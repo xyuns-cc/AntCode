@@ -1,0 +1,19 @@
+from enum import IntEnum
+
+
+class ResponseCode(IntEnum):
+    SUCCESS = 200
+    CREATED = 201
+    ACCEPTED = 202
+
+    BAD_REQUEST = 400
+    UNAUTHORIZED = 401
+    FORBIDDEN = 403
+    NOT_FOUND = 404
+    CONFLICT = 409
+    UNPROCESSABLE = 422
+
+    SERVER_ERROR = 500
+    BAD_GATEWAY = 502
+    SERVICE_UNAVAILABLE = 503
+
