@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react'
-import { Card, Row, Col, Progress, Tag, Badge, Button, Statistic, Table, Drawer, Descriptions } from 'antd'
+import { Card, Row, Col, Progress, Tag, Badge, Button, Statistic, Table, Drawer, Descriptions, Space } from 'antd'
 import {
   SyncOutlined,
   CheckCircleOutlined,
@@ -812,28 +812,26 @@ const Monitor: React.FC = () => {
                     <div className="metric-row">
                       <span className="metric-label-compact">CPU</span>
                       <div className="metric-value-compact">
-                        <Progress
-                          percent={node.cpu}
-                          strokeColor={node.cpu > 80 ? '#ff4d4f' : node.cpu > 60 ? '#faad14' : '#1890ff'}
-                          showInfo={false}
-                          size="small"
-                          strokeWidth={6}
-                          style={{ width: '100%' }}
-                        />
+                      <Progress
+                        percent={node.cpu}
+                        strokeColor={node.cpu > 80 ? '#ff4d4f' : node.cpu > 60 ? '#faad14' : '#1890ff'}
+                        showInfo={false}
+                        size="small"
+                        style={{ width: '100%' }}
+                      />
                         <span className="metric-percent">{node.cpu}%</span>
                       </div>
                     </div>
                     <div className="metric-row">
                       <span className="metric-label-compact">内存</span>
                       <div className="metric-value-compact">
-                        <Progress
-                          percent={node.memory}
-                          strokeColor={node.memory > 80 ? '#ff4d4f' : node.memory > 60 ? '#faad14' : '#52c41a'}
-                          showInfo={false}
-                          size="small"
-                          strokeWidth={6}
-                          style={{ width: '100%' }}
-                        />
+                      <Progress
+                        percent={node.memory}
+                        strokeColor={node.memory > 80 ? '#ff4d4f' : node.memory > 60 ? '#faad14' : '#52c41a'}
+                        showInfo={false}
+                        size="small"
+                        style={{ width: '100%' }}
+                      />
                         <span className="metric-percent">{node.memory}%</span>
                       </div>
                     </div>
@@ -893,11 +891,11 @@ const Monitor: React.FC = () => {
               size="small"
               title={<span style={{ fontSize: 14 }}><ThunderboltOutlined /> 性能趋势</span>}
               extra={
-                <Button.Group size="small">
+                <Space.Compact size="small">
                   <Button type="primary" size="small">24h</Button>
                   <Button size="small">7d</Button>
                   <Button size="small">30d</Button>
-                </Button.Group>
+                </Space.Compact>
               }
             >
             <div style={{ marginBottom: 16 }}>
@@ -944,6 +942,7 @@ const Monitor: React.FC = () => {
             >
             <Table
               dataSource={tasks}
+              rowKey="id"
               columns={[
                 {
                   title: '任务名称',
@@ -1047,26 +1046,24 @@ const Monitor: React.FC = () => {
                       <span>CPU</span>
                       <span>{node.cpu}%</span>
                     </div>
-                    <Progress
-                      percent={node.cpu}
-                      strokeColor={node.cpu > 80 ? '#ff4d4f' : node.cpu > 60 ? '#faad14' : '#1890ff'}
-                      showInfo={false}
-                      size="small"
-                      strokeWidth={4}
-                    />
+                  <Progress
+                    percent={node.cpu}
+                    strokeColor={node.cpu > 80 ? '#ff4d4f' : node.cpu > 60 ? '#faad14' : '#1890ff'}
+                    showInfo={false}
+                    size="small"
+                  />
                   </div>
                   <div className="metric-item-drawer">
                     <div className="metric-label-drawer">
                       <span>内存</span>
                       <span>{node.memory}%</span>
                     </div>
-                    <Progress
-                      percent={node.memory}
-                      strokeColor={node.memory > 80 ? '#ff4d4f' : node.memory > 60 ? '#faad14' : '#52c41a'}
-                      showInfo={false}
-                      size="small"
-                      strokeWidth={4}
-                    />
+                  <Progress
+                    percent={node.memory}
+                    strokeColor={node.memory > 80 ? '#ff4d4f' : node.memory > 60 ? '#faad14' : '#52c41a'}
+                    showInfo={false}
+                    size="small"
+                  />
                   </div>
                   <div className="metric-item-drawer">
                     <div className="metric-label-drawer">
@@ -1161,6 +1158,7 @@ const Monitor: React.FC = () => {
             <Card title="运行任务列表" style={{ marginTop: 16 }} size="small">
               <Table
                 dataSource={tasks.filter(t => t.node === selectedNode.name)}
+                rowKey="id"
                 columns={[
                   { title: '任务名称', dataIndex: 'name', key: 'name' },
                   { 
