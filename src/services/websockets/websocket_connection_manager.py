@@ -6,7 +6,6 @@ import asyncio
 import weakref
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Set, Optional
 
 import ujson
 from fastapi import WebSocket, WebSocketDisconnect

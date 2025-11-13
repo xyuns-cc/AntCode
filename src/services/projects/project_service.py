@@ -12,6 +12,7 @@ import zipfile
 from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.exceptions import IntegrityError
+from tortoise.expressions import Q
 
 from src.core.config import settings
 from src.models import Project, ProjectFile, ProjectRule, ProjectCode, ProjectType
@@ -372,7 +373,7 @@ class ProjectService:
         
         return project
     
-    @cached_query(ttl=300)  # 缓存5分钟
+    @cached_query(ttl=300, namespace="project:list")  # 缓存5分钟，添加namespace支持前缀清除
     async def get_projects_list(
         self, 
         page = 1, 
@@ -380,7 +381,8 @@ class ProjectService:
         project_type = None,
         status = None,
         tag = None,
-        user_id = None
+        user_id = None,
+        search = None
     ):
         """获取项目列表（优化版本，包含创建者信息）"""
         from src.services.users.user_service import user_service
@@ -401,6 +403,15 @@ class ProjectService:
         # 应用过滤条件
         if filters:
             query = query.filter(**filters)
+
+        # 关键字搜索
+        if search:
+            keyword = search.strip()
+            if keyword:
+                query = query.filter(
+                    Q(name__icontains=keyword) |
+                    Q(description__icontains=keyword)
+                )
         
         # 使用优化的分页查询
         optimizer = DatabaseOptimizer()

@@ -1,6 +1,8 @@
 """
 用户管理API接口 - 纯Controller层，只处理HTTP请求/响应
 """
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from loguru import logger
 from tortoise.exceptions import IntegrityError
@@ -17,7 +19,7 @@ from src.schemas import (
 )
 from src.schemas.common import PaginationInfo
 from src.core.response import success, page as page_response
-from src.core.messages import Messages
+from src.core.response import Messages
 from src.services.users.user_service import user_service
 
 router = APIRouter()
@@ -35,6 +37,8 @@ async def get_users_list(
     size: int = Query(20, ge=1, le=100, description="每页数量"),
     is_active: bool = Query(None, description="是否激活筛选"),
     is_admin: bool = Query(None, description="是否管理员筛选"),
+    sort_by: Optional[str] = Query(None, description="排序字段，支持 id/username/created_at"),
+    sort_order: Optional[str] = Query(None, description="排序方向 asc/desc"),
     current_admin = Depends(get_current_admin_user)
 ):
     """获取用户列表（仅管理员可访问，带缓存优化）"""
@@ -44,7 +48,9 @@ async def get_users_list(
             page=page,
             size=size,
             is_active=is_active,
-            is_admin=is_admin
+            is_admin=is_admin,
+            sort_by=sort_by,
+            sort_order=sort_order
         )
         
         pag = result["pagination"]
@@ -65,6 +71,29 @@ async def get_users_list(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取用户列表失败: {str(e)}"
+        )
+
+
+@router.get(
+    "/simple",
+    response_model=BaseResponse,
+    summary="获取用户简易列表",
+    description="获取所有用户的简易信息列表（仅管理员）",
+    tags=["用户管理"]
+)
+async def get_simple_user_list(
+    current_admin = Depends(get_current_admin_user)
+):
+    """获取用户简易信息列表"""
+    
+    try:
+        users = await user_service.get_simple_user_list()
+        return success(users, message=Messages.QUERY_SUCCESS)
+    except Exception as e:
+        logger.error(f"获取用户简易列表失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取用户简易列表失败: {str(e)}"
         )
 
 

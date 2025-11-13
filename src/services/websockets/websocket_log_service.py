@@ -6,7 +6,6 @@ WebSocket日志服务
 import asyncio
 import os
 from datetime import datetime, timezone
-from typing import Dict
 
 from fastapi import HTTPException
 from loguru import logger
@@ -22,7 +21,7 @@ class WebSocketLogService:
     """WebSocket日志服务"""
     
     def __init__(self):
-        self.file_watchers: Dict[str, asyncio.Task] = {}
+        self.file_watchers = {}
     
     async def connect(self, websocket, execution_id, token):
         """处理WebSocket连接"""
@@ -253,7 +252,12 @@ class WebSocketLogService:
                     await self._process_client_message(execution_id, message)
                     
                 except Exception as e:
-                    logger.error(f"❌ 处理客户端消息失败: {e}")
+                    # 状态码 1000 是正常关闭，不记录为错误
+                    error_str = str(e)
+                    if '1000' in error_str or 'Component unmount' in error_str:
+                        logger.debug(f"✅ 客户端正常断开连接: {e}")
+                    else:
+                        logger.error(f"❌ 处理客户端消息失败: {e}")
                     break
                     
         except Exception as e:

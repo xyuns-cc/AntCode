@@ -8,7 +8,6 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, Any
 
 import psutil
 from loguru import logger
@@ -48,8 +47,8 @@ class LogPerformanceMonitor:
         })
         
         # 系统资源监控
-        self.system_metrics: Dict[str, Any] = {}
-        self._monitor_task: Optional[asyncio.Task] = None
+        self.system_metrics = {}
+        self._monitor_task = None
         # 不在初始化时启动监控，而是在需要时启动
     
     def _start_system_monitoring(self):

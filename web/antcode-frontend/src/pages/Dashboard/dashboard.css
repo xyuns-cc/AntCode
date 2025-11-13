@@ -1,0 +1,43 @@
+/* Dashboard 进度条样式增强 */
+
+/* 确保进度条背景在浅色主题下可见 */
+body.light-theme .ant-progress-inner {
+  background-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+/* 确保进度条背景在深色主题下可见 */
+body.dark-theme .ant-progress-inner {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* 进度条主体样式 */
+.ant-progress-line {
+  margin-bottom: 0;
+}
+
+.ant-progress-outer {
+  display: block !important;
+}
+
+.ant-progress-inner {
+  border-radius: 100px;
+}
+
+.ant-progress-bg {
+  border-radius: 100px !important;
+}
+
+/* 确保进度条文本在深色主题下可见 */
+body.dark-theme .ant-progress-text {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* 卡片标题样式优化 */
+body.dark-theme .ant-card-head-title {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+body.light-theme .ant-card-head-title {
+  color: rgba(0, 0, 0, 0.88);
+}
+

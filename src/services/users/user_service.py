@@ -13,7 +13,8 @@ from src.core.cache import user_cache
 from src.models.user import User
 from src.schemas.common import PaginationInfo
 from src.schemas.user import (
-    UserResponse
+    UserResponse,
+    UserSimpleResponse,
 )
 
 
@@ -24,17 +25,22 @@ class UserService:
         """初始化用户服务"""
         pass
     
-    def _generate_cache_key(self, page, size, is_active=None, is_admin=None):
-        """生成用户列表缓存键"""
+    def _generate_cache_key(self, page, size, is_active=None, is_admin=None, sort_by=None, sort_order=None):
+        """生成用户列表缓存键（带namespace前缀）"""
         params = f"p{page}_s{size}"
         if is_active is not None:
             params += f"_a{is_active}"
         if is_admin is not None:
             params += f"_admin{is_admin}"
+        if sort_by:
+            params += f"_sort{sort_by}"
+        if sort_order:
+            params += f"_order{sort_order}"
         
         # 生成哈希确保键的唯一性
         cache_hash = hashlib.md5(params.encode()).hexdigest()[:8]
-        return f"user_list_{cache_hash}"
+        # 添加namespace前缀，便于按前缀清除
+        return f"user:list:{cache_hash}"
     
     async def authenticate_user(self, username, password):
         """
@@ -144,7 +150,9 @@ class UserService:
         page = 1, 
         size = 20, 
         is_active = None, 
-        is_admin = None
+        is_admin = None,
+        sort_by = None,
+        sort_order = None
     ):
         """
         获取用户列表（带缓存）
@@ -152,13 +160,17 @@ class UserService:
         Returns:
             dict: 包含data和pagination的字典
         """
-        cache_key = self._generate_cache_key(page, size, is_active, is_admin)
+        cache_key = self._generate_cache_key(page, size, is_active, is_admin, sort_by, sort_order)
         
         # 尝试从缓存获取
-        cached_result = await user_cache.get(cache_key)
-        if cached_result:
-            logger.debug(f"用户列表缓存命中: {cache_key}")
-            return cached_result
+        try:
+            cached_result = await user_cache.get(cache_key)
+            if cached_result:
+                logger.debug(f"用户列表缓存命中: {cache_key}")
+                return cached_result
+        except Exception as e:
+            # 缓存读取失败，记录日志并继续从数据库查询
+            logger.warning(f"用户列表缓存读取失败: {e}，将从数据库查询")
         
         logger.debug(f"从数据库查询用户列表: {cache_key}")
         
@@ -176,7 +188,14 @@ class UserService:
         
         # 分页查询
         offset = (page - 1) * size
-        users = await query.offset(offset).limit(size).order_by('-created_at')
+        allowed_sort_fields = {'id', 'username', 'created_at'}
+        order_field = '-created_at'
+        if sort_by in allowed_sort_fields:
+            order_direction = '-' if (str(sort_order or 'desc').lower() == 'desc') else ''
+            order_field = f"{order_direction}{sort_by}"
+
+        query = query.order_by(order_field)
+        users = await query.offset(offset).limit(size)
         
         # 转换为响应格式
         user_list = [
@@ -213,9 +232,43 @@ class UserService:
         }
         
         # 缓存结果
-        await user_cache.set(cache_key, result)
+        try:
+            await user_cache.set(cache_key, result)
+        except Exception as e:
+            # 缓存写入失败，记录日志但不影响返回结果
+            logger.warning(f"用户列表缓存写入失败: {e}")
         
         return result
+    
+    async def get_simple_user_list(self):
+        """
+        获取简易用户列表（仅包含ID与用户名）
+        """
+        cache_key = "user:list:simple"
+        
+        # 优先尝试从缓存获取
+        try:
+            cached_users = await user_cache.get(cache_key)
+            if cached_users is not None:
+                logger.debug("用户简易列表缓存命中")
+                return cached_users
+        except Exception as e:
+            logger.warning(f"读取用户简易列表缓存失败: {e}，将从数据库查询")
+        
+        # 从数据库查询
+        users = await User.all().only("id", "username").order_by("username")
+        simple_users = [
+            UserSimpleResponse(id=user.id, username=user.username).model_dump()
+            for user in users
+        ]
+        
+        # 缓存查询结果
+        try:
+            await user_cache.set(cache_key, simple_users)
+        except Exception as e:
+            logger.warning(f"写入用户简易列表缓存失败: {e}")
+        
+        return simple_users
     
     async def update_user(self, user_id, request):
         """
@@ -319,11 +372,11 @@ class UserService:
         logger.info(f"用户删除成功: {user.username}")
     
     async def _invalidate_user_cache(self, user_id = None):
-        """清除用户相关缓存"""
+        """清除用户相关缓存（按前缀清除，不影响其他命名空间）"""
         try:
-            # 清除所有用户列表缓存（简化处理）
-            await user_cache.clear()
-            logger.debug("用户缓存已清除")
+            # 只清除user:前缀的缓存
+            await user_cache.clear_prefix("user:")
+            logger.debug("用户缓存已清除（按前缀）")
         except Exception as e:
             logger.error(f"清除用户缓存失败: {e}")
     
@@ -332,8 +385,8 @@ class UserService:
         return await user_cache.get_stats()
     
     async def clear_cache(self):
-        """清空缓存"""
-        await user_cache.clear()
+        """清空用户相关缓存（按前缀）"""
+        await user_cache.clear_prefix("user:")
         logger.info("用户缓存已清空")
 
 

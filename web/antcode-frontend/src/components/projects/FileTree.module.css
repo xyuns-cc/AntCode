@@ -1,0 +1,152 @@
+.file-tree-container {
+  /* 背景色和边框由 Ant Design 主题处理 */
+  border-radius: 8px;
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-stats {
+  padding: 16px;
+  /* 背景色和边框由 Ant Design 主题处理 */
+  flex-shrink: 0;
+}
+
+.file-tree {
+  padding: 16px;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  min-height: 0;
+  white-space: nowrap;
+}
+
+.file-tree-node {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  min-width: 300px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+}
+
+.file-tree-node:hover {
+  /* hover 背景色由 Ant Design 主题处理 */
+}
+
+.file-tree-node:hover .file-actions {
+  opacity: 1;
+}
+
+.file-icon {
+  display: flex;
+  align-items: center;
+  width: 20px;
+  height: 20px;
+  justify-content: center;
+}
+
+.file-name {
+  flex: 0 0 auto;
+  min-width: auto;
+  font-size: 14px;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.file-size {
+  font-size: 12px;
+  min-width: 60px;
+  text-align: right;
+}
+
+.file-actions {
+  opacity: 0;
+  transition: opacity 0.2s;
+  margin-left: 8px;
+}
+
+/* Tree样式将通过全局CSS文件处理 */
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .file-tree-node {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  
+  .file-size {
+    min-width: auto;
+    text-align: left;
+  }
+  
+  .file-actions {
+    opacity: 1;
+    margin-left: 0;
+  }
+}
+
+/* 深色主题样式已移动到全局CSS文件 */
+
+/* 加载状态 */
+.file-tree-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: #999;
+}
+
+/* 空状态 */
+.file-tree-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: #999;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.file-tree-empty .empty-icon {
+  font-size: 48px;
+  color: #d9d9d9;
+}
+
+/* 动画效果 */
+.file-tree :global(.ant-tree-node-content-wrapper) {
+  transition: all 0.2s ease;
+}
+
+.file-tree :global(.ant-tree-switcher) {
+  transition: all 0.2s ease;
+}
+
+/* 文件类型图标样式 */
+.file-tree .file-icon span {
+  line-height: 1;
+  font-family: 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
+}
+
+/* 操作按钮样式 */
+.file-actions .ant-btn {
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-actions .ant-btn:hover {
+  background-color: rgba(24, 144, 255, 0.1);
+  color: #1890ff;
+}
+/* 滚动条样式已移动到全局CSS文件 */
+

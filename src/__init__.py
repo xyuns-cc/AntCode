@@ -9,12 +9,17 @@ from tortoise import Tortoise
 
 from src.api import api_router
 from src.core.config import settings
+from src.core.logging import setup_logging
 from src.core.exceptions import (
     BusinessException, business_exception_handler,
     http_exception_handler, validation_exception_handler,
     general_exception_handler
 )
 from src.core.init_app import init_data, make_middlewares, shutdown_scheduler
+
+
+# 初始化日志系统
+setup_logging()
 
 
 @asynccontextmanager

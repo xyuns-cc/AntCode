@@ -1,0 +1,312 @@
+/* 基础容器样式 */
+.loginContainer {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end; /* 改为右对齐 */
+  padding: 40px; /* 增加内边距 */
+  position: relative;
+  
+  /* 使用提供的背景图片 */
+  background: url('@/assets/login-background.jpg') no-repeat center center;
+  background-size: cover;
+  background-attachment: fixed;
+}
+
+.loginContainer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 1;
+}
+
+
+.loginBox {
+  width: 100%;
+  max-width: 420px; /* 较大的登录框 */
+  position: relative;
+  z-index: 2; /* 确保在遮罩上方 */
+  animation: fadeInUp 0.6s ease-out;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+/* Logo 样式优化 */
+.logoIcon {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  font-weight: bold;
+  color: white;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 
+    0 8px 32px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: all 0.3s ease;
+}
+
+.logoIcon:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: 
+    0 12px 40px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.title {
+  color: white;
+  font-size: 32px; /* 更大的标题 */
+  font-weight: 700;
+  margin: 0 0 12px 0;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  letter-spacing: -0.5px;
+}
+
+.subtitle {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 16px;
+  margin: 0 0 20px 0;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.loginCard {
+  border-radius: 20px;
+  padding: 40px;
+  
+  /* 毛玻璃效果 */
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  
+  /* 边框效果 */
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  
+  /* 阴影效果 */
+  box-shadow: 
+    0 8px 32px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  
+  transition: all 0.3s ease;
+}
+
+.loginCard:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: 
+    0 12px 40px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.formOptions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.forgotLink {
+  color: rgba(255, 255, 255, 0.9);
+  text-decoration: none;
+  font-size: 14px;
+  transition: color 0.3s;
+  font-weight: 500;
+}
+
+.forgotLink:hover {
+  color: white;
+  text-decoration: underline;
+}
+
+.loginButton {
+  height: 52px;
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);
+  border: none;
+  box-shadow: 
+    0 4px 12px rgba(24, 144, 255, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: all 0.3s;
+  letter-spacing: 0.5px;
+}
+
+.loginButton:hover {
+  transform: translateY(-2px);
+  box-shadow: 
+    0 6px 20px rgba(24, 144, 255, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  background: linear-gradient(135deg, #40a9ff 0%, #1890ff 100%);
+}
+
+.loginButton:active {
+  transform: translateY(0);
+}
+
+
+.footer {
+  text-align: center;
+  margin-top: 32px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* 动画效果 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .loginContainer {
+    padding: 20px;
+    justify-content: center; /* 移动端居中 */
+  }
+  
+  .loginBox {
+    max-width: 100%;
+  }
+  
+  .loginCard {
+    padding: 30px 20px;
+  }
+  
+  .title {
+    font-size: 28px;
+  }
+  
+  .subtitle {
+    font-size: 14px;
+  }
+}
+
+@media (max-width: 480px) {
+  .loginContainer {
+    padding: 16px;
+  }
+
+  .loginCard {
+    padding: 24px 16px;
+    border-radius: 16px;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+
+  .subtitle {
+    font-size: 14px;
+  }
+  
+}
+
+/* 表单项样式增强 */
+.loginCard :global(.ant-form-item-label > label) {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9) !important;
+  font-size: 14px;
+}
+
+.loginCard :global(.ant-input-affix-wrapper) {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  transition: all 0.3s;
+  height: 48px;
+}
+
+.loginCard :global(.ant-input-affix-wrapper:focus),
+.loginCard :global(.ant-input-affix-wrapper-focused) {
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+.loginCard :global(.ant-input) {
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  color: white;
+  font-size: 15px;
+}
+
+.loginCard :global(.ant-input::placeholder) {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.loginCard :global(.ant-input:focus) {
+  box-shadow: none;
+}
+
+/* 图标样式 */
+.loginCard :global(.ant-input-prefix) {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.loginCard :global(.anticon) {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* 复选框样式 */
+.loginCard :global(.ant-checkbox-wrapper) {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 14px;
+}
+
+.loginCard :global(.ant-checkbox-wrapper:hover .ant-checkbox-inner) {
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.loginCard :global(.ant-checkbox-inner) {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.loginCard :global(.ant-checkbox-checked .ant-checkbox-inner) {
+  background-color: #1890ff;
+  border-color: #1890ff;
+}
+
+/* 加载状态样式 */
+.loginButton:global(.ant-btn-loading) {
+  pointer-events: none;
+}
+
+/* 错误状态样式 */
+.loginCard :global(.ant-form-item-has-error .ant-input-affix-wrapper) {
+  border-color: #ff4d4f;
+}
+
+.loginCard :global(.ant-form-item-has-error .ant-input-affix-wrapper:focus) {
+  border-color: #ff4d4f;
+  box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.2);
+}

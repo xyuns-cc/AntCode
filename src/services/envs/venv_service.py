@@ -88,7 +88,9 @@ class ProjectVenvService:
             await self._write_manifest(paths["manifest"], version)
 
             # 记录/更新 Venv 与绑定
-            interpreter = await Interpreter.get(tool="python", version=version)
+            interpreter = await Interpreter.filter(tool="python", version=version).first()
+            if not interpreter:
+                raise RuntimeError(f"未找到 Python {version} 解释器")
             venv_obj = await Venv.get_or_none(venv_path=paths["dir"])
             if not venv_obj:
                 venv_obj = await Venv.create(
@@ -168,7 +170,9 @@ class ProjectVenvService:
             json.dump({"version": version, "key": ident}, f, ensure_ascii=False, indent=2)
 
         # 记录/更新 Venv
-        interpreter = await Interpreter.get(tool="python", version=version)
+        interpreter = await Interpreter.filter(tool="python", version=version).first()
+        if not interpreter:
+            raise RuntimeError(f"未找到 Python {version} 解释器")
         venv_obj = await Venv.get_or_none(venv_path=venv_dir)
         if not venv_obj:
             venv_obj = await Venv.create(

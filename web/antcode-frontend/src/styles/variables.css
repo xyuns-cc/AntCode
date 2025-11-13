@@ -1,0 +1,104 @@
+/* CSS 变量定义 */
+:root {
+  /* 主色调 */
+  --primary-color: #1890ff;
+  --primary-color-hover: #40a9ff;
+  --primary-color-active: #096dd9;
+  --primary-color-light: #e6f7ff;
+
+  /* 成功色 */
+  --success-color: #52c41a;
+  --success-color-hover: #73d13d;
+  --success-color-active: #389e0d;
+  --success-color-light: #f6ffed;
+
+  /* 警告色 */
+  --warning-color: #faad14;
+  --warning-color-hover: #ffc53d;
+  --warning-color-active: #d48806;
+  --warning-color-light: #fffbe6;
+
+  /* 错误色 */
+  --error-color: #ff4d4f;
+  --error-color-hover: #ff7875;
+  --error-color-active: #d9363e;
+  --error-color-light: #fff2f0;
+
+  /* 信息色 */
+  --info-color: #1890ff;
+  --info-color-hover: #40a9ff;
+  --info-color-active: #096dd9;
+  --info-color-light: #e6f7ff;
+
+  /* 中性色 */
+  --text-color: #000000d9;
+  --text-color-secondary: #00000073;
+  --text-color-disabled: #00000040;
+  --border-color: #d9d9d9;
+  --border-color-light: #f0f0f0;
+  --background-color: #ffffff;
+  --background-color-light: #fafafa;
+
+  /* 阴影 */
+  --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --shadow-3: 0 6px 16px rgba(0, 0, 0, 0.15);
+
+  /* 圆角 */
+  --border-radius-sm: 2px;
+  --border-radius: 6px;
+  --border-radius-lg: 8px;
+
+  /* 间距 */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+
+  /* 字体大小 */
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-xxl: 20px;
+
+  /* 行高 */
+  --line-height-sm: 1.2;
+  --line-height-base: 1.5;
+  --line-height-lg: 1.8;
+
+  /* 布局尺寸 */
+  --header-height: 64px;
+  --sidebar-width: 256px;
+  --sidebar-collapsed-width: 80px;
+
+  /* 动画时长 */
+  --animation-duration-slow: 0.3s;
+  --animation-duration-base: 0.2s;
+  --animation-duration-fast: 0.1s;
+
+  /* Z-index */
+  --z-index-dropdown: 1050;
+  --z-index-sticky: 1020;
+  --z-index-fixed: 1030;
+  --z-index-modal-backdrop: 1040;
+  --z-index-modal: 1050;
+  --z-index-popover: 1060;
+  --z-index-tooltip: 1070;
+
+  /* 日志查看器专用 */
+  --log-bg-color: #1e1e1e;
+  --log-text-color: #d4d4d4;
+  --log-stdout-color: #52c41a;
+  --log-stderr-color: #ff4d4f;
+  --log-timestamp-color: #808080;
+  --log-line-hover-bg: #2d2d2d;
+
+  /* 状态指示器 */
+  --status-running: #1890ff;
+  --status-success: #52c41a;
+  --status-failed: #ff4d4f;
+  --status-pending: #faad14;
+  --status-cancelled: #8c8c8c;
+}

@@ -5,7 +5,6 @@
 
 import hashlib
 import time
-from typing import Dict, Any, List
 
 from fastapi import HTTPException, status
 from loguru import logger
@@ -25,11 +24,11 @@ class LogSecurityService:
     
     def __init__(self):
         # 权限缓存，避免频繁数据库查询
-        self._permission_cache: Dict[str, Dict[str, Any]] = {}
+        self._permission_cache = {}
         self._cache_ttl = 300  # 5分钟缓存
         
         # 访问频率限制
-        self._access_limits: Dict[str, List[float]] = {}
+        self._access_limits = {}
         self._max_requests_per_minute = 60
         
     def _generate_cache_key(self, user_id, execution_id):
@@ -215,8 +214,8 @@ class EnhancedErrorHandler:
     
     def __init__(self):
         # 错误统计
-        self._error_stats: Dict[str, int] = {}
-        self._error_patterns: List[Dict[str, Any]] = []
+        self._error_stats = {}
+        self._error_patterns = []
         
     def log_error(self, error, context):
         """
