@@ -13,7 +13,6 @@ import type { UpdateUserRequest } from '@/types'
 import styles from './Settings.module.css'
 
 
-const { TabPane } = Tabs
 const { Title, Text, Paragraph } = Typography
 
 const Settings: React.FC = memo(() => {
@@ -190,31 +189,33 @@ const Settings: React.FC = memo(() => {
         </p>
       </div>
 
-      <Tabs defaultActiveKey="email" size="large" className={styles.tabsContainer}>
-        <TabPane
-          tab={
-            <span>
-              <MailOutlined />
-              邮箱设置
-            </span>
+      <Tabs 
+        defaultActiveKey="email" 
+        size="large" 
+        className={styles.tabsContainer}
+        items={[
+          {
+            key: 'email',
+            label: (
+              <span>
+                <MailOutlined />
+                邮箱设置
+              </span>
+            ),
+            children: <EmailSettings />
+          },
+          {
+            key: 'password',
+            label: (
+              <span>
+                <LockOutlined />
+                密码设置
+              </span>
+            ),
+            children: <PasswordSettings />
           }
-          key="email"
-        >
-          <EmailSettings />
-        </TabPane>
-
-        <TabPane
-          tab={
-            <span>
-              <LockOutlined />
-              密码设置
-            </span>
-          }
-          key="password"
-        >
-          <PasswordSettings />
-        </TabPane>
-      </Tabs>
+        ]}
+      />
     </div>
   )
 })

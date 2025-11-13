@@ -436,7 +436,6 @@ const ExecutionLogs: React.FC = () => {
                   type="circle"
                   percent={executionProgress}
                   width={44}
-                  strokeWidth={6}
                   format={(percent) => (
                     <span style={{ fontSize: 12, fontWeight: 600 }}>
                       {percent}%

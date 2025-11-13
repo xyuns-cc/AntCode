@@ -411,7 +411,7 @@ const EnvListPage: React.FC = () => {
             key: 'interpreters',
             label: '解释器',
             children: (
-              <Card bordered={false}>
+              <Card variant="borderless">
                 <Space direction="vertical" style={{ width: '100%' }}>
                   <Space>
                     <InterpreterDrawer onAdded={refreshInterpreters} />

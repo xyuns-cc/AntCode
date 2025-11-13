@@ -8,38 +8,33 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.20",
-    
     # 数据库
     "tortoise-orm>=0.21.0",
     "aerich>=0.7.2",
-    "asyncmy>=0.2.9",      # MySQL驱动
-    "asyncpg>=0.29.0",     # PostgreSQL驱动
-    
+    "asyncmy>=0.2.9", # MySQL驱动
+    "asyncpg>=0.29.0", # PostgreSQL驱动
     # 数据验证
     "pydantic[email]>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
-    
     # 身份认证
     "pyjwt>=2.8.0",
     "passlib[bcrypt]>=1.7.4",
     "cryptography>=41.0.0",
-    
     # 任务调度
     "apscheduler>=3.10.0",
-    
     # 缓存
     "redis>=5.0.0",
-    
     # 日志
     "loguru>=0.7.0",
-    
     # 工具库
     "aiofiles>=23.2.0",
     "psutil>=5.9.0",
     "requests>=2.31.0",
+    "fake-useragent>=1.5.0",
     "ujson>=5.9.0",
     "websockets>=12.0",
+    "scrapy>=2.13.3",
 ]
 
 
