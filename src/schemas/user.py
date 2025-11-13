@@ -55,6 +55,15 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+class UserSimpleResponse(BaseModel):
+    """用户简易信息响应模型"""
+    id: int = Field(..., description="用户ID")
+    username: str = Field(..., description="用户名")
+
+    class Config:
+        from_attributes = True
+
+
 class UserListResponse(BaseModel):
     """用户列表响应模型"""
     id: int = Field(..., description="用户ID")

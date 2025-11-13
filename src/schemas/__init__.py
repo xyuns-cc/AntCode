@@ -28,6 +28,7 @@ from .project import (
     TaskMeta,
     TaskJsonRequest,
     ProjectRuleUpdateRequest,
+    ProjectFileContentUpdateRequest,
 )
 from .user import (
     UserLoginRequest,
@@ -36,6 +37,7 @@ from .user import (
     UserPasswordUpdateRequest,
     UserAdminPasswordUpdateRequest,
     UserResponse,
+    UserSimpleResponse,
     UserListResponse,
     UserLoginResponse,
 )
@@ -50,6 +52,7 @@ __all__ = [
     "UserPasswordUpdateRequest",
     "UserAdminPasswordUpdateRequest",
     "UserResponse",
+    "UserSimpleResponse",
     "UserListResponse",
     "UserLoginResponse",
     # 项目相关
@@ -68,6 +71,7 @@ __all__ = [
     "TaskMeta",
     "TaskJsonRequest",
     "ProjectRuleUpdateRequest",
+    "ProjectFileContentUpdateRequest",
     # 通用响应
     "BaseResponse",
     "ErrorResponse",

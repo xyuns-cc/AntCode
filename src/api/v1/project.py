@@ -13,12 +13,12 @@ from src.core.exceptions import ProjectNotFoundException
 from src.models.enums import ProjectType, ProjectStatus
 from src.schemas.common import BaseResponse, PaginationResponse, PaginationInfo
 from src.core.response import success as success_response, page as page_response
-from src.core.messages import Messages
+from src.core.response import Messages
 from src.schemas.project import (
     ProjectCreateRequest, ProjectRuleCreateRequest, ProjectFileCreateRequest, ProjectCodeCreateRequest,
     ProjectResponse, ProjectListResponse, ProjectCreateFormRequest, ProjectListQueryRequest, TaskJsonRequest,
     ProjectRuleUpdateRequest,
-    ProjectCodeUpdateRequest, FileStructureResponse, FileContentResponse
+    ProjectCodeUpdateRequest, FileStructureResponse, FileContentResponse, ProjectFileContentUpdateRequest
 )
 from src.schemas.project_unified import UnifiedProjectUpdateRequest
 from src.services.projects.project_service import project_service
@@ -136,6 +136,7 @@ async def get_project_list_query(
     status: Optional[ProjectStatus] = Query(None, description="项目状态筛选"),
     tag: Optional[str] = Query(None, description="标签筛选"),
     created_by: Optional[int] = Query(None, description="创建者ID筛选"),
+    search: Optional[str] = Query(None, description="关键字搜索（名称、描述）"),
 ):
     """获取项目列表查询参数的依赖函数"""
     return ProjectListQueryRequest(
@@ -145,6 +146,7 @@ async def get_project_list_query(
         status=status,
         tag=tag,
         created_by=created_by,
+        search=search,
     )
 
 
@@ -291,7 +293,8 @@ async def get_projects_list(
         project_type=query_params.type,
         status=query_params.status.value if query_params.status else None,
         tag=query_params.tag,
-        user_id=user_filter
+        user_id=user_filter,
+        search=query_params.search
     )
 
     # 转换为响应格式
@@ -698,7 +701,8 @@ async def update_file_config(
             try:
                 import ujson
                 parsed_runtime_config = ujson.loads(runtime_config)
-            except:
+            except (ujson.JSONDecodeError, ValueError) as e:
+                logger.debug(f"runtime_config JSON解析失败（使用None）: {e}")
                 parsed_runtime_config = None
 
         parsed_environment_vars = None
@@ -706,7 +710,8 @@ async def update_file_config(
             try:
                 import ujson
                 parsed_environment_vars = ujson.loads(environment_vars)
-            except:
+            except (ujson.JSONDecodeError, ValueError) as e:
+                logger.debug(f"environment_vars JSON解析失败（使用None）: {e}")
                 parsed_environment_vars = None
 
         request = ProjectFileUpdateRequest(
@@ -865,6 +870,60 @@ async def get_project_file_content(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取项目文件内容失败: {str(e)}"
+        )
+
+
+@project_router.put(
+    "/{project_id}/files/content",
+    response_model=BaseResponse[FileContentResponse],
+    summary="更新项目文件内容",
+    description="更新项目中文件的内容",
+    response_description="返回更新后的文件内容"
+)
+async def update_project_file_content(
+    project_id: int,
+    payload: ProjectFileContentUpdateRequest,
+    current_user_id: int = Depends(get_current_user_id)
+):
+    """更新项目文件内容"""
+    try:
+        project = await project_service.get_project_by_id(project_id, current_user_id)
+        if not project:
+            raise ProjectNotFoundException(project_id)
+
+        if project.type != ProjectType.FILE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="只有文件项目支持文件内容编辑"
+            )
+
+        from src.services.projects.relation_service import relation_service
+
+        file_detail = await relation_service.get_project_file_detail(project.id)
+        if not file_detail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="项目文件详情不存在"
+            )
+
+        from src.services.projects.project_file_service import project_file_service
+
+        updated = await project_file_service.update_file_content(
+            file_detail.file_path,
+            payload.file_path,
+            payload.content,
+            payload.encoding
+        )
+
+        return success_response(FileContentResponse(**updated), message=Messages.UPDATED_SUCCESS)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新项目文件内容失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"更新项目文件内容失败: {str(e)}"
         )
 
 

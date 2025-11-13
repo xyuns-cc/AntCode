@@ -1,0 +1,110 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+.virtualenvs/
+
+# UV Cache
+.uv-cache/
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# SQLite Database
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Logs
+logs/
+*.log
+
+# Storage
+storage/
+!storage/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Serena
+.serena/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Node modules (for frontend)
+node_modules/
+web/antcode-frontend/node_modules/
+web/antcode-frontend/dist/
+
+# Lock files that might be user-specific
+.lock
+
+# Mise cache
+storage/mise/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Documentation (except README files)
+doc/
+docs/
+*.md
+!README.md
+!**/README.md
+
+# Additional files to ignore
+.jwt_secret
+file-viewer.html
+AGENTS.md
+CLAUDE.md

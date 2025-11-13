@@ -62,4 +62,6 @@ class ProjectVenvBinding(Model):
 
     class Meta:
         table = "project_venv_bindings"
-        indexes = [("project_id", "is_current")]
+        indexes = [("project_id", "is_current"), ("venv_id", "is_current")]
+        # 注意：每个项目只能有一个 is_current=True 的绑定
+        # 但 Tortoise ORM 不支持条件唯一约束，需要在应用层保证

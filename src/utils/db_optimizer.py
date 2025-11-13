@@ -58,7 +58,8 @@ class DatabaseOptimizer:
                 try:
                     existing = await existing_query.all()
                     existing_objects.extend(existing)
-                except:
+                except Exception as e:
+                    logger.warning(f"查询已存在对象失败: {e}")
                     existing = []
             
             # 找出需要创建的对象
@@ -246,13 +247,147 @@ class DatabaseOptimizer:
         return deleted_count
 
 
-# 装饰器：自动缓存查询结果
-def cached_query(ttl = 300):
+# ==================== ORM 序列化工具 ====================
+
+def _serialize_orm_object(obj):
+    """将 Tortoise ORM 对象序列化为字典（保留类型信息）"""
+    from tortoise import Model
+    
+    if isinstance(obj, Model):
+        # 序列化单个 ORM 对象
+        data = {}
+        for field_name in obj._meta.db_fields:
+            value = getattr(obj, field_name, None)
+            data[field_name] = value
+        
+        # 添加类型元信息
+        return {
+            '__type__': 'tortoise_model',
+            '__model__': f"{obj.__class__.__module__}.{obj.__class__.__name__}",
+            '__data__': data
+        }
+    
+    return obj
+
+
+def _deserialize_orm_object(data):
+    """将字典反序列化为 Tortoise ORM 对象（模拟对象）"""
+    if isinstance(data, dict) and data.get('__type__') == 'tortoise_model':
+        # 创建一个简单的对象，模拟 ORM 对象的属性访问
+        class ORMProxy:
+            """ORM 对象代理，支持属性访问和字典访问"""
+            def __init__(self, data_dict):
+                # 递归处理嵌套的字典，确保所有属性都可访问
+                for key, value in data_dict.items():
+                    if isinstance(value, dict) and '__type__' not in value:
+                        # 普通字典也转换为支持属性访问的对象
+                        self.__dict__[key] = ORMProxy(value)
+                    else:
+                        self.__dict__[key] = value
+            
+            def __getitem__(self, key):
+                return self.__dict__.get(key)
+            
+            def get(self, key, default=None):
+                return self.__dict__.get(key, default)
+            
+            def __repr__(self):
+                return f"ORMProxy({self.__dict__})"
+            
+            # 添加 model_dump 方法支持 Pydantic 序列化
+            def model_dump(self, **kwargs):
+                """兼容 Pydantic 的 model_dump 方法"""
+                result = {}
+                for key, value in self.__dict__.items():
+                    if hasattr(value, 'model_dump'):
+                        result[key] = value.model_dump(**kwargs)
+                    elif isinstance(value, ORMProxy):
+                        result[key] = value.model_dump(**kwargs)
+                    else:
+                        result[key] = value
+                return result
+            
+            # 添加 dict 方法支持 Pydantic v1
+            def dict(self, **kwargs):
+                """兼容 Pydantic v1 的 dict 方法"""
+                return self.model_dump(**kwargs)
+        
+        return ORMProxy(data['__data__'])
+    
+    return data
+
+
+def _serialize_result(result):
+    """智能序列化查询结果（支持单个对象、列表、元组等）"""
+    from tortoise import Model
+    
+    if isinstance(result, Model):
+        # 单个 ORM 对象
+        return _serialize_orm_object(result)
+    
+    elif isinstance(result, (list, tuple)):
+        # 列表或元组
+        serialized = [_serialize_result(item) for item in result]
+        return {
+            '__type__': 'list' if isinstance(result, list) else 'tuple',
+            '__data__': serialized
+        }
+    
+    elif isinstance(result, dict):
+        # 字典（可能包含 ORM 对象）
+        return {k: _serialize_result(v) for k, v in result.items()}
+    
+    else:
+        # 基本类型（int, str, None等）
+        return result
+
+
+def _deserialize_result(data):
+    """智能反序列化查询结果"""
+    if isinstance(data, dict):
+        # 检查是否是特殊类型标记
+        if data.get('__type__') == 'tortoise_model':
+            return _deserialize_orm_object(data)
+        
+        elif data.get('__type__') == 'list':
+            return [_deserialize_result(item) for item in data['__data__']]
+        
+        elif data.get('__type__') == 'tuple':
+            return tuple(_deserialize_result(item) for item in data['__data__'])
+        
+        else:
+            # 普通字典，递归处理值
+            return {k: _deserialize_result(v) for k, v in data.items()}
+    
+    elif isinstance(data, list):
+        # 列表，递归处理
+        return [_deserialize_result(item) for item in data]
+    
+    else:
+        # 基本类型
+        return data
+
+
+# ==================== 查询缓存装饰器 ====================
+
+def cached_query(ttl = 300, namespace = None):
     """
-    查询缓存装饰器 - 使用统一缓存系统
+    智能查询缓存装饰器 - 自动处理 ORM 对象序列化
+    
+    功能：
+    1. 自动序列化 Tortoise ORM 对象为字典
+    2. 从缓存读取时自动反序列化为类ORM对象
+    3. 保持属性访问接口一致（支持 .id 和 ['id'] 两种方式）
+    4. 支持单对象、列表、元组等复杂结果类型
     
     Args:
         ttl: 缓存时间（秒）
+        namespace: 缓存命名空间前缀，用于按前缀清除缓存（如 'project:list'）
+    
+    示例：
+        @cached_query(ttl=300, namespace="project:list")
+        async def get_projects_list(...):
+            return projects, total
     """
     def decorator(func):
         from functools import wraps
@@ -264,7 +399,7 @@ def cached_query(ttl = 300):
             # 生成缓存键
             func_name = f"{func.__module__}.{func.__name__}"
             
-            # 创建更稳定的缓存键
+            # 创建稳定的缓存键
             try:
                 # 过滤掉不可序列化的参数
                 filtered_kwargs = {}
@@ -276,27 +411,36 @@ def cached_query(ttl = 300):
                         continue
                 
                 key_content = f"{func_name}:{args}:{sorted(filtered_kwargs.items())}"
-                cache_key = hashlib.md5(key_content.encode()).hexdigest()[:16]
+                raw_key = hashlib.md5(key_content.encode()).hexdigest()[:16]
+                
+                # 添加namespace前缀
+                if namespace:
+                    cache_key = f"{namespace}:{raw_key}"
+                else:
+                    cache_key = raw_key
             except Exception as e:
                 logger.warning(f"生成缓存键失败: {e}，跳过缓存")
                 return await func(*args, **kwargs)
             
             # 尝试从缓存获取
             try:
-                cached_result = await query_cache.get(cache_key)
-                if cached_result is not None:
-                    logger.debug(f"数据库查询缓存命中: {func.__name__}")
-                    return cached_result
+                cached_data = await query_cache.get(cache_key)
+                if cached_data is not None:
+                    # 反序列化缓存数据
+                    result = _deserialize_result(cached_data)
+                    logger.debug(f"查询缓存命中: {func.__name__} (key: {cache_key})")
+                    return result
             except Exception as e:
                 logger.warning(f"读取缓存失败: {e}")
             
             # 执行查询
             result = await func(*args, **kwargs)
             
-            # 缓存结果
+            # 序列化并缓存结果
             try:
-                await query_cache.set(cache_key, result, ttl)
-                logger.debug(f"数据库查询结果已缓存: {func.__name__}")
+                serialized = _serialize_result(result)
+                await query_cache.set(cache_key, serialized, ttl)
+                logger.debug(f"查询结果已缓存: {func.__name__} (key: {cache_key})")
             except Exception as e:
                 logger.warning(f"保存查询缓存失败: {e}")
             

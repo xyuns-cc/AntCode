@@ -1,6 +1,46 @@
 [project]
 name = "antcode"
 version = "0.1.0"
-description = "Add your description here"
+description = "项目上传服务 API - 提供统一的项目资源管理能力"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi==0.116.1",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.0.0",
+    "pyjwt>=2.10.1",
+    "python-dotenv>=1.1.1",
+    "python-multipart>=0.0.20",
+    "tortoise-orm>=0.25.1",
+    "uvicorn>=0.35.0",
+    "bcrypt==4.0.1",
+    "passlib[bcrypt]>=1.7.4",
+    "aerich>=0.9.1",
+    "apscheduler>=3.11.0",
+    "email-validator>=2.2.0",
+    "redis>=6.4.0",
+    "websockets>=15.0.1",
+    "psutil>=7.0.0",
+    "requests>=2.32.5",
+    "ujson>=5.11.0",
+    "aiofiles>=24.1.0",
+    "cryptography>=46.0.3",
+]
+
+[project.optional-dependencies]
+# MySQL 数据库支持
+mysql = [
+    "asyncmy>=0.2.9",
+]
+
+# PostgreSQL 数据库支持
+postgres = [
+    "asyncpg>=0.30.0",
+]
+
+# 安装所有数据库驱动
+all-db = [
+    "asyncmy>=0.2.9",
+    "asyncpg>=0.30.0",
+]
+
+

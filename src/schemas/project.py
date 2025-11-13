@@ -323,6 +323,7 @@ class ProjectListQueryRequest(BaseModel):
     status: Optional[ProjectStatus] = Field(None, description="项目状态筛选")
     tag: Optional[str] = Field(None, description="标签筛选")
     created_by: Optional[int] = Field(None, description="创建者ID筛选")
+    search: Optional[str] = Field(None, description="关键字搜索（名称、描述）")
 
 
 class TaskMeta(BaseModel):
@@ -406,6 +407,36 @@ class ProjectFileUpdateRequest(BaseModel):
             except:
                 return None
         return v
+
+
+class ProjectFileContentUpdateRequest(BaseModel):
+    """文件内容更新请求模型"""
+    file_path: str = Field(..., max_length=1024, description="文件相对路径")
+    content: str = Field(..., description="文件内容")
+    encoding: Optional[str] = Field("utf-8", max_length=50, description="文件编码")
+
+    @validator('file_path')
+    def validate_file_path(cls, value: str) -> str:
+        if value is None:
+            raise ValueError("文件路径不能为空")
+
+        sanitized = value.strip()
+
+        # 允许空字符串，表示基础文件路径
+        if sanitized == "" and value == "":
+            return ""
+
+        if sanitized == "":
+            raise ValueError("文件路径不能为空")
+
+        normalized = sanitized.replace('\\', '/')
+        if normalized.startswith('/'):
+            raise ValueError("文件路径不合法")
+
+        if normalized.startswith('..') or '..' in normalized.split('/'):
+            raise ValueError("文件路径不合法")
+
+        return normalized
 
 
 class FileInfo(BaseModel):

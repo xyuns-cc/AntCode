@@ -151,8 +151,9 @@ async def create_or_bind_project_venv(project_id: int, req: CreateVenvRequest, c
         project.venv_path = venv_path
         # 设置规范绑定
         try:
-            venv_obj = await Venv.get(venv_path=venv_path)
-            project.current_venv_id = venv_obj.id
+            venv_obj = await Venv.get_or_none(venv_path=venv_path)
+            if venv_obj:
+                project.current_venv_id = venv_obj.id
         except Exception:
             pass
         await project.save()
@@ -250,8 +251,8 @@ async def list_venvs(
         data: list[VenvListItem] = []
         for v in items:
             interpreter = await Interpreter.get(id=v.interpreter_id)
-            # 取当前绑定的项目（如存在）
-            current_binding = await ProjectVenvBinding.get_or_none(venv_id=v.id, is_current=True)
+            # 取当前绑定的项目（如存在）- 使用 first() 避免多记录异常
+            current_binding = await ProjectVenvBinding.filter(venv_id=v.id, is_current=True).first()
             item = VenvListItem(
                 id=v.id,
                 scope=v.scope,
@@ -337,8 +338,8 @@ async def delete_venv(venv_id: int, allow_private: bool = Query(False), current_
         # private
         if not allow_private:
             raise HTTPException(status_code=400, detail="不允许删除私有环境（需要 allow_private=true）")
-        # 找当前绑定项目
-        bind = await ProjectVenvBinding.get_or_none(venv_id=venv_id, is_current=True)
+        # 找当前绑定项目 - 使用 first() 避免多记录异常
+        bind = await ProjectVenvBinding.filter(venv_id=venv_id, is_current=True).first()
         if not bind:
             # 无绑定也可删除物理目录与记录（防御）
             await project_venv_service._safe_rmtree(venv.venv_path)

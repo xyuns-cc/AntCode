@@ -9,7 +9,6 @@ import os
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Callable, Optional, Any, Dict
 
 import psutil
 from loguru import logger

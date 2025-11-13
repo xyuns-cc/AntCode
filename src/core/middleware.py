@@ -10,9 +10,6 @@ from loguru import logger
 import re
 from typing import Set, Optional
 
-# 引入统一缓存实例
-from src.core.cache import api_cache, query_cache
-
 
 class AdminPermissionMiddleware(BaseHTTPMiddleware):
     """
@@ -253,12 +250,23 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
                     # 解释器/版本变更影响相关列表
                     if re.match(r"^/api/v1/envs/python/interpreters", path) or re.match(r"^/api/v1/envs/python/versions", path):
                         prefixes.extend(["envs:interpreters:", "envs:versions:"])
+                elif ns == "users":
+                    # 用户相关：清除用户列表缓存
+                    prefixes.append("user:list:")
+                    # 用户详情（如果有）
+                    m = re.match(r"^/api/v1/users/(\d+)", path)
+                    if m:
+                        uid = m.group(1)
+                        prefixes.append(f"user:detail:{uid}:")
+                elif ns == "dashboard":
+                    # 仪表板：清除metrics缓存
+                    prefixes.append("metrics:")
 
-                # 执行清理
+                # 执行清理（使用统一缓存，只需清理一次）
                 if prefixes:
+                    from src.core.cache import unified_cache
                     for p in prefixes:
-                        await api_cache.clear_prefix(p)
-                        await query_cache.clear_prefix(p)
+                        await unified_cache.clear_prefix(p)
                     logger.info(f"已在写操作后清空缓存前缀: {prefixes}")
                 else:
                     logger.debug(f"未匹配到需要清理的缓存前缀: {path}")

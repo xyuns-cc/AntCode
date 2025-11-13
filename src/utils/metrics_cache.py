@@ -54,7 +54,8 @@ class SystemMetrics:
 class SystemMetricsService:
     """系统指标服务 - 使用统一缓存"""
     
-    CACHE_KEY = "system_metrics"
+    # 使用namespace前缀
+    CACHE_KEY = "metrics:system"
     
     def __init__(self):
         self._update_task: Optional[asyncio.Task] = None
@@ -130,17 +131,25 @@ class SystemMetricsService:
         """获取系统指标（带缓存）"""
         if not force_refresh:
             # 尝试从缓存获取
-            cached_metrics = await metrics_cache.get(self.CACHE_KEY)
-            if cached_metrics:
-                logger.debug("系统指标缓存命中")
-                return SystemMetrics(**cached_metrics).to_response()
+            try:
+                cached_metrics = await metrics_cache.get(self.CACHE_KEY)
+                if cached_metrics:
+                    logger.debug("系统指标缓存命中")
+                    return SystemMetrics(**cached_metrics).to_response()
+            except Exception as e:
+                # 缓存读取失败，记录日志并重新收集
+                logger.warning(f"系统指标缓存读取失败: {e}，将重新收集")
         
         # 缓存失效或强制刷新，重新收集
         logger.debug("重新收集系统指标")
         metrics = await self._collect_metrics()
         
         # 保存到缓存
-        await metrics_cache.set(self.CACHE_KEY, asdict(metrics))
+        try:
+            await metrics_cache.set(self.CACHE_KEY, asdict(metrics))
+        except Exception as e:
+            # 缓存写入失败，记录日志但不影响返回结果
+            logger.warning(f"系统指标缓存写入失败: {e}")
         
         return metrics.to_response()
     
@@ -178,24 +187,43 @@ class SystemMetricsService:
             self._update_task = None
     
     async def clear_cache(self):
-        """清除缓存"""
-        await metrics_cache.clear()
-        logger.info("系统指标缓存已清空")
+        """清除系统指标缓存（按前缀）"""
+        try:
+            await metrics_cache.clear_prefix("metrics:")
+            logger.info("系统指标缓存已清空")
+        except Exception as e:
+            logger.error(f"清除系统指标缓存失败: {e}")
+            raise
     
     async def get_cache_info(self):
         """获取缓存信息"""
-        cache_stats = await metrics_cache.get_stats()
-        
-        # 检查当前缓存是否有效
-        cached_metrics = await metrics_cache.get(self.CACHE_KEY)
-        cache_valid = cached_metrics is not None
-        
-        return {
-            **cache_stats,
-            "cache_valid": cache_valid,
-            "background_update_running": self._update_task and not self._update_task.done(),
-            "cache_key": self.CACHE_KEY
-        }
+        try:
+            cache_stats = await metrics_cache.get_stats()
+            
+            # 检查当前缓存是否有效
+            try:
+                cached_metrics = await metrics_cache.get(self.CACHE_KEY)
+                cache_valid = cached_metrics is not None
+            except Exception as e:
+                logger.warning(f"检查缓存有效性失败: {e}")
+                cache_valid = False
+            
+            return {
+                **cache_stats,
+                "cache_valid": cache_valid,
+                "background_update_running": self._update_task and not self._update_task.done(),
+                "cache_key": self.CACHE_KEY
+            }
+        except Exception as e:
+            logger.error(f"获取缓存信息失败: {e}")
+            # 返回默认值
+            return {
+                "name": "metrics",
+                "cache_valid": False,
+                "background_update_running": self._update_task and not self._update_task.done(),
+                "cache_key": self.CACHE_KEY,
+                "error": str(e)
+            }
 
 
 # 全局系统指标服务实例

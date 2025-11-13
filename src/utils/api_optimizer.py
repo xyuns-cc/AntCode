@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import time
 from functools import wraps
-from typing import Dict, List, Any, Callable, Optional
 
 from loguru import logger
 
@@ -19,7 +18,7 @@ class AsyncProcessor:
     
     def __init__(self, max_workers = 10):
         self.semaphore = asyncio.Semaphore(max_workers)
-        self.background_tasks: Dict[str, asyncio.Task] = {}
+        self.background_tasks = {}
     
     async def submit_background_task(
         self,
@@ -77,8 +76,8 @@ class PerformanceMonitor:
     """性能监控器"""
     
     def __init__(self):
-        self.metrics: Dict[str, List[float]] = {}
-        self.slow_requests: List[Dict[str, Any]] = []
+        self.metrics = {}
+        self.slow_requests = []
         self.max_slow_requests = 100
     
     def record_request(self, func_name, duration, threshold = 1.0):
@@ -164,10 +163,10 @@ def _generate_cache_key(func_name, args, kwargs):
 
 
 def fast_response(
-    cache_ttl: int = 300,
-    background_execution: bool = False,
-    namespace: Optional[str] = None,
-    key_prefix_fn: Optional[Callable[[tuple, dict], str]] = None,
+    cache_ttl = 300,
+    background_execution = False,
+    namespace = None,
+    key_prefix_fn = None,
 ):
     """
     快速响应装饰器 - 使用统一缓存系统
@@ -185,7 +184,7 @@ def fast_response(
             
             # 生成缓存键
             raw_key = _generate_cache_key(func_name, args, kwargs)
-            prefix_parts: List[str] = []
+            prefix_parts = []
             if namespace:
                 prefix_parts.append(namespace)
             if key_prefix_fn:
