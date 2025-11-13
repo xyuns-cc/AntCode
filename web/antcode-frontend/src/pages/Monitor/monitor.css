@@ -1,0 +1,1261 @@
+.monitor-container {
+  padding: 0;
+  background: transparent;
+  min-height: auto;
+}
+
+/* 浅色主题 */
+body.light-theme .monitor-container {
+  background: transparent;
+}
+
+/* 深色主题 */
+body.dark-theme .monitor-container {
+  background: transparent;
+}
+
+/* 头部样式 */
+.monitor-header {
+  margin-bottom: 16px;
+}
+
+/* 简化的头部样式 */
+.monitor-header-simple {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid;
+}
+
+/* 浅色主题 */
+body.light-theme .monitor-header-simple {
+  border-bottom-color: #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .monitor-header-simple {
+  border-bottom-color: #434343;
+}
+
+.monitor-header-simple .header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.monitor-header-simple .header-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 迷你统计卡片 */
+.mini-stat-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid;
+  transition: all 0.3s ease;
+}
+
+/* 浅色主题 */
+body.light-theme .mini-stat-card {
+  background: #fff;
+  border-color: #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .mini-stat-card {
+  background: #1f1f1f;
+  border-color: #434343;
+}
+
+.mini-stat-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
+}
+
+.mini-stat-card .stat-icon {
+  font-size: 24px;
+  opacity: 0.8;
+}
+
+.mini-stat-card .stat-content {
+  flex: 1;
+}
+
+.mini-stat-card .stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* 浅色主题 */
+body.light-theme .mini-stat-card .stat-value {
+  color: rgba(0, 0, 0, 0.88);
+}
+
+/* 深色主题 */
+body.dark-theme .mini-stat-card .stat-value {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.mini-stat-card .stat-label {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+/* 浅色主题 */
+body.light-theme .mini-stat-card .stat-label {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .mini-stat-card .stat-label {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 浅色主题卡片 */
+body.light-theme .monitor-header.ant-card {
+  background: #fff;
+  border-color: #d9d9d9;
+}
+
+/* 深色主题卡片 */
+body.dark-theme .monitor-header.ant-card {
+  background: #1f1f1f;
+  border-color: #434343;
+}
+
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+}
+
+.header-title h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: bold;
+  background: linear-gradient(135deg, #722ed1 0%, #1890ff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.header-badges {
+  display: flex;
+  gap: 16px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.current-time {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .current-time {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .current-time {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.header-stats {
+  margin-top: 16px;
+}
+
+.stat-card {
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  transition: all 0.3s ease;
+}
+
+/* 浅色主题统计卡片 */
+body.light-theme .stat-card {
+  background: linear-gradient(135deg, #f5f7fa 0%, #ffffff 100%);
+  border-color: #f0f0f0;
+}
+
+/* 深色主题统计卡片 */
+body.dark-theme .stat-card {
+  background: linear-gradient(135deg, #1a1a1a 0%, #262626 100%);
+  border-color: #434343;
+}
+
+.stat-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+/* 节点卡片样式 */
+.node-card {
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  height: 100%;
+}
+
+.node-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+.node-card.node-running {
+  border-left: 4px solid #52c41a;
+}
+
+.node-card.node-warning {
+  border-left: 4px solid #faad14;
+  background: #fffbe6;
+}
+
+.node-card.node-error {
+  border-left: 4px solid #ff4d4f;
+  background: #fff2f0;
+}
+
+.node-card.node-stopped {
+  border-left: 4px solid #d9d9d9;
+  opacity: 0.7;
+}
+
+/* 水平滚动容器 */
+.nodes-scroll-container {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 12px;
+  scroll-behavior: smooth;
+}
+
+.nodes-scroll-container::-webkit-scrollbar {
+  height: 8px;
+}
+
+/* 浅色主题滚动条 */
+body.light-theme .nodes-scroll-container::-webkit-scrollbar-track {
+  background: #f0f0f0;
+  border-radius: 4px;
+}
+
+body.light-theme .nodes-scroll-container::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 4px;
+}
+
+body.light-theme .nodes-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+
+/* 深色主题滚动条 */
+body.dark-theme .nodes-scroll-container::-webkit-scrollbar-track {
+  background: #262626;
+  border-radius: 4px;
+}
+
+body.dark-theme .nodes-scroll-container::-webkit-scrollbar-thumb {
+  background: #434343;
+  border-radius: 4px;
+}
+
+body.dark-theme .nodes-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: #595959;
+}
+
+/* 紧凑型节点卡片 */
+.node-card-compact {
+  min-width: 200px;
+  max-width: 200px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.node-card-compact .ant-card-body {
+  padding: 12px;
+}
+
+.node-card-compact:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transform: translateY(-4px);
+}
+
+.node-card-compact.node-running {
+  border-left: 3px solid #52c41a;
+}
+
+.node-card-compact.node-warning {
+  border-left: 3px solid #faad14;
+}
+
+/* 浅色主题 */
+body.light-theme .node-card-compact.node-warning {
+  background: #fffbe6;
+}
+
+/* 深色主题 */
+body.dark-theme .node-card-compact.node-warning {
+  background: rgba(250, 173, 20, 0.1);
+}
+
+.node-card-compact.node-error {
+  border-left: 3px solid #ff4d4f;
+}
+
+/* 浅色主题 */
+body.light-theme .node-card-compact.node-error {
+  background: #fff2f0;
+}
+
+/* 深色主题 */
+body.dark-theme .node-card-compact.node-error {
+  background: rgba(255, 77, 79, 0.1);
+}
+
+.node-card-compact.node-stopped {
+  border-left: 3px solid #d9d9d9;
+  opacity: 0.7;
+}
+
+.node-header-compact {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  gap: 8px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-header-compact {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .node-header-compact {
+  border-bottom: 1px solid #434343;
+}
+
+.node-header-compact h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+/* 浅色主题标题 */
+body.light-theme .node-header-compact h4 {
+  color: #262626;
+}
+
+/* 深色主题标题 */
+body.dark-theme .node-header-compact h4 {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.node-header-compact .node-version {
+  margin: 2px 0 0 0;
+  font-size: 10px;
+}
+
+/* 浅色主题版本号 */
+body.light-theme .node-header-compact .node-version {
+  color: #999;
+}
+
+/* 深色主题版本号 */
+body.dark-theme .node-header-compact .node-version {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.node-metrics-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+/* 移除旧的 metric-label-compact，已在上面重新定义 */
+
+.metric-value-compact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0; /* 确保flex子元素可以正常收缩 */
+}
+
+.metric-value-compact .ant-progress {
+  flex: 1;
+  margin: 0;
+  min-width: 80px; /* 确保进度条有最小宽度 */
+  line-height: 1;
+}
+
+.metric-value-compact .ant-progress .ant-progress-outer {
+  display: block;
+}
+
+.metric-value-compact .ant-progress .ant-progress-inner {
+  background-color: rgba(0, 0, 0, 0.06);
+  border-radius: 100px;
+  height: 6px !important;
+}
+
+body.dark-theme .metric-value-compact .ant-progress .ant-progress-inner {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.metric-value-compact .ant-progress .ant-progress-bg {
+  border-radius: 100px;
+  height: 6px !important;
+}
+
+.metric-percent {
+  font-size: 11px;
+  font-weight: 500;
+  min-width: 32px;
+  text-align: right;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-percent {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-percent {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.metric-text-compact {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-text-compact {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-text-compact {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* 紧凑型任务项 */
+.metric-item-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-label-compact {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-label-compact {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-label-compact {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* 迷你任务指示器 - 独立一行显示 */
+.task-indicators-mini {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.indicator-mini {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.indicator-mini.indicator-success {
+  background-color: #52c41a;
+}
+
+.indicator-mini.indicator-warning {
+  background-color: #faad14;
+}
+
+.indicator-mini.indicator-error {
+  background-color: #ff4d4f;
+}
+
+.more-mini {
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+/* 浅色主题 */
+body.light-theme .more-mini {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .more-mini {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* Drawer 中的紧凑节点卡片样式 */
+.node-card-drawer {
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  height: 100%;
+}
+
+.node-card-drawer.ant-card-small > .ant-card-body {
+  padding: 10px;
+}
+
+.node-card-drawer:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  transform: translateY(-2px);
+}
+
+.node-card-drawer.node-running {
+  border-left: 3px solid #52c41a;
+}
+
+.node-card-drawer.node-warning {
+  border-left: 3px solid #faad14;
+}
+
+/* 浅色主题警告背景 */
+body.light-theme .node-card-drawer.node-warning {
+  background: #fffbe6;
+}
+
+/* 深色主题警告背景 */
+body.dark-theme .node-card-drawer.node-warning {
+  background: rgba(250, 173, 20, 0.1);
+}
+
+.node-card-drawer.node-error {
+  border-left: 3px solid #ff4d4f;
+}
+
+/* 浅色主题错误背景 */
+body.light-theme .node-card-drawer.node-error {
+  background: #fff2f0;
+}
+
+/* 深色主题错误背景 */
+body.dark-theme .node-card-drawer.node-error {
+  background: rgba(255, 77, 79, 0.1);
+}
+
+.node-card-drawer.node-stopped {
+  border-left: 3px solid #d9d9d9;
+  opacity: 0.7;
+}
+
+.node-header-drawer {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  gap: 8px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-header-drawer {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .node-header-drawer {
+  border-bottom: 1px solid #434343;
+}
+
+.node-header-drawer h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+/* 浅色主题 */
+body.light-theme .node-header-drawer h4 {
+  color: #262626;
+}
+
+/* 深色主题 */
+body.dark-theme .node-header-drawer h4 {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.node-header-drawer .node-version {
+  margin: 2px 0 0 0;
+  font-size: 10px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-header-drawer .node-version {
+  color: #999;
+}
+
+/* 深色主题 */
+body.dark-theme .node-header-drawer .node-version {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.node-metrics-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metric-item-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.metric-label-drawer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-label-drawer {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-label-drawer {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* Drawer 中的任务指示器 */
+.task-indicators-compact {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 3px;
+}
+
+.task-indicators-compact .indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.task-indicators-compact .indicator.indicator-success {
+  background-color: #52c41a;
+}
+
+.task-indicators-compact .indicator.indicator-warning {
+  background-color: #faad14;
+}
+
+.task-indicators-compact .indicator.indicator-error {
+  background-color: #ff4d4f;
+}
+
+.task-indicators-compact .more-compact {
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+/* 浅色主题 */
+body.light-theme .task-indicators-compact .more-compact {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .task-indicators-compact .more-compact {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.node-uptime-drawer {
+  margin-top: 4px;
+  padding-top: 6px;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-uptime-drawer {
+  border-top: 1px solid #f0f0f0;
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .node-uptime-drawer {
+  border-top: 1px solid #434343;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 原有节点卡片样式（用于节点详情） */
+
+.node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-header {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .node-header {
+  border-bottom: 1px solid #434343;
+}
+
+.node-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+/* 浅色主题标题 */
+body.light-theme .node-header h3 {
+  color: rgba(0, 0, 0, 0.88);
+}
+
+/* 深色主题标题 */
+body.dark-theme .node-header h3 {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.node-version {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-version {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .node-version {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.node-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-label {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-label {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.task-indicators {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.indicator-success {
+  background-color: #52c41a;
+}
+
+.indicator-warning {
+  background-color: #faad14;
+}
+
+.indicator-error {
+  background-color: #ff4d4f;
+}
+
+.task-indicators .more {
+  font-size: 11px;
+  color: #888;
+  margin-left: 4px;
+}
+
+.node-uptime {
+  margin-top: 8px;
+  padding-top: 8px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 浅色主题 */
+body.light-theme .node-uptime {
+  border-top: 1px solid #f0f0f0;
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .node-uptime {
+  border-top: 1px solid #434343;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 告警列表样式 */
+.alerts-card .ant-card-body {
+  padding: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* 小尺寸卡片调整 */
+.ant-card-small .ant-card-head {
+  padding: 0 12px;
+  min-height: 36px;
+  font-size: 14px;
+}
+
+.ant-card-small .ant-card-body {
+  padding: 12px;
+}
+
+/* 浅色主题滚动条 */
+body.light-theme .alerts-list::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* 深色主题滚动条 */
+body.dark-theme .alerts-list::-webkit-scrollbar-track {
+  background: #262626;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #434343;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #595959;
+}
+
+.alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.alert-item {
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.alert-item:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.alert-item.alert-error {
+  border-left: 4px solid #ff4d4f;
+}
+
+/* 浅色主题 */
+body.light-theme .alert-item.alert-error {
+  background: #fff2f0;
+}
+
+/* 深色主题 */
+body.dark-theme .alert-item.alert-error {
+  background: rgba(255, 77, 79, 0.1);
+}
+
+.alert-item.alert-warning {
+  border-left: 4px solid #faad14;
+}
+
+/* 浅色主题 */
+body.light-theme .alert-item.alert-warning {
+  background: #fffbe6;
+}
+
+/* 深色主题 */
+body.dark-theme .alert-item.alert-warning {
+  background: rgba(250, 173, 20, 0.1);
+}
+
+.alert-item.alert-info {
+  border-left: 4px solid #1890ff;
+}
+
+/* 浅色主题 */
+body.light-theme .alert-item.alert-info {
+  background: #e6f7ff;
+}
+
+/* 深色主题 */
+body.dark-theme .alert-item.alert-info {
+  background: rgba(24, 144, 255, 0.1);
+}
+
+.alert-content {
+  display: flex;
+  gap: 12px;
+}
+
+.alert-icon {
+  font-size: 20px;
+  margin-top: 2px;
+}
+
+.alert-details {
+  flex: 1;
+}
+
+.alert-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.alert-header h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.alert-time {
+  font-size: 11px;
+}
+
+/* 浅色主题 */
+body.light-theme .alert-time {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .alert-time {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.alert-message {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 浅色主题 */
+body.light-theme .alert-message {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .alert-message {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.alert-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 大屏模式 */
+.monitor-container.large-screen {
+  padding: 8px;
+}
+
+.monitor-container.large-screen .header-title h1 {
+  font-size: 28px;
+}
+
+.monitor-container.large-screen .stat-card {
+  padding: 8px;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .header-content {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .header-left {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .current-time {
+    font-size: 11px;
+  }
+}
+
+/* 滚动条样式 */
+.alerts-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+/* 浅色主题 */
+body.light-theme .alerts-list::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* 深色主题 */
+body.dark-theme .alerts-list::-webkit-scrollbar-track {
+  background: #262626;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #434343;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #595959;
+}
+
+/* 动画效果 */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.node-card.node-warning .node-header,
+.node-card.node-error .node-header {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.node-card-compact.node-warning,
+.node-card-compact.node-error {
+  animation: pulse 3s ease-in-out infinite;
+}
+
+/* 表格样式优化 */
+.ant-table-small .ant-table-thead > tr > th {
+  font-weight: 600;
+  font-size: 12px;
+  padding: 8px;
+}
+
+/* 浅色主题 */
+body.light-theme .ant-table-small .ant-table-thead > tr > th {
+  background: #fafafa;
+}
+
+/* 深色主题 */
+body.dark-theme .ant-table-small .ant-table-thead > tr > th {
+  background: #262626;
+}
+
+.ant-table-small .ant-table-tbody > tr > td {
+  padding: 8px;
+  font-size: 12px;
+}
+
+/* 卡片间距调整 */
+.ant-card {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.ant-card-head {
+  border-bottom: 1px solid;
+}
+
+/* 浅色主题 */
+body.light-theme .ant-card-head {
+  border-bottom-color: #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .ant-card-head {
+  border-bottom-color: #434343;
+}
+
+.ant-card-head-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+/* 节点日志样式 */
+.node-log-item {
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid;
+}
+
+/* 浅色主题日志样式 */
+body.light-theme .node-log-item.node-log-error {
+  border-color: #ffccc7;
+  background: #fff2f0;
+}
+
+body.light-theme .node-log-item.node-log-warning {
+  border-color: #ffe7ba;
+  background: #fffbe6;
+}
+
+body.light-theme .node-log-item.node-log-success {
+  border-color: #d9f7be;
+  background: #f6ffed;
+}
+
+body.light-theme .node-log-item.node-log-info {
+  border-color: #d9d9d9;
+  background: #fafafa;
+}
+
+/* 深色主题日志样式 */
+body.dark-theme .node-log-item.node-log-error {
+  border-color: #a61d24;
+  background: rgba(255, 77, 79, 0.1);
+}
+
+body.dark-theme .node-log-item.node-log-warning {
+  border-color: #ad6800;
+  background: rgba(250, 173, 20, 0.1);
+}
+
+body.dark-theme .node-log-item.node-log-success {
+  border-color: #237804;
+  background: rgba(82, 196, 26, 0.1);
+}
+
+body.dark-theme .node-log-item.node-log-info {
+  border-color: #434343;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* 响应式调整 - 移动端 */
+@media (max-width: 768px) {
+  .monitor-header-simple {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .monitor-header-simple .header-left {
+    width: 100%;
+  }
+
+  .mini-stat-card {
+    padding: 10px;
+  }
+
+  .mini-stat-card .stat-icon {
+    font-size: 20px;
+  }
+
+  .mini-stat-card .stat-value {
+    font-size: 16px;
+  }
+
+  .nodes-scroll-container {
+    padding-bottom: 8px;
+  }
+
+  .node-card-compact {
+    min-width: 160px;
+    max-width: 160px;
+  }
+}
+

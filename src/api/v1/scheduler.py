@@ -11,7 +11,7 @@ from src.core.auth import get_current_user, TokenData
 from src.models.enums import TaskStatus, ProjectType
 from src.schemas.common import BaseResponse
 from src.core.response import success as success_response, task_list, execution_list
-from src.core.messages import Messages
+from src.core.response import Messages
 from src.schemas.scheduler import (
     TaskCreate, TaskUpdate, TaskResponse,
     ExecutionResponse, LogFileResponse,

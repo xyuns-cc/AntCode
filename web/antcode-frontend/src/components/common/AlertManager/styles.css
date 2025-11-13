@@ -1,0 +1,46 @@
+.alert-manager {
+  position: fixed;
+  top: 80px; /* 从24px调整到80px，避免遮挡导航栏 */
+  right: 24px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.alert-item {
+  pointer-events: auto;
+  margin-bottom: 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  animation: slideInRight 0.3s ease-out;
+}
+
+.alert-item:last-child {
+  margin-bottom: 0 !important;
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Alert关闭动画 */
+.alert-item.ant-alert-slide-up-leave {
+  animation: slideOutRight 0.3s ease-in;
+}
+
+@keyframes slideOutRight {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}

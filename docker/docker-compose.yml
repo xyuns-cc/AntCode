@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  antcode-api:
+    image: ghcr.io/your-org/antcode-api:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    #   args:
+    #     DB_TYPE: ${DB_TYPE:-sqlite}
+    container_name: antcode-api
+    ports:
+      - "127.0.0.1:${SERVER_PORT:-8000}:${SERVER_PORT:-8000}"
+    env_file:
+      - ../.env
+    restart: always
+    volumes:
+      - ../storage:/app/storage
+      - ../logs:/app/logs
+      - ./data:/app/data
+    stop_grace_period: 10s
+    healthcheck:
+      test: curl -f http://localhost:${SERVER_PORT:-8000}/api/v1/health || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - antcode-network
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
+    #     restart: true
+    #   postgres:
+    #     condition: service_healthy
+    #     restart: true
+    #   redis:
+    #     condition: service_healthy
+    #     restart: true
+
+  # 如果需要安装 MySQL、PostgreSQL 或 Redis，请取消以下注释并配置相应的环境变量。
+  # 并且要在上方的 depends_on 中取消注释相应的依赖服务。
+
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: antcode-mysql
+  #   restart: always
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+  #     MYSQL_DATABASE: ${MYSQL_DATABASE:-antcode}
+  #     MYSQL_USER: ${MYSQL_USER:-antcode}
+  #     MYSQL_PASSWORD: ${MYSQL_PASSWORD:-antcode_password}
+  #   command:
+  #     - --character-set-server=utf8mb4
+  #     - --collation-server=utf8mb4_unicode_ci
+  #     - --default-authentication-plugin=mysql_native_password
+  #   volumes:
+  #     - ./data/mysql:/var/lib/mysql
+  #   networks:
+  #     - antcode-network
+  #   healthcheck:
+  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+
+  # postgres:
+  #   image: postgres:16
+  #   container_name: antcode-postgres
+  #   restart: always
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER:-antcode}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-antcode_password}
+  #     POSTGRES_DB: ${POSTGRES_DB:-antcode}
+  #   volumes:
+  #     - ./data/postgres:/var/lib/postgresql/data
+  #   networks:
+  #     - antcode-network
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-antcode} -d ${POSTGRES_DB:-antcode}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+
+  # redis:
+  #   image: redis:7.4-alpine
+  #   container_name: antcode-redis
+  #   restart: always
+  #   command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password}
+  #   volumes:
+  #     - ./data/redis:/data
+  #   networks:
+  #     - antcode-network
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 3
+
+networks:
+  antcode-network:
+    driver: bridge
