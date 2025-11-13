@@ -4,7 +4,6 @@ import {
   ProjectOutlined,
   PlayCircleOutlined,
   CheckCircleOutlined,
-  UserOutlined,
   DatabaseOutlined,
   HddOutlined,
   ThunderboltOutlined,
@@ -28,6 +27,18 @@ const Dashboard: React.FC = memo(() => {
   const [systemMetrics, setSystemMetrics] = useState<SystemMetrics | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [activeTab, setActiveTab] = useState<string>('overview')
+
+  const normalizePercent = (value: unknown): number => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) {
+      return 0
+    }
+    return Math.min(100, Math.max(0, Math.round(numeric)))
+  }
+
+  const cpuPercent = normalizePercent(systemMetrics?.cpu_usage?.percent)
+  const memoryPercent = normalizePercent(systemMetrics?.memory_usage?.percent)
+  const diskPercent = normalizePercent(systemMetrics?.disk_usage?.percent)
 
   // 加载仪表板数据
   const loadDashboardData = async () => {
@@ -337,16 +348,15 @@ const Dashboard: React.FC = memo(() => {
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             <Progress
-                              percent={Math.round(systemMetrics.memory_usage.percent)}
-                              status={systemMetrics.memory_usage.percent > 80 ? 'exception' : 'normal'}
-                              strokeColor={systemMetrics.memory_usage.percent > 80 ? '#ff4d4f' : '#1890ff'}
+                              percent={memoryPercent}
+                              status={memoryPercent > 80 ? 'exception' : 'normal'}
+                              strokeColor={memoryPercent > 80 ? '#ff4d4f' : '#1890ff'}
                               trailColor="rgba(0, 0, 0, 0.06)"
-                              strokeWidth={10}
                               showInfo={false}
                               style={{ flex: 1 }}
                             />
                             <span style={{ fontSize: '14px', minWidth: '40px', textAlign: 'right' }}>
-                              {Math.round(systemMetrics.memory_usage.percent)}%
+                              {memoryPercent}%
                             </span>
                           </div>
                           <div style={{ marginTop: '12px', fontSize: '12px', opacity: 0.8 }}>
@@ -367,16 +377,15 @@ const Dashboard: React.FC = memo(() => {
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             <Progress
-                              percent={Math.round(systemMetrics.cpu_usage.percent)}
-                              status={systemMetrics.cpu_usage.percent > 80 ? 'exception' : 'normal'}
-                              strokeColor={systemMetrics.cpu_usage.percent > 80 ? '#ff4d4f' : '#52c41a'}
+                              percent={cpuPercent}
+                              status={cpuPercent > 80 ? 'exception' : 'normal'}
+                              strokeColor={cpuPercent > 80 ? '#ff4d4f' : '#52c41a'}
                               trailColor="rgba(0, 0, 0, 0.06)"
-                              strokeWidth={10}
                               showInfo={false}
                               style={{ flex: 1 }}
                             />
                             <span style={{ fontSize: '14px', minWidth: '40px', textAlign: 'right' }}>
-                              {Math.round(systemMetrics.cpu_usage.percent)}%
+                              {cpuPercent}%
                             </span>
                           </div>
                           <div style={{ marginTop: '12px', fontSize: '12px', opacity: 0.8 }}>
@@ -396,16 +405,15 @@ const Dashboard: React.FC = memo(() => {
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             <Progress
-                              percent={Math.round(systemMetrics.disk_usage.percent)}
-                              status={systemMetrics.disk_usage.percent > 90 ? 'exception' : 'normal'}
-                              strokeColor={systemMetrics.disk_usage.percent > 90 ? '#ff4d4f' : '#722ed1'}
+                              percent={diskPercent}
+                              status={diskPercent > 90 ? 'exception' : 'normal'}
+                              strokeColor={diskPercent > 90 ? '#ff4d4f' : '#722ed1'}
                               trailColor="rgba(0, 0, 0, 0.06)"
-                              strokeWidth={10}
                               showInfo={false}
                               style={{ flex: 1 }}
                             />
                             <span style={{ fontSize: '14px', minWidth: '40px', textAlign: 'right' }}>
-                              {Math.round(systemMetrics.disk_usage.percent)}%
+                              {diskPercent}%
                             </span>
                           </div>
                           <div style={{ marginTop: '12px', fontSize: '12px', opacity: 0.8 }}>
