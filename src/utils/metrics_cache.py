@@ -4,6 +4,8 @@
 """
 
 import asyncio
+import math
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Optional
@@ -60,50 +62,111 @@ class SystemMetricsService:
     def __init__(self):
         self._update_task: Optional[asyncio.Task] = None
     
+    @staticmethod
+    def _is_valid_percent(value):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return False
+        return not math.isnan(numeric) and not math.isinf(numeric)
+
+    @staticmethod
+    def _normalize_percent(value, default = 0.0):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return round(default, 2)
+
+        if math.isnan(numeric) or math.isinf(numeric):
+            numeric = default
+
+        numeric = max(0.0, min(100.0, numeric))
+        return round(numeric, 2)
+    
+    async def _collect_cpu_metrics(self):
+        await asyncio.to_thread(psutil.cpu_percent, None)
+        cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 0.5)
+        if not self._is_valid_percent(cpu_percent_sample):
+            cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 1.0)
+        cpu_percent = self._normalize_percent(cpu_percent_sample)
+        cpu_cores = await asyncio.to_thread(psutil.cpu_count, True)
+
+        if cpu_percent <= 0.0:
+            try:
+                load_avg = await asyncio.to_thread(psutil.getloadavg)
+                if load_avg:
+                    cpu_percent = self._normalize_percent(
+                        (load_avg[0] / max(cpu_cores or 1, 1)) * 100.0,
+                        default=cpu_percent,
+                    )
+            except (AttributeError, OSError):
+                pass
+
+        return cpu_percent, cpu_cores
+
+    async def _collect_memory_metrics(self):
+        vm = await asyncio.to_thread(psutil.virtual_memory)
+        return {
+            "percent": self._normalize_percent(vm.percent),
+            "total": int(vm.total),
+            "used": int(vm.used),
+            "available": int(vm.available),
+        }
+
+    async def _collect_disk_metrics(self):
+        du = await asyncio.to_thread(psutil.disk_usage, '/')
+        return {
+            "percent": self._normalize_percent(du.percent),
+            "total": int(du.total),
+            "used": int(du.used),
+            "free": int(du.free),
+        }
+
+    async def _collect_active_tasks(self):
+        try:
+            from src.services.scheduler.scheduler_service import scheduler_service
+            return await asyncio.to_thread(lambda: len(scheduler_service.running_tasks))
+        except Exception:
+            return 0
+
+    async def _collect_uptime_seconds(self):
+        try:
+            current_time, boot_time = await asyncio.gather(
+                asyncio.to_thread(time.time),
+                asyncio.to_thread(psutil.boot_time),
+            )
+            return int(current_time - boot_time)
+        except Exception:
+            return None
+    
     async def _collect_metrics(self):
         """收集系统指标"""
         try:
-            # 使用短间隔获取CPU使用率以避免阻塞
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            cpu_cores = psutil.cpu_count(logical=True)
-
-            vm = psutil.virtual_memory()
-            memory_percent = vm.percent
-            memory_total = int(vm.total)
-            memory_used = int(vm.used)
-            memory_available = int(vm.available)
-
-            du = psutil.disk_usage('/')
-            disk_usage = du.percent
-            disk_total = int(du.total)
-            disk_used = int(du.used)
-            disk_free = int(du.free)
-            
-            # 获取活跃任务数
-            try:
-                from src.services.scheduler.scheduler_service import scheduler_service
-                active_tasks = len(scheduler_service.running_tasks)
-            except:
-                active_tasks = 0
-            
-            # 系统运行时长（秒）
-            try:
-                import time
-                uptime_seconds = int(time.time() - psutil.boot_time())
-            except Exception:
-                uptime_seconds = None
+            (
+                (cpu_percent, cpu_cores),
+                memory_metrics,
+                disk_metrics,
+                active_tasks,
+                uptime_seconds,
+            ) = await asyncio.gather(
+                self._collect_cpu_metrics(),
+                self._collect_memory_metrics(),
+                self._collect_disk_metrics(),
+                self._collect_active_tasks(),
+                self._collect_uptime_seconds(),
+            )
 
             return SystemMetrics(
                 cpu_percent=round(cpu_percent, 2),
                 cpu_cores=cpu_cores,
-                memory_percent=round(memory_percent, 2),
-                memory_total=memory_total,
-                memory_used=memory_used,
-                memory_available=memory_available,
-                disk_usage=round(disk_usage, 2),
-                disk_total=disk_total,
-                disk_used=disk_used,
-                disk_free=disk_free,
+                memory_percent=round(memory_metrics["percent"], 2),
+                memory_total=memory_metrics["total"],
+                memory_used=memory_metrics["used"],
+                memory_available=memory_metrics["available"],
+                disk_usage=round(disk_metrics["percent"], 2),
+                disk_total=disk_metrics["total"],
+                disk_used=disk_metrics["used"],
+                disk_free=disk_metrics["free"],
                 active_tasks=active_tasks,
                 uptime_seconds=uptime_seconds,
                 collected_at=datetime.now()
