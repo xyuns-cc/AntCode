@@ -95,6 +95,8 @@ cd docker
 docker compose up -d
 ```
 
+后端（API）与前端（Web 控制台）会分别打包为镜像，默认引用 GitHub Container Registry 的 `antcode-api` 与 `antcode-frontend`。需要自建镜像时，可直接运行仓库内的 GitHub Actions 工作流（`docker-images.yml`）自动构建并推送，再通过设置环境变量 `BACKEND_IMAGE`、`FRONTEND_IMAGE` 切换镜像来源。
+
 详细配置请参考 [docker/README.md](docker/README.md)
 
 ## 📖 配置说明

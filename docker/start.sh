@@ -52,6 +52,24 @@ check_docker() {
     print_success "Docker 环境检查通过"
 }
 
+# 读取 .env 变量（如果存在）
+get_env_var() {
+    local key="$1"
+    local default_value="$2"
+    local env_file="../.env"
+
+    if [[ -f "$env_file" ]]; then
+        local value
+        value=$(grep -E "^${key}=" "$env_file" | tail -n1 | cut -d '=' -f2- | tr -d '\r' | tr -d '"')
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return
+        fi
+    fi
+
+    echo "$default_value"
+}
+
 # 显示菜单
 show_menu() {
     print_header "AntCode Docker 部署选择"
@@ -153,8 +171,13 @@ deploy_postgres_redis() {
 show_access_info() {
     echo ""
     print_header "访问信息"
-    echo "  🌐 API 地址: http://localhost:8000"
-    echo "  📚 API 文档: http://localhost:8000/docs"
+    local api_port
+    local web_port
+    api_port=$(get_env_var "SERVER_PORT" "8000")
+    web_port=$(get_env_var "FRONTEND_PORT" "3000")
+    echo "  🌐 API 地址: http://localhost:${api_port}"
+    echo "  📚 API 文档: http://localhost:${api_port}/docs"
+    echo "  💻 Web 控制台: http://localhost:${web_port}"
     echo "  👤 默认账号: admin / admin"
     echo ""
     print_info "查看日志: docker-compose logs -f"

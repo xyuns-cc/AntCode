@@ -1,11 +1,12 @@
 # =====================================================
-# AntCode API - 多阶段构建 Dockerfile
+# AntCode 多阶段构建 Dockerfile
+# 支持后端（FastAPI）和前端（React）分别打包
+# 通过 --target backend-runtime / frontend-runtime 选择输出镜像
 # =====================================================
 
-# ================== 阶段 1: 基础镜像 ==================
-FROM python:3.11-slim as base
+# ================== 后端: 基础镜像 ==================
+FROM python:3.11-slim AS backend-base
 
-# 设置环境变量
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -13,27 +14,22 @@ ENV PYTHONPATH=/app \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_SYSTEM_PYTHON=1
 
-# 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv（更快的 Python 包管理器）
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# ================== 阶段 2: 依赖安装 ==================
-FROM base as builder
+# ================== 后端: 依赖安装 ==================
+FROM backend-base AS backend-builder
 
 WORKDIR /app
 
-# 复制依赖文件
 COPY pyproject.toml uv.lock* ./
 
-# 根据构建参数安装依赖
-# 支持通过 --build-arg DB_TYPE=mysql 来指定数据库类型
 ARG DB_TYPE=sqlite
 RUN if [ "$DB_TYPE" = "mysql" ]; then \
         echo "📦 安装 MySQL 依赖..." && \
@@ -49,23 +45,19 @@ RUN if [ "$DB_TYPE" = "mysql" ]; then \
         uv sync; \
     fi
 
-# ================== 阶段 3: 运行时镜像 ==================
-FROM base as runtime
+# ================== 后端: 运行时 ==================
+FROM backend-base AS backend-runtime
 
 WORKDIR /app
 
-# 从构建阶段复制已安装的依赖
-COPY --from=builder /root/.local /root/.local
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=backend-builder /root/.local /root/.local
+COPY --from=backend-builder /app/.venv /app/.venv
 
-# 设置虚拟环境路径
 ENV PATH="/app/.venv/bin:$PATH"
 
-# 复制应用代码
 COPY src ./src
 COPY main.py ./
 
-# 创建必要的目录
 RUN mkdir -p \
     /app/storage/projects/files \
     /app/storage/projects/extracted \
@@ -75,15 +67,47 @@ RUN mkdir -p \
     /app/logs/tasks \
     /app/migrations
 
-# 设置目录权限
 RUN chmod -R 755 /app/storage /app/logs
 
-# 暴露端口
 EXPOSE 8000
 
-# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# 启动命令
 CMD ["python", "main.py"]
+
+# ================== 前端: 构建 ==================
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+ENV NODE_ENV=production \
+    HUSKY=0
+
+COPY web/antcode-frontend/package*.json ./
+RUN npm ci --legacy-peer-deps
+
+COPY web/antcode-frontend ./
+
+ARG VITE_API_BASE_URL=http://localhost:8000
+ARG VITE_APP_TITLE="AntCode 任务调度平台"
+
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
+    VITE_APP_TITLE=$VITE_APP_TITLE
+
+RUN npm run build
+
+# ================== 前端: 运行时 ==================
+FROM nginx:1.27-alpine AS frontend-runtime
+
+RUN apk add --no-cache curl
+
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=frontend-builder /frontend/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://127.0.0.1/healthz || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

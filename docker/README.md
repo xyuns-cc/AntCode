@@ -21,6 +21,7 @@ docker-compose up -d
 
 ### 3. 访问应用
 
+- **Web 控制台**: http://localhost:3000
 - **API 地址**: http://localhost:8000
 - **API 文档**: http://localhost:8000/docs
 - **默认账号**: admin / admin
@@ -33,10 +34,14 @@ docker-compose up -d
 
 ```yaml
 # docker-compose.yml（默认配置）
-antcode-api:
-  image: ghcr.io/your-org/antcode-api:latest
-  # build 部分已注释
+services:
+  antcode-api:
+    image: ${BACKEND_IMAGE:-ghcr.io/your-org/antcode-api:latest}
+  antcode-web:
+    image: ${FRONTEND_IMAGE:-ghcr.io/your-org/antcode-frontend:latest}
 ```
+
+> 可通过设置环境变量 `BACKEND_IMAGE`、`FRONTEND_IMAGE` 来切换到你自己的仓库镜像（例如 GitHub Container Registry）。
 
 直接启动：
 ```bash
@@ -52,13 +57,49 @@ antcode-api:
   build:
     context: ..
     dockerfile: docker/Dockerfile
+    target: backend-runtime
     args:
       DB_TYPE: ${DB_TYPE:-sqlite}
+
+antcode-web:
+  # image: ghcr.io/your-org/antcode-frontend:latest  # 注释这行
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    target: frontend-runtime
+    args:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://antcode-api:8000}
+      VITE_APP_TITLE: ${VITE_APP_TITLE:-AntCode Task Platform}
 ```
 
 构建并启动：
 ```bash
 docker-compose up -d --build
+```
+
+---
+
+### GitHub Actions 自动构建镜像
+
+仓库内新增 `.github/workflows/docker-images.yml`，在 push、打 tag 或手动触发时会：
+
+1. 并行构建前端（`frontend-runtime`）与后端（`backend-runtime`）镜像
+2. 推送到 `ghcr.io/<your-org>/antcode-{api|frontend}`，标签包含 `latest`、git tag、commit SHA
+
+使用方式：
+
+1. 在 GitHub 仓库启用 GitHub Packages（默认已可用）
+2. 可选：在仓库 **Settings → Variables** 中新增
+   - `VITE_API_BASE_URL`：前端构建时注入的 API 基地址
+   - `VITE_APP_TITLE`：前端界面标题
+   - `DOCKER_DB_TYPE`：后端构建所需数据库依赖（`sqlite`/`mysql`/`postgres`/`all`）
+3. 推送代码或手动运行 workflow
+4. 登录后即可拉取镜像：
+
+```bash
+echo "${GITHUB_TOKEN}" | docker login ghcr.io -u <github-username> --password-stdin
+docker pull ghcr.io/<your-org>/antcode-api:latest
+docker pull ghcr.io/<your-org>/antcode-frontend:latest
 ```
 
 ---

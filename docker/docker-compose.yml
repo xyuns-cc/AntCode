@@ -2,10 +2,12 @@ version: '3.8'
 
 services:
   antcode-api:
-    image: ghcr.io/your-org/antcode-api:latest
+    image: ${BACKEND_IMAGE:-ghcr.io/your-org/antcode-api:latest}
+    # 如需本地构建镜像，取消注释 build 配置
     # build:
     #   context: ..
     #   dockerfile: docker/Dockerfile
+    #   target: backend-runtime
     #   args:
     #     DB_TYPE: ${DB_TYPE:-sqlite}
     container_name: antcode-api
@@ -37,6 +39,33 @@ services:
     #   redis:
     #     condition: service_healthy
     #     restart: true
+
+  antcode-web:
+    image: ${FRONTEND_IMAGE:-ghcr.io/your-org/antcode-frontend:latest}
+    # 如需本地构建镜像，取消注释 build 配置
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    #   target: frontend-runtime
+    #   args:
+    #     VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://antcode-api:8000}
+    #     VITE_APP_TITLE: ${VITE_APP_TITLE:-AntCode Task Platform}
+    container_name: antcode-web
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:80"
+    restart: always
+    depends_on:
+      antcode-api:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - antcode-network
 
   # 如果需要安装 MySQL、PostgreSQL 或 Redis，请取消以下注释并配置相应的环境变量。
   # 并且要在上方的 depends_on 中取消注释相应的依赖服务。
