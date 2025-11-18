@@ -4,6 +4,7 @@ import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import App from './App.tsx'
 import { APP_TITLE } from '@/config/app'
+import { RUNTIME_CONFIG } from '@/config/runtime'
 import 'dayjs/locale/zh-cn'
 
 // 设置页面标题
@@ -12,7 +13,7 @@ if (typeof document !== 'undefined') {
 }
 
 // 性能优化：预连接到 API 服务器
-const apiDomain = import.meta.env.VITE_API_BASE_URL
+const apiDomain = RUNTIME_CONFIG.API_BASE_URL
 if (apiDomain && typeof document !== 'undefined') {
   const link = document.createElement('link')
   link.rel = 'preconnect'

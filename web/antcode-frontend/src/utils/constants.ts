@@ -1,12 +1,13 @@
 import { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE } from '@/config/app'
+import { RUNTIME_CONFIG } from '@/config/runtime'
 
 // API 相关常量
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-export const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8000'
+export const API_BASE_URL = RUNTIME_CONFIG.API_BASE_URL
+export const WS_BASE_URL = RUNTIME_CONFIG.WS_BASE_URL
 
 // 应用配置
 export { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE }
-export const APP_VERSION = import.meta.env.VITE_APP_VERSION || '1.0.0'
+export const APP_VERSION = RUNTIME_CONFIG.APP_VERSION
 
 // 项目类型
 export const PROJECT_TYPES = {

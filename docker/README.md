@@ -79,6 +79,21 @@ docker-compose up -d --build
 
 ---
 
+### 前端运行时配置（环境变量注入）
+
+`antcode-web` 在容器启动时会读取以下环境变量动态生成 `env-config.js`，不再依赖在构建阶段写死配置：
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `API_BASE_URL` | 后端 API 根地址 | `http://antcode-api:8000` |
+| `WS_BASE_URL` | WebSocket 根地址 | `ws://antcode-api:8000` |
+| `APP_TITLE` | 页面标题/品牌文案 | `AntCode Task Platform` |
+| `APP_VERSION` | 显示用版本号 | `1.0.0` |
+
+在 `docker-compose.yml` 中，这些变量会自动引用仓库根目录 `.env` 里的 `VITE_*` 配置，也可以通过 `docker compose` 命令的 `-e` 或 CI/CD Secrets 单独覆盖。
+
+---
+
 ### GitHub Actions 自动构建镜像
 
 仓库内新增 `.github/workflows/docker-images.yml`，在 push、打 tag 或手动触发时会：

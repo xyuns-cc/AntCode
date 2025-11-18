@@ -98,16 +98,25 @@ ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
 RUN npm run build
 
 # ================== 前端: 运行时 ==================
-FROM nginx:1.27-alpine AS frontend-runtime
+FROM node:20-alpine AS frontend-runtime
 
-RUN apk add --no-cache curl
+ENV NODE_ENV=production \
+    APP_DIR=/opt/app
 
-COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=frontend-builder /frontend/dist /usr/share/nginx/html
+WORKDIR /opt/app
 
-EXPOSE 80
+RUN apk add --no-cache curl && \
+    npm install -g serve
+
+COPY --from=frontend-builder /frontend/dist ./
+COPY docker/frontend-entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 4173
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://127.0.0.1/healthz || exit 1
+    CMD curl -f http://127.0.0.1:4173/ || exit 1
 
-CMD ["nginx", "-g", "daemon off;"]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["serve", "-s", ".", "-l", "4173"]
