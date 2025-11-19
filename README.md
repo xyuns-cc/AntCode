@@ -88,14 +88,71 @@ npm run dev
 
 ## 🐳 Docker 部署
 
-使用 Docker Compose 快速部署：
+### 方式 1：使用脚本快速部署（推荐）
+
+```bash
+cd docker
+chmod +x deploy.sh
+./deploy.sh
+```
+
+交互式菜单包含：
+- 🚀 快速启动（前端 + 后端）
+- 🏗️ 分别构建前后端镜像
+- 🔧 多种部署配置（SQLite/MySQL/PostgreSQL + Redis）
+- 📊 查看服务状态和日志
+- 🔄 重启和管理服务
+
+### 方式 2：使用 Docker Compose
+
+**快速启动（前后端分离）：**
 
 ```bash
 cd docker
 docker compose up -d
 ```
 
-详细配置请参考 [docker/README.md](docker/README.md)
+**分别启动前端和后端：**
+
+```bash
+# 仅启动后端
+docker compose up -d antcode-backend
+
+# 仅启动前端
+docker compose up -d antcode-frontend
+
+# 启动完整服务（含数据库和 Redis）
+docker compose up -d
+```
+
+**构建镜像：**
+
+```bash
+# 构建后端镜像（SQLite）
+docker build -f Dockerfile.backend -t antcode-backend:latest .
+
+# 构建后端镜像（MySQL 支持）
+docker build -f Dockerfile.backend -t antcode-backend:latest --build-arg DB_TYPE=mysql .
+
+# 构建前端镜像
+cd web/antcode-frontend
+docker build -t antcode-frontend:latest .
+```
+
+### 镜像说明
+
+- **后端镜像** (`antcode-backend`): 基于 Python 3.11-slim，包含 FastAPI 应用和所有依赖
+- **前端镜像** (`antcode-frontend`): 基于 Node.js 构建 + Nginx 服务，仅包含静态文件
+
+### 部署配置选项
+
+| 配置 | 适用场景 | 镜像大小 |
+|------|---------|---------|
+| SQLite + 内存缓存 | 开发、测试 | ~200MB |
+| SQLite + Redis | 小规模生产 | ~250MB |
+| MySQL/PostgreSQL + Redis | 大规模生产 | ~300MB |
+
+详细配置和故障排查请参考 [docker/README.md](docker/README.md)
 
 ## 📖 配置说明
 
