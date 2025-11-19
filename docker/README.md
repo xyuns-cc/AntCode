@@ -1,374 +1,267 @@
-# Docker 快速部署指南
+# AntCode Docker 部署指南
 
 ## 🚀 快速开始
 
-### 1. 准备配置文件
+### 前置要求
 
-```bash
-# 复制配置示例
-cp .env.example .env
+- Docker >= 20.10
+- Docker Compose >= 2.0
 
-# 编辑配置（可选）
-vim .env
-```
-
-### 2. 启动服务
+### 一键部署
 
 ```bash
 cd docker
-docker-compose up -d
+./deploy.sh
 ```
 
-### 3. 访问应用
+选择 "快速启动" 即可启动前后端服务。
 
-- **API 地址**: http://localhost:8000
-- **API 文档**: http://localhost:8000/docs
-- **默认账号**: admin / admin
-
----
-
-## 📦 使用镜像 vs 本地构建
-
-### 使用预构建镜像（推荐）
-
-```yaml
-# docker-compose.yml（默认配置）
-antcode-api:
-  image: ghcr.io/your-org/antcode-api:latest
-  # build 部分已注释
-```
-
-直接启动：
-```bash
-docker-compose up -d
-```
-
-### 本地构建镜像
-
-```yaml
-# docker-compose.yml
-antcode-api:
-  # image: ghcr.io/your-org/antcode-api:latest  # 注释这行
-  build:
-    context: ..
-    dockerfile: docker/Dockerfile
-    args:
-      DB_TYPE: ${DB_TYPE:-sqlite}
-```
-
-构建并启动：
-```bash
-docker-compose up -d --build
-```
-
----
-
-## 🗄️ 数据库配置
-
-### SQLite（默认，无需额外配置）
-
-**.env 配置**：
-```bash
-DATABASE_URL=sqlite:///./antcode.sqlite3
-```
-
-**docker-compose.yml**：无需修改，默认即可。
-
----
-
-### 启用 MySQL
-
-**1. 修改 .env**：
-```bash
-DB_TYPE=mysql
-DATABASE_URL=mysql+asyncmy://antcode:antcode_password@mysql:3306/antcode
-MYSQL_ROOT_PASSWORD=root_password
-MYSQL_DATABASE=antcode
-MYSQL_USER=antcode
-MYSQL_PASSWORD=antcode_password
-```
-
-**2. 取消注释 docker-compose.yml**：
-- 取消注释 `mysql` 服务（第 41-61 行）
-- 取消注释 `depends_on` 中的 `mysql`（第 27-29 行）
-
-**3. 启动**：
-```bash
-docker-compose up -d --build
-```
-
----
-
-### 启用 PostgreSQL
-
-**1. 修改 .env**：
-```bash
-DB_TYPE=postgres
-DATABASE_URL=postgresql://antcode:antcode_password@postgres:5432/antcode
-POSTGRES_USER=antcode
-POSTGRES_PASSWORD=antcode_password
-POSTGRES_DB=antcode
-```
-
-**2. 取消注释 docker-compose.yml**：
-- 取消注释 `postgres` 服务（第 63-80 行）
-- 取消注释 `depends_on` 中的 `postgres`（第 30-32 行）
-
-**3. 启动**：
-```bash
-docker-compose up -d --build
-```
-
----
-
-### 启用 Redis
-
-**1. 修改 .env**：
-```bash
-REDIS_URL=redis://:redis_password@redis:6379/0
-REDIS_PASSWORD=redis_password
-```
-
-**2. 取消注释 docker-compose.yml**：
-- 取消注释 `redis` 服务（第 82-95 行）
-- 取消注释 `depends_on` 中的 `redis`（第 33-35 行）
-
-**3. 启动**：
-```bash
-docker-compose up -d
-```
-
----
-
-## 🔧 常用命令
-
-### 服务管理
+### 手动部署
 
 ```bash
 # 启动所有服务
-docker-compose up -d
+cd docker
+docker compose up -d
 
-# 停止所有服务
-docker-compose down
-
-# 重启服务
-docker-compose restart
-
-# 查看服务状态
-docker-compose ps
+# 查看状态
+docker compose ps
 
 # 查看日志
-docker-compose logs -f
-
-# 查看特定服务日志
-docker-compose logs -f antcode-api
+docker compose logs -f
 ```
 
-### 数据管理
+## 📦 镜像说明
+
+项目采用前后端分离架构：
+
+- **后端镜像** (`Dockerfile.backend`): 基于 Python 3.11-slim，约 200MB
+- **前端镜像** (`web/antcode-frontend/Dockerfile`): 基于 Nginx，约 30MB
+
+## 🏗️ 构建镜像
+
+### 后端镜像
 
 ```bash
-# 备份数据
-docker-compose exec antcode-api tar -czf /tmp/backup.tar.gz /app/storage /app/data
-docker cp antcode-api:/tmp/backup.tar.gz ./backup-$(date +%Y%m%d).tar.gz
+# SQLite 版本（默认）
+docker build -f Dockerfile.backend -t antcode-backend:latest .
 
-# 清理所有数据（⚠️ 危险操作）
-docker-compose down -v
-rm -rf ./data/*
+# MySQL 版本
+docker build -f Dockerfile.backend --build-arg DB_TYPE=mysql -t antcode-backend:latest .
+
+# PostgreSQL 版本
+docker build -f Dockerfile.backend --build-arg DB_TYPE=postgres -t antcode-backend:latest .
+```
+
+### 前端镜像
+
+```bash
+cd web/antcode-frontend
+docker build -t antcode-frontend:latest .
+```
+
+## 🔧 部署配置
+
+### 方案 1: SQLite + 内存缓存（默认）
+
+适合开发和测试：
+
+```bash
+cd docker
+docker compose up -d
+```
+
+### 方案 2: MySQL/PostgreSQL + Redis
+
+适合生产环境：
+
+1. 编辑 `.env` 文件：
+
+```env
+# MySQL
+DATABASE_URL=mysql://user:pass@mysql:3306/antcode
+DB_TYPE=mysql
+
+# 或 PostgreSQL
+DATABASE_URL=postgresql://user:pass@postgres:5432/antcode
+DB_TYPE=postgres
+
+# Redis
+REDIS_URL=redis://:password@redis:6379/0
+```
+
+2. 编辑 `docker-compose.yml`，取消对应服务的注释
+
+3. 启动服务：
+
+```bash
+cd docker
+docker compose up -d --build
+```
+
+## 🌐 访问地址
+
+- 前端: http://localhost:3000
+- 后端 API: http://localhost:8000
+- API 文档: http://localhost:8000/docs
+- 默认账号: `admin` / `admin`
+
+## 🔍 服务管理
+
+### 基本命令
+
+```bash
+cd docker
+
+# 启动
+docker compose up -d
+
+# 停止
+docker compose down
+
+# 重启
+docker compose restart
+
+# 查看状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f
+```
+
+### 单独管理服务
+
+```bash
+# 仅启动后端
+docker compose up -d antcode-backend
+
+# 仅启动前端
+docker compose up -d antcode-frontend
+
+# 重启后端
+docker compose restart antcode-backend
+```
+
+## 🛠️ 环境变量
+
+主要配置项（`.env` 文件）：
+
+```env
+# 服务端口
+SERVER_PORT=8000
+FRONTEND_PORT=3000
+
+# 数据库
+DATABASE_URL=sqlite:///./data/antcode.db
+DB_TYPE=sqlite
+
+# Redis（可选）
+REDIS_URL=redis://:password@redis:6379/0
+
+# JWT 密钥（必须修改）
+JWT_SECRET_KEY=your-secret-key-here
+```
+
+详细配置请参考 [ENV_CONFIG.md](ENV_CONFIG.md)
+
+## 🐛 故障排查
+
+### 查看日志
+
+```bash
+cd docker
+
+# 所有服务
+docker compose logs -f
+
+# 指定服务
+docker compose logs -f antcode-backend
+docker compose logs -f antcode-frontend
 ```
 
 ### 进入容器
 
 ```bash
-# 进入 API 容器
-docker-compose exec antcode-api bash
+# 后端容器
+docker exec -it antcode-backend /bin/bash
 
-# 进入 MySQL 容器
-docker-compose exec mysql mysql -uantcode -pantcode_password antcode
-
-# 进入 PostgreSQL 容器
-docker-compose exec postgres psql -U antcode -d antcode
-
-# 进入 Redis 容器
-docker-compose exec redis redis-cli -a redis_password
+# 前端容器
+docker exec -it antcode-frontend /bin/sh
 ```
 
----
+### 重新构建
 
-## 📊 健康检查
-
-所有服务都配置了健康检查，查看状态：
-
-```bash
-docker-compose ps
-
-# 输出示例：
-# NAME            STATUS                   PORTS
-# antcode-api     Up (healthy)             127.0.0.1:8000->8000/tcp
-# antcode-mysql   Up (healthy)             3306/tcp
-# antcode-redis   Up (healthy)             6379/tcp
-```
-
----
-
-## 🐛 故障排查
-
-### 问题 1: 服务启动失败
-
-```bash
-# 查看详细日志
-docker-compose logs -f antcode-api
-
-# 检查配置
-docker-compose config
-```
-
-### 问题 2: 数据库连接失败
-
-```bash
-# 检查数据库服务是否健康
-docker-compose ps mysql
-
-# 测试数据库连接
-docker-compose exec mysql mysqladmin ping -h localhost
-```
-
-### 问题 3: 端口被占用
-
-**修改 .env**：
-```bash
-SERVER_PORT=8001  # 改为其他端口
-```
-
-### 问题 4: 权限问题
-
-```bash
-# 修复目录权限
-chmod -R 755 ./data ./storage ./logs
-```
-
----
-
-## 🔐 生产环境安全配置
-
-### 1. 修改默认密码
-
-**.env**：
-```bash
-JWT_SECRET_KEY=$(openssl rand -hex 32)
-MYSQL_ROOT_PASSWORD=$(openssl rand -base64 24)
-MYSQL_PASSWORD=$(openssl rand -base64 24)
-REDIS_PASSWORD=$(openssl rand -base64 24)
-```
-
-### 2. 限制端口暴露
-
-**docker-compose.yml**：
-```yaml
-ports:
-  - "127.0.0.1:8000:8000"  # 只监听本地，不暴露到外网
-```
-
-### 3. 使用 HTTPS
-
-配置反向代理（Nginx/Caddy），在代理层处理 HTTPS。
-
----
-
-## 📝 配置文件说明
-
-### 目录结构
-
-```
-docker/
-├── Dockerfile              # 镜像构建文件
-├── docker-compose.yml      # 服务编排配置
-├── data/                   # 数据持久化目录
-│   ├── mysql/             # MySQL 数据
-│   ├── postgres/          # PostgreSQL 数据
-│   └── redis/             # Redis 数据
-└── README.md              # 本文档
-```
-
-### 数据持久化
-
-所有重要数据都挂载到本地：
-
-- `./data/` - 数据库和 SQLite 文件
-- `../storage/` - 项目文件存储
-- `../logs/` - 应用日志
-
----
-
-## 🎯 推荐配置
-
-| 场景 | 配置 | 说明 |
-|------|------|------|
-| **快速测试** | SQLite | 最简单，开箱即用 |
-| **开发环境** | SQLite + Redis | 性能更好 |
-| **生产环境** | MySQL + Redis | 最佳性能和稳定性 |
-
----
-
-## ✅ 完整示例
-
-### MySQL + Redis 生产配置
-
-**1. .env**：
-```bash
-# 数据库
-DB_TYPE=mysql
-DATABASE_URL=mysql+asyncmy://antcode:SecurePass123@mysql:3306/antcode
-MYSQL_ROOT_PASSWORD=RootPass456
-MYSQL_PASSWORD=SecurePass123
-
-# Redis
-REDIS_URL=redis://:RedisPass789@redis:6379/0
-REDIS_PASSWORD=RedisPass789
-
-# JWT
-JWT_SECRET_KEY=your-very-long-random-secret-key-here
-
-# 服务器
-SERVER_PORT=8000
-LOG_LEVEL=INFO
-```
-
-**2. docker-compose.yml**：
-取消注释 `mysql`、`redis` 服务和 `depends_on`。
-
-**3. 启动**：
 ```bash
 cd docker
-docker-compose up -d --build
+docker compose build --no-cache
+docker compose up -d --force-recreate
 ```
 
-**4. 验证**：
-```bash
-# 检查服务状态
-docker-compose ps
+### 常见问题
 
-# 查看日志
-docker-compose logs -f
+**Q: 后端启动失败**
+- 检查 `.env` 配置
+- 确认数据库连接正确
+- 查看日志：`docker compose logs antcode-backend`
 
-# 测试 API
-curl http://localhost:8000/api/v1/health
-```
+**Q: 前端无法访问后端**
+- 确认后端服务已启动
+- 检查网络连接：`docker network inspect docker_antcode-network`
+- 查看健康检查：`docker compose ps`
 
----
+**Q: 数据丢失**
+- 确认 `volumes` 配置正确
+- 使用命名卷而非绑定挂载
+- 定期备份数据
 
-## 🎉 总结
+## 🔐 生产环境建议
 
-- ✅ 使用 `.env` 统一管理配置
-- ✅ 默认配置即可快速启动
-- ✅ 需要时取消注释即可启用服务
-- ✅ 完整的健康检查和自动重启
-- ✅ 数据持久化到本地目录
+1. **修改默认密码**
+   - JWT_SECRET_KEY
+   - 数据库密码
+   - Redis 密码
 
-**快速开始**：
-```bash
-cp .env.example .env
-cd docker
-docker-compose up -d
-```
+2. **限制端口访问**
+   ```yaml
+   ports:
+     - "127.0.0.1:8000:8000"
+   ```
 
-然后访问 http://localhost:8000 🚀
+3. **配置资源限制**
+   ```yaml
+   deploy:
+     resources:
+       limits:
+         cpus: '2'
+         memory: 2G
+   ```
+
+4. **数据备份**
+   ```bash
+   # 备份存储
+   docker cp antcode-backend:/app/storage ./backup/
+   
+   # 备份数据库
+   docker exec antcode-backend cp /app/data/antcode.db /app/data/backup.db
+   ```
+
+5. **日志轮转**
+   ```yaml
+   logging:
+     driver: "json-file"
+     options:
+       max-size: "10m"
+       max-file: "3"
+   ```
+
+## 📚 相关文档
+
+- [ENV_CONFIG.md](ENV_CONFIG.md) - 环境变量详细说明
+- [../README.md](../README.md) - 项目主文档
+- [../docs/](../docs/) - API 和系统文档
+
+## 💬 获取帮助
+
+遇到问题？
+1. 查看本文档的故障排查部分
+2. 检查日志：`docker compose logs -f`
+3. 提交 GitHub Issue

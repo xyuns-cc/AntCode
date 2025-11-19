@@ -1,5 +1,5 @@
 # =====================================================
-# AntCode API - 多阶段构建 Dockerfile
+# AntCode Backend - 多阶段构建 Dockerfile
 # =====================================================
 
 # ================== 阶段 1: 基础镜像 ==================
@@ -64,6 +64,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # 复制应用代码
 COPY src ./src
 COPY main.py ./
+COPY migrations ./migrations
 
 # 创建必要的目录
 RUN mkdir -p \
@@ -72,8 +73,8 @@ RUN mkdir -p \
     /app/storage/projects/executions \
     /app/storage/venvs/shared \
     /app/storage/mise/cache \
-    /app/logs/tasks \
-    /app/migrations
+    /app/storage/executions \
+    /app/logs/tasks
 
 # 设置目录权限
 RUN chmod -R 755 /app/storage /app/logs
@@ -87,3 +88,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # 启动命令
 CMD ["python", "main.py"]
+
