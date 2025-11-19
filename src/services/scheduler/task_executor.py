@@ -17,7 +17,7 @@ from src.services.logs.task_log_service import task_log_service
 from src.services.projects.relation_service import relation_service
 from src.services.envs.venv_service import project_venv_service
 from src.models import Project
-from src.services.scheduler.redis_task_service import redis_task_service
+from src.services.scheduler.spider_dispatcher import spider_task_dispatcher
 from src.utils.memory_optimizer import memory_optimized, StreamingBuffer
 
 
@@ -87,7 +87,7 @@ class TaskExecutor:
             environment_vars = None,
             timeout = 3600
     ):
-        """执行规则项目 - 提交任务到Redis"""
+        """执行规则项目 - 提交任务到调度网关"""
         try:
             # 获取规则详情
             rule_detail = await project.rule_detail
@@ -97,19 +97,13 @@ class TaskExecutor:
                     "error": "规则项目详情不存在"
                 }
 
-            # 连接Redis
-            await redis_task_service.connect()
-
             # 提交任务
-            result = await redis_task_service.submit_rule_task(
+            result = await spider_task_dispatcher.submit_rule_task(
                 project=project,
                 rule_detail=rule_detail,
                 execution_id=execution_id,
                 params=params
             )
-
-            # 断开Redis连接
-            await redis_task_service.disconnect()
 
             return result
 
