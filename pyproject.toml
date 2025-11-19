@@ -35,6 +35,8 @@ dependencies = [
     "ujson>=5.9.0",
     "websockets>=12.0",
     "scrapy>=2.13.3",
+    "DrissionPage>=4.0.0",
+    "curl-cffi>=0.6.0",
 ]
 
 
