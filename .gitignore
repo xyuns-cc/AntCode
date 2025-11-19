@@ -108,3 +108,6 @@ docs/
 file-viewer.html
 AGENTS.md
 CLAUDE.md
+demo.py
+dummy_task.py
+DOCS_CLEANUP_SUMMARY.md
