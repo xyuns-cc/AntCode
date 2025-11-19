@@ -9,6 +9,7 @@ from .enums import (
     TaskStatus, TaskType, ScheduleType  # 新增调度器枚举
 )
 from .project import Project, ProjectFile, ProjectRule, ProjectCode
+from .monitoring import NodePerformanceHistory, SpiderMetricsHistory, NodeEvent
 from .scheduler import ScheduledTask, TaskExecution  # 新增调度器模型
 from .user import User
 from .envs import Interpreter, Venv, ProjectVenvBinding
@@ -41,5 +42,10 @@ __all__ = [
     # 调度器模型
     "ScheduledTask",
     "TaskExecution",
+
+    # 监控模型
+    "NodePerformanceHistory",
+    "SpiderMetricsHistory",
+    "NodeEvent",
     
 ]

@@ -16,7 +16,8 @@ from src.models.enums import TaskStatus, ScheduleType, ProjectType
 from src.models.scheduler import ScheduledTask, TaskExecution
 from src.services.logs.task_log_service import task_log_service  # 新增
 from src.services.projects.relation_service import relation_service  # 新增
-from src.services.scheduler.redis_task_service import redis_task_service  # 新增
+from src.services.monitoring import monitoring_service
+from src.services.scheduler.spider_dispatcher import spider_task_dispatcher
 from src.services.scheduler.task_executor import TaskExecutor
 
 
@@ -55,6 +56,9 @@ class SchedulerService:
             
             # 添加定期清理工作目录的任务
             await self._add_cleanup_job()
+
+            # 注册监控相关的周期任务
+            await self._add_monitoring_jobs()
 
         except Exception as e:
             logger.error(f"启动调度器失败: {e}")
@@ -393,7 +397,10 @@ class SchedulerService:
             if not task:
                 return False
             
-            await self.pause_task(task_id)
+            try:
+                await self.pause_task(task_id)
+            except ValueError:
+                return False
             return True
         except Exception as e:
             logger.error(f"暂停任务失败: {e}")
@@ -415,7 +422,10 @@ class SchedulerService:
             if not task:
                 return False
             
-            await self.resume_task(task_id)
+            try:
+                await self.resume_task(task_id)
+            except ValueError:
+                return False
             return True
         except Exception as e:
             logger.error(f"恢复任务失败: {e}")
@@ -530,6 +540,9 @@ class SchedulerService:
             await task.save()
 
             logger.info(f"任务 {task_id} 已暂停")
+        except JobLookupError:
+            logger.warning(f"任务 {task_id} 在调度器中不存在，可能已执行完成或未激活，无法暂停")
+            raise ValueError("任务不存在或已执行完成，无法暂停")
         except Exception as e:
             logger.error(f"暂停任务失败: {e}")
             raise
@@ -546,6 +559,9 @@ class SchedulerService:
             await task.save()
 
             logger.info(f"任务 {task_id} 已恢复")
+        except JobLookupError:
+            logger.warning(f"任务 {task_id} 在调度器中不存在，可能已执行完成或未激活，无法恢复")
+            raise ValueError("任务不存在或已执行完成，无法恢复")
         except Exception as e:
             logger.error(f"恢复任务失败: {e}")
             raise
@@ -818,16 +834,13 @@ class SchedulerService:
             rule_detail,
             execution
     ):
-        """执行规则任务 - 提交到Redis"""
+        """执行规则任务 - 根据配置选择执行器"""
         try:
             if not rule_detail:
                 return {
                     "success": False,
                     "error": "规则项目详情不存在"
                 }
-
-            # 连接Redis
-            await redis_task_service.connect()
 
             # 准备参数
             params = task.execution_params or {}
@@ -851,7 +864,7 @@ class SchedulerService:
                     if "{}" in original_url:
                         rule_detail.target_url = original_url.format(page)
 
-                    result = await redis_task_service.submit_rule_task(
+                    result = await spider_task_dispatcher.submit_rule_task(
                         project=project,
                         rule_detail=rule_detail,
                         execution_id=f"{execution.execution_id}_page_{page}",
@@ -866,40 +879,34 @@ class SchedulerService:
                     await self._log_execution(
                         execution,
                         "INFO",
-                        f"提交页面 {page} 到Redis: {result.get('task_id')}"
+                        f"提交页面 {page} 到{result.get('queue', 'local:scrapy')}: {result.get('task_id')}"
                     )
-
-                # 断开Redis
-                await redis_task_service.disconnect()
 
                 return {
                     "success": True,
-                    "message": f"成功提交 {len(tasks_submitted)} 个任务到Redis",
+                    "message": f"成功提交 {len(tasks_submitted)} 个任务到执行器",
                     "task_ids": tasks_submitted,
                     "total_pages": len(tasks_submitted)
                 }
             else:
                 # 单任务提交
-                result = await redis_task_service.submit_rule_task(
+                result = await spider_task_dispatcher.submit_rule_task(
                     project=project,
                     rule_detail=rule_detail,
                     execution_id=execution.execution_id,
                     params=params
                 )
 
-                # 断开Redis
-                await redis_task_service.disconnect()
-
                 if result["success"]:
                     await self._log_execution(
                         execution,
                         "INFO",
-                        f"任务已提交到Redis: {result.get('task_id')}"
+                        f"任务已提交到{result.get('queue', 'local:scrapy')}: {result.get('task_id')}"
                     )
 
                     return {
                         "success": True,
-                        "message": f"任务已提交到Redis队列",
+                        "message": f"任务已提交到{result.get('queue', '本地执行器')}",
                         "task_id": result.get("task_id"),
                         "queue": result.get("queue")
                     }
@@ -1033,6 +1040,49 @@ class SchedulerService:
             logger.info("✅ 工作目录清理完成")
         except Exception as e:
             logger.error(f"清理工作目录失败: {e}")
+
+    async def _add_monitoring_jobs(self):
+        """注册监控数据处理任务"""
+        if not settings.MONITORING_ENABLED:
+            logger.info("监控功能未启用，跳过监控任务注册")
+            return
+
+        try:
+            self.scheduler.add_job(
+                func=self._process_monitoring_stream,
+                trigger=IntervalTrigger(seconds=settings.MONITOR_STREAM_INTERVAL),
+                id="monitoring_process_stream",
+                name="监控数据流处理",
+                replace_existing=True,
+            )
+
+            self.scheduler.add_job(
+                func=self._cleanup_monitoring_data,
+                trigger=CronTrigger(hour=3, minute=30),
+                id="monitoring_cleanup_data",
+                name="监控历史数据清理",
+                replace_existing=True,
+            )
+            logger.info("✅ 已注册监控数据处理任务")
+        except Exception as e:
+            logger.error(f"注册监控任务失败: {e}")
+
+    async def _process_monitoring_stream(self):
+        """处理监控数据流"""
+        try:
+            processed = await monitoring_service.process_stream()
+            if processed:
+                logger.debug("处理监控流数据 %s 条", processed)
+        except Exception as e:
+            logger.error(f"处理监控数据流失败: {e}")
+
+    async def _cleanup_monitoring_data(self):
+        """清理过期的监控历史数据"""
+        try:
+            await monitoring_service.cleanup_old_data()
+            logger.info("监控历史数据清理完成")
+        except Exception as e:
+            logger.error(f"清理监控历史数据失败: {e}")
 
 
 # 创建全局调度器服务实例

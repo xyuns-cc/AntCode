@@ -199,6 +199,22 @@ class Settings(BaseSettings):
     def USERS_USE_REDIS_CACHE(self):
         return self.CACHE_USE_REDIS
 
+    # 监控配置
+    MONITORING_ENABLED: bool = True
+    MONITOR_STATUS_TTL: int = 300
+    MONITOR_HISTORY_TTL: int = 3600
+    MONITOR_CLUSTER_TTL: int = 300
+    MONITOR_STREAM_KEY: str = "monitor:stream:metrics"
+    MONITOR_STREAM_LAST_ID_KEY: str = "monitor:stream:last_id"
+    MONITOR_STREAM_BATCH_SIZE: int = 200
+    MONITOR_STREAM_INTERVAL: int = 60
+    MONITOR_HISTORY_KEEP_DAYS: int = 30
+    MONITOR_STREAM_MAXLEN: int = 10000
+    MONITOR_STATUS_KEY_TPL: str = "monitor:node:{node_id}:status"
+    MONITOR_SPIDER_KEY_TPL: str = "monitor:node:{node_id}:spider"
+    MONITOR_HISTORY_KEY_TPL: str = "monitor:node:{node_id}:history"
+    MONITOR_CLUSTER_SET_KEY: str = "monitor:cluster:nodes"
+
     # 数据库连接池配置
     DATABASE_MIN_CONNECTIONS: int = 5
     DATABASE_MAX_CONNECTIONS: int = 20
