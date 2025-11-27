@@ -1,4 +1,3 @@
-# src/services/scheduler_service.py (更新版本)
 """任务调度服务"""
 import asyncio
 import uuid
@@ -14,11 +13,13 @@ from loguru import logger
 from src.core.config import settings
 from src.models.enums import TaskStatus, ScheduleType, ProjectType
 from src.models.scheduler import ScheduledTask, TaskExecution
-from src.services.logs.task_log_service import task_log_service  # 新增
-from src.services.projects.relation_service import relation_service  # 新增
+from src.models.user import User
+from src.services.logs.task_log_service import task_log_service
 from src.services.monitoring import monitoring_service
+from src.services.projects.relation_service import relation_service
 from src.services.scheduler.spider_dispatcher import spider_task_dispatcher
 from src.services.scheduler.task_executor import TaskExecutor
+from src.services.users.user_service import user_service
 
 
 class SchedulerService:
@@ -49,7 +50,7 @@ class SchedulerService:
         """启动调度器"""
         try:
             self.scheduler.start()
-            logger.info("✅ 任务调度器已启动")
+            logger.info("任务调度器已启动")
 
             # 加载已存在的活跃任务
             await self._load_active_tasks()
@@ -94,15 +95,10 @@ class SchedulerService:
         page = 1,
         size = 20
     ):
-        """获取用户任务列表（包含创建者信息）"""
+        """获取用户任务列表（优化版本）"""
         try:
-            from src.services.users.user_service import user_service
-            
             # 如果user_id为None，表示管理员查看所有任务
-            if user_id is None:
-                query = ScheduledTask.all()
-            else:
-                query = ScheduledTask.filter(user_id=user_id)
+            query = ScheduledTask.all() if user_id is None else ScheduledTask.filter(user_id=user_id)
             
             if status is not None:
                 query = query.filter(status=status)
@@ -111,14 +107,14 @@ class SchedulerService:
             
             total = await query.count()
             offset = (page - 1) * size
-            tasks = await query.offset(offset).limit(size).order_by('-created_at')
+            tasks = await query.order_by('-created_at').offset(offset).limit(size)
             
-            # 获取创建者用户名信息
-            user_ids = list(set([t.user_id for t in tasks]))
+            # 批量获取创建者用户名
+            user_ids = list({t.user_id for t in tasks if t.user_id})
             users_map = {}
             if user_ids:
-                users = await user_service.get_users_by_ids(user_ids)
-                users_map = {user.id: user.username for user in users}
+                users = await User.filter(id__in=user_ids).only('id', 'username')
+                users_map = {u.id: u.username for u in users}
             
             # 为任务添加创建者用户名
             for task in tasks:
@@ -138,8 +134,6 @@ class SchedulerService:
 
     async def get_task_by_id(self, task_id, user_id):
         """根据ID获取任务"""
-        from src.services.users.user_service import user_service
-        
         try:
             # 检查用户是否为管理员
             is_admin = await self.verify_admin_permission(user_id)
@@ -355,7 +349,6 @@ class SchedulerService:
     async def verify_admin_permission(self, user_id):
         """验证管理员权限"""
         try:
-            from src.models.user import User
             user = await User.get_or_none(id=user_id)
             return user and user.is_admin
         except Exception as e:
@@ -511,7 +504,7 @@ class SchedulerService:
                 replace_existing=True
             )
 
-            logger.info(f"✅ 任务 {task.name} 已添加到调度器")
+            logger.info(f"任务 {task.name} 已添加到调度器")
 
         except Exception as e:
             logger.error(f"添加任务失败: {e}")
@@ -648,7 +641,7 @@ class SchedulerService:
             # 记录并发状态
             current_running = self.task_execution_stats["currently_running"]
             max_concurrent = settings.MAX_CONCURRENT_TASKS
-            logger.info(f"🚀 开始执行任务 {task.name} (当前并发: {current_running}/{max_concurrent})")
+            logger.info(f"开始执行任务 {task.name} (当前并发: {current_running}/{max_concurrent})")
 
             # 生成日志文件路径
             log_paths = task_log_service.generate_log_paths(execution_id, task.name)
@@ -825,7 +818,7 @@ class SchedulerService:
             # 记录任务完成状态
             current_running = self.task_execution_stats["currently_running"]
             max_concurrent = settings.MAX_CONCURRENT_TASKS
-            logger.info(f"✅ 任务执行完成 (当前并发: {current_running}/{max_concurrent})")
+            logger.info(f"任务执行完成 (当前并发: {current_running}/{max_concurrent})")
 
     async def _execute_rule_task(
             self,
@@ -1026,7 +1019,7 @@ class SchedulerService:
                 name="清理执行工作目录",
                 replace_existing=True
             )
-            logger.info("✅ 已添加定期清理工作目录任务（每天凌晨2点执行）")
+            logger.info("已添加定期清理工作目录任务（每天凌晨2点执行）")
         except Exception as e:
             logger.error(f"添加清理任务失败: {e}")
 
@@ -1037,7 +1030,7 @@ class SchedulerService:
             await self.executor.cleanup_old_workspaces(
                 max_age_hours=settings.CLEANUP_WORKSPACE_MAX_AGE_HOURS
             )
-            logger.info("✅ 工作目录清理完成")
+            logger.info("工作目录清理完成")
         except Exception as e:
             logger.error(f"清理工作目录失败: {e}")
 
@@ -1054,6 +1047,9 @@ class SchedulerService:
                 id="monitoring_process_stream",
                 name="监控数据流处理",
                 replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=120
             )
 
             self.scheduler.add_job(
@@ -1063,7 +1059,7 @@ class SchedulerService:
                 name="监控历史数据清理",
                 replace_existing=True,
             )
-            logger.info("✅ 已注册监控数据处理任务")
+            logger.info("已注册监控数据处理任务")
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}")
 
@@ -1072,7 +1068,7 @@ class SchedulerService:
         try:
             processed = await monitoring_service.process_stream()
             if processed:
-                logger.debug("处理监控流数据 %s 条", processed)
+                logger.debug("处理监控流数据 {} 条", processed)
         except Exception as e:
             logger.error(f"处理监控数据流失败: {e}")
 

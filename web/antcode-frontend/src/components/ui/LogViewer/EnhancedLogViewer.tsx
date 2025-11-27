@@ -211,7 +211,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
           addLogMessage({
             id: generateUniqueId(),
             type: 'error',
-            content: `❗ WebSocket连接错误: ${error instanceof Error ? error.message : String(error)}`,
+            content: `[错误] WebSocket连接错误: ${error instanceof Error ? error.message : String(error)}`,
             timestamp: new Date().toISOString()
           })
         }
@@ -223,7 +223,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         addLogMessage({
           id: generateUniqueId(),
           type: 'success',
-          content: '✅ WebSocket连接已建立',
+          content: '[成功] WebSocket连接已建立',
           timestamp: new Date().toISOString()
         })
       } else {
@@ -253,7 +253,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
-      content: '🔄 尝试备用WebSocket连接...',
+      content: '[重试] 尝试备用WebSocket连接...',
       timestamp: new Date().toISOString()
     })
 
@@ -270,7 +270,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         addLogMessage({
           id: generateUniqueId(),
           type: 'success',
-          content: '✅ 备用WebSocket连接已建立',
+          content: '[成功] 备用WebSocket连接已建立',
           timestamp: new Date().toISOString()
         })
       }
@@ -316,7 +316,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         addLogMessage({
           id: generateUniqueId(),
           type: 'error',
-          content: '❌ 备用WebSocket连接也失败了',
+          content: '[失败] 备用WebSocket连接也失败了',
           timestamp: new Date().toISOString()
         })
       }
@@ -328,7 +328,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         addLogMessage({
           id: generateUniqueId(),
           type: 'warning',
-          content: `🔌 备用WebSocket连接已关闭 (${event.code})`,
+          content: `[断开] 备用WebSocket连接已关闭 (${event.code})`,
           timestamp: new Date().toISOString()
         })
       }
@@ -362,7 +362,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
-      content: '🔌 手动断开连接',
+      content: '[断开] 手动断开连接',
       timestamp: new Date().toISOString()
     })
   }, [ws, addLogMessage])
@@ -373,7 +373,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
-      content: '🗑️ 日志已清除',
+      content: '[清除] 日志已清除',
       timestamp: new Date().toISOString()
     })
   }, [addLogMessage])
@@ -639,7 +639,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
-      content: '🔍 开始连接测试...',
+      content: '[测试] 开始连接测试...',
       timestamp: new Date().toISOString()
     })
 
@@ -709,7 +709,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
-      content: '✅ 连接测试完成',
+      content: '[完成] 连接测试完成',
       timestamp: new Date().toISOString()
     })
   }, [executionId, addLogMessage])

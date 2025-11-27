@@ -1,8 +1,4 @@
-"""
-任务日志管理服务
-
-负责任务执行日志的创建、写入、读取和管理
-"""
+"""任务日志管理服务"""
 
 import asyncio
 import os
@@ -27,9 +23,9 @@ class TaskLogService:
         """确保日志目录存在"""
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"✅ 任务日志目录已准备: {self.log_dir}")
+            logger.info(f"任务日志目录已准备: {self.log_dir}")
         except Exception as e:
-            logger.error(f"❌ 创建任务日志目录失败: {e}")
+            logger.error(f"创建任务日志目录失败: {e}")
             raise
     
     def generate_log_paths(self, execution_id, task_name):
@@ -252,7 +248,7 @@ class TaskLogService:
                             pass  # 目录不为空，跳过
             
             await asyncio.get_event_loop().run_in_executor(None, cleanup_sync)
-            logger.info(f"✅ 清理了 {deleted_count} 个过期日志文件")
+            logger.info(f"清理了 {deleted_count} 个过期日志文件")
             
         except Exception as e:
             logger.error(f"清理过期日志失败: {e}")

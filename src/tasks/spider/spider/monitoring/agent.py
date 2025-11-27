@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field, asdict
@@ -8,7 +9,7 @@ from typing import Any, Dict, Optional
 import psutil
 import redis.asyncio as redis
 
-from .config import MonitoringConfig
+from src.tasks.spider.spider.monitoring.config import MonitoringConfig
 
 
 @dataclass
@@ -48,7 +49,14 @@ class MonitoringAgent:
 
     def __init__(self, config: Optional[MonitoringConfig] = None):
         self.config = config or MonitoringConfig.load()
-        self.redis = redis.from_url(self.config.redis_url)
+        self.pool = redis.ConnectionPool.from_url(
+            self.config.redis_url,
+            max_connections=10,
+            socket_timeout=10,
+            socket_connect_timeout=10,
+            socket_keepalive=True
+        )
+        self.redis = redis.Redis(connection_pool=self.pool)
         self.node_id = self.config.node_id
         self.report_interval = self.config.report_interval
         self._last_network_counters = None

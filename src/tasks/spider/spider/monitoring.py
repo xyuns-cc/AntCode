@@ -59,9 +59,16 @@ class MonitoringAgent:
 
     def __init__(self, config):
         self.config = config
-        self.redis = redis.from_url(config.redis_url, decode_responses=False)
+        self.pool = redis.ConnectionPool.from_url(
+            config.redis_url,
+            max_connections=10,
+            socket_timeout=10,
+            socket_connect_timeout=10,
+            socket_keepalive=True,
+            decode_responses=False
+        )
+        self.redis = redis.Redis(connection_pool=self.pool)
         self._last_net = psutil.net_io_counters()
-        # 预热 CPU 统计，避免首次返回 0
         psutil.cpu_percent(interval=None)
 
     def _status_key(self):

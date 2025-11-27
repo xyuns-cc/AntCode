@@ -204,7 +204,7 @@ const ProjectList: React.FC = () => {
         total: response.total || 0
       })
     } catch (error) {
-      console.error('❌ Error fetching projects:', error)
+      console.error('[Error] Error fetching projects:', error)
       setProjectList([])
       setProjects([])
       setTablePagination(prev => ({

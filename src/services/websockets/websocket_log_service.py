@@ -1,8 +1,4 @@
-"""
-WebSocket日志服务
-负责处理WebSocket日志推送的业务逻辑
-"""
-
+"""WebSocket日志服务"""
 import asyncio
 import os
 from datetime import datetime, timezone
@@ -14,6 +10,8 @@ from tortoise.exceptions import DoesNotExist
 from src.core.auth import verify_token
 from src.models.scheduler import TaskExecution
 from src.services.logs.task_log_service import task_log_service
+from src.services.projects.relation_service import relation_service
+from src.services.users.user_service import user_service
 from src.services.websockets.websocket_connection_manager import websocket_manager
 
 
@@ -46,13 +44,13 @@ class WebSocketLogService:
             await self._handle_client_messages(websocket, execution_id)
             
         except HTTPException as e:
-            logger.error(f"❌ WebSocket连接认证失败: {e.detail}")
+            logger.error(f"WebSocket连接认证失败: {e.detail}")
             await websocket.close(code=4003, reason=e.detail)
         except DoesNotExist:
-            logger.error(f"❌ 执行记录不存在: {execution_id}")
+            logger.error(f"执行记录不存在: {execution_id}")
             await websocket.close(code=4004, reason="执行记录不存在")
         except Exception as e:
-            logger.error(f"❌ WebSocket连接处理失败: {e}")
+            logger.error(f"WebSocket连接处理失败: {e}")
             await websocket.close(code=4000, reason="服务器内部错误")
         finally:
             # 清理连接
@@ -66,31 +64,29 @@ class WebSocketLogService:
             execution = await TaskExecution.get(execution_id=execution_id)
             
             # 通过关联服务验证权限
-            from src.services.projects.relation_service import relation_service
             task = await relation_service.get_task_by_id(execution.task_id)
             
             if not task:
                 raise HTTPException(status_code=404, detail="任务不存在")
             
             # 检查用户是否为管理员
-            from src.services.users.user_service import user_service
             user = await user_service.get_user_by_id(user_id)
             
             # 管理员可以访问所有执行记录，普通用户只能访问自己的
             if user and user.is_admin:
-                logger.info(f"✅ 管理员用户 {user.username} 访问执行记录 {execution_id}")
+                logger.info(f"管理员用户 {user.username} 访问执行记录 {execution_id}")
                 return execution
             elif task.user_id == user_id:
-                logger.info(f"✅ 用户访问自己的执行记录 {execution_id}")
+                logger.info(f"用户访问自己的执行记录 {execution_id}")
                 return execution
             else:
-                logger.warning(f"❌ 用户 {user_id} 无权访问执行记录 {execution_id}，任务创建者: {task.user_id}")
+                logger.warning(f"用户 {user_id} 无权访问执行记录 {execution_id}，任务创建者: {task.user_id}")
                 raise HTTPException(status_code=403, detail="无权访问此执行记录")
             
         except DoesNotExist:
             raise
         except Exception as e:
-            logger.error(f"❌ 验证执行记录权限失败: {e}")
+            logger.error(f"验证执行记录权限失败: {e}")
             raise HTTPException(status_code=500, detail="权限验证失败")
     
     async def _send_historical_logs(self, execution_id):
@@ -137,7 +133,7 @@ class WebSocketLogService:
             logger.info(f"📤 发送历史日志完成: {execution_id}, 共 {sent_lines} 行")
             
         except Exception as e:
-            logger.error(f"❌ 发送历史日志失败: {e}")
+            logger.error(f"发送历史日志失败: {e}")
             await websocket_manager.send_no_historical_logs(execution_id)
     
     async def _start_log_monitoring(self, execution_id, execution):
@@ -152,10 +148,10 @@ class WebSocketLogService:
             )
             self.file_watchers[execution_id] = monitor_task
             
-            logger.info(f"🔍 启动日志监控: {execution_id}")
+            logger.info(f"启动日志监控: {execution_id}")
             
         except Exception as e:
-            logger.error(f"❌ 启动日志监控失败: {e}")
+            logger.error(f"启动日志监控失败: {e}")
     
     async def _stop_log_monitoring(self, execution_id):
         """停止日志文件监控"""
@@ -170,7 +166,7 @@ class WebSocketLogService:
             logger.info(f"⏹️ 停止日志监控: {execution_id}")
             
         except Exception as e:
-            logger.error(f"❌ 停止日志监控失败: {e}")
+            logger.error(f"停止日志监控失败: {e}")
     
     async def _monitor_log_files(self, execution_id, execution):
         """监控日志文件变化"""
@@ -197,9 +193,9 @@ class WebSocketLogService:
                 await asyncio.sleep(1)
                 
         except asyncio.CancelledError:
-            logger.info(f"📊 日志监控任务已取消: {execution_id}")
+            logger.info(f"日志监控任务已取消: {execution_id}")
         except Exception as e:
-            logger.error(f"❌ 日志监控异常: {e}")
+            logger.error(f"日志监控异常: {e}")
     
     async def _check_log_file_changes(self, execution_id, file_path, log_type, last_pos):
         """检查日志文件变化并发送新内容"""
@@ -225,7 +221,7 @@ class WebSocketLogService:
             return last_pos
             
         except Exception as e:
-            logger.error(f"❌ 检查日志文件变化失败: {e}")
+            logger.error(f"检查日志文件变化失败: {e}")
             return last_pos
     
     async def _read_file_from_position(self, file_path, position):
@@ -239,7 +235,7 @@ class WebSocketLogService:
             return await asyncio.get_event_loop().run_in_executor(None, read_sync)
             
         except Exception as e:
-            logger.error(f"❌ 读取文件失败: {e}")
+            logger.error(f"读取文件失败: {e}")
             return ""
     
     async def _handle_client_messages(self, websocket, execution_id):
@@ -255,13 +251,13 @@ class WebSocketLogService:
                     # 状态码 1000 是正常关闭，不记录为错误
                     error_str = str(e)
                     if '1000' in error_str or 'Component unmount' in error_str:
-                        logger.debug(f"✅ 客户端正常断开连接: {e}")
+                        logger.debug(f"客户端正常断开连接: {e}")
                     else:
-                        logger.error(f"❌ 处理客户端消息失败: {e}")
+                        logger.error(f"处理客户端消息失败: {e}")
                     break
                     
         except Exception as e:
-            logger.error(f"❌ 客户端消息循环异常: {e}")
+            logger.error(f"客户端消息循环异常: {e}")
     
     async def _process_client_message(self, execution_id, message):
         """处理具体的客户端消息"""
@@ -284,7 +280,7 @@ class WebSocketLogService:
             })
             
         else:
-            logger.warning(f"⚠️ 未知的客户端消息类型: {message_type}")
+            logger.warning(f"未知的客户端消息类型: {message_type}")
 
 
 # 创建全局服务实例

@@ -1,8 +1,4 @@
-"""
-统一缓存系统
-支持Redis和内存缓存的统一配置和管理
-"""
-
+"""统一缓存系统"""
 import asyncio
 import time
 import weakref
@@ -13,35 +9,25 @@ import ujson
 from loguru import logger
 
 from src.core.config import settings
+from src.utils.redis_pool import get_redis_client
 
 
 @dataclass
 class CacheConfig:
-    """统一缓存配置"""
-    # 缓存类型配置
+    """缓存配置"""
     use_redis: bool = True
-    
-    # 缓存时间配置
-    default_ttl: int = 300  # 默认5分钟
-    max_ttl: int = 3600    # 最大1小时
-    min_ttl: int = 10      # 最小10秒
-    
-    # 内存缓存配置
-    memory_max_size: int = 1000  # 内存缓存最大条目数
-    memory_cleanup_threshold: float = 0.9  # 清理阈值
-    
-    # Redis配置
+    default_ttl: int = 300
+    max_ttl: int = 3600
+    min_ttl: int = 10
+    memory_max_size: int = 1000
+    memory_cleanup_threshold: float = 0.9
     redis_key_prefix: str = "cache:"
     redis_connection_timeout: int = 5
-    
-    # 性能配置
-    enable_compression: bool = False  # 大对象压缩
-    compression_threshold: int = 1024  # 压缩阈值(字节)
+    enable_compression: bool = False
+    compression_threshold: int = 1024
     
     @classmethod
-    def from_settings(cls, prefix = ""):
-        """从settings创建配置"""
-        # 使用统一的缓存配置
+    def from_settings(cls, prefix=""):
         return cls(
             use_redis=getattr(settings, 'CACHE_USE_REDIS', False),
             default_ttl=getattr(settings, 'CACHE_DEFAULT_TTL', 300),
@@ -52,14 +38,13 @@ class CacheConfig:
 class UnifiedCache:
     """统一缓存管理器"""
     
-    def __init__(self, config, name = "default"):
+    def __init__(self, config, name="default"):
         self.config = config
         self.name = name
         self._redis_client = None
         self._memory_cache = {}
         self._weak_refs = {}
         
-        # 统计信息
         self._stats = {
             "hits": 0,
             "misses": 0,
@@ -68,31 +53,27 @@ class UnifiedCache:
             "errors": 0
         }
         
-        logger.info(f"初始化缓存 '{name}': Redis={config.use_redis}, TTL={config.default_ttl}s")
+        logger.info(f"缓存 '{name}' 已初始化: Redis={config.use_redis}, TTL={config.default_ttl}s")
     
     async def _get_redis_client(self):
-        """获取Redis客户端（仅在配置使用Redis时）"""
         if not self.config.use_redis:
             return None
             
         if not self._redis_client:
             try:
-                from src.utils.redis_pool import get_redis_client
                 self._redis_client = await asyncio.wait_for(
                     get_redis_client(),
                     timeout=self.config.redis_connection_timeout
                 )
-                logger.info(f"缓存 '{self.name}' 已连接Redis")
+                logger.info(f"缓存 '{self.name}' 已连接到Redis")
             except Exception as e:
                 logger.error(f"缓存 '{self.name}' Redis连接失败: {e}")
-                raise  # 不降级，直接抛出异常
+                raise
                 
         return self._redis_client
     
     def _serialize_value(self, value):
-        """序列化值"""
         try:
-            # 自定义序列化处理datetime等对象
             def default_serializer(obj):
                 if isinstance(obj, datetime):
                     return obj.isoformat()
@@ -111,15 +92,13 @@ class UnifiedCache:
             raise
     
     def _deserialize_value(self, data):
-        """反序列化值"""
         try:
             if self.config.enable_compression:
                 try:
                     import gzip
                     data = gzip.decompress(data)
-                except Exception as e:
-                    logger.debug(f"解压缩失败，可能不是压缩数据: {e}")
-                    pass  # 如果不是压缩数据，继续处理
+                except Exception:
+                    pass
             
             return ujson.loads(data.decode('utf-8'))
         except Exception as e:
@@ -127,21 +106,17 @@ class UnifiedCache:
             return None
     
     def _generate_key(self, key):
-        """生成完整的缓存键"""
         return f"{self.config.redis_key_prefix}{key}"
     
     def _is_expired(self, cached_item):
-        """检查缓存项是否过期"""
         if 'expires_at' not in cached_item:
             return True
         return time.time() > cached_item['expires_at']
     
     def _cleanup_memory_cache(self):
-        """清理内存缓存"""
         if len(self._memory_cache) <= self.config.memory_max_size:
             return
         
-        # 移除过期的缓存项
         expired_keys = [
             key for key, item in self._memory_cache.items() 
             if self._is_expired(item)
@@ -150,7 +125,6 @@ class UnifiedCache:
             del self._memory_cache[key]
             self._weak_refs.pop(key, None)
         
-        # 如果还是太多，移除最旧的
         if len(self._memory_cache) > self.config.memory_max_size * self.config.memory_cleanup_threshold:
             items = list(self._memory_cache.items())
             items.sort(key=lambda x: x[1].get('created_at', 0))
@@ -161,11 +135,9 @@ class UnifiedCache:
                 self._weak_refs.pop(key, None)
     
     async def get(self, key):
-        """获取缓存值"""
         full_key = self._generate_key(key)
         
         try:
-            # 如果配置使用Redis
             if self.config.use_redis:
                 redis_client = await self._get_redis_client()
                 if redis_client:
@@ -179,9 +151,8 @@ class UnifiedCache:
                     except Exception as e:
                         logger.error(f"Redis读取失败: {e}")
                         self._stats["errors"] += 1
-                        raise  # Redis失败直接抛出异常，不降级
+                        raise
             else:
-                # 使用内存缓存
                 if key in self._memory_cache:
                     cached_item = self._memory_cache[key]
                     if not self._is_expired(cached_item):
@@ -189,7 +160,6 @@ class UnifiedCache:
                         logger.debug(f"缓存 '{self.name}' 内存命中: {key}")
                         return cached_item['value']
                     else:
-                        # 清理过期项
                         del self._memory_cache[key]
                         self._weak_refs.pop(key, None)
             
@@ -199,20 +169,17 @@ class UnifiedCache:
         except Exception as e:
             logger.error(f"缓存获取失败: {e}")
             self._stats["errors"] += 1
-            raise  # 直接抛出异常，不返回None
+            raise
     
-    async def set(self, key, value, ttl = None):
-        """设置缓存值"""
+    async def set(self, key, value, ttl=None):
         if ttl is None:
             ttl = self.config.default_ttl
         
-        # 限制TTL范围
         ttl = max(self.config.min_ttl, min(ttl, self.config.max_ttl))
         
         full_key = self._generate_key(key)
         
         try:
-            # 如果配置使用Redis
             if self.config.use_redis:
                 redis_client = await self._get_redis_client()
                 if redis_client:
@@ -220,14 +187,13 @@ class UnifiedCache:
                         data = self._serialize_value(value)
                         await redis_client.setex(full_key, ttl, data)
                         self._stats["sets"] += 1
-                        logger.debug(f"缓存 '{self.name}' Redis保存: {key}")
+                        logger.debug(f"缓存 '{self.name}' Redis设置: {key}")
                         return True
                     except Exception as e:
                         logger.error(f"Redis写入失败: {e}")
                         self._stats["errors"] += 1
-                        raise  # Redis失败直接抛出异常，不降级
+                        raise
             else:
-                # 使用内存缓存
                 self._cleanup_memory_cache()
                 
                 cached_item = {
@@ -238,7 +204,6 @@ class UnifiedCache:
                 }
                 self._memory_cache[key] = cached_item
                 
-                # 使用弱引用避免循环引用
                 if hasattr(value, '__weakref__'):
                     def cleanup_callback(ref):
                         self._memory_cache.pop(key, None)
@@ -247,20 +212,18 @@ class UnifiedCache:
                     self._weak_refs[key] = weakref.ref(value, cleanup_callback)
                 
                 self._stats["sets"] += 1
-                logger.debug(f"缓存 '{self.name}' 内存保存: {key}")
+                logger.debug(f"缓存 '{self.name}' 内存设置: {key}")
                 return True
                 
         except Exception as e:
             logger.error(f"缓存设置失败: {e}")
             self._stats["errors"] += 1
-            raise  # 直接抛出异常，不返回False
+            raise
     
     async def delete(self, key):
-        """删除缓存项"""
         full_key = self._generate_key(key)
         
         try:
-            # 如果配置使用Redis
             if self.config.use_redis:
                 redis_client = await self._get_redis_client()
                 if redis_client:
@@ -272,9 +235,8 @@ class UnifiedCache:
                     except Exception as e:
                         logger.error(f"Redis删除失败: {e}")
                         self._stats["errors"] += 1
-                        raise  # Redis失败直接抛出异常，不降级
+                        raise
             else:
-                # 使用内存缓存
                 if key in self._memory_cache:
                     del self._memory_cache[key]
                     self._weak_refs.pop(key, None)
@@ -286,21 +248,17 @@ class UnifiedCache:
         except Exception as e:
             logger.error(f"缓存删除失败: {e}")
             self._stats["errors"] += 1
-            raise  # 直接抛出异常，不返回False
+            raise
     
     async def clear(self):
-        """清空所有缓存"""
         try:
-            # 如果配置使用Redis
             if self.config.use_redis:
                 redis_client = await self._get_redis_client()
                 if redis_client:
                     try:
                         pattern = f"{self.config.redis_key_prefix}*"
-                        # 使用SCAN替代KEYS，分批删除
-                        batch: list = []
+                        batch = []
                         batch_size = 500
-                        # 优先使用scan_iter，如不可用则回退到keys
                         if hasattr(redis_client, "scan_iter"):
                             async for k in redis_client.scan_iter(match=pattern, count=batch_size):
                                 batch.append(k)
@@ -312,7 +270,6 @@ class UnifiedCache:
                         else:
                             keys = await redis_client.keys(pattern)
                             if keys:
-                                # 仍尽量分批删除
                                 for i in range(0, len(keys), batch_size):
                                     await redis_client.delete(*keys[i:i+batch_size])
                         logger.info(f"缓存 '{self.name}' Redis已清空")
@@ -320,9 +277,8 @@ class UnifiedCache:
                     except Exception as e:
                         logger.error(f"Redis清空失败: {e}")
                         self._stats["errors"] += 1
-                        raise  # Redis失败直接抛出异常，不降级
+                        raise
             else:
-                # 清空内存缓存
                 self._memory_cache.clear()
                 self._weak_refs.clear()
                 logger.info(f"缓存 '{self.name}' 内存已清空")
@@ -331,23 +287,16 @@ class UnifiedCache:
         except Exception as e:
             logger.error(f"缓存清空失败: {e}")
             self._stats["errors"] += 1
-            raise  # 直接抛出异常，不返回False
+            raise
 
-    async def clear_prefix(self, key_prefix: str):
-        """按前缀清理缓存（仅清理当前命名空间内匹配的键）。
-
-        说明：
-        - Redis: 删除匹配 pattern = redis_key_prefix + key_prefix + '*'
-        - 内存: 删除 _memory_cache 中以 key_prefix 开头的键
-        """
+    async def clear_prefix(self, key_prefix):
         try:
-            # 如果配置使用Redis
             if self.config.use_redis:
                 redis_client = await self._get_redis_client()
                 if redis_client:
                     try:
                         pattern = f"{self.config.redis_key_prefix}{key_prefix}*"
-                        batch: list = []
+                        batch = []
                         batch_size = 500
                         if hasattr(redis_client, "scan_iter"):
                             async for k in redis_client.scan_iter(match=pattern, count=batch_size):
@@ -363,34 +312,31 @@ class UnifiedCache:
                                 for i in range(0, len(keys), batch_size):
                                     await redis_client.delete(*keys[i:i+batch_size])
                         self._stats["deletes"] += 1
-                        logger.info(f"缓存 '{self.name}' Redis前缀清理(使用SCAN): {key_prefix}")
+                        logger.info(f"缓存 '{self.name}' 前缀已清除: {key_prefix}")
                         return True
                     except Exception as e:
-                        logger.error(f"Redis前缀清理失败: {e}")
+                        logger.error(f"Redis前缀清除失败: {e}")
                         self._stats["errors"] += 1
-                        raise  # Redis失败直接抛出异常，不降级
+                        raise
             else:
-                # 内存按前缀清理
                 to_delete = [k for k in list(self._memory_cache.keys()) if k.startswith(key_prefix)]
                 for k in to_delete:
                     self._memory_cache.pop(k, None)
                     self._weak_refs.pop(k, None)
                 if to_delete:
                     self._stats["deletes"] += 1
-                    logger.info(f"缓存 '{self.name}' 内存前缀清理: {key_prefix} 共{len(to_delete)}项")
+                    logger.info(f"缓存 '{self.name}' 前缀已清除: {key_prefix} ({len(to_delete)} items)")
                 return True
                 
         except Exception as e:
-            logger.error(f"缓存前缀清理失败: {e}")
+            logger.error(f"缓存前缀清除失败: {e}")
             self._stats["errors"] += 1
-            raise  # 直接抛出异常，不返回False
+            raise
     
     async def exists(self, key):
-        """检查缓存项是否存在"""
         return await self.get(key) is not None
     
     async def get_stats(self):
-        """获取缓存统计信息"""
         total_requests = self._stats["hits"] + self._stats["misses"]
         hit_rate = (self._stats["hits"] / total_requests * 100) if total_requests > 0 else 0
         
@@ -418,8 +364,7 @@ class CacheManager:
         self._caches = {}
         self._default_config = CacheConfig()
     
-    def get_cache(self, name, config = None):
-        """获取或创建缓存实例"""
+    def get_cache(self, name, config=None):
         if name not in self._caches:
             if config is None:
                 config = self._default_config
@@ -427,57 +372,42 @@ class CacheManager:
         return self._caches[name]
     
     def create_cache(self, name, **config_kwargs):
-        """创建新的缓存实例"""
         config = CacheConfig(**config_kwargs)
         cache = UnifiedCache(config, name)
         self._caches[name] = cache
         return cache
     
     async def clear_all(self):
-        """清空所有缓存"""
         for cache in self._caches.values():
             await cache.clear()
     
     async def get_all_stats(self):
-        """获取所有缓存的统计信息"""
         stats = {}
         for name, cache in self._caches.items():
             stats[name] = await cache.get_stats()
         return stats
     
     def list_caches(self):
-        """列出所有缓存名称"""
         return list(self._caches.keys())
 
 
-# 全局缓存管理器实例
 cache_manager = CacheManager()
 
-# 便捷函数
-def get_cache(name = "default", **config_kwargs):
-    """获取缓存实例的便捷函数"""
+
+def get_cache(name="default", **config_kwargs):
     if config_kwargs:
         config = CacheConfig(**config_kwargs)
         return cache_manager.get_cache(name, config)
     return cache_manager.get_cache(name)
 
 
-# 统一缓存实例 - 使用单一缓存替代多个独立缓存
-# 优势：
-# 1. 简化缓存清除逻辑，只需清除一个缓存的特定前缀
-# 2. 避免数据不一致（api_cache和query_cache之间）
-# 3. 更好的可维护性，不需要记住多个缓存实例
-# 4. 通过namespace前缀实现逻辑分离（user:, metrics:, project:等）
-# 5. 根据REDIS_URL自动决定使用Redis还是内存缓存
 unified_cache = get_cache(
     "unified",
     use_redis=getattr(settings, 'CACHE_USE_REDIS', False),
     default_ttl=getattr(settings, 'CACHE_DEFAULT_TTL', 300),
-    redis_key_prefix="cache:"  # 统一前缀，通过key中的namespace区分
+    redis_key_prefix="cache:"
 )
 
-# 为了向后兼容，保留原有的引用名称
-# 所有缓存操作都指向统一的缓存实例
 user_cache = unified_cache
 metrics_cache = unified_cache
 api_cache = unified_cache

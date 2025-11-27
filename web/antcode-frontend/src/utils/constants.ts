@@ -1,12 +1,13 @@
-import { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE } from '@/config/app'
+import { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT } from '@/config/app'
 
-// API 相关常量
+// API 地址（从环境变量读取，默认本地开发地址）
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-export const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8000'
+// WS 地址（从 API 地址自动推导：http -> ws, https -> wss）
+export const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws')
 
 // 应用配置
-export { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE }
-export const APP_VERSION = import.meta.env.VITE_APP_VERSION || '1.0.0'
+export { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT }
+export const APP_VERSION = '1.0.0'
 
 // 项目类型
 export const PROJECT_TYPES = {

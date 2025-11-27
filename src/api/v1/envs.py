@@ -1,28 +1,23 @@
+"""Python环境管理接口"""
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Body
-from pydantic import BaseModel
 from loguru import logger
+from pydantic import BaseModel
+from tortoise.expressions import Q
 
+from src.core.auth import get_current_user_id, get_current_user, TokenData
+from src.core.config import settings
+from src.core.response import page as page_response
+from src.models import Project, Venv, Interpreter, ProjectVenvBinding, User
+from src.models.enums import VenvScope
+from src.schemas.common import PaginationResponse
 from src.schemas.envs import (
-    CreateVenvRequest,
-    InstallInterpreterRequest,
-    InterpreterInfo,
-    PythonVersionListResponse,
-    VenvStatusResponse,
-    VenvListItem,
-    CreateSharedVenvRequest,
+    CreateVenvRequest, InstallInterpreterRequest, InterpreterInfo,
+    PythonVersionListResponse, VenvStatusResponse, VenvListItem, CreateSharedVenvRequest
 )
 from src.services.envs.python_env_service import python_env_service
 from src.services.envs.venv_service import project_venv_service
-from src.models import Project
-from src.models.enums import VenvScope
-from src.core.auth import get_current_user_id, get_current_user, TokenData
-from src.core.response import page as page_response
-from src.schemas.common import PaginationResponse
-from src.models import Venv, Interpreter, ProjectVenvBinding, User
-from tortoise.expressions import Q
-from src.core.config import settings
+from src.services.users.user_service import user_service
 from src.utils.api_optimizer import fast_response
-
 
 router = APIRouter(tags=["环境管理"])
 
@@ -40,7 +35,6 @@ async def list_python_versions():
         versions = await python_env_service.list_remote_versions()
         return PythonVersionListResponse(versions=versions)
     except Exception as e:
-        # 如果缺少 mise 或调用失败，返回空列表而非报错
         msg = str(e)
         if isinstance(e, FileNotFoundError) or "No such file or directory" in msg and "mise" in msg:
             logger.warning("未检测到 mise，返回空版本列表")
@@ -51,7 +45,7 @@ async def list_python_versions():
 
 @router.get("/python/interpreters", response_model=list[InterpreterInfo])
 @fast_response(cache_ttl=120, namespace="envs:interpreters")
-async def list_python_interpreters(source: str | None = Query(None)):
+async def list_python_interpreters(source=Query(None)):
     """列出已注册的 Python 解释器（来自数据库，可按来源过滤）。"""
     try:
         items = await python_env_service.list_db(source)
@@ -62,7 +56,7 @@ async def list_python_interpreters(source: str | None = Query(None)):
 
 
 @router.post("/python/interpreters", response_model=InterpreterInfo, status_code=status.HTTP_201_CREATED)
-async def install_python_interpreter(req: InstallInterpreterRequest, current_user_id: int = Depends(get_current_user_id)):
+async def install_python_interpreter(req, current_user_id=Depends(get_current_user_id)):
     """安装指定 Python 版本（幂等）。"""
     try:
         info = await python_env_service.ensure_installed(req.version, created_by=current_user_id)
@@ -73,11 +67,10 @@ async def install_python_interpreter(req: InstallInterpreterRequest, current_use
 
 
 @router.post("/python/interpreters/local", response_model=InterpreterInfo, status_code=status.HTTP_201_CREATED)
-async def register_local_interpreter(python_bin: str = Body(..., embed=True), current_user_id: int = Depends(get_current_user_id)):
+async def register_local_interpreter(python_bin=Body(..., embed=True), current_user_id=Depends(get_current_user_id)):
     """注册本地 Python 解释器。"""
     try:
         info = await python_env_service.register_local(python_bin, created_by=current_user_id)
-        # 返回包含source信息
         return InterpreterInfo(**{**info, "source": "local"})
     except Exception as e:
         logger.error(f"注册本地解释器失败: {e}")
@@ -85,11 +78,10 @@ async def register_local_interpreter(python_bin: str = Body(..., embed=True), cu
 
 
 @router.delete("/python/interpreters/{version}", status_code=status.HTTP_204_NO_CONTENT)
-async def uninstall_python_interpreter(version: str, source: str | None = Query("mise")):
+async def uninstall_python_interpreter(version, source=Query("mise")):
     """卸载或删除解释器：source=mise 执行卸载；source=local 删除登记记录。"""
     try:
         if source == "local":
-            from src.models import Interpreter
             deleted = await Interpreter.filter(tool="python", version=version, source=source).delete()
             if deleted == 0:
                 raise HTTPException(status_code=404, detail="未找到本地解释器记录")
@@ -103,7 +95,7 @@ async def uninstall_python_interpreter(version: str, source: str | None = Query(
 
 
 @router.get("/projects/{project_id}/venv", response_model=VenvStatusResponse)
-async def get_project_venv(project_id: str):
+async def get_project_venv(project_id):
     """获取项目虚拟环境状态（以数据库绑定为准）。"""
     try:
         project = await Project.get(id=int(project_id))
@@ -119,7 +111,7 @@ async def get_project_venv(project_id: str):
 
 
 @router.post("/projects/{project_id}/venv", response_model=VenvStatusResponse, status_code=status.HTTP_201_CREATED)
-async def create_or_bind_project_venv(project_id: int, req: CreateVenvRequest, current_user_id: int = Depends(get_current_user_id)):
+async def create_or_bind_project_venv(project_id, req, current_user_id=Depends(get_current_user_id)):
     """统一接口：根据 venv_scope 创建/复用并绑定项目的私有或共享虚拟环境。"""
     try:
         if req.venv_scope == VenvScope.PRIVATE:
@@ -144,12 +136,10 @@ async def create_or_bind_project_venv(project_id: int, req: CreateVenvRequest, c
         else:
             raise HTTPException(status_code=400, detail="不支持的虚拟环境作用域")
 
-        # 写入项目绑定
         project = await Project.get(id=project_id)
         project.python_version = req.version
         project.venv_scope = req.venv_scope
         project.venv_path = venv_path
-        # 设置规范绑定
         try:
             venv_obj = await Venv.get_or_none(venv_path=venv_path)
             if venv_obj:
@@ -167,7 +157,7 @@ async def create_or_bind_project_venv(project_id: int, req: CreateVenvRequest, c
 
 
 @router.delete("/projects/{project_id}/venv", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project_venv(project_id: str):
+async def delete_project_venv(project_id):
     """删除项目 venv（不影响解释器）。"""
     try:
         await project_venv_service.delete(project_id)
@@ -177,7 +167,7 @@ async def delete_project_venv(project_id: str):
 
 
 @router.get("/projects/{project_id}/venv/packages")
-async def list_project_venv_packages(project_id: int):
+async def list_project_venv_packages(project_id):
     """列出项目虚拟环境中的依赖包。"""
     try:
         project = await Project.get(id=project_id)
@@ -195,15 +185,15 @@ async def list_project_venv_packages(project_id: int):
 @router.get("/venvs", response_model=PaginationResponse[VenvListItem])
 @fast_response(cache_ttl=120, namespace="envs:list")
 async def list_venvs(
-    scope: VenvScope | None = None,
-    project_id: int | None = None,
-    q: str | None = None,
+    scope: str = None,
+    project_id: int = None,
+    q: str = None,
     page: int = 1,
     size: int = 20,
     include_packages: bool = False,
     limit_packages: int = 50,
-    interpreter_source: str | None = None,
-    current_user: TokenData = Depends(get_current_user),
+    interpreter_source: str = None,
+    current_user=Depends(get_current_user),
 ):
     """分页列出虚拟环境，支持按作用域、项目和关键字过滤；可选附带依赖列表。"""
     try:
@@ -211,7 +201,6 @@ async def list_venvs(
         if scope is not None:
             query = query.filter(scope=scope)
         if project_id is not None:
-            # 仅取当前绑定的环境
             venv_ids = await ProjectVenvBinding.filter(project_id=project_id, is_current=True).values_list("venv_id", flat=True)
             query = query.filter(id__in=list(venv_ids))
         if q:
@@ -221,14 +210,10 @@ async def list_venvs(
         if interpreter_source:
             query = query.filter(interpreter__source=interpreter_source)
 
-        # 权限控制：非管理员仅可见自己创建的共享环境 + 自己项目绑定的私有环境
-        user = await User.get_or_none(id=current_user.user_id)
-        is_admin = bool(user and getattr(user, 'is_admin', False))
+        # 权限控制
+        is_admin = await user_service.is_admin(current_user.user_id)
         if not is_admin:
-            # 自己创建的共享/私有
             created_filter = Q(created_by=current_user.user_id)
-            # 自己的项目绑定的私有环境
-            from src.models import Project
             my_project_ids = await Project.filter(user_id=current_user.user_id).values_list('id', flat=True)
             my_venv_ids = []
             if my_project_ids:
@@ -241,18 +226,24 @@ async def list_venvs(
         total = await query.count()
         items = await query.offset((page - 1) * size).limit(size)
 
-        # 预取创建者用户名，避免在循环中逐个查询
-        creator_ids = {v.created_by for v in items if getattr(v, 'created_by', None)}
-        user_map = {}
-        if creator_ids:
-            users = await User.filter(id__in=list(creator_ids)).values("id", "username")
-            user_map = {u["id"]: u["username"] for u in users}
+        # 批量预取关联数据
+        venv_ids = [v.id for v in items]
+        interpreter_ids = list({v.interpreter_id for v in items})
+        creator_ids = list({v.created_by for v in items if v.created_by})
+        
+        interpreters = await Interpreter.filter(id__in=interpreter_ids) if interpreter_ids else []
+        users = await User.filter(id__in=creator_ids).only('id', 'username') if creator_ids else []
+        bindings = await ProjectVenvBinding.filter(venv_id__in=venv_ids, is_current=True) if venv_ids else []
+        
+        interpreter_map = {i.id: i for i in interpreters}
+        user_map = {u.id: u.username for u in users}
+        binding_map = {b.venv_id: b.project_id for b in bindings}
 
         data: list[VenvListItem] = []
         for v in items:
-            interpreter = await Interpreter.get(id=v.interpreter_id)
-            # 取当前绑定的项目（如存在）- 使用 first() 避免多记录异常
-            current_binding = await ProjectVenvBinding.filter(venv_id=v.id, is_current=True).first()
+            interpreter = interpreter_map.get(v.interpreter_id)
+            if not interpreter:
+                continue
             item = VenvListItem(
                 id=v.id,
                 scope=v.scope,
@@ -264,10 +255,10 @@ async def list_venvs(
                 python_bin=interpreter.python_bin,
                 install_dir=interpreter.install_dir,
                 created_by=v.created_by,
-                created_by_username=user_map.get(v.created_by) if getattr(v, 'created_by', None) else None,
+                created_by_username=user_map.get(v.created_by),
                 created_at=v.created_at.isoformat() if v.created_at else None,
                 updated_at=v.updated_at.isoformat() if v.updated_at else None,
-                current_project_id=current_binding.project_id if current_binding else None,
+                current_project_id=binding_map.get(v.id),
             )
             if include_packages:
                 try:
@@ -275,8 +266,8 @@ async def list_venvs(
                     if limit_packages and isinstance(pkgs, list):
                         pkgs = pkgs[:limit_packages]
                     item.packages = pkgs
-                except Exception as e:
-                    logger.warning(f"获取依赖失败 venv={v.id}: {e}")
+                except Exception:
+                    pass
             data.append(item)
 
         return page_response(items=data, total=total, page=page, size=size)
@@ -287,7 +278,7 @@ async def list_venvs(
 
 @router.get("/venvs/{venv_id}/packages")
 @fast_response(cache_ttl=60, namespace="envs:packages", key_prefix_fn=lambda args, kwargs: str(kwargs.get('venv_id') if 'venv_id' in kwargs else (args[0] if args else '')))
-async def list_venv_packages(venv_id: int):
+async def list_venv_packages(venv_id):
     """按 venv_id 列出依赖包。"""
     try:
         venv = await Venv.get(id=venv_id)
@@ -306,7 +297,7 @@ async def get_env_config():
 
 
 @router.post("/venvs", status_code=status.HTTP_201_CREATED)
-async def create_shared_venv(req: CreateSharedVenvRequest, current_user_id: int = Depends(get_current_user_id)):
+async def create_shared_venv(req, current_user_id=Depends(get_current_user_id)):
     """创建或复用共享虚拟环境。"""
     try:
         info = await project_venv_service.create_or_use_shared(
@@ -323,10 +314,9 @@ async def create_shared_venv(req: CreateSharedVenvRequest, current_user_id: int 
 
 
 @router.delete("/venvs/{venv_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_venv(venv_id: int, allow_private: bool = Query(False), current_user: TokenData = Depends(get_current_user)):
+async def delete_venv(venv_id, allow_private=Query(False), current_user=Depends(get_current_user)):
     try:
         venv = await Venv.get(id=venv_id)
-        # 权限：管理员或创建者
         creator = await User.get_or_none(id=current_user.user_id)
         is_admin = bool(creator and getattr(creator, 'is_admin', False))
 
@@ -335,30 +325,23 @@ async def delete_venv(venv_id: int, allow_private: bool = Query(False), current_
                 raise HTTPException(status_code=403, detail="无权删除该共享环境")
             await project_venv_service.delete_shared_by_id(venv_id)
             return
-        # private
         if not allow_private:
             raise HTTPException(status_code=400, detail="不允许删除私有环境（需要 allow_private=true）")
-        # 找当前绑定项目 - 使用 first() 避免多记录异常
         bind = await ProjectVenvBinding.filter(venv_id=venv_id, is_current=True).first()
         if not bind:
-            # 无绑定也可删除物理目录与记录（防御）
             await project_venv_service._safe_rmtree(venv.venv_path)
             await venv.delete()
             return
-        # 删除项目私有环境
-        from src.models import Project
         project = await Project.get(id=bind.project_id)
         if not (is_admin or project.user_id == current_user.user_id):
             raise HTTPException(status_code=403, detail="无权删除该项目的私有环境")
         await project_venv_service.delete(str(bind.project_id))
-        # 清理绑定及项目字段
         await ProjectVenvBinding.filter(project_id=bind.project_id).delete()
         project.current_venv_id = None
         project.venv_path = None
         project.python_version = None
         project.venv_scope = None
         await project.save()
-        # 删除 venv 记录
         try:
             await venv.delete()
         except Exception:
@@ -371,7 +354,7 @@ async def delete_venv(venv_id: int, allow_private: bool = Query(False), current_
 
 
 @router.post("/venvs/batch-delete", status_code=status.HTTP_200_OK)
-async def batch_delete_venvs(body: dict, current_user_id: int = Depends(get_current_user_id)):
+async def batch_delete_venvs(body, current_user_id=Depends(get_current_user_id)):
     ids = body.get("ids") or []
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="ids 必须为非空数组")
@@ -391,7 +374,7 @@ class InstallPackagesRequest:
 
 
 @router.post("/venvs/{venv_id}/packages", status_code=status.HTTP_200_OK)
-async def install_packages_to_venv(venv_id: int, body: dict, current_user_id: int = Depends(get_current_user_id)):
+async def install_packages_to_venv(venv_id, body, current_user_id=Depends(get_current_user_id)):
     """向指定 venv 安装依赖。"""
     try:
         packages = body.get("packages") or []
@@ -408,7 +391,7 @@ async def install_packages_to_venv(venv_id: int, body: dict, current_user_id: in
 
 
 @router.post("/projects/{project_id}/venv/packages", status_code=status.HTTP_200_OK)
-async def install_packages_to_project_venv(project_id: int, body: dict, current_user_id: int = Depends(get_current_user_id)):
+async def install_packages_to_project_venv(project_id, body, current_user_id=Depends(get_current_user_id)):
     """向项目当前绑定的 venv 安装依赖。"""
     try:
         packages = body.get("packages") or []
@@ -424,8 +407,10 @@ async def install_packages_to_project_venv(project_id: int, body: dict, current_
     except Exception as e:
         logger.error(f"安装依赖失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.patch("/venvs/{venv_id}")
-async def update_shared_venv(venv_id: int, body: dict, current_user: TokenData = Depends(get_current_user)):
+async def update_shared_venv(venv_id, body, current_user=Depends(get_current_user)):
     """编辑共享环境（目前支持修改 key）。"""
     try:
         venv = await Venv.get(id=venv_id)

@@ -1,11 +1,9 @@
-"""
-WebSocket连接管理器
-负责管理WebSocket连接的生命周期和消息广播
-"""
+"""WebSocket连接管理器"""
 import asyncio
 import weakref
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Set, Optional, Callable, Any
 
 import ujson
 from fastapi import WebSocket, WebSocketDisconnect
@@ -80,10 +78,15 @@ class ConnectionPool:
 class MessageQueue:
     """消息队列管理"""
     
-    def __init__(self, max_queue_size = 1000):
+    def __init__(self, max_queue_size=1000, broadcast_callback: Callable = None):
         self.max_queue_size = max_queue_size
         self.queues: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_queue_size))
         self.processing: Dict[str, bool] = defaultdict(bool)
+        self._broadcast_callback = broadcast_callback
+    
+    def set_broadcast_callback(self, callback: Callable):
+        """设置广播回调"""
+        self._broadcast_callback = callback
     
     async def enqueue_message(self, execution_id, message):
         """入队消息"""
@@ -104,12 +107,11 @@ class MessageQueue:
             while self.queues[execution_id]:
                 message = self.queues[execution_id].popleft()
                 
-                # 获取该执行ID的所有连接
-                from src.services.websockets.websocket_connection_manager import websocket_manager
-                await websocket_manager._broadcast_message_direct(execution_id, message)
+                if self._broadcast_callback:
+                    await self._broadcast_callback(execution_id, message)
                 
                 # 控制发送频率
-                await asyncio.sleep(0.001)  # 1ms延迟
+                await asyncio.sleep(0.001)
                 
         except Exception as e:
             logger.error(f"处理消息队列失败 {execution_id}: {e}")
@@ -123,6 +125,7 @@ class WebSocketConnectionManager:
     def __init__(self):
         self.connection_pool = ConnectionPool()
         self.message_queue = MessageQueue()
+        self.message_queue.set_broadcast_callback(self._broadcast_message_direct)
         
         # 统计信息
         self.stats = {
@@ -203,7 +206,7 @@ class WebSocketConnectionManager:
             self.stats["total_connections"] += 1
             self.stats["active_connections"] = len(self.connection_pool.get_all_connections())
             
-            logger.info(f"✅ WebSocket连接建立: {connection_id} (执行ID: {execution_id})")
+            logger.info(f"WebSocket连接建立: {connection_id} (执行ID: {execution_id})")
             
             # 发送连接确认消息
             await self._send_to_connection_direct(websocket, {
@@ -226,7 +229,7 @@ class WebSocketConnectionManager:
             
         except Exception as e:
             self.stats["errors_count"] += 1
-            logger.error(f"❌ WebSocket连接建立失败: {e}")
+            logger.error(f"WebSocket连接建立失败: {e}")
             raise
     
     async def disconnect(self, websocket, execution_id):
@@ -241,7 +244,7 @@ class WebSocketConnectionManager:
             
         except Exception as e:
             self.stats["errors_count"] += 1
-            logger.error(f"❌ WebSocket断开处理失败: {e}")
+            logger.error(f"WebSocket断开处理失败: {e}")
     
     async def broadcast_to_execution(self, execution_id, message):
         """向指定执行ID的所有连接广播消息（队列版本）"""
@@ -252,7 +255,7 @@ class WebSocketConnectionManager:
             
         except Exception as e:
             self.stats["errors_count"] += 1
-            logger.error(f"❌ 消息入队失败: {e}")
+            logger.error(f"消息入队失败: {e}")
     
     async def _broadcast_message_direct(self, execution_id, message):
         """直接广播消息（由队列调用）"""
@@ -281,7 +284,7 @@ class WebSocketConnectionManager:
                 sent_count += 1
                 
             except Exception as e:
-                logger.warning(f"⚠️ 发送消息失败，准备清理连接: {e}")
+                logger.warning(f"发送消息失败，准备清理连接: {e}")
                 disconnected_connections.append(websocket)
         
         # 清理断开的连接
@@ -432,11 +435,11 @@ class WebSocketConnectionManager:
                 logger.info(f"🧹 清理了 {cleaned_count} 个不活跃连接")
                 
         except Exception as e:
-            logger.error(f"❌ 清理连接失败: {e}")
+            logger.error(f"清理连接失败: {e}")
     
     async def shutdown(self):
         """优雅关闭管理器"""
-        logger.info("🔄 正在关闭WebSocket连接管理器...")
+        logger.info("正在关闭WebSocket连接管理器...")
         
         # 取消清理任务
         if self._cleanup_task and not self._cleanup_task.done():
@@ -455,7 +458,7 @@ class WebSocketConnectionManager:
                 except Exception:
                     pass
         
-        logger.info("✅ WebSocket连接管理器已关闭")
+        logger.info("WebSocket连接管理器已关闭")
 
 
 # 创建全局连接管理器实例

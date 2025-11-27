@@ -1,21 +1,16 @@
-"""
-日志管理API接口
-提供基本的日志查看功能
-"""
-
+"""日志管理接口"""
 import os
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
 from src.core.auth import get_current_user, TokenData
+from src.core.response import success, Messages
 from src.schemas.common import BaseResponse
-from src.core.response import success
-from src.core.response import Messages
 from src.schemas.logs import LogEntry, LogListResponse, UnifiedLogResponse, LogLevel, LogType, LogFormat
+from src.services.logs.log_performance_service import log_performance_monitor, log_statistics_service
 from src.services.logs.log_security_service import log_security_service, error_handler
 from src.services.logs.task_log_service import task_log_service
 from src.services.scheduler.scheduler_service import scheduler_service
@@ -25,7 +20,6 @@ router = APIRouter()
 
 
 async def _get_raw_log_response(execution_id, execution, log_type, lines):
-    """获取原始文本格式的日志响应"""
     try:
         file_path = None
         content = ""
@@ -91,15 +85,10 @@ async def _get_raw_log_response(execution_id, execution, log_type, lines):
 
     except Exception as e:
         logger.error(f"获取原始日志失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="获取日志失败"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取日志失败")
 
 
-async def _get_structured_log_response(execution_id, execution, log_type,
-                                       level, lines, search):
-    """获取结构化格式的日志响应"""
+async def _get_structured_log_response(execution_id, execution, log_type, level, lines, search):
     try:
         # 获取日志内容
         logs_data = await task_log_service.get_execution_logs(execution_id)
@@ -168,29 +157,19 @@ async def _get_structured_log_response(execution_id, execution, log_type,
 
     except Exception as e:
         logger.error(f"获取结构化日志失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="获取日志失败"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取日志失败")
 
 
 @router.get("/executions/{execution_id}", response_model=BaseResponse[UnifiedLogResponse])
 async def get_execution_logs(
-        execution_id: str,
-        format: LogFormat = Query(LogFormat.STRUCTURED, description="输出格式"),
-        log_type: Optional[LogType] = Query(None, description="日志类型过滤"),
-        level: Optional[LogLevel] = Query(None, description="日志级别过滤"),
-        lines: Optional[int] = Query(None, ge=1, le=10000, description="读取行数"),
-        search: Optional[str] = Query(None, description="搜索关键词"),
-        current_user: TokenData = Depends(get_current_user)
+        execution_id: int,
+        format: str = Query(LogFormat.STRUCTURED),
+        log_type: str = Query(None),
+        level: str = Query(None),
+        lines: int = Query(None, ge=1, le=10000),
+        search: str = Query(None),
+        current_user=Depends(get_current_user)
 ):
-    """
-    获取指定执行ID的日志（统一接口）
-    
-    支持两种格式:
-    - structured: 返回结构化LogEntry数组，适合前端表格展示
-    - raw: 返回原始文本内容，适合下载和预览
-    """
     try:
         # 使用增强的权限验证
         execution = await log_security_service.verify_log_access_permission(
@@ -220,7 +199,7 @@ async def get_execution_logs(
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取执行日志失败 (错误ID: {error_id})"
+            detail=f"获取执行日志失败 (error_id: {error_id})"
         )
 
 
@@ -228,10 +207,10 @@ async def get_execution_logs(
 
 @router.get("/executions/{execution_id}/stdout", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stdout_logs(
-        execution_id: str,
-        format: LogFormat = Query(LogFormat.RAW, description="输出格式"),
-        lines: Optional[int] = Query(None, ge=1, le=10000, description="读取行数"),
-        current_user: TokenData = Depends(get_current_user)
+        execution_id: int,
+        format: str = Query(LogFormat.RAW),
+        lines: int = Query(None, ge=1, le=10000),
+        current_user=Depends(get_current_user)
 ):
     """获取标准输出日志"""
     return await get_execution_logs(
@@ -245,10 +224,10 @@ async def get_stdout_logs(
 
 @router.get("/executions/{execution_id}/stderr", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stderr_logs(
-        execution_id: str,
-        format: LogFormat = Query(LogFormat.RAW, description="输出格式"),
-        lines: Optional[int] = Query(None, ge=1, le=10000, description="读取行数"),
-        current_user: TokenData = Depends(get_current_user)
+        execution_id: int,
+        format: str = Query(LogFormat.RAW),
+        lines: int = Query(None, ge=1, le=10000),
+        current_user=Depends(get_current_user)
 ):
     """获取标准错误输出日志"""
     return await get_execution_logs(
@@ -262,11 +241,11 @@ async def get_stderr_logs(
 
 @router.get("/executions/{execution_id}/errors", response_model=BaseResponse[UnifiedLogResponse])
 async def get_error_logs(
-        execution_id: str,
-        format: LogFormat = Query(LogFormat.STRUCTURED, description="输出格式"),
-        lines: Optional[int] = Query(None, ge=1, le=10000, description="读取行数"),
-        search: Optional[str] = Query(None, description="搜索关键词"),
-        current_user: TokenData = Depends(get_current_user)
+        execution_id: int,
+        format: str = Query(LogFormat.STRUCTURED),
+        lines: int = Query(None, ge=1, le=10000),
+        search: str = Query(None),
+        current_user=Depends(get_current_user)
 ):
     """获取错误级别的日志"""
     return await get_execution_logs(
@@ -281,10 +260,10 @@ async def get_error_logs(
 
 @router.get("/executions/{execution_id}/raw", response_model=BaseResponse[UnifiedLogResponse])
 async def get_raw_logs(
-        execution_id: str,
-        log_type: Optional[LogType] = Query(None, description="日志类型过滤"),
-        lines: Optional[int] = Query(None, ge=1, le=10000, description="读取行数"),
-        current_user: TokenData = Depends(get_current_user)
+        execution_id: int,
+        log_type: str = Query(None),
+        lines: int = Query(None, ge=1, le=10000),
+        current_user=Depends(get_current_user)
 ):
     """获取原始格式的日志（兼容旧的/file接口）"""
     return await get_execution_logs(
@@ -299,14 +278,14 @@ async def get_raw_logs(
 @router.get("/tasks/{task_id}", response_model=BaseResponse[LogListResponse])
 async def get_task_logs(
         task_id: int,
-        page: int = Query(1, ge=1, description="页码"),
-        size: int = Query(50, ge=1, le=1000, description="每页数量"),
-        log_type: Optional[LogType] = Query(None, description="日志类型过滤"),
-        level: Optional[LogLevel] = Query(None, description="日志级别过滤"),
-        start_time: Optional[datetime] = Query(None, description="开始时间"),
-        end_time: Optional[datetime] = Query(None, description="结束时间"),
-        search: Optional[str] = Query(None, description="搜索关键词"),
-        current_user: TokenData = Depends(get_current_user)
+        page: int = Query(1, ge=1),
+        size: int = Query(50, ge=1, le=1000),
+        log_type: str = Query(None),
+        level: str = Query(None),
+        start_time: str = Query(None),
+        end_time: str = Query(None),
+        search: str = Query(None),
+        current_user=Depends(get_current_user)
 ):
     """获取指定任务的所有日志"""
     try:
@@ -396,7 +375,7 @@ async def get_task_logs(
 
 @router.get("/metrics")
 async def get_log_metrics(
-        current_user: TokenData = Depends(get_current_user)
+        current_user=Depends(get_current_user)
 ):
     """获取简单的日志统计指标"""
     try:
@@ -435,11 +414,10 @@ async def get_log_metrics(
 
 @router.get("/performance/stats")
 async def get_performance_stats(
-        current_user: TokenData = Depends(get_current_user)
+        current_user=Depends(get_current_user)
 ):
     """获取日志系统性能统计"""
     try:
-        from src.services.logs.log_performance_service import log_performance_monitor
 
         # 获取性能摘要
         performance_summary = log_performance_monitor.get_performance_summary()
@@ -468,13 +446,12 @@ async def get_performance_stats(
 
 @router.get("/performance/slow-operations")
 async def get_slow_operations(
-        threshold: float = Query(1.0, ge=0.1, le=10.0, description="慢操作阈值（秒）"),
-        limit: int = Query(10, ge=1, le=100, description="返回数量限制"),
-        current_user: TokenData = Depends(get_current_user)
+        threshold: float = Query(1.0, ge=0.1, le=10.0),
+        limit: int = Query(10, ge=1, le=100),
+        current_user=Depends(get_current_user)
 ):
     """获取慢操作列表"""
     try:
-        from src.services.logs.log_performance_service import log_performance_monitor
 
         slow_operations = log_performance_monitor.get_slow_operations(threshold, limit)
 
@@ -499,12 +476,11 @@ async def get_slow_operations(
 
 @router.get("/analytics/daily")
 async def get_daily_analytics(
-        days: int = Query(7, ge=1, le=30, description="统计天数"),
-        current_user: TokenData = Depends(get_current_user)
+        days: int = Query(7, ge=1, le=30),
+        current_user=Depends(get_current_user)
 ):
     """获取日志系统日统计分析"""
     try:
-        from src.services.logs.log_performance_service import log_statistics_service
 
         daily_stats = log_statistics_service.get_daily_statistics(days)
         user_stats = log_statistics_service.get_user_statistics()

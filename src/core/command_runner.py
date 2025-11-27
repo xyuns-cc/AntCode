@@ -1,3 +1,4 @@
+"""命令执行工具"""
 from __future__ import annotations
 
 import asyncio
@@ -17,11 +18,6 @@ class CommandResult:
 
 
 def _build_env(env_overrides=None):
-    """Build a minimal, process-local environment for child processes.
-
-    - Does not mutate global environment.
-    - Constrains mise data/cache dirs to `storage/mise`.
-    """
     base = os.environ.copy()
 
     mise_data = settings.MISE_DATA_ROOT
@@ -31,8 +27,6 @@ def _build_env(env_overrides=None):
 
     base.setdefault("MISE_DATA_DIR", mise_data)
     base.setdefault("MISE_CACHE_DIR", mise_cache)
-
-    # Do not write to global config files
     base.setdefault("MISE_TRUSTED_CONFIG_PATHS", "")
 
     if env_overrides:
@@ -41,17 +35,9 @@ def _build_env(env_overrides=None):
 
 
 async def run_command(args, cwd=None, env_overrides=None, timeout=900):
-    """Run a command safely with timeout and isolated env.
-
-    Args:
-        args: Executable and arguments.
-        cwd: Optional working directory for the command.
-        env_overrides: Extra env vars for subprocess only.
-        timeout: Timeout in seconds.
-    """
     env = _build_env(env_overrides)
     cmd_str = " ".join(args)
-    logger.info(f"执行命令: {cmd_str} cwd={cwd or os.getcwd()}")
+    logger.info(f"执行命令: {cmd_str} 目录={cwd or os.getcwd()}")
 
     process = await asyncio.create_subprocess_exec(
         *args,

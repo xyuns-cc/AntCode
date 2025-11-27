@@ -1,741 +1,123 @@
-/* 全局样式重置 */
-* {
+/* Global styles with Ant Design CSS variables */
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
+html {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
+}
+
 html,
 body {
   height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: var(--ant-font-family, "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  background-color: var(--ant-color-bg-layout);
+  color: var(--ant-color-text);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 #root {
   height: 100%;
-}
-
-/* 滚动条样式 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: #f1f1f1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
-}
-
-/* 代码字体 */
-code,
-pre {
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-}
-
-/* 导入CSS模块 - 这些样式现在在专门的模块中管理 */
-/* 工具类已移至 utilities.module.css */
-/* 主题样式已移至 theme.module.css */
-/* Ant Design覆盖已移至 antd-overrides.module.css */
-/* 响应式布局已移至 responsive.module.css */
-
-/* 响应式工具类 */
-@media (max-width: 768px) {
-  .mobile-hidden {
-    display: none !important;
-  }
-}
-
-/* 主题切换过渡动画 */
-* {
-  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
-}
-
-/* 浅色主题 */
-.light-theme {
-  --bg-color: #ffffff;
-  --bg-secondary: #f5f5f5;
-  --bg-tertiary: #fafafa;
-  --text-color: rgba(0, 0, 0, 0.88);
-  --text-secondary: rgba(0, 0, 0, 0.65);
-  --border-color: #d9d9d9;
-  --shadow-color: rgba(0, 0, 0, 0.1);
-}
-
-/* 深色主题 */
-.dark-theme {
-  --bg-color: #141414;
-  --bg-secondary: #1f1f1f;
-  --bg-tertiary: #262626;
-  --text-color: rgba(255, 255, 255, 0.88);
-  --text-secondary: rgba(255, 255, 255, 0.65);
-  --border-color: #434343;
-  --shadow-color: rgba(0, 0, 0, 0.3);
-}
-
-/* 深色主题滚动条样式 */
-.dark-theme ::-webkit-scrollbar-track {
-  background: #262626;
-}
-
-.dark-theme ::-webkit-scrollbar-thumb {
-  background: #434343;
-}
-
-.dark-theme ::-webkit-scrollbar-thumb:hover {
-  background: #595959;
-}
-
-/* 主题切换按钮样式 */
-.theme-toggle-btn {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  transition: all 0.3s ease;
-}
-
-.theme-toggle-btn:hover {
-  background-color: var(--bg-secondary);
-}
-
-@media (min-width: 769px) {
-  .desktop-hidden {
-    display: none !important;
-  }
-}
-
-/* 动画 */
-.fade-in {
-  animation: fadeIn 0.3s ease-in-out;
-}
-
-.fade-out {
-  animation: fadeOut 0.3s ease-in-out;
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes fadeOut {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-}
-
-/* 加载动画 */
-.loading-spinner {
-  display: inline-block;
-  width: 20px;
-  height: 20px;
-  border: 3px solid #f3f3f3;
-  border-top: 3px solid #1890ff;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
-/* 状态颜色 */
-.status-success {
-  color: #52c41a;
-}
-
-.status-warning {
-  color: #faad14;
-}
-
-.status-error {
-  color: #ff4d4f;
-}
-
-.status-info {
-  color: #1890ff;
-}
-
-/* 背景颜色 */
-.bg-success {
-  background-color: #f6ffed;
-  border-color: #b7eb8f;
-}
-
-.bg-warning {
-  background-color: #fffbe6;
-  border-color: #ffe58f;
-}
-
-.bg-error {
-  background-color: #fff2f0;
-  border-color: #ffccc7;
-}
-
-.bg-info {
-  background-color: #e6f7ff;
-  border-color: #91d5ff;
-}
-
-/* 确保 Ant Design Modal 正常显示 */
-.ant-modal-mask {
-  position: fixed !important;
-  top: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  left: 0 !important;
-  z-index: 1000 !important;
-  height: 100% !important;
-  background-color: rgba(0, 0, 0, 0.45) !important;
-}
-
-.ant-modal-wrap {
-  position: fixed !important;
-  top: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  left: 0 !important;
-  z-index: 1000 !important;
-  overflow: auto !important;
-  outline: 0 !important;
-}
-
-.ant-modal {
-  position: relative !important;
-  top: 100px !important;
-  width: auto !important;
-  max-width: calc(100vw - 32px) !important;
-  margin: 0 auto !important;
-  padding-bottom: 24px !important;
-}
-
-.ant-modal-content {
-  position: relative !important;
-  background-clip: padding-box !important;
-  border: 0 !important;
-  border-radius: 6px !important;
-  pointer-events: auto !important;
-  transition: all 0.3s ease !important;
-}
-
-/* 浅色主题Modal内容 */
-:global(.light-theme) .ant-modal-content {
-  background-color: #fff !important;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
-  color: rgba(0, 0, 0, 0.88) !important;
-}
-
-/* 深色主题Modal内容 */
-:global(.dark-theme) .ant-modal-content {
-  background-color: #1f1f1f !important;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45) !important;
-  color: rgba(255, 255, 255, 0.88) !important;
-}
-
-/* Modal标题样式 */
-:global(.light-theme) .ant-modal-header {
-  background-color: #fff !important;
-  border-bottom: 1px solid #f0f0f0 !important;
-}
-
-:global(.dark-theme) .ant-modal-header {
-  background-color: #1f1f1f !important;
-  border-bottom: 1px solid #434343 !important;
-}
-
-:global(.light-theme) .ant-modal-title {
-  color: rgba(0, 0, 0, 0.88) !important;
-}
-
-:global(.dark-theme) .ant-modal-title {
-  color: rgba(255, 255, 255, 0.88) !important;
-}
-
-/* Modal关闭按钮 */
-:global(.light-theme) .ant-modal-close {
-  color: rgba(0, 0, 0, 0.45) !important;
-}
-
-:global(.dark-theme) .ant-modal-close {
-  color: rgba(255, 255, 255, 0.45) !important;
-}
-
-:global(.light-theme) .ant-modal-close:hover {
-  color: rgba(0, 0, 0, 0.88) !important;
-}
-
-:global(.dark-theme) .ant-modal-close:hover {
-  color: rgba(255, 255, 255, 0.88) !important;
-}
-
-/* Modal底部按钮区域 */
-:global(.light-theme) .ant-modal-footer {
-  background-color: #fff !important;
-  border-top: 1px solid #f0f0f0 !important;
-}
-
-:global(.dark-theme) .ant-modal-footer {
-  background-color: #1f1f1f !important;
-  border-top: 1px solid #434343 !important;
-}
-
-/* 响应式隐藏类 */
-@media (max-width: 768px) {
-  .hidden-sm {
-    display: none !important;
-  }
-}
-
-@media (max-width: 576px) {
-  .hidden-xs {
-    display: none !important;
-  }
-}
-
-/* 表格响应式优化 */
-@media (max-width: 768px) {
-  .ant-table-thead > tr > th,
-  .ant-table-tbody > tr > td {
-    padding: 8px 4px !important;
-    font-size: 12px !important;
-  }
-
-  .ant-table-thead > tr > th {
-    white-space: nowrap !important;
-  }
-}
-
-@media (max-width: 576px) {
-  .ant-table-thead > tr > th,
-  .ant-table-tbody > tr > td {
-    padding: 6px 2px !important;
-    font-size: 11px !important;
-  }
-
-  .ant-space-item {
-    margin-right: 2px !important;
-  }
-
-  .ant-btn-sm {
-    padding: 0 4px !important;
-    font-size: 12px !important;
-  }
-}
-
-/* 表格样式优化 - 去除边框线 */
-.ant-table {
-  border: none !important;
-}
-
-.ant-table-thead > tr > th {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06) !important;
-  border-right: none !important;
-  background: transparent !important;
-}
-
-.ant-table-tbody > tr > td {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.03) !important;
-  border-right: none !important;
-}
-
-.ant-table-tbody > tr:last-child > td {
-  border-bottom: none !important;
-}
-
-/* 深色主题表格样式 */
-body.dark-theme .ant-table-thead > tr > th {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
-  background: transparent !important;
-}
-
-body.dark-theme .ant-table-tbody > tr > td {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03) !important;
-}
-
-/* 表格行悬停效果 */
-.ant-table-tbody > tr:hover > td {
-  background-color: rgba(0, 0, 0, 0.02) !important;
-}
-
-body.dark-theme .ant-table-tbody > tr:hover > td {
-  background-color: rgba(255, 255, 255, 0.02) !important;
-}
-
-/* 表格头部样式 */
-.ant-table-thead > tr > th {
-  font-weight: 600 !important;
-}
-
-/* 浅色主题表头文字 */
-body.light-theme .ant-table-thead > tr > th {
-  color: rgba(0, 0, 0, 0.85) !important;
-}
-
-/* 深色主题表头文字 */
-body.dark-theme .ant-table-thead > tr > th {
-  color: rgba(255, 255, 255, 0.85) !important;
-}
-
-/* 表格内容文字颜色 */
-body.light-theme .ant-table-tbody > tr > td {
-  color: rgba(0, 0, 0, 0.88) !important;
-}
-
-body.dark-theme .ant-table-tbody > tr > td {
-  color: rgba(255, 255, 255, 0.88) !important;
-}
-
-/* 强制表头文字颜色 - 更高优先级 */
-body.light-theme .ant-table .ant-table-thead > tr > th,
-body.light-theme .ant-table-thead th {
-  color: rgba(0, 0, 0, 0.85) !important;
-}
-
-body.dark-theme .ant-table .ant-table-thead > tr > th,
-body.dark-theme .ant-table-thead th {
-  color: rgba(255, 255, 255, 0.85) !important;
-}
-
-/* 强制表格内容文字颜色 */
-body.light-theme .ant-table .ant-table-tbody > tr > td,
-body.light-theme .ant-table-tbody td {
-  color: rgba(0, 0, 0, 0.88) !important;
-}
-
-body.dark-theme .ant-table .ant-table-tbody > tr > td,
-body.dark-theme .ant-table-tbody td {
-  color: rgba(255, 255, 255, 0.88) !important;
-}
-
-/* 表头颜色过渡动画 */
-.ant-table-thead > tr > th {
-  transition: color 0.3s ease !important;
-}
-
-/* 表头颜色主题适配 */
-html body.light-theme .ant-table-thead > tr > th {
-  color: rgba(0, 0, 0, 0.85) !important;
-}
-
-html body.dark-theme .ant-table-thead > tr > th {
-  color: rgba(255, 255, 255, 0.85) !important;
-}
-
-/* 工具栏响应式布局 */
-.toolbar-container {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.toolbar-actions {
-  flex-shrink: 0;
-}
-
-.toolbar-filters {
-  flex-grow: 1;
-  display: flex;
-  justify-content: flex-end;
-}
-
-/* 小屏幕工具栏优化 */
-@media (max-width: 768px) {
-  .toolbar-container {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
-  }
-
-  .toolbar-actions {
-    width: 100%;
-  }
-
-  .toolbar-filters {
-    width: 100%;
-    justify-content: flex-start;
-  }
-
-  .toolbar-filters .ant-space {
-    width: 100%;
-  }
-
-  .toolbar-filters .ant-input-search {
-    flex: 1;
-    min-width: 120px !important;
-  }
-
-  .toolbar-filters .ant-select {
-    flex-shrink: 0;
-  }
-}
-
-@media (max-width: 576px) {
-  .toolbar-container {
-    gap: 8px;
-  }
-
-  .toolbar-actions .ant-btn {
-    padding: 4px 8px !important;
-    font-size: 12px !important;
-  }
-
-  .toolbar-filters .ant-input-search {
-    min-width: 100px !important;
-  }
-
-  .toolbar-filters .ant-select {
-    min-width: 60px !important;
-  }
-}
-
-/* 表格操作按钮优化 */
-.table-actions {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 32px;
-}
-
-.action-btn {
-  min-width: 28px !important;
-  height: 28px !important;
-  padding: 0 !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-}
-
-/* 小屏幕表格操作优化 */
-@media (max-width: 768px) {
-  .table-actions {
-    min-height: 28px;
-  }
-
-  .action-btn {
-    min-width: 24px !important;
-    height: 24px !important;
-    font-size: 12px !important;
-  }
-
-  .table-actions .ant-space {
-    gap: 2px !important;
-  }
-}
-
-@media (max-width: 576px) {
-  .table-actions {
-    min-height: 24px;
-  }
-
-  .action-btn {
-    min-width: 20px !important;
-    height: 20px !important;
-    font-size: 10px !important;
-  }
-
-  .table-actions .ant-space {
-    gap: 1px !important;
-  }
-}
-
-/* 表格容器响应式优化 */
-@media (max-width: 768px) {
-  .ant-card {
-    margin: 8px !important;
-    padding: 0 !important;
-  }
-
-  .ant-card-body {
-    padding: 12px !important;
-  }
-
-  .ant-table-wrapper {
-    overflow-x: auto !important;
-  }
-
-  .ant-table {
-    min-width: 600px !important;
-  }
-}
-
-@media (max-width: 576px) {
-  .ant-card {
-    margin: 4px !important;
-  }
-
-  .ant-card-body {
-    padding: 8px !important;
-  }
-
-  .ant-table {
-    min-width: 500px !important;
-  }
-
-  .ant-table-pagination {
-    margin-top: 8px !important;
-  }
-
-  .ant-pagination-options {
-    display: none !important;
-  }
-}
-
-/* Tooltip z-index 修复 */
-.ant-tooltip {
-  z-index: 1060 !important;
-}
-
-.ant-tooltip-inner {
-  max-width: 300px !important;
-  word-wrap: break-word !important;
-  word-break: break-all !important;
-}
-
-/* 表格行内Tooltip特殊处理 */
-.ant-table-tbody > tr {
-  position: relative !important;
-}
-
-.ant-table-tbody > tr:hover {
-  z-index: 1 !important;
-}
-
-/* 确保Tooltip不被表格遮挡 */
-.ant-table-wrapper {
-  position: relative !important;
-  z-index: auto !important;
-}
-
-.ant-table-container {
-  position: relative !important;
-  z-index: auto !important;
-}
-
-/* Popconfirm z-index 修复 */
-.ant-popover {
-  z-index: 1060 !important;
-}
-
-/* Modal和其他浮层的z-index层级 */
-.ant-modal-mask {
-  z-index: 1000 !important;
-}
-
-.ant-modal-wrap {
-  z-index: 1000 !important;
-}
-
-.ant-drawer-mask {
-  z-index: 1000 !important;
-}
-
-.ant-drawer-wrap {
-  z-index: 1000 !important;
-}
-
-/* 通用文本截断样式 */
-.text-ellipsis {
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
-}
-
-.text-ellipsis-2 {
-  display: -webkit-box !important;
-  -webkit-line-clamp: 2 !important;
-  -webkit-box-orient: vertical !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-}
-
-.text-ellipsis-3 {
-  display: -webkit-box !important;
-  -webkit-line-clamp: 3 !important;
-  -webkit-box-orient: vertical !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-}
-
-/* 表格单元格内容截断 */
-.ant-table-cell .text-ellipsis {
-  max-width: 100% !important;
-  display: block !important;
-}
-
-/* 链接按钮截断 */
-.ant-btn-link.text-ellipsis {
-  text-align: left !important;
-  padding: 0 !important;
-  height: auto !important;
-  line-height: inherit !important;
-}
-
-/* Tag截断 */
-.ant-tag.text-ellipsis {
-  max-width: 100% !important;
-  display: inline-block !important;
-}
-
-/* 表格容器优化 - 减少底部空白 */
-.ant-table-wrapper {
-  margin-bottom: 0 !important;
-}
-
-.ant-table-container {
-  margin-bottom: 0 !important;
-}
-
-/* 表格内容区域优化 */
-.ant-table-content {
-  overflow: visible !important;
-}
-
-/* 表格体优化 */
-.ant-table-body {
-  margin-bottom: 0 !important;
-  overflow-x: auto !important;
-  overflow-y: visible !important;
-}
-
-/* 卡片内表格优化 */
-.ant-card .ant-table-wrapper {
-  margin-bottom: 0 !important;
-}
-
-.ant-card .ant-card-body {
-  padding-bottom: 16px !important;
-}
-
-/* 分页器与表格的间距 */
-.ant-table-wrapper .ant-table-pagination {
-  margin-top: 16px !important;
-  margin-bottom: 0 !important;
+  flex-direction: column;
+}
+
+code, pre, kbd, samp {
+  font-family: var(--ant-font-family-code, "JetBrains Mono", "Fira Code", "SF Mono", Consolas, Monaco, monospace);
+}
+
+::selection {
+  background-color: var(--ant-color-primary-bg);
+  color: var(--ant-color-primary);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--ant-color-border); border-radius: 4px; transition: background 0.2s; }
+::-webkit-scrollbar-thumb:hover { background: var(--ant-color-border-secondary); }
+* { scrollbar-width: thin; scrollbar-color: var(--ant-color-border) transparent; }
+
+:focus-visible {
+  outline: 2px solid var(--ant-color-primary);
+  outline-offset: 2px;
+}
+
+a {
+  color: var(--ant-color-primary);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+a:hover { color: var(--ant-color-primary-hover); }
+
+img { max-width: 100%; height: auto; }
+table { border-collapse: collapse; border-spacing: 0; }
+[disabled] { cursor: not-allowed; }
+
+body.light-theme,
+body.dark-theme {
+  transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Utilities */
+.text-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text-ellipsis-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.text-ellipsis-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+@media (max-width: 575px) { .hidden-xs { display: none !important; } }
+@media (max-width: 767px) { .hidden-sm { display: none !important; } }
+@media (min-width: 768px) { .hidden-md-up { display: none !important; } }
+
+/* Animations */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes slideInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.animate-fade-in { animation: fadeIn 0.3s ease-out; }
+.animate-slide-in-up { animation: slideInUp 0.4s ease-out; }
+.animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+.animate-spin { animation: spin 1s linear infinite; }
+
+/* Status colors */
+.status-success { color: var(--ant-color-success); }
+.status-warning { color: var(--ant-color-warning); }
+.status-error { color: var(--ant-color-error); }
+.status-info { color: var(--ant-color-info); }
+
+/* Ant Design enhancements */
+.ant-card.ant-card-hoverable:hover { box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.12); transform: translateY(-2px); }
+.ant-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.ant-btn:active:not(:disabled) { transform: scale(0.98); }
+.ant-table { border-radius: var(--ant-border-radius-lg); overflow: hidden; }
+.ant-table-thead > tr > th { font-weight: 600; background: transparent !important; }
+.ant-modal { top: 80px; }
+.ant-modal-content { border-radius: var(--ant-border-radius-lg); overflow: hidden; }
+.ant-drawer-content { border-radius: var(--ant-border-radius-lg) 0 0 var(--ant-border-radius-lg); }
+.ant-message-notice-content { border-radius: var(--ant-border-radius-lg); box-shadow: 0 6px 16px -8px rgba(0, 0, 0, 0.08), 0 9px 28px 0 rgba(0, 0, 0, 0.05), 0 12px 48px 16px rgba(0, 0, 0, 0.03); }
+.ant-notification-notice { border-radius: var(--ant-border-radius-lg); }
+.ant-tooltip-inner { border-radius: var(--ant-border-radius); }
+.ant-tag { border-radius: var(--ant-border-radius-sm); }
+.ant-badge-dot { box-shadow: 0 0 0 2px var(--ant-color-bg-container); }
+.ant-skeleton-content .ant-skeleton-title, .ant-skeleton-content .ant-skeleton-paragraph > li { border-radius: var(--ant-border-radius); }
+.ant-progress-inner { border-radius: 100px; }
+
+@media print {
+  body { background: white !important; color: black !important; }
+  .no-print { display: none !important; }
 }
