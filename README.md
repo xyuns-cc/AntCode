@@ -67,7 +67,6 @@ npm install
 5. **启动后端服务**
 
 ```bash
-# 回到项目根目录
 uv run python -m src.main
 ```
 
@@ -88,8 +87,6 @@ npm run dev
 
 ## 🐳 Docker 部署
 
-### 使用 Docker Compose
-
 ```bash
 cd docker
 docker compose up -d
@@ -97,70 +94,82 @@ docker compose up -d
 
 详细配置请参考 [docker/README.md](docker/README.md)
 
-## 📖 配置说明
-
-### 环境变量
+## 📖 环境变量配置
 
 在 `.env` 文件中配置：
 
 ```env
-# 数据库配置
-DATABASE_URL=sqlite:///./data/db/antcode.sqlite3
+# 数据库配置（留空使用默认 SQLite）
+DATABASE_URL=
 
-# Redis 配置（可选）
-REDIS_URL=redis://localhost:6379/0
+# Redis 配置（留空使用内存缓存）
+REDIS_URL=
 
 # 服务器配置
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
+SERVER_DOMAIN=localhost
+
+# 前端配置
+FRONTEND_PORT=3000
 
 # 日志配置
 LOG_LEVEL=INFO
+LOG_FORMAT=text
+LOG_TO_FILE=true
+```
+
+### 数据库配置示例
+
+```env
+# SQLite（默认，无需配置）
+DATABASE_URL=
+
+# MySQL
+DATABASE_URL=mysql+asyncmy://user:password@localhost:3306/antcode
+
+# PostgreSQL
+DATABASE_URL=postgresql://user:password@localhost:5432/antcode
 ```
 
 ## 📁 项目结构
 
 ```
 AntCode/
-├── src/                    # 后端源代码
-│   ├── api/v1/            # API 路由
-│   ├── core/              # 核心配置（认证、缓存、日志等）
-│   ├── models/            # 数据模型
-│   ├── schemas/           # Pydantic 模式
-│   ├── services/          # 业务逻辑
-│   ├── tasks/             # 爬虫任务
-│   ├── utils/             # 工具函数
-│   └── main.py            # 应用入口
-├── web/antcode-frontend/  # 前端源代码
-├── docker/                # Docker 配置
-├── docs/                  # 项目文档
-└── data/                  # 运行时数据（自动生成）
+├── src/                        # 后端源代码
+│   ├── api/v1/                 # API 路由
+│   ├── core/                   # 核心模块（配置、认证、缓存、日志等）
+│   ├── models/                 # 数据模型
+│   ├── schemas/                # Pydantic 模式
+│   ├── services/               # 业务逻辑
+│   │   ├── envs/               # 环境管理服务
+│   │   ├── files/              # 文件服务
+│   │   ├── logs/               # 日志服务
+│   │   ├── monitoring/         # 监控服务
+│   │   ├── projects/           # 项目服务
+│   │   ├── scheduler/          # 调度服务
+│   │   ├── users/              # 用户服务
+│   │   └── websockets/         # WebSocket 服务
+│   ├── tasks/                  # 爬虫任务
+│   ├── utils/                  # 工具函数
+│   └── main.py                 # 应用入口
+├── web/antcode-frontend/       # 前端源代码
+│   ├── src/
+│   │   ├── components/         # 组件
+│   │   ├── pages/              # 页面
+│   │   ├── services/           # API 服务
+│   │   ├── stores/             # 状态管理
+│   │   └── hooks/              # 自定义 Hooks
+│   └── ...
+├── docker/                     # Docker 配置
+├── docs/                       # 项目文档
+├── data/                       # 运行时数据（自动生成，不提交）
+│   ├── db/                     # 数据库文件
+│   ├── logs/                   # 日志文件
+│   └── storage/                # 项目存储
+├── pyproject.toml              # Python 项目配置
+└── uv.lock                     # 依赖锁定文件
 ```
-
-## 🧪 开发指南
-
-### 代码规范
-
-```bash
-# 代码检查
-uvx ruff check .
-
-# 代码格式化
-uvx ruff format .
-```
-
-### 运行测试
-
-```bash
-pytest -q
-```
-
-## 📚 文档
-
-- [API 文档](docs/project-api.md)
-- [调度器文档](docs/scheduler-api.md)
-- [数据库配置](docs/database-setup.md)
-- [Docker 部署](docker/README.md)
 
 ## 📄 许可证
 
