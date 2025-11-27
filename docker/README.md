@@ -1,6 +1,6 @@
 # AntCode Docker 部署指南
 
-## 🚀 快速开始
+## 快速开始
 
 ### 前置要求
 
@@ -30,26 +30,26 @@ docker compose ps
 docker compose logs -f
 ```
 
-## 📦 镜像说明
+## 镜像说明
 
 项目采用前后端分离架构：
 
-- **后端镜像** (`Dockerfile.backend`): 基于 Python 3.11-slim，约 200MB
+- **后端镜像** (`docker/Dockerfile.backend`): 基于 Python 3.11-slim，约 200MB
 - **前端镜像** (`web/antcode-frontend/Dockerfile`): 基于 Nginx，约 30MB
 
-## 🏗️ 构建镜像
+## 构建镜像
 
 ### 后端镜像
 
 ```bash
 # SQLite 版本（默认）
-docker build -f Dockerfile.backend -t antcode-backend:latest .
+docker build -f docker/Dockerfile.backend -t antcode-backend:latest .
 
 # MySQL 版本
-docker build -f Dockerfile.backend --build-arg DB_TYPE=mysql -t antcode-backend:latest .
+docker build -f docker/Dockerfile.backend --build-arg DB_TYPE=mysql -t antcode-backend:latest .
 
 # PostgreSQL 版本
-docker build -f Dockerfile.backend --build-arg DB_TYPE=postgres -t antcode-backend:latest .
+docker build -f docker/Dockerfile.backend --build-arg DB_TYPE=postgres -t antcode-backend:latest .
 ```
 
 ### 前端镜像
@@ -59,7 +59,7 @@ cd web/antcode-frontend
 docker build -t antcode-frontend:latest .
 ```
 
-## 🔧 部署配置
+## 部署配置
 
 ### 方案 1: SQLite + 内存缓存（默认）
 
@@ -98,14 +98,36 @@ cd docker
 docker compose up -d --build
 ```
 
-## 🌐 访问地址
+## 数据目录
+
+所有持久化数据统一存放在 `data/` 目录下：
+
+```
+data/
+├── db/              # 数据库文件（SQLite）
+├── logs/            # 应用日志
+│   └── tasks/       # 任务执行日志
+└── storage/         # 存储文件
+    ├── projects/    # 项目文件
+    ├── venvs/       # Python 虚拟环境
+    └── mise/        # mise 缓存
+```
+
+Docker 挂载配置：
+
+```yaml
+volumes:
+  - ../data:/app/data
+```
+
+## 访问地址
 
 - 前端: http://localhost:3000
 - 后端 API: http://localhost:8000
 - API 文档: http://localhost:8000/docs
 - 默认账号: `admin` / `admin`
 
-## 🔍 服务管理
+## 服务管理
 
 ### 基本命令
 
@@ -141,7 +163,7 @@ docker compose up -d antcode-frontend
 docker compose restart antcode-backend
 ```
 
-## 🛠️ 环境变量
+## 环境变量
 
 主要配置项（`.env` 文件）：
 
@@ -150,20 +172,21 @@ docker compose restart antcode-backend
 SERVER_PORT=8000
 FRONTEND_PORT=3000
 
-# 数据库
-DATABASE_URL=sqlite:///./data/antcode.db
-DB_TYPE=sqlite
+# 数据库（留空使用 SQLite，存储在 data/db/）
+DATABASE_URL=
 
-# Redis（可选）
-REDIS_URL=redis://:password@redis:6379/0
+# Redis（可选，留空使用内存缓存）
+REDIS_URL=
 
-# JWT 密钥（必须修改）
-JWT_SECRET_KEY=your-secret-key-here
+# 日志
+LOG_LEVEL=INFO
+LOG_FORMAT=text
+LOG_TO_FILE=true
 ```
 
 详细配置请参考 [ENV_CONFIG.md](ENV_CONFIG.md)
 
-## 🐛 故障排查
+## 故障排查
 
 ### 查看日志
 
@@ -210,10 +233,10 @@ docker compose up -d --force-recreate
 
 **Q: 数据丢失**
 - 确认 `volumes` 配置正确
-- 使用命名卷而非绑定挂载
+- 数据存储在 `data/` 目录
 - 定期备份数据
 
-## 🔐 生产环境建议
+## 生产环境建议
 
 1. **修改默认密码**
    - JWT_SECRET_KEY
@@ -237,11 +260,11 @@ docker compose up -d --force-recreate
 
 4. **数据备份**
    ```bash
-   # 备份存储
-   docker cp antcode-backend:/app/storage ./backup/
+   # 备份整个数据目录
+   tar -czvf backup.tar.gz data/
    
-   # 备份数据库
-   docker exec antcode-backend cp /app/data/antcode.db /app/data/backup.db
+   # 或仅备份数据库
+   cp data/db/antcode.sqlite3 backup/
    ```
 
 5. **日志轮转**
@@ -253,15 +276,8 @@ docker compose up -d --force-recreate
        max-file: "3"
    ```
 
-## 📚 相关文档
+## 相关文档
 
 - [ENV_CONFIG.md](ENV_CONFIG.md) - 环境变量详细说明
 - [../README.md](../README.md) - 项目主文档
 - [../docs/](../docs/) - API 和系统文档
-
-## 💬 获取帮助
-
-遇到问题？
-1. 查看本文档的故障排查部分
-2. 检查日志：`docker compose logs -f`
-3. 提交 GitHub Issue

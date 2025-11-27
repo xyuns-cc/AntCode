@@ -1,31 +1,27 @@
-import { globalAlert } from '@/components/common/AlertManager'
+import { globalNotification, type NoticeType, showNotification as showNotificationFromHook } from '@/hooks/useMessage'
 
-export type NoticeType = 'success' | 'error' | 'warning' | 'info'
+export type { NoticeType }
 
-// 兼容旧的API调用，转发到新的Alert系统
+/** @deprecated Use globalMessage or globalNotification from useMessage */
 export function showNotification(
   type: NoticeType,
   message: string,
   description?: string,
-  options?: {
-    placement?: any
-    duration?: number
-    key?: string
-    durationMs?: number // 兼容旧的 API
-    meta?: Record<string, any> // 兼容 meta 数据，但不再处理
-  }
+  options?: { placement?: string; duration?: number; key?: string; durationMs?: number; meta?: Record<string, unknown> }
 ) {
-  // 处理持续时间
-  const duration = options?.durationMs || options?.duration || (type === 'error' ? 0 : 4500)
-
-  // 转发到新的Alert系统，只使用原始的description，忽略meta信息
-  return globalAlert.show(type, message, description, duration)
+  return showNotificationFromHook(type, message, description, options)
 }
 
-// 兼容函数
-export function configureNotifications(config: any) {
-  // Alert系统不需要额外配置
-  console.log('Alert system configuration applied')
+/** @deprecated Configuration is handled by App component */
+export function configureNotifications(_config: unknown) {
+  console.warn('configureNotifications is deprecated')
+}
+
+export const notification = {
+  success: (message: string, description?: string, duration?: number) => globalNotification.success(message, description, duration),
+  error: (message: string, description?: string, duration?: number) => globalNotification.error(message, description, duration),
+  warning: (message: string, description?: string, duration?: number) => globalNotification.warning(message, description, duration),
+  info: (message: string, description?: string, duration?: number) => globalNotification.info(message, description, duration),
 }
 
 export default showNotification

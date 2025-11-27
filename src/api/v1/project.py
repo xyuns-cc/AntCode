@@ -1,35 +1,30 @@
-"""
-项目相关API接口
-处理项目的创建、查询、更新、删除等操作
-"""
-
-from typing import Optional, List, Dict, Any
-
+"""项目管理接口"""
 from fastapi import APIRouter, Depends, Form, File, UploadFile, Query, status, HTTPException, Body
 from loguru import logger
 
 from src.core.auth import get_current_user_id, get_current_user
 from src.core.exceptions import ProjectNotFoundException
+from src.core.response import success as success_response, page as page_response, Messages
 from src.models.enums import ProjectType, ProjectStatus
 from src.schemas.common import BaseResponse, PaginationResponse, PaginationInfo
-from src.core.response import success as success_response, page as page_response
-from src.core.response import Messages
 from src.schemas.project import (
     ProjectCreateRequest, ProjectRuleCreateRequest, ProjectFileCreateRequest, ProjectCodeCreateRequest,
     ProjectResponse, ProjectListResponse, ProjectCreateFormRequest, ProjectListQueryRequest, TaskJsonRequest,
-    ProjectRuleUpdateRequest,
-    ProjectCodeUpdateRequest, FileStructureResponse, FileContentResponse, ProjectFileContentUpdateRequest
+    ProjectRuleUpdateRequest, ProjectCodeUpdateRequest, FileStructureResponse, FileContentResponse,
+    ProjectFileContentUpdateRequest, ProjectFileUpdateRequest
 )
 from src.schemas.project_unified import UnifiedProjectUpdateRequest
 from src.services.projects.project_service import project_service
+from src.services.projects.project_file_service import project_file_service
+from src.services.projects.relation_service import relation_service
 from src.services.projects.unified_project_service import unified_project_service
+from src.services.users.user_service import user_service
 from src.utils.api_optimizer import fast_response, monitor_performance, optimize_large_response
 
 project_router = APIRouter()
 
 
-def create_project_response(project) -> ProjectResponse:
-    """创建 ProjectResponse 对象"""
+def create_project_response(project):
     return ProjectResponse.model_construct(
         id=project.id,
         name=project.name,
@@ -54,46 +49,38 @@ def create_project_response(project) -> ProjectResponse:
 
 
 async def get_project_create_form(
-    # 通用参数
-    name=Form(..., min_length=3, max_length=50, description="项目名称"),
-    description=Form(None, max_length=500, description="项目描述"),
-    type=Form(..., description="项目类型"),
-    tags=Form(None, description="项目标签，逗号分隔或JSON数组"),
-    dependencies=Form(None, description="Python依赖包JSON数组"),
-    venv_scope=Form(..., description="虚拟环境作用域：shared/private，必须选择"),
-    shared_venv_key=Form(None, description="共享环境标识（共享环境必填）"),
-    interpreter_source=Form("mise", description="解释器来源：mise/local（私有环境时使用）"),
-    python_version=Form(None, description="Python版本（私有环境必填）"),
-    python_bin=Form(None, description="当来源为local时的python路径（私有环境时使用）"),
-
-    # 文件项目参数
-    entry_point=Form(None, max_length=255, description="入口文件路径"),
-    runtime_config=Form(None, description="运行时配置JSON"),
-    environment_vars=Form(None, description="环境变量JSON"),
-
-    # 规则项目参数
-    engine=Form("requests", description="采集引擎 (browser/requests/curl_cffi)"),
-    target_url=Form(None, max_length=2000, description="目标URL"),
-    url_pattern=Form(None, max_length=500, description="URL匹配模式"),
-    request_method=Form("GET", description="请求方法 (GET/POST/PUT/DELETE)"),
-    callback_type=Form("list", description="回调类型 (list/detail)"),
-    extraction_rules=Form(None, description="提取规则数组JSON"),
-    pagination_config=Form(None, description="分页配置JSON"),
-    max_pages=Form(10, ge=1, le=1000, description="最大页数"),
-    start_page: Optional[int] = Form(1, ge=1, description="起始页码"),
-    request_delay: Optional[int] = Form(1000, ge=0, description="请求间隔(ms)"),
-    priority: Optional[int] = Form(0, description="优先级"),
-    headers: Optional[str] = Form(None, description="请求头JSON"),
-    cookies: Optional[str] = Form(None, description="Cookie JSON"),
-
-    # 代码项目参数
-    language: Optional[str] = Form("python", max_length=50, description="编程语言"),
-    version: Optional[str] = Form("1.0.0", max_length=20, description="版本号"),
-    code_entry_point: Optional[str] = Form(None, max_length=255, description="入口函数"),
-    documentation: Optional[str] = Form(None, description="代码文档"),
-    code_content: Optional[str] = Form(None, description="代码内容（直接提交代码时使用）"),
+    name=Form(..., min_length=3, max_length=50),
+    description=Form(None, max_length=500),
+    type=Form(...),
+    tags=Form(None),
+    dependencies=Form(None),
+    venv_scope=Form(...),
+    shared_venv_key=Form(None),
+    interpreter_source=Form("mise"),
+    python_version=Form(None),
+    python_bin=Form(None),
+    entry_point=Form(None, max_length=255),
+    runtime_config=Form(None),
+    environment_vars=Form(None),
+    engine=Form("requests"),
+    target_url=Form(None, max_length=2000),
+    url_pattern=Form(None, max_length=500),
+    request_method=Form("GET"),
+    callback_type=Form("list"),
+    extraction_rules=Form(None),
+    pagination_config=Form(None),
+    max_pages=Form(10, ge=1, le=1000),
+    start_page=Form(1, ge=1),
+    request_delay=Form(1000, ge=0),
+    priority=Form(0),
+    headers=Form(None),
+    cookies=Form(None),
+    language=Form("python", max_length=50),
+    version=Form("1.0.0", max_length=20),
+    code_entry_point=Form(None, max_length=255),
+    documentation=Form(None),
+    code_content=Form(None),
 ):
-    """获取项目创建Form参数的依赖函数"""
     return ProjectCreateFormRequest(
         name=name,
         description=description,
@@ -130,15 +117,14 @@ async def get_project_create_form(
 
 
 async def get_project_list_query(
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
-    type: Optional[ProjectType] = Query(None, description="项目类型筛选"),
-    status: Optional[ProjectStatus] = Query(None, description="项目状态筛选"),
-    tag: Optional[str] = Query(None, description="标签筛选"),
-    created_by: Optional[int] = Query(None, description="创建者ID筛选"),
-    search: Optional[str] = Query(None, description="关键字搜索（名称、描述）"),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    type: str = Query(None),
+    status: str = Query(None),
+    tag: str = Query(None),
+    created_by: int = Query(None),
+    search: str = Query(None),
 ):
-    """获取项目列表查询参数的依赖函数"""
     return ProjectListQueryRequest(
         page=page,
         size=size,
@@ -159,11 +145,11 @@ async def get_project_list_query(
     response_description="返回创建的项目信息"
 )
 async def create_project(
-    form_data: ProjectCreateFormRequest = Depends(get_project_create_form),
-    file: Optional[UploadFile] = File(None, description="项目文件（文件项目必需）"),
-    files: Optional[List[UploadFile]] = File(None, description="多个项目文件（可选）"),
-    code_file: Optional[UploadFile] = File(None, description="代码文件（代码项目必需）"),
-    current_user_id: int = Depends(get_current_user_id)
+    form_data=Depends(get_project_create_form),
+    file=File(None),
+    files=File(None),
+    code_file=File(None),
+    current_user_id=Depends(get_current_user_id)
 ):
     """创建项目"""
 
@@ -271,22 +257,16 @@ async def create_project(
 @monitor_performance(slow_threshold=0.5)  # 监控超过500ms的查询
 @optimize_large_response(chunk_size=50)  # 大响应优化
 async def get_projects_list(
-    query_params: ProjectListQueryRequest = Depends(get_project_list_query),
-    current_user_id: int = Depends(get_current_user_id),
-    current_user = Depends(get_current_user)
+    query_params=Depends(get_project_list_query),
+    current_user_id=Depends(get_current_user_id),
+    current_user=Depends(get_current_user)
 ):
-    # 获取当前用户信息以判断权限
-    from src.services.users.user_service import user_service
-    user = await user_service.get_user_by_id(current_user.user_id)
+    is_admin = await user_service.is_admin(current_user.user_id)
     
-    # 管理员可以查看所有项目，普通用户只能查看自己创建的项目
-    user_filter = None if user and user.is_admin else current_user_id
-    
-    # 如果是管理员且指定了created_by筛选，使用created_by作为筛选条件
-    if user and user.is_admin and query_params.created_by is not None:
+    user_filter = None if is_admin else current_user_id
+    if is_admin and query_params.created_by is not None:
         user_filter = query_params.created_by
 
-    # 查询项目列表
     projects, total = await project_service.get_projects_list(
         page=query_params.page,
         size=query_params.size,
@@ -333,8 +313,8 @@ async def get_projects_list(
 )
 @fast_response(cache_ttl=120, namespace="project:detail", key_prefix_fn=lambda args, kwargs: str(kwargs.get('project_id') if 'project_id' in kwargs else (args[0] if args else '')))
 async def get_project_detail(
-    project_id: int,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    current_user_id=Depends(get_current_user_id)
 ):
     
     
@@ -348,7 +328,6 @@ async def get_project_detail(
     response_data = create_project_response(project)
 
     # 根据项目类型添加详细信息 - 使用应用层关联
-    from src.services.projects.relation_service import relation_service
     if project.type == ProjectType.FILE:
         file_detail = await relation_service.get_project_file_detail(project.id)
         if file_detail:
@@ -411,9 +390,9 @@ async def get_project_detail(
     response_description="返回更新后的项目信息"
 )
 async def update_project(
-    project_id: int,
-    request: UnifiedProjectUpdateRequest,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    request,
+    current_user_id=Depends(get_current_user_id)
 ):
     """统一更新项目 - 支持所有项目类型的字段更新"""
 
@@ -428,7 +407,6 @@ async def update_project(
     response_data = ProjectResponse.from_orm(project)
     
     # 根据项目类型添加详细信息
-    from src.services.projects.relation_service import relation_service
     if project.type == ProjectType.FILE:
         file_detail = await relation_service.get_project_file_detail(project.id)
         if file_detail:
@@ -490,8 +468,8 @@ async def update_project(
     response_description="返回删除操作结果"
 )
 async def delete_project(
-    project_id: int,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    current_user_id=Depends(get_current_user_id)
 ):
 
     # 删除项目
@@ -504,7 +482,7 @@ async def delete_project(
 
 @project_router.post(
     "/batch-delete",
-    response_model=BaseResponse[Dict[str, Any]],
+    response_model=BaseResponse[dict],
     summary="批量删除项目",
     description="批量删除多个项目（不可逆操作）",
     response_description="返回批量删除操作结果"
@@ -512,8 +490,8 @@ async def delete_project(
 @fast_response(background_execution=True)  # 后台执行
 @monitor_performance(slow_threshold=2.0)  # 监控超过2秒的批量操作
 async def batch_delete_projects(
-    request: Dict[str, List[int]] = Body(..., description="包含项目ID列表的请求体"),
-    current_user_id: int = Depends(get_current_user_id)
+    request=Body(...),
+    current_user_id=Depends(get_current_user_id)
 ):
     """批量删除项目"""
     project_ids = request.get("project_ids", [])
@@ -564,8 +542,8 @@ async def batch_delete_projects(
     response_description="返回任务JSON配置"
 )
 async def generate_task_json(
-    project_id: int,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    current_user_id=Depends(get_current_user_id)
 ):
     """生成任务JSON"""
 
@@ -582,7 +560,6 @@ async def generate_task_json(
         )
 
     # 获取规则详情 - 使用应用层关联
-    from src.services.projects.relation_service import relation_service
     rule_detail = await relation_service.get_project_rule_detail(project.id)
     if not rule_detail:
         raise HTTPException(
@@ -604,9 +581,9 @@ async def generate_task_json(
     response_description="返回更新后的项目信息"
 )
 async def update_rule_config(
-    project_id: int,
-    request: ProjectRuleUpdateRequest,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    request,
+    current_user_id=Depends(get_current_user_id)
 ):
     """更新规则项目配置"""
 
@@ -633,9 +610,9 @@ async def update_rule_config(
 
 @project_router.put("/{project_id}/code-config", response_model=BaseResponse[ProjectResponse])
 async def update_code_config(
-    project_id: int,
-    request: ProjectCodeUpdateRequest,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    request,
+    current_user_id=Depends(get_current_user_id)
 ):
     """更新代码项目配置"""
     try:
@@ -669,14 +646,12 @@ async def update_code_config(
     response_description="返回更新后的项目信息"
 )
 async def update_file_config(
-    project_id: int,
-    # 表单数据
-    entry_point: Optional[str] = Form(None, description="入口文件路径"),
-    runtime_config: Optional[str] = Form(None, description="运行时配置JSON"),
-    environment_vars: Optional[str] = Form(None, description="环境变量JSON"),
-    # 文件上传
-    file: Optional[UploadFile] = File(None, description="新的项目文件（可选）"),
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    entry_point=Form(None),
+    runtime_config=Form(None),
+    environment_vars=Form(None),
+    file=File(None),
+    current_user_id=Depends(get_current_user_id)
 ):
     """更新文件项目配置"""
     try:
@@ -693,7 +668,6 @@ async def update_file_config(
             )
 
         # 构建更新请求
-        from src.schemas.project import ProjectFileUpdateRequest
 
         # 解析JSON字段
         parsed_runtime_config = None
@@ -754,8 +728,8 @@ async def update_file_config(
     response_description="返回项目文件结构树"
 )
 async def get_project_file_structure(
-    project_id: int,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    current_user_id=Depends(get_current_user_id)
 ):
     """获取项目文件结构"""
     try:
@@ -772,7 +746,6 @@ async def get_project_file_structure(
             )
 
         # 获取文件详情
-        from src.services.projects.relation_service import relation_service
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
             raise HTTPException(
@@ -781,7 +754,6 @@ async def get_project_file_structure(
             )
 
         # 获取文件结构
-        from src.services.projects.project_file_service import project_file_service
         structure = await project_file_service.get_project_file_structure(file_detail.file_path)
 
         # 统计文件信息
@@ -827,9 +799,9 @@ async def get_project_file_structure(
     response_description="返回文件内容"
 )
 async def get_project_file_content(
-    project_id: int,
-    file_path: str = Query(..., description="文件相对路径"),
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    file_path=Query(...),
+    current_user_id=Depends(get_current_user_id)
 ):
     """获取项目文件内容"""
     try:
@@ -846,7 +818,6 @@ async def get_project_file_content(
             )
 
         # 获取文件详情
-        from src.services.projects.relation_service import relation_service
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
             raise HTTPException(
@@ -855,7 +826,6 @@ async def get_project_file_content(
             )
 
         # 获取文件内容
-        from src.services.projects.project_file_service import project_file_service
         file_content = await project_file_service.get_file_content(
             file_detail.file_path, 
             file_path
@@ -881,9 +851,9 @@ async def get_project_file_content(
     response_description="返回更新后的文件内容"
 )
 async def update_project_file_content(
-    project_id: int,
-    payload: ProjectFileContentUpdateRequest,
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    payload,
+    current_user_id=Depends(get_current_user_id)
 ):
     """更新项目文件内容"""
     try:
@@ -897,7 +867,6 @@ async def update_project_file_content(
                 detail="只有文件项目支持文件内容编辑"
             )
 
-        from src.services.projects.relation_service import relation_service
 
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
@@ -906,7 +875,6 @@ async def update_project_file_content(
                 detail="项目文件详情不存在"
             )
 
-        from src.services.projects.project_file_service import project_file_service
 
         updated = await project_file_service.update_file_content(
             file_detail.file_path,
@@ -934,9 +902,9 @@ async def update_project_file_content(
     response_description="返回文件下载"
 )
 async def download_project_file(
-    project_id: int,
-    file_path: Optional[str] = Query(None, description="文件相对路径（可选，不提供则下载原始文件）"),
-    current_user_id: int = Depends(get_current_user_id)
+    project_id,
+    file_path=Query(None),
+    current_user_id=Depends(get_current_user_id)
 ):
     """下载项目文件"""
     try:
@@ -953,7 +921,6 @@ async def download_project_file(
             )
 
         # 获取文件详情
-        from src.services.projects.relation_service import relation_service
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
             raise HTTPException(
@@ -962,7 +929,6 @@ async def download_project_file(
             )
 
         # 下载文件
-        from src.services.projects.project_file_service import project_file_service
         
         if file_path:
             # 下载解压后的特定文件

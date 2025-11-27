@@ -1,9 +1,8 @@
-"""
-Redis连接池管理器
-提供高效的Redis连接复用和管理
-"""
+"""Redis连接池管理器"""
 
 import asyncio
+import platform
+import socket
 
 import redis.asyncio as redis
 from loguru import logger
@@ -26,7 +25,6 @@ class RedisConnectionPool:
         
     @classmethod
     async def get_instance(cls):
-        """获取单例实例"""
         if cls._instance is None:
             async with cls._lock:
                 if cls._instance is None:
@@ -35,57 +33,58 @@ class RedisConnectionPool:
         return cls._instance
     
     async def connect(self):
-        """建立Redis连接池"""
+        if self._connected and self.redis_client:
+            return
+
         try:
-            # 解析Redis URL
-            url_parts = redis.from_url(settings.REDIS_URL, decode_responses=False)
-            
-            # 创建连接池
-            self.pool = redis.ConnectionPool.from_url(
-                settings.REDIS_URL,
-                # 连接池配置
-                max_connections=20,
-                retry_on_timeout=True,
-                socket_timeout=5,
-                socket_connect_timeout=5,
-                health_check_interval=30,
-                # 编码配置
-                encoding="utf-8",
-                decode_responses=False
-            )
-            
-            # 创建Redis客户端
+            pool_kwargs = {
+                "max_connections": 50,
+                "retry_on_timeout": True,
+                "socket_timeout": 10,
+                "socket_connect_timeout": 10,
+                "socket_keepalive": True,
+                "health_check_interval": 30,
+                "encoding": "utf-8",
+                "decode_responses": False,
+            }
+
+            if platform.system() == "Linux":
+                keepalive_options = {}
+                if hasattr(socket, "TCP_KEEPIDLE"):
+                    keepalive_options[socket.TCP_KEEPIDLE] = 60
+                if hasattr(socket, "TCP_KEEPINTVL"):
+                    keepalive_options[socket.TCP_KEEPINTVL] = 15
+                if hasattr(socket, "TCP_KEEPCNT"):
+                    keepalive_options[socket.TCP_KEEPCNT] = 4
+                if keepalive_options:
+                    pool_kwargs["socket_keepalive_options"] = keepalive_options
+
+            self.pool = redis.ConnectionPool.from_url(settings.REDIS_URL, **pool_kwargs)
             self.redis_client = redis.Redis(connection_pool=self.pool)
             
-            # 测试连接
             await self.redis_client.ping()
             self._connected = True
             
-            # 获取Redis信息
             info = await self.redis_client.info()
             redis_version = info.get('redis_version', 'unknown')
-            logger.info(f"✅ Redis连接池初始化成功 (版本: {redis_version})")
-            logger.info(f"   连接池最大连接数: 20")
-            logger.info(f"   健康检查间隔: 30秒")
+            logger.info(f"Redis连接池已初始化 (版本{redis_version}, 最大连接=50)")
             
-            # 启动健康检查任务
             await self._start_health_check()
             
         except redis.AuthenticationError as e:
             error_msg = f"Redis认证失败: {e}"
-            logger.error(f"❌ {error_msg}")
+            logger.error(error_msg)
             raise RedisConnectionException(error_msg)
         except redis.ConnectionError as e:
             error_msg = f"Redis连接失败: {e}"
-            logger.error(f"❌ {error_msg}")
+            logger.error(error_msg)
             raise RedisConnectionException(error_msg)
         except Exception as e:
             error_msg = f"Redis连接池初始化失败: {e}"
-            logger.error(f"❌ {error_msg}")
+            logger.error(error_msg)
             raise RedisConnectionException(error_msg)
     
     async def get_client(self):
-        """获取Redis客户端"""
         if not self._connected or not self.redis_client:
             await self.connect()
         
@@ -95,7 +94,6 @@ class RedisConnectionPool:
         return self.redis_client
     
     async def is_connected(self):
-        """检查连接状态"""
         if not self._connected or not self.redis_client:
             return False
             
@@ -107,9 +105,7 @@ class RedisConnectionPool:
             return False
     
     async def disconnect(self):
-        """断开连接池"""
         try:
-            # 停止健康检查
             if self._health_check_task and not self._health_check_task.done():
                 self._health_check_task.cancel()
                 try:
@@ -117,11 +113,9 @@ class RedisConnectionPool:
                 except asyncio.CancelledError:
                     pass
             
-            # 关闭Redis客户端
             if self.redis_client:
                 await self.redis_client.close()
                 
-            # 断开连接池
             if self.pool:
                 await self.pool.disconnect()
                 
@@ -129,20 +123,18 @@ class RedisConnectionPool:
             self.redis_client = None
             self.pool = None
             
-            logger.info("✅ Redis连接池已安全关闭")
+            logger.info("Redis连接池已关闭")
             
         except Exception as e:
-            logger.error(f"关闭Redis连接池时出错: {e}")
+            logger.error(f"关闭Redis连接池失败: {e}")
     
     async def _start_health_check(self):
-        """启动健康检查任务"""
         self._health_check_task = asyncio.create_task(self._health_check_loop())
     
     async def _health_check_loop(self):
-        """健康检查循环"""
         while True:
             try:
-                await asyncio.sleep(30)  # 每30秒检查一次
+                await asyncio.sleep(30)
                 
                 if self.redis_client:
                     await self.redis_client.ping()
@@ -156,15 +148,13 @@ class RedisConnectionPool:
             except Exception as e:
                 logger.error(f"Redis健康检查失败: {e}")
                 self._connected = False
-                # 尝试重新连接
                 try:
                     await self.connect()
                     logger.info("Redis连接已恢复")
                 except Exception as reconnect_error:
-                    logger.error(f"Redis重新连接失败: {reconnect_error}")
+                    logger.error(f"Redis重连失败: {reconnect_error}")
     
     async def get_pool_stats(self):
-        """获取连接池统计信息"""
         if not self.pool:
             return {"error": "连接池未初始化"}
         
@@ -182,19 +172,35 @@ class RedisConnectionPool:
     
     @classmethod
     async def cleanup(cls):
-        """清理单例实例"""
         if cls._instance:
             await cls._instance.disconnect()
             cls._instance = None
 
 
-# 提供便捷的全局函数
 async def get_redis_client():
-    """获取Redis客户端的便捷函数"""
     pool_manager = await RedisConnectionPool.get_instance()
     return await pool_manager.get_client()
 
 
 async def close_redis_pool():
-    """关闭Redis连接池的便捷函数"""
     await RedisConnectionPool.cleanup()
+
+
+class RedisPoolHelper:
+    """Redis操作助手类"""
+    
+    async def get(self, key):
+        client = await get_redis_client()
+        value = await client.get(key)
+        return value.decode() if isinstance(value, bytes) else value
+    
+    async def set(self, key, value, ex=None):
+        client = await get_redis_client()
+        return await client.set(key, value, ex=ex)
+    
+    async def delete(self, key):
+        client = await get_redis_client()
+        return await client.delete(key)
+
+
+redis_pool = RedisPoolHelper()

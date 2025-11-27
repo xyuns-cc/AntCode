@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-监控模块入口，导出 MonitoringAgent。
-"""
+"""监控模块"""
 
-from .agent import MonitoringAgent
-from .config import MonitoringConfig
+from src.tasks.spider.spider.monitoring.agent import MonitoringAgent
+from src.tasks.spider.spider.monitoring.config import MonitoringConfig
 
 __all__ = ["MonitoringAgent", "MonitoringConfig"]
 

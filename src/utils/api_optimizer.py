@@ -1,7 +1,4 @@
-"""
-API响应时间优化工具
-使用统一缓存系统提供异步处理、缓存和响应优化功能
-"""
+"""API响应优化工具"""
 
 import asyncio
 import hashlib

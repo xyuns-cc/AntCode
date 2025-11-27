@@ -5,36 +5,32 @@ from spider.spider.settings import REDIS_URL
 from spider.spider.utils.log import logger
 
 
-# 操作redis基础类
 class RedisCtrl:
 
     def __init__(self):
-        # 解析REDIS_URL
         parsed_url = urlparse(REDIS_URL)
         host = parsed_url.hostname or '127.0.0.1'
         port = parsed_url.port or 6379
         password = parsed_url.password
         
         try:
-            # 尝试使用密码连接
-            if password:
-                self.pool = redis.ConnectionPool(host=host, port=port, password=password)
-                self.r = redis.Redis(connection_pool=self.pool)
-                # 测试连接
-                self.r.ping()
-                logger.info(f"成功连接到Redis服务器 {host}:{port} (使用密码)")
-            else:
-                # 无密码连接
-                self.pool = redis.ConnectionPool(host=host, port=port)
-                self.r = redis.Redis(connection_pool=self.pool)
-                # 测试连接
-                self.r.ping()
-                logger.info(f"成功连接到Redis服务器 {host}:{port} (无密码)")
+            self.pool = redis.ConnectionPool(
+                host=host,
+                port=port,
+                password=password,
+                max_connections=20,
+                socket_timeout=10,
+                socket_connect_timeout=10,
+                socket_keepalive=True
+            )
+            self.r = redis.Redis(connection_pool=self.pool)
+            self.r.ping()
+            logger.info(f"Redis连接池初始化成功 {host}:{port}")
         except redis.AuthenticationError:
-            logger.error("Redis认证失败，请检查密码是否正确")
+            logger.error("Redis认证失败")
             raise
         except redis.ConnectionError as e:
-            logger.error(f"无法连接到Redis服务器: {e}")
+            logger.error(f"Redis连接失败: {e}")
             raise
         except Exception as e:
             logger.error(f"Redis连接错误: {e}")

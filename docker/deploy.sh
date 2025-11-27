@@ -15,19 +15,19 @@ NC='\033[0m' # No Color
 
 # 打印带颜色的消息
 print_info() {
-    echo -e "${BLUE}ℹ${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1"
 }
 
 print_success() {
-    echo -e "${GREEN}✅${NC} $1"
+    echo -e "${GREEN}[OK]${NC} $1"
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠️${NC} $1"
+    echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
 print_error() {
-    echo -e "${RED}❌${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1"
 }
 
 print_header() {
@@ -58,15 +58,15 @@ show_main_menu() {
     print_header "AntCode Docker 管理"
     echo "请选择操作："
     echo ""
-    echo "  1) 🚀 快速启动（前端 + 后端）"
-    echo "  2) 🏗️  构建镜像"
-    echo "  3) 🔧 部署配置选择"
-    echo "  4) 📊 查看服务状态"
-    echo "  5) 📋 查看日志"
-    echo "  6) ⏹️  停止服务"
-    echo "  7) 🔄 重启服务"
-    echo "  8) 🧹 清理资源"
-    echo "  0) 🚪 退出"
+    echo "  1) 快速启动（前端 + 后端）"
+    echo "  2) 构建镜像"
+    echo "  3) 部署配置选择"
+    echo "  4) 查看服务状态"
+    echo "  5) 查看日志"
+    echo "  6) 停止服务"
+    echo "  7) 重启服务"
+    echo "  8) 清理资源"
+    echo "  0) 退出"
     echo ""
 }
 
@@ -75,12 +75,12 @@ show_build_menu() {
     print_header "构建镜像选项"
     echo "请选择要构建的镜像："
     echo ""
-    echo "  1) 🔧 构建后端镜像（SQLite）"
-    echo "  2) 🔧 构建后端镜像（MySQL）"
-    echo "  3) 🔧 构建后端镜像（PostgreSQL）"
-    echo "  4) 🎨 构建前端镜像"
-    echo "  5) 🏗️  构建所有镜像"
-    echo "  0) ⬅️  返回主菜单"
+    echo "  1) 构建后端镜像（SQLite）"
+    echo "  2) 构建后端镜像（MySQL）"
+    echo "  3) 构建后端镜像（PostgreSQL）"
+    echo "  4) 构建前端镜像"
+    echo "  5) 构建所有镜像"
+    echo "  0) 返回主菜单"
     echo ""
 }
 
@@ -93,7 +93,7 @@ show_deploy_menu() {
     echo "  2) SQLite + Redis"
     echo "  3) MySQL + Redis"
     echo "  4) PostgreSQL + Redis"
-    echo "  0) ⬅️  返回主菜单"
+    echo "  0) 返回主菜单"
     echo ""
 }
 
@@ -131,7 +131,7 @@ build_backend() {
     print_header "构建后端镜像（数据库类型: $db_type）"
     
     print_info "开始构建后端镜像..."
-    docker build -f Dockerfile.backend -t antcode-backend:latest \
+    docker build -f docker/Dockerfile.backend -t antcode-backend:latest \
         --build-arg DB_TYPE=$db_type .
     
     print_success "后端镜像构建完成！"
@@ -290,10 +290,10 @@ handle_deploy_menu() {
 show_access_info() {
     echo ""
     print_header "服务访问信息"
-    echo "  🌐 前端地址: http://localhost:3000"
-    echo "  📚 后端 API: http://localhost:8000"
-    echo "  📖 API 文档: http://localhost:8000/docs"
-    echo "  👤 默认账号: admin / admin"
+    echo "  前端地址: http://localhost:3000"
+    echo "  后端 API: http://localhost:8000"
+    echo "  API 文档: http://localhost:8000/docs"
+    echo "  默认账号: admin / admin"
     echo ""
     print_info "查看日志: cd docker && docker compose logs -f"
     print_info "停止服务: cd docker && docker compose down"
@@ -312,18 +312,18 @@ show_status() {
     
     # 后端状态
     if docker ps --filter "name=antcode-backend" --format "{{.Names}}" | grep -q antcode-backend; then
-        echo "🟢 后端服务: 运行中"
+        echo "[运行中] 后端服务"
         docker ps --filter "name=antcode-backend" --format "   容器: {{.Names}} | 状态: {{.Status}} | 端口: {{.Ports}}"
     else
-        echo "🔴 后端服务: 未运行"
+        echo "[未运行] 后端服务"
     fi
     
     # 前端状态
     if docker ps --filter "name=antcode-frontend" --format "{{.Names}}" | grep -q antcode-frontend; then
-        echo "🟢 前端服务: 运行中"
+        echo "[运行中] 前端服务"
         docker ps --filter "name=antcode-frontend" --format "   容器: {{.Names}} | 状态: {{.Status}} | 端口: {{.Ports}}"
     else
-        echo "🔴 前端服务: 未运行"
+        echo "[未运行] 前端服务"
     fi
     
     echo ""
@@ -544,4 +544,3 @@ main() {
 
 # 运行主函数
 main "$@"
-

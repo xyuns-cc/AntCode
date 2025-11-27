@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -21,8 +20,8 @@ from src.services.monitoring import monitoring_service
 router = APIRouter(prefix="/monitoring", tags=["监控"])
 
 
-def _convert_status(raw: Dict[str, str]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
+def _convert_status(raw):
+    result = {}
     for key, value in raw.items():
         if value is None or value == "":
             result[key] = None
@@ -41,8 +40,8 @@ def _convert_status(raw: Dict[str, str]) -> Dict[str, Any]:
     return result
 
 
-def _convert_spider(raw: Dict[str, str]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
+def _convert_spider(raw):
+    result = {}
     for key, value in raw.items():
         if value is None or value == "":
             result[key] = None
@@ -57,10 +56,10 @@ def _convert_spider(raw: Dict[str, str]) -> Dict[str, Any]:
     return result
 
 
-@router.get("/nodes", response_model=List[NodeSummary], summary="获取在线节点列表")
+@router.get("/nodes", response_model=list[NodeSummary], summary="列出在线节点")
 async def list_online_nodes():
     nodes = await monitoring_service.get_online_nodes()
-    summaries: List[NodeSummary] = []
+    summaries = []
     for node in nodes:
         status = NodeStatus(**_convert_status(node.get("status", {})))
         spider = NodeSpiderStats(**_convert_spider(node.get("spider", {})))
@@ -74,12 +73,8 @@ async def list_online_nodes():
     return summaries
 
 
-@router.get(
-    "/nodes/{node_id}/realtime",
-    response_model=NodeRealtimeResponse,
-    summary="获取节点实时监控数据",
-)
-async def get_node_realtime(node_id: str):
+@router.get("/nodes/{node_id}/realtime", response_model=NodeRealtimeResponse, summary="获取节点实时数据")
+async def get_node_realtime(node_id):
     data = await monitoring_service.get_node_realtime(node_id)
     if not data:
         raise HTTPException(status_code=404, detail="节点实时数据不存在")
@@ -87,25 +82,18 @@ async def get_node_realtime(node_id: str):
     return NodeRealtimeResponse(node_id=node_id, data=points)
 
 
-def _require_timezone(dt: datetime, field: str) -> datetime:
+def _require_timezone(dt, field):
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{field} 必须包含时区信息，例如 2025-11-14T10:00:00+08:00",
-        )
+        raise HTTPException(status_code=400, detail=f"{field} 必须包含时区信息")
     return dt
 
 
-@router.get(
-    "/nodes/{node_id}/history",
-    response_model=HistoryQueryResponse,
-    summary="查询节点历史监控数据",
-)
+@router.get("/nodes/{node_id}/history", response_model=HistoryQueryResponse, summary="获取节点历史数据")
 async def get_node_history(
-    node_id: str,
-    metric_type: str = Query("performance", pattern="^(performance|spider)$"),
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
+    node_id,
+    metric_type=Query("performance", pattern="^(performance|spider)$"),
+    start_time=None,
+    end_time=None,
 ):
     if end_time is None:
         end_time = datetime.now(timezone.utc)
@@ -127,9 +115,9 @@ async def get_node_history(
     if not records:
         return HistoryQueryResponse(node_id=node_id, metric_type=metric_type, data=[], count=0)
 
-    items: List[NodeHistoryItem] = []
+    items = []
     for record in records:
-        transformed: Dict[str, Any] = {}
+        transformed = {}
         for key, value in record.items():
             if isinstance(value, datetime):
                 transformed[key] = value
@@ -146,11 +134,7 @@ async def get_node_history(
     return HistoryQueryResponse(node_id=node_id, metric_type=metric_type, data=items, count=len(items))
 
 
-@router.get(
-    "/cluster/summary",
-    response_model=ClusterSummaryResponse,
-    summary="获取集群汇总统计",
-)
+@router.get("/cluster/summary", response_model=ClusterSummaryResponse, summary="获取集群摘要")
 async def get_cluster_summary():
     summary = await monitoring_service.get_cluster_summary()
     return ClusterSummaryResponse(**summary)

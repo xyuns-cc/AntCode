@@ -354,23 +354,23 @@ class TaskExecutor:
             # 记录执行开始日志
             await task_log_service.write_log(
                 log_file_path,
-                f"🚀 开始执行项目: {file_detail.original_name}",
+                f"开始执行项目: {file_detail.original_name}",
                 execution_id=execution_id
             )
             await task_log_service.write_log(
                 log_file_path,
-                f"📁 工作目录: {project_dir}",
+                f"工作目录: {project_dir}",
                 execution_id=execution_id
             )
             await task_log_service.write_log(
                 log_file_path,
-                f"⚡ 执行命令: {' '.join(cmd)}",
+                f"执行命令: {' '.join(cmd)}",
                 execution_id=execution_id
             )
             if params:
                 await task_log_service.write_log(
                     log_file_path,
-                    f"📝 执行参数: {params}",
+                    f"执行参数: {params}",
                     execution_id=execution_id
                 )
 
@@ -391,10 +391,10 @@ class TaskExecutor:
             logger.info(f"执行完成，退出码: {exit_code}")
 
             # 记录执行结束
-            status_msg = "🎉 执行成功" if exit_code == 0 else f"❌ 执行失败 (退出码: {exit_code})"
+            status_msg = "执行成功" if exit_code == 0 else f"执行失败 (退出码: {exit_code})"
             await task_log_service.write_log(
                 log_file_path,
-                f"✅ 执行完成，退出码: {exit_code}",
+                f"执行完成，退出码: {exit_code}",
                 execution_id=execution_id
             )
             await task_log_service.write_log(
@@ -420,7 +420,7 @@ class TaskExecutor:
             try:
                 await task_log_service.write_log(
                     error_log_path,
-                    f"💥 执行异常: {str(e)}",
+                    f"执行异常: {str(e)}",
                     execution_id=execution_id
                 )
             except:
@@ -483,18 +483,18 @@ class TaskExecutor:
             # 记录执行开始日志
             await task_log_service.write_log(
                 log_file_path,
-                f"🚀 开始执行代码: {os.path.basename(code_file)}",
+                f"开始执行代码: {os.path.basename(code_file)}",
                 execution_id=execution_id
             )
             await task_log_service.write_log(
                 log_file_path,
-                f"⚡ 执行命令: {' '.join(cmd)}",
+                f"执行命令: {' '.join(cmd)}",
                 execution_id=execution_id
             )
             if params:
                 await task_log_service.write_log(
                     log_file_path,
-                    f"📝 执行参数: {params}",
+                    f"执行参数: {params}",
                     execution_id=execution_id
                 )
 
@@ -515,10 +515,10 @@ class TaskExecutor:
             logger.info(f"执行完成，退出码: {exit_code}")
 
             # 记录执行结束
-            status_msg = "🎉 执行成功" if exit_code == 0 else f"❌ 执行失败 (退出码: {exit_code})"
+            status_msg = "执行成功" if exit_code == 0 else f"执行失败 (退出码: {exit_code})"
             await task_log_service.write_log(
                 log_file_path,
-                f"✅ 执行完成，退出码: {exit_code}",
+                f"执行完成，退出码: {exit_code}",
                 execution_id=execution_id
             )
             await task_log_service.write_log(
@@ -544,7 +544,7 @@ class TaskExecutor:
             try:
                 await task_log_service.write_log(
                     error_log_path,
-                    f"💥 执行异常: {str(e)}",
+                    f"执行异常: {str(e)}",
                     execution_id=execution_id
                 )
             except:
@@ -711,7 +711,7 @@ class TaskExecutor:
             logger.warning(f"进程执行超时 ({timeout}秒)，正在终止...")
 
             # 记录超时信息
-            timeout_msg = f"⏰ 进程执行超时 ({timeout}秒)，正在终止进程"
+            timeout_msg = f"进程执行超时 ({timeout}秒)，正在终止进程"
             await task_log_service.write_log(
                 error_log_path,
                 timeout_msg,
@@ -734,7 +734,7 @@ class TaskExecutor:
             logger.error(f"流式读取进程输出失败: {e}")
 
             # 记录异常信息
-            error_msg = f"💥 读取进程输出异常: {str(e)}"
+            error_msg = f"读取进程输出异常: {str(e)}"
             await task_log_service.write_log(
                 error_log_path,
                 error_msg,

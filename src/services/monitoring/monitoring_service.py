@@ -2,12 +2,12 @@ import json
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import time
-import redis.asyncio as redis
 from loguru import logger
 from tortoise.expressions import Q
 
 from src.core.config import settings
 from src.models.monitoring import NodeEvent, NodePerformanceHistory, SpiderMetricsHistory
+from src.utils.redis_pool import get_redis_client
 
 
 def _to_int(value, default=0):
@@ -48,12 +48,10 @@ class MonitoringService:
 
     def __init__(self, config=None):
         self.config = config or MonitoringSettings()
-        self._redis = None
 
     async def _get_redis(self):
-        if self._redis is None:
-            self._redis = redis.from_url(settings.REDIS_URL, decode_responses=False)
-        return self._redis
+        """获取Redis客户端"""
+        return await get_redis_client()
 
     async def process_stream(self):
         """从 Redis Stream 中读取监控数据并写入数据库。"""
@@ -69,7 +67,7 @@ class MonitoringService:
         streams = await redis_client.xread(
             {self.config.stream_key: last_id},
             count=self.config.stream_batch_size,
-            block=0,
+            block=5000,
         )
 
         if not streams:
@@ -88,7 +86,11 @@ class MonitoringService:
                     new_last_id = message_id
                     processed += 1
                 except Exception as exc:  # noqa: BLE001
-                    logger.error("处理监控数据失败: %s (message_id=%s)", exc, message_id)
+                    logger.error(
+                        "处理监控数据失败: {} (message_id={})",
+                        exc,
+                        message_id,
+                    )
 
         if processed:
             await redis_client.set(self.config.stream_last_id_key, new_last_id)
@@ -228,7 +230,7 @@ class MonitoringService:
                 }
             return None
         except Exception as exc:  # noqa: BLE001
-            logger.error("解析监控消息失败: %s", exc)
+            logger.error("解析监控消息失败: {}", exc)
             return None
 
     async def _persist_data(self, data):

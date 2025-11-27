@@ -1,8 +1,4 @@
-"""
-项目服务层
-处理项目相关的业务逻辑
-"""
-
+"""项目服务层"""
 import hashlib
 import os
 import tarfile
@@ -15,17 +11,15 @@ from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Q
 
 from src.core.config import settings
-from src.models import Project, ProjectFile, ProjectRule, ProjectCode, ProjectType
-from src.models.enums import RequestMethod, CallbackType
-from src.schemas.project import (
-    TaskJsonRequest, TaskMeta, ExtractionRule, PaginationConfig
-)
+from src.models import Project, ProjectFile, ProjectRule, ProjectCode, ProjectType, Venv, ProjectVenvBinding, User
+from src.models.enums import RequestMethod, CallbackType, VenvScope
+from src.schemas.project import TaskJsonRequest, TaskMeta, ExtractionRule, PaginationConfig
+from src.services.envs.venv_service import project_venv_service
 from src.services.files.file_storage import file_storage_service
 from src.services.projects.relation_service import relation_service
+from src.services.users.user_service import user_service
 from src.utils.db_optimizer import DatabaseOptimizer, cached_query
 from src.utils.json_parser import parse_headers, parse_cookies
-from src.models.enums import VenvScope
-from src.services.envs.venv_service import project_venv_service
 
 
 class ProjectService:
@@ -99,11 +93,9 @@ class ProjectService:
                     )
                     venv_path = info.get('venv_path')
                     # 获取/落库 Venv 记录
-                    from src.models import Venv
                     venv_obj = await Venv.get_or_none(venv_path=venv_path)
                 elif venv_scope == VenvScope.SHARED:
                     # 只能选择已有共享环境，不自动创建
-                    from src.core.config import settings
                     ident = shared_key or python_version
                     shared_dir = os.path.join(settings.VENV_STORAGE_ROOT, "shared", ident)
                     if not os.path.exists(shared_dir):
@@ -112,7 +104,6 @@ class ProjectService:
                             detail="所选共享虚拟环境不存在，请先创建或选择其它选项"
                         )
                     venv_path = shared_dir
-                    from src.models import Venv
                     venv_obj = await Venv.get_or_none(venv_path=venv_path)
                 else:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不支持的虚拟环境作用域")
@@ -134,7 +125,6 @@ class ProjectService:
 
                 # 绑定表记录（当前绑定）
                 try:
-                    from src.models import ProjectVenvBinding
                     # 历史绑定置为非当前
                     await ProjectVenvBinding.filter(project_id=project.id, is_current=True).update(is_current=False)
                     if venv_obj:
@@ -150,11 +140,11 @@ class ProjectService:
                 elif request.type == ProjectType.CODE:
                     await self._create_code_project_detail(project, request, code_file, conn)
                 
-                logger.info(f"✅ 项目创建成功: {project.name} (ID: {project.id})")
+                logger.info(f"项目创建成功: {project.name} (ID: {project.id})")
                 return project
             
         except IntegrityError as e:
-            logger.error(f"❌ 项目创建失败 - 完整性错误: {e}")
+            logger.error(f"项目创建失败 - 完整性错误: {e}")
             if "name" in str(e):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -165,7 +155,7 @@ class ProjectService:
                 detail="数据完整性错误"
             )
         except Exception as e:
-            logger.error(f"❌ 项目创建失败: {e}")
+            logger.error(f"项目创建失败: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"项目创建失败: {str(e)}"
@@ -346,8 +336,6 @@ class ProjectService:
     
     async def get_project_by_id(self, project_id, user_id = None):
         """根据ID获取项目"""
-        from src.services.users.user_service import user_service
-        
         query = Project.filter(id=project_id)
         
         # 如果指定了用户ID，检查是否为管理员
@@ -384,25 +372,18 @@ class ProjectService:
         user_id = None,
         search = None
     ):
-        """获取项目列表（优化版本，包含创建者信息）"""
-        from src.services.users.user_service import user_service
-        
+        """获取项目列表（优化版本）"""
         query = Project.all()
         
         # 构建过滤条件
-        filters = {}
         if project_type:
-            filters['type'] = project_type
+            query = query.filter(type=project_type)
         if status:
-            filters['status'] = status
+            query = query.filter(status=status)
         if user_id:
-            filters['user_id'] = user_id
+            query = query.filter(user_id=user_id)
         if tag:
-            filters['tags__contains'] = tag
-        
-        # 应用过滤条件
-        if filters:
-            query = query.filter(**filters)
+            query = query.filter(tags__contains=tag)
 
         # 关键字搜索
         if search:
@@ -413,21 +394,17 @@ class ProjectService:
                     Q(description__icontains=keyword)
                 )
         
-        # 使用优化的分页查询
-        optimizer = DatabaseOptimizer()
-        projects, total, _ = await optimizer.optimized_paginate(
-            queryset=query.order_by('-created_at'),
-            page=page,
-            size=size,
-            use_cursor=False  # 对于小数据集使用传统分页
-        )
+        # 直接使用 Tortoise ORM 分页（更快）
+        total = await query.count()
+        offset = (page - 1) * size
+        projects = await query.order_by('-created_at').offset(offset).limit(size)
         
-        # 获取创建者用户名信息
-        user_ids = list(set([p.user_id for p in projects]))
+        # 批量获取创建者用户名
+        user_ids = list({p.user_id for p in projects if p.user_id})
         users_map = {}
         if user_ids:
-            users = await user_service.get_users_by_ids(user_ids)
-            users_map = {user.id: user.username for user in users}
+            users = await User.filter(id__in=user_ids).only('id', 'username')
+            users_map = {u.id: u.username for u in users}
         
         # 为项目添加创建者用户名
         for project in projects:
@@ -442,8 +419,6 @@ class ProjectService:
         user_id
     ):
         """更新项目"""
-        from src.services.users.user_service import user_service
-        
         # 检查用户是否为管理员
         user = await user_service.get_user_by_id(user_id)
         
@@ -468,8 +443,6 @@ class ProjectService:
     
     async def delete_project(self, project_id, user_id):
         """删除项目"""
-        from src.services.users.user_service import user_service
-        
         # 检查用户是否为管理员
         user = await user_service.get_user_by_id(user_id)
         
@@ -600,8 +573,6 @@ class ProjectService:
         user_id
     ):
         """更新规则项目配置"""
-        from src.services.users.user_service import user_service
-
         # 检查用户是否为管理员
         user = await user_service.get_user_by_id(user_id)
         
@@ -672,8 +643,6 @@ class ProjectService:
         user_id
     ):
         """更新代码项目配置"""
-        from src.services.users.user_service import user_service
-
         # 检查用户是否为管理员
         user = await user_service.get_user_by_id(user_id)
         
@@ -729,8 +698,6 @@ class ProjectService:
         file = None
     ):
         """更新文件项目配置"""
-        from src.services.users.user_service import user_service
-
         # 检查用户是否为管理员
         user = await user_service.get_user_by_id(user_id)
         

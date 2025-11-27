@@ -1,17 +1,16 @@
-"""
-内存管理优化工具
-提供内存监控、限制和优化功能
-"""
-
+"""内存管理优化工具"""
 import asyncio
 import gc
 import os
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import List, Callable
 
 import psutil
 from loguru import logger
+
+from src.core.cache import cache_manager
 
 
 @dataclass
@@ -96,7 +95,6 @@ class MemoryMonitor:
         
         # 清理统一缓存系统
         try:
-            from src.core.cache import cache_manager
             # 获取所有缓存的统计信息，但不进行强制清理
             # 统一缓存系统有自己的清理机制
             # 注意：这里不能使用await，因为这不是async函数

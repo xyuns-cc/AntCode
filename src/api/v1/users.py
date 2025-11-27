@@ -1,8 +1,4 @@
-"""
-用户管理API接口 - 纯Controller层，只处理HTTP请求/响应
-"""
-from typing import Optional
-
+"""用户管理接口"""
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from loguru import logger
 from tortoise.exceptions import IntegrityError
@@ -33,13 +29,13 @@ router = APIRouter()
     tags=["用户管理"]
 )
 async def get_users_list(
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
-    is_active: bool = Query(None, description="是否激活筛选"),
-    is_admin: bool = Query(None, description="是否管理员筛选"),
-    sort_by: Optional[str] = Query(None, description="排序字段，支持 id/username/created_at"),
-    sort_order: Optional[str] = Query(None, description="排序方向 asc/desc"),
-    current_admin = Depends(get_current_admin_user)
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    is_active: bool = Query(None),
+    is_admin: bool = Query(None),
+    sort_by: str = Query(None),
+    sort_order: str = Query(None),
+    current_admin=Depends(get_current_admin_user)
 ):
     """获取用户列表（仅管理员可访问，带缓存优化）"""
     
@@ -158,8 +154,8 @@ async def create_user(
     tags=["用户管理"]
 )
 async def get_user_detail(
-    user_id: int,
-    current_user = Depends(get_current_user)
+    user_id,
+    current_user=Depends(get_current_user)
 ):
     """获取用户详情"""
     
@@ -209,9 +205,9 @@ async def get_user_detail(
     tags=["用户管理"]
 )
 async def update_user(
-    user_id: int,
-    request: UserUpdateRequest,
-    current_user: TokenData = Depends(get_current_user)
+    user_id,
+    request,
+    current_user=Depends(get_current_user)
 ):
     """更新用户信息（管理员可更新所有用户，普通用户只能更新自己）"""
 
@@ -273,9 +269,9 @@ async def update_user(
     tags=["用户管理"]
 )
 async def update_user_password(
-    user_id: int,
-    request: UserPasswordUpdateRequest,
-    current_user: TokenData = Depends(get_current_user)
+    user_id,
+    request,
+    current_user=Depends(get_current_user)
 ):
     """修改用户密码（管理员可修改所有用户密码，普通用户只能修改自己的）"""
 
@@ -310,9 +306,9 @@ async def update_user_password(
     tags=["用户管理"]
 )
 async def reset_user_password(
-    user_id: int,
-    request: UserAdminPasswordUpdateRequest,
-    current_admin = Depends(get_current_admin_user)
+    user_id,
+    request,
+    current_admin=Depends(get_current_admin_user)
 ):
     """重置用户密码（仅管理员可访问）"""
 
@@ -337,8 +333,8 @@ async def reset_user_password(
     tags=["用户管理"]
 )
 async def delete_user(
-    user_id: int,
-    current_admin = Depends(get_current_admin_user)
+    user_id,
+    current_admin=Depends(get_current_admin_user)
 ):
     """删除用户（仅管理员可访问）"""
 

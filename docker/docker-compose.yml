@@ -7,7 +7,7 @@ services:
     image: ghcr.io/your-org/antcode-backend:latest
     build:
       context: ..
-      dockerfile: Dockerfile.backend
+      dockerfile: docker/Dockerfile.backend
       args:
         DB_TYPE: ${DB_TYPE:-sqlite}
     container_name: antcode-backend
@@ -17,9 +17,7 @@ services:
       - ../.env
     restart: always
     volumes:
-      - ../storage:/app/storage
-      - ../logs:/app/logs
-      - ./data:/app/data
+      - ../data:/app/data
     stop_grace_period: 10s
     healthcheck:
       test: curl -f http://localhost:${SERVER_PORT:-8000}/api/v1/health || exit 1

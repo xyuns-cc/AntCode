@@ -36,16 +36,16 @@ COPY pyproject.toml uv.lock* ./
 # 支持通过 --build-arg DB_TYPE=mysql 来指定数据库类型
 ARG DB_TYPE=sqlite
 RUN if [ "$DB_TYPE" = "mysql" ]; then \
-        echo "📦 安装 MySQL 依赖..." && \
+        echo "安装 MySQL 依赖..." && \
         uv sync --extra mysql; \
     elif [ "$DB_TYPE" = "postgres" ]; then \
-        echo "📦 安装 PostgreSQL 依赖..." && \
+        echo "安装 PostgreSQL 依赖..." && \
         uv sync --extra postgres; \
     elif [ "$DB_TYPE" = "all" ]; then \
-        echo "📦 安装所有数据库依赖..." && \
+        echo "安装所有数据库依赖..." && \
         uv sync --extra all-db; \
     else \
-        echo "📦 安装基础依赖（SQLite）..." && \
+        echo "安装基础依赖（SQLite）..." && \
         uv sync; \
     fi
 
@@ -66,18 +66,19 @@ COPY src ./src
 COPY main.py ./
 COPY migrations ./migrations
 
-# 创建必要的目录
+# 创建数据目录
 RUN mkdir -p \
-    /app/storage/projects/files \
-    /app/storage/projects/extracted \
-    /app/storage/projects/executions \
-    /app/storage/venvs/shared \
-    /app/storage/mise/cache \
-    /app/storage/executions \
-    /app/logs/tasks
+    /app/data/db \
+    /app/data/logs/tasks \
+    /app/data/storage/projects/files \
+    /app/data/storage/projects/extracted \
+    /app/data/storage/projects/executions \
+    /app/data/storage/venvs/shared \
+    /app/data/storage/mise/cache \
+    /app/data/storage/executions
 
 # 设置目录权限
-RUN chmod -R 755 /app/storage /app/logs
+RUN chmod -R 755 /app/data
 
 # 暴露端口
 EXPOSE 8000

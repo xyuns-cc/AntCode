@@ -1,407 +1,81 @@
-/* ==================== Ant Design 组件修复样式 ==================== */
-/* 此文件包含对 Ant Design 组件的各种修复和优化 */
+/* Ant Design component fixes and enhancements */
 
-/* ==================== Z-Index 层级管理 ==================== */
-/*
-  层级规划：
-  - 普通内容: 0-1
-  - 悬停状态: 2-3
-  - 固定列: 10-20
-  - Tooltip/Popover: 9999
-  - Modal: 10000
-  - Message/Notification: 10010
-*/
+/* Modal/Drawer z-index */
+.ant-modal-mask { position: fixed !important; inset: 0 !important; z-index: 1000 !important; }
+.ant-modal-wrap { position: fixed !important; inset: 0 !important; z-index: 1000 !important; overflow: auto !important; }
+.ant-drawer-mask { z-index: 1000 !important; }
+.ant-drawer-content-wrapper { z-index: 1000 !important; }
 
-/* Tooltip 和 Popover */
-.ant-tooltip,
-.ant-popover,
-.ant-popconfirm {
-  z-index: 9999 !important;
+/* Tooltip/Popover z-index */
+.ant-tooltip { z-index: 1070 !important; }
+.ant-popover { z-index: 1060 !important; }
+.ant-popconfirm { z-index: 1060 !important; }
+
+/* Message/Notification z-index */
+.ant-message { z-index: 1080 !important; }
+.ant-notification { z-index: 1080 !important; }
+
+/* Table responsive */
+@media (max-width: 767px) {
+  .ant-table-wrapper { overflow-x: auto; }
+  .ant-table { min-width: 600px; }
+  .ant-table-thead > tr > th,
+  .ant-table-tbody > tr > td { padding: 10px 8px !important; font-size: 13px; }
 }
 
-/* 下拉菜单 */
-.ant-dropdown,
-.ant-select-dropdown {
-  z-index: 9999 !important;
+@media (max-width: 575px) {
+  .ant-table { min-width: 500px; }
+  .ant-table-thead > tr > th,
+  .ant-table-tbody > tr > td { padding: 8px 6px !important; font-size: 12px; }
+  .ant-pagination-options { display: none !important; }
 }
 
-/* Modal 对话框 */
-.ant-modal-wrap,
-.ant-modal-mask {
-  z-index: 10000 !important;
+/* Card responsive */
+@media (max-width: 767px) {
+  .ant-card { border-radius: 8px; }
+  .ant-card-body { padding: 16px !important; }
 }
 
-/* Message 和 Notification 在最顶层 */
-.ant-message,
-.ant-notification {
-  z-index: 10010 !important;
+/* Form responsive */
+@media (max-width: 575px) {
+  .ant-form-item-label { padding-bottom: 4px !important; }
+  .ant-form-item { margin-bottom: 16px; }
 }
 
-/* ==================== 表格滚动优化 ==================== */
-
-/* 表格容器基础设置 */
-.ant-table-wrapper {
-  width: 100%;
-  overflow: hidden;
+/* Button group responsive */
+@media (max-width: 575px) {
+  .ant-space-compact { flex-wrap: wrap; }
+  .ant-space-compact > .ant-btn { flex: 1; min-width: 80px; }
 }
 
-.ant-table-container {
-  width: 100%;
-  overflow-x: auto !important;
-  overflow-y: hidden;
-  position: relative;
-  z-index: 0;
+/* FloatButton */
+.ant-float-btn { box-shadow: 0 6px 16px -8px rgba(0, 0, 0, 0.12), 0 9px 28px 0 rgba(0, 0, 0, 0.08), 0 12px 48px 16px rgba(0, 0, 0, 0.04); }
+.ant-float-btn:hover { transform: scale(1.05); }
+
+/* Dark theme fixes */
+body.dark-theme { --ant-table-border-color: rgba(255, 255, 255, 0.08); }
+body.dark-theme .ant-table-thead > tr > th { border-color: rgba(255, 255, 255, 0.08) !important; }
+body.dark-theme .ant-table-tbody > tr > td { border-color: rgba(255, 255, 255, 0.04) !important; }
+body.dark-theme .ant-table-tbody > tr:hover > td { background-color: rgba(255, 255, 255, 0.02) !important; }
+body.dark-theme .ant-card.ant-card-hoverable:hover { box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.4); }
+
+/* Skeleton loading */
+.ant-skeleton-content .ant-skeleton-title,
+.ant-skeleton-content .ant-skeleton-paragraph > li {
+  background: linear-gradient(90deg, var(--ant-color-fill) 25%, var(--ant-color-fill-secondary) 37%, var(--ant-color-fill) 63%);
+  background-size: 400% 100%;
+  animation: ant-skeleton-loading 1.4s ease infinite;
 }
 
-.ant-table-content,
-.ant-table-body {
-  position: relative;
-  z-index: 0;
-  overflow-x: auto !important;
-  overflow-y: auto !important;
-}
+/* Select dropdown */
+.ant-select-dropdown { border-radius: var(--ant-border-radius-lg, 12px); box-shadow: 0 6px 16px -8px rgba(0, 0, 0, 0.08), 0 9px 28px 0 rgba(0, 0, 0, 0.05), 0 12px 48px 16px rgba(0, 0, 0, 0.03); }
+.ant-select-item { border-radius: var(--ant-border-radius, 8px); margin: 2px 4px; }
 
-/* 表格最小宽度 */
-.ant-table {
-  min-width: 100%;
-}
+/* Tabs */
+.ant-tabs-nav { margin-bottom: 16px !important; }
+.ant-tabs-tab { padding: 8px 16px !important; border-radius: 8px 8px 0 0; transition: all 0.2s; }
+.ant-tabs-tab:hover { color: var(--ant-color-primary); }
 
-/* 卡片内的表格容器 */
-.ant-card .ant-card-body {
-  overflow-x: hidden !important;
-  padding: 16px !important;
-}
-
-.ant-card .ant-table-wrapper {
-  margin-left: -16px;
-  margin-right: -16px;
-  padding-left: 16px;
-  padding-right: 16px;
-  width: calc(100% + 32px);
-  overflow-x: auto !important;
-}
-
-/* 防止整个页面出现横向滚动条 */
-body,
-#root,
-.ant-layout,
-.ant-layout-content {
-  overflow-x: hidden !important;
-}
-
-/* ==================== 表格固定列 ==================== */
-
-/* 固定列表头 - 最高层级 */
-.ant-table-thead > tr > th.ant-table-cell-fix-right {
-  position: sticky !important;
-  right: 0 !important;
-  z-index: 20 !important;
-  background: #fafafa !important;
-  border-left: 1px solid #f0f0f0 !important;
-}
-
-/* 固定列单元格 - 中间层级 */
-.ant-table-tbody > tr > td.ant-table-cell-fix-right {
-  position: sticky !important;
-  right: 0 !important;
-  z-index: 10 !important;
-  background: #ffffff !important;
-  border-left: 1px solid #f0f0f0 !important;
-}
-
-/* 第一个固定列的阴影效果 */
-.ant-table-cell-fix-right-first {
-  box-shadow: -6px 0 6px -4px rgba(0, 0, 0, 0.1) !important;
-}
-
-/* 固定左侧列 */
-.ant-table-fixed-left,
-.ant-table-fixed-right {
-  position: sticky !important;
-  z-index: 2;
-}
-
-.ant-table-fixed-right {
-  right: 0;
-  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.08);
-}
-
-.ant-table-fixed-left {
-  left: 0;
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.08);
-}
-
-/* ==================== 表格悬停和选中状态 ==================== */
-
-/* 普通单元格基础层级 */
-.ant-table-tbody > tr > td,
-.ant-table-thead > tr > th {
-  position: relative;
-  z-index: 0;
-}
-
-/* 普通行悬停 */
-.ant-table-tbody > tr:hover > td {
-  z-index: 2 !important;
-  background: #fafafa;
-}
-
-/* 固定列悬停保持高层级 */
-.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right {
-  z-index: 15 !important;
-  background: #fafafa !important;
-}
-
-/* 选中行 */
-.ant-table-tbody > tr.ant-table-row-selected > td {
-  background: #e6f7ff;
-}
-
-.ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-right {
-  z-index: 11 !important;
-  background: #e6f7ff !important;
-}
-
-/* 选中且悬停 */
-.ant-table-tbody > tr.ant-table-row-selected:hover > td.ant-table-cell-fix-right {
-  z-index: 16 !important;
-  background: #d6e4ff !important;
-}
-
-/* ==================== 深色主题适配 ==================== */
-
-/* 固定列表头 */
-.dark-theme .ant-table-thead > tr > th.ant-table-cell-fix-right,
-body[data-theme="dark"] .ant-table-thead > tr > th.ant-table-cell-fix-right {
-  background: #1f1f1f !important;
-  border-left: 1px solid #303030 !important;
-}
-
-/* 固定列单元格 */
-.dark-theme .ant-table-tbody > tr > td.ant-table-cell-fix-right,
-body[data-theme="dark"] .ant-table-tbody > tr > td.ant-table-cell-fix-right {
-  background: #141414 !important;
-  border-left: 1px solid #303030 !important;
-}
-
-/* 悬停状态 */
-.dark-theme .ant-table-tbody > tr:hover > td,
-body[data-theme="dark"] .ant-table-tbody > tr:hover > td {
-  background: #262626;
-}
-
-.dark-theme .ant-table-tbody > tr:hover > td.ant-table-cell-fix-right,
-body[data-theme="dark"] .ant-table-tbody > tr:hover > td.ant-table-cell-fix-right {
-  background: #262626 !important;
-}
-
-/* 选中状态 */
-.dark-theme .ant-table-tbody > tr.ant-table-row-selected > td,
-body[data-theme="dark"] .ant-table-tbody > tr.ant-table-row-selected > td {
-  background: #111a2c;
-}
-
-.dark-theme .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-right,
-body[data-theme="dark"] .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-right {
-  background: #111a2c !important;
-}
-
-/* 阴影效果 */
-.dark-theme .ant-table-cell-fix-right-first,
-body[data-theme="dark"] .ant-table-cell-fix-right-first {
-  box-shadow: -6px 0 6px -4px rgba(0, 0, 0, 0.3) !important;
-}
-
-.dark-theme .ant-table-fixed-right {
-  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15);
-}
-
-.dark-theme .ant-table-fixed-left {
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
-}
-
-/* ==================== 滚动条美化 ==================== */
-
-/* 横向滚动条 */
-.ant-table-body::-webkit-scrollbar {
-  height: 6px !important;
-}
-
-.ant-table-body::-webkit-scrollbar-track {
-  background: #f0f0f0;
-  border-radius: 3px;
-}
-
-.ant-table-body::-webkit-scrollbar-thumb {
-  background: #bfbfbf;
-  border-radius: 3px;
-}
-
-.ant-table-body::-webkit-scrollbar-thumb:hover {
-  background: #8c8c8c;
-}
-
-/* 深色主题滚动条 */
-.dark-theme .ant-table-body::-webkit-scrollbar-track,
-body[data-theme="dark"] .ant-table-body::-webkit-scrollbar-track {
-  background: #262626;
-}
-
-.dark-theme .ant-table-body::-webkit-scrollbar-thumb,
-body[data-theme="dark"] .ant-table-body::-webkit-scrollbar-thumb {
-  background: #434343;
-}
-
-.dark-theme .ant-table-body::-webkit-scrollbar-thumb:hover,
-body[data-theme="dark"] .ant-table-body::-webkit-scrollbar-thumb:hover {
-  background: #595959;
-}
-
-/* ==================== 滚动增强效果 ==================== */
-
-/* 固定列滚动阴影 */
-.ant-table-ping-right .ant-table-cell-fix-right-first::after {
-  position: absolute;
-  top: 0;
-  bottom: -1px;
-  left: -30px;
-  width: 30px;
-  content: "";
-  pointer-events: none;
-  background: linear-gradient(to right, transparent, rgba(0, 0, 0, 0.02));
-}
-
-.dark-theme .ant-table-ping-right .ant-table-cell-fix-right-first::after,
-body[data-theme="dark"] .ant-table-ping-right .ant-table-cell-fix-right-first::after {
-  background: linear-gradient(to right, transparent, rgba(0, 0, 0, 0.06));
-}
-
-/* ==================== 操作列特殊处理 ==================== */
-
-/* 操作列固定宽度 */
-.ant-table-cell-fix-right[data-column-key="actions"],
-th.ant-table-cell-fix-right:last-child,
-td.ant-table-cell-fix-right:last-child {
-  min-width: 120px !important;
-  max-width: 180px !important;
-}
-
-/* 操作按钮容器 */
-.table-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  white-space: nowrap;
-}
-
-/* 确保固定列内容不会溢出 */
-.ant-table-cell-fix-right {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* 操作按钮不截断 */
-.ant-table-cell-fix-right .ant-btn {
-  white-space: nowrap;
-}
-
-/* ==================== 响应式优化 ==================== */
-
-@media (max-width: 768px) {
-  /* 小屏幕卡片内边距 */
-  .ant-card .ant-card-body {
-    padding: 12px !important;
-  }
-  
-  .ant-card .ant-table-wrapper {
-    margin-left: -12px;
-    margin-right: -12px;
-    padding-left: 12px;
-    padding-right: 12px;
-    width: calc(100% + 24px);
-  }
-  
-  /* 移动端固定列宽度调整 */
-  .ant-table-cell-fix-right[data-column-key="actions"],
-  th.ant-table-cell-fix-right:last-child,
-  td.ant-table-cell-fix-right:last-child {
-    min-width: 100px !important;
-    max-width: 120px !important;
-  }
-  
-  /* 移动端减小阴影 */
-  .ant-table-cell-fix-right-first {
-    box-shadow: -4px 0 4px -3px rgba(0, 0, 0, 0.08) !important;
-  }
-  
-  /* 表格容器直接滚动 */
-  .ant-table-container {
-    overflow-x: auto !important;
-    -webkit-overflow-scrolling: touch; /* iOS 平滑滚动 */
-  }
-  
-  /* 确保表格有足够的最小宽度 */
-  .ant-table {
-    min-width: 600px !important;
-  }
-}
-
-@media (max-width: 576px) {
-  .ant-card .ant-card-body {
-    padding: 8px !important;
-  }
-  
-  .ant-card .ant-table-wrapper {
-    margin-left: -8px;
-    margin-right: -8px;
-    padding-left: 8px;
-    padding-right: 8px;
-    width: calc(100% + 16px);
-  }
-}
-
-/* ==================== 浏览器兼容性修复 ==================== */
-
-/* Safari 兼容性 */
-@supports (-webkit-appearance: none) {
-  .ant-table-cell-fix-right {
-    -webkit-transform: translateZ(0);
-    transform: translateZ(0);
-  }
-}
-
-/* Firefox 兼容性 */
-@-moz-document url-prefix() {
-  .ant-table-cell-fix-right {
-    position: -webkit-sticky;
-    position: sticky;
-  }
-}
-
-/* ==================== 表格内 Tooltip 修复 ==================== */
-
-/* 确保表格内的 Tooltip 不被遮挡 */
-.ant-table-cell .ant-tooltip-open {
-  z-index: 9999 !important;
-}
-
-/* 响应式表格的修复 */
-.responsive-table-container {
-  position: relative;
-}
-
-.responsive-table-container .ant-tooltip {
-  z-index: 9999 !important;
-}
-
-/* 修复表格固定列的 z-index 问题 */
-.ant-table-fixed-left,
-.ant-table-fixed-right {
-  z-index: auto !important;
-}
-
-.ant-table-sticky-holder {
-  z-index: auto !important;
-}
-
+/* Progress */
+.ant-progress-line { margin-bottom: 0; }
+.ant-progress-inner { background-color: var(--ant-color-fill-secondary); }

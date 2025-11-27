@@ -3,21 +3,6 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "aerich"
-version = "0.9.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "asyncclick" },
-    { name = "dictdiffer" },
-    { name = "pydantic" },
-    { name = "tortoise-orm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a5/98/75c6e3053a14a14ffe86e2435698b960abe0bf03c114e67f966d92ff19e7/aerich-0.9.1.tar.gz", hash = "sha256:629afbef5902635c41f410dd05def984c02e05e62d8a2020210a29a4aae19001", size = 35380, upload-time = "2025-06-16T03:23:57.741Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/ad/ec20a5d4a9fa389a978b95314b4c800f20bda6e34c831ae252c5a7e2604c/aerich-0.9.1-py3-none-any.whl", hash = "sha256:6ff34a2104454d03f7473dc99e7ad51f405a909c261126a1b8a52d44ca7b4cbc", size = 39873, upload-time = "2025-06-16T03:23:56.562Z" },
-]
-
-[[package]]
 name = "aiofiles"
 version = "24.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -52,7 +37,6 @@ name = "antcode"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "aerich" },
     { name = "aiofiles" },
     { name = "apscheduler" },
     { name = "asyncmy" },
@@ -81,7 +65,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aerich", specifier = ">=0.7.2" },
     { name = "aiofiles", specifier = ">=23.2.0" },
     { name = "apscheduler", specifier = ">=3.10.0" },
     { name = "asyncmy", specifier = ">=0.2.9" },
@@ -141,18 +124,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a5/ae/136395dfbfe00dfc94da3f3e136d0b13f394cba8f4841120e34226265780/async_timeout-5.0.1.tar.gz", hash = "sha256:d9321a7a3d5a6a5e187e824d2fa0793ce379a202935782d555d6e9d2735677d3", size = 9274, upload-time = "2024-11-06T16:41:39.6Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/ba/e2081de779ca30d473f21f5b30e0e737c438205440784c7dfc81efc2b029/async_timeout-5.0.1-py3-none-any.whl", hash = "sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c", size = 6233, upload-time = "2024-11-06T16:41:37.9Z" },
-]
-
-[[package]]
-name = "asyncclick"
-version = "8.2.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/41/eb56589f06d813978d258b17b1afee73977c00c5f9ed5f49386b61ab009c/asyncclick-8.2.2.1.tar.gz", hash = "sha256:6eccb64f0b6422eec911c363709fd50a84e3166eb8b3841184a4d457fdc57911", size = 1258458, upload-time = "2025-08-14T05:55:41.619Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/93/8c1e5212e8ae0508bfe5a3d789b40362a0cafd40244b5c30c39022ffb9cb/asyncclick-8.2.2.1-py3-none-any.whl", hash = "sha256:1b1ed69c2d3ab7142da6ab8a0dface791f8effa0ac88a3fad95cf73f3c01c70e", size = 105002, upload-time = "2025-08-14T05:55:39.634Z" },
 ]
 
 [[package]]
@@ -521,15 +492,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
-]
-
-[[package]]
-name = "dictdiffer"
-version = "0.9.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/61/7b/35cbccb7effc5d7e40f4c55e2b79399e1853041997fcda15c9ff160abba0/dictdiffer-0.9.0.tar.gz", hash = "sha256:17bacf5fbfe613ccf1b6d512bd766e6b21fb798822a133aa86098b8ac9997578", size = 31513, upload-time = "2021-07-22T13:24:29.276Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/ef/4cb333825d10317a36a1154341ba37e6e9c087bac99c1990ef07ffdb376f/dictdiffer-0.9.0-py2.py3-none-any.whl", hash = "sha256:442bfc693cfcadaf46674575d2eba1c53b42f5e404218ca2c2ff549f2df56595", size = 16754, upload-time = "2021-07-22T13:24:26.783Z" },
 ]
 
 [[package]]

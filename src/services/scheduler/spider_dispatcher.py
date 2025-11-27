@@ -5,7 +5,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 from loguru import logger
 
@@ -21,9 +20,9 @@ class RedisSpiderExecutor:
         self,
         project,
         rule_detail,
-        execution_id: str,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        execution_id,
+        params=None,
+    ):
         try:
             await redis_task_service.connect()
             result = await redis_task_service.submit_rule_task(
@@ -46,7 +45,7 @@ class LocalScrapyExecutor:
 
     QUEUE_NAME = "local:scrapy"
 
-    def __init__(self) -> None:
+    def __init__(self):
         self._project_root = Path(settings.BASE_DIR) / "src" / "tasks" / "antcode_spider"
         self._scrapy_cfg = self._project_root / "scrapy.cfg"
         self._work_root = Path(settings.TASK_EXECUTION_WORK_DIR)
@@ -55,9 +54,9 @@ class LocalScrapyExecutor:
         self,
         project,
         rule_detail,
-        execution_id: str,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        execution_id,
+        params=None,
+    ):
         if not self._scrapy_cfg.exists():
             raise TaskExecutionException(
                 f"未找到 Scrapy 配置文件: {self._scrapy_cfg}. "
@@ -108,7 +107,7 @@ class LocalScrapyExecutor:
         env["PYTHONPATH"] = ":".join(filter(None, python_paths))
 
         logger.info(
-            "未配置 Redis，切换为本地 Scrapy 执行。任务ID: %s，执行目录: %s",
+            "未配置 Redis，切换为本地 Scrapy 执行。任务ID: {}，执行目录: {}",
             task_id,
             run_dir,
         )
@@ -134,10 +133,10 @@ class LocalScrapyExecutor:
 
         success = process.returncode == 0
         if success:
-            logger.info("本地 Scrapy 执行完成，任务ID: %s", task_id)
+            logger.info("本地 Scrapy 执行完成，任务ID: {}", task_id)
         else:
             logger.error(
-                "本地 Scrapy 执行失败，任务ID: %s，返回码: %s，stderr: %s",
+                "本地 Scrapy 执行失败，任务ID: {}，返回码: {}，stderr: {}",
                 task_id,
                 process.returncode,
                 stderr_text[-4000:],
@@ -159,22 +158,22 @@ class LocalScrapyExecutor:
 
 
 class SpiderTaskDispatcher:
-    """统一的爬虫任务调度网关。"""
+    """统一爬虫任务调度网关"""
 
-    def __init__(self) -> None:
+    def __init__(self):
         self._redis_executor = RedisSpiderExecutor()
         self._local_executor = LocalScrapyExecutor()
 
-    def _use_redis(self) -> bool:
+    def _use_redis(self):
         return bool(settings.REDIS_URL and settings.REDIS_URL.strip())
 
     async def submit_rule_task(
         self,
         project,
         rule_detail,
-        execution_id: str,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        execution_id,
+        params=None,
+    ):
         if self._use_redis():
             return await self._redis_executor.submit_rule_task(
                 project=project,

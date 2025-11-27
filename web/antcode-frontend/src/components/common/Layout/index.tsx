@@ -1,200 +1,143 @@
-import React, { useState, useMemo, useCallback, memo } from 'react'
-import { Layout as AntLayout, Menu, Avatar, Dropdown, Button, Space, Badge } from 'antd'
+import React, { useState, useEffect, memo, useCallback } from 'react'
+import { Layout as AntLayout, Menu, Avatar, Dropdown, Button, Badge, Flex, Typography, theme } from 'antd'
 import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   DashboardOutlined,
   ProjectOutlined,
   PlayCircleOutlined,
-  FileTextOutlined,
   UserOutlined,
   LogoutOutlined,
   SettingOutlined,
   BellOutlined,
   TeamOutlined,
-  MonitorOutlined
+  ClockCircleOutlined,
+  CopyrightOutlined,
+  GithubOutlined,
+  CodeOutlined
 } from '@ant-design/icons'
 import { useNavigate, useLocation, Outlet } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
-import { APP_TITLE } from '@/utils/constants'
+import { APP_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT } from '@/config/app'
 import ThemeToggle from '@/components/common/ThemeToggle'
+import DynamicIcon from '@/components/common/DynamicIcon'
 import type { MenuItem } from '@/types'
 import styles from './Layout.module.css'
 
-const { Header, Sider, Content } = AntLayout
+const { Header, Sider, Content, Footer } = AntLayout
+const { Text } = Typography
 
 const Layout: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
-  const { user, logout, hasPermission } = useAuth()
+  const { user, logout } = useAuth()
+  const { token } = theme.useToken()
   const [collapsed, setCollapsed] = useState(false)
+  const [currentTime, setCurrentTime] = useState(new Date())
 
-  // 菜单项配置
   const menuItems: MenuItem[] = [
-    {
-      key: '/dashboard',
-      label: '仪表板',
-      icon: <DashboardOutlined />,
-      path: '/dashboard'
-    },
-    {
-      key: '/envs',
-      label: '环境管理',
-      icon: <SettingOutlined />,
-      path: '/envs'
-    },
-    {
-      key: '/projects',
-      label: '项目管理',
-      icon: <ProjectOutlined />,
-      path: '/projects'
-    },
-    {
-      key: '/tasks',
-      label: '任务管理',
-      icon: <PlayCircleOutlined />,
-      path: '/tasks'
-    },
-    // 管理员专用菜单
-    {
-      key: '/user-management',
-      label: '用户管理',
-      icon: <TeamOutlined />,
-      path: '/user-management',
-      hidden: !user?.is_admin // 只有管理员才显示
-    }
+    { key: '/dashboard', label: '仪表板', icon: <DashboardOutlined />, path: '/dashboard' },
+    { key: '/envs', label: '环境管理', icon: <CodeOutlined />, path: '/envs' },
+    { key: '/projects', label: '项目管理', icon: <ProjectOutlined />, path: '/projects' },
+    { key: '/tasks', label: '任务管理', icon: <PlayCircleOutlined />, path: '/tasks' },
+    { key: '/user-management', label: '用户管理', icon: <TeamOutlined />, path: '/user-management', hidden: !user?.is_admin },
   ]
 
-  // 过滤用户有权限的菜单项
-  const filteredMenuItems = menuItems.filter((item) => {
-    // 过滤隐藏的菜单项
-    if (item.hidden) {
-      return false
-    }
-    // 这里可以根据权限过滤菜单项
-    // 例如：return hasPermission(item.permission)
-    return true
-  })
+  const filteredMenuItems = menuItems.filter((item) => !item.hidden)
 
-  // 用户下拉菜单
   const userMenuItems = [
-    {
-      key: 'settings',
-      label: '用户设置',
-      icon: <SettingOutlined />,
-      onClick: () => navigate('/settings')
-    },
-    {
-      type: 'divider' as const
-    },
-    {
-      key: 'logout',
-      label: '退出登录',
-      icon: <LogoutOutlined />,
-      onClick: logout
-    }
+    { key: 'settings', label: '用户设置', icon: <SettingOutlined />, onClick: () => navigate('/settings') },
+    { type: 'divider' as const },
+    { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true, onClick: logout },
   ]
 
-  // 处理菜单点击
-  const handleMenuClick = ({ key }: { key: string }) => {
+  const handleMenuClick = useCallback(({ key }: { key: string }) => {
     const menuItem = filteredMenuItems.find(item => item.key === key)
-    if (menuItem?.path) {
-      navigate(menuItem.path)
-    }
-  }
+    if (menuItem?.path) navigate(menuItem.path)
+  }, [filteredMenuItems, navigate])
 
-  // 获取当前选中的菜单项
   const selectedKeys = [location.pathname]
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const formatTime = (date: Date) => {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  }
 
   return (
     <AntLayout className={styles.layout}>
-      {/* 侧边栏 */}
-      <Sider
-        trigger={null}
-        collapsible
-        collapsed={collapsed}
-        className={styles.sider}
-        width={256}
-        collapsedWidth={80}
-      >
-        {/* Logo */}
-        <div className={styles.logo}>
+      <Sider trigger={null} collapsible collapsed={collapsed} className={styles.sider} width={260} collapsedWidth={80}>
+        <Flex align="center" justify="center" className={styles.logo}>
           {collapsed ? (
-            <div className={styles.logoCollapsed}>A</div>
+            <div className={styles.logoCollapsed}>{APP_LOGO_SHORT}</div>
           ) : (
-            <div className={styles.logoFull}>
+            <Flex align="center" gap={8} className={styles.logoFull}>
+              <div className={styles.logoIcon}>
+                <DynamicIcon name={APP_LOGO_ICON} style={{ fontSize: 24 }} />
+              </div>
               <span className={styles.logoText}>{APP_TITLE}</span>
-            </div>
+            </Flex>
           )}
-        </div>
-
-        {/* 菜单 */}
+        </Flex>
         <Menu
           theme="dark"
           mode="inline"
           selectedKeys={selectedKeys}
           onClick={handleMenuClick}
           className={styles.menu}
-          items={filteredMenuItems.map(item => ({
-            key: item.key,
-            icon: item.icon,
-            label: item.label
-          }))}
+          items={filteredMenuItems.map(item => ({ key: item.key, icon: item.icon, label: item.label }))}
         />
       </Sider>
 
-      {/* 主内容区 */}
-      <AntLayout className={`${styles.mainLayout} ${collapsed ? styles.collapsed : ''}`}>
-        {/* 头部 */}
-        <Header className={styles.header}>
-          <div className={styles.headerLeft}>
-            <Button
-              type="text"
-              icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-              onClick={() => setCollapsed(!collapsed)}
-              className={styles.trigger}
-            />
-          </div>
-
-          <div className={styles.headerRight}>
-            <Space size="middle">
-              {/* 主题切换 */}
+      <AntLayout className={`${styles.mainLayout} ${collapsed ? styles.collapsed : ''}`} style={{ background: token.colorBgLayout }}>
+        <Header className={styles.header} style={{ background: token.colorBgContainer, borderBottom: `1px solid ${token.colorBorderSecondary}` }}>
+          <Flex align="center" justify="space-between" style={{ height: '100%' }}>
+            <Flex align="center">
+              <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(!collapsed)} className={styles.trigger} />
+            </Flex>
+            <Flex align="center" gap={12}>
               <ThemeToggle />
-
-              {/* 通知 */}
               <Badge count={0} size="small">
-                <Button
-                  type="text"
-                  icon={<BellOutlined />}
-                  className={styles.headerButton}
-                />
+                <Button type="text" icon={<BellOutlined />} className={styles.headerButton} />
               </Badge>
-
-              {/* 用户信息 */}
-              <Dropdown
-                menu={{ items: userMenuItems }}
-                placement="bottomRight"
-                arrow
-              >
-                <div className={styles.userInfo}>
-                  <Avatar
-                    size="small"
-                    icon={<UserOutlined />}
-                    className={styles.avatar}
-                  />
-                  <span className={styles.username}>{user?.username}</span>
-                </div>
+              <Dropdown menu={{ items: userMenuItems }} placement="bottomRight" arrow={{ pointAtCenter: true }}>
+                <Flex align="center" gap={8} className={styles.userInfo}>
+                  <Avatar size={32} icon={<UserOutlined />} style={{ backgroundColor: token.colorPrimary, cursor: 'pointer' }} />
+                  <Text className={styles.username} ellipsis={{ tooltip: user?.username }}>{user?.username}</Text>
+                </Flex>
               </Dropdown>
-            </Space>
-          </div>
+            </Flex>
+          </Flex>
         </Header>
 
-        {/* 内容区 */}
         <Content className={styles.content}>
           <div className={styles.contentInner}>
             <Outlet />
           </div>
         </Content>
+
+        <Footer className={styles.footer} style={{ background: 'transparent', borderTop: `1px solid ${token.colorBorderSecondary}` }}>
+          <Flex align="center" justify="space-between" wrap="wrap" gap={8}>
+            <Flex align="center" gap={8}>
+              <CopyrightOutlined style={{ color: token.colorTextSecondary }} />
+              <Text type="secondary" style={{ fontSize: 12 }}>2025 {APP_TITLE}</Text>
+              <span style={{ color: token.colorBorderSecondary }}>|</span>
+              <a href="https://github.com/xyuns-cc/AntCode" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>
+                <GithubOutlined /><span>GitHub</span>
+              </a>
+            </Flex>
+            <Flex align="center" gap={6}>
+              <ClockCircleOutlined style={{ color: token.colorTextSecondary }} />
+              <Text type="secondary" style={{ fontSize: 12, fontFamily: 'var(--ant-font-family-code)', letterSpacing: '0.5px' }}>
+                {formatTime(currentTime)}
+              </Text>
+            </Flex>
+          </Flex>
+        </Footer>
       </AntLayout>
     </AntLayout>
   )

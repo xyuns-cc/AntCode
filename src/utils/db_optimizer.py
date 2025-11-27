@@ -1,11 +1,11 @@
-"""
-数据库查询优化工具
-提供批量操作、查询优化和缓存功能
-"""
-
+"""数据库查询优化工具"""
 import asyncio
+import hashlib
+from functools import wraps
 
 from loguru import logger
+
+from src.core.cache import query_cache
 
 
 class DatabaseOptimizer:
@@ -390,10 +390,6 @@ def cached_query(ttl = 300, namespace = None):
             return projects, total
     """
     def decorator(func):
-        from functools import wraps
-        import hashlib
-        from src.core.cache import query_cache
-        
         @wraps(func)
         async def wrapper(*args, **kwargs):
             # 生成缓存键

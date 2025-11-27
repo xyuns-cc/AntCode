@@ -5,18 +5,16 @@ import type { UserConfig } from 'vite'
 import viteCompression from 'vite-plugin-compression'
 
 export default defineConfig(({ mode }) => {
-  // 从项目根目录的 .env 加载环境变量
+  // 从项目根目录读取 .env 环境变量
   const env = loadEnv(mode, path.resolve(__dirname, '../..'), '')
   const isProduction = mode === 'production'
   
-  // API 地址配置（优先读取 VITE_API_BASE_URL，未提供时根据后端配置推导）
-  const rawHost = env.SERVER_DOMAIN || env.SERVER_HOST || 'localhost'
-  const normalizedHost = ['0.0.0.0', '::', ''].includes(rawHost) ? 'localhost' : rawHost
+  // API 地址（从环境变量读取，默认 localhost:8000）
+  const serverHost = env.SERVER_HOST || env.SERVER_DOMAIN || 'localhost'
   const serverPort = env.SERVER_PORT || '8000'
-  const defaultApiBase = `http://${normalizedHost}:${serverPort}`
-  const apiBaseUrl = env.VITE_API_BASE_URL || defaultApiBase
-  const wsBaseUrl = (env.VITE_WS_BASE_URL || apiBaseUrl).replace(/^http/, 'ws') // http:// → ws://, https:// → wss://
-  const frontendPort = Number(env.FRONTEND_PORT || env.VITE_PORT || '3000')
+  const apiBaseUrl = env.VITE_API_BASE_URL || `http://${serverHost === '0.0.0.0' ? 'localhost' : serverHost}:${serverPort}`
+  const wsBaseUrl = apiBaseUrl.replace(/^http/, 'ws')
+  const frontendPort = Number(env.FRONTEND_PORT || '3000')
   
   const config: UserConfig = {
     plugins: [
