@@ -10,7 +10,6 @@ dependencies = [
     "python-multipart>=0.0.20",
     # 数据库
     "tortoise-orm>=0.21.0",
-    "aerich>=0.7.2",
     "asyncmy>=0.2.9", # MySQL驱动
     "asyncpg>=0.29.0", # PostgreSQL驱动
     # 数据验证

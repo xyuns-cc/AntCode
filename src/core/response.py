@@ -1,19 +1,11 @@
-"""
-统一响应处理模块
-包含响应码、消息和响应构造器
-"""
+"""响应工具"""
 from enum import IntEnum
 
-from pydantic import BaseModel
-
 from src.schemas.common import BaseResponse, PaginationInfo, PaginationResponse
+from src.schemas.scheduler import TaskListResponse, ExecutionListResponse
 
-T = type  # 简化类型变量
 
-
-# ==================== 响应码 ====================
 class ResponseCode(IntEnum):
-    """HTTP响应状态码"""
     SUCCESS = 200
     CREATED = 201
     ACCEPTED = 202
@@ -30,36 +22,25 @@ class ResponseCode(IntEnum):
     SERVICE_UNAVAILABLE = 503
 
 
-# ==================== 响应消息 ====================
 class Messages:
-    """标准响应消息"""
-    # 通用
     OPERATION_SUCCESS = "操作成功"
     CREATED_SUCCESS = "创建成功"
     UPDATED_SUCCESS = "更新成功"
     DELETED_SUCCESS = "删除成功"
     QUERY_SUCCESS = "查询成功"
 
-    # 认证
     LOGIN_SUCCESS = "登录成功"
-    LOGOUT_SUCCESS = "退出登录成功"
-    UNAUTHORIZED = "未认证或登录已过期"
+    LOGOUT_SUCCESS = "退出成功"
+    UNAUTHORIZED = "未授权或会话已过期"
     FORBIDDEN = "权限不足"
 
-    # 错误
-    BAD_REQUEST = "请求参数错误"
+    BAD_REQUEST = "请求参数无效"
     NOT_FOUND = "资源不存在"
     CONFLICT = "资源冲突"
     SERVER_ERROR = "服务器内部错误"
 
 
-# ==================== 响应构造器 ====================
-def success(
-    data = None,
-    message = Messages.OPERATION_SUCCESS,
-    code = ResponseCode.SUCCESS,
-):
-    """成功响应"""
+def success(data=None, message=Messages.OPERATION_SUCCESS, code=ResponseCode.SUCCESS):
     return BaseResponse(
         success=True,
         code=int(code),
@@ -68,12 +49,7 @@ def success(
     )
 
 
-def error(
-    message,
-    code,
-    data = None,
-):
-    """错误响应"""
+def error(message, code, data=None):
     return BaseResponse(
         success=False,
         code=int(code),
@@ -82,15 +58,7 @@ def error(
     )
 
 
-def page(
-    items,
-    total,
-    page,
-    size,
-    message = Messages.QUERY_SUCCESS,
-    code = ResponseCode.SUCCESS,
-):
-    """分页响应"""
+def page(items, total, page, size, message=Messages.QUERY_SUCCESS, code=ResponseCode.SUCCESS):
     return PaginationResponse(
         success=True,
         code=int(code),
@@ -101,12 +69,8 @@ def page(
 
 
 def task_list(total, page_num, size, items):
-    """任务列表响应（保持与前端兼容）"""
-    from src.schemas.scheduler import TaskListResponse
     return TaskListResponse(total=total, page=page_num, size=size, items=list(items))
 
 
 def execution_list(total, page_num, size, items):
-    """执行列表响应（保持与前端兼容）"""
-    from src.schemas.scheduler import ExecutionListResponse
     return ExecutionListResponse(total=total, page=page_num, size=size, items=list(items))

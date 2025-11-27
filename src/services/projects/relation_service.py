@@ -1,10 +1,4 @@
-"""
-应用层关联关系管理服务
-
-负责处理所有模型之间的关联关系，替代数据库外键约束
-"""
-
-
+"""应用层关联关系管理服务"""
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
@@ -220,8 +214,6 @@ class RelationService:
             deleted_counts["tasks"] = await ScheduledTask.filter(project_id=project_id).delete()
 
             # 4. 删除项目详情（根据项目类型）
-            from src.models.project import ProjectFile, ProjectRule, ProjectCode
-
             # 尝试删除各种类型的项目详情
             file_deleted = await ProjectFile.filter(project_id=project_id).delete()
             rule_deleted = await ProjectRule.filter(project_id=project_id).delete()

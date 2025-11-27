@@ -75,7 +75,7 @@ class RedisTaskService:
             # 获取队列长度
             queue_length = await client.llen(self.queue_name)
 
-            logger.info(f"✅ 任务已提交到Redis")
+            logger.info(f"任务已提交到Redis")
             logger.info(f"   任务ID: {task_json['meta']['task_id']}")
             logger.info(f"   队列: {self.queue_name}")
             logger.info(f"   当前队列长度: {queue_length}")
@@ -131,7 +131,7 @@ class RedisTaskService:
             # 获取队列长度
             queue_length = await self.redis_client.llen(self.queue_name)
 
-            logger.info(f"✅ 批量提交 {len(tasks)} 个任务到Redis")
+            logger.info(f"批量提交 {len(tasks)} 个任务到Redis")
             logger.info(f"   队列: {self.queue_name}")
             logger.info(f"   当前队列长度: {queue_length}")
 
@@ -231,7 +231,7 @@ class RedisTaskService:
                     pass
 
             if removed_count > 0:
-                logger.info(f"✅ 从队列中移除任务: {task_id}")
+                logger.info(f"从队列中移除任务: {task_id}")
                 return {
                     "success": True,
                     "message": f"成功移除任务",
@@ -270,7 +270,7 @@ class RedisTaskService:
             # 清空队列
             await self.redis_client.delete(self.queue_name)
 
-            logger.warning(f"⚠️ 已清空Redis队列 '{self.queue_name}'，删除了 {current_length} 个任务")
+            logger.warning(f"已清空Redis队列 '{self.queue_name}'，删除了 {current_length} 个任务")
 
             return {
                 "success": True,

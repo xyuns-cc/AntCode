@@ -1,6 +1,6 @@
 import React, { useRef, useState, useCallback } from 'react'
 import { Card, Button, Space, message } from 'antd'
-import { ClearOutlined } from '@ant-design/icons'
+import { ClearOutlined, DeleteOutlined } from '@ant-design/icons'
 import styles from './LogViewer.module.css'
 
 // 用于生成唯一ID的计数器
@@ -62,7 +62,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
-      content: '🗑️ 日志已清除',
+      content: '[清除] 日志已清除',
       timestamp: new Date().toISOString()
     })
   }, [addLogMessage])

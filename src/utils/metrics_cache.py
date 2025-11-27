@@ -1,14 +1,9 @@
-"""
-系统指标缓存服务
-使用统一缓存系统管理系统指标数据
-"""
-
+"""系统指标缓存服务"""
 import asyncio
 import math
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import Optional
 
 import psutil
 from loguru import logger
@@ -16,11 +11,11 @@ from loguru import logger
 from src.core.cache import metrics_cache
 from src.core.config import settings
 from src.schemas.scheduler import SystemMetricsResponse
+from src.services.scheduler.scheduler_service import scheduler_service
 
 
 @dataclass
 class SystemMetrics:
-    """系统指标数据"""
     cpu_percent: float
     cpu_cores: int | None
     memory_percent: float
@@ -36,7 +31,6 @@ class SystemMetrics:
     collected_at: datetime
 
     def to_response(self):
-        """转换为响应格式"""
         return SystemMetricsResponse(
             cpu_percent=self.cpu_percent,
             cpu_cores=self.cpu_cores,
@@ -54,13 +48,12 @@ class SystemMetrics:
 
 
 class SystemMetricsService:
-    """系统指标服务 - 使用统一缓存"""
+    """统一缓存系统指标服务"""
     
-    # 使用namespace前缀
     CACHE_KEY = "metrics:system"
     
     def __init__(self):
-        self._update_task: Optional[asyncio.Task] = None
+        self._update_task = None
     
     @staticmethod
     def _is_valid_percent(value):
@@ -71,7 +64,7 @@ class SystemMetricsService:
         return not math.isnan(numeric) and not math.isinf(numeric)
 
     @staticmethod
-    def _normalize_percent(value, default = 0.0):
+    def _normalize_percent(value, default=0.0):
         try:
             numeric = float(value)
         except (TypeError, ValueError):
@@ -124,7 +117,6 @@ class SystemMetricsService:
 
     async def _collect_active_tasks(self):
         try:
-            from src.services.scheduler.scheduler_service import scheduler_service
             return await asyncio.to_thread(lambda: len(scheduler_service.running_tasks))
         except Exception:
             return 0
@@ -140,7 +132,6 @@ class SystemMetricsService:
             return None
     
     async def _collect_metrics(self):
-        """收集系统指标"""
         try:
             (
                 (cpu_percent, cpu_cores),
@@ -172,8 +163,7 @@ class SystemMetricsService:
                 collected_at=datetime.now()
             )
         except Exception as e:
-            logger.error(f"收集系统指标失败: {e}")
-            # 返回默认值
+            logger.error(f"收集指标失败: {e}")
             return SystemMetrics(
                 cpu_percent=0.0,
                 cpu_cores=None,
@@ -190,34 +180,27 @@ class SystemMetricsService:
                 collected_at=datetime.now()
             )
     
-    async def get_metrics(self, force_refresh = False):
-        """获取系统指标（带缓存）"""
+    async def get_metrics(self, force_refresh=False):
         if not force_refresh:
-            # 尝试从缓存获取
             try:
                 cached_metrics = await metrics_cache.get(self.CACHE_KEY)
                 if cached_metrics:
-                    logger.debug("系统指标缓存命中")
+                    logger.debug("指标缓存命中")
                     return SystemMetrics(**cached_metrics).to_response()
             except Exception as e:
-                # 缓存读取失败，记录日志并重新收集
-                logger.warning(f"系统指标缓存读取失败: {e}，将重新收集")
+                logger.warning(f"指标缓存读取失败: {e}")
         
-        # 缓存失效或强制刷新，重新收集
-        logger.debug("重新收集系统指标")
+        logger.debug("正在收集系统指标")
         metrics = await self._collect_metrics()
         
-        # 保存到缓存
         try:
             await metrics_cache.set(self.CACHE_KEY, asdict(metrics))
         except Exception as e:
-            # 缓存写入失败，记录日志但不影响返回结果
-            logger.warning(f"系统指标缓存写入失败: {e}")
+            logger.warning(f"指标缓存写入失败: {e}")
         
         return metrics.to_response()
     
-    async def start_background_update(self, update_interval = None):
-        """启动后台更新任务"""
+    async def start_background_update(self, update_interval=None):
         if self._update_task and not self._update_task.done():
             return
         
@@ -225,22 +208,21 @@ class SystemMetricsService:
             update_interval = max(10, settings.METRICS_CACHE_TTL // 2)
         
         async def background_updater():
-            logger.info(f"系统指标后台更新已启动（间隔: {update_interval}秒）")
+            logger.info(f"指标后台更新已启动 (间隔: {update_interval}s)")
             while True:
                 try:
                     await self.get_metrics(force_refresh=True)
                     await asyncio.sleep(update_interval)
                 except asyncio.CancelledError:
-                    logger.info("系统指标后台更新已停止")
+                    logger.info("指标后台更新已停止")
                     break
                 except Exception as e:
-                    logger.error(f"后台更新系统指标失败: {e}")
+                    logger.error(f"后台指标更新失败: {e}")
                     await asyncio.sleep(update_interval)
         
         self._update_task = asyncio.create_task(background_updater())
     
     async def stop_background_update(self):
-        """停止后台更新任务"""
         if self._update_task and not self._update_task.done():
             self._update_task.cancel()
             try:
@@ -250,25 +232,22 @@ class SystemMetricsService:
             self._update_task = None
     
     async def clear_cache(self):
-        """清除系统指标缓存（按前缀）"""
         try:
             await metrics_cache.clear_prefix("metrics:")
-            logger.info("系统指标缓存已清空")
+            logger.info("指标缓存已清除")
         except Exception as e:
-            logger.error(f"清除系统指标缓存失败: {e}")
+            logger.error(f"清除指标缓存失败: {e}")
             raise
     
     async def get_cache_info(self):
-        """获取缓存信息"""
         try:
             cache_stats = await metrics_cache.get_stats()
             
-            # 检查当前缓存是否有效
             try:
                 cached_metrics = await metrics_cache.get(self.CACHE_KEY)
                 cache_valid = cached_metrics is not None
             except Exception as e:
-                logger.warning(f"检查缓存有效性失败: {e}")
+                logger.warning(f"缓存有效性检查失败: {e}")
                 cache_valid = False
             
             return {
@@ -279,7 +258,6 @@ class SystemMetricsService:
             }
         except Exception as e:
             logger.error(f"获取缓存信息失败: {e}")
-            # 返回默认值
             return {
                 "name": "metrics",
                 "cache_valid": False,
@@ -289,8 +267,5 @@ class SystemMetricsService:
             }
 
 
-# 全局系统指标服务实例
 system_metrics_service = SystemMetricsService()
-
-# 为了兼容性，保持原有的导出名称
 metrics_cache_service = system_metrics_service

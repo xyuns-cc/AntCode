@@ -4,7 +4,7 @@ import time
 from spider.spider.utils.log import logger
 from typing import List, Dict, Any, Optional, Union
 from urllib.parse import urljoin
-from .AntCodeRedisSpider import AntCodeRedisSpider
+from src.tasks.spider.spider.spiders.AntCodeRedisSpider import AntCodeRedisSpider
 from spider.spider.utils.ctrl_redis import RedisCtrl
 from spider.spider.utils.base import ScheduledRequest
 from scrapy.http import Request

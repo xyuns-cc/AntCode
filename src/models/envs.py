@@ -1,67 +1,80 @@
-"""
-环境与解释器相关数据模型
-包含解释器、虚拟环境、以及项目与虚拟环境的绑定
-"""
+"""环境和解释器模型"""
 
 from tortoise import fields
 from tortoise.models import Model
 
-from .enums import VenvScope, InterpreterSource
+from src.models.enums import VenvScope, InterpreterSource
 
 
 class Interpreter(Model):
-    """语言解释器（当前仅支持 Python）"""
+    """语言解释器模型"""
     id = fields.BigIntField(pk=True)
-    tool = fields.CharField(max_length=20, default="python", description="工具/语言，如 python")
-    version = fields.CharField(max_length=20, description="版本号")
-    install_dir = fields.CharField(max_length=500, description="安装目录")
-    python_bin = fields.CharField(max_length=500, description="解释器可执行路径")
-    status = fields.CharField(max_length=20, default="installed", description="状态")
-    source = fields.CharEnumField(InterpreterSource, default=InterpreterSource.MISE, description="来源：mise/local")
+    tool = fields.CharField(max_length=20, default="python")
+    version = fields.CharField(max_length=20)
+    install_dir = fields.CharField(max_length=500)
+    python_bin = fields.CharField(max_length=500)
+    status = fields.CharField(max_length=20, default="installed")
+    source = fields.CharEnumField(InterpreterSource, default=InterpreterSource.MISE)
 
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
-    created_by = fields.BigIntField(null=True, description="创建者ID")
+    created_by = fields.BigIntField(null=True)
 
     class Meta:
         table = "interpreters"
         unique_together = ("tool", "version", "source")
+        indexes = [
+            ("tool",),
+            ("status",),
+            ("created_at",),
+            ("tool", "status"),
+            ("tool", "version"),
+        ]
 
 
 class Venv(Model):
-    """虚拟环境记录（私有/共享）"""
+    """虚拟环境模型"""
     id = fields.BigIntField(pk=True)
-    scope = fields.CharEnumField(VenvScope, description="作用域：shared/private")
-    key = fields.CharField(max_length=100, null=True, description="共享环境标识")
-    version = fields.CharField(max_length=20, description="Python版本")
-    venv_path = fields.CharField(max_length=500, unique=True, description="虚拟环境路径")
+    scope = fields.CharEnumField(VenvScope)
+    key = fields.CharField(max_length=100, null=True)
+    version = fields.CharField(max_length=20)
+    venv_path = fields.CharField(max_length=500, unique=True)
 
-    interpreter: fields.ForeignKeyRelation[Interpreter] = fields.ForeignKeyField(
+    interpreter = fields.ForeignKeyField(
         "models.Interpreter", related_name="venvs", on_delete=fields.RESTRICT
     )
 
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
-    created_by = fields.BigIntField(null=True, description="创建者ID")
+    created_by = fields.BigIntField(null=True)
 
     class Meta:
         table = "venvs"
-        indexes = [("scope", "key"), ("version",)]
+        indexes = [
+            ("scope", "key"),
+            ("version",),
+            ("created_at",),
+            ("created_by",),
+            ("scope", "version"),
+        ]
 
 
 class ProjectVenvBinding(Model):
-    """项目与虚拟环境绑定（支持历史与当前）"""
+    """项目与虚拟环境绑定"""
     id = fields.BigIntField(pk=True)
-    project_id = fields.BigIntField(description="项目ID")
-    venv: fields.ForeignKeyRelation[Venv] = fields.ForeignKeyField(
+    project_id = fields.BigIntField()
+    venv = fields.ForeignKeyField(
         "models.Venv", related_name="bindings", on_delete=fields.CASCADE
     )
     is_current = fields.BooleanField(default=True)
     created_at = fields.DatetimeField(auto_now_add=True)
-    created_by = fields.BigIntField(null=True, description="创建者ID")
+    created_by = fields.BigIntField(null=True)
 
     class Meta:
         table = "project_venv_bindings"
-        indexes = [("project_id", "is_current"), ("venv_id", "is_current")]
-        # 注意：每个项目只能有一个 is_current=True 的绑定
-        # 但 Tortoise ORM 不支持条件唯一约束，需要在应用层保证
+        indexes = [
+            ("project_id", "is_current"),
+            ("venv_id", "is_current"),
+            ("created_at",),
+            ("created_by",),
+        ]

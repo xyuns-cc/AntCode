@@ -68,7 +68,7 @@ npm install
 ```bash
 # 回到项目根目录
 cd ../..
-uv run python main.py
+uv run python src/main.py
 ```
 
 6. **启动前端开发服务**
