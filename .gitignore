@@ -43,13 +43,8 @@ env/
 *.sqlite3-shm
 *.sqlite3-wal
 
-# Data directory (logs, db, storage)
-data/db/*
-data/logs/*
-data/storage/*
-!data/.gitignore
-!data/.gitkeep
-!data/**/.gitkeep
+# Data directory (auto-generated at runtime)
+data/
 
 # Legacy directories (已迁移到 data/)
 logs/
