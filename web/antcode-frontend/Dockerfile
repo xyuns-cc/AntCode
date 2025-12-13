@@ -6,22 +6,22 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # 设置环境变量，增加 Node.js 内存限制
-ENV NODE_ENV=development \
-    NPM_CONFIG_LOGLEVEL=warn \
-    NODE_OPTIONS="--max-old-space-size=4096"
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # 复制依赖文件
 COPY package*.json ./
 
-# 安装所有依赖（包括 devDependencies 用于构建）
-RUN npm ci && npm cache clean --force
+# 安装所有依赖
+RUN npm ci
 
 # 复制源代码
 COPY . .
 
-# 直接使用 vite build，跳过 type-check（CI 中单独检查）
-ENV NODE_ENV=production
-RUN npx vite build --mode production
+# 列出文件确认复制成功
+RUN ls -la && ls -la src/
+
+# 构建（跳过 type-check，直接用 vite）
+RUN ./node_modules/.bin/vite build --mode production
 
 # Stage 2: Production
 FROM nginx:1.27-alpine AS runtime
