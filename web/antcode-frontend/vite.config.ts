@@ -3,10 +3,15 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 import type { UserConfig } from 'vite'
 import viteCompression from 'vite-plugin-compression'
+import fs from 'fs'
 
 export default defineConfig(({ mode }) => {
-  // 从项目根目录读取 .env 环境变量
-  const env = loadEnv(mode, path.resolve(__dirname, '../..'), '')
+  // 尝试从多个位置读取环境变量（兼容 Docker 构建）
+  const rootEnvPath = path.resolve(__dirname, '../..')
+  const localEnvPath = __dirname
+  const envDir = fs.existsSync(path.join(rootEnvPath, '.env')) ? rootEnvPath : localEnvPath
+  
+  const env = loadEnv(mode, envDir, '')
   const isProduction = mode === 'production'
   
   // API 地址（从环境变量读取，默认 localhost:8000）
