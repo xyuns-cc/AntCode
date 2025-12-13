@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import time
@@ -7,7 +6,8 @@ from tortoise.expressions import Q
 
 from src.core.config import settings
 from src.models.monitoring import NodeEvent, NodePerformanceHistory, SpiderMetricsHistory
-from src.utils.redis_pool import get_redis_client
+from src.infrastructure.redis import get_redis_client
+from src.utils.serialization import from_json
 
 
 def _to_int(value, default=0):
@@ -54,27 +54,42 @@ class MonitoringService:
         return await get_redis_client()
 
     async def process_stream(self):
-        """从 Redis Stream 中读取监控数据并写入数据库。"""
+        """从 Redis Stream 中读取监控数据并批量写入数据库（优化版本）"""
+        import asyncio
+
         if not settings.MONITORING_ENABLED:
             return 0
 
-        redis_client = await self._get_redis()
-        last_id = await redis_client.get(self.config.stream_last_id_key)
-        last_id = last_id.decode() if isinstance(last_id, (bytes, bytearray)) else last_id
-        if not last_id:
-            last_id = "0-0"
+        try:
+            redis_client = await self._get_redis()
+            last_id = await redis_client.get(self.config.stream_last_id_key)
+            last_id = last_id.decode() if isinstance(last_id, (bytes, bytearray)) else last_id
+            if not last_id:
+                last_id = "0-0"
 
-        streams = await redis_client.xread(
-            {self.config.stream_key: last_id},
-            count=self.config.stream_batch_size,
-            block=5000,
-        )
+            streams = await redis_client.xread(
+                {self.config.stream_key: last_id},
+                count=self.config.stream_batch_size,
+                block=5000,
+            )
 
-        if not streams:
+            if not streams:
+                return 0
+        except asyncio.CancelledError:
+            # 应用关闭时会取消任务，这是正常行为
+            logger.debug("监控数据流处理被取消（应用正在关闭）")
+            return 0
+        except Exception as e:
+            logger.warning(f"读取监控数据流失败: {e}")
             return 0
 
         processed = 0
         new_last_id = last_id
+
+        # 批量收集数据
+        performance_records = []
+        spider_records = []
+        event_records = []
 
         for _, messages in streams:
             for message_id, payload in messages:
@@ -82,7 +97,16 @@ class MonitoringService:
                     data = self._parse_stream_payload(payload)
                     if not data:
                         continue
-                    await self._persist_data(data)
+
+                    # 收集数据而不是立即插入
+                    record = self._prepare_record(data)
+                    if record:
+                        if record['type'] == 'event':
+                            event_records.append(record['data'])
+                        elif record['type'] == 'metrics':
+                            performance_records.append(record['performance'])
+                            spider_records.append(record['spider'])
+
                     new_last_id = message_id
                     processed += 1
                 except Exception as exc:  # noqa: BLE001
@@ -92,17 +116,39 @@ class MonitoringService:
                         message_id,
                     )
 
+        # 批量插入数据库
+        if event_records:
+            await NodeEvent.bulk_create(event_records)
+        if performance_records:
+            await NodePerformanceHistory.bulk_create(performance_records)
+        if spider_records:
+            await SpiderMetricsHistory.bulk_create(spider_records)
+
         if processed:
             await redis_client.set(self.config.stream_last_id_key, new_last_id)
+            logger.debug(
+                f"批量持久化监控数据: 性能{len(performance_records)}条, "
+                f"爬虫{len(spider_records)}条, 事件{len(event_records)}条"
+            )
+
         return processed
 
     async def cleanup_old_data(self, days=None):
-        """清理过期的监控数据。"""
+        """清理过期的监控数据（批量操作）"""
         keep_days = days if days is not None else self.config.history_keep_days
         cutoff = datetime.utcnow() - timedelta(days=keep_days)
-        await NodePerformanceHistory.filter(timestamp__lt=cutoff).delete()
-        await SpiderMetricsHistory.filter(timestamp__lt=cutoff).delete()
-        await NodeEvent.filter(created_at__lt=cutoff).delete()
+
+        # 批量删除，并记录删除数量
+        perf_deleted = await NodePerformanceHistory.filter(timestamp__lt=cutoff).delete()
+        spider_deleted = await SpiderMetricsHistory.filter(timestamp__lt=cutoff).delete()
+        event_deleted = await NodeEvent.filter(created_at__lt=cutoff).delete()
+
+        total_deleted = perf_deleted + spider_deleted + event_deleted
+        if total_deleted > 0:
+            logger.info(
+                f"已清理监控数据: 性能{perf_deleted}条, 爬虫{spider_deleted}条, "
+                f"事件{event_deleted}条, 共{total_deleted}条 (>= {keep_days}天前)"
+            )
 
     async def get_online_nodes(self):
         """获取当前在线节点及其实时指标。"""
@@ -132,10 +178,10 @@ class MonitoringService:
         data = []
         for value, score in history or []:
             try:
-                payload = json.loads(value)
+                payload = from_json(value)
                 payload["timestamp"] = score
                 data.append(payload)
-            except json.JSONDecodeError:
+            except Exception:
                 continue
         data.sort(key=lambda item: item["timestamp"])
         return data
@@ -209,7 +255,7 @@ class MonitoringService:
             node_id = node_id_raw.decode()
 
             if b"data" in payload:
-                content = json.loads(payload[b"data"].decode())
+                content = from_json(payload[b"data"].decode())
                 content["node_id"] = node_id
                 ts_raw = payload.get(b"timestamp")
                 if ts_raw:
@@ -233,7 +279,64 @@ class MonitoringService:
             logger.error("解析监控消息失败: {}", exc)
             return None
 
+    def _prepare_record(self, data):
+        """准备批量插入的记录（不执行数据库操作）"""
+        timestamp = data.get("timestamp")
+        if not timestamp:
+            return None
+
+        try:
+            dt = datetime.fromtimestamp(float(timestamp))
+        except Exception:
+            dt = datetime.utcnow()
+
+        if "event" in data:
+            return {
+                'type': 'event',
+                'data': NodeEvent(
+                    node_id=data.get("node_id"),
+                    event_type=data.get("event"),
+                    event_message=data.get("reason"),
+                    created_at=dt,
+                )
+            }
+
+        # 性能和爬虫数据一起返回
+        return {
+            'type': 'metrics',
+            'performance': NodePerformanceHistory(
+                node_id=data.get("node_id"),
+                timestamp=dt,
+                cpu_percent=_to_decimal(data.get("cpu_percent")),
+                memory_percent=_to_decimal(data.get("memory_percent")),
+                memory_used_mb=_to_int(data.get("memory_used_mb"), None),
+                disk_percent=_to_decimal(data.get("disk_percent")),
+                network_sent_mb=_to_decimal(data.get("network_sent_mb")),
+                network_recv_mb=_to_decimal(data.get("network_recv_mb")),
+                uptime_seconds=_to_int(data.get("uptime_seconds"), None),
+                status=data.get("status", "online"),
+            ),
+            'spider': SpiderMetricsHistory(
+                node_id=data.get("node_id"),
+                timestamp=dt,
+                tasks_total=_to_int(data.get("tasks_total")),
+                tasks_success=_to_int(data.get("tasks_success")),
+                tasks_failed=_to_int(data.get("tasks_failed")),
+                tasks_running=_to_int(data.get("tasks_running")),
+                pages_crawled=_to_int(data.get("pages_crawled")),
+                items_scraped=_to_int(data.get("items_scraped")),
+                requests_total=_to_int(data.get("requests_total")),
+                requests_failed=_to_int(data.get("requests_failed")),
+                avg_response_time_ms=_to_int(data.get("avg_response_time_ms")),
+                error_timeout=_to_int(data.get("error_timeout")),
+                error_network=_to_int(data.get("error_network")),
+                error_parse=_to_int(data.get("error_parse")),
+                error_other=_to_int(data.get("error_other")),
+            )
+        }
+
     async def _persist_data(self, data):
+        """单条持久化（保留用于向后兼容）"""
         timestamp = data.get("timestamp")
         if not timestamp:
             return

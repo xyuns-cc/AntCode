@@ -14,13 +14,16 @@ import {
   ClockCircleOutlined,
   CopyrightOutlined,
   GithubOutlined,
-  CodeOutlined
+  CodeOutlined,
+  ClusterOutlined,
+  FileTextOutlined
 } from '@ant-design/icons'
 import { useNavigate, useLocation, Outlet } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { APP_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT } from '@/config/app'
 import ThemeToggle from '@/components/common/ThemeToggle'
 import DynamicIcon from '@/components/common/DynamicIcon'
+import NodeSelector from '@/components/common/NodeSelector'
 import type { MenuItem } from '@/types'
 import styles from './Layout.module.css'
 
@@ -37,10 +40,14 @@ const Layout: React.FC = () => {
 
   const menuItems: MenuItem[] = [
     { key: '/dashboard', label: '仪表板', icon: <DashboardOutlined />, path: '/dashboard' },
+    { key: '/nodes', label: '节点管理', icon: <ClusterOutlined />, path: '/nodes', hidden: !user?.is_admin },
     { key: '/envs', label: '环境管理', icon: <CodeOutlined />, path: '/envs' },
     { key: '/projects', label: '项目管理', icon: <ProjectOutlined />, path: '/projects' },
     { key: '/tasks', label: '任务管理', icon: <PlayCircleOutlined />, path: '/tasks' },
     { key: '/user-management', label: '用户管理', icon: <TeamOutlined />, path: '/user-management', hidden: !user?.is_admin },
+    { key: '/alert-config', label: '告警配置', icon: <BellOutlined />, path: '/alert-config', hidden: !user?.is_admin },
+    { key: '/audit-log', label: '审计日志', icon: <FileTextOutlined />, path: '/audit-log', hidden: !user?.is_admin },
+    { key: '/system-config', label: '系统配置', icon: <SettingOutlined />, path: '/system-config', hidden: user?.username !== 'admin' },
   ]
 
   const filteredMenuItems = menuItems.filter((item) => !item.hidden)
@@ -96,8 +103,9 @@ const Layout: React.FC = () => {
       <AntLayout className={`${styles.mainLayout} ${collapsed ? styles.collapsed : ''}`} style={{ background: token.colorBgLayout }}>
         <Header className={styles.header} style={{ background: token.colorBgContainer, borderBottom: `1px solid ${token.colorBorderSecondary}` }}>
           <Flex align="center" justify="space-between" style={{ height: '100%' }}>
-            <Flex align="center">
+            <Flex align="center" gap={16}>
               <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(!collapsed)} className={styles.trigger} />
+              {user?.is_admin && <NodeSelector />}
             </Flex>
             <Flex align="center" gap={12}>
               <ThemeToggle />

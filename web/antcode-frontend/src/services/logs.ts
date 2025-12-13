@@ -3,17 +3,17 @@ import Logger from '@/utils/logger'
 
 // 日志条目接口 - 匹配后端API
 export interface LogEntry {
-  id?: number
+  id?: string  // public_id
   timestamp: string
   level: 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
   log_type: 'stdout' | 'stderr' | 'system' | 'application'
   execution_id?: string
-  task_id?: number
+  task_id?: string  // public_id
   message: string
   source?: string
   file_path?: string
   line_number?: number
-  extra_data?: Record<string, any>
+  extra_data?: Record<string, unknown>
 }
 
 // 日志文件内容响应
@@ -82,7 +82,7 @@ export interface LogQueryParams {
   size?: number
   start_time?: string
   end_time?: string
-  task_id?: number
+  task_id?: string  // public_id
 }
 
 // 日志列表响应
@@ -106,14 +106,22 @@ export interface LogResponse {
   size: number
 }
 
+export interface LogMetrics {
+  total_log_files: number
+  total_size_bytes: number
+  log_levels_count: Record<string, number>
+  log_types_count: Record<string, number>
+  daily_log_count: Record<string, number>
+}
+
 class LogService {
   // 新的统一日志接口
   async getUnifiedLogs(params: UnifiedLogParams): Promise<UnifiedLogResponse> {
     try {
-      const queryParams: any = {
+      const queryParams: Record<string, string | number> = {
         format: params.format || 'structured'
       }
-      
+
       if (params.log_type) queryParams.log_type = params.log_type
       if (params.level) queryParams.level = params.level
       if (params.lines) queryParams.lines = Math.min(Math.max(params.lines, 1), 10000)
@@ -238,21 +246,22 @@ class LogService {
         }
       }
       throw new Error(response.message)
-    } catch (error) {
+    } catch {
       // 返回模拟数据作为后备
       return this.getMockLogs({ ...params, execution_id: executionId })
     }
   }
 
   // 获取日志统计
-  async getLogMetrics(): Promise<any> {
+  async getLogMetrics(): Promise<LogMetrics> {
     try {
-      const response = await apiClient.get('/api/v1/logs/metrics')
-      if (response.data.success) {
+      const response = await apiClient.get<{ success: boolean; data?: LogMetrics }>('/api/v1/logs/metrics')
+      if (response.data.success && response.data.data) {
         return response.data.data
       }
       throw new Error('API响应格式错误')
     } catch (error) {
+      Logger.warn('获取日志统计失败，返回默认值', error)
       return {
         total_log_files: 0,
         total_size_bytes: 0,
@@ -273,7 +282,7 @@ class LogService {
 
       // 否则返回模拟数据，因为后端没有统一的日志接口
       return this.getMockLogs(params)
-    } catch (error) {
+    } catch {
       // 返回模拟数据作为后备
       return this.getMockLogs(params)
     }
@@ -283,7 +292,7 @@ class LogService {
   async getStdoutLogs(executionId: string, lines?: number): Promise<LogFileResponse> {
     try {
       // 使用新的便捷接口
-      const params: any = {}
+      const params: Record<string, number> = {}
       if (lines) params.lines = Math.min(Math.max(lines, 1), 10000)
       
       const response = await apiClient.get(`/api/v1/logs/executions/${executionId}/stdout`, { params })
@@ -303,7 +312,7 @@ class LogService {
   async getStderrLogs(executionId: string, lines?: number): Promise<LogFileResponse> {
     try {
       // 使用新的便捷接口
-      const params: any = {}
+      const params: Record<string, number> = {}
       if (lines) params.lines = Math.min(Math.max(lines, 1), 10000)
       
       const response = await apiClient.get(`/api/v1/logs/executions/${executionId}/stderr`, { params })
@@ -331,7 +340,7 @@ class LogService {
   async getErrorLogs(executionId: string, params?: Omit<LogQueryParams, 'execution_id' | 'level'>): Promise<LogListResponse> {
     try {
       // 使用新的便捷接口
-      const queryParams: any = {}
+      const queryParams: Record<string, string | number> = {}
       if (params?.search) queryParams.search = params.search
       if (params?.lines) queryParams.lines = Math.min(Math.max(params.lines, 1), 10000)
       
@@ -351,10 +360,146 @@ class LogService {
     }
   }
 
-  // WebSocket 功能（优化连接管理）
-  connectLogStream(executionId?: string, onMessage?: (log: LogEntry) => void, onError?: (error: any) => void): WebSocket | null {
+  // WebSocket 功能（使用新的连接管理器）
+  connectLogStream(
+    executionId?: string, 
+    onMessage?: (log: LogEntry) => void, 
+    onError?: (error: unknown) => void,
+    onStateChange?: (state: string) => void,
+    onStatusUpdate?: (status: { status: string; message?: string; progress?: number }) => void
+  ): { disconnect: () => void } | null {
     if (!executionId) {
-      console.error('executionId is required for WebSocket connection')
+      Logger.error('executionId is required for WebSocket connection')
+      onError?.('executionId is required for WebSocket connection')
+      return null
+    }
+
+    // 直接使用简单的 WebSocket 连接（避免模块导入问题）
+    const token = localStorage.getItem('access_token')
+    if (!token) {
+      Logger.error('No access token found')
+      onError?.('No access token found')
+      return null
+    }
+
+    // 构建正确的 WebSocket URL
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = import.meta.env.VITE_WS_HOST || 'localhost:8000'
+    const wsUrl = `${protocol}//${host}/api/v1/ws/executions/${executionId}/logs?token=${encodeURIComponent(token)}`
+    
+    let ws: WebSocket | null = null
+    let reconnectAttempts = 0
+    const maxReconnectAttempts = 5
+    let manualClose = false
+
+    const connect = () => {
+      try {
+        ws = new WebSocket(wsUrl)
+        
+        ws.onopen = () => {
+          Logger.info('WebSocket 连接已建立')
+          reconnectAttempts = 0
+          onStateChange?.('connected')
+        }
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data)
+            
+            // 处理日志消息
+            if (message.type === 'log_line' && message.data) {
+              const logEntry: LogEntry = {
+                id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                timestamp: message.data.timestamp || message.timestamp,
+                level: (message.data.level || 'INFO') as LogEntry['level'],
+                log_type: (message.data.log_type || 'stdout') as LogEntry['log_type'],
+                execution_id: message.data.execution_id || executionId,
+                message: message.data.content || message.data.message || '',
+                source: message.data.source
+              }
+              onMessage?.(logEntry)
+            }
+            // 处理心跳
+            else if (message.type === 'ping') {
+              ws?.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }))
+            }
+            // 处理连接确认
+            else if (message.type === 'connected') {
+              Logger.debug('收到服务器连接确认')
+            }
+            // 处理历史日志标记
+            else if (message.type === 'historical_logs_start') {
+              Logger.debug('开始接收历史日志')
+            }
+            else if (message.type === 'historical_logs_end') {
+              Logger.debug(`历史日志接收完成，共 ${message.sent_lines} 行`)
+            }
+            else if (message.type === 'no_historical_logs') {
+              Logger.debug('无历史日志')
+            }
+            // 处理执行状态更新
+            else if (message.type === 'execution_status') {
+              Logger.info('执行状态更新:', message.data)
+              // 调用状态更新回调
+              if (onStatusUpdate && message.data) {
+                onStatusUpdate({
+                  status: message.data.status,
+                  message: message.data.message,
+                  progress: message.data.progress
+                })
+              }
+            }
+            // 处理错误
+            else if (message.type === 'error') {
+              Logger.error('服务器错误:', message.message)
+              onError?.(message.message)
+            }
+          } catch (e) {
+            Logger.error('解析消息失败:', e)
+          }
+        }
+
+        ws.onerror = (error) => {
+          Logger.error('WebSocket 错误:', error)
+          onStateChange?.('error')
+        }
+
+        ws.onclose = (event) => {
+          Logger.info(`WebSocket 关闭: ${event.code} - ${event.reason}`)
+          onStateChange?.('disconnected')
+          
+          // 自动重连
+          if (!manualClose && reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++
+            const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts - 1), 30000)
+            Logger.info(`将在 ${delay}ms 后重连 (${reconnectAttempts}/${maxReconnectAttempts})`)
+            onStateChange?.('reconnecting')
+            setTimeout(connect, delay)
+          } else if (reconnectAttempts >= maxReconnectAttempts) {
+            onError?.('达到最大重连次数')
+            onStateChange?.('failed')
+          }
+        }
+      } catch (error) {
+        Logger.error('创建 WebSocket 失败:', error)
+        onError?.(error)
+      }
+    }
+
+    connect()
+
+    return {
+      disconnect: () => {
+        manualClose = true
+        ws?.close(1000, '客户端主动断开')
+      }
+    }
+  }
+
+  // 旧版 WebSocket 连接（保持向后兼容）
+  connectLogStreamLegacy(executionId?: string, onMessage?: (log: LogEntry) => void, onError?: (error: unknown) => void): WebSocket | null {
+    if (!executionId) {
+      Logger.error('executionId is required for WebSocket connection')
       onError?.('executionId is required for WebSocket connection')
       return null
     }
@@ -362,18 +507,15 @@ class LogService {
     try {
       const token = localStorage.getItem('access_token')
       if (!token) {
-        console.error('No access token found')
+        Logger.error('No access token found')
         onError?.('No access token found')
         return null
       }
 
-      // 使用新的WebSocket端点
-      const wsUrl = `ws://localhost:8000/api/v1/ws/executions/${executionId}/logs?token=${encodeURIComponent(token)}`
+      const wsHost = import.meta.env.VITE_WS_HOST || 'localhost:8000'
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${wsProtocol}//${wsHost}/api/v1/ws/executions/${executionId}/logs?token=${encodeURIComponent(token)}`
       const ws = new WebSocket(wsUrl)
-
-      ws.onopen = () => {
-        // WebSocket连接已建立
-      }
 
       ws.onmessage = (event) => {
         try {
@@ -381,46 +523,27 @@ class LogService {
           
           if (data.type === 'log_line' && data.data) {
             const logEntry: LogEntry = {
-              id: Date.now() + Math.random(),
+              id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
               timestamp: data.data.timestamp || data.timestamp,
-              level: (data.data.level || 'INFO') as 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL',
-              log_type: (data.data.log_type || 'stdout') as 'stdout' | 'stderr' | 'system' | 'application',
+              level: (data.data.level || 'INFO') as LogEntry['level'],
+              log_type: (data.data.log_type || 'stdout') as LogEntry['log_type'],
               execution_id: data.data.execution_id || executionId,
               message: data.data.content || data.data.message || '',
               source: data.data.source
             }
             onMessage?.(logEntry)
-          } else if (data.type === 'historical_logs' && data.data) {
-            // 处理历史日志
-            data.data.forEach((logLine: any, index: number) => {
-              const logEntry: LogEntry = {
-                id: Date.now() + index,
-                timestamp: logLine.timestamp,
-                level: (logLine.level || 'INFO') as 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL',
-                log_type: (logLine.log_type || 'stdout') as 'stdout' | 'stderr' | 'system' | 'application',
-                execution_id: logLine.execution_id || executionId,
-                message: logLine.content || logLine.message || '',
-                source: logLine.source
-              }
-              onMessage?.(logEntry)
-            })
-          } else if (data.type === 'error') {
-            console.error('WebSocket服务端错误:', data.message || data.data)
-            onError?.(data.message || data.data || 'WebSocket服务端错误')
           }
         } catch (error) {
-          console.error('解析WebSocket消息失败:', error)
-          onError?.(error)
+          Logger.error('解析WebSocket消息失败:', error)
         }
       }
 
       ws.onerror = (error) => {
-        console.error('WebSocket连接错误:', error)
+        Logger.error('WebSocket连接错误:', error)
         onError?.(error)
       }
 
       ws.onclose = (event) => {
-        // 只有在异常关闭时才报告错误
         if (event.code !== 1000 && event.code !== 1001) {
           onError?.(`WebSocket连接意外关闭: ${event.code} - ${event.reason}`)
         }
@@ -428,7 +551,7 @@ class LogService {
 
       return ws
     } catch (error) {
-      console.error('创建WebSocket连接失败:', error)
+      Logger.error('创建WebSocket连接失败:', error)
       onError?.(error)
       return null
     }
@@ -557,6 +680,7 @@ class LogService {
         type: format === 'json' ? 'application/json' : 'text/csv'
       })
     } catch (error) {
+      Logger.warn('导出日志失败，返回空文件', error)
       // 创建空的导出数据
       const content = format === 'json' ? '[]' : 'timestamp,level,source,message\n'
       return new Blob([content], {
@@ -584,16 +708,12 @@ class LogService {
   }
 
   // 清空日志
-  async clearLogs(source?: string): Promise<void> {
-    try {
-      // 后端没有清空日志的接口，这里只是模拟
-      // 可以在这里调用后端的清空接口，如果有的话
-      // await apiClient.delete('/api/v1/logs', {
-      //   params: source ? { source } : undefined
-      // })
-    } catch (error) {
-      throw error
-    }
+  async clearLogs(_source?: string): Promise<void> {
+    // 后端没有清空日志的接口，这里只是模拟
+    // 可以在这里调用后端的清空接口，如果有的话
+    // await apiClient.delete('/api/v1/logs', {
+    //   params: source ? { source } : undefined
+    // })
   }
 }
 

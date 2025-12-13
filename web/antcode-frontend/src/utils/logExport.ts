@@ -110,7 +110,7 @@ export class LogExporter {
           break
           
         case 'csv':
-          exportContent = this.formatEntriesAsCsv(entries, config)
+          exportContent = this.formatEntriesAsCsv(entries)
           filename += '.csv'
           break
       }
@@ -147,7 +147,7 @@ export class LogExporter {
       
       // 处理日志内容，按行分割并添加时间戳（如果需要）
       const contentLines = content.split('\n')
-      contentLines.forEach((line, index) => {
+      contentLines.forEach((line) => {
         if (line.trim()) {
           let formattedLine = line
           if (config.includeTimestamp !== false) {
@@ -236,7 +236,7 @@ export class LogExporter {
     lines.push(`# 总条目数: ${entries.length}`)
     lines.push('')
 
-    entries.forEach((entry, index) => {
+    entries.forEach((entry) => {
       let line = ''
       
       if (config?.includeTimestamp !== false) {
@@ -262,7 +262,7 @@ export class LogExporter {
   }
 
   // 格式化日志条目为CSV
-  private static formatEntriesAsCsv(entries: LogEntry[], config?: Partial<LogExportConfig>): string {
+  private static formatEntriesAsCsv(entries: LogEntry[]): string {
     const lines: string[] = []
     
     // CSV头部

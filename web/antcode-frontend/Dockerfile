@@ -40,6 +40,17 @@ RUN echo 'server { \
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml; \
 }' > /etc/nginx/conf.d/default.conf
 
+# 安全：使用非 root 用户运行
+RUN addgroup -g 101 -S nginx || true && \
+    adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx || true && \
+    chown -R nginx:nginx /usr/share/nginx/html && \
+    chown -R nginx:nginx /var/cache/nginx && \
+    chown -R nginx:nginx /var/log/nginx && \
+    touch /var/run/nginx.pid && \
+    chown -R nginx:nginx /var/run/nginx.pid
+
+USER nginx
+
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://localhost:80/ || exit 1
 

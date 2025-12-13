@@ -91,6 +91,10 @@ storage/mise/
 *.tmp
 *.temp
 .cache/
+src/logs/
+
+# Vite cache
+web/antcode-frontend/node_modules/.vite/
 
 # Documentation (except README files)
 doc/

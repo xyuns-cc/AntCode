@@ -179,28 +179,57 @@
   font-size: 14px;
 }
 
-.loginCard :global(.ant-input-affix-wrapper) {
+.loginCard :global(.ant-input-affix-wrapper),
+.loginCard :global(.ant-input-affix-wrapper-lg) {
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+  background-color: rgba(255, 255, 255, 0.1) !important;
   backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   transition: all 0.3s;
   height: 48px;
 }
 
-.loginCard :global(.ant-input-affix-wrapper:focus),
-.loginCard :global(.ant-input-affix-wrapper-focused) {
-  border-color: rgba(255, 255, 255, 0.4);
-  background: rgba(255, 255, 255, 0.15);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+.loginCard :global(.ant-input-affix-wrapper:hover),
+.loginCard :global(.ant-input-affix-wrapper-lg:hover) {
+  border-color: rgba(255, 255, 255, 0.3) !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+  background-color: rgba(255, 255, 255, 0.12) !important;
 }
 
-.loginCard :global(.ant-input) {
-  border: none;
-  box-shadow: none;
-  background: transparent;
-  color: white;
+.loginCard :global(.ant-input-affix-wrapper:focus),
+.loginCard :global(.ant-input-affix-wrapper-focused) {
+  border-color: rgba(255, 255, 255, 0.4) !important;
+  background: rgba(255, 255, 255, 0.15) !important;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1) !important;
+}
+
+.loginCard :global(.ant-input),
+.loginCard :global(.ant-input-affix-wrapper > input.ant-input),
+.loginCard :global(input.ant-input) {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  color: white !important;
   font-size: 15px;
+}
+
+/* 密码输入框内部 */
+.loginCard :global(.ant-input-affix-wrapper .ant-input) {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+.loginCard :global(.ant-input-password-icon),
+.loginCard :global(.ant-input-suffix .anticon) {
+  color: rgba(255, 255, 255, 0.6) !important;
+}
+
+.loginCard :global(.ant-input-password-icon:hover),
+.loginCard :global(.ant-input-suffix .anticon:hover) {
+  color: rgba(255, 255, 255, 0.9) !important;
 }
 
 .loginCard :global(.ant-input::placeholder) {

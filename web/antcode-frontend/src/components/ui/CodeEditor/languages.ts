@@ -2,7 +2,6 @@
  * 编程语言配置
  */
 
-import React from 'react'
 import { APP_BRAND_NAME } from '@/config/app'
 
 export interface LanguageConfig {
@@ -385,7 +384,7 @@ func processData(data []DataItem) {
       },
       {
         label: 'struct',
-        insertText: 'type ${1:StructName} struct {\n    ${2:Field} ${3:Type} \`json:"${4:field}"\`\n}',
+        insertText: 'type ${1:StructName} struct {\n    ${2:Field} ${3:Type} `json:"${4:field}"`\n}',
         documentation: '定义结构体',
         kind: 'keyword'
       },

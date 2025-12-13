@@ -165,6 +165,7 @@ export const getEditorOptions = (
   fontLigatures: true, // 连字
   lineNumbers: 'on',
   readOnly,
+  theme: isDark ? 'vs-dark' : 'vs',
   
   // 滚动条
   scrollbar: {
@@ -364,4 +365,3 @@ export const configureMonaco = (monaco: typeof Monaco) => {
     noSyntaxValidation: false
   })
 }
-

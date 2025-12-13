@@ -1,21 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
-  Card,
   Button,
   Space,
   Tag,
-  Switch,
   Input,
   Select,
-  Tooltip,
-  Statistic,
   Row,
   Col,
-  Alert,
   Dropdown,
   message,
   Checkbox,
-  Divider,
   Typography,
   theme
 } from 'antd'
@@ -25,17 +19,14 @@ import {
   ClearOutlined,
   ReloadOutlined,
   DownloadOutlined,
-  SearchOutlined,
-  FilterOutlined,
-  SettingOutlined,
   FullscreenOutlined,
   FullscreenExitOutlined
 } from '@ant-design/icons'
 import { STORAGE_KEYS } from '@/utils/constants'
 import { logService } from '@/services/logs'
-import { LogExporter, exportExecutionLogs, exportLogEntries } from '@/utils/logExport'
+import { LogExporter } from '@/utils/logExport'
+import Logger from '@/utils/logger'
 import VirtualLogViewer from './VirtualLogViewer'
-import type { LogEntry } from '@/services/logs'
 import styles from './LogViewer.module.css'
 
 const { Search } = Input
@@ -62,7 +53,14 @@ interface LogMessage {
   timestamp: string
   level?: string
   source?: string
-  raw?: any
+  raw?: unknown
+}
+
+// 执行状态更新接口
+interface ExecutionStatusUpdate {
+  status: string
+  message?: string
+  progress?: number
 }
 
 // 组件属性接口
@@ -77,8 +75,8 @@ interface EnhancedLogViewerProps {
   enableSearch?: boolean
   enableExport?: boolean
   enableVirtualization?: boolean
-  enableAdvancedFilter?: boolean
   onLogUpdate?: (logs: string[]) => void // 新增：日志更新回调
+  onStatusUpdate?: (status: ExecutionStatusUpdate) => void // 新增：状态更新回调
 }
 
 // WebSocket连接状态
@@ -95,8 +93,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   enableSearch = true,
   enableExport = true,
   enableVirtualization = false,
-  enableAdvancedFilter = false, // 默认关闭高级过滤
-  onLogUpdate
+  onLogUpdate,
+  onStatusUpdate
 }) => {
   const { token } = theme.useToken() // 添加主题支持
 
@@ -104,7 +102,6 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   const [ws, setWs] = useState<WebSocket | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
   const [messages, setMessages] = useState<LogMessage[]>([])
-  const [filteredMessages, setFilteredMessages] = useState<LogMessage[]>([])
   const [isAutoScroll, setIsAutoScroll] = useState(true)
   const [isPaused, setIsPaused] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -127,6 +124,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   const logContainerRef = useRef<HTMLDivElement>(null)
   const mountedRef = useRef(true)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const tryFallbackConnectionRef = useRef<(() => void) | null>(null)
 
   // 确保组件挂载时mountedRef为true
   useEffect(() => {
@@ -214,6 +212,22 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
             content: `[错误] WebSocket连接错误: ${error instanceof Error ? error.message : String(error)}`,
             timestamp: new Date().toISOString()
           })
+        },
+        undefined, // onStateChange
+        (statusUpdate) => {
+          // 处理执行状态更新
+          Logger.info('收到执行状态更新:', statusUpdate)
+          
+          // 添加状态变更日志
+          addLogMessage({
+            id: generateUniqueId(),
+            type: 'info',
+            content: `[状态] ${statusUpdate.message || statusUpdate.status}`,
+            timestamp: new Date().toISOString()
+          })
+          
+          // 调用外部回调
+          onStatusUpdate?.(statusUpdate)
         }
       )
 
@@ -241,9 +255,9 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       })
 
       // 尝试备用连接方案
-      tryFallbackConnection()
+      tryFallbackConnectionRef.current?.()
     }
-  }, [executionId, connectionStatus, showStdout, showStderr, addLogMessage])
+  }, [executionId, connectionStatus, showStdout, showStderr, addLogMessage, onStatusUpdate, ws])
 
   // 备用连接方案
   const tryFallbackConnection = useCallback(async () => {
@@ -257,8 +271,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       timestamp: new Date().toISOString()
     })
 
-    // 使用简化的WebSocket端点
-    const fallbackUrl = `ws://localhost:8000/api/v1/ws/logs/stream?token=${encodeURIComponent(token)}&execution_id=${executionId}`
+    // 使用正确的WebSocket端点
+    const fallbackUrl = `ws://localhost:8000/api/v1/ws/executions/${executionId}/logs?token=${encodeURIComponent(token)}`
 
     try {
       const fallbackWs = new WebSocket(fallbackUrl)
@@ -343,6 +357,11 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       })
     }
   }, [executionId, addLogMessage])
+
+  // 更新 ref 以便 connect 函数可以调用
+  useEffect(() => {
+    tryFallbackConnectionRef.current = tryFallbackConnection
+  }, [tryFallbackConnection])
 
   // 断开连接
   const disconnect = useCallback(() => {
@@ -452,7 +471,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
           filename += '.json'
           break
 
-        case 'csv':
+        case 'csv': {
           const headers = 'Timestamp,Type,Level,Source,Content\n'
           const rows = displayMessages.map(msg =>
             `"${msg.timestamp}","${msg.type}","${msg.level || ''}","${msg.source || ''}","${msg.content.replace(/"/g, '""')}"`
@@ -460,6 +479,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
           content = headers + rows
           filename += '.csv'
           break
+        }
       }
 
       // 创建下载链接
@@ -547,7 +567,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   }, [ws])
 
   // 渲染日志消息
-  const renderLogMessage = (msg: LogMessage, index: number) => {
+  const renderLogMessage = (msg: LogMessage) => {
     let color = token.colorSuccess
     let backgroundColor = 'transparent'
 
@@ -631,88 +651,6 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       default: return '未连接'
     }
   }
-
-  // 测试连接
-  const testConnection = useCallback(async () => {
-    const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
-
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: '[测试] 开始连接测试...',
-      timestamp: new Date().toISOString()
-    })
-
-    // 测试信息
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: `执行ID: ${executionId}`,
-      timestamp: new Date().toISOString()
-    })
-
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: `Token状态: ${token ? '已设置' : '未设置'}`,
-      timestamp: new Date().toISOString()
-    })
-
-    if (token) {
-      try {
-        // 解析token查看过期时间
-        const payload = JSON.parse(atob(token.split('.')[1]))
-        const exp = new Date(payload.exp * 1000)
-        const now = new Date()
-
-        addLogMessage({
-          id: generateUniqueId(),
-          type: 'info',
-          content: `Token过期时间: ${exp.toLocaleString()}`,
-          timestamp: new Date().toISOString()
-        })
-
-        addLogMessage({
-          id: generateUniqueId(),
-          type: exp > now ? 'success' : 'error',
-          content: `Token状态: ${exp > now ? '有效' : '已过期'}`,
-          timestamp: new Date().toISOString()
-        })
-      } catch (error) {
-        addLogMessage({
-          id: generateUniqueId(),
-          type: 'error',
-          content: `Token解析失败: ${error instanceof Error ? error.message : String(error)}`,
-          timestamp: new Date().toISOString()
-        })
-      }
-    }
-
-    // 测试API连接
-    try {
-      const response = await fetch('/api/v1/health')
-      addLogMessage({
-        id: generateUniqueId(),
-        type: response.ok ? 'success' : 'error',
-        content: `API健康检查: ${response.ok ? '正常' : '失败'} (${response.status})`,
-        timestamp: new Date().toISOString()
-      })
-    } catch (error) {
-      addLogMessage({
-        id: generateUniqueId(),
-        type: 'error',
-        content: `API连接测试失败: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: new Date().toISOString()
-      })
-    }
-
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: '[完成] 连接测试完成',
-      timestamp: new Date().toISOString()
-    })
-  }, [executionId, addLogMessage])
 
   // 导出菜单项
   const exportMenuItems = [

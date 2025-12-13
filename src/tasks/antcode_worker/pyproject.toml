@@ -1,0 +1,38 @@
+[project]
+name = "antcode-worker"
+version = "2.0.0"
+description = "AntCode 分布式工作节点"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Web框架与类型
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "python-multipart>=0.0.9",
+
+    # 通信与协议
+    "httpx[socks]>=0.28.1",
+    "websockets>=12.0",
+    "h2>=4.1.0",
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
+    "protobuf>=4.25.0",
+
+    # 爬虫相关
+    "lxml>=5.0.0",
+    "cssselect>=1.2.0",
+    "curl_cffi>=0.7.0",
+    "DrissionPage>=4.0.0",
+
+    # 系统与监控
+    "psutil>=5.9.0",
+
+    # 日志与配置
+    "loguru>=0.7.0",
+    "PyYAML>=6.0",
+
+    # 序列化
+    "ujson>=5.8.0",
+    "msgpack>=1.0.0",
+]

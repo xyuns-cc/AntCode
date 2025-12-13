@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { lazy, Suspense, ComponentType } from 'react'
 import { Spin } from 'antd'
 import { LoadingOutlined } from '@ant-design/icons'
@@ -30,13 +31,13 @@ const ComponentLoading: React.FC = () => (
 )
 
 // 懒加载包装器
-export function lazyLoad<T extends ComponentType<any>>(
-  importFunc: () => Promise<{ default: T }>,
+export function lazyLoad<Props extends object>(
+  importFunc: () => Promise<{ default: ComponentType<Props> }>,
   fallback?: React.ReactNode
-): React.FC {
+): React.FC<Props> {
   const LazyComponent = lazy(importFunc)
 
-  return (props: any) => (
+  return (props: Props) => (
     <Suspense fallback={fallback || <PageLoading />}>
       <LazyComponent {...props} />
     </Suspense>
@@ -44,13 +45,13 @@ export function lazyLoad<T extends ComponentType<any>>(
 }
 
 // 带错误边界的懒加载
-export function lazyLoadWithErrorBoundary<T extends ComponentType<any>>(
-  importFunc: () => Promise<{ default: T }>,
+export function lazyLoadWithErrorBoundary<Props extends object>(
+  importFunc: () => Promise<{ default: ComponentType<Props> }>,
   fallback?: React.ReactNode
-): React.FC {
+): React.FC<Props> {
   const LazyComponent = lazy(importFunc)
 
-  return (props: any) => (
+  return (props: Props) => (
     <ErrorBoundary>
       <Suspense fallback={fallback || <PageLoading />}>
         <LazyComponent {...props} />
@@ -61,7 +62,7 @@ export function lazyLoadWithErrorBoundary<T extends ComponentType<any>>(
 
 // 预加载函数
 export function preloadComponent(
-  importFunc: () => Promise<{ default: ComponentType<any> }>
+  importFunc: () => Promise<{ default: ComponentType<Record<string, unknown>> }>
 ): void {
   importFunc()
 }
@@ -80,7 +81,7 @@ class ErrorBoundary extends React.Component<
     return { hasError: true }
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+  componentDidCatch(_error: Error, _errorInfo: React.ErrorInfo) {
     // 错误已被捕获，可以在这里记录到日志服务
   }
 

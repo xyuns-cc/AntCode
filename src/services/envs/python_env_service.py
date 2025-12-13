@@ -1,4 +1,3 @@
-"""Python环境管理服务"""
 from __future__ import annotations
 
 import asyncio
@@ -127,13 +126,14 @@ class PythonEnvService:
         return {"version": ver, "install_dir": install_dir, "python_bin": python_bin}
 
     async def list_db(self, source = None):
-        query = Interpreter.filter(tool="python")
+        from src.models import Interpreter as InterpreterModel
+        query = InterpreterModel.filter(tool="python")
         if source:
             query = query.filter(source=source)
         rows = await query.all()
         return [
             {
-                "id": r.id,
+                "id": r.public_id,
                 "version": r.version,
                 "install_dir": r.install_dir,
                 "python_bin": r.python_bin,

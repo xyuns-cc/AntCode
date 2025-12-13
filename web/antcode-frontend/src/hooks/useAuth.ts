@@ -1,11 +1,23 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { isAxiosError } from 'axios'
 // 提示交由全局拦截器与后端 message 处理
 import { authService } from '@/services/auth'
 import { useAuth as useAuthStore } from '@/stores/authStore'
 import { AuthHandler } from '@/utils/authHandler'
 import Logger from '@/utils/logger'
 import type { LoginRequest, RegisterRequest, UpdateUserRequest } from '@/types'
+
+const extractErrorMessage = (error: unknown, fallback: string) => {
+  if (isAxiosError(error)) {
+    const detail = (error.response?.data as { detail?: string } | undefined)?.detail
+    return detail || error.message || fallback
+  }
+  if (error instanceof Error) {
+    return error.message || fallback
+  }
+  return fallback
+}
 
 export const useAuth = () => {
   const navigate = useNavigate()
@@ -19,7 +31,7 @@ export const useAuth = () => {
     setUser,
     setLoading: setStoreLoading,
     setError,
-    setPermissions,
+    setPermissions: _setPermissions,
     clearUser,
     updateUser: updateStoreUser,
     hasPermission,
@@ -47,15 +59,15 @@ export const useAuth = () => {
 
       // 成功提示交由拦截器/后端 message 处理
       return response
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '登录失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '登录失败')
       setError(errorMessage)
       throw error
     } finally {
       setLoading(false)
       setStoreLoading(false)
     }
-  }, [setUser, setStoreLoading, setError, setPermissions])
+  }, [setUser, setStoreLoading, setError])
 
   // 注册
   const register = useCallback(async (userData: RegisterRequest) => {
@@ -66,8 +78,8 @@ export const useAuth = () => {
     try {
       const response = await authService.register(userData)
       return response
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '注册失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '注册失败')
       setError(errorMessage)
       throw error
     } finally {
@@ -85,7 +97,7 @@ export const useAuth = () => {
       await authService.logout()
       clearUser()
       navigate('/login')
-    } catch (error: any) {
+    } catch (error: unknown) {
       Logger.warn('登出请求失败:', error)
       // 即使登出请求失败，也要清除本地状态
       clearUser()
@@ -115,8 +127,8 @@ export const useAuth = () => {
       // }
 
       return userData
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '获取用户信息失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '获取用户信息失败')
       setError(errorMessage)
       
       // 如果是认证错误，使用统一的认证处理
@@ -130,7 +142,7 @@ export const useAuth = () => {
       setLoading(false)
       setStoreLoading(false)
     }
-  }, [setUser, setStoreLoading, setError, setPermissions, clearUser, navigate])
+  }, [setUser, setStoreLoading, setError, clearUser])
 
   // 更新用户信息
   const updateUser = useCallback(async (userData: UpdateUserRequest) => {
@@ -142,8 +154,8 @@ export const useAuth = () => {
       const updatedUser = await authService.updateUser(userData)
       updateStoreUser(updatedUser)
       return updatedUser
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '更新用户信息失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '更新用户信息失败')
       setError(errorMessage)
       throw error
     } finally {
@@ -160,8 +172,8 @@ export const useAuth = () => {
 
     try {
       await authService.changePassword(currentPassword, newPassword)
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '密码修改失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '密码修改失败')
       setError(errorMessage)
       throw error
     } finally {
@@ -196,19 +208,19 @@ export const useAuth = () => {
       const response = await authService.refreshToken()
       setUser(response.user)
       return response
-    } catch (error: any) {
+    } catch (error: unknown) {
       Logger.warn('刷新Token失败:', error)
       clearUser()
       AuthHandler.handleAuthFailure()
       throw error
     }
-  }, [setUser, clearUser, navigate])
+  }, [setUser, clearUser])
 
   // 检查用户名可用性
   const checkUsernameAvailability = useCallback(async (username: string) => {
     try {
       return await authService.checkUsernameAvailability(username)
-    } catch (error: any) {
+    } catch (error: unknown) {
       Logger.warn('检查用户名可用性失败:', error)
       return false
     }
@@ -218,7 +230,7 @@ export const useAuth = () => {
   const checkEmailAvailability = useCallback(async (email: string) => {
     try {
       return await authService.checkEmailAvailability(email)
-    } catch (error: any) {
+    } catch (error: unknown) {
       Logger.warn('检查邮箱可用性失败:', error)
       return false
     }
@@ -231,8 +243,8 @@ export const useAuth = () => {
 
     try {
       await authService.sendResetPasswordEmail(email)
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '发送邮件失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '发送邮件失败')
       setError(errorMessage)
       throw error
     } finally {
@@ -247,8 +259,8 @@ export const useAuth = () => {
 
     try {
       await authService.resetPassword(token, newPassword)
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || '密码重置失败'
+    } catch (error: unknown) {
+      const errorMessage = extractErrorMessage(error, '密码重置失败')
       setError(errorMessage)
       throw error
     } finally {
@@ -289,6 +301,7 @@ export const useAuth = () => {
     changePassword,
     checkAuth,
     refreshToken,
+    clearUser,
     checkUsernameAvailability,
     checkEmailAvailability,
     sendResetPasswordEmail,

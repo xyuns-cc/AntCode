@@ -9,15 +9,14 @@ import {
   Row,
   Col,
   Alert,
-  Tooltip,
   Collapse,
   Tag,
-  Switch
+  Switch,
+  theme
 } from 'antd'
 import {
   PlusOutlined,
   DeleteOutlined,
-  InfoCircleOutlined,
   CodeOutlined,
   QuestionCircleOutlined
 } from '@ant-design/icons'
@@ -25,9 +24,6 @@ import { useThemeContext } from '@/contexts/ThemeContext'
 import type { ExtractionRule } from '@/types'
 
 const { Text } = Typography
-const { Option } = Select
-const { TextArea } = Input
-const { Panel } = Collapse
 
 interface RuleSelectorProps {
   rules: ExtractionRule[]
@@ -47,6 +43,7 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
   defaultPageType
 }) => {
   const { isDark } = useThemeContext()
+  const { token } = theme.useToken()
   const [showAdvanced, setShowAdvanced] = useState(false)
   
   // 表单数据状态
@@ -68,20 +65,10 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
     borderColor: isDark ? '#434343' : '#d9d9d9'
   })
 
-  const getHelpCardStyle = () => ({
-    marginTop: 16,
-    backgroundColor: isDark ? '#141414' : '#f9f9f9',
-    borderColor: isDark ? '#434343' : '#d9d9d9'
-  })
-
   const getHelpTextStyle = () => ({
     fontSize: 12,
     color: isDark ? 'rgba(255, 255, 255, 0.65)' : '#666',
     marginTop: 4
-  })
-
-  const getIconStyle = () => ({
-    color: isDark ? 'rgba(255, 255, 255, 0.45)' : '#999'
   })
 
   // 验证表单数据
@@ -101,7 +88,9 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
   }
 
   // 更新表单数据
-  const updateFormData = (field: string, value: any) => {
+  type RuleField = 'desc' | 'type' | 'expr' | 'page_type' | 'attribute' | 'transform'
+
+  const updateFormData = (field: RuleField, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }))
     // 清除该字段的错误
     if (errors[field]) {
@@ -145,30 +134,23 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
     onChange(rules.filter((_, i) => i !== index))
   }
 
-  // 更新规则
-  const handleUpdateRule = (index: number, updatedRule: Partial<ExtractionRule>) => {
-    onChange(rules.map((rule, i) => 
-      i === index ? { ...rule, ...updatedRule } : rule
-    ))
-  }
-
   // 选择器类型选项
   const selectorTypes = [
-    { value: 'css', label: 'CSS选择器', description: '使用CSS选择器语法，最常用' },
-    { value: 'xpath', label: 'XPath', description: '使用XPath表达式，功能强大' },
-    { value: 'regex', label: '正则表达式', description: '使用正则表达式匹配' },
-    { value: 'jsonpath', label: 'JSONPath', description: '用于JSON数据提取' }
+    { value: 'css', label: 'CSS选择器', example: '.title, #content' },
+    { value: 'xpath', label: 'XPath', example: '//h1[@class="title"]' },
+    { value: 'regex', label: '正则表达式', example: '<title>(.*?)</title>' },
+    { value: 'jsonpath', label: 'JSONPath', example: '$.data.title' }
   ]
 
   // 属性类型选项
   const attributeTypes = [
-    { value: 'text', label: '文本内容', description: '提取元素的文本内容' },
-    { value: 'html', label: 'HTML内容', description: '提取元素的HTML内容' },
-    { value: 'href', label: '链接地址', description: '提取链接的href属性' },
-    { value: 'src', label: '图片地址', description: '提取图片的src属性' },
-    { value: 'title', label: '标题属性', description: '提取元素的title属性' },
-    { value: 'alt', label: 'Alt属性', description: '提取图片的alt属性' },
-    { value: 'data-*', label: '自定义属性', description: '提取data-开头的自定义属性' }
+    { value: 'text', label: '文本内容' },
+    { value: 'html', label: 'HTML内容' },
+    { value: 'href', label: '链接地址' },
+    { value: 'src', label: '图片地址' },
+    { value: 'title', label: '标题属性' },
+    { value: 'alt', label: 'Alt属性' },
+    { value: 'data-*', label: '自定义属性' }
   ]
 
   // 获取规则类型的颜色
@@ -189,25 +171,19 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
         <div style={{ marginBottom: 16 }}>
           <Collapse size="small" ghost>
             {rules.map((rule, index) => (
-              <Panel
+              <Collapse.Panel
                 key={index}
                 header={
-                  <Space>
+                  <Space size="small">
                     <Text strong>{rule.desc}</Text>
-                    <Tag color={getRuleTypeColor(rule.type)}>
+                    <Tag color={getRuleTypeColor(rule.type)} style={{ margin: 0 }}>
                       {rule.type.toUpperCase()}
                     </Tag>
                     {rule.page_type && (
-                      <Tag color={rule.page_type === 'list' ? 'blue' : 'orange'}>
-                        {rule.page_type === 'list' ? '列表页' : '详情页'}
+                      <Tag color={rule.page_type === 'list' ? 'blue' : 'orange'} style={{ margin: 0 }}>
+                        {rule.page_type === 'list' ? '列表' : '详情'}
                       </Tag>
                     )}
-                    <Text code style={{ fontSize: 12 }}>
-                      {rule.expr.length > 30 ? 
-                        `${rule.expr.substring(0, 30)}...` : 
-                        rule.expr
-                      }
-                    </Text>
                   </Space>
                 }
                 extra={
@@ -223,55 +199,27 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
                   />
                 }
               >
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                      <div>
-                        <Text type="secondary">选择器类型:</Text>
-                        <br />
-                        <Tag color={getRuleTypeColor(rule.type)}>
-                          {selectorTypes.find(t => t.value === rule.type)?.label}
-                        </Tag>
-                      </div>
-                      <div>
-                        <Text type="secondary">表达式:</Text>
-                        <br />
-                        <Text code copyable>{rule.expr}</Text>
-                      </div>
-                      {rule.attribute && (
-                        <div>
-                          <Text type="secondary">提取属性:</Text>
-                          <br />
-                          <Text>{rule.attribute}</Text>
-                        </div>
-                      )}
-                    </Space>
-                  </Col>
-                  <Col span={12}>
-                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                      {rule.default && (
-                        <div>
-                          <Text type="secondary">默认值:</Text>
-                          <br />
-                          <Text>{rule.default}</Text>
-                        </div>
-                      )}
-                      {rule.transform && (
-                        <div>
-                          <Text type="secondary">转换规则:</Text>
-                          <br />
-                          <Text code>{rule.transform}</Text>
-                        </div>
-                      )}
-                      <div>
-                        <Text type="secondary">是否必需:</Text>
-                        <br />
-                        <Text>{rule.required ? '是' : '否'}</Text>
-                      </div>
-                    </Space>
-                  </Col>
-                </Row>
-              </Panel>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>表达式: </Text>
+                    <Text code copyable={{ text: rule.expr }} style={{ fontSize: 12 }}>
+                      {rule.expr}
+                    </Text>
+                  </div>
+                  {rule.attribute && (
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>属性: </Text>
+                      <Text style={{ fontSize: 12 }}>{rule.attribute}</Text>
+                    </div>
+                  )}
+                  {rule.transform && (
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>转换: </Text>
+                      <Text code style={{ fontSize: 12 }}>{rule.transform}</Text>
+                    </div>
+                  )}
+                </Space>
+              </Collapse.Panel>
             ))}
           </Collapse>
         </div>
@@ -291,194 +239,126 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
         <div>
           <Row gutter={16}>
             <Col span={showPageType ? 8 : 12}>
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ 
-                  display: 'block', 
-                  marginBottom: 8, 
-                  color: isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.85)',
-                  fontWeight: 600
-                }}>
-                  字段描述 
-                  <Tooltip title="描述要提取的数据字段，如：文章标题、发布时间等">
-                    <InfoCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
-                  </Tooltip>
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+                  字段描述
                 </label>
                 <Input 
-                  placeholder="例如: 文章标题, 发布时间, 作者"
+                  placeholder="如: 标题, 时间, 作者"
                   value={formData.desc}
                   onChange={(e) => updateFormData('desc', e.target.value)}
                   status={errors.desc ? 'error' : ''}
                 />
                 {errors.desc && (
-                  <div style={{ color: '#ff4d4f', fontSize: '12px', marginTop: '4px' }}>
+                  <div style={{ color: token.colorError, fontSize: 12, marginTop: 2 }}>
                     {errors.desc}
                   </div>
                 )}
               </div>
             </Col>
             <Col span={showPageType ? 8 : 12}>
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ 
-                  display: 'block', 
-                  marginBottom: 8, 
-                  color: isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.85)',
-                  fontWeight: 600
-                }}>
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
                   选择器类型
                 </label>
                 <Select 
                   value={formData.type} 
                   onChange={(value) => updateFormData('type', value)}
                   style={{ width: '100%' }}
-                >
-                  {selectorTypes.map(type => (
-                    <Option key={type.value} value={type.value}>
-                      <Space>
-                        <span>{type.label}</span>
-                        <Tooltip title={type.description}>
-                          <InfoCircleOutlined style={getIconStyle()} />
-                        </Tooltip>
-                      </Space>
-                    </Option>
-                  ))}
-                </Select>
+                  options={selectorTypes.map(t => ({ value: t.value, label: t.label }))}
+                />
               </div>
             </Col>
             {showPageType && (
               <Col span={8}>
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ 
-                    display: 'block', 
-                    marginBottom: 8, 
-                    color: isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.85)',
-                    fontWeight: 600
-                  }}>
-                    页面类型 
-                    <Tooltip title="规则适用的页面类型">
-                      <InfoCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
-                    </Tooltip>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+                    页面类型
                   </label>
                   <Select 
                     value={formData.page_type} 
                     onChange={(value) => updateFormData('page_type', value)}
                     style={{ width: '100%' }}
-                  >
-                    <Option value="list">列表页</Option>
-                    <Option value="detail">详情页</Option>
-                  </Select>
+                    options={[
+                      { value: 'list', label: '列表页' },
+                      { value: 'detail', label: '详情页' }
+                    ]}
+                  />
                 </div>
               </Col>
             )}
           </Row>
 
-          <div style={{ marginBottom: 16 }}>
-            <label style={{ 
-              display: 'block', 
-              marginBottom: 8, 
-              color: isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.85)',
-              fontWeight: 600
-            }}>
-              选择器表达式 
-              <Tooltip title="根据选择的类型输入对应的表达式">
-                <InfoCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
-              </Tooltip>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+              选择器表达式
+              <Text type="secondary" style={{ fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
+                {selectorTypes.find(t => t.value === formData.type)?.example}
+              </Text>
             </label>
             <Input 
-              placeholder="例如: .title, //h1[@class='title'], <title>(.*?)</title>"
-              prefix={<CodeOutlined />}
+              placeholder={selectorTypes.find(t => t.value === formData.type)?.example || '输入表达式'}
+              prefix={<CodeOutlined style={{ color: token.colorTextTertiary }} />}
               value={formData.expr}
               onChange={(e) => updateFormData('expr', e.target.value)}
               status={errors.expr ? 'error' : ''}
             />
             {errors.expr && (
-              <div style={{ color: '#ff4d4f', fontSize: '12px', marginTop: '4px' }}>
+              <div style={{ color: token.colorError, fontSize: 12, marginTop: 2 }}>
                 {errors.expr}
               </div>
             )}
           </div>
 
           {/* 高级选项 */}
-          <div style={{ marginBottom: 16 }}>
-            <Space>
-              <Text>高级选项</Text>
-              <Switch
-                size="small"
-                checked={showAdvanced}
-                onChange={setShowAdvanced}
-              />
+          <div style={{ marginBottom: 12 }}>
+            <Space size="small">
+              <Text type="secondary" style={{ fontSize: 13 }}>高级选项</Text>
+              <Switch size="small" checked={showAdvanced} onChange={setShowAdvanced} />
             </Space>
           </div>
 
           {showAdvanced && (
-            <>
-              <Row gutter={16}>
-                <Col span={12}>
-                  <div style={{ marginBottom: 16 }}>
-                    <label style={{ 
-                      display: 'block', 
-                      marginBottom: 8, 
-                      color: isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.85)',
-                      fontWeight: 600
-                    }}>
-                      提取属性 
-                      <Tooltip title="选择要提取的HTML属性，默认提取文本内容">
-                        <InfoCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
-                      </Tooltip>
-                    </label>
-                    <Select 
-                      placeholder="默认提取文本内容" 
-                      allowClear
-                      value={formData.attribute || undefined}
-                      onChange={(value) => updateFormData('attribute', value)}
-                      style={{ width: '100%' }}
-                    >
-                      {attributeTypes.map(attr => (
-                        <Option key={attr.value} value={attr.value}>
-                          <Space>
-                            <span>{attr.label}</span>
-                            <Tooltip title={attr.description}>
-                              <InfoCircleOutlined style={getIconStyle()} />
-                            </Tooltip>
-                          </Space>
-                        </Option>
-                      ))}
-                    </Select>
-                  </div>
-                </Col>
-                <Col span={12}>
-                  <div style={{ marginBottom: 16 }}>
-                    <label style={{ 
-                      display: 'block', 
-                      marginBottom: 8, 
-                      color: isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.85)',
-                      fontWeight: 600
-                    }}>
-                      转换规则 
-                      <Tooltip title="对提取的数据进行转换，如：strip()、replace('旧', '新')">
-                        <InfoCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
-                      </Tooltip>
-                    </label>
-                    <Input 
-                      placeholder="例如: strip(), upper()" 
-                      value={formData.transform}
-                      onChange={(e) => updateFormData('transform', e.target.value)}
-                    />
-                  </div>
-                </Col>
-              </Row>
-            </>
+            <Row gutter={16}>
+              <Col span={12}>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+                    提取属性
+                  </label>
+                  <Select 
+                    placeholder="默认文本内容" 
+                    allowClear
+                    value={formData.attribute || undefined}
+                    onChange={(value) => updateFormData('attribute', value)}
+                    style={{ width: '100%' }}
+                    options={attributeTypes.map(a => ({ value: a.value, label: a.label }))}
+                  />
+                </div>
+              </Col>
+              <Col span={12}>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+                    转换规则
+                  </label>
+                  <Input 
+                    placeholder="strip(), upper()" 
+                    value={formData.transform}
+                    onChange={(e) => updateFormData('transform', e.target.value)}
+                  />
+                </div>
+              </Col>
+            </Row>
           )}
 
-          <div style={{ marginTop: 16 }}>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={handleAddRule}
-              block
-            >
-              添加规则
-            </Button>
-          </div>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={handleAddRule}
+            block
+            style={{ marginTop: 4 }}
+          >
+            添加规则
+          </Button>
         </div>
       </Card>
 
@@ -488,73 +368,65 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
           message="至少需要添加一个提取规则"
           type="warning"
           showIcon
-          style={{ marginTop: 16 }}
+          style={{ marginTop: 12 }}
         />
       )}
 
-      {rules.length > 0 && (
-        <Alert
-          message={`已添加 ${rules.length} 个提取规则`}
-          type="info"
-          showIcon
-          style={{ marginTop: 16 }}
-        />
-      )}
-
-      {/* 帮助信息 */}
-      <Card
-        title={
-          <Space>
-            <QuestionCircleOutlined />
-            选择器示例
-          </Space>
-        }
-        size="small"
-        style={getHelpCardStyle()}
-      >
-        <Row gutter={16}>
-          <Col span={6}>
-            <Text strong>CSS选择器:</Text>
-            <div style={getHelpTextStyle()}>
-              <div>• .title (类选择器)</div>
-              <div>• #content (ID选择器)</div>
-              <div>• h1.title (标签+类)</div>
-              <div>• a[href] (属性选择器)</div>
-              <div>• div &gt; p (子元素)</div>
-            </div>
-          </Col>
-          <Col span={6}>
-            <Text strong>XPath:</Text>
-            <div style={getHelpTextStyle()}>
-              <div>• //h1[@class='title']</div>
-              <div>• //div[@id='content']//text()</div>
-              <div>• //a/@href</div>
-              <div>• //p[contains(@class,'content')]</div>
-              <div>• //div[position()=1]</div>
-            </div>
-          </Col>
-          <Col span={6}>
-            <Text strong>正则表达式:</Text>
-            <div style={getHelpTextStyle()}>
-              <div>• &lt;title&gt;(.*?)&lt;/title&gt;</div>
-              <div>• href="([^"]*)"</div>
-              <div>• (\d{4}-\d{2}-\d{2})</div>
-              <div>• price:\s*(\d+\.?\d*)</div>
-              <div>• &lt;p&gt;([\s\S]*?)&lt;/p&gt;</div>
-            </div>
-          </Col>
-          <Col span={6}>
-            <Text strong>JSONPath:</Text>
-            <div style={getHelpTextStyle()}>
-              <div>• $.data.title</div>
-              <div>• $..items[*].name</div>
-              <div>• $.result[?(@.price&gt;100)]</div>
-              <div>• $..author</div>
-              <div>• $.items[0:5]</div>
-            </div>
-          </Col>
-        </Row>
-      </Card>
+      {/* 选择器示例 - 可折叠卡片 */}
+      <Collapse 
+        size="small" 
+        style={{ marginTop: 12 }}
+        items={[{
+          key: 'examples',
+          label: (
+            <Space size="small">
+              <QuestionCircleOutlined />
+              <span>选择器示例</span>
+            </Space>
+          ),
+          children: (
+            <Row gutter={16}>
+              <Col span={6}>
+                <Text strong>CSS选择器:</Text>
+                <div style={getHelpTextStyle()}>
+                  <div>• .title (类选择器)</div>
+                  <div>• #content (ID选择器)</div>
+                  <div>• h1.title (标签+类)</div>
+                  <div>• a[href] (属性选择器)</div>
+                  <div>• div &gt; p (子元素)</div>
+                </div>
+              </Col>
+              <Col span={6}>
+                <Text strong>XPath:</Text>
+                <div style={getHelpTextStyle()}>
+                  <div>• //h1[@class='title']</div>
+                  <div>• //div[@id='content']//text()</div>
+                  <div>• //a/@href</div>
+                  <div>• //p[contains(@class,'content')]</div>
+                </div>
+              </Col>
+              <Col span={6}>
+                <Text strong>正则表达式:</Text>
+                <div style={getHelpTextStyle()}>
+                  <div>• &lt;title&gt;(.*?)&lt;/title&gt;</div>
+                  <div>• href="([^"]*)"</div>
+                  <div>• (\d{'{'}4{'}'}-\d{'{'}2{'}'}-\d{'{'}2{'}'})</div>
+                  <div>• price:\s*(\d+\.?\d*)</div>
+                </div>
+              </Col>
+              <Col span={6}>
+                <Text strong>JSONPath:</Text>
+                <div style={getHelpTextStyle()}>
+                  <div>• $.data.title</div>
+                  <div>• $..items[*].name</div>
+                  <div>• $.result[0]</div>
+                  <div>• $..author</div>
+                </div>
+              </Col>
+            </Row>
+          )
+        }]}
+      />
     </div>
   )
 }

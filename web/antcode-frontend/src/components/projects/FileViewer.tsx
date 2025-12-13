@@ -36,7 +36,7 @@ import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
 import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup'
 import css from 'react-syntax-highlighter/dist/esm/languages/prism/css'
 
-const PRE_REGISTERED_LANGUAGES: Record<string, any> = {
+const PRE_REGISTERED_LANGUAGES: Record<string, unknown> = {
   bash,
   sh: bash,
   shell: bash,
@@ -156,7 +156,7 @@ const FileViewer: React.FC<FileViewerProps> = ({
     setIsEditing(false)
     setDraftContent(typeof fileData?.content === 'string' ? fileData.content : '')
     setCopied(false)
-  }, [filePath])
+  }, [filePath, fileData?.content])
 
   // 复制内容到剪贴板
   const handleCopy = useCallback(async () => {
@@ -168,7 +168,7 @@ const FileViewer: React.FC<FileViewerProps> = ({
       setCopied(true)
       showNotification('success', '内容已复制到剪贴板')
       setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
+    } catch {
       showNotification('error', '复制失败')
     }
   }, [draftContent, fileData?.content, isEditing])
@@ -212,7 +212,7 @@ const FileViewer: React.FC<FileViewerProps> = ({
       if (typeof updated?.content === 'string') {
         setDraftContent(updated.content)
       }
-    } catch (err) {
+    } catch {
       // 错误提示由上层处理
     }
   }, [draftContent, filePath, onSave])

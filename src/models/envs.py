@@ -1,14 +1,14 @@
 """环境和解释器模型"""
 
 from tortoise import fields
-from tortoise.models import Model
 
+from src.models.base import BaseModel, generate_public_id
 from src.models.enums import VenvScope, InterpreterSource
 
 
-class Interpreter(Model):
+class Interpreter(BaseModel):
     """语言解释器模型"""
-    id = fields.BigIntField(pk=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     tool = fields.CharField(max_length=20, default="python")
     version = fields.CharField(max_length=20)
     install_dir = fields.CharField(max_length=500)
@@ -29,12 +29,13 @@ class Interpreter(Model):
             ("created_at",),
             ("tool", "status"),
             ("tool", "version"),
+            ("public_id",),
         ]
 
 
-class Venv(Model):
+class Venv(BaseModel):
     """虚拟环境模型"""
-    id = fields.BigIntField(pk=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     scope = fields.CharEnumField(VenvScope)
     key = fields.CharField(max_length=100, null=True)
     version = fields.CharField(max_length=20)
@@ -48,6 +49,9 @@ class Venv(Model):
     updated_at = fields.DatetimeField(auto_now=True)
     created_by = fields.BigIntField(null=True)
 
+    # 分布式节点关联
+    node_id = fields.BigIntField(null=True, db_index=True, description="所属节点ID")
+
     class Meta:
         table = "venvs"
         indexes = [
@@ -56,12 +60,15 @@ class Venv(Model):
             ("created_at",),
             ("created_by",),
             ("scope", "version"),
+            ("public_id",),
+            ("node_id",),
+            ("node_id", "scope"),
         ]
 
 
-class ProjectVenvBinding(Model):
+class ProjectVenvBinding(BaseModel):
     """项目与虚拟环境绑定"""
-    id = fields.BigIntField(pk=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     project_id = fields.BigIntField()
     venv = fields.ForeignKeyField(
         "models.Venv", related_name="bindings", on_delete=fields.CASCADE
@@ -77,4 +84,5 @@ class ProjectVenvBinding(Model):
             ("venv_id", "is_current"),
             ("created_at",),
             ("created_by",),
+            ("public_id",),
         ]

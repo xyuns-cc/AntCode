@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import { Drawer, Button, Space } from 'antd'
-import showNotification from '@/utils/notification'
 import { CloseOutlined, SaveOutlined } from '@ant-design/icons'
 import RuleProjectForm from './RuleProjectForm'
 import CodeProjectForm from './CodeProjectForm'
 import FileProjectForm from './FileProjectForm'
-import { useThemeContext } from '@/contexts/ThemeContext'
 import { projectService } from '@/services/projects'
 import type { Project, ProjectCreateRequest } from '@/types'
+import styles from './ProjectEditDrawer.module.css'
 
 interface ProjectEditDrawerProps {
   open: boolean
@@ -22,7 +21,6 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
   project,
   onSuccess
 }) => {
-  const { isDark } = useThemeContext()
   const [loading, setLoading] = useState(false)
   
   // 表单引用和验证状态
@@ -51,28 +49,6 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
       resetState()
     }
   }, [open])
-
-  // 获取项目类型的步骤配置
-  const getSteps = () => {
-    if (!project) return []
-    
-    switch (project.type) {
-      case 'rule':
-        return [
-          { title: '规则配置', description: '数据采集规则设置' }
-        ]
-      case 'code':
-        return [
-          { title: '代码配置', description: '代码内容和运行配置' }
-        ]
-      case 'file':
-        return [
-          { title: '文件配置', description: '文件和运行时配置' }
-        ]
-      default:
-        return []
-    }
-  }
 
   // 处理规则项目表单验证
   const handleRuleValidationChange = (isValid: boolean, tooltip: string) => {
@@ -105,7 +81,7 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
       // 成功提示由拦截器统一处理
       onSuccess?.()
       onClose()
-    } catch (error: any) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setLoading(false)
@@ -256,27 +232,21 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
     }
 
     return (
-      <div style={{ 
-        padding: '16px 24px', 
-        borderTop: `1px solid ${isDark ? '#303030' : '#f0f0f0'}`,
-        background: isDark ? '#141414' : '#fff'
-      }}>
-        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-          <Button onClick={onClose}>
-            取消
-          </Button>
-          
-          <Button
-            type="primary"
-            loading={loading}
-            disabled={submitProps.disabled}
-            onClick={handleSave}
-            icon={<SaveOutlined />}
-            title={submitProps.tooltip}
-          >
-            保存修改
-          </Button>
-        </Space>
+      <div className={styles.footer}>
+        <Button onClick={onClose}>
+          取消
+        </Button>
+        
+        <Button
+          type="primary"
+          loading={loading}
+          disabled={submitProps.disabled}
+          onClick={handleSave}
+          icon={<SaveOutlined />}
+          title={submitProps.tooltip}
+        >
+          保存修改
+        </Button>
       </div>
     )
   }
@@ -296,9 +266,9 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
       closeIcon={<CloseOutlined />}
       footer={renderFooter()}
       destroyOnHidden
-      className={isDark ? 'dark-drawer' : ''}
+      className={styles.drawer}
     >
-      <div style={{ minHeight: '400px' }}>
+      <div className={styles.content}>
         {renderStepContent()}
       </div>
     </Drawer>

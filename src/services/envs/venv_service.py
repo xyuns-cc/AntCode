@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 
 from loguru import logger
@@ -9,7 +8,8 @@ from loguru import logger
 from src.core.command_runner import run_command
 from src.core.config import settings
 from src.services.envs.python_env_service import python_env_service
-from src.models import Interpreter, Venv, ProjectVenvBinding, Project
+from src.models import Interpreter, Venv, ProjectVenvBinding
+from src.utils.serialization import from_json, to_json, json_load_file, json_dump_file
 
 
 _venv_locks = {}
@@ -37,8 +37,7 @@ class ProjectVenvService:
         manifest_path = os.path.join(root, "manifest.json")
         if os.path.exists(manifest_path):
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = json_load_file(manifest_path)
                 version = data.get("version")
                 venv_dir = os.path.join(root, version) if version else None
                 return {"project_id": str(project_id), "version": version, "venv_path": venv_dir}
@@ -118,9 +117,8 @@ class ProjectVenvService:
             version = None
             if os.path.exists(manifest):
                 try:
-                    with open(manifest, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        version = data.get("version")
+                    data = json_load_file(manifest)
+                    version = data.get("version")
                 except Exception:
                     pass
                 try:
@@ -165,8 +163,7 @@ class ProjectVenvService:
                 raise RuntimeError(f"创建共享虚拟环境失败: {res.stderr.strip()}")
 
         # 写入manifest
-        with open(manifest, "w", encoding="utf-8") as f:
-            json.dump({"version": version, "key": ident}, f, ensure_ascii=False, indent=2)
+        json_dump_file({"version": version, "key": ident}, manifest)
 
         # 记录/更新 Venv
         interpreter = await Interpreter.filter(tool="python", version=version).first()
@@ -183,7 +180,7 @@ class ProjectVenvService:
                 created_by=created_by,
             )
 
-        return {"version": version, "venv_path": venv_dir, "key": ident, "venv_id": venv_obj.id}
+        return {"version": version, "venv_path": venv_dir, "key": ident, "venv_id": venv_obj.public_id}
 
     def venv_python(self, venv_dir):
         candidates = [
@@ -213,19 +210,23 @@ class ProjectVenvService:
         if res.exit_code != 0:
             raise RuntimeError(f"获取依赖列表失败: {res.stderr.strip()}")
         try:
-            import json as _json
-            return _json.loads(res.stdout)
+            return from_json(res.stdout)
         except Exception:
             return []
 
     async def delete_shared_by_id(self, venv_id):
+        from src.models import ProjectVenvBinding, Project
         venv = await Venv.get(id=venv_id)
         # 仅允许删除共享环境，且无任何绑定记录
         if venv.scope != "shared":
             raise RuntimeError("仅共享环境可直接删除")
-        exists = await ProjectVenvBinding.filter(venv_id=venv_id).exists()
-        if exists:
-            raise RuntimeError("该虚拟环境正在被项目使用，无法删除")
+        bindings = await ProjectVenvBinding.filter(venv_id=venv_id).all()
+        if bindings:
+            # 获取使用该环境的项目名称
+            project_ids = [b.project_id for b in bindings]
+            projects = await Project.filter(id__in=project_ids).all()
+            project_names = [p.name for p in projects]
+            raise RuntimeError(f"该虚拟环境正在被以下项目使用，无法删除: {', '.join(project_names)}")
         await self._safe_rmtree(venv.venv_path)
         await venv.delete()
         return True
@@ -258,8 +259,7 @@ class ProjectVenvService:
 
     async def _write_manifest(self, manifest_path, version):
         data = {"version": version}
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        json_dump_file(data, manifest_path)
 
 
 project_venv_service = ProjectVenvService()

@@ -3,18 +3,20 @@
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from src.models.enums import TaskStatus, TaskType, ScheduleType
+from src.models.enums import TaskStatus, TaskType, ScheduleType, ExecutionStrategy
 
 
 class TaskBase(BaseModel):
     """任务基础模型"""
     name: str = Field(..., min_length=3, max_length=255, description="任务名称")
     description: Optional[str] = Field(None, max_length=500)
-    project_id: int = Field(..., description="关联项目ID")
+    project_id: str = Field(..., description="关联项目公开ID")
     schedule_type: ScheduleType = Field(..., description="调度类型")
     is_active: bool = Field(True, description="是否激活")
+
+
 class TaskCreate(TaskBase):
     """创建任务请求"""
     cron_expression: Optional[str] = Field(None, description="Cron表达式")
@@ -26,6 +28,19 @@ class TaskCreate(TaskBase):
     retry_delay: int = Field(60, gt=0, description="重试延迟(秒)")
     execution_params: Optional[Dict[str, Any]] = Field(None, description="执行参数")
     environment_vars: Optional[Dict[str, str]] = Field(None, description="环境变量")
+
+    # 执行策略相关字段
+    execution_strategy: Optional[ExecutionStrategy] = Field(
+        None, 
+        description="执行策略（为空则继承项目配置）: local-本地, fixed-固定节点, specified-指定节点, auto-自动选择, prefer-优先绑定"
+    )
+    specified_node_id: Optional[str] = Field(
+        None, 
+        description="指定执行节点ID（仅 specified 策略时使用）"
+    )
+
+    # 兼容旧字段
+    node_id: Optional[str] = Field(None, description="[已废弃] 指定执行节点ID，请使用 specified_node_id")
 
     @field_validator('cron_expression')
     def validate_cron(cls, v, info):
@@ -64,63 +79,105 @@ class TaskUpdate(BaseModel):
     execution_params: Optional[Dict[str, Any]] = None
     environment_vars: Optional[Dict[str, str]] = None
 
+    # 执行策略相关字段
+    execution_strategy: Optional[ExecutionStrategy] = Field(
+        None, 
+        description="执行策略（为空则继承项目配置）"
+    )
+    specified_node_id: Optional[str] = Field(
+        None, 
+        description="指定执行节点ID（仅 specified 策略时使用）"
+    )
 
-class TaskResponse(TaskBase):
+
+class TaskResponse(BaseModel):
     """任务响应模型"""
-    id: int
+    id: str = Field(description="任务公开ID")
+    name: str
+    description: Optional[str] = None
+    project_id: str = Field(description="关联项目公开ID")
     task_type: TaskType
+    schedule_type: ScheduleType
+    is_active: bool
     status: TaskStatus
-    cron_expression: Optional[str]
-    interval_seconds: Optional[int]
-    scheduled_time: Optional[datetime]
-    last_run_time: Optional[datetime]
-    next_run_time: Optional[datetime]
+    cron_expression: Optional[str] = None
+    interval_seconds: Optional[int] = None
+    scheduled_time: Optional[datetime] = None
+    last_run_time: Optional[datetime] = None
+    next_run_time: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
-    created_by: int = Field(description="创建者ID")
+    created_by: str = Field(description="创建者公开ID")
     created_by_username: Optional[str] = Field(None, description="创建者用户名")
 
-    class Config:
-        from_attributes = True
+    # 执行策略相关字段
+    execution_strategy: Optional[str] = Field(None, description="执行策略")
+    specified_node_id: Optional[str] = Field(None, description="指定执行节点ID")
+    specified_node_name: Optional[str] = Field(None, description="指定执行节点名称")
+
+    # 项目执行配置（继承自项目）
+    project_execution_strategy: Optional[str] = Field(None, description="项目执行策略")
+    project_bound_node_id: Optional[str] = Field(None, description="项目绑定节点ID")
+    project_bound_node_name: Optional[str] = Field(None, description="项目绑定节点名称")
+
+    # 兼容旧字段
+    node_id: Optional[str] = Field(None, description="[已废弃] 执行节点ID")
+    node_name: Optional[str] = Field(None, description="[已废弃] 执行节点名称")
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExecutionResponse(BaseModel):
     """执行记录响应"""
-    id: int
-    execution_id: str
-    task_id: int
+    id: str = Field(description="执行记录公开ID")
+    execution_id: str = Field(description="执行UUID")
+    task_id: str = Field(description="任务公开ID")
     start_time: datetime
-    end_time: Optional[datetime]
-    duration_seconds: Optional[float]
+    end_time: Optional[datetime] = None
+    duration_seconds: Optional[float] = None
     status: TaskStatus
-    exit_code: Optional[int]
-    error_message: Optional[str]
-    result_data: Optional[Dict[str, Any]]
-
-    # 这些字段在模型中不存在，设为可选并提供默认值
+    exit_code: Optional[int] = None
+    error_message: Optional[str] = None
+    result_data: Optional[Dict[str, Any]] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def from_orm(cls, obj):
+        """从 ORM 对象创建响应，使用 public_id"""
+        return cls(
+            id=obj.public_id,
+            execution_id=obj.execution_id,
+            task_id=getattr(obj, 'task_public_id', None),
+            start_time=obj.start_time,
+            end_time=obj.end_time,
+            duration_seconds=obj.duration_seconds,
+            status=obj.status,
+            exit_code=obj.exit_code,
+            error_message=obj.error_message,
+            result_data=obj.result_data,
+            stdout=getattr(obj, 'stdout', None),
+            stderr=getattr(obj, 'stderr', None)
+        )
 
 
 class ExecutionLogResponse(BaseModel):
     """执行日志响应"""
-    id: int
+    id: str = Field(description="日志公开ID")
     level: str
     message: str
     timestamp: datetime
-    context: Optional[Dict[str, Any]]
+    context: Optional[Dict[str, Any]] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LogFileResponse(BaseModel):
     """日志文件响应"""
     execution_id: str
-    log_type: str  # "output" 或 "error"
+    log_type: str
     content: str
     file_path: str
     file_size: int
@@ -138,14 +195,14 @@ class TaskStatsResponse(BaseModel):
 
 
 class SystemMetricsResponse(BaseModel):
-    """系统指标响应（扩展字节级信息，便于前端展示）"""
+    """系统指标响应"""
     cpu_percent: float
     cpu_cores: int | None = None
     memory_percent: float
     memory_total: int | None = None
     memory_used: int | None = None
     memory_available: int | None = None
-    disk_usage: float
+    disk_percent: float  # 统一命名：改为 disk_percent
     disk_total: int | None = None
     disk_used: int | None = None
     disk_free: int | None = None

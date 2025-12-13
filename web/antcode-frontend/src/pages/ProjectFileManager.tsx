@@ -6,19 +6,14 @@ import {
   Spin,
   Alert,
   Empty,
-  Tooltip,
-  Tag,
   Modal
 } from 'antd'
 import showNotification from '@/utils/notification'
 import {
   SearchOutlined,
   CloseOutlined,
-  ReloadOutlined,
-  SaveOutlined,
   FileTextOutlined,
   FolderOutlined,
-  DownloadOutlined,
   FolderOpenOutlined,
   RightOutlined,
   ExclamationCircleOutlined
@@ -181,12 +176,12 @@ interface SelectedFileState {
 const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) => {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const projectId = Number(id)
+  const projectId = id || ''
   const { isDark } = useThemeContext()
 
   // 状态管理
-  const [project, setProject] = useState<any>(null)
-  const [fileStructure, setFileStructure] = useState<any>(null)
+  const [project, setProject] = useState<{ name?: string } | null>(null)
+  const [fileStructure, setFileStructure] = useState<{ structure?: { type?: string; name?: string; size?: number; children?: unknown[] } } | null>(null)
   const [selectedFile, setSelectedFile] = useState<SelectedFileState | null>(null)
   const [loading, setLoading] = useState(true)
   const [fileLoading, setFileLoading] = useState(false)
@@ -277,7 +272,14 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       }]
     }
     
-    const flatten = (node: any, depth = 0, parentPath = ''): FileNode[] => {
+    interface RawFileNode {
+      name: string
+      type?: string
+      size?: number
+      children?: RawFileNode[]
+    }
+    
+    const flatten = (node: RawFileNode, depth = 0, parentPath = ''): FileNode[] => {
       const result: FileNode[] = []
       const currentPath = parentPath ? `${parentPath}/${node.name}` : node.name
       
@@ -292,7 +294,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       result.push(fileNode)
       
       if (node.type === 'directory' && node.children && Array.isArray(node.children)) {
-        const childNodes = node.children.flatMap((child: any) => 
+        const childNodes = node.children.flatMap((child: RawFileNode) => 
           flatten(child, depth + 1, currentPath)
         )
         fileNode.children = childNodes
@@ -391,7 +393,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
           binary: true,
           content: '',
           file_type_description: fileType // 自定义字段
-        } as any
+        } as ProjectFileContent & { file_type_description: string }
       })
       return
     }
@@ -418,7 +420,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     } finally {
       setFileLoading(false)
     }
-  }, [projectId, handleDownloadFile, addToHistory])
+  }, [projectId, addToHistory])
 
   // 加载文件结构
   const loadFileStructure = useCallback(async () => {
@@ -442,14 +444,14 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
           setOriginalContent(fileContent.content || '')
           // 保存文件修改时间戳
           setFileModifiedTime(fileContent.modified_time || Date.now())
-        } catch (err) {
-          Logger.error('预览单个文件失败:', err)
+        } catch (_err) {
+          Logger.error('预览单个文件失败:', _err)
         }
       } else if (structure.structure && structure.structure.children) {
         // 默认展开根目录的第一层文件夹
-        const rootFolders = structure.structure.children
-          .filter((node: any) => node.type === 'directory')
-          .map((node: any) => node.name)
+        const rootFolders = (structure.structure.children as Array<{ type?: string; name?: string }>)
+          .filter((node) => node.type === 'directory')
+          .map((node) => node.name)
         setExpandedFolders(new Set([structure.structure.name, ...rootFolders]))
       }
     } catch (err) {
@@ -564,9 +566,10 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       loadFileStructure().catch(err => {
         Logger.error('刷新文件结构失败:', err)
       })
-    } catch (err: any) {
+    } catch (err: unknown) {
       Logger.error('保存文件失败:', err)
-      const errorMsg = err?.response?.data?.message || err?.message || '保存文件失败'
+      const errObj = err as { response?: { data?: { message?: string } }; message?: string }
+      const errorMsg = errObj?.response?.data?.message || errObj?.message || '保存文件失败'
       showNotification('error', errorMsg)
       throw err  // 抛出错误，让调用者知道保存失败
     } finally {
@@ -633,7 +636,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
           try {
             await handleSaveFile()
             navigate(`/projects/${projectId}`)
-          } catch (err) {
+          } catch (_err) {
             // 保存失败，不退出
             Logger.error('保存失败，取消退出')
           }
@@ -689,6 +692,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     if (value !== undefined) {
       handleContentChange(value)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originalContent])
 
   // 切换文件夹展开状态
@@ -771,7 +775,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     return () => window.removeEventListener('keydown', handleEsc)
   }, [handleCloseManager])
 
-  if (!projectId || isNaN(projectId)) {
+  if (!projectId) {
     return (
       <div className="file-manager-error">
         <Alert
@@ -953,7 +957,9 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
             <div className="file-tree">
               {loading ? (
                 <div style={{ padding: '40px 20px', textAlign: 'center' }}>
-                  <Spin tip="加载中..." />
+                  <Spin tip="加载中...">
+                    <div style={{ height: 100 }} />
+                  </Spin>
                 </div>
               ) : error ? (
                 <div style={{ padding: '20px' }}>
@@ -1016,9 +1022,10 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
               ) : (
                 // 目录结构的情况
                 fileStructure.structure.children && Array.isArray(fileStructure.structure.children) ? (
-                  fileStructure.structure.children.map((node: any) => {
+                  (fileStructure.structure.children as Array<{ name: string; type?: string; size?: number; children?: unknown[] }>).map((node) => {
                     // 递归构建完整的 FileNode 树
-                    const buildFileNode = (n: any, parentPath = '', depth = 0): FileNode => {
+                    interface RawNode { name: string; type?: string; size?: number; children?: RawNode[] }
+                    const buildFileNode = (n: RawNode, parentPath = '', depth = 0): FileNode => {
                       const currentPath = parentPath ? `${parentPath}/${n.name}` : n.name
                       const fileNode: FileNode = {
                         name: n.name,
@@ -1029,7 +1036,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
                       }
                       
                       if (n.type === 'directory' && n.children && Array.isArray(n.children)) {
-                        fileNode.children = n.children.map((child: any) => 
+                        fileNode.children = n.children.map((child: RawNode) => 
                           buildFileNode(child, currentPath, depth + 1)
                         )
                       }
@@ -1073,7 +1080,9 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
                   alignItems: 'center',
                   height: '100%' 
                 }}>
-                  <Spin tip="加载文件中..." size="large" />
+                  <Spin tip="加载文件中..." size="large">
+                    <div style={{ height: 200 }} />
+                  </Spin>
                 </div>
               ) : !selectedFile ? (
                 <Empty 
@@ -1110,7 +1119,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
                     marginBottom: '12px',
                     color: 'var(--text-primary)'
                   }}>
-                    {(selectedFile.data as any).file_type_description || '此文件类型'}不支持在线预览
+                    {(selectedFile.data as ProjectFileContent & { file_type_description?: string }).file_type_description || '此文件类型'}不支持在线预览
                   </div>
                   <div style={{ 
                     fontSize: '14px',
@@ -1146,7 +1155,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
                     onChange={handleEditorChange}
                     onMount={handleEditorDidMount}
                     options={getEditorOptions(false, isDark)}
-                    loading={<Spin tip="加载编辑器中..." />}
+                    loading={<Spin size="large" />}
                   />
                 </div>
               )}

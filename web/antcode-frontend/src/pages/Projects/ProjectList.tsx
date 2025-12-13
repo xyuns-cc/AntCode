@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useRef, useState, useCallback, Suspense, lazy } from 'react'
+import React, { useEffect, useReducer, useRef, useState, useCallback, Suspense, lazy, useMemo } from 'react'
 import {
   Button,
   Space,
@@ -9,7 +9,6 @@ import {
   Card,
   Tooltip
 } from 'antd'
-import showNotification from '@/utils/notification'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import {
   PlusOutlined,
@@ -17,12 +16,15 @@ import {
   DeleteOutlined,
   PlayCircleOutlined,
   EyeOutlined,
-  SearchOutlined
+  ReloadOutlined,
+  FolderOutlined,
+  CloudServerOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useProjects } from '@/stores/projectStore'
+import { useNodeStore } from '@/stores/nodeStore'
 import { projectService } from '@/services/projects'
-import { formatDate } from '@/utils/helpers'
+import { formatDate } from '@/utils/format'
 import {
   getProjectTypeText,
   getProjectStatusText,
@@ -31,7 +33,7 @@ import {
 } from '@/utils/projectUtils'
 import useAuth from '@/hooks/useAuth'
 import { userService, type SimpleUser } from '@/services/users'
-import type { Project, ProjectListParams } from '@/types'
+import type { Project, ProjectListParams, ProjectType } from '@/types'
 import type { ColumnsType } from 'antd/es/table'
 
 const { Search } = Input
@@ -148,21 +150,24 @@ function uiReducer(state: UIState, action: UIAction): UIState {
 const ProjectList: React.FC = () => {
   const navigate = useNavigate()
   const { isAuthenticated, loading: authLoading, user } = useAuth()
+  const { currentNode } = useNodeStore()
   const [uiState, dispatch] = useReducer(uiReducer, initialUIState)
   const currentUserIdRef = useRef<number | undefined>(user?.id)
   const [userList, setUserList] = useState<SimpleUser[]>([])
   const [loadingUsers, setLoadingUsers] = useState(false)
-  const [projects, setProjectList] = useState<Project[]>([])
-  const [searchInput, setSearchInput] = useState('')
-  const [queryParams, setQueryParams] = useState<ProjectListParams>({
-    page: 1,
-    size: 10
-  })
-  const [tablePagination, setTablePagination] = useState({
-    current: 1,
-    pageSize: 10,
-    total: 0
-  })
+  
+  // 所有项目数据（一次性加载）
+  const [allProjects, setAllProjects] = useState<Project[]>([])
+  
+  // 前端筛选条件
+  const [searchQuery, setSearchQuery] = useState('')
+  const [typeFilter, setTypeFilter] = useState<ProjectListParams['type'] | undefined>(undefined)
+  const [statusFilter, setStatusFilter] = useState<ProjectListParams['status'] | undefined>(undefined)
+  const [createdByFilter, setCreatedByFilter] = useState<number | undefined>(undefined)
+  
+  // 前端分页
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
 
   const {
     setProjects,
@@ -178,66 +183,119 @@ const ProjectList: React.FC = () => {
     try {
       const users = await userService.getSimpleUserList()
       setUserList(users)
-    } catch (error) {
-      console.error('获取用户列表失败:', error)
+    } catch {
+      // 错误由拦截器处理
     } finally {
       setLoadingUsers(false)
     }
   }
 
-  const fetchProjects = useCallback(async (params: ProjectListParams) => {
+  // 智能加载所有项目数据
+  const fetchAllProjects = useCallback(async () => {
+    if (!isAuthenticated || !user) return
+
     dispatch({ type: 'SET_LOADING', payload: true })
     try {
-      const response = await projectService.getProjects(params)
-      const items = response.items || []
+      // 构建基础参数（非管理员只能看自己的项目）
+      const baseParams: ProjectListParams = {
+        page: 1,
+        size: 100,
+        created_by: user.is_admin ? undefined : user.id,
+        node_id: currentNode?.id  // 按节点筛选
+      }
 
-      setProjectList(items)
-      setProjects(items)
-      setTablePagination({
-        current: response.page || params.page || 1,
-        pageSize: response.size || params.size || 10,
-        total: response.total || 0
-      })
-      setPagination({
-        current: response.page || params.page || 1,
-        pageSize: response.size || params.size || 10,
-        total: response.total || 0
-      })
-    } catch (error) {
-      console.error('[Error] Error fetching projects:', error)
-      setProjectList([])
+      // 先获取第一页，查看总数
+      const firstPageResponse = await projectService.getProjects(baseParams)
+      const totalCount = firstPageResponse.total
+
+      // 如果总数小于等于100，直接使用
+      if (totalCount <= 100) {
+        setAllProjects(firstPageResponse.items || [])
+        setProjects(firstPageResponse.items || [])
+      } else {
+        // 如果总数大于100，分批加载（最多加载前10页，即1000条数据）
+        const allItems = [...(firstPageResponse.items || [])]
+        const totalPages = Math.ceil(totalCount / 100)
+        const pagesToLoad = Math.min(totalPages, 10)
+        
+        const promises = []
+        for (let page = 2; page <= pagesToLoad; page++) {
+          promises.push(projectService.getProjects({ ...baseParams, page }))
+        }
+        
+        const results = await Promise.all(promises)
+        results.forEach(response => {
+          allItems.push(...(response.items || []))
+        })
+        
+        setAllProjects(allItems)
+        setProjects(allItems)
+      }
+    } catch {
+      // 错误由拦截器处理
+      setAllProjects([])
       setProjects([])
-      setTablePagination(prev => ({
-        ...prev,
-        total: 0
-      }))
-      setPagination({
-        current: 1,
-        pageSize: params.size || tablePagination.pageSize,
-        total: 0
-      })
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false })
     }
-  }, [setProjects, setPagination, tablePagination.pageSize])
+  }, [isAuthenticated, user, setProjects, currentNode?.id])
+
+  // 前端筛选和分页逻辑
+  const filteredAndPaginatedProjects = useMemo(() => {
+    let filtered = [...allProjects]
+
+    // 应用类型筛选
+    if (typeFilter) {
+      filtered = filtered.filter(project => project.type === typeFilter)
+    }
+
+    // 应用状态筛选
+    if (statusFilter) {
+      filtered = filtered.filter(project => project.status === statusFilter)
+    }
+
+    // 应用创建者筛选（仅管理员可用）
+    if (createdByFilter !== undefined && user?.is_admin) {
+      filtered = filtered.filter(project => project.created_by === createdByFilter)
+    }
+
+    // 应用搜索（项目名称、描述）
+    if (searchQuery) {
+      const lowerQuery = searchQuery.toLowerCase().trim()
+      filtered = filtered.filter(project => 
+        project.name?.toLowerCase().includes(lowerQuery) ||
+        project.description?.toLowerCase().includes(lowerQuery)
+      )
+    }
+
+    // 计算分页
+    const total = filtered.length
+    const startIndex = (currentPage - 1) * pageSize
+    const endIndex = startIndex + pageSize
+    const paginatedData = filtered.slice(startIndex, endIndex)
+
+    return {
+      data: paginatedData,
+      total: total
+    }
+  }, [allProjects, typeFilter, statusFilter, createdByFilter, searchQuery, currentPage, pageSize, user?.is_admin])
+
+  // 同步分页信息到 store（使用 useEffect 避免在渲染期间更新状态）
+  useEffect(() => {
+    setPagination({
+      current: currentPage,
+      pageSize: pageSize,
+      total: filteredAndPaginatedProjects.total
+    })
+  }, [currentPage, pageSize, filteredAndPaginatedProjects.total, setPagination])
 
   // 初始加载
   useEffect(() => {
     if (!isAuthenticated && !authLoading) {
-      setProjectList([])
+      setAllProjects([])
       setProjects([])
-      setTablePagination(prev => ({
-        ...prev,
-        current: 1,
-        total: 0
-      }))
-      setPagination({
-        current: 1,
-        pageSize: queryParams.size || 10,
-        total: 0
-      })
     }
-  }, [isAuthenticated, authLoading, queryParams.size, setPagination, setProjects])
+  }, [isAuthenticated, authLoading, setProjects])
 
   useEffect(() => {
     if (!user) {
@@ -247,63 +305,72 @@ const ProjectList: React.FC = () => {
 
     if (user.id !== currentUserIdRef.current) {
       currentUserIdRef.current = user.id
-      const defaultSize = queryParams.size || 10
-      setSearchInput('')
-      setProjectList([])
-      setProjects([])
-      setTablePagination({
-        current: 1,
-        pageSize: defaultSize,
-        total: 0
-      })
-      setPagination({
-        current: 1,
-        pageSize: defaultSize,
-        total: 0
-      })
-      setQueryParams({
-        page: 1,
-        size: defaultSize,
-        type: undefined,
-        status: undefined,
-        tag: undefined,
-        search: undefined,
-        created_by: user.is_admin ? undefined : user.id
-      })
-      return
+      // 用户切换时重置筛选条件
+      setSearchQuery('')
+      setTypeFilter(undefined)
+      setStatusFilter(undefined)
+      setCreatedByFilter(undefined)
+      setCurrentPage(1)
+      fetchAllProjects()
     }
-
-    if (!user.is_admin && queryParams.created_by !== user.id) {
-      setQueryParams(prev => ({
-        ...prev,
-        page: 1,
-        created_by: user.id
-      }))
-    }
-  }, [user?.id, user?.is_admin, queryParams.size, queryParams.created_by, setPagination, setProjects])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, fetchAllProjects])
 
   useEffect(() => {
     if (!isAuthenticated || authLoading || !user) {
       return
     }
 
-    const effectiveSize = queryParams.size && queryParams.size > 0 ? queryParams.size : 10
-    const params: ProjectListParams = {
-      ...queryParams,
-      page: queryParams.page || 1,
-      size: effectiveSize,
-      created_by: user.is_admin ? queryParams.created_by : user.id
-    }
-
-    fetchProjects(params)
-  }, [queryParams, user?.id, user?.is_admin, isAuthenticated, authLoading, fetchProjects])
+    // 首次加载或节点切换时重新加载
+    fetchAllProjects()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, authLoading, user?.id, currentNode?.id, fetchAllProjects])
 
   // 获取用户列表（管理员专用）
   useEffect(() => {
     if (user?.is_admin && isAuthenticated && !authLoading) {
       fetchUserList()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.is_admin, isAuthenticated, authLoading])
+
+  // 处理筛选变化时重置到第一页
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value)
+    setCurrentPage(1)
+  }
+
+  const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value
+    setSearchQuery(value)
+    if (!value.trim()) {
+      setCurrentPage(1)
+    }
+  }
+
+  const handleTypeChange = (value: ProjectListParams['type'] | undefined) => {
+    setTypeFilter(value)
+    setCurrentPage(1)
+  }
+
+  const handleStatusChange = (value: ProjectListParams['status'] | undefined) => {
+    setStatusFilter(value)
+    setCurrentPage(1)
+  }
+
+  const handleCreatedByChange = (value: number | undefined) => {
+    setCreatedByFilter(value)
+    setCurrentPage(1)
+  }
+
+  // 处理分页变化
+  const handlePaginationChange = (page: number, size: number) => {
+    setCurrentPage(page)
+    if (size !== pageSize) {
+      setPageSize(size)
+      setCurrentPage(1)
+    }
+  }
 
   // 删除单个项目
   const handleDelete = (project: Project) => {
@@ -318,7 +385,7 @@ const ProjectList: React.FC = () => {
       const fullProject = await projectService.getProject(project.id)
       dispatch({ type: 'SET_CURRENT_EDIT_PROJECT', payload: fullProject })
       dispatch({ type: 'TOGGLE_EDIT_DRAWER', payload: true })
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false })
@@ -333,23 +400,14 @@ const ProjectList: React.FC = () => {
       await projectService.deleteProject(uiState.currentDeleteProject.id)
       removeProject(uiState.currentDeleteProject.id)
 
-      const remainingItems = projects.filter(p => p.id !== uiState.currentDeleteProject.id)
-      setProjectList(remainingItems)
+      // 直接从本地状态移除
+      setAllProjects(prev => prev.filter(p => p.id !== uiState.currentDeleteProject!.id))
 
       // 如果删除的项目在选中列表中，需要更新选中状态
       if (uiState.selectedRowKeys.includes(uiState.currentDeleteProject.id)) {
         dispatch({ type: 'REMOVE_SELECTED_PROJECT', payload: uiState.currentDeleteProject.id })
       }
-
-      if (remainingItems.length === 0) {
-        setQueryParams(prev => ({
-          ...prev,
-          page: Math.max(1, (prev.page || tablePagination.current || 1) - 1)
-        }))
-      } else {
-        setQueryParams(prev => ({ ...prev }))
-      }
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       dispatch({ type: 'HIDE_DELETE_MODAL' })
@@ -383,21 +441,12 @@ const ProjectList: React.FC = () => {
         removeProject(id)
       })
 
-      const remainingAfterDelete = projects.filter(p => !successfullyDeletedIds.includes(p.id))
-      setProjectList(remainingAfterDelete)
+      // 直接从本地状态移除
+      setAllProjects(prev => prev.filter(p => !successfullyDeletedIds.includes(p.id)))
 
       // 清空选中状态
       dispatch({ type: 'CLEAR_SELECTION' })
-
-      if (remainingAfterDelete.length === 0) {
-        setQueryParams(prev => ({
-          ...prev,
-          page: Math.max(1, (prev.page || tablePagination.current || 1) - 1)
-        }))
-      } else {
-        setQueryParams(prev => ({ ...prev }))
-      }
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false })
@@ -406,61 +455,19 @@ const ProjectList: React.FC = () => {
   }
 
   // 项目创建成功处理
-  const handleCreateSuccess = (project: unknown) => {
+  const handleCreateSuccess = (_project: unknown) => {
     dispatch({ type: 'TOGGLE_CREATE_DRAWER', payload: false })
-    setQueryParams(prev => ({ ...prev }))
+    // 重新加载数据
+    fetchAllProjects()
   }
 
   // 项目编辑成功处理
   const handleEditSuccess = () => {
     dispatch({ type: 'TOGGLE_EDIT_DRAWER', payload: false })
     dispatch({ type: 'SET_CURRENT_EDIT_PROJECT', payload: null })
-    setQueryParams(prev => ({ ...prev }))
+    // 重新加载数据
+    fetchAllProjects()
   }
-
-  const handleSearch = (value: string) => {
-    const trimmed = value.trim()
-    setSearchInput(value)
-    setQueryParams(prev => ({
-      ...prev,
-      page: 1,
-      search: trimmed ? trimmed : undefined
-    }))
-  }
-
-  const handleTypeChange = (value: string | undefined) => {
-    setQueryParams(prev => ({
-      ...prev,
-      page: 1,
-      type: value as ProjectListParams['type'] | undefined
-    }))
-  }
-
-  const handleStatusChange = (value: string | undefined) => {
-    setQueryParams(prev => ({
-      ...prev,
-      page: 1,
-      status: value as ProjectListParams['status'] | undefined
-    }))
-  }
-
-  const handleCreatedByChange = (value: number | undefined) => {
-    setQueryParams(prev => ({
-      ...prev,
-      page: 1,
-      created_by: value
-    }))
-  }
-
-  const handlePaginationChange = (page: number, size: number) => {
-    setQueryParams(prev => ({
-      ...prev,
-      page,
-      size
-    }))
-  }
-
-
 
   // 表格列配置
   const columns: ColumnsType<Project> = [
@@ -468,9 +475,10 @@ const ProjectList: React.FC = () => {
       title: '项目名称',
       dataIndex: 'name',
       key: 'name',
-      width: 200,
-      minWidth: 120, // 最小宽度
-      ellipsis: true,
+      width: 180,
+      minWidth: 120,
+      ellipsis: { showTitle: false },
+      fixed: 'left',
       render: (text: string, record: Project) => (
         <Tooltip title={text} placement="topLeft">
           <Button
@@ -497,11 +505,10 @@ const ProjectList: React.FC = () => {
       title: '类型',
       dataIndex: 'type',
       key: 'type',
-      width: 100,
-      responsive: ['md'], // 中等屏幕及以上显示
+      width: 90,
       render: (type: string) => (
-        <Tag color={getProjectTypeColor(type as any)}>
-          {getProjectTypeText(type as any)}
+        <Tag color={getProjectTypeColor(type as ProjectType)}>
+          {getProjectTypeText(type as ProjectType)}
         </Tag>
       )
     },
@@ -509,13 +516,45 @@ const ProjectList: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 100,
-      ellipsis: true,
+      width: 90,
       render: (status: string) => (
-        <Tooltip title={getProjectStatusText(status)} placement="top">
-          <Tag color={getProjectStatusColor(status)}>
-            {getProjectStatusText(status)}
-          </Tag>
+        <Tag color={getProjectStatusColor(status)}>
+          {getProjectStatusText(status)}
+        </Tag>
+      )
+    },
+    {
+      title: '任务数',
+      dataIndex: 'task_count',
+      key: 'task_count',
+      width: 70,
+      align: 'center',
+      responsive: ['md'],
+      render: (count: number) => <span>{count || 0}</span>
+    },
+    {
+      title: '创建者',
+      dataIndex: 'created_by_username',
+      key: 'created_by_username',
+      width: 100,
+      ellipsis: { showTitle: false },
+      responsive: ['lg'],
+      render: (username: string) => (
+        <Tooltip title={username || '未知用户'} placement="topLeft">
+          <span>{username || '未知'}</span>
+        </Tooltip>
+      )
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 160,
+      ellipsis: { showTitle: false },
+      responsive: ['lg'],
+      render: (date: string) => (
+        <Tooltip title={formatDate(date)} placement="topLeft">
+          <span>{formatDate(date)}</span>
         </Tooltip>
       )
     },
@@ -523,9 +562,9 @@ const ProjectList: React.FC = () => {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
-      ellipsis: true,
-      width: 250,
-      responsive: ['lg'], // 大屏幕及以上显示
+      ellipsis: { showTitle: false },
+      width: 200,
+      responsive: ['xl'],
       render: (text: string) => (
         <Tooltip title={text || '暂无描述'} placement="topLeft">
           <span style={{
@@ -540,68 +579,15 @@ const ProjectList: React.FC = () => {
       )
     },
     {
-      title: '创建者',
-      dataIndex: 'created_by_username',
-      key: 'created_by_username',
-      width: 120,
-      ellipsis: true,
-      responsive: ['lg'], // 大屏幕及以上显示
-      render: (username: string, record: Project) => (
-        <Tooltip title={`创建者: ${username || '未知用户'}`} placement="top">
-          <span style={{
-            display: 'block',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap'
-          }}>
-            {username || '未知用户'}
-          </span>
-        </Tooltip>
-      )
-    },
-    {
-      title: '任务数',
-      dataIndex: 'task_count',
-      key: 'task_count',
-      width: 80,
-      ellipsis: true,
-      responsive: ['lg'], // 大屏幕及以上显示
-      render: (count: number) => (
-        <Tooltip title={`任务数量: ${count || 0}`} placement="top">
-          <span>{count || 0}</span>
-        </Tooltip>
-      )
-    },
-    {
-      title: '创建时间',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 180,
-      ellipsis: true,
-      responsive: ['xl'], // 超大屏幕及以上显示
-      render: (date: string) => (
-        <Tooltip title={`创建时间: ${formatDate(date)}`} placement="topLeft">
-          <span style={{
-            display: 'block',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap'
-          }}>
-            {formatDate(date)}
-          </span>
-        </Tooltip>
-      )
-    },
-    {
       title: '操作',
       key: 'actions',
-      width: 160,
+      width: 150,
       minWidth: 120,
-      fixed: 'right', // 固定在右侧
+      fixed: 'right',
       render: (_, record: Project) => (
         <div className="table-actions">
           <Space size="small" wrap>
-            <Tooltip title="查看详情">
+            <Tooltip title="查看详情" placement="top">
               <Button
                 type="text"
                 icon={<EyeOutlined />}
@@ -610,16 +596,16 @@ const ProjectList: React.FC = () => {
                 className="action-btn"
               />
             </Tooltip>
-            <Tooltip title="创建任务">
+            <Tooltip title="创建任务" placement="top">
               <Button
                 type="text"
                 icon={<PlayCircleOutlined />}
                 size="small"
                 onClick={() => navigate(`/tasks/create?project_id=${record.id}`)}
-                className="action-btn hidden-sm" // 小屏幕隐藏
+                className="action-btn hidden-sm"
               />
             </Tooltip>
-            <Tooltip title="编辑">
+            <Tooltip title="编辑" placement="top">
               <Button
                 type="text"
                 icon={<EditOutlined />}
@@ -628,7 +614,7 @@ const ProjectList: React.FC = () => {
                 className="action-btn"
               />
             </Tooltip>
-            <Tooltip title="删除">
+            <Tooltip title="删除" placement="top">
               <Button
                 type="text"
                 danger
@@ -668,119 +654,119 @@ const ProjectList: React.FC = () => {
   }
 
   return (
-    <Card>
-      {/* 工具栏 */}
-      <div style={{ marginBottom: 16 }}>
-        <div className="toolbar-container">
-          {/* 主要操作按钮 */}
-          <div className="toolbar-actions">
-            <Space wrap>
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={() => dispatch({ type: 'TOGGLE_CREATE_DRAWER' })}
-                size="middle"
-              >
-                <span className="hidden-xs">创建项目</span>
-              </Button>
-
-              <Button
-                danger
-                icon={<DeleteOutlined />}
-                onClick={handleBatchDelete}
-                disabled={uiState.selectedRowKeys.length === 0}
-                size="middle"
-              >
-                <span className="hidden-xs">批量删除</span>
-                {uiState.selectedRowKeys.length > 0 && ` (${uiState.selectedRowKeys.length})`}
-              </Button>
-            </Space>
-          </div>
-
-          {/* 筛选和搜索 */}
-          <div className="toolbar-filters">
-            <Space wrap>
-              <Search
-                placeholder="搜索项目"
-                style={{ width: 200, minWidth: 150 }}
-                onSearch={handleSearch}
-                value={searchInput}
-                onChange={(e) => {
-                  const value = e.target.value
-                  setSearchInput(value)
-                  if (!value.trim()) {
-                    setQueryParams(prev => ({
-                      ...prev,
-                      page: 1,
-                      search: undefined
-                    }))
-                  }
-                }}
-                allowClear
-                size="middle"
-              />
-
-              <Select
-                placeholder="类型"
-                style={{ width: 100, minWidth: 80 }}
-                allowClear
-                value={queryParams.type}
-                onChange={handleTypeChange}
-                size="middle"
-              >
-                <Option value="file">文件</Option>
-                <Option value="rule">规则</Option>
-                <Option value="code">代码</Option>
-              </Select>
-
-              <Select
-                placeholder="状态"
-                style={{ width: 100, minWidth: 80 }}
-                allowClear
-                value={queryParams.status}
-                onChange={handleStatusChange}
-                size="middle"
-                className="hidden-xs"
-              >
-                <Option value="active">活跃</Option>
-                <Option value="inactive">非活跃</Option>
-                <Option value="error">错误</Option>
-              </Select>
-
-              {/* 用户筛选器（仅管理员可见） */}
-              {user?.is_admin && (
-                <Select
-                  placeholder="创建者"
-                  style={{ width: 120, minWidth: 100 }}
-                  allowClear
-                  value={queryParams.created_by}
-                  onChange={handleCreatedByChange}
-                  size="middle"
-                  loading={loadingUsers}
-                  showSearch
-                  filterOption={(input, option) =>
-                    (option?.children as string)?.toLowerCase().includes(input.toLowerCase())
-                  }
-                >
-                  {userList.map((user) => (
-                    <Option key={user.id} value={user.id}>
-                      {user.username}
-                    </Option>
-                  ))}
-                </Select>
-              )}
-            </Space>
-          </div>
-        </div>
+    <div style={{ padding: '24px' }}>
+      {/* 页面标题 */}
+      <div style={{ marginBottom: '24px' }}>
+        <Space align="start">
+          <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <FolderOutlined />
+            项目管理
+          </h1>
+          {currentNode && (
+            <Tag 
+              color="cyan"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}
+            >
+              <CloudServerOutlined style={{ fontSize: 12 }} />
+              <span>{currentNode.name}</span>
+            </Tag>
+          )}
+        </Space>
+        <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
+          {currentNode ? `当前节点: ${currentNode.name}` : '管理您的爬虫项目和代码'}
+        </p>
       </div>
 
+      {/* 工具栏 */}
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+          <Space wrap size="middle">
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => fetchAllProjects()}
+              loading={uiState.loading}
+            >
+              刷新
+            </Button>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => dispatch({ type: 'TOGGLE_CREATE_DRAWER' })}
+            >
+              创建项目
+            </Button>
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              onClick={handleBatchDelete}
+              disabled={uiState.selectedRowKeys.length === 0}
+            >
+              批量删除{uiState.selectedRowKeys.length > 0 && ` (${uiState.selectedRowKeys.length})`}
+            </Button>
+          </Space>
+          <Space wrap size="middle">
+            <Select
+              placeholder="类型"
+              style={{ width: 100 }}
+              allowClear
+              value={typeFilter}
+              onChange={handleTypeChange}
+            >
+              <Option value="file">文件</Option>
+              <Option value="rule">规则</Option>
+              <Option value="code">代码</Option>
+            </Select>
+            <Select
+              placeholder="状态"
+              style={{ width: 100 }}
+              allowClear
+              value={statusFilter}
+              onChange={handleStatusChange}
+            >
+              <Option value="active">活跃</Option>
+              <Option value="inactive">非活跃</Option>
+              <Option value="error">错误</Option>
+            </Select>
+            {user?.is_admin && (
+              <Select
+                placeholder="创建者"
+                style={{ width: 120 }}
+                allowClear
+                value={createdByFilter}
+                onChange={handleCreatedByChange}
+                loading={loadingUsers}
+                showSearch
+                filterOption={(input, option) =>
+                  (option?.children as string)?.toLowerCase().includes(input.toLowerCase())
+                }
+              >
+                {userList.map((userItem) => (
+                  <Option key={userItem.id} value={userItem.id}>
+                    {userItem.username}
+                  </Option>
+                ))}
+              </Select>
+            )}
+            <Search
+              placeholder="搜索项目"
+              style={{ width: 200 }}
+              value={searchQuery}
+              onChange={handleSearchInput}
+              onSearch={handleSearchChange}
+              allowClear
+            />
+          </Space>
+        </div>
+      </Card>
+
       {/* 项目表格 */}
-      <ResponsiveTable
+      <Card>
+        <ResponsiveTable
         columns={columns}
-        dataSource={projects}
+        dataSource={filteredAndPaginatedProjects.data}
         rowKey="id"
         loading={uiState.loading}
-        minWidth={1000}
+        minWidth={900}
         fixedActions={true}
         rowSelection={{
           selectedRowKeys: uiState.selectedRowKeys,
@@ -795,23 +781,24 @@ const ProjectList: React.FC = () => {
           }),
         }}
         pagination={{
-          current: tablePagination.current,
-          pageSize: tablePagination.pageSize,
-          total: tablePagination.total,
+          current: currentPage,
+          pageSize: pageSize,
+          total: filteredAndPaginatedProjects.total,
           showSizeChanger: true,
           showQuickJumper: true,
           showTotal: (total, range) =>
             `第 ${range[0]}-${range[1]} 条，共 ${total} 条记录`,
           pageSizeOptions: ['10', '20', '50', '100'],
           onChange: (page, size) => {
-            handlePaginationChange(page, size || tablePagination.pageSize)
+            handlePaginationChange(page, size || pageSize)
           },
-          onShowSizeChange: (current, size) => {
+          onShowSizeChange: (_, size) => {
             handlePaginationChange(1, size)
           }
         }}
         size="middle"
-      />
+        />
+      </Card>
 
       {/* 项目创建抽屉 */}
       <Suspense fallback={null}>
@@ -874,7 +861,7 @@ const ProjectList: React.FC = () => {
           </div>
         </div>
       </Modal>
-    </Card>
+    </div>
   )
 }
 

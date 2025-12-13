@@ -145,7 +145,7 @@ export function truncateText(text: string, maxLength: number = 50): string {
 /**
  * 格式化JSON
  */
-export function formatJSON(obj: any, indent: number = 2): string {
+export function formatJSON<T>(obj: T, indent: number = 2): string {
   try {
     return JSON.stringify(obj, null, indent)
   } catch {
@@ -156,9 +156,9 @@ export function formatJSON(obj: any, indent: number = 2): string {
 /**
  * 解析JSON
  */
-export function parseJSON(jsonString: string): any {
+export function parseJSON<T = unknown>(jsonString: string): T | null {
   try {
-    return JSON.parse(jsonString)
+    return JSON.parse(jsonString) as T
   } catch {
     return null
   }
@@ -169,14 +169,25 @@ export function parseJSON(jsonString: string): any {
  */
 export function formatStatus(status: string): { text: string; color: string } {
   const statusMap: Record<string, { text: string; color: string }> = {
-    pending: { text: '待执行', color: 'default' },
-    running: { text: '运行中', color: 'processing' },
+    // 任务执行状态
+    pending: { text: '等待调度', color: 'default' },
+    dispatching: { text: '分配节点中', color: 'processing' },
+    queued: { text: '排队中', color: 'cyan' },
+    running: { text: '执行中', color: 'processing' },
+    success: { text: '成功', color: 'success' },
     completed: { text: '已完成', color: 'success' },
     failed: { text: '失败', color: 'error' },
     cancelled: { text: '已取消', color: 'warning' },
+    timeout: { text: '超时', color: 'error' },
     paused: { text: '已暂停', color: 'warning' },
+    skipped: { text: '已跳过', color: 'default' },
+    // 通用状态
     active: { text: '活跃', color: 'success' },
-    inactive: { text: '非活跃', color: 'default' }
+    inactive: { text: '非活跃', color: 'default' },
+    // 节点状态
+    online: { text: '在线', color: 'success' },
+    offline: { text: '离线', color: 'default' },
+    maintenance: { text: '维护中', color: 'warning' }
   }
   
   return statusMap[status] || { text: status, color: 'default' }

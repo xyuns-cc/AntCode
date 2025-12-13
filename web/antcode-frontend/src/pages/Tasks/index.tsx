@@ -1,4 +1,4 @@
-import React, { useState, useEffect, memo, useCallback, useMemo } from 'react'
+import React, { useState, memo } from 'react'
 import {
   Card,
   Button,
@@ -8,7 +8,8 @@ import {
   Select,
   Tooltip,
   Popconfirm,
-  Alert
+  Alert,
+  Modal
 } from 'antd'
 import showNotification from '@/utils/notification'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
@@ -18,15 +19,17 @@ import {
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
-  ReloadOutlined
+  ReloadOutlined,
+  ScheduleOutlined,
+  CloudServerOutlined,
+  DesktopOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { taskService } from '@/services/tasks'
-import { projectService } from '@/services/projects'
-import type { Task, TaskListParams, TaskStatus, ScheduleType, Project } from '@/types'
+import { useNodeStore } from '@/stores/nodeStore'
+import type { Task, TaskStatus, ScheduleType } from '@/types'
 import { formatDateTime } from '@/utils/format'
-import { Logger } from '@/utils/logger'
 import useAuth from '@/hooks/useAuth'
+import { useProjectsQuery, useTasksQuery, useTaskMutations } from '@/hooks/api/useTasks'
 
 const { Search } = Input
 const { Option } = Select
@@ -34,73 +37,74 @@ const { Option } = Select
 const Tasks: React.FC = memo(() => {
   const navigate = useNavigate()
   const { isAuthenticated, loading: authLoading } = useAuth()
-  const [tasks, setTasks] = useState<Task[]>([])
-  const [projects, setProjects] = useState<Project[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { currentNode } = useNodeStore()
 
-  // 分页和过滤状态
-  const [pagination, setPagination] = useState({
-    current: 1,
-    pageSize: 10,
-    total: 0
-  })
+  const [searchQuery, setSearchQuery] = useState('')
+  const [projectFilter, setProjectFilter] = useState<string | undefined>(undefined)
+  const [statusFilter, setStatusFilter] = useState<TaskStatus | undefined>(undefined)
+  const [scheduleTypeFilter, setScheduleTypeFilter] = useState<ScheduleType | undefined>(undefined)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
-  const [filters, setFilters] = useState<TaskListParams>({
-    page: 1,
-    size: 10
-  })
+  const tasksQuery = useTasksQuery({
+    page: currentPage,
+    size: pageSize,
+    project_id: projectFilter,
+    status: statusFilter,
+    schedule_type: scheduleTypeFilter,
+    search: searchQuery?.trim() || undefined,
+    node_id: currentNode?.id
+  }, isAuthenticated && !authLoading)
 
-  // 加载任务列表
-  const loadTasks = async (params?: TaskListParams) => {
-    if (!isAuthenticated) {
-      setError('请先登录')
-      return
-    }
+  const projectsQuery = useProjectsQuery(isAuthenticated && !authLoading)
+  const { triggerTask, deleteTask, batchDelete } = useTaskMutations()
 
-    setLoading(true)
-    setError(null)
-    try {
-      const response = await taskService.getTasks({ ...filters, ...params })
-      setTasks(response.items)
-      setPagination({
-        current: response.page,
-        pageSize: response.size,
-        total: response.total
-      })
-    } catch (error: any) {
-      const errorMessage = error.response?.status === 401
-        ? '认证已过期，请重新登录' 
-        : '加载任务列表失败: ' + (error.message || '未知错误')
-      setError(errorMessage)
-      setTasks([])
-      setPagination({
-        current: 1,
-        pageSize: 10,
-        total: 0
-      })
-    } finally {
-      setLoading(false)
-    }
+  const loading = tasksQuery.isLoading || tasksQuery.isFetching
+  const tasks = tasksQuery.data?.items || []
+  const total = tasksQuery.data?.total || 0
+  const projects = projectsQuery.data?.items || []
+  const requestError = tasksQuery.error as Error | null
+
+  const handleRefresh = () => {
+    tasksQuery.refetch()
   }
 
-  // 加载项目列表
-  const loadProjects = async () => {
-    try {
-      const response = await projectService.getProjects({ page: 1, size: 100 })
-      setProjects(response.items || [])
-    } catch (error) {
-      setProjects([])
-    }
+  // 处理筛选变化时重置到第一页
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value)
+    setCurrentPage(1)
   }
 
-  // 初始化数据 - 只在认证后加载
-  useEffect(() => {
-    if (isAuthenticated && !authLoading) {
-      loadTasks()
-      loadProjects()
+  // 实时搜索（输入时立即筛选）
+  const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchQuery(e.target.value)
+    setCurrentPage(1)
+  }
+
+  const handleProjectFilterChange = (value: string | undefined) => {
+    setProjectFilter(value)
+    setCurrentPage(1)
+  }
+
+  const handleStatusFilterChange = (value: TaskStatus | undefined) => {
+    setStatusFilter(value)
+    setCurrentPage(1)
+  }
+
+  const handleScheduleTypeFilterChange = (value: ScheduleType | undefined) => {
+    setScheduleTypeFilter(value)
+    setCurrentPage(1)
+  }
+
+  // 处理分页变化
+  const handlePaginationChange = (page: number, size: number) => {
+    setCurrentPage(page)
+    if (size !== pageSize) {
+      setPageSize(size)
+      setCurrentPage(1)
     }
-  }, [isAuthenticated, authLoading])
+  }
 
   // 认证加载状态
   if (authLoading) {
@@ -135,12 +139,13 @@ const Tasks: React.FC = memo(() => {
   }
 
   // 认证错误状态
-  if (error) {
+  if (requestError) {
+    const description = requestError?.message || '加载失败，请稍后重试'
     return (
       <div style={{ padding: '24px' }}>
         <Alert
           message="加载失败"
-          description={error}
+          description={description}
           type="error"
           showIcon
           action={
@@ -158,65 +163,76 @@ const Tasks: React.FC = memo(() => {
     )
   }
 
-  // 处理表格变化
-  const handleTableChange = (paginationConfig: any) => {
-    const newFilters = {
-      ...filters,
-      page: paginationConfig.current,
-      size: paginationConfig.pageSize
-    }
-    setFilters(newFilters)
-    loadTasks(newFilters)
-  }
-
   // 触发任务
-  const handleTriggerTask = async (taskId: number) => {
+  const handleTriggerTask = async (taskId: number | string) => {
     try {
-      console.log('[DEBUG Tasks] handleTriggerTask click', { taskId })
-      const resp = await taskService.triggerTask(taskId)
-      console.log('[DEBUG Tasks] handleTriggerTask success resp', resp)
+      const resp = await triggerTask.mutateAsync(taskId)
       if (resp?.message) {
         showNotification('success', resp.message)
       } else {
         showNotification('success', '任务已触发')
       }
-      loadTasks()
-    } catch (error: any) {
-      console.log('[DEBUG Tasks] handleTriggerTask error', error)
-      // 错误提示由全局拦截器统一处理，这里不再重复弹出
+    } catch (_error: unknown) {
+      // 错误提示由全局拦截器统一处理
     }
   }
 
   // 删除任务
-  const handleDeleteTask = async (taskId: number) => {
+  const handleDeleteTask = async (taskId: number | string) => {
     try {
-      await taskService.deleteTask(taskId)
-      
-      // 检查当前页是否还有其他数据
-      const remainingTasks = tasks.filter(t => t.id !== taskId)
-      if (remainingTasks.length === 0 && filters.page > 1) {
-        // 如果当前页没有数据了且不是第一页，切换到上一页
-        const newFilters = { ...filters, page: filters.page - 1 }
-        setFilters(newFilters)
-        loadTasks(newFilters)
-      } else {
-        // 否则重新加载当前页数据
-        loadTasks(filters)
-      }
-    } catch (error: any) {
+      await deleteTask.mutateAsync(taskId)
+      showNotification('success', '任务已删除')
+      setSelectedRowKeys((prev) => prev.filter(key => key !== taskId))
+    } catch (_error: unknown) {
       // 通知由拦截器统一处理
     }
   }
 
+  // 批量删除任务
+  const handleBatchDelete = () => {
+    if (selectedRowKeys.length === 0) {
+      showNotification('warning', '请先选择要删除的任务')
+      return
+    }
+
+    Modal.confirm({
+      title: '确认批量删除',
+      content: `确定要删除选中的 ${selectedRowKeys.length} 个任务吗？此操作不可恢复。`,
+      okText: '确认删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const result = await batchDelete.mutateAsync(selectedRowKeys as (string | number)[])
+          if (result.success_count > 0) {
+            showNotification('success', `成功删除 ${result.success_count} 个任务`)
+            setSelectedRowKeys([])
+          }
+          if (result.failed_count > 0) {
+            showNotification('warning', `${result.failed_count} 个任务删除失败`)
+          }
+        } catch (_error: unknown) {
+          // 如果批量删除 API 不存在，降级为逐个删除
+          showNotification('error', '批量删除失败，请稍后重试')
+        }
+      }
+    })
+  }
+
   // 获取任务状态标签
   const getStatusTag = (status: TaskStatus) => {
-    const statusMap: Record<string, { color: string; text: string }> = {
-      pending: { color: 'default', text: '等待中' },
-      running: { color: 'processing', text: '运行中' },
+    const statusMap: Record<string, { color: string; text: string; icon?: React.ReactNode }> = {
+      pending: { color: 'default', text: '等待调度' },
+      dispatching: { color: 'processing', text: '分配节点中' },
+      queued: { color: 'cyan', text: '排队中' },
+      running: { color: 'processing', text: '执行中' },
       success: { color: 'success', text: '成功' },
       completed: { color: 'success', text: '已完成' },
       failed: { color: 'error', text: '失败' },
-      cancelled: { color: 'warning', text: '已取消' }
+      cancelled: { color: 'warning', text: '已取消' },
+      timeout: { color: 'error', text: '超时' },
+      paused: { color: 'warning', text: '已暂停' },
+      skipped: { color: 'default', text: '已跳过' }
     }
     const config = statusMap[status] || { color: 'default', text: status }
     return <Tag color={config.color}>{config.text}</Tag>
@@ -236,72 +252,100 @@ const Tasks: React.FC = memo(() => {
   return (
     <div style={{ padding: '24px' }}>
       <div style={{ marginBottom: '24px' }}>
-        <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0 }}>
-          任务管理
-        </h1>
+        <Space align="start">
+          <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <ScheduleOutlined />
+            任务管理
+          </h1>
+          {currentNode && (
+            <Tag 
+              color="cyan"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}
+            >
+              <CloudServerOutlined style={{ fontSize: 12 }} />
+              <span>{currentNode.name}</span>
+            </Tag>
+          )}
+        </Space>
         <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
-          管理和监控您的调度任务
+          {currentNode ? `当前节点: ${currentNode.name}` : '管理和监控您的调度任务'}
         </p>
       </div>
 
       {/* 操作栏 */}
       <Card style={{ marginBottom: 16 }}>
-        <div className="toolbar-container">
-          {/* 主要操作按钮 */}
-          <div className="toolbar-actions">
-            <Space wrap>
-              <Button
-                icon={<ReloadOutlined />}
-                onClick={() => loadTasks()}
-                loading={loading}
-                size="middle"
-              >
-                <span className="hidden-xs">刷新</span>
-              </Button>
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={() => navigate('/tasks/create')}
-                size="middle"
-              >
-                <span className="hidden-xs">创建任务</span>
-              </Button>
-            </Space>
-          </div>
-
-          {/* 筛选和搜索 */}
-          <div className="toolbar-filters">
-            <Space wrap>
-              <Search
-                placeholder="搜索任务"
-                allowClear
-                style={{ width: 200, minWidth: 150 }}
-                onSearch={(value) => {
-                  const newFilters = { ...filters, search: value, page: 1 }
-                  setFilters(newFilters)
-                  loadTasks(newFilters)
-                }}
-                size="middle"
-              />
-              <Select
-                placeholder="项目"
-                allowClear
-                style={{ width: 120, minWidth: 100 }}
-                onChange={(value) => {
-                  const newFilters = { ...filters, project_id: value, page: 1 }
-                  setFilters(newFilters)
-                  loadTasks(newFilters)
-                }}
-                size="middle"
-              >
-                {projects.map(project => (
-                  <Option key={project.id} value={project.id}>
-                    {project.name}
-                  </Option>
-                ))}
-              </Select>
-            </Space>
-          </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+          <Space wrap size="middle">
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={handleRefresh}
+              loading={loading}
+            >
+              刷新
+            </Button>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => navigate('/tasks/create')}
+            >
+              创建任务
+            </Button>
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              onClick={handleBatchDelete}
+            >
+              批量删除{selectedRowKeys.length > 0 && ` (${selectedRowKeys.length})`}
+            </Button>
+          </Space>
+          <Space wrap size="middle">
+            <Select
+              placeholder="项目"
+              allowClear
+              style={{ width: 120 }}
+              value={projectFilter}
+              onChange={handleProjectFilterChange}
+            >
+              {projects.map(project => (
+                <Option key={project.id} value={project.id}>
+                  {project.name}
+                </Option>
+              ))}
+            </Select>
+            <Select
+              placeholder="状态"
+              allowClear
+              style={{ width: 100 }}
+              value={statusFilter}
+              onChange={handleStatusFilterChange}
+            >
+              <Option value="pending">等待中</Option>
+              <Option value="running">运行中</Option>
+              <Option value="success">成功</Option>
+              <Option value="failed">失败</Option>
+              <Option value="cancelled">已取消</Option>
+            </Select>
+            <Select
+              placeholder="调度类型"
+              allowClear
+              style={{ width: 110 }}
+              value={scheduleTypeFilter}
+              onChange={handleScheduleTypeFilterChange}
+            >
+              <Option value="once">一次性</Option>
+              <Option value="interval">间隔执行</Option>
+              <Option value="cron">Cron</Option>
+            </Select>
+            <Search
+              placeholder="搜索任务"
+              allowClear
+              style={{ width: 200 }}
+              value={searchQuery}
+              onChange={handleSearchInput}
+              onSearch={handleSearchChange}
+            />
+          </Space>
         </div>
       </Card>
 
@@ -312,13 +356,22 @@ const Tasks: React.FC = memo(() => {
           loading={loading}
           minWidth={900}
           fixedActions={true}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
+            preserveSelectedRowKeys: true
+          }}
           pagination={{
-            ...pagination,
+            current: currentPage,
+            pageSize: pageSize,
+            total: total,
             showSizeChanger: true,
             showQuickJumper: true,
-            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条`
+            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条`,
+            onChange: handlePaginationChange,
+            onShowSizeChange: (_, size) => handlePaginationChange(1, size),
+            pageSizeOptions: ['10', '20', '50', '100']
           }}
-          onChange={handleTableChange}
           rowKey="id"
           size="middle"
           columns={[
@@ -327,7 +380,7 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'name',
               key: 'name',
               width: 200,
-              ellipsis: true,
+              ellipsis: { showTitle: false },
               render: (text: string, record: Task) => (
                 <Tooltip title={text} placement="topLeft">
                   <Button
@@ -354,39 +407,57 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'status',
               key: 'status',
               width: 100,
-              ellipsis: true,
-              render: (status: TaskStatus) => (
-                <Tooltip title={`任务状态: ${status}`} placement="top">
-                  {getStatusTag(status)}
-                </Tooltip>
-              )
+              render: (status: TaskStatus) => getStatusTag(status)
             },
             {
               title: '调度类型',
               dataIndex: 'schedule_type',
               key: 'schedule_type',
               width: 120,
-              ellipsis: true,
               responsive: ['md'],
-              render: (type: ScheduleType) => (
-                <Tooltip title={`调度类型: ${type}`} placement="top">
-                  {getScheduleTypeTag(type)}
-                </Tooltip>
-              )
+              render: (type: ScheduleType) => getScheduleTypeTag(type)
+            },
+            {
+              title: '执行节点',
+              dataIndex: 'node_name',
+              key: 'node_name',
+              width: 130,
+              responsive: ['lg'],
+              render: (_: string, record: Task) => {
+                const nodeName = record.node_id ? (record.node_name || record.node_id) : '本地'
+                const icon = record.node_id 
+                  ? <CloudServerOutlined style={{ fontSize: 12 }} /> 
+                  : <DesktopOutlined style={{ fontSize: 12 }} />
+                return (
+                  <Tooltip title={nodeName} placement="topLeft">
+                    <Tag 
+                      color={record.node_id ? 'cyan' : 'geekblue'}
+                      style={{ 
+                        maxWidth: '100%', 
+                        overflow: 'hidden', 
+                        textOverflow: 'ellipsis', 
+                        display: 'inline-flex', 
+                        alignItems: 'center', 
+                        gap: '4px' 
+                      }}
+                    >
+                      {icon}
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{nodeName}</span>
+                    </Tag>
+                  </Tooltip>
+                )
+              }
             },
             {
               title: '是否启用',
               dataIndex: 'is_active',
               key: 'is_active',
               width: 100,
-              ellipsis: true,
               responsive: ['lg'],
               render: (isActive: boolean) => (
-                <Tooltip title={`状态: ${isActive ? '启用' : '禁用'}`} placement="top">
-                  <Tag color={isActive ? 'success' : 'default'}>
-                    {isActive ? '启用' : '禁用'}
-                  </Tag>
-                </Tooltip>
+                <Tag color={isActive ? 'success' : 'default'}>
+                  {isActive ? '启用' : '禁用'}
+                </Tag>
               )
             },
             {
@@ -394,18 +465,11 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'created_by_username',
               key: 'created_by_username',
               width: 120,
-              ellipsis: true,
+              ellipsis: { showTitle: false },
               responsive: ['lg'],
               render: (username: string) => (
-                <Tooltip title={`创建者: ${username || '未知用户'}`} placement="top">
-                  <span style={{
-                    display: 'block',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    {username || '未知用户'}
-                  </span>
+                <Tooltip title={username || '未知用户'} placement="topLeft">
+                  <span>{username || '未知用户'}</span>
                 </Tooltip>
               )
             },
@@ -414,18 +478,11 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'created_at',
               key: 'created_at',
               width: 180,
-              ellipsis: true,
+              ellipsis: { showTitle: false },
               responsive: ['xl'],
               render: (time: string) => (
-                <Tooltip title={`创建时间: ${formatDateTime(time)}`} placement="topLeft">
-                  <span style={{
-                    display: 'block',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    {formatDateTime(time)}
-                  </span>
+                <Tooltip title={formatDateTime(time)} placement="topLeft">
+                  <span>{formatDateTime(time)}</span>
                 </Tooltip>
               )
             },
@@ -438,7 +495,7 @@ const Tasks: React.FC = memo(() => {
               render: (_, record: Task) => (
                 <div className="table-actions">
                   <Space size="small" wrap>
-                    <Tooltip title="执行">
+                    <Tooltip title="执行" placement="top">
                       <Button
                         type="text"
                         size="small"
@@ -447,7 +504,7 @@ const Tasks: React.FC = memo(() => {
                         className="action-btn"
                       />
                     </Tooltip>
-                    <Tooltip title="查看">
+                    <Tooltip title="查看" placement="top">
                       <Button
                         type="text"
                         size="small"
@@ -456,7 +513,7 @@ const Tasks: React.FC = memo(() => {
                         className="action-btn"
                       />
                     </Tooltip>
-                    <Tooltip title="编辑">
+                    <Tooltip title="编辑" placement="top">
                       <Button
                         type="text"
                         size="small"
@@ -471,7 +528,7 @@ const Tasks: React.FC = memo(() => {
                       okText="确定"
                       cancelText="取消"
                     >
-                      <Tooltip title="删除">
+                      <Tooltip title="删除" placement="top">
                         <Button
                           type="text"
                           size="small"

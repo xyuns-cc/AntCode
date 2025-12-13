@@ -37,23 +37,18 @@ export class AuthHandler {
     this.redirectToLogin()
   }
 
-  /**
-   * 清除认证数据
-   */
+  /** 清除认证数据（保留记住我数据） */
   static clearAuthData(): void {
     try {
       localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
       localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
       localStorage.removeItem(STORAGE_KEYS.USER_INFO)
       
-      // 清除其他可能的认证相关数据
-      const keysToRemove = Object.keys(localStorage).filter(key => 
-        key.includes('auth') || key.includes('token') || key.includes('user')
-      )
-      
-      keysToRemove.forEach(key => {
-        localStorage.removeItem(key)
-      })
+      // 清除其他认证数据，保留 remember_ 前缀的数据
+      Object.keys(localStorage)
+        .filter(key => !key.startsWith('remember_') && 
+          (key.includes('auth') || key.includes('token') || key.includes('user')))
+        .forEach(key => localStorage.removeItem(key))
 
       Logger.info('认证数据已清除')
     } catch (error) {
@@ -119,13 +114,16 @@ export class AuthHandler {
   /**
    * 检查是否为认证错误
    */
-  static isAuthError(error: any): boolean {
-    if (!error?.response) {
+  static isAuthError(error: unknown): boolean {
+    if (!error || typeof error !== 'object' || !('response' in error)) {
       return false
     }
 
-    const status = error.response.status
-    const message = error.response.data?.detail || error.response.data?.message || ''
+    const response = (error as { response?: { status?: number; data?: { detail?: string; message?: string } } }).response
+    if (!response) return false
+
+    const status = response.status
+    const message = response.data?.detail || response.data?.message || ''
 
     // 检查状态码和错误消息
     return (
@@ -142,7 +140,7 @@ export class AuthHandler {
    * 处理API错误
    * 如果是认证错误，自动处理；否则返回false让调用方处理
    */
-  static handleApiError(error: any, showMessage = true): boolean {
+  static handleApiError(error: unknown, showMessage = true): boolean {
     if (this.isAuthError(error)) {
       this.handleAuthFailure(showMessage)
       return true
@@ -161,11 +159,11 @@ export class AuthHandler {
 /**
  * 创建认证错误处理的高阶函数
  */
-export function withAuthErrorHandling<T extends (...args: any[]) => Promise<any>>(
-  fn: T,
+export function withAuthErrorHandling<Args extends unknown[], ReturnType>(
+  fn: (...args: Args) => Promise<ReturnType>,
   showMessage = true
-): T {
-  return (async (...args: any[]) => {
+): (...args: Args) => Promise<ReturnType> {
+  return (async (...args: Args) => {
     try {
       return await fn(...args)
     } catch (error) {

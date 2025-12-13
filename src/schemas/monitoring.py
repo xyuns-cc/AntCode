@@ -100,3 +100,56 @@ class HistoryQueryResponse(BaseModel):
     data: List[NodeHistoryItem]
     count: int
 
+
+
+# gRPC 指标相关 Schema
+class GrpcConnectionStats(BaseModel):
+    """gRPC 连接统计"""
+    connected_nodes: int = Field(0, description="当前连接的节点数")
+    total_connections: int = Field(0, description="总连接数（历史）")
+    active_streams: int = Field(0, description="活跃的双向流数量")
+
+
+class GrpcMessageStats(BaseModel):
+    """gRPC 消息统计"""
+    messages_sent: int = Field(0, description="发送的消息数")
+    messages_received: int = Field(0, description="接收的消息数")
+    bytes_sent: int = Field(0, description="发送的字节数")
+    bytes_received: int = Field(0, description="接收的字节数")
+
+
+class GrpcLatencyStats(BaseModel):
+    """gRPC 延迟统计"""
+    avg_latency_ms: float = Field(0.0, description="平均延迟（毫秒）")
+    min_latency_ms: float = Field(0.0, description="最小延迟（毫秒）")
+    max_latency_ms: float = Field(0.0, description="最大延迟（毫秒）")
+    p95_latency_ms: float = Field(0.0, description="P95 延迟（毫秒）")
+    p99_latency_ms: float = Field(0.0, description="P99 延迟（毫秒）")
+    sample_count: int = Field(0, description="延迟样本数量")
+
+
+class GrpcErrorStats(BaseModel):
+    """gRPC 错误统计"""
+    error_count: int = Field(0, description="错误总数")
+    last_error: Optional[str] = Field(None, description="最近一次错误信息")
+    last_error_time: Optional[datetime] = Field(None, description="最近一次错误时间")
+    reconnect_count: int = Field(0, description="重连次数")
+
+
+class GrpcServerMetrics(BaseModel):
+    """gRPC 服务器指标"""
+    enabled: bool = Field(True, description="gRPC 服务是否启用")
+    running: bool = Field(False, description="gRPC 服务器是否运行中")
+    port: int = Field(50051, description="gRPC 服务器端口")
+    connection: GrpcConnectionStats = Field(default_factory=GrpcConnectionStats)
+    messages: GrpcMessageStats = Field(default_factory=GrpcMessageStats)
+    latency: GrpcLatencyStats = Field(default_factory=GrpcLatencyStats)
+    errors: GrpcErrorStats = Field(default_factory=GrpcErrorStats)
+    uptime_seconds: Optional[float] = Field(None, description="服务器运行时间（秒）")
+    started_at: Optional[datetime] = Field(None, description="服务器启动时间")
+
+
+class GrpcMetricsResponse(BaseModel):
+    """gRPC 指标响应"""
+    server: GrpcServerMetrics = Field(default_factory=GrpcServerMetrics)
+    timestamp: datetime = Field(default_factory=datetime.now)

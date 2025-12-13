@@ -21,8 +21,8 @@ interface ProjectStore {
   // Actions
   setProjects: (projects: Project[]) => void
   addProject: (project: Project) => void
-  updateProject: (id: number, updates: Partial<Project>) => void
-  removeProject: (id: number) => void
+  updateProject: (id: string, updates: Partial<Project>) => void
+  removeProject: (id: string) => void
   setCurrentProject: (project: Project | null) => void
   setStats: (stats: ProjectStats) => void
   setLoading: (loading: boolean) => void
@@ -32,7 +32,7 @@ interface ProjectStore {
   resetFilters: () => void
   
   // 查询方法
-  getProjectById: (id: number) => Project | undefined
+  getProjectById: (id: string) => Project | undefined
   getProjectsByType: (type: string) => Project[]
   getProjectsByStatus: (status: string) => Project[]
   searchProjects: (query: string) => Project[]
@@ -82,7 +82,7 @@ export const useProjectStore = create<ProjectStore>()(
     },
 
     // 更新项目
-    updateProject: (id: number, updates: Partial<Project>) => {
+    updateProject: (id: string, updates: Partial<Project>) => {
       set((state) => {
         const index = state.projects.findIndex(p => p.id === id)
         if (index !== -1) {
@@ -97,7 +97,7 @@ export const useProjectStore = create<ProjectStore>()(
     },
 
     // 删除项目
-    removeProject: (id: number) => {
+    removeProject: (id: string) => {
       set((state) => {
         state.projects = state.projects.filter(p => p.id !== id)
         state.pagination.total -= 1
@@ -164,7 +164,7 @@ export const useProjectStore = create<ProjectStore>()(
     },
 
     // 根据ID获取项目
-    getProjectById: (id: number) => {
+    getProjectById: (id: string) => {
       return get().projects.find(p => p.id === id)
     },
 

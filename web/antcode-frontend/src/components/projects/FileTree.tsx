@@ -7,17 +7,16 @@ import {
   Tooltip,
   Spin,
   Empty,
-  Alert
+  Alert,
+  theme
 } from 'antd'
 import {
   FolderOutlined,
   FolderOpenOutlined,
   EyeOutlined,
-  DownloadOutlined,
-  CodeOutlined
+  DownloadOutlined
 } from '@ant-design/icons'
-import type { TreeDataNode } from 'antd'
-import { useThemeContext } from '@/contexts/ThemeContext'
+import type { TreeDataNode, TreeProps } from 'antd'
 import { FileIcon } from '@/utils/fileIcons'
 import styles from './FileTree.module.css'
 import './FileTree.global.css'
@@ -60,14 +59,14 @@ interface FileTreeProps {
 }
 
 const FileTree: React.FC<FileTreeProps> = ({
-  projectId,
+  projectId: _projectId,
   fileStructure,
   loading = false,
   onPreviewFile,
   onDownloadFile,
   className
 }) => {
-  const { isDark } = useThemeContext()
+  const { token } = theme.useToken()
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([])
 
   // 转换文件结构为Tree组件需要的格式
@@ -103,9 +102,9 @@ const FileTree: React.FC<FileTreeProps> = ({
             >
               {isDirectory ? (
                 expandedKeys.includes(currentPath) ? (
-                  <FolderOpenOutlined style={{ color: '#42a5f5' }} />
+                  <FolderOpenOutlined style={{ color: token.colorInfo }} />
                 ) : (
-                  <FolderOutlined style={{ color: '#42a5f5' }} />
+                  <FolderOutlined style={{ color: token.colorInfo }} />
                 )
               ) : (
                 <FileIcon 
@@ -183,14 +182,14 @@ const FileTree: React.FC<FileTreeProps> = ({
     }
 
     return treeNode
-  }, [expandedKeys, onPreviewFile, onDownloadFile])
+  }, [expandedKeys, onPreviewFile, onDownloadFile, token.colorInfo])
 
   const handleExpand = (expandedKeysValue: React.Key[]) => {
     setExpandedKeys(expandedKeysValue)
   }
 
   // 处理节点点击事件
-  const handleNodeClick = (selectedKeys: React.Key[], info: any) => {
+  const handleNodeClick: TreeProps['onSelect'] = (_selectedKeys, info) => {
     const { node } = info
     const nodeKey = node.key
     
@@ -273,9 +272,9 @@ const FileTree: React.FC<FileTreeProps> = ({
                 return null
               }
               return expanded ? (
-                <FolderOpenOutlined style={{ color: '#42a5f5' }} />
+                <FolderOpenOutlined style={{ color: token.colorInfo }} />
               ) : (
-                <FolderOutlined style={{ color: '#42a5f5' }} />
+                <FolderOutlined style={{ color: token.colorInfo }} />
               )
             }}
           />

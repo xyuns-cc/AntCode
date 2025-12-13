@@ -61,13 +61,13 @@ export interface LoginResponse {
 export interface BackendLoginResponse {
   access_token: string
   token_type: string
-  user_id: number
+  user_id: string  // public_id
   username: string
   is_admin: boolean
 }
 
 export interface User {
-  id: number
+  id: string  // public_id
   username: string
   email?: string
   is_active: boolean

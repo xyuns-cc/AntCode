@@ -2,6 +2,15 @@
 
 基于 React 18 + TypeScript + Ant Design 的现代化任务调度管理前端应用。
 
+## ✨ 核心特性
+
+- 🎨 **现代化 UI** - Ant Design 5.x 组件库，支持深色/浅色主题
+- 📝 **代码编辑** - Monaco Editor 集成，支持语法高亮和智能提示
+- 📊 **数据可视化** - Chart.js 图表展示任务执行统计
+- 🔄 **实时更新** - WebSocket 实时推送日志和节点状态
+- 🚀 **性能优化** - 代码分割、懒加载、Gzip/Brotli 压缩
+- 📱 **响应式设计** - 支持桌面端、平板、手机
+
 ## 📋 目录
 
 - [快速开始](#快速开始)
@@ -171,6 +180,7 @@ antcode-frontend/
 
 ### 状态管理与路由
 - **Zustand**: 5.0.0 - 轻量级状态管理
+- **@tanstack/react-query**: 5.x - 数据获取与缓存
 - **React Router**: 6.27.0 - 路由管理
 
 ### 数据可视化
@@ -217,6 +227,11 @@ VITE_DEV_MODE=true
 - 为所有函数参数和返回值添加类型
 - 避免使用 `any`，使用 `unknown` 替代
 - 使用接口 (`interface`) 定义对象类型
+
+#### 2. 数据访问约定
+- HTTP 调用统一走 `src/services/api.ts` 封装的 axios 实例。
+- 页面侧优先使用 `src/hooks/api/*` 中的 React Query hooks 获取/变更数据，并通过 `invalidateQueries` 触发刷新。
+- 避免在页面直接手写 axios/fetch，请复用领域服务与 hooks。
 
 #### 2. React 规范
 - 使用函数组件 + Hooks
