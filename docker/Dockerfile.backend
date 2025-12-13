@@ -2,64 +2,64 @@
 # AntCode Backend - 多阶段构建 Dockerfile
 # =====================================================
 
-# ================== 阶段 1: 基础镜像 ==================
-FROM python:3.11-slim as base
+# ================== 阶段 1: 构建阶段 ==================
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
 
 # 设置环境变量
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    UV_SYSTEM_PYTHON=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖
+# 安装系统依赖和 uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     curl \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv（更快的 Python 包管理器）
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# ================== 阶段 2: 依赖安装 ==================
-FROM base as builder
-
-WORKDIR /app
+# 设置 uv 路径
+ENV PATH="/root/.local/bin:${PATH}"
 
 # 复制依赖文件
 COPY pyproject.toml uv.lock* ./
 
-# 根据构建参数安装依赖
-# 支持通过 --build-arg DB_TYPE=mysql 来指定数据库类型
+# 安装依赖
 ARG DB_TYPE=sqlite
-RUN if [ "$DB_TYPE" = "mysql" ]; then \
-        echo "安装 MySQL 依赖..." && \
+RUN uv venv /app/.venv && \
+    . /app/.venv/bin/activate && \
+    if [ "$DB_TYPE" = "mysql" ]; then \
         uv sync --extra mysql; \
     elif [ "$DB_TYPE" = "postgres" ]; then \
-        echo "安装 PostgreSQL 依赖..." && \
         uv sync --extra postgres; \
     elif [ "$DB_TYPE" = "all" ]; then \
-        echo "安装所有数据库依赖..." && \
         uv sync --extra all-db; \
     else \
-        echo "安装基础依赖（SQLite）..." && \
         uv sync; \
     fi
 
-# ================== 阶段 3: 运行时镜像 ==================
-FROM base as runtime
+# ================== 阶段 2: 运行时镜像 ==================
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# 从构建阶段复制已安装的依赖
-COPY --from=builder /root/.local /root/.local
-COPY --from=builder /app/.venv /app/.venv
+# 设置环境变量
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:${PATH}"
 
-# 设置虚拟环境路径
-ENV PATH="/app/.venv/bin:$PATH"
+# 安装运行时依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 从构建阶段复制虚拟环境
+COPY --from=builder /app/.venv /app/.venv
 
 # 复制应用代码
 COPY src ./src
@@ -75,10 +75,8 @@ RUN mkdir -p \
     /app/data/storage/projects/executions \
     /app/data/storage/venvs/shared \
     /app/data/storage/mise/cache \
-    /app/data/storage/executions
-
-# 设置目录权限
-RUN chmod -R 755 /app/data
+    /app/data/storage/executions \
+    && chmod -R 755 /app/data
 
 # 暴露端口（API + gRPC）
 EXPOSE 8000 50051
