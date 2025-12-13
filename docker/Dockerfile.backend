@@ -63,8 +63,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # 复制应用代码
 COPY src ./src
-COPY main.py ./
-COPY migrations ./migrations
+COPY proto ./proto
+COPY scripts ./scripts
 
 # 创建数据目录
 RUN mkdir -p \
@@ -80,13 +80,12 @@ RUN mkdir -p \
 # 设置目录权限
 RUN chmod -R 755 /app/data
 
-# 暴露端口
-EXPOSE 8000
+# 暴露端口（API + gRPC）
+EXPOSE 8000 50051
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
 # 启动命令
-CMD ["python", "main.py"]
-
+CMD ["python", "-m", "src.main"]
