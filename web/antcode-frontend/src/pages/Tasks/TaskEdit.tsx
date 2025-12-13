@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Card,
@@ -15,7 +15,6 @@ import {
   Spin,
   Typography
 } from 'antd'
-import showNotification from '@/utils/notification'
 import {
   ArrowLeftOutlined,
   SaveOutlined
@@ -46,12 +45,12 @@ const TaskEdit: React.FC = () => {
   Logger.log('TaskEdit - id:', id, 'isAuthenticated:', isAuthenticated, 'authLoading:', authLoading, 'task:', task, 'loading:', loading)
 
   // 加载任务详情
-  const loadTask = async () => {
+  const loadTask = useCallback(async () => {
     if (!id) return
     
     setLoading(true)
     try {
-      const taskData = await taskService.getTask(parseInt(id))
+      const taskData = await taskService.getTask(id)
       setTask(taskData)
       
       // 设置表单初始值
@@ -71,28 +70,28 @@ const TaskEdit: React.FC = () => {
         execution_params: taskData.execution_params ? JSON.stringify(taskData.execution_params, null, 2) : '',
         environment_vars: taskData.environment_vars ? JSON.stringify(taskData.environment_vars, null, 2) : ''
       })
-    } catch (error: any) {
+    } catch {
       // 错误提示由拦截器统一处理
       navigate('/tasks')
     } finally {
       setLoading(false)
     }
-  }
+  }, [id, form, navigate])
 
   // 加载项目列表
-  const loadProjects = async () => {
+  const loadProjects = useCallback(async () => {
     try {
       const response = await projectService.getProjects({ page: 1, size: 100 })
       Logger.log('TaskEdit - 项目API响应:', response)
       setProjects(response.items || [])
-    } catch (error) {
-      Logger.error('加载项目列表失败:', error)
+    } catch {
+      Logger.error('加载项目列表失败')
       setProjects([])
     }
-  }
+  }, [])
 
   // 处理表单提交
-  const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: { name: string; description?: string; schedule_type: string; cron_expression?: string; interval_seconds?: number; scheduled_time?: { toISOString: () => string }; max_instances: number; timeout_seconds: number; retry_count: number; retry_delay: number; is_active: boolean; execution_params?: string; environment_vars?: string }) => {
     if (!id || !task) return
     
     setSubmitting(true)
@@ -113,9 +112,9 @@ const TaskEdit: React.FC = () => {
         environment_vars: values.environment_vars ? JSON.parse(values.environment_vars) : undefined
       }
 
-      await taskService.updateTask(parseInt(id), updateData)
+      await taskService.updateTask(id, updateData)
       navigate(`/tasks/${id}`)
-    } catch (error: any) {
+    } catch {
       // 通知由拦截器统一处理
     } finally {
       setSubmitting(false)
@@ -127,7 +126,7 @@ const TaskEdit: React.FC = () => {
       loadTask()
       loadProjects()
     }
-  }, [id, isAuthenticated, authLoading])
+  }, [id, isAuthenticated, authLoading, loadTask, loadProjects])
 
   // 认证加载状态
   if (authLoading) {

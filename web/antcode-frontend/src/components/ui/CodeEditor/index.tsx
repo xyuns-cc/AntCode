@@ -221,14 +221,14 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
   }
 
   // 配置语言特性（代码提示、语法检查等）
-  const configureLanguageFeatures = (monaco: any, lang: string) => {
+  const configureLanguageFeatures = (monaco: typeof import('monaco-editor'), lang: string) => {
     const monacoLang = getMonacoLanguage(lang)
 
     // Python特殊配置
     if (monacoLang === 'python') {
       // 配置Python代码提示
       monaco.languages.registerCompletionItemProvider('python', {
-        provideCompletionItems: (model: any, position: any) => {
+        provideCompletionItems: (_model: editor.ITextModel, _position: editor.Position) => {
           const suggestions = [
             {
               label: 'print',
@@ -293,10 +293,8 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
   // 主题变化时更新编辑器主题
   useEffect(() => {
     if (editorRef.current) {
-      const monaco = (window as any).monaco
-      if (monaco) {
-        monaco.editor.setTheme(isDark ? 'antcode-dark' : 'antcode-light')
-      }
+      const monacoGlobal = (window as { monaco?: typeof import('monaco-editor') }).monaco
+      monacoGlobal?.editor.setTheme(isDark ? 'antcode-dark' : 'antcode-light')
     }
   }, [isDark])
 

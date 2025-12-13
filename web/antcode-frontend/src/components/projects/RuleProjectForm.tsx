@@ -1,8 +1,7 @@
-import React, { useState } from 'react'
+import React, { useCallback, useState } from 'react'
 import {
   Form,
   Input,
-  Button,
   Space,
   Typography,
   Card,
@@ -12,35 +11,44 @@ import {
   Row,
   Col,
   Divider,
-  Alert,
-  Tooltip,
   Tag,
   Radio
 } from 'antd'
-import {
-  SettingOutlined,
-  GlobalOutlined,
-  RocketOutlined,
-  SafetyOutlined,
-  ThunderboltOutlined,
-  ApiOutlined,
-  BugOutlined,
-  UnorderedListOutlined,
-  FileTextOutlined,
-  AppstoreOutlined
-} from '@ant-design/icons'
+import { GlobalOutlined, RocketOutlined, SafetyOutlined, ThunderboltOutlined, BugOutlined, UnorderedListOutlined, FileTextOutlined } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import RuleSelector from './RuleSelector'
-import type { ProjectCreateRequest, ExtractionRule, PaginationConfig, ProxyConfig, AntiSpiderConfig, TaskConfig } from '@/types'
+import BrowserEngineConfig from './BrowserEngineConfig'
+import type { BrowserEngineSettings } from './BrowserEngineConfig'
+import type { ProjectCreateRequest, ExtractionRule, ProxyConfig, AntiSpiderConfig } from '@/types'
+
+// 本地分页配置类型（与表单使用一致）
+interface FormPaginationConfig {
+  method: 'none' | 'url_param' | 'javascript' | 'ajax' | 'infinite_scroll'
+  start_page?: number
+  max_pages?: number
+  next_page_rule?: ExtractionRule
+  wait_after_click_ms?: number
+  url_template?: string
+}
 
 const { Title, Text } = Typography
 const { TextArea } = Input
 const { Option } = Select
 
+// 表单初始数据类型（tags 可以是字符串或数组，headers/cookies 支持字符串或对象格式）
+interface RuleProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags' | 'browser_config' | 'headers' | 'cookies' | 'callback_type' | 'extraction_rules'> {
+  tags?: string | string[]
+  browser_config?: string | Record<string, unknown>
+  headers?: string | Record<string, string>
+  cookies?: string | Record<string, string>
+  callback_type?: string  // 灵活类型，接受后端返回的任意值
+  extraction_rules?: string | ExtractionRule[] | Record<string, unknown>  // 支持字符串、数组或对象格式
+}
+
 interface RuleProjectFormProps {
-  initialData?: Partial<ProjectCreateRequest>
+  initialData?: RuleProjectFormInitialData
   onDataChange?: (data: Partial<ProjectCreateRequest>) => void
-  onSubmit: (data: ProjectCreateRequest) => void
+  onSubmit: (data: Record<string, unknown>) => void
   loading?: boolean
   isEdit?: boolean
   onValidationChange?: (isValid: boolean, tooltip: string) => void
@@ -82,27 +90,40 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   initialData = {},
   onDataChange,
   onSubmit,
-  loading = false,
-  isEdit = false,
+  loading: _loading = false,
+  isEdit: _isEdit = false,
   onValidationChange,
   onRef
 }) => {
   const [form] = Form.useForm()
-  const { isDark } = useThemeContext()
+  useThemeContext() // 保持主题上下文订阅
   const [listRules, setListRules] = useState<ExtractionRule[]>([])
   const [detailRules, setDetailRules] = useState<ExtractionRule[]>([])
-  const [paginationConfig, setPaginationConfig] = useState<PaginationConfig>(() => {
+  const [paginationConfig, setPaginationConfig] = useState<FormPaginationConfig>(() => {
     if (!initialData.pagination_config) {
       return { method: 'none', max_pages: 10, start_page: 1 }
     }
     try {
       return JSON.parse(initialData.pagination_config)
-    } catch (e) {
+    } catch {
       return { method: 'none', max_pages: 10, start_page: 1 }
     }
   })
   const [selectedEngine, setSelectedEngine] = useState(initialData.engine || 'requests')
   const [callbackType, setCallbackType] = useState<'list' | 'detail' | 'mixed'>('mixed')
+  const [browserConfig, setBrowserConfig] = useState<BrowserEngineSettings>(() => {
+    // 从 initialData 中解析浏览器配置
+    if (initialData.browser_config) {
+      try {
+        return typeof initialData.browser_config === 'string' 
+          ? JSON.parse(initialData.browser_config)
+          : initialData.browser_config
+      } catch {
+        return { headless: true, mute: true }
+      }
+    }
+    return { headless: true, mute: true }
+  })
   
   // v2.0.0 新增状态 - 安全解析JSON
   const [proxyConfig, setProxyConfig] = useState<ProxyConfig>(() => {
@@ -111,7 +132,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     }
     try {
       return JSON.parse(initialData.proxy_config)
-    } catch (e) {
+    } catch {
       return { enabled: false, proxy_type: 'http' }
     }
   })
@@ -122,24 +143,13 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     }
     try {
       return JSON.parse(initialData.anti_spider)
-    } catch (e) {
+    } catch {
       return { enabled: false, user_agent_rotation: false, random_delay: false }
     }
   })
   
-  const [taskConfig, setTaskConfig] = useState<TaskConfig>(() => {
-    if (!initialData.task_config) {
-      return { queue_priority: 0, concurrency_limit: 1 }
-    }
-    try {
-      return JSON.parse(initialData.task_config)
-    } catch (e) {
-      return { queue_priority: 0, concurrency_limit: 1 }
-    }
-  })
-
   // 获取按钮禁用状态
-  const getButtonDisabled = () => {
+  const getButtonDisabled = useCallback(() => {
     if (callbackType === 'mixed') {
       return listRules.length === 0 || detailRules.length === 0
     } else if (callbackType === 'list') {
@@ -148,10 +158,10 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       return detailRules.length === 0
     }
     return true
-  }
+  }, [callbackType, detailRules.length, listRules.length])
 
   // 获取按钮提示文本
-  const getButtonTooltip = () => {
+  const getButtonTooltip = useCallback(() => {
     if (callbackType === 'mixed') {
       if (listRules.length === 0 && detailRules.length === 0) {
         return '请配置列表页和详情页提取规则'
@@ -166,12 +176,12 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       return '请配置详情页提取规则'
     }
     return ''
-  }
+  }, [callbackType, detailRules.length, listRules.length])
 
   // 初始化callbackType
   React.useEffect(() => {
-    if (initialData.callback_type) {
-      setCallbackType(initialData.callback_type)
+    if (initialData.callback_type && ['list', 'detail', 'mixed'].includes(initialData.callback_type)) {
+      setCallbackType(initialData.callback_type as 'list' | 'detail' | 'mixed')
     }
   }, [initialData.callback_type])
 
@@ -179,7 +189,13 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   React.useEffect(() => {
     if (initialData.extraction_rules) {
       try {
-        const rules = JSON.parse(initialData.extraction_rules)
+        // 支持字符串、数组或对象格式
+        let rules: ExtractionRule[] = []
+        if (typeof initialData.extraction_rules === 'string') {
+          rules = JSON.parse(initialData.extraction_rules)
+        } else if (Array.isArray(initialData.extraction_rules)) {
+          rules = initialData.extraction_rules
+        }
         
         if (Array.isArray(rules)) {
           // 根据规则的page_type分离到不同的状态
@@ -193,7 +209,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
           setListRules(listRulesFromData)
           setDetailRules(detailRulesFromData)
         }
-      } catch (e) {
+      } catch {
         // 解析extraction_rules失败，使用默认值
         setListRules([])
         setDetailRules([])
@@ -206,7 +222,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     const isValid = !getButtonDisabled()
     const tooltip = getButtonTooltip()
     onValidationChange?.(isValid, tooltip)
-  }, [listRules, detailRules, callbackType, onValidationChange])
+  }, [listRules, detailRules, callbackType, onValidationChange, getButtonDisabled, getButtonTooltip])
 
   // 提供submit方法给父组件
   React.useEffect(() => {
@@ -217,14 +233,8 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     })
   }, [form, onRef])
 
-  // 动态样式函数
-  const getIconStyle = () => ({
-    marginRight: 8,
-    color: isDark ? '#52c41a' : '#52c41a'
-  })
-
   // 表单提交
-  const handleFinish = (values: any) => {
+  const handleFinish = (values: ProjectCreateRequest) => {
     // 处理headers和cookies，根据API文档，统一API支持对象和字符串两种格式
     let processedHeaders = values.headers
     let processedCookies = values.cookies
@@ -233,7 +243,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     if (processedHeaders && typeof processedHeaders === 'string') {
       try {
         processedHeaders = JSON.parse(processedHeaders)
-      } catch (e) {
+      } catch {
         // 解析失败时保持字符串格式，API会自动处理
       }
     }
@@ -241,7 +251,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     if (processedCookies && typeof processedCookies === 'string') {
       try {
         processedCookies = JSON.parse(processedCookies)
-      } catch (e) {
+      } catch {
         // 解析失败时保持字符串格式，API会自动处理
       }
     }
@@ -279,7 +289,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       ...(rule.page_type && { page_type: rule.page_type })
     }))
 
-    const submitData: ProjectCreateRequest = {
+    const submitData: Record<string, unknown> = {
       ...values,
       type: 'rule',
       callback_type: callbackType,
@@ -287,15 +297,24 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       pagination_config: JSON.stringify(paginationConfig), // API文档要求JSON字符串格式
       headers: processedHeaders, // 支持对象和字符串两种格式
       cookies: processedCookies, // 支持对象和字符串两种格式
-      tags: values.tags?.split(',').map((tag: string) => tag.trim()).filter(Boolean) || [],
-      request_delay: values.request_delay ? Math.round(values.request_delay * 1000) : 1000 // 转换为毫秒整数
+      tags: Array.isArray(values.tags) 
+        ? values.tags 
+        : (typeof values.tags === 'string' 
+          ? (values.tags as string).split(',').map((tag: string) => tag.trim()).filter(Boolean) 
+          : []),
+      request_delay: values.request_delay ? Math.round(values.request_delay * 1000) : 1000, // 转换为毫秒整数
+      // 浏览器引擎配置（仅当选择浏览器引擎时）
+      browser_config: selectedEngine === 'browser' ? JSON.stringify(browserConfig) : undefined
     }
     
     onSubmit(submitData)
   }
 
   // 表单值变化
-  const handleValuesChange = (changedValues: any, allValues: any) => {
+  const handleValuesChange = (
+    _changedValues: Partial<ProjectCreateRequest>,
+    allValues: ProjectCreateRequest
+  ) => {
     // 根据回调类型合并规则
     let allRules: ExtractionRule[] = []
     if (callbackType === 'mixed') {
@@ -364,7 +383,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   }
 
   // 分页配置变化
-  const handlePaginationConfigChange = (config: any) => {
+  const handlePaginationConfigChange = (config: FormPaginationConfig) => {
     setPaginationConfig(config)
     // 使用新的分页配置值
     const updatedData = getUpdatedDataWithPagination(config)
@@ -393,7 +412,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   }
 
   // 获取更新后的数据（考虑新的分页配置）
-  const getUpdatedDataWithPagination = (newPaginationConfig: any) => {
+  const getUpdatedDataWithPagination = (newPaginationConfig: FormPaginationConfig) => {
     let allRules: ExtractionRule[] = []
     if (callbackType === 'mixed') {
       const listRulesWithType = listRules.map(rule => ({ ...rule, page_type: 'list' as const }))
@@ -410,10 +429,8 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       callback_type: callbackType,
       extraction_rules: JSON.stringify(allRules),
       pagination_config: JSON.stringify(newPaginationConfig),
-      // v2.0.0 新增配置字段
       proxy_config: proxyConfig.enabled ? JSON.stringify(proxyConfig) : undefined,
-      anti_spider: antiSpiderConfig.enabled ? JSON.stringify(antiSpiderConfig) : undefined,
-      task_config: taskConfig.queue_priority || taskConfig.concurrency_limit !== 1 ? JSON.stringify(taskConfig) : undefined
+      anti_spider: antiSpiderConfig.enabled ? JSON.stringify(antiSpiderConfig) : undefined
     }
   }
 
@@ -558,89 +575,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
             </Form.Item>
           </Card>
 
-          {/* 3. 回调类型选择 */}
-          <Card 
-            title={
-              <Space>
-                <AppstoreOutlined />
-                回调类型
-              </Space>
-            } 
-            size="small"
-          >
-            <Form.Item
-              label="选择回调类型"
-              tooltip="根据您的需求选择合适的回调类型，不同类型需要配置不同的提取规则"
-            >
-              <Radio.Group
-                value={callbackType}
-                onChange={(e) => handleCallbackTypeChange(e.target.value)}
-                optionType="button"
-                buttonStyle="solid"
-                size="middle"
-              >
-                <Tooltip 
-                  title={
-                    <div>
-                      <div><strong>混合模式</strong></div>
-                      <div>• 需要配置列表页和详情页的提取规则</div>
-                      <div>• 适用于：新闻网站、电商产品、论坛帖子</div>
-                      <div>• 数据流程：列表页 → 详情页 → 完整数据</div>
-                      <div>• 规则需标记page_type字段</div>
-                    </div>
-                  }
-                  placement="top"
-                >
-                  <Radio value="mixed">
-                    <Space>
-                      <AppstoreOutlined style={{ color: '#1890ff' }} />
-                      混合模式
-                    </Space>
-                  </Radio>
-                </Tooltip>
-                
-                <Tooltip 
-                  title={
-                    <div>
-                      <div><strong>列表页模式</strong></div>
-                      <div>• 只需配置列表页规则，无需进入详情页</div>
-                      <div>• 适用于：文章列表、产品目录、搜索结果</div>
-                      <div>• 数据流程：列表页 → 提取数据 → 完成</div>
-                    </div>
-                  }
-                  placement="top"
-                >
-                  <Radio value="list">
-                    <Space>
-                      <UnorderedListOutlined style={{ color: '#52c41a' }} />
-                      列表页
-                    </Space>
-                  </Radio>
-                </Tooltip>
-                
-                <Tooltip 
-                  title={
-                    <div>
-                      <div><strong>详情页模式</strong></div>
-                      <div>• 只需配置详情页规则，直接采集单页数据</div>
-                      <div>• 适用于：单篇文章、产品详情、个人主页</div>
-                      <div>• 数据流程：直接访问 → 提取数据 → 完成</div>
-                    </div>
-                  }
-                  placement="top"
-                >
-                  <Radio value="detail">
-                    <Space>
-                      <FileTextOutlined style={{ color: '#fa8c16' }} />
-                      详情页
-                    </Space>
-                  </Radio>
-                </Tooltip>
-              </Radio.Group>
-            </Form.Item>
-          </Card>
-
-          {/* 4. 选择采集引擎 */}
+          {/* 3. 选择采集引擎 */}
           <Card 
             title={
               <Space>
@@ -702,256 +637,220 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
                 ))}
               </div>
             </Form.Item>
+
+            {/* 浏览器引擎配置 - 仅当选择浏览器引擎时显示 */}
+            {selectedEngine === 'browser' && (
+              <div style={{ marginTop: 16 }}>
+                <BrowserEngineConfig
+                  value={browserConfig}
+                  onChange={setBrowserConfig}
+                />
+              </div>
+            )}
           </Card>
+
         </Space>
       )
     },
-    // 根据回调类型动态显示规则配置
-    ...(callbackType === 'mixed' ? [
-      {
-        key: 'list_rules',
-        label: '列表页规则',
-        children: (
-          <Card 
-            title={
-              <Space>
-                <UnorderedListOutlined />
-                列表页数据提取规则
-              </Space>
-            }
-            size="small"
-          >
-            <Alert
-              message="列表页规则配置"
-              description="配置从列表页面提取数据的规则，通常包括：文章链接、标题、摘要、作者、时间等"
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-            <RuleSelector
-              rules={listRules}
-              onChange={handleListRulesChange}
-              placeholder="添加列表页提取规则"
-              required
-              showPageType={false}
-              defaultPageType="list"
-            />
-          </Card>
-        )
-      },
-      {
-        key: 'detail_rules',
-        label: '详情页规则',
-        children: (
-          <Card 
-            title={
-              <Space>
-                <FileTextOutlined />
-                详情页数据提取规则
-              </Space>
-            }
-            size="small"
-          >
-            <Alert
-              message="详情页规则配置"
-              description="配置从详情页面提取数据的规则，通常包括：正文内容、作者、发布时间、来源等"
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-            <RuleSelector
-              rules={detailRules}
-              onChange={handleDetailRulesChange}
-              placeholder="添加详情页提取规则"
-              required
-              showPageType={false}
-              defaultPageType="detail"
-            />
-          </Card>
-        )
-      }
-    ] : callbackType === 'list' ? [
-      {
-        key: 'list_rules',
-        label: '列表页规则',
-        children: (
-          <Card 
-            title={
-              <Space>
-                <UnorderedListOutlined />
-                列表页数据提取规则
-              </Space>
-            }
-            size="small"
-          >
-            <Alert
-              message="列表页模式"
-              description="只需配置列表页的提取规则，适用于只需要列表数据的场景"
-              type="success"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-            <RuleSelector
-              rules={listRules}
-              onChange={handleListRulesChange}
-              placeholder="添加列表页提取规则"
-              required
-              showPageType={false}
-              defaultPageType="list"
-            />
-          </Card>
-        )
-      }
-    ] : [
-      {
-        key: 'detail_rules',
-        label: '详情页规则',
-        children: (
-          <Card 
-            title={
-              <Space>
-                <FileTextOutlined />
-                详情页数据提取规则
-              </Space>
-            }
-            size="small"
-          >
-            <Alert
-              message="详情页模式"
-              description="只需配置详情页的提取规则，适用于采集单个页面数据的场景"
-              type="success"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-            <RuleSelector
-              rules={detailRules}
-              onChange={handleDetailRulesChange}
-              placeholder="添加详情页提取规则"
-              required
-              showPageType={false}
-              defaultPageType="detail"
-            />
-          </Card>
-        )
-      }
-    ]),
     {
-      key: 'pagination',
-      label: '翻页配置',
+      key: 'rules',
+      label: '提取规则',
       children: (
-        <Card 
-          title="翻页配置" 
-          size="small"
-        >
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item
-                label="翻页类型"
-                tooltip="选择分页处理方式"
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          {/* 回调类型选择 - 紧凑卡片样式 */}
+          <Card size="small" bodyStyle={{ padding: '12px 16px' }}>
+            <Space size={12} align="center">
+              <Text style={{ whiteSpace: 'nowrap' }}>采集模式:</Text>
+              {/* 列表页 */}
+              <div
+                style={{
+                  padding: '6px 16px',
+                  border: `1px solid ${callbackType === 'list' ? '#1890ff' : '#d9d9d9'}`,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  background: callbackType === 'list' ? '#e6f7ff' : undefined,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6
+                }}
+                onClick={() => handleCallbackTypeChange('list')}
               >
-                <Select
-                  value={paginationConfig.method}
-                  onChange={(value) => handlePaginationConfigChange({
-                    ...paginationConfig,
-                    method: value
-                  })}
-                >
-                  <Option value="none">无分页</Option>
-                  <Option value="url_param">URL参数翻页</Option>
-                  <Option value="javascript">JS点击翻页</Option>
-                  <Option value="ajax">AJAX加载</Option>
-                  <Option value="infinite_scroll">无限滚动</Option>
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item
-                label="起始页码"
-                tooltip="从第几页开始采集"
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={callbackType === 'list' ? '#1890ff' : '#999'} strokeWidth="2" style={{ display: 'block' }}>
+                  <line x1="8" y1="6" x2="21" y2="6" />
+                  <line x1="8" y1="12" x2="21" y2="12" />
+                  <line x1="8" y1="18" x2="21" y2="18" />
+                  <circle cx="4" cy="6" r="1" fill={callbackType === 'list' ? '#1890ff' : '#999'} />
+                  <circle cx="4" cy="12" r="1" fill={callbackType === 'list' ? '#1890ff' : '#999'} />
+                  <circle cx="4" cy="18" r="1" fill={callbackType === 'list' ? '#1890ff' : '#999'} />
+                </svg>
+                <span style={{ color: callbackType === 'list' ? '#1890ff' : undefined }}>列表页</span>
+              </div>
+              {/* 详情页 */}
+              <div
+                style={{
+                  padding: '6px 16px',
+                  border: `1px solid ${callbackType === 'detail' ? '#52c41a' : '#d9d9d9'}`,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  background: callbackType === 'detail' ? '#f6ffed' : undefined,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6
+                }}
+                onClick={() => handleCallbackTypeChange('detail')}
               >
-                <InputNumber
-                  min={0}
-                  max={100}
-                  style={{ width: '100%' }}
-                  value={paginationConfig.start_page}
-                  onChange={(value) => handlePaginationConfigChange({
-                    ...paginationConfig,
-                    start_page: value || 1
-                  })}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item
-                label="最大页数"
-                tooltip="限制采集的最大页数"
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={callbackType === 'detail' ? '#52c41a' : '#999'} strokeWidth="2" style={{ display: 'block' }}>
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="7" y1="8" x2="17" y2="8" />
+                  <line x1="7" y1="12" x2="17" y2="12" />
+                  <line x1="7" y1="16" x2="13" y2="16" />
+                </svg>
+                <span style={{ color: callbackType === 'detail' ? '#52c41a' : undefined }}>详情页</span>
+              </div>
+              {/* 混合模式 */}
+              <div
+                style={{
+                  padding: '6px 16px',
+                  border: `1px solid ${callbackType === 'mixed' ? '#fa8c16' : '#d9d9d9'}`,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  background: callbackType === 'mixed' ? '#fff7e6' : undefined,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6
+                }}
+                onClick={() => handleCallbackTypeChange('mixed')}
               >
-                <InputNumber
-                  min={1}
-                  max={1000}
-                  style={{ width: '100%' }}
-                  value={paginationConfig.max_pages}
-                  onChange={(value) => handlePaginationConfigChange({
-                    ...paginationConfig,
-                    max_pages: value || 10
-                  })}
-                />
-              </Form.Item>
-            </Col>
-          </Row>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={callbackType === 'mixed' ? '#fa8c16' : '#999'} strokeWidth="2" style={{ display: 'block' }}>
+                  <rect x="2" y="3" width="8" height="6" rx="1" />
+                  <rect x="2" y="11" width="8" height="6" rx="1" />
+                  <path d="M14 6h7M14 10h7M14 14h5" />
+                  <circle cx="18" cy="18" r="3" />
+                </svg>
+                <span style={{ color: callbackType === 'mixed' ? '#fa8c16' : undefined }}>混合模式</span>
+              </div>
+            </Space>
+          </Card>
 
-          {/* 根据翻页类型显示不同的配置 */}
-          {paginationConfig.method === 'url_param' && (
-            <Form.Item
-              label="URL模板"
-              tooltip="使用{page}作为页码占位符"
+          {/* 列表页规则 */}
+          {(callbackType === 'mixed' || callbackType === 'list') && (
+            <Card 
+              title={<><UnorderedListOutlined /> 列表页提取规则</>}
+              size="small"
             >
-              <Input
-                placeholder="例如: /list/page/{page} 或 ?page={page}"
-                value={paginationConfig.url_template}
-                onChange={(e) => handlePaginationConfigChange({
-                  ...paginationConfig,
-                  url_template: e.target.value
-                })}
-              />
-            </Form.Item>
-          )}
-
-          {(paginationConfig.method === 'javascript' || paginationConfig.method === 'ajax') && (
-            <>
-              <Alert
-                message="下一页规则"
-                description="配置如何找到并点击下一页按钮"
-                type="info"
-                style={{ marginBottom: 16 }}
-              />
-              <RuleSelector
-                rules={paginationConfig.next_page_rule ? [paginationConfig.next_page_rule] : []}
-                onChange={(rules) => handlePaginationConfigChange({
-                  ...paginationConfig,
-                  next_page_rule: rules[0] || undefined
-                })}
-                placeholder="配置下一页选择器"
-              />
               <Form.Item
-                label="点击后等待时间 (毫秒)"
-                style={{ marginTop: 16 }}
+                label="列表项选择器"
+                tooltip="用于定位列表中每个条目的容器元素"
+                style={{ marginBottom: 16 }}
               >
-                <InputNumber
-                  min={0}
-                  max={10000}
-                  step={500}
-                  style={{ width: '100%' }}
-                  value={paginationConfig.wait_after_click_ms}
-                  onChange={(value) => handlePaginationConfigChange({
-                    ...paginationConfig,
-                    wait_after_click_ms: value || 2000
-                  })}
+                <Input 
+                  placeholder="如: .list-item, ul > li, .article-list .item"
+                  prefix={<UnorderedListOutlined style={{ color: '#999' }} />}
                 />
               </Form.Item>
-            </>
+              <Divider style={{ margin: '12px 0' }} />
+              <RuleSelector
+                rules={listRules}
+                onChange={handleListRulesChange}
+                placeholder="添加列表页字段提取规则"
+                required
+                showPageType={false}
+                defaultPageType="list"
+              />
+            </Card>
           )}
-        </Card>
+
+          {/* 详情页规则 */}
+          {(callbackType === 'mixed' || callbackType === 'detail') && (
+            <Card 
+              title={<><FileTextOutlined /> 详情页提取规则</>}
+              size="small"
+            >
+              <RuleSelector
+                rules={detailRules}
+                onChange={handleDetailRulesChange}
+                placeholder="添加详情页提取规则"
+                required
+                showPageType={false}
+                defaultPageType="detail"
+              />
+            </Card>
+          )}
+
+          {/* 翻页配置 */}
+          <Card title="翻页配置" size="small">
+            <Row gutter={16}>
+              <Col span={8}>
+                <Form.Item label="翻页方式" style={{ marginBottom: 12 }}>
+                  <Select
+                    value={paginationConfig.method}
+                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, method: value })}
+                  >
+                    <Option value="none">无分页</Option>
+                    <Option value="url_param">URL参数</Option>
+                    <Option value="javascript">JS点击</Option>
+                    <Option value="ajax">AJAX加载</Option>
+                    <Option value="infinite_scroll">无限滚动</Option>
+                  </Select>
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="起始页码" style={{ marginBottom: 12 }}>
+                  <InputNumber
+                    min={0}
+                    max={100}
+                    style={{ width: '100%' }}
+                    value={paginationConfig.start_page}
+                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, start_page: value || 1 })}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="最大页数" style={{ marginBottom: 12 }}>
+                  <InputNumber
+                    min={1}
+                    max={1000}
+                    style={{ width: '100%' }}
+                    value={paginationConfig.max_pages}
+                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, max_pages: value || 10 })}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            {paginationConfig.method === 'url_param' && (
+              <Form.Item label="URL模板" tooltip="使用{page}作为页码占位符" style={{ marginBottom: 0 }}>
+                <Input
+                  placeholder="/list/page/{page} 或 ?page={page}"
+                  value={paginationConfig.url_template}
+                  onChange={(e) => handlePaginationConfigChange({ ...paginationConfig, url_template: e.target.value })}
+                />
+              </Form.Item>
+            )}
+
+            {(paginationConfig.method === 'javascript' || paginationConfig.method === 'ajax') && (
+              <>
+                <Form.Item label="下一页选择器" style={{ marginBottom: 12 }}>
+                  <RuleSelector
+                    rules={paginationConfig.next_page_rule ? [paginationConfig.next_page_rule] : []}
+                    onChange={(rules) => handlePaginationConfigChange({ ...paginationConfig, next_page_rule: rules[0] || undefined })}
+                    placeholder="配置下一页按钮选择器"
+                  />
+                </Form.Item>
+                <Form.Item label="点击后等待(ms)" style={{ marginBottom: 0 }}>
+                  <InputNumber
+                    min={0}
+                    max={10000}
+                    step={500}
+                    style={{ width: 200 }}
+                    value={paginationConfig.wait_after_click_ms}
+                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, wait_after_click_ms: value || 2000 })}
+                  />
+                </Form.Item>
+              </>
+            )}
+          </Card>
+        </Space>
       )
     },
     {
@@ -994,14 +893,6 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
             } 
             size="small"
           >
-            <Alert
-              message="反爬虫策略"
-              description={`当前引擎：${selectedEngine === 'curl_cffi' ? '已选择 Curl CFFI 引擎，自带强大的反检测能力' : '可切换到 Curl CFFI 引擎获得更好的反爬虫能力'}`}
-              type={selectedEngine === 'curl_cffi' ? 'success' : 'info'}
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-            
             <Form.Item
               label="启用反爬虫"
               style={{ marginBottom: 16 }}
@@ -1056,35 +947,17 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
               </Row>
             )}
             
-            <Row gutter={16}>
-              <Col span={12}>
-                <Form.Item
-                  name="dont_filter"
-                  label="禁用去重"
-                  valuePropName="checked"
-                  tooltip="是否禁用URL去重功能"
-                >
-                  <Select>
-                    <Option value={false}>启用去重</Option>
-                    <Option value={true}>禁用去重</Option>
-                  </Select>
-                </Form.Item>
-              </Col>
-              <Col span={12}>
-                <Form.Item
-                  label="超时时间(秒)"
-                  name="timeout"
-                  tooltip="请求超时时间"
-                >
-                  <InputNumber
-                    min={1}
-                    max={300}
-                    placeholder="30"
-                    style={{ width: '100%' }}
-                  />
-                </Form.Item>
-              </Col>
-            </Row>
+            <Form.Item
+              name="dont_filter"
+              label="URL去重"
+              tooltip="是否启用URL去重功能，避免重复采集"
+              initialValue={false}
+            >
+              <Select style={{ width: 200 }}>
+                <Option value={false}>启用去重</Option>
+                <Option value={true}>禁用去重</Option>
+              </Select>
+            </Form.Item>
           </Card>
 
           {/* 代理配置 */}
@@ -1092,7 +965,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
             title={
               <Space>
                 <SafetyOutlined />
-                代理配置 (v2.0)
+                代理配置
               </Space>
             } 
             size="small"
@@ -1111,113 +984,51 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
             </Form.Item>
             
             {proxyConfig.enabled && (
-              <>
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <div style={{ marginBottom: 16 }}>
-                      <div style={{ marginBottom: 8, fontSize: 14 }}>代理类型</div>
-                      <Select
-                        value={proxyConfig.proxy_type}
-                        onChange={(value) => setProxyConfig({ ...proxyConfig, proxy_type: value })}
-                      >
-                        <Option value="http">HTTP</Option>
-                        <Option value="https">HTTPS</Option>
-                        <Option value="socks4">SOCKS4</Option>
-                        <Option value="socks5">SOCKS5</Option>
-                      </Select>
-                    </div>
-                  </Col>
-                  <Col span={12}>
-                    <div style={{ marginBottom: 16 }}>
-                      <div style={{ marginBottom: 8, fontSize: 14 }}>代理地址</div>
-                      <Input
-                        value={proxyConfig.proxy_url}
-                        onChange={(e) => setProxyConfig({ ...proxyConfig, proxy_url: e.target.value })}
-                        placeholder="http://proxy.example.com:8080"
-                      />
-                    </div>
-                  </Col>
-                </Row>
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <div style={{ marginBottom: 16 }}>
-                      <div style={{ marginBottom: 8, fontSize: 14 }}>用户名（可选）</div>
-                      <Input
-                        value={proxyConfig.username}
-                        onChange={(e) => setProxyConfig({ ...proxyConfig, username: e.target.value })}
-                        placeholder="代理用户名"
-                      />
-                    </div>
-                  </Col>
-                  <Col span={12}>
-                    <div style={{ marginBottom: 16 }}>
-                      <div style={{ marginBottom: 8, fontSize: 14 }}>密码（可选）</div>
-                      <Input.Password
-                        value={proxyConfig.password}
-                        onChange={(e) => setProxyConfig({ ...proxyConfig, password: e.target.value })}
-                        placeholder="代理密码"
-                      />
-                    </div>
-                  </Col>
-                </Row>
-              </>
+              <Row gutter={16}>
+                <Col span={6}>
+                  <Form.Item label="代理类型" style={{ marginBottom: 12 }}>
+                    <Select
+                      value={proxyConfig.proxy_type}
+                      onChange={(value) => setProxyConfig({ ...proxyConfig, proxy_type: value })}
+                      style={{ width: '100%' }}
+                      options={[
+                        { value: 'http', label: 'HTTP' },
+                        { value: 'https', label: 'HTTPS' },
+                        { value: 'socks4', label: 'SOCKS4' },
+                        { value: 'socks5', label: 'SOCKS5' }
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={10}>
+                  <Form.Item label="代理地址" style={{ marginBottom: 12 }}>
+                    <Input
+                      value={proxyConfig.proxy_url}
+                      onChange={(e) => setProxyConfig({ ...proxyConfig, proxy_url: e.target.value })}
+                      placeholder="http://proxy.example.com:8080"
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={4}>
+                  <Form.Item label="用户名" style={{ marginBottom: 12 }}>
+                    <Input
+                      value={proxyConfig.username}
+                      onChange={(e) => setProxyConfig({ ...proxyConfig, username: e.target.value })}
+                      placeholder="可选"
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={4}>
+                  <Form.Item label="密码" style={{ marginBottom: 12 }}>
+                    <Input.Password
+                      value={proxyConfig.password}
+                      onChange={(e) => setProxyConfig({ ...proxyConfig, password: e.target.value })}
+                      placeholder="可选"
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
             )}
-          </Card>
-
-          {/* 任务配置 */}
-          <Card 
-            title={
-              <Space>
-                <SettingOutlined />
-                任务配置 (v2.0)
-              </Space>
-            } 
-            size="small"
-          >
-            <Row gutter={16}>
-              <Col span={12}>
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ marginBottom: 8, fontSize: 14 }}>队列优先级</div>
-                  <InputNumber
-                    min={0}
-                    max={10}
-                    value={taskConfig.queue_priority}
-                    onChange={(value) => setTaskConfig({ ...taskConfig, queue_priority: value || 0 })}
-                    style={{ width: '100%' }}
-                  />
-                </div>
-              </Col>
-              <Col span={12}>
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ marginBottom: 8, fontSize: 14 }}>并发限制</div>
-                  <InputNumber
-                    min={1}
-                    max={10}
-                    value={taskConfig.concurrency_limit}
-                    onChange={(value) => setTaskConfig({ ...taskConfig, concurrency_limit: value || 1 })}
-                    style={{ width: '100%' }}
-                  />
-                </div>
-              </Col>
-            </Row>
-            
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ marginBottom: 8, fontSize: 14 }}>任务ID模板</div>
-              <Input
-                value={taskConfig.task_id_template}
-                onChange={(e) => setTaskConfig({ ...taskConfig, task_id_template: e.target.value })}
-                placeholder="例如: news_{timestamp}_{page}"
-              />
-            </div>
-            
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ marginBottom: 8, fontSize: 14 }}>工作节点ID</div>
-              <Input
-                value={taskConfig.worker_id}
-                onChange={(e) => setTaskConfig({ ...taskConfig, worker_id: e.target.value })}
-                placeholder="例如: worker-001"
-              />
-            </div>
           </Card>
         </Space>
       )
@@ -1228,7 +1039,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     <div>
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
         <Title level={4}>
-          <SettingOutlined style={getIconStyle()} />
+          <ThunderboltOutlined style={{ marginRight: 8, color: '#52c41a' }} />
           规则项目配置
         </Title>
         <Text type="secondary">

@@ -1,194 +1,124 @@
+"""爬虫任务调度器 - 通过节点分发器将任务分发到工作节点"""
+
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import sys
-from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from src.core.config import settings
-from src.core.exceptions import TaskExecutionException
-from src.services.scheduler.redis_task_service import redis_task_service
-
-
-class RedisSpiderExecutor:
-    """通过 Redis 提交任务的执行器。"""
-
-    async def submit_rule_task(
-        self,
-        project,
-        rule_detail,
-        execution_id,
-        params=None,
-    ):
-        try:
-            await redis_task_service.connect()
-            result = await redis_task_service.submit_rule_task(
-                project=project,
-                rule_detail=rule_detail,
-                execution_id=execution_id,
-                params=params,
-            )
-            result["executor"] = "redis"
-            return result
-        finally:
-            try:
-                await redis_task_service.disconnect()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"断开 Redis 连接时出现异常: {exc}")
-
-
-class LocalScrapyExecutor:
-    """直接执行本地 Scrapy 项目的执行器。"""
-
-    QUEUE_NAME = "local:scrapy"
-
-    def __init__(self):
-        self._project_root = Path(settings.BASE_DIR) / "src" / "tasks" / "antcode_spider"
-        self._scrapy_cfg = self._project_root / "scrapy.cfg"
-        self._work_root = Path(settings.TASK_EXECUTION_WORK_DIR)
-
-    async def submit_rule_task(
-        self,
-        project,
-        rule_detail,
-        execution_id,
-        params=None,
-    ):
-        if not self._scrapy_cfg.exists():
-            raise TaskExecutionException(
-                f"未找到 Scrapy 配置文件: {self._scrapy_cfg}. "
-                "请确认已初始化本地爬虫项目。"
-            )
-
-        task_json = await redis_task_service._build_task_json(  # noqa: SLF001
-            project=project,
-            rule_detail=rule_detail,
-            execution_id=execution_id,
-            params=params,
-        )
-        task_id = task_json["meta"]["task_id"]
-
-        run_dir = self._work_root / execution_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        payload_path = run_dir / f"{task_id}.json"
-        payload_path.write_text(
-            json.dumps(task_json, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        log_path = run_dir / f"{task_id}.log"
-        spider_name = "spider"
-        if params and isinstance(params, dict):
-            spider_name = params.get("spider_name") or spider_name
-
-        command = [
-            sys.executable,
-            "-m",
-            "scrapy",
-            "crawl",
-            spider_name,
-            "-a",
-            f"rule_file={payload_path.as_posix()}",
-            "-s",
-            f"LOG_FILE={log_path.as_posix()}",
-            "-s",
-            "LOG_STDOUT=True",
-        ]
-
-        env = os.environ.copy()
-        python_paths = [env.get("PYTHONPATH", "")]
-        base_dir = settings.BASE_DIR
-        if base_dir not in python_paths[0]:
-            python_paths.insert(0, base_dir)
-        env["PYTHONPATH"] = ":".join(filter(None, python_paths))
-
-        logger.info(
-            "未配置 Redis，切换为本地 Scrapy 执行。任务ID: {}，执行目录: {}",
-            task_id,
-            run_dir,
-        )
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(self._project_root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-        except FileNotFoundError as exc:
-            raise TaskExecutionException(
-                "执行 Scrapy 失败，未找到命令。请确保依赖已安装。"
-            ) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise TaskExecutionException(f"启动本地 Scrapy 失败: {exc}") from exc
-
-        stdout_bytes, stderr_bytes = await process.communicate()
-        stdout_text = stdout_bytes.decode("utf-8", errors="ignore")
-        stderr_text = stderr_bytes.decode("utf-8", errors="ignore")
-
-        success = process.returncode == 0
-        if success:
-            logger.info("本地 Scrapy 执行完成，任务ID: {}", task_id)
-        else:
-            logger.error(
-                "本地 Scrapy 执行失败，任务ID: {}，返回码: {}，stderr: {}",
-                task_id,
-                process.returncode,
-                stderr_text[-4000:],
-            )
-
-        return {
-            "success": success,
-            "executor": "local",
-            "queue": self.QUEUE_NAME,
-            "task_id": task_id,
-            "task": task_json,
-            "payload_file": str(payload_path),
-            "log_file": str(log_path),
-            "stdout": stdout_text[-4000:] if stdout_text else "",
-            "stderr": stderr_text[-4000:] if stderr_text else "",
-            "returncode": process.returncode,
-            "message": "本地 Scrapy 执行完成" if success else "本地 Scrapy 执行失败",
-        }
+from src.services.nodes.node_dispatcher import node_task_dispatcher
 
 
 class SpiderTaskDispatcher:
-    """统一爬虫任务调度网关"""
-
-    def __init__(self):
-        self._redis_executor = RedisSpiderExecutor()
-        self._local_executor = LocalScrapyExecutor()
-
-    def _use_redis(self):
-        return bool(settings.REDIS_URL and settings.REDIS_URL.strip())
+    """爬虫任务调度器，通过 HTTP/WebSocket 将任务分发到工作节点"""
 
     async def submit_rule_task(
         self,
         project,
         rule_detail,
-        execution_id,
-        params=None,
-    ):
-        if self._use_redis():
-            return await self._redis_executor.submit_rule_task(
-                project=project,
-                rule_detail=rule_detail,
-                execution_id=execution_id,
-                params=params,
-            )
+        execution_id: str,
+        params: Optional[Dict] = None,
+        node_id: Optional[str] = None,
+        require_render: bool = False,
+    ) -> Dict[str, Any]:
+        """提交规则任务到工作节点"""
+        if hasattr(rule_detail, "engine"):
+            engine = rule_detail.engine
+            if hasattr(engine, "value"):
+                engine = engine.value
+            if engine == "browser":
+                require_render = True
 
-        return await self._local_executor.submit_rule_task(
-            project=project,
-            rule_detail=rule_detail,
+        task_params = {
+            "rule_detail": self._serialize_rule_detail(rule_detail),
+            **(params or {}),
+        }
+
+        result = await node_task_dispatcher.dispatch_task(
+            project_id=project.public_id,
             execution_id=execution_id,
-            params=params,
+            params=task_params,
+            project_type="rule",
+            require_render=require_render,
+            node_id=node_id,
         )
+
+        if result.get("success"):
+            logger.info(f"任务已分发到节点 [{result.get('node_name')}]: {result.get('task_id')}")
+            return {
+                "success": True,
+                "task_id": result.get("task_id"),
+                "node_id": result.get("node_id"),
+                "node_name": result.get("node_name"),
+                "queue": "node",
+                "message": result.get("message", "任务已分发"),
+            }
+        else:
+            logger.error(f"任务分发失败: {result.get('error')}")
+            return {
+                "success": False,
+                "error": result.get("error", "分发失败"),
+                "node_id": result.get("node_id"),
+                "node_name": result.get("node_name"),
+            }
+
+    async def submit_batch_tasks(
+        self,
+        project,
+        rule_details: List,
+        execution_id: str,
+        params: Optional[Dict] = None,
+        node_id: Optional[str] = None,
+        require_render: bool = False,
+    ) -> Dict[str, Any]:
+        """批量提交任务到工作节点"""
+        tasks = []
+        for i, rule_detail in enumerate(rule_details):
+            task_item = {
+                "task_id": f"{execution_id}-{i}",
+                "project_id": project.public_id,
+                "project_type": "rule",
+                "params": {
+                    "rule_detail": self._serialize_rule_detail(rule_detail),
+                    **(params or {}),
+                },
+                "require_render": require_render,
+            }
+            tasks.append(task_item)
+
+        return await node_task_dispatcher.dispatch_batch(
+            tasks=tasks,
+            node_id=node_id,
+            require_render=require_render,
+        )
+
+    def _serialize_rule_detail(self, rule_detail) -> Dict[str, Any]:
+        """序列化规则详情"""
+        data = {
+            "target_url": rule_detail.target_url,
+            "callback_type": rule_detail.callback_type.value if hasattr(rule_detail.callback_type, "value") else rule_detail.callback_type,
+            "request_method": rule_detail.request_method.value if hasattr(rule_detail.request_method, "value") else rule_detail.request_method,
+            "engine": rule_detail.engine.value if hasattr(rule_detail.engine, "value") else rule_detail.engine,
+            "headers": rule_detail.headers or {},
+            "cookies": rule_detail.cookies or {},
+            "priority": rule_detail.priority or 0,
+            "dont_filter": getattr(rule_detail, "dont_filter", False),
+        }
+
+        if rule_detail.request_body:
+            data["request_body"] = rule_detail.request_body
+        if rule_detail.proxy_config:
+            data["proxy_config"] = rule_detail.proxy_config
+        if hasattr(rule_detail, "extraction_rules") and rule_detail.extraction_rules:
+            data["extraction_rules"] = rule_detail.extraction_rules
+        if hasattr(rule_detail, "pagination_config") and rule_detail.pagination_config:
+            data["pagination_config"] = rule_detail.pagination_config
+        if hasattr(rule_detail, "wait_time") and rule_detail.wait_time:
+            data["wait_time"] = rule_detail.wait_time
+        if hasattr(rule_detail, "javascript_code") and rule_detail.javascript_code:
+            data["javascript_code"] = rule_detail.javascript_code
+
+        return data
 
 
 spider_task_dispatcher = SpiderTaskDispatcher()
-

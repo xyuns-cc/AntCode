@@ -1,7 +1,11 @@
-"""异常处理"""
+"""异常处理模块
 
-import traceback
+统一定义所有自定义异常类，包括：
+- 业务异常（继承 HTTPException）
+- 基础异常（继承 Exception）
+"""
 from datetime import datetime
+from typing import Optional
 
 from fastapi import HTTPException, status
 from fastapi.responses import JSONResponse
@@ -9,9 +13,42 @@ from fastapi.responses import JSONResponse
 from src.schemas.common import BaseResponse
 
 
+# =============================================================================
+# 基础异常类（继承 Exception）
+# =============================================================================
+
+
+class SerializationError(Exception):
+    """序列化错误异常"""
+    pass
+
+
+class SecurityError(Exception):
+    """安全检查异常"""
+    pass
+
+
+class RedisConnectionError(Exception):
+    """Redis 连接错误"""
+    pass
+
+
+class NodeUnavailableError(Exception):
+    """节点不可用异常"""
+    def __init__(self, message: str, node_id: Optional[int] = None):
+        self.message = message
+        self.node_id = node_id
+        super().__init__(message)
+
+
+# =============================================================================
+# 业务异常类（继承 HTTPException）
+# =============================================================================
+
+
 class BusinessException(HTTPException):
     """业务异常基类"""
-    
+
     def __init__(self, status_code, detail, error_code=None, errors=None):
         super().__init__(status_code=status_code, detail=detail)
         self.error_code = error_code
@@ -147,9 +184,8 @@ async def validation_exception_handler(request, exc):
 
 
 async def general_exception_handler(request, exc):
-    print(f"未处理异常: {exc}")
-    print(traceback.format_exc())
-    
+    from loguru import logger
+    logger.exception(f"未处理异常: {exc}")
     return create_error_response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, message="服务器内部错误")
 
 

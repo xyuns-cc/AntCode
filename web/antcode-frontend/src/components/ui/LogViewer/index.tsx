@@ -1,7 +1,6 @@
 import React, { useRef, useState, useCallback } from 'react'
-import { Card, Button, Space, message } from 'antd'
-import { ClearOutlined, DeleteOutlined } from '@ant-design/icons'
-import styles from './LogViewer.module.css'
+import { Card, Button, Space, theme } from 'antd'
+import { ClearOutlined } from '@ant-design/icons'
 
 // 用于生成唯一ID的计数器
 let idCounter = 0
@@ -20,18 +19,15 @@ interface LogMessage {
 }
 
 interface LogViewerProps {
-  executionId?: string
   height?: number
   showControls?: boolean
-  autoConnect?: boolean
 }
 
 const LogViewer: React.FC<LogViewerProps> = ({
-  executionId,
   height = 400,
-  showControls = true,
-  autoConnect = true
+  showControls = true
 }) => {
+  const { token } = theme.useToken()
   const [logs, setLogs] = useState<LogMessage[]>([])
   const logContainerRef = useRef<HTMLDivElement>(null)
 
@@ -68,18 +64,18 @@ const LogViewer: React.FC<LogViewerProps> = ({
   }, [addLogMessage])
 
   // 渲染日志消息
-  const renderLogMessage = (msg: LogMessage, index: number) => {
-    let color = '#000'
-    let backgroundColor = 'transparent'
+  const renderLogMessage = (msg: LogMessage) => {
+    let color = token.colorText
+    const backgroundColor = 'transparent'
 
     if (msg.type === 'error') {
-      color = '#ff4d4f'
+      color = token.colorError
     } else if (msg.type === 'info') {
-      color = '#1890ff'
+      color = token.colorInfo
     } else if (msg.type === 'warning') {
-      color = '#faad14'
+      color = token.colorWarning
     } else if (msg.type === 'success') {
-      color = '#52c41a'
+      color = token.colorSuccess
     }
 
     return (
@@ -96,7 +92,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
           wordBreak: 'break-all'
         }}
       >
-        <span style={{ color: '#999', marginRight: '8px' }}>
+        <span style={{ color: token.colorTextTertiary, marginRight: '8px' }}>
           {new Date(msg.timestamp).toLocaleTimeString()}
         </span>
         {msg.content}
@@ -129,17 +125,18 @@ const LogViewer: React.FC<LogViewerProps> = ({
         ref={logContainerRef}
         style={{
           height: height,
-          backgroundColor: '#000',
-          color: '#00ff00',
+          backgroundColor: token.colorBgContainer,
+          color: token.colorText,
           padding: '12px',
-          borderRadius: '4px',
+          borderRadius: token.borderRadius,
           overflow: 'auto',
           fontFamily: 'Monaco, Consolas, "Courier New", monospace',
-          fontSize: '12px'
+          fontSize: '12px',
+          border: `1px solid ${token.colorBorder}`
         }}
       >
         {logs.length === 0 ? (
-          <div style={{ color: '#666', textAlign: 'center', paddingTop: '50px' }}>
+          <div style={{ color: token.colorTextTertiary, textAlign: 'center', paddingTop: '50px' }}>
             暂无日志消息
           </div>
         ) : (

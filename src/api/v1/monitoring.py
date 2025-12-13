@@ -74,7 +74,7 @@ async def list_online_nodes():
 
 
 @router.get("/nodes/{node_id}/realtime", response_model=NodeRealtimeResponse, summary="获取节点实时数据")
-async def get_node_realtime(node_id):
+async def get_node_realtime(node_id: str):
     data = await monitoring_service.get_node_realtime(node_id)
     if not data:
         raise HTTPException(status_code=404, detail="节点实时数据不存在")
@@ -90,10 +90,10 @@ def _require_timezone(dt, field):
 
 @router.get("/nodes/{node_id}/history", response_model=HistoryQueryResponse, summary="获取节点历史数据")
 async def get_node_history(
-    node_id,
-    metric_type=Query("performance", pattern="^(performance|spider)$"),
-    start_time=None,
-    end_time=None,
+    node_id: str,
+    metric_type: str = Query("performance", pattern="^(performance|spider)$"),
+    start_time: datetime = None,
+    end_time: datetime = None,
 ):
     if end_time is None:
         end_time = datetime.now(timezone.utc)

@@ -15,10 +15,8 @@ import {
   Tooltip
 } from 'antd'
 import {
-  SearchOutlined,
   FilterOutlined,
   ClearOutlined,
-  SettingOutlined,
   EyeOutlined,
   EyeInvisibleOutlined
 } from '@ant-design/icons'
@@ -121,7 +119,7 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
             (msg.source && regex.test(msg.source)) ||
             (msg.level && regex.test(msg.level))
           )
-        } catch (error) {
+        } catch {
           // 正则表达式无效，使用普通搜索
           filtered = filtered.filter(msg => {
             const content = filter.caseSensitive ? msg.content : msg.content.toLowerCase()

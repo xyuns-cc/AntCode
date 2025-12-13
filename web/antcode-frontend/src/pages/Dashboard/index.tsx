@@ -40,17 +40,17 @@ interface ResourceCardProps {
 const ResourceCard: React.FC<ResourceCardProps> = memo(({ title, icon, percent, used, total, loading, color }) => {
   const { token } = theme.useToken()
   return (
-    <Card hoverable styles={{ body: { padding: 20 } }} style={{ borderRadius: 12 }}>
+    <Card hoverable styles={{ body: { padding: 16 } }} style={{ borderRadius: 8, height: '100%' }}>
       <Skeleton loading={loading} active paragraph={{ rows: 2 }}>
-        <Flex align="center" gap={12} style={{ marginBottom: 16 }}>
-          <span style={{ fontSize: 18, color }}>{icon}</span>
-          <Text strong style={{ fontSize: 15 }}>{title}</Text>
+        <Flex align="center" gap={8} style={{ marginBottom: 12 }}>
+          <span style={{ fontSize: 16, color }}>{icon}</span>
+          <Text strong style={{ fontSize: 14 }}>{title}</Text>
         </Flex>
-        <Flex align="center" gap={16}>
-          <Progress percent={percent} status={percent > 80 ? 'exception' : 'normal'} strokeColor={percent > 80 ? token.colorError : color} trailColor={token.colorFillSecondary} showInfo={false} style={{ flex: 1 }} strokeWidth={8} />
-          <Text strong style={{ minWidth: 45, textAlign: 'right' }}>{percent}%</Text>
+        <Flex align="center" gap={12} style={{ marginBottom: 6 }}>
+          <Progress percent={percent} status={percent > 80 ? 'exception' : 'normal'} strokeColor={percent > 80 ? token.colorError : color} trailColor={token.colorFillSecondary} showInfo={false} style={{ flex: 1 }} strokeWidth={6} />
+          <Text strong style={{ minWidth: 38, textAlign: 'right', fontSize: 15 }}>{percent}%</Text>
         </Flex>
-        {used && total && <Text type="secondary" style={{ fontSize: 12, marginTop: 8, display: 'block' }}>已用: {used} / 总计: {total}</Text>}
+        {used && total && <Text type="secondary" style={{ fontSize: 11, display: 'block', lineHeight: 1.5 }}>已用: {used} / 总计: {total}</Text>}
       </Skeleton>
     </Card>
   )
@@ -141,7 +141,7 @@ const Dashboard: React.FC = memo(() => {
                 <Col xs={24} sm={12} lg={6}><StatCard title="项目总数" value={dashboardStats?.projects.total || 0} icon={<ProjectOutlined />} color={token.colorInfo} loading={loading} /></Col>
                 <Col xs={24} sm={12} lg={6}><StatCard title="活跃任务" value={dashboardStats?.tasks.active || 0} icon={<PlayCircleOutlined />} color={token.colorSuccess} loading={loading} /></Col>
                 <Col xs={24} sm={12} lg={6}><StatCard title="系统状态" value={getStatusText(dashboardStats?.system.status || '')} icon={<CheckCircleOutlined />} color={getStatusColor(dashboardStats?.system.status || '')} loading={loading} /></Col>
-                <Col xs={24} sm={12} lg={6}><StatCard title="运行时间" value={dashboardStats?.system.uptime ? formatUptime(dashboardStats.system.uptime) : '未知'} icon={<FieldTimeOutlined />} color="#a855f7" loading={loading} /></Col>
+                <Col xs={24} sm={12} lg={6}><StatCard title="运行时间" value={dashboardStats?.system.uptime ? formatUptime(dashboardStats.system.uptime) : '未知'} icon={<FieldTimeOutlined />} color={token.purple} loading={loading} /></Col>
               </Row>
 
               <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
@@ -152,7 +152,7 @@ const Dashboard: React.FC = memo(() => {
                         <Col span={12}><Statistic title="正在运行" value={dashboardStats?.tasks.running || 0} valueStyle={{ color: token.colorInfo }} /></Col>
                         <Col span={12}><Statistic title="总执行次数" value={systemMetrics?.total_executions || 0} valueStyle={{ color: token.colorSuccess }} /></Col>
                         <Col span={12}><Statistic title="成功率" value={systemMetrics?.success_rate || 0} precision={1} suffix="%" valueStyle={{ color: (systemMetrics?.success_rate ?? 0) > 80 ? token.colorSuccess : token.colorWarning }} /></Col>
-                        <Col span={12}><Statistic title="队列大小" value={systemMetrics?.queue_size || 0} valueStyle={{ color: '#a855f7' }} /></Col>
+                        <Col span={12}><Statistic title="队列大小" value={systemMetrics?.queue_size || 0} valueStyle={{ color: token.purple }} /></Col>
                       </Row>
                     </Skeleton>
                   </Card>
@@ -203,10 +203,10 @@ const Dashboard: React.FC = memo(() => {
           label: <Flex align="center" gap={6}><MonitorOutlined /><span>监控中心</span></Flex>,
           children: (
             <React.Suspense fallback={<Flex align="center" justify="center" style={{ padding: 48 }}><Skeleton active paragraph={{ rows: 6 }} /></Flex>}>
-              <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-                <Col xs={24} lg={8}><ResourceCard title="内存使用情况" icon={<DatabaseOutlined />} percent={memoryPercent} used={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.used) : undefined} total={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.total) : undefined} loading={loading} color={token.colorInfo} /></Col>
-                <Col xs={24} lg={8}><ResourceCard title="CPU 使用情况" icon={<ThunderboltOutlined />} percent={cpuPercent} loading={loading} color={token.colorSuccess} /></Col>
-                <Col xs={24} lg={8}><ResourceCard title="磁盘使用情况" icon={<HddOutlined />} percent={diskPercent} used={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.used) : undefined} total={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.total) : undefined} loading={loading} color="#a855f7" /></Col>
+              <Row gutter={[12, 12]} style={{ marginBottom: 20, maxWidth: 1200, margin: '0 auto 20px' }}>
+                <Col xs={24} sm={12} lg={8}><ResourceCard title="内存使用情况" icon={<DatabaseOutlined />} percent={memoryPercent} used={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.used) : undefined} total={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.total) : undefined} loading={loading} color={token.colorInfo} /></Col>
+                <Col xs={24} sm={12} lg={8}><ResourceCard title="CPU 使用情况" icon={<ThunderboltOutlined />} percent={cpuPercent} used={systemMetrics?.cpu_usage?.cores ? `${(cpuPercent * systemMetrics.cpu_usage.cores / 100).toFixed(1)}核` : undefined} total={systemMetrics?.cpu_usage?.cores ? `${systemMetrics.cpu_usage.cores}核` : undefined} loading={loading} color={token.colorSuccess} /></Col>
+                <Col xs={24} sm={12} lg={8}><ResourceCard title="磁盘使用情况" icon={<HddOutlined />} percent={diskPercent} used={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.used) : undefined} total={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.total) : undefined} loading={loading} color={token.purple} /></Col>
               </Row>
               <MonitorTab />
             </React.Suspense>

@@ -1,6 +1,8 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { Component, ErrorInfo, ReactNode } from 'react'
 import { Button, Result, Typography, Collapse, Space } from 'antd'
 import { ReloadOutlined, BugOutlined, HomeOutlined } from '@ant-design/icons'
+import CopyableTooltip from './CopyableTooltip'
 import Logger from '@/utils/logger'
 
 const { Paragraph, Text } = Typography
@@ -157,9 +159,11 @@ class ErrorBoundary extends Component<Props, State> {
                     <Space direction="vertical" style={{ width: '100%' }}>
                       <div>
                         <Text strong>错误信息：</Text>
-                        <Paragraph code copyable>
-                          {error.message}
-                        </Paragraph>
+                        <CopyableTooltip text={error.message}>
+                          <code style={{ cursor: 'pointer', display: 'block' }}>
+                            {error.message}
+                          </code>
+                        </CopyableTooltip>
                       </div>
                       
                       {error.stack && (
@@ -171,7 +175,7 @@ class ErrorBoundary extends Component<Props, State> {
                               overflow: 'auto',
                               maxHeight: '200px',
                               padding: '10px',
-                              backgroundColor: '#f5f5f5',
+                              backgroundColor: 'var(--ant-color-fill-tertiary)',
                               borderRadius: '4px'
                             }}>
                               {error.stack}
@@ -189,7 +193,7 @@ class ErrorBoundary extends Component<Props, State> {
                               overflow: 'auto',
                               maxHeight: '200px',
                               padding: '10px',
-                              backgroundColor: '#f5f5f5',
+                              backgroundColor: 'var(--ant-color-fill-tertiary)',
                               borderRadius: '4px'
                             }}>
                               {errorInfo.componentStack}

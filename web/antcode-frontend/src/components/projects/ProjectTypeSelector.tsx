@@ -1,12 +1,10 @@
-import React from 'react'
-import { Card, Row, Col, Typography, Space } from 'antd'
+import React, { useMemo } from 'react'
+import { Row, Col, Typography, theme } from 'antd'
 import {
   FileOutlined,
   SettingOutlined,
   CodeOutlined,
-  UploadOutlined,
-  GlobalOutlined,
-  EditOutlined
+  CheckCircleFilled
 } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import type { ProjectType } from '@/types'
@@ -23,158 +21,159 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
   onSelect
 }) => {
   const { isDark } = useThemeContext()
-  const projectTypes = [
+  const { token } = theme.useToken()
+  
+  const projectTypes = useMemo(() => [
     {
       type: 'file' as ProjectType,
       title: '文件项目',
-      description: '上传完整的项目文件或压缩包',
-      icon: <FileOutlined style={{ fontSize: 32, color: '#1890ff' }} />,
-      features: [
-        '支持 .zip、.tar.gz 压缩包',
-        '支持单个 Python 文件',
-        '自动解析项目依赖',
-        '完整的项目结构管理'
-      ],
-      detailIcon: <UploadOutlined />,
-      color: '#1890ff'
+      description: '上传项目文件或压缩包',
+      icon: FileOutlined,
+      color: token.colorInfo,
+      features: ['支持 .zip、.tar.gz 压缩包', '自动解析项目依赖']
     },
     {
       type: 'rule' as ProjectType,
       title: '规则项目',
-      description: '配置网页数据采集规则',
-      icon: <SettingOutlined style={{ fontSize: 32, color: '#52c41a' }} />,
-      features: [
-        '可视化规则配置',
-        '支持列表页和详情页',
-        '多种采集引擎',
-        '灵活的翻页策略'
-      ],
-      detailIcon: <GlobalOutlined />,
-      color: '#52c41a'
+      description: '配置网页采集规则',
+      icon: SettingOutlined,
+      color: token.colorSuccess,
+      features: ['可视化规则配置', '支持列表页和详情页']
     },
     {
       type: 'code' as ProjectType,
       title: '代码项目',
-      description: '直接编写或上传源代码',
-      icon: <CodeOutlined style={{ fontSize: 32, color: '#722ed1' }} />,
-      features: [
-        '在线代码编辑器',
-        '支持多种编程语言',
-        '实时语法检查',
-        '快速部署执行'
-      ],
-      detailIcon: <EditOutlined />,
-      color: '#722ed1'
+      description: '编写自定义代码',
+      icon: CodeOutlined,
+      color: token.purple || '#722ed1',
+      features: ['在线代码编辑器', '快速部署执行']
     }
-  ]
+  ], [token])
 
   return (
-    <div>
-      <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <Title level={3}>选择项目类型</Title>
-        <Text type="secondary">
-          根据您的需求选择合适的项目类型，不同类型有不同的配置方式
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ textAlign: 'center', marginBottom: 20 }}>
+        <Title level={4} style={{ marginBottom: 4 }}>选择项目类型</Title>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          选择适合您需求的项目类型
         </Text>
       </div>
 
       <Row gutter={[16, 16]}>
-        {projectTypes.map((item) => (
-          <Col span={24} key={item.type}>
-            <Card
-              hoverable
-              className={`project-type-card ${selectedType === item.type ? 'selected' : ''}`}
-              onClick={() => onSelect(item.type)}
-              style={{
-                border: selectedType === item.type ? `2px solid ${item.color}` : `1px solid ${isDark ? '#424242' : '#d9d9d9'}`,
-                borderRadius: 8,
-                transition: 'all 0.3s ease',
-                backgroundColor: isDark ? '#1f1f1f' : '#ffffff'
-              }}
-              styles={{ body: { padding: 20 } }}
-            >
-              <Row align="middle" gutter={16}>
-                <Col flex="none">
+        {projectTypes.map((item) => {
+          const isSelected = selectedType === item.type
+          const IconComponent = item.icon
+          
+          return (
+            <Col xs={24} sm={12} key={item.type}>
+              <div
+                onClick={() => onSelect(item.type)}
+                style={{
+                  position: 'relative',
+                  padding: '16px',
+                  borderRadius: 12,
+                  border: `2px solid ${isSelected ? item.color : token.colorBorderSecondary}`,
+                  background: isSelected 
+                    ? (isDark ? `${item.color}15` : `${item.color}08`)
+                    : token.colorBgContainer,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  minHeight: 100,
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 14
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) {
+                    e.currentTarget.style.borderColor = item.color
+                    e.currentTarget.style.transform = 'translateY(-2px)'
+                    e.currentTarget.style.boxShadow = `0 4px 12px ${isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.1)'}`
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) {
+                    e.currentTarget.style.borderColor = token.colorBorderSecondary
+                    e.currentTarget.style.transform = 'translateY(0)'
+                    e.currentTarget.style.boxShadow = 'none'
+                  }
+                }}
+              >
+                {/* 选中标记 */}
+                {isSelected && (
+                  <CheckCircleFilled 
+                    style={{ 
+                      position: 'absolute',
+                      top: 10,
+                      right: 10,
+                      fontSize: 16,
+                      color: item.color
+                    }} 
+                  />
+                )}
+                
+                {/* 左侧：图标和标题 */}
+                <div style={{ 
+                  display: 'flex', 
+                  flexDirection: 'column', 
+                  alignItems: 'center',
+                  flexShrink: 0,
+                  width: 70
+                }}>
                   <div style={{
-                    width: 64,
-                    height: 64,
-                    borderRadius: 8,
-                    backgroundColor: selectedType === item.type 
-                      ? `${item.color}15` 
-                      : isDark ? '#2a2a2a' : '#f5f5f5',
+                    width: 44,
+                    height: 44,
+                    borderRadius: 10,
+                    backgroundColor: isSelected 
+                      ? `${item.color}20` 
+                      : token.colorFillSecondary,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    transition: 'all 0.3s ease'
+                    marginBottom: 8
                   }}>
-                    {item.icon}
+                    <IconComponent style={{ fontSize: 22, color: item.color }} />
                   </div>
-                </Col>
+                  <Text 
+                    strong 
+                    style={{ 
+                      fontSize: 13,
+                      color: isSelected ? item.color : token.colorText,
+                      textAlign: 'center'
+                    }}
+                  >
+                    {item.title}
+                  </Text>
+                </div>
                 
-                <Col flex="auto">
-                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Title level={4} style={{ margin: 0, color: item.color }}>
-                        {item.title}
-                      </Title>
-                      {item.detailIcon}
-                    </div>
-                    
-                    <Text type="secondary" style={{ fontSize: 14 }}>
-                      {item.description}
-                    </Text>
-                    
-                    <div style={{ marginTop: 8 }}>
-                      {item.features.map((feature, index) => (
-                        <div key={index} style={{ 
-                          fontSize: 12, 
-                          color: isDark ? 'rgba(255, 255, 255, 0.65)' : '#666',
-                          marginBottom: 2
-                        }}>
-                          • {feature}
-                        </div>
-                      ))}
-                    </div>
-                  </Space>
-                </Col>
-                
-                <Col flex="none">
-                  {selectedType === item.type && (
-                    <div style={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: '50%',
-                      backgroundColor: item.color,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: 'white',
-                      fontSize: 12,
-                      fontWeight: 'bold'
-                    }}>
-                      ✓
-                    </div>
-                  )}
-                </Col>
-              </Row>
-            </Card>
-          </Col>
-        ))}
+                {/* 右侧：描述和特性 */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text 
+                    type="secondary" 
+                    style={{ fontSize: 12, display: 'block', marginBottom: 6 }}
+                  >
+                    {item.description}
+                  </Text>
+                  
+                  <div>
+                    {item.features.map((feature, index) => (
+                      <div 
+                        key={index} 
+                        style={{ 
+                          fontSize: 11, 
+                          color: token.colorTextTertiary,
+                          lineHeight: 1.5
+                        }}
+                      >
+                        • {feature}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </Col>
+          )
+        })}
       </Row>
-
-      <style>{`
-        .project-type-card {
-          cursor: pointer;
-        }
-        
-        .project-type-card:hover {
-          box-shadow: 0 4px 12px ${isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'};
-          transform: translateY(-2px);
-        }
-        
-        .project-type-card.selected {
-          box-shadow: 0 4px 16px rgba(24, 144, 255, 0.2);
-        }
-      `}</style>
     </div>
   )
 }

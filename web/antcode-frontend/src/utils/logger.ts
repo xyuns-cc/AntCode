@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /**
  * 日志工具类 - 统一管理控制台输出
  */

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useReducer, Suspense, lazy } from 'react'
+import React, { useCallback, useEffect, useReducer, Suspense, lazy } from 'react'
 import {
   Form,
   Input,
@@ -12,7 +12,6 @@ import {
   Row,
   Col,
   Tag,
-  Switch,
   Tooltip,
   Spin
 } from 'antd'
@@ -20,13 +19,12 @@ import {
   CodeOutlined,
   UploadOutlined,
   PlusOutlined,
-  DeleteOutlined,
   FullscreenOutlined,
   CompressOutlined,
   BulbOutlined
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd'
-import { getLanguageOptions, getLanguageOptionsWithIcons, getLanguageConfig, getExtensionForLanguage } from '@/components/ui/CodeEditor/languages'
+import { getLanguageOptionsWithIcons, getLanguageConfig } from '@/components/ui/CodeEditor/languages'
 import { FileIcon } from '@/utils/fileIcons'
 import type { ProjectCreateRequest } from '@/types'
 
@@ -101,10 +99,15 @@ const codeProjectFormReducer = (
   }
 }
 
+// 表单初始数据类型（tags 可以是字符串或数组）
+interface CodeProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags'> {
+  tags?: string | string[]
+}
+
 interface CodeProjectFormProps {
-  initialData?: Partial<ProjectCreateRequest>
+  initialData?: CodeProjectFormInitialData
   onDataChange?: (data: Partial<ProjectCreateRequest>) => void
-  onSubmit: (data: ProjectCreateRequest) => void
+  onSubmit: (data: Record<string, unknown>) => void
   loading?: boolean
   isEdit?: boolean
   onValidationChange?: (isValid: boolean, tooltip: string) => void
@@ -115,7 +118,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   initialData = {},
   onDataChange,
   onSubmit,
-  loading = false,
+  loading: _loading = false,
   isEdit = false,
   onValidationChange,
   onRef
@@ -137,7 +140,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   const [state, dispatch] = useReducer(codeProjectFormReducer, initialState)
 
   // 获取验证状态
-  const getValidationStatus = () => {
+  const getValidationStatus = useCallback(() => {
     if (!isEdit) {
       if (state.inputMethod === 'editor') {
         if (!state.codeContent || state.codeContent.trim() === '') {
@@ -150,13 +153,13 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
       }
     }
     return { isValid: true, tooltip: '' }
-  }
+  }, [isEdit, state.codeContent, state.fileList, state.inputMethod])
 
   // 通知父组件验证状态变化
   React.useEffect(() => {
     const { isValid, tooltip } = getValidationStatus()
     onValidationChange?.(isValid, tooltip)
-  }, [state.inputMethod, state.codeContent, state.fileList, isEdit, onValidationChange])
+  }, [state.inputMethod, state.codeContent, state.fileList, isEdit, onValidationChange, getValidationStatus])
 
   // 提供submit方法给父组件
   React.useEffect(() => {
@@ -278,7 +281,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
         form.setFieldValue('code_content', config.defaultTemplate)
       }
     }
-  }, [selectedLanguage, showTemplate, codeContent])
+  }, [selectedLanguage, showTemplate, codeContent, form])
 
   // 监听ESC键退出全屏
   useEffect(() => {
@@ -302,10 +305,10 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   }, [isFullscreen])
 
   // 表单提交
-  const handleFinish = (values: any) => {
+  const handleFinish = (values: ProjectCreateRequest) => {
     if (isEdit) {
       // 编辑模式：只提交代码配置相关的字段
-      const submitData = {
+      const submitData: Record<string, unknown> = {
         language: values.language,
         version: values.version,
         entry_point: values.entry_point,
@@ -315,7 +318,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
       onSubmit(submitData)
     } else {
       // 创建模式：提交完整的项目数据
-      const submitData: ProjectCreateRequest = {
+      const submitData: Record<string, unknown> = {
         ...values,
         type: 'code',
         dependencies,
@@ -328,7 +331,10 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   }
 
   // 表单值变化
-  const handleValuesChange = (changedValues: any, allValues: any) => {
+  const handleValuesChange = (
+    _changedValues: Partial<ProjectCreateRequest>,
+    allValues: ProjectCreateRequest
+  ) => {
     const updatedData = {
       ...allValues,
       dependencies,
@@ -468,7 +474,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
                   代码内容 <span style={{ color: '#ff4d4f' }}>*</span>
                 </span>
                 <Space>
-                  <Tooltip title="插入代码模板">
+                  <Tooltip title="插入代码模板" placement="top">
                     <Button
                       type="text"
                       icon={<BulbOutlined />}
@@ -478,7 +484,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
                       模板
                     </Button>
                   </Tooltip>
-                  <Tooltip title={isFullscreen ? "退出全屏" : "全屏编辑"}>
+                  <Tooltip title={isFullscreen ? "退出全屏" : "全屏编辑"} placement="top">
                     <Button
                       type="text"
                       icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
@@ -530,7 +536,9 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
                   <Suspense
                     fallback={(
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: isFullscreen ? 'calc(100vh - 120px)' : 500 }}>
-                        <Spin tip="加载代码编辑器..." />
+                        <Spin tip="加载代码编辑器...">
+                          <div style={{ height: 200, width: '100%' }} />
+                        </Spin>
                       </div>
                     )}
                   >

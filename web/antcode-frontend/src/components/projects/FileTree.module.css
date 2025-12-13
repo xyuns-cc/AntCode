@@ -98,7 +98,7 @@
   align-items: center;
   justify-content: center;
   height: 200px;
-  color: #999;
+  color: var(--ant-color-text-tertiary, #999);
 }
 
 /* 空状态 */
@@ -107,14 +107,14 @@
   align-items: center;
   justify-content: center;
   height: 200px;
-  color: #999;
+  color: var(--ant-color-text-tertiary, #999);
   flex-direction: column;
   gap: 16px;
 }
 
 .file-tree-empty .empty-icon {
   font-size: 48px;
-  color: #d9d9d9;
+  color: var(--ant-color-border, #d9d9d9);
 }
 
 /* 动画效果 */
@@ -145,8 +145,8 @@
 }
 
 .file-actions .ant-btn:hover {
-  background-color: rgba(24, 144, 255, 0.1);
-  color: #1890ff;
+  background-color: var(--ant-color-primary-bg, rgba(24, 144, 255, 0.1));
+  color: var(--ant-color-primary, #1890ff);
 }
 /* 滚动条样式已移动到全局CSS文件 */
 

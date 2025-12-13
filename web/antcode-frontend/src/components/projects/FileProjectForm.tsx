@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useCallback, useState } from 'react'
 import {
   Form,
   Input,
@@ -18,7 +18,6 @@ import showNotification from '@/utils/notification'
 import {
   UploadOutlined,
   FileOutlined,
-  DeleteOutlined,
   PlusOutlined
 } from '@ant-design/icons'
 import type { UploadFile, UploadProps } from 'antd'
@@ -41,10 +40,22 @@ const formatFileSize = (bytes: number | string): string => {
   return parseFloat((numBytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
+// 表单初始数据类型（tags 可以是字符串或数组，file_info 用于编辑模式）
+interface FileProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags'> {
+  tags?: string | string[]
+  file_info?: {
+    original_name: string
+    file_size: number
+    file_hash: string
+    file_path?: string
+    entry_point?: string
+  }
+}
+
 interface FileProjectFormProps {
-  initialData?: Partial<ProjectCreateRequest>
+  initialData?: FileProjectFormInitialData
   onDataChange?: (data: Partial<ProjectCreateRequest>) => void
-  onSubmit: (data: ProjectCreateRequest) => void
+  onSubmit: (data: Record<string, unknown>) => void
   loading?: boolean
   isEdit?: boolean
   onValidationChange?: (isValid: boolean, tooltip: string) => void
@@ -55,7 +66,7 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
   initialData = {},
   onDataChange,
   onSubmit,
-  loading = false,
+  loading: _loading = false,
   isEdit = false,
   onValidationChange,
   onRef
@@ -67,18 +78,18 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
   const [newDependency, setNewDependency] = useState('')
 
   // 获取验证状态
-  const getValidationStatus = () => {
+  const getValidationStatus = useCallback(() => {
     if (!isEdit && fileList.length === 0) {
       return { isValid: false, tooltip: '请选择要上传的文件' }
     }
     return { isValid: true, tooltip: '' }
-  }
+  }, [fileList.length, isEdit])
 
   // 通知父组件验证状态变化
   React.useEffect(() => {
     const { isValid, tooltip } = getValidationStatus()
     onValidationChange?.(isValid, tooltip)
-  }, [fileList, isEdit, onValidationChange])
+  }, [fileList, isEdit, onValidationChange, getValidationStatus])
 
   // 提供submit方法给父组件
   React.useEffect(() => {
@@ -204,18 +215,21 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
   }
 
   // 表单提交
-  const handleFinish = (values: any) => {
+  const handleFinish = (values: ProjectCreateRequest) => {
     // 创建模式下必须有文件
     if (!isEdit && !fileList[0]) {
       showNotification('error', '请上传项目文件')
       return
     }
 
-    const submitData: ProjectCreateRequest = {
+    const mainFile = fileList[0]?.originFileObj ?? fileList[0]
+    const extraFiles = additionalFiles.map((f) => f.originFileObj ?? f)
+
+    const submitData: Record<string, unknown> = {
       ...values,
       type: 'file',
-      file: fileList[0] ? (fileList[0] as any) : undefined,  // 编辑模式下可选文件
-      additionalFiles: additionalFiles.map(f => f as any), // 附加文件列表
+      file: mainFile as File | undefined,  // 编辑模式下可选文件
+      additionalFiles: extraFiles as File[], // 附加文件列表
       dependencies,
       tags: values.tags?.split(',').map((tag: string) => tag.trim()).filter(Boolean) || []
     }
@@ -224,7 +238,10 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
   }
 
   // 表单值变化
-  const handleValuesChange = (changedValues: any, allValues: any) => {
+  const handleValuesChange = (
+    _changedValues: Partial<ProjectCreateRequest>,
+    allValues: ProjectCreateRequest
+  ) => {
     const updatedData = { 
       ...allValues, 
       dependencies, 

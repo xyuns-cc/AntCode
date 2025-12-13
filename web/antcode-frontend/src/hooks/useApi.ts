@@ -5,23 +5,22 @@ import Logger from '@/utils/logger'
 
 interface UseApiOptions<T> {
   onSuccess?: (data: T) => void
-  onError?: (error: any) => void
+  onError?: (error: unknown) => void
   showSuccessMessage?: boolean | string
   showErrorMessage?: boolean
   immediate?: boolean
-  deps?: any[]
 }
 
-interface UseApiResult<T, P extends any[] = any[]> {
+interface UseApiResult<T, P extends unknown[] = unknown[]> {
   data: T | null
   loading: boolean
-  error: any
+  error: unknown
   execute: (...params: P) => Promise<T>
   reset: () => void
   cancel: () => void
 }
 
-export function useApi<T, P extends any[] = any[]>(
+export function useApi<T, P extends unknown[] = unknown[]>(
   apiFunction: (...params: P) => Promise<T>,
   options: UseApiOptions<T> = {}
 ): UseApiResult<T, P> {
@@ -30,13 +29,12 @@ export function useApi<T, P extends any[] = any[]>(
     onError,
     showSuccessMessage = false,
     showErrorMessage = true,
-    immediate = false,
-    deps = []
+    immediate = false
   } = options
 
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<any>(null)
+  const [error, setError] = useState<unknown>(null)
   
   const cancelRef = useRef<boolean>(false)
   const mountedRef = useRef(true)
@@ -74,7 +72,7 @@ export function useApi<T, P extends any[] = any[]>(
       onSuccess?.(result)
       
       return result
-    } catch (err: any) {
+    } catch (err: unknown) {
       // 检查是否已取消或组件已卸载
       if (cancelRef.current || !mountedRef.current) {
         return Promise.reject(err)
@@ -116,9 +114,9 @@ export function useApi<T, P extends any[] = any[]>(
   // 立即执行（如果设置了immediate）
   useEffect(() => {
     if (immediate) {
-      execute()
+      execute().catch((err) => Logger.warn('Immediate api call failed', err))
     }
-  }, [immediate, ...deps])
+  }, [immediate, execute])
 
   // 组件卸载时清理
   useEffect(() => {
@@ -144,7 +142,7 @@ interface UsePaginatedApiOptions<T> extends UseApiOptions<T> {
   initialPageSize?: number
 }
 
-interface UsePaginatedApiResult<T, P extends any[] = any[]> extends UseApiResult<T, P> {
+interface UsePaginatedApiResult<T, P extends unknown[] = unknown[]> extends UseApiResult<T, P> {
   page: number
   pageSize: number
   total: number
@@ -154,7 +152,7 @@ interface UsePaginatedApiResult<T, P extends any[] = any[]> extends UseApiResult
   loadMore: () => void
 }
 
-export function usePaginatedApi<T, P extends any[] = any[]>(
+export function usePaginatedApi<T, P extends unknown[] = unknown[]>(
   apiFunction: (...params: P) => Promise<{ data: T; total: number; page: number; size: number }>,
   options: UsePaginatedApiOptions<T> = {}
 ): UsePaginatedApiResult<T, P> {
@@ -200,7 +198,7 @@ export function usePaginatedApi<T, P extends any[] = any[]>(
     if (lastParamsRef.current) {
       execute(...lastParamsRef.current)
     }
-  }, [page, pageSize])
+  }, [page, pageSize, execute])
 
   return {
     ...apiResult,
@@ -220,7 +218,7 @@ interface UseFormApiOptions<T> extends UseApiOptions<T> {
   resetOnSuccess?: boolean
 }
 
-export function useFormApi<T, P extends any[] = any[]>(
+export function useFormApi<T, P extends unknown[] = unknown[]>(
   apiFunction: (...params: P) => Promise<T>,
   options: UseFormApiOptions<T> = {}
 ): UseApiResult<T, P> & { submit: (...params: P) => Promise<T> } {

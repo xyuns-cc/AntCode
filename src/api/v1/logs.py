@@ -1,4 +1,5 @@
 """日志管理接口"""
+
 import os
 from datetime import datetime
 
@@ -6,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
-from src.core.auth import get_current_user, TokenData
-from src.core.response import success, Messages
+from src.core.security.auth import get_current_user
 from src.schemas.common import BaseResponse
+from src.core.response import success
+from src.core.response import Messages
 from src.schemas.logs import LogEntry, LogListResponse, UnifiedLogResponse, LogLevel, LogType, LogFormat
-from src.services.logs.log_performance_service import log_performance_monitor, log_statistics_service
 from src.services.logs.log_security_service import log_security_service, error_handler
 from src.services.logs.task_log_service import task_log_service
 from src.services.scheduler.scheduler_service import scheduler_service
@@ -162,7 +163,7 @@ async def _get_structured_log_response(execution_id, execution, log_type, level,
 
 @router.get("/executions/{execution_id}", response_model=BaseResponse[UnifiedLogResponse])
 async def get_execution_logs(
-        execution_id: int,
+        execution_id,  # 支持 public_id 和内部 id
         format: str = Query(LogFormat.STRUCTURED),
         log_type: str = Query(None),
         level: str = Query(None),
@@ -207,7 +208,7 @@ async def get_execution_logs(
 
 @router.get("/executions/{execution_id}/stdout", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stdout_logs(
-        execution_id: int,
+        execution_id,  # 支持 public_id 和内部 id
         format: str = Query(LogFormat.RAW),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
@@ -224,7 +225,7 @@ async def get_stdout_logs(
 
 @router.get("/executions/{execution_id}/stderr", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stderr_logs(
-        execution_id: int,
+        execution_id,  # 支持 public_id 和内部 id
         format: str = Query(LogFormat.RAW),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
@@ -241,7 +242,7 @@ async def get_stderr_logs(
 
 @router.get("/executions/{execution_id}/errors", response_model=BaseResponse[UnifiedLogResponse])
 async def get_error_logs(
-        execution_id: int,
+        execution_id,  # 支持 public_id 和内部 id
         format: str = Query(LogFormat.STRUCTURED),
         lines: int = Query(None, ge=1, le=10000),
         search: str = Query(None),
@@ -260,7 +261,7 @@ async def get_error_logs(
 
 @router.get("/executions/{execution_id}/raw", response_model=BaseResponse[UnifiedLogResponse])
 async def get_raw_logs(
-        execution_id: int,
+        execution_id,  # 支持 public_id 和内部 id
         log_type: str = Query(None),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
@@ -277,7 +278,7 @@ async def get_raw_logs(
 
 @router.get("/tasks/{task_id}", response_model=BaseResponse[LogListResponse])
 async def get_task_logs(
-        task_id: int,
+        task_id,  # 支持 public_id 和内部 id
         page: int = Query(1, ge=1),
         size: int = Query(50, ge=1, le=1000),
         log_type: str = Query(None),
@@ -418,6 +419,7 @@ async def get_performance_stats(
 ):
     """获取日志系统性能统计"""
     try:
+        from src.services.logs.log_performance_service import log_performance_monitor
 
         # 获取性能摘要
         performance_summary = log_performance_monitor.get_performance_summary()
@@ -452,6 +454,7 @@ async def get_slow_operations(
 ):
     """获取慢操作列表"""
     try:
+        from src.services.logs.log_performance_service import log_performance_monitor
 
         slow_operations = log_performance_monitor.get_slow_operations(threshold, limit)
 
@@ -481,6 +484,7 @@ async def get_daily_analytics(
 ):
     """获取日志系统日统计分析"""
     try:
+        from src.services.logs.log_performance_service import log_statistics_service
 
         daily_stats = log_statistics_service.get_daily_statistics(days)
         user_stats = log_statistics_service.get_user_statistics()

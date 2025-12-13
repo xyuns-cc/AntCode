@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import {
   Card,
   Form,
@@ -12,17 +12,18 @@ import {
   Switch,
   DatePicker,
   Divider,
-  Alert
+  Alert,
+  Tag
 } from 'antd'
-import showNotification from '@/utils/notification'
-import { ArrowLeftOutlined, SaveOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SaveOutlined, CloudServerOutlined, DesktopOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
-import type { TaskCreateRequest, ScheduleType, Project } from '@/types'
+import { nodeService } from '@/services/nodes'
+import type { TaskCreateRequest, ScheduleType, Project, Node } from '@/types'
 import { validateCronExpression } from '@/utils/cron'
 
-const { Option } = Select
+const { Option, OptGroup } = Select
 const { TextArea } = Input
 
 const TaskCreate: React.FC = () => {
@@ -31,34 +32,60 @@ const TaskCreate: React.FC = () => {
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [projects, setProjects] = useState<Project[]>([])
+  const [nodes, setNodes] = useState<Node[]>([])
   const [scheduleType, setScheduleType] = useState<ScheduleType>('once')
 
   // 从URL参数获取项目ID
   const projectIdFromUrl = searchParams.get('project_id')
 
   // 加载项目列表
-  const loadProjects = async () => {
+  const loadProjects = useCallback(async () => {
     try {
       const response = await projectService.getProjects({ page: 1, size: 100 })
       setProjects(response.items)
       
       // 如果URL中有项目ID，设置为默认值
       if (projectIdFromUrl) {
-        form.setFieldValue('project_id', parseInt(projectIdFromUrl))
+        form.setFieldValue('project_id', projectIdFromUrl)
       }
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     }
-  }
+  }, [form, projectIdFromUrl])
+
+  // 加载可用节点列表
+  const loadNodes = useCallback(async () => {
+    try {
+      const nodeList = await nodeService.getMyAvailableNodes()
+      setNodes(nodeList)
+    } catch {
+      // 错误提示由拦截器统一处理
+    }
+  }, [])
 
   useEffect(() => {
     loadProjects()
-  }, [])
+    loadNodes()
+  }, [loadProjects, loadNodes])
 
   // 处理表单提交
-  const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: TaskCreateRequest) => {
     setLoading(true)
     try {
+      // 处理执行策略
+      let executionStrategy: string | undefined
+      let specifiedNodeId: string | undefined
+      
+      if (values.node_id === '__auto__') {
+        // 自动选择策略
+        executionStrategy = 'auto'
+      } else if (values.node_id && values.node_id !== '') {
+        // 指定节点策略
+        executionStrategy = 'specified'
+        specifiedNodeId = values.node_id
+      }
+      // 留空则继承项目配置（不设置 execution_strategy）
+
       const taskData: TaskCreateRequest = {
         name: values.name,
         description: values.description,
@@ -73,12 +100,14 @@ const TaskCreate: React.FC = () => {
         retry_delay: values.retry_delay || 60,
         execution_params: values.execution_params ? JSON.parse(values.execution_params) : undefined,
         environment_vars: values.environment_vars ? JSON.parse(values.environment_vars) : undefined,
-        is_active: values.is_active !== false
+        is_active: values.is_active !== false,
+        execution_strategy: executionStrategy,
+        specified_node_id: specifiedNodeId,
       }
 
       await taskService.createTask(taskData)
       navigate('/tasks')
-    } catch (error: any) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setLoading(false)
@@ -86,7 +115,7 @@ const TaskCreate: React.FC = () => {
   }
 
   // 验证Cron表达式
-  const validateCron = (_: any, value: string) => {
+  const validateCron = (_: unknown, value: string) => {
     if (scheduleType === 'cron' && value) {
       if (!validateCronExpression(value)) {
         return Promise.reject(new Error('请输入有效的Cron表达式'))
@@ -96,7 +125,7 @@ const TaskCreate: React.FC = () => {
   }
 
   // 验证JSON格式
-  const validateJSON = (_: any, value: string) => {
+  const validateJSON = (_: unknown, value: string) => {
     if (value) {
       try {
         JSON.parse(value)
@@ -133,7 +162,8 @@ const TaskCreate: React.FC = () => {
             timeout_seconds: 3600,
             retry_count: 3,
             retry_delay: 60,
-            is_active: true
+            is_active: true,
+            node_id: ''  // 默认继承项目配置
           }}
         >
           <Row gutter={24}>
@@ -244,7 +274,79 @@ const TaskCreate: React.FC = () => {
 
           <Divider>执行配置</Divider>
 
+          <Alert
+            type="info"
+            showIcon
+            message="任务执行策略"
+            description="任务默认继承项目的执行策略配置。如需覆盖，可选择指定节点或自动选择。"
+            style={{ marginBottom: 16 }}
+          />
+
           <Row gutter={24}>
+            <Col span={12}>
+              <Form.Item
+                label={
+                  <Space>
+                    <CloudServerOutlined />
+                    <span>执行节点</span>
+                  </Space>
+                }
+                name="node_id"
+                tooltip="选择任务执行的节点。留空则继承项目配置；选择'自动选择'则由系统负载均衡选择最优节点"
+              >
+                <Select
+                  placeholder="继承项目配置"
+                  allowClear
+                  showSearch
+                  optionFilterProp="children"
+                >
+                  <Option value="">
+                    <Space>
+                      <DesktopOutlined style={{ color: '#1677ff' }} />
+                      <span>继承项目配置</span>
+                      <Tag color="default">推荐</Tag>
+                    </Space>
+                  </Option>
+                  <Option value="__auto__">
+                    <Space>
+                      <CloudServerOutlined style={{ color: '#52c41a' }} />
+                      <span>自动选择（负载均衡）</span>
+                    </Space>
+                  </Option>
+                  {nodes.filter(n => n.status === 'online').length > 0 && (
+                    <OptGroup label="指定节点">
+                      {nodes.filter(n => n.status === 'online').map(node => (
+                        <Option key={node.id} value={node.id}>
+                          <Space>
+                            <CloudServerOutlined style={{ color: '#13c2c2' }} />
+                            <span>{node.name}</span>
+                            {node.region && <Tag color="blue" style={{ marginLeft: 4 }}>{node.region}</Tag>}
+                            {node.metrics && (
+                              <span style={{ color: '#999', fontSize: 12 }}>
+                                (CPU: {node.metrics.cpu?.toFixed(0)}% / 内存: {node.metrics.memory?.toFixed(0)}%)
+                              </span>
+                            )}
+                          </Space>
+                        </Option>
+                      ))}
+                    </OptGroup>
+                  )}
+                  {nodes.filter(n => n.status !== 'online').length > 0 && (
+                    <OptGroup label="离线节点">
+                      {nodes.filter(n => n.status !== 'online').map(node => (
+                        <Option key={node.id} value={node.id} disabled>
+                          <Space>
+                            <CloudServerOutlined style={{ color: '#ff4d4f' }} />
+                            <span style={{ color: '#999' }}>{node.name}</span>
+                            <Tag color="error">离线</Tag>
+                          </Space>
+                        </Option>
+                      ))}
+                    </OptGroup>
+                  )}
+                </Select>
+              </Form.Item>
+            </Col>
             <Col span={6}>
               <Form.Item
                 label="最大并发数"

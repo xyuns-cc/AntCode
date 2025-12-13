@@ -13,6 +13,7 @@
     "build:analyze": "node ./scripts/generate-bundle-report.mjs",
     "build:staging": "vite build --mode staging",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 50",
+    "lint:ci": "eslint . --ext ts,tsx --config .eslintrc.ci.json --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --ext ts,tsx --fix",
     "preview": "vite preview --port 3001",
     "type-check": "tsc --noEmit",
@@ -23,6 +24,7 @@
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
     "@monaco-editor/react": "^4.6.0",
+    "@tanstack/react-query": "^5.66.1",
     "@types/react-syntax-highlighter": "^15.5.13",
     "antd": "^5.21.6",
     "axios": "^1.7.7",
@@ -51,6 +53,7 @@
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-react-hooks": "^5.0.0",
     "eslint-plugin-react-refresh": "^0.4.13",
+    "eslint-plugin-unused-imports": "4.3.0",
     "globals": "^15.11.0",
     "prettier": "^3.3.3",
     "rollup-plugin-visualizer": "5.14.0",

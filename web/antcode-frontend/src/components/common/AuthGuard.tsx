@@ -12,7 +12,7 @@ interface AuthGuardProps {
  * 监听认证状态变化，处理认证失败的情况
  */
 const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
-  const { isAuthenticated, user } = useAuth()
+  const { isAuthenticated } = useAuth()
 
   useEffect(() => {
     // 监听存储变化，检测其他标签页的登出操作

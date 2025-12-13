@@ -81,14 +81,14 @@
 .totalText {
   font-size: 24px;
   font-weight: 600;
-  fill: #262626;
+  fill: var(--ant-color-text, #262626);
   transform: rotate(90deg);
   transform-origin: center;
 }
 
 .labelText {
   font-size: 12px;
-  fill: #8c8c8c;
+  fill: var(--ant-color-text-tertiary, #8c8c8c);
   transform: rotate(90deg);
   transform-origin: center;
 }
@@ -104,7 +104,7 @@
   gap: 8px;
   padding: 12px 10px;
   border-radius: 12px;
-  background: linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%);
+  background: var(--ant-color-fill-quaternary, #fafafa);
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
   border: 1px solid transparent;
@@ -124,10 +124,10 @@
 }
 
 .statItem:hover {
-  background: linear-gradient(135deg, #f0f0f0 0%, #e8e8e8 100%);
+  background: var(--ant-color-fill-tertiary, #f0f0f0);
   transform: translateY(-4px) scale(1.02);
   box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
-  border-color: rgba(0, 0, 0, 0.08);
+  border-color: var(--ant-color-border-secondary, rgba(0, 0, 0, 0.08));
 }
 
 .statItem:hover::before {
@@ -139,10 +139,10 @@
 }
 
 .statItem.highlighted {
-  background: linear-gradient(135deg, #e6f7ff 0%, #d6f7ff 100%);
-  border-color: rgba(24, 144, 255, 0.3);
+  background: var(--ant-color-primary-bg, #e6f7ff);
+  border-color: var(--ant-color-primary-border, rgba(24, 144, 255, 0.3));
   transform: translateY(-3px) scale(1.02);
-  box-shadow: 0 6px 20px rgba(24, 144, 255, 0.2);
+  box-shadow: 0 6px 20px var(--ant-color-primary-bg, rgba(24, 144, 255, 0.2));
 }
 
 .statContent {
@@ -153,20 +153,20 @@
 .statValue {
   font-size: 16px;
   font-weight: 600;
-  color: #262626;
+  color: var(--ant-color-text, #262626);
   line-height: 1.2;
 }
 
 .statLabel {
   font-size: 12px;
-  color: #8c8c8c;
+  color: var(--ant-color-text-tertiary, #8c8c8c);
   line-height: 1.2;
   margin: 2px 0;
 }
 
 .statPercent {
   font-size: 10px;
-  color: #bfbfbf;
+  color: var(--ant-color-text-quaternary, #bfbfbf);
   line-height: 1.2;
 }
 
@@ -282,38 +282,4 @@
   }
 }
 
-/* 暗色主题适配 */
-:global(.dark-theme) .totalText {
-  fill: #ffffff;
-}
-
-:global(.dark-theme) .labelText {
-  fill: #bfbfbf;
-}
-
-:global(.dark-theme) .statItem {
-  background: linear-gradient(135deg, #1f1f1f 0%, #262626 100%);
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
-:global(.dark-theme) .statItem:hover {
-  background: linear-gradient(135deg, #262626 0%, #2f2f2f 100%);
-  border-color: rgba(255, 255, 255, 0.15);
-}
-
-:global(.dark-theme) .statItem.highlighted {
-  background: linear-gradient(135deg, rgba(24, 144, 255, 0.15) 0%, rgba(24, 144, 255, 0.25) 100%);
-  border-color: rgba(24, 144, 255, 0.4);
-}
-
-:global(.dark-theme) .statValue {
-  color: #ffffff;
-}
-
-:global(.dark-theme) .statLabel {
-  color: #bfbfbf;
-}
-
-:global(.dark-theme) .statPercent {
-  color: #8c8c8c;
-}
+/* 暗色主题适配 - 使用CSS变量自动适配，保留作为备用 */

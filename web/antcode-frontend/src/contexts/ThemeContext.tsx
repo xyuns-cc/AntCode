@@ -13,6 +13,8 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined)
 
+// Fast-refresh 会对非组件导出告警，这里仅导出自定义 hook
+// eslint-disable-next-line react-refresh/only-export-components
 export const useThemeContext = () => {
   const context = useContext(ThemeContext)
   if (!context) throw new Error('useThemeContext must be used within ThemeProvider')

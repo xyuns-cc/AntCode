@@ -76,11 +76,11 @@ class ErrorHandler {
 
     // 显示用户友好的错误提示
     if (showMessage) {
-      this.showErrorMessage(apiError, duration)
+      this.showErrorMessage(apiError, duration, context)
     }
 
     if (showNotification) {
-      this.showErrorNotification(apiError, duration)
+      this.showErrorNotification(apiError, duration, context)
     }
 
     // 上报错误
@@ -150,13 +150,23 @@ class ErrorHandler {
       }
     } else if (error && typeof error === 'object') {
       // 对象错误
-      const errorObj = error as any
+      const errorObj = error as { code?: string; message?: string; details?: Record<string, unknown>; status?: number }
       apiError = {
         code: errorObj.code || 'OBJECT_ERROR',
         message: errorObj.message || '对象错误',
         details: errorObj.details || errorObj,
         status: errorObj.status,
         timestamp: new Date().toISOString()
+      }
+    }
+
+    if (context) {
+      apiError = {
+        ...apiError,
+        details: {
+          ...(apiError.details || {}),
+          context,
+        }
       }
     }
 
@@ -213,9 +223,10 @@ class ErrorHandler {
   }
 
   // 显示错误消息
-  private showErrorMessage(error: ApiError, duration: number) {
+  private showErrorMessage(error: ApiError, duration: number, context?: ErrorContext) {
     const messageType = this.getMessageType(error.status)
     showNotification(messageType, error.message, undefined, {
+      duration,
       meta: {
         状态码: error.status,
         时间: error.timestamp,
@@ -228,9 +239,10 @@ class ErrorHandler {
   }
 
   // 显示错误通知
-  private showErrorNotification(error: ApiError, duration: number) {
+  private showErrorNotification(error: ApiError, duration: number, context?: ErrorContext) {
     const notificationType = this.getMessageType(error.status)
     showNotification(notificationType, '操作失败', error.message, {
+      duration,
       meta: {
         状态码: error.status,
         动作: context?.action,

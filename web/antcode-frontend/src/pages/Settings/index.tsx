@@ -1,6 +1,5 @@
 import React, { useState, memo } from 'react'
-import { Card, Tabs, Form, Input, Button, Space, Alert, Row, Col, Typography } from 'antd'
-import showNotification from '@/utils/notification'
+import { Card, Tabs, Form, Input, Button, Alert } from 'antd'
 import { 
   UserOutlined, 
   MailOutlined, 
@@ -11,9 +10,6 @@ import { useAuth } from '@/hooks/useAuth'
 import { authService } from '@/services/auth'
 import type { UpdateUserRequest } from '@/types'
 import styles from './Settings.module.css'
-
-
-const { Title, Text, Paragraph } = Typography
 
 const Settings: React.FC = memo(() => {
   const { user, updateUser } = useAuth()
@@ -30,7 +26,7 @@ const Settings: React.FC = memo(() => {
         email: values.email
       }
       await updateUser(updateData)
-    } catch (error) {
+    } catch {
       // 错误已在useAuth中处理
     } finally {
       setEmailLoading(false)
@@ -47,7 +43,7 @@ const Settings: React.FC = memo(() => {
     try {
       await authService.changePassword(values.currentPassword, values.newPassword)
       passwordForm.resetFields()
-    } catch (error: any) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setPasswordLoading(false)

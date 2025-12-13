@@ -1,37 +1,3 @@
-import { format, parseISO } from 'date-fns'
-
-/**
- * 格式化日期
- */
-export const formatDate = (dateString: string, formatStr = 'yyyy-MM-dd HH:mm:ss'): string => {
-  try {
-    const date = parseISO(dateString)
-    return format(date, formatStr)
-  } catch (error) {
-    return dateString
-  }
-}
-
-/**
- * 格式化时间（仅时分秒）
- */
-export const formatTime = (dateString: string): string => {
-  return formatDate(dateString, 'HH:mm:ss')
-}
-
-/**
- * 格式化文件大小
- */
-export const formatFileSize = (bytes: number): string => {
-  if (bytes === 0) return '0 Bytes'
-  
-  const k = 1024
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-}
-
 /**
  * 防抖函数
  */

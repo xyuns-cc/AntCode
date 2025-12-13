@@ -8,159 +8,90 @@
 }
 
 .logContainer {
-  background-color: var(--log-bg-color, #1e1e1e);
-  color: var(--log-text-color, #d4d4d4);
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.4;
-  padding: 8px; /* 减少padding以避免影响虚拟化计算 */
-  border-radius: 0 0 6px 6px;
+  background-color: var(--ant-color-bg-container, #ffffff);
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.85));
+  font-family: Monaco, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  border-radius: 6px;
   position: relative;
-  border: 1px solid var(--log-border-color, #d9d9d9);
-  border-radius: 4px;
-}
-
-/* 主题适配 */
-:global(.light-theme) .logContainer {
-  --log-bg-color: #fafafa;
-  --log-text-color: rgba(0, 0, 0, 0.85);
-}
-
-:global(.dark-theme) .logContainer {
-  --log-bg-color: #1e1e1e;
-  --log-text-color: #d4d4d4;
+  /* 性能优化 - 不使用 contain: strict 因为会影响绝对定位 */
+  overflow-anchor: none;
 }
 
 .logLine {
-  display: flex;
-  align-items: flex-start;
-  margin-bottom: 2px;
-  padding: 4px 8px; /* 添加左右padding */
-  word-break: break-word; /* 改为break-word以更好地处理长行 */
-  white-space: pre-wrap; /* 保留换行和空白 */
-  transition: background-color 0.2s;
-  min-height: 20px; /* 设置最小高度 */
+  padding: 4px 8px;
+  margin: 0;
+  word-break: break-all;
+  white-space: pre-wrap;
+  font-family: Monaco, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 24px;
   box-sizing: border-box;
 }
 
-.logLine:hover {
-  background-color: var(--log-hover-bg, #2d2d2d);
+/* STDOUT - 绿色 */
+.stdout {
+  color: var(--ant-color-success, #52c41a);
+  background-color: transparent;
+  border-left: 3px solid var(--ant-color-success, #52c41a);
 }
 
-:global(.light-theme) .logLine:hover {
-  --log-hover-bg: rgba(0, 0, 0, 0.04);
+/* STDERR - 红色 */
+.stderr {
+  color: var(--ant-color-error, #ff4d4f);
+  background-color: var(--ant-color-error-bg, #fff1f0);
+  border-left: 3px solid var(--ant-color-error, #ff4d4f);
 }
 
-:global(.dark-theme) .logLine:hover {
-  --log-hover-bg: #2d2d2d;
+/* ERROR - 红色 */
+.error {
+  color: var(--ant-color-error, #ff4d4f);
+  background-color: var(--ant-color-error-bg, #fff1f0);
+  border-left: 3px solid var(--ant-color-error, #ff4d4f);
+}
+
+/* WARNING - 橙色 */
+.warning {
+  color: var(--ant-color-warning, #faad14);
+  background-color: var(--ant-color-warning-bg, #fffbe6);
+  border-left: 3px solid var(--ant-color-warning, #faad14);
+}
+
+/* INFO - 蓝色 */
+.info {
+  color: var(--ant-color-info, #1890ff);
+  background-color: var(--ant-color-info-bg, #e6f7ff);
+  border-left: 3px solid var(--ant-color-info, #1890ff);
+}
+
+/* SUCCESS - 绿色 */
+.success {
+  color: var(--ant-color-success, #52c41a);
+  background-color: var(--ant-color-success-bg, #f6ffed);
+  border-left: 3px solid var(--ant-color-success, #52c41a);
 }
 
 .timestamp {
-  color: var(--log-timestamp-color, #808080);
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
   margin-right: 8px;
-  font-size: 11px;
-  white-space: nowrap;
-  min-width: 80px;
-  user-select: none;
-}
-
-:global(.light-theme) .timestamp {
-  --log-timestamp-color: rgba(0, 0, 0, 0.45);
-}
-
-:global(.dark-theme) .timestamp {
-  --log-timestamp-color: #808080;
 }
 
 .logType {
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
   margin-right: 8px;
-  font-size: 10px;
-  min-width: 60px;
-  text-align: center;
-  user-select: none;
 }
 
 .logLevel {
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
   margin-right: 8px;
-  font-size: 10px;
-  min-width: 50px;
-  text-align: center;
-  user-select: none;
 }
 
 .content {
-  flex: 1;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* 不同类型日志的样式 */
-.stdout .content {
-  color: var(--log-stdout-color, #d4d4d4);
-}
-
-.stderr .content {
-  color: var(--log-stderr-color, #f48771);
-  font-weight: 500;
-}
-
-.error .content {
-  color: var(--log-stderr-color, #f48771);
-  font-weight: 500;
-}
-
-.info .content {
-  color: var(--log-info-color, #1890ff);
-}
-
-.success .content {
-  color: var(--log-success-color, #52c41a);
-}
-
-.warning .content {
-  color: var(--log-warning-color, #ffcc02);
-}
-
-:global(.light-theme) .stdout .content {
-  --log-stdout-color: rgba(0, 0, 0, 0.85);
-}
-
-:global(.light-theme) .stderr .content,
-:global(.light-theme) .error .content {
-  --log-stderr-color: #ff4d4f;
-}
-
-:global(.light-theme) .info .content {
-  --log-info-color: #1890ff;
-}
-
-:global(.light-theme) .success .content {
-  --log-success-color: #52c41a;
-}
-
-:global(.light-theme) .warning .content {
-  --log-warning-color: #fa8c16;
-}
-
-:global(.dark-theme) .stdout .content {
-  --log-stdout-color: #d4d4d4;
-}
-
-:global(.dark-theme) .stderr .content,
-:global(.dark-theme) .error .content {
-  --log-stderr-color: #f48771;
-}
-
-:global(.dark-theme) .info .content {
-  --log-info-color: #69c0ff;
-}
-
-:global(.dark-theme) .success .content {
-  --log-success-color: #95de64;
-}
-
-:global(.dark-theme) .warning .content {
-  --log-warning-color: #ffcc02;
+  color: inherit;
 }
 
 .emptyState {
@@ -168,31 +99,17 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: var(--log-empty-color, #8c8c8c);
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
   font-style: italic;
   font-size: 14px;
+  text-align: center;
+  padding-top: 50px;
 }
 
 .stats {
   font-size: 12px;
-  color: var(--log-stats-color, #8c8c8c);
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
   margin-left: 8px;
-}
-
-:global(.light-theme) .emptyState {
-  --log-empty-color: rgba(0, 0, 0, 0.45);
-}
-
-:global(.light-theme) .stats {
-  --log-stats-color: rgba(0, 0, 0, 0.45);
-}
-
-:global(.dark-theme) .emptyState {
-  --log-empty-color: #8c8c8c;
-}
-
-:global(.dark-theme) .stats {
-  --log-stats-color: #8c8c8c;
 }
 
 /* 滚动条样式 */
@@ -201,71 +118,30 @@
 }
 
 .logContainer::-webkit-scrollbar-track {
-  background: var(--log-scrollbar-track, #2d2d2d);
+  background: var(--ant-color-fill-tertiary, #f0f0f0);
   border-radius: 4px;
 }
 
 .logContainer::-webkit-scrollbar-thumb {
-  background: var(--log-scrollbar-thumb, #555);
+  background: var(--ant-color-border, #d9d9d9);
   border-radius: 4px;
-  transition: background 0.3s;
 }
 
 .logContainer::-webkit-scrollbar-thumb:hover {
-  background: var(--log-scrollbar-thumb-hover, #777);
-}
-
-:global(.light-theme) .logContainer::-webkit-scrollbar-track {
-  --log-scrollbar-track: #f0f0f0;
-}
-
-:global(.light-theme) .logContainer::-webkit-scrollbar-thumb {
-  --log-scrollbar-thumb: #d9d9d9;
-}
-
-:global(.light-theme) .logContainer::-webkit-scrollbar-thumb:hover {
-  --log-scrollbar-thumb-hover: #bfbfbf;
-}
-
-:global(.dark-theme) .logContainer::-webkit-scrollbar-track {
-  --log-scrollbar-track: #2d2d2d;
-}
-
-:global(.dark-theme) .logContainer::-webkit-scrollbar-thumb {
-  --log-scrollbar-thumb: #555;
-}
-
-:global(.dark-theme) .logContainer::-webkit-scrollbar-thumb:hover {
-  --log-scrollbar-thumb-hover: #777;
+  background: var(--ant-color-border-secondary, #bfbfbf);
 }
 
 /* 选中文本样式 */
 .logContainer ::selection {
-  background: #264f78;
-  color: #ffffff;
-}
-
-.logContainer ::-moz-selection {
-  background: #264f78;
+  background: var(--ant-color-primary, #1890ff);
   color: #ffffff;
 }
 
 /* 响应式设计 */
 @media (max-width: 768px) {
   .logContainer {
-    font-size: 12px;
+    font-size: 11px;
     padding: 8px;
-  }
-
-  .timestamp {
-    min-width: 60px;
-    font-size: 10px;
-  }
-
-  .logType,
-  .logLevel {
-    font-size: 9px;
-    min-width: 40px;
   }
 
   .stats {
@@ -273,64 +149,8 @@
   }
 }
 
-/* 高对比度模式 */
-@media (prefers-contrast: high) {
-  .logContainer {
-    background-color: #000000;
-    color: #ffffff;
-    border: 1px solid #ffffff;
-  }
-
-  .stdout .content {
-    color: #00ff00;
-  }
-
-  .stderr .content {
-    color: #ff0000;
-  }
-
-  .warning .content {
-    color: #ffff00;
-  }
-
-  .timestamp {
-    color: #cccccc;
-  }
-}
-
-/* 主题适配已通过CSS变量处理，移除媒体查询 */
-
-/* 打印样式 */
-@media print {
-  .logContainer {
-    background: white !important;
-    color: black !important;
-    font-size: 10px;
-    line-height: 1.2;
-  }
-
-  .stdout .content,
-  .stderr .content,
-  .warning .content {
-    color: black !important;
-  }
-
-  .timestamp {
-    color: #666 !important;
-  }
-
-  .logType,
-  .logLevel {
-    display: none;
-  }
-
-  .logLine:hover {
-    background: none !important;
-  }
-}
-
-/* 动画效果 */
-.logLine {
+/* 新增日志入场动画 */
+.logLine.newItem {
   animation: fadeIn 0.3s ease-in-out;
 }
 
@@ -353,34 +173,21 @@
   border-radius: 2px;
 }
 
-/* 错误日志特殊样式 */
-.logLine.error {
-  background-color: rgba(255, 77, 79, 0.1);
-  border-left: 3px solid #ff4d4f;
-  padding-left: 9px;
-}
-
-.logLine.warning {
-  background-color: rgba(255, 204, 2, 0.1);
-  border-left: 3px solid #ffcc02;
-  padding-left: 9px;
-}
-
 /* 加载状态 */
 .loading {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #8c8c8c;
+  color: var(--ant-color-text-tertiary, #8c8c8c);
 }
 
 .loading::after {
   content: '';
   width: 20px;
   height: 20px;
-  border: 2px solid #8c8c8c;
-  border-top: 2px solid #1890ff;
+  border: 2px solid var(--ant-color-text-tertiary, #8c8c8c);
+  border-top: 2px solid var(--ant-color-primary, #1890ff);
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin-left: 8px;
@@ -404,7 +211,7 @@
   right: 0;
   bottom: 0;
   z-index: 1000;
-  background: white;
+  background: var(--ant-color-bg-container, white);
   padding: 16px;
 }
 
@@ -413,22 +220,13 @@
   margin-bottom: 16px;
 }
 
-.statsCard .ant-statistic-title {
-  font-size: 12px;
-  color: #666;
-}
-
-.statsCard .ant-statistic-content {
-  font-size: 16px;
-}
-
 /* 过滤控制样式 */
 .filterControls {
   margin-bottom: 16px;
   padding: 12px;
-  background: #fafafa;
+  background: var(--ant-color-fill-quaternary, #fafafa);
   border-radius: 4px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
 }
 
 /* 工具栏样式 */
@@ -461,19 +259,19 @@
 }
 
 .connectionStatus.connected {
-  color: #52c41a;
+  color: var(--ant-color-success, #52c41a);
 }
 
 .connectionStatus.connecting {
-  color: #faad14;
+  color: var(--ant-color-warning, #faad14);
 }
 
 .connectionStatus.disconnected {
-  color: #999;
+  color: var(--ant-color-text-tertiary, #999);
 }
 
 .connectionStatus.error {
-  color: #ff4d4f;
+  color: var(--ant-color-error, #ff4d4f);
 }
 
 /* 状态指示点 */
@@ -485,67 +283,30 @@
 }
 
 .statusDot.connected {
-  background-color: #52c41a;
+  background-color: var(--ant-color-success, #52c41a);
   animation: pulse 2s infinite;
 }
 
 .statusDot.connecting {
-  background-color: #faad14;
+  background-color: var(--ant-color-warning, #faad14);
   animation: blink 1s infinite;
 }
 
 .statusDot.disconnected {
-  background-color: #999;
+  background-color: var(--ant-color-text-tertiary, #999);
 }
 
 .statusDot.error {
-  background-color: #ff4d4f;
+  background-color: var(--ant-color-error, #ff4d4f);
   animation: blink 0.5s infinite;
 }
 
-/* 动画效果 */
 @keyframes pulse {
-  0% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-  100% {
-    opacity: 1;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 @keyframes blink {
-  0%, 50% {
-    opacity: 1;
-  }
-  51%, 100% {
-    opacity: 0;
-  }
-}
-
-/* 暗色主题支持 */
-:global(.dark-theme) .logViewer .filterControls {
-  background: #1f1f1f;
-  border-color: #303030;
-}
-
-:global(.light-theme) .logViewer .filterControls {
-  background: #fafafa;
-  border-color: #f0f0f0;
-}
-
-/* 虚拟化日志容器边框适配 */
-.logContainer {
-  border: 1px solid var(--log-border-color, #d9d9d9);
-  border-radius: 4px;
-}
-
-:global(.light-theme) .logContainer {
-  --log-border-color: #d9d9d9;
-}
-
-:global(.dark-theme) .logContainer {
-  --log-border-color: #434343;
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
 }
