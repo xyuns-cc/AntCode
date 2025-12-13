@@ -1,301 +1,319 @@
 """
-异步文件流式读取服务
-提供高效的大文件读取和处理功能
+异步文件流服务
+提供大文件的流式读取、搜索等功能
 """
 
-import asyncio
 import os
+import re
+from collections import deque
 from datetime import datetime, timezone
+from typing import AsyncGenerator, Optional
 
 import aiofiles
 from loguru import logger
 
 
 class AsyncFileStreamService:
-    """异步文件流式读取服务"""
-    
-    def __init__(self, chunk_size = 8192, max_file_size = 100 * 1024 * 1024):
-        self.chunk_size = chunk_size
-        self.max_file_size = max_file_size  # 100MB限制
-        
-    async def stream_file_content(self, file_path, start_pos = 0, 
-                                chunk_size = None):
+    """异步文件流服务类"""
+
+    def __init__(self):
+        # 默认块大小 64KB，适合日志文件读取
+        self.chunk_size = 64 * 1024
+        # 行缓冲区大小
+        self.line_buffer_size = 1024
+
+    async def stream_file_content(
+        self, file_path: str, chunk_size: Optional[int] = None
+    ) -> AsyncGenerator[str, None]:
         """
         流式读取文件内容
-        
+
         Args:
             file_path: 文件路径
-            start_pos: 开始位置
-            chunk_size: 块大小
-            
+            chunk_size: 块大小，默认使用实例配置
+
         Yields:
             str: 文件内容块
         """
+        if not os.path.exists(file_path):
+            logger.warning(f"文件不存在: {file_path}")
+            return
+
         chunk_size = chunk_size or self.chunk_size
-        
+
         try:
-            if not os.path.exists(file_path):
-                logger.warning(f"文件不存在: {file_path}")
-                return
-            
-            file_size = os.path.getsize(file_path)
-            if file_size > self.max_file_size:
-                logger.warning(f"文件过大: {file_size} bytes, 限制: {self.max_file_size} bytes")
-                
-            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                await f.seek(start_pos)
-                
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
                 while True:
                     chunk = await f.read(chunk_size)
                     if not chunk:
                         break
                     yield chunk
-                    
+        except UnicodeDecodeError:
+            # 尝试使用 latin-1 编码读取
+            logger.warning(f"UTF-8 解码失败，尝试 latin-1: {file_path}")
+            async with aiofiles.open(file_path, "r", encoding="latin-1") as f:
+                while True:
+                    chunk = await f.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
         except Exception as e:
             logger.error(f"流式读取文件失败 {file_path}: {e}")
             raise
-    
-    async def stream_file_lines(self, file_path, max_lines = None,
-                              reverse = False):
+
+    async def stream_file_lines(
+        self, file_path: str, max_lines: Optional[int] = None
+    ) -> AsyncGenerator[str, None]:
         """
         按行流式读取文件
-        
+
         Args:
             file_path: 文件路径
-            max_lines: 最大行数
-            reverse: 是否倒序读取（读取最后N行）
-            
+            max_lines: 最大行数，None 表示读取所有行
+
         Yields:
             str: 文件行内容
         """
+        if not os.path.exists(file_path):
+            logger.warning(f"文件不存在: {file_path}")
+            return
+
+        line_count = 0
+
         try:
-            if not os.path.exists(file_path):
-                return
-                
-            if reverse and max_lines:
-                # 倒序读取最后N行
-                lines = await self._read_last_n_lines(file_path, max_lines)
-                for line in lines:
-                    yield line
-            else:
-                # 正序流式读取
-                line_count = 0
-                async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                    async for line in f:
-                        if max_lines and line_count >= max_lines:
-                            break
-                        yield line.rstrip('\n\r')
-                        line_count += 1
-                        
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                async for line in f:
+                    yield line.rstrip("\n\r")
+                    line_count += 1
+                    if max_lines and line_count >= max_lines:
+                        break
+        except UnicodeDecodeError:
+            logger.warning(f"UTF-8 解码失败，尝试 latin-1: {file_path}")
+            async with aiofiles.open(file_path, "r", encoding="latin-1") as f:
+                async for line in f:
+                    yield line.rstrip("\n\r")
+                    line_count += 1
+                    if max_lines and line_count >= max_lines:
+                        break
         except Exception as e:
-            logger.error(f"按行流式读取失败 {file_path}: {e}")
+            logger.error(f"按行读取文件失败 {file_path}: {e}")
             raise
-    
-    async def _read_last_n_lines(self, file_path, n):
-        """高效读取文件最后N行"""
-        try:
-            async with aiofiles.open(file_path, 'rb') as f:
-                # 移动到文件末尾
-                await f.seek(0, 2)
-                file_size = await f.tell()
-                
-                if file_size == 0:
-                    return []
-                
-                # 从文件末尾向前读取
-                buffer_size = min(8192, file_size)
-                lines_found = []
-                pos = file_size
-                buffer = b''
-                
-                while len(lines_found) < n and pos > 0:
-                    # 计算读取位置
-                    read_size = min(buffer_size, pos)
-                    pos -= read_size
-                    
-                    await f.seek(pos)
-                    chunk = await f.read(read_size)
-                    buffer = chunk + buffer
-                    
-                    # 按行分割
-                    lines = buffer.split(b'\n')
-                    
-                    # 保留第一行（可能不完整）作为下次的buffer
-                    if pos > 0:
-                        buffer = lines[0]
-                        lines = lines[1:]
-                    else:
-                        buffer = b''
-                    
-                    # 添加完整的行（倒序）
-                    for line in reversed(lines):
-                        if line.strip():  # 跳过空行
-                            lines_found.insert(0, line.decode('utf-8', errors='ignore'))
-                            if len(lines_found) >= n:
-                                break
-                
-                return lines_found[-n:] if len(lines_found) > n else lines_found
-                
-        except Exception as e:
-            logger.error(f"读取最后N行失败 {file_path}: {e}")
-            return []
-    
-    async def get_file_tail(self, file_path, lines = 100):
+
+    async def get_file_tail(self, file_path: str, lines: int = 100) -> str:
         """
-        获取文件尾部内容（类似tail命令）
-        
+        获取文件最后 N 行
+
         Args:
             file_path: 文件路径
-            lines: 行数
-            
+            lines: 要获取的行数
+
         Returns:
-            str: 文件尾部内容
+            str: 文件最后 N 行内容
         """
-        try:
-            tail_lines = await self._read_last_n_lines(file_path, lines)
-            return '\n'.join(tail_lines)
-        except Exception as e:
-            logger.error(f"获取文件尾部失败 {file_path}: {e}")
+        if not os.path.exists(file_path):
             return ""
-    
-    async def monitor_file_changes(self, file_path, 
-                                 callback,
-                                 poll_interval = 1.0):
-        """
-        监控文件变化并调用回调
-        
-        Args:
-            file_path: 文件路径
-            callback: 变化回调函数
-            poll_interval: 轮询间隔（秒）
-        """
-        last_pos = 0
-        last_size = 0
-        
-        if os.path.exists(file_path):
-            last_size = os.path.getsize(file_path)
-            last_pos = last_size
-        
+
         try:
-            while True:
-                await asyncio.sleep(poll_interval)
-                
-                if not os.path.exists(file_path):
-                    continue
-                    
-                current_size = os.path.getsize(file_path)
-                
-                if current_size > last_pos:
-                    # 文件有新内容
-                    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                        await f.seek(last_pos)
-                        new_content = await f.read(current_size - last_pos)
-                        
-                        if new_content:
-                            await callback(new_content)
-                    
-                    last_pos = current_size
-                elif current_size < last_size:
-                    # 文件被截断或重新创建
-                    last_pos = 0
-                    logger.info(f"文件被重置: {file_path}")
-                
-                last_size = current_size
-                
-        except asyncio.CancelledError:
-            logger.info(f"文件监控已取消: {file_path}")
+            # 使用 deque 保持固定大小的行缓冲区
+            tail_lines = deque(maxlen=lines)
+
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                async for line in f:
+                    tail_lines.append(line.rstrip("\n\r"))
+
+            return "\n".join(tail_lines)
+
+        except UnicodeDecodeError:
+            logger.warning(f"UTF-8 解码失败，尝试 latin-1: {file_path}")
+            tail_lines = deque(maxlen=lines)
+            async with aiofiles.open(file_path, "r", encoding="latin-1") as f:
+                async for line in f:
+                    tail_lines.append(line.rstrip("\n\r"))
+            return "\n".join(tail_lines)
+
         except Exception as e:
-            logger.error(f"文件监控异常 {file_path}: {e}")
-    
-    async def search_in_file(self, file_path, pattern, 
-                           case_sensitive = False, 
-                           max_matches = 1000):
+            logger.error(f"读取文件尾部失败 {file_path}: {e}")
+            return f"读取失败: {e}"
+
+    async def search_in_file(
+        self,
+        file_path: str,
+        pattern: str,
+        case_sensitive: bool = False,
+        max_matches: int = 1000,
+    ) -> list[dict]:
         """
-        在文件中搜索模式
-        
+        在文件中搜索
+
         Args:
             file_path: 文件路径
-            pattern: 搜索模式
+            pattern: 搜索模式（支持正则表达式）
             case_sensitive: 是否区分大小写
             max_matches: 最大匹配数
-            
+
         Returns:
-            list: 匹配结果列表
+            list[dict]: 匹配结果列表，每项包含行号和内容
         """
-        matches = []
-        
-        try:
-            if not case_sensitive:
-                pattern = pattern.lower()
-            
-            line_number = 0
-            async for line in self.stream_file_lines(file_path):
-                line_number += 1
-                search_line = line if case_sensitive else line.lower()
-                
-                if pattern in search_line:
-                    matches.append({
-                        'line_number': line_number,
-                        'content': line,
-                        'position': search_line.find(pattern)
-                    })
-                    
-                    if len(matches) >= max_matches:
-                        break
-            
-            return matches
-            
-        except Exception as e:
-            logger.error(f"文件搜索失败 {file_path}: {e}")
+        if not os.path.exists(file_path):
             return []
-    
-    async def get_file_stats(self, file_path):
+
+        results = []
+        flags = 0 if case_sensitive else re.IGNORECASE
+
+        try:
+            compiled_pattern = re.compile(pattern, flags)
+        except re.error as e:
+            logger.error(f"无效的正则表达式 '{pattern}': {e}")
+            # 如果正则无效，使用简单字符串匹配
+            compiled_pattern = None
+
+        try:
+            line_number = 0
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                async for line in f:
+                    line_number += 1
+                    line_content = line.rstrip("\n\r")
+
+                    # 匹配检查
+                    matched = False
+                    if compiled_pattern:
+                        matched = compiled_pattern.search(line_content) is not None
+                    else:
+                        # 简单字符串匹配
+                        if case_sensitive:
+                            matched = pattern in line_content
+                        else:
+                            matched = pattern.lower() in line_content.lower()
+
+                    if matched:
+                        results.append(
+                            {"line_number": line_number, "content": line_content}
+                        )
+                        if len(results) >= max_matches:
+                            break
+
+        except UnicodeDecodeError:
+            logger.warning(f"UTF-8 解码失败，尝试 latin-1: {file_path}")
+            line_number = 0
+            async with aiofiles.open(file_path, "r", encoding="latin-1") as f:
+                async for line in f:
+                    line_number += 1
+                    line_content = line.rstrip("\n\r")
+
+                    matched = False
+                    if compiled_pattern:
+                        matched = compiled_pattern.search(line_content) is not None
+                    else:
+                        if case_sensitive:
+                            matched = pattern in line_content
+                        else:
+                            matched = pattern.lower() in line_content.lower()
+
+                    if matched:
+                        results.append(
+                            {"line_number": line_number, "content": line_content}
+                        )
+                        if len(results) >= max_matches:
+                            break
+
+        except Exception as e:
+            logger.error(f"搜索文件失败 {file_path}: {e}")
+
+        return results
+
+    async def get_file_stats(self, file_path: str) -> dict:
         """
         获取文件统计信息
-        
+
         Args:
             file_path: 文件路径
-            
+
         Returns:
             dict: 文件统计信息
         """
+        if not os.path.exists(file_path):
+            return {
+                "exists": False,
+                "size": 0,
+                "lines": 0,
+                "modified_time": None,
+                "error": "文件不存在",
+            }
+
         try:
-            if not os.path.exists(file_path):
-                return {
-                    'exists': False,
-                    'size': 0,
-                    'lines': 0,
-                    'created': None,
-                    'modified': None,
-                    'readable': False
-                }
-            
-            stat = os.stat(file_path)
-            
-            # 计算行数
-            line_count = 0
-            async for _ in self.stream_file_lines(file_path):
-                line_count += 1
-            
+            # 获取文件基本信息
+            stat_result = os.stat(file_path)
+            file_size = stat_result.st_size
+            modified_time = datetime.fromtimestamp(
+                stat_result.st_mtime, tz=timezone.utc
+            )
+
+            # 计算行数（对大文件使用估算）
+            if file_size > 100 * 1024 * 1024:  # 大于 100MB
+                # 估算行数：读取前 1MB 统计平均行长度
+                line_count = await self._estimate_line_count(file_path, file_size)
+            else:
+                line_count = await self._count_lines(file_path)
+
             return {
-                'exists': True,
-                'size': stat.st_size,
-                'lines': line_count,
-                'created': datetime.fromtimestamp(stat.st_ctime, timezone.utc),
-                'modified': datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-                'readable': os.access(file_path, os.R_OK),
-                'size_mb': round(stat.st_size / 1024 / 1024, 2)
+                "exists": True,
+                "size": file_size,
+                "size_human": self._format_size(file_size),
+                "lines": line_count,
+                "modified_time": modified_time.isoformat(),
             }
-            
+
         except Exception as e:
-            logger.error(f"获取文件统计失败 {file_path}: {e}")
+            logger.error(f"获取文件信息失败 {file_path}: {e}")
             return {
-                'exists': False,
-                'size': 0,
-                'lines': 0,
-                'error': str(e)
+                "exists": True,
+                "size": 0,
+                "lines": 0,
+                "modified_time": None,
+                "error": str(e),
             }
+
+    async def _count_lines(self, file_path: str) -> int:
+        """计算文件行数"""
+        count = 0
+        try:
+            async with aiofiles.open(file_path, "rb") as f:
+                while True:
+                    chunk = await f.read(self.chunk_size)
+                    if not chunk:
+                        break
+                    count += chunk.count(b"\n")
+        except Exception as e:
+            logger.error(f"计算行数失败 {file_path}: {e}")
+        return count
+
+    async def _estimate_line_count(self, file_path: str, file_size: int) -> int:
+        """估算大文件行数"""
+        try:
+            sample_size = 1024 * 1024  # 1MB 样本
+            async with aiofiles.open(file_path, "rb") as f:
+                sample = await f.read(sample_size)
+                if not sample:
+                    return 0
+                sample_lines = sample.count(b"\n")
+                if sample_lines == 0:
+                    return 1
+                avg_line_length = len(sample) / sample_lines
+                return int(file_size / avg_line_length)
+        except Exception as e:
+            logger.error(f"估算行数失败 {file_path}: {e}")
+            return 0
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        """格式化文件大小"""
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size < 1024:
+                return f"{size:.2f} {unit}"
+            size /= 1024
+        return f"{size:.2f} PB"
 
 
 # 创建全局实例
 file_stream_service = AsyncFileStreamService()
+

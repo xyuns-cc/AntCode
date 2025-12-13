@@ -3,15 +3,16 @@
 提供细粒度的权限控制和安全验证
 """
 
-import hashlib
 import time
 
 from fastapi import HTTPException, status
+
+from src.utils.hash_utils import calculate_content_hash
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
 from src.models.scheduler import TaskExecution, ScheduledTask
-from src.models.user import User
+from src.services.base import QueryHelper
 
 
 class LogPermissionError(Exception):
@@ -74,8 +75,12 @@ class LogSecurityService:
                     else:
                         raise LogPermissionError("无权访问此执行记录")
             
-            # 数据库验证
-            execution = await TaskExecution.get(execution_id=execution_id)
+            # 数据库验证（支持 execution_id UUID 和 public_id）
+            execution = await TaskExecution.get_or_none(execution_id=execution_id)
+            if not execution:
+                execution = await TaskExecution.get_or_none(public_id=execution_id)
+            if not execution:
+                raise DoesNotExist("执行记录不存在")
             
             # 获取关联任务
             task = await ScheduledTask.get(id=execution.task_id)
@@ -83,8 +88,8 @@ class LogSecurityService:
             # 检查基础权限
             if task.user_id != user.user_id:
                 # 检查是否为管理员
-                user_obj = await User.get(id=user.user_id)
-                if not user_obj.is_admin:
+                is_admin = await QueryHelper.is_admin(user.user_id)
+                if not is_admin:
                     # 缓存权限结果
                     self._permission_cache[cache_key] = {
                         "has_permission": False,
@@ -138,8 +143,8 @@ class LogSecurityService:
         
         # 删除权限：任务所有者或管理员
         elif operation == "delete":
-            user_obj = await User.get(id=user.user_id)
-            if task.user_id != user.user_id and not user_obj.is_admin:
+            is_admin = await QueryHelper.is_admin(user.user_id)
+            if task.user_id != user.user_id and not is_admin:
                 raise LogPermissionError("仅任务所有者或管理员可以删除日志")
         
         else:
@@ -249,7 +254,7 @@ class EnhancedErrorHandler:
         context_str = str(context)
         hash_input = f"{error_str}:{context_str}:{time.time()}"
         
-        return hashlib.md5(hash_input.encode()).hexdigest()[:8]
+        return calculate_content_hash(hash_input)[:8]
     
     def _check_error_patterns(self, error, context):
         """检查错误模式"""

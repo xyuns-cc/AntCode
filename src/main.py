@@ -9,7 +9,7 @@ if __name__ == '__main__':
     LOGGING_CONFIG["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
     LOGGING_CONFIG["formatters"]["access"]["fmt"] = '%(asctime)s %(levelprefix)s %(message)s - "%(request_line)s" %(status_code)s'
     LOGGING_CONFIG["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
-    
+
     # 使用配置文件中的主机和端口
     uvicorn.run(
         "src:app",

@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Card,
-  Table,
   Button,
   Space,
   Modal,
@@ -12,7 +11,8 @@ import {
   Popconfirm,
   Tooltip,
   Row,
-  Col
+  Col,
+  theme
 } from 'antd'
 import {
   PlusOutlined,
@@ -21,9 +21,11 @@ import {
   ReloadOutlined,
   KeyOutlined,
   UserOutlined,
-  TeamOutlined
+  TeamOutlined,
+  SearchOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import ResponsiveTable from '@/components/common/ResponsiveTable'
 import { useAuth } from '@/hooks/useAuth'
 import apiClient from '@/services/api'
 import type { User, ApiResponse } from '@/types'
@@ -44,11 +46,13 @@ interface PasswordFormData {
 
 const INITIAL_PAGE = 1
 const INITIAL_PAGE_SIZE = 20
-const INITIAL_SORT_FIELD: 'id' | 'username' | 'created_at' | null = null
-const INITIAL_SORT_ORDER: 'asc' | 'desc' = 'asc'
+
+type SortField = 'id' | 'username' | 'created_at' | null
+type SortOrder = 'asc' | 'desc'
 
 const UserManagement: React.FC = () => {
   const { user: currentUser } = useAuth()
+  const { token } = theme.useToken()
   
   // 用户列表数据
   const [users, setUsers] = useState<User[]>([])
@@ -58,8 +62,14 @@ const UserManagement: React.FC = () => {
     pageSize: INITIAL_PAGE_SIZE,
     total: 0
   })
-  const [sortField, setSortField] = useState<typeof INITIAL_SORT_FIELD>(INITIAL_SORT_FIELD)
-  const [sortOrder, setSortOrder] = useState<typeof INITIAL_SORT_ORDER>(INITIAL_SORT_ORDER)
+  const [sortField, setSortField] = useState<SortField>(null)
+  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
+  
+  // 搜索状态
+  const [searchKeyword, setSearchKeyword] = useState('')
+
+  // 批量选择
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
   // 表单状态
   const [createModalVisible, setCreateModalVisible] = useState(false)
@@ -78,8 +88,8 @@ const UserManagement: React.FC = () => {
   }: {
     page: number
     size: number
-    sortField?: 'id' | 'username' | 'created_at' | null
-    sortOrder?: 'asc' | 'desc'
+    sortField?: SortField
+    sortOrder?: SortOrder
   }) => {
     if (!currentUser?.is_admin) {
       return
@@ -90,7 +100,7 @@ const UserManagement: React.FC = () => {
       const sortFieldValue = sortFieldOverride ?? undefined
       const sortOrderValue = sortFieldOverride ? (sortOrderOverride ?? 'asc') : undefined
 
-      const response = await apiClient.get<any>('/api/v1/users/', {
+      const response = await apiClient.get<{ success?: boolean; data?: { items?: unknown[]; total?: number } }>('/api/v1/users/', {
         params: {
           page,
           size,
@@ -139,8 +149,8 @@ const UserManagement: React.FC = () => {
           total
         })
       }
-    } catch (error: any) {
-      console.error('获取用户列表失败:', error)
+    } catch {
+      // 错误由拦截器处理
       setUsers([])
     } finally {
       setLoading(false)
@@ -149,8 +159,8 @@ const UserManagement: React.FC = () => {
 
   // 处理排序
   const handleSort = (field: 'id' | 'username' | 'created_at') => {
-    let nextField: typeof field | null = field
-    let nextOrder: 'asc' | 'desc' = 'asc'
+    let nextField: SortField = field
+    let nextOrder: SortOrder = 'asc'
 
     if (sortField === field) {
       if (sortOrder === 'asc') {
@@ -212,8 +222,8 @@ const UserManagement: React.FC = () => {
           sortOrder
         })
       }
-    } catch (error: any) {
-      console.error('创建用户失败:', error)
+    } catch {
+      // 错误由拦截器处理
     }
   }
 
@@ -235,8 +245,8 @@ const UserManagement: React.FC = () => {
           sortOrder
         })
       }
-    } catch (error: any) {
-      console.error('更新用户失败:', error)
+    } catch {
+      // 错误由拦截器处理
     }
   }
 
@@ -257,18 +267,30 @@ const UserManagement: React.FC = () => {
         passwordForm.resetFields()
         setSelectedUser(null)
       }
-    } catch (error: any) {
-      console.error('重置密码失败:', error)
+    } catch {
+      // 错误由拦截器处理
     }
   }
 
+  // 前端过滤用户列表
+  const filteredUsers = useMemo(() => {
+    if (!searchKeyword.trim()) {
+      return users
+    }
+    const keyword = searchKeyword.trim().toLowerCase()
+    return users.filter(user => 
+      String(user.id).includes(keyword) || 
+      user.username.toLowerCase().includes(keyword)
+    )
+  }, [users, searchKeyword])
+
   // 删除用户
-  const handleDeleteUser = async (userId: number) => {
+  const handleDeleteUser = async (userId: number | string) => {
     try {
       const response = await apiClient.delete<ApiResponse>(`/api/v1/users/${userId}`)
       
       if (response.data.success) {
-        const remainingUsers = users.filter(u => u.id !== userId)
+        const remainingUsers = users.filter(u => String(u.id) !== String(userId))
         setUsers(remainingUsers)
 
         if (remainingUsers.length === 0 && pagination.current > 1) {
@@ -292,9 +314,68 @@ const UserManagement: React.FC = () => {
           })
         }
       }
-    } catch (error: any) {
-      console.error('删除用户失败:', error)
+    } catch {
+      // 错误由拦截器处理
     }
+  }
+
+  // 批量删除用户
+  const handleBatchDelete = () => {
+    if (selectedRowKeys.length === 0) return
+
+    // 过滤掉当前用户和管理员
+    const deletableKeys = selectedRowKeys.filter(key => {
+      const user = users.find(u => u.id === key)
+      return user && !user.is_admin && String(user.id) !== String(currentUser?.user_id)
+    })
+
+    if (deletableKeys.length === 0) {
+      Modal.warning({
+        title: '无法删除',
+        content: '选中的用户中没有可删除的用户（不能删除自己或管理员）'
+      })
+      return
+    }
+
+    Modal.confirm({
+      title: '确认批量删除',
+      content: `确定要删除选中的 ${deletableKeys.length} 个用户吗？此操作不可恢复。`,
+      okText: '确认删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        let successCount = 0
+        let failedCount = 0
+        
+        for (const userId of deletableKeys) {
+          try {
+            await apiClient.delete(`/api/v1/users/${userId}`)
+            successCount++
+          } catch {
+            failedCount++
+          }
+        }
+        
+        if (successCount > 0) {
+          Modal.success({
+            title: '删除成功',
+            content: `成功删除 ${successCount} 个用户${failedCount > 0 ? `，${failedCount} 个删除失败` : ''}`
+          })
+          setSelectedRowKeys([])
+          fetchUsers({
+            page: pagination.current,
+            size: pagination.pageSize,
+            sortField,
+            sortOrder
+          })
+        } else if (failedCount > 0) {
+          Modal.error({
+            title: '删除失败',
+            content: `${failedCount} 个用户删除失败`
+          })
+        }
+      }
+    })
   }
 
   // 表格列配置
@@ -323,24 +404,43 @@ const UserManagement: React.FC = () => {
       ),
       dataIndex: 'username',
       key: 'username',
+      width: 180,
+      ellipsis: { showTitle: false },
       render: (text: string, record: User) => (
-        <Space>
-          <UserOutlined />
-          <span>{text}</span>
-          {record.is_admin && <Tag color="gold" icon={<TeamOutlined />}>管理员</Tag>}
-        </Space>
+        <Tooltip title={text} placement="topLeft">
+          <Space>
+            <UserOutlined />
+            <span>{text}</span>
+            {record.is_admin && (
+              <Tag 
+                color="gold"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+              >
+                <TeamOutlined style={{ fontSize: 12 }} />
+                <span>管理员</span>
+              </Tag>
+            )}
+          </Space>
+        </Tooltip>
       )
     },
     {
       title: '邮箱',
       dataIndex: 'email',
       key: 'email',
-      render: (email: string) => email || '-'
+      width: 200,
+      ellipsis: { showTitle: false },
+      render: (email: string) => (
+        <Tooltip title={email || '-'} placement="topLeft">
+          <span>{email || '-'}</span>
+        </Tooltip>
+      )
     },
     {
       title: '状态',
       dataIndex: 'is_active',
       key: 'is_active',
+      width: 80,
       render: (isActive: boolean) => (
         <Tag color={isActive ? 'success' : 'error'}>
           {isActive ? '激活' : '禁用'}
@@ -358,21 +458,24 @@ const UserManagement: React.FC = () => {
       ),
       dataIndex: 'created_at',
       key: 'created_at',
+      width: 170,
       render: (date: string) => new Date(date).toLocaleString()
     },
     {
       title: '最后登录',
       dataIndex: 'last_login_at',
       key: 'last_login_at',
+      width: 170,
       render: (date: string) => date ? new Date(date).toLocaleString() : '从未登录'
     },
     {
       title: '操作',
       key: 'actions',
-      width: 200,
+      width: 150,
+      fixed: 'right',
       render: (_, record: User) => (
         <Space>
-          <Tooltip title="编辑用户">
+          <Tooltip title="编辑用户" placement="top">
             <Button
               type="text"
               icon={<EditOutlined />}
@@ -388,7 +491,7 @@ const UserManagement: React.FC = () => {
               }}
             />
           </Tooltip>
-          <Tooltip title="重置密码">
+          <Tooltip title="重置密码" placement="top">
             <Button
               type="text"
               icon={<KeyOutlined />}
@@ -398,7 +501,7 @@ const UserManagement: React.FC = () => {
               }}
             />
           </Tooltip>
-          {record.id !== currentUser?.id && (
+          {String(record.id) !== String(currentUser?.id) && (
             <Popconfirm
               title="确认删除"
               description={`确定要删除用户 "${record.username}" 吗？此操作不可恢复。`}
@@ -406,7 +509,7 @@ const UserManagement: React.FC = () => {
               okText="确定"
               cancelText="取消"
             >
-              <Tooltip title="删除用户">
+              <Tooltip title="删除用户" placement="top">
                 <Button
                   type="text"
                   danger
@@ -426,8 +529,8 @@ const UserManagement: React.FC = () => {
       fetchUsers({
         page: INITIAL_PAGE,
         size: INITIAL_PAGE_SIZE,
-        sortField: INITIAL_SORT_FIELD,
-        sortOrder: INITIAL_SORT_ORDER
+        sortField: null,
+        sortOrder: 'asc'
       })
     }
   }, [currentUser?.is_admin, fetchUsers])
@@ -438,7 +541,7 @@ const UserManagement: React.FC = () => {
       <div className={styles.accessDenied}>
         <Card>
           <div style={{ textAlign: 'center', padding: '2rem' }}>
-            <TeamOutlined style={{ fontSize: '4rem', color: '#ff7875' }} />
+            <TeamOutlined style={{ fontSize: '4rem', color: token.colorError }} />
             <h3>权限不足</h3>
             <p>只有管理员才能访问用户管理页面</p>
           </div>
@@ -448,16 +551,22 @@ const UserManagement: React.FC = () => {
   }
 
   return (
-    <div className={styles.container}>
-      <Card 
-        title={
-          <Space>
-            <TeamOutlined />
-            <span>用户管理</span>
-          </Space>
-        }
-        extra={
-          <Space>
+    <div style={{ padding: '24px' }}>
+      {/* 页面标题 */}
+      <div style={{ marginBottom: '24px' }}>
+        <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <TeamOutlined />
+          用户管理
+        </h1>
+        <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
+          管理系统用户和权限
+        </p>
+      </div>
+
+      {/* 工具栏 */}
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+          <Space wrap size="middle">
             <Button
               icon={<ReloadOutlined />}
               onClick={() => fetchUsers({
@@ -477,23 +586,51 @@ const UserManagement: React.FC = () => {
             >
               添加用户
             </Button>
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              onClick={handleBatchDelete}
+            >
+              批量删除{selectedRowKeys.length > 0 && ` (${selectedRowKeys.length})`}
+            </Button>
           </Space>
-        }
-      >
-        <Table
+          <Input
+            placeholder="搜索 ID 或用户名"
+            prefix={<SearchOutlined />}
+            allowClear
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            style={{ width: 200 }}
+          />
+        </div>
+      </Card>
+
+      {/* 用户表格 */}
+      <Card>
+        <ResponsiveTable<User>
           columns={columns}
-        dataSource={users}
+          dataSource={filteredUsers}
           rowKey="id"
           loading={loading}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
+            getCheckboxProps: (record: User) => ({
+              // 禁止选择自己和管理员
+              disabled: record.is_admin || String(record.id) === String(currentUser?.user_id),
+              title: record.is_admin ? '不能删除管理员' : (String(record.id) === String(currentUser?.user_id) ? '不能删除自己' : undefined)
+            })
+          }}
           pagination={{
-          current: pagination.current,
-          pageSize: pagination.pageSize,
-          total: pagination.total,
+            current: pagination.current,
+            pageSize: pagination.pageSize,
+            total: pagination.total,
             showSizeChanger: true,
             showQuickJumper: true,
             showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条`,
-          onChange: (page, size) => handlePaginationChange(page, size || pagination.pageSize),
-            onShowSizeChange: (current, size) => handlePaginationChange(1, size)
+            onChange: (page, size) => handlePaginationChange(page, size || pagination.pageSize),
+            onShowSizeChange: (_current, size) => handlePaginationChange(1, size)
           }}
         />
       </Card>
@@ -515,6 +652,7 @@ const UserManagement: React.FC = () => {
         width={600}
         destroyOnHidden
         maskClosable={false}
+        forceRender
       >
         <Form
           form={createForm}
@@ -606,6 +744,7 @@ const UserManagement: React.FC = () => {
         }}
         footer={null}
         width={600}
+        forceRender
       >
         <Form
           form={editForm}
@@ -662,7 +801,7 @@ const UserManagement: React.FC = () => {
             </Col>
           </Row>
           {selectedUser?.id === currentUser?.id && (
-            <div style={{ marginBottom: 16, color: '#faad14' }}>
+            <div style={{ marginBottom: 16, color: token.colorWarning }}>
               <span>注意：不能修改自己的管理员权限</span>
             </div>
           )}
@@ -694,6 +833,7 @@ const UserManagement: React.FC = () => {
         }}
         footer={null}
         width={400}
+        forceRender
       >
         <Form
           form={passwordForm}

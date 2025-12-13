@@ -2,6 +2,25 @@
 export type ProjectType = 'file' | 'rule' | 'code'
 export type ProjectStatus = 'active' | 'inactive' | 'error'
 
+// 执行策略枚举
+export type ExecutionStrategy = 'local' | 'fixed' | 'specified' | 'auto' | 'prefer'
+
+// 执行策略配置
+export interface ExecutionStrategyConfig {
+  strategy: ExecutionStrategy
+  boundNodeId?: string
+  boundNodeName?: string
+  fallbackEnabled?: boolean
+}
+
+// 执行策略选项（用于UI展示）
+export const EXECUTION_STRATEGY_OPTIONS = [
+  { value: 'local', label: '本地执行', description: '在主节点本地执行任务' },
+  { value: 'fixed', label: '固定节点', description: '仅在绑定节点执行，不可用时失败' },
+  { value: 'auto', label: '自动选择', description: '根据负载自动选择最优节点' },
+  { value: 'prefer', label: '优先绑定节点', description: '优先使用绑定节点，不可用时自动选择其他节点' },
+] as const
+
 // 运行时配置类型
 export interface RuntimeConfig {
   timeout?: number
@@ -35,8 +54,8 @@ export interface DataSchema {
   }
 }
 
-// 分页配置类型
-export interface PaginationConfig {
+// 分页配置类型（旧版，保留兼容）
+export interface LegacyPaginationConfig {
   type: 'url' | 'form' | 'ajax'
   selector?: string
   pattern?: string
@@ -65,7 +84,7 @@ export interface ProxyConfig {
 
 // 基础项目接口
 export interface Project {
-  id: number
+  id: string  // public_id
   name: string
   type: ProjectType
   status: ProjectStatus
@@ -73,12 +92,22 @@ export interface Project {
   tags?: string[]
   created_at: string
   updated_at: string
-  created_by: number
+  created_by: string  // public_id
   created_by_username?: string
   // 环境信息
   python_version?: string
   venv_scope?: 'shared' | 'private'
   venv_path?: string
+  dependencies?: string[]
+
+  // 执行策略配置
+  execution_strategy?: ExecutionStrategy
+  bound_node_id?: string
+  bound_node_name?: string
+  fallback_enabled?: boolean
+  
+  // 区域配置
+  region?: string
 
   // 详情信息（从后端API返回）
   file_info?: FileInfo
@@ -102,6 +131,7 @@ export interface FileInfo {
   file_size: number
   file_hash: string
   file_path?: string
+  original_file_path?: string
   file_type?: string
   entry_point?: string
   runtime_config?: RuntimeConfig
@@ -141,9 +171,14 @@ export interface RuleInfo {
   request_delay: number
   retry_count: number
   timeout: number
+  priority?: number
+  dont_filter?: boolean
   headers?: HttpHeaders
   cookies?: HttpCookies
   proxy_config?: ProxyConfig
+  anti_spider?: AntiSpiderConfig
+  task_config?: TaskConfig
+  browser_config?: BrowserEngineConfig
 }
 
 // 代码信息（从API返回）
@@ -155,12 +190,13 @@ export interface CodeInfo {
   entry_point?: string
   runtime_config?: RuntimeConfig
   environment_vars?: EnvironmentVars
+  documentation?: string
 }
 
 // 文件项目详情
 export interface ProjectFile {
-  id: number
-  project_id: number
+  id: string  // public_id
+  project_id: string  // public_id
   original_name: string
   file_path: string
   file_size: number
@@ -171,8 +207,8 @@ export interface ProjectFile {
 
 // 规则项目详情
 export interface ProjectRule {
-  id: number
-  project_id: number
+  id: string  // public_id
+  project_id: string  // public_id
   target_url: string
   detail_selectors: ExtractionRule[]
   pagination_config?: PaginationConfig
@@ -187,8 +223,8 @@ export interface ProjectRule {
 
 // 代码项目详情
 export interface ProjectCode {
-  id: number
-  project_id: number
+  id: string  // public_id
+  project_id: string  // public_id
   language: string
   code_content: string
   entry_point?: string
@@ -218,7 +254,7 @@ export interface PaginationConfig {
   url_template?: string  // URL模板，如 /page/{page}
   // AJAX方式的配置
   ajax_endpoint?: string  // AJAX请求地址
-  ajax_params?: Record<string, any>  // AJAX请求参数
+  ajax_params?: Record<string, unknown>  // AJAX请求参数
 }
 
 // v2.0.0 新增配置类型
@@ -243,6 +279,18 @@ export interface AntiSpiderConfig {
   browser_fingerprint?: boolean  // 是否模拟浏览器指纹
 }
 
+// 浏览器引擎配置
+export interface BrowserEngineConfig {
+  headless?: boolean  // 无头模式
+  no_imgs?: boolean  // 禁用图片加载
+  mute?: boolean  // 静音模式
+  incognito?: boolean  // 匿名/隐私模式
+  window_size?: string  // 窗口大小，如 "1920,1080"
+  page_load_timeout?: number  // 页面加载超时(秒)
+  user_agent?: string  // 自定义 User-Agent
+  extra_arguments?: string  // 自定义启动参数，逗号分隔
+}
+
 export interface TaskConfig {
   task_id_template?: string  // 任务ID模板
   worker_id?: string  // 工作节点ID
@@ -265,10 +313,28 @@ export interface ProjectCreateRequest {
   venv_scope: 'shared' | 'private'
   python_version: string
   shared_venv_key?: string
+  env_location?: string
+  node_id?: string
+  use_existing_env?: boolean
+  existing_env_name?: string
+  env_name?: string
+  env_description?: string
+
+  // 区域配置
+  region?: string
+  
+  // 执行策略配置（保留兼容）
+  execution_strategy?: ExecutionStrategy
+  bound_node_id?: string
+  fallback_enabled?: boolean
+  
+  // 解释器配置
+  interpreter_source?: string
+  python_bin?: string
 
   // 文件项目字段
   file?: File
-  additionalFiles?: File[] // 新增：附加文件列表
+  additionalFiles?: Array<File | { originFileObj?: File }> // 新增：附加文件列表
   entry_point?: string // 新增：入口文件
   runtime_config?: string | RuntimeConfig // 新增：运行时配置
   environment_vars?: string | EnvironmentVars // 新增：环境变量
@@ -296,6 +362,7 @@ export interface ProjectCreateRequest {
   anti_spider?: string  // 反爬虫配置JSON
   task_config?: string  // 任务配置JSON
   data_schema?: string  // 数据结构定义JSON
+  browser_config?: string  // 浏览器引擎配置JSON
 
   // 代码项目字段
   language?: string
@@ -313,6 +380,14 @@ export interface ProjectUpdateRequest {
   tags?: string[] | string
   status?: ProjectStatus
   type?: ProjectType
+  
+  // 区域配置
+  region?: string
+  
+  // 执行策略配置（保留兼容）
+  execution_strategy?: ExecutionStrategy
+  bound_node_id?: string
+  fallback_enabled?: boolean
   
   // 规则项目更新字段
   target_url?: string
@@ -348,6 +423,12 @@ export interface ProjectUpdateRequest {
   entry_point?: string
   runtime_config?: string
   environment_vars?: string
+  env_location?: string
+  node_id?: string
+  use_existing_env?: boolean
+  existing_env_name?: string
+  env_name?: string
+  env_description?: string
 }
 
 // 项目列表查询参数
@@ -360,7 +441,8 @@ export interface ProjectListParams {
   search?: string
   sort_by?: string
   sort_order?: 'asc' | 'desc'
-  created_by?: number  // 新增：创建者ID筛选
+  created_by?: string  // 创建者 public_id 筛选
+  node_id?: string     // 节点ID筛选
 }
 
 // 项目统计信息
@@ -394,4 +476,17 @@ export interface ProjectImportConfig {
   overwrite_existing?: boolean
   import_tasks?: boolean
   import_logs?: boolean
+}
+
+export interface ProjectFileNode {
+  name: string
+  path?: string
+  type: 'file' | 'directory'
+  size?: number
+  modified_time?: number
+  children?: ProjectFileNode[]
+}
+
+export interface ProjectFileStructure {
+  structure: ProjectFileNode
 }

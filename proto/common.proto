@@ -1,0 +1,30 @@
+// Common message types for gRPC communication
+// Requirements: 1.4, 14.1
+
+syntax = "proto3";
+
+package antcode.v1;
+
+// Timestamp message for consistent time representation
+message Timestamp {
+  int64 seconds = 1;  // Seconds since Unix epoch
+  int32 nanos = 2;    // Nanoseconds within the second
+}
+
+// System metrics reported by Worker nodes
+message Metrics {
+  float cpu = 1;                    // CPU usage percentage (0-100)
+  float memory = 2;                 // Memory usage percentage (0-100)
+  float disk = 3;                   // Disk usage percentage (0-100)
+  int32 running_tasks = 4;          // Number of currently running tasks
+  int32 max_concurrent_tasks = 5;   // Maximum concurrent tasks allowed
+  int32 task_count = 6;             // Total tasks executed
+}
+
+// Operating system information from Worker nodes
+message OSInfo {
+  string os_type = 1;        // Operating system type (e.g., "Linux", "Windows")
+  string os_version = 2;     // Operating system version
+  string python_version = 3; // Python interpreter version
+  string machine_arch = 4;   // Machine architecture (e.g., "x86_64", "arm64")
+}

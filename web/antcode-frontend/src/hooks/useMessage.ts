@@ -35,13 +35,13 @@ export const globalMessage = {
 /** Global notification API */
 export const globalNotification = {
   success: (message: string, description?: string, duration?: number) =>
-    notificationInstance?.success({ message, description, duration: duration ?? 4.5, placement: 'topRight' }),
+    notificationInstance?.success({ message, description, duration: duration ?? 3, placement: 'topRight' }),
   error: (message: string, description?: string, duration?: number) =>
-    notificationInstance?.error({ message, description, duration: duration ?? 0, placement: 'topRight' }),
+    notificationInstance?.error({ message, description, duration: duration ?? 5, placement: 'topRight' }),
   warning: (message: string, description?: string, duration?: number) =>
-    notificationInstance?.warning({ message, description, duration: duration ?? 4.5, placement: 'topRight' }),
+    notificationInstance?.warning({ message, description, duration: duration ?? 4, placement: 'topRight' }),
   info: (message: string, description?: string, duration?: number) =>
-    notificationInstance?.info({ message, description, duration: duration ?? 4.5, placement: 'topRight' }),
+    notificationInstance?.info({ message, description, duration: duration ?? 3, placement: 'topRight' }),
   destroy: () => notificationInstance?.destroy(),
 }
 
@@ -64,8 +64,14 @@ export function showNotification(
   description?: string,
   options?: { duration?: number; durationMs?: number }
 ) {
+  const defaultDurations: Record<NoticeType, number> = {
+    success: 3,
+    error: 5,
+    warning: 4,
+    info: 3
+  }
   const duration = options?.durationMs 
     ? options.durationMs / 1000 
-    : options?.duration ?? (type === 'error' ? 0 : 4.5)
+    : options?.duration ?? defaultDurations[type]
   return globalNotification[type](message, description, duration)
 }

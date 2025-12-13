@@ -37,20 +37,20 @@ class ProjectFileService:
         """
         try:
             full_path = file_storage_service.get_file_path(file_path)
-            
+
             if not os.path.exists(full_path):
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"文件路径不存在: {file_path}"
                 )
-            
+
             if os.path.isfile(full_path):
                 # 如果是文件，返回文件信息
                 return await self._get_file_info(full_path)
             else:
                 # 如果是目录，返回目录结构
                 return await self._get_directory_structure(full_path)
-                
+
         except Exception as e:
             logger.error(f"获取文件结构失败: {e}")
             raise HTTPException(
@@ -74,7 +74,7 @@ class ProjectFileService:
                     children_count = len(os.listdir(path)) if os.path.isdir(path) else 0
                 except (PermissionError, OSError):
                     children_count = 0
-                    
+
                 return {
                     "name": os.path.basename(path),
                     "type": "directory",
@@ -84,7 +84,7 @@ class ProjectFileService:
                     "truncated": True,
                     "message": f"目录深度超过{max_depth}层，已截断"
                 }
-            
+
             name = os.path.basename(path) or "root"
             item = {
                 "name": name,
@@ -93,20 +93,20 @@ class ProjectFileService:
                 "size": 0,
                 "modified_time": os.path.getmtime(path)
             }
-            
+
             if os.path.isdir(path):
                 children = []
                 total_size = 0
                 file_count = 0
                 dir_count = 0
-                
+
                 try:
                     entries = os.listdir(path)
-                    
+
                     # 过滤和排序
                     # 排序：目录在前，文件在后，按名称排序
                     entries.sort(key=lambda x: (not os.path.isdir(os.path.join(path, x)), x.lower()))
-                    
+
                     # 限制单个目录的子项数量，防止超大目录
                     max_children = 1000
                     if len(entries) > max_children:
@@ -114,19 +114,19 @@ class ProjectFileService:
                         item["total_children"] = len(entries)
                         item["message"] = f"目录包含{len(entries)}个项目，仅显示前{max_children}个"
                         entries = entries[:max_children]
-                    
+
                     for entry in entries:
                         # 跳过隐藏文件、系统文件和大型依赖目录
                         if entry.startswith('.') or entry in ['__pycache__', 'node_modules', '.git', '.venv', 'venv', 'dist', 'build']:
                             continue
-                            
+
                         child_path = os.path.join(path, entry)
-                        
+
                         try:
                             child_item = build_tree(child_path, current_depth + 1)
                             children.append(child_item)
                             total_size += child_item.get("size", 0)
-                            
+
                             if child_item.get("type") == "directory":
                                 dir_count += 1
                             else:
@@ -140,13 +140,13 @@ class ProjectFileService:
                                 "error": "权限不足或无法访问",
                                 "path": os.path.relpath(child_path, dir_path)
                             })
-                    
+
                     item["children"] = children
                     item["children_count"] = len(children)
                     item["file_count"] = file_count
                     item["dir_count"] = dir_count
                     item["size"] = total_size
-                    
+
                 except PermissionError:
                     item["error"] = "权限不足"
                     item["children"] = []
@@ -156,22 +156,22 @@ class ProjectFileService:
                     item["error"] = f"读取失败: {str(e)}"
                     item["children"] = []
                     item["children_count"] = 0
-                    
+
             else:
                 # 文件
                 try:
                     stat = os.stat(path)
                     item["size"] = stat.st_size
                     item["mime_type"] = mimetypes.guess_type(path)[0] or "application/octet-stream"
-                    
+
                     # 判断是否为文本文件
                     item["is_text"] = self._is_text_file(path, item["mime_type"])
-                    
+
                 except (OSError, IOError) as e:
                     logger.warning(f"读取文件信息失败: {path}, error: {e}")
                     item["size"] = 0
                     item["error"] = "无法读取文件信息"
-            
+
             return item
 
         try:
@@ -188,7 +188,7 @@ class ProjectFileService:
         try:
             stat = os.stat(file_path)
             mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-            
+
             return {
                 "name": os.path.basename(file_path),
                 "type": "file",
@@ -216,7 +216,7 @@ class ProjectFileService:
                 return True
             if mime_type in ['application/json', 'application/xml', 'application/javascript']:
                 return True
-        
+
         # 基于文件扩展名判断
         text_extensions = {
             '.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.yml', '.yaml',
@@ -224,11 +224,11 @@ class ProjectFileService:
             '.java', '.cpp', '.c', '.h', '.php', '.rb', '.go', '.rs', '.scala',
             '.dockerfile', '.gitignore', '.env', '.toml', '.requirements'
         }
-        
+
         ext = Path(file_path).suffix.lower()
         if ext in text_extensions:
             return True
-        
+
         # 尝试读取文件头部判断
         try:
             with open(file_path, 'rb') as f:
@@ -265,10 +265,10 @@ class ProjectFileService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="非法路径：不允许访问父目录或使用绝对路径"
                 )
-        
+
         full_base_path = file_storage_service.get_file_path(base_path)
         full_base_path = os.path.normpath(full_base_path)
-        
+
         # 判断base_path是文件还是目录
         if os.path.isfile(full_base_path):
             # 单个文件项目：直接使用base_path
@@ -280,9 +280,9 @@ class ProjectFileService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="目录项目必须指定文件路径"
                 )
-            
+
             full_file_path = os.path.normpath(os.path.join(full_base_path, relative_path))
-            
+
             # 安全检查：确保解析后的路径在允许范围内
             try:
                 common = os.path.commonpath([full_file_path, full_base_path])
@@ -297,7 +297,7 @@ class ProjectFileService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="路径访问被拒绝：路径无效"
                 )
-            
+
             return full_file_path
         else:
             raise HTTPException(
@@ -319,25 +319,25 @@ class ProjectFileService:
         try:
             # 验证并解析路径
             full_file_path = self._validate_and_resolve_path(file_path, relative_path)
-            
+
             if not os.path.exists(full_file_path):
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="文件不存在"
                 )
-            
+
             if not os.path.isfile(full_file_path):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="指定路径不是文件"
                 )
-            
+
             # 获取文件信息
             stat = os.stat(full_file_path)
             file_size = stat.st_size
             mime_type = mimetypes.guess_type(full_file_path)[0] or "application/octet-stream"
             is_text = self._is_text_file(full_file_path, mime_type)
-            
+
             result = {
                 "name": os.path.basename(full_file_path),
                 "path": relative_path,
@@ -346,7 +346,7 @@ class ProjectFileService:
                 "mime_type": mime_type,
                 "is_text": is_text
             }
-            
+
             # 如果是文本文件且大小合理，读取内容
             if is_text and file_size <= self.max_preview_size:
                 try:
@@ -354,7 +354,7 @@ class ProjectFileService:
                     encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1']
                     content = None
                     used_encoding = None
-                    
+
                     for encoding in encodings:
                         try:
                             with open(full_file_path, 'r', encoding=encoding) as f:
@@ -363,14 +363,14 @@ class ProjectFileService:
                                 break
                         except (UnicodeDecodeError, LookupError):
                             continue
-                    
+
                     if content is not None:
                         result["content"] = content
                         result["encoding"] = used_encoding
                     else:
                         result["content"] = "文件编码不支持预览，请尝试下载文件"
                         result["error"] = "unsupported_encoding"
-                        
+
                 except Exception as e:
                     logger.error(f"读取文件失败: {full_file_path}, error: {e}")
                     result["content"] = f"读取文件失败: {str(e)}"
@@ -381,9 +381,9 @@ class ProjectFileService:
             else:
                 result["content"] = "二进制文件，不支持文本预览"
                 result["binary"] = True
-            
+
             return result
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -466,14 +466,14 @@ class ProjectFileService:
 
             try:
                 await asyncio.to_thread(_write_file)
-                
+
                 # 写入成功，删除备份
                 if backup_path and os.path.exists(backup_path):
                     try:
                         os.remove(backup_path)
                     except Exception as e:
                         logger.warning(f"删除备份失败: {e}")
-                        
+
             except Exception as write_error:
                 # 写入失败，尝试恢复备份
                 if backup_path and os.path.exists(backup_path):
@@ -511,7 +511,7 @@ class ProjectFileService:
         try:
             # 验证并解析路径
             full_file_path = self._validate_and_resolve_path(file_path, relative_path)
-            
+
             # 检查文件是否存在
             if not os.path.exists(full_file_path):
                 logger.error(f"文件不存在: full_file_path={full_file_path}, file_path={file_path}, relative_path={relative_path}")
@@ -519,7 +519,7 @@ class ProjectFileService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="文件不存在"
                 )
-            
+
             # 检查是否是文件
             if not os.path.isfile(full_file_path):
                 is_dir = os.path.isdir(full_file_path)
@@ -528,19 +528,19 @@ class ProjectFileService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"指定路径是{'目录' if is_dir else '特殊文件'}，不支持下载。请选择具体文件"
                 )
-            
+
             # 获取文件名和MIME类型
             filename = os.path.basename(full_file_path)
             mime_type = mimetypes.guess_type(full_file_path)[0] or "application/octet-stream"
-            
+
             logger.info(f"下载文件: {full_file_path}, size: {os.path.getsize(full_file_path)} bytes")
-            
+
             return FileResponse(
                 path=full_file_path,
                 filename=filename,
                 media_type=mime_type
             )
-            
+
         except HTTPException:
             raise
         except Exception as e:

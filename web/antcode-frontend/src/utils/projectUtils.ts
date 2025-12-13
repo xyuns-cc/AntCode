@@ -2,7 +2,7 @@
  * 项目相关的工具函数
  */
 
-import type { ProjectType, ProjectStatus } from '@/types'
+import type { ProjectType } from '@/types'
 
 // 项目类型中文映射
 export const PROJECT_TYPE_MAP: Record<ProjectType, string> = {

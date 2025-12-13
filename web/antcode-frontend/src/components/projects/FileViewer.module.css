@@ -27,12 +27,8 @@
   right: 0;
   bottom: 0;
   z-index: 1000;
-  background: #ffffff;
+  background: var(--ant-color-bg-container, #ffffff);
   padding: 16px;
-}
-
-:global(.dark-theme) .file-viewer-container.fullscreen {
-  background: #141414;
 }
 
 .fullscreen .file-info-panel {
@@ -40,12 +36,8 @@
 }
 
 .fullscreen .file-content {
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
   border-radius: 0 0 8px 8px;
-}
-
-:global(.dark-theme) .fullscreen .file-content {
-  border-color: #303030;
 }
 
 .file-viewer-card {
@@ -66,25 +58,16 @@
 .file-info {
   margin-bottom: 16px;
   padding: 12px;
-  background: #fafafa;
+  background: var(--ant-color-fill-quaternary, #fafafa);
   border-radius: 6px;
-  border: 1px solid #d9d9d9;
-}
-
-:global(.dark-theme) .file-info {
-  background: #1f1f1f;
-  border-color: #303030;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
 }
 
 .file-content {
   flex: 1;
   overflow: hidden;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
   border-radius: 6px;
-}
-
-:global(.dark-theme) .file-content {
-  border-color: #303030;
 }
 
 .syntax-highlighter-container {
@@ -105,51 +88,29 @@
 }
 
 .syntax-highlighter-container::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: var(--ant-color-fill-tertiary, #f1f1f1);
 }
 
 .syntax-highlighter-container::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: var(--ant-color-border, #c1c1c1);
   border-radius: 4px;
 }
 
 .syntax-highlighter-container::-webkit-scrollbar-thumb:hover {
-  background: #a1a1a1;
+  background: var(--ant-color-border-secondary, #a1a1a1);
 }
 
 .syntax-highlighter-container::-webkit-scrollbar-corner {
-  background: #f1f1f1;
-}
-
-/* 深色主题滚动条 */
-:global(.dark-theme) .syntax-highlighter-container::-webkit-scrollbar-track {
-  background: #262626;
-}
-
-:global(.dark-theme) .syntax-highlighter-container::-webkit-scrollbar-thumb {
-  background: #434343;
-}
-
-:global(.dark-theme) .syntax-highlighter-container::-webkit-scrollbar-thumb:hover {
-  background: #595959;
-}
-
-:global(.dark-theme) .syntax-highlighter-container::-webkit-scrollbar-corner {
-  background: #262626;
+  background: var(--ant-color-fill-tertiary, #f1f1f1);
 }
 
 /* 行号样式调整 */
 .syntax-highlighter-container :global(.linenumber) {
-  color: #999 !important;
+  color: var(--ant-color-text-tertiary, #999) !important;
   user-select: none;
   padding-right: 12px !important;
-  border-right: 1px solid #e8e8e8 !important;
+  border-right: 1px solid var(--ant-color-border-secondary, #e8e8e8) !important;
   margin-right: 12px !important;
-}
-
-:global(.dark-theme) .syntax-highlighter-container :global(.linenumber) {
-  color: #666 !important;
-  border-right-color: #303030 !important;
 }
 
 /* 代码内容样式 */
@@ -196,7 +157,7 @@
 
 .file-viewer-loading .loading-icon {
   font-size: 48px;
-  color: #1890ff;
+  color: var(--ant-color-primary, #1890ff);
 }
 
 /* 错误状态 */
@@ -213,14 +174,14 @@
   align-items: center;
   justify-content: center;
   height: 200px;
-  color: #999;
+  color: var(--ant-color-text-tertiary, #999);
   flex-direction: column;
   gap: 16px;
 }
 
 .file-viewer-empty .empty-icon {
   font-size: 48px;
-  color: #d9d9d9;
+  color: var(--ant-color-border, #d9d9d9);
 }
 
 /* 全屏模式动画 */
@@ -245,8 +206,8 @@
 }
 
 .file-viewer-card :global(.ant-card-extra) .ant-btn:hover {
-  background-color: rgba(24, 144, 255, 0.1);
-  color: #1890ff;
+  background-color: var(--ant-color-primary-bg, rgba(24, 144, 255, 0.1));
+  color: var(--ant-color-primary, #1890ff);
 }
 
 /* 文件标签样式 */
@@ -260,14 +221,10 @@
 
 /* 代码块优化 */
 .syntax-highlighter-container pre[class*="language-"] {
-  background: #f8f9fa !important;
+  background: var(--ant-color-fill-quaternary, #f8f9fa) !important;
   border: none !important;
   border-radius: 6px !important;
   padding: 16px !important;
-}
-
-:global(.dark-theme) .syntax-highlighter-container pre[class*="language-"] {
-  background: #1e1e1e !important;
 }
 
 /* 代码选择优化 */
@@ -283,12 +240,5 @@
 .syntax-highlighter-container .token.prolog,
 .syntax-highlighter-container .token.doctype,
 .syntax-highlighter-container .token.cdata {
-  color: #6a737d;
-}
-
-:global(.dark-theme) .syntax-highlighter-container .token.comment,
-:global(.dark-theme) .syntax-highlighter-container .token.prolog,
-:global(.dark-theme) .syntax-highlighter-container .token.doctype,
-:global(.dark-theme) .syntax-highlighter-container .token.cdata {
-  color: #8b949e;
+  color: var(--ant-color-text-tertiary, #6a737d);
 }

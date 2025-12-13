@@ -1,7 +1,17 @@
-import type { Project } from './project'
+import type { Project, ExecutionStrategy } from './project'
 
 // 任务状态枚举 - 匹配后端
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type TaskStatus = 
+  | 'pending'       // 等待调度
+  | 'dispatching'   // 正在分配节点
+  | 'queued'        // 已分发到节点队列，等待执行
+  | 'running'       // 正在执行
+  | 'success'       // 执行成功
+  | 'completed'     // 执行完成（兼容旧状态）
+  | 'failed'        // 执行失败
+  | 'cancelled'     // 已取消
+  | 'timeout'       // 执行超时
+  | 'paused'        // 已暂停
 
 // 任务类型 - 匹配后端
 export type TaskType = 'code' | 'rule'
@@ -9,12 +19,20 @@ export type TaskType = 'code' | 'rule'
 // 调度类型 - 匹配后端
 export type ScheduleType = 'once' | 'interval' | 'cron'
 
+// 任务执行策略选项（用于UI展示）
+export const TASK_EXECUTION_STRATEGY_OPTIONS = [
+  { value: '', label: '继承项目配置', description: '使用项目的执行策略配置' },
+  { value: 'local', label: '本地执行', description: '在主节点本地执行' },
+  { value: 'specified', label: '指定节点', description: '在指定的节点上执行' },
+  { value: 'auto', label: '自动选择', description: '根据负载自动选择节点' },
+] as const
+
 // 基础任务接口 - 匹配后端API
 export interface Task {
-  id: number
+  id: string  // public_id
   name: string
   description?: string
-  project_id: number
+  project_id: string  // public_id
   task_type: TaskType
 
   // 调度配置
@@ -28,7 +46,7 @@ export interface Task {
   timeout_seconds: number
   retry_count: number
   retry_delay: number
-  execution_params?: Record<string, any>
+  execution_params?: Record<string, unknown>
   environment_vars?: Record<string, string>
 
   // 状态信息
@@ -39,11 +57,25 @@ export interface Task {
   failure_count: number
   success_count: number
 
+  // 执行策略配置
+  execution_strategy?: ExecutionStrategy | null  // 为空则继承项目配置
+  specified_node_id?: string      // 指定执行节点ID（仅 specified 策略）
+  specified_node_name?: string    // 指定执行节点名称
+  
+  // 项目执行配置（继承自项目）
+  project_execution_strategy?: ExecutionStrategy
+  project_bound_node_id?: string
+  project_bound_node_name?: string
+
+  // 兼容旧字段
+  node_id?: string      // [已废弃] 指定执行节点ID
+  node_name?: string    // [已废弃] 执行节点名称
+
   // 时间戳
   created_at: string
   updated_at: string
-  user_id: number
-  created_by: number
+  user_id: string  // public_id
+  created_by: string  // public_id
   created_by_username?: string
 
   // 关联数据
@@ -53,8 +85,8 @@ export interface Task {
 
 // 任务执行记录 - 匹配后端API
 export interface TaskExecution {
-  id: number
-  task_id: number
+  id: string  // public_id
+  task_id: string  // public_id
   execution_id: string
   start_time: string
   end_time?: string
@@ -62,7 +94,7 @@ export interface TaskExecution {
   status: TaskStatus
   exit_code?: number
   error_message?: string
-  result_data?: Record<string, any>
+  result_data?: Record<string, unknown>
   stdout?: string
   stderr?: string
   retry_count: number
@@ -74,7 +106,7 @@ export interface TaskExecution {
 export interface TaskCreateRequest {
   name: string
   description?: string
-  project_id: number
+  project_id: string  // public_id
   schedule_type: ScheduleType
   cron_expression?: string
   interval_seconds?: number
@@ -83,9 +115,16 @@ export interface TaskCreateRequest {
   timeout_seconds?: number
   retry_count?: number
   retry_delay?: number
-  execution_params?: Record<string, any>
+  execution_params?: Record<string, unknown>
   environment_vars?: Record<string, string>
   is_active?: boolean
+  
+  // 执行策略配置
+  execution_strategy?: ExecutionStrategy | null  // 为空则继承项目配置
+  specified_node_id?: string    // 指定执行节点ID（仅 specified 策略）
+  
+  // 兼容旧字段
+  node_id?: string    // [已废弃] 指定执行节点ID
 }
 
 // 更新任务请求 - 匹配后端API
@@ -101,8 +140,12 @@ export interface TaskUpdateRequest {
   timeout_seconds?: number
   retry_count?: number
   retry_delay?: number
-  execution_params?: Record<string, any>
+  execution_params?: Record<string, unknown>
   environment_vars?: Record<string, string>
+  
+  // 执行策略配置
+  execution_strategy?: ExecutionStrategy | null
+  specified_node_id?: string
 }
 
 // 任务列表响应 - 匹配后端API
@@ -118,7 +161,7 @@ export interface TaskListResponse {
 export interface TaskResult {
   success: boolean
   message?: string
-  data?: any
+  data?: unknown
   output_files?: string[]
   metrics?: {
     items_processed?: number
@@ -130,13 +173,13 @@ export interface TaskResult {
 
 // 任务日志
 export interface TaskLog {
-  id: number
+  id: string  // public_id
   execution_id: string
   level: 'debug' | 'info' | 'warning' | 'error'
   message: string
   timestamp: string
   source?: string
-  context?: Record<string, any>
+  context?: Record<string, unknown>
 }
 
 // 任务优先级
@@ -160,7 +203,7 @@ export interface ExecutionConfig {
   timeout_seconds: number
   retry_count: number
   retry_delay: number
-  execution_params?: Record<string, any>
+  execution_params?: Record<string, unknown>
   environment_vars?: Record<string, string>
 }
 
@@ -168,8 +211,9 @@ export interface ExecutionConfig {
 export interface TaskListParams {
   page?: number
   size?: number
-  project_id?: number
+  project_id?: string  // public_id
   status?: TaskStatus
+  schedule_type?: ScheduleType
   priority?: TaskPriority
   trigger_type?: TaskTriggerType
   search?: string
@@ -179,11 +223,12 @@ export interface TaskListParams {
   }
   sort_by?: string
   sort_order?: 'asc' | 'desc'
+  node_id?: string     // 节点ID筛选
 }
 
 // 任务执行请求
 export interface TaskExecuteRequest {
-  task_id: number
+  task_id: string  // public_id
   execution_config?: Partial<ExecutionConfig>
   environment_variables?: Record<string, string>
 }
@@ -227,7 +272,7 @@ export interface TaskStats {
 
 // 批量操作请求
 export interface TaskBatchRequest {
-  task_ids: number[]
+  task_ids: string[]  // public_ids
   action: 'start' | 'stop' | 'cancel' | 'delete' | 'enable' | 'disable'
   execution_config?: Partial<ExecutionConfig>
 }

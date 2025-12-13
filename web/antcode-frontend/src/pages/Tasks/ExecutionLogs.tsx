@@ -26,9 +26,11 @@ import {
   ThunderboltOutlined
 } from '@ant-design/icons'
 import EnhancedLogViewer from '@/components/ui/LogViewer/EnhancedLogViewer'
+import CopyableTooltip from '@/components/common/CopyableTooltip'
 import { taskService } from '@/services/tasks'
 import type { Task, TaskExecution } from '@/types'
 import { formatDateTime, formatDuration } from '@/utils/format'
+import Logger from '@/utils/logger'
 
 const { Title, Text } = Typography
 
@@ -50,9 +52,9 @@ const ExecutionLogs: React.FC = () => {
     if (!taskId) return
     
     try {
-      const taskData = await taskService.getTask(parseInt(taskId))
+      const taskData = await taskService.getTask(taskId)
       setTask(taskData)
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('加载任务信息失败:', error)
       // 不显示错误，因为主要关注执行日志
     }
@@ -67,7 +69,7 @@ const ExecutionLogs: React.FC = () => {
     }
     
     try {
-      const executions = await taskService.getTaskExecutions(parseInt(taskId))
+      const executions = await taskService.getTaskExecutions(taskId)
       const exec = executions.items.find(e => e.execution_id === executionId)
       
       if (exec) {
@@ -76,9 +78,10 @@ const ExecutionLogs: React.FC = () => {
       } else {
         setError(`未找到执行记录: ${executionId}`)
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('加载执行信息失败:', error)
-      setError(error.message || '加载执行信息失败')
+      const errMsg = error instanceof Error ? error.message : '加载执行信息失败'
+      setError(errMsg)
     } finally {
       setLoading(false)
     }
@@ -90,7 +93,7 @@ const ExecutionLogs: React.FC = () => {
     try {
       await loadExecution()
       showNotification('success', '执行状态已刷新')
-    } catch (error) {
+    } catch (_error) {
       showNotification('error', '刷新失败')
     } finally {
       setRefreshing(false)
@@ -210,8 +213,12 @@ const ExecutionLogs: React.FC = () => {
     if (!execution) return '-'
     if (!execution.end_time) {
       return (
-        <Tag color="processing" icon={<ClockCircleOutlined spin />}>
-          运行中
+        <Tag 
+          color="processing"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+        >
+          <ClockCircleOutlined spin style={{ fontSize: 12 }} />
+          <span>运行中</span>
         </Tag>
       )
     }
@@ -226,9 +233,11 @@ const ExecutionLogs: React.FC = () => {
               key: 'executionId',
               label: '执行ID',
               value: (
-                <Text code copyable={{ text: execution.execution_id }}>
-                  {execution.execution_id}
-                </Text>
+                <CopyableTooltip text={execution.execution_id}>
+                  <code style={{ cursor: 'pointer' }}>
+                    {execution.execution_id}
+                  </code>
+                </CopyableTooltip>
               )
             },
             {
@@ -291,9 +300,9 @@ const ExecutionLogs: React.FC = () => {
       <div style={{ padding: '24px' }}>
         <Card>
           <div style={{ textAlign: 'center', padding: '40px' }}>
-            <CloseCircleOutlined style={{ fontSize: 48, color: '#ff4d4f', marginBottom: 16 }} />
+            <CloseCircleOutlined style={{ fontSize: 48, color: token.colorError, marginBottom: 16 }} />
             <h3>加载失败</h3>
-            <p style={{ color: '#666', marginBottom: 24 }}>{error}</p>
+            <p style={{ color: token.colorTextSecondary, marginBottom: 24 }}>{error}</p>
             <Space>
               <Button 
                 icon={<ArrowLeftOutlined />}
@@ -431,7 +440,7 @@ const ExecutionLogs: React.FC = () => {
               <Text strong style={{ fontSize: 16 }}>执行详情</Text>
             </Space>
             {execution.status === 'running' && executionProgress !== null && (
-              <Tooltip title={`预估进度 ${executionProgress}%`}>
+              <Tooltip title={`预估进度 ${executionProgress}%`} placement="topLeft">
                 <Progress
                   type="circle"
                   percent={executionProgress}
@@ -520,6 +529,23 @@ const ExecutionLogs: React.FC = () => {
             enableSearch={true}
             enableExport={true}
             enableVirtualization={true}
+            onStatusUpdate={(statusUpdate) => {
+              // 收到状态更新时，更新本地执行状态
+              Logger.info('收到执行状态更新', statusUpdate)
+              if (execution && statusUpdate.status) {
+                // 后端发送大写状态，前端使用小写
+                const normalizedStatus = statusUpdate.status.toLowerCase() as TaskExecution['status']
+                setExecution(prev => prev ? {
+                  ...prev,
+                  status: normalizedStatus
+                } : null)
+              }
+              // 如果任务完成，刷新完整的执行信息
+              const upperStatus = statusUpdate.status.toUpperCase()
+              if (['SUCCESS', 'FAILED', 'TIMEOUT', 'CANCELLED'].includes(upperStatus)) {
+                loadExecution()
+              }
+            }}
           />
         </div>
       ) : (

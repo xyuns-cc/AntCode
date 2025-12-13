@@ -5,7 +5,6 @@
 
 import apiClient from './api'
 import type { AxiosRequestConfig, AxiosResponse } from 'axios'
-import type { ApiResponse } from '@/types'
 import Logger from '@/utils/logger'
 
 export class BaseService {
@@ -21,7 +20,7 @@ export class BaseService {
   /**
    * GET 请求
    */
-  protected async get<T = any>(
+  protected async get<T = unknown>(
     url: string,
     config?: AxiosRequestConfig
   ): Promise<T> {
@@ -38,9 +37,9 @@ export class BaseService {
   /**
    * POST 请求
    */
-  protected async post<T = any>(
+  protected async post<T = unknown>(
     url: string,
-    data?: any,
+    data?: unknown,
     config?: AxiosRequestConfig
   ): Promise<T> {
     try {
@@ -56,9 +55,9 @@ export class BaseService {
   /**
    * PUT 请求
    */
-  protected async put<T = any>(
+  protected async put<T = unknown>(
     url: string,
-    data?: any,
+    data?: unknown,
     config?: AxiosRequestConfig
   ): Promise<T> {
     try {
@@ -74,9 +73,9 @@ export class BaseService {
   /**
    * PATCH 请求
    */
-  protected async patch<T = any>(
+  protected async patch<T = unknown>(
     url: string,
-    data?: any,
+    data?: unknown,
     config?: AxiosRequestConfig
   ): Promise<T> {
     try {
@@ -92,7 +91,7 @@ export class BaseService {
   /**
    * DELETE 请求
    */
-  protected async delete<T = any>(
+  protected async delete<T = unknown>(
     url: string,
     config?: AxiosRequestConfig
   ): Promise<T> {
@@ -126,7 +125,7 @@ export class BaseService {
    * 提取响应数据
    * 处理不同的后端响应格式
    */
-  private extractData<T>(response: AxiosResponse<any>): T {
+  private extractData<T>(response: AxiosResponse<T | { data?: T }>): T {
     const data = response.data
 
     // 如果是标准的ApiResponse格式
@@ -148,7 +147,10 @@ export class BaseService {
   /**
    * 构建查询参数URL
    */
-  protected buildQueryUrl(url: string, params?: Record<string, any>): string {
+  protected buildQueryUrl(
+    url: string,
+    params?: Record<string, string | number | boolean | Array<string | number | boolean>>
+  ): string {
     if (!params || Object.keys(params).length === 0) {
       return url
     }
@@ -164,7 +166,7 @@ export class BaseService {
   /**
    * 上传文件
    */
-  protected async uploadFile<T = any>(
+  protected async uploadFile<T = unknown>(
     url: string,
     formData: FormData,
     onProgress?: (progress: number) => void
@@ -235,4 +237,3 @@ export class BaseService {
 }
 
 export default BaseService
-

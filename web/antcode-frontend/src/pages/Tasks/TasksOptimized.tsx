@@ -1,4 +1,4 @@
-import React, { useState, useEffect, memo, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, memo, useMemo } from 'react'
 import {
   Card,
   Button,
@@ -23,9 +23,8 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
-import type { Task, TaskListParams, TaskStatus, ScheduleType, Project } from '@/types'
+import type { Task, TaskStatus, ScheduleType, Project } from '@/types'
 import { formatDateTime } from '@/utils/format'
-import { Logger } from '@/utils/logger'
 import useAuth from '@/hooks/useAuth'
 
 const { Search } = Input
@@ -84,10 +83,11 @@ const Tasks: React.FC = memo(() => {
         
         setAllTasks(allItems)
       }
-    } catch (error: any) {
-      const errorMessage = error.response?.status === 401
+    } catch (error: unknown) {
+      const axiosError = error as { response?: { status?: number }; message?: string }
+      const errorMessage = axiosError.response?.status === 401
         ? '认证已过期，请重新登录' 
-        : '加载任务列表失败: ' + (error.message || '未知错误')
+        : '加载任务列表失败: ' + (axiosError.message || '未知错误')
       setError(errorMessage)
       setAllTasks([])
     } finally {
@@ -100,7 +100,7 @@ const Tasks: React.FC = memo(() => {
     try {
       const response = await projectService.getProjects({ page: 1, size: 100 })
       setProjects(response.items || [])
-    } catch (error) {
+    } catch {
       setProjects([])
     }
   }
@@ -143,6 +143,7 @@ const Tasks: React.FC = memo(() => {
       loadAllTasks()
       loadProjects()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, authLoading])
 
   // 认证加载状态
@@ -204,17 +205,15 @@ const Tasks: React.FC = memo(() => {
   // 触发任务
   const handleTriggerTask = async (taskId: number) => {
     try {
-      console.log('[DEBUG Tasks] handleTriggerTask click', { taskId })
       const resp = await taskService.triggerTask(taskId)
-      console.log('[DEBUG Tasks] handleTriggerTask success resp', resp)
       if (resp?.message) {
         showNotification('success', resp.message)
       } else {
         showNotification('success', '任务已触发')
       }
       loadAllTasks() // 重新加载任务列表
-    } catch (error: any) {
-      console.log('[DEBUG Tasks] handleTriggerTask error', error)
+    } catch {
+      // 错误由拦截器处理
     }
   }
 
@@ -231,7 +230,7 @@ const Tasks: React.FC = memo(() => {
       if (remainingTasks.length === 0 && currentPage > 1) {
         setCurrentPage(currentPage - 1)
       }
-    } catch (error: any) {
+    } catch {
       // 通知由拦截器统一处理
     }
   }
@@ -239,12 +238,17 @@ const Tasks: React.FC = memo(() => {
   // 获取任务状态标签
   const getStatusTag = (status: TaskStatus) => {
     const statusMap: Record<string, { color: string; text: string }> = {
-      pending: { color: 'default', text: '等待中' },
-      running: { color: 'processing', text: '运行中' },
+      pending: { color: 'default', text: '等待调度' },
+      dispatching: { color: 'processing', text: '分配节点中' },
+      queued: { color: 'cyan', text: '排队中' },
+      running: { color: 'processing', text: '执行中' },
       success: { color: 'success', text: '成功' },
       completed: { color: 'success', text: '已完成' },
       failed: { color: 'error', text: '失败' },
-      cancelled: { color: 'warning', text: '已取消' }
+      cancelled: { color: 'warning', text: '已取消' },
+      timeout: { color: 'error', text: '超时' },
+      paused: { color: 'warning', text: '已暂停' },
+      skipped: { color: 'default', text: '已跳过' }
     }
     const config = statusMap[status] || { color: 'default', text: status }
     return <Tag color={config.color}>{config.text}</Tag>
@@ -377,7 +381,7 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'name',
               key: 'name',
               width: 200,
-              ellipsis: true,
+              ellipsis: { showTitle: false },
               render: (text: string, record: Task) => (
                 <Tooltip title={text} placement="topLeft">
                   <Button
@@ -404,39 +408,26 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'status',
               key: 'status',
               width: 100,
-              ellipsis: true,
-              render: (status: TaskStatus) => (
-                <Tooltip title={`任务状态: ${status}`} placement="top">
-                  {getStatusTag(status)}
-                </Tooltip>
-              )
+              render: (status: TaskStatus) => getStatusTag(status)
             },
             {
               title: '调度类型',
               dataIndex: 'schedule_type',
               key: 'schedule_type',
               width: 120,
-              ellipsis: true,
               responsive: ['md'],
-              render: (type: ScheduleType) => (
-                <Tooltip title={`调度类型: ${type}`} placement="top">
-                  {getScheduleTypeTag(type)}
-                </Tooltip>
-              )
+              render: (type: ScheduleType) => getScheduleTypeTag(type)
             },
             {
               title: '是否启用',
               dataIndex: 'is_active',
               key: 'is_active',
               width: 100,
-              ellipsis: true,
               responsive: ['lg'],
               render: (isActive: boolean) => (
-                <Tooltip title={`状态: ${isActive ? '启用' : '禁用'}`} placement="top">
-                  <Tag color={isActive ? 'success' : 'default'}>
-                    {isActive ? '启用' : '禁用'}
-                  </Tag>
-                </Tooltip>
+                <Tag color={isActive ? 'success' : 'default'}>
+                  {isActive ? '启用' : '禁用'}
+                </Tag>
               )
             },
             {
@@ -444,18 +435,11 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'created_by_username',
               key: 'created_by_username',
               width: 120,
-              ellipsis: true,
+              ellipsis: { showTitle: false },
               responsive: ['lg'],
               render: (username: string) => (
-                <Tooltip title={`创建者: ${username || '未知用户'}`} placement="top">
-                  <span style={{
-                    display: 'block',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    {username || '未知用户'}
-                  </span>
+                <Tooltip title={username || '未知用户'} placement="topLeft">
+                  <span>{username || '未知用户'}</span>
                 </Tooltip>
               )
             },
@@ -464,18 +448,11 @@ const Tasks: React.FC = memo(() => {
               dataIndex: 'created_at',
               key: 'created_at',
               width: 180,
-              ellipsis: true,
+              ellipsis: { showTitle: false },
               responsive: ['xl'],
               render: (time: string) => (
-                <Tooltip title={`创建时间: ${formatDateTime(time)}`} placement="topLeft">
-                  <span style={{
-                    display: 'block',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    {formatDateTime(time)}
-                  </span>
+                <Tooltip title={formatDateTime(time)} placement="topLeft">
+                  <span>{formatDateTime(time)}</span>
                 </Tooltip>
               )
             },
@@ -545,4 +522,3 @@ const Tasks: React.FC = memo(() => {
 export default Tasks
 
 Tasks.displayName = 'TasksPage'
-

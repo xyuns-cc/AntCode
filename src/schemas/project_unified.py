@@ -5,21 +5,27 @@
 
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.models.enums import ProjectStatus, CrawlEngine, CallbackType, RequestMethod
+from src.utils.json_parser import JSONParser
 
 
 class UnifiedProjectUpdateRequest(BaseModel):
     """统一的项目更新请求 - 支持所有项目类型"""
-    
+
     # ======= 基本信息字段 (所有项目类型) =======
     name: Optional[str] = Field(None, min_length=3, max_length=50, description="项目名称")
     description: Optional[str] = Field(None, max_length=500, description="项目描述")
     status: Optional[ProjectStatus] = Field(None, description="项目状态")
     tags: Optional[List[str]] = Field(None, description="项目标签")
     dependencies: Optional[List[str]] = Field(None, description="Python依赖包")
-    
+
+    # ======= 执行策略字段 =======
+    execution_strategy: Optional[str] = Field(None, description="执行策略：local/fixed/auto/prefer")
+    bound_node_id: Optional[str] = Field(None, description="绑定的执行节点ID")
+    fallback_enabled: Optional[bool] = Field(None, description="是否启用故障转移")
+
     # ======= 规则项目字段 (type=rule时使用) =======
     engine: Optional[CrawlEngine] = Field(None, description="采集引擎")
     target_url: Optional[str] = Field(None, max_length=2000, description="目标URL")
@@ -41,12 +47,12 @@ class UnifiedProjectUpdateRequest(BaseModel):
     proxy_config: Optional[Union[str, Dict[str, Any]]] = Field(None, description="代理配置(JSON字符串或对象)")
     anti_spider: Optional[Union[str, Dict[str, Any]]] = Field(None, description="反爬虫配置(JSON字符串或对象)")
     task_config: Optional[Union[str, Dict[str, Any]]] = Field(None, description="任务配置(JSON字符串或对象)")
-    
+
     # ======= 文件项目字段 (type=file时使用) =======
     entry_point: Optional[str] = Field(None, max_length=255, description="入口文件路径")
     runtime_config: Optional[Union[str, Dict[str, Any]]] = Field(None, description="运行时配置(JSON字符串或对象)")
     environment_vars: Optional[Union[str, Dict[str, Any]]] = Field(None, description="环境变量(JSON字符串或对象)")
-    
+
     # ======= 代码项目字段 (type=code时使用) =======
     content: Optional[str] = Field(None, description="代码内容")
     language: Optional[str] = Field(None, max_length=50, description="编程语言")
@@ -55,191 +61,127 @@ class UnifiedProjectUpdateRequest(BaseModel):
     documentation: Optional[str] = Field(None, description="代码文档")
     changelog: Optional[str] = Field(None, description="变更日志")
 
-    class Config:
-        extra = "ignore"  # 忽略额外字段，避免type等字段导致验证失败
-    
-    # JSON字段解析validators
-    @validator('extraction_rules', pre=True)
+    model_config = ConfigDict(extra="ignore")  # 忽略额外字段，避免type等字段导致验证失败
+
+    # JSON字段解析validators - 使用统一的 JSONParser
+    @field_validator('extraction_rules', mode='before')
+    @classmethod
     def parse_extraction_rules(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空列表
             if v.strip() == "":
                 return []
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空列表
-                return []
+            return JSONParser.parse_or_default(v, [], "extraction_rules")
         return v
-    
-    @validator('pagination_config', pre=True)
+
+    @field_validator('pagination_config', mode='before')
+    @classmethod
     def parse_pagination_config(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "pagination_config")
         return v
-    
-    @validator('data_schema', pre=True)
+
+    @field_validator('data_schema', mode='before')
+    @classmethod
     def parse_data_schema(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "data_schema")
         return v
-    
-    @validator('headers', pre=True)
+
+    @field_validator('headers', mode='before')
+    @classmethod
     def parse_headers(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                # 尝试直接解析
-                return ujson.loads(v)
-            except:
-                try:
-                    # 如果解析失败，尝试替换单引号为双引号
-                    import re
-                    # 替换单引号为双引号，但要注意字符串边界
-                    fixed_v = re.sub(r"'([^']*)'", r'"\1"', v)
-                    return ujson.loads(fixed_v)
-                except:
-                    # 如果还是失败，返回空字典
-                    return {}
+            return JSONParser.parse_or_default(v, {}, "headers")
         return v
-    
-    @validator('cookies', pre=True)
+
+    @field_validator('cookies', mode='before')
+    @classmethod
     def parse_cookies(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                # 尝试直接解析
-                return ujson.loads(v)
-            except:
-                try:
-                    # 如果解析失败，尝试替换单引号为双引号
-                    import re
-                    # 替换单引号为双引号，但要注意字符串边界
-                    fixed_v = re.sub(r"'([^']*)'", r'"\1"', v)
-                    return ujson.loads(fixed_v)
-                except:
-                    # 如果还是失败，返回空字典
-                    return {}
+            return JSONParser.parse_or_default(v, {}, "cookies")
         return v
-    
-    @validator('proxy_config', pre=True)
+
+    @field_validator('proxy_config', mode='before')
+    @classmethod
     def parse_proxy_config(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "proxy_config")
         return v
-    
-    @validator('anti_spider', pre=True)
+
+    @field_validator('anti_spider', mode='before')
+    @classmethod
     def parse_anti_spider(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "anti_spider")
         return v
-    
-    @validator('task_config', pre=True)
+
+    @field_validator('task_config', mode='before')
+    @classmethod
     def parse_task_config(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "task_config")
         return v
-    
-    @validator('runtime_config', pre=True)
+
+    @field_validator('runtime_config', mode='before')
+    @classmethod
     def parse_runtime_config(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "runtime_config")
         return v
-    
-    @validator('environment_vars', pre=True)
+
+    @field_validator('environment_vars', mode='before')
+    @classmethod
     def parse_environment_vars(cls, v):
         if v is None:
             return None
         if isinstance(v, str):
-            # 如果是空字符串，返回空字典
             if v.strip() == "":
                 return {}
-            try:
-                import ujson
-                return ujson.loads(v)
-            except:
-                # 如果解析失败，返回空字典
-                return {}
+            return JSONParser.parse_or_default(v, {}, "environment_vars")
         return v
-        
+
     def get_basic_fields(self):
         """获取基本信息字段"""
-        basic_fields = ["name", "description", "status", "tags", "dependencies"]
+        basic_fields = [
+            "name", "description", "status", "tags", "dependencies",
+            "execution_strategy", "bound_node_id", "fallback_enabled"
+        ]
         return {k: v for k, v in self.dict(exclude_unset=True).items() if k in basic_fields}
-    
+
     def get_rule_fields(self):
         """获取规则项目字段"""
         rule_fields = [
@@ -249,12 +191,12 @@ class UnifiedProjectUpdateRequest(BaseModel):
             "dont_filter", "headers", "cookies", "proxy_config", "anti_spider", "task_config"
         ]
         return {k: v for k, v in self.dict(exclude_unset=True).items() if k in rule_fields}
-    
+
     def get_file_fields(self):
         """获取文件项目字段"""
         file_fields = ["entry_point", "runtime_config", "environment_vars"]
         return {k: v for k, v in self.dict(exclude_unset=True).items() if k in file_fields}
-    
+
     def get_code_fields(self):
         """获取代码项目字段"""
         code_fields = [

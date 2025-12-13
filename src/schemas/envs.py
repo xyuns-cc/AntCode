@@ -11,7 +11,7 @@ class PythonVersionListResponse(BaseModel):
 
 
 class InterpreterInfo(BaseModel):
-    id: int | None = None
+    id: str | None = Field(None, description="解释器公开ID")
     version: str
     install_dir: str
     python_bin: str
@@ -23,7 +23,7 @@ class InstallInterpreterRequest(BaseModel):
 
 
 class VenvStatusResponse(BaseModel):
-    project_id: str
+    project_id: str = Field(description="项目公开ID")
     scope: Optional[VenvScope] = None
     version: Optional[str] = None
     venv_path: Optional[str] = None
@@ -46,7 +46,7 @@ class CreateSharedVenvRequest(BaseModel):
 
 
 class VenvListItem(BaseModel):
-    id: int
+    id: str = Field(description="虚拟环境公开ID")
     scope: VenvScope
     key: Optional[str] = None
     version: str
@@ -55,9 +55,9 @@ class VenvListItem(BaseModel):
     interpreter_source: Optional[str] = None
     python_bin: str
     install_dir: str
-    created_by: Optional[int] = None
+    created_by: Optional[str] = Field(None, description="创建者公开ID")
     created_by_username: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     packages: Optional[list[dict]] = None
-    current_project_id: Optional[int] = None
+    current_project_id: Optional[str] = Field(None, description="当前项目公开ID")

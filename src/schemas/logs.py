@@ -40,7 +40,7 @@ class LogEntry(BaseModel):
     level: LogLevel
     log_type: LogType
     execution_id: Optional[str] = None
-    task_id: Optional[int] = None
+    task_id: Optional[str] = Field(None, description="任务公开ID")
     message: str
     source: Optional[str] = None
     file_path: Optional[str] = None
@@ -55,7 +55,7 @@ class LogQueryParams(BaseModel):
     level: Optional[LogLevel] = Field(None, description="日志级别过滤")
     log_type: Optional[LogType] = Field(None, description="日志类型过滤")
     execution_id: Optional[str] = Field(None, description="执行ID过滤")
-    task_id: Optional[int] = Field(None, description="任务ID过滤")
+    task_id: Optional[str] = Field(None, description="任务公开ID过滤")
     start_time: Optional[datetime] = Field(None, description="开始时间")
     end_time: Optional[datetime] = Field(None, description="结束时间")
     search: Optional[str] = Field(None, description="搜索关键词")
@@ -94,10 +94,10 @@ class UnifiedLogResponse(BaseModel):
     execution_id: str
     format: LogFormat
     log_type: Optional[str] = None
-    
+
     # 结构化格式字段
     structured_data: Optional[LogListResponse] = None
-    
+
     # 原始格式字段  
     raw_content: Optional[str] = None
     file_path: Optional[str] = None

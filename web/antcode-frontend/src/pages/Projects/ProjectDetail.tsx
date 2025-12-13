@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useMemo, Suspense, lazy } from 'react'
-import { Card, Descriptions, Tag, Button, Space, Spin, Typography, Table, Collapse, Modal, Select, Input } from 'antd'
+import { Card, Descriptions, Tag, Button, Space, Spin, Typography, Collapse, Modal, Select, Input, Tooltip } from 'antd'
 import { EditOutlined, PlayCircleOutlined, ArrowLeftOutlined, FolderOutlined } from '@ant-design/icons'
 import { useParams, useNavigate } from 'react-router-dom'
+import ResponsiveTable from '@/components/common/ResponsiveTable'
+import CopyableTooltip from '@/components/common/CopyableTooltip'
 import { projectService } from '@/services/projects'
-import { formatDate } from '@/utils/helpers'
-import { formatFileSize } from '@/utils/format'
+import { formatDate, formatFileSize } from '@/utils/format'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import Logger from '@/utils/logger'
 import {
@@ -15,6 +16,7 @@ import {
 } from '@/utils/projectUtils'
 import type { Project } from '@/types'
 import envService from '@/services/envs'
+import { venvScopeOptions, interpreterSourceOptions } from '@/config/displayConfig'
 
 const ProjectEditDrawer = lazy(() => import('@/components/projects/ProjectEditDrawer'))
 
@@ -30,14 +32,14 @@ const ProjectDetail: React.FC = () => {
   const [editDrawerOpen, setEditDrawerOpen] = useState(false)
   const [depsModalOpen, setDepsModalOpen] = useState(false)
   const [newDeps, setNewDeps] = useState<string[]>([])
-  const [pkgList, setPkgList] = useState<any[]>([])
+  const [pkgList, setPkgList] = useState<Array<{ name: string; version: string }>>([])
   const [envModalOpen, setEnvModalOpen] = useState(false)
-  const [venvScope, setVenvScope] = useState<'private' | 'shared'>('private')
+  const [venvScope, setVenvScope] = useState<string>('private')
   const [pythonVersion, setPythonVersion] = useState<string>('')
   const [versions, setVersions] = useState<string[]>([])
   const [sharedKey, setSharedKey] = useState<string>('')
   const [sharedOptions, setSharedOptions] = useState<{ key: string; version: string }[]>([])
-  const [interpreterSource, setInterpreterSource] = useState<'mise' | 'local'>('mise')
+  const [interpreterSource, setInterpreterSource] = useState<string>('mise')
   const [pythonBin, setPythonBin] = useState<string>('')
 
   const dependencySuggestions = useMemo(() => {
@@ -50,7 +52,6 @@ const ProjectDetail: React.FC = () => {
       'sqlalchemy',
       'aiohttp',
       'beautifulsoup4',
-      'scrapy',
       'lxml',
       'numpy',
       'pandas',
@@ -64,7 +65,7 @@ const ProjectDetail: React.FC = () => {
       'apscheduler'
     ]
 
-    const installed = new Set((pkgList || []).map((item: any) => item.name))
+    const installed = new Set((pkgList || []).map((item: { name: string }) => item.name))
 
     return popular
       .filter(name => !installed.has(name))
@@ -96,7 +97,7 @@ const ProjectDetail: React.FC = () => {
       
       try {
         setLoading(true)
-        const data = await projectService.getProject(parseInt(id))
+        const data = await projectService.getProject(id)
         setProject(data)
       } catch (error) {
         Logger.error('Failed to fetch project:', error)
@@ -110,15 +111,15 @@ const ProjectDetail: React.FC = () => {
 
   const openDepsModal = async () => {
     if (!id) return
-    const pkgs = await envService.listProjectVenvPackages(parseInt(id))
+    const pkgs = await envService.listProjectVenvPackages(id)
     setPkgList(pkgs)
     setDepsModalOpen(true)
   }
 
   const addDeps = async () => {
     if (!id || newDeps.length === 0) return
-    await envService.installPackagesToProjectVenv(parseInt(id), newDeps)
-    const pkgs = await envService.listProjectVenvPackages(parseInt(id))
+    await envService.installPackagesToProjectVenv(id, newDeps)
+    const pkgs = await envService.listProjectVenvPackages(id)
     setPkgList(pkgs)
     setNewDeps([])
   }
@@ -137,7 +138,7 @@ const ProjectDetail: React.FC = () => {
     if (id) {
       const fetchProject = async () => {
         try {
-          const data = await projectService.getProject(parseInt(id))
+          const data = await projectService.getProject(id)
           setProject(data)
         } catch (error) {
           Logger.error('Failed to refresh project data:', error)
@@ -184,7 +185,7 @@ const ProjectDetail: React.FC = () => {
             {formatFileSize(project.file_info.file_size || 0)}
           </Descriptions.Item>
           <Descriptions.Item label="文件类型">
-            {project.file_info.file_type}
+            {project.file_info.file_type || '未知'}
           </Descriptions.Item>
           <Descriptions.Item label="入口文件">
             {project.file_info.entry_point || '未指定'}
@@ -228,31 +229,49 @@ const ProjectDetail: React.FC = () => {
   const renderRuleInfo = () => {
     if (!project.rule_info) return null
 
-    const extractionRules = Array.isArray(project.rule_info.extraction_rules) 
+    interface ExtractionRule {
+      page_type?: string
+      desc?: string
+      type?: string
+      expr?: string
+    }
+    
+    const extractionRules: ExtractionRule[] = Array.isArray(project.rule_info.extraction_rules) 
       ? project.rule_info.extraction_rules 
       : []
 
-    const listRules = extractionRules.filter((rule: any) => rule.page_type === 'list')
-    const detailRules = extractionRules.filter((rule: any) => rule.page_type === 'detail')
+    const listRules = extractionRules.filter((rule) => rule.page_type === 'list')
+    const detailRules = extractionRules.filter((rule) => rule.page_type === 'detail')
 
     const columns = [
       {
         title: '规则描述',
         dataIndex: 'desc',
         key: 'desc',
+        width: 150,
+        ellipsis: { showTitle: false },
+        render: (desc: string) => (
+          <Tooltip title={desc} placement="topLeft">
+            <span>{desc}</span>
+          </Tooltip>
+        )
       },
       {
         title: '规则类型',
         dataIndex: 'type',
         key: 'type',
+        width: 100,
         render: (type: string) => <Tag color="blue">{type.toUpperCase()}</Tag>
       },
       {
         title: '选择器表达式',
         dataIndex: 'expr',
         key: 'expr',
+        ellipsis: { showTitle: false },
         render: (expr: string) => (
-          <Text code style={{ wordBreak: 'break-all' }}>{expr}</Text>
+          <Tooltip title={expr} placement="topLeft">
+            <Text code style={{ wordBreak: 'break-all' }}>{expr}</Text>
+          </Tooltip>
         )
       }
     ]
@@ -264,7 +283,11 @@ const ProjectDetail: React.FC = () => {
             <Tag color="green">{project.rule_info.engine}</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="目标URL">
-            <Text copyable>{project.rule_info.target_url}</Text>
+            <CopyableTooltip text={project.rule_info.target_url}>
+              <span style={{ cursor: 'pointer' }}>
+                {project.rule_info.target_url}
+              </span>
+            </CopyableTooltip>
           </Descriptions.Item>
           <Descriptions.Item label="回调类型">
             <Tag color="blue">{project.rule_info.callback_type}</Tag>
@@ -284,19 +307,19 @@ const ProjectDetail: React.FC = () => {
           {project.rule_info.callback_type === 'mixed' ? (
             <>
               <Panel header={`列表页规则 (${listRules.length})`} key="list">
-                <Table 
+                <ResponsiveTable 
                   columns={columns}
                   dataSource={listRules}
-                  rowKey={(_, index) => `list-${index}`}
+                  rowKey={(record: { field?: string }, idx) => record.field || `list-${idx}`}
                   pagination={false}
                   size="small"
                 />
               </Panel>
               <Panel header={`详情页规则 (${detailRules.length})`} key="detail">
-                <Table 
+                <ResponsiveTable 
                   columns={columns}
                   dataSource={detailRules}
-                  rowKey={(_, index) => `detail-${index}`}
+                  rowKey={(record: { field?: string }, idx) => record.field || `detail-${idx}`}
                   pagination={false}
                   size="small"
                 />
@@ -304,10 +327,10 @@ const ProjectDetail: React.FC = () => {
             </>
           ) : (
             <Panel header={`提取规则 (${extractionRules.length})`} key="all">
-              <Table 
+              <ResponsiveTable 
                 columns={columns}
                 dataSource={extractionRules}
-                rowKey={(_, index) => `rule-${index}`}
+                rowKey={(record: { field?: string }, idx) => record.field || `rule-${idx}`}
                 pagination={false}
                 size="small"
               />
@@ -456,7 +479,7 @@ const ProjectDetail: React.FC = () => {
             <Descriptions.Item label="创建者">
               {project.created_by_username || `用户${project.created_by}`}
             </Descriptions.Item>
-            <Descriptions.Item label="项目标签">
+            <Descriptions.Item label="项目标签" span={2}>
               {Array.isArray(project.tags) && project.tags.length > 0 ? (
                 project.tags.map((tag, index) => (
                   <Tag key={index} color="blue">
@@ -483,14 +506,22 @@ const ProjectDetail: React.FC = () => {
           <Space>
             <Button onClick={openDepsModal}>依赖</Button>
             <Button onClick={openEnvModal}>绑定/切换环境</Button>
-            <Button danger onClick={async () => { if (!id) return; await envService.createOrBindProjectVenv(parseInt(id), { version: project.python_version || '', venv_scope: 'private', create_if_missing: true }); }}>重建私有环境</Button>
-            <Button danger onClick={async () => { if (!id) return; await envService.deleteProjectVenv(parseInt(id)); }}>删除环境</Button>
+            <Button danger onClick={async () => { if (!id) return; await envService.createOrBindProjectVenv(id, { version: project.python_version || '', venv_scope: 'private', create_if_missing: true }); }}>重建私有环境</Button>
+            <Button danger onClick={async () => { if (!id) return; await envService.deleteProjectVenv(id); }}>删除环境</Button>
           </Space>
         }>
           <Descriptions column={1} bordered>
             <Descriptions.Item label="作用域">{project.venv_scope || '-'}</Descriptions.Item>
             <Descriptions.Item label="Python版本">{project.python_version || '-'}</Descriptions.Item>
-            <Descriptions.Item label="虚拟环境路径">{project.venv_path ? <Text copyable>{project.venv_path}</Text> : '-'}</Descriptions.Item>
+            <Descriptions.Item label="虚拟环境路径">
+              {project.venv_path ? (
+                <CopyableTooltip text={project.venv_path}>
+                  <span style={{ cursor: 'pointer' }}>
+                    {project.venv_path}
+                  </span>
+                </CopyableTooltip>
+              ) : '-'}
+            </Descriptions.Item>
           </Descriptions>
         </Card>
       </div>
@@ -512,7 +543,7 @@ const ProjectDetail: React.FC = () => {
             <Text strong>已安装依赖：</Text>
           </div>
           <div>
-            {(pkgList || []).map((p: any) => (<Tag key={p.name}>{p.name}@{p.version}</Tag>))}
+            {(pkgList || []).map((p: { name: string; version: string }) => (<Tag key={p.name}>{p.name}@{p.version}</Tag>))}
           </div>
           <div>
             <Text strong>新增依赖：</Text>
@@ -522,7 +553,7 @@ const ProjectDetail: React.FC = () => {
             style={{ width: '100%' }}
             placeholder="输入包名后回车，如: requests==2.32.3"
             value={newDeps}
-            onChange={setNewDeps as any}
+            onChange={(value: string[]) => setNewDeps(value)}
             tokenSeparators={[',', ' ']}
             options={dependencySuggestions}
             optionFilterProp="value"
@@ -536,17 +567,17 @@ const ProjectDetail: React.FC = () => {
       {/* 环境绑定 */}
       <Modal open={envModalOpen} onCancel={() => setEnvModalOpen(false)} title="绑定/切换环境" onOk={async () => {
         if (!id || !pythonVersion) return
-        await envService.createOrBindProjectVenv(parseInt(id), { version: pythonVersion, venv_scope: venvScope, shared_venv_key: venvScope === 'shared' ? sharedKey || undefined : undefined, create_if_missing: true, interpreter_source: interpreterSource, python_bin: interpreterSource === 'local' ? pythonBin : undefined })
+        await envService.createOrBindProjectVenv(id, { version: pythonVersion, venv_scope: venvScope, shared_venv_key: venvScope === 'shared' ? sharedKey || undefined : undefined, create_if_missing: true, interpreter_source: interpreterSource, python_bin: interpreterSource === 'local' ? pythonBin : undefined })
         setEnvModalOpen(false)
         handleEditSuccess()
       }}>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Select value={venvScope} onChange={setVenvScope as any} options={[{ value: 'private', label: '私有' }, { value: 'shared', label: '公共' }]} />
-          <Select showSearch placeholder="选择Python版本" value={pythonVersion} onChange={setPythonVersion as any} options={(versions || []).map(v => ({ value: v, label: v }))} />
+          <Select value={venvScope} onChange={(value: string) => setVenvScope(value)} options={venvScopeOptions} />
+          <Select showSearch placeholder="选择Python版本" value={pythonVersion} onChange={(value: string) => setPythonVersion(value)} options={(versions || []).map(v => ({ value: v, label: v }))} />
           {venvScope === 'shared' && (
-            <Select showSearch placeholder="选择共享标识" value={sharedKey} onChange={setSharedKey as any} options={(sharedOptions || []).map(o => ({ value: o.key, label: `${o.key} (${o.version})` }))} />
+            <Select showSearch placeholder="选择共享标识" value={sharedKey} onChange={(value: string) => setSharedKey(value)} options={(sharedOptions || []).map(o => ({ value: o.key, label: `${o.key} (${o.version})` }))} />
           )}
-          <Select value={interpreterSource} onChange={setInterpreterSource as any} options={[{ value: 'mise', label: 'mise（推荐）' }, { value: 'local', label: '本地解释器' }]} />
+          <Select value={interpreterSource} onChange={(value: string) => setInterpreterSource(value)} options={interpreterSourceOptions} />
           {interpreterSource === 'local' && (
             <Input placeholder="本地 python 路径，如 /usr/local/bin/python3" value={pythonBin} onChange={(e) => setPythonBin(e.target.value)} />
           )}

@@ -10,7 +10,7 @@ export class ResponseHandler {
   /**
    * 提取单个数据
    */
-  static extractData<T>(response: AxiosResponse<ApiResponse<T> | any>): T {
+  static extractData<T>(response: AxiosResponse<ApiResponse<T> | unknown>): T {
     const data = response.data
 
     // 如果是标准的ApiResponse格式
@@ -29,42 +29,46 @@ export class ResponseHandler {
    * 提取分页数据
    */
   static extractPaginatedData<T>(
-    response: AxiosResponse<any>
+    response: AxiosResponse<unknown>
   ): PaginatedResponse<T> {
     const data = response.data
 
-    // 标准分页格式
-    if (data && typeof data === 'object') {
-      if ('items' in data || 'pagination' in data) {
-        return {
-          items: data.items || data.data || [],
-          page: data.page || data.pagination?.page || 1,
-          size: data.size || data.pagination?.size || 10,
-          total: data.total || data.pagination?.total || 0,
-          pages: data.pages || data.pagination?.pages || 1,
-        }
-      }
-
-      // 兼容其他格式
-      if ('data' in data && Array.isArray(data.data)) {
-        return {
-          items: data.data,
-          page: 1,
-          size: data.data.length,
-          total: data.data.length,
-          pages: 1,
-        }
-      }
-    }
-
-    // 如果data直接是数组
     if (Array.isArray(data)) {
       return {
-        items: data,
+        items: data as T[],
         page: 1,
         size: data.length,
         total: data.length,
         pages: 1,
+      }
+    }
+
+    // 标准分页格式
+    if (data && typeof data === 'object') {
+      const paginatedData = data as Partial<PaginatedResponse<T>> & {
+        data?: T[]
+        pagination?: Partial<PaginatedResponse<T>>
+      }
+
+      if ('items' in paginatedData || 'pagination' in paginatedData) {
+        return {
+          items: (paginatedData.items ?? paginatedData.data ?? []) as T[],
+          page: paginatedData.page ?? paginatedData.pagination?.page ?? 1,
+          size: paginatedData.size ?? paginatedData.pagination?.size ?? 10,
+          total: paginatedData.total ?? paginatedData.pagination?.total ?? 0,
+          pages: paginatedData.pages ?? paginatedData.pagination?.pages ?? 1,
+        }
+      }
+
+      // 兼容其他格式
+      if ('data' in paginatedData && Array.isArray(paginatedData.data)) {
+        return {
+          items: paginatedData.data as T[],
+          page: 1,
+          size: paginatedData.data.length,
+          total: paginatedData.data.length,
+          pages: 1,
+        }
       }
     }
 
@@ -81,7 +85,7 @@ export class ResponseHandler {
   /**
    * 检查响应是否成功
    */
-  static isSuccess(response: AxiosResponse<any>): boolean {
+  static isSuccess(response: AxiosResponse<unknown>): boolean {
     const data = response.data
     
     // HTTP状态码检查
@@ -100,33 +104,42 @@ export class ResponseHandler {
   /**
    * 提取错误消息
    */
-  static extractErrorMessage(error: any): string {
-    if (error.response) {
-      const { data } = error.response
+  static extractErrorMessage(error: unknown): string {
+    if (error && typeof error === 'object' && 'response' in error) {
+      const response = (error as { response?: { data?: Record<string, unknown> } }).response
+      const data = response?.data as
+        | { message?: string; detail?: string | Array<{ msg?: string | undefined }> }
+        | Record<string, unknown>
+        | undefined
       
       // 优先返回后端提供的消息
       if (data?.message) return data.message
-      if (data?.detail) {
+      if (data && 'detail' in data && data.detail) {
         // 处理detail为数组的情况（FastAPI validation errors）
         if (Array.isArray(data.detail)) {
           return data.detail
-            .map((err: any) => err.msg || err)
+            .map((err: { msg?: string } | string) => ('msg' in err ? err.msg : err))
             .join(', ')
         }
-        return String(data.detail)
+        return String(data.detail as string)
       }
-      if (data?.error) return data.error
+      if (data && 'error' in data && data.error) {
+        return String(data.error)
+      }
     }
     
     // 网络错误
-    if (error.request) {
+    if (error && typeof error === 'object' && 'request' in error) {
       return '网络连接失败，请检查网络设置'
     }
     
     // 其他错误
-    return error.message || '请求失败'
+    if (error instanceof Error) {
+      return error.message || '请求失败'
+    }
+
+    return '请求失败'
   }
 }
 
 export default ResponseHandler
-

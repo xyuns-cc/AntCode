@@ -1,6 +1,6 @@
 import React from 'react'
 import { Navigate } from 'react-router-dom'
-import { Result, Button } from 'antd'
+import { Result, Button, theme } from 'antd'
 import { TeamOutlined } from '@ant-design/icons'
 import { useAuth } from '@/hooks/useAuth'
 
@@ -13,6 +13,7 @@ const AdminRoute: React.FC<AdminRouteProps> = ({
   children, 
   fallback 
 }) => {
+  const { token } = theme.useToken()
   const { user, isAuthenticated } = useAuth()
 
   // 如果用户未认证，重定向到登录页面
@@ -31,7 +32,7 @@ const AdminRoute: React.FC<AdminRouteProps> = ({
         status="403"
         title="403"
         subTitle="抱歉，您没有权限访问此页面。"
-        icon={<TeamOutlined style={{ color: '#ff7875' }} />}
+        icon={<TeamOutlined style={{ color: token.colorError }} />}
         extra={
           <Button type="primary" onClick={() => window.history.back()}>
             返回

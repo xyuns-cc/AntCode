@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react'
-import { Card, Row, Col, Progress, Tag, Badge, Button, Statistic, Table, Drawer, Descriptions, Space } from 'antd'
+import React, { useEffect, useState, useMemo, useCallback } from 'react'
+import { Card, Row, Col, Progress, Tag, Badge, Button, Drawer, Descriptions, Space, Tooltip, message, theme } from 'antd'
 import {
   SyncOutlined,
   CheckCircleOutlined,
@@ -16,6 +16,7 @@ import {
   AppleOutlined,
   LinuxOutlined
 } from '@ant-design/icons'
+import ResponsiveTable from '@/components/common/ResponsiveTable'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -24,12 +25,15 @@ import {
   LineElement,
   BarElement,
   Title,
-  Tooltip,
+  Tooltip as ChartTooltip,
   Legend,
   Filler
 } from 'chart.js'
 import zoomPlugin from 'chartjs-plugin-zoom'
 import { Line, Bar } from 'react-chartjs-2'
+import { nodeService } from '@/services/nodes'
+import { taskService } from '@/services/tasks'
+import type { Node, NodeAggregateStats } from '@/types/node'
 import './monitor.css'
 
 // 注册 Chart.js 组件
@@ -40,23 +44,35 @@ ChartJS.register(
   LineElement,
   BarElement,
   Title,
-  Tooltip,
+  ChartTooltip,
   Legend,
   Filler,
   zoomPlugin
 )
 
-// 模拟数据类型定义
-interface NodeStatus {
+// 节点显示数据类型
+interface NodeDisplayData {
   id: string
   name: string
   version: string
-  os: 'windows' | 'ubuntu' | 'debian' | 'centos' | 'redhat' | 'alpine' | 'fedora' | 'macos'
+  os: 'windows' | 'ubuntu' | 'debian' | 'centos' | 'redhat' | 'alpine' | 'fedora' | 'macos' | 'linux'
   status: 'running' | 'warning' | 'error' | 'stopped'
   cpu: number
   memory: number
+  disk: number
   tasks: number
   uptime: string
+  host: string
+  port: number
+  lastHeartbeat?: string
+  // 详细资源信息
+  cpuCores?: number
+  memoryTotal?: number
+  memoryUsed?: number
+  memoryAvailable?: number
+  diskTotal?: number
+  diskUsed?: number
+  diskFree?: number
 }
 
 interface Alert {
@@ -73,8 +89,8 @@ interface Task {
   name: string
   node: string
   status: 'running' | 'success' | 'failed' | 'pending'
-  cpu: number
-  memory: number
+  cpu: number | string
+  memory: number | string
   duration: string
 }
 
@@ -86,64 +102,301 @@ interface NodeLog {
   time: string
 }
 
+// 计算性能趋势的小时数（组件外部工具函数）
+const getPerformancePeriodHours = (period: '24h' | '7d' | '30d'): number => {
+  switch (period) {
+    case '24h': return 24
+    case '7d': return 24 * 7
+    case '30d': return 24 * 30
+    default: return 24
+  }
+}
+
 const Monitor: React.FC = () => {
+  const { token } = theme.useToken()
   const [loading, setLoading] = useState(false)
   const [currentTime, setCurrentTime] = useState(new Date())
-  const [isLargeScreen, setIsLargeScreen] = useState(false)
+  const [isLargeScreen, _setIsLargeScreen] = useState(false)
   const [showAllNodes, setShowAllNodes] = useState(false)
-  const [selectedNode, setSelectedNode] = useState<NodeStatus | null>(null)
-  const chartRef = React.useRef<any>(null)
-  const [chartKey, setChartKey] = useState(0) // 用于强制更新图表数据
+  const [showAllAlerts, setShowAllAlerts] = useState(false)
+  const [selectedNode, setSelectedNode] = useState<NodeDisplayData | null>(null)
+  const chartRef = React.useRef<ChartJS | null>(null)
 
-  // 模拟节点数据（增加更多节点以展示滚动效果）
-  const [nodes] = useState<NodeStatus[]>([
-    { id: '1', name: 'node-01', version: 'v1.3.0', os: 'ubuntu', status: 'running', cpu: 68, memory: 75, tasks: 16, uptime: '15天 8小时' },
-    { id: '2', name: 'node-02', version: 'v1.3.0', os: 'windows', status: 'running', cpu: 45, memory: 62, tasks: 15, uptime: '15天 8小时' },
-    { id: '3', name: 'node-03', version: 'v1.3.0', os: 'debian', status: 'warning', cpu: 89, memory: 82, tasks: 18, uptime: '10天 2小时' },
-    { id: '4', name: 'node-04', version: 'v1.3.0', os: 'macos', status: 'running', cpu: 52, memory: 68, tasks: 17, uptime: '20天 5小时' },
-    { id: '5', name: 'node-05', version: 'v1.3.0', os: 'centos', status: 'running', cpu: 38, memory: 55, tasks: 14, uptime: '25天 12小时' },
-    { id: '6', name: 'node-06', version: 'v1.3.0', os: 'windows', status: 'running', cpu: 55, memory: 60, tasks: 13, uptime: '18天 3小时' },
-    { id: '7', name: 'node-07', version: 'v1.3.0', os: 'alpine', status: 'error', cpu: 95, memory: 91, tasks: 20, uptime: '5天 10小时' },
-    { id: '8', name: 'node-08', version: 'v1.3.0', os: 'fedora', status: 'running', cpu: 42, memory: 58, tasks: 12, uptime: '30天 7小时' },
-  ])
+  // 真实节点数据
+  const [nodes, setNodes] = useState<NodeDisplayData[]>([])
+  const [, setNodeStats] = useState<NodeAggregateStats | null>(null)
+  const [lastChecked, setLastChecked] = useState<string>('刚刚')
 
-  // 模拟告警数据
-  const [alerts] = useState<Alert[]>([
-    { id: '1', type: 'error', title: 'CPU使用率过高', message: 'node-03 节点CPU使用率持续15分钟超过85%，当前91%', time: '10分钟前', node: 'node-03' },
-    { id: '2', type: 'warning', title: '内存资源不足', message: 'node-03 节点内存使用率82%，建议迁移部分任务', time: '25分钟前', node: 'node-03' },
-    { id: '3', type: 'warning', title: '磁盘空间不足', message: '存储节点剩余空间低于20%，当前可用18%', time: '1小时前', node: 'storage-01' },
-    { id: '4', type: 'error', title: '任务执行失败', message: 'task "data-process-05" 在node-02上执行失败，错误代码: 500', time: '3小时前', node: 'node-02' },
-    { id: '5', type: 'info', title: '节点连接恢复', message: 'node-04 节点网络连接已恢复正常', time: '5小时前', node: 'node-04' },
-  ])
+  // 将 API Node 转换为显示数据
+  const transformNode = useCallback((node: Node): NodeDisplayData => {
+    // 根据状态和指标判断显示状态
+    let displayStatus: 'running' | 'warning' | 'error' | 'stopped' = 'stopped'
+    if (node.status === 'online') {
+      const cpu = node.metrics?.cpu || 0
+      const memory = node.metrics?.memory || 0
+      if (cpu > 90 || memory > 90) {
+        displayStatus = 'error'
+      } else if (cpu > 75 || memory > 75) {
+        displayStatus = 'warning'
+      } else {
+        displayStatus = 'running'
+      }
+    } else if (node.status === 'maintenance') {
+      displayStatus = 'warning'
+    } else if (node.status === 'connecting') {
+      displayStatus = 'warning'
+    }
 
-  // 模拟任务数据
-  const [tasks] = useState<Task[]>([
-    { id: '1', name: 'data-sync-daily', node: 'node-01', status: 'running', cpu: 18, memory: 25, duration: '5分12秒' },
-    { id: '2', name: 'log-analyzer', node: 'node-02', status: 'running', cpu: 42, memory: 68, duration: '12分35秒' },
-    { id: '3', name: 'backup-task', node: 'node-03', status: 'running', cpu: 78, memory: 82, duration: '28分18秒' },
-    { id: '4', name: 'report-generator', node: 'node-02', status: 'failed', cpu: 0, memory: 0, duration: '-' },
-    { id: '5', name: 'data-cleanup', node: 'node-04', status: 'success', cpu: 32, memory: 45, duration: '8分45秒' },
-    { id: '6', name: 'alert-monitor', node: 'node-01', status: 'running', cpu: 28, memory: 35, duration: '2分58秒' },
-  ])
+    // 格式化运行时间
+    const formatUptime = (seconds?: number): string => {
+      if (!seconds) return '未知'
+      const days = Math.floor(seconds / 86400)
+      const hours = Math.floor((seconds % 86400) / 3600)
+      if (days > 0) return `${days}天 ${hours}小时`
+      const minutes = Math.floor((seconds % 3600) / 60)
+      if (hours > 0) return `${hours}小时 ${minutes}分钟`
+      return `${minutes}分钟`
+    }
 
-  // 模拟节点日志数据
-  const [nodeLogs] = useState<NodeLog[]>([
-    { id: '1', node: 'node-01', type: 'info', message: '任务 data-sync-daily 启动成功', time: '2分钟前' },
-    { id: '2', node: 'node-01', type: 'success', message: '系统健康检查通过', time: '5分钟前' },
-    { id: '3', node: 'node-02', type: 'error', message: '任务 report-generator 执行失败: 连接超时', time: '3分钟前' },
-    { id: '4', node: 'node-02', type: 'warning', message: '内存使用率超过60%', time: '10分钟前' },
-    { id: '5', node: 'node-03', type: 'error', message: 'CPU使用率持续超过85%', time: '5分钟前' },
-    { id: '6', node: 'node-03', type: 'warning', message: '磁盘空间不足，剩余18%', time: '15分钟前' },
-    { id: '7', node: 'node-03', type: 'info', message: '备份任务正在执行中', time: '20分钟前' },
-    { id: '8', node: 'node-04', type: 'success', message: '数据清理任务完成', time: '8分钟前' },
-    { id: '9', node: 'node-04', type: 'info', message: '网络连接已恢复', time: '30分钟前' },
-    { id: '10', node: 'node-05', type: 'info', message: '定时任务调度器启动', time: '1小时前' },
-    { id: '11', node: 'node-07', type: 'error', message: '系统资源严重不足', time: '2分钟前' },
-    { id: '12', node: 'node-07', type: 'error', message: '多个任务执行失败', time: '5分钟前' },
-  ])
+    // 映射操作系统类型
+    const mapOsType = (osType?: string): NodeDisplayData['os'] => {
+      if (!osType) return 'linux'
+      const osLower = osType.toLowerCase()
+      if (osLower === 'darwin' || osLower === 'macos') return 'macos'
+      if (osLower === 'windows') return 'windows'
+      if (osLower.includes('ubuntu')) return 'ubuntu'
+      if (osLower.includes('debian')) return 'debian'
+      if (osLower.includes('centos')) return 'centos'
+      if (osLower.includes('redhat') || osLower.includes('rhel')) return 'redhat'
+      if (osLower.includes('alpine')) return 'alpine'
+      if (osLower.includes('fedora')) return 'fedora'
+      return 'linux'
+    }
+
+    return {
+      id: node.id,
+      name: node.name,
+      version: node.version || 'v1.0.0',
+      os: mapOsType(node.osType),
+      status: displayStatus,
+      cpu: node.metrics?.cpu || 0,
+      memory: node.metrics?.memory || 0,
+      disk: node.metrics?.disk || 0,
+      tasks: node.metrics?.runningTasks || 0,
+      uptime: formatUptime(node.metrics?.uptime),
+      host: node.host,
+      port: node.port,
+      lastHeartbeat: node.lastHeartbeat,
+      // 详细资源信息
+      cpuCores: node.metrics?.cpuCores,
+      memoryTotal: node.metrics?.memoryTotal,
+      memoryUsed: node.metrics?.memoryUsed,
+      memoryAvailable: node.metrics?.memoryAvailable,
+      diskTotal: node.metrics?.diskTotal,
+      diskUsed: node.metrics?.diskUsed,
+      diskFree: node.metrics?.diskFree,
+    }
+  }, [])
+
+  // 加载节点数据
+  const loadNodes = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true)
+    try {
+      const [allNodes, stats] = await Promise.all([
+        nodeService.getAllNodes(),
+        nodeService.getAggregateStats().catch(() => null)
+      ])
+      setNodes(allNodes.map(transformNode))
+      if (stats) setNodeStats(stats)
+      setLastChecked('刚刚')
+    } catch (error) {
+      console.error('加载节点数据失败:', error)
+      if (showLoading) message.error('加载节点数据失败')
+    } finally {
+      if (showLoading) setLoading(false)
+    }
+  }, [transformNode])
+
+  // 初始加载
+  useEffect(() => {
+    loadNodes()
+  }, [loadNodes])
+
+  // 定时刷新（每 10 秒）
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadNodes(false) // 静默刷新
+      setLastChecked('刚刚')
+    }, 10000)
+    return () => clearInterval(interval)
+  }, [loadNodes])
+
+  // 更新最后检查时间
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setLastChecked(prev => {
+        if (prev === '刚刚') return '1分钟前'
+        const match = prev.match(/(\d+)分钟前/)
+        if (match) {
+          const minutes = parseInt(match[1]) + 1
+          if (minutes >= 10) return '10分钟前'
+          return `${minutes}分钟前`
+        }
+        return prev
+      })
+    }, 60000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // 根据节点状态生成告警数据
+  const alerts = useMemo<Alert[]>(() => {
+    const alertList: Alert[] = []
+    nodes.forEach(node => {
+      if (node.cpu > 85) {
+        alertList.push({
+          id: `cpu-${node.id}`,
+          type: 'error',
+          title: 'CPU使用率过高',
+          message: `${node.name} 节点CPU使用率超过85%，当前${node.cpu}%`,
+          time: lastChecked,
+          node: node.name
+        })
+      } else if (node.cpu > 70) {
+        alertList.push({
+          id: `cpu-warn-${node.id}`,
+          type: 'warning',
+          title: 'CPU使用率较高',
+          message: `${node.name} 节点CPU使用率${node.cpu}%，建议关注`,
+          time: lastChecked,
+          node: node.name
+        })
+      }
+      if (node.memory > 85) {
+        alertList.push({
+          id: `mem-${node.id}`,
+          type: 'error',
+          title: '内存资源不足',
+          message: `${node.name} 节点内存使用率超过85%，当前${node.memory}%`,
+          time: lastChecked,
+          node: node.name
+        })
+      } else if (node.memory > 70) {
+        alertList.push({
+          id: `mem-warn-${node.id}`,
+          type: 'warning',
+          title: '内存使用率较高',
+          message: `${node.name} 节点内存使用率${node.memory}%，建议关注`,
+          time: lastChecked,
+          node: node.name
+        })
+      }
+      if (node.disk > 80) {
+        alertList.push({
+          id: `disk-${node.id}`,
+          type: 'warning',
+          title: '磁盘空间不足',
+          message: `${node.name} 节点磁盘使用率${node.disk}%`,
+          time: lastChecked,
+          node: node.name
+        })
+      }
+      if (node.status === 'stopped') {
+        alertList.push({
+          id: `offline-${node.id}`,
+          type: 'error',
+          title: '节点离线',
+          message: `${node.name} 节点当前处于离线状态`,
+          time: lastChecked,
+          node: node.name
+        })
+      }
+    })
+    return alertList
+  }, [nodes, lastChecked])
+
+  // 卡片中显示的告警（最多5条）
+  const displayAlerts = useMemo(() => alerts.slice(0, 5), [alerts])
+
+  // 任务数据 - 从各节点汇总
+  const [tasks, setTasks] = useState<Task[]>([])
+  
+  // 加载任务数据
+  useEffect(() => {
+    const loadTasks = async () => {
+      try {
+        const response = await taskService.getTasks({ page: 1, size: 20 })
+        const taskList = response.data || []
+        setTasks(taskList.map((t: { id: string; name: string; node_id?: string; status: string; last_run_duration?: number }) => ({
+          id: t.id,
+          name: t.name,
+          node: nodes.find(n => n.id === t.node_id)?.name || '未分配',
+          status: t.status === 'running' ? 'running' : t.status === 'failed' ? 'failed' : t.status === 'completed' ? 'success' : 'pending',
+          cpu: '-', // 任务级别的 CPU/内存暂不支持
+          memory: '-',
+          duration: t.last_run_duration ? `${Math.round(t.last_run_duration)}秒` : '-'
+        })))
+      } catch (error) {
+        console.error('加载任务失败:', error)
+      }
+    }
+    loadTasks()
+  }, [nodes])
+
+  // 节点日志数据 - 根据节点状态动态生成
+  const nodeLogs = useMemo<NodeLog[]>(() => {
+    const logs: NodeLog[] = []
+    nodes.forEach(node => {
+      if (node.status === 'running') {
+        logs.push({
+          id: `health-${node.id}`,
+          node: node.name,
+          type: 'success',
+          message: '系统健康检查通过',
+          time: lastChecked
+        })
+      }
+      if (node.cpu > 70) {
+        logs.push({
+          id: `cpu-log-${node.id}`,
+          node: node.name,
+          type: node.cpu > 85 ? 'error' : 'warning',
+          message: `CPU使用率 ${node.cpu}%`,
+          time: lastChecked
+        })
+      }
+      if (node.memory > 70) {
+        logs.push({
+          id: `mem-log-${node.id}`,
+          node: node.name,
+          type: node.memory > 85 ? 'error' : 'warning',
+          message: `内存使用率 ${node.memory}%`,
+          time: lastChecked
+        })
+      }
+      if (node.status === 'stopped') {
+        logs.push({
+          id: `offline-log-${node.id}`,
+          node: node.name,
+          type: 'error',
+          message: '节点离线，请检查网络连接',
+          time: lastChecked
+        })
+      }
+      if (node.tasks > 0) {
+        logs.push({
+          id: `task-log-${node.id}`,
+          node: node.name,
+          type: 'info',
+          message: `当前运行 ${node.tasks} 个任务`,
+          time: lastChecked
+        })
+      }
+    })
+    return logs
+  }, [nodes, lastChecked])
 
   // 生成过去24小时的时间标签
-  const generateTimeLabels = () => {
+  const _generateTimeLabels = useCallback(() => {
     const labels = []
     const now = new Date()
     for (let i = 23; i >= 0; i--) {
@@ -151,244 +404,366 @@ const Monitor: React.FC = () => {
       labels.push(`${hour.getHours()}:00`)
     }
     return labels
-  }
-
-  // 生成过去30天的时间标签（用于节点详情）
-  // 生成过去30天的日期标签（使用 useMemo 避免重新生成）
-  const dayLabels = useMemo(() => {
-    const labels = []
-    const now = new Date()
-    for (let i = 29; i >= 0; i--) {
-      const day = new Date(now.getTime() - i * 24 * 60 * 60 * 1000)
-      labels.push(`${day.getMonth() + 1}/${day.getDate()}`)
-    }
-    return labels
   }, [])
 
-  // 生成随机数据
-  const generateRandomData = (count: number, min: number, max: number) => {
-    return Array.from({ length: count }, () => Math.floor(Math.random() * (max - min + 1)) + min)
-  }
+  // 性能趋势时间范围状态
+  const [performancePeriod, setPerformancePeriod] = useState<'24h' | '7d' | '30d'>('24h')
 
-  const timeLabels = generateTimeLabels()
+  // 集群历史指标数据
+  const [clusterHistory, setClusterHistory] = useState<{
+    timestamps: string[]
+    cpu: { avg: number[]; max: number[]; min: number[] }
+    memory: { avg: number[]; max: number[]; min: number[] }
+  } | null>(null)
 
-  // 添加定时器更新图表数据
+  // 节点详情历史指标
+  const [nodeHistory, setNodeHistory] = useState<Array<{
+    timestamp: string
+    cpu: number
+    memory: number
+    disk: number
+  }>>([])
+
+  // 加载集群历史指标
+  const loadClusterHistory = useCallback(async () => {
+    try {
+      const hours = getPerformancePeriodHours(performancePeriod)
+      const history = await nodeService.getClusterMetricsHistory(hours)
+      setClusterHistory(history)
+    } catch (error) {
+      console.error('加载集群历史指标失败:', error)
+      // 静默失败，保持之前的数据
+    }
+  }, [performancePeriod])
+
+  // 加载节点详情历史指标
+  const loadNodeHistory = useCallback(async (nodeId: string) => {
+    try {
+      const history = await nodeService.getNodeMetricsHistory(nodeId, 720) // 30天
+      setNodeHistory(history)
+    } catch (error) {
+      console.error('加载节点历史指标失败:', error)
+      setNodeHistory([])
+    }
+  }, [])
+
+  // 初始加载集群历史
   useEffect(() => {
-    if (!selectedNode || !chartRef.current) return
-    
-    const interval = setInterval(() => {
-      const chart = chartRef.current
-      if (chart) {
-        // 更新数据但保持缩放状态
-        chart.data.datasets[0].data = generateRandomData(30, Math.max(0, selectedNode.cpu - 15), Math.min(100, selectedNode.cpu + 15))
-        chart.data.datasets[1].data = generateRandomData(30, Math.max(0, selectedNode.memory - 15), Math.min(100, selectedNode.memory + 15))
-        chart.update('none') // 'none' 模式不会重置缩放
-      }
-    }, 3000) // 每3秒更新一次
-    
-    return () => clearInterval(interval)
-  }, [selectedNode])
+    loadClusterHistory()
+  }, [loadClusterHistory])
 
-  // 生成节点详情图表数据
-  const getNodeDetailChartData = () => {
+  // 定时刷新集群历史（每分钟）
+  useEffect(() => {
+    const interval = setInterval(loadClusterHistory, 60000)
+    return () => clearInterval(interval)
+  }, [loadClusterHistory])
+
+  // 选中节点时加载历史，并设置定时刷新
+  useEffect(() => {
+    if (!selectedNode) return
+    
+    // 立即加载一次
+    loadNodeHistory(selectedNode.id)
+    
+    // 设置定时刷新（每30秒）
+    const interval = setInterval(() => {
+      loadNodeHistory(selectedNode.id)
+    }, 30000)
+    
+    // 清理函数
+    return () => clearInterval(interval)
+  }, [selectedNode, loadNodeHistory])
+
+  // 格式化时间标签
+  const formatTimeLabel = useCallback((timestamp: string) => {
+    const date = new Date(timestamp)
+    if (performancePeriod === '24h') {
+      return `${date.getHours()}:00`
+    } else if (performancePeriod === '7d') {
+      return `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:00`
+    } else {
+      return `${date.getMonth() + 1}/${date.getDate()}`
+    }
+  }, [performancePeriod])
+
+  // 节点详情图表数据 - 使用真实历史数据（使用 useMemo 优化性能）
+  const nodeDetailChartData = useMemo(() => {
     if (!selectedNode) return null
+    
+    // 如果有历史数据，使用真实数据
+    if (nodeHistory.length > 0) {
+      const labels = nodeHistory.map(h => {
+        const date = new Date(h.timestamp)
+        return `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:00`
+      })
+      
+      return {
+        labels,
+        datasets: [
+          {
+            label: 'CPU',
+            data: nodeHistory.map(h => h.cpu),
+            borderColor: '#1890ff',
+            backgroundColor: 'rgba(24, 144, 255, 0.1)',
+            tension: 0.4,
+            fill: true,
+            borderWidth: 2.5,
+            pointRadius: 1,
+            pointHoverRadius: 6,
+          },
+          {
+            label: '内存',
+            data: nodeHistory.map(h => h.memory),
+            borderColor: '#52c41a',
+            backgroundColor: 'rgba(82, 196, 26, 0.1)',
+            tension: 0.4,
+            fill: true,
+            borderWidth: 2.5,
+            pointRadius: 1,
+            pointHoverRadius: 6,
+          },
+        ],
+      }
+    }
+    
+    // 没有历史数据时，显示当前值的单点
     return {
-      labels: dayLabels,
+      labels: ['当前'],
       datasets: [
         {
           label: 'CPU',
-          data: generateRandomData(30, Math.max(0, selectedNode.cpu - 15), Math.min(100, selectedNode.cpu + 15)),
+          data: [selectedNode.cpu],
           borderColor: '#1890ff',
-          backgroundColor: (context: any) => {
-            const ctx = context.chart.ctx
-            const gradient = ctx.createLinearGradient(0, 0, 0, 250)
-            gradient.addColorStop(0, 'rgba(24, 144, 255, 0.3)')
-            gradient.addColorStop(1, 'rgba(24, 144, 255, 0.01)')
-            return gradient
-          },
+          backgroundColor: 'rgba(24, 144, 255, 0.1)',
           tension: 0.4,
           fill: true,
           borderWidth: 2.5,
-          pointRadius: 2,
-          pointHoverRadius: 6,
-          pointBackgroundColor: '#1890ff',
-          pointHoverBackgroundColor: '#1890ff',
-          pointHoverBorderColor: '#fff',
-          pointHoverBorderWidth: 2,
+          pointRadius: 5,
         },
         {
           label: '内存',
-          data: generateRandomData(30, Math.max(0, selectedNode.memory - 15), Math.min(100, selectedNode.memory + 15)),
+          data: [selectedNode.memory],
           borderColor: '#52c41a',
-          backgroundColor: (context: any) => {
-            const ctx = context.chart.ctx
-            const gradient = ctx.createLinearGradient(0, 0, 0, 250)
-            gradient.addColorStop(0, 'rgba(82, 196, 26, 0.3)')
-            gradient.addColorStop(1, 'rgba(82, 196, 26, 0.01)')
-            return gradient
-          },
+          backgroundColor: 'rgba(82, 196, 26, 0.1)',
           tension: 0.4,
           fill: true,
           borderWidth: 2.5,
-          pointRadius: 2,
-          pointHoverRadius: 6,
-          pointBackgroundColor: '#52c41a',
-          pointHoverBackgroundColor: '#52c41a',
-          pointHoverBorderColor: '#fff',
-          pointHoverBorderWidth: 2,
+          pointRadius: 5,
         },
       ],
     }
-  }
+  }, [selectedNode, nodeHistory])
 
-  // CPU趋势数据 - 显示集群平均值、最大值和最小值
-  const cpuTrendData = {
-    labels: timeLabels,
-    datasets: [
-      {
-        label: '平均',
-        data: generateRandomData(24, 50, 65),
-        borderColor: '#1890ff',
-        backgroundColor: (context: any) => {
-          const ctx = context.chart.ctx
-          const gradient = ctx.createLinearGradient(0, 0, 0, 200)
-          gradient.addColorStop(0, 'rgba(24, 144, 255, 0.3)')
-          gradient.addColorStop(1, 'rgba(24, 144, 255, 0.01)')
-          return gradient
+  // 计算当前集群资源使用情况（用于显示当前值）
+  const clusterMetrics = useMemo(() => {
+    if (nodes.length === 0) return { avgCpu: 0, avgMem: 0, maxCpu: 0, maxMem: 0, minCpu: 0, minMem: 0 }
+    const cpuValues = nodes.map(n => n.cpu)
+    const memValues = nodes.map(n => n.memory)
+    return {
+      avgCpu: Math.round(cpuValues.reduce((a, b) => a + b, 0) / nodes.length),
+      avgMem: Math.round(memValues.reduce((a, b) => a + b, 0) / nodes.length),
+      maxCpu: Math.max(...cpuValues),
+      maxMem: Math.max(...memValues),
+      minCpu: Math.min(...cpuValues),
+      minMem: Math.min(...memValues),
+    }
+  }, [nodes])
+
+  // CPU趋势数据 - 使用真实历史数据
+  const cpuTrendData = useMemo(() => {
+    // 使用真实历史数据
+    if (clusterHistory && clusterHistory.timestamps.length > 0) {
+      return {
+        labels: clusterHistory.timestamps.map(formatTimeLabel),
+        datasets: [
+          {
+            label: '平均',
+            data: clusterHistory.cpu.avg,
+            borderColor: '#1890ff',
+            backgroundColor: 'rgba(24, 144, 255, 0.1)',
+            tension: 0.4,
+            fill: true,
+            borderWidth: 3,
+            pointRadius: 0,
+            pointHoverRadius: 6,
+          },
+          {
+            label: '最大',
+            data: clusterHistory.cpu.max,
+            borderColor: '#ff7875',
+            backgroundColor: 'transparent',
+            tension: 0.4,
+            fill: false,
+            borderWidth: 2,
+            borderDash: [8, 4],
+            pointRadius: 0,
+            pointHoverRadius: 5,
+          },
+          {
+            label: '最小',
+            data: clusterHistory.cpu.min,
+            borderColor: '#95de64',
+            backgroundColor: 'transparent',
+            tension: 0.4,
+            fill: false,
+            borderWidth: 2,
+            borderDash: [8, 4],
+            pointRadius: 0,
+            pointHoverRadius: 5,
+          },
+        ],
+      }
+    }
+    
+    // 没有历史数据时显示当前快照
+    return {
+      labels: ['当前'],
+      datasets: [
+        {
+          label: '平均',
+          data: [clusterMetrics.avgCpu],
+          borderColor: '#1890ff',
+          backgroundColor: 'rgba(24, 144, 255, 0.1)',
+          borderWidth: 3,
+          pointRadius: 5,
         },
-        tension: 0.4,
-        fill: true,
-        borderWidth: 3,
-        pointRadius: 0,
-        pointHoverRadius: 6,
-        pointHoverBackgroundColor: '#1890ff',
-        pointHoverBorderColor: '#fff',
-        pointHoverBorderWidth: 2,
-      },
-      {
-        label: '最大',
-        data: generateRandomData(24, 70, 90),
-        borderColor: '#ff7875',
-        backgroundColor: 'transparent',
-        tension: 0.4,
-        fill: false,
-        borderWidth: 2,
-        borderDash: [8, 4],
-        pointRadius: 0,
-        pointHoverRadius: 5,
-        pointHoverBackgroundColor: '#ff4d4f',
-        pointHoverBorderColor: '#fff',
-        pointHoverBorderWidth: 2,
-      },
-      {
-        label: '最小',
-        data: generateRandomData(24, 30, 45),
-        borderColor: '#95de64',
-        backgroundColor: 'transparent',
-        tension: 0.4,
-        fill: false,
-        borderWidth: 2,
-        borderDash: [8, 4],
-        pointRadius: 0,
-        pointHoverRadius: 5,
-        pointHoverBackgroundColor: '#52c41a',
-        pointHoverBorderColor: '#fff',
-        pointHoverBorderWidth: 2,
-      },
-    ],
-  }
-
-  // 内存趋势数据 - 显示集群平均值、最大值和最小值
-  const memoryTrendData = {
-    labels: timeLabels,
-    datasets: [
-      {
-        label: '平均',
-        data: generateRandomData(24, 55, 70),
-        borderColor: '#722ed1',
-        backgroundColor: (context: any) => {
-          const ctx = context.chart.ctx
-          const gradient = ctx.createLinearGradient(0, 0, 0, 200)
-          gradient.addColorStop(0, 'rgba(114, 46, 209, 0.3)')
-          gradient.addColorStop(1, 'rgba(114, 46, 209, 0.01)')
-          return gradient
+        {
+          label: '最大',
+          data: [clusterMetrics.maxCpu],
+          borderColor: '#ff7875',
+          borderWidth: 2,
+          pointRadius: 5,
         },
-        tension: 0.4,
-        fill: true,
-        borderWidth: 3,
-        pointRadius: 0,
-        pointHoverRadius: 6,
-        pointHoverBackgroundColor: '#722ed1',
-        pointHoverBorderColor: '#fff',
-        pointHoverBorderWidth: 2,
-      },
-      {
-        label: '最大',
-        data: generateRandomData(24, 75, 90),
-        borderColor: '#ff7875',
-        backgroundColor: 'transparent',
-        tension: 0.4,
-        fill: false,
-        borderWidth: 2,
-        borderDash: [8, 4],
-        pointRadius: 0,
-        pointHoverRadius: 5,
-        pointHoverBackgroundColor: '#ff4d4f',
-        pointHoverBorderColor: '#fff',
-        pointHoverBorderWidth: 2,
-      },
-      {
-        label: '最小',
-        data: generateRandomData(24, 40, 55),
-        borderColor: '#95de64',
-        backgroundColor: 'transparent',
-        tension: 0.4,
-        fill: false,
-        borderWidth: 2,
-        borderDash: [8, 4],
-        pointRadius: 0,
-        pointHoverRadius: 5,
-        pointHoverBackgroundColor: '#52c41a',
-        pointHoverBorderColor: '#fff',
-        pointHoverBorderWidth: 2,
-      },
-    ],
-  }
+        {
+          label: '最小',
+          data: [clusterMetrics.minCpu],
+          borderColor: '#95de64',
+          borderWidth: 2,
+          pointRadius: 5,
+        },
+      ],
+    }
+  }, [clusterHistory, clusterMetrics, formatTimeLabel])
 
-  // 任务执行统计数据
-  const taskStatsData = {
-    labels: ['成功', '失败', '运行中', '待执行'],
-    datasets: [
-      {
-        label: '任务数量',
-        data: [156, 12, 8, 24],
-        backgroundColor: ['#52c41a', '#ff4d4f', '#1890ff', '#faad14'],
-      },
-    ],
-  }
+  // 内存趋势数据 - 使用真实历史数据
+  const memoryTrendData = useMemo(() => {
+    // 使用真实历史数据
+    if (clusterHistory && clusterHistory.timestamps.length > 0) {
+      return {
+        labels: clusterHistory.timestamps.map(formatTimeLabel),
+        datasets: [
+          {
+            label: '平均',
+            data: clusterHistory.memory.avg,
+            borderColor: '#722ed1',
+            backgroundColor: 'rgba(114, 46, 209, 0.1)',
+            tension: 0.4,
+            fill: true,
+            borderWidth: 3,
+            pointRadius: 0,
+            pointHoverRadius: 6,
+          },
+          {
+            label: '最大',
+            data: clusterHistory.memory.max,
+            borderColor: '#ff7875',
+            backgroundColor: 'transparent',
+            tension: 0.4,
+            fill: false,
+            borderWidth: 2,
+            borderDash: [8, 4],
+            pointRadius: 0,
+            pointHoverRadius: 5,
+          },
+          {
+            label: '最小',
+            data: clusterHistory.memory.min,
+            borderColor: '#95de64',
+            backgroundColor: 'transparent',
+            tension: 0.4,
+            fill: false,
+            borderWidth: 2,
+            borderDash: [8, 4],
+            pointRadius: 0,
+            pointHoverRadius: 5,
+          },
+        ],
+      }
+    }
+    
+    // 没有历史数据时显示当前快照
+    return {
+      labels: ['当前'],
+      datasets: [
+        {
+          label: '平均',
+          data: [clusterMetrics.avgMem],
+          borderColor: '#722ed1',
+          backgroundColor: 'rgba(114, 46, 209, 0.1)',
+          borderWidth: 3,
+          pointRadius: 5,
+        },
+        {
+          label: '最大',
+          data: [clusterMetrics.maxMem],
+          borderColor: '#ff7875',
+          borderWidth: 2,
+          pointRadius: 5,
+        },
+        {
+          label: '最小',
+          data: [clusterMetrics.minMem],
+          borderColor: '#95de64',
+          borderWidth: 2,
+          pointRadius: 5,
+        },
+      ],
+    }
+  }, [clusterHistory, clusterMetrics, formatTimeLabel])
 
-  // 网络流量数据
-  const networkData = {
-    labels: timeLabels.slice(-12),
-    datasets: [
-      {
-        label: '接收',
-        data: generateRandomData(12, 300, 800),
-        borderColor: '#52c41a',
-        backgroundColor: 'rgba(82, 196, 26, 0.1)',
-        tension: 0.4,
-        fill: true,
-      },
-      {
-        label: '发送',
-        data: generateRandomData(12, 200, 600),
-        borderColor: '#1890ff',
-        backgroundColor: 'rgba(24, 144, 255, 0.1)',
-        tension: 0.4,
-        fill: true,
-      },
-    ],
-  }
+  // 任务执行统计数据 - 使用真实数据
+  const taskStatsData = useMemo(() => {
+    const successCount = tasks.filter(t => t.status === 'success').length
+    const failedCount = tasks.filter(t => t.status === 'failed').length
+    const runningCount = tasks.filter(t => t.status === 'running').length
+    const pendingCount = tasks.filter(t => t.status === 'pending').length
+    
+    return {
+      labels: ['成功', '失败', '运行中', '待执行'],
+      datasets: [
+        {
+          label: '任务数量',
+          data: [successCount, failedCount, runningCount, pendingCount],
+          backgroundColor: ['#52c41a', '#ff4d4f', '#1890ff', '#faad14'],
+        },
+      ],
+    }
+  }, [tasks])
+
+  // 磁盘使用数据 - 使用真实节点磁盘数据
+  const diskUsageData = useMemo(() => {
+    if (nodes.length === 0) {
+      return {
+        labels: ['暂无数据'],
+        datasets: [{
+          label: '磁盘使用率',
+          data: [0],
+          backgroundColor: ['#d9d9d9'],
+        }],
+      }
+    }
+    
+    return {
+      labels: nodes.map(n => n.name),
+      datasets: [{
+        label: '磁盘使用率 (%)',
+        data: nodes.map(n => n.disk),
+        backgroundColor: nodes.map(n => 
+          n.disk > 80 ? '#ff4d4f' : n.disk > 60 ? '#faad14' : '#722ed1'
+        ),
+      }],
+    }
+  }, [nodes])
 
   const chartOptions = {
     responsive: true,
@@ -406,7 +781,7 @@ const Monitor: React.FC = () => {
           usePointStyle: true,
           pointStyle: 'circle',
           padding: 12,
-          color: '#666',
+          color: token.colorTextSecondary,
         },
       },
       tooltip: {
@@ -421,7 +796,7 @@ const Monitor: React.FC = () => {
         padding: 10,
         displayColors: true,
         callbacks: {
-          label: function(context: any) {
+          label: function(context: { dataset: { label?: string }; parsed: { y: number | null } }) {
             let label = context.dataset.label || ''
             if (label) {
               label += ': '
@@ -440,16 +815,16 @@ const Monitor: React.FC = () => {
         beginAtZero: true,
         max: 100,
         ticks: {
-          callback: function(value: any) {
+          callback: function(value: string | number) {
             return value + '%'
           },
           font: {
             size: 11
           },
-          color: '#999',
+          color: token.colorTextTertiary,
         },
         grid: {
-          color: 'rgba(0, 0, 0, 0.06)',
+          color: token.colorBorderSecondary,
           drawBorder: false,
         },
         border: {
@@ -464,7 +839,7 @@ const Monitor: React.FC = () => {
           font: {
             size: 10
           },
-          color: '#999',
+          color: token.colorTextTertiary,
         },
         grid: {
           display: false,
@@ -493,7 +868,7 @@ const Monitor: React.FC = () => {
           usePointStyle: true,
           pointStyle: 'circle',
           padding: 12,
-          color: '#666',
+          color: token.colorTextSecondary,
         },
       },
       tooltip: {
@@ -508,7 +883,7 @@ const Monitor: React.FC = () => {
         padding: 10,
         displayColors: true,
         callbacks: {
-          label: function(context: any) {
+          label: function(context: { dataset: { label?: string }; parsed: { y: number | null } }) {
             let label = context.dataset.label || ''
             if (label) {
               label += ': '
@@ -521,22 +896,18 @@ const Monitor: React.FC = () => {
         }
       },
       zoom: {
+        pan: {
+          enabled: true,
+          mode: 'x' as const,
+        },
         zoom: {
           wheel: {
             enabled: true,
-            speed: 0.1,
           },
           pinch: {
             enabled: true,
           },
           mode: 'x' as const,
-        },
-        pan: {
-          enabled: true,
-          mode: 'x' as const,
-        },
-        limits: {
-          x: { min: 'original', max: 'original' },
         },
       },
     },
@@ -545,16 +916,16 @@ const Monitor: React.FC = () => {
         beginAtZero: true,
         max: 100,
         ticks: {
-          callback: function(value: any) {
+          callback: function(value: string | number) {
             return value + '%'
           },
           font: {
             size: 11
           },
-          color: '#999',
+          color: token.colorTextTertiary,
         },
         grid: {
-          color: 'rgba(0, 0, 0, 0.06)',
+          color: token.colorBorderSecondary,
           drawBorder: false,
         },
         border: {
@@ -568,7 +939,7 @@ const Monitor: React.FC = () => {
           font: {
             size: 10
           },
-          color: '#999',
+          color: token.colorTextTertiary,
         },
         grid: {
           display: false,
@@ -578,7 +949,7 @@ const Monitor: React.FC = () => {
         },
       },
     },
-  }), [])
+  }), [token])
 
   // 更新时间
   useEffect(() => {
@@ -590,11 +961,26 @@ const Monitor: React.FC = () => {
 
   // 刷新数据
   const handleRefresh = () => {
-    setLoading(true)
-    setTimeout(() => {
-      setLoading(false)
-    }, 1000)
+    loadNodes(true)
+    message.success('数据刷新成功')
   }
+
+  // 计算统计数据
+  const statsData = useMemo(() => {
+    const onlineCount = nodes.filter(n => n.status === 'running').length
+    const warningCount = nodes.filter(n => n.status === 'warning').length
+    const errorCount = nodes.filter(n => n.status === 'error' || n.status === 'stopped').length
+    const totalTasks = nodes.reduce((sum, n) => sum + n.tasks, 0)
+    
+    return {
+      totalNodes: nodes.length,
+      onlineCount,
+      warningCount,
+      errorCount,
+      totalTasks,
+      systemStatus: errorCount > 0 ? 'error' : warningCount > 0 ? 'warning' : 'normal'
+    }
+  }, [nodes])
 
   // 获取状态颜色
   const getStatusColor = (status: string) => {
@@ -628,18 +1014,19 @@ const Monitor: React.FC = () => {
   const getOsIcon = (os: string) => {
     switch (os) {
       case 'windows':
-        return <WindowsOutlined style={{ fontSize: 14, marginRight: 4, color: '#00a4ef' }} />
+        return <WindowsOutlined style={{ fontSize: 14, marginRight: 4, color: token.colorInfo }} />
       case 'ubuntu':
       case 'debian':
       case 'centos':
       case 'redhat':
       case 'alpine':
       case 'fedora':
-        return <LinuxOutlined style={{ fontSize: 14, marginRight: 4, color: '#fcc624' }} />
+      case 'linux':
+        return <LinuxOutlined style={{ fontSize: 14, marginRight: 4, color: token.colorWarning }} />
       case 'macos':
-        return <AppleOutlined style={{ fontSize: 14, marginRight: 4, color: '#555' }} />
+        return <AppleOutlined style={{ fontSize: 14, marginRight: 4, color: token.colorTextSecondary }} />
       default:
-        return <LinuxOutlined style={{ fontSize: 14, marginRight: 4, color: '#fcc624' }} />
+        return <CloudServerOutlined style={{ fontSize: 14, marginRight: 4, color: token.colorPrimary }} />
     }
   }
 
@@ -654,16 +1041,17 @@ const Monitor: React.FC = () => {
       case 'alpine': return 'Alpine Linux'
       case 'fedora': return 'Fedora'
       case 'macos': return 'macOS'
-      default: return '未知'
+      case 'linux': return 'Linux'
+      default: return '节点'
     }
   }
 
   // 获取告警图标
   const getAlertIcon = (type: string) => {
     switch (type) {
-      case 'error': return <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-      case 'warning': return <WarningOutlined style={{ color: '#faad14' }} />
-      case 'info': return <CheckCircleOutlined style={{ color: '#1890ff' }} />
+      case 'error': return <CloseCircleOutlined style={{ color: token.colorError }} />
+      case 'warning': return <WarningOutlined style={{ color: token.colorWarning }} />
+      case 'info': return <CheckCircleOutlined style={{ color: token.colorInfo }} />
       default: return null
     }
   }
@@ -696,12 +1084,15 @@ const Monitor: React.FC = () => {
       <div className="monitor-header-simple">
         <div className="header-left">
           <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 600 }}>
-            <CloudServerOutlined style={{ marginRight: 8, color: '#722ed1' }} />
+            <CloudServerOutlined style={{ marginRight: 8, color: token.colorPrimary }} />
             节点监控
           </h2>
           <div className="header-badges">
-            <Badge status="success" text="系统正常" />
-            <span style={{ fontSize: 12, color: '#888', marginLeft: 16 }}>
+            <Badge 
+              status={statsData.systemStatus === 'error' ? 'error' : statsData.systemStatus === 'warning' ? 'warning' : 'success'} 
+              text={statsData.systemStatus === 'error' ? '系统异常' : statsData.systemStatus === 'warning' ? '需要关注' : '系统正常'} 
+            />
+            <span style={{ fontSize: 12, color: token.colorTextSecondary, marginLeft: 16 }}>
               <ClockCircleOutlined /> {currentTime.toLocaleString('zh-CN')}
             </span>
           </div>
@@ -721,10 +1112,10 @@ const Monitor: React.FC = () => {
         <Col xs={12} sm={6}>
           <div className="mini-stat-card">
             <div className="stat-icon">
-              <CloudServerOutlined style={{ color: '#722ed1' }} />
+              <CloudServerOutlined style={{ color: token.colorPrimary }} />
             </div>
             <div className="stat-content">
-              <div className="stat-value">8</div>
+              <div className="stat-value">{statsData.totalNodes}</div>
               <div className="stat-label">执行节点</div>
             </div>
           </div>
@@ -732,10 +1123,10 @@ const Monitor: React.FC = () => {
         <Col xs={12} sm={6}>
           <div className="mini-stat-card">
             <div className="stat-icon">
-              <ThunderboltOutlined style={{ color: '#1890ff' }} />
+              <ThunderboltOutlined style={{ color: token.colorInfo }} />
             </div>
             <div className="stat-content">
-              <div className="stat-value">124</div>
+              <div className="stat-value">{statsData.totalTasks}</div>
               <div className="stat-label">运行任务</div>
             </div>
           </div>
@@ -743,10 +1134,10 @@ const Monitor: React.FC = () => {
         <Col xs={12} sm={6}>
           <div className="mini-stat-card">
             <div className="stat-icon">
-              <WarningOutlined style={{ color: '#faad14' }} />
+              <WarningOutlined style={{ color: token.colorWarning }} />
             </div>
             <div className="stat-content">
-              <div className="stat-value">3</div>
+              <div className="stat-value">{statsData.warningCount}</div>
               <div className="stat-label">警告</div>
             </div>
           </div>
@@ -754,10 +1145,10 @@ const Monitor: React.FC = () => {
         <Col xs={12} sm={6}>
           <div className="mini-stat-card">
             <div className="stat-icon">
-              <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+              <CloseCircleOutlined style={{ color: token.colorError }} />
             </div>
             <div className="stat-content">
-              <div className="stat-value">1</div>
+              <div className="stat-value">{statsData.errorCount}</div>
               <div className="stat-label">错误</div>
             </div>
           </div>
@@ -776,7 +1167,7 @@ const Monitor: React.FC = () => {
           }
           extra={
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={{ fontSize: 11, color: '#888' }}>上次检查: 2分钟前</span>
+              <span style={{ fontSize: 11, color: token.colorTextSecondary }}>上次检查: {lastChecked}</span>
               <Button 
                 size="small" 
                 type="link" 
@@ -788,8 +1179,14 @@ const Monitor: React.FC = () => {
             </div>
           }
           style={{ marginBottom: 12 }}
+          loading={loading && nodes.length === 0}
         >
             <div className="nodes-scroll-container">
+              {nodes.length === 0 && !loading && (
+                <div style={{ textAlign: 'center', padding: '40px', color: token.colorTextTertiary, width: '100%' }}>
+                  暂无节点数据，请先添加节点
+                </div>
+              )}
               {nodes.map((node) => (
                 <Card 
                   key={node.id} 
@@ -854,33 +1251,50 @@ const Monitor: React.FC = () => {
         </Card>
 
         {/* 第二行：资源告警和性能趋势 */}
-        <Row gutter={12} style={{ marginBottom: 12 }}>
+        <Row gutter={12} style={{ marginTop: 16, marginBottom: 12 }}>
           {/* 资源告警 */}
           <Col xs={24} lg={12}>
             <Card
               size="small"
-              title={<span style={{ fontSize: 14 }}><WarningOutlined /> 资源告警</span>}
-              extra={<a style={{ fontSize: 11 }}>查看全部</a>}
+              title={
+                <span style={{ fontSize: 14 }}>
+                  <WarningOutlined /> 资源告警
+                  {alerts.length > 0 && (
+                    <Badge count={alerts.length} style={{ marginLeft: 8 }} size="small" />
+                  )}
+                </span>
+              }
+              extra={alerts.length > 0 && <a style={{ fontSize: 11 }} onClick={() => setShowAllAlerts(true)}>查看全部</a>}
               className="alerts-card"
+              styles={{ body: { height: 360, overflow: 'auto', padding: alerts.length === 0 ? '16px' : undefined } }}
             >
             <div className="alerts-list">
-              {alerts.map((alert) => (
-                <Card key={alert.id} className={`alert-item alert-${alert.type}`} size="small">
-                  <div className="alert-content">
-                    <div className="alert-icon">{getAlertIcon(alert.type)}</div>
-                    <div className="alert-details">
-                      <div className="alert-header">
-                        <h4>{alert.title}</h4>
-                        <span className="alert-time">{alert.time}</span>
+              {displayAlerts.length === 0 ? (
+                <div style={{ 
+                  display: 'flex', 
+                  flexDirection: 'column', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  height: '100%',
+                  color: token.colorTextSecondary 
+                }}>
+                  <CheckCircleOutlined style={{ fontSize: 40, marginBottom: 12, color: token.colorSuccess }} />
+                  <span style={{ fontSize: 13 }}>暂无告警，系统运行正常</span>
+                </div>
+              ) : (
+                displayAlerts.map((alert) => (
+                  <div key={alert.id} className={`alert-item-compact alert-${alert.type}`}>
+                    <div className="alert-icon-compact">{getAlertIcon(alert.type)}</div>
+                    <div className="alert-details-compact">
+                      <div className="alert-header-compact">
+                        <span className="alert-title-compact">{alert.title}</span>
+                        <span className="alert-time-compact">{alert.time}</span>
                       </div>
-                      <p className="alert-message">{alert.message}</p>
-                      <div className="alert-actions">
-                        <Button size="small" type="link">处理</Button>
-                      </div>
+                      <p className="alert-message-compact">{alert.message}</p>
                     </div>
                   </div>
-                </Card>
-              ))}
+                ))
+              )}
             </div>
           </Card>
         </Col>
@@ -892,19 +1306,38 @@ const Monitor: React.FC = () => {
               title={<span style={{ fontSize: 14 }}><ThunderboltOutlined /> 性能趋势</span>}
               extra={
                 <Space.Compact size="small">
-                  <Button type="primary" size="small">24h</Button>
-                  <Button size="small">7d</Button>
-                  <Button size="small">30d</Button>
+                  <Button 
+                    type={performancePeriod === '24h' ? 'primary' : 'default'} 
+                    size="small"
+                    onClick={() => setPerformancePeriod('24h')}
+                  >
+                    24h
+                  </Button>
+                  <Button 
+                    type={performancePeriod === '7d' ? 'primary' : 'default'} 
+                    size="small"
+                    onClick={() => setPerformancePeriod('7d')}
+                  >
+                    7d
+                  </Button>
+                  <Button 
+                    type={performancePeriod === '30d' ? 'primary' : 'default'} 
+                    size="small"
+                    onClick={() => setPerformancePeriod('30d')}
+                  >
+                    30d
+                  </Button>
                 </Space.Compact>
               }
+              styles={{ body: { height: 360 } }}
             >
             <div style={{ marginBottom: 16 }}>
-              <p style={{ fontSize: 12, marginBottom: 10, color: '#888', fontWeight: 500 }}>
+              <p style={{ fontSize: 12, marginBottom: 10, color: token.colorTextSecondary, fontWeight: 500 }}>
                 集群CPU使用率
               </p>
               <div style={{ 
-                height: 180, 
-                padding: '12px',
+                height: 160, 
+                padding: '8px',
                 borderRadius: '6px',
                 background: 'rgba(24, 144, 255, 0.02)'
               }}>
@@ -912,12 +1345,12 @@ const Monitor: React.FC = () => {
               </div>
             </div>
             <div>
-              <p style={{ fontSize: 12, marginBottom: 10, color: '#888', fontWeight: 500 }}>
+              <p style={{ fontSize: 12, marginBottom: 10, color: token.colorTextSecondary, fontWeight: 500 }}>
                 集群内存使用率
               </p>
               <div style={{ 
-                height: 180, 
-                padding: '12px',
+                height: 160, 
+                padding: '8px',
                 borderRadius: '6px',
                 background: 'rgba(114, 46, 209, 0.02)'
               }}>
@@ -940,7 +1373,7 @@ const Monitor: React.FC = () => {
                 </Button>
               }
             >
-            <Table
+            <ResponsiveTable
               dataSource={tasks}
               rowKey="id"
               columns={[
@@ -948,38 +1381,52 @@ const Monitor: React.FC = () => {
                   title: '任务名称',
                   dataIndex: 'name',
                   key: 'name',
+                  width: 150,
+                  ellipsis: { showTitle: false },
+                  render: (name: string) => (
+                    <Tooltip title={name} placement="topLeft">
+                      <span>{name}</span>
+                    </Tooltip>
+                  ),
                 },
                 {
                   title: '执行节点',
                   dataIndex: 'node',
                   key: 'node',
+                  width: 100,
                 },
                 {
                   title: '状态',
                   dataIndex: 'status',
                   key: 'status',
-                  render: (status) => <Tag color={getStatusColor(status)}>{getStatusText(status)}</Tag>,
+                  width: 80,
+                  render: (status: string) => <Tag color={getStatusColor(status)}>{getStatusText(status)}</Tag>,
                 },
                 {
                   title: 'CPU',
                   dataIndex: 'cpu',
                   key: 'cpu',
-                  render: (cpu) => `${cpu}%`,
+                  width: 60,
+                  render: (cpu: number | string) => typeof cpu === 'number' ? `${cpu}%` : cpu,
                 },
                 {
                   title: '内存',
                   dataIndex: 'memory',
                   key: 'memory',
-                  render: (memory) => `${memory}%`,
+                  width: 60,
+                  render: (memory: number | string) => typeof memory === 'number' ? `${memory}%` : memory,
                 },
                 {
                   title: '运行时长',
                   dataIndex: 'duration',
                   key: 'duration',
+                  width: 90,
                 },
                 {
                   title: '操作',
                   key: 'action',
+                  width: 70,
+                  fixed: 'right' as const,
                   render: () => <Button type="link" size="small">详情</Button>,
                 },
               ]}
@@ -1002,10 +1449,10 @@ const Monitor: React.FC = () => {
             </Card>
             <Card 
               size="small"
-              title={<span style={{ fontSize: 14 }}><HddOutlined /> 网络流量 (MB/s)</span>}
+              title={<span style={{ fontSize: 14 }}><HddOutlined /> 各节点磁盘使用率</span>}
             >
               <div style={{ height: 180 }}>
-                <Line data={networkData} options={{ ...chartOptions, scales: { y: { beginAtZero: true, max: undefined } } }} />
+                <Bar data={diskUsageData} options={{ ...chartOptions, scales: { y: { beginAtZero: true, max: 100 } } }} />
               </div>
             </Card>
           </Col>
@@ -1026,7 +1473,10 @@ const Monitor: React.FC = () => {
               <Card 
                 className={`node-card-drawer node-${node.status}`} 
                 hoverable
-                onClick={() => setSelectedNode(node)}
+                onClick={() => {
+                  setShowAllNodes(false)  // 先关闭全部节点Drawer
+                  setTimeout(() => setSelectedNode(node), 100)  // 稍后打开详情Drawer，避免动画冲突
+                }}
                 size="small"
               >
                 <div className="node-header-drawer">
@@ -1087,6 +1537,44 @@ const Monitor: React.FC = () => {
         </Row>
       </Drawer>
 
+      {/* 全部告警 Drawer */}
+      <Drawer
+        title={<><WarningOutlined /> 全部告警 <Badge count={alerts.length} style={{ marginLeft: 8 }} /></>}
+        placement="right"
+        width={500}
+        onClose={() => setShowAllAlerts(false)}
+        open={showAllAlerts}
+      >
+        <div className="alerts-list">
+          {alerts.length === 0 ? (
+            <div style={{ 
+              display: 'flex', 
+              flexDirection: 'column', 
+              alignItems: 'center', 
+              justifyContent: 'center', 
+              height: 200,
+              color: token.colorTextSecondary 
+            }}>
+              <CheckCircleOutlined style={{ fontSize: 40, marginBottom: 12, color: token.colorSuccess }} />
+              <span style={{ fontSize: 13 }}>暂无告警，系统运行正常</span>
+            </div>
+          ) : (
+            alerts.map((alert) => (
+              <div key={alert.id} className={`alert-item-compact alert-${alert.type}`}>
+                <div className="alert-icon-compact">{getAlertIcon(alert.type)}</div>
+                <div className="alert-details-compact">
+                  <div className="alert-header-compact">
+                    <span className="alert-title-compact">{alert.title}</span>
+                    <span className="alert-time-compact">{alert.time}</span>
+                  </div>
+                  <p className="alert-message-compact">{alert.message}</p>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </Drawer>
+
       {/* 节点详情 Drawer */}
       <Drawer
         title={<><CloudServerOutlined /> 节点详情 - {selectedNode?.name}</>}
@@ -1097,12 +1585,10 @@ const Monitor: React.FC = () => {
       >
         {selectedNode && (
           <div>
-            <Descriptions column={2} bordered size="small">
+            <Descriptions column={2} bordered size="small" labelStyle={{ width: 100 }} contentStyle={{ width: 150 }}>
               <Descriptions.Item label="节点名称" span={2}>{selectedNode.name}</Descriptions.Item>
-              <Descriptions.Item label="操作系统">
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {getOsIcon(selectedNode.os)} {getOsName(selectedNode.os)}
-                </span>
+              <Descriptions.Item label="地址">
+                <span style={{ fontFamily: 'monospace' }}>{selectedNode.host}:{selectedNode.port}</span>
               </Descriptions.Item>
               <Descriptions.Item label="版本">{selectedNode.version}</Descriptions.Item>
               <Descriptions.Item label="状态">
@@ -1110,12 +1596,66 @@ const Monitor: React.FC = () => {
               </Descriptions.Item>
               <Descriptions.Item label="运行时间">{selectedNode.uptime}</Descriptions.Item>
               <Descriptions.Item label="CPU使用率">
-                <Progress percent={selectedNode.cpu} size="small" />
+                <div style={{ width: '100%' }}>
+                  <Tooltip
+                    title={selectedNode.cpuCores ? (
+                      <div>
+                        <div>核心数: {selectedNode.cpuCores} 核</div>
+                      </div>
+                    ) : undefined}
+                  >
+                    <Progress 
+                      percent={selectedNode.cpu} 
+                      size="small" 
+                      strokeColor={selectedNode.cpu > 80 ? '#ff4d4f' : selectedNode.cpu > 60 ? '#faad14' : '#1890ff'}
+                    />
+                  </Tooltip>
+                </div>
               </Descriptions.Item>
               <Descriptions.Item label="内存使用率">
-                <Progress percent={selectedNode.memory} size="small" />
+                <div style={{ width: '100%' }}>
+                  <Tooltip
+                    title={selectedNode.memoryTotal ? (
+                      <div>
+                        <div>总内存: {(selectedNode.memoryTotal / 1024 / 1024 / 1024).toFixed(2)} GB</div>
+                        <div>已使用: {((selectedNode.memoryUsed || 0) / 1024 / 1024 / 1024).toFixed(2)} GB</div>
+                        <div>可用: {((selectedNode.memoryAvailable || 0) / 1024 / 1024 / 1024).toFixed(2)} GB</div>
+                      </div>
+                    ) : undefined}
+                  >
+                    <Progress 
+                      percent={selectedNode.memory} 
+                      size="small" 
+                      strokeColor={selectedNode.memory > 80 ? '#ff4d4f' : selectedNode.memory > 60 ? '#faad14' : '#52c41a'}
+                    />
+                  </Tooltip>
+                </div>
               </Descriptions.Item>
-              <Descriptions.Item label="任务数量" span={2}>{selectedNode.tasks}个</Descriptions.Item>
+              <Descriptions.Item label="磁盘使用率">
+                <div style={{ width: '100%' }}>
+                  <Tooltip
+                    title={selectedNode.diskTotal ? (
+                      <div>
+                        <div>总容量: {(selectedNode.diskTotal / 1024 / 1024 / 1024).toFixed(2)} GB</div>
+                        <div>已使用: {((selectedNode.diskUsed || 0) / 1024 / 1024 / 1024).toFixed(2)} GB</div>
+                        <div>可用: {((selectedNode.diskFree || 0) / 1024 / 1024 / 1024).toFixed(2)} GB</div>
+                      </div>
+                    ) : undefined}
+                  >
+                    <Progress 
+                      percent={selectedNode.disk} 
+                      size="small" 
+                      strokeColor={selectedNode.disk > 80 ? '#ff4d4f' : selectedNode.disk > 60 ? '#faad14' : '#722ed1'}
+                    />
+                  </Tooltip>
+                </div>
+              </Descriptions.Item>
+              <Descriptions.Item label="任务数量">{selectedNode.tasks}个</Descriptions.Item>
+              {selectedNode.lastHeartbeat && (
+                <Descriptions.Item label="最后心跳" span={2}>
+                  {new Date(selectedNode.lastHeartbeat).toLocaleString('zh-CN')}
+                </Descriptions.Item>
+              )}
             </Descriptions>
 
             <Card 
@@ -1139,16 +1679,16 @@ const Monitor: React.FC = () => {
               style={{ marginTop: 16 }} 
               size="small"
               extra={
-                <span style={{ fontSize: 11, color: '#999' }}>
+                <span style={{ fontSize: 11, color: token.colorTextTertiary }}>
                   💡 滚轮缩放 · 拖拽平移
                 </span>
               }
             >
               <div style={{ height: 250 }}>
-                {selectedNode && (
+                {nodeDetailChartData && (
                   <Line 
                     ref={chartRef}
-                    data={getNodeDetailChartData()!} 
+                    data={nodeDetailChartData} 
                     options={nodeDetailChartOptions} 
                   />
                 )}
@@ -1156,19 +1696,31 @@ const Monitor: React.FC = () => {
             </Card>
 
             <Card title="运行任务列表" style={{ marginTop: 16 }} size="small">
-              <Table
+              <ResponsiveTable
                 dataSource={tasks.filter(t => t.node === selectedNode.name)}
                 rowKey="id"
                 columns={[
-                  { title: '任务名称', dataIndex: 'name', key: 'name' },
+                  { 
+                    title: '任务名称', 
+                    dataIndex: 'name', 
+                    key: 'name',
+                    width: 150,
+                    ellipsis: { showTitle: false },
+                    render: (name: string) => (
+                      <Tooltip title={name} placement="topLeft">
+                        <span>{name}</span>
+                      </Tooltip>
+                    )
+                  },
                   { 
                     title: '状态', 
                     dataIndex: 'status', 
                     key: 'status',
-                    render: (status) => <Tag color={getStatusColor(status)}>{getStatusText(status)}</Tag>
+                    width: 80,
+                    render: (status: string) => <Tag color={getStatusColor(status)}>{getStatusText(status)}</Tag>
                   },
-                  { title: 'CPU', dataIndex: 'cpu', key: 'cpu', render: (cpu) => `${cpu}%` },
-                  { title: '内存', dataIndex: 'memory', key: 'memory', render: (memory) => `${memory}%` },
+                  { title: 'CPU', dataIndex: 'cpu', key: 'cpu', width: 60, render: (cpu: number | string) => typeof cpu === 'number' ? `${cpu}%` : cpu },
+                  { title: '内存', dataIndex: 'memory', key: 'memory', width: 60, render: (memory: number | string) => typeof memory === 'number' ? `${memory}%` : memory },
                 ]}
                 pagination={false}
                 size="small"
@@ -1193,13 +1745,13 @@ const Monitor: React.FC = () => {
                               </Tag>
                               <div style={{ fontSize: 13, lineHeight: 1.6 }}>{log.message}</div>
                             </div>
-                            <span style={{ fontSize: 11, color: '#999', whiteSpace: 'nowrap' }}>{log.time}</span>
+                            <span style={{ fontSize: 11, color: token.colorTextTertiary, whiteSpace: 'nowrap' }}>{log.time}</span>
                           </div>
                         </div>
                       ))}
                   </div>
                 ) : (
-                  <div style={{ textAlign: 'center', padding: '20px', color: '#999' }}>
+                  <div style={{ textAlign: 'center', padding: '20px', color: token.colorTextTertiary }}>
                     暂无日志记录
                   </div>
                 )}

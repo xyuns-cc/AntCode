@@ -8,7 +8,6 @@ import type {
   BackendLoginResponse,
   User,
   RegisterRequest,
-  RefreshTokenRequest,
   UpdateUserRequest,
   ApiResponse
 } from '@/types'

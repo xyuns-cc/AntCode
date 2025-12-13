@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Statistic, Row, Col, Tooltip, Progress, theme } from 'antd'
+import { Card, Row, Col, Tooltip, theme } from 'antd'
 import { CheckCircleOutlined, ExclamationCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import styles from './LogChart.module.css'

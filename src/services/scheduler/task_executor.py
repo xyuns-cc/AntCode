@@ -27,6 +27,11 @@ class TaskExecutor:
     def __init__(self):
         self.running_processes = {}
         self.work_dir = settings.TASK_EXECUTION_WORK_DIR
+        self.max_extract_size = 500 * 1024 * 1024  # 500MB
+        self.max_extract_files = 2000
+        self.cpu_time_limit = None
+        self.memory_limit_bytes = None
+        self._preexec_fn = None
 
     @memory_optimized(max_memory_mb=200)  # 限制最大内存使用200MB
     async def execute(
@@ -49,19 +54,21 @@ class TaskExecutor:
         Returns:
             执行结果
         """
+        # 使用全局超时时间上限，防止调用方设置过大
+        effective_timeout = min(timeout, settings.TASK_EXECUTION_TIMEOUT)
         try:
             # 根据项目类型执行不同的逻辑
             if project.type == ProjectType.FILE:
                 return await self._execute_file_project(
-                    project, execution_id, params, environment_vars, timeout
+                    project, execution_id, params, environment_vars, effective_timeout
                 )
             elif project.type == ProjectType.CODE:
                 return await self._execute_code_project(
-                    project, execution_id, params, environment_vars, timeout
+                    project, execution_id, params, environment_vars, effective_timeout
                 )
             elif project.type == ProjectType.RULE:
                 return await self._execute_rule_project(
-                    project, execution_id, params, environment_vars, timeout
+                    project, execution_id, params, environment_vars, effective_timeout
                 )
             else:
                 raise ValueError(f"不支持的项目类型: {project.type}")
@@ -242,21 +249,53 @@ class TaskExecutor:
             return project_dir
 
     async def _extract_archive(self, archive_path, extract_dir, original_name):
-        """解压压缩文件"""
+        """解压压缩文件（带安全校验）"""
+        base_dir = os.path.abspath(extract_dir)
+
+        def _is_safe_path(target_path):
+            return os.path.commonpath([base_dir, os.path.abspath(target_path)]) == base_dir
+
+        total_size = 0
+        file_count = 0
+
         try:
             if original_name.endswith('.zip'):
                 with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    # 预检查
+                    for info in zip_ref.infolist():
+                        target_path = os.path.join(base_dir, info.filename)
+                        if not _is_safe_path(target_path):
+                            raise ValueError("压缩包包含非法路径，已拒绝")
+                        if not info.is_dir():
+                            total_size += info.file_size
+                            file_count += 1
+                        if total_size > self.max_extract_size or file_count > self.max_extract_files:
+                            raise ValueError("压缩包解压体积或文件数超出限制")
                     zip_ref.extractall(extract_dir)
                     logger.info(f"解压ZIP文件: {archive_path} -> {extract_dir}")
             elif original_name.endswith('.tar.gz'):
                 with tarfile.open(archive_path, 'r:gz') as tar_ref:
-                    tar_ref.extractall(extract_dir)
+                    safe_members = []
+                    for member in tar_ref.getmembers():
+                        if member.issym() or member.islnk():
+                            raise ValueError("压缩包包含符号链接，已拒绝")
+                        target_path = os.path.join(base_dir, member.name)
+                        if not _is_safe_path(target_path):
+                            raise ValueError("压缩包包含非法路径，已拒绝")
+                        if member.isfile():
+                            total_size += member.size
+                            file_count += 1
+                        if total_size > self.max_extract_size or file_count > self.max_extract_files:
+                            raise ValueError("压缩包解压体积或文件数超出限制")
+                        safe_members.append(member)
+                    tar_ref.extractall(extract_dir, members=safe_members)
                     logger.info(f"解压TAR.GZ文件: {archive_path} -> {extract_dir}")
             else:
                 raise ValueError(f"不支持的压缩格式: {original_name}")
         except Exception as e:
             logger.error(f"解压文件失败: {e}")
             raise
+
 
     async def _create_code_file(self, code_detail, work_dir):
         """创建代码文件"""
@@ -375,13 +414,13 @@ class TaskExecutor:
                 )
 
             # 执行命令
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=project_dir,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            kwargs = {
+                "cwd": project_dir,
+                "env": env,
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+            }
+            process = await asyncio.create_subprocess_exec(*cmd, **kwargs)
 
             # 实时读取输出并记录日志
             stdout_text, stderr_text, exit_code = await self._stream_process_output(
@@ -423,7 +462,7 @@ class TaskExecutor:
                     f"执行异常: {str(e)}",
                     execution_id=execution_id
                 )
-            except:
+            except Exception:
                 pass  # 避免日志记录失败影响主流程
 
             return {
@@ -499,13 +538,13 @@ class TaskExecutor:
                 )
 
             # 执行命令
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=code_dir,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            kwargs = {
+                "cwd": code_dir,
+                "env": env,
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+            }
+            process = await asyncio.create_subprocess_exec(*cmd, **kwargs)
 
             # 实时读取输出并记录日志
             stdout_text, stderr_text, exit_code = await self._stream_process_output(
@@ -547,7 +586,7 @@ class TaskExecutor:
                     f"执行异常: {str(e)}",
                     execution_id=execution_id
                 )
-            except:
+            except Exception:
                 pass  # 避免日志记录失败影响主流程
 
             return {
@@ -613,24 +652,24 @@ class TaskExecutor:
         # 使用流式缓冲区管理内存
         stdout_buffer = StreamingBuffer(max_size=4 * 1024 * 1024)  # 4MB缓冲区
         stderr_buffer = StreamingBuffer(max_size=4 * 1024 * 1024)  # 4MB缓冲区
-        
+
         # 设置溢出处理
         stdout_overflow_lines = []
         stderr_overflow_lines = []
-        
+
         def stdout_overflow_handler(data):
             lines = data.decode('utf-8', errors='ignore').split('\n')
             stdout_overflow_lines.extend(lines)
             # 只保留最后1000行，避免内存无限增长
             if len(stdout_overflow_lines) > 1000:
                 stdout_overflow_lines[:] = stdout_overflow_lines[-1000:]
-        
+
         def stderr_overflow_handler(data):
             lines = data.decode('utf-8', errors='ignore').split('\n')
             stderr_overflow_lines.extend(lines)
             if len(stderr_overflow_lines) > 1000:
                 stderr_overflow_lines[:] = stderr_overflow_lines[-1000:]
-        
+
         stdout_buffer.set_overflow_callback(stdout_overflow_handler)
         stderr_buffer.set_overflow_callback(stderr_overflow_handler)
 
@@ -643,12 +682,12 @@ class TaskExecutor:
                         break
 
                     stdout_buffer.write(chunk)
-                    
+
                     # 处理完整的行
                     while b'\n' in stdout_buffer.buffer:
                         line_data = stdout_buffer.read(stdout_buffer.buffer.find(b'\n') + 1)
                         line_text = line_data.decode('utf-8', errors='ignore').rstrip('\n\r')
-                        
+
                         if line_text:
                             # 实时写入日志文件
                             await task_log_service.write_log(
@@ -657,10 +696,10 @@ class TaskExecutor:
                                 execution_id=execution_id,
                                 add_timestamp=False
                             )
-                            
+
                             # 实时推送到WebSocket
                             await self._broadcast_log_line(execution_id, "stdout", line_text)
-                            
+
             except Exception as e:
                 logger.error(f"读取标准输出失败: {e}")
 
@@ -673,12 +712,12 @@ class TaskExecutor:
                         break
 
                     stderr_buffer.write(chunk)
-                    
+
                     # 处理完整的行
                     while b'\n' in stderr_buffer.buffer:
                         line_data = stderr_buffer.read(stderr_buffer.buffer.find(b'\n') + 1)
                         line_text = line_data.decode('utf-8', errors='ignore').rstrip('\n\r')
-                        
+
                         if line_text:
                             # 实时写入错误日志文件
                             await task_log_service.write_log(
@@ -687,10 +726,10 @@ class TaskExecutor:
                                 execution_id=execution_id,
                                 add_timestamp=False
                             )
-                            
+
                             # 实时推送到WebSocket
                             await self._broadcast_log_line(execution_id, "stderr", line_text)
-                            
+
             except Exception as e:
                 logger.error(f"读取错误输出失败: {e}")
 
@@ -746,7 +785,7 @@ class TaskExecutor:
                 try:
                     process.kill()
                     await process.wait()
-                except:
+                except Exception:
                     pass
 
             exit_code = process.returncode if process.returncode is not None else -2
@@ -755,33 +794,43 @@ class TaskExecutor:
         # 收集剩余的输出
         remaining_stdout = stdout_buffer.read().decode('utf-8', errors='ignore')
         remaining_stderr = stderr_buffer.read().decode('utf-8', errors='ignore')
-        
+
         # 合并所有输出 (内存优化：只保留摘要)
         stdout_text = f"输出行数: {len(stdout_overflow_lines)}"
         if remaining_stdout:
             stdout_text += f"\n最后输出: {remaining_stdout[-500:]}"  # 只保留最后500字符
-            
+
         stderr_text = f"错误行数: {len(stderr_overflow_lines)}" 
         if remaining_stderr:
             stderr_text += f"\n最后错误: {remaining_stderr[-500:]}"  # 只保留最后500字符
-        
+
         # 清理缓冲区释放内存
         stdout_buffer.clear()
         stderr_buffer.clear()
-        
+
         return stdout_text, stderr_text, exit_code
 
     async def _broadcast_log_line(self, execution_id, log_type, line_text):
         """
-        实时广播日志行到WebSocket连接（已移除WebSocket功能）
+        实时广播日志行到WebSocket连接
 
         Args:
             execution_id: 执行ID
             log_type: 日志类型 (stdout/stderr)
             line_text: 日志行内容
         """
-        # WebSocket功能已被移除，此方法保留以保持兼容性
-        pass
+        try:
+            from src.services.websockets.websocket_connection_manager import websocket_manager
+
+            # 检查是否有活跃的WebSocket连接
+            if websocket_manager.get_connections_for_execution(execution_id) > 0:
+                level = "ERROR" if log_type == "stderr" else "INFO"
+                await websocket_manager.send_log_message(
+                    execution_id, log_type, line_text, level
+                )
+        except Exception as e:
+            # 不影响主流程，只记录调试日志
+            logger.debug(f"广播日志行失败: {e}")
 
     async def _cleanup_workspace(self, execution_id):
         """
@@ -810,19 +859,19 @@ class TaskExecutor:
         try:
             if not os.path.exists(self.work_dir):
                 return
-                
+
             current_time = datetime.now()
             cleaned_count = 0
-            
+
             for dir_name in os.listdir(self.work_dir):
                 dir_path = os.path.join(self.work_dir, dir_name)
                 if not os.path.isdir(dir_path):
                     continue
-                    
+
                 # 检查目录创建时间
                 dir_stat = os.stat(dir_path)
                 dir_age_hours = (current_time.timestamp() - dir_stat.st_ctime) / 3600
-                
+
                 if dir_age_hours > max_age_hours:
                     try:
                         shutil.rmtree(dir_path)
@@ -830,9 +879,9 @@ class TaskExecutor:
                         logger.debug(f"清理过期目录: {dir_path} (创建于{dir_age_hours:.1f}小时前)")
                     except Exception as e:
                         logger.error(f"清理过期目录失败 {dir_path}: {e}")
-                        
+
             if cleaned_count > 0:
                 logger.info(f"清理了 {cleaned_count} 个过期的执行工作目录")
-                
+
         except Exception as e:
             logger.error(f"批量清理工作目录失败: {e}")

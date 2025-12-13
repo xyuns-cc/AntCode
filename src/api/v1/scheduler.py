@@ -1,48 +1,28 @@
 """任务调度接口"""
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
 from tortoise.exceptions import DoesNotExist, IntegrityError
 
-from src.core.auth import get_current_user, TokenData
+from src.core.security.auth import get_current_user
 from src.core.response import success as success_response, task_list, execution_list, Messages
-from src.models.enums import TaskStatus, ProjectType
+from src.models.enums import ProjectType
 from src.schemas.common import BaseResponse
 from src.schemas.scheduler import (
-    TaskCreate, TaskUpdate, TaskResponse, ExecutionResponse, LogFileResponse,
-    TaskStatsResponse, SystemMetricsResponse, TaskListResponse, ExecutionListResponse
+    TaskCreate, TaskUpdate, TaskResponse, ExecutionResponse,
+    LogFileResponse, TaskStatsResponse, TaskListResponse, ExecutionListResponse
 )
 from src.services.logs.task_log_service import task_log_service
 from src.services.projects.relation_service import relation_service
 from src.services.scheduler.scheduler_service import scheduler_service
-from src.services.scheduler.task_executor import TaskExecutor
-from src.services.users.user_service import user_service
+from src.core.response import TaskResponseBuilder, ExecutionResponseBuilder
 from src.utils.api_optimizer import fast_response
 
 router = APIRouter()
 
 
-def create_task_response(task):
-    return TaskResponse.model_construct(
-        id=task.id,
-        name=task.name,
-        description=task.description,
-        project_id=task.project_id,
-        schedule_type=task.schedule_type,
-        is_active=task.is_active,
-        task_type=task.task_type,
-        status=task.status,
-        cron_expression=task.cron_expression,
-        interval_seconds=task.interval_seconds,
-        scheduled_time=task.scheduled_time,
-        last_run_time=task.last_run_time,
-        next_run_time=task.next_run_time,
-        created_at=task.created_at,
-        updated_at=task.updated_at,
-        created_by=getattr(task, 'created_by', task.user_id),
-        created_by_username=getattr(task, 'created_by_username', None)
-    )
+def create_task_response(task) -> TaskResponse:
+    """构建任务响应（兼容旧代码）"""
+    return TaskResponseBuilder.build_detail(task)
 
 
 @router.post("/tasks", response_model=BaseResponse[TaskResponse])
@@ -65,11 +45,13 @@ async def create_task(task_data: TaskCreate, current_user=Depends(get_current_us
     project = project_info["project"]
 
     try:
-        # 使用service层创建任务
+        # 使用service层创建任务，传递内部 project_id
         task = await scheduler_service.create_task(
             task_data=task_data,
             project_type=ProjectType(project.type),
-            user_id=current_user.user_id
+            user_id=current_user.user_id,
+            internal_project_id=project.id,  # 传递内部 id
+            node_id=task_data.node_id  # 传递节点 ID
         )
 
         return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
@@ -92,32 +74,28 @@ async def list_tasks(
         size: int = Query(20, ge=1, le=100),
         status: str = None,
         is_active: bool = None,
+        node_id: str = Query(None, description="节点ID筛选"),
         current_user=Depends(get_current_user)
 ):
-    try:
-        is_admin = await user_service.is_admin(current_user.user_id)
-        user_filter = None if is_admin else current_user.user_id
-        
-        result = await scheduler_service.get_user_tasks(
-            user_id=user_filter,
-            status=status,
-            is_active=is_active,
-            page=page,
-            size=size
-        )
-        
-        # 构建 TaskResponse 对象列表
-        task_responses = [create_task_response(task) for task in result["tasks"]]
-        
-        return task_list(
-            total=result["total"],
-            page_num=result["page"],
-            size=result["size"],
-            items=task_responses
-        )
-    except Exception as e:
-        logger.error(f"Failed to list tasks: {e}")
-        raise HTTPException(status_code=500, detail="Failed to list tasks")
+    """获取任务列表"""
+    from src.services.users.user_service import user_service
+
+    is_admin = await user_service.is_admin(current_user.user_id)
+    result = await scheduler_service.get_user_tasks(
+        user_id=None if is_admin else current_user.user_id,
+        status=status,
+        is_active=is_active,
+        page=page,
+        size=size,
+        node_id=node_id
+    )
+
+    return task_list(
+        total=result["total"],
+        page_num=result["page"],
+        size=result["size"],
+        items=TaskResponseBuilder.build_list(result["tasks"])
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=BaseResponse[TaskResponse])
@@ -164,6 +142,43 @@ async def delete_task(task_id, current_user=Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Failed to delete task: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete task")
+
+
+@router.post("/tasks/batch-delete", response_model=BaseResponse)
+async def batch_delete_tasks(
+    request: dict,
+    current_user=Depends(get_current_user)
+):
+    """批量删除任务"""
+    task_ids = request.get("task_ids", [])
+    if not task_ids:
+        raise HTTPException(status_code=400, detail="task_ids不能为空")
+
+    success_count = 0
+    failed_count = 0
+    failed_ids = []
+
+    for task_id in task_ids:
+        try:
+            deleted = await scheduler_service.delete_task(task_id, current_user.user_id)
+            if deleted:
+                success_count += 1
+            else:
+                failed_count += 1
+                failed_ids.append(task_id)
+        except Exception as e:
+            logger.warning(f"删除任务 {task_id} 失败: {e}")
+            failed_count += 1
+            failed_ids.append(task_id)
+
+    return success_response(
+        {
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "failed_ids": failed_ids
+        },
+        message=f"成功删除 {success_count} 个任务" + (f"，{failed_count} 个失败" if failed_count > 0 else "")
+    )
 
 
 @router.post("/tasks/{task_id}/pause", response_model=BaseResponse)
@@ -225,7 +240,7 @@ async def trigger_task(
 
 @router.get("/tasks/{task_id}/executions", response_model=ExecutionListResponse)
 async def list_task_executions(
-        task_id: int,
+        task_id: str,
         page: int = Query(1, ge=1),
         size: int = Query(20, ge=1, le=100),
         status: str = None,
@@ -244,18 +259,15 @@ async def list_task_executions(
             page=page,
             size=size
         )
-        
+
         return execution_list(
             total=result["total"],
             page_num=result["page"],
             size=result["size"],
-            items=[ExecutionResponse.from_orm(e) for e in result["executions"]]
+            items=ExecutionResponseBuilder.build_list(result["executions"])
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"获取任务执行历史失败: {e}")
-        raise HTTPException(status_code=500, detail="获取任务执行历史失败")
 
 
 @router.get("/executions/{execution_id}", response_model=BaseResponse[ExecutionResponse])
@@ -277,10 +289,79 @@ async def get_execution(
         raise HTTPException(status_code=500, detail="获取执行详情失败")
 
 
+@router.post("/executions/{execution_id}/cancel", response_model=BaseResponse[dict])
+async def cancel_execution(
+        execution_id: str,
+        current_user=Depends(get_current_user)
+):
+    """
+    取消正在执行的任务
+    
+    - 如果任务在节点上运行，会发送取消指令到节点
+    - 如果任务在队列中等待，会直接取消
+    """
+    from src.models.scheduler import ScheduledTask
+    from src.models.enums import TaskStatus
+
+    # 获取执行记录
+    execution = await scheduler_service.get_execution_with_permission(execution_id, current_user.user_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
+
+    # 检查状态
+    if execution.status not in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.QUEUED):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"任务状态为 {execution.status.value}，无法取消"
+        )
+
+    # 获取任务信息
+    task = await ScheduledTask.get_or_none(id=execution.task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="关联任务不存在")
+
+    cancelled = False
+
+    # 如果任务正在节点上运行，发送取消指令
+    if execution.status == TaskStatus.RUNNING and execution.node_id:
+        try:
+            from src.api.v1.websocket_nodes import cancel_task_via_websocket
+            from src.services.nodes.node_service import node_service
+
+            node = await node_service.get_node_by_id(execution.node_id)
+            if node:
+                cancelled = await cancel_task_via_websocket(
+                    node_id=node.public_id,
+                    task_id=task.public_id,
+                    execution_id=execution.execution_id
+                )
+                if cancelled:
+                    logger.info(f"已发送取消指令到节点: {node.name}")
+        except Exception as e:
+            logger.warning(f"发送取消指令失败: {e}")
+
+    # 更新数据库状态
+    execution.status = TaskStatus.CANCELLED
+    execution.error_message = f"用户取消 (user_id={current_user.user_id})"
+    await execution.save()
+
+    # 更新任务状态
+    task.status = TaskStatus.CANCELLED
+    await task.save()
+
+    logger.info(f"执行已取消: {execution_id}, 远程取消={cancelled}")
+
+    return success_response({
+        "execution_id": execution_id,
+        "status": "cancelled",
+        "remote_cancelled": cancelled
+    }, message="任务已取消")
+
+
 @router.get("/executions/{execution_id}/logs/file", response_model=BaseResponse[LogFileResponse])
 async def get_execution_log_file(
-        execution_id: int,
-        log_type: str = Query("output", regex="^(output|error)$"),
+        execution_id: str,  # 支持 public_id
+        log_type: str = Query("output", pattern="^(output|error)$"),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
 ):
@@ -387,11 +468,12 @@ async def cleanup_workspaces(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="只有管理员可以执行清理操作"
         )
-    
+
     try:
+        from src.services.scheduler.task_executor import TaskExecutor
         executor = TaskExecutor()
         await executor.cleanup_old_workspaces(max_age_hours=max_age_hours)
-        
+
         return success_response(None, message=f"清理完成，已删除超过 {max_age_hours} 小时的工作目录")
     except Exception as e:
         logger.error(f"手动清理工作目录失败: {e}")

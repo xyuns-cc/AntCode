@@ -1,51 +1,32 @@
 """项目管理接口"""
-from fastapi import APIRouter, Depends, Form, File, UploadFile, Query, status, HTTPException, Body
+from fastapi import APIRouter, Depends, Form, File, Query, status, HTTPException, Body, Request
 from loguru import logger
 
-from src.core.auth import get_current_user_id, get_current_user
+from src.core.security.auth import get_current_user_id, get_current_user
 from src.core.exceptions import ProjectNotFoundException
 from src.core.response import success as success_response, page as page_response, Messages
-from src.models.enums import ProjectType, ProjectStatus
-from src.schemas.common import BaseResponse, PaginationResponse, PaginationInfo
+from src.models.enums import ProjectType
+from src.schemas.common import BaseResponse, PaginationResponse
+from src.services.audit import audit_service
+from src.models.audit_log import AuditAction
 from src.schemas.project import (
     ProjectCreateRequest, ProjectRuleCreateRequest, ProjectFileCreateRequest, ProjectCodeCreateRequest,
     ProjectResponse, ProjectListResponse, ProjectCreateFormRequest, ProjectListQueryRequest, TaskJsonRequest,
-    ProjectRuleUpdateRequest, ProjectCodeUpdateRequest, FileStructureResponse, FileContentResponse,
-    ProjectFileContentUpdateRequest, ProjectFileUpdateRequest
+    FileStructureResponse, FileContentResponse, ProjectFileContentUpdateRequest
 )
 from src.schemas.project_unified import UnifiedProjectUpdateRequest
 from src.services.projects.project_service import project_service
-from src.services.projects.project_file_service import project_file_service
-from src.services.projects.relation_service import relation_service
 from src.services.projects.unified_project_service import unified_project_service
-from src.services.users.user_service import user_service
+from src.services.projects.relation_service import relation_service
+from src.core.response import ProjectResponseBuilder
 from src.utils.api_optimizer import fast_response, monitor_performance, optimize_large_response
 
 project_router = APIRouter()
 
 
-def create_project_response(project):
-    return ProjectResponse.model_construct(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        type=project.type,
-        status=project.status,
-        tags=project.tags or [],
-        dependencies=project.dependencies,
-        created_at=project.created_at,
-        updated_at=project.updated_at,
-        created_by=getattr(project, 'created_by', getattr(project, 'user_id', None)),
-        created_by_username=getattr(project, 'created_by_username', None),
-        download_count=project.download_count,
-        star_count=project.star_count,
-        file_info=getattr(project, 'file_info', None),
-        rule_info=getattr(project, 'rule_info', None),
-        code_info=getattr(project, 'code_info', None),
-        python_version=getattr(project, 'python_version', None),
-        venv_scope=getattr(project, 'venv_scope', None),
-        venv_path=getattr(project, 'venv_path', None),
-    )
+def create_project_response(project) -> ProjectResponse:
+    """构建项目响应（兼容旧代码）"""
+    return ProjectResponseBuilder.build_detail(project)
 
 
 async def get_project_create_form(
@@ -59,6 +40,14 @@ async def get_project_create_form(
     interpreter_source=Form("mise"),
     python_version=Form(None),
     python_bin=Form(None),
+    # 节点环境参数
+    env_location=Form("local"),
+    node_id=Form(None),
+    use_existing_env=Form(None),
+    existing_env_name=Form(None),
+    env_name=Form(None),
+    env_description=Form(None),
+    # 文件项目参数
     entry_point=Form(None, max_length=255),
     runtime_config=Form(None),
     environment_vars=Form(None),
@@ -81,6 +70,14 @@ async def get_project_create_form(
     documentation=Form(None),
     code_content=Form(None),
 ):
+    # 处理 use_existing_env 布尔值
+    use_existing_env_bool = False
+    if use_existing_env is not None:
+        if isinstance(use_existing_env, bool):
+            use_existing_env_bool = use_existing_env
+        elif isinstance(use_existing_env, str):
+            use_existing_env_bool = use_existing_env.lower() in ('true', '1', 'yes')
+
     return ProjectCreateFormRequest(
         name=name,
         description=description,
@@ -92,6 +89,12 @@ async def get_project_create_form(
         shared_venv_key=shared_venv_key,
         interpreter_source=interpreter_source,
         python_bin=python_bin,
+        env_location=env_location,
+        node_id=node_id,
+        use_existing_env=use_existing_env_bool,
+        existing_env_name=existing_env_name,
+        env_name=env_name,
+        env_description=env_description,
         entry_point=entry_point,
         runtime_config=runtime_config,
         environment_vars=environment_vars,
@@ -118,12 +121,13 @@ async def get_project_create_form(
 
 async def get_project_list_query(
     page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
+    size: int = Query(20, ge=1, le=500),
     type: str = Query(None),
     status: str = Query(None),
     tag: str = Query(None),
-    created_by: int = Query(None),
+    created_by: str = Query(None),
     search: str = Query(None),
+    node_id: str = Query(None, description="节点ID筛选"),
 ):
     return ProjectListQueryRequest(
         page=page,
@@ -133,6 +137,7 @@ async def get_project_list_query(
         tag=tag,
         created_by=created_by,
         search=search,
+        node_id=node_id,
     )
 
 
@@ -145,11 +150,13 @@ async def get_project_list_query(
     response_description="返回创建的项目信息"
 )
 async def create_project(
+    http_request: Request,
     form_data=Depends(get_project_create_form),
     file=File(None),
     files=File(None),
     code_file=File(None),
-    current_user_id=Depends(get_current_user_id)
+    current_user_id=Depends(get_current_user_id),
+    current_user=Depends(get_current_user)
 ):
     """创建项目"""
 
@@ -165,6 +172,13 @@ async def create_project(
         "shared_venv_key": form_data.shared_venv_key,
         "interpreter_source": form_data.interpreter_source,
         "python_bin": form_data.python_bin,
+        # 节点环境参数
+        "env_location": form_data.env_location,
+        "node_id": form_data.node_id,
+        "use_existing_env": form_data.use_existing_env,
+        "existing_env_name": form_data.existing_env_name,
+        "env_name": form_data.env_name,
+        "env_description": form_data.env_description,
     }
 
     # 根据项目类型添加特定参数
@@ -236,6 +250,19 @@ async def create_project(
             "file_hash": file_detail.file_hash
         }
 
+    # 记录审计日志
+    from src.services.users.user_service import user_service
+    user = await user_service.get_user_by_id(current_user.user_id)
+    await audit_service.log_project_action(
+        action=AuditAction.PROJECT_CREATE,
+        username=user.username if user else "unknown",
+        project_id=project.id,
+        project_name=project.name,
+        user_id=current_user.user_id,
+        ip_address=http_request.client.host if http_request.client else None,
+        description=f"创建项目: {project.name} (类型: {project.type})"
+    )
+
     return success_response(response_data, message=Messages.CREATED_SUCCESS, code=201)
 
 
@@ -243,29 +270,28 @@ async def create_project(
     "",
     response_model=PaginationResponse[ProjectListResponse],
     summary="获取项目列表",
-    description="获取当前用户的项目列表，支持分页和筛选",
-    response_description="返回项目列表和分页信息"
+    description="获取当前用户的项目列表，支持分页和筛选"
 )
-@project_router.get(
-    "/",
-    response_model=PaginationResponse[ProjectListResponse],
-    summary="获取项目列表", 
-    description="获取当前用户的项目列表，支持分页和筛选",
-    response_description="返回项目列表和分页信息"
-)
-@fast_response(cache_ttl=120, namespace="project:list")  # 列表缓存2分钟
-@monitor_performance(slow_threshold=0.5)  # 监控超过500ms的查询
-@optimize_large_response(chunk_size=50)  # 大响应优化
+@fast_response(cache_ttl=120, namespace="project:list")
+@monitor_performance(slow_threshold=0.5)
+@optimize_large_response(chunk_size=50)
 async def get_projects_list(
     query_params=Depends(get_project_list_query),
     current_user_id=Depends(get_current_user_id),
     current_user=Depends(get_current_user)
 ):
+    """获取项目列表"""
+    from src.services.users.user_service import user_service
+
     is_admin = await user_service.is_admin(current_user.user_id)
-    
     user_filter = None if is_admin else current_user_id
     if is_admin and query_params.created_by is not None:
-        user_filter = query_params.created_by
+        try:
+            user_filter = int(query_params.created_by)
+        except (ValueError, TypeError):
+            from src.models import User
+            user = await User.filter(public_id=query_params.created_by).first()
+            user_filter = user.id if user else None
 
     projects, total = await project_service.get_projects_list(
         page=query_params.page,
@@ -277,26 +303,8 @@ async def get_projects_list(
         search=query_params.search
     )
 
-    # 转换为响应格式
-    project_list = []
-    for project in projects:
-        project_data = ProjectListResponse(
-            id=project.id,
-            name=project.name,
-            description=project.description,
-            type=project.type,
-            status=project.status,
-            tags=project.tags,
-            created_at=project.created_at,
-            created_by=project.user_id,  # 映射 user_id 到 created_by
-            created_by_username=getattr(project, 'created_by_username', None),
-            download_count=project.download_count,
-            star_count=project.star_count
-        )
-        project_list.append(project_data)
-
     return page_response(
-        items=project_list,
+        items=ProjectResponseBuilder.build_list(projects),
         total=total,
         page=query_params.page,
         size=query_params.size,
@@ -307,156 +315,77 @@ async def get_projects_list(
 @project_router.get(
     "/{project_id}",
     response_model=BaseResponse[ProjectResponse],
-    summary="获取项目详情",
-    description="根据项目ID获取项目详细信息",
-    response_description="返回项目详细信息"
+    summary="获取项目详情"
 )
-@fast_response(cache_ttl=120, namespace="project:detail", key_prefix_fn=lambda args, kwargs: str(kwargs.get('project_id') if 'project_id' in kwargs else (args[0] if args else '')))
+@fast_response(cache_ttl=120, namespace="project:detail", key_prefix_fn=lambda args, kwargs: str(kwargs.get('project_id', args[0] if args else '')))
 async def get_project_detail(
-    project_id,
-    current_user_id=Depends(get_current_user_id)
+    project_id: str,
+    current_user_id: int = Depends(get_current_user_id)
 ):
-    
-    
-
-    # 查询项目
+    """获取项目详情"""
     project = await project_service.get_project_by_id(project_id, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
 
-    # 构建响应数据
     response_data = create_project_response(project)
+    await _attach_project_detail_info(response_data, project)
+    return success_response(response_data, message=Messages.QUERY_SUCCESS)
 
-    # 根据项目类型添加详细信息 - 使用应用层关联
+
+async def _attach_project_detail_info(response_data: ProjectResponse, project):
+    """为项目响应附加详细信息"""
     if project.type == ProjectType.FILE:
-        file_detail = await relation_service.get_project_file_detail(project.id)
-        if file_detail:
+        if detail := await relation_service.get_project_file_detail(project.id):
             response_data.file_info = {
-                "original_name": file_detail.original_name,
-                "file_size": file_detail.file_size,
-                "file_hash": file_detail.file_hash,
-                "file_path": file_detail.file_path,
-                "file_type": file_detail.file_type,
-                "entry_point": file_detail.entry_point,
-                "runtime_config": file_detail.runtime_config,
-                "environment_vars": file_detail.environment_vars
+                "original_name": detail.original_name, "file_size": detail.file_size,
+                "file_hash": detail.file_hash, "file_path": detail.file_path,
+                "file_type": detail.file_type, "storage_type": detail.storage_type,
+                "entry_point": detail.entry_point, "runtime_config": detail.runtime_config,
+                "environment_vars": detail.environment_vars, "is_compressed": detail.is_compressed,
+                "original_file_path": detail.original_file_path
             }
     elif project.type == ProjectType.RULE:
-        rule_detail = await relation_service.get_project_rule_detail(project.id)
-        if rule_detail:
+        if detail := await relation_service.get_project_rule_detail(project.id):
             response_data.rule_info = {
-                "engine": rule_detail.engine,
-                "target_url": rule_detail.target_url,
-                "url_pattern": rule_detail.url_pattern,
-                "callback_type": rule_detail.callback_type,
-                "request_method": rule_detail.request_method,
-                "extraction_rules": rule_detail.extraction_rules,
-                "data_schema": rule_detail.data_schema,
-                "pagination_config": rule_detail.pagination_config,
-                "max_pages": rule_detail.max_pages,
-                "start_page": rule_detail.start_page,
-                "request_delay": rule_detail.request_delay,
-                "retry_count": rule_detail.retry_count,
-                "timeout": rule_detail.timeout,
-                "priority": getattr(rule_detail, 'priority', 0),
-                "dont_filter": getattr(rule_detail, 'dont_filter', False),
-                "headers": rule_detail.headers,
-                "cookies": rule_detail.cookies,
-                "proxy_config": rule_detail.proxy_config,
-                "task_config": getattr(rule_detail, 'task_config', None)
+                "engine": detail.engine, "target_url": detail.target_url,
+                "url_pattern": detail.url_pattern, "callback_type": detail.callback_type,
+                "request_method": detail.request_method, "extraction_rules": detail.extraction_rules,
+                "data_schema": detail.data_schema, "pagination_config": detail.pagination_config,
+                "max_pages": detail.max_pages, "start_page": detail.start_page,
+                "request_delay": detail.request_delay, "retry_count": detail.retry_count,
+                "timeout": detail.timeout, "priority": getattr(detail, 'priority', 0),
+                "dont_filter": getattr(detail, 'dont_filter', False), "headers": detail.headers,
+                "cookies": detail.cookies, "proxy_config": detail.proxy_config,
+                "task_config": getattr(detail, 'task_config', None)
             }
     elif project.type == ProjectType.CODE:
-        code_detail = await relation_service.get_project_code_detail(project.id)
-        if code_detail:
+        if detail := await relation_service.get_project_code_detail(project.id):
             response_data.code_info = {
-                "content": code_detail.content,
-                "language": code_detail.language,
-                "version": code_detail.version,
-                "content_hash": code_detail.content_hash,
-                "entry_point": code_detail.entry_point,
-                "runtime_config": code_detail.runtime_config,
-                "environment_vars": code_detail.environment_vars
+                "content": detail.content, "language": detail.language,
+                "version": detail.version, "content_hash": detail.content_hash,
+                "entry_point": detail.entry_point, "runtime_config": detail.runtime_config,
+                "environment_vars": detail.environment_vars
             }
-
-    return success_response(response_data, message=Messages.QUERY_SUCCESS)
 
 
 
 @project_router.put(
     "/{project_id}",
     response_model=BaseResponse[ProjectResponse],
-    summary="更新项目（统一API）",
-    description="统一更新项目的所有信息，支持基本信息和各类型项目的详细配置一次性更新",
-    response_description="返回更新后的项目信息"
+    summary="更新项目"
 )
 async def update_project(
-    project_id,
-    request,
-    current_user_id=Depends(get_current_user_id)
+    project_id: str,
+    request: UnifiedProjectUpdateRequest,
+    current_user_id: int = Depends(get_current_user_id)
 ):
-    """统一更新项目 - 支持所有项目类型的字段更新"""
-
-    # 使用统一服务更新项目
-    project = await unified_project_service.update_project_unified(
-        project_id, request, current_user_id
-    )
+    """统一更新项目"""
+    project = await unified_project_service.update_project_unified(project_id, request, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
 
-    # 构建响应数据 - 包含详细信息
-    response_data = ProjectResponse.from_orm(project)
-    
-    # 根据项目类型添加详细信息
-    if project.type == ProjectType.FILE:
-        file_detail = await relation_service.get_project_file_detail(project.id)
-        if file_detail:
-            response_data.file_info = {
-                "original_name": file_detail.original_name,
-                "file_size": file_detail.file_size,
-                "file_hash": file_detail.file_hash,
-                "file_path": file_detail.file_path,
-                "file_type": file_detail.file_type,
-                "entry_point": file_detail.entry_point,
-                "runtime_config": file_detail.runtime_config,
-                "environment_vars": file_detail.environment_vars
-            }
-    elif project.type == ProjectType.RULE:
-        rule_detail = await relation_service.get_project_rule_detail(project.id)
-        if rule_detail:
-            response_data.rule_info = {
-                "engine": rule_detail.engine,
-                "target_url": rule_detail.target_url,
-                "url_pattern": rule_detail.url_pattern,
-                "callback_type": rule_detail.callback_type,
-                "request_method": rule_detail.request_method,
-                "extraction_rules": rule_detail.extraction_rules,
-                "data_schema": rule_detail.data_schema,
-                "pagination_config": rule_detail.pagination_config,
-                "max_pages": rule_detail.max_pages,
-                "start_page": rule_detail.start_page,
-                "request_delay": rule_detail.request_delay,
-                "retry_count": rule_detail.retry_count,
-                "timeout": rule_detail.timeout,
-                "priority": getattr(rule_detail, 'priority', 0),
-                "dont_filter": getattr(rule_detail, 'dont_filter', False),
-                "headers": rule_detail.headers,
-                "cookies": rule_detail.cookies,
-                "proxy_config": rule_detail.proxy_config,
-                "task_config": getattr(rule_detail, 'task_config', None)
-            }
-    elif project.type == ProjectType.CODE:
-        code_detail = await relation_service.get_project_code_detail(project.id)
-        if code_detail:
-            response_data.code_info = {
-                "content": code_detail.content,
-                "language": code_detail.language,
-                "version": code_detail.version,
-                "content_hash": code_detail.content_hash,
-                "entry_point": code_detail.entry_point,
-                "runtime_config": code_detail.runtime_config,
-                "environment_vars": code_detail.environment_vars
-            }
-
+    response_data = create_project_response(project)
+    await _attach_project_detail_info(response_data, project)
     return success_response(response_data, message=Messages.UPDATED_SUCCESS)
 
 
@@ -469,13 +398,31 @@ async def update_project(
 )
 async def delete_project(
     project_id,
-    current_user_id=Depends(get_current_user_id)
+    http_request: Request,
+    current_user_id=Depends(get_current_user_id),
+    current_user=Depends(get_current_user)
 ):
+    # 获取项目信息用于审计
+    project = await project_service.get_project_by_id(project_id, current_user_id)
+    project_name = project.name if project else project_id
 
     # 删除项目
     deleted = await project_service.delete_project(project_id, current_user_id)
     if not deleted:
         raise ProjectNotFoundException(project_id)
+
+    # 记录审计日志
+    from src.services.users.user_service import user_service
+    user = await user_service.get_user_by_id(current_user.user_id)
+    await audit_service.log_project_action(
+        action=AuditAction.PROJECT_DELETE,
+        username=user.username if user else "unknown",
+        project_id=project.id if project else 0,
+        project_name=project_name,
+        user_id=current_user.user_id,
+        ip_address=http_request.client.host if http_request.client else None,
+        description=f"删除项目: {project_name}"
+    )
 
     return success_response(None, message=Messages.DELETED_SUCCESS)
 
@@ -560,6 +507,7 @@ async def generate_task_json(
         )
 
     # 获取规则详情 - 使用应用层关联
+    from src.services.projects.relation_service import relation_service
     rule_detail = await relation_service.get_project_rule_detail(project.id)
     if not rule_detail:
         raise HTTPException(
@@ -668,25 +616,12 @@ async def update_file_config(
             )
 
         # 构建更新请求
+        from src.schemas.project import ProjectFileUpdateRequest
 
         # 解析JSON字段
-        parsed_runtime_config = None
-        if runtime_config:
-            try:
-                import ujson
-                parsed_runtime_config = ujson.loads(runtime_config)
-            except (ujson.JSONDecodeError, ValueError) as e:
-                logger.debug(f"runtime_config JSON解析失败（使用None）: {e}")
-                parsed_runtime_config = None
-
-        parsed_environment_vars = None
-        if environment_vars:
-            try:
-                import ujson
-                parsed_environment_vars = ujson.loads(environment_vars)
-            except (ujson.JSONDecodeError, ValueError) as e:
-                logger.debug(f"environment_vars JSON解析失败（使用None）: {e}")
-                parsed_environment_vars = None
+        from src.utils.json_parser import JSONParser
+        parsed_runtime_config = JSONParser.parse_safely(runtime_config, "runtime_config")
+        parsed_environment_vars = JSONParser.parse_safely(environment_vars, "environment_vars")
 
         request = ProjectFileUpdateRequest(
             entry_point=entry_point,
@@ -746,6 +681,7 @@ async def get_project_file_structure(
             )
 
         # 获取文件详情
+        from src.services.projects.relation_service import relation_service
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
             raise HTTPException(
@@ -754,6 +690,7 @@ async def get_project_file_structure(
             )
 
         # 获取文件结构
+        from src.services.projects.project_file_service import project_file_service
         structure = await project_file_service.get_project_file_structure(file_detail.file_path)
 
         # 统计文件信息
@@ -771,7 +708,7 @@ async def get_project_file_structure(
         total_size = sum_size(structure)
 
         response_data = FileStructureResponse(
-            project_id=project.id,
+            project_id=project.public_id,
             project_name=project.name,
             file_path=file_detail.file_path,
             structure=structure,
@@ -818,6 +755,7 @@ async def get_project_file_content(
             )
 
         # 获取文件详情
+        from src.services.projects.relation_service import relation_service
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
             raise HTTPException(
@@ -826,6 +764,7 @@ async def get_project_file_content(
             )
 
         # 获取文件内容
+        from src.services.projects.project_file_service import project_file_service
         file_content = await project_file_service.get_file_content(
             file_detail.file_path, 
             file_path
@@ -851,9 +790,9 @@ async def get_project_file_content(
     response_description="返回更新后的文件内容"
 )
 async def update_project_file_content(
-    project_id,
-    payload,
-    current_user_id=Depends(get_current_user_id)
+    project_id: str,
+    payload: ProjectFileContentUpdateRequest,
+    current_user_id: int = Depends(get_current_user_id)
 ):
     """更新项目文件内容"""
     try:
@@ -867,6 +806,7 @@ async def update_project_file_content(
                 detail="只有文件项目支持文件内容编辑"
             )
 
+        from src.services.projects.relation_service import relation_service
 
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
@@ -875,6 +815,7 @@ async def update_project_file_content(
                 detail="项目文件详情不存在"
             )
 
+        from src.services.projects.project_file_service import project_file_service
 
         updated = await project_file_service.update_file_content(
             file_detail.file_path,
@@ -882,6 +823,23 @@ async def update_project_file_content(
             payload.content,
             payload.encoding
         )
+
+        # 标记项目过期（用于分布式同步）
+        try:
+            from src.models import ProjectFile
+            from src.services.nodes.node_project_service import node_project_service
+            from datetime import datetime
+
+            await ProjectFile.filter(id=file_detail.id).update(
+                is_modified=True,
+                last_modified_at=datetime.now()
+            )
+
+            await node_project_service.mark_project_outdated(project.public_id)
+
+            logger.debug(f"项目已标记过期 [{project.public_id}]")
+        except Exception as mark_error:
+            logger.warning(f"过期标记失败: {mark_error}")
 
         return success_response(FileContentResponse(**updated), message=Messages.UPDATED_SUCCESS)
 
@@ -921,6 +879,7 @@ async def download_project_file(
             )
 
         # 获取文件详情
+        from src.services.projects.relation_service import relation_service
         file_detail = await relation_service.get_project_file_detail(project.id)
         if not file_detail:
             raise HTTPException(
@@ -929,7 +888,8 @@ async def download_project_file(
             )
 
         # 下载文件
-        
+        from src.services.projects.project_file_service import project_file_service
+
         if file_path:
             # 下载解压后的特定文件
             return await project_file_service.download_file(

@@ -1,17 +1,92 @@
 import React, { useEffect, useState } from 'react'
-import { Card, Form, Input, Select, Button, Space, Tabs, Spin, Alert } from 'antd'
-import showNotification from '@/utils/notification'
-import { ArrowLeftOutlined, SaveOutlined } from '@ant-design/icons'
+import { Card, Form, Input, Select, Button, Space, Tabs, Spin, Alert, Row, Col, theme, Divider } from 'antd'
+import { ArrowLeftOutlined, SaveOutlined, FileTextOutlined, ToolOutlined, CodeOutlined } from '@ant-design/icons'
 import { useParams, useNavigate } from 'react-router-dom'
 import { projectService } from '@/services/projects'
 import { validationRules } from '@/utils/validators'
-import { RuleProjectForm, CodeProjectForm, FileProjectForm } from '@/components/projects'
+import { RuleProjectForm, CodeProjectForm, FileProjectForm, RegionNodeSelector } from '@/components/projects'
 import envService from '@/services/envs'
 import { useAuth } from '@/hooks/useAuth'
-import type { Project, ProjectCreateRequest, ProjectUpdateRequest, ExtractionRule } from '@/types'
+import { venvScopeOptions } from '@/config/displayConfig'
+import type { Project, ProjectCreateRequest, ProjectUpdateRequest } from '@/types'
 
-const { Option } = Select
+const { Option: _Option } = Select
 const { TextArea } = Input
+
+// 项目类型配置
+const PROJECT_TYPES = [
+  {
+    value: 'file',
+    label: '文件项目',
+    icon: <FileTextOutlined />,
+    description: '上传文件进行数据提取'
+  },
+  {
+    value: 'rule',
+    label: '规则项目',
+    icon: <ToolOutlined />,
+    description: '配置规则进行网页抓取'
+  },
+  {
+    value: 'code',
+    label: '代码项目',
+    icon: <CodeOutlined />,
+    description: '编写代码自定义采集逻辑'
+  }
+]
+
+// 项目类型选择器组件
+const ProjectTypeSelector: React.FC<{
+  value?: string
+  onChange?: (value: string) => void
+}> = ({ value, onChange }) => {
+  const { token } = theme.useToken()
+  
+  return (
+    <Row gutter={[12, 12]}>
+      {PROJECT_TYPES.map((type) => (
+        <Col key={type.value} xs={24} sm={12}>
+          <div
+            onClick={() => onChange?.(type.value)}
+            style={{
+              padding: '12px 16px',
+              borderRadius: 8,
+              border: `1px solid ${value === type.value ? token.colorPrimary : token.colorBorder}`,
+              background: value === type.value ? token.colorPrimaryBg : token.colorBgContainer,
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12
+            }}
+          >
+            <div style={{
+              fontSize: 20,
+              color: value === type.value ? token.colorPrimary : token.colorTextSecondary
+            }}>
+              {type.icon}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{
+                fontWeight: 500,
+                color: value === type.value ? token.colorPrimary : token.colorText
+              }}>
+                {type.label}
+              </div>
+              <div style={{
+                fontSize: 12,
+                color: token.colorTextSecondary,
+                marginTop: 2
+              }}>
+                {type.description}
+              </div>
+            </div>
+          </div>
+        </Col>
+      ))}
+    </Row>
+  )
+}
 
 const ProjectForm: React.FC = () => {
   const { id } = useParams<{ id: string }>()
@@ -20,16 +95,22 @@ const ProjectForm: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [installedInterpreters, setInstalledInterpreters] = useState<Array<{ version: string; source?: string; python_bin: string }>>([])
   const [sharedVenvs, setSharedVenvs] = useState<{ key: string; version: string }[]>([])
-  const [venvScope, setVenvScope] = useState<'private' | 'shared'>('private')
+  const [venvScope, setVenvScope] = useState<string>('private')
   const [dependencies, setDependencies] = useState<string[]>([])
   const [pythonVersion, setPythonVersion] = useState<string>('')
   const [sharedKey, setSharedKey] = useState<string>('')
-  const [interpreterSource, setInterpreterSource] = useState<'mise' | 'local'>('mise')
+  const [interpreterSource, setInterpreterSource] = useState<string>('mise')
   const [pythonBin, setPythonBin] = useState<string>('')
   const [fetchLoading, setFetchLoading] = useState(false)
   const [project, setProject] = useState<Project | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('basic')
+  
+  // 区域配置
+  const [regionConfig, setRegionConfig] = useState<{
+    region?: string
+    require_render?: boolean
+  }>({})
   
   // 编辑模式下的表单引用
   const [ruleFormRef, setRuleFormRef] = useState<{ submit: () => void } | null>(null)
@@ -45,7 +126,7 @@ const ProjectForm: React.FC = () => {
         setFetchLoading(true)
         setError(null)
         try {
-          const projectData = await projectService.getProject(parseInt(id))
+          const projectData = await projectService.getProject(id)
           setProject(projectData)
           form.setFieldsValue({
             name: projectData.name,
@@ -53,8 +134,16 @@ const ProjectForm: React.FC = () => {
             description: projectData.description,
             tags: Array.isArray(projectData.tags) ? projectData.tags.join(', ') : projectData.tags
           })
-        } catch (error: any) {
-          const errorMessage = error.response?.data?.message || error.message || '获取项目信息失败'
+          // 加载区域配置
+          if (projectData.region) {
+            setRegionConfig({
+              region: projectData.region,
+              require_render: projectData.rule_info?.engine === 'browser'
+            })
+          }
+        } catch (error: unknown) {
+          const axiosError = error as { response?: { data?: { message?: string } }; message?: string }
+          const errorMessage = axiosError.response?.data?.message || axiosError.message || '获取项目信息失败'
           setError(errorMessage)
         } finally {
           setFetchLoading(false)
@@ -64,7 +153,7 @@ const ProjectForm: React.FC = () => {
     }
     // 初始化加载解释器与共享venv（创建模式）
     if (!isEdit) {
-      envService.listInterpreters().then((list) => setInstalledInterpreters(list as any)).catch(() => setInstalledInterpreters([]))
+      envService.listInterpreters().then((list) => setInstalledInterpreters(list as { version: string; source?: string; python_bin: string }[])).catch(() => setInstalledInterpreters([]))
       envService
         .listVenvs({ scope: 'shared', page: 1, size: 100 })
         .then((res) => {
@@ -75,46 +164,46 @@ const ProjectForm: React.FC = () => {
     }
   }, [id, isEdit, form, isAuthenticated, authLoading])
 
-  const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: { name: string; type?: string; description?: string; tags?: string }) => {
     setLoading(true)
     try {
       if (isEdit && project) {
         const updateData: ProjectUpdateRequest = {
           name: values.name,
           description: values.description,
-          tags: typeof values.tags === 'string' ? values.tags : values.tags?.join(', ')
+          tags: values.tags,
+          // 区域配置
+          region: regionConfig.region,
         }
         await projectService.updateProject(project.id, updateData)
         // 成功提示由拦截器统一处理
       } else {
         const createData: ProjectCreateRequest = {
           name: values.name,
-          type: values.type,
+          type: values.type as ProjectCreateRequest['type'],
           description: values.description,
-          tags: values.tags,
+          tags: values.tags ? values.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : undefined,
           venv_scope: venvScope,
           python_version: pythonVersion,
           shared_venv_key: venvScope === 'shared' ? sharedKey || undefined : undefined,
           dependencies,
-          // 前端用于API兼容的补充字段：
-          // 通过 projects.ts -> formData 追加 'interpreter_source' 和 'python_bin'
-          // @ts-expect-error - Backend API expects these fields
+          // 区域配置
+          region: regionConfig.region,
           interpreter_source: interpreterSource,
-          // @ts-expect-error - Backend API expects these fields
           python_bin: interpreterSource === 'local' ? pythonBin : undefined,
         }
         await projectService.createProject(createData)
         // 成功提示由拦截器统一处理
       }
       navigate('/projects')
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setLoading(false)
     }
   }
 
-  const handleRuleSubmit = async (ruleData: any) => {
+  const handleRuleSubmit = async (ruleData: Record<string, unknown>) => {
     setLoading(true)
     try {
       if (isEdit && project) {
@@ -122,14 +211,14 @@ const ProjectForm: React.FC = () => {
         // 成功提示由拦截器统一处理
         navigate('/projects')
       }
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setLoading(false)
     }
   }
 
-  const handleCodeSubmit = async (codeData: any) => {
+  const handleCodeSubmit = async (codeData: Record<string, unknown>) => {
     setLoading(true)
     try {
       if (isEdit && project) {
@@ -137,14 +226,14 @@ const ProjectForm: React.FC = () => {
         // 成功提示由拦截器统一处理
         navigate('/projects')
       }
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setLoading(false)
     }
   }
 
-  const handleFileSubmit = async (fileData: any) => {
+  const handleFileSubmit = async (fileData: { entry_point?: string; runtime_config?: Record<string, unknown>; environment_vars?: Record<string, unknown>; file?: File }) => {
     setLoading(true)
     try {
       if (isEdit && project) {
@@ -161,7 +250,7 @@ const ProjectForm: React.FC = () => {
         // 成功提示由拦截器统一处理
         navigate('/projects')
       }
-    } catch (error) {
+    } catch {
       // 错误提示由拦截器统一处理
     } finally {
       setLoading(false)
@@ -190,11 +279,7 @@ const ProjectForm: React.FC = () => {
           label="项目类型"
           rules={[{ required: true, message: '请选择项目类型' }]}
         >
-          <Select placeholder="请选择项目类型">
-            <Option value="file">文件项目</Option>
-            <Option value="rule">规则项目</Option>
-            <Option value="code">代码项目</Option>
-          </Select>
+          <ProjectTypeSelector />
         </Form.Item>
       )}
 
@@ -217,10 +302,7 @@ const ProjectForm: React.FC = () => {
           placeholder="请选择环境作用域"
           value={venvScope}
           onChange={(v) => setVenvScope(v)}
-          options={[
-            { value: 'private', label: '私有（项目专属）' },
-            { value: 'shared', label: '公共（共享）' },
-          ]}
+          options={venvScopeOptions}
         />
       </Form.Item>
 
@@ -233,12 +315,13 @@ const ProjectForm: React.FC = () => {
           showSearch
           placeholder="选择已安装的解释器（local/mise）"
           value={pythonVersion}
-          onChange={(val, option: any) => {
+          onChange={(val, option) => {
             setPythonVersion(val as string)
-            setInterpreterSource((option?.source as 'mise' | 'local') || 'mise')
-            setPythonBin(option?.python_bin as string)
+            const opt = option as { source?: string; python_bin?: string }
+            setInterpreterSource(opt?.source || 'mise')
+            setPythonBin(opt?.python_bin || '')
           }}
-          options={(installedInterpreters || []).map((it: any) => ({ value: it.version, label: `${it.version} (${it.source || 'mise'})`, source: it.source || 'mise', python_bin: it.python_bin }))}
+          options={(installedInterpreters || []).map((it) => ({ value: it.version, label: `${it.version} (${it.source || 'mise'})`, source: it.source || 'mise', python_bin: it.python_bin }))}
           filterOption={(input, option) => ((option?.label as string) || '').toLowerCase().includes(input.toLowerCase())}
         />
       </Form.Item>
@@ -260,21 +343,10 @@ const ProjectForm: React.FC = () => {
         </Form.Item>
       )}
 
-      <Form.Item
-        name="dependencies"
-        label="依赖（至少一个）"
-        rules={[
-          {
-            validator: async () => {
-              if (!dependencies || dependencies.length === 0) throw new Error('请至少添加一个依赖')
-            },
-          },
-        ]}
-      >
+      <Form.Item name="dependencies" label="依赖">
         <Select
           mode="tags"
           placeholder="输入包名后回车添加，例如: requests==2.32.3"
-          value={dependencies}
           onChange={(vals) => setDependencies(vals as string[])}
           tokenSeparators={[',']}
         />
@@ -287,7 +359,15 @@ const ProjectForm: React.FC = () => {
         <Input placeholder="请输入标签，多个标签用逗号分隔" />
       </Form.Item>
 
-      <Form.Item>
+      <Divider orientation="left">执行区域配置</Divider>
+      
+      <RegionNodeSelector
+        value={regionConfig}
+        onChange={setRegionConfig}
+        requireRender={regionConfig.require_render}
+      />
+
+      <Form.Item style={{ marginTop: 24 }}>
         <Space>
           <Button
             type="primary"
@@ -353,7 +433,7 @@ const ProjectForm: React.FC = () => {
           return project.rule_info.pagination_config
         }
         // 否则从旧字段构建
-        const config: any = {
+        const config: Record<string, unknown> = {
           method: project.rule_info.pagination_type || 'none',
           max_pages: project.rule_info.max_pages || 10,
           start_page: project.rule_info.start_page || 1
@@ -364,7 +444,8 @@ const ProjectForm: React.FC = () => {
             config.next_page_rule = typeof project.rule_info.pagination_rule === 'string' 
               ? JSON.parse(project.rule_info.pagination_rule)
               : project.rule_info.pagination_rule
-          } catch (e) {
+          } catch {
+            // ignore parse error
           }
         }
         return JSON.stringify(config)

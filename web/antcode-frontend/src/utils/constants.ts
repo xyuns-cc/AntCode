@@ -57,4 +57,7 @@ export const STORAGE_KEYS = {
   ACCESS_TOKEN: 'access_token',
   REFRESH_TOKEN: 'refresh_token',
   USER_INFO: 'user_info',
+  REMEMBER_USERNAME: 'remember_username',
+  REMEMBER_PASSWORD: 'remember_password',
+  REMEMBER_ME: 'remember_me',
 } as const

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Card, Input, Space, Tag, Button } from 'antd'
-import { SearchOutlined, ClearOutlined } from '@ant-design/icons'
+import { Card, Input, Space, Tag, Button, theme } from 'antd'
+import { ClearOutlined } from '@ant-design/icons'
 import styles from './LogViewer.module.css'
 import LogSearchFilter from './LogSearchFilter'
 import type { LogFilter } from './LogSearchFilter'
@@ -56,14 +56,19 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
 }, ref) => {
   const [scrollTop, setScrollTop] = useState(0)
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
-  const [isUserScrolling, setIsUserScrolling] = useState(false)
+  const [, setPositionsVersion] = useState(0) // 用于触发重渲染
   const lastScrollTop = useRef(0)
   const containerRef = useRef<HTMLDivElement>(null)
   const itemHeights = useRef<Record<string, number>>({})
   const itemPositions = useRef<number[]>([])
-  const [positionsVersion, setPositionsVersion] = useState(0)
   const [totalHeight, setTotalHeight] = useState(0)
   const lastItemsLength = useRef(items.length)
+  // 追踪已渲染过的消息ID，用于判断是否为新消息
+  const renderedIds = useRef<Set<string>>(new Set())
+  // 用户是否正在滚动（防止自动滚动干扰）
+  const userScrollingRef = useRef(false)
+  const userScrollTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const recalcTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   // 计算每个项目的位置
   const calculateItemPositions = useCallback(() => {
@@ -73,8 +78,8 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
     for (let i = 0; i < items.length; i++) {
       positions[i] = position
       const message = items[i]
-      const height = itemHeights.current[message?.id ?? ''] || estimatedItemHeight
-      position += height
+      const h = itemHeights.current[message?.id ?? ''] || estimatedItemHeight
+      position += h
     }
 
     const previousPositions = itemPositions.current
@@ -103,34 +108,49 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
     })
   }, [items, estimatedItemHeight])
   
+  // 待更新的高度队列
+  const pendingHeightUpdates = useRef<boolean>(false)
+  
   // 更新项目高度 - 添加防抖避免频繁重新计算
-  const updateItemHeight = useCallback((id: string, height: number) => {
-    if (!id) return
+  const updateItemHeight = useCallback((id: string, h: number) => {
+    if (!id || h <= 0) return
     const currentHeight = itemHeights.current[id]
 
     // 只有高度变化超过1px时才更新，避免微小差异导致频繁重计算
-    if (Math.abs((currentHeight || 0) - height) > 1) {
-      itemHeights.current[id] = height
+    if (Math.abs((currentHeight || 0) - h) > 1) {
+      itemHeights.current[id] = h
+      
+      // 标记有待处理的高度更新
+      pendingHeightUpdates.current = true
+
+      // 用户正在滚动时，延迟位置重计算，但仍然记录高度
+      if (userScrollingRef.current) {
+        return
+      }
 
       // 使用requestAnimationFrame避免在滚动过程中频繁更新布局
       requestAnimationFrame(() => {
-        calculateItemPositions()
+        if (!userScrollingRef.current && pendingHeightUpdates.current) {
+          pendingHeightUpdates.current = false
+          calculateItemPositions()
+        }
       })
     }
   }, [calculateItemPositions])
   
-  // 计算可见范围
+  // 计算可见范围 - 增加缓冲区减少滚动时的重渲染
   const getVisibleRange = useCallback(() => {
     const positions = itemPositions.current
     let start = 0
     let end = items.length - 1
+    const buffer = 3 // 增加缓冲区，提前渲染更多项
 
     // 找到第一个可见项
     for (let i = 0; i < positions.length; i++) {
       const message = items[i]
-      const height = itemHeights.current[message?.id ?? ''] || estimatedItemHeight
-      if (positions[i] + height >= scrollTop) {
-        start = Math.max(0, i - 1) // 提前渲染一项
+      const h = itemHeights.current[message?.id ?? ''] || estimatedItemHeight
+      if (positions[i] + h >= scrollTop) {
+        start = Math.max(0, i - buffer)
         break
       }
     }
@@ -140,46 +160,71 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
       const message = items[i]
       const itemHeight = itemHeights.current[message?.id ?? ''] || estimatedItemHeight
       if (positions[i] + itemHeight >= scrollTop + height) {
-        end = Math.min(items.length - 1, i + 1) // 延后渲染一项
+        end = Math.min(items.length - 1, i + buffer)
         break
       }
     }
     
     return { start, end }
-  }, [items, scrollTop, height, estimatedItemHeight, positionsVersion])
+  }, [items, scrollTop, height, estimatedItemHeight])
 
   const { start: visibleStart, end: visibleEnd } = getVisibleRange()
   const visibleItems = items.slice(visibleStart, visibleEnd + 1)
 
-  // 处理滚动
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const newScrollTop = e.currentTarget.scrollTop
-    setScrollTop(newScrollTop)
-
-    // 检查是否在底部附近（距离底部30px以内才算真正的底部）
+  // 处理滚动 - 简化逻辑，减少抖动
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const container = e.currentTarget
-    const distanceToBottom = container.scrollHeight - newScrollTop - container.clientHeight
-    const isAtBottom = distanceToBottom < 30
+    const newScrollTop = container.scrollTop
+    const scrollHeight = container.scrollHeight
+    const clientHeight = container.clientHeight
+    
+    // 计算是否在底部附近
+    const distanceToBottom = scrollHeight - newScrollTop - clientHeight
+    const isAtBottom = distanceToBottom < 50
+    
+    // 标记用户正在滚动
+    userScrollingRef.current = true
+    if (userScrollTimeoutRef.current) {
+      clearTimeout(userScrollTimeoutRef.current)
+    }
+    // 用户停止滚动 300ms 后才允许自动滚动和位置更新
+    userScrollTimeoutRef.current = setTimeout(() => {
+      userScrollingRef.current = false
+      // 用户停止滚动后，更新 scrollTop 并重新计算位置
+      const currentScrollTop = containerRef.current?.scrollTop || 0
+      setScrollTop(currentScrollTop)
+      // 如果有待处理的高度更新，重新计算位置
+      if (pendingHeightUpdates.current) {
+        pendingHeightUpdates.current = false
+        calculateItemPositions()
+      }
+    }, 300)
 
-    const isScrollingUp = newScrollTop < lastScrollTop.current
-
-    // 用户向上滚动且未到达底部时，禁用自动滚动
-    if (isScrollingUp && !isAtBottom) {
-      setIsUserScrolling(true)
+    // 用户向上滚动时，禁用自动滚动
+    if (newScrollTop < lastScrollTop.current - 10) {
       setShouldAutoScroll(false)
     }
-    // 用户滚动到真正的底部时，重新启用自动滚动
+    // 用户滚动到底部时，重新启用自动滚动
     else if (isAtBottom) {
-      setIsUserScrolling(false)
       setShouldAutoScroll(true)
     }
 
     lastScrollTop.current = newScrollTop
-  }
+    
+    // 只有在用户不是主动滚动时才更新 scrollTop 状态
+    // 这样可以避免在用户滚动时触发重新渲染
+    if (!userScrollingRef.current || Math.abs(newScrollTop - scrollTop) > 100) {
+      setScrollTop(newScrollTop)
+    }
+  }, [scrollTop, calculateItemPositions])
 
-  // 初始化位置计算
+  // 初始化位置计算 - 延迟执行确保 DOM 已渲染
   useEffect(() => {
-    calculateItemPositions()
+    // 首次渲染后延迟计算，确保高度已测量
+    const timer = setTimeout(() => {
+      calculateItemPositions()
+    }, 50)
+    return () => clearTimeout(timer)
   }, [calculateItemPositions])
 
   // 当items内容变化时重置虚拟化状态
@@ -198,76 +243,92 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
       Math.abs(items.length - lastItemsLength.current) > Math.max(items.length, lastItemsLength.current) * 0.3
 
     if (shouldFullReset) {
-      // 完全重置所有状态
       itemHeights.current = {}
       itemPositions.current = []
+      renderedIds.current = new Set()
       setScrollTop(0)
       setShouldAutoScroll(true)
 
-      // 重置滚动位置
       if (containerRef.current) {
         containerRef.current.scrollTop = 0
       }
 
       calculateItemPositions()
     } else {
-      // 轻量重新计算位置
       calculateItemPositions()
     }
 
     lastItemsLength.current = items.length
   }, [items, calculateItemPositions])
 
-  // 滚动到底部（只在应该自动滚动且有新消息时）
-  const scrollToBottom = useCallback(() => {
-    if (containerRef.current && shouldAutoScroll && !isUserScrolling) {
-      containerRef.current.scrollTop = totalHeight
-    }
-  }, [totalHeight, shouldAutoScroll, isUserScrolling])
-
-  // 只在有新消息时自动滚动到底部
+  // 只在有新消息且允许自动滚动时，滚动到底部
+  const prevItemsLength = useRef(items.length)
   useEffect(() => {
-    const hasNewItems = items.length > lastItemsLength.current
-    lastItemsLength.current = items.length
+    const hasNewItems = items.length > prevItemsLength.current
+    prevItemsLength.current = items.length
     
-    if (hasNewItems && shouldAutoScroll && !isUserScrolling) {
-      // 使用setTimeout确保DOM更新完成后再滚动
-      setTimeout(scrollToBottom, 0)
+    // 只有新增消息、允许自动滚动、且用户没有在滚动时才自动滚动
+    if (hasNewItems && shouldAutoScroll && !userScrollingRef.current) {
+      // 使用 RAF 确保在下一帧滚动
+      requestAnimationFrame(() => {
+        if (containerRef.current && !userScrollingRef.current) {
+          containerRef.current.scrollTop = containerRef.current.scrollHeight
+        }
+      })
     }
-  }, [items.length, scrollToBottom, shouldAutoScroll, isUserScrolling])
-
-  // 总高度变化时，如果用户在底部则跟随
-  useEffect(() => {
-    if (shouldAutoScroll && !isUserScrolling) {
-      setTimeout(scrollToBottom, 0)
-    }
-  }, [totalHeight, scrollToBottom, shouldAutoScroll, isUserScrolling])
+  }, [items.length, shouldAutoScroll])
 
   // 滚动到底部（手动触发）
   const forceScrollToBottom = useCallback(() => {
     setShouldAutoScroll(true)
-    setIsUserScrolling(false)
-    if (containerRef.current) {
-      containerRef.current.scrollTop = totalHeight
+    userScrollingRef.current = false
+    if (userScrollTimeoutRef.current) {
+      clearTimeout(userScrollTimeoutRef.current)
+      userScrollTimeoutRef.current = null
     }
-  }, [totalHeight])
+    requestAnimationFrame(() => {
+      if (containerRef.current) {
+        containerRef.current.scrollTop = containerRef.current.scrollHeight
+      }
+    })
+  }, [])
 
   // 重置虚拟化状态
   const resetVirtualization = useCallback(() => {
-    // 重置所有缓存和状态
     itemHeights.current = {}
     itemPositions.current = []
+    renderedIds.current = new Set()
     setScrollTop(0)
     setShouldAutoScroll(true)
+    userScrollingRef.current = false
     
-    // 重置滚动位置
+    if (userScrollTimeoutRef.current) {
+      clearTimeout(userScrollTimeoutRef.current)
+      userScrollTimeoutRef.current = null
+    }
+    if (recalcTimeoutRef.current) {
+      clearTimeout(recalcTimeoutRef.current)
+      recalcTimeoutRef.current = null
+    }
+    
     if (containerRef.current) {
       containerRef.current.scrollTop = 0
     }
     
-    // 重新计算位置
     calculateItemPositions()
   }, [calculateItemPositions])
+  
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (userScrollTimeoutRef.current) {
+        clearTimeout(userScrollTimeoutRef.current)
+      }
+      if (recalcTimeoutRef.current) {
+        clearTimeout(recalcTimeoutRef.current)
+      }
+    }
+  }, [])
 
   // 暴露方法给父组件
   React.useImperativeHandle(ref, () => ({
@@ -285,21 +346,21 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
       }}
       onScroll={handleScroll}
     >
-      <div style={{ height: totalHeight, position: 'relative' }}>
+      <div style={{ height: totalHeight + 60, position: 'relative', paddingBottom: 60 }}>
         {visibleItems.map((message, index) => {
           const actualIndex = visibleStart + index
           const top = itemPositions.current[actualIndex] || 0
+          // 判断是否为新渲染的消息
+          const isNew = !renderedIds.current.has(message.id)
+          if (isNew) {
+            renderedIds.current.add(message.id)
+          }
           return (
             <LogRow
               key={message.id}
               message={message}
-              index={actualIndex}
-              style={{
-                position: 'absolute',
-                top,
-                left: 0,
-                right: 0
-              }}
+              top={top}
+              isNew={isNew}
               searchText={searchText}
               onMessageClick={onMessageClick}
               onHeightChange={updateItemHeight}
@@ -311,48 +372,63 @@ const VirtualizedList = React.forwardRef<VirtualizedListRef, VirtualizedListProp
   )
 })
 
-// 添加displayName
 VirtualizedList.displayName = 'VirtualizedList'
 
 // 日志行组件
 interface LogRowProps {
   message: LogMessage
-  index: number
-  style: React.CSSProperties
+  top: number
+  isNew: boolean
   searchText: string
   onMessageClick?: (message: LogMessage) => void
   onHeightChange: (id: string, height: number) => void
 }
 
-const LogRow: React.FC<LogRowProps> = ({
+const LogRow = React.memo<LogRowProps>(({
   message,
-  index,
-  style,
+  top,
+  isNew,
   searchText,
   onMessageClick,
   onHeightChange
 }) => {
   const rowRef = useRef<HTMLDivElement>(null)
   const lastReportedHeight = useRef<number>(0)
+  const [showAnimation, setShowAnimation] = useState(isNew)
 
-  // 使用ResizeObserver来监测高度变化
+  // 新消息入场动画
+  useEffect(() => {
+    if (isNew && showAnimation) {
+      const timer = setTimeout(() => {
+        setShowAnimation(false)
+      }, 300)
+      return () => clearTimeout(timer)
+    }
+    return undefined
+  }, [isNew, showAnimation])
+
+  // 使用 useLayoutEffect 确保在绘制前测量高度
+  React.useLayoutEffect(() => {
+    const element = rowRef.current
+    if (!element) return
+
+    // 使用 offsetHeight 获取完整高度（包含 padding）
+    const h = element.offsetHeight
+    if (h > 0 && Math.abs(h - lastReportedHeight.current) > 1) {
+      lastReportedHeight.current = h
+      onHeightChange(message.id, h)
+    }
+  }, [message.id, message.content, onHeightChange])
+
+  // 使用 ResizeObserver 监测后续高度变化
   useEffect(() => {
     const element = rowRef.current
     if (!element) return
 
-    // 初始测量
-    const height = element.offsetHeight
-    if (Math.abs(height - lastReportedHeight.current) > 1) {
-      lastReportedHeight.current = height
-      onHeightChange(message.id, height)
-    }
-
-    // 使用ResizeObserver监听大小变化
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const newHeight = entry.contentRect.height
-        // 只有高度变化超过1px时才报告
-        if (Math.abs(newHeight - lastReportedHeight.current) > 1) {
+        const newHeight = (entry.target as HTMLElement).offsetHeight
+        if (newHeight > 0 && Math.abs(newHeight - lastReportedHeight.current) > 1) {
           lastReportedHeight.current = newHeight
           onHeightChange(message.id, newHeight)
         }
@@ -360,80 +436,82 @@ const LogRow: React.FC<LogRowProps> = ({
     })
 
     resizeObserver.observe(element)
-
-    return () => {
-      resizeObserver.disconnect()
-    }
+    return () => resizeObserver.disconnect()
   }, [message.id, onHeightChange])
 
-  // 当内容或搜索文本变化时重新测量 - 减少频率
-  useEffect(() => {
-    const element = rowRef.current
-    if (!element) return
-
-    // 使用requestAnimationFrame延迟测量，避免在渲染过程中频繁测量
-    requestAnimationFrame(() => {
-      const height = element.offsetHeight
-      if (Math.abs(height - lastReportedHeight.current) > 1) {
-        lastReportedHeight.current = height
-        onHeightChange(message.id, height)
-      }
-    })
-  }, [message.id, message.content, searchText, onHeightChange])
-
-  // 高亮搜索文本
-  const highlightText = (text: string, search: string) => {
-    if (!search) return text
+  // 高亮搜索文本 - 使用useMemo缓存
+  const highlightedContent = useMemo(() => {
+    if (!searchText) return message.content
     
-    const regex = new RegExp(`(${search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
-    const parts = text.split(regex)
-    
-    return parts.map((part, index) => 
-      regex.test(part) ? (
-        <span key={index} className={styles.highlight}>
-          {part}
-        </span>
-      ) : part
-    )
-  }
+    try {
+      const escaped = searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const regex = new RegExp(`(${escaped})`, 'gi')
+      const parts = message.content.split(regex)
+      
+      return parts.map((part, idx) => 
+        regex.test(part) ? (
+          <span key={idx} className={styles.highlight}>{part}</span>
+        ) : part
+      )
+    } catch {
+      return message.content
+    }
+  }, [message.content, searchText])
 
-  // 获取日志行的CSS类
-  const getLogClass = (type: string) => {
-    return `${styles.logLine} ${styles[type] || styles.stdout}`
-  }
+  // 缓存CSS类名
+  const logClassName = useMemo(() => {
+    const baseClass = `${styles.logLine} ${styles[message.type] || styles.stdout}`
+    return showAnimation ? `${baseClass} ${styles.newItem}` : baseClass
+  }, [message.type, showAnimation])
+
+  // 缓存时间戳
+  const formattedTime = useMemo(() => 
+    new Date(message.timestamp).toLocaleTimeString()
+  , [message.timestamp])
+
+  const formattedDateTime = useMemo(() => 
+    new Date(message.timestamp).toLocaleString()
+  , [message.timestamp])
+
+  // 缓存点击处理
+  const handleClick = useCallback(() => {
+    onMessageClick?.(message)
+  }, [onMessageClick, message])
 
   return (
     <div
       ref={rowRef}
-      className={getLogClass(message.type)}
+      className={logClassName}
       style={{
-        ...style,
         position: 'absolute',
+        top,
+        left: 0,
+        right: 0,
         cursor: onMessageClick ? 'pointer' : 'default'
       }}
-      onClick={() => onMessageClick?.(message)}
-      title={`${message.type.toUpperCase()} - ${new Date(message.timestamp).toLocaleString()}`}
+      onClick={handleClick}
+      title={`${message.type.toUpperCase()} - ${formattedDateTime}`}
     >
-      <span className={styles.timestamp}>
-        [{new Date(message.timestamp).toLocaleTimeString()}]
-      </span>
-      <span className={styles.logType}>
-        [{message.type.toUpperCase()}]
-      </span>
-      {message.level && (
-        <span className={styles.logLevel}>
-          [{message.level}]
-        </span>
-      )}
-      {message.source && (
-        <span className={styles.logLevel}>
-          [{message.source}]
-        </span>
-      )}
-      <span className={styles.content}>{highlightText(message.content, searchText)}</span>
+      <span className={styles.timestamp}>[{formattedTime}]</span>
+      <span className={styles.logType}>[{message.type.toUpperCase()}]</span>
+      {message.level && <span className={styles.logLevel}>[{message.level}]</span>}
+      {message.source && <span className={styles.logLevel}>[{message.source}]</span>}
+      <span className={styles.content}>{highlightedContent}</span>
     </div>
   )
-}
+}, (prevProps, nextProps) => {
+  // 自定义比较：只在关键属性变化时重新渲染
+  return (
+    prevProps.message.id === nextProps.message.id &&
+    prevProps.message.content === nextProps.message.content &&
+    prevProps.top === nextProps.top &&
+    prevProps.searchText === nextProps.searchText &&
+    prevProps.isNew === nextProps.isNew
+  )
+})
+
+LogRow.displayName = 'LogRow'
+
 
 // 虚拟日志查看器属性
 interface VirtualLogViewerProps {
@@ -441,8 +519,8 @@ interface VirtualLogViewerProps {
   height?: number
   estimatedItemHeight?: number
   searchable?: boolean
-  enableAdvancedFilter?: boolean  // 是否启用高级过滤器
-  filterMode?: string  // 过滤模式标识，用于强制重置
+  enableAdvancedFilter?: boolean
+  filterMode?: string
   onMessageClick?: (message: LogMessage) => void
   onClear?: () => void
 }
@@ -450,13 +528,14 @@ interface VirtualLogViewerProps {
 const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
   messages,
   height = 400,
-  estimatedItemHeight = 32, // 增加预估高度以容纳换行
+  estimatedItemHeight = 28,
   searchable = true,
   enableAdvancedFilter = false,
-  filterMode = 'default', // 默认过滤模式
+  filterMode = 'default',
   onMessageClick,
   onClear
 }) => {
+  const { token } = theme.useToken()
   const [searchText, setSearchText] = useState('')
   const [filterResult, setFilterResult] = useState<SearchFilterResult>({
     filteredMessages: messages,
@@ -475,7 +554,7 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
   const lastFilterMode = useRef(filterMode)
 
   // 处理过滤结果更新
-  const handleFilterChange = useCallback((filteredMessages: LogMessage[], filter: LogFilter) => {
+  const handleFilterChange = useCallback((filteredMessages: LogMessage[], _filter: LogFilter) => {
     setFilterResult({
       filteredMessages,
       stats: {
@@ -486,18 +565,17 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
         errors: filteredMessages.filter(m => m.type === 'error' || m.level === 'ERROR').length,
         warnings: filteredMessages.filter(m => m.type === 'warning' || m.level === 'WARNING').length,
         info: filteredMessages.filter(m => m.type === 'info').length,
-        debug: filteredMessages.filter(m => m.type === 'debug').length
+        debug: filteredMessages.filter(m => m.level === 'DEBUG').length
       }
     })
   }, [messages.length])
 
-  // 获取过滤后的消息 - 优先使用高级过滤器结果，否则使用简单搜索
+  // 获取过滤后的消息
   const filteredMessages = useMemo(() => {
     if (enableAdvancedFilter) {
       return filterResult.filteredMessages
     }
     
-    // 简单搜索逻辑（向后兼容）
     if (!searchText) return messages
     
     const search = searchText.toLowerCase()
@@ -508,13 +586,12 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
     )
   }, [messages, searchText, enableAdvancedFilter, filterResult.filteredMessages])
 
-  // 统计信息 - 使用高级过滤器的统计或计算简单统计
+  // 统计信息
   const stats = useMemo(() => {
     if (enableAdvancedFilter) {
       return filterResult.stats
     }
     
-    // 简单统计逻辑（向后兼容）
     return {
       total: messages.length,
       filtered: filteredMessages.length,
@@ -523,7 +600,7 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
       errors: messages.filter(m => m.type === 'error' || m.level === 'ERROR').length,
       warnings: messages.filter(m => m.type === 'warning' || m.level === 'WARNING').length,
       info: messages.filter(m => m.type === 'info').length,
-      debug: messages.filter(m => m.type === 'debug').length
+      debug: messages.filter(m => m.level === 'DEBUG').length
     }
   }, [messages, filteredMessages, enableAdvancedFilter, filterResult.stats])
 
@@ -532,10 +609,9 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
     setSearchText('')
   }
 
-  // 监听过滤模式变化，强制重置所有状态
+  // 监听过滤模式变化
   useEffect(() => {
     if (lastFilterMode.current !== filterMode) {
-      // 过滤模式发生变化，重置所有状态
       lastFilterMode.current = filterMode
       setSearchText('')
       setFilterResult({
@@ -548,21 +624,15 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
           errors: messages.filter(m => m.type === 'error' || m.level === 'ERROR').length,
           warnings: messages.filter(m => m.type === 'warning' || m.level === 'WARNING').length,
           info: messages.filter(m => m.type === 'info').length,
-          debug: messages.filter(m => m.type === 'debug').length
+          debug: messages.filter(m => m.level === 'DEBUG').length
         }
       })
 
-      // 强制重置虚拟化状态
       if (virtualizedListRef.current) {
         virtualizedListRef.current.resetVirtualization()
       }
     }
   }, [filterMode, messages])
-
-  // 在messages或filterMode变化时强制更新
-  const memoKey = useMemo(() => {
-    return `${filterMode}-${messages.length}-${filteredMessages.length}-${searchText}`
-  }, [filterMode, messages.length, filteredMessages.length, searchText])
 
   return (
     <Card
@@ -587,9 +657,7 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
             </Button>
           )}
           <Button
-            onClick={() => {
-              virtualizedListRef.current?.scrollToBottom()
-            }}
+            onClick={() => virtualizedListRef.current?.scrollToBottom()}
             size="small"
           >
             滚动到底部
@@ -597,7 +665,6 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
         </Space>
       }
     >
-      {/* 搜索栏 - 根据是否启用高级过滤器显示不同的搜索界面 */}
       {searchable && (
         <div style={{ marginBottom: 12 }}>
           {enableAdvancedFilter ? (
@@ -629,7 +696,6 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
         </div>
       )}
 
-      {/* 虚拟列表 */}
       <div className={styles.logContainer} style={{ height, overflow: 'hidden' }}>
         {filteredMessages.length === 0 ? (
           <div className={styles.emptyState}>
@@ -637,7 +703,6 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
           </div>
         ) : (
           <VirtualizedList
-            key={memoKey}
             ref={virtualizedListRef}
             items={filteredMessages}
             height={height}
@@ -648,25 +713,24 @@ const VirtualLogViewer: React.FC<VirtualLogViewerProps> = ({
         )}
       </div>
 
-      {/* 底部统计 */}
       <div
         style={{
           marginTop: 8,
           padding: '4px 0',
           fontSize: '12px',
-          color: '#666',
-          borderTop: '1px solid #f0f0f0'
+          color: token.colorTextSecondary,
+          borderTop: `1px solid ${token.colorBorderSecondary}`
         }}
       >
         显示 {stats.filtered} / {stats.total} 条日志
         {searchText && ` (搜索: "${searchText}")`}
         {stats.errors > 0 && (
-          <span style={{ color: '#ff4d4f', marginLeft: 16 }}>
+          <span style={{ color: token.colorError, marginLeft: 16 }}>
             错误: {stats.errors}
           </span>
         )}
         {stats.warnings > 0 && (
-          <span style={{ color: '#faad14', marginLeft: 8 }}>
+          <span style={{ color: token.colorWarning, marginLeft: 8 }}>
             警告: {stats.warnings}
           </span>
         )}

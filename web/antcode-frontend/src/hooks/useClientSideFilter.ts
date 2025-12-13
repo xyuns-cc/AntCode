@@ -8,7 +8,7 @@ import { useState, useMemo, useCallback } from 'react'
 export interface FilterOptions<T> {
   searchFields?: (keyof T)[]  // 需要搜索的字段
   filterFunctions?: {
-    [key: string]: (item: T, value: any) => boolean
+    [key: string]: (item: T, value: unknown) => boolean
   }
 }
 
@@ -16,8 +16,8 @@ export interface UseClientSideFilterResult<T> {
   filteredData: T[]
   searchQuery: string
   setSearchQuery: (query: string) => void
-  filters: Record<string, any>
-  setFilter: (key: string, value: any) => void
+  filters: Record<string, unknown>
+  setFilter: (key: string, value: unknown) => void
   resetFilters: () => void
   applyFilters: () => void
 }
@@ -34,10 +34,10 @@ export function useClientSideFilter<T>(
   const { searchFields = [], filterFunctions = {} } = options
 
   const [searchQuery, setSearchQuery] = useState('')
-  const [filters, setFilters] = useState<Record<string, any>>({})
+  const [filters, setFilters] = useState<Record<string, unknown>>({})
 
   // 设置单个筛选器
-  const setFilter = useCallback((key: string, value: any) => {
+  const setFilter = useCallback((key: string, value: unknown) => {
     setFilters(prev => {
       if (value === undefined || value === null || value === '') {
         const { [key]: _, ...rest } = prev
@@ -83,7 +83,7 @@ export function useClientSideFilter<T>(
           result = result.filter(item => filterFn(item, value))
         } else {
           // 默认相等匹配
-          result = result.filter(item => (item as any)[key] === value)
+          result = result.filter(item => (item as Record<string, unknown>)[key] === value)
         }
       }
     })
@@ -143,7 +143,7 @@ export function usePaginatedClientFilter<T>(
     setCurrentPage(1)
   }, [filterResult])
 
-  const setFilter = useCallback((key: string, value: any) => {
+  const setFilter = useCallback((key: string, value: unknown) => {
     filterResult.setFilter(key, value)
     setCurrentPage(1)
   }, [filterResult])
@@ -234,4 +234,3 @@ export function useSortableClientFilter<T>(
     toggleSort
   }
 }
-

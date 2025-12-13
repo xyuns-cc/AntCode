@@ -1,0 +1,41 @@
+/* 项目编辑抽屉样式 */
+/* 使用 Ant Design CSS 变量适配主题 */
+
+.drawer {
+  z-index: 1000;
+}
+
+.drawer :global(.ant-drawer-body) {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  height: 100%;
+  background: var(--ant-color-bg-layout, #fafafa);
+}
+
+.drawer :global(.ant-drawer-footer) {
+  padding: 0;
+  border-top: none;
+}
+
+/* 内容容器 */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--ant-color-bg-container, #fff);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+  overflow: auto;
+}
+
+/* 底部按钮区域 */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-top: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  background: var(--ant-color-bg-container, #fff);
+}

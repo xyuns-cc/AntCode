@@ -19,21 +19,13 @@ export default defineConfig(({ mode }) => {
   const config: UserConfig = {
     plugins: [
       react(),
-      // Gzip 压缩
+      // Gzip 压缩（生产环境）
       isProduction && viteCompression({
         verbose: true,
         disable: false,
         threshold: 10240, // 10KB 以上才压缩
         algorithm: 'gzip',
         ext: '.gz',
-      }),
-      // Brotli 压缩
-      isProduction && viteCompression({
-        verbose: true,
-        disable: false,
-        threshold: 10240,
-        algorithm: 'brotliCompress',
-        ext: '.br',
       }),
     ].filter(Boolean),
     

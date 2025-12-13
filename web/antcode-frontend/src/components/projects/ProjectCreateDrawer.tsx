@@ -5,11 +5,6 @@ import {
   Button,
   Space,
   Card,
-  Typography,
-  Row,
-  Col,
-  Select,
-  Input,
 } from 'antd'
 import showNotification from '@/utils/notification'
 import {
@@ -23,18 +18,19 @@ import ProjectTypeSelector from './ProjectTypeSelector'
 import FileProjectForm from './FileProjectForm'
 import RuleProjectForm from './RuleProjectForm'
 import CodeProjectForm from './CodeProjectForm'
+import RegionNodeSelector from './RegionNodeSelector'
+import EnvSelector from '@/components/envs/EnvSelector'
+import type { EnvironmentConfig } from '@/components/envs/EnvSelector'
 import { projectService } from '@/services/projects'
-import type { ProjectType, ProjectCreateRequest } from '@/types'
+import nodeService from '@/services/nodes'
+import type { ProjectType, ProjectCreateRequest, Node, Project } from '@/types'
 import Logger from '@/utils/logger'
 import styles from './ProjectCreateDrawer.module.css'
-import envService from '@/services/envs'
-
-const { Title, Text } = Typography
 
 interface ProjectCreateDrawerProps {
   open: boolean
   onClose: () => void
-  onSuccess?: (project: any) => void
+  onSuccess?: (project: Project) => void
 }
 
 const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
@@ -58,24 +54,17 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
   const [codeFormTooltip, setCodeFormTooltip] = useState('')
   const [codeFormRef, setCodeFormRef] = useState<{ submit: () => void } | null>(null)
   
-  // 环境选择状态（统一样式 + 与项目创建一致）
-  const [venvScope, setVenvScope] = useState<'private' | 'shared'>('private')
-  const [installedInterpreters, setInstalledInterpreters] = useState<Array<{ version: string; source?: string; python_bin: string }>>([])
-  const [pythonVersion, setPythonVersion] = useState<string>('')
-  const [interpreterSource, setInterpreterSource] = useState<'mise' | 'local'>('mise')
-  const [pythonBin, setPythonBin] = useState<string>('')
-  const [sharedVenvs, setSharedVenvs] = useState<{ key: string; version: string }[]>([])
-  const [dependencies, setDependencies] = useState<string[]>([])
-  const [sharedKey, setSharedKey] = useState<string>('')
+  // 环境配置状态（使用新的 EnvSelector）
+  const [envConfig, setEnvConfig] = useState<EnvironmentConfig | null>(null)
+  const [nodeList, setNodeList] = useState<Node[]>([])
+  
+  // 规则项目的区域配置
+  const [regionConfig, setRegionConfig] = useState<{ region?: string; require_render?: boolean }>({})
 
   useEffect(() => {
     if (open) {
-      // 加载已安装解释器与共享环境
-      envService.listInterpreters().then((list) => setInstalledInterpreters(list as any)).catch(() => setInstalledInterpreters([]))
-      envService.listVenvs({ scope: 'shared', page: 1, size: 100 }).then(res => {
-        const items = (res.items || []).map(v => ({ key: v.key || v.version, version: v.version }))
-        setSharedVenvs(items)
-      }).catch(() => setSharedVenvs([]))
+      // 加载节点列表
+      nodeService.getAllNodes().then(setNodeList).catch(() => setNodeList([]))
     }
   }, [open])
 
@@ -100,6 +89,8 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
     setProjectType(null)
     setFormData({})
     setLoading(false)
+    setEnvConfig(null)
+    setRegionConfig({})
   }
 
   // 关闭抽屉
@@ -153,26 +144,85 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
 
   // 提交创建
   const handleSubmit = async (finalData: ProjectCreateRequest) => {
+    // 规则项目只需要区域配置，不需要环境配置
+    if (projectType === 'rule') {
+      setLoading(true)
+      try {
+        Logger.log('创建规则项目:', finalData, '区域配置:', regionConfig)
+        
+        // 规则项目合并区域配置
+        const merged: ProjectCreateRequest = {
+          ...finalData,
+          region: regionConfig.region,
+          // 规则项目使用默认的环境配置
+          venv_scope: 'shared',
+          python_version: '3.11',
+        }
+
+        const project = await projectService.createProject(merged)
+        onSuccess?.(project)
+        handleClose()
+      } catch (error) {
+        Logger.error('创建规则项目失败:', error)
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+    
+    // 文件/代码项目需要环境配置
+    if (!envConfig) {
+      showNotification.error('请配置运行环境')
+      return
+    }
+
+    // 验证节点环境配置
+    if (envConfig.location === 'node' && !envConfig.nodeId) {
+      showNotification.error('使用节点环境时必须选择节点')
+      return
+    }
+
+    // 验证使用现有环境时的配置
+    if (envConfig.useExisting && !envConfig.existingEnvName) {
+      showNotification.error('请选择要使用的环境')
+      return
+    }
+
+    // 验证创建新环境时的配置
+    if (!envConfig.useExisting && !envConfig.pythonVersion) {
+      showNotification.error('创建新环境时必须指定Python版本')
+      return
+    }
+
     setLoading(true)
     try {
-      Logger.log('创建项目:', finalData)
+      Logger.log('创建项目:', finalData, '环境配置:', envConfig)
+      
       // 合并环境配置
-      const merged: any = {
+      const merged: ProjectCreateRequest = {
         ...finalData,
-        venv_scope: venvScope,
-        python_version: pythonVersion,
-        shared_venv_key: venvScope === 'shared' ? undefined : undefined, // 共享环境仅在环境管理创建
-        dependencies,
-        interpreter_source: interpreterSource,
-        python_bin: interpreterSource === 'local' ? pythonBin : undefined,
+        
+        // 环境位置和节点信息
+        env_location: envConfig.location,
+        node_id: envConfig.nodeId,
+        
+        // 环境作用域
+        venv_scope: envConfig.scope,
+        
+        // 使用现有环境 or 创建新环境
+        use_existing_env: envConfig.useExisting,
+        existing_env_name: envConfig.existingEnvName,
+        
+        // 创建新环境时的配置
+        python_version: envConfig.pythonVersion,
+        env_name: envConfig.envName,
+        env_description: envConfig.envDescription,
       }
-      if (venvScope === 'shared') {
-        merged.shared_venv_key = sharedKey || undefined
-      }
+
       const project = await projectService.createProject(merged)
       onSuccess?.(project)
       handleClose()
-    } catch (error: any) {
+    } catch (error) {
       Logger.error('创建项目失败:', error)
     } finally {
       setLoading(false)
@@ -189,7 +239,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             onSelect={handleTypeSelect}
           />
         )
-      case 1:
+      case 1: {
         if (!projectType) return null
         
         const commonProps = {
@@ -199,63 +249,13 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
           loading
         }
 
-        // 先渲染环境选择区域
+        // 使用新的环境选择器组件
         const envSection = (
-          <div style={{ marginBottom: 16 }}>
-            <Title level={5}>运行环境</Title>
-            <div style={{ marginBottom: 12 }}>
-              <Text>作用域</Text>
-              <Select
-                style={{ width: '100%', marginTop: 6 }}
-                value={venvScope}
-                onChange={(v) => setVenvScope(v)}
-                options={[{ value: 'private', label: '私有（项目专属）' }, { value: 'shared', label: '公共（共享）' }]}
-              />
-            </div>
-            {venvScope === 'private' ? (
-              <>
-                <div style={{ marginBottom: 12 }}>
-                  <Text>Python 解释器（来源）</Text>
-                  <Select
-                    showSearch
-                    placeholder="选择已安装的解释器（local/mise）"
-                    style={{ width: '100%', marginTop: 6 }}
-                    value={pythonVersion}
-                    onChange={(val, option: any) => {
-                      setPythonVersion(val as string)
-                      setInterpreterSource((option?.source as 'mise' | 'local') || 'mise')
-                      setPythonBin(option?.python_bin as string)
-                    }}
-                    options={(installedInterpreters || []).map((it: any) => ({ value: it.version, label: `${it.version} (${it.source || 'mise'})`, source: it.source || 'mise', python_bin: it.python_bin }))}
-                    filterOption={(input, option) => ((option?.label as string) || '').toLowerCase().includes(input.toLowerCase())}
-                  />
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <Text>依赖（至少一个）</Text>
-                  <Select
-                    mode="tags"
-                    placeholder="输入依赖包名后回车，如: requests==2.32.3"
-                    style={{ width: '100%', marginTop: 6 }}
-                    value={dependencies}
-                    onChange={(vals) => setDependencies(vals as string[])}
-                    tokenSeparators={[',']}
-                  />
-                </div>
-              </>
-            ) : (
-              <div style={{ marginBottom: 12 }}>
-                <Text>共享环境</Text>
-                <Select
-                  placeholder="请选择已有共享环境"
-                  style={{ width: '100%', marginTop: 6 }}
-                  value={sharedKey}
-                  onChange={(v) => setSharedKey(v)}
-                  options={(sharedVenvs || []).map(v => ({ value: v.key, label: `${v.key} (${v.version})` }))}
-                />
-                <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>共享环境需已在“环境管理”中创建</Text>
-              </div>
-            )}
-          </div>
+          <EnvSelector 
+            value={envConfig}
+            onChange={setEnvConfig}
+            nodeList={nodeList}
+          />
         )
 
         switch (projectType) {
@@ -265,8 +265,21 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
               <FileProjectForm {...commonProps} onValidationChange={handleFileValidationChange} onRef={setFileFormRef} />
             </>
           case 'rule':
+            // 规则项目使用区域选择器，不需要环境配置
             return <>
-              {envSection}
+              <Card title="执行区域配置" size="small" style={{ marginBottom: 16 }}>
+                <RegionNodeSelector
+                  value={regionConfig}
+                  onChange={(config) => {
+                    setRegionConfig(config)
+                    // 根据引擎类型更新 require_render
+                    if (formData.engine === 'browser') {
+                      setRegionConfig({ ...config, require_render: true })
+                    }
+                  }}
+                  requireRender={formData.engine === 'browser'}
+                />
+              </Card>
               <RuleProjectForm {...commonProps} onValidationChange={handleRuleValidationChange} onRef={setRuleFormRef} />
             </>
           case 'code':
@@ -277,6 +290,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
           default:
             return null
         }
+      }
       default:
         return null
     }

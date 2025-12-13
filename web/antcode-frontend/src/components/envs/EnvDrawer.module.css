@@ -1,0 +1,185 @@
+/* 环境管理抽屉样式 */
+/* 使用 Ant Design CSS 变量适配主题 */
+
+.drawer {
+  /* 抽屉容器 */
+}
+
+.drawer :global(.ant-drawer-body) {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  background: var(--ant-color-bg-layout, #fafafa);
+  height: 100%;
+}
+
+.drawer :global(.ant-drawer-footer) {
+  border-top: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  padding: 16px 24px;
+}
+
+/* 步骤条容器 */
+.steps {
+  flex-shrink: 0;
+  margin-bottom: 16px;
+  padding: 16px 24px;
+  background: var(--ant-color-bg-container, #fff);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+}
+
+.steps :global(.ant-steps-item-title) {
+  font-weight: 500;
+}
+
+.steps :global(.ant-steps-item-description) {
+  font-size: 12px;
+}
+
+/* 表单卡片 */
+.formCard {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--ant-color-bg-container, #fff);
+  padding: 24px;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+  overflow: auto;
+}
+
+.formCard :global(.ant-card-body) {
+  flex: 1;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 表单项容器 */
+.formItem {
+  margin-bottom: 24px;
+}
+
+.formItem:last-child {
+  margin-bottom: 0;
+}
+
+/* 表单标签 */
+.formLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+.formLabel :global(.anticon) {
+  color: var(--ant-color-primary, #1890ff);
+}
+
+/* 表单提示文字 */
+.formHint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+  line-height: 1.5;
+}
+
+/* 上传区域 */
+.uploadArea {
+  border: 2px dashed var(--ant-color-border, #d9d9d9);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  background: var(--ant-color-bg-container, #fff);
+}
+
+.uploadArea:hover {
+  border-color: var(--ant-color-primary, #1890ff);
+  background: var(--ant-color-primary-bg, #e6f4ff);
+}
+
+.uploadArea :global(.ant-upload-drag-icon) {
+  margin-bottom: 12px;
+}
+
+.uploadArea :global(.ant-upload-text) {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+.uploadArea :global(.ant-upload-hint) {
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+/* 标签列表 */
+.tagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 信息卡片 */
+.infoCard {
+  border-radius: 8px;
+  margin-top: 16px;
+}
+
+.infoCard ul {
+  margin: 8px 0 0 0;
+  padding-left: 20px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
+}
+
+.infoCard li {
+  margin-bottom: 4px;
+  line-height: 1.6;
+}
+
+.infoCard li:last-child {
+  margin-bottom: 0;
+}
+
+/* 表单内容区域 */
+.formContent {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* 节点提示 */
+.nodeHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-radius: 6px;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+}
+
+/* 底部按钮组 */
+.footerButtons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 依赖包预览 */
+.depsPreview {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-radius: 8px;
+}
+
+.depsPreview .depsCount {
+  font-size: 13px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
+  margin-bottom: 8px;
+}
+

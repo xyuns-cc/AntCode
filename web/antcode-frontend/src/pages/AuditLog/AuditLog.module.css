@@ -1,0 +1,41 @@
+/* 审计日志页面样式 */
+
+.auditLogContainer {
+  padding: 24px;
+}
+
+.pageHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.pageTitle {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.searchCard {
+  margin-bottom: 16px;
+}
+
+.noPermission {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 400px;
+  color: #999;
+}
+
+.noPermission h3 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  color: #666;
+}
+
+.noPermission p {
+  color: #999;
+}

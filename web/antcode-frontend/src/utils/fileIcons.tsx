@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React from 'react'
 
 // 文件图标组件，使用SVG实现类似Material Icons的效果

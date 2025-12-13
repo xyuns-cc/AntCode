@@ -1,0 +1,98 @@
+/* 告警配置页面样式 */
+
+.alertConfigContainer {
+  padding: 24px;
+  min-height: 100%;
+}
+
+.pageHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.pageTitle {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.loadingContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 400px;
+}
+
+/* Webhook 卡片 */
+.webhookCard {
+  height: 100%;
+}
+
+.webhookList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.webhookItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.webhookInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.webhookName {
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.webhookUrl {
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+
+.webhookLevels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 统计区域 */
+.statsSection {
+  margin-bottom: 16px;
+}
+
+.statsTitle {
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+/* 响应式 */
+@media (max-width: 1200px) {
+  .alertConfigContainer {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .pageHeader {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+}

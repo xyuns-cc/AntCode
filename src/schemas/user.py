@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class UserLoginRequest(BaseModel):
@@ -34,7 +34,7 @@ class UserAdminPasswordUpdateRequest(BaseModel):
 
 
 class UserResponse(BaseModel):
-    id: int
+    id: str = Field(description="用户公开ID")
     username: str
     email: str | None = None
     is_active: bool
@@ -42,20 +42,18 @@ class UserResponse(BaseModel):
     created_at: datetime
     last_login_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserSimpleResponse(BaseModel):
-    id: int
+    id: str = Field(description="用户公开ID")
     username: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserListResponse(BaseModel):
-    id: int
+    id: str = Field(description="用户公开ID")
     username: str
     email: str | None = None
     is_active: bool
@@ -63,13 +61,12 @@ class UserListResponse(BaseModel):
     created_at: datetime
     last_login_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserLoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    user_id: int
+    user_id: str = Field(description="用户公开ID")
     username: str
     is_admin: bool

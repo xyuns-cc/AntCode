@@ -1,13 +1,15 @@
+"""监控模型"""
 from tortoise import fields
-from tortoise.models import Model
+
+from src.models.base import BaseModel, generate_public_id
 
 
-class NodePerformanceHistory(Model):
+class NodePerformanceHistory(BaseModel):
     """节点系统性能历史记录（按分钟聚合）"""
 
-    id = fields.BigIntField(pk=True)
-    node_id = fields.CharField(max_length=100, index=True, description="节点标识")
-    timestamp = fields.DatetimeField(index=True, description="采集时间")
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    node_id = fields.CharField(max_length=100, db_index=True, description="节点标识")
+    timestamp = fields.DatetimeField(db_index=True, description="采集时间")
 
     cpu_percent = fields.DecimalField(max_digits=5, decimal_places=2, null=True)
     memory_percent = fields.DecimalField(max_digits=5, decimal_places=2, null=True)
@@ -22,15 +24,15 @@ class NodePerformanceHistory(Model):
 
     class Meta:
         table = "node_performance_history"
-        indexes = ("node_id", "timestamp")
+        indexes = [("node_id", "timestamp"), ("public_id",)]
 
 
-class SpiderMetricsHistory(Model):
+class SpiderMetricsHistory(BaseModel):
     """爬虫业务指标历史记录（按分钟聚合）"""
 
-    id = fields.BigIntField(pk=True)
-    node_id = fields.CharField(max_length=100, index=True, description="节点标识")
-    timestamp = fields.DatetimeField(index=True, description="采集时间")
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    node_id = fields.CharField(max_length=100, db_index=True, description="节点标识")
+    timestamp = fields.DatetimeField(db_index=True, description="采集时间")
 
     tasks_total = fields.IntField(default=0)
     tasks_success = fields.IntField(default=0)
@@ -52,19 +54,18 @@ class SpiderMetricsHistory(Model):
 
     class Meta:
         table = "spider_metrics_history"
-        indexes = ("node_id", "timestamp")
+        indexes = [("node_id", "timestamp"), ("public_id",)]
 
 
-class NodeEvent(Model):
+class NodeEvent(BaseModel):
     """节点事件日志"""
 
-    id = fields.BigIntField(pk=True)
-    node_id = fields.CharField(max_length=100, index=True, description="节点标识")
-    event_type = fields.CharField(max_length=50, index=True, description="事件类型")
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    node_id = fields.CharField(max_length=100, db_index=True, description="节点标识")
+    event_type = fields.CharField(max_length=50, db_index=True, description="事件类型")
     event_message = fields.TextField(null=True)
-    created_at = fields.DatetimeField(auto_now_add=True, index=True)
+    created_at = fields.DatetimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         table = "node_events"
-        indexes = (("node_id", "created_at"), ("event_type", "created_at"))
-
+        indexes = [("node_id", "created_at"), ("event_type", "created_at"), ("public_id",)]

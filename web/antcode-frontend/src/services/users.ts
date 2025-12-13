@@ -4,10 +4,10 @@
  */
 
 import { BaseService } from './base'
-import type { User, ApiResponse, PaginatedResponse } from '@/types'
+import type { User, ApiResponse } from '@/types'
 
 export interface SimpleUser {
-  id: number
+  id: string  // public_id
   username: string
 }
 
@@ -50,7 +50,7 @@ class UserService extends BaseService {
   /**
    * 获取用户详情
    */
-  async getUser(id: number): Promise<User> {
+  async getUser(id: string): Promise<User> {
     return this.get<User>(`/${id}`)
   }
 
@@ -64,21 +64,21 @@ class UserService extends BaseService {
   /**
    * 更新用户
    */
-  async updateUser(id: number, userData: Partial<User>): Promise<User> {
+  async updateUser(id: string, userData: Partial<User>): Promise<User> {
     return this.put<User>(`/${id}`, userData)
   }
 
   /**
    * 删除用户
    */
-  async deleteUser(id: number): Promise<void> {
+  async deleteUser(id: string): Promise<void> {
     return this.delete(`/${id}`)
   }
 
   /**
    * 重置用户密码
    */
-  async resetPassword(id: number, newPassword: string): Promise<void> {
+  async resetPassword(id: string, newPassword: string): Promise<void> {
     return this.post(`/${id}/reset-password`, { new_password: newPassword })
   }
 
@@ -95,14 +95,14 @@ class UserService extends BaseService {
   /**
    * 批量操作
    */
-  async batchUpdateStatus(userIds: number[], isActive: boolean): Promise<void> {
+  async batchUpdateStatus(userIds: string[], isActive: boolean): Promise<void> {
     return this.post('/batch/status', {
       user_ids: userIds,
       is_active: isActive,
     })
   }
 
-  async batchDelete(userIds: number[]): Promise<void> {
+  async batchDelete(userIds: string[]): Promise<void> {
     return this.post('/batch/delete', {
       user_ids: userIds,
     })

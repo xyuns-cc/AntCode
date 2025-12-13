@@ -1,6 +1,6 @@
 """基础模式"""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class HealthResponse(BaseModel):

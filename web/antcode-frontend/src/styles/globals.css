@@ -105,7 +105,17 @@ body.dark-theme {
 .ant-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
 .ant-btn:active:not(:disabled) { transform: scale(0.98); }
 .ant-table { border-radius: var(--ant-border-radius-lg); overflow: hidden; }
-.ant-table-thead > tr > th { font-weight: 600; background: transparent !important; }
+.ant-table-thead > tr > th { font-weight: 600; background: var(--ant-color-bg-container) !important; }
+
+/* Table row hover - consistent for both themes */
+.ant-table-tbody > tr:hover > td { background-color: var(--ant-color-fill-quaternary) !important; }
+
+/* Fixed column background - 实色背景防止内容重叠 */
+.ant-table-cell-fix-right,
+.ant-table-cell-fix-left { background-color: var(--ant-color-bg-container, #ffffff) !important; }
+
+.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right,
+.ant-table-tbody > tr:hover > td.ant-table-cell-fix-left { background-color: var(--ant-color-fill-quaternary, #fafafa) !important; }
 .ant-modal { top: 80px; }
 .ant-modal-content { border-radius: var(--ant-border-radius-lg); overflow: hidden; }
 .ant-drawer-content { border-radius: var(--ant-border-radius-lg) 0 0 var(--ant-border-radius-lg); }
