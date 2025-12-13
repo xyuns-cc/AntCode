@@ -1,24 +1,39 @@
 # AntCode Frontend - Multi-stage Build Dockerfile
 
 # Stage 1: Build
-FROM node:22-alpine as builder
+FROM node:22-alpine AS builder
+
 WORKDIR /app
-ENV NODE_ENV=production \
+
+# 设置环境变量
+ENV NODE_ENV=development \
     NPM_CONFIG_LOGLEVEL=warn
+
+# 复制依赖文件
 COPY package*.json ./
-RUN npm ci --only=production --ignore-scripts && npm cache clean --force
+
+# 安装所有依赖（包括 devDependencies 用于构建）
+RUN npm ci && npm cache clean --force
+
+# 复制源代码
 COPY . .
+
+# 设置生产环境并构建
+ENV NODE_ENV=production
 RUN npm run build
 
 # Stage 2: Production
-FROM nginx:1.27-alpine as runtime
+FROM nginx:1.27-alpine AS runtime
+
 WORKDIR /usr/share/nginx/html
+
+# 删除默认内容
 RUN rm -rf ./*
 
-# Copy build output
+# 从构建阶段复制产物
 COPY --from=builder /app/dist .
 
-# Inline nginx configuration for SPA
+# Nginx 配置
 RUN echo 'server { \
     listen 80; \
     server_name localhost; \
@@ -32,6 +47,12 @@ RUN echo 'server { \
         proxy_set_header Host $host; \
         proxy_set_header X-Real-IP $remote_addr; \
     } \
+    location /ws { \
+        proxy_pass http://backend:8000; \
+        proxy_http_version 1.1; \
+        proxy_set_header Upgrade $http_upgrade; \
+        proxy_set_header Connection "upgrade"; \
+    } \
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ { \
         expires 1y; \
         add_header Cache-Control "public, immutable"; \
@@ -40,17 +61,7 @@ RUN echo 'server { \
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml; \
 }' > /etc/nginx/conf.d/default.conf
 
-# 安全：使用非 root 用户运行
-RUN addgroup -g 101 -S nginx || true && \
-    adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx || true && \
-    chown -R nginx:nginx /usr/share/nginx/html && \
-    chown -R nginx:nginx /var/cache/nginx && \
-    chown -R nginx:nginx /var/log/nginx && \
-    touch /var/run/nginx.pid && \
-    chown -R nginx:nginx /var/run/nginx.pid
-
-USER nginx
-
+# 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://localhost:80/ || exit 1
 
