@@ -10,10 +10,10 @@ from src.models import Interpreter
 from src.models.enums import InterpreterSource
 
 
-_install_locks = {}
+_install_locks: dict[str, asyncio.Lock] = {}
 
 
-def _lock_for(version):
+def _lock_for(version: str) -> asyncio.Lock:
     key = f"python@{version}"
     if key not in _install_locks:
         _install_locks[key] = asyncio.Lock()
@@ -23,7 +23,7 @@ def _lock_for(version):
 class PythonEnvService:
     """Python 解释器管理（基于 mise）。"""
 
-    async def list_remote_versions(self):
+    async def list_remote_versions(self) -> list[str]:
         """列出可安装的远端 Python 版本。"""
         try:
             res = await run_command(["mise", "ls-remote", "python"], timeout=120)
@@ -51,7 +51,9 @@ class PythonEnvService:
             versions.append(ver)
         return versions
 
-    async def ensure_installed(self, version, created_by = None):
+    async def ensure_installed(
+        self, version: str, created_by: int | None = None
+    ) -> dict[str, str]:
         """确保指定版本已安装并返回安装信息。"""
         lock = _lock_for(version)
         async with lock:
@@ -94,7 +96,9 @@ class PythonEnvService:
                 logger.warning(f"记录解释器到数据库失败: {e}")
             return info
 
-    async def register_local(self, python_bin, created_by = None):
+    async def register_local(
+        self, python_bin: str, created_by: int | None = None
+    ) -> dict[str, str]:
         """注册本地解释器，读取版本并写入数据库。"""
         if not os.path.exists(python_bin):
             raise RuntimeError("python_bin 路径不存在")
@@ -125,7 +129,7 @@ class PythonEnvService:
             logger.warning(f"保存本地解释器失败: {e}")
         return {"version": ver, "install_dir": install_dir, "python_bin": python_bin}
 
-    async def list_db(self, source = None):
+    async def list_db(self, source: str | None = None) -> list[dict[str, str]]:
         from src.models import Interpreter as InterpreterModel
         query = InterpreterModel.filter(tool="python")
         if source:
@@ -142,7 +146,7 @@ class PythonEnvService:
             for r in rows
         ]
 
-    async def uninstall(self, version):
+    async def uninstall(self, version: str) -> bool:
         """卸载指定版本（若正被 venv 使用，调用层应阻止）。"""
         lock = _lock_for(version)
         async with lock:
@@ -152,7 +156,7 @@ class PythonEnvService:
                 logger.warning(f"mise uninstall 返回非零: {res.exit_code} -> {res.stderr.strip()}")
             return True
 
-    async def list_installed(self):
+    async def list_installed(self) -> list[dict[str, str]]:
         """列出已安装解释器（基于 mise 或本地扫描）。"""
         # 优先尝试 mise 的已安装列表
         try:

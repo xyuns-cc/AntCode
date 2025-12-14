@@ -1,7 +1,12 @@
-"""日志配置模块"""
+"""日志配置模块
+
+提供日志初始化、格式化和敏感信息脱敏功能。
+"""
 import os
+import re
 import sys
 import asyncio
+from typing import Any, Dict
 
 from loguru import logger
 
@@ -16,20 +21,112 @@ CONSOLE_FORMAT = (
 )
 FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
 
+# 敏感字段模式（用于脱敏）
+SENSITIVE_PATTERNS = [
+    # API Key / Secret Key
+    (re.compile(r'(api[_-]?key|secret[_-]?key|access[_-]?key)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{8,})["\']?', re.IGNORECASE), r'\1=***REDACTED***'),
+    # Password
+    (re.compile(r'(password|passwd|pwd)["\']?\s*[:=]\s*["\']?([^"\'\s,}]{3,})["\']?', re.IGNORECASE), r'\1=***REDACTED***'),
+    # Token
+    (re.compile(r'(token|bearer|jwt)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{20,})["\']?', re.IGNORECASE), r'\1=***REDACTED***'),
+    # Authorization Header
+    (re.compile(r'(Authorization)["\']?\s*[:=]\s*["\']?(Bearer\s+)?([a-zA-Z0-9_\-\.]{20,})["\']?', re.IGNORECASE), r'\1=***REDACTED***'),
+    # Database URL with password
+    (re.compile(r'(mysql|postgres|postgresql|redis)://([^:]+):([^@]+)@', re.IGNORECASE), r'\1://\2:***@'),
+    # Email (部分脱敏)
+    (re.compile(r'([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)'), r'***@\2'),
+]
 
-def setup_logging():
-    """初始化日志系统"""
+
+def sanitize_log_message(message: str) -> str:
+    """
+    对日志消息进行敏感信息脱敏
+    
+    Args:
+        message: 原始日志消息
+        
+    Returns:
+        脱敏后的日志消息
+    """
+    if not message:
+        return message
+    
+    sanitized = message
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
+    
+    return sanitized
+
+
+def sanitize_dict(data: Dict[str, Any], sensitive_keys: set = None) -> Dict[str, Any]:
+    """
+    对字典数据进行敏感信息脱敏
+    
+    Args:
+        data: 原始字典数据
+        sensitive_keys: 需要脱敏的键名集合
+        
+    Returns:
+        脱敏后的字典
+    """
+    if sensitive_keys is None:
+        sensitive_keys = {
+            'password', 'passwd', 'pwd', 'secret', 'token', 'api_key', 
+            'apikey', 'secret_key', 'secretkey', 'access_key', 'accesskey',
+            'authorization', 'auth', 'credential', 'credentials'
+        }
+    
+    if not isinstance(data, dict):
+        return data
+    
+    result = {}
+    for key, value in data.items():
+        key_lower = key.lower()
+        if any(sk in key_lower for sk in sensitive_keys):
+            result[key] = '***REDACTED***'
+        elif isinstance(value, dict):
+            result[key] = sanitize_dict(value, sensitive_keys)
+        elif isinstance(value, str):
+            result[key] = sanitize_log_message(value)
+        else:
+            result[key] = value
+    
+    return result
+
+
+class SanitizingFilter:
+    """日志脱敏过滤器"""
+    
+    def __call__(self, record: Dict[str, Any]) -> bool:
+        """对日志记录进行脱敏处理"""
+        # 脱敏消息内容
+        if 'message' in record:
+            record['message'] = sanitize_log_message(record['message'])
+        
+        # 脱敏 extra 字段
+        if 'extra' in record and isinstance(record['extra'], dict):
+            record['extra'] = sanitize_dict(record['extra'])
+        
+        return True
+
+
+def setup_logging() -> None:
+    """初始化日志系统，包含敏感信息脱敏"""
     logger.remove()
 
-    # 控制台输出
+    # 创建脱敏过滤器
+    sanitizing_filter = SanitizingFilter()
+
+    # 控制台输出（带脱敏）
     logger.add(
         sys.stderr,
         format=CONSOLE_FORMAT,
         level=settings.LOG_LEVEL,
         colorize=True,
+        filter=sanitizing_filter,
     )
 
-    # 文件输出
+    # 文件输出（带脱敏）
     if settings.LOG_TO_FILE:
         log_dir = os.path.dirname(settings.LOG_FILE_PATH)
         if log_dir:
@@ -44,18 +141,19 @@ def setup_logging():
             compression="zip",
             encoding="utf-8",
             enqueue=True,  # 异步写入，提升性能
+            filter=sanitizing_filter,
         )
 
-    # 添加告警处理器（仅处理 ERROR 和 CRITICAL）
+    # 添加告警处理器（仅处理 ERROR 和 CRITICAL，带脱敏）
     logger.add(
         _alert_sink,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} - {message}",
         level="ERROR",
-        filter=lambda record: record["level"].name in ["ERROR", "CRITICAL"],
+        filter=lambda record: sanitizing_filter(record) and record["level"].name in ["ERROR", "CRITICAL"],
         enqueue=True,  # 异步处理，避免阻塞主线程
     )
 
-    logger.info(f"日志初始化完成: level={settings.LOG_LEVEL}, file={settings.LOG_TO_FILE}, alert=True")
+    logger.info(f"日志初始化完成: level={settings.LOG_LEVEL}, file={settings.LOG_TO_FILE}, sanitize=True")
 
 
 def _alert_sink(message):
