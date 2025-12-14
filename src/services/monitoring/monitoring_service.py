@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import time
+from typing import Any, Optional
+
 from loguru import logger
 from tortoise.expressions import Q
 
@@ -10,14 +12,14 @@ from src.infrastructure.redis import get_redis_client
 from src.utils.serialization import from_json
 
 
-def _to_int(value, default=0):
+def _to_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
 
 
-def _to_decimal(value):
+def _to_decimal(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
     try:
@@ -26,12 +28,12 @@ def _to_decimal(value):
         return None
 
 
-def _decode_hash(raw):
+def _decode_hash(raw: dict[bytes, bytes]) -> dict[str, str]:
     return {key.decode(): value.decode() for key, value in raw.items()}
 
 
 class MonitoringSettings:
-    def __init__(self):
+    def __init__(self) -> None:
         self.stream_key = settings.MONITOR_STREAM_KEY
         self.stream_last_id_key = settings.MONITOR_STREAM_LAST_ID_KEY
         self.stream_batch_size = settings.MONITOR_STREAM_BATCH_SIZE
@@ -46,14 +48,14 @@ class MonitoringSettings:
 class MonitoringService:
     """监控数据服务：从 Redis 流归档到数据库并提供查询能力。"""
 
-    def __init__(self, config=None):
+    def __init__(self, config: Optional[MonitoringSettings] = None) -> None:
         self.config = config or MonitoringSettings()
 
-    async def _get_redis(self):
+    async def _get_redis(self) -> Any:
         """获取Redis客户端"""
         return await get_redis_client()
 
-    async def process_stream(self):
+    async def process_stream(self) -> int:
         """从 Redis Stream 中读取监控数据并批量写入数据库（优化版本）"""
         import asyncio
 
@@ -133,7 +135,7 @@ class MonitoringService:
 
         return processed
 
-    async def cleanup_old_data(self, days=None):
+    async def cleanup_old_data(self, days: Optional[int] = None) -> None:
         """清理过期的监控数据（批量操作）"""
         keep_days = days if days is not None else self.config.history_keep_days
         cutoff = datetime.utcnow() - timedelta(days=keep_days)
@@ -150,7 +152,7 @@ class MonitoringService:
                 f"事件{event_deleted}条, 共{total_deleted}条 (>= {keep_days}天前)"
             )
 
-    async def get_online_nodes(self):
+    async def get_online_nodes(self) -> list[dict[str, Any]]:
         """获取当前在线节点及其实时指标。"""
         redis_client = await self._get_redis()
         nodes = await redis_client.smembers(self.config.cluster_set_key)
@@ -170,7 +172,7 @@ class MonitoringService:
 
         return result
 
-    async def get_node_realtime(self, node_id):
+    async def get_node_realtime(self, node_id: str) -> list[dict[str, Any]]:
         """返回节点最近一小时的实时数据。"""
         redis_client = await self._get_redis()
         key = self.config.history_key_tpl.format(node_id=node_id)
@@ -186,7 +188,7 @@ class MonitoringService:
         data.sort(key=lambda item: item["timestamp"])
         return data
 
-    async def get_cluster_summary(self):
+    async def get_cluster_summary(self) -> dict[str, Any]:
         """汇总集群级别的实时统计。"""
         nodes = await self.get_online_nodes()
         totals = {
@@ -247,7 +249,7 @@ class MonitoringService:
 
         return [dict(record) for record in await queryset]
 
-    def _parse_stream_payload(self, payload):
+    def _parse_stream_payload(self, payload: dict[bytes, bytes]) -> Optional[dict[str, Any]]:
         try:
             node_id_raw = payload.get(b"node_id")
             if not node_id_raw:
@@ -279,7 +281,7 @@ class MonitoringService:
             logger.error("解析监控消息失败: {}", exc)
             return None
 
-    def _prepare_record(self, data):
+    def _prepare_record(self, data: dict[str, Any]) -> Optional[dict[str, Any]]:
         """准备批量插入的记录（不执行数据库操作）"""
         timestamp = data.get("timestamp")
         if not timestamp:
@@ -335,7 +337,7 @@ class MonitoringService:
             )
         }
 
-    async def _persist_data(self, data):
+    async def _persist_data(self, data: dict[str, Any]) -> None:
         """单条持久化（保留用于向后兼容）"""
         timestamp = data.get("timestamp")
         if not timestamp:

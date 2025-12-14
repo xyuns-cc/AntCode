@@ -1,5 +1,5 @@
 """服务层基础类"""
-from typing import TypeVar, Any
+from typing import TypeVar, Any, Optional, Type
 from loguru import logger
 
 T = TypeVar('T')
@@ -9,7 +9,12 @@ class QueryHelper:
     """查询辅助工具"""
 
     @staticmethod
-    async def get_by_id_or_public_id(model_class, id_value, user_id: int = None, check_admin: bool = True):
+    async def get_by_id_or_public_id(
+        model_class: Type[T],
+        id_value: Any,
+        user_id: Optional[int] = None,
+        check_admin: bool = True
+    ) -> Optional[T]:
         """
         通过 ID 或 public_id 获取对象
         
@@ -95,7 +100,7 @@ class QueryHelper:
 class BaseService:
     """服务基类"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.query = QueryHelper()
 
     async def _check_permission(self, user_id: int, resource_user_id: int) -> bool:
@@ -104,7 +109,7 @@ class BaseService:
             return True
         return await self.query.is_admin(user_id)
 
-    def _log_operation(self, operation: str, resource_id: Any, user_id: int = None):
+    def _log_operation(self, operation: str, resource_id: Any, user_id: Optional[int] = None) -> None:
         """记录操作日志"""
         user_info = f" by user {user_id}" if user_id else ""
         logger.info(f"{operation}: {resource_id}{user_info}")

@@ -12,16 +12,17 @@ from src.models import Interpreter, Venv, ProjectVenvBinding
 from src.utils.serialization import from_json, to_json, json_load_file, json_dump_file
 
 
-_venv_locks = {}
+_venv_locks: dict[str, asyncio.Lock] = {}
 
 
-def _venv_lock(project_id):
-    if project_id not in _venv_locks:
-        _venv_locks[project_id] = asyncio.Lock()
-    return _venv_locks[project_id]
+def _venv_lock(project_id: str | int) -> asyncio.Lock:
+    key = str(project_id)
+    if key not in _venv_locks:
+        _venv_locks[key] = asyncio.Lock()
+    return _venv_locks[key]
 
 
-def _paths_for(project_id, version):
+def _paths_for(project_id: str | int, version: str) -> dict[str, str]:
     venv_root = os.path.join(settings.VENV_STORAGE_ROOT, str(project_id))
     venv_dir = os.path.join(venv_root, version)
     manifest = os.path.join(venv_root, "manifest.json")
@@ -31,7 +32,7 @@ def _paths_for(project_id, version):
 class ProjectVenvService:
     """项目虚拟环境管理（基于 uv venv）。"""
 
-    async def get_status(self, project_id):
+    async def get_status(self, project_id: str | int) -> dict[str, str | None]:
         """Return project venv status."""
         root = os.path.join(os.path.abspath(os.path.join(os.getcwd(), "storage")), "venvs", str(project_id))
         manifest_path = os.path.join(root, "manifest.json")
@@ -105,7 +106,7 @@ class ProjectVenvService:
 
             return {"project_id": str(project_id), "version": version, "venv_path": paths["dir"]}
 
-    async def delete(self, project_id):
+    async def delete(self, project_id: str | int) -> bool:
         """Delete project venv (does not affect interpreter)."""
         lock = _venv_lock(str(project_id))
         async with lock:
@@ -182,7 +183,7 @@ class ProjectVenvService:
 
         return {"version": version, "venv_path": venv_dir, "key": ident, "venv_id": venv_obj.public_id}
 
-    def venv_python(self, venv_dir):
+    def venv_python(self, venv_dir: str) -> str:
         candidates = [
             os.path.join(venv_dir, "bin", "python"),
             os.path.join(venv_dir, "bin", "python3"),
@@ -190,7 +191,7 @@ class ProjectVenvService:
         ]
         return next((p for p in candidates if os.path.exists(p)), candidates[0])
 
-    async def install_dependencies(self, venv_dir, packages):
+    async def install_dependencies(self, venv_dir: str, packages: list[str]) -> None:
         if not packages:
             return
         py = self.venv_python(venv_dir)
@@ -201,7 +202,7 @@ class ProjectVenvService:
         if res.exit_code != 0:
             raise RuntimeError(f"安装依赖失败: {res.stderr.strip() or res.stdout.strip()}")
 
-    async def list_packages(self, venv_dir):
+    async def list_packages(self, venv_dir: str) -> list[dict]:
         py = self.venv_python(venv_dir)
         # 优先 uv pip list，回退 pip list
         res = await run_command(["uv", "pip", "list", "--format", "json", "--python", py], timeout=120)
@@ -214,7 +215,7 @@ class ProjectVenvService:
         except Exception:
             return []
 
-    async def delete_shared_by_id(self, venv_id):
+    async def delete_shared_by_id(self, venv_id: int) -> bool:
         from src.models import ProjectVenvBinding, Project
         venv = await Venv.get(id=venv_id)
         # 仅允许删除共享环境，且无任何绑定记录
@@ -231,7 +232,7 @@ class ProjectVenvService:
         await venv.delete()
         return True
 
-    async def _safe_rmtree(self, path):
+    async def _safe_rmtree(self, path: str | None) -> None:
         if not path or not os.path.exists(path):
             return
         # 避免误删，必须在 storage/venvs 下
@@ -257,7 +258,7 @@ class ProjectVenvService:
         except OSError:
             pass
 
-    async def _write_manifest(self, manifest_path, version):
+    async def _write_manifest(self, manifest_path: str, version: str) -> None:
         data = {"version": version}
         json_dump_file(data, manifest_path)
 

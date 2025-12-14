@@ -58,15 +58,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# 创建非 root 用户（安全最佳实践）
+RUN groupadd --gid 1000 appgroup && \
+    useradd --uid 1000 --gid appgroup --shell /bin/bash --create-home appuser
+
 # 从构建阶段复制虚拟环境
 COPY --from=builder /app/.venv /app/.venv
 
 # 复制应用代码
-COPY src ./src
-COPY proto ./proto
-COPY scripts ./scripts
+COPY --chown=appuser:appgroup src ./src
+COPY --chown=appuser:appgroup proto ./proto
+COPY --chown=appuser:appgroup scripts ./scripts
 
-# 创建数据目录
+# 创建数据目录并设置权限
 RUN mkdir -p \
     /app/data/db \
     /app/data/logs/tasks \
@@ -76,7 +80,12 @@ RUN mkdir -p \
     /app/data/storage/venvs/shared \
     /app/data/storage/mise/cache \
     /app/data/storage/executions \
+    && chown -R appuser:appgroup /app/data \
+    && chown -R appuser:appgroup /app/.venv \
     && chmod -R 755 /app/data
+
+# 切换到非 root 用户
+USER appuser
 
 # 暴露端口（API + gRPC）
 EXPOSE 8000 50051
