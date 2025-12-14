@@ -1,5 +1,9 @@
 """基础接口"""
-from fastapi import APIRouter, HTTPException, status, Request
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, HTTPException, status, Request, Query
+from fastapi.responses import JSONResponse
 
 from src.core.security.auth import jwt_auth
 from src.core.config import settings
@@ -19,13 +23,106 @@ router = APIRouter()
     tags=["基础"]
 )
 async def health_check():
-    from datetime import datetime
     payload = HealthResponse(
         status="healthy",
         version=settings.APP_VERSION,
         timestamp=datetime.now().isoformat()
     )
     return success(payload, message=Messages.QUERY_SUCCESS)
+
+
+@router.get(
+    "/health/detailed",
+    summary="详细健康检查",
+    tags=["基础"],
+    response_model=None,
+)
+async def detailed_health_check(
+    include_details: bool = Query(default=True, description="是否包含详细信息"),
+) -> JSONResponse:
+    """
+    详细健康检查端点
+    
+    返回所有服务组件的健康状态，包括：
+    - 数据库连接
+    - Redis 连接（如启用）
+    - gRPC 服务状态
+    - 熔断器状态
+    - 系统资源使用
+    """
+    from src.core.resilience.health import health_checker, HealthStatus
+    
+    health = await health_checker.check_all()
+    
+    # 根据状态返回不同的 HTTP 状态码
+    if health.status == HealthStatus.HEALTHY:
+        status_code = 200
+    elif health.status == HealthStatus.DEGRADED:
+        status_code = 200  # 降级但仍可用
+    else:
+        status_code = 503  # 服务不可用
+    
+    response_data = health.to_dict()
+    response_data["version"] = settings.APP_VERSION
+    
+    if not include_details:
+        # 简化响应
+        response_data = {
+            "status": health.status.value,
+            "version": settings.APP_VERSION,
+            "timestamp": health.timestamp,
+            "summary": health.summary,
+        }
+    
+    return JSONResponse(content=response_data, status_code=status_code)
+
+
+@router.get(
+    "/health/live",
+    summary="存活检查 (Kubernetes liveness)",
+    tags=["基础"],
+)
+async def liveness_check() -> Dict[str, Any]:
+    """
+    Kubernetes 存活探针端点
+    
+    只检查应用是否存活，不检查依赖服务
+    """
+    from src.core.resilience.health import health_checker
+    
+    is_alive = await health_checker.liveness()
+    
+    if is_alive:
+        return {"status": "alive", "timestamp": datetime.now().isoformat()}
+    
+    return JSONResponse(
+        content={"status": "dead", "timestamp": datetime.now().isoformat()},
+        status_code=503,
+    )
+
+
+@router.get(
+    "/health/ready",
+    summary="就绪检查 (Kubernetes readiness)",
+    tags=["基础"],
+)
+async def readiness_check() -> Dict[str, Any]:
+    """
+    Kubernetes 就绪探针端点
+    
+    检查应用是否准备好接收流量
+    """
+    from src.core.resilience.health import health_checker
+    
+    is_ready = await health_checker.readiness()
+    
+    if is_ready:
+        return {"status": "ready", "timestamp": datetime.now().isoformat()}
+    
+    return JSONResponse(
+        content={"status": "not_ready", "timestamp": datetime.now().isoformat()},
+        status_code=503,
+    )
 
 
 @router.post(

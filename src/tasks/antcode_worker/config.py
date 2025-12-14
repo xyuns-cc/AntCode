@@ -1,6 +1,9 @@
 """
 工作节点配置模块
+
+提供节点配置管理，支持同步和异步文件操作。
 """
+import asyncio
 import os
 import hashlib
 import platform
@@ -11,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+import aiofiles
 import yaml
 
 
@@ -200,10 +204,9 @@ class NodeConfig:
             "start_time": self.start_time.isoformat(),
         }
 
-    def save_to_file(self, path: Optional[Path] = None):
-        """保存配置到文件"""
-        path = path or NODE_CONFIG_FILE
-        config_data = {
+    def _get_config_data(self) -> Dict[str, Any]:
+        """获取配置数据字典（内部方法）"""
+        return {
             "name": self.name,
             "port": self.port,
             "region": self.region,
@@ -222,12 +225,27 @@ class NodeConfig:
             "grpc_reconnect_max_delay": self.grpc_reconnect_max_delay,
             "data_dir": self.data_dir,
         }
+
+    def save_to_file(self, path: Optional[Path] = None) -> None:
+        """保存配置到文件（同步版本，用于启动时）"""
+        path = path or NODE_CONFIG_FILE
+        config_data = self._get_config_data()
+        os.makedirs(path.parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False)
 
+    async def save_to_file_async(self, path: Optional[Path] = None) -> None:
+        """保存配置到文件（异步版本，用于运行时更新）"""
+        path = path or NODE_CONFIG_FILE
+        config_data = self._get_config_data()
+        yaml_content = yaml.dump(config_data, allow_unicode=True, default_flow_style=False)
+        os.makedirs(path.parent, exist_ok=True)
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(yaml_content)
+
     @classmethod
     def load_from_file(cls, path: Optional[Path] = None) -> "NodeConfig":
-        """从文件加载配置"""
+        """从文件加载配置（同步版本，用于启动时）"""
         path = path or NODE_CONFIG_FILE
         if not path.exists():
             return cls()
@@ -238,6 +256,22 @@ class NodeConfig:
             return cls(**{k: v for k, v in config_data.items() if v is not None})
         except Exception as e:
             print(f"[Warning] Failed to load config: {e}")
+            return cls()
+
+    @classmethod
+    async def load_from_file_async(cls, path: Optional[Path] = None) -> "NodeConfig":
+        """从文件加载配置（异步版本，用于运行时重载）"""
+        path = path or NODE_CONFIG_FILE
+        if not path.exists():
+            return cls()
+
+        try:
+            async with aiofiles.open(path, "r", encoding="utf-8") as f:
+                content = await f.read()
+            config_data = yaml.safe_load(content) or {}
+            return cls(**{k: v for k, v in config_data.items() if v is not None})
+        except Exception as e:
+            print(f"[Warning] Failed to load config async: {e}")
             return cls()
 
 

@@ -1,11 +1,14 @@
 """项目管理接口"""
-from fastapi import APIRouter, Depends, Form, File, Query, status, HTTPException, Body, Request
+from typing import Any, Optional, Union
+
+from fastapi import APIRouter, Depends, Form, File, Query, status, HTTPException, Body, Request, UploadFile
 from loguru import logger
 
 from src.core.security.auth import get_current_user_id, get_current_user
 from src.core.exceptions import ProjectNotFoundException
 from src.core.response import success as success_response, page as page_response, Messages
 from src.models.enums import ProjectType
+from src.models.project import Project
 from src.schemas.common import BaseResponse, PaginationResponse
 from src.services.audit import audit_service
 from src.models.audit_log import AuditAction
@@ -24,52 +27,52 @@ from src.utils.api_optimizer import fast_response, monitor_performance, optimize
 project_router = APIRouter()
 
 
-def create_project_response(project) -> ProjectResponse:
+def create_project_response(project: Project) -> ProjectResponse:
     """构建项目响应（兼容旧代码）"""
     return ProjectResponseBuilder.build_detail(project)
 
 
 async def get_project_create_form(
-    name=Form(..., min_length=3, max_length=50),
-    description=Form(None, max_length=500),
-    type=Form(...),
-    tags=Form(None),
-    dependencies=Form(None),
-    venv_scope=Form(...),
-    shared_venv_key=Form(None),
-    interpreter_source=Form("mise"),
-    python_version=Form(None),
-    python_bin=Form(None),
+    name: str = Form(..., min_length=3, max_length=50),
+    description: Optional[str] = Form(None, max_length=500),
+    type: str = Form(...),
+    tags: Optional[str] = Form(None),
+    dependencies: Optional[str] = Form(None),
+    venv_scope: str = Form(...),
+    shared_venv_key: Optional[str] = Form(None),
+    interpreter_source: str = Form("mise"),
+    python_version: Optional[str] = Form(None),
+    python_bin: Optional[str] = Form(None),
     # 节点环境参数
-    env_location=Form("local"),
-    node_id=Form(None),
-    use_existing_env=Form(None),
-    existing_env_name=Form(None),
-    env_name=Form(None),
-    env_description=Form(None),
+    env_location: str = Form("local"),
+    node_id: Optional[str] = Form(None),
+    use_existing_env: Optional[Union[bool, str]] = Form(None),
+    existing_env_name: Optional[str] = Form(None),
+    env_name: Optional[str] = Form(None),
+    env_description: Optional[str] = Form(None),
     # 文件项目参数
-    entry_point=Form(None, max_length=255),
-    runtime_config=Form(None),
-    environment_vars=Form(None),
-    engine=Form("requests"),
-    target_url=Form(None, max_length=2000),
-    url_pattern=Form(None, max_length=500),
-    request_method=Form("GET"),
-    callback_type=Form("list"),
-    extraction_rules=Form(None),
-    pagination_config=Form(None),
-    max_pages=Form(10, ge=1, le=1000),
-    start_page=Form(1, ge=1),
-    request_delay=Form(1000, ge=0),
-    priority=Form(0),
-    headers=Form(None),
-    cookies=Form(None),
-    language=Form("python", max_length=50),
-    version=Form("1.0.0", max_length=20),
-    code_entry_point=Form(None, max_length=255),
-    documentation=Form(None),
-    code_content=Form(None),
-):
+    entry_point: Optional[str] = Form(None, max_length=255),
+    runtime_config: Optional[str] = Form(None),
+    environment_vars: Optional[str] = Form(None),
+    engine: str = Form("requests"),
+    target_url: Optional[str] = Form(None, max_length=2000),
+    url_pattern: Optional[str] = Form(None, max_length=500),
+    request_method: str = Form("GET"),
+    callback_type: str = Form("list"),
+    extraction_rules: Optional[str] = Form(None),
+    pagination_config: Optional[str] = Form(None),
+    max_pages: int = Form(10, ge=1, le=1000),
+    start_page: int = Form(1, ge=1),
+    request_delay: int = Form(1000, ge=0),
+    priority: int = Form(0),
+    headers: Optional[str] = Form(None),
+    cookies: Optional[str] = Form(None),
+    language: str = Form("python", max_length=50),
+    version: str = Form("1.0.0", max_length=20),
+    code_entry_point: Optional[str] = Form(None, max_length=255),
+    documentation: Optional[str] = Form(None),
+    code_content: Optional[str] = Form(None),
+) -> ProjectCreateFormRequest:
     # 处理 use_existing_env 布尔值
     use_existing_env_bool = False
     if use_existing_env is not None:

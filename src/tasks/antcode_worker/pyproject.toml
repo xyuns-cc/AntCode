@@ -35,4 +35,7 @@ dependencies = [
     # 序列化
     "ujson>=5.8.0",
     "msgpack>=1.0.0",
+
+    # 异步文件操作
+    "aiofiles>=24.1.0",
 ]
