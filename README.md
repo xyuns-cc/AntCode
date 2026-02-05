@@ -138,10 +138,9 @@ cd web/antcode-frontend && npm run dev
 |------|------|------|
 | 前端 | http://localhost:3000 | Web 管理界面 |
 | 后端 API | http://localhost:8000 | REST API |
-| API 文档 | http://localhost:8000/docs | Swagger 文档 |
 | gRPC | localhost:50051 | Worker 通信端口 |
 
-默认管理员账号：`admin` / `admin`
+默认管理员账号：`admin` / `Admin123!`
 
 ## 🐳 Docker 部署
 
@@ -230,7 +229,7 @@ REDIS_URL=redis://localhost:6379/0
 ```bash
 # 后端
 uv run python -m src.main                    # 启动后端
-uv run uvicorn src:app --reload --port 8000  # 开发模式
+uv run uvicorn src.asgi:app --reload --port 8000  # 开发模式
 
 # 前端
 cd web/antcode-frontend

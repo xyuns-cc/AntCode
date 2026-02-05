@@ -2,7 +2,7 @@
 传输协议抽象基类
 
 定义了 Worker 与 Master 通信的标准接口。
-所有具体传输实现（gRPC、HTTP、WebSocket）都必须实现此接口。
+所有具体传输实现（gRPC、HTTP）都必须实现此接口。
 
 Requirements: 11.2
 """
@@ -41,7 +41,7 @@ class TransportProtocol(ABC):
     传输协议抽象接口
     
     定义了 Worker 与 Master 通信的标准接口。
-    具体实现可以是 gRPC、HTTP 或 WebSocket。
+    具体实现可以是 gRPC 或 HTTP。
     
     设计原则：
     1. 协议无关 - 业务逻辑不依赖具体传输协议
@@ -57,7 +57,7 @@ class TransportProtocol(ABC):
         建立连接
         
         Args:
-            config: 连接配置，包含 master_url、node_id、api_key 等
+            config: 连接配置，包含 master_url、node_id、api_key、access_token 等
             
         Returns:
             是否连接成功

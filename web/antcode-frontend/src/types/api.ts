@@ -64,6 +64,7 @@ export interface BackendLoginResponse {
   user_id: string  // public_id
   username: string
   is_admin: boolean
+  is_super_admin: boolean
 }
 
 export interface User {
@@ -72,9 +73,11 @@ export interface User {
   email?: string
   is_active: boolean
   is_admin: boolean
+  is_super_admin?: boolean
   created_at: string
   updated_at: string
   last_login_at?: string
+  is_online?: boolean
 }
 
 // Token 信息

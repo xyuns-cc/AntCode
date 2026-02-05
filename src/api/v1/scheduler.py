@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 def create_task_response(task) -> TaskResponse:
-    """构建任务响应（兼容旧代码）"""
+    """构建任务响应"""
     return TaskResponseBuilder.build_detail(task)
 
 
@@ -51,7 +51,6 @@ async def create_task(task_data: TaskCreate, current_user=Depends(get_current_us
             project_type=ProjectType(project.type),
             user_id=current_user.user_id,
             internal_project_id=project.id,  # 传递内部 id
-            node_id=task_data.node_id  # 传递节点 ID
         )
 
         return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
@@ -323,20 +322,29 @@ async def cancel_execution(
     cancelled = False
 
     # 如果任务正在节点上运行，发送取消指令
-    if execution.status == TaskStatus.RUNNING and execution.node_id:
+    if execution.status in (TaskStatus.RUNNING, TaskStatus.QUEUED) and execution.node_id:
         try:
-            from src.api.v1.websocket_nodes import cancel_task_via_websocket
             from src.services.nodes.node_service import node_service
+            from src.services.nodes import node_task_dispatcher
+            from src.services.sessions.session_service import user_session_service
+            from src.core.security.auth import jwt_auth
 
-            node = await node_service.get_node_by_id(execution.node_id)
+            node = await node_service.get_node_by_internal_id(execution.node_id)
             if node:
-                cancelled = await cancel_task_via_websocket(
-                    node_id=node.public_id,
-                    task_id=task.public_id,
-                    execution_id=execution.execution_id
+                session = await user_session_service.get_or_create_service_session(current_user.user_id)
+                access_token = jwt_auth.create_access_token(
+                    user_id=current_user.user_id,
+                    username=current_user.username,
+                    session_id=session.public_id,
+                    token_type="service",
+                )
+                cancelled = await node_task_dispatcher.cancel_task_on_node(
+                    node=node,
+                    task_id=execution.execution_id,
+                    access_token=access_token,
                 )
                 if cancelled:
-                    logger.info(f"已发送取消指令到节点: {node.name}")
+                    logger.info(f"已发送取消指令到节点: {node.name}, task_id={execution.execution_id}")
         except Exception as e:
             logger.warning(f"发送取消指令失败: {e}")
 
@@ -360,7 +368,7 @@ async def cancel_execution(
 
 @router.get("/executions/{execution_id}/logs/file", response_model=BaseResponse[LogFileResponse])
 async def get_execution_log_file(
-        execution_id: str,  # 支持 public_id
+        execution_id: str,
         log_type: str = Query("output", pattern="^(output|error)$"),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)

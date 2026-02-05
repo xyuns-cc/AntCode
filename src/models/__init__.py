@@ -9,6 +9,7 @@ from src.models.project import Project, ProjectFile, ProjectRule, ProjectCode
 from src.models.monitoring import NodePerformanceHistory, SpiderMetricsHistory, NodeEvent
 from src.models.scheduler import ScheduledTask, TaskExecution
 from src.models.user import User
+from src.models.user_session import UserSession
 from src.models.envs import Interpreter, Venv, ProjectVenvBinding
 from src.models.node import Node, NodeHeartbeat, NodeStatus, UserNodePermission
 from src.models.node_project import NodeProject, NodeProjectFile
@@ -33,6 +34,7 @@ __all__ = [
     "Venv",
     "ProjectVenvBinding",
     "User",
+    "UserSession",
     "ScheduledTask",
     "TaskExecution",
     "NodePerformanceHistory",

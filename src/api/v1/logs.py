@@ -20,6 +20,20 @@ from src.services.websockets.websocket_connection_manager import websocket_manag
 router = APIRouter()
 
 
+def _parse_enum(value, enum_cls, field_name):
+    if value is None:
+        return None
+    if isinstance(value, enum_cls):
+        return value
+    try:
+        return enum_cls(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} 参数无效"
+        )
+
+
 async def _get_raw_log_response(execution_id, execution, log_type, lines):
     try:
         file_path = None
@@ -109,7 +123,7 @@ async def _get_structured_log_response(execution_id, execution, log_type, level,
                             level=LogLevel.INFO,
                             log_type=LogType.STDOUT,
                             execution_id=execution_id,
-                            task_id=execution.task_id,
+                            task_id=getattr(execution, "task_public_id", None),
                             message=line.strip(),
                             source="task_execution"
                         ))
@@ -126,7 +140,7 @@ async def _get_structured_log_response(execution_id, execution, log_type, level,
                             level=LogLevel.ERROR,
                             log_type=LogType.STDERR,
                             execution_id=execution_id,
-                            task_id=execution.task_id,
+                            task_id=getattr(execution, "task_public_id", None),
                             message=line.strip(),
                             source="task_execution"
                         ))
@@ -163,7 +177,7 @@ async def _get_structured_log_response(execution_id, execution, log_type, level,
 
 @router.get("/executions/{execution_id}", response_model=BaseResponse[UnifiedLogResponse])
 async def get_execution_logs(
-        execution_id,  # 支持 public_id 和内部 id
+        execution_id,
         format: str = Query(LogFormat.STRUCTURED),
         log_type: str = Query(None),
         level: str = Query(None),
@@ -172,18 +186,29 @@ async def get_execution_logs(
         current_user=Depends(get_current_user)
 ):
     try:
+        format_value = _parse_enum(format, LogFormat, "format") or LogFormat.STRUCTURED
+        log_type_value = _parse_enum(log_type, LogType, "log_type")
+        level_value = _parse_enum(level, LogLevel, "level")
+
         # 使用增强的权限验证
         execution = await log_security_service.verify_log_access_permission(
             current_user, execution_id, "read"
         )
 
         # 根据格式返回不同的响应
-        if format == LogFormat.RAW:
+        if format_value == LogFormat.RAW:
             # 返回原始文本格式
-            return await _get_raw_log_response(execution_id, execution, log_type, lines)
+            return await _get_raw_log_response(execution_id, execution, log_type_value, lines)
         else:
             # 返回结构化格式
-            return await _get_structured_log_response(execution_id, execution, log_type, level, lines, search)
+            return await _get_structured_log_response(
+                execution_id,
+                execution,
+                log_type_value,
+                level_value,
+                lines,
+                search
+            )
 
     except HTTPException:
         # 重新抛出HTTP异常
@@ -208,7 +233,7 @@ async def get_execution_logs(
 
 @router.get("/executions/{execution_id}/stdout", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stdout_logs(
-        execution_id,  # 支持 public_id 和内部 id
+        execution_id,
         format: str = Query(LogFormat.RAW),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
@@ -225,7 +250,7 @@ async def get_stdout_logs(
 
 @router.get("/executions/{execution_id}/stderr", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stderr_logs(
-        execution_id,  # 支持 public_id 和内部 id
+        execution_id,
         format: str = Query(LogFormat.RAW),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
@@ -242,7 +267,7 @@ async def get_stderr_logs(
 
 @router.get("/executions/{execution_id}/errors", response_model=BaseResponse[UnifiedLogResponse])
 async def get_error_logs(
-        execution_id,  # 支持 public_id 和内部 id
+        execution_id,
         format: str = Query(LogFormat.STRUCTURED),
         lines: int = Query(None, ge=1, le=10000),
         search: str = Query(None),
@@ -261,12 +286,12 @@ async def get_error_logs(
 
 @router.get("/executions/{execution_id}/raw", response_model=BaseResponse[UnifiedLogResponse])
 async def get_raw_logs(
-        execution_id,  # 支持 public_id 和内部 id
+        execution_id,
         log_type: str = Query(None),
         lines: int = Query(None, ge=1, le=10000),
         current_user=Depends(get_current_user)
 ):
-    """获取原始格式的日志（兼容旧的/file接口）"""
+    """获取原始格式的日志"""
     return await get_execution_logs(
         execution_id=execution_id,
         format=LogFormat.RAW,
@@ -278,7 +303,7 @@ async def get_raw_logs(
 
 @router.get("/tasks/{task_id}", response_model=BaseResponse[LogListResponse])
 async def get_task_logs(
-        task_id,  # 支持 public_id 和内部 id
+        task_id,
         page: int = Query(1, ge=1),
         size: int = Query(50, ge=1, le=1000),
         log_type: str = Query(None),

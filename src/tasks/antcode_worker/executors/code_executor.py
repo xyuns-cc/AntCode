@@ -45,7 +45,7 @@ class CodeExecutor(BaseExecutor):
                 result.exit_code = exit_code
                 result.finished_at = datetime.now().isoformat()
                 if exit_code == 0:
-                    result.status = ExecutionStatus.COMPLETED
+                    result.status = ExecutionStatus.SUCCESS
                 elif exit_code == 124:
                     result.status = ExecutionStatus.TIMEOUT
                     result.error_message = f"执行超时 ({context.timeout}s)"

@@ -2,7 +2,6 @@ import { globalNotification, type NoticeType, showNotification as showNotificati
 
 export type { NoticeType }
 
-/** @deprecated Use globalMessage or globalNotification from useMessage */
 export function showNotification(
   type: NoticeType,
   message: string,
@@ -10,11 +9,6 @@ export function showNotification(
   options?: { placement?: string; duration?: number; key?: string; durationMs?: number; meta?: Record<string, unknown> }
 ) {
   return showNotificationFromHook(type, message, description, options)
-}
-
-/** @deprecated Configuration is handled by App component */
-export function configureNotifications(_config: unknown) {
-  console.warn('configureNotifications is deprecated')
 }
 
 export const notification = {

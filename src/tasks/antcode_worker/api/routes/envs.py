@@ -20,6 +20,7 @@ class EnvInfo(BaseModel):
     name: str
     python_version: Optional[str] = None
     path: str
+    python_bin: str
     packages_count: int = 0
     key: Optional[str] = None
     description: Optional[str] = None
@@ -48,7 +49,7 @@ class PackageListResponse(BaseModel):
 class InterpreterInfo(BaseModel):
     """解释器信息 - 与主控格式一致"""
     version: str
-    path: str
+    python_bin: str
     install_dir: str = ""
     source: str = "local"
     is_available: bool = True
@@ -259,21 +260,16 @@ async def list_interpreters(source: Optional[str] = Query(None, description="来
     # 转换为标准格式
     result = []
     for interp in interpreters:
-        # 兼容不同字段名: python_bin / python_executable / path
-        python_path = (
-            interp.get("python_bin")
-            or interp.get("python_executable")
-            or interp.get("path", "")
-        )
-        # 安装目录：优先使用 install_dir，否则从 python_path 推导
+        python_bin = interp.get("python_bin", "")
+        # 安装目录：优先使用 install_dir，否则从 python_bin 推导
         install_dir = interp.get("install_dir", "")
-        if not install_dir and python_path:
+        if not install_dir and python_bin:
             import os
             # 从 python 路径推导安装目录 (去掉 bin/python)
-            install_dir = os.path.dirname(os.path.dirname(python_path))
+            install_dir = os.path.dirname(os.path.dirname(python_bin))
         result.append(InterpreterInfo(
             version=interp.get("version", "unknown"),
-            path=python_path,
+            python_bin=python_bin,
             install_dir=install_dir,
             source=interp.get("source", "local"),
             is_available=interp.get("is_available", True),
@@ -291,7 +287,7 @@ async def register_local_interpreter(python_bin: str = Body(..., embed=True)):
         result = await local_env_service.register_local_interpreter(python_bin)
         return InterpreterInfo(
             version=result.get("version", "unknown"),
-            path=result.get("path", python_bin),
+            python_bin=result.get("python_bin", python_bin),
             source="local",
             is_available=True,
             created_at=result.get("created_at"),
@@ -323,7 +319,7 @@ async def uninstall_interpreter(version: str, source: str = Query("local", descr
                 detail=f"解释器 {version} (source={source}) 不存在"
             )
 
-        python_bin = target.get("path")
+        python_bin = target.get("python_bin")
         await local_env_service.unregister_local_interpreter(python_bin)
         return None
     except HTTPException:

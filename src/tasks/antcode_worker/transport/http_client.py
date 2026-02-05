@@ -82,10 +82,16 @@ class HttpClient(TransportProtocol):
     async def connect(self, config: ConnectionConfig) -> bool:
         """建立 HTTP 连接"""
         self._config = config
+
+        if not config.access_token:
+            raise ConnectionError("缺少访问令牌")
         
         try:
             client = await self._get_http_client()
-            response = await client.get(f"{config.master_url}/api/v1/health")
+            response = await client.get(
+                f"{config.master_url}/api/v1/health",
+                headers={"Authorization": f"Bearer {config.access_token}"},
+            )
             
             if response.status_code != 200:
                 raise ConnectionError(f"连接失败: HTTP {response.status_code}")
@@ -294,7 +300,7 @@ class HttpClient(TransportProtocol):
         nonce = uuid.uuid4().hex[:16]
 
         headers = {
-            "Authorization": f"Bearer {self._config.api_key}",
+            "Authorization": f"Bearer {self._config.access_token}",
             "X-Timestamp": str(timestamp),
             "X-Nonce": nonce,
             "X-Node-ID": self._config.node_id or "",

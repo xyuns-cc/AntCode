@@ -182,23 +182,28 @@ class TaskResponseBuilder:
         """构建任务详情响应"""
         from src.schemas.scheduler import TaskResponse
 
-        project_public_id = getattr(task, 'project_public_id', None) or str(task.project_id)
-        created_by_public_id = getattr(task, 'created_by_public_id', None) or str(task.user_id)
+        project_public_id = getattr(task, "project_public_id", None)
+        created_by_public_id = getattr(task, "created_by_public_id", None)
+
+        if not project_public_id:
+            raise ValueError("缺少 project_public_id")
+        if not created_by_public_id:
+            raise ValueError("缺少 created_by_public_id")
 
         # 获取执行策略相关字段
         execution_strategy = getattr(task, 'execution_strategy', None)
         if execution_strategy and hasattr(execution_strategy, 'value'):
             execution_strategy = execution_strategy.value
 
-        specified_node_id = getattr(task, 'specified_node_id', None)
-        specified_node_name = getattr(task, 'specified_node_name', None)
+        specified_node_id = getattr(task, "specified_node_public_id", None)
+        specified_node_name = getattr(task, "specified_node_name", None)
 
         # 项目执行配置
         project_execution_strategy = getattr(task, 'project_execution_strategy', None)
         if project_execution_strategy and hasattr(project_execution_strategy, 'value'):
             project_execution_strategy = project_execution_strategy.value
-        project_bound_node_id = getattr(task, 'project_bound_node_id', None)
-        project_bound_node_name = getattr(task, 'project_bound_node_name', None)
+        project_bound_node_id = getattr(task, "project_bound_node_public_id", None)
+        project_bound_node_name = getattr(task, "project_bound_node_name", None)
 
         return TaskResponse.model_construct(
             id=task.public_id,
@@ -220,15 +225,12 @@ class TaskResponseBuilder:
             created_by_username=getattr(task, 'created_by_username', None),
             # 执行策略字段
             execution_strategy=execution_strategy,
-            specified_node_id=str(specified_node_id) if specified_node_id else None,
+            specified_node_id=specified_node_id,
             specified_node_name=specified_node_name,
             # 项目执行配置
             project_execution_strategy=project_execution_strategy,
-            project_bound_node_id=str(project_bound_node_id) if project_bound_node_id else None,
+            project_bound_node_id=project_bound_node_id,
             project_bound_node_name=project_bound_node_name,
-            # 兼容旧字段
-            node_id=getattr(task, 'node_public_id', None),
-            node_name=getattr(task, 'node_name', None),
         )
 
     @staticmethod

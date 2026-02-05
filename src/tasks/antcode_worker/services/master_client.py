@@ -67,6 +67,7 @@ class MasterClient:
     def __init__(self):
         self.master_url: Optional[str] = None
         self.api_key: Optional[str] = None
+        self.access_token: Optional[str] = None
         self.secret_key: Optional[str] = None
         self.node_id: Optional[str] = None
         self.machine_code: Optional[str] = None
@@ -136,7 +137,7 @@ class MasterClient:
         nonce = uuid.uuid4().hex[:16]
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.access_token}",
             "X-Timestamp": str(timestamp),
             "X-Nonce": nonce,
             "X-Node-ID": self.node_id or "",
@@ -193,16 +194,23 @@ class MasterClient:
         return None
 
     async def connect(self, master_url: str, machine_code: str, api_key: str,
-                      secret_key: str = None, node_id: str = None):
+                      access_token: str, secret_key: str = None, node_id: str = None):
         self.master_url = master_url.rstrip("/")
         self.machine_code = machine_code
         self.api_key = api_key
+        self.access_token = access_token
         self.secret_key = secret_key
         self.node_id = node_id
 
+        if not self.access_token:
+            raise ConnectionError("缺少访问令牌")
+
         try:
             client = await self._get_http_client()
-            response = await client.get(f"{self.master_url}/api/v1/health")
+            response = await client.get(
+                f"{self.master_url}/api/v1/health",
+                headers={"Authorization": f"Bearer {self.access_token}"},
+            )
             if response.status_code != 200:
                 raise ConnectionError(f"连接失败: HTTP {response.status_code}")
         except httpx.ConnectError as e:
@@ -232,6 +240,7 @@ class MasterClient:
         self._connected = False
         self.master_url = None
         self.api_key = None
+        self.access_token = None
         self.secret_key = None
 
         logger.info("已断开连接")
@@ -296,7 +305,7 @@ class MasterClient:
                 await asyncio.sleep(5)
 
     async def send_heartbeat(self) -> bool:
-        if not self.master_url or not self.node_id:
+        if not self.master_url or not self.node_id or not self.api_key or not self.access_token:
             return False
 
         try:
@@ -401,7 +410,7 @@ class MasterClient:
             logger.debug(f"单条日志发送异常: {e}")
 
     async def report_log_line(self, execution_id: str, log_type: str, content: str) -> bool:
-        if not self.master_url or not self.api_key:
+        if not self.master_url or not self.api_key or not self.access_token:
             return False
 
         async with self._log_lock:
@@ -413,7 +422,7 @@ class MasterClient:
 
     async def report_task_status(self, execution_id: str, status: str,
                                  exit_code: int = None, error_message: str = None) -> bool:
-        if not self.master_url or not self.api_key:
+        if not self.master_url or not self.api_key or not self.access_token:
             return False
 
         await self._flush_logs()
@@ -428,7 +437,7 @@ class MasterClient:
 
     async def report_execution_heartbeat(self, execution_id: str) -> bool:
         """上报任务执行心跳"""
-        if not self.master_url or not self.api_key:
+        if not self.master_url or not self.api_key or not self.access_token:
             return False
 
         response = await self._request_with_retry(
@@ -506,7 +515,7 @@ class MasterClient:
         return 0
 
     async def fetch_pending_tasks(self) -> list:
-        if not self.master_url or not self.api_key:
+        if not self.master_url or not self.api_key or not self.access_token:
             return []
 
         try:
@@ -521,7 +530,7 @@ class MasterClient:
             return []
 
     async def sync_project_from_master(self, master_project_id: str) -> Optional[Dict[str, Any]]:
-        if not self.master_url or not self.api_key:
+        if not self.master_url or not self.api_key or not self.access_token:
             return None
 
         try:

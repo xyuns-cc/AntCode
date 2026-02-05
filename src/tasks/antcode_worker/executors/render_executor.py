@@ -151,7 +151,7 @@ class RenderExecutor(BaseExecutor):
                     timeout=context.timeout or self.default_timeout
                 )
 
-                result.status = ExecutionStatus.COMPLETED
+                result.status = ExecutionStatus.SUCCESS
                 result.data = crawl_result if isinstance(crawl_result, dict) else {"result": crawl_result}
 
             except asyncio.TimeoutError:
@@ -186,7 +186,7 @@ class RenderExecutor(BaseExecutor):
                 module_name="render_spider_module",
             )
 
-        # 否则使用方法检查（兼容旧代码）
+        # 否则使用方法检查
         return await self._load_module_class(
             project_path=project_path,
             entry_point=entry_point,

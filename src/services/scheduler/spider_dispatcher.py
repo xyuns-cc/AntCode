@@ -12,6 +12,22 @@ from src.services.nodes.node_dispatcher import node_task_dispatcher
 class SpiderTaskDispatcher:
     """爬虫任务调度器，通过 HTTP/WebSocket 将任务分发到工作节点"""
 
+    async def _build_access_token(self, user_id: int) -> Optional[str]:
+        from src.services.users.user_service import user_service
+        from src.core.security.auth import jwt_auth
+        from src.services.sessions.session_service import user_session_service
+
+        user = await user_service.get_user_by_id(user_id)
+        if not user:
+            return None
+        session = await user_session_service.get_or_create_service_session(user.id)
+        return jwt_auth.create_access_token(
+            user_id=user.id,
+            username=user.username,
+            session_id=session.public_id,
+            token_type="service",
+        )
+
     async def submit_rule_task(
         self,
         project,
@@ -34,9 +50,14 @@ class SpiderTaskDispatcher:
             **(params or {}),
         }
 
+        access_token = await self._build_access_token(project.user_id)
+        if not access_token:
+            return {"success": False, "error": "用户不存在或无权限"}
+
         result = await node_task_dispatcher.dispatch_task(
             project_id=project.public_id,
             execution_id=execution_id,
+            access_token=access_token,
             params=task_params,
             project_type="rule",
             require_render=require_render,
@@ -86,8 +107,13 @@ class SpiderTaskDispatcher:
             }
             tasks.append(task_item)
 
+        access_token = await self._build_access_token(project.user_id)
+        if not access_token:
+            return {"success": False, "error": "用户不存在或无权限"}
+
         return await node_task_dispatcher.dispatch_batch(
             tasks=tasks,
+            access_token=access_token,
             node_id=node_id,
             require_render=require_render,
         )

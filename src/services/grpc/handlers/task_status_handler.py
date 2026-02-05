@@ -18,12 +18,8 @@ class TaskStatusHandler(MessageHandler):
     
     处理节点发送的任务状态更新：
     1. 更新数据库中的执行记录
-    2. 任务完成时触发后续钩子
     """
-    
-    # 终态状态列表
-    TERMINAL_STATUSES = {"success", "completed", "failed", "error", "timeout", "cancelled"}
-    
+
     async def handle(self, message: TaskStatus, context: NodeContext) -> Optional[Any]:
         """处理任务状态消息
         
@@ -52,16 +48,7 @@ class TaskStatusHandler(MessageHandler):
                 exit_code=exit_code,
                 error_message=error_message,
             )
-            
-            # 如果是终态，触发后续钩子
-            if status.lower() in self.TERMINAL_STATUSES:
-                await self._trigger_post_execution_hooks(
-                    execution_id=execution_id,
-                    status=status,
-                    exit_code=exit_code,
-                    error_message=error_message,
-                )
-            
+
             return None
             
         except Exception as e:
@@ -128,9 +115,7 @@ class TaskStatusHandler(MessageHandler):
             status_map = {
                 "running": TaskStatusEnum.RUNNING,
                 "success": TaskStatusEnum.SUCCESS,
-                "completed": TaskStatusEnum.SUCCESS,
                 "failed": TaskStatusEnum.FAILED,
-                "error": TaskStatusEnum.FAILED,
                 "timeout": TaskStatusEnum.TIMEOUT,
                 "cancelled": TaskStatusEnum.CANCELLED,
             }
@@ -147,7 +132,7 @@ class TaskStatusHandler(MessageHandler):
                 execution.error_message = error_message
             
             # 如果是终态，设置结束时间
-            if status.lower() in self.TERMINAL_STATUSES:
+            if status.lower() in {"success", "failed", "timeout", "cancelled"}:
                 now = datetime.now(timezone.utc)
                 execution.end_time = now
                 if execution.start_time:
@@ -161,50 +146,6 @@ class TaskStatusHandler(MessageHandler):
             
         except Exception as e:
             logger.error(f"直接更新数据库失败: {e}")
-    
-    async def _trigger_post_execution_hooks(
-        self,
-        execution_id: str,
-        status: str,
-        exit_code: Optional[int],
-        error_message: Optional[str],
-    ) -> None:
-        """触发任务完成后的钩子
-        
-        Args:
-            execution_id: 执行 ID
-            status: 状态
-            exit_code: 退出码
-            error_message: 错误消息
-        """
-        try:
-            # 获取执行记录和关联任务
-            from src.models.scheduler import TaskExecution, ScheduledTask
-            
-            execution = await TaskExecution.get_or_none(execution_id=execution_id)
-            if not execution:
-                return
-            
-            task = await ScheduledTask.get_or_none(id=execution.task_id)
-            if not task:
-                return
-            
-            # 更新任务统计
-            if status.lower() in {"success", "completed"}:
-                task.success_count = (task.success_count or 0) + 1
-            elif status.lower() in {"failed", "error", "timeout"}:
-                task.failure_count = (task.failure_count or 0) + 1
-            
-            task.last_run_time = datetime.now()
-            await task.save()
-            
-            logger.debug(f"任务统计已更新: {task.name}")
-            
-            # TODO: 触发其他后续钩子（如通知、重试等）
-            # 这里可以扩展更多的后续处理逻辑
-            
-        except Exception as e:
-            logger.error(f"触发后续钩子失败: {e}")
 
 
 # 全局处理器实例

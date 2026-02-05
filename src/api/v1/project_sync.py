@@ -6,6 +6,7 @@ from typing import Optional
 from loguru import logger
 
 from src.core.security.node_auth import verify_node_request_with_signature
+from src.core.security.auth import get_current_user
 from src.core.response import success as success_response
 from src.services.nodes.node_project_service import node_project_service
 
@@ -32,7 +33,8 @@ class SyncStatusRequest(BaseModel):
 @router.post("/callback")
 async def sync_callback(
     request: SyncCallbackRequest,
-    auth_info: dict = Depends(verify_node_request_with_signature)
+    auth_info: dict = Depends(verify_node_request_with_signature),
+    current_user=Depends(get_current_user)
 ):
     """同步完成回调（HMAC签名验证）"""
     from src.models import Node
@@ -96,7 +98,8 @@ async def sync_callback(
 @router.get("/status/{project_public_id}")
 async def get_sync_status(
     project_public_id: str,
-    auth_info: dict = Depends(verify_node_request_with_signature)
+    auth_info: dict = Depends(verify_node_request_with_signature),
+    current_user=Depends(get_current_user)
 ):
     """查询同步状态（HMAC签名验证）"""
     from src.models import Node
@@ -132,7 +135,8 @@ async def get_sync_status(
 
 @router.get("/statistics")
 async def get_sync_statistics(
-    auth_info: dict = Depends(verify_node_request_with_signature)
+    auth_info: dict = Depends(verify_node_request_with_signature),
+    current_user=Depends(get_current_user)
 ):
     """获取同步统计（HMAC签名验证）"""
     from src.models import Node
@@ -146,4 +150,3 @@ async def get_sync_statistics(
     except Exception as e:
         logger.error(f"统计获取失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-

@@ -90,9 +90,9 @@ USER appuser
 # 暴露端口（API + gRPC）
 EXPOSE 8000 50051
 
-# 健康检查
+# 健康检查（需要鉴权：脚本会缓存 token，避免频繁登录）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+    CMD python scripts/healthcheck.py || exit 1
 
 # 启动命令
 CMD ["python", "-m", "src.main"]

@@ -20,6 +20,7 @@ import {
   DeleteOutlined,
   ReloadOutlined,
   KeyOutlined,
+  LogoutOutlined,
   UserOutlined,
   TeamOutlined,
   SearchOutlined
@@ -319,6 +320,23 @@ const UserManagement: React.FC = () => {
     }
   }
 
+  // 踢下线（仅超级管理员）
+  const handleKickUser = async (userId: string) => {
+    try {
+      const response = await apiClient.post<ApiResponse<{ revoked_sessions: number }>>(`/api/v1/users/${userId}/kick`)
+      if (response.data.success) {
+        fetchUsers({
+          page: pagination.current,
+          size: pagination.pageSize,
+          sortField,
+          sortOrder
+        })
+      }
+    } catch {
+      // 错误由拦截器处理
+    }
+  }
+
   // 批量删除用户
   const handleBatchDelete = () => {
     if (selectedRowKeys.length === 0) return
@@ -326,7 +344,7 @@ const UserManagement: React.FC = () => {
     // 过滤掉当前用户和管理员
     const deletableKeys = selectedRowKeys.filter(key => {
       const user = users.find(u => u.id === key)
-      return user && !user.is_admin && String(user.id) !== String(currentUser?.user_id)
+      return user && !user.is_admin && String(user.id) !== String(currentUser?.id)
     })
 
     if (deletableKeys.length === 0) {
@@ -413,11 +431,11 @@ const UserManagement: React.FC = () => {
             <span>{text}</span>
             {record.is_admin && (
               <Tag 
-                color="gold"
+                color={record.is_super_admin ? 'red' : 'gold'}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
               >
                 <TeamOutlined style={{ fontSize: 12 }} />
-                <span>管理员</span>
+                <span>{record.is_super_admin ? '超级管理员' : '管理员'}</span>
               </Tag>
             )}
           </Space>
@@ -448,6 +466,17 @@ const UserManagement: React.FC = () => {
       )
     },
     {
+      title: '在线',
+      dataIndex: 'is_online',
+      key: 'is_online',
+      width: 80,
+      render: (isOnline: boolean) => (
+        <Tag color={isOnline ? 'success' : 'default'}>
+          {isOnline ? '在线' : '离线'}
+        </Tag>
+      )
+    },
+    {
       title: () => (
         <span 
           style={{ cursor: 'pointer' }} 
@@ -471,7 +500,7 @@ const UserManagement: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 150,
+      width: 190,
       fixed: 'right',
       render: (_, record: User) => (
         <Space>
@@ -501,6 +530,23 @@ const UserManagement: React.FC = () => {
               }}
             />
           </Tooltip>
+          {currentUser?.is_super_admin && !record.is_super_admin && String(record.id) !== String(currentUser?.id) && (
+            <Popconfirm
+              title="确认踢下线"
+              description={`确定要踢下线用户 "${record.username}" 吗？`}
+              onConfirm={() => handleKickUser(record.id)}
+              okText="确定"
+              cancelText="取消"
+            >
+              <Tooltip title="踢下线" placement="top">
+                <Button
+                  type="text"
+                  danger
+                  icon={<LogoutOutlined />}
+                />
+              </Tooltip>
+            </Popconfirm>
+          )}
           {String(record.id) !== String(currentUser?.id) && (
             <Popconfirm
               title="确认删除"
@@ -618,8 +664,8 @@ const UserManagement: React.FC = () => {
             onChange: (keys) => setSelectedRowKeys(keys),
             getCheckboxProps: (record: User) => ({
               // 禁止选择自己和管理员
-              disabled: record.is_admin || String(record.id) === String(currentUser?.user_id),
-              title: record.is_admin ? '不能删除管理员' : (String(record.id) === String(currentUser?.user_id) ? '不能删除自己' : undefined)
+              disabled: record.is_admin || String(record.id) === String(currentUser?.id),
+              title: record.is_admin ? '不能删除管理员' : (String(record.id) === String(currentUser?.id) ? '不能删除自己' : undefined)
             })
           }}
           pagination={{
@@ -690,7 +736,7 @@ const UserManagement: React.FC = () => {
             name="password"
             rules={[
               { required: true, message: '请输入密码' },
-              { min: 6, message: '密码至少6个字符' }
+              { min: 8, message: '密码长度至少 8 位' }
             ]}
           >
             <Input.Password placeholder="请输入密码" />
@@ -845,7 +891,7 @@ const UserManagement: React.FC = () => {
             name="new_password"
             rules={[
               { required: true, message: '请输入新密码' },
-              { min: 6, message: '密码至少6个字符' }
+              { min: 8, message: '密码长度至少 8 位' }
             ]}
           >
             <Input.Password placeholder="请输入新密码" />

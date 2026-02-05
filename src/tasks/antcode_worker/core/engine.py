@@ -221,14 +221,14 @@ class WorkerEngine:
             project_info = await self._project_service.get_project(project_id)
 
         # 如果项目未找到，尝试使用任务数据中的信息重新同步
-        if not project_info and task_data.get("download_url") and task_data.get("api_key"):
+        if not project_info and task_data.get("download_url") and task_data.get("access_token"):
             logger.info(f"任务 {task_id} 项目未找到，尝试重新同步: {project_id}")
             try:
                 project_info = await self._project_service.sync_from_master(
                     master_project_id=project_id,
                     project_name=f"project-{project_id[:8]}",
                     download_url=task_data["download_url"],
-                    api_key=task_data["api_key"],
+                    access_token=task_data["access_token"],
                     entry_point=task_data.get("entry_point"),
                     file_hash=task_data.get("file_hash"),
                 )
@@ -263,7 +263,7 @@ class WorkerEngine:
         if env_name:
             env_info = await self._env_service.get_env(env_name)
             if env_info:
-                return env_info.get("python_path", "python")
+                return env_info.get("python_bin", "python")
         return "python"
 
     async def _heartbeat_loop(self, execution_id: str):
@@ -372,12 +372,18 @@ class WorkerEngine:
                 result = await self._run_executor(task_id, project_id, project_path,
                                                   entry_point, python_executable, task_data)
             else:
-                logger.warning(f"任务 {task_id} 没有项目路径，跳过执行")
-                result = {"task_id": task_id, "execution_id": task_id, "project_id": project_id, 
-                         "status": "skipped", "exit_code": 0}
+                logger.error(f"任务 {task_id} 项目不可用，无法执行")
+                result = {
+                    "task_id": task_id,
+                    "execution_id": task_id,
+                    "project_id": project_id,
+                    "status": "failed",
+                    "exit_code": 1,
+                    "error_message": "项目不可用，无法执行",
+                }
 
             # 4. 更新统计
-            if result["status"] in ("completed", "skipped"):
+            if result["status"] == "success":
                 self._stats["tasks_completed"] += 1
             else:
                 self._stats["tasks_failed"] += 1

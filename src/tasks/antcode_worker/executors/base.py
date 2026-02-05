@@ -16,7 +16,7 @@ from ..core.signals import Signal
 class ExecutionStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
-    COMPLETED = "completed"
+    SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
@@ -66,7 +66,7 @@ class BaseExecutor(ABC):
         self._lock = asyncio.Lock()
         self._running = False
         self._on_log = None
-        self._stats = {"total_executions": 0, "completed": 0, "failed": 0, "cancelled": 0, "timeout": 0}
+        self._stats = {"total_executions": 0, "success": 0, "failed": 0, "cancelled": 0, "timeout": 0}
 
     def set_log_callback(self, callback):
         self._on_log = callback
@@ -264,8 +264,11 @@ class BaseExecutor(ABC):
         result.duration_ms = (time.time() - start_time) * 1000
         self._update_stats(result.status)
         if self.signals:
-            signal = {ExecutionStatus.COMPLETED: Signal.EXECUTION_COMPLETED, ExecutionStatus.FAILED: Signal.EXECUTION_FAILED,
-                     ExecutionStatus.CANCELLED: Signal.TASK_CANCELLED}.get(result.status, Signal.EXECUTION_COMPLETED)
+            signal = {
+                ExecutionStatus.SUCCESS: Signal.EXECUTION_COMPLETED,
+                ExecutionStatus.FAILED: Signal.EXECUTION_FAILED,
+                ExecutionStatus.CANCELLED: Signal.TASK_CANCELLED,
+            }.get(result.status, Signal.EXECUTION_COMPLETED)
             await self.signals.send_catch_log(signal, sender=self, execution_id=context.execution_id, result=result.to_dict())
         return result
 
@@ -278,8 +281,8 @@ class BaseExecutor(ABC):
         pass
 
     def _update_stats(self, status):
-        if status == ExecutionStatus.COMPLETED:
-            self._stats["completed"] += 1
+        if status == ExecutionStatus.SUCCESS:
+            self._stats["success"] += 1
         elif status == ExecutionStatus.FAILED:
             self._stats["failed"] += 1
         elif status == ExecutionStatus.CANCELLED:

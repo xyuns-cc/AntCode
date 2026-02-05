@@ -1,35 +1,7 @@
-"""Application entry point.
+"""src 包。
 
-This module provides the FastAPI application instance created by the bootstrap module.
-
-The application is created lazily to avoid side effects during module imports.
-Use `get_app()` to get the application instance, or access `app` directly
-which will create the application on first access.
+注意：不要在包导入时创建 FastAPI app，避免脚本/迁移等场景导入 `src.*`
+触发大量副作用。ASGI 入口请使用 `src/asgi.py`。
 """
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from fastapi import FastAPI
-
-_app: "FastAPI | None" = None
-
-
-def get_app() -> "FastAPI":
-    """Get or create the FastAPI application instance.
-    
-    Returns:
-        FastAPI: The application instance.
-    """
-    global _app
-    if _app is None:
-        from src.bootstrap import create_app
-        _app = create_app()
-    return _app
-
-
-# For backward compatibility with `from src import app`
-def __getattr__(name: str):
-    if name == "app":
-        return get_app()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = []

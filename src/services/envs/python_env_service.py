@@ -31,7 +31,7 @@ class PythonEnvService:
             logger.warning("未检测到 mise，可安装版本列表返回为空")
             return []
         except Exception as e:
-            # 兼容 OSError: [Errno 2] No such file or directory: 'mise'
+            # 处理 OSError: [Errno 2] No such file or directory: 'mise'
             if "No such file or directory" in str(e) and "mise" in str(e):
                 logger.warning("未检测到 mise，可安装版本列表返回为空")
                 return []

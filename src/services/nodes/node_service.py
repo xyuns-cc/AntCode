@@ -13,11 +13,13 @@ from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.expressions import Q
 
+from src.core.security.auth import jwt_auth
 from src.models import Node, NodeHeartbeat, NodeStatus
 from src.schemas.node import (
     NodeCreateRequest, NodeUpdateRequest, NodeMetrics,
     NodeAggregateStats, NodeRegisterRequest, NodeConnectRequest
 )
+from src.services.users.user_service import user_service
 
 
 def is_safe_host(host: str) -> bool:
@@ -197,20 +199,6 @@ class NodeService:
         await self._check_offline_nodes(nodes)
         return nodes
 
-    async def get_node_by_id(self, node_id) -> Optional[Node]:
-        """根据ID获取节点"""
-        # 尝试作为 public_id
-        node = await Node.filter(public_id=str(node_id)).first()
-        if node:
-            return node
-
-        # 尝试作为内部 ID
-        try:
-            internal_id = int(node_id)
-            return await Node.filter(id=internal_id).first()
-        except (ValueError, TypeError):
-            return None
-
     async def create_node(
         self,
         request: NodeCreateRequest,
@@ -259,7 +247,7 @@ class NodeService:
         request: NodeUpdateRequest
     ) -> Optional[Node]:
         """更新节点"""
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             return None
 
@@ -312,7 +300,7 @@ class NodeService:
         - node: 更新后的节点对象
         - error: 错误信息（如果失败）
         """
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             return {"success": False, "error": "节点不存在"}
 
@@ -358,7 +346,7 @@ class NodeService:
 
     async def delete_node(self, node_id) -> bool:
         """删除节点（级联删除所有关联数据）"""
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             return False
 
@@ -415,8 +403,8 @@ class NodeService:
                 deleted["node_project_files"] = await NodeProjectFile.filter(node_project_id__in=np_ids).delete()
                 deleted["node_projects"] = await NodeProject.filter(id__in=np_ids).delete()
 
-            # 5. 删除节点上的任务及执行记录
-            tasks = await ScheduledTask.filter(node_id=node_internal_id).all()
+            # 5. 删除指定到该节点的任务及执行记录
+            tasks = await ScheduledTask.filter(specified_node_id=node_internal_id).all()
             if tasks:
                 task_ids = [t.id for t in tasks]
                 deleted["task_executions"] = await TaskExecution.filter(task_id__in=task_ids).delete()
@@ -435,10 +423,10 @@ class NodeService:
 
     async def batch_delete_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
         """批量删除节点（级联删除所有关联数据）"""
-        # 解析节点ID（支持public_id和内部ID混合）
+        # 仅支持 public_id
         nodes_to_delete = []
         for node_id in node_ids:
-            node = await self.get_node_by_id(node_id)
+            node = await self.get_node_by_public_id(str(node_id))
             if node:
                 nodes_to_delete.append(node)
 
@@ -536,7 +524,7 @@ class NodeService:
         capabilities: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """处理节点心跳"""
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             logger.warning(f"心跳失败: 节点不存在 {node_id}")
             return False
@@ -594,7 +582,7 @@ class NodeService:
         手动测试节点连接
         成功时会恢复自动心跳检测
         """
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             return {"success": False, "error": "节点不存在"}
 
@@ -752,6 +740,28 @@ class NodeService:
             logger.info(f"节点连接成功: {node.name} ({node.host}:{node.port})")
 
         # 4. 通知节点已连接（使用 v2 API 传递 node_id）
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="缺少用户信息"
+            )
+
+        user = await user_service.get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="用户不存在或已禁用"
+            )
+
+        from src.services.sessions.session_service import user_session_service
+        session = await user_session_service.get_or_create_node_session(user.id, node.public_id)
+        access_token = jwt_auth.create_access_token(
+            user_id=user.id,
+            username=user.username,
+            session_id=session.public_id,
+            token_type="node",
+        )
+
         try:
             async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 await client.post(
@@ -759,11 +769,14 @@ class NodeService:
                     json={
                         "machine_code": request.machine_code,
                         "api_key": node.api_key,
+                        "access_token": access_token,
                         "master_url": master_url,
                         "node_id": node.public_id,
                         "secret_key": node.secret_key,
-                        "use_websocket": False,  # 暂时使用 HTTP
-                    }
+                        "prefer_grpc": bool(settings.GRPC_ENABLED),
+                        "grpc_port": settings.GRPC_PORT,
+                    },
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
         except Exception as e:
             logger.warning(f"通知节点连接状态失败: {e}")
@@ -772,7 +785,7 @@ class NodeService:
 
     async def disconnect_node(self, node_id) -> bool:
         """断开节点连接"""
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             return False
 
@@ -782,7 +795,7 @@ class NodeService:
             async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
                 await client.post(
                     f"{node_url}/node/disconnect",
-                    json={"machine_code": node.api_key[:16] if node.api_key else ""}
+                    json={"machine_code": node.machine_code or ""}
                 )
         except Exception as e:
             logger.warning(f"通知节点断开失败: {e}")
@@ -860,7 +873,7 @@ class NodeService:
 
     async def refresh_node_status(self, node_id) -> Optional[Node]:
         """刷新节点状态，并尝试重新连接未连接的节点"""
-        node = await self.get_node_by_id(node_id)
+        node = await self.get_node_by_public_id(str(node_id))
         if not node:
             return None
 
@@ -884,28 +897,49 @@ class NodeService:
                     if not health_data.get("is_connected", True):
                         try:
                             # 获取节点信息以获取机器码
-                            info_response = await client.get(f"{node_url}/node/info")
-                            if info_response.status_code == 200:
-                                node_info = info_response.json()
-                                machine_code = node_info.get("machine_code")
+	                            info_response = await client.get(f"{node_url}/node/info")
+	                            if info_response.status_code == 200:
+	                                node_info = info_response.json()
+	                                machine_code = node_info.get("machine_code")
 
-                                if machine_code:
-                                    from src.core.config import settings
-                                    master_url = f"http://{settings.HOST}:{settings.PORT}"
+	                                if machine_code:
+	                                    from src.core.config import settings
+	                                    master_url = settings.master_url
 
-                                    # 发送 v2 连接请求
-                                    await client.post(
-                                        f"{node_url}/node/connect/v2",
-                                        json={
-                                            "machine_code": machine_code,
-                                            "api_key": node.api_key,
-                                            "master_url": master_url,
-                                            "node_id": node.public_id,
-                                            "secret_key": node.secret_key,
-                                            "use_websocket": False,
-                                        }
-                                    )
-                                    logger.info(f"已重新连接节点: {node.name}")
+	                                    access_token = None
+	                                    if node.created_by:
+	                                        user = await user_service.get_user_by_id(node.created_by)
+	                                        if user:
+	                                            from src.services.sessions.session_service import user_session_service
+	                                            session = await user_session_service.get_or_create_node_session(
+	                                                user.id,
+	                                                node.public_id,
+	                                            )
+	                                            access_token = jwt_auth.create_access_token(
+	                                                user_id=user.id,
+	                                                username=user.username,
+	                                                session_id=session.public_id,
+	                                                token_type="node",
+	                                            )
+
+	                                    if not access_token:
+	                                        logger.warning(f"节点缺少用户令牌，无法重新连接: {node.name}")
+	                                    else:
+	                                        await client.post(
+	                                            f"{node_url}/node/connect/v2",
+	                                            json={
+	                                                "machine_code": machine_code,
+	                                                "api_key": node.api_key,
+	                                                "access_token": access_token,
+	                                                "master_url": master_url,
+	                                                "node_id": node.public_id,
+	                                                "secret_key": node.secret_key,
+	                                                "prefer_grpc": bool(settings.GRPC_ENABLED),
+	                                                "grpc_port": settings.GRPC_PORT,
+	                                            },
+	                                            headers={"Authorization": f"Bearer {access_token}"}
+	                                        )
+	                                        logger.info(f"已重新连接节点: {node.name}")
                         except Exception as e:
                             logger.warning(f"重新连接节点失败: {e}")
                 else:
@@ -1126,13 +1160,6 @@ class NodeService:
             logger.info(f"节点 {node.name} 手动测试成功，已恢复自动心跳检测")
 
         return is_online
-
-    async def check_all_nodes_health(self) -> Dict[str, Any]:
-        """
-        检查所有节点健康状态（兼容旧接口）
-        新代码请使用 smart_health_check()
-        """
-        return await self.smart_health_check()
 
     # ==================== 节点权限管理 ====================
 
@@ -1511,6 +1538,9 @@ class NodeService:
             }
         }
 
+
+    async def get_node_by_internal_id(self, node_id: int) -> Optional[Node]:
+        return await Node.get_or_none(id=node_id)
 
     async def get_node_by_public_id(self, public_id: str) -> Optional[Node]:
         """根据 public_id 获取节点

@@ -87,7 +87,7 @@ class TaskServiceImpl(ITaskService):
                 logger.debug(f"任务状态上报成功: {execution_id} -> {status}")
                 
                 # 清理已完成任务的缓存
-                if status in ("completed", "failed", "cancelled", "timeout"):
+                if status in ("success", "failed", "cancelled", "timeout"):
                     self._task_status_cache.pop(execution_id, None)
 
             return success

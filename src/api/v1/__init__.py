@@ -12,7 +12,6 @@ from src.api.v1.dashboard import router as dashboard_router
 from src.api.v1.envs import router as envs_router
 from src.api.v1.monitoring import router as monitoring_router
 from src.api.v1.nodes import router as nodes_router
-from src.api.v1.websocket_nodes import router as websocket_nodes_router
 from src.api.v1.system_config import router as system_config_router
 from src.api.v1.alert import router as alert_router
 from src.api.v1.audit import router as audit_router
@@ -33,9 +32,6 @@ v1_router.include_router(dashboard_router, prefix="/dashboard", tags=["仪表盘
 v1_router.include_router(envs_router, prefix="/envs", tags=["环境管理"])
 v1_router.include_router(monitoring_router, tags=["监控"])
 v1_router.include_router(nodes_router)
-v1_router.include_router(
-    websocket_nodes_router, prefix="/nodes", tags=["节点WebSocket"]
-)
 v1_router.include_router(
     system_config_router, prefix="/system-config", tags=["系统配置"]
 )

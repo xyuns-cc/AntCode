@@ -75,15 +75,13 @@ class LogSecurityService:
                     else:
                         raise LogPermissionError("无权访问此执行记录")
             
-            # 数据库验证（支持 execution_id UUID 和 public_id）
             execution = await TaskExecution.get_or_none(execution_id=execution_id)
-            if not execution:
-                execution = await TaskExecution.get_or_none(public_id=execution_id)
             if not execution:
                 raise DoesNotExist("执行记录不存在")
             
             # 获取关联任务
             task = await ScheduledTask.get(id=execution.task_id)
+            execution.task_public_id = task.public_id
             
             # 检查基础权限
             if task.user_id != user.user_id:
@@ -198,7 +196,7 @@ class LogSecurityService:
         """获取用户可访问的执行记录ID列表"""
         try:
             # 获取用户的任务
-            if hasattr(user, 'is_admin') and user.is_admin:
+            if await QueryHelper.is_admin(user.user_id):
                 # 管理员可以访问所有执行记录
                 executions = await TaskExecution.all().limit(limit)
             else:

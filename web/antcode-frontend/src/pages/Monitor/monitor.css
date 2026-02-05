@@ -1042,7 +1042,7 @@ body.dark-theme .alert-message-compact {
   color: rgba(255, 255, 255, 0.65);
 }
 
-/* 旧版告警样式保留用于兼容 */
+/* 告警卡片样式 */
 .alert-item {
   border-radius: 6px;
   transition: all 0.3s ease;
@@ -1399,4 +1399,3 @@ body.dark-theme .node-log-item.node-log-info {
     max-width: 160px;
   }
 }
-

@@ -15,7 +15,8 @@ from src.models.audit_log import AuditAction
 from src.schemas.project import (
     ProjectCreateRequest, ProjectRuleCreateRequest, ProjectFileCreateRequest, ProjectCodeCreateRequest,
     ProjectResponse, ProjectListResponse, ProjectCreateFormRequest, ProjectListQueryRequest, TaskJsonRequest,
-    FileStructureResponse, FileContentResponse, ProjectFileContentUpdateRequest
+    FileStructureResponse, FileContentResponse, ProjectFileContentUpdateRequest,
+    ProjectRuleUpdateRequest, ProjectCodeUpdateRequest
 )
 from src.schemas.project_unified import UnifiedProjectUpdateRequest
 from src.services.projects.project_service import project_service
@@ -28,7 +29,7 @@ project_router = APIRouter()
 
 
 def create_project_response(project: Project) -> ProjectResponse:
-    """构建项目响应（兼容旧代码）"""
+    """构建项目响应"""
     return ProjectResponseBuilder.build_detail(project)
 
 
@@ -289,12 +290,11 @@ async def get_projects_list(
     is_admin = await user_service.is_admin(current_user.user_id)
     user_filter = None if is_admin else current_user_id
     if is_admin and query_params.created_by is not None:
-        try:
-            user_filter = int(query_params.created_by)
-        except (ValueError, TypeError):
-            from src.models import User
-            user = await User.filter(public_id=query_params.created_by).first()
-            user_filter = user.id if user else None
+        from src.models import User
+        user = await User.filter(public_id=str(query_params.created_by)).first()
+        if not user:
+            raise HTTPException(status_code=400, detail="created_by 无效")
+        user_filter = user.id
 
     projects, total = await project_service.get_projects_list(
         page=query_params.page,
@@ -303,7 +303,8 @@ async def get_projects_list(
         status=query_params.status.value if query_params.status else None,
         tag=query_params.tag,
         user_id=user_filter,
-        search=query_params.search
+        search=query_params.search,
+        node_id=query_params.node_id
     )
 
     return page_response(
@@ -533,7 +534,7 @@ async def generate_task_json(
 )
 async def update_rule_config(
     project_id,
-    request,
+    request: ProjectRuleUpdateRequest,
     current_user_id=Depends(get_current_user_id)
 ):
     """更新规则项目配置"""
@@ -551,7 +552,9 @@ async def update_rule_config(
         )
 
     # 更新规则配置
-    updated_project = await project_service.update_rule_config(project_id, request, current_user_id)
+    updated_project = await project_service.update_rule_config(project.id, request, current_user_id)
+    if not updated_project:
+        raise ProjectNotFoundException(project_id)
 
     # 构建响应数据
     response_data = create_project_response(updated_project)
@@ -562,31 +565,30 @@ async def update_rule_config(
 @project_router.put("/{project_id}/code-config", response_model=BaseResponse[ProjectResponse])
 async def update_code_config(
     project_id,
-    request,
+    request: ProjectCodeUpdateRequest,
     current_user_id=Depends(get_current_user_id)
 ):
     """更新代码项目配置"""
-    try:
-        # 更新代码配置
-        updated_project = await project_service.update_code_config(project_id, request, current_user_id)
+    # 获取项目详情
+    project = await project_service.get_project_by_id(project_id, current_user_id)
+    if not project:
+        raise ProjectNotFoundException(project_id)
 
-        if not updated_project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="项目不存在或无权限访问"
-            )
-
-        # 构建响应数据
-        response_data = create_project_response(updated_project)
-
-        return success_response(response_data, message=Messages.UPDATED_SUCCESS)
-    except HTTPException:
-        raise
-    except Exception as e:
+    if project.type != ProjectType.CODE:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"更新代码项目配置失败: {str(e)}"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="只有代码项目才能更新代码配置"
         )
+
+    # 更新代码配置
+    updated_project = await project_service.update_code_config(project.id, request, current_user_id)
+    if not updated_project:
+        raise ProjectNotFoundException(project_id)
+
+    # 构建响应数据
+    response_data = create_project_response(updated_project)
+
+    return success_response(response_data, message=Messages.UPDATED_SUCCESS)
 
 
 @project_router.put(

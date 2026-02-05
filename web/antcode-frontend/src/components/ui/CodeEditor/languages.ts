@@ -9,7 +9,7 @@ export interface LanguageConfig {
   name: string
   monacoId: string
   extensions: string[]
-  icon: string  // 保留用于兼容性，但推荐使用FileIcon组件
+  icon: string
   color: string
   defaultTemplate: string
   snippets: CodeSnippet[]
@@ -403,7 +403,7 @@ export const getLanguageConfig = (languageId: string): LanguageConfig | undefine
   return SUPPORTED_LANGUAGES.find(lang => lang.id === languageId)
 }
 
-// 获取所有支持的语言选项（使用emoji图标，保持兼容性）
+// 获取所有支持的语言选项（使用emoji图标）
 export const getLanguageOptions = () => {
   return SUPPORTED_LANGUAGES.map(lang => ({
     value: lang.id,

@@ -12,7 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from src.core.config import settings
-from src.models.enums import TaskStatus, ScheduleType, ProjectType
+from src.models.enums import TaskStatus, ScheduleType, ProjectType, ExecutionStrategy
 from src.models.scheduler import ScheduledTask, TaskExecution
 from src.services.logs.task_log_service import task_log_service  # 新增
 from src.services.projects.relation_service import relation_service  # 新增
@@ -68,33 +68,33 @@ class SchedulerService:
             logger.error(f"启动调度器失败: {e}")
             raise
 
-    async def create_task(self, task_data, project_type, user_id, internal_project_id=None, node_id=None):
+    async def create_task(self, task_data, project_type, user_id, internal_project_id):
         """创建调度任务"""
         try:
-            # 使用传入的内部 project_id，或从 task_data 中获取
-            project_id = internal_project_id if internal_project_id is not None else task_data.project_id
-
-            # 处理节点ID
             from src.models import Node
-            node_internal_id = None
-            if node_id:
-                # 支持 public_id
-                node = await Node.filter(public_id=node_id).first()
-                if node:
-                    node_internal_id = node.id
-                else:
-                    try:
-                        node_internal_id = int(node_id)
-                    except ValueError:
-                        pass
+
+            if internal_project_id is None:
+                raise ValueError("缺少项目ID")
+
+            specified_node_internal_id = None
+            if task_data.specified_node_id:
+                node = await Node.get_or_none(public_id=task_data.specified_node_id)
+                if not node:
+                    raise ValueError("指定的节点不存在")
+                specified_node_internal_id = node.id
+
+            if task_data.execution_strategy == ExecutionStrategy.SPECIFIED and not task_data.specified_node_id:
+                raise ValueError("执行策略为 specified 时必须指定 specified_node_id")
+            if task_data.specified_node_id and task_data.execution_strategy != ExecutionStrategy.SPECIFIED:
+                raise ValueError("指定 specified_node_id 时必须将执行策略设置为 specified")
 
             # 创建任务
             task = await ScheduledTask.create(
-                **task_data.model_dump(exclude={'project_id', 'node_id'}),
-                project_id=project_id,
+                **task_data.model_dump(exclude={'project_id', 'specified_node_id'}),
+                project_id=internal_project_id,
                 task_type=project_type,
                 user_id=user_id,
-                node_id=node_internal_id
+                specified_node_id=specified_node_internal_id,
             )
 
             # 添加到调度器
@@ -102,7 +102,7 @@ class SchedulerService:
                 await self.add_task(task)
 
             logger.info(f"任务创建成功: {task.name} (ID: {task.id})")
-            return task
+            return await self.get_task_by_id(task.public_id, user_id)
 
         except Exception as e:
             logger.error(f"创建任务失败: {e}")
@@ -119,7 +119,8 @@ class SchedulerService:
     ):
         """获取用户任务列表（优化版本）"""
         try:
-            from src.models import Node
+            from tortoise.expressions import Q
+            from src.models import Node, Project
 
             # 如果user_id为None，表示管理员查看所有任务
             query = ScheduledTask.all() if user_id is None else ScheduledTask.filter(user_id=user_id)
@@ -131,15 +132,31 @@ class SchedulerService:
 
             # 节点筛选
             if node_id:
-                # 支持 public_id 查询
-                node = await Node.filter(public_id=node_id).first()
-                if node:
-                    query = query.filter(node_id=node.id)
-                else:
-                    try:
-                        query = query.filter(node_id=int(node_id))
-                    except ValueError:
-                        pass
+                node = await Node.get_or_none(public_id=node_id)
+                if not node:
+                    return {
+                        "tasks": [],
+                        "total": 0,
+                        "page": page,
+                        "size": size,
+                        "pages": 0,
+                    }
+
+                bound_project_ids = await Project.filter(
+                    bound_node_id=node.id,
+                    execution_strategy__in=[ExecutionStrategy.FIXED_NODE, ExecutionStrategy.PREFER_BOUND],
+                ).values_list("id", flat=True)
+
+                query = query.filter(
+                    Q(specified_node_id=node.id)
+                    | (
+                        Q(project_id__in=bound_project_ids)
+                        & (
+                            Q(execution_strategy__isnull=True)
+                            | Q(execution_strategy__in=[ExecutionStrategy.FIXED_NODE, ExecutionStrategy.PREFER_BOUND])
+                        )
+                    )
+                )
 
             total = await query.count()
             offset = (page - 1) * size
@@ -151,21 +168,35 @@ class SchedulerService:
 
             # 批量获取项目的 public_id
             project_ids = list({t.project_id for t in tasks if t.project_id})
-            projects_map = await QueryHelper.batch_get_project_public_ids(project_ids)
+            projects_map = await QueryHelper.batch_get_project_info(project_ids)
 
-            # 批量获取节点的 public_id 和名称
-            node_ids = list({t.node_id for t in tasks if t.node_id})
-            nodes_map = await QueryHelper.batch_get_node_info(node_ids)
+            node_ids = set()
+            for task in tasks:
+                if task.specified_node_id:
+                    node_ids.add(task.specified_node_id)
+                project_info = projects_map.get(task.project_id) or {}
+                if project_info.get("bound_node_id"):
+                    node_ids.add(project_info["bound_node_id"])
+
+            nodes_map = await QueryHelper.batch_get_node_info(list(node_ids))
 
             # 为任务添加创建者、项目和节点信息
             for task in tasks:
                 user_info = users_map.get(task.user_id, {})
                 task.created_by_username = user_info.get('username')
                 task.created_by_public_id = user_info.get('public_id')
-                task.project_public_id = projects_map.get(task.project_id)
-                node_info = nodes_map.get(task.node_id, {})
-                task.node_public_id = node_info.get('public_id')
-                task.node_name = node_info.get('name')
+                project_info = projects_map.get(task.project_id) or {}
+                task.project_public_id = project_info.get("public_id")
+
+                task.project_execution_strategy = project_info.get("execution_strategy")
+                bound_node_internal_id = project_info.get("bound_node_id")
+                bound_node_info = nodes_map.get(bound_node_internal_id, {}) if bound_node_internal_id else {}
+                task.project_bound_node_public_id = bound_node_info.get("public_id") if bound_node_internal_id else None
+                task.project_bound_node_name = bound_node_info.get("name") if bound_node_internal_id else None
+
+                specified_node_info = nodes_map.get(task.specified_node_id, {}) if task.specified_node_id else {}
+                task.specified_node_public_id = specified_node_info.get("public_id") if task.specified_node_id else None
+                task.specified_node_name = specified_node_info.get("name") if task.specified_node_id else None
 
             return {
                 "tasks": tasks,
@@ -179,12 +210,11 @@ class SchedulerService:
             raise
 
     async def get_task_by_id(self, task_id, user_id):
-        """根据ID获取任务（支持 public_id 和内部 id）"""
+        """根据 public_id 获取任务"""
         from src.models import Project
 
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -197,28 +227,28 @@ class SchedulerService:
             task.created_by_username = user_info.get('username')
             task.created_by_public_id = user_info.get('public_id')
 
-            # 获取项目的 public_id 和执行策略配置
             project = await Project.get_or_none(id=task.project_id)
             task.project_public_id = project.public_id if project else None
 
-            # 填充项目执行策略信息
             if project:
                 task.project_execution_strategy = project.execution_strategy
-                task.project_bound_node_id = project.bound_node_id
-                # 获取项目绑定节点名称
+
                 if project.bound_node_id:
                     from src.models import Node
                     bound_node = await Node.get_or_none(id=project.bound_node_id)
+                    task.project_bound_node_public_id = bound_node.public_id if bound_node else None
                     task.project_bound_node_name = bound_node.name if bound_node else None
                 else:
+                    task.project_bound_node_public_id = None
                     task.project_bound_node_name = None
 
-            # 填充任务指定节点名称
             if task.specified_node_id:
                 from src.models import Node
                 specified_node = await Node.get_or_none(id=task.specified_node_id)
+                task.specified_node_public_id = specified_node.public_id if specified_node else None
                 task.specified_node_name = specified_node.name if specified_node else None
             else:
+                task.specified_node_public_id = None
                 task.specified_node_name = None
 
             return task
@@ -229,16 +259,44 @@ class SchedulerService:
     async def update_task(self, task_id, task_data, user_id):
         """更新任务（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
             if not task:
                 return None
 
-            # 更新字段
             update_data = task_data.model_dump(exclude_unset=True)
+
+            specified_node_provided = "specified_node_id" in update_data
+            new_specified_node_internal_id = task.specified_node_id
+            specified_node_requested = False
+
+            if specified_node_provided:
+                specified_node_public_id = update_data.pop("specified_node_id")
+                specified_node_requested = specified_node_public_id is not None
+                if specified_node_public_id:
+                    from src.models import Node
+                    node = await Node.get_or_none(public_id=specified_node_public_id)
+                    if not node:
+                        raise ValueError("指定的节点不存在")
+                    new_specified_node_internal_id = node.id
+                else:
+                    new_specified_node_internal_id = None
+
+            new_strategy = update_data.get("execution_strategy", task.execution_strategy)
+            if new_strategy == ExecutionStrategy.SPECIFIED:
+                if not new_specified_node_internal_id:
+                    raise ValueError("执行策略为 specified 时必须指定 specified_node_id")
+            elif specified_node_requested:
+                raise ValueError("指定 specified_node_id 时必须将执行策略设置为 specified")
+            else:
+                new_specified_node_internal_id = None
+
+            if specified_node_provided or new_strategy != ExecutionStrategy.SPECIFIED:
+                update_data["specified_node_id"] = new_specified_node_internal_id
+
+            # 更新字段
             for field, value in update_data.items():
                 setattr(task, field, value)
 
@@ -252,7 +310,7 @@ class SchedulerService:
                     await self.remove_task(task.id)
 
             logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
-            return task
+            return await self.get_task_by_id(task.public_id, user_id)
 
         except Exception as e:
             logger.error(f"更新任务失败: {e}")
@@ -261,8 +319,7 @@ class SchedulerService:
     async def delete_task(self, task_id, user_id):
         """删除任务（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -299,8 +356,7 @@ class SchedulerService:
     ):
         """获取任务执行记录（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -347,8 +403,7 @@ class SchedulerService:
     async def get_task_stats(self, task_id, user_id):
         """获取任务统计信息（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -434,8 +489,7 @@ class SchedulerService:
     async def pause_task_by_user(self, task_id, user_id):
         """暂停用户任务（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -454,8 +508,7 @@ class SchedulerService:
     async def resume_task_by_user(self, task_id, user_id):
         """恢复用户任务（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -474,8 +527,7 @@ class SchedulerService:
     async def trigger_task_by_user(self, task_id, user_id):
         """立即触发用户任务（支持 public_id）"""
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
+            task = await QueryHelper.get_by_public_id(
                 ScheduledTask, task_id, user_id=user_id, check_admin=True
             )
 
@@ -489,17 +541,9 @@ class SchedulerService:
             raise
 
     async def get_execution_with_permission(self, execution_id, user_id):
-        """获取执行记录（带权限验证，支持 public_id 和 execution_id UUID）"""
+        """获取执行记录（带权限验证）"""
         try:
-            # 支持多种查询方式
-            execution = None
-
-            # 先尝试作为 UUID (execution_id)
             execution = await TaskExecution.get_or_none(execution_id=execution_id)
-
-            # 如果没找到，尝试作为 public_id
-            if not execution:
-                execution = await TaskExecution.get_or_none(public_id=str(execution_id))
 
             if not execution:
                 return None
@@ -730,14 +774,14 @@ class SchedulerService:
 
             # 记录到运行中任务
             self.running_tasks[execution_id] = {
-                'task_id': task_id,
+                "task_id": task.public_id,
                 'task_name': task.name,
                 'start_time': now
             }
 
             # 推送开始状态到WebSocket
             await self._push_execution_status(execution, {
-                "status": "RUNNING",
+                "status": TaskStatus.RUNNING.value,
                 "message": "任务开始执行",
                 "task_name": task.name,
                 "start_time": now.isoformat()
@@ -784,6 +828,12 @@ class SchedulerService:
                     # 规则项目：提交到调度网关
                     result = await self._execute_rule_task(task, project, project_detail, execution)
                 else:
+                    # 本地执行：进入 RUNNING 状态
+                    task.status = TaskStatus.RUNNING
+                    execution.status = TaskStatus.RUNNING
+                    await task.save()
+                    await execution.save()
+
                     # 文件/代码项目：本地执行
                     result = await self.executor.execute(
                         project=project,
@@ -809,7 +859,9 @@ class SchedulerService:
                 # 检查是否为分布式任务（等待节点执行结果）
                 if result.get('distributed') and result.get('pending'):
                     # 分布式任务：保持 RUNNING 状态，等待节点回调
-                    execution.result = result
+                    current = execution.result_data or {}
+                    current.update(result)
+                    execution.result_data = current
                     await execution.save()
 
                     await self._log_execution(
@@ -820,7 +872,7 @@ class SchedulerService:
 
                     # 推送分发成功状态
                     await self._push_execution_status(execution, {
-                        "status": "RUNNING",
+                        "status": TaskStatus.QUEUED.value,
                         "message": "任务已分发到节点，等待执行结果",
                         "distributed": True,
                         "node_id": result.get("node_id"),
@@ -829,7 +881,7 @@ class SchedulerService:
                 else:
                     # 本地执行成功
                     execution.status = TaskStatus.SUCCESS
-                    execution.result = result
+                    execution.result_data = result
                     task.status = TaskStatus.SUCCESS
                     task.success_count += 1
 
@@ -847,7 +899,7 @@ class SchedulerService:
 
                     # 推送成功状态到WebSocket
                     await self._push_execution_status(execution, {
-                        "status": "SUCCESS",
+                        "status": TaskStatus.SUCCESS.value,
                         "message": "任务执行成功",
                         "result": result
                     })
@@ -871,7 +923,7 @@ class SchedulerService:
 
                 # 推送失败状态到WebSocket
                 await self._push_execution_status(execution, {
-                    "status": "FAILED",
+                    "status": TaskStatus.FAILED.value,
                     "message": "任务执行失败",
                     "error": result.get('error')
                 })
@@ -913,38 +965,37 @@ class SchedulerService:
             # 更新并发统计
             self.task_execution_stats["currently_running"] -= 1
 
-            # 检查是否为分布式任务（仍在节点执行中）
-            is_distributed_pending = (
-                execution and 
-                execution.status == TaskStatus.RUNNING and 
-                execution.result_data and 
-                execution.result_data.get("distributed")
+            is_distributed = bool(execution and execution.result_data and execution.result_data.get("distributed"))
+            is_terminal = bool(
+                execution and execution.status in (
+                    TaskStatus.SUCCESS,
+                    TaskStatus.FAILED,
+                    TaskStatus.TIMEOUT,
+                    TaskStatus.CANCELLED,
+                )
             )
 
-            # 更新成功/失败统计（分布式任务不在此处统计）
-            if not is_distributed_pending:
-                if execution and execution.status == TaskStatus.SUCCESS:
+            # 更新成功/失败统计（分布式任务在节点回调时统计）
+            if execution and is_terminal and not is_distributed:
+                if execution.status == TaskStatus.SUCCESS:
                     self.task_execution_stats["success_count"] += 1
-                elif execution and execution.status == TaskStatus.FAILED:
+                elif execution.status == TaskStatus.FAILED:
                     self.task_execution_stats["failed_count"] += 1
 
-            # 清理运行中任务（分布式任务保留，等待节点回调）
-            if execution_id in self.running_tasks and not is_distributed_pending:
+            # 清理运行中任务（当前调度协程结束即清理）
+            if execution_id in self.running_tasks:
                 del self.running_tasks[execution_id]
 
-            # 更新执行记录（分布式任务不设置 end_time，等待节点回调）
-            if execution and not is_distributed_pending:
+            # 更新执行记录：仅终态写入 end_time/duration，避免 queued/running 状态出现 end_time
+            if execution and is_terminal:
                 execution.end_time = datetime.now(timezone.utc)
                 if execution.start_time:
-                    execution.duration_seconds = (
-                            execution.end_time - execution.start_time
-                    ).total_seconds()
+                    execution.duration_seconds = (execution.end_time - execution.start_time).total_seconds()
                 await execution.save()
 
             # 更新任务状态
             if task:
-                # 分布式任务保持 RUNNING 状态
-                if not is_distributed_pending and task.status == TaskStatus.RUNNING:
+                if task.status == TaskStatus.RUNNING:
                     task.status = TaskStatus.PENDING
                 task.next_run_time = self._get_next_run_time(task_id)
                 await task.save()
@@ -973,14 +1024,9 @@ class SchedulerService:
             target_node: 目标节点（由执行策略解析器确定）
         """
         from src.services.nodes import node_task_dispatcher
-        from src.models import Node
 
         try:
-            # 使用传入的目标节点，或兼容旧逻辑
             node = target_node
-            if not node and task.node_id:
-                # 兼容旧代码：从 task.node_id 获取节点
-                node = await Node.get_or_none(id=task.node_id)
 
             if not node:
                 return {
@@ -999,9 +1045,30 @@ class SchedulerService:
             project_type_str = project.type.value if hasattr(project.type, 'value') else str(project.type)
             priority = task.priority if hasattr(task, 'priority') and task.priority is not None else None
 
+            user_id = getattr(task, "user_id", None) or getattr(project, "user_id", None)
+            from src.services.users.user_service import user_service
+            from src.core.security.auth import jwt_auth
+            from src.services.sessions.session_service import user_session_service
+
+            user = await user_service.get_user_by_id(user_id) if user_id else None
+            if not user:
+                return {
+                    "success": False,
+                    "error": "用户不存在或无权限"
+                }
+
+            session = await user_session_service.get_or_create_service_session(user.id)
+            access_token = jwt_auth.create_access_token(
+                user_id=user.id,
+                username=user.username,
+                session_id=session.public_id,
+                token_type="service",
+            )
+
             result = await node_task_dispatcher.dispatch_task(
                 project_id=project.public_id,
                 execution_id=execution_id,
+                access_token=access_token,
                 params=task.execution_params,
                 environment_vars=task.environment_vars,
                 timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
@@ -1026,7 +1093,7 @@ class SchedulerService:
 
                 # 保存远程任务信息到执行记录
                 execution.status = TaskStatus.QUEUED
-                execution.result = {
+                execution.result_data = {
                     "distributed": True,
                     "node_id": node.public_id,
                     "node_name": node.name,
@@ -1226,9 +1293,26 @@ class SchedulerService:
                 )
 
     async def _push_execution_status(self, execution, status_data):
-        """推送执行状态到WebSocket客户端（已移除WebSocket功能）"""
-        # WebSocket功能已被移除，此方法保留以保持兼容性
-        pass
+        """推送执行状态到 WebSocket 客户端"""
+        try:
+            if not execution:
+                return
+
+            status = status_data.get("status") if isinstance(status_data, dict) else None
+            if not status:
+                return
+
+            from src.services.websockets.websocket_connection_manager import websocket_manager
+
+            await websocket_manager.send_execution_status(
+                execution_id=execution.execution_id,
+                status=status,
+                progress=status_data.get("progress"),
+                message=status_data.get("message"),
+            )
+        except Exception:
+            # WebSocket 推送失败不应影响主流程
+            return
 
     def _get_next_run_time(self, task_id):
         """获取下次运行时间"""

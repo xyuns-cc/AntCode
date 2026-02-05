@@ -47,8 +47,8 @@ env/
 data/
 
 # Legacy directories (已迁移到 data/)
-logs/
-storage/
+/logs/
+/storage/
 
 # IDE
 .vscode/

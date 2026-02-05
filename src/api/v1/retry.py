@@ -47,14 +47,7 @@ async def get_retry_stats(
     """获取任务重试统计"""
     from src.models.scheduler import ScheduledTask
 
-    # 支持 public_id
     task = await ScheduledTask.get_or_none(public_id=task_id)
-    if not task:
-        try:
-            task = await ScheduledTask.get_or_none(id=int(task_id))
-        except ValueError:
-            pass
-
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -100,7 +93,7 @@ async def get_pending_retries(
     task_map = {task.id: task.public_id for task in tasks}
 
     for item in pending:
-        item["task_id"] = task_map.get(item["task_id"], item["task_id"])
+        item["task_id"] = task_map.get(item["task_id"])
 
     return success({"items": pending, "total": len(pending)})
 
@@ -120,14 +113,7 @@ async def update_retry_config(
     """更新任务重试配置"""
     from src.models.scheduler import ScheduledTask
 
-    # 支持 public_id
     task = await ScheduledTask.get_or_none(public_id=task_id)
-    if not task:
-        try:
-            task = await ScheduledTask.get_or_none(id=int(task_id))
-        except ValueError:
-            pass
-
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -219,14 +205,7 @@ async def get_retry_history(
     """获取任务重试历史"""
     from src.models.scheduler import ScheduledTask, TaskExecution
 
-    # 支持 public_id
     task = await ScheduledTask.get_or_none(public_id=task_id)
-    if not task:
-        try:
-            task = await ScheduledTask.get_or_none(id=int(task_id))
-        except ValueError:
-            pass
-
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -50,17 +50,17 @@ export const useTaskMutations = () => {
   const invalidateTasks = () => queryClient.invalidateQueries({ queryKey: ['tasks'] })
 
   const triggerTask = useMutation({
-    mutationFn: (taskId: number | string) => taskService.triggerTask(String(taskId)),
+    mutationFn: (taskId: string) => taskService.triggerTask(taskId),
     onSuccess: () => invalidateTasks()
   })
 
   const deleteTask = useMutation({
-    mutationFn: (taskId: number | string) => taskService.deleteTask(String(taskId)),
+    mutationFn: (taskId: string) => taskService.deleteTask(taskId),
     onSuccess: () => invalidateTasks()
   })
 
   const batchDelete = useMutation({
-    mutationFn: (ids: (string | number)[]) => taskService.batchDeleteTasks(ids),
+    mutationFn: (ids: string[]) => taskService.batchDeleteTasks(ids),
     onSuccess: () => invalidateTasks()
   })
 

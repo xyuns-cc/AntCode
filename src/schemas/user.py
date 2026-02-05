@@ -12,7 +12,7 @@ class UserLoginRequest(BaseModel):
 
 class UserCreateRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=5, max_length=100)
+    password: str = Field(..., min_length=8, max_length=100)
     email: str | None = None
     is_active: bool = True
     is_admin: bool = False
@@ -26,11 +26,11 @@ class UserUpdateRequest(BaseModel):
 
 class UserPasswordUpdateRequest(BaseModel):
     old_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6, max_length=100)
+    new_password: str = Field(..., min_length=8, max_length=100)
 
 
 class UserAdminPasswordUpdateRequest(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=100)
+    new_password: str = Field(..., min_length=8, max_length=100)
 
 
 class UserResponse(BaseModel):
@@ -39,6 +39,8 @@ class UserResponse(BaseModel):
     email: str | None = None
     is_active: bool
     is_admin: bool
+    is_super_admin: bool = False
+    is_online: bool = False
     created_at: datetime
     last_login_at: datetime | None = None
 
@@ -58,6 +60,8 @@ class UserListResponse(BaseModel):
     email: str | None = None
     is_active: bool
     is_admin: bool
+    is_super_admin: bool = False
+    is_online: bool = False
     created_at: datetime
     last_login_at: datetime | None = None
 
@@ -70,3 +74,4 @@ class UserLoginResponse(BaseModel):
     user_id: str = Field(description="用户公开ID")
     username: str
     is_admin: bool
+    is_super_admin: bool = False

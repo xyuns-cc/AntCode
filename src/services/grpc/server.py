@@ -78,8 +78,9 @@ class GrpcServer:
             else:
                 logger.warning("未设置 NodeService 实现，服务器将无法处理请求")
             
-            # 绑定端口
+            # 绑定端口（优先 IPv6，其次 IPv4，避免部分环境无 IPv6 导致启动失败）
             listen_addr = f"[::]:{self.config.port}"
+            fallback_addr = f"0.0.0.0:{self.config.port}"
             
             if self.config.tls_enabled:
                 # TLS 模式
@@ -89,11 +90,17 @@ class GrpcServer:
                     key = f.read()
                 
                 credentials = grpc.ssl_server_credentials([(key, cert)])
-                self._server.add_secure_port(listen_addr, credentials)
+                added = self._server.add_secure_port(listen_addr, credentials)
+                if not added:
+                    listen_addr = fallback_addr
+                    added = self._server.add_secure_port(listen_addr, credentials)
                 logger.info(f"gRPC 服务器启动于 {listen_addr} (TLS)")
             else:
                 # 非 TLS 模式
-                self._server.add_insecure_port(listen_addr)
+                added = self._server.add_insecure_port(listen_addr)
+                if not added:
+                    listen_addr = fallback_addr
+                    added = self._server.add_insecure_port(listen_addr)
                 logger.info(f"gRPC 服务器启动于 {listen_addr}")
             
             # 启动服务器

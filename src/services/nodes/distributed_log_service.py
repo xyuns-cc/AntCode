@@ -345,9 +345,7 @@ class DistributedLogService:
             status_map = {
                 "running": TaskStatus.RUNNING,
                 "success": TaskStatus.SUCCESS,
-                "completed": TaskStatus.SUCCESS,
                 "failed": TaskStatus.FAILED,
-                "error": TaskStatus.FAILED,
                 "timeout": TaskStatus.TIMEOUT,
                 "cancelled": TaskStatus.CANCELLED,
             }
@@ -416,22 +414,23 @@ class DistributedLogService:
         try:
             from src.services.websockets.websocket_connection_manager import websocket_manager
 
-            message = f"任务状态: {status}"
-            if status == "RUNNING":
+            normalized = (status or "").lower()
+            message = f"任务状态: {normalized}"
+            if normalized == "running":
                 message = "任务开始执行"
-            elif status == "SUCCESS":
+            elif normalized == "success":
                 message = "任务执行成功"
-            elif status == "FAILED":
+            elif normalized == "failed":
                 message = f"任务执行失败: {error_message or '未知错误'}"
-            elif status == "TIMEOUT":
+            elif normalized == "timeout":
                 message = "任务执行超时"
-            elif status == "CANCELLED":
+            elif normalized == "cancelled":
                 message = "任务已取消"
 
             await websocket_manager.send_execution_status(
                 execution_id=execution_id,
-                status=status,
-                progress=100.0 if status in ("SUCCESS", "FAILED", "TIMEOUT", "CANCELLED") else None,
+                status=normalized,
+                progress=100.0 if normalized in ("success", "failed", "timeout", "cancelled") else None,
                 message=message,
             )
         except Exception as e:

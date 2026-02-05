@@ -130,23 +130,36 @@ class WebSocketLogService:
     async def _send_current_status(self, execution_id: str, execution: TaskExecution):
         """发送当前执行状态（让前端立即获取最新状态）"""
         try:
-            status = execution.status.value if execution.status else "QUEUED"
+            from src.models.enums import TaskStatus
+
+            status = execution.status.value if execution.status else TaskStatus.QUEUED.value
 
             # 构建状态消息
             message = f"当前状态: {status}"
-            if status == "RUNNING":
-                message = "任务正在执行中"
-            elif status == "SUCCESS":
-                message = "任务执行成功"
-            elif status == "FAILED":
-                message = f"任务执行失败"
-            elif status == "QUEUED":
+            if status == TaskStatus.DISPATCHING.value:
+                message = "正在分配执行节点"
+            elif status == TaskStatus.QUEUED.value:
                 message = "任务排队中"
+            elif status == TaskStatus.RUNNING.value:
+                message = "任务正在执行中"
+            elif status == TaskStatus.SUCCESS.value:
+                message = "任务执行成功"
+            elif status == TaskStatus.FAILED.value:
+                message = "任务执行失败"
+            elif status == TaskStatus.TIMEOUT.value:
+                message = "任务执行超时"
+            elif status == TaskStatus.CANCELLED.value:
+                message = "任务已取消"
 
             await websocket_manager.send_execution_status(
                 execution_id=execution_id,
                 status=status,
-                progress=100.0 if status in ("SUCCESS", "FAILED", "TIMEOUT", "CANCELLED") else None,
+                progress=100.0 if status in (
+                    TaskStatus.SUCCESS.value,
+                    TaskStatus.FAILED.value,
+                    TaskStatus.TIMEOUT.value,
+                    TaskStatus.CANCELLED.value,
+                ) else None,
                 message=message,
             )
 

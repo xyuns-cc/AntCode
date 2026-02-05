@@ -1,8 +1,12 @@
 import apiClient from './api'
-import type { ApiResponse, PaginatedResponse, Project, Task, TaskListResponse } from '@/types'
+import type { ApiResponse, Project, Task, TaskListResponse } from '@/types'
 
-type ProjectListResponse = ApiResponse<Project[]> & {
-  pagination?: PaginatedResponse<Project>['pagination']
+type ProjectPage = {
+  items: Project[]
+  total: number
+  page: number
+  size: number
+  pages: number
 }
 
 export interface DashboardStats {
@@ -15,7 +19,7 @@ export interface DashboardStats {
     total: number
     active: number
     running: number
-    completed: number
+    success: number
     failed: number
   }
   system: {
@@ -72,10 +76,14 @@ export interface TaskSummary {
   running: number
   by_status: {
     pending: number
+    dispatching: number
+    queued: number
     running: number
-    completed: number
+    success: number
     failed: number
     paused: number
+    cancelled: number
+    timeout: number
   }
 }
 
@@ -84,12 +92,13 @@ class DashboardService {
   async getProjectStats(): Promise<ProjectCount> {
     try {
       // 获取项目列表来统计
-      const response = await apiClient.get<ProjectListResponse>('/api/v1/projects', {
-        params: { page: 1, size: 1000 } // 获取大量数据来统计
+      const response = await apiClient.get<ApiResponse<ProjectPage>>('/api/v1/projects', {
+        params: { page: 1, size: 1000 }, // 获取大量数据来统计
       })
-      
-      const projects = response.data.data || []
-      const total = response.data.pagination?.total || projects.length
+
+      const pageData = response.data.data
+      const projects = pageData?.items ?? []
+      const total = pageData?.total ?? projects.length
       
       // 统计各状态项目数量
       const byStatus = projects.reduce<ProjectCount['by_status']>((acc, project) => {
@@ -132,13 +141,14 @@ class DashboardService {
   // 获取任务统计（对齐后端 /scheduler/tasks 返回的 TaskListResponse 结构）
   async getTaskStats(): Promise<TaskSummary> {
     try {
-      const response = await apiClient.get<TaskListResponse>('/api/v1/scheduler/tasks', {
-        params: { page: 1, size: 1000 }
+      const response = await apiClient.get<ApiResponse<TaskListResponse>>('/api/v1/scheduler/tasks', {
+        params: { page: 1, size: 1000 },
       })
 
       // 后端返回结构: { total, page, size, items }
-      const list = response.data?.items ?? []
-      const total = response.data?.total ?? list.length
+      const pageData = response.data.data
+      const list = pageData?.items ?? []
+      const total = pageData?.total ?? list.length
 
       const active = list.filter((task: Task) => task.is_active).length
       const running = list.filter((task: Task) => task.status === 'running').length
@@ -149,26 +159,45 @@ class DashboardService {
           case 'pending':
             acc.pending += 1
             break
+          case 'dispatching':
+            acc.dispatching += 1
+            break
+          case 'queued':
+            acc.queued += 1
+            break
           case 'running':
             acc.running += 1
             break
-          case 'completed':
           case 'success':
-            acc.completed += 1
+            acc.success += 1
             break
           case 'failed':
-          case 'error':
             acc.failed += 1
             break
           case 'paused':
-          case 'cancelled':
             acc.paused += 1
+            break
+          case 'cancelled':
+            acc.cancelled += 1
+            break
+          case 'timeout':
+            acc.timeout += 1
             break
           default:
             acc.pending += 1
         }
         return acc
-      }, { pending: 0, running: 0, completed: 0, failed: 0, paused: 0 })
+      }, {
+        pending: 0,
+        dispatching: 0,
+        queued: 0,
+        running: 0,
+        success: 0,
+        failed: 0,
+        paused: 0,
+        cancelled: 0,
+        timeout: 0,
+      })
 
       return { total, active, running, by_status: byStatus }
     } catch (error) {
@@ -177,12 +206,22 @@ class DashboardService {
         total: 0,
         active: 0,
         running: 0,
-        by_status: { pending: 0, running: 0, completed: 0, failed: 0, paused: 0 }
+        by_status: {
+          pending: 0,
+          dispatching: 0,
+          queued: 0,
+          running: 0,
+          success: 0,
+          failed: 0,
+          paused: 0,
+          cancelled: 0,
+          timeout: 0,
+        },
       }
     }
   }
 
-  // 获取系统指标（兼容后端精简的 SystemMetricsResponse）
+  // 获取系统指标（做字段映射）
   async getSystemMetrics(): Promise<SystemMetrics> {
     try {
       // 1) 核心系统指标（CPU/内存/磁盘/活跃任务）
@@ -271,7 +310,7 @@ class DashboardService {
           total: summary.tasks?.total || 0,
           active: summary.tasks?.active || 0,
           running: summary.tasks?.running || 0,
-          completed: summary.tasks?.by_status?.completed || 0,
+          success: summary.tasks?.by_status?.success || 0,
           failed: summary.tasks?.by_status?.failed || 0,
         },
         system: {
@@ -287,7 +326,7 @@ class DashboardService {
       // 返回默认值
       return {
         projects: { total: 0, active: 0, inactive: 0 },
-        tasks: { total: 0, active: 0, running: 0, completed: 0, failed: 0 },
+        tasks: { total: 0, active: 0, running: 0, success: 0, failed: 0 },
         system: { status: 'error', uptime: 0 }
       }
     }

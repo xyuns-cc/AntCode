@@ -46,8 +46,6 @@ from .services import (
     local_env_service as local_env_service,
     local_project_service as local_project_service,
     master_client as master_client,
-    node_ws_client as node_ws_client,
 )
 
 from .cli import main as main
-

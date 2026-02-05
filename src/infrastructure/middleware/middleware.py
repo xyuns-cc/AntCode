@@ -9,59 +9,6 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from loguru import logger
 
-from src.core.security.auth import jwt_auth
-
-
-class AdminPermissionMiddleware(BaseHTTPMiddleware):
-    """管理员权限验证中间件"""
-
-    # 预编译正则表达式
-    ADMIN_PATTERNS: ClassVar[list] = [
-        re.compile(r'^/api/v1/users/?$'),
-        re.compile(r'^/api/v1/users/\d+/?$'),
-        re.compile(r'^/api/v1/users/\d+/reset-password/?$'),
-        re.compile(r'^/api/v1/users/cache/?.*$'),
-    ]
-
-    EXCLUDED_PATTERNS: ClassVar[list] = [
-        (re.compile(r'^/api/v1/users/\d+/?$'), 'GET'),
-    ]
-
-    async def dispatch(self, request, call_next):
-        path = request.url.path
-        method = request.method
-
-        is_admin_path = any(p.match(path) for p in self.ADMIN_PATTERNS)
-
-        if is_admin_path:
-            is_excluded = any(p.match(path) and method == m for p, m in self.EXCLUDED_PATTERNS)
-            if not is_excluded:
-                await self._verify_admin_permission(request)
-
-        return await call_next(request)
-
-    async def _verify_admin_permission(self, request):
-        """验证管理员权限"""
-        from src.services.users.user_service import user_service
-
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少认证信息")
-
-        try:
-            token = auth_header.split(' ', 1)[1]
-            token_data = jwt_auth.verify_token(token)
-            user = await user_service.get_user_by_id(token_data.user_id)
-
-            if not user or not user.is_admin:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning(f"权限验证失败: {e}")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="认证失败")
-
-
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """安全响应头中间件"""
 
@@ -236,7 +183,6 @@ def make_middlewares():
         ),
         Middleware(SecurityHeadersMiddleware),
         Middleware(RateLimitMiddleware, calls=settings.RATE_LIMIT_CALLS, period=settings.RATE_LIMIT_PERIOD),
-        Middleware(AdminPermissionMiddleware),
         Middleware(CacheInvalidationMiddleware),
     ]
     return middleware

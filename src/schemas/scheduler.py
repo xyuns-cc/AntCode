@@ -38,9 +38,15 @@ class TaskCreate(TaskBase):
         None, 
         description="指定执行节点ID（仅 specified 策略时使用）"
     )
-
-    # 兼容旧字段
-    node_id: Optional[str] = Field(None, description="[已废弃] 指定执行节点ID，请使用 specified_node_id")
+    @field_validator("specified_node_id")
+    def validate_specified_node_id(cls, v, info):
+        values = info.data
+        strategy = values.get("execution_strategy")
+        if strategy == ExecutionStrategy.SPECIFIED and not v:
+            raise ValueError("执行策略为 specified 时必须指定 specified_node_id")
+        if v and strategy != ExecutionStrategy.SPECIFIED:
+            raise ValueError("指定 specified_node_id 时必须将执行策略设置为 specified")
+        return v
 
     @field_validator('cron_expression')
     def validate_cron(cls, v, info):
@@ -120,10 +126,6 @@ class TaskResponse(BaseModel):
     project_bound_node_id: Optional[str] = Field(None, description="项目绑定节点ID")
     project_bound_node_name: Optional[str] = Field(None, description="项目绑定节点名称")
 
-    # 兼容旧字段
-    node_id: Optional[str] = Field(None, description="[已废弃] 执行节点ID")
-    node_name: Optional[str] = Field(None, description="[已废弃] 执行节点名称")
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -138,6 +140,7 @@ class ExecutionResponse(BaseModel):
     status: TaskStatus
     exit_code: Optional[int] = None
     error_message: Optional[str] = None
+    retry_count: int = Field(0, description="已重试次数")
     result_data: Optional[Dict[str, Any]] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
@@ -157,6 +160,7 @@ class ExecutionResponse(BaseModel):
             status=obj.status,
             exit_code=obj.exit_code,
             error_message=obj.error_message,
+            retry_count=getattr(obj, "retry_count", 0) or 0,
             result_data=obj.result_data,
             stdout=getattr(obj, 'stdout', None),
             stderr=getattr(obj, 'stderr', None)

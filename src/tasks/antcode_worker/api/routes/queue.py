@@ -33,7 +33,7 @@ class TaskItemRequest(BaseModel):
     environment: Dict[str, str] = Field(default_factory=dict, description="环境变量")
     timeout: int = Field(3600, description="超时时间（秒）")
     download_url: Optional[str] = Field(None, description="下载URL")
-    api_key: Optional[str] = Field(None, description="API密钥")
+    access_token: Optional[str] = Field(None, description="访问令牌")
     file_hash: Optional[str] = Field(None, description="文件哈希")
     entry_point: Optional[str] = Field(None, description="入口文件")
 
@@ -180,7 +180,7 @@ async def receive_batch_tasks(request: BatchTaskRequestModel):
             environment=t.environment,
             timeout=t.timeout,
             download_url=t.download_url,
-            api_key=t.api_key,
+            access_token=t.access_token,
             file_hash=t.file_hash,
             entry_point=t.entry_point,
         ))

@@ -13,11 +13,9 @@ export const PROJECT_TYPE_MAP: Record<ProjectType, string> = {
 
 // 项目状态中文映射
 export const PROJECT_STATUS_MAP: Record<string, string> = {
+  draft: '草稿',
   active: '活跃',
   inactive: '非活跃',
-  error: '错误',
-  draft: '草稿',
-  published: '已发布',
   archived: '已归档'
 }
 
@@ -30,11 +28,9 @@ export const PROJECT_TYPE_COLORS: Record<ProjectType, string> = {
 
 // 项目状态颜色映射
 export const PROJECT_STATUS_COLORS: Record<string, string> = {
+  draft: 'processing',
   active: 'success',
   inactive: 'default',
-  error: 'error',
-  draft: 'processing',
-  published: 'success',
   archived: 'warning'
 }
 
@@ -109,11 +105,9 @@ export const getProjectTypeDescription = (type: ProjectType): string => {
  */
 export const getProjectStatusDescription = (status: string): string => {
   const descriptionMap: Record<string, string> = {
+    draft: '项目处于草稿状态',
     active: '项目正常运行中',
     inactive: '项目暂停或未激活',
-    error: '项目运行出现错误',
-    draft: '项目处于草稿状态',
-    published: '项目已发布可用',
     archived: '项目已归档'
   }
   return descriptionMap[status] || ''

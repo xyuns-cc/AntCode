@@ -2,10 +2,10 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, status, Request, Query
+from fastapi import APIRouter, HTTPException, status, Request, Query, Depends
 from fastapi.responses import JSONResponse
 
-from src.core.security.auth import jwt_auth
+from src.core.security.auth import jwt_auth, get_current_user
 from src.core.config import settings
 from src.schemas import HealthResponse, UserLoginRequest, UserLoginResponse
 from src.schemas.common import BaseResponse
@@ -22,7 +22,7 @@ router = APIRouter()
     summary="健康检查",
     tags=["基础"]
 )
-async def health_check():
+async def health_check(current_user=Depends(get_current_user)):
     payload = HealthResponse(
         status="healthy",
         version=settings.APP_VERSION,
@@ -39,6 +39,7 @@ async def health_check():
 )
 async def detailed_health_check(
     include_details: bool = Query(default=True, description="是否包含详细信息"),
+    current_user=Depends(get_current_user)
 ) -> JSONResponse:
     """
     详细健康检查端点
@@ -82,7 +83,9 @@ async def detailed_health_check(
     summary="存活检查 (Kubernetes liveness)",
     tags=["基础"],
 )
-async def liveness_check() -> Dict[str, Any]:
+async def liveness_check(
+    current_user=Depends(get_current_user)
+) -> Dict[str, Any]:
     """
     Kubernetes 存活探针端点
     
@@ -106,7 +109,9 @@ async def liveness_check() -> Dict[str, Any]:
     summary="就绪检查 (Kubernetes readiness)",
     tags=["基础"],
 )
-async def readiness_check() -> Dict[str, Any]:
+async def readiness_check(
+    current_user=Depends(get_current_user)
+) -> Dict[str, Any]:
     """
     Kubernetes 就绪探针端点
     
@@ -131,7 +136,10 @@ async def readiness_check() -> Dict[str, Any]:
     summary="用户登录",
     tags=["认证"]
 )
-async def login(request: UserLoginRequest, http_request: Request):
+async def login(
+    request: UserLoginRequest,
+    http_request: Request
+):
     ip_address = http_request.client.host if http_request.client else None
     user_agent = http_request.headers.get("user-agent")
 
@@ -176,12 +184,53 @@ async def login(request: UserLoginRequest, http_request: Request):
         success=True
     )
 
-    access_token = jwt_auth.create_access_token(user_id=user.id, username=user.username)
+    from src.services.sessions.session_service import user_session_service
+    session = await user_session_service.create_web_session(
+        user_id=user.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    access_token = jwt_auth.create_access_token(
+        user_id=user.id,
+        username=user.username,
+        session_id=session.public_id,
+        token_type="access",
+    )
 
     payload = UserLoginResponse(
         access_token=access_token,
         user_id=user.public_id,
         username=user.username,
-        is_admin=user.is_admin
+        is_admin=user.is_admin,
+        is_super_admin=bool(user.is_admin and user.username == settings.DEFAULT_ADMIN_USERNAME),
     )
     return success(payload, message=Messages.LOGIN_SUCCESS)
+
+
+@router.post(
+    "/auth/logout",
+    response_model=BaseResponse[None],
+    summary="用户登出",
+    tags=["认证"]
+)
+async def logout(
+    http_request: Request,
+    current_user=Depends(get_current_user),
+):
+    from src.services.sessions.session_service import user_session_service
+
+    ip_address = http_request.client.host if http_request.client else None
+    user = await user_service.get_user_by_id(current_user.user_id)
+
+    # 撤销当前会话（立即离线）
+    await user_session_service.revoke_session(current_user.session_id)
+
+    if user:
+        await audit_service.log_logout(
+            username=user.username,
+            user_id=user.id,
+            ip_address=ip_address,
+        )
+
+    return success(None, message="已退出登录")

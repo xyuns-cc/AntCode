@@ -123,7 +123,9 @@ class NodeConfig:
 
     # 主节点连接信息
     master_url: Optional[str] = None
+    node_id: Optional[str] = None
     api_key: Optional[str] = None
+    access_token: Optional[str] = None
     secret_key: Optional[str] = None
     is_connected: bool = False
 
@@ -188,6 +190,7 @@ class NodeConfig:
             "tags": self.tags,
             "machine_code": self.machine_code,
             "master_url": self.master_url,
+            "node_id": self.node_id,
             "is_connected": self.is_connected,
             "heartbeat_interval": self.heartbeat_interval,
             "max_concurrent_tasks": self.max_concurrent_tasks,
@@ -213,6 +216,7 @@ class NodeConfig:
             "description": self.description,
             "tags": self.tags,
             "master_url": self.master_url,
+            "node_id": self.node_id,
             "heartbeat_interval": self.heartbeat_interval,
             "max_concurrent_tasks": self.max_concurrent_tasks,
             "task_timeout": self.task_timeout,

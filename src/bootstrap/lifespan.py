@@ -211,8 +211,8 @@ async def _create_default_admin() -> None:
                 is_admin=True,
             )
             await user_service.create_user(admin_request)
-            logger.info("默认管理员已创建: admin/admin")
-            logger.warning("请修改默认管理员密码")
+            logger.info(f"默认管理员已创建: {settings.DEFAULT_ADMIN_USERNAME}")
+            logger.warning("请尽快修改默认管理员密码（DEFAULT_ADMIN_PASSWORD）")
     except Exception as e:
         logger.error(f"创建默认管理员失败: {e}")
         raise

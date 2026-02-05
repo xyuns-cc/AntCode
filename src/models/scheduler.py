@@ -48,9 +48,6 @@ class ScheduledTask(BaseModel):
     # 指定执行节点ID（仅 specified 策略时使用）
     specified_node_id = fields.BigIntField(null=True, db_index=True, description="指定执行节点ID")
 
-    # 兼容旧字段（已废弃，保留用于迁移）
-    node_id = fields.BigIntField(null=True, db_index=True, description="[已废弃] 所属节点ID")
-
     class Meta:
         table = "scheduled_tasks"
         indexes = [
@@ -68,9 +65,6 @@ class ScheduledTask(BaseModel):
             ("project_id", "status"),
             ("task_type", "status"),
             ("public_id",),
-            ("node_id",),
-            ("node_id", "status"),
-            ("node_id", "user_id"),
             ("execution_strategy",),
             ("specified_node_id",),
         ]

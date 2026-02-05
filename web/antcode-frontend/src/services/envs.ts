@@ -46,7 +46,7 @@ export interface NodeEnvItem {
   name: string
   path: string
   python_version: string
-  python_executable: string
+  python_bin: string
   created_at?: string
   packages_count?: number
 }
@@ -55,10 +55,11 @@ export interface NodeEnvItem {
 export interface NodeInterpreter {
   version: string
   install_dir?: string
-  python_executable?: string  // 兼容旧字段
-  python_bin?: string         // 新字段
-  path?: string               // Worker 节点返回的字段
+  python_bin: string
   source: string
+  is_available?: boolean
+  created_at?: string
+  updated_at?: string
 }
 
 // 节点Python版本信息
@@ -158,12 +159,12 @@ class EnvService {
 
   // 在节点上注册本地解释器
   async registerNodeInterpreter(nodeId: string, pythonBin: string): Promise<void> {
-    await apiClient.post(`/api/v1/nodes/${nodeId}/interpreters/register`, { python_bin: pythonBin })
+    await apiClient.post(`/api/v1/nodes/${nodeId}/interpreters/local`, { python_bin: pythonBin })
   }
 
   // 在节点上取消注册解释器
-  async unregisterNodeInterpreter(nodeId: string, pythonBin: string): Promise<void> {
-    await apiClient.post(`/api/v1/nodes/${nodeId}/interpreters/unregister`, { python_bin: pythonBin })
+  async unregisterNodeInterpreter(nodeId: string, version: string, source: string = 'local'): Promise<void> {
+    await apiClient.delete(`/api/v1/nodes/${nodeId}/interpreters/${encodeURIComponent(version)}`, { params: { source } })
   }
 
   // 获取节点Python版本信息
@@ -187,7 +188,7 @@ class EnvService {
 
   async listVenvs(params: {
     scope?: VenvScope
-    project_id?: number
+    project_id?: string
     q?: string
     page?: number
     size?: number

@@ -11,6 +11,7 @@ import grpc
 from grpc import aio as grpc_aio
 from loguru import logger
 
+from src.core.security.auth import verify_token as verify_access_token
 from src.grpc_generated import (
     NodeServiceServicer,
     NodeMessage,
@@ -75,6 +76,7 @@ class NodeServiceImpl(NodeServiceServicer):
     # 认证 metadata 键名
     AUTH_NODE_ID_KEY = "x-node-id"
     AUTH_API_KEY_KEY = "x-api-key"
+    AUTH_TOKEN_KEY = "authorization"
     
     def __init__(
         self,
@@ -105,24 +107,28 @@ class NodeServiceImpl(NodeServiceServicer):
     def _extract_auth_metadata(
         self,
         context: grpc_aio.ServicerContext
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """从 gRPC context 中提取认证信息
         
         Args:
             context: gRPC 服务上下文
             
         Returns:
-            (node_id, api_key) 元组
+            (node_id, api_key, access_token) 元组
         """
         metadata = dict(context.invocation_metadata())
         node_id = metadata.get(self.AUTH_NODE_ID_KEY)
         api_key = metadata.get(self.AUTH_API_KEY_KEY)
-        return node_id, api_key
+        token = metadata.get(self.AUTH_TOKEN_KEY) or metadata.get(self.AUTH_TOKEN_KEY.upper())
+        if token and token.lower().startswith("bearer "):
+            token = token[7:]
+        return node_id, api_key, token
     
     async def _authenticate(
         self,
         node_id: str,
         api_key: str,
+        access_token: str,
         context: grpc_aio.ServicerContext
     ) -> bool:
         """验证节点认证信息
@@ -135,10 +141,26 @@ class NodeServiceImpl(NodeServiceServicer):
         Returns:
             认证是否成功
         """
+        if not access_token:
+            await context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "缺少用户令牌"
+            )
+            return False
+
+        try:
+            await verify_access_token(access_token)
+        except Exception:
+            await context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "用户令牌无效"
+            )
+            return False
+
         if not node_id or not api_key:
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED,
-                "缺少认证信息: 需要 x-node-id 和 x-api-key"
+                "缺少节点认证信息: 需要 x-node-id 和 x-api-key"
             )
             return False
         
@@ -258,8 +280,26 @@ class NodeServiceImpl(NodeServiceServicer):
         """
         logger.info(f"收到注册请求 - node_id: {request.node_id}, machine_code: {request.machine_code}")
         
+        node_id, api_key, access_token = self._extract_auth_metadata(context)
+        node_id = node_id or request.node_id
+        api_key = api_key or request.api_key
+
+        if not access_token:
+            return RegisterResponse(
+                success=False,
+                error="缺少用户令牌"
+            )
+
+        try:
+            await verify_access_token(access_token)
+        except Exception:
+            return RegisterResponse(
+                success=False,
+                error="用户令牌无效"
+            )
+
         # 验证认证信息
-        if not request.api_key:
+        if not api_key:
             return RegisterResponse(
                 success=False,
                 error="缺少 API Key"
@@ -322,10 +362,10 @@ class NodeServiceImpl(NodeServiceServicer):
             主控消息
         """
         # 提取认证信息
-        node_id, api_key = self._extract_auth_metadata(context)
+        node_id, api_key, access_token = self._extract_auth_metadata(context)
         
         # 验证认证
-        if not await self._authenticate(node_id, api_key, context):
+        if not await self._authenticate(node_id, api_key, access_token, context):
             return
         
         # 创建节点上下文

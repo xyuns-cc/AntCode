@@ -1,7 +1,6 @@
 """中间件基础设施模块"""
 
 from src.infrastructure.middleware.middleware import (
-    AdminPermissionMiddleware,
     SecurityHeadersMiddleware,
     RateLimitMiddleware,
     CacheInvalidationMiddleware,
@@ -9,7 +8,6 @@ from src.infrastructure.middleware.middleware import (
 )
 
 __all__ = [
-    "AdminPermissionMiddleware",
     "SecurityHeadersMiddleware",
     "RateLimitMiddleware",
     "CacheInvalidationMiddleware",

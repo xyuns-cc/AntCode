@@ -1,8 +1,9 @@
+import type React from 'react'
+
 // 导出所有类型定义
 export * from './api'
 export * from './project'
 export * from './task'
-export * from './websocket'
 export * from './node'
 export * from './system-config'
 

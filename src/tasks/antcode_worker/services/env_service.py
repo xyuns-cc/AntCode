@@ -223,7 +223,7 @@ class LocalEnvService:
                 "name": name,
                 "path": venv_path,
                 "python_version": version,
-                "python_executable": python_exe,
+                "python_bin": python_exe,
                 "created_at": manifest.get("created_at"),
                 "created_by": manifest.get("created_by"),
                 "packages_count": manifest.get("packages_count", 0),
@@ -357,7 +357,7 @@ class LocalEnvService:
                 "name": env_name,
                 "path": venv_path,
                 "python_version": actual_version,
-                "python_executable": python_exe,
+                "python_bin": python_exe,
                 "created_at": manifest["created_at"],
                 "created_by": manifest.get("created_by"),
                 "packages_count": manifest.get("packages_count", 0),
@@ -598,7 +598,7 @@ class LocalEnvService:
                             versions.append({
                                 "version": ver,
                                 "install_dir": install_dir,
-                                "python_executable": python_exe,
+                                "python_bin": python_exe,
                                 "source": "mise",
                             })
 
@@ -611,7 +611,7 @@ class LocalEnvService:
         versions.append({
             "version": f"{sys_version} (system)",
             "install_dir": os.path.dirname(sys.executable),
-            "python_executable": sys.executable,
+            "python_bin": sys.executable,
             "source": "system",
         })
 
@@ -644,7 +644,7 @@ class LocalEnvService:
                         versions.append({
                             "version": ver_dir,
                             "install_dir": ver_path,
-                            "python_executable": python_exe,
+                            "python_bin": python_exe,
                             "source": "pyenv-win",
                         })
 
@@ -662,7 +662,7 @@ class LocalEnvService:
                         versions.append({
                             "version": version,
                             "install_dir": item_path,
-                            "python_executable": python_exe,
+                            "python_bin": python_exe,
                             "source": "local",
                         })
 
@@ -715,7 +715,7 @@ class LocalEnvService:
             return {
                 "version": version,
                 "install_dir": install_dir,
-                "python_executable": python_exe,
+                "python_bin": python_exe,
                 "source": "mise",
             }
 
@@ -867,7 +867,7 @@ class LocalEnvService:
         for interp in all_interps:
             interp_version = interp.get("version", "")
             if interp_version.startswith(version):
-                python_bin = interp.get("python_bin") or interp.get("python_executable")
+                python_bin = interp.get("python_bin")
                 if python_bin and os.path.exists(python_bin):
                     return python_bin
 
@@ -945,4 +945,3 @@ class LocalEnvService:
 
 # 全局实例
 local_env_service = LocalEnvService()
-

@@ -22,8 +22,7 @@ import {
   FullscreenOutlined,
   FullscreenExitOutlined
 } from '@ant-design/icons'
-import { STORAGE_KEYS } from '@/utils/constants'
-import { logService } from '@/services/logs'
+import { logService, type LogStreamConnection } from '@/services/logs'
 import { LogExporter } from '@/utils/logExport'
 import Logger from '@/utils/logger'
 import VirtualLogViewer from './VirtualLogViewer'
@@ -99,7 +98,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   const { token } = theme.useToken() // 添加主题支持
 
   // 状态管理
-  const [ws, setWs] = useState<WebSocket | null>(null)
+  const [stream, setStream] = useState<LogStreamConnection | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
   const [messages, setMessages] = useState<LogMessage[]>([])
   const [isAutoScroll, setIsAutoScroll] = useState(true)
@@ -123,8 +122,6 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   // Refs
   const logContainerRef = useRef<HTMLDivElement>(null)
   const mountedRef = useRef(true)
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const tryFallbackConnectionRef = useRef<(() => void) | null>(null)
 
   // 确保组件挂载时mountedRef为true
   useEffect(() => {
@@ -166,9 +163,9 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     }
     
     // 如果已有连接，先清理
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
-      ws.close(1000, 'Reconnecting')
-      setWs(null)
+    if (stream) {
+      stream.disconnect()
+      setStream(null)
     }
 
     try {
@@ -181,7 +178,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       })
 
       // 使用新的WebSocket连接管理
-      const ws = logService.connectLogStream(
+      const conn = logService.connectLogStream(
         executionId,
         (logEntry) => {
           // 将LogEntry转换为LogMessage格式
@@ -213,7 +210,36 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
             timestamp: new Date().toISOString()
           })
         },
-        undefined, // onStateChange
+        (state) => {
+          if (!mountedRef.current) return
+          if (state === 'connected') {
+            setConnectionStatus('connected')
+            addLogMessage({
+              id: generateUniqueId(),
+              type: 'success',
+              content: '[成功] WebSocket连接已建立',
+              timestamp: new Date().toISOString()
+            })
+            return
+          }
+          if (state === 'reconnecting') {
+            setConnectionStatus('connecting')
+            addLogMessage({
+              id: generateUniqueId(),
+              type: 'warning',
+              content: '[重连] WebSocket连接中...',
+              timestamp: new Date().toISOString()
+            })
+            return
+          }
+          if (state === 'disconnected') {
+            setConnectionStatus('disconnected')
+            return
+          }
+          if (state === 'failed' || state === 'error') {
+            setConnectionStatus('error')
+          }
+        },
         (statusUpdate) => {
           // 处理执行状态更新
           Logger.info('收到执行状态更新:', statusUpdate)
@@ -231,15 +257,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         }
       )
 
-      if (ws) {
-        setWs(ws)
-        setConnectionStatus('connected')
-        addLogMessage({
-          id: generateUniqueId(),
-          type: 'success',
-          content: '[成功] WebSocket连接已建立',
-          timestamp: new Date().toISOString()
-        })
+      if (conn) {
+        setStream(conn)
       } else {
         throw new Error('无法创建WebSocket连接')
       }
@@ -253,128 +272,14 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         content: `创建WebSocket失败: ${error instanceof Error ? error.message : String(error)}`,
         timestamp: new Date().toISOString()
       })
-
-      // 尝试备用连接方案
-      tryFallbackConnectionRef.current?.()
     }
-  }, [executionId, connectionStatus, showStdout, showStderr, addLogMessage, onStatusUpdate, ws])
-
-  // 备用连接方案
-  const tryFallbackConnection = useCallback(async () => {
-    const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
-    if (!token || !executionId) return
-
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: '[重试] 尝试备用WebSocket连接...',
-      timestamp: new Date().toISOString()
-    })
-
-    // 使用正确的WebSocket端点
-    const fallbackUrl = `ws://localhost:8000/api/v1/ws/executions/${executionId}/logs?token=${encodeURIComponent(token)}`
-
-    try {
-      const fallbackWs = new WebSocket(fallbackUrl)
-      setWs(fallbackWs)
-
-      fallbackWs.onopen = () => {
-        if (!mountedRef.current) return
-        setConnectionStatus('connected')
-        addLogMessage({
-          id: generateUniqueId(),
-          type: 'success',
-          content: '[成功] 备用WebSocket连接已建立',
-          timestamp: new Date().toISOString()
-        })
-      }
-
-      fallbackWs.onmessage = (event) => {
-        if (!mountedRef.current) return
-
-        try {
-          const data = JSON.parse(event.data)
-
-          // 处理简化端点的消息格式
-          if (data.type === 'log') {
-            addLogMessage({
-              id: generateUniqueId(),
-              type: data.log_type || 'stdout',
-              content: data.message || data.content,
-              timestamp: data.timestamp || new Date().toISOString(),
-              level: data.level,
-              source: data.source
-            })
-          } else {
-            addLogMessage({
-              id: generateUniqueId(),
-              type: 'info',
-              content: `收到消息: ${JSON.stringify(data)}`,
-              timestamp: new Date().toISOString()
-            })
-          }
-        } catch (error) {
-          addLogMessage({
-            id: generateUniqueId(),
-            type: 'error',
-            content: `解析备用连接消息失败: ${error instanceof Error ? error.message : String(error)}`,
-            timestamp: new Date().toISOString()
-          })
-        }
-      }
-
-      fallbackWs.onerror = (error) => {
-        if (!mountedRef.current) return
-        console.error('Fallback WebSocket error:', error)
-        setConnectionStatus('error')
-        addLogMessage({
-          id: generateUniqueId(),
-          type: 'error',
-          content: '[失败] 备用WebSocket连接也失败了',
-          timestamp: new Date().toISOString()
-        })
-      }
-
-      fallbackWs.onclose = (event) => {
-        if (!mountedRef.current) return
-        setConnectionStatus('disconnected')
-        setWs(null)
-        addLogMessage({
-          id: generateUniqueId(),
-          type: 'warning',
-          content: `[断开] 备用WebSocket连接已关闭 (${event.code})`,
-          timestamp: new Date().toISOString()
-        })
-      }
-
-    } catch (error) {
-      console.error('Fallback WebSocket creation failed:', error)
-      addLogMessage({
-        id: generateUniqueId(),
-        type: 'error',
-        content: `创建备用WebSocket失败: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: new Date().toISOString()
-      })
-    }
-  }, [executionId, addLogMessage])
-
-  // 更新 ref 以便 connect 函数可以调用
-  useEffect(() => {
-    tryFallbackConnectionRef.current = tryFallbackConnection
-  }, [tryFallbackConnection])
+  }, [executionId, connectionStatus, showStdout, showStderr, addLogMessage, onStatusUpdate, stream])
 
   // 断开连接
   const disconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current)
-      reconnectTimeoutRef.current = null
-    }
-    
-    if (ws) {
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close(1000, 'Manual disconnect')
-      }
-      setWs(null)
+    if (stream) {
+      stream.disconnect()
+      setStream(null)
     }
     
     setConnectionStatus('disconnected')
@@ -384,7 +289,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       content: '[断开] 手动断开连接',
       timestamp: new Date().toISOString()
     })
-  }, [ws, addLogMessage])
+  }, [stream, addLogMessage])
 
   // 清除日志
   const clearLogs = useCallback(() => {
@@ -543,28 +448,21 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     if (!autoConnect || !executionId) return
     
     // 只在真正断开时才自动连接，避免重复连接
-    if (connectionStatus === 'disconnected' && !ws) {
+    if (connectionStatus === 'disconnected' && !stream) {
       const timeoutId = setTimeout(() => {
         connect()
       }, 500) // 500ms 防抖
       
       return () => clearTimeout(timeoutId)
     }
-  }, [autoConnect, executionId, connectionStatus, ws, connect])
+  }, [autoConnect, executionId, connectionStatus, stream, connect])
 
   // 组件卸载清理
   useEffect(() => {
     return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current)
-        reconnectTimeoutRef.current = null
-      }
-      
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close(1000, 'Component unmount')
-      }
+      stream?.disconnect()
     }
-  }, [ws])
+  }, [stream])
 
   // 渲染日志消息
   const renderLogMessage = (msg: LogMessage) => {

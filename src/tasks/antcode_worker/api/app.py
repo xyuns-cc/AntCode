@@ -1,6 +1,8 @@
 """FastAPI 应用"""
 
 from contextlib import asynccontextmanager
+from datetime import datetime
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -10,99 +12,12 @@ from .routes import node_router, envs_router, projects_router, tasks_router, spi
 from .routes.queue import init_queue_components, shutdown_queue_components
 from ..config import get_node_config, MACHINE_CODE_FILE
 from ..core import EngineConfig, init_worker_engine
-from ..services import local_env_service, local_project_service, master_client, node_ws_client
-# 导入旧的 communication_manager 用于兼容性
-from ..services import communication_manager as legacy_communication_manager
-# 导入新的 gRPC 通信管理器
-from ..transport import CommunicationManager as GrpcCommunicationManager
-from ..domain.models import ConnectionConfig, Protocol
+from ..services import local_env_service, local_project_service, master_client
+from ..transport.manager import communication_manager
+from ..domain.models import ConnectionConfig, LogEntry, TaskStatus, TaskCancel
 
 # 仅在首次断连时提示，避免日志刷屏
 _disconnected_log_notified = set()
-
-# gRPC 通信管理器实例
-_grpc_communication_manager: GrpcCommunicationManager | None = None
-
-
-def get_grpc_communication_manager() -> GrpcCommunicationManager | None:
-    """获取 gRPC 通信管理器实例"""
-    return _grpc_communication_manager
-
-
-def set_grpc_communication_manager(manager: GrpcCommunicationManager):
-    """设置 gRPC 通信管理器实例"""
-    global _grpc_communication_manager
-    _grpc_communication_manager = manager
-
-
-# 兼容性包装器：根据配置选择使用哪个通信管理器
-class CommunicationManagerWrapper:
-    """通信管理器包装器，提供统一接口"""
-    
-    def __init__(self):
-        self._use_grpc = False
-    
-    @property
-    def is_connected(self) -> bool:
-        if self._use_grpc and _grpc_communication_manager:
-            return _grpc_communication_manager.is_connected
-        return legacy_communication_manager.is_connected
-    
-    @property
-    def current_protocol(self):
-        if self._use_grpc and _grpc_communication_manager:
-            return _grpc_communication_manager.current_protocol
-        return legacy_communication_manager.current_protocol
-    
-    async def report_task_status(self, execution_id: str, status: str, exit_code: int = None, error_message: str = None):
-        if self._use_grpc and _grpc_communication_manager:
-            from ..domain.models import TaskStatus
-            from datetime import datetime
-            task_status = TaskStatus(
-                execution_id=execution_id,
-                status=status,
-                exit_code=exit_code,
-                error_message=error_message,
-                timestamp=datetime.now(),
-            )
-            return await _grpc_communication_manager.send_task_status(task_status)
-        return await legacy_communication_manager.report_task_status(execution_id, status, exit_code, error_message)
-    
-    async def report_log(self, execution_id: str, log_type: str, content: str):
-        if self._use_grpc and _grpc_communication_manager:
-            from ..domain.models import LogEntry
-            from datetime import datetime
-            log_entry = LogEntry(
-                execution_id=execution_id,
-                log_type=log_type,
-                content=content,
-                timestamp=datetime.now(),
-            )
-            return await _grpc_communication_manager.send_logs([log_entry])
-        return await legacy_communication_manager.report_log(execution_id, log_type, content)
-    
-    async def disconnect(self):
-        """
-        断开连接
-        
-        优雅关闭流程：
-        1. 刷新待处理的日志
-        2. 关闭 gRPC 流
-        3. 断开通道
-        
-        Requirements: 7.4
-        """
-        if self._use_grpc and _grpc_communication_manager:
-            logger.info("正在优雅关闭 gRPC 通信管理器...")
-            await _grpc_communication_manager.disconnect()
-        await legacy_communication_manager.disconnect()
-    
-    def set_use_grpc(self, use_grpc: bool):
-        self._use_grpc = use_grpc
-
-
-# 全局通信管理器包装器
-communication_manager = CommunicationManagerWrapper()
 
 
 def print_banner(config):
@@ -125,50 +40,67 @@ async def on_task_start(task: dict):
 
     logger.info(f"任务启动: {execution_id}, protocol={communication_manager.current_protocol.value}")
 
-    if communication_manager.is_connected:
-        try:
-            result = await communication_manager.report_task_status(report_id, "running")
-            logger.debug(f"状态上报结果: {result}")
-        except Exception as e:
-            logger.warning(f"上报任务状态失败: {e}")
-    else:
+    if not communication_manager.is_connected:
         logger.warning(f"节点未连接主站，任务状态未上报: {execution_id}")
+        return
+
+    try:
+        ok = await communication_manager.send_task_status(TaskStatus(
+            execution_id=report_id,
+            status="running",
+            timestamp=datetime.now(),
+        ))
+        logger.debug(f"状态上报结果: {ok}")
+    except Exception as e:
+        logger.warning(f"上报任务状态失败: {e}")
 
 
 async def on_task_complete(task: dict):
     """任务完成回调"""
     execution_id = task.get("execution_id", task.get("id", task.get("task_id")))
-    status = task.get("status", "completed")
+    status = task.get("status", "success")
     report_id = task.get("master_execution_id") or execution_id
 
     logger.info(f"任务完成: {execution_id} [{status}], protocol={communication_manager.current_protocol.value}")
 
-    if communication_manager.is_connected:
-        try:
-            result = await communication_manager.report_task_status(
-                report_id, status, task.get("exit_code"), task.get("error_message")
-            )
-            logger.debug(f"状态上报结果: {result}")
-        except Exception as e:
-            logger.warning(f"上报任务完成状态失败: {e}")
-    else:
+    if not communication_manager.is_connected:
         logger.warning(f"节点未连接主站，任务完成状态未上报: {execution_id}")
+        return
+
+    try:
+        ok = await communication_manager.send_task_status(TaskStatus(
+            execution_id=report_id,
+            status=status,
+            exit_code=task.get("exit_code"),
+            error_message=task.get("error_message"),
+            timestamp=datetime.now(),
+        ))
+        logger.debug(f"状态上报结果: {ok}")
+    except Exception as e:
+        logger.warning(f"上报任务完成状态失败: {e}")
 
 
 async def on_log_line(execution_id: str, log_type: str, content: str):
     """日志行回调"""
     if communication_manager.is_connected:
-        await communication_manager.report_log(execution_id, log_type, content)
+        try:
+            await communication_manager.send_logs([LogEntry(
+                execution_id=execution_id,
+                log_type=log_type,
+                content=content,
+                timestamp=datetime.now(),
+            )])
+        except Exception as e:
+            logger.debug(f"日志上报失败: {e}")
     else:
         if execution_id not in _disconnected_log_notified:
             _disconnected_log_notified.add(execution_id)
             logger.warning(f"节点未连接主站，日志未上报: {execution_id}")
 
-
-async def on_task_cancel(data: dict):
-    """远程取消任务回调（WebSocket）"""
-    task_id = data.get("task_id")
-    execution_id = data.get("execution_id")
+async def on_task_cancel(cancel: TaskCancel):
+    """远程取消任务回调（来自 Master）"""
+    task_id = getattr(cancel, "task_id", None)
+    execution_id = getattr(cancel, "execution_id", None)
 
     if not task_id:
         logger.warning("收到取消指令但缺少 task_id")
@@ -177,58 +109,23 @@ async def on_task_cancel(data: dict):
     logger.info(f"收到远程取消指令: task_id={task_id}, execution_id={execution_id}")
 
     engine = get_engine()
-    if engine:
-        success = await engine.cancel_task(task_id)
-        if success:
-            logger.info(f"任务已取消: {task_id}")
-            # 上报取消状态
-            if communication_manager.is_connected and execution_id:
-                await communication_manager.report_task_status(
-                    execution_id, "cancelled", exit_code=-1, error_message="任务被远程取消"
-                )
-        else:
-            logger.warning(f"取消任务失败（可能已完成或不存在）: {task_id}")
-
-
-async def on_grpc_task_cancel(cancel):
-    """
-    gRPC 任务取消回调
-    
-    处理通过 gRPC 接收的任务取消请求。
-    
-    Args:
-        cancel: TaskCancel 对象，包含 task_id 和 execution_id
-    """
-    from ..domain.models import TaskCancel
-    
-    task_id = cancel.task_id if isinstance(cancel, TaskCancel) else cancel.get("task_id", "")
-    execution_id = cancel.execution_id if isinstance(cancel, TaskCancel) else cancel.get("execution_id", "")
-
-    if not task_id:
-        logger.warning("收到 gRPC 取消指令但缺少 task_id")
+    if not engine:
+        await communication_manager.send_cancel_ack(task_id, False, "engine not ready")
         return
 
-    logger.info(f"收到 gRPC 远程取消指令: task_id={task_id}, execution_id={execution_id}")
-
-    engine = get_engine()
-    grpc_manager = get_grpc_communication_manager()
-    
-    if engine:
-        success = await engine.cancel_task(task_id)
-        if success:
-            logger.info(f"任务已取消: {task_id}")
-            # 发送取消确认
-            if grpc_manager:
-                await grpc_manager.send_cancel_ack(task_id, True)
-            # 上报取消状态
-            if communication_manager.is_connected and execution_id:
-                await communication_manager.report_task_status(
-                    execution_id, "cancelled", exit_code=-1, error_message="任务被远程取消"
-                )
-        else:
-            logger.warning(f"取消任务失败（可能已完成或不存在）: {task_id}")
-            if grpc_manager:
-                await grpc_manager.send_cancel_ack(task_id, False, "任务不存在或已完成")
+    success = await engine.cancel_task(task_id)
+    if success:
+        await communication_manager.send_cancel_ack(task_id, True)
+        if execution_id and communication_manager.is_connected:
+            await communication_manager.send_task_status(TaskStatus(
+                execution_id=execution_id,
+                status="cancelled",
+                exit_code=-1,
+                error_message="任务被远程取消",
+                timestamp=datetime.now(),
+            ))
+    else:
+        await communication_manager.send_cancel_ack(task_id, False, "任务不存在或已完成")
 
 
 @asynccontextmanager
@@ -268,24 +165,20 @@ async def lifespan(app: FastAPI):
     # 启动引擎（这会启动引擎内部的调度器）
     await engine.start()
 
-    # 注册 WebSocket 事件处理器
-    node_ws_client.on("task_cancel", on_task_cancel)
-
     # 初始化队列组件（绑定到引擎的调度器）
     await init_queue_components()
 
-    # 初始化 gRPC 通信管理器（如果启用）
-    # Requirements: 8.2 - 初始化 CommunicationManager 并使用 gRPC 偏好连接
-    if config.grpc_enabled and config.master_url:
-        grpc_manager = GrpcCommunicationManager()
-        set_grpc_communication_manager(grpc_manager)
-        
-        # 创建连接配置
+    # 注册 Master -> Worker 回调
+    communication_manager.on_task_cancel(on_task_cancel)
+
+    # 如果已配置连接信息，则启动时自动连接（主要用于容器/自动化场景）
+    if config.grpc_enabled and config.master_url and config.api_key and config.access_token and getattr(config, "node_id", None):
         connection_config = ConnectionConfig(
             master_url=config.master_url,
-            node_id=config.machine_code,  # 使用机器码作为节点 ID
-            api_key=config.api_key or "",
+            node_id=config.node_id,
+            api_key=config.api_key,
             machine_code=config.machine_code,
+            access_token=config.access_token,
             secret_key=config.secret_key,
             grpc_port=config.grpc_port,
             prefer_grpc=config.prefer_grpc,
@@ -293,25 +186,27 @@ async def lifespan(app: FastAPI):
             reconnect_base_delay=config.grpc_reconnect_base_delay,
             reconnect_max_delay=config.grpc_reconnect_max_delay,
         )
-        
-        # 注册任务取消回调
-        grpc_manager.on_task_cancel(on_grpc_task_cancel)
-        
-        # 尝试连接
+
         try:
-            connected = await grpc_manager.connect(connection_config)
-            if connected:
-                communication_manager.set_use_grpc(True)
-                logger.info(f"gRPC 通信管理器已连接，协议: {grpc_manager.current_protocol.value}")
-            else:
-                logger.warning("gRPC 通信管理器连接失败，将使用传统通信方式")
+            await master_client.connect(
+                master_url=config.master_url,
+                machine_code=config.machine_code,
+                api_key=config.api_key,
+                access_token=config.access_token,
+                secret_key=config.secret_key,
+                node_id=config.node_id,
+            )
         except Exception as e:
-            logger.error(f"gRPC 通信管理器初始化失败: {e}")
-    else:
-        if not config.grpc_enabled:
-            logger.info("gRPC 通信已禁用，使用传统通信方式")
-        elif not config.master_url:
-            logger.debug("未配置 master_url，跳过 gRPC 通信管理器初始化")
+            logger.warning(f"Master HTTP 连接初始化失败: {e}")
+
+        try:
+            connected = await communication_manager.connect(connection_config)
+            if connected:
+                logger.info(f"通信管理器已连接，协议: {communication_manager.current_protocol.value}")
+            else:
+                logger.warning("通信管理器连接失败")
+        except Exception as e:
+            logger.error(f"通信管理器初始化失败: {e}")
 
     # 启动资源监控（如果启用）
     if config.auto_resource_limit:
@@ -337,6 +232,10 @@ async def lifespan(app: FastAPI):
     await engine.stop()
     await shutdown_queue_components()
     await communication_manager.disconnect()
+    try:
+        await master_client.disconnect()
+    except Exception:
+        pass
     logger.info("节点已关闭")
 
 

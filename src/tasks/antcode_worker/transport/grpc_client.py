@@ -107,6 +107,9 @@ class GrpcClient(TransportProtocol):
         Requirements: 1.2
         """
         self._config = config
+
+        if not config.access_token:
+            raise ConnectionError("缺少访问令牌")
         
         try:
             # 解析 gRPC 地址
@@ -206,8 +209,9 @@ class GrpcClient(TransportProtocol):
             
             # 添加认证 metadata
             metadata = [
-                ('authorization', f'Bearer {self._config.api_key}'),
+                ('authorization', f'Bearer {self._config.access_token}'),
                 ('x-node-id', self._config.node_id),
+                ('x-api-key', self._config.api_key),
                 ('x-machine-code', self._config.machine_code),
             ]
             
@@ -279,8 +283,9 @@ class GrpcClient(TransportProtocol):
         try:
             # 添加认证 metadata
             metadata = [
-                ('authorization', f'Bearer {self._config.api_key}'),
+                ('authorization', f'Bearer {self._config.access_token}'),
                 ('x-node-id', self._config.node_id),
+                ('x-api-key', self._config.api_key),
                 ('x-machine-code', self._config.machine_code),
             ]
             
@@ -651,4 +656,3 @@ class GrpcClient(TransportProtocol):
     def on_task_cancel(self, callback: Callable[[TaskCancel], Awaitable[None]]):
         """注册任务取消回调"""
         self._on_task_cancel = callback
-

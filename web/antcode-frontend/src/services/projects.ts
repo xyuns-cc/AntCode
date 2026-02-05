@@ -106,7 +106,7 @@ class ProjectService extends BaseService {
     // 根据项目类型添加特定字段
     if (data.type === 'file') {
       if (data.file) {
-        // 处理主文件上传 - 兼容 Ant Design Upload 组件的文件对象
+        // 处理主文件上传 - 适配 Ant Design Upload 组件的文件对象
         const fileToUpload = this.extractFile(data.file as FileInput)
         if (fileToUpload) {
           formData.append('file', fileToUpload)
@@ -219,68 +219,86 @@ class ProjectService extends BaseService {
 
   // 更新规则项目配置
   async updateRuleConfig(id: string, data: Partial<ProjectUpdateRequest>): Promise<Project> {
-    const formData = new FormData()
-    
-    // 将所有字段添加到FormData中
-    if (data.target_url) {
-      formData.append('target_url', data.target_url)
-    }
-    if (data.url_pattern) {
-      formData.append('url_pattern', data.url_pattern)
-    }
-    if (data.engine) {
-      formData.append('engine', data.engine)
-    }
-    if (data.request_method) {
-      formData.append('request_method', data.request_method)
-    }
-    if (data.callback_type) {
-      formData.append('callback_type', data.callback_type)
-    }
-    if (data.extraction_rules) {
-      formData.append('extraction_rules', data.extraction_rules)
-    }
-    if (data.pagination_config) {
-      formData.append('pagination_config', data.pagination_config)
-    }
-    if (data.max_pages !== undefined) {
-      formData.append('max_pages', data.max_pages.toString())
-    }
-    if (data.start_page !== undefined) {
-      formData.append('start_page', data.start_page.toString())
-    }
-    if (data.request_delay !== undefined) {
-      formData.append('request_delay', data.request_delay.toString())
-    }
-    if (data.retry_count !== undefined) {
-      formData.append('retry_count', data.retry_count.toString())
-    }
-    if (data.timeout !== undefined) {
-      formData.append('timeout', data.timeout.toString())
-    }
-    if (data.priority !== undefined) {
-      formData.append('priority', data.priority.toString())
-    }
-    if (data.dont_filter !== undefined) {
-      formData.append('dont_filter', data.dont_filter.toString())
-    }
-    if (data.headers) {
-      formData.append('headers', typeof data.headers === 'string' ? data.headers : JSON.stringify(data.headers))
-    }
-    if (data.cookies) {
-      formData.append('cookies', typeof data.cookies === 'string' ? data.cookies : JSON.stringify(data.cookies))
-    }
-    if (data.proxy_config) {
-      formData.append('proxy_config', data.proxy_config)
-    }
-    if (data.anti_spider) {
-      formData.append('anti_spider', data.anti_spider)
-    }
-    if (data.task_config) {
-      formData.append('task_config', data.task_config)
+    const payload: Record<string, unknown> = {}
+    const allowedFields = [
+      'target_url',
+      'callback_type',
+      'request_method',
+      'extraction_rules',
+      'pagination_config',
+      'max_pages',
+      'start_page',
+      'request_delay',
+      'priority',
+      'dont_filter',
+      'headers',
+      'cookies',
+      'proxy_config',
+      'task_config'
+    ]
+    allowedFields.forEach((field) => {
+      const value = data[field as keyof ProjectUpdateRequest]
+      if (value !== undefined) {
+        payload[field] = value
+      }
+    })
+
+    const parseJson = (value: unknown, field: string) => {
+      if (value === undefined || value === null) return value
+      if (typeof value !== 'string') return value
+      if (!value.trim()) return undefined
+      try {
+        return JSON.parse(value)
+      } catch {
+        throw new Error(`${field} JSON解析失败`)
+      }
     }
 
-    return this.uploadFile<Project>(`/${id}/rule-config`, formData)
+    if (payload.extraction_rules !== undefined) {
+      const parsed = parseJson(payload.extraction_rules, 'extraction_rules')
+      if (!Array.isArray(parsed)) {
+        throw new Error('extraction_rules 必须是数组')
+      }
+      payload.extraction_rules = parsed
+    }
+
+    if (payload.pagination_config !== undefined) {
+      const parsed = parseJson(payload.pagination_config, 'pagination_config')
+      if (parsed && typeof parsed !== 'object') {
+        throw new Error('pagination_config 必须是对象')
+      }
+      payload.pagination_config = parsed
+    }
+
+    if (payload.headers !== undefined) {
+      payload.headers = parseJson(payload.headers, 'headers')
+    }
+
+    if (payload.cookies !== undefined) {
+      payload.cookies = parseJson(payload.cookies, 'cookies')
+    }
+
+    if (payload.task_config !== undefined) {
+      payload.task_config = parseJson(payload.task_config, 'task_config')
+    }
+
+    const numberFields = ['max_pages', 'start_page', 'request_delay', 'priority', 'retry_count', 'timeout']
+    numberFields.forEach((field) => {
+      const value = payload[field]
+      if (typeof value === 'string') {
+        const parsed = Number(value)
+        if (Number.isNaN(parsed)) {
+          throw new Error(`${field} 必须是数字`)
+        }
+        payload[field] = parsed
+      }
+    })
+
+    if (typeof payload.dont_filter === 'string') {
+      payload.dont_filter = payload.dont_filter === 'true'
+    }
+
+    return this.put<Project>(`/${id}/rule-config`, payload)
   }
 
   // 更新代码项目配置

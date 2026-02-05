@@ -294,14 +294,14 @@ class TaskItem:
     environment: dict = field(default_factory=dict)
     timeout: int = 3600
     download_url: str = None
-    api_key: str = None
+    access_token: str = None
     file_hash: str = None
     entry_point: str = None
 
     def to_dict(self):
         return {"task_id": self.task_id, "project_id": self.project_id, "project_type": self.project_type.value,
                 "priority": self.priority, "params": self.params, "environment": self.environment,
-                "timeout": self.timeout, "download_url": self.download_url, "api_key": self.api_key, 
+                "timeout": self.timeout, "download_url": self.download_url, "access_token": self.access_token, 
                 "file_hash": self.file_hash, "entry_point": self.entry_point}
 
     @classmethod
@@ -310,7 +310,7 @@ class TaskItem:
                   project_type=ProjectType(d.get("project_type", ProjectType.CODE.value)),
                   priority=d.get("priority"), params=d.get("params", {}), environment=d.get("environment", {}),
                   timeout=d.get("timeout", 3600), download_url=d.get("download_url"),
-                  api_key=d.get("api_key"), file_hash=d.get("file_hash"), entry_point=d.get("entry_point"))
+                  access_token=d.get("access_token"), file_hash=d.get("file_hash"), entry_point=d.get("entry_point"))
 
 
 @dataclass
@@ -361,7 +361,7 @@ class BatchReceiver:
                                                    project_type=task.project_type, priority=priority,
                                                    data={"params": task.params, "environment": task.environment,
                                                         "timeout": task.timeout, "download_url": task.download_url,
-                                                        "api_key": task.api_key, "file_hash": task.file_hash,
+                                                        "access_token": task.access_token, "file_hash": task.file_hash,
                                                         "entry_point": task.entry_point})
             if success:
                 accepted_tasks.append(task.task_id)

@@ -2,7 +2,7 @@
 传输层 - Worker 节点通信协议实现
 
 本模块包含所有与 Master 通信的传输协议实现。
-支持 gRPC、HTTP 和 WebSocket 协议。
+支持 gRPC 和 HTTP 协议。
 
 Requirements: 11.2
 """

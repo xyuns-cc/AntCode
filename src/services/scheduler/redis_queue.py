@@ -442,7 +442,7 @@ class RedisQueueBackend(BaseQueueBackend):
         """检查任务是否在队列中
         
         注意：这是同步方法，需要在事件循环中调用异步版本。
-        为了兼容 Protocol，这里使用同步检查。
+        由于 Protocol 定义为同步方法，这里使用同步检查。
         """
         # 由于 Protocol 定义为同步方法，这里需要特殊处理
         # 在实际使用中，建议使用 contains_async
