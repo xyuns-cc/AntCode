@@ -7,14 +7,13 @@ export type TaskStatus =
   | 'queued'        // 已分发到节点队列，等待执行
   | 'running'       // 正在执行
   | 'success'       // 执行成功
-  | 'completed'     // 执行完成（兼容旧状态）
   | 'failed'        // 执行失败
   | 'cancelled'     // 已取消
   | 'timeout'       // 执行超时
   | 'paused'        // 已暂停
 
 // 任务类型 - 匹配后端
-export type TaskType = 'code' | 'rule'
+export type TaskType = 'file' | 'code' | 'rule' | 'spider'
 
 // 调度类型 - 匹配后端
 export type ScheduleType = 'once' | 'interval' | 'cron'
@@ -67,10 +66,6 @@ export interface Task {
   project_bound_node_id?: string
   project_bound_node_name?: string
 
-  // 兼容旧字段
-  node_id?: string      // [已废弃] 指定执行节点ID
-  node_name?: string    // [已废弃] 执行节点名称
-
   // 时间戳
   created_at: string
   updated_at: string
@@ -122,9 +117,6 @@ export interface TaskCreateRequest {
   // 执行策略配置
   execution_strategy?: ExecutionStrategy | null  // 为空则继承项目配置
   specified_node_id?: string    // 指定执行节点ID（仅 specified 策略）
-  
-  // 兼容旧字段
-  node_id?: string    // [已废弃] 指定执行节点ID
 }
 
 // 更新任务请求 - 匹配后端API
@@ -233,8 +225,8 @@ export interface TaskExecuteRequest {
   environment_variables?: Record<string, string>
 }
 
-// 分页响应
-export interface PaginatedResponse<T> {
+// 分页数据（不包含 BaseResponse 外层包装）
+export interface PageData<T> {
   items: T[]
   total: number
   page: number

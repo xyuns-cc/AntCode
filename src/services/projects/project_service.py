@@ -45,11 +45,11 @@ class ProjectService:
 
     @staticmethod
     def _resolve_full_path(path):
-        """将存储路径解析为绝对路径，兼容相对路径和历史绝对路径"""
+        """将存储路径解析为绝对路径（仅允许相对路径）"""
         if not path:
             return None
         if os.path.isabs(path):
-            return path
+            raise HTTPException(status_code=500, detail="检测到非法存储路径（绝对路径）")
         return file_storage_service.get_file_path(path)
 
     def _build_node_base_url(self, node):
@@ -365,15 +365,10 @@ class ProjectService:
         )
 
     async def get_project_by_id(self, project_id, user_id=None):
-        """根据ID获取项目（支持 public_id 和内部 id）"""
+        """根据 public_id 获取项目"""
         from src.services.users.user_service import user_service
 
-        # 尝试解析 project_id
-        try:
-            internal_id = int(project_id)
-            query = Project.filter(id=internal_id)
-        except (ValueError, TypeError):
-            query = Project.filter(public_id=str(project_id))
+        query = Project.filter(public_id=str(project_id))
 
         # 如果指定了用户ID，检查是否为管理员
         if user_id is not None:
@@ -410,7 +405,8 @@ class ProjectService:
         status = None,
         tag = None,
         user_id = None,
-        search = None
+        search = None,
+        node_id = None
     ):
         """获取项目列表（优化版本）
         
@@ -430,6 +426,8 @@ class ProjectService:
             query = query.filter(user_id=user_id)
         if tag:
             query = query.filter(tags__contains=tag)
+        if node_id:
+            query = query.filter(node_id=node_id)
 
         # 关键字搜索
         if search:
@@ -461,7 +459,7 @@ class ProjectService:
         request, 
         user_id
     ):
-        """更新项目"""
+        """更新项目（仅 public_id）"""
         from src.services.users.user_service import user_service
 
         # 检查用户是否为管理员
@@ -469,10 +467,10 @@ class ProjectService:
 
         if user and user.is_admin:
             # 管理员可以更新所有项目
-            project = await Project.filter(id=project_id).first()
+            project = await Project.filter(public_id=str(project_id)).first()
         else:
             # 普通用户只能更新自己的项目
-            project = await Project.filter(id=project_id, user_id=user_id).first()
+            project = await Project.filter(public_id=str(project_id), user_id=user_id).first()
 
         if not project:
             return None
@@ -486,17 +484,11 @@ class ProjectService:
             if 'bound_node_id' in update_data:
                 bound_node_id = update_data['bound_node_id']
                 if bound_node_id:
-                    # 将 public_id 转换为内部 id
                     from src.models import Node
                     node = await Node.get_or_none(public_id=str(bound_node_id))
-                    if node:
-                        update_data['bound_node_id'] = node.id
-                    else:
-                        # 尝试直接作为内部 id 使用
-                        try:
-                            update_data['bound_node_id'] = int(bound_node_id)
-                        except (ValueError, TypeError):
-                            update_data['bound_node_id'] = None
+                    if not node:
+                        raise HTTPException(status_code=400, detail="绑定节点不存在")
+                    update_data['bound_node_id'] = node.id
                 else:
                     update_data['bound_node_id'] = None
 

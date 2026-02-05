@@ -27,7 +27,6 @@ class Protocol(str, Enum):
     NONE = "none"
     HTTP = "http"
     GRPC = "grpc"
-    WEBSOCKET = "websocket"  # 保留兼容性
 
 
 @dataclass
@@ -37,6 +36,7 @@ class ConnectionConfig:
     node_id: str
     api_key: str
     machine_code: str
+    access_token: str
     secret_key: Optional[str] = None
     grpc_port: int = 50051
     prefer_grpc: bool = True

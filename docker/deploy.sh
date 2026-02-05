@@ -289,14 +289,13 @@ handle_deploy_menu() {
 # 显示访问信息
 show_access_info() {
     echo ""
-    print_header "服务访问信息"
-    echo "  前端地址: http://localhost:3000"
-    echo "  后端 API: http://localhost:8000"
-    echo "  API 文档: http://localhost:8000/docs"
-    echo "  默认账号: admin / admin"
-    echo ""
-    print_info "查看日志: cd docker && docker compose logs -f"
-    print_info "停止服务: cd docker && docker compose down"
+	    print_header "服务访问信息"
+	    echo "  前端地址: http://localhost:3000"
+	    echo "  后端 API: http://localhost:8000"
+	    echo "  默认账号: admin / Admin123!"
+	    echo ""
+	    print_info "查看日志: cd docker && docker compose logs -f"
+	    print_info "停止服务: cd docker && docker compose down"
     echo ""
 }
 

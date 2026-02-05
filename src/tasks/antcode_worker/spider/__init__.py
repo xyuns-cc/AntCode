@@ -11,7 +11,7 @@ Spider 模块 - 爬虫核心
 - RenderSpider: 渲染爬虫基类
 
 用法:
-    from antcode_worker.engine.spider import Spider, Request, Response
+    from antcode_worker.spider import Spider, Request, Response
     
     class MySpider(Spider):
         name = "my_spider"
@@ -25,7 +25,7 @@ Spider 模块 - 爬虫核心
                 }
     
     # 渲染爬虫
-    from antcode_worker.engine.spider import RenderSpider, RenderResponse
+    from antcode_worker.spider import RenderSpider, RenderResponse
     
     class MyRenderSpider(RenderSpider):
         name = "my_render_spider"

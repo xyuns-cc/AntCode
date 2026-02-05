@@ -145,7 +145,7 @@ const EnvListPage: React.FC = () => {
               venv_path: env.path,
               interpreter_version: env.python_version,
               interpreter_source: 'local',
-              python_bin: env.python_executable,
+              python_bin: env.python_bin,
               install_dir: '',
               created_at: env.created_at,
               isLocal: false,
@@ -187,7 +187,7 @@ const EnvListPage: React.FC = () => {
                 venv_path: env.path,
                 interpreter_version: env.python_version,
                 interpreter_source: 'local',
-                python_bin: env.python_executable,
+                python_bin: env.python_bin,
                 install_dir: '',
                 created_at: env.created_at,
                 isLocal: false,
@@ -297,7 +297,7 @@ const EnvListPage: React.FC = () => {
         setInstalled(
           nodeInterpreters.interpreters.map((interp) => ({
             version: interp.version,
-            python_bin: interp.path || interp.python_bin || interp.python_executable || '',
+            python_bin: interp.python_bin,
             install_dir: interp.install_dir || '',
             source: interp.source,
             nodeName: currentNode.name,
@@ -325,7 +325,7 @@ const EnvListPage: React.FC = () => {
             const nodeInterpreters = await envService.listNodeInterpreters(node.id)
             return nodeInterpreters.interpreters.map((interp) => ({
               version: interp.version,
-              python_bin: interp.path || interp.python_bin || interp.python_executable || '',
+              python_bin: interp.python_bin,
               install_dir: interp.install_dir || '',
               source: interp.source,
               nodeName: node.name,
@@ -510,7 +510,7 @@ const EnvListPage: React.FC = () => {
               onClick={() =>
                 setInstallModal({
                   open: true,
-                  venvId: typeof record.id === 'number' ? record.id : undefined,
+                  venvId: record.id,
                 })
               }
             />
@@ -584,7 +584,7 @@ const EnvListPage: React.FC = () => {
             onClick={() =>
               setInstallModal({
                 open: true,
-                venvId: typeof record.id === 'number' ? record.id : undefined,
+                venvId: record.id,
               })
             }
           />
@@ -741,11 +741,17 @@ const EnvListPage: React.FC = () => {
                     : `将卸载 mise 管理的 Python ${r.version}`,
                 onOk: async () => {
                   if (currentNode) {
-                    const bin =
-                      r.python_bin || r.python_executable || r.install_dir || r.version
-                    await envService.unregisterNodeInterpreter(currentNode.id, bin)
+                    if (r.source === 'system') {
+                      message.warning('系统解释器不可卸载')
+                      return
+                    }
+                    await envService.unregisterNodeInterpreter(
+                      currentNode.id,
+                      r.version,
+                      r.source || 'local'
+                    )
                   } else {
-                    await envService.uninstallInterpreter(r.version, r.source)
+                    await envService.uninstallInterpreter(r.version, r.source || 'mise')
                   }
                   refreshInterpreters()
                 },
@@ -841,10 +847,10 @@ const EnvListPage: React.FC = () => {
                   批量删除 {selectedRowKeys.length > 0 && `(${selectedRowKeys.length})`}
                 </Button>
                 <InstallPackagesButton
-                  venvId={-1}
+                  venvId=""
                   onInstalled={() => {}}
                   batch
-                  selectedIds={selectedRowKeys as number[]}
+                  selectedIds={selectedRowKeys as string[]}
                 />
               </>
             )}

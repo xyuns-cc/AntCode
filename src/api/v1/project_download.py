@@ -1,30 +1,39 @@
 """项目下载API"""
 
 import os
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from loguru import logger
 
 from src.core.security.auth import get_current_user
 from src.core.response import success as success_response
-from src.models import User, Project, Node
+from src.models import Project
 from src.services.files.file_storage import file_storage_service
 from src.services.projects.project_sync_service import project_sync_service
+from src.services.users.user_service import user_service
 
 router = APIRouter(prefix="/projects", tags=["项目下载"])
+
+
+async def _get_request_user(current_user):
+    user = await user_service.get_user_by_id(current_user.user_id)
+    if not user:
+        raise HTTPException(status_code=403, detail="用户不存在或已禁用")
+    return user
 
 
 @router.get("/{project_id}/transfer-info")
 async def get_project_transfer_info(
     project_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ):
     """获取传输策略"""
+    user = await _get_request_user(current_user)
     project = await Project.get_or_none(public_id=project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    if project.user_id != current_user.id:
+    if not user.is_admin and project.user_id != user.id:
         raise HTTPException(status_code=403, detail="无权访问")
 
     transfer_info = await project_sync_service.get_project_transfer_info(project.id)
@@ -35,14 +44,15 @@ async def get_project_transfer_info(
 @router.get("/{project_id}/download")
 async def download_project_file(
     project_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ):
     """下载项目文件"""
+    user = await _get_request_user(current_user)
     project = await Project.get_or_none(public_id=project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    if project.user_id != current_user.id:
+    if not user.is_admin and project.user_id != user.id:
         raise HTTPException(status_code=403, detail="无权访问")
 
     transfer_info = await project_sync_service.get_project_transfer_info(project.id)
@@ -86,14 +96,15 @@ async def download_project_file(
 async def get_incremental_changes(
     project_id: str,
     client_file_hashes: dict,
-    current_user: User = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ):
     """获取增量变更"""
+    user = await _get_request_user(current_user)
     project = await Project.get_or_none(public_id=project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    if project.user_id != current_user.id:
+    if not user.is_admin and project.user_id != user.id:
         raise HTTPException(status_code=403, detail="无权访问")
 
     changes = await project_sync_service.get_incremental_changes(
@@ -108,16 +119,17 @@ async def get_incremental_changes(
 async def download_specific_file(
     project_id: str,
     file_path: str = Query(..., description="相对路径"),
-    current_user: User = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ):
     """下载单个文件"""
     from src.services.projects.relation_service import relation_service
 
+    user = await _get_request_user(current_user)
     project = await Project.get_or_none(public_id=project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    if project.user_id != current_user.id:
+    if not user.is_admin and project.user_id != user.id:
         raise HTTPException(status_code=403, detail="无权访问")
 
     file_detail = await relation_service.get_project_file_detail(project.id)
@@ -139,32 +151,19 @@ async def download_specific_file(
         media_type='application/octet-stream'
     )
 
-
-
-async def verify_node_api_key(request: Request) -> Node:
-    """验证节点 API Key"""
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="缺少认证信息")
-
-    api_key = auth_header[7:]  # 去掉 "Bearer " 前缀
-
-    node = await Node.get_or_none(api_key=api_key)
-    if not node:
-        raise HTTPException(status_code=401, detail="无效的 API Key")
-
-    return node
-
-
 @router.get("/{project_id}/node-download")
 async def node_download_project(
     project_id: str,
-    node: Node = Depends(verify_node_api_key)
+    current_user=Depends(get_current_user)
 ):
-    """节点专用项目下载接口（使用节点 API Key 认证）"""
+    """节点专用项目下载接口"""
+    user = await _get_request_user(current_user)
     project = await Project.get_or_none(public_id=project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    if not user.is_admin and project.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权访问")
 
     transfer_info = await project_sync_service.get_project_transfer_info(project.id)
 
@@ -183,7 +182,7 @@ async def node_download_project(
         raise HTTPException(status_code=404, detail="文件不存在")
 
     logger.info(
-        f"节点 [{node.name}] 下载项目 [{project.name}] "
+        f"用户 [{user.username}] 下载项目 [{project.name}] "
         f"{transfer_info['transfer_method']} {transfer_info['file_size']}字节"
     )
 

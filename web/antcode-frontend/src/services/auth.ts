@@ -30,6 +30,7 @@ class AuthService {
       email: '',
       is_active: true,
       is_admin: response.data.data.is_admin, // 添加管理员标识
+      is_super_admin: response.data.data.is_super_admin,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     }
@@ -52,8 +53,13 @@ class AuthService {
 
   // 用户登出
   async logout(): Promise<void> {
-    // 后端暂未提供 logout 接口，直接清理本地认证数据
-    AuthHandler.clearAuthData()
+    try {
+      await apiClient.post('/api/v1/auth/logout')
+    } catch {
+      // 即使请求失败也清理本地认证数据
+    } finally {
+      AuthHandler.clearAuthData()
+    }
   }
 
   // 获取当前用户信息

@@ -399,19 +399,47 @@ const TaskDetail: React.FC = () => {
                         {task.created_by_username || `用户${task.created_by}`}
                       </Descriptions.Item>
                       <Descriptions.Item label="执行节点" span={2}>
-                        {task.node_id ? (
-                          <Space>
-                            <CloudServerOutlined style={{ color: '#1890ff' }} />
-                            <span>{task.node_name || task.node_id}</span>
-                            <Tag color="blue">远程节点</Tag>
-                          </Space>
-                        ) : (
-                          <Space>
-                            <DesktopOutlined style={{ color: '#52c41a' }} />
-                            <span>本地执行 / 自动选择</span>
-                            <Tag color="green">本地</Tag>
-                          </Space>
-                        )}
+                        {(() => {
+                          const strategy = task.execution_strategy || task.project_execution_strategy
+
+                          if (strategy === 'specified') {
+                            return (
+                              <Space>
+                                <CloudServerOutlined style={{ color: '#1890ff' }} />
+                                <span>{task.specified_node_name || task.specified_node_id}</span>
+                                <Tag color="cyan">指定节点</Tag>
+                              </Space>
+                            )
+                          }
+
+                          if (strategy === 'fixed' || strategy === 'prefer') {
+                            return (
+                              <Space>
+                                <CloudServerOutlined style={{ color: '#1890ff' }} />
+                                <span>{task.project_bound_node_name || task.project_bound_node_id || '未绑定节点'}</span>
+                                <Tag color="blue">绑定节点</Tag>
+                              </Space>
+                            )
+                          }
+
+                          if (strategy === 'auto') {
+                            return (
+                              <Space>
+                                <CloudServerOutlined style={{ color: '#52c41a' }} />
+                                <span>自动选择</span>
+                                <Tag color="green">自动</Tag>
+                              </Space>
+                            )
+                          }
+
+                          return (
+                            <Space>
+                              <DesktopOutlined style={{ color: '#52c41a' }} />
+                              <span>本地执行</span>
+                              <Tag color="green">本地</Tag>
+                            </Space>
+                          )
+                        })()}
                       </Descriptions.Item>
                     </Descriptions>
 

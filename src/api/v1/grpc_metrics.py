@@ -7,7 +7,7 @@ Requirements: 10.4
 """
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from src.schemas.monitoring import (
     GrpcMetricsResponse,
@@ -21,12 +21,13 @@ from src.services.grpc.config import grpc_config
 from src.services.grpc.server import get_grpc_server
 from src.services.grpc.metrics import get_grpc_metrics_collector
 from src.services.grpc.node_service_impl import get_node_service_impl
+from src.core.security.auth import get_current_user
 
 router = APIRouter(prefix="/grpc", tags=["gRPC 监控"])
 
 
 @router.get("/metrics", response_model=GrpcMetricsResponse, summary="获取 gRPC 服务器指标")
-async def get_grpc_metrics() -> GrpcMetricsResponse:
+async def get_grpc_metrics(current_user=Depends(get_current_user)) -> GrpcMetricsResponse:
     """
     获取 gRPC 服务器的统计信息
     
@@ -95,7 +96,7 @@ async def get_grpc_metrics() -> GrpcMetricsResponse:
 
 
 @router.get("/status", summary="获取 gRPC 服务器状态")
-async def get_grpc_status() -> dict:
+async def get_grpc_status(current_user=Depends(get_current_user)) -> dict:
     """
     获取 gRPC 服务器的简要状态
     
@@ -114,7 +115,7 @@ async def get_grpc_status() -> dict:
 
 
 @router.get("/connections", summary="获取 gRPC 连接列表")
-async def get_grpc_connections() -> dict:
+async def get_grpc_connections(current_user=Depends(get_current_user)) -> dict:
     """
     获取当前所有 gRPC 连接的详细信息
     """

@@ -12,7 +12,7 @@ if __name__ == '__main__':
 
     # 使用配置文件中的主机和端口
     uvicorn.run(
-        "src:app",
+        "src.asgi:app",
         host=settings.SERVER_HOST,
         port=settings.SERVER_PORT,
         reload=True,

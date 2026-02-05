@@ -1,9 +1,10 @@
 """WebSocket日志流接口"""
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, Depends
 from loguru import logger
 
 from src.services.websockets.websocket_log_service import websocket_log_service
+from src.core.security.auth import get_current_user
 
 router = APIRouter()
 
@@ -29,7 +30,7 @@ async def websocket_logs_endpoint(
 
 
 @router.get("/stats")
-async def get_websocket_stats():
+async def get_websocket_stats(current_user=Depends(get_current_user)):
     try:
         from src.services.websockets.websocket_connection_manager import websocket_manager
         stats = websocket_manager.get_stats()
@@ -40,7 +41,7 @@ async def get_websocket_stats():
 
 
 @router.post("/cleanup")
-async def cleanup_inactive_connections():
+async def cleanup_inactive_connections(current_user=Depends(get_current_user)):
     try:
         from src.services.websockets.websocket_connection_manager import websocket_manager
         await websocket_manager.cleanup_inactive_connections()

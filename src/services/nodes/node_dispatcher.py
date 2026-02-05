@@ -446,6 +446,7 @@ class NodeTaskDispatcher:
         self,
         project_id: str,
         execution_id: str,
+        access_token: str,
         params: Optional[Dict] = None,
         environment_vars: Optional[Dict] = None,
         timeout: int = 3600,
@@ -476,6 +477,7 @@ class NodeTaskDispatcher:
 
         result = await self.dispatch_batch(
             tasks=[task_item],
+            access_token=access_token,
             node_id=node_id,
             region=region,
             tags=tags,
@@ -511,6 +513,7 @@ class NodeTaskDispatcher:
     async def dispatch_batch(
         self,
         tasks: List[Dict[str, Any]],
+        access_token: str,
         node_id: Optional[str] = None,
         region: Optional[str] = None,
         tags: Optional[List[str]] = None,
@@ -528,6 +531,9 @@ class NodeTaskDispatcher:
         if not tasks:
             return {"success": False, "error": "任务列表为空"}
 
+        if not access_token:
+            return {"success": False, "error": "缺少访问令牌"}
+
         # 检查任务是否需要渲染能力
         if not require_render:
             for task in tasks:
@@ -542,13 +548,17 @@ class NodeTaskDispatcher:
 
         try:
             # 确保节点已连接到 Master（用于日志上报）
-            connected = await self._ensure_node_connected(node)
+            connected = await self._ensure_node_connected(node, access_token)
             if not connected:
                 return {"success": False, "error": f"节点未连接: {node.name}"}
 
             # 同步所有涉及的项目，并获取项目下载信息
             project_ids = list(set(t.get("project_id") for t in tasks if t.get("project_id")))
-            sync_results, project_download_info = await self._sync_projects_to_node_with_info(node, project_ids)
+            sync_results, project_download_info = await self._sync_projects_to_node_with_info(
+                node,
+                project_ids,
+                access_token,
+            )
 
             # 为每个任务添加项目下载信息（用于 Worker 端重新同步）
             enriched_tasks = []
@@ -558,7 +568,7 @@ class NodeTaskDispatcher:
                 if pid and pid in project_download_info:
                     info = project_download_info[pid]
                     task_copy["download_url"] = info.get("download_url")
-                    task_copy["api_key"] = node.api_key
+                    task_copy["access_token"] = access_token
                     task_copy["file_hash"] = info.get("file_hash")
                     task_copy["entry_point"] = info.get("entry_point")
                 enriched_tasks.append(task_copy)
@@ -568,6 +578,7 @@ class NodeTaskDispatcher:
                 node=node,
                 tasks=enriched_tasks,
                 batch_id=batch_id or str(uuid.uuid4()),
+                access_token=access_token,
             )
 
             return {
@@ -593,7 +604,7 @@ class NodeTaskDispatcher:
                 "node_name": node.name,
             }
 
-    async def _ensure_node_connected(self, node: Node) -> bool:
+    async def _ensure_node_connected(self, node: Node, access_token: str) -> bool:
         """
         确保节点已连接到 Master（用于日志上报）
         
@@ -631,12 +642,14 @@ class NodeTaskDispatcher:
                     json={
                         "machine_code": machine_code,
                         "api_key": node.api_key,
+                        "access_token": access_token,
                         "master_url": master_url,
                         "node_id": node.public_id,
                         "secret_key": node.secret_key,
-                        "use_websocket": True,  # 启用 WebSocket 优先模式
+                        "prefer_grpc": bool(settings.GRPC_ENABLED),
+                        "grpc_port": settings.GRPC_PORT,
                     },
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
 
                 if response.status_code == 200:
@@ -667,11 +680,6 @@ class NodeTaskDispatcher:
         """
         if node_id:
             node = await Node.filter(public_id=node_id).first()
-            if not node:
-                try:
-                    node = await Node.filter(id=int(node_id)).first()
-                except ValueError:
-                    pass
 
             if not node:
                 logger.warning(f"节点不存在: {node_id}")
@@ -698,15 +706,17 @@ class NodeTaskDispatcher:
         self,
         node: Node,
         project_ids: List[str],
+        access_token: str,
     ) -> Dict[str, Any]:
         """批量同步项目到节点"""
-        results, _ = await self._sync_projects_to_node_with_info(node, project_ids)
+        results, _ = await self._sync_projects_to_node_with_info(node, project_ids, access_token)
         return results
 
     async def _sync_projects_to_node_with_info(
         self,
         node: Node,
         project_ids: List[str],
+        access_token: str,
     ) -> tuple:
         """批量同步项目到节点，并返回项目下载信息"""
         from src.models import Project
@@ -746,7 +756,13 @@ class NodeTaskDispatcher:
                     continue
 
                 # 执行同步
-                sync_success = await self._sync_single_project(node, project, transfer_info, current_hash)
+                sync_success = await self._sync_single_project(
+                    node,
+                    project,
+                    transfer_info,
+                    current_hash,
+                    access_token,
+                )
 
                 if sync_success:
                     await node_project_service.record_project_sync(
@@ -773,6 +789,7 @@ class NodeTaskDispatcher:
         project,
         transfer_info: Dict,
         file_hash: str,
+        access_token: str,
     ) -> bool:
         """同步单个项目到节点"""
         node_url = f"http://{node.host}:{node.port}"
@@ -789,7 +806,7 @@ class NodeTaskDispatcher:
                             "entry_point": transfer_info.get("entry_point"),
                             "master_project_id": project.public_id,
                         },
-                        headers={"Authorization": f"Bearer {node.api_key}"}
+                        headers={"Authorization": f"Bearer {access_token}"}
                     )
                 else:
                     from src.core.config import settings
@@ -806,9 +823,9 @@ class NodeTaskDispatcher:
                             "transfer_method": transfer_info["transfer_method"],
                             "file_hash": file_hash,
                             "file_size": transfer_info.get("file_size"),
-                            "api_key": node.api_key,
+                            "access_token": access_token,
                         },
-                        headers={"Authorization": f"Bearer {node.api_key}"},
+                        headers={"Authorization": f"Bearer {access_token}"},
                     )
 
                 return response.status_code == 200
@@ -822,6 +839,7 @@ class NodeTaskDispatcher:
         node: Node,
         tasks: List[Dict[str, Any]],
         batch_id: str,
+        access_token: str,
     ) -> Dict[str, Any]:
         """发送批量任务到节点的优先级队列"""
         node_url = f"http://{node.host}:{node.port}"
@@ -835,7 +853,7 @@ class NodeTaskDispatcher:
                         "node_id": node.public_id,
                         "batch_id": batch_id,
                     },
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
 
                 # 200 表示同步处理完成，202 表示异步处理已接受
@@ -888,6 +906,7 @@ class NodeTaskDispatcher:
         node: Node,
         task_id: str,
         priority: int,
+        access_token: str,
     ) -> Dict[str, Any]:
         """更新节点上任务的优先级"""
         node_url = f"http://{node.host}:{node.port}"
@@ -897,7 +916,7 @@ class NodeTaskDispatcher:
                 response = await client.put(
                     f"{node_url}/queue/tasks/{task_id}/priority",
                     json={"priority": priority},
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
 
                 if response.status_code == 200:
@@ -917,7 +936,7 @@ class NodeTaskDispatcher:
             logger.error(f"更新任务优先级失败: {e}")
             return {"success": False, "error": str(e)}
 
-    async def get_queue_status(self, node: Node) -> Dict[str, Any]:
+    async def get_queue_status(self, node: Node, access_token: str) -> Dict[str, Any]:
         """获取节点队列状态"""
         node_url = f"http://{node.host}:{node.port}"
 
@@ -925,7 +944,7 @@ class NodeTaskDispatcher:
             async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 response = await client.get(
                     f"{node_url}/queue/status",
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
 
                 if response.status_code == 200:
@@ -940,6 +959,7 @@ class NodeTaskDispatcher:
         self,
         node: Node,
         task_id: str,
+        access_token: str,
     ) -> bool:
         """取消节点队列中的任务"""
         node_url = f"http://{node.host}:{node.port}"
@@ -948,12 +968,33 @@ class NodeTaskDispatcher:
             async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 response = await client.delete(
                     f"{node_url}/queue/tasks/{task_id}",
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
-                return response.status_code == 200
+                # Worker 端使用 204 No Content
+                return response.status_code in (200, 204)
 
         except Exception as e:
             logger.error(f"取消任务失败: {e}")
+            return False
+
+    async def cancel_task_on_node(
+        self,
+        node: Node,
+        task_id: str,
+        access_token: str,
+    ) -> bool:
+        """取消节点上的任务（运行中/队列中均可）"""
+        node_url = f"http://{node.host}:{node.port}"
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                response = await client.delete(
+                    f"{node_url}/tasks/{task_id}",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                return response.status_code in (200, 204)
+        except Exception as e:
+            logger.error(f"取消节点任务失败: {e}")
             return False
 
     async def sync_project_to_node(
@@ -961,6 +1002,7 @@ class NodeTaskDispatcher:
         node: Node,
         project_id: str,
         project_data: Dict[str, Any],
+        access_token: str,
     ) -> bool:
         """同步项目到节点"""
         node_url = f"http://{node.host}:{node.port}"
@@ -981,7 +1023,7 @@ class NodeTaskDispatcher:
                             "entry_point": project_data.get("entry_point"),
                             "master_project_id": project_id,
                         },
-                        headers={"Authorization": f"Bearer {node.api_key}"}
+                        headers={"Authorization": f"Bearer {access_token}"}
                     )
                     return response.status_code == 200
 
@@ -1010,9 +1052,9 @@ class NodeTaskDispatcher:
                             "transfer_method": project_data.get("transfer_method", "original"),
                             "file_hash": project_data.get("file_hash"),
                             "file_size": project_data.get("file_size"),
-                            "api_key": node.api_key,
+                            "access_token": access_token,
                         },
-                        headers={"Authorization": f"Bearer {node.api_key}"}
+                        headers={"Authorization": f"Bearer {access_token}"}
                     )
 
                     if response.status_code == 200:
@@ -1030,6 +1072,7 @@ class NodeTaskDispatcher:
         self,
         node: Node,
         task_id: str,
+        access_token: str,
     ) -> Optional[Dict[str, Any]]:
         """从节点获取任务状态"""
         node_url = f"http://{node.host}:{node.port}"
@@ -1038,7 +1081,7 @@ class NodeTaskDispatcher:
             async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 response = await client.get(
                     f"{node_url}/tasks/{task_id}",
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
 
                 if response.status_code == 200:
@@ -1053,6 +1096,7 @@ class NodeTaskDispatcher:
         self,
         node: Node,
         task_id: str,
+        access_token: str,
         log_type: str = "output",
         tail: int = 100,
     ) -> List[str]:
@@ -1064,7 +1108,7 @@ class NodeTaskDispatcher:
                 response = await client.get(
                     f"{node_url}/tasks/{task_id}/logs",
                     params={"log_type": log_type, "tail": tail},
-                    headers={"Authorization": f"Bearer {node.api_key}"}
+                    headers={"Authorization": f"Bearer {access_token}"}
                 )
 
                 if response.status_code == 200:

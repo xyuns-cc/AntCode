@@ -1,6 +1,6 @@
 // 项目类型枚举
 export type ProjectType = 'file' | 'rule' | 'code'
-export type ProjectStatus = 'active' | 'inactive' | 'error'
+export type ProjectStatus = 'draft' | 'active' | 'inactive' | 'archived'
 
 // 执行策略枚举
 export type ExecutionStrategy = 'local' | 'fixed' | 'specified' | 'auto' | 'prefer'
@@ -35,16 +35,6 @@ export interface EnvironmentVars {
   [key: string]: string
 }
 
-// 提取规则类型
-export interface ExtractionRules {
-  [selector: string]: {
-    type: 'text' | 'attr' | 'html'
-    attr?: string
-    required?: boolean
-    default?: string
-  }
-}
-
 // 数据模式类型
 export interface DataSchema {
   [field: string]: {
@@ -52,15 +42,6 @@ export interface DataSchema {
     required?: boolean
     description?: string
   }
-}
-
-// 分页配置类型（旧版，保留兼容）
-export interface LegacyPaginationConfig {
-  type: 'url' | 'form' | 'ajax'
-  selector?: string
-  pattern?: string
-  max_pages?: number
-  start_page?: number
 }
 
 // HTTP头部类型
@@ -71,15 +52,6 @@ export interface HttpHeaders {
 // Cookie类型
 export interface HttpCookies {
   [key: string]: string
-}
-
-// 代理配置类型
-export interface ProxyConfig {
-  host: string
-  port: number
-  username?: string
-  password?: string
-  type?: 'http' | 'https' | 'socks4' | 'socks5'
 }
 
 // 基础项目接口
@@ -113,11 +85,6 @@ export interface Project {
   file_info?: FileInfo
   rule_info?: RuleInfo
   code_info?: CodeInfo
-
-  // 关联数据（旧版本兼容）
-  project_file?: ProjectFile
-  project_rule?: ProjectRule
-  project_code?: ProjectCode
 
   // 统计信息
   task_count?: number
@@ -159,13 +126,9 @@ export interface RuleInfo {
   url_pattern?: string
   callback_type: string
   request_method: string
-  extraction_rules?: ExtractionRules
-  list_selectors?: ExtractionRules
-  detail_selectors?: ExtractionRules
+  extraction_rules?: ExtractionRule[]
   data_schema?: DataSchema
   pagination_config?: PaginationConfig
-  pagination_type?: string
-  pagination_rule?: string
   max_pages: number
   start_page: number
   request_delay: number
@@ -194,44 +157,6 @@ export interface CodeInfo {
 }
 
 // 文件项目详情
-export interface ProjectFile {
-  id: string  // public_id
-  project_id: string  // public_id
-  original_name: string
-  file_path: string
-  file_size: number
-  file_hash: string
-  dependencies?: string[]
-  created_at: string
-}
-
-// 规则项目详情
-export interface ProjectRule {
-  id: string  // public_id
-  project_id: string  // public_id
-  target_url: string
-  detail_selectors: ExtractionRule[]
-  pagination_config?: PaginationConfig
-  request_method: string
-  headers?: Record<string, string>
-  cookies?: Record<string, string>
-  callback_type: string
-  priority: number
-  dont_filter: boolean
-  created_at: string
-}
-
-// 代码项目详情
-export interface ProjectCode {
-  id: string  // public_id
-  project_id: string  // public_id
-  language: string
-  code_content: string
-  entry_point?: string
-  dependencies?: string[]
-  created_at: string
-}
-
 // 提取规则 - 根据v2.0.0 API文档更新
 export interface ExtractionRule {
   desc: string  // 规则描述
@@ -323,7 +248,7 @@ export interface ProjectCreateRequest {
   // 区域配置
   region?: string
   
-  // 执行策略配置（保留兼容）
+  // 执行策略配置
   execution_strategy?: ExecutionStrategy
   bound_node_id?: string
   fallback_enabled?: boolean
@@ -384,7 +309,7 @@ export interface ProjectUpdateRequest {
   // 区域配置
   region?: string
   
-  // 执行策略配置（保留兼容）
+  // 执行策略配置
   execution_strategy?: ExecutionStrategy
   bound_node_id?: string
   fallback_enabled?: boolean

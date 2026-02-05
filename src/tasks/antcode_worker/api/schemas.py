@@ -6,20 +6,15 @@ from pydantic import BaseModel, Field
 
 # ============ 节点相关 ============
 
-class ConnectRequest(BaseModel):
-    machine_code: str
-    api_key: str
-    master_url: str
-    node_id: Optional[str] = None  # 节点ID，用于心跳上报
-
-
 class ConnectRequestV2(BaseModel):
     machine_code: str
     api_key: str
+    access_token: str
     master_url: str
-    node_id: Optional[str] = None
+    node_id: str
     secret_key: Optional[str] = None
-    use_websocket: bool = True
+    prefer_grpc: bool = True
+    grpc_port: Optional[int] = None
 
 
 class DisconnectRequest(BaseModel):
@@ -71,7 +66,7 @@ class SyncFromMasterRequest(BaseModel):
     transfer_method: str = Field("original", description="传输方式")
     file_hash: Optional[str] = Field(None, description="文件哈希")
     file_size: Optional[int] = Field(None, description="文件大小")
-    api_key: Optional[str] = Field(None, description="下载认证密钥")
+    access_token: Optional[str] = Field(None, description="下载认证令牌")
 
 
 class UpdateProjectRequest(BaseModel):

@@ -3,14 +3,13 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query, Request
 from loguru import logger
 from tortoise.exceptions import IntegrityError
 
-from src.core.security.auth import get_current_admin_user, get_current_user, TokenData
+from src.core.security.auth import get_current_admin_user, get_current_super_admin, get_current_user, TokenData
 from src.core.response import success, page as page_response, Messages
 from src.schemas import (
     BaseResponse, PaginationResponse, UserResponse,
     UserCreateRequest, UserUpdateRequest,
     UserPasswordUpdateRequest, UserAdminPasswordUpdateRequest
 )
-from src.schemas.common import PaginationInfo
 from src.services.users.user_service import user_service
 from src.services.audit import audit_service
 from src.models.audit_log import AuditAction
@@ -18,14 +17,17 @@ from src.models.audit_log import AuditAction
 router = APIRouter()
 
 
-def _build_user_response(user) -> UserResponse:
+def _build_user_response(user, is_online: bool = False) -> UserResponse:
     """构建用户响应"""
+    from src.core.config import settings
     return UserResponse(
         id=user.public_id,
         username=user.username,
         email=user.email,
         is_active=user.is_active,
         is_admin=user.is_admin,
+        is_super_admin=bool(user.is_admin and user.username == settings.DEFAULT_ADMIN_USERNAME),
+        is_online=is_online,
         created_at=user.created_at,
         last_login_at=user.last_login_at
     )
@@ -60,9 +62,6 @@ async def get_users_list(
         )
 
         pag = result["pagination"]
-        # 兼容缓存命中后被反序列化为dict的情况
-        if isinstance(pag, dict):
-            pag = PaginationInfo(**pag)
         items = result["data"]["items"]
         return page_response(
             items=items,
@@ -160,7 +159,12 @@ async def get_user_detail(
     if not current_user_obj.is_admin and current_user_obj.id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
 
-    return success(_build_user_response(user), message=Messages.QUERY_SUCCESS)
+    from src.services.sessions.session_service import user_session_service
+    online_ids = await user_session_service.get_online_user_ids([user.id])
+    return success(
+        _build_user_response(user, is_online=user.id in online_ids),
+        message=Messages.QUERY_SUCCESS,
+    )
 
 
 @router.put(
@@ -260,6 +264,52 @@ async def delete_user(
         return success(None, message=Messages.DELETED_SUCCESS)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post(
+    "/{user_id}/kick",
+    response_model=BaseResponse,
+    summary="踢下线用户",
+    tags=["用户管理"]
+)
+async def kick_user(
+    user_id: str,
+    http_request: Request,
+    current_super_admin: TokenData = Depends(get_current_super_admin),
+):
+    """超级管理员踢下线管理员/普通用户（撤销其 web 会话）"""
+    from datetime import datetime
+    from src.core.config import settings
+    from src.services.sessions.session_service import user_session_service
+
+    operator = await user_service.get_user_by_id(current_super_admin.user_id)
+    if not operator:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前用户不存在")
+
+    target_user = await user_service.get_user_by_public_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+
+    if target_user.id == operator.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能踢自己下线")
+
+    if target_user.is_admin and target_user.username == settings.DEFAULT_ADMIN_USERNAME:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="不能踢超级管理员下线")
+
+    revoked = await user_session_service.revoke_user_web_sessions(target_user.id)
+
+    await audit_service.log_user_action(
+        action=AuditAction.USER_KICK,
+        operator_username=operator.username,
+        target_user_id=target_user.id,
+        target_username=target_user.username,
+        operator_id=operator.id,
+        ip_address=http_request.client.host if http_request.client else None,
+        new_value={"revoked_web_sessions": revoked, "revoked_at": datetime.utcnow().isoformat()},
+        description=f"踢下线用户: {target_user.username}",
+    )
+
+    return success({"revoked_sessions": revoked}, message="已踢下线")
 
 
 @router.get(

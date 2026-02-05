@@ -482,7 +482,7 @@ class SecureTaskExecutor(BaseExecutor):
             result.finished_at = datetime.now().isoformat()
 
             if exit_code == 0:
-                result.status = ExecutionStatus.COMPLETED
+                result.status = ExecutionStatus.SUCCESS
             elif exit_code == 124:
                 result.status = ExecutionStatus.TIMEOUT
                 result.error_message = f"执行超时 ({limits.wall_time}s)"
@@ -562,7 +562,7 @@ class SecureTaskExecutor(BaseExecutor):
         work_dir: str,
         sandbox_dir: Optional[Path] = None
     ) -> dict:
-        """构建受限环境变量 (跨平台兼容)
+        """构建受限环境变量 (跨平台适配)
         
         Args:
             context: 执行上下文

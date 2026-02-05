@@ -118,7 +118,7 @@ class MemoryMonitor:
             logger.warning(f"缓存清理失败: {e}")
 
     def _trigger_memory_cleanup(self):
-        """触发内存清理（兼容旧接口）"""
+        """触发内存清理"""
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._async_memory_cleanup())

@@ -21,7 +21,6 @@ from src.infrastructure.redis import (
     close_redis_pool,
 )
 from src.infrastructure.middleware import (
-    AdminPermissionMiddleware,
     SecurityHeadersMiddleware,
     RateLimitMiddleware,
     CacheInvalidationMiddleware,
@@ -44,7 +43,6 @@ __all__ = [
     "get_redis_client",
     "close_redis_pool",
     # Middleware
-    "AdminPermissionMiddleware",
     "SecurityHeadersMiddleware",
     "RateLimitMiddleware",
     "CacheInvalidationMiddleware",

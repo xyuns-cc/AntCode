@@ -73,20 +73,7 @@ class ExecutionResolver:
         if task.execution_strategy:
             return task.execution_strategy
 
-        # 项目级别策略
-        if project.execution_strategy:
-            return project.execution_strategy
-
-        # 兼容旧数据：如果任务有 node_id 或 specified_node_id，使用 specified 策略
-        if task.specified_node_id or task.node_id:
-            return ExecutionStrategy.SPECIFIED
-
-        # 兼容旧数据：如果项目有 bound_node_id，使用 prefer 策略
-        if project.bound_node_id:
-            return ExecutionStrategy.PREFER_BOUND
-
-        # 默认：本地执行
-        return ExecutionStrategy.LOCAL
+        return project.execution_strategy
 
     async def _resolve_fixed_node(self, project: Project) -> Node:
         """解析固定节点策略"""
@@ -111,17 +98,14 @@ class ExecutionResolver:
 
     async def _resolve_specified_node(self, task: ScheduledTask) -> Node:
         """解析指定节点策略"""
-        # 优先使用新字段，兼容旧字段
-        node_id = task.specified_node_id or task.node_id
-
-        if not node_id:
+        if not task.specified_node_id:
             raise NodeUnavailableError("任务未指定执行节点")
 
-        node = await Node.get_or_none(id=node_id)
+        node = await Node.get_or_none(id=task.specified_node_id)
         if not node:
             raise NodeUnavailableError(
-                f"指定的节点不存在 (id={node_id})",
-                node_id
+                f"指定的节点不存在 (id={task.specified_node_id})",
+                task.specified_node_id
             )
 
         if node.status != NodeStatus.ONLINE:

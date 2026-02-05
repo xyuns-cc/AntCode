@@ -1,7 +1,7 @@
 """任务模型 - 统一的任务定义
 
 设计原则:
-1. 兼容后端现有任务模型
+1. 状态与 Master 端保持一致（success/failed/cancelled/timeout 等）
 2. 支持多种任务类型（代码执行、爬虫、数据处理）
 3. 灵活的参数配置
 4. 丰富的执行状态
@@ -29,11 +29,10 @@ class TaskStatus(str, Enum):
     PENDING = "pending"        # 等待中
     QUEUED = "queued"          # 已入队
     RUNNING = "running"        # 执行中
-    COMPLETED = "completed"    # 已完成
+    SUCCESS = "success"        # 执行成功
     FAILED = "failed"          # 失败
     CANCELLED = "cancelled"    # 已取消
     TIMEOUT = "timeout"        # 超时
-    RETRYING = "retrying"      # 重试中
     PAUSED = "paused"          # 暂停
 
 
@@ -114,7 +113,7 @@ class SpiderCrawlParams:
     spider_type: str = "custom"  # custom, list_detail, pagination
     start_urls: List[str] = field(default_factory=list)
 
-    # 单页解析规则（兼容旧版）
+    # 单页解析规则
     xpath_rules: Dict[str, str] = field(default_factory=dict)
     css_rules: Dict[str, str] = field(default_factory=dict)
     regex_rules: Dict[str, str] = field(default_factory=dict)
@@ -434,7 +433,7 @@ class TaskItem:
     environment: Dict[str, str] = field(default_factory=dict)
     timeout: int = 3600
     download_url: Optional[str] = None
-    api_key: Optional[str] = None
+    access_token: Optional[str] = None
     file_hash: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -447,7 +446,7 @@ class TaskItem:
             "environment": self.environment,
             "timeout": self.timeout,
             "download_url": self.download_url,
-            "api_key": self.api_key,
+            "access_token": self.access_token,
             "file_hash": self.file_hash,
         }
 
@@ -462,7 +461,7 @@ class TaskItem:
             environment=d.get("environment", {}),
             timeout=d.get("timeout", 3600),
             download_url=d.get("download_url"),
-            api_key=d.get("api_key"),
+            access_token=d.get("access_token"),
             file_hash=d.get("file_hash"),
         )
 

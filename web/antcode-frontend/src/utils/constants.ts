@@ -27,7 +27,7 @@ export const PROJECT_STATUS = {
 export const TASK_STATUS = {
   PENDING: 'pending',
   RUNNING: 'running',
-  COMPLETED: 'completed',
+  SUCCESS: 'success',
   FAILED: 'failed',
   CANCELLED: 'cancelled',
 } as const

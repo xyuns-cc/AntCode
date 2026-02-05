@@ -20,7 +20,7 @@ class CheckpointState(str, Enum):
     PENDING = "pending"          # 等待执行
     RUNNING = "running"          # 正在执行
     CHECKPOINTED = "checkpointed"  # 已保存检查点
-    COMPLETED = "completed"      # 已完成
+    SUCCESS = "success"          # 执行成功
     FAILED = "failed"            # 已失败
     RECOVERED = "recovered"      # 已恢复
 

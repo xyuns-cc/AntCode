@@ -77,12 +77,22 @@ class SystemMetricsService:
         return round(numeric, 2)
 
     async def _collect_cpu_metrics(self):
-        await asyncio.to_thread(psutil.cpu_percent, None)
-        cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 0.5)
+        try:
+            await asyncio.to_thread(psutil.cpu_percent, None)
+            cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 0.5)
+        except Exception:
+            return 0.0, None
+
         if not self._is_valid_percent(cpu_percent_sample):
-            cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 1.0)
+            try:
+                cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 1.0)
+            except Exception:
+                cpu_percent_sample = 0.0
         cpu_percent = self._normalize_percent(cpu_percent_sample)
-        cpu_cores = await asyncio.to_thread(psutil.cpu_count, True)
+        try:
+            cpu_cores = await asyncio.to_thread(psutil.cpu_count, True)
+        except Exception:
+            cpu_cores = None
 
         if cpu_percent <= 0.0:
             try:

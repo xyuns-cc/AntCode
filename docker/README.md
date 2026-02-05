@@ -124,8 +124,7 @@ volumes:
 
 - 前端: http://localhost:3000
 - 后端 API: http://localhost:8000
-- API 文档: http://localhost:8000/docs
-- 默认账号: `admin` / `admin`
+- 默认账号: `admin` / `Admin123!`
 
 ## 服务管理
 

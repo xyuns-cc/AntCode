@@ -41,7 +41,7 @@ class AsyncProcessor:
         if not task:
             return "not_found"
         if task.done():
-            return "failed" if task.exception() else "completed"
+            return "failed" if task.exception() else "success"
         return "running"
 
 
@@ -213,6 +213,5 @@ def optimize_large_response(chunk_size: int = 100):
             return result
         return wrapper
     return decorator
-
 
 

@@ -189,7 +189,7 @@ class NodeService extends BaseService {
   /**
    * 分配节点权限给用户
    */
-  async assignNodeToUser(nodeId: string, userId: string | number, permission: string = 'use', note?: string): Promise<void> {
+  async assignNodeToUser(nodeId: string, userId: string, permission: string = 'use', note?: string): Promise<void> {
     await this.post(`/${nodeId}/assign`, {
       user_id: userId,
       permission,
@@ -200,14 +200,14 @@ class NodeService extends BaseService {
   /**
    * 撤销用户的节点权限
    */
-  async revokeNodeFromUser(nodeId: string, userId: string | number): Promise<void> {
+  async revokeNodeFromUser(nodeId: string, userId: string): Promise<void> {
     await this.delete(`/${nodeId}/revoke/${userId}`)
   }
 
   /**
    * 批量分配节点权限
    */
-  async batchAssignNodes(userId: string | number, nodeIds: string[], permission: string = 'use'): Promise<{
+  async batchAssignNodes(userId: string, nodeIds: string[], permission: string = 'use'): Promise<{
     success: number
     failed: number
   }> {

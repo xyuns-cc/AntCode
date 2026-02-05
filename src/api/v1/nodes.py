@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, Request
 from loguru import logger
 
-from src.core.security.auth import TokenData, get_current_user
+from src.core.security.auth import TokenData, get_current_super_admin, get_current_user, jwt_auth
 from src.core.security.node_auth import verify_node_request_with_signature, verify_node_request
 from src.core.response import success, BaseResponse
 from src.models import NodeStatus
@@ -23,6 +23,18 @@ from src.schemas.node import (
 from src.utils.node_request import build_node_signed_headers
 
 router = APIRouter(prefix="/nodes", tags=["节点管理"])
+
+
+async def _build_service_access_token(current_user: TokenData) -> str:
+    from src.services.sessions.session_service import user_session_service
+
+    session = await user_session_service.get_or_create_service_session(current_user.user_id)
+    return jwt_auth.create_access_token(
+        user_id=current_user.user_id,
+        username=current_user.username,
+        session_id=session.public_id,
+        token_type="service",
+    )
 
 
 def _build_node_base_url(node):
@@ -66,7 +78,6 @@ def _node_to_response(node) -> NodeResponse:
             capabilities = NodeCapabilities(**node.capabilities)
             has_render = capabilities.has_render_capability()
         except Exception:
-            # 兼容旧数据格式
             capabilities = None
 
     return NodeResponse(
@@ -242,7 +253,7 @@ async def get_node(
     current_user: TokenData = Depends(get_current_user)
 ):
     """获取节点详情"""
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -336,7 +347,7 @@ async def delete_node(
     from src.services.users.user_service import user_service
 
     # 获取节点信息用于审计
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     node_name = node.name if node else node_id
 
     deleted = await node_service.delete_node(node_id)
@@ -483,7 +494,7 @@ async def get_node_users(
             detail="需要管理员权限"
         )
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -516,7 +527,7 @@ async def assign_node_permission(
             detail="需要管理员权限"
         )
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -533,12 +544,10 @@ async def assign_node_permission(
             detail="用户ID不能为空"
         )
 
-    # 支持 public_id 或内部 id
-    if isinstance(user_id, str):
-        user = await User.filter(public_id=user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        user_id = user.id
+    user = await User.filter(public_id=str(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    user_id = user.id
 
     await node_service.assign_node_to_user(
         node_id=node.id,
@@ -573,23 +582,17 @@ async def revoke_node_permission(
             detail="需要管理员权限"
         )
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="节点不存在"
         )
 
-    # 支持 public_id 或内部 id
-    internal_user_id = user_id
-    try:
-        internal_user_id = int(user_id)
-    except ValueError:
-        # 是 public_id
-        user = await User.filter(public_id=user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        internal_user_id = user.id
+    user = await User.filter(public_id=str(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    internal_user_id = user.id
 
     revoked = await node_service.revoke_node_from_user(node.id, internal_user_id)
 
@@ -636,10 +639,16 @@ async def batch_assign_nodes(
             detail="节点ID列表不能为空"
         )
 
+    # 获取用户的内部ID
+    user = await User.filter(public_id=str(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    user_id = user.id
+
     # 获取节点的内部ID
     internal_ids = []
     for nid in node_ids:
-        node = await node_service.get_node_by_id(nid)
+        node = await node_service.get_node_by_public_id(str(nid))
         if node:
             internal_ids.append(node.id)
 
@@ -653,7 +662,7 @@ async def batch_assign_nodes(
     return success(result, message=f"成功分配 {result['success']} 个节点权限")
 
 
-# ====== 节点端调用的 API（无需用户认证）======
+# ====== 节点端调用的 API（需要用户认证）======
 
 @router.get(
     "/{node_id}/metrics/history",
@@ -667,7 +676,7 @@ async def get_node_metrics_history(
     current_user: TokenData = Depends(get_current_user)
 ):
     """获取节点历史指标"""
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -685,7 +694,8 @@ async def get_node_metrics_history(
     description="工作节点主动注册到主节点"
 )
 async def register_node(
-    request: NodeRegisterRequest
+    request: NodeRegisterRequest,
+    current_user: TokenData = Depends(get_current_user)
 ):
     """节点注册（节点主动调用）"""
     node, api_key, secret_key = await node_service.register_node(request)
@@ -707,7 +717,8 @@ async def register_node(
 )
 async def node_heartbeat(
     request: NodeHeartbeatRequest,
-    auth_info: dict = Depends(verify_node_request_with_signature)
+    auth_info: dict = Depends(verify_node_request_with_signature),
+    current_user: TokenData = Depends(get_current_user)
 ):
     """节点心跳上报（HMAC签名验证）"""
     # 处理能力上报
@@ -802,6 +813,7 @@ async def dispatch_task_to_node(
     result = await node_task_dispatcher.dispatch_task(
         project_id=project_id,
         execution_id=execution_id,
+        access_token=await _build_service_access_token(current_user),
         params=request.get("params"),
         environment_vars=request.get("environment_vars"),
         timeout=request.get("timeout", 3600),
@@ -862,6 +874,7 @@ async def dispatch_batch_to_node(
 
     result = await node_task_dispatcher.dispatch_batch(
         tasks=tasks,
+        access_token=await _build_service_access_token(current_user),
         node_id=request.get("node_id"),
         region=request.get("region"),
         tags=request.get("tags"),
@@ -891,14 +904,17 @@ async def get_node_queue_status(
     """获取节点队列状态"""
     from src.services.nodes import node_task_dispatcher
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="节点不存在"
         )
 
-    status_data = await node_task_dispatcher.get_queue_status(node)
+    status_data = await node_task_dispatcher.get_queue_status(
+        node,
+        access_token=await _build_service_access_token(current_user),
+    )
     return success(status_data)
 
 
@@ -924,14 +940,19 @@ async def update_node_task_priority(
             detail="优先级必须是 0-4 之间的整数"
         )
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="节点不存在"
         )
 
-    result = await node_task_dispatcher.update_task_priority(node, task_id, priority)
+    result = await node_task_dispatcher.update_task_priority(
+        node,
+        task_id,
+        priority,
+        access_token=await _build_service_access_token(current_user),
+    )
 
     if not result.get("success"):
         raise HTTPException(
@@ -956,14 +977,18 @@ async def cancel_node_queued_task(
     """取消节点队列中的任务"""
     from src.services.nodes import node_task_dispatcher
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="节点不存在"
         )
 
-    success_flag = await node_task_dispatcher.cancel_queued_task(node, task_id)
+    success_flag = await node_task_dispatcher.cancel_queued_task(
+        node,
+        task_id,
+        access_token=await _build_service_access_token(current_user),
+    )
 
     if not success_flag:
         raise HTTPException(
@@ -988,14 +1013,18 @@ async def get_distributed_task_status(
     """从节点获取任务状态"""
     from src.services.nodes import node_task_dispatcher
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="节点不存在"
         )
 
-    status_data = await node_task_dispatcher.get_task_status_from_node(node, task_id)
+    status_data = await node_task_dispatcher.get_task_status_from_node(
+        node,
+        task_id,
+        access_token=await _build_service_access_token(current_user),
+    )
 
     if not status_data:
         raise HTTPException(
@@ -1022,7 +1051,7 @@ async def get_distributed_task_logs(
     """从节点获取任务日志"""
     from src.services.nodes import node_task_dispatcher
 
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1030,7 +1059,11 @@ async def get_distributed_task_logs(
         )
 
     logs = await node_task_dispatcher.get_task_logs_from_node(
-        node, task_id, log_type, tail
+        node,
+        task_id,
+        access_token=await _build_service_access_token(current_user),
+        log_type=log_type,
+        tail=tail,
     )
 
     return success({
@@ -1124,7 +1157,7 @@ async def get_render_capable_nodes(
     )
 
 
-# ====== 工作节点上报接口（节点调用，无需用户认证）======
+# ====== 工作节点上报接口（节点调用，需要用户认证）======
 
 @router.post(
     "/report-log",
@@ -1134,7 +1167,8 @@ async def get_render_capable_nodes(
 )
 async def report_task_log(
     request: dict = Body(...),
-    auth_info: dict = Depends(verify_node_request)
+    auth_info: dict = Depends(verify_node_request),
+    current_user: TokenData = Depends(get_current_user)
 ):
     """任务日志上报（Bearer Token验证，无需签名）"""
     from src.services.nodes.distributed_log_service import distributed_log_service
@@ -1169,7 +1203,8 @@ async def report_task_log(
 )
 async def report_task_logs_batch(
     request: dict = Body(...),
-    auth_info: dict = Depends(verify_node_request)
+    auth_info: dict = Depends(verify_node_request),
+    current_user: TokenData = Depends(get_current_user)
 ):
     """批量任务日志上报（Bearer Token验证，无需签名）"""
     from src.services.nodes.distributed_log_service import distributed_log_service
@@ -1210,7 +1245,8 @@ async def report_task_logs_batch(
 )
 async def report_execution_heartbeat(
     request: dict = Body(...),
-    auth_info: dict = Depends(verify_node_request)
+    auth_info: dict = Depends(verify_node_request),
+    current_user: TokenData = Depends(get_current_user)
 ):
     """任务执行心跳上报"""
     from src.services.scheduler.task_persistence import task_persistence_service
@@ -1234,7 +1270,8 @@ async def report_execution_heartbeat(
 )
 async def report_task_status(
     request: dict = Body(...),
-    auth_info: dict = Depends(verify_node_request)
+    auth_info: dict = Depends(verify_node_request),
+    current_user: TokenData = Depends(get_current_user)
 ):
     """任务状态上报（Bearer Token验证，无需签名）"""
     from src.services.nodes.distributed_log_service import distributed_log_service
@@ -1305,7 +1342,7 @@ async def _proxy_node_request(
     require_permission: str = "use",
 ) -> dict:
     """代理请求到工作节点，统一做节点权限与状态校验"""
-    node = await node_service.get_node_by_id(node_id)
+    node = await node_service.get_node_by_public_id(node_id)
     if not node:
         raise HTTPException(status_code=404, detail="节点不存在")
 
@@ -1822,7 +1859,7 @@ async def get_node_resources(
 async def update_node_resources(
     node_id: str,
     request: dict = Body(...),
-    current_user: TokenData = Depends(get_current_user)
+    current_super_admin: TokenData = Depends(get_current_super_admin)
 ):
     """
     调整节点资源限制（仅 admin 用户可修改）
@@ -1833,16 +1870,6 @@ async def update_node_resources(
     - task_cpu_time_limit_sec: 单任务CPU时间限制 (60-3600 秒)
     - auto_resource_limit: 是否启用自适应资源限制
     """
-    from src.models import User
-
-    # 检查超级管理员权限（仅 admin 用户）
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin or user.username != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要超级管理员权限修改资源配置"
-        )
-
     # 参数验证
     max_concurrent = request.get("max_concurrent_tasks")
     memory_limit = request.get("task_memory_limit_mb")

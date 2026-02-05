@@ -16,7 +16,7 @@ class UnifiedProjectService:
     """统一项目更新服务"""
 
     async def _resolve_project(self, project_id, user_id: int, connection=None):
-        """解析项目ID（支持 public_id 和内部 id）"""
+        """解析项目ID（仅 public_id）"""
         if project_id is None:
             return None
 
@@ -24,21 +24,6 @@ class UnifiedProjectService:
         from src.services.users.user_service import user_service
         user = await user_service.get_user_by_id(user_id)
         is_admin = user and user.is_admin
-
-        # 尝试作为整数（内部ID）
-        try:
-            internal_id = int(project_id)
-            if is_admin:
-                query = Project.filter(id=internal_id)
-            else:
-                query = Project.filter(id=internal_id, user_id=user_id)
-            if connection:
-                query = query.using_db(connection)
-            project = await query.first()
-            if project:
-                return project
-        except (ValueError, TypeError):
-            pass
 
         # 通过 public_id 查询
         if is_admin:
@@ -59,7 +44,7 @@ class UnifiedProjectService:
         统一更新项目 - 在单个事务中处理所有更新
         
         Args:
-            project_id: 项目ID或public_id
+            project_id: 项目 public_id
             request: 统一更新请求
             user_id: 用户ID
             
@@ -86,17 +71,11 @@ class UnifiedProjectService:
                     if 'bound_node_id' in basic_fields:
                         bound_node_id = basic_fields['bound_node_id']
                         if bound_node_id:
-                            # 将 public_id 转换为内部 id
                             from src.models import Node
                             node = await Node.get_or_none(public_id=str(bound_node_id))
-                            if node:
-                                basic_fields['bound_node_id'] = node.id
-                            else:
-                                # 尝试直接作为内部 id 使用
-                                try:
-                                    basic_fields['bound_node_id'] = int(bound_node_id)
-                                except (ValueError, TypeError):
-                                    basic_fields['bound_node_id'] = None
+                            if not node:
+                                raise HTTPException(status_code=400, detail="绑定节点不存在")
+                            basic_fields['bound_node_id'] = node.id
                         else:
                             basic_fields['bound_node_id'] = None
 

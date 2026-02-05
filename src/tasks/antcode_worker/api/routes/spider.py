@@ -136,7 +136,7 @@ async def crawl_single(request: CrawlRequest):
     # 添加随机 UA
     if request.use_random_ua and "User-Agent" not in req.headers:
         import random
-        from ...engine.spider.middlewares import USER_AGENTS
+        from ...spider.middlewares import USER_AGENTS
         req.headers["User-Agent"] = random.choice(USER_AGENTS)
 
     # 发送请求
@@ -219,7 +219,7 @@ async def crawl_batch(request: BatchCrawlRequest, background_tasks: BackgroundTa
 
                     if request.use_random_ua:
                         import random
-                        from ...engine.spider.middlewares import USER_AGENTS
+                        from ...spider.middlewares import USER_AGENTS
                         req.headers["User-Agent"] = random.choice(USER_AGENTS)
 
                     response = await client.fetch(req)
@@ -246,7 +246,7 @@ async def crawl_batch(request: BatchCrawlRequest, background_tasks: BackgroundTa
                         await asyncio.sleep(request.download_delay)
 
         await asyncio.gather(*[crawl_one(url) for url in request.urls])
-        task["status"] = "completed"
+        task["status"] = "success"
 
     background_tasks.add_task(do_batch_crawl)
 
@@ -357,7 +357,7 @@ async def execute_spider(request: SpiderTaskRequest, background_tasks: Backgroun
             result = await spider.run()
             task["results"].append(result.to_dict())
             task["completed"] = 1
-            task["status"] = "completed"
+            task["status"] = "success"
 
         except Exception as e:
             logger.error(f"爬虫执行失败: {e}")

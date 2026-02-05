@@ -175,7 +175,6 @@ export function formatStatus(status: string): { text: string; color: string } {
     queued: { text: '排队中', color: 'cyan' },
     running: { text: '执行中', color: 'processing' },
     success: { text: '成功', color: 'success' },
-    completed: { text: '已完成', color: 'success' },
     failed: { text: '失败', color: 'error' },
     cancelled: { text: '已取消', color: 'warning' },
     timeout: { text: '超时', color: 'error' },
