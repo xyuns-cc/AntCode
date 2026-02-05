@@ -203,7 +203,7 @@ const Tasks: React.FC = memo(() => {
   }
 
   // 触发任务
-  const handleTriggerTask = async (taskId: number) => {
+  const handleTriggerTask = async (taskId: string) => {
     try {
       const resp = await taskService.triggerTask(taskId)
       if (resp?.message) {
@@ -218,7 +218,7 @@ const Tasks: React.FC = memo(() => {
   }
 
   // 删除任务
-  const handleDeleteTask = async (taskId: number) => {
+  const handleDeleteTask = async (taskId: string) => {
     try {
       await taskService.deleteTask(taskId)
       
@@ -243,7 +243,6 @@ const Tasks: React.FC = memo(() => {
       queued: { color: 'cyan', text: '排队中' },
       running: { color: 'processing', text: '执行中' },
       success: { color: 'success', text: '成功' },
-      completed: { color: 'success', text: '已完成' },
       failed: { color: 'error', text: '失败' },
       cancelled: { color: 'warning', text: '已取消' },
       timeout: { color: 'error', text: '超时' },

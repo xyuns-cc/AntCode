@@ -21,8 +21,7 @@ src/
 │       ├── dashboard.py        # 仪表盘数据
 │       ├── system_config.py    # 系统配置
 │       ├── grpc_metrics.py     # gRPC 性能指标
-│       ├── websocket_logs.py   # WebSocket 日志推送
-│       └── websocket_nodes.py  # WebSocket 节点状态
+│       └── websocket_logs.py   # WebSocket 日志推送
 │
 ├── core/                       # 核心模块
 │   ├── config.py               # 配置管理（Pydantic Settings）
@@ -170,14 +169,12 @@ uv sync
 uv run python -m src.main
 
 # 或使用 uvicorn（开发模式）
-uv run uvicorn src:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn src.asgi:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ## 📖 API 文档
 
-启动后访问：
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+出于安全考虑，默认关闭 Swagger/ReDoc/OpenAPI 路由。
 
 ## 🔧 核心功能
 
@@ -187,10 +184,10 @@ uv run uvicorn src:app --reload --host 0.0.0.0 --port 8000
 
 ```python
 # 登录获取 token
-POST /api/v1/users/login
+POST /api/v1/auth/login
 {
     "username": "admin",
-    "password": "admin"
+    "password": "Admin123!"
 }
 
 # 使用 token 访问 API
@@ -249,9 +246,6 @@ service NodeService {
 ```javascript
 // 日志实时推送
 ws://localhost:8000/ws/logs/{execution_id}
-
-// 节点状态推送
-ws://localhost:8000/ws/nodes
 ```
 
 ## 📊 数据模型

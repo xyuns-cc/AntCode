@@ -55,7 +55,6 @@ export const globalModal = {
   destroyAll: () => modalInstance?.destroyAll(),
 }
 
-/** @deprecated Use globalMessage or globalNotification instead */
 export type NoticeType = 'success' | 'error' | 'warning' | 'info'
 
 export function showNotification(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 
 from src.schemas.monitoring import (
     ClusterSummaryResponse,
@@ -16,6 +16,7 @@ from src.schemas.monitoring import (
     NodeSummary,
 )
 from src.services.monitoring import monitoring_service
+from src.core.security.auth import get_current_user
 
 router = APIRouter(prefix="/monitoring", tags=["监控"])
 
@@ -57,7 +58,7 @@ def _convert_spider(raw):
 
 
 @router.get("/nodes", response_model=list[NodeSummary], summary="列出在线节点")
-async def list_online_nodes():
+async def list_online_nodes(current_user=Depends(get_current_user)):
     nodes = await monitoring_service.get_online_nodes()
     summaries = []
     for node in nodes:
@@ -74,7 +75,10 @@ async def list_online_nodes():
 
 
 @router.get("/nodes/{node_id}/realtime", response_model=NodeRealtimeResponse, summary="获取节点实时数据")
-async def get_node_realtime(node_id: str):
+async def get_node_realtime(
+    node_id: str,
+    current_user=Depends(get_current_user)
+):
     data = await monitoring_service.get_node_realtime(node_id)
     if not data:
         raise HTTPException(status_code=404, detail="节点实时数据不存在")
@@ -94,6 +98,7 @@ async def get_node_history(
     metric_type: str = Query("performance", pattern="^(performance|spider)$"),
     start_time: datetime = None,
     end_time: datetime = None,
+    current_user=Depends(get_current_user),
 ):
     if end_time is None:
         end_time = datetime.now(timezone.utc)
@@ -135,7 +140,6 @@ async def get_node_history(
 
 
 @router.get("/cluster/summary", response_model=ClusterSummaryResponse, summary="获取集群摘要")
-async def get_cluster_summary():
+async def get_cluster_summary(current_user=Depends(get_current_user)):
     summary = await monitoring_service.get_cluster_summary()
     return ClusterSummaryResponse(**summary)
-

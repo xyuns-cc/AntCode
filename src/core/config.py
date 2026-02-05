@@ -105,7 +105,7 @@ class Settings(BaseSettings):
 
     # === 默认管理员 ===
     DEFAULT_ADMIN_USERNAME: str = "admin"
-    DEFAULT_ADMIN_PASSWORD: str = "admin"
+    DEFAULT_ADMIN_PASSWORD: str = "Admin123!"
 
     # === 任务队列后端配置 ===
     # 队列后端类型: "memory" (默认) 或 "redis"

@@ -94,7 +94,7 @@ const Settings: React.FC = memo(() => {
     <Card title="密码设置" size="small" className={styles.formCard}>
       <Alert
         message="密码安全提示"
-        description="为了账户安全，请定期更换密码。新密码应包含字母、数字，长度至少6位。"
+        description="为了账户安全，请定期更换密码。新密码应包含大小写字母、数字、特殊字符，长度至少8位。"
         type="info"
         showIcon
         className={styles.securityAlert}
@@ -124,7 +124,7 @@ const Settings: React.FC = memo(() => {
           name="newPassword"
           rules={[
             { required: true, message: '请输入新密码' },
-            { min: 6, message: '密码长度至少6位' },
+            { min: 8, message: '密码长度至少8位' },
             { max: 100, message: '密码长度不能超过100位' }
           ]}
         >

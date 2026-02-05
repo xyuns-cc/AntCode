@@ -9,31 +9,20 @@ class QueryHelper:
     """查询辅助工具"""
 
     @staticmethod
-    async def get_by_id_or_public_id(
+    async def get_by_public_id(
         model_class: Type[T],
-        id_value: Any,
+        public_id: Any,
         user_id: Optional[int] = None,
-        check_admin: bool = True
+        check_admin: bool = True,
     ) -> Optional[T]:
-        """
-        通过 ID 或 public_id 获取对象
-        
-        Args:
-            model_class: 模型类
-            id_value: ID 值（支持内部 ID 或 public_id）
-            user_id: 用户 ID（用于权限过滤）
-            check_admin: 是否检查管理员权限
-        """
-        # 确定查询字段
-        try:
-            internal_id = int(id_value)
-            query = model_class.filter(id=internal_id)
-        except (ValueError, TypeError):
-            query = model_class.filter(public_id=str(id_value))
+        if public_id is None:
+            return None
 
-        # 权限过滤
+        query = model_class.filter(public_id=str(public_id))
+
         if user_id is not None and check_admin:
             from src.services.users.user_service import user_service
+
             user = await user_service.get_user_by_id(user_id)
             if not (user and user.is_admin):
                 query = query.filter(user_id=user_id)
@@ -66,6 +55,22 @@ class QueryHelper:
         from src.models import Project
         projects = await Project.filter(id__in=project_ids).only('id', 'public_id')
         return {p.id: p.public_id for p in projects}
+
+    @staticmethod
+    async def batch_get_project_info(project_ids: list[int]) -> dict[int, dict]:
+        if not project_ids:
+            return {}
+
+        from src.models import Project
+        projects = await Project.filter(id__in=project_ids).only("id", "public_id", "execution_strategy", "bound_node_id")
+        return {
+            p.id: {
+                "public_id": p.public_id,
+                "execution_strategy": p.execution_strategy,
+                "bound_node_id": p.bound_node_id,
+            }
+            for p in projects
+        }
 
     @staticmethod
     async def batch_get_node_info(node_ids: list[int]) -> dict[int, dict]:

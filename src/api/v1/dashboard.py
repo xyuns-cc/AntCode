@@ -9,13 +9,21 @@ from src.core.response import success, Messages
 from src.models.project import Project
 from src.models.scheduler import ScheduledTask
 from src.models.enums import ProjectStatus, ProjectType, TaskStatus
+from src.services.users.user_service import user_service
 
 router = APIRouter()
+
+
+async def _require_admin(user_id):
+    is_admin = await user_service.is_admin(user_id)
+    if not is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
 
 
 @router.get("/summary", response_model=BaseResponse[dict], summary="仪表盘摘要")
 async def get_dashboard_summary(current_user=Depends(get_current_user)):
     try:
+        await _require_admin(current_user.user_id)
         total_projects = await Project.all().count()
         projects_by_status = {
             "active": await Project.filter(status=ProjectStatus.ACTIVE).count(),
@@ -32,7 +40,7 @@ async def get_dashboard_summary(current_user=Depends(get_current_user)):
         total_tasks = await ScheduledTask.all().count()
         tasks_active = await ScheduledTask.filter(is_active=True).count()
         tasks_running = await ScheduledTask.filter(status=TaskStatus.RUNNING).count()
-        tasks_completed = await ScheduledTask.filter(status=TaskStatus.SUCCESS).count()
+        tasks_success = await ScheduledTask.filter(status=TaskStatus.SUCCESS).count()
         tasks_failed = await ScheduledTask.filter(status=TaskStatus.FAILED).count()
         tasks_paused = await ScheduledTask.filter(status=TaskStatus.PAUSED).count()
 
@@ -47,7 +55,7 @@ async def get_dashboard_summary(current_user=Depends(get_current_user)):
                 "active": tasks_active,
                 "running": tasks_running,
                 "by_status": {
-                    "completed": tasks_completed,
+                    "success": tasks_success,
                     "failed": tasks_failed,
                     "paused": tasks_paused,
                 },
@@ -66,6 +74,7 @@ async def get_dashboard_summary(current_user=Depends(get_current_user)):
 @router.get("/metrics", response_model=BaseResponse[dict], summary="系统指标")
 async def get_system_metrics(current_user=Depends(get_current_user)):
     try:
+        await _require_admin(current_user.user_id)
         from src.infrastructure.cache import system_metrics_service
         metrics = await system_metrics_service.get_metrics()
         return success(metrics.model_dump(), message=Messages.QUERY_SUCCESS)
@@ -98,6 +107,7 @@ async def get_metrics_cache_info(current_user=Depends(get_current_user)):
 @router.post("/metrics/refresh", response_model=BaseResponse[dict], summary="刷新指标")
 async def refresh_system_metrics(current_user=Depends(get_current_user)):
     try:
+        await _require_admin(current_user.user_id)
         from src.infrastructure.cache import system_metrics_service
         metrics = await system_metrics_service.get_metrics(force_refresh=True)
         return success(metrics.model_dump(), message="指标已刷新")

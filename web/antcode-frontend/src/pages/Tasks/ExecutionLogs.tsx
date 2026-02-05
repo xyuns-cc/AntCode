@@ -533,16 +533,13 @@ const ExecutionLogs: React.FC = () => {
               // 收到状态更新时，更新本地执行状态
               Logger.info('收到执行状态更新', statusUpdate)
               if (execution && statusUpdate.status) {
-                // 后端发送大写状态，前端使用小写
-                const normalizedStatus = statusUpdate.status.toLowerCase() as TaskExecution['status']
                 setExecution(prev => prev ? {
                   ...prev,
-                  status: normalizedStatus
+                  status: statusUpdate.status as TaskExecution['status']
                 } : null)
               }
               // 如果任务完成，刷新完整的执行信息
-              const upperStatus = statusUpdate.status.toUpperCase()
-              if (['SUCCESS', 'FAILED', 'TIMEOUT', 'CANCELLED'].includes(upperStatus)) {
+              if (['success', 'failed', 'timeout', 'cancelled'].includes(statusUpdate.status)) {
                 loadExecution()
               }
             }}

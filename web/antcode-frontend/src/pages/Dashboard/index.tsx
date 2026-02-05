@@ -162,7 +162,7 @@ const Dashboard: React.FC = memo(() => {
                     <Skeleton loading={loading} active>
                       <Row gutter={[24, 24]}>
                         <Col span={8}><Statistic title="活跃项目" value={dashboardStats?.projects.active || 0} valueStyle={{ color: token.colorSuccess }} /></Col>
-                        <Col span={8}><Statistic title="已完成任务" value={dashboardStats?.tasks.completed || 0} valueStyle={{ color: token.colorInfo }} /></Col>
+                        <Col span={8}><Statistic title="成功任务" value={dashboardStats?.tasks.success || 0} valueStyle={{ color: token.colorInfo }} /></Col>
                         <Col span={8}><Statistic title="失败任务" value={dashboardStats?.tasks.failed || 0} valueStyle={{ color: token.colorError }} /></Col>
                       </Row>
                     </Skeleton>

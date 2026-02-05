@@ -23,17 +23,16 @@ const InstallPackagesModal: React.FC<InstallPackagesModalProps> = ({
     setLoading(true)
     try {
       // 判断是节点环境还是本地环境
-      const venvIdStr = String(venvId)
-      if (venvIdStr.includes('-')) {
+      if (venvId.includes('-')) {
         // 节点环境ID格式: nodeId-envName
-        const firstDashIndex = venvIdStr.indexOf('-')
-        const nodeId = venvIdStr.substring(0, firstDashIndex)
-        const envName = venvIdStr.substring(firstDashIndex + 1)
+        const firstDashIndex = venvId.indexOf('-')
+        const nodeId = venvId.substring(0, firstDashIndex)
+        const envName = venvId.substring(firstDashIndex + 1)
         await envService.installNodeEnvPackages(nodeId, envName, pkgs)
         message.success('节点环境依赖安装成功')
       } else {
         // 本地环境
-        await envService.installPackagesToVenv(venvId as number, pkgs)
+        await envService.installPackagesToVenv(venvId, pkgs)
         message.success('依赖安装成功')
       }
       onSuccess()

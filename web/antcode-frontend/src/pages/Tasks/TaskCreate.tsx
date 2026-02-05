@@ -26,6 +26,12 @@ import { validateCronExpression } from '@/utils/cron'
 const { Option, OptGroup } = Select
 const { TextArea } = Input
 
+interface TaskCreateFormValues extends Omit<TaskCreateRequest, 'execution_params' | 'environment_vars' | 'scheduled_time'> {
+  execution_params?: string
+  environment_vars?: string
+  scheduled_time?: { toISOString: () => string }
+}
+
 const TaskCreate: React.FC = () => {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -69,22 +75,11 @@ const TaskCreate: React.FC = () => {
   }, [loadProjects, loadNodes])
 
   // 处理表单提交
-  const handleSubmit = async (values: TaskCreateRequest) => {
+  const handleSubmit = async (values: TaskCreateFormValues) => {
     setLoading(true)
     try {
-      // 处理执行策略
-      let executionStrategy: string | undefined
-      let specifiedNodeId: string | undefined
-      
-      if (values.node_id === '__auto__') {
-        // 自动选择策略
-        executionStrategy = 'auto'
-      } else if (values.node_id && values.node_id !== '') {
-        // 指定节点策略
-        executionStrategy = 'specified'
-        specifiedNodeId = values.node_id
-      }
-      // 留空则继承项目配置（不设置 execution_strategy）
+      const executionStrategy = values.execution_strategy || undefined
+      const specifiedNodeId = executionStrategy === 'specified' ? values.specified_node_id : undefined
 
       const taskData: TaskCreateRequest = {
         name: values.name,
@@ -162,8 +157,7 @@ const TaskCreate: React.FC = () => {
             timeout_seconds: 3600,
             retry_count: 3,
             retry_delay: 60,
-            is_active: true,
-            node_id: ''  // 默认继承项目配置
+            is_active: true
           }}
         >
           <Row gutter={24}>
@@ -278,7 +272,7 @@ const TaskCreate: React.FC = () => {
             type="info"
             showIcon
             message="任务执行策略"
-            description="任务默认继承项目的执行策略配置。如需覆盖，可选择指定节点或自动选择。"
+            description="任务默认继承项目的执行策略配置。如需覆盖，可选择本地/自动/指定节点。"
             style={{ marginBottom: 16 }}
           />
 
@@ -288,11 +282,11 @@ const TaskCreate: React.FC = () => {
                 label={
                   <Space>
                     <CloudServerOutlined />
-                    <span>执行节点</span>
+                    <span>执行策略</span>
                   </Space>
                 }
-                name="node_id"
-                tooltip="选择任务执行的节点。留空则继承项目配置；选择'自动选择'则由系统负载均衡选择最优节点"
+                name="execution_strategy"
+                tooltip="留空则继承项目配置；指定节点时需额外选择节点"
               >
                 <Select
                   placeholder="继承项目配置"
@@ -307,44 +301,76 @@ const TaskCreate: React.FC = () => {
                       <Tag color="default">推荐</Tag>
                     </Space>
                   </Option>
-                  <Option value="__auto__">
+                  <Option value="local">
+                    <Space>
+                      <DesktopOutlined style={{ color: '#1677ff' }} />
+                      <span>本地执行</span>
+                    </Space>
+                  </Option>
+                  <Option value="auto">
                     <Space>
                       <CloudServerOutlined style={{ color: '#52c41a' }} />
                       <span>自动选择（负载均衡）</span>
                     </Space>
                   </Option>
-                  {nodes.filter(n => n.status === 'online').length > 0 && (
-                    <OptGroup label="指定节点">
-                      {nodes.filter(n => n.status === 'online').map(node => (
-                        <Option key={node.id} value={node.id}>
-                          <Space>
-                            <CloudServerOutlined style={{ color: '#13c2c2' }} />
-                            <span>{node.name}</span>
-                            {node.region && <Tag color="blue" style={{ marginLeft: 4 }}>{node.region}</Tag>}
-                            {node.metrics && (
-                              <span style={{ color: '#999', fontSize: 12 }}>
-                                (CPU: {node.metrics.cpu?.toFixed(0)}% / 内存: {node.metrics.memory?.toFixed(0)}%)
-                              </span>
-                            )}
-                          </Space>
-                        </Option>
-                      ))}
-                    </OptGroup>
-                  )}
-                  {nodes.filter(n => n.status !== 'online').length > 0 && (
-                    <OptGroup label="离线节点">
-                      {nodes.filter(n => n.status !== 'online').map(node => (
-                        <Option key={node.id} value={node.id} disabled>
-                          <Space>
-                            <CloudServerOutlined style={{ color: '#ff4d4f' }} />
-                            <span style={{ color: '#999' }}>{node.name}</span>
-                            <Tag color="error">离线</Tag>
-                          </Space>
-                        </Option>
-                      ))}
-                    </OptGroup>
-                  )}
+                  <Option value="specified">
+                    <Space>
+                      <CloudServerOutlined style={{ color: '#13c2c2' }} />
+                      <span>指定节点</span>
+                    </Space>
+                  </Option>
                 </Select>
+              </Form.Item>
+
+              <Form.Item shouldUpdate noStyle>
+                {() => {
+                  const strategy = form.getFieldValue('execution_strategy')
+                  if (strategy !== 'specified') {
+                    return null
+                  }
+
+                  return (
+                    <Form.Item
+                      label="指定节点"
+                      name="specified_node_id"
+                      rules={[{ required: true, message: '请选择节点' }]}
+                    >
+                      <Select placeholder="请选择节点" showSearch optionFilterProp="children">
+                        {nodes.filter(n => n.status === 'online').length > 0 && (
+                          <OptGroup label="在线节点">
+                            {nodes.filter(n => n.status === 'online').map(node => (
+                              <Option key={node.id} value={node.id}>
+                                <Space>
+                                  <CloudServerOutlined style={{ color: '#13c2c2' }} />
+                                  <span>{node.name}</span>
+                                  {node.region && <Tag color="blue" style={{ marginLeft: 4 }}>{node.region}</Tag>}
+                                  {node.metrics && (
+                                    <span style={{ color: '#999', fontSize: 12 }}>
+                                      (CPU: {node.metrics.cpu?.toFixed(0)}% / 内存: {node.metrics.memory?.toFixed(0)}%)
+                                    </span>
+                                  )}
+                                </Space>
+                              </Option>
+                            ))}
+                          </OptGroup>
+                        )}
+                        {nodes.filter(n => n.status !== 'online').length > 0 && (
+                          <OptGroup label="离线节点">
+                            {nodes.filter(n => n.status !== 'online').map(node => (
+                              <Option key={node.id} value={node.id} disabled>
+                                <Space>
+                                  <CloudServerOutlined style={{ color: '#ff4d4f' }} />
+                                  <span style={{ color: '#999' }}>{node.name}</span>
+                                  <Tag color="error">离线</Tag>
+                                </Space>
+                              </Option>
+                            ))}
+                          </OptGroup>
+                        )}
+                      </Select>
+                    </Form.Item>
+                  )
+                }}
               </Form.Item>
             </Col>
             <Col span={6}>

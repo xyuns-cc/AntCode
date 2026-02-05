@@ -15,18 +15,10 @@ class RelationService:
     """应用层关联关系管理器"""
 
     @staticmethod
-    async def _get_by_id_or_public_id(model_class, id_value) -> Optional[Any]:
-        """通用的 ID/public_id 查询"""
-        try:
-            internal_id = int(id_value)
-            return await model_class.get(id=internal_id)
-        except (ValueError, TypeError):
-            try:
-                return await model_class.get(public_id=str(id_value))
-            except DoesNotExist:
-                return None
-        except DoesNotExist:
+    async def _get_by_public_id(model_class, public_id) -> Optional[Any]:
+        if public_id is None:
             return None
+        return await model_class.get_or_none(public_id=str(public_id))
 
     @staticmethod
     async def get_user_by_id(user_id: int) -> Optional[User]:
@@ -35,8 +27,8 @@ class RelationService:
 
     @staticmethod
     async def get_project_by_id(project_id) -> Optional[Project]:
-        """根据ID获取项目（支持 public_id）"""
-        return await RelationService._get_by_id_or_public_id(Project, project_id)
+        """根据 public_id 获取项目"""
+        return await RelationService._get_by_public_id(Project, project_id)
 
     @staticmethod
     async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:

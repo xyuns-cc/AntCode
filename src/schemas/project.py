@@ -60,7 +60,7 @@ class ProjectCreateRequest(BaseModel):
     # ========== 区域配置 ==========
     region: str | None = Field(None, description="执行区域，系统自动选择该区域内负载最低的节点")
 
-    # ========== 执行策略配置（保留兼容）==========
+    # ========== 执行策略配置 ==========
     execution_strategy: str | None = Field(
         "auto", 
         description="执行策略：local-本地执行, fixed-固定节点, auto-自动选择, prefer-优先绑定节点"
@@ -262,7 +262,7 @@ class ProjectUpdateRequest(BaseModel):
     # 区域配置
     region: Optional[str] = Field(None, description="执行区域")
 
-    # 执行策略配置（保留兼容）
+    # 执行策略配置
     execution_strategy: Optional[str] = Field(None, description="执行策略")
     bound_node_id: Optional[str] = Field(None, description="绑定的执行节点ID")
     fallback_enabled: Optional[bool] = Field(None, description="是否启用故障转移")
@@ -332,6 +332,7 @@ class ProjectListQueryRequest(BaseModel):
     tag: Optional[str] = Field(None, description="标签筛选")
     created_by: Optional[str] = Field(None, description="创建者公开ID筛选")
     search: Optional[str] = Field(None, description="关键字搜索（名称、描述）")
+    node_id: Optional[str] = Field(None, description="节点ID筛选")
 
 
 class TaskMeta(BaseModel):

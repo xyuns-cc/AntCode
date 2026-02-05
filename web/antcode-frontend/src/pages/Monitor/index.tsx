@@ -325,12 +325,18 @@ const Monitor: React.FC = () => {
     const loadTasks = async () => {
       try {
         const response = await taskService.getTasks({ page: 1, size: 20 })
-        const taskList = response.data || []
-        setTasks(taskList.map((t: { id: string; name: string; node_id?: string; status: string; last_run_duration?: number }) => ({
+        const taskList = response.items || []
+        setTasks(taskList.map((t: any) => ({
           id: t.id,
           name: t.name,
-          node: nodes.find(n => n.id === t.node_id)?.name || '未分配',
-          status: t.status === 'running' ? 'running' : t.status === 'failed' ? 'failed' : t.status === 'completed' ? 'success' : 'pending',
+          node: (() => {
+            const strategy = t.execution_strategy || t.project_execution_strategy
+            if (strategy === 'specified') return t.specified_node_name || t.specified_node_id || '指定节点'
+            if (strategy === 'fixed' || strategy === 'prefer') return t.project_bound_node_name || t.project_bound_node_id || '绑定节点'
+            if (strategy === 'auto') return '自动选择'
+            return '本地'
+          })(),
+          status: t.status === 'running' ? 'running' : t.status === 'failed' ? 'failed' : t.status === 'success' ? 'success' : 'pending',
           cpu: '-', // 任务级别的 CPU/内存暂不支持
           memory: '-',
           duration: t.last_run_duration ? `${Math.round(t.last_run_duration)}秒` : '-'
@@ -1765,4 +1771,3 @@ const Monitor: React.FC = () => {
 }
 
 export default Monitor
-

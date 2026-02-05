@@ -51,7 +51,7 @@ class SpiderExecutor(BaseExecutor):
             try:
                 crawl_result = await asyncio.wait_for(spider.run(client=self._http_client),
                                                      timeout=context.timeout or self.default_timeout)
-                result.status = ExecutionStatus.COMPLETED
+                result.status = ExecutionStatus.SUCCESS
                 result.data = crawl_result.to_dict()
                 result.finished_at = datetime.now().isoformat()
             except asyncio.TimeoutError:

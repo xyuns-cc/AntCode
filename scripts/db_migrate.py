@@ -26,17 +26,27 @@
 import argparse
 import asyncio
 import sys
+import shutil
 from pathlib import Path
 
 # 添加项目根目录到 Python 路径
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.dont_write_bytecode = True
+
+
+def _cleanup_pycache() -> None:
+    for pycache_dir in (PROJECT_ROOT / "migrations").rglob("__pycache__"):
+        shutil.rmtree(pycache_dir, ignore_errors=True)
 
 
 async def run_aerich_command(args: list[str]) -> int:
     """运行 aerich 命令"""
     from aerich import Command
     from src.core.db_config import TORTOISE_ORM
+    from tortoise import Tortoise
+
+    _cleanup_pycache()
 
     command = Command(
         tortoise_config=TORTOISE_ORM,
@@ -49,8 +59,16 @@ async def run_aerich_command(args: list[str]) -> int:
 
         if args[0] == "init":
             # 初始化迁移目录
-            await command.init_db(safe=True)
-            print("✅ 迁移初始化完成")
+            migrations_dir = PROJECT_ROOT / "migrations" / "models"
+            has_migrations = migrations_dir.exists() and any(
+                p.is_file() and p.suffix == ".py" and p.name[0].isdigit()
+                for p in migrations_dir.iterdir()
+            )
+            if has_migrations:
+                print("ℹ️  已存在迁移文件，跳过 init-db，请直接执行 upgrade")
+            else:
+                await command.init_db(safe=True)
+                print("✅ 迁移初始化完成")
 
         elif args[0] == "migrate":
             # 生成迁移文件
@@ -110,6 +128,12 @@ async def run_aerich_command(args: list[str]) -> int:
     except Exception as e:
         print(f"❌ 错误: {e}")
         return 1
+    finally:
+        try:
+            await Tortoise.close_connections()
+        except Exception:
+            pass
+        _cleanup_pycache()
 
 
 def main():

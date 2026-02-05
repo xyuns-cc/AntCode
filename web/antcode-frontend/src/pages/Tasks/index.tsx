@@ -164,7 +164,7 @@ const Tasks: React.FC = memo(() => {
   }
 
   // 触发任务
-  const handleTriggerTask = async (taskId: number | string) => {
+  const handleTriggerTask = async (taskId: string) => {
     try {
       const resp = await triggerTask.mutateAsync(taskId)
       if (resp?.message) {
@@ -178,11 +178,11 @@ const Tasks: React.FC = memo(() => {
   }
 
   // 删除任务
-  const handleDeleteTask = async (taskId: number | string) => {
+  const handleDeleteTask = async (taskId: string) => {
     try {
       await deleteTask.mutateAsync(taskId)
       showNotification('success', '任务已删除')
-      setSelectedRowKeys((prev) => prev.filter(key => key !== taskId))
+      setSelectedRowKeys((prev) => prev.filter(key => String(key) !== taskId))
     } catch (_error: unknown) {
       // 通知由拦截器统一处理
     }
@@ -203,7 +203,7 @@ const Tasks: React.FC = memo(() => {
       cancelText: '取消',
       onOk: async () => {
         try {
-          const result = await batchDelete.mutateAsync(selectedRowKeys as (string | number)[])
+          const result = await batchDelete.mutateAsync(selectedRowKeys.map(String))
           if (result.success_count > 0) {
             showNotification('success', `成功删除 ${result.success_count} 个任务`)
             setSelectedRowKeys([])
@@ -212,7 +212,6 @@ const Tasks: React.FC = memo(() => {
             showNotification('warning', `${result.failed_count} 个任务删除失败`)
           }
         } catch (_error: unknown) {
-          // 如果批量删除 API 不存在，降级为逐个删除
           showNotification('error', '批量删除失败，请稍后重试')
         }
       }
@@ -227,7 +226,6 @@ const Tasks: React.FC = memo(() => {
       queued: { color: 'cyan', text: '排队中' },
       running: { color: 'processing', text: '执行中' },
       success: { color: 'success', text: '成功' },
-      completed: { color: 'success', text: '已完成' },
       failed: { color: 'error', text: '失败' },
       cancelled: { color: 'warning', text: '已取消' },
       timeout: { color: 'error', text: '超时' },
@@ -419,19 +417,33 @@ const Tasks: React.FC = memo(() => {
             },
             {
               title: '执行节点',
-              dataIndex: 'node_name',
-              key: 'node_name',
+              key: 'node',
               width: 130,
               responsive: ['lg'],
               render: (_: string, record: Task) => {
-                const nodeName = record.node_id ? (record.node_name || record.node_id) : '本地'
-                const icon = record.node_id 
-                  ? <CloudServerOutlined style={{ fontSize: 12 }} /> 
-                  : <DesktopOutlined style={{ fontSize: 12 }} />
+                const strategy = record.execution_strategy || record.project_execution_strategy
+
+                let nodeName = '本地'
+                let icon = <DesktopOutlined style={{ fontSize: 12 }} />
+                let color: string = 'geekblue'
+
+                if (strategy === 'auto') {
+                  nodeName = '自动选择'
+                  icon = <CloudServerOutlined style={{ fontSize: 12 }} />
+                  color = 'green'
+                } else if (strategy === 'specified') {
+                  nodeName = record.specified_node_name || record.specified_node_id || '指定节点'
+                  icon = <CloudServerOutlined style={{ fontSize: 12 }} />
+                  color = 'cyan'
+                } else if (strategy === 'fixed' || strategy === 'prefer') {
+                  nodeName = record.project_bound_node_name || record.project_bound_node_id || '绑定节点'
+                  icon = <CloudServerOutlined style={{ fontSize: 12 }} />
+                  color = 'blue'
+                }
                 return (
                   <Tooltip title={nodeName} placement="topLeft">
                     <Tag 
-                      color={record.node_id ? 'cyan' : 'geekblue'}
+                      color={color}
                       style={{ 
                         maxWidth: '100%', 
                         overflow: 'hidden', 

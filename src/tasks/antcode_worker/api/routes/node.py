@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from loguru import logger
 
 from ..deps import get_engine
-from ..schemas import ConnectRequest, ConnectRequestV2, DisconnectRequest
+from ..schemas import ConnectRequestV2, DisconnectRequest
 from ...config import get_node_config, reset_machine_code
 from ...services import master_client
 
@@ -40,6 +40,9 @@ class SystemInfo(BaseModel):
 class NodeInfoResponse(BaseModel):
     """节点信息响应"""
     name: str
+    host: Optional[str] = None
+    port: Optional[int] = None
+    region: Optional[str] = None
     machine_code: str
     is_connected: bool
     master_url: Optional[str] = None
@@ -57,7 +60,6 @@ class ConnectResponse(BaseModel):
     machine_code: str
     node_id: Optional[str] = None
     connection_type: str
-    websocket_connected: bool = False
 
 
 class MachineCodeResetResponse(BaseModel):
@@ -73,11 +75,13 @@ async def get_node_info():
     """获取节点信息"""
     import platform
     import sys
-    from ...services import capability_service, communication_manager
+    from ...services import capability_service
+    from ...transport.manager import communication_manager
 
     info = master_client.get_node_info()
     engine = get_engine()
     metrics = master_client.get_system_metrics()
+    config = get_node_config()
 
     # 获取系统信息
     system_info = SystemInfo(
@@ -92,10 +96,13 @@ async def get_node_info():
 
     return NodeInfoResponse(
         name=info.get("name", "unknown"),
+        host=info.get("host"),
+        port=info.get("port"),
+        region=info.get("region"),
         machine_code=info.get("machine_code", ""),
         is_connected=communication_manager.is_connected,
-        master_url=info.get("master_url"),
-        version="1.0.0",  # 工作节点版本
+        master_url=config.master_url,
+        version=info.get("version"),
         engine=EngineInfo(
             state=engine.state.name,
             running_tasks=engine.running_count,
@@ -103,7 +110,7 @@ async def get_node_info():
             max_concurrent=engine.max_concurrent,
         ),
         websocket=WebSocketInfo(
-            connected=comm_stats.get("websocket", {}).get("connected", False),
+            connected=comm_stats.get("connected", False),
             stats=comm_stats,
         ),
         capabilities=capability_service.detect_all(),
@@ -122,7 +129,7 @@ async def get_node_stats():
 @router.get("/communication")
 async def get_communication_stats():
     """获取通讯状态统计"""
-    from ...services import communication_manager
+    from ...transport.manager import communication_manager
     return communication_manager.get_stats()
 
 
@@ -132,9 +139,12 @@ async def get_metrics():
     return master_client.get_system_metrics()
 
 
-@router.post("/connect", response_model=ConnectResponse)
-async def connect_node(request: ConnectRequest):
-    """连接主节点（HTTP模式）"""
+@router.post("/connect/v2", response_model=ConnectResponse)
+async def connect_node_v2(request: ConnectRequestV2):
+    """连接主节点（gRPC 优先，HTTP 回退）"""
+    from ...transport.manager import communication_manager
+    from ...domain.models import ConnectionConfig
+
     config = get_node_config()
 
     if request.machine_code != config.machine_code:
@@ -142,74 +152,60 @@ async def connect_node(request: ConnectRequest):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="机器码不匹配"
         )
+    if not request.access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="缺少访问令牌"
+        )
 
     config.is_connected = True
     config.api_key = request.api_key
+    config.access_token = request.access_token
     config.master_url = request.master_url
+    config.secret_key = request.secret_key
+    config.node_id = request.node_id
+    if request.grpc_port:
+        config.grpc_port = request.grpc_port
+    config.prefer_grpc = bool(request.prefer_grpc)
 
+    # 先建立 HTTP 连接（心跳/执行心跳等）
     try:
         await master_client.connect(
             master_url=request.master_url,
             machine_code=config.machine_code,
             api_key=request.api_key,
-            node_id=request.node_id,  # 传递 node_id 用于心跳上报
+            access_token=request.access_token,
+            secret_key=request.secret_key,
+            node_id=request.node_id,
         )
     except Exception as e:
-        logger.warning(f"主节点连接失败: {e}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"主节点连接失败: {e}")
 
-    logger.info(f"已连接主节点 (HTTP): {request.master_url}")
-
-    return ConnectResponse(
-        name=config.name,
-        machine_code=config.machine_code,
-        node_id=request.node_id,
-        connection_type="http",
-    )
-
-
-@router.post("/connect/v2", response_model=ConnectResponse)
-async def connect_node_v2(request: ConnectRequestV2):
-    """连接主节点（支持WebSocket优先+HTTP回退）"""
-    from ...services import communication_manager
-
-    config = get_node_config()
-
-    if request.machine_code != config.machine_code:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="机器码不匹配"
-        )
-
-    config.is_connected = True
-    config.api_key = request.api_key
-    config.master_url = request.master_url
-
-    # 使用统一通讯管理器连接（自动处理 WebSocket 优先 + HTTP 回退）
-    connected = await communication_manager.connect(
+    connection_config = ConnectionConfig(
         master_url=request.master_url,
-        machine_code=config.machine_code,
-        api_key=request.api_key,
-        secret_key=request.secret_key,
         node_id=request.node_id,
-        prefer_websocket=request.use_websocket,
+        api_key=request.api_key,
+        machine_code=config.machine_code,
+        access_token=request.access_token,
+        secret_key=request.secret_key,
+        grpc_port=config.grpc_port,
+        prefer_grpc=config.prefer_grpc,
+        heartbeat_interval=config.heartbeat_interval,
+        reconnect_base_delay=config.grpc_reconnect_base_delay,
+        reconnect_max_delay=config.grpc_reconnect_max_delay,
     )
+
+    try:
+        connected = await communication_manager.connect(connection_config)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"通信连接失败: {e}")
 
     if not connected:
-        # 即使连接失败，也设置基本信息以便后续重试
-        logger.warning(f"连接失败，设置基本信息以便重试: {request.master_url}")
-        master_client.master_url = request.master_url.rstrip("/")
-        master_client.machine_code = config.machine_code
-        master_client.api_key = request.api_key
-        master_client.secret_key = request.secret_key
-        master_client.node_id = request.node_id
-        master_client._connected = True
-        await master_client.start_heartbeat()
-        await master_client._start_log_flush_task()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="通信连接失败")
 
     # 获取实际使用的协议
     protocol = communication_manager.current_protocol
     connection_type = protocol.value if protocol.value != "none" else "http"
-    ws_connected = protocol.value == "websocket"
 
     logger.info(f"已连接主节点: {request.master_url} (协议: {connection_type})")
 
@@ -218,14 +214,13 @@ async def connect_node_v2(request: ConnectRequestV2):
         machine_code=config.machine_code,
         node_id=request.node_id,
         connection_type=connection_type,
-        websocket_connected=ws_connected,
     )
 
 
 @router.post("/disconnect")
 async def disconnect_node(request: DisconnectRequest):
     """断开主节点连接"""
-    from ...services import communication_manager
+    from ...transport.manager import communication_manager
 
     config = get_node_config()
 
@@ -237,10 +232,17 @@ async def disconnect_node(request: DisconnectRequest):
 
     config.is_connected = False
     config.api_key = None
+    config.access_token = None
     config.master_url = None
+    config.secret_key = None
+    config.node_id = None
 
     # 使用统一通讯管理器断开连接
     await communication_manager.disconnect()
+    try:
+        await master_client.disconnect()
+    except Exception:
+        pass
     logger.info("已断开主节点连接")
 
     return {"disconnected": True}
@@ -249,6 +251,7 @@ async def disconnect_node(request: DisconnectRequest):
 @router.post("/reset-machine-code", response_model=MachineCodeResetResponse)
 async def reset_machine_code_endpoint():
     """重置机器码"""
+    from ...transport.manager import communication_manager
     config = get_node_config()
 
     old_code = config.machine_code
@@ -257,7 +260,11 @@ async def reset_machine_code_endpoint():
     config.is_connected = False
     config.master_url = None
     config.api_key = None
+    config.access_token = None
+    config.secret_key = None
+    config.node_id = None
 
+    await communication_manager.disconnect()
     await master_client.disconnect()
 
     return MachineCodeResetResponse(

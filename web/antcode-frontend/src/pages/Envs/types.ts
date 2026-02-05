@@ -29,7 +29,6 @@ export interface InterpreterInfo {
   source?: string
   nodeName?: string
   nodeId?: string
-  python_executable?: string
 }
 
 /**
@@ -55,7 +54,7 @@ export interface EditModalState {
  */
 export interface InstallModalState {
   open: boolean
-  venvId?: number | string
+  venvId?: string
 }
 
 /**
@@ -82,10 +81,10 @@ export interface CreateVenvDrawerProps {
  * 安装依赖按钮 Props
  */
 export interface InstallPackagesButtonProps {
-  venvId: number
+  venvId: string
   onInstalled?: () => void
   batch?: boolean
-  selectedIds?: number[]
+  selectedIds?: string[]
   buttonId?: string
 }
 
@@ -104,7 +103,7 @@ export interface EditVenvKeyModalProps {
  */
 export interface InstallPackagesModalProps {
   open: boolean
-  venvId?: string | number
+  venvId?: string
   onClose: () => void
   onSuccess: () => void
 }

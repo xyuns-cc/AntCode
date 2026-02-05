@@ -3,6 +3,8 @@
  * 提供常用的类型工具和辅助函数
  */
 
+import type React from 'react'
+
 /**
  * 可选属性类型，将 T 中的指定属性 K 变为可选
  */
@@ -11,7 +13,7 @@ export type Optional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>
 /**
  * 必需属性类型，将 T 中的指定属性 K 变为必需
  */
-export type Required<T, K extends keyof T> = T & Required<Pick<T, K>>
+export type RequiredFields<T, K extends keyof T> = T & Required<Pick<T, K>>
 
 /**
  * 深度可选类型

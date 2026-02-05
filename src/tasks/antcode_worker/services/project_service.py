@@ -665,7 +665,7 @@ class LocalProjectService:
         master_project_id: str,
         project_name: str,
         download_url: str,
-        api_key: str,
+        access_token: str,
         description: str = "",
         entry_point: Optional[str] = None,
         transfer_method: str = "original",
@@ -690,15 +690,6 @@ class LocalProjectService:
                         logger.info(f"使用 ProjectCache 缓存: {project_name} (hash={file_hash[:8]}...)")
                         return proj.to_dict()
 
-        # 回退到旧的缓存检查（兼容性）
-        if master_project_id in self._project_cache:
-            local_id = self._project_cache[master_project_id]
-            cached_project = self._projects.get(local_id)
-
-            if cached_project and file_hash and cached_project.file_hash == file_hash:
-                logger.info(f"使用缓存: {project_name}")
-                return cached_project.to_dict()
-
         logger.info(f"拉取项目: {project_name} [{transfer_method}]")
 
         # 网络 IO 不持锁
@@ -706,7 +697,7 @@ class LocalProjectService:
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.get(
                 download_url,
-                headers={"Authorization": f"Bearer {api_key}"}
+                headers={"Authorization": f"Bearer {access_token}"}
             )
 
             if response.status_code != 200:
@@ -997,4 +988,3 @@ class LocalProjectService:
 
 # 全局实例
 local_project_service = LocalProjectService()
-

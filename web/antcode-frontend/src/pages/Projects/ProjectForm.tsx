@@ -407,49 +407,16 @@ const ProjectForm: React.FC = () => {
       retry_count: project.rule_info.retry_count,
       timeout: project.rule_info.timeout,
       dont_filter: project.rule_info.dont_filter,
-      // v2.0.0 统一字段 - 兼容旧数据
-      extraction_rules: (() => {
-        // 如果有新的extraction_rules字段
-        if (project.rule_info.extraction_rules) {
-          // 如果是数组格式，需要转换为JSON字符串
-          if (Array.isArray(project.rule_info.extraction_rules)) {
-            return JSON.stringify(project.rule_info.extraction_rules)
-          }
-          // 如果已经是字符串格式，直接返回
-          return project.rule_info.extraction_rules
-        }
-        // 否则从旧字段转换
-        const oldRules = project.rule_info.list_selectors || project.rule_info.detail_selectors || []
-        return JSON.stringify(oldRules)
-      })(),
-      pagination_config: (() => {
-        // 如果有新的pagination_config字段
-        if (project.rule_info.pagination_config) {
-          // 如果是对象格式，需要转换为JSON字符串
-          if (typeof project.rule_info.pagination_config === 'object') {
-            return JSON.stringify(project.rule_info.pagination_config)
-          }
-          // 如果已经是字符串格式，直接返回
-          return project.rule_info.pagination_config
-        }
-        // 否则从旧字段构建
-        const config: Record<string, unknown> = {
-          method: project.rule_info.pagination_type || 'none',
+      extraction_rules: project.rule_info.extraction_rules
+        ? JSON.stringify(project.rule_info.extraction_rules)
+        : '[]',
+      pagination_config: JSON.stringify(
+        project.rule_info.pagination_config || {
+          method: 'none',
           max_pages: project.rule_info.max_pages || 10,
-          start_page: project.rule_info.start_page || 1
+          start_page: project.rule_info.start_page || 1,
         }
-        // 安全解析pagination_rule
-        if (project.rule_info.pagination_rule) {
-          try {
-            config.next_page_rule = typeof project.rule_info.pagination_rule === 'string' 
-              ? JSON.parse(project.rule_info.pagination_rule)
-              : project.rule_info.pagination_rule
-          } catch {
-            // ignore parse error
-          }
-        }
-        return JSON.stringify(config)
-      })(),
+      ),
       headers: (() => {
         const headers = project.rule_info.headers
         if (!headers) return ''
@@ -462,11 +429,10 @@ const ProjectForm: React.FC = () => {
         if (typeof cookies === 'string') return cookies
         return JSON.stringify(cookies, null, 2)
       })(),
-      // v2.0.0 新增字段
-      proxy_config: project.rule_info.proxy_config,
-      anti_spider: project.rule_info.anti_spider,
-      task_config: project.rule_info.task_config,
-      data_schema: project.rule_info.data_schema
+      proxy_config: project.rule_info.proxy_config ? JSON.stringify(project.rule_info.proxy_config) : undefined,
+      anti_spider: project.rule_info.anti_spider ? JSON.stringify(project.rule_info.anti_spider) : undefined,
+      task_config: project.rule_info.task_config ? JSON.stringify(project.rule_info.task_config) : undefined,
+      data_schema: project.rule_info.data_schema ? JSON.stringify(project.rule_info.data_schema, null, 2) : undefined
     }
 
     return (

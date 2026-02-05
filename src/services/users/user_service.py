@@ -12,6 +12,7 @@ from src.infrastructure.cache import user_cache
 from src.models.user import User
 from src.schemas.common import PaginationInfo
 from src.schemas.user import UserResponse, UserSimpleResponse
+from src.core.config import settings
 
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:
@@ -131,14 +132,7 @@ class UserService:
         return await User.get_or_none(id=user_id)
 
     async def get_user_by_public_id(self, public_id: str):
-        """通过 public_id 获取用户（支持 public_id 和内部 id）"""
-        # 尝试作为整数（内部ID）
-        try:
-            internal_id = int(public_id)
-            return await User.get_or_none(id=internal_id)
-        except (ValueError, TypeError):
-            pass
-        # 作为 public_id 查询
+        """通过 public_id 获取用户"""
         return await User.get_or_none(public_id=public_id)
 
     async def get_user_by_username(self, username):
@@ -187,15 +181,7 @@ class UserService:
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = None
     ) -> dict:
-        """获取用户列表（带缓存）"""
-        cache_key = self._generate_cache_key(page, size, is_active, is_admin, sort_by, sort_order)
-
-        # 尝试缓存
-        try:
-            if cached := await user_cache.get(cache_key):
-                return cached
-        except Exception:
-            pass
+        """获取用户列表"""
 
         # 构建查询
         query = User.all()
@@ -214,25 +200,31 @@ class UserService:
 
         users = await query.order_by(order_field).offset((page - 1) * size).limit(size)
 
+        from src.services.sessions.session_service import user_session_service
+        online_ids = await user_session_service.get_online_user_ids([u.id for u in users])
+
         # 构建响应
-        user_list = [
-            UserResponse(
-                id=u.public_id, username=u.username, email=u.email,
-                is_active=u.is_active, is_admin=u.is_admin,
-                created_at=u.created_at, last_login_at=u.last_login_at
-            ) for u in users
-        ]
+        user_list = []
+        for u in users:
+            user_list.append(
+                UserResponse(
+                    id=u.public_id,
+                    username=u.username,
+                    email=u.email,
+                    is_active=u.is_active,
+                    is_admin=u.is_admin,
+                    is_super_admin=bool(u.is_admin and u.username == settings.DEFAULT_ADMIN_USERNAME),
+                    is_online=u.id in online_ids,
+                    created_at=u.created_at,
+                    last_login_at=u.last_login_at,
+                )
+            )
 
         pages = (total + size - 1) // size
         result = {
             'data': {'items': user_list, 'page': page, 'size': size, 'total': total, 'pages': pages},
             'pagination': PaginationInfo(page=page, size=size, total=total, pages=pages)
         }
-
-        try:
-            await user_cache.set(cache_key, result)
-        except Exception:
-            pass
 
         return result
 
@@ -257,7 +249,7 @@ class UserService:
         return result
 
     async def update_user(self, user_id, request):
-        """更新用户（支持 public_id 和内部 id）"""
+        """更新用户（仅 public_id）"""
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -273,7 +265,7 @@ class UserService:
         return user
 
     async def update_user_password(self, user_id, request, current_user_id):
-        """更新用户密码（支持 public_id 和内部 id）"""
+        """更新用户密码（仅 public_id）"""
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -283,8 +275,8 @@ class UserService:
         if user.id != current_user_id and not current_user.is_admin:
             raise PermissionError("无权修改其他用户的密码")
 
-        if user.id == current_user_id and request.current_password:
-            if not user.verify_password(request.current_password):
+        if user.id == current_user_id and request.old_password:
+            if not user.verify_password(request.old_password):
                 raise ValueError("当前密码错误")
 
         # 验证新密码强度
@@ -298,7 +290,7 @@ class UserService:
         logger.info(f"密码已更新: {user.username}")
 
     async def reset_user_password(self, user_id, new_password):
-        """重置用户密码（支持 public_id 和内部 id）"""
+        """重置用户密码（仅 public_id）"""
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -314,7 +306,7 @@ class UserService:
         logger.info(f"密码已重置: {user.username}")
 
     async def delete_user(self, user_id, current_user_id):
-        """删除用户（支持 public_id 和内部 id，级联删除关联数据）"""
+        """删除用户（仅 public_id，级联删除关联数据）"""
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")

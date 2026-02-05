@@ -101,15 +101,20 @@ async def create_code_project(request: CreateCodeProjectRequest):
 async def sync_from_master(request: SyncFromMasterRequest):
     """从主节点同步项目（智能拉取）"""
     try:
-        # 优先使用请求中的 api_key，否则使用节点配置的 api_key
+        # 优先使用请求中的 access_token，否则使用节点配置的 access_token
         config = get_node_config()
-        api_key = request.api_key or config.api_key
+        access_token = request.access_token or config.access_token
+        if not access_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="缺少访问令牌"
+            )
 
         project = await local_project_service.sync_from_master(
             master_project_id=request.project_id,
             project_name=request.name,
             download_url=request.download_url,
-            api_key=api_key,
+            access_token=access_token,
             description=request.description,
             entry_point=request.entry_point,
             transfer_method=request.transfer_method,
