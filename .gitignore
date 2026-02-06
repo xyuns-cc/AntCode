@@ -45,6 +45,7 @@ env/
 
 # Data directory (auto-generated at runtime)
 data/
+runtime_data/
 
 # Legacy directories (已迁移到 data/)
 /logs/
