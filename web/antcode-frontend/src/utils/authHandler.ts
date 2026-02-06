@@ -174,7 +174,7 @@ export function withAuthErrorHandling<Args extends unknown[], ReturnType>(
       // 不是认证错误，重新抛出原错误
       throw error
     }
-  }) as T
+  })
 }
 
 export default AuthHandler

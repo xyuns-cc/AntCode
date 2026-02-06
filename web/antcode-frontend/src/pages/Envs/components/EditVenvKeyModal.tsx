@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import type React from 'react'
+import { useEffect, useState } from 'react'
 import { Modal, Form, Input, Tag, Space, Typography, App } from 'antd'
 import envService from '@/services/envs'
+import { runtimeService } from '@/services/runtimes'
 import type { EditVenvKeyModalProps } from '../types'
 
 const { Text } = Typography
@@ -29,13 +31,13 @@ const EditVenvKeyModal: React.FC<EditVenvKeyModalProps> = ({
       const values = await form.validateFields()
       setLoading(true)
       if (venv) {
-        // 节点环境
-        if (!venv.isLocal && venv.nodeId && venv.envName) {
-          await envService.updateNodeEnv(venv.nodeId, venv.envName, {
+        // Worker 环境
+        if (!venv.isLocal && venv.workerId && venv.envName) {
+          await runtimeService.updateEnv(venv.workerId, venv.envName, {
             key: values.key || undefined,
             description: values.description || undefined,
           })
-          message.success('节点环境更新成功')
+          message.success('Worker 环境更新成功')
         }
         // 本地环境（仅共享环境支持编辑）
         else if (venv.scope === 'shared') {
@@ -55,7 +57,7 @@ const EditVenvKeyModal: React.FC<EditVenvKeyModalProps> = ({
 
   return (
     <Modal
-      title={venv?.isLocal ? '编辑共享环境标识' : `编辑节点环境 - ${venv?.nodeName}`}
+      title={venv?.isLocal ? '编辑共享环境标识' : `编辑 Worker 环境 - ${venv?.workerName}`}
       open={open}
       onCancel={onClose}
       onOk={handleSubmit}
@@ -87,7 +89,7 @@ const EditVenvKeyModal: React.FC<EditVenvKeyModalProps> = ({
             <div style={{ marginTop: 8 }}>
               <Space>
                 <Tag color={venv.isLocal ? 'geekblue' : 'cyan'}>
-                  {venv.isLocal ? '本地' : venv.nodeName}
+                  {venv.isLocal ? '本地' : venv.workerName}
                 </Tag>
                 <Text>Python {venv.version}</Text>
                 {venv.current_project_id && (

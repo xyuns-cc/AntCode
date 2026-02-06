@@ -84,8 +84,23 @@ export const safeJsonParse = <T = unknown>(str: string, defaultValue: T): T => {
  */
 export const getErrorMessage = (error: unknown): string => {
   if (typeof error === 'string') return error
-  if (error?.response?.data?.detail) return error.response.data.detail
-  if (error?.response?.data?.message) return error.response.data.message
-  if (error?.message) return error.message
+  if (error && typeof error === 'object') {
+    const errorObj = error as {
+      response?: { data?: { detail?: string; message?: string } }
+      message?: string
+    }
+    if (errorObj.response?.data?.detail) return errorObj.response.data.detail
+    if (errorObj.response?.data?.message) return errorObj.response.data.message
+    if (errorObj.message) return errorObj.message
+  }
   return '未知错误'
+}
+
+/**
+ * 判断请求是否被主动取消
+ */
+export const isAbortError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false
+  const err = error as { code?: string; name?: string }
+  return err.code === 'ERR_CANCELED' || err.name === 'CanceledError'
 }

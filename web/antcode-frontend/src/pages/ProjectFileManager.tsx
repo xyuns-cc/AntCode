@@ -6,7 +6,10 @@ import {
   Spin,
   Alert,
   Empty,
-  Modal
+  Modal,
+  Dropdown,
+  Tooltip,
+  Badge
 } from 'antd'
 import showNotification from '@/utils/notification'
 import {
@@ -16,9 +19,16 @@ import {
   FolderOutlined,
   FolderOpenOutlined,
   RightOutlined,
-  ExclamationCircleOutlined
+  ExclamationCircleOutlined,
+  CloudUploadOutlined,
+  UndoOutlined,
+  HistoryOutlined,
+  DownOutlined,
+  CheckCircleOutlined,
+  DownloadOutlined
 } from '@ant-design/icons'
 import projectService from '@/services/projects'
+import versionService from '@/services/versions'
 import Logger from '@/utils/logger'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import Editor from '@monaco-editor/react'
@@ -29,7 +39,8 @@ import {
   getMonacoTheme,
   configureMonaco 
 } from '@/utils/monacoConfig'
-import type { ProjectFileContent } from '@/types'
+import type { Project, ProjectFileContent, ProjectFileStructure, ProjectFileNode } from '@/types'
+import type { EditStatus, ProjectVersion } from '@/types/version'
 import './ProjectFileManager.css'
 
 // 格式化文件大小
@@ -74,7 +85,7 @@ const isFilePreviewable = (fileName: string): boolean => {
     // 编程语言
     'py', 'js', 'jsx', 'ts', 'tsx', 'java', 'c', 'cpp', 'h', 'hpp',
     'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt', 'scala', 'dart',
-    // Web
+    // 前端
     'html', 'htm', 'css', 'scss', 'sass', 'less', 'vue',
     // 数据格式
     'json', 'xml', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf',
@@ -180,8 +191,8 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
   const { isDark } = useThemeContext()
 
   // 状态管理
-  const [project, setProject] = useState<{ name?: string } | null>(null)
-  const [fileStructure, setFileStructure] = useState<{ structure?: { type?: string; name?: string; size?: number; children?: unknown[] } } | null>(null)
+  const [project, setProject] = useState<Project | null>(null)
+  const [fileStructure, setFileStructure] = useState<ProjectFileStructure | null>(null)
   const [selectedFile, setSelectedFile] = useState<SelectedFileState | null>(null)
   const [loading, setLoading] = useState(true)
   const [fileLoading, setFileLoading] = useState(false)
@@ -194,6 +205,13 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
   const [fileHistory, setFileHistory] = useState<Array<{path: string, name: string, timestamp: number}>>([])  // 文件操作历史
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)  // 是否有未保存的更改
   const [originalContent, setOriginalContent] = useState<string>('')  // 原始文件内容，用于比较
+  
+  // 版本管理状态
+  const [editStatus, setEditStatus] = useState<EditStatus | null>(null)
+  const [versions, setVersions] = useState<ProjectVersion[]>([])
+  const [_currentVersion, setCurrentVersion] = useState<string>('draft')
+  const [publishLoading, setPublishLoading] = useState(false)
+  const [showVersionHistory, setShowVersionHistory] = useState(false)
   
   // Monaco Editor 相关
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
@@ -257,54 +275,46 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
 
   // 扁平化文件树
   const flatFileList = useMemo(() => {
-    if (!fileStructure || !fileStructure.structure) {
+    if (!fileStructure) {
       return []
     }
-    
+
+    const root = fileStructure.structure
+
     // 如果是单个文件
-    if (fileStructure.structure.type === 'file') {
+    if (root.type === 'file') {
       return [{
-        name: fileStructure.structure.name,
-        path: fileStructure.structure.name,
+        name: root.name,
+        path: root.path,
         type: 'file',
-        size: fileStructure.structure.size,
+        size: root.size,
         depth: 0
       }]
     }
-    
-    interface RawFileNode {
-      name: string
-      type?: string
-      size?: number
-      children?: RawFileNode[]
-    }
-    
-    const flatten = (node: RawFileNode, depth = 0, parentPath = ''): FileNode[] => {
+
+    const flatten = (node: ProjectFileNode, depth = 0): FileNode[] => {
       const result: FileNode[] = []
-      const currentPath = parentPath ? `${parentPath}/${node.name}` : node.name
       
       const fileNode: FileNode = {
         name: node.name,
-        path: currentPath,
+        path: node.path,
         type: node.type === 'directory' ? 'folder' : 'file',
         size: node.size,
         depth
       }
-      
+
       result.push(fileNode)
-      
-      if (node.type === 'directory' && node.children && Array.isArray(node.children)) {
-        const childNodes = node.children.flatMap((child: RawFileNode) => 
-          flatten(child, depth + 1, currentPath)
-        )
-        fileNode.children = childNodes
-        result.push(...childNodes)
+
+      if (node.type === 'directory' && node.children.length > 0) {
+        node.children.forEach((child) => {
+          result.push(...flatten(child, depth + 1))
+        })
       }
-      
+
       return result
     }
-    
-    return flatten(fileStructure.structure)
+
+    return root.children.flatMap((child) => flatten(child, 0))
   }, [fileStructure])
 
   // 过滤后的文件列表（使用防抖后的搜索词）
@@ -360,7 +370,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
   // 下载文件
   const handleDownloadFile = useCallback(async (filePath: string, fileName: string) => {
     try {
-      const blob = await projectService.downloadFile(projectId, filePath)
+      const blob = await projectService.downloadProjectFile(projectId, filePath)
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -431,12 +441,12 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       setError(null)
       
       // 如果是单个文件，自动加载并预览
-      if (structure.structure && structure.structure.type === 'file') {
+      if (structure.structure.type === 'file') {
         // 单个文件：传文件名作为路径（后端会自动判断）
         try {
-          const fileContent = await projectService.getFileContent(projectId, structure.structure.name)
+          const fileContent = await projectService.getFileContent(projectId, structure.structure.path)
           setSelectedFile({
-            path: structure.structure.name,
+            path: structure.structure.path,
             name: structure.structure.name,
             data: fileContent
           })
@@ -447,12 +457,12 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
         } catch (_err) {
           Logger.error('预览单个文件失败:', _err)
         }
-      } else if (structure.structure && structure.structure.children) {
+      } else {
         // 默认展开根目录的第一层文件夹
-        const rootFolders = (structure.structure.children as Array<{ type?: string; name?: string }>)
+        const rootFolders = structure.structure.children
           .filter((node) => node.type === 'directory')
-          .map((node) => node.name)
-        setExpandedFolders(new Set([structure.structure.name, ...rootFolders]))
+          .map((node) => node.path)
+        setExpandedFolders(new Set(rootFolders))
       }
     } catch (err) {
       Logger.error('加载文件结构失败:', err)
@@ -461,6 +471,101 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       setLoading(false)
     }
   }, [projectId])
+
+  // 加载编辑状态
+  const loadEditStatus = useCallback(async () => {
+    try {
+      const status = await versionService.getEditStatus(projectId)
+      setEditStatus(status)
+    } catch (err) {
+      Logger.error('加载编辑状态失败:', err)
+    }
+  }, [projectId])
+
+  // 加载版本列表
+  const loadVersions = useCallback(async () => {
+    try {
+      const result = await versionService.getVersions(projectId)
+      setVersions(result.versions || [])
+    } catch (err) {
+      Logger.error('加载版本列表失败:', err)
+    }
+  }, [projectId])
+
+  // 丢弃草稿
+  const handleDiscard = useCallback(async () => {
+    if (!hasUnsavedChanges && !editStatus?.dirty) {
+      showNotification('info', '没有需要丢弃的修改')
+      return
+    }
+
+    Modal.confirm({
+      title: '丢弃修改',
+      icon: <ExclamationCircleOutlined style={{ color: '#faad14' }} />,
+      content: (
+        <div style={{ marginTop: 16 }}>
+          <p style={{ fontWeight: 500, color: '#ff4d4f' }}>确定要丢弃所有未发布的修改吗？</p>
+          <p style={{ color: '#666', fontSize: '13px' }}>
+            此操作将恢复到最新已发布版本，所有未保存的修改将丢失。
+          </p>
+        </div>
+      ),
+      okText: '丢弃',
+      okType: 'danger',
+      cancelText: '取消',
+      centered: true,
+      onOk: async () => {
+        try {
+          await versionService.discard(projectId)
+          showNotification('success', '已恢复到最新版本')
+          
+          // 刷新
+          setHasUnsavedChanges(false)
+          setSelectedFile(null)
+          await loadFileStructure()
+          await loadEditStatus()
+        } catch (err) {
+          Logger.error('丢弃失败:', err)
+          showNotification('error', '丢弃失败')
+        }
+      }
+    })
+  }, [projectId, hasUnsavedChanges, editStatus, loadFileStructure, loadEditStatus])
+
+  // 回滚到指定版本
+  const handleRollback = useCallback(async (version: number) => {
+    Modal.confirm({
+      title: '回滚版本',
+      icon: <UndoOutlined style={{ color: '#faad14' }} />,
+      content: (
+        <div style={{ marginTop: 16 }}>
+          <p>确定要回滚到版本 v{version} 吗？</p>
+          <p style={{ color: '#666', fontSize: '13px' }}>
+            回滚后草稿将被替换为该版本的内容，需要重新发布才能生效。
+          </p>
+        </div>
+      ),
+      okText: '回滚',
+      okType: 'danger',
+      cancelText: '取消',
+      centered: true,
+      onOk: async () => {
+        try {
+          await versionService.rollback(projectId, { version })
+          showNotification('success', `已回滚到版本 v${version}`)
+          
+          // 刷新
+          setSelectedFile(null)
+          setCurrentVersion('draft')
+          await loadFileStructure()
+          await loadEditStatus()
+        } catch (err) {
+          Logger.error('回滚失败:', err)
+          showNotification('error', '回滚失败')
+        }
+      }
+    })
+  }, [projectId, loadFileStructure, loadEditStatus])
 
   // 保存文件
   const handleSaveFile = useCallback(async () => {
@@ -577,6 +682,56 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     }
   }, [projectId, selectedFile, fileModifiedTime, loadFileStructure])
 
+  // 发布草稿
+  const handlePublish = useCallback(async () => {
+    if (!hasUnsavedChanges && !editStatus?.dirty) {
+      showNotification('info', '没有需要发布的修改')
+      return
+    }
+
+    Modal.confirm({
+      title: '发布版本',
+      icon: <CloudUploadOutlined style={{ color: '#1890ff' }} />,
+      content: (
+        <div style={{ marginTop: 16 }}>
+          <p>确定要将当前草稿发布为新版本吗？</p>
+          <p style={{ color: '#666', fontSize: '13px' }}>
+            发布后将创建不可变的版本快照，可用于执行和回滚。
+          </p>
+        </div>
+      ),
+      okText: '发布',
+      cancelText: '取消',
+      centered: true,
+      onOk: async () => {
+        try {
+          setPublishLoading(true)
+
+          // 如果有未保存的本地修改，先保存
+          if (hasUnsavedChanges && selectedFile) {
+            await handleSaveFile()
+          }
+
+          const result = await versionService.publish(projectId, {
+            description: `版本 v${(editStatus?.published_version || 0) + 1}`
+          })
+
+          showNotification('success', `版本 v${result.version} 发布成功`)
+
+          // 刷新状态
+          setHasUnsavedChanges(false)
+          await loadEditStatus()
+          await loadVersions()
+        } catch (err) {
+          Logger.error('发布失败:', err)
+          showNotification('error', '发布失败')
+        } finally {
+          setPublishLoading(false)
+        }
+      }
+    })
+  }, [projectId, hasUnsavedChanges, editStatus, selectedFile, handleSaveFile, loadEditStatus, loadVersions])
+
   // 刷新
   const handleRefresh = useCallback(() => {
     setSelectedFile(null)
@@ -618,7 +773,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
 
   // 关闭文件管理器（返回项目详情）
   const handleCloseManager = useCallback(() => {
-    // 检查是否有未保存的更改
+    // 检查是否有未保存的本地更改
     if (hasUnsavedChanges) {
       Modal.confirm({
         title: '未保存的更改',
@@ -635,9 +790,32 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
         onOk: async () => {
           try {
             await handleSaveFile()
-            navigate(`/projects/${projectId}`)
+            // 保存后检查是否需要发布
+            if (editStatus?.dirty) {
+              Modal.confirm({
+                title: '未发布的修改',
+                icon: <CloudUploadOutlined style={{ color: '#1890ff' }} />,
+                content: '草稿已保存，是否发布为新版本？',
+                okText: '发布并退出',
+                cancelText: '稍后发布',
+                centered: true,
+                onOk: async () => {
+                  try {
+                    await versionService.publish(projectId)
+                    navigate(`/projects/${projectId}`)
+                  } catch (err) {
+                    Logger.error('发布失败:', err)
+                    navigate(`/projects/${projectId}`)
+                  }
+                },
+                onCancel: () => {
+                  navigate(`/projects/${projectId}`)
+                }
+              })
+            } else {
+              navigate(`/projects/${projectId}`)
+            }
           } catch (_err) {
-            // 保存失败，不退出
             Logger.error('保存失败，取消退出')
           }
         },
@@ -648,14 +826,45 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       return
     }
     
-    // 无未保存更改或用户选择放弃，直接退出
+    // 检查是否有未发布的草稿修改
+    if (editStatus?.dirty) {
+      Modal.confirm({
+        title: '未发布的修改',
+        icon: <CloudUploadOutlined style={{ color: '#1890ff' }} />,
+        content: (
+          <div style={{ marginTop: 16 }}>
+            <p style={{ marginBottom: 8 }}>草稿有未发布的修改！</p>
+            <p style={{ color: '#666', fontSize: '14px' }}>是否发布为新版本？</p>
+          </div>
+        ),
+        okText: '发布并退出',
+        cancelText: '稍后发布',
+        centered: true,
+        onOk: async () => {
+          try {
+            await versionService.publish(projectId)
+            showNotification('success', '版本发布成功')
+            navigate(`/projects/${projectId}`)
+          } catch (err) {
+            Logger.error('发布失败:', err)
+            navigate(`/projects/${projectId}`)
+          }
+        },
+        onCancel: () => {
+          navigate(`/projects/${projectId}`)
+        }
+      })
+      return
+    }
+    
+    // 无未保存更改，直接退出
     navigate(`/projects/${projectId}`)
-  }, [hasUnsavedChanges, handleSaveFile, navigate, projectId])
+  }, [hasUnsavedChanges, editStatus, handleSaveFile, navigate, projectId])
 
   // 处理文件内容修改
-  const handleContentChange = (newContent: string) => {
+  const handleContentChange = useCallback((newContent: string) => {
     if (!selectedFile) return
-    
+
     setSelectedFile({
       ...selectedFile,
       data: {
@@ -666,7 +875,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     
     // 比较当前内容和原始内容，判断是否真的有修改
     setHasUnsavedChanges(newContent !== originalContent)
-  }
+  }, [selectedFile, originalContent])
   
   // Monaco Editor 挂载时的回调
   const handleEditorDidMount = useCallback((editor: Monaco.editor.IStandaloneCodeEditor, monaco: typeof Monaco) => {
@@ -692,8 +901,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     if (value !== undefined) {
       handleContentChange(value)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [originalContent])
+  }, [handleContentChange])
 
   // 切换文件夹展开状态
   const toggleFolder = (path: string) => {
@@ -704,6 +912,22 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
       newExpanded.add(path)
     }
     setExpandedFolders(newExpanded)
+  }
+
+  const buildFileNode = (n: ProjectFileNode, depth = 0): FileNode => {
+    const fileNode: FileNode = {
+      name: n.name,
+      path: n.path,
+      type: n.type === 'directory' ? 'folder' : 'file',
+      size: n.size,
+      depth
+    }
+
+    if (n.type === 'directory' && n.children.length > 0) {
+      fileNode.children = n.children.map((child) => buildFileNode(child, depth + 1))
+    }
+
+    return fileNode
   }
 
   // 渲染文件树节点
@@ -761,8 +985,10 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
     if (projectId) {
       loadProject()
       loadFileStructure()
+      loadEditStatus()
+      loadVersions()
     }
-  }, [projectId, loadProject, loadFileStructure])
+  }, [projectId, loadProject, loadFileStructure, loadEditStatus, loadVersions])
 
   // 按ESC键关闭
   useEffect(() => {
@@ -811,10 +1037,109 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
         {/* 窗口标题栏 */}
         <header className="window-header no-select">
           <div className="window-title">
-            {project?.name || '文件浏览器'}
+            <span>{project?.name || '文件浏览器'}</span>
+            {/* 编辑状态指示器 */}
+            {(hasUnsavedChanges || editStatus?.dirty) && (
+              <Badge 
+                status="warning" 
+                text={<span style={{ fontSize: '12px', color: '#faad14' }}>未发布</span>}
+                style={{ marginLeft: 12 }}
+              />
+            )}
+            {editStatus && editStatus.published_version > 0 && (
+              <span style={{ 
+                marginLeft: 12, 
+                fontSize: '12px', 
+                color: 'var(--text-secondary)',
+                background: 'var(--bg-secondary)',
+                padding: '2px 8px',
+                borderRadius: '4px'
+              }}>
+                v{editStatus.published_version}
+              </span>
+            )}
           </div>
           
           <div className="header-actions">
+            {/* 版本历史按钮 */}
+            <Dropdown
+              trigger={['click']}
+              open={showVersionHistory}
+              onOpenChange={setShowVersionHistory}
+              dropdownRender={() => (
+                <div style={{
+                  background: 'var(--bg-primary)',
+                  borderRadius: '8px',
+                  boxShadow: '0 6px 16px rgba(0,0,0,0.12)',
+                  padding: '8px 0',
+                  minWidth: '280px',
+                  maxHeight: '400px',
+                  overflow: 'auto'
+                }}>
+                  <div style={{ 
+                    padding: '8px 16px', 
+                    borderBottom: '1px solid var(--border-color)',
+                    fontWeight: 500
+                  }}>
+                    版本历史
+                  </div>
+                  {versions.length === 0 ? (
+                    <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      暂无已发布版本
+                    </div>
+                  ) : (
+                    versions.map((v) => (
+                      <div 
+                        key={v.version_id}
+                        style={{
+                          padding: '12px 16px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          borderBottom: '1px solid var(--border-color)'
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = 'var(--hover-bg)'}
+                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 500 }}>
+                            v{v.version}
+                            {v.version === editStatus?.published_version && (
+                              <CheckCircleOutlined style={{ marginLeft: 8, color: '#52c41a', fontSize: '12px' }} />
+                            )}
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                            {new Date(v.created_at).toLocaleString('zh-CN')}
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                            {v.file_count} 文件 · {(v.total_size / 1024).toFixed(1)} KB
+                          </div>
+                        </div>
+                        <Tooltip title="回滚到此版本">
+                          <Button 
+                            size="small" 
+                            icon={<UndoOutlined />}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setShowVersionHistory(false)
+                              handleRollback(v.version)
+                            }}
+                          />
+                        </Tooltip>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            >
+              <button className="action-button secondary">
+                <HistoryOutlined style={{ marginRight: 4 }} />
+                历史
+                <DownOutlined style={{ marginLeft: 4, fontSize: '10px' }} />
+              </button>
+            </Dropdown>
+
             <button 
               className="action-button secondary"
               onClick={handleRefresh}
@@ -828,6 +1153,7 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
               </svg>
               重置
             </button>
+            
             <button 
               className="action-button"
               onClick={handleSaveFile}
@@ -839,6 +1165,32 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
                 <polyline points="7 3 7 8 15 8"/>
               </svg>
               保存
+            </button>
+
+            {/* 丢弃按钮 */}
+            <Tooltip title="丢弃所有未发布的修改">
+              <button 
+                className="action-button secondary"
+                onClick={handleDiscard}
+                disabled={!hasUnsavedChanges && !editStatus?.dirty}
+              >
+                <UndoOutlined style={{ marginRight: 4 }} />
+                丢弃
+              </button>
+            </Tooltip>
+
+            {/* 发布按钮 */}
+            <button 
+              className="action-button primary"
+              onClick={handlePublish}
+              disabled={publishLoading || (!hasUnsavedChanges && !editStatus?.dirty)}
+              style={{
+                background: (hasUnsavedChanges || editStatus?.dirty) ? '#1890ff' : undefined,
+                color: (hasUnsavedChanges || editStatus?.dirty) ? '#fff' : undefined
+              }}
+            >
+              <CloudUploadOutlined style={{ marginRight: 4 }} />
+              {publishLoading ? '发布中...' : '发布'}
             </button>
             
             <div className="window-controls">
@@ -1007,9 +1359,9 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
               ) : fileStructure.structure.type === 'file' ? (
                 // 单个文件的情况
                 <div
-                  className={`tree-node file ${selectedFile?.path === fileStructure.structure.name ? 'selected' : ''}`}
+                  className={`tree-node file ${selectedFile?.path === fileStructure.structure.path ? 'selected' : ''}`}
                   style={{ paddingLeft: '12px' }}
-                  onClick={() => handlePreviewFile(fileStructure.structure.name, fileStructure.structure.name)}
+                  onClick={() => handlePreviewFile(fileStructure.structure.path, fileStructure.structure.name)}
                 >
                   <span className="node-icon icon-file">
                     <FileTextOutlined />
@@ -1021,31 +1373,8 @@ const ProjectFileManager: React.FC<ProjectFileManagerProps> = ({ className }) =>
                 </div>
               ) : (
                 // 目录结构的情况
-                fileStructure.structure.children && Array.isArray(fileStructure.structure.children) ? (
-                  (fileStructure.structure.children as Array<{ name: string; type?: string; size?: number; children?: unknown[] }>).map((node) => {
-                    // 递归构建完整的 FileNode 树
-                    interface RawNode { name: string; type?: string; size?: number; children?: RawNode[] }
-                    const buildFileNode = (n: RawNode, parentPath = '', depth = 0): FileNode => {
-                      const currentPath = parentPath ? `${parentPath}/${n.name}` : n.name
-                      const fileNode: FileNode = {
-                        name: n.name,
-                        path: currentPath,
-                        type: n.type === 'directory' ? 'folder' : 'file',
-                        size: n.size,
-                        depth
-                      }
-                      
-                      if (n.type === 'directory' && n.children && Array.isArray(n.children)) {
-                        fileNode.children = n.children.map((child: RawNode) => 
-                          buildFileNode(child, currentPath, depth + 1)
-                        )
-                      }
-                      
-                      return fileNode
-                    }
-                    
-                    return renderTreeNode(buildFileNode(node), true)
-                  })
+                fileStructure.structure.children.length > 0 ? (
+                  fileStructure.structure.children.map((node) => renderTreeNode(buildFileNode(node, 0), true))
                 ) : (
                   <Empty 
                     description="暂无文件" 

@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useEffect, useMemo, useCallback, useState } from 'react'
+import type React from 'react'
+import { createContext, useContext, useEffect, useMemo, useCallback, useState } from 'react'
 import { theme, type ThemeConfig } from 'antd'
 
 export type ThemeMode = 'light' | 'dark' | 'system'

@@ -1,8 +1,7 @@
-import React from 'react'
+import type React from 'react'
 import { Dropdown, Button, Flex, Typography, theme } from 'antd'
 import { SunOutlined, MoonOutlined, DesktopOutlined, CheckOutlined } from '@ant-design/icons'
-import { useThemeContext } from '@/contexts/ThemeContext'
-import type { ThemeMode } from '@/hooks/useTheme'
+import { useThemeContext, type ThemeMode } from '@/contexts/ThemeContext'
 import type { MenuProps } from 'antd'
 
 const { Text } = Typography

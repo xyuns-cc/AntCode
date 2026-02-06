@@ -10,11 +10,11 @@ export interface UseTasksParams {
   status?: TaskListParams['status']
   schedule_type?: TaskListParams['schedule_type']
   search?: string
-  node_id?: string
+  specified_worker_id?: string
 }
 
 const buildTaskParams = (params: UseTasksParams): TaskListParams => {
-  const { page, size, project_id, status, schedule_type, search, node_id } = params
+  const { page, size, project_id, status, schedule_type, search, specified_worker_id } = params
   return {
     page,
     size,
@@ -22,7 +22,7 @@ const buildTaskParams = (params: UseTasksParams): TaskListParams => {
     status,
     schedule_type,
     search,
-    node_id
+    specified_worker_id
   }
 }
 
@@ -30,7 +30,7 @@ export const useTasksQuery = (params: UseTasksParams, enabled: boolean) => {
   return useQuery<TaskListResponse>({
     queryKey: ['tasks', params],
     queryFn: () => taskService.getTasks(buildTaskParams(params)),
-    keepPreviousData: true,
+    placeholderData: (previous) => previous,
     enabled
   })
 }

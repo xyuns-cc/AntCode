@@ -1,0 +1,249 @@
+# =====================================================
+# AntCode 多服务架构 - 开发环境 Docker Compose
+# =====================================================
+# 服务架构:
+#   - web_api (Control Plane): HTTP API + WebSocket/SSE
+#   - master (Schedule Plane): 调度循环 + 一致性维护
+#   - gateway (Data Plane): 公网 Worker 接入 (gRPC/TLS)
+#   - worker (Execution Plane): 任务执行器
+# =====================================================
+
+version: '3.8'
+
+services:
+  # ================== 基础设施服务 ==================
+
+  # MySQL 数据库
+  mysql:
+    image: mysql:8.0
+    container_name: antcode-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-antcode}
+      MYSQL_USER: ${MYSQL_USER:-antcode}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-antcode_password}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Redis 缓存与消息队列
+  redis:
+    image: redis:7.4-alpine
+    container_name: antcode-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password} --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # MinIO 对象存储
+  minio:
+    image: minio/minio:latest
+    container_name: antcode-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ================== 应用服务 ==================
+
+  # Web API 服务 (Control Plane)
+  web-api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.web_api
+    image: antcode-web-api:dev
+    container_name: antcode-web-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WEB_API_PORT:-8000}:8000"
+    env_file:
+      - ../../.env
+    environment:
+      - DATABASE_URL=mysql://${MYSQL_USER:-antcode}:${MYSQL_PASSWORD:-antcode_password}@mysql:3306/${MYSQL_DATABASE:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ../../data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Master 调度服务 (Schedule Plane)
+  master:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.master
+    image: antcode-master:dev
+    container_name: antcode-master
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      - DATABASE_URL=mysql://${MYSQL_USER:-antcode}:${MYSQL_PASSWORD:-antcode_password}@mysql:3306/${MYSQL_DATABASE:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+      - MASTER_ID=${MASTER_ID:-master-1}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Gateway 网关服务 (Data Plane)
+  gateway:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.gateway
+    image: antcode-gateway:dev
+    container_name: antcode-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GATEWAY_GRPC_PORT:-50051}:50051"
+    env_file:
+      - ../../.env
+    environment:
+      - DATABASE_URL=mysql://${MYSQL_USER:-antcode}:${MYSQL_PASSWORD:-antcode_password}@mysql:3306/${MYSQL_DATABASE:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+      - GRPC_PORT=50051
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Worker 执行器服务 (Execution Plane) - Direct 模式
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.worker
+    image: antcode-worker:dev
+    container_name: antcode-worker
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - WORKER_MODE=direct
+      - WORKER_NAME=${WORKER_NAME:-worker-1}
+    volumes:
+      - worker_data:/app/data
+      - worker_venvs:/app/venvs
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ================== 前端服务 ==================
+
+  frontend:
+    build:
+      context: ../../web/antcode-frontend
+      dockerfile: Dockerfile
+    image: antcode-frontend:dev
+    container_name: antcode-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      web-api:
+        condition: service_healthy
+    networks:
+      - antcode-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+# ================== 网络配置 ==================
+networks:
+  antcode-network:
+    driver: bridge
+
+# ================== 数据卷 ==================
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  worker_data:
+    driver: local
+  worker_venvs:
+    driver: local

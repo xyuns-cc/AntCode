@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react'
+import type React from 'react'
+import { useState, useEffect } from 'react'
 import { Drawer, Button, Space } from 'antd'
 import { CloseOutlined, SaveOutlined } from '@ant-design/icons'
 import RuleProjectForm from './RuleProjectForm'
 import CodeProjectForm from './CodeProjectForm'
 import FileProjectForm from './FileProjectForm'
 import { projectService } from '@/services/projects'
-import type { Project, ProjectCreateRequest } from '@/types'
+import type { Project, ProjectUpdateRequest } from '@/types'
 import styles from './ProjectEditDrawer.module.css'
 
 interface ProjectEditDrawerProps {
@@ -69,14 +70,15 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
   }
 
   // 处理项目更新提交
-  const handleSubmit = async (data: ProjectCreateRequest) => {
+  const handleSubmit = async (data: Record<string, unknown>) => {
     if (!project) return
     
     try {
       setLoading(true)
+      const updateData = data as ProjectUpdateRequest
       
       // 统一使用通用的项目更新接口，后端会根据type字段处理不同类型的项目
-      await projectService.updateProject(project.id, data)
+      await projectService.updateProject(project.id, updateData)
       
       // 成功提示由拦截器统一处理
       onSuccess?.()

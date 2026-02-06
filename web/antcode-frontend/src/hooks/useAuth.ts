@@ -6,7 +6,7 @@ import { authService } from '@/services/auth'
 import { useAuth as useAuthStore } from '@/stores/authStore'
 import { AuthHandler } from '@/utils/authHandler'
 import Logger from '@/utils/logger'
-import type { LoginRequest, RegisterRequest, UpdateUserRequest } from '@/types'
+import type { LoginRequest, UpdateUserRequest } from '@/types'
 
 const extractErrorMessage = (error: unknown, fallback: string) => {
   if (isAxiosError(error)) {
@@ -68,25 +68,6 @@ export const useAuth = () => {
       setStoreLoading(false)
     }
   }, [setUser, setStoreLoading, setError])
-
-  // 注册
-  const register = useCallback(async (userData: RegisterRequest) => {
-    setLoading(true)
-    setStoreLoading(true)
-    setError(null)
-
-    try {
-      const response = await authService.register(userData)
-      return response
-    } catch (error: unknown) {
-      const errorMessage = extractErrorMessage(error, '注册失败')
-      setError(errorMessage)
-      throw error
-    } finally {
-      setLoading(false)
-      setStoreLoading(false)
-    }
-  }, [setStoreLoading, setError])
 
   // 登出
   const logout = useCallback(async () => {
@@ -282,6 +263,8 @@ export const useAuth = () => {
 
       return () => clearInterval(interval)
     }
+
+    return undefined
   }, [isAuthenticated])
 
   return {
@@ -294,7 +277,6 @@ export const useAuth = () => {
 
     // 方法
     login,
-    register,
     logout,
     getCurrentUser,
     updateUser,

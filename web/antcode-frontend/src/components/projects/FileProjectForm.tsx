@@ -40,6 +40,11 @@ const formatFileSize = (bytes: number | string): string => {
   return parseFloat((numBytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
+const isCompressedFile = (filename?: string): boolean => {
+  const name = (filename || '').toLowerCase()
+  return name.endsWith('.zip') || name.endsWith('.tar.gz') || name.endsWith('.tar')
+}
+
 // 表单初始数据类型（tags 可以是字符串或数组，file_info 用于编辑模式）
 interface FileProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags'> {
   tags?: string | string[]
@@ -76,20 +81,26 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
   const [additionalFiles, setAdditionalFiles] = useState<UploadFile[]>([])
   const [dependencies, setDependencies] = useState<string[]>(initialData.dependencies || [])
   const [newDependency, setNewDependency] = useState('')
+  const entryPointValue = Form.useWatch('entry_point', form)
 
   // 获取验证状态
   const getValidationStatus = useCallback(() => {
     if (!isEdit && fileList.length === 0) {
       return { isValid: false, tooltip: '请选择要上传的文件' }
     }
+    if (fileList.length > 0 && isCompressedFile(fileList[0]?.name)) {
+      if (!entryPointValue || (typeof entryPointValue === 'string' && entryPointValue.trim() === '')) {
+        return { isValid: false, tooltip: '压缩包必须填写入口文件' }
+      }
+    }
     return { isValid: true, tooltip: '' }
-  }, [fileList.length, isEdit])
+  }, [entryPointValue, fileList, isEdit])
 
   // 通知父组件验证状态变化
   React.useEffect(() => {
     const { isValid, tooltip } = getValidationStatus()
     onValidationChange?.(isValid, tooltip)
-  }, [fileList, isEdit, onValidationChange, getValidationStatus])
+  }, [entryPointValue, fileList, isEdit, onValidationChange, getValidationStatus])
 
   // 提供submit方法给父组件
   React.useEffect(() => {
@@ -222,6 +233,13 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
       return
     }
 
+    if (fileList[0] && isCompressedFile(fileList[0].name)) {
+      if (!values.entry_point || values.entry_point.trim() === '') {
+        showNotification('error', '压缩包必须指定入口文件')
+        return
+      }
+    }
+
     const mainFile = fileList[0]?.originFileObj ?? fileList[0]
     const extraFiles = additionalFiles.map((f) => f.originFileObj ?? f)
 
@@ -231,7 +249,12 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
       file: mainFile as File | undefined,  // 编辑模式下可选文件
       additionalFiles: extraFiles as File[], // 附加文件列表
       dependencies,
-      tags: values.tags?.split(',').map((tag: string) => tag.trim()).filter(Boolean) || []
+      tags: Array.isArray(values.tags)
+        ? values.tags
+        : (values.tags || '')
+            .split(',')
+            .map((tag: string) => tag.trim())
+            .filter(Boolean)
     }
 
     onSubmit(submitData)
@@ -318,7 +341,7 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
             <Form.Item
               label="项目文件"
               required
-              help="支持 .py、.zip、.tar.gz 格式，最大 100MB"
+              help="支持 .py、.zip、.tar.gz、.tar 格式，最大 100MB"
             >
               <Upload.Dragger {...uploadProps} style={{ padding: '20px 0' }}>
                 <p className="ant-upload-drag-icon">
@@ -394,7 +417,7 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
 
             <Form.Item
               label="替换文件"
-              help="可选：上传新文件来替换当前文件。支持 .py、.zip、.tar.gz 格式，最大 100MB"
+              help="可选：上传新文件来替换当前文件。支持 .py、.zip、.tar.gz、.tar 格式，最大 100MB"
             >
               <Upload.Dragger {...uploadProps} style={{ padding: '20px 0' }}>
                 <p className="ant-upload-drag-icon">
@@ -427,6 +450,7 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
             name="entry_point"
             label="入口文件"
             tooltip="指定项目的主入口文件，如 main.py"
+            extra="压缩包必须填写入口文件；单文件项目可留空自动使用文件名"
           >
             <Input placeholder="例如: main.py" />
           </Form.Item>

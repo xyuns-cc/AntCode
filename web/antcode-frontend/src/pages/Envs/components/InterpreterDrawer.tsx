@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import type React from 'react'
+import { useState } from 'react'
 import {
   Button,
   Drawer,
@@ -21,11 +22,12 @@ import {
   ArrowRightOutlined,
 } from '@ant-design/icons'
 import envService from '@/services/envs'
+import { runtimeService } from '@/services/runtimes'
 import { interpreterSourceOptions } from '@/config/displayConfig'
 import type { InterpreterDrawerProps } from '../types'
 import styles from '@/components/envs/EnvDrawer.module.css'
 
-const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentNode }) => {
+const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentWorker }) => {
   const { token } = theme.useToken()
   const [open, setOpen] = useState(false)
   const [currentStep, setCurrentStep] = useState(0)
@@ -34,7 +36,7 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
   const [version, setVersion] = useState<string>('')
   const [pythonBin, setPythonBin] = useState<string>('')
   const [loading, setLoading] = useState(false)
-  const [nodeHint, setNodeHint] = useState<string>('')
+  const [workerHint, setWorkerHint] = useState<string>('')
 
   const steps = [
     { title: '选择来源', description: 'mise 或 本地解释器', icon: <SettingOutlined /> },
@@ -44,16 +46,16 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
   const openDrawer = async () => {
     setOpen(true)
     setCurrentStep(0)
-    setNodeHint(currentNode ? `当前节点: ${currentNode.name}` : '本地（主控）')
+    setWorkerHint(currentWorker ? `当前 Worker: ${currentWorker.name}` : '本地（主控）')
     try {
-      if (currentNode) {
-        const nodeVers = await envService.getNodePythonVersions(currentNode.id)
+      if (currentWorker) {
+        const workerVers = await runtimeService.getPythonVersions(currentWorker.id)
         const merged = Array.from(
           new Set([
-            ...(nodeVers?.available || []),
-            ...(nodeVers?.all_interpreters || [])
+            ...(workerVers?.available || []),
+            ...(workerVers?.all_interpreters || [])
               .map((i: { version?: string }) => i.version)
-              .filter(Boolean),
+              .filter((v): v is string => Boolean(v)),
           ])
         ).sort()
         setVersions(merged)
@@ -71,15 +73,15 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
     try {
       if (source === 'mise') {
         if (!version) return
-        if (currentNode) {
-          await envService.installNodePythonVersion(currentNode.id, version)
+        if (currentWorker) {
+          await runtimeService.installPythonVersion(currentWorker.id, version)
         } else {
           await envService.installInterpreter(version)
         }
       } else {
         if (!pythonBin) return
-        if (currentNode) {
-          await envService.registerNodeInterpreter(currentNode.id, pythonBin)
+        if (currentWorker) {
+          await runtimeService.registerInterpreter(currentWorker.id, pythonBin)
         } else {
           await envService.registerLocalInterpreter(pythonBin)
         }
@@ -98,10 +100,10 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
       case 0:
         return (
           <div className={styles.formContent}>
-            {nodeHint && (
+            {workerHint && (
               <div className={styles.nodeHint}>
                 <CloudServerOutlined />
-                <span>{nodeHint}</span>
+                <span>{workerHint}</span>
               </div>
             )}
 
@@ -127,7 +129,6 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
                   ),
                 }))}
                 style={{ width: '100%' }}
-                size="large"
               />
               <div className={styles.formHint}>
                 {source === 'mise'
@@ -154,7 +155,6 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
                   options={(versions || []).map((v) => ({ value: v, label: v }))}
                   allowClear
                   style={{ width: '100%' }}
-                  size="large"
                   notFoundContent={
                     <Empty
                       image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -168,7 +168,6 @@ const InterpreterDrawer: React.FC<InterpreterDrawerProps> = ({ onAdded, currentN
                   value={pythonBin}
                   onChange={(e) => setPythonBin(e.target.value)}
                   style={{ width: '100%' }}
-                  size="large"
                   prefix={<CodeOutlined style={{ color: token.colorTextTertiary }} />}
                 />
               )}

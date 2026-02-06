@@ -45,6 +45,8 @@ interface FileNode {
   children_count?: number
 }
 
+type FileTreeDataNode = TreeDataNode & { data: FileNode }
+
 interface FileTreeProps {
   projectId: number
   fileStructure?: {
@@ -70,11 +72,11 @@ const FileTree: React.FC<FileTreeProps> = ({
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([])
 
   // 转换文件结构为Tree组件需要的格式
-  const convertToTreeData = useCallback((node: FileNode, parentPath = ''): TreeDataNode => {
+  const convertToTreeData = useCallback((node: FileNode, parentPath = ''): FileTreeDataNode => {
     const currentPath = parentPath ? `${parentPath}/${node.name}` : node.name
     const isDirectory = node.type === 'directory'
     
-    const treeNode: TreeDataNode = {
+    const treeNode: FileTreeDataNode = {
       key: currentPath,
       // 保存原始节点数据供后续使用
       data: node,
@@ -189,7 +191,7 @@ const FileTree: React.FC<FileTreeProps> = ({
   }
 
   // 处理节点点击事件
-  const handleNodeClick: TreeProps['onSelect'] = (_selectedKeys, info) => {
+  const handleNodeClick: TreeProps<FileTreeDataNode>['onSelect'] = (_selectedKeys, info) => {
     const { node } = info
     const nodeKey = node.key
     
@@ -205,7 +207,7 @@ const FileTree: React.FC<FileTreeProps> = ({
       }
     } else {
       // 如果点击的是文件，预览文件
-      const nodeData = node.data as FileNode
+      const nodeData = node.data
       if (nodeData && nodeData.path && nodeData.name) {
         onPreviewFile?.(nodeData.path, nodeData.name)
       }
@@ -233,7 +235,7 @@ const FileTree: React.FC<FileTreeProps> = ({
     )
   }
 
-  const treeData = [convertToTreeData(fileStructure.structure)]
+  const treeData: FileTreeDataNode[] = [convertToTreeData(fileStructure.structure)]
 
   return (
     <div className={`${styles['file-tree-container']} ${className || ''}`}>

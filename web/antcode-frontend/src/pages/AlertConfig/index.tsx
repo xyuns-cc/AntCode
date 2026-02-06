@@ -1,7 +1,8 @@
 /**
  * 告警配置页面
  */
-import React, { useState, useEffect, memo } from 'react'
+import type React from 'react'
+import { useState, useEffect, memo, useCallback } from 'react'
 import {
   Card,
   Tabs,
@@ -16,7 +17,7 @@ import {
   Tag,
   Popconfirm,
   Modal,
-  Spin,
+  Skeleton,
   Empty,
   Statistic,
   Row,
@@ -79,13 +80,13 @@ const AlertConfig: React.FC = memo(() => {
   const [stats, setStats] = useState<AlertStatsResponse | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [statsLoading, setStatsLoading] = useState(false)
-  
+
   // 表单
   const [configForm] = Form.useForm()
   const [webhookForm] = Form.useForm()
   const [emailForm] = Form.useForm()
   const [recipientForm] = Form.useForm()
-  
+
   // 弹窗状态
   const [webhookModalVisible, setWebhookModalVisible] = useState(false)
   const [editingWebhook, setEditingWebhook] = useState<{
@@ -93,12 +94,12 @@ const AlertConfig: React.FC = memo(() => {
     index: number
     data?: WebhookConfig
   } | null>(null)
-  
+
   // 邮件配置弹窗
   const [emailModalVisible, setEmailModalVisible] = useState(false)
   const [recipientModalVisible, setRecipientModalVisible] = useState(false)
   const [editingRecipient, setEditingRecipient] = useState<{ index: number; data?: EmailRecipient } | null>(null)
-  
+
   // 测试状态
   const [testLoading, setTestLoading] = useState<string | null>(null)
 
@@ -106,12 +107,12 @@ const AlertConfig: React.FC = memo(() => {
   const isSuperAdmin = user?.username === 'admin'
 
   // 加载配置
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async () => {
     setLoading(true)
     try {
       const data = await alertService.getConfig()
       setConfig(data)
-      
+
       // 设置表单值
       configForm.setFieldsValue({
         auto_alert_levels: data.auto_alert_levels,
@@ -128,10 +129,10 @@ const AlertConfig: React.FC = memo(() => {
     } finally {
       setLoading(false)
     }
-  }
+  }, [configForm])
 
   // 加载历史
-  const loadHistory = async () => {
+  const loadHistory = useCallback(async () => {
     setHistoryLoading(true)
     try {
       const data = await alertService.getHistory({ limit: 100 })
@@ -142,10 +143,10 @@ const AlertConfig: React.FC = memo(() => {
     } finally {
       setHistoryLoading(false)
     }
-  }
+  }, [])
 
   // 加载统计
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     setStatsLoading(true)
     try {
       const data = await alertService.getStats()
@@ -156,14 +157,13 @@ const AlertConfig: React.FC = memo(() => {
     } finally {
       setStatsLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     loadConfig()
     loadHistory()
     loadStats()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [loadConfig, loadHistory, loadStats])
 
   // 保存配置
   const handleSaveConfig = async () => {
@@ -171,10 +171,10 @@ const AlertConfig: React.FC = memo(() => {
       showNotification('error', '权限不足', '仅超级管理员可修改配置')
       return
     }
-    
+
     try {
       const values = await configForm.validateFields()
-      
+
       await alertService.updateConfig({
         auto_alert_levels: values.auto_alert_levels,
         rate_limit: {
@@ -188,7 +188,7 @@ const AlertConfig: React.FC = memo(() => {
           retry_delay: values.retry_delay
         }
       })
-      
+
       showNotification('success', '告警配置已保存')
       loadConfig()
     } catch (error: unknown) {
@@ -200,7 +200,7 @@ const AlertConfig: React.FC = memo(() => {
   // 添加/编辑 Webhook
   const handleWebhookSubmit = async () => {
     if (!isSuperAdmin || !editingWebhook) return
-    
+
     try {
       const values = await webhookForm.validateFields()
       const webhookData: WebhookConfig = {
@@ -209,25 +209,25 @@ const AlertConfig: React.FC = memo(() => {
         levels: values.levels,
         enabled: values.enabled ?? true
       }
-      
+
       // 更新配置
       const newConfig = { ...config! }
       const webhookKey = `${editingWebhook.type}_webhooks` as 'feishu_webhooks' | 'dingtalk_webhooks' | 'wecom_webhooks'
       const webhooks = [...(newConfig.channels[webhookKey] as WebhookConfig[])]
-      
+
       if (editingWebhook.index >= 0) {
         webhooks[editingWebhook.index] = webhookData
       } else {
         webhooks.push(webhookData)
       }
-      
+
       await alertService.updateConfig({
         channels: {
           ...newConfig.channels,
           [webhookKey]: webhooks
         }
       })
-      
+
       showNotification('success', editingWebhook.index >= 0 ? 'Webhook 已更新' : 'Webhook 已添加')
       setWebhookModalVisible(false)
       setEditingWebhook(null)
@@ -242,19 +242,19 @@ const AlertConfig: React.FC = memo(() => {
   // 删除 Webhook
   const handleDeleteWebhook = async (type: 'feishu' | 'dingtalk' | 'wecom', index: number) => {
     if (!isSuperAdmin || !config) return
-    
+
     try {
       const webhookKey = `${type}_webhooks` as 'feishu_webhooks' | 'dingtalk_webhooks' | 'wecom_webhooks'
       const webhooks = [...(config.channels[webhookKey] as WebhookConfig[])]
       webhooks.splice(index, 1)
-      
+
       await alertService.updateConfig({
         channels: {
           ...config.channels,
           [webhookKey]: webhooks
         }
       })
-      
+
       showNotification('success', 'Webhook 已删除')
       loadConfig()
     } catch (error: unknown) {
@@ -331,7 +331,7 @@ const AlertConfig: React.FC = memo(() => {
   // 保存邮件配置
   const handleEmailConfigSubmit = async () => {
     if (!isSuperAdmin) return
-    
+
     try {
       const values = await emailForm.validateFields()
       const emailConfig: EmailConfig = {
@@ -343,14 +343,14 @@ const AlertConfig: React.FC = memo(() => {
         sender_name: values.sender_name || 'AntCode告警系统',
         recipients: config?.channels.email_config?.recipients || []
       }
-      
+
       await alertService.updateConfig({
         channels: {
           ...config!.channels,
           email_config: emailConfig
         }
       })
-      
+
       showNotification('success', '邮件配置已保存')
       setEmailModalVisible(false)
       loadConfig()
@@ -380,7 +380,7 @@ const AlertConfig: React.FC = memo(() => {
   // 保存收件人
   const handleRecipientSubmit = async () => {
     if (!isSuperAdmin || !config?.channels.email_config) return
-    
+
     try {
       const values = await recipientForm.validateFields()
       const recipient: EmailRecipient = {
@@ -388,14 +388,14 @@ const AlertConfig: React.FC = memo(() => {
         name: values.name || '',
         levels: values.levels || ['ERROR', 'CRITICAL']
       }
-      
+
       const recipients = [...(config.channels.email_config.recipients || [])]
       if (editingRecipient && editingRecipient.index >= 0) {
         recipients[editingRecipient.index] = recipient
       } else {
         recipients.push(recipient)
       }
-      
+
       await alertService.updateConfig({
         channels: {
           ...config.channels,
@@ -405,7 +405,7 @@ const AlertConfig: React.FC = memo(() => {
           }
         }
       })
-      
+
       showNotification('success', editingRecipient?.index === -1 ? '收件人已添加' : '收件人已更新')
       setRecipientModalVisible(false)
       setEditingRecipient(null)
@@ -420,11 +420,11 @@ const AlertConfig: React.FC = memo(() => {
   // 删除收件人
   const handleDeleteRecipient = async (index: number) => {
     if (!isSuperAdmin || !config?.channels.email_config) return
-    
+
     try {
       const recipients = [...config.channels.email_config.recipients]
       recipients.splice(index, 1)
-      
+
       await alertService.updateConfig({
         channels: {
           ...config.channels,
@@ -434,7 +434,7 @@ const AlertConfig: React.FC = memo(() => {
           }
         }
       })
-      
+
       showNotification('success', '收件人已删除')
       loadConfig()
     } catch (error: unknown) {
@@ -446,10 +446,10 @@ const AlertConfig: React.FC = memo(() => {
   // 渲染邮件配置卡片
   const renderEmailConfig = () => {
     if (!config) return null
-    
+
     const emailConfig = config.channels.email_config
     const hasConfig = emailConfig && emailConfig.smtp_host
-    
+
     return (
       <Card
         title="邮件告警"
@@ -546,10 +546,10 @@ const AlertConfig: React.FC = memo(() => {
   // 渲染 Webhook 列表
   const renderWebhookList = (type: 'feishu' | 'dingtalk' | 'wecom') => {
     if (!config) return null
-    
+
     const webhookKey = `${type}_webhooks` as 'feishu_webhooks' | 'dingtalk_webhooks' | 'wecom_webhooks'
     const webhooks = config.channels[webhookKey] as WebhookConfig[]
-    
+
     return (
       <Card
         title={`${CHANNEL_NAMES[type]} Webhook`}
@@ -668,8 +668,12 @@ const AlertConfig: React.FC = memo(() => {
 
   if (loading && !config) {
     return (
-      <div className={styles.loadingContainer}>
-        <Spin size="large" />
+      <div className={styles.alertConfigContainer}>
+        <div className={styles.pageHeader}>
+          <Skeleton.Input active style={{ width: 150, height: 32 }} />
+          <Skeleton.Button active style={{ width: 120 }} />
+        </div>
+        <Skeleton active paragraph={{ rows: 10 }} />
       </div>
     )
   }
@@ -859,7 +863,7 @@ const AlertConfig: React.FC = memo(() => {
                 <Table
                   columns={historyColumns}
                   dataSource={history}
-                  rowKey={(record) => `${record.timestamp}-${record.type || ''}-${record.message?.slice(0, 20) || ''}`}
+                  rowKey={(record) => `${record.timestamp}-${record.source || ''}-${record.message?.slice(0, 20) || ''}`}
                   loading={historyLoading}
                   pagination={{ pageSize: 20 }}
                   size="small"

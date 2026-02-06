@@ -445,7 +445,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
 
   // 自动连接（添加防抖和重复连接保护）
   useEffect(() => {
-    if (!autoConnect || !executionId) return
+    if (!autoConnect || !executionId) return undefined
     
     // 只在真正断开时才自动连接，避免重复连接
     if (connectionStatus === 'disconnected' && !stream) {
@@ -455,6 +455,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       
       return () => clearTimeout(timeoutId)
     }
+
+    return undefined
   }, [autoConnect, executionId, connectionStatus, stream, connect])
 
   // 组件卸载清理

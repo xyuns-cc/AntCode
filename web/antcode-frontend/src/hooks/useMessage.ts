@@ -52,7 +52,6 @@ export const globalModal = {
   success: (props: Parameters<ModalStaticFunctions['success']>[0]) => modalInstance?.success(props),
   error: (props: Parameters<ModalStaticFunctions['error']>[0]) => modalInstance?.error(props),
   warning: (props: Parameters<ModalStaticFunctions['warning']>[0]) => modalInstance?.warning(props),
-  destroyAll: () => modalInstance?.destroyAll(),
 }
 
 export type NoticeType = 'success' | 'error' | 'warning' | 'info'
