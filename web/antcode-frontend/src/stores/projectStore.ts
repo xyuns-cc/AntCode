@@ -185,7 +185,7 @@ export const useProjectStore = create<ProjectStore>()(
       return projects.filter(p => 
         p.name.toLowerCase().includes(lowerQuery) ||
         p.description?.toLowerCase().includes(lowerQuery) ||
-        p.tags?.toLowerCase().includes(lowerQuery)
+        (Array.isArray(p.tags) && p.tags.some(tag => tag.toLowerCase().includes(lowerQuery)))
       )
     }
   }))

@@ -1,0 +1,47 @@
+// Common message types for gRPC communication
+// Requirements: 1.4, 14.1
+
+syntax = "proto3";
+
+package antcode.v1;
+
+// Timestamp message for consistent time representation
+message Timestamp {
+  int64 seconds = 1;  // Seconds since Unix epoch
+  int32 nanos = 2;    // Nanoseconds within the second
+}
+
+// Spider statistics summary for heartbeat reporting
+// Requirements: 8.2, 8.4
+message SpiderStatsSummary {
+  int64 request_count = 1;              // Total HTTP requests made
+  int64 response_count = 2;             // Total HTTP responses received
+  int64 item_scraped_count = 3;         // Total items successfully scraped
+  int64 error_count = 4;                // Total errors (exceptions + HTTP errors)
+  double avg_latency_ms = 5;            // Average request latency in milliseconds
+  double requests_per_minute = 6;       // Request throughput rate
+  map<int32, int64> status_codes = 7;   // HTTP status code distribution (status_code -> count)
+}
+
+// System metrics reported by Workers
+message Metrics {
+  float cpu = 1;                    // CPU usage percentage (0-100)
+  float memory = 2;                 // Memory usage percentage (0-100)
+  float disk = 3;                   // Disk usage percentage (0-100)
+  int32 running_tasks = 4;          // Number of currently running tasks
+  int32 max_concurrent_tasks = 5;   // Maximum concurrent tasks allowed
+  int32 task_count = 6;             // Total tasks executed
+  int32 project_count = 7;          // Total projects on the worker
+  int32 env_count = 8;              // Total environments on the worker
+  
+  // Spider statistics summary (Requirements: 8.2)
+  SpiderStatsSummary spider_stats = 10;
+}
+
+// Operating system information from Workers
+message OSInfo {
+  string os_type = 1;        // Operating system type (e.g., "Linux", "Windows")
+  string os_version = 2;     // Operating system version
+  string python_version = 3; // Python interpreter version
+  string machine_arch = 4;   // Machine architecture (e.g., "x86_64", "arm64")
+}

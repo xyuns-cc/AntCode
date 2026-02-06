@@ -12,8 +12,8 @@
 
   /* Layout */
   --layout-header-height: 64px;
-  --layout-sider-width: 260px;
-  --layout-sider-collapsed-width: 80px;
+  --layout-sider-width: 200px;
+  --layout-sider-collapsed-width: 64px;
   --layout-content-padding: 24px;
   --layout-content-padding-mobile: 16px;
 
@@ -87,6 +87,47 @@
   --status-failed: #ef4444;
   --status-pending: #f59e0b;
   --status-cancelled: #71717a;
+
+  /* Ant Design token fallbacks */
+  --ant-font-family: var(--font-sans);
+  --ant-font-family-code: var(--font-mono);
+  --ant-border-radius: 8px;
+  --ant-border-radius-sm: 6px;
+  --ant-border-radius-lg: 12px;
+
+  --ant-color-primary: var(--brand-primary);
+  --ant-color-primary-hover: var(--brand-primary-hover);
+  --ant-color-primary-bg: rgba(99, 102, 241, 0.12);
+  --ant-color-primary-border: rgba(99, 102, 241, 0.3);
+
+  --ant-color-success: var(--brand-success);
+  --ant-color-success-bg: #f6ffed;
+  --ant-color-warning: var(--brand-warning);
+  --ant-color-warning-bg: #fffbe6;
+  --ant-color-error: var(--brand-error);
+  --ant-color-error-bg: #fff1f0;
+  --ant-color-info: var(--brand-info);
+  --ant-color-info-bg: #e6f4ff;
+
+  --ant-color-text: rgba(0, 0, 0, 0.88);
+  --ant-color-text-secondary: rgba(0, 0, 0, 0.65);
+  --ant-color-text-tertiary: rgba(0, 0, 0, 0.45);
+  --ant-color-text-quaternary: rgba(0, 0, 0, 0.25);
+
+  --ant-color-bg-layout: #f4f4f5;
+  --ant-color-bg-container: #ffffff;
+  --ant-color-bg-elevated: #ffffff;
+  --ant-color-bg-text-hover: rgba(0, 0, 0, 0.04);
+
+  --ant-color-border: #e4e4e7;
+  --ant-color-border-secondary: #f4f4f5;
+
+  --ant-color-fill: #f4f4f5;
+  --ant-color-fill-secondary: #fafafa;
+  --ant-color-fill-tertiary: #ffffff;
+  --ant-color-fill-quaternary: #ffffff;
+
+  --ant-table-border-color: var(--ant-color-border);
 }
 
 html.dark,
@@ -94,4 +135,31 @@ body.dark-theme {
   --log-bg-color: #09090b;
   --log-text-color: #e4e4e7;
   --log-line-hover-bg: #18181b;
+
+  --ant-color-primary-bg: rgba(99, 102, 241, 0.2);
+  --ant-color-primary-border: rgba(99, 102, 241, 0.4);
+  --ant-color-success-bg: rgba(16, 185, 129, 0.2);
+  --ant-color-warning-bg: rgba(245, 158, 11, 0.2);
+  --ant-color-error-bg: rgba(239, 68, 68, 0.2);
+  --ant-color-info-bg: rgba(59, 130, 246, 0.2);
+
+  --ant-color-text: rgba(255, 255, 255, 0.92);
+  --ant-color-text-secondary: rgba(255, 255, 255, 0.68);
+  --ant-color-text-tertiary: rgba(255, 255, 255, 0.48);
+  --ant-color-text-quaternary: rgba(255, 255, 255, 0.28);
+
+  --ant-color-bg-layout: #09090b;
+  --ant-color-bg-container: #18181b;
+  --ant-color-bg-elevated: #27272a;
+  --ant-color-bg-text-hover: rgba(255, 255, 255, 0.08);
+
+  --ant-color-border: #3f3f46;
+  --ant-color-border-secondary: #27272a;
+
+  --ant-color-fill: #3f3f46;
+  --ant-color-fill-secondary: #27272a;
+  --ant-color-fill-tertiary: #18181b;
+  --ant-color-fill-quaternary: #09090b;
+
+  --ant-table-border-color: rgba(255, 255, 255, 0.08);
 }

@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import type React from 'react'
+import { useState } from 'react'
 import {
   Card,
   Input,
@@ -46,8 +47,17 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
   const { token } = theme.useToken()
   const [showAdvanced, setShowAdvanced] = useState(false)
   
+  type RuleFormData = {
+    desc: string
+    type: ExtractionRule['type']
+    expr: string
+    page_type: NonNullable<ExtractionRule['page_type']>
+    attribute: string
+    transform: string
+  }
+
   // 表单数据状态
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<RuleFormData>({
     desc: '',
     type: 'css',
     expr: '',
@@ -88,9 +98,9 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
   }
 
   // 更新表单数据
-  type RuleField = 'desc' | 'type' | 'expr' | 'page_type' | 'attribute' | 'transform'
+  type RuleField = keyof RuleFormData
 
-  const updateFormData = (field: RuleField, value: string) => {
+  const updateFormData = <K extends RuleField>(field: K, value: RuleFormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }))
     // 清除该字段的错误
     if (errors[field]) {
@@ -261,7 +271,7 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
                 <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
                   选择器类型
                 </label>
-                <Select 
+                <Select<RuleFormData['type']>
                   value={formData.type} 
                   onChange={(value) => updateFormData('type', value)}
                   style={{ width: '100%' }}
@@ -275,7 +285,7 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
                   <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
                     页面类型
                   </label>
-                  <Select 
+                  <Select<RuleFormData['page_type']>
                     value={formData.page_type} 
                     onChange={(value) => updateFormData('page_type', value)}
                     style={{ width: '100%' }}
@@ -325,11 +335,11 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
                   <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
                     提取属性
                   </label>
-                  <Select 
+                  <Select
                     placeholder="默认文本内容" 
                     allowClear
                     value={formData.attribute || undefined}
-                    onChange={(value) => updateFormData('attribute', value)}
+                    onChange={(value) => updateFormData('attribute', value ?? '')}
                     style={{ width: '100%' }}
                     options={attributeTypes.map(a => ({ value: a.value, label: a.label }))}
                   />

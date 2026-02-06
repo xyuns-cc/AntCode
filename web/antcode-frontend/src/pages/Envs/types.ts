@@ -1,14 +1,14 @@
 import type { VenvListItem, VenvScope } from '@/services/envs'
-import type { Node } from '@/types'
+import type { Worker } from '@/types'
 
 /**
  * 扩展的环境项，包含节点信息
  */
 export interface ExtendedVenvItem extends VenvListItem {
-  nodeName?: string
-  nodeId?: string
+  workerName?: string
+  workerId?: string
   isLocal: boolean
-  envName?: string // 原始环境名称（用于节点环境API调用）
+  envName?: string // Worker 环境名称（用于 runtime API 调用）
 }
 
 /**
@@ -27,8 +27,8 @@ export interface InterpreterInfo {
   python_bin: string
   install_dir: string
   source?: string
-  nodeName?: string
-  nodeId?: string
+  workerName?: string
+  workerId?: string
 }
 
 /**
@@ -60,7 +60,7 @@ export interface InstallModalState {
 /**
  * 节点筛选选项
  */
-export interface NodeFilterOption {
+export interface WorkerFilterOption {
   value: string
   label: string
 }
@@ -113,7 +113,7 @@ export interface InstallPackagesModalProps {
  */
 export interface InterpreterDrawerProps {
   onAdded: () => void
-  currentNode?: Node | null
+  currentWorker?: Worker
 }
 
-export type { VenvScope, Node }
+export type { VenvScope, Worker }

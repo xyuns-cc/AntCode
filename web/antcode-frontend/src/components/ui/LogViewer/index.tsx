@@ -1,4 +1,5 @@
-import React, { useRef, useState, useCallback } from 'react'
+import type React from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
 import { Card, Button, Space, theme } from 'antd'
 import { ClearOutlined } from '@ant-design/icons'
 
@@ -30,6 +31,16 @@ const LogViewer: React.FC<LogViewerProps> = ({
   const { token } = theme.useToken()
   const [logs, setLogs] = useState<LogMessage[]>([])
   const logContainerRef = useRef<HTMLDivElement>(null)
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current)
+        scrollTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   // 添加日志消息
   const addLogMessage = useCallback((logMessage: LogMessage) => {
@@ -43,7 +54,10 @@ const LogViewer: React.FC<LogViewerProps> = ({
     })
 
     // 自动滚动到底部
-    setTimeout(() => {
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current)
+    }
+    scrollTimeoutRef.current = setTimeout(() => {
       if (logContainerRef.current) {
         logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
       }

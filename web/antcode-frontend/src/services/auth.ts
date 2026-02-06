@@ -7,7 +7,6 @@ import type {
   LoginResponse,
   BackendLoginResponse,
   User,
-  RegisterRequest,
   UpdateUserRequest,
   ApiResponse
 } from '@/types'
@@ -20,35 +19,24 @@ class AuthService {
       password: credentials.password
     })
 
-    // 保存 token 和用户信息
-    TokenManager.setTokens(response.data.data.access_token)
-
-    // 构造用户对象（后端返回的格式可能不同）
+    const payload = response.data.data
     const user = {
-      id: response.data.data.user_id,
-      username: response.data.data.username,
-      email: '',
-      is_active: true,
-      is_admin: response.data.data.is_admin, // 添加管理员标识
-      is_super_admin: response.data.data.is_super_admin,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      ...payload.user,
+      // 当前后端未单独下发 super_admin 字段，这里按用户名兜底
+      is_super_admin: payload.user.username === 'admin',
     }
 
+    // 保存 token 和用户信息
+    TokenManager.setTokens(payload.access_token, payload.refresh_token)
     localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(user))
 
     return {
-      access_token: response.data.data.access_token,
-      token_type: response.data.data.token_type,
-      expires_in: 3600, // 默认1小时
+      access_token: payload.access_token,
+      refresh_token: payload.refresh_token,
+      token_type: payload.token_type,
+      expires_in: payload.expires_in ?? 3600,
       user
     }
-  }
-
-  // 用户注册
-  async register(userData: RegisterRequest): Promise<ApiResponse<User>> {
-    const response = await apiClient.post<ApiResponse<User>>('/api/v1/auth/register', userData)
-    return response.data
   }
 
   // 用户登出
@@ -114,15 +102,27 @@ class AuthService {
       throw new Error('No refresh token available')
     }
 
-    const response = await apiClient.post<LoginResponse>('/api/v1/auth/refresh', {
+    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/refresh', {
       refresh_token: refreshToken,
     })
 
-    // 更新 token
-    TokenManager.setTokens(response.data.access_token)
-    localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(response.data.user))
+    const payload = response.data.data
+    const user = {
+      ...payload.user,
+      is_super_admin: payload.user.username === 'admin',
+    }
 
-    return response.data
+    // 更新 token
+    TokenManager.setTokens(payload.access_token, payload.refresh_token)
+    localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(user))
+
+    return {
+      access_token: payload.access_token,
+      refresh_token: payload.refresh_token,
+      token_type: payload.token_type,
+      expires_in: payload.expires_in ?? 3600,
+      user,
+    }
   }
 
   // 检查是否已登录
@@ -220,7 +220,7 @@ class AuthService {
 
     // 如果 token 即将过期（5分钟内），尝试刷新
     const payload = TokenManager.getTokenPayload(token)
-    if (payload && payload.exp * 1000 - Date.now() < 5 * 60 * 1000) {
+    if (payload?.exp && payload.exp * 1000 - Date.now() < 5 * 60 * 1000) {
       try {
         await this.refreshToken()
       } catch (error) {

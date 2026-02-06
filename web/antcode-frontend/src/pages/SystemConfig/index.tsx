@@ -9,7 +9,7 @@ import {
   Button,
   Space,
   Alert,
-  Spin,
+  Skeleton,
   Typography,
   message,
 } from 'antd'
@@ -37,12 +37,14 @@ import styles from './SystemConfig.module.css'
 
 const { Title, Paragraph } = Typography
 
+type TaskLogFormValues = TaskLogConfig & { task_log_max_size_mb?: number }
+
 const SystemConfig: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [reloading, setReloading] = useState(false)
   const [taskResourceForm] = Form.useForm<TaskResourceConfig>()
-  const [taskLogForm] = Form.useForm<TaskLogConfig>()
+  const [taskLogForm] = Form.useForm<TaskLogFormValues>()
   const [schedulerForm] = Form.useForm<SchedulerConfig>()
   const [cacheForm] = Form.useForm<CacheConfig>()
   const [monitoringForm] = Form.useForm<MonitoringConfig>()
@@ -77,11 +79,11 @@ const SystemConfig: React.FC = () => {
   }, [loadConfigs])
 
   // 保存配置
-  const handleSave = async (category: string, values: Record<string, unknown>) => {
+  const handleSave = async (category: string, values: object) => {
     setSaving(true)
     try {
       // 构建批量更新请求
-      const configUpdates = Object.entries(values).map(([key, value]) => ({
+      const configUpdates = Object.entries(values as Record<string, unknown>).map(([key, value]) => ({
         config_key: key,
         config_value: String(value),
         category,
@@ -562,10 +564,15 @@ const SystemConfig: React.FC = () => {
 
   if (loading) {
     return (
-      <div className={styles.loadingContainer}>
-        <Spin size="large" tip="加载配置中...">
-          <div style={{ height: 100 }} />
-        </Spin>
+      <div className={styles.systemConfigContainer}>
+        <div className={styles.pageHeader}>
+          <div>
+            <Skeleton.Input active style={{ width: 200, height: 32, marginBottom: 8 }} />
+            <Skeleton.Input active style={{ width: 300, height: 20 }} />
+          </div>
+          <Skeleton.Button active style={{ width: 120 }} />
+        </div>
+        <Skeleton active paragraph={{ rows: 12 }} />
       </div>
     )
   }

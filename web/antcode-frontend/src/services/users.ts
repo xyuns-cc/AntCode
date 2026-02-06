@@ -4,7 +4,9 @@
  */
 
 import { BaseService } from './base'
-import type { User, ApiResponse } from '@/types'
+import apiClient from './api'
+import type { AxiosRequestConfig } from 'axios'
+import type { PaginationResponse, User } from '@/types'
 
 export interface SimpleUser {
   id: string  // public_id
@@ -27,9 +29,12 @@ class UserService extends BaseService {
   /**
    * 获取简化用户列表（用于下拉选择）
    */
-  async getSimpleUserList(): Promise<SimpleUser[]> {
-    const data = await this.get<ApiResponse<SimpleUser[]>>('/simple')
-    return data || []
+  async getSimpleUserList(config?: AxiosRequestConfig): Promise<SimpleUser[]> {
+    const data = await this.get<SimpleUser[] | { items?: SimpleUser[] }>('/simple', config)
+    if (Array.isArray(data)) {
+      return data
+    }
+    return data?.items ?? []
   }
 
   /**
@@ -37,14 +42,13 @@ class UserService extends BaseService {
    */
   async getUserList(params: UserListParams = {}): Promise<{ users: User[]; total: number }> {
     const { page = 1, size = 20, ...filters } = params
-    const data = await this.get<ApiResponse<User[]>>('/', {
+    const response = await apiClient.get<PaginationResponse<User>>('/api/v1/users/', {
       params: { page, size, ...filters },
     })
 
-    return {
-      users: data || [],
-      total: data?.length || 0,
-    }
+    const items = response.data?.data || []
+    const total = response.data?.pagination?.total || items.length
+    return { users: items, total }
   }
 
   /**

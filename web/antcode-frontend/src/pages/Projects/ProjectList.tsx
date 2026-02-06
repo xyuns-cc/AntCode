@@ -1,4 +1,5 @@
-import React, { useEffect, useReducer, useRef, useState, useCallback, Suspense, lazy, useMemo } from 'react'
+import type React from 'react'
+import { useEffect, useReducer, useRef, useState, useCallback, Suspense, lazy, useMemo } from 'react'
 import {
   Button,
   Space,
@@ -7,7 +8,11 @@ import {
   Input,
   Select,
   Card,
-  Tooltip
+  Tooltip,
+  Upload,
+  Checkbox,
+  Form,
+  Typography
 } from 'antd'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import {
@@ -18,11 +23,12 @@ import {
   EyeOutlined,
   ReloadOutlined,
   FolderOutlined,
-  CloudServerOutlined
+  CloudServerOutlined,
+  UploadOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useProjects } from '@/stores/projectStore'
-import { useNodeStore } from '@/stores/nodeStore'
+import { useWorkerStore } from '@/stores/workerStore'
 import { projectService } from '@/services/projects'
 import { formatDate } from '@/utils/format'
 import {
@@ -31,13 +37,19 @@ import {
   getProjectTypeColor,
   getProjectStatusColor
 } from '@/utils/projectUtils'
+import EnvSelector from '@/components/runtimes/EnvSelector'
+import type { EnvironmentConfig } from '@/components/runtimes/EnvSelector'
+import showNotification from '@/utils/notification'
 import useAuth from '@/hooks/useAuth'
 import { userService, type SimpleUser } from '@/services/users'
+import { isAbortError } from '@/utils/helpers'
 import type { Project, ProjectListParams, ProjectType } from '@/types'
+import type { UploadFile } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 
 const { Search } = Input
 const { Option } = Select
+const { Text } = Typography
 
 const ProjectCreateDrawer = lazy(() => import('@/components/projects/ProjectCreateDrawer'))
 const ProjectEditDrawer = lazy(() => import('@/components/projects/ProjectEditDrawer'))
@@ -67,7 +79,7 @@ type UIAction =
   | { type: 'SHOW_BATCH_DELETE_MODAL' }
   | { type: 'HIDE_BATCH_DELETE_MODAL' }
   | { type: 'CLEAR_SELECTION' }
-  | { type: 'REMOVE_SELECTED_PROJECT'; payload: number }
+  | { type: 'REMOVE_SELECTED_PROJECT'; payload: string }
 
 // 初始状态
 const initialUIState: UIState = {
@@ -150,9 +162,11 @@ function uiReducer(state: UIState, action: UIAction): UIState {
 const ProjectList: React.FC = () => {
   const navigate = useNavigate()
   const { isAuthenticated, loading: authLoading, user } = useAuth()
-  const { currentNode } = useNodeStore()
+  const { currentWorker, workers, refreshWorkers } = useWorkerStore()
   const [uiState, dispatch] = useReducer(uiReducer, initialUIState)
-  const currentUserIdRef = useRef<number | undefined>(user?.id)
+  const currentUserIdRef = useRef<string | undefined>(user?.id)
+  const mountedRef = useRef(true)
+  const controllersRef = useRef<Record<string, AbortController | null>>({})
   const [userList, setUserList] = useState<SimpleUser[]>([])
   const [loadingUsers, setLoadingUsers] = useState(false)
   
@@ -163,11 +177,18 @@ const ProjectList: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<ProjectListParams['type'] | undefined>(undefined)
   const [statusFilter, setStatusFilter] = useState<ProjectListParams['status'] | undefined>(undefined)
-  const [createdByFilter, setCreatedByFilter] = useState<number | undefined>(undefined)
+  const [createdByFilter, setCreatedByFilter] = useState<string | undefined>(undefined)
   
   // 前端分页
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [importModalVisible, setImportModalVisible] = useState(false)
+  const [importSubmitting, setImportSubmitting] = useState(false)
+  const [importProjectFiles, setImportProjectFiles] = useState<UploadFile[]>([])
+  const [importProjectName, setImportProjectName] = useState('')
+  const [importEntryPoint, setImportEntryPoint] = useState('')
+  const [importOverwriteExisting, setImportOverwriteExisting] = useState(false)
+  const [importEnvConfig, setImportEnvConfig] = useState<EnvironmentConfig | null>(null)
 
   const {
     setProjects,
@@ -175,24 +196,79 @@ const ProjectList: React.FC = () => {
     removeProject
   } = useProjects()
 
+  const resolveSelectedProjects = useCallback((
+    selectedKeys: React.Key[],
+    currentRows: Project[]
+  ) => {
+    if (selectedKeys.length === 0) {
+      return []
+    }
+    // 保持跨分页勾选时的完整选中列表
+    const selectedKeySet = new Set(selectedKeys.map(key => String(key)))
+    let resolvedProjects = allProjects.filter(project => selectedKeySet.has(project.id))
+    if (resolvedProjects.length !== selectedKeySet.size) {
+      const knownIds = new Set(resolvedProjects.map(project => project.id))
+      const mergedProjects = [...resolvedProjects]
+      currentRows.forEach(project => {
+        if (selectedKeySet.has(project.id) && !knownIds.has(project.id)) {
+          mergedProjects.push(project)
+          knownIds.add(project.id)
+        }
+      })
+      resolvedProjects = mergedProjects
+    }
+    return resolvedProjects
+  }, [allProjects])
+
+  const createController = useCallback((key: string) => {
+    const existing = controllersRef.current[key]
+    if (existing) {
+      existing.abort()
+    }
+    const controller = new AbortController()
+    controllersRef.current[key] = controller
+    return controller
+  }, [])
+
+  const isLatestController = useCallback((key: string, controller: AbortController) => {
+    return controllersRef.current[key] === controller && !controller.signal.aborted
+  }, [])
+
+  useEffect(() => {
+    const controllers = controllersRef
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      Object.values(controllers.current).forEach((controller) => controller?.abort())
+    }
+  }, [])
+
   // 获取用户列表（仅管理员需要）
-  const fetchUserList = async () => {
+  const fetchUserList = useCallback(async () => {
     if (!user?.is_admin) return
-    
+
+    const controller = createController('users')
     setLoadingUsers(true)
     try {
-      const users = await userService.getSimpleUserList()
+      const users = await userService.getSimpleUserList({ signal: controller.signal })
+      if (!mountedRef.current || !isLatestController('users', controller)) return
       setUserList(users)
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) return
       // 错误由拦截器处理
     } finally {
-      setLoadingUsers(false)
+      if (mountedRef.current && isLatestController('users', controller)) {
+        setLoadingUsers(false)
+      }
     }
-  }
+  }, [user?.is_admin, createController, isLatestController])
 
   // 智能加载所有项目数据
   const fetchAllProjects = useCallback(async () => {
     if (!isAuthenticated || !user) return
+
+    const controller = createController('projects')
+    const requestConfig = { signal: controller.signal }
 
     dispatch({ type: 'SET_LOADING', payload: true })
     try {
@@ -201,44 +277,45 @@ const ProjectList: React.FC = () => {
         page: 1,
         size: 100,
         created_by: user.is_admin ? undefined : user.id,
-        node_id: currentNode?.id  // 按节点筛选
+        worker_id: currentWorker?.id  // 按 Worker 筛选
       }
 
       // 先获取第一页，查看总数
-      const firstPageResponse = await projectService.getProjects(baseParams)
+      const firstPageResponse = await projectService.getProjects(baseParams, requestConfig)
       const totalCount = firstPageResponse.total
+      const allItems = [...(firstPageResponse.items || [])]
 
-      // 如果总数小于等于100，直接使用
-      if (totalCount <= 100) {
-        setAllProjects(firstPageResponse.items || [])
-        setProjects(firstPageResponse.items || [])
-      } else {
-        // 如果总数大于100，分批加载（最多加载前10页，即1000条数据）
-        const allItems = [...(firstPageResponse.items || [])]
+      // 如果总数大于100，分批加载（最多加载前10页，即1000条数据）
+      if (totalCount > 100) {
         const totalPages = Math.ceil(totalCount / 100)
         const pagesToLoad = Math.min(totalPages, 10)
-        
+
         const promises = []
         for (let page = 2; page <= pagesToLoad; page++) {
-          promises.push(projectService.getProjects({ ...baseParams, page }))
+          promises.push(projectService.getProjects({ ...baseParams, page }, requestConfig))
         }
-        
+
         const results = await Promise.all(promises)
         results.forEach(response => {
           allItems.push(...(response.items || []))
         })
-        
-        setAllProjects(allItems)
-        setProjects(allItems)
       }
-    } catch {
+
+      if (!mountedRef.current || !isLatestController('projects', controller)) return
+      setAllProjects(allItems)
+      setProjects(allItems)
+    } catch (error) {
+      if (isAbortError(error)) return
       // 错误由拦截器处理
+      if (!mountedRef.current || !isLatestController('projects', controller)) return
       setAllProjects([])
       setProjects([])
     } finally {
-      dispatch({ type: 'SET_LOADING', payload: false })
+      if (mountedRef.current && isLatestController('projects', controller)) {
+        dispatch({ type: 'SET_LOADING', payload: false })
+      }
     }
-  }, [isAuthenticated, user, setProjects, currentNode?.id])
+  }, [isAuthenticated, user, setProjects, currentWorker?.id, createController, isLatestController])
 
   // 前端筛选和分页逻辑
   const filteredAndPaginatedProjects = useMemo(() => {
@@ -313,26 +390,23 @@ const ProjectList: React.FC = () => {
       setCurrentPage(1)
       fetchAllProjects()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, fetchAllProjects])
+  }, [user, fetchAllProjects])
 
   useEffect(() => {
     if (!isAuthenticated || authLoading || !user) {
       return
     }
 
-    // 首次加载或节点切换时重新加载
+    // 首次加载或 Worker 切换时重新加载
     fetchAllProjects()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, authLoading, user?.id, currentNode?.id, fetchAllProjects])
+  }, [isAuthenticated, authLoading, user, fetchAllProjects])
 
   // 获取用户列表（管理员专用）
   useEffect(() => {
     if (user?.is_admin && isAuthenticated && !authLoading) {
       fetchUserList()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.is_admin, isAuthenticated, authLoading])
+  }, [user?.is_admin, isAuthenticated, authLoading, fetchUserList])
 
   // 处理筛选变化时重置到第一页
   const handleSearchChange = (value: string) => {
@@ -358,7 +432,7 @@ const ProjectList: React.FC = () => {
     setCurrentPage(1)
   }
 
-  const handleCreatedByChange = (value: number | undefined) => {
+  const handleCreatedByChange = (value: string | undefined) => {
     setCreatedByFilter(value)
     setCurrentPage(1)
   }
@@ -372,13 +446,110 @@ const ProjectList: React.FC = () => {
     }
   }
 
+  const resetImportState = useCallback(() => {
+    setImportProjectFiles([])
+    setImportProjectName('')
+    setImportEntryPoint('')
+    setImportOverwriteExisting(false)
+    setImportEnvConfig(null)
+  }, [])
+
+  const isCompressedFile = useCallback((filename?: string) => {
+    const name = (filename || '').toLowerCase()
+    return name.endsWith('.zip') || name.endsWith('.tar.gz') || name.endsWith('.tar')
+  }, [])
+
+  const openImportModal = useCallback(() => {
+    refreshWorkers().catch(() => undefined)
+    setImportEnvConfig({
+      location: 'worker',
+      workerId: currentWorker?.id,
+      scope: 'private',
+      useExisting: false,
+      existingEnvName: undefined,
+      pythonVersion: '3.11',
+      envName: undefined,
+      envDescription: undefined,
+    })
+    setImportModalVisible(true)
+  }, [currentWorker?.id, refreshWorkers])
+
+  const handleImportSubmit = useCallback(async () => {
+    const projectFile = importProjectFiles[0]?.originFileObj as File | undefined
+    if (!projectFile) {
+      showNotification('error', '请选择项目文件或压缩包')
+      return
+    }
+    const name = importProjectName.trim()
+    const entryPoint = importEntryPoint.trim()
+
+    if (isCompressedFile(projectFile.name) && !entryPoint) {
+      showNotification('error', '压缩包必须填写入口文件')
+      return
+    }
+
+    if (!importEnvConfig) {
+      showNotification('error', '请配置运行环境')
+      return
+    }
+
+    if (!importEnvConfig.workerId) {
+      showNotification('error', '请选择 Worker')
+      return
+    }
+
+    if (importEnvConfig.useExisting) {
+      if (!importEnvConfig.existingEnvName) {
+        showNotification('error', '请选择要使用的环境')
+        return
+      }
+    } else if (!importEnvConfig.pythonVersion) {
+      showNotification('error', '创建新环境时必须指定 Python 版本')
+      return
+    }
+
+    try {
+      setImportSubmitting(true)
+      await projectService.importProject({
+        file: projectFile,
+        name: name || undefined,
+        entry_point: entryPoint || undefined,
+        runtime_scope: importEnvConfig.scope,
+        worker_id: importEnvConfig.workerId,
+        use_existing_env: importEnvConfig.useExisting,
+        existing_env_name: importEnvConfig.existingEnvName,
+        python_version: importEnvConfig.pythonVersion,
+        env_name: importEnvConfig.envName,
+        env_description: importEnvConfig.envDescription,
+        overwrite_existing: importOverwriteExisting && Boolean(name),
+      })
+      showNotification('success', '导入成功')
+      setImportModalVisible(false)
+      resetImportState()
+      fetchAllProjects()
+    } catch {
+      // 错误提示由拦截器统一处理
+    } finally {
+      setImportSubmitting(false)
+    }
+  }, [
+    fetchAllProjects,
+    importEnvConfig,
+    importEntryPoint,
+    importOverwriteExisting,
+    importProjectFiles,
+    importProjectName,
+    isCompressedFile,
+    resetImportState,
+  ])
+
   // 删除单个项目
-  const handleDelete = (project: Project) => {
+  const handleDelete = useCallback((project: Project) => {
     dispatch({ type: 'SHOW_DELETE_MODAL', payload: project })
-  }
+  }, [dispatch])
 
   // 编辑项目
-  const handleEdit = async (project: Project) => {
+  const handleEdit = useCallback(async (project: Project) => {
     try {
       dispatch({ type: 'SET_LOADING', payload: true })
       // 获取完整的项目详情
@@ -390,7 +561,7 @@ const ProjectList: React.FC = () => {
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false })
     }
-  }
+  }, [dispatch])
 
   // 确认删除单个项目
   const confirmDelete = async () => {
@@ -416,7 +587,7 @@ const ProjectList: React.FC = () => {
 
   // 批量删除项目
   const handleBatchDelete = () => {
-    if (uiState.selectedProjects.length === 0) {
+    if (uiState.selectedRowKeys.length === 0) {
       return
     }
 
@@ -425,11 +596,15 @@ const ProjectList: React.FC = () => {
 
   // 确认批量删除
   const confirmBatchDelete = async () => {
+    const projectIds = uiState.selectedRowKeys.map(key => String(key))
+    if (projectIds.length === 0) {
+      dispatch({ type: 'HIDE_BATCH_DELETE_MODAL' })
+      return
+    }
     try {
       dispatch({ type: 'SET_LOADING', payload: true })
 
       // 使用批量删除API
-      const projectIds = uiState.selectedProjects.map(project => project.id)
       const result = await projectService.batchDeleteProjects(projectIds)
 
       // 从状态中移除成功删除的项目
@@ -470,7 +645,7 @@ const ProjectList: React.FC = () => {
   }
 
   // 表格列配置
-  const columns: ColumnsType<Project> = [
+  const columns = useMemo<ColumnsType<Project>>(() => [
     {
       title: '项目名称',
       dataIndex: 'name',
@@ -628,7 +803,7 @@ const ProjectList: React.FC = () => {
         </div>
       )
     }
-  ]
+  ], [handleDelete, handleEdit, navigate])
 
   // 认证加载状态
   if (authLoading) {
@@ -662,18 +837,18 @@ const ProjectList: React.FC = () => {
             <FolderOutlined />
             项目管理
           </h1>
-          {currentNode && (
+          {currentWorker && (
             <Tag 
               color="cyan"
               style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}
             >
               <CloudServerOutlined style={{ fontSize: 12 }} />
-              <span>{currentNode.name}</span>
+              <span>{currentWorker.name}</span>
             </Tag>
           )}
         </Space>
         <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
-          {currentNode ? `当前节点: ${currentNode.name}` : '管理您的爬虫项目和代码'}
+          {currentWorker ? `当前 Worker: ${currentWorker.name}` : '管理您的爬虫项目和代码'}
         </p>
       </div>
 
@@ -694,6 +869,12 @@ const ProjectList: React.FC = () => {
               onClick={() => dispatch({ type: 'TOGGLE_CREATE_DRAWER' })}
             >
               创建项目
+            </Button>
+            <Button
+              icon={<UploadOutlined />}
+              onClick={openImportModal}
+            >
+              导入项目
             </Button>
             <Button
               danger
@@ -736,16 +917,14 @@ const ProjectList: React.FC = () => {
                 onChange={handleCreatedByChange}
                 loading={loadingUsers}
                 showSearch
-                filterOption={(input, option) =>
-                  (option?.children as string)?.toLowerCase().includes(input.toLowerCase())
-                }
-              >
-                {userList.map((userItem) => (
-                  <Option key={userItem.id} value={userItem.id}>
-                    {userItem.username}
-                  </Option>
-                ))}
-              </Select>
+                optionFilterProp="label"
+                options={userList.map((userItem) => ({ value: userItem.id, label: userItem.username }))}
+                filterOption={(input, option) => {
+                  const label = option?.label
+                  if (typeof label !== 'string') return false
+                  return label.toLowerCase().includes(input.toLowerCase())
+                }}
+              />
             )}
             <Search
               placeholder="搜索项目"
@@ -771,9 +950,10 @@ const ProjectList: React.FC = () => {
         rowSelection={{
           selectedRowKeys: uiState.selectedRowKeys,
           onChange: (newSelectedRowKeys: React.Key[], newSelectedRows: Project[]) => {
+            const resolvedProjects = resolveSelectedProjects(newSelectedRowKeys, newSelectedRows)
             dispatch({ 
               type: 'SET_SELECTED_PROJECTS', 
-              payload: { keys: newSelectedRowKeys, projects: newSelectedRows } 
+              payload: { keys: newSelectedRowKeys, projects: resolvedProjects } 
             })
           },
           getCheckboxProps: (record: Project) => ({
@@ -847,19 +1027,95 @@ const ProjectList: React.FC = () => {
         confirmLoading={uiState.loading}
       >
         <div>
-          <p>确定要删除选中的 {uiState.selectedProjects.length} 个项目吗？此操作不可恢复。</p>
+          <p>确定要删除选中的 {uiState.selectedRowKeys.length} 个项目吗？此操作不可恢复。</p>
           <div style={{ marginTop: 8 }}>
             <strong>将要删除的项目：</strong>
             <ul style={{ marginTop: 4, marginBottom: 0 }}>
               {uiState.selectedProjects.slice(0, 5).map(project => (
                 <li key={project.id}>{project.name}</li>
               ))}
-              {uiState.selectedProjects.length > 5 && (
-                <li>... 还有 {uiState.selectedProjects.length - 5} 个项目</li>
+              {uiState.selectedRowKeys.length > 5 && (
+                <li>... 还有 {uiState.selectedRowKeys.length - 5} 个项目</li>
               )}
             </ul>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        title="导入项目"
+        open={importModalVisible}
+        onOk={handleImportSubmit}
+        onCancel={() => {
+          setImportModalVisible(false)
+          resetImportState()
+        }}
+        okText="开始导入"
+        cancelText="取消"
+        confirmLoading={importSubmitting}
+        destroyOnClose
+      >
+        <Form layout="vertical">
+          <Form.Item label="项目文件/压缩包" required>
+            <Upload
+              fileList={importProjectFiles}
+              beforeUpload={(file) => {
+                const allowedTypes = ['.py', '.zip', '.tar.gz', '.tar']
+                const filename = file.name.toLowerCase()
+                const isAllowed = allowedTypes.some(type => filename.endsWith(type))
+                if (!isAllowed) {
+                  showNotification('error', '只支持 .py、.zip、.tar.gz、.tar 格式的文件')
+                  return Upload.LIST_IGNORE
+                }
+                return false
+              }}
+              maxCount={1}
+              accept=".py,.zip,.tar,.tar.gz"
+              onChange={({ fileList }) => setImportProjectFiles(fileList.slice(-1))}
+              onRemove={() => {
+                setImportProjectFiles([])
+                return true
+              }}
+            >
+              <Button icon={<UploadOutlined />}>选择项目文件</Button>
+            </Upload>
+            <Text type="secondary">
+              支持 .py、.zip、.tar.gz、.tar
+            </Text>
+          </Form.Item>
+          <EnvSelector
+            value={importEnvConfig}
+            onChange={setImportEnvConfig}
+            workerList={workers}
+          />
+          <Form.Item label="项目名称（可选）">
+            <Input
+              placeholder="默认使用文件名"
+              value={importProjectName}
+              onChange={(e) => setImportProjectName(e.target.value)}
+            />
+          </Form.Item>
+          <Form.Item label="入口文件（压缩包必填）">
+            <Input
+              placeholder="压缩包内入口路径，例如 main.py"
+              value={importEntryPoint}
+              onChange={(e) => setImportEntryPoint(e.target.value)}
+            />
+            <Text type="secondary">
+              压缩包必须填写入口文件；单文件项目可留空自动使用文件名
+            </Text>
+          </Form.Item>
+          <Form.Item>
+            <Space direction="vertical">
+              <Checkbox
+                checked={importOverwriteExisting}
+                onChange={(e) => setImportOverwriteExisting(e.target.checked)}
+              >
+                覆盖同名项目
+              </Checkbox>
+            </Space>
+          </Form.Item>
+        </Form>
       </Modal>
     </div>
   )

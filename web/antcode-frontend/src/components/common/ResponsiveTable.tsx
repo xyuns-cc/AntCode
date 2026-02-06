@@ -1,6 +1,7 @@
 import React from 'react'
 import { Table, Tooltip } from 'antd'
 import type { TableProps, TableColumnType } from 'antd'
+import type { ColumnGroupType, ColumnType, ColumnsType } from 'antd/es/table'
 import styles from './ResponsiveTable.module.css'
 
 interface ResponsiveTableProps<T> extends TableProps<T> {
@@ -29,31 +30,40 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
   const processedColumns = React.useMemo(() => {
     if (!columns) return columns
 
-    // 处理现有列，添加排序和溢出省略
-    const enhancedColumns = columns.map((col) => {
-      const newCol: TableColumnType<T> = { ...(col as TableColumnType<T>) }
+    type AnyColumn = ColumnType<T> | ColumnGroupType<T>
+
+    const enhanceColumn = (col: AnyColumn): AnyColumn => {
+      if ('children' in col && col.children) {
+        return {
+          ...col,
+          children: (col.children as ColumnsType<T>).map(enhanceColumn)
+        }
+      }
+
+      const leafCol = col as ColumnType<T>
+      const newCol: TableColumnType<T> = { ...leafCol }
 
       // 如果是操作列且需要固定
-      if (fixedActions && (col.key === 'actions' || col.dataIndex === 'actions')) {
+      if (fixedActions && (newCol.key === 'actions' || newCol.dataIndex === 'actions')) {
         newCol.fixed = 'right'
-        newCol.className = `${col.className || ''} table-actions-column`.trim()
+        newCol.className = `${newCol.className || ''} table-actions-column`.trim()
       } else {
         // 非操作列添加排序功能（如果没有自定义 sorter）
-        if (col.dataIndex && col.sorter === undefined && col.key !== 'index') {
+        if (newCol.dataIndex && newCol.sorter === undefined && newCol.key !== 'index') {
           newCol.sorter = (a: T, b: T) => {
-            const aVal = a[col.dataIndex as keyof T] as SortableValue
-            const bVal = b[col.dataIndex as keyof T] as SortableValue
-            
+            const aVal = a[newCol.dataIndex as keyof T] as SortableValue
+            const bVal = b[newCol.dataIndex as keyof T] as SortableValue
+
             // 处理 null/undefined
             if (aVal == null && bVal == null) return 0
             if (aVal == null) return -1
             if (bVal == null) return 1
-            
+
             // 日期类型
             if (aVal instanceof Date && bVal instanceof Date) {
               return aVal.getTime() - bVal.getTime()
             }
-            
+
             // 字符串日期格式
             if (typeof aVal === 'string' && typeof bVal === 'string') {
               const dateA = Date.parse(aVal)
@@ -62,12 +72,12 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
                 return dateA - dateB
               }
             }
-            
+
             // 数字类型
             if (typeof aVal === 'number' && typeof bVal === 'number') {
               return aVal - bVal
             }
-            
+
             // 字符串类型
             return String(aVal).localeCompare(String(bVal), 'zh-CN')
           }
@@ -75,7 +85,7 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
         }
 
         // 非操作列添加溢出省略和气泡提示（如果没有自定义 render 且没有禁用）
-        if (!col.render && col.ellipsis !== false && col.key !== 'index') {
+        if (!newCol.render && newCol.ellipsis !== false && newCol.key !== 'index') {
           newCol.ellipsis = { showTitle: false }
           newCol.render = (text: React.ReactNode) => {
             if (text == null || text === '') return '-'
@@ -90,7 +100,10 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
       }
 
       return newCol
-    })
+    }
+
+    // 处理现有列，添加排序和溢出省略
+    const enhancedColumns = (columns as ColumnsType<T>).map(enhanceColumn)
 
     // 添加序号列
     if (showIndex) {

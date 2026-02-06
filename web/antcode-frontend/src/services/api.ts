@@ -8,6 +8,7 @@ import type { AxiosError, AxiosInstance, AxiosRequestConfig, AxiosResponse } fro
 import showNotification from '@/utils/notification'
 import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
 import { AuthHandler } from '@/utils/authHandler'
+import { isAbortError } from '@/utils/helpers'
 
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -65,6 +66,9 @@ const buildErrorMessage = (error: AxiosError<ErrorData | unknown>) => {
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => response,
   (error: AxiosError) => {
+    if (isAbortError(error)) {
+      return Promise.reject(error)
+    }
     if (error.response?.status === 401) {
       AuthHandler.handleAuthFailure()
     }
@@ -115,6 +119,14 @@ export class TokenManager {
   private static readonly TOKEN_KEY = STORAGE_KEYS.ACCESS_TOKEN
   private static readonly REFRESH_KEY = STORAGE_KEYS.REFRESH_TOKEN
 
+  static getTokenPayload(token: string): JwtTokenPayload | null {
+    try {
+      return JSON.parse(atob(token.split('.')[1])) as JwtTokenPayload
+    } catch {
+      return null
+    }
+  }
+
   static setTokens(accessToken: string, refreshToken?: string) {
     localStorage.setItem(this.TOKEN_KEY, accessToken)
     if (refreshToken) {
@@ -137,21 +149,19 @@ export class TokenManager {
   }
 
   static isTokenExpired(token: string): boolean {
-    try {
-      const payload = JSON.parse(atob(token.split('.')[1]))
-      return payload.exp * 1000 < Date.now()
-    } catch {
-      return true
-    }
+    const payload = this.getTokenPayload(token)
+    if (!payload?.exp) return true
+    return payload.exp * 1000 < Date.now()
   }
+}
 
-  static getTokenPayload(token: string): unknown {
-    try {
-      return JSON.parse(atob(token.split('.')[1]))
-    } catch {
-      return null
-    }
-  }
+export type JwtTokenPayload = {
+  exp?: number
+  iat?: number
+  user_id?: number | string
+  username?: string
+  permissions?: string[]
+  [key: string]: unknown
 }
 
 export default apiClient

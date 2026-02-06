@@ -1,9 +1,11 @@
-import React, { useMemo } from 'react'
+import type React from 'react'
+import { useMemo } from 'react'
 import { Row, Col, Typography, theme } from 'antd'
 import {
   FileOutlined,
   SettingOutlined,
   CodeOutlined,
+  RobotOutlined,
   CheckCircleFilled
 } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
@@ -22,7 +24,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
 }) => {
   const { isDark } = useThemeContext()
   const { token } = theme.useToken()
-  
+
   const projectTypes = useMemo(() => [
     {
       type: 'file' as ProjectType,
@@ -47,6 +49,14 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
       icon: CodeOutlined,
       color: token.purple || '#722ed1',
       features: ['在线代码编辑器', '快速部署执行']
+    },
+    {
+      type: 'agent' as ProjectType,
+      title: '智能代理',
+      description: 'AI 驱动的智能浏览器采集',
+      icon: RobotOutlined,
+      color: token.colorWarning,
+      features: ['自然语言描述任务', 'AI 自动执行采集']
     }
   ], [token])
 
@@ -63,7 +73,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
         {projectTypes.map((item) => {
           const isSelected = selectedType === item.type
           const IconComponent = item.icon
-          
+
           return (
             <Col xs={24} sm={12} key={item.type}>
               <div
@@ -73,7 +83,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                   padding: '16px',
                   borderRadius: 12,
                   border: `2px solid ${isSelected ? item.color : token.colorBorderSecondary}`,
-                  background: isSelected 
+                  background: isSelected
                     ? (isDark ? `${item.color}15` : `${item.color}08`)
                     : token.colorBgContainer,
                   cursor: 'pointer',
@@ -100,21 +110,21 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
               >
                 {/* 选中标记 */}
                 {isSelected && (
-                  <CheckCircleFilled 
-                    style={{ 
+                  <CheckCircleFilled
+                    style={{
                       position: 'absolute',
                       top: 10,
                       right: 10,
                       fontSize: 16,
                       color: item.color
-                    }} 
+                    }}
                   />
                 )}
-                
+
                 {/* 左侧：图标和标题 */}
-                <div style={{ 
-                  display: 'flex', 
-                  flexDirection: 'column', 
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
                   alignItems: 'center',
                   flexShrink: 0,
                   width: 70
@@ -123,8 +133,8 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                     width: 44,
                     height: 44,
                     borderRadius: 10,
-                    backgroundColor: isSelected 
-                      ? `${item.color}20` 
+                    backgroundColor: isSelected
+                      ? `${item.color}20`
                       : token.colorFillSecondary,
                     display: 'flex',
                     alignItems: 'center',
@@ -133,9 +143,9 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                   }}>
                     <IconComponent style={{ fontSize: 22, color: item.color }} />
                   </div>
-                  <Text 
-                    strong 
-                    style={{ 
+                  <Text
+                    strong
+                    style={{
                       fontSize: 13,
                       color: isSelected ? item.color : token.colorText,
                       textAlign: 'center'
@@ -144,22 +154,22 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                     {item.title}
                   </Text>
                 </div>
-                
+
                 {/* 右侧：描述和特性 */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <Text 
-                    type="secondary" 
+                  <Text
+                    type="secondary"
                     style={{ fontSize: 12, display: 'block', marginBottom: 6 }}
                   >
                     {item.description}
                   </Text>
-                  
+
                   <div>
                     {item.features.map((feature, index) => (
-                      <div 
-                        key={index} 
-                        style={{ 
-                          fontSize: 11, 
+                      <div
+                        key={index}
+                        style={{
+                          fontSize: 11,
                           color: token.colorTextTertiary,
                           lineHeight: 1.5
                         }}

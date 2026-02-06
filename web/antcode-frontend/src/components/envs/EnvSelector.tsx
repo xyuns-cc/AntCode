@@ -1,11 +1,12 @@
 /**
  * 环境选择器组件
- * 用于项目创建时选择运行环境（本地或节点）
+ * 用于项目创建时选择运行环境（本地或 Worker）
  */
-import React, { useState, useEffect } from 'react'
+import type React from 'react'
+import { useState, useEffect } from 'react'
 import { Card, Radio, Select, Input, Space, Typography, Alert } from 'antd'
 import { CloudServerOutlined, DesktopOutlined } from '@ant-design/icons'
-import type { Node } from '@/types'
+import type { Worker } from '@/types'
 import envService from '@/services/envs'
 
 const { Title, Text } = Typography
@@ -15,14 +16,14 @@ const { Option } = Select
  * 环境配置类型
  */
 export interface EnvironmentConfig {
-  // 环境位置：本地 or 节点
-  location: 'local' | 'node'
+  // 环境位置：本地 or Worker
+  location: 'local' | 'worker'
   
-  // 节点ID（location=node时必填）
-  nodeId?: string
+  // Worker ID（location=worker时必填）
+  workerId?: string
   
   // 环境作用域
-  scope: 'private' | 'public'
+  scope: 'private' | 'shared'
   
   // 是否使用现有环境
   useExisting: boolean
@@ -43,7 +44,7 @@ export interface EnvironmentConfig {
 interface EnvSelectorProps {
   value?: EnvironmentConfig | null
   onChange?: (config: EnvironmentConfig) => void
-  nodeList?: Node[]
+  workerList?: Worker[]
 }
 
 /**
@@ -52,16 +53,16 @@ interface EnvSelectorProps {
 const EnvSelector: React.FC<EnvSelectorProps> = ({
   value,
   onChange,
-  nodeList = []
+  workerList = []
 }) => {
   // 环境位置
-  const [location, setLocation] = useState<'local' | 'node'>(value?.location || 'local')
+  const [location, setLocation] = useState<'local' | 'worker'>(value?.location || 'local')
   
-  // 节点ID
-  const [nodeId, setNodeId] = useState<string | undefined>(value?.nodeId)
+  // Worker ID
+  const [workerId, setWorkerId] = useState<string | undefined>(value?.workerId)
   
   // 环境作用域
-  const [scope, setScope] = useState<'private' | 'public'>(value?.scope || 'private')
+  const [scope, setScope] = useState<'private' | 'shared'>(value?.scope || 'private')
   
   // 是否使用现有环境
   const [useExisting, setUseExisting] = useState<boolean>(value?.useExisting || false)
@@ -98,23 +99,23 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
             setInterpreters(data.map(i => ({ version: i.version, source: i.source })))
           })
           .catch(() => setInterpreters([]))
-      } else if (location === 'node' && nodeId) {
-        // 加载节点已安装的解释器
-        envService.listNodeInterpreters(nodeId)
+      } else if (location === 'worker' && workerId) {
+        // 加载 Worker 已安装的解释器
+        envService.listWorkerInterpreters(workerId)
           .then(data => {
             setInterpreters(data.interpreters.map(i => ({ version: i.version, source: i.source })))
           })
           .catch(() => setInterpreters([]))
       }
     }
-  }, [location, useExisting, nodeId])
+  }, [location, useExisting, workerId])
 
   // 加载现有环境列表
   useEffect(() => {
     if (useExisting) {
-      if (location === 'node' && nodeId) {
-        // 加载节点环境
-        envService.listNodeEnvs(nodeId)
+      if (location === 'worker' && workerId) {
+        // 加载 Worker 环境
+        envService.listWorkerEnvs(workerId)
           .then(envs => setExistingEnvs(envs))
           .catch(() => setExistingEnvs([]))
       } else if (location === 'local') {
@@ -129,13 +130,13 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
           .catch(() => setExistingEnvs([]))
       }
     }
-  }, [useExisting, location, nodeId])
+  }, [useExisting, location, workerId])
 
   // 触发onChange
   useEffect(() => {
     const config: EnvironmentConfig = {
       location,
-      nodeId,
+      workerId,
       scope,
       useExisting,
       existingEnvName,
@@ -144,10 +145,10 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
       envDescription
     }
     onChange?.(config)
-  }, [location, nodeId, scope, useExisting, existingEnvName, pythonVersion, envName, envDescription, onChange])
+  }, [location, workerId, scope, useExisting, existingEnvName, pythonVersion, envName, envDescription, onChange])
 
-  // 在线节点列表
-  const onlineNodes = nodeList.filter(n => n.status === 'online')
+  // 在线 Worker 列表
+  const onlineWorkers = workerList.filter(w => w.status === 'online')
 
   return (
     <Card title="运行环境配置" style={{ marginBottom: 16 }}>
@@ -159,19 +160,19 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
             value={location}
             onChange={e => {
               setLocation(e.target.value)
-              setNodeId(undefined)
+              setWorkerId(undefined)
             }}
           >
             <Radio.Button value="local">
               <DesktopOutlined /> 本地
             </Radio.Button>
-            <Radio.Button value="node" disabled={onlineNodes.length === 0}>
-              <CloudServerOutlined /> 节点
+            <Radio.Button value="worker" disabled={onlineWorkers.length === 0}>
+              <CloudServerOutlined /> Worker
             </Radio.Button>
           </Radio.Group>
-          {location === 'node' && onlineNodes.length === 0 && (
+          {location === 'worker' && onlineWorkers.length === 0 && (
             <Alert
-              message="暂无在线节点"
+              message="暂无在线 Worker"
               type="warning"
               showIcon
               style={{ marginTop: 8 }}
@@ -179,19 +180,19 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
           )}
         </div>
 
-        {/* 节点选择 */}
-        {location === 'node' && (
+        {/* Worker 选择 */}
+        {location === 'worker' && (
           <div>
-            <Title level={5}>选择节点</Title>
+            <Title level={5}>选择 Worker</Title>
             <Select
               style={{ width: '100%' }}
-              placeholder="选择要使用的节点"
-              value={nodeId}
-              onChange={setNodeId}
+              placeholder="选择要使用的 Worker"
+              value={workerId}
+              onChange={setWorkerId}
             >
-              {onlineNodes.map(node => (
-                <Option key={node.id} value={node.id}>
-                  {node.name} ({node.host}:{node.port})
+              {onlineWorkers.map(worker => (
+                <Option key={worker.id} value={worker.id}>
+                  {worker.name}
                 </Option>
               ))}
             </Select>
@@ -203,13 +204,13 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
           <Title level={5}>环境作用域</Title>
           <Radio.Group value={scope} onChange={e => setScope(e.target.value)}>
             <Radio.Button value="private">私有</Radio.Button>
-            <Radio.Button value="public">公共</Radio.Button>
+            <Radio.Button value="shared">共享</Radio.Button>
           </Radio.Group>
           <div style={{ marginTop: 8 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
               {scope === 'private' 
                 ? '私有环境仅当前项目使用' 
-                : '公共环境可被多个项目共享'}
+                : '共享环境可被多个项目使用'}
             </Text>
           </div>
         </div>
@@ -254,7 +255,7 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
                 value={pythonVersion}
                 onChange={setPythonVersion}
                 showSearch
-                loading={interpreters.length === 0 && ((location === 'node' && nodeId !== undefined) || location === 'local')}
+                loading={interpreters.length === 0 && ((location === 'worker' && workerId !== undefined) || location === 'local')}
                 notFoundContent={interpreters.length === 0 ? "暂无可用版本，请先在环境管理中添加解释器" : undefined}
               >
                 {interpreters.map(item => {
@@ -277,8 +278,8 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
               </Select>
               <div style={{ marginTop: 8 }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {location === 'node' 
-                    ? '从节点已安装的解释器中选择，如需添加请在节点管理中操作'
+                  {location === 'worker' 
+                    ? '从 Worker 已安装的解释器中选择，如需添加请在 Worker 管理中操作'
                     : '从本地已安装的解释器中选择，如需添加请在环境管理中操作'}
                 </Text>
               </div>
@@ -310,4 +311,3 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
 }
 
 export default EnvSelector
-

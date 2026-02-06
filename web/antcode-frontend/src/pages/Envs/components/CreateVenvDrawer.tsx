@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import type React from 'react'
+import { useState } from 'react'
 import {
   Button,
   Drawer,
@@ -123,7 +124,6 @@ const CreateVenvDrawer: React.FC<CreateVenvDrawerProps> = ({ onCreated }) => {
                 }))}
                 allowClear
                 style={{ width: '100%' }}
-                size="large"
                 notFoundContent={
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -143,7 +143,6 @@ const CreateVenvDrawer: React.FC<CreateVenvDrawerProps> = ({ onCreated }) => {
                 placeholder="输入共享标识，便于项目引用"
                 value={sharedKey}
                 onChange={(e) => setSharedKey(e.target.value)}
-                size="large"
               />
               <div className={styles.formHint}>
                 设置标识后，其他项目可以通过此标识复用该虚拟环境
@@ -166,7 +165,6 @@ const CreateVenvDrawer: React.FC<CreateVenvDrawerProps> = ({ onCreated }) => {
                 onChange={(value: string[]) => setDeps(value)}
                 tokenSeparators={[',', ' ']}
                 style={{ width: '100%' }}
-                size="large"
               />
               <div className={styles.formHint}>支持多个依赖包，可以指定版本号</div>
             </div>

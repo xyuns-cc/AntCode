@@ -109,6 +109,9 @@ export class BaseService {
    * 获取完整URL
    */
   private getFullUrl(url: string): string {
+    if (!url) {
+      return this.basePath
+    }
     // 如果url已经是完整路径（以/api开头），直接返回
     if (url.startsWith('/api')) {
       return url

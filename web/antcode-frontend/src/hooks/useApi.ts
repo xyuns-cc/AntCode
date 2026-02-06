@@ -114,12 +114,13 @@ export function useApi<T, P extends unknown[] = unknown[]>(
   // 立即执行（如果设置了immediate）
   useEffect(() => {
     if (immediate) {
-      execute().catch((err) => Logger.warn('Immediate api call failed', err))
+      execute(...([] as unknown as P)).catch((err) => Logger.warn('Immediate api call failed', err))
     }
   }, [immediate, execute])
 
   // 组件卸载时清理
   useEffect(() => {
+    mountedRef.current = true
     return () => {
       mountedRef.current = false
       cancelRef.current = true

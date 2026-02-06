@@ -15,12 +15,12 @@ import {
   Alert,
   Tag
 } from 'antd'
-import { ArrowLeftOutlined, SaveOutlined, CloudServerOutlined, DesktopOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SaveOutlined, CloudServerOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
-import { nodeService } from '@/services/nodes'
-import type { TaskCreateRequest, ScheduleType, Project, Node } from '@/types'
+import { workerService } from '@/services/workers'
+import type { TaskCreateRequest, ScheduleType, Project, Worker } from '@/types'
 import { validateCronExpression } from '@/utils/cron'
 
 const { Option, OptGroup } = Select
@@ -38,7 +38,7 @@ const TaskCreate: React.FC = () => {
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [projects, setProjects] = useState<Project[]>([])
-  const [nodes, setNodes] = useState<Node[]>([])
+  const [workers, setWorkers] = useState<Worker[]>([])
   const [scheduleType, setScheduleType] = useState<ScheduleType>('once')
 
   // 从URL参数获取项目ID
@@ -59,11 +59,11 @@ const TaskCreate: React.FC = () => {
     }
   }, [form, projectIdFromUrl])
 
-  // 加载可用节点列表
-  const loadNodes = useCallback(async () => {
+  // 加载可用 Worker 列表
+  const loadWorkers = useCallback(async () => {
     try {
-      const nodeList = await nodeService.getMyAvailableNodes()
-      setNodes(nodeList)
+      const list = await workerService.getMyAvailableWorkers()
+      setWorkers(list)
     } catch {
       // 错误提示由拦截器统一处理
     }
@@ -71,15 +71,16 @@ const TaskCreate: React.FC = () => {
 
   useEffect(() => {
     loadProjects()
-    loadNodes()
-  }, [loadProjects, loadNodes])
+    loadWorkers()
+  }, [loadProjects, loadWorkers])
 
   // 处理表单提交
   const handleSubmit = async (values: TaskCreateFormValues) => {
     setLoading(true)
     try {
       const executionStrategy = values.execution_strategy || undefined
-      const specifiedNodeId = executionStrategy === 'specified' ? values.specified_node_id : undefined
+      const specifiedWorkerId =
+        executionStrategy === 'specified' ? values.specified_worker_id : undefined
 
       const taskData: TaskCreateRequest = {
         name: values.name,
@@ -97,7 +98,7 @@ const TaskCreate: React.FC = () => {
         environment_vars: values.environment_vars ? JSON.parse(values.environment_vars) : undefined,
         is_active: values.is_active !== false,
         execution_strategy: executionStrategy,
-        specified_node_id: specifiedNodeId,
+        specified_worker_id: specifiedWorkerId,
       }
 
       await taskService.createTask(taskData)
@@ -212,14 +213,15 @@ const TaskCreate: React.FC = () => {
                 rules={[{ required: true, message: '请选择调度类型' }]}
               >
                 <Select onChange={setScheduleType}>
-                  <Option value="once">一次性执行</Option>
+                  <Option value="once">立即执行一次</Option>
+                  <Option value="date">指定时间执行</Option>
                   <Option value="interval">间隔执行</Option>
                   <Option value="cron">Cron表达式</Option>
                 </Select>
               </Form.Item>
             </Col>
             <Col span={16}>
-              {scheduleType === 'once' && (
+              {scheduleType === 'date' && (
                 <Form.Item
                   label="执行时间"
                   name="scheduled_time"
@@ -272,7 +274,7 @@ const TaskCreate: React.FC = () => {
             type="info"
             showIcon
             message="任务执行策略"
-            description="任务默认继承项目的执行策略配置。如需覆盖，可选择本地/自动/指定节点。"
+            description="任务默认继承项目的执行策略配置。如需覆盖，可选择自动/指定 Worker/固定 Worker/优先绑定 Worker。"
             style={{ marginBottom: 16 }}
           />
 
@@ -286,7 +288,7 @@ const TaskCreate: React.FC = () => {
                   </Space>
                 }
                 name="execution_strategy"
-                tooltip="留空则继承项目配置；指定节点时需额外选择节点"
+                tooltip="留空则继承项目配置；指定 Worker 时需额外选择 Worker"
               >
                 <Select
                   placeholder="继承项目配置"
@@ -294,19 +296,6 @@ const TaskCreate: React.FC = () => {
                   showSearch
                   optionFilterProp="children"
                 >
-                  <Option value="">
-                    <Space>
-                      <DesktopOutlined style={{ color: '#1677ff' }} />
-                      <span>继承项目配置</span>
-                      <Tag color="default">推荐</Tag>
-                    </Space>
-                  </Option>
-                  <Option value="local">
-                    <Space>
-                      <DesktopOutlined style={{ color: '#1677ff' }} />
-                      <span>本地执行</span>
-                    </Space>
-                  </Option>
                   <Option value="auto">
                     <Space>
                       <CloudServerOutlined style={{ color: '#52c41a' }} />
@@ -316,7 +305,21 @@ const TaskCreate: React.FC = () => {
                   <Option value="specified">
                     <Space>
                       <CloudServerOutlined style={{ color: '#13c2c2' }} />
-                      <span>指定节点</span>
+                      <span>指定 Worker</span>
+                    </Space>
+                  </Option>
+                  <Option value="fixed">
+                    <Space>
+                      <CloudServerOutlined style={{ color: '#1677ff' }} />
+                      <span>固定 Worker（仅绑定 Worker）</span>
+                      <Tag color="blue">需项目绑定</Tag>
+                    </Space>
+                  </Option>
+                  <Option value="prefer">
+                    <Space>
+                      <CloudServerOutlined style={{ color: '#1677ff' }} />
+                      <span>优先绑定 Worker（可故障转移）</span>
+                      <Tag color="default">需项目绑定</Tag>
                     </Space>
                   </Option>
                 </Select>
@@ -331,22 +334,22 @@ const TaskCreate: React.FC = () => {
 
                   return (
                     <Form.Item
-                      label="指定节点"
-                      name="specified_node_id"
-                      rules={[{ required: true, message: '请选择节点' }]}
+                      label="指定 Worker"
+                      name="specified_worker_id"
+                      rules={[{ required: true, message: '请选择 Worker' }]}
                     >
-                      <Select placeholder="请选择节点" showSearch optionFilterProp="children">
-                        {nodes.filter(n => n.status === 'online').length > 0 && (
-                          <OptGroup label="在线节点">
-                            {nodes.filter(n => n.status === 'online').map(node => (
-                              <Option key={node.id} value={node.id}>
+                      <Select placeholder="请选择 Worker" showSearch optionFilterProp="children">
+                        {workers.filter(w => w.status === 'online').length > 0 && (
+                          <OptGroup label="在线 Worker">
+                            {workers.filter(w => w.status === 'online').map(worker => (
+                              <Option key={worker.id} value={worker.id}>
                                 <Space>
                                   <CloudServerOutlined style={{ color: '#13c2c2' }} />
-                                  <span>{node.name}</span>
-                                  {node.region && <Tag color="blue" style={{ marginLeft: 4 }}>{node.region}</Tag>}
-                                  {node.metrics && (
+                                  <span>{worker.name}</span>
+                                  {worker.region && <Tag color="blue" style={{ marginLeft: 4 }}>{worker.region}</Tag>}
+                                  {worker.metrics && (
                                     <span style={{ color: '#999', fontSize: 12 }}>
-                                      (CPU: {node.metrics.cpu?.toFixed(0)}% / 内存: {node.metrics.memory?.toFixed(0)}%)
+                                      (CPU: {worker.metrics.cpu.toFixed(0)}% / 内存: {worker.metrics.memory.toFixed(0)}%)
                                     </span>
                                   )}
                                 </Space>
@@ -354,13 +357,13 @@ const TaskCreate: React.FC = () => {
                             ))}
                           </OptGroup>
                         )}
-                        {nodes.filter(n => n.status !== 'online').length > 0 && (
-                          <OptGroup label="离线节点">
-                            {nodes.filter(n => n.status !== 'online').map(node => (
-                              <Option key={node.id} value={node.id} disabled>
+                        {workers.filter(w => w.status !== 'online').length > 0 && (
+                          <OptGroup label="离线 Worker">
+                            {workers.filter(w => w.status !== 'online').map(worker => (
+                              <Option key={worker.id} value={worker.id} disabled>
                                 <Space>
                                   <CloudServerOutlined style={{ color: '#ff4d4f' }} />
-                                  <span style={{ color: '#999' }}>{node.name}</span>
+                                  <span style={{ color: '#999' }}>{worker.name}</span>
                                   <Tag color="error">离线</Tag>
                                 </Space>
                               </Option>

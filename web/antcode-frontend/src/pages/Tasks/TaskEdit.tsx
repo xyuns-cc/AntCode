@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import type React from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Card,
@@ -12,8 +13,9 @@ import {
   Switch,
   InputNumber,
   DatePicker,
-  Spin,
-  Typography
+  Skeleton,
+  Typography,
+  message
 } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -22,7 +24,7 @@ import {
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
 import Logger from '@/utils/logger'
-import type { Task, Project, TaskUpdateRequest } from '@/types'
+import type { Task, Project, TaskUpdateRequest, ScheduleType } from '@/types'
 import useAuth from '@/hooks/useAuth'
 import dayjs from 'dayjs'
 
@@ -47,12 +49,12 @@ const TaskEdit: React.FC = () => {
   // 加载任务详情
   const loadTask = useCallback(async () => {
     if (!id) return
-    
+
     setLoading(true)
     try {
       const taskData = await taskService.getTask(id)
       setTask(taskData)
-      
+
       // 设置表单初始值
       form.setFieldsValue({
         name: taskData.name,
@@ -91,11 +93,49 @@ const TaskEdit: React.FC = () => {
   }, [])
 
   // 处理表单提交
-  const handleSubmit = async (values: { name: string; description?: string; schedule_type: string; cron_expression?: string; interval_seconds?: number; scheduled_time?: { toISOString: () => string }; max_instances: number; timeout_seconds: number; retry_count: number; retry_delay: number; is_active: boolean; execution_params?: string; environment_vars?: string }) => {
+  const handleSubmit = async (values: { name: string; description?: string; schedule_type: ScheduleType; cron_expression?: string; interval_seconds?: number; scheduled_time?: { toISOString: () => string }; max_instances: number; timeout_seconds: number; retry_count: number; retry_delay: number; is_active: boolean; execution_params?: string; environment_vars?: string }) => {
     if (!id || !task) return
-    
+
     setSubmitting(true)
     try {
+      let executionParams: Record<string, unknown> | undefined
+      if (values.execution_params) {
+        try {
+          const parsed = JSON.parse(values.execution_params) as unknown
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            message.error('执行参数必须是 JSON 对象')
+            return
+          }
+          executionParams = parsed as Record<string, unknown>
+        } catch {
+          message.error('执行参数 JSON 格式错误')
+          return
+        }
+      }
+
+      let environmentVars: Record<string, string> | undefined
+      if (values.environment_vars) {
+        try {
+          const parsed = JSON.parse(values.environment_vars) as unknown
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            message.error('环境变量必须是 JSON 对象')
+            return
+          }
+          const map: Record<string, string> = {}
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            if (typeof v !== 'string') {
+              message.error(`环境变量 ${k} 的值必须是字符串`)
+              return
+            }
+            map[k] = v
+          }
+          environmentVars = map
+        } catch {
+          message.error('环境变量 JSON 格式错误')
+          return
+        }
+      }
+
       const updateData: TaskUpdateRequest = {
         name: values.name,
         description: values.description,
@@ -108,8 +148,8 @@ const TaskEdit: React.FC = () => {
         retry_count: values.retry_count,
         retry_delay: values.retry_delay,
         is_active: values.is_active,
-        execution_params: values.execution_params ? JSON.parse(values.execution_params) : undefined,
-        environment_vars: values.environment_vars ? JSON.parse(values.environment_vars) : undefined
+        execution_params: executionParams,
+        environment_vars: environmentVars
       }
 
       await taskService.updateTask(id, updateData)
@@ -131,9 +171,10 @@ const TaskEdit: React.FC = () => {
   // 认证加载状态
   if (authLoading) {
     return (
-      <div style={{ textAlign: 'center', padding: '50px' }}>
-        <Spin size="large" />
-        <div style={{ marginTop: '16px' }}>正在验证登录状态...</div>
+      <div style={{ padding: '24px' }}>
+        <Card>
+          <Skeleton active paragraph={{ rows: 6 }} />
+        </Card>
       </div>
     )
   }
@@ -152,9 +193,10 @@ const TaskEdit: React.FC = () => {
 
   if (loading) {
     return (
-      <div style={{ textAlign: 'center', padding: '50px' }}>
-        <Spin size="large" />
-        <div style={{ marginTop: '16px' }}>正在加载任务信息...</div>
+      <div style={{ padding: '24px' }}>
+        <Card>
+          <Skeleton active paragraph={{ rows: 8 }} />
+        </Card>
       </div>
     )
   }
@@ -310,7 +352,7 @@ const TaskEdit: React.FC = () => {
           <Form.Item shouldUpdate={(prevValues, currentValues) => prevValues.schedule_type !== currentValues.schedule_type}>
             {({ getFieldValue }) => {
               const scheduleType = getFieldValue('schedule_type')
-              
+
               if (scheduleType === 'interval') {
                 return (
                   <Form.Item
@@ -322,7 +364,7 @@ const TaskEdit: React.FC = () => {
                   </Form.Item>
                 )
               }
-              
+
               if (scheduleType === 'cron') {
                 return (
                   <Form.Item
@@ -334,7 +376,7 @@ const TaskEdit: React.FC = () => {
                   </Form.Item>
                 )
               }
-              
+
               if (scheduleType === 'once') {
                 return (
                   <Form.Item
@@ -349,7 +391,7 @@ const TaskEdit: React.FC = () => {
                   </Form.Item>
                 )
               }
-              
+
               return null
             }}
           </Form.Item>

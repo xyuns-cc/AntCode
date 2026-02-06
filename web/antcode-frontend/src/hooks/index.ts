@@ -32,7 +32,11 @@ export type {
 } from './useTableWithPagination'
 
 // 消息
-export { useMessage } from './useMessage'
+export {
+  setMessageInstances,
+  globalMessage,
+  globalNotification,
+  globalModal,
+  showNotification
+} from './useMessage'
 
-// 主题
-export { useTheme } from './useTheme'
