@@ -1,0 +1,58 @@
+.container {
+  padding: 24px;
+}
+
+.pageTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 24px;
+  font-weight: bold;
+  margin: 0;
+}
+
+.pageDescription {
+  margin: 8px 0 0 0;
+  opacity: 0.65;
+}
+
+.statsRow {
+  margin-bottom: 24px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.accountInfo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.accountName {
+  font-weight: 600;
+}
+
+.accountSource {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.scriptPreview {
+  font-size: 10px;
+  font-family: monospace;
+  color: rgba(0, 0, 0, 0.45);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.syncBadge {
+  font-family: monospace;
+}

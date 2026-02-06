@@ -6,8 +6,8 @@ export interface ApiResponse<T = unknown> {
   code?: number
 }
 
-// 分页响应类型
-export interface PaginatedResponse<T> {
+// 分页响应类型（带 success 包装）
+export interface ApiPaginatedResponse<T> {
   success: boolean
   data: {
     items: T[]
@@ -16,6 +16,20 @@ export interface PaginatedResponse<T> {
     size: number
     pages: number
   }
+}
+
+// 新版分页响应类型（data + pagination）
+export interface PaginationResponse<T> {
+  success: boolean
+  data: T[]
+  pagination: {
+    page: number
+    size: number
+    total: number
+    pages: number
+  }
+  message?: string
+  code?: number
 }
 
 // 错误响应类型
@@ -50,8 +64,15 @@ export interface LoginRequest {
   password: string
 }
 
+export interface LoginPublicKeyResponse {
+  algorithm: string
+  key_id: string
+  public_key: string
+}
+
 export interface LoginResponse {
   access_token: string
+  refresh_token?: string
   token_type: string
   expires_in: number
   user: User
@@ -60,11 +81,10 @@ export interface LoginResponse {
 // 后端实际返回的登录响应格式
 export interface BackendLoginResponse {
   access_token: string
+  refresh_token?: string
   token_type: string
-  user_id: string  // public_id
-  username: string
-  is_admin: boolean
-  is_super_admin: boolean
+  expires_in?: number
+  user: User  // 嵌套的用户对象
 }
 
 export interface User {
@@ -91,13 +111,6 @@ export interface TokenInfo {
 // 刷新Token请求
 export interface RefreshTokenRequest {
   refresh_token: string
-}
-
-// 用户注册请求
-export interface RegisterRequest {
-  username: string
-  password: string
-  email?: string
 }
 
 // 用户更新请求

@@ -57,7 +57,7 @@ dev = [
 
 
 [tool.aerich]
-tortoise_orm = "src.core.db_config.TORTOISE_ORM"
+tortoise_orm = "antcode_core.infrastructure.db.tortoise.TORTOISE_ORM"
 location = "./migrations"
 src_folder = "./."
 

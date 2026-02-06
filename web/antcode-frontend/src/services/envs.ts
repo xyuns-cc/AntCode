@@ -1,4 +1,5 @@
 import apiClient from './api'
+import type { ApiResponse } from '@/types'
 
 export interface PythonVersionsResponse {
   versions: string[]
@@ -41,41 +42,6 @@ export interface PaginatedVenvs {
   pages: number
 }
 
-// 节点虚拟环境
-export interface NodeEnvItem {
-  name: string
-  path: string
-  python_version: string
-  python_bin: string
-  created_at?: string
-  packages_count?: number
-}
-
-// 节点解释器
-export interface NodeInterpreter {
-  version: string
-  install_dir?: string
-  python_bin: string
-  source: string
-  is_available?: boolean
-  created_at?: string
-  updated_at?: string
-}
-
-// 节点Python版本信息
-export interface NodePythonVersions {
-  installed: NodeInterpreter[]
-  available: string[]
-  all_interpreters: NodeInterpreter[]
-  platform: {
-    os_type: string
-    os_version: string
-    python_version: string
-    machine: string
-    mise_available: boolean
-  }
-}
-
 class EnvService {
   async listPythonVersions(): Promise<string[]> {
     const res = await apiClient.get<PythonVersionsResponse>('/api/v1/envs/python/versions')
@@ -104,86 +70,21 @@ class EnvService {
     await apiClient.delete(`/api/v1/envs/python/interpreters/${encodeURIComponent(version)}`, { params: { source } })
   }
 
-  // ========== 节点环境管理 API ==========
+  // ========== Worker 环境管理 API ==========
 
-  // 获取节点虚拟环境列表
-  async listNodeEnvs(nodeId: string): Promise<NodeEnvItem[]> {
-    const res = await apiClient.get<{ data: { envs: NodeEnvItem[] } }>(`/api/v1/nodes/${nodeId}/envs`)
-    return res.data.data?.envs || []
-  }
-
-  // 在节点上创建虚拟环境
-  async createNodeEnv(nodeId: string, data: { name: string; python_version?: string; packages?: string[] }): Promise<NodeEnvItem> {
-    const res = await apiClient.post<{ data: NodeEnvItem }>(`/api/v1/nodes/${nodeId}/envs`, data)
-    return res.data.data
-  }
-
-  // 获取节点虚拟环境详情
-  async getNodeEnv(nodeId: string, envName: string): Promise<NodeEnvItem> {
-    const res = await apiClient.get<{ data: NodeEnvItem }>(`/api/v1/nodes/${nodeId}/envs/${envName}`)
-    return res.data.data
-  }
-
-  // 编辑节点虚拟环境
-  async updateNodeEnv(nodeId: string, envName: string, data: { key?: string; description?: string }): Promise<NodeEnvItem> {
-    const res = await apiClient.patch<{ data: NodeEnvItem }>(`/api/v1/nodes/${nodeId}/envs/${envName}`, data)
-    return res.data.data
-  }
-
-  // 删除节点虚拟环境
-  async deleteNodeEnv(nodeId: string, envName: string): Promise<void> {
-    await apiClient.delete(`/api/v1/nodes/${nodeId}/envs/${envName}`)
-  }
-
-  // 获取节点虚拟环境包列表
-  async listNodeEnvPackages(nodeId: string, envName: string): Promise<Array<{ name: string; version: string }>> {
-    const res = await apiClient.get<{ data: { packages: Array<{ name: string; version: string }> } }>(`/api/v1/nodes/${nodeId}/envs/${envName}/packages`)
-    return res.data.data?.packages || []
-  }
-
-  // 安装包到节点虚拟环境
-  async installNodeEnvPackages(nodeId: string, envName: string, packages: string[], upgrade?: boolean): Promise<void> {
-    await apiClient.post(`/api/v1/nodes/${nodeId}/envs/${envName}/packages`, { packages, upgrade })
-  }
-
-  // 从节点虚拟环境卸载包
-  async uninstallNodeEnvPackages(nodeId: string, envName: string, packages: string[]): Promise<void> {
-    await apiClient.delete(`/api/v1/nodes/${nodeId}/envs/${envName}/packages`, { data: { packages } })
-  }
-
-  // 获取节点解释器列表
-  async listNodeInterpreters(nodeId: string): Promise<{ interpreters: NodeInterpreter[]; total: number }> {
-    const res = await apiClient.get<{ data: { interpreters: NodeInterpreter[]; total: number } }>(`/api/v1/nodes/${nodeId}/interpreters`)
-    return res.data.data || { interpreters: [], total: 0 }
-  }
-
-  // 在节点上注册本地解释器
-  async registerNodeInterpreter(nodeId: string, pythonBin: string): Promise<void> {
-    await apiClient.post(`/api/v1/nodes/${nodeId}/interpreters/local`, { python_bin: pythonBin })
-  }
-
-  // 在节点上取消注册解释器
-  async unregisterNodeInterpreter(nodeId: string, version: string, source: string = 'local'): Promise<void> {
-    await apiClient.delete(`/api/v1/nodes/${nodeId}/interpreters/${encodeURIComponent(version)}`, { params: { source } })
-  }
-
-  // 获取节点Python版本信息
-  async getNodePythonVersions(nodeId: string): Promise<NodePythonVersions> {
-    const res = await apiClient.get<{ data: NodePythonVersions }>(`/api/v1/nodes/${nodeId}/python-versions`)
-    return res.data.data
-  }
-
-  // 在节点上安装Python版本
-  async installNodePythonVersion(nodeId: string, version: string): Promise<void> {
-    await apiClient.post(`/api/v1/nodes/${nodeId}/python-versions/${version}/install`)
-  }
-
-  // 获取节点平台信息
-  async getNodePlatform(nodeId: string): Promise<{ os_type: string; os_version: string; python_version: string; machine: string; mise_available: boolean }> {
-    const res = await apiClient.get<{ data: { os_type: string; os_version: string; python_version: string; machine: string; mise_available: boolean } }>(
-      `/api/v1/nodes/${nodeId}/platform`
+  async listWorkerEnvs(workerId: string): Promise<Array<{ name: string; python_version: string }>> {
+    const res = await apiClient.get<ApiResponse<Array<{ name: string; python_version: string }>>>(
+      `/api/v1/workers/${workerId}/envs`
     )
-    return res.data.data
+    return res.data.data || []
+  }
+
+  async listWorkerInterpreters(workerId: string): Promise<{ interpreters: Array<{ version: string; source?: string }>; total: number }> {
+    const res = await apiClient.get<ApiResponse<Array<{ version: string; source?: string }>>>(
+      `/api/v1/workers/${workerId}/interpreters`
+    )
+    const interpreters = res.data.data || []
+    return { interpreters, total: interpreters.length }
   }
 
   async listVenvs(params: {
@@ -195,7 +96,7 @@ class EnvService {
     include_packages?: boolean
     limit_packages?: number
     interpreter_source?: string
-    node_id?: string  // 节点ID筛选
+    worker_id?: string  // Worker ID 筛选
   }): Promise<PaginatedVenvs> {
     const res = await apiClient.get<{
       success: boolean

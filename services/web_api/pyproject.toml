@@ -1,0 +1,36 @@
+[project]
+name = "antcode-web-api"
+version = "0.1.0"
+description = "AntCode Web API 服务 - Control Plane"
+requires-python = ">=3.11"
+dependencies = [
+    # 核心依赖
+    "antcode-core",
+
+    # Web 框架
+    "fastapi>=0.123.0",
+    "uvicorn[standard]>=0.38.0",
+    "python-multipart>=0.0.20",
+
+    # WebSocket
+    "websockets>=12.0",
+
+    # HTTP 客户端
+    "httpx>=0.28.0",
+
+    # 工具库
+    "ujson>=5.9.0",
+]
+
+[tool.uv.sources]
+antcode-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/antcode_web_api"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/antcode_web_api"]

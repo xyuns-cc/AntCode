@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { Modal, Select, Space, Typography, Tag, Button, Upload, App } from 'antd'
 import { InboxOutlined } from '@ant-design/icons'
 import envService from '@/services/envs'
+import { runtimeService } from '@/services/runtimes'
 import type { InstallPackagesModalProps } from '../types'
 
 const { Text } = Typography
@@ -22,14 +23,11 @@ const InstallPackagesModal: React.FC<InstallPackagesModalProps> = ({
 
     setLoading(true)
     try {
-      // 判断是节点环境还是本地环境
-      if (venvId.includes('-')) {
-        // 节点环境ID格式: nodeId-envName
-        const firstDashIndex = venvId.indexOf('-')
-        const nodeId = venvId.substring(0, firstDashIndex)
-        const envName = venvId.substring(firstDashIndex + 1)
-        await envService.installNodeEnvPackages(nodeId, envName, pkgs)
-        message.success('节点环境依赖安装成功')
+      // Worker 环境ID格式: workerId|envName
+      if (venvId.includes('|')) {
+        const [workerId, envName] = venvId.split('|')
+        await runtimeService.installPackages(workerId, envName, pkgs)
+        message.success('Worker 环境依赖安装成功')
       } else {
         // 本地环境
         await envService.installPackagesToVenv(venvId, pkgs)

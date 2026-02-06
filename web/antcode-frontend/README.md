@@ -64,105 +64,51 @@ open http://localhost:3000
 ```
 antcode-frontend/
 ├── public/                 # 静态资源
-│   └── vite.svg           # 网站图标
-├── src/                   # 源代码目录
-│   ├── assets/           # 资源文件
-│   │   └── login-background.jpg
-│   ├── components/       # 可复用组件
-│   │   ├── common/      # 通用组件
-│   │   │   ├── AdminRoute.tsx
-│   │   │   ├── AlertManager/
-│   │   │   ├── AuthGuard.tsx
-│   │   │   ├── ErrorBoundary.tsx
-│   │   │   ├── Layout/
-│   │   │   ├── ResponsiveTable.tsx
-│   │   │   └── ThemeToggle/
-│   │   ├── projects/    # 项目相关组件
-│   │   │   ├── CodeProjectForm.tsx
-│   │   │   ├── FileProjectForm.tsx
-│   │   │   ├── FileTree.tsx
-│   │   │   ├── FileViewer.tsx
-│   │   │   ├── ProjectCreateDrawer.tsx
-│   │   │   ├── ProjectEditDrawer.tsx
-│   │   │   ├── ProjectTypeSelector.tsx
-│   │   │   └── RuleProjectForm.tsx
-│   │   └── ui/          # UI组件
-│   │       ├── CodeEditor/
-│   │       ├── LogChart/
-│   │       └── LogViewer/
-│   ├── config/          # 配置文件
-│   │   └── app.ts
-│   ├── contexts/        # React Context
-│   │   └── ThemeContext.tsx
-│   ├── hooks/           # 自定义 Hooks
-│   │   ├── useApi.ts
-│   │   ├── useAuth.ts
-│   │   ├── useClientSideFilter.ts
-│   │   └── useTheme.ts
-│   ├── pages/           # 页面组件
-│   │   ├── Dashboard/   # 仪表盘
-│   │   ├── Envs/        # 环境管理
-│   │   ├── Login/       # 登录页
-│   │   ├── Logs/        # 日志查看
-│   │   ├── Monitor/     # 监控页面
-│   │   ├── Projects/    # 项目管理
-│   │   ├── Settings/    # 设置页面
-│   │   ├── Tasks/       # 任务管理
-│   │   └── UserManagement/  # 用户管理
-│   ├── services/        # API 服务
-│   │   ├── api.ts       # API 基础配置
-│   │   ├── auth.ts      # 认证服务
-│   │   ├── dashboard.ts
-│   │   ├── envs.ts
-│   │   ├── logs.ts
-│   │   ├── projects.ts
-│   │   ├── tasks.ts
-│   │   └── users.ts
-│   ├── stores/          # 状态管理
-│   │   ├── authStore.ts
-│   │   └── projectStore.ts
-│   ├── styles/          # 全局样式
-│   │   ├── globals.css
-│   │   ├── variables.css
-│   │   ├── table-fix.css
-│   │   ├── table-overlap-fix.css
-│   │   └── tooltip-fix.css
-│   ├── types/           # TypeScript 类型定义
-│   │   ├── api.ts
-│   │   ├── index.ts
-│   │   ├── project.ts
-│   │   ├── task.ts
-│   │   └── utils.ts
-│   ├── utils/           # 工具函数
-│   │   ├── authHandler.ts
-│   │   ├── constants.ts
-│   │   ├── cron.ts
-│   │   ├── errorHandler.ts
-│   │   ├── fileIcons.tsx
-│   │   ├── format.ts
-│   │   ├── helpers.ts
-│   │   ├── lazyLoad.tsx
-│   │   ├── logExport.ts
-│   │   ├── logger.ts
-│   │   ├── monacoConfig.ts
-│   │   ├── notification.tsx
-│   │   ├── projectUtils.ts
-│   │   ├── request.ts
-│   │   ├── theme.ts
-│   │   └── validators.ts
-│   ├── App.tsx          # 应用根组件
-│   ├── main.tsx         # 应用入口
-│   └── vite-env.d.ts    # Vite 类型声明
-├── dist/                # 构建产物（自动生成）
-├── .npmrc               # npm 配置
-├── eslint.config.js     # ESLint 配置
-├── index.html           # HTML 入口
-├── nginx.conf.example   # Nginx 配置示例
-├── package.json         # 项目配置
-├── tsconfig.json        # TypeScript 配置
-├── tsconfig.app.json    # 应用 TypeScript 配置
-├── tsconfig.node.json   # Node TypeScript 配置
-└── vite.config.ts       # Vite 构建配置
+├── src/                    # 源代码目录
+│   ├── assets/             # 资源文件
+│   ├── components/         # 可复用组件
+│   │   ├── common/         # 通用组件（Layout, AuthGuard, ErrorBoundary）
+│   │   ├── envs/           # 环境相关组件
+│   │   ├── nodes/          # 节点相关组件
+│   │   ├── projects/       # 项目相关组件
+│   │   ├── runtimes/       # 运行时相关组件
+│   │   ├── ui/             # UI 组件（CodeEditor, LogViewer）
+│   │   └── workers/        # Worker 相关组件
+│   ├── config/             # 配置文件
+│   ├── contexts/           # React Context
+│   ├── hooks/              # 自定义 Hooks
+│   │   └── api/            # API 相关 Hooks
+│   ├── lib/                # 第三方库配置
+│   ├── pages/              # 页面组件
+│   │   ├── AlertConfig/    # 告警配置
+│   │   ├── AuditLog/       # 审计日志
+│   │   ├── Dashboard/      # 仪表盘
+│   │   ├── Envs/           # 环境管理
+│   │   ├── Login/          # 登录页
+│   │   ├── Logs/           # 日志查看
+│   │   ├── Monitor/        # 监控页面
+│   │   ├── Nodes/          # 节点管理
+│   │   ├── Projects/       # 项目管理
+│   │   ├── Runtimes/       # 运行时管理
+│   │   ├── Settings/       # 设置页面
+│   │   ├── SpiderMonitor/  # 爬虫监控
+│   │   ├── SystemConfig/   # 系统配置
+│   │   ├── Tasks/          # 任务管理
+│   │   ├── UserManagement/ # 用户管理
+│   │   └── Workers/        # Worker 管理
+│   ├── services/           # API 服务
+│   ├── stores/             # 状态管理（Zustand）
+│   ├── styles/             # 全局样式
+│   ├── types/              # TypeScript 类型定义
+│   ├── utils/              # 工具函数
+│   ├── App.tsx             # 应用根组件
+│   └── main.tsx            # 应用入口
+├── dist/                   # 构建产物（自动生成）
+├── eslint.config.js        # ESLint 配置
+├── index.html              # HTML 入口
+├── package.json            # 项目配置
+├── tsconfig.json           # TypeScript 配置
+└── vite.config.ts          # Vite 构建配置
 ```
 
 ---
@@ -598,7 +544,7 @@ npm run build:analyze
 
 ## 📝 更新日志
 
-### v0.0.0 (2025-11-05)
+### v1.0.0 (2026-01-15)
 
 #### 优化
 - ✅ 升级到 Node.js 22.10.0
@@ -614,6 +560,7 @@ npm run build:analyze
 - ✅ 文件管理功能
 - ✅ Monaco 编辑器集成
 - ✅ 主题切换功能
+- ✅ 节点环境选择器
 
 ---
 

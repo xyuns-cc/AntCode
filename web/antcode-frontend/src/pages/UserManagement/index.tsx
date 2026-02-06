@@ -29,7 +29,7 @@ import type { ColumnsType } from 'antd/es/table'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import { useAuth } from '@/hooks/useAuth'
 import apiClient from '@/services/api'
-import type { User, ApiResponse } from '@/types'
+import type { User, ApiResponse, PaginationResponse } from '@/types'
 import styles from './UserManagement.module.css'
 
 interface UserFormData {
@@ -101,7 +101,7 @@ const UserManagement: React.FC = () => {
       const sortFieldValue = sortFieldOverride ?? undefined
       const sortOrderValue = sortFieldOverride ? (sortOrderOverride ?? 'asc') : undefined
 
-      const response = await apiClient.get<{ success?: boolean; data?: { items?: unknown[]; total?: number } }>('/api/v1/users/', {
+      const response = await apiClient.get<PaginationResponse<User>>('/api/v1/users/', {
         params: {
           page,
           size,
@@ -111,45 +111,19 @@ const UserManagement: React.FC = () => {
       })
 
       const payload = response.data
+      if (!payload?.success) return
 
-      if (payload?.success) {
-        const rawData = payload.data
-        const paginationInfo = payload.pagination || rawData?.pagination
+      const items = payload.data || []
+      const total = payload.pagination?.total || items.length
+      const respPage = payload.pagination?.page || page
+      const respSize = payload.pagination?.size || size
 
-        const items = Array.isArray(rawData)
-          ? rawData
-          : Array.isArray(rawData?.items)
-            ? rawData.items
-            : []
-
-        const total =
-          typeof paginationInfo?.total === 'number'
-            ? paginationInfo.total
-            : typeof rawData?.total === 'number'
-              ? rawData.total
-              : items.length
-
-        const respPage =
-          typeof paginationInfo?.page === 'number'
-            ? paginationInfo.page
-            : typeof rawData?.page === 'number'
-              ? rawData.page
-              : page
-
-        const respSize =
-          typeof paginationInfo?.size === 'number'
-            ? paginationInfo.size
-            : typeof rawData?.size === 'number'
-              ? rawData.size
-              : size
-
-        setUsers(items)
-        setPagination({
-          current: respPage,
-          pageSize: respSize,
-          total
-        })
-      }
+      setUsers(items)
+      setPagination({
+        current: respPage,
+        pageSize: respSize,
+        total
+      })
     } catch {
       // 错误由拦截器处理
       setUsers([])

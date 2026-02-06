@@ -1,7 +1,8 @@
 /**
  * 审计日志页面
  */
-import React, { useState, useEffect, useCallback } from 'react'
+import type React from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   Card,
   Table,
@@ -44,6 +45,7 @@ import {
   type AuditStats,
   type ActionOption
 } from '@/services/audit'
+import Logger from '@/utils/logger'
 import dayjs from 'dayjs'
 import styles from './AuditLog.module.css'
 
@@ -57,7 +59,7 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   user: '用户',
   project: '项目',
   task: '任务',
-  node: '节点',
+  worker: 'Worker',
   config: '配置',
   env: '环境',
   file: '文件'
@@ -118,7 +120,7 @@ const AuditLog: React.FC = () => {
       const data = await getAuditStats(7)
       setStats(data)
     } catch (error) {
-      console.error('加载统计数据失败:', error)
+      Logger.error('加载统计数据失败:', error)
     }
   }, [])
 
@@ -128,7 +130,7 @@ const AuditLog: React.FC = () => {
       const actionsData = await getAuditActions()
       setActions(actionsData)
     } catch (error) {
-      console.error('加载选项数据失败:', error)
+      Logger.error('加载选项数据失败:', error)
     }
   }, [])
 

@@ -1,0 +1,50 @@
+# AntCode Worker 配置示例
+# 复制此文件为 worker.yaml 并根据需要修改
+
+# 基本配置
+name: "Worker-Node"
+port: 8001                    # 健康检查端口
+region: "默认"
+version: "0.1.0"
+
+# 传输模式: direct (Redis) 或 gateway (Gateway)
+transport_mode: "gateway"
+
+# Direct 模式配置（内网直连 Redis）
+redis_url: "redis://localhost:6379/0"
+
+# Gateway 模式配置（公网通过 Gateway）
+gateway_host: "localhost"
+gateway_port: 50051
+
+# 控制平面 API 地址（用于安装 Key 注册）
+api_base_url: "http://localhost:8000"
+
+
+# 心跳配置
+heartbeat_interval: 30        # 心跳间隔（秒）
+heartbeat_timeout: 60         # 心跳超时（秒）
+
+# 任务配置
+max_concurrent_tasks: 0       # 最大并发（0=自动计算）
+task_timeout: 3600            # 默认超时（秒）
+task_cpu_time_limit_sec: 0    # CPU 时间限制（0=自动）
+task_memory_limit_mb: 0       # 内存限制（0=自动）
+auto_resource_limit: true     # 启用自适应资源限制
+
+# 流控配置（可选）
+flow_control_enabled: false
+flow_control_strategy: "token_bucket"  # token_bucket/aimd/sliding_window
+flow_control_rate: 100.0               # 令牌补充速率（请求/秒）
+flow_control_capacity: 200             # 令牌桶容量
+
+# 存储配置
+data_dir: "var/worker"
+
+# 日志清理
+log_retention_days: 7
+log_cleanup_interval_hours: 24
+log_cleanup_enabled: true
+
+# 凭证存储: file 或 env
+credential_store: "file"

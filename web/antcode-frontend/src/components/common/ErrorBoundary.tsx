@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import React, { Component, ErrorInfo, ReactNode } from 'react'
+import React, { Component, type ErrorInfo, type ReactNode } from 'react'
 import { Button, Result, Typography, Collapse, Space } from 'antd'
 import { ReloadOutlined, BugOutlined, HomeOutlined } from '@ant-design/icons'
 import CopyableTooltip from './CopyableTooltip'

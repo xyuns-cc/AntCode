@@ -1,5 +1,6 @@
 import { BaseService } from './base'
 import apiClient from './api'
+import type { AxiosRequestConfig } from 'axios'
 import Logger from '@/utils/logger'
 import type {
   Project,
@@ -36,7 +37,10 @@ class ProjectService extends BaseService {
   }
 
   // 获取项目列表
-  async getProjects(params?: ProjectListParams): Promise<{ items: Project[]; page: number; size: number; total: number; pages: number }> {
+  async getProjects(
+    params?: ProjectListParams,
+    config?: AxiosRequestConfig
+  ): Promise<{ items: Project[]; page: number; size: number; total: number; pages: number }> {
     const response = await apiClient.get<{
       success: boolean
       data: Project[]
@@ -46,7 +50,10 @@ class ProjectService extends BaseService {
         total: number
         pages: number
       }
-    }>('/api/v1/projects', { params })
+    }>('/api/v1/projects', {
+      ...config,
+      params: { ...(params ?? {}), ...(config?.params ?? {}) }
+    })
 
     // 转换后端响应格式为前端期望的格式
     return {
@@ -78,17 +85,17 @@ class ProjectService extends BaseService {
     }
 
     // 环境必填字段
-    formData.append('venv_scope', data.venv_scope)
+    formData.append('runtime_scope', data.runtime_scope)
     formData.append('python_version', data.python_version)
-    if (data.shared_venv_key) {
-      formData.append('shared_venv_key', data.shared_venv_key)
+    if (data.shared_runtime_key) {
+      formData.append('shared_runtime_key', data.shared_runtime_key)
     }
     // 环境配置参数
     if (data.env_location) {
       formData.append('env_location', data.env_location)
     }
-    if (data.node_id) {
-      formData.append('node_id', data.node_id)
+    if (data.worker_id) {
+      formData.append('worker_id', data.worker_id)
     }
     if (data.use_existing_env !== undefined) {
       formData.append('use_existing_env', String(data.use_existing_env))
@@ -382,14 +389,41 @@ class ProjectService extends BaseService {
   async importProject(config: ProjectImportConfig): Promise<Project[]> {
     const formData = new FormData()
     formData.append('file', config.file)
+    if (config.name) {
+      formData.append('name', config.name)
+    }
+    if (config.description) {
+      formData.append('description', config.description)
+    }
+    if (config.entry_point) {
+      formData.append('entry_point', config.entry_point)
+    }
+    if (config.runtime_scope) {
+      formData.append('runtime_scope', config.runtime_scope)
+    }
+    if (config.worker_id) {
+      formData.append('worker_id', config.worker_id)
+    }
+    if (config.use_existing_env !== undefined) {
+      formData.append('use_existing_env', config.use_existing_env.toString())
+    }
+    if (config.existing_env_name) {
+      formData.append('existing_env_name', config.existing_env_name)
+    }
+    if (config.python_version) {
+      formData.append('python_version', config.python_version)
+    }
+    if (config.shared_runtime_key) {
+      formData.append('shared_runtime_key', config.shared_runtime_key)
+    }
+    if (config.env_name) {
+      formData.append('env_name', config.env_name)
+    }
+    if (config.env_description) {
+      formData.append('env_description', config.env_description)
+    }
     if (config.overwrite_existing !== undefined) {
       formData.append('overwrite_existing', config.overwrite_existing.toString())
-    }
-    if (config.import_tasks !== undefined) {
-      formData.append('import_tasks', config.import_tasks.toString())
-    }
-    if (config.import_logs !== undefined) {
-      formData.append('import_logs', config.import_logs.toString())
     }
 
     return this.uploadFile<Project[]>('/import', formData)
@@ -517,9 +551,10 @@ class ProjectService extends BaseService {
   // 创建下载链接（用于直接下载）
   getDownloadUrl(id: string, filePath?: string): string {
     const baseUrl = apiClient.defaults.baseURL || ''
+    const normalizedBase = baseUrl.replace(/\/api\/?$/, '').replace(/\/$/, '')
     return filePath 
-      ? `${baseUrl}/api/v1/projects/${id}/files/download?file_path=${encodeURIComponent(filePath)}`
-      : `${baseUrl}/api/v1/projects/${id}/files/download`
+      ? `${normalizedBase}/api/v1/projects/${id}/files/download?file_path=${encodeURIComponent(filePath)}`
+      : `${normalizedBase}/api/v1/projects/${id}/files/download`
   }
 }
 

@@ -1,0 +1,304 @@
+// Gateway service definitions for Worker access (Gateway <-> Worker gRPC)
+// Renamed from node_service.proto for clarity in the new architecture
+// Requirements: 1.4, 14.1
+
+syntax = "proto3";
+
+package antcode.v1;
+
+import "common.proto";
+
+// GatewayService handles all communication between Master and Worker
+// (Previously named WorkerService)
+service GatewayService {
+  // Bidirectional streaming for real-time communication
+  rpc WorkerStream(stream WorkerMessage) returns (stream MasterMessage);
+  
+  // Single call for worker registration
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Worker polling for task dispatch
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+
+  // Worker task acknowledgment
+  rpc AckTask(AckTaskRequest) returns (AckTaskResponse);
+
+  // Worker result reporting
+  rpc ReportResult(ReportResultRequest) returns (ReportResultResponse);
+
+  // Worker realtime logs
+  rpc SendLog(SendLogRequest) returns (SendLogResponse);
+  rpc SendLogBatch(SendLogBatchRequest) returns (SendLogBatchResponse);
+  rpc SendLogChunk(SendLogChunkRequest) returns (SendLogChunkResponse);
+
+  // Worker heartbeat
+  rpc SendHeartbeat(SendHeartbeatRequest) returns (SendHeartbeatResponse);
+
+  // Worker control polling
+  rpc PollControl(PollControlRequest) returns (PollControlResponse);
+  rpc AckControl(AckControlRequest) returns (AckControlResponse);
+  rpc ReportControlResult(ControlResultRequest) returns (ControlResultResponse);
+}
+
+// Messages sent from Worker to Master
+message WorkerMessage {
+  reserved 2;
+  reserved "log_batch";
+  oneof payload {
+    Heartbeat heartbeat = 1;
+    TaskStatus task_status = 3;
+    TaskAck task_ack = 4;
+    CancelAck cancel_ack = 5;
+  }
+}
+
+// Messages sent from Master to Worker
+message MasterMessage {
+  oneof payload {
+    TaskDispatch task_dispatch = 1;
+    TaskCancel task_cancel = 2;
+    ConfigUpdate config_update = 3;
+    Ping ping = 4;
+  }
+}
+
+
+// Heartbeat message sent periodically by Worker to Master
+message Heartbeat {
+  string worker_id = 1;                    // Unique identifier for the worker
+  string status = 2;                       // Worker status (online, busy, offline)
+  Metrics metrics = 3;                     // System metrics
+  OSInfo os_info = 4;                      // Operating system information
+  Timestamp timestamp = 5;                 // Message timestamp
+  map<string, string> capabilities = 6;   // Worker capabilities
+  string version = 7;                      // Worker version
+}
+
+// Task execution status update from Worker to Master
+message TaskStatus {
+  string execution_id = 1;           // Task execution identifier
+  string status = 2;                 // Status (pending, running, completed, failed, cancelled)
+  optional int32 exit_code = 3;      // Process exit code (if completed)
+  optional string error_message = 4; // Error message (if failed)
+  Timestamp timestamp = 5;           // Status update timestamp
+}
+
+// Task dispatch from Master to Worker
+message TaskDispatch {
+  string task_id = 1;                      // Unique task identifier
+  string project_id = 2;                   // Project identifier
+  string project_type = 3;                 // Project type (spider, code, file)
+  int32 priority = 4;                      // Task priority (higher = more urgent)
+  map<string, string> params = 5;          // Task parameters
+  map<string, string> environment = 6;     // Environment variables
+  int32 timeout = 7;                       // Execution timeout in seconds
+  string download_url = 8;                 // Project download URL
+  string file_hash = 9;                    // Project file hash for verification
+  string entry_point = 10;                 // Entry point script/file
+  string run_id = 11;                      // Execution/run identifier
+}
+
+// Task acknowledgment from Worker to Master
+message TaskAck {
+  string task_id = 1;           // Task identifier being acknowledged
+  bool accepted = 2;            // Whether task was accepted
+  optional string reason = 3;   // Rejection reason (if not accepted)
+}
+
+// Task cancellation request from Master to Worker
+message TaskCancel {
+  string task_id = 1;        // Task identifier to cancel
+  string execution_id = 2;   // Execution identifier to cancel
+}
+
+// Cancellation acknowledgment from Worker to Master
+message CancelAck {
+  string task_id = 1;           // Task identifier
+  bool success = 2;             // Whether cancellation succeeded
+  optional string reason = 3;   // Failure reason (if not successful)
+}
+
+// Worker registration request
+message RegisterRequest {
+  reserved 1;
+  reserved "machine_code";
+  string api_key = 2;                      // API key for authentication
+  string worker_id = 3;                    // Worker identifier
+  OSInfo os_info = 4;                      // Operating system information
+  map<string, string> capabilities = 5;   // Worker capabilities
+}
+
+// Worker registration response
+message RegisterResponse {
+  bool success = 1;                  // Whether registration succeeded
+  string worker_id = 2;              // Assigned worker identifier
+  optional string error = 3;         // Error message (if failed)
+  int32 heartbeat_interval = 4;      // Recommended heartbeat interval in seconds
+}
+
+// Configuration update from Master to Worker
+message ConfigUpdate {
+  map<string, string> config = 1;   // Configuration key-value pairs
+}
+
+// Ping message for keepalive
+message Ping {
+  Timestamp timestamp = 1;   // Ping timestamp
+}
+
+// ==================== Polling RPC Messages ====================
+
+message PollTaskRequest {
+  string worker_id = 1;
+  int32 timeout_ms = 2;
+}
+
+message PollTaskResponse {
+  bool has_task = 1;
+  TaskDispatch task = 2;
+  string receipt_id = 3;
+}
+
+message AckTaskRequest {
+  string worker_id = 1;
+  string receipt_id = 2;
+  bool accepted = 3;
+  string reason = 4;
+  string task_id = 5;
+}
+
+message AckTaskResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ReportResultRequest {
+  string run_id = 1;
+  string task_id = 2;
+  string worker_id = 3;
+  string status = 4;
+  int32 exit_code = 5;
+  string error_message = 6;
+  string started_at = 7;
+  string finished_at = 8;
+  int64 duration_ms = 9;
+  string data_json = 10;
+}
+
+message ReportResultResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message SendLogRequest {
+  string execution_id = 1;
+  string log_type = 2;
+  string content = 3;
+  string timestamp = 4;
+  int64 sequence = 5;
+}
+
+message LogEntry {
+  string execution_id = 1;
+  string log_type = 2;
+  string content = 3;
+  string timestamp = 4;
+  int64 sequence = 5;
+}
+
+message SendLogBatchRequest {
+  repeated LogEntry logs = 1;
+}
+
+message SendLogResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message SendLogBatchResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message SendLogChunkRequest {
+  string execution_id = 1;
+  string log_type = 2;
+  bytes data = 3;
+  int64 offset = 4;
+  bool is_final = 5;
+  string checksum = 6;
+  int64 total_size = 7;
+}
+
+message SendLogChunkResponse {
+  bool success = 1;
+  int64 ack_offset = 2;
+  string error = 3;
+}
+
+message SendHeartbeatRequest {
+  string worker_id = 1;
+  string status = 2;
+  float cpu_percent = 3;
+  float memory_percent = 4;
+  float disk_percent = 5;
+  int32 running_tasks = 6;
+  int32 max_concurrent_tasks = 7;
+  string timestamp = 8;
+  string version = 9;
+}
+
+message SendHeartbeatResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ControlMessage {
+  oneof payload {
+    TaskCancel task_cancel = 1;
+    ConfigUpdate config_update = 2;
+    RuntimeControl runtime_control = 3;
+  }
+}
+
+message RuntimeControl {
+  string request_id = 1;
+  string action = 2;
+  string reply_stream = 3;
+  string payload_json = 4;
+}
+
+message PollControlRequest {
+  string worker_id = 1;
+  int32 timeout_ms = 2;
+}
+
+message PollControlResponse {
+  bool has_control = 1;
+  ControlMessage control = 2;
+  string receipt_id = 3;
+}
+
+message AckControlRequest {
+  string worker_id = 1;
+  string receipt_id = 2;
+}
+
+message AckControlResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ControlResultRequest {
+  string worker_id = 1;
+  string request_id = 2;
+  bool success = 3;
+  string payload_json = 4;
+  string error = 5;
+  string reply_stream = 6;
+}
+
+message ControlResultResponse {
+  bool success = 1;
+  string error = 2;
+}

@@ -1,4 +1,5 @@
-import React, { useRef, useEffect } from 'react'
+import type React from 'react'
+import { useRef, useEffect } from 'react'
 import Editor from '@monaco-editor/react'
 import type { OnMount, OnChange } from '@monaco-editor/react'
 import { useThemeContext } from '@/contexts/ThemeContext'
@@ -227,66 +228,90 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
     // Python特殊配置
     if (monacoLang === 'python') {
       // 配置Python代码提示
-      monaco.languages.registerCompletionItemProvider('python', {
-        provideCompletionItems: (_model: editor.ITextModel, _position: editor.Position) => {
-          const suggestions = [
-            {
-              label: 'print',
-              kind: monaco.languages.CompletionItemKind.Function,
-              insertText: 'print(${1:message})',
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              documentation: '打印输出'
-            },
-            {
-              label: 'def',
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: 'def ${1:function_name}(${2:params}):\n    ${3:pass}',
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              documentation: '定义函数'
-            },
-            {
-              label: 'class',
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: 'class ${1:ClassName}:\n    def __init__(self${2:, params}):\n        ${3:pass}',
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              documentation: '定义类'
-            },
-            {
-              label: 'if',
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: 'if ${1:condition}:\n    ${2:pass}',
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              documentation: '条件语句'
-            },
-            {
-              label: 'for',
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: 'for ${1:item} in ${2:iterable}:\n    ${3:pass}',
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              documentation: '循环语句'
-            }
-          ]
-          return { suggestions }
-        }
-      })
+            monaco.languages.registerCompletionItemProvider('python', {
+              provideCompletionItems: (model, position) => {
+                const word = model.getWordUntilPosition(position)
+                const range = {
+                  startLineNumber: position.lineNumber,
+                  endLineNumber: position.lineNumber,
+                  startColumn: word.startColumn,
+                  endColumn: word.endColumn,
+                }
+
+                const suggestions = [
+                  {
+                    label: 'print',
+                    kind: monaco.languages.CompletionItemKind.Function,
+                    insertText: 'print(${1:message})',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: '打印输出',
+                    range,
+                  },
+                  {
+                    label: 'def',
+                    kind: monaco.languages.CompletionItemKind.Keyword,
+                    insertText: 'def ${1:function_name}(${2:params}):\n    ${3:pass}',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: '定义函数',
+                    range,
+                  },
+                  {
+                    label: 'class',
+                    kind: monaco.languages.CompletionItemKind.Keyword,
+                    insertText: 'class ${1:ClassName}:\n    def __init__(self${2:, params}):\n        ${3:pass}',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: '定义类',
+                    range,
+                  },
+                  {
+                    label: 'if',
+                    kind: monaco.languages.CompletionItemKind.Keyword,
+                    insertText: 'if ${1:condition}:\n    ${2:pass}',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: '条件语句',
+                    range,
+                  },
+                  {
+                    label: 'for',
+                    kind: monaco.languages.CompletionItemKind.Keyword,
+                    insertText: 'for ${1:item} in ${2:iterable}:\n    ${3:pass}',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: '循环语句',
+                    range,
+                  }
+                ]
+
+                return { suggestions }
+              }
+            })
     }
 
     // JavaScript/TypeScript特殊配置
     if (monacoLang === 'javascript' || monacoLang === 'typescript') {
-      monaco.languages.registerCompletionItemProvider(monacoLang, {
-        provideCompletionItems: () => {
-          const suggestions = [
-            {
-              label: 'function',
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: 'function ${1:functionName}(${2:params}) {\n    ${3:// code}\n}',
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              documentation: '定义函数'
-            }
-          ]
-          return { suggestions }
-        }
-      })
+            monaco.languages.registerCompletionItemProvider(monacoLang, {
+              provideCompletionItems: (model, position) => {
+                const word = model.getWordUntilPosition(position)
+                const range = {
+                  startLineNumber: position.lineNumber,
+                  endLineNumber: position.lineNumber,
+                  startColumn: word.startColumn,
+                  endColumn: word.endColumn,
+                }
+
+                const suggestions = [
+                  {
+                    label: 'function',
+                    kind: monaco.languages.CompletionItemKind.Keyword,
+                    insertText: 'function ${1:functionName}(${2:params}) {\n    ${3:// code}\n}',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: '定义函数',
+                    range,
+                  }
+                ]
+
+                return { suggestions }
+              }
+            })
     }
   }
 

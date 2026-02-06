@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useMemo, Suspense, lazy } from 'react'
-import { Card, Descriptions, Tag, Button, Space, Spin, Typography, Collapse, Modal, Select, Input, Tooltip } from 'antd'
+import type React from 'react'
+import { useEffect, useState, useMemo, Suspense, lazy } from 'react'
+import { Card, Descriptions, Tag, Button, Space, Skeleton, Typography, Collapse, Modal, Select, Input, Tooltip } from 'antd'
 import { EditOutlined, PlayCircleOutlined, ArrowLeftOutlined, FolderOutlined } from '@ant-design/icons'
 import { useParams, useNavigate } from 'react-router-dom'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
@@ -15,7 +16,7 @@ import {
   getProjectStatusColor
 } from '@/utils/projectUtils'
 import type { Project } from '@/types'
-import envService from '@/services/envs'
+import envService, { type VenvScope } from '@/services/envs'
 import { venvScopeOptions, interpreterSourceOptions } from '@/config/displayConfig'
 
 const ProjectEditDrawer = lazy(() => import('@/components/projects/ProjectEditDrawer'))
@@ -34,7 +35,7 @@ const ProjectDetail: React.FC = () => {
   const [newDeps, setNewDeps] = useState<string[]>([])
   const [pkgList, setPkgList] = useState<Array<{ name: string; version: string }>>([])
   const [envModalOpen, setEnvModalOpen] = useState(false)
-  const [venvScope, setVenvScope] = useState<string>('private')
+  const [venvScope, setVenvScope] = useState<VenvScope>('private')
   const [pythonVersion, setPythonVersion] = useState<string>('')
   const [versions, setVersions] = useState<string[]>([])
   const [sharedKey, setSharedKey] = useState<string>('')
@@ -94,7 +95,7 @@ const ProjectDetail: React.FC = () => {
   useEffect(() => {
     const fetchProject = async () => {
       if (!id) return
-      
+
       try {
         setLoading(true)
         const data = await projectService.getProject(id)
@@ -150,9 +151,10 @@ const ProjectDetail: React.FC = () => {
 
   if (loading) {
     return (
-      <div style={{ textAlign: 'center', padding: '50px' }}>
-        <Spin size="large" />
-        <div style={{ marginTop: '16px' }}>加载中...</div>
+      <div style={{ padding: '24px' }}>
+        <Card>
+          <Skeleton active paragraph={{ rows: 8 }} />
+        </Card>
       </div>
     )
   }
@@ -161,7 +163,7 @@ const ProjectDetail: React.FC = () => {
     return (
       <div style={{ textAlign: 'center', padding: '50px' }}>
         <div>项目不存在</div>
-        <Button 
+        <Button
           style={{ marginTop: '16px' }}
           onClick={() => navigate('/projects')}
         >
@@ -235,9 +237,9 @@ const ProjectDetail: React.FC = () => {
       type?: string
       expr?: string
     }
-    
-    const extractionRules: ExtractionRule[] = Array.isArray(project.rule_info.extraction_rules) 
-      ? project.rule_info.extraction_rules 
+
+    const extractionRules: ExtractionRule[] = Array.isArray(project.rule_info.extraction_rules)
+      ? project.rule_info.extraction_rules
       : []
 
     const listRules = extractionRules.filter((rule) => rule.page_type === 'list')
@@ -307,19 +309,19 @@ const ProjectDetail: React.FC = () => {
           {project.rule_info.callback_type === 'mixed' ? (
             <>
               <Panel header={`列表页规则 (${listRules.length})`} key="list">
-                <ResponsiveTable 
+                <ResponsiveTable
                   columns={columns}
                   dataSource={listRules}
-                  rowKey={(record: { field?: string }, idx) => record.field || `list-${idx}`}
+                  rowKey={(record, idx) => `${record.type}-${record.expr}-${idx}`}
                   pagination={false}
                   size="small"
                 />
               </Panel>
               <Panel header={`详情页规则 (${detailRules.length})`} key="detail">
-                <ResponsiveTable 
+                <ResponsiveTable
                   columns={columns}
                   dataSource={detailRules}
-                  rowKey={(record: { field?: string }, idx) => record.field || `detail-${idx}`}
+                  rowKey={(record, idx) => `${record.type}-${record.expr}-${idx}`}
                   pagination={false}
                   size="small"
                 />
@@ -327,16 +329,16 @@ const ProjectDetail: React.FC = () => {
             </>
           ) : (
             <Panel header={`提取规则 (${extractionRules.length})`} key="all">
-              <ResponsiveTable 
+              <ResponsiveTable
                 columns={columns}
                 dataSource={extractionRules}
-                rowKey={(record: { field?: string }, idx) => record.field || `rule-${idx}`}
+                rowKey={(record, idx) => `${record.type}-${record.expr}-${idx}`}
                 pagination={false}
                 size="small"
               />
             </Panel>
           )}
-          
+
           {project.rule_info.headers && (
             <Panel header="请求头配置" key="headers">
               <pre style={getCodeBlockStyle()}>
@@ -344,7 +346,7 @@ const ProjectDetail: React.FC = () => {
               </pre>
             </Panel>
           )}
-          
+
           {project.rule_info.pagination_config && (
             <Panel header="分页配置" key="pagination">
               <pre style={getCodeBlockStyle()}>
@@ -511,7 +513,7 @@ const ProjectDetail: React.FC = () => {
           </Space>
         }>
           <Descriptions column={1} bordered>
-            <Descriptions.Item label="作用域">{project.venv_scope || '-'}</Descriptions.Item>
+            <Descriptions.Item label="作用域">{project.runtime_scope || '-'}</Descriptions.Item>
             <Descriptions.Item label="Python版本">{project.python_version || '-'}</Descriptions.Item>
             <Descriptions.Item label="虚拟环境路径">
               {project.venv_path ? (
@@ -525,15 +527,15 @@ const ProjectDetail: React.FC = () => {
           </Descriptions>
         </Card>
       </div>
-      
+
       {/* 编辑抽屉 */}
       <Suspense fallback={null}>
-      <ProjectEditDrawer
-        open={editDrawerOpen}
-        onClose={() => setEditDrawerOpen(false)}
-        project={project}
-        onSuccess={handleEditSuccess}
-      />
+        <ProjectEditDrawer
+          open={editDrawerOpen}
+          onClose={() => setEditDrawerOpen(false)}
+          project={project}
+          onSuccess={handleEditSuccess}
+        />
       </Suspense>
 
       {/* 依赖管理 */}
@@ -572,7 +574,7 @@ const ProjectDetail: React.FC = () => {
         handleEditSuccess()
       }}>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Select value={venvScope} onChange={(value: string) => setVenvScope(value)} options={venvScopeOptions} />
+          <Select value={venvScope} onChange={(value) => setVenvScope(value as VenvScope)} options={venvScopeOptions} />
           <Select showSearch placeholder="选择Python版本" value={pythonVersion} onChange={(value: string) => setPythonVersion(value)} options={(versions || []).map(v => ({ value: v, label: v }))} />
           {venvScope === 'shared' && (
             <Select showSearch placeholder="选择共享标识" value={sharedKey} onChange={(value: string) => setSharedKey(value)} options={(sharedOptions || []).map(o => ({ value: o.key, label: `${o.key} (${o.version})` }))} />

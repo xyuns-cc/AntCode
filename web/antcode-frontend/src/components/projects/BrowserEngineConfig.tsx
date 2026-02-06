@@ -1,4 +1,4 @@
-import React from 'react'
+import type React from 'react'
 import { Card, Form, Switch, Input, InputNumber, Row, Col, Typography, Tooltip, Space, Divider } from 'antd'
 import { 
   SettingOutlined, 

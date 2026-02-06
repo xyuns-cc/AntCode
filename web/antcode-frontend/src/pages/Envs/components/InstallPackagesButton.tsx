@@ -1,7 +1,9 @@
-import React, { useState } from 'react'
+import type React from 'react'
+import { useState } from 'react'
 import { Button, Modal, Select } from 'antd'
 import { DownloadOutlined } from '@ant-design/icons'
 import envService from '@/services/envs'
+import { runtimeService } from '@/services/runtimes'
 import type { InstallPackagesButtonProps } from '../types'
 
 const InstallPackagesButton: React.FC<InstallPackagesButtonProps> = ({
@@ -26,10 +28,20 @@ const InstallPackagesButton: React.FC<InstallPackagesButtonProps> = ({
         }
         // 批量安装
         for (const id of selectedIds) {
-          await envService.installPackagesToVenv(id, pkgs)
+          if (id.includes('|')) {
+            const [workerId, envName] = id.split('|')
+            await runtimeService.installPackages(workerId, envName, pkgs)
+          } else {
+            await envService.installPackagesToVenv(id, pkgs)
+          }
         }
       } else {
-        await envService.installPackagesToVenv(venvId, pkgs)
+        if (venvId.includes('|')) {
+          const [workerId, envName] = venvId.split('|')
+          await runtimeService.installPackages(workerId, envName, pkgs)
+        } else {
+          await envService.installPackagesToVenv(venvId, pkgs)
+        }
       }
       setOpen(false)
       setPkgs([])

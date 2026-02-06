@@ -1,219 +1,233 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Card,
-  Space,
-  Tag,
-  Input,
-  Select,
-  Button,
-  Typography,
-  Modal,
-  List,
-  Tabs,
-  Tooltip,
-  theme,
-  Popconfirm,
-  Spin,
-  Empty,
   App,
+  Button,
+  Card,
+  Empty,
+  Input,
+  List,
+  Modal,
+  Popconfirm,
+  Select,
+  Space,
+  Spin,
+  Tabs,
+  Tag,
+  Tooltip,
+  Typography,
+  theme,
 } from 'antd'
 import {
   CloudServerOutlined,
   DesktopOutlined,
-  EyeOutlined,
-  EditOutlined,
-  DownloadOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  EditOutlined,
+  EyeOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
 import CopyableTooltip from '@/components/common/CopyableTooltip'
+import ResponsiveTable from '@/components/common/ResponsiveTable'
 import envService from '@/services/envs'
+import { runtimeService, type RuntimeEnv } from '@/services/runtimes'
+import { useWorkerStore } from '@/stores/workerStore'
 import {
-  getSourceDisplay,
   getScopeDisplay,
+  getSourceDisplay,
   interpreterSourceOptions,
 } from '@/config/displayConfig'
-import nodeService from '@/services/nodes'
-import { useNodeStore } from '@/stores/nodeStore'
-import ResponsiveTable from '@/components/common/ResponsiveTable'
-import type { Node } from '@/types'
+import type { Worker } from '@/types'
 import {
   CreateVenvDrawer,
-  InstallPackagesButton,
   EditVenvKeyModal,
+  InstallPackagesButton,
   InstallPackagesModal,
   InterpreterDrawer,
 } from './components'
 import type {
-  ExtendedVenvItem,
-  PackageModalState,
   EditModalState,
+  ExtendedVenvItem,
   InstallModalState,
   InterpreterInfo,
+  PackageModalState,
 } from './types'
 
 const { Search } = Input
 const { Text } = Typography
 
+const buildWorkerEnvId = (workerId: string, envName: string) => `${workerId}|${envName}`
+
+const toWorkerVenvItem = (worker: Worker, env: RuntimeEnv): ExtendedVenvItem => {
+  const scope = env.scope || (env.name?.startsWith('shared-') ? 'shared' : 'private')
+  return {
+    id: buildWorkerEnvId(worker.id, env.name),
+    scope,
+    key: env.name,
+    version: env.python_version,
+    venv_path: env.path,
+    interpreter_version: env.python_version,
+    interpreter_source: 'local',
+    python_bin: env.python_executable,
+    install_dir: '',
+    created_by_username: env.created_by || null,
+    created_at: env.created_at || null,
+    updated_at: null,
+    current_project_id: null,
+    packages: undefined,
+    isLocal: false,
+    workerName: worker.name,
+    workerId: worker.id,
+    envName: env.name,
+  }
+}
+
 const EnvListPage: React.FC = () => {
   const { token } = theme.useToken()
   const { message, modal } = App.useApp()
-  const { currentNode } = useNodeStore()
+  const { currentWorker, workers, refreshWorkers } = useWorkerStore()
+
   const [loading, setLoading] = useState(false)
-
-  // 节点列表
-  const [nodes, setNodes] = useState<Node[]>([])
-
-  // 所有环境数据
   const [allItems, setAllItems] = useState<ExtendedVenvItem[]>([])
 
-  // 筛选条件
   const [searchQuery, setSearchQuery] = useState('')
   const [scopeFilter, setScopeFilter] = useState<string | undefined>(undefined)
   const [interpreterSourceFilter, setInterpreterSourceFilter] = useState<string | undefined>(
     undefined
   )
-  const [nodeFilter, setNodeFilter] = useState<string | undefined>(undefined)
+  const [workerFilter, setWorkerFilter] = useState<string | undefined>(undefined)
 
-  // 分页
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
 
-  // 模态框状态
   const [pkgModal, setPkgModal] = useState<PackageModalState>({ open: false })
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [editModal, setEditModal] = useState<EditModalState>({ open: false })
   const [installModal, setInstallModal] = useState<InstallModalState>({ open: false })
 
-  // Tab 和解释器
   const [activeTab, setActiveTab] = useState<string>('venvs')
   const [installed, setInstalled] = useState<InterpreterInfo[]>([])
   const [ivLoading, setIvLoading] = useState(false)
 
-  // 加载节点列表
   useEffect(() => {
-    nodeService
-      .getAllNodes()
-      .then(setNodes)
-      .catch(() => setNodes([]))
-  }, [])
-
-  // 卸载包
-  const handleUninstallPackage = async (pkg: { name: string; version: string }) => {
-    const { venv } = pkgModal
-    if (!venv) return
-
-    try {
-      if (venv.isLocal) {
-        message.warning('本地环境卸载功能即将支持')
-        return
-      } else if (venv.nodeId && venv.envName) {
-        await envService.uninstallNodeEnvPackages(venv.nodeId, venv.envName, [pkg.name])
-        message.success(`已卸载 ${pkg.name}`)
-
-        setPkgModal({ ...pkgModal, loading: true })
-        try {
-          const pkgs = await envService.listNodeEnvPackages(venv.nodeId, venv.envName)
-          setPkgModal({ open: true, venv, packages: pkgs, loading: false })
-        } catch (error: unknown) {
-          const errMsg = error instanceof Error ? error.message : '刷新依赖列表失败'
-          message.error(errMsg)
-          setPkgModal({ ...pkgModal, loading: false })
-        }
-      }
-    } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '卸载包失败'
-      message.error(errMsg)
+    if (workers.length === 0) {
+      refreshWorkers()
     }
-  }
+  }, [workers.length, refreshWorkers])
 
-  // 加载环境数据
   const fetchAllEnvs = useCallback(async () => {
     setLoading(true)
     try {
       const allEnvs: ExtendedVenvItem[] = []
 
-      if (currentNode) {
-        try {
-          const nodeEnvs = await envService.listNodeEnvs(currentNode.id)
-          const extendedEnvs: ExtendedVenvItem[] = nodeEnvs.map(
-            (env): ExtendedVenvItem => ({
-              id: `${currentNode.id}-${env.name}`,
-              scope: 'private',
-              key: env.name,
-              version: env.python_version,
-              venv_path: env.path,
-              interpreter_version: env.python_version,
-              interpreter_source: 'local',
-              python_bin: env.python_bin,
-              install_dir: '',
-              created_at: env.created_at,
-              isLocal: false,
-              nodeName: currentNode.name,
-              nodeId: currentNode.id,
-              envName: env.name,
-            })
-          )
-          allEnvs.push(...extendedEnvs)
-        } catch (error) {
-          console.error(`加载节点 ${currentNode.name} 环境失败:`, error)
-        }
+      if (currentWorker) {
+        const envs = await runtimeService.listEnvs(currentWorker.id)
+        allEnvs.push(...envs.map((env) => toWorkerVenvItem(currentWorker, env)))
       } else {
-        // 获取本地环境
+        // 本地环境（Web API 所在机器）
         try {
           const localResponse = await envService.listVenvs({ page: 1, size: 1000 })
-          const localEnvs: ExtendedVenvItem[] = localResponse.items.map((item) => ({
-            ...item,
-            isLocal: true,
-            nodeName: '本地',
-            nodeId: undefined,
-          }))
-          allEnvs.push(...localEnvs)
-        } catch (error) {
-          console.error('加载本地环境失败:', error)
+          allEnvs.push(
+            ...localResponse.items.map((item) => ({
+              ...item,
+              isLocal: true,
+              workerName: '本地',
+              workerId: undefined,
+              envName: undefined,
+            }))
+          )
+        } catch {
+          // 本地环境失败时不阻塞 Worker 环境展示
         }
 
-        // 获取所有在线节点的环境
-        const onlineNodes = nodes.filter((n) => n.status === 'online')
-        const nodeEnvPromises = onlineNodes.map(async (node) => {
-          try {
-            const nodeEnvs = await envService.listNodeEnvs(node.id)
-            return nodeEnvs.map(
-              (env): ExtendedVenvItem => ({
-                id: `${node.id}-${env.name}`,
-                scope: 'private',
-                key: env.name,
-                version: env.python_version,
-                venv_path: env.path,
-                interpreter_version: env.python_version,
-                interpreter_source: 'local',
-                python_bin: env.python_bin,
-                install_dir: '',
-                created_at: env.created_at,
-                isLocal: false,
-                nodeName: node.name,
-                nodeId: node.id,
-                envName: env.name,
-              })
-            )
-          } catch (error) {
-            console.error(`加载节点 ${node.name} 环境失败:`, error)
-            return []
-          }
-        })
-
-        const nodeEnvsResults = await Promise.all(nodeEnvPromises)
-        nodeEnvsResults.forEach((envs) => allEnvs.push(...envs))
+        // 在线 Worker 环境
+        const onlineWorkers = workers.filter((w) => w.status === 'online')
+        const results = await Promise.all(
+          onlineWorkers.map(async (w) => {
+            try {
+              const envs = await runtimeService.listEnvs(w.id)
+              return envs.map((env) => toWorkerVenvItem(w, env))
+            } catch {
+              return []
+            }
+          })
+        )
+        results.forEach((items) => allEnvs.push(...items))
       }
 
       setAllItems(allEnvs)
-    } catch (error) {
-      console.error('加载环境列表失败:', error)
+    } catch {
       setAllItems([])
     } finally {
       setLoading(false)
     }
-  }, [nodes, currentNode])
+  }, [currentWorker, workers])
+
+  useEffect(() => {
+    fetchAllEnvs()
+  }, [fetchAllEnvs])
+
+  const refreshInterpreters = useCallback(async () => {
+    setIvLoading(true)
+    setInstalled([])
+    try {
+      if (currentWorker) {
+        const items = await runtimeService.listInterpreters(currentWorker.id)
+        setInstalled(
+          items.map((interp) => ({
+            version: interp.version,
+            python_bin: interp.python_bin || '',
+            install_dir: interp.install_dir || '',
+            source: interp.source,
+            workerName: currentWorker.name,
+            workerId: currentWorker.id,
+          }))
+        )
+      } else {
+        const all: InterpreterInfo[] = []
+        const localItems = await envService.listInterpreters()
+        all.push(
+          ...localItems.map((interp) => ({
+            version: interp.version,
+            python_bin: interp.python_bin,
+            install_dir: interp.install_dir,
+            source: interp.source,
+            workerName: '本地',
+            workerId: undefined,
+          }))
+        )
+
+        const onlineWorkers = workers.filter((w) => w.status === 'online')
+        const results = await Promise.all(
+          onlineWorkers.map(async (w) => {
+            try {
+              const items = await runtimeService.listInterpreters(w.id)
+              return items.map((interp) => ({
+                version: interp.version,
+                python_bin: interp.python_bin || '',
+                install_dir: interp.install_dir || '',
+                source: interp.source,
+                workerName: w.name,
+                workerId: w.id,
+              }))
+            } catch {
+              return []
+            }
+          })
+        )
+        results.forEach((items) => all.push(...items))
+
+        setInstalled(all)
+      }
+    } finally {
+      setIvLoading(false)
+    }
+  }, [currentWorker, workers])
+
+  useEffect(() => {
+    if (activeTab === 'interpreters') {
+      refreshInterpreters()
+    }
+  }, [activeTab, refreshInterpreters])
 
   // 筛选和分页
   const filteredAndPaginatedItems = useMemo(() => {
@@ -227,11 +241,11 @@ const EnvListPage: React.FC = () => {
       filtered = filtered.filter((item) => item.interpreter_source === interpreterSourceFilter)
     }
 
-    if (!currentNode && nodeFilter) {
-      if (nodeFilter === 'local') {
+    if (!currentWorker && workerFilter) {
+      if (workerFilter === 'local') {
         filtered = filtered.filter((item) => item.isLocal)
       } else {
-        filtered = filtered.filter((item) => item.nodeId === nodeFilter)
+        filtered = filtered.filter((item) => item.workerId === workerFilter)
       }
     }
 
@@ -242,7 +256,7 @@ const EnvListPage: React.FC = () => {
           item.venv_path?.toLowerCase().includes(lowerQuery) ||
           item.key?.toLowerCase().includes(lowerQuery) ||
           item.version?.toLowerCase().includes(lowerQuery) ||
-          item.nodeName?.toLowerCase().includes(lowerQuery)
+          item.workerName?.toLowerCase().includes(lowerQuery)
         )
       })
     }
@@ -257,27 +271,12 @@ const EnvListPage: React.FC = () => {
     allItems,
     scopeFilter,
     interpreterSourceFilter,
-    nodeFilter,
+    workerFilter,
     searchQuery,
     currentPage,
     pageSize,
-    currentNode,
+    currentWorker,
   ])
-
-  // 监听节点切换
-  useEffect(() => {
-    if (nodes.length > 0) {
-      setNodeFilter(undefined)
-      setCurrentPage(1)
-      fetchAllEnvs()
-    }
-  }, [fetchAllEnvs, nodes.length, currentNode?.id])
-
-  // 筛选变化处理
-  const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSearchQuery(e.target.value)
-    setCurrentPage(1)
-  }
 
   const handlePaginationChange = (page: number, size: number) => {
     setCurrentPage(page)
@@ -287,102 +286,58 @@ const EnvListPage: React.FC = () => {
     }
   }
 
-  // 刷新解释器
-  const refreshInterpreters = async () => {
-    setIvLoading(true)
-    setInstalled([])
+  const workerFilterOptions = useMemo(() => {
+    return [
+      { value: 'local', label: '本地' },
+      ...workers
+        .filter((w) => w.status === 'online')
+        .map((w) => ({
+          value: w.id,
+          label: w.name,
+        })),
+    ]
+  }, [workers])
+
+  const handleUninstallPackage = async (pkg: { name: string; version: string }) => {
+    const { venv } = pkgModal
+    if (!venv) return
+
     try {
-      if (currentNode) {
-        const nodeInterpreters = await envService.listNodeInterpreters(currentNode.id)
-        setInstalled(
-          nodeInterpreters.interpreters.map((interp) => ({
-            version: interp.version,
-            python_bin: interp.python_bin,
-            install_dir: interp.install_dir || '',
-            source: interp.source,
-            nodeName: currentNode.name,
-            nodeId: currentNode.id,
-          }))
-        )
-      } else {
-        const allInterpreters: InterpreterInfo[] = []
-
-        const [, localIns] = await Promise.all([
-          envService.listPythonVersions(),
-          envService.listInterpreters(),
-        ])
-        allInterpreters.push(
-          ...localIns.map((interp) => ({
-            ...interp,
-            nodeName: '本地',
-            nodeId: undefined,
-          }))
-        )
-
-        const onlineNodes = nodes.filter((n) => n.status === 'online')
-        const nodeInterpreterPromises = onlineNodes.map(async (node) => {
-          try {
-            const nodeInterpreters = await envService.listNodeInterpreters(node.id)
-            return nodeInterpreters.interpreters.map((interp) => ({
-              version: interp.version,
-              python_bin: interp.python_bin,
-              install_dir: interp.install_dir || '',
-              source: interp.source,
-              nodeName: node.name,
-              nodeId: node.id,
-            }))
-          } catch (error) {
-            console.error(`获取节点 ${node.name} 解释器失败:`, error)
-            return []
-          }
-        })
-
-        const nodeInterpretersResults = await Promise.all(nodeInterpreterPromises)
-        nodeInterpretersResults.forEach((interpreters) => allInterpreters.push(...interpreters))
-
-        setInstalled(allInterpreters)
+      if (venv.isLocal) {
+        message.warning('本地环境卸载功能暂不支持')
+        return
       }
-    } finally {
-      setIvLoading(false)
+      if (!venv.workerId || !venv.envName) return
+
+      await runtimeService.uninstallPackages(venv.workerId, venv.envName, [pkg.name])
+      message.success(`已卸载 ${pkg.name}`)
+
+      setPkgModal({ ...pkgModal, loading: true })
+      const pkgs = await runtimeService.listPackages(venv.workerId, venv.envName)
+      setPkgModal({ open: true, venv, packages: pkgs, loading: false })
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : '卸载包失败'
+      message.error(errMsg)
+      setPkgModal({ ...pkgModal, loading: false })
     }
   }
 
-  useEffect(() => {
-    if (activeTab === 'interpreters') {
-      refreshInterpreters()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, currentNode?.id, nodes.length])
-
-  // 节点筛选选项
-  const nodeFilterOptions = useMemo(() => {
-    return [
-      { value: 'local', label: '本地' },
-      ...nodes.filter((n) => n.status === 'online').map((node) => ({
-        value: node.id,
-        label: node.name,
-      })),
-    ]
-  }, [nodes])
-
-
-  // 表格列定义
   const columns = [
     {
-      title: '节点',
-      dataIndex: 'nodeName',
-      key: 'nodeName',
-      width: 130,
+      title: '位置',
+      dataIndex: 'workerName',
+      key: 'workerName',
+      width: 140,
       ellipsis: true,
       render: (_: unknown, record: ExtendedVenvItem) => {
-        const nodeName = record.nodeName || '未知'
+        const name = record.workerName || '未知'
         const icon = record.isLocal ? (
           <DesktopOutlined style={{ fontSize: 12 }} />
         ) : (
           <CloudServerOutlined style={{ fontSize: 12 }} />
         )
         return (
-          <Tooltip title={nodeName} placement="topLeft">
+          <Tooltip title={name} placement="topLeft">
             <Tag
               color={record.isLocal ? 'geekblue' : 'cyan'}
               style={{
@@ -395,7 +350,7 @@ const EnvListPage: React.FC = () => {
               }}
             >
               {icon}
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{nodeName}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</span>
             </Tag>
           </Tooltip>
         )
@@ -412,10 +367,10 @@ const EnvListPage: React.FC = () => {
       },
     },
     {
-      title: '标识',
+      title: '名称',
       dataIndex: 'key',
       key: 'key',
-      width: 130,
+      width: 180,
       ellipsis: true,
       render: (v?: string) =>
         v ? (
@@ -456,10 +411,10 @@ const EnvListPage: React.FC = () => {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 100,
-      render: (v?: string) => {
+      render: (v?: string | null) => {
         if (!v) return '-'
-        const date = v.split('T')[0]
-        const time = v.split('T')[1]?.split('.')[0] || ''
+        const date = String(v).split('T')[0]
+        const time = String(v).split('T')[1]?.split('.')[0] || ''
         return (
           <Tooltip title={`${date} ${time}`} placement="topLeft">
             <span>{date}</span>
@@ -469,10 +424,8 @@ const EnvListPage: React.FC = () => {
     },
   ]
 
-  // 操作列渲染
   const renderActions = (_: unknown, record: ExtendedVenvItem) => {
-    // 节点环境的操作
-    if (!record.isLocal && record.nodeId) {
+    if (!record.isLocal && record.workerId && record.envName) {
       return (
         <Space size="small">
           <Tooltip title="查看依赖" placement="top">
@@ -482,10 +435,7 @@ const EnvListPage: React.FC = () => {
               icon={<EyeOutlined />}
               onClick={async () => {
                 try {
-                  const pkgs = await envService.listNodeEnvPackages(
-                    record.nodeId!,
-                    record.envName || record.key || ''
-                  )
+                  const pkgs = await runtimeService.listPackages(record.workerId!, record.envName!)
                   setPkgModal({ open: true, venv: record, packages: pkgs })
                 } catch (error: unknown) {
                   const errMsg = error instanceof Error ? error.message : '获取依赖列表失败'
@@ -507,12 +457,7 @@ const EnvListPage: React.FC = () => {
               type="link"
               size="small"
               icon={<DownloadOutlined />}
-              onClick={() =>
-                setInstallModal({
-                  open: true,
-                  venvId: record.id,
-                })
-              }
+              onClick={() => setInstallModal({ open: true, venvId: record.id })}
             />
           </Tooltip>
           <Tooltip title="删除" placement="top">
@@ -523,14 +468,11 @@ const EnvListPage: React.FC = () => {
               icon={<DeleteOutlined />}
               onClick={async () => {
                 modal.confirm({
-                  title: '确认删除节点环境？',
-                  content: `将从节点 ${record.nodeName} 删除环境 ${record.key || record.envName}`,
+                  title: '确认删除 Worker 环境？',
+                  content: `将从 Worker ${record.workerName} 删除环境 ${record.envName}`,
                   onOk: async () => {
                     try {
-                      await envService.deleteNodeEnv(
-                        record.nodeId!,
-                        record.envName || record.key || ''
-                      )
+                      await runtimeService.deleteEnv(record.workerId!, record.envName!)
                       message.success('环境删除成功')
                       fetchAllEnvs()
                     } catch (error: unknown) {
@@ -546,7 +488,7 @@ const EnvListPage: React.FC = () => {
       )
     }
 
-    // 本地环境的操作
+    // 本地环境
     return (
       <Space size="small">
         <Tooltip title="查看依赖" placement="top">
@@ -555,8 +497,13 @@ const EnvListPage: React.FC = () => {
             size="small"
             icon={<EyeOutlined />}
             onClick={async () => {
-              const pkgs = await envService.listVenvPackagesById(record.id)
-              setPkgModal({ open: true, venv: record, packages: pkgs })
+              try {
+                const pkgs = await envService.listVenvPackagesById(record.id)
+                setPkgModal({ open: true, venv: record, packages: pkgs })
+              } catch (error: unknown) {
+                const errMsg = error instanceof Error ? error.message : '获取依赖列表失败'
+                message.error(errMsg)
+              }
             }}
           />
         </Tooltip>
@@ -569,11 +516,7 @@ const EnvListPage: React.FC = () => {
             size="small"
             icon={<EditOutlined />}
             disabled={record.scope !== 'shared'}
-            onClick={() => {
-              if (record.scope === 'shared') {
-                setEditModal({ open: true, venv: record })
-              }
-            }}
+            onClick={() => setEditModal({ open: true, venv: record })}
           />
         </Tooltip>
         <Tooltip title="安装依赖" placement="top">
@@ -581,12 +524,7 @@ const EnvListPage: React.FC = () => {
             type="link"
             size="small"
             icon={<DownloadOutlined />}
-            onClick={() =>
-              setInstallModal({
-                open: true,
-                venvId: record.id,
-              })
-            }
+            onClick={() => setInstallModal({ open: true, venvId: record.id })}
           />
         </Tooltip>
         <Tooltip title="删除" placement="top">
@@ -596,49 +534,20 @@ const EnvListPage: React.FC = () => {
             danger
             icon={<DeleteOutlined />}
             onClick={async () => {
-              if (record.scope === 'shared') {
-                modal.confirm({
-                  title: '确认删除共享环境？',
-                  content: '仅未被项目使用的共享环境可删除',
-                  onOk: async () => {
-                    try {
-                      await envService.deleteVenv(record.id)
-                      message.success('删除成功')
-                      fetchAllEnvs()
-                    } catch (error: unknown) {
-                      const errObj = error as {
-                        response?: { data?: { detail?: string } }
-                        message?: string
-                      }
-                      const errMsg =
-                        errObj?.response?.data?.detail || errObj?.message || '删除失败'
-                      message.error(errMsg)
-                    }
-                  },
-                })
-              } else {
-                modal.confirm({
-                  title: '确认删除私有环境？',
-                  content: record.current_project_id
-                    ? `该操作会解除项目(${record.current_project_id})的环境绑定`
-                    : '该操作将删除该私有环境',
-                  onOk: async () => {
-                    try {
-                      await envService.deleteVenv(record.id, true)
-                      message.success('删除成功')
-                      fetchAllEnvs()
-                    } catch (error: unknown) {
-                      const errObj = error as {
-                        response?: { data?: { detail?: string } }
-                        message?: string
-                      }
-                      const errMsg =
-                        errObj?.response?.data?.detail || errObj?.message || '删除失败'
-                      message.error(errMsg)
-                    }
-                  },
-                })
-              }
+              modal.confirm({
+                title: '确认删除本地环境？',
+                content: `将删除本地环境 ${record.key || record.id}`,
+                onOk: async () => {
+                  try {
+                    await envService.deleteVenv(record.id, record.scope === 'private')
+                    message.success('环境删除成功')
+                    fetchAllEnvs()
+                  } catch (error: unknown) {
+                    const errMsg = error instanceof Error ? error.message : '删除环境失败'
+                    message.error(errMsg)
+                  }
+                },
+              })
             }}
           />
         </Tooltip>
@@ -646,16 +555,14 @@ const EnvListPage: React.FC = () => {
     )
   }
 
-
-  // 解释器表格列
   const interpreterColumns = [
     {
-      title: '节点',
-      dataIndex: 'nodeName',
-      width: 120,
+      title: '位置',
+      dataIndex: 'workerName',
+      width: 140,
       ellipsis: true,
-      render: (nodeName?: string) => {
-        const displayName = nodeName || '未知'
+      render: (name?: string) => {
+        const displayName = name || '未知'
         const isLocal = displayName === '本地'
         const icon = isLocal ? (
           <DesktopOutlined style={{ fontSize: 12 }} />
@@ -685,13 +592,13 @@ const EnvListPage: React.FC = () => {
     {
       title: '版本',
       dataIndex: 'version',
-      width: 100,
+      width: 110,
       render: (v: string) => <Tag color="blue">{v}</Tag>,
     },
     {
       title: '来源',
       dataIndex: 'source',
-      width: 100,
+      width: 110,
       render: (v: string) => {
         const display = getSourceDisplay(v)
         return <Tag color={display.color}>{display.label || v}</Tag>
@@ -701,11 +608,14 @@ const EnvListPage: React.FC = () => {
       title: '可执行文件',
       dataIndex: 'python_bin',
       ellipsis: true,
-      render: (v: string) => (
-        <CopyableTooltip text={v}>
-          <span style={{ cursor: 'pointer' }}>{v}</span>
-        </CopyableTooltip>
-      ),
+      render: (v: string) =>
+        v ? (
+          <CopyableTooltip text={v}>
+            <span style={{ cursor: 'pointer' }}>{v}</span>
+          </CopyableTooltip>
+        ) : (
+          <Text type="secondary">-</Text>
+        ),
     },
     {
       title: '安装目录',
@@ -724,50 +634,57 @@ const EnvListPage: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 80,
+      width: 90,
       fixed: 'right' as const,
       render: (_: unknown, r: InterpreterInfo) => (
-        <Tooltip title={r.source === 'local' ? '删除记录' : '卸载解释器'} placement="top">
+        <Tooltip title={r.source === 'system' ? '系统解释器不可移除' : '移除'} placement="top">
           <Button
             type="link"
             danger
             size="small"
+            disabled={r.source === 'system'}
             onClick={async () => {
               modal.confirm({
-                title: r.source === 'local' ? '确认删除记录？' : '确认卸载解释器？',
-                content:
-                  r.source === 'local'
-                    ? '将从记录中移除该本地解释器'
-                    : `将卸载 mise 管理的 Python ${r.version}`,
+                title: '确认移除解释器？',
+                content: r.workerName ? `将从 ${r.workerName} 移除解释器 ${r.version}` : `移除解释器 ${r.version}`,
                 onOk: async () => {
-                  if (currentNode) {
-                    if (r.source === 'system') {
-                      message.warning('系统解释器不可卸载')
-                      return
+                  try {
+                    if (r.workerId) {
+                      const mode = r.source === 'local' ? 'unregister' : 'uninstall'
+                      await runtimeService.removeInterpreter(r.workerId, {
+                        version: r.version,
+                        python_bin: r.python_bin,
+                        mode,
+                      })
+                    } else {
+                      await envService.uninstallInterpreter(r.version, r.source || 'mise')
                     }
-                    await envService.unregisterNodeInterpreter(
-                      currentNode.id,
-                      r.version,
-                      r.source || 'local'
-                    )
-                  } else {
-                    await envService.uninstallInterpreter(r.version, r.source || 'mise')
+                    refreshInterpreters()
+                  } catch (error: unknown) {
+                    const errMsg = error instanceof Error ? error.message : '移除失败'
+                    message.error(errMsg)
                   }
-                  refreshInterpreters()
                 },
               })
             }}
           >
-            {r.source === 'local' ? '删除' : '卸载'}
+            移除
           </Button>
         </Tooltip>
       ),
     },
   ]
 
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
+    getCheckboxProps: (record: ExtendedVenvItem) => ({
+      disabled: !record.isLocal || record.scope !== 'shared',
+    }),
+  }
+
   return (
     <div style={{ padding: '24px' }}>
-      {/* 页面头部 */}
       <div
         style={{
           display: 'flex',
@@ -790,19 +707,18 @@ const EnvListPage: React.FC = () => {
             }}
           >
             <CloudServerOutlined style={{ color: token.colorPrimary }} />
-            环境管理
+            运行时管理
           </h1>
-          {currentNode && (
+          {currentWorker && (
             <Tag color="cyan" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
               <CloudServerOutlined style={{ fontSize: 12 }} />
-              <span>{currentNode.name}</span>
+              <span>{currentWorker.name}</span>
             </Tag>
           )}
         </Space>
       </div>
 
       <Card>
-        {/* 工具栏 */}
         <div
           style={{
             display: 'flex',
@@ -824,7 +740,8 @@ const EnvListPage: React.FC = () => {
             >
               刷新
             </Button>
-            {activeTab === 'venvs' && (
+
+            {activeTab === 'venvs' && !currentWorker && (
               <>
                 <CreateVenvDrawer onCreated={fetchAllEnvs} />
                 <Button
@@ -854,29 +771,29 @@ const EnvListPage: React.FC = () => {
                 />
               </>
             )}
+
             {activeTab === 'interpreters' && (
-              <InterpreterDrawer
-                onAdded={refreshInterpreters}
-                currentNode={currentNode || undefined}
-              />
+              <InterpreterDrawer onAdded={refreshInterpreters} currentWorker={currentWorker} />
             )}
           </Space>
+
           {activeTab === 'venvs' && (
             <Space wrap size="small">
-              {!currentNode && (
+              {!currentWorker && (
                 <Select
                   allowClear
-                  placeholder="节点"
-                  style={{ width: 120 }}
-                  value={nodeFilter}
+                  placeholder="Worker"
+                  style={{ width: 160 }}
+                  value={workerFilter}
                   onChange={(v) => {
-                    setNodeFilter(v)
+                    setWorkerFilter(v)
                     setCurrentPage(1)
                   }}
-                  options={nodeFilterOptions}
+                  options={workerFilterOptions}
                   size="small"
                 />
               )}
+
               <Select
                 allowClear
                 placeholder="作用域"
@@ -892,6 +809,7 @@ const EnvListPage: React.FC = () => {
                 ]}
                 size="small"
               />
+
               <Select
                 allowClear
                 placeholder="解释器来源"
@@ -907,23 +825,23 @@ const EnvListPage: React.FC = () => {
                 }))}
                 size="small"
               />
+
               <Search
-                placeholder={currentNode ? '搜索路径/标识/版本' : '搜索路径/标识/版本/节点'}
+                placeholder={currentWorker ? '搜索路径/名称/版本' : '搜索路径/名称/版本/位置'}
                 value={searchQuery}
-                onChange={handleSearchInput}
-                onSearch={(v) => {
-                  setSearchQuery(v)
+                onChange={(e) => {
+                  setSearchQuery(e.target.value)
                   setCurrentPage(1)
                 }}
+                onSearch={() => setCurrentPage(1)}
                 allowClear
-                style={{ width: 200 }}
+                style={{ width: 220 }}
                 size="small"
               />
             </Space>
           )}
         </div>
 
-        {/* Tabs */}
         <Tabs
           activeKey={activeTab}
           onChange={setActiveTab}
@@ -931,25 +849,25 @@ const EnvListPage: React.FC = () => {
           items={[
             {
               key: 'venvs',
-              label: '虚拟环境',
+              label: '环境',
               children: (
                 <ResponsiveTable
                   rowKey="id"
                   loading={loading}
-                  rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+                  rowSelection={activeTab === 'venvs' ? rowSelection : undefined}
                   columns={[
                     ...columns,
                     {
                       title: '操作',
                       key: 'actions',
-                      width: 160,
+                      width: 180,
                       fixed: 'right' as const,
                       render: renderActions,
                     },
                   ]}
                   dataSource={filteredAndPaginatedItems.data}
-                  minWidth={1000}
-                  fixedActions={true}
+                  minWidth={1050}
+                  fixedActions
                   pagination={{
                     current: currentPage,
                     pageSize: pageSize,
@@ -958,8 +876,7 @@ const EnvListPage: React.FC = () => {
                     onShowSizeChange: (_, size) => handlePaginationChange(1, size),
                     showSizeChanger: true,
                     showQuickJumper: true,
-                    showTotal: (total, range) =>
-                      `第 ${range[0]}-${range[1]} 条，共 ${total} 条记录`,
+                    showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条记录`,
                     pageSizeOptions: ['10', '20', '50', '100'],
                   }}
                   size="middle"
@@ -971,12 +888,14 @@ const EnvListPage: React.FC = () => {
               label: '解释器',
               children: (
                 <ResponsiveTable
-                  rowKey={(r) => `${r.version || ''}-${r.python_bin || ''}-${r.nodeId || 'local'}`}
+                  rowKey={(r: InterpreterInfo) =>
+                    `${r.version || ''}-${r.python_bin || ''}-${r.workerId || 'local'}`
+                  }
                   loading={ivLoading}
                   columns={interpreterColumns}
                   dataSource={installed}
-                  minWidth={800}
-                  fixedActions={true}
+                  minWidth={900}
+                  fixedActions
                   pagination={false}
                   size="middle"
                 />
@@ -986,7 +905,6 @@ const EnvListPage: React.FC = () => {
         />
       </Card>
 
-      {/* 依赖列表 Modal */}
       <Modal
         open={pkgModal.open}
         onCancel={() => setPkgModal({ open: false })}
@@ -995,22 +913,6 @@ const EnvListPage: React.FC = () => {
           <Button key="close" onClick={() => setPkgModal({ open: false })}>
             关闭
           </Button>,
-          !pkgModal.venv?.isLocal && (
-            <Button
-              key="install"
-              type="primary"
-              icon={<DownloadOutlined />}
-              onClick={() => {
-                setPkgModal({ open: false })
-                setInstallModal({
-                  open: true,
-                  venvId: typeof pkgModal.venv?.id === 'number' ? pkgModal.venv.id : undefined,
-                })
-              }}
-            >
-              安装包
-            </Button>
-          ),
         ]}
         width={700}
       >
@@ -1039,19 +941,22 @@ const EnvListPage: React.FC = () => {
                   }
                 >
                   <List.Item.Meta
-                    title={<strong>{item.name}</strong>}
-                    description={`版本: ${item.version}`}
+                    title={
+                      <Space>
+                        <Text strong>{item.name}</Text>
+                        <Tag>{item.version}</Tag>
+                      </Space>
+                    }
                   />
                 </List.Item>
               )}
             />
           ) : (
-            <Empty description="暂无已安装的包" />
+            <Empty description="暂无依赖包" />
           )}
         </Spin>
       </Modal>
 
-      {/* 编辑标识 Modal */}
       <EditVenvKeyModal
         open={editModal.open}
         venv={editModal.venv}
@@ -1062,7 +967,6 @@ const EnvListPage: React.FC = () => {
         }}
       />
 
-      {/* 安装依赖 Modal */}
       <InstallPackagesModal
         open={installModal.open}
         venvId={installModal.venvId}

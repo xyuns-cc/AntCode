@@ -24,6 +24,7 @@ import {
   BulbOutlined
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd'
+import type { RcFile } from 'antd/es/upload/interface'
 import { getLanguageOptionsWithIcons, getLanguageConfig } from '@/components/ui/CodeEditor/languages'
 import { FileIcon } from '@/utils/fileIcons'
 import type { ProjectCreateRequest } from '@/types'
@@ -178,7 +179,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
     name: 'code_file',
     multiple: false,
     fileList: state.fileList,
-    beforeUpload: (file: File) => {
+    beforeUpload: (file: RcFile) => {
       const allowedTypes = ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rs']
       const fileName = file.name.toLowerCase()
       const isAllowed = allowedTypes.some(type => fileName.endsWith(type))
@@ -187,7 +188,13 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
         return Upload.LIST_IGNORE
       }
 
-      dispatch({ type: 'SET_FILE_LIST', payload: [file] })
+      const uploadFile: UploadFile = {
+        uid: file.uid,
+        name: file.name,
+        status: 'done',
+        originFileObj: file
+      }
+      dispatch({ type: 'SET_FILE_LIST', payload: [uploadFile] })
       const updatedData = { ...form.getFieldsValue(), code_file: file }
       onDataChange?.(updatedData)
 
@@ -287,7 +294,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && isFullscreen) {
-        setIsFullscreen(false)
+        dispatch({ type: 'TOGGLE_FULLSCREEN' })
       }
     }
 
@@ -324,7 +331,12 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
         dependencies,
         code_content: inputMethod === 'editor' ? codeContent : undefined,
         code_file: inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined,
-        tags: values.tags?.split(',').map((tag: string) => tag.trim()).filter(Boolean) || []
+        tags: Array.isArray(values.tags)
+          ? values.tags
+          : (values.tags || '')
+              .split(',')
+              .map((tag: string) => tag.trim())
+              .filter(Boolean)
       }
       onSubmit(submitData)
     }

@@ -1,63 +1,68 @@
 /* eslint-disable react-refresh/only-export-components */
-import React, { lazy, Suspense, ComponentType } from 'react'
+import React, { lazy, Suspense, type ComponentType } from 'react'
 import { Spin } from 'antd'
 import { LoadingOutlined } from '@ant-design/icons'
 
 // 全局加载组件
 const PageLoading: React.FC = () => (
-  <div style={{
-    height: '100vh',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center'
-  }}>
-    <Spin 
-      indicator={<LoadingOutlined style={{ fontSize: 24 }} spin />} 
-      tip="加载中..."
-    >
-      <div style={{ width: '200px', height: '100px' }} />
+  <div
+    style={{
+      height: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    }}
+  >
+    <Spin indicator={<LoadingOutlined style={{ fontSize: 24 }} spin />} tip="加载中...">
+      <div style={{ width: 200, height: 100 }} />
     </Spin>
   </div>
 )
 
 // 组件级加载
 const ComponentLoading: React.FC = () => (
-  <div style={{
-    padding: '20px',
-    textAlign: 'center'
-  }}>
+  <div
+    style={{
+      padding: 20,
+      textAlign: 'center'
+    }}
+  >
     <Spin />
   </div>
 )
 
 // 懒加载包装器
-export function lazyLoad<Props extends object>(
-  importFunc: () => Promise<{ default: ComponentType<Props> }>,
+export function lazyLoad<P extends object>(
+  importFunc: () => Promise<{ default: ComponentType<P> }>,
   fallback?: React.ReactNode
-): React.FC<Props> {
-  const LazyComponent = lazy(importFunc)
+): React.FC<P> {
+  const LazyComponent = lazy(importFunc) as unknown as ComponentType<P>
 
-  return (props: Props) => (
+  const Wrapped: React.FC<P> = (props) => (
     <Suspense fallback={fallback || <PageLoading />}>
       <LazyComponent {...props} />
     </Suspense>
   )
+
+  return Wrapped
 }
 
 // 带错误边界的懒加载
-export function lazyLoadWithErrorBoundary<Props extends object>(
-  importFunc: () => Promise<{ default: ComponentType<Props> }>,
+export function lazyLoadWithErrorBoundary<P extends object>(
+  importFunc: () => Promise<{ default: ComponentType<P> }>,
   fallback?: React.ReactNode
-): React.FC<Props> {
-  const LazyComponent = lazy(importFunc)
+): React.FC<P> {
+  const LazyComponent = lazy(importFunc) as unknown as ComponentType<P>
 
-  return (props: Props) => (
+  const Wrapped: React.FC<P> = (props) => (
     <ErrorBoundary>
       <Suspense fallback={fallback || <PageLoading />}>
         <LazyComponent {...props} />
       </Suspense>
     </ErrorBoundary>
   )
+
+  return Wrapped
 }
 
 // 预加载函数
@@ -88,7 +93,7 @@ class ErrorBoundary extends React.Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div style={{ padding: '20px', textAlign: 'center' }}>
+        <div style={{ padding: 20, textAlign: 'center' }}>
           <h3>组件加载失败</h3>
           <p>请刷新页面重试</p>
         </div>

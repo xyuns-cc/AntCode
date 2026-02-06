@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Button,
   Space,
@@ -136,6 +136,7 @@ const FileViewer: React.FC<FileViewerProps> = ({
   const [copied, setCopied] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [draftContent, setDraftContent] = useState('')
+  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const canEdit = Boolean(
     fileData?.is_text &&
@@ -156,7 +157,20 @@ const FileViewer: React.FC<FileViewerProps> = ({
     setIsEditing(false)
     setDraftContent(typeof fileData?.content === 'string' ? fileData.content : '')
     setCopied(false)
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current)
+      copyTimeoutRef.current = null
+    }
   }, [filePath, fileData?.content])
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current)
+        copyTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   // 复制内容到剪贴板
   const handleCopy = useCallback(async () => {
@@ -167,7 +181,10 @@ const FileViewer: React.FC<FileViewerProps> = ({
       await navigator.clipboard.writeText(textToCopy)
       setCopied(true)
       showNotification('success', '内容已复制到剪贴板')
-      setTimeout(() => setCopied(false), 2000)
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current)
+      }
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000)
     } catch {
       showNotification('error', '复制失败')
     }

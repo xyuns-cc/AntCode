@@ -1,4 +1,5 @@
-import React, { useState, useEffect, memo, useCallback } from 'react'
+import type React from 'react'
+import { useState, useEffect, memo, useCallback } from 'react'
 import { Layout as AntLayout, Menu, Avatar, Dropdown, Button, Badge, Flex, Typography, theme } from 'antd'
 import {
   MenuFoldOutlined,
@@ -16,14 +17,15 @@ import {
   GithubOutlined,
   CodeOutlined,
   ClusterOutlined,
-  FileTextOutlined
+  FileTextOutlined,
+  DatabaseOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useLocation, Outlet } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
-import { APP_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT } from '@/config/app'
 import ThemeToggle from '@/components/common/ThemeToggle'
 import DynamicIcon from '@/components/common/DynamicIcon'
-import NodeSelector from '@/components/common/NodeSelector'
+import { useBrandingStore } from '@/stores/brandingStore'
+import WorkerSelector from '@/components/common/WorkerSelector'
 import type { MenuItem } from '@/types'
 import styles from './Layout.module.css'
 
@@ -34,16 +36,18 @@ const Layout: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuth()
+  const branding = useBrandingStore((state) => state.branding)
   const { token } = theme.useToken()
   const [collapsed, setCollapsed] = useState(false)
   const [currentTime, setCurrentTime] = useState(new Date())
 
   const menuItems: MenuItem[] = [
     { key: '/dashboard', label: '仪表板', icon: <DashboardOutlined />, path: '/dashboard' },
-    { key: '/nodes', label: '节点管理', icon: <ClusterOutlined />, path: '/nodes', hidden: !user?.is_admin },
+    { key: '/workers', label: 'Worker 管理', icon: <ClusterOutlined />, path: '/workers', hidden: !user?.is_admin },
     { key: '/envs', label: '环境管理', icon: <CodeOutlined />, path: '/envs' },
     { key: '/projects', label: '项目管理', icon: <ProjectOutlined />, path: '/projects' },
     { key: '/tasks', label: '任务管理', icon: <PlayCircleOutlined />, path: '/tasks' },
+    { key: '/cookies', label: 'Cookie 账号池', icon: <DatabaseOutlined />, path: '/cookies', hidden: !user?.is_admin },
     { key: '/user-management', label: '用户管理', icon: <TeamOutlined />, path: '/user-management', hidden: !user?.is_admin },
     { key: '/alert-config', label: '告警配置', icon: <BellOutlined />, path: '/alert-config', hidden: !user?.is_admin },
     { key: '/audit-log', label: '审计日志', icon: <FileTextOutlined />, path: '/audit-log', hidden: !user?.is_admin },
@@ -77,16 +81,26 @@ const Layout: React.FC = () => {
 
   return (
     <AntLayout className={styles.layout}>
-      <Sider trigger={null} collapsible collapsed={collapsed} className={styles.sider} width={260} collapsedWidth={80}>
+      <Sider trigger={null} collapsible collapsed={collapsed} className={styles.sider} width={200} collapsedWidth={64}>
         <Flex align="center" justify="center" className={styles.logo}>
           {collapsed ? (
-            <div className={styles.logoCollapsed}>{APP_LOGO_SHORT}</div>
+            <div className={`${styles.logoCollapsed} ${branding.logoUrl ? styles.logoCollapsedImage : ''}`}>
+              {branding.logoUrl ? (
+                <img src={branding.logoUrl} alt={branding.brandName} className={styles.logoImageCollapsed} />
+              ) : (
+                <DynamicIcon name={branding.logoIcon} className={styles.logoCollapsedIcon} />
+              )}
+            </div>
           ) : (
             <Flex align="center" gap={8} className={styles.logoFull}>
-              <div className={styles.logoIcon}>
-                <DynamicIcon name={APP_LOGO_ICON} style={{ fontSize: 24 }} />
+              <div className={`${styles.logoIcon} ${branding.logoUrl ? styles.logoIconImage : ''}`}>
+                {branding.logoUrl ? (
+                  <img src={branding.logoUrl} alt={branding.brandName} className={styles.logoImage} />
+                ) : (
+                  <DynamicIcon name={branding.logoIcon} style={{ fontSize: 24 }} />
+                )}
               </div>
-              <span className={styles.logoText}>{APP_TITLE}</span>
+              <span className={styles.logoText}>{branding.logoText}</span>
             </Flex>
           )}
         </Flex>
@@ -105,7 +119,7 @@ const Layout: React.FC = () => {
           <Flex align="center" justify="space-between" style={{ height: '100%' }}>
             <Flex align="center" gap={16}>
               <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(!collapsed)} className={styles.trigger} />
-              {user?.is_admin && <NodeSelector />}
+              <WorkerSelector className={styles.workerSelector} />
             </Flex>
             <Flex align="center" gap={12}>
               <ThemeToggle />
@@ -132,7 +146,7 @@ const Layout: React.FC = () => {
           <Flex align="center" justify="space-between" wrap="wrap" gap={8}>
             <Flex align="center" gap={8}>
               <CopyrightOutlined style={{ color: token.colorTextSecondary }} />
-              <Text type="secondary" style={{ fontSize: 12 }}>2025 {APP_TITLE}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>2025 {branding.appTitle}</Text>
               <span style={{ color: token.colorBorderSecondary }}>|</span>
               <a href="https://github.com/xyuns-cc/AntCode" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>
                 <GithubOutlined /><span>GitHub</span>

@@ -1,4 +1,5 @@
-import React, { useState, memo } from 'react'
+import type React from 'react'
+import { useState, memo } from 'react'
 import { Card, Tabs, Form, Input, Button, Alert } from 'antd'
 import { 
   UserOutlined, 

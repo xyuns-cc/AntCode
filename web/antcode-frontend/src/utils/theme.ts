@@ -134,7 +134,7 @@ export function applyTheme(mode: ThemeMode): void {
 }
 
 // 初始化主题
-export function initTheme(): void {
+export function initTheme(): (() => void) | undefined {
   const theme = getCurrentTheme()
   applyTheme(theme)
   
@@ -146,6 +146,8 @@ export function initTheme(): void {
     
     return () => mediaQuery.removeEventListener('change', handleChange)
   }
+
+  return undefined
 }
 
 // 切换主题

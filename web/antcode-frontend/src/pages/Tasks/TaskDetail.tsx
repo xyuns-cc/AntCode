@@ -22,7 +22,6 @@ import {
   ReloadOutlined,
   EyeOutlined,
   CloudServerOutlined,
-  DesktopOutlined,
   RedoOutlined,
   HistoryOutlined,
   StopOutlined
@@ -406,8 +405,8 @@ const TaskDetail: React.FC = () => {
                             return (
                               <Space>
                                 <CloudServerOutlined style={{ color: '#1890ff' }} />
-                                <span>{task.specified_node_name || task.specified_node_id}</span>
-                                <Tag color="cyan">指定节点</Tag>
+                                <span>{task.specified_worker_name || task.specified_worker_id}</span>
+                                <Tag color="cyan">指定 Worker</Tag>
                               </Space>
                             )
                           }
@@ -416,8 +415,8 @@ const TaskDetail: React.FC = () => {
                             return (
                               <Space>
                                 <CloudServerOutlined style={{ color: '#1890ff' }} />
-                                <span>{task.project_bound_node_name || task.project_bound_node_id || '未绑定节点'}</span>
-                                <Tag color="blue">绑定节点</Tag>
+                                <span>{task.project_bound_worker_name || task.project_bound_worker_id || '未绑定 Worker'}</span>
+                                <Tag color="blue">绑定 Worker</Tag>
                               </Space>
                             )
                           }
@@ -434,9 +433,9 @@ const TaskDetail: React.FC = () => {
 
                           return (
                             <Space>
-                              <DesktopOutlined style={{ color: '#52c41a' }} />
-                              <span>本地执行</span>
-                              <Tag color="green">本地</Tag>
+                              <CloudServerOutlined style={{ color: '#52c41a' }} />
+                              <span>自动选择</span>
+                              <Tag color="green">自动</Tag>
                             </Space>
                           )
                         })()}
@@ -471,27 +470,33 @@ const TaskDetail: React.FC = () => {
                       <Col span={12}>
                         <Statistic
                           title="成功次数"
-                          value={task.success_count}
+                          value={task.success_count ?? 0}
                           valueStyle={{ color: token.colorSuccess }}
                         />
                       </Col>
                       <Col span={12}>
                         <Statistic
                           title="失败次数"
-                          value={task.failure_count}
+                          value={task.failure_count ?? 0}
                           valueStyle={{ color: token.colorError }}
                         />
                       </Col>
                       <Col span={24}>
                         <Card title="成功率" size="small">
+                          {(() => {
+                            const success = task.success_count ?? 0
+                            const failed = task.failure_count ?? 0
+                            const totalRuns = success + failed
+                            const percent =
+                              totalRuns > 0 ? Math.round((success / totalRuns) * 100) : 0
+                            const status = failed > success ? 'exception' : 'success'
+                            return (
                           <Progress
-                            percent={
-                              task.success_count + task.failure_count > 0
-                                ? Math.round((task.success_count / (task.success_count + task.failure_count)) * 100)
-                                : 0
-                            }
-                            status={task.failure_count > task.success_count ? 'exception' : 'success'}
+                            percent={percent}
+                            status={status}
                           />
+                            )
+                          })()}
                         </Card>
                       </Col>
                       {retryStats && retryStats.total_retries > 0 && (

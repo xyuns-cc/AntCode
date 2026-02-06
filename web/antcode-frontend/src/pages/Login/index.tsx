@@ -1,13 +1,15 @@
-import React, { useEffect } from 'react'
+import type React from 'react'
+import { useEffect } from 'react'
 import { Form, Input, Button, Card, Checkbox, ConfigProvider } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { AuthHandler } from '@/utils/authHandler'
-import { APP_TITLE, STORAGE_KEYS } from '@/utils/constants'
+import { STORAGE_KEYS } from '@/utils/constants'
 import { validationRules } from '@/utils/validators'
 import Logger from '@/utils/logger'
 import SecureStorage from '@/utils/crypto'
+import { useBrandingStore } from '@/stores/brandingStore'
 import type { LoginRequest } from '@/types'
 import styles from './Login.module.css'
 
@@ -32,33 +34,36 @@ const loginTheme = {
 const Login: React.FC = () => {
   const navigate = useNavigate()
   const { login, loading, isAuthenticated } = useAuth()
+  const branding = useBrandingStore((state) => state.branding)
   const [form] = Form.useForm()
 
   useEffect(() => {
     if (isAuthenticated) {
       navigate(AuthHandler.getRedirectPath(), { replace: true })
-      return
+      return undefined
     }
 
     // 读取并自动填充记住的凭据
     const rememberMe = localStorage.getItem(STORAGE_KEYS.REMEMBER_ME) === 'true'
-    if (rememberMe) {
-      const username = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || ''
-      const password = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_PASSWORD) || ''
-      
-      const setFormValues = () => {
-        form.setFieldsValue({ username, password, remember: true })
-      }
-
-      setFormValues()
-      
-      // 延迟设置以覆盖浏览器自动填充
-      const timeouts = [50, 200, 500].map(delay => 
-        setTimeout(setFormValues, delay)
-      )
-      
-      return () => timeouts.forEach(clearTimeout)
+    if (!rememberMe) {
+      return undefined
     }
+
+    const username = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || ''
+    const password = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_PASSWORD) || ''
+    
+    const setFormValues = () => {
+      form.setFieldsValue({ username, password, remember: true })
+    }
+
+    setFormValues()
+    
+    // 延迟设置以覆盖浏览器自动填充
+    const timeouts = [50, 200, 500].map(delay => 
+      setTimeout(setFormValues, delay)
+    )
+    
+    return () => timeouts.forEach(clearTimeout)
   }, [isAuthenticated, navigate, form])
 
   const handleSubmit = async (values: LoginRequest & { remember: boolean }) => {
@@ -86,9 +91,15 @@ const Login: React.FC = () => {
       <div className={styles.loginBox}>
         <div className={styles.header}>
           <div className={styles.logo}>
-            <div className={styles.logoIcon}>A</div>
+            <div className={styles.logoIcon}>
+              {branding.logoUrl ? (
+                <img src={branding.logoUrl} alt={branding.brandName} className={styles.logoImage} />
+              ) : (
+                branding.logoShort
+              )}
+            </div>
           </div>
-          <h1 className={styles.title}>{APP_TITLE}</h1>
+          <h1 className={styles.title}>{branding.appTitle}</h1>
           <p className={styles.subtitle}>欢迎回来，请登录您的账户</p>
         </div>
 
@@ -120,7 +131,7 @@ const Login: React.FC = () => {
         </Card>
 
         <div className={styles.footer}>
-          <p>&copy; 2025 {APP_TITLE}. All rights reserved.</p>
+          <p>&copy; 2025 {branding.appTitle}. All rights reserved.</p>
         </div>
       </div>
     </div>

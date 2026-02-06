@@ -243,12 +243,10 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
         <Button
           icon={<ClearOutlined />}
           onClick={clearAllFilters}
-          size="small"
         >
           清除过滤器
         </Button>
       }
-      size="small"
     >
       <Space direction="vertical" style={{ width: '100%' }}>
         {/* 基础搜索 - 调整为两行布局以给选择器更多空间 */}
@@ -260,7 +258,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
               onChange={(e) => updateFilter({ searchText: e.target.value })}
               onSearch={(value) => updateFilter({ searchText: value })}
               allowClear
-              size="small"
             />
           </Col>
         </Row>
@@ -271,18 +268,16 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
               placeholder="选择日志类型"
               value={filter.logTypes}
               onChange={(value) => updateFilter({ logTypes: value })}
-              size="small"
               style={{ width: '100%' }}
               tagRender={(props) => {
                 const value = props.value as string
-                if (!value) return null
+                if (!value) return <span />
                 const typeInfo = getTypeInfo(value)
                 return (
                   <Tag
                     color={typeInfo.color}
                     closable={props.closable}
                     onClose={props.onClose}
-                    size="small"
                     style={{ margin: '2px' }}
                   >
                     {typeInfo.text}
@@ -295,7 +290,7 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                 const typeInfo = getTypeInfo(type)
                 return (
                   <Option key={type} value={type} label={typeInfo.text}>
-                    <Tag color={typeInfo.color} size="small">
+                    <Tag color={typeInfo.color}>
                       {typeInfo.text}
                     </Tag>
                   </Option>
@@ -309,17 +304,15 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
               placeholder="选择日志级别"
               value={filter.levels}
               onChange={(value) => updateFilter({ levels: value })}
-              size="small"
               style={{ width: '100%' }}
               tagRender={(props) => {
                 const value = props.value as string
-                if (!value) return null
+                if (!value) return <span />
                 return (
                   <Tag
                     color={getLevelColor(value)}
                     closable={props.closable}
                     onClose={props.onClose}
-                    size="small"
                     style={{ margin: '2px' }}
                   >
                     {value}
@@ -329,19 +322,19 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
               optionLabelProp="label"
             >
               <Option value="DEBUG" label="DEBUG">
-                <Tag color="default" size="small">DEBUG</Tag>
+                <Tag color="default">DEBUG</Tag>
               </Option>
               <Option value="INFO" label="INFO">
-                <Tag color="blue" size="small">INFO</Tag>
+                <Tag color="blue">INFO</Tag>
               </Option>
               <Option value="WARNING" label="WARNING">
-                <Tag color="orange" size="small">WARNING</Tag>
+                <Tag color="orange">WARNING</Tag>
               </Option>
               <Option value="ERROR" label="ERROR">
-                <Tag color="red" size="small">ERROR</Tag>
+                <Tag color="red">ERROR</Tag>
               </Option>
               <Option value="CRITICAL" label="CRITICAL">
-                <Tag color="magenta" size="small">CRITICAL</Tag>
+                <Tag color="magenta">CRITICAL</Tag>
               </Option>
             </Select>
           </Col>
@@ -351,7 +344,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
               placeholder="选择日志源"
               value={filter.sources}
               onChange={(value) => updateFilter({ sources: value })}
-              size="small"
               style={{ width: '100%' }}
             >
               {availableOptions.sources.map(source => (
@@ -366,7 +358,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
         {/* 高级选项 */}
         {showAdvanced && (
           <Collapse 
-            size="small"
             items={[
               {
                 key: 'advanced',
@@ -380,7 +371,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                           <Switch
                             checked={filter.caseSensitive}
                             onChange={(checked) => updateFilter({ caseSensitive: checked })}
-                            size="small"
                           />
                         </Space>
                       </Col>
@@ -390,7 +380,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                           <Switch
                             checked={filter.useRegex}
                             onChange={(checked) => updateFilter({ useRegex: checked })}
-                            size="small"
                           />
                         </Space>
                       </Col>
@@ -417,7 +406,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                           showTime
                           value={filter.timeRange}
                           onChange={(dates) => updateFilter({ timeRange: dates as [Dayjs, Dayjs] })}
-                          size="small"
                           style={{ width: '100%', marginLeft: 8 }}
                         />
                       </Col>
@@ -429,7 +417,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                               type={filter.showTimestamp ? 'primary' : 'default'}
                               icon={filter.showTimestamp ? <EyeOutlined /> : <EyeInvisibleOutlined />}
                               onClick={() => updateFilter({ showTimestamp: !filter.showTimestamp })}
-                              size="small"
                             >
                               时间
                             </Button>
@@ -439,7 +426,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                               type={filter.showLevel ? 'primary' : 'default'}
                               icon={filter.showLevel ? <EyeOutlined /> : <EyeInvisibleOutlined />}
                               onClick={() => updateFilter({ showLevel: !filter.showLevel })}
-                              size="small"
                             >
                               级别
                             </Button>
@@ -449,7 +435,6 @@ const LogSearchFilter: React.FC<LogSearchFilterProps> = ({
                               type={filter.showSource ? 'primary' : 'default'}
                               icon={filter.showSource ? <EyeOutlined /> : <EyeInvisibleOutlined />}
                               onClick={() => updateFilter({ showSource: !filter.showSource })}
-                              size="small"
                             >
                               来源
                             </Button>

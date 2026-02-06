@@ -1,4 +1,5 @@
 import showNotification from '@/utils/notification'
+import Logger from '@/utils/logger'
 import { logService } from '@/services/logs'
 import type { LogEntry, LogFileResponse } from '@/services/logs'
 
@@ -49,7 +50,7 @@ export class LogExporter {
       })
 
       if (logData.length === 0) {
-      showNotification('warning', '没有日志内容可导出')
+        showNotification('warning', '没有日志内容可导出')
         return
       }
 
@@ -77,7 +78,7 @@ export class LogExporter {
       showNotification('success', `日志已导出为 ${format.toUpperCase()} 格式`)
 
     } catch (error) {
-      console.error('导出日志失败:', error)
+      Logger.error('导出日志失败:', error)
       showNotification('error', '导出日志失败: ' + (error instanceof Error ? error.message : String(error)))
     }
   }
@@ -90,7 +91,7 @@ export class LogExporter {
       })
 
       if (!response.success || response.data.items.length === 0) {
-      showNotification('warning', '没有日志条目可导出')
+        showNotification('warning', '没有日志条目可导出')
         return
       }
 
@@ -119,7 +120,7 @@ export class LogExporter {
       showNotification('success', `日志条目已导出为 ${format.toUpperCase()} 格式`)
 
     } catch (error) {
-      console.error('导出日志条目失败:', error)
+      Logger.error('导出日志条目失败:', error)
       showNotification('error', '导出日志条目失败: ' + (error instanceof Error ? error.message : String(error)))
     }
   }

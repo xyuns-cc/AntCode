@@ -21,12 +21,14 @@ export interface ErrorContext {
 }
 
 // 错误级别
-export enum ErrorLevel {
-  INFO = 'info',
-  WARNING = 'warning',
-  ERROR = 'error',
-  CRITICAL = 'critical'
-}
+export const ErrorLevel = {
+  INFO: 'info',
+  WARNING: 'warning',
+  ERROR: 'error',
+  CRITICAL: 'critical'
+} as const
+
+export type ErrorLevel = (typeof ErrorLevel)[keyof typeof ErrorLevel]
 
 // 错误处理配置
 interface ErrorHandlerConfig {

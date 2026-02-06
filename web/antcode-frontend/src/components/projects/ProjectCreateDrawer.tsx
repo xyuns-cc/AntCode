@@ -1,4 +1,5 @@
-import React, { useEffect, useState, memo } from 'react'
+import type React from 'react'
+import { useEffect, useState, memo } from 'react'
 import {
   Drawer,
   Steps,
@@ -18,12 +19,12 @@ import ProjectTypeSelector from './ProjectTypeSelector'
 import FileProjectForm from './FileProjectForm'
 import RuleProjectForm from './RuleProjectForm'
 import CodeProjectForm from './CodeProjectForm'
-import RegionNodeSelector from './RegionNodeSelector'
-import EnvSelector from '@/components/envs/EnvSelector'
-import type { EnvironmentConfig } from '@/components/envs/EnvSelector'
+import RegionWorkerSelector from './RegionWorkerSelector'
+import EnvSelector from '@/components/runtimes/EnvSelector'
+import type { EnvironmentConfig } from '@/components/runtimes/EnvSelector'
 import { projectService } from '@/services/projects'
-import nodeService from '@/services/nodes'
-import type { ProjectType, ProjectCreateRequest, Node, Project } from '@/types'
+import { workerService } from '@/services/workers'
+import type { ProjectType, ProjectCreateRequest, Worker, Project } from '@/types'
 import Logger from '@/utils/logger'
 import styles from './ProjectCreateDrawer.module.css'
 
@@ -45,26 +46,26 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
   const [ruleFormValid, setRuleFormValid] = useState(false)
   const [ruleFormTooltip, setRuleFormTooltip] = useState('')
   const [ruleFormRef, setRuleFormRef] = useState<{ submit: () => void } | null>(null)
-  
+
   const [fileFormValid, setFileFormValid] = useState(false)
   const [fileFormTooltip, setFileFormTooltip] = useState('')
   const [fileFormRef, setFileFormRef] = useState<{ submit: () => void } | null>(null)
-  
+
   const [codeFormValid, setCodeFormValid] = useState(false)
   const [codeFormTooltip, setCodeFormTooltip] = useState('')
   const [codeFormRef, setCodeFormRef] = useState<{ submit: () => void } | null>(null)
-  
+
   // 环境配置状态（使用新的 EnvSelector）
   const [envConfig, setEnvConfig] = useState<EnvironmentConfig | null>(null)
-  const [nodeList, setNodeList] = useState<Node[]>([])
-  
+  const [workerList, setWorkerList] = useState<Worker[]>([])
+
   // 规则项目的区域配置
   const [regionConfig, setRegionConfig] = useState<{ region?: string; require_render?: boolean }>({})
 
   useEffect(() => {
     if (open) {
-      // 加载节点列表
-      nodeService.getAllNodes().then(setNodeList).catch(() => setNodeList([]))
+      // 加载 Worker 列表
+      workerService.getAllWorkers().then(setWorkerList).catch(() => setWorkerList([]))
     }
   }, [open])
 
@@ -78,8 +79,9 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
     {
       title: '配置项目',
       description: '填写项目信息',
-      icon: projectType === 'file' ? <FileOutlined /> : 
-            projectType === 'rule' ? <SettingOutlined /> : <CodeOutlined />
+      icon: projectType === 'file' ? <FileOutlined /> :
+        projectType === 'rule' ? <SettingOutlined /> :
+          <CodeOutlined />
     }
   ]
 
@@ -143,19 +145,20 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
   }
 
   // 提交创建
-  const handleSubmit = async (finalData: ProjectCreateRequest) => {
+  const handleSubmit = async (finalData: Record<string, unknown>) => {
+    const typedData = finalData as unknown as ProjectCreateRequest
     // 规则项目只需要区域配置，不需要环境配置
     if (projectType === 'rule') {
       setLoading(true)
       try {
-        Logger.log('创建规则项目:', finalData, '区域配置:', regionConfig)
-        
+        Logger.log('创建规则项目:', typedData, '区域配置:', regionConfig)
+
         // 规则项目合并区域配置
         const merged: ProjectCreateRequest = {
-          ...finalData,
+          ...typedData,
           region: regionConfig.region,
           // 规则项目使用默认的环境配置
-          venv_scope: 'shared',
+          runtime_scope: 'shared',
           python_version: '3.11',
         }
 
@@ -169,52 +172,54 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
       }
       return
     }
-    
+
     // 文件/代码项目需要环境配置
     if (!envConfig) {
-      showNotification.error('请配置运行环境')
+      showNotification('error', '请配置运行环境')
       return
     }
 
-    // 验证节点环境配置
-    if (envConfig.location === 'node' && !envConfig.nodeId) {
-      showNotification.error('使用节点环境时必须选择节点')
+    // 验证 Worker 环境配置
+    if (envConfig.location === 'worker' && !envConfig.workerId) {
+      showNotification('error', '使用 Worker 环境时必须选择 Worker')
       return
     }
 
     // 验证使用现有环境时的配置
     if (envConfig.useExisting && !envConfig.existingEnvName) {
-      showNotification.error('请选择要使用的环境')
+      showNotification('error', '请选择要使用的环境')
       return
     }
 
     // 验证创建新环境时的配置
     if (!envConfig.useExisting && !envConfig.pythonVersion) {
-      showNotification.error('创建新环境时必须指定Python版本')
+      showNotification('error', '创建新环境时必须指定Python版本')
       return
     }
 
     setLoading(true)
     try {
-      Logger.log('创建项目:', finalData, '环境配置:', envConfig)
-      
+      Logger.log('创建项目:', typedData, '环境配置:', envConfig)
+
+      const pythonVersion = envConfig.pythonVersion ?? typedData.python_version ?? '3.11'
+
       // 合并环境配置
       const merged: ProjectCreateRequest = {
-        ...finalData,
-        
-        // 环境位置和节点信息
+        ...typedData,
+
+        // 环境位置和 Worker 信息
         env_location: envConfig.location,
-        node_id: envConfig.nodeId,
-        
+        worker_id: envConfig.workerId,
+
         // 环境作用域
-        venv_scope: envConfig.scope,
-        
+        runtime_scope: envConfig.scope,
+
         // 使用现有环境 or 创建新环境
         use_existing_env: envConfig.useExisting,
         existing_env_name: envConfig.existingEnvName,
-        
+
         // 创建新环境时的配置
-        python_version: envConfig.pythonVersion,
+        python_version: pythonVersion,
         env_name: envConfig.envName,
         env_description: envConfig.envDescription,
       }
@@ -241,7 +246,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
         )
       case 1: {
         if (!projectType) return null
-        
+
         const commonProps = {
           initialData: formData,
           onDataChange: handleFormDataChange,
@@ -251,10 +256,10 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
 
         // 使用新的环境选择器组件
         const envSection = (
-          <EnvSelector 
+          <EnvSelector
             value={envConfig}
             onChange={setEnvConfig}
-            nodeList={nodeList}
+            workerList={workerList}
           />
         )
 
@@ -268,7 +273,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             // 规则项目使用区域选择器，不需要环境配置
             return <>
               <Card title="执行区域配置" size="small" style={{ marginBottom: 16 }}>
-                <RegionNodeSelector
+                <RegionWorkerSelector
                   value={regionConfig}
                   onChange={(config) => {
                     setRegionConfig(config)
@@ -309,7 +314,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             上一步
           </Button>
         )}
-        
+
         {currentStep === 0 && (
           <Button
             type="primary"
@@ -320,7 +325,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             下一步
           </Button>
         )}
-        
+
         {currentStep === 1 && projectType === 'file' && (
           <Button
             type="primary"
@@ -336,7 +341,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             创建文件项目
           </Button>
         )}
-        
+
         {currentStep === 1 && projectType === 'rule' && (
           <Button
             type="primary"
@@ -352,7 +357,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             创建规则项目
           </Button>
         )}
-        
+
         {currentStep === 1 && projectType === 'code' && (
           <Button
             type="primary"
@@ -368,7 +373,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
             创建代码项目
           </Button>
         )}
-        
+
         <Button onClick={handleClose} disabled={loading}>
           取消
         </Button>

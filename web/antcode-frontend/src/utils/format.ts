@@ -171,7 +171,7 @@ export function formatStatus(status: string): { text: string; color: string } {
   const statusMap: Record<string, { text: string; color: string }> = {
     // 任务执行状态
     pending: { text: '等待调度', color: 'default' },
-    dispatching: { text: '分配节点中', color: 'processing' },
+    dispatching: { text: '分配 Worker 中', color: 'processing' },
     queued: { text: '排队中', color: 'cyan' },
     running: { text: '执行中', color: 'processing' },
     success: { text: '成功', color: 'success' },
@@ -183,7 +183,7 @@ export function formatStatus(status: string): { text: string; color: string } {
     // 通用状态
     active: { text: '活跃', color: 'success' },
     inactive: { text: '非活跃', color: 'default' },
-    // 节点状态
+    // Worker 状态
     online: { text: '在线', color: 'success' },
     offline: { text: '离线', color: 'default' },
     maintenance: { text: '维护中', color: 'warning' }

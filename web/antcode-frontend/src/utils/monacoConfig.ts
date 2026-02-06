@@ -251,9 +251,7 @@ export const getEditorOptions = (
   },
   
   // 代码高亮
-  semanticHighlighting: {
-    enabled: true
-  },
+  'semanticHighlighting.enabled': true,
   
   // 粘性滚动（显示当前作用域）
   stickyScroll: {
@@ -281,7 +279,7 @@ export const getEditorOptions = (
   
   // 代码操作灯泡
   lightbulb: {
-    enabled: 'on'
+    enabled: 'on' as Monaco.editor.ShowLightbulbIconMode
   },
   
   // 链接检测

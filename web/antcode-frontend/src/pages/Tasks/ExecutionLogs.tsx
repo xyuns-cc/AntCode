@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import type React from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Card,
@@ -8,7 +9,7 @@ import {
   Tag,
   Row,
   Col,
-  Spin,
+  Skeleton,
   Alert,
   Tooltip,
   Progress,
@@ -16,9 +17,9 @@ import {
   theme
 } from 'antd'
 import showNotification from '@/utils/notification'
-import { 
-  ArrowLeftOutlined, 
-  ReloadOutlined, 
+import {
+  ArrowLeftOutlined,
+  ReloadOutlined,
   InfoCircleOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -38,7 +39,7 @@ const ExecutionLogs: React.FC = () => {
   const navigate = useNavigate()
   const { taskId, executionId } = useParams<{ taskId: string; executionId: string }>()
   const { token } = theme.useToken()
-  
+
   // 状态管理
   const [task, setTask] = useState<Task | null>(null)
   const [execution, setExecution] = useState<TaskExecution | null>(null)
@@ -50,12 +51,12 @@ const ExecutionLogs: React.FC = () => {
   // 加载任务信息
   const loadTask = useCallback(async () => {
     if (!taskId) return
-    
+
     try {
       const taskData = await taskService.getTask(taskId)
       setTask(taskData)
     } catch (error: unknown) {
-      console.error('加载任务信息失败:', error)
+      Logger.error('加载任务信息失败:', error)
       // 不显示错误，因为主要关注执行日志
     }
   }, [taskId])
@@ -67,11 +68,11 @@ const ExecutionLogs: React.FC = () => {
       setLoading(false)
       return
     }
-    
+
     try {
       const executions = await taskService.getTaskExecutions(taskId)
       const exec = executions.items.find(e => e.execution_id === executionId)
-      
+
       if (exec) {
         setExecution(exec)
         setError(null)
@@ -79,7 +80,7 @@ const ExecutionLogs: React.FC = () => {
         setError(`未找到执行记录: ${executionId}`)
       }
     } catch (error: unknown) {
-      console.error('加载执行信息失败:', error)
+      Logger.error('加载执行信息失败:', error)
       const errMsg = error instanceof Error ? error.message : '加载执行信息失败'
       setError(errMsg)
     } finally {
@@ -142,19 +143,19 @@ const ExecutionLogs: React.FC = () => {
   // 计算执行进度（如果有持续时间）
   const executionProgress = useMemo(() => {
     if (!execution) return null
-    
+
     if (execution.status === 'success') return 100
     if (execution.status === 'failed') return 100
     if (!execution.start_time) return 0
-    
+
     const startTime = new Date(execution.start_time).getTime()
     const now = Date.now()
     const elapsed = (now - startTime) / 1000 // 秒
-    
+
     // 假设一般任务在5分钟内完成
     const estimatedDuration = 300
     const progress = Math.min((elapsed / estimatedDuration) * 100, 99)
-    
+
     return Math.round(progress)
   }, [execution])
 
@@ -213,7 +214,7 @@ const ExecutionLogs: React.FC = () => {
     if (!execution) return '-'
     if (!execution.end_time) {
       return (
-        <Tag 
+        <Tag
           color="processing"
           style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
         >
@@ -229,50 +230,50 @@ const ExecutionLogs: React.FC = () => {
     () =>
       execution
         ? [
-            {
-              key: 'executionId',
-              label: '执行ID',
-              value: (
-                <CopyableTooltip text={execution.execution_id}>
-                  <code style={{ cursor: 'pointer' }}>
-                    {execution.execution_id}
-                  </code>
-                </CopyableTooltip>
+          {
+            key: 'executionId',
+            label: '执行ID',
+            value: (
+              <CopyableTooltip text={execution.execution_id}>
+                <code style={{ cursor: 'pointer' }}>
+                  {execution.execution_id}
+                </code>
+              </CopyableTooltip>
+            )
+          },
+          {
+            key: 'startTime',
+            label: '开始时间',
+            value: formatDateTime(execution.start_time)
+          },
+          {
+            key: 'endTime',
+            label: '结束时间',
+            value: endTimeDisplay
+          },
+          {
+            key: 'duration',
+            label: '持续时间',
+            value: durationDisplay
+          },
+          {
+            key: 'exitCode',
+            label: '退出码',
+            value:
+              execution.exit_code !== null && execution.exit_code !== undefined ? (
+                <Tag color={execution.exit_code === 0 ? 'success' : 'error'}>
+                  {execution.exit_code}
+                </Tag>
+              ) : (
+                '-'
               )
-            },
-            {
-              key: 'startTime',
-              label: '开始时间',
-              value: formatDateTime(execution.start_time)
-            },
-            {
-              key: 'endTime',
-              label: '结束时间',
-              value: endTimeDisplay
-            },
-            {
-              key: 'duration',
-              label: '持续时间',
-              value: durationDisplay
-            },
-            {
-              key: 'exitCode',
-              label: '退出码',
-              value:
-                execution.exit_code !== null && execution.exit_code !== undefined ? (
-                  <Tag color={execution.exit_code === 0 ? 'success' : 'error'}>
-                    {execution.exit_code}
-                  </Tag>
-                ) : (
-                  '-'
-                )
-            },
-            {
-              key: 'taskId',
-              label: '任务ID',
-              value: taskId ? `#${taskId}` : '-'
-            }
-          ]
+          },
+          {
+            key: 'taskId',
+            label: '任务ID',
+            value: taskId ? `#${taskId}` : '-'
+          }
+        ]
         : [],
     [durationDisplay, endTimeDisplay, execution, taskId]
   )
@@ -280,16 +281,14 @@ const ExecutionLogs: React.FC = () => {
   // 如果正在加载
   if (loading) {
     return (
-      <div style={{ 
-        padding: '24px', 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center',
-        minHeight: '400px'
+      <div style={{
+        padding: '24px',
+        maxWidth: '1800px',
+        margin: '0 auto'
       }}>
-        <Spin size="large">
-          <div style={{ marginTop: '50px' }}>加载执行日志中...</div>
-        </Spin>
+        <Card>
+          <Skeleton active paragraph={{ rows: 10 }} />
+        </Card>
       </div>
     )
   }
@@ -304,14 +303,14 @@ const ExecutionLogs: React.FC = () => {
             <h3>加载失败</h3>
             <p style={{ color: token.colorTextSecondary, marginBottom: 24 }}>{error}</p>
             <Space>
-              <Button 
+              <Button
                 icon={<ArrowLeftOutlined />}
                 onClick={() => navigate(`/tasks/${taskId}`)}
               >
                 返回任务详情
               </Button>
-              <Button 
-                type="primary" 
+              <Button
+                type="primary"
                 icon={<ReloadOutlined />}
                 onClick={() => {
                   setError(null)
@@ -329,9 +328,9 @@ const ExecutionLogs: React.FC = () => {
   }
 
   return (
-    <div style={{ 
-      padding: '20px 24px', 
-      maxWidth: '1800px', 
+    <div style={{
+      padding: '20px 24px',
+      maxWidth: '1800px',
       margin: '0 auto',
       minHeight: '100vh'
     }}>
@@ -356,7 +355,7 @@ const ExecutionLogs: React.FC = () => {
               >
                 返回
               </Button>
-              <div style={{ 
+              <div style={{
                 borderLeft: `2px solid ${token.colorBorderSecondary}`,
                 paddingLeft: 16,
                 height: 36,
@@ -374,12 +373,12 @@ const ExecutionLogs: React.FC = () => {
               <Tag
                 color={statusMeta.tagColor}
                 icon={statusMeta.icon}
-                style={{ 
-                  margin: 0, 
+                style={{
+                  margin: 0,
                   padding: '4px 12px',
                   fontSize: 13,
-                  display: 'flex', 
-                  alignItems: 'center', 
+                  display: 'flex',
+                  alignItems: 'center',
                   gap: 6,
                   border: 'none'
                 }}
@@ -427,9 +426,9 @@ const ExecutionLogs: React.FC = () => {
           }}
         >
           {/* 标题区域 */}
-          <div style={{ 
-            display: 'flex', 
-            justifyContent: 'space-between', 
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
             alignItems: 'center',
             marginBottom: 20,
             paddingBottom: 16,
@@ -484,17 +483,17 @@ const ExecutionLogs: React.FC = () => {
                       e.currentTarget.style.borderColor = token.colorBorder
                     }}
                   >
-                    <div style={{ 
-                      fontSize: 12, 
+                    <div style={{
+                      fontSize: 12,
                       color: token.colorTextSecondary,
                       marginBottom: 8,
                       fontWeight: 500
                     }}>
                       {item.label}
                     </div>
-                    <div style={{ 
-                      fontSize: 15, 
-                      fontWeight: 600, 
+                    <div style={{
+                      fontSize: 15,
+                      fontWeight: 600,
                       color: token.colorText,
                       lineHeight: 1.4
                     }}>
@@ -551,7 +550,7 @@ const ExecutionLogs: React.FC = () => {
             padding: '80px 40px',
             textAlign: 'center'
           }}>
-            <Empty 
+            <Empty
               description="执行ID不存在"
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />

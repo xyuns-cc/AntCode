@@ -3,22 +3,22 @@ export type ProjectType = 'file' | 'rule' | 'code'
 export type ProjectStatus = 'draft' | 'active' | 'inactive' | 'archived'
 
 // 执行策略枚举
-export type ExecutionStrategy = 'local' | 'fixed' | 'specified' | 'auto' | 'prefer'
+export type ExecutionStrategy = 'fixed' | 'specified' | 'auto' | 'prefer'
 
 // 执行策略配置
 export interface ExecutionStrategyConfig {
   strategy: ExecutionStrategy
-  boundNodeId?: string
-  boundNodeName?: string
-  fallbackEnabled?: boolean
+  bound_worker_id?: string
+  bound_worker_name?: string
+  fallback_enabled?: boolean
 }
 
 // 执行策略选项（用于UI展示）
 export const EXECUTION_STRATEGY_OPTIONS = [
-  { value: 'local', label: '本地执行', description: '在主节点本地执行任务' },
-  { value: 'fixed', label: '固定节点', description: '仅在绑定节点执行，不可用时失败' },
-  { value: 'auto', label: '自动选择', description: '根据负载自动选择最优节点' },
-  { value: 'prefer', label: '优先绑定节点', description: '优先使用绑定节点，不可用时自动选择其他节点' },
+  { value: 'fixed', label: '固定 Worker', description: '仅在绑定 Worker 执行，不可用时失败' },
+  { value: 'specified', label: '指定 Worker', description: '在指定的 Worker 上执行' },
+  { value: 'auto', label: '自动选择', description: '根据负载自动选择最优 Worker' },
+  { value: 'prefer', label: '优先绑定 Worker', description: '优先使用绑定 Worker，不可用时自动选择其他 Worker' },
 ] as const
 
 // 运行时配置类型
@@ -68,14 +68,14 @@ export interface Project {
   created_by_username?: string
   // 环境信息
   python_version?: string
-  venv_scope?: 'shared' | 'private'
+  runtime_scope?: 'shared' | 'private'
   venv_path?: string
   dependencies?: string[]
 
   // 执行策略配置
   execution_strategy?: ExecutionStrategy
-  bound_node_id?: string
-  bound_node_name?: string
+  bound_worker_id?: string
+  bound_worker_name?: string
   fallback_enabled?: boolean
   
   // 区域配置
@@ -234,12 +234,14 @@ export interface ProjectCreateRequest {
   type: ProjectType
   description?: string
   tags?: string[]
-  // 环境必填
-  venv_scope: 'shared' | 'private'
+  // 运行环境（新架构）
+  env_location?: string  // worker/local
+  worker_id?: string
+  runtime_scope: 'shared' | 'private'
+  shared_runtime_key?: string
+  interpreter_source?: string
   python_version: string
-  shared_venv_key?: string
-  env_location?: string
-  node_id?: string
+  python_bin?: string
   use_existing_env?: boolean
   existing_env_name?: string
   env_name?: string
@@ -250,13 +252,9 @@ export interface ProjectCreateRequest {
   
   // 执行策略配置
   execution_strategy?: ExecutionStrategy
-  bound_node_id?: string
+  bound_worker_id?: string
   fallback_enabled?: boolean
   
-  // 解释器配置
-  interpreter_source?: string
-  python_bin?: string
-
   // 文件项目字段
   file?: File
   additionalFiles?: Array<File | { originFileObj?: File }> // 新增：附加文件列表
@@ -311,7 +309,7 @@ export interface ProjectUpdateRequest {
   
   // 执行策略配置
   execution_strategy?: ExecutionStrategy
-  bound_node_id?: string
+  bound_worker_id?: string
   fallback_enabled?: boolean
   
   // 规则项目更新字段
@@ -349,7 +347,7 @@ export interface ProjectUpdateRequest {
   runtime_config?: string
   environment_vars?: string
   env_location?: string
-  node_id?: string
+  worker_id?: string
   use_existing_env?: boolean
   existing_env_name?: string
   env_name?: string
@@ -367,7 +365,7 @@ export interface ProjectListParams {
   sort_by?: string
   sort_order?: 'asc' | 'desc'
   created_by?: string  // 创建者 public_id 筛选
-  node_id?: string     // 节点ID筛选
+  worker_id?: string   // Worker ID 筛选
 }
 
 // 项目统计信息
@@ -398,6 +396,17 @@ export interface ProjectExportConfig {
 // 项目导入配置
 export interface ProjectImportConfig {
   file: File
+  name?: string
+  description?: string
+  entry_point?: string
+  runtime_scope?: 'shared' | 'private'
+  worker_id?: string
+  use_existing_env?: boolean
+  existing_env_name?: string
+  python_version?: string
+  shared_runtime_key?: string
+  env_name?: string
+  env_description?: string
   overwrite_existing?: boolean
   import_tasks?: boolean
   import_logs?: boolean
@@ -405,11 +414,16 @@ export interface ProjectImportConfig {
 
 export interface ProjectFileNode {
   name: string
-  path?: string
   type: 'file' | 'directory'
-  size?: number
+  path: string
+  size: number
   modified_time?: number
-  children?: ProjectFileNode[]
+  mime_type?: string
+  is_text?: boolean
+  children: ProjectFileNode[]
+  children_count?: number
+  error?: string
+  truncated?: boolean
 }
 
 export interface ProjectFileStructure {

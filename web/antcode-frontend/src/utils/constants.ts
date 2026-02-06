@@ -1,7 +1,8 @@
 import { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT } from '@/config/app'
 
 // API 地址（从环境变量读取，默认本地开发地址）
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+export const API_BASE_URL = rawApiBaseUrl.replace(/\/api\/?$/, '').replace(/\/$/, '')
 // WS 地址（从 API 地址自动推导：http -> ws, https -> wss）
 export const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws')
 

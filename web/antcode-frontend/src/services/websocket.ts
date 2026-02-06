@@ -4,6 +4,7 @@
  */
 
 import Logger from '@/utils/logger'
+import { WS_BASE_URL } from '@/utils/constants'
 
 // 连接状态
 export const ConnectionState = {
@@ -361,9 +362,8 @@ export function createLogWebSocket(
   }
   
   // 构建 WebSocket URL
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = import.meta.env.VITE_WS_HOST || 'localhost:8000'
-  const url = `${protocol}//${host}/api/v1/ws/executions/${executionId}/logs`
+  const wsBase = WS_BASE_URL.replace(/\/$/, '')
+  const url = `${wsBase}/api/v1/ws/executions/${executionId}/logs`
   
   const manager = new WebSocketManager({
     url,

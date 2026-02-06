@@ -2,7 +2,7 @@ import React, { useEffect, useState, memo } from 'react'
 import { Row, Col, Card, Statistic, Progress, Alert, Button, Tabs, Flex, Typography, Skeleton, theme, Space } from 'antd'
 import {
   ProjectOutlined, PlayCircleOutlined, CheckCircleOutlined, DatabaseOutlined, HddOutlined,
-  ThunderboltOutlined, SyncOutlined, MonitorOutlined, ClockCircleOutlined, DashboardOutlined,
+  ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, DashboardOutlined,
   RocketOutlined, FieldTimeOutlined, BarChartOutlined, FileTextOutlined, AimOutlined,
   ApiOutlined, InfoCircleOutlined, WarningOutlined, CloseCircleOutlined
 } from '@ant-design/icons'
@@ -10,7 +10,6 @@ import { useAuth } from '@/hooks/useAuth'
 import { PLATFORM_TITLE } from '@/config/app'
 import { dashboardService, type DashboardStats, type SystemMetrics } from '@/services/dashboard'
 
-const MonitorTab = React.lazy(() => import('@/pages/Monitor'))
 const { Title, Text } = Typography
 
 interface StatCardProps {
@@ -170,6 +169,40 @@ const Dashboard: React.FC = memo(() => {
                 </Col>
               </Row>
 
+              <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+                <Col xs={24} md={8}>
+                  <ResourceCard
+                    title="CPU 使用率"
+                    icon={<ThunderboltOutlined />}
+                    percent={cpuPercent}
+                    loading={loading}
+                    color={token.colorWarning}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <ResourceCard
+                    title="内存使用率"
+                    icon={<DatabaseOutlined />}
+                    percent={memoryPercent}
+                    used={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.used) : undefined}
+                    total={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.total) : undefined}
+                    loading={loading}
+                    color={token.colorSuccess}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <ResourceCard
+                    title="磁盘使用率"
+                    icon={<HddOutlined />}
+                    percent={diskPercent}
+                    used={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.used) : undefined}
+                    total={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.total) : undefined}
+                    loading={loading}
+                    color={token.colorInfo}
+                  />
+                </Col>
+              </Row>
+
               {dashboardStats?.system.status === 'warning' && <Alert message="系统性能警告" description="系统资源使用率较高，建议关注CPU、内存或磁盘使用情况。" type="warning" showIcon style={{ marginBottom: 24, borderRadius: 12 }} />}
               {dashboardStats?.system.status === 'error' && <Alert message="系统状态异常" description="系统资源使用率过高，可能影响服务稳定性，请及时处理。" type="error" showIcon style={{ marginBottom: 24, borderRadius: 12 }} />}
 
@@ -196,20 +229,6 @@ const Dashboard: React.FC = memo(() => {
                 </Col>
               </Row>
             </>
-          ),
-        },
-        {
-          key: 'monitor',
-          label: <Flex align="center" gap={6}><MonitorOutlined /><span>监控中心</span></Flex>,
-          children: (
-            <React.Suspense fallback={<Flex align="center" justify="center" style={{ padding: 48 }}><Skeleton active paragraph={{ rows: 6 }} /></Flex>}>
-              <Row gutter={[12, 12]} style={{ marginBottom: 20, maxWidth: 1200, margin: '0 auto 20px' }}>
-                <Col xs={24} sm={12} lg={8}><ResourceCard title="内存使用情况" icon={<DatabaseOutlined />} percent={memoryPercent} used={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.used) : undefined} total={systemMetrics?.memory_usage ? formatBytes(systemMetrics.memory_usage.total) : undefined} loading={loading} color={token.colorInfo} /></Col>
-                <Col xs={24} sm={12} lg={8}><ResourceCard title="CPU 使用情况" icon={<ThunderboltOutlined />} percent={cpuPercent} used={systemMetrics?.cpu_usage?.cores ? `${(cpuPercent * systemMetrics.cpu_usage.cores / 100).toFixed(1)}核` : undefined} total={systemMetrics?.cpu_usage?.cores ? `${systemMetrics.cpu_usage.cores}核` : undefined} loading={loading} color={token.colorSuccess} /></Col>
-                <Col xs={24} sm={12} lg={8}><ResourceCard title="磁盘使用情况" icon={<HddOutlined />} percent={diskPercent} used={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.used) : undefined} total={systemMetrics?.disk_usage ? formatBytes(systemMetrics.disk_usage.total) : undefined} loading={loading} color={token.purple} /></Col>
-              </Row>
-              <MonitorTab />
-            </React.Suspense>
           ),
         },
       ]} />

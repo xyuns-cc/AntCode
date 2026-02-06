@@ -25,7 +25,7 @@ import {
   DesktopOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { useNodeStore } from '@/stores/nodeStore'
+import { useWorkerStore } from '@/stores/workerStore'
 import type { Task, TaskStatus, ScheduleType } from '@/types'
 import { formatDateTime } from '@/utils/format'
 import useAuth from '@/hooks/useAuth'
@@ -37,7 +37,7 @@ const { Option } = Select
 const Tasks: React.FC = memo(() => {
   const navigate = useNavigate()
   const { isAuthenticated, loading: authLoading } = useAuth()
-  const { currentNode } = useNodeStore()
+  const { currentWorker } = useWorkerStore()
 
   const [searchQuery, setSearchQuery] = useState('')
   const [projectFilter, setProjectFilter] = useState<string | undefined>(undefined)
@@ -54,7 +54,7 @@ const Tasks: React.FC = memo(() => {
     status: statusFilter,
     schedule_type: scheduleTypeFilter,
     search: searchQuery?.trim() || undefined,
-    node_id: currentNode?.id
+    specified_worker_id: currentWorker?.id
   }, isAuthenticated && !authLoading)
 
   const projectsQuery = useProjectsQuery(isAuthenticated && !authLoading)
@@ -222,7 +222,7 @@ const Tasks: React.FC = memo(() => {
   const getStatusTag = (status: TaskStatus) => {
     const statusMap: Record<string, { color: string; text: string; icon?: React.ReactNode }> = {
       pending: { color: 'default', text: '等待调度' },
-      dispatching: { color: 'processing', text: '分配节点中' },
+      dispatching: { color: 'processing', text: '分配 Worker 中' },
       queued: { color: 'cyan', text: '排队中' },
       running: { color: 'processing', text: '执行中' },
       success: { color: 'success', text: '成功' },
@@ -241,7 +241,8 @@ const Tasks: React.FC = memo(() => {
     const typeMap = {
       once: { color: 'blue', text: '一次性' },
       interval: { color: 'green', text: '间隔执行' },
-      cron: { color: 'purple', text: 'Cron' }
+      cron: { color: 'purple', text: 'Cron' },
+      date: { color: 'orange', text: '指定时间' }
     }
     const config = typeMap[type] || { color: 'default', text: type }
     return <Tag color={config.color}>{config.text}</Tag>
@@ -255,18 +256,18 @@ const Tasks: React.FC = memo(() => {
             <ScheduleOutlined />
             任务管理
           </h1>
-          {currentNode && (
+          {currentWorker && (
             <Tag 
               color="cyan"
               style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}
             >
               <CloudServerOutlined style={{ fontSize: 12 }} />
-              <span>{currentNode.name}</span>
+              <span>{currentWorker.name}</span>
             </Tag>
           )}
         </Space>
         <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
-          {currentNode ? `当前节点: ${currentNode.name}` : '管理和监控您的调度任务'}
+          {currentWorker ? `当前 Worker: ${currentWorker.name}` : '管理和监控您的调度任务'}
         </p>
       </div>
 
@@ -332,6 +333,7 @@ const Tasks: React.FC = memo(() => {
               onChange={handleScheduleTypeFilterChange}
             >
               <Option value="once">一次性</Option>
+              <Option value="date">指定时间</Option>
               <Option value="interval">间隔执行</Option>
               <Option value="cron">Cron</Option>
             </Select>
@@ -416,32 +418,32 @@ const Tasks: React.FC = memo(() => {
               render: (type: ScheduleType) => getScheduleTypeTag(type)
             },
             {
-              title: '执行节点',
-              key: 'node',
+              title: '执行 Worker',
+              key: 'worker',
               width: 130,
               responsive: ['lg'],
               render: (_: string, record: Task) => {
                 const strategy = record.execution_strategy || record.project_execution_strategy
 
-                let nodeName = '本地'
+                let workerName = '本地'
                 let icon = <DesktopOutlined style={{ fontSize: 12 }} />
                 let color: string = 'geekblue'
 
                 if (strategy === 'auto') {
-                  nodeName = '自动选择'
+                  workerName = '自动选择'
                   icon = <CloudServerOutlined style={{ fontSize: 12 }} />
                   color = 'green'
                 } else if (strategy === 'specified') {
-                  nodeName = record.specified_node_name || record.specified_node_id || '指定节点'
+                  workerName = record.specified_worker_name || record.specified_worker_id || '指定 Worker'
                   icon = <CloudServerOutlined style={{ fontSize: 12 }} />
                   color = 'cyan'
                 } else if (strategy === 'fixed' || strategy === 'prefer') {
-                  nodeName = record.project_bound_node_name || record.project_bound_node_id || '绑定节点'
+                  workerName = record.project_bound_worker_name || record.project_bound_worker_id || '绑定 Worker'
                   icon = <CloudServerOutlined style={{ fontSize: 12 }} />
                   color = 'blue'
                 }
                 return (
-                  <Tooltip title={nodeName} placement="topLeft">
+                  <Tooltip title={workerName} placement="topLeft">
                     <Tag 
                       color={color}
                       style={{ 
@@ -454,7 +456,7 @@ const Tasks: React.FC = memo(() => {
                       }}
                     >
                       {icon}
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{nodeName}</span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{workerName}</span>
                     </Tag>
                   </Tooltip>
                 )
