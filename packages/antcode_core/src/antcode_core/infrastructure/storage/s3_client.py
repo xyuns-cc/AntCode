@@ -326,7 +326,6 @@ class S3ClientManager:
         Returns:
             下载的文件数量
         """
-        import os
         from pathlib import Path
         
         client = await self.get_client()

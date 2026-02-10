@@ -22,11 +22,15 @@ from loguru import logger
 
 from antcode_worker.domain.enums import LogStream
 from antcode_worker.domain.models import ArtifactRef, LogEntry
+from antcode_worker.config import DATA_ROOT
 from antcode_worker.logs.archive import ArchiveConfig, LogArchiver
 from antcode_worker.logs.batch import BackpressureState, BatchConfig, BatchSender
 from antcode_worker.logs.realtime import RealtimeConfig, RealtimeSender
 from antcode_worker.logs.spool import LogSpool, SpoolConfig
 from antcode_worker.logs.streamer import LogStreamer
+
+
+_DEFAULT_WAL_DIR = str(DATA_ROOT / "logs" / "wal")
 
 
 class TransportProtocol(Protocol):
@@ -71,7 +75,7 @@ class LogManagerConfig:
     archive_config: ArchiveConfig = field(default_factory=ArchiveConfig)
     
     # WAL 目录（用于归档）
-    wal_dir: str = "var/worker/logs/wal"
+    wal_dir: str = _DEFAULT_WAL_DIR
     
     # 丢弃策略
     drop_policy: DropPolicy = DropPolicy.LOW_PRIORITY

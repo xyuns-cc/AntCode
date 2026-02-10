@@ -137,13 +137,34 @@ class WorkerConnectionService:
         api_key = secrets.token_hex(32)
         secret_key = secrets.token_hex(64)
 
-        name = (request.name or "").strip() or worker_id
-        name = name[:100]
+        base_name = ((request.name or "").strip() or worker_id)[:100]
+        name = base_name
         if await Worker.filter(name=name).exists():
-            suffix = worker_id[:6]
-            name = f"{name}-{suffix}"[:100]
-            if await Worker.filter(name=name).exists():
-                name = f"worker-{worker_id[:12]}"[:100]
+            candidate_names = [
+                f"{base_name}-{worker_id[:6]}",
+                f"{base_name}-{worker_id[-6:]}",
+                f"worker-{worker_id[:12]}",
+            ]
+
+            selected_name = None
+            for candidate in candidate_names:
+                candidate = candidate[:100]
+                if not await Worker.filter(name=candidate).exists():
+                    selected_name = candidate
+                    break
+
+            if selected_name is None:
+                base = base_name[:92]
+                for _ in range(6):
+                    candidate = f"{base}-{secrets.token_hex(3)}"
+                    if not await Worker.filter(name=candidate).exists():
+                        selected_name = candidate
+                        break
+
+            if selected_name is None:
+                raise ValueError("无法为 Worker 生成唯一名称")
+
+            name = selected_name
 
         worker = await Worker.create(
             public_id=worker_id,

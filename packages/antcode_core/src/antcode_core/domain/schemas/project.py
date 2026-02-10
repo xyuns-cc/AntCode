@@ -15,6 +15,7 @@ from antcode_core.domain.models.enums import (
     ProjectStatus,
     ProjectType,
     RequestMethod,
+    RuntimeKind,
     RuntimeScope,
 )
 
@@ -28,6 +29,20 @@ def _normalize_runtime_scope(value):
             return RuntimeScope.SHARED
         if raw == "private":
             return RuntimeScope.PRIVATE
+    return value
+
+
+def _normalize_runtime_kind(value):
+    if isinstance(value, RuntimeKind):
+        return value
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw == "python":
+            return RuntimeKind.PYTHON
+        if raw == "java":
+            return RuntimeKind.JAVA
+        if raw == "go":
+            return RuntimeKind.GO
     return value
 
 
@@ -66,7 +81,8 @@ class ProjectCreateRequest(BaseModel):
     worker_id: str | None = Field(None, description="Worker 节点 ID")
 
     # 环境作用域：private / shared
-    runtime_scope: RuntimeScope = Field(..., description="虚拟环境作用域：shared/private")
+    runtime_scope: RuntimeScope = Field(..., description="运行时作用域：shared/private")
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型：python/java/go")
 
     # 使用现有环境 or 创建新环境
     use_existing_env: bool = Field(default=False, description="是否使用现有环境")
@@ -107,6 +123,11 @@ class ProjectCreateRequest(BaseModel):
     @classmethod
     def normalize_runtime_scope(cls, v):
         return _normalize_runtime_scope(v)
+
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def normalize_runtime_kind(cls, v):
+        return _normalize_runtime_kind(v)
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -332,7 +353,8 @@ class ProjectCreateFormRequest(BaseModel):
     type: ProjectType = Field(..., description="项目类型")
     tags: str | None = Field(None, description="项目标签，逗号分隔或JSON数组")
     dependencies: str | None = Field(None, description="Python依赖包JSON数组")
-    runtime_scope: RuntimeScope = Field(..., description="虚拟环境作用域：shared/private")
+    runtime_scope: RuntimeScope = Field(..., description="运行时作用域：shared/private")
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型：python/java/go")
     python_version: str | None = Field(
         None, max_length=20, description="Python版本（私有环境必填）"
     )
@@ -387,6 +409,11 @@ class ProjectCreateFormRequest(BaseModel):
     @classmethod
     def normalize_runtime_scope(cls, v):
         return _normalize_runtime_scope(v)
+
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def normalize_runtime_kind(cls, v):
+        return _normalize_runtime_kind(v)
 
 
 class ProjectListQueryRequest(BaseModel):
@@ -593,8 +620,9 @@ class ProjectResponse(BaseModel):
     star_count: int = Field(0, description="收藏次数")
     # 运行环境
     python_version: str | None = Field(None, description="绑定的Python版本")
-    runtime_scope: RuntimeScope | None = Field(None, description="虚拟环境作用域")
-    venv_path: str | None = Field(None, description="虚拟环境路径")
+    runtime_scope: RuntimeScope | None = Field(None, description="运行时作用域")
+    runtime_kind: RuntimeKind | None = Field(None, description="运行时类型")
+    runtime_locator: str | None = Field(None, description="运行时定位符")
     file_info: FileInfo | None = Field(None, description="文件信息")
     rule_info: dict[str, Any] | None = Field(default_factory=dict, description="规则信息")
     code_info: dict[str, Any] | None = Field(default_factory=dict, description="代码信息")

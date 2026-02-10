@@ -6,10 +6,18 @@
 **Validates: Requirements 6.5**
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from loguru import logger
+
+from antcode_core.infrastructure.redis import (
+    decode_stream_payload,
+    redis_namespace,
+    task_ready_stream,
+    worker_group,
+)
 
 
 @dataclass
@@ -37,9 +45,9 @@ class TaskPollHandler:
     Gateway 不实现调度策略，只负责代理队列读取。
     """
 
-    # Redis Streams 键前缀
-    READY_QUEUE_PREFIX = "antcode:task:ready:"
-    WORKER_GROUP = "antcode-workers"
+    # Redis Streams 键前缀（用于测试与诊断观测）
+    READY_QUEUE_PREFIX = f"{redis_namespace()}:task:ready:"
+    WORKER_GROUP = worker_group()
 
     def __init__(self, redis_client=None):
         """初始化处理器
@@ -48,6 +56,25 @@ class TaskPollHandler:
             redis_client: Redis 客户端，默认延迟初始化
         """
         self._redis_client = redis_client
+        self._group_lock = asyncio.Lock()
+        self._initialized_groups: set[tuple[str, str]] = set()
+
+    async def _ensure_consumer_group(self, redis, stream_key: str, group: str) -> None:
+        key = (stream_key, group)
+        if key in self._initialized_groups:
+            return
+
+        async with self._group_lock:
+            if key in self._initialized_groups:
+                return
+
+            try:
+                await redis.xgroup_create(stream_key, group, id="0", mkstream=True)
+            except Exception as e:
+                if "BUSYGROUP" not in str(e):
+                    raise
+
+            self._initialized_groups.add(key)
 
     async def _get_redis_client(self):
         """获取 Redis 客户端"""
@@ -95,15 +122,11 @@ class TaskPollHandler:
             # 确定要读取的队列
             if queues is None:
                 # 默认读取 worker 专属队列
-                queues = [f"{self.READY_QUEUE_PREFIX}{worker_id}"]
+                queues = [task_ready_stream(worker_id)]
 
-            # 确保消费者组存在
+            # 确保消费者组存在（每个 stream 只初始化一次）
             for queue in queues:
-                try:
-                    await redis.xgroup_create(queue, self.WORKER_GROUP, id="0", mkstream=True)
-                except Exception as e:
-                    if "BUSYGROUP" not in str(e):
-                        raise
+                await self._ensure_consumer_group(redis, queue, self.WORKER_GROUP)
 
             # 构建 streams 参数
             streams = dict.fromkeys(queues, ">")
@@ -157,12 +180,7 @@ class TaskPollHandler:
             任务信息，解析失败返回 None
         """
         try:
-            # 解码字节数据
-            decoded = {}
-            for k, v in data.items():
-                key = k.decode() if isinstance(k, bytes) else k
-                value = v.decode() if isinstance(v, bytes) else v
-                decoded[key] = value
+            decoded = decode_stream_payload(data)
 
             task_id = decoded.get("task_id")
             if not task_id:
@@ -172,7 +190,7 @@ class TaskPollHandler:
             return TaskInfo(
                 task_id=task_id,
                 project_id=decoded.get("project_id", ""),
-                run_id=decoded.get("run_id", decoded.get("execution_id", "")),
+                run_id=decoded.get("run_id", ""),
                 project_type=decoded.get("project_type", "spider"),
                 priority=int(decoded.get("priority", 0)),
                 timeout=int(decoded.get("timeout", 3600)),
@@ -187,14 +205,19 @@ class TaskPollHandler:
             logger.error(f"解析任务数据失败: {e}, message_id={message_id}")
             return None
 
-    def _parse_json(self, value: str) -> dict[str, object]:
-        """解析 JSON 字符串"""
+    def _parse_json(self, value: object) -> dict[str, object]:
+        """解析 JSON 内容"""
         if not value:
             return {}
+
+        if isinstance(value, dict):
+            return value
+
+        raw = value.decode("utf-8", errors="ignore") if isinstance(value, (bytes, bytearray)) else str(value)
         try:
             import json
 
-            parsed = json.loads(value)
+            parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
             return {}

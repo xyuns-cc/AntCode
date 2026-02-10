@@ -17,14 +17,14 @@ export interface RetryStats {
 // 待重试任务
 export interface PendingRetry {
   task_id: string
-  execution_id: string
+  run_id: string
   retry_time: string
   retry_count: number
 }
 
 // 重试历史项
 export interface RetryHistoryItem {
-  execution_id: string
+  run_id: string
   public_id: string
   status: string
   retry_count: number
@@ -43,13 +43,13 @@ export interface RetryConfig {
 /**
  * 手动重试任务
  */
-export async function manualRetry(executionId: string): Promise<{
+export async function manualRetry(runId: string): Promise<{
   success: boolean
   message: string
-  execution_id: string
+  run_id: string
   retry_count: number
 }> {
-  const response = await api.post(`/api/v1/retry/manual/${executionId}`)
+  const response = await api.post(`/api/v1/retry/manual/${runId}`)
   return response.data.data
 }
 
@@ -86,11 +86,11 @@ export async function updateRetryConfig(
 /**
  * 取消待重试任务
  */
-export async function cancelPendingRetry(executionId: string): Promise<{
-  execution_id: string
+export async function cancelPendingRetry(runId: string): Promise<{
+  run_id: string
   status: string
 }> {
-  const response = await api.post(`/api/v1/retry/cancel/${executionId}`)
+  const response = await api.post(`/api/v1/retry/cancel/${runId}`)
   return response.data.data
 }
 

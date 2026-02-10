@@ -57,18 +57,18 @@ class Heartbeat(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., status: _Optional[str] = ..., metrics: _Optional[_Union[_common_pb2.Metrics, _Mapping]] = ..., os_info: _Optional[_Union[_common_pb2.OSInfo, _Mapping]] = ..., timestamp: _Optional[_Union[_common_pb2.Timestamp, _Mapping]] = ..., capabilities: _Optional[_Mapping[str, str]] = ..., version: _Optional[str] = ...) -> None: ...
 
 class TaskStatus(_message.Message):
-    __slots__ = ("execution_id", "status", "exit_code", "error_message", "timestamp")
-    EXECUTION_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("run_id", "status", "exit_code", "error_message", "timestamp")
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     EXIT_CODE_FIELD_NUMBER: _ClassVar[int]
     ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
-    execution_id: str
+    run_id: str
     status: str
     exit_code: int
     error_message: str
     timestamp: _common_pb2.Timestamp
-    def __init__(self, execution_id: _Optional[str] = ..., status: _Optional[str] = ..., exit_code: _Optional[int] = ..., error_message: _Optional[str] = ..., timestamp: _Optional[_Union[_common_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, run_id: _Optional[str] = ..., status: _Optional[str] = ..., exit_code: _Optional[int] = ..., error_message: _Optional[str] = ..., timestamp: _Optional[_Union[_common_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class TaskDispatch(_message.Message):
     __slots__ = ("task_id", "project_id", "project_type", "priority", "params", "environment", "timeout", "download_url", "file_hash", "entry_point", "run_id")
@@ -121,12 +121,12 @@ class TaskAck(_message.Message):
     def __init__(self, task_id: _Optional[str] = ..., accepted: bool = ..., reason: _Optional[str] = ...) -> None: ...
 
 class TaskCancel(_message.Message):
-    __slots__ = ("task_id", "execution_id")
+    __slots__ = ("task_id", "run_id")
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
-    EXECUTION_ID_FIELD_NUMBER: _ClassVar[int]
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
     task_id: str
-    execution_id: str
-    def __init__(self, task_id: _Optional[str] = ..., execution_id: _Optional[str] = ...) -> None: ...
+    run_id: str
+    def __init__(self, task_id: _Optional[str] = ..., run_id: _Optional[str] = ...) -> None: ...
 
 class CancelAck(_message.Message):
     __slots__ = ("task_id", "success", "reason")
@@ -261,32 +261,32 @@ class ReportResultResponse(_message.Message):
     def __init__(self, success: bool = ..., error: _Optional[str] = ...) -> None: ...
 
 class SendLogRequest(_message.Message):
-    __slots__ = ("execution_id", "log_type", "content", "timestamp", "sequence")
-    EXECUTION_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("run_id", "log_type", "content", "timestamp", "sequence")
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
     LOG_TYPE_FIELD_NUMBER: _ClassVar[int]
     CONTENT_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
     SEQUENCE_FIELD_NUMBER: _ClassVar[int]
-    execution_id: str
+    run_id: str
     log_type: str
     content: str
     timestamp: str
     sequence: int
-    def __init__(self, execution_id: _Optional[str] = ..., log_type: _Optional[str] = ..., content: _Optional[str] = ..., timestamp: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
+    def __init__(self, run_id: _Optional[str] = ..., log_type: _Optional[str] = ..., content: _Optional[str] = ..., timestamp: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
 
 class LogEntry(_message.Message):
-    __slots__ = ("execution_id", "log_type", "content", "timestamp", "sequence")
-    EXECUTION_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("run_id", "log_type", "content", "timestamp", "sequence")
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
     LOG_TYPE_FIELD_NUMBER: _ClassVar[int]
     CONTENT_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
     SEQUENCE_FIELD_NUMBER: _ClassVar[int]
-    execution_id: str
+    run_id: str
     log_type: str
     content: str
     timestamp: str
     sequence: int
-    def __init__(self, execution_id: _Optional[str] = ..., log_type: _Optional[str] = ..., content: _Optional[str] = ..., timestamp: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
+    def __init__(self, run_id: _Optional[str] = ..., log_type: _Optional[str] = ..., content: _Optional[str] = ..., timestamp: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
 
 class SendLogBatchRequest(_message.Message):
     __slots__ = ("logs",)
@@ -311,22 +311,22 @@ class SendLogBatchResponse(_message.Message):
     def __init__(self, success: bool = ..., error: _Optional[str] = ...) -> None: ...
 
 class SendLogChunkRequest(_message.Message):
-    __slots__ = ("execution_id", "log_type", "data", "offset", "is_final", "checksum", "total_size")
-    EXECUTION_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("run_id", "log_type", "data", "offset", "is_final", "checksum", "total_size")
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
     LOG_TYPE_FIELD_NUMBER: _ClassVar[int]
     DATA_FIELD_NUMBER: _ClassVar[int]
     OFFSET_FIELD_NUMBER: _ClassVar[int]
     IS_FINAL_FIELD_NUMBER: _ClassVar[int]
     CHECKSUM_FIELD_NUMBER: _ClassVar[int]
     TOTAL_SIZE_FIELD_NUMBER: _ClassVar[int]
-    execution_id: str
+    run_id: str
     log_type: str
     data: bytes
     offset: int
     is_final: bool
     checksum: str
     total_size: int
-    def __init__(self, execution_id: _Optional[str] = ..., log_type: _Optional[str] = ..., data: _Optional[bytes] = ..., offset: _Optional[int] = ..., is_final: bool = ..., checksum: _Optional[str] = ..., total_size: _Optional[int] = ...) -> None: ...
+    def __init__(self, run_id: _Optional[str] = ..., log_type: _Optional[str] = ..., data: _Optional[bytes] = ..., offset: _Optional[int] = ..., is_final: bool = ..., checksum: _Optional[str] = ..., total_size: _Optional[int] = ...) -> None: ...
 
 class SendLogChunkResponse(_message.Message):
     __slots__ = ("success", "ack_offset", "error")

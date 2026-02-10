@@ -13,6 +13,8 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_core.infrastructure.redis import decode_stream_payload, worker_heartbeat_key
+
 
 @dataclass
 class HeartbeatData:
@@ -40,9 +42,6 @@ class HeartbeatHandler:
     处理 Worker 发送的心跳消息：
     1. 更新 Redis 中的 Worker 状态
     """
-
-    # Redis 键前缀
-    WORKER_HEARTBEAT_PREFIX = "antcode:heartbeat:"
 
     # 心跳过期时间（秒）
     HEARTBEAT_TTL = 90
@@ -107,7 +106,7 @@ class HeartbeatHandler:
             worker_id = heartbeat.worker_id
 
             # 更新心跳信息（与 Direct 模式一致）
-            heartbeat_key = f"{self.WORKER_HEARTBEAT_PREFIX}{worker_id}"
+            heartbeat_key = worker_heartbeat_key(worker_id)
             timestamp = datetime.fromtimestamp(heartbeat.timestamp, UTC)
             status_data = {
                 "status": heartbeat.status,
@@ -129,8 +128,10 @@ class HeartbeatHandler:
                     heartbeat.capabilities, ensure_ascii=False
                 )
 
-            await redis.hset(heartbeat_key, mapping=status_data)
-            await redis.expire(heartbeat_key, self.HEARTBEAT_TTL)
+            pipe = redis.pipeline(transaction=False)
+            pipe.hset(heartbeat_key, mapping=status_data)
+            pipe.expire(heartbeat_key, self.HEARTBEAT_TTL)
+            await pipe.execute()
 
             logger.debug(f"Worker 状态已更新: {worker_id}")
             return True
@@ -153,19 +154,12 @@ class HeartbeatHandler:
             return None
 
         try:
-            status_key = f"{self.WORKER_STATUS_PREFIX}{worker_id}"
-            data = await redis.hgetall(status_key)
+            data = await redis.hgetall(worker_heartbeat_key(worker_id))
 
             if not data:
                 return None
 
-            # 解码字节数据
-            return {
-                k.decode() if isinstance(k, bytes) else k: v.decode()
-                if isinstance(v, bytes)
-                else v
-                for k, v in data.items()
-            }
+            return decode_stream_payload(data)
 
         except Exception as e:
             logger.error(f"获取 Worker 状态失败: {e}")
@@ -185,7 +179,7 @@ class HeartbeatHandler:
             return False
 
         try:
-            heartbeat_key = f"{self.WORKER_HEARTBEAT_PREFIX}{worker_id}"
+            heartbeat_key = worker_heartbeat_key(worker_id)
             return await redis.exists(heartbeat_key) > 0
         except Exception as e:
             logger.error(f"检查 Worker 状态失败: {e}")

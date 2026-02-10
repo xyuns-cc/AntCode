@@ -235,6 +235,7 @@ export interface SpiderStatsHistoryPoint {
 export interface WorkerInstallKeyResponse {
   key: string
   os_type: string
+  allowed_source?: string
   install_command: string
   expires_at: string
 }

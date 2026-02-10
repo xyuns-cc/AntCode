@@ -16,10 +16,10 @@ from loguru import logger
 
 from antcode_core.common.serialization import from_json, to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
+from antcode_core.infrastructure.redis.control_plane import worker_heartbeat_key
 
 # Redis 键名前缀
 WORKER_REGISTRY_KEY = "workers:registry"  # Hash: worker_id -> worker_info
-WORKER_HEARTBEAT_PREFIX = "antcode:heartbeat:"  # String: worker_id -> timestamp
 WORKER_BATCH_PREFIX = "worker:batch:"  # Set: batch_id -> worker_ids
 
 # 默认配置
@@ -158,7 +158,7 @@ class WorkerRegistryService:
             await redis.hset(WORKER_REGISTRY_KEY, worker_id, worker_data)
 
             # 设置心跳键（带过期时间）
-            heartbeat_key = f"{WORKER_HEARTBEAT_PREFIX}{worker_id}"
+            heartbeat_key = worker_heartbeat_key(worker_id)
             await redis.set(heartbeat_key, str(now), ex=self._heartbeat_ttl)
 
             # 如果有批次 ID，添加到批次的 Worker 集合
@@ -193,7 +193,7 @@ class WorkerRegistryService:
             await redis.hdel(WORKER_REGISTRY_KEY, worker_id)
 
             # 删除心跳键
-            heartbeat_key = f"{WORKER_HEARTBEAT_PREFIX}{worker_id}"
+            heartbeat_key = worker_heartbeat_key(worker_id)
             await redis.delete(heartbeat_key)
 
             # 从批次的 Worker 集合中移除
@@ -263,7 +263,7 @@ class WorkerRegistryService:
             await redis.hset(WORKER_REGISTRY_KEY, worker_id, worker_data)
 
             # 更新心跳键
-            heartbeat_key = f"{WORKER_HEARTBEAT_PREFIX}{worker_id}"
+            heartbeat_key = worker_heartbeat_key(worker_id)
             await redis.set(heartbeat_key, str(now), ex=self._heartbeat_ttl)
 
             # 处理批次变更
@@ -419,7 +419,7 @@ class WorkerRegistryService:
                     continue
 
                 # 检查心跳键是否存在
-                heartbeat_key = f"{WORKER_HEARTBEAT_PREFIX}{worker.worker_id}"
+                heartbeat_key = worker_heartbeat_key(worker.worker_id)
                 heartbeat_exists = await redis.exists(heartbeat_key)
 
                 # 检查心跳时间

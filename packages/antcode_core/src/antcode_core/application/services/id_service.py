@@ -14,7 +14,7 @@ class IdService:
     提供多种 ID 生成策略：
     - UUID: 标准 UUID4
     - Public ID: 不带连字符的 UUID（用于 API 暴露）
-    - Execution ID: 任务执行 ID（带时间戳前缀）
+    - Run ID: 任务运行 ID（带时间戳前缀）
     - Snowflake: 分布式唯一 ID（可选）
     """
 
@@ -29,8 +29,8 @@ class IdService:
         return uuid.uuid4().hex
 
     @staticmethod
-    def generate_execution_id(prefix: str | None = None) -> str:
-        """生成任务执行 ID
+    def generate_run_id(prefix: str | None = None) -> str:
+        """生成任务运行 ID
 
         格式: {prefix}-{timestamp}-{random}
         """
@@ -38,7 +38,7 @@ class IdService:
         random_part = uuid.uuid4().hex[:8]
         if prefix:
             return f"{prefix}-{timestamp}-{random_part}"
-        return f"exec-{timestamp}-{random_part}"
+        return f"run-{timestamp}-{random_part}"
 
     @staticmethod
     def generate_batch_id() -> str:

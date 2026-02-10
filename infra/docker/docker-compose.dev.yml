@@ -192,7 +192,6 @@ services:
       - WORKER_NAME=${WORKER_NAME:-worker-1}
     volumes:
       - worker_data:/app/data
-      - worker_venvs:/app/venvs
     depends_on:
       redis:
         condition: service_healthy
@@ -244,6 +243,4 @@ volumes:
   minio_data:
     driver: local
   worker_data:
-    driver: local
-  worker_venvs:
     driver: local

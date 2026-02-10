@@ -26,9 +26,9 @@ except ImportError:  # pragma: no cover - optional dependency
 # Worker根目录
 WORKER_ROOT = Path(__file__).parent
 SERVICE_ROOT = WORKER_ROOT.parent.parent  # services/worker/src -> services/worker
-# 项目根目录（运行时数据统一放在 var/ 下）
+# 项目根目录（运行时数据统一放在 data/ 下）
 PROJECT_ROOT = SERVICE_ROOT.parent.parent  # services/worker -> project root
-DATA_ROOT = PROJECT_ROOT / "var" / "worker"
+DATA_ROOT = PROJECT_ROOT / "data" / "worker"
 
 # Worker配置文件路径
 WORKER_CONFIG_FILE = DATA_ROOT / "worker_config.yaml"
@@ -77,6 +77,18 @@ def _get_env_bool(*keys: str) -> bool | None:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def _normalize_path(path_value: str) -> str:
+    """将路径标准化为绝对路径（相对路径基于项目根目录）"""
+    expanded = os.path.expandvars(os.path.expanduser(str(path_value))).strip()
+    if not expanded:
+        return expanded
+
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return str(path)
+
+
 def _load_env_config() -> dict[str, Any]:
     """读取环境变量配置"""
     env_config: dict[str, Any] = {}
@@ -96,6 +108,10 @@ def _load_env_config() -> dict[str, Any]:
     redis_url = _get_env_value("WORKER_REDIS_URL", "REDIS_URL", "ANTCODE_REDIS_URL")
     if redis_url:
         env_config["redis_url"] = redis_url
+
+    redis_namespace = _get_env_value("WORKER_REDIS_NAMESPACE", "REDIS_NAMESPACE")
+    if redis_namespace:
+        env_config["redis_namespace"] = redis_namespace
 
     gateway_endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT", "GATEWAY_ENDPOINT", "ANTCODE_GATEWAY_ENDPOINT")
     if gateway_endpoint:
@@ -212,6 +228,7 @@ class WorkerConfig:
 
     # Redis 配置（Direct 模式）
     redis_url: str = "redis://localhost:6379/0"
+    redis_namespace: str = "antcode"
 
     # Gateway 配置（Gateway 模式）
     gateway_host: str = "localhost"
@@ -251,7 +268,7 @@ class WorkerConfig:
     @property
     def venvs_dir(self) -> str:
         """虚拟环境存储目录"""
-        return os.path.join(self.data_dir, "venvs")
+        return os.path.join(self.data_dir, "runtimes")
 
     @property
     def logs_dir(self) -> str:
@@ -259,9 +276,9 @@ class WorkerConfig:
         return os.path.join(self.data_dir, "logs")
 
     @property
-    def executions_dir(self) -> str:
+    def runs_dir(self) -> str:
         """任务执行目录"""
-        return os.path.join(self.data_dir, "executions")
+        return os.path.join(self.data_dir, "runs")
 
     def ensure_directories(self):
         """确保所有存储目录存在"""
@@ -269,7 +286,7 @@ class WorkerConfig:
             self.projects_dir,
             self.venvs_dir,
             self.logs_dir,
-            self.executions_dir,
+            self.runs_dir,
         ]:
             os.makedirs(dir_path, exist_ok=True)
 
@@ -291,6 +308,7 @@ class WorkerConfig:
             "auto_resource_limit": self.auto_resource_limit,
             "transport_mode": self.transport_mode,
             "redis_url": self.redis_url,
+            "redis_namespace": self.redis_namespace,
             "gateway_host": self.gateway_host,
             "gateway_port": self.gateway_port,
             "api_base_url": self.api_base_url,
@@ -321,6 +339,7 @@ class WorkerConfig:
             "task_memory_limit_mb": self.task_memory_limit_mb,
             "transport_mode": self.transport_mode,
             "redis_url": self.redis_url,
+            "redis_namespace": self.redis_namespace,
             "gateway_host": self.gateway_host,
             "gateway_port": self.gateway_port,
             "api_base_url": self.api_base_url,
@@ -528,6 +547,14 @@ def init_worker_config(
     # 合并配置：配置文件 < 环境变量
     merged_config = {**file_config, **env_config}
 
+    # 规范化路径配置（所有路径统一归到 data/ 下；相对路径基于项目根目录）
+    if merged_config.get("data_dir"):
+        merged_config["data_dir"] = _normalize_path(str(merged_config["data_dir"]))
+
+    for key in ("projects_dir", "venvs_dir", "logs_dir", "runs_dir", "wal_dir", "spool_dir"):
+        if merged_config.get(key):
+            merged_config[key] = _normalize_path(str(merged_config[key]))
+
     # 命令行参数覆盖（仅当显式设置或上层未提供）
     if name != "Worker-001" or "name" not in merged_config:
         merged_config["name"] = name
@@ -547,6 +574,8 @@ def init_worker_config(
         _apply_override("transport_mode", kwargs["transport_mode"], "gateway")
     if "redis_url" in kwargs:
         _apply_override("redis_url", kwargs["redis_url"], "redis://localhost:6379/0")
+    if "redis_namespace" in kwargs:
+        _apply_override("redis_namespace", kwargs["redis_namespace"], "antcode")
     if "gateway_host" in kwargs:
         _apply_override("gateway_host", kwargs["gateway_host"], "localhost")
     if "gateway_port" in kwargs:
@@ -558,6 +587,7 @@ def init_worker_config(
             "host",
             "transport_mode",
             "redis_url",
+            "redis_namespace",
             "gateway_host",
             "gateway_port",
         ):

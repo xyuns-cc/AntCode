@@ -83,7 +83,7 @@ class UserService extends BaseService {
    * 重置用户密码
    */
   async resetPassword(id: string, newPassword: string): Promise<void> {
-    return this.post(`/${id}/reset-password`, { new_password: newPassword })
+    return this.put(`/${id}/reset-password`, { new_password: newPassword })
   }
 
   /**

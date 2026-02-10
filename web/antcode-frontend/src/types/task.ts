@@ -81,11 +81,11 @@ export interface Task {
   executions?: TaskExecution[]
 }
 
-// 任务执行记录（对齐后端 TaskRunResponse，保留向前兼容字段为可选）
+// 任务执行记录（对齐后端 TaskRunResponse）
 export interface TaskExecution {
   id: string
   task_id: string
-  execution_id: string
+  run_id: string
 
   start_time: string
   end_time?: string
@@ -195,7 +195,7 @@ export interface TaskResult {
 // 任务日志
 export interface TaskLog {
   id: string
-  execution_id: string
+  run_id: string
   level: 'debug' | 'info' | 'warning' | 'error'
   message: string
   timestamp: string

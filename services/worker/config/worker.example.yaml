@@ -1,8 +1,10 @@
 # AntCode Worker 配置示例
-# 复制此文件为 worker.yaml 并根据需要修改
+#
+# 推荐位置（新架构默认读取）：data/worker/worker_config.yaml
+# 你可以复制此文件到该位置并按需修改。
 
 # 基本配置
-name: "Worker-Node"
+name: "Worker-001"
 port: 8001                    # 健康检查端口
 region: "默认"
 version: "0.1.0"
@@ -39,7 +41,7 @@ flow_control_rate: 100.0               # 令牌补充速率（请求/秒）
 flow_control_capacity: 200             # 令牌桶容量
 
 # 存储配置
-data_dir: "var/worker"
+data_dir: "data/worker"
 
 # 日志清理
 log_retention_days: 7

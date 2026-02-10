@@ -270,8 +270,8 @@ class WorkerService:
         deleted = {
             "heartbeats": 0,
             "permissions": 0,
-            "venvs": 0,
-            "venv_bindings": 0,
+            "runtimes": 0,
+            "runtime_bindings": 0,
             "worker_projects": 0,
             "worker_project_files": 0,
             "task_executions": 0,
@@ -290,14 +290,14 @@ class WorkerService:
                 worker_id=worker_internal_id
             ).delete()
 
-            # 3. 删除 Worker 上的虚拟环境及其绑定
+            # 3. 删除 Worker 上的运行时及其绑定
             runtimes = await Runtime.filter(worker_id=worker_internal_id).all()
             if runtimes:
                 runtime_ids = [r.id for r in runtimes]
-                deleted["venv_bindings"] = await ProjectRuntimeBinding.filter(
+                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(
                     runtime_id__in=runtime_ids
                 ).delete()
-                deleted["venvs"] = await Runtime.filter(id__in=runtime_ids).delete()
+                deleted["runtimes"] = await Runtime.filter(id__in=runtime_ids).delete()
 
             # 4. 删除 Worker 项目绑定
             worker_projects = await WorkerProject.filter(worker_id=worker_internal_id).all()

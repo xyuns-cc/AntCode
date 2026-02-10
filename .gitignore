@@ -113,3 +113,24 @@ CLAUDE.md
 demo.py
 dummy_task.py
 DOCS_CLEANUP_SUMMARY.md
+
+# Test files and test directories
+# 禁止上传测试相关内容
+/tests/
+**/tests/
+**/__tests__/
+*.test.py
+*.spec.py
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+
+# Environment files (strict)
+# 禁止上传任何 env 文件（含示例模板）
+.env*
+**/.env*
+*.env*
+# Keep example env templates
+!.env.example
+!**/.env.example

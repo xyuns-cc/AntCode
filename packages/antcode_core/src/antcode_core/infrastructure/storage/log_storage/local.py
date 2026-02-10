@@ -38,7 +38,7 @@ class LocalLogStorage(LogStorageBackend):
         """初始化本地日志存储
         
         Args:
-            base_dir: 基础目录，默认为 data/storage
+            base_dir: 基础目录，默认为 data/backend/storage
         """
         from antcode_core.common.config import settings
         self.base_dir = Path(base_dir or os.path.join(settings.data_dir, "storage"))
@@ -189,7 +189,7 @@ class LocalLogStorage(LogStorageBackend):
             if checksum and actual_checksum != checksum:
                 return WriteResult(
                     success=False,
-                    error=f"校验和不匹配",
+                    error="校验和不匹配",
                 )
             
             # 压缩并保存

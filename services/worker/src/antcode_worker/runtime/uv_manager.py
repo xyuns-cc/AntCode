@@ -228,6 +228,8 @@ class UVManager:
                     "created_at": manifest.get("created_at"),
                     "created_by": manifest.get("created_by"),
                     "packages_count": manifest.get("packages_count", 0),
+                    "key": manifest.get("key"),
+                    "description": manifest.get("description"),
                     "scope": scope_value,
                 }
             )
@@ -238,6 +240,58 @@ class UVManager:
         """获取虚拟环境详情"""
         envs = await self.list_envs()
         return next((e for e in envs if e["name"] == env_name), None)
+
+    async def update_env(
+        self,
+        env_name: str,
+        key: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """更新虚拟环境元数据（manifest）"""
+        lock = self._get_lock(f"env:{env_name}")
+        async with lock:
+            venv_path = self._get_venv_path(env_name)
+            if not os.path.exists(venv_path):
+                raise RuntimeError(f"虚拟环境 {env_name} 不存在")
+
+            manifest_path = os.path.join(venv_path, "manifest.json")
+            manifest: dict = {}
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, encoding="utf-8") as f:
+                        manifest = ujson.load(f)
+                except Exception:
+                    manifest = {}
+
+            manifest.setdefault("name", env_name)
+            manifest.setdefault("created_at", datetime.now().isoformat())
+
+            if key is None:
+                manifest.pop("key", None)
+            else:
+                normalized_key = key.strip()
+                if normalized_key:
+                    manifest["key"] = normalized_key
+                else:
+                    manifest.pop("key", None)
+
+            if description is None:
+                manifest.pop("description", None)
+            else:
+                normalized_desc = description.strip()
+                if normalized_desc:
+                    manifest["description"] = normalized_desc
+                else:
+                    manifest.pop("description", None)
+
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                ujson.dump(manifest, f, ensure_ascii=False, indent=2)
+
+            env_data = await self.get_env(env_name)
+            if not env_data:
+                raise RuntimeError("环境更新后读取失败")
+
+            return env_data
 
     async def create_env(
         self,

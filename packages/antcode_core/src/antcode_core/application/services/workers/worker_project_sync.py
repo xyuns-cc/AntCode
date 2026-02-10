@@ -47,9 +47,10 @@ class WorkerProjectSyncService:
         project_download_info: dict[str, dict] = {}
 
         project_map: dict[str, Project] = {}
-        if project_ids:
-            projects = await Project.filter(public_id__in=list(set(project_ids))).all()
-            project_map = {p.public_id: p for p in projects}
+        for project_id in set(project_ids):
+            project = await Project.get_or_none(public_id=project_id)
+            if project:
+                project_map[project.public_id] = project
 
         for project_id in project_ids:
             try:

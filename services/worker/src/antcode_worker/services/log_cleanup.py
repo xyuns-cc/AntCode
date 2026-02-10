@@ -23,7 +23,7 @@ class CleanupResult:
     directories_cleaned: int = 0
     files_cleaned: int = 0
     bytes_freed: int = 0
-    execution_ids: list = field(default_factory=list)
+    run_ids: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     skipped_incomplete: int = 0  # 跳过的未完成传输数
 
@@ -37,7 +37,7 @@ class LogCleanupService:
     1. 日志目录修改时间超过 retention_days 天
     2. 日志传输已完成（.meta 文件中 completed=true）
 
-    日志目录结构: {logs_dir}/{execution_id}/
+    日志目录结构: {logs_dir}/{run_id}/
 
     Requirements: 6.1
     """
@@ -180,10 +180,10 @@ class LogCleanupService:
             for entry in os.scandir(self._logs_dir):
                 if not entry.is_dir():
                     continue
-                if entry.name == "spool":
+                if entry.name in {"spool", "wal"}:
                     continue
 
-                execution_id = entry.name
+                run_id = entry.name
 
                 try:
                     # 检查目录修改时间
@@ -196,7 +196,7 @@ class LogCleanupService:
                     if not self._is_transfer_completed(entry.path):
                         result.skipped_incomplete += 1
                         logger.debug(
-                            f"跳过未完成传输的日志目录: execution_id={execution_id}"
+                            f"跳过未完成传输的日志目录: run_id={run_id}"
                         )
                         continue
 
@@ -208,18 +208,18 @@ class LogCleanupService:
 
                     result.directories_cleaned += 1
                     result.bytes_freed += dir_size
-                    result.execution_ids.append(execution_id)
+                    result.run_ids.append(run_id)
 
                     # 记录清理日志（Requirements: 6.1）
                     logger.info(
                         f"清理过期 Worker 日志目录: "
-                        f"execution_id={execution_id}, "
+                        f"run_id={run_id}, "
                         f"freed={self._format_bytes(dir_size)}"
                     )
 
                 except OSError as e:
                     logger.warning(f"清理目录失败 {entry.path}: {e}")
-                    result.errors.append(f"{execution_id}: {e}")
+                    result.errors.append(f"{run_id}: {e}")
 
         except OSError as e:
             logger.error(f"扫描日志目录失败: {e}")
@@ -310,25 +310,25 @@ class LogCleanupService:
             size /= 1024
         return f"{size:.1f}PB"
 
-    async def cleanup_execution(self, execution_id: str, force: bool = False) -> dict:
+    async def cleanup_execution(self, run_id: str, force: bool = False) -> dict:
         """
         清理指定执行 ID 的日志
 
         Args:
-            execution_id: 执行 ID
+            run_id: 执行 ID
             force: 是否强制清理（忽略传输完成状态）
 
         Returns:
             清理结果字典
         """
         result = {
-            "execution_id": execution_id,
+            "run_id": run_id,
             "cleaned": False,
             "bytes_freed": 0,
             "error": None,
         }
 
-        log_dir = self._logs_dir / execution_id
+        log_dir = self._logs_dir / run_id
         if not log_dir.exists():
             result["error"] = "目录不存在"
             return result
@@ -347,7 +347,7 @@ class LogCleanupService:
 
             logger.info(
                 f"清理 Worker 日志目录: "
-                f"execution_id={execution_id}, "
+                f"run_id={run_id}, "
                 f"freed={self._format_bytes(dir_size)}"
             )
         except OSError as e:

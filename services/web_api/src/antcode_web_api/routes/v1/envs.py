@@ -1,13 +1,13 @@
 """环境管理接口
 
-Python 解释器和虚拟环境管理 API。
+Python 解释器和运行时管理 API。
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+import re
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from loguru import logger
@@ -15,10 +15,10 @@ from pydantic import BaseModel
 from tortoise.expressions import Q
 
 from antcode_core.common.config import settings
-from antcode_web_api.response import page as page_response, success
+from antcode_web_api.response import page as page_response
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import Project, User
-from antcode_core.domain.models.enums import InterpreterSource, RuntimeScope
+from antcode_core.domain.models.enums import InterpreterSource, RuntimeKind, RuntimeScope
 from antcode_core.domain.models.runtime import Interpreter, ProjectRuntimeBinding, Runtime
 from antcode_core.domain.schemas.runtime import (
     InterpreterInfo,
@@ -31,6 +31,7 @@ router = APIRouter(tags=["环境管理"])
 
 # 安装锁
 _install_locks: dict[str, asyncio.Lock] = {}
+_SAFE_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _lock_for(version: str) -> asyncio.Lock:
@@ -40,8 +41,105 @@ def _lock_for(version: str) -> asyncio.Lock:
     return _install_locks[key]
 
 
+def _normalize_path_component(value: str, field_name: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail=f"{field_name} 不能为空")
+    if "/" in normalized or "\\" in normalized or ".." in normalized or "\x00" in normalized:
+        raise HTTPException(status_code=400, detail=f"{field_name} 包含非法路径字符")
+    if not _SAFE_PATH_COMPONENT_RE.fullmatch(normalized):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} 仅允许字母、数字、点、下划线和短横线",
+        )
+    return normalized
+
+
+def _safe_join_runtime_path(base_dir: str, component: str, field_name: str) -> str:
+    safe_component = _normalize_path_component(component, field_name)
+    base_abs = os.path.abspath(base_dir)
+    candidate = os.path.abspath(os.path.join(base_abs, safe_component))
+    if os.path.commonpath([base_abs, candidate]) != base_abs:
+        raise HTTPException(status_code=400, detail=f"{field_name} 非法")
+    return candidate
+
+
+async def _get_current_user_or_401(current_user: TokenData) -> User:
+    user = await User.get_or_none(id=current_user.user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或会话已失效")
+    return user
+
+
+async def _ensure_admin_user(current_user: TokenData) -> User:
+    user = await _get_current_user_or_401(current_user)
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
+async def _resolve_project(project_id: str) -> Project:
+    try:
+        internal_id = int(project_id)
+        project = await Project.get_or_none(id=internal_id)
+    except (ValueError, TypeError):
+        project = await Project.get_or_none(public_id=str(project_id))
+
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
+    return project
+
+
+async def _ensure_project_access(project_id: str, current_user: TokenData) -> Project:
+    project = await _resolve_project(project_id)
+    user = await _get_current_user_or_401(current_user)
+    if not user.is_admin and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该项目")
+    return project
+
+
+async def _resolve_runtime(runtime_id: str) -> Runtime:
+    try:
+        internal_id = int(runtime_id)
+        runtime = await Runtime.get_or_none(id=internal_id)
+    except (ValueError, TypeError):
+        runtime = await Runtime.get_or_none(public_id=str(runtime_id))
+
+    if not runtime:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="运行时不存在")
+    return runtime
+
+
+async def _ensure_runtime_access(runtime: Runtime, current_user: TokenData) -> None:
+    user = await _get_current_user_or_401(current_user)
+    if user.is_admin:
+        return
+
+    runtime_scope = runtime.scope.value if hasattr(runtime.scope, "value") else str(runtime.scope)
+    if runtime_scope == RuntimeScope.SHARED.value:
+        if runtime.created_by == current_user.user_id:
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该共享环境")
+
+    bindings = await ProjectRuntimeBinding.filter(runtime_id=runtime.id, is_current=True).all()
+    if not bindings:
+        if runtime.created_by == current_user.user_id:
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该私有环境")
+
+    project_ids = [binding.project_id for binding in bindings]
+    has_owned_project = await Project.filter(
+        id__in=project_ids,
+        user_id=current_user.user_id,
+    ).exists()
+    if has_owned_project:
+        return
+
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该私有环境")
+
+
 class EnvConfigResponse(BaseModel):
-    venv_root: str
+    runtime_root: str
     mise_root: str
 
 
@@ -49,8 +147,9 @@ class EnvConfigResponse(BaseModel):
 
 
 @router.get("/python/versions", response_model=PythonVersionListResponse)
-async def list_python_versions():
+async def list_python_versions(current_user: TokenData = Depends(get_current_user)):
     """列出 mise 支持的 Python 版本。"""
+    await _ensure_admin_user(current_user)
     try:
         from antcode_core.common.command_runner import run_command
 
@@ -79,8 +178,12 @@ async def list_python_versions():
 
 
 @router.get("/python/interpreters", response_model=list[InterpreterInfo])
-async def list_python_interpreters(source: str = Query(None)):
+async def list_python_interpreters(
+    source: str = Query(None),
+    current_user: TokenData = Depends(get_current_user),
+):
     """列出已注册的 Python 解释器。"""
+    await _ensure_admin_user(current_user)
     try:
         query = Interpreter.filter(tool="python")
         if source:
@@ -195,8 +298,13 @@ async def register_local_interpreter(
 
 
 @router.delete("/python/interpreters/{version}", status_code=status.HTTP_204_NO_CONTENT)
-async def uninstall_python_interpreter(version: str, source: str = Query("mise")):
+async def uninstall_python_interpreter(
+    version: str,
+    source: str = Query("mise"),
+    current_user: TokenData = Depends(get_current_user),
+):
     """卸载或删除解释器。"""
+    await _ensure_admin_user(current_user)
     try:
         if source in ("local", "system"):
             deleted = await Interpreter.filter(tool="python", version=version, source=source).delete()
@@ -213,11 +321,11 @@ async def uninstall_python_interpreter(version: str, source: str = Query("mise")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-# ==================== 虚拟环境管理 ====================
+# ==================== 运行时管理 ====================
 
 
-@router.get("/venvs")
-async def list_venvs(
+@router.get("")
+async def list_runtimes(
     scope: str = None,
     project_id: int = None,
     q: str = None,
@@ -229,7 +337,7 @@ async def list_venvs(
     worker_id: str = Query(None, description="Worker ID 筛选"),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """分页列出虚拟环境。"""
+    """分页列出运行时。"""
     from antcode_core.domain.models import Worker
 
     try:
@@ -237,12 +345,12 @@ async def list_venvs(
         if scope is not None:
             query = query.filter(scope=scope)
         if project_id is not None:
-            venv_ids = await ProjectRuntimeBinding.filter(
+            runtime_ids = await ProjectRuntimeBinding.filter(
                 project_id=project_id, is_current=True
             ).values_list("runtime_id", flat=True)
-            query = query.filter(id__in=list(venv_ids))
+            query = query.filter(id__in=list(runtime_ids))
         if q:
-            query = query.filter(Q(venv_path__icontains=q) | Q(key__icontains=q) | Q(version__icontains=q))
+            query = query.filter(Q(runtime_locator__icontains=q) | Q(key__icontains=q) | Q(version__icontains=q))
 
         # 节点筛选
         if worker_id:
@@ -261,13 +369,13 @@ async def list_venvs(
         if not is_admin:
             created_filter = Q(created_by=current_user.user_id)
             my_project_ids = await Project.filter(user_id=current_user.user_id).values_list("id", flat=True)
-            my_venv_ids = []
+            my_runtime_ids = []
             if my_project_ids:
-                my_venv_ids = await ProjectRuntimeBinding.filter(
+                my_runtime_ids = await ProjectRuntimeBinding.filter(
                     project_id__in=list(my_project_ids), is_current=True
                 ).values_list("runtime_id", flat=True)
-            if my_venv_ids:
-                query = query.filter(created_filter | Q(id__in=list(my_venv_ids)))
+            if my_runtime_ids:
+                query = query.filter(created_filter | Q(id__in=list(my_runtime_ids)))
             else:
                 query = query.filter(created_filter)
 
@@ -297,10 +405,12 @@ async def list_venvs(
 
             item = RuntimeListItem(
                 id=v.public_id,
+                runtime_kind=v.runtime_kind,
                 scope=v.scope,
                 key=v.key or "",
                 version=v.version,
-                venv_path=v.venv_path,
+                runtime_locator=v.runtime_locator,
+                runtime_details=v.runtime_details or {},
                 interpreter_version=interpreter.version if interpreter else "",
                 interpreter_source=interpreter.source.value if interpreter and hasattr(interpreter.source, "value") else "",
                 python_bin=interpreter.python_bin if interpreter else "",
@@ -315,23 +425,23 @@ async def list_venvs(
 
         return page_response(items=data, total=total, page=page, size=size)
     except Exception as e:
-        logger.error(f"列出虚拟环境失败: {e}")
+        logger.error(f"列出运行时失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/venvs/{venv_id}/packages")
-async def list_venv_packages(venv_id: str):
-    """按 venv_id 列出依赖包。"""
+@router.get("/{runtime_id}/packages")
+async def list_runtime_packages(
+    runtime_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """按 runtime_id 列出依赖包。"""
     try:
         from antcode_core.common.command_runner import run_command
 
-        try:
-            internal_id = int(venv_id)
-            venv = await Runtime.get(id=internal_id)
-        except (ValueError, TypeError):
-            venv = await Runtime.get(public_id=str(venv_id))
+        runtime = await _resolve_runtime(runtime_id)
+        await _ensure_runtime_access(runtime, current_user)
 
-        py = _venv_python(venv.venv_path)
+        py = _runtime_python(runtime.runtime_locator)
         res = await run_command(["uv", "pip", "list", "--format", "json", "--python", py], timeout=120)
         if res.exit_code != 0 or not res.stdout.strip():
             res = await run_command([py, "-m", "pip", "list", "--format", "json"], timeout=120)
@@ -340,46 +450,43 @@ async def list_venv_packages(venv_id: str):
         import json
 
         packages = json.loads(res.stdout) if res.stdout.strip() else []
-        return {"venv_id": venv.public_id, "packages": packages}
+        return {"runtime_id": runtime.public_id, "packages": packages}
     except Exception as e:
         logger.error(f"获取依赖失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _venv_python(venv_dir: str) -> str:
-    """获取虚拟环境的 Python 可执行文件路径。"""
+def _runtime_python(runtime_dir: str) -> str:
+    """获取运行时的 Python 可执行文件路径。"""
     candidates = [
-        os.path.join(venv_dir, "bin", "python"),
-        os.path.join(venv_dir, "bin", "python3"),
-        os.path.join(venv_dir, "Scripts", "python.exe"),
+        os.path.join(runtime_dir, "bin", "python"),
+        os.path.join(runtime_dir, "bin", "python3"),
+        os.path.join(runtime_dir, "Scripts", "python.exe"),
     ]
     return next((p for p in candidates if os.path.exists(p)), candidates[0])
 
 
-@router.post("/venvs/{venv_id}/packages", status_code=status.HTTP_200_OK)
-async def install_packages_to_venv(
-    venv_id: str,
+@router.post("/{runtime_id}/packages", status_code=status.HTTP_200_OK)
+async def install_packages_to_runtime(
+    runtime_id: str,
     packages: list[str] = Body(..., embed=True),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """向指定 venv 安装依赖。"""
+    """向指定 runtime 安装依赖。"""
     try:
         from antcode_core.common.command_runner import run_command
 
         if not packages:
             raise HTTPException(status_code=400, detail="packages 必须为非空列表")
-        try:
-            internal_id = int(venv_id)
-            venv = await Runtime.get(id=internal_id)
-        except (ValueError, TypeError):
-            venv = await Runtime.get(public_id=str(venv_id))
+        runtime = await _resolve_runtime(runtime_id)
+        await _ensure_runtime_access(runtime, current_user)
 
-        py = _venv_python(venv.venv_path)
+        py = _runtime_python(runtime.runtime_locator)
         args = ["uv", "pip", "install", "-q", "--python", py] + packages
         res = await run_command(args, timeout=1800)
         if res.exit_code != 0:
             raise RuntimeError(f"安装依赖失败: {res.stderr.strip() or res.stdout.strip()}")
-        return {"venv_id": venv.public_id, "installed": packages}
+        return {"runtime_id": runtime.public_id, "installed": packages}
     except HTTPException:
         raise
     except Exception as e:
@@ -387,23 +494,25 @@ async def install_packages_to_venv(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/venvs", status_code=status.HTTP_201_CREATED)
-async def create_shared_venv(
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def create_shared_runtime(
     version: str = Body(...),
-    shared_venv_key: str = Body(None),
+    shared_runtime_key: str = Body(None),
     interpreter_source: str = Body("mise"),
     python_bin: str = Body(None),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """创建或复用共享虚拟环境。"""
+    """创建或复用共享运行时。"""
+    await _ensure_admin_user(current_user)
     try:
         from antcode_core.common.command_runner import run_command
 
-        ident = shared_venv_key or version
-        venv_root = os.path.join(settings.VENV_STORAGE_ROOT, "shared")
-        venv_dir = os.path.join(venv_root, ident)
+        version = _normalize_path_component(version, "version")
+        ident = _normalize_path_component(shared_runtime_key or version, "shared_runtime_key")
+        runtime_root = os.path.join(settings.VENV_STORAGE_ROOT, "shared")
+        runtime_dir = _safe_join_runtime_path(runtime_root, ident, "shared_runtime_key")
 
-        os.makedirs(venv_root, exist_ok=True)
+        os.makedirs(runtime_root, exist_ok=True)
 
         # 确保解释器存在
         if interpreter_source == "local":
@@ -438,79 +547,80 @@ async def create_shared_venv(
                         status="installed", source=InterpreterSource.MISE, created_by=current_user.user_id,
                     )
 
-        if not os.path.exists(venv_dir):
-            os.makedirs(venv_dir, exist_ok=True)
-            res = await run_command(["uv", "venv", venv_dir, "--python", python_exe], timeout=900)
+        if not os.path.exists(runtime_dir):
+            os.makedirs(runtime_dir, exist_ok=True)
+            res = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
             if res.exit_code != 0:
-                raise RuntimeError(f"创建共享虚拟环境失败: {res.stderr.strip()}")
+                raise RuntimeError(f"创建共享运行时失败: {res.stderr.strip()}")
 
         interpreter = await Interpreter.filter(tool="python", version=version).first()
         if not interpreter:
             raise RuntimeError(f"未找到 Python {version} 解释器")
-        venv_obj = await Runtime.get_or_none(venv_path=venv_dir)
-        if not venv_obj:
-            venv_obj = await Runtime.create(
-                scope=RuntimeScope.SHARED, key=ident, version=version, venv_path=venv_dir,
+        runtime_obj = await Runtime.get_or_none(runtime_locator=runtime_dir)
+        if not runtime_obj:
+            runtime_obj = await Runtime.create(
+                runtime_kind=RuntimeKind.PYTHON, scope=RuntimeScope.SHARED, key=ident, version=version, runtime_locator=runtime_dir, runtime_details={"python_version": version},
                 interpreter_id=interpreter.id, created_by=current_user.user_id,
             )
 
-        return {"version": version, "venv_path": venv_dir, "key": ident, "venv_id": venv_obj.public_id}
+        return {"version": version, "runtime_locator": runtime_dir, "key": ident, "runtime_id": runtime_obj.public_id}
     except Exception as e:
         logger.error(f"创建共享环境失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/venvs/{venv_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_venv(
-    venv_id: str,
+@router.delete("/{runtime_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_runtime(
+    runtime_id: str,
     allow_private: bool = Query(False),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """删除虚拟环境。"""
+    """删除运行时。"""
     try:
         try:
-            internal_id = int(venv_id)
-            venv = await Runtime.get(id=internal_id)
+            internal_id = int(runtime_id)
+            runtime = await Runtime.get(id=internal_id)
         except (ValueError, TypeError):
-            venv = await Runtime.get(public_id=str(venv_id))
+            runtime = await Runtime.get(public_id=str(runtime_id))
 
         user = await User.get_or_none(id=current_user.user_id)
         is_admin = bool(user and getattr(user, "is_admin", False))
 
-        if venv.scope == RuntimeScope.SHARED or venv.scope == "shared":
-            if not (is_admin or venv.created_by == current_user.user_id):
+        if runtime.scope == RuntimeScope.SHARED or runtime.scope == "shared":
+            if not (is_admin or runtime.created_by == current_user.user_id):
                 raise HTTPException(status_code=403, detail="无权删除该共享环境")
             # 检查是否有绑定
-            bindings = await ProjectRuntimeBinding.filter(runtime_id=venv.id).all()
+            bindings = await ProjectRuntimeBinding.filter(runtime_id=runtime.id).all()
             if bindings:
                 project_ids = [b.project_id for b in bindings]
                 projects = await Project.filter(id__in=project_ids).all()
                 project_names = [p.name for p in projects]
-                raise HTTPException(status_code=400, detail=f"该虚拟环境正在被以下项目使用: {', '.join(project_names)}")
-            await _safe_rmtree(venv.venv_path)
-            await venv.delete()
+                raise HTTPException(status_code=400, detail=f"该运行时正在被以下项目使用: {', '.join(project_names)}")
+            await _safe_rmtree(runtime.runtime_locator)
+            await runtime.delete()
             return
 
         # private
         if not allow_private:
             raise HTTPException(status_code=400, detail="不允许删除私有环境（需要 allow_private=true）")
-        bind = await ProjectRuntimeBinding.filter(runtime_id=venv.id, is_current=True).first()
+        bind = await ProjectRuntimeBinding.filter(runtime_id=runtime.id, is_current=True).first()
         if not bind:
-            await _safe_rmtree(venv.venv_path)
-            await venv.delete()
+            await _safe_rmtree(runtime.runtime_locator)
+            await runtime.delete()
             return
         project = await Project.get(id=bind.project_id)
         if not (is_admin or project.user_id == current_user.user_id):
             raise HTTPException(status_code=403, detail="无权删除该项目的私有环境")
-        await _safe_rmtree(venv.venv_path)
+        await _safe_rmtree(runtime.runtime_locator)
         await ProjectRuntimeBinding.filter(project_id=bind.project_id).delete()
         project.current_runtime_id = None
-        project.venv_path = None
+        project.runtime_locator = None
         project.python_version = None
         project.runtime_scope = None
+        project.runtime_kind = None
         await project.save()
         try:
-            await venv.delete()
+            await runtime.delete()
         except Exception:
             pass
     except HTTPException:
@@ -524,10 +634,10 @@ async def _safe_rmtree(path: str | None) -> None:
     """安全删除目录。"""
     if not path or not os.path.exists(path):
         return
-    venvs_root = settings.VENV_STORAGE_ROOT
+    runtime_root = settings.VENV_STORAGE_ROOT
     abs_path = os.path.abspath(path)
-    if not abs_path.startswith(os.path.abspath(venvs_root) + os.sep):
-        logger.warning(f"拒绝删除非 venv 路径: {abs_path}")
+    if not abs_path.startswith(os.path.abspath(runtime_root) + os.sep):
+        logger.warning(f"拒绝删除非 runtime 路径: {abs_path}")
         return
     for root, dirs, files in os.walk(abs_path, topdown=False):
         for name in files:
@@ -546,59 +656,56 @@ async def _safe_rmtree(path: str | None) -> None:
         pass
 
 
-@router.post("/venvs/batch-delete", status_code=status.HTTP_200_OK)
-async def batch_delete_venvs(
+@router.post("/batch-delete", status_code=status.HTTP_200_OK)
+async def batch_delete_runtimes(
     ids: list[str] = Body(..., embed=True),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """批量删除虚拟环境。"""
+    """批量删除运行时。"""
+    await _ensure_admin_user(current_user)
     if not ids:
         raise HTTPException(status_code=400, detail="ids 必须为非空数组")
     success_count = 0
     failed: list[str] = []
     for vid in ids:
         try:
-            try:
-                internal_id = int(vid)
-                venv = await Runtime.get(id=internal_id)
-            except (ValueError, TypeError):
-                venv = await Runtime.get(public_id=str(vid))
-            bindings = await ProjectRuntimeBinding.filter(runtime_id=venv.id).all()
+            runtime = await _resolve_runtime(str(vid))
+            bindings = await ProjectRuntimeBinding.filter(runtime_id=runtime.id).all()
             if bindings:
                 failed.append(str(vid))
                 continue
-            await _safe_rmtree(venv.venv_path)
-            await venv.delete()
+            await _safe_rmtree(runtime.runtime_locator)
+            await runtime.delete()
             success_count += 1
         except Exception:
             failed.append(str(vid))
     return {"total": len(ids), "deleted": success_count, "failed": failed}
 
 
-@router.patch("/venvs/{venv_id}")
-async def update_shared_venv(
-    venv_id: str,
+@router.patch("/{runtime_id}")
+async def update_shared_runtime(
+    runtime_id: str,
     key: str = Body(None, embed=True),
     current_user: TokenData = Depends(get_current_user),
 ):
     """编辑共享环境。"""
     try:
         try:
-            internal_id = int(venv_id)
-            venv = await Runtime.get(id=internal_id)
+            internal_id = int(runtime_id)
+            runtime = await Runtime.get(id=internal_id)
         except (ValueError, TypeError):
-            venv = await Runtime.get(public_id=str(venv_id))
+            runtime = await Runtime.get(public_id=str(runtime_id))
 
-        if venv.scope != RuntimeScope.SHARED and venv.scope != "shared":
+        if runtime.scope != RuntimeScope.SHARED and runtime.scope != "shared":
             raise HTTPException(status_code=400, detail="仅共享环境支持编辑")
         user = await User.get_or_none(id=current_user.user_id)
         is_admin = bool(user and getattr(user, "is_admin", False))
-        if not (is_admin or venv.created_by == current_user.user_id):
+        if not (is_admin or runtime.created_by == current_user.user_id):
             raise HTTPException(status_code=403, detail="无权编辑该共享环境")
         if key is not None:
-            venv.key = key
-            await venv.save()
-        return {"id": venv.public_id, "key": venv.key}
+            runtime.key = key
+            await runtime.save()
+        return {"id": runtime.public_id, "key": runtime.key}
     except HTTPException:
         raise
     except Exception as e:
@@ -606,58 +713,60 @@ async def update_shared_venv(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# ==================== 项目虚拟环境管理 ====================
+# ==================== 项目运行时管理 ====================
 
 
-@router.get("/projects/{project_id}/venv", response_model=RuntimeStatusResponse)
-async def get_project_venv(project_id: str):
-    """获取项目虚拟环境状态。"""
+@router.get("/projects/{project_id}/runtime", response_model=RuntimeStatusResponse)
+async def get_project_runtime(
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """获取项目运行时状态。"""
     try:
-        try:
-            internal_id = int(project_id)
-            project = await Project.get(id=internal_id)
-        except (ValueError, TypeError):
-            project = await Project.get(public_id=str(project_id))
+        project = await _ensure_project_access(project_id, current_user)
 
         return RuntimeStatusResponse(
             project_id=project.public_id,
+            runtime_kind=project.runtime_kind or RuntimeKind.PYTHON,
             scope=project.runtime_scope.value if project.runtime_scope and hasattr(project.runtime_scope, "value") else (project.runtime_scope or ""),
             version=project.python_version or "",
-            venv_path=project.venv_path or "",
+            runtime_locator=project.runtime_locator or "",
         )
     except Exception as e:
-        logger.error(f"获取 venv 状态失败: {e}")
+        logger.error(f"获取 runtime 状态失败: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.post("/projects/{project_id}/venv", response_model=RuntimeStatusResponse, status_code=status.HTTP_201_CREATED)
-async def create_or_bind_project_venv(
+@router.post("/projects/{project_id}/runtime", response_model=RuntimeStatusResponse, status_code=status.HTTP_201_CREATED)
+async def create_or_bind_project_runtime(
     project_id: str,
     version: str = Body(...),
-    venv_scope: str = Body(...),
-    shared_venv_key: str = Body(None),
+    runtime_scope: str = Body(...),
+    runtime_kind: RuntimeKind = Body(RuntimeKind.PYTHON),
+    shared_runtime_key: str = Body(None),
     create_if_missing: bool = Body(True),
     interpreter_source: str = Body("mise"),
     python_bin: str = Body(None),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """创建/绑定项目虚拟环境。"""
+    """创建/绑定项目运行时。"""
     try:
         from antcode_core.common.command_runner import run_command
 
-        try:
-            internal_id = int(project_id)
-            project = await Project.get(id=internal_id)
-        except (ValueError, TypeError):
-            project = await Project.get(public_id=str(project_id))
+        project = await _ensure_project_access(project_id, current_user)
+        version = _normalize_path_component(version, "version")
+        if shared_runtime_key:
+            shared_runtime_key = _normalize_path_component(shared_runtime_key, "shared_runtime_key")
 
-        scope = RuntimeScope.SHARED if venv_scope == "shared" else RuntimeScope.PRIVATE
+        scope = RuntimeScope.SHARED if runtime_scope == "shared" else RuntimeScope.PRIVATE
+        if runtime_kind != RuntimeKind.PYTHON:
+            raise HTTPException(status_code=400, detail="当前仅支持 python 运行时")
 
         if scope == RuntimeScope.PRIVATE:
             # 私有环境
-            venv_root = os.path.join(settings.VENV_STORAGE_ROOT, str(project.id))
-            venv_dir = os.path.join(venv_root, version)
-            os.makedirs(venv_root, exist_ok=True)
+            runtime_root = os.path.join(settings.VENV_STORAGE_ROOT, str(project.id))
+            runtime_dir = _safe_join_runtime_path(runtime_root, version, "version")
+            os.makedirs(runtime_root, exist_ok=True)
 
             if interpreter_source == "local":
                 if not python_bin:
@@ -674,20 +783,20 @@ async def create_or_bind_project_venv(
                     candidates = [os.path.join(install_dir, "bin", "python"), os.path.join(install_dir, "bin", "python3")]
                     python_exe = next((p for p in candidates if os.path.exists(p)), candidates[0])
 
-            if not os.path.exists(venv_dir):
+            if not os.path.exists(runtime_dir):
                 if not create_if_missing:
-                    raise RuntimeError("虚拟环境不存在且不允许创建")
-                res = await run_command(["uv", "venv", venv_dir, "--python", python_exe], timeout=900)
+                    raise RuntimeError("运行时不存在且不允许创建")
+                res = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
                 if res.exit_code != 0:
-                    raise RuntimeError(f"创建虚拟环境失败: {res.stderr.strip()}")
+                    raise RuntimeError(f"创建运行时失败: {res.stderr.strip()}")
 
-            venv_path = venv_dir
+            runtime_locator = runtime_dir
         else:
             # 共享环境
-            ident = shared_venv_key or version
-            venv_root = os.path.join(settings.VENV_STORAGE_ROOT, "shared")
-            venv_dir = os.path.join(venv_root, ident)
-            os.makedirs(venv_root, exist_ok=True)
+            ident = shared_runtime_key or version
+            runtime_root = os.path.join(settings.VENV_STORAGE_ROOT, "shared")
+            runtime_dir = _safe_join_runtime_path(runtime_root, ident, "shared_runtime_key")
+            os.makedirs(runtime_root, exist_ok=True)
 
             if interpreter_source == "local":
                 if not python_bin:
@@ -704,88 +813,87 @@ async def create_or_bind_project_venv(
                     candidates = [os.path.join(install_dir, "bin", "python"), os.path.join(install_dir, "bin", "python3")]
                     python_exe = next((p for p in candidates if os.path.exists(p)), candidates[0])
 
-            if not os.path.exists(venv_dir):
-                os.makedirs(venv_dir, exist_ok=True)
-                res = await run_command(["uv", "venv", venv_dir, "--python", python_exe], timeout=900)
+            if not os.path.exists(runtime_dir):
+                os.makedirs(runtime_dir, exist_ok=True)
+                res = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
                 if res.exit_code != 0:
-                    raise RuntimeError(f"创建共享虚拟环境失败: {res.stderr.strip()}")
+                    raise RuntimeError(f"创建共享运行时失败: {res.stderr.strip()}")
 
-            venv_path = venv_dir
+            runtime_locator = runtime_dir
 
         # 记录/更新 Runtime 与绑定
         interpreter = await Interpreter.filter(tool="python", version=version).first()
         if not interpreter:
             raise RuntimeError(f"未找到 Python {version} 解释器")
-        venv_obj = await Runtime.get_or_none(venv_path=venv_path)
-        if not venv_obj:
-            venv_obj = await Runtime.create(
-                scope=scope, key=shared_venv_key if scope == RuntimeScope.SHARED else None,
-                version=version, venv_path=venv_path, interpreter_id=interpreter.id,
+        runtime_obj = await Runtime.get_or_none(runtime_locator=runtime_locator)
+        if not runtime_obj:
+            runtime_obj = await Runtime.create(
+                runtime_kind=RuntimeKind.PYTHON, scope=scope, key=shared_runtime_key if scope == RuntimeScope.SHARED else None,
+                version=version, runtime_locator=runtime_locator, runtime_details={"python_version": version}, interpreter_id=interpreter.id,
                 created_by=current_user.user_id,
             )
 
         # 更新项目绑定
         await ProjectRuntimeBinding.filter(project_id=project.id, is_current=True).update(is_current=False)
         await ProjectRuntimeBinding.create(
-            project_id=project.id, runtime_id=venv_obj.id, is_current=True, created_by=current_user.user_id
+            project_id=project.id, runtime_id=runtime_obj.id, is_current=True, created_by=current_user.user_id
         )
 
         # 更新项目字段
         project.python_version = version
         project.runtime_scope = scope
-        project.venv_path = venv_path
-        project.current_runtime_id = venv_obj.id
+        project.runtime_kind = RuntimeKind.PYTHON
+        project.runtime_locator = runtime_locator
+        project.current_runtime_id = runtime_obj.id
         await project.save()
 
-        return RuntimeStatusResponse(project_id=project.public_id, scope=venv_scope, version=version, venv_path=venv_path)
+        return RuntimeStatusResponse(project_id=project.public_id, runtime_kind=runtime_kind, scope=runtime_scope, version=version, runtime_locator=runtime_locator)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"创建/绑定 venv 失败: {e}")
+        logger.error(f"创建/绑定 runtime 失败: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.delete("/projects/{project_id}/venv", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project_venv(project_id: str):
-    """删除项目 venv。"""
+@router.delete("/projects/{project_id}/runtime", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project_runtime(
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """删除项目运行时。"""
     try:
-        try:
-            internal_id = int(project_id)
-            project = await Project.get(id=internal_id)
-        except (ValueError, TypeError):
-            project = await Project.get(public_id=str(project_id))
+        project = await _ensure_project_access(project_id, current_user)
 
-        if project.venv_path:
-            await _safe_rmtree(project.venv_path)
+        if project.runtime_locator:
+            await _safe_rmtree(project.runtime_locator)
 
         # 清理绑定
         await ProjectRuntimeBinding.filter(project_id=project.id).delete()
         project.current_runtime_id = None
-        project.venv_path = None
+        project.runtime_locator = None
         project.python_version = None
         project.runtime_scope = None
         await project.save()
     except Exception as e:
-        logger.error(f"删除 venv 失败: {e}")
+        logger.error(f"删除 runtime 失败: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.get("/projects/{project_id}/venv/packages")
-async def list_project_venv_packages(project_id: str):
-    """列出项目虚拟环境中的依赖包。"""
+@router.get("/projects/{project_id}/runtime/packages")
+async def list_project_runtime_packages(
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """列出项目运行时中的依赖包。"""
     try:
         from antcode_core.common.command_runner import run_command
 
-        try:
-            internal_id = int(project_id)
-            project = await Project.get(id=internal_id)
-        except (ValueError, TypeError):
-            project = await Project.get(public_id=str(project_id))
+        project = await _ensure_project_access(project_id, current_user)
 
-        if not project.venv_path:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目未绑定虚拟环境")
+        if not project.runtime_locator:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目未绑定运行时")
 
-        py = _venv_python(project.venv_path)
+        py = _runtime_python(project.runtime_locator)
         res = await run_command(["uv", "pip", "list", "--format", "json", "--python", py], timeout=120)
         if res.exit_code != 0 or not res.stdout.strip():
             res = await run_command([py, "-m", "pip", "list", "--format", "json"], timeout=120)
@@ -802,28 +910,24 @@ async def list_project_venv_packages(project_id: str):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.post("/projects/{project_id}/venv/packages", status_code=status.HTTP_200_OK)
-async def install_packages_to_project_venv(
+@router.post("/projects/{project_id}/runtime/packages", status_code=status.HTTP_200_OK)
+async def install_packages_to_project_runtime(
     project_id: str,
     packages: list[str] = Body(..., embed=True),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """向项目当前绑定的 venv 安装依赖。"""
+    """向项目当前绑定的 runtime 安装依赖。"""
     try:
         from antcode_core.common.command_runner import run_command
 
         if not packages:
             raise HTTPException(status_code=400, detail="packages 必须为非空列表")
-        try:
-            internal_id = int(project_id)
-            project = await Project.get(id=internal_id)
-        except (ValueError, TypeError):
-            project = await Project.get(public_id=str(project_id))
+        project = await _ensure_project_access(project_id, current_user)
 
-        if not project.venv_path:
-            raise HTTPException(status_code=404, detail="项目未绑定虚拟环境")
+        if not project.runtime_locator:
+            raise HTTPException(status_code=404, detail="项目未绑定运行时")
 
-        py = _venv_python(project.venv_path)
+        py = _runtime_python(project.runtime_locator)
         args = ["uv", "pip", "install", "-q", "--python", py] + packages
         res = await run_command(args, timeout=1800)
         if res.exit_code != 0:
@@ -837,9 +941,10 @@ async def install_packages_to_project_venv(
 
 
 @router.get("/config", response_model=EnvConfigResponse)
-async def get_env_config():
+async def get_env_config(current_user: TokenData = Depends(get_current_user)):
     """返回环境相关的存储配置。"""
+    await _ensure_admin_user(current_user)
     return EnvConfigResponse(
-        venv_root=settings.VENV_STORAGE_ROOT,
+        runtime_root=settings.VENV_STORAGE_ROOT,
         mise_root=getattr(settings, "MISE_DATA_ROOT", ""),
     )

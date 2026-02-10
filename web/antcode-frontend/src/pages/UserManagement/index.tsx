@@ -30,14 +30,16 @@ import ResponsiveTable from '@/components/common/ResponsiveTable'
 import { useAuth } from '@/hooks/useAuth'
 import apiClient from '@/services/api'
 import type { User, ApiResponse, PaginationResponse } from '@/types'
+import { STORAGE_KEYS } from '@/utils/constants'
 import styles from './UserManagement.module.css'
 
 interface UserFormData {
   username: string
-  password: string
   email?: string
   is_active: boolean
   is_admin: boolean
+  old_password?: string
+  new_password?: string
 }
 
 interface PasswordFormData {
@@ -207,9 +209,21 @@ const UserManagement: React.FC = () => {
     if (!selectedUser) return
 
     try {
-      const response = await apiClient.put<ApiResponse<User>>(`/api/v1/users/${selectedUser.id}`, values)
+      const response = await apiClient.put<ApiResponse<User>>(`/api/v1/users/${selectedUser.id}`, {
+        username: values.username,
+        email: values.email,
+        is_active: values.is_active,
+        is_admin: values.is_admin,
+        old_password: values.old_password || undefined,
+        new_password: values.new_password || undefined,
+      })
       
       if (response.data.success) {
+        const updatedUser = response.data.data
+        if (String(selectedUser.id) === String(currentUser?.id) && updatedUser) {
+          localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(updatedUser))
+        }
+
         setEditModalVisible(false)
         editForm.resetFields()
         setSelectedUser(null)
@@ -778,10 +792,11 @@ const UserManagement: React.FC = () => {
                 name="username"
                 rules={[
                   { required: true, message: '请输入用户名' },
-                  { min: 3, message: '用户名至少3个字符' }
+                  { min: 3, message: '用户名至少3个字符' },
+                  { pattern: /^[a-zA-Z0-9_-]+$/, message: '用户名只能包含字母、数字、下划线和横线' }
                 ]}
               >
-                <Input placeholder="请输入用户名" disabled />
+                <Input placeholder="请输入用户名" />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -820,9 +835,55 @@ const UserManagement: React.FC = () => {
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                label="当前密码"
+                name="old_password"
+                rules={[
+                  ({ getFieldValue }) => ({
+                    validator(_, value) {
+                      const newPassword = getFieldValue('new_password')
+                      if (newPassword && !value && selectedUser?.id === currentUser?.id) {
+                        return Promise.reject(new Error('修改自己的密码需输入当前密码'))
+                      }
+                      return Promise.resolve()
+                    }
+                  })
+                ]}
+              >
+                <Input.Password placeholder="如需改密请填写" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                label="新密码"
+                name="new_password"
+                rules={[
+                  {
+                    validator(_, value) {
+                      if (!value) {
+                        return Promise.resolve()
+                      }
+                      if (value.length < 8) {
+                        return Promise.reject(new Error('密码长度至少 8 位'))
+                      }
+                      const strong = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_\-+=[\]\\;'`~]).+$/.test(value)
+                      if (!strong) {
+                        return Promise.reject(new Error('需包含大小写字母、数字和特殊字符'))
+                      }
+                      return Promise.resolve()
+                    }
+                  }
+                ]}
+              >
+                <Input.Password placeholder="留空表示不修改密码" />
+              </Form.Item>
+            </Col>
+          </Row>
           {selectedUser?.id === currentUser?.id && (
             <div style={{ marginBottom: 16, color: token.colorWarning }}>
-              <span>注意：不能修改自己的管理员权限</span>
+              <span>注意：不能修改自己的管理员权限；修改密码需填写当前密码</span>
             </div>
           )}
           <Form.Item>

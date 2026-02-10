@@ -14,10 +14,10 @@ from typing import Any
 from loguru import logger
 
 from antcode_worker.services.credential.base import CredentialStore
-from antcode_worker.config import PROJECT_ROOT
+from antcode_worker.config import DATA_ROOT
 
-# 默认凭证文件路径（统一放在项目根目录 var/worker/secrets 下）
-DEFAULT_CREDENTIAL_FILE = PROJECT_ROOT / "var" / "worker" / "secrets" / "worker_credentials.json"
+# 默认凭证文件路径（统一放在项目根目录 data/worker/secrets 下）
+DEFAULT_CREDENTIAL_FILE = DATA_ROOT / "secrets" / "worker_credentials.json"
 
 
 class FileCredentialStore(CredentialStore):
@@ -34,7 +34,7 @@ class FileCredentialStore(CredentialStore):
         初始化文件凭证存储
 
         Args:
-            credential_file: 凭证文件路径，默认为 runtime_data/secrets/worker_credentials.json
+            credential_file: 凭证文件路径，默认为 data/worker/secrets/worker_credentials.json
         """
         self._credential_file = credential_file or DEFAULT_CREDENTIAL_FILE
 

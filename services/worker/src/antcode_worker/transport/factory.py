@@ -19,6 +19,13 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+from antcode_core.infrastructure.redis import (
+    control_stream,
+    redis_namespace,
+    task_ready_stream,
+    worker_group,
+)
+
 from antcode_worker.transport.base import TransportBase
 
 
@@ -32,9 +39,21 @@ class DirectConfig:
     """Direct 模式配置"""
     redis_url: str = ""
     redis_password: str | None = None
-    consumer_group: str = "antcode-workers"
-    task_stream_prefix: str = "antcode:task:ready:"
-    control_stream_prefix: str = "antcode:control:"
+    redis_namespace: str = redis_namespace()
+    consumer_group: str = ""
+
+    def __post_init__(self) -> None:
+        self.redis_namespace = redis_namespace(self.redis_namespace)
+        if not self.consumer_group:
+            self.consumer_group = worker_group(self.redis_namespace)
+
+    @property
+    def task_stream_prefix(self) -> str:
+        return task_ready_stream("", namespace=self.redis_namespace).rstrip(":") + ":"
+
+    @property
+    def control_stream_prefix(self) -> str:
+        return control_stream("", namespace=self.redis_namespace).rstrip(":") + ":"
 
 
 @dataclass
@@ -145,6 +164,7 @@ def print_transport_banner(config: TransportConfig) -> None:
         banner_lines.extend([
             "  Mode:     DIRECT (内网直连 Redis)",
             f"  Redis:    {redis_url}",
+            f"  Namespace:{redis_namespace(config.direct.redis_namespace)}",
             f"  Group:    {config.direct.consumer_group}",
             f"  Worker:   {config.worker_id}",
             "",
@@ -200,8 +220,8 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
         logger.info("  OK  Redis PING 成功")
 
         # 2. 检查/创建消费者组
-        stream_key = f"{config.direct.task_stream_prefix}{config.worker_id}"
-        group_name = config.direct.consumer_group
+        stream_key = task_ready_stream(config.worker_id, namespace=config.direct.redis_namespace)
+        group_name = config.direct.consumer_group or worker_group(config.direct.redis_namespace)
 
         try:
             await redis_client.xgroup_create(stream_key, group_name, id="0", mkstream=True)
@@ -390,6 +410,8 @@ async def create_transport(
         return RedisTransport(
             redis_url=config.direct.redis_url,
             worker_id=config.worker_id,
+            namespace=config.direct.redis_namespace,
+            consumer_group=config.direct.consumer_group or worker_group(config.direct.redis_namespace),
         )
 
     else:  # gateway
@@ -443,7 +465,15 @@ def build_transport_config_from_env(
 
     # Direct 配置
     config.direct.redis_url = redis_url or os.getenv("WORKER_REDIS_URL", "")
-    config.direct.consumer_group = os.getenv("WORKER_CONSUMER_GROUP", "antcode-workers")
+    config.direct.redis_namespace = redis_namespace(
+        os.getenv("WORKER_REDIS_NAMESPACE")
+        or os.getenv("REDIS_NAMESPACE")
+        or config.direct.redis_namespace
+    )
+    config.direct.consumer_group = os.getenv(
+        "WORKER_CONSUMER_GROUP",
+        worker_group(config.direct.redis_namespace),
+    )
 
     # Gateway 配置
     config.gateway.host = gateway_host or os.getenv("WORKER_GATEWAY_HOST", "localhost")

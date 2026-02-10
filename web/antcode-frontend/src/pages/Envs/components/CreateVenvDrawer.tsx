@@ -75,12 +75,12 @@ const CreateVenvDrawer: React.FC<CreateVenvDrawerProps> = ({ onCreated }) => {
     if (!version) return
     const info = (await envService.createSharedVenv({
       version,
-      shared_venv_key: sharedKey || undefined,
+      shared_runtime_key: sharedKey || undefined,
       interpreter_source: interpreterSource,
       python_bin: interpreterSource === 'local' ? pythonBin : undefined,
-    })) as { venv_id?: number }
-    if (deps && deps.length && info && info.venv_id) {
-      await envService.installPackagesToVenv(String(info.venv_id), deps)
+    })) as { runtime_id?: number }
+    if (deps && deps.length && info && info.runtime_id) {
+      await envService.installPackagesToVenv(String(info.runtime_id), deps)
     }
     setOpen(false)
     setVersion('')

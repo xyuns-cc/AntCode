@@ -132,7 +132,7 @@ async def _init_db() -> None:
     """初始化数据库连接和模式"""
     try:
         await Tortoise.init(config=get_default_tortoise_config())
-        await Tortoise.generate_schemas()
+        await Tortoise.generate_schemas(safe=True)
         await _ensure_task_execution_schema()
         logger.info("数据库已初始化")
     except ConnectionRefusedError:

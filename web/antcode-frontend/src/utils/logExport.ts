@@ -8,7 +8,7 @@ export type ExportFormat = 'txt' | 'json' | 'csv'
 
 // 导出配置接口
 export interface LogExportConfig {
-  executionId: string
+  runId: string
   format: ExportFormat
   includeStdout?: boolean
   includeStderr?: boolean
@@ -22,17 +22,17 @@ export interface LogExportConfig {
 export class LogExporter {
   // 导出日志文件内容
   static async exportLogFile(config: LogExportConfig): Promise<void> {
-    const { executionId, format, includeStdout = true, includeStderr = true } = config
+    const { runId, format, includeStdout = true, includeStderr = true } = config
 
     try {
       const promises: Promise<LogFileResponse>[] = []
       
       if (includeStdout) {
-        promises.push(logService.getStdoutLogs(executionId, config.maxLines))
+        promises.push(logService.getStdoutLogs(runId, config.maxLines))
       }
       
       if (includeStderr) {
-        promises.push(logService.getStderrLogs(executionId, config.maxLines))
+        promises.push(logService.getStderrLogs(runId, config.maxLines))
       }
 
       const responses = await Promise.all(promises)
@@ -55,7 +55,7 @@ export class LogExporter {
       }
 
       let exportContent = ''
-      let filename = `logs_${executionId}_${new Date().toISOString().split('T')[0]}`
+      let filename = `logs_${runId}_${new Date().toISOString().split('T')[0]}`
 
       switch (format) {
         case 'txt':
@@ -84,9 +84,9 @@ export class LogExporter {
   }
 
   // 导出日志条目
-  static async exportLogEntries(executionId: string, format: ExportFormat, config?: Partial<LogExportConfig>): Promise<void> {
+  static async exportLogEntries(runId: string, format: ExportFormat, config?: Partial<LogExportConfig>): Promise<void> {
     try {
-      const response = await logService.getExecutionLogs(executionId, {
+      const response = await logService.getRunLogs(runId, {
         lines: config?.maxLines || 1000
       })
 
@@ -97,7 +97,7 @@ export class LogExporter {
 
       const entries = response.data.items
       let exportContent = ''
-      let filename = `log_entries_${executionId}_${new Date().toISOString().split('T')[0]}`
+      let filename = `log_entries_${runId}_${new Date().toISOString().split('T')[0]}`
 
       switch (format) {
         case 'txt':
@@ -134,7 +134,7 @@ export class LogExporter {
     
     // 添加头部信息
     lines.push(`# 执行日志导出`)
-    lines.push(`# 执行ID: ${config.executionId}`)
+    lines.push(`# 运行ID: ${config.runId}`)
     lines.push(`# 导出时间: ${new Date().toLocaleString()}`)
     lines.push(`# 格式: TXT`)
     lines.push('')
@@ -172,7 +172,7 @@ export class LogExporter {
   ): string {
     const exportData = {
       metadata: {
-        executionId: config.executionId,
+        runId: config.runId,
         exportTime: new Date().toISOString(),
         format: 'json',
         includeStdout: config.includeStdout,
@@ -299,9 +299,9 @@ export class LogExporter {
 }
 
 // 便捷导出函数
-export const exportExecutionLogs = (executionId: string, format: ExportFormat = 'txt') => {
+export const exportRunLogs = (runId: string, format: ExportFormat = 'txt') => {
   return LogExporter.exportLogFile({
-    executionId,
+    runId,
     format,
     includeStdout: true,
     includeStderr: true,
@@ -311,6 +311,6 @@ export const exportExecutionLogs = (executionId: string, format: ExportFormat = 
   })
 }
 
-export const exportLogEntries = (executionId: string, format: ExportFormat = 'json') => {
-  return LogExporter.exportLogEntries(executionId, format)
+export const exportLogEntries = (runId: string, format: ExportFormat = 'json') => {
+  return LogExporter.exportLogEntries(runId, format)
 }

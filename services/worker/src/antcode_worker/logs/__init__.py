@@ -26,9 +26,6 @@ from antcode_worker.logs.archive import (
     ArchiveState,
     ArchiveRecoveryService,
     S3Uploader,
-    # 兼容旧接口
-    LogArchive,
-    SimpleUploader,
 )
 from antcode_worker.logs.wal import (
     WALWriter,
@@ -66,9 +63,6 @@ __all__ = [
     "ArchiveState",
     "ArchiveRecoveryService",
     "S3Uploader",
-    # Archive (兼容)
-    "LogArchive",
-    "SimpleUploader",
     # WAL
     "WALWriter",
     "WALReader",

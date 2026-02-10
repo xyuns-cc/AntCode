@@ -11,7 +11,7 @@ export interface LogEntry {
   timestamp: string
   level: LogLevel
   log_type: LogType
-  execution_id?: string
+  run_id?: string
   task_id?: string
   message: string
   source?: string
@@ -28,7 +28,7 @@ export interface StructuredLogData {
 }
 
 export interface UnifiedLogResponse {
-  execution_id: string
+  run_id: string
   format: LogFormat
   log_type?: string
   raw_content?: string
@@ -40,7 +40,7 @@ export interface UnifiedLogResponse {
 }
 
 export interface UnifiedLogParams {
-  execution_id: string
+  run_id: string
   format?: LogFormat
   log_type?: 'stdout' | 'stderr'
   level?: LogLevel
@@ -49,7 +49,7 @@ export interface UnifiedLogParams {
 }
 
 export interface LogQueryParams {
-  execution_id?: string
+  run_id?: string
   log_type?: 'stdout' | 'stderr'
   level?: LogLevel
   lines?: number
@@ -66,7 +66,7 @@ export interface LogFileResponse {
   code: number
   message: string
   data: {
-    execution_id: string
+    run_id: string
     log_type: string
     content: string
     file_path: string
@@ -98,13 +98,13 @@ class LogService {
     if (params.lines) queryParams.lines = Math.min(Math.max(params.lines, 1), 10000)
     if (params.search) queryParams.search = params.search
 
-    const response = await apiClient.get(`/api/v1/logs/executions/${params.execution_id}`, { params: queryParams })
+    const response = await apiClient.get(`/api/v1/logs/runs/${params.run_id}`, { params: queryParams })
     return response.data.data as UnifiedLogResponse
   }
 
-  async getExecutionLogs(executionId: string, params?: LogQueryParams): Promise<LogListResponse> {
+  async getRunLogs(runId: string, params?: LogQueryParams): Promise<LogListResponse> {
     const unified = await this.getUnifiedLogs({
-      execution_id: executionId,
+      run_id: runId,
       format: 'structured',
       log_type: params?.log_type,
       level: params?.level,
@@ -124,11 +124,11 @@ class LogService {
     }
   }
 
-  async getStdoutLogs(executionId: string, lines?: number): Promise<LogFileResponse> {
+  async getStdoutLogs(runId: string, lines?: number): Promise<LogFileResponse> {
     const params: Record<string, number> = {}
     if (lines) params.lines = Math.min(Math.max(lines, 1), 10000)
 
-    const response = await apiClient.get(`/api/v1/logs/executions/${executionId}/stdout`, { params })
+    const response = await apiClient.get(`/api/v1/logs/runs/${runId}/stdout`, { params })
     const unified = response.data.data as UnifiedLogResponse
 
     return {
@@ -136,7 +136,7 @@ class LogService {
       code: 200,
       message: '获取成功',
       data: {
-        execution_id: unified.execution_id,
+        run_id: unified.run_id,
         log_type: unified.log_type || 'stdout',
         content: unified.raw_content || '',
         file_path: unified.file_path || '',
@@ -147,11 +147,11 @@ class LogService {
     }
   }
 
-  async getStderrLogs(executionId: string, lines?: number): Promise<LogFileResponse> {
+  async getStderrLogs(runId: string, lines?: number): Promise<LogFileResponse> {
     const params: Record<string, number> = {}
     if (lines) params.lines = Math.min(Math.max(lines, 1), 10000)
 
-    const response = await apiClient.get(`/api/v1/logs/executions/${executionId}/stderr`, { params })
+    const response = await apiClient.get(`/api/v1/logs/runs/${runId}/stderr`, { params })
     const unified = response.data.data as UnifiedLogResponse
 
     return {
@@ -159,7 +159,7 @@ class LogService {
       code: 200,
       message: '获取成功',
       data: {
-        execution_id: unified.execution_id,
+        run_id: unified.run_id,
         log_type: unified.log_type || 'stderr',
         content: unified.raw_content || '',
         file_path: unified.file_path || '',
@@ -171,14 +171,14 @@ class LogService {
   }
 
   connectLogStream(
-    executionId?: string,
+    runId?: string,
     onMessage?: (log: LogEntry) => void,
     onError?: (error: unknown) => void,
     onStateChange?: (state: string) => void,
     onStatusUpdate?: (status: { status: string; message?: string; progress?: number }) => void
   ): LogStreamConnection | null {
-    if (!executionId) {
-      onError?.('executionId is required for WebSocket connection')
+    if (!runId) {
+      onError?.('runId is required for WebSocket connection')
       return null
     }
 
@@ -190,7 +190,7 @@ class LogService {
 
     const wsHost = import.meta.env.VITE_WS_HOST || window.location.host
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${wsProtocol}//${wsHost}/api/v1/ws/executions/${executionId}/logs?token=${encodeURIComponent(token)}`
+    const wsUrl = `${wsProtocol}//${wsHost}/api/v1/ws/runs/${runId}/logs?token=${encodeURIComponent(token)}`
 
     let ws: WebSocket | null = null
     let reconnectAttempts = 0
@@ -216,7 +216,7 @@ class LogService {
                 timestamp: message.data.timestamp || message.timestamp,
                 level: (message.data.level || 'INFO') as LogLevel,
                 log_type: (message.data.log_type || 'stdout') as LogType,
-                execution_id: message.data.execution_id || executionId,
+                run_id: message.data.run_id || runId,
                 message: message.data.content || message.data.message || '',
                 source: message.data.source,
               }
@@ -229,7 +229,7 @@ class LogService {
               return
             }
 
-            if (message.type === 'execution_status' && message.data) {
+            if (message.type === 'run_status' && message.data) {
               onStatusUpdate?.({
                 status: message.data.status,
                 message: message.data.message,

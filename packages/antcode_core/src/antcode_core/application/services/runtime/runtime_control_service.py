@@ -9,7 +9,13 @@ from typing import Any
 
 from loguru import logger
 
-from antcode_core.infrastructure.redis import get_redis_client
+from antcode_core.infrastructure.redis import (
+    build_runtime_manage_control_payload,
+    control_reply_stream,
+    control_stream,
+    decode_stream_payload,
+    get_redis_client,
+)
 
 
 class RuntimeControlService:
@@ -29,21 +35,20 @@ class RuntimeControlService:
         """发送运行时管理控制指令"""
         redis = await get_redis_client()
         request_id = uuid.uuid4().hex
-        reply_stream = f"antcode:control:reply:{request_id}"
-        control_stream = f"antcode:control:{worker_id}"
+        reply_stream_key = control_reply_stream(request_id)
+        control_stream_key = control_stream(worker_id)
 
-        data = {
-            "control_type": "runtime_manage",
-            "action": action,
-            "request_id": request_id,
-            "reply_stream": reply_stream,
-            "payload": json.dumps(payload or {}, ensure_ascii=False),
-        }
+        data = build_runtime_manage_control_payload(
+            action=action,
+            request_id=request_id,
+            reply_stream=reply_stream_key,
+            payload=payload or {},
+        )
 
-        await redis.xadd(control_stream, data)
+        await redis.xadd(control_stream_key, data)
 
         timeout_ms = int((timeout or self._default_timeout) * 1000)
-        result = await redis.xread({reply_stream: "0-0"}, count=1, block=timeout_ms)
+        result = await redis.xread({reply_stream_key: "0-0"}, count=1, block=timeout_ms)
 
         if not result:
             logger.warning(f"运行时控制超时: action={action}, worker={worker_id}")
@@ -59,12 +64,7 @@ class RuntimeControlService:
 
         msg_id, raw = messages[0]
         _ = msg_id
-        decoded = {
-            (k.decode() if isinstance(k, bytes) else k): (
-                v.decode() if isinstance(v, bytes) else v
-            )
-            for k, v in raw.items()
-        }
+        decoded = decode_stream_payload(raw)
 
         success = str(decoded.get("success", "")).lower() in ("1", "true", "yes")
         error = decoded.get("error", "")
@@ -77,7 +77,7 @@ class RuntimeControlService:
                 data_obj = data_raw
 
         with contextlib.suppress(Exception):
-            await redis.delete(reply_stream)
+            await redis.delete(reply_stream_key)
 
         return {"success": success, "error": error, "data": data_obj}
 
@@ -86,6 +86,23 @@ class RuntimeControlService:
 
     async def get_env(self, worker_id: str, env_name: str) -> dict[str, Any]:
         return await self.send_command(worker_id, "get_env", {"env_name": env_name})
+
+    async def update_env(
+        self,
+        worker_id: str,
+        env_name: str,
+        key: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.send_command(
+            worker_id,
+            "update_env",
+            {
+                "env_name": env_name,
+                "key": key,
+                "description": description,
+            },
+        )
 
     async def create_env(
         self,

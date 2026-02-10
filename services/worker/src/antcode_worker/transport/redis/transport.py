@@ -7,6 +7,7 @@ Requirements: 5.3, 7.2, 11.3
 """
 
 import asyncio
+import base64
 import contextlib
 import json
 import time
@@ -50,17 +51,21 @@ class RedisTransport(TransportBase):
         redis_url: str = "redis://localhost:6379/0",
         worker_id: str | None = None,
         config: ServerConfig | None = None,
+        namespace: str | None = None,
+        consumer_group: str | None = None,
+        control_group: str | None = None,
     ):
         super().__init__(config)
         self._redis_url = redis_url
         self._redis = None
         self._worker_id = worker_id
-        self._keys = RedisKeys()
-        self._consumer_group = self._keys.consumer_group_name()
+        resolved_namespace = namespace or getattr(self._config, "redis_namespace", None)
+        self._keys = RedisKeys(namespace=resolved_namespace)
+        self._consumer_group = consumer_group or self._keys.consumer_group_name()
         self._consumer_name = (
             self._keys.consumer_name(worker_id) if worker_id else "worker"
         )
-        self._control_group = self._keys.consumer_group_name("control")
+        self._control_group = control_group or self._keys.consumer_group_name("control")
         self._reclaimer: PendingTaskReclaimer | None = None
         self._receipt_cache: dict[str, tuple[str, str, dict[str, Any]]] = {}
         self._poll_error_count = 0
@@ -233,7 +238,7 @@ class RedisTransport(TransportBase):
                 file_hash=decoded.get("file_hash", "") or "",
                 entry_point=decoded.get("entry_point", "") or "",
                 is_compressed=decoded.get("is_compressed"),
-                run_id=decoded.get("run_id", "") or decoded.get("execution_id", "") or "",
+                run_id=decoded.get("run_id", "") or "",
                 receipt=receipt,
             )
 
@@ -338,7 +343,7 @@ class RedisTransport(TransportBase):
             return False
 
         try:
-            log_key = self._keys.log_stream(log.execution_id)
+            log_key = self._keys.log_stream(log.run_id)
             timestamp = log.timestamp or datetime.now()
             fields = {
                 "log_type": log.log_type,
@@ -350,8 +355,9 @@ class RedisTransport(TransportBase):
             maxlen = self._keys.config.stream_max_len
 
             async def _write_log():
+                pipe = self._redis.pipeline(transaction=False)
                 if maxlen > 0:
-                    await self._redis.xadd(
+                    pipe.xadd(
                         log_key,
                         fields,
                         id=entry_id,
@@ -359,16 +365,17 @@ class RedisTransport(TransportBase):
                         approximate=self._keys.config.stream_approx_max_len,
                     )
                 else:
-                    await self._redis.xadd(log_key, fields, id=entry_id)
+                    pipe.xadd(log_key, fields, id=entry_id)
                 if self._keys.config.log_ttl > 0:
-                    await self._redis.expire(log_key, self._keys.config.log_ttl)
+                    pipe.expire(log_key, self._keys.config.log_ttl)
+                await pipe.execute()
 
             await self._run_with_reconnect("发送日志", _write_log)
             return True
 
         except Exception as e:
             if self._is_duplicate_log_error(e):
-                logger.debug(f"日志已存在，忽略重复写入: {log.execution_id} seq={log.sequence}")
+                logger.debug(f"日志已存在，忽略重复写入: {log.run_id} seq={log.sequence}")
                 return True
             logger.error(f"发送日志失败: {e}")
             return False
@@ -382,34 +389,39 @@ class RedisTransport(TransportBase):
             return True
 
         try:
-            pipe = self._redis.pipeline()
             maxlen = self._keys.config.stream_max_len
             ttl_seconds = self._keys.config.log_ttl
-            seen = set()
-            for log in logs:
-                log_key = self._keys.log_stream(log.execution_id)
-                timestamp = log.timestamp or datetime.now()
-                fields = {
-                    "log_type": log.log_type,
-                    "content": log.content,
-                    "timestamp": timestamp.isoformat(),
-                    "sequence": str(log.sequence),
-                }
-                entry_id = self._build_log_entry_id(log, timestamp) or "*"
-                if maxlen > 0:
-                    pipe.xadd(
-                        log_key,
-                        fields,
-                        id=entry_id,
-                        maxlen=maxlen,
-                        approximate=self._keys.config.stream_approx_max_len,
-                    )
-                else:
-                    pipe.xadd(log_key, fields, id=entry_id)
-                if ttl_seconds > 0 and log_key not in seen:
-                    pipe.expire(log_key, ttl_seconds)
-                    seen.add(log_key)
-            results = await pipe.execute(raise_on_error=False)
+
+            async def _write_batch_logs():
+                pipe = self._redis.pipeline()
+                seen = set()
+                for log in logs:
+                    log_key = self._keys.log_stream(log.run_id)
+                    timestamp = log.timestamp or datetime.now()
+                    fields = {
+                        "log_type": log.log_type,
+                        "content": log.content,
+                        "timestamp": timestamp.isoformat(),
+                        "sequence": str(log.sequence),
+                    }
+                    entry_id = self._build_log_entry_id(log, timestamp) or "*"
+                    if maxlen > 0:
+                        pipe.xadd(
+                            log_key,
+                            fields,
+                            id=entry_id,
+                            maxlen=maxlen,
+                            approximate=self._keys.config.stream_approx_max_len,
+                        )
+                    else:
+                        pipe.xadd(log_key, fields, id=entry_id)
+                    if ttl_seconds > 0 and log_key not in seen:
+                        pipe.expire(log_key, ttl_seconds)
+                        seen.add(log_key)
+
+                return await pipe.execute(raise_on_error=False)
+
+            results = await self._run_with_reconnect("发送批量日志", _write_batch_logs)
             for result in results:
                 if isinstance(result, Exception):
                     if self._is_duplicate_log_error(result):
@@ -439,7 +451,7 @@ class RedisTransport(TransportBase):
 
     async def send_log_chunk(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         data: bytes,
         offset: int,
@@ -450,10 +462,8 @@ class RedisTransport(TransportBase):
             return False
 
         try:
-            import base64
-
             # 写入 log chunk stream
-            chunk_key = self._keys.log_chunk_stream(execution_id)
+            chunk_key = self._keys.log_chunk_stream(run_id)
             fields = {
                 "log_type": log_type,
                 "data": base64.b64encode(data).decode("utf-8"),
@@ -462,17 +472,22 @@ class RedisTransport(TransportBase):
                 "timestamp": datetime.now().isoformat(),
             }
             maxlen = self._keys.config.stream_max_len
-            if maxlen > 0:
-                await self._redis.xadd(
-                    chunk_key,
-                    fields,
-                    maxlen=maxlen,
-                    approximate=self._keys.config.stream_approx_max_len,
-                )
-            else:
-                await self._redis.xadd(chunk_key, fields)
-            if self._keys.config.log_ttl > 0:
-                await self._redis.expire(chunk_key, self._keys.config.log_ttl)
+            async def _write_chunk():
+                pipe = self._redis.pipeline(transaction=False)
+                if maxlen > 0:
+                    pipe.xadd(
+                        chunk_key,
+                        fields,
+                        maxlen=maxlen,
+                        approximate=self._keys.config.stream_approx_max_len,
+                    )
+                else:
+                    pipe.xadd(chunk_key, fields)
+                if self._keys.config.log_ttl > 0:
+                    pipe.expire(chunk_key, self._keys.config.log_ttl)
+                await pipe.execute()
+
+            await self._run_with_reconnect("发送日志分片", _write_chunk)
             return True
 
         except Exception as e:
@@ -485,15 +500,16 @@ class RedisTransport(TransportBase):
             return False
 
         try:
-            import json
-
-            # 支持两种心跳格式：HeartbeatMessage 和 HeartbeatReporter 的 Heartbeat
-            # 提取字段值，兼容不同的心跳对象结构
+            # 统一提取心跳字段，支持传输层与上报器的数据结构
             worker_id = getattr(heartbeat, "worker_id", None)
+            if not worker_id:
+                logger.warning("发送心跳失败: 缺少 worker_id")
+                return False
+
             status = getattr(heartbeat, "status", "online")
             timestamp = getattr(heartbeat, "timestamp", None) or datetime.now()
 
-            # 尝试从 metrics 属性获取指标（HeartbeatReporter 的 Heartbeat 格式）
+            # 优先读取 metrics 聚合字段
             metrics = getattr(heartbeat, "metrics", None)
             if metrics is not None:
                 cpu_percent = getattr(metrics, "cpu", 0.0)
@@ -502,7 +518,7 @@ class RedisTransport(TransportBase):
                 running_tasks = getattr(metrics, "running_tasks", 0)
                 max_concurrent_tasks = getattr(metrics, "max_concurrent_tasks", 5)
             else:
-                # 直接从心跳对象获取（HeartbeatMessage 格式）
+                # 直接读取扁平字段
                 cpu_percent = getattr(heartbeat, "cpu_percent", 0.0)
                 memory_percent = getattr(heartbeat, "memory_percent", 0.0)
                 disk_percent = getattr(heartbeat, "disk_percent", 0.0)
@@ -558,11 +574,10 @@ class RedisTransport(TransportBase):
                     except Exception:
                         pass
 
-                await self._redis.hset(
-                    hb_key,
-                    mapping=mapping,
-                )
-                await self._redis.expire(hb_key, self._config.heartbeat_interval * 3)
+                pipe = self._redis.pipeline(transaction=False)
+                pipe.hset(hb_key, mapping=mapping)
+                pipe.expire(hb_key, self._config.heartbeat_interval * 3)
+                await pipe.execute()
 
             await self._run_with_reconnect("发送心跳", _write_heartbeat)
             return True
@@ -602,7 +617,7 @@ class RedisTransport(TransportBase):
             return ControlMessage(
                 control_type=decoded.get("control_type", ""),
                 task_id=decoded.get("task_id", ""),
-                run_id=decoded.get("run_id", decoded.get("execution_id", "")),
+                run_id=decoded.get("run_id", ""),
                 reason=decoded.get("reason", ""),
                 payload=decoded,
                 receipt=receipt,

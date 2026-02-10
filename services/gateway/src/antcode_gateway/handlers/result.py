@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from loguru import logger
 
-from antcode_core.common.config import settings
+from antcode_core.infrastructure.redis import task_result_stream
 from antcode_core.infrastructure.redis.streams import StreamClient
 
 
@@ -41,7 +41,7 @@ class ResultHandler:
     def __init__(self):
         """初始化处理器"""
         self._stream = StreamClient()
-        self._result_stream = f"{settings.REDIS_NAMESPACE}:task:result"
+        self._result_stream = task_result_stream()
 
     async def handle(self, result: TaskResult) -> bool:
         """处理任务结果

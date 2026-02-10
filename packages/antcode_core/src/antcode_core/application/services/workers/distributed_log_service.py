@@ -11,6 +11,7 @@
 import asyncio
 import contextlib
 import os
+from collections import deque
 from collections import defaultdict
 from datetime import datetime
 
@@ -42,7 +43,7 @@ class DistributedLogService:
         self._log_cache = defaultdict(list)
         self._task_status = {}
 
-        # 写入缓冲区（按 execution_id:log_type 分组）
+        # 写入缓冲区（按 run_id:log_type 分组）
         self._write_buffers = defaultdict(LogBuffer)
         self._flush_tasks = {}
 
@@ -170,31 +171,31 @@ class DistributedLogService:
                 parts = buffer_key.rsplit(":", 1)
                 if len(parts) != 2:
                     return
-                execution_id, log_type = parts
+                run_id, log_type = parts
 
-                await self._write_to_file(execution_id, log_type, lines_to_write)
+                await self._write_to_file(run_id, log_type, lines_to_write)
         finally:
             async with self._buffer_lock:
                 self._flush_tasks.pop(buffer_key, None)
 
-    def _get_file_lock(self, execution_id):
+    def _get_file_lock(self, run_id):
         """获取文件锁"""
-        if execution_id not in self._file_locks:
-            self._file_locks[execution_id] = asyncio.Lock()
-        return self._file_locks[execution_id]
+        if run_id not in self._file_locks:
+            self._file_locks[run_id] = asyncio.Lock()
+        return self._file_locks[run_id]
 
-    async def _write_to_file(self, execution_id, log_type, lines):
+    async def _write_to_file(self, run_id, log_type, lines):
         """异步写入文件"""
         if not lines:
             return
 
-        log_dir = self._get_log_dir(execution_id, create=True)
+        log_dir = self._get_log_dir(run_id, create=True)
         filename = "stdout.log" if log_type == "stdout" else "stderr.log"
         log_file = os.path.join(log_dir, filename)
 
         content = "\n".join(lines) + "\n"
 
-        lock = self._get_file_lock(execution_id)
+        lock = self._get_file_lock(run_id)
         async with lock:
             try:
                 # 使用线程池执行文件 I/O
@@ -209,15 +210,15 @@ class DistributedLogService:
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(content)
 
-    def _get_log_dir(self, execution_id, create=True):
+    def _get_log_dir(self, run_id, create=True):
         """获取日志目录"""
         date_str = datetime.now().strftime("%Y-%m-%d")
-        log_dir = os.path.join(self._log_root, date_str, execution_id)
+        log_dir = os.path.join(self._log_root, date_str, run_id)
         if create:
             os.makedirs(log_dir, exist_ok=True)
         return log_dir
 
-    def _find_log_dir(self, execution_id):
+    def _find_log_dir(self, run_id):
         """查找已存在的日志目录"""
         if not os.path.exists(self._log_root):
             return None
@@ -226,25 +227,25 @@ class DistributedLogService:
             for date_dir in os.listdir(self._log_root):
                 date_path = os.path.join(self._log_root, date_dir)
                 if os.path.isdir(date_path):
-                    execution_path = os.path.join(date_path, execution_id)
+                    execution_path = os.path.join(date_path, run_id)
                     if os.path.exists(execution_path):
                         return execution_path
         except OSError:
             pass
         return None
 
-    def _get_log_file(self, execution_id, log_type):
+    def _get_log_file(self, run_id, log_type):
         """获取日志文件路径"""
-        existing_dir = self._find_log_dir(execution_id)
+        existing_dir = self._find_log_dir(run_id)
         if existing_dir:
             filename = "stdout.log" if log_type == "stdout" else "stderr.log"
             return os.path.join(existing_dir, filename)
 
-        log_dir = self._get_log_dir(execution_id, create=False)
+        log_dir = self._get_log_dir(run_id, create=False)
         filename = "stdout.log" if log_type == "stdout" else "stderr.log"
         return os.path.join(log_dir, filename)
 
-    async def _has_ws_connections(self, execution_id):
+    async def _has_ws_connections(self, run_id):
         """检查是否有 WebSocket 连接（带缓存）"""
         if not self._notifier:
             return False
@@ -252,40 +253,40 @@ class DistributedLogService:
         now = asyncio.get_event_loop().time()
 
         # 检查缓存
-        if execution_id in self._ws_cache_time:
-            if (now - self._ws_cache_time[execution_id]) < self._ws_cache_ttl:
-                return self._ws_connection_cache.get(execution_id, False)
+        if run_id in self._ws_cache_time:
+            if (now - self._ws_cache_time[run_id]) < self._ws_cache_ttl:
+                return self._ws_connection_cache.get(run_id, False)
 
         # 查询并缓存
         try:
-            has_conn = await self._notifier.has_connections(execution_id)
-            self._ws_connection_cache[execution_id] = has_conn
-            self._ws_cache_time[execution_id] = now
+            has_conn = await self._notifier.has_connections(run_id)
+            self._ws_connection_cache[run_id] = has_conn
+            self._ws_cache_time[run_id] = now
             return has_conn
         except Exception:
             return False
 
-    def _get_ws_queue(self, execution_id):
-        queue = self._ws_queues.get(execution_id)
+    def _get_ws_queue(self, run_id):
+        queue = self._ws_queues.get(run_id)
         if not queue:
             queue = asyncio.Queue()
-            self._ws_queues[execution_id] = queue
+            self._ws_queues[run_id] = queue
         return queue
 
-    def _enqueue_ws_logs(self, execution_id, log_type, log_lines):
-        queue = self._get_ws_queue(execution_id)
+    def _enqueue_ws_logs(self, run_id, log_type, log_lines):
+        queue = self._get_ws_queue(run_id)
         for line in log_lines:
             queue.put_nowait((log_type, line))
-        self._ensure_ws_task(execution_id)
+        self._ensure_ws_task(run_id)
 
-    def _ensure_ws_task(self, execution_id):
-        if execution_id in self._ws_tasks:
+    def _ensure_ws_task(self, run_id):
+        if run_id in self._ws_tasks:
             return
-        task = asyncio.create_task(self._ws_loop(execution_id))
-        self._ws_tasks[execution_id] = task
+        task = asyncio.create_task(self._ws_loop(run_id))
+        self._ws_tasks[run_id] = task
 
-    async def _ws_loop(self, execution_id):
-        queue = self._ws_queues.get(execution_id)
+    async def _ws_loop(self, run_id):
+        queue = self._ws_queues.get(run_id)
         if not queue:
             return
         try:
@@ -300,15 +301,15 @@ class DistributedLogService:
                         break
                     continue
                 log_type, content = item
-                await self._push_to_websocket(execution_id, log_type, content)
+                await self._push_to_websocket(run_id, log_type, content)
         finally:
-            self._ws_tasks.pop(execution_id, None)
+            self._ws_tasks.pop(run_id, None)
             if queue and queue.empty():
-                self._ws_queues.pop(execution_id, None)
+                self._ws_queues.pop(run_id, None)
 
     async def append_log(
         self,
-        execution_id,
+        run_id,
         log_type,
         content,
     ):
@@ -316,14 +317,14 @@ class DistributedLogService:
         追加日志行（优化版：批量写入 + 异步推送）
         """
         await self.append_logs(
-            execution_id=execution_id,
+            run_id=run_id,
             log_type=log_type,
             contents=[content],
         )
 
     async def append_logs(
         self,
-        execution_id,
+        run_id,
         log_type,
         contents,
     ):
@@ -333,7 +334,7 @@ class DistributedLogService:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_lines = [f"[{timestamp}] {content}" for content in contents]
 
-        buffer_key = f"{execution_id}:{log_type}"
+        buffer_key = f"{run_id}:{log_type}"
         should_flush = False
 
         async with self._buffer_lock:
@@ -359,22 +360,22 @@ class DistributedLogService:
             await self._ensure_flush_task(buffer_key)
 
         # 实时推送到 WebSocket（如果有连接）
-        if await self._has_ws_connections(execution_id):
-            self._enqueue_ws_logs(execution_id, log_type, log_lines)
+        if await self._has_ws_connections(run_id):
+            self._enqueue_ws_logs(run_id, log_type, log_lines)
 
-    async def _push_to_websocket(self, execution_id, log_type, content):
+    async def _push_to_websocket(self, run_id, log_type, content):
         """推送日志到 WebSocket"""
         if not self._notifier:
             return
         try:
             level = "ERROR" if log_type == "stderr" else "INFO"
-            await self._notifier.send_log(execution_id, log_type, content, level)
+            await self._notifier.send_log(run_id, log_type, content, level)
         except Exception as e:
             logger.debug(f"推送日志到 WebSocket 失败: {e}")
 
     async def update_task_status(
         self,
-        execution_id,
+        run_id,
         status,
         exit_code=None,
         error_message=None,
@@ -384,7 +385,7 @@ class DistributedLogService:
         if status_at is None:
             status_at = datetime.now().astimezone()
 
-        self._task_status[execution_id] = {
+        self._task_status[run_id] = {
             "status": status,
             "exit_code": exit_code,
             "error_message": error_message,
@@ -393,16 +394,16 @@ class DistributedLogService:
 
         # 刷新该任务的日志缓冲区（确保日志先于状态到达）
         for log_type in ["stdout", "stderr"]:
-            await self._flush_buffer_now(f"{execution_id}:{log_type}")
+            await self._flush_buffer_now(f"{run_id}:{log_type}")
 
         # 写入状态文件
-        log_dir = self._get_log_dir(execution_id)
+        log_dir = self._get_log_dir(run_id)
         status_file = os.path.join(log_dir, "status.json")
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                lambda: json_dump_file(self._task_status[execution_id], status_file),
+                lambda: json_dump_file(self._task_status[run_id], status_file),
             )
         except Exception as e:
             logger.error(f"写入任务状态失败: {e}")
@@ -414,14 +415,14 @@ class DistributedLogService:
         if error_message:
             status_msg += f", 错误: {error_message}"
 
-        await self.append_log(execution_id, "stdout", status_msg)
+        await self.append_log(run_id, "stdout", status_msg)
 
         from antcode_core.application.services.scheduler.execution_status_service import (
             execution_status_service,
         )
 
         await execution_status_service.update_runtime_status(
-            execution_id=execution_id,
+            run_id=run_id,
             status=status,
             status_at=status_at,
             exit_code=exit_code,
@@ -432,7 +433,7 @@ class DistributedLogService:
             from antcode_core.domain.models.task import Task
             from antcode_core.domain.models.task_run import TaskRun
 
-            execution = await TaskRun.get_or_none(execution_id=execution_id)
+            execution = await TaskRun.get_or_none(run_id=run_id)
             if execution:
                 task_name = None
                 task = await Task.get_or_none(id=execution.task_id)
@@ -440,7 +441,7 @@ class DistributedLogService:
                     task_name = task.name
 
                 await self._push_status_to_frontend(
-                    execution_id=execution_id,
+                    run_id=run_id,
                     status=execution.status.value,
                     task_name=task_name,
                     exit_code=execution.exit_code,
@@ -450,11 +451,11 @@ class DistributedLogService:
         except Exception as e:
             logger.debug(f"推送状态到前端失败: {e}")
 
-        logger.info(f"分布式任务状态更新: {execution_id} -> {status}")
+        logger.info(f"分布式任务状态更新: {run_id} -> {status}")
 
     async def _push_status_to_frontend(
         self,
-        execution_id,
+        run_id,
         status,
         task_name=None,
         exit_code=None,
@@ -480,7 +481,7 @@ class DistributedLogService:
                 message = "任务已取消"
 
             await self._notifier.send_status(
-                execution_id=execution_id,
+                run_id=run_id,
                 status=status_value,
                 progress=100.0
                 if status_value in ("success", "failed", "timeout", "cancelled", "skipped", "rejected")
@@ -492,18 +493,18 @@ class DistributedLogService:
 
     async def get_logs(
         self,
-        execution_id,
+        run_id,
         log_type="stdout",
         tail=100,
     ):
         """获取日志"""
-        cache_key = f"{execution_id}:{log_type}"
+        cache_key = f"{run_id}:{log_type}"
         cache = self._log_cache.get(cache_key)
         if cache and tail is not None and len(cache) >= tail:
             return cache[-tail:]
 
         # 从文件读取
-        log_file = self._get_log_file(execution_id, log_type)
+        log_file = self._get_log_file(run_id, log_type)
         if not os.path.exists(log_file):
             return cache[-tail:] if cache else []
 
@@ -519,17 +520,19 @@ class DistributedLogService:
     def _sync_read_file(file_path, tail):
         """同步读取文件（在线程池中执行）"""
         with open(file_path, encoding="utf-8") as f:
-            lines = f.readlines()
             if tail is None:
-                return [line.rstrip() for line in lines]
-            return [line.rstrip() for line in lines[-tail:]]
+                return [line.rstrip() for line in f]
+            window = deque(maxlen=tail)
+            for line in f:
+                window.append(line.rstrip())
+            return list(window)
 
-    async def get_task_status(self, execution_id):
+    async def get_task_status(self, run_id):
         """获取任务状态"""
-        if execution_id in self._task_status:
-            return self._task_status[execution_id]
+        if run_id in self._task_status:
+            return self._task_status[run_id]
 
-        log_dir = self._find_log_dir(execution_id)
+        log_dir = self._find_log_dir(run_id)
         if not log_dir:
             return None
 
@@ -542,17 +545,17 @@ class DistributedLogService:
                 pass
         return None
 
-    async def get_all_logs(self, execution_id):
+    async def get_all_logs(self, run_id):
         """获取所有类型的日志"""
         return {
-            "stdout": await self.get_logs(execution_id, "stdout", 5000),
-            "stderr": await self.get_logs(execution_id, "stderr", 5000),
+            "stdout": await self.get_logs(run_id, "stdout", 5000),
+            "stderr": await self.get_logs(run_id, "stderr", 5000),
         }
 
-    def clear_cache(self, execution_id):
+    def clear_cache(self, run_id):
         """清理指定执行ID的缓存"""
         for log_type in ["stdout", "stderr"]:
-            cache_key = f"{execution_id}:{log_type}"
+            cache_key = f"{run_id}:{log_type}"
             if cache_key in self._log_cache:
                 del self._log_cache[cache_key]
             if cache_key in self._write_buffers:
@@ -561,19 +564,19 @@ class DistributedLogService:
             if flush_task and not flush_task.done():
                 flush_task.cancel()
 
-        if execution_id in self._task_status:
-            del self._task_status[execution_id]
-        if execution_id in self._file_locks:
-            del self._file_locks[execution_id]
-        if execution_id in self._ws_connection_cache:
-            del self._ws_connection_cache[execution_id]
-        if execution_id in self._ws_cache_time:
-            del self._ws_cache_time[execution_id]
-        ws_task = self._ws_tasks.pop(execution_id, None)
+        if run_id in self._task_status:
+            del self._task_status[run_id]
+        if run_id in self._file_locks:
+            del self._file_locks[run_id]
+        if run_id in self._ws_connection_cache:
+            del self._ws_connection_cache[run_id]
+        if run_id in self._ws_cache_time:
+            del self._ws_cache_time[run_id]
+        ws_task = self._ws_tasks.pop(run_id, None)
         if ws_task and not ws_task.done():
             ws_task.cancel()
-        if execution_id in self._ws_queues:
-            del self._ws_queues[execution_id]
+        if run_id in self._ws_queues:
+            del self._ws_queues[run_id]
 
     async def cleanup_old_logs(self, days=7):
         """清理旧日志"""
