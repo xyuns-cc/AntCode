@@ -102,7 +102,7 @@ class ExecutionStatusService:
 
     async def update_dispatch_status(
         self,
-        execution_id,
+        run_id,
         status,
         status_at=None,
         worker_id=None,
@@ -114,9 +114,9 @@ class ExecutionStatusService:
             return False
 
         status_at = self._ensure_dt(status_at)
-        execution = await TaskRun.get_or_none(execution_id=execution_id)
+        execution = await TaskRun.get_or_none(run_id=run_id)
         if not execution:
-            logger.warning(f"执行记录不存在: {execution_id}")
+            logger.warning(f"执行记录不存在: {run_id}")
             return False
 
         if not self._should_update(
@@ -145,7 +145,7 @@ class ExecutionStatusService:
 
     async def update_runtime_status(
         self,
-        execution_id,
+        run_id,
         status,
         status_at=None,
         exit_code=None,
@@ -157,9 +157,9 @@ class ExecutionStatusService:
             return False
 
         status_at = self._ensure_dt(status_at)
-        execution = await TaskRun.get_or_none(execution_id=execution_id)
+        execution = await TaskRun.get_or_none(run_id=run_id)
         if not execution:
-            logger.warning(f"执行记录不存在: {execution_id}")
+            logger.warning(f"执行记录不存在: {run_id}")
             return False
 
         if not self._should_update(

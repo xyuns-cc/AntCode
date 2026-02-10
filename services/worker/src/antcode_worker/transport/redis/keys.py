@@ -15,13 +15,26 @@ Requirements: 5.3
 from dataclasses import dataclass
 from typing import ClassVar
 
+from antcode_core.infrastructure.redis import (
+    control_global_stream as shared_control_global_stream,
+    control_group as shared_control_group,
+    control_stream as shared_control_stream,
+    redis_namespace,
+    task_ready_stream as shared_task_ready_stream,
+    task_result_stream as shared_task_result_stream,
+    log_stream_key as shared_log_stream_key,
+    log_chunk_stream_key as shared_log_chunk_stream_key,
+    worker_group as shared_worker_group,
+    worker_heartbeat_key as shared_worker_heartbeat_key,
+)
+
 
 @dataclass(frozen=True)
 class RedisKeyConfig:
     """Redis Key 配置"""
 
     # 命名空间前缀
-    namespace: str = "antcode"
+    namespace: str = redis_namespace()
 
     # Stream 相关配置
     stream_max_len: int = 10000  # Stream 最大长度
@@ -49,7 +62,7 @@ class RedisKeys:
     """
 
     # 默认命名空间
-    DEFAULT_NAMESPACE: ClassVar[str] = "antcode"
+    DEFAULT_NAMESPACE: ClassVar[str] = redis_namespace()
 
     def __init__(self, namespace: str | None = None, config: RedisKeyConfig | None = None):
         """
@@ -59,7 +72,7 @@ class RedisKeys:
             namespace: 命名空间前缀，默认为 "antcode"
             config: Key 配置
         """
-        self._namespace = namespace or self.DEFAULT_NAMESPACE
+        self._namespace = (namespace or self.DEFAULT_NAMESPACE).strip() or self.DEFAULT_NAMESPACE
         self._config = config or RedisKeyConfig(namespace=self._namespace)
 
     @property
@@ -88,7 +101,7 @@ class RedisKeys:
             Stream key，如 "antcode:task:ready" 或 "antcode:task:ready:{worker_id}"
         """
         if worker_id:
-            return f"{self._namespace}:task:ready:{worker_id}"
+            return shared_task_ready_stream(worker_id, namespace=self._namespace)
         return f"{self._namespace}:task:ready"
 
     def task_pending_stream(self, worker_id: str) -> str:
@@ -114,7 +127,7 @@ class RedisKeys:
         Returns:
             Stream key，如 "antcode:task:result"
         """
-        return f"{self._namespace}:task:result"
+        return shared_task_result_stream(namespace=self._namespace)
 
     def task_ack_stream(self) -> str:
         """
@@ -141,7 +154,7 @@ class RedisKeys:
         Returns:
             Stream key，如 "antcode:control:{worker_id}"
         """
-        return f"{self._namespace}:control:{worker_id}"
+        return shared_control_stream(worker_id, namespace=self._namespace)
 
     def control_global_stream(self) -> str:
         """
@@ -152,7 +165,7 @@ class RedisKeys:
         Returns:
             Stream key，如 "antcode:control:global"
         """
-        return f"{self._namespace}:control:global"
+        return shared_control_global_stream(namespace=self._namespace)
 
     # ==================== 日志 Keys ====================
 
@@ -168,7 +181,7 @@ class RedisKeys:
         Returns:
             Stream key，如 "antcode:log:stream:{run_id}"
         """
-        return f"{self._namespace}:log:stream:{run_id}"
+        return shared_log_stream_key(run_id, namespace=self._namespace)
 
     def log_chunk_stream(self, run_id: str) -> str:
         """
@@ -182,7 +195,7 @@ class RedisKeys:
         Returns:
             Stream key，如 "antcode:log:chunk:{run_id}"
         """
-        return f"{self._namespace}:log:chunk:{run_id}"
+        return shared_log_chunk_stream_key(run_id, namespace=self._namespace)
 
     def log_metadata_key(self, run_id: str) -> str:
         """
@@ -212,7 +225,7 @@ class RedisKeys:
         Returns:
             Hash key，如 "antcode:heartbeat:{worker_id}"
         """
-        return f"{self._namespace}:heartbeat:{worker_id}"
+        return shared_worker_heartbeat_key(worker_id, namespace=self._namespace)
 
     def heartbeat_set(self) -> str:
         """
@@ -278,6 +291,10 @@ class RedisKeys:
         Returns:
             消费者组名称，如 "antcode-workers"
         """
+        if purpose == "workers":
+            return shared_worker_group(namespace=self._namespace)
+        if purpose == "control":
+            return shared_control_group(namespace=self._namespace)
         return f"{self._namespace}-{purpose}"
 
     def consumer_name(self, worker_id: str, instance_id: str | None = None) -> str:

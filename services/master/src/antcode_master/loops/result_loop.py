@@ -17,7 +17,7 @@ from typing import Any
 from loguru import logger
 
 from antcode_core.application.services.task_run_service import task_run_service
-from antcode_core.common.config import settings
+from antcode_core.infrastructure.redis import task_result_stream
 from antcode_core.infrastructure.redis.streams import StreamClient
 from antcode_master.leader import ensure_leader
 
@@ -35,7 +35,7 @@ class ResultLoop:
         batch_size: int = 50,
         pending_check_interval: int = 30,
     ):
-        self._stream_key = stream_key or f"{settings.REDIS_NAMESPACE}:task:result"
+        self._stream_key = stream_key or task_result_stream()
         self._group = group_name
         self._consumer = consumer_name or f"{socket.gethostname()}-{id(self)}"
         self._poll_interval = poll_interval
@@ -124,7 +124,7 @@ class ResultLoop:
     async def _handle_message(self, data: dict[str, Any]) -> bool:
         """处理单条结果消息"""
         payload = self._normalize_payload(data)
-        run_id = payload.get("run_id") or payload.get("execution_id") or ""
+        run_id = payload.get("run_id") or ""
         if not run_id:
             return True
 

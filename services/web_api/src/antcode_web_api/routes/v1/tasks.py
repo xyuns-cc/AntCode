@@ -37,6 +37,7 @@ from antcode_core.domain.schemas.task import (
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.domain.models import Project, Task, TaskRun
+from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 from antcode_web_api.utils.simple_yaml import parse_simple_yaml
 
 tasks_router = APIRouter()
@@ -131,7 +132,7 @@ def _parse_task_import_payload(raw_text: str) -> dict[str, Any]:
         if isinstance(data, dict):
             return data
         raise ValueError("导入内容必须为 YAML 对象")
-    except ImportError as exc:
+    except ImportError:
         try:
             data = parse_simple_yaml(raw_text)
             if isinstance(data, dict):
@@ -372,8 +373,12 @@ async def get_tasks_stats(
 
 
 @tasks_router.post("/validate-cron", response_model=BaseResponse[dict])
-async def validate_cron_expression(request: CronValidateRequest):
+async def validate_cron_expression(
+    request: CronValidateRequest,
+    current_user=Depends(get_current_user),
+):
     """验证 Cron 表达式"""
+    _ = current_user
     try:
         from apscheduler.triggers.cron import CronTrigger
 
@@ -396,8 +401,9 @@ async def validate_cron_expression(request: CronValidateRequest):
 
 
 @tasks_router.get("/templates", response_model=BaseResponse[dict])
-async def list_task_templates():
+async def list_task_templates(current_user=Depends(get_current_user)):
     """获取任务模板列表"""
+    _ = current_user
     return success_response({"templates": TASK_TEMPLATES}, message=Messages.QUERY_SUCCESS)
 
 
@@ -736,13 +742,11 @@ async def batch_operate_tasks(
                         worker = await worker_service.get_worker_by_id(execution.worker_id)
                         if worker:
                             redis = await get_redis_client()
-                            payload = {
-                                "control_type": "cancel",
-                                "task_id": execution.execution_id,
-                                "run_id": execution.execution_id,
-                                "reason": f"user_cancel:{current_user.user_id}",
-                            }
-                            await redis.xadd(f"antcode:control:{worker.public_id}", payload)
+                            payload = build_cancel_control_payload(
+                                run_id=execution.run_id,
+                                reason=f"user_cancel:{current_user.user_id}",
+                            )
+                            await redis.xadd(control_stream(worker.public_id), payload)
                             cancelled = True
                     except Exception as e:
                         logger.warning(f"发送取消指令失败: {e}")
@@ -752,7 +756,7 @@ async def batch_operate_tasks(
                 )
 
                 await execution_status_service.update_runtime_status(
-                    execution_id=execution.execution_id,
+                    run_id=execution.run_id,
                     status="cancelled",
                     status_at=datetime.now(timezone.utc),
                     error_message=f"用户取消 (user_id={current_user.user_id})",
@@ -1014,15 +1018,15 @@ async def get_task_stats(task_id, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="获取任务统计失败")
 
 
-@tasks_router.post("/executions/{execution_id}/stop", response_model=BaseResponse[dict])
-async def stop_task_execution(execution_id: str, current_user=Depends(get_current_user)):
+@tasks_router.post("/runs/{run_id}/stop", response_model=BaseResponse[dict])
+async def stop_task_execution(run_id: str, current_user=Depends(get_current_user)):
     """停止任务执行"""
     from antcode_core.application.services.scheduler.execution_status_service import (
         execution_status_service,
     )
 
     execution = await scheduler_service.get_execution_with_permission(
-        execution_id, current_user.user_id
+        run_id, current_user.user_id
     )
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
@@ -1044,33 +1048,31 @@ async def stop_task_execution(execution_id: str, current_user=Depends(get_curren
             worker = await worker_service.get_worker_by_id(execution.worker_id)
             if worker:
                 redis = await get_redis_client()
-                payload = {
-                    "control_type": "cancel",
-                    "task_id": execution.execution_id,
-                    "run_id": execution.execution_id,
-                    "reason": f"user_cancel:{current_user.user_id}",
-                }
-                await redis.xadd(f"antcode:control:{worker.public_id}", payload)
+                payload = build_cancel_control_payload(
+                    run_id=execution.run_id,
+                    reason=f"user_cancel:{current_user.user_id}",
+                )
+                await redis.xadd(control_stream(worker.public_id), payload)
                 cancelled = True
         except Exception as e:
             logger.warning(f"发送取消指令失败: {e}")
 
     await execution_status_service.update_runtime_status(
-        execution_id=execution.execution_id,
+        run_id=execution.run_id,
         status="cancelled",
         status_at=datetime.now(timezone.utc),
         error_message=f"用户取消 (user_id={current_user.user_id})",
     )
 
     return success_response(
-        {"execution_id": execution_id, "status": "cancelled", "remote_cancelled": cancelled},
+        {"run_id": run_id, "status": "cancelled", "remote_cancelled": cancelled},
         message="任务已停止",
     )
 
 
-@tasks_router.get("/executions/{execution_id}/logs", response_model=PaginationResponse[dict])
+@tasks_router.get("/runs/{run_id}/logs", response_model=PaginationResponse[dict])
 async def get_task_execution_logs(
-    execution_id: str,
+    run_id: str,
     page: int = Query(1, ge=1),
     size: int = Query(200, ge=1, le=1000),
     current_user=Depends(get_current_user),
@@ -1079,12 +1081,12 @@ async def get_task_execution_logs(
     from antcode_core.application.services.logs.task_log_service import task_log_service
 
     execution = await scheduler_service.get_execution_with_permission(
-        execution_id, current_user.user_id
+        run_id, current_user.user_id
     )
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
-    logs = await task_log_service.get_execution_logs(execution.execution_id)
+    logs = await task_log_service.get_execution_logs(execution.run_id)
     items = []
     for line in (logs.get("output") or "").splitlines():
         if line.strip():
@@ -1105,9 +1107,9 @@ async def get_task_execution_logs(
     )
 
 
-@tasks_router.get("/executions/{execution_id}/logs/download")
+@tasks_router.get("/runs/{run_id}/logs/download")
 async def download_task_execution_logs(
-    execution_id: str,
+    run_id: str,
     format: str = Query("txt", pattern="^(txt|json)$"),
     current_user=Depends(get_current_user),
 ):
@@ -1115,16 +1117,16 @@ async def download_task_execution_logs(
     from antcode_core.application.services.logs.task_log_service import task_log_service
 
     execution = await scheduler_service.get_execution_with_permission(
-        execution_id, current_user.user_id
+        run_id, current_user.user_id
     )
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
-    logs = await task_log_service.get_execution_logs(execution.execution_id)
+    logs = await task_log_service.get_execution_logs(execution.run_id)
     if format == "json":
         content = json.dumps(logs, ensure_ascii=False, indent=2)
         media_type = "application/json"
-        filename = f"execution_{execution_id}.json"
+        filename = f"run_{run_id}.json"
     else:
         content = "\n".join(
             [
@@ -1136,7 +1138,7 @@ async def download_task_execution_logs(
             ]
         )
         media_type = "text/plain"
-        filename = f"execution_{execution_id}.txt"
+        filename = f"run_{run_id}.txt"
 
     buffer = io.BytesIO(content.encode("utf-8"))
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}

@@ -114,6 +114,11 @@ class TaskResponse(BaseModel):
     project_bound_worker_id: str = Field("", description="项目绑定 Worker ID")
     project_bound_worker_name: str = Field("", description="项目绑定 Worker 名称")
 
+    runtime_kind: str = Field("", description="运行时类型")
+    runtime_scope: str = Field("", description="运行时作用域")
+    python_version: str = Field("", description="Python 版本")
+    runtime_locator: str = Field("", description="运行时定位符")
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -128,7 +133,7 @@ class TaskListResponse(BaseModel):
 class TaskRunResponse(BaseModel):
     """任务执行记录响应"""
     id: str = Field(description="执行记录公开ID")
-    execution_id: str = Field(description="执行UUID")
+    run_id: str = Field(description="运行UUID")
     task_id: str = Field(description="任务公开ID")
     start_time: str = ""
     end_time: str = ""
@@ -152,7 +157,7 @@ class TaskRunResponse(BaseModel):
         """从 ORM 对象创建响应，使用 public_id"""
         return cls(
             id=obj.public_id,
-            execution_id=obj.execution_id,
+            run_id=obj.run_id,
             task_id=getattr(obj, "task_public_id", "") or "",
             start_time=obj.start_time.isoformat() if obj.start_time else "",
             end_time=obj.end_time.isoformat() if obj.end_time else "",

@@ -53,6 +53,21 @@ const { Option } = Select
 const { RangePicker } = DatePicker
 const { Text } = Typography
 
+const getUsernameChangeSummary = (record: AuditLogItem): string | null => {
+  if (record.resource_type !== 'user' || record.action !== 'user_update') {
+    return null
+  }
+
+  const oldUsername = typeof record.old_value?.username === 'string' ? record.old_value.username : ''
+  const newUsername = typeof record.new_value?.username === 'string' ? record.new_value.username : ''
+
+  if (!oldUsername || !newUsername || oldUsername === newUsername) {
+    return null
+  }
+
+  return `用户名: ${oldUsername} → ${newUsername}`
+}
+
 // 资源类型映射
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
   auth: '认证',
@@ -150,6 +165,9 @@ const AuditLog: React.FC = () => {
     if (values.action) params.action = values.action
     if (values.resource_type) params.resource_type = values.resource_type
     if (values.username) params.username = values.username
+    if (values.user_id !== undefined && values.user_id !== null && values.user_id !== '') {
+      params.user_id = Number(values.user_id)
+    }
     if (values.success !== undefined) params.success = values.success
     if (values.time_range && values.time_range.length === 2) {
       params.start_date = values.time_range[0].format('YYYY-MM-DD')
@@ -261,7 +279,21 @@ const AuditLog: React.FC = () => {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
-      ellipsis: true
+      ellipsis: true,
+      render: (description: string | undefined, record: AuditLogItem) => {
+        const usernameChangeSummary = getUsernameChangeSummary(record)
+
+        if (!usernameChangeSummary) {
+          return description || '-'
+        }
+
+        return (
+          <Space direction="vertical" size={2}>
+            <span>{description || '-'}</span>
+            <Tag color="processing">{usernameChangeSummary}</Tag>
+          </Space>
+        )
+      }
     },
     {
       title: '操作',
@@ -332,6 +364,10 @@ const AuditLog: React.FC = () => {
 
           <Form.Item name="username" label="用户名">
             <Input placeholder="输入用户名" style={{ width: 120 }} />
+          </Form.Item>
+
+          <Form.Item name="user_id" label="用户ID">
+            <Input placeholder="输入用户ID" style={{ width: 120 }} />
           </Form.Item>
 
           <Form.Item name="success" label="结果">
@@ -459,6 +495,12 @@ const AuditLog: React.FC = () => {
               </Descriptions.Item>
             )}
 
+            {selectedLog.user_id !== undefined && selectedLog.user_id !== null && (
+              <Descriptions.Item label="用户ID">
+                {selectedLog.user_id}
+              </Descriptions.Item>
+            )}
+
             {selectedLog.resource_id && (
               <Descriptions.Item label="资源ID">
                 {selectedLog.resource_id}
@@ -474,6 +516,12 @@ const AuditLog: React.FC = () => {
             {selectedLog.description && (
               <Descriptions.Item label="描述">
                 {selectedLog.description}
+              </Descriptions.Item>
+            )}
+
+            {getUsernameChangeSummary(selectedLog) && (
+              <Descriptions.Item label="变更摘要">
+                <Tag color="processing">{getUsernameChangeSummary(selectedLog)}</Tag>
               </Descriptions.Item>
             )}
 

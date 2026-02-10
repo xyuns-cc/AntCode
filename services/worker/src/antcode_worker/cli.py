@@ -20,7 +20,6 @@ from loguru import logger
 from antcode_worker.config import (
     DATA_ROOT,
     WORKER_CONFIG_FILE,
-    PROJECT_ROOT,
     SERVICE_ROOT,
     WorkerConfig,
     init_worker_config,
@@ -203,13 +202,8 @@ def run_doctor() -> int:
     logger.info("检查 目录结构")
     required_dirs = [
         ("config/", SERVICE_ROOT / "config"),
-        ("runtime_data/cache/", SERVICE_ROOT / "runtime_data" / "cache"),
-        ("runtime_data/logs/", SERVICE_ROOT / "runtime_data" / "logs"),
-        ("runtime_data/secrets/", SERVICE_ROOT / "runtime_data" / "secrets"),
         ("scripts/", SERVICE_ROOT / "scripts"),
         ("src/antcode_worker/", SERVICE_ROOT / "src" / "antcode_worker"),
-        ("tests/unit/", SERVICE_ROOT / "tests" / "unit"),
-        ("tests/integration/", SERVICE_ROOT / "tests" / "integration"),
     ]
 
     for name, path in required_dirs:
@@ -296,11 +290,11 @@ def run_doctor() -> int:
     # 7. 数据目录检查
     logger.info("检查 数据目录")
     data_dirs = [
-        ("var/worker/", DATA_ROOT),
-        ("var/worker/projects/", DATA_ROOT / "projects"),
-        ("var/worker/venvs/", DATA_ROOT / "venvs"),
-        ("var/worker/logs/", DATA_ROOT / "logs"),
-        ("var/worker/executions/", DATA_ROOT / "executions"),
+        ("data/worker/", DATA_ROOT),
+        ("data/worker/projects/", DATA_ROOT / "projects"),
+        ("data/worker/runtimes/", DATA_ROOT / "runtimes"),
+        ("data/worker/logs/", DATA_ROOT / "logs"),
+        ("data/worker/runs/", DATA_ROOT / "runs"),
     ]
 
     for name, path in data_dirs:
@@ -387,7 +381,6 @@ def start_worker(
     Requirements: 7.1, 7.2
     """
     import asyncio
-    import signal
     import sys
 
     from loguru import logger
@@ -583,8 +576,8 @@ def main():
         epilog="""
 使用方式:
   交互式菜单: python -m antcode_worker
-  Gateway 模式: python -m antcode_worker run --name "Node-001" --transport gateway
-  Direct 模式:  python -m antcode_worker run --name "Node-001" --transport direct
+  Gateway 模式: python -m antcode_worker run --name "Worker-001" --transport gateway
+  Direct 模式:  python -m antcode_worker run --name "Worker-001" --transport direct
   环境诊断:     python -m antcode_worker doctor
   查看配置:     python -m antcode_worker print-config
 

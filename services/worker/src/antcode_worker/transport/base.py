@@ -112,7 +112,7 @@ class HeartbeatMessage:
 @dataclass
 class LogMessage:
     """日志消息"""
-    execution_id: str
+    run_id: str
     log_type: str  # stdout, stderr
     content: str
     timestamp: datetime | None = None
@@ -284,7 +284,7 @@ class TransportBase(ABC):
     @abstractmethod
     async def send_log_chunk(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         data: bytes,
         offset: int,
@@ -294,7 +294,7 @@ class TransportBase(ABC):
         发送日志分片（存储通道）
 
         Args:
-            execution_id: 执行 ID
+            run_id: 运行 ID
             log_type: 日志类型 (stdout/stderr)
             data: 日志数据
             offset: 偏移量

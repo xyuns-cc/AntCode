@@ -37,7 +37,7 @@ const { Title, Text } = Typography
 
 const ExecutionLogs: React.FC = () => {
   const navigate = useNavigate()
-  const { taskId, executionId } = useParams<{ taskId: string; executionId: string }>()
+  const { taskId, runId } = useParams<{ taskId: string; runId: string }>()
   const { token } = theme.useToken()
 
   // 状态管理
@@ -63,21 +63,21 @@ const ExecutionLogs: React.FC = () => {
 
   // 加载执行信息
   const loadExecution = useCallback(async () => {
-    if (!taskId || !executionId) {
-      setError('缺少任务ID或执行ID')
+    if (!taskId || !runId) {
+      setError('缺少任务ID或运行ID')
       setLoading(false)
       return
     }
 
     try {
-      const executions = await taskService.getTaskExecutions(taskId)
-      const exec = executions.items.find(e => e.execution_id === executionId)
+      const executions = await taskService.getTaskRuns(taskId)
+      const exec = executions.items.find(e => e.run_id === runId)
 
       if (exec) {
         setExecution(exec)
         setError(null)
       } else {
-        setError(`未找到执行记录: ${executionId}`)
+        setError(`未找到执行记录: ${runId}`)
       }
     } catch (error: unknown) {
       Logger.error('加载执行信息失败:', error)
@@ -86,7 +86,7 @@ const ExecutionLogs: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [taskId, executionId])
+  }, [taskId, runId])
 
   // 刷新执行状态
   const refreshExecution = useCallback(async () => {
@@ -231,12 +231,12 @@ const ExecutionLogs: React.FC = () => {
       execution
         ? [
           {
-            key: 'executionId',
-            label: '执行ID',
+            key: 'runId',
+            label: '运行ID',
             value: (
-              <CopyableTooltip text={execution.execution_id}>
+              <CopyableTooltip text={execution.run_id}>
                 <code style={{ cursor: 'pointer' }}>
-                  {execution.execution_id}
+                  {execution.run_id}
                 </code>
               </CopyableTooltip>
             )
@@ -508,7 +508,7 @@ const ExecutionLogs: React.FC = () => {
       )}
 
       {/* 日志查看器 */}
-      {executionId ? (
+      {runId ? (
         <div style={{
           background: token.colorBgContainer,
           borderRadius: '8px',
@@ -517,8 +517,8 @@ const ExecutionLogs: React.FC = () => {
           border: `1px solid ${token.colorBorderSecondary}`
         }}>
           <EnhancedLogViewer
-            key={executionId}
-            executionId={executionId}
+            key={runId}
+            runId={runId}
             height={viewerHeight}
             showControls={true}
             autoConnect={true}
@@ -551,7 +551,7 @@ const ExecutionLogs: React.FC = () => {
             textAlign: 'center'
           }}>
             <Empty
-              description="执行ID不存在"
+              description="运行ID不存在"
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />
           </div>

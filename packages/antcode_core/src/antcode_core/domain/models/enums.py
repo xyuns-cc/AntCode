@@ -129,6 +129,13 @@ class ExecutionStrategy(str, Enum):
 
 # ========== 运行时环境相关枚举 ==========
 
+class RuntimeKind(str, Enum):
+    """运行时类型"""
+    PYTHON = "python"
+    JAVA = "java"
+    GO = "go"
+
+
 class RuntimeScope(str, Enum):
     """运行时环境作用域"""
     SHARED = "shared"
@@ -239,6 +246,7 @@ __all__ = [
     "ScheduleType",
     "ExecutionStrategy",
     # 运行时环境相关
+    "RuntimeKind",
     "RuntimeScope",
     "RuntimeLocation",
     "InterpreterSource",

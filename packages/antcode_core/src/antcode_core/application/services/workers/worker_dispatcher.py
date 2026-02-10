@@ -11,6 +11,7 @@ from datetime import datetime
 from loguru import logger
 
 from antcode_core.domain.models import Worker, WorkerStatus
+from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
 
 
 class WorkerLoadBalancer:
@@ -64,7 +65,7 @@ class WorkerLoadBalancer:
                     from antcode_core.infrastructure.redis import get_redis_client
 
                     redis = await get_redis_client()
-                    hb_key = f"antcode:heartbeat:{worker.public_id}"
+                    hb_key = worker_heartbeat_key(worker.public_id)
                     raw = await redis.hgetall(hb_key)
                     metrics = {
                         (k.decode() if isinstance(k, bytes) else k): (
@@ -241,7 +242,7 @@ class WorkerLoadBalancer:
 
         参数:
         - workers: 候选节点列表（可选）
-        - exclude_workers: 排除的节点ID列表
+        - exclude_workers: 排除的 Worker ID 列表
         - region: 区域过滤
         - tags: 标签过滤
         - require_render: 是否需要渲染能力（DrissionPage）
@@ -576,7 +577,7 @@ class WorkerTaskDispatcher:
     async def dispatch_task(
         self,
         project_id,
-        execution_id,
+        run_id,
         params=None,
         environment_vars=None,
         timeout=3600,
@@ -595,7 +596,7 @@ class WorkerTaskDispatcher:
         """
         # 构建单任务批量请求
         task_item = {
-            "task_id": execution_id,
+            "task_id": run_id,
             "project_id": project_id,
             "project_type": project_type,
             "priority": priority,
@@ -619,8 +620,8 @@ class WorkerTaskDispatcher:
                 "success": True,
                 "worker_id": result.get("worker_id"),
                 "worker_name": result.get("worker_name"),
-                "execution_id": execution_id,
-                "task_id": execution_id,
+                "run_id": run_id,
+                "task_id": run_id,
                 "message": "任务已分发到优先级队列",
                 "transfer_skipped": result.get("transfer_skipped", False),
                 "accepted_count": result.get("accepted_count", 0),
@@ -805,7 +806,7 @@ class WorkerTaskDispatcher:
         from antcode_core.infrastructure.redis.streams import StreamClient
 
         stream = StreamClient()
-        stream_key = f"antcode:task:ready:{worker.public_id}"
+        stream_key = task_ready_stream(worker.public_id)
 
         messages = []
         for task in tasks:
@@ -875,14 +876,15 @@ class WorkerTaskDispatcher:
         try:
             from antcode_core.domain.models.task_run import TaskRun
 
-            execution = await TaskRun.get_or_none(execution_id=str(task_id))
-            if not execution:
-                execution = await TaskRun.get_or_none(public_id=str(task_id))
+            task_id_str = str(task_id)
+            execution = await TaskRun.get_or_none(run_id=task_id_str)
+            if not execution and len(task_id_str) <= 32:
+                execution = await TaskRun.get_or_none(public_id=task_id_str)
             if not execution:
                 return None
 
             return {
-                "execution_id": execution.execution_id,
+                "run_id": execution.run_id,
                 "status": execution.status,
                 "start_time": execution.start_time.isoformat()
                 if execution.start_time
@@ -904,7 +906,7 @@ class WorkerTaskDispatcher:
 
             log_type = "stdout" if log_type == "output" else "stderr" if log_type == "error" else log_type
             return await distributed_log_service.get_logs(
-                execution_id=str(task_id),
+                run_id=str(task_id),
                 log_type=log_type,
                 tail=tail,
             )

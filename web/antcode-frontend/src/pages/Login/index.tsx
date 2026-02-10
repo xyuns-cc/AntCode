@@ -2,7 +2,7 @@ import type React from 'react'
 import { useEffect } from 'react'
 import { Form, Input, Button, Card, Checkbox, ConfigProvider } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { AuthHandler } from '@/utils/authHandler'
 import { STORAGE_KEYS } from '@/utils/constants'
@@ -12,6 +12,27 @@ import SecureStorage from '@/utils/crypto'
 import { useBrandingStore } from '@/stores/brandingStore'
 import type { LoginRequest } from '@/types'
 import styles from './Login.module.css'
+
+const isPrintableText = (value: string): boolean => {
+  if (!value) {
+    return false
+  }
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code < 32 || code > 126) {
+      return false
+    }
+  }
+  return true
+}
+
+const isValidRememberedUsername = (value: string): boolean => {
+  return /^[a-zA-Z0-9_]{3,32}$/.test(value)
+}
+
+const isValidRememberedPassword = (value: string): boolean => {
+  return value.length >= 4 && value.length <= 128 && isPrintableText(value)
+}
 
 // 登录页面专用主题配置，覆盖深色主题的输入框样式
 const loginTheme = {
@@ -49,20 +70,44 @@ const Login: React.FC = () => {
       return undefined
     }
 
-    const username = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || ''
+    const username = (SecureStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || '').trim()
     const password = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_PASSWORD) || ''
-    
+
+    const rememberedValid =
+      isValidRememberedUsername(username) &&
+      isValidRememberedPassword(password)
+
+    if (!rememberedValid) {
+      localStorage.removeItem(STORAGE_KEYS.REMEMBER_ME)
+      SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_USERNAME)
+      SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
+      return undefined
+    }
+
     const setFormValues = () => {
+      const touched = form.isFieldsTouched(['username', 'password'], true)
+      if (touched) {
+        return
+      }
+
+      const currentValues = form.getFieldsValue(['username', 'password']) as {
+        username?: string
+        password?: string
+      }
+      const currentUsername = (currentValues.username || '').trim()
+      const currentPassword = currentValues.password || ''
+
+      if ((currentUsername && currentUsername !== username) || (currentPassword && currentPassword !== password)) {
+        return
+      }
+
       form.setFieldsValue({ username, password, remember: true })
     }
 
     setFormValues()
-    
-    // 延迟设置以覆盖浏览器自动填充
-    const timeouts = [50, 200, 500].map(delay => 
-      setTimeout(setFormValues, delay)
-    )
-    
+
+    const timeouts = [50, 200, 500].map(delay => setTimeout(setFormValues, delay))
+
     return () => timeouts.forEach(clearTimeout)
   }, [isAuthenticated, navigate, form])
 
@@ -79,7 +124,7 @@ const Login: React.FC = () => {
         SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
       }
 
-      await login({ username: values.username, password: values.password })
+      await login({ username: values.username.trim(), password: values.password })
       navigate(AuthHandler.getRedirectPath(), { replace: true })
     } catch (error) {
       Logger.error('Login failed:', error)
@@ -119,7 +164,6 @@ const Login: React.FC = () => {
                   <Form.Item name="remember" valuePropName="checked" noStyle>
                     <Checkbox>记住我</Checkbox>
                   </Form.Item>
-                  <Link to="/forgot-password" className={styles.forgotLink}>忘记密码？</Link>
                 </div>
               </Form.Item>
 

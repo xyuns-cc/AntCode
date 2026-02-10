@@ -10,7 +10,6 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
 from typing import Any, Protocol
 
@@ -312,7 +311,7 @@ class BatchSender:
         from antcode_worker.transport.base import LogMessage
         
         return LogMessage(
-            execution_id=entry.run_id,
+            run_id=entry.run_id,
             log_type=entry.stream.value,
             content=entry.content,
             timestamp=entry.timestamp,

@@ -548,8 +548,12 @@ async def search_projects(
     response_model=BaseResponse[dict],
     summary="验证项目配置",
 )
-async def validate_project_config(payload: ProjectValidateRequest):
+async def validate_project_config(
+    payload: ProjectValidateRequest,
+    current_user=Depends(get_current_user),
+):
     """验证项目配置"""
+    _ = current_user
     errors: list[str] = []
 
     project_type = payload.type
@@ -888,7 +892,8 @@ async def duplicate_project(
         worker_env_name=project.worker_env_name,
         python_version=project.python_version,
         runtime_scope=project.runtime_scope,
-        venv_path=project.venv_path,
+        runtime_kind=project.runtime_kind,
+        runtime_locator=project.runtime_locator,
         current_runtime_id=project.current_runtime_id,
         runtime_worker_id=project.runtime_worker_id,
         execution_strategy=project.execution_strategy,
@@ -924,9 +929,6 @@ async def duplicate_project(
                 last_editor_id=detail.last_editor_id,
                 last_edit_at=detail.last_edit_at,
                 published_version=detail.published_version,
-                is_modified=detail.is_modified,
-                extracted_hash=detail.extracted_hash,
-                last_modified_at=detail.last_modified_at,
             )
     elif project.type == ProjectType.RULE:
         detail = await relation_service.get_project_rule_detail(project.id)
@@ -1060,80 +1062,6 @@ async def update_project_dependencies(
     project.updated_by = current_user_id
     await project.save()
     return success_response({"dependencies": deps}, message=Messages.UPDATED_SUCCESS)
-
-
-@project_router.get(
-    "/{project_id}/file-content",
-    response_model=BaseResponse[dict],
-    summary="获取项目文件内容（兼容）",
-)
-async def get_project_file_content_compat(
-    project_id: str,
-    current_user_id: int = Depends(get_current_user_id),
-):
-    """兼容旧版获取项目文件内容接口"""
-    project = await project_service.get_project_by_id(project_id, current_user_id)
-    if not project:
-        raise ProjectNotFoundException(project_id)
-
-    if project.type == ProjectType.CODE:
-        detail = await relation_service.get_project_code_detail(project.id)
-        if not detail:
-            raise HTTPException(status_code=404, detail="代码项目内容不存在")
-        return success_response({"content": detail.content}, message=Messages.QUERY_SUCCESS)
-
-    if project.type == ProjectType.FILE:
-        detail = await relation_service.get_project_file_detail(project.id)
-        if not detail or not detail.entry_point:
-            raise HTTPException(status_code=404, detail="文件项目未配置入口文件")
-        content = await project_file_service.get_versioned_file_content(
-            project.id, detail.entry_point, "draft"
-        )
-        return success_response({"content": content.get("content", "")}, message=Messages.QUERY_SUCCESS)
-
-    raise HTTPException(status_code=400, detail="当前项目类型不支持文件内容获取")
-
-
-@project_router.put(
-    "/{project_id}/file-content",
-    response_model=BaseResponse[dict],
-    summary="更新项目文件内容（兼容）",
-)
-async def update_project_file_content_compat(
-    project_id: str,
-    payload: dict,
-    current_user_id: int = Depends(get_current_user_id),
-):
-    """兼容旧版更新项目文件内容接口"""
-    project = await project_service.get_project_by_id(project_id, current_user_id)
-    if not project:
-        raise ProjectNotFoundException(project_id)
-
-    content = payload.get("content") if isinstance(payload, dict) else None
-    if content is None:
-        raise HTTPException(status_code=400, detail="必须提供 content")
-
-    if project.type == ProjectType.CODE:
-        detail = await relation_service.get_project_code_detail(project.id)
-        if not detail:
-            raise HTTPException(status_code=404, detail="代码项目内容不存在")
-        from antcode_core.common.hash_utils import calculate_content_hash
-
-        detail.content = content
-        detail.content_hash = calculate_content_hash(content)
-        await detail.save()
-        return success_response({"content": content}, message=Messages.UPDATED_SUCCESS)
-
-    if project.type == ProjectType.FILE:
-        detail = await relation_service.get_project_file_detail(project.id)
-        if not detail or not detail.entry_point:
-            raise HTTPException(status_code=404, detail="文件项目未配置入口文件")
-        updated = await project_file_service.update_file_content(
-            detail.file_path, detail.entry_point, content, "utf-8"
-        )
-        return success_response(updated, message=Messages.UPDATED_SUCCESS)
-
-    raise HTTPException(status_code=400, detail="当前项目类型不支持文件内容更新")
 
 
 @project_router.delete(
@@ -1531,7 +1459,10 @@ async def update_project_file_content(
         # 标记项目过期（用于分布式同步）
         try:
             await ProjectFile.filter(id=file_detail.id).update(
-                is_modified=True, last_modified_at=datetime.now()
+                dirty=True,
+                dirty_files_count=(file_detail.dirty_files_count or 0) + 1,
+                last_editor_id=current_user_id,
+                last_edit_at=datetime.now(),
             )
 
             await worker_project_service.mark_project_outdated(project.public_id)

@@ -14,6 +14,7 @@ from antcode_core.domain.schemas.logs import LogFileResponse
 from antcode_core.domain.schemas.task import TaskRunResponse
 from antcode_core.application.services.logs.task_log_service import task_log_service
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
+from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 
 runs_router = APIRouter()
 
@@ -85,13 +86,11 @@ async def cancel_run(run_id: str, current_user=Depends(get_current_user)):
             worker = await worker_service.get_worker_by_id(execution.worker_id)
             if worker:
                 redis = await get_redis_client()
-                payload = {
-                    "control_type": "cancel",
-                    "task_id": execution.execution_id,
-                    "run_id": execution.execution_id,
-                    "reason": f"user_cancel:{current_user.user_id}",
-                }
-                await redis.xadd(f"antcode:control:{worker.public_id}", payload)
+                payload = build_cancel_control_payload(
+                    run_id=execution.run_id,
+                    reason=f"user_cancel:{current_user.user_id}",
+                )
+                await redis.xadd(control_stream(worker.public_id), payload)
                 cancelled = True
                 if cancelled:
                     logger.info(f"已发送取消指令到 Worker: {worker.name}")
@@ -104,7 +103,7 @@ async def cancel_run(run_id: str, current_user=Depends(get_current_user)):
     )
 
     await execution_status_service.update_runtime_status(
-        execution_id=execution.execution_id,
+        run_id=execution.run_id,
         status="cancelled",
         status_at=datetime.now(UTC),
         error_message=f"用户取消 (user_id={current_user.user_id})",
@@ -114,7 +113,7 @@ async def cancel_run(run_id: str, current_user=Depends(get_current_user)):
 
     return success_response(
         {
-            "execution_id": run_id,
+            "run_id": run_id,
             "status": "cancelled",
             "remote_cancelled": cancelled,
         },
@@ -149,7 +148,7 @@ async def get_run_log_file(
 
         return success_response(
             LogFileResponse(
-                execution_id=run_id,
+                run_id=run_id,
                 log_type=log_type,
                 content=content,
                 file_path=log_file_path,

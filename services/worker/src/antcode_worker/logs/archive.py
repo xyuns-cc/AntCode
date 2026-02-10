@@ -14,8 +14,7 @@ import asyncio
 import gzip
 import hashlib
 import io
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -27,7 +26,11 @@ from loguru import logger
 
 from antcode_worker.domain.enums import ArtifactType
 from antcode_worker.domain.models import ArtifactRef
+from antcode_worker.config import DATA_ROOT
 from antcode_worker.logs.wal import WALConfig, WALManager, WALMetadata, WALReader, WALState, WALWriter
+
+
+_DEFAULT_WAL_DIR = str(DATA_ROOT / "logs" / "wal")
 
 
 class ArchiveState(str, Enum):
@@ -44,7 +47,7 @@ class ArchiveState(str, Enum):
 class ArchiveConfig:
     """归档配置"""
     # WAL 配置
-    wal_dir: str = "var/worker/logs/wal"
+    wal_dir: str = _DEFAULT_WAL_DIR
     sync_on_write: bool = False
     
     # 压缩配置
@@ -537,8 +540,3 @@ class ArchiveRecoveryService:
             data["state"] = WALState.COMPLETED.value
             async with aiofiles.open(meta_file, "w") as f:
                 await f.write(json.dumps(data, indent=2))
-
-
-# 兼容旧接口
-LogArchive = LogArchiver
-SimpleUploader = S3Uploader

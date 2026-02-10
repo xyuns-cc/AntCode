@@ -29,7 +29,7 @@ class CheckpointState(str, Enum):
 class TaskCheckpoint:
     """任务检查点"""
 
-    execution_id: str
+    run_id: str
     task_id: int
     task_public_id: str
     worker_id: str | None = None
@@ -79,11 +79,11 @@ class TaskPersistenceService:
             checkpoint.last_checkpoint_at = datetime.now()
             await self._save_to_db(checkpoint)
 
-            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{checkpoint.execution_id}"
+            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{checkpoint.run_id}"
             await unified_cache.set(cache_key, checkpoint.to_dict(), ttl=self.CHECKPOINT_CACHE_TTL)
 
             logger.debug(
-                f"检查点已保存: execution_id={checkpoint.execution_id}, "
+                f"检查点已保存: run_id={checkpoint.run_id}, "
                 f"progress={checkpoint.progress:.1%}"
             )
             return True
@@ -97,7 +97,7 @@ class TaskPersistenceService:
         from antcode_core.domain.models import TaskRun
 
         try:
-            execution = await TaskRun.get_or_none(execution_id=checkpoint.execution_id)
+            execution = await TaskRun.get_or_none(run_id=checkpoint.run_id)
             if execution:
                 result_data = execution.result_data or {}
                 result_data["checkpoint"] = checkpoint.to_dict()
@@ -106,10 +106,10 @@ class TaskPersistenceService:
         except Exception as e:
             logger.warning(f"保存检查点到数据库失败: {e}")
 
-    async def get_checkpoint(self, execution_id):
+    async def get_checkpoint(self, run_id):
         """获取任务检查点"""
         try:
-            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{execution_id}"
+            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{run_id}"
             data = await unified_cache.get(cache_key)
             if data:
                 return TaskCheckpoint.from_dict(data)
@@ -119,7 +119,7 @@ class TaskPersistenceService:
         try:
             from antcode_core.domain.models import TaskRun
 
-            execution = await TaskRun.get_or_none(execution_id=execution_id)
+            execution = await TaskRun.get_or_none(run_id=run_id)
             if execution and execution.result_data:
                 checkpoint_data = execution.result_data.get("checkpoint")
                 if checkpoint_data:
@@ -129,20 +129,20 @@ class TaskPersistenceService:
 
         return None
 
-    async def delete_checkpoint(self, execution_id):
+    async def delete_checkpoint(self, run_id):
         """删除任务检查点"""
         try:
-            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{execution_id}"
+            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{run_id}"
             await unified_cache.delete(cache_key)
         except Exception as e:
             logger.debug(f"删除缓存检查点失败: {e}")
 
-    async def update_heartbeat(self, execution_id):
+    async def update_heartbeat(self, run_id):
         """更新任务心跳"""
         from antcode_core.domain.models import TaskRun
 
         try:
-            updated = await TaskRun.filter(execution_id=execution_id).update(
+            updated = await TaskRun.filter(run_id=run_id).update(
                 last_heartbeat=datetime.now()
             )
             return updated > 0
@@ -178,8 +178,8 @@ class TaskPersistenceService:
 
             orphan_executions = [e for e in interrupted_executions if e.task_id not in task_map]
             if orphan_executions:
-                orphan_ids = [e.execution_id for e in orphan_executions]
-                await TaskRun.filter(execution_id__in=orphan_ids).update(
+                orphan_ids = [e.run_id for e in orphan_executions]
+                await TaskRun.filter(run_id__in=orphan_ids).update(
                     status=TaskStatus.FAILED,
                     error_message="任务已被删除",
                     end_time=datetime.now(),
@@ -202,7 +202,7 @@ class TaskPersistenceService:
 
                 if not checkpoint:
                     checkpoint = TaskCheckpoint(
-                        execution_id=execution.execution_id,
+                        run_id=execution.run_id,
                         task_id=execution.task_id,
                         task_public_id=task.public_id,
                         state=CheckpointState.CHECKPOINTED,
@@ -218,10 +218,10 @@ class TaskPersistenceService:
             logger.error(f"获取中断任务失败: {e}")
             return []
 
-    async def update_progress(self, execution_id, progress, checkpoint_data=None):
+    async def update_progress(self, run_id, progress, checkpoint_data=None):
         """更新任务进度"""
         try:
-            checkpoint = await self.get_checkpoint(execution_id)
+            checkpoint = await self.get_checkpoint(run_id)
             if checkpoint:
                 checkpoint.progress = min(1.0, max(0.0, progress))
                 if checkpoint_data:
@@ -257,7 +257,7 @@ class TaskRecoveryService:
                 try:
                     if checkpoint.retry_count >= TaskPersistenceService.MAX_RETRY_ON_RECOVERY:
                         logger.warning(
-                            f"任务 {checkpoint.execution_id} 重试次数过多 "
+                            f"任务 {checkpoint.run_id} 重试次数过多 "
                             f"({checkpoint.retry_count}次)，标记为失败"
                         )
                         await self._mark_task_failed(checkpoint, "任务恢复失败，重试次数超限")
@@ -271,7 +271,7 @@ class TaskRecoveryService:
                         stats["skipped"] += 1
 
                 except Exception as e:
-                    logger.error(f"恢复任务 {checkpoint.execution_id} 异常: {e}")
+                    logger.error(f"恢复任务 {checkpoint.run_id} 异常: {e}")
                     stats["failed"] += 1
 
             logger.info(
@@ -299,7 +299,7 @@ class TaskRecoveryService:
             checkpoint.retry_count += 1
             await self.persistence.save_checkpoint(checkpoint)
 
-            await TaskRun.filter(execution_id=checkpoint.execution_id).update(
+            await TaskRun.filter(run_id=checkpoint.run_id).update(
                 status=TaskStatus.FAILED,
                 error_message="任务中断，已重新调度",
                 end_time=datetime.now(),
@@ -312,7 +312,7 @@ class TaskRecoveryService:
                     "_checkpoint": checkpoint.checkpoint_data,
                     "_progress": checkpoint.progress,
                     "_last_log_offset": checkpoint.last_log_offset,
-                    "_previous_execution_id": checkpoint.execution_id,
+                    "_previous_run_id": checkpoint.run_id,
                 }
 
             if resume_data:
@@ -327,7 +327,7 @@ class TaskRecoveryService:
             await scheduler_service.trigger_task(task.id)
 
             logger.info(
-                f"任务已恢复调度: execution_id={checkpoint.execution_id}, "
+                f"任务已恢复调度: run_id={checkpoint.run_id}, "
                 f"进度={checkpoint.progress:.1%}, 重试次数={checkpoint.retry_count}, "
                 f"断点续传={'是' if resume_data else '否'}"
             )
@@ -344,22 +344,22 @@ class TaskRecoveryService:
             from antcode_core.domain.models import TaskRun
             from antcode_core.domain.models.enums import TaskStatus
 
-            await TaskRun.filter(execution_id=checkpoint.execution_id).update(
+            await TaskRun.filter(run_id=checkpoint.run_id).update(
                 status=TaskStatus.FAILED,
                 error_message=error_message,
                 end_time=datetime.now(),
             )
 
-            await self.persistence.delete_checkpoint(checkpoint.execution_id)
+            await self.persistence.delete_checkpoint(checkpoint.run_id)
 
         except Exception as e:
             logger.error(f"标记任务失败异常: {e}")
 
-    async def recover_single_task(self, execution_id):
+    async def recover_single_task(self, run_id):
         """手动恢复单个任务"""
-        checkpoint = await self.persistence.get_checkpoint(execution_id)
+        checkpoint = await self.persistence.get_checkpoint(run_id)
         if not checkpoint:
-            logger.warning(f"未找到检查点: {execution_id}")
+            logger.warning(f"未找到检查点: {run_id}")
             return False
 
         return await self._recover_task(checkpoint)

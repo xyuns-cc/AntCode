@@ -5,6 +5,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$(dirname "$WORKER_ROOT")")"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -68,7 +69,7 @@ fi
 # 4. 目录检查
 echo ""
 echo "4. 目录结构"
-for dir in "config" "runtime_data" "src/antcode_worker"; do
+for dir in "config" "src/antcode_worker"; do
     if [ -d "$WORKER_ROOT/$dir" ]; then
         check_pass "$dir/"
     else
@@ -76,13 +77,28 @@ for dir in "config" "runtime_data" "src/antcode_worker"; do
     fi
 done
 
+DATA_ROOT="$PROJECT_ROOT/data/worker"
+if [ -d "$DATA_ROOT" ]; then
+    check_pass "data/worker/"
+else
+    check_warn "data/worker/ 不存在（将由 Worker 自动创建）"
+fi
+
 # 5. 配置文件检查
 echo ""
 echo "5. 配置文件"
-if [ -f "$WORKER_ROOT/config/worker.yaml" ]; then
-    check_pass "config/worker.yaml"
+
+# 新架构默认配置文件位置：data/worker/worker_config.yaml
+WORKER_CONFIG_FILE="$DATA_ROOT/worker_config.yaml"
+if [ -f "$WORKER_CONFIG_FILE" ]; then
+    check_pass "data/worker/worker_config.yaml"
 else
-    check_warn "config/worker.yaml 不存在（将使用默认配置）"
+    check_warn "data/worker/worker_config.yaml 不存在（将使用默认配置）"
+fi
+
+# 兼容提示：旧示例文件仍在 services/worker/config 下
+if [ -f "$WORKER_ROOT/config/worker.yaml" ]; then
+    check_pass "config/worker.yaml（示例/自定义路径）"
 fi
 
 # 6. 依赖检查
@@ -105,7 +121,7 @@ fi
 # 7. 证书检查（Gateway 模式）
 echo ""
 echo "7. 证书（Gateway 模式）"
-SECRETS_DIR="$WORKER_ROOT/runtime_data/secrets"
+SECRETS_DIR="$PROJECT_ROOT/data/worker/secrets"
 if [ -d "$SECRETS_DIR" ]; then
     if [ -f "$SECRETS_DIR/ca.crt" ]; then
         check_pass "CA 证书存在"

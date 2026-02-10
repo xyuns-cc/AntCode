@@ -75,7 +75,10 @@ COPY --chown=appuser:appgroup services/gateway/src/antcode_gateway /app/services
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
-    /app/data/logs \
+    /app/data/backend/db \
+    /app/data/backend/logs \
+    /app/data/backend/storage \
+    /app/data/backend/keys \
     /app/certs \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/certs \

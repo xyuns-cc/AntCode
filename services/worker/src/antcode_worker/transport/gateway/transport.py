@@ -420,7 +420,7 @@ class GatewayTransport(TransportBase):
 
     async def send_log_chunk(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         data: bytes,
         offset: int,
@@ -435,7 +435,7 @@ class GatewayTransport(TransportBase):
 
             # 构建请求
             request = LogEncoder.encode_chunk(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 data=data,
                 offset=offset,
@@ -514,7 +514,7 @@ class GatewayTransport(TransportBase):
                 return ControlMessage(
                     control_type="cancel",
                     task_id=data.get("task_id", ""),
-                    run_id=data.get("execution_id", ""),
+                    run_id=data.get("run_id", ""),
                     reason="",
                     receipt=getattr(response, "receipt_id", ""),
                 )

@@ -16,7 +16,11 @@ from typing import Optional
 from loguru import logger
 
 from antcode_core.common.config import settings
-from antcode_core.infrastructure.redis import get_redis_client
+from antcode_core.infrastructure.redis import (
+    get_redis_client,
+    log_chunk_stream_pattern,
+    log_stream_pattern,
+)
 from antcode_core.infrastructure.storage import (
     LocalFileStorageBackend,
     S3FileStorageBackend,
@@ -30,12 +34,12 @@ class CleanupResult:
     directories_cleaned: int = 0
     files_cleaned: int = 0
     bytes_freed: int = 0
-    execution_ids: list = None
+    run_ids: list = None
     errors: list = None
     
     def __post_init__(self):
-        if self.execution_ids is None:
-            self.execution_ids = []
+        if self.run_ids is None:
+            self.run_ids = []
         if self.errors is None:
             self.errors = []
 
@@ -70,9 +74,9 @@ class LogCleanupService:
     日志清理服务
     
     定时清理过期的任务日志目录，包括：
-    - 日志双通道架构的日志（data/logs/tasks/{execution_id}/）
-    - 分布式日志（data/logs/distributed/{date}/{execution_id}/）
-    - 本地任务日志（data/logs/tasks/{date}/{execution_id}/）
+    - 日志双通道架构的日志（data/backend/logs/tasks/{run_id}/）
+    - 分布式日志（data/backend/logs/distributed/{date}/{run_id}/）
+    - 本地任务日志（data/backend/logs/tasks/{date}/{run_id}/）
     
     Requirements: 6.2, 6.3
     """
@@ -147,7 +151,7 @@ class LogCleanupService:
         start_time = datetime.now()
         logger.info(f"开始清理过期日志（保留 {self._retention_days} 天）...")
         
-        # 1. 清理日志双通道架构的日志（按 execution_id 组织）
+        # 1. 清理日志双通道架构的日志（按 run_id 组织）
         dual_channel_result = await self._cleanup_dual_channel_logs()
 
         # 2. 清理分布式日志（按日期组织）
@@ -164,11 +168,6 @@ class LogCleanupService:
         
         duration = (datetime.now() - start_time).total_seconds()
         
-        total_dirs = (
-            dual_channel_result.directories_cleaned +
-            distributed_result.directories_cleaned +
-            local_result.directories_cleaned
-        )
         total_bytes = (
             dual_channel_result.bytes_freed +
             distributed_result.bytes_freed +
@@ -189,15 +188,15 @@ class LogCleanupService:
             f"耗时={duration:.1f}s"
         )
         
-        # 记录清理的 execution_id（Requirements: 6.3）
-        all_execution_ids = (
-            dual_channel_result.execution_ids +
-            distributed_result.execution_ids
+        # 记录清理的 run_id（Requirements: 6.3）
+        all_run_ids = (
+            dual_channel_result.run_ids +
+            distributed_result.run_ids
         )
-        if all_execution_ids:
+        if all_run_ids:
             logger.debug(
-                f"清理的 execution_id 列表: {all_execution_ids[:20]}"
-                f"{'...' if len(all_execution_ids) > 20 else ''}"
+                f"清理的 run_id 列表: {all_run_ids[:20]}"
+                f"{'...' if len(all_run_ids) > 20 else ''}"
             )
 
     async def _cleanup_redis_streams(self) -> RedisCleanupResult:
@@ -215,12 +214,12 @@ class LogCleanupService:
 
         patterns = [
             (
-                f"{self._redis_namespace}:log:stream:*",
+                log_stream_pattern(self._redis_namespace),
                 self._log_stream_maxlen,
                 self._log_stream_ttl_seconds,
             ),
             (
-                f"{self._redis_namespace}:log:chunk:*",
+                log_chunk_stream_pattern(self._redis_namespace),
                 self._log_chunk_stream_maxlen,
                 self._log_chunk_ttl_seconds,
             ),
@@ -358,7 +357,7 @@ class LogCleanupService:
         """
         清理日志双通道架构的日志
         
-        日志目录结构: data/logs/tasks/{execution_id}/
+        日志目录结构: data/backend/logs/tasks/{run_id}/
         按目录修改时间判断是否过期
         
         Requirements: 6.2
@@ -421,11 +420,11 @@ class LogCleanupService:
                         
                         result.directories_cleaned += 1
                         result.bytes_freed += dir_size
-                        result.execution_ids.append(entry.name)
+                        result.run_ids.append(entry.name)
                         
                         # 记录清理日志（Requirements: 6.3）
                         logger.info(
-                            f"清理过期日志目录: execution_id={entry.name}, "
+                            f"清理过期日志目录: run_id={entry.name}, "
                             f"释放空间={self._format_bytes(dir_size)}"
                         )
                 except OSError as e:
@@ -441,7 +440,7 @@ class LogCleanupService:
         """
         清理分布式日志
         
-        日志目录结构: data/logs/distributed/{date}/{execution_id}/
+        日志目录结构: data/backend/logs/distributed/{date}/{run_id}/
         按日期目录名判断是否过期
         
         Requirements: 6.2
@@ -487,12 +486,12 @@ class LogCleanupService:
                 try:
                     dir_date = datetime.strptime(date_entry.name, "%Y-%m-%d")
                     if dir_date < cutoff_date:
-                        # 收集该日期目录下的所有 execution_id
-                        execution_ids = []
+                        # 收集该日期目录下的所有 run_id
+                        run_ids = []
                         try:
                             for exec_entry in os.scandir(date_entry.path):
                                 if exec_entry.is_dir():
-                                    execution_ids.append(exec_entry.name)
+                                    run_ids.append(exec_entry.name)
                         except OSError:
                             pass
                         
@@ -504,12 +503,12 @@ class LogCleanupService:
                         
                         result.directories_cleaned += 1
                         result.bytes_freed += dir_size
-                        result.execution_ids.extend(execution_ids)
+                        result.run_ids.extend(run_ids)
                         
                         # 记录清理日志（Requirements: 6.3）
                         logger.info(
                             f"清理过期分布式日志目录: date={date_entry.name}, "
-                            f"execution_count={len(execution_ids)}, "
+                            f"execution_count={len(run_ids)}, "
                             f"释放空间={self._format_bytes(dir_size)}"
                         )
                 except ValueError:
@@ -528,7 +527,7 @@ class LogCleanupService:
         """
         清理本地任务日志
         
-        日志目录结构: data/logs/tasks/{date}/{execution_id}/
+        日志目录结构: data/backend/logs/tasks/{date}/{run_id}/
         按日期目录名判断是否过期
         """
         result = CleanupResult()
@@ -680,9 +679,9 @@ class LogCleanupService:
             "bytes_freed_formatted": self._format_bytes(total_bytes),
             "duration_seconds": duration,
             "retention_days": self._retention_days,
-            "execution_ids_cleaned": (
-                dual_channel_result.execution_ids +
-                distributed_result.execution_ids
+            "run_ids_cleaned": (
+                dual_channel_result.run_ids +
+                distributed_result.run_ids
             ),
             "errors": (
                 dual_channel_result.errors +
@@ -693,25 +692,25 @@ class LogCleanupService:
             ),
         }
     
-    async def cleanup_execution(self, execution_id: str) -> dict:
+    async def cleanup_execution(self, run_id: str) -> dict:
         """
         清理指定执行 ID 的日志
         
         Args:
-            execution_id: 执行 ID
+            run_id: 执行 ID
             
         Returns:
             清理结果字典
         """
         result = {
-            "execution_id": execution_id,
+            "run_id": run_id,
             "cleaned": False,
             "bytes_freed": 0,
             "error": None,
         }
         
         # 1. 清理双通道日志
-        dual_channel_path = self._task_log_dir / execution_id
+        dual_channel_path = self._task_log_dir / run_id
         if dual_channel_path.exists():
             try:
                 dir_size = self._get_dir_size(str(dual_channel_path))
@@ -719,7 +718,7 @@ class LogCleanupService:
                 result["cleaned"] = True
                 result["bytes_freed"] += dir_size
                 logger.info(
-                    f"清理日志目录: execution_id={execution_id}, "
+                    f"清理日志目录: run_id={run_id}, "
                     f"释放空间={self._format_bytes(dir_size)}"
                 )
             except OSError as e:
@@ -731,14 +730,14 @@ class LogCleanupService:
             try:
                 for date_entry in os.scandir(self._distributed_log_dir):
                     if date_entry.is_dir():
-                        exec_path = Path(date_entry.path) / execution_id
+                        exec_path = Path(date_entry.path) / run_id
                         if exec_path.exists():
                             dir_size = self._get_dir_size(str(exec_path))
                             shutil.rmtree(exec_path)
                             result["cleaned"] = True
                             result["bytes_freed"] += dir_size
                             logger.info(
-                                f"清理分布式日志目录: execution_id={execution_id}, "
+                                f"清理分布式日志目录: run_id={run_id}, "
                                 f"释放空间={self._format_bytes(dir_size)}"
                             )
             except OSError as e:

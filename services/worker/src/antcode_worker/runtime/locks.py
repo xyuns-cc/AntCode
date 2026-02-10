@@ -263,7 +263,7 @@ class FileLock:
     文件锁
 
     基于文件系统的锁，用于跨进程同步。
-    适用于多 Worker 进程共享同一 venvs 目录的场景。
+    适用于多 Worker 进程共享同一 runtimes 目录的场景。
 
     Requirements: 6.5
     """

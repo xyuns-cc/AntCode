@@ -98,18 +98,23 @@ class WorkerService extends BaseService {
    * 生成 Worker 安装 Key
    * 返回包含安装命令的 Key 信息
    */
-  async generateInstallKey(osType: string): Promise<{
+  async generateInstallKey(osType: string, allowedSource?: string): Promise<{
     key: string
     os_type: string
+    allowed_source?: string
     install_command: string
     expires_at: string
   }> {
     return this.post<{
       key: string
       os_type: string
+      allowed_source?: string
       install_command: string
       expires_at: string
-    }>('/generate-install-key', { os_type: osType })
+    }>('/generate-install-key', {
+      os_type: osType,
+      ...(allowedSource ? { allowed_source: allowedSource.trim() } : {})
+    })
   }
 
 
@@ -336,14 +341,14 @@ class WorkerService extends BaseService {
     require_render?: boolean
   }): Promise<{
     success: boolean
-    execution_id?: string
+    run_id?: string
     worker_id?: string
     worker_name?: string
     message?: string
   }> {
     return this.post<{
       success: boolean
-      execution_id?: string
+      run_id?: string
       worker_id?: string
       worker_name?: string
       message?: string
@@ -353,21 +358,21 @@ class WorkerService extends BaseService {
   /**
    * 获取分布式任务日志
    */
-  async getDistributedLogs(executionId: string, params?: {
+  async getDistributedLogs(runId: string, params?: {
     log_type?: 'stdout' | 'stderr'
     tail?: number
   }): Promise<{
-    execution_id: string
+    run_id: string
     log_type: string
     logs: string[]
     total: number
   }> {
     return this.get<{
-      execution_id: string
+      run_id: string
       log_type: string
       logs: string[]
       total: number
-    }>(`/distributed-logs/${executionId}`, { params })
+    }>(`/distributed-logs/${runId}`, { params })
   }
 
   /**

@@ -1,0 +1,133 @@
+/* Global styles with Ant Design CSS variables */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  height: 100%;
+  font-family: var(--ant-font-family, "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  background-color: var(--ant-color-bg-layout);
+  color: var(--ant-color-text);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+#root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+code, pre, kbd, samp {
+  font-family: var(--ant-font-family-code, "JetBrains Mono", "Fira Code", "SF Mono", Consolas, Monaco, monospace);
+}
+
+::selection {
+  background-color: var(--ant-color-primary-bg);
+  color: var(--ant-color-primary);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--ant-color-border); border-radius: 4px; transition: background 0.2s; }
+::-webkit-scrollbar-thumb:hover { background: var(--ant-color-border-secondary); }
+* { scrollbar-width: thin; scrollbar-color: var(--ant-color-border) transparent; }
+
+:focus-visible {
+  outline: 2px solid var(--ant-color-primary);
+  outline-offset: 2px;
+}
+
+a {
+  color: var(--ant-color-primary);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+a:hover { color: var(--ant-color-primary-hover); }
+
+img { max-width: 100%; height: auto; }
+table { border-collapse: collapse; border-spacing: 0; }
+[disabled] { cursor: not-allowed; }
+
+body.light-theme,
+body.dark-theme {
+  transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Utilities */
+.text-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text-ellipsis-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.text-ellipsis-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+@media (max-width: 575px) { .hidden-xs { display: none !important; } }
+@media (max-width: 767px) { .hidden-sm { display: none !important; } }
+@media (min-width: 768px) { .hidden-md-up { display: none !important; } }
+
+/* Animations */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes slideInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.animate-fade-in { animation: fadeIn 0.3s ease-out; }
+.animate-slide-in-up { animation: slideInUp 0.4s ease-out; }
+.animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+.animate-spin { animation: spin 1s linear infinite; }
+
+/* Status colors */
+.status-success { color: var(--ant-color-success); }
+.status-warning { color: var(--ant-color-warning); }
+.status-error { color: var(--ant-color-error); }
+.status-info { color: var(--ant-color-info); }
+
+/* Ant Design enhancements */
+.ant-card.ant-card-hoverable:hover { box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.12); transform: translateY(-2px); }
+.ant-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.ant-btn:active:not(:disabled) { transform: scale(0.98); }
+.ant-table { border-radius: var(--ant-border-radius-lg); overflow: hidden; }
+.ant-table-thead > tr > th { font-weight: 600; background: var(--ant-color-bg-container) !important; }
+
+/* Table row hover - consistent for both themes */
+.ant-table-tbody > tr:hover > td { background-color: var(--ant-color-fill-quaternary) !important; }
+
+/* Fixed column background - 实色背景防止内容重叠 */
+.ant-table-cell-fix-right,
+.ant-table-cell-fix-left { background-color: var(--ant-color-bg-container, #ffffff) !important; }
+
+.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right,
+.ant-table-tbody > tr:hover > td.ant-table-cell-fix-left { background-color: var(--ant-color-fill-quaternary, #fafafa) !important; }
+.ant-modal { top: 80px; }
+.ant-modal-content { border-radius: var(--ant-border-radius-lg); overflow: hidden; }
+.ant-drawer-content { border-radius: var(--ant-border-radius-lg) 0 0 var(--ant-border-radius-lg); }
+.ant-message-notice-content { border-radius: var(--ant-border-radius-lg); box-shadow: 0 6px 16px -8px rgba(0, 0, 0, 0.08), 0 9px 28px 0 rgba(0, 0, 0, 0.05), 0 12px 48px 16px rgba(0, 0, 0, 0.03); }
+.ant-notification-notice { border-radius: var(--ant-border-radius-lg); }
+.ant-tooltip-inner { border-radius: var(--ant-border-radius); }
+.ant-tag { border-radius: var(--ant-border-radius-sm); }
+.ant-badge-dot { box-shadow: 0 0 0 2px var(--ant-color-bg-container); }
+.ant-skeleton-content .ant-skeleton-title, .ant-skeleton-content .ant-skeleton-paragraph > li { border-radius: var(--ant-border-radius); }
+.ant-progress-inner { border-radius: 100px; }
+
+@media print {
+  body { background: white !important; color: black !important; }
+  .no-print { display: none !important; }
+}

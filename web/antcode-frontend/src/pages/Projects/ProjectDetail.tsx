@@ -508,7 +508,7 @@ const ProjectDetail: React.FC = () => {
           <Space>
             <Button onClick={openDepsModal}>依赖</Button>
             <Button onClick={openEnvModal}>绑定/切换环境</Button>
-            <Button danger onClick={async () => { if (!id) return; await envService.createOrBindProjectVenv(id, { version: project.python_version || '', venv_scope: 'private', create_if_missing: true }); }}>重建私有环境</Button>
+            <Button danger onClick={async () => { if (!id) return; await envService.createOrBindProjectVenv(id, { version: project.python_version || '', runtime_scope: 'private', create_if_missing: true }); }}>重建私有环境</Button>
             <Button danger onClick={async () => { if (!id) return; await envService.deleteProjectVenv(id); }}>删除环境</Button>
           </Space>
         }>
@@ -516,10 +516,10 @@ const ProjectDetail: React.FC = () => {
             <Descriptions.Item label="作用域">{project.runtime_scope || '-'}</Descriptions.Item>
             <Descriptions.Item label="Python版本">{project.python_version || '-'}</Descriptions.Item>
             <Descriptions.Item label="虚拟环境路径">
-              {project.venv_path ? (
-                <CopyableTooltip text={project.venv_path}>
+              {project.runtime_locator ? (
+                <CopyableTooltip text={project.runtime_locator}>
                   <span style={{ cursor: 'pointer' }}>
-                    {project.venv_path}
+                    {project.runtime_locator}
                   </span>
                 </CopyableTooltip>
               ) : '-'}
@@ -569,7 +569,7 @@ const ProjectDetail: React.FC = () => {
       {/* 环境绑定 */}
       <Modal open={envModalOpen} onCancel={() => setEnvModalOpen(false)} title="绑定/切换环境" onOk={async () => {
         if (!id || !pythonVersion) return
-        await envService.createOrBindProjectVenv(id, { version: pythonVersion, venv_scope: venvScope, shared_venv_key: venvScope === 'shared' ? sharedKey || undefined : undefined, create_if_missing: true, interpreter_source: interpreterSource, python_bin: interpreterSource === 'local' ? pythonBin : undefined })
+        await envService.createOrBindProjectVenv(id, { version: pythonVersion, runtime_scope: venvScope, shared_runtime_key: venvScope === 'shared' ? sharedKey || undefined : undefined, create_if_missing: true, interpreter_source: interpreterSource, python_bin: interpreterSource === 'local' ? pythonBin : undefined })
         setEnvModalOpen(false)
         handleEditSuccess()
       }}>

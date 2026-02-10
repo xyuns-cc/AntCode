@@ -58,6 +58,7 @@ export const STORAGE_KEYS = {
   ACCESS_TOKEN: 'access_token',
   REFRESH_TOKEN: 'refresh_token',
   USER_INFO: 'user_info',
+  INSTALL_KEY_ALLOWED_SOURCE: 'install_key_allowed_source',
   REMEMBER_USERNAME: 'remember_username',
   REMEMBER_PASSWORD: 'remember_password',
   REMEMBER_ME: 'remember_me',

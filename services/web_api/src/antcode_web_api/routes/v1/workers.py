@@ -1,19 +1,24 @@
 """Worker 管理 API"""
 
+import asyncio
 import contextlib
 import json
+import time
 from datetime import UTC
+from ipaddress import ip_address, ip_network
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field
 
 from antcode_web_api.response import BaseResponse, success
+from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.common.security.worker_auth import (
-    verify_worker_request,
     verify_worker_request_with_signature,
 )
+from antcode_core.common.security import constant_time_compare
 from antcode_core.domain.models import WorkerStatus
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
@@ -37,8 +42,223 @@ from antcode_core.domain.schemas.worker import (
 )
 from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.workers import worker_service
+from antcode_core.infrastructure.redis import (
+    build_config_update_control_payload,
+    control_stream,
+    direct_register_proof_key,
+    get_redis_client,
+    worker_install_key_block_key,
+    worker_install_key_claim_key,
+    worker_install_key_fail_counter_key,
+    worker_install_key_meta_key,
+    worker_install_key_nonce_key,
+)
 
 router = APIRouter()
+
+
+class _WorkerReportBaseModel(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+
+class WorkerTaskLogReportRequest(_WorkerReportBaseModel):
+    run_id: str = Field(..., min_length=1, description="任务运行 ID")
+    log_type: str = Field(default="stdout", description="日志类型")
+    content: str = Field(..., min_length=1, description="日志内容")
+
+
+class WorkerTaskLogsBatchReportRequest(_WorkerReportBaseModel):
+    logs: list[WorkerTaskLogReportRequest] = Field(
+        ...,
+        min_length=1,
+        description="批量日志条目",
+    )
+
+
+class WorkerTaskHeartbeatReportRequest(_WorkerReportBaseModel):
+    run_id: str = Field(..., min_length=1, description="任务运行 ID")
+
+
+class WorkerTaskStatusReportRequest(_WorkerReportBaseModel):
+    run_id: str = Field(..., min_length=1, description="任务运行 ID")
+    status: str = Field(..., min_length=1, description="任务状态")
+    exit_code: int | None = Field(default=None, description="任务退出码")
+    error_message: str | None = Field(default=None, description="错误信息")
+
+
+def _extract_request_source(request: Request, default_host: str = "") -> str:
+    if request.client and request.client.host:
+        return request.client.host
+    return (default_host or "").strip()
+
+
+def _is_source_match(source: str, rule: str) -> bool:
+    source_value = (source or "").strip().lower()
+    rule_value = (rule or "").strip().lower()
+    if not rule_value:
+        return True
+    if not source_value:
+        return False
+
+    if "/" in rule_value:
+        try:
+            return ip_address(source_value) in ip_network(rule_value, strict=False)
+        except Exception:
+            return False
+
+    try:
+        return ip_address(source_value) == ip_address(rule_value)
+    except Exception:
+        return source_value == rule_value
+
+
+async def _check_install_key_blocked(
+    key: str,
+    source: str,
+) -> tuple[bool, int]:
+    redis = await get_redis_client()
+    block_key = worker_install_key_block_key(key, source)
+    ttl = await redis.ttl(block_key)
+    return bool(ttl and ttl > 0), int(ttl or 0)
+
+
+async def _record_install_key_failed_attempt(
+    key: str,
+    source: str,
+) -> int:
+    redis = await get_redis_client()
+    fail_counter_key = worker_install_key_fail_counter_key(key, source)
+
+    fail_count = await redis.incr(fail_counter_key)
+    if int(fail_count) == 1:
+        await redis.expire(fail_counter_key, settings.WORKER_INSTALL_KEY_BLOCK_SECONDS)
+
+    if int(fail_count) >= settings.WORKER_INSTALL_KEY_FAIL_THRESHOLD:
+        block_key = worker_install_key_block_key(key, source)
+        await redis.set(block_key, "1", ex=settings.WORKER_INSTALL_KEY_BLOCK_SECONDS)
+
+    return int(fail_count)
+
+
+async def _clear_install_key_fail_counter(key: str, source: str) -> None:
+    redis = await get_redis_client()
+    fail_counter_key = worker_install_key_fail_counter_key(key, source)
+    await redis.delete(fail_counter_key)
+
+
+async def _claim_install_key_source_once(
+    key: str,
+    source: str,
+    request_timestamp: int,
+    request_nonce: str,
+) -> tuple[bool, str]:
+    redis = await get_redis_client()
+    claim_key = worker_install_key_claim_key(key)
+    nonce_key = worker_install_key_nonce_key(key, request_nonce)
+
+    nonce_set = await redis.set(
+        nonce_key,
+        "1",
+        ex=settings.WORKER_INSTALL_KEY_REPLAY_WINDOW_SECONDS,
+        nx=True,
+    )
+    if not nonce_set:
+        return False, "请求重复（nonce 已使用）"
+
+    current_ts = int(time.time())
+    if abs(current_ts - int(request_timestamp)) > settings.WORKER_INSTALL_KEY_REPLAY_WINDOW_SECONDS:
+        return False, "请求已过期"
+
+    existing_source = await redis.get(claim_key)
+    if existing_source:
+        existing_value = existing_source.decode("utf-8") if isinstance(existing_source, (bytes, bytearray)) else str(existing_source)
+        if existing_value != source:
+            return False, "安装 Key 已绑定其它来源"
+        return True, "ok"
+
+    set_ok = await redis.set(
+        claim_key,
+        source,
+        ex=settings.WORKER_INSTALL_KEY_REPLAY_WINDOW_SECONDS,
+        nx=True,
+    )
+    if set_ok:
+        return True, "ok"
+
+    existing_source = await redis.get(claim_key)
+    if existing_source:
+        existing_value = existing_source.decode("utf-8") if isinstance(existing_source, (bytes, bytearray)) else str(existing_source)
+        if existing_value != source:
+            return False, "安装 Key 已绑定其它来源"
+    return True, "ok"
+
+
+async def _set_install_key_allowed_source_once(key: str, source: str) -> str:
+    redis = await get_redis_client()
+    meta_key = worker_install_key_meta_key(key)
+    raw = await redis.get(meta_key)
+    if not raw:
+        return ""
+
+    payload: dict = {}
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="ignore")
+    try:
+        payload = json.loads(str(raw)) or {}
+    except Exception:
+        payload = {}
+
+    current_allowed = (payload.get("allowed_source") or "").strip()
+    if current_allowed:
+        return current_allowed
+
+    payload["allowed_source"] = source
+    ttl = await redis.ttl(meta_key)
+    ttl_seconds = int(ttl if ttl and ttl > 0 else settings.WORKER_INSTALL_KEY_BLOCK_SECONDS)
+    await redis.set(meta_key, json.dumps(payload), ex=ttl_seconds)
+    return source
+
+
+async def _get_install_key_allowed_source(key: str) -> str:
+    redis = await get_redis_client()
+    meta_key = worker_install_key_meta_key(key)
+    value = await redis.get(meta_key)
+    if not value:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    try:
+        payload = json.loads(str(value))
+    except Exception:
+        return ""
+    allowed_source = (payload or {}).get("allowed_source")
+    return (allowed_source or "").strip()
+
+
+async def _verify_worker_credential_headers(
+    request: Request,
+    auth_info: dict = Depends(verify_worker_request_with_signature),
+) -> dict:
+    """校验 Worker 凭证头（签名 + Worker ID + API Key）。"""
+    worker_id = (auth_info.get("worker_id") or "").strip()
+    if not worker_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 Worker 标识")
+
+    worker = await worker_service.get_worker_by_id(worker_id)
+    if not worker:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Worker 不存在")
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少认证信息")
+    api_key = auth_header[7:].strip()
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 API Key")
+
+    if not worker.api_key or not constant_time_compare(api_key, worker.api_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的 API Key")
+
+    return {"worker": worker, "auth_info": auth_info}
 
 
 def _mask_redis_url(redis_url: str) -> str:
@@ -644,7 +864,7 @@ async def register_direct_worker(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
-    proof_key = f"antcode:direct:register:{request.worker_id}"
+    proof_key = direct_register_proof_key(request.worker_id)
     try:
         stored_proof = await redis.get(proof_key)
     except Exception as exc:
@@ -707,13 +927,10 @@ async def register_direct_worker(
     description="Worker 主动注册到平台",
 )
 async def register_worker(request: WorkerRegisterRequest):
-    """Worker 注册（Worker 主动调用）"""
-    worker, api_key, secret_key = await worker_service.register_worker(request)
-    return success(
-        WorkerRegisterResponse(
-            worker_id=worker.public_id, api_key=api_key, secret_key=secret_key
-        ),
-        message="Worker 注册成功",
+    """Worker 注册（已废弃，统一使用安装 Key 或 Direct 注册）"""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="该注册方式已下线，请使用 /workers/register-by-key 或 /workers/register-direct",
     )
 
 
@@ -725,6 +942,7 @@ async def register_worker(request: WorkerRegisterRequest):
 )
 async def generate_install_key(
     request: WorkerInstallKeyRequest,
+    http_request: Request,
     current_user: TokenData = Depends(get_current_user),
 ):
     """生成 Worker 安装 Key
@@ -732,7 +950,6 @@ async def generate_install_key(
     生成一次性安装命令，复制到目标机器执行即可完成 Worker 注册。
     类似 nezha 探针的工作模式。
     """
-    from antcode_core.common.config import settings
     from antcode_core.domain.models import User, WorkerInstallKey
 
     # 检查管理员权限
@@ -750,11 +967,23 @@ async def generate_install_key(
             detail="操作系统类型必须是 linux、macos 或 windows",
         )
 
+    allowed_source = (request.allowed_source or "").strip()
+
     # 创建安装 Key
     install_key = await WorkerInstallKey.create_install_key(
         os_type=os_type,
         created_by=current_user.user_id,
     )
+
+    redis = await get_redis_client()
+    meta_key = worker_install_key_meta_key(install_key.key)
+    now_ts = int(time.time())
+    ttl_seconds = max(int(install_key.expires_at.timestamp()) - now_ts, 1)
+    meta_payload = {
+        "allowed_source": allowed_source,
+        "created_at": now_ts,
+    }
+    await redis.set(meta_key, json.dumps(meta_payload), ex=ttl_seconds)
 
     # 生成安装命令
     api_base = settings.API_BASE_URL or f"http://{settings.GATEWAY_HOST}:{settings.GATEWAY_PORT}"
@@ -774,6 +1003,7 @@ async def generate_install_key(
         WorkerInstallKeyResponse(
             key=install_key.key,
             os_type=os_type,
+            allowed_source=allowed_source or None,
             install_command=install_command,
             expires_at=install_key.expires_at,
         ),
@@ -787,24 +1017,37 @@ async def generate_install_key(
     summary="使用 Key 注册 Worker",
     description="Worker 使用安装 Key 进行注册（无需认证）",
 )
-async def register_worker_by_key(request: WorkerRegisterByKeyRequest):
+async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_request: Request):
     """Worker 使用安装 Key 注册
 
     Worker 启动时通过环境变量获取 Key，调用此接口完成注册。
     """
     import secrets
-    from datetime import UTC, datetime
 
     from antcode_core.domain.models import Worker, WorkerInstallKey
+
+    if not request.client_nonce or len(request.client_nonce.strip()) < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 client_nonce")
+
+    request_source = _extract_request_source(http_request, default_host=request.host)
+
+    is_blocked, block_ttl = await _check_install_key_blocked(request.key, request_source)
+    if is_blocked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"注册尝试过于频繁，请 {block_ttl} 秒后重试",
+        )
 
     # 查找并验证 Key
     install_key = await WorkerInstallKey.get_or_none(key=request.key)
     if not install_key:
+        await _record_install_key_failed_attempt(request.key, request_source)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="安装 Key 不存在"
         )
 
     if not install_key.is_valid():
+        await _record_install_key_failed_attempt(request.key, request_source)
         if install_key.status == "used":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -814,6 +1057,26 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="安装 Key 已过期",
         )
+
+    allowed_source = await _get_install_key_allowed_source(request.key)
+    if allowed_source and not _is_source_match(request_source, allowed_source):
+        await _record_install_key_failed_attempt(request.key, request_source)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="来源不在安装 Key 允许范围内",
+        )
+
+    claim_ok, claim_message = await _claim_install_key_source_once(
+        key=request.key,
+        source=request_source,
+        request_timestamp=request.client_timestamp,
+        request_nonce=request.client_nonce,
+    )
+    if not claim_ok:
+        await _record_install_key_failed_attempt(request.key, request_source)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=claim_message)
+
+    await _set_install_key_allowed_source_once(request.key, request_source)
 
     # 创建 Worker
     api_key = secrets.token_hex(16)
@@ -833,6 +1096,7 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest):
 
     # 标记 Key 为已使用
     await install_key.mark_used(worker.public_id)
+    await _clear_install_key_fail_counter(request.key, request_source)
 
     logger.info(f"Worker 通过安装 Key 注册成功: {worker.name} ({worker.public_id})")
 
@@ -945,12 +1209,12 @@ async def dispatch_task_to_worker(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 
-    execution_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
 
     # 创建执行记录（public_id 使用不带横线的 UUID）
-    public_id = execution_id.replace("-", "")
+    public_id = run_id.replace("-", "")
     task_run = await TaskRun.create(
-        execution_id=execution_id,
+        run_id=run_id,
         public_id=public_id,
         task_id=project.id,
         project_id=project.id,
@@ -962,7 +1226,7 @@ async def dispatch_task_to_worker(
 
     result = await worker_task_dispatcher.dispatch_task(
         project_id=project_id,
-        execution_id=execution_id,
+        run_id=run_id,
         params=request.get("params"),
         environment_vars=request.get("environment_vars"),
         timeout=request.get("timeout", 3600),
@@ -989,6 +1253,7 @@ async def dispatch_task_to_worker(
     task_run.dispatch_status = "dispatched"
     task_run.worker_id = result.get("worker_id")
     await task_run.save()
+
 
     return success(result, message="任务已分发到 Worker")
 
@@ -1271,25 +1536,19 @@ async def get_render_capable_workers(
     description="Worker 实时上报任务执行日志",
 )
 async def report_task_log(
-    request: dict = Body(...), auth_info: dict = Depends(verify_worker_request)
+    request: WorkerTaskLogReportRequest = Body(...),
+    auth_context: dict = Depends(_verify_worker_credential_headers),
 ):
-    """任务日志上报（Bearer Token验证，无需签名）"""
+    """任务日志上报（签名 + Worker 标识 + API Key）"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
-    execution_id = request.get("execution_id")
-    log_type = request.get("log_type", "stdout")
-    content = request.get("content", "")
-    if not execution_id or not content:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="execution_id 和 content 不能为空",
-        )
+    _ = auth_context
 
     # 存储日志
     await distributed_log_service.append_log(
-        execution_id=execution_id,
-        log_type=log_type,
-        content=content,
+        request.run_id,
+        request.log_type,
+        request.content,
     )
 
     return success({"received": True})
@@ -1302,29 +1561,50 @@ async def report_task_log(
     description="Worker 批量上报任务执行日志",
 )
 async def report_task_logs_batch(
-    request: dict = Body(...), auth_info: dict = Depends(verify_worker_request)
+    request: WorkerTaskLogsBatchReportRequest = Body(...),
+    auth_context: dict = Depends(_verify_worker_credential_headers),
 ):
-    """批量任务日志上报（Bearer Token验证，无需签名）"""
+    """批量任务日志上报（签名 + Worker 标识 + API Key）"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
-    logs = request.get("logs", [])
-    if not logs:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="logs 不能为空")
+    _ = auth_context
 
-    # 批量存储日志
-    received_count = 0
-    for log in logs:
-        execution_id = log.get("execution_id")
-        log_type = log.get("log_type", "stdout")
-        content = log.get("content", "")
+    logs = request.logs
 
-        if execution_id and content:
-            await distributed_log_service.append_log(
-                execution_id=execution_id,
-                log_type=log_type,
-                content=content,
+    grouped_logs: dict[tuple[str, str], list[str]] = {}
+    for item in logs:
+        key = (item.run_id, item.log_type)
+        grouped_logs.setdefault(key, []).append(item.content)
+
+    semaphore = asyncio.Semaphore(16)
+
+    async def _append_group(run_id: str, log_type: str, contents: list[str]) -> int:
+        try:
+            async with semaphore:
+                await distributed_log_service.append_logs(
+                    run_id,
+                    log_type,
+                    contents,
+                )
+            return len(contents)
+        except Exception as exc:
+            logger.warning(
+                "批量日志写入失败: run_id={}, log_type={}, count={}, error={}",
+                run_id,
+                log_type,
+                len(contents),
+                exc,
             )
-            received_count += 1
+            return 0
+
+    results = await asyncio.gather(
+        *(
+            _append_group(run_id, log_type, contents)
+            for (run_id, log_type), contents in grouped_logs.items()
+        ),
+        return_exceptions=False,
+    )
+    received_count = sum(results)
 
     return success({"received": received_count, "total": len(logs)})
 
@@ -1336,16 +1616,15 @@ async def report_task_logs_batch(
     description="Worker 上报任务执行心跳，用于检测任务中断",
 )
 async def report_execution_heartbeat(
-    request: dict = Body(...), auth_info: dict = Depends(verify_worker_request)
+    request: WorkerTaskHeartbeatReportRequest = Body(...),
+    auth_context: dict = Depends(_verify_worker_credential_headers),
 ):
     """任务执行心跳上报"""
     from antcode_core.application.services.scheduler.task_persistence import task_persistence_service
 
-    execution_id = request.get("execution_id")
-    if not execution_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="execution_id 不能为空")
+    _ = auth_context
 
-    success_flag = await task_persistence_service.update_heartbeat(execution_id)
+    success_flag = await task_persistence_service.update_heartbeat(request.run_id)
     return success({"updated": success_flag})
 
 
@@ -1356,40 +1635,33 @@ async def report_execution_heartbeat(
     description="Worker 上报任务执行状态",
 )
 async def report_task_status(
-    request: dict = Body(...), auth_info: dict = Depends(verify_worker_request)
+    request: WorkerTaskStatusReportRequest = Body(...),
+    auth_context: dict = Depends(_verify_worker_credential_headers),
 ):
-    """任务状态上报（Bearer Token验证，无需签名）"""
+    """任务状态上报（签名 + Worker 标识 + API Key）"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
-    execution_id = request.get("execution_id")
-    task_status = request.get("status")
-    exit_code = request.get("exit_code")
-    error_message = request.get("error_message")
-    if not execution_id or not task_status:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="execution_id 和 status 不能为空",
-        )
+    _ = auth_context
 
     # 更新任务状态
     await distributed_log_service.update_task_status(
-        execution_id=execution_id,
-        status=task_status,
-        exit_code=exit_code,
-        error_message=error_message,
+        request.run_id,
+        request.status,
+        exit_code=request.exit_code,
+        error_message=request.error_message,
     )
 
     return success({"updated": True})
 
 
 @router.get(
-    "/distributed-logs/{execution_id}",
+    "/distributed-logs/{run_id}",
     response_model=BaseResponse[dict],
     summary="获取分布式任务日志",
     description="获取在远程 Worker 执行的任务日志",
 )
 async def get_distributed_logs(
-    execution_id: str,
+    run_id: str,
     log_type: str = Query("stdout", description="日志类型: stdout/stderr"),
     tail: int = Query(100, ge=1, le=5000, description="返回最后N行"),
     current_user: TokenData = Depends(get_current_user),
@@ -1398,12 +1670,12 @@ async def get_distributed_logs(
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
     logs = await distributed_log_service.get_logs(
-        execution_id=execution_id, log_type=log_type, tail=tail
+        run_id, log_type=log_type, tail=tail
     )
 
     return success(
         {
-            "execution_id": execution_id,
+            "run_id": run_id,
             "log_type": log_type,
             "logs": logs,
             "total": len(logs),
@@ -1578,11 +1850,8 @@ async def update_worker_resources(
     synced = False
     try:
         redis = await get_redis_client()
-        payload = {
-            "control_type": "config_update",
-            "config": json.dumps(config_params),
-        }
-        await redis.xadd(f"antcode:control:{worker.public_id}", payload)
+        payload = build_config_update_control_payload(config_params)
+        await redis.xadd(control_stream(worker.public_id), payload)
         synced = True
     except Exception as e:
         logger.warning(f"发送配置更新失败: {e}")

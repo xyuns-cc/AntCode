@@ -64,7 +64,7 @@ interface ExecutionStatusUpdate {
 
 // 组件属性接口
 interface EnhancedLogViewerProps {
-  executionId: string
+  runId: string
   height?: number
   showControls?: boolean
   autoConnect?: boolean
@@ -82,7 +82,7 @@ interface EnhancedLogViewerProps {
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
 const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
-  executionId,
+  runId,
   height = 600,
   showControls = true,
   autoConnect = true,
@@ -173,13 +173,13 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       addLogMessage({
         id: generateUniqueId(),
         type: 'info',
-        content: `正在连接到执行ID: ${executionId}`,
+        content: `正在连接到运行ID: ${runId}`,
         timestamp: new Date().toISOString()
       })
 
       // 使用新的WebSocket连接管理
       const conn = logService.connectLogStream(
-        executionId,
+        runId,
         (logEntry) => {
           // 将LogEntry转换为LogMessage格式
           const logMessage: LogMessage = {
@@ -273,7 +273,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         timestamp: new Date().toISOString()
       })
     }
-  }, [executionId, connectionStatus, showStdout, showStderr, addLogMessage, onStatusUpdate, stream])
+  }, [runId, connectionStatus, showStdout, showStderr, addLogMessage, onStatusUpdate, stream])
 
   // 断开连接
   const disconnect = useCallback(() => {
@@ -346,7 +346,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     try {
       // 优先导出原始日志文件
       await LogExporter.exportLogFile({
-        executionId,
+        runId,
         format,
         includeStdout: showStdout,
         includeStderr: showStderr,
@@ -361,7 +361,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       console.warn('导出原始日志失败，使用当前显示的消息:', error)
 
       let content = ''
-      let filename = `logs_${executionId}_${new Date().toISOString().split('T')[0]}`
+      let filename = `logs_${runId}_${new Date().toISOString().split('T')[0]}`
 
       switch (format) {
         case 'txt':
@@ -400,7 +400,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
 
       message.success(`日志已导出为 ${format.toUpperCase()} 格式`)
     }
-  }, [displayMessages, executionId, showStdout, showStderr, maxLines])
+  }, [displayMessages, runId, showStdout, showStderr, maxLines])
 
   // 更新统计信息
   useEffect(() => {
@@ -445,7 +445,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
 
   // 自动连接（添加防抖和重复连接保护）
   useEffect(() => {
-    if (!autoConnect || !executionId) return undefined
+    if (!autoConnect || !runId) return undefined
     
     // 只在真正断开时才自动连接，避免重复连接
     if (connectionStatus === 'disconnected' && !stream) {
@@ -457,7 +457,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     }
 
     return undefined
-  }, [autoConnect, executionId, connectionStatus, stream, connect])
+  }, [autoConnect, runId, connectionStatus, stream, connect])
 
   // 组件卸载清理
   useEffect(() => {
@@ -606,7 +606,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
                   {getStatusText()}
                 </Tag>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  执行ID: {executionId.slice(0, 8)}...
+                  运行ID: {runId.slice(0, 8)}...
                 </Text>
               </Space>
             </div>

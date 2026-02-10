@@ -347,7 +347,7 @@ export class WebSocketManager {
  * 创建日志 WebSocket 连接
  */
 export function createLogWebSocket(
-  executionId: string,
+  runId: string,
   callbacks: {
     onMessage?: (message: WebSocketMessage) => void
     onStateChange?: (state: ConnectionStateType) => void
@@ -363,7 +363,7 @@ export function createLogWebSocket(
   
   // 构建 WebSocket URL
   const wsBase = WS_BASE_URL.replace(/\/$/, '')
-  const url = `${wsBase}/api/v1/ws/executions/${executionId}/logs`
+  const url = `${wsBase}/api/v1/ws/runs/${runId}/logs`
   
   const manager = new WebSocketManager({
     url,

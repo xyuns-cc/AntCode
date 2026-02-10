@@ -4,12 +4,12 @@ from typing import Protocol
 
 
 class LogRealtimeNotifier(Protocol):
-    async def has_connections(self, execution_id: str) -> bool:
+    async def has_connections(self, run_id: str) -> bool:
         """是否存在订阅该执行的连接。"""
 
     async def send_log(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         content: str,
         level: str,
@@ -18,7 +18,7 @@ class LogRealtimeNotifier(Protocol):
 
     async def send_status(
         self,
-        execution_id: str,
+        run_id: str,
         status: str,
         progress: float | None,
         message: str,

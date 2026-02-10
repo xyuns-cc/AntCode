@@ -130,7 +130,7 @@ class ReconcileLoop:
                 logger.warning(f"发现 {len(timeout_tasks)} 个超时任务")
 
                 for task in timeout_tasks:
-                    logger.info(f"标记任务超时: execution_id={task.id}")
+                    logger.info(f"标记任务超时: run_id={task.id}")
                     task.status = TaskStatus.TIMEOUT
                     task.end_time = datetime.now()
                     task.error_message = f"任务执行超时（超过 {self.timeout_threshold}秒）"
@@ -192,7 +192,7 @@ class ReconcileLoop:
                 logger.info(f"Worker {worker_id} 上有 {len(running_tasks)} 个运行中任务")
 
                 for task in running_tasks:
-                    logger.info(f"标记任务失败: execution_id={task.id}")
+                    logger.info(f"标记任务失败: run_id={task.id}")
                     task.status = TaskStatus.FAILED
                     task.end_time = datetime.now()
                     task.error_message = "Worker 失联"
@@ -221,7 +221,7 @@ class ReconcileLoop:
                 logger.warning(f"发现 {len(inconsistent_tasks)} 个状态不一致任务")
 
                 for task in inconsistent_tasks:
-                    logger.info(f"修复任务状态: execution_id={task.id}")
+                    logger.info(f"修复任务状态: run_id={task.id}")
                     # 根据 end_time 和其他信息推断正确状态
                     if task.error_message:
                         task.status = TaskStatus.FAILED
@@ -254,7 +254,7 @@ class ReconcileLoop:
                 logger.warning(f"发现 {len(zombie_tasks)} 个僵尸任务")
 
                 for task in zombie_tasks:
-                    logger.info(f"清理僵尸任务: execution_id={task.id}")
+                    logger.info(f"清理僵尸任务: run_id={task.id}")
                     task.status = TaskStatus.FAILED
                     task.error_message = "任务长时间未调度，已清理"
                     task.end_time = datetime.now()

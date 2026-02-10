@@ -22,9 +22,9 @@ class TaskLogService:
         self.max_log_size = settings.TASK_LOG_MAX_SIZE
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-    def generate_log_paths(self, execution_id, task_name):
+    def generate_log_paths(self, run_id, task_name):
         """生成日志文件路径"""
-        task_log_dir = self.log_dir / datetime.now().strftime("%Y-%m-%d") / execution_id
+        task_log_dir = self.log_dir / datetime.now().strftime("%Y-%m-%d") / run_id
         task_log_dir.mkdir(parents=True, exist_ok=True)
 
         return {
@@ -38,7 +38,7 @@ class TaskLogService:
         log_file_path,
         content,
         append=True,
-        execution_id=None,
+        run_id=None,
         add_timestamp=True
     ):
         """写入日志"""
@@ -182,12 +182,12 @@ class TaskLogService:
         except Exception as e:
             logger.error(f"清理过期日志失败: {e}")
     
-    async def get_execution_logs(self, execution_id, include_distributed=True):
+    async def get_execution_logs(self, run_id, include_distributed=True):
         """
         获取指定执行ID的所有日志（整合本地日志和分布式日志）
         
         Args:
-            execution_id: 执行ID
+            run_id: 执行ID
             include_distributed: 是否包含分布式日志（Worker 上报的日志）
             
         Returns:
@@ -199,7 +199,7 @@ class TaskLogService:
         
         for date_dir in self.log_dir.iterdir():
             if date_dir.is_dir():
-                execution_dir = date_dir / execution_id
+                execution_dir = date_dir / run_id
                 if execution_dir.exists():
                     local_output = await self.read_log(str(execution_dir / "output.log"))
                     local_error = await self.read_log(str(execution_dir / "error.log"))
@@ -213,8 +213,8 @@ class TaskLogService:
             try:
                 from antcode_core.application.services.logs.log_chunk_receiver import log_chunk_receiver
 
-                stdout_path = log_chunk_receiver.get_log_file_path(execution_id, "stdout")
-                stderr_path = log_chunk_receiver.get_log_file_path(execution_id, "stderr")
+                stdout_path = log_chunk_receiver.get_log_file_path(run_id, "stdout")
+                stderr_path = log_chunk_receiver.get_log_file_path(run_id, "stderr")
 
                 if stdout_path.exists():
                     distributed_output = await self.read_log(str(stdout_path))
@@ -224,7 +224,7 @@ class TaskLogService:
                 logger.debug(f"获取 Worker 日志失败: {e}")
 
             if not distributed_output or not distributed_error:
-                redis_output, redis_error = await self._get_redis_stream_logs(execution_id)
+                redis_output, redis_error = await self._get_redis_stream_logs(run_id)
                 if not distributed_output:
                     distributed_output = redis_output
                 if not distributed_error:
@@ -239,7 +239,7 @@ class TaskLogService:
             "error": all_error
         }
 
-    async def _get_redis_stream_logs(self, execution_id: str) -> tuple[str, str]:
+    async def _get_redis_stream_logs(self, run_id: str) -> tuple[str, str]:
         if not settings.REDIS_URL:
             return "", ""
 
@@ -253,7 +253,7 @@ class TaskLogService:
         try:
             redis = await get_redis_client()
             keys = RedisKeys(settings.REDIS_NAMESPACE)
-            stream_key = keys.log_stream_key(execution_id)
+            stream_key = keys.log_stream_key(run_id)
             last_id = "0-0"
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []

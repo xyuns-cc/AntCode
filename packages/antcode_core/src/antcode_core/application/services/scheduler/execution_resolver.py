@@ -66,6 +66,28 @@ class ExecutionResolver:
             return project.execution_strategy
         return ExecutionStrategy.AUTO_SELECT
 
+    async def _ensure_worker_online(self, worker: Worker) -> bool:
+        """确保 Worker 在线（含心跳兜底检测）。"""
+        if worker.status == WorkerStatus.ONLINE:
+            return True
+
+        try:
+            from antcode_core.application.services.workers.worker_heartbeat_service import (
+                worker_heartbeat_service,
+            )
+
+            is_online = await worker_heartbeat_service.manual_test_worker(worker.id)
+            if is_online:
+                latest = await Worker.get_or_none(id=worker.id)
+                if latest:
+                    worker.status = latest.status
+                    worker.last_heartbeat = latest.last_heartbeat
+            return is_online
+        except Exception as e:
+            logger.debug(f"Worker 在线检测失败，回退到状态判断: worker={worker.id}, error={e}")
+            latest = await Worker.get_or_none(id=worker.id)
+            return bool(latest and latest.status == WorkerStatus.ONLINE)
+
     async def _resolve_fixed_worker(self, project):
         """解析固定 Worker 策略"""
         if not project.bound_worker_id:
@@ -77,7 +99,7 @@ class ExecutionResolver:
                 f"绑定 Worker 不存在 (id={project.bound_worker_id})", project.bound_worker_id
             )
 
-        if worker.status != WorkerStatus.ONLINE:
+        if not await self._ensure_worker_online(worker):
             raise WorkerUnavailableError(f"绑定 Worker [{worker.name}] 离线", worker.id)
 
         logger.info(f"FIXED_WORKER: 使用 Worker [{worker.name}]")
@@ -94,7 +116,7 @@ class ExecutionResolver:
                 f"指定 Worker 不存在 (id={task.specified_worker_id})", task.specified_worker_id
             )
 
-        if worker.status != WorkerStatus.ONLINE:
+        if not await self._ensure_worker_online(worker):
             raise WorkerUnavailableError(f"指定 Worker [{worker.name}] 离线", worker.id)
 
         logger.info(f"SPECIFIED: 使用 Worker [{worker.name}]")
@@ -122,7 +144,7 @@ class ExecutionResolver:
         # 尝试使用绑定 Worker
         if project.bound_worker_id:
             worker = await Worker.get_or_none(id=project.bound_worker_id)
-            if worker and worker.status == WorkerStatus.ONLINE:
+            if worker and await self._ensure_worker_online(worker):
                 logger.info(f"PREFER_BOUND: 使用绑定 Worker [{worker.name}]")
                 return worker
 

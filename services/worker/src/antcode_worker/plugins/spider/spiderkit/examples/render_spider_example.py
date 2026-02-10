@@ -209,6 +209,7 @@ if __name__ == "__main__":
     import asyncio
 
     from loguru import logger
+    from antcode_worker.config import DATA_ROOT
 
     from ..render_client import RenderClient, RenderConfig
 
@@ -217,7 +218,7 @@ if __name__ == "__main__":
         config = RenderConfig(
             max_browsers=2,
             headless=True,
-            data_dir="data/browsers",
+            data_dir=str(DATA_ROOT / "browsers"),
         )
         client = RenderClient(config)
         await client.start()

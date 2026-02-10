@@ -35,9 +35,18 @@ class UserCreateRequest(BaseModel):
 
 class UserUpdateRequest(BaseModel):
     """用户更新请求"""
+    username: str | None = Field(None, min_length=3, max_length=50)
     email: str | None = Field(None, max_length=100)
     is_active: bool | None = None
     is_admin: bool | None = None
+    old_password: str | None = Field(None, min_length=1)
+    new_password: str | None = Field(None, min_length=8)
+
+    @model_validator(mode="after")
+    def validate_password_update_fields(self) -> "UserUpdateRequest":
+        if self.old_password and not self.new_password:
+            raise ValueError("提供 old_password 时必须同时提供 new_password")
+        return self
 
 
 class UserPasswordUpdateRequest(BaseModel):
@@ -61,6 +70,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_login_at: datetime | None = None
+    is_online: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

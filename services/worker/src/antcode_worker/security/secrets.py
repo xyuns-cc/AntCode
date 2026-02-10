@@ -1,7 +1,7 @@
 """
 凭证管理
 
-从 runtime_data/secrets/ 或环境变量加载凭证。
+从 data/worker/secrets/ 或环境变量加载凭证。
 凭证不应该存入代码仓库。
 
 支持 SIGHUP 信号触发重载。
@@ -32,7 +32,7 @@ class SecretsManager:
     """
     凭证管理器
 
-    从 runtime_data/secrets/ 或环境变量加载凭证。
+    从 data/worker/secrets/ 或环境变量加载凭证。
     凭证不应该存入代码仓库。
 
     优先级：文件 > 环境变量 > 默认值

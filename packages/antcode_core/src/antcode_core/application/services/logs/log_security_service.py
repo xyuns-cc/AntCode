@@ -33,22 +33,22 @@ class LogSecurityService:
         self._access_limits = {}
         self._max_requests_per_minute = 60
         
-    def _generate_cache_key(self, user_id, execution_id):
+    def _generate_cache_key(self, user_id, run_id):
         """生成缓存键"""
-        return f"perm:{user_id}:{execution_id}"
+        return f"perm:{user_id}:{run_id}"
     
     def _is_cache_valid(self, cache_entry):
         """检查缓存是否有效"""
         return time.time() - cache_entry.get("timestamp", 0) < self._cache_ttl
     
-    async def verify_log_access_permission(self, user, execution_id, 
+    async def verify_log_access_permission(self, user, run_id, 
                                          operation = "read"):
         """
         验证用户对日志的访问权限
         
         Args:
             user: 用户令牌数据
-            execution_id: 执行ID
+            run_id: 执行ID
             operation: 操作类型 (read, write, delete)
             
         Returns:
@@ -67,7 +67,7 @@ class LogSecurityService:
                 )
             
             # 检查权限缓存
-            cache_key = self._generate_cache_key(user.user_id, execution_id)
+            cache_key = self._generate_cache_key(user.user_id, run_id)
             if cache_key in self._permission_cache:
                 cache_entry = self._permission_cache[cache_key]
                 if self._is_cache_valid(cache_entry):
@@ -76,10 +76,11 @@ class LogSecurityService:
                     else:
                         raise LogPermissionError("无权访问此执行记录")
             
-            # 数据库验证（支持 execution_id UUID 和 public_id）
-            execution = await TaskRun.get_or_none(execution_id=execution_id)
-            if not execution:
-                execution = await TaskRun.get_or_none(public_id=execution_id)
+            # 数据库验证（支持 run_id UUID 和 public_id）
+            run_id_str = str(run_id)
+            execution = await TaskRun.get_or_none(run_id=run_id_str)
+            if not execution and len(run_id_str) <= 32:
+                execution = await TaskRun.get_or_none(public_id=run_id_str)
             if not execution:
                 raise DoesNotExist("执行记录不存在")
             
@@ -109,7 +110,7 @@ class LogSecurityService:
                 "timestamp": time.time()
             }
             
-            logger.debug(f"用户 {user.user_id} 访问执行记录 {execution_id} 权限验证通过")
+            logger.debug(f"用户 {user.user_id} 访问执行记录 {run_id} 权限验证通过")
             return execution
             
         except DoesNotExist:
@@ -174,11 +175,11 @@ class LogSecurityService:
         return True
     
     def clear_permission_cache(self, user_id = None, 
-                             execution_id = None):
+                             run_id = None):
         """清理权限缓存"""
-        if user_id and execution_id:
+        if user_id and run_id:
             # 清理特定缓存
-            cache_key = self._generate_cache_key(user_id, execution_id)
+            cache_key = self._generate_cache_key(user_id, run_id)
             self._permission_cache.pop(cache_key, None)
         elif user_id:
             # 清理用户相关缓存
@@ -208,7 +209,7 @@ class LogSecurityService:
                 task_ids = [task.id for task in user_tasks]
                 executions = await TaskRun.filter(task_id__in=task_ids).limit(limit)
             
-            return [execution.execution_id for execution in executions]
+            return [execution.run_id for execution in executions]
             
         except Exception as e:
             logger.error(f"获取可访问执行记录失败: {e}")

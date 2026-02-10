@@ -45,9 +45,9 @@ class RelationService:
         return await Task.get_or_none(id=task_id)
 
     @staticmethod
-    async def get_execution_by_id(execution_id):
+    async def get_execution_by_id(run_id):
         """根据ID获取执行记录"""
-        return await TaskRun.get_or_none(id=execution_id)
+        return await TaskRun.get_or_none(id=run_id)
 
     # ==================== 项目关联关系 ====================
 
@@ -146,9 +146,9 @@ class RelationService:
     # ==================== 执行记录关联关系 ====================
 
     @staticmethod
-    async def get_execution_with_task(execution_id):
+    async def get_execution_with_task(run_id):
         """获取执行记录及其关联的任务信息"""
-        execution = await RelationService.get_execution_by_id(execution_id)
+        execution = await RelationService.get_execution_by_id(run_id)
         if not execution:
             return None
 
@@ -192,9 +192,9 @@ class RelationService:
         return await RelationService.validate_project_user(task.project_id, user_id)
 
     @staticmethod
-    async def validate_execution_user(execution_id, user_id):
+    async def validate_execution_user(run_id, user_id):
         """验证执行记录是否属于指定用户"""
-        execution = await RelationService.get_execution_by_id(execution_id)
+        execution = await RelationService.get_execution_by_id(run_id)
         if not execution:
             return False
 

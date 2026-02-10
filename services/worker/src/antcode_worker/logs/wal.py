@@ -16,7 +16,6 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import AsyncIterator
@@ -25,6 +24,10 @@ import aiofiles
 import aiofiles.os
 from loguru import logger
 
+from antcode_worker.config import DATA_ROOT
+
+
+_DEFAULT_WAL_DIR = str(DATA_ROOT / "logs" / "wal")
 
 class WALState(str, Enum):
     """WAL 状态"""
@@ -38,7 +41,7 @@ class WALState(str, Enum):
 @dataclass
 class WALConfig:
     """WAL 配置"""
-    wal_dir: str = "var/worker/logs/wal"
+    wal_dir: str = _DEFAULT_WAL_DIR
     max_file_size: int = 10 * 1024 * 1024   # 10MB 触发轮转
     sync_interval: float = 1.0               # fsync 间隔（秒）
     sync_on_write: bool = False              # 每次写入都 fsync（更可靠但慢）

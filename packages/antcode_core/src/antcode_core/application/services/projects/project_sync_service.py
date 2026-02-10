@@ -9,7 +9,6 @@ from loguru import logger
 
 from antcode_core.common.hash_utils import create_hash_calculator
 from antcode_core.domain.models import Project
-from antcode_core.application.services.files.file_storage import file_storage_service
 
 
 class ProjectSyncService:
@@ -17,13 +16,6 @@ class ProjectSyncService:
 
     def __init__(self):
         self.chunk_size = 8 * 1024 * 1024
-
-    @property
-    def temp_dir(self):
-        """获取临时目录"""
-        temp_path = file_storage_service.get_file_path("temp")
-        os.makedirs(temp_path, exist_ok=True)
-        return temp_path
 
     async def get_project_transfer_info(
         self,
@@ -153,9 +145,6 @@ class ProjectSyncService:
 
         通过比较项目目录的文件列表哈希来判断
         """
-        if hasattr(file_detail, "is_modified") and file_detail.is_modified:
-            return True
-
         # TODO: 实现更精确的 S3 项目修改检测
         # 目前简单返回 False，假设未修改
         return False
@@ -232,93 +221,6 @@ class ProjectSyncService:
             "presigned_url": presigned_url,
         }
 
-    async def _check_project_modified(self, file_detail):
-        """检测项目修改状态"""
-        if hasattr(file_detail, "is_modified") and file_detail.is_modified:
-            return True
-
-        if file_detail.is_compressed:
-            extracted_path = file_storage_service.get_file_path(file_detail.file_path)
-
-            if not os.path.exists(extracted_path) or not os.path.isdir(extracted_path):
-                return False
-
-            try:
-                current_hash = await self._calculate_directory_hash(extracted_path)
-
-                if hasattr(file_detail, "extracted_hash") and file_detail.extracted_hash:
-                    return current_hash != file_detail.extracted_hash
-
-                return True
-            except Exception as e:
-                logger.warning(f"Hash计算失败: {e}")
-                return True
-
-        return False
-
-    async def _calculate_directory_hash(self, directory):
-        """计算目录hash"""
-        hasher = create_hash_calculator("md5")
-
-        file_paths = []
-        for root, dirs, files in os.walk(directory):
-            dirs.sort()
-            files.sort()
-            for file in files:
-                file_path = os.path.join(root, file)
-                file_paths.append(file_path)
-
-        for file_path in file_paths:
-            try:
-                rel_path = os.path.relpath(file_path, directory)
-                hasher.update(rel_path.encode("utf-8"))
-
-                with open(file_path, "rb") as f:
-                    while chunk := f.read(8192):
-                        hasher.update(chunk)
-            except Exception as e:
-                logger.warning(f"文件读取失败 {file_path}: {e}")
-                continue
-
-        return hasher.hexdigest()
-
-    async def _repack_modified_project(self, project, file_detail):
-        """重新打包已修改项目"""
-        extracted_path = file_storage_service.get_file_path(file_detail.file_path)
-
-        if not os.path.exists(extracted_path):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="解压目录不存在")
-
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        temp_name = f"{project.public_id}_{timestamp}.zip"
-        temp_dir = self.temp_dir
-        relative_path = os.path.join("temp", temp_name)
-        temp_path = os.path.join(temp_dir, temp_name)
-
-        try:
-            await self._compress_directory(extracted_path, temp_path)
-
-            file_hash, file_size = await self._calculate_file_info(temp_path)
-
-            logger.info(f"重新打包完成 [{project.name}] {file_size}字节")
-
-            return {
-                "file_path": relative_path,
-                "file_size": file_size,
-                "file_hash": file_hash,
-                "original_name": file_detail.original_name,
-                "entry_point": file_detail.entry_point,
-                "is_compressed": True,
-                "is_temporary": True,
-            }
-        except Exception as e:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"打包失败: {str(e)}",
-            )
-
     async def _compress_directory(self, source_dir, output_path):
         """压缩目录"""
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zipf:
@@ -346,30 +248,21 @@ class ProjectSyncService:
         return hasher.hexdigest(), file_size
 
     async def cleanup_temporary_file(self, file_path):
-        """清理临时文件（本地或 S3）"""
-        from antcode_core.infrastructure.storage.presign import is_s3_storage_enabled
-
+        """清理临时文件（S3）"""
         try:
-            if is_s3_storage_enabled() and file_path.startswith("temp/"):
-                # S3 临时文件
+            if file_path.startswith("temp/"):
                 from antcode_core.infrastructure.storage.base import get_file_storage_backend
+
                 backend = get_file_storage_backend()
                 if await backend.exists(file_path):
                     await backend.delete(file_path)
                     logger.info(f"已清理 S3 临时文件: {file_path}")
-            else:
-                # 本地临时文件
-                full_path = file_storage_service.get_file_path(file_path)
-                if "temp/" in full_path and os.path.exists(full_path):
-                    os.remove(full_path)
-                    logger.info(f"已清理本地临时文件: {full_path}")
         except Exception as e:
             logger.warning(f"清理临时文件失败: {e}")
 
     async def get_incremental_changes(self, project_id, client_file_hashes):
         """计算增量变更"""
         from antcode_core.application.services.projects.relation_service import relation_service
-        from antcode_core.infrastructure.storage.presign import is_s3_storage_enabled
 
         project = await Project.get_or_none(id=project_id)
         if not project:
@@ -379,49 +272,7 @@ class ProjectSyncService:
         if not file_detail or not file_detail.is_compressed:
             return {"error": "仅支持压缩项目的增量同步"}
 
-        # 检查是否为 S3 项目目录
-        if is_s3_storage_enabled() and file_detail.file_path.startswith("projects/"):
-            return await self._get_s3_incremental_changes(project, file_detail, client_file_hashes)
-
-        extracted_path = file_storage_service.get_file_path(file_detail.file_path)
-        if not os.path.exists(extracted_path):
-            return {"error": "项目解压目录不存在"}
-
-        server_files = {}
-        for root, dirs, files in os.walk(extracted_path):
-            dirs.sort()
-            files.sort()
-            for file in files:
-                file_path = os.path.join(root, file)
-                rel_path = os.path.relpath(file_path, extracted_path)
-
-                hasher = create_hash_calculator("md5")
-                with open(file_path, "rb") as f:
-                    hasher.update(f.read())
-                server_files[rel_path] = hasher.hexdigest()
-
-        client_paths = set(client_file_hashes.keys())
-        server_paths = set(server_files.keys())
-
-        added = list(server_paths - client_paths)
-        deleted = list(client_paths - server_paths)
-        common = server_paths & client_paths
-
-        modified = [path for path in common if server_files[path] != client_file_hashes[path]]
-        unchanged = [path for path in common if server_files[path] == client_file_hashes[path]]
-
-        logger.info(
-            f"增量差异 [{project.name}] "
-            f"+{len(added)} ~{len(modified)} -{len(deleted)} ={len(unchanged)}"
-        )
-
-        return {
-            "added": added,
-            "modified": modified,
-            "deleted": deleted,
-            "unchanged": unchanged,
-            "server_files": server_files,
-        }
+        return await self._get_s3_incremental_changes(project, file_detail, client_file_hashes)
 
     async def _get_s3_incremental_changes(self, project, file_detail, client_file_hashes):
         """计算 S3 项目的增量变更"""

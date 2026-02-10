@@ -12,8 +12,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from antcode_core.infrastructure.db import get_tortoise_config
-from tortoise import Tortoise
+from antcode_core.infrastructure.db import get_tortoise_config  # noqa: E402
+from tortoise import Tortoise  # noqa: E402
 
 
 # SQL 语句

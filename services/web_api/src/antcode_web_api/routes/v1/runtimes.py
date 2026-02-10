@@ -27,14 +27,6 @@ class CreateEnvRequest(BaseModel):
     packages: list[str] = Field(default_factory=list, description="初始依赖")
 
 
-class CreateEnvCompatRequest(BaseModel):
-    name: str | None = None
-    env_name: str | None = None
-    python_version: str | None = None
-    scope: RuntimeScope | str | None = None
-    packages: list[str] = Field(default_factory=list, description="初始依赖")
-
-
 class PackageRequest(BaseModel):
     packages: list[str] = Field(default_factory=list, description="包列表")
     upgrade: bool = Field(False, description="是否升级安装")
@@ -73,7 +65,7 @@ async def _ensure_worker_access(worker_id: str, user_id: int) -> Worker:
 
 
 @runtime_router.get(
-    "/workers/{worker_id}/envs",
+    "/workers/{worker_id}/runtimes",
     response_model=BaseResponse[list[dict[str, Any]]],
 )
 async def list_envs(
@@ -100,25 +92,22 @@ async def list_envs(
 
 
 @runtime_router.post(
-    "/workers/{worker_id}/envs",
+    "/workers/{worker_id}/runtimes",
     response_model=BaseResponse[dict[str, Any]],
     status_code=status.HTTP_201_CREATED,
 )
 async def create_env(
     worker_id: str,
-    payload: CreateEnvCompatRequest,
+    payload: CreateEnvRequest,
     current_user_id=Depends(get_current_user_id),
     current_user=Depends(get_current_user),
 ):
     """创建运行时环境"""
     worker = await _ensure_worker_access(worker_id, current_user_id)
 
-    env_name = payload.env_name or payload.name
-    scope_raw = payload.scope or (RuntimeScope.SHARED if env_name and env_name.startswith("shared-") else RuntimeScope.PRIVATE)
-    scope = scope_raw.value if hasattr(scope_raw, "value") else str(scope_raw)
+    env_name = payload.env_name
+    scope = payload.scope.value
     python_version = payload.python_version
-    if not python_version:
-        raise HTTPException(status_code=400, detail="必须提供 python_version")
 
     if scope == RuntimeScope.SHARED.value:
         if env_name and not env_name.startswith("shared-"):
@@ -154,7 +143,7 @@ async def create_env(
 
 
 @runtime_router.get(
-    "/workers/{worker_id}/envs/{env_name}",
+    "/workers/{worker_id}/runtimes/{env_name}",
     response_model=BaseResponse[dict[str, Any]],
 )
 async def get_env_detail(
@@ -178,7 +167,7 @@ async def get_env_detail(
 
 
 @runtime_router.patch(
-    "/workers/{worker_id}/envs/{env_name}",
+    "/workers/{worker_id}/runtimes/{env_name}",
     response_model=BaseResponse[dict[str, Any]],
 )
 async def update_env_detail(
@@ -188,22 +177,26 @@ async def update_env_detail(
     current_user_id=Depends(get_current_user_id),
     current_user=Depends(get_current_user),
 ):
-    """更新环境元数据（兼容占位）"""
-    _ = payload
+    """更新环境元数据"""
     _ = current_user
     await _ensure_worker_access(worker_id, current_user_id)
 
-    result = await runtime_control_service.get_env(worker_id, env_name)
+    result = await runtime_control_service.update_env(
+        worker_id,
+        env_name,
+        key=payload.key,
+        description=payload.description,
+    )
     if not result.get("success"):
         raise HTTPException(
             status_code=500,
-            detail=f"获取环境失败: {result.get('error') or '未知错误'}",
+            detail=f"更新环境失败: {result.get('error') or '未知错误'}",
         )
     return success_response(result.get("data") or {})
 
 
 @runtime_router.delete(
-    "/workers/{worker_id}/envs/{env_name}",
+    "/workers/{worker_id}/runtimes/{env_name}",
     response_model=BaseResponse[dict[str, Any]],
 )
 async def delete_env(
@@ -227,7 +220,7 @@ async def delete_env(
 
 
 @runtime_router.get(
-    "/workers/{worker_id}/envs/{env_name}/packages",
+    "/workers/{worker_id}/runtimes/{env_name}/packages",
     response_model=BaseResponse[list[dict[str, Any]]],
 )
 async def list_packages(
@@ -251,7 +244,7 @@ async def list_packages(
 
 
 @runtime_router.post(
-    "/workers/{worker_id}/envs/{env_name}/packages",
+    "/workers/{worker_id}/runtimes/{env_name}/packages",
     response_model=BaseResponse[dict[str, Any]],
 )
 async def install_packages(
@@ -280,7 +273,7 @@ async def install_packages(
 
 
 @runtime_router.delete(
-    "/workers/{worker_id}/envs/{env_name}/packages",
+    "/workers/{worker_id}/runtimes/{env_name}/packages",
     response_model=BaseResponse[dict[str, Any]],
 )
 async def uninstall_packages(
@@ -376,32 +369,6 @@ async def register_interpreter(
         raise HTTPException(
             status_code=500,
             detail=f"注册解释器失败: {result.get('error') or '未知错误'}",
-        )
-
-    return success_response(result.get("data") or {})
-
-
-@runtime_router.post(
-    "/workers/{worker_id}/interpreters/unregister",
-    response_model=BaseResponse[dict[str, Any]],
-)
-async def unregister_interpreter(
-    worker_id: str,
-    payload: RegisterInterpreterRequest,
-    current_user_id=Depends(get_current_user_id),
-    current_user=Depends(get_current_user),
-):
-    """取消注册解释器（兼容）"""
-    _ = current_user
-    await _ensure_worker_access(worker_id, current_user_id)
-
-    result = await runtime_control_service.unregister_interpreter(
-        worker_id, version=payload.version, python_bin=payload.python_bin
-    )
-    if not result.get("success"):
-        raise HTTPException(
-            status_code=500,
-            detail=f"移除解释器失败: {result.get('error') or '未知错误'}",
         )
 
     return success_response(result.get("data") or {})

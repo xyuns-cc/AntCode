@@ -64,7 +64,7 @@ const toWorkerVenvItem = (worker: Worker, env: RuntimeEnv): ExtendedVenvItem => 
     scope,
     key: env.name,
     version: env.python_version,
-    venv_path: env.path,
+    runtime_locator: env.path,
     interpreter_version: env.python_version,
     interpreter_source: 'local',
     python_bin: env.python_executable,
@@ -253,7 +253,7 @@ const EnvListPage: React.FC = () => {
       const lowerQuery = searchQuery.toLowerCase().trim()
       filtered = filtered.filter((item) => {
         return (
-          item.venv_path?.toLowerCase().includes(lowerQuery) ||
+          item.runtime_locator?.toLowerCase().includes(lowerQuery) ||
           item.key?.toLowerCase().includes(lowerQuery) ||
           item.version?.toLowerCase().includes(lowerQuery) ||
           item.workerName?.toLowerCase().includes(lowerQuery)
@@ -390,8 +390,8 @@ const EnvListPage: React.FC = () => {
     },
     {
       title: '路径',
-      dataIndex: 'venv_path',
-      key: 'venv_path',
+      dataIndex: 'runtime_locator',
+      key: 'runtime_locator',
       ellipsis: true,
       render: (v: string) => (
         <CopyableTooltip text={v}>

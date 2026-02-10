@@ -9,7 +9,6 @@ Requirements: 1.4, 1.5, 4.1, 4.2, 4.3, 4.4
 
 import asyncio
 import hashlib
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -23,7 +22,7 @@ from antcode_core.common.config import settings
 @dataclass
 class LogChunkAckResult:
     """日志分片 ACK 结果"""
-    execution_id: str
+    run_id: str
     log_type: str
     ack_offset: int
     ok: bool
@@ -32,7 +31,7 @@ class LogChunkAckResult:
 
 @dataclass
 class ReceiverState:
-    """接收器状态（每个 execution_id:log_type 一个）"""
+    """接收器状态（每个 run_id:log_type 一个）"""
     # 已连续写入的最大 offset
     contiguous_offset: int = 0
     # 已接收的分片 offset 集合（用于处理乱序）
@@ -68,10 +67,10 @@ class LogChunkReceiver:
         self._storage_path = Path(storage_path) if storage_path else Path(settings.TASK_LOG_DIR)
         self._storage_path.mkdir(parents=True, exist_ok=True)
         
-        # 写锁（按 execution_id 分组）
+        # 写锁（按 run_id 分组）
         self._write_locks: dict[str, asyncio.Lock] = {}
         
-        # 接收器状态（按 execution_id:log_type 分组）
+        # 接收器状态（按 run_id:log_type 分组）
         self._states: dict[str, ReceiverState] = {}
         
         # 状态锁
@@ -81,7 +80,7 @@ class LogChunkReceiver:
     
     async def handle_chunk(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         chunk: bytes,
         offset: int,
@@ -95,7 +94,7 @@ class LogChunkReceiver:
         接收日志分片，幂等写入到磁盘，返回 ACK。
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             chunk: 分片数据
             offset: 文件偏移量
@@ -108,7 +107,7 @@ class LogChunkReceiver:
             
         Requirements: 1.4, 1.5, 4.1, 4.2, 4.3, 4.4
         """
-        state_key = f"{execution_id}:{log_type}"
+        state_key = f"{run_id}:{log_type}"
         
         try:
             # 获取或创建状态
@@ -117,10 +116,10 @@ class LogChunkReceiver:
             # 检查是否已完成
             if state.completed:
                 logger.debug(
-                    f"[{execution_id}/{log_type}] 传输已完成，忽略分片: offset={offset}"
+                    f"[{run_id}/{log_type}] 传输已完成，忽略分片: offset={offset}"
                 )
                 return LogChunkAckResult(
-                    execution_id=execution_id,
+                    run_id=run_id,
                     log_type=log_type,
                     ack_offset=state.contiguous_offset,
                     ok=True,
@@ -130,10 +129,10 @@ class LogChunkReceiver:
             if checksum and chunk:
                 if not self._verify_checksum(chunk, checksum):
                     logger.warning(
-                        f"[{execution_id}/{log_type}] 分片校验失败: offset={offset}"
+                        f"[{run_id}/{log_type}] 分片校验失败: offset={offset}"
                     )
                     return LogChunkAckResult(
-                        execution_id=execution_id,
+                        run_id=run_id,
                         log_type=log_type,
                         ack_offset=state.contiguous_offset,
                         ok=False,
@@ -142,7 +141,7 @@ class LogChunkReceiver:
             
             # 幂等写入分片
             write_result = await self._write_chunk(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 chunk=chunk,
                 offset=offset,
@@ -166,7 +165,7 @@ class LogChunkReceiver:
             # 如果是最终分片，验证完整性
             if is_final and total_size >= 0:
                 verify_result = await self._verify_final(
-                    execution_id=execution_id,
+                    run_id=run_id,
                     log_type=log_type,
                     total_size=total_size,
                 )
@@ -178,17 +177,17 @@ class LogChunkReceiver:
                 await self._mark_completed(state_key)
                 
                 logger.info(
-                    f"[{execution_id}/{log_type}] 传输完成: total_size={total_size}"
+                    f"[{run_id}/{log_type}] 传输完成: total_size={total_size}"
                 )
             
             logger.debug(
-                f"[{execution_id}/{log_type}] 分片处理成功: "
+                f"[{run_id}/{log_type}] 分片处理成功: "
                 f"offset={offset}, size={len(chunk)}, "
                 f"ack_offset={state.contiguous_offset}"
             )
             
             return LogChunkAckResult(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 ack_offset=state.contiguous_offset,
                 ok=True,
@@ -196,7 +195,7 @@ class LogChunkReceiver:
             
         except Exception as e:
             logger.error(
-                f"[{execution_id}/{log_type}] 分片处理失败: "
+                f"[{run_id}/{log_type}] 分片处理失败: "
                 f"offset={offset}, error={e}"
             )
             
@@ -205,111 +204,111 @@ class LogChunkReceiver:
             ack_offset = state.contiguous_offset if state else 0
             
             return LogChunkAckResult(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 ack_offset=ack_offset,
                 ok=False,
                 error=str(e),
             )
     
-    def get_log_file_path(self, execution_id: str, log_type: str) -> Path:
+    def get_log_file_path(self, run_id: str, log_type: str) -> Path:
         """
         获取日志文件路径
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             
         Returns:
             日志文件路径
         """
-        log_dir = self._storage_path / execution_id
+        log_dir = self._storage_path / run_id
         filename = f"{log_type}.log"
         return log_dir / filename
     
-    async def get_file_size(self, execution_id: str, log_type: str) -> int:
+    async def get_file_size(self, run_id: str, log_type: str) -> int:
         """
         获取日志文件大小
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             
         Returns:
             文件大小（字节），文件不存在返回 0
         """
-        log_file = self.get_log_file_path(execution_id, log_type)
+        log_file = self.get_log_file_path(run_id, log_type)
         if log_file.exists():
             return log_file.stat().st_size
         return 0
     
-    async def get_contiguous_offset(self, execution_id: str, log_type: str) -> int:
+    async def get_contiguous_offset(self, run_id: str, log_type: str) -> int:
         """
         获取已连续写入的最大 offset
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             
         Returns:
             已连续写入的最大 offset
         """
-        state_key = f"{execution_id}:{log_type}"
+        state_key = f"{run_id}:{log_type}"
         state = await self._get_state(state_key)
         return state.contiguous_offset if state else 0
     
-    async def is_completed(self, execution_id: str, log_type: str) -> bool:
+    async def is_completed(self, run_id: str, log_type: str) -> bool:
         """
         检查传输是否已完成
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             
         Returns:
             是否已完成
         """
-        state_key = f"{execution_id}:{log_type}"
+        state_key = f"{run_id}:{log_type}"
         state = await self._get_state(state_key)
         return state.completed if state else False
     
-    def clear_state(self, execution_id: str) -> None:
+    def clear_state(self, run_id: str) -> None:
         """
         清理指定执行 ID 的状态
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
         """
         for log_type in ["stdout", "stderr"]:
-            state_key = f"{execution_id}:{log_type}"
+            state_key = f"{run_id}:{log_type}"
             if state_key in self._states:
                 del self._states[state_key]
         
-        if execution_id in self._write_locks:
-            del self._write_locks[execution_id]
+        if run_id in self._write_locks:
+            del self._write_locks[run_id]
     
     # ==================== 内部方法 ====================
     
-    def _get_write_lock(self, execution_id: str) -> asyncio.Lock:
+    def _get_write_lock(self, run_id: str) -> asyncio.Lock:
         """
         获取写锁
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             
         Returns:
             写锁
         """
-        if execution_id not in self._write_locks:
-            self._write_locks[execution_id] = asyncio.Lock()
-        return self._write_locks[execution_id]
+        if run_id not in self._write_locks:
+            self._write_locks[run_id] = asyncio.Lock()
+        return self._write_locks[run_id]
     
     async def _get_or_create_state(self, state_key: str) -> ReceiverState:
         """
         获取或创建接收器状态
         
         Args:
-            state_key: 状态键 (execution_id:log_type)
+            state_key: 状态键 (run_id:log_type)
             
         Returns:
             接收器状态
@@ -324,7 +323,7 @@ class LogChunkReceiver:
         获取接收器状态
         
         Args:
-            state_key: 状态键 (execution_id:log_type)
+            state_key: 状态键 (run_id:log_type)
             
         Returns:
             接收器状态，不存在返回 None
@@ -344,7 +343,7 @@ class LogChunkReceiver:
         更新接收器状态
         
         Args:
-            state_key: 状态键 (execution_id:log_type)
+            state_key: 状态键 (run_id:log_type)
             offset: 分片偏移量
             chunk_size: 分片大小
             is_final: 是否为最终分片
@@ -404,7 +403,7 @@ class LogChunkReceiver:
         标记传输完成
         
         Args:
-            state_key: 状态键 (execution_id:log_type)
+            state_key: 状态键 (run_id:log_type)
         """
         async with self._state_lock:
             state = self._states.get(state_key)
@@ -427,7 +426,7 @@ class LogChunkReceiver:
     
     async def _write_chunk(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         chunk: bytes,
         offset: int,
@@ -438,7 +437,7 @@ class LogChunkReceiver:
         按 offset 定位写入，重复写入相同 offset 的分片不影响最终结果。
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             chunk: 分片数据
             offset: 文件偏移量
@@ -451,20 +450,20 @@ class LogChunkReceiver:
         # 空分片（最终分片可能为空）
         if not chunk:
             return LogChunkAckResult(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 ack_offset=offset,
                 ok=True,
             )
         
         # 获取日志文件路径
-        log_dir = self._storage_path / execution_id
+        log_dir = self._storage_path / run_id
         log_dir.mkdir(parents=True, exist_ok=True)
         
         log_file = log_dir / f"{log_type}.log"
         
         # 获取写锁
-        write_lock = self._get_write_lock(execution_id)
+        write_lock = self._get_write_lock(run_id)
         
         async with write_lock:
             try:
@@ -485,7 +484,7 @@ class LogChunkReceiver:
                         await f.write(chunk)
                 
                 return LogChunkAckResult(
-                    execution_id=execution_id,
+                    run_id=run_id,
                     log_type=log_type,
                     ack_offset=offset + len(chunk),
                     ok=True,
@@ -497,12 +496,12 @@ class LogChunkReceiver:
                     error_msg = "disk full"
                 
                 logger.error(
-                    f"[{execution_id}/{log_type}] 写入分片失败: "
+                    f"[{run_id}/{log_type}] 写入分片失败: "
                     f"offset={offset}, error={e}"
                 )
                 
                 return LogChunkAckResult(
-                    execution_id=execution_id,
+                    run_id=run_id,
                     log_type=log_type,
                     ack_offset=0,
                     ok=False,
@@ -511,7 +510,7 @@ class LogChunkReceiver:
     
     async def _verify_final(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         total_size: int,
     ) -> LogChunkAckResult:
@@ -521,7 +520,7 @@ class LogChunkReceiver:
         检查文件大小是否与 total_size 匹配。
         
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             total_size: 期望的文件大小
             
@@ -530,20 +529,20 @@ class LogChunkReceiver:
             
         Requirements: 4.3, 4.4
         """
-        log_file = self.get_log_file_path(execution_id, log_type)
+        log_file = self.get_log_file_path(run_id, log_type)
         
         if not log_file.exists():
             # 文件不存在，如果 total_size 为 0 则正常
             if total_size == 0:
                 return LogChunkAckResult(
-                    execution_id=execution_id,
+                    run_id=run_id,
                     log_type=log_type,
                     ack_offset=0,
                     ok=True,
                 )
             
             return LogChunkAckResult(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 ack_offset=0,
                 ok=False,
@@ -554,12 +553,12 @@ class LogChunkReceiver:
         
         if actual_size != total_size:
             logger.warning(
-                f"[{execution_id}/{log_type}] 文件大小不匹配: "
+                f"[{run_id}/{log_type}] 文件大小不匹配: "
                 f"actual={actual_size}, expected={total_size}"
             )
             
             return LogChunkAckResult(
-                execution_id=execution_id,
+                run_id=run_id,
                 log_type=log_type,
                 ack_offset=actual_size,
                 ok=False,
@@ -567,7 +566,7 @@ class LogChunkReceiver:
             )
         
         return LogChunkAckResult(
-            execution_id=execution_id,
+            run_id=run_id,
             log_type=log_type,
             ack_offset=total_size,
             ok=True,

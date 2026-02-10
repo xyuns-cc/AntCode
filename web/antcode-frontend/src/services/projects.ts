@@ -439,17 +439,6 @@ class ProjectService extends BaseService {
     return this.post<{ success: boolean; message: string; data?: Record<string, unknown> }>(`/${id}/test-connection`)
   }
 
-  // 获取项目文件内容
-  async getProjectFileContent(id: string): Promise<string> {
-    const result = await this.get<{ content: string }>(`/${id}/file-content`)
-    return result.content
-  }
-
-  // 更新项目文件内容
-  async updateProjectFileContent(id: string, content: string): Promise<void> {
-    await this.put(`/${id}/file-content`, { content })
-  }
-
   // 获取项目依赖
   async getProjectDependencies(id: string): Promise<string[]> {
     const result = await this.get<{ dependencies: string[] }>(`/${id}/dependencies`)

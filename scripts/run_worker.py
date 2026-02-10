@@ -10,7 +10,6 @@ Worker 节点启动脚本
 注意：推荐使用 scripts/run_worker.sh 启动脚本，提供更多配置选项。
 """
 
-import sys
 from pathlib import Path
 
 # 项目根目录

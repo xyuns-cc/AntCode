@@ -14,7 +14,7 @@ class SpiderTaskDispatcher:
         self,
         project,
         rule_detail,
-        execution_id,
+        run_id,
         params=None,
         worker_id=None,
         require_render=False,
@@ -34,7 +34,7 @@ class SpiderTaskDispatcher:
 
         result = await worker_task_dispatcher.dispatch_task(
             project_id=project.public_id,
-            execution_id=execution_id,
+            run_id=run_id,
             params=task_params,
             project_type="rule",
             require_render=require_render,
@@ -66,7 +66,7 @@ class SpiderTaskDispatcher:
         self,
         project,
         rule_details,
-        execution_id,
+        run_id,
         params=None,
         worker_id=None,
         require_render=False,
@@ -75,7 +75,7 @@ class SpiderTaskDispatcher:
         tasks = []
         for i, rule_detail in enumerate(rule_details):
             task_item = {
-                "task_id": f"{execution_id}-{i}",
+                "task_id": f"{run_id}-{i}",
                 "project_id": project.public_id,
                 "project_type": "rule",
                 "params": {

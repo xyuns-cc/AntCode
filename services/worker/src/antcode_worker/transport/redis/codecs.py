@@ -2,7 +2,7 @@
 Redis 消息编解码模块
 
 实现 Worker 与 Redis 之间消息的序列化和反序列化。
-支持 schema versioning 以便向后兼容。
+支持 schema version 标记，便于协议演进。
 
 Requirements: 5.4
 """
@@ -86,7 +86,7 @@ class JsonCodec(MessageCodec):
     """
     JSON 编解码器
 
-    使用 JSON 序列化，支持 schema versioning。
+    使用 JSON 序列化，并携带 schema version 字段。
     """
 
     # 版本字段名

@@ -197,58 +197,6 @@ export const useAuth = () => {
     }
   }, [setUser, clearUser])
 
-  // 检查用户名可用性
-  const checkUsernameAvailability = useCallback(async (username: string) => {
-    try {
-      return await authService.checkUsernameAvailability(username)
-    } catch (error: unknown) {
-      Logger.warn('检查用户名可用性失败:', error)
-      return false
-    }
-  }, [])
-
-  // 检查邮箱可用性
-  const checkEmailAvailability = useCallback(async (email: string) => {
-    try {
-      return await authService.checkEmailAvailability(email)
-    } catch (error: unknown) {
-      Logger.warn('检查邮箱可用性失败:', error)
-      return false
-    }
-  }, [])
-
-  // 发送重置密码邮件
-  const sendResetPasswordEmail = useCallback(async (email: string) => {
-    setLoading(true)
-    setError(null)
-
-    try {
-      await authService.sendResetPasswordEmail(email)
-    } catch (error: unknown) {
-      const errorMessage = extractErrorMessage(error, '发送邮件失败')
-      setError(errorMessage)
-      throw error
-    } finally {
-      setLoading(false)
-    }
-  }, [setError])
-
-  // 重置密码
-  const resetPassword = useCallback(async (token: string, newPassword: string) => {
-    setLoading(true)
-    setError(null)
-
-    try {
-      await authService.resetPassword(token, newPassword)
-    } catch (error: unknown) {
-      const errorMessage = extractErrorMessage(error, '密码重置失败')
-      setError(errorMessage)
-      throw error
-    } finally {
-      setLoading(false)
-    }
-  }, [setError])
-
   // 组件挂载时检查登录状态
   useEffect(() => {
     checkAuth()
@@ -284,10 +232,6 @@ export const useAuth = () => {
     checkAuth,
     refreshToken,
     clearUser,
-    checkUsernameAvailability,
-    checkEmailAvailability,
-    sendResetPasswordEmail,
-    resetPassword,
 
     // 权限检查
     hasPermission,

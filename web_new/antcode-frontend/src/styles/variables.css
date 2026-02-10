@@ -1,0 +1,97 @@
+/* CSS Variables - Supplement to Ant Design Design Tokens */
+
+:root {
+  /* Brand colors */
+  --brand-primary: #6366f1;
+  --brand-primary-hover: #818cf8;
+  --brand-primary-active: #4f46e5;
+  --brand-success: #10b981;
+  --brand-warning: #f59e0b;
+  --brand-error: #ef4444;
+  --brand-info: #3b82f6;
+
+  /* Layout */
+  --layout-header-height: 64px;
+  --layout-sider-width: 260px;
+  --layout-sider-collapsed-width: 80px;
+  --layout-content-padding: 24px;
+  --layout-content-padding-mobile: 16px;
+
+  /* Border radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Typography */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, Monaco, monospace;
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 20px;
+  --font-size-3xl: 24px;
+  --font-size-4xl: 28px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+
+  /* Animation */
+  --duration-fast: 0.1s;
+  --duration-normal: 0.2s;
+  --duration-slow: 0.3s;
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Z-Index */
+  --z-dropdown: 1050;
+  --z-sticky: 1020;
+  --z-fixed: 1030;
+  --z-modal-backdrop: 1040;
+  --z-modal: 1050;
+  --z-popover: 1060;
+  --z-tooltip: 1070;
+
+  /* Log viewer */
+  --log-bg-color: #18181b;
+  --log-text-color: #d4d4d8;
+  --log-stdout-color: #10b981;
+  --log-stderr-color: #ef4444;
+  --log-timestamp-color: #71717a;
+  --log-line-hover-bg: #27272a;
+
+  /* Status indicators */
+  --status-running: #3b82f6;
+  --status-success: #10b981;
+  --status-failed: #ef4444;
+  --status-pending: #f59e0b;
+  --status-cancelled: #71717a;
+}
+
+html.dark,
+body.dark-theme {
+  --log-bg-color: #09090b;
+  --log-text-color: #e4e4e7;
+  --log-line-hover-bg: #18181b;
+}

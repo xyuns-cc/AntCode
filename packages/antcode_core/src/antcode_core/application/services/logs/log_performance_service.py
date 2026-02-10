@@ -8,6 +8,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
+from typing import Any, Dict
 
 import psutil
 from loguru import logger
@@ -97,7 +98,7 @@ class LogPerformanceMonitor:
             process = psutil.Process()
             memory_usage = process.memory_info().rss / 1024 / 1024  # MB
             cpu_usage = process.cpu_percent()
-        except:
+        except Exception:
             memory_usage = 0.0
             cpu_usage = 0.0
         

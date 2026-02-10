@@ -95,17 +95,19 @@ COPY --chown=appuser:appgroup services/worker/src/antcode_worker /app/services/w
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
-    /app/data/logs/tasks \
-    /app/data/storage/projects/files \
-    /app/data/storage/projects/extracted \
-    /app/data/storage/projects/executions \
-    /app/data/storage/executions \
-    /app/venvs \
+    /app/data/worker/logs/tasks \
+    /app/data/worker/logs/wal \
+    /app/data/worker/logs/spool \
+    /app/data/worker/projects/files \
+    /app/data/worker/projects/extracted \
+    /app/data/worker/projects/executions \
+    /app/data/worker/runtimes \
+    /app/data/worker/runs \
+    /app/data/worker/secrets \
+    /app/data/worker/identity \
     && chown -R appuser:appgroup /app/data \
-    && chown -R appuser:appgroup /app/venvs \
     && chown -R appuser:appgroup /app/.venv \
-    && chmod -R 755 /app/data \
-    && chmod -R 755 /app/venvs
+    && chmod -R 755 /app/data
 
 # 为 appuser 安装 uv
 USER appuser

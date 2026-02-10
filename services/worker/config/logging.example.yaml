@@ -15,7 +15,7 @@ console:
 # 文件输出
 file:
   enabled: true
-  path: "./runtime_data/logs/worker.log"
+  path: "./data/worker/logs/worker.log"
   level: "DEBUG"
   rotation: "10 MB"           # 日志轮转大小
   retention: "7 days"         # 保留时间
@@ -24,12 +24,12 @@ file:
 # 结构化日志（JSON）
 json:
   enabled: false
-  path: "./runtime_data/logs/worker.json"
+  path: "./data/worker/logs/worker.json"
 
 # 任务日志
 task_logs:
   enabled: true
-  path: "./runtime_data/logs/tasks"
+  path: "./data/worker/logs/tasks"
   max_size_mb: 100            # 单个任务日志最大大小
   buffer_size: 100            # 缓冲区大小（行数）
   flush_interval: 0.5         # 刷新间隔（秒）

@@ -1,5 +1,7 @@
 """用户管理接口"""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
 from tortoise.exceptions import IntegrityError
@@ -33,6 +35,11 @@ router = APIRouter()
 
 def _build_user_response(user) -> UserResponse:
     """构建用户响应"""
+    is_online = False
+    if user.last_login_at:
+        now = datetime.now(user.last_login_at.tzinfo) if user.last_login_at.tzinfo else datetime.now()
+        is_online = (now - user.last_login_at).total_seconds() <= user_service.ONLINE_WINDOW_SECONDS
+
     return UserResponse(
         id=user.public_id,
         username=user.username,
@@ -42,6 +49,7 @@ def _build_user_response(user) -> UserResponse:
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,
+        is_online=is_online,
     )
 
 
@@ -176,6 +184,7 @@ async def get_user_detail(user_id: str, current_user: TokenData = Depends(get_cu
 async def update_user(
     user_id: str,
     request: UserUpdateRequest,
+    http_request: Request,
     current_user: TokenData = Depends(get_current_user),
 ):
     """更新用户信息"""
@@ -191,15 +200,59 @@ async def update_user(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     if request.is_admin is not None and not await verify_super_admin(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有超级管理员可以修改管理员权限")
+    if request.new_password and current_user_obj.id != target_user.id and not current_user_obj.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权修改其他用户密码")
+    if request.new_password and current_user_obj.id == target_user.id and not request.old_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="修改自己的密码必须提供当前密码")
+
+    old_snapshot = {
+        "username": target_user.username,
+        "email": target_user.email,
+        "is_active": target_user.is_active,
+        "is_admin": target_user.is_admin,
+    }
 
     try:
         user = await user_service.update_user(user_id, request)
+
+        new_snapshot = {
+            "username": user.username,
+            "email": user.email,
+            "is_active": user.is_active,
+            "is_admin": user.is_admin,
+            "password_updated": bool(request.new_password),
+        }
+
+        username_changed = old_snapshot["username"] != new_snapshot["username"]
+        operator_username = user.username if current_user_obj.id == user.id else current_user_obj.username
+
+        description = f"更新用户信息: {old_snapshot['username']}"
+        if username_changed:
+            description = (
+                f"更新用户信息: {old_snapshot['username']} -> {new_snapshot['username']}"
+            )
+
+        await audit_service.log_user_action(
+            action=AuditAction.USER_UPDATE,
+            operator_username=operator_username,
+            target_user_id=user.id,
+            target_username=user.username,
+            operator_id=current_user_obj.id,
+            ip_address=http_request.client.host if http_request.client else None,
+            old_value=old_snapshot,
+            new_value=new_snapshot,
+            description=description,
+        )
+
         return success(_build_user_response(user), message=Messages.UPDATED_SUCCESS)
     except IntegrityError as e:
+        detail = str(e)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="邮箱已存在" if "邮箱" in str(e) else str(e),
+            detail="用户名已存在" if "用户名" in detail else ("邮箱已存在" if "邮箱" in detail else detail),
         )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.put(
@@ -257,22 +310,6 @@ async def reset_user_password(
     current_admin: TokenData = Depends(get_current_super_admin),
 ):
     """重置用户密码（仅超级管理员）"""
-    await user_service.reset_user_password(user_id, request.new_password)
-    return success(None, message="密码重置成功")
-
-
-@router.post(
-    "/{user_id}/reset-password",
-    response_model=BaseResponse,
-    summary="重置用户密码(兼容)",
-    tags=["用户管理"],
-)
-async def reset_user_password_compat(
-    user_id: str,
-    request: UserAdminPasswordUpdateRequest,
-    current_admin: TokenData = Depends(get_current_super_admin),
-):
-    """重置用户密码（兼容 POST 版本，仅超级管理员）"""
     await user_service.reset_user_password(user_id, request.new_password)
     return success(None, message="密码重置成功")
 

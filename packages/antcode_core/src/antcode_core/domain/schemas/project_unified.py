@@ -25,7 +25,7 @@ class UnifiedProjectUpdateRequest(BaseModel):
     execution_strategy: str | None = Field(
         None, description="执行策略：fixed/auto/prefer/specified"
     )
-    bound_worker_id: str | None = Field(None, description="绑定的执行节点ID")
+    bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID")
     fallback_enabled: bool | None = Field(None, description="是否启用故障转移")
 
     # ======= 规则项目字段 (type=rule时使用) =======

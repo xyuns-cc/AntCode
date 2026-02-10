@@ -8,10 +8,9 @@ Requirements: 9.3
 
 import asyncio
 import json
-import os
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -22,6 +21,10 @@ from loguru import logger
 
 from antcode_worker.domain.enums import LogStream
 from antcode_worker.domain.models import LogEntry
+from antcode_worker.config import DATA_ROOT
+
+
+_DEFAULT_SPOOL_DIR = str(DATA_ROOT / "logs" / "spool")
 
 
 @dataclass
@@ -29,7 +32,7 @@ class SpoolConfig:
     """Spool 配置"""
     
     # 存储路径
-    spool_dir: str = "var/worker/logs/spool"
+    spool_dir: str = _DEFAULT_SPOOL_DIR
     
     # 磁盘限制
     max_disk_bytes: int = 100 * 1024 * 1024  # 100MB

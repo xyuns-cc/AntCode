@@ -21,6 +21,8 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_worker.config import DATA_ROOT
+
 # DrissionPage 导入
 try:
     from DrissionPage import Chromium, ChromiumOptions
@@ -43,7 +45,7 @@ class RenderConfig:
     max_tabs_per_browser: int = 5
 
     # 数据目录
-    data_dir: str = "data/browsers"
+    data_dir: str = str(DATA_ROOT / "browsers")
 
     # 浏览器设置
     headless: bool = True

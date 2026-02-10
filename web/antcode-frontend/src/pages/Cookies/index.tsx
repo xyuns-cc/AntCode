@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import {
     Card,
     Button,
@@ -133,21 +133,7 @@ const Cookies: React.FC = () => {
     const [showAddModal, setShowAddModal] = useState(false)
     const [form] = Form.useForm<NewAccountForm>()
 
-    // 自动刷新计时器
-    useEffect(() => {
-        const timer = setInterval(() => {
-            setTimeLeft((prev) => {
-                if (prev <= 1) {
-                    handleAutoRefresh()
-                    return updateFrequency
-                }
-                return prev - 1
-            })
-        }, 1000)
-        return () => clearInterval(timer)
-    }, [updateFrequency])
-
-    const handleAutoRefresh = async () => {
+    const handleAutoRefresh = useCallback(async () => {
         setIsUpdating(true)
         await new Promise(resolve => setTimeout(resolve, 2000))
         setAccounts(prev =>
@@ -159,7 +145,21 @@ const Cookies: React.FC = () => {
         )
         setIsUpdating(false)
         setTimeLeft(updateFrequency)
-    }
+    }, [updateFrequency])
+
+    // 自动刷新计时器
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setTimeLeft((prev) => {
+                if (prev <= 1) {
+                    void handleAutoRefresh()
+                    return updateFrequency
+                }
+                return prev - 1
+            })
+        }, 1000)
+        return () => clearInterval(timer)
+    }, [handleAutoRefresh, updateFrequency])
 
     const handleAddAccount = async () => {
         try {
@@ -175,7 +175,7 @@ const Cookies: React.FC = () => {
                 scriptType: values.scriptType,
                 script: values.scriptCode
             }
-            setAccounts([account, ...accounts])
+            setAccounts(prev => [account, ...prev])
             setShowAddModal(false)
             form.resetFields()
         } catch {

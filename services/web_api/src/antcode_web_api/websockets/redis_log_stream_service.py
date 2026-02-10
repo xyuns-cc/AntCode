@@ -14,13 +14,18 @@ from typing import Any
 
 from loguru import logger
 
-from antcode_core.infrastructure.redis.client import get_redis_client
+from antcode_core.infrastructure.redis import (
+    decode_stream_payload,
+    get_redis_client,
+    log_stream_key,
+    redis_namespace,
+)
 from antcode_web_api.websockets.websocket_connection_manager import websocket_manager
 
 
 @dataclass
 class StreamFollower:
-    execution_id: str
+    run_id: str
     last_id: str = "0-0"
     ref_count: int = 0
     running: bool = False
@@ -33,33 +38,33 @@ class RedisLogStreamService:
 
     def __init__(
         self,
-        namespace: str = "antcode",
+        namespace: str | None = None,
         batch_size: int = 200,
         block_ms: int = 5000,
     ):
-        self._namespace = namespace
+        self._namespace = redis_namespace(namespace)
         self._batch_size = batch_size
         self._block_ms = block_ms
         self._followers: dict[str, StreamFollower] = {}
         self._lock = asyncio.Lock()
 
-    async def subscribe(self, execution_id: str) -> None:
+    async def subscribe(self, run_id: str) -> None:
         """订阅执行日志"""
         async with self._lock:
-            follower = self._followers.get(execution_id)
+            follower = self._followers.get(run_id)
             if follower:
                 follower.ref_count += 1
                 return
 
-            follower = StreamFollower(execution_id=execution_id, ref_count=1)
-            self._followers[execution_id] = follower
+            follower = StreamFollower(run_id=run_id, ref_count=1)
+            self._followers[run_id] = follower
 
         await self._start_follower(follower)
 
-    async def unsubscribe(self, execution_id: str) -> None:
+    async def unsubscribe(self, run_id: str) -> None:
         """取消订阅执行日志"""
         async with self._lock:
-            follower = self._followers.get(execution_id)
+            follower = self._followers.get(run_id)
             if not follower:
                 return
 
@@ -67,25 +72,25 @@ class RedisLogStreamService:
             if follower.ref_count > 0:
                 return
 
-            self._followers.pop(execution_id, None)
+            self._followers.pop(run_id, None)
 
         await self._stop_follower(follower)
 
-    def _stream_key(self, execution_id: str) -> str:
-        return f"{self._namespace}:log:stream:{execution_id}"
+    def _stream_key(self, run_id: str) -> str:
+        return log_stream_key(run_id, namespace=self._namespace)
 
     async def _start_follower(self, follower: StreamFollower) -> None:
         follower.running = True
 
         if not follower.history_sent:
-            last_id, sent = await self._send_history(follower.execution_id)
+            last_id, sent = await self._send_history(follower.run_id)
             follower.last_id = last_id
             follower.history_sent = True
             if sent == 0:
-                await websocket_manager.send_no_historical_logs(follower.execution_id)
+                await websocket_manager.send_no_historical_logs(follower.run_id)
             else:
                 await websocket_manager.send_historical_logs_end(
-                    follower.execution_id, sent
+                    follower.run_id, sent
                 )
 
         follower.task = asyncio.create_task(self._follow_stream(follower))
@@ -98,14 +103,19 @@ class RedisLogStreamService:
                 await follower.task
             follower.task = None
 
-    async def _send_history(self, execution_id: str) -> tuple[str, int]:
+    async def _send_history(self, run_id: str) -> tuple[str, int]:
         """发送历史日志"""
-        await websocket_manager.send_historical_logs_start(execution_id)
+        await websocket_manager.send_historical_logs_start(run_id)
 
         last_id = "0-0"
         sent = 0
         redis = await get_redis_client()
-        stream_key = self._stream_key(execution_id)
+        stream_key = self._stream_key(run_id)
+
+        if redis is None:
+            logger.warning("Redis 不可用，跳过历史日志流读取: {}", run_id)
+            sent = await self._send_history_from_s3(run_id)
+            return last_id, sent
 
         # 先从 Redis Stream 读取
         while True:
@@ -120,16 +130,16 @@ class RedisLogStreamService:
             for msg_id, fields in messages:
                 last_id = self._decode_value(msg_id)
                 log_entry = self._decode_log(fields)
-                await self._emit_log(execution_id, log_entry, source="history")
+                await self._emit_log(run_id, log_entry, source="history")
                 sent += 1
 
         # 如果 Redis 没有数据，尝试从 S3 读取
         if sent == 0:
-            sent = await self._send_history_from_s3(execution_id)
+            sent = await self._send_history_from_s3(run_id)
 
         return last_id, sent
 
-    async def _send_history_from_s3(self, execution_id: str) -> int:
+    async def _send_history_from_s3(self, run_id: str) -> int:
         """从 S3 读取历史日志（支持压缩文件）"""
         import gzip
 
@@ -144,7 +154,7 @@ class RedisLogStreamService:
             for log_type in ["stdout", "stderr"]:
                 try:
                     # 先尝试获取预签名下载 URL（压缩文件）
-                    url = await log_storage.get_presigned_download_url(execution_id, log_type)
+                    url = await log_storage.get_presigned_download_url(run_id, log_type)
                     if url:
                         async with (
                             aiohttp.ClientSession() as session,
@@ -166,13 +176,13 @@ class RedisLogStreamService:
                                             "timestamp": "",
                                             "sequence": str(i),
                                         }
-                                        await self._emit_log(execution_id, log_entry, source="s3_history")
+                                        await self._emit_log(run_id, log_entry, source="s3_history")
                                         sent += 1
                         continue
 
                     # 回退到 query_logs（JSONL 格式）
                     query_result = await log_storage.query_logs(
-                        run_id=execution_id,
+                        run_id=run_id,
                         log_type=log_type,
                         limit=10000,
                     )
@@ -184,7 +194,7 @@ class RedisLogStreamService:
                             "timestamp": entry.timestamp.isoformat() if entry.timestamp else "",
                             "sequence": str(entry.sequence),
                         }
-                        await self._emit_log(execution_id, log_entry, source="s3_history")
+                        await self._emit_log(run_id, log_entry, source="s3_history")
                         sent += 1
 
                 except Exception as e:
@@ -198,8 +208,12 @@ class RedisLogStreamService:
     async def _follow_stream(self, follower: StreamFollower) -> None:
         """持续跟随日志流"""
         redis = await get_redis_client()
-        stream_key = self._stream_key(follower.execution_id)
+        stream_key = self._stream_key(follower.run_id)
         last_id = follower.last_id
+
+        if redis is None:
+            logger.warning("Redis 不可用，停止日志跟随: {}", follower.run_id)
+            return
 
         while follower.running:
             try:
@@ -215,7 +229,7 @@ class RedisLogStreamService:
                 for msg_id, fields in messages:
                     last_id = self._decode_value(msg_id)
                     log_entry = self._decode_log(fields)
-                    await self._emit_log(follower.execution_id, log_entry, source="realtime")
+                    await self._emit_log(follower.run_id, log_entry, source="realtime")
 
                 follower.last_id = last_id
 
@@ -225,7 +239,7 @@ class RedisLogStreamService:
                 logger.error(f"日志流读取失败: {e}")
                 await asyncio.sleep(1.0)
 
-    async def _emit_log(self, execution_id: str, log_entry: dict[str, Any], source: str) -> None:
+    async def _emit_log(self, run_id: str, log_entry: dict[str, Any], source: str) -> None:
         log_type = log_entry.get("log_type") or "stdout"
         content = log_entry.get("content") or ""
         timestamp = log_entry.get("timestamp") or datetime.now(UTC).isoformat()
@@ -233,9 +247,9 @@ class RedisLogStreamService:
 
         message = {
             "type": "log_line",
-            "execution_id": execution_id,
+            "run_id": run_id,
             "data": {
-                "execution_id": execution_id,
+                "run_id": run_id,
                 "log_type": log_type,
                 "content": content,
                 "timestamp": timestamp,
@@ -244,18 +258,15 @@ class RedisLogStreamService:
             },
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        await websocket_manager.broadcast_to_execution(execution_id, message)
+        await websocket_manager.broadcast_to_run(run_id, message)
 
     def _decode_log(self, fields: dict[str, Any]) -> dict[str, Any]:
-        # Redis 返回的 fields 键可能是 bytes 或 str，需要兼容处理
-        def get_field(name: str) -> Any:
-            return fields.get(name) or fields.get(name.encode("utf-8"))
-
+        decoded = decode_stream_payload(fields)
         return {
-            "log_type": self._decode_value(get_field("log_type")),
-            "content": self._decode_value(get_field("content")),
-            "timestamp": self._decode_value(get_field("timestamp")),
-            "sequence": self._decode_value(get_field("sequence")),
+            "log_type": self._decode_value(decoded.get("log_type")),
+            "content": self._decode_value(decoded.get("content")),
+            "timestamp": self._decode_value(decoded.get("timestamp")),
+            "sequence": self._decode_value(decoded.get("sequence")),
         }
 
     def _decode_value(self, value: Any) -> str:

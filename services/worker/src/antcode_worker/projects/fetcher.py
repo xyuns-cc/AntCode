@@ -285,6 +285,14 @@ class ArtifactFetcher:
         mode = member.external_attr >> 16
         return (mode & 0o120000) == 0o120000
 
+    def _is_unsafe_path(self, path: str) -> bool:
+        if not path:
+            return True
+        target = Path(path)
+        if target.is_absolute():
+            return True
+        return ".." in target.parts
+
     def _is_safe_member_path(self, name: str, base_dir: Path) -> bool:
         if not name:
             return False

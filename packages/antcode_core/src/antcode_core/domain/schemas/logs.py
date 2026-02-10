@@ -43,7 +43,7 @@ class LogEntry(BaseModel):
     timestamp: datetime
     level: LogLevel
     log_type: LogType
-    execution_id: str = ""
+    run_id: str = ""
     task_id: str = Field("", description="任务公开ID")
     message: str
     source: str = ""
@@ -59,7 +59,7 @@ class LogQueryParams(BaseModel):
     size: int = Field(50, ge=1, le=1000, description="每页数量")
     level: LogLevel | None = Field(None, description="日志级别过滤")
     log_type: LogType | None = Field(None, description="日志类型过滤")
-    execution_id: str | None = Field(None, description="执行ID过滤")
+    run_id: str | None = Field(None, description="运行ID过滤")
     task_id: str | None = Field(None, description="任务公开ID过滤")
     start_time: datetime | None = Field(None, description="开始时间")
     end_time: datetime | None = Field(None, description="结束时间")
@@ -88,7 +88,7 @@ class LogFileInfo(BaseModel):
 class LogFileResponse(BaseModel):
     """日志文件响应"""
 
-    execution_id: str
+    run_id: str
     log_type: str
     content: str
     file_path: str
@@ -100,7 +100,7 @@ class LogFileResponse(BaseModel):
 class UnifiedLogResponse(BaseModel):
     """统一日志响应（支持多种格式）"""
 
-    execution_id: str
+    run_id: str
     format: LogFormat
     log_type: str = ""
 
@@ -121,7 +121,7 @@ class LogStreamMessage(BaseModel):
     """日志流消息"""
 
     type: str = Field(..., description="消息类型")
-    execution_id: str = Field("", description="执行ID")
+    run_id: str = Field("", description="运行ID")
     timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")
     data: dict[str, Any] = Field(..., description="消息数据")
 
@@ -130,7 +130,7 @@ class LogStreamStats(BaseModel):
     """日志流统计信息"""
 
     total_connections: int
-    active_executions: int
+    active_runs: int
     messages_sent: int
     uptime_seconds: float
 
@@ -138,7 +138,7 @@ class LogStreamStats(BaseModel):
 class LogArchiveRequest(BaseModel):
     """日志归档请求"""
 
-    execution_ids: list[str] | None = Field(None, description="指定执行ID列表")
+    run_ids: list[str] | None = Field(None, description="指定运行ID列表")
     start_date: datetime | None = Field(None, description="开始日期")
     end_date: datetime | None = Field(None, description="结束日期")
     compress: bool = Field(True, description="是否压缩")
@@ -158,7 +158,7 @@ class LogCleanupRequest(BaseModel):
     """日志清理请求"""
 
     older_than_days: int = Field(30, ge=1, le=365, description="清理多少天前的日志")
-    execution_ids: list[str] | None = Field(None, description="指定执行ID列表")
+    run_ids: list[str] | None = Field(None, description="指定运行ID列表")
     dry_run: bool = Field(False, description="是否为试运行")
 
 
@@ -167,7 +167,7 @@ class LogCleanupResponse(BaseModel):
 
     deleted_files: int
     freed_space_bytes: int
-    deleted_executions: list[str]
+    deleted_runs: list[str]
     dry_run: bool
 
 
@@ -187,7 +187,7 @@ class RealTimeLogMessage(BaseModel):
     """实时日志消息"""
 
     type: str = "log_line"
-    execution_id: str
+    run_id: str
     log_type: LogType
     content: str
     timestamp: datetime

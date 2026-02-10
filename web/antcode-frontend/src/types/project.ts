@@ -69,7 +69,8 @@ export interface Project {
   // 环境信息
   python_version?: string
   runtime_scope?: 'shared' | 'private'
-  venv_path?: string
+  runtime_kind?: 'python' | 'java' | 'go'
+  runtime_locator?: string
   dependencies?: string[]
 
   // 执行策略配置
@@ -218,7 +219,7 @@ export interface BrowserEngineConfig {
 
 export interface TaskConfig {
   task_id_template?: string  // 任务ID模板
-  worker_id?: string  // 工作节点ID
+  worker_id?: string  // Worker ID
   queue_priority?: number  // 队列优先级
   retry_policy?: {
     max_retries: number

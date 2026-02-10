@@ -76,7 +76,7 @@ message Heartbeat {
 
 // Task execution status update from Worker to Master
 message TaskStatus {
-  string execution_id = 1;           // Task execution identifier
+  string run_id = 1;                 // Task run identifier
   string status = 2;                 // Status (pending, running, completed, failed, cancelled)
   optional int32 exit_code = 3;      // Process exit code (if completed)
   optional string error_message = 4; // Error message (if failed)
@@ -108,7 +108,7 @@ message TaskAck {
 // Task cancellation request from Master to Worker
 message TaskCancel {
   string task_id = 1;        // Task identifier to cancel
-  string execution_id = 2;   // Execution identifier to cancel
+  string run_id = 2;         // Run identifier to cancel
 }
 
 // Cancellation acknowledgment from Worker to Master
@@ -191,7 +191,7 @@ message ReportResultResponse {
 }
 
 message SendLogRequest {
-  string execution_id = 1;
+  string run_id = 1;
   string log_type = 2;
   string content = 3;
   string timestamp = 4;
@@ -199,7 +199,7 @@ message SendLogRequest {
 }
 
 message LogEntry {
-  string execution_id = 1;
+  string run_id = 1;
   string log_type = 2;
   string content = 3;
   string timestamp = 4;
@@ -221,7 +221,7 @@ message SendLogBatchResponse {
 }
 
 message SendLogChunkRequest {
-  string execution_id = 1;
+  string run_id = 1;
   string log_type = 2;
   bytes data = 3;
   int64 offset = 4;

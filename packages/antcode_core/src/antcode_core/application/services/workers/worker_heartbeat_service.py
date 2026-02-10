@@ -195,21 +195,17 @@ class WorkerHeartbeatService:
         """从 Redis 获取节点心跳时间（Direct 模式）"""
         try:
             from antcode_core.infrastructure.redis import get_redis_client
+            from antcode_core.infrastructure.redis import decode_stream_payload, worker_heartbeat_key
 
             redis = await get_redis_client()
-            hb_key = f"antcode:heartbeat:{worker.public_id}"
+            hb_key = worker_heartbeat_key(worker.public_id)
             raw = await redis.hgetall(hb_key)
 
             if not raw:
                 return None
 
             # 解析心跳数据
-            data = {
-                (k.decode() if isinstance(k, bytes) else k): (
-                    v.decode() if isinstance(v, bytes) else v
-                )
-                for k, v in raw.items()
-            }
+            data = decode_stream_payload(raw)
 
             # 获取时间戳
             timestamp_str = data.get("timestamp")
@@ -234,21 +230,17 @@ class WorkerHeartbeatService:
         """将 Redis 心跳同步到数据库（Direct 模式）"""
         try:
             from antcode_core.infrastructure.redis import get_redis_client
+            from antcode_core.infrastructure.redis import decode_stream_payload, worker_heartbeat_key
 
             redis = await get_redis_client()
-            hb_key = f"antcode:heartbeat:{worker.public_id}"
+            hb_key = worker_heartbeat_key(worker.public_id)
             raw = await redis.hgetall(hb_key)
 
             if not raw:
                 return False
 
             # 解析心跳数据
-            data = {
-                (k.decode() if isinstance(k, bytes) else k): (
-                    v.decode() if isinstance(v, bytes) else v
-                )
-                for k, v in raw.items()
-            }
+            data = decode_stream_payload(raw)
 
             # 获取时间戳
             timestamp_str = data.get("timestamp")

@@ -9,24 +9,25 @@ export type VenvScope = 'shared' | 'private'
 
 export interface CreateOrBindVenvRequest {
   version: string
-  venv_scope: VenvScope
-  shared_venv_key?: string
+  runtime_scope: VenvScope
+  shared_runtime_key?: string
   create_if_missing?: boolean
   interpreter_source?: string
   python_bin?: string
 }
 
 export interface VenvListItem {
-  id: string  // public_id
+  id: string
+  runtime_kind?: 'python' | 'java' | 'go'
   scope: VenvScope
   key?: string | null
   version: string
-  venv_path: string
+  runtime_locator: string
   interpreter_version: string
   interpreter_source?: string
   python_bin: string
   install_dir: string
-  created_by?: string | null  // public_id
+  created_by?: string | null
   created_by_username?: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -44,44 +45,43 @@ export interface PaginatedVenvs {
 
 class EnvService {
   async listPythonVersions(): Promise<string[]> {
-    const res = await apiClient.get<PythonVersionsResponse>('/api/v1/envs/python/versions')
+    const res = await apiClient.get<PythonVersionsResponse>('/api/v1/runtimes/python/versions')
     return res.data.versions || []
   }
 
   async listInterpreters(): Promise<Array<{ version: string; python_bin: string; install_dir: string; source?: string }>> {
-    const res = await apiClient.get<Array<{ version: string; python_bin: string; install_dir: string; source?: string; id?: number }>>('/api/v1/envs/python/interpreters')
+    const res = await apiClient.get<Array<{ version: string; python_bin: string; install_dir: string; source?: string; id?: number }>>('/api/v1/runtimes/python/interpreters')
     return res.data || []
   }
 
-  // 获取已安装的解释器列表（用于项目创建时选择）
   async listInstalledInterpreters(): Promise<Array<{ version: string; python_bin: string; install_dir: string; source?: string }>> {
     return this.listInterpreters()
   }
 
   async installInterpreter(version: string): Promise<void> {
-    await apiClient.post('/api/v1/envs/python/interpreters', { version })
+    await apiClient.post('/api/v1/runtimes/python/interpreters', { version })
   }
 
   async registerLocalInterpreter(python_bin: string): Promise<void> {
-    await apiClient.post('/api/v1/envs/python/interpreters/local', { python_bin })
+    await apiClient.post('/api/v1/runtimes/python/interpreters/local', { python_bin })
   }
 
   async uninstallInterpreter(version: string, source: string = 'mise'): Promise<void> {
-    await apiClient.delete(`/api/v1/envs/python/interpreters/${encodeURIComponent(version)}`, { params: { source } })
+    await apiClient.delete(`/api/v1/runtimes/python/interpreters/${encodeURIComponent(version)}`, {
+      params: { source },
+    })
   }
-
-  // ========== Worker 环境管理 API ==========
 
   async listWorkerEnvs(workerId: string): Promise<Array<{ name: string; python_version: string }>> {
     const res = await apiClient.get<ApiResponse<Array<{ name: string; python_version: string }>>>(
-      `/api/v1/workers/${workerId}/envs`
+      `/api/v1/runtimes/workers/${workerId}/runtimes`
     )
     return res.data.data || []
   }
 
   async listWorkerInterpreters(workerId: string): Promise<{ interpreters: Array<{ version: string; source?: string }>; total: number }> {
     const res = await apiClient.get<ApiResponse<Array<{ version: string; source?: string }>>>(
-      `/api/v1/workers/${workerId}/interpreters`
+      `/api/v1/runtimes/workers/${workerId}/interpreters`
     )
     const interpreters = res.data.data || []
     return { interpreters, total: interpreters.length }
@@ -96,13 +96,14 @@ class EnvService {
     include_packages?: boolean
     limit_packages?: number
     interpreter_source?: string
-    worker_id?: string  // Worker ID 筛选
+    worker_id?: string
   }): Promise<PaginatedVenvs> {
     const res = await apiClient.get<{
       success: boolean
       data: VenvListItem[]
       pagination: { page: number; size: number; total: number; pages: number }
-    }>('/api/v1/envs/venvs', { params })
+    }>('/api/v1/runtimes', { params })
+
     return {
       items: res.data.data || [],
       page: res.data.pagination?.page || 1,
@@ -113,47 +114,61 @@ class EnvService {
   }
 
   async batchDeleteVenvs(ids: string[]): Promise<{ total: number; deleted: number; failed: string[] }> {
-    const res = await apiClient.post<{ total: number; deleted: number; failed: string[] }>('/api/v1/envs/venvs/batch-delete', { ids })
+    const res = await apiClient.post<{ total: number; deleted: number; failed: string[] }>(
+      '/api/v1/runtimes/batch-delete',
+      { ids }
+    )
     return res.data
   }
 
-  async listVenvPackagesById(venv_id: string): Promise<Array<{ name: string; version: string }>> {
-    const res = await apiClient.get<{ venv_id: string; packages: Array<{ name: string; version: string }> }>(`/api/v1/envs/venvs/${venv_id}/packages`)
+  async listVenvPackagesById(runtime_id: string): Promise<Array<{ name: string; version: string }>> {
+    const res = await apiClient.get<{ runtime_id: string; packages: Array<{ name: string; version: string }> }>(
+      `/api/v1/runtimes/${runtime_id}/packages`
+    )
     return res.data.packages || []
   }
 
   async listProjectVenvPackages(project_id: string): Promise<Array<{ name: string; version: string }>> {
-    const res = await apiClient.get<{ project_id: string; packages: Array<{ name: string; version: string }> }>(`/api/v1/envs/projects/${project_id}/venv/packages`)
+    const res = await apiClient.get<{ project_id: string; packages: Array<{ name: string; version: string }> }>(
+      `/api/v1/runtimes/projects/${project_id}/runtime/packages`
+    )
     return res.data.packages || []
   }
 
   async createOrBindProjectVenv(project_id: string, payload: CreateOrBindVenvRequest): Promise<void> {
-    await apiClient.post(`/api/v1/envs/projects/${project_id}/venv`, payload)
+    await apiClient.post(`/api/v1/runtimes/projects/${project_id}/runtime`, payload)
   }
 
   async deleteProjectVenv(project_id: string): Promise<void> {
-    await apiClient.delete(`/api/v1/envs/projects/${project_id}/venv`)
+    await apiClient.delete(`/api/v1/runtimes/projects/${project_id}/runtime`)
   }
 
-  async createSharedVenv(payload: { version: string; shared_venv_key?: string; interpreter_source?: string; python_bin?: string }): Promise<Record<string, unknown>> {
-    const res = await apiClient.post<Record<string, unknown>>('/api/v1/envs/venvs', payload)
+  async createSharedVenv(payload: {
+    version: string
+    shared_runtime_key?: string
+    interpreter_source?: string
+    python_bin?: string
+  }): Promise<Record<string, unknown>> {
+    const res = await apiClient.post<Record<string, unknown>>('/api/v1/runtimes', payload)
     return res.data
   }
 
-  async deleteVenv(venv_id: string, allowPrivate = false): Promise<void> {
-    await apiClient.delete(`/api/v1/envs/venvs/${venv_id}`, { params: { allow_private: allowPrivate } })
+  async deleteVenv(runtime_id: string, allowPrivate = false): Promise<void> {
+    await apiClient.delete(`/api/v1/runtimes/${runtime_id}`, {
+      params: { allow_private: allowPrivate },
+    })
   }
 
-  async updateSharedVenv(venv_id: string, payload: { key?: string }): Promise<void> {
-    await apiClient.patch(`/api/v1/envs/venvs/${venv_id}`, payload)
+  async updateSharedVenv(runtime_id: string, payload: { key?: string }): Promise<void> {
+    await apiClient.patch(`/api/v1/runtimes/${runtime_id}`, payload)
   }
 
-  async installPackagesToVenv(venv_id: string, packages: string[]): Promise<void> {
-    await apiClient.post(`/api/v1/envs/venvs/${venv_id}/packages`, { packages })
+  async installPackagesToVenv(runtime_id: string, packages: string[]): Promise<void> {
+    await apiClient.post(`/api/v1/runtimes/${runtime_id}/packages`, { packages })
   }
 
   async installPackagesToProjectVenv(project_id: string, packages: string[]): Promise<void> {
-    await apiClient.post(`/api/v1/envs/projects/${project_id}/venv/packages`, { packages })
+    await apiClient.post(`/api/v1/runtimes/projects/${project_id}/runtime/packages`, { packages })
   }
 }
 

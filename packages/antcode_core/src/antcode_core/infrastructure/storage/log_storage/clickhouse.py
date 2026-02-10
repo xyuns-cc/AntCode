@@ -29,8 +29,6 @@ ClickHouse 日志存储后端
     TTL timestamp + INTERVAL 30 DAY;
 """
 
-import gzip
-import io
 import json
 import os
 from datetime import datetime

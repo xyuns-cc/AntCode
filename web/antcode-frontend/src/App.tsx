@@ -109,7 +109,7 @@ const AppRoutes: React.FC = () => (
         <Route path="tasks/create" element={<TaskCreate />} />
         <Route path="tasks/:id/edit" element={<TaskEdit />} />
         <Route path="tasks/:id" element={<TaskDetail />} />
-        <Route path="tasks/:taskId/executions/:executionId" element={<ExecutionLogs />} />
+        <Route path="tasks/:taskId/runs/:runId" element={<ExecutionLogs />} />
 
         <Route path="user-management" element={<AdminRoute><UserManagement /></AdminRoute>} />
         <Route path="system-config" element={<SuperAdminRoute><SystemConfig /></SuperAdminRoute>} />

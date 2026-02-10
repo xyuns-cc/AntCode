@@ -22,7 +22,7 @@ from antcode_web_api.websockets.websocket_connection_manager import websocket_ma
 class WebSocketLogService:
     """WebSocket日志服务 - 生产环境优化版本"""
 
-    async def connect(self, websocket, execution_id, token):
+    async def connect(self, websocket, run_id, token):
         """处理WebSocket连接"""
         connection_id: str | None = None
 
@@ -38,37 +38,37 @@ class WebSocketLogService:
 
             # 2. 验证执行记录权限
             try:
-                execution = await self._verify_execution_access(execution_id, user_id)
+                execution = await self._verify_execution_access(run_id, user_id)
             except HTTPException as e:
                 logger.warning(f"WebSocket权限验证失败: {e.detail}")
                 await self._reject_connection(websocket, 4003, e.detail)
                 return
             except DoesNotExist:
-                logger.warning(f"执行记录不存在: {execution_id}")
+                logger.warning(f"执行记录不存在: {run_id}")
                 await self._reject_connection(websocket, 4004, "执行记录不存在")
                 return
 
             # 3. 建立连接
-            connection_id = await websocket_manager.connect(websocket, execution_id, user_id)
+            connection_id = await websocket_manager.connect(websocket, run_id, user_id)
             logger.info(f"WebSocket连接成功: {connection_id}")
 
             # 4. 发送当前执行状态（让前端立即获取最新状态）
-            await self._send_current_status(execution_id, execution)
+            await self._send_current_status(run_id, execution)
 
             # 5. 推送历史日志并开启实时推送（Redis Streams）
             from antcode_web_api.websockets.redis_log_stream_service import (
                 redis_log_stream_service,
             )
 
-            await redis_log_stream_service.subscribe(execution_id)
+            await redis_log_stream_service.subscribe(run_id)
 
             # 6. 处理客户端消息（阻塞直到断开）
-            await self._handle_client_messages(websocket, execution_id, connection_id)
+            await self._handle_client_messages(websocket, run_id, connection_id)
 
         except Exception:
             logger.exception(
-                "WebSocket 连接处理异常: execution_id={}, connection_id={}",
-                execution_id,
+                "WebSocket 连接处理异常: run_id={}, connection_id={}",
+                run_id,
                 connection_id,
             )
             if connection_id is None:
@@ -76,12 +76,12 @@ class WebSocketLogService:
         finally:
             # 清理
             if connection_id:
-                await websocket_manager.disconnect(websocket, execution_id)
+                await websocket_manager.disconnect(websocket, run_id)
                 from antcode_web_api.websockets.redis_log_stream_service import (
                     redis_log_stream_service,
                 )
 
-                await redis_log_stream_service.unsubscribe(execution_id)
+                await redis_log_stream_service.unsubscribe(run_id)
 
     async def _reject_connection(self, websocket, code, reason):
         """拒绝连接"""
@@ -99,18 +99,18 @@ class WebSocketLogService:
         except Exception as e:
             logger.debug(f"拒绝连接时异常: {e}")
 
-    async def _verify_execution_access(self, execution_id, user_id):
+    async def _verify_execution_access(self, run_id, user_id):
         """验证用户对执行记录的访问权限"""
         # 获取执行记录（等待最多 5 秒，因为执行记录可能还在创建中）
         execution = None
         for _ in range(10):
-            execution = await TaskRun.get_or_none(execution_id=execution_id)
+            execution = await TaskRun.get_or_none(run_id=run_id)
             if execution:
                 break
             await asyncio.sleep(0.5)
 
         if not execution:
-            raise DoesNotExist(f"执行记录不存在: {execution_id}")
+            raise DoesNotExist(f"执行记录不存在: {run_id}")
 
         # 检查用户权限
         user = await user_service.get_user_by_id(user_id)
@@ -131,7 +131,7 @@ class WebSocketLogService:
         else:
             raise HTTPException(status_code=403, detail="无权访问此执行记录")
 
-    async def _send_current_status(self, execution_id, execution):
+    async def _send_current_status(self, run_id, execution):
         """发送当前执行状态（让前端立即获取最新状态）"""
         try:
             status = execution.status.value if execution.status else "QUEUED"
@@ -147,25 +147,25 @@ class WebSocketLogService:
             elif status == "QUEUED":
                 message = "任务排队中"
 
-            await websocket_manager.send_execution_status(
-                execution_id=execution_id,
+            await websocket_manager.send_run_status(
+                run_id=run_id,
                 status=status,
                 progress=100.0 if status in ("SUCCESS", "FAILED", "TIMEOUT", "CANCELLED") else None,
                 message=message,
             )
 
-            logger.debug(f"已发送当前状态: {execution_id} -> {status}")
+            logger.debug(f"已发送当前状态: {run_id} -> {status}")
 
         except Exception as e:
             logger.warning(f"发送当前状态失败: {e}")
 
-    async def _handle_client_messages(self, websocket, execution_id, connection_id):
+    async def _handle_client_messages(self, websocket, run_id, connection_id):
         """处理客户端消息"""
         try:
             while True:
                 try:
                     data = await websocket.receive_json()
-                    await websocket_manager.handle_client_message(execution_id, connection_id, data)
+                    await websocket_manager.handle_client_message(run_id, connection_id, data)
                 except Exception as e:
                     error_str = str(e)
                     # 正常关闭

@@ -13,9 +13,6 @@ from antcode_worker.runtime.builder import (
     RuntimeBuilder,
 )
 
-# 旧版兼容（保留原有导出）
-from antcode_worker.runtime.cache_gc import CacheGC, GCConfig, cache_gc
-
 # 垃圾回收
 from antcode_worker.runtime.gc import (
     GCPolicy,
@@ -59,12 +56,6 @@ from antcode_worker.runtime.spec import (
     PythonSpec,
     RuntimeSpec,
 )
-from antcode_worker.runtime.uv_manager import (
-    CommandResult,
-    UVManager,
-    run_command,
-    uv_manager,
-)
 
 __all__ = [
     # 规格定义
@@ -101,12 +92,4 @@ __all__ = [
     "create_runtime_manager",
     "get_runtime_manager",
     "set_runtime_manager",
-    # 旧版兼容
-    "UVManager",
-    "uv_manager",
-    "CommandResult",
-    "run_command",
-    "CacheGC",
-    "GCConfig",
-    "cache_gc",
 ]

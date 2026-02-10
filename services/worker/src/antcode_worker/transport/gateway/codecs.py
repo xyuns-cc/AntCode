@@ -210,7 +210,7 @@ class LogEncoder:
         from antcode_contracts import gateway_pb2
 
         return gateway_pb2.SendLogRequest(
-            execution_id=log.execution_id,
+            run_id=log.run_id,
             log_type=log.log_type,
             content=log.content,
             timestamp=(log.timestamp or datetime.now()).isoformat(),
@@ -219,7 +219,7 @@ class LogEncoder:
 
     @staticmethod
     def encode_chunk(
-        execution_id: str,
+        run_id: str,
         log_type: str,
         data: bytes,
         offset: int,
@@ -231,7 +231,7 @@ class LogEncoder:
         编码日志分片消息
 
         Args:
-            execution_id: 执行 ID
+            run_id: 运行 ID
             log_type: 日志类型
             data: 日志数据
             offset: 偏移量
@@ -245,7 +245,7 @@ class LogEncoder:
         from antcode_contracts import gateway_pb2
 
         request = gateway_pb2.SendLogChunkRequest(
-            execution_id=execution_id,
+            run_id=run_id,
             log_type=log_type,
             data=data,
             offset=offset,
@@ -275,7 +275,7 @@ class LogEncoder:
         log_entries = []
         for log in logs:
             entry = gateway_pb2.LogEntry(
-                execution_id=log.execution_id,
+                run_id=log.run_id,
                 log_type=log.log_type,
                 content=log.content,
                 timestamp=(log.timestamp or datetime.now()).isoformat(),
@@ -297,7 +297,7 @@ class LogEncoder:
             日志数据字典
         """
         return {
-            "execution_id": log.execution_id,
+            "run_id": log.run_id,
             "log_type": log.log_type,
             "content": log.content,
             "timestamp": (log.timestamp or datetime.now()).isoformat(),
@@ -396,10 +396,12 @@ class ControlDecoder:
         Returns:
             取消信息字典
         """
-        return {
-            "task_id": getattr(proto_cancel, "task_id", ""),
-            "execution_id": getattr(proto_cancel, "execution_id", ""),
-        }
+        from antcode_core.infrastructure.redis import build_cancel_control_payload
+
+        return build_cancel_control_payload(
+            run_id=getattr(proto_cancel, "run_id", ""),
+            task_id=getattr(proto_cancel, "task_id", ""),
+        )
 
     @staticmethod
     def decode_config_update(proto_config: Any) -> dict[str, str]:

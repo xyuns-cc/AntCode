@@ -281,6 +281,15 @@ class Engine:
                     result_data = await uv_manager.get_env(env_name)
                     if result_data is None:
                         raise RuntimeError("环境不存在")
+                elif action == "update_env":
+                    env_name = data.get("env_name")
+                    if not env_name:
+                        raise RuntimeError("env_name 不能为空")
+                    result_data = await uv_manager.update_env(
+                        env_name=env_name,
+                        key=data.get("key"),
+                        description=data.get("description"),
+                    )
                 elif action == "create_env":
                     env_name = data.get("env_name")
                     python_version = data.get("python_version")

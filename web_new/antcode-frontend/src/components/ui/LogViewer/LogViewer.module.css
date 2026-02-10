@@ -1,0 +1,312 @@
+.logViewerCard {
+  height: 100%;
+}
+
+.logViewerCard :global(.ant-card-body) {
+  padding: 0;
+  height: calc(100% - 57px);
+}
+
+.logContainer {
+  background-color: var(--ant-color-bg-container, #ffffff);
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.85));
+  font-family: Monaco, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  border-radius: 6px;
+  position: relative;
+  /* 性能优化 - 不使用 contain: strict 因为会影响绝对定位 */
+  overflow-anchor: none;
+}
+
+.logLine {
+  padding: 4px 8px;
+  margin: 0;
+  word-break: break-all;
+  white-space: pre-wrap;
+  font-family: Monaco, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 24px;
+  box-sizing: border-box;
+}
+
+/* STDOUT - 绿色 */
+.stdout {
+  color: var(--ant-color-success, #52c41a);
+  background-color: transparent;
+  border-left: 3px solid var(--ant-color-success, #52c41a);
+}
+
+/* STDERR - 红色 */
+.stderr {
+  color: var(--ant-color-error, #ff4d4f);
+  background-color: var(--ant-color-error-bg, #fff1f0);
+  border-left: 3px solid var(--ant-color-error, #ff4d4f);
+}
+
+/* ERROR - 红色 */
+.error {
+  color: var(--ant-color-error, #ff4d4f);
+  background-color: var(--ant-color-error-bg, #fff1f0);
+  border-left: 3px solid var(--ant-color-error, #ff4d4f);
+}
+
+/* WARNING - 橙色 */
+.warning {
+  color: var(--ant-color-warning, #faad14);
+  background-color: var(--ant-color-warning-bg, #fffbe6);
+  border-left: 3px solid var(--ant-color-warning, #faad14);
+}
+
+/* INFO - 蓝色 */
+.info {
+  color: var(--ant-color-info, #1890ff);
+  background-color: var(--ant-color-info-bg, #e6f7ff);
+  border-left: 3px solid var(--ant-color-info, #1890ff);
+}
+
+/* SUCCESS - 绿色 */
+.success {
+  color: var(--ant-color-success, #52c41a);
+  background-color: var(--ant-color-success-bg, #f6ffed);
+  border-left: 3px solid var(--ant-color-success, #52c41a);
+}
+
+.timestamp {
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
+  margin-right: 8px;
+}
+
+.logType {
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
+  margin-right: 8px;
+}
+
+.logLevel {
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
+  margin-right: 8px;
+}
+
+.content {
+  color: inherit;
+}
+
+.emptyState {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
+  font-style: italic;
+  font-size: 14px;
+  text-align: center;
+  padding-top: 50px;
+}
+
+.stats {
+  font-size: 12px;
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
+  margin-left: 8px;
+}
+
+/* 滚动条样式 */
+.logContainer::-webkit-scrollbar {
+  width: 8px;
+}
+
+.logContainer::-webkit-scrollbar-track {
+  background: var(--ant-color-fill-tertiary, #f0f0f0);
+  border-radius: 4px;
+}
+
+.logContainer::-webkit-scrollbar-thumb {
+  background: var(--ant-color-border, #d9d9d9);
+  border-radius: 4px;
+}
+
+.logContainer::-webkit-scrollbar-thumb:hover {
+  background: var(--ant-color-border-secondary, #bfbfbf);
+}
+
+/* 选中文本样式 */
+.logContainer ::selection {
+  background: var(--ant-color-primary, #1890ff);
+  color: #ffffff;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .logContainer {
+    font-size: 11px;
+    padding: 8px;
+  }
+
+  .stats {
+    display: none;
+  }
+}
+
+/* 新增日志入场动画 */
+.logLine.newItem {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 搜索高亮 */
+.logContainer .highlight {
+  background-color: #ffff00;
+  color: #000000;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+/* 加载状态 */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--ant-color-text-tertiary, #8c8c8c);
+}
+
+.loading::after {
+  content: '';
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--ant-color-text-tertiary, #8c8c8c);
+  border-top: 2px solid var(--ant-color-primary, #1890ff);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-left: 8px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 增强日志查看器样式 */
+.logViewer {
+  position: relative;
+  width: 100%;
+}
+
+.logViewer.fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  background: var(--ant-color-bg-container, white);
+  padding: 16px;
+}
+
+/* 统计卡片样式 */
+.statsCard {
+  margin-bottom: 16px;
+}
+
+/* 过滤控制样式 */
+.filterControls {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-radius: 4px;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+}
+
+/* 工具栏样式 */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 8px 0;
+}
+
+.toolbarLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toolbarRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 连接状态指示器 */
+.connectionStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.connectionStatus.connected {
+  color: var(--ant-color-success, #52c41a);
+}
+
+.connectionStatus.connecting {
+  color: var(--ant-color-warning, #faad14);
+}
+
+.connectionStatus.disconnected {
+  color: var(--ant-color-text-tertiary, #999);
+}
+
+.connectionStatus.error {
+  color: var(--ant-color-error, #ff4d4f);
+}
+
+/* 状态指示点 */
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.statusDot.connected {
+  background-color: var(--ant-color-success, #52c41a);
+  animation: pulse 2s infinite;
+}
+
+.statusDot.connecting {
+  background-color: var(--ant-color-warning, #faad14);
+  animation: blink 1s infinite;
+}
+
+.statusDot.disconnected {
+  background-color: var(--ant-color-text-tertiary, #999);
+}
+
+.statusDot.error {
+  background-color: var(--ant-color-error, #ff4d4f);
+  animation: blink 0.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}

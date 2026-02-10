@@ -337,7 +337,7 @@ async def main():
         await page.goto("{url}")
         {f'await page.wait_for_selector("{wait_for}")' if wait_for else ''}
         {f'await page.screenshot(path=output_file, full_page={full_page})' if screenshot else ''}
-        {f'await page.pdf(path=output_file)' if pdf else ''}
+        {'await page.pdf(path=output_file)' if pdf else ''}
         await browser.close()
         logger.info("Rendered to %s", output_file)
 

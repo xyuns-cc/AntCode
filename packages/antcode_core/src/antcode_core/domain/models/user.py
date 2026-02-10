@@ -4,15 +4,27 @@
 用户账户的数据模型定义。
 """
 
-from passlib.context import CryptContext
+import bcrypt
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
 
-pwd_context = CryptContext(
-    schemes=["bcrypt_sha256", "bcrypt"],
-    deprecated="auto",
-)
+
+class BcryptPasswordContext:
+    """基于 bcrypt 的密码上下文。"""
+
+    def hash(self, password: str) -> str:
+        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+        return hashed.decode("utf-8")
+
+    def verify(self, password: str, password_hash: str) -> bool:
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+        except (TypeError, ValueError):
+            return False
+
+
+pwd_context = BcryptPasswordContext()
 
 
 class User(BaseModel):
@@ -51,10 +63,7 @@ class User(BaseModel):
 
     def verify_password(self, password: str) -> bool:
         """验证密码"""
-        try:
-            return pwd_context.verify(password, self.password_hash)
-        except ValueError:
-            return False
+        return pwd_context.verify(password, self.password_hash)
 
     def __str__(self):
         return self.username
