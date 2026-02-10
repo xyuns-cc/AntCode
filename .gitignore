@@ -137,3 +137,6 @@ DOCS_CLEANUP_SUMMARY.md
 
 # Legacy frontend workspace
 web_new/
+
+# Local utility scripts
+scripts/
