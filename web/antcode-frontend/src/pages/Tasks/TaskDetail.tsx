@@ -69,7 +69,7 @@ const TaskDetail: React.FC = () => {
     
     setExecutionsLoading(true)
     try {
-      const executionData = await taskService.getTaskExecutions(id)
+      const executionData = await taskService.getTaskRuns(id)
       setExecutions(executionData.items)
     } catch {
       // 错误提示由拦截器统一处理
@@ -90,10 +90,10 @@ const TaskDetail: React.FC = () => {
   }, [id])
 
   // 取消执行
-  const handleCancel = async (executionId: string) => {
-    setCancelLoading(executionId)
+  const handleCancel = async (runId: string) => {
+    setCancelLoading(runId)
     try {
-      const result = await taskService.cancelTaskExecution(executionId)
+      const result = await taskService.cancelTaskRun(runId)
       if (result.remote_cancelled) {
         showNotification('success', '任务已取消，已发送取消指令到节点')
       } else {
@@ -110,10 +110,10 @@ const TaskDetail: React.FC = () => {
   }
 
   // 手动重试
-  const handleRetry = async (executionId: string) => {
-    setRetryLoading(executionId)
+  const handleRetry = async (runId: string) => {
+    setRetryLoading(runId)
     try {
-      await manualRetry(executionId)
+      await manualRetry(runId)
       showNotification('success', '任务已触发重试')
       loadExecutions()
       loadRetryStats()
@@ -177,8 +177,8 @@ const TaskDetail: React.FC = () => {
   const executionColumns = [
     {
       title: '执行ID',
-      dataIndex: 'execution_id',
-      key: 'execution_id',
+      dataIndex: 'run_id',
+      key: 'run_id',
       width: 120,
       ellipsis: { showTitle: false },
       render: (text: string) => (
@@ -242,7 +242,7 @@ const TaskDetail: React.FC = () => {
             type="text"
             size="small"
             icon={<EyeOutlined />}
-            onClick={() => navigate(`/tasks/${task.id}/executions/${record.execution_id}`)}
+            onClick={() => navigate(`/tasks/${task.id}/runs/${record.run_id}`)}
           >
             日志
           </Button>
@@ -253,8 +253,8 @@ const TaskDetail: React.FC = () => {
                 size="small"
                 danger
                 icon={<StopOutlined />}
-                loading={cancelLoading === record.execution_id}
-                onClick={() => handleCancel(record.execution_id)}
+                loading={cancelLoading === record.run_id}
+                onClick={() => handleCancel(record.run_id)}
               >
                 取消
               </Button>
@@ -266,8 +266,8 @@ const TaskDetail: React.FC = () => {
                 type="text"
                 size="small"
                 icon={<RedoOutlined />}
-                loading={retryLoading === record.execution_id}
-                onClick={() => handleRetry(record.execution_id)}
+                loading={retryLoading === record.run_id}
+                onClick={() => handleRetry(record.run_id)}
               >
                 重试
               </Button>

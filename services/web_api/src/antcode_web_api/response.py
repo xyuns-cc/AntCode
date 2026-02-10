@@ -127,7 +127,8 @@ class ProjectResponseBuilder:
             code_info=getattr(project, "code_info", None),
             python_version=getattr(project, "python_version", None),
             runtime_scope=getattr(project, "runtime_scope", None),
-            venv_path=getattr(project, "venv_path", None),
+            runtime_kind=getattr(project, "runtime_kind", None),
+            runtime_locator=getattr(project, "runtime_locator", None),
             # 执行策略字段
             execution_strategy=execution_strategy,
             bound_worker_id=str(bound_worker_id) if bound_worker_id else None,
@@ -222,8 +223,9 @@ class TaskResponseBuilder:
             fallback_enabled=getattr(task, "fallback_enabled", None),
             # 运行时
             runtime_scope=getattr(task, "runtime_scope", None),
+            runtime_kind=getattr(task, "runtime_kind", None),
             python_version=getattr(task, "python_version", None),
-            venv_path=getattr(task, "venv_path", None),
+            runtime_locator=getattr(task, "runtime_locator", None),
         )
 
     @staticmethod

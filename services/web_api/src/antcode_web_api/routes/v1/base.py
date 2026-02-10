@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -16,7 +16,6 @@ from antcode_core.common.security.login_crypto import (
     LoginPasswordCryptoError,
     login_password_crypto,
 )
-from antcode_core.domain.models import User
 from antcode_core.domain.schemas import (
     AppInfoResponse,
     HealthResponse,
@@ -32,22 +31,12 @@ from antcode_core.infrastructure.resilience.health import HealthStatus, health_c
 
 router = APIRouter()
 
+# 企业内网部署：关闭自助找回/重置密码与公开可用性枚举接口
+AUTH_SELF_SERVICE_DISABLED_DETAIL = "企业内部系统已禁用自助认证接口，请联系系统管理员"
+
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(..., min_length=1)
-
-
-class VerifyEmailRequest(BaseModel):
-    token: str = Field(..., min_length=1)
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: str = Field(..., min_length=3, max_length=100)
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=8)
 
 
 @router.get(
@@ -233,6 +222,8 @@ async def login(request: UserLoginRequest, http_request: Request):
         success=True,
     )
 
+    await user_service.clear_cache()
+
     permissions = ["admin"] if user.is_admin else []
     access_token = jwt_auth.create_access_token(
         user_id=user.id, username=user.username, permissions=permissions
@@ -317,73 +308,19 @@ async def refresh_token(request: RefreshTokenRequest):
     return success(payload, message=Messages.OPERATION_SUCCESS)
 
 
-@router.post(
-    "/auth/verify-email",
-    response_model=BaseResponse[dict],
-    summary="验证邮箱",
-    tags=["认证"],
-)
-async def verify_email(request: VerifyEmailRequest):
-    """验证邮箱（当前实现为占位验证）"""
-    try:
-        _ = jwt_auth.verify_token(request.token, expected_type="verify")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return success({"verified": True}, message="邮箱验证成功")
-
-
-@router.post(
-    "/auth/forgot-password",
-    response_model=BaseResponse[dict],
-    summary="发送重置密码邮件",
-    tags=["认证"],
-)
-async def forgot_password(request: ForgotPasswordRequest):
-    """发送重置密码邮件（当前返回重置令牌，实际邮件发送待接入）"""
-    user = await User.get_or_none(email=request.email)
-    token = None
-    if user:
-        token = jwt_auth.create_action_token(
-            user_id=user.id,
-            username=user.username,
-            token_type="reset",
-            expires_delta=timedelta(minutes=30),
-        )
-    return success(
-        {"token": token},
-        message="重置邮件已发送（如未收到，请联系管理员）",
-    )
-
-
-@router.post(
-    "/auth/reset-password",
-    response_model=BaseResponse[dict],
-    summary="重置密码",
-    tags=["认证"],
-)
-async def reset_password(request: ResetPasswordRequest):
-    """使用重置令牌修改密码"""
-    try:
-        token_data = jwt_auth.verify_token(request.token, expected_type="reset")
-        await user_service.reset_user_password(token_data.user_id, request.new_password)
-        return success({"reset": True}, message="密码已重置")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-
 @router.get(
     "/auth/check-username/{username}",
     response_model=BaseResponse[dict],
     summary="检查用户名可用性",
     tags=["认证"],
 )
-async def check_username(username: str):
-    user = await user_service.get_user_by_username(username)
-    return success({"available": user is None}, message=Messages.QUERY_SUCCESS)
+async def check_username(
+    username: str,
+):
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=AUTH_SELF_SERVICE_DISABLED_DETAIL,
+    )
 
 
 @router.get(
@@ -392,9 +329,13 @@ async def check_username(username: str):
     summary="检查邮箱可用性",
     tags=["认证"],
 )
-async def check_email(email: str):
-    user = await User.get_or_none(email=email)
-    return success({"available": user is None}, message=Messages.QUERY_SUCCESS)
+async def check_email(
+    email: str,
+):
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=AUTH_SELF_SERVICE_DISABLED_DETAIL,
+    )
 
 
 @router.get(

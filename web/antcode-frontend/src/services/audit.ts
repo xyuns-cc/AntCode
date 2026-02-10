@@ -10,9 +10,12 @@ export interface AuditLogItem {
   resource_type: string
   resource_id?: string
   resource_name?: string
+  user_id?: number
   username: string
   ip_address?: string
   description?: string
+  old_value?: Record<string, unknown> | null
+  new_value?: Record<string, unknown> | null
   success: boolean
   error_message?: string
   created_at: string
@@ -33,6 +36,7 @@ export interface AuditLogQueryParams {
   action?: string
   resource_type?: string
   username?: string
+  user_id?: number
   start_date?: string
   end_date?: string
   success?: boolean

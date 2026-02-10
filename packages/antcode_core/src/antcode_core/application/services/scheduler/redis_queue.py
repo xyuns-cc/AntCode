@@ -12,6 +12,7 @@ from time import time
 
 from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.application.services.scheduler.queue_backend import BaseQueueBackend, QueuedTask
+from antcode_core.infrastructure.redis import redis_namespace
 
 
 class RedisQueueBackend(BaseQueueBackend):
@@ -32,14 +33,14 @@ class RedisQueueBackend(BaseQueueBackend):
     """
 
     BACKEND_TYPE = "redis"
-    QUEUE_KEY = "antcode:task_queue"
-    TASK_DATA_PREFIX = "antcode:task_data:"
+    QUEUE_SUFFIX = "task_queue"
+    TASK_DATA_SUFFIX = "task_data:"
 
     # 重连配置
     MAX_RECONNECT_ATTEMPTS = 3
     RECONNECT_DELAY_SECONDS = 1.0
 
-    def __init__(self, redis_url):
+    def __init__(self, redis_url, namespace: str | None = None):
         """初始化 Redis 队列后端
 
         Args:
@@ -47,6 +48,9 @@ class RedisQueueBackend(BaseQueueBackend):
         """
         super().__init__()
         self._redis_url = redis_url
+        self._namespace = redis_namespace(namespace)
+        self._queue_key = f"{self._namespace}:{self.QUEUE_SUFFIX}"
+        self._task_data_prefix = f"{self._namespace}:{self.TASK_DATA_SUFFIX}"
         self._redis = None
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
@@ -61,7 +65,7 @@ class RedisQueueBackend(BaseQueueBackend):
 
     def _get_task_data_key(self, task_id):
         """获取任务数据的 Redis key"""
-        return f"{self.TASK_DATA_PREFIX}{task_id}"
+        return f"{self._task_data_prefix}{task_id}"
 
     async def _ensure_connection(self):
         """确保 Redis 连接可用
@@ -237,7 +241,7 @@ class RedisQueueBackend(BaseQueueBackend):
         async def _do_enqueue():
             async with self._lock:
                 # 检查是否已存在
-                exists = await self._redis.zscore(self.QUEUE_KEY, task_id)
+                exists = await self._redis.zscore(self._queue_key, task_id)
                 if exists is not None:
                     self._log_warning("任务已在队列中，拒绝重复入队", task_id)
                     return False
@@ -256,7 +260,7 @@ class RedisQueueBackend(BaseQueueBackend):
                 pipe = self._redis.pipeline()
                 # ZADD: score 为 (priority * 1e10 + enqueue_time) 确保同优先级按时间排序
                 score = priority * 1e10 + queued_task.enqueue_time
-                pipe.zadd(self.QUEUE_KEY, {task_id: score})
+                pipe.zadd(self._queue_key, {task_id: score})
                 pipe.set(self._get_task_data_key(task_id), queued_task.to_json())
                 await pipe.execute()
 
@@ -285,7 +289,7 @@ class RedisQueueBackend(BaseQueueBackend):
         async def _do_dequeue():
             async with self._lock:
                 # ZPOPMIN 原子性地弹出最小 score 的元素
-                result = await self._redis.zpopmin(self.QUEUE_KEY, count=1)
+                result = await self._redis.zpopmin(self._queue_key, count=1)
 
                 if not result:
                     return None
@@ -331,7 +335,7 @@ class RedisQueueBackend(BaseQueueBackend):
             async with self._lock:
                 # 使用 pipeline 原子删除
                 pipe = self._redis.pipeline()
-                pipe.zrem(self.QUEUE_KEY, task_id)
+                pipe.zrem(self._queue_key, task_id)
                 pipe.delete(self._get_task_data_key(task_id))
                 results = await pipe.execute()
 
@@ -385,13 +389,13 @@ class RedisQueueBackend(BaseQueueBackend):
                 # 使用 pipeline 原子更新
                 pipe = self._redis.pipeline()
                 # ZADD XX: 只更新已存在的元素
-                pipe.zadd(self.QUEUE_KEY, {task_id: new_score}, xx=True)
+                pipe.zadd(self._queue_key, {task_id: new_score}, xx=True)
                 pipe.set(task_data_key, task.to_json())
                 await pipe.execute()
 
                 # ZADD XX 返回 0 表示更新成功（没有新增）
                 # 但我们需要检查元素是否存在
-                exists = await self._redis.zscore(self.QUEUE_KEY, task_id)
+                exists = await self._redis.zscore(self._queue_key, task_id)
                 if exists is None:
                     return False
 
@@ -411,7 +415,7 @@ class RedisQueueBackend(BaseQueueBackend):
         await self._ensure_connection()
 
         try:
-            queue_depth = await self._redis.zcard(self.QUEUE_KEY)
+            queue_depth = await self._redis.zcard(self._queue_key)
 
             # 测试 Redis 连接延迟
             start = time()
@@ -463,7 +467,7 @@ class RedisQueueBackend(BaseQueueBackend):
     async def _contains_async(self, task_id):
         """异步检查任务是否在队列中"""
         await self._ensure_connection()
-        score = await self._redis.zscore(self.QUEUE_KEY, task_id)
+        score = await self._redis.zscore(self._queue_key, task_id)
         return score is not None
 
     def size(self):
@@ -487,7 +491,7 @@ class RedisQueueBackend(BaseQueueBackend):
     async def _size_async(self):
         """异步获取队列大小"""
         await self._ensure_connection()
-        return await self._redis.zcard(self.QUEUE_KEY)
+        return await self._redis.zcard(self._queue_key)
 
     async def peek(self):
         """查看队首任务（不出队）"""
@@ -495,7 +499,7 @@ class RedisQueueBackend(BaseQueueBackend):
 
         try:
             # ZRANGE 获取最小 score 的元素
-            result = await self._redis.zrange(self.QUEUE_KEY, 0, 0)
+            result = await self._redis.zrange(self._queue_key, 0, 0)
 
             if not result:
                 return None
@@ -519,13 +523,13 @@ class RedisQueueBackend(BaseQueueBackend):
         async with self._lock:
             try:
                 # 获取所有任务 ID
-                task_ids = await self._redis.zrange(self.QUEUE_KEY, 0, -1)
+                task_ids = await self._redis.zrange(self._queue_key, 0, -1)
                 count = len(task_ids)
 
                 if count > 0:
                     # 删除所有任务数据
                     pipe = self._redis.pipeline()
-                    pipe.delete(self.QUEUE_KEY)
+                    pipe.delete(self._queue_key)
                     for task_id in task_ids:
                         pipe.delete(self._get_task_data_key(task_id))
                     await pipe.execute()

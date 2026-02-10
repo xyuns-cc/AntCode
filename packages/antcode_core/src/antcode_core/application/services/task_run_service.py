@@ -63,13 +63,13 @@ class TaskRunService:
         status_at = finish_dt or start_dt or datetime.now(UTC)
 
         await execution_status_service.update_dispatch_status(
-            execution_id=execution.execution_id,
+            run_id=execution.run_id,
             status=DispatchStatus.ACKED,
             status_at=status_at,
         )
 
         await execution_status_service.update_runtime_status(
-            execution_id=execution.execution_id,
+            run_id=execution.run_id,
             status=runtime_status,
             status_at=status_at,
             exit_code=exit_code,
@@ -125,7 +125,7 @@ class TaskRunService:
             return False
 
         await execution_status_service.update_runtime_status(
-            execution_id=execution.execution_id,
+            run_id=execution.run_id,
             status=runtime_status,
             status_at=self._parse_dt(status_at) or datetime.now(UTC),
             exit_code=exit_code,
@@ -134,10 +134,16 @@ class TaskRunService:
         return True
 
     async def _get_execution(self, run_id: str) -> TaskRun | None:
-        execution = await TaskRun.get_or_none(execution_id=str(run_id))
+        run_id_str = str(run_id)
+        execution = await TaskRun.get_or_none(run_id=run_id_str)
         if execution:
             return execution
-        return await TaskRun.get_or_none(public_id=str(run_id))
+
+        # public_id 固定为 32 字符；超长 run_id 不应回退到 public_id 查询
+        if len(run_id_str) > 32:
+            return None
+
+        return await TaskRun.get_or_none(public_id=run_id_str)
 
     def _normalize_status(self, status: str | RuntimeStatus) -> RuntimeStatus | None:
         if isinstance(status, RuntimeStatus):

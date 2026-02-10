@@ -1,0 +1,96 @@
+.systemConfigContainer {
+  padding: 24px;
+  min-height: calc(100vh - 64px);
+  background-color: var(--bg-secondary);
+}
+
+.pageHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
+.pageTitle {
+  margin: 0 !important;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+}
+
+.pageDescription {
+  margin: 8px 0 0 0 !important;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.alertInfo {
+  margin-bottom: 24px;
+}
+
+.tabsContainer {
+  background: var(--bg-primary);
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03),
+              0 1px 6px -1px rgba(0, 0, 0, 0.02),
+              0 2px 4px 0 rgba(0, 0, 0, 0.02);
+}
+
+.tabsContainer :global(.ant-tabs-nav) {
+  margin-bottom: 24px;
+}
+
+.tabsContainer :global(.ant-card) {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.tabsContainer :global(.ant-card-head) {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tabsContainer :global(.ant-form-item) {
+  margin-bottom: 24px;
+}
+
+.tabsContainer :global(.ant-form-item-label > label) {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tabsContainer :global(.ant-input-number),
+.tabsContainer :global(.ant-input) {
+  width: 100%;
+}
+
+.loadingContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 400px;
+}
+
+/* 响应式布局 */
+@media (max-width: 768px) {
+  .systemConfigContainer {
+    padding: 16px;
+  }
+
+  .pageHeader {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .pageTitle {
+    font-size: 24px;
+  }
+
+  .tabsContainer {
+    padding: 16px;
+  }
+}
+

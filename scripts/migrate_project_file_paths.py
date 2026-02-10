@@ -9,11 +9,11 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from tortoise import Tortoise
-from tortoise.transactions import in_transaction
+from tortoise import Tortoise  # noqa: E402
+from tortoise.transactions import in_transaction  # noqa: E402
 
-from antcode_core.common.config import settings
-from antcode_core.domain.models import ProjectFile
+from antcode_core.common.config import settings  # noqa: E402
+from antcode_core.domain.models import ProjectFile  # noqa: E402
 
 
 def _has_parent_ref(path):

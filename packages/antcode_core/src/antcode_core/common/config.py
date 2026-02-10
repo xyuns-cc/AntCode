@@ -102,8 +102,8 @@ class Settings(BaseSettings):
 
     @cached_property
     def data_dir(self) -> str:
-        """数据目录"""
-        return os.path.join(self.BASE_DIR, "data")
+        """后端数据目录"""
+        return os.path.join(self.BASE_DIR, "data", "backend")
 
     @cached_property
     def db_url(self) -> str:
@@ -143,6 +143,9 @@ class Settings(BaseSettings):
     WORKER_HEARTBEAT_INTERVAL_OFFLINE: int = Field(default=60)
     WORKER_HEARTBEAT_MAX_FAILURES: int = Field(default=5)
     WORKER_HEARTBEAT_TIMEOUT_REQUEST: int = Field(default=2)
+    WORKER_INSTALL_KEY_REPLAY_WINDOW_SECONDS: int = Field(default=60)
+    WORKER_INSTALL_KEY_FAIL_THRESHOLD: int = Field(default=5)
+    WORKER_INSTALL_KEY_BLOCK_SECONDS: int = Field(default=600)
 
     @cached_property
     def REDIS_ENABLED(self) -> bool:
@@ -208,7 +211,7 @@ class Settings(BaseSettings):
 
     @cached_property
     def VENV_STORAGE_ROOT(self) -> str:
-        return os.path.join(self.data_dir, "storage", "venvs")
+        return os.path.join(self.data_dir, "storage", "runtimes")
 
     @cached_property
     def MISE_DATA_ROOT(self) -> str:

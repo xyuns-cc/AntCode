@@ -141,7 +141,7 @@ class RetryService:
         await self._retry_queue.put(
             {
                 "task_id": task.id,
-                "execution_id": execution.execution_id,
+                "run_id": execution.run_id,
                 "retry_time": next_retry_time,
                 "retry_count": execution.retry_count,
             }
@@ -155,9 +155,9 @@ class RetryService:
 
         return next_retry_time
 
-    async def manual_retry(self, execution_id, user_id):
+    async def manual_retry(self, run_id, user_id):
         """手动重试任务"""
-        execution = await TaskRun.get_or_none(execution_id=execution_id)
+        execution = await TaskRun.get_or_none(run_id=run_id)
         if not execution:
             return {"success": False, "error": "执行记录不存在"}
 
@@ -182,7 +182,7 @@ class RetryService:
         return {
             "success": True,
             "message": "任务已触发重试",
-            "execution_id": execution_id,
+            "run_id": run_id,
             "retry_count": execution.retry_count,
         }
 
@@ -223,7 +223,7 @@ class RetryService:
             alert_message = (
                 f"任务执行失败告警\n"
                 f"任务名称: {task.name}\n"
-                f"执行ID: {execution.execution_id}\n"
+                f"执行ID: {execution.run_id}\n"
                 f"重试次数: {execution.retry_count}\n"
                 f"错误信息: {error}\n"
                 f"失败时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -311,7 +311,7 @@ class RetryService:
                 pending.append(
                     {
                         "task_id": item["task_id"],
-                        "execution_id": item["execution_id"],
+                        "run_id": item["run_id"],
                         "retry_time": item["retry_time"].isoformat(),
                         "retry_count": item["retry_count"],
                     }

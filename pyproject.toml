@@ -63,7 +63,14 @@ src_folder = "./."
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+addopts = "-p no:unraisableexception"
 filterwarnings = [
     # 忽略 passlib 库中的 crypt 模块弃用警告（第三方库问题，Python 3.13 前无法解决）
     "ignore:'crypt' is deprecated:DeprecationWarning",
+    "ignore:Exception ignored in:pytest.PytestUnraisableExceptionWarning",
+]
+
+markers = [
+    "integration: 集成测试标记",
+    "pbt: 边界/属性测试标记",
 ]

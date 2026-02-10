@@ -55,6 +55,7 @@ import { userService } from '@/services/users'
 import type { Worker, WorkerStatus } from '@/types'
 import { formatDateTime } from '@/utils/format'
 import showNotification from '@/utils/notification'
+import { STORAGE_KEYS } from '@/utils/constants'
 
 // Worker用户权限类型
 interface WorkerUserPermission {
@@ -107,6 +108,7 @@ const Workers: React.FC = () => {
   const [installKeyData, setInstallKeyData] = useState<{
     key: string
     os_type: string
+    allowed_source?: string
     install_command: string
     expires_at: string
   } | null>(null)
@@ -262,7 +264,8 @@ const Workers: React.FC = () => {
   // 生成安装 Key 并复制到剪贴板
   const handleGenerateKey = async (osType: string) => {
     try {
-      const result = await workerService.generateInstallKey(osType)
+      const allowedSource = localStorage.getItem(STORAGE_KEYS.INSTALL_KEY_ALLOWED_SOURCE) || undefined
+      const result = await workerService.generateInstallKey(osType, allowedSource)
       setInstallKeyData(result)
       setInstallKeyModalVisible(true)
       // 复制 Key 到剪贴板（保持旧行为）
@@ -1110,6 +1113,9 @@ const Workers: React.FC = () => {
             >
               <Descriptions.Item label="操作系统">
                 {installKeyData.os_type?.toUpperCase?.() || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="来源绑定">
+                {installKeyData.allowed_source || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="有效期">
                 {installKeyData.expires_at ? formatDateTime(installKeyData.expires_at) : '-'}

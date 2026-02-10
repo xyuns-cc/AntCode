@@ -1,7 +1,8 @@
 import apiClient, { TokenManager } from './api'
 import { AuthHandler } from '@/utils/authHandler'
-import { STORAGE_KEYS } from '@/utils/constants'
+import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
 import Logger from '@/utils/logger'
+import { encryptLoginPassword } from '@/utils/loginEncryption'
 import type {
   LoginRequest,
   LoginResponse,
@@ -14,10 +15,39 @@ import type {
 class AuthService {
   // 用户登录
   async login(credentials: LoginRequest): Promise<LoginResponse> {
-    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/login', {
-      username: credentials.username,
-      password: credentials.password
-    })
+    const username = credentials.username.trim()
+    if (!username) {
+      throw new Error('用户名不能为空')
+    }
+
+    let loginPayload: {
+      username: string
+      password?: string
+      encrypted_password?: string
+      encryption?: string
+      key_id?: string
+    } = {
+      username,
+      password: credentials.password,
+    }
+
+    try {
+      const encrypted = await encryptLoginPassword(credentials.password)
+      loginPayload = {
+        username,
+        encrypted_password: encrypted.encryptedPassword,
+        encryption: encrypted.algorithm,
+        key_id: encrypted.keyId,
+      }
+    } catch (error) {
+      Logger.warn('登录密码加密失败，回退明文登录:', error)
+    }
+
+    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/login', loginPayload)
+
+    const allowedSource = this.resolveClientEndpoint(API_BASE_URL)
+
+    localStorage.setItem(STORAGE_KEYS.INSTALL_KEY_ALLOWED_SOURCE, allowedSource)
 
     const payload = response.data.data
     const user = {
@@ -41,13 +71,7 @@ class AuthService {
 
   // 用户登出
   async logout(): Promise<void> {
-    try {
-      await apiClient.post('/api/v1/auth/logout')
-    } catch {
-      // 即使请求失败也清理本地认证数据
-    } finally {
-      AuthHandler.clearAuthData()
-    }
+    AuthHandler.clearAuthData()
   }
 
   // 获取当前用户信息
@@ -156,40 +180,6 @@ class AuthService {
     }
   }
 
-  // 验证邮箱
-  async verifyEmail(token: string): Promise<void> {
-    await apiClient.post('/api/v1/auth/verify-email', { token })
-  }
-
-  // 发送重置密码邮件
-  async sendResetPasswordEmail(email: string): Promise<void> {
-    await apiClient.post('/api/v1/auth/forgot-password', { email })
-  }
-
-  // 重置密码
-  async resetPassword(token: string, newPassword: string): Promise<void> {
-    await apiClient.post('/api/v1/auth/reset-password', {
-      token,
-      new_password: newPassword,
-    })
-  }
-
-  // 检查用户名是否可用
-  async checkUsernameAvailability(username: string): Promise<boolean> {
-    const response = await apiClient.get<ApiResponse<{ available: boolean }>>(
-      `/api/v1/auth/check-username/${username}`
-    )
-    return response.data.data.available
-  }
-
-  // 检查邮箱是否可用
-  async checkEmailAvailability(email: string): Promise<boolean> {
-    const response = await apiClient.get<ApiResponse<{ available: boolean }>>(
-      `/api/v1/auth/check-email/${email}`
-    )
-    return response.data.data.available
-  }
-
   // 获取用户权限
   async getUserPermissions(): Promise<string[]> {
     const response = await apiClient.get<ApiResponse<{ permissions: string[] }>>(
@@ -211,6 +201,23 @@ class AuthService {
 
     const payload = TokenManager.getTokenPayload(token)
     return payload?.permissions || []
+  }
+
+  private resolveClientEndpoint(baseUrl: string): string {
+    try {
+      const parsed = new URL(baseUrl)
+      const host = parsed.hostname
+      if (host) {
+        return host
+      }
+    } catch {
+      // ignore
+    }
+
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      return window.location.hostname
+    }
+    return 'unknown'
   }
 
   // 自动刷新 token

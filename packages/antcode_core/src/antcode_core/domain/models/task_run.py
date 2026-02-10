@@ -26,7 +26,7 @@ class TaskRun(BaseModel):
     task_id = fields.BigIntField()
 
     # 执行标识
-    execution_id = fields.CharField(max_length=64, unique=True)
+    run_id = fields.CharField(max_length=64, unique=True)
 
     # 时间信息
     start_time = fields.DatetimeField(null=True)
@@ -70,7 +70,7 @@ class TaskRun(BaseModel):
     class Meta:
         table = "task_executions"
         indexes = [
-            ("execution_id",),
+            ("run_id",),
             ("task_id",),
             ("status",),
             ("dispatch_status",),

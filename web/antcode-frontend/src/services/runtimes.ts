@@ -49,7 +49,7 @@ class RuntimeService {
 
   async listEnvs(workerId: string, scope?: RuntimeScope, config?: AxiosRequestConfig): Promise<RuntimeEnv[]> {
     const res = await apiClient.get<{ data: RuntimeEnv[] | { envs?: RuntimeEnv[] } }>(
-      `${this.base(workerId)}/envs`,
+      `${this.base(workerId)}/runtimes`,
       {
         ...config,
         params: { ...(scope ? { scope } : {}), ...(config?.params ?? {}) }
@@ -63,10 +63,19 @@ class RuntimeService {
     }))
   }
 
-  async createEnv(workerId: string, payload: { env_name?: string; name?: string; python_version: string; scope?: RuntimeScope | string; packages?: string[] }, config?: AxiosRequestConfig): Promise<RuntimeEnv> {
+  async createEnv(workerId: string, payload: { env_name?: string; python_version: string; scope: RuntimeScope; packages?: string[] }, config?: AxiosRequestConfig): Promise<RuntimeEnv> {
+    const normalizedScope = payload.scope === 'shared' || payload.scope === 'private'
+      ? payload.scope
+      : (payload.env_name?.startsWith('shared-') ? 'shared' : 'private')
+
     const res = await apiClient.post<{ data: { env: RuntimeEnv } | RuntimeEnv }>(
-      `${this.base(workerId)}/envs`,
-      payload,
+      `${this.base(workerId)}/runtimes`,
+      {
+        env_name: payload.env_name,
+        python_version: payload.python_version,
+        scope: normalizedScope,
+        packages: payload.packages || [],
+      },
       config
     )
     const data = res.data.data
@@ -79,7 +88,7 @@ class RuntimeService {
 
   async updateEnv(workerId: string, envName: string, payload: { key?: string; description?: string }, config?: AxiosRequestConfig): Promise<RuntimeEnv> {
     const res = await apiClient.patch<{ data: RuntimeEnv }>(
-      `${this.base(workerId)}/envs/${encodeURIComponent(envName)}`,
+      `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}`,
       payload,
       config
     )
@@ -87,12 +96,12 @@ class RuntimeService {
   }
 
   async deleteEnv(workerId: string, envName: string, config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.delete(`${this.base(workerId)}/envs/${encodeURIComponent(envName)}`, config)
+    await apiClient.delete(`${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}`, config)
   }
 
   async listPackages(workerId: string, envName: string, config?: AxiosRequestConfig): Promise<RuntimePackage[]> {
     const res = await apiClient.get<{ data: RuntimePackage[] }>(
-      `${this.base(workerId)}/envs/${encodeURIComponent(envName)}/packages`,
+      `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}/packages`,
       config
     )
     return res.data.data || []
@@ -100,7 +109,7 @@ class RuntimeService {
 
   async installPackages(workerId: string, envName: string, packages: string[], upgrade?: boolean, config?: AxiosRequestConfig): Promise<void> {
     await apiClient.post(
-      `${this.base(workerId)}/envs/${encodeURIComponent(envName)}/packages`,
+      `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}/packages`,
       { packages, upgrade: !!upgrade },
       config
     )
@@ -108,7 +117,7 @@ class RuntimeService {
 
   async uninstallPackages(workerId: string, envName: string, packages: string[], config?: AxiosRequestConfig): Promise<void> {
     await apiClient.delete(
-      `${this.base(workerId)}/envs/${encodeURIComponent(envName)}/packages`,
+      `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}/packages`,
       { ...config, data: { packages, upgrade: false } }
     )
   }
@@ -130,6 +139,13 @@ class RuntimeService {
   }
 
   async removeInterpreter(workerId: string, payload: { version?: string; python_bin?: string; mode?: 'uninstall' | 'unregister' }, config?: AxiosRequestConfig): Promise<void> {
+    if (payload.mode === 'unregister' && !payload.version && !payload.python_bin) {
+      throw new Error('移除本地解释器需要提供 version 或 python_bin')
+    }
+    if (payload.mode !== 'unregister' && !payload.version) {
+      throw new Error('卸载解释器需要提供 version')
+    }
+
     await apiClient.delete(`${this.base(workerId)}/interpreters`, {
       ...config,
       params: { ...(payload ?? {}), ...(config?.params ?? {}) }

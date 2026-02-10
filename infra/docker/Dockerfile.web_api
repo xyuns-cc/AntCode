@@ -75,9 +75,10 @@ COPY --chown=appuser:appgroup services/web_api/src/antcode_web_api /app/services
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
-    /app/data/db \
-    /app/data/logs \
-    /app/data/storage \
+    /app/data/backend/db \
+    /app/data/backend/logs \
+    /app/data/backend/storage \
+    /app/data/backend/keys \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/.venv \
     && chmod -R 755 /app/data

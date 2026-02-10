@@ -219,8 +219,9 @@ def _create_transport(config: Any) -> Any:
         from pathlib import Path
 
         from antcode_worker.security import init_identity_manager
+        from antcode_worker.config import DATA_ROOT
 
-        data_dir = getattr(config, "data_dir", "var/worker")
+        data_dir = getattr(config, "data_dir", str(DATA_ROOT))
         identity_path = Path(data_dir) / "identity" / "worker_identity.yaml"
         name = getattr(config, "name", "")
         labels = {"name": name} if name else None
@@ -243,6 +244,7 @@ def _create_transport(config: Any) -> Any:
         worker_id=worker_id,
         direct=DirectConfig(
             redis_url=getattr(config, "redis_url", ""),
+            redis_namespace=getattr(config, "redis_namespace", "antcode"),
         ),
         gateway=GatewayConfigSpec(
             host=gateway_host,
@@ -277,6 +279,8 @@ def _create_transport(config: Any) -> Any:
         return RedisTransport(
             redis_url=transport_config.direct.redis_url,
             worker_id=worker_id,
+            namespace=transport_config.direct.redis_namespace,
+            consumer_group=transport_config.direct.consumer_group,
         )
     else:
         from antcode_worker.transport.gateway import GatewayConfig, GatewayTransport
@@ -335,6 +339,8 @@ def _register_by_install_key(
 ):
     """使用安装 Key 注册 Worker，返回凭证（失败抛错）"""
     import os
+    import secrets
+    import time
 
     worker_key = getattr(config, "worker_key", "") or os.getenv("ANTCODE_WORKER_KEY") or os.getenv("WORKER_KEY")
     if not worker_key:
@@ -358,6 +364,8 @@ def _register_by_install_key(
         "host": host,
         "port": getattr(config, "port", 8001),
         "region": getattr(config, "region", ""),
+        "client_timestamp": int(time.time()),
+        "client_nonce": secrets.token_hex(16),
     }
 
     url = f"{api_base_url}/api/v1/workers/register-by-key"
@@ -449,8 +457,13 @@ def _register_direct_worker(
     if not redis_url:
         raise TransportConfigError("Direct 模式必须配置 redis_url")
 
+    from antcode_core.infrastructure.redis import direct_register_proof_key
+
     proof = secrets.token_hex(16)
-    proof_key = f"antcode:direct:register:{worker_id}"
+    proof_key = direct_register_proof_key(
+        worker_id,
+        namespace=getattr(config, "redis_namespace", None),
+    )
     try:
         import redis
 
@@ -526,10 +539,14 @@ def _register_direct_worker(
 
 def _create_runtime_manager(config: Any) -> Any:
     """创建运行时管理器"""
+    import os
+
     from antcode_worker.runtime.manager import RuntimeManager, RuntimeManagerConfig
     from antcode_worker.runtime.uv_manager import uv_manager
+    from antcode_worker.config import DATA_ROOT
 
-    venvs_dir = getattr(config, "venvs_dir", None) or "var/worker/venvs"
+    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
+    venvs_dir = getattr(config, "venvs_dir", None) or os.path.join(data_dir, "runtimes")
     locks_dir = getattr(config, "locks_dir", None)
     uv_cache_dir = getattr(config, "uv_cache_dir", None)
 
@@ -571,14 +588,19 @@ def _create_plugin_registry(config: Any) -> Any:
 
 def _create_log_manager(config: Any, transport: Any) -> Any:
     """创建日志管理器"""
+    import os
 
     from antcode_worker.logs.archive import ArchiveConfig
     from antcode_worker.logs.manager import LogManagerConfig, LogManagerFactory
     from antcode_worker.logs.spool import SpoolConfig
+    from antcode_worker.config import DATA_ROOT
+
+    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
+    logs_dir = getattr(config, "logs_dir", None) or os.path.join(data_dir, "logs")
 
     # WAL 目录用于高可靠归档
-    wal_dir = getattr(config, "wal_dir", None) or "var/worker/logs/wal"
-    spool_dir = getattr(config, "spool_dir", None) or "var/worker/logs/spool"
+    wal_dir = getattr(config, "wal_dir", None) or os.path.join(logs_dir, "wal")
+    spool_dir = getattr(config, "spool_dir", None) or os.path.join(logs_dir, "spool")
 
     log_config = LogManagerConfig(
         wal_dir=wal_dir,
@@ -593,11 +615,14 @@ def _create_log_manager(config: Any, transport: Any) -> Any:
 def _create_log_cleanup_service(config: Any) -> Any:
     """创建日志清理服务"""
     from antcode_worker.services.log_cleanup import LogCleanupService
+    from antcode_worker.config import DATA_ROOT
+    import os
 
     if not getattr(config, "log_cleanup_enabled", True):
         return None
 
-    logs_dir = getattr(config, "logs_dir", None) or "var/worker/logs"
+    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
+    logs_dir = getattr(config, "logs_dir", None) or os.path.join(data_dir, "logs")
     retention_days = getattr(config, "log_retention_days", 7)
     interval_hours = getattr(config, "log_cleanup_interval_hours", 24)
     return LogCleanupService(
@@ -720,18 +745,26 @@ def _create_flow_controller(config: Any) -> Any:
 
 def _create_project_fetcher(config: Any) -> Any:
     """创建项目获取器"""
-    from antcode_worker.projects.fetcher import ArtifactFetcher, ProjectCache
+    import os
 
-    cache_dir = getattr(config, "projects_dir", None) or "var/worker/projects"
+    from antcode_worker.projects.fetcher import ArtifactFetcher, ProjectCache
+    from antcode_worker.config import DATA_ROOT
+
+    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
+    cache_dir = getattr(config, "projects_dir", None) or os.path.join(data_dir, "projects")
     cache = ProjectCache(cache_dir=cache_dir)
     return ArtifactFetcher(cache=cache)
 
 
 def _create_artifact_manager(config: Any) -> Any:
     """创建产物管理器"""
-    from antcode_worker.executor.artifacts import ArtifactManager
+    import os
 
-    storage_dir = getattr(config, "executions_dir", None) or "var/worker/executions"
+    from antcode_worker.executor.artifacts import ArtifactManager
+    from antcode_worker.config import DATA_ROOT
+
+    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
+    storage_dir = getattr(config, "runs_dir", None) or os.path.join(data_dir, "runs")
     return ArtifactManager(storage_dir=storage_dir)
 
 

@@ -227,7 +227,7 @@ class RealtimeSender:
         from antcode_worker.transport.base import LogMessage
         
         return LogMessage(
-            execution_id=entry.run_id,
+            run_id=entry.run_id,
             log_type=entry.stream.value,
             content=entry.content,
             timestamp=entry.timestamp,

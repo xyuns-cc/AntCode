@@ -29,7 +29,7 @@ def _find_project_root() -> str:
 
 # 基础目录
 BASE_DIR = _find_project_root()
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.path.join(BASE_DIR, "data", "backend")
 
 
 def get_database_url() -> str:

@@ -17,7 +17,7 @@ from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.common.utils.db_optimizer import DatabaseOptimizer
 from antcode_core.common.utils.json_parser import parse_cookies, parse_headers
 from antcode_core.domain.models import Project, ProjectCode, ProjectFile, ProjectRule, ProjectType
-from antcode_core.domain.models.enums import CallbackType, RequestMethod, RuntimeScope
+from antcode_core.domain.models.enums import CallbackType, RequestMethod, RuntimeKind, RuntimeScope
 from antcode_core.domain.schemas.project import (
     ExtractionRule,
     PaginationConfig,
@@ -600,9 +600,9 @@ class ProjectService:
             page_number=1 if pagination_config else None,
             proxy=rule_detail.proxy_config.get("proxy") if rule_detail.proxy_config else None,
             task_id=task_id,
-            worker_id=rule_detail.task_config.get("worker_id", "Scraper-Node-Default-01")
+            worker_id=rule_detail.task_config.get("worker_id", "Scraper-Worker-Default-01")
             if rule_detail.task_config
-            else "Scraper-Node-Default-01",
+            else "Scraper-Worker-Default-01",
         )
 
         # 构建任务JSON
@@ -1002,6 +1002,12 @@ class ProjectService:
 
         use_existing_env = getattr(request, "use_existing_env", False)
         runtime_scope = request.runtime_scope
+        runtime_kind = getattr(request, "runtime_kind", RuntimeKind.PYTHON)
+        if runtime_kind != RuntimeKind.PYTHON:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="当前仅支持 python 运行时",
+            )
         python_version = getattr(request, "python_version", None)
         existing_env_name = getattr(request, "existing_env_name", None)
         shared_runtime_key = getattr(request, "shared_runtime_key", None)
@@ -1077,8 +1083,9 @@ class ProjectService:
         project.worker_env_name = env_name
         project.python_version = python_version
         project.runtime_scope = runtime_scope
+        project.runtime_kind = runtime_kind
         # Worker 运行时不使用本地字段
-        project.venv_path = None
+        project.runtime_locator = None
         project.current_runtime_id = None
         await project.save(using_db=conn)
 

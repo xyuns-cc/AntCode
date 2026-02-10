@@ -105,7 +105,7 @@ class InFlightChunk:
 class TransferMeta:
     """传输元数据"""
 
-    execution_id: str
+    run_id: str
     log_type: str
     last_acked_offset: int = 0
     last_sent_offset: int = 0
@@ -128,7 +128,7 @@ class LogArchiver:
 
     def __init__(
         self,
-        execution_id: str,
+        run_id: str,
         log_type: str,
         log_file: Path | str,
         message_sender: MessageSender,
@@ -140,7 +140,7 @@ class LogArchiver:
         初始化日志归档器
 
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             log_type: 日志类型 (stdout/stderr)
             log_file: 本地日志文件路径
             message_sender: 消息发送器
@@ -148,7 +148,7 @@ class LogArchiver:
             on_state_change: 状态变更回调
             on_error: 错误回调
         """
-        self.execution_id = execution_id
+        self.run_id = run_id
         self.log_type = log_type
         self.log_file = Path(log_file)
         self._message_sender = message_sender
@@ -211,7 +211,7 @@ class LogArchiver:
 
             self._state = new_state
             logger.debug(
-                f"[{self.execution_id}/{self.log_type}] 状态变更: "
+                f"[{self.run_id}/{self.log_type}] 状态变更: "
                 f"{old_state.value} -> {new_state.value}"
             )
 
@@ -224,7 +224,7 @@ class LogArchiver:
     async def start(self) -> None:
         """启动分片传输"""
         if self._running:
-            logger.warning(f"[{self.execution_id}/{self.log_type}] 归档器已在运行")
+            logger.warning(f"[{self.run_id}/{self.log_type}] 归档器已在运行")
             return
 
         self._running = True
@@ -234,7 +234,7 @@ class LogArchiver:
         self._ack_check_task = asyncio.create_task(self._ack_check_loop())
 
         logger.info(
-            f"[{self.execution_id}/{self.log_type}] 归档器已启动, "
+            f"[{self.run_id}/{self.log_type}] 归档器已启动, "
             f"从 offset={self._last_acked_offset} 开始"
         )
 
@@ -252,7 +252,7 @@ class LogArchiver:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._ack_check_task
 
-        logger.info(f"[{self.execution_id}/{self.log_type}] 归档器已停止")
+        logger.info(f"[{self.run_id}/{self.log_type}] 归档器已停止")
 
     async def finalize(self) -> None:
         """请求完成传输"""
@@ -261,7 +261,7 @@ class LogArchiver:
             self.log_file.stat().st_size if self.log_file.exists() else 0
         )
         await self._set_state(TransferState.FINALIZING)
-        logger.info(f"[{self.execution_id}/{self.log_type}] 请求完成传输")
+        logger.info(f"[{self.run_id}/{self.log_type}] 请求完成传输")
 
     async def handle_ack(
         self, ack_offset: int, ok: bool, error: str = ""
@@ -276,7 +276,7 @@ class LogArchiver:
         """
         if not ok:
             logger.warning(
-                f"[{self.execution_id}/{self.log_type}] ACK 失败: "
+                f"[{self.run_id}/{self.log_type}] ACK 失败: "
                 f"offset={ack_offset}, error={error}"
             )
             return
@@ -303,7 +303,7 @@ class LogArchiver:
         ):
             await self._set_state(TransferState.COMPLETED)
             logger.info(
-                f"[{self.execution_id}/{self.log_type}] 传输完成, "
+                f"[{self.run_id}/{self.log_type}] 传输完成, "
                 f"total={self._total_size} bytes"
             )
 
@@ -320,7 +320,7 @@ class LogArchiver:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"[{self.execution_id}/{self.log_type}] 发送循环异常: {e}")
+            logger.error(f"[{self.run_id}/{self.log_type}] 发送循环异常: {e}")
             await self._set_state(TransferState.ERROR)
             if self._on_error:
                 self._on_error(str(e))
@@ -360,7 +360,7 @@ class LogArchiver:
                 await f.seek(offset)
                 chunk_data = await f.read(chunk_size)
         except Exception as e:
-            logger.error(f"[{self.execution_id}/{self.log_type}] 读取分片失败: {e}")
+            logger.error(f"[{self.run_id}/{self.log_type}] 读取分片失败: {e}")
             return
 
         checksum = hashlib.sha256(chunk_data).hexdigest()[:16]
@@ -388,7 +388,7 @@ class LogArchiver:
                 self._send_start_time = time.time()
 
             logger.debug(
-                f"[{self.execution_id}/{self.log_type}] 发送分片: "
+                f"[{self.run_id}/{self.log_type}] 发送分片: "
                 f"offset={offset}, size={len(chunk_data)}"
             )
 
@@ -403,7 +403,7 @@ class LogArchiver:
 
         if success:
             logger.info(
-                f"[{self.execution_id}/{self.log_type}] 发送最终分片, "
+                f"[{self.run_id}/{self.log_type}] 发送最终分片, "
                 f"total_size={self._total_size}"
             )
 
@@ -419,7 +419,7 @@ class LogArchiver:
         try:
             message = {
                 "type": "log_chunk",
-                "execution_id": self.execution_id,
+                "run_id": self.run_id,
                 "log_type": self.log_type,
                 "offset": offset,
                 "chunk": chunk,
@@ -431,7 +431,7 @@ class LogArchiver:
             return await self._message_sender.send_message(message)
 
         except Exception as e:
-            logger.error(f"[{self.execution_id}/{self.log_type}] 发送分片失败: {e}")
+            logger.error(f"[{self.run_id}/{self.log_type}] 发送分片失败: {e}")
             return False
 
     async def _ack_check_loop(self) -> None:
@@ -448,7 +448,7 @@ class LogArchiver:
                 break
             except Exception as e:
                 logger.error(
-                    f"[{self.execution_id}/{self.log_type}] ACK 检查异常: {e}"
+                    f"[{self.run_id}/{self.log_type}] ACK 检查异常: {e}"
                 )
 
     async def _check_ack_timeout(self) -> None:
@@ -464,7 +464,7 @@ class LogArchiver:
         for offset, chunk in timeout_chunks:
             if chunk.retry_count >= self._config.retry_max:
                 logger.error(
-                    f"[{self.execution_id}/{self.log_type}] 分片重试次数超限: "
+                    f"[{self.run_id}/{self.log_type}] 分片重试次数超限: "
                     f"offset={offset}"
                 )
                 await self._set_state(TransferState.ERROR)
@@ -496,13 +496,13 @@ class LogArchiver:
                         self._in_flight_chunks[offset].retry_count += 1
 
                 logger.debug(
-                    f"[{self.execution_id}/{self.log_type}] 重试分片: "
+                    f"[{self.run_id}/{self.log_type}] 重试分片: "
                     f"offset={offset}, retry={chunk.retry_count + 1}"
                 )
 
         except Exception as e:
             logger.error(
-                f"[{self.execution_id}/{self.log_type}] 重试分片失败: {e}"
+                f"[{self.run_id}/{self.log_type}] 重试分片失败: {e}"
             )
 
     async def wait_for_completion(self, timeout: float = 60.0) -> bool:
@@ -527,7 +527,7 @@ class LogArchiver:
     def get_status(self) -> dict:
         """获取归档器状态"""
         return {
-            "execution_id": self.execution_id,
+            "run_id": self.run_id,
             "log_type": self.log_type,
             "state": self._state.value,
             "last_acked_offset": self._last_acked_offset,

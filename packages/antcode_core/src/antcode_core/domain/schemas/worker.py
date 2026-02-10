@@ -211,12 +211,18 @@ class WorkerCredentialsResponse(BaseModel):
 class WorkerInstallKeyRequest(BaseModel):
     """生成安装 Key 请求"""
     os_type: str = Field(..., description="操作系统类型: linux/macos/windows")
+    allowed_source: str | None = Field(
+        default=None,
+        max_length=255,
+        description="可选来源绑定（IP/CIDR/主机名），为空则首次注册自动绑定",
+    )
 
 
 class WorkerInstallKeyResponse(BaseModel):
     """安装 Key 响应"""
     key: str = Field(..., description="安装Key")
     os_type: str = Field(..., description="操作系统类型")
+    allowed_source: str | None = Field(default=None, description="来源绑定")
     install_command: str = Field(..., description="安装命令")
     expires_at: datetime = Field(..., description="过期时间")
 
@@ -228,6 +234,8 @@ class WorkerRegisterByKeyRequest(BaseModel):
     host: str = Field(..., min_length=1, max_length=255, description="主机地址")
     port: int = Field(8001, ge=1, le=65535, description="端口")
     region: str = Field("", max_length=50, description="区域")
+    client_timestamp: int = Field(..., description="客户端时间戳（秒）")
+    client_nonce: str = Field(..., min_length=8, max_length=64, description="客户端随机串")
 
 
 class WorkerRegisterDirectRequest(BaseModel):

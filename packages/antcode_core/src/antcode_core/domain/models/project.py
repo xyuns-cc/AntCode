@@ -14,6 +14,7 @@ from antcode_core.domain.models.enums import (
     ProjectStatus,
     ProjectType,
     RequestMethod,
+    RuntimeKind,
     RuntimeScope,
 )
 
@@ -43,7 +44,8 @@ class Project(BaseModel):
     worker_env_name = fields.CharField(max_length=100, null=True)
     python_version = fields.CharField(max_length=20, null=True)
     runtime_scope = fields.CharEnumField(RuntimeScope, null=True)
-    venv_path = fields.CharField(max_length=500, null=True)
+    runtime_kind = fields.CharEnumField(RuntimeKind, null=True)
+    runtime_locator = fields.CharField(max_length=500, null=True)
     current_runtime_id = fields.BigIntField(null=True)
     runtime_worker_id = fields.BigIntField(
         null=True,
@@ -86,6 +88,8 @@ class Project(BaseModel):
             ("env_location", "worker_id"),
             ("python_version",),
             ("runtime_scope",),
+            ("runtime_kind",),
+            ("runtime_locator",),
             ("created_at",),
             ("updated_at",),
             ("current_runtime_id",),
@@ -114,7 +118,7 @@ class ProjectFile(BaseModel):
     project_id = fields.BigIntField(unique=True)
 
     # ========== 文件基础信息 ==========
-    file_path = fields.CharField(max_length=500, description="当前文件路径（兼容）")
+    file_path = fields.CharField(max_length=500, description="当前文件路径")
     original_file_path = fields.CharField(max_length=500, null=True, description="原始上传路径")
     original_name = fields.CharField(max_length=255)
     file_size = fields.BigIntField()
@@ -148,11 +152,6 @@ class ProjectFile(BaseModel):
 
     # ========== 版本指针（新增） ==========
     published_version = fields.IntField(default=0, description="最新已发布版本号")
-
-    # ========== 废弃字段（保留兼容，逐步迁移） ==========
-    is_modified = fields.BooleanField(default=False, description="[废弃] 由 dirty 替代")
-    extracted_hash = fields.CharField(max_length=64, null=True, description="[废弃] 由 version.content_hash 替代")
-    last_modified_at = fields.DatetimeField(null=True, description="[废弃] 由 last_edit_at 替代")
 
     class Meta:
         table = "project_files"

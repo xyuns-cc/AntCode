@@ -34,17 +34,17 @@ class LogStreamer:
 
     def __init__(
         self,
-        execution_id: str,
+        run_id: str,
         message_sender: MessageSender,
     ):
         """
         初始化日志流式传输器
 
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             message_sender: 消息发送器（实现 send_message 方法）
         """
-        self.execution_id = execution_id
+        self.run_id = run_id
         self._message_sender = message_sender
         self._enabled = False
         self._enabled_lock = asyncio.Lock()
@@ -63,11 +63,11 @@ class LogStreamer:
         """
         async with self._enabled_lock:
             if self._enabled:
-                logger.debug(f"[{self.execution_id}] 实时推送已开启，跳过")
+                logger.debug(f"[{self.run_id}] 实时推送已开启，跳过")
                 return True
 
             self._enabled = True
-            logger.info(f"[{self.execution_id}] 开启实时推送模式")
+            logger.info(f"[{self.run_id}] 开启实时推送模式")
 
         return True
 
@@ -80,11 +80,11 @@ class LogStreamer:
         """
         async with self._enabled_lock:
             if not self._enabled:
-                logger.debug(f"[{self.execution_id}] 实时推送已关闭，跳过")
+                logger.debug(f"[{self.run_id}] 实时推送已关闭，跳过")
                 return True
 
             self._enabled = False
-            logger.info(f"[{self.execution_id}] 关闭实时推送模式")
+            logger.info(f"[{self.run_id}] 关闭实时推送模式")
 
         return True
 
@@ -124,7 +124,7 @@ class LogStreamer:
             # 构建消息（使用通用格式，具体 protobuf 类型由调用方决定）
             message = {
                 "type": "log_realtime",
-                "execution_id": self.execution_id,
+                "run_id": self.run_id,
                 "log_type": log_type,
                 "content": content,
                 "timestamp": int(time.time() * 1000),
@@ -133,7 +133,7 @@ class LogStreamer:
             return await self._message_sender.send_message(message)
 
         except Exception as e:
-            logger.error(f"[{self.execution_id}] 发送实时日志消息失败: {e}")
+            logger.error(f"[{self.run_id}] 发送实时日志消息失败: {e}")
             return False
 
     def get_status(self) -> dict:
@@ -144,7 +144,7 @@ class LogStreamer:
             状态信息字典
         """
         return {
-            "execution_id": self.execution_id,
+            "run_id": self.run_id,
             "enabled": self._enabled,
         }
 
@@ -158,7 +158,7 @@ class BufferedLogStreamer(LogStreamer):
 
     def __init__(
         self,
-        execution_id: str,
+        run_id: str,
         message_sender: MessageSender,
         buffer_size: int = 100,
         flush_interval: float = 0.5,
@@ -167,12 +167,12 @@ class BufferedLogStreamer(LogStreamer):
         初始化带缓冲的日志流式传输器
 
         Args:
-            execution_id: 任务执行 ID
+            run_id: 任务执行 ID
             message_sender: 消息发送器
             buffer_size: 缓冲区大小（行数）
             flush_interval: 刷新间隔（秒）
         """
-        super().__init__(execution_id, message_sender)
+        super().__init__(run_id, message_sender)
         self._buffer_size = buffer_size
         self._flush_interval = flush_interval
         self._stdout_buffer: list[str] = []
@@ -241,7 +241,7 @@ class BufferedLogStreamer(LogStreamer):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[{self.execution_id}] 刷新缓冲区异常: {e}")
+                logger.error(f"[{self.run_id}] 刷新缓冲区异常: {e}")
 
     async def _flush_buffers(self) -> None:
         """刷新所有缓冲区"""

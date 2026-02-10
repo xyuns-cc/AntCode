@@ -329,7 +329,7 @@ class HeartbeatFailed(DomainEvent):
 class LogChunkSent(DomainEvent):
     """日志分片发送事件（新双通道架构）"""
 
-    execution_id: str = ""
+    run_id: str = ""
     log_type: str = ""  # stdout/stderr
     offset: int = 0
     size: int = 0
@@ -340,7 +340,7 @@ class LogChunkSent(DomainEvent):
 class LogChunkAcked(DomainEvent):
     """日志分片确认事件（新双通道架构）"""
 
-    execution_id: str = ""
+    run_id: str = ""
     log_type: str = ""  # stdout/stderr
     ack_offset: int = 0
     ok: bool = True
@@ -351,7 +351,7 @@ class LogChunkAcked(DomainEvent):
 class LogRealtimePushed(DomainEvent):
     """实时日志推送事件（新双通道架构）"""
 
-    execution_id: str = ""
+    run_id: str = ""
     log_type: str = ""  # stdout/stderr
     content_length: int = 0
 
@@ -360,7 +360,7 @@ class LogRealtimePushed(DomainEvent):
 class LogTransferCompleted(DomainEvent):
     """日志传输完成事件（新双通道架构）"""
 
-    execution_id: str = ""
+    run_id: str = ""
     log_type: str = ""  # stdout/stderr
     total_size: int = 0
 
@@ -379,7 +379,7 @@ class TaskReceived(DomainEvent):
 class TaskStatusChanged(DomainEvent):
     """任务状态变更事件"""
 
-    execution_id: str = ""
+    run_id: str = ""
     old_status: str = ""
     new_status: str = ""
     exit_code: int | None = None
@@ -390,7 +390,7 @@ class TaskStatusChanged(DomainEvent):
 class TaskCancelled(DomainEvent):
     """任务取消事件"""
 
-    execution_id: str = ""
+    run_id: str = ""
     success: bool = False
     reason: str | None = None
 

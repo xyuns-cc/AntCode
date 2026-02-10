@@ -31,7 +31,7 @@ class ConnectionInfo:
     """连接信息"""
 
     connection_id: str
-    execution_id: str
+    run_id: str
     user_id: int
     websocket: WebSocket
     state: ConnectionState = ConnectionState.CONNECTING
@@ -69,14 +69,14 @@ class ConnectionPool:
             settings, "WEBSOCKET_MAX_TOTAL_CONN", max_total_connections
         )
         self._connections: dict[str, dict[str, ConnectionInfo]] = defaultdict(dict)
-        # 分段锁：每个 execution_id 一个锁
+        # 分段锁：每个 run_id 一个锁
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._global_lock = asyncio.Lock()  # 仅用于创建新的 execution 分段
         self._total_count = 0
 
     async def add_connection(self, connection_info):
         """添加连接"""
-        execution_id = connection_info.execution_id
+        run_id = connection_info.run_id
         connection_id = connection_info.connection_id
 
         # 检查总连接数限制
@@ -86,42 +86,42 @@ class ConnectionPool:
 
         # 获取或创建分段锁
         async with self._global_lock:
-            lock = self._locks[execution_id]
+            lock = self._locks[run_id]
 
         async with lock:
             # 检查单执行连接数限制
-            if len(self._connections[execution_id]) >= self.max_connections_per_execution:
+            if len(self._connections[run_id]) >= self.max_connections_per_execution:
                 oldest = min(
-                    self._connections[execution_id].values(),
+                    self._connections[run_id].values(),
                     key=lambda c: c.connected_at,
                 )
                 await self._close_connection_unsafe(oldest)
                 self._total_count -= 1
-                logger.warning(f"执行ID {execution_id} 连接数超限，移除最旧连接")
+                logger.warning(f"执行ID {run_id} 连接数超限，移除最旧连接")
 
-            self._connections[execution_id][connection_id] = connection_info
+            self._connections[run_id][connection_id] = connection_info
             connection_info.state = ConnectionState.CONNECTED
             self._total_count += 1
             return True
 
-    async def remove_connection(self, execution_id, connection_id):
+    async def remove_connection(self, run_id, connection_id):
         """移除连接"""
-        if execution_id not in self._connections:
+        if run_id not in self._connections:
             return False
 
-        lock = self._locks.get(execution_id)
+        lock = self._locks.get(run_id)
         if not lock:
             return False
 
         async with lock:
-            if connection_id in self._connections.get(execution_id, {}):
-                conn = self._connections[execution_id].pop(connection_id)
+            if connection_id in self._connections.get(run_id, {}):
+                conn = self._connections[run_id].pop(connection_id)
                 conn.state = ConnectionState.CLOSED
                 self._total_count -= 1
 
                 # 清理空的 execution
-                if not self._connections[execution_id]:
-                    del self._connections[execution_id]
+                if not self._connections[run_id]:
+                    del self._connections[run_id]
                     # 延迟清理锁，避免竞态
                 return True
             return False
@@ -140,29 +140,29 @@ class ConnectionPool:
         finally:
             conn.state = ConnectionState.CLOSED
 
-    def get_connection(self, execution_id, connection_id):
+    def get_connection(self, run_id, connection_id):
         """获取单个连接（无锁读取）"""
-        return self._connections.get(execution_id, {}).get(connection_id)
+        return self._connections.get(run_id, {}).get(connection_id)
 
-    def get_connections(self, execution_id):
+    def get_connections(self, run_id):
         """获取执行ID的所有连接"""
-        return list(self._connections.get(execution_id, {}).values())
+        return list(self._connections.get(run_id, {}).values())
 
     def get_all_connections(self):
         """获取所有连接"""
         return {eid: list(conns.values()) for eid, conns in self._connections.items()}
 
-    def get_connection_count(self, execution_id):
+    def get_connection_count(self, run_id):
         """获取连接数"""
-        return len(self._connections.get(execution_id, {}))
+        return len(self._connections.get(run_id, {}))
 
     def get_total_connection_count(self):
         """获取总连接数"""
         return sum(len(conns) for conns in self._connections.values())
 
-    def update_activity(self, execution_id, connection_id):
+    def update_activity(self, run_id, connection_id):
         """更新连接活动时间"""
-        conn = self.get_connection(execution_id, connection_id)
+        conn = self.get_connection(run_id, connection_id)
         if conn:
             conn.last_activity = datetime.now(UTC)
 
@@ -216,7 +216,7 @@ class HeartbeatManager:
         now = datetime.now(UTC)
         all_connections = pool.get_all_connections()
 
-        for _execution_id, connections in all_connections.items():
+        for _run_id, connections in all_connections.items():
             for conn in connections:
                 if conn.state != ConnectionState.CONNECTED:
                     continue
@@ -272,32 +272,32 @@ class MessageQueue:
         self._processing: dict[str, asyncio.Task] = {}
         self._dropped_count: dict[str, int] = defaultdict(int)
 
-    async def enqueue(self, execution_id, message):
+    async def enqueue(self, run_id, message):
         """入队消息（无锁）"""
-        queue = self._queues[execution_id]
+        queue = self._queues[run_id]
 
         # deque 的 maxlen 会自动丢弃旧消息
         was_full = len(queue) >= self.max_queue_size
         queue.append(message)
 
         if was_full:
-            self._dropped_count[execution_id] += 1
-            if self._dropped_count[execution_id] % 100 == 1:
+            self._dropped_count[run_id] += 1
+            if self._dropped_count[run_id] % 100 == 1:
                 logger.warning(
-                    f"消息队列溢出: {execution_id}, 已丢弃 {self._dropped_count[execution_id]} 条"
+                    f"消息队列溢出: {run_id}, 已丢弃 {self._dropped_count[run_id]} 条"
                 )
 
         # 确保处理任务在运行
-        if execution_id not in self._processing or self._processing[execution_id].done():
-            self._processing[execution_id] = asyncio.create_task(self._process_queue(execution_id))
+        if run_id not in self._processing or self._processing[run_id].done():
+            self._processing[run_id] = asyncio.create_task(self._process_queue(run_id))
 
         return True
 
-    async def _process_queue(self, execution_id):
+    async def _process_queue(self, run_id):
         """处理队列（批量发送）"""
         try:
             while True:
-                queue = self._queues.get(execution_id)
+                queue = self._queues.get(run_id)
                 if not queue:
                     break
 
@@ -314,12 +314,12 @@ class MessageQueue:
                         websocket_manager,
                     )
 
-                    await websocket_manager._broadcast_batch(execution_id, batch)
+                    await websocket_manager._broadcast_batch(run_id, batch)
 
                 # 如果队列空了，等待一小段时间看是否有新消息
                 if not queue:
                     await asyncio.sleep(self.flush_interval)
-                    if not self._queues.get(execution_id):
+                    if not self._queues.get(run_id):
                         break
                 else:
                     # 队列还有消息，立即继续处理
@@ -328,22 +328,22 @@ class MessageQueue:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"处理消息队列失败: {execution_id}, {e}")
+            logger.error(f"处理消息队列失败: {run_id}, {e}")
         finally:
-            self._processing.pop(execution_id, None)
+            self._processing.pop(run_id, None)
 
-    def get_queue_size(self, execution_id):
+    def get_queue_size(self, run_id):
         """获取队列大小"""
-        return len(self._queues.get(execution_id, []))
+        return len(self._queues.get(run_id, []))
 
     def get_total_queue_size(self):
         """获取总队列大小"""
         return sum(len(q) for q in self._queues.values())
 
-    def get_dropped_count(self, execution_id=None):
+    def get_dropped_count(self, run_id=None):
         """获取丢弃消息数"""
-        if execution_id:
-            return self._dropped_count.get(execution_id, 0)
+        if run_id:
+            return self._dropped_count.get(run_id, 0)
         return sum(self._dropped_count.values())
 
 
@@ -414,24 +414,24 @@ class WebSocketConnectionManager:
 
         # 关闭所有连接
         all_connections = self.connection_pool.get_all_connections()
-        for _execution_id, connections in all_connections.items():
+        for _run_id, connections in all_connections.items():
             for conn in connections:
                 with contextlib.suppress(Exception):
                     await conn.websocket.close(code=1001, reason="服务器关闭")
 
         logger.info("WebSocket连接管理器已关闭")
 
-    def _generate_connection_id(self, execution_id, websocket):
+    def _generate_connection_id(self, run_id, websocket):
         """生成连接ID"""
-        return f"{execution_id}_{id(websocket)}_{time.time_ns()}"
+        return f"{run_id}_{id(websocket)}_{time.time_ns()}"
 
-    async def connect(self, websocket, execution_id, user_id):
+    async def connect(self, websocket, run_id, user_id):
         """建立WebSocket连接"""
         # 确保管理器已启动
         if not self._started:
             await self.start()
 
-        connection_id = self._generate_connection_id(execution_id, websocket)
+        connection_id = self._generate_connection_id(run_id, websocket)
 
         try:
             # 接受连接
@@ -440,7 +440,7 @@ class WebSocketConnectionManager:
             # 创建连接信息
             conn_info = ConnectionInfo(
                 connection_id=connection_id,
-                execution_id=execution_id,
+                run_id=run_id,
                 user_id=user_id,
                 websocket=websocket,
             )
@@ -452,7 +452,7 @@ class WebSocketConnectionManager:
             self._stats["total_connections"] += 1
 
             logger.info(
-                f"WebSocket连接建立: {connection_id} (执行ID: {execution_id}, 用户: {user_id})"
+                f"WebSocket连接建立: {connection_id} (执行ID: {run_id}, 用户: {user_id})"
             )
 
             return connection_id
@@ -462,13 +462,13 @@ class WebSocketConnectionManager:
             logger.error(f"WebSocket连接建立失败: {e}")
             raise
 
-    async def disconnect(self, websocket, execution_id):
+    async def disconnect(self, websocket, run_id):
         """断开WebSocket连接"""
         # 查找连接
-        connections = self.connection_pool.get_connections(execution_id)
+        connections = self.connection_pool.get_connections(run_id)
         for conn in connections:
             if conn.websocket == websocket:
-                await self.connection_pool.remove_connection(execution_id, conn.connection_id)
+                await self.connection_pool.remove_connection(run_id, conn.connection_id)
                 self._stats["total_disconnections"] += 1
                 logger.info(f"WebSocket连接断开: {conn.connection_id}")
                 return
@@ -480,7 +480,7 @@ class WebSocketConnectionManager:
         with contextlib.suppress(Exception):
             await conn.websocket.close(code=4008, reason="心跳超时")
 
-        await self.connection_pool.remove_connection(conn.execution_id, conn.connection_id)
+        await self.connection_pool.remove_connection(conn.run_id, conn.connection_id)
         logger.warning(f"连接因心跳超时断开: {conn.connection_id}")
 
     async def _cleanup_loop(self):
@@ -501,20 +501,20 @@ class WebSocketConnectionManager:
         cleaned = 0
 
         all_connections = self.connection_pool.get_all_connections()
-        for execution_id, connections in all_connections.items():
+        for run_id, connections in all_connections.items():
             for conn in connections:
                 if conn.last_activity < cutoff:
                     with contextlib.suppress(Exception):
                         await conn.websocket.close(code=4009, reason="连接不活跃")
-                    await self.connection_pool.remove_connection(execution_id, conn.connection_id)
+                    await self.connection_pool.remove_connection(run_id, conn.connection_id)
                     cleaned += 1
 
         if cleaned > 0:
             logger.info(f"清理了 {cleaned} 个不活跃连接")
 
-    async def handle_client_message(self, execution_id, connection_id, message):
+    async def handle_client_message(self, run_id, connection_id, message):
         """处理客户端消息"""
-        conn = self.connection_pool.get_connection(execution_id, connection_id)
+        conn = self.connection_pool.get_connection(run_id, connection_id)
         if not conn:
             return
 
@@ -538,13 +538,13 @@ class WebSocketConnectionManager:
             # 其他消息类型
             logger.debug(f"收到客户端消息: {message_type}")
 
-    async def broadcast_to_execution(self, execution_id, message):
+    async def broadcast_to_run(self, run_id, message):
         """向执行ID广播消息（通过队列）"""
-        await self.message_queue.enqueue(execution_id, message)
+        await self.message_queue.enqueue(run_id, message)
 
-    async def _broadcast_batch(self, execution_id, messages):
+    async def _broadcast_batch(self, run_id, messages):
         """批量广播消息（并发发送）"""
-        connections = self.connection_pool.get_connections(execution_id)
+        connections = self.connection_pool.get_connections(run_id)
         if not connections:
             return
 
@@ -584,7 +584,7 @@ class WebSocketConnectionManager:
                 sent_count += 1
             elif isinstance(result, ConnectionInfo):
                 await self.connection_pool.remove_connection(
-                    result.execution_id, result.connection_id
+                    result.run_id, result.connection_id
                 )
 
         self._stats["messages_sent"] += len(messages) * sent_count
@@ -596,13 +596,13 @@ class WebSocketConnectionManager:
 
     # ==================== 便捷方法 ====================
 
-    async def send_log_message(self, execution_id, log_type, content, level="INFO", source=None):
+    async def send_log_message(self, run_id, log_type, content, level="INFO", source=None):
         """发送日志消息"""
         message = {
             "type": "log_line",
-            "execution_id": execution_id,
+            "run_id": run_id,
             "data": {
-                "execution_id": execution_id,
+                "run_id": run_id,
                 "log_type": log_type,
                 "content": content,
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -611,32 +611,32 @@ class WebSocketConnectionManager:
             },
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        await self.broadcast_to_execution(execution_id, message)
+        await self.broadcast_to_run(run_id, message)
 
-    async def send_execution_status(self, execution_id, status, progress=None, message=None):
+    async def send_run_status(self, run_id, status, progress=None, message=None):
         """发送执行状态"""
         status_message = {
-            "type": "execution_status",
-            "execution_id": execution_id,
+            "type": "run_status",
+            "run_id": run_id,
             "data": {"status": status, "progress": progress, "message": message},
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        await self.broadcast_to_execution(execution_id, status_message)
+        await self.broadcast_to_run(run_id, status_message)
 
-    async def send_historical_logs_start(self, execution_id):
+    async def send_historical_logs_start(self, run_id):
         """发送历史日志开始标记"""
-        await self.broadcast_to_execution(
-            execution_id,
+        await self.broadcast_to_run(
+            run_id,
             {
                 "type": "historical_logs_start",
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
 
-    async def send_historical_logs_end(self, execution_id, sent_lines):
+    async def send_historical_logs_end(self, run_id, sent_lines):
         """发送历史日志结束标记"""
-        await self.broadcast_to_execution(
-            execution_id,
+        await self.broadcast_to_run(
+            run_id,
             {
                 "type": "historical_logs_end",
                 "sent_lines": sent_lines,
@@ -644,19 +644,19 @@ class WebSocketConnectionManager:
             },
         )
 
-    async def send_no_historical_logs(self, execution_id):
+    async def send_no_historical_logs(self, run_id):
         """发送无历史日志标记"""
-        await self.broadcast_to_execution(
-            execution_id,
+        await self.broadcast_to_run(
+            run_id,
             {
                 "type": "no_historical_logs",
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
 
-    def get_connections_for_execution(self, execution_id):
+    def get_connections_for_run(self, run_id):
         """获取执行ID的连接数"""
-        return self.connection_pool.get_connection_count(execution_id)
+        return self.connection_pool.get_connection_count(run_id)
 
     def get_stats(self):
         """获取统计信息"""
@@ -670,7 +670,7 @@ class WebSocketConnectionManager:
             **self._stats,
             "uptime_seconds": round(uptime, 2),
             "active_connections": self.connection_pool.get_total_connection_count(),
-            "active_executions": len(self.connection_pool.get_all_connections()),
+            "active_runs": len(self.connection_pool.get_all_connections()),
             "queued_messages": self.message_queue.get_total_queue_size(),
             "dropped_messages": self.message_queue.get_dropped_count(),
             "messages_per_second": round(messages_per_second, 2),

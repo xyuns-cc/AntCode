@@ -123,7 +123,7 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
         envService.listVenvs({ page: 1, size: 100 })
           .then(res => setExistingEnvs(
             res.items.map(item => ({
-              name: item.key || item.venv_path,
+              name: item.key || item.runtime_locator,
               python_version: item.version
             }))
           ))

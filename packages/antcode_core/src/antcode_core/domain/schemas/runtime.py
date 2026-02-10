@@ -6,7 +6,7 @@
 
 from pydantic import BaseModel, Field, field_validator
 
-from antcode_core.domain.models.enums import RuntimeScope
+from antcode_core.domain.models.enums import RuntimeKind, RuntimeScope
 
 
 def _normalize_runtime_scope(value):
@@ -19,6 +19,21 @@ def _normalize_runtime_scope(value):
             return RuntimeScope.SHARED
         if raw == "private":
             return RuntimeScope.PRIVATE
+    return value
+
+
+def _normalize_runtime_kind(value):
+    """规范化运行时类型"""
+    if isinstance(value, RuntimeKind):
+        return value
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw == "python":
+            return RuntimeKind.PYTHON
+        if raw == "java":
+            return RuntimeKind.JAVA
+        if raw == "go":
+            return RuntimeKind.GO
     return value
 
 
@@ -44,15 +59,17 @@ class InstallInterpreterRequest(BaseModel):
 class RuntimeStatusResponse(BaseModel):
     """运行时环境状态响应"""
     project_id: str = Field(description="项目公开ID")
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型")
     scope: str = ""
     version: str = ""
-    venv_path: str = ""
+    runtime_locator: str = ""
     worker_id: str = Field("", description="环境所在的 Worker ID")
 
 
 class CreateRuntimeRequest(BaseModel):
     """创建运行时环境请求"""
-    version: str = Field(..., description="Python 版本，如 3.11.9")
+    version: str = Field(..., description="运行时版本，如 3.11.9")
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型")
     runtime_scope: RuntimeScope = Field(..., description="运行时环境作用域：shared/private")
     shared_runtime_key: str = Field("", description="共享运行时标识（可选）")
     create_if_missing: bool = Field(True, description="不存在则创建")
@@ -64,10 +81,16 @@ class CreateRuntimeRequest(BaseModel):
     def normalize_runtime_scope(cls, v):
         return _normalize_runtime_scope(v)
 
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def normalize_runtime_kind(cls, v):
+        return _normalize_runtime_kind(v)
+
 
 class CreateSharedRuntimeRequest(BaseModel):
     """创建共享运行时环境请求"""
-    version: str = Field(..., description="Python 版本，如 3.11.9")
+    version: str = Field(..., description="运行时版本，如 3.11.9")
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型")
     shared_runtime_key: str = Field("", description="共享运行时标识（可选）")
     interpreter_source: str = Field("mise", description="解释器来源：mise/local")
     python_bin: str = Field("", description="当来源为local时的python路径")
@@ -76,10 +99,12 @@ class CreateSharedRuntimeRequest(BaseModel):
 class RuntimeListItem(BaseModel):
     """运行时环境列表项"""
     id: str = Field(description="运行时环境公开ID")
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型")
     scope: RuntimeScope
     key: str = ""
     version: str
-    venv_path: str
+    runtime_locator: str
+    runtime_details: dict = Field(default_factory=dict)
     interpreter_version: str
     interpreter_source: str = ""
     python_bin: str

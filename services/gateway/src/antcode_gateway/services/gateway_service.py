@@ -15,6 +15,14 @@ from loguru import logger
 
 from antcode_gateway.handlers import HeartbeatHandler, LogHandler, ResultHandler, TaskPollHandler
 from antcode_gateway.handlers.heartbeat import HeartbeatData
+from antcode_core.infrastructure.redis import (
+    build_cancel_control_payload,
+    control_global_stream,
+    control_group,
+    control_reply_stream,
+    control_stream,
+    decode_stream_payload,
+)
 
 if TYPE_CHECKING:
     from antcode_core.domain.models import Worker
@@ -37,7 +45,27 @@ class GatewayServiceImpl:
         self.poll_handler = TaskPollHandler()
         self._active_streams: dict[str, asyncio.Queue] = {}
         self._stream_tasks: dict[str, asyncio.Task] = {}
+        self._control_group_lock = asyncio.Lock()
+        self._initialized_control_groups: set[tuple[str, str]] = set()
         logger.info("GatewayService 已初始化")
+
+    async def _ensure_control_group(self, redis, stream_key: str, group: str) -> None:
+        key = (stream_key, group)
+        if key in self._initialized_control_groups:
+            return
+
+        async with self._control_group_lock:
+            if key in self._initialized_control_groups:
+                return
+
+            try:
+                await redis.xgroup_create(stream_key, group, id="0", mkstream=True)
+            except Exception as e:
+                if "BUSYGROUP" not in str(e):
+                    logger.warning(f"创建消费者组失败: {e}")
+                    return
+
+            self._initialized_control_groups.add(key)
 
     async def _control_poller(
         self,
@@ -59,17 +87,13 @@ class GatewayServiceImpl:
             logger.warning(f"Worker {worker_id} 控制轮询器：Redis 不可用")
             return
 
-        control_group = "antcode-control"
+        control_group_name = control_group()
         consumer = worker_id
 
-        # 确保消费者组存在
-        streams = [f"antcode:control:{worker_id}", "antcode:control:global"]
+        # 确保消费者组存在（每个 stream 只初始化一次）
+        streams = [control_stream(worker_id), control_global_stream()]
         for stream_key in streams:
-            try:
-                await redis.xgroup_create(stream_key, control_group, id="0", mkstream=True)
-            except Exception as e:
-                if "BUSYGROUP" not in str(e):
-                    logger.warning(f"创建消费者组失败: {e}")
+            await self._ensure_control_group(redis, stream_key, control_group_name)
 
         logger.debug(f"Worker {worker_id} 控制轮询器已启动")
 
@@ -77,7 +101,7 @@ class GatewayServiceImpl:
             try:
                 # 非阻塞轮询控制消息
                 result = await redis.xreadgroup(
-                    groupname=control_group,
+                    groupname=control_group_name,
                     consumername=consumer,
                     streams=dict.fromkeys(streams, ">"),
                     count=1,
@@ -92,17 +116,21 @@ class GatewayServiceImpl:
                     continue
 
                 msg_id, data = messages[0]
-                decoded = self._decode_data(data)
+                decoded = decode_stream_payload(data)
                 control_type = decoded.get("control_type", "")
 
                 # 构建控制消息
                 master_msg = None
 
                 if control_type in ("cancel", "kill"):
+                    cancel_payload = build_cancel_control_payload(
+                        run_id=decoded.get("run_id", ""),
+                        task_id=decoded.get("task_id", ""),
+                    )
                     master_msg = gateway_pb2.MasterMessage(
                         task_cancel=gateway_pb2.TaskCancel(
-                            task_id=decoded.get("task_id", ""),
-                            execution_id=decoded.get("execution_id", decoded.get("run_id", "")),
+                            task_id=cancel_payload["task_id"],
+                            run_id=cancel_payload["run_id"],
                         )
                     )
                     logger.info(f"推送任务取消到 Worker {worker_id}: {decoded.get('task_id')}")
@@ -123,7 +151,7 @@ class GatewayServiceImpl:
                 if master_msg:
                     await response_queue.put(master_msg)
                     # ACK 消息
-                    await redis.xack(stream_key, control_group, msg_id)
+                    await redis.xack(stream_key, control_group_name, msg_id)
 
             except asyncio.CancelledError:
                 break
@@ -259,7 +287,7 @@ class GatewayServiceImpl:
             status_at = datetime.fromtimestamp(total, tz=UTC)
 
         await self.result_handler.handle_status_update(
-            run_id=task_status.execution_id,
+            run_id=task_status.run_id,
             status=task_status.status,
             exit_code=task_status.exit_code if task_status.HasField("exit_code") else None,
             error_message=task_status.error_message
@@ -469,7 +497,7 @@ class GatewayServiceImpl:
         from antcode_gateway.handlers.logs import LogEntry as HandlerLog
 
         entry = HandlerLog(
-            run_id=request.execution_id,
+            run_id=request.run_id,
             log_type=request.log_type,
             content=request.content,
             sequence=request.sequence,
@@ -485,17 +513,18 @@ class GatewayServiceImpl:
         from antcode_contracts import gateway_pb2
         from antcode_gateway.handlers.logs import LogEntry as HandlerLog
 
-        success = True
-        for log in request.logs:
-            entry = HandlerLog(
-                run_id=log.execution_id,
+        entries = [
+            HandlerLog(
+                run_id=log.run_id,
                 log_type=log.log_type,
                 content=log.content,
                 sequence=log.sequence,
             )
-            ok = await self.log_handler.handle_realtime_log(entry)
-            if not ok:
-                success = False
+            for log in request.logs
+        ]
+
+        success = await self.log_handler.handle_realtime_logs(entries)
+
         return gateway_pb2.SendLogBatchResponse(
             success=success,
             error="" if success else "log batch failed",
@@ -507,7 +536,7 @@ class GatewayServiceImpl:
         from antcode_gateway.handlers.logs import LogChunk as HandlerChunk
 
         chunk = HandlerChunk(
-            run_id=request.execution_id,
+            run_id=request.run_id,
             log_type=request.log_type,
             chunk=request.data,
             offset=request.offset,
@@ -552,22 +581,18 @@ class GatewayServiceImpl:
 
         worker_id = request.worker_id
         timeout_ms = request.timeout_ms or 5000
-        control_group = "antcode-control"
+        control_group_name = control_group()
         consumer = worker_id or "worker"
         streams = {
-            f"antcode:control:{worker_id}": ">",
-            "antcode:control:global": ">",
+            control_stream(worker_id): ">",
+            control_global_stream(): ">",
         }
 
         for stream_key in streams:
-            try:
-                await redis.xgroup_create(stream_key, control_group, id="0", mkstream=True)
-            except Exception as e:
-                if "BUSYGROUP" not in str(e):
-                    raise
+            await self._ensure_control_group(redis, stream_key, control_group_name)
 
         result = await redis.xreadgroup(
-            groupname=control_group,
+            groupname=control_group_name,
             consumername=consumer,
             streams=streams,
             count=1,
@@ -582,15 +607,19 @@ class GatewayServiceImpl:
             return gateway_pb2.PollControlResponse(has_control=False)
 
         msg_id, data = messages[0]
-        decoded = self._decode_data(data)
+        decoded = decode_stream_payload(data)
         control_type = decoded.get("control_type", "")
         receipt_id = f"{stream_key}|{msg_id}"
 
         if control_type in ("cancel", "kill"):
+            cancel_payload = build_cancel_control_payload(
+                run_id=decoded.get("run_id", ""),
+                task_id=decoded.get("task_id", ""),
+            )
             control = gateway_pb2.ControlMessage(
                 task_cancel=gateway_pb2.TaskCancel(
-                    task_id=decoded.get("task_id", ""),
-                    execution_id=decoded.get("execution_id", decoded.get("run_id", "")),
+                    task_id=cancel_payload["task_id"],
+                    run_id=cancel_payload["run_id"],
                 )
             )
             return gateway_pb2.PollControlResponse(
@@ -642,7 +671,7 @@ class GatewayServiceImpl:
 
         stream_key, msg_id = request.receipt_id.split("|", 1)
         try:
-            await redis.xack(stream_key, "antcode-control", msg_id)
+            await redis.xack(stream_key, control_group(), msg_id)
             return gateway_pb2.AckControlResponse(success=True, error="")
         except Exception as e:
             return gateway_pb2.AckControlResponse(success=False, error=str(e))
@@ -655,7 +684,7 @@ class GatewayServiceImpl:
         if redis is None:
             return gateway_pb2.ControlResultResponse(success=False, error="redis unavailable")
 
-        reply_stream = request.reply_stream or f"antcode:control:reply:{request.request_id}"
+        reply_stream = request.reply_stream or control_reply_stream(request.request_id)
         payload = {
             "request_id": request.request_id,
             "success": str(bool(request.success)).lower(),
@@ -678,26 +707,6 @@ class GatewayServiceImpl:
         except ImportError:
             logger.warning("antcode_core.infrastructure.redis 不可用")
             return None
-
-    def _decode_data(self, data: dict) -> dict:
-        decoded = {}
-        for k, v in data.items():
-            key = k.decode() if isinstance(k, bytes) else k
-            val = v.decode() if isinstance(v, bytes) else v
-            decoded[key] = val
-        if "config" in decoded and isinstance(decoded["config"], str):
-            try:
-                import json
-                decoded["config"] = json.loads(decoded["config"])
-            except Exception:
-                pass
-        if "payload" in decoded and isinstance(decoded["payload"], str):
-            try:
-                import json
-                decoded["payload"] = json.loads(decoded["payload"])
-            except Exception:
-                pass
-        return decoded
 
     def _parse_datetime(self, value: str):
         if not value:

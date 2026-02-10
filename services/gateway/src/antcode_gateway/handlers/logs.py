@@ -17,6 +17,7 @@ from datetime import datetime
 from loguru import logger
 
 from antcode_core.common.config import settings
+from antcode_core.infrastructure.redis import decode_stream_payload, log_stream_key
 
 
 @dataclass
@@ -51,8 +52,6 @@ class LogHandler:
     2. 日志分片写入持久化存储（S3/ClickHouse）
     """
 
-    # Redis Streams 键前缀
-    LOG_STREAM_PREFIX = f"{settings.REDIS_NAMESPACE}:log:stream:"
     MAX_STREAM_LENGTH = settings.LOG_STREAM_MAXLEN
     STREAM_TTL_SECONDS = settings.LOG_STREAM_TTL_SECONDS
 
@@ -65,6 +64,9 @@ class LogHandler:
         """
         self._redis_client = redis_client
         self._log_storage = log_storage
+
+    def _stream_key(self, run_id: str) -> str:
+        return log_stream_key(run_id)
 
     async def _get_redis_client(self):
         """获取 Redis 客户端"""
@@ -90,6 +92,71 @@ class LogHandler:
                 return None
         return self._log_storage
 
+    async def _persist_realtime_logs(self, entries: list[LogEntry]) -> None:
+        """持久化实时日志条目。"""
+        log_storage = await self._get_log_storage()
+        if log_storage is None:
+            return
+
+        try:
+            from antcode_core.infrastructure.storage.log_storage import LogEntry as StorageLogEntry
+
+            for entry in entries:
+                storage_entry = StorageLogEntry(
+                    run_id=entry.run_id,
+                    log_type=entry.log_type,
+                    content=entry.content,
+                    sequence=entry.sequence,
+                    timestamp=datetime.fromtimestamp(entry.timestamp) if entry.timestamp else None,
+                )
+                result = await log_storage.write_log(storage_entry)
+
+                if not result.success:
+                    logger.warning(f"持久化日志失败: {result.error}")
+
+        except Exception as e:
+            logger.error(f"持久化日志失败: {e}")
+
+    async def handle_realtime_logs(self, entries: list[LogEntry]) -> bool:
+        """批量处理实时日志。
+
+        使用单次 pipeline 提升高频日志吞吐。
+        """
+        if not entries:
+            return True
+
+        redis = await self._get_redis_client()
+        if redis is not None:
+            try:
+                pipe = redis.pipeline(transaction=False)
+                expire_keys: set[str] = set()
+
+                for entry in entries:
+                    stream_key = self._stream_key(entry.run_id)
+                    pipe.xadd(
+                        stream_key,
+                        {
+                            "log_type": entry.log_type,
+                            "content": entry.content,
+                            "timestamp": str(entry.timestamp),
+                            "sequence": str(entry.sequence),
+                        },
+                        maxlen=self.MAX_STREAM_LENGTH,
+                        approximate=True,
+                    )
+                    if self.STREAM_TTL_SECONDS > 0:
+                        expire_keys.add(stream_key)
+
+                for stream_key in expire_keys:
+                    pipe.expire(stream_key, self.STREAM_TTL_SECONDS)
+
+                await pipe.execute()
+            except Exception as e:
+                logger.error(f"写入日志 Stream 失败: {e}")
+
+        await self._persist_realtime_logs(entries)
+        return True
+
     async def handle_realtime_log(self, entry: LogEntry) -> bool:
         """处理实时日志
 
@@ -101,60 +168,11 @@ class LogHandler:
         Returns:
             是否成功
         """
-        run_id = entry.run_id
-
         logger.debug(
-            f"收到实时日志: run_id={run_id}, "
+            f"收到实时日志: run_id={entry.run_id}, "
             f"type={entry.log_type}, size={len(entry.content)}"
         )
-
-        # 1. 写入 Redis Stream（实时推送）
-        redis = await self._get_redis_client()
-        if redis is not None:
-            try:
-                stream_key = f"{self.LOG_STREAM_PREFIX}{run_id}"
-
-                await redis.xadd(
-                    stream_key,
-                    {
-                        "log_type": entry.log_type,
-                        "content": entry.content,
-                        "timestamp": str(entry.timestamp),
-                        "sequence": str(entry.sequence),
-                    },
-                    maxlen=self.MAX_STREAM_LENGTH,
-                    approximate=True,
-                )
-                if self.STREAM_TTL_SECONDS > 0:
-                    await redis.expire(stream_key, self.STREAM_TTL_SECONDS)
-
-                logger.debug(f"日志已写入 Stream: {stream_key}")
-
-            except Exception as e:
-                logger.error(f"写入日志 Stream 失败: {e}")
-
-        # 2. 写入持久化存储（S3/ClickHouse）
-        log_storage = await self._get_log_storage()
-        if log_storage is not None:
-            try:
-                from antcode_core.infrastructure.storage.log_storage import LogEntry as StorageLogEntry
-
-                storage_entry = StorageLogEntry(
-                    run_id=run_id,
-                    log_type=entry.log_type,
-                    content=entry.content,
-                    sequence=entry.sequence,
-                    timestamp=datetime.fromtimestamp(entry.timestamp) if entry.timestamp else None,
-                )
-                result = await log_storage.write_log(storage_entry)
-
-                if not result.success:
-                    logger.warning(f"持久化日志失败: {result.error}")
-
-            except Exception as e:
-                logger.error(f"持久化日志失败: {e}")
-
-        return True
+        return await self.handle_realtime_logs([entry])
 
     async def handle_log_chunk(self, chunk: LogChunk) -> dict:
         """处理日志分片
@@ -250,7 +268,7 @@ class LogHandler:
             return []
 
         try:
-            stream_key = f"{self.LOG_STREAM_PREFIX}{run_id}"
+            stream_key = self._stream_key(run_id)
 
             # 使用 XRANGE 读取日志
             messages = await redis.xrange(
@@ -262,21 +280,14 @@ class LogHandler:
 
             logs = []
             for message_id, data in messages:
-                # 解码数据
-                decoded = {}
-                for k, v in data.items():
-                    key = k.decode() if isinstance(k, bytes) else k
-                    value = v.decode() if isinstance(v, bytes) else v
-                    decoded[key] = value
-
+                decoded = decode_stream_payload(data)
+                mid = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
                 logs.append({
-                    "id": message_id.decode()
-                    if isinstance(message_id, bytes)
-                    else message_id,
+                    "id": mid,
                     "log_type": decoded.get("log_type", "stdout"),
                     "content": decoded.get("content", ""),
-                    "timestamp": float(decoded.get("timestamp", 0)),
-                    "sequence": int(decoded.get("sequence", 0)),
+                    "timestamp": float(decoded.get("timestamp", 0) or 0),
+                    "sequence": int(decoded.get("sequence", 0) or 0),
                 })
 
             return logs
@@ -301,7 +312,7 @@ class LogHandler:
             return False
 
         try:
-            stream_key = f"{self.LOG_STREAM_PREFIX}{run_id}"
+            stream_key = self._stream_key(run_id)
             await redis.delete(stream_key)
             logger.debug(f"日志 Stream 已清理: {stream_key}")
             return True

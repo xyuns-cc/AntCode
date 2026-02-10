@@ -51,6 +51,15 @@ class UserService:
 
     # 允许排序的字段
     ALLOWED_SORT_FIELDS = {"id", "username", "created_at"}
+    ONLINE_WINDOW_SECONDS = 900
+
+    @staticmethod
+    def _is_user_online(last_login_at: datetime | None) -> bool:
+        if not last_login_at:
+            return False
+
+        now = datetime.now(last_login_at.tzinfo) if last_login_at.tzinfo else datetime.now()
+        return (now - last_login_at).total_seconds() <= UserService.ONLINE_WINDOW_SECONDS
 
     def _normalize_cached_user_list(self, cached):
         """修复历史缓存字段缺失问题（updated_at）"""
@@ -243,6 +252,7 @@ class UserService:
                     created_at=created_at,
                     updated_at=updated_at,
                     last_login_at=u.last_login_at,
+                    is_online=self._is_user_online(u.last_login_at),
                 )
             )
 
@@ -290,8 +300,35 @@ class UserService:
             raise ValueError("用户不存在")
 
         update_data = request.model_dump(exclude_unset=True)
+
+        new_username = update_data.get("username")
+        if new_username and new_username != user.username:
+            existing_user = await User.get_or_none(username=new_username)
+            if existing_user and existing_user.id != user.id:
+                raise IntegrityError("用户名已存在")
+
+        new_email = update_data.get("email")
+        if new_email and new_email != user.email:
+            existing_email = await User.get_or_none(email=new_email)
+            if existing_email and existing_email.id != user.id:
+                raise IntegrityError("邮箱已存在")
+
         for field, value in update_data.items():
+            if field in {"old_password", "new_password"}:
+                continue
             setattr(user, field, value)
+
+        old_password = update_data.get("old_password")
+        new_password = update_data.get("new_password")
+        if new_password:
+            if old_password and not user.verify_password(old_password):
+                raise ValueError("当前密码错误")
+
+            is_valid, error_msg = validate_password_strength(new_password)
+            if not is_valid:
+                raise ValueError(error_msg)
+
+            user.set_password(new_password)
 
         await user.save()
         await self._invalidate_user_cache(user.id)

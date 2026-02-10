@@ -14,14 +14,14 @@ router = APIRouter()
 
 
 @router.post(
-    "/manual/{execution_id}",
+    "/manual/{run_id}",
     summary="手动重试任务",
     description="手动触发失败任务的重试",
 )
-async def manual_retry_task(execution_id: str, current_user: TokenData = Depends(get_current_user)):
+async def manual_retry_task(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """手动重试任务"""
     result = await retry_service.manual_retry(
-        execution_id=execution_id, user_id=current_user.user_id
+        run_id=run_id, user_id=current_user.user_id
     )
 
     if not result["success"]:
@@ -72,6 +72,9 @@ async def get_pending_retries(current_user: TokenData = Depends(get_current_user
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
 
     pending = await retry_service.get_pending_retries()
+
+    if not pending:
+        return success({"items": [], "total": 0})
 
     # 将内部 task_id 转换为 public_id
     task_ids = [item["task_id"] for item in pending]
@@ -132,19 +135,19 @@ async def update_retry_config(
 
 
 @router.post(
-    "/cancel/{execution_id}",
+    "/cancel/{run_id}",
     summary="取消待重试任务",
     description="取消队列中待重试的任务",
 )
 async def cancel_pending_retry(
-    execution_id: str, current_user: TokenData = Depends(get_current_user)
+    run_id: str, current_user: TokenData = Depends(get_current_user)
 ):
     """取消待重试任务"""
     from antcode_core.domain.models.enums import TaskStatus
     from antcode_core.domain.models.task import Task
     from antcode_core.domain.models.task_run import TaskRun
 
-    execution = await TaskRun.get_or_none(execution_id=execution_id)
+    execution = await TaskRun.get_or_none(run_id=run_id)
     if not execution:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="执行记录不存在")
 
@@ -164,7 +167,7 @@ async def cancel_pending_retry(
 
     logger.info(f"任务 {task.name} 的重试已取消 by user {current_user.user_id}")
 
-    return success({"execution_id": execution_id, "status": "cancelled"}, message="重试已取消")
+    return success({"run_id": run_id, "status": "cancelled"}, message="重试已取消")
 
 
 @router.get(
@@ -204,7 +207,7 @@ async def get_retry_history(
 
     items = [
         {
-            "execution_id": e.execution_id,
+            "run_id": e.run_id,
             "public_id": e.public_id,
             "status": e.status.value,
             "retry_count": e.retry_count,

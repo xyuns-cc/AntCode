@@ -214,6 +214,7 @@ class AuditService:
         action=None,
         resource_type=None,
         username=None,
+        user_id=None,
         start_date=None,
         end_date=None,
         success=None,
@@ -227,6 +228,7 @@ class AuditService:
             action: 操作类型过滤
             resource_type: 资源类型过滤
             username: 用户名过滤
+            user_id: 用户ID过滤
             start_date: 开始时间
             end_date: 结束时间
             success: 成功状态过滤
@@ -242,6 +244,8 @@ class AuditService:
             query = query.filter(resource_type=resource_type)
         if username:
             query = query.filter(username__icontains=username)
+        if user_id is not None:
+            query = query.filter(user_id=user_id)
         if start_date:
             query = query.filter(created_at__gte=start_date)
         if end_date:
@@ -262,9 +266,12 @@ class AuditService:
                     "resource_type": log.resource_type,
                     "resource_id": log.resource_id,
                     "resource_name": log.resource_name,
+                    "user_id": log.user_id,
                     "username": log.username,
                     "ip_address": log.ip_address,
                     "description": log.description,
+                    "old_value": log.old_value,
+                    "new_value": log.new_value,
                     "success": log.success,
                     "error_message": log.error_message,
                     "created_at": log.created_at.isoformat(),
