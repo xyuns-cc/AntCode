@@ -134,3 +134,6 @@ DOCS_CLEANUP_SUMMARY.md
 # Keep example env templates
 !.env.example
 !**/.env.example
+
+# Legacy frontend workspace
+web_new/

@@ -3,6 +3,8 @@
 批量迁移 src.* 导入到 antcode_core 的脚本
 """
 
+import os
+import re
 from pathlib import Path
 
 from loguru import logger

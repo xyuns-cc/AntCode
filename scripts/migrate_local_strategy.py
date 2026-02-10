@@ -16,11 +16,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from loguru import logger  # noqa: E402
-from tortoise import Tortoise  # noqa: E402
-from tortoise.transactions import in_transaction  # noqa: E402
+from loguru import logger
+from tortoise import Tortoise
+from tortoise.transactions import in_transaction
 
-from antcode_core.infrastructure.db.tortoise import TORTOISE_ORM  # noqa: E402
+from antcode_core.infrastructure.db.tortoise import TORTOISE_ORM
 
 
 async def count_local_strategy_records() -> tuple[int, int]:

@@ -10,7 +10,7 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     `public_id` VARCHAR(32) NOT NULL UNIQUE,
     `user_id` BIGINT NOT NULL,
     `session_type` VARCHAR(20) NOT NULL,
-    `worker_id` VARCHAR(32),
+    `node_id` VARCHAR(32),
     `ip_address` VARCHAR(50),
     `user_agent` VARCHAR(500),
     `last_seen_at` DATETIME(6),
@@ -20,12 +20,12 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     KEY `idx_user_sessions_public_id` (`public_id`),
     KEY `idx_user_sessions_user_id` (`user_id`),
     KEY `idx_user_sessions_session_type` (`session_type`),
-    KEY `idx_user_sessions_worker_id` (`worker_id`),
+    KEY `idx_user_sessions_node_id` (`node_id`),
     KEY `idx_user_sessions_last_seen_at` (`last_seen_at`),
     KEY `idx_user_sessions_revoked_at` (`revoked_at`),
     KEY `idx_user_sessions_user_session_type` (`user_id`, `session_type`),
     KEY `idx_user_sessions_type_last_seen` (`session_type`, `last_seen_at`),
-    KEY `idx_user_sessions_worker_session_type` (`worker_id`, `session_type`)
+    KEY `idx_user_sessions_node_session_type` (`node_id`, `session_type`)
 ) CHARACTER SET utf8mb4 COMMENT='用户会话';
         """
 
