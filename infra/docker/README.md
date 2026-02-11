@@ -82,7 +82,7 @@ docker compose -f docker-compose.dev.yml up -d --force-recreate
 | `MYSQL_*` | MySQL 账号与库配置 |
 | `REDIS_PASSWORD` | Redis 密码 |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO 凭据 |
-| `WORKER_MODE` / `WORKER_NAME` | Worker 基础配置 |
+| `WORKER_TRANSPORT_MODE` / `WORKER_NAME` | Worker 基础配置 |
 
 ## 故障排查
 
