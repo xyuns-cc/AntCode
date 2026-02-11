@@ -1,78 +1,71 @@
-# AntCode Worker（Execution Plane）
+# 👷 AntCode Worker (执行节点)
 
-Worker 负责执行任务、管理运行时环境、上报日志与心跳。
+Worker 是 AntCode 的"手脚"，负责实际执行用户提交的任务。它被设计为无状态、即插即用的组件，支持动态扩缩容。
 
-## 目录结构（核心）
+---
 
-```text
-services/worker/
-├── src/antcode_worker/
-│   ├── app/                # 依赖装配
-│   ├── engine/             # 任务执行编排
-│   ├── executor/           # 进程执行与隔离
-│   ├── heartbeat/          # 心跳上报
-│   ├── logs/               # 实时日志 / WAL / Spool
-│   ├── plugins/            # code/spider/render 插件
-│   ├── projects/           # 项目缓存与拉取
-│   ├── runtime/            # uv 运行时管理
-│   ├── security/           # 凭证与安全工具
-│   └── transport/          # direct / gateway 传输层
-└── config/                 # 示例配置
-```
+## 🌟 核心职责
 
-## 启动方式
+1.  **任务执行 (Execution)**: 从队列拉取任务，启动隔离的 Python 运行时环境执行代码。
+2.  **环境管理 (Runtime Management)**: 自动安装 `uv`，并为每个项目创建独立的虚拟环境，确保依赖不冲突。
+3.  **实时日志 (Real-time Logging)**: 捕获任务的 `stdout/stderr`，并通过流式传输实时上报给后端。
+4.  **心跳保活 (Heartbeat)**: 定期上报节点状态（CPU/内存/任务数），供控制面决策调度。
+
+---
+
+## 🚀 启动指南
+
+### 方式一：交互式启动 (推荐新手)
 
 ```bash
-# 交互式
 uv run python -m antcode_worker
+```
+系统会引导你输入节点名称、选择接入模式等配置。
 
-# 查看帮助
-uv run python -m antcode_worker --help
+### 方式二：命令行参数启动 (推荐脚本/容器)
 
-# 诊断
-uv run python -m antcode_worker doctor
-
-# 启动节点
-uv run python -m antcode_worker --name Worker-001 --port 8001
+```bash
+uv run python -m antcode_worker --name "My-Worker-01" --port 8001
 ```
 
-## 传输模式
+### 方式三：环境变量配置 (推荐生产环境)
 
-- `direct`：内网直连 Redis
-- `gateway`：通过 gRPC Gateway 公网接入
+你可以通过环境变量预设配置，无论是 Direct 还是 Gateway 模式：
 
-推荐显式设置：
+| 变量名 | 描述 | 示例 |
+| :--- | :--- | :--- |
+| `WORKER_NAME` | 节点名称 | `prod-worker-01` |
+| `WORKER_TRANSPORT_MODE` | 接入模式 | `gateway` (默认 `direct`) |
+| `WORKER_GATEWAY_ENDPOINT` | Gateway 地址 | `gateway.example.com:50051` |
+| `WORKER_REDIS_URL` | Redis 地址 (Direct 模式) | `redis://192.168.1.10:6379/0` |
 
-```env
-WORKER_TRANSPORT_MODE=gateway
-```
+---
 
-## 运行时数据目录
+## 📂 运行时数据结构
 
-默认目录：`data/worker`
+Worker 所有的运行时产生的数据都存储在 `data/worker` 目录下（可通过 `WORKER_DATA_DIR` 修改）：
 
 ```text
 data/worker/
-├── worker_config.yaml
-├── projects/
-├── runtimes/
-├── logs/
-├── runs/
-├── secrets/
-└── identity/
+├── projects/      # 项目代码缓存 (按 version 存储)
+├── runtimes/      # Python 虚拟环境 (按项目+环境 hash 隔离)
+├── logs/          # 任务执行日志
+├── runs/          # 任务执行时的临时工作目录
+└── identity/      # 节点身份标识 (UUID)
 ```
 
-## 关键配置项
+---
 
-| 变量 | 说明 |
-|---|---|
-| `WORKER_DATA_DIR` | Worker 数据根目录 |
-| `WORKER_TRANSPORT_MODE` | `direct` / `gateway` |
-| `WORKER_REDIS_URL` | Direct 模式 Redis 地址 |
-| `WORKER_GATEWAY_ENDPOINT` | Gateway 模式地址（`host:port`） |
-| `ANTCODE_WORKER_KEY` | 安装 Key（节点注册） |
+## 🛠️ 常见操作
 
-## 约束
+### 运行环境诊断
+如果遇到依赖安装失败或网络问题，请运行诊断工具：
+```bash
+uv run python -m antcode_worker doctor
+```
 
-- Worker 仅写入 `data/worker`
-- 不应在仓库其他目录创建运行时文件
+### 查看帮助
+获取完整的参数列表：
+```bash
+uv run python -m antcode_worker --help
+```

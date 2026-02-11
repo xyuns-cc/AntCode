@@ -1,56 +1,51 @@
-# AntCode Gateway（Data Plane）
+# 🚪 AntCode Gateway (数据面)
 
-Gateway 为公网 Worker 提供统一 gRPC 接入层，负责认证、限流、协议转换与后端交互。
+Gateway 是连接公网与内网的桥梁。它为部署在公网或跨云环境的 Worker 提供了一个统一、安全、高性能的 gRPC 接入层。
 
-## 核心职责
+---
 
-- 暴露 gRPC 服务供 Worker 接入
-- 执行 API Key / mTLS 认证
-- 承担限流、连接治理与防护
-- 将 Worker 请求转换为后端可消费的数据流
+## 🛡️ 核心职责
 
-## 目录结构
+1.  **安全接入 (Secure Access)**: 作为公网入口，所有请求必须通过 API Key 或 mTLS 双向认证。
+2.  **协议转换 (Protocol Translation)**: 将 Worker 的 gRPC 请求转换为内部 Redis Stream 消息指令，对后端透明。
+3.  **连接管理 (Connection Mgmt)**: 维护长连接，处理心跳保活，识别并剔除失联节点。
+4.  **流量控制 (Rate Limiting)**: 防止恶意或失控的 Worker 流量打垮后端存储。
 
-```text
-services/gateway/
-├── src/antcode_gateway/
-│   ├── auth.py
-│   ├── rate_limit.py
-│   ├── server.py
-│   ├── config.py
-│   ├── handlers/
-│   └── services/
-└── pyproject.toml
-```
+---
 
-## 启动
+## ⚡ 快速启动
+
+### 命令行启动
 
 ```bash
 uv run python -m antcode_gateway
 ```
 
-## 关键配置
+### 推荐配置
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `GRPC_HOST` | `0.0.0.0` | gRPC 监听地址 |
-| `GRPC_PORT` | `50051` | gRPC 监听端口 |
-| `GRPC_MAX_WORKERS` | `10` | gRPC 工作线程 |
-| `AUTH_ENABLED` | `true` | 认证开关 |
-| `RATE_LIMIT_ENABLED` | `true` | 限流开关 |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis 连接 |
+生产环境建议通过环境变量进行配置：
 
-TLS（可选）：
+| 变量名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `GRPC_HOST` | `0.0.0.0` | 监听地址 |
+| `GRPC_PORT` | `50051` | 监听端口 |
+| `AUTH_ENABLED` | `true` | 是否开启鉴权 (生产环境必须开启) |
+| `RATE_LIMIT_ENABLED` | `true` | 是否开启限流 |
 
-- `GRPC_TLS_CERT_PATH`
-- `GRPC_TLS_KEY_PATH`
-- `GRPC_TLS_CA_PATH`（启用 mTLS 时必需）
+---
 
-## 运行时目录
+## 🔒 安全配置建议
 
-Gateway 归属后端运行时目录：`data/backend`。
+为了确保通讯安全，强烈建议在生产环境启用 TLS：
 
-## 边界说明
+```bash
+export GRPC_TLS_ENABLED=true
+export GRPC_TLS_CERT_PATH=/path/to/server.crt
+export GRPC_TLS_KEY_PATH=/path/to/server.key
+```
 
-- Gateway 不实现调度策略（由 `master` 负责）
-- Gateway 不提供业务 CRUD（由 `web_api` 负责）
+若需极高安全性，可开启 mTLS (双向认证)：
+
+```bash
+export GRPC_TLS_CA_PATH=/path/to/ca.crt
+```
