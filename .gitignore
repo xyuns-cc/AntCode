@@ -97,13 +97,6 @@ src/logs/
 # Vite cache
 web/antcode-frontend/node_modules/.vite/
 
-# Documentation (except README files)
-doc/
-docs/
-*.md
-!README.md
-!**/README.md
-
 # Additional files to ignore
 # JWT密钥（在 data/ 目录下）
 data/.jwt_secret
