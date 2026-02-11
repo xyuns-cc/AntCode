@@ -8,8 +8,6 @@
 #   - worker (Execution Plane): 任务执行器
 # =====================================================
 
-version: '3.8'
-
 services:
   # ================== 基础设施服务 ==================
 
@@ -188,7 +186,7 @@ services:
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
-      - WORKER_MODE=direct
+      - WORKER_TRANSPORT_MODE=direct
       - WORKER_NAME=${WORKER_NAME:-worker-1}
     volumes:
       - worker_data:/app/data
