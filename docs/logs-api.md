@@ -236,15 +236,13 @@ curl -X GET "/api/v1/logs/executions/abc123/stderr?level=ERROR" \
 
 ### 4. 实时日志流 (WebSocket)
 
-**注意**: 当前版本暂时移除了WebSocket功能，此接口暂不可用。
-
-**WebSocket** `/api/v1/logs/executions/{execution_id}/stream`
+**WebSocket** `/api/v1/ws/runs/{run_id}/logs`
 
 实时接收任务执行日志流。
 
 #### 连接示例
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/api/v1/logs/executions/abc123/stream?token=<jwt-token>');
+const ws = new WebSocket('ws://localhost:8000/api/v1/ws/runs/<run_id>/logs?token=<jwt-token>');
 
 ws.onmessage = function(event) {
     const logData = JSON.parse(event.data);

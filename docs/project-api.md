@@ -68,8 +68,14 @@ ProjectStatus:
 - `entry_point` (string, 可选): 入口文件路径
 - `runtime_config` (string, 可选): 运行时配置JSON
 - `environment_vars` (string, 可选): 环境变量JSON
-- `file` (file, 必需): 项目文件
+- `source_type` (string, 可选): 文件来源类型 (`s3` | `git`)，默认 `s3`
+- `file` (file, 条件必需): 项目文件（`source_type=s3` 时必需）
 - `files` (file[], 可选): 多个项目文件
+- `git_url` (string, 条件必需): Git 仓库地址（`source_type=git` 时必需）
+- `git_branch` (string, 可选): Git 分支名
+- `git_commit` (string, 可选): Git 提交哈希
+- `git_subdir` (string, 可选): Git 仓库子目录
+- `git_credential_id` (string, 可选): Git 凭证 ID（私有仓库时使用，参见 [Git 凭证管理](../services/web_api/src/antcode_web_api/routes/v1/git_credentials.py)）
 
 **规则项目参数：**
 - `engine` (string): 采集引擎 (`browser` | `requests` | `curl_cffi`)
@@ -91,8 +97,14 @@ ProjectStatus:
 - `version` (string, 可选): 语言版本
 - `code_entry_point` (string, 可选): 代码入口点
 - `documentation` (string, 可选): 文档说明
-- `code_content` (string): 代码内容
-- `code_file` (file, 可选): 代码文件
+- `source_type` (string, 可选): 代码来源类型 (`s3` | `git` | `inline`)，默认 `s3`
+- `code_content` (string, 条件可选): 代码内容（`source_type=inline` 时使用）
+- `code_file` (file, 可选): 代码文件（`source_type=s3` 时使用）
+- `git_url` (string, 条件必需): Git 仓库地址（`source_type=git` 时必需）
+- `git_branch` (string, 可选): Git 分支名
+- `git_commit` (string, 可选): Git 提交哈希
+- `git_subdir` (string, 可选): Git 仓库子目录
+- `git_credential_id` (string, 可选): Git 凭证 ID（私有仓库时使用）
 
 #### 请求示例
 
@@ -135,7 +147,8 @@ curl -X POST /api/v1/projects \
         "file_info": {
             "original_name": "test_project.zip",
             "file_size": 1024,
-            "file_hash": "abc123..."
+            "file_hash": "abc123...",
+            "source_type": "s3"
         }
     }
 }
@@ -362,7 +375,11 @@ curl -X POST /api/v1/projects/batch-delete \
     "file_config": {
         "entry_point": "app.py",
         "runtime_config": {"workers": 2},
-        "environment_vars": {"ENV": "production"}
+        "environment_vars": {"ENV": "production"},
+        "source_type": "git",
+        "git_url": "https://github.com/example/repo.git",
+        "git_branch": "main",
+        "git_credential_id": "cred_abc123"
     }
 }
 ```
@@ -392,7 +409,11 @@ curl -X POST /api/v1/projects/batch-delete \
     "code_config": {
         "code_content": "print('Hello Updated World!')",
         "language": "python",
-        "version": "3.11"
+        "version": "3.11",
+        "source_type": "git",
+        "git_url": "https://github.com/example/repo.git",
+        "git_branch": "main",
+        "git_credential_id": "cred_abc123"
     }
 }
 ```
