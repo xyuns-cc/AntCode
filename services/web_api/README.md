@@ -28,7 +28,7 @@ uv run python -m antcode_web_api
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `PORT` | `8000` | 监听端口 |
 | `DATABASE_URL` | - | 数据库连接串 |
-| `JWT_SECRET_KEY` | - | 鉴权密钥 |
+| `ENCRYPTION_KEY` | - | 加密密钥（用于凭证加密等） |
 
 ---
 
@@ -47,4 +47,4 @@ uv run python -m antcode_web_api
 -   `core/`: 核心配置与工具
 -   `services/`: 业务逻辑层 (Service Layer)
 -   `schemas/`: Pydantic 数据模型 (DTO)
--   `models/`: SQLAlchemy 数据库模型 (ORM)
+-   `models/`: Tortoise ORM 数据库模型

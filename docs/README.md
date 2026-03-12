@@ -12,12 +12,12 @@
 如果你刚接触 AntCode，建议按以下顺序阅读：
 1.  **[项目总览](../README.md)**: 了解 AntCode 是什么，以及如何快速启动。
 2.  **[架构设计](ARCHITECTURE.md)**: 理解系统的核心分层（控制面 vs 执行面）与数据流向。
-3.  **[本地开发指南](../README.md#快速开始本地开发)**: 手把手教你搭建开发环境。
+3.  **[本地开发指南](../README.md#-快速上手)**: 手把手教你搭建开发环境。
 
 ### 我是... 核心贡献者 (Core Contributor)
 深入理解系统内部机制：
 -   **[数据库设计](database-setup.md)**: 数据库选型、Schema 定义与 Alembic 迁移指南。
--   **[Worker 通信原理](worker-transport.md)**: 深入剖析 Director 与 Gateway 两种接入模式的底层差异。
+-   **[Worker 通信原理](worker-transport.md)**: 深入剖析 Direct 与 Gateway 两种接入模式的底层差异。
 -   **[系统配置详解](system-config.md)**: 掌握所有环境变量与配置项的生效策略。
 -   **[节点环境管理](node-env-management.md)**: 了解 Worker 如何自动管理 Python 运行时环境。
 -   **[容错与恢复](resilience.md)**: 学习系统如何处理节点故障与网络分区。
@@ -26,6 +26,7 @@
 对接后端接口与数据模型：
 -   **[Web API 接口概览](../services/web_api/README.md)**: 快速了解 API 结构（或直接查看 [Swagger UI](http://localhost:8000/docs)）。
 -   **[项目管理 API](project-api.md)**: Project 相关的核心接口逻辑。
+-   **[Git 凭证管理 API](../services/web_api/src/antcode_web_api/routes/v1/git_credentials.py)**: Git 凭证 CRUD 接口（代码即文档，参见 Swagger）。
 -   **[任务调度 API](scheduler-api.md)**: 任务创建、触发与状态查询。
 -   **[日志系统 API](logs-api.md)**: 实时日志流与历史日志查询接口。
 -   **[用户与权限 API](user-api.md)**: 认证与授权模块。
@@ -60,6 +61,7 @@
 
 | 版本 | 日期 | 说明 |
 | :--- | :--- | :--- |
+| **v3.2** | 2026-03-12 | 新增 Git 凭证管理、项目多来源类型（git/s3/legacy_inline）、统一 API 响应信封。 |
 | **v3.1** | 2026-02-10 | 统一 `data/backend` 与 `data/worker` 目录结构，精简文档索引。 |
 | **v3.0** | 2026-01-15 | 新架构发布，文档重构。 |
 
