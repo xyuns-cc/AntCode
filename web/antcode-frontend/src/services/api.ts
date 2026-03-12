@@ -9,6 +9,7 @@ import showNotification from '@/utils/notification'
 import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
 import { AuthHandler } from '@/utils/authHandler'
 import { isAbortError } from '@/utils/helpers'
+import { presentApiError } from '@/utils/apiErrorPresentation'
 
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -26,54 +27,19 @@ apiClient.interceptors.request.use((config) => {
   return config
 })
 
-type ErrorData = {
-  message?: string
-  detail?: string | Array<{ msg?: string }>
-}
-
-const buildErrorMessage = (error: AxiosError<ErrorData | unknown>) => {
-  const status = error.response?.status
-  const data = error.response?.data
-
-  if (data && typeof data === 'object' && 'message' in data && (data as ErrorData).message) {
-    return String((data as ErrorData).message)
-  }
-  if (Array.isArray((data as ErrorData | undefined)?.detail)) {
-    const detailItems = (data as ErrorData).detail as Array<{ msg?: string } | string>
-    const detail = detailItems
-      .map((d) => (typeof d === 'string' ? d : d?.msg || ''))
-      .filter(Boolean)
-      .join(', ')
-    if (detail) return `参数错误: ${detail}`
-  }
-  if (data && typeof data === 'object' && 'detail' in data && (data as ErrorData).detail) {
-    return String((data as ErrorData).detail)
-  }
-
-  switch (status) {
-    case 400: return '请求参数错误'
-    case 401: return '未认证或登录已过期'
-    case 403: return '权限不足'
-    case 404: return '请求的资源不存在'
-    case 429: return '请求过于频繁，请稍后再试'
-    case 500: return '服务器内部错误'
-    case 502: return '网关错误'
-    case 503: return '服务暂时不可用'
-    default: return error.message || '请求失败'
-  }
-}
-
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => response,
   (error: AxiosError) => {
     if (isAbortError(error)) {
       return Promise.reject(error)
     }
+
     if (error.response?.status === 401) {
       AuthHandler.handleAuthFailure()
     }
-    const message = buildErrorMessage(error)
-    showNotification('error', message)
+
+    const { title, description } = presentApiError(error)
+    showNotification('error', title, description)
     return Promise.reject(error)
   }
 )

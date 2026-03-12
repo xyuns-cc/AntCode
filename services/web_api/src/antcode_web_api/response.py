@@ -2,7 +2,12 @@
 
 from enum import IntEnum
 
-from antcode_core.domain.schemas.common import BaseResponse, PaginationInfo, PaginationResponse
+from antcode_core.domain.schemas.common import (
+    BaseResponse,
+    PaginationData,
+    PaginationInfo,
+    PaginationResponse,
+)
 
 
 class ResponseCode(IntEnum):
@@ -63,8 +68,10 @@ def page(items, total, page, size, message=Messages.QUERY_SUCCESS, code=Response
         success=True,
         code=int(code),
         message=message,
-        data=list(items),
-        pagination=PaginationInfo(page=page, size=size, total=total, pages=pages),
+        data=PaginationData(
+            items=list(items),
+            pagination=PaginationInfo(page=page, size=size, total=total, pages=pages),
+        ),
     )
 
 
@@ -83,6 +90,28 @@ def execution_list(total, page_num, size, items):
 
 
 # ============================================================================
+# 响应构建器辅助函数
+# ============================================================================
+
+
+def _safe_attr(obj, attr, default=None):
+    """安全获取属性值，自动提取 enum.value"""
+    value = getattr(obj, attr, default)
+    if value is not None and hasattr(value, "value"):
+        return value.value
+    return value
+
+
+def _resolve_public_id(obj, public_id_attr, fallback_attr):
+    """解析 public_id，优先使用专用属性，回退到内部 ID 转字符串"""
+    public_id = getattr(obj, public_id_attr, None)
+    if public_id:
+        return public_id
+    fallback = getattr(obj, fallback_attr, None)
+    return str(fallback) if fallback else None
+
+
+# ============================================================================
 # 领域响应构建器
 # ============================================================================
 
@@ -95,18 +124,9 @@ class ProjectResponseBuilder:
         """构建项目详情响应"""
         from antcode_core.domain.schemas.project import ProjectResponse
 
-        created_by_public_id = getattr(project, "created_by_public_id", None)
-        if not created_by_public_id:
-            created_by_public_id = str(project.user_id) if project.user_id else None
-
-        # 获取执行策略相关字段
-        execution_strategy = getattr(project, "execution_strategy", None)
-        if execution_strategy and hasattr(execution_strategy, "value"):
-            execution_strategy = execution_strategy.value
-
+        created_by_public_id = _resolve_public_id(project, "created_by_public_id", "user_id")
+        execution_strategy = _safe_attr(project, "execution_strategy")
         bound_worker_id = getattr(project, "bound_worker_id", None)
-        bound_worker_name = getattr(project, "bound_worker_name", None)
-        fallback_enabled = getattr(project, "fallback_enabled", None)
 
         return ProjectResponse.model_construct(
             id=project.public_id,
@@ -129,11 +149,10 @@ class ProjectResponseBuilder:
             runtime_scope=getattr(project, "runtime_scope", None),
             runtime_kind=getattr(project, "runtime_kind", None),
             runtime_locator=getattr(project, "runtime_locator", None),
-            # 执行策略字段
             execution_strategy=execution_strategy,
             bound_worker_id=str(bound_worker_id) if bound_worker_id else None,
-            bound_worker_name=bound_worker_name,
-            fallback_enabled=fallback_enabled,
+            bound_worker_name=getattr(project, "bound_worker_name", None),
+            fallback_enabled=getattr(project, "fallback_enabled", None),
         )
 
     @staticmethod
@@ -141,9 +160,7 @@ class ProjectResponseBuilder:
         """构建项目列表项响应"""
         from antcode_core.domain.schemas.project import ProjectListResponse
 
-        created_by_public_id = getattr(project, "created_by_public_id", None)
-        if not created_by_public_id and project.user_id:
-            created_by_public_id = str(project.user_id)
+        created_by_public_id = _resolve_public_id(project, "created_by_public_id", "user_id")
 
         return ProjectListResponse(
             id=project.public_id,
@@ -174,23 +191,12 @@ class TaskResponseBuilder:
         """构建任务详情响应"""
         from antcode_core.domain.schemas.task import TaskResponse
 
-        project_public_id = getattr(task, "project_public_id", None) or str(task.project_id)
-        created_by_public_id = getattr(task, "created_by_public_id", None) or str(task.user_id)
-
-        # 获取执行策略相关字段
-        execution_strategy = getattr(task, "execution_strategy", None)
-        if execution_strategy and hasattr(execution_strategy, "value"):
-            execution_strategy = execution_strategy.value
-
+        project_public_id = _resolve_public_id(task, "project_public_id", "project_id")
+        created_by_public_id = _resolve_public_id(task, "created_by_public_id", "user_id")
+        execution_strategy = _safe_attr(task, "execution_strategy")
+        project_execution_strategy = _safe_attr(task, "project_execution_strategy")
         specified_worker_id = getattr(task, "specified_worker_public_id", None)
-        specified_worker_name = getattr(task, "specified_worker_name", None)
-
-        # 项目执行配置
-        project_execution_strategy = getattr(task, "project_execution_strategy", None)
-        if project_execution_strategy and hasattr(project_execution_strategy, "value"):
-            project_execution_strategy = project_execution_strategy.value
         project_bound_worker_id = getattr(task, "project_bound_worker_public_id", None)
-        project_bound_worker_name = getattr(task, "project_bound_worker_name", None)
 
         return TaskResponse.model_construct(
             id=task.public_id,
@@ -210,18 +216,15 @@ class TaskResponseBuilder:
             updated_at=task.updated_at,
             created_by=created_by_public_id,
             created_by_username=getattr(task, "created_by_username", None),
-            # 执行策略字段
             execution_strategy=execution_strategy,
             specified_worker_id=str(specified_worker_id) if specified_worker_id else None,
-            specified_worker_name=specified_worker_name,
-            # 项目执行配置
+            specified_worker_name=getattr(task, "specified_worker_name", None),
             project_execution_strategy=project_execution_strategy,
             project_bound_worker_id=str(project_bound_worker_id)
             if project_bound_worker_id
             else None,
-            project_bound_worker_name=project_bound_worker_name,
+            project_bound_worker_name=getattr(task, "project_bound_worker_name", None),
             fallback_enabled=getattr(task, "fallback_enabled", None),
-            # 运行时
             runtime_scope=getattr(task, "runtime_scope", None),
             runtime_kind=getattr(task, "runtime_kind", None),
             python_version=getattr(task, "python_version", None),

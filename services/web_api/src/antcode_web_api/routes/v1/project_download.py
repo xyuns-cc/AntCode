@@ -1,25 +1,47 @@
-"""项目下载API"""
+"""项目下载 API。"""
 
+from __future__ import annotations
+
+import os
 import re
 from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from loguru import logger
+from pydantic import RootModel, field_validator
 
-from antcode_web_api.response import success as success_response
-from antcode_core.common.security import constant_time_compare
-from antcode_core.common.security.auth import TokenData, get_current_user
-from antcode_core.common.security.worker_auth import verify_worker_request_with_signature
-from antcode_core.domain.models import Project, User, Worker
+from antcode_core.application.services.files.file_storage import file_storage_service
+from antcode_core.application.services.projects.managed_paths import (
+    is_managed_path,
+    resolve_managed_path,
+)
 from antcode_core.application.services.projects.project_sync_service import project_sync_service
-from antcode_core.infrastructure.storage.presign import is_s3_storage_enabled
+from antcode_core.common.security.auth import TokenData, get_current_user
+from antcode_core.common.security.worker_auth import worker_auth_verifier
+from antcode_core.domain.models import Project, User, Worker
+from antcode_core.domain.schemas.common import BaseResponse
+from antcode_web_api.response import success as success_response
 
 router = APIRouter()
 _MAX_INCREMENTAL_FILE_COUNT = 2000
 _MAX_RELATIVE_PATH_LEN = 512
 _HASH_PATTERN = re.compile(r"^[A-Fa-f0-9]{32,128}$")
+_S3_TRANSFER_PREFIX = "s3_"
+_MANAGED_ARCHIVE_METHOD = "managed_archive"
+
+
+class IncrementalSyncHashes(RootModel[dict[str, str]]):
+    """客户端增量文件哈希映射。"""
+
+    @field_validator("root")
+    @classmethod
+    def validate_root(cls, value: dict[str, str]) -> dict[str, str]:
+        try:
+            return _validate_client_file_hashes(value)
+        except HTTPException as exc:
+            raise ValueError(str(exc.detail)) from exc
 
 
 async def _ensure_project_access(project_id: str, current_user: TokenData) -> Project:
@@ -40,7 +62,6 @@ async def _ensure_project_access(project_id: str, current_user: TokenData) -> Pr
 def _validate_client_file_hashes(client_file_hashes: dict[str, Any]) -> dict[str, str]:
     if not isinstance(client_file_hashes, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="client_file_hashes 必须是对象")
-
     if len(client_file_hashes) > _MAX_INCREMENTAL_FILE_COUNT:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -54,7 +75,6 @@ def _validate_client_file_hashes(client_file_hashes: dict[str, Any]) -> dict[str
 
         path = raw_path.strip()
         file_hash = raw_hash.strip().lower()
-
         if not path:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件路径不能为空")
         if len(path) > _MAX_RELATIVE_PATH_LEN:
@@ -65,242 +85,181 @@ def _validate_client_file_hashes(client_file_hashes: dict[str, Any]) -> dict[str
         segments = [segment for segment in path.split("/") if segment]
         if not segments or any(segment == ".." for segment in segments):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件路径包含非法目录")
-
         if not _HASH_PATTERN.fullmatch(file_hash):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件哈希格式非法")
-
         normalized[path] = file_hash
 
     return normalized
 
 
-@router.get("/{project_id}/transfer-info")
+@router.get("/{project_id}/transfer-info", response_model=BaseResponse[dict[str, Any]])
 async def get_project_transfer_info(
-    project_id: str, current_user: TokenData = Depends(get_current_user)
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
 ):
-    """获取传输策略"""
     project = await _ensure_project_access(project_id, current_user)
-
-    transfer_info = await project_sync_service.get_project_transfer_info(
-        project.id,
-        project=project,
-    )
-
+    transfer_info = await project_sync_service.get_project_transfer_info(project.id, project=project)
     return success_response(transfer_info)
 
 
-@router.get("/{project_id}/download")
+@router.get("/{project_id}/download", response_model=None)
 async def download_project_file(
     project_id: str,
     current_user: TokenData = Depends(get_current_user),
 ):
-    """下载项目文件"""
     project = await _ensure_project_access(project_id, current_user)
-
-    transfer_info = await project_sync_service.get_project_transfer_info(
-        project.id,
-        project=project,
-    )
-
-    if transfer_info.get("transfer_method") == "code":
-        raise HTTPException(status_code=400, detail="代码项目请使用/transfer-info获取")
-
-    file_path = transfer_info.get("file_path")
-    original_name = transfer_info.get("original_name")
-
+    transfer_info = await project_sync_service.get_project_transfer_info(project.id, project=project)
     logger.info(
-        f"下载 [{project.name}] {transfer_info['transfer_method']} {transfer_info['file_size']}字节"
+        f"下载 [{project.name}] {transfer_info.get('transfer_method', '')} "
+        f"{transfer_info.get('file_size', 0)}字节"
     )
-
-    # 检查是否使用 S3 存储
-    if is_s3_storage_enabled():
-        from antcode_core.infrastructure.storage.base import get_file_storage_backend
-        from antcode_core.infrastructure.storage.presign import generate_download_url
-
-        backend = get_file_storage_backend()
-
-        # 检查文件是否存在
-        if not await backend.exists(file_path):
-            raise HTTPException(status_code=404, detail="文件不存在")
-
-        # 尝试生成预签名 URL 并重定向
-        try:
-            presigned_url = await generate_download_url(file_path, expires_in=3600)
-            logger.debug(f"用户下载重定向到 S3 预签名 URL: {file_path}")
-            return RedirectResponse(
-                url=presigned_url,
-                status_code=302,
-                headers={
-                    "X-Transfer-Method": transfer_info["transfer_method"],
-                    "X-File-Hash": transfer_info["file_hash"],
-                    "X-File-Size": str(transfer_info["file_size"]),
-                    "X-Is-Modified": str(transfer_info.get("modified", False)),
-                }
-            )
-        except Exception as e:
-            logger.warning(f"生成预签名 URL 失败，回退到流式下载: {e}")
-
-        # 回退到流式下载
-        try:
-            file_size = await backend.get_file_size(file_path)
-
-            async def stream_s3_file() -> AsyncIterator[bytes]:
-                async for chunk in backend.open(file_path):
-                    yield chunk
-
-            return StreamingResponse(
-                stream_s3_file(),
-                media_type="application/octet-stream",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{original_name}"',
-                    "Content-Length": str(file_size),
-                    "X-Transfer-Method": transfer_info["transfer_method"],
-                    "X-File-Hash": transfer_info["file_hash"],
-                    "X-File-Size": str(transfer_info["file_size"]),
-                    "X-Is-Modified": str(transfer_info.get("modified", False)),
-                },
-            )
-        except Exception as e:
-            logger.error(f"S3 流式下载失败: {e}")
-            raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
-
-    raise HTTPException(status_code=503, detail="文件项目仅支持 S3 下载")
+    return await _download_transfer(transfer_info)
 
 
-@router.post("/{project_id}/incremental-sync")
+@router.post("/{project_id}/incremental-sync", response_model=BaseResponse[dict[str, Any]])
 async def get_incremental_changes(
     project_id: str,
-    client_file_hashes: dict[str, Any] = Body(...),
+    client_file_hashes: IncrementalSyncHashes = Body(...),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """获取增量变更"""
     project = await _ensure_project_access(project_id, current_user)
-    validated_hashes = _validate_client_file_hashes(client_file_hashes)
-
-    changes = await project_sync_service.get_incremental_changes(project.id, validated_hashes)
-
+    changes = await project_sync_service.get_incremental_changes(project.id, client_file_hashes.root)
     return success_response(changes)
 
 
-async def verify_worker_download_request(
-    request: Request,
-    auth_info: dict = Depends(verify_worker_request_with_signature),
-) -> Worker:
-    """验证 Worker 下载请求（HMAC 签名 + API Key 双重校验）"""
-    worker_id = (auth_info.get("worker_id") or "").strip()
-    if not worker_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 Worker 标识")
+async def verify_worker_download_request(project_id: str, request: Request) -> Worker:
+    worker_id = (request.query_params.get("worker_id") or "").strip()
+    timestamp_str = (request.query_params.get("timestamp") or "").strip()
+    nonce = (request.query_params.get("nonce") or "").strip()
+    signature = (request.query_params.get("signature") or "").strip()
+
+    if not all([worker_id, timestamp_str, nonce, signature]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名参数")
+
+    try:
+        timestamp = int(timestamp_str)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="时间戳格式错误") from exc
 
     worker = await Worker.get_or_none(public_id=worker_id)
-    if not worker:
+    if not worker or not worker.secret_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的 Worker")
+    if not worker_auth_verifier.check_rate_limit(worker.public_id):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求频率过高")
 
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少认证信息")
-
-    api_key = auth_header[7:].strip()
-    if not api_key:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 API Key")
-
-    if not worker.api_key or not constant_time_compare(api_key, worker.api_key):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的 API Key")
-
+    worker_auth_verifier.register_worker_secret(worker.public_id, worker.secret_key)
+    payload = {"project_id": project_id}
+    if not worker_auth_verifier.verify_signature(
+        worker.public_id,
+        payload,
+        timestamp,
+        nonce,
+        signature,
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="签名验证失败")
     return worker
 
 
-@router.get("/{project_id}/worker-download")
-async def worker_download_project(
-    project_id: str, worker: Worker = Depends(verify_worker_download_request)
-):
-    """Worker 专用项目下载接口（HMAC 签名 + API Key）
-
-    仅支持 S3 存储后端，优先重定向预签名 URL，失败时回退流式下载。
-    """
+@router.get("/{project_id}/worker-download", response_model=None)
+async def worker_download_project(project_id: str, request: Request):
+    worker = await verify_worker_download_request(project_id, request)
     project = await Project.get_or_none(public_id=project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 
-    transfer_info = await project_sync_service.get_project_transfer_info(
-        project.id,
-        project=project,
-    )
-
-    if transfer_info.get("transfer_method") == "code":
-        raise HTTPException(status_code=400, detail="代码项目请使用/transfer-info获取")
-
-    file_path = transfer_info.get("file_path")
-    original_name = transfer_info.get("original_name")
-
+    transfer_info = await project_sync_service.get_project_transfer_info(project.id, project=project)
     logger.info(
         f"Worker [{worker.name}] 下载项目 [{project.name}] "
-        f"{transfer_info['transfer_method']} {transfer_info['file_size']}字节"
+        f"{transfer_info.get('transfer_method', '')} {transfer_info.get('file_size', 0)}字节"
     )
-
-    # 检查是否使用 S3 存储
-    if is_s3_storage_enabled():
-        return await _download_from_s3_for_worker(
-            file_path=file_path,
-            original_name=original_name,
-            transfer_info=transfer_info,
-        )
-
-    raise HTTPException(status_code=503, detail="文件项目仅支持 S3 下载")
+    return await _download_transfer(transfer_info)
 
 
-async def _download_from_s3_for_worker(
-    file_path: str,
-    original_name: str,
-    transfer_info: dict,
-):
-    """从 S3 下载文件给 Worker
+async def _download_transfer(transfer_info: dict[str, Any]):
+    transfer_method = str(transfer_info.get("transfer_method") or "")
+    if transfer_method.startswith(_S3_TRANSFER_PREFIX):
+        return await _download_transfer_from_s3(transfer_info)
+    return _download_transfer_from_local(transfer_info)
 
-    优先使用重定向到预签名 URL，回退到流式下载
-    """
+
+async def _download_transfer_from_s3(transfer_info: dict[str, Any]):
     from antcode_core.infrastructure.storage.base import get_file_storage_backend
     from antcode_core.infrastructure.storage.presign import generate_download_url
 
+    file_path = _require_transfer_file_path(transfer_info)
     backend = get_file_storage_backend()
-
-    # 检查文件是否存在
     if not await backend.exists(file_path):
-        raise HTTPException(status_code=404, detail="文件不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
 
-    # 尝试生成预签名 URL 并重定向
     try:
         presigned_url = await generate_download_url(file_path, expires_in=3600)
-        logger.debug(f"Worker 下载重定向到 S3 预签名 URL: {file_path}")
+        logger.debug(f"下载重定向到 S3 预签名 URL: {file_path}")
         return RedirectResponse(
             url=presigned_url,
             status_code=302,
-            headers={
-                "X-Transfer-Method": transfer_info["transfer_method"],
-                "X-File-Hash": transfer_info["file_hash"],
-                "X-File-Size": str(transfer_info["file_size"]),
-            }
+            headers=_build_transfer_headers(transfer_info),
         )
-    except Exception as e:
-        logger.warning(f"生成预签名 URL 失败，回退到流式下载: {e}")
+    except Exception as exc:
+        logger.warning(f"生成预签名 URL 失败，回退到流式下载: {exc}")
 
-    # 回退到流式下载
-    try:
-        file_size = await backend.get_file_size(file_path)
+    file_size = await backend.get_file_size(file_path)
 
-        async def stream_s3_file() -> AsyncIterator[bytes]:
-            async for chunk in backend.open(file_path):
-                yield chunk
+    async def stream_s3_file() -> AsyncIterator[bytes]:
+        async for chunk in backend.open(file_path):
+            yield chunk
 
-        return StreamingResponse(
-            stream_s3_file(),
-            media_type="application/octet-stream",
-            headers={
-                "Content-Disposition": f'attachment; filename="{original_name}"',
-                "Content-Length": str(file_size),
-                "X-Transfer-Method": transfer_info["transfer_method"],
-                "X-File-Hash": transfer_info["file_hash"],
-                "X-File-Size": str(transfer_info["file_size"]),
-            },
-        )
-    except Exception as e:
-        logger.error(f"S3 流式下载失败: {e}")
-        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+    return StreamingResponse(
+        stream_s3_file(),
+        media_type="application/octet-stream",
+        headers={
+            **_build_transfer_headers(transfer_info),
+            "Content-Disposition": f'attachment; filename="{transfer_info.get("original_name") or "project.zip"}"',
+            "Content-Length": str(file_size),
+        },
+    )
+
+
+def _download_transfer_from_local(transfer_info: dict[str, Any]):
+    file_path = _resolve_local_transfer_path(transfer_info)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="下载目标不是文件")
+
+    filename = transfer_info.get("original_name") or os.path.basename(file_path)
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type="application/octet-stream",
+        headers=_build_transfer_headers(transfer_info),
+    )
+
+
+def _resolve_local_transfer_path(transfer_info: dict[str, Any]) -> str:
+    file_path = _require_transfer_file_path(transfer_info)
+    if transfer_info.get("transfer_method") == _MANAGED_ARCHIVE_METHOD:
+        file_path = transfer_info.get("original_file_path") or file_path
+    if is_managed_path(file_path):
+        return resolve_managed_path(file_path)
+    return file_storage_service.get_file_path(file_path)
+
+
+def _require_transfer_file_path(transfer_info: dict[str, Any]) -> str:
+    file_path = (transfer_info.get("file_path") or "").strip()
+    if not file_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件路径不存在")
+    return file_path
+
+
+def _build_transfer_headers(transfer_info: dict[str, Any]) -> dict[str, str]:
+    headers = {
+        "X-Transfer-Method": str(transfer_info.get("transfer_method") or ""),
+        "X-File-Hash": str(transfer_info.get("file_hash") or ""),
+        "X-File-Size": str(transfer_info.get("file_size") or 0),
+    }
+    resolved_revision = str(transfer_info.get("resolved_revision") or "")
+    if resolved_revision:
+        headers["X-Resolved-Revision"] = resolved_revision
+    if "modified" in transfer_info:
+        headers["X-Is-Modified"] = str(bool(transfer_info.get("modified")))
+    return headers

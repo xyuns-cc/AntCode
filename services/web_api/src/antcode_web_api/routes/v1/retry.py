@@ -1,6 +1,7 @@
 """任务重试与补偿 API"""
 
 import contextlib
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from loguru import logger
@@ -8,6 +9,7 @@ from loguru import logger
 from antcode_web_api.response import success
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User
+from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.application.services.scheduler.retry_service import retry_service
 
 router = APIRouter()
@@ -15,6 +17,7 @@ router = APIRouter()
 
 @router.post(
     "/manual/{run_id}",
+    response_model=BaseResponse[dict[str, Any]],
     summary="手动重试任务",
     description="手动触发失败任务的重试",
 )
@@ -32,6 +35,7 @@ async def manual_retry_task(run_id: str, current_user: TokenData = Depends(get_c
 
 @router.get(
     "/stats/{task_id}",
+    response_model=BaseResponse[dict[str, Any]],
     summary="获取任务重试统计",
     description="获取指定任务的重试统计信息",
 )
@@ -60,6 +64,7 @@ async def get_retry_stats(task_id: str, current_user: TokenData = Depends(get_cu
 
 @router.get(
     "/pending",
+    response_model=BaseResponse[dict[str, Any]],
     summary="获取待重试任务",
     description="获取当前待重试的任务列表（仅管理员）",
 )
@@ -89,6 +94,7 @@ async def get_pending_retries(current_user: TokenData = Depends(get_current_user
 
 @router.post(
     "/config/{task_id}",
+    response_model=BaseResponse[dict[str, Any]],
     summary="更新任务重试配置",
     description="更新指定任务的重试配置",
 )
@@ -136,6 +142,7 @@ async def update_retry_config(
 
 @router.post(
     "/cancel/{run_id}",
+    response_model=BaseResponse[dict[str, Any]],
     summary="取消待重试任务",
     description="取消队列中待重试的任务",
 )
@@ -172,6 +179,7 @@ async def cancel_pending_retry(
 
 @router.get(
     "/history/{task_id}",
+    response_model=BaseResponse[dict[str, Any]],
     summary="获取任务重试历史",
     description="获取指定任务的重试历史记录",
 )

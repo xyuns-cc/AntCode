@@ -1,5 +1,4 @@
-import apiClient from './api'
-import type { ApiResponse } from '@/types'
+import { BaseService } from './base'
 
 export interface PythonVersionsResponse {
   versions: string[]
@@ -43,15 +42,18 @@ export interface PaginatedVenvs {
   pages: number
 }
 
-class EnvService {
+class EnvService extends BaseService {
+  constructor() {
+    super('/api/v1')
+  }
+
   async listPythonVersions(): Promise<string[]> {
-    const res = await apiClient.get<PythonVersionsResponse>('/api/v1/runtimes/python/versions')
-    return res.data.versions || []
+    const data = await this.get<PythonVersionsResponse>('/runtimes/python/versions')
+    return data.versions
   }
 
   async listInterpreters(): Promise<Array<{ version: string; python_bin: string; install_dir: string; source?: string }>> {
-    const res = await apiClient.get<Array<{ version: string; python_bin: string; install_dir: string; source?: string; id?: number }>>('/api/v1/runtimes/python/interpreters')
-    return res.data || []
+    return await this.get<Array<{ version: string; python_bin: string; install_dir: string; source?: string }>>('/runtimes/python/interpreters')
   }
 
   async listInstalledInterpreters(): Promise<Array<{ version: string; python_bin: string; install_dir: string; source?: string }>> {
@@ -59,31 +61,29 @@ class EnvService {
   }
 
   async installInterpreter(version: string): Promise<void> {
-    await apiClient.post('/api/v1/runtimes/python/interpreters', { version })
+    await this.post('/runtimes/python/interpreters', { version })
   }
 
   async registerLocalInterpreter(python_bin: string): Promise<void> {
-    await apiClient.post('/api/v1/runtimes/python/interpreters/local', { python_bin })
+    await this.post('/runtimes/python/interpreters/local', { python_bin })
   }
 
   async uninstallInterpreter(version: string, source: string = 'mise'): Promise<void> {
-    await apiClient.delete(`/api/v1/runtimes/python/interpreters/${encodeURIComponent(version)}`, {
+    await this.delete(`/runtimes/python/interpreters/${encodeURIComponent(version)}`, {
       params: { source },
     })
   }
 
   async listWorkerEnvs(workerId: string): Promise<Array<{ name: string; python_version: string }>> {
-    const res = await apiClient.get<ApiResponse<Array<{ name: string; python_version: string }>>>(
-      `/api/v1/runtimes/workers/${workerId}/runtimes`
+    return await this.get<Array<{ name: string; python_version: string }>>(
+      `/runtimes/workers/${workerId}/runtimes`
     )
-    return res.data.data || []
   }
 
   async listWorkerInterpreters(workerId: string): Promise<{ interpreters: Array<{ version: string; source?: string }>; total: number }> {
-    const res = await apiClient.get<ApiResponse<Array<{ version: string; source?: string }>>>(
-      `/api/v1/runtimes/workers/${workerId}/interpreters`
+    const interpreters = await this.get<Array<{ version: string; source?: string }>>(
+      `/runtimes/workers/${workerId}/interpreters`
     )
-    const interpreters = res.data.data || []
     return { interpreters, total: interpreters.length }
   }
 
@@ -98,49 +98,46 @@ class EnvService {
     interpreter_source?: string
     worker_id?: string
   }): Promise<PaginatedVenvs> {
-    const res = await apiClient.get<{
-      success: boolean
-      data: VenvListItem[]
-      pagination: { page: number; size: number; total: number; pages: number }
-    }>('/api/v1/runtimes', { params })
+    const data = await this.get<{ items: VenvListItem[]; pagination: { page: number; size: number; total: number; pages: number } }>('/runtimes', { params })
+
+    const { items, pagination } = data
 
     return {
-      items: res.data.data || [],
-      page: res.data.pagination?.page || 1,
-      size: res.data.pagination?.size || 20,
-      total: res.data.pagination?.total || 0,
-      pages: res.data.pagination?.pages || 1,
+      items,
+      page: pagination.page,
+      size: pagination.size,
+      total: pagination.total,
+      pages: pagination.pages,
     }
   }
 
   async batchDeleteVenvs(ids: string[]): Promise<{ total: number; deleted: number; failed: string[] }> {
-    const res = await apiClient.post<{ total: number; deleted: number; failed: string[] }>(
-      '/api/v1/runtimes/batch-delete',
+    return await this.post<{ total: number; deleted: number; failed: string[] }>(
+      '/runtimes/batch-delete',
       { ids }
     )
-    return res.data
   }
 
   async listVenvPackagesById(runtime_id: string): Promise<Array<{ name: string; version: string }>> {
-    const res = await apiClient.get<{ runtime_id: string; packages: Array<{ name: string; version: string }> }>(
-      `/api/v1/runtimes/${runtime_id}/packages`
+    const data = await this.get<{ runtime_id: string; packages: Array<{ name: string; version: string }> }>(
+      `/runtimes/${runtime_id}/packages`
     )
-    return res.data.packages || []
+    return data.packages
   }
 
   async listProjectVenvPackages(project_id: string): Promise<Array<{ name: string; version: string }>> {
-    const res = await apiClient.get<{ project_id: string; packages: Array<{ name: string; version: string }> }>(
-      `/api/v1/runtimes/projects/${project_id}/runtime/packages`
+    const data = await this.get<{ project_id: string; packages: Array<{ name: string; version: string }> }>(
+      `/runtimes/projects/${project_id}/runtime/packages`
     )
-    return res.data.packages || []
+    return data.packages
   }
 
   async createOrBindProjectVenv(project_id: string, payload: CreateOrBindVenvRequest): Promise<void> {
-    await apiClient.post(`/api/v1/runtimes/projects/${project_id}/runtime`, payload)
+    await this.post(`/runtimes/projects/${project_id}/runtime`, payload)
   }
 
   async deleteProjectVenv(project_id: string): Promise<void> {
-    await apiClient.delete(`/api/v1/runtimes/projects/${project_id}/runtime`)
+    await this.delete(`/runtimes/projects/${project_id}/runtime`)
   }
 
   async createSharedVenv(payload: {
@@ -149,26 +146,25 @@ class EnvService {
     interpreter_source?: string
     python_bin?: string
   }): Promise<Record<string, unknown>> {
-    const res = await apiClient.post<Record<string, unknown>>('/api/v1/runtimes', payload)
-    return res.data
+    return await this.post<Record<string, unknown>>('/runtimes', payload)
   }
 
   async deleteVenv(runtime_id: string, allowPrivate = false): Promise<void> {
-    await apiClient.delete(`/api/v1/runtimes/${runtime_id}`, {
+    await this.delete(`/runtimes/${runtime_id}`, {
       params: { allow_private: allowPrivate },
     })
   }
 
   async updateSharedVenv(runtime_id: string, payload: { key?: string }): Promise<void> {
-    await apiClient.patch(`/api/v1/runtimes/${runtime_id}`, payload)
+    await this.patch(`/runtimes/${runtime_id}`, payload)
   }
 
   async installPackagesToVenv(runtime_id: string, packages: string[]): Promise<void> {
-    await apiClient.post(`/api/v1/runtimes/${runtime_id}/packages`, { packages })
+    await this.post(`/runtimes/${runtime_id}/packages`, { packages })
   }
 
   async installPackagesToProjectVenv(project_id: string, packages: string[]): Promise<void> {
-    await apiClient.post(`/api/v1/runtimes/projects/${project_id}/runtime/packages`, { packages })
+    await this.post(`/runtimes/projects/${project_id}/runtime/packages`, { packages })
   }
 }
 

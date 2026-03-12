@@ -30,37 +30,41 @@ class DatabaseOptimizer:
             batch_size: 批处理大小
 
         Returns:
-            (created_objects, existing_objects)
+            (created_objects, existing_objects, errors)
         """
+        from tortoise.expressions import Q
+
         created_objects = []
         existing_objects = []
+        errors = []
 
         # 分批处理
         for i in range(0, len(items), batch_size):
             batch = items[i : i + batch_size]
 
-            # 构建查询条件
-            query_conditions = []
+            # 构建查询条件 - 使用 Q 对象 OR 组合替代 .union() 链
+            q_filters = []
             for item in batch:
                 condition = {}
                 for field in unique_fields:
                     if field in item:
                         condition[field] = item[field]
                 if condition:
-                    query_conditions.append(condition)
+                    q_filters.append(Q(**condition))
 
             # 查询已存在的对象
-            if query_conditions:
-                existing_query = model_class.filter()
-                for condition in query_conditions:
-                    existing_query = existing_query.union(model_class.filter(**condition))
+            existing = []
+            if q_filters:
+                combined_q = q_filters[0]
+                for q in q_filters[1:]:
+                    combined_q = combined_q | q
 
                 try:
-                    existing = await existing_query.all()
+                    existing = await model_class.filter(combined_q).all()
                     existing_objects.extend(existing)
                 except Exception as e:
+                    errors.append(f"查询已存在对象失败: {e}")
                     logger.warning(f"查询已存在对象失败: {e}")
-                    existing = []
 
             # 找出需要创建的对象
             existing_keys = set()
@@ -82,6 +86,7 @@ class DatabaseOptimizer:
                     )
                     created_objects.extend(new_objects)
                 except Exception as e:
+                    errors.append(f"批量创建失败: {e}")
                     logger.error(f"批量创建失败: {e}")
                     # 回退到逐个创建
                     for item in to_create:
@@ -89,12 +94,15 @@ class DatabaseOptimizer:
                             obj = await model_class.create(**item)
                             created_objects.append(obj)
                         except Exception as create_error:
+                            errors.append(f"创建对象失败: {create_error}")
                             logger.error(f"创建对象失败: {create_error}")
 
         logger.info(
-            f"批量操作完成: 创建 {len(created_objects)} 个对象, 找到 {len(existing_objects)} 个已存在对象"
+            f"批量操作完成: 创建 {len(created_objects)} 个对象, "
+            f"找到 {len(existing_objects)} 个已存在对象, "
+            f"{len(errors)} 个错误"
         )
-        return created_objects, existing_objects
+        return created_objects, existing_objects, errors
 
     @staticmethod
     async def bulk_update(model_class, updates, key_field="id", batch_size=100):

@@ -1,10 +1,13 @@
 import { BaseService } from './base'
-import apiClient from './api'
+import apiClient, { unwrapResponse } from './api'
 import type { AxiosRequestConfig } from 'axios'
 import Logger from '@/utils/logger'
 import type {
+  PaginationResponse,
   Project,
   ProjectCreateRequest,
+  ProjectCodeConfigUpdateRequest,
+  ProjectFileConfigUpdateRequest,
   ProjectUpdateRequest,
   ProjectListParams,
   ProjectStats,
@@ -25,6 +28,41 @@ class ProjectService extends BaseService {
     super('/api/v1/projects')
   }
 
+  private appendGitSourceFields(formData: FormData, data: ProjectCreateRequest): void {
+    if (data.git_url) {
+      formData.append('git_url', data.git_url)
+    }
+    if (data.git_branch) {
+      formData.append('git_branch', data.git_branch)
+    }
+    if (data.git_commit) {
+      formData.append('git_commit', data.git_commit)
+    }
+    if (data.git_subdir) {
+      formData.append('git_subdir', data.git_subdir)
+    }
+    if (data.git_credential_id) {
+      formData.append('git_credential_id', data.git_credential_id)
+    }
+  }
+
+  private appendJsonField(
+    formData: FormData,
+    field: string,
+    value: string | Record<string, unknown> | undefined,
+    emptyObjectWhenBlank = false,
+  ): void {
+    if (value === undefined) {
+      return
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim()
+      formData.append(field, !normalized && emptyObjectWhenBlank ? '{}' : value)
+      return
+    }
+    formData.append(field, JSON.stringify(value))
+  }
+
   // 辅助方法：从 File 或 UploadFile 中提取实际的 File 对象
   private extractFile(fileInput: FileInput): File | null {
     if (fileInput instanceof File) {
@@ -41,27 +79,19 @@ class ProjectService extends BaseService {
     params?: ProjectListParams,
     config?: AxiosRequestConfig
   ): Promise<{ items: Project[]; page: number; size: number; total: number; pages: number }> {
-    const response = await apiClient.get<{
-      success: boolean
-      data: Project[]
-      pagination: {
-        page: number
-        size: number
-        total: number
-        pages: number
-      }
-    }>('/api/v1/projects', {
+    const response = await apiClient.get<PaginationResponse<Project>>('/api/v1/projects', {
       ...config,
       params: { ...(params ?? {}), ...(config?.params ?? {}) }
     })
 
-    // 转换后端响应格式为前端期望的格式
+    const { items, pagination } = response.data.data
+
     return {
-      items: response.data.data || [],
-      page: response.data.pagination?.page || 1,
-      size: response.data.pagination?.size || 10,
-      total: response.data.pagination?.total || 0,
-      pages: response.data.pagination?.pages || 1
+      items,
+      page: pagination.page,
+      size: pagination.size,
+      total: pagination.total,
+      pages: pagination.pages
     }
   }
 
@@ -112,43 +142,59 @@ class ProjectService extends BaseService {
 
     // 根据项目类型添加特定字段
     if (data.type === 'file') {
-      if (data.file) {
-        // 处理主文件上传 - 适配 Ant Design Upload 组件的文件对象
-        const fileToUpload = this.extractFile(data.file as FileInput)
-        if (fileToUpload) {
-          formData.append('file', fileToUpload)
-        }
-      }
-      // 处理附加文件上传
-      if (data.additionalFiles && data.additionalFiles.length > 0) {
-        data.additionalFiles.forEach((fileItem) => {
-          const fileToUpload = this.extractFile(fileItem)
+      const fileSourceType = data.file_source_type ?? (data.source_type === 'git' ? 'git' : 's3')
+      formData.append('file_source_type', fileSourceType)
+      if (fileSourceType === 'git') {
+        this.appendGitSourceFields(formData, data)
+      } else {
+        if (data.file) {
+          // 处理主文件上传 - 适配 Ant Design Upload 组件的文件对象
+          const fileToUpload = this.extractFile(data.file as FileInput)
           if (fileToUpload) {
-            formData.append('files', fileToUpload)
+            formData.append('file', fileToUpload)
           }
-        })
+        }
+        // 处理附加文件上传
+        if (data.additionalFiles && data.additionalFiles.length > 0) {
+          data.additionalFiles.forEach((fileItem) => {
+            const fileToUpload = this.extractFile(fileItem)
+            if (fileToUpload) {
+              formData.append('files', fileToUpload)
+            }
+          })
+        }
       }
       if (data.entry_point) {
         formData.append('entry_point', data.entry_point)
       }
+      this.appendJsonField(formData, 'runtime_config', data.runtime_config, true)
+      this.appendJsonField(formData, 'environment_vars', data.environment_vars, true)
       if (data.dependencies) { formData.append('dependencies', JSON.stringify(data.dependencies)) }
     } else if (data.type === 'rule') {
       this.appendRuleFields(formData, data)
     } else if (data.type === 'code') {
+      const codeSourceType = data.code_source_type ?? (data.source_type || 's3')
+      formData.append('code_source_type', codeSourceType)
+      if (codeSourceType === 'git') {
+        this.appendGitSourceFields(formData, data)
+      }
       if (data.language) {
         formData.append('language', data.language)
       }
       if (data.version) {
         formData.append('version', data.version)
       }
-      if (data.code_content) {
-        formData.append('code_content', data.code_content)
-      }
-      if (data.code_file) {
-        formData.append('code_file', data.code_file)
-      }
       if (data.code_entry_point) {
         formData.append('code_entry_point', data.code_entry_point)
+        formData.append('entry_point', data.code_entry_point)
+      }
+      if (codeSourceType !== 'git') {
+        if (data.code_content) {
+          formData.append('code_content', data.code_content)
+        }
+        if (data.code_file) {
+          formData.append('code_file', data.code_file)
+        }
       }
       if (data.documentation) {
         formData.append('documentation', data.documentation)
@@ -309,28 +355,47 @@ class ProjectService extends BaseService {
   }
 
   // 更新代码项目配置
-  async updateCodeConfig(id: string, data: Record<string, unknown>): Promise<Project> {
+  async updateCodeConfig(id: string, data: ProjectCodeConfigUpdateRequest): Promise<Project> {
     return this.put<Project>(`/${id}/code-config`, data)
   }
 
   // 更新文件项目配置
-  async updateFileConfig(id: string, data: Record<string, unknown>): Promise<Project> {
+  async updateFileConfig(id: string, data: ProjectFileConfigUpdateRequest): Promise<Project> {
     const formData = new FormData()
 
     if (data.entry_point) {
       formData.append('entry_point', data.entry_point as string)
     }
-    if (data.runtime_config) {
-      formData.append('runtime_config', typeof data.runtime_config === 'string' ? data.runtime_config : JSON.stringify(data.runtime_config))
+    this.appendJsonField(formData, 'runtime_config', data.runtime_config, true)
+    this.appendJsonField(formData, 'environment_vars', data.environment_vars, true)
+    if (data.source_type !== undefined) {
+      formData.append('source_type', data.source_type)
     }
-    if (data.environment_vars) {
-      formData.append('environment_vars', typeof data.environment_vars === 'string' ? data.environment_vars : JSON.stringify(data.environment_vars))
+    if (data.git_url !== undefined) {
+      formData.append('git_url', data.git_url)
+    }
+    if (data.git_branch !== undefined) {
+      formData.append('git_branch', data.git_branch)
+    }
+    if (data.git_commit !== undefined) {
+      formData.append('git_commit', data.git_commit)
+    }
+    if (data.git_subdir !== undefined) {
+      formData.append('git_subdir', data.git_subdir)
+    }
+    if (data.git_credential_id !== undefined) {
+      formData.append('git_credential_id', data.git_credential_id)
     }
     if (data.file) {
       formData.append('file', data.file as File)
     }
 
-    return this.uploadFile<Project>(`/${id}/file-config`, formData)
+    const response = await apiClient.put(`${this.basePath}/${id}/file-config`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return unwrapResponse<Project>(response)
   }
 
   // 删除项目
@@ -519,7 +584,7 @@ class ProjectService extends BaseService {
     try {
       const url = filePath 
         ? `/api/v1/projects/${id}/files/download?file_path=${encodeURIComponent(filePath)}`
-        : `/api/v1/projects/${id}/files/download`
+        : `/api/v1/projects/${id}/download`
       
       const response = await apiClient.get(url, {
         responseType: 'blob',
@@ -543,7 +608,7 @@ class ProjectService extends BaseService {
     const normalizedBase = baseUrl.replace(/\/api\/?$/, '').replace(/\/$/, '')
     return filePath 
       ? `${normalizedBase}/api/v1/projects/${id}/files/download?file_path=${encodeURIComponent(filePath)}`
-      : `${normalizedBase}/api/v1/projects/${id}/files/download`
+      : `${normalizedBase}/api/v1/projects/${id}/download`
   }
 }
 

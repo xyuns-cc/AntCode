@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     JWT_SECRET_FILE: str = Field(default="")
 
+    # === 加密密钥（独立于 JWT Secret）===
+    ENCRYPTION_KEY: str = Field(default="")
+
     # === 登录密码加密配置 ===
     LOGIN_PASSWORD_ENCRYPTION_ENABLED: bool = Field(default=True)
     LOGIN_PASSWORD_ENCRYPTION_REQUIRED: bool = Field(default=True)
