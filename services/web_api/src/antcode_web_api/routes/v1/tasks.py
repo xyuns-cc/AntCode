@@ -220,6 +220,7 @@ async def list_tasks(
     schedule_type: str | None = Query(None, description="调度类型筛选"),
     search: str | None = Query(None, description="关键词搜索"),
     specified_worker_id: str = Query(None, description="指定执行 Worker ID 筛选"),
+    worker_id: str | None = Query(None, description="节点视角 Worker ID 筛选"),
     current_user=Depends(get_current_user),
 ):
     """获取任务列表"""
@@ -233,6 +234,7 @@ async def list_tasks(
         page=page,
         size=size,
         specified_worker_id=specified_worker_id,
+        worker_id=worker_id,
         project_id=project_id,
         schedule_type=schedule_type,
         search=search,
@@ -439,7 +441,7 @@ async def create_task_from_template(
     return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
 
 
-@tasks_router.get("/{task_id}/export")
+@tasks_router.get("/{task_id}/export", response_model=None)
 async def export_task_config(
     task_id: str,
     format: str = Query("json", pattern="^(json|yaml)$"),
@@ -1107,7 +1109,7 @@ async def get_task_execution_logs(
     )
 
 
-@tasks_router.get("/runs/{run_id}/logs/download")
+@tasks_router.get("/runs/{run_id}/logs/download", response_model=None)
 async def download_task_execution_logs(
     run_id: str,
     format: str = Query("txt", pattern="^(txt|json)$"),

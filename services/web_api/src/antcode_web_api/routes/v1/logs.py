@@ -3,6 +3,7 @@
 import gzip
 import os
 from datetime import datetime
+from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,7 +11,7 @@ from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
 from antcode_web_api.response import Messages, success
-from antcode_core.common.security.auth import get_current_user
+from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.logs import (
     LogEntry,
@@ -78,17 +79,49 @@ async def _get_logs_from_s3(run_id: str, log_type: str | None = None) -> dict[st
         return {"stdout": "", "stderr": ""}
 
 
+def _normalize_log_type(log_type: LogType | str | None) -> LogType | None:
+    if log_type is None:
+        return None
+    if isinstance(log_type, LogType):
+        return log_type
+    try:
+        return LogType(log_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的日志类型") from exc
+
+
+def _normalize_log_format(format_value: LogFormat | str) -> LogFormat:
+    if isinstance(format_value, LogFormat):
+        return format_value
+    try:
+        return LogFormat(format_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的日志格式") from exc
+
+
+def _normalize_log_level(level: LogLevel | str | None) -> LogLevel | None:
+    if level is None:
+        return None
+    if isinstance(level, LogLevel):
+        return level
+    try:
+        return LogLevel(level)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的日志级别") from exc
+
+
 async def _get_raw_log_response(run_id, execution, log_type, lines):
     try:
+        normalized_log_type = _normalize_log_type(log_type)
         file_path = None
         content = ""
         file_size = 0
         lines_count = 0
         last_modified = None
 
-        if log_type == LogType.STDOUT and execution.log_file_path:
+        if normalized_log_type == LogType.STDOUT and execution.log_file_path:
             file_path = execution.log_file_path
-        elif log_type == LogType.STDERR and execution.error_log_path:
+        elif normalized_log_type == LogType.STDERR and execution.error_log_path:
             file_path = execution.error_log_path
         else:
             # 如果没有指定类型，合并两个文件的内容
@@ -121,7 +154,7 @@ async def _get_raw_log_response(run_id, execution, log_type, lines):
                 UnifiedLogResponse(
                     run_id=run_id,
                     format=LogFormat.RAW,
-                    log_type=log_type.value if log_type else "mixed",
+                    log_type=normalized_log_type.value if normalized_log_type else "mixed",
                     raw_content=content,
                     lines_count=len(content.split("\n")) if content else 0,
                 ),
@@ -138,10 +171,13 @@ async def _get_raw_log_response(run_id, execution, log_type, lines):
 
         # 如果本地文件为空，尝试从 S3 读取
         if not content:
-            s3_logs = await _get_logs_from_s3(run_id, log_type.value if log_type else None)
-            if log_type == LogType.STDOUT:
+            s3_logs = await _get_logs_from_s3(
+                run_id,
+                normalized_log_type.value if normalized_log_type else None,
+            )
+            if normalized_log_type == LogType.STDOUT:
                 content = s3_logs.get("stdout", "")
-            elif log_type == LogType.STDERR:
+            elif normalized_log_type == LogType.STDERR:
                 content = s3_logs.get("stderr", "")
 
             if lines and content:
@@ -155,7 +191,7 @@ async def _get_raw_log_response(run_id, execution, log_type, lines):
             UnifiedLogResponse(
                 run_id=run_id,
                 format=LogFormat.RAW,
-                log_type=log_type.value if log_type else None,
+                log_type=normalized_log_type.value if normalized_log_type else None,
                 raw_content=content,
                 file_path=file_path,
                 file_size=file_size,
@@ -174,6 +210,9 @@ async def _get_raw_log_response(run_id, execution, log_type, lines):
 
 async def _get_structured_log_response(run_id, execution, log_type, level, lines, search):
     try:
+        normalized_log_type = _normalize_log_type(log_type)
+        normalized_level = _normalize_log_level(level)
+
         # 获取日志内容
         logs_data = await task_log_service.get_execution_logs(run_id)
 
@@ -191,7 +230,7 @@ async def _get_structured_log_response(run_id, execution, log_type, level, lines
         log_timestamp = execution.start_time or execution.created_at or datetime.utcnow()
 
         # 处理标准输出日志
-        if not log_type or log_type == LogType.STDOUT:
+        if not normalized_log_type or normalized_log_type == LogType.STDOUT:
             stdout_lines = stdout_content.split("\n") if stdout_content else []
             for i, line in enumerate(stdout_lines):
                 if line.strip() and (not search or search.lower() in line.lower()):
@@ -209,7 +248,7 @@ async def _get_structured_log_response(run_id, execution, log_type, level, lines
                     )
 
         # 处理错误输出日志
-        if not log_type or log_type == LogType.STDERR:
+        if not normalized_log_type or normalized_log_type == LogType.STDERR:
             stderr_lines = stderr_content.split("\n") if stderr_content else []
             for i, line in enumerate(stderr_lines):
                 if line.strip() and (not search or search.lower() in line.lower()):
@@ -227,8 +266,8 @@ async def _get_structured_log_response(run_id, execution, log_type, level, lines
                     )
 
         # 按级别过滤
-        if level:
-            log_entries = [entry for entry in log_entries if entry.level == level]
+        if normalized_level:
+            log_entries = [entry for entry in log_entries if entry.level == normalized_level]
 
         # 限制行数
         if lines:
@@ -238,7 +277,7 @@ async def _get_structured_log_response(run_id, execution, log_type, level, lines
             total=len(log_entries), page=1, size=len(log_entries), items=log_entries
         )
 
-        log_type_value = log_type.value if log_type else ""
+        log_type_value = normalized_log_type.value if normalized_log_type else ""
         return success(
             UnifiedLogResponse(
                 run_id=run_id,
@@ -267,13 +306,15 @@ async def get_run_logs(
     current_user=Depends(get_current_user),
 ):
     try:
+        normalized_format = _normalize_log_format(format)
+
         # 使用增强的权限验证
         execution = await log_security_service.verify_log_access_permission(
             current_user, run_id, "read"
         )
 
         # 根据格式返回不同的响应
-        if format == LogFormat.RAW:
+        if normalized_format == LogFormat.RAW:
             # 返回原始文本格式
             return await _get_raw_log_response(run_id, execution, log_type, lines)
         else:
@@ -293,7 +334,7 @@ async def get_run_logs(
                 "endpoint": "get_run_logs",
                 "run_id": run_id,
                 "user_id": current_user.user_id,
-                "format": format,
+                "format": str(format),
                 "log_type": log_type,
             },
         )
@@ -471,8 +512,8 @@ async def get_task_logs(
         )
 
 
-@router.get("/metrics")
-async def get_log_metrics(current_user=Depends(get_current_user)):
+@router.get("/metrics", response_model=BaseResponse[dict[str, Any]])
+async def get_log_metrics(current_user: TokenData = Depends(get_current_user)):
     """获取简单的日志统计指标"""
     try:
         # 获取用户的所有任务ID
@@ -507,8 +548,8 @@ async def get_log_metrics(current_user=Depends(get_current_user)):
         )
 
 
-@router.get("/performance/stats")
-async def get_performance_stats(current_user=Depends(get_current_user)):
+@router.get("/performance/stats", response_model=BaseResponse[dict[str, Any]])
+async def get_performance_stats(current_user: TokenData = Depends(get_current_user)):
     """获取日志系统性能统计"""
     try:
         from antcode_core.application.services.logs.log_performance_service import log_performance_monitor
@@ -540,11 +581,11 @@ async def get_performance_stats(current_user=Depends(get_current_user)):
         )
 
 
-@router.get("/performance/slow-operations")
+@router.get("/performance/slow-operations", response_model=BaseResponse[dict[str, Any]])
 async def get_slow_operations(
     threshold: float = Query(1.0, ge=0.1, le=10.0),
     limit: int = Query(10, ge=1, le=100),
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取慢操作列表"""
     try:
@@ -577,9 +618,9 @@ async def get_slow_operations(
         )
 
 
-@router.get("/analytics/daily")
+@router.get("/analytics/daily", response_model=BaseResponse[dict[str, Any]])
 async def get_daily_analytics(
-    days: int = Query(7, ge=1, le=30), current_user=Depends(get_current_user)
+    days: int = Query(7, ge=1, le=30), current_user: TokenData = Depends(get_current_user)
 ):
     """获取日志系统日统计分析"""
     try:

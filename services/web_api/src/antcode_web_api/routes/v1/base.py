@@ -11,7 +11,12 @@ from pydantic import BaseModel, Field
 
 from antcode_core.common.config import settings
 from antcode_web_api.response import Messages, success
-from antcode_core.common.security.auth import get_current_user, jwt_auth, verify_refresh_token
+from antcode_core.common.security.auth import (
+    TokenData,
+    get_current_user,
+    jwt_auth,
+    verify_refresh_token,
+)
 from antcode_core.common.security.login_crypto import (
     LoginPasswordCryptoError,
     login_password_crypto,
@@ -37,6 +42,11 @@ AUTH_SELF_SERVICE_DISABLED_DETAIL = "企业内部系统已禁用自助认证接�
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(..., min_length=1)
+
+
+class ProbeStatusResponse(BaseModel):
+    status: str
+    timestamp: str
 
 
 @router.get(
@@ -76,7 +86,7 @@ async def get_app_info():
     "/health/detailed",
     summary="详细健康检查",
     tags=["基础"],
-    response_model=None,
+    response_model=BaseResponse[dict[str, Any]],
 )
 async def detailed_health_check(
     include_details: bool = Query(default=True, description="是否包含详细信息"),
@@ -112,15 +122,17 @@ async def detailed_health_check(
             "summary": health.summary,
         }
 
-    return JSONResponse(content=response_data, status_code=status_code)
+    response = success(response_data, message=Messages.QUERY_SUCCESS, code=status_code)
+    return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
 
 
 @router.get(
     "/health/live",
+    response_model=BaseResponse[ProbeStatusResponse],
     summary="存活检查 (Kubernetes liveness)",
     tags=["基础"],
 )
-async def liveness_check() -> dict[str, Any]:
+async def liveness_check() -> JSONResponse:
     """
     Kubernetes 存活探针端点
 
@@ -128,21 +140,20 @@ async def liveness_check() -> dict[str, Any]:
     """
     is_alive = await health_checker.liveness()
 
-    if is_alive:
-        return {"status": "alive", "timestamp": datetime.now().isoformat()}
-
-    return JSONResponse(
-        content={"status": "dead", "timestamp": datetime.now().isoformat()},
-        status_code=503,
-    )
+    status_code = status.HTTP_200_OK if is_alive else status.HTTP_503_SERVICE_UNAVAILABLE
+    probe_status = "alive" if is_alive else "dead"
+    payload = ProbeStatusResponse(status=probe_status, timestamp=datetime.now().isoformat())
+    response = success(payload, message=Messages.QUERY_SUCCESS, code=status_code)
+    return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
 
 
 @router.get(
     "/health/ready",
+    response_model=BaseResponse[ProbeStatusResponse],
     summary="就绪检查 (Kubernetes readiness)",
     tags=["基础"],
 )
-async def readiness_check() -> dict[str, Any]:
+async def readiness_check() -> JSONResponse:
     """
     Kubernetes 就绪探针端点
 
@@ -150,13 +161,11 @@ async def readiness_check() -> dict[str, Any]:
     """
     is_ready = await health_checker.readiness()
 
-    if is_ready:
-        return {"status": "ready", "timestamp": datetime.now().isoformat()}
-
-    return JSONResponse(
-        content={"status": "not_ready", "timestamp": datetime.now().isoformat()},
-        status_code=503,
-    )
+    status_code = status.HTTP_200_OK if is_ready else status.HTTP_503_SERVICE_UNAVAILABLE
+    probe_status = "ready" if is_ready else "not_ready"
+    payload = ProbeStatusResponse(status=probe_status, timestamp=datetime.now().isoformat())
+    response = success(payload, message=Messages.QUERY_SUCCESS, code=status_code)
+    return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
 
 
 @router.post(
@@ -226,7 +235,7 @@ async def login(request: UserLoginRequest, http_request: Request):
 
     permissions = ["admin"] if user.is_admin else []
     access_token = jwt_auth.create_access_token(
-        user_id=user.id, username=user.username, permissions=permissions
+        user_id=user.id, username=user.username, is_admin=user.is_admin
     )
     refresh_token = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
 
@@ -284,7 +293,7 @@ async def refresh_token(request: RefreshTokenRequest):
 
     permissions = ["admin"] if user.is_admin else []
     access_token = jwt_auth.create_access_token(
-        user_id=user.id, username=user.username, permissions=permissions
+        user_id=user.id, username=user.username, is_admin=user.is_admin
     )
     refresh_token_value = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
 
@@ -340,11 +349,11 @@ async def check_email(
 
 @router.get(
     "/auth/permissions",
-    response_model=BaseResponse[dict],
+    response_model=BaseResponse[dict[str, list[str]]],
     summary="获取用户权限",
     tags=["认证"],
 )
-async def get_permissions(current_user=Depends(get_current_user)):
+async def get_permissions(current_user: TokenData = Depends(get_current_user)):
     user = await user_service.get_user_by_id(current_user.user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")

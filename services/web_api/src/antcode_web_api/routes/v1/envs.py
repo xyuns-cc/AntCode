@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from loguru import logger
@@ -15,11 +16,14 @@ from pydantic import BaseModel
 from tortoise.expressions import Q
 
 from antcode_core.common.config import settings
+from antcode_web_api.response import Messages
 from antcode_web_api.response import page as page_response
+from antcode_web_api.response import success as success_response
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import Project, User
 from antcode_core.domain.models.enums import InterpreterSource, RuntimeKind, RuntimeScope
 from antcode_core.domain.models.runtime import Interpreter, ProjectRuntimeBinding, Runtime
+from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.runtime import (
     InterpreterInfo,
     PythonVersionListResponse,
@@ -32,6 +36,13 @@ router = APIRouter(tags=["环境管理"])
 # 安装锁
 _install_locks: dict[str, asyncio.Lock] = {}
 _SAFE_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_PYTHON_VERSION_RE = re.compile(r"Python\s+([0-9][0-9A-Za-z._+-]*)")
+
+
+class InterpreterResolution(NamedTuple):
+    interpreter: Interpreter
+    version: str
+    python_exe: str
 
 
 def _lock_for(version: str) -> asyncio.Lock:
@@ -62,6 +73,324 @@ def _safe_join_runtime_path(base_dir: str, component: str, field_name: str) -> s
     if os.path.commonpath([base_abs, candidate]) != base_abs:
         raise HTTPException(status_code=400, detail=f"{field_name} 非法")
     return candidate
+
+
+def _normalize_interpreter_source(value: str | InterpreterSource) -> InterpreterSource:
+    if isinstance(value, InterpreterSource):
+        return value
+
+    normalized = (value or InterpreterSource.MISE.value).strip().lower()
+    try:
+        return InterpreterSource(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="interpreter_source 仅支持 mise 或 local") from exc
+
+
+def _parse_python_version(output: str) -> str:
+    normalized = (output or "").strip()
+    match = _PYTHON_VERSION_RE.search(normalized)
+    if match:
+        return match.group(1)
+
+    parts = normalized.split()
+    if parts:
+        return parts[-1]
+    raise RuntimeError("无法解析 Python 版本")
+
+
+async def _ensure_local_interpreter(
+    *,
+    requested_version: str | None,
+    python_bin: str | None,
+    current_user_id: int,
+) -> InterpreterResolution:
+    from antcode_core.common.command_runner import run_command
+
+    if not python_bin:
+        raise RuntimeError("本地解释器需要提供 python_bin")
+    if not os.path.exists(python_bin):
+        raise RuntimeError("python_bin 路径不存在")
+
+    result = await run_command([python_bin, "--version"], timeout=30)
+    version_output = result.stdout.strip() or result.stderr.strip()
+    if result.exit_code != 0:
+        raise RuntimeError(f"检测本地解释器失败: {version_output or '未知错误'}")
+
+    detected_version = _parse_python_version(version_output)
+    if requested_version and requested_version != detected_version:
+        raise RuntimeError(
+            f"python_bin 实际版本为 {detected_version}，与请求版本 {requested_version} 不一致"
+        )
+
+    install_dir = os.path.dirname(python_bin)
+    interpreter = await Interpreter.get_or_none(
+        tool="python",
+        version=detected_version,
+        source=InterpreterSource.LOCAL,
+    )
+    if not interpreter:
+        interpreter = await Interpreter.create(
+            tool="python",
+            version=detected_version,
+            install_dir=install_dir,
+            python_bin=python_bin,
+            status="installed",
+            source=InterpreterSource.LOCAL,
+            created_by=current_user_id,
+        )
+    else:
+        update_fields: list[str] = []
+        if interpreter.install_dir != install_dir:
+            interpreter.install_dir = install_dir
+            update_fields.append("install_dir")
+        if interpreter.python_bin != python_bin:
+            interpreter.python_bin = python_bin
+            update_fields.append("python_bin")
+        if update_fields:
+            await interpreter.save(update_fields=update_fields)
+
+    return InterpreterResolution(
+        interpreter=interpreter,
+        version=detected_version,
+        python_exe=python_bin,
+    )
+
+
+async def _ensure_mise_interpreter(
+    *,
+    version: str,
+    current_user_id: int,
+) -> InterpreterResolution:
+    from antcode_core.common.command_runner import run_command
+
+    lock = _lock_for(version)
+    async with lock:
+        install_result = await run_command(["mise", "install", "-y", f"python@{version}"], timeout=1800)
+        if install_result.exit_code != 0:
+            detail = install_result.stderr.strip() or install_result.stdout.strip()
+            raise RuntimeError(f"安装解释器失败: {detail or '未知错误'}")
+
+        where = await run_command(["mise", "where", f"python@{version}"], timeout=60)
+        if where.exit_code != 0:
+            raise RuntimeError(f"查找解释器失败: {where.stderr.strip()}")
+
+    install_dir = where.stdout.strip()
+    candidates = [
+        os.path.join(install_dir, "bin", "python"),
+        os.path.join(install_dir, "bin", "python3"),
+    ]
+    python_exe = next((path for path in candidates if os.path.exists(path)), candidates[0])
+    interpreter = await Interpreter.get_or_none(
+        tool="python",
+        version=version,
+        source=InterpreterSource.MISE,
+    )
+    if not interpreter:
+        interpreter = await Interpreter.create(
+            tool="python",
+            version=version,
+            install_dir=install_dir,
+            python_bin=python_exe,
+            status="installed",
+            source=InterpreterSource.MISE,
+            created_by=current_user_id,
+        )
+    else:
+        update_fields: list[str] = []
+        if interpreter.install_dir != install_dir:
+            interpreter.install_dir = install_dir
+            update_fields.append("install_dir")
+        if interpreter.python_bin != python_exe:
+            interpreter.python_bin = python_exe
+            update_fields.append("python_bin")
+        if update_fields:
+            await interpreter.save(update_fields=update_fields)
+
+    return InterpreterResolution(
+        interpreter=interpreter,
+        version=version,
+        python_exe=python_exe,
+    )
+
+
+async def _resolve_python_interpreter(
+    *,
+    requested_version: str,
+    interpreter_source: str | InterpreterSource,
+    python_bin: str | None,
+    current_user_id: int,
+) -> InterpreterResolution:
+    source = _normalize_interpreter_source(interpreter_source)
+    if source == InterpreterSource.LOCAL:
+        return await _ensure_local_interpreter(
+            requested_version=requested_version,
+            python_bin=python_bin,
+            current_user_id=current_user_id,
+        )
+
+    return await _ensure_mise_interpreter(version=requested_version, current_user_id=current_user_id)
+
+
+async def _resolve_project_runtime_record(project: Project) -> Runtime | None:
+    if project.current_runtime_id:
+        runtime = await Runtime.get_or_none(id=project.current_runtime_id)
+        if runtime:
+            return runtime
+
+    if project.runtime_locator:
+        return await Runtime.get_or_none(runtime_locator=project.runtime_locator)
+
+    return None
+
+
+def _clear_project_runtime_fields(project: Project) -> None:
+    project.current_runtime_id = None
+    project.runtime_locator = None
+    project.python_version = None
+    project.runtime_scope = None
+    project.runtime_kind = None
+
+
+async def _get_worker_related_runtime_ids(worker_ref: str) -> tuple[int | None, list[int]]:
+    from antcode_core.domain.models import Worker
+
+    worker_public_id: str | None = None
+    worker_internal_id: int | None = None
+
+    worker = await Worker.filter(public_id=worker_ref).first()
+    if worker:
+        worker_public_id = worker.public_id
+        worker_internal_id = worker.id
+    else:
+        try:
+            worker_internal_id = int(worker_ref)
+        except (TypeError, ValueError):
+            worker_internal_id = None
+        else:
+            internal_worker = await Worker.get_or_none(id=worker_internal_id)
+            if internal_worker:
+                worker_public_id = internal_worker.public_id
+
+    project_filters: list[Q] = []
+    if worker_public_id:
+        project_filters.append(Q(worker_id=worker_public_id))
+    if worker_internal_id is not None:
+        project_filters.append(Q(bound_worker_id=worker_internal_id))
+        project_filters.append(Q(runtime_worker_id=worker_internal_id))
+
+    if not project_filters:
+        return worker_internal_id, []
+
+    project_query = project_filters[0]
+    for extra_filter in project_filters[1:]:
+        project_query = project_query | extra_filter
+
+    project_ids = await Project.filter(project_query).values_list("id", flat=True)
+    if not project_ids:
+        return worker_internal_id, []
+
+    runtime_ids = await ProjectRuntimeBinding.filter(
+        project_id__in=list(project_ids),
+        is_current=True,
+    ).values_list("runtime_id", flat=True)
+    return worker_internal_id, list(runtime_ids)
+
+
+async def _ensure_runtime_directory(
+    *,
+    runtime_dir: str,
+    python_exe: str,
+    create_if_missing: bool,
+    create_error: str,
+) -> None:
+    from antcode_core.common.command_runner import run_command
+
+    if os.path.exists(runtime_dir):
+        return
+    if not create_if_missing:
+        raise RuntimeError("运行时不存在且不允许创建")
+
+    os.makedirs(runtime_dir, exist_ok=True)
+    result = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
+    if result.exit_code != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"{create_error}: {detail or '未知错误'}")
+
+
+async def _get_or_create_runtime_record(
+    *,
+    scope: RuntimeScope,
+    key: str | None,
+    version: str,
+    runtime_locator: str,
+    interpreter_id: int | None,
+    created_by: int,
+    worker_id: int | None = None,
+) -> Runtime:
+    runtime = await Runtime.get_or_none(runtime_locator=runtime_locator)
+    desired_details = {"python_version": version}
+    if not runtime:
+        return await Runtime.create(
+            runtime_kind=RuntimeKind.PYTHON,
+            scope=scope,
+            key=key,
+            version=version,
+            runtime_locator=runtime_locator,
+            runtime_details=desired_details,
+            interpreter_id=interpreter_id,
+            created_by=created_by,
+            worker_id=worker_id,
+        )
+
+    update_fields: list[str] = []
+    if runtime.runtime_kind != RuntimeKind.PYTHON:
+        runtime.runtime_kind = RuntimeKind.PYTHON
+        update_fields.append("runtime_kind")
+    if runtime.scope != scope:
+        runtime.scope = scope
+        update_fields.append("scope")
+    if runtime.key != key:
+        runtime.key = key
+        update_fields.append("key")
+    if runtime.version != version:
+        runtime.version = version
+        update_fields.append("version")
+    if runtime.runtime_details != desired_details:
+        runtime.runtime_details = desired_details
+        update_fields.append("runtime_details")
+    if runtime.interpreter_id != interpreter_id:
+        runtime.interpreter_id = interpreter_id
+        update_fields.append("interpreter_id")
+    if worker_id is not None and runtime.worker_id != worker_id:
+        runtime.worker_id = worker_id
+        update_fields.append("worker_id")
+    if update_fields:
+        await runtime.save(update_fields=update_fields)
+    return runtime
+
+
+async def _bind_project_runtime(
+    project: Project,
+    runtime: Runtime,
+    *,
+    version: str,
+    scope: RuntimeScope,
+    current_user_id: int,
+) -> None:
+    await ProjectRuntimeBinding.filter(project_id=project.id, is_current=True).update(is_current=False)
+    await ProjectRuntimeBinding.create(
+        project_id=project.id,
+        runtime_id=runtime.id,
+        is_current=True,
+        created_by=current_user_id,
+    )
+
+    project.python_version = version
+    project.runtime_scope = scope
+    project.runtime_kind = RuntimeKind.PYTHON
+    project.runtime_locator = runtime.runtime_locator
+    project.current_runtime_id = runtime.id
+    await project.save()
 
 
 async def _get_current_user_or_401(current_user: TokenData) -> User:
@@ -264,40 +593,32 @@ async def register_local_interpreter(
 ):
     """注册本地 Python 解释器。"""
     try:
-        from antcode_core.common.command_runner import run_command
-
-        if not os.path.exists(python_bin):
-            raise RuntimeError("python_bin 路径不存在")
-        res = await run_command([python_bin, "--version"], timeout=30)
-        if res.exit_code != 0:
-            raise RuntimeError(f"读取版本失败: {res.stderr or res.stdout}")
-        ver = res.stdout.strip().split()[-1]
-        install_dir = os.path.dirname(python_bin)
-
-        obj = await Interpreter.get_or_none(tool="python", version=ver, source=InterpreterSource.LOCAL)
-        if obj:
-            obj.install_dir = install_dir
-            obj.python_bin = python_bin
-            await obj.save()
-        else:
-            obj = await Interpreter.create(
-                tool="python",
-                version=ver,
-                install_dir=install_dir,
-                python_bin=python_bin,
-                status="installed",
-                source=InterpreterSource.LOCAL,
-                created_by=current_user.user_id,
-            )
+        resolution = await _ensure_local_interpreter(
+            requested_version=None,
+            python_bin=python_bin,
+            current_user_id=current_user.user_id,
+        )
+        interpreter = resolution.interpreter
+        interpreter.install_dir = os.path.dirname(resolution.python_exe)
+        interpreter.python_bin = resolution.python_exe
+        await interpreter.save(update_fields=["install_dir", "python_bin"])
         return InterpreterInfo(
-            id=obj.public_id, version=ver, install_dir=install_dir, python_bin=python_bin, source="local"
+            id=interpreter.public_id,
+            version=resolution.version,
+            install_dir=interpreter.install_dir,
+            python_bin=resolution.python_exe,
+            source="local",
         )
     except Exception as e:
         logger.error(f"注册本地解释器失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/python/interpreters/{version}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/python/interpreters/{version}",
+    response_model=BaseResponse[None],
+    status_code=status.HTTP_200_OK,
+)
 async def uninstall_python_interpreter(
     version: str,
     source: str = Query("mise"),
@@ -310,10 +631,11 @@ async def uninstall_python_interpreter(
             deleted = await Interpreter.filter(tool="python", version=version, source=source).delete()
             if deleted == 0:
                 raise HTTPException(status_code=404, detail=f"未找到 {source} 解释器记录")
-            return
+            return success_response(None, message=Messages.DELETED_SUCCESS)
         from antcode_core.common.command_runner import run_command
 
         await run_command(["mise", "uninstall", f"python@{version}"])
+        return success_response(None, message=Messages.DELETED_SUCCESS)
     except HTTPException:
         raise
     except Exception as e:
@@ -324,7 +646,7 @@ async def uninstall_python_interpreter(
 # ==================== 运行时管理 ====================
 
 
-@router.get("")
+@router.get("", response_model=PaginationResponse[RuntimeListItem])
 async def list_runtimes(
     scope: str = None,
     project_id: int = None,
@@ -338,8 +660,6 @@ async def list_runtimes(
     current_user: TokenData = Depends(get_current_user),
 ):
     """分页列出运行时。"""
-    from antcode_core.domain.models import Worker
-
     try:
         query = Runtime.all()
         if scope is not None:
@@ -354,14 +674,15 @@ async def list_runtimes(
 
         # 节点筛选
         if worker_id:
-            worker = await Worker.filter(public_id=worker_id).first()
-            if worker:
-                query = query.filter(worker_id=worker.id)
+            worker_internal_id, related_runtime_ids = await _get_worker_related_runtime_ids(worker_id)
+            if worker_internal_id is not None and related_runtime_ids:
+                query = query.filter(Q(worker_id=worker_internal_id) | Q(id__in=related_runtime_ids))
+            elif worker_internal_id is not None:
+                query = query.filter(worker_id=worker_internal_id)
+            elif related_runtime_ids:
+                query = query.filter(id__in=related_runtime_ids)
             else:
-                try:
-                    query = query.filter(worker_id=int(worker_id))
-                except ValueError:
-                    pass
+                query = query.filter(id=0)
 
         # 权限控制
         user = await User.get_or_none(id=current_user.user_id)
@@ -429,7 +750,7 @@ async def list_runtimes(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/{runtime_id}/packages")
+@router.get("/{runtime_id}/packages", response_model=BaseResponse[dict[str, Any]])
 async def list_runtime_packages(
     runtime_id: str,
     current_user: TokenData = Depends(get_current_user),
@@ -450,7 +771,10 @@ async def list_runtime_packages(
         import json
 
         packages = json.loads(res.stdout) if res.stdout.strip() else []
-        return {"runtime_id": runtime.public_id, "packages": packages}
+        return success_response(
+            {"runtime_id": runtime.public_id, "packages": packages},
+            message=Messages.QUERY_SUCCESS,
+        )
     except Exception as e:
         logger.error(f"获取依赖失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -466,7 +790,11 @@ def _runtime_python(runtime_dir: str) -> str:
     return next((p for p in candidates if os.path.exists(p)), candidates[0])
 
 
-@router.post("/{runtime_id}/packages", status_code=status.HTTP_200_OK)
+@router.post(
+    "/{runtime_id}/packages",
+    response_model=BaseResponse[dict[str, Any]],
+    status_code=status.HTTP_200_OK,
+)
 async def install_packages_to_runtime(
     runtime_id: str,
     packages: list[str] = Body(..., embed=True),
@@ -486,7 +814,10 @@ async def install_packages_to_runtime(
         res = await run_command(args, timeout=1800)
         if res.exit_code != 0:
             raise RuntimeError(f"安装依赖失败: {res.stderr.strip() or res.stdout.strip()}")
-        return {"runtime_id": runtime.public_id, "installed": packages}
+        return success_response(
+            {"runtime_id": runtime.public_id, "installed": packages},
+            message=Messages.UPDATED_SUCCESS,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -494,7 +825,11 @@ async def install_packages_to_runtime(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=BaseResponse[dict[str, Any]],
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_shared_runtime(
     version: str = Body(...),
     shared_runtime_key: str = Body(None),
@@ -505,71 +840,56 @@ async def create_shared_runtime(
     """创建或复用共享运行时。"""
     await _ensure_admin_user(current_user)
     try:
-        from antcode_core.common.command_runner import run_command
-
         version = _normalize_path_component(version, "version")
+        resolution = await _resolve_python_interpreter(
+            requested_version=version,
+            interpreter_source=interpreter_source,
+            python_bin=python_bin,
+            current_user_id=current_user.user_id,
+        )
+        version = resolution.version
         ident = _normalize_path_component(shared_runtime_key or version, "shared_runtime_key")
         runtime_root = os.path.join(settings.VENV_STORAGE_ROOT, "shared")
         runtime_dir = _safe_join_runtime_path(runtime_root, ident, "shared_runtime_key")
 
         os.makedirs(runtime_root, exist_ok=True)
+        await _ensure_runtime_directory(
+            runtime_dir=runtime_dir,
+            python_exe=resolution.python_exe,
+            create_if_missing=True,
+            create_error="创建共享运行时失败",
+        )
+        runtime_obj = await _get_or_create_runtime_record(
+            scope=RuntimeScope.SHARED,
+            key=ident,
+            version=version,
+            runtime_locator=runtime_dir,
+            interpreter_id=resolution.interpreter.id,
+            created_by=current_user.user_id,
+        )
 
-        # 确保解释器存在
-        if interpreter_source == "local":
-            if not python_bin:
-                raise RuntimeError("本地解释器需要提供 python_bin")
-            if not os.path.exists(python_bin):
-                raise RuntimeError("python_bin 路径不存在")
-            res = await run_command([python_bin, "--version"], timeout=30)
-            ver = res.stdout.strip().split()[-1]
-            install_dir = os.path.dirname(python_bin)
-            obj = await Interpreter.get_or_none(tool="python", version=ver, source=InterpreterSource.LOCAL)
-            if not obj:
-                obj = await Interpreter.create(
-                    tool="python", version=ver, install_dir=install_dir, python_bin=python_bin,
-                    status="installed", source=InterpreterSource.LOCAL, created_by=current_user.user_id,
-                )
-            python_exe = python_bin
-        else:
-            lock = _lock_for(version)
-            async with lock:
-                await run_command(["mise", "install", "-y", f"python@{version}"], timeout=1800)
-                where = await run_command(["mise", "where", f"python@{version}"], timeout=60)
-                if where.exit_code != 0:
-                    raise RuntimeError(f"查找解释器失败: {where.stderr.strip()}")
-                install_dir = where.stdout.strip()
-                candidates = [os.path.join(install_dir, "bin", "python"), os.path.join(install_dir, "bin", "python3")]
-                python_exe = next((p for p in candidates if os.path.exists(p)), candidates[0])
-                obj = await Interpreter.get_or_none(tool="python", version=version, source=InterpreterSource.MISE)
-                if not obj:
-                    obj = await Interpreter.create(
-                        tool="python", version=version, install_dir=install_dir, python_bin=python_exe,
-                        status="installed", source=InterpreterSource.MISE, created_by=current_user.user_id,
-                    )
-
-        if not os.path.exists(runtime_dir):
-            os.makedirs(runtime_dir, exist_ok=True)
-            res = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
-            if res.exit_code != 0:
-                raise RuntimeError(f"创建共享运行时失败: {res.stderr.strip()}")
-
-        interpreter = await Interpreter.filter(tool="python", version=version).first()
-        if not interpreter:
-            raise RuntimeError(f"未找到 Python {version} 解释器")
-        runtime_obj = await Runtime.get_or_none(runtime_locator=runtime_dir)
-        if not runtime_obj:
-            runtime_obj = await Runtime.create(
-                runtime_kind=RuntimeKind.PYTHON, scope=RuntimeScope.SHARED, key=ident, version=version, runtime_locator=runtime_dir, runtime_details={"python_version": version},
-                interpreter_id=interpreter.id, created_by=current_user.user_id,
-            )
-
-        return {"version": version, "runtime_locator": runtime_dir, "key": ident, "runtime_id": runtime_obj.public_id}
+        return success_response(
+            {
+                "version": version,
+                "runtime_locator": runtime_dir,
+                "key": ident,
+                "runtime_id": runtime_obj.public_id,
+            },
+            message=Messages.CREATED_SUCCESS,
+            code=status.HTTP_201_CREATED,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"创建共享环境失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/{runtime_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{runtime_id}",
+    response_model=BaseResponse[None],
+    status_code=status.HTTP_200_OK,
+)
 async def delete_runtime(
     runtime_id: str,
     allow_private: bool = Query(False),
@@ -598,7 +918,7 @@ async def delete_runtime(
                 raise HTTPException(status_code=400, detail=f"该运行时正在被以下项目使用: {', '.join(project_names)}")
             await _safe_rmtree(runtime.runtime_locator)
             await runtime.delete()
-            return
+            return success_response(None, message=Messages.DELETED_SUCCESS)
 
         # private
         if not allow_private:
@@ -607,7 +927,7 @@ async def delete_runtime(
         if not bind:
             await _safe_rmtree(runtime.runtime_locator)
             await runtime.delete()
-            return
+            return success_response(None, message=Messages.DELETED_SUCCESS)
         project = await Project.get(id=bind.project_id)
         if not (is_admin or project.user_id == current_user.user_id):
             raise HTTPException(status_code=403, detail="无权删除该项目的私有环境")
@@ -623,6 +943,7 @@ async def delete_runtime(
             await runtime.delete()
         except Exception:
             pass
+        return success_response(None, message=Messages.DELETED_SUCCESS)
     except HTTPException:
         raise
     except Exception as e:
@@ -656,7 +977,11 @@ async def _safe_rmtree(path: str | None) -> None:
         pass
 
 
-@router.post("/batch-delete", status_code=status.HTTP_200_OK)
+@router.post(
+    "/batch-delete",
+    response_model=BaseResponse[dict[str, Any]],
+    status_code=status.HTTP_200_OK,
+)
 async def batch_delete_runtimes(
     ids: list[str] = Body(..., embed=True),
     current_user: TokenData = Depends(get_current_user),
@@ -679,10 +1004,13 @@ async def batch_delete_runtimes(
             success_count += 1
         except Exception:
             failed.append(str(vid))
-    return {"total": len(ids), "deleted": success_count, "failed": failed}
+    return success_response(
+        {"total": len(ids), "deleted": success_count, "failed": failed},
+        message=Messages.OPERATION_SUCCESS,
+    )
 
 
-@router.patch("/{runtime_id}")
+@router.patch("/{runtime_id}", response_model=BaseResponse[dict[str, Any]])
 async def update_shared_runtime(
     runtime_id: str,
     key: str = Body(None, embed=True),
@@ -705,7 +1033,10 @@ async def update_shared_runtime(
         if key is not None:
             runtime.key = key
             await runtime.save()
-        return {"id": runtime.public_id, "key": runtime.key}
+        return success_response(
+            {"id": runtime.public_id, "key": runtime.key},
+            message=Messages.UPDATED_SUCCESS,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -751,8 +1082,6 @@ async def create_or_bind_project_runtime(
 ):
     """创建/绑定项目运行时。"""
     try:
-        from antcode_core.common.command_runner import run_command
-
         project = await _ensure_project_access(project_id, current_user)
         version = _normalize_path_component(version, "version")
         if shared_runtime_key:
@@ -762,92 +1091,55 @@ async def create_or_bind_project_runtime(
         if runtime_kind != RuntimeKind.PYTHON:
             raise HTTPException(status_code=400, detail="当前仅支持 python 运行时")
 
+        resolution = await _resolve_python_interpreter(
+            requested_version=version,
+            interpreter_source=interpreter_source,
+            python_bin=python_bin,
+            current_user_id=current_user.user_id,
+        )
+        version = resolution.version
+        runtime_key: str | None = None
+        create_error = "创建运行时失败"
+
         if scope == RuntimeScope.PRIVATE:
-            # 私有环境
             runtime_root = os.path.join(settings.VENV_STORAGE_ROOT, str(project.id))
             runtime_dir = _safe_join_runtime_path(runtime_root, version, "version")
-            os.makedirs(runtime_root, exist_ok=True)
-
-            if interpreter_source == "local":
-                if not python_bin:
-                    raise RuntimeError("本地解释器需要提供 python_bin")
-                python_exe = python_bin
-            else:
-                lock = _lock_for(version)
-                async with lock:
-                    await run_command(["mise", "install", "-y", f"python@{version}"], timeout=1800)
-                    where = await run_command(["mise", "where", f"python@{version}"], timeout=60)
-                    if where.exit_code != 0:
-                        raise RuntimeError(f"查找解释器失败: {where.stderr.strip()}")
-                    install_dir = where.stdout.strip()
-                    candidates = [os.path.join(install_dir, "bin", "python"), os.path.join(install_dir, "bin", "python3")]
-                    python_exe = next((p for p in candidates if os.path.exists(p)), candidates[0])
-
-            if not os.path.exists(runtime_dir):
-                if not create_if_missing:
-                    raise RuntimeError("运行时不存在且不允许创建")
-                res = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
-                if res.exit_code != 0:
-                    raise RuntimeError(f"创建运行时失败: {res.stderr.strip()}")
-
-            runtime_locator = runtime_dir
         else:
-            # 共享环境
-            ident = shared_runtime_key or version
+            runtime_key = shared_runtime_key or version
             runtime_root = os.path.join(settings.VENV_STORAGE_ROOT, "shared")
-            runtime_dir = _safe_join_runtime_path(runtime_root, ident, "shared_runtime_key")
-            os.makedirs(runtime_root, exist_ok=True)
+            runtime_dir = _safe_join_runtime_path(runtime_root, runtime_key, "shared_runtime_key")
+            create_error = "创建共享运行时失败"
 
-            if interpreter_source == "local":
-                if not python_bin:
-                    raise RuntimeError("本地解释器需要提供 python_bin")
-                python_exe = python_bin
-            else:
-                lock = _lock_for(version)
-                async with lock:
-                    await run_command(["mise", "install", "-y", f"python@{version}"], timeout=1800)
-                    where = await run_command(["mise", "where", f"python@{version}"], timeout=60)
-                    if where.exit_code != 0:
-                        raise RuntimeError(f"查找解释器失败: {where.stderr.strip()}")
-                    install_dir = where.stdout.strip()
-                    candidates = [os.path.join(install_dir, "bin", "python"), os.path.join(install_dir, "bin", "python3")]
-                    python_exe = next((p for p in candidates if os.path.exists(p)), candidates[0])
-
-            if not os.path.exists(runtime_dir):
-                os.makedirs(runtime_dir, exist_ok=True)
-                res = await run_command(["uv", "venv", runtime_dir, "--python", python_exe], timeout=900)
-                if res.exit_code != 0:
-                    raise RuntimeError(f"创建共享运行时失败: {res.stderr.strip()}")
-
-            runtime_locator = runtime_dir
-
-        # 记录/更新 Runtime 与绑定
-        interpreter = await Interpreter.filter(tool="python", version=version).first()
-        if not interpreter:
-            raise RuntimeError(f"未找到 Python {version} 解释器")
-        runtime_obj = await Runtime.get_or_none(runtime_locator=runtime_locator)
-        if not runtime_obj:
-            runtime_obj = await Runtime.create(
-                runtime_kind=RuntimeKind.PYTHON, scope=scope, key=shared_runtime_key if scope == RuntimeScope.SHARED else None,
-                version=version, runtime_locator=runtime_locator, runtime_details={"python_version": version}, interpreter_id=interpreter.id,
-                created_by=current_user.user_id,
-            )
-
-        # 更新项目绑定
-        await ProjectRuntimeBinding.filter(project_id=project.id, is_current=True).update(is_current=False)
-        await ProjectRuntimeBinding.create(
-            project_id=project.id, runtime_id=runtime_obj.id, is_current=True, created_by=current_user.user_id
+        os.makedirs(runtime_root, exist_ok=True)
+        await _ensure_runtime_directory(
+            runtime_dir=runtime_dir,
+            python_exe=resolution.python_exe,
+            create_if_missing=create_if_missing or scope == RuntimeScope.SHARED,
+            create_error=create_error,
+        )
+        runtime_obj = await _get_or_create_runtime_record(
+            scope=scope,
+            key=runtime_key,
+            version=version,
+            runtime_locator=runtime_dir,
+            interpreter_id=resolution.interpreter.id,
+            created_by=current_user.user_id,
+        )
+        await _bind_project_runtime(
+            project,
+            runtime_obj,
+            version=version,
+            scope=scope,
+            current_user_id=current_user.user_id,
         )
 
-        # 更新项目字段
-        project.python_version = version
-        project.runtime_scope = scope
-        project.runtime_kind = RuntimeKind.PYTHON
-        project.runtime_locator = runtime_locator
-        project.current_runtime_id = runtime_obj.id
-        await project.save()
-
-        return RuntimeStatusResponse(project_id=project.public_id, runtime_kind=runtime_kind, scope=runtime_scope, version=version, runtime_locator=runtime_locator)
+        return RuntimeStatusResponse(
+            project_id=project.public_id,
+            runtime_kind=runtime_kind,
+            scope=scope.value,
+            version=version,
+            runtime_locator=runtime_dir,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -855,7 +1147,11 @@ async def create_or_bind_project_runtime(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.delete("/projects/{project_id}/runtime", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/projects/{project_id}/runtime",
+    response_model=BaseResponse[None],
+    status_code=status.HTTP_200_OK,
+)
 async def delete_project_runtime(
     project_id: str,
     current_user: TokenData = Depends(get_current_user),
@@ -863,23 +1159,45 @@ async def delete_project_runtime(
     """删除项目运行时。"""
     try:
         project = await _ensure_project_access(project_id, current_user)
+        runtime = await _resolve_project_runtime_record(project)
+        current_scope = runtime.scope if runtime else project.runtime_scope
 
-        if project.runtime_locator:
-            await _safe_rmtree(project.runtime_locator)
+        if current_scope == RuntimeScope.SHARED or current_scope == "shared":
+            await ProjectRuntimeBinding.filter(project_id=project.id, is_current=True).delete()
+            _clear_project_runtime_fields(project)
+            await project.save()
+            return success_response(None, message=Messages.DELETED_SUCCESS)
 
-        # 清理绑定
-        await ProjectRuntimeBinding.filter(project_id=project.id).delete()
-        project.current_runtime_id = None
-        project.runtime_locator = None
-        project.python_version = None
-        project.runtime_scope = None
+        if runtime:
+            has_other_current_bindings = await ProjectRuntimeBinding.filter(
+                runtime_id=runtime.id,
+                is_current=True,
+            ).exclude(project_id=project.id).exists()
+            if has_other_current_bindings:
+                await ProjectRuntimeBinding.filter(project_id=project.id, is_current=True).delete()
+            else:
+                await _safe_rmtree(runtime.runtime_locator)
+                await ProjectRuntimeBinding.filter(runtime_id=runtime.id).delete()
+                await runtime.delete()
+        else:
+            await ProjectRuntimeBinding.filter(project_id=project.id, is_current=True).delete()
+            if project.runtime_locator:
+                await _safe_rmtree(project.runtime_locator)
+
+        _clear_project_runtime_fields(project)
         await project.save()
+        return success_response(None, message=Messages.DELETED_SUCCESS)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"删除 runtime 失败: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.get("/projects/{project_id}/runtime/packages")
+@router.get(
+    "/projects/{project_id}/runtime/packages",
+    response_model=BaseResponse[dict[str, Any]],
+)
 async def list_project_runtime_packages(
     project_id: str,
     current_user: TokenData = Depends(get_current_user),
@@ -902,7 +1220,10 @@ async def list_project_runtime_packages(
         import json
 
         packages = json.loads(res.stdout) if res.stdout.strip() else []
-        return {"project_id": project.public_id, "packages": packages}
+        return success_response(
+            {"project_id": project.public_id, "packages": packages},
+            message=Messages.QUERY_SUCCESS,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -910,7 +1231,11 @@ async def list_project_runtime_packages(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.post("/projects/{project_id}/runtime/packages", status_code=status.HTTP_200_OK)
+@router.post(
+    "/projects/{project_id}/runtime/packages",
+    response_model=BaseResponse[dict[str, Any]],
+    status_code=status.HTTP_200_OK,
+)
 async def install_packages_to_project_runtime(
     project_id: str,
     packages: list[str] = Body(..., embed=True),
@@ -932,7 +1257,10 @@ async def install_packages_to_project_runtime(
         res = await run_command(args, timeout=1800)
         if res.exit_code != 0:
             raise RuntimeError(f"安装依赖失败: {res.stderr.strip() or res.stdout.strip()}")
-        return {"project_id": project.public_id, "installed": packages}
+        return success_response(
+            {"project_id": project.public_id, "installed": packages},
+            message=Messages.UPDATED_SUCCESS,
+        )
     except HTTPException:
         raise
     except Exception as e:

@@ -126,25 +126,16 @@ export class BaseService {
 
   /**
    * 提取响应数据
-   * 处理不同的后端响应格式
+   * 统一处理后端响应信封
    */
   private extractData<T>(response: AxiosResponse<T | { data?: T }>): T {
-    const data = response.data
+    const payload = response.data
 
-    // 如果是标准的ApiResponse格式
-    if (data && typeof data === 'object') {
-      // 有data字段，返回data
-      if ('data' in data) {
-        return data.data as T
-      }
-      // 有items字段（分页数据），返回整个对象
-      if ('items' in data || 'pagination' in data) {
-        return data as T
-      }
+    if (payload && typeof payload === 'object' && 'data' in payload) {
+      return payload.data as T
     }
 
-    // 否则返回原始数据
-    return data as T
+    return payload as T
   }
 
   /**

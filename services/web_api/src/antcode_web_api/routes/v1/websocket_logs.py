@@ -1,12 +1,15 @@
 """WebSocket日志流接口"""
 
 import contextlib
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from loguru import logger
 
+from antcode_web_api.response import success
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User
+from antcode_core.domain.schemas.common import BaseResponse
 from antcode_web_api.websockets.websocket_log_service import websocket_log_service
 
 router = APIRouter()
@@ -37,7 +40,7 @@ async def websocket_logs_endpoint(
             await websocket.close(code=4000, reason="Internal error")
 
 
-@router.get("/stats")
+@router.get("/stats", response_model=BaseResponse[dict[str, Any]])
 async def get_websocket_stats(current_user: TokenData = Depends(get_current_user)):
     await _ensure_authenticated_user(current_user)
     try:
@@ -46,13 +49,13 @@ async def get_websocket_stats(current_user: TokenData = Depends(get_current_user
         )
 
         stats = websocket_manager.get_stats()
-        return {"success": True, "code": 200, "message": "Success", "data": stats}
+        return success(stats, message="查询成功")
     except Exception as e:
         logger.error(f"获取 WebSocket 统计信息失败: {e}")
         raise HTTPException(status_code=500, detail="获取统计信息失败")
 
 
-@router.post("/cleanup")
+@router.post("/cleanup", response_model=BaseResponse[dict[str, Any]])
 async def cleanup_inactive_connections(current_user: TokenData = Depends(get_current_user)):
     user = await _ensure_authenticated_user(current_user)
     if not user.is_admin:
@@ -63,12 +66,7 @@ async def cleanup_inactive_connections(current_user: TokenData = Depends(get_cur
         )
 
         await websocket_manager.cleanup_inactive_connections()
-        return {
-            "success": True,
-            "code": 200,
-            "message": "Cleanup complete",
-            "data": {"cleaned": True},
-        }
+        return success({"cleaned": True}, message="清理完成")
     except Exception as e:
         logger.error(f"清理连接失败: {e}")
         raise HTTPException(status_code=500, detail="清理失败")

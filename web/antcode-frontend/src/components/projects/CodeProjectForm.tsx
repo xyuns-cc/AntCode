@@ -28,6 +28,7 @@ import type { RcFile } from 'antd/es/upload/interface'
 import { getLanguageOptionsWithIcons, getLanguageConfig } from '@/components/ui/CodeEditor/languages'
 import { FileIcon } from '@/utils/fileIcons'
 import type { ProjectCreateRequest } from '@/types'
+import GitCredentialSelect from './GitCredentialSelect'
 
 const { Title, Text } = Typography
 const { TextArea } = Input
@@ -139,9 +140,26 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   }
 
   const [state, dispatch] = useReducer(codeProjectFormReducer, initialState)
+  const sourceTypeValue = Form.useWatch('source_type', form)
+  const gitUrlValue = Form.useWatch('git_url', form)
+  const entryPointValue = Form.useWatch('code_entry_point', form)
+  const initialSourceType = initialData.source_type || 's3'
 
   // 获取验证状态
   const getValidationStatus = useCallback(() => {
+    const sourceType = sourceTypeValue || initialSourceType || 's3'
+
+    if (sourceType === 'git') {
+      if (!gitUrlValue || (typeof gitUrlValue === 'string' && gitUrlValue.trim() === '')) {
+        return { isValid: false, tooltip: 'Git 来源必须填写 git_url' }
+      }
+      const entryPoint = entryPointValue ? String(entryPointValue).trim() : ''
+      if (!entryPoint) {
+        return { isValid: false, tooltip: 'Git 代码项目必须提供 entry_point' }
+      }
+      return { isValid: true, tooltip: '' }
+    }
+
     if (!isEdit) {
       if (state.inputMethod === 'editor') {
         if (!state.codeContent || state.codeContent.trim() === '') {
@@ -152,9 +170,16 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
           return { isValid: false, tooltip: '请选择要上传的代码文件' }
         }
       }
+    } else {
+      const isSwitching = sourceType !== (initialSourceType || 's3')
+      if (isSwitching && (sourceType === 's3' || sourceType === 'legacy_inline')) {
+        if (!state.codeContent || state.codeContent.trim() === '') {
+          return { isValid: false, tooltip: '切换代码来源时必须提供 code_content' }
+        }
+      }
     }
     return { isValid: true, tooltip: '' }
-  }, [isEdit, state.codeContent, state.fileList, state.inputMethod])
+  }, [entryPointValue, gitUrlValue, initialSourceType, isEdit, state.codeContent, state.fileList, state.inputMethod, sourceTypeValue])
 
   // 通知父组件验证状态变化
   React.useEffect(() => {
@@ -173,6 +198,11 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
 
   // 解构状态
   const { fileList, dependencies, newDependency, inputMethod, codeContent, selectedLanguage, isFullscreen, showTemplate } = state
+  const currentSourceType = sourceTypeValue || initialSourceType || 's3'
+  const requireCodeContent = !isEdit || (
+    currentSourceType !== initialSourceType
+    && (currentSourceType === 's3' || currentSourceType === 'legacy_inline')
+  )
 
   // 文件上传配置
   const uploadProps = {
@@ -246,7 +276,9 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
     form.setFieldValue('language', language)
 
     // 如果启用模板且当前代码为空或为默认模板，则更新为新语言的模板
-    if (showTemplate && (!codeContent || isDefaultTemplate(codeContent))) {
+    const sourceType = sourceTypeValue || initialSourceType || 's3'
+    const allowTemplate = !isEdit || sourceType === 'legacy_inline'
+    if (allowTemplate && showTemplate && (!codeContent || isDefaultTemplate(codeContent))) {
       const config = getLanguageConfig(language)
       if (config) {
         const newTemplate = config.defaultTemplate
@@ -281,14 +313,16 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
 
   // 初始化代码模板
   useEffect(() => {
-    if (!codeContent && showTemplate) {
+    const sourceType = sourceTypeValue || initialSourceType || 's3'
+    const allowTemplate = !isEdit || sourceType === 'legacy_inline'
+    if (!codeContent && showTemplate && allowTemplate) {
       const config = getLanguageConfig(selectedLanguage)
       if (config) {
         dispatch({ type: 'SET_CODE_CONTENT', payload: config.defaultTemplate })
         form.setFieldValue('code_content', config.defaultTemplate)
       }
     }
-  }, [selectedLanguage, showTemplate, codeContent, form])
+  }, [selectedLanguage, showTemplate, codeContent, form, initialSourceType, isEdit, sourceTypeValue])
 
   // 监听ESC键退出全屏
   useEffect(() => {
@@ -313,14 +347,31 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
 
   // 表单提交
   const handleFinish = (values: ProjectCreateRequest) => {
+    const sourceType = values.source_type || initialSourceType || 's3'
+    const tags = Array.isArray(values.tags)
+      ? values.tags
+      : (values.tags || '')
+          .split(',')
+          .map((tag: string) => tag.trim())
+          .filter(Boolean)
+
     if (isEdit) {
-      // 编辑模式：只提交代码配置相关的字段
       const submitData: Record<string, unknown> = {
+        name: values.name,
+        description: values.description,
+        tags,
+        dependencies,
         language: values.language,
         version: values.version,
-        entry_point: values.entry_point,
+        entry_point: values.code_entry_point,
         documentation: values.documentation,
-        code_content: inputMethod === 'editor' ? codeContent : undefined,
+        source_type: sourceType,
+        git_url: values.git_url,
+        git_branch: values.git_branch,
+        git_commit: values.git_commit,
+        git_subdir: values.git_subdir,
+        git_credential_id: values.git_credential_id,
+        code_content: sourceType === 'git' ? undefined : (codeContent.trim() ? codeContent : undefined),
       }
       onSubmit(submitData)
     } else {
@@ -329,14 +380,10 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
         ...values,
         type: 'code',
         dependencies,
-        code_content: inputMethod === 'editor' ? codeContent : undefined,
-        code_file: inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined,
-        tags: Array.isArray(values.tags)
-          ? values.tags
-          : (values.tags || '')
-              .split(',')
-              .map((tag: string) => tag.trim())
-              .filter(Boolean)
+        source_type: sourceType,
+        code_content: sourceType === 'git' ? undefined : (inputMethod === 'editor' ? codeContent : undefined),
+        code_file: sourceType === 'git' ? undefined : (inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined),
+        tags
       }
       onSubmit(submitData)
     }
@@ -347,11 +394,13 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
     _changedValues: Partial<ProjectCreateRequest>,
     allValues: ProjectCreateRequest
   ) => {
+    const sourceType = allValues.source_type || initialSourceType || 's3'
     const updatedData = {
       ...allValues,
       dependencies,
-      code_content: inputMethod === 'editor' ? codeContent : undefined,
-      code_file: inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined
+      source_type: sourceType,
+      code_content: sourceType === 'git' ? undefined : (inputMethod === 'editor' ? codeContent : undefined),
+      code_file: sourceType === 'git' ? undefined : (inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined)
     }
     onDataChange?.(updatedData)
   }
@@ -437,6 +486,59 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
           </Row>
 
           <Form.Item
+            name="source_type"
+            label="来源类型"
+            initialValue={initialSourceType}
+            rules={[{ required: true, message: '请选择来源类型' }]}
+          >
+            <Select
+              options={[
+                { label: 'S3（托管归档）', value: 's3' },
+                { label: 'Git（后端物化分发）', value: 'git' },
+                ...(isEdit ? [{ label: 'Legacy Inline（兼容）', value: 'legacy_inline' }] : []),
+              ]}
+            />
+          </Form.Item>
+
+          {(sourceTypeValue || initialSourceType) === 'git' && (
+            <>
+              <Form.Item
+                name="git_url"
+                label="Git 仓库地址"
+                rules={[{ required: true, message: '请输入 Git 仓库地址' }]}
+              >
+                <Input placeholder="https://github.com/org/repo.git" />
+              </Form.Item>
+
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item name="git_branch" label="分支（可选）">
+                    <Input placeholder="main" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="git_commit" label="提交（可选）">
+                    <Input placeholder="commit sha" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item name="git_subdir" label="子目录（可选）">
+                    <Input placeholder="path/in/repo" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="git_credential_id" label="Git 凭证（可选）">
+                    <GitCredentialSelect />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </>
+          )}
+
+          <Form.Item
             name="description"
             label="项目描述"
           >
@@ -457,140 +559,143 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
           </Form.Item>
         </Space>
       )
-    },
-    {
-      key: 'code',
-      label: '代码内容',
-      children: (
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <Card title="代码输入方式" size="small">
-            <Select
-              value={inputMethod}
-              onChange={(value) => dispatch({ type: 'SET_INPUT_METHOD', payload: value })}
-              style={{ width: '100%' }}
-            >
-              <Option value="editor">在线编辑器</Option>
-              <Option value="upload">上传文件</Option>
-            </Select>
-          </Card>
+	    },
+	    ...((currentSourceType === 'git') ? [] : [
+	      {
+	        key: 'code',
+	        label: '代码内容',
+	        children: (
+	          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+	            <Card title="代码输入方式" size="small">
+	              <Select
+	                value={inputMethod}
+	                onChange={(value) => dispatch({ type: 'SET_INPUT_METHOD', payload: value })}
+	                style={{ width: '100%' }}
+	                disabled={isEdit}
+	              >
+	                <Option value="editor">在线编辑器</Option>
+	                <Option value="upload">上传文件</Option>
+	              </Select>
+	            </Card>
 
-          {inputMethod === 'editor' ? (
-            <div>
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 12
-              }}>
-                <span style={{ fontWeight: 500 }}>
-                  代码内容 <span style={{ color: '#ff4d4f' }}>*</span>
-                </span>
-                <Space>
-                  <Tooltip title="插入代码模板" placement="top">
-                    <Button
-                      type="text"
-                      icon={<BulbOutlined />}
-                      onClick={insertTemplate}
-                      size="small"
-                    >
-                      模板
-                    </Button>
-                  </Tooltip>
-                  <Tooltip title={isFullscreen ? "退出全屏" : "全屏编辑"} placement="top">
-                    <Button
-                      type="text"
-                      icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
-                      onClick={toggleFullscreen}
-                      size="small"
-                    />
-                  </Tooltip>
-                </Space>
-              </div>
+	            {inputMethod === 'editor' ? (
+	              <div>
+	                <div style={{
+	                  display: 'flex',
+	                  justifyContent: 'space-between',
+	                  alignItems: 'center',
+	                  marginBottom: 12
+	                }}>
+		                  <span style={{ fontWeight: 500 }}>
+		                    代码内容 {requireCodeContent && <span style={{ color: '#ff4d4f' }}>*</span>}
+		                  </span>
+	                  <Space>
+	                    <Tooltip title="插入代码模板" placement="top">
+	                      <Button
+	                        type="text"
+	                        icon={<BulbOutlined />}
+	                        onClick={insertTemplate}
+	                        size="small"
+	                      >
+	                        模板
+	                      </Button>
+	                    </Tooltip>
+	                    <Tooltip title={isFullscreen ? "退出全屏" : "全屏编辑"} placement="top">
+	                      <Button
+	                        type="text"
+	                        icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
+	                        onClick={toggleFullscreen}
+	                        size="small"
+	                      />
+	                    </Tooltip>
+	                  </Space>
+	                </div>
 
-              <Form.Item
-                name="code_content"
-                rules={[{ required: true, message: '请输入代码内容' }]}
-                style={{ marginBottom: 0 }}
-              >
-                <div style={isFullscreen ? {
-                  position: 'fixed',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  zIndex: 1000,
-                  backgroundColor: '#fff',
-                  padding: 20
-                } : {}}>
-                  {isFullscreen && (
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: 16,
-                      paddingBottom: 16,
-                      borderBottom: '1px solid #f0f0f0'
-                    }}>
-                      <h3 style={{ margin: 0 }}>
-                        <CodeOutlined style={{ marginRight: 8 }} />
-                        代码编辑器 - {getLanguageConfig(selectedLanguage)?.name}
-                      </h3>
-                      <Button
-                        type="primary"
-                        icon={<CompressOutlined />}
-                        onClick={toggleFullscreen}
-                      >
-                        退出全屏
-                      </Button>
-                    </div>
-                  )}
+		                <Form.Item
+		                  name="code_content"
+		                  rules={requireCodeContent ? [{ required: true, message: '请输入代码内容' }] : []}
+		                  style={{ marginBottom: 0 }}
+		                >
+	                  <div style={isFullscreen ? {
+	                    position: 'fixed',
+	                    top: 0,
+	                    left: 0,
+	                    right: 0,
+	                    bottom: 0,
+	                    zIndex: 1000,
+	                    backgroundColor: '#fff',
+	                    padding: 20
+	                  } : {}}>
+	                    {isFullscreen && (
+	                      <div style={{
+	                        display: 'flex',
+	                        justifyContent: 'space-between',
+	                        alignItems: 'center',
+	                        marginBottom: 16,
+	                        paddingBottom: 16,
+	                        borderBottom: '1px solid #f0f0f0'
+	                      }}>
+	                        <h3 style={{ margin: 0 }}>
+	                          <CodeOutlined style={{ marginRight: 8 }} />
+	                          代码编辑器 - {getLanguageConfig(selectedLanguage)?.name}
+	                        </h3>
+	                        <Button
+	                          type="primary"
+	                          icon={<CompressOutlined />}
+	                          onClick={toggleFullscreen}
+	                        >
+	                          退出全屏
+	                        </Button>
+	                      </div>
+	                    )}
 
-                  <Suspense
-                    fallback={(
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: isFullscreen ? 'calc(100vh - 120px)' : 500 }}>
-                        <Spin tip="加载代码编辑器...">
-                          <div style={{ height: 200, width: '100%' }} />
-                        </Spin>
-                      </div>
-                    )}
-                  >
-                    <LazyCodeEditor
-                    value={codeContent}
-                    language={selectedLanguage}
-                    onChange={handleCodeChange}
-                    height={isFullscreen ? 'calc(100vh - 120px)' : 500}
-                    placeholder={`请输入${getLanguageConfig(selectedLanguage)?.name}代码...`}
-                  />
-                  </Suspense>
-                </div>
-              </Form.Item>
-            </div>
-          ) : (
-            <Form.Item
-              label="代码文件"
-              required
-              help="支持 .py、.js、.ts、.java、.cpp、.c、.go、.rs 等格式"
-            >
-              <Upload.Dragger {...uploadProps}>
-                <p className="ant-upload-drag-icon">
-                  <UploadOutlined style={{ fontSize: 48, color: '#722ed1' }} />
-                </p>
-                <p className="ant-upload-text">
-                  点击或拖拽代码文件到此区域上传
-                </p>
-                <p className="ant-upload-hint">
-                  支持单个代码文件上传
-                </p>
-              </Upload.Dragger>
-            </Form.Item>
-          )}
-        </Space>
-      )
-    },
-    {
-      key: 'deps',
-      label: '依赖管理',
-      children: (
+	                    <Suspense
+	                      fallback={(
+	                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: isFullscreen ? 'calc(100vh - 120px)' : 500 }}>
+	                          <Spin tip="加载代码编辑器...">
+	                            <div style={{ height: 200, width: '100%' }} />
+	                          </Spin>
+	                        </div>
+	                      )}
+	                    >
+	                      <LazyCodeEditor
+	                      value={codeContent}
+	                      language={selectedLanguage}
+	                      onChange={handleCodeChange}
+	                      height={isFullscreen ? 'calc(100vh - 120px)' : 500}
+	                      placeholder={`请输入${getLanguageConfig(selectedLanguage)?.name}代码...`}
+	                    />
+	                    </Suspense>
+	                  </div>
+	                </Form.Item>
+	              </div>
+	            ) : (
+	              <Form.Item
+	                label="代码文件"
+	                required
+	                help="支持 .py、.js、.ts、.java、.cpp、.c、.go、.rs 等格式"
+	              >
+	                <Upload.Dragger {...uploadProps}>
+	                  <p className="ant-upload-drag-icon">
+	                    <UploadOutlined style={{ fontSize: 48, color: '#722ed1' }} />
+	                  </p>
+	                  <p className="ant-upload-text">
+	                    点击或拖拽代码文件到此区域上传
+	                  </p>
+	                  <p className="ant-upload-hint">
+	                    支持单个代码文件上传
+	                  </p>
+	                </Upload.Dragger>
+	              </Form.Item>
+	            )}
+	          </Space>
+	        )
+	      },
+	    ]),
+	    {
+	      key: 'deps',
+	      label: '依赖管理',
+	      children: (
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
           <Card title="依赖包管理" size="small">
             <Space.Compact style={{ width: '100%', marginBottom: 16 }}>

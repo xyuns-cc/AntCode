@@ -20,6 +20,7 @@ Domain Models 模块
 # 基础模型
 # 审计日志模型
 from antcode_core.domain.models.audit_log import AuditLog
+from antcode_core.domain.models.git_credential import GitCredential
 from antcode_core.domain.models.base import (
     BaseModel,
     SoftDeleteMixin,
@@ -170,6 +171,7 @@ __all__ = [
     "WorkerEvent",
     # 审计日志模型
     "AuditLog",
+    "GitCredential",
     # 系统配置模型
     "SystemConfig",
 ]

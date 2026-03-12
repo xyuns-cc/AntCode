@@ -15,6 +15,8 @@ from loguru import logger
 
 from antcode_core.common.config import settings
 from antcode_core.application.services.files.file_storage import file_storage_service
+from antcode_core.application.services.projects.managed_paths import is_managed_path, resolve_managed_path
+from antcode_core.application.services.projects.storage_paths import is_s3_storage_key
 from antcode_core.infrastructure.storage.presign import is_s3_storage_enabled
 
 
@@ -25,6 +27,60 @@ class ProjectFileService:
         # 预览与编辑大小限制，避免加载或写入超大文件
         self.max_preview_size = 1024 * 1024  # 1MB
         self.max_edit_size = getattr(settings, "MAX_FILE_EDIT_SIZE", 1024 * 1024)
+
+    def _uses_s3_storage_key(self, file_path: str | None) -> bool:
+        return is_s3_storage_enabled() and is_s3_storage_key(file_path)
+
+    @staticmethod
+    def _get_s3_backend():
+        from antcode_core.infrastructure.storage.base import get_file_storage_backend
+
+        return get_file_storage_backend()
+
+    @staticmethod
+    def _resolve_local_path(storage_path: str) -> str:
+        if is_managed_path(storage_path):
+            return resolve_managed_path(storage_path)
+        return file_storage_service.get_file_path(storage_path)
+
+    async def _get_s3_path_structure(self, file_path: str):
+        backend = self._get_s3_backend()
+        if await backend.exists(file_path):
+            return await self._get_s3_file_info(file_path, backend)
+        return await self._get_s3_directory_structure(file_path)
+
+    async def _get_s3_file_info(self, file_path: str, backend=None):
+        backend = backend or self._get_s3_backend()
+        filename = os.path.basename(file_path)
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+        try:
+            file_size = await backend.get_file_size(file_path)
+        except Exception:
+            file_size = 0
+
+        return {
+            "name": filename,
+            "type": "file",
+            "path": filename,
+            "size": file_size,
+            "modified_time": 0.0,
+            "mime_type": mime_type,
+            "is_text": self._is_text_file_by_name(filename),
+        }
+
+    async def _resolve_s3_file_key(self, file_path: str, relative_path: str = "") -> str:
+        backend = self._get_s3_backend()
+        if relative_path and await backend.exists(file_path):
+            return file_path
+        if relative_path:
+            return f"{file_path.rstrip('/')}/{relative_path.lstrip('/')}"
+        if await backend.exists(file_path):
+            return file_path
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="S3 项目目录必须指定文件路径",
+        )
 
     async def get_project_file_structure(self, file_path):
         """
@@ -37,11 +93,10 @@ class ProjectFileService:
             文件结构树
         """
         try:
-            # 检查是否使用 S3 后端
-            if is_s3_storage_enabled() and file_path.startswith("projects/"):
-                return await self._get_s3_directory_structure(file_path)
+            if self._uses_s3_storage_key(file_path):
+                return await self._get_s3_path_structure(file_path)
 
-            full_path = file_storage_service.get_file_path(file_path)
+            full_path = self._resolve_local_path(file_path)
 
             if not os.path.exists(full_path):
                 raise HTTPException(
@@ -146,7 +201,7 @@ class ProjectFileService:
                     file_node = {
                         "name": parts[-1],
                         "type": "file",
-                        "path": relative_path,
+                        "path": relative_path or os.path.basename(full_file_path),
                         "size": obj["size"],
                         "modified_time": obj["last_modified"].timestamp() if obj.get("last_modified") else None,
                         "mime_type": mimetypes.guess_type(parts[-1])[0] or "application/octet-stream",
@@ -353,7 +408,7 @@ class ProjectFileService:
             return {
                 "name": os.path.basename(file_path),
                 "type": "file",
-                "path": "",
+                "path": os.path.basename(file_path),
                 "size": stat.st_size,
                 "modified_time": stat.st_mtime,
                 "mime_type": mime_type,
@@ -460,7 +515,7 @@ class ProjectFileService:
                     detail="非法路径：不允许访问父目录或使用绝对路径",
                 )
 
-        full_base_path = file_storage_service.get_file_path(base_path)
+        full_base_path = self._resolve_local_path(base_path)
         full_base_path = os.path.normpath(full_base_path)
 
         # 判断base_path是文件还是目录
@@ -508,8 +563,7 @@ class ProjectFileService:
             文件内容信息
         """
         try:
-            # 检查是否使用 S3 后端且是项目目录
-            if is_s3_storage_enabled() and file_path.startswith("projects/"):
+            if self._uses_s3_storage_key(file_path):
                 return await self._get_s3_file_content(file_path, relative_path)
 
             # 验证并解析路径
@@ -587,26 +641,10 @@ class ProjectFileService:
             )
 
     async def _get_s3_file_content(self, file_path: str, relative_path: str = ""):
-        """从 S3 获取文件内容
+        """从 S3 获取文件内容。"""
+        backend = self._get_s3_backend()
+        s3_key = await self._resolve_s3_file_key(file_path, relative_path)
 
-        Args:
-            file_path: S3 前缀（如 projects/{project_id}/）
-            relative_path: 相对路径
-        """
-        from antcode_core.infrastructure.storage.base import get_file_storage_backend
-
-        backend = get_file_storage_backend()
-
-        # 构建完整的 S3 key
-        if relative_path:
-            s3_key = f"{file_path.rstrip('/')}/{relative_path.lstrip('/')}"
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="S3 项目目录必须指定文件路径",
-            )
-
-        # 检查文件是否存在
         if not await backend.exists(s3_key):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
 
@@ -622,7 +660,7 @@ class ProjectFileService:
 
         result = {
             "name": filename,
-            "path": relative_path,
+            "path": relative_path or os.path.basename(s3_key),
             "size": file_size,
             "mime_type": mime_type,
             "is_text": is_text,
@@ -682,8 +720,7 @@ class ProjectFileService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件内容不能为空")
 
         try:
-            # 检查是否使用 S3 后端且是项目目录
-            if is_s3_storage_enabled() and file_path.startswith("projects/"):
+            if self._uses_s3_storage_key(file_path):
                 return await self._update_s3_file_content(file_path, relative_path, content, encoding)
 
             # 验证并解析路径
@@ -772,30 +809,13 @@ class ProjectFileService:
             ) from exc
 
     async def _update_s3_file_content(self, file_path: str, relative_path: str, content: str, encoding: str = "utf-8"):
-        """更新 S3 上的文件内容
-
-        Args:
-            file_path: S3 前缀（如 projects/{project_id}/）
-            relative_path: 相对路径
-            content: 文件内容
-            encoding: 文件编码
-        """
-        from antcode_core.infrastructure.storage.base import get_file_storage_backend
+        """更新 S3 上的文件内容。"""
         from antcode_core.infrastructure.storage.s3_client import get_s3_client_manager
 
-        if not relative_path:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="S3 项目目录必须指定文件路径",
-            )
-
-        backend = get_file_storage_backend()
+        backend = self._get_s3_backend()
         s3_manager = get_s3_client_manager()
+        s3_key = await self._resolve_s3_file_key(file_path, relative_path)
 
-        # 构建完整的 S3 key
-        s3_key = f"{file_path.rstrip('/')}/{relative_path.lstrip('/')}"
-
-        # 检查文件是否存在
         if not await backend.exists(s3_key):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
 
@@ -855,8 +875,7 @@ class ProjectFileService:
             文件响应（FileResponse、StreamingResponse 或 RedirectResponse）
         """
         try:
-            # 检查是否使用 S3 后端
-            if is_s3_storage_enabled():
+            if self._uses_s3_storage_key(file_path):
                 return await self._download_from_s3(file_path, relative_path, use_redirect)
 
             # 本地文件系统下载
@@ -905,25 +924,12 @@ class ProjectFileService:
         return FileResponse(path=full_file_path, filename=filename, media_type=mime_type)
 
     async def _download_from_s3(self, file_path: str, relative_path: str = "", use_redirect: bool = False):
-        """从 S3 下载文件
-
-        Args:
-            file_path: S3 中的文件路径
-            relative_path: 相对路径（S3 不支持目录结构，此参数会被忽略）
-            use_redirect: 是否重定向到预签名 URL
-        """
-        from antcode_core.infrastructure.storage.base import get_file_storage_backend
+        """从 S3 下载文件。"""
         from antcode_core.infrastructure.storage.presign import generate_download_url
 
-        backend = get_file_storage_backend()
+        backend = self._get_s3_backend()
+        s3_path = await self._resolve_s3_file_key(file_path, relative_path)
 
-        # S3 路径处理：如果有 relative_path，拼接路径
-        s3_path = file_path
-        if relative_path:
-            # S3 使用 / 作为路径分隔符
-            s3_path = f"{file_path.rstrip('/')}/{relative_path.lstrip('/')}"
-
-        # 检查文件是否存在
         if not await backend.exists(s3_path):
             logger.error(f"S3 文件不存在: {s3_path}")
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
@@ -978,7 +984,7 @@ class ProjectFileService:
         Returns:
             预签名 URL，如果不支持则返回 None
         """
-        if not is_s3_storage_enabled():
+        if not self._uses_s3_storage_key(file_path):
             return None
 
         try:

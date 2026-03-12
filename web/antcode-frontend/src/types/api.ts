@@ -1,43 +1,42 @@
 // API 响应基础类型
 export interface ApiResponse<T = unknown> {
   success: boolean
+  code: number
+  message: string
   data: T
-  message?: string
-  code?: number
+  timestamp: string
 }
 
-// 分页响应类型（带 success 包装）
-export interface ApiPaginatedResponse<T> {
-  success: boolean
-  data: {
-    items: T[]
-    total: number
-    page: number
-    size: number
-    pages: number
-  }
+export interface PaginationInfo {
+  page: number
+  size: number
+  total: number
+  pages: number
 }
 
-// 新版分页响应类型（data + pagination）
-export interface PaginationResponse<T> {
-  success: boolean
-  data: T[]
-  pagination: {
-    page: number
-    size: number
-    total: number
-    pages: number
-  }
-  message?: string
-  code?: number
+export interface PaginationData<T> {
+  items: T[]
+  pagination: PaginationInfo
+}
+
+// 分页响应类型（单一响应信封）
+export type PaginationResponse<T> = ApiResponse<PaginationData<T>>
+
+// 兼容别名（与 PaginationResponse 结构一致）
+export type ApiPaginatedResponse<T> = PaginationResponse<T>
+
+export interface ApiErrorDetail {
+  field: string
+  message: string
+}
+
+export interface ApiErrorData {
+  error_code?: string
+  errors: ApiErrorDetail[]
 }
 
 // 错误响应类型
-export interface ApiError {
-  detail: string
-  code?: string
-  field?: string
-}
+export type ApiError = ApiResponse<ApiErrorData | null>
 
 // 请求配置类型
 export interface RequestConfig {

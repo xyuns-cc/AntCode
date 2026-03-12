@@ -116,42 +116,37 @@ class SchedulerService:
         self, task_data, project_type, user_id, internal_project_id=None, specified_worker_id=None
     ):
         """创建调度任务"""
-        try:
-            # 使用传入的内部 project_id，或从 task_data 中获取
-            project_id = (
-                internal_project_id if internal_project_id is not None else task_data.project_id
-            )
+        # 使用传入的内部 project_id，或从 task_data 中获取
+        project_id = (
+            internal_project_id if internal_project_id is not None else task_data.project_id
+        )
 
-            # 处理 Worker ID
-            from antcode_core.domain.models import Worker
+        # 处理 Worker ID
+        from antcode_core.domain.models import Worker
 
-            worker_internal_id = None
-            if specified_worker_id:
-                worker = await Worker.filter(public_id=specified_worker_id).first()
-                if worker:
-                    worker_internal_id = worker.id
-                else:
-                    raise ValueError("指定执行 Worker 不存在")
+        worker_internal_id = None
+        if specified_worker_id:
+            worker = await Worker.filter(public_id=specified_worker_id).first()
+            if worker:
+                worker_internal_id = worker.id
+            else:
+                raise ValueError("指定执行 Worker 不存在")
 
-            # 创建任务
-            task = await Task.create(
-                **task_data.model_dump(exclude={"project_id", "specified_worker_id"}),
-                project_id=project_id,
-                task_type=project_type,
-                user_id=user_id,
-                specified_worker_id=worker_internal_id,
-            )
+        # 创建任务
+        task = await Task.create(
+            **task_data.model_dump(exclude={"project_id", "specified_worker_id"}),
+            project_id=project_id,
+            task_type=project_type,
+            user_id=user_id,
+            specified_worker_id=worker_internal_id,
+        )
 
-            # 添加到调度器
-            if task.is_active:
-                await self.add_task(task)
+        # 添加到调度器
+        if task.is_active:
+            await self.add_task(task)
 
-            logger.info(f"任务创建成功: {task.name} (ID: {task.id})")
-            return task
-
-        except Exception as e:
-            logger.error(f"创建任务失败: {e}")
-            raise
+        logger.info(f"任务创建成功: {task.name} (ID: {task.id})")
+        return task
 
     async def get_user_tasks(
         self,
@@ -161,215 +156,215 @@ class SchedulerService:
         page=1,
         size=20,
         specified_worker_id=None,
+        worker_id=None,
         project_id=None,
         schedule_type=None,
         search=None,
     ):
         """获取用户任务列表（优化版本）"""
-        try:
-            from tortoise.expressions import Q
+        from tortoise.expressions import Q
 
-            from antcode_core.domain.models import Worker
+        from antcode_core.domain.models import Project, Worker
 
-            # 如果user_id为None，表示管理员查看所有任务
-            query = Task.all() if user_id is None else Task.filter(user_id=user_id)
+        # 如果user_id为None，表示管理员查看所有任务
+        query = Task.all() if user_id is None else Task.filter(user_id=user_id)
 
-            if status is not None:
-                query = query.filter(status=status)
-            if is_active is not None:
-                query = query.filter(is_active=is_active)
-            if schedule_type:
-                query = query.filter(schedule_type=schedule_type)
-            if search:
-                keyword = str(search).strip()
-                if keyword:
-                    query = query.filter(
-                        Q(name__icontains=keyword) | Q(description__icontains=keyword)
-                    )
-
-            if project_id:
-                from antcode_core.domain.models import Project
-
-                project = await QueryHelper.get_by_id_or_public_id(
-                    Project,
-                    project_id,
-                    user_id=user_id,
-                    check_admin=True,
+        if status is not None:
+            query = query.filter(status=status)
+        if is_active is not None:
+            query = query.filter(is_active=is_active)
+        if schedule_type:
+            query = query.filter(schedule_type=schedule_type)
+        if search:
+            keyword = str(search).strip()
+            if keyword:
+                query = query.filter(
+                    Q(name__icontains=keyword) | Q(description__icontains=keyword)
                 )
-                if not project:
-                    raise ValueError("项目不存在或无权限访问")
-                query = query.filter(project_id=project.id)
 
-            # Worker 筛选
-            if specified_worker_id:
-                worker = await Worker.filter(public_id=specified_worker_id).first()
-                if worker:
-                    query = query.filter(specified_worker_id=worker.id)
-                else:
-                    raise ValueError("指定执行 Worker 不存在")
+        if project_id:
+            project = await QueryHelper.get_by_id_or_public_id(
+                Project,
+                project_id,
+                user_id=user_id,
+                check_admin=True,
+            )
+            if not project:
+                raise ValueError("项目不存在或无权限访问")
+            query = query.filter(project_id=project.id)
 
-            total = await query.count()
-            offset = (page - 1) * size
-            tasks = await query.order_by("-created_at").offset(offset).limit(size)
+        # Worker 筛选
+        if specified_worker_id:
+            worker = await Worker.filter(public_id=specified_worker_id).first()
+            if worker:
+                query = query.filter(specified_worker_id=worker.id)
+            else:
+                raise ValueError("指定执行 Worker 不存在")
 
-            # 批量获取创建者用户名和 public_id
-            user_ids = list({t.user_id for t in tasks if t.user_id})
-            users_map = await QueryHelper.batch_get_user_info(user_ids)
+        # 节点视角筛选：按节点只看与该节点相关的任务
+        if worker_id:
+            worker = await Worker.filter(public_id=worker_id).first()
+            if not worker:
+                raise ValueError("指定 Worker 不存在")
 
-            # 批量获取项目的 public_id
-            project_ids = list({t.project_id for t in tasks if t.project_id})
-            projects_map = await QueryHelper.batch_get_project_public_ids(project_ids)
+            related_project_ids = await Project.filter(
+                Q(worker_id=worker.public_id)
+                | Q(bound_worker_id=worker.id)
+                | Q(runtime_worker_id=worker.id)
+            ).values_list("id", flat=True)
 
-            # 批量获取指定 Worker 的 public_id 和名称
-            worker_ids = list({t.specified_worker_id for t in tasks if t.specified_worker_id})
-            workers_map = await QueryHelper.batch_get_worker_info(worker_ids)
+            node_query = Q(specified_worker_id=worker.id)
+            project_ids = list(related_project_ids)
+            if project_ids:
+                node_query = node_query | Q(project_id__in=project_ids)
 
-            # 为任务添加创建者、项目和 Worker 信息
-            for task in tasks:
-                user_info = users_map.get(task.user_id, {})
-                task.created_by_username = user_info.get("username")
-                task.created_by_public_id = user_info.get("public_id")
-                task.project_public_id = projects_map.get(task.project_id)
-                worker_info = workers_map.get(task.specified_worker_id, {})
-                task.specified_worker_name = worker_info.get("name")
-                task.specified_worker_public_id = worker_info.get("public_id")
+            query = query.filter(node_query)
 
-            return {
-                "tasks": tasks,
-                "total": total,
-                "page": page,
-                "size": size,
-                "pages": (total + size - 1) // size,
-            }
-        except Exception as e:
-            logger.error(f"获取用户任务列表失败: {e}")
-            raise
+        total = await query.count()
+        offset = (page - 1) * size
+        tasks = await query.order_by("-created_at").offset(offset).limit(size)
+
+        # 批量获取创建者用户名和 public_id
+        user_ids = list({t.user_id for t in tasks if t.user_id})
+        users_map = await QueryHelper.batch_get_user_info(user_ids)
+
+        # 批量获取项目的 public_id
+        project_ids = list({t.project_id for t in tasks if t.project_id})
+        projects_map = await QueryHelper.batch_get_project_public_ids(project_ids)
+
+        # 批量获取指定 Worker 的 public_id 和名称
+        worker_ids = list({t.specified_worker_id for t in tasks if t.specified_worker_id})
+        workers_map = await QueryHelper.batch_get_worker_info(worker_ids)
+
+        # 为任务添加创建者、项目和 Worker 信息
+        for task in tasks:
+            user_info = users_map.get(task.user_id, {})
+            task.created_by_username = user_info.get("username")
+            task.created_by_public_id = user_info.get("public_id")
+            task.project_public_id = projects_map.get(task.project_id)
+            worker_info = workers_map.get(task.specified_worker_id, {})
+            task.specified_worker_name = worker_info.get("name")
+            task.specified_worker_public_id = worker_info.get("public_id")
+
+        return {
+            "tasks": tasks,
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": (total + size - 1) // size,
+        }
 
     async def get_task_by_id(self, task_id, user_id):
         """根据ID获取任务（支持 public_id 和内部 id）"""
         from antcode_core.domain.models import Project
 
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
 
-            if not task:
-                return None
+        if not task:
+            return None
 
-            # 获取创建者信息
-            users_map = await QueryHelper.batch_get_user_info(
-                [task.user_id] if task.user_id else []
-            )
-            user_info = users_map.get(task.user_id, {})
-            task.created_by_username = user_info.get("username")
-            task.created_by_public_id = user_info.get("public_id")
+        # 获取创建者信息
+        users_map = await QueryHelper.batch_get_user_info(
+            [task.user_id] if task.user_id else []
+        )
+        user_info = users_map.get(task.user_id, {})
+        task.created_by_username = user_info.get("username")
+        task.created_by_public_id = user_info.get("public_id")
 
-            # 获取项目的 public_id 和执行策略配置
-            project = await Project.get_or_none(id=task.project_id)
-            task.project_public_id = project.public_id if project else None
+        # 获取项目的 public_id 和执行策略配置
+        project = await Project.get_or_none(id=task.project_id)
+        task.project_public_id = project.public_id if project else None
 
-            # 填充项目执行策略信息
-            if project:
-                task.project_execution_strategy = project.execution_strategy
-                task.project_bound_worker_id = project.bound_worker_id
-                # 获取项目绑定 Worker 名称
-                if project.bound_worker_id:
-                    from antcode_core.domain.models import Worker
-
-                    bound_worker = await Worker.get_or_none(id=project.bound_worker_id)
-                    task.project_bound_worker_name = bound_worker.name if bound_worker else None
-                    task.project_bound_worker_public_id = (
-                        bound_worker.public_id if bound_worker else None
-                    )
-                else:
-                    task.project_bound_worker_name = None
-                    task.project_bound_worker_public_id = None
-
-            # 填充任务指定 Worker 名称
-            if task.specified_worker_id:
+        # 填充项目执行策略信息
+        if project:
+            task.project_execution_strategy = project.execution_strategy
+            task.project_bound_worker_id = project.bound_worker_id
+            # 获取项目绑定 Worker 名称
+            if project.bound_worker_id:
                 from antcode_core.domain.models import Worker
 
-                specified_worker = await Worker.get_or_none(id=task.specified_worker_id)
-                task.specified_worker_name = specified_worker.name if specified_worker else None
-                task.specified_worker_public_id = (
-                    specified_worker.public_id if specified_worker else None
+                bound_worker = await Worker.get_or_none(id=project.bound_worker_id)
+                task.project_bound_worker_name = bound_worker.name if bound_worker else None
+                task.project_bound_worker_public_id = (
+                    bound_worker.public_id if bound_worker else None
                 )
             else:
-                task.specified_worker_name = None
-                task.specified_worker_public_id = None
+                task.project_bound_worker_name = None
+                task.project_bound_worker_public_id = None
 
-            return task
-        except Exception as e:
-            logger.error(f"获取任务失败: {e}")
-            raise
+        # 填充任务指定 Worker 名称
+        if task.specified_worker_id:
+            from antcode_core.domain.models import Worker
+
+            specified_worker = await Worker.get_or_none(id=task.specified_worker_id)
+            task.specified_worker_name = specified_worker.name if specified_worker else None
+            task.specified_worker_public_id = (
+                specified_worker.public_id if specified_worker else None
+            )
+        else:
+            task.specified_worker_name = None
+            task.specified_worker_public_id = None
+
+        return task
 
     async def update_task(self, task_id, task_data, user_id):
         """更新任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
 
-            if not task:
-                return None
+        if not task:
+            return None
 
-            # 更新字段
-            update_data = task_data.model_dump(exclude_unset=True)
-            for field, value in update_data.items():
-                setattr(task, field, value)
+        # 更新字段
+        update_data = task_data.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(task, field, value)
 
-            await task.save()
+        await task.save()
 
-            if self._control_plane():
-                await self._publish_event("task_changed", task.id)
-                logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
-                return task
-
-            # 如果任务状态改变，更新调度器（使用内部 ID）
-            if "is_active" in update_data:
-                if task.is_active:
-                    await self.add_task(task)
-                else:
-                    await self.remove_task(task.id)
-
+        if self._control_plane():
+            await self._publish_event("task_changed", task.id)
             logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
             return task
 
-        except Exception as e:
-            logger.error(f"更新任务失败: {e}")
-            raise
+        # 如果任务状态改变，更新调度器（使用内部 ID）
+        if "is_active" in update_data:
+            if task.is_active:
+                await self.add_task(task)
+            else:
+                await self.remove_task(task.id)
+
+        logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
+        return task
 
     async def delete_task(self, task_id, user_id):
         """删除任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
 
-            if not task:
-                return False
+        if not task:
+            return False
 
-            # 从调度器移除（使用内部 ID）
-            await self.remove_task(task.id)
+        # 从调度器移除（使用内部 ID）
+        await self.remove_task(task.id)
 
-            # 级联删除执行记录
-            deleted_count = await TaskRun.filter(task_id=task.id).delete()
-            if deleted_count > 0:
-                logger.info(f"已删除任务 {task.id} 的 {deleted_count} 条执行记录")
+        # 级联删除执行记录
+        deleted_count = await TaskRun.filter(task_id=task.id).delete()
+        if deleted_count > 0:
+            logger.info(f"已删除任务 {task.id} 的 {deleted_count} 条执行记录")
 
-            # 删除数据库记录
-            await task.delete()
+        # 删除数据库记录
+        await task.delete()
 
-            logger.info(f"任务删除成功: {task.name} (ID: {task.id})")
-            return True
-
-        except Exception as e:
-            logger.error(f"删除任务失败: {e}")
-            raise
+        logger.info(f"任务删除成功: {task.name} (ID: {task.id})")
+        return True
 
     async def get_task_executions(
         self,
@@ -382,57 +377,49 @@ class SchedulerService:
         size=20,
     ):
         """获取任务执行记录（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
 
-            if not task:
-                raise ValueError("任务不存在或无权访问")
+        if not task:
+            raise ValueError("任务不存在或无权访问")
 
-            # 使用内部 ID 查询执行记录
-            query = TaskRun.filter(task_id=task.id)
+        # 使用内部 ID 查询执行记录
+        query = TaskRun.filter(task_id=task.id)
 
-            if status is not None:
-                query = query.filter(status=status)
-            if start_date:
-                query = query.filter(start_time__gte=start_date)
-            if end_date:
-                query = query.filter(start_time__lte=end_date)
+        if status is not None:
+            query = query.filter(status=status)
+        if start_date:
+            query = query.filter(start_time__gte=start_date)
+        if end_date:
+            query = query.filter(start_time__lte=end_date)
 
-            total = await query.count()
-            offset = (page - 1) * size
-            executions = await query.offset(offset).limit(size).order_by("-start_time")
+        total = await query.count()
+        offset = (page - 1) * size
+        executions = await query.offset(offset).limit(size).order_by("-start_time")
 
-            # 为每个执行记录添加任务的 public_id
-            for execution in executions:
-                execution.task_public_id = task.public_id
+        # 为每个执行记录添加任务的 public_id
+        for execution in executions:
+            execution.task_public_id = task.public_id
 
-            worker_ids = list({e.worker_id for e in executions if e.worker_id})
-            workers_map = await QueryHelper.batch_get_worker_info(worker_ids)
-            for execution in executions:
-                worker_info = workers_map.get(execution.worker_id, {})
-                execution.worker_public_id = worker_info.get("public_id")
+        worker_ids = list({e.worker_id for e in executions if e.worker_id})
+        workers_map = await QueryHelper.batch_get_worker_info(worker_ids)
+        for execution in executions:
+            worker_info = workers_map.get(execution.worker_id, {})
+            execution.worker_public_id = worker_info.get("public_id")
 
-            return {
-                "executions": executions,
-                "total": total,
-                "page": page,
-                "size": size,
-                "pages": (total + size - 1) // size,
-            }
-        except Exception as e:
-            logger.error(f"获取任务执行记录失败: {e}")
-            raise
+        return {
+            "executions": executions,
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": (total + size - 1) // size,
+        }
 
     async def get_execution_by_id(self, run_id):
         """根据ID获取执行记录"""
-        try:
-            return await TaskRun.get_or_none(run_id=run_id)
-        except Exception as e:
-            logger.error(f"获取执行记录失败: {e}")
-            raise
+        return await TaskRun.get_or_none(run_id=run_id)
 
     async def get_task_stats(self, task_id, user_id):
         """获取任务统计信息（支持 public_id）
@@ -441,45 +428,44 @@ class SchedulerService:
         """
         import asyncio
 
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
 
-            if not task:
-                return None
+        if not task:
+            return None
 
-            base_query = TaskRun.filter(task_id=task.id)
+        base_query = TaskRun.filter(task_id=task.id)
 
-            # 并行执行统计查询
-            total, success_count, failed_count, running_count, last_execution = await asyncio.gather(
-                base_query.count(),
-                base_query.filter(status=TaskStatus.SUCCESS).count(),
-                base_query.filter(status=TaskStatus.FAILED).count(),
-                base_query.filter(status=TaskStatus.RUNNING).count(),
-                base_query.order_by("-start_time").first(),
-            )
+        # 并行执行统计查询
+        total, success_count, failed_count, running_count, last_execution = await asyncio.gather(
+            base_query.count(),
+            base_query.filter(status=TaskStatus.SUCCESS).count(),
+            base_query.filter(status=TaskStatus.FAILED).count(),
+            base_query.filter(status=TaskStatus.RUNNING).count(),
+            base_query.order_by("-start_time").first(),
+        )
 
-            if total == 0:
-                return {
-                    "task_id": task_id,
-                    "total_executions": 0,
-                    "success_count": 0,
-                    "failed_count": 0,
-                    "running_count": 0,
-                    "success_rate": 0.0,
-                    "avg_duration": 0.0,
-                    "last_execution": None,
-                }
+        if total == 0:
+            return {
+                "task_id": task_id,
+                "total_executions": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "running_count": 0,
+                "success_rate": 0.0,
+                "avg_duration": 0.0,
+                "last_execution": None,
+            }
 
-            # 计算平均执行时长（只查询有完成时间的记录）
-            avg_duration = 0.0
-            completed = await base_query.filter(
-                end_time__isnull=False, start_time__isnull=False
-            ).only("start_time", "end_time").limit(1000)
+        # 计算平均执行时长（只查询有完成时间的记录）
+        avg_duration = 0.0
+        completed = await base_query.filter(
+            end_time__isnull=False, start_time__isnull=False
+        ).only("start_time", "end_time").limit(1000)
 
-            if completed:
+        if completed:
                 durations = [
                     (e.end_time - e.start_time).total_seconds() for e in completed
                 ]
@@ -502,9 +488,6 @@ class SchedulerService:
                 if last_execution
                 else None,
             }
-        except Exception as e:
-            logger.error(f"获取任务统计失败: {e}")
-            raise
 
     async def verify_admin_permission(self, user_id):
         """验证管理员权限"""
@@ -516,284 +499,236 @@ class SchedulerService:
 
     async def get_user_task_ids(self, user_id):
         """获取用户所有任务ID列表"""
-        try:
-            tasks = await Task.filter(user_id=user_id).all()
-            return [task.id for task in tasks]
-        except Exception as e:
-            logger.error(f"获取用户任务ID失败: {e}")
-            return []
+        tasks = await Task.filter(user_id=user_id).all()
+        return [task.id for task in tasks]
 
     async def get_task_executions_by_task_ids(self, task_ids):
         """根据任务ID列表获取所有执行记录"""
-        try:
-            if not task_ids:
-                return []
-            return await TaskRun.filter(task_id__in=task_ids).all()
-        except Exception as e:
-            logger.error(f"获取任务执行记录失败: {e}")
+        if not task_ids:
             return []
+        return await TaskRun.filter(task_id__in=task_ids).all()
 
     async def pause_task_by_user(self, task_id, user_id):
         """暂停用户任务（支持 public_id）"""
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
+
+        if not task:
+            return False
+
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
-
-            if not task:
-                return False
-
-            try:
-                await self.pause_task(task.id)  # 使用内部 ID
-            except ValueError:
-                return False
-            return True
-        except Exception as e:
-            logger.error(f"暂停任务失败: {e}")
-            raise
+            await self.pause_task(task.id)  # 使用内部 ID
+        except ValueError:
+            return False
+        return True
 
     async def resume_task_by_user(self, task_id, user_id):
         """恢复用户任务（支持 public_id）"""
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
+
+        if not task:
+            return False
+
         try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
-
-            if not task:
-                return False
-
-            try:
-                await self.resume_task(task.id)  # 使用内部 ID
-            except ValueError:
-                return False
-            return True
-        except Exception as e:
-            logger.error(f"恢复任务失败: {e}")
-            raise
+            await self.resume_task(task.id)  # 使用内部 ID
+        except ValueError:
+            return False
+        return True
 
     async def trigger_task_by_user(self, task_id, user_id):
         """立即触发用户任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(
-                Task, task_id, user_id=user_id, check_admin=True
-            )
+        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        task = await QueryHelper.get_by_id_or_public_id(
+            Task, task_id, user_id=user_id, check_admin=True
+        )
 
-            if not task:
-                return False
+        if not task:
+            return False
 
-            await self.trigger_task(task.id)  # 使用内部 ID
-            return True
-        except Exception as e:
-            logger.error(f"触发任务失败: {e}")
-            raise
+        await self.trigger_task(task.id)  # 使用内部 ID
+        return True
 
     async def get_execution_with_permission(self, run_id, user_id):
         """获取执行记录（带权限验证，支持 public_id 和 run_id UUID）"""
-        try:
-            # 支持多种查询方式
-            execution = None
+        # 支持多种查询方式
+        execution = None
 
-            run_id_str = str(run_id)
+        run_id_str = str(run_id)
 
-            # 先尝试作为 run_id
-            execution = await TaskRun.get_or_none(run_id=run_id_str)
+        # 先尝试作为 run_id
+        execution = await TaskRun.get_or_none(run_id=run_id_str)
 
-            # 如果没找到，尝试作为 public_id
-            if not execution and len(run_id_str) <= 32:
-                execution = await TaskRun.get_or_none(public_id=run_id_str)
+        # 如果没找到，尝试作为 public_id
+        if not execution and len(run_id_str) <= 32:
+            execution = await TaskRun.get_or_none(public_id=run_id_str)
 
-            if not execution:
+        if not execution:
+            return None
+
+        # 检查用户是否为管理员
+        is_admin = await QueryHelper.is_admin(user_id)
+
+        if is_admin:
+            # 管理员可以查看所有执行记录
+            # 添加任务的 public_id
+            task = await Task.get_or_none(id=execution.task_id)
+            execution.task_public_id = task.public_id if task else None
+            if execution.worker_id:
+                from antcode_core.domain.models import Worker
+
+                worker = await Worker.get_or_none(id=execution.worker_id)
+                execution.worker_public_id = worker.public_id if worker else None
+            return execution
+        else:
+            # 普通用户只能查看自己任务的执行记录
+            task = await Task.get_or_none(id=execution.task_id, user_id=user_id)
+            if not task:
                 return None
 
-            # 检查用户是否为管理员
-            is_admin = await QueryHelper.is_admin(user_id)
+            execution.task_public_id = task.public_id
+            if execution.worker_id:
+                from antcode_core.domain.models import Worker
 
-            if is_admin:
-                # 管理员可以查看所有执行记录
-                # 添加任务的 public_id
-                task = await Task.get_or_none(id=execution.task_id)
-                execution.task_public_id = task.public_id if task else None
-                if execution.worker_id:
-                    from antcode_core.domain.models import Worker
-
-                    worker = await Worker.get_or_none(id=execution.worker_id)
-                    execution.worker_public_id = worker.public_id if worker else None
-                return execution
-            else:
-                # 普通用户只能查看自己任务的执行记录
-                task = await Task.get_or_none(id=execution.task_id, user_id=user_id)
-                if not task:
-                    return None
-
-                execution.task_public_id = task.public_id
-                if execution.worker_id:
-                    from antcode_core.domain.models import Worker
-
-                    worker = await Worker.get_or_none(id=execution.worker_id)
-                    execution.worker_public_id = worker.public_id if worker else None
-                return execution
-        except Exception as e:
-            logger.error(f"获取执行记录失败: {e}")
-            raise
+                worker = await Worker.get_or_none(id=execution.worker_id)
+                execution.worker_public_id = worker.public_id if worker else None
+            return execution
 
     async def shutdown(self):
         """关闭调度器"""
-        try:
-            if not self._scheduler_enabled():
-                logger.info(f"调度器未启用 (role={self._role})，跳过关闭")
-                return
-            self.scheduler.shutdown(wait=True)
-            logger.info("任务调度器已关闭")
-        except Exception as e:
-            logger.error(f"关闭调度器失败: {e}")
+        if not self._scheduler_enabled():
+            logger.info(f"调度器未启用 (role={self._role})，跳过关闭")
+            return
+        self.scheduler.shutdown(wait=True)
+        logger.info("任务调度器已关闭")
 
     async def _load_active_tasks(self):
         """加载活跃任务"""
-        try:
-            active_tasks = await Task.filter(is_active=True).all()
-            for task in active_tasks:
-                await self.add_task(task)
-                logger.info(f"加载任务: {task.name}")
-        except Exception as e:
-            logger.error(f"加载活跃任务失败: {e}")
+        active_tasks = await Task.filter(is_active=True).all()
+        for task in active_tasks:
+            await self.add_task(task)
+            logger.info(f"加载任务: {task.name}")
 
     async def add_task(self, task):
         """添加任务到调度器"""
-        try:
-            if not self._scheduler_enabled():
-                await self._publish_event("task_changed", task.id)
-                return
-            # 创建触发器
-            trigger = self._create_trigger(task)
+        if not self._scheduler_enabled():
+            await self._publish_event("task_changed", task.id)
+            return
+        # 创建触发器
+        trigger = self._create_trigger(task)
 
-            # 添加作业
-            self.scheduler.add_job(
-                func=self._execute_task,
-                trigger=trigger,
-                id=str(task.id),
-                name=task.name,
-                kwargs={"task_id": task.id},
-                replace_existing=True,
-            )
+        # 添加作业
+        self.scheduler.add_job(
+            func=self._execute_task,
+            trigger=trigger,
+            id=str(task.id),
+            name=task.name,
+            kwargs={"task_id": task.id},
+            replace_existing=True,
+        )
 
-            logger.info(f"任务 {task.name} 已添加到调度器")
-
-        except Exception as e:
-            logger.error(f"添加任务失败: {e}")
-            raise
+        logger.info(f"任务 {task.name} 已添加到调度器")
 
     async def remove_task(self, task_id):
         """从调度器移除任务"""
+        if not self._scheduler_enabled():
+            await self._publish_event("task_changed", task_id)
+            return
         try:
-            if not self._scheduler_enabled():
-                await self._publish_event("task_changed", task_id)
-                return
             self.scheduler.remove_job(str(task_id))
             logger.info(f"任务 {task_id} 已从调度器移除")
         except JobLookupError:
             logger.warning(f"任务 {task_id} 在调度器中不存在，视为已移除")
-        except Exception as e:
-            logger.error(f"移除任务失败: {e}")
-            raise
 
     async def pause_task(self, task_id):
         """暂停任务"""
-        try:
-            if not self._scheduler_enabled():
-                task = await Task.get(id=task_id)
-                task.status = TaskStatus.PAUSED
-                task.is_active = False
-                await task.save()
-                await self._publish_event("task_changed", task_id)
-                logger.info(f"任务 {task_id} 已暂停")
-                return
-            self.scheduler.pause_job(str(task_id))
-
-            # 更新数据库状态
+        if not self._scheduler_enabled():
             task = await Task.get(id=task_id)
             task.status = TaskStatus.PAUSED
             task.is_active = False
             await task.save()
-
+            await self._publish_event("task_changed", task_id)
             logger.info(f"任务 {task_id} 已暂停")
+            return
+        try:
+            self.scheduler.pause_job(str(task_id))
         except JobLookupError:
             logger.warning(f"任务 {task_id} 在调度器中不存在，可能已执行完成或未激活，无法暂停")
             raise ValueError("任务不存在或已执行完成，无法暂停")
-        except Exception as e:
-            logger.error(f"暂停任务失败: {e}")
-            raise
+
+        # 更新数据库状态
+        task = await Task.get(id=task_id)
+        task.status = TaskStatus.PAUSED
+        task.is_active = False
+        await task.save()
+
+        logger.info(f"任务 {task_id} 已暂停")
 
     async def resume_task(self, task_id):
         """恢复任务"""
-        try:
-            if not self._scheduler_enabled():
-                task = await Task.get(id=task_id)
-                task.status = TaskStatus.PENDING
-                task.is_active = True
-                await task.save()
-                await self._publish_event("task_changed", task_id)
-                logger.info(f"任务 {task_id} 已恢复")
-                return
-            self.scheduler.resume_job(str(task_id))
-
-            # 更新数据库状态
+        if not self._scheduler_enabled():
             task = await Task.get(id=task_id)
             task.status = TaskStatus.PENDING
             task.is_active = True
             await task.save()
-
+            await self._publish_event("task_changed", task_id)
             logger.info(f"任务 {task_id} 已恢复")
+            return
+        try:
+            self.scheduler.resume_job(str(task_id))
         except JobLookupError:
             logger.warning(f"任务 {task_id} 在调度器中不存在，可能已执行完成或未激活，无法恢复")
             raise ValueError("任务不存在或已执行完成，无法恢复")
-        except Exception as e:
-            logger.error(f"恢复任务失败: {e}")
-            raise
+
+        # 更新数据库状态
+        task = await Task.get(id=task_id)
+        task.status = TaskStatus.PENDING
+        task.is_active = True
+        await task.save()
+
+        logger.info(f"任务 {task_id} 已恢复")
 
     async def trigger_task(self, task_id):
         """立即触发任务"""
-        try:
-            if not self._scheduler_enabled():
-                await self._publish_event("task_trigger", task_id)
-                logger.info(f"任务 {task_id} 已触发 (事件)")
-                return
-            # 检查任务是否存在于调度器中
-            job = self.scheduler.get_job(str(task_id))
-            if job:
-                # 如果存在，修改下次运行时间为现在
-                try:
-                    aware_now = datetime.now(self.scheduler.timezone)
-                except Exception:
-                    aware_now = datetime.now(UTC)
-                job.modify(next_run_time=aware_now)
-                logger.info(f"任务 {task_id} 已触发")
-            else:
-                # 如果不存在，创建一个临时作业来执行
-                logger.info(f"任务 {task_id} 不在调度器中，创建临时作业执行")
+        if not self._scheduler_enabled():
+            await self._publish_event("task_trigger", task_id)
+            logger.info(f"任务 {task_id} 已触发 (事件)")
+            return
+        # 检查任务是否存在于调度器中
+        job = self.scheduler.get_job(str(task_id))
+        if job:
+            # 如果存在，修改下次运行时间为现在
+            try:
+                aware_now = datetime.now(self.scheduler.timezone)
+            except Exception:
+                aware_now = datetime.now(UTC)
+            job.modify(next_run_time=aware_now)
+            logger.info(f"任务 {task_id} 已触发")
+        else:
+            # 如果不存在，创建一个临时作业来执行
+            logger.info(f"任务 {task_id} 不在调度器中，创建临时作业执行")
 
-                # 使用唯一的job_id，包含时间戳避免冲突
-                temp_job_id = f"{task_id}_manual_{datetime.now().timestamp()}"
+            # 使用唯一的job_id，包含时间戳避免冲突
+            temp_job_id = f"{task_id}_manual_{datetime.now().timestamp()}"
 
-                # 添加一个立即执行的作业
-                self.scheduler.add_job(
-                    func=self._execute_task,
-                    trigger=DateTrigger(
-                        run_date=(
-                            datetime.now(self.scheduler.timezone)
-                            if hasattr(self.scheduler, "timezone") and self.scheduler.timezone
-                            else datetime.now(UTC)
-                        )
-                    ),
-                    id=temp_job_id,
-                    kwargs={"task_id": task_id},
-                    replace_existing=True,
-                )
-        except Exception as e:
-            logger.error(f"触发任务失败: {e}")
-            raise
+            # 添加一个立即执行的作业
+            self.scheduler.add_job(
+                func=self._execute_task,
+                trigger=DateTrigger(
+                    run_date=(
+                        datetime.now(self.scheduler.timezone)
+                        if hasattr(self.scheduler, "timezone") and self.scheduler.timezone
+                        else datetime.now(UTC)
+                    )
+                ),
+                id=temp_job_id,
+                kwargs={"task_id": task_id},
+                replace_existing=True,
+            )
 
     def _create_trigger(self, task):
         """创建触发器"""

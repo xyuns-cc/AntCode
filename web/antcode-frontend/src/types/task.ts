@@ -173,6 +173,7 @@ export interface TaskListParams {
   schedule_type?: ScheduleType
   search?: string
   specified_worker_id?: string
+  worker_id?: string
 
   sort_by?: string
   sort_order?: 'asc' | 'desc'

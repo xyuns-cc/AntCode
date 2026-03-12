@@ -30,11 +30,7 @@ class UserService extends BaseService {
    * 获取简化用户列表（用于下拉选择）
    */
   async getSimpleUserList(config?: AxiosRequestConfig): Promise<SimpleUser[]> {
-    const data = await this.get<SimpleUser[] | { items?: SimpleUser[] }>('/simple', config)
-    if (Array.isArray(data)) {
-      return data
-    }
-    return data?.items ?? []
+    return this.get<SimpleUser[]>('/simple', config)
   }
 
   /**
@@ -46,9 +42,8 @@ class UserService extends BaseService {
       params: { page, size, ...filters },
     })
 
-    const items = response.data?.data || []
-    const total = response.data?.pagination?.total || items.length
-    return { users: items, total }
+    const { items, pagination } = response.data.data
+    return { users: items, total: pagination.total }
   }
 
   /**

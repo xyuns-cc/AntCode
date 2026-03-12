@@ -35,11 +35,31 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
-      - name: Run unit tests
-        run: uv run pytest tests/unit/ -v --tb=short
+      - name: Run unit tests with coverage
+        run: |
+          uv run pytest tests/unit/ -v --tb=short \
+            --cov=packages --cov=services \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
 
       - name: Run boundary tests
         run: uv run pytest tests/boundary/ -v --tb=short
+
+      - name: Coverage gate (30% minimum)
+        run: uv run python -c "
+          import xml.etree.ElementTree as ET;
+          tree = ET.parse('coverage.xml');
+          rate = float(tree.getroot().attrib['line-rate']) * 100;
+          print(f'Coverage: {rate:.1f}%');
+          assert rate >= 30, f'Coverage {rate:.1f}% below 30% threshold'
+          "
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
 
   # ==================== 后端代码检查 ====================
   backend-lint:
@@ -66,6 +86,39 @@ jobs:
 
       - name: Run ruff format check
         run: uv run ruff format --check .
+
+  # ==================== 后端安全扫描 ====================
+  backend-security:
+    name: Backend Security & Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-packages --dev
+
+      - name: Run bandit security scan
+        run: uv run bandit -r packages/ services/ -f json -o bandit-report.json || true
+
+      - name: Run mypy type check
+        run: uv run mypy packages/antcode_core/ --ignore-missing-imports || true
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
 
   # ==================== 前端测试 ====================
   frontend-test:
@@ -123,21 +176,75 @@ jobs:
         working-directory: web/antcode-frontend
         run: npm run build
 
+  # ==================== 集成测试 ====================
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test_root_pw
+          MYSQL_DATABASE: antcode_test
+          MYSQL_USER: antcode
+          MYSQL_PASSWORD: test_antcode_pw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: mysql://antcode:test_antcode_pw@127.0.0.1:3306/antcode_test
+          REDIS_URL: redis://127.0.0.1:6379/0
+        run: uv run pytest tests/integration/ -v --tb=short || true
+
   # ==================== 摘要 ====================
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [backend-test, backend-lint, frontend-test, frontend-build]
+    needs: [backend-test, backend-lint, backend-security, frontend-test, frontend-build, integration-test]
     if: always()
 
     steps:
       - name: Summary
         run: |
-          echo "## ✅ CI 检查结果" >> $GITHUB_STEP_SUMMARY
+          echo "## CI 检查结果" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| 检查项 | 状态 |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| 后端测试 | ${{ needs.backend-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 后端代码检查 | ${{ needs.backend-lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 安全扫描 | ${{ needs.backend-security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端测试 | ${{ needs.frontend-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端构建 | ${{ needs.frontend-build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 集成测试 | ${{ needs.integration-test.result }} |" >> $GITHUB_STEP_SUMMARY

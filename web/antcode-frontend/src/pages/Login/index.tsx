@@ -135,15 +135,6 @@ const Login: React.FC = () => {
     <div className={styles.loginContainer}>
       <div className={styles.loginBox}>
         <div className={styles.header}>
-          <div className={styles.logo}>
-            <div className={styles.logoIcon}>
-              {branding.logoUrl ? (
-                <img src={branding.logoUrl} alt={branding.brandName} className={styles.logoImage} />
-              ) : (
-                branding.logoShort
-              )}
-            </div>
-          </div>
           <h1 className={styles.title}>{branding.appTitle}</h1>
           <p className={styles.subtitle}>欢迎回来，请登录您的账户</p>
         </div>

@@ -6,13 +6,14 @@ Web API 异常模块
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from antcode_core.domain.schemas.common import ErrorDetail, ErrorResponse
+from antcode_core.domain.schemas.common import ErrorData, ErrorDetail, ErrorResponse
 
 
 class BusinessException(HTTPException):
@@ -146,22 +147,21 @@ def create_error_response(
             elif isinstance(err, ErrorDetail):
                 error_details.append(err)
 
+    error_data = None
+    if error_code or error_details:
+        error_data = ErrorData(error_code=error_code, errors=error_details)
+
     resp = ErrorResponse(
         success=False,
         code=status_code,
         message=message,
-        errors=error_details,
-        timestamp=datetime.now(),
+        data=error_data,
     )
-    content = resp.model_dump()
-    if isinstance(content.get("timestamp"), datetime):
-        content["timestamp"] = content["timestamp"].isoformat()
-    if error_code:
-        content["error_code"] = error_code
+    content = resp.model_dump(mode="json")
     return JSONResponse(status_code=status_code, content=content)
 
 
-async def business_exception_handler(request, exc: BusinessException) -> JSONResponse:
+async def business_exception_handler(request: Request, exc: BusinessException) -> JSONResponse:
     """处理业务异常"""
     return create_error_response(
         status_code=exc.status_code,
@@ -171,12 +171,15 @@ async def business_exception_handler(request, exc: BusinessException) -> JSONRes
     )
 
 
-async def http_exception_handler(request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(
+    request: Request,
+    exc: HTTPException | StarletteHTTPException,
+) -> JSONResponse:
     """处理 HTTP 异常"""
     return create_error_response(status_code=exc.status_code, message=exc.detail)
 
 
-async def validation_exception_handler(request, exc) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """处理请求验证异常"""
     errors: list[dict[str, Any]] = []
     for error in exc.errors():
@@ -194,7 +197,7 @@ async def validation_exception_handler(request, exc) -> JSONResponse:
     )
 
 
-async def general_exception_handler(request, exc: Exception) -> JSONResponse:
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """处理未捕获的异常"""
     from loguru import logger
 
