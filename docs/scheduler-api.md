@@ -146,29 +146,34 @@ curl -X GET "/api/v1/scheduler/tasks?page=1&size=10&is_active=true" \
 #### 响应示例
 ```json
 {
-    "total": 25,
-    "page": 1,
-    "size": 10,
-    "items": [
-        {
-            "id": 1,
-            "name": "数据同步任务",
-            "description": "每2小时同步一次数据",
-            "project_id": 1,
-            "schedule_type": "CRON",
-            "schedule_config": "0 */2 * * *",
-            "is_active": true,
-            "status": "PENDING",
-            "next_run_time": "2024-01-01T02:00:00Z",
-            "last_execution": {
-                "execution_id": "exec-123",
-                "status": "SUCCESS",
-                "start_time": "2024-01-01T00:00:00Z",
-                "duration_seconds": 45
-            },
-            "created_at": "2024-01-01T00:00:00Z"
-        }
-    ]
+    "success": true,
+    "code": 200,
+    "message": "查询成功",
+    "data": {
+        "total": 25,
+        "page": 1,
+        "size": 10,
+        "items": [
+            {
+                "id": 1,
+                "name": "数据同步任务",
+                "description": "每2小时同步一次数据",
+                "project_id": 1,
+                "schedule_type": "CRON",
+                "schedule_config": "0 */2 * * *",
+                "is_active": true,
+                "status": "PENDING",
+                "next_run_time": "2024-01-01T02:00:00Z",
+                "last_execution": {
+                    "execution_id": "exec-123",
+                    "status": "SUCCESS",
+                    "start_time": "2024-01-01T00:00:00Z",
+                    "duration_seconds": 45
+                },
+                "created_at": "2024-01-01T00:00:00Z"
+            }
+        ]
+    }
 }
 ```
 
@@ -406,25 +411,30 @@ curl -X GET "/api/v1/scheduler/tasks/1/executions?page=1&size=10&status=SUCCESS"
 #### 响应示例
 ```json
 {
-    "total": 45,
-    "page": 1,
-    "size": 10,
-    "items": [
-        {
-            "execution_id": "exec-20240101-001",
-            "task_id": 1,
-            "status": "SUCCESS",
-            "start_time": "2024-01-01T02:00:00Z",
-            "end_time": "2024-01-01T02:00:45Z",
-            "duration_seconds": 45,
-            "exit_code": 0,
-            "output_summary": "处理了1000条记录，成功同步到数据库",
-            "error_message": null,
-            "log_file_path": "/logs/tasks/exec-20240101-001/output.log",
-            "error_log_path": "/logs/tasks/exec-20240101-001/error.log",
-            "created_at": "2024-01-01T02:00:00Z"
-        }
-    ]
+    "success": true,
+    "code": 200,
+    "message": "查询成功",
+    "data": {
+        "total": 45,
+        "page": 1,
+        "size": 10,
+        "items": [
+            {
+                "execution_id": "exec-20240101-001",
+                "task_id": 1,
+                "status": "SUCCESS",
+                "start_time": "2024-01-01T02:00:00Z",
+                "end_time": "2024-01-01T02:00:45Z",
+                "duration_seconds": 45,
+                "exit_code": 0,
+                "output_summary": "处理了1000条记录，成功同步到数据库",
+                "error_message": null,
+                "log_file_path": "/logs/tasks/exec-20240101-001/output.log",
+                "error_log_path": "/logs/tasks/exec-20240101-001/error.log",
+                "created_at": "2024-01-01T02:00:00Z"
+            }
+        ]
+    }
 }
 ```
 

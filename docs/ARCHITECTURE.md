@@ -29,7 +29,7 @@ AntCode 的架构可以清晰地划分为四个平面：
 
 | 平面 | 服务组件 | 核心职责 | 关键技术 |
 | :--- | :--- | :--- | :--- |
-| **Control Plane** | `web_api` | **大脑**。提供 RESTful API，处理用户请求、鉴权、配置管理以及元数据存储。 | FastAPI, SQLAlchemy |
+| **Control Plane** | `web_api` | **大脑**。提供 RESTful API，处理用户请求、鉴权、配置管理以及元数据存储。 | FastAPI, Tortoise ORM |
 | **Schedule Plane** | `master` | **心脏**。负责任务的调度分发、故障检测、重试机制以及数据的一致性维护。 | Python AsyncIO, Redis Streams |
 | **Data Plane** | `gateway` | **关口**。为公网 Worker 提供统一的 gRPC 接入点，负责认证、限流与协议转换。 | gRPC, TLS |
 | **Execution Plane** | `worker` | **手脚**。实际执行任务的节点，支持沙箱隔离、资源限制与实时日志上报。 | Subprocess, Streaming |

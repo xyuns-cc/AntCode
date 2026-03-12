@@ -71,31 +71,36 @@ curl -X GET "/api/v1/users/?page=1&size=10&is_active=true" \
 #### 响应示例
 ```json
 {
-    "data": [
-        {
-            "id": 1,
-            "username": "admin",
-            "email": "admin@example.com",
-            "is_active": true,
-            "is_admin": true,
-            "created_at": "2024-01-01T00:00:00Z",
-            "last_login_at": "2024-01-01T10:00:00Z"
-        },
-        {
-            "id": 2,
-            "username": "user01",
-            "email": "user01@example.com",
-            "is_active": true,
-            "is_admin": false,
-            "created_at": "2024-01-01T01:00:00Z",
-            "last_login_at": "2024-01-01T09:30:00Z"
+    "success": true,
+    "code": 200,
+    "message": "查询成功",
+    "data": {
+        "items": [
+            {
+                "id": 1,
+                "username": "admin",
+                "email": "admin@example.com",
+                "is_active": true,
+                "is_admin": true,
+                "created_at": "2024-01-01T00:00:00Z",
+                "last_login_at": "2024-01-01T10:00:00Z"
+            },
+            {
+                "id": 2,
+                "username": "user01",
+                "email": "user01@example.com",
+                "is_active": true,
+                "is_admin": false,
+                "created_at": "2024-01-01T01:00:00Z",
+                "last_login_at": "2024-01-01T09:30:00Z"
+            }
+        ],
+        "pagination": {
+            "page": 1,
+            "size": 10,
+            "total": 25,
+            "pages": 3
         }
-    ],
-    "pagination": {
-        "page": 1,
-        "size": 10,
-        "total": 25,
-        "pages": 3
     }
 }
 ```
