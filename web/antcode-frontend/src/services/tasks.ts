@@ -11,115 +11,25 @@ import type {
   TaskListParams,
   TaskListResponse,
   ApiResponse,
+  PaginationResponse,
 } from '@/types'
-
-type PaginationPayload<T> = {
-  data?: T[]
-  pagination?: {
-    total?: number
-    page?: number
-    size?: number
-  }
-}
 
 class TaskService extends BaseService {
   constructor() {
     super('/api/v1/tasks')
   }
 
-  private normalizeTaskListResponse(payload: unknown): TaskListResponse {
-    const data = payload as Record<string, unknown> | null
-
-    if (!data || typeof data !== 'object') {
-      return { total: 0, page: 1, size: 20, items: [] }
-    }
-
-    if (Array.isArray(data.items)) {
-      return {
-        items: data.items as Task[],
-        total: Number(data.total ?? (data.items as unknown[]).length) || 0,
-        page: Number(data.page ?? 1) || 1,
-        size: Number(data.size ?? 20) || 20,
-      }
-    }
-
-    if (Array.isArray(data.data)) {
-      const pagePayload = data as unknown as PaginationPayload<Task>
-      const items = pagePayload.data || []
-      return {
-        items,
-        total: Number(pagePayload.pagination?.total ?? items.length) || 0,
-        page: Number(pagePayload.pagination?.page ?? 1) || 1,
-        size: Number(pagePayload.pagination?.size ?? 20) || 20,
-      }
-    }
-
-    if (data.data && typeof data.data === 'object') {
-      const inner = data.data as Record<string, unknown>
-      if (Array.isArray(inner.items)) {
-        return {
-          items: inner.items as Task[],
-          total: Number(inner.total ?? (inner.items as unknown[]).length) || 0,
-          page: Number(inner.page ?? 1) || 1,
-          size: Number(inner.size ?? 20) || 20,
-        }
-      }
-    }
-
-    return { total: 0, page: 1, size: 20, items: [] }
-  }
-
-  private normalizeTaskExecutionsResponse(payload: unknown): {
-    items: TaskExecution[]
-    total: number
-    page: number
-    size: number
-  } {
-    const data = payload as Record<string, unknown> | null
-
-    if (!data || typeof data !== 'object') {
-      return { items: [], total: 0, page: 1, size: 20 }
-    }
-
-    if (Array.isArray(data.items)) {
-      return {
-        items: data.items as TaskExecution[],
-        total: Number(data.total ?? (data.items as unknown[]).length) || 0,
-        page: Number(data.page ?? 1) || 1,
-        size: Number(data.size ?? 20) || 20,
-      }
-    }
-
-    if (Array.isArray(data.data)) {
-      const pagePayload = data as unknown as PaginationPayload<TaskExecution>
-      const items = pagePayload.data || []
-      return {
-        items,
-        total: Number(pagePayload.pagination?.total ?? items.length) || 0,
-        page: Number(pagePayload.pagination?.page ?? 1) || 1,
-        size: Number(pagePayload.pagination?.size ?? 20) || 20,
-      }
-    }
-
-    if (data.data && typeof data.data === 'object') {
-      const inner = data.data as Record<string, unknown>
-      if (Array.isArray(inner.items)) {
-        return {
-          items: inner.items as TaskExecution[],
-          total: Number(inner.total ?? (inner.items as unknown[]).length) || 0,
-          page: Number(inner.page ?? 1) || 1,
-          size: Number(inner.size ?? 20) || 20,
-        }
-      }
-    }
-
-    return { items: [], total: 0, page: 1, size: 20 }
-  }
-
   // 获取任务列表
   async getTasks(params?: TaskListParams): Promise<TaskListResponse> {
-    const response = await apiClient.get('/api/v1/tasks', { params })
-    return this.normalizeTaskListResponse(response.data)
+    const response = await apiClient.get<PaginationResponse<Task>>('/api/v1/tasks', { params })
+    const { items, pagination } = response.data.data
+
+    return {
+      items,
+      total: pagination.total,
+      page: pagination.page,
+      size: pagination.size,
+    }
   }
 
   // 获取任务详情
@@ -170,7 +80,7 @@ class TaskService extends BaseService {
     const response = await apiClient.post<ApiResponse<{ remote_cancelled: boolean }>>(
       `/api/v1/runs/${runId}/cancel`
     )
-    return response.data?.data || { remote_cancelled: false }
+    return response.data.data
   }
 
   // 获取任务执行记录
@@ -182,15 +92,21 @@ class TaskService extends BaseService {
       status?: string
     }
   ): Promise<{ items: TaskExecution[]; total: number; page: number; size: number }> {
-    const response = await apiClient.get(`/api/v1/tasks/${taskId}/runs`, { params })
-    return this.normalizeTaskExecutionsResponse(response.data)
+    const response = await apiClient.get<PaginationResponse<TaskExecution>>(`/api/v1/tasks/${taskId}/runs`, { params })
+    const { items, pagination } = response.data.data
+
+    return {
+      items,
+      total: pagination.total,
+      page: pagination.page,
+      size: pagination.size,
+    }
   }
 
   // 获取任务执行详情
   async getTaskRun(runId: string): Promise<TaskExecution> {
-    const response = await apiClient.get(`/api/v1/runs/${runId}`)
-    const payload = response.data as { data?: TaskExecution }
-    return payload?.data || (response.data as TaskExecution)
+    const response = await apiClient.get<ApiResponse<TaskExecution>>(`/api/v1/runs/${runId}`)
+    return response.data.data
   }
 }
 

@@ -8,7 +8,7 @@ from tortoise.exceptions import DoesNotExist
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
-from antcode_core.common.security.auth import get_current_user
+from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.logs import LogFileResponse
 from antcode_core.domain.schemas.task import TaskRunResponse
@@ -20,7 +20,7 @@ runs_router = APIRouter()
 
 
 @runs_router.get("/{run_id}", response_model=BaseResponse[TaskRunResponse])
-async def get_run(run_id, current_user=Depends(get_current_user)):
+async def get_run(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """获取执行详情"""
     try:
         execution = await scheduler_service.get_execution_with_permission(
@@ -40,7 +40,7 @@ async def get_run(run_id, current_user=Depends(get_current_user)):
 
 
 @runs_router.post("/{run_id}/cancel", response_model=BaseResponse[dict])
-async def cancel_run(run_id: str, current_user=Depends(get_current_user)):
+async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """
     取消正在执行的任务
 
@@ -126,7 +126,7 @@ async def get_run_log_file(
     run_id: str,  # 支持 public_id
     log_type: str = Query("output", pattern="^(output|error)$"),
     lines: int = Query(None, ge=1, le=10000),
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取执行日志文件内容"""
     try:

@@ -1,5 +1,6 @@
 """同步回调API"""
 
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 
 from antcode_web_api.response import success as success_response
 from antcode_core.common.security.worker_auth import verify_worker_request_with_signature
+from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.application.services.workers.worker_project_service import (
     worker_project_service,
 )
@@ -32,7 +34,7 @@ class SyncStatusRequest(BaseModel):
     project_public_id: str
 
 
-@router.post("/callback")
+@router.post("/callback", response_model=BaseResponse[dict[str, Any]])
 async def sync_callback(
     request: SyncCallbackRequest,
     auth_info: dict = Depends(verify_worker_request_with_signature),
@@ -95,7 +97,7 @@ async def sync_callback(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/status/{project_public_id}")
+@router.get("/status/{project_public_id}", response_model=BaseResponse[dict[str, Any]])
 async def get_sync_status(
     project_public_id: str,
     auth_info: dict = Depends(verify_worker_request_with_signature),
@@ -134,7 +136,7 @@ async def get_sync_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/statistics")
+@router.get("/statistics", response_model=BaseResponse[dict[str, Any]])
 async def get_sync_statistics(
     auth_info: dict = Depends(verify_worker_request_with_signature),
 ):

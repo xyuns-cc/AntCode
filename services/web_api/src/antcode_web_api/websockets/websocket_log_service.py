@@ -134,23 +134,25 @@ class WebSocketLogService:
     async def _send_current_status(self, run_id, execution):
         """发送当前执行状态（让前端立即获取最新状态）"""
         try:
-            status = execution.status.value if execution.status else "QUEUED"
+            status = execution.status.value if execution.status else "queued"
 
             # 构建状态消息
             message = f"当前状态: {status}"
-            if status == "RUNNING":
+            if status == "running":
                 message = "任务正在执行中"
-            elif status == "SUCCESS":
+            elif status == "success":
                 message = "任务执行成功"
-            elif status == "FAILED":
+            elif status == "failed":
                 message = "任务执行失败"
-            elif status == "QUEUED":
+            elif status == "queued":
                 message = "任务排队中"
+
+            terminal_statuses = {"success", "failed", "timeout", "cancelled", "skipped", "rejected"}
 
             await websocket_manager.send_run_status(
                 run_id=run_id,
                 status=status,
-                progress=100.0 if status in ("SUCCESS", "FAILED", "TIMEOUT", "CANCELLED") else None,
+                progress=100.0 if status in terminal_statuses else None,
                 message=message,
             )
 

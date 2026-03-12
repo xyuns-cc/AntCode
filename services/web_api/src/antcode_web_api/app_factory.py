@@ -5,6 +5,8 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import UJSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from antcode_core.common.config import settings
 from antcode_core.common.logging import setup_logging
@@ -17,6 +19,11 @@ from antcode_web_api.exceptions import (
 )
 from antcode_web_api.lifespan import lifespan
 from antcode_web_api.middleware import make_middlewares
+from antcode_web_api.openapi import (
+    API_TAGS,
+    DEFAULT_ERROR_RESPONSES,
+    generate_operation_id,
+)
 
 
 def create_app() -> FastAPI:
@@ -34,6 +41,10 @@ def create_app() -> FastAPI:
         version=settings.APP_VERSION,
         description=settings.APP_DESCRIPTION,
         middleware=make_middlewares(),
+        default_response_class=UJSONResponse,
+        openapi_tags=API_TAGS,
+        responses=DEFAULT_ERROR_RESPONSES,
+        generate_unique_id_function=generate_operation_id,
         openapi_url="/openapi.json",
         lifespan=lifespan,
     )
@@ -41,6 +52,7 @@ def create_app() -> FastAPI:
     # 注册异常处理器
     app.add_exception_handler(BusinessException, business_exception_handler)
     app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, general_exception_handler)
 

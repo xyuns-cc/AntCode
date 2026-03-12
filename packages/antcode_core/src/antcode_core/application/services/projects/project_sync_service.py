@@ -1,12 +1,29 @@
 """项目智能同步服务"""
 
 import os
-import zipfile
 from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+import zipfile
 
 from fastapi import HTTPException, status
 from loguru import logger
 
+from antcode_core.application.services.projects.code_source import (
+    SOURCE_TYPE_GIT,
+    SOURCE_TYPE_LEGACY_INLINE,
+    SOURCE_TYPE_S3,
+    get_runtime_artifact_config,
+    get_runtime_source_config,
+)
+from antcode_core.application.services.projects.managed_paths import (
+    is_managed_path,
+    resolve_managed_path,
+)
+from antcode_core.application.services.projects.project_artifact_service import (
+    project_artifact_service,
+)
+from antcode_core.application.services.files.file_storage import file_storage_service
 from antcode_core.common.hash_utils import create_hash_calculator
 from antcode_core.domain.models import Project
 
@@ -22,15 +39,7 @@ class ProjectSyncService:
         project_id,
         project: Project | None = None,
     ):
-        """
-        获取传输策略
-
-        新架构要求：所有文件项目必须存储在 S3，Worker 通过预签名 URL 下载
-
-        策略选择:
-        - 代码项目 → 代码内容
-        - S3 项目目录 → 打包下载或预签名 URL
-        """
+        """获取传输策略。"""
         from antcode_core.application.services.projects.relation_service import relation_service
         from antcode_core.infrastructure.storage.presign import is_s3_storage_enabled
 
@@ -40,33 +49,114 @@ class ProjectSyncService:
         if not project:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 
-        # 代码项目直接返回代码内容（不走文件传输）
         if project.type.value == "code":
             code_detail = await relation_service.get_project_code_detail(project_id)
             if not code_detail:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="代码项目详情不存在"
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="代码项目详情不存在",
                 )
-            return {
-                "transfer_method": "code",
-                "content": code_detail.content,
-                "language": code_detail.language,
-                "entry_point": code_detail.entry_point,
-            }
+            source_config = get_runtime_source_config(code_detail)
+            source_type = source_config["type"]
+            if source_type == SOURCE_TYPE_GIT:
+                artifact = await project_artifact_service.materialize_git_source(
+                    project.public_id,
+                    source_config,
+                )
+                return artifact.to_transfer_info(code_detail.entry_point)
+            if source_type == SOURCE_TYPE_LEGACY_INLINE:
+                entry_point = code_detail.entry_point or "main.py"
+                artifact = await project_artifact_service.materialize_inline_code(
+                    project.public_id,
+                    entry_point,
+                    code_detail.content,
+                )
+                return artifact.to_transfer_info(entry_point)
 
-        # 文件项目 - 新架构强制要求 S3
-        if not is_s3_storage_enabled():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="文件项目需要 S3 存储后端，请配置 FILE_STORAGE_BACKEND=s3",
-            )
+            artifact_config = get_runtime_artifact_config(code_detail)
+            if not artifact_config:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="S3 代码项目产物不存在",
+                )
+            artifact_detail = self._build_artifact_detail(artifact_config, code_detail.entry_point)
+            if is_s3_storage_enabled() and artifact_config.get("storage_type") == SOURCE_TYPE_S3:
+                return await self._get_s3_project_transfer_info(project, artifact_detail)
+            return await self._get_local_project_transfer_info(project, artifact_detail)
 
         file_detail = await relation_service.get_project_file_detail(project_id)
         if not file_detail:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件信息不存在")
 
-        # 所有文件项目都通过 S3 传输
-        return await self._get_s3_project_transfer_info(project, file_detail)
+        source_config = get_runtime_source_config(file_detail)
+        if source_config["type"] == SOURCE_TYPE_GIT:
+            artifact = await project_artifact_service.materialize_git_source(
+                project.public_id,
+                source_config,
+            )
+            return artifact.to_transfer_info(file_detail.entry_point)
+
+        if is_s3_storage_enabled():
+            return await self._get_s3_project_transfer_info(project, file_detail)
+
+        return await self._get_local_project_transfer_info(project, file_detail)
+
+    def _build_artifact_detail(self, artifact_config, entry_point):
+        return SimpleNamespace(
+            file_path=artifact_config.get("file_path") or "",
+            original_file_path=artifact_config.get("original_file_path") or None,
+            original_name=artifact_config.get("original_name") or "project.zip",
+            file_size=int(artifact_config.get("file_size") or 0),
+            file_hash=artifact_config.get("file_hash") or "",
+            file_type=artifact_config.get("file_type") or "",
+            is_compressed=bool(artifact_config.get("is_compressed")),
+            entry_point=artifact_config.get("entry_point") or entry_point or "",
+            storage_type=artifact_config.get("storage_type") or SOURCE_TYPE_S3,
+            resolved_revision=artifact_config.get("resolved_revision") or "",
+        )
+
+    async def _get_local_project_transfer_info(self, project, file_detail):
+        if file_detail.original_file_path:
+            archive_path = file_detail.original_file_path
+            if self._local_path_exists(archive_path):
+                return {
+                    "transfer_method": "local_original",
+                    "file_path": archive_path,
+                    "file_size": file_detail.file_size,
+                    "file_hash": file_detail.file_hash,
+                    "is_compressed": True,
+                    "original_name": file_detail.original_name,
+                    "entry_point": file_detail.entry_point,
+                    "modified": False,
+                    "resolved_revision": getattr(file_detail, "resolved_revision", ""),
+                }
+
+        file_path = file_detail.file_path
+        if self._local_path_exists(file_path):
+            return {
+                "transfer_method": "local_file",
+                "file_path": file_path,
+                "file_size": file_detail.file_size,
+                "file_hash": file_detail.file_hash,
+                "is_compressed": file_detail.is_compressed,
+                "original_name": file_detail.original_name,
+                "entry_point": file_detail.entry_point,
+                "modified": False,
+                "resolved_revision": getattr(file_detail, "resolved_revision", ""),
+            }
+
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件不存在")
+
+    def _local_path_exists(self, storage_path: str | None) -> bool:
+        if not storage_path:
+            return False
+        local_path = self._resolve_local_path(storage_path)
+        return Path(local_path).exists()
+
+    def _resolve_local_path(self, storage_path: str) -> str:
+        if is_managed_path(storage_path):
+            return resolve_managed_path(storage_path)
+        return file_storage_service.get_file_path(storage_path)
 
     async def _get_s3_project_transfer_info(self, project, file_detail):
         """获取 S3 项目的传输信息
@@ -101,6 +191,7 @@ class ProjectSyncService:
                     "entry_point": file_detail.entry_point,
                     "modified": False,
                     "presigned_url": presigned_url,
+                    "resolved_revision": getattr(file_detail, "resolved_revision", ""),
                 }
             else:
                 raise HTTPException(
@@ -128,6 +219,7 @@ class ProjectSyncService:
                         "entry_point": file_detail.entry_point,
                         "modified": False,
                         "presigned_url": presigned_url,
+                        "resolved_revision": getattr(file_detail, "resolved_revision", ""),
                     }
 
         # 情况3：需要打包 S3 项目目录
@@ -141,13 +233,9 @@ class ProjectSyncService:
         }
 
     async def _check_s3_project_modified(self, file_detail) -> bool:
-        """检查 S3 项目是否被修改
-
-        通过比较项目目录的文件列表哈希来判断
-        """
-        # TODO: 实现更精确的 S3 项目修改检测
-        # 目前简单返回 False，假设未修改
-        return False
+        """检查 S3 项目是否已产生草稿修改。"""
+        dirty_files = int(getattr(file_detail, "dirty_files_count", 0) or 0)
+        return bool(getattr(file_detail, "dirty", False) or dirty_files > 0)
 
     async def _pack_s3_project(self, project, file_detail, backend, s3_manager):
         """打包 S3 项目目录为压缩文件
@@ -219,6 +307,7 @@ class ProjectSyncService:
             "is_compressed": True,
             "is_temporary": True,
             "presigned_url": presigned_url,
+            "resolved_revision": getattr(file_detail, "resolved_revision", ""),
         }
 
     async def _compress_directory(self, source_dir, output_path):

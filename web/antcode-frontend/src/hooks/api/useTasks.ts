@@ -11,10 +11,11 @@ export interface UseTasksParams {
   schedule_type?: TaskListParams['schedule_type']
   search?: string
   specified_worker_id?: string
+  worker_id?: string
 }
 
 const buildTaskParams = (params: UseTasksParams): TaskListParams => {
-  const { page, size, project_id, status, schedule_type, search, specified_worker_id } = params
+  const { page, size, project_id, status, schedule_type, search, specified_worker_id, worker_id } = params
   return {
     page,
     size,
@@ -22,7 +23,8 @@ const buildTaskParams = (params: UseTasksParams): TaskListParams => {
     status,
     schedule_type,
     search,
-    specified_worker_id
+    specified_worker_id,
+    worker_id
   }
 }
 
@@ -35,10 +37,13 @@ export const useTasksQuery = (params: UseTasksParams, enabled: boolean) => {
   })
 }
 
-export const useProjectsQuery = (enabled: boolean = true) => {
+export const useProjectsQuery = (
+  workerId?: string,
+  enabled: boolean = true,
+) => {
   return useQuery<{ items: Project[]; page: number; size: number; total: number; pages: number }>({
-    queryKey: ['projects', 'options'],
-    queryFn: () => projectService.getProjects({ page: 1, size: 200 }),
+    queryKey: ['projects', 'options', workerId || 'all'],
+    queryFn: () => projectService.getProjects({ page: 1, size: 200, worker_id: workerId }),
     staleTime: 60_000,
     enabled
   })

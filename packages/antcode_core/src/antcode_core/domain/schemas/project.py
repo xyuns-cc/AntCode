@@ -46,6 +46,16 @@ def _normalize_runtime_kind(value):
     return value
 
 
+def _parse_project_dict_field(value, field_name):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return {}
+        return JSONParser.parse_safely(value, field_name)
+    return value
+
+
 class ExtractionRule(BaseModel):
     """提取规则模型"""
 
@@ -194,26 +204,24 @@ class ProjectFileCreateRequest(ProjectCreateRequest):
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: dict | None = Field(None, description="运行时配置")
     environment_vars: dict | None = Field(None, description="环境变量")
+    source_type: str | None = Field("s3", description="文件来源类型：s3/git")
+    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
+    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
+    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
+    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
+    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
 
     @field_validator("runtime_config", mode="before")
     @classmethod
     def parse_runtime_config(cls, v):
         """解析运行时配置"""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return JSONParser.parse_safely(v, "runtime_config")
-        return v
+        return _parse_project_dict_field(v, "runtime_config")
 
     @field_validator("environment_vars", mode="before")
     @classmethod
     def parse_environment_vars(cls, v):
         """解析环境变量"""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return JSONParser.parse_safely(v, "environment_vars")
-        return v
+        return _parse_project_dict_field(v, "environment_vars")
 
 
 class BrowserConfig(BaseModel):
@@ -312,6 +320,12 @@ class ProjectCodeCreateRequest(ProjectCreateRequest):
     version: str | None = Field("1.0.0", max_length=20, description="版本号")
     entry_point: str | None = Field(None, max_length=255, description="入口函数")
     documentation: str | None = Field(None, description="代码文档")
+    source_type: str | None = Field("s3", description="代码来源类型：s3/git/inline(兼容)")
+    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
+    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
+    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
+    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
+    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
     code_content: str | None = Field(None, description="代码内容（直接提交代码时使用）")
 
 
@@ -378,6 +392,7 @@ class ProjectCreateFormRequest(BaseModel):
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: str | None = Field(None, description="运行时配置JSON")
     environment_vars: str | None = Field(None, description="环境变量JSON")
+    file_source_type: str | None = Field("s3", description="文件来源类型：s3/git")
 
     # 区域配置
     region: str | None = Field(None, description="执行区域")
@@ -403,6 +418,12 @@ class ProjectCreateFormRequest(BaseModel):
     version: str | None = Field("1.0.0", max_length=20, description="版本号")
     code_entry_point: str | None = Field(None, max_length=255, description="入口函数")
     documentation: str | None = Field(None, description="代码文档")
+    code_source_type: str | None = Field("s3", description="代码来源类型：s3/git/inline(兼容)")
+    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
+    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
+    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
+    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
+    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
     code_content: str | None = Field(None, description="代码内容（直接提交代码时使用）")
 
     @field_validator("runtime_scope", mode="before")
@@ -480,6 +501,14 @@ class ProjectCodeUpdateRequest(BaseModel):
     version: str | None = Field(None, max_length=20, description="版本号")
     entry_point: str | None = Field(None, max_length=255, description="入口函数")
     documentation: str | None = Field(None, description="代码文档")
+    source_type: str | None = Field(None, description="代码来源类型：s3/git/inline(兼容)")
+    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
+    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
+    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
+    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
+    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
+    runtime_config: dict[str, Any] | None = Field(None, description="运行时配置")
+    environment_vars: dict[str, Any] | None = Field(None, description="环境变量")
     code_content: str | None = Field(None, description="代码内容")
 
 
@@ -489,26 +518,24 @@ class ProjectFileUpdateRequest(BaseModel):
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: str | dict[str, Any] | None = Field(None, description="运行时配置")
     environment_vars: str | dict[str, Any] | None = Field(None, description="环境变量")
+    source_type: str | None = Field(None, description="文件来源类型：s3/git")
+    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
+    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
+    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
+    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
+    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
 
     @field_validator("runtime_config", mode="before")
     @classmethod
     def parse_runtime_config(cls, v):
         """解析运行时配置"""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return JSONParser.parse_safely(v, "runtime_config")
-        return v
+        return _parse_project_dict_field(v, "runtime_config")
 
     @field_validator("environment_vars", mode="before")
     @classmethod
     def parse_environment_vars(cls, v):
         """解析环境变量"""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return JSONParser.parse_safely(v, "environment_vars")
-        return v
+        return _parse_project_dict_field(v, "environment_vars")
 
 
 class ProjectFileContentUpdateRequest(BaseModel):
@@ -557,6 +584,14 @@ class FileInfo(BaseModel):
     environment_vars: dict[str, Any] = Field(default_factory=dict, description="环境变量")
     is_compressed: bool = Field(False, description="是否为压缩包")
     original_file_path: str = Field("", description="原始文件路径")
+    source_type: str = Field("s3", description="来源类型")
+    git_url: str | None = Field(None, description="Git 仓库地址")
+    git_branch: str | None = Field(None, description="Git 分支")
+    git_commit: str | None = Field(None, description="Git 提交")
+    git_subdir: str | None = Field(None, description="Git 子目录")
+    git_credential_id: str | None = Field(None, description="Git 凭证 ID")
+    git_credential_name: str | None = Field(None, description="Git 凭证名称")
+    resolved_revision: str | None = Field(None, description="Git 解析后的提交版本")
 
 
 class FileTreeNode(BaseModel):

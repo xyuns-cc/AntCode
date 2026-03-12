@@ -1,6 +1,7 @@
 import type { MessageInstance } from 'antd/es/message/interface'
 import type { NotificationInstance } from 'antd/es/notification/interface'
 import type { ModalStaticFunctions } from 'antd/es/modal/confirm'
+import type { ReactNode } from 'react'
 
 let messageInstance: MessageInstance | null = null
 let notificationInstance: NotificationInstance | null = null
@@ -34,13 +35,13 @@ export const globalMessage = {
 
 /** Global notification API */
 export const globalNotification = {
-  success: (message: string, description?: string, duration?: number) =>
+  success: (message: ReactNode, description?: ReactNode, duration?: number) =>
     notificationInstance?.success({ message, description, duration: duration ?? 3, placement: 'topRight' }),
-  error: (message: string, description?: string, duration?: number) =>
+  error: (message: ReactNode, description?: ReactNode, duration?: number) =>
     notificationInstance?.error({ message, description, duration: duration ?? 5, placement: 'topRight' }),
-  warning: (message: string, description?: string, duration?: number) =>
+  warning: (message: ReactNode, description?: ReactNode, duration?: number) =>
     notificationInstance?.warning({ message, description, duration: duration ?? 4, placement: 'topRight' }),
-  info: (message: string, description?: string, duration?: number) =>
+  info: (message: ReactNode, description?: ReactNode, duration?: number) =>
     notificationInstance?.info({ message, description, duration: duration ?? 3, placement: 'topRight' }),
   destroy: () => notificationInstance?.destroy(),
 }
@@ -56,11 +57,13 @@ export const globalModal = {
 
 export type NoticeType = 'success' | 'error' | 'warning' | 'info'
 
+export type NotificationPlacement = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight'
+
 export function showNotification(
   type: NoticeType,
-  message: string,
-  description?: string,
-  options?: { duration?: number; durationMs?: number }
+  message: ReactNode,
+  description?: ReactNode,
+  options?: { duration?: number; durationMs?: number; placement?: NotificationPlacement; key?: string }
 ) {
   const defaultDurations: Record<NoticeType, number> = {
     success: 3,
@@ -71,5 +74,8 @@ export function showNotification(
   const duration = options?.durationMs 
     ? options.durationMs / 1000 
     : options?.duration ?? defaultDurations[type]
-  return globalNotification[type](message, description, duration)
+
+  const placement = options?.placement ?? 'topRight'
+  const key = options?.key
+  return notificationInstance?.[type]({ message, description, duration, placement, key })
 }

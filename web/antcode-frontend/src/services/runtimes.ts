@@ -1,5 +1,5 @@
 import type { AxiosRequestConfig } from 'axios'
-import apiClient from './api'
+import { BaseService } from './base'
 
 export type RuntimeScope = 'private' | 'shared'
 
@@ -42,21 +42,23 @@ export interface RuntimePythonVersions {
   }
 }
 
-class RuntimeService {
+class RuntimeService extends BaseService {
+  constructor() {
+    super('/api/v1/runtimes')
+  }
+
   private base(workerId: string) {
-    return `/api/v1/runtimes/workers/${workerId}`
+    return `/workers/${workerId}`
   }
 
   async listEnvs(workerId: string, scope?: RuntimeScope, config?: AxiosRequestConfig): Promise<RuntimeEnv[]> {
-    const res = await apiClient.get<{ data: RuntimeEnv[] | { envs?: RuntimeEnv[] } }>(
+    const items = await this.get<RuntimeEnv[]>(
       `${this.base(workerId)}/runtimes`,
       {
         ...config,
         params: { ...(scope ? { scope } : {}), ...(config?.params ?? {}) }
       }
     )
-    const data = res.data.data
-    const items = Array.isArray(data) ? data : data?.envs || []
     return items.map((env) => ({
       ...env,
       scope: env.scope || (env.name?.startsWith('shared-') ? 'shared' : 'private'),
@@ -68,7 +70,7 @@ class RuntimeService {
       ? payload.scope
       : (payload.env_name?.startsWith('shared-') ? 'shared' : 'private')
 
-    const res = await apiClient.post<{ data: { env: RuntimeEnv } | RuntimeEnv }>(
+    const data = await this.post<{ worker_id: string; env: RuntimeEnv }>(
       `${this.base(workerId)}/runtimes`,
       {
         env_name: payload.env_name,
@@ -78,8 +80,7 @@ class RuntimeService {
       },
       config
     )
-    const data = res.data.data
-    const env = (data && typeof data === 'object' && 'env' in data) ? (data as { env: RuntimeEnv }).env : (data as RuntimeEnv)
+    const env = data.env
     return {
       ...env,
       scope: env.scope || (env.name?.startsWith('shared-') ? 'shared' : 'private'),
@@ -87,28 +88,26 @@ class RuntimeService {
   }
 
   async updateEnv(workerId: string, envName: string, payload: { key?: string; description?: string }, config?: AxiosRequestConfig): Promise<RuntimeEnv> {
-    const res = await apiClient.patch<{ data: RuntimeEnv }>(
+    return await this.patch<RuntimeEnv>(
       `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}`,
       payload,
       config
     )
-    return res.data.data
   }
 
   async deleteEnv(workerId: string, envName: string, config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.delete(`${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}`, config)
+    await this.delete(`${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}`, config)
   }
 
   async listPackages(workerId: string, envName: string, config?: AxiosRequestConfig): Promise<RuntimePackage[]> {
-    const res = await apiClient.get<{ data: RuntimePackage[] }>(
+    return await this.get<RuntimePackage[]>(
       `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}/packages`,
       config
     )
-    return res.data.data || []
   }
 
   async installPackages(workerId: string, envName: string, packages: string[], upgrade?: boolean, config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.post(
+    await this.post(
       `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}/packages`,
       { packages, upgrade: !!upgrade },
       config
@@ -116,26 +115,25 @@ class RuntimeService {
   }
 
   async uninstallPackages(workerId: string, envName: string, packages: string[], config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.delete(
+    await this.delete(
       `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}/packages`,
       { ...config, data: { packages, upgrade: false } }
     )
   }
 
   async listInterpreters(workerId: string, config?: AxiosRequestConfig): Promise<RuntimeInterpreter[]> {
-    const res = await apiClient.get<{ data: RuntimeInterpreter[] }>(
+    return await this.get<RuntimeInterpreter[]>(
       `${this.base(workerId)}/interpreters`,
       config
     )
-    return res.data.data || []
   }
 
   async installInterpreter(workerId: string, version: string, config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.post(`${this.base(workerId)}/interpreters`, { version }, config)
+    await this.post(`${this.base(workerId)}/interpreters`, { version }, config)
   }
 
   async registerInterpreter(workerId: string, python_bin: string, version?: string, config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.post(`${this.base(workerId)}/interpreters/register`, { python_bin, version }, config)
+    await this.post(`${this.base(workerId)}/interpreters/register`, { python_bin, version }, config)
   }
 
   async removeInterpreter(workerId: string, payload: { version?: string; python_bin?: string; mode?: 'uninstall' | 'unregister' }, config?: AxiosRequestConfig): Promise<void> {
@@ -146,22 +144,21 @@ class RuntimeService {
       throw new Error('卸载解释器需要提供 version')
     }
 
-    await apiClient.delete(`${this.base(workerId)}/interpreters`, {
+    await this.delete(`${this.base(workerId)}/interpreters`, {
       ...config,
       params: { ...(payload ?? {}), ...(config?.params ?? {}) }
     })
   }
 
   async getPythonVersions(workerId: string, config?: AxiosRequestConfig): Promise<RuntimePythonVersions> {
-    const res = await apiClient.get<{ data: RuntimePythonVersions }>(
+    return await this.get<RuntimePythonVersions>(
       `${this.base(workerId)}/python-versions`,
       config
     )
-    return res.data.data || {}
   }
 
   async installPythonVersion(workerId: string, version: string, config?: AxiosRequestConfig): Promise<void> {
-    await apiClient.post(`${this.base(workerId)}/python-versions/${encodeURIComponent(version)}/install`, undefined, config)
+    await this.post(`${this.base(workerId)}/python-versions/${encodeURIComponent(version)}/install`, undefined, config)
   }
 }
 

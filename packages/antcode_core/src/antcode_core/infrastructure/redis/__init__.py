@@ -20,6 +20,7 @@ from antcode_core.infrastructure.redis.locks import (
     acquire_leader_lock,
     fencing_token_manager,
 )
+from antcode_core.infrastructure.redis.rate_limiter import RedisRateLimiter, redis_rate_limiter
 from antcode_core.infrastructure.redis.streams import StreamClient
 from antcode_core.infrastructure.redis.control_plane import (
     build_cancel_control_payload,
@@ -57,6 +58,8 @@ __all__ = [
     "FencingTokenManager",
     "fencing_token_manager",
     "acquire_leader_lock",
+    "RedisRateLimiter",
+    "redis_rate_limiter",
     "redis_namespace",
     "task_ready_stream",
     "task_result_stream",

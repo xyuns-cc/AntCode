@@ -32,6 +32,7 @@ import {
   EditOutlined,
   ReloadOutlined,
   ClusterOutlined,
+  CloudServerOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   ApiOutlined,
@@ -94,7 +95,17 @@ const getOsInfo = (osType?: string) => {
 
 const Workers: React.FC = () => {
   const { token } = theme.useToken()
-  const { workers, loading, refreshWorkers, silentRefresh, setCurrentWorker, removeWorker, updateWorker, lastRefreshed } = useWorkerStore()
+  const {
+    workers,
+    currentWorker,
+    loading,
+    refreshWorkers,
+    silentRefresh,
+    setCurrentWorker,
+    removeWorker,
+    updateWorker,
+    lastRefreshed,
+  } = useWorkerStore()
 
   // 本地状态
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
@@ -138,15 +149,22 @@ const Workers: React.FC = () => {
     return () => clearInterval(intervalId)
   }, [refreshWorkers, silentRefresh])
 
+  const filteredWorkersByNode = useMemo(() => {
+    if (!currentWorker) {
+      return workers
+    }
+    return workers.filter((worker) => worker.id === currentWorker.id)
+  }, [workers, currentWorker])
+
   // 获取所有 regions
   const regions = useMemo(() => {
-    const regionSet = new Set(workers.map(n => n.region).filter(Boolean))
+    const regionSet = new Set(filteredWorkersByNode.map(n => n.region).filter(Boolean))
     return Array.from(regionSet) as string[]
-  }, [workers])
+  }, [filteredWorkersByNode])
 
   // 筛选后的数据
   const filteredWorkers = useMemo(() => {
-    let filtered = [...workers]
+    let filtered = [...filteredWorkersByNode]
 
     if (statusFilter) {
       filtered = filtered.filter(n => n.status === statusFilter)
@@ -166,7 +184,7 @@ const Workers: React.FC = () => {
     }
 
     return filtered
-  }, [workers, statusFilter, regionFilter, searchQuery])
+  }, [filteredWorkersByNode, statusFilter, regionFilter, searchQuery])
 
   // 分页数据
   const paginatedWorkers = useMemo(() => {
@@ -176,20 +194,20 @@ const Workers: React.FC = () => {
 
   // 统计数据
   const stats = useMemo(() => ({
-    total: workers.length,
-    online: workers.filter(n => n.status === 'online').length,
-    offline: workers.filter(n => n.status === 'offline').length,
-    maintenance: workers.filter(n => n.status === 'maintenance').length,
-    totalTasks: workers.reduce((sum, n) => sum + (n.metrics?.taskCount || 0), 0),
-    runningTasks: workers.reduce((sum, n) => sum + (n.metrics?.runningTasks || 0), 0),
-    totalProjects: workers.reduce((sum, n) => sum + (n.metrics?.projectCount || 0), 0),
-    avgCpu: workers.length > 0
-      ? Math.round(workers.reduce((sum, n) => sum + (n.metrics?.cpu || 0), 0) / workers.length)
+    total: filteredWorkersByNode.length,
+    online: filteredWorkersByNode.filter(n => n.status === 'online').length,
+    offline: filteredWorkersByNode.filter(n => n.status === 'offline').length,
+    maintenance: filteredWorkersByNode.filter(n => n.status === 'maintenance').length,
+    totalTasks: filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.taskCount || 0), 0),
+    runningTasks: filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.runningTasks || 0), 0),
+    totalProjects: filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.projectCount || 0), 0),
+    avgCpu: filteredWorkersByNode.length > 0
+      ? Math.round(filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.cpu || 0), 0) / filteredWorkersByNode.length)
       : 0,
-    avgMemory: workers.length > 0
-      ? Math.round(workers.reduce((sum, n) => sum + (n.metrics?.memory || 0), 0) / workers.length)
+    avgMemory: filteredWorkersByNode.length > 0
+      ? Math.round(filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.memory || 0), 0) / filteredWorkersByNode.length)
       : 0
-  }), [workers])
+  }), [filteredWorkersByNode])
 
   // 编辑Worker
   const handleEdit = async (values: { name?: string; host?: string; port?: number; region?: string; description?: string; tags?: string[] }) => {
@@ -601,12 +619,23 @@ const Workers: React.FC = () => {
     <div style={{ padding: '24px' }}>
       {/* 页面标题 */}
       <div style={{ marginBottom: '24px' }}>
-        <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <ClusterOutlined />
-          Worker 管理
-        </h1>
+        <Space align="start">
+          <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <ClusterOutlined />
+            Worker 管理
+          </h1>
+          {currentWorker && (
+            <Tag
+              color="cyan"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}
+            >
+              <CloudServerOutlined style={{ fontSize: 12 }} />
+              <span>{currentWorker.name}</span>
+            </Tag>
+          )}
+        </Space>
         <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
-          管理和监控分布式 Worker
+          {currentWorker ? `当前 Worker: ${currentWorker.name}` : '管理和监控分布式 Worker'}
         </p>
       </div>
 

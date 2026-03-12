@@ -1,6 +1,7 @@
 """审计日志 API"""
 
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
@@ -8,12 +9,18 @@ from loguru import logger
 from antcode_web_api.response import success
 from antcode_core.common.security.auth import TokenData, get_current_super_admin, get_current_user
 from antcode_core.domain.models import User
+from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.application.services.audit import audit_service
 
 router = APIRouter()
 
 
-@router.get("/logs", summary="获取审计日志", description="获取审计日志列表（仅管理员）")
+@router.get(
+    "/logs",
+    response_model=BaseResponse[dict[str, Any]],
+    summary="获取审计日志",
+    description="获取审计日志列表（仅管理员）",
+)
 async def get_audit_logs(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(50, ge=1, le=200, description="每页数量"),
@@ -61,7 +68,12 @@ async def get_audit_logs(
     return success(result)
 
 
-@router.get("/stats", summary="获取审计统计", description="获取审计日志统计信息（仅管理员）")
+@router.get(
+    "/stats",
+    response_model=BaseResponse[dict[str, Any]],
+    summary="获取审计统计",
+    description="获取审计日志统计信息（仅管理员）",
+)
 async def get_audit_stats(
     days: int = Query(7, ge=1, le=90, description="统计天数"),
     current_user: TokenData = Depends(get_current_user),
@@ -77,6 +89,7 @@ async def get_audit_stats(
 
 @router.get(
     "/user/{username}",
+    response_model=BaseResponse[dict[str, Any]],
     summary="获取用户活动",
     description="获取指定用户的活动记录（仅管理员）",
 )
@@ -98,6 +111,7 @@ async def get_user_activity(
 
 @router.delete(
     "/cleanup",
+    response_model=BaseResponse[dict[str, Any]],
     summary="清理旧日志",
     description="清理指定天数之前的审计日志（仅超级管理员）",
 )
@@ -113,7 +127,12 @@ async def cleanup_audit_logs(
     return success({"deleted": deleted}, message=f"已清理 {deleted} 条旧日志")
 
 
-@router.get("/actions", summary="获取操作类型列表", description="获取所有可用的审计操作类型")
+@router.get(
+    "/actions",
+    response_model=BaseResponse[list[dict[str, str]]],
+    summary="获取操作类型列表",
+    description="获取所有可用的审计操作类型",
+)
 async def get_audit_actions(current_user: TokenData = Depends(get_current_user)):
     """获取操作类型列表"""
     from antcode_core.domain.models.audit_log import AuditAction

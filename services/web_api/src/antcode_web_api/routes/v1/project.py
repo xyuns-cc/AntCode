@@ -31,6 +31,7 @@ from antcode_web_api.response import (
     page as page_response,
     success as success_response,
 )
+from antcode_core.common.config import settings
 from antcode_core.common.security.auth import get_current_user, get_current_user_id
 from antcode_core.common.utils.api_optimizer import (
     fast_response,
@@ -47,6 +48,7 @@ from antcode_core.domain.schemas.project import (
     FileContentResponse,
     FileStructureResponse,
     ProjectCodeCreateRequest,
+    ProjectCodeUpdateRequest,
     ProjectCreateFormRequest,
     ProjectCreateRequest,
     ProjectFileContentUpdateRequest,
@@ -67,6 +69,17 @@ from antcode_web_api.services.projects.project_file_service import project_file_
 from antcode_core.application.services.projects.project_service import project_service
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.projects.unified_project_service import unified_project_service
+from antcode_core.application.services.projects.code_source import (
+    SOURCE_TYPE_GIT,
+    SOURCE_TYPE_S3,
+    get_code_source_config,
+    get_runtime_artifact_config,
+    get_runtime_source_config,
+    normalize_source_type,
+)
+from antcode_core.application.services.projects.git_credential_service import (
+    git_credential_service,
+)
 from antcode_core.application.services.users.user_service import user_service
 from antcode_web_api.exceptions import ProjectNotFoundException
 
@@ -97,6 +110,8 @@ class ProjectValidateRequest(BaseModel):
     target_url: str | None = None
     extraction_rules: str | dict | None = None
     code_content: str | None = None
+    source_type: str | None = None
+    git_url: str | None = None
     entry_point: str | None = None
 
 
@@ -190,6 +205,7 @@ async def get_project_create_form(
     entry_point: str | None = Form(None, max_length=255),
     runtime_config: str | None = Form(None),
     environment_vars: str | None = Form(None),
+    file_source_type: str | None = Form("s3"),
     engine: str = Form("requests"),
     target_url: str | None = Form(None, max_length=2000),
     url_pattern: str | None = Form(None, max_length=500),
@@ -207,6 +223,12 @@ async def get_project_create_form(
     version: str = Form("1.0.0", max_length=20),
     code_entry_point: str | None = Form(None, max_length=255),
     documentation: str | None = Form(None),
+    code_source_type: str | None = Form("s3"),
+    git_url: str | None = Form(None, max_length=2000),
+    git_branch: str | None = Form(None, max_length=255),
+    git_commit: str | None = Form(None, max_length=255),
+    git_subdir: str | None = Form(None, max_length=500),
+    git_credential_id: str | None = Form(None, max_length=32),
     code_content: str | None = Form(None),
 ) -> ProjectCreateFormRequest:
     # 处理 use_existing_env 布尔值
@@ -237,6 +259,7 @@ async def get_project_create_form(
         entry_point=entry_point,
         runtime_config=runtime_config,
         environment_vars=environment_vars,
+        file_source_type=file_source_type,
         engine=engine,
         target_url=target_url,
         url_pattern=url_pattern,
@@ -254,6 +277,12 @@ async def get_project_create_form(
         version=version,
         code_entry_point=code_entry_point,
         documentation=documentation,
+        code_source_type=code_source_type,
+        git_url=git_url,
+        git_branch=git_branch,
+        git_commit=git_commit,
+        git_subdir=git_subdir,
+        git_credential_id=git_credential_id,
         code_content=code_content,
     )
 
@@ -327,6 +356,12 @@ async def create_project(
                 "entry_point": form_data.entry_point,
                 "runtime_config": form_data.runtime_config,
                 "environment_vars": form_data.environment_vars,
+                "source_type": form_data.file_source_type,
+                "git_url": form_data.git_url,
+                "git_branch": form_data.git_branch,
+                "git_commit": form_data.git_commit,
+                "git_subdir": form_data.git_subdir,
+                "git_credential_id": form_data.git_credential_id,
             }
         )
     elif form_data.type == ProjectType.RULE:
@@ -360,6 +395,12 @@ async def create_project(
                 "version": form_data.version,
                 "entry_point": form_data.code_entry_point,
                 "documentation": form_data.documentation,
+                "source_type": form_data.code_source_type,
+                "git_url": form_data.git_url,
+                "git_branch": form_data.git_branch,
+                "git_commit": form_data.git_commit,
+                "git_subdir": form_data.git_subdir,
+                "git_credential_id": form_data.git_credential_id,
                 "code_content": form_data.code_content,
             }
         )
@@ -385,15 +426,7 @@ async def create_project(
 
     # 构建响应数据
     response_data = create_project_response(project)
-
-    # 如果是文件项目，添加文件信息
-    if project.type == ProjectType.FILE and hasattr(project, "file_detail"):
-        file_detail = project.file_detail
-        response_data.file_info = {
-            "original_name": file_detail.original_name,
-            "file_size": file_detail.file_size,
-            "file_hash": file_detail.file_hash,
-        }
+    await _attach_project_detail_info(response_data, project)
 
     # 记录审计日志
     user = await user_service.get_user_by_id(current_user.user_id)
@@ -574,9 +607,32 @@ async def validate_project_config(
             errors.append("规则项目必须提供 target_url")
         if not payload.extraction_rules:
             errors.append("规则项目必须提供 extraction_rules")
+    elif project_type == ProjectType.FILE or project_type == ProjectType.FILE.value:
+        try:
+            source_type = normalize_source_type(payload.source_type, SOURCE_TYPE_S3)
+        except ValueError as exc:
+            errors.append(str(exc))
+            source_type = SOURCE_TYPE_S3
+        if source_type == SOURCE_TYPE_GIT:
+            if not payload.git_url:
+                errors.append("Git 文件项目必须提供 git_url")
+            if not payload.entry_point:
+                errors.append("Git 文件项目必须提供 entry_point")
     elif project_type == ProjectType.CODE or project_type == ProjectType.CODE.value:
-        if not payload.code_content:
-            errors.append("代码项目必须提供 code_content")
+        try:
+            source_type = normalize_source_type(payload.source_type, SOURCE_TYPE_S3)
+        except ValueError as exc:
+            errors.append(str(exc))
+            source_type = SOURCE_TYPE_S3
+        if source_type == SOURCE_TYPE_GIT:
+            if not payload.git_url:
+                errors.append("Git 代码项目必须提供 git_url")
+            if not payload.entry_point:
+                errors.append("Git 代码项目必须提供 entry_point")
+        elif source_type == SOURCE_TYPE_S3 and not payload.code_content:
+            errors.append("S3 代码项目必须提供 code_content")
+        elif source_type != SOURCE_TYPE_GIT and source_type != SOURCE_TYPE_S3 and not payload.code_content:
+            errors.append("legacy inline 代码项目必须提供 code_content")
 
     return success_response(
         {"valid": len(errors) == 0, "errors": errors if errors else None},
@@ -609,6 +665,11 @@ async def import_projects(
     current_user=Depends(get_current_user),
 ):
     """导入文件项目（上传文件/压缩包）"""
+    # 文件大小校验
+    if file.size and file.size > settings.MAX_FILE_SIZE:
+        from antcode_web_api.exceptions import FileTooLargeException
+        raise FileTooLargeException()
+
     raw_name = (name or Path(file.filename or "").stem or "imported-project").strip()
     base_name = raw_name or "imported-project"
 
@@ -671,6 +732,7 @@ async def import_projects(
 @project_router.post(
     "/{project_id}/export",
     summary="导出项目配置",
+    response_model=None,
 )
 async def export_project_config(
     project_id: str,
@@ -791,9 +853,17 @@ async def get_project_detail(project_id: str, current_user_id: int = Depends(get
 
 
 async def _attach_project_detail_info(response_data: ProjectResponse, project):
-    """为项目响应附加详细信息"""
+    """为项目响应附加详细信息。"""
     if project.type == ProjectType.FILE:
         if detail := await relation_service.get_project_file_detail(project.id):
+            source_config = get_runtime_source_config(detail)
+            artifact_config = get_runtime_artifact_config(detail)
+            credential_id = source_config.get("git_credential_id")
+            credential = (
+                await git_credential_service.get_by_public_id(credential_id)
+                if credential_id
+                else None
+            )
             response_data.file_info = {
                 "original_name": detail.original_name,
                 "file_size": detail.file_size,
@@ -806,6 +876,16 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 "environment_vars": detail.environment_vars,
                 "is_compressed": detail.is_compressed,
                 "original_file_path": detail.original_file_path,
+                "source_type": source_config.get("type", "s3"),
+                "git_url": source_config.get("url"),
+                "git_branch": source_config.get("branch"),
+                "git_commit": source_config.get("commit"),
+                "git_subdir": source_config.get("subdir"),
+                "git_credential_id": credential_id,
+                "git_credential_name": credential.name if credential else None,
+                "resolved_revision": artifact_config.get("resolved_revision")
+                or detail.file_hash
+                or source_config.get("commit"),
             }
     elif project.type == ProjectType.RULE:
         if detail := await relation_service.get_project_rule_detail(project.id):
@@ -831,15 +911,33 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 "task_config": getattr(detail, "task_config", None),
             }
     elif project.type == ProjectType.CODE and (detail := await relation_service.get_project_code_detail(project.id)):
+        source_config = get_code_source_config(detail)
+        artifact_config = get_runtime_artifact_config(detail)
+        credential_id = source_config.get("git_credential_id")
+        credential = (
+            await git_credential_service.get_by_public_id(credential_id)
+            if credential_id
+            else None
+        )
         response_data.code_info = {
-                "content": detail.content,
-                "language": detail.language,
-                "version": detail.version,
-                "content_hash": detail.content_hash,
-                "entry_point": detail.entry_point,
-                "runtime_config": detail.runtime_config,
-                "environment_vars": detail.environment_vars,
-            }
+            "content": detail.content,
+            "language": detail.language,
+            "version": detail.version,
+            "content_hash": detail.content_hash,
+            "entry_point": detail.entry_point,
+            "runtime_config": detail.runtime_config,
+            "environment_vars": detail.environment_vars,
+            "source_type": source_config.get("type", "s3"),
+            "git_url": source_config.get("url"),
+            "git_branch": source_config.get("branch"),
+            "git_commit": source_config.get("commit"),
+            "git_subdir": source_config.get("subdir"),
+            "git_credential_id": credential_id,
+            "git_credential_name": credential.name if credential else None,
+            "resolved_revision": artifact_config.get("resolved_revision")
+            or detail.content_hash
+            or source_config.get("commit"),
+        }
 
 
 @project_router.put(
@@ -1214,7 +1312,11 @@ async def update_rule_config(project_id, request, current_user_id=Depends(get_cu
 
 
 @project_router.put("/{project_id}/code-config", response_model=BaseResponse[ProjectResponse])
-async def update_code_config(project_id, request, current_user_id=Depends(get_current_user_id)):
+async def update_code_config(
+    project_id: str,
+    request: ProjectCodeUpdateRequest,
+    current_user_id=Depends(get_current_user_id),
+):
     """更新代码项目配置"""
     try:
         # 更新代码配置
@@ -1229,6 +1331,7 @@ async def update_code_config(project_id, request, current_user_id=Depends(get_cu
 
         # 构建响应数据
         response_data = create_project_response(updated_project)
+        await _attach_project_detail_info(response_data, updated_project)
 
         return success_response(response_data, message=Messages.UPDATED_SUCCESS)
     except HTTPException:
@@ -1248,10 +1351,16 @@ async def update_code_config(project_id, request, current_user_id=Depends(get_cu
     response_description="返回更新后的项目信息",
 )
 async def update_file_config(
-    project_id,
+    project_id: str,
     entry_point=Form(None),
     runtime_config=Form(None),
     environment_vars=Form(None),
+    source_type=Form(None),
+    git_url=Form(None),
+    git_branch=Form(None),
+    git_commit=Form(None),
+    git_subdir=Form(None),
+    git_credential_id=Form(None),
     file=File(None),
     current_user_id=Depends(get_current_user_id),
 ):
@@ -1270,14 +1379,16 @@ async def update_file_config(
             )
 
         # 构建更新请求
-        # 解析JSON字段
-        parsed_runtime_config = JSONParser.parse_safely(runtime_config, "runtime_config")
-        parsed_environment_vars = JSONParser.parse_safely(environment_vars, "environment_vars")
-
         request = ProjectFileUpdateRequest(
             entry_point=entry_point,
-            runtime_config=parsed_runtime_config,
-            environment_vars=parsed_environment_vars,
+            runtime_config=runtime_config,
+            environment_vars=environment_vars,
+            source_type=source_type,
+            git_url=git_url,
+            git_branch=git_branch,
+            git_commit=git_commit,
+            git_subdir=git_subdir,
+            git_credential_id=git_credential_id,
         )
 
         # 更新文件配置
@@ -1292,6 +1403,7 @@ async def update_file_config(
 
         # 构建响应数据
         response_data = create_project_response(updated_project)
+        await _attach_project_detail_info(response_data, updated_project)
 
         return success_response(response_data, message=Messages.UPDATED_SUCCESS)
 
@@ -1488,6 +1600,7 @@ async def update_project_file_content(
     summary="下载项目文件",
     description="下载项目的原始文件或解压后的特定文件",
     response_description="返回文件下载",
+    response_model=None,
 )
 async def download_project_file(
     project_id, file_path=Query(None), current_user_id=Depends(get_current_user_id)
@@ -1511,18 +1624,16 @@ async def download_project_file(
         if not file_detail:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件详情不存在")
 
-        # 下载文件
         if file_path:
-            # 下载解压后的特定文件
             return await project_file_service.download_file(file_detail.file_path, file_path)
-        else:
-            # 下载原始文件（如果是压缩包则下载压缩包，否则下载文件本身）
-            if file_detail.is_compressed and file_detail.original_file_path:
-                # 下载原始压缩包
-                return await project_file_service.download_file(file_detail.original_file_path)
-            else:
-                # 下载单个文件
-                return await project_file_service.download_file(file_detail.file_path)
+
+        from antcode_core.application.services.projects.project_sync_service import (
+            project_sync_service,
+        )
+        from antcode_web_api.routes.v1.project_download import _download_transfer
+
+        transfer_info = await project_sync_service.get_project_transfer_info(project.id, project=project)
+        return await _download_transfer(transfer_info)
 
     except HTTPException:
         raise

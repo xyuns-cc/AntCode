@@ -7,6 +7,7 @@ from antcode_web_api.routes.v1.branding import router as branding_router
 from antcode_web_api.routes.v1.crawl import router as crawl_router
 from antcode_web_api.routes.v1.dashboard import router as dashboard_router
 from antcode_web_api.routes.v1.envs import router as envs_router
+from antcode_web_api.routes.v1.git_credentials import router as git_credentials_router
 from antcode_web_api.routes.v1.logs import router as logs_router
 from antcode_web_api.routes.v1.monitoring import router as monitoring_router
 from antcode_web_api.routes.v1.project import project_router
@@ -27,6 +28,7 @@ v1_router.include_router(base_router, tags=["基础"])
 v1_router.include_router(branding_router, prefix="/branding", tags=["基础"])
 v1_router.include_router(users_router, prefix="/users", tags=["用户管理"])
 v1_router.include_router(project_router, prefix="/projects", tags=["项目管理"])
+v1_router.include_router(git_credentials_router, prefix="/git-credentials", tags=["Git 凭证"])
 v1_router.include_router(project_download_router, prefix="/projects", tags=["项目下载"])
 v1_router.include_router(project_versions_router, prefix="/projects", tags=["项目版本管理"])
 v1_router.include_router(tasks_router, prefix="/tasks", tags=["任务"])

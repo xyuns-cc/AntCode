@@ -6,7 +6,12 @@ import RuleProjectForm from './RuleProjectForm'
 import CodeProjectForm from './CodeProjectForm'
 import FileProjectForm from './FileProjectForm'
 import { projectService } from '@/services/projects'
-import type { Project, ProjectUpdateRequest } from '@/types'
+import type {
+  Project,
+  ProjectCodeConfigUpdateRequest,
+  ProjectFileConfigUpdateRequest,
+  ProjectUpdateRequest,
+} from '@/types'
 import styles from './ProjectEditDrawer.module.css'
 
 interface ProjectEditDrawerProps {
@@ -75,10 +80,64 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
     
     try {
       setLoading(true)
-      const updateData = data as ProjectUpdateRequest
-      
-      // 统一使用通用的项目更新接口，后端会根据type字段处理不同类型的项目
-      await projectService.updateProject(project.id, updateData)
+
+      const baseUpdate: ProjectUpdateRequest = {}
+      if (typeof data.name === 'string') {
+        baseUpdate.name = data.name
+      }
+      if (typeof data.description === 'string') {
+        baseUpdate.description = data.description
+      }
+      if (data.tags !== undefined) {
+        const rawTags = data.tags
+        if (Array.isArray(rawTags)) {
+          baseUpdate.tags = rawTags.filter((tag): tag is string => typeof tag === 'string')
+        } else if (typeof rawTags === 'string') {
+          baseUpdate.tags = rawTags
+            .split(',')
+            .map((tag) => tag.trim())
+            .filter(Boolean)
+        }
+      }
+      if (Array.isArray(data.dependencies)) {
+        baseUpdate.dependencies = data.dependencies as string[]
+      }
+      if (Object.keys(baseUpdate).length > 0) {
+        await projectService.updateProject(project.id, baseUpdate)
+      }
+
+      if (project.type === 'rule') {
+        await projectService.updateRuleConfig(project.id, data as Partial<ProjectUpdateRequest>)
+      } else if (project.type === 'code') {
+        const payload: ProjectCodeConfigUpdateRequest = {
+          language: data.language as string | undefined,
+          version: data.version as string | undefined,
+          entry_point: data.entry_point as string | undefined,
+          documentation: data.documentation as string | undefined,
+          source_type: data.source_type as ProjectCodeConfigUpdateRequest['source_type'],
+          git_url: data.git_url as string | undefined,
+          git_branch: data.git_branch as string | undefined,
+          git_commit: data.git_commit as string | undefined,
+          git_subdir: data.git_subdir as string | undefined,
+          git_credential_id: data.git_credential_id as string | undefined,
+          code_content: data.code_content as string | undefined,
+        }
+        await projectService.updateCodeConfig(project.id, payload)
+      } else if (project.type === 'file') {
+        const payload: ProjectFileConfigUpdateRequest = {
+          entry_point: data.entry_point as string | undefined,
+          runtime_config: data.runtime_config as ProjectFileConfigUpdateRequest['runtime_config'],
+          environment_vars: data.environment_vars as ProjectFileConfigUpdateRequest['environment_vars'],
+          file: data.file as File | undefined,
+          source_type: data.source_type as ProjectFileConfigUpdateRequest['source_type'],
+          git_url: data.git_url as string | undefined,
+          git_branch: data.git_branch as string | undefined,
+          git_commit: data.git_commit as string | undefined,
+          git_subdir: data.git_subdir as string | undefined,
+          git_credential_id: data.git_credential_id as string | undefined,
+        }
+        await projectService.updateFileConfig(project.id, payload)
+      }
       
       // 成功提示由拦截器统一处理
       onSuccess?.()
@@ -156,6 +215,12 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
     if (project.type === 'code' && project.code_info) {
       return {
         ...baseData,
+        source_type: project.code_info.source_type,
+        git_url: project.code_info.git_url,
+        git_branch: project.code_info.git_branch,
+        git_commit: project.code_info.git_commit,
+        git_subdir: project.code_info.git_subdir,
+        git_credential_id: project.code_info.git_credential_id,
         language: project.code_info.language,
         version: project.code_info.version,
         code_entry_point: project.code_info.entry_point,
@@ -168,6 +233,12 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
     if (project.type === 'file' && project.file_info) {
       return {
         ...baseData,
+        source_type: project.file_info.source_type,
+        git_url: project.file_info.git_url,
+        git_branch: project.file_info.git_branch,
+        git_commit: project.file_info.git_commit,
+        git_subdir: project.file_info.git_subdir,
+        git_credential_id: project.file_info.git_credential_id,
         entry_point: project.file_info.entry_point,
         runtime_config: project.file_info.runtime_config ? JSON.stringify(project.file_info.runtime_config, null, 2) : '',
         environment_vars: project.file_info.environment_vars ? JSON.stringify(project.file_info.environment_vars, null, 2) : '',

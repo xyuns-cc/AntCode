@@ -192,6 +192,14 @@ const ProjectDetail: React.FC = () => {
           <Descriptions.Item label="入口文件">
             {project.file_info.entry_point || '未指定'}
           </Descriptions.Item>
+          <Descriptions.Item label="来源类型">
+            <Tag color={project.file_info.source_type === 'git' ? 'purple' : 'blue'}>
+              {project.file_info.source_type || 's3'}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="Resolved Revision">
+            <Text code>{project.file_info.resolved_revision || '-'}</Text>
+          </Descriptions.Item>
           <Descriptions.Item label="文件哈希">
             <Text code>{project.file_info.file_hash}</Text>
           </Descriptions.Item>
@@ -200,6 +208,25 @@ const ProjectDetail: React.FC = () => {
               {project.file_info.file_path || project.file_info.original_file_path || '未提供'}
             </Text>
           </Descriptions.Item>
+          {project.file_info.source_type === 'git' && (
+            <>
+              <Descriptions.Item label="Git URL" span={2}>
+                <Text code style={{ wordBreak: 'break-all' }}>{project.file_info.git_url || '-'}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 分支">
+                {project.file_info.git_branch || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 提交">
+                <Text code>{project.file_info.git_commit || '-'}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 子目录">
+                <Text code>{project.file_info.git_subdir || '-'}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 凭证">
+                {project.file_info.git_credential_name || '-'}
+              </Descriptions.Item>
+            </>
+          )}
         </Descriptions>
 
         {project.file_info.runtime_config && (
@@ -363,6 +390,9 @@ const ProjectDetail: React.FC = () => {
   const renderCodeInfo = () => {
     if (!project.code_info) return null
 
+    const sourceType = project.code_info.source_type || 's3'
+    const hasInlineContent = sourceType === 'legacy_inline' && Boolean(project.code_info.content)
+
     return (
       <Card title="代码项目详情" style={{ marginTop: 16 }}>
         <Descriptions column={2} bordered>
@@ -376,18 +406,54 @@ const ProjectDetail: React.FC = () => {
             {project.code_info.entry_point || '未指定'}
           </Descriptions.Item>
           <Descriptions.Item label="内容大小">
-            {(project.code_info.content.length / 1024).toFixed(2)} KB
+            {hasInlineContent ? `${(project.code_info.content.length / 1024).toFixed(2)} KB` : '-'}
           </Descriptions.Item>
+          <Descriptions.Item label="来源类型">
+            <Tag color={sourceType === 'git' ? 'purple' : sourceType === 'legacy_inline' ? 'gold' : 'blue'}>
+              {sourceType}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="Resolved Revision">
+            <Text code>{project.code_info.resolved_revision || '-'}</Text>
+          </Descriptions.Item>
+          {sourceType === 'git' && (
+            <>
+              <Descriptions.Item label="Git URL" span={2}>
+                <Text code style={{ wordBreak: 'break-all' }}>{project.code_info.git_url || '-'}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 分支">
+                {project.code_info.git_branch || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 提交">
+                <Text code>{project.code_info.git_commit || '-'}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 子目录">
+                <Text code>{project.code_info.git_subdir || '-'}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Git 凭证">
+                {project.code_info.git_credential_name || '-'}
+              </Descriptions.Item>
+            </>
+          )}
         </Descriptions>
 
-        <div style={{ marginTop: 16 }}>
-          <Text strong>代码内容:</Text>
-          <div style={getCodeContentStyle()}>
-            <pre style={{ margin: 0, fontFamily: 'Monaco, Consolas, monospace', fontSize: '12px' }}>
-              {project.code_info.content}
-            </pre>
+        {hasInlineContent ? (
+          <div style={{ marginTop: 16 }}>
+            <Text strong>代码内容:</Text>
+            <div style={getCodeContentStyle()}>
+              <pre style={{ margin: 0, fontFamily: 'Monaco, Consolas, monospace', fontSize: '12px' }}>
+                {project.code_info.content}
+              </pre>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div style={{ marginTop: 16 }}>
+            <Text strong>代码内容:</Text>
+            <Paragraph type="secondary" style={{ marginTop: 8 }}>
+              当前来源为 {sourceType}，代码通过后端物化/归档交付，不在此处展示。
+            </Paragraph>
+          </div>
+        )}
 
 
 

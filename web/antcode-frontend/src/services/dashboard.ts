@@ -1,8 +1,40 @@
-import apiClient from './api'
-import type { ApiResponse, PaginationResponse, Project, Task } from '@/types'
+import { BaseService } from './base'
+import type { Project, Task } from '@/types'
 
-type ProjectListResponse = ApiResponse<Project[]> & {
-  pagination?: PaginationResponse<Project>['pagination']
+interface DashboardMetricsPayload {
+  active_tasks?: number
+  success_rate?: number
+  queue_size?: number
+  uptime_seconds?: number
+  memory_total?: number
+  memory_used?: number
+  memory_available?: number
+  memory_percent?: number
+  cpu_percent?: number
+  cpu_cores?: number
+  disk_total?: number
+  disk_used?: number
+  disk_free?: number
+  disk_percent?: number
+}
+
+interface DashboardSummaryPayload {
+  projects?: {
+    total?: number
+    by_status?: {
+      active?: number
+      inactive?: number
+    }
+  }
+  tasks?: {
+    total?: number
+    active?: number
+    running?: number
+    by_status?: {
+      success?: number
+      failed?: number
+    }
+  }
 }
 
 export interface DashboardStats {
@@ -87,18 +119,21 @@ export interface TaskSummary {
   }
 }
 
-class DashboardService {
+class DashboardService extends BaseService {
+  constructor() {
+    super('/api/v1')
+  }
+
   // 获取项目统计
   async getProjectStats(): Promise<ProjectCount> {
     try {
-      // 获取项目列表来统计
-      const response = await apiClient.get<ProjectListResponse>('/api/v1/projects', {
+      const data = await this.get<{ items: Project[]; pagination: { total: number; page: number; size: number; pages: number } }>('/projects', {
         params: { page: 1, size: 1000 } // 获取大量数据来统计
       })
-      
-      const projects = response.data.data || []
-      const total = response.data.pagination?.total || projects.length
-      
+
+      const { items: projects, pagination } = data
+      const total = pagination.total
+
       // 统计各状态项目数量
       const byStatus = projects.reduce<ProjectCount['by_status']>((acc, project) => {
         const status = (project.status ?? 'draft').toLowerCase() as keyof ProjectCount['by_status']
@@ -140,13 +175,12 @@ class DashboardService {
   // 获取任务统计（对齐后端 /tasks 返回的 PaginationResponse 结构）
   async getTaskStats(): Promise<TaskSummary> {
     try {
-      const response = await apiClient.get<PaginationResponse<Task>>('/api/v1/tasks', {
+      const data = await this.get<{ items: Task[]; pagination: { total: number; page: number; size: number; pages: number } }>('/tasks', {
         params: { page: 1, size: 1000 }
       })
 
-      // 后端返回结构: { success, data: Task[], pagination }
-      const list = response.data?.data ?? []
-      const total = response.data?.pagination?.total ?? list.length
+      const { items: list, pagination } = data
+      const total = pagination.total
 
       const active = list.filter((task: Task) => task.is_active).length
       const running = list.filter((task: Task) => task.status === 'running').length
@@ -193,14 +227,13 @@ class DashboardService {
   async getSystemMetrics(): Promise<SystemMetrics> {
     try {
       // 1) 核心系统指标（CPU/内存/磁盘/活跃任务/队列大小/成功率）
-      const sysResp = await apiClient.get('/api/v1/dashboard/metrics')
-      const sysData = sysResp.data?.data || sysResp.data || {}
+      const sysData = await this.get<DashboardMetricsPayload>('/dashboard/metrics')
 
       // 2) 日志指标（用于 total_executions 等补充）
       let total_executions = 0
       try {
-        const logResp = await apiClient.get('/api/v1/logs/metrics')
-        total_executions = logResp.data?.data?.total_executions || 0
+        const logData = await this.get<{ total_executions: number }>('/logs/metrics')
+        total_executions = logData.total_executions
       } catch (err) {
         console.warn('Failed to get log metrics', err)
       }
@@ -213,8 +246,8 @@ class DashboardService {
       const mapped: SystemMetrics = {
         active_tasks: sysData.active_tasks ?? 0,
         total_executions,
-        success_rate: sysData.success_rate ?? 0,  // 使用后端返回的成功率
-        queue_size: sysData.queue_size ?? 0,      // 使用后端返回的队列大小
+        success_rate: sysData.success_rate ?? 0,
+        queue_size: sysData.queue_size ?? 0,
         uptime: sysData.uptime_seconds ?? 0,
         memory_usage: sysData.memory_percent != null ? {
           total: sysData.memory_total ?? 0,
@@ -226,11 +259,11 @@ class DashboardService {
           percent: sysData.cpu_percent,
           cores: sysData.cpu_cores ?? hardwareConcurrency
         } : undefined,
-        disk_usage: sysData.disk_percent != null ? {  // 修复：使用 disk_percent
+        disk_usage: sysData.disk_percent != null ? {
           total: sysData.disk_total ?? 0,
           used: sysData.disk_used ?? 0,
           free: sysData.disk_free ?? 0,
-          percent: sysData.disk_percent  // 修复：使用 disk_percent
+          percent: sysData.disk_percent
         } : undefined
       }
 
@@ -250,8 +283,7 @@ class DashboardService {
   // 获取24小时任务趋势数据
   async getHourlyTrend(): Promise<HourlyTrendItem[]> {
     try {
-      const response = await apiClient.get<ApiResponse<HourlyTrendItem[]>>('/api/v1/dashboard/tasks/hourly-trend')
-      return response.data.data ?? []
+      return await this.get<HourlyTrendItem[]>('/dashboard/tasks/hourly-trend')
     } catch (error) {
       console.error('Failed to get hourly trend:', error)
       // 返回空数组，前端会显示空状态
@@ -262,8 +294,7 @@ class DashboardService {
   // 获取运行中的任务
   async getRunningTasks(): Promise<Task[]> {
     try {
-      const response = await apiClient.get<ApiResponse<Task[]>>('/api/v1/tasks/running')
-      return response.data.data ?? []
+      return await this.get<Task[]>('/tasks/running')
     } catch (error) {
       console.error('Failed to get running tasks:', error)
       return []
@@ -274,24 +305,23 @@ class DashboardService {
   async getDashboardStats(): Promise<DashboardStats> {
     try {
       // 优先使用后端提供的全量汇总统计
-      const [summaryResp, systemMetrics] = await Promise.all([
-        apiClient.get('/api/v1/dashboard/summary'),
+      const [summary, systemMetrics] = await Promise.all([
+        this.get<DashboardSummaryPayload>('/dashboard/summary'),
         this.getSystemMetrics()
       ])
-      const summary = summaryResp.data?.data || summaryResp.data || {}
 
       return {
         projects: {
-          total: summary.projects?.total || 0,
-          active: summary.projects?.by_status?.active || 0,
-          inactive: summary.projects?.by_status?.inactive || 0,
+          total: summary.projects?.total ?? 0,
+          active: summary.projects?.by_status?.active ?? 0,
+          inactive: summary.projects?.by_status?.inactive ?? 0,
         },
         tasks: {
-          total: summary.tasks?.total || 0,
-          active: summary.tasks?.active || 0,
-          running: summary.tasks?.running || 0,
-          success: summary.tasks?.by_status?.success || 0,
-          failed: summary.tasks?.by_status?.failed || 0,
+          total: summary.tasks?.total ?? 0,
+          active: summary.tasks?.active ?? 0,
+          running: summary.tasks?.running ?? 0,
+          success: summary.tasks?.by_status?.success ?? 0,
+          failed: summary.tasks?.by_status?.failed ?? 0,
         },
         system: {
           status: this.calculateSystemStatus(systemMetrics),
@@ -324,15 +354,14 @@ class DashboardService {
     } else if (cpuUsage > 70 || memoryUsage > 70 || diskUsage > 85) {
       return 'warning'
     }
-    
+
     return 'normal'
   }
 
   // 刷新系统指标缓存（同样做字段映射）
   async refreshSystemMetrics(): Promise<SystemMetrics> {
     try {
-      const resp = await apiClient.post('/api/v1/dashboard/metrics/refresh')
-      const data = resp.data?.data || resp.data || {}
+      const data = await this.post<DashboardMetricsPayload>('/dashboard/metrics/refresh')
 
       const hardwareConcurrency = typeof navigator !== 'undefined'
         ? navigator.hardwareConcurrency ?? 0
@@ -354,11 +383,11 @@ class DashboardService {
           percent: data.cpu_percent,
           cores: data.cpu_cores ?? hardwareConcurrency
         } : undefined,
-        disk_usage: data.disk_percent != null ? {  // 修复：使用 disk_percent
+        disk_usage: data.disk_percent != null ? {
           total: data.disk_total ?? 0,
           used: data.disk_used ?? 0,
           free: data.disk_free ?? 0,
-          percent: data.disk_percent  // 修复：使用 disk_percent
+          percent: data.disk_percent
         } : undefined,
       }
 

@@ -22,6 +22,7 @@ import {
   DatabaseOutlined,
   LineChartOutlined,
   FileTextOutlined,
+  KeyOutlined,
 } from '@ant-design/icons'
 import { systemConfigService } from '@/services/systemConfig'
 import type {
@@ -34,6 +35,7 @@ import type {
 import { CONFIG_FIELD_LABELS, CONFIG_FIELD_DESCRIPTIONS } from '@/types/system-config'
 import showNotification from '@/utils/notification'
 import styles from './SystemConfig.module.css'
+import GitCredentialsTab from './GitCredentialsTab'
 
 const { Title, Paragraph } = Typography
 
@@ -671,6 +673,16 @@ const SystemConfig: React.FC = () => {
               </span>
             ),
             children: <MonitoringForm />,
+          },
+          {
+            key: 'git_credentials',
+            label: (
+              <span>
+                <KeyOutlined />
+                Git 凭证
+              </span>
+            ),
+            children: <GitCredentialsTab />,
           },
         ]}
       />

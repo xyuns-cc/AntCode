@@ -115,16 +115,14 @@ const UserManagement: React.FC = () => {
       const payload = response.data
       if (!payload?.success) return
 
-      const items = payload.data || []
-      const total = payload.pagination?.total || items.length
-      const respPage = payload.pagination?.page || page
-      const respSize = payload.pagination?.size || size
+      const items = payload.data?.items ?? []
+      const responsePagination = payload.data?.pagination
 
       setUsers(items)
       setPagination({
-        current: respPage,
-        pageSize: respSize,
-        total
+        current: responsePagination?.page ?? page,
+        pageSize: responsePagination?.size ?? size,
+        total: responsePagination?.total ?? items.length
       })
     } catch {
       // 错误由拦截器处理

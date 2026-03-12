@@ -1,6 +1,8 @@
 // 项目类型枚举
 export type ProjectType = 'file' | 'rule' | 'code'
 export type ProjectStatus = 'draft' | 'active' | 'inactive' | 'archived'
+export type ProjectSourceType = 's3' | 'git'
+export type ProjectCodeSourceType = ProjectSourceType | 'legacy_inline'
 
 // 执行策略枚举
 export type ExecutionStrategy = 'fixed' | 'specified' | 'auto' | 'prefer'
@@ -104,6 +106,14 @@ export interface FileInfo {
   entry_point?: string
   runtime_config?: RuntimeConfig
   environment_vars?: EnvironmentVars
+  source_type?: ProjectSourceType
+  git_url?: string
+  git_branch?: string
+  git_commit?: string
+  git_subdir?: string
+  git_credential_id?: string
+  git_credential_name?: string
+  resolved_revision?: string
 }
 
 export interface ProjectFileContent {
@@ -155,6 +165,14 @@ export interface CodeInfo {
   runtime_config?: RuntimeConfig
   environment_vars?: EnvironmentVars
   documentation?: string
+  source_type?: ProjectCodeSourceType
+  git_url?: string
+  git_branch?: string
+  git_commit?: string
+  git_subdir?: string
+  git_credential_id?: string
+  git_credential_name?: string
+  resolved_revision?: string
 }
 
 // 文件项目详情
@@ -229,6 +247,34 @@ export interface TaskConfig {
   concurrency_limit?: number  // 并发限制
 }
 
+export interface GitCredential {
+  id: string
+  name: string
+  auth_type: 'token' | 'basic'
+  username?: string | null
+  host_scope: string
+  has_secret: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface GitCredentialCreateRequest {
+  name: string
+  auth_type: 'token' | 'basic'
+  username?: string
+  secret: string
+  host_scope: string
+}
+
+export interface GitCredentialUpdateRequest {
+  name?: string
+  auth_type?: 'token' | 'basic'
+  username?: string
+  secret?: string
+  host_scope?: string
+}
+
+
 // 创建项目请求
 export interface ProjectCreateRequest {
   name: string
@@ -256,12 +302,22 @@ export interface ProjectCreateRequest {
   bound_worker_id?: string
   fallback_enabled?: boolean
   
+  // 文件/代码来源字段
+  source_type?: ProjectCodeSourceType
+  file_source_type?: ProjectSourceType
+  code_source_type?: ProjectCodeSourceType
+  git_url?: string
+  git_branch?: string
+  git_commit?: string
+  git_subdir?: string
+  git_credential_id?: string
+
   // 文件项目字段
   file?: File
-  additionalFiles?: Array<File | { originFileObj?: File }> // 新增：附加文件列表
-  entry_point?: string // 新增：入口文件
-  runtime_config?: string | RuntimeConfig // 新增：运行时配置
-  environment_vars?: string | EnvironmentVars // 新增：环境变量
+  additionalFiles?: Array<File | { originFileObj?: File }>
+  entry_point?: string
+  runtime_config?: string | RuntimeConfig
+  environment_vars?: string | EnvironmentVars
   dependencies?: string[]
 
   // 规则项目字段
@@ -342,17 +398,52 @@ export interface ProjectUpdateRequest {
   code_entry_point?: string
   documentation?: string
   dependencies?: string[]
+  source_type?: ProjectCodeSourceType
+  git_url?: string
+  git_branch?: string
+  git_commit?: string
+  git_subdir?: string
+  git_credential_id?: string
   
   // 文件项目更新字段
   entry_point?: string
-  runtime_config?: string
-  environment_vars?: string
+  runtime_config?: string | RuntimeConfig
+  environment_vars?: string | EnvironmentVars
   env_location?: string
   worker_id?: string
   use_existing_env?: boolean
   existing_env_name?: string
   env_name?: string
   env_description?: string
+}
+
+export interface ProjectCodeConfigUpdateRequest {
+  language?: string
+  version?: string
+  entry_point?: string
+  documentation?: string
+  code_content?: string
+  source_type?: ProjectCodeSourceType
+  git_url?: string
+  git_branch?: string
+  git_commit?: string
+  git_subdir?: string
+  git_credential_id?: string
+  runtime_config?: RuntimeConfig
+  environment_vars?: EnvironmentVars
+}
+
+export interface ProjectFileConfigUpdateRequest {
+  entry_point?: string
+  runtime_config?: string | RuntimeConfig
+  environment_vars?: string | EnvironmentVars
+  file?: File
+  source_type?: ProjectSourceType
+  git_url?: string
+  git_branch?: string
+  git_commit?: string
+  git_subdir?: string
+  git_credential_id?: string
 }
 
 // 项目列表查询参数

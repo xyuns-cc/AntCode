@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
-import time
-from collections import defaultdict
+import uuid
+from datetime import datetime
 from typing import ClassVar, Pattern
 
 from fastapi import HTTPException, status
@@ -15,7 +15,44 @@ from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from antcode_core.common.security.auth import jwt_auth
-from antcode_core.application.services.users.user_service import user_service
+
+
+# ============================================================================
+# 缓存失效命名空间映射（路由模块可扩展）
+# ============================================================================
+
+CACHE_NAMESPACE_MAP: dict[str, dict] = {
+    "project": {
+        "path": r"^/api/v1/projects",
+        "id_pattern": r"^/api/v1/projects/(\w+)",
+        "prefixes": ["project:list:"],
+        "detail_prefix": "project:detail:{id}:",
+    },
+    "scheduler": {
+        "path": r"^/api/v1/tasks",
+        "id_pattern": r"^/api/v1/tasks/(\w+)",
+        "prefixes": ["scheduler:list:", "scheduler:running:"],
+        "detail_prefix": "scheduler:detail:{id}:",
+    },
+    "scheduler_runs": {
+        "path": r"^/api/v1/runs",
+        "prefixes": ["scheduler:list:", "scheduler:running:"],
+    },
+    "users": {
+        "path": r"^/api/v1/users",
+        "id_pattern": r"^/api/v1/users/(\w+)",
+        "prefixes": ["user:list:"],
+        "detail_prefix": "user:detail:{id}:",
+    },
+    "logs": {
+        "path": r"^/api/v1/logs",
+        "prefixes": [],
+    },
+    "dashboard": {
+        "path": r"^/api/v1/dashboard",
+        "prefixes": ["metrics:"],
+    },
+}
 
 
 class AdminPermissionMiddleware(BaseHTTPMiddleware):
@@ -55,9 +92,8 @@ class AdminPermissionMiddleware(BaseHTTPMiddleware):
         try:
             token = auth_header.split(" ", 1)[1]
             token_data = jwt_auth.verify_token(token)
-            user = await user_service.get_user_by_id(token_data.user_id)
 
-            if not user or not user.is_admin:
+            if not token_data.is_admin:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
         except HTTPException:
             raise
@@ -83,33 +119,43 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """X-Request-ID 中间件：读取或生成请求 ID"""
+
+    async def dispatch(self, request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """速率限制中间件（内存实现，多进程部署需改用 Redis）"""
+    """Redis 分布式滑动窗口限流中间件"""
 
     def __init__(self, app, calls: int = 100, period: int = 60):
         super().__init__(app)
         self.calls = calls
         self.period = period
-        self.requests: dict[str, list[float]] = defaultdict(list)
-        self._last_cleanup = time.time()
-        self._cleanup_interval = 60
 
     async def dispatch(self, request, call_next):
         client_ip = self._get_client_ip(request)
-        current_time = time.time()
 
-        # 定期清理
-        if current_time - self._last_cleanup > self._cleanup_interval:
-            self._cleanup_expired_records(current_time)
-            self._last_cleanup = current_time
+        from antcode_core.infrastructure.redis.rate_limiter import redis_rate_limiter
 
-        if self._is_rate_limited(client_ip, current_time):
+        allowed = await redis_rate_limiter.is_allowed(client_ip, self.calls, self.period)
+        if not allowed:
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={"success": False, "code": 429, "message": "请求过于频繁"},
+                content={
+                    "success": False,
+                    "code": status.HTTP_429_TOO_MANY_REQUESTS,
+                    "message": "请求过于频繁",
+                    "data": None,
+                    "timestamp": datetime.now().isoformat(),
+                },
             )
 
-        self.requests[client_ip].append(current_time)
         return await call_next(request)
 
     def _get_client_ip(self, request) -> str:
@@ -119,44 +165,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return real_ip
         return request.client.host if request.client else "unknown"
 
-    def _cleanup_expired_records(self, current_time: float):
-        cutoff = current_time - self.period
-        expired = [ip for ip, ts in self.requests.items() if not any(t > cutoff for t in ts)]
-        for ip in expired:
-            del self.requests[ip]
-        for ip in self.requests:
-            self.requests[ip] = [t for t in self.requests[ip] if t > cutoff]
-
-    def _is_rate_limited(self, client_ip: str, current_time: float) -> bool:
-        if client_ip not in self.requests:
-            return False
-        cutoff = current_time - self.period
-        return sum(1 for t in self.requests[client_ip] if t > cutoff) >= self.calls
-
 
 class CacheInvalidationMiddleware(BaseHTTPMiddleware):
     """写操作缓存失效中间件"""
 
     WRITE_METHODS: ClassVar[set[str]] = {"POST", "PUT", "PATCH", "DELETE"}
 
-    # 预编译路径匹配
-    PATH_PATTERNS: ClassVar[list[tuple[Pattern[str], str]]] = [
-        (re.compile(r"^/api/v1/projects"), "project"),
-        (re.compile(r"^/api/v1/tasks"), "scheduler"),
-        (re.compile(r"^/api/v1/runs"), "scheduler"),
-        (re.compile(r"^/api/v1/users"), "users"),
-        (re.compile(r"^/api/v1/logs"), "logs"),
-        (re.compile(r"^/api/v1/dashboard"), "dashboard"),
-    ]
+    def __init__(self, app):
+        super().__init__(app)
+        # 从配置字典构建编译后的匹配器
+        self._path_patterns: list[tuple[re.Pattern, str]] = []
+        self._id_patterns: dict[str, re.Pattern] = {}
+        self._prefix_map: dict[str, list[str]] = {}
+        self._detail_prefix_map: dict[str, str] = {}
 
-    ID_PATTERNS: ClassVar[dict[str, Pattern[str]]] = {
-        "project": re.compile(r"^/api/v1/projects/(\w+)"),
-        "scheduler": re.compile(r"^/api/v1/tasks/(\w+)"),
-        "users": re.compile(r"^/api/v1/users/(\w+)"),
-    }
+        for ns, cfg in CACHE_NAMESPACE_MAP.items():
+            compiled = re.compile(cfg["path"])
+            self._path_patterns.append((compiled, ns))
+            if "id_pattern" in cfg:
+                self._id_patterns[ns] = re.compile(cfg["id_pattern"])
+            self._prefix_map[ns] = cfg.get("prefixes", [])
+            if "detail_prefix" in cfg:
+                self._detail_prefix_map[ns] = cfg["detail_prefix"]
 
     def _match_namespace(self, path: str) -> str | None:
-        for pattern, ns in self.PATH_PATTERNS:
+        for pattern, ns in self._path_patterns:
             if pattern.match(path):
                 return ns
         return None
@@ -177,7 +210,15 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
             if not ns:
                 return
 
-            prefixes = self._get_cache_prefixes(ns, path)
+            prefixes = list(self._prefix_map.get(ns, []))
+
+            # 提取资源 ID 并添加 detail 前缀
+            if ns in self._id_patterns and ns in self._detail_prefix_map:
+                if m := self._id_patterns[ns].match(path):
+                    prefixes.append(
+                        self._detail_prefix_map[ns].format(id=m.group(1))
+                    )
+
             if prefixes:
                 from antcode_core.infrastructure.cache import unified_cache
 
@@ -187,36 +228,13 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             logger.warning(f"缓存失效处理失败: {e}")
 
-    def _get_cache_prefixes(self, ns: str, path: str) -> list[str]:
-        """获取需要清除的缓存前缀"""
-        prefixes = []
-
-        if ns == "project":
-            prefixes.append("project:list:")
-            if m := self.ID_PATTERNS["project"].match(path):
-                prefixes.append(f"project:detail:{m.group(1)}:")
-
-        elif ns == "scheduler":
-            prefixes.extend(["scheduler:list:", "scheduler:running:"])
-            if m := self.ID_PATTERNS["scheduler"].match(path):
-                prefixes.append(f"scheduler:detail:{m.group(1)}:")
-
-        elif ns == "users":
-            prefixes.append("user:list:")
-            if m := self.ID_PATTERNS["users"].match(path):
-                prefixes.append(f"user:detail:{m.group(1)}:")
-
-        elif ns == "dashboard":
-            prefixes.append("metrics:")
-
-        return prefixes
-
 
 def make_middlewares():
     """创建 FastAPI 中间件列表"""
     from antcode_core.common.config import settings
 
     middleware = [
+        Middleware(RequestIDMiddleware),
         Middleware(
             CORSMiddleware,
             allow_origins=settings.CORS_ORIGINS,

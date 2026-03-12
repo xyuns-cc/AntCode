@@ -1,4 +1,4 @@
-import apiClient from './api'
+import { BaseService } from './base'
 import { STORAGE_KEYS } from '@/utils/constants'
 import Logger from '@/utils/logger'
 
@@ -87,7 +87,18 @@ export interface LogStreamConnection {
   disconnect: () => void
 }
 
-class LogService {
+export type HistoricalLogsPhase = 'loading' | 'loaded' | 'empty'
+
+export interface HistoricalLogsUpdate {
+  phase: HistoricalLogsPhase
+  sentLines?: number
+}
+
+class LogService extends BaseService {
+  constructor() {
+    super('/api/v1')
+  }
+
   async getUnifiedLogs(params: UnifiedLogParams): Promise<UnifiedLogResponse> {
     const queryParams: Record<string, string | number> = {
       format: params.format || 'structured'
@@ -98,8 +109,7 @@ class LogService {
     if (params.lines) queryParams.lines = Math.min(Math.max(params.lines, 1), 10000)
     if (params.search) queryParams.search = params.search
 
-    const response = await apiClient.get(`/api/v1/logs/runs/${params.run_id}`, { params: queryParams })
-    return response.data.data as UnifiedLogResponse
+    return await this.get<UnifiedLogResponse>(`/logs/runs/${params.run_id}`, { params: queryParams })
   }
 
   async getRunLogs(runId: string, params?: LogQueryParams): Promise<LogListResponse> {
@@ -128,8 +138,7 @@ class LogService {
     const params: Record<string, number> = {}
     if (lines) params.lines = Math.min(Math.max(lines, 1), 10000)
 
-    const response = await apiClient.get(`/api/v1/logs/runs/${runId}/stdout`, { params })
-    const unified = response.data.data as UnifiedLogResponse
+    const unified = await this.get<UnifiedLogResponse>(`/logs/runs/${runId}/stdout`, { params })
 
     return {
       success: true,
@@ -151,8 +160,7 @@ class LogService {
     const params: Record<string, number> = {}
     if (lines) params.lines = Math.min(Math.max(lines, 1), 10000)
 
-    const response = await apiClient.get(`/api/v1/logs/runs/${runId}/stderr`, { params })
-    const unified = response.data.data as UnifiedLogResponse
+    const unified = await this.get<UnifiedLogResponse>(`/logs/runs/${runId}/stderr`, { params })
 
     return {
       success: true,
@@ -175,7 +183,8 @@ class LogService {
     onMessage?: (log: LogEntry) => void,
     onError?: (error: unknown) => void,
     onStateChange?: (state: string) => void,
-    onStatusUpdate?: (status: { status: string; message?: string; progress?: number }) => void
+    onStatusUpdate?: (status: { status: string; message?: string; progress?: number }) => void,
+    onHistoricalLogsUpdate?: (update: HistoricalLogsUpdate) => void
   ): LogStreamConnection | null {
     if (!runId) {
       onError?.('runId is required for WebSocket connection')
@@ -238,6 +247,25 @@ class LogService {
               return
             }
 
+            if (message.type === 'historical_logs_start') {
+              onHistoricalLogsUpdate?.({ phase: 'loading' })
+              return
+            }
+
+            if (message.type === 'historical_logs_end') {
+              const sentLines = Number(message.sent_lines)
+              onHistoricalLogsUpdate?.({
+                phase: 'loaded',
+                sentLines: Number.isFinite(sentLines) ? sentLines : 0,
+              })
+              return
+            }
+
+            if (message.type === 'no_historical_logs') {
+              onHistoricalLogsUpdate?.({ phase: 'empty', sentLines: 0 })
+              return
+            }
+
             if (message.type === 'error') {
               onError?.(message.message || 'WebSocket server error')
             }
@@ -285,4 +313,3 @@ class LogService {
 
 export const logService = new LogService()
 export default logService
-

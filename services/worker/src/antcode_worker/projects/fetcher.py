@@ -17,6 +17,7 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from loguru import logger
 
@@ -126,6 +127,25 @@ class ArtifactFetcher:
         is_compressed: bool | None = None,
         entry_point: str | None = None,
     ) -> str:
+        if self._is_git_download_url(download_url):
+            return await self._fetch_git_project(project_id, download_url, file_hash)
+
+        return await self._fetch_artifact_project(
+            project_id=project_id,
+            download_url=download_url,
+            file_hash=file_hash,
+            is_compressed=is_compressed,
+            entry_point=entry_point,
+        )
+
+    async def _fetch_artifact_project(
+        self,
+        project_id: str,
+        download_url: str,
+        file_hash: str | None = None,
+        is_compressed: bool | None = None,
+        entry_point: str | None = None,
+    ) -> str:
         cache_key = self._build_cache_key(project_id, file_hash, download_url)
         cached = await self._cache.get(cache_key)
         if cached:
@@ -178,6 +198,39 @@ class ArtifactFetcher:
         await self._cache.put(entry)
         return final_path
 
+    async def _fetch_git_project(
+        self,
+        project_id: str,
+        download_url: str,
+        file_hash: str | None,
+    ) -> str:
+        source_config = self._parse_git_download_url(download_url)
+        cache_key = self._build_cache_key(project_id, file_hash, download_url)
+
+        if file_hash:
+            cached = await self._cache.get(cache_key)
+            if cached:
+                return cached
+
+        project_dir = self._build_project_dir(project_id, cache_key)
+        await asyncio.to_thread(self._prepare_project_dir, project_dir)
+
+        repo_dir = project_dir / "repo"
+        await self._clone_git_repo(source_config, repo_dir)
+        final_path = self._resolve_git_project_path(repo_dir, source_config.get("subdir"))
+
+        if file_hash:
+            entry = ProjectCacheEntry(
+                cache_key=cache_key,
+                project_id=project_id,
+                file_hash=file_hash,
+                local_path=final_path,
+                size_bytes=0,
+            )
+            await self._cache.put(entry)
+
+        return final_path
+
     def _build_cache_key(self, project_id: str, file_hash: str | None, url: str) -> str:
         safe_project = self._safe_slug(project_id)
         if file_hash:
@@ -192,6 +245,93 @@ class ArtifactFetcher:
 
     def _safe_slug(self, value: str) -> str:
         return re.sub(r"[^a-zA-Z0-9._-]", "_", value)
+
+    def _is_git_download_url(self, url: str) -> bool:
+        return url.startswith("git+")
+
+    def _parse_git_download_url(self, download_url: str) -> dict[str, str]:
+        raw_url = download_url.removeprefix("git+")
+        parsed = urlparse(raw_url)
+        if not parsed.scheme:
+            raise RuntimeError("Git 下载地址必须包含协议")
+
+        repo_url = parsed._replace(query="", fragment="").geturl()
+        query = parse_qs(parsed.query)
+        config = {"url": repo_url}
+        if ref := self._first_query_value(query, "ref"):
+            config["branch"] = ref
+        if commit := self._first_query_value(query, "commit"):
+            config["commit"] = commit
+        if subdir := self._first_query_value(query, "subdir"):
+            config["subdir"] = self._normalize_git_subdir(subdir)
+        return config
+
+    def _first_query_value(self, query: dict[str, list[str]], key: str) -> str | None:
+        values = query.get(key)
+        if not values:
+            return None
+        value = values[0].strip()
+        return value or None
+
+    def _normalize_git_subdir(self, value: str) -> str:
+        normalized = value.strip().replace("\\", "/").strip("/")
+        if not normalized:
+            raise RuntimeError("Git 子目录不能为空")
+        parts = [part for part in normalized.split("/") if part]
+        if any(part == ".." for part in parts):
+            raise RuntimeError("Git 子目录不合法")
+        return "/".join(parts)
+
+    def _prepare_project_dir(self, project_dir: Path) -> None:
+        import shutil
+
+        if project_dir.exists():
+            shutil.rmtree(project_dir)
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _clone_git_repo(self, source_config: dict[str, str], repo_dir: Path) -> None:
+        clone_cmd = ["git", "clone"]
+        branch = source_config.get("branch")
+        commit = source_config.get("commit")
+
+        if branch and not commit:
+            clone_cmd.extend(["--depth", "1", "--branch", branch])
+        elif branch:
+            clone_cmd.extend(["--branch", branch])
+
+        clone_cmd.extend([source_config["url"], str(repo_dir)])
+        await self._run_git_command(clone_cmd)
+
+        if commit:
+            await self._run_git_command(["git", "checkout", commit], cwd=repo_dir)
+
+    async def _run_git_command(self, command: list[str], cwd: Path | None = None) -> None:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(cwd) if cwd else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode == 0:
+            return
+
+        error = stderr.decode("utf-8", errors="ignore").strip()
+        output = stdout.decode("utf-8", errors="ignore").strip()
+        message = error or output or "未知错误"
+        raise RuntimeError(f"Git 命令执行失败: {' '.join(command)}\n{message}")
+
+    def _resolve_git_project_path(self, repo_dir: Path, subdir: str | None) -> str:
+        if not subdir:
+            return str(repo_dir)
+
+        base_dir = repo_dir.resolve()
+        target_dir = (base_dir / subdir).resolve()
+        if os.path.commonpath([str(base_dir), str(target_dir)]) != str(base_dir):
+            raise RuntimeError("Git 子目录越界")
+        if not target_dir.exists():
+            raise FileNotFoundError(f"Git 子目录不存在: {subdir}")
+        return str(target_dir)
 
     def _guess_filename(self, url: str) -> str:
         name = url.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
@@ -219,6 +359,7 @@ class ArtifactFetcher:
     def _copy_file(self, src: Path, dest: Path) -> None:
         import shutil
 
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
 
     def _detect_hash_algo(self, file_hash: str) -> str:

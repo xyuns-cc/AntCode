@@ -27,13 +27,17 @@ class ErrorDetail(BaseModel):
     message: str
 
 
-class ErrorResponse(BaseModel):
+class ErrorData(BaseModel):
+    """错误扩展数据"""
+
+    error_code: str | None = None
+    errors: list[ErrorDetail] = Field(default_factory=list)
+
+
+class ErrorResponse(BaseResponse[ErrorData | None]):
     """错误响应模型"""
     success: bool = Field(default=False)
-    code: int
-    message: str
-    errors: list[ErrorDetail] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.now)
+    data: ErrorData | None = None
 
 
 class PaginationParams(BaseModel):
@@ -50,14 +54,17 @@ class PaginationInfo(BaseModel):
     pages: int
 
 
-class PaginationResponse(BaseModel, Generic[T]):
-    """分页响应模型"""
-    success: bool = Field(default=True)
-    code: int = Field(default=200)
-    message: str = Field(default="Query successful")
-    data: list[T]
+class PaginationData(BaseModel, Generic[T]):
+    """分页数据体"""
+
+    items: list[T]
     pagination: PaginationInfo
-    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class PaginationResponse(BaseResponse[PaginationData[T]], Generic[T]):
+    """分页响应模型"""
+    message: str = Field(default="Query successful")
+    data: PaginationData[T]
 
 
 class HealthResponse(BaseModel):
@@ -79,9 +86,11 @@ class AppInfoResponse(BaseModel):
 __all__ = [
     "BaseResponse",
     "ErrorDetail",
+    "ErrorData",
     "ErrorResponse",
     "PaginationParams",
     "PaginationInfo",
+    "PaginationData",
     "PaginationResponse",
     "HealthResponse",
     "AppInfoResponse",

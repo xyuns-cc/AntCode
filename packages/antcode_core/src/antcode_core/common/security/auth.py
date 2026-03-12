@@ -77,6 +77,7 @@ class TokenData(BaseModel):
 
     user_id: int
     username: str
+    is_admin: bool = False
     exp: datetime
 
 
@@ -115,10 +116,10 @@ class JWTAuth:
         user_id: int,
         username: str,
         expires_delta: timedelta | None = None,
-        permissions: list[str] | None = None,
+        is_admin: bool = False,
     ) -> str:
         """创建访问令牌"""
-        extra = {"permissions": permissions} if permissions else None
+        extra = {"is_admin": is_admin}
         return self._create_token(
             user_id=user_id,
             username=username,
@@ -170,6 +171,7 @@ class JWTAuth:
             return TokenData(
                 user_id=user_id,
                 username=username,
+                is_admin=payload.get("is_admin", False),
                 exp=datetime.fromtimestamp(payload["exp"]),
             )
         except jwt.ExpiredSignatureError:
@@ -214,10 +216,7 @@ async def get_current_admin_user(
     current_user: TokenData = Depends(get_current_user),
 ) -> TokenData:
     """获取当前管理员用户"""
-    from antcode_core.application.services.users import user_service
-
-    user = await user_service.get_user_by_id(current_user.user_id)
-    if not user or not user.is_admin:
+    if not current_user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return current_user
 
@@ -226,20 +225,14 @@ async def get_current_super_admin(
     current_user: TokenData = Depends(get_current_user),
 ) -> TokenData:
     """获取超级管理员（仅 admin 用户）"""
-    from antcode_core.application.services.users import user_service
-
-    user = await user_service.get_user_by_id(current_user.user_id)
-    if not user or not user.is_admin or user.username != "admin":
+    if not current_user.is_admin or current_user.username != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要超级管理员权限")
     return current_user
 
 
 async def verify_super_admin(user: TokenData) -> bool:
     """验证是否为超级管理员"""
-    from antcode_core.application.services.users import user_service
-
-    user_obj = await user_service.get_user_by_id(user.user_id)
-    return bool(user_obj and user_obj.is_admin and user_obj.username == "admin")
+    return bool(user.is_admin and user.username == "admin")
 
 
 def get_optional_current_user(credentials=Depends(security)) -> TokenData | None:

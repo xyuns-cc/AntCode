@@ -54,10 +54,10 @@ const Tasks: React.FC = memo(() => {
     status: statusFilter,
     schedule_type: scheduleTypeFilter,
     search: searchQuery?.trim() || undefined,
-    specified_worker_id: currentWorker?.id
+    worker_id: currentWorker?.id
   }, isAuthenticated && !authLoading)
 
-  const projectsQuery = useProjectsQuery(isAuthenticated && !authLoading)
+  const projectsQuery = useProjectsQuery(currentWorker?.id, isAuthenticated && !authLoading)
   const { triggerTask, deleteTask, batchDelete } = useTaskMutations()
 
   const loading = tasksQuery.isLoading || tasksQuery.isFetching

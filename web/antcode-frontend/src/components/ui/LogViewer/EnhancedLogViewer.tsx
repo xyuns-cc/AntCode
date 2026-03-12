@@ -22,7 +22,7 @@ import {
   FullscreenOutlined,
   FullscreenExitOutlined
 } from '@ant-design/icons'
-import { logService, type LogStreamConnection } from '@/services/logs'
+import { logService, type HistoricalLogsUpdate, type LogStreamConnection } from '@/services/logs'
 import { LogExporter } from '@/utils/logExport'
 import Logger from '@/utils/logger'
 import VirtualLogViewer from './VirtualLogViewer'
@@ -80,6 +80,7 @@ interface EnhancedLogViewerProps {
 
 // WebSocket连接状态
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
+type HistoricalStatus = 'idle' | 'loading' | 'loaded' | 'empty'
 
 const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   runId,
@@ -100,6 +101,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   // 状态管理
   const [stream, setStream] = useState<LogStreamConnection | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
+  const [historyStatus, setHistoryStatus] = useState<HistoricalStatus>('idle')
+  const [historySentLines, setHistorySentLines] = useState(0)
   const [messages, setMessages] = useState<LogMessage[]>([])
   const [isAutoScroll, setIsAutoScroll] = useState(true)
   const [isPaused, setIsPaused] = useState(false)
@@ -170,6 +173,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
 
     try {
       setConnectionStatus('connecting')
+      setHistoryStatus('idle')
+      setHistorySentLines(0)
       addLogMessage({
         id: generateUniqueId(),
         type: 'info',
@@ -254,6 +259,45 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
           
           // 调用外部回调
           onStatusUpdate?.(statusUpdate)
+        },
+        (historicalUpdate: HistoricalLogsUpdate) => {
+          if (!mountedRef.current) return
+
+          if (historicalUpdate.phase === 'loading') {
+            setHistoryStatus('loading')
+            setHistorySentLines(0)
+            addLogMessage({
+              id: generateUniqueId(),
+              type: 'info',
+              content: '[历史] 正在加载历史日志...',
+              timestamp: new Date().toISOString()
+            })
+            return
+          }
+
+          if (historicalUpdate.phase === 'loaded') {
+            const sentLines = historicalUpdate.sentLines || 0
+            setHistoryStatus('loaded')
+            setHistorySentLines(sentLines)
+            addLogMessage({
+              id: generateUniqueId(),
+              type: 'info',
+              content: `[历史] 历史日志加载完成，共 ${sentLines} 行`,
+              timestamp: new Date().toISOString()
+            })
+            return
+          }
+
+          if (historicalUpdate.phase === 'empty') {
+            setHistoryStatus('empty')
+            setHistorySentLines(0)
+            addLogMessage({
+              id: generateUniqueId(),
+              type: 'info',
+              content: '[历史] 无历史日志，已进入实时模式',
+              timestamp: new Date().toISOString()
+            })
+          }
         }
       )
 
@@ -283,6 +327,8 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     }
     
     setConnectionStatus('disconnected')
+    setHistoryStatus('idle')
+    setHistorySentLines(0)
     addLogMessage({
       id: generateUniqueId(),
       type: 'info',
@@ -552,6 +598,30 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     }
   }
 
+  const getHistoryStatusColor = (): 'processing' | 'success' | 'default' => {
+    switch (historyStatus) {
+      case 'loading':
+        return 'processing'
+      case 'loaded':
+        return 'success'
+      default:
+        return 'default'
+    }
+  }
+
+  const getHistoryStatusText = () => {
+    switch (historyStatus) {
+      case 'loading':
+        return '历史加载中'
+      case 'loaded':
+        return `历史已加载(${historySentLines})`
+      case 'empty':
+        return '无历史日志'
+      default:
+        return '历史未加载'
+    }
+  }
+
   // 导出菜单项
   const exportMenuItems = [
     {
@@ -604,6 +674,16 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
                   }}
                 >
                   {getStatusText()}
+                </Tag>
+                <Tag
+                  color={getHistoryStatusColor()}
+                  style={{
+                    margin: 0,
+                    border: 'none',
+                    fontSize: 12
+                  }}
+                >
+                  {getHistoryStatusText()}
                 </Tag>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   运行ID: {runId.slice(0, 8)}...

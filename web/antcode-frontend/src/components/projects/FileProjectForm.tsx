@@ -2,6 +2,7 @@ import React, { useCallback, useState } from 'react'
 import {
   Form,
   Input,
+  Select,
   Upload,
   Button,
   Space,
@@ -22,6 +23,7 @@ import {
 } from '@ant-design/icons'
 import type { UploadFile, UploadProps } from 'antd'
 import type { ProjectCreateRequest } from '@/types'
+import GitCredentialSelect from './GitCredentialSelect'
 
 const { Title, Text } = Typography
 const { TextArea } = Input
@@ -54,6 +56,12 @@ interface FileProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>,
     file_hash: string
     file_path?: string
     entry_point?: string
+    source_type?: 's3' | 'git'
+    git_url?: string
+    git_branch?: string
+    git_commit?: string
+    git_subdir?: string
+    git_credential_id?: string
   }
 }
 
@@ -82,11 +90,29 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
   const [dependencies, setDependencies] = useState<string[]>(initialData.dependencies || [])
   const [newDependency, setNewDependency] = useState('')
   const entryPointValue = Form.useWatch('entry_point', form)
+  const sourceTypeValue = Form.useWatch('source_type', form)
+  const gitUrlValue = Form.useWatch('git_url', form)
+  const initialSourceType = initialData.source_type || initialData.file_info?.source_type || 's3'
 
   // 获取验证状态
   const getValidationStatus = useCallback(() => {
+    const sourceType = sourceTypeValue || initialSourceType || 's3'
+
+    if (sourceType === 'git') {
+      if (!gitUrlValue || (typeof gitUrlValue === 'string' && gitUrlValue.trim() === '')) {
+        return { isValid: false, tooltip: 'Git 来源必须填写 git_url' }
+      }
+      if (!entryPointValue || (typeof entryPointValue === 'string' && entryPointValue.trim() === '')) {
+        return { isValid: false, tooltip: 'Git 文件项目必须填写入口文件' }
+      }
+      return { isValid: true, tooltip: '' }
+    }
+
     if (!isEdit && fileList.length === 0) {
       return { isValid: false, tooltip: '请选择要上传的文件' }
+    }
+    if (isEdit && initialSourceType === 'git' && sourceType === 's3' && fileList.length === 0) {
+      return { isValid: false, tooltip: '切换到 S3 来源时必须重新上传文件' }
     }
     if (fileList.length > 0 && isCompressedFile(fileList[0]?.name)) {
       if (!entryPointValue || (typeof entryPointValue === 'string' && entryPointValue.trim() === '')) {
@@ -94,7 +120,7 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
       }
     }
     return { isValid: true, tooltip: '' }
-  }, [entryPointValue, fileList, isEdit])
+  }, [entryPointValue, fileList, gitUrlValue, initialSourceType, isEdit, sourceTypeValue])
 
   // 通知父组件验证状态变化
   React.useEffect(() => {
@@ -227,13 +253,26 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
 
   // 表单提交
   const handleFinish = (values: ProjectCreateRequest) => {
+    const sourceType = values.source_type || initialSourceType || 's3'
+
     // 创建模式下必须有文件
-    if (!isEdit && !fileList[0]) {
+    if (sourceType !== 'git' && !isEdit && !fileList[0]) {
       showNotification('error', '请上传项目文件')
       return
     }
 
-    if (fileList[0] && isCompressedFile(fileList[0].name)) {
+    if (sourceType === 'git') {
+      if (!values.git_url || values.git_url.trim() === '') {
+        showNotification('error', 'Git 来源必须填写 git_url')
+        return
+      }
+      if (!values.entry_point || values.entry_point.trim() === '') {
+        showNotification('error', 'Git 文件项目必须指定入口文件')
+        return
+      }
+    }
+
+    if (sourceType !== 'git' && fileList[0] && isCompressedFile(fileList[0].name)) {
       if (!values.entry_point || values.entry_point.trim() === '') {
         showNotification('error', '压缩包必须指定入口文件')
         return
@@ -335,8 +374,63 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
           </Form.Item>
         </Card>
 
+        {/* 来源配置 */}
+        <Card title="来源配置" size="small" style={{ marginBottom: 16 }}>
+          <Form.Item
+            name="source_type"
+            label="来源类型"
+            initialValue={initialSourceType}
+            rules={[{ required: true, message: '请选择来源类型' }]}
+          >
+            <Select
+              options={[
+                { label: 'S3 上传', value: 's3' },
+                { label: 'Git 仓库', value: 'git' },
+              ]}
+            />
+          </Form.Item>
+
+          {(sourceTypeValue || initialSourceType) === 'git' && (
+            <>
+              <Form.Item
+                name="git_url"
+                label="Git 仓库地址"
+                rules={[{ required: true, message: '请输入 Git 仓库地址' }]}
+              >
+                <Input placeholder="https://github.com/org/repo.git" />
+              </Form.Item>
+
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item name="git_branch" label="分支（可选）">
+                    <Input placeholder="main" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="git_commit" label="提交（可选）">
+                    <Input placeholder="commit sha" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item name="git_subdir" label="子目录（可选）">
+                    <Input placeholder="path/in/repo" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="git_credential_id" label="Git 凭证（可选）">
+                    <GitCredentialSelect />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </>
+          )}
+        </Card>
+
         {/* 文件上传 - 编辑模式下隐藏 */}
-        {!isEdit && (
+        {!isEdit && (sourceTypeValue || initialSourceType) !== 'git' && (
           <Card title="文件上传" size="small" style={{ marginBottom: 16 }}>
             <Form.Item
               label="项目文件"
@@ -415,31 +509,35 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
               style={{ marginBottom: 16 }}
             />
 
-            <Form.Item
-              label="替换文件"
-              help="可选：上传新文件来替换当前文件。支持 .py、.zip、.tar.gz、.tar 格式，最大 100MB"
-            >
-              <Upload.Dragger {...uploadProps} style={{ padding: '20px 0' }}>
-                <p className="ant-upload-drag-icon">
-                  <UploadOutlined style={{ fontSize: 48, color: '#1890ff' }} />
-                </p>
-                <p className="ant-upload-text">
-                  点击或拖拽文件到此区域替换当前文件
-                </p>
-                <p className="ant-upload-hint">
-                  可选操作：如不上传新文件，将保持当前文件不变
-                </p>
-              </Upload.Dragger>
-            </Form.Item>
+            {(sourceTypeValue || initialSourceType) !== 'git' && (
+              <>
+                <Form.Item
+                  label="替换文件"
+                  help="可选：上传新文件来替换当前文件。支持 .py、.zip、.tar.gz、.tar 格式，最大 100MB"
+                >
+                  <Upload.Dragger {...uploadProps} style={{ padding: '20px 0' }}>
+                    <p className="ant-upload-drag-icon">
+                      <UploadOutlined style={{ fontSize: 48, color: '#1890ff' }} />
+                    </p>
+                    <p className="ant-upload-text">
+                      点击或拖拽文件到此区域替换当前文件
+                    </p>
+                    <p className="ant-upload-hint">
+                      可选操作：如不上传新文件，将保持当前文件不变
+                    </p>
+                  </Upload.Dragger>
+                </Form.Item>
 
-            {fileList.length > 0 && (
-              <Alert
-                message="新文件已选择"
-                description={`将替换为: ${fileList[0].name}`}
-                type="success"
-                showIcon
-                style={{ marginTop: 8 }}
-              />
+                {fileList.length > 0 && (
+                  <Alert
+                    message="新文件已选择"
+                    description={`将替换为: ${fileList[0].name}`}
+                    type="success"
+                    showIcon
+                    style={{ marginTop: 8 }}
+                  />
+                )}
+              </>
             )}
           </Card>
         )}
@@ -450,7 +548,7 @@ const FileProjectForm: React.FC<FileProjectFormProps> = ({
             name="entry_point"
             label="入口文件"
             tooltip="指定项目的主入口文件，如 main.py"
-            extra="压缩包必须填写入口文件；单文件项目可留空自动使用文件名"
+            extra="压缩包与 Git 来源必须填写入口文件；单文件项目可留空自动使用文件名"
           >
             <Input placeholder="例如: main.py" />
           </Form.Item>
