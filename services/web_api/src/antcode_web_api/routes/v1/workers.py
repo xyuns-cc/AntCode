@@ -1238,24 +1238,24 @@ async def dispatch_task_to_worker(
         require_render=request.get("require_render", False),
     )
 
-    if not result.get("success"):
+    if not result.success:
         # 分发失败，更新执行记录状态
         task_run.status = "failed"
         task_run.dispatch_status = "failed"
-        task_run.error_message = result.get("error", "任务分发失败")
+        task_run.error_message = result.error or "任务分发失败"
         await task_run.save()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("error", "任务分发失败"),
+            detail=result.error or "任务分发失败",
         )
 
     # 更新分发状态
     task_run.dispatch_status = "dispatched"
-    task_run.worker_id = result.get("worker_id")
+    task_run.worker_id = result.worker_id
     await task_run.save()
 
-
-    return success(result, message="任务已分发到 Worker")
+    from dataclasses import asdict
+    return success(asdict(result), message="任务已分发到 Worker")
 
 
 @router.post(
@@ -1301,13 +1301,14 @@ async def dispatch_batch_to_worker(
         require_render=request.get("require_render", False),
     )
 
-    if not result.get("success"):
+    if not result.success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("error", "批量任务分发失败"),
+            detail=result.error or "批量任务分发失败",
         )
 
-    return success(result, message="批量任务已分发到 Worker")
+    from dataclasses import asdict
+    return success(asdict(result), message="批量任务已分发到 Worker")
 
 
 @router.get(
@@ -1779,9 +1780,9 @@ async def update_worker_resources(
     from antcode_core.domain.models import User
     from antcode_core.infrastructure.redis import get_redis_client
 
-    # 检查超级管理员权限（仅 admin 用户）
+    # 检查超级管理员权限
     user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin or user.username != "admin":
+    if not user or not user.is_super_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="需要超级管理员权限修改资源配置",

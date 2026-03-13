@@ -10,97 +10,13 @@ import { dashboardService, type DashboardStats, type SystemMetrics, type HourlyT
 import { workerService } from '@/services/workers'
 import type { WorkerAggregateStats, ClusterSpiderStats } from '@/types'
 import SpiderStatsTab from '@/components/workers/SpiderStatsTab'
+import StatCard from '@/components/common/StatCard'
 
 const MonitorTab = React.lazy(() => import('@/pages/Monitor'))
 const { Title, Text } = Typography
 
 // 自动刷新间隔（毫秒）
 const AUTO_REFRESH_INTERVAL = 30000
-
-// 统计卡片组件 - 与爬虫统计页面样式一致
-interface StatCardProps {
-  title: string
-  value: string | number
-  subValue?: string
-  icon: React.ReactNode
-  iconBg: string
-  iconColor: string
-  loading?: boolean
-}
-
-const StatCard: React.FC<StatCardProps> = memo(({ title, value, subValue, icon, iconColor, loading }) => {
-  const { token } = theme.useToken()
-  return (
-    <Skeleton loading={loading} active paragraph={{ rows: 1 }}>
-      <div
-        style={{
-          background: token.colorBgContainer,
-          border: `1px solid ${token.colorBorderSecondary}`,
-          borderRadius: 12,
-          padding: '14px 16px',
-          position: 'relative',
-          overflow: 'hidden',
-          height: 110,
-          transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-          cursor: 'pointer'
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = iconColor
-          e.currentTarget.style.boxShadow = `0 4px 12px ${iconColor}20`
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = token.colorBorderSecondary
-          e.currentTarget.style.boxShadow = 'none'
-        }}
-      >
-        {/* 右上角装饰大圆 */}
-        <div
-          style={{
-            position: 'absolute',
-            right: -20,
-            top: -20,
-            width: 80,
-            height: 80,
-            borderRadius: '50%',
-            background: `${iconColor}10`
-          }}
-        />
-        {/* 右上角方形圆角图标 */}
-        <div
-          style={{
-            position: 'absolute',
-            right: 12,
-            top: 12,
-            width: 36,
-            height: 36,
-            borderRadius: 10,
-            background: `${iconColor}20`,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 16,
-            color: iconColor,
-            zIndex: 1
-          }}
-        >
-          {icon}
-        </div>
-        {/* 内容区 */}
-        <div style={{ paddingRight: 50, position: 'relative', zIndex: 1 }}>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-            {title}
-          </Text>
-          <span style={{ color: token.colorText, fontSize: 24, fontWeight: 600, lineHeight: 1 }}>{value}</span>
-          {subValue && (
-            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
-              {subValue}
-            </Text>
-          )}
-        </div>
-      </div>
-    </Skeleton>
-  )
-})
 
 // 资源进度条组件
 interface ResourceBarProps {
@@ -279,7 +195,7 @@ const Dashboard: React.FC = memo(() => {
                       value={`${workerStats?.onlineWorkers ?? 0} / ${workerStats?.totalWorkers ?? 0}`}
                       subValue="当前在线Worker数"
                       icon={<CloudServerOutlined />}
-                      iconBg={`${token.colorPrimary}15`}
+
                       iconColor={token.colorPrimary}
                       loading={initialLoading}
                     />
@@ -290,7 +206,7 @@ const Dashboard: React.FC = memo(() => {
                       value={`${dashboardStats?.projects.active ?? 0} / ${dashboardStats?.projects.total ?? 0}`}
                       subValue="活跃/总项目数"
                       icon={<ProjectOutlined />}
-                      iconBg={`${token.purple}15`}
+
                       iconColor={token.purple}
                       loading={initialLoading}
                     />
@@ -301,7 +217,7 @@ const Dashboard: React.FC = memo(() => {
                       value={formatNumber(dashboardStats?.tasks.success ?? 0)}
                       subValue={`成功率 ${systemMetrics?.success_rate?.toFixed(1) ?? 0}%`}
                       icon={<CheckCircleOutlined />}
-                      iconBg={`${token.colorSuccess}15`}
+
                       iconColor={token.colorSuccess}
                       loading={initialLoading}
                     />
@@ -312,7 +228,7 @@ const Dashboard: React.FC = memo(() => {
                       value={dashboardStats?.tasks.failed ?? 0}
                       subValue="需要关注的失败任务"
                       icon={<ExclamationCircleOutlined />}
-                      iconBg={`${token.colorError}15`}
+
                       iconColor={token.colorError}
                       loading={initialLoading}
                     />

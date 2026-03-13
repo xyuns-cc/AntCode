@@ -52,8 +52,7 @@ class AuthService {
     const payload = response.data.data
     const user = {
       ...payload.user,
-      // 当前后端未单独下发 super_admin 字段，这里按用户名兜底
-      is_super_admin: payload.user.username === 'admin',
+      is_super_admin: payload.user.role === 'super_admin',
     }
 
     // 保存 token 和用户信息
@@ -133,7 +132,7 @@ class AuthService {
     const payload = response.data.data
     const user = {
       ...payload.user,
-      is_super_admin: payload.user.username === 'admin',
+      is_super_admin: payload.user.role === 'super_admin',
     }
 
     // 更新 token

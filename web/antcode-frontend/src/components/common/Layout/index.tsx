@@ -32,6 +32,8 @@ import styles from './Layout.module.css'
 const { Header, Sider, Content, Footer } = AntLayout
 const { Text } = Typography
 
+const WORKER_RELEVANT_PATHS = ['/dashboard', '/tasks', '/projects', '/workers']
+
 const Layout: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
@@ -51,7 +53,7 @@ const Layout: React.FC = () => {
     { key: '/user-management', label: '用户管理', icon: <TeamOutlined />, path: '/user-management', hidden: !user?.is_admin },
     { key: '/alert-config', label: '告警配置', icon: <BellOutlined />, path: '/alert-config', hidden: !user?.is_admin },
     { key: '/audit-log', label: '审计日志', icon: <FileTextOutlined />, path: '/audit-log', hidden: !user?.is_admin },
-    { key: '/system-config', label: '系统配置', icon: <SettingOutlined />, path: '/system-config', hidden: user?.username !== 'admin' },
+    { key: '/system-config', label: '系统配置', icon: <SettingOutlined />, path: '/system-config', hidden: user?.role !== 'super_admin' && !user?.is_super_admin },
   ]
 
   const filteredMenuItems = menuItems.filter((item) => !item.hidden)
@@ -68,6 +70,7 @@ const Layout: React.FC = () => {
   }, [filteredMenuItems, navigate])
 
   const selectedKeys = [location.pathname]
+  const showWorkerSelector = WORKER_RELEVANT_PATHS.some(p => location.pathname.startsWith(p))
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000)
@@ -119,7 +122,7 @@ const Layout: React.FC = () => {
           <Flex align="center" justify="space-between" style={{ height: '100%' }}>
             <Flex align="center" gap={16}>
               <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(!collapsed)} className={styles.trigger} />
-              <WorkerSelector className={styles.workerSelector} />
+              {showWorkerSelector && <WorkerSelector className={styles.workerSelector} />}
             </Flex>
             <Flex align="center" gap={12}>
               <ThemeToggle />
