@@ -31,6 +31,7 @@ from antcode_core.domain.schemas import (
 )
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.application.services.audit import audit_service
+from antcode_core.domain.models.user import UserRole
 from antcode_core.application.services.users.user_service import user_service
 from antcode_core.infrastructure.resilience.health import HealthStatus, health_checker
 
@@ -233,9 +234,10 @@ async def login(request: UserLoginRequest, http_request: Request):
 
     await user_service.clear_cache()
 
-    permissions = ["admin"] if user.is_admin else []
+    permissions = ["admin"] if user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN) else []
     access_token = jwt_auth.create_access_token(
-        user_id=user.id, username=user.username, is_admin=user.is_admin
+        user_id=user.id, username=user.username, is_admin=user.is_admin,
+        role=user.role.value,
     )
     refresh_token = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
 
@@ -245,6 +247,7 @@ async def login(request: UserLoginRequest, http_request: Request):
         email=user.email or "",
         is_active=user.is_active,
         is_admin=user.is_admin,
+        role=user.role.value,
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,
@@ -291,9 +294,10 @@ async def refresh_token(request: RefreshTokenRequest):
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户不可用")
 
-    permissions = ["admin"] if user.is_admin else []
+    permissions = ["admin"] if user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN) else []
     access_token = jwt_auth.create_access_token(
-        user_id=user.id, username=user.username, is_admin=user.is_admin
+        user_id=user.id, username=user.username, is_admin=user.is_admin,
+        role=user.role.value,
     )
     refresh_token_value = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
 
@@ -303,6 +307,7 @@ async def refresh_token(request: RefreshTokenRequest):
         email=user.email or "",
         is_active=user.is_active,
         is_admin=user.is_admin,
+        role=user.role.value,
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,
@@ -357,5 +362,5 @@ async def get_permissions(current_user: TokenData = Depends(get_current_user)):
     user = await user_service.get_user_by_id(current_user.user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-    permissions = ["admin"] if user.is_admin else ["user"]
+    permissions = ["admin"] if user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN) else ["user"]
     return success({"permissions": permissions}, message=Messages.QUERY_SUCCESS)

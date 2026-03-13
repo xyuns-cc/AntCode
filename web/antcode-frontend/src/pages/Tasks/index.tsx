@@ -1,4 +1,4 @@
-import React, { useState, memo } from 'react'
+import React, { useState, memo, useMemo, useCallback } from 'react'
 import {
   Card,
   Button,
@@ -24,11 +24,12 @@ import {
   CloudServerOutlined,
   DesktopOutlined
 } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useWorkerStore } from '@/stores/workerStore'
 import type { Task, TaskStatus, ScheduleType } from '@/types'
 import { formatDateTime } from '@/utils/format'
 import useAuth from '@/hooks/useAuth'
+import { debounce } from '@/utils/helpers'
 import { useProjectsQuery, useTasksQuery, useTaskMutations } from '@/hooks/api/useTasks'
 
 const { Search } = Input
@@ -39,13 +40,31 @@ const Tasks: React.FC = memo(() => {
   const { isAuthenticated, loading: authLoading } = useAuth()
   const { currentWorker } = useWorkerStore()
 
-  const [searchQuery, setSearchQuery] = useState('')
-  const [projectFilter, setProjectFilter] = useState<string | undefined>(undefined)
-  const [statusFilter, setStatusFilter] = useState<TaskStatus | undefined>(undefined)
-  const [scheduleTypeFilter, setScheduleTypeFilter] = useState<ScheduleType | undefined>(undefined)
-  const [currentPage, setCurrentPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  // URL state sync for filters
+  const [searchParams, setSearchParams] = useSearchParams()
+  const searchQuery = searchParams.get('q') || ''
+  const projectFilter = searchParams.get('project') || undefined
+  const statusFilter = (searchParams.get('status') as TaskStatus) || undefined
+  const scheduleTypeFilter = (searchParams.get('schedule') as ScheduleType) || undefined
+  const currentPage = Number(searchParams.get('page')) || 1
+  const pageSize = Number(searchParams.get('size')) || 10
+
+  const [searchInputValue, setSearchInputValue] = useState(searchQuery)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+
+  const updateParams = useCallback((updates: Record<string, string | undefined>) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === undefined || value === '') {
+          next.delete(key)
+        } else {
+          next.set(key, value)
+        }
+      }
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
 
   const tasksQuery = useTasksQuery({
     page: currentPage,
@@ -72,37 +91,42 @@ const Tasks: React.FC = memo(() => {
 
   // 处理筛选变化时重置到第一页
   const handleSearchChange = (value: string) => {
-    setSearchQuery(value)
-    setCurrentPage(1)
+    updateParams({ q: value || undefined, page: undefined })
   }
 
-  // 实时搜索（输入时立即筛选）
+  // Debounced search - updates URL after 400ms of inactivity
+  const debouncedSearch = useMemo(
+    () => debounce((value: string) => {
+      updateParams({ q: value || undefined, page: undefined })
+    }, 400),
+    [updateParams]
+  )
+
+  // 实时搜索（输入时防抖筛选）
   const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSearchQuery(e.target.value)
-    setCurrentPage(1)
+    const value = e.target.value
+    setSearchInputValue(value)
+    debouncedSearch(value)
   }
 
   const handleProjectFilterChange = (value: string | undefined) => {
-    setProjectFilter(value)
-    setCurrentPage(1)
+    updateParams({ project: value, page: undefined })
   }
 
   const handleStatusFilterChange = (value: TaskStatus | undefined) => {
-    setStatusFilter(value)
-    setCurrentPage(1)
+    updateParams({ status: value, page: undefined })
   }
 
   const handleScheduleTypeFilterChange = (value: ScheduleType | undefined) => {
-    setScheduleTypeFilter(value)
-    setCurrentPage(1)
+    updateParams({ schedule: value, page: undefined })
   }
 
   // 处理分页变化
   const handlePaginationChange = (page: number, size: number) => {
-    setCurrentPage(page)
     if (size !== pageSize) {
-      setPageSize(size)
-      setCurrentPage(1)
+      updateParams({ page: undefined, size: String(size) })
+    } else {
+      updateParams({ page: page > 1 ? String(page) : undefined })
     }
   }
 
@@ -341,7 +365,7 @@ const Tasks: React.FC = memo(() => {
               placeholder="搜索任务"
               allowClear
               style={{ width: 200 }}
-              value={searchQuery}
+              value={searchInputValue}
               onChange={handleSearchInput}
               onSearch={handleSearchChange}
             />

@@ -2,6 +2,8 @@ import type React from 'react'
 import { useEffect } from 'react'
 import { useAuth } from '@/hooks/useAuth'
 import { AuthHandler } from '@/utils/authHandler'
+import { TokenManager } from '@/services/api'
+import { STORAGE_KEYS } from '@/utils/constants'
 import Logger from '@/utils/logger'
 
 interface AuthGuardProps {
@@ -18,7 +20,7 @@ const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
   useEffect(() => {
     // 监听存储变化，检测其他标签页的登出操作
     const handleStorageChange = (event: StorageEvent) => {
-      if (event.key === 'access_token' && !event.newValue && event.oldValue) {
+      if (event.key === STORAGE_KEYS.ACCESS_TOKEN && !event.newValue && event.oldValue) {
         // Token被清除，可能是其他标签页登出了
         Logger.info('检测到其他标签页登出，同步登出状态')
         AuthHandler.handleAuthFailure(false) // 不显示消息，避免重复提示
@@ -29,7 +31,7 @@ const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && isAuthenticated) {
         // 页面重新可见时，检查token是否仍然有效
-        const token = localStorage.getItem('access_token')
+        const token = TokenManager.getAccessToken()
         if (!token) {
           Logger.info('页面重新可见时发现token已失效')
           AuthHandler.handleAuthFailure()
@@ -41,7 +43,6 @@ const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
     const handleOnline = () => {
       if (isAuthenticated) {
         Logger.info('网络重新连接，检查认证状态')
-        // 可以在这里添加重新验证token的逻辑
       }
     }
 
@@ -58,29 +59,20 @@ const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
     }
   }, [isAuthenticated])
 
-  // 定期检查token有效性（可选）
+  // 定期检查token有效性
   useEffect(() => {
     if (!isAuthenticated) return
 
     const checkTokenValidity = () => {
-      const token = localStorage.getItem('access_token')
+      const token = TokenManager.getAccessToken()
       if (!token) {
         Logger.warn('定期检查发现token已失效')
         AuthHandler.handleAuthFailure()
         return
       }
 
-      try {
-        // 检查token是否过期
-        const payload = JSON.parse(atob(token.split('.')[1]))
-        const now = Date.now() / 1000
-        
-        if (payload.exp && payload.exp < now) {
-          Logger.warn('定期检查发现token已过期')
-          AuthHandler.handleAuthFailure()
-        }
-      } catch (error) {
-        Logger.error('解析token失败:', error)
+      if (TokenManager.isTokenExpired(token)) {
+        Logger.warn('定期检查发现token已过期')
         AuthHandler.handleAuthFailure()
       }
     }

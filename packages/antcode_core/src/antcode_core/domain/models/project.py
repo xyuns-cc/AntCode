@@ -247,6 +247,32 @@ class ProjectRule(BaseModel):
             ("public_id",),
         ]
 
+    def to_dispatch_dict(self) -> dict:
+        """序列化为分发字典，供 dispatcher 使用"""
+        data = {
+            "target_url": self.target_url,
+            "callback_type": self.callback_type.value if hasattr(self.callback_type, "value") else self.callback_type,
+            "request_method": self.request_method.value if hasattr(self.request_method, "value") else self.request_method,
+            "engine": self.engine.value if hasattr(self.engine, "value") else self.engine,
+            "headers": self.headers or {},
+            "cookies": self.cookies or {},
+            "priority": self.priority or 0,
+            "dont_filter": self.dont_filter,
+        }
+        if hasattr(self, "request_body") and self.request_body:
+            data["request_body"] = self.request_body
+        if self.proxy_config:
+            data["proxy_config"] = self.proxy_config
+        if self.extraction_rules:
+            data["extraction_rules"] = self.extraction_rules
+        if self.pagination_config:
+            data["pagination_config"] = self.pagination_config
+        if hasattr(self, "wait_time") and self.wait_time:
+            data["wait_time"] = self.wait_time
+        if hasattr(self, "javascript_code") and self.javascript_code:
+            data["javascript_code"] = self.javascript_code
+        return data
+
 
 class ProjectCode(BaseModel):
     """代码项目详情"""

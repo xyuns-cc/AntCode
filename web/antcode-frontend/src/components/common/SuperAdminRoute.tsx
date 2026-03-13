@@ -11,11 +11,11 @@ interface SuperAdminRouteProps {
 
 /**
  * 超级管理员路由保护组件
- * 只允许 username 为 'admin' 的超级管理员访问
+ * 只允许 role 为 'super_admin' 的超级管理员访问
  */
-const SuperAdminRoute: React.FC<SuperAdminRouteProps> = ({ 
-  children, 
-  fallback 
+const SuperAdminRoute: React.FC<SuperAdminRouteProps> = ({
+  children,
+  fallback
 }) => {
   const { token } = theme.useToken()
   const { user, isAuthenticated } = useAuth()
@@ -25,8 +25,8 @@ const SuperAdminRoute: React.FC<SuperAdminRouteProps> = ({
     return <Navigate to="/login" replace />
   }
 
-  // 只有 username 为 'admin' 的超级管理员才能访问
-  if (!user?.is_admin || user?.username !== 'admin') {
+  // 基于 role 字段判断超级管理员，兼容旧的 is_super_admin 字段
+  if (user?.role !== 'super_admin' && !user?.is_super_admin) {
     if (fallback) {
       return <>{fallback}</>
     }

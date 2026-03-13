@@ -4,7 +4,7 @@
  */
 
 import Logger from '@/utils/logger'
-import { WS_BASE_URL } from '@/utils/constants'
+import { WS_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
 
 // 连接状态
 export const ConnectionState = {
@@ -276,7 +276,7 @@ export class WebSocketManager {
   
   private sendPing(): void {
     const sent = this.send({
-      type: 'pong',  // 响应服务器的 ping
+      type: 'ping',  // 发送心跳 ping，等待服务器返回 pong
       timestamp: new Date().toISOString()
     })
     
@@ -354,7 +354,7 @@ export function createLogWebSocket(
     onError?: (error: Event | string) => void
   }
 ): WebSocketManager | null {
-  const token = localStorage.getItem('access_token')
+  const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
   if (!token) {
     Logger.error('未找到访问令牌')
     callbacks.onError?.('未找到访问令牌')

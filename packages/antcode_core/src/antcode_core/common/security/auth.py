@@ -78,7 +78,12 @@ class TokenData(BaseModel):
     user_id: int
     username: str
     is_admin: bool = False
+    role: str = "user"
     exp: datetime
+
+    @property
+    def is_super_admin(self) -> bool:
+        return self.role == "super_admin"
 
 
 class JWTAuth:
@@ -117,9 +122,10 @@ class JWTAuth:
         username: str,
         expires_delta: timedelta | None = None,
         is_admin: bool = False,
+        role: str = "user",
     ) -> str:
         """创建访问令牌"""
-        extra = {"is_admin": is_admin}
+        extra = {"is_admin": is_admin, "role": role}
         return self._create_token(
             user_id=user_id,
             username=username,
@@ -172,6 +178,7 @@ class JWTAuth:
                 user_id=user_id,
                 username=username,
                 is_admin=payload.get("is_admin", False),
+                role=payload.get("role", "admin" if payload.get("is_admin") else "user"),
                 exp=datetime.fromtimestamp(payload["exp"]),
             )
         except jwt.ExpiredSignatureError:
@@ -224,15 +231,15 @@ async def get_current_admin_user(
 async def get_current_super_admin(
     current_user: TokenData = Depends(get_current_user),
 ) -> TokenData:
-    """获取超级管理员（仅 admin 用户）"""
-    if not current_user.is_admin or current_user.username != "admin":
+    """获取超级管理员"""
+    if not current_user.is_super_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要超级管理员权限")
     return current_user
 
 
 async def verify_super_admin(user: TokenData) -> bool:
     """验证是否为超级管理员"""
-    return bool(user.is_admin and user.username == "admin")
+    return user.is_super_admin
 
 
 def get_optional_current_user(credentials=Depends(security)) -> TokenData | None:

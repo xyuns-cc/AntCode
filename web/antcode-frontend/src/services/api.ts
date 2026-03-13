@@ -19,8 +19,77 @@ const apiClient: AxiosInstance = axios.create({
   }
 })
 
-apiClient.interceptors.request.use((config) => {
+// Independent axios instance for token refresh to avoid interceptor recursion
+const refreshClient: AxiosInstance = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 15000,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+})
+
+// Token refresh state
+let isRefreshing = false
+let refreshPromise: Promise<string | null> | null = null
+
+const TOKEN_REFRESH_THRESHOLD_MS = 10 * 60 * 1000 // 10 minutes
+
+async function ensureFreshToken(): Promise<string | null> {
   const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+  if (!token) return null
+
+  // Check if token expires within threshold
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    const expiresAt = (payload.exp || 0) * 1000
+    const remaining = expiresAt - Date.now()
+
+    if (remaining > TOKEN_REFRESH_THRESHOLD_MS) {
+      return token // Still fresh enough
+    }
+
+    // Token is about to expire, refresh it
+    const refreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+    if (!refreshToken) return token // No refresh token, use current
+
+    if (isRefreshing && refreshPromise) {
+      return refreshPromise // Wait for ongoing refresh
+    }
+
+    isRefreshing = true
+    refreshPromise = (async () => {
+      try {
+        const response = await refreshClient.post('/api/v1/auth/refresh', {
+          refresh_token: refreshToken,
+        })
+        const data = response.data?.data
+        if (data?.access_token) {
+          localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, data.access_token)
+          if (data.refresh_token) {
+            localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, data.refresh_token)
+          }
+          if (data.user) {
+            localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(data.user))
+          }
+          return data.access_token
+        }
+        return token
+      } catch {
+        return token // Refresh failed, use existing token
+      } finally {
+        isRefreshing = false
+        refreshPromise = null
+      }
+    })()
+
+    return refreshPromise
+  } catch {
+    return token
+  }
+}
+
+apiClient.interceptors.request.use(async (config) => {
+  const token = await ensureFreshToken()
   if (token && config.headers) {
     config.headers.Authorization = `Bearer ${token}`
   }

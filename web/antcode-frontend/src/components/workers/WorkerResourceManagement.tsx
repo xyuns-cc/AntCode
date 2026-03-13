@@ -79,7 +79,7 @@ const WorkerResourceManagement: React.FC<WorkerResourceManagementProps> = ({ wor
   const [resourceData, setResourceData] = useState<ResourceData | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const isSuperAdmin = user?.username === 'admin'
+  const isSuperAdmin = user?.role === 'super_admin' || user?.is_super_admin
   const isAdmin = user?.is_admin
 
   const loadResources = useCallback(async () => {
