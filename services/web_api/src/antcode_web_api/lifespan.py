@@ -316,14 +316,22 @@ async def _create_default_admin() -> None:
         admin_user = await user_service.get_user_by_username(settings.DEFAULT_ADMIN_USERNAME)
 
         if not admin_user:
+            if not settings.DEFAULT_ADMIN_PASSWORD:
+                logger.warning(
+                    "未配置 DEFAULT_ADMIN_PASSWORD，跳过默认管理员创建。"
+                    "请在 .env 中设置 DEFAULT_ADMIN_USERNAME 和 DEFAULT_ADMIN_PASSWORD"
+                )
+                return
+
             admin_request = UserCreateRequest(
                 username=settings.DEFAULT_ADMIN_USERNAME,
                 password=settings.DEFAULT_ADMIN_PASSWORD,
                 email="admin@example.com",
                 is_admin=True,
+                role="super_admin",
             )
             await user_service.create_user(admin_request)
-            logger.info("默认管理员已创建，请使用配置的默认账号密码登录")
+            logger.info(f"默认管理员 [{settings.DEFAULT_ADMIN_USERNAME}] 已创建")
             logger.warning("请尽快修改默认管理员密码")
     except Exception as e:
         logger.error(f"创建默认管理员失败: {e}")

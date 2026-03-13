@@ -134,6 +134,12 @@ class UserService:
                 is_active=request.is_active,
                 is_admin=request.is_admin,
             )
+            if hasattr(request, 'role') and request.role:
+                from antcode_core.domain.models.user import UserRole
+                try:
+                    user.role = UserRole(request.role)
+                except ValueError:
+                    pass
 
             user.set_password(request.password)
             await user.save()
@@ -249,6 +255,7 @@ class UserService:
                     email=u.email,
                     is_active=u.is_active,
                     is_admin=u.is_admin,
+                    role=u.role.value if hasattr(u.role, 'value') else str(u.role),
                     created_at=created_at,
                     updated_at=updated_at,
                     last_login_at=u.last_login_at,

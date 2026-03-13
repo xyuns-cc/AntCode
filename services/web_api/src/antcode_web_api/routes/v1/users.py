@@ -46,6 +46,7 @@ def _build_user_response(user) -> UserResponse:
         email=user.email,
         is_active=user.is_active,
         is_admin=user.is_admin,
+        role=user.role.value if hasattr(user.role, 'value') else str(user.role),
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,

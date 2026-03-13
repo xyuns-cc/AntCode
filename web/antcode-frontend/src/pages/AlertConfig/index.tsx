@@ -104,7 +104,7 @@ const AlertConfig: React.FC = memo(() => {
   const [testLoading, setTestLoading] = useState<string | null>(null)
 
   // 检查权限
-  const isSuperAdmin = user?.username === 'admin'
+  const isSuperAdmin = user?.role === 'super_admin' || user?.is_super_admin
 
   // 加载配置
   const loadConfig = useCallback(async () => {

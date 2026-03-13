@@ -6,12 +6,45 @@
 
 import asyncio
 import contextlib
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from loguru import logger
 
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
+
+
+@dataclass
+class DispatchResult:
+    """单任务分发结果"""
+
+    success: bool
+    worker_id: str | None = None
+    worker_name: str | None = None
+    run_id: str | None = None
+    task_id: str | None = None
+    message: str = ""
+    error: str | None = None
+    transfer_skipped: bool = False
+    accepted_count: int = 0
+
+
+@dataclass
+class BatchDispatchResult:
+    """批量任务分发结果"""
+
+    success: bool
+    worker_id: str | None = None
+    worker_name: str | None = None
+    batch_id: str | None = None
+    accepted_count: int = 0
+    rejected_count: int = 0
+    accepted_tasks: list[dict] = field(default_factory=list)
+    rejected_tasks: list[dict] = field(default_factory=list)
+    message: str = ""
+    error: str | None = None
+    sync_results: dict | None = None
 
 
 class WorkerLoadBalancer:
@@ -615,30 +648,30 @@ class WorkerTaskDispatcher:
         )
 
         # 转换批量结果为单任务结果格式
-        if result.get("success"):
-            return {
-                "success": True,
-                "worker_id": result.get("worker_id"),
-                "worker_name": result.get("worker_name"),
-                "run_id": run_id,
-                "task_id": run_id,
-                "message": "任务已分发到优先级队列",
-                "transfer_skipped": result.get("transfer_skipped", False),
-                "accepted_count": result.get("accepted_count", 0),
-            }
+        if result.success:
+            return DispatchResult(
+                success=True,
+                worker_id=result.worker_id,
+                worker_name=result.worker_name,
+                run_id=run_id,
+                task_id=run_id,
+                message="任务已分发到优先级队列",
+                transfer_skipped=bool(result.sync_results and result.sync_results.get("transfer_skipped")),
+                accepted_count=result.accepted_count,
+            )
         else:
-            rejected = result.get("rejected_tasks", [])
-            error_msg = result.get("error")
+            rejected = result.rejected_tasks
+            error_msg = result.error
             if not error_msg and rejected:
                 error_msg = rejected[0].get("reason", "任务被拒绝")
             if not error_msg:
                 error_msg = "任务分发失败，未知原因"
-            return {
-                "success": False,
-                "error": error_msg,
-                "worker_id": result.get("worker_id"),
-                "worker_name": result.get("worker_name"),
-            }
+            return DispatchResult(
+                success=False,
+                error=error_msg,
+                worker_id=result.worker_id,
+                worker_name=result.worker_name,
+            )
 
     async def dispatch_batch(
         self,
@@ -658,7 +691,7 @@ class WorkerTaskDispatcher:
         import uuid
 
         if not tasks:
-            return {"success": False, "error": "任务列表为空"}
+            return BatchDispatchResult(success=False, error="任务列表为空")
 
         # 检查任务是否需要渲染能力
         if not require_render:
@@ -670,13 +703,13 @@ class WorkerTaskDispatcher:
         # 选择目标 Worker
         worker = await self._select_worker(worker_id, region, tags, require_render=require_render)
         if not worker:
-            return {"success": False, "error": "无可用 Worker"}
+            return BatchDispatchResult(success=False, error="无可用 Worker")
 
         try:
             # 确保节点在线
             connected = await self._ensure_worker_connected(worker)
             if not connected:
-                return {"success": False, "error": f"Worker 未在线: {worker.name}"}
+                return BatchDispatchResult(success=False, error=f"Worker 未在线: {worker.name}")
 
             # 同步所有涉及的项目，并获取项目下载信息
             project_ids = list({t.get("project_id") for t in tasks if t.get("project_id")})
@@ -688,7 +721,7 @@ class WorkerTaskDispatcher:
             if sync_results.get("failed"):
                 failed_items = sync_results.get("failed", [])
                 reason = failed_items[0].get("reason") if failed_items else "项目同步失败"
-                return {"success": False, "error": reason, "sync_results": sync_results}
+                return BatchDispatchResult(success=False, error=reason, sync_results=sync_results)
 
             # 为每个任务添加项目下载信息（用于 Worker 端重新同步）
             enriched_tasks = []
@@ -710,28 +743,28 @@ class WorkerTaskDispatcher:
                 batch_id=batch_id or str(uuid.uuid4()),
             )
 
-            return {
-                "success": result.get("success", False),
-                "worker_id": worker.public_id,
-                "worker_name": worker.name,
-                "batch_id": result.get("batch_id"),
-                "accepted_count": result.get("accepted_count", 0),
-                "rejected_count": result.get("rejected_count", 0),
-                "accepted_tasks": result.get("accepted_tasks", []),
-                "rejected_tasks": result.get("rejected_tasks", []),
-                "message": result.get("message", "批量任务已分发"),
-                "error": result.get("error"),
-                "sync_results": sync_results,
-            }
+            return BatchDispatchResult(
+                success=result.get("success", False),
+                worker_id=worker.public_id,
+                worker_name=worker.name,
+                batch_id=result.get("batch_id"),
+                accepted_count=result.get("accepted_count", 0),
+                rejected_count=result.get("rejected_count", 0),
+                accepted_tasks=result.get("accepted_tasks", []),
+                rejected_tasks=result.get("rejected_tasks", []),
+                message=result.get("message", "批量任务已分发"),
+                error=result.get("error"),
+                sync_results=sync_results,
+            )
 
         except Exception as e:
             logger.error(f"批量任务分发失败 [{worker.name}] {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "worker_id": worker.public_id,
-                "worker_name": worker.name,
-            }
+            return BatchDispatchResult(
+                success=False,
+                error=str(e),
+                worker_id=worker.public_id,
+                worker_name=worker.name,
+            )
 
     async def _ensure_worker_connected(self, worker):
         """确保节点在线（依赖心跳状态）"""

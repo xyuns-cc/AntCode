@@ -1052,18 +1052,18 @@ class SchedulerService:
                 project_type=project_type_str,
             )
 
-            if result.get("success"):
+            if result.success:
                 await self._log_execution(
                     execution,
                     "INFO",
-                    f"任务已分发到 Worker {target_worker.name}, 远程任务ID: {result.get('task_id')}",
+                    f"任务已分发到 Worker {target_worker.name}, 远程任务ID: {result.task_id}",
                 )
 
                 execution.result_data = {
                     "distributed": True,
                     "worker_id": target_worker.public_id,
                     "worker_name": target_worker.name,
-                    "remote_task_id": result.get("task_id"),
+                    "remote_task_id": result.task_id,
                 }
                 await execution.save(update_fields=["result_data"])
 
@@ -1074,12 +1074,12 @@ class SchedulerService:
                     "message": f"任务已分发到 Worker {target_worker.name}",
                     "worker_id": target_worker.public_id,
                     "worker_name": target_worker.name,
-                    "remote_task_id": result.get("task_id"),
+                    "remote_task_id": result.task_id,
                 }
             else:
                 return {
                     "success": False,
-                    "error": result.get("error") or "任务分发失败",
+                    "error": result.error or "任务分发失败",
                 }
 
         except Exception as e:

@@ -156,8 +156,8 @@ class Settings(BaseSettings):
         return bool(self.REDIS_URL and self.REDIS_URL.strip())
 
     # === 默认管理员 ===
-    DEFAULT_ADMIN_USERNAME: str = "admin"
-    DEFAULT_ADMIN_PASSWORD: str = "Admin123!"
+    DEFAULT_ADMIN_USERNAME: str = Field(default="admin")
+    DEFAULT_ADMIN_PASSWORD: str = Field(default="")
 
     # === 抽象后端配置 ===
     CRAWL_BACKEND: str = Field(default="memory")

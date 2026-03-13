@@ -5,9 +5,19 @@
 """
 
 import bcrypt
+from enum import Enum
+
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
+
+
+class UserRole(str, Enum):
+    """用户角色"""
+
+    USER = "user"
+    ADMIN = "admin"
+    SUPER_ADMIN = "super_admin"
 
 
 class BcryptPasswordContext:
@@ -41,6 +51,7 @@ class User(BaseModel):
     email = fields.CharField(max_length=100, null=True)
     is_active = fields.BooleanField(default=True)
     is_admin = fields.BooleanField(default=False)
+    role = fields.CharEnumField(UserRole, default=UserRole.USER, max_length=20)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     last_login_at = fields.DatetimeField(null=True)
@@ -65,11 +76,17 @@ class User(BaseModel):
         """验证密码"""
         return pwd_context.verify(password, self.password_hash)
 
+    @property
+    def is_super_admin(self) -> bool:
+        """是否为超级管理员"""
+        return self.role == UserRole.SUPER_ADMIN
+
     def __str__(self):
         return self.username
 
 
 __all__ = [
     "User",
+    "UserRole",
     "pwd_context",
 ]

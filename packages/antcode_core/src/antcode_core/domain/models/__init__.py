@@ -92,7 +92,7 @@ from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
 
 # 用户模型
-from antcode_core.domain.models.user import User, pwd_context
+from antcode_core.domain.models.user import User, UserRole, pwd_context
 
 # Worker 节点模型
 from antcode_core.domain.models.worker import (
@@ -139,6 +139,7 @@ __all__ = [
     "Priority",
     # 用户模型
     "User",
+    "UserRole",
     "pwd_context",
     # 项目模型
     "Project",

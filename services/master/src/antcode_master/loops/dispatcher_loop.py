@@ -41,23 +41,23 @@ class SpiderTaskDispatcher:
             worker_id=worker_id,
         )
 
-        if result.get("success"):
-            logger.info(f"任务已分发到 Worker [{result.get('worker_name')}]: {result.get('task_id')}")
+        if result.success:
+            logger.info(f"任务已分发到 Worker [{result.worker_name}]: {result.task_id}")
             return {
                 "success": True,
-                "task_id": result.get("task_id"),
-                "worker_id": result.get("worker_id"),
-                "worker_name": result.get("worker_name"),
+                "task_id": result.task_id,
+                "worker_id": result.worker_id,
+                "worker_name": result.worker_name,
                 "queue": "worker",
-                "message": result.get("message", "任务已分发"),
+                "message": result.message or "任务已分发",
             }
         else:
-            logger.error(f"任务分发失败: {result.get('error')}")
+            logger.error(f"任务分发失败: {result.error}")
             return {
                 "success": False,
-                "error": result.get("error", "分发失败"),
-                "worker_id": result.get("worker_id"),
-                "worker_name": result.get("worker_name"),
+                "error": result.error or "分发失败",
+                "worker_id": result.worker_id,
+                "worker_name": result.worker_name,
             }
 
     async def submit_batch_tasks(
@@ -92,6 +92,10 @@ class SpiderTaskDispatcher:
 
     def _serialize_rule_detail(self, rule_detail):
         """序列化规则详情"""
+        if hasattr(rule_detail, "to_dispatch_dict"):
+            return rule_detail.to_dispatch_dict()
+
+        # Fallback for plain dicts or objects without to_dispatch_dict
         data = {
             "target_url": rule_detail.target_url,
             "callback_type": rule_detail.callback_type.value

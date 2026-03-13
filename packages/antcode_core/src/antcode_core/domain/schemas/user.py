@@ -31,6 +31,7 @@ class UserCreateRequest(BaseModel):
     email: str | None = Field(None, max_length=100)
     is_active: bool = Field(default=True)
     is_admin: bool = Field(default=False)
+    role: str | None = Field(None, max_length=20)
 
 
 class UserUpdateRequest(BaseModel):
@@ -67,6 +68,7 @@ class UserResponse(BaseModel):
     email: str = ""
     is_active: bool
     is_admin: bool
+    role: str = "user"
     created_at: datetime
     updated_at: datetime
     last_login_at: datetime | None = None
