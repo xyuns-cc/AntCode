@@ -18,6 +18,7 @@ from antcode_core.domain.models.enums import (
 )
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.observability.tracing import new_trace, set_current_trace
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -707,6 +708,17 @@ class SchedulerService:
         distributed_pending = False
         local_execution = False
         result_success = None
+
+        # P5.4: 在调度入口种入新的 W3C trace 上下文。后续 dispatch_task
+        # 触发的 redis stream 写入、本协程内所有 logger 调用都会自动带
+        # 上同一个 trace_id,Worker 端收到 TaskDispatch.trace 后会复用
+        # 同一个 trace_id 形成端到端链路。
+        trace_ids = new_trace()
+        set_current_trace(trace_ids.traceparent)
+        logger.debug(
+            f"调度入口绑定 trace: task_id={task_id} run_id={run_id} "
+            f"traceparent={trace_ids.traceparent}"
+        )
 
         # 更新统计信息
         self.task_execution_stats["total_executed"] += 1

@@ -12,6 +12,11 @@ import json
 from datetime import datetime
 from typing import Any
 
+from antcode_core.observability.tracing import (
+    child_span,
+    new_trace,
+    set_current_trace,
+)
 from loguru import logger
 
 from antcode_worker.domain.enums import ExitReason, RunStatus
@@ -480,6 +485,22 @@ class Engine:
                     continue
 
                 run_id, (context, task_msg) = item
+
+                # P5.4: 把 TaskDispatch 携带的 traceparent 绑定到当前
+                # asyncio.Task 的 ContextVar。一旦绑定,后续 logger 调用
+                # 和 transport.report_result / send_log_batch 等出站点都
+                # 会自动透传同一个 trace,实现 Master ↔ Worker 端到端链路。
+                #
+                # transport 层在 poll_task 后会把 dispatch.trace.traceparent
+                # 用 setattr 挂到 task_msg 上(TaskMessage dataclass 没有
+                # traceparent 字段,但 Python 允许动态属性)。拿不到时新
+                # 起一个 trace,保证当前任务内 logger 仍有 trace_id 可贴。
+                inbound_traceparent = getattr(task_msg, "traceparent", "") or ""
+                if inbound_traceparent:
+                    # 从父 traceparent 派生子 span: 同一 trace_id,新 span_id
+                    set_current_trace(child_span(inbound_traceparent).traceparent)
+                else:
+                    set_current_trace(new_trace().traceparent)
 
                 # 执行任务
                 result = await self._execute_task(context, task_msg)
