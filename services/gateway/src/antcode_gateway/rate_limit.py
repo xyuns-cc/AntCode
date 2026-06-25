@@ -76,10 +76,7 @@ class TokenBucketLimiter:
             elapsed = now - last
 
             # 补充令牌
-            current_tokens = min(
-                self.capacity,
-                self._tokens[key] + elapsed * self.rate
-            )
+            current_tokens = min(self.capacity, self._tokens[key] + elapsed * self.rate)
             self._last_update[key] = now
 
             if self.rate <= 0:
@@ -132,10 +129,7 @@ class TokenBucketLimiter:
         cleaned = 0
 
         with self._lock:
-            keys_to_remove = [
-                key for key, last_update in self._last_update.items()
-                if now - last_update > max_age
-            ]
+            keys_to_remove = [key for key, last_update in self._last_update.items() if now - last_update > max_age]
 
             for key in keys_to_remove:
                 del self._tokens[key]
@@ -208,10 +202,12 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
     WORKER_ID_HEADER = "x-worker-id"
 
     # 不需要限流的方法
-    SKIP_RATE_LIMIT_METHODS = frozenset([
-        "/grpc.health.v1.Health/Check",
-        "/grpc.health.v1.Health/Watch",
-    ])
+    SKIP_RATE_LIMIT_METHODS = frozenset(
+        [
+            "/grpc.health.v1.Health/Check",
+            "/grpc.health.v1.Health/Watch",
+        ]
+    )
 
     def __init__(
         self,
@@ -251,10 +247,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
         result = self.limiter.allow(key)
 
         if not result.allowed:
-            logger.warning(
-                f"请求被限流: key={key}, method={method}, "
-                f"retry_after={result.retry_after:.2f}s"
-            )
+            logger.warning(f"请求被限流: key={key}, method={method}, retry_after={result.retry_after:.2f}s")
             return self._create_rate_limited_handler(result)
 
         # 继续处理
@@ -268,11 +261,13 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
         async def rate_limited_handler(request, context):
             # 设置重试时间
-            context.set_trailing_metadata([
-                ("retry-after", str(int(result.retry_after) + 1)),
-                ("x-ratelimit-remaining", "0"),
-                ("x-ratelimit-reset", str(int(result.reset_at))),
-            ])
+            context.set_trailing_metadata(
+                [
+                    ("retry-after", str(int(result.retry_after) + 1)),
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", str(int(result.reset_at))),
+                ]
+            )
             await context.abort(
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
                 f"请求过于频繁，请在 {result.retry_after:.1f} 秒后重试",

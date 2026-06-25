@@ -1,28 +1,42 @@
 """
 任务轮询处理器
 
-代理 Worker poll 任务，从 Redis Streams ready queues 读取任务。
+从 Redis Streams ready queues 读取任务，转码为 ``data_pb2.TaskDispatch`` 供
+``DataService.StreamTasks`` 推送给 Worker。
+
+P1c 改造：保留 ready stream 的 JSON 帧（写入端 Master 当前仍是 JSON 派发），
+gateway 在 yield 给 Worker 前转码为 Proto，避免端到端的 JSON 暴露。
+
+待 Master 切换为 Proto bytes 派发后，``_parse_task_data`` 可以替换为
+``StreamClient(codec=ProtoCodec(data_pb2.TaskDispatch))`` 路径。
 
 **Validates: Requirements 6.5**
 """
 
+from __future__ import annotations
+
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-from loguru import logger
-
+from antcode_contracts import data_pb2
 from antcode_core.infrastructure.redis import (
     decode_stream_payload,
     redis_namespace,
     task_ready_stream,
     worker_group,
 )
+from loguru import logger
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    pass
 
 
 @dataclass
 class TaskInfo:
-    """任务信息"""
+    """任务信息（保持向后兼容的 dataclass，方便单元测试）"""
 
     task_id: str
     project_id: str
@@ -38,23 +52,44 @@ class TaskInfo:
     receipt_id: str = ""
 
 
+def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
+    """把内部 ``TaskInfo`` 转码为 Proto ``TaskDispatch`` 供 StreamTasks 推送。
+
+    ready stream 当前的 ``download_url`` / ``file_hash`` 暂时映射到
+    ``source_bundle_uri`` / ``source_bundle_sha256`` 字段（Master 切换 source bundle
+    派发后会自然对齐）。
+    """
+    dispatch = data_pb2.TaskDispatch(
+        task_id=task.task_id,
+        project_id=task.project_id,
+        project_type=task.project_type,
+        priority=int(task.priority),
+        timeout_seconds=int(task.timeout),
+        source_bundle_uri=task.download_url,
+        source_bundle_sha256=task.file_hash,
+        transfer_method="source_bundle" if task.download_url else "",
+        entry_point=task.entry_point,
+        run_id=task.run_id,
+        receipt_id=task.receipt_id,
+    )
+    for key, value in (task.params or {}).items():
+        dispatch.params[str(key)] = str(value) if value is not None else ""
+    for key, value in (task.environment or {}).items():
+        dispatch.environment[str(key)] = str(value) if value is not None else ""
+    return dispatch
+
+
 class TaskPollHandler:
     """任务轮询处理器
 
-    代理 Worker 从 Redis Streams ready queues 读取任务。
+    从 Redis Streams ready queues 读取任务。
     Gateway 不实现调度策略，只负责代理队列读取。
     """
 
-    # Redis Streams 键前缀（用于测试与诊断观测）
     READY_QUEUE_PREFIX = f"{redis_namespace()}:task:ready:"
     WORKER_GROUP = worker_group()
 
     def __init__(self, redis_client=None):
-        """初始化处理器
-
-        Args:
-            redis_client: Redis 客户端，默认延迟初始化
-        """
         self._redis_client = redis_client
         self._group_lock = asyncio.Lock()
         self._initialized_groups: set[tuple[str, str]] = set()
@@ -70,14 +105,13 @@ class TaskPollHandler:
 
             try:
                 await redis.xgroup_create(stream_key, group, id="0", mkstream=True)
-            except Exception as e:
-                if "BUSYGROUP" not in str(e):
+            except Exception as exc:
+                if "BUSYGROUP" not in str(exc):
                     raise
 
             self._initialized_groups.add(key)
 
     async def _get_redis_client(self):
-        """获取 Redis 客户端"""
         if self._redis_client is None:
             try:
                 from antcode_core.infrastructure.redis import get_redis_client
@@ -95,22 +129,9 @@ class TaskPollHandler:
         block_ms: int = 5000,
         queues: list[str] | None = None,
     ) -> list[TaskInfo]:
-        """处理任务轮询请求
-
-        从 Redis Streams ready queues 读取任务。
-
-        Args:
-            worker_id: Worker ID
-            max_tasks: 最多返回的任务数
-            block_ms: 阻塞等待时间（毫秒）
-            queues: 要读取的队列列表，默认读取所有队列
-
-        Returns:
-            任务列表
-        """
+        """处理任务轮询请求（同步式拉取，用于 StreamTasks 内部循环）。"""
         logger.debug(
-            f"Worker {worker_id} 轮询任务，最多 {max_tasks} 个，"
-            f"阻塞 {block_ms}ms"
+            f"Worker {worker_id} 轮询任务，最多 {max_tasks} 个，阻塞 {block_ms}ms"
         )
 
         redis = await self._get_redis_client()
@@ -119,20 +140,14 @@ class TaskPollHandler:
             return []
 
         try:
-            # 确定要读取的队列
             if queues is None:
-                # 默认读取 worker 专属队列
                 queues = [task_ready_stream(worker_id)]
 
-            # 确保消费者组存在（每个 stream 只初始化一次）
             for queue in queues:
                 await self._ensure_consumer_group(redis, queue, self.WORKER_GROUP)
 
-            # 构建 streams 参数
             streams = dict.fromkeys(queues, ">")
 
-            # 从 Redis Streams 读取任务
-            # 使用 XREADGROUP 确保消息只被一个消费者处理
             results = await redis.xreadgroup(
                 groupname=self.WORKER_GROUP,
                 consumername=worker_id,
@@ -149,36 +164,30 @@ class TaskPollHandler:
                 for message_id, data in messages:
                     task = self._parse_task_data(data, message_id)
                     if task:
-                        task.receipt_id = f"{stream_name}|{message_id}"
+                        sname = (
+                            stream_name.decode()
+                            if isinstance(stream_name, bytes)
+                            else str(stream_name)
+                        )
+                        mid = (
+                            message_id.decode()
+                            if isinstance(message_id, bytes)
+                            else str(message_id)
+                        )
+                        task.receipt_id = f"{sname}|{mid}"
                         tasks.append(task)
                         logger.debug(
-                            f"读取任务: task_id={task.task_id}, "
-                            f"stream={stream_name}, message_id={message_id}"
+                            f"读取任务: task_id={task.task_id}, stream={sname}, message_id={mid}"
                         )
 
-            logger.info(
-                f"Worker {worker_id} 获取了 {len(tasks)} 个任务"
-            )
+            logger.info(f"Worker {worker_id} 获取了 {len(tasks)} 个任务")
             return tasks
 
-        except Exception as e:
-            logger.error(f"读取任务失败: {e}")
+        except Exception as exc:
+            logger.error(f"读取任务失败: {exc}")
             return []
 
-    def _parse_task_data(
-        self,
-        data: dict,
-        message_id: str,
-    ) -> TaskInfo | None:
-        """解析任务数据
-
-        Args:
-            data: Redis Stream 消息数据
-            message_id: 消息 ID
-
-        Returns:
-            任务信息，解析失败返回 None
-        """
+    def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo | None:
         try:
             decoded = decode_stream_payload(data)
 
@@ -201,43 +210,29 @@ class TaskPollHandler:
                 environment=self._parse_json(decoded.get("environment", "{}")),
             )
 
-        except Exception as e:
-            logger.error(f"解析任务数据失败: {e}, message_id={message_id}")
+        except Exception as exc:
+            logger.error(f"解析任务数据失败: {exc}, message_id={message_id}")
             return None
 
     def _parse_json(self, value: object) -> dict[str, object]:
-        """解析 JSON 内容"""
         if not value:
             return {}
 
         if isinstance(value, dict):
             return value
 
-        raw = value.decode("utf-8", errors="ignore") if isinstance(value, (bytes, bytearray)) else str(value)
+        raw = (
+            value.decode("utf-8", errors="ignore")
+            if isinstance(value, (bytes, bytearray))
+            else str(value)
+        )
         try:
-            import json
-
             parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
             return {}
 
-    async def ack_task(
-        self,
-        worker_id: str,
-        queue: str,
-        message_id: str,
-    ) -> bool:
-        """确认任务已处理
-
-        Args:
-            worker_id: Worker ID
-            queue: 队列名称
-            message_id: 消息 ID
-
-        Returns:
-            是否成功
-        """
+    async def ack_task(self, worker_id: str, queue: str, message_id: str) -> bool:
         redis = await self._get_redis_client()
         if redis is None:
             return False
@@ -245,12 +240,11 @@ class TaskPollHandler:
         try:
             await redis.xack(queue, self.WORKER_GROUP, message_id)
             logger.debug(
-                f"任务已确认: worker_id={worker_id}, "
-                f"queue={queue}, message_id={message_id}"
+                f"任务已确认: worker_id={worker_id}, queue={queue}, message_id={message_id}"
             )
             return True
-        except Exception as e:
-            logger.error(f"确认任务失败: {e}")
+        except Exception as exc:
+            logger.error(f"确认任务失败: {exc}")
             return False
 
     async def ack_receipt(
@@ -268,7 +262,12 @@ class TaskPollHandler:
         return await self._requeue_task(queue, message_id, reason)
 
     async def _requeue_task(self, queue: str, message_id: str, reason: str) -> bool:
-        """拒绝任务并重新入队"""
+        """拒绝任务并回写 ready stream。
+
+        注：保留 JSON 帧以兼容 Master 当前的 ``_send_batch_to_queue`` 写入端。
+        待 Master 切换为 ``ProtoCodec(TaskDispatch)`` 派发后，这里需要改为
+        ``xadd {PROTO_FIELD: TaskDispatch.SerializeToString()}``。
+        """
         redis = await self._get_redis_client()
         if redis is None:
             return False
@@ -291,6 +290,6 @@ class TaskPollHandler:
             await redis.xadd(queue, decoded)
             await redis.xack(queue, self.WORKER_GROUP, message_id)
             return True
-        except Exception as e:
-            logger.error(f"重新入队失败: {e}")
+        except Exception as exc:
+            logger.error(f"重新入队失败: {exc}")
             return False

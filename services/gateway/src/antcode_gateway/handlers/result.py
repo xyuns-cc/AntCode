@@ -1,129 +1,118 @@
 """
 结果处理器
 
-接收 Worker 的任务执行结果，写入 Redis Streams，由 Master 消费。
+接收 Worker 的任务执行状态（``TaskStatus``）并以 **Proto bytes** 单字段框架
+（``{PROTO_FIELD: bytes}``）写入 Redis Stream，由 Master ``ResultLoop`` 用
+``ProtoCodec(data_pb2.TaskStatus)`` 直接解码。
+
+P1c 改造：彻底移除 JSON 落库路径，统一走 Proto bytes，端到端与 P1a Master 对齐。
 
 **Validates: Requirements 6.6**
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
+
 from datetime import UTC, datetime
 
+from antcode_contracts import data_pb2
+from antcode_contracts.common_pb2 import Timestamp
+from antcode_core.infrastructure.redis import task_result_stream
+from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
 
-from antcode_core.infrastructure.redis import task_result_stream
-from antcode_core.infrastructure.redis.streams import StreamClient
+# Status 字符串 -> data_pb2.Status enum 的映射（用于兼容旧调用方传入字符串）
+_STATUS_FROM_STR: dict[str, int] = {
+    "": data_pb2.STATUS_UNSPECIFIED,
+    "pending": data_pb2.STATUS_PENDING,
+    "running": data_pb2.STATUS_RUNNING,
+    "success": data_pb2.STATUS_COMPLETED,
+    "completed": data_pb2.STATUS_COMPLETED,
+    "failed": data_pb2.STATUS_FAILED,
+    "cancelled": data_pb2.STATUS_CANCELLED,
+    "canceled": data_pb2.STATUS_CANCELLED,
+    "timeout": data_pb2.STATUS_TIMEOUT,
+}
 
 
-@dataclass
-class TaskResult:
-    """任务结果"""
+def _to_status_enum(status: object) -> int:
+    """把传入的 status（int 或字符串）映射成 ``data_pb2.Status`` 数值。"""
+    if isinstance(status, int):
+        return status
+    if isinstance(status, str):
+        return _STATUS_FROM_STR.get(status.strip().lower(), data_pb2.STATUS_UNSPECIFIED)
+    return data_pb2.STATUS_UNSPECIFIED
 
-    run_id: str
-    task_id: str
-    status: str  # success, failed, timeout, cancelled
-    exit_code: int = 0
-    error_message: str = ""
-    output: str = ""
-    data: dict | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    duration_ms: int = 0
+
+def _to_timestamp(value: datetime | None) -> Timestamp | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    epoch_seconds = value.timestamp()
+    seconds = int(epoch_seconds)
+    nanos = int((epoch_seconds - seconds) * 1_000_000_000)
+    return Timestamp(seconds=seconds, nanos=nanos)
 
 
 class ResultHandler:
     """结果处理器
 
-    接收 Worker 的任务执行结果：
-    1. 写入 Redis Streams
+    把 Worker 上报的 ``TaskStatus`` 以 Proto bytes 写入 Redis Stream。
+    Stream 上的消息形如 ``{PROTO_FIELD: TaskStatus.SerializeToString()}``，
+    与 Master ``ResultLoop`` 的 ``ProtoCodec(TaskStatus)`` 解码端对齐。
     """
 
-    def __init__(self):
-        """初始化处理器"""
-        self._stream = StreamClient()
-        self._result_stream = task_result_stream()
-
-    async def handle(self, result: TaskResult) -> bool:
-        """处理任务结果
+    def __init__(
+        self,
+        stream: StreamClient | None = None,
+        result_stream: str | None = None,
+    ):
+        """初始化处理器
 
         Args:
-            result: 任务结果
-
-        Returns:
-            是否成功
+            stream: 注入测试用的 ``StreamClient``；默认创建带
+                ``ProtoCodec(TaskStatus)`` 的实例
+            result_stream: Stream 键名，默认使用 ``task_result_stream()``
         """
-        run_id = result.run_id
-        status = result.status
+        self._stream = stream or StreamClient(codec=ProtoCodec(data_pb2.TaskStatus))
+        self._result_stream = result_stream or task_result_stream()
 
-        logger.info(
-            f"收到任务结果: run_id={run_id}, "
-            f"status={status}, exit_code={result.exit_code}"
-        )
-
-        payload = self._build_payload(result)
-        return await self._publish_result(payload)
-
-    async def _publish_result(self, payload: dict) -> bool:
-        """写入 Redis Streams"""
+    async def handle(self, task_status: data_pb2.TaskStatus) -> bool:
+        """以 Proto bytes 写入 result stream。"""
         try:
-            await self._stream.xadd(self._result_stream, payload)
+            await self._stream.xadd_typed(self._result_stream, task_status)
+            logger.info(
+                "结果已写入 stream: run_id={} task_id={} status={}",
+                task_status.run_id,
+                task_status.task_id,
+                int(task_status.status),
+            )
             return True
-        except Exception as e:
-            logger.error(f"写入结果流失败: {e}")
+        except Exception as exc:
+            logger.error(f"写入结果流失败: {exc}")
             return False
-
-    def _build_payload(self, result: TaskResult) -> dict:
-        payload = {
-            "run_id": result.run_id,
-            "task_id": result.task_id,
-            "status": result.status,
-            "exit_code": result.exit_code,
-            "error_message": result.error_message,
-            "started_at": self._format_dt(result.started_at),
-            "finished_at": self._format_dt(result.finished_at),
-            "duration_ms": result.duration_ms,
-            "data": result.data or {},
-        }
-        return {k: v for k, v in payload.items() if v not in (None, "", {})}
-
-    def _format_dt(self, value: datetime | None) -> str | None:
-        if not value:
-            return None
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        return value.isoformat()
 
     async def handle_status_update(
         self,
         run_id: str,
-        status: str,
+        task_id: str = "",
+        status: object = "",
         exit_code: int | None = None,
         error_message: str | None = None,
         timestamp: datetime | None = None,
     ) -> bool:
-        """处理状态更新
+        """处理中间状态更新（如 running）。
 
-        用于处理中间状态更新（如 running）。
-
-        Args:
-            run_id: 运行 ID
-            status: 状态
-            exit_code: 退出码
-            error_message: 错误消息
-            timestamp: 时间戳
-
-        Returns:
-            是否成功
+        构造 ``TaskStatus`` proto 后调用 ``handle`` 落 Stream。
         """
-        logger.debug(
-            f"收到状态更新: run_id={run_id}, status={status}"
+        msg = data_pb2.TaskStatus(
+            run_id=run_id,
+            task_id=task_id or run_id,
+            status=_to_status_enum(status),
+            exit_code=int(exit_code) if exit_code is not None else 0,
+            error_message=error_message or "",
         )
-
-        payload = {
-            "run_id": run_id,
-            "status": status,
-            "exit_code": exit_code,
-            "error_message": error_message or "",
-            "started_at": self._format_dt(timestamp or datetime.now(UTC)),
-        }
-        return await self._publish_result({k: v for k, v in payload.items() if v not in (None, "")})
+        ts = _to_timestamp(timestamp or datetime.now(UTC))
+        if ts is not None:
+            msg.started_at.CopyFrom(ts)
+        return await self.handle(msg)
