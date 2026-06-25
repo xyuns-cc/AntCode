@@ -1,0 +1,148 @@
+// Data plane service - asynchronous, high-frequency RPCs for task dispatch,
+// task status updates, and log streaming.
+//
+// Replaces the data-path RPCs of the legacy GatewayService
+// (PollTask + ReportResult + SendLog* + WorkerStream task_status).
+// All requests carry a W3C TraceContext for distributed tracing.
+//
+// Requirements: 1.4, 14.1
+
+syntax = "proto3";
+
+package antcode.v1;
+
+import "common.proto";
+
+service DataService {
+  // Task dispatch: server-streaming push. Worker opens this stream once with
+  // its capabilities + prefetch hint, and the Master/Gateway pushes TaskDispatch
+  // messages as they are scheduled. Replaces the legacy long-poll PollTask.
+  rpc StreamTasks(SubscribeRequest) returns (stream TaskDispatch);
+
+  // Worker acknowledges accept/reject of a dispatched task (replaces AckTask).
+  rpc AckTask(AckTaskRequest) returns (AckTaskResponse);
+
+  // Task status updates flow back from Worker via client-streaming so each
+  // status transition (running -> completed/failed/...) reuses the same TCP
+  // connection. Replaces ReportResult + WorkerMessage.task_status.
+  rpc StreamStatus(stream TaskStatus) returns (StatusAck);
+
+  // Single unified log path. A LogBatch can contain 1..N entries.
+  // Replaces SendLog + SendLogBatch + SendLogChunk - large payloads go via
+  // source_bundle (pgartifact://) instead of being chunked through gRPC.
+  rpc StreamLogs(stream LogBatch) returns (LogAck);
+}
+
+// =========================================================================
+// Task dispatch
+// =========================================================================
+
+message SubscribeRequest {
+  string worker_id = 1;
+  repeated string capabilities = 2;         // Capability tags this worker can serve
+  int32 prefetch = 3;                       // Hint: how many tasks Master may push ahead
+  TraceContext trace = 100;
+}
+
+message TaskDispatch {
+  string task_id = 1;
+  string project_id = 2;
+  string project_type = 3;                  // spider / code / file
+  int32 priority = 4;
+  map<string, string> params = 5;           // Task params
+  map<string, string> environment = 6;      // Environment variables
+  int32 timeout_seconds = 7;                // Execution timeout
+
+  // Source bundle reference. Large objects are NOT streamed through gRPC.
+  // The bundle is uploaded to pgartifact and the Worker pulls it by URI.
+  string source_bundle_uri = 8;             // pgartifact://<sha256>
+  string source_bundle_sha256 = 9;          // Integrity check
+  int64 source_bundle_size = 10;            // Bytes
+  string transfer_method = 11;              // Fixed: "source_bundle"
+  string resolved_revision = 12;            // VCS revision the bundle was built from
+  string source_subdir = 13;                // Subdirectory within the bundle
+
+  string entry_point = 14;                  // Entry script/file
+  string run_id = 15;                       // Execution / run identifier
+  string receipt_id = 16;                   // Echoed back in AckTask
+
+  TraceContext trace = 100;
+}
+
+message AckTaskRequest {
+  string worker_id = 1;
+  string receipt_id = 2;
+  string task_id = 3;
+  bool accepted = 4;
+  string reason = 5;                        // Rejection reason if !accepted
+  TraceContext trace = 100;
+}
+
+message AckTaskResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// =========================================================================
+// Task status (client-streaming back from Worker)
+// =========================================================================
+
+// Typed status enum - replaces the legacy free-form `string status`.
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_PENDING = 1;
+  STATUS_RUNNING = 2;
+  STATUS_COMPLETED = 3;
+  STATUS_FAILED = 4;
+  STATUS_CANCELLED = 5;
+  STATUS_TIMEOUT = 6;
+}
+
+message TaskStatus {
+  string run_id = 1;
+  string task_id = 2;
+  string worker_id = 3;
+  Status status = 4;
+  int32 exit_code = 5;
+  string error_message = 6;
+  Timestamp started_at = 7;
+  Timestamp finished_at = 8;
+  int64 duration_ms = 9;
+  // Structured result metadata only. Large objects belong in a source_bundle,
+  // not in this map. (No `data_json` blob.)
+  map<string, string> data = 10;
+  TraceContext trace = 100;
+}
+
+message StatusAck {
+  int32 received = 1;
+}
+
+// =========================================================================
+// Logs (client-streaming, single path)
+// =========================================================================
+
+enum LogType {
+  LOG_TYPE_UNSPECIFIED = 0;
+  LOG_TYPE_STDOUT = 1;
+  LOG_TYPE_STDERR = 2;
+  LOG_TYPE_SYSTEM = 3;
+}
+
+message LogBatch {
+  string worker_id = 1;
+  repeated LogEntry entries = 2;            // 1..N entries per batch
+  TraceContext trace = 100;
+}
+
+message LogEntry {
+  string run_id = 1;
+  LogType log_type = 2;
+  string content = 3;
+  Timestamp timestamp = 4;
+  int64 sequence = 5;
+}
+
+message LogAck {
+  int32 received = 1;
+}

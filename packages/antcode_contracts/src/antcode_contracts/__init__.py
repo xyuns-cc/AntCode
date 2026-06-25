@@ -8,12 +8,13 @@ AntCode Contracts - gRPC 契约包
     ./scripts/gen_proto.sh
 
 包含的 proto 文件：
-    - common.proto: 通用消息定义（Timestamp, Metrics, OSInfo 等）
-    - gateway.proto: Gateway 服务定义（原 worker_service.proto）
+    - common.proto:  通用消息定义（Timestamp, Metrics, OSInfo, TraceContext, AuditEvent 等）
+    - control.proto: ControlService 控制面（Register / Lease / CancelTask / WatchControl）
+    - data.proto:    DataService 数据面（StreamTasks / StreamStatus / StreamLogs）
 
 使用示例：
-    from antcode_contracts import common_pb2, gateway_pb2
-    from antcode_contracts import gateway_pb2_grpc
+    from antcode_contracts import common_pb2, control_pb2, data_pb2
+    from antcode_contracts import control_pb2_grpc, data_pb2_grpc
 """
 
 __version__ = "0.1.0"
@@ -22,8 +23,10 @@ __version__ = "0.1.0"
 __all__ = [
     "common_pb2",
     "common_pb2_grpc",
-    "gateway_pb2",
-    "gateway_pb2_grpc",
+    "control_pb2",
+    "control_pb2_grpc",
+    "data_pb2",
+    "data_pb2_grpc",
 ]
 
 
