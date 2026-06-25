@@ -1,4 +1,5 @@
 // Common message types for gRPC communication
+// Shared between ControlService and DataService
 // Requirements: 1.4, 14.1
 
 syntax = "proto3";
@@ -11,7 +12,15 @@ message Timestamp {
   int32 nanos = 2;    // Nanoseconds within the second
 }
 
-// Spider statistics summary for heartbeat reporting
+// W3C Trace Context for distributed tracing propagation
+// See: https://www.w3.org/TR/trace-context/
+// Carried on every RPC request/response to stitch spans across Master/Gateway/Worker.
+message TraceContext {
+  string traceparent = 1;   // version-traceid-spanid-flags, e.g. "00-<32hex>-<16hex>-01"
+  string tracestate = 2;    // vendor-specific state, comma-separated key=value
+}
+
+// Spider statistics summary for metrics reporting
 // Requirements: 8.2, 8.4
 message SpiderStatsSummary {
   int64 request_count = 1;              // Total HTTP requests made
@@ -23,7 +32,7 @@ message SpiderStatsSummary {
   map<int32, int64> status_codes = 7;   // HTTP status code distribution (status_code -> count)
 }
 
-// System metrics reported by Workers
+// System metrics reported by Workers (carried on LeaseRequest)
 message Metrics {
   float cpu = 1;                    // CPU usage percentage (0-100)
   float memory = 2;                 // Memory usage percentage (0-100)
@@ -33,7 +42,7 @@ message Metrics {
   int32 task_count = 6;             // Total tasks executed
   int32 project_count = 7;          // Total projects on the worker
   int32 env_count = 8;              // Total environments on the worker
-  
+
   // Spider statistics summary (Requirements: 8.2)
   SpiderStatsSummary spider_stats = 10;
 }
@@ -44,4 +53,16 @@ message OSInfo {
   string os_version = 2;     // Operating system version
   string python_version = 3; // Python interpreter version
   string machine_arch = 4;   // Machine architecture (e.g., "x86_64", "arm64")
+}
+
+// Security audit event - emitted by Gateway when transport-level checks fail.
+// Consumed by an audit Stream (out-of-band of the per-worker control channel)
+// so that rejected/unauthenticated peers still produce a tamper-evident record.
+message AuditEvent {
+  string event_type = 1;        // mtls_reject / api_key_invalid / jwt_invalid / install_key_replay
+  string worker_id = 2;         // Asserted worker_id (may be empty if unauthenticated)
+  string peer = 3;              // Peer address (e.g. "ipv4:1.2.3.4:5678")
+  string reason = 4;            // Human-readable reason
+  Timestamp ts = 5;             // Time of event
+  map<string, string> extra = 6; // Free-form context (cert fingerprint, key id, etc.)
 }

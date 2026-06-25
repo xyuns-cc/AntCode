@@ -14,6 +14,14 @@ class Timestamp(_message.Message):
     nanos: int
     def __init__(self, seconds: _Optional[int] = ..., nanos: _Optional[int] = ...) -> None: ...
 
+class TraceContext(_message.Message):
+    __slots__ = ("traceparent", "tracestate")
+    TRACEPARENT_FIELD_NUMBER: _ClassVar[int]
+    TRACESTATE_FIELD_NUMBER: _ClassVar[int]
+    traceparent: str
+    tracestate: str
+    def __init__(self, traceparent: _Optional[str] = ..., tracestate: _Optional[str] = ...) -> None: ...
+
 class SpiderStatsSummary(_message.Message):
     __slots__ = ("request_count", "response_count", "item_scraped_count", "error_count", "avg_latency_ms", "requests_per_minute", "status_codes")
     class StatusCodesEntry(_message.Message):
@@ -72,3 +80,26 @@ class OSInfo(_message.Message):
     python_version: str
     machine_arch: str
     def __init__(self, os_type: _Optional[str] = ..., os_version: _Optional[str] = ..., python_version: _Optional[str] = ..., machine_arch: _Optional[str] = ...) -> None: ...
+
+class AuditEvent(_message.Message):
+    __slots__ = ("event_type", "worker_id", "peer", "reason", "ts", "extra")
+    class ExtraEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    EVENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    PEER_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    TS_FIELD_NUMBER: _ClassVar[int]
+    EXTRA_FIELD_NUMBER: _ClassVar[int]
+    event_type: str
+    worker_id: str
+    peer: str
+    reason: str
+    ts: Timestamp
+    extra: _containers.ScalarMap[str, str]
+    def __init__(self, event_type: _Optional[str] = ..., worker_id: _Optional[str] = ..., peer: _Optional[str] = ..., reason: _Optional[str] = ..., ts: _Optional[_Union[Timestamp, _Mapping]] = ..., extra: _Optional[_Mapping[str, str]] = ...) -> None: ...
