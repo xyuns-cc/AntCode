@@ -1,6 +1,13 @@
 """日志配置模块
 
 提供日志初始化、格式化和敏感信息脱敏功能。
+
+P5.4: 集成 W3C TraceContext —— 每条日志会自动从当前 ContextVar
+(``antcode_core.observability.tracing.get_current_trace_id``) 提取
+``trace_id`` 注入到 ``record["extra"]["trace_id"]``,日志格式串里通过
+``{extra[trace_id]}`` 渲染。Worker 在每个任务的 ``_worker_loop`` 中
+调用 ``set_current_trace`` 后,该任务内所有日志会自动带上 trace_id,
+方便从单条日志反查整个分布式调用链。
 """
 
 import os
@@ -13,13 +20,19 @@ from loguru import logger
 from antcode_core.common.config import settings
 
 # 日志格式
+# ``extra[trace_id]`` 在未绑定 trace 时由 ``_inject_trace_id`` 填一个 "-"
+# 占位,避免 loguru 渲染时报 KeyError。
 CONSOLE_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
     "<level>{level: <8}</level> | "
+    "<magenta>trace={extra[trace_id]}</magenta> | "
     "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
     "<level>{message}</level>"
 )
-FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+FILE_FORMAT = (
+    "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | trace={extra[trace_id]} | "
+    "{name}:{function}:{line} - {message}"
+)
 
 # 敏感字段模式（用于脱敏）
 SENSITIVE_PATTERNS = [
@@ -116,11 +129,38 @@ def sanitize_dict(data: dict[str, Any], sensitive_keys: set[str] | None = None) 
     return result
 
 
+def _inject_trace_id(record: dict[str, Any]) -> None:
+    """把 ContextVar 中的当前 trace_id 注入到 ``record['extra']``。
+
+    若未绑定 trace,填一个 ``"-"`` 占位,避免 loguru 在格式串里渲染
+    ``{extra[trace_id]}`` 时报 KeyError(每条日志都要可渲染)。
+    显式调用 ``logger.bind(trace_id=...)`` 已经手动设置过的会优先保留。
+    """
+    extra = record.setdefault("extra", {})
+    if extra.get("trace_id"):
+        return
+    try:
+        # 延迟导入以打破潜在的循环依赖(observability 不应依赖 common)。
+        from antcode_core.observability.tracing import get_current_trace_id
+
+        trace_id = get_current_trace_id()
+    except Exception:  # noqa: BLE001 - 日志路径绝不能因可观测性故障崩
+        trace_id = None
+    extra["trace_id"] = trace_id or "-"
+
+
 class SanitizingFilter:
-    """日志脱敏过滤器"""
+    """日志脱敏过滤器(同时承担 trace_id 注入)"""
 
     def __call__(self, record: dict[str, Any]) -> bool:
-        """对日志记录进行脱敏处理"""
+        """对日志记录进行脱敏处理 + trace_id 注入。
+
+        顺序: 先注入 trace_id(它不属于敏感字段),再脱敏。这样即便
+        sanitize_dict 后续把 extra 整个替换,trace_id 也已经在新 dict 里。
+        """
+        # 注入 trace_id(在脱敏前,避免被当成"未知键"丢掉)
+        _inject_trace_id(record)
+
         # 脱敏消息内容
         if "message" in record:
             record["message"] = sanitize_log_message(record["message"])
@@ -128,6 +168,10 @@ class SanitizingFilter:
         # 脱敏 extra 字段
         if "extra" in record and isinstance(record["extra"], dict):
             record["extra"] = sanitize_dict(record["extra"])
+
+        # 脱敏后再兜底一次(sanitize_dict 不会动 trace_id 这种非敏感键,
+        # 但万一 extra 被替换为新 dict 而丢失 trace_id 仍可补上)
+        record["extra"].setdefault("trace_id", "-")
 
         return True
 
