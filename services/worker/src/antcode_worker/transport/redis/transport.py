@@ -423,13 +423,15 @@ class RedisTransport(TransportBase):
     async def send_log_batch(self, logs: list[LogMessage]) -> bool:
         """发送批量日志
 
-        P1b：每个 ``run_id`` 对应一个 ``LogBatch`` Proto 消息，写到该 run_id 的
-        log Stream 的单字段 ``PROTO_FIELD``。Master ``log_ingest_loop`` 通过
-        ``ProtoCodec(LogBatch)`` 解码。
+        Follow-up #1 (post-review): 不再按 run_id 写到 per-run stream
+        ``antcode:log:stream:{run_id}``,改为统一写到全局 ingest stream
+        ``antcode:log:ingest``。这是和 Master ``log_ingest_loop`` 默认订阅 key
+        对齐的关键 —— 此前两边 key 永不相交,Direct 模式日志无法落库。
 
-        注：原实现按 ``ms-sequence`` 构造 Stream entry id 做幂等去重；切换到
-        Proto bytes 单字段后 entry id 改回 ``*``（Master 端通过 ``run_id`` /
-        ``sequence`` 字段判重）。这是 P1b 已知的取舍，详见 task 描述。
+        每个 ``run_id`` 仍单独打包成一条 ``LogBatch`` Proto(保持 batch 内
+        单一 run_id 语义),多个 run_id 的 batch 在同一 pipeline 内全部
+        XADD 到同一个 ingest stream。stream 由 MAXLEN 维持大小,不设
+        EXPIRE(共享 stream 永久存在,Master 通过 XACK 维护游标)。
         """
         if not self._redis or not self._running:
             return False
@@ -439,18 +441,18 @@ class RedisTransport(TransportBase):
 
         try:
             maxlen = self._keys.config.stream_max_len
-            ttl_seconds = self._keys.config.log_ttl
 
-            # 按 run_id 分组打包，每个 run_id 一条 Proto LogBatch
+            # 按 run_id 分组打包,每个 run_id 一条 Proto LogBatch
             batches: dict[str, list[LogMessage]] = {}
             for log in logs:
                 batches.setdefault(log.run_id or "", []).append(log)
 
+            # Follow-up #1: 统一 ingest stream,不再按 run_id 分 stream
+            ingest_key = self._keys.log_ingest_stream()
+
             async def _write_batches():
                 pipe = self._redis.pipeline(transaction=False)
-                seen = set()
                 for run_id, run_logs in batches.items():
-                    log_key = self._keys.log_stream(run_id)
                     batch_msg = data_pb2.LogBatch(
                         worker_id=self._worker_id or "",
                     )
@@ -462,23 +464,20 @@ class RedisTransport(TransportBase):
                     payload_bytes = batch_msg.SerializeToString()
                     if maxlen > 0:
                         pipe.xadd(
-                            log_key,
+                            ingest_key,
                             {PROTO_FIELD: payload_bytes},
                             maxlen=maxlen,
                             approximate=self._keys.config.stream_approx_max_len,
                         )
                     else:
-                        pipe.xadd(log_key, {PROTO_FIELD: payload_bytes})
-                    if ttl_seconds > 0 and log_key not in seen:
-                        pipe.expire(log_key, ttl_seconds)
-                        seen.add(log_key)
+                        pipe.xadd(ingest_key, {PROTO_FIELD: payload_bytes})
 
                 return await pipe.execute(raise_on_error=False)
 
             results = await self._run_with_reconnect("发送批量日志", _write_batches)
             for result in results:
                 if isinstance(result, Exception):
-                    logger.error(f"发送批量日志失败: {result}")
+                    logger.exception(f"发送批量日志失败: {result}")
                     return False
             return True
         except Exception:
