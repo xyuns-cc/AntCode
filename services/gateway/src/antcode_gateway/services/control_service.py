@@ -1,18 +1,20 @@
 """
-ControlService gRPC 服务实现 (P1c)
+ControlService gRPC 服务实现 (P1c + P3)
 
 负责 Worker 生命周期 (Register/Deregister)、租约 (Lease)、任务取消
 (CancelTask)、配置更新 (UpdateConfig) 以及反向控制通道
 (WatchControl / AckControl)。
 
-P1c 范围只覆盖契约和 Stream 路由：
+P3 LeaseStore 已接管租约状态机:
 
-- ``Register`` 沿用旧 ``GatewayServiceImpl.Register`` 的 API Key 验证逻辑，
-  额外返回 ``lease_ttl_ms`` / ``lease_renew_after_ms``。真实 LeaseStore
-  状态机由 P3 接管，这里只占位返回固定 30s TTL。
-- ``Lease`` 暂时返回伪 lease_id（``lease-{worker_id}-{ts}``）+ 30s 过期；
-  同时把 ``request.metrics`` 写到 ``heartbeat:{worker_id}`` Hash，保留运维
-  dashboard 可见。
+- ``Register`` 沿用旧 ``GatewayServiceImpl.Register`` 的 API Key 验证逻辑;
+  注册成功后立即调 ``LeaseStore.grant`` 发首份租约,返回真实
+  ``lease_ttl_ms`` / ``lease_renew_after_ms``(从 ``LeaseStore.policy``)。
+- ``Lease`` 通过 ``LeaseStore.grant(worker_id, current_lease_id, metrics)``
+  发租 / 续租,返回真 lease_id + expires_at_ms。``request.metrics`` 顺便
+  写到 ``heartbeat:{worker_id}`` Hash,保留运维 dashboard 可见。
+- 若构造时未注入 LeaseStore(例如 Redis 不可用),退化为 P1c 阶段的
+  ``lease-{worker_id}-{ts}`` 占位实现,保留兼容。
 - ``CancelTask`` / ``UpdateConfig`` 把控制指令 xadd 到对应
   ``control:{worker_id}`` Stream（payload 与 control_plane helpers 对齐），
   由 ``WatchControl`` 消费推送。
