@@ -83,12 +83,20 @@ class WorkerInstallKey(BaseModel):
         )
 
     def is_valid(self) -> bool:
-        """检查 Key 是否有效"""
+        """检查 Key 是否有效。
+
+        ``expires_at`` 在某些 DB 后端(如旧 SQLite 字段)取回时可能是
+        naive datetime,如果直接和 ``datetime.now(UTC)`` 比较会触发
+        ``TypeError``,绕过这条校验。这里统一把 naive 视作 UTC
+        再比较,确保时区一致(P2-#L11)。
+        """
         if self.status != "pending":
             return False
-        if datetime.now(UTC) > self.expires_at:
-            return False
-        return True
+        now = datetime.now(UTC)
+        expires_at = self.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        return now < expires_at
 
     async def mark_used(self, worker_public_id: str) -> None:
         """标记 Key 为已使用

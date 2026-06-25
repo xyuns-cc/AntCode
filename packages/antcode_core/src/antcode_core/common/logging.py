@@ -35,8 +35,42 @@ FILE_FORMAT = (
 )
 
 # 敏感字段模式（用于脱敏）
+#
+# 列表里的正则按顺序逐条 sub,顺序排前的优先匹配。补齐了 P1-#L8 提到的几类:
+# - JSON 序列化的 "api_key" / "token" 字面量(双引号包裹的 value)
+# - Authorization Bearer xxx 头
+# - AntCode 内部 ``ak_xxxx`` API key 前缀(generate_api_key 的格式)
 SENSITIVE_PATTERNS = [
-    # API 密钥/私密密钥
+    # JSON 序列化的 api_key 字面量: "api_key": "xxx"
+    (
+        re.compile(r'("api[_-]?key"\s*:\s*")[^"]+(")', re.IGNORECASE),
+        r"\1***\2",
+    ),
+    # JSON 序列化的 token / access_token / refresh_token 字面量
+    (
+        re.compile(r'("(?:access_|refresh_)?token"\s*:\s*")[^"]+(")', re.IGNORECASE),
+        r"\1***\2",
+    ),
+    # JSON 序列化的 secret / password 字面量
+    (
+        re.compile(r'("(?:secret|password|passwd|pwd|install_key|private_key)"\s*:\s*")[^"]+(")', re.IGNORECASE),
+        r"\1***\2",
+    ),
+    # Authorization header: Bearer xxx / Basic xxx
+    (
+        re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
+        "Bearer ***",
+    ),
+    (
+        re.compile(r"\bBasic\s+[A-Za-z0-9+/=]+", re.IGNORECASE),
+        "Basic ***",
+    ),
+    # AntCode API key 前缀 ak_xxxxxxxx
+    (
+        re.compile(r"\bak_[A-Za-z0-9_\-]{8,}"),
+        "ak_***",
+    ),
+    # API 密钥/私密密钥（key=value 格式)
     (
         re.compile(
             r'(api[_-]?key|secret[_-]?key|access[_-]?key)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{8,})["\']?',
@@ -52,18 +86,18 @@ SENSITIVE_PATTERNS = [
         ),
         r"\1=***REDACTED***",
     ),
-    # 令牌
+    # 令牌(通用 key=value)
     (
         re.compile(
-            r'(token|bearer|jwt)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{20,})["\']?',
+            r'(token|jwt)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{20,})["\']?',
             re.IGNORECASE,
         ),
         r"\1=***REDACTED***",
     ),
-    # 授权头
+    # 授权头: Authorization=xxx / Authorization: xxx
     (
         re.compile(
-            r'(Authorization)["\']?\s*[:=]\s*["\']?(Bearer\s+)?([a-zA-Z0-9_\-\.]{20,})["\']?',
+            r'(Authorization)["\']?\s*[:=]\s*["\']?(?:Bearer\s+|Basic\s+)?([a-zA-Z0-9_\-\.+/=]{8,})["\']?',
             re.IGNORECASE,
         ),
         r"\1=***REDACTED***",
@@ -78,6 +112,34 @@ SENSITIVE_PATTERNS = [
 ]
 
 
+# 字典脱敏:命中即整体 value 替换为 ``"***"`` 的 key 名(子串匹配)。
+# 给 web_api access log middleware 直接调用,避免在请求体里漏字段。
+DEFAULT_SENSITIVE_KEY_TOKENS: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "secret_key",
+        "secretkey",
+        "access_key",
+        "accesskey",
+        "authorization",
+        "auth",
+        "credential",
+        "credentials",
+        "jwt",
+        "cert",
+        "certificate",
+        "private_key",
+        "install_key",
+    }
+)
+
+
 def sanitize_log_message(message: str) -> str:
     """对日志消息进行敏感信息脱敏"""
     if not message:
@@ -90,37 +152,37 @@ def sanitize_log_message(message: str) -> str:
     return sanitized
 
 
-def sanitize_dict(data: dict[str, Any], sensitive_keys: set[str] | None = None) -> dict[str, Any]:
-    """对字典数据进行敏感信息脱敏"""
+def sanitize_dict(
+    data: dict[str, Any],
+    sensitive_keys: set[str] | frozenset[str] | None = None,
+    mask: str = "***",
+) -> dict[str, Any]:
+    """对字典数据进行敏感信息脱敏。
+
+    命中 ``sensitive_keys`` 的 key,value 整体替换为 ``mask``;否则递归
+    处理子 dict / list。给 web_api access log middleware 与日志过滤器
+    复用,确保结构化字段不会因正则漏匹配而泄露。
+    """
     if sensitive_keys is None:
-        sensitive_keys = {
-            "password",
-            "passwd",
-            "pwd",
-            "secret",
-            "token",
-            "api_key",
-            "apikey",
-            "secret_key",
-            "secretkey",
-            "access_key",
-            "accesskey",
-            "authorization",
-            "auth",
-            "credential",
-            "credentials",
-        }
+        sensitive_keys = DEFAULT_SENSITIVE_KEY_TOKENS
 
     if not isinstance(data, dict):
         return data
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
-        key_lower = key.lower()
+        key_lower = str(key).lower()
         if any(sk in key_lower for sk in sensitive_keys):
-            result[key] = "***REDACTED***"
+            result[key] = mask
         elif isinstance(value, dict):
-            result[key] = sanitize_dict(value, sensitive_keys)
+            result[key] = sanitize_dict(value, sensitive_keys, mask=mask)
+        elif isinstance(value, list):
+            result[key] = [
+                sanitize_dict(item, sensitive_keys, mask=mask)
+                if isinstance(item, dict)
+                else (sanitize_log_message(item) if isinstance(item, str) else item)
+                for item in value
+            ]
         elif isinstance(value, str):
             result[key] = sanitize_log_message(value)
         else:

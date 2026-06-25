@@ -107,17 +107,39 @@ class GitCredentialService:
     def _build_basic_header(self, username: str | None, secret: str) -> str:
         if not username:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Basic 凭证缺少 username")
-        token = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("utf-8")
+        token = base64.b64encode(f"{username}:{secret}".encode()).decode("utf-8")
         return f"Authorization: Basic {token}"
 
+    # 允许的 Git 协议白名单:只走 HTTPS,杜绝降级到明文 HTTP 或 file:// 等
+    _ALLOWED_SCHEMES = frozenset({"https"})
+
     def _validate_host_scope(self, git_url: str, host_scope: str) -> None:
-        host = (urlparse(git_url).hostname or "").lower()
+        """校验 Git URL 的 host 与凭证 ``host_scope`` 精确匹配。
+
+        历史实现使用 ``host.endswith(f".{scope}")`` 放过任意子域,
+        攻击者注册 ``evil.github.com`` 即可窃取 ``github.com`` 范围内
+        的凭证(P0-#5)。这里改为:
+        1. scheme 必须在白名单(仅 HTTPS)
+        2. host 与 scope 必须**完全相等**(case-insensitive)
+        """
+        parsed = urlparse(git_url)
+        if parsed.scheme.lower() not in self._ALLOWED_SCHEMES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Git 地址协议不允许,仅支持 HTTPS",
+            )
+        host = (parsed.hostname or "").lower()
         scope = host_scope.strip().lower()
         if not host or not scope:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Git 地址或 host_scope 无效")
-        if host == scope or host.endswith(f".{scope}"):
-            return
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Git 凭证 host_scope 不匹配")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Git 地址或 host_scope 无效",
+            )
+        if host != scope:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Git 凭证 host_scope 不匹配",
+            )
 
     def _normalize_username(self, username: str | None) -> str | None:
         if username is None:
