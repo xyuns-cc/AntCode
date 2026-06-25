@@ -26,6 +26,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from antcode_contracts.transcode import (
+    datetime_to_proto_timestamp,
+    encode_task_status,
+    log_type_str_to_proto,
+    proto_timestamp_to_datetime,
+)
 from loguru import logger
 
 from antcode_worker.transport.base import (
@@ -35,65 +41,9 @@ from antcode_worker.transport.base import (
     TaskResult,
 )
 
-
-# ---------------------------------------------------------------------------
-# 字符串 <-> Proto enum 映射（与 Direct transport 共享同一约定）
-# ---------------------------------------------------------------------------
-def _status_str_to_proto(status: str) -> int:
-    from antcode_contracts import data_pb2
-
-    mapping = {
-        "": data_pb2.Status.STATUS_UNSPECIFIED,
-        "pending": data_pb2.Status.STATUS_PENDING,
-        "running": data_pb2.Status.STATUS_RUNNING,
-        "success": data_pb2.Status.STATUS_COMPLETED,
-        "completed": data_pb2.Status.STATUS_COMPLETED,
-        "done": data_pb2.Status.STATUS_COMPLETED,
-        "failed": data_pb2.Status.STATUS_FAILED,
-        "failure": data_pb2.Status.STATUS_FAILED,
-        "error": data_pb2.Status.STATUS_FAILED,
-        "cancelled": data_pb2.Status.STATUS_CANCELLED,
-        "canceled": data_pb2.Status.STATUS_CANCELLED,
-        "timeout": data_pb2.Status.STATUS_TIMEOUT,
-        "timed_out": data_pb2.Status.STATUS_TIMEOUT,
-    }
-    return mapping.get((status or "").lower(), data_pb2.Status.STATUS_UNSPECIFIED)
-
-
-def _log_type_str_to_proto(log_type: str) -> int:
-    from antcode_contracts import data_pb2
-
-    mapping = {
-        "": data_pb2.LogType.LOG_TYPE_UNSPECIFIED,
-        "stdout": data_pb2.LogType.LOG_TYPE_STDOUT,
-        "stderr": data_pb2.LogType.LOG_TYPE_STDERR,
-        "system": data_pb2.LogType.LOG_TYPE_SYSTEM,
-    }
-    return mapping.get((log_type or "").lower(), data_pb2.LogType.LOG_TYPE_UNSPECIFIED)
-
-
-def datetime_to_proto_timestamp(dt: datetime | None) -> Any:
-    """``datetime`` → ``common_pb2.Timestamp``，``None`` 时返回 ``None``。"""
-    if dt is None:
-        return None
-    from antcode_contracts import common_pb2
-
-    ts = common_pb2.Timestamp()
-    epoch = dt.timestamp()
-    ts.seconds = int(epoch)
-    ts.nanos = int((epoch - int(epoch)) * 1e9)
-    return ts
-
-
-def proto_timestamp_to_datetime(ts: Any) -> datetime | None:
-    """``common_pb2.Timestamp`` → ``datetime``，未设置时返回 ``None``。"""
-    if ts is None:
-        return None
-    seconds = getattr(ts, "seconds", 0)
-    nanos = getattr(ts, "nanos", 0)
-    if seconds == 0 and nanos == 0:
-        return None
-    return datetime.fromtimestamp(seconds + nanos / 1e9)
+# P1: 之前 codecs.py 自己维护了一份字符串-枚举映射 + Timestamp 双向转换，
+# 与 redis/transport.py 完全重复。现在统一从 ``antcode_contracts.transcode``
+# 导入,见包内 transcode.py 注释中的别名收敛清单。
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +75,7 @@ class TaskDecoder:
                 receipt=getattr(dispatch, "receipt_id", "") or None,
             )
         except Exception as e:
-            logger.error(f"解码任务消息失败: {e}")
+            logger.exception("解码任务消息失败")
             raise CodecError(f"解码任务消息失败: {e}") from e
 
 
@@ -133,40 +83,26 @@ class TaskDecoder:
 # TaskResult → TaskStatus
 # ---------------------------------------------------------------------------
 class TaskStatusEncoder:
-    """``TaskResult`` → ``data_pb2.TaskStatus``（StreamStatus 消息体）。"""
+    """``TaskResult`` → ``data_pb2.TaskStatus``（StreamStatus 消息体）。
+
+    实际工作委托给 ``antcode_contracts.transcode.encode_task_status``，
+    保持与 Direct 模式同一份 Status 别名映射 / data map 处理逻辑。
+    """
 
     @staticmethod
     def encode(result: TaskResult, worker_id: str) -> Any:
-        from antcode_contracts import data_pb2
-
-        msg = data_pb2.TaskStatus(
+        return encode_task_status(
             run_id=result.run_id or "",
             task_id=result.task_id or "",
             worker_id=worker_id or "",
-            status=_status_str_to_proto(result.status),
+            status=result.status,
             exit_code=int(result.exit_code or 0),
             error_message=result.error_message or "",
+            started_at=result.started_at,
+            finished_at=result.finished_at,
             duration_ms=int(result.duration_ms or 0),
+            data=result.data,
         )
-        started = datetime_to_proto_timestamp(result.started_at)
-        if started is not None:
-            msg.started_at.CopyFrom(started)
-        finished = datetime_to_proto_timestamp(result.finished_at)
-        if finished is not None:
-            msg.finished_at.CopyFrom(finished)
-        if result.data:
-            for k, v in result.data.items():
-                key = str(k)
-                if isinstance(v, (str, int, float, bool)):
-                    msg.data[key] = str(v)
-                else:
-                    import json
-
-                    try:
-                        msg.data[key] = json.dumps(v, ensure_ascii=False)
-                    except Exception:
-                        msg.data[key] = repr(v)
-        return msg
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +117,7 @@ class LogEncoder:
 
         entry = data_pb2.LogEntry(
             run_id=log.run_id or "",
-            log_type=_log_type_str_to_proto(log.log_type),
+            log_type=log_type_str_to_proto(log.log_type),
             content=log.content or "",
             sequence=int(log.sequence or 0),
         )

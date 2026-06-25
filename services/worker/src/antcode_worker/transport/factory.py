@@ -246,8 +246,8 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
         logger.info("Direct 模式自检通过")
         return True
 
-    except Exception as e:
-        logger.error(f"Direct 模式自检失败: {e}")
+    except Exception:
+        logger.exception("Direct 模式自检失败")
         logger.error("请检查 Redis 连接配置和网络连通性")
         return False
 
@@ -356,8 +356,8 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
         logger.error("Gateway 模式自检失败: 连接超时")
         logger.error("请检查 Gateway 地址和网络连通性")
         return False
-    except Exception as e:
-        logger.error(f"Gateway 模式自检失败: {e}")
+    except Exception:
+        logger.exception("Gateway 模式自检失败")
         logger.error("请检查 Gateway 配置、证书和网络连通性")
         return False
 

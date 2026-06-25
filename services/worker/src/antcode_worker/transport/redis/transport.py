@@ -17,7 +17,6 @@ Requirements: 5.3, 7.2, 11.3
 """
 
 import asyncio
-import base64
 import contextlib
 import json
 import time
@@ -25,6 +24,11 @@ from datetime import datetime
 from typing import Any
 
 from antcode_contracts import data_pb2
+from antcode_contracts.transcode import (
+    datetime_to_proto_timestamp,
+    encode_task_status,
+    log_type_str_to_proto,
+)
 from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 from antcode_core.observability.tracing import inject_trace
 from loguru import logger
@@ -44,59 +48,9 @@ from antcode_worker.transport.base import (
 from antcode_worker.transport.redis.keys import RedisKeys
 from antcode_worker.transport.redis.reclaim import PendingTaskReclaimer, ensure_consumer_group
 
-# ---------------------------------------------------------------------------
-# 字符串状态 → Proto Status enum 映射
-#
-# Worker 内部仍然按 ``TaskResult.status`` 字符串语义传递；写 Stream 时把
-# 字符串映射到 ``data_pb2.Status``，与 Master ``result_loop`` 的反向映射对齐
-# （``STATUS_COMPLETED`` → ``completed``，详见 result_loop._proto_status_to_str）。
-# ``success`` / ``completed`` / ``done`` 全部归并到 ``STATUS_COMPLETED``，
-# 这样上游下游用任一别名都能在 Proto 上对齐。
-# ---------------------------------------------------------------------------
-_STATUS_STR_TO_PROTO: dict[str, int] = {
-    "": data_pb2.Status.STATUS_UNSPECIFIED,
-    "pending": data_pb2.Status.STATUS_PENDING,
-    "running": data_pb2.Status.STATUS_RUNNING,
-    "success": data_pb2.Status.STATUS_COMPLETED,
-    "completed": data_pb2.Status.STATUS_COMPLETED,
-    "done": data_pb2.Status.STATUS_COMPLETED,
-    "failed": data_pb2.Status.STATUS_FAILED,
-    "failure": data_pb2.Status.STATUS_FAILED,
-    "error": data_pb2.Status.STATUS_FAILED,
-    "cancelled": data_pb2.Status.STATUS_CANCELLED,
-    "canceled": data_pb2.Status.STATUS_CANCELLED,
-    "timeout": data_pb2.Status.STATUS_TIMEOUT,
-    "timed_out": data_pb2.Status.STATUS_TIMEOUT,
-}
-
-
-_LOG_TYPE_STR_TO_PROTO: dict[str, int] = {
-    "": data_pb2.LogType.LOG_TYPE_UNSPECIFIED,
-    "stdout": data_pb2.LogType.LOG_TYPE_STDOUT,
-    "stderr": data_pb2.LogType.LOG_TYPE_STDERR,
-    "system": data_pb2.LogType.LOG_TYPE_SYSTEM,
-}
-
-
-def _status_str_to_proto(status: str) -> int:
-    return _STATUS_STR_TO_PROTO.get((status or "").lower(), data_pb2.Status.STATUS_UNSPECIFIED)
-
-
-def _log_type_str_to_proto(log_type: str) -> int:
-    return _LOG_TYPE_STR_TO_PROTO.get((log_type or "").lower(), data_pb2.LogType.LOG_TYPE_UNSPECIFIED)
-
-
-def _datetime_to_proto_timestamp(dt: datetime | None):
-    """``datetime`` → ``common_pb2.Timestamp``。``None`` 时返回 ``None``。"""
-    if dt is None:
-        return None
-    from antcode_contracts import common_pb2
-
-    ts = common_pb2.Timestamp()
-    epoch = dt.timestamp()
-    ts.seconds = int(epoch)
-    ts.nanos = int((epoch - int(epoch)) * 1e9)
-    return ts
+# P1: Status / LogType / Timestamp 转换全部走 ``antcode_contracts.transcode``
+# （原来这里有本地 ``_STATUS_STR_TO_PROTO`` / ``_log_type_str_to_proto`` /
+# ``_datetime_to_proto_timestamp`` 三份拷贝，与 gateway/codecs.py 重复）。
 
 
 class RedisTransport(TransportBase):
@@ -249,7 +203,7 @@ class RedisTransport(TransportBase):
                     await self._redis.aclose()
                     self._redis = None
                 if not self._is_connection_error(e) or attempt >= max_attempts:
-                    logger.error(f"Redis 连接失败: {e}")
+                    logger.exception("Redis 连接失败")
                     return False
                 logger.warning(f"Redis 连接失败，{delay:.1f}s 后重试 ({attempt}/{max_attempts})")
                 await asyncio.sleep(delay)
@@ -340,11 +294,11 @@ class RedisTransport(TransportBase):
             self._receipt_cache[receipt] = (stream_name, msg_id, decoded)
             return task_msg
 
-        except Exception as e:
+        except Exception:
             self._poll_error_count += 1
             delay = min(30.0, 0.5 * (2 ** (self._poll_error_count - 1)))
             self._poll_backoff_until = time.monotonic() + delay
-            logger.error(f"拉取任务失败: {e}")
+            logger.exception("拉取任务失败")
             logger.warning(f"拉取任务退避 {delay:.1f}s (连续失败 {self._poll_error_count} 次)")
             if self._poll_error_count % 3 == 0:
                 await self.reconnect()
@@ -370,8 +324,8 @@ class RedisTransport(TransportBase):
             self._receipt_cache.pop(task_id, None)
             return True
 
-        except Exception as e:
-            logger.error(f"确认任务失败: {e}")
+        except Exception:
+            logger.exception("确认任务失败")
             return False
 
     async def report_result(self, result: TaskResult) -> bool:
@@ -386,33 +340,18 @@ class RedisTransport(TransportBase):
 
         try:
             result_key = self._keys.task_result_stream()
-            ts_msg = data_pb2.TaskStatus(
+            ts_msg = encode_task_status(
                 run_id=result.run_id or "",
                 task_id=result.task_id or "",
                 worker_id=self._worker_id or "",
-                status=_status_str_to_proto(result.status),
+                status=result.status,
                 exit_code=int(result.exit_code or 0),
                 error_message=result.error_message or "",
+                started_at=result.started_at,
+                finished_at=result.finished_at,
                 duration_ms=int(result.duration_ms or 0),
+                data=result.data,
             )
-            started_ts = _datetime_to_proto_timestamp(result.started_at)
-            if started_ts is not None:
-                ts_msg.started_at.CopyFrom(started_ts)
-            finished_ts = _datetime_to_proto_timestamp(result.finished_at)
-            if finished_ts is not None:
-                ts_msg.finished_at.CopyFrom(finished_ts)
-            # data: dict → map<string,string>。强制 str 化（Proto map<string,string>
-            # 要求 str；非 str 用 to_json/repr fallback）。
-            if result.data:
-                for k, v in result.data.items():
-                    key = str(k)
-                    if isinstance(v, (str, int, float, bool)):
-                        ts_msg.data[key] = str(v)
-                    else:
-                        try:
-                            ts_msg.data[key] = json.dumps(v, ensure_ascii=False)
-                        except Exception:
-                            ts_msg.data[key] = repr(v)
 
             # P5.4: 透传当前 trace(由 engine ``_worker_loop`` set_current_trace
             # 绑定)。无 contextvar 时 inject_trace 会兜底生成新 trace,确保
@@ -427,8 +366,8 @@ class RedisTransport(TransportBase):
             )
             return True
 
-        except Exception as e:
-            logger.error(f"上报结果失败: {e}")
+        except Exception:
+            logger.exception("上报结果失败")
             return False
 
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
@@ -456,8 +395,8 @@ class RedisTransport(TransportBase):
             )
             self._receipt_cache.pop(receipt, None)
             return True
-        except Exception as e:
-            logger.error(f"重新入队失败: {e}")
+        except Exception:
+            logger.exception("重新入队失败")
             return False
 
     async def send_log(self, log: LogMessage) -> bool:
@@ -472,11 +411,11 @@ class RedisTransport(TransportBase):
         """``LogMessage`` → ``data_pb2.LogEntry``"""
         entry = data_pb2.LogEntry(
             run_id=log.run_id or "",
-            log_type=_log_type_str_to_proto(log.log_type),
+            log_type=log_type_str_to_proto(log.log_type),
             content=log.content or "",
             sequence=int(log.sequence or 0),
         )
-        ts = _datetime_to_proto_timestamp(log.timestamp or datetime.now())
+        ts = datetime_to_proto_timestamp(log.timestamp or datetime.now())
         if ts is not None:
             entry.timestamp.CopyFrom(ts)
         return entry
@@ -542,8 +481,8 @@ class RedisTransport(TransportBase):
                     logger.error(f"发送批量日志失败: {result}")
                     return False
             return True
-        except Exception as e:
-            logger.error(f"发送批量日志失败: {e}")
+        except Exception:
+            logger.exception("发送批量日志失败")
             return False
 
     async def send_log_chunk(
@@ -554,48 +493,23 @@ class RedisTransport(TransportBase):
         offset: int,
         is_final: bool = False,
     ) -> bool:
-        """发送日志分片
+        """发送日志分片 — 已弃用，no-op。
 
-        TODO(P3): chunk Stream 暂时保留 dict + base64 wire format（契约测试
-        ``test_send_log_chunk_concat_round_trips`` 按字段读 ``data`` /
-        ``offset`` / ``is_final``）。P3 会把 chunk 归并入 ``LogBatch``
-        并由 source_bundle/pgartifact 承载大块。
+        P2: 之前会把 ``[CHUNK] offset=N <base64>`` 拼到 LogBatch content 里塞
+        Stream，违反 Stream 单字段语义且会撑大日志体。大块二进制现在应该走
+        ``source_bundle`` / ``pgartifact`` 通道，本方法保留签名只为兼容
+        旧调用方，不再实际写入 Stream。
+
+        Returns:
+            恒为 ``True``（兼容调用方）。
         """
-        if not self._redis or not self._running:
-            return False
-
-        try:
-            # 写入 log chunk stream
-            chunk_key = self._keys.log_chunk_stream(run_id)
-            fields = {
-                "log_type": log_type,
-                "data": base64.b64encode(data).decode("utf-8"),
-                "offset": str(offset),
-                "is_final": str(is_final).lower(),
-                "timestamp": datetime.now().isoformat(),
-            }
-            maxlen = self._keys.config.stream_max_len
-            async def _write_chunk():
-                pipe = self._redis.pipeline(transaction=False)
-                if maxlen > 0:
-                    pipe.xadd(
-                        chunk_key,
-                        fields,
-                        maxlen=maxlen,
-                        approximate=self._keys.config.stream_approx_max_len,
-                    )
-                else:
-                    pipe.xadd(chunk_key, fields)
-                if self._keys.config.log_ttl > 0:
-                    pipe.expire(chunk_key, self._keys.config.log_ttl)
-                await pipe.execute()
-
-            await self._run_with_reconnect("发送日志分片", _write_chunk)
-            return True
-
-        except Exception as e:
-            logger.error(f"发送日志分片失败: {e}")
-            return False
+        size = len(data) if data else 0
+        logger.warning(
+            "send_log_chunk 已弃用,大块二进制应走 source_bundle/pgartifact: "
+            f"run_id={run_id} log_type={log_type} offset={offset} "
+            f"size={size} is_final={is_final}"
+        )
+        return True
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
         """发送心跳 — P3 桥接到 ``lease_renew``。
@@ -625,8 +539,8 @@ class RedisTransport(TransportBase):
             # 同步写 heartbeat Hash（保留运维 dashboard 兼容）。
             await self._write_legacy_heartbeat_hash(heartbeat, worker_id)
             return True
-        except Exception as exc:
-            logger.error(f"发送心跳失败: {exc}")
+        except Exception:
+            logger.exception(f"发送心跳失败: worker_id={worker_id}")
             return False
 
     def _heartbeat_to_metrics_dict(self, heartbeat: HeartbeatMessage) -> dict:
@@ -804,8 +718,8 @@ class RedisTransport(TransportBase):
                 payload=decoded,
                 receipt=receipt,
             )
-        except Exception as e:
-            logger.error(f"拉取控制消息失败: {e}")
+        except Exception:
+            logger.exception("拉取控制消息失败")
             return None
 
     async def ack_control(self, receipt: str) -> bool:
@@ -819,8 +733,8 @@ class RedisTransport(TransportBase):
                 return False
             await self._redis.xack(stream_key, self._control_group, msg_id)
             return True
-        except Exception as e:
-            logger.error(f"确认控制消息失败: {e}")
+        except Exception:
+            logger.exception("确认控制消息失败")
             return False
 
     async def send_control_result(
@@ -851,8 +765,8 @@ class RedisTransport(TransportBase):
             await self._redis.xadd(reply_stream, payload, maxlen=1, approximate=True)
             await self._redis.expire(reply_stream, 120)
             return True
-        except Exception as e:
-            logger.error(f"回传控制结果失败: {e}")
+        except Exception:
+            logger.exception("回传控制结果失败")
             return False
 
     def get_status(self) -> dict[str, Any]:
@@ -913,8 +827,8 @@ class RedisTransport(TransportBase):
 
             await pipe.execute()
             return True
-        except Exception as e:
-            logger.error(f"上报爬虫数据失败: {e}")
+        except Exception:
+            logger.exception("上报爬虫数据失败")
             return False
 
     async def update_spider_meta(
@@ -952,8 +866,8 @@ class RedisTransport(TransportBase):
                 await self._redis.expire(meta_key, ttl_seconds)
 
             return True
-        except Exception as e:
-            logger.error(f"更新爬虫元数据失败: {e}")
+        except Exception:
+            logger.exception("更新爬虫元数据失败")
             return False
 
     def get_spider_data_reporter(
