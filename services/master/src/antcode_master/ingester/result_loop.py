@@ -5,6 +5,15 @@
 
 P1a 改造：Stream 上的消息现在是 Proto bytes（``data_pb2.TaskStatus``），
 通过 ``StreamClient(codec=ProtoCodec(...))`` 自动解码为 typed 对象。
+
+P2-#24 改造：解码失败（payload 损坏 / schema 不匹配 / 重复处理报错）
+的消息现在不再被直接跳过——增加 ``XPENDING`` 检查的 deliver_count 阈值，
+超过 ``MAX_DELIVER_COUNT`` 后 ``XACK`` 并 ``XADD`` 到 dead-letter
+stream ``antcode:dead_letter:result``，避免坏消息无限重投阻塞 group。
+
+实现采取"直接用底层 redis 客户端做 XPENDING"的策略——``StreamClient``
+当前不暴露 XPENDING；后续如果 StreamClient 增补 ``xpending`` 方法可
+内联替换 ``_get_pending_deliver_count``。
 """
 
 from __future__ import annotations
@@ -19,10 +28,21 @@ from typing import Any
 from antcode_contracts import data_pb2
 from antcode_core.application.services.task_run_service import task_run_service
 from antcode_core.infrastructure.redis import task_result_stream
+from antcode_core.infrastructure.redis.client import get_redis_client
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
 
 from antcode_master.leader import ensure_leader
+
+
+def _dead_letter_stream_key(namespace: str | None = None) -> str:
+    """死信队列 stream key：``antcode:dead_letter:result``。"""
+    return f"{redis_namespace(namespace)}:dead_letter:result"
+
+
+# 单条消息最大重投次数；超过后进入 DLQ。
+MAX_DELIVER_COUNT = 5
 
 
 class ResultLoop:
@@ -108,21 +128,32 @@ class ResultLoop:
                         continue
 
                 ack_ids: list[str] = []
+                dlq_ids: list[str] = []
                 for message in messages:
                     try:
                         handled = await self._handle_message(message.payload)
                         if handled:
                             ack_ids.append(message.msg_id)
-                    except Exception as exc:
-                        logger.error(f"处理结果消息失败: {exc}")
+                        elif await self._should_dead_letter(message.msg_id):
+                            await self._move_to_dlq(message)
+                            dlq_ids.append(message.msg_id)
+                    except Exception:
+                        logger.exception(
+                            "处理结果消息失败: msg_id={}", message.msg_id
+                        )
+                        if await self._should_dead_letter(message.msg_id):
+                            await self._move_to_dlq(message)
+                            dlq_ids.append(message.msg_id)
 
-                if ack_ids:
-                    await self._stream.xack(self._stream_key, ack_ids, self._group)
+                # 正常处理完毕 + DLQ 后的消息都需要 ACK（防止重投阻塞 group）。
+                final_ack_ids = ack_ids + dlq_ids
+                if final_ack_ids:
+                    await self._stream.xack(self._stream_key, final_ack_ids, self._group)
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"结果消费循环异常: {e}")
+            except Exception:
+                logger.exception("结果消费循环异常")
                 await asyncio.sleep(self._poll_interval)
 
     async def _handle_message(self, task_status: data_pb2.TaskStatus) -> bool:
@@ -174,6 +205,60 @@ class ResultLoop:
         if status_name.startswith("STATUS_"):
             return status_name[len("STATUS_") :].lower()
         return status_name.lower()
+
+    async def _should_dead_letter(self, msg_id: str) -> bool:
+        """判断单条消息的 deliver_count 是否已经超过阈值。
+
+        StreamClient 暂未暴露 XPENDING，直接走 ``get_redis_client``。
+        失败时返回 False，让消息留在 pending 由下轮 reclaim 处理。
+        """
+        try:
+            redis = await get_redis_client()
+            # XPENDING <stream> <group> <start> <end> <count> 返回
+            # [[msg_id, consumer, idle_ms, deliver_count], ...]
+            entries = await redis.xpending_range(
+                name=self._stream_key,
+                groupname=self._group,
+                min=msg_id,
+                max=msg_id,
+                count=1,
+            )
+            if not entries:
+                return False
+            deliver_count = int(entries[0].get("times_delivered", 0))
+            return deliver_count > MAX_DELIVER_COUNT
+        except Exception:
+            logger.exception("XPENDING 查询失败: msg_id={}", msg_id)
+            return False
+
+    async def _move_to_dlq(self, message) -> None:
+        """把一条坏掉的消息搬到 ``antcode:dead_letter:result``。
+
+        DLQ 内消息仍是 Proto bytes，保留原 payload；同时附带 ``orig_msg_id``
+        和 ``orig_stream`` 方便后续人工排障。
+        """
+        try:
+            redis = await get_redis_client()
+            payload = message.payload
+            raw_bytes = payload.SerializeToString() if hasattr(payload, "SerializeToString") else b""
+            await redis.xadd(
+                _dead_letter_stream_key(),
+                {
+                    "payload": raw_bytes,
+                    "orig_stream": self._stream_key,
+                    "orig_msg_id": message.msg_id,
+                    "moved_at_ms": str(int(time.time() * 1000)),
+                },
+                maxlen=10_000,
+                approximate=True,
+            )
+            logger.warning(
+                "消息超过最大重投次数已进 DLQ: msg_id={} stream={}",
+                message.msg_id,
+                self._stream_key,
+            )
+        except Exception:
+            logger.exception("写 DLQ 失败: msg_id={}", message.msg_id)
 
 
 def _safe_has_field(msg: Any, field_name: str) -> bool:
