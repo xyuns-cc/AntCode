@@ -75,7 +75,7 @@ async def main():
         else:
             logger.warning("Redis 不可用，ControlService 将退化为占位 Lease")
     except Exception as exc:  # pragma: no cover - defensive bootstrap
-        logger.error(f"构建 LeaseStore 失败，ControlService 将退化为占位 Lease: {exc}")
+        logger.exception(f"构建 LeaseStore 失败，ControlService 将退化为占位 Lease: {exc}")
 
     # 注册服务实现：ControlService (lifecycle/lease/control) + DataService (tasks/status/logs)
     logger.info("注册 gRPC 服务")
