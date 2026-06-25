@@ -1,0 +1,200 @@
+// Control plane service - synchronous, low-frequency RPCs for worker lifecycle,
+// lease (liveness) management, task-level control, and a reverse server-streaming
+// control channel from Gateway/Master to Worker.
+//
+// Replaces the lifecycle / control / heartbeat halves of the legacy GatewayService.
+// All requests carry a W3C TraceContext for distributed tracing.
+//
+// Requirements: 1.4, 14.1
+
+syntax = "proto3";
+
+package antcode.v1;
+
+import "common.proto";
+
+service ControlService {
+  // Worker lifecycle
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+
+  // Lease replaces periodic heartbeat as the liveness signal.
+  // Metrics piggy-back on the same call so we don't need a separate channel.
+  rpc Lease(LeaseRequest) returns (LeaseResponse);
+
+  // Task lifecycle control (synchronous, low-frequency).
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+
+  // Reverse control channel: a long-lived server-streaming RPC the Worker
+  // opens once and receives ControlEvents on. Each event carries an event_id
+  // that the Worker AckControls back when it has applied (or rejected) the event.
+  rpc WatchControl(WatchControlRequest) returns (stream ControlEvent);
+  rpc AckControl(AckControlRequest) returns (AckControlResponse);
+}
+
+// =========================================================================
+// Registration
+// =========================================================================
+
+message RegisterRequest {
+  string api_key = 1;                       // Bootstrap API key / install key
+  string worker_id = 2;                     // Worker self-asserted identifier
+  OSInfo os_info = 3;                       // Operating system information
+  map<string, string> capabilities = 4;     // Worker capabilities (key -> value)
+  string version = 5;                       // Worker version (semver)
+  TraceContext trace = 100;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string worker_id = 2;                     // Server-assigned (or echoed) worker id
+  string error = 3;                         // Empty on success
+  int32 lease_ttl_ms = 4;                   // Lease lifetime granted on success
+  int32 lease_renew_after_ms = 5;           // Recommended renewal interval (< ttl)
+}
+
+// =========================================================================
+// Deregistration
+// =========================================================================
+
+message DeregisterRequest {
+  string worker_id = 1;
+  string reason = 2;                        // e.g. "shutdown", "drain"
+  TraceContext trace = 100;
+}
+
+message DeregisterResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// =========================================================================
+// Lease (liveness + metrics) - replaces SendHeartbeat
+// =========================================================================
+
+message LeaseRequest {
+  string worker_id = 1;
+  string current_lease_id = 2;              // Empty on first call, prior lease_id on renew
+  Metrics metrics = 3;                      // System + spider metrics piggy-back here
+  TraceContext trace = 100;
+}
+
+message LeaseResponse {
+  string lease_id = 1;                      // New (or refreshed) lease id
+  int64 expires_at_ms = 2;                  // Absolute expiry (epoch ms)
+  int32 renew_after_ms = 3;                 // Recommended renewal interval
+  bool revoked = 4;                         // True if Master forced lease revocation
+  string revoke_reason = 5;                 // Human-readable revoke reason
+}
+
+// =========================================================================
+// Task control
+// =========================================================================
+
+message CancelTaskRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string reason = 4;
+  TraceContext trace = 100;
+}
+
+message CancelTaskResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message UpdateConfigRequest {
+  string worker_id = 1;
+  map<string, string> config = 2;
+  TraceContext trace = 100;
+}
+
+message UpdateConfigResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// =========================================================================
+// Reverse control channel
+// =========================================================================
+
+message WatchControlRequest {
+  string worker_id = 1;
+  TraceContext trace = 100;
+}
+
+// ControlEvent is what the server streams to the worker on WatchControl.
+// payload is a strongly typed oneof - no more payload_json escape hatch.
+message ControlEvent {
+  string event_id = 1;                      // Unique per event, used for AckControl
+  TraceContext trace = 2;
+  oneof payload {
+    TaskCancel task_cancel = 10;
+    ConfigUpdate config_update = 11;
+    RuntimeControl runtime_control = 12;
+    Ping ping = 13;
+  }
+}
+
+message AckControlRequest {
+  string worker_id = 1;
+  string event_id = 2;
+  bool success = 3;                         // Whether the worker applied the event
+  string error = 4;                         // Empty on success
+  TraceContext trace = 100;
+}
+
+message AckControlResponse {
+  bool received = 1;
+}
+
+// =========================================================================
+// Shared sub-messages used by ControlEvent.payload
+// =========================================================================
+
+message TaskCancel {
+  string task_id = 1;
+  string run_id = 2;
+  string reason = 3;
+}
+
+message ConfigUpdate {
+  map<string, string> config = 1;
+}
+
+// RuntimeControl drives the Worker's runtime-management surface
+// (env / package / interpreter management - see engine._handle_runtime_control).
+//
+// The legacy implementation stuffed arbitrary key/values into payload_json (a string).
+// We replace that with a typed `RuntimeAction` oneof so callers cannot smuggle
+// schema-less blobs. Until every action is enumerated, GenericAction { name, args }
+// keeps short-term compatibility with the existing action dispatcher while still
+// being typed (string -> string, no JSON).
+message RuntimeControl {
+  string request_id = 1;                    // Correlation id - echoed back on result
+  string action = 2;                        // Action name (legacy field, kept for routing)
+  map<string, string> params = 3;           // Top-level params (e.g. reply_stream)
+  RuntimeAction action_typed = 4;           // Typed payload (preferred)
+}
+
+message RuntimeAction {
+  oneof payload {
+    // Open-ended generic action carrier. Each action name maps to an
+    // engine handler; args is a typed map (no JSON blobs).
+    // P1/P3/P4 owners should promote frequently-used actions
+    // (list_envs, install_packages, install_interpreter, ...) to
+    // dedicated typed messages and slot them in here.
+    GenericAction generic = 99;
+  }
+}
+
+message GenericAction {
+  string name = 1;                          // e.g. "list_envs", "install_packages"
+  map<string, string> args = 2;             // Typed key-value args (no JSON)
+}
+
+message Ping {
+  Timestamp timestamp = 1;
+}
