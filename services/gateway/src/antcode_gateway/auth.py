@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import grpc
+from antcode_core.observability.tracing import parse_traceparent
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -25,6 +26,22 @@ if TYPE_CHECKING:
 AUDIT_SECURITY_STREAM = "audit:security"
 # 审计 Stream 最大长度（近似裁剪）
 AUDIT_SECURITY_MAXLEN = 100_000
+
+# W3C TraceContext metadata header(grpc 元数据按 HTTP/2 习惯全小写)
+TRACEPARENT_HEADER = "traceparent"
+
+
+def _extract_trace_id_from_metadata(metadata: dict[str, Any]) -> str | None:
+    """从 gRPC invocation_metadata 提取 W3C trace_id。
+
+    metadata 头大小写在不同 grpc 客户端实现里不一致,这里两种都试。
+    格式不合规直接返回 None,不抛——审计路径绝不能因可观测性失败而中断。
+    """
+    raw = metadata.get(TRACEPARENT_HEADER) or metadata.get(TRACEPARENT_HEADER.upper())
+    if not raw:
+        return None
+    ids = parse_traceparent(str(raw))
+    return ids.trace_id if ids else None
 
 
 @dataclass
@@ -85,6 +102,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         worker_id: str | None,
         peer: str | None,
         reason: str,
+        trace_id: str | None = None,
     ) -> None:
         """写一条安全审计事件到 Redis Stream
 
@@ -96,19 +114,24 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             worker_id: 关联的 worker_id，可空
             peer: 对端标识（IP 或 mTLS CN），可空
             reason: 简短失败原因
+            trace_id: W3C trace_id（32 hex），从请求 metadata 中的
+                ``traceparent`` 头提取。空时审计事件不带 trace_id 字段。
         """
         if self._audit_stream is None:
             return
         try:
+            fields = {
+                "event_type": event_type,
+                "worker_id": worker_id or "",
+                "peer": peer or "",
+                "reason": reason or "",
+                "ts": str(int(time.time() * 1000)),
+            }
+            if trace_id:
+                fields["trace_id"] = trace_id
             await self._audit_stream.xadd(
                 AUDIT_SECURITY_STREAM,
-                {
-                    "event_type": event_type,
-                    "worker_id": worker_id or "",
-                    "peer": peer or "",
-                    "reason": reason or "",
-                    "ts": str(int(time.time() * 1000)),
-                },
+                fields,
                 maxlen=AUDIT_SECURITY_MAXLEN,
                 approximate=True,
             )
@@ -154,11 +177,17 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 # 没有任何认证凭证：归类为 mTLS 拒绝 / 凭证缺失
                 event_type = "mtls_reject"
             peer = metadata.get("x-forwarded-for") or metadata.get("x-real-ip") or ""
+            # P5.4: 如果 worker 在 metadata 里带了 W3C traceparent 头,
+            # 把 trace_id 一起记入审计事件,方便事后跨服务追查"为什么
+            # 这次请求被拒"。无 traceparent 时 trace_id=None,审计字段
+            # 自动省略,不影响兼容性。
+            trace_id = _extract_trace_id_from_metadata(metadata)
             await self._emit_audit(
                 event_type=event_type,
                 worker_id=worker_id,
                 peer=peer,
                 reason=auth_result.error or "",
+                trace_id=trace_id,
             )
 
             return self._create_unauthenticated_handler(auth_result.error)

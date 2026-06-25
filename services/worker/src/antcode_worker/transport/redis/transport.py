@@ -26,6 +26,7 @@ from typing import Any
 
 from antcode_contracts import data_pb2
 from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
+from antcode_core.observability.tracing import inject_trace
 from loguru import logger
 from redis.exceptions import ConnectionError, TimeoutError
 
@@ -328,6 +329,14 @@ class RedisTransport(TransportBase):
                 receipt=receipt,
             )
 
+            # P5.4: Direct 模式下 ready stream 是 dict-wire,Master 端
+            # 把 traceparent 放在 ``trace_parent`` 字段。把它挂到 task_msg
+            # 上(TaskMessage 没有此字段,Python 允许动态属性),engine
+            # ``_worker_loop`` 会读取并 set_current_trace。
+            traceparent = decoded.get("trace_parent") or decoded.get("traceparent") or ""
+            if traceparent:
+                task_msg.traceparent = traceparent  # type: ignore[attr-defined]
+
             self._receipt_cache[receipt] = (stream_name, msg_id, decoded)
             return task_msg
 
@@ -404,6 +413,11 @@ class RedisTransport(TransportBase):
                             ts_msg.data[key] = json.dumps(v, ensure_ascii=False)
                         except Exception:
                             ts_msg.data[key] = repr(v)
+
+            # P5.4: 透传当前 trace(由 engine ``_worker_loop`` set_current_trace
+            # 绑定)。无 contextvar 时 inject_trace 会兜底生成新 trace,确保
+            # task:result Stream 上的每条 TaskStatus 都带 trace。
+            inject_trace(ts_msg)
 
             payload_bytes = ts_msg.SerializeToString()
 
@@ -503,6 +517,9 @@ class RedisTransport(TransportBase):
                     )
                     for log in run_logs:
                         batch_msg.entries.append(self._build_log_entry_proto(log))
+                    # P5.4: 把当前 trace 注入到每个 LogBatch,Master 端
+                    # ingester 可据此把同一 run 的日志按 trace_id 关联到调用链。
+                    inject_trace(batch_msg)
                     payload_bytes = batch_msg.SerializeToString()
                     if maxlen > 0:
                         pipe.xadd(

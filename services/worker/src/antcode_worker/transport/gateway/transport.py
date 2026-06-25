@@ -32,6 +32,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from antcode_core.observability.tracing import (
+    extract_traceparent,
+    inject_trace,
+)
 from loguru import logger
 
 from antcode_worker.transport.base import (
@@ -279,6 +283,14 @@ class GatewayTransport(TransportBase):
                         break
                     try:
                         task = TaskDecoder.decode(dispatch)
+                        # P5.4: 从 ``TaskDispatch.trace`` 提取 traceparent
+                        # 透传给 engine。TaskDecoder 当前不读 trace 字段
+                        # (为保证 P3 codec 不动),这里 setattr 给 TaskMessage
+                        # 挂一个动态属性,engine ``_worker_loop`` 会读取并
+                        # set_current_trace,实现 Master → Worker 链路。
+                        inbound_traceparent = extract_traceparent(dispatch)
+                        if inbound_traceparent:
+                            task.traceparent = inbound_traceparent  # type: ignore[attr-defined]
                         if task.receipt:
                             self._receipt_cache[task.receipt] = (
                                 datetime.now().timestamp(),
@@ -568,6 +580,11 @@ class GatewayTransport(TransportBase):
             from antcode_worker.transport.gateway.codecs import TaskStatusEncoder
 
             msg = TaskStatusEncoder.encode(result, self._gateway_config.worker_id or "")
+            # P5.4: 透传当前 trace。``engine._worker_loop`` 在任务起点
+            # set_current_trace,出站时 inject_trace 把 trace 写到
+            # TaskStatus.trace,Master ResultLoop 解码后可以把状态变更
+            # 关联到同一个分布式 trace。
+            inject_trace(msg)
             await self._status_outbox.put(msg)
             if self._gateway_config.enable_receipt_idempotency:
                 self._cache_result(cache_key, True)
@@ -591,6 +608,9 @@ class GatewayTransport(TransportBase):
             from antcode_worker.transport.gateway.codecs import LogEncoder
 
             batch = LogEncoder.encode_batch(logs, self._gateway_config.worker_id or "")
+            # P5.4: 透传当前 trace,Master 端 log ingester 解码后可以把
+            # 这批日志按 trace_id 接到调用链上(全链路日志查询)。
+            inject_trace(batch)
             await self._log_outbox.put(batch)
             return True
         except Exception as e:
