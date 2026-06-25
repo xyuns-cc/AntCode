@@ -17,14 +17,35 @@ from typing import ClassVar
 
 from antcode_core.infrastructure.redis import (
     control_global_stream as shared_control_global_stream,
+)
+from antcode_core.infrastructure.redis import (
     control_group as shared_control_group,
+)
+from antcode_core.infrastructure.redis import (
     control_stream as shared_control_stream,
-    redis_namespace,
-    task_ready_stream as shared_task_ready_stream,
-    task_result_stream as shared_task_result_stream,
-    log_stream_key as shared_log_stream_key,
+)
+from antcode_core.infrastructure.redis import (
     log_chunk_stream_key as shared_log_chunk_stream_key,
+)
+from antcode_core.infrastructure.redis import (
+    log_ingest_stream_key as shared_log_ingest_stream_key,
+)
+from antcode_core.infrastructure.redis import (
+    log_stream_key as shared_log_stream_key,
+)
+from antcode_core.infrastructure.redis import (
+    redis_namespace,
+)
+from antcode_core.infrastructure.redis import (
+    task_ready_stream as shared_task_ready_stream,
+)
+from antcode_core.infrastructure.redis import (
+    task_result_stream as shared_task_result_stream,
+)
+from antcode_core.infrastructure.redis import (
     worker_group as shared_worker_group,
+)
+from antcode_core.infrastructure.redis import (
     worker_heartbeat_key as shared_worker_heartbeat_key,
 )
 
@@ -182,6 +203,10 @@ class RedisKeys:
             Stream key，如 "antcode:log:stream:{run_id}"
         """
         return shared_log_stream_key(run_id, namespace=self._namespace)
+
+    def log_ingest_stream(self) -> str:
+        """Worker 直连日志落库 Stream key。"""
+        return shared_log_ingest_stream_key(namespace=self._namespace)
 
     def log_chunk_stream(self, run_id: str) -> str:
         """

@@ -51,9 +51,7 @@ class SelectorList(list):
             result.extend(sel.re(pattern, flags))
         return result
 
-    def re_first(
-        self, pattern: str, default: str = None, flags: int = 0
-    ) -> str | None:
+    def re_first(self, pattern: str, default: str = None, flags: int = 0) -> str | None:
         """正则匹配第一个"""
         for sel in self:
             match = sel.re_first(pattern, flags=flags)
@@ -216,9 +214,7 @@ class Selector:
                 result.append(match)
         return result
 
-    def re_first(
-        self, pattern: str, default: str = None, flags: int = 0
-    ) -> str | None:
+    def re_first(self, pattern: str, default: str = None, flags: int = 0) -> str | None:
         """正则匹配第一个"""
         matches = self.re(pattern, flags)
         return matches[0] if matches else default

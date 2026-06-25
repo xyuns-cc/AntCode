@@ -3,50 +3,27 @@
 
 提供完整的日志管理功能：
 - 实时捕获 stdout/stderr
-- 本地缓冲（断线恢复）
 - 批量发送
-- WAL + S3 高可靠归档
+- transport 上报
 
-Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7
+Requirements: 9.1, 9.2, 9.4, 9.5, 9.7
 """
 
-from antcode_worker.logs.streamer import LogStreamer, StreamCapture, LogSink
-from antcode_worker.logs.spool import LogSpool, SpoolConfig, SpoolMeta
-from antcode_worker.logs.realtime import RealtimeSender, RealtimeConfig, RealtimeSink
 from antcode_worker.logs.batch import (
-    BatchSender,
-    BatchConfig,
-    BatchSink,
     BackpressureState,
+    BatchConfig,
+    BatchSender,
+    BatchSink,
 )
-from antcode_worker.logs.archive import (
-    LogArchiver,
-    ArchiveConfig,
-    ArchiveResult,
-    ArchiveState,
-    ArchiveRecoveryService,
-    S3Uploader,
-)
-from antcode_worker.logs.wal import (
-    WALWriter,
-    WALReader,
-    WALManager,
-    WALConfig,
-    WALEntry,
-    WALMetadata,
-    WALState,
-)
-from antcode_worker.logs.manager import LogManager, LogManagerConfig, DropPolicy
+from antcode_worker.logs.manager import DropPolicy, LogManager, LogManagerConfig
+from antcode_worker.logs.realtime import RealtimeConfig, RealtimeSender, RealtimeSink
+from antcode_worker.logs.streamer import LogSink, LogStreamer, StreamCapture
 
 __all__ = [
     # Streamer
     "LogStreamer",
     "StreamCapture",
     "LogSink",
-    # Spool
-    "LogSpool",
-    "SpoolConfig",
-    "SpoolMeta",
     # Realtime
     "RealtimeSender",
     "RealtimeConfig",
@@ -56,21 +33,6 @@ __all__ = [
     "BatchConfig",
     "BatchSink",
     "BackpressureState",
-    # Archive (新)
-    "LogArchiver",
-    "ArchiveConfig",
-    "ArchiveResult",
-    "ArchiveState",
-    "ArchiveRecoveryService",
-    "S3Uploader",
-    # WAL
-    "WALWriter",
-    "WALReader",
-    "WALManager",
-    "WALConfig",
-    "WALEntry",
-    "WALMetadata",
-    "WALState",
     # Manager
     "LogManager",
     "LogManagerConfig",

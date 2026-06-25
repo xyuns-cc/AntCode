@@ -2,7 +2,7 @@
 Worker 域模型定义
 
 定义 Worker 执行侧所需的最小模型集合。
-注意：这些模型不等同于 antcode_core 的 MySQL 模型。
+注意：这些模型不等同于 antcode_core 的 PostgreSQL 模型。
 
 Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
 """
@@ -20,6 +20,19 @@ from antcode_worker.domain.enums import (
 )
 
 
+@dataclass(frozen=True)
+class SourceBundle:
+    """任务源码包引用。"""
+
+    uri: str
+    sha256: str
+    size: int
+    transfer_method: str = "source_bundle"
+    entry_point: str = ""
+    resolved_revision: str = ""
+    source_subdir: str = ""
+
+
 @dataclass
 class RunContext:
     """
@@ -30,25 +43,25 @@ class RunContext:
     Requirements: 3.1
     """
 
-    run_id: str                          # 执行实例 ID（全局唯一）
-    task_id: str                         # 任务 ID
-    project_id: str                      # 项目 ID
+    run_id: str  # 执行实例 ID（全局唯一）
+    task_id: str  # 任务 ID
+    project_id: str  # 项目 ID
 
     # 运行时规格
     runtime_spec: Optional["RuntimeSpec"] = None
 
     # 资源限制
-    timeout_seconds: int = 3600          # 执行超时（秒）
-    memory_limit_mb: int = 0             # 内存限制（MB，0=不限制）
-    cpu_limit_seconds: int = 0           # CPU 时间限制（秒，0=不限制）
+    timeout_seconds: int = 3600  # 执行超时（秒）
+    memory_limit_mb: int = 0  # 内存限制（MB，0=不限制）
+    cpu_limit_seconds: int = 0  # CPU 时间限制（秒，0=不限制）
 
     # 元数据
-    priority: int = 0                    # 优先级（越大越高）
+    priority: int = 0  # 优先级（越大越高）
     labels: dict[str, str] = field(default_factory=dict)
     created_at: datetime | None = field(default_factory=datetime.now)
 
     # 传输层信息
-    receipt: str | None = None        # 任务回执（用于 ack/requeue）
+    receipt: str | None = None  # 任务回执（用于 ack/requeue）
 
 
 @dataclass
@@ -62,11 +75,11 @@ class RuntimeSpec:
     """
 
     # Python 规格
-    python_version: str | None = None      # Python 版本（如 "3.11"）
-    python_path: str | None = None         # 指定 Python 路径
+    python_version: str | None = None  # Python 版本（如 "3.11"）
+    python_path: str | None = None  # 指定 Python 路径
 
     # 依赖锁定
-    lock_source: str | None = None         # uv.lock 内容哈希或 URI
+    lock_source: str | None = None  # uv.lock 内容哈希或 URI
     requirements: list[str] = field(default_factory=list)  # requirements.txt 内容
 
     # 可选约束
@@ -89,15 +102,14 @@ class TaskPayload:
 
     task_type: TaskType = TaskType.CODE
 
-    # 项目信息
-    project_path: str | None = None        # 本地项目路径
-    download_url: str | None = None        # 项目下载 URL
-    file_hash: str | None = None           # 文件哈希（用于缓存）
-    is_compressed: bool | None = None      # 是否为压缩包（None 表示自动检测）
+    # Worker 执行工作区，由 source bundle 解包生成
+    workspace_path: str | None = None
+    project_cwd: str | None = None
+    source_bundle: SourceBundle | None = None
 
     # 执行入口
-    entry_point: str = ""                     # 入口文件
-    function: str | None = None            # 入口函数
+    entry_point: str = ""  # 入口文件
+    function: str | None = None  # 入口函数
 
     # 参数
     args: list[str] = field(default_factory=list)
@@ -125,7 +137,7 @@ class ExecPlan:
     """
 
     # 命令（必填字段放在前面）
-    command: str                              # 可执行文件路径
+    command: str  # 可执行文件路径
 
     # 运行 ID（可选）
     run_id: str | None = None
@@ -135,15 +147,19 @@ class ExecPlan:
 
     # 环境
     env: dict[str, str] = field(default_factory=dict)
-    cwd: str | None = None                 # 工作目录
+    cwd: str | None = None  # 工作目录
 
     # 超时
     timeout_seconds: int = 3600
-    grace_period_seconds: int = 10            # SIGTERM 后等待时间
+    grace_period_seconds: int = 10  # SIGTERM 后等待时间
 
     # 资源限制
     memory_limit_mb: int = 0
     cpu_limit_seconds: int = 0
+    # 沙箱硬限制（0 = 使用 ExecutorConfig 默认；POSIX rlimit）
+    max_open_files: int = 0
+    max_processes: int = 0
+    enforce_rlimit: bool = True
 
     # 产物策略
     artifact_patterns: list[str] = field(default_factory=list)
@@ -155,7 +171,7 @@ class ExecPlan:
     sandbox_config: dict[str, Any] = field(default_factory=dict)
 
     # 元数据
-    plugin_name: str | None = None         # 生成此计划的插件名
+    plugin_name: str | None = None  # 生成此计划的插件名
 
 
 @dataclass
@@ -189,8 +205,6 @@ class ExecResult:
     # 日志统计
     stdout_lines: int = 0
     stderr_lines: int = 0
-    log_archived: bool = False
-    log_archive_uri: str | None = None
 
     # 额外数据
     data: dict[str, Any] = field(default_factory=dict)
@@ -211,8 +225,6 @@ class ExecResult:
             "artifacts": [a.to_dict() for a in self.artifacts],
             "stdout_lines": self.stdout_lines,
             "stderr_lines": self.stderr_lines,
-            "log_archived": self.log_archived,
-            "log_archive_uri": self.log_archive_uri,
             "data": self.data,
         }
 
@@ -236,8 +248,8 @@ class LogEntry:
     timestamp: datetime | None = field(default_factory=datetime.now)
 
     # 元数据
-    level: str = "INFO"                       # 日志级别
-    source: str | None = None              # 来源（如文件名）
+    level: str = "INFO"  # 日志级别
+    source: str | None = None  # 来源（如文件名）
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
@@ -260,16 +272,16 @@ class ArtifactRef:
     Requirements: 3.6
     """
 
-    name: str                                 # 产物名称
+    name: str  # 产物名称
     artifact_type: ArtifactType = ArtifactType.FILE
 
     # 存储位置
-    uri: str | None = None                 # 存储 URI
-    local_path: str | None = None          # 本地路径
+    uri: str | None = None  # 存储 URI
+    local_path: str | None = None  # 本地路径
 
     # 元数据
     size_bytes: int = 0
-    checksum: str | None = None            # SHA256
+    checksum: str | None = None  # SHA256
     mime_type: str | None = None
 
     # 时间
@@ -299,9 +311,9 @@ class RuntimeHandle:
     Requirements: 6.1
     """
 
-    path: str                                 # 虚拟环境路径
-    runtime_hash: str                         # 运行时哈希
-    python_executable: str                    # Python 可执行文件路径
+    path: str  # 虚拟环境路径
+    runtime_hash: str  # 运行时哈希
+    python_executable: str  # Python 可执行文件路径
 
     # 元数据
     python_version: str | None = None

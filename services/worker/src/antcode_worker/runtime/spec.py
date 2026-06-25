@@ -31,11 +31,7 @@ class PythonSpec:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, PythonSpec):
             return False
-        return (
-            self.version == other.version
-            and self.path == other.path
-            and self.uv_managed == other.uv_managed
-        )
+        return self.version == other.version and self.path == other.path and self.uv_managed == other.uv_managed
 
     def __hash__(self) -> int:
         return hash((self.version, self.path, self.uv_managed))
@@ -63,43 +59,18 @@ class LockSource:
     """
     依赖锁定源
 
-    定义依赖的锁定方式，支持多种来源。
+    定义 requirements.txt 内容。
     """
 
-    # 锁定类型: "hash" | "uri" | "inline" | "requirements"
-    source_type: str = "requirements"
-
-    # uv.lock 内容哈希（当 source_type="hash" 时）
-    content_hash: str | None = None
-
-    # 锁文件 URI（当 source_type="uri" 时）
-    uri: str | None = None
-
-    # 内联锁文件内容（当 source_type="inline" 时）
-    inline_content: str | None = None
-
-    # requirements.txt 内容（当 source_type="requirements" 时）
     requirements: list[str] = field(default_factory=list)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, LockSource):
             return False
-        return (
-            self.source_type == other.source_type
-            and self.content_hash == other.content_hash
-            and self.uri == other.uri
-            and self.inline_content == other.inline_content
-            and sorted(self.requirements) == sorted(other.requirements)
-        )
+        return sorted(self.requirements) == sorted(other.requirements)
 
     def __hash__(self) -> int:
-        return hash((
-            self.source_type,
-            self.content_hash,
-            self.uri,
-            self.inline_content,
-            tuple(sorted(self.requirements)),
-        ))
+        return hash(tuple(sorted(self.requirements)))
 
     def to_dict(self, sort_requirements: bool = False) -> dict[str, Any]:
         """
@@ -108,39 +79,22 @@ class LockSource:
         Args:
             sort_requirements: 是否对 requirements 排序（用于哈希计算）
         """
-        return {
-            "source_type": self.source_type,
-            "content_hash": self.content_hash,
-            "uri": self.uri,
-            "inline_content": self.inline_content,
-            "requirements": sorted(self.requirements) if sort_requirements else self.requirements,
-        }
+        return {"requirements": sorted(self.requirements) if sort_requirements else self.requirements}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LockSource":
         """从字典创建"""
+        forbidden = {"source_type", "content_hash", "uri", "inline_content"} & set(data)
+        if forbidden:
+            raise ValueError(f"LockSource 不接受旧字段: {', '.join(sorted(forbidden))}")
         return cls(
-            source_type=data.get("source_type", "requirements"),
-            content_hash=data.get("content_hash"),
-            uri=data.get("uri"),
-            inline_content=data.get("inline_content"),
             requirements=data.get("requirements", []),
         )
 
     @classmethod
     def from_requirements(cls, requirements: list[str]) -> "LockSource":
         """从 requirements 列表创建"""
-        return cls(source_type="requirements", requirements=requirements)
-
-    @classmethod
-    def from_hash(cls, content_hash: str) -> "LockSource":
-        """从内容哈希创建"""
-        return cls(source_type="hash", content_hash=content_hash)
-
-    @classmethod
-    def from_uri(cls, uri: str) -> "LockSource":
-        """从 URI 创建"""
-        return cls(source_type="uri", uri=uri)
+        return cls(requirements=requirements)
 
 
 @dataclass
@@ -286,9 +240,11 @@ class RuntimeSpec:
 
         只使用确定性字段。
         """
-        return hash((
-            self.python_spec,
-            self.lock_source,
-            tuple(sorted(self.constraints)),
-            tuple(sorted(self.extras)),
-        ))
+        return hash(
+            (
+                self.python_spec,
+                self.lock_source,
+                tuple(sorted(self.constraints)),
+                tuple(sorted(self.extras)),
+            )
+        )

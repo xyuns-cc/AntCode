@@ -3,7 +3,7 @@
 
 包含:
 - SpiderPlugin: 爬虫任务 ExecPlan 生成器
-- spiderkit: 完整爬虫框架（Spider、HttpClient、RenderClient 等）
+- spiderkit: 完整爬虫框架（Spider、HttpClient 等）
 - data: 爬虫数据存储模块（Redis 存储、上报器、读取器）
 """
 

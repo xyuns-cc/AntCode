@@ -166,9 +166,7 @@ class HttpClient:
     def _get_impersonate(self) -> str:
         """获取指纹"""
         if self.config.rotate_impersonate:
-            impersonate = BROWSER_IMPERSONATES[
-                self._impersonate_index % len(BROWSER_IMPERSONATES)
-            ]
+            impersonate = BROWSER_IMPERSONATES[self._impersonate_index % len(BROWSER_IMPERSONATES)]
             self._impersonate_index += 1
             return impersonate
         return self.config.impersonate or "chrome110"
@@ -227,9 +225,7 @@ class HttpClient:
                 elapsed_ms=(time.time() - start_time) * 1000,
             )
 
-    async def _fetch_httpx(
-        self, request: Request, headers: dict[str, str]
-    ) -> Response:
+    async def _fetch_httpx(self, request: Request, headers: dict[str, str]) -> Response:
         """使用 httpx 请求"""
         proxy = request.proxy or self.config.proxy
 

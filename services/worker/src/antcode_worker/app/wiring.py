@@ -32,7 +32,6 @@ class Container:
     executor: Any = None
     plugin_registry: Any = None
     log_manager: Any = None
-    log_cleanup: Any = None
     heartbeat_reporter: Any = None
 
     # 可观测性
@@ -104,27 +103,21 @@ def create_container(config: Any) -> Container:
     log_manager = _create_log_manager(config, transport)
     container.register("log_manager", log_manager)
 
-    # 6. 创建日志清理服务
-    log_cleanup = _create_log_cleanup_service(config)
-    container.register("log_cleanup", log_cleanup)
-
-    # 7. 创建指标采集器
+    # 6. 创建指标采集器
     metrics_collector = _create_metrics_collector(config)
     container.register("metrics_collector", metrics_collector)
 
-    # 8. 创建心跳上报器
-    heartbeat_reporter = _create_heartbeat_reporter(
-        config, transport, metrics_collector
-    )
+    # 7. 创建心跳上报器
+    heartbeat_reporter = _create_heartbeat_reporter(config, transport, metrics_collector)
     container.register("heartbeat_reporter", heartbeat_reporter)
 
-    # 9. 创建项目获取器与产物管理器
+    # 8. 创建项目获取器与产物管理器
     project_fetcher = _create_project_fetcher(config)
     container.register("project_fetcher", project_fetcher)
     artifact_manager = _create_artifact_manager(config)
     container.register("artifact_manager", artifact_manager)
 
-    # 10. 创建引擎（依赖其他组件）
+    # 9. 创建引擎（依赖其他组件）
     engine = _create_engine(
         config=config,
         transport=transport,
@@ -169,7 +162,7 @@ def _create_transport(config: Any) -> Any:
     transport_mode = getattr(config, "transport_mode", "gateway")
 
     # 加载凭证
-    credential_store = getattr(config, "credential_store", "file")
+    credential_store = getattr(config, "credential_store", "env")
     credential_service = init_credential_service(get_credential_store(credential_store))
     credentials = credential_service.load()
 
@@ -182,17 +175,15 @@ def _create_transport(config: Any) -> Any:
         if not credentials or not credentials.is_valid():
             from antcode_worker.transport.factory import TransportConfigError
 
-            message = (
-                "Gateway 模式首次启动必须配置安装 Key\n"
-                "示例: ANTCODE_WORKER_KEY=xxx 或 WORKER_KEY=xxx"
-            )
+            message = "Gateway 模式首次启动必须配置安装 Key\n示例: ANTCODE_WORKER_KEY=xxx"
             logger.error(f"传输层配置错误: {message}")
             raise TransportConfigError(message)
     worker_id = None
 
     # 从环境变量读取 worker_id（优先级高于配置与凭证）
     import os
-    env_worker_id = os.getenv("WORKER_ID") or os.getenv("ANTCODE_WORKER_ID")
+
+    env_worker_id = os.getenv("WORKER_ID")
     if env_worker_id:
         worker_id = env_worker_id
 
@@ -202,7 +193,7 @@ def _create_transport(config: Any) -> Any:
     api_key = getattr(config, "api_key", None)
 
     if not api_key:
-        api_key = os.getenv("WORKER_API_KEY") or os.getenv("ANTCODE_API_KEY")
+        api_key = os.getenv("WORKER_API_KEY")
 
     if credentials and credentials.is_valid():
         if credentials.gateway_host:
@@ -218,8 +209,8 @@ def _create_transport(config: Any) -> Any:
     if not worker_id and transport_mode == "direct":
         from pathlib import Path
 
-        from antcode_worker.security import init_identity_manager
         from antcode_worker.config import DATA_ROOT
+        from antcode_worker.security import init_identity_manager
 
         data_dir = getattr(config, "data_dir", str(DATA_ROOT))
         identity_path = Path(data_dir) / "identity" / "worker_identity.yaml"
@@ -237,13 +228,15 @@ def _create_transport(config: Any) -> Any:
 
     if transport_mode == "direct":
         _register_direct_worker(config=config, worker_id=worker_id)
+        # 已注册过的旧 worker：本地有 api_key 但无 redis_username → 自动迁移
+        _migrate_legacy_direct_worker_to_acl(config=config, worker_id=worker_id)
 
     # 构建配置对象
     transport_config = TransportConfig(
         mode=transport_mode,
         worker_id=worker_id,
         direct=DirectConfig(
-            redis_url=getattr(config, "redis_url", ""),
+            redis_url=_build_authenticated_redis_url(getattr(config, "redis_url", "")),
             redis_namespace=getattr(config, "redis_namespace", "antcode"),
         ),
         gateway=GatewayConfigSpec(
@@ -276,6 +269,7 @@ def _create_transport(config: Any) -> Any:
     # 创建传输层实例
     if transport_mode == "direct":
         from antcode_worker.transport.redis import RedisTransport
+
         return RedisTransport(
             redis_url=transport_config.direct.redis_url,
             worker_id=worker_id,
@@ -284,6 +278,7 @@ def _create_transport(config: Any) -> Any:
         )
     else:
         from antcode_worker.transport.gateway import GatewayConfig, GatewayTransport
+
         gateway_config = GatewayConfig(
             gateway_host=gateway_host,
             gateway_port=gateway_port,
@@ -298,6 +293,32 @@ def _create_transport(config: Any) -> Any:
         if worker_id:
             transport.set_credentials(worker_id=worker_id)
         return transport
+
+
+def _build_authenticated_redis_url(base_url: str) -> str:
+    """如果本地 SecretsManager 有 redis_username/password，则注入到 URL。"""
+    from urllib.parse import urlsplit, urlunsplit
+
+    if not base_url:
+        return base_url
+    try:
+        from antcode_worker.security.secrets import get_secrets_manager
+
+        mgr = get_secrets_manager()
+    except Exception:
+        return base_url
+    if mgr is None:
+        return base_url
+    username = mgr.get("redis_username")
+    password = mgr.get("redis_password")
+    if not username or not password:
+        return base_url
+    parsed = urlsplit(base_url)
+    host = parsed.hostname or ""
+    netloc = f"{username}:{password}@{host}"
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _normalize_api_base_url(value: str | None, gateway_host: str) -> str:
@@ -342,20 +363,21 @@ def _register_by_install_key(
     import secrets
     import time
 
-    worker_key = getattr(config, "worker_key", "") or os.getenv("ANTCODE_WORKER_KEY") or os.getenv("WORKER_KEY")
+    worker_key = getattr(config, "worker_key", "") or os.getenv("ANTCODE_WORKER_KEY")
     if not worker_key:
         return None
 
     gateway_host = getattr(config, "gateway_host", "localhost")
     gateway_port = getattr(config, "gateway_port", 50051)
     api_base_url = _normalize_api_base_url(
-        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL") or os.getenv("ANTCODE_API_BASE_URL") or os.getenv("API_BASE_URL"),
+        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
         gateway_host,
     )
 
     host = getattr(config, "host", "")
     if host in ("", "0.0.0.0", "127.0.0.1", "localhost"):
         from antcode_worker.config import get_local_ip
+
         host = get_local_ip()
 
     payload = {
@@ -432,18 +454,15 @@ def _register_direct_worker(
     import platform
     import secrets
 
-    from antcode_worker.transport.factory import TransportConfigError
     from antcode_worker.heartbeat.reporter import get_capability_detector
+    from antcode_worker.transport.factory import TransportConfigError
 
     if not worker_id:
         raise TransportConfigError("Direct 模式必须配置 worker_id")
 
     gateway_host = getattr(config, "gateway_host", "localhost")
     api_base_url = _normalize_api_base_url(
-        getattr(config, "api_base_url", "")
-        or os.getenv("WORKER_API_BASE_URL")
-        or os.getenv("ANTCODE_API_BASE_URL")
-        or os.getenv("API_BASE_URL"),
+        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
         gateway_host,
     )
 
@@ -519,10 +538,7 @@ def _register_direct_worker(
         if isinstance(body, dict):
             detail = body.get("message") or body.get("detail")
         if detail == "无效的 Direct 注册证明":
-            detail = (
-                "无效的 Direct 注册证明"
-                "（请确认 Web API 的 REDIS_URL 与 Worker 的 redis_url 指向同一 Redis）"
-            )
+            detail = "无效的 Direct 注册证明（请确认 Web API 的 REDIS_URL 与 Worker 的 redis_url 指向同一 Redis）"
         raise RuntimeError(detail or f"Direct Worker 注册失败 (HTTP {response.status_code})")
 
     if not isinstance(body, dict) or not body.get("success"):
@@ -536,14 +552,95 @@ def _register_direct_worker(
     else:
         logger.info("Direct Worker 已注册: worker_id={}", worker_id)
 
+    # 若服务端返回了独立的 Redis ACL 凭证，立即持久化到 secrets 目录
+    redis_username = data.get("redis_username")
+    redis_password = data.get("redis_password")
+    if redis_username and redis_password:
+        _persist_worker_redis_credentials(config, redis_username, redis_password)
+        logger.info("Worker {} 已获得独立 Redis ACL 凭证: user={}", worker_id, redis_username)
+
+
+def _persist_worker_redis_credentials(config: Any, redis_username: str, redis_password: str) -> None:
+    """把服务端下发的 Worker Redis 账户写入 SecretsManager（含本地文件）。"""
+    from antcode_worker.security.secrets import get_secrets_manager
+
+    try:
+        mgr = get_secrets_manager()
+    except Exception as exc:
+        logger.warning("无法获取 SecretsManager 持久化 Redis 凭证: {}", exc)
+        return
+    if mgr is None:
+        return
+    try:
+        mgr.store("redis_username", redis_username)
+        mgr.store("redis_password", redis_password)
+    except Exception as exc:
+        logger.warning("写入 Redis 凭证到 secrets 失败: {}", exc)
+
+
+def _migrate_legacy_direct_worker_to_acl(config: Any, worker_id: str) -> None:
+    """旧 Worker 自动迁移：已注册但本地无 redis_username → 调 issue 路由领取。
+
+    要求本地已有 worker api_key（注册时拿到的）才能鉴权。
+    """
+    import os
+
+    import httpx
+
+    from antcode_worker.security.secrets import get_secrets_manager
+
+    try:
+        mgr = get_secrets_manager()
+    except Exception:
+        return
+    if mgr is None:
+        return
+    if mgr.get("redis_username"):
+        return  # 已经有 ACL 凭证
+    api_key = mgr.get("api_key")
+    if not api_key:
+        return  # 第一次启动还没注册，走 register-direct 主路径
+
+    gateway_host = getattr(config, "gateway_host", "localhost")
+    api_base_url = _normalize_api_base_url(
+        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
+        gateway_host,
+    )
+    url = f"{api_base_url}/api/v1/workers/{worker_id}/redis-acl/issue"
+    trust_env = _should_trust_env_proxy(api_base_url)
+    try:
+        with httpx.Client(timeout=10.0, trust_env=trust_env) as client:
+            resp = client.post(url, headers={"X-API-Key": api_key})
+    except Exception as exc:
+        logger.warning("Worker {} 自动迁移 Redis ACL 失败: {}", worker_id, exc)
+        return
+    if resp.status_code >= 400:
+        logger.warning(
+            "Worker {} 自动迁移 Redis ACL 失败 HTTP={} body={}",
+            worker_id,
+            resp.status_code,
+            resp.text[:200],
+        )
+        return
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    data = (body or {}).get("data") or {}
+    redis_username = data.get("redis_username")
+    redis_password = data.get("redis_password")
+    if redis_username and redis_password:
+        _persist_worker_redis_credentials(config, redis_username, redis_password)
+        logger.info("Worker {} 自动迁移 Redis ACL 完成: user={}", worker_id, redis_username)
+
 
 def _create_runtime_manager(config: Any) -> Any:
     """创建运行时管理器"""
     import os
 
+    from antcode_worker.config import DATA_ROOT
     from antcode_worker.runtime.manager import RuntimeManager, RuntimeManagerConfig
     from antcode_worker.runtime.uv_manager import uv_manager
-    from antcode_worker.config import DATA_ROOT
 
     data_dir = getattr(config, "data_dir", str(DATA_ROOT))
     venvs_dir = getattr(config, "venvs_dir", None) or os.path.join(data_dir, "runtimes")
@@ -567,12 +664,18 @@ def _create_executor(config: Any) -> Any:
     default_timeout = getattr(config, "task_timeout", 3600)
     cpu_limit = getattr(config, "task_cpu_time_limit_sec", 0)
     memory_limit = getattr(config, "task_memory_limit_mb", 0)
+    enforce_rlimit = bool(getattr(config, "sandbox_enforce_rlimit", True))
+    max_open_files = int(getattr(config, "sandbox_max_open_files", 256))
+    max_processes = int(getattr(config, "sandbox_max_processes", 64))
 
     exec_config = ExecutorConfig(
         max_concurrent=max_concurrent,
         default_timeout=default_timeout,
         default_cpu_limit_seconds=cpu_limit if cpu_limit > 0 else 0,
         default_memory_limit_mb=memory_limit if memory_limit > 0 else 0,
+        enforce_rlimit=enforce_rlimit,
+        default_max_open_files=max_open_files,
+        default_max_processes=max_processes,
     )
     return ProcessExecutor(exec_config)
 
@@ -588,48 +691,11 @@ def _create_plugin_registry(config: Any) -> Any:
 
 def _create_log_manager(config: Any, transport: Any) -> Any:
     """创建日志管理器"""
-    import os
-
-    from antcode_worker.logs.archive import ArchiveConfig
     from antcode_worker.logs.manager import LogManagerConfig, LogManagerFactory
-    from antcode_worker.logs.spool import SpoolConfig
-    from antcode_worker.config import DATA_ROOT
 
-    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
-    logs_dir = getattr(config, "logs_dir", None) or os.path.join(data_dir, "logs")
-
-    # WAL 目录用于高可靠归档
-    wal_dir = getattr(config, "wal_dir", None) or os.path.join(logs_dir, "wal")
-    spool_dir = getattr(config, "spool_dir", None) or os.path.join(logs_dir, "spool")
-
-    log_config = LogManagerConfig(
-        wal_dir=wal_dir,
-        spool_config=SpoolConfig(spool_dir=spool_dir),
-        archive_config=ArchiveConfig(wal_dir=wal_dir),
-        enable_archive=True,
-    )
+    log_config = LogManagerConfig()
 
     return LogManagerFactory(transport=transport, config=log_config)
-
-
-def _create_log_cleanup_service(config: Any) -> Any:
-    """创建日志清理服务"""
-    from antcode_worker.services.log_cleanup import LogCleanupService
-    from antcode_worker.config import DATA_ROOT
-    import os
-
-    if not getattr(config, "log_cleanup_enabled", True):
-        return None
-
-    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
-    logs_dir = getattr(config, "logs_dir", None) or os.path.join(data_dir, "logs")
-    retention_days = getattr(config, "log_retention_days", 7)
-    interval_hours = getattr(config, "log_cleanup_interval_hours", 24)
-    return LogCleanupService(
-        logs_dir=logs_dir,
-        retention_days=retention_days,
-        interval_hours=interval_hours,
-    )
 
 
 def _create_metrics_collector(config: Any) -> Any:
@@ -730,10 +796,7 @@ def _create_flow_controller(config: Any) -> Any:
         return None
 
     strategy_value = getattr(config, "flow_control_strategy", "token_bucket")
-    try:
-        strategy = FlowControlStrategy(strategy_value)
-    except ValueError:
-        strategy = FlowControlStrategy.TOKEN_BUCKET
+    strategy = FlowControlStrategy(strategy_value)
 
     flow_config = FlowControlConfig(
         strategy=strategy,
@@ -747,25 +810,24 @@ def _create_project_fetcher(config: Any) -> Any:
     """创建项目获取器"""
     import os
 
-    from antcode_worker.projects.fetcher import ArtifactFetcher, ProjectCache
+    from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
+
     from antcode_worker.config import DATA_ROOT
+    from antcode_worker.projects.fetcher import ArtifactFetcher, ProjectWorkspace
 
     data_dir = getattr(config, "data_dir", str(DATA_ROOT))
-    cache_dir = getattr(config, "projects_dir", None) or os.path.join(data_dir, "projects")
-    cache = ProjectCache(cache_dir=cache_dir)
-    return ArtifactFetcher(cache=cache)
+    runs_dir = getattr(config, "runs_dir", None) or os.path.join(data_dir, "runs")
+    workspace = ProjectWorkspace(root_dir=os.path.join(runs_dir, "sources"))
+    return ArtifactFetcher(workspace=workspace, artifact_store=PostgresArtifactStore())
 
 
 def _create_artifact_manager(config: Any) -> Any:
     """创建产物管理器"""
-    import os
+    from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
 
     from antcode_worker.executor.artifacts import ArtifactManager
-    from antcode_worker.config import DATA_ROOT
 
-    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
-    storage_dir = getattr(config, "runs_dir", None) or os.path.join(data_dir, "runs")
-    return ArtifactManager(storage_dir=storage_dir)
+    return ArtifactManager(artifact_store=PostgresArtifactStore())
 
 
 def _create_observability_server(config: Any, transport: Any, engine: Any) -> Any:

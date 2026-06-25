@@ -21,6 +21,7 @@ from loguru import logger
 
 class AuthMethod(Enum):
     """认证方式"""
+
     NONE = "none"
     API_KEY = "api_key"
     MTLS = "mtls"
@@ -29,6 +30,7 @@ class AuthMethod(Enum):
 
 class VerifyResult(Enum):
     """验证结果"""
+
     SUCCESS = "success"
     FAILED = "failed"
     EXPIRED = "expired"
@@ -40,6 +42,7 @@ class VerifyResult(Enum):
 @dataclass
 class TaskSignature:
     """任务签名"""
+
     issued_at: int
     expires_at: int
     nonce: str
@@ -76,6 +79,7 @@ class TaskSignature:
 @dataclass
 class VerificationContext:
     """验证上下文"""
+
     task_id: str
     run_id: str | None = None
     payload_hash: str | None = None

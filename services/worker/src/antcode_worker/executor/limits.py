@@ -137,9 +137,7 @@ class ConcurrencyLimiter:
 
         try:
             if timeout is not None:
-                acquired = await asyncio.wait_for(
-                    self._semaphore.acquire(), timeout=timeout
-                )
+                acquired = await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
             else:
                 acquired = await self._semaphore.acquire()
 
@@ -201,11 +199,7 @@ class ConcurrencyLimiter:
             "available": self.available,
             "total_acquired": self._total_acquired,
             "total_rejected": self._total_rejected,
-            "avg_wait_time_ms": (
-                self._total_wait_time_ms / self._total_acquired
-                if self._total_acquired > 0
-                else 0
-            ),
+            "avg_wait_time_ms": (self._total_wait_time_ms / self._total_acquired if self._total_acquired > 0 else 0),
         }
 
 
@@ -384,9 +378,7 @@ class ResourceMonitor:
                         memory_info = p.memory_info()
                         usage.memory_rss_mb = memory_info.rss / 1024 / 1024
                         usage.memory_vms_mb = memory_info.vms / 1024 / 1024
-                        usage.memory_peak_mb = max(
-                            usage.memory_peak_mb, usage.memory_rss_mb
-                        )
+                        usage.memory_peak_mb = max(usage.memory_peak_mb, usage.memory_rss_mb)
 
                         # 更新 IO 使用
                         try:
@@ -397,17 +389,13 @@ class ResourceMonitor:
                             pass
 
                         # 更新墙钟时间
-                        usage.wall_time_seconds = (
-                            datetime.now() - start_time
-                        ).total_seconds()
+                        usage.wall_time_seconds = (datetime.now() - start_time).total_seconds()
 
                         # 检查限制
                         if limits and on_limit_exceeded:
                             exceeded = self._check_limits(usage, limits)
                             if exceeded:
-                                logger.warning(
-                                    f"资源超限: {task_id}, reason={exceeded}"
-                                )
+                                logger.warning(f"资源超限: {task_id}, reason={exceeded}")
                                 if asyncio.iscoroutinefunction(on_limit_exceeded):
                                     await on_limit_exceeded(task_id, exceeded)
                                 else:
@@ -461,9 +449,7 @@ class ResourceMonitor:
         """
         return self._usage.get(task_id)
 
-    def _check_limits(
-        self, usage: ResourceUsage, limits: ResourceLimits
-    ) -> str | None:
+    def _check_limits(self, usage: ResourceUsage, limits: ResourceLimits) -> str | None:
         """
         检查是否超限
 

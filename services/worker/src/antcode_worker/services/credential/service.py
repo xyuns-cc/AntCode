@@ -25,6 +25,7 @@ from antcode_worker.services.credential.base import (
 @dataclass
 class WorkerCredentials:
     """Worker 凭证数据模型"""
+
     worker_id: str = ""
     api_key: str = ""
     secret_key: str = ""

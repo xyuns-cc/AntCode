@@ -130,11 +130,34 @@ class Application:
         self.container: Container | None = None
         self.lifecycle = Lifecycle()
         self._graceful = GracefulShutdown(grace_period=getattr(config, "grace_period", 30.0))
+        self._database_initialized = False
 
     async def setup(self) -> None:
         """初始化应用"""
         logger.info("初始化 Worker 应用...")
-        self.container = create_container(self.config)
+        await self._init_database()
+        try:
+            self.container = create_container(self.config)
+        except Exception:
+            await self._close_database()
+            raise
+
+    async def _init_database(self) -> None:
+        from antcode_core.infrastructure.db.tortoise import init_db
+
+        await init_db(service="worker")
+        self._database_initialized = True
+        logger.info("Worker PostgreSQL 连接已初始化")
+
+    async def _close_database(self) -> None:
+        if not self._database_initialized:
+            return
+
+        from antcode_core.infrastructure.db.tortoise import close_db
+
+        await close_db()
+        self._database_initialized = False
+        logger.info("Worker PostgreSQL 连接已关闭")
 
     async def run(self) -> None:
         """运行应用"""
@@ -165,6 +188,7 @@ class Application:
         except TimeoutError:
             logger.warning(f"关闭超时 ({grace_period + 5}s)，部分资源可能未正确释放")
         finally:
+            await self._close_database()
             self._graceful.cancel_force_exit()
 
     def _log_status(self) -> None:

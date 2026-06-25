@@ -30,9 +30,10 @@ class LogSink(Protocol):
 class StreamCapture:
     """
     流捕获结果
-    
+
     包含捕获的内容和元数据。
     """
+
     content: str
     stream: LogStream
     timestamp: datetime
@@ -42,15 +43,15 @@ class StreamCapture:
 class LogStreamer:
     """
     日志流式捕获器
-    
+
     实时捕获 stdout/stderr 并转换为 LogEntry(seq)。
-    
+
     功能：
     - 从 asyncio.StreamReader 捕获输出
     - 自动分配序列号
     - 转换为 LogEntry 格式
-    - 支持多个 sink（实时/spool/batch）
-    
+    - 支持多个 transport sink
+
     Requirements: 9.2
     """
 
@@ -62,7 +63,7 @@ class LogStreamer:
     ):
         """
         初始化日志流式捕获器
-        
+
         Args:
             run_id: 运行 ID
             sinks: 日志接收器列表
@@ -71,16 +72,16 @@ class LogStreamer:
         self.run_id = run_id
         self._sinks = sinks or []
         self._on_entry = on_entry
-        
+
         # 序列号管理
         self._seq_counter = 0
         self._seq_lock = asyncio.Lock()
-        
+
         # 统计
         self._stdout_lines = 0
         self._stderr_lines = 0
         self._total_bytes = 0
-        
+
         # 状态
         self._running = False
         self._capture_tasks: list[asyncio.Task] = []
@@ -123,23 +124,23 @@ class LogStreamer:
     ) -> None:
         """
         捕获单个流
-        
+
         Args:
             reader: 异步流读取器
             stream: 流类型（stdout/stderr）
         """
         self._running = True
-        
+
         try:
             while True:
                 try:
                     line = await reader.readline()
                     if not line:
                         break
-                    
+
                     content = line.decode("utf-8", errors="replace").rstrip("\n\r")
                     await self._process_line(content, stream)
-                    
+
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -155,22 +156,18 @@ class LogStreamer:
     ) -> None:
         """
         同时捕获 stdout 和 stderr
-        
+
         Args:
             stdout: stdout 流读取器
             stderr: stderr 流读取器
         """
         self._running = True
-        
-        stdout_task = asyncio.create_task(
-            self.capture_stream(stdout, LogStream.STDOUT)
-        )
-        stderr_task = asyncio.create_task(
-            self.capture_stream(stderr, LogStream.STDERR)
-        )
-        
+
+        stdout_task = asyncio.create_task(self.capture_stream(stdout, LogStream.STDOUT))
+        stderr_task = asyncio.create_task(self.capture_stream(stderr, LogStream.STDERR))
+
         self._capture_tasks = [stdout_task, stderr_task]
-        
+
         try:
             await asyncio.gather(stdout_task, stderr_task)
         except asyncio.CancelledError:
@@ -185,21 +182,21 @@ class LogStreamer:
     async def _process_line(self, content: str, stream: LogStream) -> None:
         """
         处理单行日志
-        
+
         Args:
             content: 日志内容
             stream: 流类型
         """
         if not content:
             return
-        
+
         # 更新统计
         self._total_bytes += len(content.encode("utf-8"))
         if stream == LogStream.STDOUT:
             self._stdout_lines += 1
         else:
             self._stderr_lines += 1
-        
+
         # 创建 LogEntry
         seq = await self._next_seq()
         entry = LogEntry(
@@ -210,21 +207,21 @@ class LogStreamer:
             timestamp=datetime.now(),
             level="INFO" if stream == LogStream.STDOUT else "ERROR",
         )
-        
+
         # 回调
         if self._on_entry:
             try:
                 self._on_entry(entry)
             except Exception as e:
                 logger.error(f"[{self.run_id}] 日志回调异常: {e}")
-        
+
         # 发送到所有 sink
         await self._dispatch_to_sinks(entry)
 
     async def _dispatch_to_sinks(self, entry: LogEntry) -> None:
         """
         分发日志到所有 sink
-        
+
         Args:
             entry: 日志条目
         """
@@ -241,7 +238,7 @@ class LogStreamer:
     ) -> None:
         """
         写入系统日志
-        
+
         Args:
             content: 日志内容
             level: 日志级别
@@ -256,14 +253,14 @@ class LogStreamer:
             level=level,
             source="worker",
         )
-        
+
         # 回调
         if self._on_entry:
             try:
                 self._on_entry(entry)
             except Exception as e:
                 logger.error(f"[{self.run_id}] 日志回调异常: {e}")
-        
+
         await self._dispatch_to_sinks(entry)
 
     async def flush(self) -> None:
@@ -278,15 +275,15 @@ class LogStreamer:
     async def stop(self) -> None:
         """停止捕获"""
         self._running = False
-        
+
         # 取消所有捕获任务
         for task in self._capture_tasks:
             if not task.done():
                 task.cancel()
-        
+
         if self._capture_tasks:
             await asyncio.gather(*self._capture_tasks, return_exceptions=True)
-        
+
         # 刷新所有 sink
         await self.flush()
 
@@ -310,12 +307,12 @@ async def iter_stream(
 ) -> AsyncIterator[LogEntry]:
     """
     异步迭代流内容
-    
+
     Args:
         reader: 异步流读取器
         stream: 流类型
         run_id: 运行 ID
-        
+
     Yields:
         LogEntry 对象
     """
@@ -325,7 +322,7 @@ async def iter_stream(
             line = await reader.readline()
             if not line:
                 break
-            
+
             content = line.decode("utf-8", errors="replace").rstrip("\n\r")
             if content:
                 yield LogEntry(
@@ -336,7 +333,7 @@ async def iter_stream(
                     timestamp=datetime.now(),
                 )
                 seq += 1
-                
+
         except asyncio.CancelledError:
             break
         except Exception as e:

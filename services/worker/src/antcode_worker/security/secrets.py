@@ -22,6 +22,7 @@ from loguru import logger
 @dataclass
 class Credential:
     """凭证数据"""
+
     key: str
     value: str
     source: str  # "file", "env", "default"
@@ -42,12 +43,13 @@ class SecretsManager:
 
     # 已知的凭证键名
     KNOWN_KEYS = {
-        "api_key": "ANTCODE_API_KEY",
-        "ca_cert": "ANTCODE_CA_CERT_PATH",
-        "client_cert": "ANTCODE_CLIENT_CERT_PATH",
-        "client_key": "ANTCODE_CLIENT_KEY_PATH",
-        "redis_password": "ANTCODE_REDIS_PASSWORD",
-        "gateway_token": "ANTCODE_GATEWAY_TOKEN",
+        "api_key": "WORKER_API_KEY",
+        "ca_cert": "WORKER_CA_CERT",
+        "client_cert": "WORKER_CLIENT_CERT",
+        "client_key": "WORKER_CLIENT_KEY",
+        "redis_username": "WORKER_REDIS_USERNAME",
+        "redis_password": "WORKER_REDIS_PASSWORD",
+        "gateway_token": "WORKER_GATEWAY_TOKEN",
     }
 
     def __init__(
@@ -167,12 +169,49 @@ class SecretsManager:
 
             return None
 
+    def store(self, key: str, value: str) -> Path | None:
+        """持久化一条凭证到 secrets 目录。
+
+        - 优先写文件（``data/worker/secrets/<key>``，0600 权限）；secrets_dir
+          未配置时仅写入内存缓存
+        - 写入后立即更新缓存，下次 get() 不再回退文件
+        """
+        with self._lock:
+            stored_path: Path | None = None
+            if self._secrets_dir:
+                self._secrets_dir.mkdir(parents=True, exist_ok=True)
+                stored_path = self._secrets_dir / key
+                stored_path.write_text(value, encoding="utf-8")
+                try:
+                    os.chmod(stored_path, 0o600)
+                except OSError as exc:
+                    logger.debug("chmod {} 失败（忽略）: {}", stored_path, exc)
+            self._cache[key] = Credential(
+                key=key,
+                value=value,
+                source="file" if stored_path else "memory",
+                path=str(stored_path) if stored_path else None,
+            )
+            return stored_path
+
     def get_credential(self, key: str) -> Credential | None:
         """获取凭证对象（包含来源信息）"""
         with self._lock:
             # 确保凭证已加载
             self.get(key)
             return self._cache.get(key)
+
+    def masked_view(self) -> dict[str, str]:
+        """返回所有已加载凭证的脱敏视图，专用于日志/调试输出。
+
+        敏感值仅显示长度提示（如 ``***(len=32)``），永不返回明文。
+        """
+        with self._lock:
+            view: dict[str, str] = {}
+            for key, credential in self._cache.items():
+                value = credential.value or ""
+                view[key] = f"***(len={len(value)},src={credential.source})"
+            return view
 
     def get_api_key(self) -> str | None:
         """获取 API Key"""
@@ -305,6 +344,7 @@ class SecretsManager:
             return
 
         try:
+
             def handler(signum, frame):
                 logger.info("收到 SIGHUP 信号，重载凭证...")
                 self.reload()

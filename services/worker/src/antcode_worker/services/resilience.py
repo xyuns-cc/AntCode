@@ -23,6 +23,7 @@ from antcode_worker.domain.events import CircuitBreakerStateChanged, event_bus
 @dataclass
 class BackoffConfig:
     """退避配置"""
+
     base_delay: float = 1.0
     max_delay: float = 60.0
     multiplier: float = 2.0
@@ -71,7 +72,7 @@ class ExponentialBackoff:
 
     def get_delay_for_attempt(self, attempt: int) -> float:
         """获取指定尝试次数的延迟（不改变状态）"""
-        delay = self._config.base_delay * (self._config.multiplier ** attempt)
+        delay = self._config.base_delay * (self._config.multiplier**attempt)
         return min(delay, self._config.max_delay)
 
 
@@ -87,6 +88,7 @@ class CircuitState(str, Enum):
 @dataclass
 class CircuitBreakerConfig:
     """断路器配置"""
+
     failure_threshold: int = 5
     recovery_timeout: float = 30.0
     half_open_max_calls: int = 1
@@ -95,6 +97,7 @@ class CircuitBreakerConfig:
 
 class CircuitOpenError(Exception):
     """断路器打开异常"""
+
     def __init__(self, message: str = "Circuit breaker is open", retry_after: float | None = None):
         super().__init__(message)
         self.retry_after = retry_after
@@ -208,12 +211,14 @@ class CircuitBreaker:
             self._success_count = 0
             logger.warning(f"Circuit '{self._name}': {old_state.value} -> OPEN (failures={self._failure_count})")
 
-        await event_bus.publish(CircuitBreakerStateChanged(
-            circuit_name=self._name,
-            old_state=old_state.value,
-            new_state=new_state.value,
-            failure_count=self._failure_count,
-        ))
+        await event_bus.publish(
+            CircuitBreakerStateChanged(
+                circuit_name=self._name,
+                old_state=old_state.value,
+                new_state=new_state.value,
+                failure_count=self._failure_count,
+            )
+        )
 
     async def reset(self) -> None:
         async with self._lock:
@@ -242,6 +247,7 @@ class RateLimiterState(str, Enum):
 @dataclass
 class RateLimiterConfig:
     """限流器配置"""
+
     max_rate: float = 100.0
     cpu_threshold: float = 90.0
     memory_threshold: float = 85.0
@@ -252,6 +258,7 @@ class RateLimiterConfig:
 @dataclass
 class AcquireResult:
     """获取许可结果"""
+
     allowed: bool
     retry_after: float | None = None
     reason: str | None = None
@@ -311,6 +318,7 @@ class RateLimiter:
         try:
             # 尝试导入系统指标模块
             from antcode_worker.heartbeat.system_metrics import get_system_metrics
+
             metrics = get_system_metrics()
 
             if metrics.cpu_percent > self._config.cpu_threshold:
@@ -348,6 +356,7 @@ class RateLimiter:
 
                 try:
                     from antcode_worker.heartbeat.system_metrics import get_system_metrics
+
                     metrics = get_system_metrics()
 
                     cpu_ok = metrics.cpu_percent < (self._config.cpu_threshold - 5)

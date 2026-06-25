@@ -19,8 +19,8 @@ from loguru import logger
 
 from antcode_worker.config import (
     DATA_ROOT,
-    WORKER_CONFIG_FILE,
     SERVICE_ROOT,
+    WORKER_CONFIG_FILE,
     WorkerConfig,
     init_worker_config,
 )
@@ -38,19 +38,16 @@ def _get_default_redis_url() -> str:
     from antcode_worker.config import _get_env_value, _load_env_file
 
     _load_env_file()
-    return (
-        _get_env_value("WORKER_REDIS_URL", "REDIS_URL", "ANTCODE_REDIS_URL")
-        or "redis://localhost:6379/0"
-    )
+    return _get_env_value("WORKER_REDIS_URL") or ""
 
 
 def _get_default_gateway_host_port() -> tuple[str, int]:
     from antcode_worker.config import _get_env_int, _get_env_value, _load_env_file
 
     _load_env_file()
-    host = _get_env_value("WORKER_GATEWAY_HOST", "GATEWAY_HOST", "ANTCODE_GATEWAY_HOST") or "localhost"
-    port = _get_env_int("WORKER_GATEWAY_PORT", "GATEWAY_PORT", "ANTCODE_GATEWAY_PORT") or 50051
-    endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT", "GATEWAY_ENDPOINT", "ANTCODE_GATEWAY_ENDPOINT")
+    host = _get_env_value("WORKER_GATEWAY_HOST") or "localhost"
+    port = _get_env_int("WORKER_GATEWAY_PORT") or 50051
+    endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT")
     if endpoint:
         if ":" in endpoint:
             endpoint_host, endpoint_port = endpoint.rsplit(":", 1)
@@ -120,7 +117,7 @@ def show_help():
         "\n"
         "  功能:\n"
         "    - 虚拟环境管理 (创建/删除环境，安装/卸载包)\n"
-        "    - 项目管理 (上传文件/代码项目，编辑代码)\n"
+        "    - 项目运行 (从 Git 来源执行项目)\n"
         "    - 任务执行 (运行项目，查看日志，取消任务)\n"
         "    - 平台通信 (心跳上报，状态同步，任务分发)\n"
         "\n"
@@ -161,10 +158,7 @@ def run_doctor() -> int:
     import shutil
     import subprocess
 
-    _log_block(
-        "  AntCode Worker - 环境诊断\n"
-        "  " + "=" * 40
-    )
+    _log_block("  AntCode Worker - 环境诊断\n  " + "=" * 40)
 
     issues = []
 
@@ -183,12 +177,7 @@ def run_doctor() -> int:
     uv_path = shutil.which("uv")
     if uv_path:
         try:
-            result = subprocess.run(
-                ["uv", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            result = subprocess.run(["uv", "--version"], capture_output=True, text=True, timeout=5)
             uv_version = result.stdout.strip()
             logger.info("OK  uv 已安装: {}", uv_version)
         except Exception:
@@ -233,9 +222,18 @@ def run_doctor() -> int:
     logger.info("检查 域模型导入")
     try:
         import importlib
+
         models_module = importlib.import_module("antcode_worker.domain.models")
         # 验证关键类存在
-        required_models = ["RunContext", "TaskPayload", "ExecPlan", "ExecResult", "LogEntry", "ArtifactRef", "RuntimeHandle"]
+        required_models = [
+            "RunContext",
+            "TaskPayload",
+            "ExecPlan",
+            "ExecResult",
+            "LogEntry",
+            "ArtifactRef",
+            "RuntimeHandle",
+        ]
         for model_name in required_models:
             if not hasattr(models_module, model_name):
                 raise ImportError(f"缺少 {model_name}")
@@ -291,10 +289,10 @@ def run_doctor() -> int:
     logger.info("检查 数据目录")
     data_dirs = [
         ("data/worker/", DATA_ROOT),
-        ("data/worker/projects/", DATA_ROOT / "projects"),
         ("data/worker/runtimes/", DATA_ROOT / "runtimes"),
-        ("data/worker/logs/", DATA_ROOT / "logs"),
         ("data/worker/runs/", DATA_ROOT / "runs"),
+        ("data/worker/temp/runtime-build/", DATA_ROOT / "temp" / "runtime-build"),
+        ("data/worker/temp/sandbox/", DATA_ROOT / "temp" / "sandbox"),
     ]
 
     for name, path in data_dirs:
@@ -326,10 +324,7 @@ def print_config(config_format: str = "yaml") -> None:
     """
     import json
 
-    _log_block(
-        "  AntCode Worker - 当前配置\n"
-        "  " + "=" * 40
-    )
+    _log_block("  AntCode Worker - 当前配置\n  " + "=" * 40)
 
     # 加载配置
     config = WorkerConfig.load_from_file()
@@ -392,14 +387,11 @@ def start_worker(
     if worker_id:
         os.environ["WORKER_ID"] = worker_id
     if worker_key:
-        os.environ["WORKER_KEY"] = worker_key
-    # 配置日志
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        level=log_level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    )
+        os.environ["ANTCODE_WORKER_KEY"] = worker_key
+    # 配置日志（含敏感信息脱敏）
+    from antcode_core.common.logging import setup_logging
+
+    setup_logging(level=log_level)
 
     # 初始化 Worker 配置
     grace_period = 30.0
@@ -470,14 +462,17 @@ def prompt_start_worker(transport_mode: str) -> None:
         raise ValueError("transport_mode 必须是 direct 或 gateway")
 
     title = "Direct" if transport_mode == "direct" else "Gateway"
-    _log_block(f"  {title} Worker 配置\n" "  --------------")
+    _log_block(f"  {title} Worker 配置\n  --------------")
 
     default_name = _generate_default_worker_name()
     name = input(f"  Worker 名称 [{default_name}]: ").strip() or default_name
 
     if transport_mode == "direct":
-        redis_url = _get_default_redis_url()
-        redis_url = input(f"  Redis URL [{redis_url}]: ").strip() or redis_url
+        default_redis_url = _get_default_redis_url()
+        redis_prompt = f"  Redis URL [{default_redis_url}]: " if default_redis_url else "  Redis URL: "
+        redis_url = input(redis_prompt).strip() or default_redis_url
+        if not redis_url:
+            raise ValueError("Direct 模式必须配置 Redis URL")
         gateway_host, gateway_port = "localhost", 50051
         worker_key = None
     else:
@@ -488,14 +483,15 @@ def prompt_start_worker(transport_mode: str) -> None:
             get_credential_store,
             init_credential_service,
         )
-        store = os.getenv("WORKER_CREDENTIAL_STORE") or os.getenv("ANTCODE_WORKER_CREDENTIAL_STORE") or "file"
+
+        store = os.getenv("WORKER_CREDENTIAL_STORE") or "env"
         if WORKER_CONFIG_FILE.exists():
             try:
                 with open(WORKER_CONFIG_FILE, encoding="utf-8") as f:
                     file_config = yaml.safe_load(f) or {}
                 store = file_config.get("credential_store", store)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"读取 Worker 配置失败: {WORKER_CONFIG_FILE}") from exc
         credential_service = init_credential_service(get_credential_store(store))
         credentials = credential_service.load()
         if credentials and credentials.is_valid():
