@@ -13,6 +13,7 @@ from loguru import logger
 
 from antcode_contracts.gateway_pb2_grpc import add_GatewayServiceServicer_to_server
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
+from antcode_core.infrastructure.redis.stream_client import StreamClient
 from antcode_gateway.auth import AuthInterceptor
 from antcode_gateway.config import gateway_config
 from antcode_gateway.rate_limit import RateLimitInterceptor
@@ -31,8 +32,12 @@ async def main():
 
     # 注册拦截器
     if gateway_config.auth_enabled:
-        server.add_interceptor(AuthInterceptor(enabled=True))
-        logger.info("AuthInterceptor 已启用")
+        # 注入共享 StreamClient 用于安全审计落 Redis Stream (audit:security)
+        audit_stream = StreamClient()
+        server.add_interceptor(
+            AuthInterceptor(enabled=True, audit_stream=audit_stream)
+        )
+        logger.info("AuthInterceptor 已启用（含安全审计 Stream）")
     else:
         logger.info("AuthInterceptor 已禁用")
 
