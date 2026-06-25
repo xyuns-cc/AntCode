@@ -1,0 +1,24 @@
+# One-shot Redis used by the Worker TransportBase contract tests.
+#
+# Port 16379 is chosen deliberately to avoid colliding with a local default
+# Redis on 6379 — this container is short-lived and only meant for the contract
+# suite under tests/contracts/.
+#
+# Usage:
+#   docker compose -f tests/contracts/docker-compose.test.yml up -d
+#   uv run pytest tests/contracts/ -v
+#   docker compose -f tests/contracts/docker-compose.test.yml down -v
+
+services:
+  redis-contract:
+    image: redis:7-alpine
+    container_name: antcode-contracts-redis
+    ports:
+      - "16379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    restart: "no"
