@@ -7,14 +7,25 @@
 - 消息确认 (XACK)
 - 超时任务转移 (XCLAIM/XAUTOCLAIM)
 - 队列信息查询 (XLEN/XINFO/XPENDING)
+
+支持可插拔的消息编解码策略（Codec）：
+- JsonCodec（默认，向后兼容）：每个业务字段独立 JSON 序列化
+- ProtoCodec：将 Proto Message 序列化为单字段 'p' 存原始 bytes
 """
 
 from dataclasses import dataclass, field
+from typing import Any, Generic, Protocol, TypeVar
 
 from loguru import logger
 
 from antcode_core.common.utils.serialization import from_json, to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
+
+# Stream codec field name used by ProtoCodec to store serialized bytes
+# (约定俗成：Proto 序列化字节统一存到 'p' 字段，便于 worker/gateway 协同)
+PROTO_FIELD = b"p"
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -23,6 +34,18 @@ class StreamMessage:
 
     msg_id: str = ""
     data: dict = field(default_factory=dict)
+    stream_key: str = ""
+
+
+@dataclass
+class TypedStreamMessage(Generic[T]):
+    """带类型解码后的 Stream 消息
+
+    `payload` 字段已经被对应的 codec 解码为业务对象（如 Proto Message）。
+    """
+
+    msg_id: str = ""
+    payload: Any = None
     stream_key: str = ""
 
 
@@ -36,6 +59,111 @@ class PendingMessage:
     delivery_count: int = 0
 
 
+class StreamCodec(Protocol, Generic[T]):
+    """Stream 消息编解码策略
+
+    Stream Codec 在 ``StreamClient`` 的 ``xadd_typed`` / ``xreadgroup_typed`` 等
+    typed 方法上生效。它接收业务对象（如 Proto Message、dict 等）并产出
+    Redis Stream 字段字典，反之亦然。
+
+    实现需保证 ``decode(encode(msg))`` 的语义等价。
+    """
+
+    def encode(self, msg: T) -> dict[bytes | str, bytes | str]:
+        """编码业务对象 → Redis Stream 字段 dict"""
+        ...
+
+    def decode(self, fields: dict[bytes | str, bytes | str]) -> T:
+        """解码 Redis Stream 字段 dict → 业务对象"""
+        ...
+
+
+class JsonCodec:
+    """JSON 序列化（向后兼容）
+
+    与 ``StreamClient`` 的传统行为等价：每个字段独立 JSON 序列化。
+    string/int/float/bytes 直接透传，其他类型用 ``to_json``。
+    解码时尝试 JSON 反序列化，失败则保留原值。
+    """
+
+    def encode(self, msg: dict) -> dict:
+        if not isinstance(msg, dict):
+            raise TypeError(
+                f"JsonCodec.encode expects dict, got {type(msg).__name__}"
+            )
+        return {
+            k: to_json(v) if not isinstance(v, (str, int, float, bytes)) else v
+            for k, v in msg.items()
+        }
+
+    def decode(self, fields: dict) -> dict:
+        out: dict = {}
+        for k, v in fields.items():
+            key = k.decode("utf-8") if isinstance(k, bytes) else k
+            if isinstance(v, bytes):
+                try:
+                    v = v.decode("utf-8")
+                except UnicodeDecodeError:
+                    out[key] = v
+                    continue
+            if isinstance(v, str):
+                # 尝试 JSON 反序列化；任何反序列化错误回退到原字符串
+                # (使用宽 try 是因为 ``from_json`` 可能抛 SerializationError /
+                # JSONDecodeError / ValueError / TypeError 等多种异常)
+                try:
+                    out[key] = from_json(v)
+                    continue
+                except Exception:  # noqa: BLE001 - 反序列化回退是预期路径
+                    pass
+            out[key] = v
+        return out
+
+
+class ProtoCodec(Generic[T]):
+    """Proto bytes 序列化
+
+    将 Proto Message 整个序列化为字节并存到单字段（默认 'p'）。读取时
+    把字节反序列化回 Proto Message。
+
+    Args:
+        msg_type: Proto Message 类（如 ``data_pb2.TaskStatus``）。
+        field_name: 存放序列化字节的字段名，默认 ``b"p"``。
+    """
+
+    def __init__(self, msg_type: type[T], field_name: bytes = PROTO_FIELD):
+        self._msg_type = msg_type
+        self._field = field_name
+        self._field_str = (
+            field_name.decode("utf-8") if isinstance(field_name, bytes) else field_name
+        )
+
+    @property
+    def msg_type(self) -> type[T]:
+        return self._msg_type
+
+    def encode(self, msg: T) -> dict:
+        if not hasattr(msg, "SerializeToString"):
+            raise TypeError(
+                f"ProtoCodec.encode expects a Proto Message, got {type(msg).__name__}"
+            )
+        return {self._field: msg.SerializeToString()}
+
+    def decode(self, fields: dict) -> T:
+        raw = fields.get(self._field)
+        if raw is None:
+            raw = fields.get(self._field_str)
+        if raw is None:
+            raise ValueError(
+                f"missing '{self._field_str}' field for proto codec "
+                f"({self._msg_type.__name__})"
+            )
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        msg = self._msg_type()
+        msg.ParseFromString(raw)
+        return msg
+
+
 class StreamClient:
     """Redis Streams 客户端
 
@@ -44,24 +172,43 @@ class StreamClient:
     - 消费者组管理
     - 超时任务回收
     - 队列状态查询
+
+    可选注入 ``codec``：
+    - ``codec=None`` (默认)：保持历史 JSON 行为（隐式 ``JsonCodec``）。
+    - ``codec=JsonCodec()``：显式 JSON 编解码。
+    - ``codec=ProtoCodec(SomeProtoMsg)``：Proto bytes 编解码。
+
+    Typed 方法 (``xadd_typed`` / ``xreadgroup_typed`` ...) 使用注入的 codec；
+    无后缀方法保持原 dict 接口，不破坏历史调用方。
     """
 
     # 默认消费者组名称
     DEFAULT_GROUP = "crawl_workers"
 
-    def __init__(self, redis_client=None):
+    def __init__(
+        self,
+        redis_client=None,
+        codec: StreamCodec | None = None,
+    ):
         """初始化 Stream 客户端
 
         Args:
             redis_client: Redis 客户端实例，为 None 时自动获取
+            codec: Stream 编解码策略，None 时 typed 方法使用 ``JsonCodec``
         """
         self._redis = redis_client
+        self._codec: StreamCodec = codec if codec is not None else JsonCodec()
 
     async def _get_client(self):
         """获取 Redis 客户端"""
         if self._redis is None:
             self._redis = await get_redis_client()
         return self._redis
+
+    @property
+    def codec(self) -> StreamCodec:
+        """当前注入的 codec（默认为 ``JsonCodec``）"""
+        return self._codec
 
     # =========================================================================
     # 消息发布
@@ -133,6 +280,39 @@ class StreamClient:
                 msg_ids.append(result)
 
         return msg_ids
+
+    async def xadd_typed(
+        self,
+        stream_key: str,
+        msg: Any,
+        msg_id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        """使用注入的 codec 编码后发布消息
+
+        Args:
+            stream_key: Stream 键名
+            msg: 业务对象（由 codec.encode 处理）
+            msg_id: 消息 ID，默认 "*" 自动生成
+            maxlen: 最大长度限制
+            approximate: 是否使用近似裁剪
+
+        Returns:
+            消息 ID
+        """
+        client = await self._get_client()
+        serialized = self._codec.encode(msg)
+
+        kwargs = {}
+        if maxlen is not None:
+            kwargs["maxlen"] = maxlen
+            kwargs["approximate"] = approximate
+
+        result = await client.xadd(stream_key, serialized, id=msg_id, **kwargs)
+        if isinstance(result, bytes):
+            return result.decode("utf-8")
+        return result
 
     # =========================================================================
     # 消费者组管理
@@ -286,6 +466,134 @@ class StreamClient:
         except Exception as e:
             logger.error(f"多 Stream 读取失败: {e}")
             return {}
+
+    async def xreadgroup_typed(
+        self,
+        stream_key: str,
+        group_name: str | None = None,
+        consumer_name: str = "worker",
+        count: int = 10,
+        block_ms: int | None = None,
+        read_pending: bool = False,
+    ) -> list[TypedStreamMessage]:
+        """使用注入的 codec 解码后读取消息
+
+        与 ``xreadgroup`` 接口对齐，但每条消息的 ``payload`` 已经被
+        ``codec.decode`` 解码为业务对象。codec 解码失败的消息会被
+        跳过（记录错误日志）以避免阻塞整批。
+
+        Returns:
+            TypedStreamMessage 列表，``payload`` 字段为 codec 解码后的对象
+        """
+        client = await self._get_client()
+        group = group_name or self.DEFAULT_GROUP
+
+        msg_id = "0" if read_pending else ">"
+
+        kwargs = {"count": count}
+        if block_ms is not None:
+            kwargs["block"] = block_ms
+
+        try:
+            result = await client.xreadgroup(
+                group, consumer_name,
+                streams={stream_key: msg_id},
+                **kwargs
+            )
+            return self._parse_typed_result(result, stream_key)
+
+        except Exception as e:
+            if "NOGROUP" in str(e):
+                await self.ensure_group(stream_key, group)
+                return []
+            raise
+
+    async def xreadgroup_multi_typed(
+        self,
+        stream_keys: list,
+        group_name: str | None = None,
+        consumer_name: str = "worker",
+        count: int = 10,
+        block_ms: int | None = None,
+    ) -> dict[str, list[TypedStreamMessage]]:
+        """多 Stream 版本的 ``xreadgroup_typed``。"""
+        client = await self._get_client()
+        group = group_name or self.DEFAULT_GROUP
+
+        for key in stream_keys:
+            await self.ensure_group(key, group)
+
+        streams = dict.fromkeys(stream_keys, ">")
+
+        kwargs = {"count": count}
+        if block_ms is not None:
+            kwargs["block"] = block_ms
+
+        try:
+            result = await client.xreadgroup(
+                group, consumer_name,
+                streams=streams,
+                **kwargs
+            )
+
+            result_dict: dict[str, list[TypedStreamMessage]] = {}
+            if not result:
+                return result_dict
+            for stream_data in result:
+                if len(stream_data) < 2:
+                    continue
+                stream_name = stream_data[0]
+                if isinstance(stream_name, bytes):
+                    stream_name = stream_name.decode("utf-8")
+                result_dict[stream_name] = self._decode_typed_entries(
+                    stream_data[1], stream_name
+                )
+            return result_dict
+
+        except Exception as e:
+            logger.error(f"多 Stream typed 读取失败: {e}")
+            return {}
+
+    def _parse_typed_result(
+        self, result, stream_key: str
+    ) -> list[TypedStreamMessage]:
+        """解析 XREAD/XREADGROUP 结果并通过 codec 解码 payload"""
+        if not result:
+            return []
+
+        messages: list[TypedStreamMessage] = []
+        for stream_data in result:
+            if len(stream_data) < 2:
+                continue
+            stream_name = stream_data[0]
+            if isinstance(stream_name, bytes):
+                stream_name = stream_name.decode("utf-8")
+            messages.extend(self._decode_typed_entries(stream_data[1], stream_name))
+        return messages
+
+    def _decode_typed_entries(
+        self, entries, stream_name: str
+    ) -> list[TypedStreamMessage]:
+        """对单个 stream 的 entries 列表执行 codec.decode"""
+        out: list[TypedStreamMessage] = []
+        for msg_data in entries:
+            if len(msg_data) < 2:
+                continue
+            msg_id = msg_data[0]
+            if isinstance(msg_id, bytes):
+                msg_id = msg_id.decode("utf-8")
+            try:
+                payload = self._codec.decode(msg_data[1])
+            except Exception as exc:
+                logger.error(
+                    "Codec 解码失败: stream={}, msg_id={}, codec={}, err={}",
+                    stream_name, msg_id, type(self._codec).__name__, exc,
+                )
+                continue
+            out.append(TypedStreamMessage(
+                msg_id=msg_id, payload=payload, stream_key=stream_name,
+            ))
+        return out
 
     def _parse_xread_result(self, result, stream_key: str) -> list:
         """解析 XREAD/XREADGROUP 结果"""
