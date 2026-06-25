@@ -1,7 +1,7 @@
 """
 缓存垃圾回收器
 
-负责清理过期的虚拟环境、日志文件和临时文件。
+负责清理过期的虚拟环境和临时文件。
 """
 
 import asyncio
@@ -23,16 +23,12 @@ class GCConfig:
 
     # 环境过期时间（秒），默认 7 天
     env_ttl: int = 7 * 24 * 3600
-    # 日志过期时间（秒），默认 3 天
-    log_ttl: int = 3 * 24 * 3600
     # 临时文件过期时间（秒），默认 1 天
     temp_ttl: int = 24 * 3600
     # GC 检查间隔（秒），默认 1 小时
     check_interval: int = 3600
     # 最大保留环境数量
     max_envs: int = 100
-    # 最大保留日志目录数量
-    max_log_dirs: int = 1000
     # 是否启用自动 GC
     auto_gc: bool = True
 
@@ -43,19 +39,16 @@ class CacheGC:
 
     定期清理过期的资源：
     - 虚拟环境：超过 TTL 未使用的环境
-    - 日志文件：超过 TTL 的执行日志
     - 临时文件：超过 TTL 的临时文件
     """
 
     def __init__(
         self,
         venvs_dir: str | None = None,
-        logs_dir: str | None = None,
         temp_dir: str | None = None,
         config: GCConfig | None = None,
     ):
         self.venvs_dir = venvs_dir
-        self.logs_dir = logs_dir
         self.temp_dir = temp_dir
         self._config = config or GCConfig()
         self._running = False
@@ -66,7 +59,6 @@ class CacheGC:
         self._stats = {
             "last_gc_time": None,
             "envs_cleaned": 0,
-            "logs_cleaned": 0,
             "temp_cleaned": 0,
             "bytes_freed": 0,
         }
@@ -96,9 +88,7 @@ class CacheGC:
 
         self._running = True
         self._task = asyncio.create_task(self._gc_loop())
-        logger.info(
-            f"缓存 GC 已启动，检查间隔: {self._config.check_interval}s"
-        )
+        logger.info(f"缓存 GC 已启动，检查间隔: {self._config.check_interval}s")
 
     async def stop(self) -> None:
         """停止自动 GC"""
@@ -121,7 +111,6 @@ class CacheGC:
                 result = await self.run_gc()
                 logger.info(
                     f"GC 完成: envs={result['envs_cleaned']}, "
-                    f"logs={result['logs_cleaned']}, "
                     f"temp={result['temp_cleaned']}, "
                     f"freed={result['bytes_freed'] / 1024 / 1024:.2f}MB"
                 )
@@ -147,7 +136,6 @@ class CacheGC:
         """
         result = {
             "envs_cleaned": 0,
-            "logs_cleaned": 0,
             "temp_cleaned": 0,
             "bytes_freed": 0,
             "errors": [],
@@ -160,13 +148,6 @@ class CacheGC:
             result["bytes_freed"] += env_result["bytes_freed"]
             result["errors"].extend(env_result.get("errors", []))
 
-        # 清理日志
-        if self.logs_dir:
-            log_result = await self._gc_logs()
-            result["logs_cleaned"] = log_result["cleaned"]
-            result["bytes_freed"] += log_result["bytes_freed"]
-            result["errors"].extend(log_result.get("errors", []))
-
         # 清理临时文件
         if self.temp_dir:
             temp_result = await self._gc_temp()
@@ -177,7 +158,6 @@ class CacheGC:
         # 更新统计
         self._stats["last_gc_time"] = datetime.now().isoformat()
         self._stats["envs_cleaned"] += result["envs_cleaned"]
-        self._stats["logs_cleaned"] += result["logs_cleaned"]
         self._stats["temp_cleaned"] += result["temp_cleaned"]
         self._stats["bytes_freed"] += result["bytes_freed"]
 
@@ -207,13 +187,9 @@ class CacheGC:
                 try:
                     with open(manifest_path, encoding="utf-8") as f:
                         manifest = ujson.load(f)
-                    last_used_str = manifest.get("last_used") or manifest.get(
-                        "created_at"
-                    )
+                    last_used_str = manifest.get("last_used") or manifest.get("created_at")
                     if last_used_str:
-                        last_used = datetime.fromisoformat(
-                            last_used_str
-                        ).timestamp()
+                        last_used = datetime.fromisoformat(last_used_str).timestamp()
                 except Exception:
                     pass
 
@@ -242,10 +218,7 @@ class CacheGC:
                 logger.debug(f"环境 {env['name']} 超过 TTL，将被清理")
 
             # 超过最大数量限制
-            if (
-                len(envs_info) - result["cleaned"] > self._config.max_envs
-                and not should_clean
-            ):
+            if len(envs_info) - result["cleaned"] > self._config.max_envs and not should_clean:
                 should_clean = True
                 logger.debug(f"环境 {env['name']} 超过数量限制，将被清理")
 
@@ -258,62 +231,6 @@ class CacheGC:
                 except Exception as e:
                     result["errors"].append(f"清理环境 {env['name']} 失败: {e}")
                     logger.error(f"清理环境 {env['name']} 失败: {e}")
-
-        return result
-
-    async def _gc_logs(self) -> dict:
-        """清理过期日志"""
-        result = {"cleaned": 0, "bytes_freed": 0, "errors": []}
-
-        if not self.logs_dir or not os.path.exists(self.logs_dir):
-            return result
-
-        now = time.time()
-        cutoff = now - self._config.log_ttl
-        logs_info = []
-
-        # 收集日志目录信息
-        for name in os.listdir(self.logs_dir):
-            log_path = os.path.join(self.logs_dir, name)
-            if not os.path.isdir(log_path):
-                continue
-
-            mtime = os.path.getmtime(log_path)
-            logs_info.append(
-                {
-                    "name": name,
-                    "path": log_path,
-                    "mtime": mtime,
-                    "size": self._get_dir_size(log_path),
-                }
-            )
-
-        # 按修改时间排序
-        logs_info.sort(key=lambda x: x["mtime"])
-
-        # 清理过期日志
-        for log in logs_info:
-            should_clean = False
-
-            # 超过 TTL
-            if log["mtime"] < cutoff:
-                should_clean = True
-
-            # 超过最大数量限制
-            if (
-                len(logs_info) - result["cleaned"] > self._config.max_log_dirs
-                and not should_clean
-            ):
-                should_clean = True
-
-            if should_clean:
-                try:
-                    shutil.rmtree(log["path"])
-                    result["cleaned"] += 1
-                    result["bytes_freed"] += log["size"]
-                except Exception as e:
-                    result["errors"].append(f"清理日志 {log['name']} 失败: {e}")
-                    logger.error(f"清理日志 {log['name']} 失败: {e}")
 
         return result
 
@@ -332,11 +249,7 @@ class CacheGC:
             try:
                 mtime = os.path.getmtime(item_path)
                 if mtime < cutoff:
-                    size = (
-                        self._get_dir_size(item_path)
-                        if os.path.isdir(item_path)
-                        else os.path.getsize(item_path)
-                    )
+                    size = self._get_dir_size(item_path) if os.path.isdir(item_path) else os.path.getsize(item_path)
 
                     if os.path.isdir(item_path):
                         shutil.rmtree(item_path)

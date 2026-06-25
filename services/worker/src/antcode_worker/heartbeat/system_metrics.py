@@ -16,6 +16,7 @@ from loguru import logger
 
 try:
     import psutil
+
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
@@ -42,56 +43,62 @@ class EngineMetricsProvider(Protocol):
 @dataclass
 class CPUMetrics:
     """CPU 指标"""
-    percent: float = 0.0           # CPU 使用率 (0-100)
-    count: int = 0                 # CPU 核心数
-    load_avg_1m: float = 0.0       # 1 分钟负载
-    load_avg_5m: float = 0.0       # 5 分钟负载
-    load_avg_15m: float = 0.0      # 15 分钟负载
+
+    percent: float = 0.0  # CPU 使用率 (0-100)
+    count: int = 0  # CPU 核心数
+    load_avg_1m: float = 0.0  # 1 分钟负载
+    load_avg_5m: float = 0.0  # 5 分钟负载
+    load_avg_15m: float = 0.0  # 15 分钟负载
 
 
 @dataclass
 class MemoryMetrics:
     """内存指标"""
-    percent: float = 0.0           # 内存使用率 (0-100)
-    total_mb: float = 0.0          # 总内存 (MB)
-    available_mb: float = 0.0      # 可用内存 (MB)
-    used_mb: float = 0.0           # 已用内存 (MB)
+
+    percent: float = 0.0  # 内存使用率 (0-100)
+    total_mb: float = 0.0  # 总内存 (MB)
+    available_mb: float = 0.0  # 可用内存 (MB)
+    used_mb: float = 0.0  # 已用内存 (MB)
 
 
 @dataclass
 class DiskMetrics:
     """磁盘指标"""
-    percent: float = 0.0           # 磁盘使用率 (0-100)
-    total_gb: float = 0.0          # 总容量 (GB)
-    free_gb: float = 0.0           # 可用容量 (GB)
-    used_gb: float = 0.0           # 已用容量 (GB)
+
+    percent: float = 0.0  # 磁盘使用率 (0-100)
+    total_gb: float = 0.0  # 总容量 (GB)
+    free_gb: float = 0.0  # 可用容量 (GB)
+    used_gb: float = 0.0  # 已用容量 (GB)
 
 
 @dataclass
 class NetworkMetrics:
     """网络指标"""
-    bytes_sent: int = 0            # 发送字节数
-    bytes_recv: int = 0            # 接收字节数
-    packets_sent: int = 0          # 发送包数
-    packets_recv: int = 0          # 接收包数
-    bytes_sent_rate: float = 0.0   # 发送速率 (bytes/s)
-    bytes_recv_rate: float = 0.0   # 接收速率 (bytes/s)
+
+    bytes_sent: int = 0  # 发送字节数
+    bytes_recv: int = 0  # 接收字节数
+    packets_sent: int = 0  # 发送包数
+    packets_recv: int = 0  # 接收包数
+    bytes_sent_rate: float = 0.0  # 发送速率 (bytes/s)
+    bytes_recv_rate: float = 0.0  # 接收速率 (bytes/s)
 
 
 @dataclass
 class WorkerMetrics:
     """Worker 特定指标"""
-    running_slots: int = 0         # 正在运行的任务槽位
-    max_slots: int = 0             # 最大任务槽位
-    queue_depth: int = 0           # 队列深度
+
+    running_slots: int = 0  # 正在运行的任务槽位
+    max_slots: int = 0  # 最大任务槽位
+    queue_depth: int = 0  # 队列深度
     total_tasks_executed: int = 0  # 总执行任务数
-    last_heartbeat_ts: float = 0.0 # 上次心跳时间戳
-    reconnect_count: int = 0       # 重连次数
+    last_heartbeat_ts: float = 0.0  # 上次心跳时间戳
+    reconnect_count: int = 0  # 重连次数
 
 
 @dataclass
 class SystemMetrics:
     """系统指标汇总"""
+
     cpu: CPUMetrics = field(default_factory=CPUMetrics)
     memory: MemoryMetrics = field(default_factory=MemoryMetrics)
     disk: DiskMetrics = field(default_factory=DiskMetrics)
@@ -250,9 +257,7 @@ class SystemMetricsCollector:
 
         try:
             # CPU 使用率（非阻塞）
-            metrics.percent = await asyncio.to_thread(
-                psutil.cpu_percent, interval=None
-            )
+            metrics.percent = await asyncio.to_thread(psutil.cpu_percent, interval=None)
             metrics.count = psutil.cpu_count() or 1
 
             # 负载（仅 Unix）
@@ -326,12 +331,8 @@ class SystemMetricsCollector:
                 last_sent, last_recv, last_time = self._last_net_io
                 elapsed = now - last_time
                 if elapsed > 0:
-                    metrics.bytes_sent_rate = round(
-                        (net_io.bytes_sent - last_sent) / elapsed, 1
-                    )
-                    metrics.bytes_recv_rate = round(
-                        (net_io.bytes_recv - last_recv) / elapsed, 1
-                    )
+                    metrics.bytes_sent_rate = round((net_io.bytes_sent - last_sent) / elapsed, 1)
+                    metrics.bytes_recv_rate = round((net_io.bytes_recv - last_recv) / elapsed, 1)
 
             self._last_net_io = (net_io.bytes_sent, net_io.bytes_recv, now)
 

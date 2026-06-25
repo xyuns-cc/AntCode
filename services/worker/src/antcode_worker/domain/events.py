@@ -49,7 +49,6 @@ class Signal(Enum):
     PROJECT_SYNC_STARTED = auto()
     PROJECT_SYNC_COMPLETED = auto()
     PROJECT_SYNC_FAILED = auto()
-    PROJECT_CACHED = auto()
 
     # 执行过程
     EXECUTION_STARTED = auto()

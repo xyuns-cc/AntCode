@@ -55,8 +55,8 @@ from antcode_worker.transport.flow_control import (
 from antcode_worker.transport.gateway import (
     AuthConfig,
     AuthMethod,
+    ControlDecoder,
     GatewayAuthenticator,
-    GatewayCodec,
     GatewayConfig,
     GatewayTransport,
     HeartbeatEncoder,
@@ -65,8 +65,8 @@ from antcode_worker.transport.gateway import (
     ReconnectManager,
     ReconnectState,
     ReconnectStats,
-    ResultEncoder,
     TaskDecoder,
+    TaskStatusEncoder,
 )
 
 # Redis Transport
@@ -129,12 +129,12 @@ __all__ = [
     "GatewayAuthenticator",
     "AuthConfig",
     "AuthMethod",
-    # Gateway 编解码
-    "GatewayCodec",
+    # Gateway 编解码（P1b: ControlService + DataService 新 proto）
     "TaskDecoder",
+    "TaskStatusEncoder",
     "LogEncoder",
-    "ResultEncoder",
     "HeartbeatEncoder",
+    "ControlDecoder",
     # Gateway 重连
     "ReconnectManager",
     "ReconnectConfig",

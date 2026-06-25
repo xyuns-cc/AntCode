@@ -10,7 +10,9 @@ import asyncio
 import contextlib
 import os
 import signal
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -25,6 +27,14 @@ except ImportError:
     psutil = None
     HAS_PSUTIL = False
 
+try:
+    import resource
+
+    HAS_RESOURCE = True
+except ImportError:
+    resource = None  # type: ignore[assignment]
+    HAS_RESOURCE = False
+
 from antcode_worker.domain.enums import ExitReason, LogStream, RunStatus
 from antcode_worker.domain.models import (
     ExecPlan,
@@ -38,6 +48,75 @@ from antcode_worker.executor.base import (
     LogSink,
     NoOpLogSink,
 )
+
+
+def _build_preexec_fn(
+    enforce_rlimit: bool,
+    cpu_seconds: int,
+    memory_mb: int,
+    max_open_files: int,
+    max_processes: int,
+) -> Callable[[], None] | None:
+    """构造子进程 preexec_fn：独立进程组 + POSIX rlimit。
+
+    None 表示当前平台/配置下无需 preexec_fn（如 Windows 或 enforce_rlimit=False）。
+    """
+    if sys.platform == "win32":
+        return None
+    if not enforce_rlimit and not max_open_files and not max_processes:
+        return None
+
+    def _pre() -> None:
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        if not HAS_RESOURCE or resource is None:
+            return
+        # 每条 setrlimit 独立保护，避免某一项不支持就放弃所有限制
+        if cpu_seconds and cpu_seconds > 0 and hasattr(resource, "RLIMIT_CPU"):
+            try:
+                resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+            except (ValueError, OSError):
+                pass
+        if memory_mb and memory_mb > 0 and hasattr(resource, "RLIMIT_AS"):
+            limit = memory_mb * 1024 * 1024
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+            except (ValueError, OSError):
+                pass
+        if max_open_files and max_open_files > 0 and hasattr(resource, "RLIMIT_NOFILE"):
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (max_open_files, max_open_files))
+            except (ValueError, OSError):
+                pass
+        if max_processes and max_processes > 0 and hasattr(resource, "RLIMIT_NPROC"):
+            try:
+                resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
+            except (ValueError, OSError):
+                pass
+
+    return _pre
+
+
+def _signal_process_group(process: asyncio.subprocess.Process, sig: int) -> None:
+    """优先按进程组发送信号（杀掉子进程及其 fork 出来的孙进程）。
+
+    若拿不到进程组（如 setsid 失败、Windows），退回到给主进程发信号。
+    """
+    if process.returncode is not None:
+        return
+    pid = process.pid
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, sig)
+        return
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        process.send_signal(sig)
+    except ProcessLookupError:
+        pass
 
 
 @dataclass
@@ -132,6 +211,16 @@ class ProcessExecutor(BaseExecutor):
 
             logger.debug(f"执行命令: {' '.join(cmd)}, cwd={cwd}")
 
+            # 构造 preexec_fn：独立进程组 + POSIX rlimit
+            enforce = exec_plan.enforce_rlimit if exec_plan.enforce_rlimit is not None else self.config.enforce_rlimit
+            preexec = _build_preexec_fn(
+                enforce_rlimit=bool(enforce),
+                cpu_seconds=exec_plan.cpu_limit_seconds or self.config.default_cpu_limit_seconds,
+                memory_mb=exec_plan.memory_limit_mb or self.config.default_memory_limit_mb,
+                max_open_files=exec_plan.max_open_files or self.config.default_max_open_files,
+                max_processes=exec_plan.max_processes or self.config.default_max_processes,
+            )
+
             # 创建子进程
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -139,6 +228,7 @@ class ProcessExecutor(BaseExecutor):
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                preexec_fn=preexec,
             )
 
             # 创建进程信息
@@ -154,12 +244,8 @@ class ProcessExecutor(BaseExecutor):
 
             # 启动资源监控
             monitor_task = None
-            if HAS_PSUTIL and (
-                exec_plan.memory_limit_mb > 0 or exec_plan.cpu_limit_seconds > 0
-            ):
-                monitor_task = asyncio.create_task(
-                    self._monitor_resources(process_info)
-                )
+            if HAS_PSUTIL and (exec_plan.memory_limit_mb > 0 or exec_plan.cpu_limit_seconds > 0):
+                monitor_task = asyncio.create_task(self._monitor_resources(process_info))
 
             try:
                 # 流式读取输出
@@ -174,9 +260,7 @@ class ProcessExecutor(BaseExecutor):
                 await log_sink.flush()
 
                 # 确定状态和退出原因
-                status, exit_reason, error_msg = self._determine_result(
-                    exit_code, process_info
-                )
+                status, exit_reason, error_msg = self._determine_result(exit_code, process_info)
 
                 # 创建结果
                 result = self._create_result(
@@ -223,9 +307,7 @@ class ProcessExecutor(BaseExecutor):
             self._update_stats(RunStatus.FAILED)
             return result
 
-    def _build_command(
-        self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle
-    ) -> list[str]:
+    def _build_command(self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle) -> list[str]:
         """构建执行命令"""
         # 使用运行时的 Python 解释器
         if exec_plan.command.endswith(".py"):
@@ -238,9 +320,7 @@ class ProcessExecutor(BaseExecutor):
 
         return cmd
 
-    def _build_env(
-        self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle
-    ) -> dict[str, str]:
+    def _build_env(self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle) -> dict[str, str]:
         """构建环境变量"""
         env = os.environ.copy()
 
@@ -292,9 +372,7 @@ class ProcessExecutor(BaseExecutor):
         stdout_count = 0
         stderr_count = 0
 
-        async def read_stream(
-            stream: asyncio.StreamReader, stream_type: str
-        ) -> int:
+        async def read_stream(stream: asyncio.StreamReader, stream_type: str) -> int:
             """读取单个流"""
             nonlocal stdout_count, stderr_count
             count = 0
@@ -310,9 +388,7 @@ class ProcessExecutor(BaseExecutor):
                     # 检查行数限制
                     if count > max_lines:
                         if count == max_lines + 1:
-                            logger.warning(
-                                f"任务 {run_id} {stream_type} 输出行数超限 ({max_lines})"
-                            )
+                            logger.warning(f"任务 {run_id} {stream_type} 输出行数超限 ({max_lines})")
                         continue
 
                     # 解码内容
@@ -325,9 +401,7 @@ class ProcessExecutor(BaseExecutor):
                     # 创建日志条目
                     entry = LogEntry(
                         run_id=run_id,
-                        stream=LogStream.STDOUT
-                        if stream_type == "stdout"
-                        else LogStream.STDERR,
+                        stream=LogStream.STDOUT if stream_type == "stdout" else LogStream.STDERR,
                         content=content,
                         seq=seq,
                         timestamp=datetime.now(),
@@ -340,28 +414,21 @@ class ProcessExecutor(BaseExecutor):
                     # 任务被取消，正常退出
                     break
                 except Exception as e:
-                    logger.debug(f"读取 {stream_type} 异常: {e}")
-                    break
+                    logger.error(f"读取 {stream_type} 异常: {e}")
+                    raise
 
             return count
 
         def safe_get_result(task: asyncio.Task) -> int:
             """安全获取任务结果"""
             if task.done() and not task.cancelled():
-                try:
-                    return task.result()
-                except Exception:
-                    return 0
+                return task.result()
             return 0
 
         try:
             # 创建读取任务
-            stdout_task = asyncio.create_task(
-                read_stream(process.stdout, "stdout")
-            )
-            stderr_task = asyncio.create_task(
-                read_stream(process.stderr, "stderr")
-            )
+            stdout_task = asyncio.create_task(read_stream(process.stdout, "stdout"))
+            stderr_task = asyncio.create_task(read_stream(process.stderr, "stderr"))
             wait_task = asyncio.create_task(process.wait())
 
             # 等待完成或超时
@@ -382,8 +449,7 @@ class ProcessExecutor(BaseExecutor):
                 # 终止进程
                 await self._terminate_process(
                     process_info,
-                    process_info.exec_plan.grace_period_seconds
-                    or self.config.default_grace_period,
+                    process_info.exec_plan.grace_period_seconds or self.config.default_grace_period,
                 )
 
                 return 124, safe_get_result(stdout_task), safe_get_result(stderr_task)
@@ -398,14 +464,11 @@ class ProcessExecutor(BaseExecutor):
             # 超时处理
             await self._terminate_process(
                 process_info,
-                process_info.exec_plan.grace_period_seconds
-                or self.config.default_grace_period,
+                process_info.exec_plan.grace_period_seconds or self.config.default_grace_period,
             )
             return 124, stdout_count, stderr_count
 
-    async def _terminate_process(
-        self, process_info: ProcessInfo, grace_period: float
-    ) -> None:
+    async def _terminate_process(self, process_info: ProcessInfo, grace_period: float) -> None:
         """
         终止进程
 
@@ -421,15 +484,15 @@ class ProcessExecutor(BaseExecutor):
             return
 
         try:
-            # 发送 SIGTERM
-            process.terminate()
+            # 发送 SIGTERM 到整个进程组（防止 fork 出的子进程残留）
+            _signal_process_group(process, signal.SIGTERM)
             logger.debug(f"发送 SIGTERM: {process_info.run_id}")
 
             try:
                 await asyncio.wait_for(process.wait(), timeout=grace_period)
             except TimeoutError:
-                # 发送 SIGKILL
-                process.kill()
+                # 发送 SIGKILL 到整个进程组
+                _signal_process_group(process, signal.SIGKILL)
                 logger.debug(f"发送 SIGKILL: {process_info.run_id}")
                 await process.wait()
 
@@ -473,26 +536,20 @@ class ProcessExecutor(BaseExecutor):
                     # 获取内存使用
                     memory_info = p.memory_info()
                     memory_mb = memory_info.rss / 1024 / 1024
-                    process_info.memory_peak_mb = max(
-                        process_info.memory_peak_mb, memory_mb
-                    )
+                    process_info.memory_peak_mb = max(process_info.memory_peak_mb, memory_mb)
 
-                    # 检查 CPU 限制
+                    # 检查 CPU 限制（rlimit 是兜底，监控提前杀防失控）
                     if cpu_limit > 0 and cpu_time > cpu_limit:
-                        logger.warning(
-                            f"CPU 时间超限: {cpu_time:.1f}s > {cpu_limit}s, "
-                            f"run_id={process_info.run_id}"
-                        )
-                        p.kill()
+                        logger.warning(f"CPU 时间超限: {cpu_time:.1f}s > {cpu_limit}s, run_id={process_info.run_id}")
+                        _signal_process_group(process, signal.SIGKILL)
                         break
 
                     # 检查内存限制
                     if memory_limit_bytes > 0 and memory_info.rss > memory_limit_bytes:
                         logger.warning(
-                            f"内存超限: {memory_mb:.1f}MB > {exec_plan.memory_limit_mb}MB, "
-                            f"run_id={process_info.run_id}"
+                            f"内存超限: {memory_mb:.1f}MB > {exec_plan.memory_limit_mb}MB, run_id={process_info.run_id}"
                         )
-                        p.kill()
+                        _signal_process_group(process, signal.SIGKILL)
                         break
 
                 except psutil.NoSuchProcess:
@@ -518,9 +575,7 @@ class ProcessExecutor(BaseExecutor):
             return 2.0
         return 5.0
 
-    def _determine_result(
-        self, exit_code: int, process_info: ProcessInfo
-    ) -> tuple[RunStatus, ExitReason, str | None]:
+    def _determine_result(self, exit_code: int, process_info: ProcessInfo) -> tuple[RunStatus, ExitReason, str | None]:
         """
         确定执行结果
 
@@ -549,16 +604,10 @@ class ProcessExecutor(BaseExecutor):
 
         # 检查是否因资源限制被终止
         exec_plan = process_info.exec_plan
-        if (
-            exec_plan.cpu_limit_seconds > 0
-            and process_info.cpu_time_seconds > exec_plan.cpu_limit_seconds
-        ):
+        if exec_plan.cpu_limit_seconds > 0 and process_info.cpu_time_seconds > exec_plan.cpu_limit_seconds:
             return RunStatus.FAILED, ExitReason.CPU_LIMIT, "CPU 时间超限"
 
-        if (
-            exec_plan.memory_limit_mb > 0
-            and process_info.memory_peak_mb > exec_plan.memory_limit_mb
-        ):
+        if exec_plan.memory_limit_mb > 0 and process_info.memory_peak_mb > exec_plan.memory_limit_mb:
             return RunStatus.FAILED, ExitReason.OOM, "内存超限"
 
         return RunStatus.FAILED, ExitReason.ERROR, f"退出码: {exit_code}"
@@ -570,6 +619,5 @@ class ProcessExecutor(BaseExecutor):
 
         await self._terminate_process(
             process_info,
-            process_info.exec_plan.grace_period_seconds
-            or self.config.default_grace_period,
+            process_info.exec_plan.grace_period_seconds or self.config.default_grace_period,
         )

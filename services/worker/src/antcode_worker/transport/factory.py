@@ -17,14 +17,13 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 
-from loguru import logger
-
 from antcode_core.infrastructure.redis import (
     control_stream,
     redis_namespace,
     task_ready_stream,
     worker_group,
 )
+from loguru import logger
 
 from antcode_worker.transport.base import TransportBase
 
@@ -310,11 +309,11 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
         await asyncio.wait_for(channel.channel_ready(), timeout=10.0)
         logger.info(f"  OK  gRPC 连接成功: {endpoint}")
 
-        # 尝试 Register
+        # 尝试 Register (新协议：ControlService.Register)
         try:
-            from antcode_contracts import gateway_pb2, gateway_pb2_grpc
+            from antcode_contracts import control_pb2, control_pb2_grpc
 
-            stub = gateway_pb2_grpc.GatewayServiceStub(channel)
+            stub = control_pb2_grpc.ControlServiceStub(channel)
 
             # 构建认证元数据
             metadata = []
@@ -324,7 +323,7 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
                 metadata.append(("x-worker-id", config.worker_id))
 
             # 发送 Register 请求
-            request = gateway_pb2.RegisterRequest(
+            request = control_pb2.RegisterRequest(
                 worker_id=config.worker_id or "",
                 api_key=config.gateway.api_key or "",
             )
@@ -335,7 +334,11 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
             )
 
             if response.success:
-                logger.info(f"  OK  Register 成功: worker_id={response.worker_id}")
+                logger.info(
+                    f"  OK  Register 成功: worker_id={response.worker_id} "
+                    f"lease_ttl_ms={getattr(response, 'lease_ttl_ms', 0)} "
+                    f"lease_renew_after_ms={getattr(response, 'lease_renew_after_ms', 0)}"
+                )
             else:
                 logger.warning(f"  WARN Register 返回失败: {response.error}")
                 # 不阻止启动，可能是首次注册

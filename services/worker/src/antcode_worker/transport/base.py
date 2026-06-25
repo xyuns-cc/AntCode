@@ -16,25 +16,30 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from antcode_worker.domain.models import SourceBundle
+
 
 class TransportMode(str, Enum):
     """传输模式枚举"""
-    DIRECT = "direct"    # 内网直连 Redis Streams
+
+    DIRECT = "direct"  # 内网直连 Redis Streams
     GATEWAY = "gateway"  # 公网通过 Gateway gRPC
 
 
 class WorkerState(str, Enum):
     """Worker 状态枚举"""
-    WAITING = "waiting"          # 等待连接
-    CONNECTING = "connecting"    # 正在连接
-    REGISTERED = "registered"    # 已注册
-    ONLINE = "online"            # 在线
+
+    WAITING = "waiting"  # 等待连接
+    CONNECTING = "connecting"  # 正在连接
+    REGISTERED = "registered"  # 已注册
+    ONLINE = "online"  # 在线
     RECONNECTING = "reconnecting"  # 重连中
-    OFFLINE = "offline"          # 离线
+    OFFLINE = "offline"  # 离线
 
 
 class ControlType(str, Enum):
     """控制消息类型"""
+
     CANCEL = "cancel"
     KILL = "kill"
     CONFIG_UPDATE = "config_update"
@@ -44,13 +49,14 @@ class ControlType(str, Enum):
 @dataclass
 class ServerConfig:
     """传输层配置"""
+
     # 通用配置
     heartbeat_interval: int = 30
     reconnect_interval: int = 5
     max_reconnect_attempts: int = 10
 
     # Direct 模式配置
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = ""
     worker_queue_prefix: str = "worker:queue:"
     task_stream_prefix: str = "task:stream:"
     log_stream_prefix: str = "log:stream:"
@@ -62,9 +68,14 @@ class ServerConfig:
     max_receive_message_length: int = 50 * 1024 * 1024
 
 
-@dataclass
+@dataclass(repr=False)
 class TaskMessage:
-    """任务消息"""
+    """任务消息
+
+    环境变量等敏感字段在 ``__repr__`` / ``__str__`` 中会被脱敏，
+    防止日志/异常堆栈意外打印明文 secret。
+    """
+
     task_id: str
     project_id: str
     project_type: str = "code"
@@ -72,18 +83,34 @@ class TaskMessage:
     params: dict = field(default_factory=dict)
     environment: dict = field(default_factory=dict)
     timeout: int = 3600
-    download_url: str = ""
-    file_hash: str = ""
+    source_bundle: SourceBundle | None = None
+    source_subdir: str = ""
     entry_point: str = ""
-    is_compressed: bool | None = None  # None 表示未指定，由 fetcher 自动判断
     run_id: str = ""
     created_at: datetime | None = None
     receipt: str | None = None
+
+    def __repr__(self) -> str:
+        from antcode_core.common.logging import sanitize_dict
+
+        return (
+            f"TaskMessage(task_id={self.task_id!r}, project_id={self.project_id!r}, "
+            f"project_type={self.project_type!r}, priority={self.priority}, "
+            f"params={sanitize_dict(self.params)!r}, "
+            f"environment={sanitize_dict(self.environment)!r}, "
+            f"timeout={self.timeout}, source_bundle={self.source_bundle!r}, "
+            f"source_subdir={self.source_subdir!r}, entry_point={self.entry_point!r}, "
+            f"run_id={self.run_id!r}, created_at={self.created_at!r}, "
+            f"receipt={'***' if self.receipt else None})"
+        )
+
+    __str__ = __repr__
 
 
 @dataclass
 class TaskResult:
     """任务结果"""
+
     run_id: str
     task_id: str
     status: str  # success, failed, cancelled, timeout
@@ -98,6 +125,7 @@ class TaskResult:
 @dataclass
 class HeartbeatMessage:
     """心跳消息"""
+
     worker_id: str
     status: str = "online"
     cpu_percent: float = 0.0
@@ -112,6 +140,7 @@ class HeartbeatMessage:
 @dataclass
 class LogMessage:
     """日志消息"""
+
     run_id: str
     log_type: str  # stdout, stderr
     content: str
@@ -122,6 +151,7 @@ class LogMessage:
 @dataclass
 class ControlMessage:
     """控制消息"""
+
     control_type: str
     task_id: str = ""
     run_id: str = ""
@@ -415,6 +445,7 @@ class TransportBase(ABC):
         if self._on_state_change:
             try:
                 import asyncio
+
                 result = self._on_state_change(old_state, new_state)
                 if asyncio.iscoroutine(result):
                     await result

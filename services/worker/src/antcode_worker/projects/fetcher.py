@@ -1,438 +1,202 @@
 """
-项目拉取与缓存
+Source bundle 项目获取。
 
-提供基于 file_hash 的缓存与安全解压。
+Worker 只接受 pgartifact://<sha256>，从 PostgreSQL artifact blob 读取源码包，
+校验 sha256 后解包到当前 run 的临时工作区。
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
+import io
 import os
 import re
+import shutil
 import tarfile
-import time
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
-from loguru import logger
-
-
-@dataclass
-class ProjectCacheEntry:
-    """项目缓存条目"""
-
-    cache_key: str
-    project_id: str
-    file_hash: str
-    local_path: str
-    created_at: float = field(default_factory=time.time)
-    last_access: float = field(default_factory=time.time)
-    size_bytes: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ProjectCacheEntry:
-        return cls(**data)
+SOURCE_BUNDLE_METHOD = "source_bundle"
+PGARTIFACT_SCHEME = "pgartifact"
+SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 
 
-class ProjectCache:
-    """项目缓存索引"""
+def _safe_slug(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", value)
 
-    INDEX_FILE = "index.json"
 
-    def __init__(
-        self,
-        cache_dir: str,
-        max_entries: int = 200,
-        ttl_hours: int = 24 * 7,
-    ):
-        self._cache_dir = Path(cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._index_path = self._cache_dir / self.INDEX_FILE
-        self._max_entries = max_entries
-        self._ttl_seconds = ttl_hours * 3600
-        self._entries: dict[str, ProjectCacheEntry] = {}
-        self._lock = asyncio.Lock()
-        self._load_index()
+class ProjectWorkspace:
+    """Per-run source workspace."""
 
-    def _load_index(self) -> None:
-        if not self._index_path.exists():
-            return
-        try:
-            data = json.loads(self._index_path.read_text(encoding="utf-8"))
-            for key, entry in data.items():
-                self._entries[key] = ProjectCacheEntry.from_dict(entry)
-        except Exception as exc:
-            logger.warning(f"读取项目缓存索引失败: {exc}")
+    def __init__(self, root_dir: str):
+        self._root_dir = Path(root_dir)
+        self._root_dir.mkdir(parents=True, exist_ok=True)
 
-    def _save_index(self) -> None:
-        data = {k: v.to_dict() for k, v in self._entries.items()}
-        self._index_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    def project_dir(self, run_id: str, project_id: str, sha256: str) -> Path:
+        return self._root_dir / _safe_slug(run_id) / _safe_slug(project_id) / sha256
 
-    async def get(self, cache_key: str) -> str | None:
-        async with self._lock:
-            entry = self._entries.get(cache_key)
-            if not entry:
-                return None
+    async def cleanup(self, run_id: str) -> None:
+        run_dir = self._root_dir / _safe_slug(run_id)
+        await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
 
-            now = time.time()
-            if now - entry.created_at > self._ttl_seconds:
-                self._entries.pop(cache_key, None)
-                self._save_index()
-                return None
 
-            if not os.path.exists(entry.local_path):
-                self._entries.pop(cache_key, None)
-                self._save_index()
-                return None
+@dataclass(frozen=True)
+class FetchedWorkspace:
+    """Resolved source bundle workspace paths."""
 
-            entry.last_access = now
-            self._save_index()
-            return entry.local_path
-
-    async def put(self, entry: ProjectCacheEntry) -> None:
-        async with self._lock:
-            if len(self._entries) >= self._max_entries:
-                self._evict_locked()
-            self._entries[entry.cache_key] = entry
-            self._save_index()
-
-    def _evict_locked(self) -> None:
-        if not self._entries:
-            return
-        oldest = sorted(self._entries.values(), key=lambda e: e.last_access)
-        evict_count = max(1, len(self._entries) - self._max_entries + 1)
-        for entry in oldest[:evict_count]:
-            self._entries.pop(entry.cache_key, None)
+    bundle_root: str
+    project_cwd: str
 
 
 class ArtifactFetcher:
-    """项目文件获取器"""
+    """Source bundle 获取器。"""
 
-    def __init__(self, cache: ProjectCache):
-        self._cache = cache
+    def __init__(self, workspace: ProjectWorkspace, artifact_store: Any):
+        self._workspace = workspace
+        self._artifact_store = artifact_store
 
     async def fetch(
         self,
+        run_id: str,
         project_id: str,
-        download_url: str,
-        file_hash: str | None = None,
-        is_compressed: bool | None = None,
+        source_bundle_uri: str,
+        source_bundle_sha256: str,
+        source_bundle_size: int,
         entry_point: str | None = None,
-    ) -> str:
-        if self._is_git_download_url(download_url):
-            return await self._fetch_git_project(project_id, download_url, file_hash)
-
-        return await self._fetch_artifact_project(
-            project_id=project_id,
-            download_url=download_url,
-            file_hash=file_hash,
-            is_compressed=is_compressed,
-            entry_point=entry_point,
+        source_subdir: str | None = None,
+    ) -> FetchedWorkspace:
+        del entry_point
+        content_hash = self._validate_source_bundle(
+            source_bundle_uri,
+            source_bundle_sha256,
+            source_bundle_size,
         )
 
-    async def _fetch_artifact_project(
-        self,
-        project_id: str,
-        download_url: str,
-        file_hash: str | None = None,
-        is_compressed: bool | None = None,
-        entry_point: str | None = None,
-    ) -> str:
-        cache_key = self._build_cache_key(project_id, file_hash, download_url)
-        cached = await self._cache.get(cache_key)
-        if cached:
-            return cached
+        blob = await self._artifact_store.read_blob(content_hash)
+        self._verify_blob(blob, source_bundle_sha256, source_bundle_size)
 
-        project_dir = self._build_project_dir(project_id, cache_key)
-        project_dir.mkdir(parents=True, exist_ok=True)
-
-        filename = self._guess_filename(download_url)
-        file_path = project_dir / filename
-
-        await self._download_file(download_url, file_path)
-
-        if file_hash:
-            algo = self._detect_hash_algo(file_hash)
-            actual = await asyncio.to_thread(self._hash_file, file_path, algo)
-            if actual.lower() != file_hash.lower():
-                raise RuntimeError(f"项目文件哈希不一致: expected={file_hash}, actual={actual}")
-
-        # 判断是否需要解压
-        # 1. 如果明确指定 is_compressed=False，则不解压
-        # 2. 如果是压缩包扩展名，则解压
-        should_extract = True
-        if is_compressed is False:
-            should_extract = False
-
-        if should_extract:
-            extracted_path = await self._extract_if_needed(file_path, project_dir)
-        else:
-            extracted_path = None
-            # 对于单个文件，将其移动到 extracted 目录以保持一致的目录结构
-            extract_dir = project_dir / "extracted"
-            extract_dir.mkdir(parents=True, exist_ok=True)
-            # 使用 entry_point 作为文件名（如果提供），否则使用原始文件名
-            target_name = entry_point if entry_point else filename
-            target_path = extract_dir / target_name
-            await asyncio.to_thread(self._copy_file, file_path, target_path)
-            extracted_path = str(extract_dir)
-
-        final_path = extracted_path or str(project_dir)
-
-        size_bytes = file_path.stat().st_size if file_path.exists() else 0
-        entry = ProjectCacheEntry(
-            cache_key=cache_key,
-            project_id=project_id,
-            file_hash=file_hash or "",
-            local_path=final_path,
-            size_bytes=size_bytes,
-        )
-        await self._cache.put(entry)
-        return final_path
-
-    async def _fetch_git_project(
-        self,
-        project_id: str,
-        download_url: str,
-        file_hash: str | None,
-    ) -> str:
-        source_config = self._parse_git_download_url(download_url)
-        cache_key = self._build_cache_key(project_id, file_hash, download_url)
-
-        if file_hash:
-            cached = await self._cache.get(cache_key)
-            if cached:
-                return cached
-
-        project_dir = self._build_project_dir(project_id, cache_key)
+        project_dir = self._workspace.project_dir(run_id, project_id, content_hash)
         await asyncio.to_thread(self._prepare_project_dir, project_dir)
+        extracted_path = await asyncio.to_thread(self._extract_bundle, blob, project_dir)
+        project_cwd = self._resolve_project_cwd(extracted_path, source_subdir)
+        return FetchedWorkspace(bundle_root=str(extracted_path), project_cwd=str(project_cwd))
 
-        repo_dir = project_dir / "repo"
-        await self._clone_git_repo(source_config, repo_dir)
-        final_path = self._resolve_git_project_path(repo_dir, source_config.get("subdir"))
+    async def cleanup(self, run_id: str) -> None:
+        await self._workspace.cleanup(run_id)
 
-        if file_hash:
-            entry = ProjectCacheEntry(
-                cache_key=cache_key,
-                project_id=project_id,
-                file_hash=file_hash,
-                local_path=final_path,
-                size_bytes=0,
-            )
-            await self._cache.put(entry)
+    def _validate_source_bundle(
+        self,
+        uri: str,
+        sha256: str,
+        size: int,
+    ) -> str:
+        if uri.startswith("git+"):
+            raise ValueError("Worker 只接受 pgartifact://<sha256> source bundle")
+        if not SHA256_RE.fullmatch(sha256):
+            raise ValueError("source_bundle_sha256 必须是 64 位十六进制 sha256")
+        if size < 0:
+            raise ValueError("source_bundle_size 不能为负数")
 
-        return final_path
+        parsed = urlparse(uri)
+        if parsed.scheme != PGARTIFACT_SCHEME:
+            raise ValueError("Worker 只接受 pgartifact://<sha256> source bundle")
+        if parsed.path or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("pgartifact URI 不允许 path/query/fragment")
+        if parsed.username or parsed.password or parsed.port:
+            raise ValueError("pgartifact URI 只能包含 sha256 主机名")
 
-    def _build_cache_key(self, project_id: str, file_hash: str | None, url: str) -> str:
-        safe_project = self._safe_slug(project_id)
-        if file_hash:
-            return f"{safe_project}:{file_hash}"
-        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-        return f"{safe_project}:{url_hash}"
+        content_hash = parsed.hostname or ""
+        if not SHA256_RE.fullmatch(content_hash):
+            raise ValueError("pgartifact URI 必须是 pgartifact://<sha256>")
+        if content_hash.lower() != sha256.lower():
+            raise ValueError("pgartifact URI sha256 与 source_bundle_sha256 不一致")
+        return content_hash.lower()
 
-    def _build_project_dir(self, project_id: str, cache_key: str) -> Path:
-        safe_project = self._safe_slug(project_id)
-        safe_key = self._safe_slug(cache_key)
-        return self._cache._cache_dir / safe_project / safe_key
-
-    def _safe_slug(self, value: str) -> str:
-        return re.sub(r"[^a-zA-Z0-9._-]", "_", value)
-
-    def _is_git_download_url(self, url: str) -> bool:
-        return url.startswith("git+")
-
-    def _parse_git_download_url(self, download_url: str) -> dict[str, str]:
-        raw_url = download_url.removeprefix("git+")
-        parsed = urlparse(raw_url)
-        if not parsed.scheme:
-            raise RuntimeError("Git 下载地址必须包含协议")
-
-        repo_url = parsed._replace(query="", fragment="").geturl()
-        query = parse_qs(parsed.query)
-        config = {"url": repo_url}
-        if ref := self._first_query_value(query, "ref"):
-            config["branch"] = ref
-        if commit := self._first_query_value(query, "commit"):
-            config["commit"] = commit
-        if subdir := self._first_query_value(query, "subdir"):
-            config["subdir"] = self._normalize_git_subdir(subdir)
-        return config
-
-    def _first_query_value(self, query: dict[str, list[str]], key: str) -> str | None:
-        values = query.get(key)
-        if not values:
-            return None
-        value = values[0].strip()
-        return value or None
-
-    def _normalize_git_subdir(self, value: str) -> str:
-        normalized = value.strip().replace("\\", "/").strip("/")
-        if not normalized:
-            raise RuntimeError("Git 子目录不能为空")
-        parts = [part for part in normalized.split("/") if part]
-        if any(part == ".." for part in parts):
-            raise RuntimeError("Git 子目录不合法")
-        return "/".join(parts)
+    def _verify_blob(self, blob: bytes, expected_sha256: str, expected_size: int) -> None:
+        if len(blob) != expected_size:
+            raise ValueError(f"source bundle 大小不一致: expected={expected_size}, actual={len(blob)}")
+        actual = hashlib.sha256(blob).hexdigest()
+        if actual.lower() != expected_sha256.lower():
+            raise ValueError(f"source bundle sha256 不一致: expected={expected_sha256}, actual={actual}")
 
     def _prepare_project_dir(self, project_dir: Path) -> None:
-        import shutil
-
         if project_dir.exists():
             shutil.rmtree(project_dir)
         project_dir.mkdir(parents=True, exist_ok=True)
 
-    async def _clone_git_repo(self, source_config: dict[str, str], repo_dir: Path) -> None:
-        clone_cmd = ["git", "clone"]
-        branch = source_config.get("branch")
-        commit = source_config.get("commit")
-
-        if branch and not commit:
-            clone_cmd.extend(["--depth", "1", "--branch", branch])
-        elif branch:
-            clone_cmd.extend(["--branch", branch])
-
-        clone_cmd.extend([source_config["url"], str(repo_dir)])
-        await self._run_git_command(clone_cmd)
-
-        if commit:
-            await self._run_git_command(["git", "checkout", commit], cwd=repo_dir)
-
-    async def _run_git_command(self, command: list[str], cwd: Path | None = None) -> None:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(cwd) if cwd else None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        if process.returncode == 0:
-            return
-
-        error = stderr.decode("utf-8", errors="ignore").strip()
-        output = stdout.decode("utf-8", errors="ignore").strip()
-        message = error or output or "未知错误"
-        raise RuntimeError(f"Git 命令执行失败: {' '.join(command)}\n{message}")
-
-    def _resolve_git_project_path(self, repo_dir: Path, subdir: str | None) -> str:
-        if not subdir:
-            return str(repo_dir)
-
-        base_dir = repo_dir.resolve()
-        target_dir = (base_dir / subdir).resolve()
-        if os.path.commonpath([str(base_dir), str(target_dir)]) != str(base_dir):
-            raise RuntimeError("Git 子目录越界")
-        if not target_dir.exists():
-            raise FileNotFoundError(f"Git 子目录不存在: {subdir}")
-        return str(target_dir)
-
-    def _guess_filename(self, url: str) -> str:
-        name = url.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
-        return name or "project.zip"
-
-    async def _download_file(self, url: str, file_path: Path) -> None:
-        if url.startswith("file://"):
-            src = Path(url.removeprefix("file://"))
-            if not src.exists():
-                raise FileNotFoundError(f"本地文件不存在: {src}")
-            await asyncio.to_thread(self._copy_file, src, file_path)
-            return
-
-        import httpx
-
-        async with (
-            httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client,
-            client.stream("GET", url) as response,
-        ):
-            response.raise_for_status()
-            with open(file_path, "wb") as f:
-                async for chunk in response.aiter_bytes():
-                    f.write(chunk)
-
-    def _copy_file(self, src: Path, dest: Path) -> None:
-        import shutil
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-
-    def _detect_hash_algo(self, file_hash: str) -> str:
-        length = len(file_hash)
-        if length == 32:
-            return "md5"
-        if length == 64:
-            return "sha256"
-        return "sha256"
-
-    def _hash_file(self, file_path: Path, algo: str) -> str:
-        hasher = hashlib.new(algo)
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    async def _extract_if_needed(self, file_path: Path, project_dir: Path) -> str | None:
-        name = file_path.name.lower()
-        if not (name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz")):
-            return None
-
+    def _extract_bundle(self, blob: bytes, project_dir: Path) -> Path:
         extract_dir = project_dir / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
 
-        if name.endswith(".zip"):
-            await asyncio.to_thread(self._safe_extract_zip, file_path, extract_dir)
-        else:
-            await asyncio.to_thread(self._safe_extract_tar, file_path, extract_dir)
+        if zipfile.is_zipfile(io.BytesIO(blob)):
+            self._safe_extract_zip(blob, extract_dir)
+            return extract_dir
+        fileobj = io.BytesIO(blob)
+        if self._is_tar_blob(fileobj):
+            fileobj.seek(0)
+            self._safe_extract_tar(fileobj, extract_dir)
+            return extract_dir
 
-        return str(extract_dir)
+        raise ValueError("source bundle 必须是 zip 或 tar 压缩包")
 
-    def _safe_extract_zip(self, file_path: Path, dest: Path) -> None:
+    def _is_tar_blob(self, fileobj: io.BytesIO) -> bool:
+        try:
+            with tarfile.open(fileobj=fileobj, mode="r:*"):
+                return True
+        except tarfile.TarError:
+            return False
+
+    def _safe_extract_zip(self, blob: bytes, dest: Path) -> None:
         base_dir = dest.resolve()
-        with zipfile.ZipFile(file_path, "r") as zf:
-            for member in zf.infolist():
+        with zipfile.ZipFile(io.BytesIO(blob), "r") as archive:
+            members = archive.infolist()
+            for member in members:
                 if self._is_unsafe_zip_member(member, base_dir):
-                    raise RuntimeError(f"不安全的压缩路径: {member.filename}")
-            for member in zf.infolist():
-                zf.extract(member, base_dir)
+                    raise ValueError(f"不安全的压缩路径: {member.filename}")
+            archive.extractall(base_dir)
 
-    def _safe_extract_tar(self, file_path: Path, dest: Path) -> None:
-        mode = "r:gz" if file_path.name.endswith((".tar.gz", ".tgz")) else "r"
+    def _safe_extract_tar(self, fileobj: io.BytesIO, dest: Path) -> None:
         base_dir = dest.resolve()
-        with tarfile.open(file_path, mode) as tf:
-            members = tf.getmembers()
+        with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
+            members = archive.getmembers()
             for member in members:
                 if self._is_unsafe_tar_member(member, base_dir):
-                    raise RuntimeError(f"不安全的压缩路径: {member.name}")
-            for member in members:
-                tf.extract(member, base_dir)
+                    raise ValueError(f"不安全的压缩路径: {member.name}")
+            archive.extractall(base_dir, members=members)
+
+    def _resolve_project_cwd(self, bundle_root: Path, source_subdir: str | None) -> Path:
+        relative = self._normalize_subdir(source_subdir)
+        project_cwd = (bundle_root / relative).resolve()
+        base_dir = bundle_root.resolve()
+        if os.path.commonpath([str(base_dir), str(project_cwd)]) != str(base_dir):
+            raise ValueError("source_subdir 越界")
+        if not project_cwd.is_dir():
+            raise ValueError(f"source_subdir 不存在: {relative}")
+        return project_cwd
+
+    def _normalize_subdir(self, source_subdir: str | None) -> str:
+        normalized = (source_subdir or "").strip().replace("\\", "/").strip("/")
+        if not normalized or normalized == ".":
+            raise ValueError("source_subdir 不能为空")
+        parts = normalized.split("/")
+        if any(part in {"..", ".git"} for part in parts):
+            raise ValueError("source_subdir 不合法")
+        return normalized
 
     def _is_unsafe_zip_member(self, member: zipfile.ZipInfo, base_dir: Path) -> bool:
-        if self._is_zip_symlink(member):
+        mode = member.external_attr >> 16
+        if (mode & 0o120000) == 0o120000:
             return True
         return not self._is_safe_member_path(member.filename, base_dir)
 
     def _is_unsafe_tar_member(self, member: tarfile.TarInfo, base_dir: Path) -> bool:
-        if member.issym() or member.islnk():
+        if not (member.isfile() or member.isdir()):
             return True
         return not self._is_safe_member_path(member.name, base_dir)
-
-    def _is_zip_symlink(self, member: zipfile.ZipInfo) -> bool:
-        mode = member.external_attr >> 16
-        return (mode & 0o120000) == 0o120000
-
-    def _is_unsafe_path(self, path: str) -> bool:
-        if not path:
-            return True
-        target = Path(path)
-        if target.is_absolute():
-            return True
-        return ".." in target.parts
 
     def _is_safe_member_path(self, name: str, base_dir: Path) -> bool:
         if not name:

@@ -292,6 +292,7 @@ class IdentityManager:
             return
 
         try:
+
             def handler(signum, frame):
                 logger.info("收到 SIGHUP 信号，重载身份...")
                 self.reload()

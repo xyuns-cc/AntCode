@@ -7,8 +7,6 @@ SpiderKit - 爬虫核心框架
 - Spider: 爬虫基类
 - HttpClient: 异步 HTTP 客户端（httpx + curl_cffi）
 - Middlewares: 爬虫中间件（UA轮换、代理、限速、指纹伪装）
-- RenderClient: DrissionPage 浏览器渲染客户端
-- RenderSpider: 渲染爬虫基类
 
 用法:
     from antcode_worker.plugins.spider.spiderkit import Spider, Request, Response
@@ -23,17 +21,6 @@ SpiderKit - 爬虫核心框架
                     "title": item.css("h2::text").get(),
                     "link": item.css("a::attr(href)").get(),
                 }
-
-    # 渲染爬虫
-    from antcode_worker.plugins.spider.spiderkit import RenderSpider, RenderResponse
-
-    class MyRenderSpider(RenderSpider):
-        name = "my_render_spider"
-        start_urls = ["https://spa-example.com"]
-        wait_selector = "#content"
-
-        async def parse(self, response: RenderResponse):
-            yield {"title": self.css_first(response.html, "h1::text")}
 """
 
 from .base import CrawlResult, Spider
@@ -48,8 +35,6 @@ from .middlewares import (
     SpiderMiddlewareManager,
     UserAgentMiddleware,
 )
-from .render_client import BrowserPool, RenderClient, RenderConfig, RenderResponse
-from .render_spider import RenderCrawlResult, RenderSpider
 from .request import Request, RequestMethod, Response
 from .selector import Selector, SelectorList
 
@@ -76,12 +61,4 @@ __all__ = [
     "RateLimitMiddleware",
     "CookieMiddleware",
     "ImpersonateMiddleware",
-    # 渲染客户端
-    "RenderClient",
-    "RenderConfig",
-    "RenderResponse",
-    "BrowserPool",
-    # 渲染爬虫
-    "RenderSpider",
-    "RenderCrawlResult",
 ]

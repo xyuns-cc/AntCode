@@ -58,6 +58,11 @@ class ExecutorConfig:
     default_memory_limit_mb: int = 0  # 0 = 不限制
     default_cpu_limit_seconds: int = 0  # 0 = 不限制
 
+    # 沙箱硬限制（POSIX rlimit；非 POSIX 平台自动跳过）
+    enforce_rlimit: bool = True  # 默认开启：独立进程组 + rlimit
+    default_max_open_files: int = 256
+    default_max_processes: int = 64
+
     # 输出限制
     max_output_lines: int = 100000
     max_output_bytes: int = 100 * 1024 * 1024  # 100MB
@@ -153,9 +158,7 @@ class BaseExecutor(ABC):
             return
 
         self._running = True
-        logger.info(
-            f"{self.__class__.__name__} 已启动 (并发: {self.config.max_concurrent})"
-        )
+        logger.info(f"{self.__class__.__name__} 已启动 (并发: {self.config.max_concurrent})")
 
     async def stop(self, grace_period: float = 10.0) -> None:
         """
@@ -363,9 +366,7 @@ class BufferedLogSink:
 
     def __init__(
         self,
-        flush_callback: Callable[
-            [list[LogEntry]], None | Coroutine[Any, Any, None]
-        ],
+        flush_callback: Callable[[list[LogEntry]], None | Coroutine[Any, Any, None]],
         max_buffer_size: int = 100,
         flush_interval: float = 1.0,
     ):
@@ -392,8 +393,7 @@ class BufferedLogSink:
             # 检查是否需要刷新
             should_flush = (
                 len(self._buffer) >= self._max_buffer_size
-                or (datetime.now() - self._last_flush).total_seconds()
-                >= self._flush_interval
+                or (datetime.now() - self._last_flush).total_seconds() >= self._flush_interval
             )
 
         if should_flush:

@@ -12,6 +12,7 @@ from typing import Any
 
 class HealthStatus(str, Enum):
     """健康状态"""
+
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
@@ -20,6 +21,7 @@ class HealthStatus(str, Enum):
 @dataclass
 class HealthResult:
     """健康检查结果"""
+
     status: HealthStatus
     message: str = ""
     details: dict[str, Any] = field(default_factory=dict)

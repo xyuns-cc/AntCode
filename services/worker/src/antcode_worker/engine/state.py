@@ -15,18 +15,20 @@ from loguru import logger
 
 class RunState(str, Enum):
     """运行状态"""
-    QUEUED = "queued"           # 在本地队列中
-    PREPARING = "preparing"     # 准备运行时
-    RUNNING = "running"         # 执行中
-    CANCELLING = "cancelling"   # 取消中
-    COMPLETED = "completed"     # 已完成
-    FAILED = "failed"           # 失败
-    CANCELLED = "cancelled"     # 已取消
+
+    QUEUED = "queued"  # 在本地队列中
+    PREPARING = "preparing"  # 准备运行时
+    RUNNING = "running"  # 执行中
+    CANCELLING = "cancelling"  # 取消中
+    COMPLETED = "completed"  # 已完成
+    FAILED = "failed"  # 失败
+    CANCELLED = "cancelled"  # 已取消
 
 
 @dataclass
 class RunInfo:
     """运行信息"""
+
     run_id: str
     task_id: str
     state: RunState = RunState.QUEUED

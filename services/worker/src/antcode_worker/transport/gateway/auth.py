@@ -22,11 +22,11 @@ from loguru import logger
 class AuthMethod(str, Enum):
     """认证方法"""
 
-    NONE = "none"          # 无认证（仅用于测试）
-    API_KEY = "api_key"    # API Key 认证
-    MTLS = "mtls"          # mTLS 双向认证
-    JWT = "jwt"            # JWT Token 认证
-    HMAC = "hmac"          # HMAC 签名认证
+    NONE = "none"  # 无认证（仅用于测试）
+    API_KEY = "api_key"  # API Key 认证
+    MTLS = "mtls"  # mTLS 双向认证
+    JWT = "jwt"  # JWT Token 认证
+    HMAC = "hmac"  # HMAC 签名认证
 
 
 @dataclass
@@ -202,6 +202,7 @@ class GatewayAuthenticator:
     def _generate_nonce(self) -> str:
         """生成随机 nonce"""
         import secrets
+
         return secrets.token_hex(16)
 
     def _build_sign_string(self, timestamp: str, nonce: str) -> str:

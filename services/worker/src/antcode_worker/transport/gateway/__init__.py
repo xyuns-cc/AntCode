@@ -12,11 +12,11 @@ from antcode_worker.transport.gateway.auth import (
     GatewayAuthenticator,
 )
 from antcode_worker.transport.gateway.codecs import (
-    GatewayCodec,
+    ControlDecoder,
     HeartbeatEncoder,
     LogEncoder,
-    ResultEncoder,
     TaskDecoder,
+    TaskStatusEncoder,
 )
 from antcode_worker.transport.gateway.reconnect import (
     ReconnectConfig,
@@ -37,12 +37,12 @@ __all__ = [
     "GatewayAuthenticator",
     "AuthConfig",
     "AuthMethod",
-    # Codecs
-    "GatewayCodec",
+    # Codecs (P1b: new ControlService / DataService proto)
     "TaskDecoder",
+    "TaskStatusEncoder",
     "LogEncoder",
-    "ResultEncoder",
     "HeartbeatEncoder",
+    "ControlDecoder",
     # Reconnect
     "ReconnectManager",
     "ReconnectConfig",

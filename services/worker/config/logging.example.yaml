@@ -12,24 +12,11 @@ console:
   level: "INFO"
   colorize: true
 
-# 文件输出
+# 文件输出已禁用；任务日志通过 Redis 实时流与 PostgreSQL 持久化。
 file:
-  enabled: true
-  path: "./data/worker/logs/worker.log"
+  enabled: false
   level: "DEBUG"
-  rotation: "10 MB"           # 日志轮转大小
-  retention: "7 days"         # 保留时间
-  compression: "gz"           # 压缩格式
 
 # 结构化日志（JSON）
 json:
   enabled: false
-  path: "./data/worker/logs/worker.json"
-
-# 任务日志
-task_logs:
-  enabled: true
-  path: "./data/worker/logs/tasks"
-  max_size_mb: 100            # 单个任务日志最大大小
-  buffer_size: 100            # 缓冲区大小（行数）
-  flush_interval: 0.5         # 刷新间隔（秒）

@@ -2,7 +2,7 @@
 Redis 消息编解码模块
 
 实现 Worker 与 Redis 之间消息的序列化和反序列化。
-支持 schema version 标记，便于协议演进。
+    消息必须携带当前 schema version 标记。
 
 Requirements: 5.4
 """
@@ -27,6 +27,7 @@ from antcode_worker.domain.models import (
     LogEntry,
     RunContext,
     RuntimeSpec,
+    SourceBundle,
     TaskPayload,
 )
 
@@ -36,8 +37,7 @@ T = TypeVar("T")
 class SchemaVersion(str, Enum):
     """消息 schema 版本"""
 
-    V1 = "v1"  # 初始版本
-    V2 = "v2"  # 预留扩展版本
+    V1 = "v1"
 
     @classmethod
     def current(cls) -> "SchemaVersion":
@@ -151,12 +151,9 @@ class JsonCodec(MessageCodec):
             # 解析字符串值
             parsed = self._string_dict_to_dict(data)
 
-            # 检查版本
-            version_str = parsed.pop(self.VERSION_FIELD, SchemaVersion.V1.value)
-            version = SchemaVersion(version_str)
-
-            # 根据版本进行迁移
-            parsed = self._migrate_schema(parsed, version, target_type)
+            version_str = parsed.pop(self.VERSION_FIELD, None)
+            if version_str != self._version.value:
+                raise CodecError(f"{self.VERSION_FIELD} must be {self._version.value}")
 
             # 构造目标对象
             return self._dict_to_object(parsed, target_type)
@@ -239,32 +236,6 @@ class JsonCodec(MessageCodec):
 
         return value
 
-    def _migrate_schema(
-        self, data: dict[str, Any], from_version: SchemaVersion, target_type: type
-    ) -> dict[str, Any]:
-        """
-        迁移 schema 版本
-
-        Args:
-            data: 原始数据
-            from_version: 源版本
-            target_type: 目标类型
-
-        Returns:
-            迁移后的数据
-        """
-        # 目前只有 V1，无需迁移
-        # 未来添加新版本时，在这里实现迁移逻辑
-        if from_version == SchemaVersion.V1:
-            return data
-
-        # V2 迁移示例（预留）
-        # if from_version == SchemaVersion.V2:
-        #     # 执行 V2 -> V1 的迁移
-        #     pass
-
-        return data
-
     def _dict_to_object(self, data: dict[str, Any], target_type: type[T]) -> T:
         """将字典转换为目标类型对象"""
         if target_type == RunContext:
@@ -311,15 +282,20 @@ class JsonCodec(MessageCodec):
 
     def _decode_task_payload(self, data: dict[str, Any]) -> TaskPayload:
         """解码 TaskPayload"""
+        if data.get("project_path"):
+            raise CodecError("project_path 不能从 Redis 任务消息反序列化")
+        source_bundle = self._decode_source_bundle(data.get("source_bundle"))
+        if source_bundle is None:
+            raise CodecError("source_bundle is required")
         task_type = TaskType.CODE
         if data.get("task_type"):
             task_type = TaskType(data["task_type"])
 
         return TaskPayload(
             task_type=task_type,
-            project_path=data.get("project_path"),
-            download_url=data.get("download_url"),
-            file_hash=data.get("file_hash"),
+            workspace_path=None,
+            project_cwd=None,
+            source_bundle=source_bundle,
             entry_point=data.get("entry_point", ""),
             function=data.get("function"),
             args=data.get("args", []),
@@ -327,6 +303,22 @@ class JsonCodec(MessageCodec):
             env_vars=data.get("env_vars", {}),
             inputs=data.get("inputs", {}),
             artifact_patterns=data.get("artifact_patterns", []),
+        )
+
+    def _decode_source_bundle(self, data: Any) -> SourceBundle | None:
+        if not isinstance(data, dict):
+            return None
+        transfer_method = data.get("transfer_method")
+        if not transfer_method:
+            raise CodecError("transfer_method is required")
+        return SourceBundle(
+            uri=data.get("uri", ""),
+            sha256=data.get("sha256", ""),
+            size=int(data.get("size", 0) or 0),
+            transfer_method=transfer_method,
+            entry_point=data.get("entry_point", ""),
+            resolved_revision=data.get("resolved_revision", ""),
+            source_subdir=data.get("source_subdir", ""),
         )
 
     def _decode_exec_result(self, data: dict[str, Any]) -> ExecResult:
@@ -362,8 +354,6 @@ class JsonCodec(MessageCodec):
             artifacts=artifacts,
             stdout_lines=data.get("stdout_lines", 0),
             stderr_lines=data.get("stderr_lines", 0),
-            log_archived=data.get("log_archived", False),
-            log_archive_uri=data.get("log_archive_uri"),
             data=data.get("data", {}),
         )
 
@@ -387,6 +377,9 @@ class JsonCodec(MessageCodec):
 
     def _decode_artifact_ref(self, data: dict[str, Any]) -> ArtifactRef:
         """解码 ArtifactRef"""
+        if data.get("local_path"):
+            raise CodecError("artifact local_path is not accepted across Redis transport")
+
         artifact_type = ArtifactType.FILE
         if data.get("type"):
             artifact_type = ArtifactType(data["type"])
@@ -401,7 +394,6 @@ class JsonCodec(MessageCodec):
             name=data.get("name", ""),
             artifact_type=artifact_type,
             uri=data.get("uri"),
-            local_path=data.get("local_path"),
             size_bytes=data.get("size_bytes", 0),
             checksum=data.get("checksum"),
             mime_type=data.get("mime_type"),
@@ -461,9 +453,7 @@ class TaskMessageCodec(JsonCodec):
         }
         return self.encode(data)
 
-    def decode_task_dispatch(
-        self, data: dict[str, str]
-    ) -> tuple[TaskPayload, RunContext]:
+    def decode_task_dispatch(self, data: dict[str, str]) -> tuple[TaskPayload, RunContext]:
         """
         解码任务分发消息
 
@@ -487,9 +477,7 @@ class TaskMessageCodec(JsonCodec):
         # 补充基本字段
         context_data["run_id"] = parsed.get("run_id", context_data.get("run_id", ""))
         context_data["task_id"] = parsed.get("task_id", context_data.get("task_id", ""))
-        context_data["project_id"] = parsed.get(
-            "project_id", context_data.get("project_id", "")
-        )
+        context_data["project_id"] = parsed.get("project_id", context_data.get("project_id", ""))
         context = self._decode_run_context(context_data)
 
         return payload, context

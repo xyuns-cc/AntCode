@@ -38,7 +38,7 @@ class GCPolicy:
 
     # Disk Watermark 策略
     disk_high_watermark: float = 0.85  # 高水位（开始清理）
-    disk_low_watermark: float = 0.70   # 低水位（停止清理）
+    disk_low_watermark: float = 0.70  # 低水位（停止清理）
 
     # 清理间隔（秒）
     gc_interval: int = 3600  # 默认 1 小时
@@ -144,8 +144,7 @@ class RuntimeGC:
 
                 result = await self.run_gc()
                 logger.info(
-                    f"运行时 GC 完成: cleaned={result['cleaned']}, "
-                    f"freed={result['bytes_freed'] / 1024 / 1024:.2f}MB"
+                    f"运行时 GC 完成: cleaned={result['cleaned']}, freed={result['bytes_freed'] / 1024 / 1024:.2f}MB"
                 )
 
                 if self._on_gc_complete:
@@ -240,13 +239,15 @@ class RuntimeGC:
                 with contextlib.suppress(Exception):
                     last_used_at = datetime.fromtimestamp(os.path.getmtime(venv_path))
 
-            runtimes.append(RuntimeInfo(
-                runtime_hash=name,
-                path=venv_path,
-                size_bytes=self._get_dir_size(venv_path),
-                created_at=created_at,
-                last_used_at=last_used_at,
-            ))
+            runtimes.append(
+                RuntimeInfo(
+                    runtime_hash=name,
+                    path=venv_path,
+                    size_bytes=self._get_dir_size(venv_path),
+                    created_at=created_at,
+                    last_used_at=last_used_at,
+                )
+            )
 
         return runtimes
 

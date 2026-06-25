@@ -33,15 +33,15 @@ class TransportProtocol(Protocol):
 @dataclass
 class RealtimeConfig:
     """实时发送配置"""
-    
+
     # 发送控制
     enabled: bool = True
     max_retries: int = 3
     retry_delay: float = 0.1
-    
+
     # 速率限制
     max_entries_per_second: int = 1000
-    
+
     # 连接检查
     check_connection: bool = True
 
@@ -49,15 +49,15 @@ class RealtimeConfig:
 class RealtimeSender:
     """
     实时日志发送器
-    
+
     将日志条目实时发送到 Transport 层。
-    
+
     功能：
     - 实时发送日志
     - 连接状态检查
     - 失败重试
     - 速率限制
-    
+
     Requirements: 9.4
     """
 
@@ -70,7 +70,7 @@ class RealtimeSender:
     ):
         """
         初始化实时发送器
-        
+
         Args:
             run_id: 运行 ID
             transport: 传输层实例
@@ -81,16 +81,16 @@ class RealtimeSender:
         self._transport = transport
         self._config = config or RealtimeConfig()
         self._on_send_failure = on_send_failure
-        
+
         # 状态
         self._enabled = self._config.enabled
         self._running = False
-        
+
         # 速率限制
         self._send_count = 0
         self._last_reset = datetime.now()
         self._rate_lock = asyncio.Lock()
-        
+
         # 统计
         self._total_sent = 0
         self._total_failed = 0
@@ -126,31 +126,31 @@ class RealtimeSender:
     async def write(self, entry: LogEntry) -> bool:
         """
         发送日志条目
-        
+
         实现 LogSink 协议。
-        
+
         Args:
             entry: 日志条目
-            
+
         Returns:
             是否发送成功
         """
         if not self._enabled or not self._running:
             logger.debug(f"[{self.run_id}] 实时发送跳过: enabled={self._enabled}, running={self._running}")
             return False
-        
+
         # 检查连接
         if not self.is_connected:
             self._total_dropped += 1
             logger.debug(f"[{self.run_id}] 实时发送跳过: 未连接")
             return False
-        
+
         # 速率限制
         if not await self._check_rate_limit():
             self._total_dropped += 1
             logger.debug(f"[{self.run_id}] 实时发送跳过: 速率限制")
             return False
-        
+
         # 发送
         return await self._send_with_retry(entry)
 
@@ -158,74 +158,74 @@ class RealtimeSender:
         """检查速率限制"""
         async with self._rate_lock:
             now = datetime.now()
-            
+
             # 每秒重置计数
             if (now - self._last_reset).total_seconds() >= 1.0:
                 self._send_count = 0
                 self._last_reset = now
-            
+
             if self._send_count >= self._config.max_entries_per_second:
                 return False
-            
+
             self._send_count += 1
             return True
 
     async def _send_with_retry(self, entry: LogEntry) -> bool:
         """带重试的发送"""
         last_error = ""
-        
+
         for attempt in range(self._config.max_retries):
             try:
                 # 构建日志消息
                 log_message = self._build_log_message(entry)
-                
-                logger.debug(f"[{self.run_id}] 发送日志: seq={entry.seq}, stream={entry.stream.value}, content_len={len(entry.content)}")
-                
+
+                logger.debug(
+                    f"[{self.run_id}] 发送日志: seq={entry.seq}, stream={entry.stream.value}, content_len={len(entry.content)}"
+                )
+
                 # 发送
                 success = await self._transport.send_log(log_message)
-                
+
                 if success:
                     self._total_sent += 1
                     logger.debug(f"[{self.run_id}] 日志发送成功: seq={entry.seq}")
                     return True
-                
+
                 last_error = "Transport returned False"
                 logger.debug(f"[{self.run_id}] 日志发送失败: Transport returned False")
-                
+
             except Exception as e:
                 last_error = str(e)
-                logger.debug(
-                    f"[{self.run_id}] 发送日志失败 (attempt {attempt + 1}): {e}"
-                )
-            
+                logger.debug(f"[{self.run_id}] 发送日志失败 (attempt {attempt + 1}): {e}")
+
             # 重试延迟
             if attempt < self._config.max_retries - 1:
                 await asyncio.sleep(self._config.retry_delay)
-        
+
         # 所有重试失败
         self._total_failed += 1
-        
+
         if self._on_send_failure:
             try:
                 self._on_send_failure(entry, last_error)
             except Exception:
                 pass
-        
+
         return False
 
     def _build_log_message(self, entry: LogEntry) -> Any:
         """
         构建日志消息
-        
+
         Args:
             entry: 日志条目
-            
+
         Returns:
             Transport 可接受的日志消息格式
         """
         # 使用 Transport 的 LogMessage 格式
         from antcode_worker.transport.base import LogMessage
-        
+
         return LogMessage(
             run_id=entry.run_id,
             log_type=entry.stream.value,
@@ -255,14 +255,14 @@ class RealtimeSender:
 class RealtimeSink:
     """
     实时日志 Sink
-    
+
     包装 RealtimeSender 以实现 LogSink 协议。
     """
 
     def __init__(self, sender: RealtimeSender):
         """
         初始化
-        
+
         Args:
             sender: 实时发送器
         """

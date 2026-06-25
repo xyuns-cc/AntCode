@@ -177,9 +177,7 @@ class PendingTaskReclaimer:
 
             for msg_id, msg_data in messages:
                 # 获取消息的 pending 信息
-                pending_info = await self._get_pending_info(
-                    stream_key, group_name, msg_id
-                )
+                pending_info = await self._get_pending_info(stream_key, group_name, msg_id)
 
                 task = ReclaimedTask(
                     message_id=msg_id,
@@ -203,9 +201,7 @@ class PendingTaskReclaimer:
 
             # 更新统计
             self._stats.last_reclaim_time = datetime.now()
-            self._stats.stream_stats[stream_key] = (
-                self._stats.stream_stats.get(stream_key, 0) + len(reclaimed_tasks)
-            )
+            self._stats.stream_stats[stream_key] = self._stats.stream_stats.get(stream_key, 0) + len(reclaimed_tasks)
 
         except Exception:
             self._stats.reclaim_errors += 1
@@ -213,9 +209,7 @@ class PendingTaskReclaimer:
 
         return reclaimed_tasks
 
-    async def _get_pending_info(
-        self, stream_key: str, group_name: str, message_id: str
-    ) -> dict[str, Any]:
+    async def _get_pending_info(self, stream_key: str, group_name: str, message_id: str) -> dict[str, Any]:
         """
         获取消息的 pending 信息
 
@@ -245,17 +239,14 @@ class PendingTaskReclaimer:
                     "consumer": entry[1],
                     "idle_time_ms": entry[2],
                     "delivery_count": entry[3],
-                    "last_delivery_time": datetime.now()
-                    - timedelta(milliseconds=entry[2]),
+                    "last_delivery_time": datetime.now() - timedelta(milliseconds=entry[2]),
                 }
         except Exception:
             pass
 
         return {"idle_time_ms": 0, "delivery_count": 1}
 
-    async def _move_to_dead_letter(
-        self, source_stream: str, task: ReclaimedTask
-    ) -> None:
+    async def _move_to_dead_letter(self, source_stream: str, task: ReclaimedTask) -> None:
         """
         将任务移入死信队列
 
@@ -323,9 +314,7 @@ class PendingTaskReclaimer:
 
         return 0
 
-    async def get_pending_summary(
-        self, stream_key: str | None = None
-    ) -> dict[str, Any]:
+    async def get_pending_summary(self, stream_key: str | None = None) -> dict[str, Any]:
         """
         获取 pending 任务摘要
 

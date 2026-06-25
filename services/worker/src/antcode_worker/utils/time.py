@@ -33,11 +33,11 @@ def format_duration(ms: float) -> str:
     if ms < 1000:
         return f"{ms:.0f}ms"
     elif ms < 60000:
-        return f"{ms/1000:.1f}s"
+        return f"{ms / 1000:.1f}s"
     elif ms < 3600000:
-        return f"{ms/60000:.1f}m"
+        return f"{ms / 60000:.1f}m"
     else:
-        return f"{ms/3600000:.1f}h"
+        return f"{ms / 3600000:.1f}h"
 
 
 def elapsed_since(start: datetime) -> float:

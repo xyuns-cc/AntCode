@@ -12,6 +12,7 @@ from loguru import logger
 
 try:
     from aiohttp import web
+
     HAS_AIOHTTP = True
 except ImportError:
     HAS_AIOHTTP = False
@@ -75,10 +76,12 @@ class ObservabilityServer:
         if not HAS_AIOHTTP:
             return None
 
-        return web.json_response({
-            "status": "ok",
-            "service": "antcode-worker",
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "service": "antcode-worker",
+            }
+        )
 
     async def liveness(self, request: Any) -> Any:
         """
