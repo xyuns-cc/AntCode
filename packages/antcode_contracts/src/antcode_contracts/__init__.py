@@ -27,6 +27,8 @@ __all__ = [
     "control_pb2_grpc",
     "data_pb2",
     "data_pb2_grpc",
+    # 共享的 Proto <-> Python 类型转换工具（见 transcode.py）
+    "transcode",
 ]
 
 

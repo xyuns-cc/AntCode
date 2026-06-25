@@ -57,6 +57,12 @@ if TYPE_CHECKING:
     from antcode_worker.transport.gateway.reconnect import ReconnectManager
 
 
+# P2-#36: 用一个独立 sentinel 对象代替每秒 wait_for(timeout=1.0) 轮询。
+# ``stop()`` 显式把 sentinel 放进 outbox，``_gen()`` 一识别就立刻 return,
+# 客户端流随之关闭。和 ``None`` 区分开以免和合法消息混淆。
+_SHUTDOWN_SENTINEL = object()
+
+
 @dataclass
 class GatewayConfig:
     """Gateway 传输层配置"""
@@ -213,8 +219,8 @@ class GatewayTransport(TransportBase):
             )
             return True
 
-        except Exception as e:
-            logger.error(f"Gateway 启动失败: {e}")
+        except Exception:
+            logger.exception("Gateway 启动失败")
             return False
 
     async def stop(self, grace_period: float = 5.0) -> None:
@@ -231,6 +237,13 @@ class GatewayTransport(TransportBase):
             )
         except TimeoutError:
             logger.warning("Gateway transport stop: outbox drain timeout，强制关闭")
+
+        # P2-#36: 显式 sentinel 通知 push loop 的 generator 关闭流。
+        # 队列已经 drain 完，sentinel 之后不会再有新消息。
+        for outbox in (self._status_outbox, self._log_outbox):
+            if outbox is not None:
+                with contextlib.suppress(asyncio.QueueFull):
+                    outbox.put_nowait(_SHUTDOWN_SENTINEL)
 
         await self._cancel_background_tasks()
         await self._disconnect()
@@ -298,8 +311,8 @@ class GatewayTransport(TransportBase):
                             )
                         if self._task_inbox is not None:
                             await self._task_inbox.put(task)
-                    except Exception as exc:
-                        logger.error(f"StreamTasks 投递失败: {exc}")
+                    except Exception:
+                        logger.exception("StreamTasks 投递失败")
 
             except asyncio.CancelledError:
                 break
@@ -345,8 +358,8 @@ class GatewayTransport(TransportBase):
                             continue
                         if self._control_inbox is not None:
                             await self._control_inbox.put(ctrl_msg)
-                    except Exception as exc:
-                        logger.error(f"WatchControl 投递失败: {exc}")
+                    except Exception:
+                        logger.exception("WatchControl 投递失败")
 
             except asyncio.CancelledError:
                 break
@@ -412,35 +425,32 @@ class GatewayTransport(TransportBase):
         """从 outbox 取 ``TaskStatus`` 推到 ``DataService.StreamStatus``。
 
         client-streaming RPC 在 worker 端是 ``call(generator)`` 的形式 —
-        我们维护一个 async generator，从队列出队作为流元素。流断开时
-        重新打开。
+        我们维护一个 async generator，从队列出队作为流元素。
+
+        P1-#7：以前 ``_gen()`` 一旦 ``yield msg`` 后 gRPC 写入抛错，那条消息
+        就丢了。现在用 ``_drain_outbox_to_stream`` 抓住 generator 内的异常，
+        把当前消息塞回队列（FIFO 顺序退化为消息被排到尾部，由上层 retry
+        重新写入；可接受的折中）。
+
+        P2-#36：以前每秒 ``wait_for(timeout=1.0)`` 轮询检查 ``self._running``。
+        现在 ``stop()`` 直接把 ``_SHUTDOWN_SENTINEL`` 放进队列，``_gen`` 一识别
+        就 return，省掉空转。
         """
         backoff = 1.0
         while self._running:
+            if not self._data_stub or self._status_outbox is None:
+                await asyncio.sleep(backoff)
+                backoff = min(self._gateway_config.max_backoff, backoff * 2)
+                continue
+
             try:
-                if not self._data_stub or self._status_outbox is None:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._gateway_config.max_backoff, backoff * 2)
-                    continue
-
-                async def _gen():
-                    while self._running:
-                        try:
-                            msg = await asyncio.wait_for(
-                                self._status_outbox.get(),
-                                timeout=1.0,
-                            )
-                        except TimeoutError:
-                            continue
-                        if msg is None:
-                            return
-                        yield msg
-
                 ack = await self._data_stub.StreamStatus(
-                    _gen(),
+                    self._drain_outbox_to_stream(self._status_outbox),
                     metadata=self._get_auth_metadata(),
                 )
-                logger.debug(f"StreamStatus 流结束: received={getattr(ack, 'received', 0)}")
+                logger.debug(
+                    f"StreamStatus 流结束: received={getattr(ack, 'received', 0)}"
+                )
                 backoff = 1.0
 
             except asyncio.CancelledError:
@@ -453,33 +463,26 @@ class GatewayTransport(TransportBase):
                 backoff = min(self._gateway_config.max_backoff, backoff * 2)
 
     async def _log_push_loop(self) -> None:
-        """从 outbox 取 ``LogBatch`` 推到 ``DataService.StreamLogs``。"""
+        """从 outbox 取 ``LogBatch`` 推到 ``DataService.StreamLogs``。
+
+        同 ``_status_push_loop``：使用 ``_drain_outbox_to_stream`` 共享 sentinel
+        + re-queue-on-error 行为，避免断流丢消息（P1-#7）和 1s 轮询（P2-#36）。
+        """
         backoff = 1.0
         while self._running:
+            if not self._data_stub or self._log_outbox is None:
+                await asyncio.sleep(backoff)
+                backoff = min(self._gateway_config.max_backoff, backoff * 2)
+                continue
+
             try:
-                if not self._data_stub or self._log_outbox is None:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._gateway_config.max_backoff, backoff * 2)
-                    continue
-
-                async def _gen():
-                    while self._running:
-                        try:
-                            msg = await asyncio.wait_for(
-                                self._log_outbox.get(),
-                                timeout=1.0,
-                            )
-                        except TimeoutError:
-                            continue
-                        if msg is None:
-                            return
-                        yield msg
-
                 ack = await self._data_stub.StreamLogs(
-                    _gen(),
+                    self._drain_outbox_to_stream(self._log_outbox),
                     metadata=self._get_auth_metadata(),
                 )
-                logger.debug(f"StreamLogs 流结束: received={getattr(ack, 'received', 0)}")
+                logger.debug(
+                    f"StreamLogs 流结束: received={getattr(ack, 'received', 0)}"
+                )
                 backoff = 1.0
 
             except asyncio.CancelledError:
@@ -490,6 +493,32 @@ class GatewayTransport(TransportBase):
                 logger.warning(f"StreamLogs 流断开，{backoff:.1f}s 后重连: {e}")
                 await asyncio.sleep(backoff)
                 backoff = min(self._gateway_config.max_backoff, backoff * 2)
+
+    async def _drain_outbox_to_stream(self, outbox: asyncio.Queue):
+        """把 outbox 转成 gRPC client-streaming 用的 async generator。
+
+        关键不变量:
+        * 看到 ``_SHUTDOWN_SENTINEL`` -> ``return``（流正常关闭）。
+        * ``yield`` 后捕到异常 -> 把这条消息塞回 outbox 尾部再 raise，
+          上层的 reconnect 会重新打开流并继续 drain（P1-#7：避免断流丢消息）。
+          注意：FIFO 顺序不严格保持（消息被排到尾），是为了简化重试。
+        """
+        while True:
+            msg = await outbox.get()
+            if msg is _SHUTDOWN_SENTINEL:
+                return
+            try:
+                yield msg
+            except Exception:
+                # 上游 gRPC 写入失败：保留这条消息，由下一次重连重传。
+                try:
+                    outbox.put_nowait(msg)
+                except asyncio.QueueFull:
+                    # 极端：队列已满，丢失一条但记录日志，避免死锁。
+                    logger.warning(
+                        "outbox 队列已满，丢弃 1 条待发送消息（断流场景）"
+                    )
+                raise
 
     # ==================== TransportBase 实现：任务面 ====================
 
@@ -502,8 +531,8 @@ class GatewayTransport(TransportBase):
             return task
         except TimeoutError:
             return None
-        except Exception as e:
-            logger.error(f"poll_task 出队失败: {e}")
+        except Exception:
+            logger.exception("poll_task 出队失败")
             return None
 
     async def ack_task(self, task_id: str, accepted: bool, reason: str = "") -> bool:
@@ -551,7 +580,7 @@ class GatewayTransport(TransportBase):
             return success
         except Exception as e:
             self._consecutive_failures += 1
-            logger.error(f"确认任务失败: {e}")
+            logger.exception("确认任务失败")
             await self._handle_connection_error(e)
             return False
 
@@ -589,8 +618,8 @@ class GatewayTransport(TransportBase):
             if self._gateway_config.enable_receipt_idempotency:
                 self._cache_result(cache_key, True)
             return True
-        except Exception as e:
-            logger.error(f"入队任务状态失败: {e}")
+        except Exception:
+            logger.exception("入队任务状态失败")
             return False
 
     # ==================== TransportBase 实现：日志面 ====================
@@ -613,8 +642,8 @@ class GatewayTransport(TransportBase):
             inject_trace(batch)
             await self._log_outbox.put(batch)
             return True
-        except Exception as e:
-            logger.error(f"入队日志批次失败: {e}")
+        except Exception:
+            logger.exception("入队日志批次失败")
             return False
 
     async def send_log_chunk(
@@ -625,24 +654,20 @@ class GatewayTransport(TransportBase):
         offset: int,
         is_final: bool = False,
     ) -> bool:
-        """发送日志分片
+        """发送日志分片 — 已弃用，no-op。
 
-        TODO(P3): 新协议下大块 binary 走 source_bundle/pgartifact，
-        不再有专门的 chunk gRPC。短期内 P1b 把 chunk 包成 1-entry
-        ``LogBatch``（content = base64(data)），实现层归一到日志流。
+        之前会把 ``[CHUNK] offset=N <base64>`` 拼成 LogBatch content 推到
+        日志流，违反 Stream 单字段语义且会撑大 LogEntry。大块二进制现在
+        应该走 ``source_bundle`` / ``pgartifact`` 通道；本方法保留签名只为
+        兼容调用方，不再产生网络流量。
         """
-        import base64
-
-        encoded = base64.b64encode(data).decode("utf-8") if data else ""
-        marker = "[FINAL]" if is_final else "[CHUNK]"
-        log = LogMessage(
-            run_id=run_id,
-            log_type=log_type,
-            content=f"{marker} offset={offset} {encoded}",
-            timestamp=datetime.now(),
-            sequence=int(offset),
+        size = len(data) if data else 0
+        logger.warning(
+            "send_log_chunk 已弃用,大块二进制应走 source_bundle/pgartifact: "
+            f"run_id={run_id} log_type={log_type} offset={offset} "
+            f"size={size} is_final={is_final}"
         )
-        return await self.send_log_batch([log])
+        return True
 
     # ==================== TransportBase 实现：心跳/Lease ====================
 
@@ -670,7 +695,7 @@ class GatewayTransport(TransportBase):
             return bool(new_lease_id)
         except Exception as exc:
             self._consecutive_failures += 1
-            logger.error(f"Lease/心跳失败: {exc}")
+            logger.exception("Lease/心跳失败")
             await self._handle_connection_error(exc)
             return False
 
@@ -746,7 +771,7 @@ class GatewayTransport(TransportBase):
             return (new_lease_id, expires_at_ms, renew_after_ms, revoked)
         except Exception as exc:
             self._consecutive_failures += 1
-            logger.error(f"lease_renew RPC 失败: {exc}")
+            logger.exception("lease_renew RPC 失败")
             await self._handle_connection_error(exc)
             return ("", 0, 0, False)
 
@@ -772,8 +797,8 @@ class GatewayTransport(TransportBase):
             return msg
         except TimeoutError:
             return None
-        except Exception as e:
-            logger.error(f"poll_control 出队失败: {e}")
+        except Exception:
+            logger.exception("poll_control 出队失败")
             return None
 
     async def ack_control(self, receipt: str) -> bool:
@@ -799,7 +824,7 @@ class GatewayTransport(TransportBase):
             )
             return bool(getattr(response, "received", False))
         except Exception as e:
-            logger.error(f"确认控制消息失败: {e}")
+            logger.exception("确认控制消息失败")
             await self._handle_connection_error(e)
             return False
 
@@ -840,7 +865,7 @@ class GatewayTransport(TransportBase):
             )
             return bool(getattr(response, "received", False))
         except Exception as e:
-            logger.error(f"回传控制结果失败: {e}")
+            logger.exception("回传控制结果失败")
             await self._handle_connection_error(e)
             return False
 
@@ -955,8 +980,8 @@ class GatewayTransport(TransportBase):
         except TimeoutError:
             logger.error(f"Gateway 连接超时: {target}")
             return False
-        except Exception as e:
-            logger.error(f"Gateway 连接失败: {e}")
+        except Exception:
+            logger.exception("Gateway 连接失败")
             return False
 
     async def _disconnect(self) -> None:

@@ -6,11 +6,14 @@
 Requirements: 4.1, 4.5, 4.6, 4.7, 4.8
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from antcode_core.observability.tracing import (
     child_span,
@@ -24,6 +27,17 @@ from antcode_worker.domain.models import ExecResult, RunContext
 from antcode_worker.engine.policies import Policies, default_policies
 from antcode_worker.engine.scheduler import Scheduler
 from antcode_worker.engine.state import RunState, StateManager
+from antcode_worker.transport.base import (
+    ControlMessage,
+    TaskMessage,
+    TransportBase,
+)
+
+if TYPE_CHECKING:
+    # 仅类型注解使用的依赖：避免运行时 import 引入循环 / 重负载。
+    # 这些都是可选依赖，构造时以 ``None`` 兜底。
+    from antcode_worker.executor.base import BaseExecutor
+    from antcode_worker.runtime.manager import RuntimeManager
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +105,10 @@ class Engine:
 
     def __init__(
         self,
-        transport: Any,
-        executor: Any,
+        transport: TransportBase,
+        executor: BaseExecutor,
         flow_controller: Any = None,
-        runtime_manager: Any = None,
+        runtime_manager: RuntimeManager | None = None,
         plugin_registry: Any = None,
         log_manager_factory: Any = None,
         project_fetcher: Any = None,
@@ -104,10 +118,14 @@ class Engine:
         memory_limit_mb: int = 0,
         cpu_limit_seconds: int = 0,
     ):
-        self._transport = transport
-        self._executor = executor
+        # P2-#31: ``transport`` 与 ``executor`` 是核心依赖，按抽象基类标注；
+        # 其他 manager / registry 仍保留 Any，因为它们的接口尚未稳定
+        # （flow_controller / plugin_registry / log_manager_factory /
+        # project_fetcher / artifact_manager 没有统一基类）。
+        self._transport: TransportBase = transport
+        self._executor: BaseExecutor = executor
         self._flow_controller = flow_controller
-        self._runtime_manager = runtime_manager
+        self._runtime_manager: RuntimeManager | None = runtime_manager
         self._plugin_registry = plugin_registry
         self._log_manager_factory = log_manager_factory
         self._project_fetcher = project_fetcher
@@ -124,6 +142,10 @@ class Engine:
         self._control_task: asyncio.Task | None = None
         self._worker_tasks: list[asyncio.Task] = []
         self._runtime_control_semaphore = asyncio.Semaphore(1)
+        # P2-#37: bounded set 防止 ``_handle_runtime_control`` 派出的 task
+        # 被 GC 回收（asyncio.create_task 返回值丢弃会触发警告，长任务可能
+        # 被取消）；done_callback 自动从集合移除。
+        self._inflight_controls: set[asyncio.Task] = set()
 
         # 资源限制
         self._policies.resource.max_concurrent = max_concurrent
@@ -274,10 +296,10 @@ class Engine:
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except Exception:
                 if self._flow_controller:
                     self._flow_controller.on_failure()
-                logger.error(f"轮询异常: {e}")
+                logger.exception("轮询异常")
                 await asyncio.sleep(1)
             finally:
                 if self._flow_controller and flow_acquired:
@@ -304,28 +326,202 @@ class Engine:
                 elif control.control_type == "config_update":
                     await self.apply_config_update(control.payload or {})
                 elif control.control_type == "runtime_manage":
-                    asyncio.create_task(self._handle_runtime_control(control))
+                    # P2-#37: 保持强引用避免 task 被 GC；done_callback 自动清理。
+                    task = asyncio.create_task(
+                        self._handle_runtime_control(control)
+                    )
+                    self._inflight_controls.add(task)
+                    task.add_done_callback(self._inflight_controls.discard)
                     continue
 
                 if control.receipt:
                     await self._transport.ack_control(control.receipt)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"控制通道异常: {e}")
+            except Exception:
+                logger.exception("控制通道异常")
                 await asyncio.sleep(1)
 
-    async def _handle_runtime_control(self, control: Any) -> None:
+    # ------------------------------------------------------------------
+    # RuntimeControl action handlers
+    #
+    # P2-#32: 之前 ``_handle_runtime_control`` 是一条 14-elif 长链，路由 +
+    # 参数解码 + 业务调用混在一起。现在拆成：
+    #   * ``_ACTION_HANDLERS`` 静态表 —— 路由 dispatch
+    #   * 每个 ``_action_*`` 方法 —— 参数解析 + uv_manager 调用
+    #   * 上层只剩 dispatch + 信号量 + 异常归一
+    # 新增 action 时只需写一个 ``_action_xxx`` 方法并在表里登记。
+    # ------------------------------------------------------------------
+    async def _action_list_envs(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        scope = _arg_str(data, "scope") or None
+        return await uv_manager.list_envs(scope=scope)
+
+    async def _action_get_env(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        if not env_name:
+            raise RuntimeError("env_name 不能为空")
+        result = await uv_manager.get_env(env_name)
+        if result is None:
+            raise RuntimeError("环境不存在")
+        return result
+
+    async def _action_update_env(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        if not env_name:
+            raise RuntimeError("env_name 不能为空")
+        return await uv_manager.update_env(
+            env_name=env_name,
+            key=_arg_str(data, "key"),
+            description=_arg_str(data, "description"),
+        )
+
+    async def _action_create_env(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        if not env_name:
+            raise RuntimeError("env_name 不能为空")
+        return await uv_manager.create_env(
+            env_name=env_name,
+            python_version=_arg_str(data, "python_version"),
+            packages=_arg_list(data, "packages"),
+            created_by=_arg_str(data, "created_by") or None,
+        )
+
+    async def _action_delete_env(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        if not env_name:
+            raise RuntimeError("env_name 不能为空")
+        deleted = await uv_manager.delete_env(env_name)
+        return {"deleted": bool(deleted)}
+
+    async def _action_list_packages(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        if not env_name:
+            raise RuntimeError("env_name 不能为空")
+        return await uv_manager.list_packages(env_name)
+
+    async def _action_install_packages(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        packages = _arg_list(data, "packages")
+        if not env_name or not packages:
+            raise RuntimeError("env_name 和 packages 不能为空")
+        return await uv_manager.install_packages(
+            env_name=env_name,
+            packages=packages,
+            upgrade=_arg_bool(data, "upgrade", False),
+        )
+
+    async def _action_uninstall_packages(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        env_name = _arg_str(data, "env_name")
+        packages = _arg_list(data, "packages")
+        if not env_name or not packages:
+            raise RuntimeError("env_name 和 packages 不能为空")
+        return await uv_manager.uninstall_packages(
+            env_name=env_name,
+            packages=packages,
+        )
+
+    async def _action_list_interpreters(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        return await uv_manager.list_all_interpreters()
+
+    async def _action_install_interpreter(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        version = _arg_str(data, "version")
+        if not version:
+            raise RuntimeError("version 不能为空")
+        return await uv_manager.install_interpreter(version)
+
+    async def _action_uninstall_interpreter(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        version = _arg_str(data, "version")
+        if not version:
+            raise RuntimeError("version 不能为空")
+        return await uv_manager.uninstall_interpreter(version)
+
+    async def _action_register_interpreter(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        python_bin = _arg_str(data, "python_bin")
+        if not python_bin:
+            raise RuntimeError("python_bin 不能为空")
+        return await uv_manager.register_interpreter(
+            python_bin=python_bin,
+            version=_arg_str(data, "version") or None,
+        )
+
+    async def _action_unregister_interpreter(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        return await uv_manager.unregister_interpreter(
+            python_bin=_arg_str(data, "python_bin") or None,
+            version=_arg_str(data, "version") or None,
+        )
+
+    async def _action_get_python_versions(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        installed = await uv_manager.get_installed_python_versions()
+        all_interpreters = await uv_manager.list_all_interpreters()
+        available = sorted(
+            {
+                interp.get("version")
+                for interp in installed
+                if interp.get("version")
+            }
+        )
+        platform_info = await uv_manager.get_platform_info_async()
+        return {
+            "installed": installed,
+            "available": available,
+            "all_interpreters": all_interpreters,
+            "platform": platform_info,
+        }
+
+    async def _action_get_platform_info(self, data: dict) -> Any:
+        from antcode_worker.runtime.uv_manager import uv_manager
+        return await uv_manager.get_platform_info_async()
+
+    # 静态路由表：``action`` 字符串 → ``Engine`` 实例方法。
+    # ``_handle_runtime_control`` 根据 action 查表，找不到就报 unknown action。
+    _ACTION_HANDLERS: dict[
+        str,
+        Callable[[Engine, dict], Awaitable[Any]],
+    ] = {
+        "list_envs": _action_list_envs,
+        "get_env": _action_get_env,
+        "update_env": _action_update_env,
+        "create_env": _action_create_env,
+        "delete_env": _action_delete_env,
+        "list_packages": _action_list_packages,
+        "install_packages": _action_install_packages,
+        "uninstall_packages": _action_uninstall_packages,
+        "list_interpreters": _action_list_interpreters,
+        "install_interpreter": _action_install_interpreter,
+        "uninstall_interpreter": _action_uninstall_interpreter,
+        "register_interpreter": _action_register_interpreter,
+        "unregister_interpreter": _action_unregister_interpreter,
+        "get_python_versions": _action_get_python_versions,
+        "get_platform_info": _action_get_platform_info,
+    }
+
+    async def _handle_runtime_control(self, control: ControlMessage) -> None:
         """处理运行时管理控制消息
 
         新协议 (control_pb2.RuntimeControl) 字段抽取规则：
         - ``request_id`` / ``action`` 从 ControlMessage.payload 顶层读
         - ``args`` 是 typed map<string,string>（GenericAction.args），
-          通过 ``_runtime_arg_*`` 帮助函数解码为原 dict 行为兼容的类型
+          通过 ``_arg_*`` 帮助函数解码为原 dict 行为兼容的类型
         - 旧路径还有 ``payload`` / ``reply_stream`` 字段，这里 fallback 读
           ``payload`` 保持兼容（Direct 模式 P3 收尾前仍按 dict 走）
         - ``reply_stream`` 在新协议下已废弃 — 结果通过 ``ack_control``
           （携带 success/error）回报
+
+        P2-#32: 路由从 14 elif 链改为 ``_ACTION_HANDLERS`` 表驱动。
         """
         payload = control.payload or {}
         action = payload.get("action", "")
@@ -333,129 +529,25 @@ class Engine:
         # 新协议优先用 typed args；旧路径 fallback 到 payload 嵌套 dict
         data = payload.get("args") or payload.get("payload") or {}
 
-        from antcode_worker.runtime.uv_manager import uv_manager
+        handler = self._ACTION_HANDLERS.get(action)
 
         success = True
         result_data: Any = None
         error_message = ""
 
         try:
+            if handler is None:
+                raise RuntimeError(f"未知运行时操作: {action}")
             async with self._runtime_control_semaphore:
-                if action == "list_envs":
-                    scope = _arg_str(data, "scope") or None
-                    result_data = await uv_manager.list_envs(scope=scope)
-                elif action == "get_env":
-                    env_name = _arg_str(data, "env_name")
-                    if not env_name:
-                        raise RuntimeError("env_name 不能为空")
-                    result_data = await uv_manager.get_env(env_name)
-                    if result_data is None:
-                        raise RuntimeError("环境不存在")
-                elif action == "update_env":
-                    env_name = _arg_str(data, "env_name")
-                    if not env_name:
-                        raise RuntimeError("env_name 不能为空")
-                    result_data = await uv_manager.update_env(
-                        env_name=env_name,
-                        key=_arg_str(data, "key"),
-                        description=_arg_str(data, "description"),
-                    )
-                elif action == "create_env":
-                    env_name = _arg_str(data, "env_name")
-                    python_version = _arg_str(data, "python_version")
-                    packages = _arg_list(data, "packages")
-                    created_by = _arg_str(data, "created_by") or None
-                    if not env_name:
-                        raise RuntimeError("env_name 不能为空")
-                    result_data = await uv_manager.create_env(
-                        env_name=env_name,
-                        python_version=python_version,
-                        packages=packages,
-                        created_by=created_by,
-                    )
-                elif action == "delete_env":
-                    env_name = _arg_str(data, "env_name")
-                    if not env_name:
-                        raise RuntimeError("env_name 不能为空")
-                    deleted = await uv_manager.delete_env(env_name)
-                    result_data = {"deleted": bool(deleted)}
-                elif action == "list_packages":
-                    env_name = _arg_str(data, "env_name")
-                    if not env_name:
-                        raise RuntimeError("env_name 不能为空")
-                    result_data = await uv_manager.list_packages(env_name)
-                elif action == "install_packages":
-                    env_name = _arg_str(data, "env_name")
-                    packages = _arg_list(data, "packages")
-                    upgrade = _arg_bool(data, "upgrade", False)
-                    if not env_name or not packages:
-                        raise RuntimeError("env_name 和 packages 不能为空")
-                    result_data = await uv_manager.install_packages(
-                        env_name=env_name,
-                        packages=packages,
-                        upgrade=upgrade,
-                    )
-                elif action == "uninstall_packages":
-                    env_name = _arg_str(data, "env_name")
-                    packages = _arg_list(data, "packages")
-                    if not env_name or not packages:
-                        raise RuntimeError("env_name 和 packages 不能为空")
-                    result_data = await uv_manager.uninstall_packages(
-                        env_name=env_name,
-                        packages=packages,
-                    )
-                elif action == "list_interpreters":
-                    result_data = await uv_manager.list_all_interpreters()
-                elif action == "install_interpreter":
-                    version = _arg_str(data, "version")
-                    if not version:
-                        raise RuntimeError("version 不能为空")
-                    result_data = await uv_manager.install_interpreter(version)
-                elif action == "uninstall_interpreter":
-                    version = _arg_str(data, "version")
-                    if not version:
-                        raise RuntimeError("version 不能为空")
-                    result_data = await uv_manager.uninstall_interpreter(version)
-                elif action == "register_interpreter":
-                    python_bin = _arg_str(data, "python_bin")
-                    version = _arg_str(data, "version") or None
-                    if not python_bin:
-                        raise RuntimeError("python_bin 不能为空")
-                    result_data = await uv_manager.register_interpreter(
-                        python_bin=python_bin,
-                        version=version,
-                    )
-                elif action == "unregister_interpreter":
-                    python_bin = _arg_str(data, "python_bin") or None
-                    version = _arg_str(data, "version") or None
-                    result_data = await uv_manager.unregister_interpreter(
-                        python_bin=python_bin,
-                        version=version,
-                    )
-                elif action == "get_python_versions":
-                    installed = await uv_manager.get_installed_python_versions()
-                    all_interpreters = await uv_manager.list_all_interpreters()
-                    available = sorted(
-                        {
-                            interp.get("version")
-                            for interp in installed
-                            if interp.get("version")
-                        }
-                    )
-                    platform_info = await uv_manager.get_platform_info_async()
-                    result_data = {
-                        "installed": installed,
-                        "available": available,
-                        "all_interpreters": all_interpreters,
-                        "platform": platform_info,
-                    }
-                elif action == "get_platform_info":
-                    result_data = await uv_manager.get_platform_info_async()
-                else:
-                    raise RuntimeError(f"未知运行时操作: {action}")
+                result_data = await handler(self, data)
         except Exception as e:
             success = False
             error_message = str(e)
+            # P2: ``except Exception`` 块统一用 logger.exception 保留堆栈，
+            # 避免错误被静默吞掉只剩 ``str(e)``。
+            logger.exception(
+                f"runtime action 失败: action={action} req={request_id}"
+            )
         finally:
             # 新协议：结果通过 ``send_control_result`` 回报。
             # Gateway 模式下它实际走 ``ControlService.AckControl(success, error)``，
@@ -510,10 +602,10 @@ class Engine:
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Worker-{worker_id} 异常: {e}")
+            except Exception:
+                logger.exception(f"Worker-{worker_id} 异常")
 
-    async def _execute_task(self, context: RunContext, task_msg: Any) -> ExecResult:
+    async def _execute_task(self, context: RunContext, task_msg: TaskMessage) -> ExecResult:
         """执行单个任务"""
         run_id = context.run_id
         started_at = datetime.now()
@@ -607,7 +699,7 @@ class Engine:
             return exec_result
 
         except Exception as e:
-            logger.error(f"执行失败: {run_id}, error={e}")
+            logger.exception(f"执行失败: {run_id}")
             await self._state_manager.transition(run_id, RunState.FAILED)
             return ExecResult(
                 run_id=run_id,
@@ -758,7 +850,7 @@ class Engine:
     def _generate_run_id(self, task_id: str) -> str:
         return f"run-{task_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 
-    def _build_payload(self, task_msg: Any) -> Any:
+    def _build_payload(self, task_msg: TaskMessage) -> Any:
         """构建任务 payload"""
         from antcode_worker.domain.enums import TaskType
         from antcode_worker.domain.models import TaskPayload
