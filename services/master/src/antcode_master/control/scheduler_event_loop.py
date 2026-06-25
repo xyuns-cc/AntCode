@@ -10,10 +10,10 @@ import contextlib
 import os
 import socket
 
-from loguru import logger
-
 from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis.streams import StreamClient
+from loguru import logger
+
 from antcode_master.leader import ensure_leader
 
 
@@ -118,7 +118,8 @@ class SchedulerEventLoop:
             return
 
         from antcode_core.domain.models.task import Task
-        from antcode_master.loops.scheduler_loop import scheduler_service
+
+        from antcode_master.control.scheduler_loop import scheduler_service
 
         if event_type == "task_trigger":
             await scheduler_service.trigger_task(task_id)

@@ -4,11 +4,10 @@ import asyncio
 from datetime import datetime, timedelta
 from enum import Enum
 
-from loguru import logger
-
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
+from loguru import logger
 
 
 class RetryStrategy(str, Enum):
@@ -173,7 +172,7 @@ class RetryService:
         execution.error_message = f"手动重试 by user {user_id}"
         await execution.save()
 
-        from antcode_master.loops.scheduler_loop import scheduler_service
+        from antcode_master.control.scheduler_loop import scheduler_service
 
         await scheduler_service.trigger_task(task.id)
 
@@ -253,7 +252,7 @@ class RetryService:
                     await asyncio.sleep(wait_seconds)
 
                 task_id = retry_item["task_id"]
-                from antcode_master.loops.scheduler_loop import scheduler_service
+                from antcode_master.control.scheduler_loop import scheduler_service
 
                 await scheduler_service.trigger_task(task_id)
 

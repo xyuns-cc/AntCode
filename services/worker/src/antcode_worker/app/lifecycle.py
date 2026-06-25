@@ -85,7 +85,12 @@ class Lifecycle:
                 port = getattr(container.config, "port", 8001)
                 await container.observability_server.start(host=host, port=port)
 
-            # 启动心跳
+            # P3：首次发租 — 让 Worker 在心跳 loop 起来之前就拿到 lease，
+            # 这样 Master 端能立刻看到 lease:active 集合更新。
+            if container.transport:
+                await self._initial_lease_renew(container)
+
+            # 启动心跳（内部桥接到 lease_renew）
             if container.heartbeat_reporter:
                 interval = getattr(container.config, "heartbeat_interval", 30)
                 await container.heartbeat_reporter.start(interval=interval)
@@ -116,6 +121,42 @@ class Lifecycle:
             logger.error(f"启动失败: {e}")
             await self.shutdown(container)
             raise
+
+    async def _initial_lease_renew(self, container: Any) -> None:
+        """Worker 启动时主动跑一次 ``transport.lease_renew("")``。
+
+        - Direct 模式直接走 ``LeaseStore.grant``，无副作用。
+        - Gateway 模式跑 ``ControlService.Lease`` RPC，让 Master 立刻在
+          ``lease:active`` 看到 Worker。
+        - 如果返回 ``revoked=True``（极端情况下首发就被撤销）则触发关闭。
+
+        本方法对 ``lease_renew`` 失败做容错：失败时只 warning，不阻塞
+        Worker 启动，后续 HeartbeatReporter loop 会持续重试。
+        """
+        transport = container.transport
+        if transport is None or not hasattr(transport, "lease_renew"):
+            return
+        try:
+            lease_id, expires_at_ms, renew_after_ms, revoked = await transport.lease_renew(
+                current_lease_id="",
+                metrics=None,
+            )
+        except Exception as exc:
+            logger.warning(f"初始 lease_renew 失败（不阻塞启动）: {exc}")
+            return
+
+        if revoked:
+            logger.error("Worker 首次 lease 即被撤销，触发优雅关闭")
+            self.trigger_shutdown()
+            return
+
+        if lease_id:
+            logger.info(
+                "初始 lease 已获取: lease_id={} expires_at_ms={} renew_after_ms={}",
+                lease_id,
+                expires_at_ms,
+                renew_after_ms,
+            )
 
     def _bind_transport_state(self, container: Any) -> None:
         """绑定传输层状态变更回调"""

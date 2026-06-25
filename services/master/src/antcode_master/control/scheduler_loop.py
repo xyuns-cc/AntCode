@@ -4,13 +4,10 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from apscheduler.jobstores.base import JobLookupError
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
-from apscheduler.triggers.interval import IntervalTrigger
-from loguru import logger
-
+from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.logs.task_log_service import task_log_service
+from antcode_core.application.services.monitoring import monitoring_service
+from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import (
     DispatchStatus,
@@ -21,11 +18,14 @@ from antcode_core.domain.models.enums import (
 )
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
-from antcode_core.application.services.base import QueryHelper
-from antcode_core.application.services.logs.task_log_service import task_log_service
-from antcode_core.application.services.monitoring import monitoring_service
-from antcode_core.application.services.projects.relation_service import relation_service
-from antcode_master.loops.dispatcher_loop import spider_task_dispatcher
+from apscheduler.jobstores.base import JobLookupError
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+from loguru import logger
+
+from antcode_master.control.dispatcher_loop import spider_task_dispatcher
 
 
 class SchedulerService:
@@ -787,6 +787,7 @@ class SchedulerService:
 
             # 使用执行策略解析器确定执行节点
             from antcode_core.common.exceptions import WorkerUnavailableError
+
             from antcode_master.dispatch.selector import execution_resolver
 
             try:

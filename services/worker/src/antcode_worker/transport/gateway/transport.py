@@ -627,21 +627,78 @@ class GatewayTransport(TransportBase):
     # ==================== TransportBase 实现：心跳/Lease ====================
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
-        """心跳实际走 ``ControlService.Lease``（新协议替代 SendHeartbeat）。
+        """心跳 — P3 桥接到 ``lease_renew``，对外仍保留 send_heartbeat 名字。
 
-        接口名保留是因为 TransportBase 仍叫 ``send_heartbeat``。P3 会重命名
-        为 ``lease_renew``，并把 lease_id / expires_at_ms 暴露到 engine 层。
+        本方法把 ``HeartbeatMessage`` 摊平成 metrics dict，调用 ``lease_renew``
+        实际触发 ``ControlService.Lease`` RPC，并把返回的 lease 元数据缓存在
+        ``self._lease_id``。``revoked=True`` 视为心跳失败，调用方据此触发
+        重新注册。
         """
-        if not self._control_stub or not self._running:
+        if not self._running:
             return False
 
+        metrics_dict = self._heartbeat_to_metrics_dict(heartbeat)
         try:
-            from antcode_worker.transport.gateway.codecs import HeartbeatEncoder
-
-            request = HeartbeatEncoder.encode_lease(
-                heartbeat,
-                worker_id=self._gateway_config.worker_id or "",
+            new_lease_id, _exp, _renew, revoked = await self.lease_renew(
                 current_lease_id=self._lease_id,
+                metrics=metrics_dict,
+            )
+            if revoked:
+                return False
+            if new_lease_id:
+                self._last_heartbeat = datetime.now()
+            return bool(new_lease_id)
+        except Exception as exc:
+            self._consecutive_failures += 1
+            logger.error(f"Lease/心跳失败: {exc}")
+            await self._handle_connection_error(exc)
+            return False
+
+    def _heartbeat_to_metrics_dict(self, heartbeat: HeartbeatMessage) -> dict:
+        """``HeartbeatMessage`` → ``LeaseRequest.metrics`` 等价 dict。"""
+        metrics = getattr(heartbeat, "metrics", None)
+        if metrics is not None:
+            return {
+                "cpu": getattr(metrics, "cpu", 0.0),
+                "memory": getattr(metrics, "memory", 0.0),
+                "disk": getattr(metrics, "disk", 0.0),
+                "running_tasks": getattr(metrics, "running_tasks", 0),
+                "max_concurrent_tasks": getattr(metrics, "max_concurrent_tasks", 5),
+            }
+        return {
+            "cpu": getattr(heartbeat, "cpu_percent", 0.0),
+            "memory": getattr(heartbeat, "memory_percent", 0.0),
+            "disk": getattr(heartbeat, "disk_percent", 0.0),
+            "running_tasks": getattr(heartbeat, "running_tasks", 0),
+            "max_concurrent_tasks": getattr(heartbeat, "max_concurrent_tasks", 5),
+        }
+
+    async def lease_renew(
+        self,
+        current_lease_id: str,
+        metrics: dict | None = None,
+    ) -> tuple[str, int, int, bool]:
+        """Gateway 模式 lease 续租：调用 ``ControlService.Lease``。
+
+        Returns:
+            ``(new_lease_id, expires_at_ms, renew_after_ms, revoked)``。
+            RPC 失败或 worker_id 未配置时返回 ``("", 0, 0, False)``，
+            ``revoked=True`` 由服务端透出（``LeaseResponse.revoked``）。
+        """
+        if not self._control_stub or not self._running:
+            return ("", 0, 0, False)
+        worker_id = self._gateway_config.worker_id or ""
+        if not worker_id:
+            return ("", 0, 0, False)
+
+        try:
+            from antcode_contracts import control_pb2
+
+            metrics_msg = self._build_metrics_proto(metrics or {})
+            request = control_pb2.LeaseRequest(
+                worker_id=worker_id,
+                current_lease_id=current_lease_id or "",
+                metrics=metrics_msg,
             )
             response = await asyncio.wait_for(
                 self._control_stub.Lease(
@@ -651,26 +708,39 @@ class GatewayTransport(TransportBase):
                 timeout=self._gateway_config.call_timeout,
             )
 
-            # 记录 lease 状态
             new_lease_id = getattr(response, "lease_id", "") or ""
+            expires_at_ms = int(getattr(response, "expires_at_ms", 0) or 0)
+            renew_after_ms = int(getattr(response, "renew_after_ms", 0) or 0)
+            revoked = bool(getattr(response, "revoked", False))
+
             if new_lease_id:
                 self._lease_id = new_lease_id
-            revoked = bool(getattr(response, "revoked", False))
             if revoked:
                 logger.warning(
                     f"Lease 被服务端撤销: reason={getattr(response, 'revoke_reason', '')}"
                 )
-                # 撤销视为心跳失败：调用方可以触发重新注册
-                return False
-
-            self._last_heartbeat = datetime.now()
-            self._consecutive_failures = 0
-            return True
-        except Exception as e:
+                # 清空本地 lease，下一次会重新发租
+                self._lease_id = ""
+            else:
+                self._consecutive_failures = 0
+            return (new_lease_id, expires_at_ms, renew_after_ms, revoked)
+        except Exception as exc:
             self._consecutive_failures += 1
-            logger.error(f"Lease/心跳失败: {e}")
-            await self._handle_connection_error(e)
-            return False
+            logger.error(f"lease_renew RPC 失败: {exc}")
+            await self._handle_connection_error(exc)
+            return ("", 0, 0, False)
+
+    def _build_metrics_proto(self, metrics: dict):
+        """``dict`` → ``common_pb2.Metrics``。缺失字段用 0 兜底。"""
+        from antcode_contracts import common_pb2
+
+        return common_pb2.Metrics(
+            cpu=float(metrics.get("cpu", 0.0) or 0.0),
+            memory=float(metrics.get("memory", 0.0) or 0.0),
+            disk=float(metrics.get("disk", 0.0) or 0.0),
+            running_tasks=int(metrics.get("running_tasks", 0) or 0),
+            max_concurrent_tasks=int(metrics.get("max_concurrent_tasks", 5) or 5),
+        )
 
     # ==================== TransportBase 实现：控制面 ====================
 

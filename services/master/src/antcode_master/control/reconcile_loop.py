@@ -3,9 +3,11 @@
 
 负责处理：
 - 超时任务检测与恢复
-- 失联 Worker 检测
 - 状态不一致补偿
 - 僵尸任务清理
+
+注：失联 Worker 检测在 P3 已迁移到 ``LeaseSweeperLoop`` —
+原来基于 ``last_heartbeat`` 阈值的判活逻辑被强一致 Lease 模型取代。
 """
 
 import asyncio
@@ -99,8 +101,9 @@ class ReconcileLoop:
         # 1. 检测超时任务
         await self._check_timeout_tasks(fencing_token)
 
-        # 2. 检测失联 Worker
-        await self._check_disconnected_workers(fencing_token)
+        # 2. 检测失联 Worker —— P3 已迁移到 LeaseSweeperLoop
+        #    （Worker 失租 → Master sweep → 自动剔除 + 任务回收），
+        #    这里不再做 last_heartbeat 阈值判活。
 
         # 3. 检测状态不一致
         await self._check_inconsistent_states(fencing_token)
@@ -138,68 +141,6 @@ class ReconcileLoop:
 
         except Exception as e:
             logger.error(f"检测超时任务失败: {e}")
-
-    async def _check_disconnected_workers(self, fencing_token: int):
-        """检测失联 Worker
-
-        Args:
-            fencing_token: Fencing Token
-        """
-        try:
-            from antcode_core.domain.models import Worker
-            from antcode_core.domain.models.enums import WorkerStatus
-
-            # 查找失联的 Worker
-            offline_threshold = datetime.now() - timedelta(seconds=60)
-
-            disconnected_workers = await Worker.filter(
-                status=WorkerStatus.ONLINE.value,
-                last_heartbeat__lt=offline_threshold,
-            ).all()
-
-            if disconnected_workers:
-                logger.warning(f"发现 {len(disconnected_workers)} 个失联 Worker")
-
-                for worker in disconnected_workers:
-                    logger.info(f"标记 Worker 离线: worker_id={worker.id}")
-                    worker.status = WorkerStatus.OFFLINE.value
-                    await worker.save()
-
-                    # 处理该 Worker 上的运行中任务
-                    await self._handle_worker_tasks(worker.id, fencing_token)
-
-        except Exception as e:
-            logger.error(f"检测失联 Worker 失败: {e}")
-
-    async def _handle_worker_tasks(self, worker_id: int, fencing_token: int):
-        """处理 Worker 上的任务
-
-        Args:
-            worker_id: Worker ID
-            fencing_token: Fencing Token
-        """
-        try:
-            from antcode_core.domain.models import TaskRun
-            from antcode_core.domain.models.enums import TaskStatus
-
-            # 查找该 Worker 上运行中的任务
-            running_tasks = await TaskRun.filter(
-                worker_id=worker_id,
-                status=TaskStatus.RUNNING,
-            ).all()
-
-            if running_tasks:
-                logger.info(f"Worker {worker_id} 上有 {len(running_tasks)} 个运行中任务")
-
-                for task in running_tasks:
-                    logger.info(f"标记任务失败: run_id={task.id}")
-                    task.status = TaskStatus.FAILED
-                    task.end_time = datetime.now()
-                    task.error_message = "Worker 失联"
-                    await task.save()
-
-        except Exception as e:
-            logger.error(f"处理 Worker 任务失败: {e}")
 
     async def _check_inconsistent_states(self, fencing_token: int):
         """检测状态不一致

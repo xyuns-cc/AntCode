@@ -11,7 +11,9 @@ import sys
 
 from antcode_contracts.control_pb2_grpc import add_ControlServiceServicer_to_server
 from antcode_contracts.data_pb2_grpc import add_DataServiceServicer_to_server
+from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
+from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 from antcode_core.infrastructure.redis.stream_client import StreamClient
 from loguru import logger
 
@@ -54,9 +56,33 @@ async def main():
     else:
         logger.info("RateLimitInterceptor 已禁用")
 
+    # 构建 LeaseStore (P3) —— 把真实 Lease 状态机注入 ControlService。
+    lease_store: LeaseStore | None = None
+    try:
+        redis_client = await get_redis_client()
+        if redis_client is not None:
+            lease_store = LeaseStore(
+                redis_client=redis_client,
+                namespace=redis_namespace(),
+                policy=LeasePolicy(),  # 默认 30s TTL / 10s renew
+            )
+            logger.info(
+                "LeaseStore 已构建: namespace={} ttl_ms={} renew_after_ms={}",
+                lease_store.namespace,
+                lease_store.policy.ttl_ms,
+                lease_store.policy.renew_after_ms,
+            )
+        else:
+            logger.warning("Redis 不可用，ControlService 将退化为占位 Lease")
+    except Exception as exc:  # pragma: no cover - defensive bootstrap
+        logger.error(f"构建 LeaseStore 失败，ControlService 将退化为占位 Lease: {exc}")
+
     # 注册服务实现：ControlService (lifecycle/lease/control) + DataService (tasks/status/logs)
     logger.info("注册 gRPC 服务")
-    server.add_servicer(GatewayControlService(), add_ControlServiceServicer_to_server)
+    server.add_servicer(
+        GatewayControlService(lease_store=lease_store),
+        add_ControlServiceServicer_to_server,
+    )
     server.add_servicer(GatewayDataService(), add_DataServiceServicer_to_server)
     logger.info("ControlService + DataService 已注册")
 
