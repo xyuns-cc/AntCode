@@ -143,7 +143,7 @@ class HeartbeatHandler:
             return True
 
         except Exception as e:
-            logger.error(f"更新 Redis 状态失败: {e}")
+            logger.exception(f"更新 Redis 状态失败: {e}")
             return False
 
     async def get_worker_status(self, worker_id: str) -> dict[str, Any] | None:
@@ -168,7 +168,7 @@ class HeartbeatHandler:
             return decode_stream_payload(data)
 
         except Exception as e:
-            logger.error(f"获取 Worker 状态失败: {e}")
+            logger.exception(f"获取 Worker 状态失败: {e}")
             return None
 
     async def is_worker_online(self, worker_id: str) -> bool:
@@ -188,7 +188,7 @@ class HeartbeatHandler:
             heartbeat_key = worker_heartbeat_key(worker_id)
             return await redis.exists(heartbeat_key) > 0
         except Exception as e:
-            logger.error(f"检查 Worker 状态失败: {e}")
+            logger.exception(f"检查 Worker 状态失败: {e}")
             return False
 
 

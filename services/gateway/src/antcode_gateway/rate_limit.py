@@ -240,8 +240,12 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
             return await continuation(handler_call_details)
 
         # 获取限流键
+        # P2-#L2: 没有 worker_id 时退回到对端 IP, 而不是所有匿名客户端共用
+        # 一个 "default" 桶 (后者会让单条恶意连接直接打爆全局桶)。
         metadata = dict(handler_call_details.invocation_metadata)
-        key = metadata.get(self.WORKER_ID_HEADER, "default")
+        key = metadata.get(self.WORKER_ID_HEADER)
+        if not key:
+            key = self._infer_peer_key(metadata)
 
         # 检查限流
         result = self.limiter.allow(key)
@@ -252,6 +256,22 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
         # 继续处理
         return await continuation(handler_call_details)
+
+    @staticmethod
+    def _infer_peer_key(metadata: dict) -> str:
+        """没有 worker_id 时退回到对端 IP (x-forwarded-for / x-real-ip / peer header).
+
+        若什么都拿不到, 退回 "anonymous" -- 仍然比所有匿名共享 "default" 好,
+        因为 anonymous 桶被打爆只影响匿名调用,带 worker_id 的客户端不受影响。
+        """
+        xff = metadata.get("x-forwarded-for")
+        if xff:
+            # XFF 可能是 "client, proxy1, proxy2", 取第一个
+            return f"ip:{str(xff).split(',', 1)[0].strip()}"
+        real_ip = metadata.get("x-real-ip")
+        if real_ip:
+            return f"ip:{str(real_ip).strip()}"
+        return "anonymous"
 
     def _create_rate_limited_handler(
         self,

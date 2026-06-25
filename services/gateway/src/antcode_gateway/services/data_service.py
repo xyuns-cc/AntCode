@@ -84,7 +84,7 @@ class GatewayDataService(DataServiceServicer):
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    logger.error(f"StreamTasks poll 异常: {exc}")
+                    logger.exception(f"StreamTasks poll 异常: {exc}")
                     await asyncio.sleep(1.0)
                     continue
 
@@ -111,7 +111,12 @@ class GatewayDataService(DataServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> data_pb2.AckTaskResponse:
         receipt_id = request.receipt_id or ""
+        # P2-#19: 协议违规走 gRPC error, 业务失败保留 response 字段
         if not receipt_id:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "receipt_id 缺失",
+            )
             return data_pb2.AckTaskResponse(success=False, error="receipt_id 缺失")
         try:
             success = await self._poll.ack_receipt(
@@ -124,7 +129,9 @@ class GatewayDataService(DataServiceServicer):
                 error="" if success else "ack failed",
             )
         except Exception as exc:
-            logger.error(f"AckTask 异常: {exc}")
+            logger.exception(f"AckTask 异常: {exc}")
+            # 底层异常归为不可用,触发 worker retry
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
             return data_pb2.AckTaskResponse(success=False, error=str(exc))
 
     # =========================================================================
@@ -136,21 +143,47 @@ class GatewayDataService(DataServiceServicer):
         request_iterator: AsyncIterator[data_pb2.TaskStatus],
         context: grpc.aio.ServicerContext,
     ) -> data_pb2.StatusAck:
+        # P1-#7: 每条 status 用独立 try/except 包裹, 失败的累计 cnt 上报。
+        # 落 stream 失败时 abort(UNAVAILABLE), 让 worker 端重试,绝不静默吞掉。
         received = 0
+        failed = 0
         try:
             async for task_status in request_iterator:
-                ok = await self._result.handle(task_status)
+                try:
+                    ok = await self._result.handle(task_status)
+                except Exception as exc:
+                    logger.exception(
+                        f"StreamStatus.handle 异常: run_id={task_status.run_id} exc={exc}"
+                    )
+                    failed += 1
+                    await context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        f"status stream write failed: {exc}",
+                    )
+                    return data_pb2.StatusAck(received=received)
                 if ok:
                     received += 1
                 else:
+                    failed += 1
                     logger.warning(
                         f"StreamStatus 落 stream 失败: run_id={task_status.run_id}"
                     )
+                    # ack 写入失败 -> 让 worker 重试。
+                    await context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        "status stream write failed",
+                    )
+                    return data_pb2.StatusAck(received=received)
         except asyncio.CancelledError:
-            logger.info(f"StreamStatus 被取消，已 received={received}")
+            logger.info(
+                f"StreamStatus 被取消，已 received={received} failed={failed}"
+            )
+            raise
+        except grpc.aio.AbortError:
             raise
         except Exception as exc:
-            logger.error(f"StreamStatus 异常: {exc}")
+            logger.exception(f"StreamStatus 异常: {exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
         return data_pb2.StatusAck(received=received)
 
     # =========================================================================
@@ -162,19 +195,44 @@ class GatewayDataService(DataServiceServicer):
         request_iterator: AsyncIterator[data_pb2.LogBatch],
         context: grpc.aio.ServicerContext,
     ) -> data_pb2.LogAck:
+        # P1-#7: 每个 batch 用独立 try/except 包裹, 失败的累计 cnt 上报。
+        # 落 stream 失败时 abort(UNAVAILABLE) 让 worker 重试, 绝不静默吞掉。
         received = 0
+        failed = 0
         try:
             async for batch in request_iterator:
-                ok = await self._logs.handle_log_batch(batch)
+                try:
+                    ok = await self._logs.handle_log_batch(batch)
+                except Exception as exc:
+                    logger.exception(
+                        f"StreamLogs.handle_log_batch 异常: worker_id={batch.worker_id} exc={exc}"
+                    )
+                    failed += 1
+                    await context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        f"log stream write failed: {exc}",
+                    )
+                    return data_pb2.LogAck(received=received)
                 if ok:
                     received += len(batch.entries)
                 else:
+                    failed += 1
                     logger.warning(
                         f"StreamLogs 写 Stream 失败: worker_id={batch.worker_id}"
                     )
+                    await context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        "log stream write failed",
+                    )
+                    return data_pb2.LogAck(received=received)
         except asyncio.CancelledError:
-            logger.info(f"StreamLogs 被取消，已 received={received}")
+            logger.info(
+                f"StreamLogs 被取消，已 received={received} failed={failed}"
+            )
+            raise
+        except grpc.aio.AbortError:
             raise
         except Exception as exc:
-            logger.error(f"StreamLogs 异常: {exc}")
+            logger.exception(f"StreamLogs 异常: {exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
         return data_pb2.LogAck(received=received)
