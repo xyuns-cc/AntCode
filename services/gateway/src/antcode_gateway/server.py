@@ -134,7 +134,7 @@ class GrpcServer:
             return True
 
         except Exception as e:
-            logger.error(f"gRPC 服务器启动失败: {e}")
+            logger.exception(f"gRPC 服务器启动失败: {e}")
             self._server = None
             self._started = False
             return False
@@ -174,7 +174,7 @@ class GrpcServer:
             logger.error(f"TLS 证书文件不存在: {e}")
             return None
         except Exception as e:
-            logger.error(f"创建 TLS 凭证失败: {e}")
+            logger.exception(f"创建 TLS 凭证失败: {e}")
             return None
 
     async def stop(self, grace: float | None = None) -> None:
@@ -197,7 +197,7 @@ class GrpcServer:
             logger.info("gRPC 服务器已停止")
 
         except Exception as e:
-            logger.error(f"gRPC 服务器停止失败: {e}")
+            logger.exception(f"gRPC 服务器停止失败: {e}")
             self._started = False
             self._server = None
         finally:

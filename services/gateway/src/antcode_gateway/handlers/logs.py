@@ -152,7 +152,7 @@ class LogHandler:
             try:
                 await pipe.execute()
             except Exception as exc:
-                logger.error(f"写入日志 Stream 失败: {exc}")
+                logger.exception(f"写入日志 Stream 失败: {exc}")
                 return False
 
         # 持久化（best-effort，不阻塞实时推送）
@@ -184,7 +184,7 @@ class LogHandler:
                 if not getattr(result, "success", True):
                     logger.warning(f"持久化日志失败: {getattr(result, 'error', '')}")
             except Exception as exc:
-                logger.error(f"持久化日志条目失败: {exc}")
+                logger.exception(f"持久化日志条目失败: {exc}")
 
     # =========================================================================
     # 查询/清理 - 维持原接口，给 web_api / 调试用
@@ -223,7 +223,7 @@ class LogHandler:
                     )
             return logs
         except Exception as exc:
-            logger.error(f"读取日志失败: {exc}")
+            logger.exception(f"读取日志失败: {exc}")
             return []
 
     def _decode_log_message(self, data: dict) -> data_pb2.LogBatch | None:
@@ -243,7 +243,7 @@ class LogHandler:
                 batch.ParseFromString(raw)
                 return batch
             except Exception as exc:
-                logger.error(f"解码 LogBatch Proto 失败: {exc}")
+                logger.exception(f"解码 LogBatch Proto 失败: {exc}")
                 return None
 
         # 兼容历史 JSON 帧
@@ -283,5 +283,5 @@ class LogHandler:
             logger.debug(f"日志 Stream 已清理: {stream_key}")
             return True
         except Exception as exc:
-            logger.error(f"清理日志 Stream 失败: {exc}")
+            logger.exception(f"清理日志 Stream 失败: {exc}")
             return False

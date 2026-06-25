@@ -122,6 +122,11 @@ class GatewayConfig:
             ),
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
             ("grpc.http2.max_pings_without_data", 0),
+            # P1-#17: 限制每个 HTTP/2 连接最大并发 stream 数, 避免 worker
+            # 端无界 multiplex 把 gateway 资源打满; 同时关闭 idle 超时
+            # (=0), 保活由 keepalive_* 参数控制。
+            ("grpc.max_concurrent_streams", 1000),
+            ("grpc.max_connection_idle_ms", 0),
         ]
 
     @property

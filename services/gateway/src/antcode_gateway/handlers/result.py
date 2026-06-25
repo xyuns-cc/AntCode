@@ -89,7 +89,7 @@ class ResultHandler:
             )
             return True
         except Exception as exc:
-            logger.error(f"写入结果流失败: {exc}")
+            logger.exception(f"写入结果流失败: {exc}")
             return False
 
     async def handle_status_update(

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
 import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -60,6 +61,9 @@ DEFAULT_LEASE_RENEW_AFTER_MS = 10_000
 # WatchControl 内部轮询间隔（block 毫秒）
 CONTROL_POLL_BLOCK_MS = 1_000
 
+# P1-#8: control:{worker_id} stream 的近似最大长度,避免无界增长。
+CONTROL_STREAM_MAXLEN = 1_000
+
 
 class GatewayControlService(ControlServiceServicer):
     """ControlService Gateway 端实现。
@@ -80,6 +84,10 @@ class GatewayControlService(ControlServiceServicer):
         self._lease_store = lease_store
         self._control_group_lock = asyncio.Lock()
         self._initialized_control_groups: set[tuple[str, str]] = set()
+        # P2-#21: event_id 不再直接暴露 stream key/msg id, 用 server 端短 token
+        # 映射, AckControl 时反查。
+        self._event_id_map: dict[str, tuple[str, str]] = {}
+        self._event_id_lock = asyncio.Lock()
         if lease_store is not None:
             logger.info(
                 "ControlService 已初始化（LeaseStore 已注入: ttl_ms={}, renew_after_ms={}）",
@@ -150,10 +158,10 @@ class GatewayControlService(ControlServiceServicer):
                 return False, "Worker ID 不匹配", None
             return True, "", worker
         except ImportError:
-            logger.error("antcode_core.domain.models 不可用，无法验证注册 API Key")
+            logger.exception("antcode_core.domain.models 不可用，无法验证注册 API Key")
             return False, "Worker/API Key 验证服务不可用", None
         except Exception as exc:
-            logger.error(f"验证注册请求异常: {exc}")
+            logger.exception(f"验证注册请求异常: {exc}")
             return False, f"验证失败: {exc}", None
 
     async def Deregister(
@@ -243,7 +251,7 @@ class GatewayControlService(ControlServiceServicer):
                     revoked=False,
                 )
             except Exception as exc:
-                logger.error(f"Lease grant 失败，降级为占位响应: worker_id={worker_id}, exc={exc}")
+                logger.exception(f"Lease grant 失败，降级为占位响应: worker_id={worker_id}, exc={exc}")
                 # 不要直接 abort —— 让 Worker 拿到非 revoked 响应继续运行，
                 # 下一次 sweep 自然剔除。
 
@@ -272,7 +280,11 @@ class GatewayControlService(ControlServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.CancelTaskResponse:
         worker_id = request.worker_id
+        # P2-#19: 协议违规 (参数缺失 / redis 不可用) 走 gRPC error。
         if not worker_id:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空"
+            )
             return control_pb2.CancelTaskResponse(success=False, error="worker_id 不能为空")
 
         payload = build_cancel_control_payload(
@@ -283,16 +295,28 @@ class GatewayControlService(ControlServiceServicer):
         try:
             redis = await get_redis_client()
             if redis is None:
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE, "redis unavailable"
+                )
                 return control_pb2.CancelTaskResponse(
                     success=False, error="redis unavailable"
                 )
-            await redis.xadd(control_stream(worker_id), payload)
+            # P1-#8: 限制 control stream 长度,避免无界增长。
+            await redis.xadd(
+                control_stream(worker_id),
+                payload,
+                maxlen=CONTROL_STREAM_MAXLEN,
+                approximate=True,
+            )
             logger.info(
                 f"已下发任务取消到 control:{worker_id}: task_id={request.task_id}"
             )
             return control_pb2.CancelTaskResponse(success=True)
+        except grpc.aio.AbortError:
+            raise
         except Exception as exc:
-            logger.error(f"CancelTask 写 Stream 失败: {exc}")
+            logger.exception(f"CancelTask 写 Stream 失败: {exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
             return control_pb2.CancelTaskResponse(success=False, error=str(exc))
 
     async def UpdateConfig(
@@ -301,7 +325,11 @@ class GatewayControlService(ControlServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.UpdateConfigResponse:
         worker_id = request.worker_id
+        # P2-#19: 协议违规 (参数缺失 / redis 不可用) 走 gRPC error。
         if not worker_id:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空"
+            )
             return control_pb2.UpdateConfigResponse(
                 success=False, error="worker_id 不能为空"
             )
@@ -311,14 +339,26 @@ class GatewayControlService(ControlServiceServicer):
         try:
             redis = await get_redis_client()
             if redis is None:
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE, "redis unavailable"
+                )
                 return control_pb2.UpdateConfigResponse(
                     success=False, error="redis unavailable"
                 )
-            await redis.xadd(control_stream(worker_id), payload)
+            # P1-#8: 限制 control stream 长度,避免无界增长。
+            await redis.xadd(
+                control_stream(worker_id),
+                payload,
+                maxlen=CONTROL_STREAM_MAXLEN,
+                approximate=True,
+            )
             logger.info(f"已下发配置更新到 control:{worker_id}")
             return control_pb2.UpdateConfigResponse(success=True)
+        except grpc.aio.AbortError:
+            raise
         except Exception as exc:
-            logger.error(f"UpdateConfig 写 Stream 失败: {exc}")
+            logger.exception(f"UpdateConfig 写 Stream 失败: {exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
             return control_pb2.UpdateConfigResponse(success=False, error=str(exc))
 
     # =========================================================================
@@ -370,7 +410,7 @@ class GatewayControlService(ControlServiceServicer):
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    logger.error(f"WatchControl xreadgroup 异常: {exc}")
+                    logger.exception(f"WatchControl xreadgroup 异常: {exc}")
                     await asyncio.sleep(1.0)
                     continue
 
@@ -385,7 +425,7 @@ class GatewayControlService(ControlServiceServicer):
                     for msg_id, data in messages:
                         if isinstance(msg_id, bytes):
                             msg_id = msg_id.decode()
-                        event = self._build_control_event(
+                        event = await self._build_control_event(
                             stream_key=stream_key,
                             msg_id=msg_id,
                             data=data,
@@ -403,7 +443,7 @@ class GatewayControlService(ControlServiceServicer):
         finally:
             logger.info(f"WatchControl 已断开: worker_id={worker_id}")
 
-    def _build_control_event(
+    async def _build_control_event(
         self,
         stream_key: str,
         msg_id: str,
@@ -411,15 +451,17 @@ class GatewayControlService(ControlServiceServicer):
     ) -> control_pb2.ControlEvent | None:
         """把 Stream 一条消息封装成 ``ControlEvent``。
 
-        event_id 形式 ``{stream_key}|{msg_id}``，与 AckControl 的解析对齐。
+        P2-#21: event_id 是 server 端生成的短 token (secrets.token_hex(8)),
+        在 ``_event_id_map`` 维护 token -> (stream_key, msg_id) 的映射,
+        AckControl 时反查。不再把 stream key 明文塞回客户端。
         """
         try:
             decoded = decode_stream_payload(data)
         except Exception as exc:
-            logger.error(f"control stream payload 解码失败: {exc}")
+            logger.exception(f"control stream payload 解码失败: {exc}")
             return None
 
-        event_id = f"{stream_key}|{msg_id}"
+        event_id = await self._register_event_id(stream_key, msg_id)
         control_type = decoded.get("control_type", "")
 
         if control_type in ("cancel", "kill"):
@@ -507,10 +549,21 @@ class GatewayControlService(ControlServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.AckControlResponse:
         event_id = request.event_id
-        if not event_id or "|" not in event_id:
+        if not event_id:
             return control_pb2.AckControlResponse(received=False)
 
-        stream_key, msg_id = event_id.split("|", 1)
+        # P2-#21: 反查 server 端映射拿到真实 stream_key/msg_id;
+        # 兼容旧 "stream|msg" 形式以平滑滚动升级。
+        resolved = await self._resolve_event_id(event_id)
+        if resolved is None:
+            if "|" in event_id:
+                stream_key, msg_id = event_id.split("|", 1)
+            else:
+                logger.warning(f"AckControl 未知 event_id: {event_id}")
+                return control_pb2.AckControlResponse(received=False)
+        else:
+            stream_key, msg_id = resolved
+
         try:
             redis = await get_redis_client()
             if redis is None:
@@ -527,7 +580,7 @@ class GatewayControlService(ControlServiceServicer):
                 )
             return control_pb2.AckControlResponse(received=received)
         except Exception as exc:
-            logger.error(f"AckControl 异常: {exc}")
+            logger.exception(f"AckControl 异常: {exc}")
             return control_pb2.AckControlResponse(received=False)
 
     # =========================================================================
@@ -546,6 +599,31 @@ class GatewayControlService(ControlServiceServicer):
                 await redis.xgroup_create(stream_key, group, id="0", mkstream=True)
             except Exception as exc:
                 if "BUSYGROUP" not in str(exc):
-                    logger.error(f"创建 control 消费者组失败: {exc}")
+                    logger.exception(f"创建 control 消费者组失败: {exc}")
                     raise
             self._initialized_control_groups.add(key)
+
+    async def _register_event_id(self, stream_key: str, msg_id: str) -> str:
+        """P2-#21: 生成短 token 作为对外 event_id, 服务器端维护映射。
+
+        与旧 ``{stream}|{msg}`` 形式不同, 这里不暴露 redis stream key。
+        worker 端 AckControl 时只看到 token, 由 _resolve_event_id 反查。
+        """
+        token = secrets.token_hex(8)
+        async with self._event_id_lock:
+            # 限制 map 大小, 简单防御内存溢出: 超过 10000 条时清掉最早一半。
+            if len(self._event_id_map) > 10_000:
+                # dict 在 3.7+ 是有序的, 直接砍前一半 keys。
+                cutoff = len(self._event_id_map) // 2
+                stale_keys = list(self._event_id_map.keys())[:cutoff]
+                for k in stale_keys:
+                    self._event_id_map.pop(k, None)
+            self._event_id_map[token] = (stream_key, msg_id)
+        return token
+
+    async def _resolve_event_id(
+        self, event_id: str
+    ) -> tuple[str, str] | None:
+        """根据 token 反查 (stream_key, msg_id)。命中后即从 map 移除避免重放。"""
+        async with self._event_id_lock:
+            return self._event_id_map.pop(event_id, None)

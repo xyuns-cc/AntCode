@@ -28,6 +28,7 @@ from antcode_core.infrastructure.redis import (
     task_ready_stream,
     worker_group,
 )
+from antcode_core.observability.tracing import inject_trace
 from loguru import logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -58,6 +59,11 @@ def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
     ready stream 当前的 ``download_url`` / ``file_hash`` 暂时映射到
     ``source_bundle_uri`` / ``source_bundle_sha256`` 字段（Master 切换 source bundle
     派发后会自然对齐）。
+
+    P1-#6: 把 TaskInfo 上携带的 ``trace_parent`` 写到 dispatch.trace,
+    让 worker 端拿到 W3C traceparent 后能续接。``TaskInfo`` 当前没正式
+    声明 ``trace_parent`` 字段(归 Agent P 改 contracts/core), 这里用
+    getattr 做 fallback 拿空字符串。
     """
     dispatch = data_pb2.TaskDispatch(
         task_id=task.task_id,
@@ -76,6 +82,7 @@ def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
         dispatch.params[str(key)] = str(value) if value is not None else ""
     for key, value in (task.environment or {}).items():
         dispatch.environment[str(key)] = str(value) if value is not None else ""
+    inject_trace(dispatch, traceparent=getattr(task, "trace_parent", "") or "")
     return dispatch
 
 
@@ -184,7 +191,7 @@ class TaskPollHandler:
             return tasks
 
         except Exception as exc:
-            logger.error(f"读取任务失败: {exc}")
+            logger.exception(f"读取任务失败: {exc}")
             return []
 
     def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo | None:
@@ -211,7 +218,7 @@ class TaskPollHandler:
             )
 
         except Exception as exc:
-            logger.error(f"解析任务数据失败: {exc}, message_id={message_id}")
+            logger.exception(f"解析任务数据失败: {exc}, message_id={message_id}")
             return None
 
     def _parse_json(self, value: object) -> dict[str, object]:
@@ -244,7 +251,7 @@ class TaskPollHandler:
             )
             return True
         except Exception as exc:
-            logger.error(f"确认任务失败: {exc}")
+            logger.exception(f"确认任务失败: {exc}")
             return False
 
     async def ack_receipt(
@@ -291,5 +298,5 @@ class TaskPollHandler:
             await redis.xack(queue, self.WORKER_GROUP, message_id)
             return True
         except Exception as exc:
-            logger.error(f"重新入队失败: {exc}")
+            logger.exception(f"重新入队失败: {exc}")
             return False
