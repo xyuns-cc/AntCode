@@ -13,6 +13,7 @@ from loguru import logger
 
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
+from antcode_core.observability.tracing import get_current_trace
 
 
 @dataclass
@@ -462,8 +463,8 @@ class WorkerTaskDispatcher:
 
             backend_type = get_queue_backend_type()
             logger.info(f"任务队列后端已初始化: {backend_type}")
-        except Exception as e:
-            logger.error(f"初始化任务队列后端失败: {e}")
+        except Exception:
+            logger.exception("初始化任务队列后端失败")
             raise
 
     async def shutdown_queue_backend(self):
@@ -758,7 +759,7 @@ class WorkerTaskDispatcher:
             )
 
         except Exception as e:
-            logger.error(f"批量任务分发失败 [{worker.name}] {e}")
+            logger.exception(f"批量任务分发失败 [{worker.name}]")
             return BatchDispatchResult(
                 success=False,
                 error=str(e),
@@ -835,11 +836,19 @@ class WorkerTaskDispatcher:
         return await worker_project_sync_service.sync_projects_to_worker_with_info(worker, project_ids)
 
     async def _send_batch_to_queue(self, worker, tasks, batch_id):
-        """写入 Redis Stream 分发批量任务"""
+        """写入 Redis Stream 分发批量任务
+
+        P1-#6: 把调度入口（scheduler_loop._execute_task_internal）通过
+        ``set_current_trace`` 绑定的 W3C ``traceparent`` 写到每条 ready
+        stream message 上，Worker poll 拿到后即可复用同一个 trace_id，
+        在 Worker 端的 logger / Redis 写入串成完整端到端链路。
+        """
         from antcode_core.infrastructure.redis.streams import StreamClient
 
         stream = StreamClient()
         stream_key = task_ready_stream(worker.public_id)
+
+        trace_parent = get_current_trace() or ""
 
         messages = []
         for task in tasks:
@@ -858,13 +867,14 @@ class WorkerTaskDispatcher:
                     "file_hash": task.get("file_hash") or "",
                     "entry_point": task.get("entry_point") or "",
                     "is_compressed": task.get("is_compressed", True),
+                    "trace_parent": trace_parent,
                 }
             )
 
         try:
             await stream.xadd_batch(stream_key, messages)
         except Exception as e:
-            logger.error(f"任务写入 Redis 失败: {e}")
+            logger.exception("任务写入 Redis 失败")
             return {"success": False, "error": str(e)}
 
         accepted_tasks = [{"task_id": task.get("task_id")} for task in tasks]
@@ -926,8 +936,8 @@ class WorkerTaskDispatcher:
                 "exit_code": execution.exit_code,
                 "error_message": execution.error_message,
             }
-        except Exception as e:
-            logger.error(f"获取任务状态失败: {e}")
+        except Exception:
+            logger.exception("获取任务状态失败")
             return None
 
     async def get_task_logs_from_worker(self, worker, task_id, log_type="output", tail=100):
@@ -943,8 +953,8 @@ class WorkerTaskDispatcher:
                 log_type=log_type,
                 tail=tail,
             )
-        except Exception as e:
-            logger.error(f"获取任务日志失败: {e}")
+        except Exception:
+            logger.exception("获取任务日志失败")
             return []
 
 
