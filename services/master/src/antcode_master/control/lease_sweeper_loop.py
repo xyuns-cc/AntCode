@@ -105,8 +105,8 @@ class LeaseSweeperLoop:
                     await self._handle_evictions(evicted)
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
-                logger.error(f"LeaseSweeperLoop sweep 异常: {exc}")
+            except Exception:
+                logger.exception("LeaseSweeperLoop sweep 异常")
 
             try:
                 await asyncio.sleep(self._interval)
@@ -114,19 +114,38 @@ class LeaseSweeperLoop:
                 break
 
     async def _handle_evictions(self, worker_ids: list[str]) -> None:
-        """对每个被剔除的 Worker 触发回调 + 写 audit。"""
-        for worker_id in worker_ids:
-            # 1) 回调 — 允许调用方做任务回收等重活。
-            if self._on_worker_evicted is not None:
-                try:
-                    await self._on_worker_evicted(worker_id)
-                except Exception as exc:
-                    logger.error(
-                        f"on_worker_evicted 回调异常: worker_id={worker_id} exc={exc}"
+        """对每个被剔除的 Worker 触发回调 + 写 audit。
+
+        P2-#38：原实现串行 ``for worker_id``，一轮 sweep 在 worker 数
+        多时退化为 O(N) × 任务回收耗时，远超 sweep ``interval``。改为
+        ``asyncio.gather`` 并发；逐项检查 Exception 不向上抛，保证 audit
+        阶段对每个 worker 都能写一条事件。
+        """
+        if not worker_ids:
+            return
+
+        # 1) 并发回调 — 允许调用方做任务回收等重活。
+        if self._on_worker_evicted is not None:
+            results = await asyncio.gather(
+                *(self._on_worker_evicted(w) for w in worker_ids),
+                return_exceptions=True,
+            )
+            for worker_id, result in zip(worker_ids, results, strict=False):
+                if isinstance(result, BaseException):
+                    logger.opt(exception=result).error(
+                        f"on_worker_evicted 回调异常: worker_id={worker_id}"
                     )
 
-            # 2) audit — 与 gateway 安全审计一致的字段 schema。
-            await self._emit_audit(worker_id)
+        # 2) 并发 audit — 与 gateway 安全审计一致的字段 schema。
+        audit_results = await asyncio.gather(
+            *(self._emit_audit(w) for w in worker_ids),
+            return_exceptions=True,
+        )
+        for worker_id, result in zip(worker_ids, audit_results, strict=False):
+            if isinstance(result, BaseException):
+                logger.opt(exception=result).error(
+                    f"写 worker_evicted audit 失败: worker_id={worker_id}"
+                )
 
     async def _emit_audit(self, worker_id: str) -> None:
         if self._audit_stream is None:
@@ -144,9 +163,9 @@ class LeaseSweeperLoop:
                 maxlen=AUDIT_SECURITY_MAXLEN,
                 approximate=True,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                f"写 worker_evicted audit 失败: worker_id={worker_id} exc={exc}"
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                f"写 worker_evicted audit 失败: worker_id={worker_id}"
             )
 
 
