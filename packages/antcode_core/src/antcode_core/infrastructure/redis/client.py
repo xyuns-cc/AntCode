@@ -5,6 +5,7 @@
 
 import asyncio
 import contextlib
+import os
 import platform
 import socket
 import time
@@ -166,7 +167,7 @@ class RedisConnectionPool:
             logger.info("Redis 连接池已关闭")
 
         except Exception as e:
-            logger.error(f"关闭 Redis 连接池失败: {e}")
+            logger.exception(f"关闭 Redis 连接池失败: {e}")
 
     async def _start_health_check(self) -> None:
         """启动健康检查任务"""
@@ -188,13 +189,13 @@ class RedisConnectionPool:
                 logger.debug("Redis 健康检查任务已取消")
                 break
             except Exception as e:
-                logger.error(f"Redis 健康检查失败: {e}")
+                logger.exception(f"Redis 健康检查失败: {e}")
                 self._connected = False
                 try:
                     await self.connect()
                     logger.info("Redis 连接已恢复")
                 except Exception as reconnect_error:
-                    logger.error(f"Redis 重连失败: {reconnect_error}")
+                    logger.exception(f"Redis 重连失败: {reconnect_error}")
 
     async def get_pool_stats(self) -> dict:
         """获取连接池统计信息"""
@@ -239,8 +240,24 @@ async def close_redis_pool() -> None:
 #   - hot：数据面（result/log Stream、任务分发等高吞吐路径）
 #   - cold：控制面（scheduler/reconcile/audit 等低频路径）
 # 拆开后可以避免控制面被数据面挤占连接，也方便独立调参。
-HOT_POOL_DEFAULT = 50
-COLD_POOL_DEFAULT = 10
+#
+# Hot pool 上限默认从 50 提到 100：实际跑过爬虫 + 调度 + 心跳的压测显示,
+# Master ingester + Gateway 写入路径并发到 80+ 时连接池等待会成为新的尾延迟
+# 来源。100 仍远低于 Redis 默认 maxclients=10000,且通过
+# ``REDIS_HOT_POOL_MAX_CONN`` 环境变量可在部署侧再调整。
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+HOT_POOL_DEFAULT = _env_int("REDIS_HOT_POOL_MAX_CONN", 100)
+COLD_POOL_DEFAULT = _env_int("REDIS_COLD_POOL_MAX_CONN", 10)
 
 
 def _build_pool_kwargs(max_connections: int, **overrides) -> dict:

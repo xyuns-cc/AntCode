@@ -2,19 +2,73 @@
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from datetime import datetime
-from typing import ClassVar, Pattern
+from re import Pattern
+from typing import Any, ClassVar
 
-from fastapi import HTTPException, status
+from antcode_core.common.logging import sanitize_dict
+from antcode_core.common.security.auth import jwt_auth
+from fastapi import HTTPException, Request, status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from antcode_core.common.security.auth import jwt_auth
+# ============================================================================
+# 客户端 IP 解析（XFF 仅在受信代理白名单内才生效）
+# ============================================================================
+
+
+def _trusted_proxies() -> set[str]:
+    """返回受信反向代理 IP 列表（来自环境变量 ANTCODE_TRUSTED_PROXIES）。
+
+    每次调用即时读取以方便在 runtime 通过 settings 重载;若需要更高频访问可由
+    调用方自行缓存。空字符串、空白条目都会被剔除。
+    """
+    raw = os.getenv("ANTCODE_TRUSTED_PROXIES", "") or ""
+    return {ip.strip() for ip in raw.split(",") if ip.strip()}
+
+
+def get_client_ip(request: Request) -> str:
+    """安全解析客户端 IP。
+
+    只有当直接连进来的 socket 对端 IP 在 ``ANTCODE_TRUSTED_PROXIES`` 白名单内
+    时才信任 ``X-Forwarded-For`` / ``X-Real-IP`` 头,否则一律以 socket 对端
+    IP 为准,防止任意客户端通过伪造 XFF 头绕过基于 IP 的限流。
+    """
+    direct = request.client.host if request.client else ""
+    if not direct:
+        return "unknown"
+
+    trusted = _trusted_proxies()
+    if direct not in trusted:
+        return direct
+
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        # 取左侧最初一跳的原始客户端 IP
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    real_ip = request.headers.get("X-Real-IP", "")
+    if real_ip:
+        return real_ip.strip()
+    return direct
+
+
+def safe_sanitize_body(body: Any) -> Any:
+    """对将要写入访问日志的请求/响应 body 做敏感字段脱敏。
+
+    复用 ``antcode_core.common.logging.sanitize_dict``,对常见的 ``api_key``、
+    ``password``、``token`` 等键值做 ``***REDACTED***`` 替换;非 dict 直接返回。
+    """
+    if isinstance(body, dict):
+        return sanitize_dict(body)
+    return body
 
 
 # ============================================================================
@@ -159,11 +213,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     def _get_client_ip(self, request) -> str:
-        if forwarded := request.headers.get("X-Forwarded-For"):
-            return forwarded.split(",")[0].strip()
-        if real_ip := request.headers.get("X-Real-IP"):
-            return real_ip
-        return request.client.host if request.client else "unknown"
+        # 委托给模块级 get_client_ip:仅在 socket 对端 IP 命中受信代理白名单
+        # 时才接受 XFF / X-Real-IP,防止外部客户端伪造 IP 绕过限流。
+        return get_client_ip(request)
 
 
 class CacheInvalidationMiddleware(BaseHTTPMiddleware):
