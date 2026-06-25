@@ -1,7 +1,14 @@
 """
-心跳处理器
+心跳/租约处理器
 
-处理 Worker 的心跳请求，更新 Redis 中的 Worker 状态。
+处理 Worker 的 ``ControlService.Lease`` 上报，把 Metrics 写到
+``heartbeat:{worker_id}`` Hash（过渡期保留运维 dashboard 可见）。
+
+P1c 改造：
+- 旧 ``SendHeartbeat`` RPC 已删除，统一由 ``ControlService.Lease`` 携带 Metrics。
+- 旧 ``HeartbeatHandler`` 保留接口、改名暴露为 ``LeaseHandler``，由 control_service
+  直接调用。**这里 *只* 维护过渡期的 Hash 视图**；真正的 lease 状态机由 P3
+  接管（``LeaseStore`` + 强一致 lease_id）。
 
 **Validates: Requirements 6.3**
 """
@@ -11,9 +18,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from loguru import logger
-
 from antcode_core.infrastructure.redis import decode_stream_payload, worker_heartbeat_key
+from loguru import logger
 
 
 @dataclass
@@ -184,3 +190,9 @@ class HeartbeatHandler:
         except Exception as e:
             logger.error(f"检查 Worker 状态失败: {e}")
             return False
+
+
+# P1c：control_service.Lease 调用方使用的别名（语义更准确）。
+# 等 P3 接管真实 LeaseStore 后会被替换为新的 ``LeaseStore`` 实现。
+LeaseHandler = HeartbeatHandler
+LeaseData = HeartbeatData

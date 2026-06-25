@@ -8,7 +8,7 @@ Gateway 是连接公网与内网的桥梁。它为部署在公网或跨云环境
 
 1.  **安全接入 (Secure Access)**: 作为公网入口，所有请求必须通过 API Key 或 mTLS 双向认证。
 2.  **协议转换 (Protocol Translation)**: 将 Worker 的 gRPC 请求转换为内部 Redis Stream 消息指令，对后端透明。
-3.  **连接管理 (Connection Mgmt)**: 维护长连接，处理心跳保活，识别并剔除失联节点。
+3.  **连接管理 (Connection Mgmt)**: 维护长连接，处理心跳保活，识别并剔除失联 Worker。
 4.  **流量控制 (Rate Limiting)**: 防止恶意或失控的 Worker 流量打垮后端存储。
 
 ---
