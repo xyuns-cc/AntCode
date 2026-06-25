@@ -9,12 +9,22 @@
 **Validates: Requirements 6.2**
 """
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import grpc
 from loguru import logger
+
+if TYPE_CHECKING:
+    from antcode_core.infrastructure.redis.stream_client import StreamClient
+
+
+# 安全审计 Stream 键名
+AUDIT_SECURITY_STREAM = "audit:security"
+# 审计 Stream 最大长度（近似裁剪）
+AUDIT_SECURITY_MAXLEN = 100_000
 
 
 @dataclass
@@ -53,6 +63,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         enabled: bool = True,
         api_key_validator: Callable[[str], bool] | None = None,
         jwt_validator: Callable[[str], dict | None] | None = None,
+        audit_stream: "StreamClient | None" = None,
     ):
         """初始化认证拦截器
 
@@ -60,10 +71,49 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             enabled: 是否启用认证
             api_key_validator: API Key 验证函数，返回是否有效
             jwt_validator: JWT 验证函数，返回解码后的 payload 或 None
+            audit_stream: 安全审计 Stream 客户端。如果为 None，审计写入将被跳过
+                （zero-config 友好），但认证主流程不受影响。
         """
         self.enabled = enabled
         self._api_key_validator = api_key_validator
         self._jwt_validator = jwt_validator
+        self._audit_stream = audit_stream
+
+    async def _emit_audit(
+        self,
+        event_type: str,
+        worker_id: str | None,
+        peer: str | None,
+        reason: str,
+    ) -> None:
+        """写一条安全审计事件到 Redis Stream
+
+        审计失败绝不能影响主认证流程，所有异常都被捕获并降级为 error 日志。
+
+        Args:
+            event_type: 事件类型，如 mtls_reject / api_key_invalid /
+                jwt_invalid / install_key_replay
+            worker_id: 关联的 worker_id，可空
+            peer: 对端标识（IP 或 mTLS CN），可空
+            reason: 简短失败原因
+        """
+        if self._audit_stream is None:
+            return
+        try:
+            await self._audit_stream.xadd(
+                AUDIT_SECURITY_STREAM,
+                {
+                    "event_type": event_type,
+                    "worker_id": worker_id or "",
+                    "peer": peer or "",
+                    "reason": reason or "",
+                    "ts": str(int(time.time() * 1000)),
+                },
+                maxlen=AUDIT_SECURITY_MAXLEN,
+                approximate=True,
+            )
+        except Exception as e:  # noqa: BLE001 - 审计失败不影响主流程
+            logger.error(f"写入安全审计 Stream 失败: event_type={event_type}, error={e}")
 
     async def intercept_service(
         self,
@@ -92,6 +142,25 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 f"认证失败: {auth_result.error}, method={method}, "
                 f"has_api_key={has_api_key}, worker_id={worker_id}"
             )
+
+            # 追加结构化安全审计（不影响主流程）
+            auth_header = metadata.get(self.AUTHORIZATION_HEADER) or ""
+            has_jwt = auth_header.lower().startswith("bearer ")
+            if has_api_key:
+                event_type = "api_key_invalid"
+            elif has_jwt:
+                event_type = "jwt_invalid"
+            else:
+                # 没有任何认证凭证：归类为 mTLS 拒绝 / 凭证缺失
+                event_type = "mtls_reject"
+            peer = metadata.get("x-forwarded-for") or metadata.get("x-real-ip") or ""
+            await self._emit_audit(
+                event_type=event_type,
+                worker_id=worker_id,
+                peer=peer,
+                reason=auth_result.error or "",
+            )
+
             return self._create_unauthenticated_handler(auth_result.error)
 
         logger.debug(

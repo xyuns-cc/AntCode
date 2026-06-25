@@ -8,6 +8,23 @@ import os
 from dataclasses import dataclass, field
 
 
+def _default_grpc_workers() -> int:
+    """计算 gRPC 服务器默认工作线程数
+
+    根据 CPU 核数动态调整：cpu * 4，封顶 32。
+    可通过环境变量 ``GRPC_MAX_WORKERS`` 覆盖。
+
+    参考值：
+    - 2 核机器: 8
+    - 4 核机器: 16
+    - 8 核及以上: 32（封顶）
+    """
+    env_value = os.getenv("GRPC_MAX_WORKERS")
+    if env_value:
+        return int(env_value)
+    return min(32, (os.cpu_count() or 4) * 4)
+
+
 @dataclass
 class GatewayConfig:
     """Gateway 服务器配置
@@ -21,10 +38,8 @@ class GatewayConfig:
     # 服务器端口
     port: int = field(default_factory=lambda: int(os.getenv("GRPC_PORT", "50051")))
 
-    # 最大工作线程数
-    max_workers: int = field(
-        default_factory=lambda: int(os.getenv("GRPC_MAX_WORKERS", "10"))
-    )
+    # 最大工作线程数（默认 min(32, cpu_count * 4)，可通过 GRPC_MAX_WORKERS 覆盖）
+    max_workers: int = field(default_factory=_default_grpc_workers)
 
     # 是否启用 gRPC 服务
     enabled: bool = field(
