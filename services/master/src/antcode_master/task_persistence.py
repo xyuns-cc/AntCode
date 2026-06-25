@@ -10,9 +10,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from loguru import logger
-
 from antcode_core.infrastructure.cache import unified_cache
+from loguru import logger
 
 
 class CheckpointState(str, Enum):
@@ -152,10 +151,9 @@ class TaskPersistenceService:
 
     async def get_interrupted_tasks(self):
         """获取所有被中断的任务"""
-        from tortoise.expressions import Q
-
         from antcode_core.domain.models import Task, TaskRun
         from antcode_core.domain.models.enums import TaskStatus
+        from tortoise.expressions import Q
 
         try:
             cutoff = datetime.now() - timedelta(minutes=self.INTERRUPTED_THRESHOLD_MINUTES)
@@ -322,7 +320,7 @@ class TaskRecoveryService:
                 await task.save(update_fields=["execution_params"])
                 logger.debug(f"已注入断点续传数据到任务 {task.public_id}")
 
-            from antcode_master.loops.scheduler_loop import scheduler_service
+            from antcode_master.control.scheduler_loop import scheduler_service
 
             await scheduler_service.trigger_task(task.id)
 

@@ -335,12 +335,18 @@ class TransportBase(ABC):
         """
         pass
 
-    # ==================== 心跳操作 ====================
+    # ==================== 心跳 / Lease 操作 ====================
 
     @abstractmethod
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
         """
-        发送心跳
+        发送心跳（兼容旧接口）
+
+        新协议（P3）下，本方法在内部桥接到 ``lease_renew``：
+        Direct 模式直接 grant LeaseStore；Gateway 模式调用
+        ``ControlService.Lease``。返回的 ``bool`` 仅表示 RPC 是否
+        成功，**不携带 lease_id / 过期时间**。需要 lease 元数据请用
+        ``lease_renew``。
 
         Args:
             heartbeat: 心跳消息
@@ -349,6 +355,39 @@ class TransportBase(ABC):
             是否成功
         """
         pass
+
+    async def lease_renew(
+        self,
+        current_lease_id: str,
+        metrics: dict | None = None,
+    ) -> tuple[str, int, int, bool]:
+        """续租 / 首发租。
+
+        新 P3 协议下的判活原语，返回一份完整的 lease 元数据。默认实现走旧
+        ``send_heartbeat`` 桥接，没有 lease_id / 过期时间的子类仍可使用
+        旧路径（兼容）；新驱动应覆盖本方法。
+
+        Args:
+            current_lease_id: Worker 当前持有的 ``lease_id``，空表示首次。
+            metrics: 可选指标快照，落到 ``LeaseRequest.metrics``。
+
+        Returns:
+            ``(new_lease_id, expires_at_ms, renew_after_ms, revoked)``。
+            兼容路径下 ``new_lease_id`` 为空、``expires_at_ms`` / ``renew_after_ms``
+            为 0、``revoked`` 为 False。
+        """
+        # 默认兜底：把 metrics 适配为一份 HeartbeatMessage，调旧接口。
+        heartbeat = HeartbeatMessage(
+            worker_id="",
+            status="online",
+            cpu_percent=float((metrics or {}).get("cpu", 0.0) or 0.0),
+            memory_percent=float((metrics or {}).get("memory", 0.0) or 0.0),
+            disk_percent=float((metrics or {}).get("disk", 0.0) or 0.0),
+            running_tasks=int((metrics or {}).get("running_tasks", 0) or 0),
+            max_concurrent_tasks=int((metrics or {}).get("max_concurrent_tasks", 5) or 5),
+        )
+        ok = await self.send_heartbeat(heartbeat)
+        return ("" if not ok else current_lease_id, 0, 0, False)
 
     # ==================== 控制通道 ====================
 
