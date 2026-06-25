@@ -55,19 +55,28 @@ def verify_api_key_hash(api_key: str, stored_hash: str) -> bool:
 
 
 async def verify_api_key(api_key: str, worker_id: str | None = None) -> bool:
-    """验证 API Key 是否存在于 Worker 记录中"""
+    """验证 API Key 是否存在于 Worker 记录中。
+
+    任何模块不可用 / DB 异常都直接拒绝(返回 ``False``),不存在
+    "开发模式 fallback" —— 防止环境降级时鉴权自动通过(P0-#4)。
+    """
     if not api_key:
         return False
 
     try:
         from antcode_core.domain.models.worker import Worker
     except Exception:
+        logger.exception("Worker 模型不可用,拒绝 API Key 鉴权(无 fallback)")
         return False
 
-    query = Worker.filter(api_key=api_key)
-    if worker_id:
-        query = query.filter(public_id=worker_id)
-    return await query.exists()
+    try:
+        query = Worker.filter(api_key=api_key)
+        if worker_id:
+            query = query.filter(public_id=worker_id)
+        return await query.exists()
+    except Exception:
+        logger.exception("API Key 查询失败,拒绝鉴权(无 fallback)")
+        return False
 
 
 class APIKeyManager:

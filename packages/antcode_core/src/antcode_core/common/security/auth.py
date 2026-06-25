@@ -1,6 +1,6 @@
 """认证模块"""
 
-import secrets
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -26,47 +26,54 @@ TOKEN_EXPIRED_ERROR = HTTPException(
 
 
 class JWTSecretManager:
-    """JWT 密钥管理器"""
+    """JWT 密钥管理器
 
-    def __init__(self, secret_file: Path | None = None):
-        resolved = Path(secret_file) if secret_file else None
-        if resolved is None and settings.JWT_SECRET_FILE:
-            resolved = Path(settings.JWT_SECRET_FILE)
-        self.secret_file = resolved or Path(settings.data_dir) / ".jwt_secret"
+    密钥必须通过环境变量 ``JWT_SECRET`` 或 ``JWT_SECRET_FILE``
+    (亦可通过 ``settings.JWT_SECRET_FILE`` 配置) 显式提供。
+    懒生成已禁用以避免多进程 race + 容器重启时密钥丢失。
+    """
+
+    def __init__(self, secret_file: Path | str | None = None):
+        resolved: Path | None = Path(secret_file) if secret_file else None
+        if resolved is None:
+            env_file = os.getenv("JWT_SECRET_FILE") or settings.JWT_SECRET_FILE
+            if env_file:
+                resolved = Path(env_file)
+        self.secret_file: Path | None = resolved
         self._secret: str | None = None
 
     def get_secret(self) -> str:
         if self._secret:
             return self._secret
 
-        # 尝试从文件加载
-        if self.secret_file.exists():
+        # 1. 优先环境变量
+        if env_secret := os.getenv("JWT_SECRET"):
+            self._secret = env_secret.strip()
+            if self._secret:
+                return self._secret
+
+        # 2. 从指定文件加载
+        if self.secret_file and self.secret_file.exists():
             try:
                 if secret := self.secret_file.read_text().strip():
                     self._secret = secret
                     return self._secret
-            except Exception as e:
-                logger.warning(f"读取JWT密钥失败: {e}")
+            except Exception:
+                logger.exception("读取 JWT 密钥失败")
 
-        # 生成新密钥
-        self._secret = secrets.token_hex(64)
-        self._save_secret()
-        return self._secret
-
-    def _save_secret(self):
-        """保存密钥到文件"""
-        try:
-            self.secret_file.parent.mkdir(parents=True, exist_ok=True)
-            self.secret_file.write_text(self._secret)
-            self.secret_file.chmod(0o600)
-        except Exception as e:
-            logger.warning(f"保存JWT密钥失败: {e}")
+        # 3. 没配置即拒绝启动 —— 禁止懒生成
+        raise RuntimeError(
+            "JWT_SECRET or JWT_SECRET_FILE must be configured; "
+            "lazy secret generation is disabled to avoid multi-process race "
+            "conditions and container-restart key loss."
+        )
 
     def regenerate(self) -> str:
-        """重新生成密钥"""
-        self._secret = secrets.token_hex(64)
-        self._save_secret()
-        return self._secret
+        """重新生成密钥 —— 已禁用,改为运维侧轮换。"""
+        raise RuntimeError(
+            "JWTSecretManager.regenerate() is disabled; "
+            "rotate JWT_SECRET via deployment configuration instead."
+        )
 
 
 jwt_secret_manager = JWTSecretManager()
@@ -161,9 +168,19 @@ class JWTAuth:
         )
 
     def verify_token(self, token: str, expected_type: str | None = "access") -> TokenData:
-        """验证令牌"""
+        """验证令牌
+
+        默认 ``verify_exp=True``、``verify_type=True``;调用方若需放宽必须
+        显式传 ``expected_type=None``,**不允许跳过过期校验**。
+        """
         try:
-            payload = jwt.decode(token, self._get_secret(), algorithms=[self.algorithm])
+            # 显式强制启用过期校验,杜绝 verify_exp=False 旁路
+            payload = jwt.decode(
+                token,
+                self._get_secret(),
+                algorithms=[self.algorithm],
+                options={"verify_exp": True, "require": ["exp"]},
+            )
             user_id, username = payload.get("user_id"), payload.get("username")
             if not user_id or not username:
                 raise AUTH_ERROR
