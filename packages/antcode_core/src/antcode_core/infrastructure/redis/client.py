@@ -11,10 +11,10 @@ import time
 from typing import Optional
 
 import redis.asyncio as redis
+from loguru import logger
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError, TimeoutError
-from loguru import logger
 
 from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
@@ -222,7 +222,7 @@ class RedisConnectionPool:
 
 
 async def get_redis_client() -> redis.Redis:
-    """获取 Redis 客户端（便捷函数）"""
+    """获取 Redis 客户端（便捷函数，单例 hot pool）"""
     pool_manager = await RedisConnectionPool.get_instance()
     return await pool_manager.get_client()
 
@@ -230,3 +230,90 @@ async def get_redis_client() -> redis.Redis:
 async def close_redis_pool() -> None:
     """关闭 Redis 连接池（便捷函数）"""
     await RedisConnectionPool.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# P5.2: hot / cold connection pool helpers
+# ---------------------------------------------------------------------------
+# 不同业务场景对 Redis 连接数的需求差异显著：
+#   - hot：数据面（result/log Stream、任务分发等高吞吐路径）
+#   - cold：控制面（scheduler/reconcile/audit 等低频路径）
+# 拆开后可以避免控制面被数据面挤占连接，也方便独立调参。
+HOT_POOL_DEFAULT = 50
+COLD_POOL_DEFAULT = 10
+
+
+def _build_pool_kwargs(max_connections: int, **overrides) -> dict:
+    """构建符合项目默认配置的 ConnectionPool kwargs"""
+    retry = Retry(ExponentialBackoff(cap=1.0, base=0.1), retries=3)
+    pool_kwargs: dict = {
+        "max_connections": max_connections,
+        "retry_on_timeout": True,
+        "retry": retry,
+        "retry_on_error": [ConnectionError, TimeoutError],
+        "socket_timeout": 10,
+        "socket_connect_timeout": 10,
+        "socket_keepalive": True,
+        "health_check_interval": 30,
+        "encoding": "utf-8",
+        "decode_responses": False,
+    }
+
+    if platform.system() == "Linux":
+        keepalive_options = {}
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            keepalive_options[socket.TCP_KEEPIDLE] = 60
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            keepalive_options[socket.TCP_KEEPINTVL] = 15
+        if hasattr(socket, "TCP_KEEPCNT"):
+            keepalive_options[socket.TCP_KEEPCNT] = 4
+        if keepalive_options:
+            pool_kwargs["socket_keepalive_options"] = keepalive_options
+
+    pool_kwargs.update(overrides)
+    return pool_kwargs
+
+
+def _make_client(
+    url: str | None,
+    *,
+    max_connections: int,
+    pool_label: str,
+    **overrides,
+) -> redis.Redis:
+    """创建独立的 Redis 客户端（不走单例）"""
+    redis_url = url or settings.REDIS_URL
+    if not redis_url:
+        raise RedisConnectionError("REDIS_URL 未配置")
+
+    pool_kwargs = _build_pool_kwargs(max_connections, **overrides)
+    pool = redis.ConnectionPool.from_url(redis_url, **pool_kwargs)
+    client = redis.Redis(connection_pool=pool)
+    logger.debug(
+        f"Redis {pool_label} 连接池已创建 (max_connections={max_connections})"
+    )
+    return client
+
+
+def make_hot_client(
+    url: str | None = None,
+    *,
+    max_connections: int = HOT_POOL_DEFAULT,
+    **kwargs,
+) -> redis.Redis:
+    """高吞吐场景使用 - Master ingester 组、Gateway 写入路径等"""
+    return _make_client(
+        url, max_connections=max_connections, pool_label="hot", **kwargs
+    )
+
+
+def make_cold_client(
+    url: str | None = None,
+    *,
+    max_connections: int = COLD_POOL_DEFAULT,
+    **kwargs,
+) -> redis.Redis:
+    """低频场景使用 - Master control 组、辅助查询等"""
+    return _make_client(
+        url, max_connections=max_connections, pool_label="cold", **kwargs
+    )
