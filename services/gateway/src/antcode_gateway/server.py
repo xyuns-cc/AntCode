@@ -67,7 +67,7 @@ class GrpcServer:
 
         Args:
             servicer: 服务实现实例
-            add_to_server_func: 添加服务的函数（如 add_GatewayServiceServicer_to_server）
+            add_to_server_func: 添加服务的函数（如 add_ControlServiceServicer_to_server）
         """
         self._servicers.append((servicer, add_to_server_func))
 

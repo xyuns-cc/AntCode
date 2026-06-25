@@ -7,7 +7,7 @@ gRPC 网关服务，负责：
 - 请求限流与熔断
 - 代理 Worker poll 任务（从 Redis Streams 读取）
 - 接收日志写入 log:{run_id} stream
-- 接收结果并回写 MySQL
+- 接收结果并回写 PostgreSQL
 
 职责边界：
 - 不实现复杂调度策略（只代理队列 + 写状态/日志/结果）

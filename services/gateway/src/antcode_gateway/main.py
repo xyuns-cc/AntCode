@@ -9,16 +9,17 @@ import os
 import signal
 import sys
 
-from loguru import logger
-
-from antcode_contracts.gateway_pb2_grpc import add_GatewayServiceServicer_to_server
+from antcode_contracts.control_pb2_grpc import add_ControlServiceServicer_to_server
+from antcode_contracts.data_pb2_grpc import add_DataServiceServicer_to_server
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
 from antcode_core.infrastructure.redis.stream_client import StreamClient
+from loguru import logger
+
 from antcode_gateway.auth import AuthInterceptor
 from antcode_gateway.config import gateway_config
 from antcode_gateway.rate_limit import RateLimitInterceptor
 from antcode_gateway.server import get_grpc_server
-from antcode_gateway.services import GatewayServiceImpl
+from antcode_gateway.services import GatewayControlService, GatewayDataService
 
 
 async def main():
@@ -53,10 +54,11 @@ async def main():
     else:
         logger.info("RateLimitInterceptor 已禁用")
 
-    # 注册服务实现
+    # 注册服务实现：ControlService (lifecycle/lease/control) + DataService (tasks/status/logs)
     logger.info("注册 gRPC 服务")
-    server.add_servicer(GatewayServiceImpl(), add_GatewayServiceServicer_to_server)
-    logger.info("GatewayService 已注册")
+    server.add_servicer(GatewayControlService(), add_ControlServiceServicer_to_server)
+    server.add_servicer(GatewayDataService(), add_DataServiceServicer_to_server)
+    logger.info("ControlService + DataService 已注册")
 
     # 启动服务器
     await server.start()
