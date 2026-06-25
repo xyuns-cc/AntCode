@@ -340,13 +340,17 @@ class TransportBase(ABC):
     @abstractmethod
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
         """
-        发送心跳（兼容旧接口）
+        发送心跳（**deprecated alias for** ``lease_renew``）。
 
-        新协议（P3）下，本方法在内部桥接到 ``lease_renew``：
-        Direct 模式直接 grant LeaseStore；Gateway 模式调用
-        ``ControlService.Lease``。返回的 ``bool`` 仅表示 RPC 是否
-        成功，**不携带 lease_id / 过期时间**。需要 lease 元数据请用
-        ``lease_renew``。
+        P3 之后 ``lease_renew`` 是 canonical 名（liveness signal + lease
+        元数据），``send_heartbeat`` 保留只为 ``HeartbeatReporter`` 现存调用
+        点不破坏。新代码请直接调用 ``lease_renew``：
+
+            new_lease_id, expires_at_ms, renew_after_ms, revoked = \\
+                await transport.lease_renew(current_lease_id, metrics)
+
+        ``send_heartbeat`` 的返回 ``bool`` 仅表示 RPC 是否成功，**不携带
+        lease_id / 过期时间**。需要 lease 元数据请用 ``lease_renew``。
 
         Args:
             heartbeat: 心跳消息
