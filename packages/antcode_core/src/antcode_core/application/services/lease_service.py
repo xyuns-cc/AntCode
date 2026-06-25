@@ -31,6 +31,7 @@ Validates: Requirements (P3 设计文档 §Lease)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 import time
@@ -197,6 +198,11 @@ class LeaseStore:
         self._policy = policy or LeasePolicy()
         self._grant_script_sha: str | None = None
         self._revoke_script_sha: str | None = None
+        # _ensure_scripts_loaded 用 Event 做快速路径(无锁开销),用 Lock 做
+        # 慢路径串行化:第一次 SCRIPT LOAD 期间多个 grant/revoke 并发到达时,
+        # 只让一个协程真正发 SCRIPT LOAD,其它人在锁外面等 Event。
+        self._scripts_loaded = asyncio.Event()
+        self._scripts_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ Keys
 
@@ -220,21 +226,36 @@ class LeaseStore:
     # ---------------------------------------------------------------- Script
 
     async def _ensure_scripts_loaded(self) -> None:
-        """首次调用时 SCRIPT LOAD，把 SHA 缓存下来。"""
-        if self._grant_script_sha is None:
-            self._grant_script_sha = await self._redis.script_load(_GRANT_LUA)
-        if self._revoke_script_sha is None:
-            self._revoke_script_sha = await self._redis.script_load(_REVOKE_LUA)
+        """首次调用时 SCRIPT LOAD，把 SHA 缓存下来。
+
+        采用 double-checked locking:Event 给出 lock-free 的快速路径,Lock 把
+        实际的 SCRIPT LOAD 串行化,避免并发 grant/revoke 第一次进入时同时发
+        SCRIPT LOAD 重复加载、或在两个属性赋值中间被另一个协程读到半初始化
+        状态。
+        """
+        if self._scripts_loaded.is_set():
+            return
+        async with self._scripts_lock:
+            # 拿到锁后再确认一次:可能在 await lock 期间别人已经完成加载
+            if self._scripts_loaded.is_set():
+                return
+            if self._grant_script_sha is None:
+                self._grant_script_sha = await self._redis.script_load(_GRANT_LUA)
+            if self._revoke_script_sha is None:
+                self._revoke_script_sha = await self._redis.script_load(_REVOKE_LUA)
+            self._scripts_loaded.set()
 
     async def _evalsha_grant(self, keys: list[str], args: list[str]) -> list[Any]:
         await self._ensure_scripts_loaded()
         try:
             return await self._redis.evalsha(self._grant_script_sha, len(keys), *keys, *args)
         except Exception as exc:
-            # NOSCRIPT 或缓存失效时回退到 EVAL，并重新缓存 SHA
+            # NOSCRIPT 或缓存失效时回退到 EVAL，并触发下一次 _ensure_scripts_loaded
+            # 重新缓存 SHA(Event 清零让 double-check 路径再走一遍 SCRIPT LOAD)。
             if "NOSCRIPT" in str(exc):
                 logger.warning("Lease grant 脚本未在 Redis 缓存中，回退 EVAL")
                 self._grant_script_sha = None
+                self._scripts_loaded.clear()
                 return await self._redis.eval(_GRANT_LUA, len(keys), *keys, *args)
             raise
 
@@ -246,6 +267,7 @@ class LeaseStore:
             if "NOSCRIPT" in str(exc):
                 logger.warning("Lease revoke 脚本未在 Redis 缓存中，回退 EVAL")
                 self._revoke_script_sha = None
+                self._scripts_loaded.clear()
                 return await self._redis.eval(_REVOKE_LUA, len(keys), *keys, *args)
             raise
 

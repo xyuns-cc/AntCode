@@ -2,23 +2,22 @@
 
 import asyncio
 import contextlib
+import hmac
 import json
+import os
 import time
 from datetime import UTC
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
-from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
-
-from antcode_web_api.response import BaseResponse, success
+from antcode_core.application.services.audit import audit_service
+from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
+from antcode_core.common.security import constant_time_compare
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.common.security.worker_auth import (
     verify_worker_request_with_signature,
 )
-from antcode_core.common.security import constant_time_compare
 from antcode_core.domain.models import WorkerStatus
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
@@ -40,8 +39,6 @@ from antcode_core.domain.schemas.worker import (
     WorkerTestConnectionResponse,
     WorkerUpdateRequest,
 )
-from antcode_core.application.services.audit import audit_service
-from antcode_core.application.services.workers import worker_service
 from antcode_core.infrastructure.redis import (
     build_config_update_control_payload,
     control_stream,
@@ -53,6 +50,11 @@ from antcode_core.infrastructure.redis import (
     worker_install_key_meta_key,
     worker_install_key_nonce_key,
 )
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field
+
+from antcode_web_api.response import BaseResponse, success
 
 router = APIRouter()
 
@@ -86,9 +88,77 @@ class WorkerTaskStatusReportRequest(_WorkerReportBaseModel):
     error_message: str | None = Field(default=None, description="错误信息")
 
 
+# ---------------------------------------------------------------------------
+# Install-key 全局失败计数器
+# ---------------------------------------------------------------------------
+# 单 IP 失败计数器(see _record_install_key_failed_attempt)只能拦截单一来源的
+# 爆破,如果攻击者使用大量代理池伪造客户端 IP,仍可能在跨 IP 层面对全部存活
+# install key 做枚举。这里再额外维护一个无 IP 维度的全局计数器:任意 install
+# key 失败一次都 incr 同一个 Redis key,1 分钟超过阈值就把所有 register-by-key
+# 调用 returns 429,直到窗口过期。
+# ---------------------------------------------------------------------------
+_INSTALL_KEY_GLOBAL_FAIL_KEY = "install_key:fail:global"
+_INSTALL_KEY_GLOBAL_FAIL_WINDOW_SECONDS = 60
+_INSTALL_KEY_GLOBAL_FAIL_THRESHOLD = 50
+
+
+async def _check_install_key_global_block() -> tuple[bool, int]:
+    """读取全局失败计数器,超过阈值则返回 (True, 剩余冷却秒数)。"""
+    redis = await get_redis_client()
+    raw = await redis.get(_INSTALL_KEY_GLOBAL_FAIL_KEY)
+    try:
+        count = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count < _INSTALL_KEY_GLOBAL_FAIL_THRESHOLD:
+        return False, 0
+    ttl = await redis.ttl(_INSTALL_KEY_GLOBAL_FAIL_KEY)
+    return True, int(ttl if ttl and ttl > 0 else _INSTALL_KEY_GLOBAL_FAIL_WINDOW_SECONDS)
+
+
+async def _record_install_key_global_failure() -> int:
+    """全局失败计数 +1,第一次设置过期窗口。"""
+    redis = await get_redis_client()
+    count = await redis.incr(_INSTALL_KEY_GLOBAL_FAIL_KEY)
+    if int(count) == 1:
+        await redis.expire(
+            _INSTALL_KEY_GLOBAL_FAIL_KEY,
+            _INSTALL_KEY_GLOBAL_FAIL_WINDOW_SECONDS,
+        )
+    return int(count)
+
+
+def _trusted_proxies() -> set[str]:
+    """读取 ``ANTCODE_TRUSTED_PROXIES`` 受信反向代理白名单。
+
+    与 ``middleware._trusted_proxies`` 保持一致,但在这里独立读取避免跨模块
+    互相依赖循环 import。空字符串/空白条目都会被剔除。
+    """
+    raw = os.getenv("ANTCODE_TRUSTED_PROXIES", "") or ""
+    return {ip.strip() for ip in raw.split(",") if ip.strip()}
+
+
 def _extract_request_source(request: Request, default_host: str = "") -> str:
-    if request.client and request.client.host:
-        return request.client.host
+    """提取请求来源 IP。
+
+    XFF / X-Real-IP 只有当 socket 对端 IP 命中 ``ANTCODE_TRUSTED_PROXIES``
+    白名单时才被信任,否则一律以 socket 对端 IP 为准;这样可以避免任意客户端
+    通过伪造 ``X-Forwarded-For`` 头绕过基于 IP 的失败计数器 / 来源绑定。
+    ``default_host`` 仅在没有可用客户端 IP 时作为 fallback。
+    """
+    direct = request.client.host if request.client and request.client.host else ""
+    if direct:
+        trusted = _trusted_proxies()
+        if direct in trusted:
+            xff = request.headers.get("X-Forwarded-For", "")
+            if xff:
+                first = xff.split(",")[0].strip()
+                if first:
+                    return first
+            real_ip = request.headers.get("X-Real-IP", "")
+            if real_ip:
+                return real_ip.strip()
+        return direct
     return (default_host or "").strip()
 
 
@@ -1031,6 +1101,14 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
 
     request_source = _extract_request_source(http_request, default_host=request.host)
 
+    # 全局熔断:跨 IP 的大规模枚举会先撞到这里
+    global_blocked, global_ttl = await _check_install_key_global_block()
+    if global_blocked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"系统检测到异常注册流量，请 {global_ttl} 秒后重试",
+        )
+
     is_blocked, block_ttl = await _check_install_key_blocked(request.key, request_source)
     if is_blocked:
         raise HTTPException(
@@ -1039,15 +1117,26 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
         )
 
     # 查找并验证 Key
+    # 注:Tortoise ORM 的 filter 是 SQL 等值匹配,索引层面已经常量时,但应用层
+    # 命中后仍补一次 hmac.compare_digest,防止 ORM 索引匹配本身的边界时序差异
+    # (例如不同长度的 key 触发不同的字符串比较路径)被用作 oracle。
     install_key = await WorkerInstallKey.get_or_none(key=request.key)
+    if install_key and not hmac.compare_digest(
+        (install_key.key or "").encode("utf-8"),
+        (request.key or "").encode("utf-8"),
+    ):
+        # 极端情况下:ORM 命中但常量时间比对不一致(理论上不会发生),按未命中处理。
+        install_key = None
     if not install_key:
         await _record_install_key_failed_attempt(request.key, request_source)
+        await _record_install_key_global_failure()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="安装 Key 不存在"
         )
 
     if not install_key.is_valid():
         await _record_install_key_failed_attempt(request.key, request_source)
+        await _record_install_key_global_failure()
         if install_key.status == "used":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1061,6 +1150,7 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
     allowed_source = await _get_install_key_allowed_source(request.key)
     if allowed_source and not _is_source_match(request_source, allowed_source):
         await _record_install_key_failed_attempt(request.key, request_source)
+        await _record_install_key_global_failure()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="来源不在安装 Key 允许范围内",
@@ -1074,6 +1164,7 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
     )
     if not claim_ok:
         await _record_install_key_failed_attempt(request.key, request_source)
+        await _record_install_key_global_failure()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=claim_message)
 
     await _set_install_key_allowed_source_once(request.key, request_source)
@@ -1120,15 +1211,52 @@ async def worker_heartbeat(
     request: WorkerHeartbeatRequest,
     auth_info: dict = Depends(verify_worker_request_with_signature),
 ):
-    """Worker 心跳上报（HMAC签名验证）"""
+    """Worker 心跳上报（HMAC签名验证）
+
+    认证以 HMAC 签名头(``X-AntCode-Signature`` + ``X-AntCode-Timestamp``)为唯一
+    依据,worker_id 从签名校验结果中取出。``WorkerHeartbeatRequest.api_key``
+    字段保留为向后兼容,但**不再用于身份校验**——任何凭此字段做认证的逻辑
+    都会让明文 API Key 出现在 body / 访问日志里,被视为已弃用。
+    """
     # 处理能力上报
     capabilities_dict = None
     if request.capabilities:
         capabilities_dict = request.capabilities.model_dump()
 
+    # 以 HMAC 验签后的 worker_id 为准,忽略 body 里的 worker_id/api_key
+    # 防止攻击者用窃取的明文 api_key 伪造心跳,以及防止 body 字段被签名头绕过
+    signed_worker_id = (auth_info.get("worker_id") or "").strip()
+    if not signed_worker_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名认证身份"
+        )
+
+    if request.worker_id and request.worker_id != signed_worker_id:
+        logger.warning(
+            "心跳 body worker_id 与 HMAC 签名身份不一致, "
+            f"signed={signed_worker_id}, body={request.worker_id}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="worker_id 与签名身份不一致"
+        )
+
+    # 旁路:如果客户端仍把 api_key 放进 body,记一次弃用告警,但不让它进入日志
+    if request.api_key:
+        logger.warning(
+            "心跳 body 中携带了弃用的 api_key 字段,worker_id="
+            f"{signed_worker_id};请升级 Worker 端只使用 HMAC 签名头"
+        )
+
+    worker = await worker_service.get_worker_by_id(signed_worker_id)
+    if not worker or not worker.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败"
+        )
+
     heartbeat_success = await worker_service.heartbeat(
-        worker_id=request.worker_id,
-        api_key=request.api_key,
+        worker_id=signed_worker_id,
+        # 用服务端持有的 api_key 调下游服务,避免 body 字段成为信任来源
+        api_key=worker.api_key,
         status_value=request.status,
         metrics=request.metrics,
         version=request.version,
@@ -1197,8 +1325,8 @@ async def dispatch_task_to_worker(
     import uuid
     from datetime import datetime
 
-    from antcode_core.domain.models import Project, TaskRun
     from antcode_core.application.services.workers import worker_task_dispatcher
+    from antcode_core.domain.models import Project, TaskRun
 
     project_id = request.get("project_id")
     if not project_id:
