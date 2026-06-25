@@ -1,10 +1,4 @@
-"""
-爬虫任务插件
-
-生成爬虫任务的 ExecPlan。
-
-Requirements: 8.4
-"""
+"""爬虫任务插件。"""
 
 import os
 from typing import Any
@@ -58,13 +52,9 @@ class SpiderPlugin(PluginBase):
 
         # 判断执行模式
         if spider_config.get("framework") == "scrapy":
-            return self._build_scrapy_plan(
-                python_exe, context, payload, spider_config
-            )
+            return self._build_scrapy_plan(python_exe, context, payload, spider_config)
         else:
-            return self._build_script_plan(
-                python_exe, context, payload, spider_config
-            )
+            return self._build_script_plan(python_exe, context, payload, spider_config)
 
     def _extract_spider_config(self, payload: TaskPayload) -> dict[str, Any]:
         """从 payload 提取爬虫配置"""
@@ -102,9 +92,7 @@ class SpiderPlugin(PluginBase):
         # Scrapy 设置
         settings = config.get("settings", {})
         settings.setdefault("LOG_LEVEL", config.get("log_level", "INFO"))
-        settings.setdefault(
-            "CONCURRENT_REQUESTS", config.get("concurrent_requests", 16)
-        )
+        settings.setdefault("CONCURRENT_REQUESTS", config.get("concurrent_requests", 16))
         if config.get("download_delay"):
             settings["DOWNLOAD_DELAY"] = config["download_delay"]
 
@@ -116,15 +104,14 @@ class SpiderPlugin(PluginBase):
 
         # 环境变量
         env = dict(payload.env_vars)
-        if payload.project_path:
+        if payload.workspace_path:
             pythonpath = env.get("PYTHONPATH", "")
             if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.project_path, pythonpath])
+                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
             else:
-                env["PYTHONPATH"] = payload.project_path
+                env["PYTHONPATH"] = payload.workspace_path
 
-        # 工作目录
-        cwd = payload.project_path or os.getcwd()
+        cwd = self._get_project_cwd(payload)
 
         # 产物模式
         artifact_patterns = list(payload.artifact_patterns)
@@ -155,12 +142,12 @@ class SpiderPlugin(PluginBase):
 
         # 环境变量
         env = dict(payload.env_vars)
-        if payload.project_path:
+        if payload.workspace_path:
             pythonpath = env.get("PYTHONPATH", "")
             if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.project_path, pythonpath])
+                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
             else:
-                env["PYTHONPATH"] = payload.project_path
+                env["PYTHONPATH"] = payload.workspace_path
 
         # 爬虫特定环境变量
         env["SPIDER_LOG_LEVEL"] = config.get("log_level", "INFO")
@@ -169,8 +156,7 @@ class SpiderPlugin(PluginBase):
         if config.get("output_format"):
             env["SPIDER_OUTPUT_FORMAT"] = config["output_format"]
 
-        # 工作目录
-        cwd = payload.project_path or os.getcwd()
+        cwd = self._get_project_cwd(payload)
 
         # 产物模式
         artifact_patterns = list(payload.artifact_patterns)
@@ -192,5 +178,10 @@ class SpiderPlugin(PluginBase):
         """获取 Python 可执行文件路径"""
         if context.runtime_spec and context.runtime_spec.python_path:
             return context.runtime_spec.python_path
-        import sys
-        return sys.executable
+        raise RuntimeError("runtime_spec.python_path 不能为空")
+
+    def _get_project_cwd(self, payload: TaskPayload) -> str:
+        cwd = payload.project_cwd or payload.workspace_path
+        if not cwd:
+            raise RuntimeError("project_cwd 不能为空")
+        return cwd

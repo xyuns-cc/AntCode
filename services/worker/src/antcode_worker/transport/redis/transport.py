@@ -3,6 +3,16 @@ Redis 传输层实现（Direct 模式）
 
 内网 Worker 直连 Redis Streams，低延迟。
 
+P1b 改造：
+- ``report_result`` 写入 ``task:result`` Stream 时使用 Proto bytes
+  （``data_pb2.TaskStatus`` 序列化到 ``PROTO_FIELD``），
+  与 Master ``result_loop`` 的 ``ProtoCodec`` 对齐。
+- ``send_log`` / ``send_log_batch`` 写入 log Stream 时使用 Proto bytes
+  （``data_pb2.LogBatch``），与 Master ``log_ingest_loop`` 对齐。
+- ``send_log_chunk`` / ``send_heartbeat`` / ``poll_control`` /
+  ``send_control_result`` 暂时保留原有 dict/JSON wire format
+  （契约测试 + Gateway/Master 配合到位前的过渡），P3 收尾。
+
 Requirements: 5.3, 7.2, 11.3
 """
 
@@ -14,6 +24,8 @@ import time
 from datetime import datetime
 from typing import Any
 
+from antcode_contracts import data_pb2
+from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 from loguru import logger
 from redis.exceptions import ConnectionError, TimeoutError
 
@@ -30,6 +42,60 @@ from antcode_worker.transport.base import (
 )
 from antcode_worker.transport.redis.keys import RedisKeys
 from antcode_worker.transport.redis.reclaim import PendingTaskReclaimer, ensure_consumer_group
+
+# ---------------------------------------------------------------------------
+# 字符串状态 → Proto Status enum 映射
+#
+# Worker 内部仍然按 ``TaskResult.status`` 字符串语义传递；写 Stream 时把
+# 字符串映射到 ``data_pb2.Status``，与 Master ``result_loop`` 的反向映射对齐
+# （``STATUS_COMPLETED`` → ``completed``，详见 result_loop._proto_status_to_str）。
+# ``success`` / ``completed`` / ``done`` 全部归并到 ``STATUS_COMPLETED``，
+# 这样上游下游用任一别名都能在 Proto 上对齐。
+# ---------------------------------------------------------------------------
+_STATUS_STR_TO_PROTO: dict[str, int] = {
+    "": data_pb2.Status.STATUS_UNSPECIFIED,
+    "pending": data_pb2.Status.STATUS_PENDING,
+    "running": data_pb2.Status.STATUS_RUNNING,
+    "success": data_pb2.Status.STATUS_COMPLETED,
+    "completed": data_pb2.Status.STATUS_COMPLETED,
+    "done": data_pb2.Status.STATUS_COMPLETED,
+    "failed": data_pb2.Status.STATUS_FAILED,
+    "failure": data_pb2.Status.STATUS_FAILED,
+    "error": data_pb2.Status.STATUS_FAILED,
+    "cancelled": data_pb2.Status.STATUS_CANCELLED,
+    "canceled": data_pb2.Status.STATUS_CANCELLED,
+    "timeout": data_pb2.Status.STATUS_TIMEOUT,
+    "timed_out": data_pb2.Status.STATUS_TIMEOUT,
+}
+
+
+_LOG_TYPE_STR_TO_PROTO: dict[str, int] = {
+    "": data_pb2.LogType.LOG_TYPE_UNSPECIFIED,
+    "stdout": data_pb2.LogType.LOG_TYPE_STDOUT,
+    "stderr": data_pb2.LogType.LOG_TYPE_STDERR,
+    "system": data_pb2.LogType.LOG_TYPE_SYSTEM,
+}
+
+
+def _status_str_to_proto(status: str) -> int:
+    return _STATUS_STR_TO_PROTO.get((status or "").lower(), data_pb2.Status.STATUS_UNSPECIFIED)
+
+
+def _log_type_str_to_proto(log_type: str) -> int:
+    return _LOG_TYPE_STR_TO_PROTO.get((log_type or "").lower(), data_pb2.LogType.LOG_TYPE_UNSPECIFIED)
+
+
+def _datetime_to_proto_timestamp(dt: datetime | None):
+    """``datetime`` → ``common_pb2.Timestamp``。``None`` 时返回 ``None``。"""
+    if dt is None:
+        return None
+    from antcode_contracts import common_pb2
+
+    ts = common_pb2.Timestamp()
+    epoch = dt.timestamp()
+    ts.seconds = int(epoch)
+    ts.nanos = int((epoch - int(epoch)) * 1e9)
+    return ts
 
 
 class RedisTransport(TransportBase):
@@ -280,27 +346,50 @@ class RedisTransport(TransportBase):
             return False
 
     async def report_result(self, result: TaskResult) -> bool:
-        """上报任务结果"""
+        """上报任务结果
+
+        P1b：从 dict 切换到 Proto bytes（``data_pb2.TaskStatus``），写到
+        ``task:result`` Stream 的单字段 ``PROTO_FIELD``。Master ``result_loop``
+        通过 ``ProtoCodec(TaskStatus)`` 解码。
+        """
         if not self._redis or not self._running:
             return False
 
         try:
             result_key = self._keys.task_result_stream()
-            payload = {
-                "run_id": result.run_id,
-                "task_id": result.task_id,
-                "status": result.status,
-                "exit_code": str(result.exit_code),
-                "error_message": result.error_message,
-                "started_at": result.started_at.isoformat() if result.started_at else "",
-                "finished_at": result.finished_at.isoformat() if result.finished_at else "",
-                "duration_ms": str(result.duration_ms),
-            }
+            ts_msg = data_pb2.TaskStatus(
+                run_id=result.run_id or "",
+                task_id=result.task_id or "",
+                worker_id=self._worker_id or "",
+                status=_status_str_to_proto(result.status),
+                exit_code=int(result.exit_code or 0),
+                error_message=result.error_message or "",
+                duration_ms=int(result.duration_ms or 0),
+            )
+            started_ts = _datetime_to_proto_timestamp(result.started_at)
+            if started_ts is not None:
+                ts_msg.started_at.CopyFrom(started_ts)
+            finished_ts = _datetime_to_proto_timestamp(result.finished_at)
+            if finished_ts is not None:
+                ts_msg.finished_at.CopyFrom(finished_ts)
+            # data: dict → map<string,string>。强制 str 化（Proto map<string,string>
+            # 要求 str；非 str 用 to_json/repr fallback）。
             if result.data:
-                payload["data"] = json.dumps(result.data, ensure_ascii=False)
+                for k, v in result.data.items():
+                    key = str(k)
+                    if isinstance(v, (str, int, float, bool)):
+                        ts_msg.data[key] = str(v)
+                    else:
+                        try:
+                            ts_msg.data[key] = json.dumps(v, ensure_ascii=False)
+                        except Exception:
+                            ts_msg.data[key] = repr(v)
+
+            payload_bytes = ts_msg.SerializeToString()
+
             await self._run_with_reconnect(
                 "上报结果",
-                lambda: self._redis.xadd(result_key, payload),
+                lambda: self._redis.xadd(result_key, {PROTO_FIELD: payload_bytes}),
             )
             return True
 
@@ -338,50 +427,37 @@ class RedisTransport(TransportBase):
             return False
 
     async def send_log(self, log: LogMessage) -> bool:
-        """发送实时日志"""
-        if not self._redis or not self._running:
-            return False
+        """发送实时日志
 
-        try:
-            log_key = self._keys.log_stream(log.run_id)
-            timestamp = log.timestamp or datetime.now()
-            fields = {
-                "log_type": log.log_type,
-                "content": log.content,
-                "timestamp": timestamp.isoformat(),
-                "sequence": str(log.sequence),
-            }
-            entry_id = self._build_log_entry_id(log, timestamp) or "*"
-            maxlen = self._keys.config.stream_max_len
+        接口语义保留：单条 log → 1-entry ``LogBatch``，落到日志 Stream。
+        """
+        # 内部转批，避免两条编码路径走样
+        return await self.send_log_batch([log])
 
-            async def _write_log():
-                pipe = self._redis.pipeline(transaction=False)
-                if maxlen > 0:
-                    pipe.xadd(
-                        log_key,
-                        fields,
-                        id=entry_id,
-                        maxlen=maxlen,
-                        approximate=self._keys.config.stream_approx_max_len,
-                    )
-                else:
-                    pipe.xadd(log_key, fields, id=entry_id)
-                if self._keys.config.log_ttl > 0:
-                    pipe.expire(log_key, self._keys.config.log_ttl)
-                await pipe.execute()
-
-            await self._run_with_reconnect("发送日志", _write_log)
-            return True
-
-        except Exception as e:
-            if self._is_duplicate_log_error(e):
-                logger.debug(f"日志已存在，忽略重复写入: {log.run_id} seq={log.sequence}")
-                return True
-            logger.error(f"发送日志失败: {e}")
-            return False
+    def _build_log_entry_proto(self, log: LogMessage):
+        """``LogMessage`` → ``data_pb2.LogEntry``"""
+        entry = data_pb2.LogEntry(
+            run_id=log.run_id or "",
+            log_type=_log_type_str_to_proto(log.log_type),
+            content=log.content or "",
+            sequence=int(log.sequence or 0),
+        )
+        ts = _datetime_to_proto_timestamp(log.timestamp or datetime.now())
+        if ts is not None:
+            entry.timestamp.CopyFrom(ts)
+        return entry
 
     async def send_log_batch(self, logs: list[LogMessage]) -> bool:
-        """发送批量日志"""
+        """发送批量日志
+
+        P1b：每个 ``run_id`` 对应一个 ``LogBatch`` Proto 消息，写到该 run_id 的
+        log Stream 的单字段 ``PROTO_FIELD``。Master ``log_ingest_loop`` 通过
+        ``ProtoCodec(LogBatch)`` 解码。
+
+        注：原实现按 ``ms-sequence`` 构造 Stream entry id 做幂等去重；切换到
+        Proto bytes 单字段后 entry id 改回 ``*``（Master 端通过 ``run_id`` /
+        ``sequence`` 字段判重）。这是 P1b 已知的取舍，详见 task 描述。
+        """
         if not self._redis or not self._running:
             return False
 
@@ -392,62 +468,46 @@ class RedisTransport(TransportBase):
             maxlen = self._keys.config.stream_max_len
             ttl_seconds = self._keys.config.log_ttl
 
-            async def _write_batch_logs():
-                pipe = self._redis.pipeline()
+            # 按 run_id 分组打包，每个 run_id 一条 Proto LogBatch
+            batches: dict[str, list[LogMessage]] = {}
+            for log in logs:
+                batches.setdefault(log.run_id or "", []).append(log)
+
+            async def _write_batches():
+                pipe = self._redis.pipeline(transaction=False)
                 seen = set()
-                for log in logs:
-                    log_key = self._keys.log_stream(log.run_id)
-                    timestamp = log.timestamp or datetime.now()
-                    fields = {
-                        "log_type": log.log_type,
-                        "content": log.content,
-                        "timestamp": timestamp.isoformat(),
-                        "sequence": str(log.sequence),
-                    }
-                    entry_id = self._build_log_entry_id(log, timestamp) or "*"
+                for run_id, run_logs in batches.items():
+                    log_key = self._keys.log_stream(run_id)
+                    batch_msg = data_pb2.LogBatch(
+                        worker_id=self._worker_id or "",
+                    )
+                    for log in run_logs:
+                        batch_msg.entries.append(self._build_log_entry_proto(log))
+                    payload_bytes = batch_msg.SerializeToString()
                     if maxlen > 0:
                         pipe.xadd(
                             log_key,
-                            fields,
-                            id=entry_id,
+                            {PROTO_FIELD: payload_bytes},
                             maxlen=maxlen,
                             approximate=self._keys.config.stream_approx_max_len,
                         )
                     else:
-                        pipe.xadd(log_key, fields, id=entry_id)
+                        pipe.xadd(log_key, {PROTO_FIELD: payload_bytes})
                     if ttl_seconds > 0 and log_key not in seen:
                         pipe.expire(log_key, ttl_seconds)
                         seen.add(log_key)
 
                 return await pipe.execute(raise_on_error=False)
 
-            results = await self._run_with_reconnect("发送批量日志", _write_batch_logs)
+            results = await self._run_with_reconnect("发送批量日志", _write_batches)
             for result in results:
                 if isinstance(result, Exception):
-                    if self._is_duplicate_log_error(result):
-                        continue
                     logger.error(f"发送批量日志失败: {result}")
                     return False
             return True
         except Exception as e:
             logger.error(f"发送批量日志失败: {e}")
             return False
-
-    @staticmethod
-    def _build_log_entry_id(log: LogMessage, timestamp: datetime) -> str | None:
-        if log.sequence is None:
-            return None
-        try:
-            seq = int(log.sequence)
-        except (TypeError, ValueError):
-            return None
-        ts_ms = int(timestamp.timestamp() * 1000)
-        return f"{ts_ms}-{seq}"
-
-    @staticmethod
-    def _is_duplicate_log_error(error: Exception) -> bool:
-        message = str(error)
-        return "ID specified in XADD" in message or "equal or smaller" in message
 
     async def send_log_chunk(
         self,
@@ -457,7 +517,13 @@ class RedisTransport(TransportBase):
         offset: int,
         is_final: bool = False,
     ) -> bool:
-        """发送日志分片"""
+        """发送日志分片
+
+        TODO(P3): chunk Stream 暂时保留 dict + base64 wire format（契约测试
+        ``test_send_log_chunk_concat_round_trips`` 按字段读 ``data`` /
+        ``offset`` / ``is_final``）。P3 会把 chunk 归并入 ``LogBatch``
+        并由 source_bundle/pgartifact 承载大块。
+        """
         if not self._redis or not self._running:
             return False
 
@@ -495,7 +561,13 @@ class RedisTransport(TransportBase):
             return False
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
-        """发送心跳"""
+        """发送心跳
+
+        TODO(P3): 新 control.proto 用 ``ControlService.Lease`` 取代心跳，
+        Direct 模式没有 gRPC 通道，因此这里继续写 ``heartbeat:{worker_id}``
+        Hash（契约测试 ``test_send_heartbeat_*`` 仍按 hash 字段断言）。
+        P3 替换为 ``lease_renew``（带 Metrics）后再去掉本方法。
+        """
         if not self._redis or not self._running:
             return False
 
@@ -587,7 +659,14 @@ class RedisTransport(TransportBase):
             return False
 
     async def poll_control(self, timeout: float = 5.0) -> ControlMessage | None:
-        """拉取控制消息"""
+        """拉取控制消息
+
+        TODO(P3): Direct 模式的 control Stream 暂时保留 dict wire format。
+        Gateway 模式已切到 ``ControlService.WatchControl`` server-stream + 类型化
+        ``ControlEvent``（见 gateway/transport.py）。Direct 没有 gRPC，
+        我们在 P3 让 Master 直接写 typed dict（``ControlEvent`` payload 的扁平
+        投影）到这里。当前契约测试 ``test_poll_control_*`` 按 dict 字段断言。
+        """
         if not self._redis or not self._running or not self._worker_id:
             return None
 
@@ -649,7 +728,13 @@ class RedisTransport(TransportBase):
         data: dict | None = None,
         error: str = "",
     ) -> bool:
-        """回传控制结果"""
+        """回传控制结果
+
+        TODO(P3): 新 ``ControlService.AckControl`` 已经携带 ``success`` /
+        ``error`` 字段。Direct 模式没有 gRPC 通道，这里继续走 reply Stream
+        （JSON dict）。Gateway 模式见 gateway/transport.py 的等价实现。
+        契约测试 ``test_send_control_result_*`` 按 dict 字段断言。
+        """
         if not self._redis or not self._running:
             return False
 

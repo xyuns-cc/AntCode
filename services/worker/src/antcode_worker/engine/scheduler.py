@@ -19,8 +19,9 @@ from loguru import logger
 @dataclass(order=True)
 class QueueItem:
     """队列项（支持优先级排序）"""
-    priority: int                          # 负数，越小优先级越高
-    enqueue_time: float                    # 入队时间（用于 aging）
+
+    priority: int  # 负数，越小优先级越高
+    enqueue_time: float  # 入队时间（用于 aging）
     run_id: str = field(compare=False)
     data: Any = field(compare=False)
     cancelled: bool = field(default=False, compare=False)
@@ -41,8 +42,8 @@ class Scheduler:
     def __init__(
         self,
         max_queue_size: int = 100,
-        aging_interval: float = 60.0,      # 每 60 秒提升一次优先级
-        aging_boost: int = 1,              # 每次提升的优先级
+        aging_interval: float = 60.0,  # 每 60 秒提升一次优先级
+        aging_boost: int = 1,  # 每次提升的优先级
     ):
         self._max_size = max_queue_size
         self._aging_interval = aging_interval

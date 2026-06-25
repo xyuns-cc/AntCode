@@ -39,9 +39,7 @@ class SpiderMiddleware(ABC):
         return request
 
     @abstractmethod
-    async def process_response(
-        self, request: Request, response: Response
-    ) -> Response | None:
+    async def process_response(self, request: Request, response: Response) -> Response | None:
         """
         处理响应
 
@@ -52,9 +50,7 @@ class SpiderMiddleware(ABC):
         return response
 
     @abstractmethod
-    async def process_exception(
-        self, request: Request, exception: Exception
-    ) -> Request | None:
+    async def process_exception(self, request: Request, exception: Exception) -> Request | None:
         """
         处理异常
 
@@ -149,9 +145,7 @@ class ProxyMiddleware(SpiderMiddleware):
 
         return request
 
-    async def process_exception(
-        self, request: Request, exception: Exception
-    ) -> Request | None:
+    async def process_exception(self, request: Request, exception: Exception) -> Request | None:
         # 标记失败代理
         if request.proxy:
             self._failed_proxies.add(request.proxy)
@@ -178,21 +172,15 @@ class RetryMiddleware(SpiderMiddleware):
         self.retry_codes = retry_codes or [500, 502, 503, 504, 408, 429]
         self.retry_delay = retry_delay
 
-    async def process_response(
-        self, request: Request, response: Response
-    ) -> Response | None:
+    async def process_response(self, request: Request, response: Response) -> Response | None:
         if response.status in self.retry_codes and request.retry_count < self.max_retries:
             request.retry_count += 1
             await asyncio.sleep(self.retry_delay * request.retry_count)
-            logger.debug(
-                f"重试 {request.retry_count}/{self.max_retries}: {request.url}"
-            )
+            logger.debug(f"重试 {request.retry_count}/{self.max_retries}: {request.url}")
             return None  # 触发重试
         return response
 
-    async def process_exception(
-        self, request: Request, exception: Exception
-    ) -> Request | None:
+    async def process_exception(self, request: Request, exception: Exception) -> Request | None:
         if request.retry_count < self.max_retries:
             request.retry_count += 1
             await asyncio.sleep(self.retry_delay * request.retry_count)
@@ -242,9 +230,7 @@ class RateLimitMiddleware(SpiderMiddleware):
 
             # 补充令牌
             elapsed = now - self._last_update[domain]
-            self._tokens[domain] = min(
-                self.burst, self._tokens[domain] + elapsed * self.rate
-            )
+            self._tokens[domain] = min(self.burst, self._tokens[domain] + elapsed * self.rate)
             self._last_update[domain] = now
 
             # 等待令牌
@@ -281,9 +267,7 @@ class CookieMiddleware(SpiderMiddleware):
             request.cookies = {**self._cookies[domain], **request.cookies}
         return request
 
-    async def process_response(
-        self, request: Request, response: Response
-    ) -> Response:
+    async def process_response(self, request: Request, response: Response) -> Response:
         if response.cookies:
             domain = self._get_domain(request.url)
             if domain not in self._cookies:
@@ -330,9 +314,7 @@ class ImpersonateMiddleware(SpiderMiddleware):
             if self.rotate:
                 request.impersonate = random.choice(self.impersonates)
             else:
-                request.impersonate = self.impersonates[
-                    self._index % len(self.impersonates)
-                ]
+                request.impersonate = self.impersonates[self._index % len(self.impersonates)]
                 self._index += 1
         return request
 
@@ -372,9 +354,7 @@ class SpiderMiddlewareManager:
                 logger.error(f"中间件 {middleware.name} 请求处理异常: {e}")
         return request
 
-    async def process_response(
-        self, request: Request, response: Response
-    ) -> Response | None:
+    async def process_response(self, request: Request, response: Response) -> Response | None:
         """处理响应"""
         for middleware in reversed(self._middlewares):
             if not middleware.enabled:
@@ -387,9 +367,7 @@ class SpiderMiddlewareManager:
                 logger.error(f"中间件 {middleware.name} 响应处理异常: {e}")
         return response
 
-    async def process_exception(
-        self, request: Request, exception: Exception
-    ) -> Request | None:
+    async def process_exception(self, request: Request, exception: Exception) -> Request | None:
         """处理异常"""
         for middleware in self._middlewares:
             if not middleware.enabled:

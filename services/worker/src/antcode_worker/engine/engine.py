@@ -8,6 +8,7 @@ Requirements: 4.1, 4.5, 4.6, 4.7, 4.8
 
 import asyncio
 import contextlib
+import json
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,60 @@ from antcode_worker.domain.models import ExecResult, RunContext
 from antcode_worker.engine.policies import Policies, default_policies
 from antcode_worker.engine.scheduler import Scheduler
 from antcode_worker.engine.state import RunState, StateManager
+
+
+# ---------------------------------------------------------------------------
+# RuntimeControl 参数读取辅助
+#
+# 新协议 (control_pb2.RuntimeControl.action_typed.generic.args) 是
+# ``map<string, string>``：所有值都是字符串。Direct 模式旧路径仍可能传
+# typed dict（list / int / bool 已经是原生 Python 类型）。下面这组帮助
+# 函数同时支持两种 shape，保留 engine 现有 action handler 的语义。
+# ---------------------------------------------------------------------------
+def _arg_str(args: dict, key: str, default: str | None = None) -> str | None:
+    value = args.get(key, default)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _arg_bool(args: dict, key: str, default: bool = False) -> bool:
+    value = args.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+def _arg_list(args: dict, key: str, default: list | None = None) -> list:
+    """``packages`` / 类似列表参数。
+
+    新协议 map<string,string>：值是 JSON 数组字符串（如 ``'["a","b"]'``）
+    或逗号分隔字符串。旧 dict 直接是 ``list``。
+    """
+    value = args.get(key, default)
+    if value is None:
+        return list(default) if default else []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        # JSON 数组优先
+        if text.startswith("[") and text.endswith("]"):
+            with contextlib.suppress(Exception):
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return parsed
+        # 退化：逗号分隔
+        return [item.strip() for item in text.split(",") if item.strip()]
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
 
 class Engine:
@@ -256,12 +311,22 @@ class Engine:
                 await asyncio.sleep(1)
 
     async def _handle_runtime_control(self, control: Any) -> None:
-        """处理运行时管理控制消息"""
+        """处理运行时管理控制消息
+
+        新协议 (control_pb2.RuntimeControl) 字段抽取规则：
+        - ``request_id`` / ``action`` 从 ControlMessage.payload 顶层读
+        - ``args`` 是 typed map<string,string>（GenericAction.args），
+          通过 ``_runtime_arg_*`` 帮助函数解码为原 dict 行为兼容的类型
+        - 旧路径还有 ``payload`` / ``reply_stream`` 字段，这里 fallback 读
+          ``payload`` 保持兼容（Direct 模式 P3 收尾前仍按 dict 走）
+        - ``reply_stream`` 在新协议下已废弃 — 结果通过 ``ack_control``
+          （携带 success/error）回报
+        """
         payload = control.payload or {}
         action = payload.get("action", "")
         request_id = payload.get("request_id", "")
-        reply_stream = payload.get("reply_stream", "")
-        data = payload.get("payload") or {}
+        # 新协议优先用 typed args；旧路径 fallback 到 payload 嵌套 dict
+        data = payload.get("args") or payload.get("payload") or {}
 
         from antcode_worker.runtime.uv_manager import uv_manager
 
@@ -272,29 +337,29 @@ class Engine:
         try:
             async with self._runtime_control_semaphore:
                 if action == "list_envs":
-                    scope = data.get("scope") or None
+                    scope = _arg_str(data, "scope") or None
                     result_data = await uv_manager.list_envs(scope=scope)
                 elif action == "get_env":
-                    env_name = data.get("env_name")
+                    env_name = _arg_str(data, "env_name")
                     if not env_name:
                         raise RuntimeError("env_name 不能为空")
                     result_data = await uv_manager.get_env(env_name)
                     if result_data is None:
                         raise RuntimeError("环境不存在")
                 elif action == "update_env":
-                    env_name = data.get("env_name")
+                    env_name = _arg_str(data, "env_name")
                     if not env_name:
                         raise RuntimeError("env_name 不能为空")
                     result_data = await uv_manager.update_env(
                         env_name=env_name,
-                        key=data.get("key"),
-                        description=data.get("description"),
+                        key=_arg_str(data, "key"),
+                        description=_arg_str(data, "description"),
                     )
                 elif action == "create_env":
-                    env_name = data.get("env_name")
-                    python_version = data.get("python_version")
-                    packages = data.get("packages") or []
-                    created_by = data.get("created_by") or None
+                    env_name = _arg_str(data, "env_name")
+                    python_version = _arg_str(data, "python_version")
+                    packages = _arg_list(data, "packages")
+                    created_by = _arg_str(data, "created_by") or None
                     if not env_name:
                         raise RuntimeError("env_name 不能为空")
                     result_data = await uv_manager.create_env(
@@ -304,20 +369,20 @@ class Engine:
                         created_by=created_by,
                     )
                 elif action == "delete_env":
-                    env_name = data.get("env_name")
+                    env_name = _arg_str(data, "env_name")
                     if not env_name:
                         raise RuntimeError("env_name 不能为空")
                     deleted = await uv_manager.delete_env(env_name)
                     result_data = {"deleted": bool(deleted)}
                 elif action == "list_packages":
-                    env_name = data.get("env_name")
+                    env_name = _arg_str(data, "env_name")
                     if not env_name:
                         raise RuntimeError("env_name 不能为空")
                     result_data = await uv_manager.list_packages(env_name)
                 elif action == "install_packages":
-                    env_name = data.get("env_name")
-                    packages = data.get("packages") or []
-                    upgrade = bool(data.get("upgrade", False))
+                    env_name = _arg_str(data, "env_name")
+                    packages = _arg_list(data, "packages")
+                    upgrade = _arg_bool(data, "upgrade", False)
                     if not env_name or not packages:
                         raise RuntimeError("env_name 和 packages 不能为空")
                     result_data = await uv_manager.install_packages(
@@ -326,8 +391,8 @@ class Engine:
                         upgrade=upgrade,
                     )
                 elif action == "uninstall_packages":
-                    env_name = data.get("env_name")
-                    packages = data.get("packages") or []
+                    env_name = _arg_str(data, "env_name")
+                    packages = _arg_list(data, "packages")
                     if not env_name or not packages:
                         raise RuntimeError("env_name 和 packages 不能为空")
                     result_data = await uv_manager.uninstall_packages(
@@ -337,18 +402,18 @@ class Engine:
                 elif action == "list_interpreters":
                     result_data = await uv_manager.list_all_interpreters()
                 elif action == "install_interpreter":
-                    version = data.get("version")
+                    version = _arg_str(data, "version")
                     if not version:
                         raise RuntimeError("version 不能为空")
                     result_data = await uv_manager.install_interpreter(version)
                 elif action == "uninstall_interpreter":
-                    version = data.get("version")
+                    version = _arg_str(data, "version")
                     if not version:
                         raise RuntimeError("version 不能为空")
                     result_data = await uv_manager.uninstall_interpreter(version)
                 elif action == "register_interpreter":
-                    python_bin = data.get("python_bin")
-                    version = data.get("version") or None
+                    python_bin = _arg_str(data, "python_bin")
+                    version = _arg_str(data, "version") or None
                     if not python_bin:
                         raise RuntimeError("python_bin 不能为空")
                     result_data = await uv_manager.register_interpreter(
@@ -356,8 +421,8 @@ class Engine:
                         version=version,
                     )
                 elif action == "unregister_interpreter":
-                    python_bin = data.get("python_bin") or None
-                    version = data.get("version") or None
+                    python_bin = _arg_str(data, "python_bin") or None
+                    version = _arg_str(data, "version") or None
                     result_data = await uv_manager.unregister_interpreter(
                         python_bin=python_bin,
                         version=version,
@@ -387,7 +452,12 @@ class Engine:
             success = False
             error_message = str(e)
         finally:
-            if request_id and reply_stream:
+            # 新协议：结果通过 ``send_control_result`` 回报。
+            # Gateway 模式下它实际走 ``ControlService.AckControl(success, error)``，
+            # 不再需要 reply_stream 字段。Direct 模式下仍写 reply Stream（P3 收尾）。
+            # 兼容旧 Direct 路径：如果 payload 里还带 ``reply_stream``，透传过去。
+            if request_id:
+                reply_stream = payload.get("reply_stream", "") or payload.get("params", {}).get("reply_stream", "")
                 await self._transport.send_control_result(
                     request_id=request_id,
                     reply_stream=reply_stream,

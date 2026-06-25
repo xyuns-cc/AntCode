@@ -24,12 +24,12 @@ from loguru import logger
 class ReconnectState(str, Enum):
     """重连状态"""
 
-    IDLE = "idle"                    # 空闲（已连接）
-    DISCONNECTED = "disconnected"    # 已断开
-    RECONNECTING = "reconnecting"    # 重连中
-    BACKOFF = "backoff"              # 退避等待中
-    FAILED = "failed"                # 重连失败（达到最大次数）
-    STOPPED = "stopped"              # 已停止
+    IDLE = "idle"  # 空闲（已连接）
+    DISCONNECTED = "disconnected"  # 已断开
+    RECONNECTING = "reconnecting"  # 重连中
+    BACKOFF = "backoff"  # 退避等待中
+    FAILED = "failed"  # 重连失败（达到最大次数）
+    STOPPED = "stopped"  # 已停止
 
 
 @dataclass
@@ -37,23 +37,23 @@ class ReconnectConfig:
     """重连配置"""
 
     # 退避配置
-    initial_backoff: float = 1.0           # 初始退避时间（秒）
-    max_backoff: float = 60.0              # 最大退避时间（秒）
-    backoff_multiplier: float = 2.0        # 退避乘数
-    jitter_factor: float = 0.1             # 抖动因子（0-1）
+    initial_backoff: float = 1.0  # 初始退避时间（秒）
+    max_backoff: float = 60.0  # 最大退避时间（秒）
+    backoff_multiplier: float = 2.0  # 退避乘数
+    jitter_factor: float = 0.1  # 抖动因子（0-1）
 
     # 重试配置
-    max_attempts: int = 0                  # 最大重试次数（0 = 无限）
+    max_attempts: int = 0  # 最大重试次数（0 = 无限）
     reset_backoff_on_success: bool = True  # 成功后重置退避
 
     # 健康检查配置
-    health_check_interval: float = 30.0    # 健康检查间隔（秒）
-    health_check_timeout: float = 5.0      # 健康检查超时（秒）
+    health_check_interval: float = 30.0  # 健康检查间隔（秒）
+    health_check_timeout: float = 5.0  # 健康检查超时（秒）
 
     # 幂等性配置
-    enable_receipt_tracking: bool = True   # 启用 receipt 跟踪
-    receipt_cache_size: int = 10000        # receipt 缓存大小
-    receipt_ttl: float = 300.0             # receipt TTL（秒）
+    enable_receipt_tracking: bool = True  # 启用 receipt 跟踪
+    receipt_cache_size: int = 10000  # receipt 缓存大小
+    receipt_ttl: float = 300.0  # receipt TTL（秒）
 
 
 @dataclass
@@ -79,21 +79,9 @@ class ReconnectStats:
             "failed_reconnects": self.failed_reconnects,
             "current_attempt": self.current_attempt,
             "current_backoff": self.current_backoff,
-            "last_reconnect_time": (
-                self.last_reconnect_time.isoformat()
-                if self.last_reconnect_time
-                else None
-            ),
-            "last_success_time": (
-                self.last_success_time.isoformat()
-                if self.last_success_time
-                else None
-            ),
-            "last_failure_time": (
-                self.last_failure_time.isoformat()
-                if self.last_failure_time
-                else None
-            ),
+            "last_reconnect_time": (self.last_reconnect_time.isoformat() if self.last_reconnect_time else None),
+            "last_success_time": (self.last_success_time.isoformat() if self.last_success_time else None),
+            "last_failure_time": (self.last_failure_time.isoformat() if self.last_failure_time else None),
             "last_failure_reason": self.last_failure_reason,
             "total_downtime_seconds": self.total_downtime_seconds,
         }
@@ -160,15 +148,11 @@ class ReconnectManager:
         """获取统计信息"""
         return self._stats
 
-    def set_connect_func(
-        self, func: Callable[[], Coroutine[Any, Any, bool]]
-    ) -> None:
+    def set_connect_func(self, func: Callable[[], Coroutine[Any, Any, bool]]) -> None:
         """设置连接函数"""
         self._connect_func = func
 
-    def set_health_check_func(
-        self, func: Callable[[], Coroutine[Any, Any, bool]]
-    ) -> None:
+    def set_health_check_func(self, func: Callable[[], Coroutine[Any, Any, bool]]) -> None:
         """设置健康检查函数"""
         self._health_check_func = func
 
@@ -190,9 +174,7 @@ class ReconnectManager:
 
         # 启动健康检查任务
         if self._health_check_func:
-            self._health_check_task = asyncio.create_task(
-                self._health_check_loop()
-            )
+            self._health_check_task = asyncio.create_task(self._health_check_loop())
 
     async def stop(self) -> None:
         """停止重连管理器"""
@@ -406,16 +388,11 @@ class ReconnectManager:
 
         while not self._stop_event.is_set():
             # 检查最大重试次数
-            if (
-                self._config.max_attempts > 0
-                and self._stats.current_attempt >= self._config.max_attempts
-            ):
+            if self._config.max_attempts > 0 and self._stats.current_attempt >= self._config.max_attempts:
                 self._state = ReconnectState.FAILED
                 self._stats.total_downtime_seconds += time.time() - disconnect_time
 
-                logger.error(
-                    f"达到最大重试次数 ({self._config.max_attempts})，停止重连"
-                )
+                logger.error(f"达到最大重试次数 ({self._config.max_attempts})，停止重连")
                 return
 
             # 计算退避时间
@@ -423,10 +400,7 @@ class ReconnectManager:
             self._stats.current_backoff = backoff
             self._stats.current_attempt += 1
 
-            logger.info(
-                f"等待 {backoff:.2f} 秒后重连 "
-                f"(尝试 {self._stats.current_attempt})"
-            )
+            logger.info(f"等待 {backoff:.2f} 秒后重连 (尝试 {self._stats.current_attempt})")
 
             # 等待退避时间
             self._state = ReconnectState.BACKOFF
@@ -504,10 +478,7 @@ class ReconnectManager:
         ttl = self._config.receipt_ttl
 
         # 清理已完成的
-        expired = [
-            rid for rid, entry in self._completed_receipts.items()
-            if entry.is_expired(ttl)
-        ]
+        expired = [rid for rid, entry in self._completed_receipts.items() if entry.is_expired(ttl)]
         for rid in expired:
             del self._completed_receipts[rid]
 

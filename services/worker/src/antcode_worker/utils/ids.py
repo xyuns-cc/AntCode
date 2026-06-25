@@ -59,6 +59,7 @@ def generate_worker_id() -> str:
     基于主机名和进程 ID
     """
     import socket
+
     hostname = socket.gethostname()[:8]
     pid = os.getpid()
     rand = uuid.uuid4().hex[:4]

@@ -14,6 +14,7 @@ from loguru import logger
 
 from antcode_worker.transport.base import WorkerState
 
+
 class Lifecycle:
     """
     生命周期管理器
@@ -66,17 +67,12 @@ class Lifecycle:
                 if transport_started:
                     logger.info("传输层已启动")
                 else:
-                    logger.warning("传输层启动失败，进入降级模式，将自动重连")
+                    raise RuntimeError("传输层启动失败")
 
             # 启动运行时管理器
             if container.runtime_manager:
                 await container.runtime_manager.start()
                 logger.info("运行时管理器已启动")
-
-            # 启动日志清理
-            if container.log_cleanup:
-                await container.log_cleanup.start()
-                logger.info("日志清理服务已启动")
 
             # 启动执行器
             if container.executor:
@@ -133,7 +129,7 @@ class Lifecycle:
             if new_state == WorkerState.ONLINE:
                 logger.info("传输层已恢复在线")
             elif old_state == WorkerState.ONLINE and new_state != WorkerState.ONLINE:
-                logger.warning("传输层离线，进入降级模式")
+                logger.warning("传输层离线")
 
         container.transport.on_state_change(_on_state_change)
 
@@ -182,11 +178,6 @@ class Lifecycle:
             if container.executor:
                 await container.executor.stop()
                 logger.info("执行器已停止")
-
-            # 停止日志清理
-            if container.log_cleanup:
-                await container.log_cleanup.stop()
-                logger.info("日志清理服务已停止")
 
             # 停止运行时管理器
             if container.runtime_manager:

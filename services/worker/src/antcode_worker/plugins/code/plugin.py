@@ -1,8 +1,4 @@
-"""
-代码执行插件
-
-Requirements: 8.3
-"""
+"""代码执行插件"""
 
 import os
 
@@ -51,15 +47,14 @@ class CodePlugin(PluginBase):
 
         # 构建环境变量
         env = dict(payload.env_vars)
-        if payload.project_path:
+        if payload.workspace_path:
             pythonpath = env.get("PYTHONPATH", "")
             if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.project_path, pythonpath])
+                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
             else:
-                env["PYTHONPATH"] = payload.project_path
+                env["PYTHONPATH"] = payload.workspace_path
 
-        # 工作目录
-        cwd = payload.project_path or os.getcwd()
+        cwd = self._get_project_cwd(payload)
 
         return ExecPlan(
             command=python_exe,
@@ -74,10 +69,12 @@ class CodePlugin(PluginBase):
 
     def _get_python_executable(self, context: RunContext) -> str:
         """获取 Python 可执行文件路径"""
-        # 如果有运行时规格，使用指定的 Python
         if context.runtime_spec and context.runtime_spec.python_path:
             return context.runtime_spec.python_path
+        raise RuntimeError("runtime_spec.python_path 不能为空")
 
-        # 默认使用系统 Python
-        import sys
-        return sys.executable
+    def _get_project_cwd(self, payload: TaskPayload) -> str:
+        cwd = payload.project_cwd or payload.workspace_path
+        if not cwd:
+            raise RuntimeError("project_cwd 不能为空")
+        return cwd

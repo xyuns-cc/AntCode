@@ -112,12 +112,12 @@ class CredentialStore(ABC):
 _credential_store: CredentialStore | None = None
 
 
-def get_credential_store(store_type: str = "file") -> CredentialStore:
+def get_credential_store(store_type: str = "env") -> CredentialStore:
     """
     工厂方法：根据配置返回凭证存储实现
 
     Args:
-        store_type: 存储类型 ("file" 或 "env")
+        store_type: 存储类型 env
 
     Returns:
         凭证存储实例
@@ -132,11 +132,9 @@ def get_credential_store(store_type: str = "file") -> CredentialStore:
     if _credential_store is not None:
         return _credential_store
 
-    if store_type == "file":
-        from antcode_worker.services.credential.file_store import FileCredentialStore
-        _credential_store = FileCredentialStore()
-    elif store_type == "env":
+    if store_type == "env":
         from antcode_worker.services.credential.env_store import EnvCredentialStore
+
         _credential_store = EnvCredentialStore()
     else:
         raise ValueError(f"Unknown credential store type: {store_type}")

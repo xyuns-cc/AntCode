@@ -19,51 +19,55 @@ from loguru import logger
 
 class FlowControlStrategy(str, Enum):
     """流量控制策略"""
+
     TOKEN_BUCKET = "token_bucket"  # 令牌桶
-    AIMD = "aimd"                  # 加性增乘性减
+    AIMD = "aimd"  # 加性增乘性减
     SLIDING_WINDOW = "sliding_window"  # 滑动窗口
 
 
 class BackpressureLevel(str, Enum):
     """背压级别"""
-    NONE = "none"          # 无背压
-    LOW = "low"            # 低背压（轻微减速）
-    MEDIUM = "medium"      # 中等背压（明显减速）
-    HIGH = "high"          # 高背压（严重减速）
+
+    NONE = "none"  # 无背压
+    LOW = "low"  # 低背压（轻微减速）
+    MEDIUM = "medium"  # 中等背压（明显减速）
+    HIGH = "high"  # 高背压（严重减速）
     CRITICAL = "critical"  # 临界背压（暂停）
 
 
 @dataclass
 class FlowControlConfig:
     """流量控制配置"""
+
     # 通用配置
     strategy: FlowControlStrategy = FlowControlStrategy.TOKEN_BUCKET
-    initial_rate: float = 100.0        # 初始速率（请求/秒）
-    min_rate: float = 1.0              # 最小速率
-    max_rate: float = 1000.0           # 最大速率
+    initial_rate: float = 100.0  # 初始速率（请求/秒）
+    min_rate: float = 1.0  # 最小速率
+    max_rate: float = 1000.0  # 最大速率
 
     # Token Bucket 配置
-    bucket_capacity: int = 100         # 桶容量
-    refill_rate: float = 10.0          # 填充速率（令牌/秒）
+    bucket_capacity: int = 100  # 桶容量
+    refill_rate: float = 10.0  # 填充速率（令牌/秒）
 
     # AIMD 配置
-    additive_increase: float = 1.0     # 加性增量
+    additive_increase: float = 1.0  # 加性增量
     multiplicative_decrease: float = 0.5  # 乘性减量因子
 
     # Sliding Window 配置
-    window_size: float = 1.0           # 窗口大小（秒）
+    window_size: float = 1.0  # 窗口大小（秒）
     max_requests_per_window: int = 100  # 每窗口最大请求数
 
     # Backpressure 配置
-    backpressure_threshold_low: float = 0.5     # 低背压阈值
+    backpressure_threshold_low: float = 0.5  # 低背压阈值
     backpressure_threshold_medium: float = 0.7  # 中等背压阈值
-    backpressure_threshold_high: float = 0.85   # 高背压阈值
+    backpressure_threshold_high: float = 0.85  # 高背压阈值
     backpressure_threshold_critical: float = 0.95  # 临界背压阈值
 
 
 @dataclass
 class FlowControlStats:
     """流量控制统计"""
+
     total_requests: int = 0
     allowed_requests: int = 0
     rejected_requests: int = 0
@@ -353,9 +357,7 @@ class SlidingWindowController(FlowController):
                 for _ in range(count):
                     self._requests.append(now)
                 self._stats.allowed_requests += 1
-                self._update_backpressure(
-                    len(self._requests) / self._config.max_requests_per_window
-                )
+                self._update_backpressure(len(self._requests) / self._config.max_requests_per_window)
                 self._stats.current_rate = len(self._requests) / self._config.window_size
                 return True
 
@@ -379,9 +381,7 @@ class SlidingWindowController(FlowController):
                     for _ in range(count):
                         self._requests.append(now)
                     self._stats.allowed_requests += 1
-                    self._update_backpressure(
-                        len(self._requests) / self._config.max_requests_per_window
-                    )
+                    self._update_backpressure(len(self._requests) / self._config.max_requests_per_window)
                     self._stats.current_rate = len(self._requests) / self._config.window_size
                     return True
 

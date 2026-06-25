@@ -153,9 +153,7 @@ class Spider(ABC):
             )
 
     @abstractmethod
-    async def parse(
-        self, response: Response
-    ) -> AsyncGenerator[dict | Request, None]:
+    async def parse(self, response: Response) -> AsyncGenerator[dict | Request, None]:
         """
         解析响应
 
@@ -217,10 +215,7 @@ class Spider(ABC):
                 await self._request_queue.put(request)
 
             # 并发处理
-            workers = [
-                asyncio.create_task(self._worker())
-                for _ in range(self.concurrent_requests)
-            ]
+            workers = [asyncio.create_task(self._worker()) for _ in range(self.concurrent_requests)]
 
             # 等待队列清空
             await self._request_queue.join()
@@ -271,9 +266,7 @@ class Spider(ABC):
         """工作协程"""
         while self._running:
             try:
-                request = await asyncio.wait_for(
-                    self._request_queue.get(), timeout=1.0
-                )
+                request = await asyncio.wait_for(self._request_queue.get(), timeout=1.0)
             except TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -345,9 +338,7 @@ class Spider(ABC):
         except Exception as e:
             logger.warning(f"上报数据项失败: {e}")
 
-    def make_request(
-        self, url: str, callback: Callable = None, method: str = "GET", **kwargs
-    ) -> Request:
+    def make_request(self, url: str, callback: Callable = None, method: str = "GET", **kwargs) -> Request:
         """
         创建请求
 

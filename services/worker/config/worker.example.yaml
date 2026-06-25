@@ -12,8 +12,8 @@ version: "0.1.0"
 # 传输模式: direct (Redis) 或 gateway (Gateway)
 transport_mode: "gateway"
 
-# Direct 模式配置（内网直连 Redis）
-redis_url: "redis://localhost:6379/0"
+# Direct 模式配置（内网直连 Redis，transport_mode=direct 时必填）
+redis_url: ""
 
 # Gateway 模式配置（公网通过 Gateway）
 gateway_host: "localhost"
@@ -43,10 +43,5 @@ flow_control_capacity: 200             # 令牌桶容量
 # 存储配置
 data_dir: "data/worker"
 
-# 日志清理
-log_retention_days: 7
-log_cleanup_interval_hours: 24
-log_cleanup_enabled: true
-
-# 凭证存储: file 或 env
-credential_store: "file"
+# 凭证存储: env
+credential_store: "env"

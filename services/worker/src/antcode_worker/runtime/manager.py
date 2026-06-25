@@ -182,9 +182,7 @@ class RuntimeManager:
             )
 
             logger.info(
-                f"运行时准备完成: {runtime_hash}, "
-                f"cached={result.cached}, "
-                f"build_time={result.build_time_ms:.0f}ms"
+                f"运行时准备完成: {runtime_hash}, cached={result.cached}, build_time={result.build_time_ms:.0f}ms"
             )
 
             return handle

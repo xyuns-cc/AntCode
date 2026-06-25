@@ -4,7 +4,6 @@
 Requirements: 8.1
 """
 
-
 from loguru import logger
 
 from antcode_worker.domain.errors import PluginError
@@ -87,16 +86,14 @@ class PluginRegistry:
 
     def list_plugins(self) -> list[dict]:
         """列出所有插件"""
-        return [
-            {"name": p.name, "priority": p.priority}
-            for p in self._plugins
-        ]
+        return [{"name": p.name, "priority": p.priority} for p in self._plugins]
 
     def load_builtin_plugins(self) -> None:
         """加载内置插件"""
         # Code Plugin
         try:
             from antcode_worker.plugins.code.plugin import CodePlugin
+
             self.register(CodePlugin())
         except ImportError:
             logger.warning("CodePlugin 加载失败")
@@ -104,6 +101,7 @@ class PluginRegistry:
         # Spider Plugin
         try:
             from antcode_worker.plugins.spider.plugin import SpiderPlugin
+
             self.register(SpiderPlugin())
         except ImportError:
             logger.warning("SpiderPlugin 加载失败")
@@ -111,6 +109,7 @@ class PluginRegistry:
         # Render Plugin
         try:
             from antcode_worker.plugins.render.plugin import RenderPlugin
+
             self.register(RenderPlugin())
         except ImportError:
             logger.warning("RenderPlugin 加载失败")

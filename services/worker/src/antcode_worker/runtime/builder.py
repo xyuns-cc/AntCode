@@ -9,7 +9,6 @@ Requirements: 6.4
 import asyncio
 import contextlib
 import os
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -125,8 +124,11 @@ class RuntimeBuilder:
         elif spec.python_spec.version:
             args.extend(["--python", f"python@{spec.python_spec.version}"])
         else:
-            # 使用当前 Python
-            args.extend(["--python", sys.executable])
+            return CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr="runtime python_spec.path 或 python_spec.version 不能为空",
+            )
 
         # 设置环境变量
         env = {}
@@ -134,21 +136,6 @@ class RuntimeBuilder:
             env["UV_CACHE_DIR"] = self.uv_cache_dir
 
         result = await run_command(args, env=env if env else None, timeout=self.timeout)
-
-        # 如果 uv 失败，尝试使用标准 venv
-        if result.exit_code != 0:
-            logger.warning(f"uv venv 失败，尝试使用标准 venv: {result.stderr}")
-
-            python_exe = spec.python_spec.path or sys.executable
-            fallback_result = await run_command(
-                [python_exe, "-m", "venv", venv_path],
-                timeout=self.timeout,
-            )
-
-            if fallback_result.exit_code == 0:
-                return fallback_result
-            # 返回原始错误
-            return result
 
         return result
 
@@ -173,12 +160,16 @@ class RuntimeBuilder:
         if not requirements:
             return CommandResult(exit_code=0, stdout="", stderr="")
 
+        temp_dir = os.path.join(os.path.dirname(self.venvs_dir), "temp", "runtime-build")
+        os.makedirs(temp_dir, exist_ok=True)
+
         # 创建临时 requirements 文件
         with tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".txt",
             delete=False,
             encoding="utf-8",
+            dir=temp_dir,
         ) as f:
             f.write("\n".join(requirements))
             requirements_file = f.name
@@ -186,9 +177,13 @@ class RuntimeBuilder:
         try:
             # 使用 uv pip install
             args = [
-                "uv", "pip", "install",
-                "--python", python_exe,
-                "-r", requirements_file,
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                python_exe,
+                "-r",
+                requirements_file,
             ]
 
             # 添加约束
@@ -198,6 +193,7 @@ class RuntimeBuilder:
                     suffix=".txt",
                     delete=False,
                     encoding="utf-8",
+                    dir=temp_dir,
                 ) as cf:
                     cf.write("\n".join(spec.constraints))
                     constraints_file = cf.name
@@ -221,86 +217,12 @@ class RuntimeBuilder:
                 with contextlib.suppress(OSError):
                     os.unlink(constraints_file)
 
-            # 如果 uv 失败，尝试使用 pip
-            if result.exit_code != 0:
-                logger.warning(f"uv pip install 失败，尝试使用 pip: {result.stderr}")
-
-                pip_args = [python_exe, "-m", "pip", "install", "-r", requirements_file]
-                result = await run_command(pip_args, timeout=self.timeout)
-
             return result
 
         finally:
             # 清理临时文件
             with contextlib.suppress(OSError):
                 os.unlink(requirements_file)
-
-    async def _sync_from_lock(
-        self,
-        venv_path: str,
-        spec: RuntimeSpec,
-    ) -> CommandResult:
-        """
-        从锁文件同步依赖
-
-        Args:
-            venv_path: 虚拟环境路径
-            spec: 运行时规格
-
-        Returns:
-            命令执行结果
-        """
-        lock_source = spec.lock_source
-
-        if lock_source.source_type == "inline" and lock_source.inline_content:
-            # 写入临时锁文件
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".lock",
-                delete=False,
-                encoding="utf-8",
-            ) as f:
-                f.write(lock_source.inline_content)
-                lock_file = f.name
-
-            try:
-                python_exe = self._get_python_executable(venv_path)
-                args = [
-                    "uv", "sync",
-                    "--python", python_exe,
-                    "--locked",
-                ]
-
-                env = {"UV_LOCK_FILE": lock_file}
-                if self.uv_cache_dir:
-                    env["UV_CACHE_DIR"] = self.uv_cache_dir
-
-                return await run_command(args, env=env, timeout=self.timeout)
-            finally:
-                with contextlib.suppress(OSError):
-                    os.unlink(lock_file)
-
-        elif lock_source.source_type == "uri" and lock_source.uri:
-            lock_file = await self._download_lock_file(lock_source.uri)
-            try:
-                python_exe = self._get_python_executable(venv_path)
-                args = [
-                    "uv", "sync",
-                    "--python", python_exe,
-                    "--locked",
-                ]
-
-                env = {"UV_LOCK_FILE": lock_file}
-                if self.uv_cache_dir:
-                    env["UV_CACHE_DIR"] = self.uv_cache_dir
-
-                return await run_command(args, env=env, timeout=self.timeout)
-            finally:
-                with contextlib.suppress(OSError):
-                    os.unlink(lock_file)
-
-        # 默认使用 requirements
-        return await self._install_requirements(venv_path, spec)
 
     def _save_manifest(
         self,
@@ -342,33 +264,6 @@ class RuntimeBuilder:
             manifest_path = self._get_manifest_path(venv_path)
             with open(manifest_path, "w", encoding="utf-8") as f:
                 ujson.dump(manifest, f, ensure_ascii=False, indent=2)
-
-    async def _download_lock_file(self, uri: str) -> str:
-        """下载锁文件到临时路径"""
-        import tempfile
-
-        if uri.startswith("file://"):
-            src_path = uri.removeprefix("file://")
-            return src_path
-
-        if os.path.exists(uri):
-            return uri
-
-        import httpx
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".lock") as tmp:
-            tmp_path = tmp.name
-
-        async with (
-            httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client,
-            client.stream("GET", uri) as response,
-        ):
-            response.raise_for_status()
-            with open(tmp_path, "wb") as f:
-                async for chunk in response.aiter_bytes():
-                    f.write(chunk)
-
-        return tmp_path
 
     def exists(self, runtime_hash: str) -> bool:
         """检查运行时是否已存在"""
@@ -422,6 +317,7 @@ class RuntimeBuilder:
         # 清理旧目录（如果存在）
         if os.path.exists(venv_path):
             import shutil
+
             shutil.rmtree(venv_path)
 
         try:
@@ -438,10 +334,7 @@ class RuntimeBuilder:
                 )
 
             # 安装依赖
-            if spec.lock_source.source_type in ("inline", "uri"):
-                result = await self._sync_from_lock(venv_path, spec)
-            else:
-                result = await self._install_requirements(venv_path, spec)
+            result = await self._install_requirements(venv_path, spec)
 
             if result.exit_code != 0:
                 return BuildResult(
@@ -499,6 +392,7 @@ class RuntimeBuilder:
 
         try:
             import shutil
+
             shutil.rmtree(venv_path)
             logger.info(f"已删除运行时: {runtime_hash}")
             return True
@@ -529,13 +423,15 @@ class RuntimeBuilder:
 
             manifest = self._load_manifest(venv_path)
 
-            runtimes.append({
-                "runtime_hash": name,
-                "venv_path": venv_path,
-                "python_executable": python_exe,
-                "python_version": manifest.get("python_version") if manifest else None,
-                "created_at": manifest.get("created_at") if manifest else None,
-                "last_used": manifest.get("last_used") if manifest else None,
-            })
+            runtimes.append(
+                {
+                    "runtime_hash": name,
+                    "venv_path": venv_path,
+                    "python_executable": python_exe,
+                    "python_version": manifest.get("python_version") if manifest else None,
+                    "created_at": manifest.get("created_at") if manifest else None,
+                    "last_used": manifest.get("last_used") if manifest else None,
+                }
+            )
 
         return runtimes

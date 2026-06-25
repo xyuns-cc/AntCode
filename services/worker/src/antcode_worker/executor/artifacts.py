@@ -10,7 +10,6 @@ import asyncio
 import fnmatch
 import hashlib
 import mimetypes
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -181,9 +180,7 @@ class ArtifactCollector:
                 # 检查单个文件大小限制
                 if file_size > self.config.max_file_size:
                     skipped_count += 1
-                    errors.append(
-                        f"文件过大: {rel_path} ({file_size} > {self.config.max_file_size})"
-                    )
+                    errors.append(f"文件过大: {rel_path} ({file_size} > {self.config.max_file_size})")
                     continue
 
                 # 检查总大小限制
@@ -193,9 +190,7 @@ class ArtifactCollector:
                     break
 
                 # 创建 ArtifactRef
-                artifact = await self._create_artifact_ref(
-                    file_path, rel_path, file_size
-                )
+                artifact = await self._create_artifact_ref(file_path, rel_path, file_size)
 
                 artifacts.append(artifact)
                 total_size += file_size
@@ -205,10 +200,7 @@ class ArtifactCollector:
                 errors.append(f"处理文件失败: {rel_path}, error={e}")
                 skipped_count += 1
 
-        logger.debug(
-            f"产物收集完成: run_id={run_id}, "
-            f"files={file_count}, size={total_size}, skipped={skipped_count}"
-        )
+        logger.debug(f"产物收集完成: run_id={run_id}, files={file_count}, size={total_size}, skipped={skipped_count}")
 
         return CollectionResult(
             artifacts=artifacts,
@@ -287,24 +279,15 @@ class ArtifactCollector:
             return ArtifactType.LOG
 
         # 报告文件
-        if any(
-            ext in lower_path
-            for ext in [".html", ".pdf", ".md", "report", "summary"]
-        ):
+        if any(ext in lower_path for ext in [".html", ".pdf", ".md", "report", "summary"]):
             return ArtifactType.REPORT
 
         # 数据文件
-        if any(
-            ext in lower_path
-            for ext in [".json", ".csv", ".xml", ".yaml", ".yml", ".parquet"]
-        ):
+        if any(ext in lower_path for ext in [".json", ".csv", ".xml", ".yaml", ".yml", ".parquet"]):
             return ArtifactType.DATA
 
         # 压缩包
-        if any(
-            ext in lower_path
-            for ext in [".zip", ".tar", ".gz", ".bz2", ".xz", ".7z"]
-        ):
+        if any(ext in lower_path for ext in [".zip", ".tar", ".gz", ".bz2", ".xz", ".7z"]):
             return ArtifactType.ARCHIVE
 
         return ArtifactType.FILE
@@ -367,20 +350,23 @@ class ArtifactManager:
     def __init__(
         self,
         collector: ArtifactCollector | None = None,
-        storage_dir: str | None = None,
+        artifact_store: Any | None = None,
     ):
         """
         初始化产物管理器
 
         Args:
             collector: 产物收集器
-            storage_dir: 存储目录
+            artifact_store: PostgreSQL blob store
         """
-        self._collector = collector or ArtifactCollector()
-        self._storage_dir = storage_dir
+        if artifact_store is None:
+            from antcode_core.infrastructure.postgres.artifact_store import (
+                PostgresArtifactStore,
+            )
 
-        if storage_dir:
-            os.makedirs(storage_dir, exist_ok=True)
+            artifact_store = PostgresArtifactStore()
+        self._collector = collector or ArtifactCollector()
+        self._artifact_store = artifact_store
 
     @property
     def collector(self) -> ArtifactCollector:
@@ -414,7 +400,7 @@ class ArtifactManager:
         """
         存储产物
 
-        将产物复制到存储目录，更新 URI。
+        将产物写入 PostgreSQL blob store，更新 URI。
 
         Args:
             artifact: 产物引用
@@ -423,59 +409,24 @@ class ArtifactManager:
         Returns:
             更新后的 ArtifactRef
         """
-        if not self._storage_dir or not artifact.local_path:
-            return artifact
+        if not artifact.local_path:
+            raise ValueError("artifact.local_path is required")
 
-        # 创建运行目录
-        run_dir = os.path.join(self._storage_dir, run_id)
-        os.makedirs(run_dir, exist_ok=True)
+        content = await self._read_artifact_content(artifact.local_path)
+        media_type = artifact.mime_type or self._guess_media_type(artifact.name)
+        stored = await self._artifact_store.write_blob(content, media_type=media_type)
+        artifact.uri = stored.uri
+        artifact.local_path = None
+        artifact.checksum = stored.content_hash
+        artifact.size_bytes = stored.size_bytes
+        artifact.mime_type = media_type
 
-        # 目标路径
-        dest_path = os.path.join(run_dir, artifact.name)
-
-        # 确保目标目录存在
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-
-        # 复制文件
-        loop = asyncio.get_event_loop()
-
-        def copy_file():
-            import shutil
-
-            shutil.copy2(artifact.local_path, dest_path)
-
-        await loop.run_in_executor(None, copy_file)
-
-        # 更新 URI
-        artifact.uri = f"file://{dest_path}"
-
-        logger.debug(f"产物已存储: {artifact.name} -> {dest_path}")
+        logger.debug(f"产物已写入 PostgreSQL: {artifact.name} -> {stored.uri}")
 
         return artifact
 
     async def cleanup_artifacts(self, run_id: str) -> None:
-        """
-        清理产物
-
-        Args:
-            run_id: 运行 ID
-        """
-        if not self._storage_dir:
-            return
-
-        run_dir = os.path.join(self._storage_dir, run_id)
-
-        if os.path.exists(run_dir):
-            loop = asyncio.get_event_loop()
-
-            def remove_dir():
-                import shutil
-
-                shutil.rmtree(run_dir)
-
-            await loop.run_in_executor(None, remove_dir)
-
-            logger.debug(f"产物已清理: {run_id}")
+        raise RuntimeError("PostgreSQL artifact cleanup is handled by retention policy")
 
     async def get_artifact(
         self,
@@ -492,23 +443,7 @@ class ArtifactManager:
         Returns:
             ArtifactRef 或 None
         """
-        if not self._storage_dir:
-            return None
-
-        artifact_path = os.path.join(self._storage_dir, run_id, artifact_name)
-
-        if not os.path.exists(artifact_path):
-            return None
-
-        stat = os.stat(artifact_path)
-
-        return ArtifactRef(
-            name=artifact_name,
-            local_path=artifact_path,
-            uri=f"file://{artifact_path}",
-            size_bytes=stat.st_size,
-            created_at=datetime.fromtimestamp(stat.st_ctime),
-        )
+        raise RuntimeError("Artifacts are addressed by pgartifact URI")
 
     async def list_artifacts(self, run_id: str) -> list[ArtifactRef]:
         """
@@ -520,33 +455,14 @@ class ArtifactManager:
         Returns:
             ArtifactRef 列表
         """
-        if not self._storage_dir:
-            return []
+        raise RuntimeError("Artifacts are listed from task result metadata")
 
-        run_dir = os.path.join(self._storage_dir, run_id)
+    async def _read_artifact_content(self, local_path: str) -> bytes:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, Path(local_path).read_bytes)
 
-        if not os.path.exists(run_dir):
-            return []
-
-        artifacts: list[ArtifactRef] = []
-
-        for root, _, files in os.walk(run_dir):
-            for file_name in files:
-                file_path = os.path.join(root, file_name)
-                rel_path = os.path.relpath(file_path, run_dir)
-                stat = os.stat(file_path)
-
-                artifacts.append(
-                    ArtifactRef(
-                        name=rel_path,
-                        local_path=file_path,
-                        uri=f"file://{file_path}",
-                        size_bytes=stat.st_size,
-                        created_at=datetime.fromtimestamp(stat.st_ctime),
-                    )
-                )
-
-        return artifacts
+    def _guess_media_type(self, name: str) -> str:
+        return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
 # 便捷函数

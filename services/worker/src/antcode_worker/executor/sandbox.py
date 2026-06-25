@@ -8,7 +8,6 @@ Requirements: 7.4
 
 import os
 import shutil
-import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -16,6 +15,7 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_worker.config import DATA_ROOT
 from antcode_worker.domain.enums import ExitReason, RunStatus
 from antcode_worker.domain.models import (
     ExecPlan,
@@ -101,9 +101,7 @@ class SandboxProvider(ABC):
         pass
 
     @abstractmethod
-    def wrap_command(
-        self, cmd: list[str], context: dict[str, Any]
-    ) -> list[str]:
+    def wrap_command(self, cmd: list[str], context: dict[str, Any]) -> list[str]:
         """
         包装命令以在沙箱中执行
 
@@ -117,9 +115,7 @@ class SandboxProvider(ABC):
         pass
 
     @abstractmethod
-    def filter_env(
-        self, env: dict[str, str], context: dict[str, Any]
-    ) -> dict[str, str]:
+    def filter_env(self, env: dict[str, str], context: dict[str, Any]) -> dict[str, str]:
         """
         过滤环境变量
 
@@ -156,15 +152,11 @@ class NoOpSandbox(SandboxProvider):
         """准备（无操作）"""
         return {"work_dir": work_dir}
 
-    def wrap_command(
-        self, cmd: list[str], context: dict[str, Any]
-    ) -> list[str]:
+    def wrap_command(self, cmd: list[str], context: dict[str, Any]) -> list[str]:
         """不包装命令"""
         return cmd
 
-    def filter_env(
-        self, env: dict[str, str], context: dict[str, Any]
-    ) -> dict[str, str]:
+    def filter_env(self, env: dict[str, str], context: dict[str, Any]) -> dict[str, str]:
         """不过滤环境变量"""
         return env
 
@@ -204,10 +196,9 @@ class BasicSandbox(SandboxProvider):
 
         # 如果启用文件系统隔离，创建临时工作目录
         if self.config.fs_isolated:
-            temp_base = self.config.temp_dir or tempfile.gettempdir()
-            temp_work_dir = os.path.join(
-                temp_base, f"sandbox_{os.getpid()}_{id(exec_plan)}"
-            )
+            temp_base = self.config.temp_dir or str(DATA_ROOT / "temp" / "sandbox")
+            os.makedirs(temp_base, exist_ok=True)
+            temp_work_dir = os.path.join(temp_base, f"sandbox_{os.getpid()}_{id(exec_plan)}")
             os.makedirs(temp_work_dir, exist_ok=True)
             context["temp_work_dir"] = temp_work_dir
             context["cleanup_dirs"].append(temp_work_dir)
@@ -217,18 +208,14 @@ class BasicSandbox(SandboxProvider):
 
         return context
 
-    def wrap_command(
-        self, cmd: list[str], context: dict[str, Any]
-    ) -> list[str]:
+    def wrap_command(self, cmd: list[str], context: dict[str, Any]) -> list[str]:
         """包装命令"""
         # 如果配置了自定义沙箱命令，使用它
         if self.config.sandbox_command:
             return self.config.sandbox_command + cmd
         return cmd
 
-    def filter_env(
-        self, env: dict[str, str], context: dict[str, Any]
-    ) -> dict[str, str]:
+    def filter_env(self, env: dict[str, str], context: dict[str, Any]) -> dict[str, str]:
         """过滤环境变量"""
         filtered = {}
 
@@ -343,9 +330,7 @@ class SandboxExecutor(BaseExecutor):
 
         # 获取信号量
         async with self._semaphore:
-            return await self._execute_in_sandbox(
-                run_id, exec_plan, runtime_handle, sink
-            )
+            return await self._execute_in_sandbox(run_id, exec_plan, runtime_handle, sink)
 
     async def _execute_in_sandbox(
         self,
@@ -364,14 +349,10 @@ class SandboxExecutor(BaseExecutor):
             context = await self._sandbox.prepare(exec_plan, work_dir)
 
             # 创建沙箱化的执行计划
-            sandboxed_plan = self._create_sandboxed_plan(
-                exec_plan, runtime_handle, context
-            )
+            sandboxed_plan = self._create_sandboxed_plan(exec_plan, runtime_handle, context)
 
             # 使用 ProcessExecutor 执行
-            result = await self._process_executor.run(
-                sandboxed_plan, runtime_handle, log_sink
-            )
+            result = await self._process_executor.run(sandboxed_plan, runtime_handle, log_sink)
 
             # 更新统计
             self._update_stats(result.status)

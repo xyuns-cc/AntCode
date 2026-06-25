@@ -28,7 +28,8 @@ WORKER_ROOT = Path(__file__).parent
 SERVICE_ROOT = WORKER_ROOT.parent.parent  # services/worker/src -> services/worker
 # 项目根目录（运行时数据统一放在 data/ 下）
 PROJECT_ROOT = SERVICE_ROOT.parent.parent  # services/worker -> project root
-DATA_ROOT = PROJECT_ROOT / "data" / "worker"
+PROJECT_DATA_ROOT = PROJECT_ROOT / "data"
+DATA_ROOT = PROJECT_DATA_ROOT / "worker"
 
 # Worker配置文件路径
 WORKER_CONFIG_FILE = DATA_ROOT / "worker_config.yaml"
@@ -86,34 +87,34 @@ def _normalize_path(path_value: str) -> str:
     path = Path(expanded)
     if not path.is_absolute():
         path = PROJECT_ROOT / path
-    return str(path)
+    resolved = path.resolve(strict=False)
+    data_root = PROJECT_DATA_ROOT.resolve(strict=False)
+    if os.path.commonpath([str(data_root), str(resolved)]) != str(data_root):
+        raise ValueError("运行时路径必须位于项目根 data 目录下")
+    return str(resolved)
 
 
 def _load_env_config() -> dict[str, Any]:
     """读取环境变量配置"""
     env_config: dict[str, Any] = {}
 
-    api_base_url = _get_env_value(
-        "WORKER_API_BASE_URL",
-        "ANTCODE_API_BASE_URL",
-        "API_BASE_URL",
-    )
+    api_base_url = _get_env_value("WORKER_API_BASE_URL")
     if api_base_url:
         env_config["api_base_url"] = api_base_url
 
-    transport_mode = _get_env_value("WORKER_TRANSPORT_MODE", "TRANSPORT_MODE", "ANTCODE_TRANSPORT_MODE")
+    transport_mode = _get_env_value("WORKER_TRANSPORT_MODE")
     if transport_mode:
         env_config["transport_mode"] = transport_mode
 
-    redis_url = _get_env_value("WORKER_REDIS_URL", "REDIS_URL", "ANTCODE_REDIS_URL")
+    redis_url = _get_env_value("WORKER_REDIS_URL")
     if redis_url:
         env_config["redis_url"] = redis_url
 
-    redis_namespace = _get_env_value("WORKER_REDIS_NAMESPACE", "REDIS_NAMESPACE")
+    redis_namespace = _get_env_value("WORKER_REDIS_NAMESPACE")
     if redis_namespace:
         env_config["redis_namespace"] = redis_namespace
 
-    gateway_endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT", "GATEWAY_ENDPOINT", "ANTCODE_GATEWAY_ENDPOINT")
+    gateway_endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT")
     if gateway_endpoint:
         if ":" in gateway_endpoint:
             host, port = gateway_endpoint.rsplit(":", 1)
@@ -123,60 +124,48 @@ def _load_env_config() -> dict[str, Any]:
         else:
             env_config["gateway_host"] = gateway_endpoint
 
-    gateway_host = _get_env_value("WORKER_GATEWAY_HOST", "GATEWAY_HOST", "ANTCODE_GATEWAY_HOST")
+    gateway_host = _get_env_value("WORKER_GATEWAY_HOST")
     if gateway_host:
         env_config["gateway_host"] = gateway_host
 
-    gateway_port = _get_env_int("WORKER_GATEWAY_PORT", "GATEWAY_PORT", "ANTCODE_GATEWAY_PORT")
+    gateway_port = _get_env_int("WORKER_GATEWAY_PORT")
     if gateway_port is not None:
         env_config["gateway_port"] = gateway_port
 
-    name = _get_env_value("WORKER_NAME", "ANTCODE_WORKER_NAME")
+    name = _get_env_value("WORKER_NAME")
     if name:
         env_config["name"] = name
 
-    host = _get_env_value("WORKER_HOST", "ANTCODE_WORKER_HOST")
+    host = _get_env_value("WORKER_HOST")
     if host:
         env_config["host"] = host
 
-    port = _get_env_int("WORKER_PORT", "ANTCODE_WORKER_PORT")
+    port = _get_env_int("WORKER_PORT")
     if port is not None:
         env_config["port"] = port
 
-    region = _get_env_value("WORKER_REGION", "ANTCODE_WORKER_REGION")
+    region = _get_env_value("WORKER_REGION")
     if region:
         env_config["region"] = region
 
-    heartbeat_interval = _get_env_int("WORKER_HEARTBEAT_INTERVAL", "ANTCODE_HEARTBEAT_INTERVAL")
+    heartbeat_interval = _get_env_int("WORKER_HEARTBEAT_INTERVAL")
     if heartbeat_interval is not None:
         env_config["heartbeat_interval"] = heartbeat_interval
 
-    max_concurrent = _get_env_int("WORKER_MAX_CONCURRENT_TASKS", "MAX_CONCURRENT_TASKS", "ANTCODE_MAX_CONCURRENT_TASKS")
+    max_concurrent = _get_env_int("WORKER_MAX_CONCURRENT_TASKS")
     if max_concurrent is not None:
         env_config["max_concurrent_tasks"] = max_concurrent
 
-    data_dir = _get_env_value("WORKER_DATA_DIR", "ANTCODE_WORKER_DATA_DIR")
+    data_dir = _get_env_value("WORKER_DATA_DIR")
     if data_dir:
         env_config["data_dir"] = data_dir
 
-    credential_store = _get_env_value("WORKER_CREDENTIAL_STORE", "ANTCODE_WORKER_CREDENTIAL_STORE")
+    credential_store = _get_env_value("WORKER_CREDENTIAL_STORE")
     if credential_store:
         env_config["credential_store"] = credential_store
 
-    log_retention_days = _get_env_int("WORKER_LOG_RETENTION_DAYS")
-    if log_retention_days is not None:
-        env_config["log_retention_days"] = log_retention_days
-
-    log_cleanup_interval_hours = _get_env_int("WORKER_LOG_CLEANUP_INTERVAL_HOURS")
-    if log_cleanup_interval_hours is not None:
-        env_config["log_cleanup_interval_hours"] = log_cleanup_interval_hours
-
-    log_cleanup_enabled = _get_env_bool("WORKER_LOG_CLEANUP_ENABLED")
-    if log_cleanup_enabled is not None:
-        env_config["log_cleanup_enabled"] = log_cleanup_enabled
-
     # Worker 安装 Key（用于快速注册）
-    worker_key = _get_env_value("ANTCODE_WORKER_KEY", "WORKER_KEY")
+    worker_key = _get_env_value("ANTCODE_WORKER_KEY")
     if worker_key:
         env_config["worker_key"] = worker_key
 
@@ -223,11 +212,16 @@ class WorkerConfig:
     task_memory_limit_mb: int = 0  # 单任务内存上限（MB，0=自动）
     auto_resource_limit: bool = True  # 是否启用自适应资源限制
 
+    # 沙箱硬限制（POSIX rlimit；非 POSIX 平台自动跳过）
+    sandbox_enforce_rlimit: bool = True  # 默认强制开启 rlimit + 独立进程组
+    sandbox_max_open_files: int = 256  # RLIMIT_NOFILE
+    sandbox_max_processes: int = 64  # RLIMIT_NPROC（防 fork 炸弹）
+
     # 传输模式配置
     transport_mode: str = "gateway"  # 传输模式: "direct" 或 "gateway"
 
     # Redis 配置（Direct 模式）
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = ""
     redis_namespace: str = "antcode"
 
     # Gateway 配置（Gateway 模式）
@@ -238,15 +232,10 @@ class WorkerConfig:
     api_base_url: str = ""
 
     # 凭证存储配置
-    credential_store: str = "file"  # 凭证存储类型: "file" (默认) 或 "env"
+    credential_store: str = "env"  # 凭证存储类型: env
 
     # 存储配置
     data_dir: str = field(default_factory=lambda: str(DATA_ROOT))
-
-    # 日志清理配置
-    log_retention_days: int = 7  # Worker 端日志保留天数（默认 7 天）
-    log_cleanup_interval_hours: int = 24  # 日志清理间隔（小时）
-    log_cleanup_enabled: bool = True  # 是否启用日志清理
 
     # 流控配置
     flow_control_enabled: bool = False  # 是否启用流控
@@ -261,19 +250,9 @@ class WorkerConfig:
     start_time: datetime = field(default_factory=datetime.now)
 
     @property
-    def projects_dir(self) -> str:
-        """项目存储目录"""
-        return os.path.join(self.data_dir, "projects")
-
-    @property
     def venvs_dir(self) -> str:
         """虚拟环境存储目录"""
         return os.path.join(self.data_dir, "runtimes")
-
-    @property
-    def logs_dir(self) -> str:
-        """日志存储目录"""
-        return os.path.join(self.data_dir, "logs")
 
     @property
     def runs_dir(self) -> str:
@@ -283,9 +262,7 @@ class WorkerConfig:
     def ensure_directories(self):
         """确保所有存储目录存在"""
         for dir_path in [
-            self.projects_dir,
             self.venvs_dir,
-            self.logs_dir,
             self.runs_dir,
         ]:
             os.makedirs(dir_path, exist_ok=True)
@@ -314,9 +291,6 @@ class WorkerConfig:
             "api_base_url": self.api_base_url,
             "credential_store": self.credential_store,
             "data_dir": self.data_dir,
-            "log_retention_days": self.log_retention_days,
-            "log_cleanup_interval_hours": self.log_cleanup_interval_hours,
-            "log_cleanup_enabled": self.log_cleanup_enabled,
             "flow_control_enabled": self.flow_control_enabled,
             "flow_control_strategy": self.flow_control_strategy,
             "flow_control_rate": self.flow_control_rate,
@@ -345,9 +319,6 @@ class WorkerConfig:
             "api_base_url": self.api_base_url,
             "credential_store": self.credential_store,
             "data_dir": self.data_dir,
-            "log_retention_days": self.log_retention_days,
-            "log_cleanup_interval_hours": self.log_cleanup_interval_hours,
-            "log_cleanup_enabled": self.log_cleanup_enabled,
             "flow_control_enabled": self.flow_control_enabled,
             "flow_control_strategy": self.flow_control_strategy,
             "flow_control_rate": self.flow_control_rate,
@@ -383,8 +354,7 @@ class WorkerConfig:
                 config_data = yaml.safe_load(f) or {}
             return cls(**{k: v for k, v in config_data.items() if v is not None})
         except Exception as e:
-            logger.warning("加载配置文件失败: {}", e)
-            return cls()
+            raise RuntimeError(f"加载配置文件失败: {path}") from e
 
     @classmethod
     async def load_from_file_async(cls, path: Path | None = None) -> "WorkerConfig":
@@ -399,8 +369,7 @@ class WorkerConfig:
             config_data = yaml.safe_load(content) or {}
             return cls(**{k: v for k, v in config_data.items() if v is not None})
         except Exception as e:
-            logger.warning("异步加载配置文件失败: {}", e)
-            return cls()
+            raise RuntimeError(f"异步加载配置文件失败: {path}") from e
 
 
 # 全局配置实例
@@ -504,12 +473,7 @@ def apply_resource_limits(config: WorkerConfig) -> WorkerConfig:
     return config
 
 
-def init_worker_config(
-    name: str = "Worker-001",
-    port: int = 8001,
-    region: str = "默认",
-    **kwargs
-) -> WorkerConfig:
+def init_worker_config(name: str = "Worker-001", port: int = 8001, region: str = "默认", **kwargs) -> WorkerConfig:
     """
     初始化Worker配置
 
@@ -551,7 +515,7 @@ def init_worker_config(
     if merged_config.get("data_dir"):
         merged_config["data_dir"] = _normalize_path(str(merged_config["data_dir"]))
 
-    for key in ("projects_dir", "venvs_dir", "logs_dir", "runs_dir", "wal_dir", "spool_dir"):
+    for key in ("projects_dir", "venvs_dir", "runs_dir"):
         if merged_config.get(key):
             merged_config[key] = _normalize_path(str(merged_config[key]))
 
@@ -573,7 +537,7 @@ def init_worker_config(
     if "transport_mode" in kwargs:
         _apply_override("transport_mode", kwargs["transport_mode"], "gateway")
     if "redis_url" in kwargs:
-        _apply_override("redis_url", kwargs["redis_url"], "redis://localhost:6379/0")
+        _apply_override("redis_url", kwargs["redis_url"], "")
     if "redis_namespace" in kwargs:
         _apply_override("redis_namespace", kwargs["redis_namespace"], "antcode")
     if "gateway_host" in kwargs:

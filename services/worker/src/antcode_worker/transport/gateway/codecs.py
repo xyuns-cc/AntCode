@@ -1,17 +1,29 @@
 """
-Gateway Protobuf 编解码模块
+Gateway Protobuf 编解码模块（P1b 重写）
 
-实现 protobuf 消息的编解码，支持 schema versioning。
+负责在 ``antcode_worker.transport.base`` 的内部数据结构与新的
+``antcode_contracts.control_pb2`` / ``data_pb2`` Proto 消息之间转换。
+
+新协议要点：
+- 不再使用 ``gateway_pb2``（已被 ControlService + DataService 取代）。
+- 任务投递走 ``DataService.StreamTasks``（server-stream），消息体是
+  ``data_pb2.TaskDispatch``。
+- 任务状态走 ``DataService.StreamStatus``（client-stream），消息体是
+  ``data_pb2.TaskStatus``，状态枚举 ``data_pb2.Status``。
+- 日志走 ``DataService.StreamLogs``（client-stream），消息体是
+  ``data_pb2.LogBatch``（含 1..N 条 ``LogEntry``）。
+- 控制事件走 ``ControlService.WatchControl``（server-stream），消息体是
+  ``control_pb2.ControlEvent``，``payload`` 是 oneof
+  （``task_cancel`` / ``config_update`` / ``runtime_control`` / ``ping``）。
+- ``RuntimeControl`` 不再有 ``payload_json`` / ``reply_stream`` 字段，全部
+  改为 typed ``params: map<string,string>`` + ``action_typed`` oneof。
 
 Requirements: 5.5
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from loguru import logger
@@ -24,447 +36,292 @@ from antcode_worker.transport.base import (
 )
 
 
-class SchemaVersion(str, Enum):
-    """Schema 版本"""
+# ---------------------------------------------------------------------------
+# 字符串 <-> Proto enum 映射（与 Direct transport 共享同一约定）
+# ---------------------------------------------------------------------------
+def _status_str_to_proto(status: str) -> int:
+    from antcode_contracts import data_pb2
 
-    V1 = "v1"
-    V2 = "v2"
-
-
-@dataclass
-class CodecConfig:
-    """编解码配置"""
-
-    version: SchemaVersion = SchemaVersion.V1
-    strict_mode: bool = False  # 严格模式下，未知字段会报错
-    default_timeout: int = 3600
-    default_priority: int = 0
-
-
-class GatewayCodec:
-    """
-    Gateway 编解码器
-
-    提供 protobuf 消息与内部数据结构之间的转换。
-    """
-
-    def __init__(self, config: CodecConfig | None = None):
-        self._config = config or CodecConfig()
-
-    @property
-    def version(self) -> SchemaVersion:
-        return self._config.version
+    mapping = {
+        "": data_pb2.Status.STATUS_UNSPECIFIED,
+        "pending": data_pb2.Status.STATUS_PENDING,
+        "running": data_pb2.Status.STATUS_RUNNING,
+        "success": data_pb2.Status.STATUS_COMPLETED,
+        "completed": data_pb2.Status.STATUS_COMPLETED,
+        "done": data_pb2.Status.STATUS_COMPLETED,
+        "failed": data_pb2.Status.STATUS_FAILED,
+        "failure": data_pb2.Status.STATUS_FAILED,
+        "error": data_pb2.Status.STATUS_FAILED,
+        "cancelled": data_pb2.Status.STATUS_CANCELLED,
+        "canceled": data_pb2.Status.STATUS_CANCELLED,
+        "timeout": data_pb2.Status.STATUS_TIMEOUT,
+        "timed_out": data_pb2.Status.STATUS_TIMEOUT,
+    }
+    return mapping.get((status or "").lower(), data_pb2.Status.STATUS_UNSPECIFIED)
 
 
+def _log_type_str_to_proto(log_type: str) -> int:
+    from antcode_contracts import data_pb2
+
+    mapping = {
+        "": data_pb2.LogType.LOG_TYPE_UNSPECIFIED,
+        "stdout": data_pb2.LogType.LOG_TYPE_STDOUT,
+        "stderr": data_pb2.LogType.LOG_TYPE_STDERR,
+        "system": data_pb2.LogType.LOG_TYPE_SYSTEM,
+    }
+    return mapping.get((log_type or "").lower(), data_pb2.LogType.LOG_TYPE_UNSPECIFIED)
+
+
+def datetime_to_proto_timestamp(dt: datetime | None) -> Any:
+    """``datetime`` → ``common_pb2.Timestamp``，``None`` 时返回 ``None``。"""
+    if dt is None:
+        return None
+    from antcode_contracts import common_pb2
+
+    ts = common_pb2.Timestamp()
+    epoch = dt.timestamp()
+    ts.seconds = int(epoch)
+    ts.nanos = int((epoch - int(epoch)) * 1e9)
+    return ts
+
+
+def proto_timestamp_to_datetime(ts: Any) -> datetime | None:
+    """``common_pb2.Timestamp`` → ``datetime``，未设置时返回 ``None``。"""
+    if ts is None:
+        return None
+    seconds = getattr(ts, "seconds", 0)
+    nanos = getattr(ts, "nanos", 0)
+    if seconds == 0 and nanos == 0:
+        return None
+    return datetime.fromtimestamp(seconds + nanos / 1e9)
+
+
+# ---------------------------------------------------------------------------
+# TaskDispatch → TaskMessage
+# ---------------------------------------------------------------------------
 class TaskDecoder:
-    """
-    任务消息解码器
-
-    将 protobuf TaskDispatch 消息解码为 TaskMessage。
-    """
+    """``data_pb2.TaskDispatch`` → ``TaskMessage``。"""
 
     @staticmethod
-    def decode(proto_task: Any) -> TaskMessage:
-        """
-        解码任务消息
-
-        Args:
-            proto_task: protobuf TaskDispatch 消息
-
-        Returns:
-            TaskMessage 实例
-        """
+    def decode(dispatch: Any) -> TaskMessage:
         try:
-            # 解析参数
-            params = {}
-            if hasattr(proto_task, "params") and proto_task.params:
-                params = dict(proto_task.params)
-
-            # 解析环境变量
-            environment = {}
-            if hasattr(proto_task, "environment") and proto_task.environment:
-                environment = dict(proto_task.environment)
+            params = dict(getattr(dispatch, "params", {}) or {})
+            environment = dict(getattr(dispatch, "environment", {}) or {})
 
             return TaskMessage(
-                task_id=getattr(proto_task, "task_id", ""),
-                project_id=getattr(proto_task, "project_id", ""),
-                project_type=getattr(proto_task, "project_type", "code"),
-                priority=getattr(proto_task, "priority", 0),
+                task_id=getattr(dispatch, "task_id", "") or "",
+                project_id=getattr(dispatch, "project_id", "") or "",
+                project_type=getattr(dispatch, "project_type", "") or "code",
+                priority=int(getattr(dispatch, "priority", 0) or 0),
                 params=params,
                 environment=environment,
-                timeout=getattr(proto_task, "timeout", 3600),
-                download_url=getattr(proto_task, "download_url", ""),
-                file_hash=getattr(proto_task, "file_hash", ""),
-                entry_point=getattr(proto_task, "entry_point", ""),
-                run_id=getattr(proto_task, "run_id", ""),
+                # 新 proto 字段名是 timeout_seconds
+                timeout=int(getattr(dispatch, "timeout_seconds", 0) or 3600),
+                # 大对象走 source_bundle，旧的 download_url 留空
+                download_url=getattr(dispatch, "source_bundle_uri", "") or "",
+                file_hash=getattr(dispatch, "source_bundle_sha256", "") or "",
+                entry_point=getattr(dispatch, "entry_point", "") or "",
+                run_id=getattr(dispatch, "run_id", "") or "",
+                receipt=getattr(dispatch, "receipt_id", "") or None,
             )
-
         except Exception as e:
             logger.error(f"解码任务消息失败: {e}")
             raise CodecError(f"解码任务消息失败: {e}") from e
 
-    @staticmethod
-    def decode_from_dict(data: dict[str, Any]) -> TaskMessage:
-        """
-        从字典解码任务消息
 
-        Args:
-            data: 任务数据字典
-
-        Returns:
-            TaskMessage 实例
-        """
-        return TaskMessage(
-            task_id=data.get("task_id", ""),
-            project_id=data.get("project_id", ""),
-            project_type=data.get("project_type", "code"),
-            priority=int(data.get("priority", 0)),
-            params=data.get("params", {}),
-            environment=data.get("environment", {}),
-            timeout=int(data.get("timeout", 3600)),
-            download_url=data.get("download_url", ""),
-            file_hash=data.get("file_hash", ""),
-            entry_point=data.get("entry_point", ""),
-            run_id=data.get("run_id", ""),
-        )
-
-
-class ResultEncoder:
-    """
-    结果消息编码器
-
-    将 TaskResult 编码为 protobuf ReportResultRequest 消息。
-    """
+# ---------------------------------------------------------------------------
+# TaskResult → TaskStatus
+# ---------------------------------------------------------------------------
+class TaskStatusEncoder:
+    """``TaskResult`` → ``data_pb2.TaskStatus``（StreamStatus 消息体）。"""
 
     @staticmethod
     def encode(result: TaskResult, worker_id: str) -> Any:
-        """
-        编码结果消息
+        from antcode_contracts import data_pb2
 
-        Args:
-            result: TaskResult 实例
-            worker_id: Worker ID
-
-        Returns:
-            protobuf ReportResultRequest 消息
-        """
-        from antcode_contracts import gateway_pb2
-
-        return gateway_pb2.ReportResultRequest(
-            run_id=result.run_id,
-            task_id=result.task_id,
-            worker_id=worker_id,
-            status=result.status,
-            exit_code=result.exit_code,
+        msg = data_pb2.TaskStatus(
+            run_id=result.run_id or "",
+            task_id=result.task_id or "",
+            worker_id=worker_id or "",
+            status=_status_str_to_proto(result.status),
+            exit_code=int(result.exit_code or 0),
             error_message=result.error_message or "",
-            started_at=result.started_at.isoformat() if result.started_at else "",
-            finished_at=result.finished_at.isoformat() if result.finished_at else "",
-            duration_ms=int(result.duration_ms),
-            data_json="" if not result.data else json.dumps(result.data, ensure_ascii=False),
+            duration_ms=int(result.duration_ms or 0),
         )
+        started = datetime_to_proto_timestamp(result.started_at)
+        if started is not None:
+            msg.started_at.CopyFrom(started)
+        finished = datetime_to_proto_timestamp(result.finished_at)
+        if finished is not None:
+            msg.finished_at.CopyFrom(finished)
+        if result.data:
+            for k, v in result.data.items():
+                key = str(k)
+                if isinstance(v, (str, int, float, bool)):
+                    msg.data[key] = str(v)
+                else:
+                    import json
 
-    @staticmethod
-    def encode_to_dict(result: TaskResult, worker_id: str) -> dict[str, Any]:
-        """
-        编码结果为字典
-
-        Args:
-            result: TaskResult 实例
-            worker_id: Worker ID
-
-        Returns:
-            结果数据字典
-        """
-        return {
-            "run_id": result.run_id,
-            "task_id": result.task_id,
-            "worker_id": worker_id,
-            "status": result.status,
-            "exit_code": result.exit_code,
-            "error_message": result.error_message or "",
-            "started_at": result.started_at.isoformat() if result.started_at else "",
-            "finished_at": result.finished_at.isoformat() if result.finished_at else "",
-            "duration_ms": int(result.duration_ms),
-            "data": result.data,
-        }
+                    try:
+                        msg.data[key] = json.dumps(v, ensure_ascii=False)
+                    except Exception:
+                        msg.data[key] = repr(v)
+        return msg
 
 
+# ---------------------------------------------------------------------------
+# LogMessage → LogEntry/LogBatch
+# ---------------------------------------------------------------------------
 class LogEncoder:
-    """
-    日志消息编码器
-
-    将 LogMessage 编码为 protobuf 消息。
-    """
+    """``LogMessage`` 列表 → ``data_pb2.LogBatch``（StreamLogs 消息体）。"""
 
     @staticmethod
-    def encode_realtime(log: LogMessage) -> Any:
-        """
-        编码实时日志消息
+    def encode_entry(log: LogMessage) -> Any:
+        from antcode_contracts import data_pb2
 
-        Args:
-            log: LogMessage 实例
-
-        Returns:
-            protobuf SendLogRequest 消息
-        """
-        from antcode_contracts import gateway_pb2
-
-        return gateway_pb2.SendLogRequest(
-            run_id=log.run_id,
-            log_type=log.log_type,
-            content=log.content,
-            timestamp=(log.timestamp or datetime.now()).isoformat(),
-            sequence=log.sequence,
+        entry = data_pb2.LogEntry(
+            run_id=log.run_id or "",
+            log_type=_log_type_str_to_proto(log.log_type),
+            content=log.content or "",
+            sequence=int(log.sequence or 0),
         )
+        ts = datetime_to_proto_timestamp(log.timestamp or datetime.now())
+        if ts is not None:
+            entry.timestamp.CopyFrom(ts)
+        return entry
 
     @staticmethod
-    def encode_chunk(
-        run_id: str,
-        log_type: str,
-        data: bytes,
-        offset: int,
-        is_final: bool = False,
-        checksum: str | None = None,
-        total_size: int | None = None,
-    ) -> Any:
-        """
-        编码日志分片消息
+    def encode_batch(logs: list[LogMessage], worker_id: str = "") -> Any:
+        from antcode_contracts import data_pb2
 
-        Args:
-            run_id: 运行 ID
-            log_type: 日志类型
-            data: 日志数据
-            offset: 偏移量
-            is_final: 是否最后一片
-            checksum: 校验和
-            total_size: 总大小
-
-        Returns:
-            protobuf SendLogChunkRequest 消息
-        """
-        from antcode_contracts import gateway_pb2
-
-        request = gateway_pb2.SendLogChunkRequest(
-            run_id=run_id,
-            log_type=log_type,
-            data=data,
-            offset=offset,
-            is_final=is_final,
-        )
-
-        if checksum:
-            request.checksum = checksum
-        if total_size is not None:
-            request.total_size = total_size
-
-        return request
-
-    @staticmethod
-    def encode_batch(logs: list[LogMessage]) -> Any:
-        """
-        编码批量日志消息
-
-        Args:
-            logs: LogMessage 列表
-
-        Returns:
-            protobuf SendLogBatchRequest 消息
-        """
-        from antcode_contracts import gateway_pb2
-
-        log_entries = []
+        batch = data_pb2.LogBatch(worker_id=worker_id or "")
         for log in logs:
-            entry = gateway_pb2.LogEntry(
-                run_id=log.run_id,
-                log_type=log.log_type,
-                content=log.content,
-                timestamp=(log.timestamp or datetime.now()).isoformat(),
-                sequence=log.sequence,
-            )
-            log_entries.append(entry)
-
-        return gateway_pb2.SendLogBatchRequest(logs=log_entries)
-
-    @staticmethod
-    def encode_to_dict(log: LogMessage) -> dict[str, Any]:
-        """
-        编码日志为字典
-
-        Args:
-            log: LogMessage 实例
-
-        Returns:
-            日志数据字典
-        """
-        return {
-            "run_id": log.run_id,
-            "log_type": log.log_type,
-            "content": log.content,
-            "timestamp": (log.timestamp or datetime.now()).isoformat(),
-            "sequence": log.sequence,
-        }
+            batch.entries.append(LogEncoder.encode_entry(log))
+        return batch
 
 
+# ---------------------------------------------------------------------------
+# Heartbeat → Lease（控制面）
+# ---------------------------------------------------------------------------
 class HeartbeatEncoder:
-    """
-    心跳消息编码器
+    """``HeartbeatMessage`` → ``control_pb2.LeaseRequest``。
 
-    将 HeartbeatMessage 编码为 protobuf 消息。
+    新协议把心跳重命名为 Lease（liveness signal），Metrics 直接挂在同一个
+    请求上。Worker 内部仍叫 ``send_heartbeat``，Gateway transport 把它桥到
+    ``ControlService.Lease``。
     """
 
     @staticmethod
-    def encode(heartbeat: HeartbeatMessage) -> Any:
-        """
-        编码心跳消息
+    def encode_lease(
+        heartbeat: HeartbeatMessage,
+        worker_id: str,
+        current_lease_id: str = "",
+    ) -> Any:
+        from antcode_contracts import common_pb2, control_pb2
 
-        Args:
-            heartbeat: HeartbeatMessage 实例
-
-        Returns:
-            protobuf SendHeartbeatRequest 消息
-        """
-        worker_id = getattr(heartbeat, "worker_id", "")
-        status = getattr(heartbeat, "status", "online")
-        metrics = getattr(heartbeat, "metrics", None)
-        if metrics is not None:
-            cpu_percent = getattr(metrics, "cpu", 0.0)
-            memory_percent = getattr(metrics, "memory", 0.0)
-            disk_percent = getattr(metrics, "disk", 0.0)
-            running_tasks = getattr(metrics, "running_tasks", 0)
-            max_concurrent_tasks = getattr(metrics, "max_concurrent_tasks", 5)
+        metrics_obj = getattr(heartbeat, "metrics", None)
+        if metrics_obj is not None:
+            cpu = float(getattr(metrics_obj, "cpu", 0.0) or 0.0)
+            memory = float(getattr(metrics_obj, "memory", 0.0) or 0.0)
+            disk = float(getattr(metrics_obj, "disk", 0.0) or 0.0)
+            running_tasks = int(getattr(metrics_obj, "running_tasks", 0) or 0)
+            max_concurrent = int(getattr(metrics_obj, "max_concurrent_tasks", 0) or 0)
         else:
-            cpu_percent = getattr(heartbeat, "cpu_percent", 0.0)
-            memory_percent = getattr(heartbeat, "memory_percent", 0.0)
-            disk_percent = getattr(heartbeat, "disk_percent", 0.0)
-            running_tasks = getattr(heartbeat, "running_tasks", 0)
-            max_concurrent_tasks = getattr(heartbeat, "max_concurrent_tasks", 5)
+            cpu = float(getattr(heartbeat, "cpu_percent", 0.0) or 0.0)
+            memory = float(getattr(heartbeat, "memory_percent", 0.0) or 0.0)
+            disk = float(getattr(heartbeat, "disk_percent", 0.0) or 0.0)
+            running_tasks = int(getattr(heartbeat, "running_tasks", 0) or 0)
+            max_concurrent = int(getattr(heartbeat, "max_concurrent_tasks", 0) or 0)
 
-        version = getattr(heartbeat, "version", "")
-
-        from antcode_contracts import gateway_pb2
-
-        return gateway_pb2.SendHeartbeatRequest(
-            worker_id=worker_id,
-            status=status,
-            cpu_percent=cpu_percent,
-            memory_percent=memory_percent,
-            disk_percent=disk_percent,
+        metrics = common_pb2.Metrics(
+            cpu=cpu,
+            memory=memory,
+            disk=disk,
             running_tasks=running_tasks,
-            max_concurrent_tasks=max_concurrent_tasks,
-            timestamp=(heartbeat.timestamp or datetime.now()).isoformat(),
-            version=version,
+            max_concurrent_tasks=max_concurrent,
         )
 
-    @staticmethod
-    def encode_to_dict(heartbeat: HeartbeatMessage) -> dict[str, Any]:
-        """
-        编码心跳为字典
-
-        Args:
-            heartbeat: HeartbeatMessage 实例
-
-        Returns:
-            心跳数据字典
-        """
-        return {
-            "worker_id": heartbeat.worker_id,
-            "status": heartbeat.status,
-            "cpu_percent": heartbeat.cpu_percent,
-            "memory_percent": heartbeat.memory_percent,
-            "disk_percent": heartbeat.disk_percent,
-            "running_tasks": heartbeat.running_tasks,
-            "max_concurrent_tasks": heartbeat.max_concurrent_tasks,
-            "timestamp": (heartbeat.timestamp or datetime.now()).isoformat(),
-        }
+        return control_pb2.LeaseRequest(
+            worker_id=worker_id or "",
+            current_lease_id=current_lease_id or "",
+            metrics=metrics,
+        )
 
 
+# ---------------------------------------------------------------------------
+# ControlEvent → 内部 ControlMessage 字段抽取
+# ---------------------------------------------------------------------------
 class ControlDecoder:
+    """``control_pb2.ControlEvent.payload`` 各 oneof 分支的字段提取。
+
+    返回普通字典，由 ``GatewayTransport`` 包装成 ``ControlMessage``。
     """
-    控制消息解码器
-
-    解码来自 Gateway 的控制消息（取消、配置更新等）。
-    """
 
     @staticmethod
-    def decode_cancel(proto_cancel: Any) -> dict[str, Any]:
-        """
-        解码取消消息
-
-        Args:
-            proto_cancel: protobuf TaskCancel 消息
-
-        Returns:
-            取消信息字典
-        """
-        from antcode_core.infrastructure.redis import build_cancel_control_payload
-
-        return build_cancel_control_payload(
-            run_id=getattr(proto_cancel, "run_id", ""),
-            task_id=getattr(proto_cancel, "task_id", ""),
-        )
+    def decode_task_cancel(task_cancel: Any) -> dict[str, Any]:
+        return {
+            "task_id": getattr(task_cancel, "task_id", "") or "",
+            "run_id": getattr(task_cancel, "run_id", "") or "",
+            "reason": getattr(task_cancel, "reason", "") or "",
+        }
 
     @staticmethod
-    def decode_config_update(proto_config: Any) -> dict[str, str]:
-        """
-        解码配置更新消息
-
-        Args:
-            proto_config: protobuf ConfigUpdate 消息
-
-        Returns:
-            配置字典
-        """
-        if hasattr(proto_config, "config") and proto_config.config:
-            return dict(proto_config.config)
-        return {}
+    def decode_config_update(config_update: Any) -> dict[str, str]:
+        cfg = getattr(config_update, "config", None)
+        return dict(cfg) if cfg else {}
 
     @staticmethod
-    def decode_runtime_control(proto_runtime: Any) -> dict[str, Any]:
-        """
-        解码运行时管理控制消息
+    def decode_runtime_control(runtime: Any) -> dict[str, Any]:
+        """``control_pb2.RuntimeControl`` → 扁平 dict。
 
-        Args:
-            proto_runtime: protobuf RuntimeControl 消息
+        新协议下 ``RuntimeControl``:
+          - ``request_id``: correlation id（必填，用于 AckControl 回报）
+          - ``action``: 路由用的 action 名（legacy，保留兼容）
+          - ``params``: ``map<string,string>``，顶层参数（如 reply_stream）
+          - ``action_typed``: ``RuntimeAction`` oneof（首选）；当前只填充
+            ``generic`` 分支，``generic.name`` 与 ``action`` 同源，
+            ``generic.args`` 是真正的任务参数（与旧 ``payload`` 等价）。
 
-        Returns:
-            运行时控制信息
+        引擎层（``_handle_runtime_control``）继续按 ``action`` 路由 + 按字段名
+        从 ``args`` 取值；不再用 ``payload_json`` 和 ``reply_stream`` 字段。
         """
-        payload = {}
-        if getattr(proto_runtime, "payload_json", ""):
+        request_id = getattr(runtime, "request_id", "") or ""
+        action = getattr(runtime, "action", "") or ""
+        params = dict(getattr(runtime, "params", {}) or {})
+
+        args: dict[str, str] = {}
+        action_typed = getattr(runtime, "action_typed", None)
+        if action_typed is not None:
+            which = None
             try:
-                payload = json.loads(proto_runtime.payload_json)
+                which = action_typed.WhichOneof("payload")
             except Exception:
-                payload = {}
+                which = None
+            if which == "generic":
+                generic = action_typed.generic
+                generic_name = getattr(generic, "name", "") or ""
+                if generic_name and not action:
+                    action = generic_name
+                generic_args = getattr(generic, "args", None)
+                if generic_args:
+                    args.update(dict(generic_args))
 
         return {
-            "request_id": getattr(proto_runtime, "request_id", ""),
-            "action": getattr(proto_runtime, "action", ""),
-            "reply_stream": getattr(proto_runtime, "reply_stream", ""),
-            "payload": payload,
+            "request_id": request_id,
+            "action": action,
+            "params": params,
+            "args": args,
         }
 
     @staticmethod
-    def decode_ping(proto_ping: Any) -> dict[str, Any]:
-        """
-        解码 Ping 消息
-
-        Args:
-            proto_ping: protobuf Ping 消息
-
-        Returns:
-            Ping 信息字典
-        """
-        timestamp = None
-        if hasattr(proto_ping, "timestamp") and proto_ping.timestamp:
-            ts = proto_ping.timestamp
-            if hasattr(ts, "seconds"):
-                timestamp = datetime.fromtimestamp(ts.seconds + ts.nanos / 1e9)
-
-        return {
-            "timestamp": timestamp,
-        }
+    def decode_ping(ping: Any) -> dict[str, Any]:
+        ts = getattr(ping, "timestamp", None)
+        return {"timestamp": proto_timestamp_to_datetime(ts)}
 
 
+# ---------------------------------------------------------------------------
+# Exception
+# ---------------------------------------------------------------------------
 class CodecError(Exception):
     """编解码错误"""
 
@@ -473,68 +330,13 @@ class CodecError(Exception):
         self.field = field
 
 
-# ==================== 工具函数 ====================
-
-
-def timestamp_to_proto(dt: datetime | None) -> Any:
-    """
-    将 datetime 转换为 protobuf Timestamp
-
-    Args:
-        dt: datetime 实例
-
-    Returns:
-        protobuf Timestamp 消息
-    """
-    if dt is None:
-        return None
-
-    from antcode_contracts import common_pb2
-
-    ts = common_pb2.Timestamp()
-    ts.seconds = int(dt.timestamp())
-    ts.nanos = int((dt.timestamp() % 1) * 1e9)
-    return ts
-
-
-def proto_to_timestamp(proto_ts: Any) -> datetime | None:
-    """
-    将 protobuf Timestamp 转换为 datetime
-
-    Args:
-        proto_ts: protobuf Timestamp 消息
-
-    Returns:
-        datetime 实例
-    """
-    if proto_ts is None:
-        return None
-
-    seconds = getattr(proto_ts, "seconds", 0)
-    nanos = getattr(proto_ts, "nanos", 0)
-
-    return datetime.fromtimestamp(seconds + nanos / 1e9)
-
-
-def safe_get_field(proto_msg: Any, field: str, default: Any = None) -> Any:
-    """
-    安全获取 protobuf 消息字段
-
-    Args:
-        proto_msg: protobuf 消息
-        field: 字段名
-        default: 默认值
-
-    Returns:
-        字段值或默认值
-    """
-    try:
-        if hasattr(proto_msg, field):
-            value = getattr(proto_msg, field)
-            # 检查是否为空消息
-            if hasattr(value, "ByteSize") and value.ByteSize() == 0:
-                return default
-            return value
-        return default
-    except Exception:
-        return default
+__all__ = [
+    "TaskDecoder",
+    "TaskStatusEncoder",
+    "LogEncoder",
+    "HeartbeatEncoder",
+    "ControlDecoder",
+    "CodecError",
+    "datetime_to_proto_timestamp",
+    "proto_timestamp_to_datetime",
+]

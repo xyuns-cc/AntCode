@@ -146,9 +146,7 @@ class Response:
 
         return Selector(self.text).re(pattern, flags)
 
-    def re_first(
-        self, pattern: str, default: str = None, flags: int = 0
-    ) -> str | None:
+    def re_first(self, pattern: str, default: str = None, flags: int = 0) -> str | None:
         """正则匹配第一个"""
         from .selector import Selector
 

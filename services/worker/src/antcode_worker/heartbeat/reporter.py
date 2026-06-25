@@ -9,9 +9,7 @@ Requirements: 10.1, 10.3
 
 import asyncio
 import contextlib
-import os
 import platform
-import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -24,11 +22,12 @@ from loguru import logger
 
 class HeartbeatState(str, Enum):
     """心跳状态"""
-    IDLE = "idle"                  # 空闲
-    RUNNING = "running"            # 运行中
-    DEGRADED = "degraded"          # 降级模式（连续失败）
+
+    IDLE = "idle"  # 空闲
+    RUNNING = "running"  # 运行中
+    DEGRADED = "degraded"  # 降级模式（连续失败）
     RECONNECTING = "reconnecting"  # 重连中
-    STOPPED = "stopped"            # 已停止
+    STOPPED = "stopped"  # 已停止
 
 
 class TransportProtocol(Protocol):
@@ -135,22 +134,18 @@ class CapabilityDetector:
     """
     Worker能力检测器
 
-    检测本地环境的渲染能力并上报给主控。
+    检测本地环境的可选能力并上报给主控。
     """
 
     def __init__(self):
         self._cached_capabilities: dict | None = None
-        self._platform = platform.system().lower()
 
     def detect_all(self, force_refresh: bool = False) -> dict:
         """检测所有能力"""
         if self._cached_capabilities and not force_refresh:
             return self._cached_capabilities
 
-        capabilities = {
-            "drissionpage": self._detect_drissionpage(),
-            "curl_cffi": self._detect_curl_cffi(),
-        }
+        capabilities = {"curl_cffi": self._detect_curl_cffi()}
 
         self._cached_capabilities = capabilities
         logger.debug(f"Worker能力检测完成: {self._summarize(capabilities)}")
@@ -161,45 +156,8 @@ class CapabilityDetector:
         enabled = []
         for name, cap in capabilities.items():
             if cap and cap.get("enabled"):
-                extra = ""
-                if name in ("drissionpage", "playwright", "selenium"):
-                    headless = cap.get("headless", True)
-                    extra = " (headless)" if headless else " (GUI)"
-                enabled.append(f"{name}{extra}")
-        return ", ".join(enabled) if enabled else "无渲染能力"
-
-    def _get_default_headless(self) -> bool:
-        """根据平台获取默认的 headless 设置"""
-        if self._platform == "linux" and not os.getenv("DISPLAY"):
-            return True
-        return True
-
-    def _detect_drissionpage(self) -> dict:
-        """检测 DrissionPage 能力"""
-        headless = self._get_default_headless()
-
-        result = {
-            "enabled": False,
-            "browser_path": None,
-            "headless": headless,
-            "headless_forced": self._platform == "linux" and not os.getenv("DISPLAY"),
-            "platform": self._platform,
-        }
-
-        try:
-            from DrissionPage import ChromiumOptions  # noqa: F401
-        except ImportError:
-            result["error"] = "DrissionPage 未安装"
-            return result
-
-        browser_path = self._find_browser()
-        if not browser_path:
-            result["error"] = "未找到 Chrome/Chromium 浏览器"
-            return result
-
-        result["browser_path"] = browser_path
-        result["enabled"] = True
-        return result
+                enabled.append(name)
+        return ", ".join(enabled) if enabled else "无额外能力"
 
     def _detect_curl_cffi(self) -> dict:
         """检测 curl_cffi 能力"""
@@ -213,42 +171,6 @@ class CapabilityDetector:
             pass
 
         return result
-
-    def _find_browser(self) -> str | None:
-        """查找 Chrome/Chromium 浏览器路径"""
-        env_path = os.getenv("DRISSIONPAGE_BROWSER_PATH")
-        if env_path and os.path.isfile(env_path):
-            return env_path
-
-        browser_paths = [
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/snap/bin/chromium",
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "chrome",
-            "chromium",
-            "google-chrome",
-            "google-chrome-stable",
-        ]
-
-        for path in browser_paths:
-            if path.startswith("/"):
-                if os.path.isfile(path):
-                    return path
-            else:
-                found = shutil.which(path)
-                if found:
-                    return found
-
-        return None
-
-    def has_render_capability(self) -> bool:
-        """检查是否有渲染能力"""
-        caps = self.detect_all()
-        return caps.get("drissionpage", {}).get("enabled", False)
 
 
 # 全局能力检测器实例
@@ -277,9 +199,9 @@ class HeartbeatReporter:
     MAX_INTERVAL = 60
     DEFAULT_INTERVAL = 30
     MAX_CONSECUTIVE_FAILURES = 5
-    DEGRADED_INTERVAL = 60          # 降级模式下的心跳间隔
-    RECONNECT_BACKOFF_BASE = 2.0    # 重连退避基数
-    RECONNECT_BACKOFF_MAX = 300.0   # 最大重连退避时间（秒）
+    DEGRADED_INTERVAL = 60  # 降级模式下的心跳间隔
+    RECONNECT_BACKOFF_BASE = 2.0  # 重连退避基数
+    RECONNECT_BACKOFF_MAX = 300.0  # 最大重连退避时间（秒）
 
     def __init__(
         self,
@@ -402,7 +324,7 @@ class HeartbeatReporter:
     async def send_heartbeat(self) -> bool:
         """发送心跳"""
         if not self._transport.is_connected:
-            logger.debug("传输层未连接，跳过心跳")
+            self._record_heartbeat_failure("传输层未连接")
             return False
 
         try:
@@ -435,16 +357,17 @@ class HeartbeatReporter:
                 logger.debug(f"心跳发送成功: latency={latency:.1f}ms")
                 return True
             else:
-                self._consecutive_failures += 1
-                self._adjust_interval(False)
-                logger.warning(f"心跳发送失败: consecutive={self._consecutive_failures}")
+                self._record_heartbeat_failure("心跳发送失败")
                 return False
 
         except Exception as e:
-            self._consecutive_failures += 1
-            self._adjust_interval(False)
-            logger.warning(f"心跳发送异常: {e}")
+            self._record_heartbeat_failure(f"心跳发送异常: {e}")
             return False
+
+    def _record_heartbeat_failure(self, reason: str) -> None:
+        self._consecutive_failures += 1
+        self._adjust_interval(False)
+        logger.warning(f"{reason}: consecutive={self._consecutive_failures}")
 
     async def _loop(self) -> None:
         """心跳循环"""
@@ -513,7 +436,7 @@ class HeartbeatReporter:
 
         # 计算退避时间
         backoff = min(
-            self.RECONNECT_BACKOFF_BASE ** self._reconnect_attempts,
+            self.RECONNECT_BACKOFF_BASE**self._reconnect_attempts,
             self.RECONNECT_BACKOFF_MAX,
         )
 
@@ -610,9 +533,7 @@ class HeartbeatReporter:
                     memory=round(max(0.0, min(100.0, m.get("memory", 0.0))), 1),
                     disk=round(max(0.0, min(100.0, m.get("disk", 0.0))), 1),
                     running_tasks=m.get("runningTasks", 0),
-                    max_concurrent_tasks=m.get(
-                        "maxConcurrentTasks", self._max_concurrent_tasks
-                    ),
+                    max_concurrent_tasks=m.get("maxConcurrentTasks", self._max_concurrent_tasks),
                     task_count=m.get("taskCount", 0),
                     project_count=m.get("projectCount", 0),
                     env_count=m.get("envCount", 0),
