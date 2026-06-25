@@ -49,9 +49,11 @@ from loguru import logger
 from antcode_gateway.handlers import LeaseHandler
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from antcode_core.application.services.lease_service import LeaseStore
     from antcode_core.domain.models import Worker
 
-# 占位常量 - P3 接管后由 LeaseStore 决定
+# 兜底常量 —— 仅在未注入 LeaseStore 时使用（保持旧调用方兼容）。
+# 真正的 TTL / renew_after 由 ``LeaseStore.policy`` 决定。
 DEFAULT_LEASE_TTL_MS = 30_000
 DEFAULT_LEASE_RENEW_AFTER_MS = 10_000
 
@@ -60,13 +62,32 @@ CONTROL_POLL_BLOCK_MS = 1_000
 
 
 class GatewayControlService(ControlServiceServicer):
-    """ControlService Gateway 端实现。"""
+    """ControlService Gateway 端实现。
 
-    def __init__(self, lease_handler: LeaseHandler | None = None):
+    P3：可选注入 ``LeaseStore``，接管 Lease 状态机。注入后：
+    - ``Register`` 成功时为 Worker 发首个 lease。
+    - ``Lease`` 走 ``LeaseStore.grant`` 真发租 / 续租（含 lease_id 一致性）。
+    - ``Deregister`` 调 ``LeaseStore.revoke`` 主动撤销。
+    未注入时退化为 P1c 的占位实现，保留旧测试调用方式可用。
+    """
+
+    def __init__(
+        self,
+        lease_handler: LeaseHandler | None = None,
+        lease_store: LeaseStore | None = None,
+    ):
         self._lease_handler = lease_handler or LeaseHandler()
+        self._lease_store = lease_store
         self._control_group_lock = asyncio.Lock()
         self._initialized_control_groups: set[tuple[str, str]] = set()
-        logger.info("ControlService 已初始化")
+        if lease_store is not None:
+            logger.info(
+                "ControlService 已初始化（LeaseStore 已注入: ttl_ms={}, renew_after_ms={}）",
+                lease_store.policy.ttl_ms,
+                lease_store.policy.renew_after_ms,
+            )
+        else:
+            logger.info("ControlService 已初始化（LeaseStore 未注入，使用占位 Lease）")
 
     # =========================================================================
     # Register / Deregister
@@ -93,12 +114,24 @@ class GatewayControlService(ControlServiceServicer):
             )
             return control_pb2.RegisterResponse(success=False, error=error_msg)
 
+        # 注册成功后立刻发首个 lease（若已注入 LeaseStore），
+        # 让 Worker 拿到注册响应就已经在 active 集合里。
+        ttl_ms = DEFAULT_LEASE_TTL_MS
+        renew_after_ms = DEFAULT_LEASE_RENEW_AFTER_MS
+        if self._lease_store is not None:
+            try:
+                await self._lease_store.grant(worker_id, current_lease_id="")
+                ttl_ms = self._lease_store.policy.ttl_ms
+                renew_after_ms = self._lease_store.policy.renew_after_ms
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(f"Register 阶段发首个 lease 失败（不阻塞注册）: {exc}")
+
         logger.info(f"Worker 注册成功: worker_id={worker_id}")
         return control_pb2.RegisterResponse(
             success=True,
             worker_id=worker_id,
-            lease_ttl_ms=DEFAULT_LEASE_TTL_MS,
-            lease_renew_after_ms=DEFAULT_LEASE_RENEW_AFTER_MS,
+            lease_ttl_ms=ttl_ms,
+            lease_renew_after_ms=renew_after_ms,
         )
 
     async def _verify_registration(
@@ -131,7 +164,13 @@ class GatewayControlService(ControlServiceServicer):
         worker_id = request.worker_id
         reason = request.reason or "explicit"
         logger.info(f"Worker Deregister: worker_id={worker_id}, reason={reason}")
-        # P3 LeaseStore 接管后这里会撤销 lease；当前只清理 heartbeat Hash 的 TTL。
+        # 主动撤销 lease（让 Master 端立刻看到 worker 下线）。
+        if self._lease_store is not None:
+            try:
+                await self._lease_store.revoke(worker_id, reason=f"deregister:{reason}")
+            except Exception as exc:
+                logger.warning(f"Deregister 撤销 lease 失败: {exc}")
+        # 同时清理过渡期心跳 Hash（运维 dashboard 兼容）。
         try:
             redis = await get_redis_client()
             if redis is not None:
@@ -151,14 +190,28 @@ class GatewayControlService(ControlServiceServicer):
         request: control_pb2.LeaseRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.LeaseResponse:
+        """发租或续租：P3 走 LeaseStore，未注入时退回占位。"""
         worker_id = request.worker_id
-        now_ms = int(time.time() * 1000)
-        lease_id = f"lease-{worker_id}-{now_ms}"
-        expires_at_ms = now_ms + DEFAULT_LEASE_TTL_MS
+        if not worker_id:
+            return control_pb2.LeaseResponse(
+                lease_id="",
+                expires_at_ms=0,
+                renew_after_ms=DEFAULT_LEASE_RENEW_AFTER_MS,
+                revoked=True,
+                revoke_reason="worker_id 为空",
+            )
 
-        # Metrics 落 Redis Hash 保持过渡期 dashboard 可见
+        # 把 metrics 同步落 heartbeat:{worker_id} Hash —— 过渡期保留运维 dashboard 视图。
+        metrics_dict: dict | None = None
         if request.HasField("metrics"):
             metrics = request.metrics
+            metrics_dict = {
+                "cpu": metrics.cpu,
+                "memory": metrics.memory,
+                "disk": metrics.disk,
+                "running_tasks": metrics.running_tasks,
+                "max_concurrent_tasks": metrics.max_concurrent_tasks,
+            }
             from antcode_gateway.handlers.heartbeat import LeaseData
 
             lease_data = LeaseData(
@@ -175,12 +228,35 @@ class GatewayControlService(ControlServiceServicer):
             except Exception as exc:
                 logger.warning(f"Lease 写 Redis 心跳 Hash 失败: {exc}")
 
+        # 主路径：LeaseStore.grant
+        if self._lease_store is not None:
+            try:
+                lease = await self._lease_store.grant(
+                    worker_id,
+                    current_lease_id=request.current_lease_id or "",
+                    metrics=metrics_dict,
+                )
+                return control_pb2.LeaseResponse(
+                    lease_id=lease.lease_id,
+                    expires_at_ms=lease.expires_at_ms,
+                    renew_after_ms=self._lease_store.policy.renew_after_ms,
+                    revoked=False,
+                )
+            except Exception as exc:
+                logger.error(f"Lease grant 失败，降级为占位响应: worker_id={worker_id}, exc={exc}")
+                # 不要直接 abort —— 让 Worker 拿到非 revoked 响应继续运行，
+                # 下一次 sweep 自然剔除。
+
+        # 兜底（LeaseStore 未注入或 grant 异常）：占位 30s lease。
+        now_ms = int(time.time() * 1000)
+        placeholder_lease_id = f"lease-{worker_id}-{now_ms}"
+        expires_at_ms = now_ms + DEFAULT_LEASE_TTL_MS
         logger.debug(
-            f"Lease granted: worker_id={worker_id}, lease_id={lease_id}, "
+            f"Lease 占位响应: worker_id={worker_id}, lease_id={placeholder_lease_id}, "
             f"expires_at_ms={expires_at_ms}"
         )
         return control_pb2.LeaseResponse(
-            lease_id=lease_id,
+            lease_id=placeholder_lease_id,
             expires_at_ms=expires_at_ms,
             renew_after_ms=DEFAULT_LEASE_RENEW_AFTER_MS,
             revoked=False,

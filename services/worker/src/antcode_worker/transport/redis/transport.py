@@ -136,6 +136,9 @@ class RedisTransport(TransportBase):
         self._receipt_cache: dict[str, tuple[str, str, dict[str, Any]]] = {}
         self._poll_error_count = 0
         self._poll_backoff_until = 0.0
+        # P3：Direct 模式下 Worker 直连 Redis，自带 LeaseStore（共享 redis_client）。
+        self._lease_store: Any = None
+        self._lease_id: str = ""
 
     def _is_connection_error(self, exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError)):
@@ -216,6 +219,23 @@ class RedisTransport(TransportBase):
                     keys=self._keys,
                 )
                 await self._reclaimer.start()
+
+                # P3：构造本地 LeaseStore（共享 redis_client + namespace）。
+                # Direct 模式没有 Gateway 接管 lease，Worker 自己 grant 即可。
+                try:
+                    from antcode_core.application.services.lease_service import (
+                        LeasePolicy,
+                        LeaseStore,
+                    )
+
+                    ns = getattr(self._keys, "namespace", None) or "antcode"
+                    self._lease_store = LeaseStore(
+                        redis_client=self._redis,
+                        namespace=ns,
+                        policy=LeasePolicy(),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(f"Direct 模式构造 LeaseStore 失败: {exc}")
 
                 self._running = True
                 await self._set_state(WorkerState.ONLINE)
@@ -561,102 +581,168 @@ class RedisTransport(TransportBase):
             return False
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
-        """发送心跳
+        """发送心跳 — P3 桥接到 ``lease_renew``。
 
-        TODO(P3): 新 control.proto 用 ``ControlService.Lease`` 取代心跳，
-        Direct 模式没有 gRPC 通道，因此这里继续写 ``heartbeat:{worker_id}``
-        Hash（契约测试 ``test_send_heartbeat_*`` 仍按 hash 字段断言）。
-        P3 替换为 ``lease_renew``（带 Metrics）后再去掉本方法。
+        Direct 模式没有 gRPC，统一走 ``LeaseStore.grant``。对外仍叫
+        ``send_heartbeat`` 是因为 ``HeartbeatReporter`` 还在调用本名字。
+        metrics 由 ``lease_renew`` 内部同时写到 ``heartbeat:{worker_id}``
+        Hash，保留运维 dashboard 视图。
         """
-        if not self._redis or not self._running:
+        if not self._running:
             return False
 
+        worker_id = getattr(heartbeat, "worker_id", None) or self._worker_id
+        if not worker_id:
+            logger.warning("发送心跳失败: 缺少 worker_id")
+            return False
+
+        metrics_dict = self._heartbeat_to_metrics_dict(heartbeat)
         try:
-            # 统一提取心跳字段，支持传输层与上报器的数据结构
-            worker_id = getattr(heartbeat, "worker_id", None)
-            if not worker_id:
-                logger.warning("发送心跳失败: 缺少 worker_id")
+            _new_lease, _exp, _renew, revoked = await self.lease_renew(
+                current_lease_id=self._lease_id,
+                metrics=metrics_dict,
+            )
+            if revoked:
+                logger.warning(f"心跳收到 lease revoked 信号: worker_id={worker_id}")
                 return False
-
-            status = getattr(heartbeat, "status", "online")
-            timestamp = getattr(heartbeat, "timestamp", None) or datetime.now()
-
-            # 优先读取 metrics 聚合字段
-            metrics = getattr(heartbeat, "metrics", None)
-            if metrics is not None:
-                cpu_percent = getattr(metrics, "cpu", 0.0)
-                memory_percent = getattr(metrics, "memory", 0.0)
-                disk_percent = getattr(metrics, "disk", 0.0)
-                running_tasks = getattr(metrics, "running_tasks", 0)
-                max_concurrent_tasks = getattr(metrics, "max_concurrent_tasks", 5)
-            else:
-                # 直接读取扁平字段
-                cpu_percent = getattr(heartbeat, "cpu_percent", 0.0)
-                memory_percent = getattr(heartbeat, "memory_percent", 0.0)
-                disk_percent = getattr(heartbeat, "disk_percent", 0.0)
-                running_tasks = getattr(heartbeat, "running_tasks", 0)
-                max_concurrent_tasks = getattr(heartbeat, "max_concurrent_tasks", 5)
-
-            name = getattr(heartbeat, "name", None)
-            host = getattr(heartbeat, "host", None)
-            port = getattr(heartbeat, "port", None)
-            region = getattr(heartbeat, "region", None)
-            version = getattr(heartbeat, "version", None)
-            capabilities = getattr(heartbeat, "capabilities", None)
-            os_info = getattr(heartbeat, "os_info", None)
-            os_type = getattr(os_info, "os_type", None) if os_info else None
-            os_version = getattr(os_info, "os_version", None) if os_info else None
-            python_version = getattr(os_info, "python_version", None) if os_info else None
-            machine_arch = getattr(os_info, "machine_arch", None) if os_info else None
-
-            # 写入 heartbeat hash
-            hb_key = self._keys.heartbeat_key(worker_id)
-
-            async def _write_heartbeat():
-                mapping = {
-                    "status": status,
-                    "cpu_percent": str(cpu_percent),
-                    "memory_percent": str(memory_percent),
-                    "disk_percent": str(disk_percent),
-                    "running_tasks": str(running_tasks),
-                    "max_concurrent_tasks": str(max_concurrent_tasks),
-                    "timestamp": timestamp.isoformat(),
-                }
-                if name:
-                    mapping["name"] = str(name)
-                if host:
-                    mapping["host"] = str(host)
-                if port:
-                    mapping["port"] = str(port)
-                if region:
-                    mapping["region"] = str(region)
-                if version:
-                    mapping["version"] = str(version)
-                if os_type:
-                    mapping["os_type"] = str(os_type)
-                if os_version:
-                    mapping["os_version"] = str(os_version)
-                if python_version:
-                    mapping["python_version"] = str(python_version)
-                if machine_arch:
-                    mapping["machine_arch"] = str(machine_arch)
-                if capabilities:
-                    try:
-                        mapping["capabilities"] = json.dumps(capabilities, ensure_ascii=False)
-                    except Exception:
-                        pass
-
-                pipe = self._redis.pipeline(transaction=False)
-                pipe.hset(hb_key, mapping=mapping)
-                pipe.expire(hb_key, self._config.heartbeat_interval * 3)
-                await pipe.execute()
-
-            await self._run_with_reconnect("发送心跳", _write_heartbeat)
+            # 同步写 heartbeat Hash（保留运维 dashboard 兼容）。
+            await self._write_legacy_heartbeat_hash(heartbeat, worker_id)
             return True
-
-        except Exception as e:
-            logger.error(f"发送心跳失败: {e}")
+        except Exception as exc:
+            logger.error(f"发送心跳失败: {exc}")
             return False
+
+    def _heartbeat_to_metrics_dict(self, heartbeat: HeartbeatMessage) -> dict:
+        """``HeartbeatMessage`` → ``LeaseStore.grant`` 所需的 metrics dict。"""
+        metrics = getattr(heartbeat, "metrics", None)
+        if metrics is not None:
+            return {
+                "cpu": getattr(metrics, "cpu", 0.0),
+                "memory": getattr(metrics, "memory", 0.0),
+                "disk": getattr(metrics, "disk", 0.0),
+                "running_tasks": getattr(metrics, "running_tasks", 0),
+                "max_concurrent_tasks": getattr(metrics, "max_concurrent_tasks", 5),
+            }
+        return {
+            "cpu": getattr(heartbeat, "cpu_percent", 0.0),
+            "memory": getattr(heartbeat, "memory_percent", 0.0),
+            "disk": getattr(heartbeat, "disk_percent", 0.0),
+            "running_tasks": getattr(heartbeat, "running_tasks", 0),
+            "max_concurrent_tasks": getattr(heartbeat, "max_concurrent_tasks", 5),
+        }
+
+    async def _write_legacy_heartbeat_hash(
+        self,
+        heartbeat: HeartbeatMessage,
+        worker_id: str,
+    ) -> None:
+        """过渡期：保留 ``heartbeat:{worker_id}`` Hash 视图。
+
+        新判活信号是 lease，本 Hash 只供 web_api / 运维 dashboard 读最近
+        一次上报指标。Hash 过期时间仍按 ``heartbeat_interval * 3`` 兜底，
+        合理范围内。
+        """
+        if not self._redis:
+            return
+
+        status = getattr(heartbeat, "status", "online")
+        timestamp = getattr(heartbeat, "timestamp", None) or datetime.now()
+        metrics = getattr(heartbeat, "metrics", None)
+        if metrics is not None:
+            cpu_percent = getattr(metrics, "cpu", 0.0)
+            memory_percent = getattr(metrics, "memory", 0.0)
+            disk_percent = getattr(metrics, "disk", 0.0)
+            running_tasks = getattr(metrics, "running_tasks", 0)
+            max_concurrent_tasks = getattr(metrics, "max_concurrent_tasks", 5)
+        else:
+            cpu_percent = getattr(heartbeat, "cpu_percent", 0.0)
+            memory_percent = getattr(heartbeat, "memory_percent", 0.0)
+            disk_percent = getattr(heartbeat, "disk_percent", 0.0)
+            running_tasks = getattr(heartbeat, "running_tasks", 0)
+            max_concurrent_tasks = getattr(heartbeat, "max_concurrent_tasks", 5)
+
+        name = getattr(heartbeat, "name", None)
+        host = getattr(heartbeat, "host", None)
+        port = getattr(heartbeat, "port", None)
+        region = getattr(heartbeat, "region", None)
+        version = getattr(heartbeat, "version", None)
+        capabilities = getattr(heartbeat, "capabilities", None)
+        os_info = getattr(heartbeat, "os_info", None)
+        os_type = getattr(os_info, "os_type", None) if os_info else None
+        os_version = getattr(os_info, "os_version", None) if os_info else None
+        python_version = getattr(os_info, "python_version", None) if os_info else None
+        machine_arch = getattr(os_info, "machine_arch", None) if os_info else None
+
+        hb_key = self._keys.heartbeat_key(worker_id)
+
+        async def _write_heartbeat():
+            mapping = {
+                "status": status,
+                "cpu_percent": str(cpu_percent),
+                "memory_percent": str(memory_percent),
+                "disk_percent": str(disk_percent),
+                "running_tasks": str(running_tasks),
+                "max_concurrent_tasks": str(max_concurrent_tasks),
+                "timestamp": timestamp.isoformat(),
+            }
+            if name:
+                mapping["name"] = str(name)
+            if host:
+                mapping["host"] = str(host)
+            if port:
+                mapping["port"] = str(port)
+            if region:
+                mapping["region"] = str(region)
+            if version:
+                mapping["version"] = str(version)
+            if os_type:
+                mapping["os_type"] = str(os_type)
+            if os_version:
+                mapping["os_version"] = str(os_version)
+            if python_version:
+                mapping["python_version"] = str(python_version)
+            if machine_arch:
+                mapping["machine_arch"] = str(machine_arch)
+            if capabilities:
+                try:
+                    mapping["capabilities"] = json.dumps(capabilities, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            pipe = self._redis.pipeline(transaction=False)
+            pipe.hset(hb_key, mapping=mapping)
+            pipe.expire(hb_key, self._config.heartbeat_interval * 3)
+            await pipe.execute()
+
+        await self._run_with_reconnect("写心跳 Hash", _write_heartbeat)
+
+    async def lease_renew(
+        self,
+        current_lease_id: str,
+        metrics: dict | None = None,
+    ) -> tuple[str, int, int, bool]:
+        """Direct 模式 lease 续租：直接走本地 ``LeaseStore.grant``。
+
+        Returns:
+            ``(new_lease_id, expires_at_ms, renew_after_ms, revoked)``。
+            Direct 模式没有外部 Master 主动撤销链路，``revoked`` 恒为 False
+            （Worker 把 ``lease_renew`` 拿到的 lease_id 作为下一次续租入参）。
+        """
+        if not self._lease_store or not self._worker_id:
+            return ("", 0, 0, False)
+
+        lease = await self._lease_store.grant(
+            worker_id=self._worker_id,
+            current_lease_id=current_lease_id or "",
+            metrics=metrics,
+        )
+        self._lease_id = lease.lease_id
+        return (
+            lease.lease_id,
+            lease.expires_at_ms,
+            self._lease_store.policy.renew_after_ms,
+            False,
+        )
 
     async def poll_control(self, timeout: float = 5.0) -> ControlMessage | None:
         """拉取控制消息
