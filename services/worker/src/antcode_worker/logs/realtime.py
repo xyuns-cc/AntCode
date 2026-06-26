@@ -50,6 +50,11 @@ class RealtimeSender:
     """
     实时日志发送器
 
+    **Deprecated (P2)**: 默认日志路径已切换到 ``BatchSender`` 单路径
+    分发。``RealtimeSender`` 仅在 ``BatchSender`` 未启用时作为 fallback
+    或单元测试场景使用，避免 realtime+batch 同条日志双发以及速率限制
+    把整条 worker 拖死。
+
     将日志条目实时发送到 Transport 层。
 
     功能：

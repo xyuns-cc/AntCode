@@ -17,6 +17,12 @@ from loguru import logger
 from antcode_worker.domain.enums import LogStream
 from antcode_worker.domain.models import LogEntry
 
+try:
+    from antcode_core.common.logging import sanitize_log_message
+except Exception:  # pragma: no cover - import safety net
+    def sanitize_log_message(message: str) -> str:  # type: ignore[override]
+        return message
+
 
 class LogSink(Protocol):
     """日志接收器协议"""
@@ -183,6 +189,9 @@ class LogStreamer:
         """
         处理单行日志
 
+        P2: 子进程 stdout/stderr 走 ``sanitize_log_message`` 脱敏后再发出去,
+        避免 access token / API key / 密码 进入 ingest stream + PG。
+
         Args:
             content: 日志内容
             stream: 流类型
@@ -190,8 +199,11 @@ class LogStreamer:
         if not content:
             return
 
-        # 更新统计
-        self._total_bytes += len(content.encode("utf-8"))
+        # 脱敏（核心代码已有正则规则集，集中维护）
+        sanitized = sanitize_log_message(content)
+
+        # 更新统计（按脱敏后字节数算，避免误差）
+        self._total_bytes += len(sanitized.encode("utf-8"))
         if stream == LogStream.STDOUT:
             self._stdout_lines += 1
         else:
@@ -202,7 +214,7 @@ class LogStreamer:
         entry = LogEntry(
             run_id=self.run_id,
             stream=stream,
-            content=content,
+            content=sanitized,
             seq=seq,
             timestamp=datetime.now(),
             level="INFO" if stream == LogStream.STDOUT else "ERROR",
@@ -247,7 +259,7 @@ class LogStreamer:
         entry = LogEntry(
             run_id=self.run_id,
             stream=LogStream.SYSTEM,
-            content=content,
+            content=sanitize_log_message(content),
             seq=seq,
             timestamp=datetime.now(),
             level=level,

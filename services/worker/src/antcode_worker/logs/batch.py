@@ -229,7 +229,12 @@ class BatchSender:
                     pass
 
     async def _send_loop(self) -> None:
-        """发送循环"""
+        """发送循环
+
+        P2 (#M3): 失败时指数退避(1s → 60s),避免在网络持续抖动 / Master
+        宕机时进入死循环 ``logger.error`` + 立即重试拉满 CPU。
+        """
+        backoff = 1.0
         while self._running:
             try:
                 # 等待批次超时或队列满
@@ -240,11 +245,20 @@ class BatchSender:
 
                 # 发送批次
                 await self._send_batch()
+                # 成功 -> 重置退避
+                backoff = 1.0
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[{self.run_id}] 批量发送循环异常: {e}")
+                logger.error(
+                    f"[{self.run_id}] 批量发送循环异常 (退避 {backoff:.1f}s): {e}"
+                )
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    break
+                backoff = min(60.0, backoff * 2)
 
     async def _send_batch(self) -> None:
         """发送一个批次"""

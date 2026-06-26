@@ -70,6 +70,10 @@ class LogManager:
         self._total_dropped = 0
         self._stdout_lines = 0
         self._stderr_lines = 0
+        # P2: 软失败累积阈值（rate-limit / not-connected 视为软跳过,不计数）
+        self._soft_drop_count = 0
+        self._hard_dispatch_failures = 0
+        self._hard_failure_threshold = 10
 
     @property
     def backpressure_state(self) -> BackpressureState:
@@ -101,6 +105,10 @@ class LogManager:
         logger.info(f"[{self.run_id}] 日志管理器已停止")
 
     async def _init_components(self) -> None:
+        # P2 改造：默认只走 batch（吞吐高 + 失败重试更优）。
+        # ``enable_realtime`` 仍保留构造 RealtimeSender 用于调试 / 单元测试,
+        # 但不会再被 ``_dispatch_entry`` 调用——避免 realtime+batch 同条日志
+        # 双发,以及 realtime 速率限制把整条 worker 拖死。
         if self._config.enable_realtime and self._transport:
             self._realtime = RealtimeSender(
                 self.run_id,
@@ -128,17 +136,49 @@ class LogManager:
         task.add_done_callback(self._track_dispatch_result)
 
     async def _dispatch_entry(self, entry: LogEntry) -> None:
+        """P2: 单路径分发——只走 batch.
+
+        - ``False`` 不再立即升级为 RuntimeError。
+        - rate-limited / disabled / not-connected / backpressure-drop 视为
+          *软跳过*: ``_soft_drop_count++``，debug log，不抛异常。
+        - 其它非预期失败累计到 ``_hard_dispatch_failures``，达到阈值
+          才 ``raise`` 关闭 worker。
+        """
         if self._should_drop(entry):
             self._drop_entry(entry)
             return
-        if self._realtime:
-            realtime_sent = await self._realtime.write(entry)
-            if not realtime_sent:
-                raise RuntimeError(f"实时日志上报失败: run_id={self.run_id}, seq={entry.seq}")
-        if self._batch:
+
+        if not self._batch:
+            # batch 未启用时退回 realtime（旧行为兼容）。
+            if self._realtime:
+                ok = await self._realtime.write(entry)
+                if not ok:
+                    self._soft_drop_count += 1
+                    logger.debug(
+                        f"[{self.run_id}] 实时日志软跳过: seq={entry.seq}"
+                    )
+            return
+
+        try:
             batch_queued = await self._batch.write(entry)
-            if not batch_queued:
-                raise RuntimeError(f"批量日志入队失败: run_id={self.run_id}, seq={entry.seq}")
+        except Exception as exc:
+            self._hard_dispatch_failures += 1
+            logger.error(
+                f"[{self.run_id}] 批量日志入队异常 (累计 {self._hard_dispatch_failures}): {exc}"
+            )
+            if self._hard_dispatch_failures >= self._hard_failure_threshold:
+                raise RuntimeError(
+                    f"日志分发硬失败超过阈值 {self._hard_failure_threshold}: run_id={self.run_id}"
+                ) from exc
+            return
+
+        if not batch_queued:
+            # 已知软原因（backpressure drop / queue full / disconnected）走 debug,
+            # 让 worker 在反压退潮后恢复，不撕掉整条任务。
+            self._soft_drop_count += 1
+            logger.debug(
+                f"[{self.run_id}] 批量日志软跳过 seq={entry.seq} (backpressure 或未连接)"
+            )
 
     async def _wait_dispatch_tasks(self) -> None:
         if not self._dispatch_tasks:
@@ -235,6 +275,8 @@ class LogManager:
             "total_dropped": self._total_dropped,
             "stdout_lines": self._stdout_lines,
             "stderr_lines": self._stderr_lines,
+            "soft_drop_count": self._soft_drop_count,
+            "hard_dispatch_failures": self._hard_dispatch_failures,
         }
 
 
