@@ -1,4 +1,5 @@
 import { BaseService } from './base'
+import apiClient from './api'
 import { STORAGE_KEYS } from '@/utils/constants'
 import Logger from '@/utils/logger'
 
@@ -178,6 +179,25 @@ class LogService extends BaseService {
     }
   }
 
+  /**
+   * 申请 WebSocket 一次性 ticket（避免把长期 JWT 写入 URL）。
+   * 后端 401 时由 apiClient 响应拦截器统一处理；调用方仅在 ticket 缺失时报错。
+   * 如果服务端尚未实现 /api/v1/ws-ticket，则回退到 access_token。
+   */
+  async getWsTicket(): Promise<string | null> {
+    try {
+      const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
+        '/api/v1/ws-ticket'
+      )
+      const body = response.data
+      const ticket = body?.data?.ticket ?? body?.ticket
+      if (ticket) return ticket
+    } catch (error) {
+      Logger.warn('获取 WebSocket ticket 失败，回退到 access_token', error)
+    }
+    return localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+  }
+
   connectLogStream(
     runId?: string,
     onMessage?: (log: LogEntry) => void,
@@ -191,23 +211,46 @@ class LogService extends BaseService {
       return null
     }
 
-    const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
-    if (!token) {
-      onError?.('No access token found')
-      return null
-    }
-
     const wsHost = import.meta.env.VITE_WS_HOST || window.location.host
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${wsProtocol}//${wsHost}/api/v1/ws/runs/${runId}/logs?token=${encodeURIComponent(token)}`
 
     let ws: WebSocket | null = null
     let reconnectAttempts = 0
     const maxReconnectAttempts = 5
     let manualClose = false
+    let closeCode = 0
+    // 历史日志去重（按 timestamp|sequence|log_type|content 前 64 字节）
+    const seenKeys = new Set<string>()
+    const MAX_SEEN = 50_000
+    const SEEN_AGE_HALF = 25_000
 
-    const connect = () => {
+    const logKey = (entry: {
+      timestamp?: string
+      log_type?: string
+      sequence?: number
+      line_number?: number
+      message?: string
+    }): string => {
+      const seq = entry.sequence ?? entry.line_number ?? ''
+      const msg = (entry.message ?? '').slice(0, 64)
+      return `${entry.timestamp ?? ''}|${seq}|${entry.log_type ?? ''}|${msg}`
+    }
+
+    const buildUrl = async (): Promise<string | null> => {
+      // 通过一次性 ticket 鉴权（401 时拦截器会刷新 token + 重试）
+      const ticket = await this.getWsTicket()
+      if (!ticket) {
+        onError?.('No access token / ticket available')
+        return null
+      }
+      return `${wsProtocol}//${wsHost}/api/v1/ws/runs/${runId}/logs?ticket=${encodeURIComponent(ticket)}`
+    }
+
+    const connect = async () => {
       try {
+        const wsUrl = await buildUrl()
+        if (!wsUrl) return
+
         ws = new WebSocket(wsUrl)
 
         ws.onopen = () => {
@@ -220,14 +263,36 @@ class LogService extends BaseService {
             const message = JSON.parse(event.data)
 
             if (message.type === 'log_line' && message.data) {
+              const data = message.data
+              const dedupKey = logKey({
+                timestamp: data.timestamp || message.timestamp,
+                log_type: data.log_type,
+                sequence: data.sequence,
+                line_number: data.line_number,
+                message: data.content || data.message,
+              })
+
+              // 重连后历史日志可能与已收到的实时日志重叠，去重防止 UI 重复
+              if (seenKeys.has(dedupKey)) return
+              seenKeys.add(dedupKey)
+              // 老化：超 50k 条仅保留最近 25k
+              if (seenKeys.size > MAX_SEEN) {
+                const arr = Array.from(seenKeys)
+                seenKeys.clear()
+                for (const k of arr.slice(arr.length - SEEN_AGE_HALF)) {
+                  seenKeys.add(k)
+                }
+              }
+
               const logEntry: LogEntry = {
                 id: `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-                timestamp: message.data.timestamp || message.timestamp,
-                level: (message.data.level || 'INFO') as LogLevel,
-                log_type: (message.data.log_type || 'stdout') as LogType,
-                run_id: message.data.run_id || runId,
-                message: message.data.content || message.data.message || '',
-                source: message.data.source,
+                timestamp: data.timestamp || message.timestamp,
+                level: (data.level || 'INFO') as LogLevel,
+                log_type: (data.log_type || 'stdout') as LogType,
+                run_id: data.run_id || runId,
+                message: data.content || data.message || '',
+                source: data.source,
+                line_number: data.line_number,
               }
               onMessage?.(logEntry)
               return
@@ -280,27 +345,39 @@ class LogService extends BaseService {
         }
 
         ws.onclose = (event) => {
+          closeCode = event.code
           onStateChange?.('disconnected')
 
-          if (!manualClose && reconnectAttempts < maxReconnectAttempts) {
+          if (manualClose) return
+
+          // 鉴权失败（4401/4403）：尝试刷新 token 再重连一次
+          const isAuthClose = closeCode === 4401 || closeCode === 4403
+
+          if (reconnectAttempts < maxReconnectAttempts) {
             reconnectAttempts += 1
             const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts - 1), 30000)
             onStateChange?.('reconnecting')
-            setTimeout(connect, delay)
+            setTimeout(() => {
+              if (manualClose) return
+              if (isAuthClose) {
+                // 异步刷新 token：通过任何 API 调用触发拦截器；这里直接重新申请 ticket
+                void connect()
+              } else {
+                void connect()
+              }
+            }, delay)
             return
           }
 
-          if (!manualClose && reconnectAttempts >= maxReconnectAttempts) {
-            onStateChange?.('failed')
-            onError?.(`WebSocket closed: ${event.code} - ${event.reason}`)
-          }
+          onStateChange?.('failed')
+          onError?.(`WebSocket closed: ${event.code} - ${event.reason}`)
         }
       } catch (error) {
         onError?.(error)
       }
     }
 
-    connect()
+    void connect()
 
     return {
       disconnect: () => {

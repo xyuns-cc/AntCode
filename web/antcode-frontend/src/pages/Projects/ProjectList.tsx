@@ -904,9 +904,9 @@ const ProjectList: React.FC = () => {
               value={statusFilter}
               onChange={handleStatusChange}
             >
-              <Option value="active">活跃</Option>
-              <Option value="inactive">非活跃</Option>
-              <Option value="error">错误</Option>
+              <Option value="active">激活</Option>
+              <Option value="inactive">未激活</Option>
+              <Option value="archived">已归档</Option>
             </Select>
             {user?.is_admin && (
               <Select
