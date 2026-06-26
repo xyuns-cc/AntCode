@@ -5,13 +5,14 @@
 需求: 1.1, 1.2, 1.3, 1.4, 1.5, 6.4, 9.1, 9.2, 12.1, 12.3, 12.4
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from loguru import logger
-
+from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.crawl.batch_service import crawl_batch_service
+from antcode_core.application.services.crawl.metrics_service import crawl_metrics_service
+from antcode_core.application.services.crawl.progress_service import crawl_progress_service
+from antcode_core.application.services.crawl.queue_service import crawl_queue_service
+from antcode_core.application.services.crawl.test_service import crawl_test_service
 from antcode_core.common.exceptions import BatchNotFoundError, BatchStateError
-from antcode_web_api.response import Messages, page
-from antcode_web_api.response import success as success_response
-from antcode_core.common.security.auth import get_current_user
+from antcode_core.common.security.auth import TokenData, get_current_admin_user, get_current_user
 from antcode_core.domain.models.crawl import CrawlBatch
 from antcode_core.domain.models.project import Project
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
@@ -31,14 +32,32 @@ from antcode_core.domain.schemas.crawl import (
     SystemMetricsInfo,
     TestStatusResponse,
 )
-from antcode_core.application.services.base import QueryHelper
-from antcode_core.application.services.crawl.batch_service import crawl_batch_service
-from antcode_core.application.services.crawl.metrics_service import crawl_metrics_service
-from antcode_core.application.services.crawl.progress_service import crawl_progress_service
-from antcode_core.application.services.crawl.queue_service import crawl_queue_service
-from antcode_core.application.services.crawl.test_service import crawl_test_service
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from loguru import logger
+
+from antcode_web_api.response import Messages, page
+from antcode_web_api.response import success as success_response
 
 router = APIRouter()
+
+
+# =============================================================================
+# 权限校验辅助
+# =============================================================================
+
+
+async def _verify_batch_owner(batch_id: str, current_user: TokenData) -> CrawlBatch:
+    """校验批次所有权
+
+    管理员可访问任意批次；普通用户只能访问自己创建的批次。
+    Raise 404 当批次不存在，403 当无权访问。
+    """
+    batch = await crawl_batch_service.get_batch(batch_id)
+    if not batch:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="批次不存在")
+    if not getattr(current_user, "is_admin", False) and batch.user_id != current_user.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该批次")
+    return batch
 
 
 # =============================================================================
@@ -139,19 +158,14 @@ async def create_batch(
 )
 async def get_batch(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取批次详情
 
     需求: 1.5 - 用户查询批次状态时返回批次的当前状态和进度信息
     """
     try:
-        batch = await crawl_batch_service.get_batch(batch_id)
-        if not batch:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="批次不存在",
-            )
+        batch = await _verify_batch_owner(batch_id, current_user)
 
         response = await _build_batch_response(batch)
         return success_response(response, message=Messages.QUERY_SUCCESS)
@@ -178,13 +192,15 @@ async def list_batches(
     is_test: bool = Query(None, description="是否为测试批次"),
     page_num: int = Query(1, ge=1, alias="page", description="页码"),
     size: int = Query(20, ge=1, le=100, description="每页数量"),
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取批次列表"""
     try:
+        # 管理员可以查看所有用户的批次；普通用户仅限自己的
+        user_id_filter = None if getattr(current_user, "is_admin", False) else current_user.user_id
         batches, total = await crawl_batch_service.list_batches(
             project_id=project_id,
-            user_id=current_user.user_id,
+            user_id=user_id_filter,
             status=batch_status,
             is_test=is_test,
             page=page_num,
@@ -218,10 +234,11 @@ async def list_batches(
 )
 async def start_batch(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """启动批次"""
     try:
+        await _verify_batch_owner(batch_id, current_user)
         batch = await crawl_batch_service.start_batch(batch_id)
         response = await _build_batch_response(batch)
         return success_response(response, message="批次已启动")
@@ -236,6 +253,8 @@ async def start_batch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"启动批次失败: {e}")
         raise HTTPException(
@@ -252,13 +271,14 @@ async def start_batch(
 )
 async def pause_batch(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """暂停批次
 
     需求: 1.2 - 用户请求暂停批次时停止分发新任务并保持当前进度
     """
     try:
+        await _verify_batch_owner(batch_id, current_user)
         batch = await crawl_batch_service.pause_batch(batch_id)
         response = await _build_batch_response(batch)
         return success_response(response, message="批次已暂停")
@@ -273,6 +293,8 @@ async def pause_batch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"暂停批次失败: {e}")
         raise HTTPException(
@@ -289,13 +311,14 @@ async def pause_batch(
 )
 async def resume_batch(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """恢复批次
 
     需求: 1.3 - 用户请求恢复批次时从暂停点继续分发任务
     """
     try:
+        await _verify_batch_owner(batch_id, current_user)
         batch = await crawl_batch_service.resume_batch(batch_id)
         response = await _build_batch_response(batch)
         return success_response(response, message="批次已恢复")
@@ -310,6 +333,8 @@ async def resume_batch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"恢复批次失败: {e}")
         raise HTTPException(
@@ -327,13 +352,14 @@ async def resume_batch(
 async def cancel_batch(
     batch_id: str,
     cleanup: bool = Query(True, description="是否清理队列和进度数据"),
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """取消批次
 
     需求: 1.4 - 用户请求取消批次时停止所有任务并清理相关资源
     """
     try:
+        await _verify_batch_owner(batch_id, current_user)
         batch = await crawl_batch_service.cancel_batch(batch_id, cleanup=cleanup)
         response = await _build_batch_response(batch)
         return success_response(response, message="批次已取消")
@@ -348,6 +374,8 @@ async def cancel_batch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"取消批次失败: {e}")
         raise HTTPException(
@@ -370,20 +398,15 @@ async def cancel_batch(
 )
 async def get_batch_progress(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取批次进度
 
     需求: 6.4 - 查询批次进度时返回 URL 统计、速度、活跃 Worker 数等信息
     """
     try:
-        # 获取批次信息
-        batch = await crawl_batch_service.get_batch(batch_id)
-        if not batch:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="批次不存在",
-            )
+        # 获取批次信息（带所有权校验）
+        batch = await _verify_batch_owner(batch_id, current_user)
 
         # 获取项目公开 ID
         project = await Project.filter(id=batch.project_id).first()
@@ -532,10 +555,11 @@ async def create_test_batch(
 )
 async def get_test_status(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取测试状态"""
     try:
+        await _verify_batch_owner(batch_id, current_user)
         status_info = await crawl_test_service.get_test_status(batch_id)
 
         if status_info.get("status") == "not_found":
@@ -570,10 +594,11 @@ async def get_test_status(
 )
 async def get_test_result(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取测试结果"""
     try:
+        await _verify_batch_owner(batch_id, current_user)
         result = await crawl_test_service.get_test_result(batch_id)
 
         if not result:
@@ -613,10 +638,11 @@ async def get_test_result(
 )
 async def cleanup_test(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """清理测试数据"""
     try:
+        await _verify_batch_owner(batch_id, current_user)
         success = await crawl_test_service.cleanup_test(batch_id)
 
         if not success:
@@ -697,20 +723,15 @@ async def get_system_metrics(
 )
 async def get_batch_metrics(
     batch_id: str,
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """获取批次监控指标
 
     需求: 9.2 - 查询批次指标时返回完成数、失败数、速度、活跃 Worker 数等
     """
     try:
-        # 获取批次信息
-        batch = await crawl_batch_service.get_batch(batch_id)
-        if not batch:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="批次不存在",
-            )
+        # 获取批次信息（带所有权校验）
+        batch = await _verify_batch_owner(batch_id, current_user)
 
         # 获取项目公开 ID
         project = await Project.filter(id=batch.project_id).first()
@@ -914,9 +935,9 @@ async def update_alert_config(
     pel_size_threshold: int = Query(None, description="PEL大小告警阈值"),
     dead_letter_threshold: int = Query(None, description="死信队列告警阈值"),
     dedup_size_threshold: int = Query(None, description="去重集合大小告警阈值"),
-    current_user=Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_admin_user),
 ):
-    """更新告警配置"""
+    """更新告警配置（仅管理员）"""
     try:
         crawl_metrics_service.update_alert_config(
             stream_length_threshold=stream_length_threshold,
