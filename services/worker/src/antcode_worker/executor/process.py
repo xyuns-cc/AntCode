@@ -373,7 +373,12 @@ class ProcessExecutor(BaseExecutor):
         stderr_count = 0
 
         async def read_stream(stream: asyncio.StreamReader, stream_type: str) -> int:
-            """读取单个流"""
+            """读取单个流
+
+            V8: 即使超过 max_lines 也必须继续 ``await readline()``,
+            否则 pipe buffer 满后子进程下一次 ``write`` 会阻塞,整个任务卡死。
+            超限后 drop 行内容,但保留 drain 行为。
+            """
             nonlocal stdout_count, stderr_count
             count = 0
 
@@ -385,10 +390,13 @@ class ProcessExecutor(BaseExecutor):
 
                     count += 1
 
-                    # 检查行数限制
+                    # V8: 超限后只 drop 不 break, 继续读取以释放 pipe buffer。
                     if count > max_lines:
                         if count == max_lines + 1:
-                            logger.warning(f"任务 {run_id} {stream_type} 输出行数超限 ({max_lines})")
+                            logger.warning(
+                                f"任务 {run_id} {stream_type} 输出行数超限 ({max_lines}); "
+                                "后续行将被丢弃,但继续 drain 防止子进程阻塞"
+                            )
                         continue
 
                     # 解码内容

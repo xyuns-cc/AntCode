@@ -103,9 +103,13 @@ class TaskPayload:
     task_type: TaskType = TaskType.CODE
 
     # Worker 执行工作区，由 source bundle 解包生成
-    workspace_path: str | None = None
-    project_cwd: str | None = None
+    workspace_path: str = ""
+    project_cwd: str = ""
     source_bundle: SourceBundle | None = None
+
+    # 运行上下文（供插件/子进程读取）
+    run_id: str = ""
+    project_id: str = ""
 
     # 执行入口
     entry_point: str = ""  # 入口文件

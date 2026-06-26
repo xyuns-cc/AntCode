@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from antcode_core.observability.tracing import (
     child_span,
     new_trace,
+    parse_traceparent,
     set_current_trace,
 )
 from loguru import logger
@@ -618,16 +619,26 @@ class Engine:
 
             # 生成任务 payload
             payload = self._build_payload(task_msg)
+            payload.run_id = run_id
+            payload.project_id = context.project_id
 
-            # 下载/缓存项目
-            if self._project_fetcher and payload.download_url:
-                payload.project_path = await self._project_fetcher.fetch(
+            # V1/V1.5/V2: 下载/缓存项目 source bundle
+            source_bundle = getattr(task_msg, "source_bundle", None)
+            if self._project_fetcher and source_bundle is not None:
+                workspace = await self._project_fetcher.fetch(
+                    run_id=run_id,
                     project_id=context.project_id,
-                    download_url=payload.download_url,
-                    file_hash=payload.file_hash,
-                    is_compressed=payload.is_compressed,
+                    source_bundle_uri=source_bundle.uri,
+                    source_bundle_sha256=source_bundle.sha256,
+                    source_bundle_size=source_bundle.size or 0,
                     entry_point=payload.entry_point,
+                    source_subdir=getattr(source_bundle, "source_subdir", None)
+                    or getattr(task_msg, "source_subdir", "")
+                    or "",
                 )
+                # V5: SpiderPlugin / 其它插件读 workspace_path / project_cwd
+                payload.workspace_path = workspace.bundle_root or ""
+                payload.project_cwd = workspace.project_cwd or workspace.bundle_root or ""
 
             # 准备运行时环境
             runtime_handle = await self._prepare_runtime(context)
@@ -646,6 +657,15 @@ class Engine:
             # 注入运行时环境变量
             if context.runtime_spec and context.runtime_spec.env_vars:
                 exec_plan.env.update(context.runtime_spec.env_vars)
+
+            # V11: 把入站 traceparent 透传给子进程,实现 Master → Worker → 子进程
+            # 端到端的 trace_id 连续。子脚本(scrapy/spider/用户代码)读取
+            # TRACEPARENT / ANTCODE_TRACE_ID 即可注入自己的 logger。
+            inbound_traceparent = getattr(task_msg, "traceparent", "") or ""
+            if inbound_traceparent:
+                exec_plan.env["TRACEPARENT"] = inbound_traceparent
+                ids = parse_traceparent(inbound_traceparent)
+                exec_plan.env["ANTCODE_TRACE_ID"] = ids.trace_id if ids else ""
 
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
@@ -714,6 +734,12 @@ class Engine:
                 await log_manager.stop()
             if runtime_handle and self._runtime_manager:
                 await self._runtime_manager.release(runtime_handle)
+            # V3: 清理 fetched workspace,避免无限堆积
+            if self._project_fetcher is not None:
+                try:
+                    await self._project_fetcher.cleanup(run_id)
+                except Exception:
+                    logger.exception(f"清理 workspace 失败: run_id={run_id}")
 
     async def _report_result(self, context: RunContext, result: ExecResult) -> None:
         """上报结果（幂等）"""
@@ -737,18 +763,19 @@ class Engine:
         )
 
         # 幂等上报
-        success = await self._transport.report_result(task_result)
-        if success:
+        report_ok = await self._transport.report_result(task_result)
+        if report_ok:
             logger.info(f"结果已上报: {context.run_id}")
+            # V12: 只有 report_result 成功才 ack;
+            # 失败时不 ack,Stream 上的 PEL 会被 XAUTOCLAIM 回收交给其它 worker 重试。
+            if context.receipt:
+                await self._transport.ack_task(context.receipt, accepted=True)
+            # 清理状态(成功路径)
+            await self._state_manager.remove(context.run_id)
         else:
-            logger.warning(f"结果上报失败: {context.run_id}")
-
-        # ACK 任务
-        if context.receipt:
-            await self._transport.ack_task(context.receipt, accepted=True)
-
-        # 清理状态
-        await self._state_manager.remove(context.run_id)
+            logger.error(
+                f"report_result 失败,不 ack 让 PEL 自动 reclaim: run_id={context.run_id}"
+            )
 
     async def _report_result_by_info(
         self,
@@ -881,15 +908,9 @@ class Engine:
             env_vars = dict(env_vars)
             env_vars.pop("ANTCODE_RUNTIME_ENV", None)
 
-        # 获取 is_compressed 字段（用于判断是否需要解压）
-        is_compressed = getattr(task_msg, "is_compressed", None)
-
         return TaskPayload(
             task_type=task_type,
-            project_path=None,
-            download_url=getattr(task_msg, "download_url", "") or None,
-            file_hash=getattr(task_msg, "file_hash", "") or None,
-            is_compressed=is_compressed,
+            source_bundle=getattr(task_msg, "source_bundle", None),
             entry_point=getattr(task_msg, "entry_point", "") or "",
             args=args,
             kwargs=kwargs,
@@ -1005,7 +1026,7 @@ class Engine:
             command=command,
             args=args,
             env=payload.env_vars,
-            cwd=payload.project_path or ".",
+            cwd=payload.project_cwd or payload.workspace_path or ".",
             timeout_seconds=context.timeout_seconds,
             memory_limit_mb=context.memory_limit_mb,
             cpu_limit_seconds=context.cpu_limit_seconds,

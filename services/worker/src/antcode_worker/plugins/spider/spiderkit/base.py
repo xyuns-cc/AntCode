@@ -107,6 +107,9 @@ class Spider(ABC):
         self._running = False
         self._request_queue: asyncio.Queue = asyncio.Queue()
         self._seen_urls: set = set()
+        # V4: 跟踪 worker tasks,任何退出路径(正常/异常/取消)都需要 cancel + gather,
+        # 避免 worker 协程 leak 到下一次 run() 或事件循环关闭时报警告。
+        self._workers: list[asyncio.Task] = []
 
         # 结果
         self._result = CrawlResult(spider_name=self.name)
@@ -208,22 +211,21 @@ class Spider(ABC):
 
         self._running = True
         status = "completed"
+        self._workers = []
 
         try:
             # 添加起始请求
             async for request in self.start_requests():
                 await self._request_queue.put(request)
 
-            # 并发处理
-            workers = [asyncio.create_task(self._worker()) for _ in range(self.concurrent_requests)]
+            # 并发处理 (V4: 用实例属性持有,finally 里统一清理)
+            self._workers = [
+                asyncio.create_task(self._worker())
+                for _ in range(self.concurrent_requests)
+            ]
 
             # 等待队列清空
             await self._request_queue.join()
-
-            # 停止 workers
-            self._running = False
-            for worker in workers:
-                worker.cancel()
 
         except Exception as e:
             logger.error(f"爬虫异常: {e}")
@@ -231,6 +233,15 @@ class Spider(ABC):
             status = "failed"
 
         finally:
+            # V4: 无论正常完成 / 异常 / 取消,都必须 cancel + gather workers,
+            # 避免协程残留。原代码只有 try 块成功时才 cancel,异常路径 leak。
+            self._running = False
+            for worker in self._workers:
+                if not worker.done():
+                    worker.cancel()
+            if self._workers:
+                await asyncio.gather(*self._workers, return_exceptions=True)
+            self._workers = []
             if own_client and self._client:
                 await self._client.close()
 

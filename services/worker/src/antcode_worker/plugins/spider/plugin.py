@@ -52,9 +52,32 @@ class SpiderPlugin(PluginBase):
 
         # 判断执行模式
         if spider_config.get("framework") == "scrapy":
-            return self._build_scrapy_plan(python_exe, context, payload, spider_config)
+            plan = self._build_scrapy_plan(python_exe, context, payload, spider_config)
         else:
-            return self._build_script_plan(python_exe, context, payload, spider_config)
+            plan = self._build_script_plan(python_exe, context, payload, spider_config)
+
+        # V7: 注入 spider 子进程联系 RedisDataReporter / GatewayDataReporter
+        # 所需的最小上下文。子脚本里读这些 env 即可启动 reporter,无需
+        # 业务代码硬编码 redis url。WORKER_REDIS_URL / WORKER_REDIS_NAMESPACE
+        # 已在父 worker 进程的 environ 里 (由 config 模块负责设置)。
+        self._inject_reporter_env(plan, payload)
+        return plan
+
+    def _inject_reporter_env(self, plan: ExecPlan, payload: TaskPayload) -> None:
+        """把 reporter 配置写入 plan.env, 子进程通过 env 拉起 SpiderDataReporter."""
+        redis_url = os.environ.get("WORKER_REDIS_URL", "")
+        if redis_url:
+            plan.env.setdefault("ANTCODE_SPIDER_REDIS_URL", redis_url)
+            plan.env.setdefault("ANTCODE_SPIDER_REPORTER", "redis")
+        # run_id / project_id 来自 payload(engine 已在 _execute_task 写入),
+        # 即使没有 redis 也提供,便于 gateway-mode reporter 或日志关联使用。
+        if payload.run_id:
+            plan.env.setdefault("ANTCODE_SPIDER_RUN_ID", payload.run_id)
+        if payload.project_id:
+            plan.env.setdefault("ANTCODE_SPIDER_PROJECT_ID", payload.project_id)
+        namespace = os.environ.get("WORKER_REDIS_NAMESPACE", "")
+        if namespace:
+            plan.env.setdefault("ANTCODE_SPIDER_REDIS_NAMESPACE", namespace)
 
     def _extract_spider_config(self, payload: TaskPayload) -> dict[str, Any]:
         """从 payload 提取爬虫配置"""
