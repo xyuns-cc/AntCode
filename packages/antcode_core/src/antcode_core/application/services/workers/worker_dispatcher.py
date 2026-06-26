@@ -835,6 +835,10 @@ class WorkerTaskDispatcher:
 
         return await worker_project_sync_service.sync_projects_to_worker_with_info(worker, project_ids)
 
+    # U3 / #16: ready stream 上限,防止 Worker 长时间挂掉时 stream 无限增长。
+    # 用 ~10k entries(近似裁剪,XADD 内部 trim,实际值会大致在 10k 上下)。
+    READY_STREAM_MAXLEN = 10000
+
     async def _send_batch_to_queue(self, worker, tasks, batch_id):
         """写入 Redis Stream 分发批量任务
 
@@ -842,11 +846,35 @@ class WorkerTaskDispatcher:
         ``set_current_trace`` 绑定的 W3C ``traceparent`` 写到每条 ready
         stream message 上，Worker poll 拿到后即可复用同一个 trace_id，
         在 Worker 端的 logger / Redis 写入串成完整端到端链路。
+
+        U3: 在 XADD 之前主动 ``XGROUP CREATE ... MKSTREAM`` consumer group,
+        ``start_id="0"`` —— 这样 Worker 起得晚也能拿到历史消息(默认 "$"
+        只读到新写入,起得晚的 worker 会丢任务)。``BUSYGROUP`` 异常吞掉
+        视作幂等。
+
+        #16: 给 ready stream 加 ``maxlen`` 近似裁剪,防止 Worker 离线时
+        stream 无限增长把 Redis 撑爆。
         """
         from antcode_core.infrastructure.redis.streams import StreamClient
 
         stream = StreamClient()
         stream_key = task_ready_stream(worker.public_id)
+
+        # U3: 写入前确保 consumer group 存在,start_id="0" 让起得晚的
+        # Worker 也能 deliver 到历史消息。StreamClient.xgroup_create 已
+        # 内置 BUSYGROUP 幂等处理。
+        try:
+            await stream.xgroup_create(
+                stream_key,
+                group_name="antcode-workers",
+                start_id="0",
+                mkstream=True,
+            )
+        except Exception as exc:
+            # 非 BUSYGROUP 类异常(网络抖动等)记一行 warning,不阻塞 XADD
+            # —— xadd 自带 reconnect,group 即使本次没建上,Worker 端 start
+            # 时还会 ensure_consumer_group。
+            logger.warning(f"ensure_group 失败,继续 XADD: {exc}")
 
         trace_parent = get_current_trace() or ""
 
@@ -872,7 +900,11 @@ class WorkerTaskDispatcher:
             )
 
         try:
-            await stream.xadd_batch(stream_key, messages)
+            # #16: maxlen 近似裁剪。StreamClient.xadd_batch(maxlen=N) 会
+            # 对 pipeline 内每条 XADD 都加 MAXLEN ~N。
+            await stream.xadd_batch(
+                stream_key, messages, maxlen=self.READY_STREAM_MAXLEN
+            )
         except Exception as e:
             logger.exception("任务写入 Redis 失败")
             return {"success": False, "error": str(e)}

@@ -236,9 +236,21 @@ class RetryService:
             logger.error(f"发送任务失败告警失败: {e}")
 
     async def _process_retry_queue(self):
-        """处理重试队列"""
+        """处理重试队列
+
+        #15: 入口加 leader 闸口 —— 双 Master 场景下,非 Leader 不能 trigger
+        任务,否则会和 Leader 的 scheduler 双跑。空转 sleep 让出循环。
+        """
+        from antcode_master.leader import ensure_leader
+
         while self._running:
             try:
+                if not await ensure_leader():
+                    # 非 Leader,空转;不消费队列 —— 让 Leader 的 retry_service
+                    # 来 trigger。
+                    await asyncio.sleep(1.0)
+                    continue
+
                 try:
                     retry_item = await asyncio.wait_for(self._retry_queue.get(), timeout=1.0)
                 except TimeoutError:

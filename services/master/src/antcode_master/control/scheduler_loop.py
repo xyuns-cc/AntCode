@@ -43,6 +43,7 @@ from tortoise.expressions import Q
 from tortoise.functions import Avg, Count, Max
 
 from antcode_master.control.dispatcher_loop import spider_task_dispatcher
+from antcode_master.leader import ensure_leader
 
 
 class SchedulerService:
@@ -69,8 +70,16 @@ class SchedulerService:
         }
 
     async def start(self):
-        """启动调度器"""
+        """启动调度器
+
+        U1: 仅 Leader 启动 APScheduler 调度,避免双 Master 双跑同一个
+        任务。非 Leader 进 standby —— 等 leader_election 重新 try_become
+        成功之后再由调用方重启 scheduler_service。
+        """
         try:
+            if not await ensure_leader():
+                logger.info("非 Leader,scheduler 进入 standby,不启动 APScheduler")
+                return
             self.scheduler.start()
             logger.info("任务调度器已启动")
 
@@ -744,7 +753,16 @@ class SchedulerService:
 
         把准备 / 分发 / 处理 / 失败 / 收尾 5 段拆到独立方法，主壳里只
         负责 trace 绑定 + 调度顺序。
+
+        U1: 入口加 leader 闸口 —— 过去 leader 失效后 APScheduler 仍可能
+        触发已排好的 job,这里直接放弃,避免两个 Master 同时跑同一个任务。
         """
+        if not await ensure_leader():
+            logger.warning(
+                f"非 Leader,放弃任务执行: task_id={task_id}(可能 leader 在 in-flight 期间发生切换)"
+            )
+            return
+
         run_id = str(uuid.uuid4())
 
         # P5.4: 在调度入口种入新的 W3C trace 上下文。
@@ -1104,11 +1122,19 @@ class SchedulerService:
             )
             priority = getattr(task, "priority", None)
 
+            # U2: 与 core scheduler_service 实现对齐 —— 当项目用 worker 端
+            # venv 时,把 worker_env_name 注入 ANTCODE_RUNTIME_ENV,Worker
+            # 执行时才能 resolve 到正确的 venv;不注入会导致 worker 走默认
+            # 解释器,污染依赖环境。
+            environment_vars = dict(task.environment_vars or {})
+            if getattr(project, "env_location", None) == "worker" and project.worker_env_name:
+                environment_vars.setdefault("ANTCODE_RUNTIME_ENV", project.worker_env_name)
+
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,
                 run_id=run_id,
                 params=task.execution_params,
-                environment_vars=task.environment_vars,
+                environment_vars=environment_vars,
                 timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
                 worker_id=target_worker.public_id,
                 priority=priority,
@@ -1237,38 +1263,53 @@ class SchedulerService:
             return {"success": False, "error": str(e)}
 
     async def _schedule_retry(self, task, execution):
-        """调度重试"""
-        execution.retry_count += 1
-        await execution.save()
+        """调度重试
 
-        # 延迟后重试
-        retry_delay = task.retry_delay or settings.TASK_RETRY_DELAY
+        U1: 入口加 leader 闸口,防止非 Leader Master 也排 retry。
 
-        # 使用唯一的job_id，包含run_id以避免冲突
-        job_id = f"{task.id}_retry_{execution.run_id}_{execution.retry_count}"
-
-        # 先尝试移除可能存在的旧作业
-        try:
-            self.scheduler.remove_job(job_id)
-        except Exception:
-            pass  # 忽略作业不存在的错误
-
-        try:
-            base_time = (
-                datetime.now(self.scheduler.timezone)
-                if hasattr(self.scheduler, "timezone") and self.scheduler.timezone
-                else datetime.now(UTC)
+        U4: 不再 ``scheduler.add_job`` 写到 APScheduler in-memory store
+        —— APScheduler 的 jobstore 是 ``MemoryJobStore``,Master 重启 / 切
+        Leader 后 retry job 会丢。改为把 retry 意图持久化到 TaskRun(用
+        ``result_data["next_retry_at"]`` 记录,无需 schema migration)并
+        派发到 ``retry_service._retry_queue``,后者由 Leader Master 的 retry
+        loop 负责 trigger。Master 重启后,持久化字段还在,新 Leader 的
+        recovery 路径可以从 DB 重新捞回。
+        """
+        if not await ensure_leader():
+            logger.warning(
+                f"非 Leader,放弃排 retry: task_id={task.id} run={execution.run_id}"
             )
-        except Exception:
-            base_time = datetime.now(UTC)
+            return
 
-        self.scheduler.add_job(
-            func=self._execute_task,
-            trigger=DateTrigger(run_date=base_time + timedelta(seconds=retry_delay)),
-            id=job_id,
-            kwargs={"task_id": task.id},
-            replace_existing=True,  # 如果存在则替换
-        )
+        execution.retry_count += 1
+        retry_delay = task.retry_delay or settings.TASK_RETRY_DELAY
+        next_retry_at = datetime.now(UTC) + timedelta(seconds=retry_delay)
+
+        # 把 next_retry_at 写到 result_data (JSONField),Master 重启后
+        # recovery 路径可据此重新调度。
+        result_data = dict(execution.result_data or {})
+        result_data["next_retry_at"] = next_retry_at.isoformat()
+        result_data["retry_count"] = execution.retry_count
+        execution.result_data = result_data
+        await execution.save(update_fields=["retry_count", "result_data"])
+
+        # 派发到 retry_service 的 in-memory queue(retry_loop 会等到点
+        # 再 trigger_task);DB 上的 next_retry_at 提供持久化兜底。
+        try:
+            from antcode_master.control.retry_loop import retry_service
+
+            await retry_service._retry_queue.put(
+                {
+                    "task_id": task.id,
+                    "run_id": execution.run_id,
+                    "retry_time": next_retry_at,
+                    "retry_count": execution.retry_count,
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                f"派发 retry 到 retry_service 失败,DB next_retry_at 仍可兜底: {exc}"
+            )
 
         await self._log_execution(
             execution,

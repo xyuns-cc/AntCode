@@ -370,8 +370,24 @@ class RedisTransport(TransportBase):
             logger.exception("上报结果失败")
             return False
 
+    # U6: requeue 病毒消息阈值 + 死信 stream。
+    MAX_REQUEUE_COUNT = 5
+    DEAD_LETTER_STREAM_SUFFIX = "task:dead_letter"
+
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
-        """重新入队任务"""
+        """重新入队任务
+
+        U6 修复点:
+        - 之前的实现没有 requeue 次数上限,某条"恶意 / 总是失败"的消息
+          会被无限重投,把 Worker 卡死在一条任务上(病毒消息)。这里加
+          ``MAX_REQUEUE_COUNT`` 上限,超过后写入 ``task:dead_letter``
+          Stream 并直接 ACK,避免死循环。
+        - 之前的实现把 cached dict 直接 ``xadd`` —— 但缓存里的 ``params``
+          / ``environment`` 已经被 ``_decode_data`` ``json.loads`` 成 dict,
+          ``xadd`` 不接受 nested dict 值(redis-py 会按 ``str(dict)`` stringify,
+          下一次 Worker poll 时再 ``json.loads`` 直接抛异常)。这里对
+          这几个字段在 requeue 写回前重新 ``json.dumps``。
+        """
         if not self._redis or not self._running:
             return False
 
@@ -382,12 +398,49 @@ class RedisTransport(TransportBase):
 
             stream_key, msg_id, data = cached
             data = dict(data)
-            data["requeue_reason"] = reason
-            data["requeue_at"] = datetime.now().isoformat()
+
+            # ---- 1) 计数 + 死信检查 ----
+            try:
+                current_count = int(data.get("requeue_count", "0") or "0")
+            except (TypeError, ValueError):
+                current_count = 0
+            requeue_count = current_count + 1
+
+            if requeue_count > self.MAX_REQUEUE_COUNT:
+                # 写死信 + ack 原消息。死信 stream 用 namespace 拼接,与
+                # 现有 stream key naming 风格一致。
+                ns = getattr(self._keys, "namespace", None) or "antcode"
+                dead_letter_key = f"{ns}:{self.DEAD_LETTER_STREAM_SUFFIX}"
+                dead_payload = self._serialize_for_xadd(data)
+                dead_payload["requeue_count"] = str(requeue_count)
+                dead_payload["requeue_reason"] = reason or ""
+                dead_payload["dead_at"] = datetime.now().isoformat()
+                await self._run_with_reconnect(
+                    "写入死信 stream",
+                    lambda: self._redis.xadd(
+                        dead_letter_key, dead_payload, maxlen=10000, approximate=True
+                    ),
+                )
+                await self._run_with_reconnect(
+                    "死信 ack",
+                    lambda: self._redis.xack(stream_key, self._consumer_group, msg_id),
+                )
+                self._receipt_cache.pop(receipt, None)
+                logger.warning(
+                    f"消息进入死信(超过 {self.MAX_REQUEUE_COUNT} 次 requeue): "
+                    f"receipt={receipt} count={requeue_count} reason={reason}"
+                )
+                return True
+
+            # ---- 2) 正常 requeue:把 nested dict 字段重新 JSON 编码 ----
+            requeue_payload = self._serialize_for_xadd(data)
+            requeue_payload["requeue_count"] = str(requeue_count)
+            requeue_payload["requeue_reason"] = reason or ""
+            requeue_payload["requeue_at"] = datetime.now().isoformat()
 
             await self._run_with_reconnect(
                 "任务重新入队",
-                lambda: self._redis.xadd(stream_key, data),
+                lambda: self._redis.xadd(stream_key, requeue_payload),
             )
             await self._run_with_reconnect(
                 "重新入队确认",
@@ -398,6 +451,28 @@ class RedisTransport(TransportBase):
         except Exception:
             logger.exception("重新入队失败")
             return False
+
+    def _serialize_for_xadd(self, data: dict[str, Any]) -> dict[str, str]:
+        """把缓存中的解码后 dict 还原成 ``xadd`` 可接受的 ``str/bytes`` map。
+
+        ``_decode_data`` 把 ``params/environment/data/payload`` 之类的字符串
+        字段 ``json.loads`` 成了 Python dict。``xadd`` 不接受 nested dict
+        作为字段值(redis-py 默认 ``str(dict)``,下游解析直接炸),所以这里
+        显式 ``json.dumps`` 一次。其它字段统一 ``str(...)``。
+        """
+        out: dict[str, str] = {}
+        for k, v in data.items():
+            if isinstance(v, (dict, list)):
+                out[k] = json.dumps(v, ensure_ascii=False)
+            elif isinstance(v, bool):
+                out[k] = "true" if v else "false"
+            elif v is None:
+                out[k] = ""
+            elif isinstance(v, (bytes, str)):
+                out[k] = v if isinstance(v, str) else v.decode("utf-8", errors="ignore")
+            else:
+                out[k] = str(v)
+        return out
 
     async def send_log(self, log: LogMessage) -> bool:
         """发送实时日志
