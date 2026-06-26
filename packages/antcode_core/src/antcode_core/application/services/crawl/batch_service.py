@@ -7,13 +7,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
-from antcode_core.common.exceptions import BatchNotFoundError, BatchStateError
-from antcode_core.domain.models.crawl import BatchStatus, CrawlBatch
-from antcode_core.domain.models.project import Project
 from antcode_core.application.services.base import BaseService
 from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
 from antcode_core.application.services.crawl.progress_service import (
@@ -21,6 +18,10 @@ from antcode_core.application.services.crawl.progress_service import (
     crawl_progress_service,
 )
 from antcode_core.application.services.crawl.queue_service import CrawlQueueService, crawl_queue_service
+from antcode_core.common.config import settings
+from antcode_core.common.exceptions import BatchNotFoundError, BatchStateError
+from antcode_core.domain.models.crawl import BatchStatus, CrawlBatch
+from antcode_core.domain.models.project import Project
 
 # 批次状态转换规则
 # 定义每个状态可以转换到哪些状态
@@ -64,6 +65,38 @@ class CrawlBatchService(BaseService):
         self._queue_service = queue_service or crawl_queue_service
         self._progress_service = progress_service or crawl_progress_service
         self._dedup_service = dedup_service or crawl_dedup_service
+        self._event_client = None
+
+    async def _publish_batch_event(self, event: str, batch_id: str) -> None:
+        """发布批次生命周期事件到调度事件流
+
+        让 Master 端的控制平面接管批次的实际任务分发逻辑（暂停/恢复/取消等）。
+        Master 端响应这些事件的接管逻辑由控制平面负责（follow-up）。
+
+        Args:
+            event: 事件名，如 batch_started / batch_paused / batch_resumed / batch_cancelled
+            batch_id: 批次公开 ID
+        """
+        if not settings.REDIS_ENABLED:
+            logger.debug(f"Redis 未启用，跳过批次事件发布: {event}({batch_id})")
+            return
+        try:
+            if self._event_client is None:
+                from antcode_core.infrastructure.redis.streams import StreamClient
+
+                self._event_client = StreamClient()
+            await self._event_client.xadd(
+                settings.scheduler_event_stream,
+                {
+                    "event": event,
+                    "batch_id": batch_id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+                maxlen=settings.SCHEDULER_EVENT_MAXLEN,
+            )
+            logger.info(f"已发布批次事件: {event}({batch_id})")
+        except Exception as e:
+            logger.warning(f"发布批次事件失败: {event}({batch_id}): {e}")
 
     # =========================================================================
     # 批次创建
@@ -179,6 +212,9 @@ class CrawlBatchService(BaseService):
 
         logger.info(f"启动批次: batch_id={batch_id}, enqueued={result.enqueued}")
 
+        # 通知 Master 控制平面接管批次任务分发
+        await self._publish_batch_event("batch_started", batch.public_id)
+
         return batch
 
     # =========================================================================
@@ -221,6 +257,9 @@ class CrawlBatchService(BaseService):
 
         logger.info(f"暂停批次: batch_id={batch_id}")
 
+        # 通知 Master 停止分发新任务
+        await self._publish_batch_event("batch_paused", batch.public_id)
+
         return batch
 
     # =========================================================================
@@ -262,6 +301,9 @@ class CrawlBatchService(BaseService):
         await batch.save()
 
         logger.info(f"恢复批次: batch_id={batch_id}")
+
+        # 通知 Master 恢复批次任务分发
+        await self._publish_batch_event("batch_resumed", batch.public_id)
 
         return batch
 
@@ -652,6 +694,10 @@ class CrawlBatchService(BaseService):
         await batch.save()
 
         logger.info(f"取消批次: batch_id={batch.public_id}, cleanup={cleanup}")
+
+        # 通知 Master 停止所有相关任务分发
+        await self._publish_batch_event("batch_cancelled", batch.public_id)
+
         return batch
 
 

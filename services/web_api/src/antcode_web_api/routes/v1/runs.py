@@ -2,19 +2,21 @@
 
 from datetime import UTC, datetime
 
+from antcode_core.application.services.logs.task_log_service import task_log_service
+from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
+from antcode_core.common.security.auth import TokenData, get_current_user
+from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.domain.schemas.common import BaseResponse
+from antcode_core.domain.schemas.logs import LogFileResponse
+from antcode_core.domain.schemas.task import TaskRunResponse
+from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
-from antcode_core.common.security.auth import TokenData, get_current_user
-from antcode_core.domain.schemas.common import BaseResponse
-from antcode_core.domain.schemas.logs import LogFileResponse
-from antcode_core.domain.schemas.task import TaskRunResponse
-from antcode_core.application.services.logs.task_log_service import task_log_service
-from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
-from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 
 runs_router = APIRouter()
 
@@ -45,9 +47,8 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
     取消正在执行的任务
 
     - 如果任务在 Worker 上运行，会发送取消指令到 Worker
-    - 如果任务在队列中等待，会直接取消
+    - 如果任务在队列中等待，会使用 CAS UPDATE 抢占式标记为已取消（T5）
     """
-    from antcode_core.domain.models.enums import TaskStatus
     from antcode_core.domain.models.task import Task
 
     # 获取执行记录
@@ -72,6 +73,37 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
     task = await Task.get_or_none(id=execution.task_id)
     if not task:
         raise HTTPException(status_code=404, detail="关联任务不存在")
+
+    # T5: 未分发的执行使用 CAS UPDATE 抢占式置为 CANCELLED
+    if execution.worker_id is None and execution.status in (
+        TaskStatus.PENDING,
+        TaskStatus.QUEUED,
+    ):
+        updated = await TaskRun.filter(
+            run_id=execution.run_id,
+            worker_id__isnull=True,
+            status__in=[TaskStatus.PENDING, TaskStatus.QUEUED],
+        ).update(
+            status=TaskStatus.CANCELLED,
+            end_time=datetime.now(UTC),
+            error_message=f"用户取消 (user_id={current_user.user_id})",
+        )
+        if updated:
+            logger.info(f"执行已取消 (CAS): {run_id}")
+            return success_response(
+                {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "remote_cancelled": False,
+                },
+                message="任务已取消",
+            )
+        # 0 行命中：在 CAS 期间已被 dispatch，重新加载 execution
+        execution = await scheduler_service.get_execution_with_permission(
+            run_id, current_user.user_id
+        )
+        if not execution:
+            raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
     cancelled = False
 
@@ -119,6 +151,12 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
         },
         message="任务已取消",
     )
+
+
+@runs_router.post("/{run_id}/stop", response_model=BaseResponse[dict])
+async def stop_run_alias(run_id: str, current_user: TokenData = Depends(get_current_user)):
+    """前端兼容路径 — 转发到 cancel_run，使两个端点行为一致"""
+    return await cancel_run(run_id=run_id, current_user=current_user)
 
 
 @runs_router.get("/{run_id}/logs/file", response_model=BaseResponse[LogFileResponse])

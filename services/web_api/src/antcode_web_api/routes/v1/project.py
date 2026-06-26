@@ -5,31 +5,27 @@ from __future__ import annotations
 import csv
 import io
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import (
-    APIRouter,
-    Body,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    Query,
-    Request,
-    UploadFile,
-    status,
+from antcode_core.application.services.audit import audit_service
+from antcode_core.application.services.projects.code_source import (
+    SOURCE_TYPE_GIT,
+    SOURCE_TYPE_S3,
+    get_code_source_config,
+    get_runtime_artifact_config,
+    get_runtime_source_config,
+    normalize_source_type,
 )
-from fastapi.responses import StreamingResponse
-from loguru import logger
-from pydantic import BaseModel
-
-from antcode_web_api.response import (
-    ExecutionResponseBuilder,
-    Messages,
-    ProjectResponseBuilder,
-    page as page_response,
-    success as success_response,
+from antcode_core.application.services.projects.git_credential_service import (
+    git_credential_service,
+)
+from antcode_core.application.services.projects.project_service import project_service
+from antcode_core.application.services.projects.relation_service import relation_service
+from antcode_core.application.services.projects.unified_project_service import unified_project_service
+from antcode_core.application.services.users.user_service import user_service
+from antcode_core.application.services.workers.worker_project_service import (
+    worker_project_service,
 )
 from antcode_core.common.config import settings
 from antcode_core.common.security.auth import get_current_user, get_current_user_id
@@ -38,7 +34,6 @@ from antcode_core.common.utils.api_optimizer import (
     monitor_performance,
     optimize_large_response,
 )
-from antcode_core.common.utils.json_parser import JSONParser
 from antcode_core.domain.models import Task, TaskRun, User
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.models.enums import ProjectType
@@ -61,27 +56,35 @@ from antcode_core.domain.schemas.project import (
     TaskJsonRequest,
 )
 from antcode_core.domain.schemas.project_unified import UnifiedProjectUpdateRequest
-from antcode_core.application.services.audit import audit_service
-from antcode_core.application.services.workers.worker_project_service import (
-    worker_project_service,
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import StreamingResponse
+from loguru import logger
+from pydantic import BaseModel
+
+from antcode_web_api.exceptions import ProjectNotFoundException
+from antcode_web_api.response import (
+    ExecutionResponseBuilder,
+    Messages,
+    ProjectResponseBuilder,
+)
+from antcode_web_api.response import (
+    page as page_response,
+)
+from antcode_web_api.response import (
+    success as success_response,
 )
 from antcode_web_api.services.projects.project_file_service import project_file_service
-from antcode_core.application.services.projects.project_service import project_service
-from antcode_core.application.services.projects.relation_service import relation_service
-from antcode_core.application.services.projects.unified_project_service import unified_project_service
-from antcode_core.application.services.projects.code_source import (
-    SOURCE_TYPE_GIT,
-    SOURCE_TYPE_S3,
-    get_code_source_config,
-    get_runtime_artifact_config,
-    get_runtime_source_config,
-    normalize_source_type,
-)
-from antcode_core.application.services.projects.git_credential_service import (
-    git_credential_service,
-)
-from antcode_core.application.services.users.user_service import user_service
-from antcode_web_api.exceptions import ProjectNotFoundException
 
 project_router = APIRouter()
 
@@ -751,7 +754,7 @@ async def export_project_config(
 
     payload = {
         "version": 1,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": datetime.now(UTC).isoformat(),
         "project": project_payload,
     }
 
@@ -970,7 +973,13 @@ async def duplicate_project(
     payload: ProjectDuplicateRequest,
     current_user_id: int = Depends(get_current_user_id),
 ):
-    """复制项目"""
+    """复制项目
+
+    T11: 全程包裹在数据库事务中，避免主 Project 创建成功后子表（File/Rule/Code）
+    复制失败时留下孤儿项目记录。
+    """
+    from tortoise.transactions import in_transaction
+
     project = await project_service.get_project_by_id(project_id, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
@@ -978,97 +987,98 @@ async def duplicate_project(
     base_name = payload.name or f"{project.name}-copy"
     name = await _generate_unique_project_name(base_name)
 
-    new_project = await Project.create(
-        name=name,
-        description=project.description,
-        type=project.type,
-        status=project.status,
-        tags=project.tags or [],
-        dependencies=project.dependencies,
-        env_location=project.env_location,
-        worker_id=project.worker_id,
-        worker_env_name=project.worker_env_name,
-        python_version=project.python_version,
-        runtime_scope=project.runtime_scope,
-        runtime_kind=project.runtime_kind,
-        runtime_locator=project.runtime_locator,
-        current_runtime_id=project.current_runtime_id,
-        runtime_worker_id=project.runtime_worker_id,
-        execution_strategy=project.execution_strategy,
-        bound_worker_id=project.bound_worker_id,
-        fallback_enabled=project.fallback_enabled,
-        user_id=current_user_id,
-        updated_by=current_user_id,
-    )
+    async with in_transaction():
+        new_project = await Project.create(
+            name=name,
+            description=project.description,
+            type=project.type,
+            status=project.status,
+            tags=project.tags or [],
+            dependencies=project.dependencies,
+            env_location=project.env_location,
+            worker_id=project.worker_id,
+            worker_env_name=project.worker_env_name,
+            python_version=project.python_version,
+            runtime_scope=project.runtime_scope,
+            runtime_kind=project.runtime_kind,
+            runtime_locator=project.runtime_locator,
+            current_runtime_id=project.current_runtime_id,
+            runtime_worker_id=project.runtime_worker_id,
+            execution_strategy=project.execution_strategy,
+            bound_worker_id=project.bound_worker_id,
+            fallback_enabled=project.fallback_enabled,
+            user_id=current_user_id,
+            updated_by=current_user_id,
+        )
 
-    if project.type == ProjectType.FILE:
-        detail = await relation_service.get_project_file_detail(project.id)
-        if detail:
-            await ProjectFile.create(
-                project_id=new_project.id,
-                file_path=detail.file_path,
-                original_file_path=detail.original_file_path,
-                original_name=detail.original_name,
-                file_size=detail.file_size,
-                file_type=detail.file_type,
-                file_hash=detail.file_hash,
-                entry_point=detail.entry_point,
-                runtime_config=detail.runtime_config,
-                environment_vars=detail.environment_vars,
-                storage_type=detail.storage_type,
-                is_compressed=detail.is_compressed,
-                compression_ratio=detail.compression_ratio,
-                file_count=detail.file_count,
-                additional_files=detail.additional_files,
-                draft_manifest_key=detail.draft_manifest_key,
-                draft_root_prefix=detail.draft_root_prefix,
-                dirty=detail.dirty,
-                dirty_files_count=detail.dirty_files_count,
-                last_editor_id=detail.last_editor_id,
-                last_edit_at=detail.last_edit_at,
-                published_version=detail.published_version,
-            )
-    elif project.type == ProjectType.RULE:
-        detail = await relation_service.get_project_rule_detail(project.id)
-        if detail:
-            await ProjectRule.create(
-                project_id=new_project.id,
-                engine=detail.engine,
-                target_url=detail.target_url,
-                url_pattern=detail.url_pattern,
-                callback_type=detail.callback_type,
-                request_method=detail.request_method,
-                extraction_rules=detail.extraction_rules,
-                data_schema=detail.data_schema,
-                pagination_config=detail.pagination_config,
-                max_pages=detail.max_pages,
-                start_page=detail.start_page,
-                request_delay=detail.request_delay,
-                retry_count=detail.retry_count,
-                timeout=detail.timeout,
-                priority=getattr(detail, "priority", 0),
-                dont_filter=getattr(detail, "dont_filter", False),
-                headers=detail.headers,
-                cookies=detail.cookies,
-                proxy_config=detail.proxy_config,
-                anti_spider=detail.anti_spider,
-                task_config=getattr(detail, "task_config", None),
-            )
-    elif project.type == ProjectType.CODE:
-        detail = await relation_service.get_project_code_detail(project.id)
-        if detail:
-            await ProjectCode.create(
-                project_id=new_project.id,
-                content=detail.content,
-                language=detail.language,
-                version=detail.version,
-                content_hash=detail.content_hash,
-                entry_point=detail.entry_point,
-                runtime_config=detail.runtime_config,
-                environment_vars=detail.environment_vars,
-                documentation=detail.documentation,
-                changelog=detail.changelog,
-            )
+        if project.type == ProjectType.FILE:
+            detail = await relation_service.get_project_file_detail(project.id)
+            if detail:
+                await ProjectFile.create(
+                    project_id=new_project.id,
+                    file_path=detail.file_path,
+                    original_file_path=detail.original_file_path,
+                    original_name=detail.original_name,
+                    file_size=detail.file_size,
+                    file_type=detail.file_type,
+                    file_hash=detail.file_hash,
+                    entry_point=detail.entry_point,
+                    runtime_config=detail.runtime_config,
+                    environment_vars=detail.environment_vars,
+                    storage_type=detail.storage_type,
+                    is_compressed=detail.is_compressed,
+                    compression_ratio=detail.compression_ratio,
+                    file_count=detail.file_count,
+                    additional_files=detail.additional_files,
+                    draft_manifest_key=detail.draft_manifest_key,
+                    draft_root_prefix=detail.draft_root_prefix,
+                    dirty=detail.dirty,
+                    dirty_files_count=detail.dirty_files_count,
+                    last_editor_id=detail.last_editor_id,
+                    last_edit_at=detail.last_edit_at,
+                    published_version=detail.published_version,
+                )
+        elif project.type == ProjectType.RULE:
+            detail = await relation_service.get_project_rule_detail(project.id)
+            if detail:
+                await ProjectRule.create(
+                    project_id=new_project.id,
+                    engine=detail.engine,
+                    target_url=detail.target_url,
+                    url_pattern=detail.url_pattern,
+                    callback_type=detail.callback_type,
+                    request_method=detail.request_method,
+                    extraction_rules=detail.extraction_rules,
+                    data_schema=detail.data_schema,
+                    pagination_config=detail.pagination_config,
+                    max_pages=detail.max_pages,
+                    start_page=detail.start_page,
+                    request_delay=detail.request_delay,
+                    retry_count=detail.retry_count,
+                    timeout=detail.timeout,
+                    priority=getattr(detail, "priority", 0),
+                    dont_filter=getattr(detail, "dont_filter", False),
+                    headers=detail.headers,
+                    cookies=detail.cookies,
+                    proxy_config=detail.proxy_config,
+                    anti_spider=detail.anti_spider,
+                    task_config=getattr(detail, "task_config", None),
+                )
+        elif project.type == ProjectType.CODE:
+            detail = await relation_service.get_project_code_detail(project.id)
+            if detail:
+                await ProjectCode.create(
+                    project_id=new_project.id,
+                    content=detail.content,
+                    language=detail.language,
+                    version=detail.version,
+                    content_hash=detail.content_hash,
+                    entry_point=detail.entry_point,
+                    runtime_config=detail.runtime_config,
+                    environment_vars=detail.environment_vars,
+                    documentation=detail.documentation,
+                    changelog=detail.changelog,
+                )
 
     response_data = create_project_response(new_project)
     await _attach_project_detail_info(response_data, new_project)
@@ -1630,6 +1640,7 @@ async def download_project_file(
         from antcode_core.application.services.projects.project_sync_service import (
             project_sync_service,
         )
+
         from antcode_web_api.routes.v1.project_download import _download_transfer
 
         transfer_info = await project_sync_service.get_project_transfer_info(project.id, project=project)
