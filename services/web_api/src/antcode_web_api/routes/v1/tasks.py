@@ -2,25 +2,13 @@
 
 import io
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import StreamingResponse
-from loguru import logger
-from pydantic import BaseModel, Field
-from tortoise.exceptions import IntegrityError
-
-from antcode_web_api.response import (
-    ExecutionResponseBuilder,
-    Messages,
-    TaskResponseBuilder,
-    page as page_response,
-)
-from antcode_web_api.response import (
-    success as success_response,
-)
+from antcode_core.application.services.projects.relation_service import relation_service
+from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.common.security.auth import get_current_user
+from antcode_core.domain.models import Project, Task, TaskRun
 from antcode_core.domain.models.enums import ProjectType, ScheduleType, TaskStatus
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.task import (
@@ -34,10 +22,24 @@ from antcode_core.domain.schemas.task import (
 from antcode_core.domain.schemas.task import (
     TaskUpdateRequest as TaskUpdate,
 )
-from antcode_core.application.services.projects.relation_service import relation_service
-from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
-from antcode_core.domain.models import Project, Task, TaskRun
 from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
+from loguru import logger
+from pydantic import BaseModel, Field
+from tortoise.exceptions import IntegrityError
+
+from antcode_web_api.response import (
+    ExecutionResponseBuilder,
+    Messages,
+    TaskResponseBuilder,
+)
+from antcode_web_api.response import (
+    page as page_response,
+)
+from antcode_web_api.response import (
+    success as success_response,
+)
 from antcode_web_api.utils.simple_yaml import parse_simple_yaml
 
 tasks_router = APIRouter()
@@ -250,8 +252,12 @@ async def list_tasks(
 
 
 @tasks_router.get("/running", response_model=BaseResponse[list])
-async def get_running_tasks(current_user=Depends(get_current_user)):
-    """获取运行中的任务"""
+async def get_running_tasks(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    current_user=Depends(get_current_user),
+):
+    """获取运行中的任务（带分页）"""
     from antcode_core.domain.models import Task
 
     running = scheduler_service.get_running_tasks()
@@ -270,10 +276,11 @@ async def get_running_tasks(current_user=Depends(get_current_user)):
 
     valid_task_ids = {t.id for t in tasks}
 
-    # 过滤只显示当前用户有权限的任务
+    # 过滤只显示当前用户有权限的任务，再分页（避免无界返回打爆响应体）
     user_tasks = [info for info in running if info["task_id"] in valid_task_ids]
+    paginated = user_tasks[offset : offset + limit]
 
-    return success_response(user_tasks, message=Messages.QUERY_SUCCESS)
+    return success_response(paginated, message=Messages.QUERY_SUCCESS)
 
 
 @tasks_router.get("/stats", response_model=BaseResponse[dict])
@@ -284,10 +291,9 @@ async def get_tasks_stats(
     """获取任务统计信息（全局/按项目）"""
     import asyncio
 
-    from tortoise.functions import Avg
-
     from antcode_core.application.services.base import QueryHelper
     from antcode_core.application.services.users.user_service import user_service
+    from tortoise.functions import Avg
 
     user = await user_service.get_user_by_id(current_user.user_id)
     is_admin = bool(user and user.is_admin)
@@ -385,7 +391,7 @@ async def validate_cron_expression(
         from apscheduler.triggers.cron import CronTrigger
 
         trigger = CronTrigger.from_crontab(request.expression)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         next_runs = []
         last = None
         for _ in range(5):
@@ -458,7 +464,7 @@ async def export_task_config(
 
     payload = {
         "version": 1,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": datetime.now(UTC).isoformat(),
         "task": await _task_export_payload(task, project),
     }
 
@@ -760,7 +766,7 @@ async def batch_operate_tasks(
                 await execution_status_service.update_runtime_status(
                     run_id=execution.run_id,
                     status="cancelled",
-                    status_at=datetime.now(timezone.utc),
+                    status_at=datetime.now(UTC),
                     error_message=f"用户取消 (user_id={current_user.user_id})",
                 )
                 if cancelled:
@@ -815,15 +821,71 @@ async def resume_task(task_id, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="恢复任务失败")
 
 
-@tasks_router.post("/{task_id}/trigger", response_model=BaseResponse)
-async def trigger_task(task_id, current_user=Depends(get_current_user)):
-    """立即触发任务"""
+async def _acquire_trigger_dedup_lock(task_id: str, user_id: int) -> bool:
+    """5s 内禁止同一用户重复触发同一任务
+
+    返回 True 表示获得锁；False 表示 5 秒内已经触发过。
+    Redis 不可用时退化为不限流，避免阻塞业务。
+    """
     try:
+        from antcode_core.common.config import settings as _settings
+        if not _settings.REDIS_ENABLED:
+            return True
+        from antcode_core.infrastructure.redis import get_redis_client
+
+        redis = await get_redis_client()
+        lock_key = f"trigger_dedup:{task_id}:{user_id}"
+        acquired = await redis.set(lock_key, "1", nx=True, ex=5)
+        return bool(acquired)
+    except Exception as exc:
+        logger.warning(f"触发去重锁获取失败，允许通过: {exc}")
+        return True
+
+
+async def _resolve_latest_run_id(task_id_or_public: str, user_id: int) -> str | None:
+    """触发后查找该任务最新一次执行的 run_id
+
+    trigger_task 是异步排程的，run_id 在 worker 执行流程中生成；这里返回
+    用户视角能立即拿到的 run_id（若已落库），便于前端立刻订阅日志。
+    """
+    try:
+        task = await scheduler_service.get_task_by_id(task_id_or_public, user_id)
+        if not task:
+            return None
+        latest = (
+            await TaskRun.filter(task_id=task.id)
+            .order_by("-created_at")
+            .only("run_id")
+            .first()
+        )
+        return latest.run_id if latest else None
+    except Exception as exc:
+        logger.debug(f"解析最新 run_id 失败: {exc}")
+        return None
+
+
+@tasks_router.post("/{task_id}/trigger", response_model=BaseResponse[dict])
+async def trigger_task(task_id, current_user=Depends(get_current_user)):
+    """立即触发任务
+
+    - T15: Redis 锁去重，5s 内同 task_id+user 只允许触发一次
+    - S6: 返回最新一次执行的 run_id，便于前端立即订阅日志
+    """
+    try:
+        if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
+            raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
+
         triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
         if not triggered:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        return success_response(None, message="任务已触发")
+        # 调度器异步创建 TaskRun，此处尝试查询最新一次执行的 run_id
+        run_id = await _resolve_latest_run_id(str(task_id), current_user.user_id)
+
+        return success_response(
+            {"task_id": str(task_id), "run_id": run_id, "triggered": True},
+            message="任务已触发",
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -839,11 +901,16 @@ async def execute_task(
 ):
     """执行任务（触发立即执行）"""
     try:
+        if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
+            raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
+
         triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
         if not triggered:
             raise HTTPException(status_code=404, detail="Task not found")
+
+        run_id = await _resolve_latest_run_id(str(task_id), current_user.user_id)
         return success_response(
-            {"task_id": task_id, "triggered": True},
+            {"task_id": task_id, "run_id": run_id, "triggered": True},
             message="任务已触发",
         )
     except HTTPException:
@@ -1022,7 +1089,12 @@ async def get_task_stats(task_id, current_user=Depends(get_current_user)):
 
 @tasks_router.post("/runs/{run_id}/stop", response_model=BaseResponse[dict])
 async def stop_task_execution(run_id: str, current_user=Depends(get_current_user)):
-    """停止任务执行"""
+    """停止任务执行
+
+    T5: 对未被 dispatch 出去的执行（PENDING/QUEUED 且 worker_id 为空）使用 CAS
+    UPDATE 直接置为 CANCELLED，避免 read-modify-write 之间的竞态：若 UPDATE
+    实际命中 0 行，说明已被分发，改走 worker 控制平面。
+    """
     from antcode_core.application.services.scheduler.execution_status_service import (
         execution_status_service,
     )
@@ -1040,6 +1112,33 @@ async def stop_task_execution(run_id: str, current_user=Depends(get_current_user
         TaskStatus.RUNNING,
     ):
         raise HTTPException(status_code=400, detail="任务当前状态无法停止")
+
+    # T5: 未分发的执行采用 CAS UPDATE 抢占式置为 CANCELLED
+    if execution.worker_id is None and execution.status in (
+        TaskStatus.PENDING,
+        TaskStatus.QUEUED,
+    ):
+        now = datetime.now(UTC)
+        updated = await TaskRun.filter(
+            run_id=execution.run_id,
+            worker_id__isnull=True,
+            status__in=[TaskStatus.PENDING, TaskStatus.QUEUED],
+        ).update(
+            status=TaskStatus.CANCELLED,
+            end_time=now,
+            error_message=f"用户取消 (user_id={current_user.user_id})",
+        )
+        if updated:
+            return success_response(
+                {"run_id": run_id, "status": "cancelled", "remote_cancelled": False},
+                message="任务已停止",
+            )
+        # 0 行命中：已被 dispatch 出去，重新加载状态并走 worker 控制平面
+        execution = await scheduler_service.get_execution_with_permission(
+            run_id, current_user.user_id
+        )
+        if not execution:
+            raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
     cancelled = False
     if execution.worker_id:
@@ -1062,7 +1161,7 @@ async def stop_task_execution(run_id: str, current_user=Depends(get_current_user
     await execution_status_service.update_runtime_status(
         run_id=execution.run_id,
         status="cancelled",
-        status_at=datetime.now(timezone.utc),
+        status_at=datetime.now(UTC),
         error_message=f"用户取消 (user_id={current_user.user_id})",
     )
 
@@ -1079,7 +1178,12 @@ async def get_task_execution_logs(
     size: int = Query(200, ge=1, le=1000),
     current_user=Depends(get_current_user),
 ):
-    """获取任务执行日志（分页）"""
+    """获取任务执行日志（分页）
+
+    T6 备注: 若 task_log_service 后续提供 list_entries(run_id, offset, limit)
+    走 PG 的接口（由 Agent Y 提供），应直接替换为按需查询，无需读全量内容。
+    当前实现按行解析后切片，对超大日志而言成本较高。
+    """
     from antcode_core.application.services.logs.task_log_service import task_log_service
 
     execution = await scheduler_service.get_execution_with_permission(
@@ -1089,13 +1193,17 @@ async def get_task_execution_logs(
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
     logs = await task_log_service.get_execution_logs(execution.run_id)
-    items = []
-    for line in (logs.get("output") or "").splitlines():
-        if line.strip():
-            items.append({"type": "stdout", "message": line})
-    for line in (logs.get("error") or "").splitlines():
-        if line.strip():
-            items.append({"type": "stderr", "message": line})
+
+    # 单次扫描组装条目，避免对超大文本反复 splitlines + strip
+    items: list[dict] = []
+    for log_type, payload_key in (("stdout", "output"), ("stderr", "error")):
+        raw = logs.get(payload_key) or ""
+        if not raw:
+            continue
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped:
+                items.append({"type": log_type, "message": stripped})
 
     total = len(items)
     start = (page - 1) * size
