@@ -175,6 +175,12 @@ class HttpClient:
         """
         发送请求
 
+        V6: 旧实现用递归 ``await self.fetch(request)`` 实现重试,在网络持续抖动时
+        会无限递归(``request.retry_count`` 只在 except 分支递增,但每次递归都重置
+        local 变量栈,Python 会先栈溢出 / 再 deadlock task)。改为 while 循环。
+        重试策略只保留这一处,middleware 的 ``RetryMiddleware.process_exception``
+        被简化为 no-op,避免双层重试导致请求数翻倍。
+
         Args:
             request: 请求对象
 
@@ -190,40 +196,44 @@ class HttpClient:
         # 选择客户端
         use_curl = request.impersonate is not None or self.use_curl
 
-        try:
-            if use_curl and HAS_CURL_CFFI:
-                response = await self._fetch_curl(request, headers)
-            else:
-                response = await self._fetch_httpx(request, headers)
+        last_exc: Exception | None = None
+        max_retries = max(request.max_retries, 0)
+        for attempt in range(max_retries + 1):
+            try:
+                if use_curl and HAS_CURL_CFFI:
+                    response = await self._fetch_curl(request, headers)
+                else:
+                    response = await self._fetch_httpx(request, headers)
 
-            response.elapsed_ms = (time.time() - start_time) * 1000
-            response.request = request
-            response.meta = request.meta.copy()
+                response.elapsed_ms = (time.time() - start_time) * 1000
+                response.request = request
+                response.meta = request.meta.copy()
 
-            self._stats["success"] += 1
-            self._stats["bytes_received"] += len(response.content)
+                self._stats["success"] += 1
+                self._stats["bytes_received"] += len(response.content)
 
-            return response
+                return response
 
-        except Exception as e:
-            self._stats["failed"] += 1
+            except Exception as e:
+                last_exc = e
+                self._stats["failed"] += 1
+                # 还有重试机会则退避
+                if attempt < max_retries:
+                    request.retry_count = attempt + 1
+                    self._stats["retried"] += 1
+                    await asyncio.sleep(self.config.retry_delay * (attempt + 1))
+                    continue
+                break
 
-            # 重试
-            if request.retry_count < request.max_retries:
-                request.retry_count += 1
-                self._stats["retried"] += 1
-                await asyncio.sleep(self.config.retry_delay * request.retry_count)
-                return await self.fetch(request)
-
-            # 返回错误响应
-            return Response(
-                url=request.url,
-                status=0,
-                content=str(e).encode(),
-                request=request,
-                meta=request.meta.copy(),
-                elapsed_ms=(time.time() - start_time) * 1000,
-            )
+        # 用尽重试,返回错误响应(不抛,让上层 errback 决定)
+        return Response(
+            url=request.url,
+            status=0,
+            content=str(last_exc).encode() if last_exc else b"",
+            request=request,
+            meta=request.meta.copy(),
+            elapsed_ms=(time.time() - start_time) * 1000,
+        )
 
     async def _fetch_httpx(self, request: Request, headers: dict[str, str]) -> Response:
         """使用 httpx 请求"""

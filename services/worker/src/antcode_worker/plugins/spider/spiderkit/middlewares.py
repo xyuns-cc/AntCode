@@ -173,6 +173,8 @@ class RetryMiddleware(SpiderMiddleware):
         self.retry_delay = retry_delay
 
     async def process_response(self, request: Request, response: Response) -> Response | None:
+        # 响应级重试(5xx/429 等)仍由本中间件负责,因为 HttpClient.fetch 只对
+        # 传输层异常重试,看不到 HTTP 状态码语义。
         if response.status in self.retry_codes and request.retry_count < self.max_retries:
             request.retry_count += 1
             await asyncio.sleep(self.retry_delay * request.retry_count)
@@ -181,10 +183,10 @@ class RetryMiddleware(SpiderMiddleware):
         return response
 
     async def process_exception(self, request: Request, exception: Exception) -> Request | None:
-        if request.retry_count < self.max_retries:
-            request.retry_count += 1
-            await asyncio.sleep(self.retry_delay * request.retry_count)
-            return request
+        # V6: 异常重试已统一由 HttpClient.fetch 的 while 循环负责,不再在
+        # middleware 层重试 — 否则两层叠加会让请求数 = (client_retries+1) *
+        # (middleware_retries+1) 倍 fan-out。保留方法签名以满足 ABC 约定。
+        del request, exception
         return None
 
 

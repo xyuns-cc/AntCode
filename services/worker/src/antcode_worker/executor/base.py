@@ -60,7 +60,9 @@ class ExecutorConfig:
 
     # 沙箱硬限制（POSIX rlimit；非 POSIX 平台自动跳过）
     enforce_rlimit: bool = True  # 默认开启：独立进程组 + rlimit
-    default_max_open_files: int = 256
+    # V13: 256 太低,爬虫 16 并发 + DNS + TLS + keepalive 池极易触发 EMFILE。
+    # 实测 scrapy/playwright 子进程稳定 800~1500 fd,留余量到 2048。
+    default_max_open_files: int = 2048
     default_max_processes: int = 64
 
     # 输出限制
