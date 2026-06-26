@@ -1,6 +1,7 @@
 /**
  * 任务服务 - 管理任务调度的 API 调用
  */
+import type { AxiosError } from 'axios'
 import { BaseService } from './base'
 import apiClient from './api'
 import type {
@@ -13,6 +14,15 @@ import type {
   ApiResponse,
   PaginationResponse,
 } from '@/types'
+
+// triggerTask 返回的载荷（后端现已返回 task_id/run_id/triggered）
+export interface TriggerTaskResponse {
+  task_id?: string
+  run_id?: string
+  triggered?: boolean
+  message?: string
+  [key: string]: unknown
+}
 
 class TaskService extends BaseService {
   constructor() {
@@ -66,21 +76,40 @@ class TaskService extends BaseService {
   }
 
   // 立即触发任务（保留 message 给页面展示）
-  async triggerTask(id: string): Promise<ApiResponse<Record<string, unknown>>> {
-    const response = await apiClient.post<ApiResponse<Record<string, unknown>>>(
+  // 返回 { task_id, run_id, triggered } —— run_id 可用于跳转日志页
+  async triggerTask(id: string): Promise<TriggerTaskResponse> {
+    const response = await apiClient.post<ApiResponse<TriggerTaskResponse>>(
       `/api/v1/tasks/${id}/trigger`,
       undefined,
       { headers: { 'X-Skip-Success-Toast': '1' } }
     )
-    return response.data
+    // 后端可能直接返回 { data: {...} } 也可能扁平返回，做容错
+    const body = response.data
+    if (body && typeof body === 'object' && 'data' in body && body.data) {
+      return { ...(body.data as TriggerTaskResponse), message: body.message }
+    }
+    return body as unknown as TriggerTaskResponse
   }
 
   // 取消任务执行
+  // 后端已加 alias: POST /api/v1/runs/{id}/cancel
+  // 旧路径 POST /api/v1/tasks/runs/{id}/stop 作为兜底
   async cancelTaskRun(runId: string): Promise<{ remote_cancelled: boolean }> {
-    const response = await apiClient.post<ApiResponse<{ remote_cancelled: boolean }>>(
-      `/api/v1/runs/${runId}/cancel`
-    )
-    return response.data.data
+    try {
+      const response = await apiClient.post<ApiResponse<{ remote_cancelled: boolean }>>(
+        `/api/v1/runs/${runId}/cancel`
+      )
+      return response.data.data
+    } catch (error) {
+      const axiosError = error as AxiosError
+      if (axiosError?.response?.status === 404) {
+        const fallback = await apiClient.post<ApiResponse<{ remote_cancelled: boolean }>>(
+          `/api/v1/tasks/runs/${runId}/stop`
+        )
+        return fallback.data.data
+      }
+      throw error
+    }
   }
 
   // 获取任务执行记录
@@ -104,9 +133,21 @@ class TaskService extends BaseService {
   }
 
   // 获取任务执行详情
+  // 优先调用新 alias /api/v1/runs/{run_id}，404 时回退到 /api/v1/tasks/runs/{run_id}
   async getTaskRun(runId: string): Promise<TaskExecution> {
-    const response = await apiClient.get<ApiResponse<TaskExecution>>(`/api/v1/runs/${runId}`)
-    return response.data.data
+    try {
+      const response = await apiClient.get<ApiResponse<TaskExecution>>(`/api/v1/runs/${runId}`)
+      return response.data.data
+    } catch (error) {
+      const axiosError = error as AxiosError
+      if (axiosError?.response?.status === 404) {
+        const fallback = await apiClient.get<ApiResponse<TaskExecution>>(
+          `/api/v1/tasks/runs/${runId}`
+        )
+        return fallback.data.data
+      }
+      throw error
+    }
   }
 }
 

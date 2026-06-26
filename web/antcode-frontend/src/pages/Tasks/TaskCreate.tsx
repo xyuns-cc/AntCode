@@ -260,9 +260,9 @@ const TaskCreate: React.FC = () => {
                     { required: true, message: '请输入Cron表达式' },
                     { validator: validateCron }
                   ]}
-                  extra="格式: 秒 分 时 日 月 周，例如: 0 0 12 * * ? (每天12点执行)"
+                  extra="格式: 分 时 日 月 周，例如: 0 12 * * * (每天 12 点执行)"
                 >
-                  <Input placeholder="请输入Cron表达式" />
+                  <Input placeholder="分 时 日 月 周，例如 0 9 * * 1-5" />
                 </Form.Item>
               )}
             </Col>

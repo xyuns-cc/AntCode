@@ -1,7 +1,8 @@
 import type React from 'react'
 import { useState, useEffect } from 'react'
-import { Drawer, Button, Space } from 'antd'
+import { Drawer, Button, Space, Modal } from 'antd'
 import { CloseOutlined, SaveOutlined } from '@ant-design/icons'
+import showNotification from '@/utils/notification'
 import RuleProjectForm from './RuleProjectForm'
 import CodeProjectForm from './CodeProjectForm'
 import FileProjectForm from './FileProjectForm'
@@ -30,16 +31,18 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
   const [loading, setLoading] = useState(false)
   
   // 表单引用和验证状态
+  // 初始一律 false，与创建抽屉一致；子表单挂载并通过 onValidationChange 上报后才允许提交，
+  // 防止初始 true 绕过必填校验导致保存空值。
   const [ruleFormRef, setRuleFormRef] = useState<{ submit: () => void } | null>(null)
-  const [ruleFormValid, setRuleFormValid] = useState(true)
+  const [ruleFormValid, setRuleFormValid] = useState(false)
   const [ruleFormTooltip, setRuleFormTooltip] = useState('')
-  
+
   const [codeFormRef, setCodeFormRef] = useState<{ submit: () => void } | null>(null)
-  const [codeFormValid, setCodeFormValid] = useState(true)
+  const [codeFormValid, setCodeFormValid] = useState(false)
   const [codeFormTooltip, setCodeFormTooltip] = useState('')
-  
+
   const [fileFormRef, setFileFormRef] = useState<{ submit: () => void } | null>(null)
-  const [fileFormValid, setFileFormValid] = useState(true)
+  const [fileFormValid, setFileFormValid] = useState(false)
   const [fileFormTooltip, setFileFormTooltip] = useState('')
 
   // 重置状态
@@ -75,12 +78,13 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
   }
 
   // 处理项目更新提交
+  // 分步串行：基本信息 -> 类型配置。任一步失败时弹窗询问是否继续后续步骤，
+  // 避免某一步失败后静默吞掉错误，用户不知道保存了哪一部分。
   const handleSubmit = async (data: Record<string, unknown>) => {
     if (!project) return
-    
-    try {
-      setLoading(true)
 
+    setLoading(true)
+    try {
       const baseUpdate: ProjectUpdateRequest = {}
       if (typeof data.name === 'string') {
         baseUpdate.name = data.name
@@ -102,12 +106,29 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
       if (Array.isArray(data.dependencies)) {
         baseUpdate.dependencies = data.dependencies as string[]
       }
+
+      type Step = { name: string; run: () => Promise<void> }
+      const steps: Step[] = []
+
       if (Object.keys(baseUpdate).length > 0) {
-        await projectService.updateProject(project.id, baseUpdate)
+        steps.push({
+          name: '项目基本信息',
+          run: async () => {
+            await projectService.updateProject(project.id, baseUpdate)
+          },
+        })
       }
 
       if (project.type === 'rule') {
-        await projectService.updateRuleConfig(project.id, data as Partial<ProjectUpdateRequest>)
+        steps.push({
+          name: '规则配置',
+          run: async () => {
+            await projectService.updateRuleConfig(
+              project.id,
+              data as Partial<ProjectUpdateRequest>,
+            )
+          },
+        })
       } else if (project.type === 'code') {
         const payload: ProjectCodeConfigUpdateRequest = {
           language: data.language as string | undefined,
@@ -122,7 +143,12 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
           git_credential_id: data.git_credential_id as string | undefined,
           code_content: data.code_content as string | undefined,
         }
-        await projectService.updateCodeConfig(project.id, payload)
+        steps.push({
+          name: '代码配置',
+          run: async () => {
+            await projectService.updateCodeConfig(project.id, payload)
+          },
+        })
       } else if (project.type === 'file') {
         const payload: ProjectFileConfigUpdateRequest = {
           entry_point: data.entry_point as string | undefined,
@@ -136,14 +162,57 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
           git_subdir: data.git_subdir as string | undefined,
           git_credential_id: data.git_credential_id as string | undefined,
         }
-        await projectService.updateFileConfig(project.id, payload)
+        steps.push({
+          name: '文件配置',
+          run: async () => {
+            await projectService.updateFileConfig(project.id, payload)
+          },
+        })
       }
-      
-      // 成功提示由拦截器统一处理
-      onSuccess?.()
-      onClose()
-    } catch {
-      // 错误提示由拦截器统一处理
+
+      const failures: string[] = []
+      let abort = false
+
+      for (let i = 0; i < steps.length; i += 1) {
+        if (abort) break
+        const step = steps[i]
+        try {
+          await step.run()
+        } catch (error) {
+          const err = error as { message?: string }
+          failures.push(step.name)
+          // 还有后续步骤时询问是否继续
+          if (i < steps.length - 1) {
+            // eslint-disable-next-line @typescript-eslint/no-loop-func
+            const shouldContinue = await new Promise<boolean>((resolve) => {
+              Modal.confirm({
+                title: `${step.name}保存失败`,
+                content: `${step.name}保存失败：${err.message ?? '未知错误'}。是否继续后续步骤？`,
+                okText: '继续',
+                cancelText: '中止',
+                onOk: () => resolve(true),
+                onCancel: () => resolve(false),
+              })
+            })
+            if (!shouldContinue) abort = true
+          } else {
+            // 最后一步失败，直接提示
+            showNotification('error', `${step.name}保存失败`, err.message)
+          }
+        }
+      }
+
+      if (failures.length === 0) {
+        showNotification('success', '项目已保存')
+        onSuccess?.()
+        onClose()
+      } else {
+        showNotification(
+          'warning',
+          '保存部分完成',
+          `以下步骤失败：${failures.join('、')}`,
+        )
+      }
     } finally {
       setLoading(false)
     }

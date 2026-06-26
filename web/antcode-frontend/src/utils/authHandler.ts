@@ -38,15 +38,17 @@ export class AuthHandler {
   }
 
   /** 清除认证数据（保留记住我数据） */
+  // refresh_token 现在用 sessionStorage 存储，同时也清掉 localStorage 中的历史残留。
   static clearAuthData(): void {
     try {
       localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
       localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+      sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
       localStorage.removeItem(STORAGE_KEYS.USER_INFO)
-      
+
       // 清除其他认证数据，保留 remember_ 前缀的数据
       Object.keys(localStorage)
-        .filter(key => !key.startsWith('remember_') && 
+        .filter(key => !key.startsWith('remember_') &&
           (key.includes('auth') || key.includes('token') || key.includes('user')))
         .forEach(key => localStorage.removeItem(key))
 

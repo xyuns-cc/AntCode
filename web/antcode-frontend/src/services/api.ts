@@ -34,6 +34,34 @@ let refreshPromise: Promise<string | null> | null = null
 
 const TOKEN_REFRESH_THRESHOLD_MS = 10 * 60 * 1000 // 10 minutes
 
+// 安全策略：
+// - access_token 留 localStorage（短期 15min），刷新页面后仍可保持登录。
+// - refresh_token 改用 sessionStorage：关闭 tab 即失效，限制 XSS 凭证泄露面。
+// - 长期方案：后端 HttpOnly cookie，前端完全不接触 refresh_token。
+function getRefreshTokenStored(): string | null {
+  // 兼容旧版本：如果只在 localStorage 里（升级前留下），迁移到 sessionStorage 后清掉 localStorage。
+  const fromSession = sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+  if (fromSession) return fromSession
+  const fromLocal = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+  if (fromLocal) {
+    sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, fromLocal)
+    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+    return fromLocal
+  }
+  return null
+}
+
+function setRefreshTokenStored(token: string): void {
+  sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, token)
+  // 一旦写入 session，确保 local 中的旧值被清掉，避免双源不一致。
+  localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+}
+
+function clearRefreshTokenStored(): void {
+  sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+  localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+}
+
 async function ensureFreshToken(): Promise<string | null> {
   const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
   if (!token) return null
@@ -49,7 +77,7 @@ async function ensureFreshToken(): Promise<string | null> {
     }
 
     // Token is about to expire, refresh it
-    const refreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+    const refreshToken = getRefreshTokenStored()
     if (!refreshToken) return token // No refresh token, use current
 
     if (isRefreshing && refreshPromise) {
@@ -66,7 +94,7 @@ async function ensureFreshToken(): Promise<string | null> {
         if (data?.access_token) {
           localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, data.access_token)
           if (data.refresh_token) {
-            localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, data.refresh_token)
+            setRefreshTokenStored(data.refresh_token)
           }
           if (data.user) {
             localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(data.user))
@@ -163,9 +191,11 @@ export class TokenManager {
   }
 
   static setTokens(accessToken: string, refreshToken?: string) {
+    // access_token 仍走 localStorage（保留多 tab 共享 + 刷新页面后保持登录）
     localStorage.setItem(this.TOKEN_KEY, accessToken)
+    // refresh_token 改用 sessionStorage：降低 XSS 凭证泄露面，限制为单个 tab。
     if (refreshToken) {
-      localStorage.setItem(this.REFRESH_KEY, refreshToken)
+      setRefreshTokenStored(refreshToken)
     }
   }
 
@@ -174,12 +204,12 @@ export class TokenManager {
   }
 
   static getRefreshToken(): string | null {
-    return localStorage.getItem(this.REFRESH_KEY)
+    return getRefreshTokenStored()
   }
 
   static clearTokens() {
     localStorage.removeItem(this.TOKEN_KEY)
-    localStorage.removeItem(this.REFRESH_KEY)
+    clearRefreshTokenStored()
     localStorage.removeItem(STORAGE_KEYS.USER_INFO)
   }
 
