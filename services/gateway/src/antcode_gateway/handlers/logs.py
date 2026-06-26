@@ -24,8 +24,19 @@ from typing import TYPE_CHECKING
 from antcode_contracts import data_pb2
 from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis import decode_stream_payload, log_stream_key
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
+
+
+def log_ingest_stream_key(namespace: str | None = None) -> str:
+    """全局日志摄取 Stream key。
+
+    与 Master ``_log_ingest_stream_key`` helper 同名同效。本地定义以避免
+    跨包修改 ``control_plane.py``（属于其他 Agent 的范围）。
+    路径：``<namespace>:log:ingest``。
+    """
+    return f"{redis_namespace(namespace)}:log:ingest"
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -76,7 +87,17 @@ class LogHandler:
         # ProtoCodec 仅用于 xadd_typed/xreadgroup_typed；下面 pipeline 路径绕过它
         self._stream = stream or StreamClient(codec=ProtoCodec(data_pb2.LogBatch))
 
-    def _stream_key(self, run_id: str) -> str:
+    def _stream_key(self, run_id: str | None = None) -> str:
+        """全局 ingest stream key（与 Master ingest loop 默认订阅对齐）。
+
+        ``run_id`` 参数保留只是为了兼容老调用点签名；所有 ``xadd`` 都打到
+        单一 ingest stream，Master 解码 LogBatch 后按 ``entry.run_id`` 路由。
+        旧 per-run stream 已废弃。
+        """
+        return log_ingest_stream_key()
+
+    def _legacy_per_run_stream_key(self, run_id: str) -> str:
+        """旧 per-run stream key（仅 ``get_logs`` / ``cleanup_logs`` 兼容路径用）。"""
         return log_stream_key(run_id)
 
     async def _get_redis_client(self):
@@ -106,53 +127,40 @@ class LogHandler:
     # =========================================================================
 
     async def handle_log_batch(self, batch: data_pb2.LogBatch) -> bool:
-        """以 Proto bytes 单字段框架写入每个 run_id 对应的日志 Stream。
+        """以 Proto bytes 单字段框架写入全局 ingest stream。
 
-        ``LogBatch`` 内多个 entry 可能属于不同 ``run_id``，所以按 run_id 分桶后
-        各自合并成一个 ``LogBatch`` 子消息再 xadd。这样 Master 那边解码出来
-        仍然是完整的 ``LogBatch`` 结构。
+        改造点（与 Master ingest loop 对齐）：
+        - 不再按 run_id 拆 sub-stream，所有 ``LogBatch`` 整体 xadd 到
+          ``<namespace>:log:ingest``；
+        - ``LogBatch`` 内部已自带 ``run_id`` 字段，Master 解码后按
+          ``entry.run_id`` 路由；
+        - 单一 stream 让 Master 单 consumer group 全量消费，避免 per-run
+          stream key 的水平扩散。
         """
         if not batch.entries:
             return True
-
-        # 按 run_id 分桶
-        by_run: dict[str, list[data_pb2.LogEntry]] = {}
-        for entry in batch.entries:
-            by_run.setdefault(entry.run_id, []).append(entry)
 
         redis = await self._get_redis_client()
         if redis is None:
             logger.warning("Redis 不可用，跳过日志 Stream 写入")
         else:
-            pipe = redis.pipeline(transaction=False)
-            expire_keys: set[str] = set()
             from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 
-            for run_id, entries in by_run.items():
-                stream_key = self._stream_key(run_id)
-                sub_batch = data_pb2.LogBatch(
-                    worker_id=batch.worker_id,
-                    entries=entries,
-                )
-                if batch.HasField("trace"):
-                    sub_batch.trace.CopyFrom(batch.trace)
-
-                pipe.xadd(
-                    stream_key,
-                    {PROTO_FIELD: sub_batch.SerializeToString()},
-                    maxlen=self.MAX_STREAM_LENGTH,
-                    approximate=True,
-                )
-                if self.STREAM_TTL_SECONDS > 0:
-                    expire_keys.add(stream_key)
-
-            for stream_key in expire_keys:
+            stream_key = self._stream_key()
+            pipe = redis.pipeline(transaction=False)
+            pipe.xadd(
+                stream_key,
+                {PROTO_FIELD: batch.SerializeToString()},
+                maxlen=self.MAX_STREAM_LENGTH,
+                approximate=True,
+            )
+            if self.STREAM_TTL_SECONDS > 0:
                 pipe.expire(stream_key, self.STREAM_TTL_SECONDS)
 
             try:
                 await pipe.execute()
             except Exception as exc:
-                logger.exception(f"写入日志 Stream 失败: {exc}")
+                logger.exception(f"写入日志 ingest stream 失败: {exc}")
                 return False
 
         # 持久化（best-effort，不阻塞实时推送）
@@ -202,7 +210,8 @@ class LogHandler:
             return []
 
         try:
-            stream_key = self._stream_key(run_id)
+            # 兼容查询：旧 per-run stream 仍有可能持有未到期日志
+            stream_key = self._legacy_per_run_stream_key(run_id)
             messages = await redis.xrange(stream_key, min=start_id, max="+", count=count)
 
             logs: list[dict] = []
@@ -274,13 +283,15 @@ class LogHandler:
         return data_pb2.LogBatch(entries=[entry])
 
     async def cleanup_logs(self, run_id: str) -> bool:
+        """清理某 run_id 的旧 per-run stream（ingest stream 是全局共享的,
+        不能按 run_id 删除,由 MAXLEN/TTL 自动 trim）。"""
         redis = await self._get_redis_client()
         if redis is None:
             return False
         try:
-            stream_key = self._stream_key(run_id)
+            stream_key = self._legacy_per_run_stream_key(run_id)
             await redis.delete(stream_key)
-            logger.debug(f"日志 Stream 已清理: {stream_key}")
+            logger.debug(f"日志 Stream 已清理（legacy per-run）: {stream_key}")
             return True
         except Exception as exc:
             logger.exception(f"清理日志 Stream 失败: {exc}")
