@@ -191,6 +191,13 @@ const Tasks: React.FC = memo(() => {
   const handleTriggerTask = async (taskId: string) => {
     try {
       const resp = await triggerTask.mutateAsync(taskId)
+      // 后端 trigger 现已返回 { task_id, run_id, triggered }
+      // 优先用 run_id 跳转日志页
+      if (resp?.run_id) {
+        showNotification('success', `已触发，run_id=${resp.run_id}`)
+        navigate(`/tasks/${taskId}/runs/${resp.run_id}`)
+        return
+      }
       if (resp?.message) {
         showNotification('success', resp.message)
       } else {
@@ -533,12 +540,13 @@ const Tasks: React.FC = memo(() => {
               render: (_, record: Task) => (
                 <div className="table-actions">
                   <Space size="small" wrap>
-                    <Tooltip title="执行" placement="top">
+                    <Tooltip title={record.is_active ? '执行' : '任务已禁用'} placement="top">
                       <Button
                         type="text"
                         size="small"
                         icon={<PlayCircleOutlined />}
                         onClick={() => handleTriggerTask(record.id)}
+                        disabled={!record.is_active}
                         className="action-btn"
                       />
                     </Tooltip>

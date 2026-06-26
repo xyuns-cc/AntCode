@@ -90,16 +90,54 @@ const TaskDetail: React.FC = () => {
   }, [id])
 
   // 取消执行
+  // 取消是异步的（信号下发 Worker），点击后启动短期轮询直到 run 进入终态。
   const handleCancel = async (runId: string) => {
     setCancelLoading(runId)
     try {
       const result = await taskService.cancelTaskRun(runId)
       if (result.remote_cancelled) {
-        showNotification('success', '任务已取消，已发送取消指令到节点')
+        showNotification('info', '取消信号已发送，正在等待 Worker 响应...')
       } else {
-        showNotification('success', '任务已取消')
+        showNotification('info', '取消请求已发送')
       }
-      loadExecutions()
+
+      // 轮询确认状态变化（最多 30s，每 2s 一次）
+      const TERMINAL: ReadonlySet<string> = new Set([
+        'cancelled',
+        'failed',
+        'success',
+        'timeout',
+        'rejected',
+        'skipped',
+      ])
+      const stopAt = Date.now() + 30_000
+      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+      // eslint-disable-next-line no-constant-condition
+      while (Date.now() < stopAt) {
+        await sleep(2_000)
+        let latest: TaskExecution[] = []
+        try {
+          const executionData = await taskService.getTaskRuns(id!)
+          latest = executionData.items
+          setExecutions(latest)
+        } catch {
+          // 单次失败不致命，继续下一次轮询
+          continue
+        }
+        const run = latest.find((e) => e.run_id === runId)
+        if (run && TERMINAL.has(run.status)) {
+          if (run.status === 'cancelled') {
+            showNotification('success', '任务已取消')
+          } else {
+            showNotification('success', `任务已结束（${run.status}）`)
+          }
+          loadTask()
+          return
+        }
+      }
+
+      showNotification('warning', '取消超时，请稍后刷新查看')
       loadTask()
     } catch (error: unknown) {
       const err = error as { message?: string }
@@ -134,9 +172,16 @@ const TaskDetail: React.FC = () => {
   // 触发任务
   const handleTriggerTask = async () => {
     if (!task) return
-    
+
     try {
       const resp = await taskService.triggerTask(task.id)
+      // 后端 trigger 现已返回 { task_id, run_id, triggered }
+      // 优先用 run_id 跳转到日志页
+      if (resp?.run_id) {
+        showNotification('success', `已触发，run_id=${resp.run_id}`)
+        navigate(`/tasks/${task.id}/runs/${resp.run_id}`)
+        return
+      }
       if (resp?.message) {
         showNotification('success', resp.message)
       } else {
@@ -246,7 +291,7 @@ const TaskDetail: React.FC = () => {
           >
             日志
           </Button>
-          {(record.status === 'running' || record.status === 'pending' || record.status === 'queued') && (
+          {(record.status === 'running' || record.status === 'pending' || record.status === 'queued' || record.status === 'dispatching') && (
             <Tooltip title="取消执行">
               <Button
                 type="text"
@@ -260,7 +305,7 @@ const TaskDetail: React.FC = () => {
               </Button>
             </Tooltip>
           )}
-          {(record.status === 'failed' || record.status === 'timeout') && (
+          {(record.status === 'failed' || record.status === 'timeout' || record.status === 'rejected') && (
             <Tooltip title="重试此执行">
               <Button
                 type="text"

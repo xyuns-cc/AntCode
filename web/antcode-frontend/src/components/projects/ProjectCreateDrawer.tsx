@@ -6,6 +6,7 @@ import {
   Button,
   Space,
   Card,
+  Modal,
 } from 'antd'
 import showNotification from '@/utils/notification'
 import {
@@ -96,9 +97,33 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
   }
 
   // 关闭抽屉
+  // 若用户已经填了字段（脏数据），先确认是否丢弃，避免误关导致填写丢失。
+  const isDirty = (): boolean => {
+    if (projectType) return true
+    if (envConfig) return true
+    if (regionConfig.region || regionConfig.require_render) return true
+    if (formData && Object.keys(formData).length > 0) return true
+    return false
+  }
+
   const handleClose = () => {
-    resetState()
-    onClose()
+    if (loading) return
+    if (!isDirty()) {
+      resetState()
+      onClose()
+      return
+    }
+    Modal.confirm({
+      title: '放弃创建？',
+      content: '当前表单已有填写内容，关闭后将丢失。是否继续？',
+      okText: '放弃',
+      cancelText: '继续编辑',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        resetState()
+        onClose()
+      },
+    })
   }
 
   // 下一步
