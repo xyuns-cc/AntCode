@@ -54,10 +54,7 @@ class Span:
 
     def end(self) -> None:
         """结束 Span"""
-        logger.debug(
-            f"Span ended: {self.name}, trace_id={self.context.trace_id}, "
-            f"status={self._status}"
-        )
+        logger.debug(f"Span ended: {self.name}, trace_id={self.context.trace_id}, status={self._status}")
 
 
 class Tracer:

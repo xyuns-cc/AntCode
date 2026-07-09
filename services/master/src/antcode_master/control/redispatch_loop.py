@@ -1,0 +1,196 @@
+"""T7-B3a (P1-1): 派发失败补派 loop（leader-only）。
+
+覆盖两条链路的补派：
+- `scheduler_service._execute_task_internal` 派发失败 → 入队
+- `batch_dispatcher_service._dispatch_single_url_run` 派发失败 → 入队
+
+本 loop 每 10s tick 一次，从 ``{ns}:task:redispatch`` ZSet 拿到期任务，逐个
+调 ``worker_task_dispatcher.dispatch_task`` 重派：
+- 成功 → 队列已 pop 完毕
+- 仍失败 → attempts++ 重新入队（指数退避，见 redispatch_service.next_delay_seconds）
+- 超阈值 → 触发放弃：置 TaskRun.FAILED + 写 audit_log + 告警
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+
+from loguru import logger
+
+from antcode_core.application.services.scheduler.redispatch_service import (
+    redispatch_service,
+)
+from antcode_core.common.config import settings
+from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.task_run import TaskRun
+
+from antcode_master.leader import ensure_leader
+
+
+class RedispatchLoop:
+    """派发失败补派 loop。"""
+
+    def __init__(self, tick_interval_seconds: float | None = None) -> None:
+        self._tick_interval = float(
+            tick_interval_seconds
+            or getattr(settings, "REDISPATCH_TICK_INTERVAL_SEC", 10)
+        )
+        self._running = False
+        self._task: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+        logger.info(f"补派 loop 已启动: tick={self._tick_interval}s")
+
+    async def stop(self) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
+        logger.info("补派 loop 已停止")
+
+    async def _run_loop(self) -> None:
+        while self._running:
+            try:
+                if not await ensure_leader():
+                    await asyncio.sleep(self._tick_interval)
+                    continue
+                await self._tick()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.exception(f"补派 loop 异常: {exc}")
+            await asyncio.sleep(self._tick_interval)
+
+    async def _tick(self) -> None:
+        due = await redispatch_service.pop_due(limit=50)
+        if not due:
+            return
+        logger.info(f"补派 tick: 到期 {len(due)} 项")
+        for payload in due:
+            try:
+                await self._handle_one(payload)
+            except Exception as exc:
+                logger.exception(
+                    f"补派单项处理异常: run_id={payload.get('run_id')} err={exc}"
+                )
+                # 处理本身异常也再入队（累计 attempts）
+                await self._reenqueue_or_give_up(payload, reason=f"handler err: {exc}")
+
+    async def _handle_one(self, payload: dict[str, Any]) -> None:
+        from antcode_core.application.services.workers.worker_dispatcher import (
+            worker_task_dispatcher,
+        )
+
+        run_id = payload.get("run_id") or ""
+        project_id = payload.get("project_id") or ""
+        if not run_id or not project_id:
+            logger.warning(f"补派 payload 缺关键字段，丢弃: {payload}")
+            return
+
+        result = await worker_task_dispatcher.dispatch_task(
+            project_id=project_id,
+            run_id=run_id,
+            params=payload.get("params") or {},
+            environment_vars=payload.get("environment_vars") or None,
+            timeout=int(payload.get("timeout") or 3600),
+            project_type=payload.get("project_type") or "code",
+        )
+
+        if getattr(result, "success", False):
+            logger.info(
+                f"补派成功: run_id={run_id} attempts={payload.get('attempts')} "
+                f"worker={getattr(result, 'worker_name', '')}"
+            )
+            return
+
+        # 仍失败 → 再入队或放弃
+        await self._reenqueue_or_give_up(
+            payload,
+            reason=getattr(result, "error", "") or "dispatch failed",
+        )
+
+    async def _reenqueue_or_give_up(
+        self, payload: dict[str, Any], *, reason: str
+    ) -> None:
+        attempts = int(payload.get("attempts") or 0) + 1
+        enqueued = await redispatch_service.enqueue(
+            run_id=payload.get("run_id") or "",
+            task_id=payload.get("task_id"),
+            project_id=payload.get("project_id") or "",
+            params=payload.get("params") or {},
+            environment_vars=payload.get("environment_vars") or None,
+            timeout=int(payload.get("timeout") or 3600),
+            project_type=payload.get("project_type") or "code",
+            attempts=attempts,
+            reason=reason,
+        )
+        if not enqueued:
+            # 超阈值放弃：置 FAILED + audit + 告警
+            await self._give_up(payload, reason=reason)
+
+    async def _give_up(self, payload: dict[str, Any], *, reason: str) -> None:
+        run_id = payload.get("run_id") or ""
+        attempts = int(payload.get("attempts") or 0)
+        # 置 TaskRun.FAILED
+        try:
+            await TaskRun.filter(run_id=run_id).update(
+                status=TaskStatus.FAILED,
+                end_time=datetime.now(UTC),
+                error_message=f"补派耗尽 ({attempts}次): {reason}"[:1000],
+            )
+        except Exception as exc:
+            logger.warning(f"补派放弃时置 FAILED 失败 run_id={run_id}: {exc}")
+
+        # audit_log
+        try:
+            from antcode_core.domain.models.audit_log import AuditLog
+
+            await AuditLog.create(
+                action="redispatch_gave_up",
+                resource_type="task_run",
+                resource_id=run_id,
+                details={
+                    "attempts": attempts,
+                    "reason": reason,
+                    "project_id": payload.get("project_id"),
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"补派放弃写 audit 失败 run_id={run_id}: {exc}")
+
+        # 告警
+        try:
+            from antcode_core.application.services.alert import alert_service
+
+            await alert_service.send_alert(
+                title=f"派发补派耗尽: run_id={run_id}",
+                content=(
+                    f"run_id={run_id} project_id={payload.get('project_id')} "
+                    f"attempts={attempts} 最后错误: {reason}"
+                ),
+                level="error",
+            )
+        except Exception as exc:
+            logger.debug(f"补派放弃告警发送失败（可忽略）: {exc}")
+
+        logger.error(
+            f"补派放弃: run_id={run_id} attempts={attempts} reason={reason!r}"
+        )
+
+
+redispatch_loop = RedispatchLoop()
+
+
+__all__ = ["RedispatchLoop", "redispatch_loop"]

@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 from time import time
 
-from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.application.services.scheduler.queue_backend import BaseQueueBackend, QueuedTask
+from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.infrastructure.redis import redis_namespace
 
 
@@ -29,12 +30,12 @@ class RedisQueueBackend(BaseQueueBackend):
     错误处理：
     - 连接失败时自动重试
     - 操作失败时记录错误并抛出异常
-    - 支持优雅降级
     """
 
     BACKEND_TYPE = "redis"
     QUEUE_SUFFIX = "task_queue"
     TASK_DATA_SUFFIX = "task_data:"
+    SYNC_CALL_TIMEOUT_SECONDS = 5.0
 
     # 重连配置
     MAX_RECONNECT_ATTEMPTS = 3
@@ -66,6 +67,16 @@ class RedisQueueBackend(BaseQueueBackend):
     def _get_task_data_key(self, task_id):
         """获取任务数据的 Redis key"""
         return f"{self._task_data_prefix}{task_id}"
+
+    def _run_async_sync(self, coro_factory):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro_factory())
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(lambda: asyncio.run(coro_factory()))
+            return future.result(timeout=self.SYNC_CALL_TIMEOUT_SECONDS)
 
     async def _ensure_connection(self):
         """确保 Redis 连接可用
@@ -104,16 +115,17 @@ class RedisQueueBackend(BaseQueueBackend):
                     self._redis = None
 
             try:
-                import redis.asyncio as aioredis
+                # T6-T1: 走统一 factory，standalone/cluster/sentinel 无感切换
+                from antcode_core.infrastructure.redis.factory import (
+                    create_async_redis_client,
+                )
 
-                self._redis = aioredis.from_url(
+                self._redis = create_async_redis_client(
                     self._redis_url,
-                    encoding="utf-8",
                     decode_responses=True,
                     socket_connect_timeout=5.0,
                     socket_timeout=5.0,
                 )
-                # 测试连接
                 await self._redis.ping()
                 self._log_operation("连接成功", "N/A", url=self._redis_url)
             except ImportError:
@@ -131,9 +143,7 @@ class RedisQueueBackend(BaseQueueBackend):
         """
         for attempt in range(1, self.MAX_RECONNECT_ATTEMPTS + 1):
             self._stats["reconnect_attempts"] += 1
-            self._log_operation(
-                "重连尝试", "N/A", attempt=f"{attempt}/{self.MAX_RECONNECT_ATTEMPTS}"
-            )
+            self._log_operation("重连尝试", "N/A", attempt=f"{attempt}/{self.MAX_RECONNECT_ATTEMPTS}")
 
             try:
                 # 关闭旧连接
@@ -175,8 +185,7 @@ class RedisQueueBackend(BaseQueueBackend):
             # 检查是否是连接错误
             error_str = str(e).lower()
             is_connection_error = any(
-                keyword in error_str
-                for keyword in ["connection", "timeout", "refused", "reset", "closed"]
+                keyword in error_str for keyword in ["connection", "timeout", "refused", "reset", "closed"]
             )
 
             if is_connection_error:
@@ -194,9 +203,7 @@ class RedisQueueBackend(BaseQueueBackend):
                             f"Redis 操作 '{operation_name}' 失败: {retry_error}"
                         ) from retry_error
                 else:
-                    raise RedisConnectionError(
-                        f"Redis 连接失败，无法执行操作 '{operation_name}'"
-                    ) from e
+                    raise RedisConnectionError(f"Redis 连接失败，无法执行操作 '{operation_name}'") from e
             else:
                 # 非连接错误，直接抛出
                 raise
@@ -446,23 +453,9 @@ class RedisQueueBackend(BaseQueueBackend):
         """检查任务是否在队列中
 
         注意：这是同步方法，需要在事件循环中调用异步版本。
-        为了兼容 Protocol，这里使用同步检查。
+        满足同步队列接口，这里使用同步检查。
         """
-        # 由于 Protocol 定义为同步方法，这里需要特殊处理
-        # 在实际使用中，建议使用 contains_async
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 如果在异步上下文中，创建一个 Future
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, self._contains_async(task_id))
-                    return future.result(timeout=5.0)
-            else:
-                return loop.run_until_complete(self._contains_async(task_id))
-        except Exception:
-            return False
+        return self._run_async_sync(lambda: self._contains_async(task_id))
 
     async def _contains_async(self, task_id):
         """异步检查任务是否在队列中"""
@@ -475,18 +468,7 @@ class RedisQueueBackend(BaseQueueBackend):
 
         注意：这是同步方法，需要在事件循环中调用异步版本。
         """
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, self._size_async())
-                    return future.result(timeout=5.0)
-            else:
-                return loop.run_until_complete(self._size_async())
-        except Exception:
-            return -1
+        return self._run_async_sync(self._size_async)
 
     async def _size_async(self):
         """异步获取队列大小"""

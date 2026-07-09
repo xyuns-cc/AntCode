@@ -10,7 +10,6 @@ import {
   Space,
   Alert,
   Skeleton,
-  Typography,
   message,
 } from 'antd'
 import {
@@ -22,8 +21,8 @@ import {
   DatabaseOutlined,
   LineChartOutlined,
   FileTextOutlined,
-  KeyOutlined,
 } from '@ant-design/icons'
+import PageContainer from '@/components/common/PageContainer'
 import { systemConfigService } from '@/services/systemConfig'
 import type {
   TaskResourceConfig,
@@ -35,9 +34,6 @@ import type {
 import { CONFIG_FIELD_LABELS, CONFIG_FIELD_DESCRIPTIONS } from '@/types/system-config'
 import showNotification from '@/utils/notification'
 import styles from './SystemConfig.module.css'
-import GitCredentialsTab from './GitCredentialsTab'
-
-const { Title, Paragraph } = Typography
 
 type TaskLogFormValues = TaskLogConfig & { task_log_max_size_mb?: number }
 
@@ -334,7 +330,7 @@ const SystemConfig: React.FC = () => {
         <Form.Item
           label={CONFIG_FIELD_LABELS.cleanup_workspace_max_age_hours}
           name="cleanup_workspace_max_age_hours"
-          rules={[{ required: true, message: '请输入工作空间最大保留时间' }]}
+          rules={[{ required: true, message: '请输入运行时沙箱最大保留时间' }]}
           tooltip={CONFIG_FIELD_DESCRIPTIONS.cleanup_workspace_max_age_hours}
         >
           <InputNumber min={1} max={168} style={{ width: '100%' }} addonAfter="小时" />
@@ -580,17 +576,15 @@ const SystemConfig: React.FC = () => {
   }
 
   return (
-    <div className={styles.systemConfigContainer}>
-      <div className={styles.pageHeader}>
-        <div>
-          <Title level={2} className={styles.pageTitle}>
-            <SettingOutlined style={{ marginRight: 8 }} />
-            系统配置管理
-          </Title>
-          <Paragraph className={styles.pageDescription}>
-            管理系统全局配置，修改后可实时热加载生效
-          </Paragraph>
-        </div>
+    <PageContainer
+      scrollable
+      title={
+        <>
+          <SettingOutlined style={{ marginRight: 8 }} />
+          系统配置管理
+        </>
+      }
+      extra={
         <Button
           type="default"
           icon={<ReloadOutlined />}
@@ -599,8 +593,8 @@ const SystemConfig: React.FC = () => {
         >
           热加载配置
         </Button>
-      </div>
-
+      }
+    >
       <Alert
         message="配置说明"
         description={
@@ -626,6 +620,7 @@ const SystemConfig: React.FC = () => {
         items={[
           {
             key: 'task_resource',
+            forceRender: true,
             label: (
               <span>
                 <ThunderboltOutlined />
@@ -636,6 +631,7 @@ const SystemConfig: React.FC = () => {
           },
           {
             key: 'task_log',
+            forceRender: true,
             label: (
               <span>
                 <FileTextOutlined />
@@ -646,6 +642,7 @@ const SystemConfig: React.FC = () => {
           },
           {
             key: 'scheduler',
+            forceRender: true,
             label: (
               <span>
                 <ClockCircleOutlined />
@@ -656,6 +653,7 @@ const SystemConfig: React.FC = () => {
           },
           {
             key: 'cache',
+            forceRender: true,
             label: (
               <span>
                 <DatabaseOutlined />
@@ -666,6 +664,7 @@ const SystemConfig: React.FC = () => {
           },
           {
             key: 'monitoring',
+            forceRender: true,
             label: (
               <span>
                 <LineChartOutlined />
@@ -674,19 +673,9 @@ const SystemConfig: React.FC = () => {
             ),
             children: <MonitoringForm />,
           },
-          {
-            key: 'git_credentials',
-            label: (
-              <span>
-                <KeyOutlined />
-                Git 凭证
-              </span>
-            ),
-            children: <GitCredentialsTab />,
-          },
         ]}
       />
-    </div>
+    </PageContainer>
   )
 }
 

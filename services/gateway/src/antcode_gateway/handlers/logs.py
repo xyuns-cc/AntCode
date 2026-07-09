@@ -11,8 +11,8 @@ SendLog / SendLogBatch / SendLogChunk 三套 RPC 合并为 ``StreamLogs`` 单一
 **Validates: Requirements 6.6**
 
 存储策略：
-1. 实时日志 -> Redis Streams（Proto bytes，供 WebSocket 推送 & Master 摄取）
-2. 持久化 -> log_storage（按需，落 S3 / ClickHouse / FS）
+- 实时日志 -> Redis Streams（Proto bytes，供 WebSocket 推送 & Master 摄取）
+- 持久化 -> master log_ingest_loop 消费 Redis 落 PG（``task_logs`` 表）
 """
 
 from __future__ import annotations
@@ -71,19 +71,16 @@ class LogHandler:
     def __init__(
         self,
         redis_client=None,
-        log_storage=None,
         stream: StreamClient | None = None,
     ):
         """初始化处理器
 
         Args:
             redis_client: Redis 客户端（用于 pipeline 写 expire 等低级操作）
-            log_storage: 日志持久化存储后端
             stream: 注入测试用的 ``StreamClient``；默认创建带
                 ``ProtoCodec(LogBatch)`` 的实例
         """
         self._redis_client = redis_client
-        self._log_storage = log_storage
         # ProtoCodec 仅用于 xadd_typed/xreadgroup_typed；下面 pipeline 路径绕过它
         self._stream = stream or StreamClient(codec=ProtoCodec(data_pb2.LogBatch))
 
@@ -111,16 +108,6 @@ class LogHandler:
                 return None
         return self._redis_client
 
-    async def _get_log_storage(self):
-        if self._log_storage is None:
-            try:
-                from antcode_core.infrastructure.storage.log_storage import get_log_storage
-
-                self._log_storage = get_log_storage()
-            except ImportError:
-                logger.warning("antcode_core.infrastructure.storage.log_storage 不可用")
-                return None
-        return self._log_storage
 
     # =========================================================================
     # Proto 入口 - StreamLogs / 内部测试都从这里进
@@ -163,36 +150,9 @@ class LogHandler:
                 logger.exception(f"写入日志 ingest stream 失败: {exc}")
                 return False
 
-        # 持久化（best-effort，不阻塞实时推送）
-        await self._persist_log_batch(batch)
+        # 日志经 Redis ingest stream 由 master log_ingest_loop 消费落 PG，
+        # gateway 端不再做副持久化（旧 log_storage 模块已随重构下线）。
         return True
-
-    async def _persist_log_batch(self, batch: data_pb2.LogBatch) -> None:
-        log_storage = await self._get_log_storage()
-        if log_storage is None:
-            return
-
-        try:
-            from antcode_core.infrastructure.storage.log_storage import (
-                LogEntry as StorageLogEntry,
-            )
-        except ImportError:
-            return
-
-        for entry in batch.entries:
-            try:
-                storage_entry = StorageLogEntry(
-                    run_id=entry.run_id,
-                    log_type=_log_type_from_proto(entry.log_type),
-                    content=entry.content,
-                    sequence=entry.sequence,
-                    timestamp=datetime.fromtimestamp(_entry_timestamp_seconds(entry)),
-                )
-                result = await log_storage.write_log(storage_entry)
-                if not getattr(result, "success", True):
-                    logger.warning(f"持久化日志失败: {getattr(result, 'error', '')}")
-            except Exception as exc:
-                logger.exception(f"持久化日志条目失败: {exc}")
 
     # =========================================================================
     # 查询/清理 - 维持原接口，给 web_api / 调试用

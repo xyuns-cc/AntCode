@@ -47,6 +47,8 @@ import {
   DownOutlined,
   CopyOutlined
 } from '@ant-design/icons'
+import PageContainer from '@/components/common/PageContainer'
+import FilterBar from '@/components/common/FilterBar'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import WorkerResourceManagement from '@/components/workers/WorkerResourceManagement'
 import WorkerSpiderStats from '@/components/workers/WorkerSpiderStats'
@@ -149,7 +151,7 @@ const Workers: React.FC = () => {
     return () => clearInterval(intervalId)
   }, [refreshWorkers, silentRefresh])
 
-  const filteredWorkersByNode = useMemo(() => {
+  const visibleWorkers = useMemo(() => {
     if (!currentWorker) {
       return workers
     }
@@ -158,13 +160,13 @@ const Workers: React.FC = () => {
 
   // 获取所有 regions
   const regions = useMemo(() => {
-    const regionSet = new Set(filteredWorkersByNode.map(n => n.region).filter(Boolean))
+    const regionSet = new Set(visibleWorkers.map(n => n.region).filter(Boolean))
     return Array.from(regionSet) as string[]
-  }, [filteredWorkersByNode])
+  }, [visibleWorkers])
 
   // 筛选后的数据
   const filteredWorkers = useMemo(() => {
-    let filtered = [...filteredWorkersByNode]
+    let filtered = [...visibleWorkers]
 
     if (statusFilter) {
       filtered = filtered.filter(n => n.status === statusFilter)
@@ -184,7 +186,7 @@ const Workers: React.FC = () => {
     }
 
     return filtered
-  }, [filteredWorkersByNode, statusFilter, regionFilter, searchQuery])
+  }, [visibleWorkers, statusFilter, regionFilter, searchQuery])
 
   // 分页数据
   const paginatedWorkers = useMemo(() => {
@@ -194,20 +196,20 @@ const Workers: React.FC = () => {
 
   // 统计数据
   const stats = useMemo(() => ({
-    total: filteredWorkersByNode.length,
-    online: filteredWorkersByNode.filter(n => n.status === 'online').length,
-    offline: filteredWorkersByNode.filter(n => n.status === 'offline').length,
-    maintenance: filteredWorkersByNode.filter(n => n.status === 'maintenance').length,
-    totalTasks: filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.taskCount || 0), 0),
-    runningTasks: filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.runningTasks || 0), 0),
-    totalProjects: filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.projectCount || 0), 0),
-    avgCpu: filteredWorkersByNode.length > 0
-      ? Math.round(filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.cpu || 0), 0) / filteredWorkersByNode.length)
+    total: visibleWorkers.length,
+    online: visibleWorkers.filter(n => n.status === 'online').length,
+    offline: visibleWorkers.filter(n => n.status === 'offline').length,
+    maintenance: visibleWorkers.filter(n => n.status === 'maintenance').length,
+    totalTasks: visibleWorkers.reduce((sum, n) => sum + (n.metrics?.taskCount || 0), 0),
+    runningTasks: visibleWorkers.reduce((sum, n) => sum + (n.metrics?.runningTasks || 0), 0),
+    totalProjects: visibleWorkers.reduce((sum, n) => sum + (n.metrics?.projectCount || 0), 0),
+    avgCpu: visibleWorkers.length > 0
+      ? Math.round(visibleWorkers.reduce((sum, n) => sum + (n.metrics?.cpu || 0), 0) / visibleWorkers.length)
       : 0,
-    avgMemory: filteredWorkersByNode.length > 0
-      ? Math.round(filteredWorkersByNode.reduce((sum, n) => sum + (n.metrics?.memory || 0), 0) / filteredWorkersByNode.length)
+    avgMemory: visibleWorkers.length > 0
+      ? Math.round(visibleWorkers.reduce((sum, n) => sum + (n.metrics?.memory || 0), 0) / visibleWorkers.length)
       : 0
-  }), [filteredWorkersByNode])
+  }), [visibleWorkers])
 
   // 编辑Worker
   const handleEdit = async (values: { name?: string; host?: string; port?: number; region?: string; description?: string; tags?: string[] }) => {
@@ -286,7 +288,6 @@ const Workers: React.FC = () => {
       const result = await workerService.generateInstallKey(osType, allowedSource)
       setInstallKeyData(result)
       setInstallKeyModalVisible(true)
-      // 复制 Key 到剪贴板（保持旧行为）
       await navigator.clipboard.writeText(result.key)
       showNotification('success', `${osType.toUpperCase()} 安装 Key 已复制到剪贴板`)
     } catch (error: unknown) {
@@ -531,18 +532,6 @@ const Workers: React.FC = () => {
       )
     },
     {
-      title: '渲染',
-      key: 'render',
-      width: 80,
-      render: (_: unknown, record: Worker) => {
-        return record.capabilities?.drissionpage?.enabled ? (
-          <Tag color="green">有</Tag>
-        ) : (
-          <Tag color="default">无</Tag>
-        )
-      }
-    },
-    {
       title: '最后心跳',
       dataIndex: 'lastHeartbeat',
       key: 'lastHeartbeat',
@@ -552,56 +541,56 @@ const Workers: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 240,
+      width: 380,
       render: (_: unknown, record: Worker) => (
-        <Space size="small">
-          <Tooltip title="进入 Worker" placement="top">
-            <Button
-              type="link"
-              size="small"
-              icon={<PlayCircleOutlined />}
-              onClick={() => handleEnterWorker(record)}
-              disabled={record.status !== 'online'}
-            />
-          </Tooltip>
-          <Tooltip title="测试连接" placement="top">
-            <Button
-              type="link"
-              size="small"
-              icon={<ApiOutlined />}
-              onClick={() => handleTestConnection(record.id)}
-            />
-          </Tooltip>
-          <Tooltip title="权限管理" placement="top">
-            <Button
-              type="link"
-              size="small"
-              icon={<TeamOutlined />}
-              onClick={() => openPermissionModal(record)}
-            />
-          </Tooltip>
-          <Tooltip title="编辑" placement="top">
-            <Button
-              type="link"
-              size="small"
-              icon={<EditOutlined />}
-              onClick={() => openEditModal(record)}
-            />
-          </Tooltip>
+        <Space size={4} wrap={false}>
+          <Button
+            type="link"
+            size="small"
+            icon={<PlayCircleOutlined />}
+            onClick={() => handleEnterWorker(record)}
+            disabled={record.status !== 'online'}
+          >
+            进入
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<ApiOutlined />}
+            onClick={() => handleTestConnection(record.id)}
+          >
+            连接
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<TeamOutlined />}
+            onClick={() => openPermissionModal(record)}
+          >
+            权限
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => openEditModal(record)}
+          >
+            编辑
+          </Button>
           <Popconfirm
             title="确定删除此Worker？"
             onConfirm={() => handleDelete(record.id)}
             okText="删除"
             cancelText="取消"
           >
-            <Tooltip title="删除" placement="top">
-              <Button
-                type="link"
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-              />
-            </Tooltip>
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+            >
+              删除
+            </Button>
           </Popconfirm>
         </Space>
       )
@@ -616,198 +605,116 @@ const Workers: React.FC = () => {
   ])
 
   return (
-    <div style={{ padding: '24px' }}>
-      {/* 页面标题 */}
-      <div style={{ marginBottom: '24px' }}>
-        <Space align="start">
-          <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ClusterOutlined />
-            Worker 管理
-          </h1>
+    <PageContainer
+      title={
+        <Space>
+          <ClusterOutlined />
+          <span>Worker 管理</span>
           {currentWorker && (
-            <Tag
-              color="cyan"
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}
-            >
+            <Tag color="cyan" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <CloudServerOutlined style={{ fontSize: 12 }} />
               <span>{currentWorker.name}</span>
             </Tag>
           )}
         </Space>
-        <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
-          {currentWorker ? `当前 Worker: ${currentWorker.name}` : '管理和监控分布式 Worker'}
-        </p>
-      </div>
-
-      {/* 统计卡片 */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={8} md={6} lg={4}>
-          <Card size="small">
-            <Statistic
-              title="总Worker"
-              value={stats.total}
-              prefix={<ClusterOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={6} lg={4}>
-          <Card size="small">
-            <Statistic
-              title="在线"
-              value={stats.online}
-              valueStyle={{ color: token.colorSuccess }}
-              prefix={<CheckCircleOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={6} lg={4}>
-          <Card size="small">
-            <Statistic
-              title="离线"
-              value={stats.offline}
-              valueStyle={{ color: stats.offline > 0 ? '#ff4d4f' : undefined }}
-              prefix={<CloseCircleOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={6} lg={4}>
-          <Card size="small">
-            <Statistic
-              title="总任务"
-              value={stats.totalTasks}
-              suffix={<Text type="secondary" style={{ fontSize: 12 }}>/ {stats.runningTasks} 运行中</Text>}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={6} lg={4}>
-          <Card size="small">
-            <Statistic
-              title="平均 CPU"
-              value={stats.avgCpu}
-              suffix="%"
-              valueStyle={{ color: stats.avgCpu > 80 ? '#ff4d4f' : undefined }}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={6} lg={4}>
-          <Card size="small">
-            <Statistic
-              title="平均内存"
-              value={stats.avgMemory}
-              suffix="%"
-              valueStyle={{ color: stats.avgMemory > 80 ? '#ff4d4f' : undefined }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      {/* 工具栏 */}
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-          <Space wrap size="middle">
-            <Space>
-              <Badge status="processing" />
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                实时监控
-                {lastRefreshed && (
-                  <span style={{ marginLeft: 4, opacity: 0.7 }}>
-                    · {new Date(lastRefreshed).toLocaleTimeString()}
-                  </span>
-                )}
-              </Text>
-            </Space>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => refreshWorkers()}
-              loading={loading}
-              size="small"
-            >
-              刷新
-            </Button>
-            <Dropdown
-              menu={{
-                items: [
-                  { key: 'linux', label: 'Linux', icon: <DesktopOutlined /> },
-                  { key: 'macos', label: 'macOS', icon: <AppleOutlined /> },
-                  { key: 'windows', label: 'Windows', icon: <WindowsOutlined /> },
-                ],
-                onClick: ({ key }) => handleGenerateKey(key)
-              }}
-              trigger={['hover']}
-            >
-              <Button type="primary" icon={<LinkOutlined />}>
-                连接 Worker <DownOutlined />
+      }
+      extra={
+        <Space size={4}>
+          <Badge status="processing" />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            实时监控
+            {lastRefreshed && (
+              <span style={{ marginLeft: 4, opacity: 0.7 }}>
+                · {new Date(lastRefreshed).toLocaleTimeString()}
+              </span>
+            )}
+          </Text>
+        </Space>
+      }
+      banner={
+        <Row gutter={12}>
+          <Col xs={12} sm={8} md={6} lg={4}>
+            <Card size="small"><Statistic title="总Worker" value={stats.total} prefix={<ClusterOutlined />} /></Card>
+          </Col>
+          <Col xs={12} sm={8} md={6} lg={4}>
+            <Card size="small"><Statistic title="在线" value={stats.online} valueStyle={{ color: token.colorSuccess }} prefix={<CheckCircleOutlined />} /></Card>
+          </Col>
+          <Col xs={12} sm={8} md={6} lg={4}>
+            <Card size="small"><Statistic title="离线" value={stats.offline} valueStyle={{ color: stats.offline > 0 ? '#ff4d4f' : undefined }} prefix={<CloseCircleOutlined />} /></Card>
+          </Col>
+          <Col xs={12} sm={8} md={6} lg={4}>
+            <Card size="small"><Statistic title="总任务" value={stats.totalTasks} suffix={<Text type="secondary" style={{ fontSize: 12 }}>/ {stats.runningTasks} 运行中</Text>} /></Card>
+          </Col>
+          <Col xs={12} sm={8} md={6} lg={4}>
+            <Card size="small"><Statistic title="平均 CPU" value={stats.avgCpu} suffix="%" valueStyle={{ color: stats.avgCpu > 80 ? '#ff4d4f' : undefined }} /></Card>
+          </Col>
+          <Col xs={12} sm={8} md={6} lg={4}>
+            <Card size="small"><Statistic title="平均内存" value={stats.avgMemory} suffix="%" valueStyle={{ color: stats.avgMemory > 80 ? '#ff4d4f' : undefined }} /></Card>
+          </Col>
+        </Row>
+      }
+      toolbar={
+        <FilterBar
+          filters={
+            <>
+              <Select placeholder="状态" allowClear style={{ width: 110 }} value={statusFilter} onChange={setStatusFilter}>
+                <Option value="online">在线</Option>
+                <Option value="offline">离线</Option>
+                <Option value="maintenance">维护中</Option>
+              </Select>
+              <Select placeholder="区域" allowClear style={{ width: 130 }} value={regionFilter} onChange={setRegionFilter}>
+                {regions.map(r => (<Option key={r} value={r}>{r}</Option>))}
+              </Select>
+              <Search placeholder="搜索Worker" allowClear style={{ width: 220 }} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+            </>
+          }
+          actions={
+            <>
+              <Button icon={<ReloadOutlined />} onClick={() => refreshWorkers()} loading={loading}>刷新</Button>
+              <Dropdown
+                menu={{
+                  items: [
+                    { key: 'linux', label: 'Linux', icon: <DesktopOutlined /> },
+                    { key: 'macos', label: 'macOS', icon: <AppleOutlined /> },
+                    { key: 'windows', label: 'Windows', icon: <WindowsOutlined /> },
+                  ],
+                  onClick: ({ key }) => handleGenerateKey(key),
+                }}
+                trigger={['hover']}
+              >
+                <Button type="primary" icon={<LinkOutlined />}>
+                  连接 Worker <DownOutlined />
+                </Button>
+              </Dropdown>
+              <Button danger icon={<DeleteOutlined />} disabled={selectedRowKeys.length === 0} onClick={handleBatchDelete}>
+                批量删除{selectedRowKeys.length > 0 && ` (${selectedRowKeys.length})`}
               </Button>
-            </Dropdown>
-            <Button
-              danger
-              icon={<DeleteOutlined />}
-              disabled={selectedRowKeys.length === 0}
-              onClick={handleBatchDelete}
-            >
-              批量删除{selectedRowKeys.length > 0 && ` (${selectedRowKeys.length})`}
-            </Button>
-          </Space>
-          <Space wrap size="middle">
-            <Select
-              placeholder="状态"
-              allowClear
-              style={{ width: 100 }}
-              value={statusFilter}
-              onChange={setStatusFilter}
-            >
-              <Option value="online">在线</Option>
-              <Option value="offline">离线</Option>
-              <Option value="maintenance">维护中</Option>
-            </Select>
-            <Select
-              placeholder="区域"
-              allowClear
-              style={{ width: 120 }}
-              value={regionFilter}
-              onChange={setRegionFilter}
-            >
-              {regions.map(r => (
-                <Option key={r} value={r}>{r}</Option>
-              ))}
-            </Select>
-            <Search
-              placeholder="搜索Worker"
-              allowClear
-              style={{ width: 200 }}
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-            />
-          </Space>
-        </div>
-      </Card>
-
-      {/* Worker表格 */}
-      <Card>
-        <ResponsiveTable
-          dataSource={paginatedWorkers}
-          columns={columns}
-          rowKey="id"
-          loading={loading}
-          rowSelection={{
-            selectedRowKeys,
-            onChange: setSelectedRowKeys
-          }}
-          pagination={{
-            current: currentPage,
-            pageSize: pageSize,
-            total: filteredWorkers.length,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条`,
-            onChange: (page, size) => {
-              setCurrentPage(page)
-              if (size !== pageSize) setPageSize(size)
-            }
-          }}
-          minWidth={1000}
+            </>
+          }
         />
-      </Card>
+      }
+    >
+      <ResponsiveTable
+        fill
+        dataSource={paginatedWorkers}
+        columns={columns}
+        rowKey="id"
+        loading={loading}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: setSelectedRowKeys,
+        }}
+        pagination={{
+          current: currentPage,
+          pageSize: pageSize,
+          total: filteredWorkers.length,
+          onChange: (page, size) => {
+            setCurrentPage(page)
+            if (size !== pageSize) setPageSize(size)
+          },
+        }}
+        minWidth={1000}
+      />
 
       {/* 编辑弹窗 */}
       <Modal
@@ -975,16 +882,6 @@ const Workers: React.FC = () => {
                       ) : '-'}
                     </Descriptions.Item>
                     <Descriptions.Item label="Worker 版本">{selectedWorker.version || '-'}</Descriptions.Item>
-
-                    {/* 渲染能力 */}
-                    <Descriptions.Item label="渲染能力" span={2}>
-                      {selectedWorker.capabilities?.drissionpage?.enabled ? (
-                        <Tag color="green">有</Tag>
-                      ) : (
-                        <Tag color="default">无</Tag>
-                      )}
-                    </Descriptions.Item>
-
                     <Descriptions.Item label="描述" span={2}>{selectedWorker.description || '-'}</Descriptions.Item>
                     <Descriptions.Item label="最后心跳" span={2}>
                       {selectedWorker.lastHeartbeat ? formatDateTime(selectedWorker.lastHeartbeat) : '-'}
@@ -1266,7 +1163,7 @@ const Workers: React.FC = () => {
         </Card>
       </Modal>
 
-    </div>
+    </PageContainer>
   )
 }
 

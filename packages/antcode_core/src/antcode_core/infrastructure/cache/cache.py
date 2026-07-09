@@ -1,8 +1,6 @@
-"""统一缓存系统"""
+"""Redis-only cache infrastructure."""
 
-import asyncio
-import time
-import weakref
+import gzip
 from dataclasses import dataclass
 
 from loguru import logger
@@ -11,397 +9,185 @@ from antcode_core.common.config import settings
 from antcode_core.common.serialization import from_json, to_json
 
 
-@dataclass
+@dataclass(frozen=True)
 class CacheConfig:
-    """缓存配置"""
+    """Redis cache configuration."""
 
-    use_redis: bool = True
     default_ttl: int = 300
     max_ttl: int = 3600
     min_ttl: int = 10
-    memory_max_size: int = 1000
-    memory_cleanup_threshold: float = 0.9
     redis_key_prefix: str = "cache:"
     redis_connection_timeout: int = 5
     enable_compression: bool = False
     compression_threshold: int = 1024
 
     @classmethod
-    def from_settings(cls, prefix=""):
-        return cls(
-            use_redis=getattr(settings, "CACHE_USE_REDIS", False),
-            default_ttl=getattr(settings, "CACHE_DEFAULT_TTL", 300),
-            redis_key_prefix=f"cache:{prefix.lower().rstrip('_')}:" if prefix else "cache:",
-        )
+    def from_settings(cls, prefix: str = "") -> "CacheConfig":
+        key_prefix = f"cache:{prefix.lower().rstrip('_')}:" if prefix else "cache:"
+        return cls(default_ttl=settings.CACHE_DEFAULT_TTL, redis_key_prefix=key_prefix)
 
 
 class UnifiedCache:
-    """统一缓存管理器"""
+    """Redis cache manager."""
 
-    def __init__(self, config, name="default"):
+    def __init__(self, config: CacheConfig, name: str = "default"):
         self.config = config
         self.name = name
         self._redis_client = None
-        self._memory_cache = {}
-        self._weak_refs = {}
-
         self._stats = {"hits": 0, "misses": 0, "sets": 0, "deletes": 0, "errors": 0}
-
-        logger.info(f"缓存 '{name}' 已初始化: Redis={config.use_redis}, TTL={config.default_ttl}s")
+        logger.info(f"Redis 缓存 '{name}' 已初始化: TTL={config.default_ttl}s")
 
     async def _get_redis_client(self):
-        if not self.config.use_redis:
-            return None
+        if self._redis_client is None:
+            from antcode_core.infrastructure.redis import get_redis_client
 
-        if not self._redis_client:
-            try:
-                from antcode_core.infrastructure.redis import get_redis_client
-
-                self._redis_client = await asyncio.wait_for(
-                    get_redis_client(), timeout=self.config.redis_connection_timeout
-                )
-                logger.info(f"缓存 '{self.name}' 已连接到Redis")
-            except Exception as e:
-                logger.error(f"缓存 '{self.name}' Redis连接失败: {e}")
-                raise
-
+            self._redis_client = await get_redis_client()
+            logger.info(f"Redis 缓存 '{self.name}' 已连接")
         return self._redis_client
 
-    def _serialize_value(self, value):
-        try:
-            data = to_json(value)
-            if self.config.enable_compression and len(data) > self.config.compression_threshold:
-                import gzip
-
-                return gzip.compress(data.encode("utf-8"))
-            return data.encode("utf-8")
-        except Exception as e:
-            logger.error(f"缓存序列化失败: {e}")
-            raise
-
-    def _deserialize_value(self, data):
-        try:
-            if self.config.enable_compression:
-                try:
-                    import gzip
-
-                    data = gzip.decompress(data)
-                except Exception:
-                    pass
-
-            return from_json(data.decode("utf-8"))
-        except Exception as e:
-            logger.error(f"缓存反序列化失败: {e}")
-            return None
-
-    def _generate_key(self, key):
+    def _generate_key(self, key: str) -> str:
         return f"{self.config.redis_key_prefix}{key}"
 
-    def _is_expired(self, cached_item):
-        if "expires_at" not in cached_item:
-            return True
-        return time.time() > cached_item["expires_at"]
+    def _serialize_value(self, value) -> bytes:
+        data = to_json(value).encode("utf-8")
+        if self.config.enable_compression and len(data) > self.config.compression_threshold:
+            return gzip.compress(data)
+        return data
 
-    def _cleanup_memory_cache(self):
-        if len(self._memory_cache) <= self.config.memory_max_size:
-            return
+    def _deserialize_value(self, data: bytes):
+        raw = self._maybe_decompress(data)
+        return from_json(raw.decode("utf-8"))
 
-        expired_keys = [key for key, item in self._memory_cache.items() if self._is_expired(item)]
-        for key in expired_keys:
-            del self._memory_cache[key]
-            self._weak_refs.pop(key, None)
+    def _maybe_decompress(self, data: bytes) -> bytes:
+        if not self.config.enable_compression:
+            return data
+        try:
+            return gzip.decompress(data)
+        except gzip.BadGzipFile:
+            return data
 
-        if (
-            len(self._memory_cache)
-            > self.config.memory_max_size * self.config.memory_cleanup_threshold
-        ):
-            items = list(self._memory_cache.items())
-            items.sort(key=lambda x: x[1].get("created_at", 0))
+    def _normalize_ttl(self, ttl: int | None) -> int:
+        selected = self.config.default_ttl if ttl is None else ttl
+        return max(self.config.min_ttl, min(selected, self.config.max_ttl))
 
-            remove_count = len(items) - int(
-                self.config.memory_max_size * self.config.memory_cleanup_threshold
+    async def get(self, key: str):
+        try:
+            data = await (await self._get_redis_client()).get(self._generate_key(key))
+            if data is None:
+                self._stats["misses"] += 1
+                return None
+            self._stats["hits"] += 1
+            return self._deserialize_value(data)
+        except Exception as exc:
+            self._stats["errors"] += 1
+            logger.error(f"Redis 缓存读取失败: {exc}")
+            raise
+
+    async def set(self, key: str, value, ttl: int | None = None) -> bool:
+        try:
+            payload = self._serialize_value(value)
+            await (await self._get_redis_client()).setex(
+                self._generate_key(key),
+                self._normalize_ttl(ttl),
+                payload,
             )
-            for key, _ in items[:remove_count]:
-                del self._memory_cache[key]
-                self._weak_refs.pop(key, None)
-
-    async def get(self, key):
-        full_key = self._generate_key(key)
-
-        try:
-            if self.config.use_redis:
-                redis_client = await self._get_redis_client()
-                if redis_client:
-                    try:
-                        data = await redis_client.get(full_key)
-                        if data:
-                            value = self._deserialize_value(data)
-                            self._stats["hits"] += 1
-                            logger.debug(f"缓存 '{self.name}' Redis命中: {key}")
-                            return value
-                    except Exception as e:
-                        logger.error(f"Redis读取失败: {e}")
-                        self._stats["errors"] += 1
-                        raise
-            else:
-                if key in self._memory_cache:
-                    cached_item = self._memory_cache[key]
-                    if not self._is_expired(cached_item):
-                        self._stats["hits"] += 1
-                        logger.debug(f"缓存 '{self.name}' 内存命中: {key}")
-                        return cached_item["value"]
-                    else:
-                        del self._memory_cache[key]
-                        self._weak_refs.pop(key, None)
-
-            self._stats["misses"] += 1
-            return None
-
-        except Exception as e:
-            logger.error(f"缓存获取失败: {e}")
+            self._stats["sets"] += 1
+            return True
+        except Exception as exc:
             self._stats["errors"] += 1
+            logger.error(f"Redis 缓存写入失败: {exc}")
             raise
 
-    async def set(self, key, value, ttl=None):
-        if ttl is None:
-            ttl = self.config.default_ttl
-
-        ttl = max(self.config.min_ttl, min(ttl, self.config.max_ttl))
-
-        full_key = self._generate_key(key)
-
+    async def delete(self, key: str) -> bool:
         try:
-            if self.config.use_redis:
-                redis_client = await self._get_redis_client()
-                if redis_client:
-                    try:
-                        data = self._serialize_value(value)
-                        await redis_client.setex(full_key, ttl, data)
-                        self._stats["sets"] += 1
-                        logger.debug(f"缓存 '{self.name}' Redis设置: {key}")
-                        return True
-                    except Exception as e:
-                        logger.error(f"Redis写入失败: {e}")
-                        self._stats["errors"] += 1
-                        raise
-            else:
-                self._cleanup_memory_cache()
-
-                cached_item = {
-                    "value": value,
-                    "created_at": time.time(),
-                    "expires_at": time.time() + ttl,
-                    "ttl": ttl,
-                }
-                self._memory_cache[key] = cached_item
-
-                if hasattr(value, "__weakref__"):
-
-                    def cleanup_callback(ref):
-                        self._memory_cache.pop(key, None)
-                        self._weak_refs.pop(key, None)
-
-                    self._weak_refs[key] = weakref.ref(value, cleanup_callback)
-
-                self._stats["sets"] += 1
-                logger.debug(f"缓存 '{self.name}' 内存设置: {key}")
-                return True
-
-        except Exception as e:
-            logger.error(f"缓存设置失败: {e}")
+            result = await (await self._get_redis_client()).delete(self._generate_key(key))
+            self._stats["deletes"] += 1
+            return result > 0
+        except Exception as exc:
             self._stats["errors"] += 1
+            logger.error(f"Redis 缓存删除失败: {exc}")
             raise
 
-    async def delete(self, key):
-        full_key = self._generate_key(key)
+    async def clear(self) -> bool:
+        await self.clear_prefix("")
+        return True
 
-        try:
-            if self.config.use_redis:
-                redis_client = await self._get_redis_client()
-                if redis_client:
-                    try:
-                        result = await redis_client.delete(full_key)
-                        self._stats["deletes"] += 1
-                        logger.debug(f"缓存 '{self.name}' Redis删除: {key}")
-                        return result > 0
-                    except Exception as e:
-                        logger.error(f"Redis删除失败: {e}")
-                        self._stats["errors"] += 1
-                        raise
-            else:
-                if key in self._memory_cache:
-                    del self._memory_cache[key]
-                    self._weak_refs.pop(key, None)
-                    self._stats["deletes"] += 1
-                    logger.debug(f"缓存 '{self.name}' 内存删除: {key}")
-                    return True
-                return False
+    async def clear_prefix(self, key_prefix: str) -> bool:
+        client = await self._get_redis_client()
+        pattern = f"{self.config.redis_key_prefix}{key_prefix}*"
+        deleted = await self._delete_pattern(client, pattern)
+        if deleted:
+            self._stats["deletes"] += deleted
+        logger.info(f"Redis 缓存 '{self.name}' 前缀已清除: {key_prefix}")
+        return True
 
-        except Exception as e:
-            logger.error(f"缓存删除失败: {e}")
-            self._stats["errors"] += 1
-            raise
+    async def _delete_pattern(self, client, pattern: str) -> int:
+        deleted = 0
+        batch: list[bytes | str] = []
+        async for key in client.scan_iter(match=pattern, count=500):
+            batch.append(key)
+            if len(batch) >= 500:
+                deleted += await client.delete(*batch)
+                batch.clear()
+        if batch:
+            deleted += await client.delete(*batch)
+        return deleted
 
-    async def clear(self):
-        try:
-            if self.config.use_redis:
-                redis_client = await self._get_redis_client()
-                if redis_client:
-                    try:
-                        pattern = f"{self.config.redis_key_prefix}*"
-                        batch = []
-                        batch_size = 500
-                        if hasattr(redis_client, "scan_iter"):
-                            async for k in redis_client.scan_iter(match=pattern, count=batch_size):
-                                batch.append(k)
-                                if len(batch) >= batch_size:
-                                    await redis_client.delete(*batch)
-                                    batch.clear()
-                            if batch:
-                                await redis_client.delete(*batch)
-                        else:
-                            keys = await redis_client.keys(pattern)
-                            if keys:
-                                for i in range(0, len(keys), batch_size):
-                                    await redis_client.delete(*keys[i : i + batch_size])
-                        logger.info(f"缓存 '{self.name}' Redis已清空")
-                        return True
-                    except Exception as e:
-                        logger.error(f"Redis清空失败: {e}")
-                        self._stats["errors"] += 1
-                        raise
-            else:
-                self._memory_cache.clear()
-                self._weak_refs.clear()
-                logger.info(f"缓存 '{self.name}' 内存已清空")
-                return True
-
-        except Exception as e:
-            logger.error(f"缓存清空失败: {e}")
-            self._stats["errors"] += 1
-            raise
-
-    async def clear_prefix(self, key_prefix):
-        try:
-            if self.config.use_redis:
-                redis_client = await self._get_redis_client()
-                if redis_client:
-                    try:
-                        pattern = f"{self.config.redis_key_prefix}{key_prefix}*"
-                        batch = []
-                        batch_size = 500
-                        if hasattr(redis_client, "scan_iter"):
-                            async for k in redis_client.scan_iter(match=pattern, count=batch_size):
-                                batch.append(k)
-                                if len(batch) >= batch_size:
-                                    await redis_client.delete(*batch)
-                                    batch.clear()
-                            if batch:
-                                await redis_client.delete(*batch)
-                        else:
-                            keys = await redis_client.keys(pattern)
-                            if keys:
-                                for i in range(0, len(keys), batch_size):
-                                    await redis_client.delete(*keys[i : i + batch_size])
-                        self._stats["deletes"] += 1
-                        logger.info(f"缓存 '{self.name}' 前缀已清除: {key_prefix}")
-                        return True
-                    except Exception as e:
-                        logger.error(f"Redis前缀清除失败: {e}")
-                        self._stats["errors"] += 1
-                        raise
-            else:
-                to_delete = [k for k in list(self._memory_cache.keys()) if k.startswith(key_prefix)]
-                for k in to_delete:
-                    self._memory_cache.pop(k, None)
-                    self._weak_refs.pop(k, None)
-                if to_delete:
-                    self._stats["deletes"] += 1
-                    logger.info(
-                        f"缓存 '{self.name}' 前缀已清除: {key_prefix} ({len(to_delete)} items)"
-                    )
-                return True
-
-        except Exception as e:
-            logger.error(f"缓存前缀清除失败: {e}")
-            self._stats["errors"] += 1
-            raise
-
-    async def exists(self, key):
+    async def exists(self, key: str) -> bool:
         return await self.get(key) is not None
 
-    async def get_stats(self):
-        total_requests = self._stats["hits"] + self._stats["misses"]
-        hit_rate = (self._stats["hits"] / total_requests * 100) if total_requests > 0 else 0
-
+    async def get_stats(self) -> dict:
+        total = self._stats["hits"] + self._stats["misses"]
+        hit_rate = round(self._stats["hits"] / total * 100, 2) if total else 0
         return {
             "name": self.name,
             "config": {
-                "use_redis": self.config.use_redis,
+                "backend": "redis",
                 "default_ttl": self.config.default_ttl,
-                "memory_max_size": self.config.memory_max_size,
             },
-            "stats": {
-                **self._stats,
-                "hit_rate": round(hit_rate, 2),
-                "memory_items": len(self._memory_cache),
-                "weak_refs": len(self._weak_refs),
-            },
+            "stats": {**self._stats, "hit_rate": hit_rate},
             "redis_available": self._redis_client is not None,
         }
 
 
 class CacheManager:
-    """全局缓存管理器"""
+    """Global Redis cache registry."""
 
     def __init__(self):
-        self._caches = {}
+        self._caches: dict[str, UnifiedCache] = {}
         self._default_config = CacheConfig()
 
-    def get_cache(self, name, config=None):
+    def get_cache(self, name: str, config: CacheConfig | None = None) -> UnifiedCache:
         if name not in self._caches:
-            if config is None:
-                config = self._default_config
-            self._caches[name] = UnifiedCache(config, name)
+            self._caches[name] = UnifiedCache(config or self._default_config, name)
         return self._caches[name]
 
-    def create_cache(self, name, **config_kwargs):
-        config = CacheConfig(**config_kwargs)
-        cache = UnifiedCache(config, name)
+    def create_cache(self, name: str, **config_kwargs) -> UnifiedCache:
+        cache = UnifiedCache(CacheConfig(**config_kwargs), name)
         self._caches[name] = cache
         return cache
 
-    async def clear_all(self):
+    async def clear_all(self) -> None:
         for cache in self._caches.values():
             await cache.clear()
 
-    async def get_all_stats(self):
-        stats = {}
-        for name, cache in self._caches.items():
-            stats[name] = await cache.get_stats()
-        return stats
+    async def get_all_stats(self) -> dict:
+        return {name: await cache.get_stats() for name, cache in self._caches.items()}
 
-    def list_caches(self):
+    def list_caches(self) -> list[str]:
         return list(self._caches.keys())
 
 
 cache_manager = CacheManager()
 
 
-def get_cache(name="default", **config_kwargs):
+def get_cache(name: str = "default", **config_kwargs) -> UnifiedCache:
     if config_kwargs:
-        config = CacheConfig(**config_kwargs)
-        return cache_manager.get_cache(name, config)
+        return cache_manager.get_cache(name, CacheConfig(**config_kwargs))
     return cache_manager.get_cache(name)
 
 
-unified_cache = get_cache(
-    "unified",
-    use_redis=getattr(settings, "CACHE_USE_REDIS", False),
-    default_ttl=getattr(settings, "CACHE_DEFAULT_TTL", 300),
-    redis_key_prefix="cache:",
-)
-
+unified_cache = get_cache("unified", default_ttl=settings.CACHE_DEFAULT_TTL)
 user_cache = unified_cache
 metrics_cache = unified_cache
 api_cache = unified_cache

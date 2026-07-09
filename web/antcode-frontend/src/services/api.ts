@@ -102,8 +102,15 @@ async function ensureFreshToken(): Promise<string | null> {
           return data.access_token
         }
         return token
-      } catch {
-        return token // Refresh failed, use existing token
+      } catch (err) {
+        // 刷新失败：若是 refresh_token 也过期（401/403），触发登出；网络错误则保留旧 token 让下次请求触发。
+        const status = (err as AxiosError)?.response?.status
+        if (status === 401 || status === 403) {
+          clearRefreshTokenStored()
+          AuthHandler.handleAuthFailure()
+          return null
+        }
+        return token
       } finally {
         isRefreshing = false
         refreshPromise = null
@@ -180,7 +187,6 @@ export const unwrapResponse = <T>(response: AxiosResponse<unknown>): T => {
 
 export class TokenManager {
   private static readonly TOKEN_KEY = STORAGE_KEYS.ACCESS_TOKEN
-  private static readonly REFRESH_KEY = STORAGE_KEYS.REFRESH_TOKEN
 
   static getTokenPayload(token: string): JwtTokenPayload | null {
     try {

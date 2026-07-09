@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback, memo } from 'react'
-import { Row, Col, Card, Progress, Button, Tabs, Flex, Typography, Skeleton, theme, Tooltip } from 'antd'
+import { Row, Col, Card, Progress, Button, Tabs, Flex, Typography, Skeleton, theme, Tooltip, Alert } from 'antd'
 import {
   ClusterOutlined, ProjectOutlined, CheckCircleOutlined, SyncOutlined, MonitorOutlined,
   ClockCircleOutlined, DashboardOutlined, BugOutlined, CloudServerOutlined,
@@ -11,6 +11,7 @@ import { workerService } from '@/services/workers'
 import type { WorkerAggregateStats, ClusterSpiderStats } from '@/types'
 import SpiderStatsTab from '@/components/workers/SpiderStatsTab'
 import StatCard from '@/components/common/StatCard'
+import PageContainer from '@/components/common/PageContainer'
 
 const MonitorTab = React.lazy(() => import('@/pages/Monitor'))
 const { Title, Text } = Typography
@@ -56,6 +57,7 @@ const Dashboard: React.FC = memo(() => {
   const [hourlyTrend, setHourlyTrend] = useState<HourlyTrendItem[]>([])
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [activeTab, setActiveTab] = useState('overview')
+  const [loadError, setLoadError] = useState<string | null>(null)
   
   // 用于追踪是否已完成首次加载
   const isInitialLoadDone = useRef(false)
@@ -82,9 +84,9 @@ const Dashboard: React.FC = memo(() => {
       const [stats, metrics, workers, spider, trend] = await Promise.all([
         dashboardService.getDashboardStats(),
         dashboardService.getSystemMetrics(),
-        workerService.getAggregateStats().catch(() => null),
-        workerService.getClusterSpiderStats().catch(() => null),
-        dashboardService.getHourlyTrend().catch(() => [])
+        workerService.getAggregateStats(),
+        workerService.getClusterSpiderStats(),
+        dashboardService.getHourlyTrend()
       ])
       
       // 批量更新状态，减少重渲染
@@ -94,6 +96,7 @@ const Dashboard: React.FC = memo(() => {
       setSpiderStats(spider)
       setHourlyTrend(trend)
       setLastUpdated(new Date())
+      setLoadError(null)
       
       // 标记首次加载完成
       if (!isInitialLoadDone.current) {
@@ -101,6 +104,7 @@ const Dashboard: React.FC = memo(() => {
       }
     } catch (e) {
       console.error('Failed to load dashboard:', e)
+      setLoadError(e instanceof Error ? e.message : '加载仪表盘数据失败')
     } finally {
       setInitialLoading(false)
       setIsRefreshing(false)
@@ -139,7 +143,7 @@ const Dashboard: React.FC = memo(() => {
                       dashboardStats?.system.status === 'warning' ? token.colorWarning : token.colorError
 
   return (
-    <div>
+    <PageContainer scrollable>
       {/* 页头 */}
       <Flex justify="space-between" align="center" wrap="wrap" gap={16} style={{ marginBottom: 24 }}>
         <div>
@@ -177,6 +181,16 @@ const Dashboard: React.FC = memo(() => {
           )}
         </Flex>
       </Flex>
+
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message="仪表盘数据加载失败"
+          description={loadError}
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       <Tabs
         activeKey={activeTab}
@@ -511,7 +525,7 @@ const Dashboard: React.FC = memo(() => {
           50% { opacity: 0.5; }
         }
       `}</style>
-    </div>
+    </PageContainer>
   )
 })
 

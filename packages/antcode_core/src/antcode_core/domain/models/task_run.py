@@ -20,9 +20,7 @@ class TaskRun(BaseModel):
     表示一次任务执行的完整记录，包含分发状态、运行状态和执行结果。
     """
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     task_id = fields.BigIntField()
 
     # 执行标识
@@ -45,9 +43,6 @@ class TaskRun(BaseModel):
     error_message = fields.TextField(null=True)
     retry_count = fields.IntField(default=0)
 
-    # 日志路径
-    log_file_path = fields.CharField(max_length=512, null=True)
-    error_log_path = fields.CharField(max_length=512, null=True)
     result_data = fields.JSONField(null=True)
 
     # 资源使用
@@ -56,6 +51,7 @@ class TaskRun(BaseModel):
 
     # 心跳时间 - 用于检测任务是否中断
     last_heartbeat = fields.DatetimeField(null=True, description="最后心跳时间")
+    next_retry_at = fields.DatetimeField(null=True, description="下次重试时间")
 
     # 执行 Worker ID - 记录任务在哪个 Worker 执行
     worker_id = fields.BigIntField(
@@ -83,6 +79,7 @@ class TaskRun(BaseModel):
             ("public_id",),
             ("worker_id",),
             ("status", "last_heartbeat"),
+            ("status", "next_retry_at"),
         ]
         ordering = ["-start_time"]
 

@@ -24,9 +24,6 @@ from antcode_core.application.services.projects.project_service import project_s
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.projects.unified_project_service import unified_project_service
 from antcode_core.application.services.users.user_service import user_service
-from antcode_core.application.services.workers.worker_project_service import (
-    worker_project_service,
-)
 from antcode_core.common.config import settings
 from antcode_core.common.security.auth import get_current_user, get_current_user_id
 from antcode_core.common.utils.api_optimizer import (
@@ -40,13 +37,10 @@ from antcode_core.domain.models.enums import ProjectType
 from antcode_core.domain.models.project import Project, ProjectCode, ProjectFile, ProjectRule
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.project import (
-    FileContentResponse,
-    FileStructureResponse,
     ProjectCodeCreateRequest,
     ProjectCodeUpdateRequest,
     ProjectCreateFormRequest,
     ProjectCreateRequest,
-    ProjectFileContentUpdateRequest,
     ProjectFileCreateRequest,
     ProjectFileUpdateRequest,
     ProjectListQueryRequest,
@@ -84,7 +78,6 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
-from antcode_web_api.services.projects.project_file_service import project_file_service
 
 project_router = APIRouter()
 
@@ -222,6 +215,10 @@ async def get_project_create_form(
     priority: int = Form(0),
     headers: str | None = Form(None),
     cookies: str | None = Form(None),
+    # S10 (Scrapy 迁移收尾): UI 提交但后端没接的两个字段——scrapy-redis
+    # 断点续爬 + 内容级去重。加进 Form 参数，再往下传到 ProjectRule。
+    resume_enabled: bool | str | None = Form(None),
+    dedup_config: str | None = Form(None),
     language: str = Form("python", max_length=50),
     version: str = Form("1.0.0", max_length=20),
     code_entry_point: str | None = Form(None, max_length=255),
@@ -233,6 +230,12 @@ async def get_project_create_form(
     git_subdir: str | None = Form(None, max_length=500),
     git_credential_id: str | None = Form(None, max_length=32),
     code_content: str | None = Form(None),
+    # O6: Git repository 源码字段（前端 appendRepositorySourceFields 传的）。
+    # 迁移 44/45 后 code/file 项目源码统一走这里，旧的 git_* 字段已废弃。
+    repository_id: str | None = Form(None, max_length=32),
+    ref: str | None = Form(None, max_length=255),
+    subdir: str | None = Form(None, max_length=500),
+    include_paths: str | None = Form(None),
 ) -> ProjectCreateFormRequest:
     # 处理 use_existing_env 布尔值
     use_existing_env_bool = False
@@ -241,6 +244,14 @@ async def get_project_create_form(
             use_existing_env_bool = use_existing_env
         elif isinstance(use_existing_env, str):
             use_existing_env_bool = use_existing_env.lower() in ("true", "1", "yes")
+
+    # S10: resume_enabled 表单侧可能是 "true"/"false" 字符串
+    resume_enabled_bool: bool | None = None
+    if resume_enabled is not None:
+        if isinstance(resume_enabled, bool):
+            resume_enabled_bool = resume_enabled
+        elif isinstance(resume_enabled, str) and resume_enabled.strip():
+            resume_enabled_bool = resume_enabled.strip().lower() in ("true", "1", "yes", "on")
 
     return ProjectCreateFormRequest(
         name=name,
@@ -287,7 +298,28 @@ async def get_project_create_form(
         git_subdir=git_subdir,
         git_credential_id=git_credential_id,
         code_content=code_content,
+        repository_id=repository_id,
+        ref=ref,
+        subdir=subdir,
+        include_paths=include_paths,
+        # S10
+        resume_enabled=resume_enabled_bool,
+        dedup_config=dedup_config,
     )
+
+
+def _extract_repo_source_fields(form_data) -> dict:
+    """O6: 从 FormRequest 抽 Git repository 源码字段，供 file/code project
+    的 CreateRequest 使用。前端 ``appendRepositorySourceFields`` 用同一契约。
+    """
+    fields = {
+        "repository_id": form_data.repository_id,
+        "ref": form_data.ref or "main",
+        "subdir": form_data.subdir,
+        "include_paths": form_data.include_paths,
+    }
+    # 剔除 None 让 Pydantic default 生效
+    return {k: v for k, v in fields.items() if v is not None}
 
 
 async def get_project_list_query(
@@ -323,15 +355,24 @@ async def get_project_list_query(
 async def create_project(
     http_request: Request,
     form_data=Depends(get_project_create_form),
-    file=File(None),
-    files=File(None),
-    code_file=File(None),
     current_user_id=Depends(get_current_user_id),
     current_user=Depends(get_current_user),
 ):
-    """创建项目"""
+    """创建项目。
 
-    # 构建请求数据
+    O6: 之前该端点因三重漂移（service 签名多传 File kwarg / FormRequest
+    缺 10 字段 / Create schema 缺 repository_id）当前 100% 失败。
+    修复方向：
+    - 删除已废弃的 file/files/code_file File 参数——新架构下项目源码统一
+      走 Git repository，不再接受 upload；前端也已不再传这些字段。
+    - 清理 request_data 里向 CreateRequest 传递的旧 git_*/code_content
+      /file_source_type/interpreter_source/python_bin/version 字段
+      （schema ``extra="forbid"`` 遇到即 422）；这些字段在迁移 44/45 后
+      已被 repository_id 取代。
+    - 保留 form 参数向后兼容（老客户端传了会被忽略）。
+    """
+
+    # 构建请求数据 —— 仅包含 Pydantic Create schemas 声明的字段
     request_data = {
         "name": form_data.name,
         "description": form_data.description,
@@ -341,8 +382,6 @@ async def create_project(
         "runtime_scope": form_data.runtime_scope,
         "python_version": form_data.python_version,
         "shared_runtime_key": form_data.shared_runtime_key,
-        "interpreter_source": form_data.interpreter_source,
-        "python_bin": form_data.python_bin,
         # Worker 环境参数
         "env_location": form_data.env_location,
         "worker_id": form_data.worker_id,
@@ -352,6 +391,9 @@ async def create_project(
         "env_description": form_data.env_description,
     }
 
+    # 从 form 抽 Git repository 源码字段（file/code 项目共用契约）
+    repo_fields = _extract_repo_source_fields(form_data)
+
     # 根据项目类型添加特定参数
     if form_data.type == ProjectType.FILE:
         request_data.update(
@@ -359,12 +401,7 @@ async def create_project(
                 "entry_point": form_data.entry_point,
                 "runtime_config": form_data.runtime_config,
                 "environment_vars": form_data.environment_vars,
-                "source_type": form_data.file_source_type,
-                "git_url": form_data.git_url,
-                "git_branch": form_data.git_branch,
-                "git_commit": form_data.git_commit,
-                "git_subdir": form_data.git_subdir,
-                "git_credential_id": form_data.git_credential_id,
+                **repo_fields,
             }
         )
     elif form_data.type == ProjectType.RULE:
@@ -389,22 +426,18 @@ async def create_project(
                 "priority": form_data.priority,
                 "headers": form_data.headers,
                 "cookies": form_data.cookies,
+                # S10: scrapy-redis 断点续爬 + 内容级去重
+                "resume_enabled": getattr(form_data, "resume_enabled", None),
+                "dedup_config": getattr(form_data, "dedup_config", None),
             }
         )
     elif form_data.type == ProjectType.CODE:
         request_data.update(
             {
                 "language": form_data.language,
-                "version": form_data.version,
                 "entry_point": form_data.code_entry_point,
                 "documentation": form_data.documentation,
-                "source_type": form_data.code_source_type,
-                "git_url": form_data.git_url,
-                "git_branch": form_data.git_branch,
-                "git_commit": form_data.git_commit,
-                "git_subdir": form_data.git_subdir,
-                "git_credential_id": form_data.git_credential_id,
-                "code_content": form_data.code_content,
+                **repo_fields,
             }
         )
 
@@ -422,9 +455,6 @@ async def create_project(
     project = await project_service.create_project(
         request=request,
         user_id=current_user_id,
-        file=file,
-        files=files,
-        code_file=code_file,
     )
 
     # 构建响应数据
@@ -649,87 +679,21 @@ async def validate_project_config(
     summary="导入文件项目",
 )
 async def import_projects(
-    file: UploadFile = File(...),
-    name: str | None = Form(None),
-    description: str | None = Form(None),
-    entry_point: str | None = Form(None),
-    runtime_config: str | None = Form(None),
-    environment_vars: str | None = Form(None),
-    overwrite_existing: bool = Form(False),
-    runtime_scope: str = Form(...),
-    worker_id: str = Form(...),
-    use_existing_env: bool | str | None = Form(None),
-    existing_env_name: str | None = Form(None),
-    python_version: str | None = Form(None),
-    shared_runtime_key: str | None = Form(None),
-    env_name: str | None = Form(None),
-    env_description: str | None = Form(None),
     current_user_id=Depends(get_current_user_id),
-    current_user=Depends(get_current_user),
 ):
-    """导入文件项目（上传文件/压缩包）"""
-    # 文件大小校验
-    if file.size and file.size > settings.MAX_FILE_SIZE:
-        from antcode_web_api.exceptions import FileTooLargeException
-        raise FileTooLargeException()
+    """[已下线] 上传文件建文件项目。
 
-    raw_name = (name or Path(file.filename or "").stem or "imported-project").strip()
-    base_name = raw_name or "imported-project"
-
-    use_base_name = True
-    if overwrite_existing:
-        existing = await Project.get_or_none(name=base_name, user_id=current_user_id)
-        if existing:
-            await project_service.delete_project(existing.public_id, current_user_id)
-        else:
-            if await Project.filter(name=base_name).exists():
-                use_base_name = False
-
-    if use_base_name:
-        project_name = base_name
-    else:
-        project_name = await _generate_unique_project_name(base_name)
-
-    use_existing_env_bool = False
-    if use_existing_env is not None:
-        if isinstance(use_existing_env, bool):
-            use_existing_env_bool = use_existing_env
-        elif isinstance(use_existing_env, str):
-            use_existing_env_bool = use_existing_env.lower() in ("true", "1", "yes")
-
-    request_data = {
-        "name": project_name,
-        "description": description or "",
-        "type": ProjectType.FILE,
-        "tags": [],
-        "dependencies": None,
-        "runtime_scope": runtime_scope,
-        "python_version": python_version,
-        "shared_runtime_key": shared_runtime_key,
-        "interpreter_source": "mise",
-        "python_bin": None,
-        "env_location": "worker",
-        "worker_id": worker_id,
-        "use_existing_env": use_existing_env_bool,
-        "existing_env_name": existing_env_name,
-        "env_name": env_name,
-        "env_description": env_description,
-        "entry_point": entry_point,
-        "runtime_config": runtime_config,
-        "environment_vars": environment_vars,
-    }
-    request = ProjectFileCreateRequest(**request_data)
-    new_project = await project_service.create_project(
-        request=request,
-        user_id=current_user_id,
-        file=file,
-        files=None,
-        code_file=None,
+    O6/迁移 44 后新架构下文件项目源码统一走 Git 仓库；请改用：
+    ``POST /api/v1/repositories/import-from-repository``（同时支持 code/file
+    项目）。此端点保留仅为让前端收到明确错误信息，而非静默 500。
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            "上传式文件项目导入已下线。请先在 /api/v1/repositories 创建 Git 仓库"
+            "，然后调用 POST /api/v1/repositories/import-from-repository 导入项目。"
+        ),
     )
-
-    response_data = create_project_response(new_project)
-    await _attach_project_detail_info(response_data, new_project)
-    return success_response([response_data], message=Messages.CREATED_SUCCESS)
 
 
 @project_router.post(
@@ -867,27 +831,32 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 if credential_id
                 else None
             )
+            # P11: ProjectFile 迁移后只留 language/entry_point/runtime_config/
+            # environment_vars（迁移 20261216120000_remove_local_env_location 拆掉
+            # 了 original_name/file_size/file_hash/file_path/file_type/storage_type/
+            # is_compressed/original_file_path 等磁盘字段——现在源码统一走 Git
+            # repository + source_bundle）。此处响应装配还引用旧字段，导致
+            # 每次 GET file 项目详情都 AttributeError 返 500。
+            # P13: 键名要匹配 FileInfo schema（repository_id/repository_name/
+            # repository_url/ref/subdir）而不是 git_* 前缀；environment_vars
+            # 必须是 dict（schema default_factory=dict），不能传 None。
+            _ = credential  # 若前端后续需要凭证名，在此挂 credential.name
+            from antcode_core.domain.models import GitRepository, ProjectSource
+            project_source = await ProjectSource.get_or_none(project_id=project.id)
+            repository = None
+            if project_source and project_source.repository_id:
+                repository = await GitRepository.get_or_none(id=project_source.repository_id)
             response_data.file_info = {
-                "original_name": detail.original_name,
-                "file_size": detail.file_size,
-                "file_hash": detail.file_hash,
-                "file_path": detail.file_path,
-                "file_type": detail.file_type,
-                "storage_type": detail.storage_type,
                 "entry_point": detail.entry_point,
-                "runtime_config": detail.runtime_config,
-                "environment_vars": detail.environment_vars,
-                "is_compressed": detail.is_compressed,
-                "original_file_path": detail.original_file_path,
-                "source_type": source_config.get("type", "s3"),
-                "git_url": source_config.get("url"),
-                "git_branch": source_config.get("branch"),
-                "git_commit": source_config.get("commit"),
-                "git_subdir": source_config.get("subdir"),
-                "git_credential_id": credential_id,
-                "git_credential_name": credential.name if credential else None,
+                "runtime_config": detail.runtime_config or {},
+                "environment_vars": detail.environment_vars or {},
+                "repository_id": repository.public_id if repository else None,
+                "repository_name": repository.name if repository else None,
+                "repository_url": (repository.url if repository else None) or source_config.get("url"),
+                "ref": (project_source.ref if project_source else None) or source_config.get("branch"),
+                "subdir": (project_source.subdir if project_source else None) or source_config.get("subdir"),
+                "include_paths": (project_source.include_paths if project_source else None) or [],
                 "resolved_revision": artifact_config.get("resolved_revision")
-                or detail.file_hash
                 or source_config.get("commit"),
             }
     elif project.type == ProjectType.RULE:
@@ -912,6 +881,9 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 "cookies": detail.cookies,
                 "proxy_config": detail.proxy_config,
                 "task_config": getattr(detail, "task_config", None),
+                # S10: 详情页展示这两个字段
+                "resume_enabled": bool(getattr(detail, "resume_enabled", False) or False),
+                "dedup_config": getattr(detail, "dedup_config", None),
             }
     elif project.type == ProjectType.CODE and (detail := await relation_service.get_project_code_detail(project.id)):
         source_config = get_code_source_config(detail)
@@ -1425,232 +1397,3 @@ async def update_file_config(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文件配置更新失败"
         )
 
-
-@project_router.get(
-    "/{project_id}/files/structure",
-    response_model=BaseResponse[FileStructureResponse],
-    summary="获取项目文件结构",
-    description="获取项目的文件结构树，支持版本参数（draft/latest/版本号）",
-    response_description="返回项目文件结构树",
-)
-async def get_project_file_structure(
-    project_id,
-    version: str = Query("draft", description="版本标识: draft(草稿), latest(最新版本), 或版本号"),
-    current_user_id=Depends(get_current_user_id),
-):
-    """获取项目文件结构"""
-    try:
-        # 获取项目详情
-        project = await project_service.get_project_by_id(project_id, current_user_id)
-        if not project:
-            raise ProjectNotFoundException(project_id)
-
-        # 只支持文件项目
-        if project.type != ProjectType.FILE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="只有文件项目支持文件结构查看",
-            )
-
-        # 获取文件详情
-        file_detail = await relation_service.get_project_file_detail(project.id)
-        if not file_detail:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件详情不存在")
-
-        # 获取文件结构（支持版本参数）
-        structure = await project_file_service.get_versioned_file_structure(
-            project.id, version
-        )
-
-        # 统计文件信息
-        def count_files(node):
-            if node.get("type") == "file":
-                return 1
-            elif node.get("children"):
-                return sum(count_files(child) for child in node["children"])
-            return 0
-
-        def sum_size(node):
-            return node.get("size", 0)
-
-        total_files = count_files(structure)
-        total_size = sum_size(structure)
-
-        response_data = FileStructureResponse(
-            project_id=project.public_id,
-            project_name=project.name,
-            file_path=file_detail.file_path,
-            structure=structure,
-            total_files=total_files,
-            total_size=total_size,
-        )
-
-        return success_response(response_data, message=Messages.QUERY_SUCCESS)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取项目文件结构失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取项目文件结构失败: {str(e)}",
-        )
-
-
-@project_router.get(
-    "/{project_id}/files/content",
-    response_model=BaseResponse[FileContentResponse],
-    summary="获取项目文件内容",
-    description="获取项目中特定文件的内容，支持版本参数（draft/latest/版本号）",
-    response_description="返回文件内容",
-)
-async def get_project_file_content(
-    project_id,
-    file_path=Query(..., description="文件路径"),
-    version: str = Query("draft", description="版本标识: draft(草稿), latest(最新版本), 或版本号"),
-    current_user_id=Depends(get_current_user_id),
-):
-    """获取项目文件内容"""
-    try:
-        # 获取项目详情
-        project = await project_service.get_project_by_id(project_id, current_user_id)
-        if not project:
-            raise ProjectNotFoundException(project_id)
-
-        # 只支持文件项目
-        if project.type != ProjectType.FILE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="只有文件项目支持文件内容查看",
-            )
-
-        # 获取文件详情
-        file_detail = await relation_service.get_project_file_detail(project.id)
-        if not file_detail:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件详情不存在")
-
-        # 获取文件内容（支持版本参数）
-        file_content = await project_file_service.get_versioned_file_content(
-            project.id, file_path, version
-        )
-
-        return success_response(FileContentResponse(**file_content), message=Messages.QUERY_SUCCESS)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取项目文件内容失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取项目文件内容失败: {str(e)}",
-        )
-
-
-@project_router.put(
-    "/{project_id}/files/content",
-    response_model=BaseResponse[FileContentResponse],
-    summary="更新项目文件内容",
-    description="更新项目中文件的内容",
-    response_description="返回更新后的文件内容",
-)
-async def update_project_file_content(
-    project_id: str,
-    payload: ProjectFileContentUpdateRequest,
-    current_user_id: int = Depends(get_current_user_id),
-):
-    """更新项目文件内容"""
-    try:
-        project = await project_service.get_project_by_id(project_id, current_user_id)
-        if not project:
-            raise ProjectNotFoundException(project_id)
-
-        if project.type != ProjectType.FILE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="只有文件项目支持文件内容编辑",
-            )
-
-        file_detail = await relation_service.get_project_file_detail(project.id)
-        if not file_detail:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件详情不存在")
-
-        updated = await project_file_service.update_file_content(
-            file_detail.file_path, payload.file_path, payload.content, payload.encoding
-        )
-
-        # 标记项目过期（用于分布式同步）
-        try:
-            await ProjectFile.filter(id=file_detail.id).update(
-                dirty=True,
-                dirty_files_count=(file_detail.dirty_files_count or 0) + 1,
-                last_editor_id=current_user_id,
-                last_edit_at=datetime.now(),
-            )
-
-            await worker_project_service.mark_project_outdated(project.public_id)
-
-            logger.debug(f"项目已标记过期 [{project.public_id}]")
-        except Exception as mark_error:
-            logger.warning(f"过期标记失败: {mark_error}")
-
-        return success_response(FileContentResponse(**updated), message=Messages.UPDATED_SUCCESS)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新项目文件内容失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"更新项目文件内容失败: {str(e)}",
-        )
-
-
-@project_router.get(
-    "/{project_id}/files/download",
-    summary="下载项目文件",
-    description="下载项目的原始文件或解压后的特定文件",
-    response_description="返回文件下载",
-    response_model=None,
-)
-async def download_project_file(
-    project_id, file_path=Query(None), current_user_id=Depends(get_current_user_id)
-):
-    """下载项目文件"""
-    try:
-        # 获取项目详情
-        project = await project_service.get_project_by_id(project_id, current_user_id)
-        if not project:
-            raise ProjectNotFoundException(project_id)
-
-        # 只支持文件项目
-        if project.type != ProjectType.FILE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="只有文件项目支持文件下载",
-            )
-
-        # 获取文件详情
-        file_detail = await relation_service.get_project_file_detail(project.id)
-        if not file_detail:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目文件详情不存在")
-
-        if file_path:
-            return await project_file_service.download_file(file_detail.file_path, file_path)
-
-        from antcode_core.application.services.projects.project_sync_service import (
-            project_sync_service,
-        )
-
-        from antcode_web_api.routes.v1.project_download import _download_transfer
-
-        transfer_info = await project_sync_service.get_project_transfer_info(project.id, project=project)
-        return await _download_transfer(transfer_info)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"下载项目文件失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"下载项目文件失败: {str(e)}",
-        )

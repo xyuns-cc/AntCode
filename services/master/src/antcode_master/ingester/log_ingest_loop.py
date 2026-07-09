@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -61,22 +63,34 @@ class LogIngestLoop:
     def __init__(
         self,
         stream_key: str | None = None,
-        group_name: str = "antcode-log-ingest",
+        group_name: str | None = None,
         consumer_name: str | None = None,
         poll_interval: float = 1.0,
         block_ms: int = 5000,
         batch_size: int = 100,
     ):
         # 默认订阅"全局聚合 ingest stream"，对齐 Worker 侧统一写入路径。
+        # E5: 默认 group 带 namespace，与其它 loop 保持一致
+        from antcode_core.infrastructure.redis.control_plane import (
+            log_ingest_consumer_group,
+        )
+
         self._stream_key = stream_key or _log_ingest_stream_key()
-        self._group = group_name
-        self._consumer = consumer_name or f"{socket.gethostname()}-{id(self)}"
+        self._group = group_name or log_ingest_consumer_group()
+        # R1-P0-2 (审查报告): consumer 名去掉 id(self)，与 result_loop 保持一致
+        self._consumer = consumer_name or f"{socket.gethostname()}-{os.getpid()}"
         self._poll_interval = poll_interval
         self._block_ms = block_ms
         self._batch_size = batch_size
         self._stream = StreamClient(codec=ProtoCodec(data_pb2.LogBatch))
         self._running = False
         self._task: asyncio.Task | None = None
+        # R1-P0-5 (审查报告): read_pending 兜底 + XAUTOCLAIM 认领。原来
+        # log_ingest_loop 只 read ">" 无 pending 重试，PG 抖动一次日志静默丢失。
+        self._pending_check_interval = 30.0
+        self._last_pending_check = 0.0
+        self._autoclaim_min_idle_ms = 60_000
+        self._last_autoclaim = 0.0
 
     async def start(self) -> None:
         if self._running:
@@ -102,10 +116,8 @@ class LogIngestLoop:
     async def _run_loop(self) -> None:
         while self._running:
             try:
-                if not await ensure_leader():
-                    await asyncio.sleep(self._poll_interval)
-                    continue
-
+                # T6-T2: 去掉 leader gate —— log_ingest 走 consumer group，
+                # 天然按 consumer name 分区，多 master 实例可分担负载。
                 messages = await self._stream.xreadgroup_typed(
                     stream_key=self._stream_key,
                     group_name=self._group,
@@ -115,13 +127,52 @@ class LogIngestLoop:
                 )
 
                 if not messages:
-                    await asyncio.sleep(self._poll_interval)
-                    continue
+                    # R1-P0-5 (审查报告): 无新消息时读自己的 PEL 兜底 —— PG
+                    # 抖动一次日志批次会留在 pending，之前主循环无 read_pending
+                    # 分支，本进程存活期内该批日志永不落库。
+                    now = time.time()
+                    if now - self._last_pending_check >= self._pending_check_interval:
+                        self._last_pending_check = now
+                        messages = await self._stream.xreadgroup_typed(
+                            stream_key=self._stream_key,
+                            group_name=self._group,
+                            consumer_name=self._consumer,
+                            count=self._batch_size,
+                            block_ms=1,
+                            read_pending=True,
+                        )
+                        # 认领旧 consumer 遗留 PEL（R1-P0-2 一并覆盖）
+                        if not messages:
+                            try:
+                                next_id = "0-0"
+                                claimed_total = 0
+                                for _ in range(3):
+                                    next_id, claimed, _ = await self._stream.xautoclaim(
+                                        self._stream_key,
+                                        group_name=self._group,
+                                        consumer_name=self._consumer,
+                                        min_idle_time_ms=self._autoclaim_min_idle_ms,
+                                        start_id=next_id,
+                                        count=self._batch_size,
+                                    )
+                                    claimed_total += len(claimed)
+                                    if not next_id or next_id == "0-0" or len(claimed) < self._batch_size:
+                                        break
+                                if claimed_total:
+                                    logger.warning(
+                                        "log_ingest_loop XAUTOCLAIM 认领旧 PEL {} 条",
+                                        claimed_total,
+                                    )
+                            except Exception as exc:
+                                logger.debug("XAUTOCLAIM 失败: {}", exc)
+                    if not messages:
+                        await asyncio.sleep(self._poll_interval)
+                        continue
 
                 ack_ids: list[str] = []
                 for message in messages:
                     try:
-                        await self._handle_batch(message.payload)
+                        await self._handle_batch(message.payload, msg_id=message.msg_id)
                         ack_ids.append(message.msg_id)
                     except Exception:
                         # 已在 _handle_batch 中 logger.exception；这里不再 ACK，
@@ -137,8 +188,12 @@ class LogIngestLoop:
                 logger.exception("日志摄取循环异常")
                 await asyncio.sleep(self._poll_interval)
 
-    async def _handle_batch(self, log_batch: data_pb2.LogBatch) -> None:
-        """处理单个 ``LogBatch``：批量持久化，失败抛出由上游决定 ACK。"""
+    async def _handle_batch(self, log_batch: data_pb2.LogBatch, msg_id: str = "") -> None:
+        """处理单个 ``LogBatch``：批量持久化，失败抛出由上游决定 ACK。
+
+        ``msg_id`` 是 Redis Stream 的消息 ID，用作 ``event_id`` 的稳定前缀，
+        叠加 batch 内的 sequence + run_id 保证 XAUTOCLAIM 重放时幂等。
+        """
         if not log_batch.entries:
             return
 
@@ -151,8 +206,9 @@ class LogIngestLoop:
                 timestamp=_ts_to_datetime(entry.timestamp),
                 sequence=entry.sequence,
                 worker_id=worker_id,
+                event_id=(f"{msg_id}:{i}" if msg_id else None),
             )
-            for entry in log_batch.entries
+            for i, entry in enumerate(log_batch.entries)
             if entry.run_id
         ]
         if not entries:

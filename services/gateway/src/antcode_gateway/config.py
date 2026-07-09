@@ -6,6 +6,18 @@ Gateway 服务配置模块
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+# 在读 env 前先加载 .env（GatewayConfig 用 os.getenv 直连 os.environ，无此步骤会
+# 读不到项目根 .env）。dotenv 缺失时静默跳过，不影响 CI/CD 已通过 env 注入的场景。
+try:
+    from dotenv import load_dotenv
+
+    _env_file = Path(__file__).resolve().parents[4] / ".env"
+    if _env_file.exists():
+        load_dotenv(_env_file, override=False)
+except ImportError:
+    pass
 
 
 def _default_grpc_workers() -> int:
@@ -90,6 +102,12 @@ class GatewayConfig:
     # 认证配置
     auth_enabled: bool = field(
         default_factory=lambda: os.getenv("AUTH_ENABLED", "true").lower() == "true"
+    )
+    # 显式允许在启用鉴权的情况下用明文端口启动（仅本地/测试）。
+    # 生产必须走 TLS/mTLS；把 api_key 或 JWT 放在明文 gRPC 上等于把凭证挂到公网。
+    allow_insecure_with_auth: bool = field(
+        default_factory=lambda: os.getenv("ANTCODE_GATEWAY_ALLOW_INSECURE", "false").lower()
+        == "true"
     )
 
     # 限流配置

@@ -11,10 +11,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 
+from antcode_core.common.serialization import to_json
 from fastapi import WebSocket
 from loguru import logger
-
-from antcode_core.common.serialization import to_json
 
 
 class ConnectionState(Enum):
@@ -65,9 +64,7 @@ class ConnectionPool:
         self.max_connections_per_execution = getattr(
             settings, "WEBSOCKET_MAX_CONN_PER_EXECUTION", max_connections_per_execution
         )
-        self.max_total_connections = getattr(
-            settings, "WEBSOCKET_MAX_TOTAL_CONN", max_total_connections
-        )
+        self.max_total_connections = getattr(settings, "WEBSOCKET_MAX_TOTAL_CONN", max_total_connections)
         self._connections: dict[str, dict[str, ConnectionInfo]] = defaultdict(dict)
         # 分段锁：每个 run_id 一个锁
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -130,9 +127,7 @@ class ConnectionPool:
         """关闭连接（调用者需持有锁）"""
         try:
             conn.state = ConnectionState.CLOSING
-            await asyncio.wait_for(
-                conn.websocket.close(code=1000, reason="连接被替换"), timeout=5.0
-            )
+            await asyncio.wait_for(conn.websocket.close(code=1000, reason="连接被替换"), timeout=5.0)
         except TimeoutError:
             logger.warning(f"关闭连接超时: {conn.connection_id}")
         except Exception as e:
@@ -283,9 +278,7 @@ class MessageQueue:
         if was_full:
             self._dropped_count[run_id] += 1
             if self._dropped_count[run_id] % 100 == 1:
-                logger.warning(
-                    f"消息队列溢出: {run_id}, 已丢弃 {self._dropped_count[run_id]} 条"
-                )
+                logger.warning(f"消息队列溢出: {run_id}, 已丢弃 {self._dropped_count[run_id]} 条")
 
         # 确保处理任务在运行
         if run_id not in self._processing or self._processing[run_id].done():
@@ -451,9 +444,7 @@ class WebSocketConnectionManager:
             # 更新统计
             self._stats["total_connections"] += 1
 
-            logger.info(
-                f"WebSocket连接建立: {connection_id} (执行ID: {run_id}, 用户: {user_id})"
-            )
+            logger.info(f"WebSocket连接建立: {connection_id} (执行ID: {run_id}, 用户: {user_id})")
 
             return connection_id
 
@@ -583,9 +574,7 @@ class WebSocketConnectionManager:
             if result is None:
                 sent_count += 1
             elif isinstance(result, ConnectionInfo):
-                await self.connection_pool.remove_connection(
-                    result.run_id, result.connection_id
-                )
+                await self.connection_pool.remove_connection(result.run_id, result.connection_id)
 
         self._stats["messages_sent"] += len(messages) * sent_count
 

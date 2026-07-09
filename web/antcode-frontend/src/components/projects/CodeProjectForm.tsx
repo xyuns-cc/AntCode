@@ -1,107 +1,23 @@
-import React, { useCallback, useEffect, useReducer, Suspense, lazy } from 'react'
-import {
-  Form,
-  Input,
-  Button,
-  Space,
-  Typography,
-  Card,
-  Select,
-  Upload,
-  Tabs,
-  Row,
-  Col,
-  Tag,
-  Tooltip,
-  Spin
-} from 'antd'
-import {
-  CodeOutlined,
-  UploadOutlined,
-  PlusOutlined,
-  FullscreenOutlined,
-  CompressOutlined,
-  BulbOutlined
-} from '@ant-design/icons'
-import type { UploadFile } from 'antd'
-import type { RcFile } from 'antd/es/upload/interface'
-import { getLanguageOptionsWithIcons, getLanguageConfig } from '@/components/ui/CodeEditor/languages'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button, Card, Col, Form, Input, Row, Select, Space, Tag, Typography } from 'antd'
+import { CodeOutlined, PlusOutlined } from '@ant-design/icons'
 import { FileIcon } from '@/utils/fileIcons'
 import type { ProjectCreateRequest } from '@/types'
-import GitCredentialSelect from './GitCredentialSelect'
+import { repositoryService } from '@/services/repositories'
+import type { GitRepository } from '@/types/repository'
 
 const { Title, Text } = Typography
 const { TextArea } = Input
 const { Option } = Select
-const LazyCodeEditor = lazy(() => import('@/components/ui/CodeEditor'))
 
-// 代码项目表单状态类型
-interface CodeProjectFormState {
-  fileList: UploadFile[]
-  dependencies: string[]
-  newDependency: string
-  inputMethod: 'editor' | 'upload'
-  codeContent: string
-  selectedLanguage: string
-  isFullscreen: boolean
-  showTemplate: boolean
-}
+const LANGUAGE_OPTIONS = [
+  { value: 'python', label: 'Python', extension: '.py', color: '#3776ab' },
+  { value: 'javascript', label: 'JavaScript', extension: '.js', color: '#f7df1e' },
+  { value: 'typescript', label: 'TypeScript', extension: '.ts', color: '#3178c6' },
+  { value: 'java', label: 'Java', extension: '.java', color: '#b07219' },
+  { value: 'go', label: 'Go', extension: '.go', color: '#00add8' }
+]
 
-// 状态操作类型
-type CodeProjectFormAction =
-  | { type: 'SET_FILE_LIST'; payload: UploadFile[] }
-  | { type: 'SET_DEPENDENCIES'; payload: string[] }
-  | { type: 'ADD_DEPENDENCY'; payload: string }
-  | { type: 'REMOVE_DEPENDENCY'; payload: number }
-  | { type: 'SET_NEW_DEPENDENCY'; payload: string }
-  | { type: 'SET_INPUT_METHOD'; payload: 'editor' | 'upload' }
-  | { type: 'SET_CODE_CONTENT'; payload: string }
-  | { type: 'SET_SELECTED_LANGUAGE'; payload: string }
-  | { type: 'TOGGLE_FULLSCREEN' }
-  | { type: 'SET_SHOW_TEMPLATE'; payload: boolean }
-  | { type: 'RESET_STATE'; payload: Partial<CodeProjectFormState> }
-
-// Reducer函数
-const codeProjectFormReducer = (
-  state: CodeProjectFormState,
-  action: CodeProjectFormAction
-): CodeProjectFormState => {
-  switch (action.type) {
-    case 'SET_FILE_LIST':
-      return { ...state, fileList: action.payload }
-    case 'SET_DEPENDENCIES':
-      return { ...state, dependencies: action.payload }
-    case 'ADD_DEPENDENCY':
-      return {
-        ...state,
-        dependencies: [...state.dependencies, action.payload],
-        newDependency: ''
-      }
-    case 'REMOVE_DEPENDENCY':
-      return {
-        ...state,
-        dependencies: state.dependencies.filter((_, index) => index !== action.payload)
-      }
-    case 'SET_NEW_DEPENDENCY':
-      return { ...state, newDependency: action.payload }
-    case 'SET_INPUT_METHOD':
-      return { ...state, inputMethod: action.payload }
-    case 'SET_CODE_CONTENT':
-      return { ...state, codeContent: action.payload }
-    case 'SET_SELECTED_LANGUAGE':
-      return { ...state, selectedLanguage: action.payload }
-    case 'TOGGLE_FULLSCREEN':
-      return { ...state, isFullscreen: !state.isFullscreen }
-    case 'SET_SHOW_TEMPLATE':
-      return { ...state, showTemplate: action.payload }
-    case 'RESET_STATE':
-      return { ...state, ...action.payload }
-    default:
-      return state
-  }
-}
-
-// 表单初始数据类型（tags 可以是字符串或数组）
 interface CodeProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags'> {
   tags?: string | string[]
 }
@@ -116,639 +32,92 @@ interface CodeProjectFormProps {
   onRef?: (ref: { submit: () => void }) => void
 }
 
+const normalizeTags = (tags?: string | string[]): string[] => {
+  if (Array.isArray(tags)) return tags
+  return (tags || '').split(',').map((tag) => tag.trim()).filter(Boolean)
+}
+
+const normalizeList = (value?: string[] | string): string[] => {
+  if (Array.isArray(value)) return value
+  return (value || '').split(',').map((item) => item.trim()).filter(Boolean)
+}
+
 const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   initialData = {},
   onDataChange,
   onSubmit,
-  loading: _loading = false,
-  isEdit = false,
   onValidationChange,
   onRef
 }) => {
-  const [form] = Form.useForm()
-
-  // 初始状态
-  const initialState: CodeProjectFormState = {
-    fileList: [],
-    dependencies: initialData.dependencies || [],
-    newDependency: '',
-    inputMethod: 'editor',
-    codeContent: initialData.code_content || '',
-    selectedLanguage: initialData.language || 'python',
-    isFullscreen: false,
-    showTemplate: true
-  }
-
-  const [state, dispatch] = useReducer(codeProjectFormReducer, initialState)
-  const sourceTypeValue = Form.useWatch('source_type', form)
-  const gitUrlValue = Form.useWatch('git_url', form)
+  const [form] = Form.useForm<ProjectCreateRequest>()
+  const [dependencies, setDependencies] = useState<string[]>(initialData.dependencies || [])
+  const [newDependency, setNewDependency] = useState('')
+  const [repositories, setRepositories] = useState<GitRepository[]>([])
+  const repositoryIdValue = Form.useWatch('repository_id', form)
+  const subdirValue = Form.useWatch('subdir', form)
   const entryPointValue = Form.useWatch('code_entry_point', form)
-  const initialSourceType = initialData.source_type || 's3'
 
-  // 获取验证状态
-  const getValidationStatus = useCallback(() => {
-    const sourceType = sourceTypeValue || initialSourceType || 's3'
-
-    if (sourceType === 'git') {
-      if (!gitUrlValue || (typeof gitUrlValue === 'string' && gitUrlValue.trim() === '')) {
-        return { isValid: false, tooltip: 'Git 来源必须填写 git_url' }
-      }
-      const entryPoint = entryPointValue ? String(entryPointValue).trim() : ''
-      if (!entryPoint) {
-        return { isValid: false, tooltip: 'Git 代码项目必须提供 entry_point' }
-      }
-      return { isValid: true, tooltip: '' }
+  const isValid = useMemo(() => {
+    if (!repositoryIdValue || String(repositoryIdValue).trim() === '') {
+      return { valid: false, tooltip: 'Git 来源必须选择代码仓库' }
     }
-
-    if (!isEdit) {
-      if (state.inputMethod === 'editor') {
-        if (!state.codeContent || state.codeContent.trim() === '') {
-          return { isValid: false, tooltip: '请输入代码内容' }
-        }
-      } else {
-        if (state.fileList.length === 0) {
-          return { isValid: false, tooltip: '请选择要上传的代码文件' }
-        }
-      }
-    } else {
-      const isSwitching = sourceType !== (initialSourceType || 's3')
-      if (isSwitching && (sourceType === 's3' || sourceType === 'legacy_inline')) {
-        if (!state.codeContent || state.codeContent.trim() === '') {
-          return { isValid: false, tooltip: '切换代码来源时必须提供 code_content' }
-        }
-      }
+    if (!subdirValue || String(subdirValue).trim() === '') {
+      return { valid: false, tooltip: 'Git 代码项目必须填写仓库子目录' }
     }
-    return { isValid: true, tooltip: '' }
-  }, [entryPointValue, gitUrlValue, initialSourceType, isEdit, state.codeContent, state.fileList, state.inputMethod, sourceTypeValue])
+    if (!entryPointValue || String(entryPointValue).trim() === '') {
+      return { valid: false, tooltip: 'Git 代码项目必须填写入口文件' }
+    }
+    return { valid: true, tooltip: '' }
+  }, [entryPointValue, repositoryIdValue, subdirValue])
 
-  // 通知父组件验证状态变化
-  React.useEffect(() => {
-    const { isValid, tooltip } = getValidationStatus()
-    onValidationChange?.(isValid, tooltip)
-  }, [state.inputMethod, state.codeContent, state.fileList, isEdit, onValidationChange, getValidationStatus])
+  useEffect(() => {
+    onValidationChange?.(isValid.valid, isValid.tooltip)
+  }, [isValid, onValidationChange])
 
-  // 提供submit方法给父组件
-  React.useEffect(() => {
-    onRef?.({
-      submit: () => {
-        form.submit()
-      }
-    })
+  useEffect(() => {
+    repositoryService.list().then(setRepositories)
+  }, [])
+
+  useEffect(() => {
+    onRef?.({ submit: () => form.submit() })
   }, [form, onRef])
 
-  // 解构状态
-  const { fileList, dependencies, newDependency, inputMethod, codeContent, selectedLanguage, isFullscreen, showTemplate } = state
-  const currentSourceType = sourceTypeValue || initialSourceType || 's3'
-  const requireCodeContent = !isEdit || (
-    currentSourceType !== initialSourceType
-    && (currentSourceType === 's3' || currentSourceType === 'legacy_inline')
-  )
+  const emitDataChange = useCallback((values: ProjectCreateRequest, deps = dependencies) => {
+    onDataChange?.({
+      ...values,
+      dependencies: deps
+    })
+  }, [dependencies, onDataChange])
 
-  // 文件上传配置
-  const uploadProps = {
-    name: 'code_file',
-    multiple: false,
-    fileList: state.fileList,
-    beforeUpload: (file: RcFile) => {
-      const allowedTypes = ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rs']
-      const fileName = file.name.toLowerCase()
-      const isAllowed = allowedTypes.some(type => fileName.endsWith(type))
-
-      if (!isAllowed) {
-        return Upload.LIST_IGNORE
-      }
-
-      const uploadFile: UploadFile = {
-        uid: file.uid,
-        name: file.name,
-        status: 'done',
-        originFileObj: file
-      }
-      dispatch({ type: 'SET_FILE_LIST', payload: [uploadFile] })
-      const updatedData = { ...form.getFieldsValue(), code_file: file }
-      onDataChange?.(updatedData)
-
-      return false
-    },
-    onRemove: () => {
-      dispatch({ type: 'SET_FILE_LIST', payload: [] })
-      const updatedData = { ...form.getFieldsValue(), code_file: undefined }
-      onDataChange?.(updatedData)
-    }
-  }
-
-  // 添加依赖
   const handleAddDependency = () => {
-    if (newDependency.trim() && !dependencies.includes(newDependency.trim())) {
-      dispatch({ type: 'ADD_DEPENDENCY', payload: newDependency.trim() })
-
-      const newDeps = [...dependencies, newDependency.trim()]
-      const updatedData = { ...form.getFieldsValue(), dependencies: newDeps }
-      onDataChange?.(updatedData)
-    }
+    const dependency = newDependency.trim()
+    if (!dependency || dependencies.includes(dependency)) return
+    const nextDependencies = [...dependencies, dependency]
+    setDependencies(nextDependencies)
+    setNewDependency('')
+    emitDataChange(form.getFieldsValue(), nextDependencies)
   }
 
-  // 删除依赖
-  const handleRemoveDependency = (dep: string) => {
-    const depIndex = dependencies.indexOf(dep)
-    if (depIndex !== -1) {
-      dispatch({ type: 'REMOVE_DEPENDENCY', payload: depIndex })
-
-      const newDeps = dependencies.filter(d => d !== dep)
-      const updatedData = { ...form.getFieldsValue(), dependencies: newDeps }
-      onDataChange?.(updatedData)
-    }
+  const handleRemoveDependency = (dependency: string) => {
+    const nextDependencies = dependencies.filter((item) => item !== dependency)
+    setDependencies(nextDependencies)
+    emitDataChange(form.getFieldsValue(), nextDependencies)
   }
 
-  // 处理代码内容变化
-  const handleCodeChange = (value: string | undefined) => {
-    const newValue = value || ''
-    dispatch({ type: 'SET_CODE_CONTENT', payload: newValue })
-    form.setFieldValue('code_content', newValue)
-
-    const updatedData = { ...form.getFieldsValue(), code_content: newValue }
-    onDataChange?.(updatedData)
-  }
-
-  // 处理语言变化
-  const handleLanguageChange = (language: string) => {
-    dispatch({ type: 'SET_SELECTED_LANGUAGE', payload: language })
-    form.setFieldValue('language', language)
-
-    // 如果启用模板且当前代码为空或为默认模板，则更新为新语言的模板
-    const sourceType = sourceTypeValue || initialSourceType || 's3'
-    const allowTemplate = !isEdit || sourceType === 'legacy_inline'
-    if (allowTemplate && showTemplate && (!codeContent || isDefaultTemplate(codeContent))) {
-      const config = getLanguageConfig(language)
-      if (config) {
-        const newTemplate = config.defaultTemplate
-        dispatch({ type: 'SET_CODE_CONTENT', payload: newTemplate })
-        form.setFieldValue('code_content', newTemplate)
-      }
-    }
-
-    const updatedData = { ...form.getFieldsValue(), language }
-    onDataChange?.(updatedData)
-  }
-
-  // 检查是否为默认模板
-  const isDefaultTemplate = (content: string): boolean => {
-    const config = getLanguageConfig(selectedLanguage)
-    return config ? content.trim() === config.defaultTemplate.trim() : false
-  }
-
-  // 切换全屏模式
-  const toggleFullscreen = () => {
-    dispatch({ type: 'TOGGLE_FULLSCREEN' })
-  }
-
-  // 插入代码模板
-  const insertTemplate = () => {
-    const config = getLanguageConfig(selectedLanguage)
-    if (config) {
-      dispatch({ type: 'SET_CODE_CONTENT', payload: config.defaultTemplate })
-      form.setFieldValue('code_content', config.defaultTemplate)
-    }
-  }
-
-  // 初始化代码模板
-  useEffect(() => {
-    const sourceType = sourceTypeValue || initialSourceType || 's3'
-    const allowTemplate = !isEdit || sourceType === 'legacy_inline'
-    if (!codeContent && showTemplate && allowTemplate) {
-      const config = getLanguageConfig(selectedLanguage)
-      if (config) {
-        dispatch({ type: 'SET_CODE_CONTENT', payload: config.defaultTemplate })
-        form.setFieldValue('code_content', config.defaultTemplate)
-      }
-    }
-  }, [selectedLanguage, showTemplate, codeContent, form, initialSourceType, isEdit, sourceTypeValue])
-
-  // 监听ESC键退出全屏
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && isFullscreen) {
-        dispatch({ type: 'TOGGLE_FULLSCREEN' })
-      }
-    }
-
-    if (isFullscreen) {
-      document.addEventListener('keydown', handleKeyDown)
-      document.body.style.overflow = 'hidden'
-    } else {
-      document.body.style.overflow = 'auto'
-    }
-
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      document.body.style.overflow = 'auto'
-    }
-  }, [isFullscreen])
-
-  // 表单提交
   const handleFinish = (values: ProjectCreateRequest) => {
-    const sourceType = values.source_type || initialSourceType || 's3'
-    const tags = Array.isArray(values.tags)
-      ? values.tags
-      : (values.tags || '')
-          .split(',')
-          .map((tag: string) => tag.trim())
-          .filter(Boolean)
-
-    if (isEdit) {
-      const submitData: Record<string, unknown> = {
-        name: values.name,
-        description: values.description,
-        tags,
-        dependencies,
-        language: values.language,
-        version: values.version,
-        entry_point: values.code_entry_point,
-        documentation: values.documentation,
-        source_type: sourceType,
-        git_url: values.git_url,
-        git_branch: values.git_branch,
-        git_commit: values.git_commit,
-        git_subdir: values.git_subdir,
-        git_credential_id: values.git_credential_id,
-        code_content: sourceType === 'git' ? undefined : (codeContent.trim() ? codeContent : undefined),
-      }
-      onSubmit(submitData)
-    } else {
-      // 创建模式：提交完整的项目数据
-      const submitData: Record<string, unknown> = {
-        ...values,
-        type: 'code',
-        dependencies,
-        source_type: sourceType,
-        code_content: sourceType === 'git' ? undefined : (inputMethod === 'editor' ? codeContent : undefined),
-        code_file: sourceType === 'git' ? undefined : (inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined),
-        tags
-      }
-      onSubmit(submitData)
-    }
-  }
-
-  // 表单值变化
-  const handleValuesChange = (
-    _changedValues: Partial<ProjectCreateRequest>,
-    allValues: ProjectCreateRequest
-  ) => {
-    const sourceType = allValues.source_type || initialSourceType || 's3'
-    const updatedData = {
-      ...allValues,
+    onSubmit({
+      ...values,
+      type: 'code',
+      include_paths: normalizeList(values.include_paths),
       dependencies,
-      source_type: sourceType,
-      code_content: sourceType === 'git' ? undefined : (inputMethod === 'editor' ? codeContent : undefined),
-      code_file: sourceType === 'git' ? undefined : (inputMethod === 'upload' ? fileList[0]?.originFileObj : undefined)
-    }
-    onDataChange?.(updatedData)
+      tags: normalizeTags(values.tags)
+    })
   }
 
-  const tabItems = [
-    {
-      key: 'basic',
-      label: '基本信息',
-      children: (
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                name="name"
-                label="项目名称"
-                rules={[
-                  { required: true, message: '请输入项目名称' },
-                  { min: 3, max: 50, message: '项目名称长度为3-50个字符' }
-                ]}
-              >
-                <Input placeholder="请输入项目名称" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="language"
-                label="编程语言"
-                initialValue="python"
-                rules={[{ required: true, message: '请选择编程语言' }]}
-              >
-                <Select
-                  value={selectedLanguage}
-                  onChange={handleLanguageChange}
-                  showSearch
-                  placeholder="选择编程语言"
-                  optionFilterProp="children"
-                >
-                  {getLanguageOptionsWithIcons().map(option => (
-                    <Option key={option.value} value={option.value}>
-                      <div style={{ 
-                        display: 'flex', 
-                        alignItems: 'center', 
-                        gap: '8px'
-                      }}>
-                        <FileIcon 
-                          extension={option.extension}
-                          size={16}
-                        />
-                        <span style={{ 
-                          color: option.color, 
-                          lineHeight: '16px',
-                          fontSize: '14px'
-                        }}>
-                          {option.label}
-                        </span>
-                      </div>
-                    </Option>
-                  ))}
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                name="version"
-                label="版本号"
-                initialValue="1.0.0"
-              >
-                <Input placeholder="例如: 1.0.0" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="tags"
-                label="项目标签"
-                tooltip="多个标签用逗号分隔"
-              >
-                <Input placeholder="例如: 工具,脚本,自动化" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Form.Item
-            name="source_type"
-            label="来源类型"
-            initialValue={initialSourceType}
-            rules={[{ required: true, message: '请选择来源类型' }]}
-          >
-            <Select
-              options={[
-                { label: 'S3（托管归档）', value: 's3' },
-                { label: 'Git（后端物化分发）', value: 'git' },
-                ...(isEdit ? [{ label: 'Legacy Inline（兼容）', value: 'legacy_inline' }] : []),
-              ]}
-            />
-          </Form.Item>
-
-          {(sourceTypeValue || initialSourceType) === 'git' && (
-            <>
-              <Form.Item
-                name="git_url"
-                label="Git 仓库地址"
-                rules={[{ required: true, message: '请输入 Git 仓库地址' }]}
-              >
-                <Input placeholder="https://github.com/org/repo.git" />
-              </Form.Item>
-
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item name="git_branch" label="分支（可选）">
-                    <Input placeholder="main" />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="git_commit" label="提交（可选）">
-                    <Input placeholder="commit sha" />
-                  </Form.Item>
-                </Col>
-              </Row>
-
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item name="git_subdir" label="子目录（可选）">
-                    <Input placeholder="path/in/repo" />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="git_credential_id" label="Git 凭证（可选）">
-                    <GitCredentialSelect />
-                  </Form.Item>
-                </Col>
-              </Row>
-            </>
-          )}
-
-          <Form.Item
-            name="description"
-            label="项目描述"
-          >
-            <TextArea
-              rows={3}
-              placeholder="请描述代码的功能和用途"
-              maxLength={500}
-              showCount
-            />
-          </Form.Item>
-
-          <Form.Item
-            name="code_entry_point"
-            label="入口函数"
-            tooltip="指定代码的主入口函数，如 main"
-          >
-            <Input placeholder="例如: main, run, execute" />
-          </Form.Item>
-        </Space>
-      )
-	    },
-	    ...((currentSourceType === 'git') ? [] : [
-	      {
-	        key: 'code',
-	        label: '代码内容',
-	        children: (
-	          <Space direction="vertical" style={{ width: '100%' }} size="middle">
-	            <Card title="代码输入方式" size="small">
-	              <Select
-	                value={inputMethod}
-	                onChange={(value) => dispatch({ type: 'SET_INPUT_METHOD', payload: value })}
-	                style={{ width: '100%' }}
-	                disabled={isEdit}
-	              >
-	                <Option value="editor">在线编辑器</Option>
-	                <Option value="upload">上传文件</Option>
-	              </Select>
-	            </Card>
-
-	            {inputMethod === 'editor' ? (
-	              <div>
-	                <div style={{
-	                  display: 'flex',
-	                  justifyContent: 'space-between',
-	                  alignItems: 'center',
-	                  marginBottom: 12
-	                }}>
-		                  <span style={{ fontWeight: 500 }}>
-		                    代码内容 {requireCodeContent && <span style={{ color: '#ff4d4f' }}>*</span>}
-		                  </span>
-	                  <Space>
-	                    <Tooltip title="插入代码模板" placement="top">
-	                      <Button
-	                        type="text"
-	                        icon={<BulbOutlined />}
-	                        onClick={insertTemplate}
-	                        size="small"
-	                      >
-	                        模板
-	                      </Button>
-	                    </Tooltip>
-	                    <Tooltip title={isFullscreen ? "退出全屏" : "全屏编辑"} placement="top">
-	                      <Button
-	                        type="text"
-	                        icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
-	                        onClick={toggleFullscreen}
-	                        size="small"
-	                      />
-	                    </Tooltip>
-	                  </Space>
-	                </div>
-
-		                <Form.Item
-		                  name="code_content"
-		                  rules={requireCodeContent ? [{ required: true, message: '请输入代码内容' }] : []}
-		                  style={{ marginBottom: 0 }}
-		                >
-	                  <div style={isFullscreen ? {
-	                    position: 'fixed',
-	                    top: 0,
-	                    left: 0,
-	                    right: 0,
-	                    bottom: 0,
-	                    zIndex: 1000,
-	                    backgroundColor: '#fff',
-	                    padding: 20
-	                  } : {}}>
-	                    {isFullscreen && (
-	                      <div style={{
-	                        display: 'flex',
-	                        justifyContent: 'space-between',
-	                        alignItems: 'center',
-	                        marginBottom: 16,
-	                        paddingBottom: 16,
-	                        borderBottom: '1px solid #f0f0f0'
-	                      }}>
-	                        <h3 style={{ margin: 0 }}>
-	                          <CodeOutlined style={{ marginRight: 8 }} />
-	                          代码编辑器 - {getLanguageConfig(selectedLanguage)?.name}
-	                        </h3>
-	                        <Button
-	                          type="primary"
-	                          icon={<CompressOutlined />}
-	                          onClick={toggleFullscreen}
-	                        >
-	                          退出全屏
-	                        </Button>
-	                      </div>
-	                    )}
-
-	                    <Suspense
-	                      fallback={(
-	                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: isFullscreen ? 'calc(100vh - 120px)' : 500 }}>
-	                          <Spin tip="加载代码编辑器...">
-	                            <div style={{ height: 200, width: '100%' }} />
-	                          </Spin>
-	                        </div>
-	                      )}
-	                    >
-	                      <LazyCodeEditor
-	                      value={codeContent}
-	                      language={selectedLanguage}
-	                      onChange={handleCodeChange}
-	                      height={isFullscreen ? 'calc(100vh - 120px)' : 500}
-	                      placeholder={`请输入${getLanguageConfig(selectedLanguage)?.name}代码...`}
-	                    />
-	                    </Suspense>
-	                  </div>
-	                </Form.Item>
-	              </div>
-	            ) : (
-	              <Form.Item
-	                label="代码文件"
-	                required
-	                help="支持 .py、.js、.ts、.java、.cpp、.c、.go、.rs 等格式"
-	              >
-	                <Upload.Dragger {...uploadProps}>
-	                  <p className="ant-upload-drag-icon">
-	                    <UploadOutlined style={{ fontSize: 48, color: '#722ed1' }} />
-	                  </p>
-	                  <p className="ant-upload-text">
-	                    点击或拖拽代码文件到此区域上传
-	                  </p>
-	                  <p className="ant-upload-hint">
-	                    支持单个代码文件上传
-	                  </p>
-	                </Upload.Dragger>
-	              </Form.Item>
-	            )}
-	          </Space>
-	        )
-	      },
-	    ]),
-	    {
-	      key: 'deps',
-	      label: '依赖管理',
-	      children: (
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <Card title="依赖包管理" size="small">
-            <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
-              <Input
-                placeholder="输入依赖包名"
-                value={newDependency}
-                onChange={(e) => dispatch({ type: 'SET_NEW_DEPENDENCY', payload: e.target.value })}
-                onPressEnter={handleAddDependency}
-              />
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={handleAddDependency}
-                disabled={!newDependency.trim()}
-              >
-                添加
-              </Button>
-            </Space.Compact>
-
-            {dependencies.length > 0 && (
-              <div>
-                <Text strong style={{ marginBottom: 8, display: 'block' }}>
-                  已添加的依赖包:
-                </Text>
-                {dependencies.map((dep) => (
-                  <Tag
-                    key={dep}
-                    closable
-                    onClose={() => handleRemoveDependency(dep)}
-                    style={{ marginBottom: 4 }}
-                  >
-                    {dep}
-                  </Tag>
-                ))}
-              </div>
-            )}
-          </Card>
-
-          <Form.Item
-            name="documentation"
-            label="代码文档"
-          >
-            <TextArea
-              rows={8}
-              placeholder="请添加代码的使用说明、API文档等..."
-              maxLength={2000}
-              showCount
-            />
-          </Form.Item>
-        </Space>
-      )
-    }
-  ]
+  const initialValues = {
+    ...initialData,
+    language: initialData.language || 'python'
+  }
 
   return (
     <div>
@@ -757,29 +126,115 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
           <CodeOutlined style={{ marginRight: 8, color: '#722ed1' }} />
           代码项目配置
         </Title>
-        <Text type="secondary">
-          直接编写或上传源代码，支持多种编程语言
-        </Text>
+        <Text type="secondary">通过 Git 仓库提供代码来源</Text>
       </div>
 
       <Form
         form={form}
         layout="vertical"
-        initialValues={initialData}
+        initialValues={initialValues}
         onFinish={handleFinish}
-        onValuesChange={handleValuesChange}
+        onValuesChange={(_, allValues) => emitDataChange(allValues)}
       >
-        <Tabs
-          items={tabItems}
-          type="card"
-          size="small"
-        />
+        <Card title="基本信息" size="small" style={{ marginBottom: 16 }}>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="name" label="项目名称" rules={[{ required: true, message: '请输入项目名称' }]}>
+                <Input placeholder="请输入项目名称" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="language" label="编程语言" rules={[{ required: true, message: '请选择编程语言' }]}>
+                <Select showSearch placeholder="选择编程语言" optionFilterProp="children">
+                  {LANGUAGE_OPTIONS.map((option) => (
+                    <Option key={option.value} value={option.value}>
+                      <Space>
+                        <FileIcon extension={option.extension} size={16} />
+                        <span style={{ color: option.color }}>{option.label}</span>
+                      </Space>
+                    </Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
 
+          <Form.Item name="tags" label="项目标签" tooltip="多个标签用逗号分隔">
+            <Input placeholder="例如: 工具,脚本,自动化" />
+          </Form.Item>
 
+          <Form.Item name="description" label="项目描述">
+            <TextArea rows={3} placeholder="请描述代码的功能和用途" maxLength={500} showCount />
+          </Form.Item>
+        </Card>
+
+        <Card title="Git 来源" size="small" style={{ marginBottom: 16 }}>
+          <Form.Item name="repository_id" label="代码仓库" rules={[{ required: true, message: '请选择代码仓库' }]}>
+            <Select showSearch placeholder="选择已管理仓库" optionFilterProp="label">
+              {repositories.map((repository) => (
+                <Option key={repository.id} value={repository.id} label={repository.name}>
+                  <Space direction="vertical" size={0}>
+                    <span>{repository.name}</span>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{repository.url}</Text>
+                  </Space>
+                </Option>
+              ))}
+            </Select>
+          </Form.Item>
+
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="ref" label="Git 引用">
+                <Input placeholder="main" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="subdir" label="项目子目录" rules={[{ required: true, message: '请输入仓库内项目子目录' }]}>
+                <Input placeholder="spiders/news" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Form.Item name="include_paths" label="共享目录">
+            <Input placeholder="libs/common, libs/utils" />
+          </Form.Item>
+
+          <Form.Item
+            name="code_entry_point"
+            label="入口文件"
+            tooltip="指定项目子目录内的入口脚本，如 main.py"
+            rules={[{ required: true, message: '请输入入口文件' }]}
+          >
+            <Input placeholder="例如: main.py" />
+          </Form.Item>
+        </Card>
+
+        <Card title="依赖与文档" size="small">
+          <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+            <Input
+              placeholder="输入依赖包名"
+              value={newDependency}
+              onChange={(event) => setNewDependency(event.target.value)}
+              onPressEnter={handleAddDependency}
+            />
+            <Button type="primary" icon={<PlusOutlined />} onClick={handleAddDependency} disabled={!newDependency.trim()}>
+              添加
+            </Button>
+          </Space.Compact>
+
+          {dependencies.map((dependency) => (
+            <Tag key={dependency} closable onClose={() => handleRemoveDependency(dependency)} style={{ marginBottom: 8 }}>
+              {dependency}
+            </Tag>
+          ))}
+
+          <Form.Item name="documentation" label="代码文档" style={{ marginTop: 12 }}>
+            <TextArea rows={8} placeholder="请添加代码的使用说明、API文档等..." maxLength={2000} showCount />
+          </Form.Item>
+        </Card>
       </Form>
     </div>
   )
 }
 
-// 使用React.memo优化，避免不必要的重渲染
 export default React.memo(CodeProjectForm)

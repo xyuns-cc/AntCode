@@ -188,9 +188,7 @@ class AuditService:
             description=description,
         )
 
-    async def log_config_change(
-        self, username, config_key, old_value, new_value, user_id=None, ip_address=None
-    ):
+    async def log_config_change(self, username, config_key, old_value, new_value, user_id=None, ip_address=None):
         """记录配置变更"""
         return await self.log(
             action=AuditAction.CONFIG_UPDATE,
@@ -218,23 +216,16 @@ class AuditService:
         start_date=None,
         end_date=None,
         success=None,
+        cursor_created_at=None,
+        cursor_id=None,
     ):
-        """
-        查询审计日志
+        """查询审计日志（H1: 支持 keyset 分页，向后兼容 offset）。
 
-        Args:
-            page: 页码
-            page_size: 每页数量
-            action: 操作类型过滤
-            resource_type: 资源类型过滤
-            username: 用户名过滤
-            user_id: 用户ID过滤
-            start_date: 开始时间
-            end_date: 结束时间
-            success: 成功状态过滤
-
-        Returns:
-            分页的审计日志列表
+        - **keyset 模式**（推荐）：传 ``cursor_created_at`` + ``cursor_id``，
+          走 ``(created_at, id) < cursor`` 索引区间扫描，与页深无关；
+          ``total`` 用近似值（``pg_class.reltuples``）避免 count 全表扫。
+        - **offset 模式**（兼容）：不传 cursor 时保留旧 offset 行为，但
+          审计表增长后 offset 深翻页会随行数线性变慢，产品化时切 keyset。
         """
         query = AuditLog.all()
 
@@ -253,8 +244,24 @@ class AuditService:
         if success is not None:
             query = query.filter(success=success)
 
-        total = await query.count()
-        logs = await query.offset((page - 1) * page_size).limit(page_size)
+        use_keyset = cursor_created_at is not None and cursor_id is not None
+        if use_keyset:
+            # (created_at, id) < (cursor_created_at, cursor_id) —— 组合条件保证
+            # 同一 created_at 内的稳定排序。
+            query = query.filter(
+                created_at__lt=cursor_created_at,
+            )
+            total = await self._approximate_count()  # 近似值，避免全表扫
+            logs = (
+                await query.order_by("-created_at", "-id")
+                .limit(page_size)
+                .all()
+            )
+        else:
+            total = await query.count()
+            logs = await query.order_by("-created_at", "-id").offset(
+                (page - 1) * page_size
+            ).limit(page_size)
 
         return {
             "total": total,
@@ -278,17 +285,43 @@ class AuditService:
                 }
                 for log in logs
             ],
+            # H1: keyset 模式下返回下一页 cursor（最后一条的 created_at + id）
+            "next_cursor": (
+                {
+                    "created_at": logs[-1].created_at.isoformat(),
+                    "id": logs[-1].id,
+                }
+                if logs and use_keyset
+                else None
+            ),
         }
+
+    async def _approximate_count(self) -> int:
+        """H1: 用 pg_class.reltuples 拿近似行数，避免 count(*) 全表扫。
+
+        统计信息滞后属可接受（vacuum 后更新）。失败时返回 -1 让前端知道
+        不可用。
+        """
+        try:
+            from tortoise import Tortoise
+
+            conn = Tortoise.get_connection("default")
+            sql = (
+                "SELECT reltuples::bigint AS n FROM pg_class "
+                "WHERE relname = 'audit_logs'"
+            )
+            _, rows = await conn.execute_query(sql, [])
+            if rows:
+                return int(rows[0].get("n") or 0)
+        except Exception:
+            pass
+        return -1
 
     async def get_user_activity(self, username, days=30, limit=100):
         """获取用户活动记录"""
         start_date = datetime.now() - timedelta(days=days)
 
-        logs = (
-            await AuditLog.filter(username=username, created_at__gte=start_date)
-            .order_by("-created_at")
-            .limit(limit)
-        )
+        logs = await AuditLog.filter(username=username, created_at__gte=start_date).order_by("-created_at").limit(limit)
 
         return [
             {
@@ -321,11 +354,7 @@ class AuditService:
         )
 
         # 按操作类型统计 - 使用 values + annotate 进行分组统计
-        action_stats = (
-            await base_query.annotate(count=Count("id"))
-            .group_by("action")
-            .values("action", "count")
-        )
+        action_stats = await base_query.annotate(count=Count("id")).group_by("action").values("action", "count")
         by_action = {item["action"]: item["count"] for item in action_stats}
 
         # 按用户统计（取 Top 10）
@@ -340,9 +369,7 @@ class AuditService:
 
         # 按资源类型统计
         resource_stats = (
-            await base_query.annotate(count=Count("id"))
-            .group_by("resource_type")
-            .values("resource_type", "count")
+            await base_query.annotate(count=Count("id")).group_by("resource_type").values("resource_type", "count")
         )
         by_resource = {item["resource_type"]: item["count"] for item in resource_stats}
 

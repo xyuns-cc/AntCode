@@ -102,13 +102,12 @@ def _safe_attr(obj, attr, default=None):
     return value
 
 
-def _resolve_public_id(obj, public_id_attr, fallback_attr):
-    """解析 public_id，优先使用专用属性，回退到内部 ID 转字符串"""
+def _resolve_public_id(obj, public_id_attr):
+    """解析 public_id，缺失时显式暴露查询投影错误"""
     public_id = getattr(obj, public_id_attr, None)
     if public_id:
         return public_id
-    fallback = getattr(obj, fallback_attr, None)
-    return str(fallback) if fallback else None
+    raise ValueError(f"响应对象缺少 {public_id_attr}")
 
 
 # ============================================================================
@@ -124,7 +123,7 @@ class ProjectResponseBuilder:
         """构建项目详情响应"""
         from antcode_core.domain.schemas.project import ProjectResponse
 
-        created_by_public_id = _resolve_public_id(project, "created_by_public_id", "user_id")
+        created_by_public_id = _resolve_public_id(project, "created_by_public_id")
         execution_strategy = _safe_attr(project, "execution_strategy")
         bound_worker_id = getattr(project, "bound_worker_id", None)
 
@@ -140,7 +139,6 @@ class ProjectResponseBuilder:
             updated_at=project.updated_at,
             created_by=created_by_public_id,
             created_by_username=getattr(project, "created_by_username", None),
-            download_count=project.download_count,
             star_count=project.star_count,
             file_info=getattr(project, "file_info", None),
             rule_info=getattr(project, "rule_info", None),
@@ -152,7 +150,6 @@ class ProjectResponseBuilder:
             execution_strategy=execution_strategy,
             bound_worker_id=str(bound_worker_id) if bound_worker_id else None,
             bound_worker_name=getattr(project, "bound_worker_name", None),
-            fallback_enabled=getattr(project, "fallback_enabled", None),
         )
 
     @staticmethod
@@ -160,7 +157,7 @@ class ProjectResponseBuilder:
         """构建项目列表项响应"""
         from antcode_core.domain.schemas.project import ProjectListResponse
 
-        created_by_public_id = _resolve_public_id(project, "created_by_public_id", "user_id")
+        created_by_public_id = _resolve_public_id(project, "created_by_public_id")
 
         return ProjectListResponse(
             id=project.public_id,
@@ -172,7 +169,6 @@ class ProjectResponseBuilder:
             created_at=project.created_at,
             created_by=created_by_public_id,
             created_by_username=getattr(project, "created_by_username", None),
-            download_count=project.download_count,
             star_count=project.star_count,
             task_count=getattr(project, "task_count", 0),
         )
@@ -191,8 +187,8 @@ class TaskResponseBuilder:
         """构建任务详情响应"""
         from antcode_core.domain.schemas.task import TaskResponse
 
-        project_public_id = _resolve_public_id(task, "project_public_id", "project_id")
-        created_by_public_id = _resolve_public_id(task, "created_by_public_id", "user_id")
+        project_public_id = _resolve_public_id(task, "project_public_id")
+        created_by_public_id = _resolve_public_id(task, "created_by_public_id")
         execution_strategy = _safe_attr(task, "execution_strategy")
         project_execution_strategy = _safe_attr(task, "project_execution_strategy")
         specified_worker_id = getattr(task, "specified_worker_public_id", None)
@@ -220,11 +216,8 @@ class TaskResponseBuilder:
             specified_worker_id=str(specified_worker_id) if specified_worker_id else None,
             specified_worker_name=getattr(task, "specified_worker_name", None),
             project_execution_strategy=project_execution_strategy,
-            project_bound_worker_id=str(project_bound_worker_id)
-            if project_bound_worker_id
-            else None,
+            project_bound_worker_id=str(project_bound_worker_id) if project_bound_worker_id else None,
             project_bound_worker_name=getattr(task, "project_bound_worker_name", None),
-            fallback_enabled=getattr(task, "fallback_enabled", None),
             runtime_scope=getattr(task, "runtime_scope", None),
             runtime_kind=getattr(task, "runtime_kind", None),
             python_version=getattr(task, "python_version", None),

@@ -1,15 +1,14 @@
-"""
-爬虫任务插件
+"""爬虫任务插件。
 
-包含:
-- SpiderPlugin: 爬虫任务 ExecPlan 生成器
-- spiderkit: 完整爬虫框架（Spider、HttpClient 等）
-- data: 爬虫数据存储模块（Redis 存储、上报器、读取器）
+- ``SpiderPlugin``：TaskType.SPIDER 类型的历史插件（保留供旧任务复用）。
+- ``data``：爬虫数据模型（SpiderDataItem 等）与旧上报器实现。
+
+S4 后 spiderkit 子包已删除；规则爬虫（TaskType.RULE）走
+:mod:`antcode_scrapy`，通过 :mod:`antcode_worker.plugins.rule.plugin`
+生成 Scrapy 子进程 ExecPlan。
 """
 
-# 导出 spiderkit 子模块
-# 导出数据存储模块
-from antcode_worker.plugins.spider import data, spiderkit
+from antcode_worker.plugins.spider import data
 from antcode_worker.plugins.spider.plugin import SpiderPlugin
 
-__all__ = ["SpiderPlugin", "spiderkit", "data"]
+__all__ = ["SpiderPlugin", "data"]

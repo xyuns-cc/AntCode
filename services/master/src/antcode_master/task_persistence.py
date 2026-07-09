@@ -151,7 +151,7 @@ class TaskPersistenceService:
 
     async def get_interrupted_tasks(self):
         """获取所有被中断的任务"""
-        from antcode_core.domain.models import Task, TaskRun
+        from antcode_core.domain.models import Task, TaskRun, Worker
         from antcode_core.domain.models.enums import TaskStatus
         from tortoise.expressions import Q
 
@@ -169,6 +169,14 @@ class TaskPersistenceService:
 
             if not interrupted_executions:
                 return []
+
+            # B6: 用 LeaseStore 权威判活——心跳超阈值只是提示，真正判"死"的
+            # 是"lease 不再有效"。旧实现只看 last_heartbeat < cutoff 就重跑，
+            # 长跑任务或临时心跳丢失都会被误判 → 与真实执行的 worker 双跑。
+            active_worker_ids = await self._get_active_worker_ids()
+            worker_ids_in_batch = [e.worker_id for e in interrupted_executions if e.worker_id]
+            workers = await Worker.filter(id__in=worker_ids_in_batch) if worker_ids_in_batch else []
+            worker_pub_map = {w.id: w.public_id for w in workers}
 
             task_ids = [e.task_id for e in interrupted_executions]
             tasks = await Task.filter(id__in=task_ids)
@@ -188,6 +196,15 @@ class TaskPersistenceService:
             for execution in interrupted_executions:
                 task = task_map.get(execution.task_id)
                 if not task:
+                    continue
+
+                # B6: worker 仍持有 lease → 视为存活，跳过恢复（避免双跑）
+                pub_id = worker_pub_map.get(execution.worker_id) if execution.worker_id else None
+                if pub_id and pub_id in active_worker_ids:
+                    logger.debug(
+                        f"跳过恢复（worker lease 仍活跃）: run_id={execution.run_id} "
+                        f"worker={pub_id}"
+                    )
                     continue
 
                 checkpoint = None
@@ -215,6 +232,26 @@ class TaskPersistenceService:
         except Exception as e:
             logger.error(f"获取中断任务失败: {e}")
             return []
+
+    async def _get_active_worker_ids(self) -> set[str]:
+        """B6: 从 LeaseStore 拿当前活跃 worker 集合；不可达时返回空集（保守：
+        Redis 挂时不改变旧行为，仍按 heartbeat 判死——避免因 Redis 抖动
+        推迟所有 recovery）。"""
+        try:
+            from antcode_core.application.services.lease_service import (
+                LeasePolicy,
+                LeaseStore,
+            )
+            from antcode_core.infrastructure.redis import get_redis_client
+
+            redis = await get_redis_client()
+            if redis is None:
+                return set()
+            store = LeaseStore(redis, policy=LeasePolicy())
+            return set(await store.list_active())
+        except Exception as exc:
+            logger.debug(f"读取 active leases 失败(保守空集): {exc}")
+            return set()
 
     async def update_progress(self, run_id, progress, checkpoint_data=None):
         """更新任务进度"""

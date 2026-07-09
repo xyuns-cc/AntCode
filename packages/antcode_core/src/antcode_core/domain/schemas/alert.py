@@ -1,6 +1,5 @@
 """告警配置 Schema"""
 
-
 from pydantic import BaseModel, Field
 
 
@@ -36,15 +35,9 @@ class EmailConfig(BaseModel):
 class AlertChannelConfig(BaseModel):
     """告警渠道配置"""
 
-    feishu_webhooks: list[WebhookConfig] = Field(
-        default_factory=list, description="飞书 Webhook 列表"
-    )
-    dingtalk_webhooks: list[WebhookConfig] = Field(
-        default_factory=list, description="钉钉 Webhook 列表"
-    )
-    wecom_webhooks: list[WebhookConfig] = Field(
-        default_factory=list, description="企业微信 Webhook 列表"
-    )
+    feishu_webhooks: list[WebhookConfig] = Field(default_factory=list, description="飞书 Webhook 列表")
+    dingtalk_webhooks: list[WebhookConfig] = Field(default_factory=list, description="钉钉 Webhook 列表")
+    wecom_webhooks: list[WebhookConfig] = Field(default_factory=list, description="企业微信 Webhook 列表")
     email_config: EmailConfig = Field(default_factory=EmailConfig, description="邮件告警配置")
 
 

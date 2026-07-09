@@ -192,3 +192,55 @@ class LogAck(_message.Message):
     RECEIVED_FIELD_NUMBER: _ClassVar[int]
     received: int
     def __init__(self, received: _Optional[int] = ...) -> None: ...
+
+class SpiderDataBatch(_message.Message):
+    __slots__ = ("worker_id", "run_id", "project_id", "items", "meta", "trace")
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    ITEMS_FIELD_NUMBER: _ClassVar[int]
+    META_FIELD_NUMBER: _ClassVar[int]
+    TRACE_FIELD_NUMBER: _ClassVar[int]
+    worker_id: str
+    run_id: str
+    project_id: str
+    items: _containers.RepeatedCompositeFieldContainer[SpiderDataItem]
+    meta: SpiderMetaUpdate
+    trace: _common_pb2.TraceContext
+    def __init__(self, worker_id: _Optional[str] = ..., run_id: _Optional[str] = ..., project_id: _Optional[str] = ..., items: _Optional[_Iterable[_Union[SpiderDataItem, _Mapping]]] = ..., meta: _Optional[_Union[SpiderMetaUpdate, _Mapping]] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+
+class SpiderDataItem(_message.Message):
+    __slots__ = ("item_id", "spider_name", "item_type", "data", "url", "timestamp", "sequence")
+    ITEM_ID_FIELD_NUMBER: _ClassVar[int]
+    SPIDER_NAME_FIELD_NUMBER: _ClassVar[int]
+    ITEM_TYPE_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    SEQUENCE_FIELD_NUMBER: _ClassVar[int]
+    item_id: str
+    spider_name: str
+    item_type: str
+    data: bytes
+    url: str
+    timestamp: str
+    sequence: int
+    def __init__(self, item_id: _Optional[str] = ..., spider_name: _Optional[str] = ..., item_type: _Optional[str] = ..., data: _Optional[bytes] = ..., url: _Optional[str] = ..., timestamp: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
+
+class SpiderMetaUpdate(_message.Message):
+    __slots__ = ("status", "items_count", "last_item_at")
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    ITEMS_COUNT_FIELD_NUMBER: _ClassVar[int]
+    LAST_ITEM_AT_FIELD_NUMBER: _ClassVar[int]
+    status: str
+    items_count: int
+    last_item_at: str
+    def __init__(self, status: _Optional[str] = ..., items_count: _Optional[int] = ..., last_item_at: _Optional[str] = ...) -> None: ...
+
+class SpiderDataAck(_message.Message):
+    __slots__ = ("accepted", "failed")
+    ACCEPTED_FIELD_NUMBER: _ClassVar[int]
+    FAILED_FIELD_NUMBER: _ClassVar[int]
+    accepted: int
+    failed: int
+    def __init__(self, accepted: _Optional[int] = ..., failed: _Optional[int] = ...) -> None: ...

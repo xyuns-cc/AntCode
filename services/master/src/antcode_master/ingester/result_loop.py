@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
 import time
 from datetime import UTC, datetime
@@ -51,16 +52,30 @@ class ResultLoop:
     def __init__(
         self,
         stream_key: str | None = None,
-        group_name: str = "antcode-results",
+        group_name: str | None = None,
         consumer_name: str | None = None,
         poll_interval: float = 1.0,
         block_ms: int = 5000,
         batch_size: int = 50,
         pending_check_interval: int = 30,
     ):
+        # E5: 默认 group 带 namespace，与其它 loop 保持一致
+        from antcode_core.infrastructure.redis.control_plane import (
+            result_consumer_group,
+        )
+
         self._stream_key = stream_key or task_result_stream()
-        self._group = group_name
-        self._consumer = consumer_name or f"{socket.gethostname()}-{id(self)}"
+        self._group = group_name or result_consumer_group()
+        # R1-P0-2 (审查报告): consumer 名去掉 id(self)——它每次重启进程都变，
+        # 老 consumer 名下的 PEL 永远读不回。用 hostname + pid 已经能区分
+        # 同机多副本；重启后 pid 会变，靠周期 XAUTOCLAIM 认领旧 PEL（下面
+        # _run_loop 加）。
+        self._consumer = consumer_name or f"{socket.gethostname()}-{os.getpid()}"
+        # XAUTOCLAIM min-idle 阈值（毫秒）：其他 consumer 空闲超过此时长的
+        # PEL 消息会被本 consumer 认领重读。取一次 pending_check 周期 * 2，
+        # 兼顾切主/重启场景，同时不与正常处理时长冲突。
+        self._autoclaim_min_idle_ms = max(int(pending_check_interval * 2 * 1000), 30_000)
+        self._last_autoclaim = 0.0
         self._poll_interval = poll_interval
         self._block_ms = block_ms
         self._batch_size = batch_size
@@ -95,13 +110,16 @@ class ResultLoop:
         logger.info("结果消费循环已停止")
 
     async def _run_loop(self) -> None:
-        """主循环"""
+        """主循环（异常时指数退避 + jitter，避免持续错误刷爆日志/连接池）"""
+        from antcode_core.common.utils.retry import sleep_with_backoff
+
+        consecutive_errors = 0
         while self._running:
             try:
-                if not await ensure_leader():
-                    await asyncio.sleep(self._poll_interval)
-                    continue
-
+                # T6-T2: 去掉 leader gate —— result 流走 XREADGROUP 消费组，
+                # 每个 master 实例用 hostname-pid 作 consumer name，Redis
+                # Streams 天然按 consumer 分区消息。多实例部署时 follower
+                # 也承担 ingest 负载，不再干等 leader。
                 messages = await self._stream.xreadgroup_typed(
                     stream_key=self._stream_key,
                     group_name=self._group,
@@ -122,6 +140,35 @@ class ResultLoop:
                             block_ms=1,
                             read_pending=True,
                         )
+                        # R1-P0-2 (审查报告): XAUTOCLAIM 认领旧 consumer 的
+                        # 悬挂 PEL 消息。之前 consumer 名带 id(self) 每次重启
+                        # 都变，旧 PEL 永远读不回；即使我们把 consumer 名固定，
+                        # 老部署里已经积压的旧 consumer PEL 也要被清理。
+                        # 认领后消息进本 consumer 的 PEL，下一轮 read_pending
+                        # 会捞出来处理。
+                        if not messages:
+                            try:
+                                next_id = "0-0"
+                                claimed_total = 0
+                                for _ in range(3):  # 最多扫 3 页避免占用主循环
+                                    next_id, claimed, _deleted = await self._stream.xautoclaim(
+                                        self._stream_key,
+                                        group_name=self._group,
+                                        consumer_name=self._consumer,
+                                        min_idle_time_ms=self._autoclaim_min_idle_ms,
+                                        start_id=next_id,
+                                        count=self._batch_size,
+                                    )
+                                    claimed_total += len(claimed)
+                                    if not next_id or next_id == "0-0" or len(claimed) < self._batch_size:
+                                        break
+                                if claimed_total:
+                                    logger.warning(
+                                        "result_loop XAUTOCLAIM 认领旧 PEL {} 条",
+                                        claimed_total,
+                                    )
+                            except Exception as exc:
+                                logger.debug("XAUTOCLAIM 失败: {}", exc)
 
                     if not messages:
                         await asyncio.sleep(self._poll_interval)
@@ -150,11 +197,17 @@ class ResultLoop:
                 if final_ack_ids:
                     await self._stream.xack(self._stream_key, final_ack_ids, self._group)
 
+                consecutive_errors = 0  # 一次成功迭代 → 清零
+
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("结果消费循环异常")
-                await asyncio.sleep(self._poll_interval)
+                consecutive_errors += 1
+                logger.exception(
+                    "结果消费循环异常（连续第 {} 次），指数退避中", consecutive_errors
+                )
+                # 1s → 2s → 4s → ... → 上限 60s，加 jitter
+                await sleep_with_backoff(consecutive_errors, base_delay=1.0, max_delay=60.0)
 
     async def _handle_message(self, task_status: data_pb2.TaskStatus) -> bool:
         """处理单条 ``TaskStatus`` 消息"""
@@ -162,9 +215,11 @@ class ResultLoop:
         if not run_id:
             return True
 
-        # Proto Status enum → 小写字符串（与 task_run_service 现有 mapping 兼容）
-        status_name = data_pb2.Status.Name(task_status.status)
-        status = self._proto_status_to_str(status_name)
+        # Proto Status enum → 小写字符串（E1: 复用 antcode_contracts.transcode 的
+        # 权威 mapping，避免本地重复一份跑到 UNSPECIFIED 分叉）
+        from antcode_contracts.transcode import proto_status_to_str
+
+        status = proto_status_to_str(task_status.status)
 
         # proto3 标量字段：未设置时默认 0。这里仍然把 0 透传给下游，
         # 由 task_run_service 决定是否覆盖。
@@ -199,9 +254,10 @@ class ResultLoop:
             data=result_data,
         )
 
+    # E1: 已弃用本地映射，改用 antcode_contracts.transcode.proto_status_to_str。
+    # 旧方法保留兼容旧测试导入，转发到权威实现。
     @staticmethod
     def _proto_status_to_str(status_name: str) -> str:
-        """``STATUS_COMPLETED`` → ``completed``"""
         if status_name.startswith("STATUS_"):
             return status_name[len("STATUS_") :].lower()
         return status_name.lower()

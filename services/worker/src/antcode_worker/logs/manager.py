@@ -266,6 +266,17 @@ class LogManager:
         if self._batch:
             await self._batch.flush()
 
+    async def archive_logs(self) -> list:
+        """P6: engine._execute_task 期望在归档阶段调用此方法把 run 的日志固化。
+
+        当前架构下日志已经通过 ``_dispatch_entry`` 流式写入 PG，PG 里就是
+        权威归档，无需再上传 blob。只要在这里 flush 剩余 buffer 保证 PG
+        看到全部日志即可；返回空列表让 engine 走 log_archived=False 分支
+        （``ExecResult.log_archive_uri`` 保持默认）。
+        """
+        await self.flush()
+        return []
+
     def get_stats(self) -> dict:
         return {
             "run_id": self.run_id,

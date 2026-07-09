@@ -3,14 +3,17 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from antcode_core.application.services.audit import audit_service
+from antcode_core.common.security.auth import TokenData, get_current_super_admin, get_current_user
+from antcode_core.domain.models import User, UserRole
+from antcode_core.domain.schemas.common import BaseResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 
+from antcode_web_api.deps import require_role
 from antcode_web_api.response import success
-from antcode_core.common.security.auth import TokenData, get_current_super_admin, get_current_user
-from antcode_core.domain.models import User
-from antcode_core.domain.schemas.common import BaseResponse
-from antcode_core.application.services.audit import audit_service
+
+_REQUIRE_ADMIN = require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 
 router = APIRouter()
 
@@ -31,14 +34,9 @@ async def get_audit_logs(
     start_date: str | None = Query(None, description="开始日期"),
     end_date: str | None = Query(None, description="结束日期"),
     success_filter: bool | None = Query(None, alias="success", description="成功状态"),
-    current_user: TokenData = Depends(get_current_user),
+    _admin: User = Depends(_REQUIRE_ADMIN),
 ):
     """获取审计日志"""
-    # 检查管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     # 解析日期
     start_dt = None
     end_dt = None
@@ -76,13 +74,9 @@ async def get_audit_logs(
 )
 async def get_audit_stats(
     days: int = Query(7, ge=1, le=90, description="统计天数"),
-    current_user: TokenData = Depends(get_current_user),
+    _admin: User = Depends(_REQUIRE_ADMIN),
 ):
     """获取审计统计"""
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     stats = await audit_service.get_stats(days=days)
     return success(stats)
 
@@ -97,13 +91,9 @@ async def get_user_activity(
     username: str,
     days: int = Query(30, ge=1, le=90, description="查询天数"),
     limit: int = Query(100, ge=1, le=500, description="返回数量"),
-    current_user: TokenData = Depends(get_current_user),
+    _admin: User = Depends(_REQUIRE_ADMIN),
 ):
     """获取用户活动"""
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     activity = await audit_service.get_user_activity(username=username, days=days, limit=limit)
 
     return success({"username": username, "activity": activity})
@@ -137,9 +127,7 @@ async def get_audit_actions(current_user: TokenData = Depends(get_current_user))
     """获取操作类型列表"""
     from antcode_core.domain.models.audit_log import AuditAction
 
-    actions = [
-        {"value": action.value, "label": _get_action_label(action)} for action in AuditAction
-    ]
+    actions = [{"value": action.value, "label": _get_action_label(action)} for action in AuditAction]
 
     return success(actions)
 

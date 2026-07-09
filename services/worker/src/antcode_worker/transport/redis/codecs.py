@@ -401,87 +401,6 @@ class JsonCodec(MessageCodec):
         )
 
 
-class TaskMessageCodec(JsonCodec):
-    """
-    任务消息编解码器
-
-    专门用于任务相关消息的编解码。
-    """
-
-    # 任务消息字段映射
-    FIELD_MAPPINGS: ClassVar[dict[str, str]] = {
-        "task_id": "task_id",
-        "run_id": "run_id",
-        "project_id": "project_id",
-        "task_type": "task_type",
-        "priority": "priority",
-        "timeout": "timeout_seconds",
-        "payload": "payload",
-        "receipt": "receipt",
-    }
-
-    def encode_task_dispatch(
-        self,
-        run_id: str,
-        task_id: str,
-        project_id: str,
-        payload: TaskPayload,
-        context: RunContext,
-    ) -> dict[str, str]:
-        """
-        编码任务分发消息
-
-        Args:
-            run_id: 运行 ID
-            task_id: 任务 ID
-            project_id: 项目 ID
-            payload: 任务数据
-            context: 执行上下文
-
-        Returns:
-            编码后的消息
-        """
-        data = {
-            "run_id": run_id,
-            "task_id": task_id,
-            "project_id": project_id,
-            "task_type": payload.task_type.value,
-            "priority": context.priority,
-            "timeout_seconds": context.timeout_seconds,
-            "payload": self._dataclass_to_dict(payload),
-            "context": self._dataclass_to_dict(context),
-        }
-        return self.encode(data)
-
-    def decode_task_dispatch(self, data: dict[str, str]) -> tuple[TaskPayload, RunContext]:
-        """
-        解码任务分发消息
-
-        Args:
-            data: 消息数据
-
-        Returns:
-            (TaskPayload, RunContext) 元组
-        """
-        parsed = self._string_dict_to_dict(data)
-
-        # 移除版本字段
-        parsed.pop(self.VERSION_FIELD, None)
-
-        # 解码 payload
-        payload_data = parsed.get("payload", {})
-        payload = self._decode_task_payload(payload_data)
-
-        # 解码 context
-        context_data = parsed.get("context", {})
-        # 补充基本字段
-        context_data["run_id"] = parsed.get("run_id", context_data.get("run_id", ""))
-        context_data["task_id"] = parsed.get("task_id", context_data.get("task_id", ""))
-        context_data["project_id"] = parsed.get("project_id", context_data.get("project_id", ""))
-        context = self._decode_run_context(context_data)
-
-        return payload, context
-
 
 class LogMessageCodec(JsonCodec):
     """
@@ -629,7 +548,6 @@ class ControlMessageCodec(JsonCodec):
 
 # 默认编解码器实例
 default_codec = JsonCodec()
-task_codec = TaskMessageCodec()
 log_codec = LogMessageCodec()
 result_codec = ResultMessageCodec()
 heartbeat_codec = HeartbeatCodec()

@@ -19,6 +19,7 @@ from redis.exceptions import ConnectionError, TimeoutError
 
 from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
+from antcode_core.infrastructure.redis.factory import create_async_redis_client
 
 
 class RedisConnectionPool:
@@ -83,8 +84,14 @@ class RedisConnectionPool:
                 if keepalive_options:
                     pool_kwargs["socket_keepalive_options"] = keepalive_options
 
-            self.pool = redis.ConnectionPool.from_url(settings.REDIS_URL, **pool_kwargs)
-            self.redis_client = redis.Redis(connection_pool=self.pool)
+            # T6-T1: 走统一 factory，standalone/cluster/sentinel 自动分派
+            self.redis_client = create_async_redis_client(
+                settings.REDIS_URL,
+                max_connections=50,
+                decode_responses=False,
+            )
+            # cluster/sentinel 客户端没有暴露 pool，只有 standalone 才存
+            self.pool = getattr(self.redis_client, "connection_pool", None)
 
             await self.redis_client.ping()
             self._connected = True
@@ -298,16 +305,23 @@ def _make_client(
     pool_label: str,
     **overrides,
 ) -> redis.Redis:
-    """创建独立的 Redis 客户端（不走单例）"""
+    """创建独立的 Redis 客户端（不走单例）。
+
+    T6-T1: 走统一 factory，standalone/cluster/sentinel 自动分派。
+    集群模式下 max_connections 是每节点独立池上限。
+    """
     redis_url = url or settings.REDIS_URL
     if not redis_url:
         raise RedisConnectionError("REDIS_URL 未配置")
 
-    pool_kwargs = _build_pool_kwargs(max_connections, **overrides)
-    pool = redis.ConnectionPool.from_url(redis_url, **pool_kwargs)
-    client = redis.Redis(connection_pool=pool)
+    client = create_async_redis_client(
+        redis_url,
+        max_connections=max_connections,
+        decode_responses=False,
+        **overrides,
+    )
     logger.debug(
-        f"Redis {pool_label} 连接池已创建 (max_connections={max_connections})"
+        f"Redis {pool_label} 客户端已创建 (max_connections={max_connections})"
     )
     return client
 

@@ -1,15 +1,13 @@
 """URL 去重服务
 
-基于抽象后端实现 URL 去重，支持 Redis Bloom Filter 和内存 Set 两种实现。
-
-Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8
+基于 Redis 实现 URL 去重。
 """
 
 from loguru import logger
 
-from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.application.services.base import BaseService
 from antcode_core.application.services.crawl.backends.dedup_backend import DedupStore, get_dedup_store
+from antcode_core.common.hash_utils import calculate_content_hash
 
 
 def calculate_url_fingerprint(url: str) -> str:
@@ -32,17 +30,11 @@ def calculate_url_fingerprint(url: str) -> str:
 class CrawlDedupService(BaseService):
     """URL 去重服务
 
-    基于抽象后端实现高效的 URL 去重，支持：
+    基于 Redis 后端实现高效的 URL 去重，支持：
     - 单个 URL 的存在性检查
     - 单个 URL 的添加
     - 批量 URL 的检查和添加
     - 自动计算 URL 指纹
-
-    通过环境变量 CRAWL_BACKEND 配置后端类型：
-    - "memory": 内存 Set 实现（默认）
-    - "redis": Redis Bloom Filter 实现
-
-    Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8
     """
 
     # 默认配置
@@ -100,8 +92,7 @@ class CrawlDedupService(BaseService):
         result = await self.dedup_store.exists(project_id, fingerprint)
 
         logger.debug(
-            f"检查 URL 去重: project={project_id}, url={url[:50]}..., "
-            f"fingerprint={fingerprint[:8]}..., exists={result}"
+            f"检查 URL 去重: project={project_id}, url={url[:50]}..., fingerprint={fingerprint[:8]}..., exists={result}"
         )
 
         return result
@@ -121,13 +112,11 @@ class CrawlDedupService(BaseService):
 
         if result:
             logger.debug(
-                f"添加 URL 到去重存储: project={project_id}, "
-                f"url={url[:50]}..., fingerprint={fingerprint[:8]}..."
+                f"添加 URL 到去重存储: project={project_id}, url={url[:50]}..., fingerprint={fingerprint[:8]}..."
             )
         else:
             logger.debug(
-                f"URL 已存在于去重存储: project={project_id}, "
-                f"url={url[:50]}..., fingerprint={fingerprint[:8]}..."
+                f"URL 已存在于去重存储: project={project_id}, url={url[:50]}..., fingerprint={fingerprint[:8]}..."
             )
 
         return result
@@ -162,10 +151,7 @@ class CrawlDedupService(BaseService):
         fingerprints = [calculate_url_fingerprint(url) for url in urls]
         results = await self.dedup_store.exists_many(project_id, fingerprints)
 
-        logger.debug(
-            f"批量检查 URL 去重: project={project_id}, "
-            f"count={len(urls)}, exists_count={sum(results)}"
-        )
+        logger.debug(f"批量检查 URL 去重: project={project_id}, count={len(urls)}, exists_count={sum(results)}")
 
         return results
 
@@ -189,8 +175,7 @@ class CrawlDedupService(BaseService):
         duplicate = len(results) - added
 
         logger.info(
-            f"批量添加 URL 到去重存储: project={project_id}, "
-            f"total={len(urls)}, added={added}, duplicate={duplicate}"
+            f"批量添加 URL 到去重存储: project={project_id}, total={len(urls)}, added={added}, duplicate={duplicate}"
         )
 
         return added, duplicate
@@ -215,10 +200,7 @@ class CrawlDedupService(BaseService):
             if not exists:
                 new_urls.append(url)
 
-        logger.debug(
-            f"过滤新 URL: project={project_id}, "
-            f"input={len(urls)}, new={len(new_urls)}"
-        )
+        logger.debug(f"过滤新 URL: project={project_id}, input={len(urls)}, new={len(new_urls)}")
 
         return new_urls
 
@@ -287,10 +269,7 @@ class CrawlDedupService(BaseService):
 
         result = await self.dedup_store.ensure_store(project_id, capacity, error_rate)
 
-        logger.info(
-            f"清空去重存储: project={project_id}, "
-            f"capacity={capacity}, error_rate={error_rate}"
-        )
+        logger.info(f"清空去重存储: project={project_id}, capacity={capacity}, error_rate={error_rate}")
 
         return result
 
@@ -327,7 +306,7 @@ class CrawlDedupService(BaseService):
             存储信息字典
         """
         # 检查后端是否支持 get_filter_info
-        if hasattr(self.dedup_store, 'get_filter_info'):
+        if hasattr(self.dedup_store, "get_filter_info"):
             return await self.dedup_store.get_filter_info(project_id)
 
         # 内存后端返回基本信息

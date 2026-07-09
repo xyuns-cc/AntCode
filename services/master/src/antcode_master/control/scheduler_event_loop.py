@@ -20,6 +20,15 @@ from antcode_master.leader import ensure_leader
 class SchedulerEventLoop:
     """调度事件循环"""
 
+    # R1-P0-3 (审查报告)：失败事件不 ACK 永不重读，PEL 无限膨胀；且原
+    # consumer 名带 os.getpid() 重启即变，旧 PEL 永远读不回。
+    # - 死信阈值 = 一条消息最多被投递多少次仍处理失败，之后 ACK 进死信
+    # - pending_check 周期 = 主循环空闲时读自己 PEL 兜底重试
+    # - autoclaim min_idle = 认领其他 consumer 悬挂消息的阈值
+    DLQ_DELIVERY_THRESHOLD = 5
+    PENDING_CHECK_INTERVAL = 30.0
+    AUTOCLAIM_MIN_IDLE_MS = 60_000
+
     def __init__(
         self,
         block_ms: int = 3000,
@@ -33,8 +42,14 @@ class SchedulerEventLoop:
         self._task: asyncio.Task | None = None
         self._stream = settings.scheduler_event_stream
         self._group = settings.SCHEDULER_EVENT_GROUP
+        # R1-P0-3: 固定 consumer 名（hostname+pid 已能区分多副本；重启后 pid
+        # 会变，靠 XAUTOCLAIM 认领旧 PEL）
         self._consumer = f"{socket.gethostname()}-{os.getpid()}"
         self._stream_client = StreamClient()
+        # T6-T2: delivery counter 走 XPENDING 权威源，不再用进程内 dict。
+        # _deliveries 已废弃，保留字段名以防外部访问但不用于决策。
+        self._deliveries: dict[str, int] = {}
+        self._last_pending_check = 0.0
 
     async def start(self) -> None:
         """启动事件循环"""
@@ -61,16 +76,23 @@ class SchedulerEventLoop:
         logger.info("调度事件循环已停止")
 
     async def _run_loop(self) -> None:
-        """事件循环主逻辑"""
+        """事件循环主逻辑。
+
+        R1-P0-3: 补上 pending 重读 + XAUTOCLAIM + 失败重试计数进死信，
+        堵住"master crash 或事件处理抛错后批次事件永久丢失"这条链。
+        """
+        import time as _time
+
         while self._running:
             try:
                 if not settings.REDIS_ENABLED:
                     await asyncio.sleep(self.idle_sleep)
                     continue
 
-                if not await ensure_leader():
-                    await asyncio.sleep(self.idle_sleep)
-                    continue
+                # T6-T2: 去掉 leader gate —— scheduler_event 也走 consumer
+                # group（虽然生产者只有 leader，消费端可以多实例分担）。
+                # PEL deliver_count 走 XPENDING 权威源（下方 _handle_message
+                # 里读），不再依赖进程内 _deliveries 本地计数。
 
                 await self._stream_client.ensure_group(self._stream, self._group)
 
@@ -82,8 +104,49 @@ class SchedulerEventLoop:
                     block_ms=self.block_ms,
                 )
 
+                # 无新消息：读 pending + XAUTOCLAIM 认领旧 consumer PEL
                 if not messages:
-                    continue
+                    now = _time.time()
+                    if now - self._last_pending_check >= self.PENDING_CHECK_INTERVAL:
+                        self._last_pending_check = now
+                        try:
+                            messages = await self._stream_client.xreadgroup(
+                                stream_key=self._stream,
+                                group_name=self._group,
+                                consumer_name=self._consumer,
+                                count=self.batch_size,
+                                block_ms=1,
+                                read_pending=True,
+                            )
+                        except TypeError:
+                            # 兼容旧签名（不支持 read_pending 参数）
+                            messages = []
+                        if not messages:
+                            try:
+                                next_id = "0-0"
+                                claimed_total = 0
+                                for _ in range(3):
+                                    next_id, claimed, _ = await self._stream_client.xautoclaim(
+                                        self._stream,
+                                        group_name=self._group,
+                                        consumer_name=self._consumer,
+                                        min_idle_time_ms=self.AUTOCLAIM_MIN_IDLE_MS,
+                                        start_id=next_id,
+                                        count=self.batch_size,
+                                    )
+                                    claimed_total += len(claimed)
+                                    if not next_id or next_id == "0-0" or len(claimed) < self.batch_size:
+                                        break
+                                if claimed_total:
+                                    logger.warning(
+                                        "scheduler_event_loop XAUTOCLAIM 认领旧 PEL {} 条",
+                                        claimed_total,
+                                    )
+                            except Exception as exc:
+                                logger.debug(f"XAUTOCLAIM 失败: {exc}")
+                    if not messages:
+                        await asyncio.sleep(self.idle_sleep)
+                        continue
 
                 ack_ids: list[str] = []
                 for message in messages:
@@ -91,7 +154,26 @@ class SchedulerEventLoop:
                         await self._handle_message(message.data)
                         ack_ids.append(message.msg_id)
                     except Exception as e:
-                        logger.error(f"处理调度事件失败: {e}")
+                        # R1-P0-3: 失败不 ACK 会永远卡在 PEL；累计投递次数
+                        # 超阈值后 ACK 进死信，避免 PEL 无限膨胀。
+                        # T6-T2: 计数改用 XPENDING deliver_count（Redis 权威源），
+                        # 不再走进程内 _deliveries dict —— 多 master 分片后本地
+                        # 计数会漂，同一条消息被两个实例累加导致误进死信。
+                        try:
+                            count = await self._xpending_deliver_count(message.msg_id)
+                        except Exception as pend_exc:
+                            logger.debug(f"XPENDING 查询失败，退回 1: {pend_exc}")
+                            count = 1
+                        if count >= self.DLQ_DELIVERY_THRESHOLD:
+                            logger.error(
+                                f"调度事件处理失败 {count} 次，ACK 进死信: "
+                                f"msg_id={message.msg_id} event={message.data} err={e}"
+                            )
+                            ack_ids.append(message.msg_id)
+                        else:
+                            logger.warning(
+                                f"处理调度事件失败 (第 {count} 次): msg_id={message.msg_id} err={e}"
+                            )
 
                 if ack_ids:
                     await self._stream_client.xack(self._stream, ack_ids, self._group)
@@ -102,13 +184,57 @@ class SchedulerEventLoop:
                 logger.error(f"调度事件循环异常: {e}")
                 await asyncio.sleep(self.idle_sleep)
 
-    async def _handle_message(self, data: dict) -> None:
-        """处理单条事件"""
-        event_type = str(data.get("event", ""))
-        task_id_raw = data.get("task_id")
+    async def _xpending_deliver_count(self, msg_id: str) -> int:
+        """T6-T2: 查 XPENDING 里指定 msg 的投递次数。
 
+        Redis Streams 每次 XREADGROUP / XCLAIM 触达一条 PEL 消息都会自增
+        times_delivered；这是跨 master 实例的权威计数。
+        """
+        client = await self._stream_client._get_client()  # type: ignore[attr-defined]
+        raw = await client.xpending_range(
+            self._stream, self._group, min=msg_id, max=msg_id, count=1
+        )
+        if not raw:
+            return 1
+        entry = raw[0]
+        # redis-py 返回 dict 或 list（版本差异），都提取 times_delivered
+        if isinstance(entry, dict):
+            return int(entry.get("times_delivered", 1))
+        # 兼容 list 形式 [id, consumer, idle, delivered]
+        try:
+            return int(entry[3])
+        except (IndexError, TypeError, ValueError):
+            return 1
+
+    async def _handle_message(self, data: dict) -> None:
+        """处理单条事件。
+
+        F: 分两族事件：
+        - **task_*** 事件：依赖 ``task_id``，走 scheduler_service（原逻辑）。
+        - **batch_*** 事件：依赖 ``batch_id``，走 crawl_batch_dispatcher_service。
+          旧实现遇到 batch 事件因 ``task_id`` 缺失直接丢，是 crawl 主链路的
+          断点之一。
+        """
+        event_type = str(data.get("event", ""))
+
+        # F: batch_* 事件分支
+        if event_type.startswith("batch_"):
+            batch_id = data.get("batch_id")
+            if not batch_id:
+                logger.warning(f"批次事件缺 batch_id: {event_type}")
+                return
+            from antcode_core.application.services.crawl.batch_dispatcher_service import (
+                crawl_batch_dispatcher_service,
+            )
+
+            await crawl_batch_dispatcher_service.handle_batch_event(
+                event_type, str(batch_id)
+            )
+            return
+
+        task_id_raw = data.get("task_id")
         if not task_id_raw:
-            logger.warning("调度事件缺少 task_id，已忽略")
+            logger.warning(f"调度事件缺少 task_id 且非 batch_* 事件: {event_type}")
             return
 
         try:

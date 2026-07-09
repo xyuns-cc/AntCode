@@ -1,13 +1,6 @@
-"""
-JSON解析工具模块
-提供安全的JSON解析功能，支持多种格式兼容
-"""
-
-import ast
-import re
+"""严格 JSON 解析工具模块。"""
 
 import ujson
-from loguru import logger
 
 
 class JSONParser:
@@ -32,37 +25,21 @@ class JSONParser:
         if isinstance(data, dict):
             return data
 
-        # 如果不是字符串，记录警告并返回None
         if not isinstance(data, str):
-            logger.warning(f"无法解析{field_name}: 不支持的数据类型 {type(data)}")
-            return None
+            raise ValueError(f"{field_name} 必须是 JSON 对象字符串或字典")
 
         # 去除首尾空白字符
         data = data.strip()
         if not data:
             return None
 
-        # 尝试多种解析方式
-        parsers = [
-            ("ujson.loads", ujson.loads),
-            ("ast.literal_eval", ast.literal_eval),
-            ("单引号修复后解析", JSONParser._parse_with_quote_fix),
-        ]
-
-        for parser_name, parser_func in parsers:
-            try:
-                result = parser_func(data)
-                if isinstance(result, dict):
-                    return result
-                else:
-                    logger.warning(f"{field_name}解析结果不是字典类型: {type(result)}")
-            except Exception as e:
-                logger.debug(f"使用{parser_name}解析{field_name}失败: {e}")
-                continue
-
-        # 所有解析方式都失败
-        logger.warning(f"无法解析{field_name}: {data[:100]}...")
-        return None
+        try:
+            result = ujson.loads(data)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} JSON格式错误") from exc
+        if not isinstance(result, dict):
+            raise ValueError(f"{field_name} 必须是 JSON 对象")
+        return result
 
     @staticmethod
     def parse_list(data, field_name="data"):
@@ -83,37 +60,21 @@ class JSONParser:
         if isinstance(data, list):
             return data
 
-        # 如果不是字符串，记录警告并返回None
         if not isinstance(data, str):
-            logger.warning(f"无法解析{field_name}: 不支持的数据类型 {type(data)}")
-            return None
+            raise ValueError(f"{field_name} 必须是 JSON 数组字符串或列表")
 
         # 去除首尾空白字符
         data = data.strip()
         if not data:
             return None
 
-        # 尝试多种解析方式
-        parsers = [
-            ("ujson.loads", ujson.loads),
-            ("ast.literal_eval", ast.literal_eval),
-            ("单引号修复后解析", JSONParser._parse_list_with_quote_fix),
-        ]
-
-        for parser_name, parser_func in parsers:
-            try:
-                result = parser_func(data)
-                if isinstance(result, list):
-                    return result
-                else:
-                    logger.debug(f"{field_name}解析结果不是列表类型: {type(result)}")
-            except Exception as e:
-                logger.debug(f"使用{parser_name}解析{field_name}失败: {e}")
-                continue
-
-        # 所有解析方式都失败
-        logger.warning(f"无法解析{field_name}为列表: {data[:100]}...")
-        return None
+        try:
+            result = ujson.loads(data)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} JSON格式错误") from exc
+        if not isinstance(result, list):
+            raise ValueError(f"{field_name} 必须是 JSON 数组")
+        return result
 
     @staticmethod
     def parse_extraction_rules(data, field_name="extraction_rules"):
@@ -142,8 +103,7 @@ class JSONParser:
         # 验证每个元素都是字典
         for i, item in enumerate(result):
             if not isinstance(item, dict):
-                logger.warning(f"{field_name}[{i}]不是字典类型: {type(item)}")
-                return None
+                raise ValueError(f"{field_name}[{i}] 必须是 JSON 对象")
 
         return result
 
@@ -160,67 +120,6 @@ class JSONParser:
             解析后的分页配置字典，失败时返回None
         """
         return JSONParser.parse_safely(data, field_name)
-
-    @staticmethod
-    def parse_or_default(data, default_value, field_name="data"):
-        """
-        解析JSON，失败时返回默认值
-
-        Args:
-            data: 待解析的数据
-            default_value: 解析失败时返回的默认值
-            field_name: 字段名称，用于日志记录
-
-        Returns:
-            解析后的数据或默认值
-        """
-        if isinstance(default_value, list):
-            result = JSONParser.parse_list(data, field_name)
-        else:
-            result = JSONParser.parse_safely(data, field_name)
-
-        return result if result is not None else default_value
-
-    @staticmethod
-    def _parse_with_quote_fix(data):
-        """
-        修复单引号格式后解析JSON字典
-
-        Args:
-            data: JSON字符串
-
-        Returns:
-            解析后的字典
-
-        Raises:
-            ValueError: 解析失败时抛出异常
-        """
-        # 修复单引号为双引号
-        # 匹配格式: 'key': 'value' 或 'key' : 'value'
-        fixed_json = re.sub(r"'([^']*)'(\s*:\s*)", r'"\1"\2', data)
-        fixed_json = re.sub(r"(\s*:\s*)'([^']*)'", r'\1"\2"', fixed_json)
-
-        return ujson.loads(fixed_json)
-
-    @staticmethod
-    def _parse_list_with_quote_fix(data):
-        """
-        修复单引号格式后解析JSON数组
-
-        Args:
-            data: JSON字符串
-
-        Returns:
-            解析后的列表
-
-        Raises:
-            ValueError: 解析失败时抛出异常
-        """
-        # 修复单引号为双引号
-        fixed_json = re.sub(r"'([^']*)'(\s*:\s*)", r'"\1"\2', data)
-        fixed_json = re.sub(r"(\s*:\s*)'([^']*)'", r'\1"\2"', fixed_json)
-
-        return ujson.loads(fixed_json)
 
     @staticmethod
     def parse_headers(headers):

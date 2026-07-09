@@ -183,7 +183,7 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
           failures.push(step.name)
           // 还有后续步骤时询问是否继续
           if (i < steps.length - 1) {
-            // eslint-disable-next-line @typescript-eslint/no-loop-func
+             
             const shouldContinue = await new Promise<boolean>((resolve) => {
               Modal.confirm({
                 title: `${step.name}保存失败`,

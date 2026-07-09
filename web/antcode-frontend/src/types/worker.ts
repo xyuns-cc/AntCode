@@ -25,18 +25,8 @@ export interface WorkerMetrics {
   diskFree?: number           // 可用磁盘 (bytes)
 }
 
-// 渲染能力详情
-export interface WorkerRenderCapability {
-  enabled: boolean
-  browser_path?: string
-  headless?: boolean
-  max_instances?: number
-  error?: string
-}
-
 // Worker 能力
 export interface WorkerCapabilities {
-  drissionpage?: WorkerRenderCapability
   curl_cffi?: {
     enabled: boolean
     default_impersonate?: string
@@ -55,7 +45,6 @@ export interface Worker {
   description?: string
   metrics?: WorkerMetrics
   capabilities?: WorkerCapabilities  // Worker 能力
-  hasRenderCapability?: boolean
   version?: string
   // 操作系统信息
   osType?: string           // 操作系统类型: Windows/Linux/Darwin

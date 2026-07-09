@@ -1,10 +1,4 @@
-"""Redis 分布式滑动窗口限流器
-
-使用 Sorted Set + Lua 脚本实现原子化滑动窗口限流。
-Redis 不可用时 fail-open（放行请求）。
-"""
-
-from loguru import logger
+"""Redis 分布式滑动窗口限流器。"""
 
 # Lua 脚本：原子化滑动窗口限流
 # KEYS[1] = 限流 key
@@ -68,32 +62,26 @@ class RedisRateLimiter:
         Returns:
             True 表示允许，False 表示被限流
         """
+        from antcode_core.infrastructure.redis.client import get_redis_client
+
+        redis_client = await get_redis_client()
+        key = f"{self._key_prefix}{identifier}"
+
+        import time
+
+        now_us = int(time.time() * 1_000_000)
+
+        sha = await self._ensure_script(redis_client)
         try:
-            from antcode_core.infrastructure.redis.client import get_redis_client
-
-            redis_client = await get_redis_client()
-            key = f"{self._key_prefix}{identifier}"
-
-            import time
-
-            now_us = int(time.time() * 1_000_000)
-
+            result = await redis_client.evalsha(sha, 1, key, period, limit, now_us)
+        except Exception:
+            # SHA 可能因 Redis 重启失效，重新加载后重试一次；仍失败则暴露异常。
+            self._script_sha = None
             sha = await self._ensure_script(redis_client)
-            try:
-                result = await redis_client.evalsha(sha, 1, key, period, limit, now_us)
-            except Exception:
-                # SHA 可能因 Redis 重启失效，重新加载
-                self._script_sha = None
-                sha = await self._ensure_script(redis_client)
-                result = await redis_client.evalsha(sha, 1, key, period, limit, now_us)
+            result = await redis_client.evalsha(sha, 1, key, period, limit, now_us)
 
-            # result = [count, allowed(1/0)]
-            return result[1] == 1
-
-        except Exception as e:
-            # Redis 不可用时 fail-open
-            logger.warning(f"Redis 限流检查失败，放行请求: {e}")
-            return True
+        # result = [count, allowed(1/0)]
+        return result[1] == 1
 
 
 # 全局实例

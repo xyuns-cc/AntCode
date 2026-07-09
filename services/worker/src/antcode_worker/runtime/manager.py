@@ -94,6 +94,9 @@ class RuntimeManager:
         # 运行时使用计数
         self._usage_count: dict[str, int] = {}
 
+        # 让 GC 能查询 in-use 状态；防止 GC 在任务运行中 rmtree
+        self._gc.set_in_use_check(self._is_runtime_in_use)
+
         # 运行状态
         self._running = False
 
@@ -206,6 +209,10 @@ class RuntimeManager:
         self._builder._update_last_used(handle.path)
 
         logger.debug(f"释放运行时: {runtime_hash}")
+
+    def _is_runtime_in_use(self, runtime_hash: str) -> bool:
+        """GC 回调用：某 runtime_hash 是否仍有活跃任务持有。"""
+        return self._usage_count.get(runtime_hash, 0) > 0
 
     async def remove(self, runtime_hash: str, force: bool = False) -> bool:
         """

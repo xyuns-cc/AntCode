@@ -11,11 +11,11 @@ from typing import Any
 
 from loguru import logger
 
-from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus
-from antcode_core.domain.models.task_run import TaskRun
 from antcode_core.application.services.scheduler.execution_status_service import (
     execution_status_service,
 )
+from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus
+from antcode_core.domain.models.task_run import TaskRun
 
 
 class TaskRunService:
@@ -26,7 +26,17 @@ class TaskRunService:
         "running": RuntimeStatus.RUNNING,
         "success": RuntimeStatus.SUCCESS,
         "succeeded": RuntimeStatus.SUCCESS,
+        # P9: proto 契约的 canonical 字符串是 "completed"（见
+        # antcode_contracts.transcode._PROTO_STATUS_TO_CANONICAL），
+        # master.result_loop 走 proto_status_to_str 得到的就是 completed。
+        # 之前 mapping 没有此键，每条 rule/code/file 任务的 result 都被
+        # `无法识别的运行状态: completed` 打回并进 DLQ，PG task_executions
+        # 永远停留在 pending。
+        "completed": RuntimeStatus.SUCCESS,
+        "done": RuntimeStatus.SUCCESS,
         "failed": RuntimeStatus.FAILED,
+        "failure": RuntimeStatus.FAILED,
+        "error": RuntimeStatus.FAILED,
         "timeout": RuntimeStatus.TIMEOUT,
         "timed_out": RuntimeStatus.TIMEOUT,
         "cancelled": RuntimeStatus.CANCELLED,

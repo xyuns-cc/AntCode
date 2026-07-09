@@ -23,7 +23,6 @@ import {
   FullscreenExitOutlined
 } from '@ant-design/icons'
 import { logService, type HistoricalLogsUpdate, type LogStreamConnection } from '@/services/logs'
-import { LogExporter } from '@/utils/logExport'
 import Logger from '@/utils/logger'
 import VirtualLogViewer from './VirtualLogViewer'
 import styles from './LogViewer.module.css'
@@ -389,64 +388,45 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       return
     }
 
-    try {
-      // 优先导出原始日志文件
-      await LogExporter.exportLogFile({
-        runId,
-        format,
-        includeStdout: showStdout,
-        includeStderr: showStderr,
-        includeTimestamp: true,
-        includeLevel: true,
-        includeSource: true,
-        maxLines: maxLines
-      })
-      message.success(`日志已导出为 ${format.toUpperCase()} 格式`)
-    } catch (error) {
-      // 如果导出文件失败，则导出当前显示的消息
-      console.warn('导出原始日志失败，使用当前显示的消息:', error)
+    let content = ''
+    let filename = `logs_${runId}_${new Date().toISOString().split('T')[0]}`
 
-      let content = ''
-      let filename = `logs_${runId}_${new Date().toISOString().split('T')[0]}`
+    switch (format) {
+      case 'txt':
+        content = displayMessages.map(msg =>
+          `[${new Date(msg.timestamp).toLocaleString()}] [${msg.type.toUpperCase()}] ${msg.content}`
+        ).join('\n')
+        filename += '.txt'
+        break
 
-      switch (format) {
-        case 'txt':
-          content = displayMessages.map(msg =>
-            `[${new Date(msg.timestamp).toLocaleString()}] [${msg.type.toUpperCase()}] ${msg.content}`
-          ).join('\n')
-          filename += '.txt'
-          break
+      case 'json':
+        content = JSON.stringify(displayMessages, null, 2)
+        filename += '.json'
+        break
 
-        case 'json':
-          content = JSON.stringify(displayMessages, null, 2)
-          filename += '.json'
-          break
-
-        case 'csv': {
-          const headers = 'Timestamp,Type,Level,Source,Content\n'
-          const rows = displayMessages.map(msg =>
-            `"${msg.timestamp}","${msg.type}","${msg.level || ''}","${msg.source || ''}","${msg.content.replace(/"/g, '""')}"`
-          ).join('\n')
-          content = headers + rows
-          filename += '.csv'
-          break
-        }
+      case 'csv': {
+        const headers = 'Timestamp,Type,Level,Source,Content\n'
+        const rows = displayMessages.map(msg =>
+          `"${msg.timestamp}","${msg.type}","${msg.level || ''}","${msg.source || ''}","${msg.content.replace(/"/g, '""')}"`
+        ).join('\n')
+        content = headers + rows
+        filename += '.csv'
+        break
       }
-
-      // 创建下载链接
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = filename
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      URL.revokeObjectURL(url)
-
-      message.success(`日志已导出为 ${format.toUpperCase()} 格式`)
     }
-  }, [displayMessages, runId, showStdout, showStderr, maxLines])
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    message.success(`日志已导出为 ${format.toUpperCase()} 格式`)
+  }, [displayMessages, runId])
 
   // 更新统计信息
   useEffect(() => {

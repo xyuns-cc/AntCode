@@ -1,9 +1,6 @@
 """系统配置管理接口"""
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from loguru import logger
-
-from antcode_web_api.response import Messages, success
+from antcode_core.application.services.system_config import system_config_service
 from antcode_core.common.security.auth import get_current_super_admin
 from antcode_core.domain.schemas import BaseResponse
 from antcode_core.domain.schemas.system_config import (
@@ -12,7 +9,10 @@ from antcode_core.domain.schemas.system_config import (
     SystemConfigResponse,
     SystemConfigUpdate,
 )
-from antcode_core.application.services.system_config import system_config_service
+from fastapi import APIRouter, Depends, HTTPException, status
+from loguru import logger
+
+from antcode_web_api.response import Messages, success
 
 router = APIRouter()
 
@@ -101,15 +101,11 @@ async def get_config(config_key: str, current_admin=Depends(get_current_super_ad
     description="创建新的系统配置（仅超级管理员）",
     tags=["系统配置"],
 )
-async def create_config(
-    config_data: SystemConfigCreate, current_admin=Depends(get_current_super_admin)
-):
+async def create_config(config_data: SystemConfigCreate, current_admin=Depends(get_current_super_admin)):
     """创建系统配置（仅超级管理员可访问）"""
 
     try:
-        config = await system_config_service.create_config(
-            config_data, modified_by=current_admin.username
-        )
+        config = await system_config_service.create_config(config_data, modified_by=current_admin.username)
 
         response_data = SystemConfigResponse.model_validate(config)
         return success(response_data, message=Messages.CREATED_SUCCESS, code=201)
@@ -139,9 +135,7 @@ async def update_config(
     """更新系统配置（仅超级管理员可访问）"""
 
     try:
-        config = await system_config_service.update_config(
-            config_key, config_data, modified_by=current_admin.username
-        )
+        config = await system_config_service.update_config(config_key, config_data, modified_by=current_admin.username)
 
         response_data = SystemConfigResponse.model_validate(config)
         return success(response_data, message=Messages.UPDATED_SUCCESS)
@@ -163,9 +157,7 @@ async def update_config(
     description="批量更新系统配置（仅超级管理员）",
     tags=["系统配置"],
 )
-async def batch_update_configs(
-    batch_data: SystemConfigBatchUpdate, current_admin=Depends(get_current_super_admin)
-):
+async def batch_update_configs(batch_data: SystemConfigBatchUpdate, current_admin=Depends(get_current_super_admin)):
     """批量更新系统配置（仅超级管理员可访问）"""
 
     try:

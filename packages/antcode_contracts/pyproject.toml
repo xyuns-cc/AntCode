@@ -1,6 +1,6 @@
 [project]
 name = "antcode-contracts"
-version = "0.1.0"
+version = "1.0.0"
 description = "AntCode gRPC 契约包 - Proto 生成的 Python 代码"
 requires-python = ">=3.11"
 dependencies = [

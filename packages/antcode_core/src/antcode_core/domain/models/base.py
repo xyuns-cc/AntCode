@@ -25,9 +25,7 @@ class BaseModel(Model):
     """
 
     id = fields.BigIntField(primary_key=True)
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
 
     class Meta:
         abstract = True

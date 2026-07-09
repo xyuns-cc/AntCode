@@ -12,6 +12,7 @@ import {
   Tooltip,
   Row,
   Col,
+  message,
   theme
 } from 'antd'
 import {
@@ -26,6 +27,8 @@ import {
   SearchOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import PageContainer from '@/components/common/PageContainer'
+import FilterBar from '@/components/common/FilterBar'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import { useAuth } from '@/hooks/useAuth'
 import apiClient from '@/services/api'
@@ -124,9 +127,8 @@ const UserManagement: React.FC = () => {
         pageSize: responsePagination?.size ?? size,
         total: responsePagination?.total ?? items.length
       })
-    } catch {
-      // 错误由拦截器处理
-      setUsers([])
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '加载用户列表失败')
     } finally {
       setLoading(false)
     }
@@ -197,8 +199,8 @@ const UserManagement: React.FC = () => {
           sortOrder
         })
       }
-    } catch {
-      // 错误由拦截器处理
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '创建用户失败')
     }
   }
 
@@ -232,8 +234,8 @@ const UserManagement: React.FC = () => {
           sortOrder
         })
       }
-    } catch {
-      // 错误由拦截器处理
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '更新用户失败')
     }
   }
 
@@ -254,8 +256,8 @@ const UserManagement: React.FC = () => {
         passwordForm.resetFields()
         setSelectedUser(null)
       }
-    } catch {
-      // 错误由拦截器处理
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '重置密码失败')
     }
   }
 
@@ -301,8 +303,8 @@ const UserManagement: React.FC = () => {
           })
         }
       }
-    } catch {
-      // 错误由拦截器处理
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '删除用户失败')
     }
   }
 
@@ -318,8 +320,8 @@ const UserManagement: React.FC = () => {
           sortOrder
         })
       }
-    } catch {
-      // 错误由拦截器处理
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '踢下线失败')
     }
   }
 
@@ -410,23 +412,26 @@ const UserManagement: React.FC = () => {
       key: 'username',
       width: 180,
       ellipsis: { showTitle: false },
-      render: (text: string, record: User) => (
-        <Tooltip title={text} placement="topLeft">
-          <Space>
-            <UserOutlined />
-            <span>{text}</span>
-            {record.is_admin && (
-              <Tag 
-                color={record.is_super_admin ? 'red' : 'gold'}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-              >
-                <TeamOutlined style={{ fontSize: 12 }} />
-                <span>{record.is_super_admin ? '超级管理员' : '管理员'}</span>
-              </Tag>
-            )}
-          </Space>
-        </Tooltip>
-      )
+      render: (text: string, record: User) => {
+        const isSuperAdmin = record.role === 'super_admin'
+        return (
+          <Tooltip title={text} placement="topLeft">
+            <Space>
+              <UserOutlined />
+              <span>{text}</span>
+              {record.is_admin && (
+                <Tag
+                  color={isSuperAdmin ? 'red' : 'gold'}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                >
+                  <TeamOutlined style={{ fontSize: 12 }} />
+                  <span>{isSuperAdmin ? '超级管理员' : '管理员'}</span>
+                </Tag>
+              )}
+            </Space>
+          </Tooltip>
+        )
+      }
     },
     {
       title: '邮箱',
@@ -486,37 +491,39 @@ const UserManagement: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 190,
+      width: 300,
       fixed: 'right',
       render: (_, record: User) => (
-        <Space>
-          <Tooltip title="编辑用户" placement="top">
-            <Button
-              type="text"
-              icon={<EditOutlined />}
-              onClick={() => {
-                setSelectedUser(record)
-                editForm.setFieldsValue({
-                  username: record.username,
-                  email: record.email,
-                  is_active: record.is_active,
-                  is_admin: record.is_admin
-                })
-                setEditModalVisible(true)
-              }}
-            />
-          </Tooltip>
-          <Tooltip title="重置密码" placement="top">
-            <Button
-              type="text"
-              icon={<KeyOutlined />}
-              onClick={() => {
-                setSelectedUser(record)
-                setPasswordModalVisible(true)
-              }}
-            />
-          </Tooltip>
-          {currentUser?.is_super_admin && !record.is_super_admin && String(record.id) !== String(currentUser?.id) && (
+        <Space size={4} wrap>
+          <Button
+            type="link"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => {
+              setSelectedUser(record)
+              editForm.setFieldsValue({
+                username: record.username,
+                email: record.email,
+                is_active: record.is_active,
+                is_admin: record.is_admin,
+              })
+              setEditModalVisible(true)
+            }}
+          >
+            编辑
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<KeyOutlined />}
+            onClick={() => {
+              setSelectedUser(record)
+              setPasswordModalVisible(true)
+            }}
+          >
+            改密
+          </Button>
+          {currentUser?.role === 'super_admin' && record.role !== 'super_admin' && String(record.id) !== String(currentUser?.id) && (
             <Popconfirm
               title="确认踢下线"
               description={`确定要踢下线用户 "${record.username}" 吗？`}
@@ -524,13 +531,9 @@ const UserManagement: React.FC = () => {
               okText="确定"
               cancelText="取消"
             >
-              <Tooltip title="踢下线" placement="top">
-                <Button
-                  type="text"
-                  danger
-                  icon={<LogoutOutlined />}
-                />
-              </Tooltip>
+              <Button type="link" size="small" danger icon={<LogoutOutlined />}>
+                踢下线
+              </Button>
             </Popconfirm>
           )}
           {String(record.id) !== String(currentUser?.id) && (
@@ -541,13 +544,9 @@ const UserManagement: React.FC = () => {
               okText="确定"
               cancelText="取消"
             >
-              <Tooltip title="删除用户" placement="top">
-                <Button
-                  type="text"
-                  danger
-                  icon={<DeleteOutlined />}
-                />
-              </Tooltip>
+              <Button type="link" size="small" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
             </Popconfirm>
           )}
         </Space>
@@ -583,64 +582,57 @@ const UserManagement: React.FC = () => {
   }
 
   return (
-    <div style={{ padding: '24px' }}>
-      {/* 页面标题 */}
-      <div style={{ marginBottom: '24px' }}>
-        <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+    <PageContainer
+      title={
+        <Space>
           <TeamOutlined />
-          用户管理
-        </h1>
-        <p style={{ margin: '8px 0 0 0', opacity: 0.65 }}>
-          管理系统用户和权限
-        </p>
-      </div>
-
-      {/* 工具栏 */}
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-          <Space wrap size="middle">
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => fetchUsers({
-                page: pagination.current,
-                size: pagination.pageSize,
-                sortField,
-                sortOrder
-              })}
-              loading={loading}
-            >
-              刷新
-            </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => setCreateModalVisible(true)}
-            >
-              添加用户
-            </Button>
-            <Button
-              danger
-              icon={<DeleteOutlined />}
-              disabled={selectedRowKeys.length === 0}
-              onClick={handleBatchDelete}
-            >
-              批量删除{selectedRowKeys.length > 0 && ` (${selectedRowKeys.length})`}
-            </Button>
-          </Space>
-          <Input
-            placeholder="搜索 ID 或用户名"
-            prefix={<SearchOutlined />}
-            allowClear
-            value={searchKeyword}
-            onChange={(e) => setSearchKeyword(e.target.value)}
-            style={{ width: 200 }}
-          />
-        </div>
-      </Card>
-
-      {/* 用户表格 */}
-      <Card>
-        <ResponsiveTable<User>
+          <span>用户管理</span>
+        </Space>
+      }
+      toolbar={
+        <FilterBar
+          filters={
+            <Input
+              placeholder="搜索 ID 或用户名"
+              prefix={<SearchOutlined />}
+              allowClear
+              value={searchKeyword}
+              onChange={(e) => setSearchKeyword(e.target.value)}
+              style={{ width: 240 }}
+            />
+          }
+          actions={
+            <>
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => fetchUsers({
+                  page: pagination.current,
+                  size: pagination.pageSize,
+                  sortField,
+                  sortOrder,
+                })}
+                loading={loading}
+              >
+                刷新
+              </Button>
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                disabled={selectedRowKeys.length === 0}
+                onClick={handleBatchDelete}
+              >
+                批量删除{selectedRowKeys.length > 0 && ` (${selectedRowKeys.length})`}
+              </Button>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalVisible(true)}>
+                添加用户
+              </Button>
+            </>
+          }
+        />
+      }
+    >
+      <ResponsiveTable<User>
+        fill
           columns={columns}
           dataSource={filteredUsers}
           rowKey="id"
@@ -658,14 +650,10 @@ const UserManagement: React.FC = () => {
             current: pagination.current,
             pageSize: pagination.pageSize,
             total: pagination.total,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条`,
             onChange: (page, size) => handlePaginationChange(page, size || pagination.pageSize),
-            onShowSizeChange: (_current, size) => handlePaginationChange(1, size)
+            onShowSizeChange: (_current, size) => handlePaginationChange(1, size),
           }}
-        />
-      </Card>
+      />
 
       {/* 创建用户模态框 */}
       <Modal
@@ -963,7 +951,7 @@ const UserManagement: React.FC = () => {
           </Form.Item>
         </Form>
       </Modal>
-    </div>
+    </PageContainer>
   )
 }
 

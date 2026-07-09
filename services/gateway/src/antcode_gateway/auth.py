@@ -68,10 +68,11 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     WORKER_ID_HEADER = "x-worker-id"
     AUTHORIZATION_HEADER = "authorization"
 
-    # 不需要认证的方法（如健康检查）
+    # 不需要认证的方法：只保留首次注册（必须免鉴权，此时 worker 尚未获取 api_key）
+    # 与健康检查。Deregister 需要鉴权，否则可被利用发 Deregister{任意 worker_id} 撤销
+    # 他人 lease 造成 DoS。
     SKIP_AUTH_METHODS = frozenset([
-        "/antcode.v1.ControlService/Register",      # 首次注册
-        "/antcode.v1.ControlService/Deregister",    # 优雅退出
+        "/antcode.v1.ControlService/Register",      # 首次注册（此时无 api_key）
         "/grpc.health.v1.Health/Check",             # gRPC 健康检查
         "/grpc.health.v1.Health/Watch",
     ])

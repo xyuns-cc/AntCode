@@ -173,6 +173,21 @@ class GatewayControlService(ControlServiceServicer):
     ) -> control_pb2.DeregisterResponse:
         worker_id = request.worker_id
         reason = request.reason or "explicit"
+        # D7-1: 归属校验——请求头里的 worker 身份必须与被 Deregister 的 worker_id
+        # 一致，避免持有合法凭证的 worker A 去 Deregister worker B（DoS）。
+        # AuthInterceptor 已把 caller 身份写到 metadata；直接读，不再回查 DB。
+        caller_worker_id = ""
+        for md_key, md_val in context.invocation_metadata() or ():
+            if md_key == "x-worker-id":
+                caller_worker_id = md_val
+                break
+        if caller_worker_id and worker_id and caller_worker_id != worker_id:
+            logger.warning(
+                "拒绝 Deregister：caller x-worker-id=%s 与请求 worker_id=%s 不一致",
+                caller_worker_id, worker_id,
+            )
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "worker_id 不匹配")
+            return control_pb2.DeregisterResponse(success=False)
         logger.info(f"Worker Deregister: worker_id={worker_id}, reason={reason}")
         # 主动撤销 lease（让 Master 端立刻看到 worker 下线）。
         if self._lease_store is not None:

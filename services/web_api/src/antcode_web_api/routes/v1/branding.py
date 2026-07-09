@@ -1,11 +1,11 @@
 """品牌配置接口"""
 
-from fastapi import APIRouter, HTTPException, status
-from loguru import logger
-
 from antcode_core.application.services.system_config import system_config_service
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.system_config import BrandingConfig
+from fastapi import APIRouter, HTTPException, status
+from loguru import logger
+
 from antcode_web_api.response import Messages, success
 
 router = APIRouter()

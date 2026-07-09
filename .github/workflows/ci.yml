@@ -11,7 +11,6 @@ on:
       - develop
 
 env:
-  PYTHON_VERSION: "3.11"
   NODE_VERSION: "22"
 
 jobs:
@@ -28,9 +27,6 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
-
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: uv sync --all-packages
@@ -75,9 +71,6 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
       - name: Install dependencies
         run: uv sync --all-packages
 
@@ -101,24 +94,36 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
       - name: Install dependencies
         run: uv sync --all-packages --dev
 
       - name: Run bandit security scan
         run: uv run bandit -r packages/ services/ -f json -o bandit-report.json || true
 
-      - name: Run mypy type check
-        run: uv run mypy packages/antcode_core/ --ignore-missing-imports || true
+      - name: Block on HIGH severity bandit findings
+        run: python scripts/fail_on_high_vulns.py bandit-report.json --tool bandit
 
-      - name: Upload bandit report
+      - name: Run pip-audit (deps CVE scan)
+        run: |
+          uv pip install pip-audit
+          uv run pip-audit --format=json --output=pip-audit-report.json || true
+
+      - name: Block on HIGH/CRITICAL pip-audit findings
+        run: python scripts/fail_on_high_vulns.py pip-audit-report.json --tool pip-audit
+
+      - name: Run mypy type check
+        # J1: 去掉 || true 让 mypy 真正阻断 PR；type-check 存量白名单靠 mypy.ini
+        # 里逐目录 ignore_errors=True 收敛，与 ruff 逐目录收紧同步节奏。
+        run: uv run mypy packages services --ignore-missing-imports
+
+      - name: Upload security reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bandit-report
-          path: bandit-report.json
+          name: security-reports
+          path: |
+            bandit-report.json
+            pip-audit-report.json
 
   # ==================== 前端测试 ====================
   frontend-test:
@@ -152,6 +157,30 @@ jobs:
         working-directory: web/antcode-frontend
         run: npm run test -- --run
 
+  # ==================== 前端安全扫描 ====================
+  frontend-security:
+    name: Frontend Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/antcode-frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web/antcode-frontend
+        run: npm ci
+
+      - name: npm audit (HIGH severity blocks)
+        working-directory: web/antcode-frontend
+        run: npm audit --audit-level=high
+
   # ==================== 前端构建 ====================
   frontend-build:
     name: Frontend Build
@@ -182,17 +211,16 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      mysql:
-        image: mysql:8.0
+      postgres:
+        image: postgres:16-alpine
         env:
-          MYSQL_ROOT_PASSWORD: test_root_pw
-          MYSQL_DATABASE: antcode_test
-          MYSQL_USER: antcode
-          MYSQL_PASSWORD: test_antcode_pw
+          POSTGRES_DB: antcode_test
+          POSTGRES_USER: antcode
+          POSTGRES_PASSWORD: test_antcode_pw
         ports:
-          - 3306:3306
+          - 5432:5432
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-cmd="pg_isready -U antcode -d antcode_test"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
@@ -216,23 +244,20 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
       - name: Install dependencies
         run: uv sync --all-packages
 
       - name: Run integration tests
         env:
-          DATABASE_URL: mysql://antcode:test_antcode_pw@127.0.0.1:3306/antcode_test
+          DATABASE_URL: postgresql://antcode:test_antcode_pw@127.0.0.1:5432/antcode_test
           REDIS_URL: redis://127.0.0.1:6379/0
-        run: uv run pytest tests/integration/ -v --tb=short || true
+        run: uv run pytest tests/integration/ -v --tb=short
 
   # ==================== 摘要 ====================
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [backend-test, backend-lint, backend-security, frontend-test, frontend-build, integration-test]
+    needs: [backend-test, backend-lint, backend-security, frontend-test, frontend-security, frontend-build, integration-test]
     if: always()
 
     steps:
@@ -244,7 +269,8 @@ jobs:
           echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| 后端测试 | ${{ needs.backend-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 后端代码检查 | ${{ needs.backend-lint.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 安全扫描 | ${{ needs.backend-security.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 后端安全扫描 | ${{ needs.backend-security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端测试 | ${{ needs.frontend-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 前端安全扫描 | ${{ needs.frontend-security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端构建 | ${{ needs.frontend-build.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 集成测试 | ${{ needs.integration-test.result }} |" >> $GITHUB_STEP_SUMMARY

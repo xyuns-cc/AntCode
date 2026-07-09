@@ -34,6 +34,7 @@ from antcode_core.observability.tracing import inject_trace
 from loguru import logger
 from redis.exceptions import ConnectionError, TimeoutError
 
+from antcode_worker.domain.models import SourceBundle
 from antcode_worker.transport.base import (
     ControlMessage,
     HeartbeatMessage,
@@ -91,6 +92,9 @@ class RedisTransport(TransportBase):
         self._receipt_cache: dict[str, tuple[str, str, dict[str, Any]]] = {}
         self._poll_error_count = 0
         self._poll_backoff_until = 0.0
+        # R1-P0-4: 被 reclaimer 认领回来的消息塞在这里，poll_task 会优先消费
+        # 队列元素形如 (msg_id, decoded_data)
+        self._reclaimed_queue: asyncio.Queue = asyncio.Queue()
         # P3：Direct 模式下 Worker 直连 Redis，自带 LeaseStore（共享 redis_client）。
         self._lease_store: Any = None
         self._lease_id: str = ""
@@ -124,29 +128,19 @@ class RedisTransport(TransportBase):
             logger.error("worker_id 未配置，无法启动 Redis 传输层")
             return False
 
-        import redis.asyncio as aioredis
-        from redis.asyncio.retry import Retry
-        from redis.backoff import ExponentialBackoff
+        # T6-T1: 走统一 factory，自动分派 standalone / cluster / sentinel。
+        # 重试/keepalive 参数已内建在 factory 里，这里只留连接建立重试。
+        from antcode_core.infrastructure.redis.factory import (
+            create_async_redis_client,
+        )
 
         max_attempts = min(3, max(1, self._config.max_reconnect_attempts))
         delay = 0.3
 
         for attempt in range(1, max_attempts + 1):
             try:
-                retry = Retry(ExponentialBackoff(cap=1.0, base=0.1), retries=3)
-                self._redis = aioredis.from_url(
+                self._redis = create_async_redis_client(
                     self._redis_url,
-                    retry_on_timeout=True,
-                    retry=retry,
-                    retry_on_error=[
-                        ConnectionError,
-                        TimeoutError,
-                    ],
-                    socket_timeout=10,
-                    socket_connect_timeout=10,
-                    socket_keepalive=True,
-                    health_check_interval=30,
-                    encoding="utf-8",
                     decode_responses=True,
                 )
 
@@ -168,10 +162,14 @@ class RedisTransport(TransportBase):
                 )
 
                 # 启动 pending 回收器
+                # R1-P0-4 (审查报告)：认领到的消息通过 on_reclaimed 回调塞进
+                # 本地 _reclaimed_queue，poll_task 优先消费该队列 → 消息回到
+                # engine 执行。原实现丢弃 _do_reclaim 返回值，认领等于空转。
                 self._reclaimer = PendingTaskReclaimer(
                     redis_client=self._redis,
                     worker_id=self._worker_id,
                     keys=self._keys,
+                    on_reclaimed=self._enqueue_reclaimed,
                 )
                 await self._reclaimer.start()
 
@@ -229,21 +227,70 @@ class RedisTransport(TransportBase):
         await self._set_state(WorkerState.OFFLINE)
         logger.info("Redis 传输层已停止")
 
+    async def deregister(self, reason: str = "shutdown") -> None:
+        """T7-B3b (P1-6): Direct 模式主动 revoke lease + 删心跳。
+
+        让 master 立即判定 worker 离线，不再等 lease TTL（30s）。
+        Redis 已经 close 时降级为 no-op。
+        """
+        if not self._worker_id or not self._redis:
+            return
+        try:
+            if self._lease_store is not None:
+                await self._lease_store.revoke(self._worker_id, reason=reason)
+        except Exception as exc:
+            logger.warning(f"deregister revoke lease 失败: {exc}")
+        try:
+            from antcode_core.infrastructure.redis import worker_heartbeat_key
+
+            await self._redis.delete(worker_heartbeat_key(self._worker_id))
+        except Exception as exc:
+            logger.debug(f"deregister 清心跳 key 失败（可忽略）: {exc}")
+        logger.info(f"worker 主动 deregister 完成 (reason={reason})")
+
+    async def _enqueue_reclaimed(self, msg_id: str, data: dict[str, str]) -> None:
+        """R1-P0-4: reclaimer 的 on_reclaimed 回调。
+
+        认领到的消息塞进本地队列；poll_task 会优先消费。data 已经是 Redis
+        原始 field map（bytes 或 str），走 _decode_data 与正常 poll 一致。
+        """
+        await self._reclaimed_queue.put((msg_id, data))
+
     async def poll_task(self, timeout: float = 5.0) -> TaskMessage | None:
         """
         从 Redis Streams 拉取任务
 
-        使用 XREADGROUP 从 ready queue 读取任务。
+        使用 XREADGROUP 从 ready queue 读取任务。R1-P0-4: 优先消费本地
+        _reclaimed_queue（reclaimer 认领的旧 PEL 消息）。
         """
         if not self._redis or not self._running:
             return None
 
+        # R1-P0-4: 优先出被认领的旧消息
+        reclaimed: tuple[str, dict[str, str]] | None = None
         try:
+            reclaimed = self._reclaimed_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            reclaimed = None
+
+        try:
+            stream_key = self._keys.task_ready_stream(self._worker_id)
+            if reclaimed is not None:
+                msg_id, data = reclaimed
+                stream_name = stream_key
+                decoded = self._decode_data(data)
+                receipt = self._encode_receipt(stream_name, msg_id)
+                # 走原来的构造分支
+                self._poll_error_count = 0
+                self._poll_backoff_until = 0.0
+                # fallthrough 到下面构造 TaskMessage 用 decoded
+                # 但为了不重复代码，跳到公共构造点：复制一份
+                return self._build_task_message(stream_name, msg_id, decoded, receipt)
+
             now = time.monotonic()
             if self._poll_backoff_until > now:
                 await asyncio.sleep(self._poll_backoff_until - now)
 
-            stream_key = self._keys.task_ready_stream(self._worker_id)
             result = await self._redis.xreadgroup(
                 groupname=self._consumer_group,
                 consumername=self._consumer_name,
@@ -266,33 +313,8 @@ class RedisTransport(TransportBase):
             msg_id, data = messages[0]
             decoded = self._decode_data(data)
             receipt = self._encode_receipt(stream_name, msg_id)
-
-            task_msg = TaskMessage(
-                task_id=decoded.get("task_id", ""),
-                project_id=decoded.get("project_id", ""),
-                project_type=decoded.get("project_type", "code"),
-                priority=int(decoded.get("priority", 0) or 0),
-                params=decoded.get("params", {}) or {},
-                environment=decoded.get("environment", {}) or {},
-                timeout=int(decoded.get("timeout", 3600) or 3600),
-                download_url=decoded.get("download_url", "") or "",
-                file_hash=decoded.get("file_hash", "") or "",
-                entry_point=decoded.get("entry_point", "") or "",
-                is_compressed=decoded.get("is_compressed"),
-                run_id=decoded.get("run_id", "") or "",
-                receipt=receipt,
-            )
-
-            # P5.4: Direct 模式下 ready stream 是 dict-wire,Master 端
-            # 把 traceparent 放在 ``trace_parent`` 字段。把它挂到 task_msg
-            # 上(TaskMessage 没有此字段,Python 允许动态属性),engine
-            # ``_worker_loop`` 会读取并 set_current_trace。
-            traceparent = decoded.get("trace_parent") or decoded.get("traceparent") or ""
-            if traceparent:
-                task_msg.traceparent = traceparent  # type: ignore[attr-defined]
-
-            self._receipt_cache[receipt] = (stream_name, msg_id, decoded)
-            return task_msg
+            # 构造 TaskMessage 走公共入口（含 SourceBundle 契约、traceparent 挂载）
+            return self._build_task_message(stream_name, msg_id, decoded, receipt)
 
         except Exception:
             self._poll_error_count += 1
@@ -303,6 +325,54 @@ class RedisTransport(TransportBase):
             if self._poll_error_count % 3 == 0:
                 await self.reconnect()
             return None
+
+    def _build_task_message(
+        self,
+        stream_name: str,
+        msg_id: str,
+        decoded: dict[str, Any],
+        receipt: str,
+    ) -> TaskMessage:
+        """R1-P0-4: 抽出的 TaskMessage 构造逻辑，poll_task 与 reclaimer 复用。"""
+        # source_bundle 与 poll_task 主流程保持一致
+        source_bundle_uri = (
+            decoded.get("source_bundle_uri") or decoded.get("download_url", "") or ""
+        )
+        source_bundle: SourceBundle | None = None
+        if source_bundle_uri:
+            source_bundle = SourceBundle(
+                uri=source_bundle_uri,
+                sha256=decoded.get("source_bundle_sha256")
+                or decoded.get("file_hash", "")
+                or "",
+                size=int(decoded.get("source_bundle_size", 0) or 0),
+                transfer_method=decoded.get("transfer_method") or "source_bundle",
+                entry_point=decoded.get("entry_point", "") or "",
+                resolved_revision=decoded.get("resolved_revision", "") or "",
+                source_subdir=decoded.get("source_subdir", "") or "",
+            )
+
+        task_msg = TaskMessage(
+            task_id=decoded.get("task_id", ""),
+            project_id=decoded.get("project_id", ""),
+            project_type=decoded.get("project_type", "code"),
+            priority=int(decoded.get("priority", 0) or 0),
+            params=decoded.get("params", {}) or {},
+            environment=decoded.get("environment", {}) or {},
+            timeout=int(decoded.get("timeout", 3600) or 3600),
+            source_bundle=source_bundle,
+            source_subdir=decoded.get("source_subdir", "") or "",
+            entry_point=decoded.get("entry_point", "") or "",
+            run_id=decoded.get("run_id", "") or "",
+            receipt=receipt,
+        )
+
+        traceparent = decoded.get("trace_parent") or decoded.get("traceparent") or ""
+        if traceparent:
+            task_msg.traceparent = traceparent  # type: ignore[attr-defined]
+
+        self._receipt_cache[receipt] = (stream_name, msg_id, decoded)
+        return task_msg
 
     async def ack_task(self, task_id: str, accepted: bool, reason: str = "") -> bool:
         """确认任务"""
@@ -360,9 +430,16 @@ class RedisTransport(TransportBase):
 
             payload_bytes = ts_msg.SerializeToString()
 
+            # R1-P1-18 (审查报告): task:result 流之前没 maxlen 也无清理任务，
+            # 随任务量线性增长直至 Redis 内存耗尽。加 approximate MAXLEN。
             await self._run_with_reconnect(
                 "上报结果",
-                lambda: self._redis.xadd(result_key, {PROTO_FIELD: payload_bytes}),
+                lambda: self._redis.xadd(
+                    result_key,
+                    {PROTO_FIELD: payload_bytes},
+                    maxlen=self.RESULT_STREAM_MAXLEN,
+                    approximate=True,
+                ),
             )
             return True
 
@@ -373,6 +450,9 @@ class RedisTransport(TransportBase):
     # U6: requeue 病毒消息阈值 + 死信 stream。
     MAX_REQUEUE_COUNT = 5
     DEAD_LETTER_STREAM_SUFFIX = "task:dead_letter"
+    # R1-P1-18: task:result 流上限（近似）；实际保留量 = 最新 N 条。
+    # 长期建议 master 端加 XTRIM MINID 按 group 已 ACK 游标裁剪。
+    RESULT_STREAM_MAXLEN = 50_000
 
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
         """重新入队任务

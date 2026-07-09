@@ -64,6 +64,10 @@ class ExecutorConfig:
     # 实测 scrapy/playwright 子进程稳定 800~1500 fd,留余量到 2048。
     default_max_open_files: int = 2048
     default_max_processes: int = 64
+    # T7-P2-4 (P2-4): RLIMIT_FSIZE 保护 worker 磁盘。默认 1024 MB 单文件
+    # 上限——保护"失控爬虫把日志/artifact 写满磁盘"的 DoS 场景；正常
+    # 项目（rule/code）单文件产物远不到 1GB。运维可通过 config 调整。
+    default_max_file_size_mb: int = 1024
 
     # 输出限制
     max_output_lines: int = 100000

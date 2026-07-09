@@ -6,7 +6,7 @@
 # =====================================================
 
 # ================== 阶段 1: 构建阶段 ==================
-FROM python:3.11-slim AS builder
+FROM python:3.11.11-slim AS builder
 
 WORKDIR /app
 
@@ -48,7 +48,7 @@ RUN uv venv /app/.venv && \
     uv sync --package antcode-worker
 
 # ================== 阶段 2: 运行时镜像 ==================
-FROM python:3.11-slim AS runtime
+FROM python:3.11.11-slim AS runtime
 
 WORKDIR /app
 
@@ -70,9 +70,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxslt1.1 \
     # 用于 curl_cffi
     libcurl4 \
-    # 用于 DrissionPage (headless browser)
-    chromium \
-    chromium-driver \
     # 进程管理
     procps \
     && rm -rf /var/lib/apt/lists/*
@@ -95,28 +92,28 @@ COPY --chown=appuser:appgroup services/worker/src/antcode_worker /app/services/w
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
-    /app/data/worker/logs/tasks \
-    /app/data/worker/logs/wal \
-    /app/data/worker/logs/spool \
-    /app/data/worker/projects/files \
-    /app/data/worker/projects/extracted \
-    /app/data/worker/projects/executions \
     /app/data/worker/runtimes \
     /app/data/worker/runs \
     /app/data/worker/secrets \
     /app/data/worker/identity \
+    /app/data/worker/temp/runtime-build \
+    /app/data/worker/temp/sandbox \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/.venv \
     && chmod -R 755 /app/data
 
-# 为 appuser 安装 uv
+# 为 appuser 安装 uv + mise（多语言 runtime 管理器；C4/M2：镜像内置避免
+# 首次运行时 curl|sh 的 MITM 风险；同时容器化部署更希望镜像自包含）
 USER appuser
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    curl -fsSL https://mise.run | sh
 ENV PATH="/home/appuser/.local/bin:${PATH}"
+# 镜像已预装 mise，禁止 worker 启动时再走 curl|sh
+ENV ANTCODE_MISE_AUTO_INSTALL=false
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+# 健康检查：进程存活探测（worker 无 HTTP/gRPC 端口）
+HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
+    CMD pgrep -f antcode_worker >/dev/null || exit 1
 
 # 启动命令
 CMD ["python", "-m", "antcode_worker"]

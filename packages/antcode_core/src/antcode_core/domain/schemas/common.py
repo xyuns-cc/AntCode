@@ -14,6 +14,7 @@ T = TypeVar("T")
 
 class BaseResponse(BaseModel, Generic[T]):
     """通用响应模型"""
+
     success: bool = Field(default=True)
     code: int = Field(default=200)
     message: str = Field(default="")
@@ -23,6 +24,7 @@ class BaseResponse(BaseModel, Generic[T]):
 
 class ErrorDetail(BaseModel):
     """错误详情"""
+
     field: str
     message: str
 
@@ -36,18 +38,21 @@ class ErrorData(BaseModel):
 
 class ErrorResponse(BaseResponse[ErrorData | None]):
     """错误响应模型"""
+
     success: bool = Field(default=False)
     data: ErrorData | None = None
 
 
 class PaginationParams(BaseModel):
     """分页参数"""
+
     page: int = Field(default=1, ge=1)
     size: int = Field(default=20, ge=1, le=100)
 
 
 class PaginationInfo(BaseModel):
     """分页信息"""
+
     page: int
     size: int
     total: int
@@ -63,12 +68,14 @@ class PaginationData(BaseModel, Generic[T]):
 
 class PaginationResponse(BaseResponse[PaginationData[T]], Generic[T]):
     """分页响应模型"""
+
     message: str = Field(default="Query successful")
     data: PaginationData[T]
 
 
 class HealthResponse(BaseModel):
     """健康检查响应"""
+
     status: str
     version: str
     timestamp: str
@@ -76,6 +83,7 @@ class HealthResponse(BaseModel):
 
 class AppInfoResponse(BaseModel):
     """应用信息响应"""
+
     name: str
     title: str
     version: str

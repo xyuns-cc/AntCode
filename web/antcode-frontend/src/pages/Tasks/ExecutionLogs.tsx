@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import PageContainer from '@/components/common/PageContainer'
 import {
   Card,
   Button,
@@ -29,9 +30,12 @@ import {
 import EnhancedLogViewer from '@/components/ui/LogViewer/EnhancedLogViewer'
 import CopyableTooltip from '@/components/common/CopyableTooltip'
 import { taskService } from '@/services/tasks'
+import { runsService, type RunArtifact, type SpiderItem } from '@/services/runs'
 import type { Task, TaskExecution } from '@/types'
 import { formatDateTime, formatDuration } from '@/utils/format'
 import Logger from '@/utils/logger'
+import { DownloadOutlined, FileOutlined } from '@ant-design/icons'
+import { List } from 'antd'
 
 const { Title, Text } = Typography
 
@@ -47,6 +51,15 @@ const ExecutionLogs: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [viewerHeight, setViewerHeight] = useState(600)
+
+  // L2 产物链：从 /api/v1/runs/{run_id}/artifacts 拉列表；执行结束再取一次
+  const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
+  const [artifactsLoading, setArtifactsLoading] = useState(false)
+  const [downloading, setDownloading] = useState<string | null>(null)
+
+  // O2 抓取数据：从 /api/v1/runs/{run_id}/spider-items 拉分页
+  const [spiderItems, setSpiderItems] = useState<SpiderItem[]>([])
+  const [spiderItemsLoading, setSpiderItemsLoading] = useState(false)
 
   // 加载任务信息
   const loadTask = useCallback(async () => {
@@ -101,14 +114,68 @@ const ExecutionLogs: React.FC = () => {
     }
   }, [loadExecution])
 
+  // L2: 从后端拉产物列表；执行终态触发再拉一次
+  const loadArtifacts = useCallback(async () => {
+    if (!runId) return
+    setArtifactsLoading(true)
+    try {
+      const items = await runsService.listArtifacts(runId)
+      setArtifacts(items)
+    } catch (err) {
+      Logger.warn('获取产物列表失败', err)
+      setArtifacts([])
+    } finally {
+      setArtifactsLoading(false)
+    }
+  }, [runId])
+
+  const handleDownloadArtifact = useCallback(
+    async (artifactName: string) => {
+      if (!runId) return
+      setDownloading(artifactName)
+      try {
+        await runsService.downloadArtifact(runId, artifactName)
+      } catch (err) {
+        Logger.error('下载产物失败', err)
+        showNotification('error', `下载失败: ${(err as Error).message || '未知错误'}`)
+      } finally {
+        setDownloading(null)
+      }
+    },
+    [runId],
+  )
+
+  // O2: 拉抓取数据；执行终态时再刷一次
+  const loadSpiderItems = useCallback(async () => {
+    if (!runId) return
+    setSpiderItemsLoading(true)
+    try {
+      const resp = await runsService.listSpiderItems(runId, { count: 200 })
+      setSpiderItems(resp.items || [])
+    } catch (err) {
+      Logger.warn('获取抓取数据失败', err)
+      setSpiderItems([])
+    } finally {
+      setSpiderItemsLoading(false)
+    }
+  }, [runId])
+
   // 初始加载
   useEffect(() => {
     const init = async () => {
       setLoading(true)
-      await Promise.all([loadTask(), loadExecution()])
+      await Promise.all([loadTask(), loadExecution(), loadArtifacts(), loadSpiderItems()])
     }
     init()
-  }, [loadTask, loadExecution])
+  }, [loadTask, loadExecution, loadArtifacts, loadSpiderItems])
+
+  // 执行进入终态时刷新产物列表和抓取数据（写库有延迟）
+  useEffect(() => {
+    if (execution && ['success', 'failed', 'timeout', 'cancelled'].includes(execution.status)) {
+      loadArtifacts()
+      loadSpiderItems()
+    }
+  }, [execution, loadArtifacts, loadSpiderItems])
 
   // 自动刷新（如果任务正在运行）
   useEffect(() => {
@@ -328,12 +395,7 @@ const ExecutionLogs: React.FC = () => {
   }
 
   return (
-    <div style={{
-      padding: '20px 24px',
-      maxWidth: '1800px',
-      margin: '0 auto',
-      minHeight: '100vh'
-    }}>
+    <PageContainer scrollable>
       {/* 页面头部 - 更紧凑的设计 */}
       <div
         style={{
@@ -529,7 +591,7 @@ const ExecutionLogs: React.FC = () => {
             enableExport={true}
             enableVirtualization={true}
             onStatusUpdate={(statusUpdate) => {
-              // 收到状态更新时，更新本地执行状态
+              // 收到状态更新时，更新执行状态
               Logger.info('收到执行状态更新', statusUpdate)
               if (execution && statusUpdate.status) {
                 setExecution(prev => prev ? {
@@ -557,8 +619,186 @@ const ExecutionLogs: React.FC = () => {
           </div>
         </Card>
       )}
-    </div>
+
+      {/* O2: 爬虫抓取数据区 —— 执行有 SpiderDataReporter 时展示 items */}
+      {runId && (
+        <Card
+          title={
+            <Space>
+              <FileOutlined />
+              <span>抓取数据</span>
+              {spiderItems.length > 0 && (
+                <Tag color="green">{spiderItems.length}</Tag>
+              )}
+            </Space>
+          }
+          style={{ marginTop: 16 }}
+          extra={
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={loadSpiderItems}
+              loading={spiderItemsLoading}
+            >
+              刷新
+            </Button>
+          }
+        >
+          {spiderItems.length === 0 ? (
+            <Empty
+              description={
+                spiderItemsLoading
+                  ? '加载中...'
+                  : '该执行没有抓取数据（或规则爬虫未启用 SpiderDataReporter）'
+              }
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            />
+          ) : (
+            <List
+              size="small"
+              itemLayout="vertical"
+              dataSource={spiderItems}
+              pagination={
+                spiderItems.length > 20
+                  ? { pageSize: 20, size: 'small', showSizeChanger: false }
+                  : false
+              }
+              renderItem={(item, idx) => (
+                <List.Item key={item._id || idx}>
+                  <List.Item.Meta
+                    title={
+                      <Space>
+                        <Text code style={{ fontSize: 12 }}>#{idx + 1}</Text>
+                        {item.spider_name && (
+                          <Tag color="blue">{item.spider_name}</Tag>
+                        )}
+                        {item._id && (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {item._id}
+                          </Text>
+                        )}
+                      </Space>
+                    }
+                  />
+                  <pre
+                    style={{
+                      background: token.colorBgLayout,
+                      padding: 8,
+                      borderRadius: 4,
+                      fontSize: 12,
+                      maxHeight: 200,
+                      overflow: 'auto',
+                      margin: 0,
+                    }}
+                  >
+                    {typeof item.data === 'string'
+                      ? item.data
+                      : JSON.stringify(item.data ?? {}, null, 2)}
+                  </pre>
+                </List.Item>
+              )}
+            />
+          )}
+        </Card>
+      )}
+
+      {/* L2: 产物区 —— 执行有产物时展示，允许下载。执行时段可能为空。 */}
+      {runId && (
+        <Card
+          title={
+            <Space>
+              <FileOutlined />
+              <span>执行产物</span>
+              {artifacts.length > 0 && (
+                <Tag color="blue">{artifacts.length}</Tag>
+              )}
+            </Space>
+          }
+          style={{ marginTop: 16 }}
+          extra={
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={loadArtifacts}
+              loading={artifactsLoading}
+            >
+              刷新
+            </Button>
+          }
+        >
+          {artifacts.length === 0 ? (
+            <Empty
+              description={
+                artifactsLoading
+                  ? '加载中...'
+                  : '该执行没有产物（或任务未收集 artifact_patterns）'
+              }
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            />
+          ) : (
+            <List
+              itemLayout="horizontal"
+              dataSource={artifacts}
+              renderItem={(artifact) => (
+                <List.Item
+                  actions={[
+                    <Button
+                      key="download"
+                      type="link"
+                      size="small"
+                      icon={<DownloadOutlined />}
+                      loading={downloading === artifact.name}
+                      onClick={() => handleDownloadArtifact(artifact.name)}
+                    >
+                      下载
+                    </Button>,
+                  ]}
+                >
+                  <List.Item.Meta
+                    avatar={<FileOutlined style={{ fontSize: 18, color: token.colorPrimary }} />}
+                    title={
+                      <Tooltip title={`SHA256: ${artifact.checksum || '未知'}`}>
+                        <Text code style={{ fontSize: 13 }}>
+                          {artifact.name}
+                        </Text>
+                      </Tooltip>
+                    }
+                    description={
+                      <Space size="middle">
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {artifact.mime_type || 'application/octet-stream'}
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {formatBytes(artifact.size_bytes)}
+                        </Text>
+                        {artifact.created_at && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {formatDateTime(artifact.created_at)}
+                          </Text>
+                        )}
+                      </Space>
+                    }
+                  />
+                </List.Item>
+              )}
+            />
+          )}
+        </Card>
+      )}
+    </PageContainer>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let idx = 0
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx += 1
+  }
+  return `${value.toFixed(idx === 0 ? 0 : 2)} ${units[idx]}`
 }
 
 export default ExecutionLogs

@@ -15,9 +15,6 @@ from datetime import datetime, timedelta
 
 from loguru import logger
 
-from antcode_core.common.exceptions import BatchNotFoundError, BatchStateError
-from antcode_core.domain.models.crawl import BatchStatus, CrawlBatch
-from antcode_core.domain.models.project import Project
 from antcode_core.application.services.base import BaseService
 from antcode_core.application.services.crawl.batch_service import CrawlBatchService, crawl_batch_service
 from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
@@ -26,6 +23,9 @@ from antcode_core.application.services.crawl.progress_service import (
     crawl_progress_service,
 )
 from antcode_core.application.services.crawl.queue_service import CrawlQueueService, crawl_queue_service
+from antcode_core.common.exceptions import BatchNotFoundError, BatchStateError
+from antcode_core.domain.models.crawl import BatchStatus, CrawlBatch
+from antcode_core.domain.models.project import Project
 
 # 测试批次默认配置
 DEFAULT_TEST_MAX_DEPTH = 2
@@ -242,9 +242,11 @@ class CrawlTestService(BaseService):
             is_test=True,
         )
 
-        logger.info(f"创建测试批次: batch_id={batch.public_id}, project={project_id}, "
-                    f"seed_urls={len(seed_urls)}, max_depth={max_depth}, "
-                    f"max_pages={max_pages}")
+        logger.info(
+            f"创建测试批次: batch_id={batch.public_id}, project={project_id}, "
+            f"seed_urls={len(seed_urls)}, max_depth={max_depth}, "
+            f"max_pages={max_pages}"
+        )
 
         return batch
 
@@ -374,17 +376,30 @@ class CrawlTestService(BaseService):
         project_id: str,
         timeout: int,
     ) -> CrawlTestResult:
-        """等待测试完成
+        """等待测试完成。
 
-        Args:
-            batch_id: 批次 ID
-            project_public_id: 项目公开 ID（可选，避免重复查询）
-            project_id: 项目 ID
-            timeout: 超时时间（秒）
+        R1-P1-22 (审查报告): 老实现的两个退出条件都不可达——
+        (a) batch 终态 = 依赖 crawl_batch_status_loop（在 P0-1 修复前批次
+        任务全失败）；
+        (b) progress 页面限制 = 依赖 progress_service 计数，但生产代码
+        零调用方（P1-17）恒为 0。
+        结果：测试必然跑满 timeout（60s~300s）后以"测试执行超时"失败。
 
-        Returns:
-            CrawlTestResult 对象
+        修复：改成查 **TaskRun 终态**（P0-1 修完后 rule 任务会正常
+        SUCCESS/FAILED）。TaskRun 是 batch 派发时创建的，
+        result_data.crawl_batch_id 关联到 batch。
         """
+        from antcode_core.domain.models.enums import TaskStatus
+        from antcode_core.domain.models.task_run import TaskRun
+
+        _run_terminal = {
+            TaskStatus.SUCCESS,
+            TaskStatus.FAILED,
+            TaskStatus.TIMEOUT,
+            TaskStatus.CANCELLED,
+            TaskStatus.REJECTED,
+        }
+
         result = CrawlTestResult(batch_id=batch_id)
         start_time = time.time()
 
@@ -404,29 +419,33 @@ class CrawlTestService(BaseService):
                 result.errors.append("批次不存在")
                 break
 
-            # 检查是否完成
+            # R1-P1-22: 优先看 TaskRun 终态（比 batch 状态更精细也更快）
+            # 用 raw SQL 走 JSONB where 下推：result_data->>'crawl_batch_id' = $1
+            matched = await TaskRun.raw(
+                "SELECT * FROM task_executions WHERE result_data->>'crawl_batch_id' = $1",
+                batch_id,
+            )
+            if matched:
+                all_terminal = all(r.status in _run_terminal for r in matched)
+                if all_terminal:
+                    result = await self._collect_results(batch_id, project_id)
+                    result.total_pages = len(matched)
+                    result.success_pages = sum(1 for r in matched if r.status == TaskStatus.SUCCESS)
+                    result.failed_pages = result.total_pages - result.success_pages
+                    result.success = result.failed_pages == 0
+                    if not result.success:
+                        result.errors.append(f"{result.failed_pages} 个 URL 失败")
+                    break
+
+            # 检查是否完成（批次终态兜底）
             if batch.status in [BatchStatus.COMPLETED, BatchStatus.FAILED, BatchStatus.CANCELLED]:
-                # 收集结果
                 result = await self._collect_results(batch_id, project_id)
                 result.success = batch.status == BatchStatus.COMPLETED
-
                 if batch.status == BatchStatus.FAILED:
                     result.errors.append("测试执行失败")
                 elif batch.status == BatchStatus.CANCELLED:
                     result.errors.append("测试被取消")
-
                 break
-
-            # 检查是否达到页面限制
-            progress = await self._progress_service.get_progress(project_id, batch_id)
-            if progress:
-                total_processed = progress.completed_urls + progress.failed_urls
-                if total_processed >= batch.max_pages:
-                    # 达到限制，标记完成
-                    await self._batch_service.complete_batch(batch_id, success=True)
-                    result = await self._collect_results(batch_id, project_id)
-                    result.success = True
-                    break
 
             # 等待一段时间后再检查
             await asyncio.sleep(1)
@@ -468,9 +487,57 @@ class CrawlTestService(BaseService):
             result.sample_data = cached_result.sample_data
             result.errors = cached_result.errors
 
-        logger.info(f"收集测试结果: batch_id={batch_id}, "
-                    f"total={result.total_pages}, success={result.success_pages}, "
-                    f"failed={result.failed_pages}")
+        # R1-P1-22 (审查报告): 样本数据从 spider:data:{run_id} 读——
+        # add_sample_data 全仓库零生产调用方，样本永远为空。真正的样本
+        # 数据来自 scrapy 侧 AntCodeRedisPipeline 写入 spider:data stream。
+        try:
+            from antcode_core.domain.models.task_run import TaskRun
+            from antcode_core.infrastructure.redis.client import get_redis_client
+            from antcode_core.infrastructure.redis.keys import RedisKeys
+            from antcode_worker.plugins.spider.data.models import SpiderDataItem
+            import json as _json
+
+            matched = await TaskRun.raw(
+                "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 "
+                "ORDER BY id DESC LIMIT 20",
+                batch_id,
+            )
+            if matched:
+                keys = RedisKeys()
+                client = await get_redis_client()
+                samples: list[dict] = []
+                MAX_SAMPLES = 10
+                for run in matched:
+                    if len(samples) >= MAX_SAMPLES:
+                        break
+                    stream_key = keys.spider_data_stream(run.run_id)
+                    entries = await client.xrange(stream_key, count=MAX_SAMPLES - len(samples))
+                    for _, data in entries:
+                        try:
+                            item_data = data.get(b"data") or data.get("data") or ""
+                            if isinstance(item_data, bytes):
+                                item_data = item_data.decode("utf-8", errors="ignore")
+                            payload = _json.loads(item_data) if item_data else {}
+                            url_val = data.get(b"url") or data.get("url") or ""
+                            if isinstance(url_val, bytes):
+                                url_val = url_val.decode("utf-8", errors="ignore")
+                            if url_val:
+                                payload["_url"] = url_val
+                            samples.append(payload)
+                        except Exception:
+                            continue
+                        if len(samples) >= MAX_SAMPLES:
+                            break
+                if samples:
+                    result.sample_data = samples
+        except Exception as exc:
+            logger.debug(f"读取 spider:data 样本失败（不影响其他字段）: {exc}")
+
+        logger.info(
+            f"收集测试结果: batch_id={batch_id}, "
+            f"total={result.total_pages}, success={result.success_pages}, "
+            f"failed={result.failed_pages}, samples={len(result.sample_data)}"
+        )
 
         return result
 
@@ -577,15 +644,49 @@ class CrawlTestService(BaseService):
                 project = await Project.filter(id=batch.project_id).only("public_id").first()
                 project_public_id = project.public_id if project else str(batch.project_id)
 
-            # 清理队列数据
-            await self._queue_service.clear_queues(project_public_id)
+            # R1-P2-25 (审查报告): 老实现 clear_queues(project_public_id)
+            # 是 project 级——测试清理把正式批次的队列也清了。而且注释
+            # 承认"测试和正式共用去重过滤器"更糟：测试 URL 会污染正式
+            # 去重集。修复：只清 batch 级 progress key（自己的），队列/
+            # 去重都不再触及 project 级资源。
+            # 队列本来就没消费者（P1-20 已确认），测试时批次事件走的是
+            # scheduler_event_loop → dispatcher，队列写入仅是遗留死数据，
+            # 不清也不影响正式 —— 由 P2-25 的清理策略调整。
 
-            # 清理进度数据
+            # 只清本 batch 的 progress（batch 级）
             await self._progress_service.clear_progress(project_public_id, batch_id)
 
-            # 清理去重数据（测试批次使用独立的去重过滤器）
-            # 注意：这里不清理去重数据，因为测试和正式共用去重过滤器
-            # 如果需要独立的测试去重，可以使用不同的 project_id 前缀
+            # R1-P2-24 (审查报告): 测试结果之前只放 self._test_results 内存里，
+            # 多副本/重启即丢失，且 finally 里 cleanup 会把 pop 掉，之后
+            # ``GET /batches/test/{id}/result`` 必 404。把最终结果落到
+            # CrawlBatch.result_data 里持久化，多副本可查。
+            cached_result = self._test_results.get(batch_id)
+            if cached_result:
+                try:
+                    result_summary = {
+                        "batch_id": cached_result.batch_id,
+                        "success": cached_result.success,
+                        "total_pages": cached_result.total_pages,
+                        "success_pages": cached_result.success_pages,
+                        "failed_pages": cached_result.failed_pages,
+                        "sample_data": cached_result.sample_data[:10]
+                        if isinstance(cached_result.sample_data, list)
+                        else cached_result.sample_data,
+                        "errors": cached_result.errors[:10]
+                        if isinstance(cached_result.errors, list)
+                        else cached_result.errors,
+                        "duration_seconds": cached_result.duration_seconds,
+                    }
+                    batch_obj = await self._batch_service.get_batch(batch_id)
+                    if batch_obj is not None:
+                        existing = batch_obj.result_data or {}
+                        if not isinstance(existing, dict):
+                            existing = {}
+                        existing["test_result"] = result_summary
+                        batch_obj.result_data = existing
+                        await batch_obj.save(update_fields=["result_data"])
+                except Exception as exc:
+                    logger.warning(f"持久化测试结果到 batch.result_data 失败: {exc}")
 
             # 清理内存中的测试结果
             self._test_results.pop(batch_id, None)
@@ -636,15 +737,11 @@ class CrawlTestService(BaseService):
         project_public_id_map = {}
         project_ids = list({b.project_id for b in batches})
         if project_ids:
-            project_public_id_map = await self._batch_service.query.batch_get_project_public_ids(
-                project_ids
-            )
+            project_public_id_map = await self._batch_service.query.batch_get_project_public_ids(project_ids)
 
         for batch in batches:
             try:
-                project_public_id = project_public_id_map.get(
-                    batch.project_id, str(batch.project_id)
-                )
+                project_public_id = project_public_id_map.get(batch.project_id, str(batch.project_id))
                 success = await self.cleanup_test(
                     batch.public_id,
                     project_public_id=project_public_id,

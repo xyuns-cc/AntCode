@@ -27,7 +27,12 @@ from antcode_contracts import data_pb2
 from antcode_contracts.data_pb2_grpc import DataServiceServicer
 from loguru import logger
 
-from antcode_gateway.handlers import LogHandler, ResultHandler, TaskPollHandler
+from antcode_gateway.handlers import (
+    LogHandler,
+    ResultHandler,
+    SpiderDataHandler,
+    TaskPollHandler,
+)
 from antcode_gateway.handlers.poll import task_info_to_dispatch
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -46,10 +51,13 @@ class GatewayDataService(DataServiceServicer):
         poll_handler: TaskPollHandler | None = None,
         result_handler: ResultHandler | None = None,
         log_handler: LogHandler | None = None,
+        spider_data_handler: SpiderDataHandler | None = None,
     ):
         self._poll = poll_handler or TaskPollHandler()
         self._result = result_handler or ResultHandler()
         self._logs = log_handler or LogHandler()
+        # T6-T3b: gateway 模式的 rule/spider 数据落地通道
+        self._spider_data = spider_data_handler or SpiderDataHandler()
         logger.info("DataService 已初始化")
 
     # =========================================================================
@@ -236,3 +244,52 @@ class GatewayDataService(DataServiceServicer):
             logger.exception(f"StreamLogs 异常: {exc}")
             await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
         return data_pb2.LogAck(received=received)
+
+    # =========================================================================
+    # T6-T3b: StreamSpiderData (client-streaming)
+    # =========================================================================
+
+    async def StreamSpiderData(
+        self,
+        request_iterator: AsyncIterator[data_pb2.SpiderDataBatch],
+        context: grpc.aio.ServicerContext,
+    ) -> data_pb2.SpiderDataAck:
+        """gateway 模式下 worker 上报 Scrapy pipeline 抓到的 item。
+
+        字段与 direct 模式 xadd 一一对齐，web_api 侧读取逻辑不用改。
+        任何 batch 失败 → abort，让 worker 端重连 gRPC 流重试。
+        """
+        total_accepted = 0
+        total_failed = 0
+        try:
+            async for batch in request_iterator:
+                try:
+                    accepted, failed = await self._spider_data.handle_batch(batch)
+                except Exception as exc:
+                    logger.exception(
+                        f"StreamSpiderData.handle_batch 异常: "
+                        f"worker_id={batch.worker_id} run_id={batch.run_id} exc={exc}"
+                    )
+                    await context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        f"spider data write failed: {exc}",
+                    )
+                    return data_pb2.SpiderDataAck(
+                        accepted=total_accepted, failed=total_failed
+                    )
+                total_accepted += accepted
+                total_failed += failed
+        except asyncio.CancelledError:
+            logger.info(
+                f"StreamSpiderData 被取消: accepted={total_accepted} "
+                f"failed={total_failed}"
+            )
+            raise
+        except grpc.aio.AbortError:
+            raise
+        except Exception as exc:
+            logger.exception(f"StreamSpiderData 异常: {exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        return data_pb2.SpiderDataAck(
+            accepted=total_accepted, failed=total_failed
+        )

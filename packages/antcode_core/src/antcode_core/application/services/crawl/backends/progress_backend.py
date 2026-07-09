@@ -1,13 +1,9 @@
-"""进度存储后端抽象基类
+"""Redis 进度存储后端抽象基类。"""
 
-定义进度存储的抽象接口，支持 Redis Hash 和内存两种实现。
-
-Requirements: 3.1, 3.2, 3.3
-"""
-
-import os
 from abc import ABC, abstractmethod
 from typing import Any
+
+from antcode_core.application.services.crawl.backends.base import _redis_backend_required
 
 
 class ProgressStore(ABC):
@@ -242,37 +238,17 @@ _progress_store_instance: ProgressStore | None = None
 
 
 def get_progress_store() -> ProgressStore:
-    """工厂方法：根据配置返回进度存储实现
-
-    通过环境变量 CRAWL_BACKEND 或 PROGRESS_BACKEND 配置后端类型：
-    - "memory": 内存实现（默认）
-    - "redis": Redis Hash 实现
-
-    Returns:
-        ProgressStore 实例
-
-    Raises:
-        ValueError: 无效的后端类型
-
-    Requirements: 3.1, 3.2, 3.3
-    """
+    """返回 Redis 进度存储。"""
     global _progress_store_instance
 
     if _progress_store_instance is not None:
         return _progress_store_instance
 
-    # 优先使用 CRAWL_BACKEND，其次使用 PROGRESS_BACKEND
-    backend_type = os.getenv("CRAWL_BACKEND") or os.getenv("PROGRESS_BACKEND", "memory")
-    backend_type = backend_type.lower().strip()
+    _redis_backend_required("CRAWL_BACKEND", "PROGRESS_BACKEND")
 
-    if backend_type == "redis":
-        from antcode_core.application.services.crawl.backends.redis_progress import RedisProgressStore
-        _progress_store_instance = RedisProgressStore()
-    elif backend_type == "memory":
-        from antcode_core.application.services.crawl.backends.memory_progress import InMemoryProgressStore
-        _progress_store_instance = InMemoryProgressStore()
-    else:
-        raise ValueError(f"Unknown progress backend: {backend_type}")
+    from antcode_core.application.services.crawl.backends.redis_progress import RedisProgressStore
+
+    _progress_store_instance = RedisProgressStore()
 
     return _progress_store_instance
 

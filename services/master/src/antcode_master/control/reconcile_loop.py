@@ -125,25 +125,63 @@ class ReconcileLoop:
             fencing_token: Fencing Token
         """
         try:
-            # 查找运行中但超时的任务
+            # R1-P1-2 (审查报告): 原实现 (a) 用全局 300s 阈值一刀切，正常
+            # 派发默认 timeout 3600 的爬虫会被误杀；(b) bulk update 绕过
+            # 状态机，只写 status 不写 runtime_status，同 P1-1 机制迟到
+            # SUCCESS 可翻回。
+            # 修复策略：只对确实超过 per-run timeout 的记录标 TIMEOUT，
+            # 且走 execution_status_service.update_runtime_status 让终态
+            # 保护生效。R1-P2-23 同时兜住 start_time 为 NULL 的记录
+            # （改用 last_heartbeat / created_at 兜底）。
+            from antcode_core.application.services.scheduler.execution_status_service import (
+                execution_status_service,
+            )
+            from antcode_core.domain.models.enums import RuntimeStatus
+
             now = datetime.now(UTC)
-            timeout_threshold = now - timedelta(seconds=self.timeout_threshold)
+            # 拉活跃 RUNNING 记录：per-run 判定
+            candidates = await TaskRun.filter(status=TaskStatus.RUNNING).only(
+                "id", "run_id", "start_time", "last_heartbeat", "created_at",
+                "task_id",
+            ).all()
 
-            timeout_ids = await TaskRun.filter(
-                status=TaskStatus.RUNNING,
-                start_time__lt=timeout_threshold,
-            ).values_list("id", flat=True)
-
-            if not timeout_ids:
+            if not candidates:
                 return
 
-            logger.warning(f"发现 {len(timeout_ids)} 个超时任务")
-            updated = await TaskRun.filter(id__in=list(timeout_ids)).update(
-                status=TaskStatus.TIMEOUT,
-                end_time=now,
-                error_message=f"任务执行超时（超过 {self.timeout_threshold}秒）",
-            )
-            logger.info(f"已标记 {updated} 个任务为 TIMEOUT")
+            # 尝试拿到 per-task timeout；缺失时回退到全局阈值
+            timeout_map: dict[int, int] = {}
+            task_ids = [c.task_id for c in candidates if c.task_id]
+            if task_ids:
+                from antcode_core.domain.models import Task
+                for t in await Task.filter(id__in=task_ids).only("id", "timeout_seconds").all():
+                    timeout_map[t.id] = int(getattr(t, "timeout_seconds", 0) or 0)
+
+            to_mark: list[TaskRun] = []
+            fallback_threshold = int(self.timeout_threshold or 300)
+            for run in candidates:
+                # 优先按 start_time；R1-P2-23: NULL 时用 last_heartbeat 或 created_at 兜底
+                anchor = run.start_time or run.last_heartbeat or run.created_at
+                if not anchor:
+                    continue
+                per_run_to = timeout_map.get(run.task_id, 0) or fallback_threshold
+                elapsed = (now - anchor).total_seconds()
+                if elapsed > per_run_to:
+                    to_mark.append(run)
+
+            if not to_mark:
+                return
+            logger.warning(f"发现 {len(to_mark)} 个超时任务，走状态机 CAS")
+            marked = 0
+            for run in to_mark:
+                ok = await execution_status_service.update_runtime_status(
+                    run_id=run.run_id,
+                    status=RuntimeStatus.TIMEOUT,
+                    status_at=now,
+                    error_message=f"任务执行超时（超过 per-run timeout）",
+                )
+                if ok:
+                    marked += 1
+            logger.info(f"已标记 {marked}/{len(to_mark)} 个任务为 TIMEOUT")
 
         except Exception:
             logger.exception("检测超时任务失败")

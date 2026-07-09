@@ -49,6 +49,9 @@ from antcode_master.leader import ensure_leader
 class SchedulerService:
     """调度器服务"""
 
+    # K3: leader 变更时 standby watcher 的检查周期（秒）。~30s 兼顾一致性与开销。
+    _LEADER_POLL_INTERVAL = 30.0
+
     def __init__(self):
         self.scheduler = AsyncIOScheduler(
             timezone=settings.SCHEDULER_TIMEZONE,
@@ -68,33 +71,77 @@ class SchedulerService:
             "failed_count": 0,
             "success_count": 0,
         }
+        # K3: standby watcher / scheduler 就绪状态
+        self._standby_task: asyncio.Task | None = None
+        self._scheduler_ready = False
 
     async def start(self):
-        """启动调度器
+        """启动 scheduler 的 leader-aware watcher。
 
-        U1: 仅 Leader 启动 APScheduler 调度,避免双 Master 双跑同一个
-        任务。非 Leader 进 standby —— 等 leader_election 重新 try_become
-        成功之后再由调用方重启 scheduler_service。
+        K3: 旧实现是一次性 gate——非 leader 就 return，交给"调用方"重启，
+        而无人真的调。首启锁抢不到 → 永久 standby，调度/监控 job / worker
+        心跳检测全静默死亡。
+
+        新实现启动一个后台 watcher：leader 时启动 APScheduler + 装载 jobs；
+        丢主时优雅停 scheduler；持续轮询等下次夺主。
         """
+        if self._standby_task is not None:
+            return
+        self._standby_task = asyncio.create_task(self._leader_watcher_loop())
+
+    async def _leader_watcher_loop(self) -> None:
+        """K3 standby watcher：随 leader 状态自动 up/down APScheduler。"""
+        while True:
+            try:
+                is_leader = await ensure_leader()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"scheduler watcher ensure_leader 失败: {exc}")
+                is_leader = False
+
+            if is_leader and not self._scheduler_ready:
+                await self._activate_scheduler()
+            elif not is_leader and self._scheduler_ready:
+                await self._deactivate_scheduler()
+
+            try:
+                await asyncio.sleep(self._LEADER_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                break
+
+    async def _activate_scheduler(self) -> None:
+        """成为 leader 时启动 APScheduler + 装载 jobs（幂等）。"""
         try:
-            if not await ensure_leader():
-                logger.info("非 Leader,scheduler 进入 standby,不启动 APScheduler")
-                return
-            self.scheduler.start()
-            logger.info("任务调度器已启动")
-
-            # 加载已存在的活跃任务
+            if not self.scheduler.running:
+                self.scheduler.start()
             await self._load_active_tasks()
-
-            # 注册监控相关的周期任务
             await self._add_monitoring_jobs()
-
-            # 添加节点心跳检测任务
             await self._add_worker_heartbeat_job()
-
+            self._scheduler_ready = True
+            logger.info("任务调度器已启动（becoming leader）")
         except Exception:
-            logger.exception("启动调度器失败")
-            raise
+            logger.exception("激活调度器失败，标记未就绪，下一轮重试")
+            self._scheduler_ready = False
+
+    async def _deactivate_scheduler(self) -> None:
+        """丢主时优雅停 APScheduler，避免非 leader 继续触发 job。"""
+        try:
+            if self.scheduler.running:
+                self.scheduler.shutdown(wait=False)
+                # 重建一个空 scheduler，方便下次成为 leader 时重新装载
+                self.scheduler = AsyncIOScheduler(
+                    timezone=settings.SCHEDULER_TIMEZONE,
+                    job_defaults={
+                        "coalesce": True,
+                        "max_instances": 3,
+                        "misfire_grace_time": 30,
+                    },
+                )
+            self._scheduler_ready = False
+            logger.info("已放弃 Leader，调度器进入 standby")
+        except Exception:
+            logger.exception("停用调度器失败")
 
     async def create_task(
         self, task_data, project_type, user_id, internal_project_id=None, specified_worker_id=None
@@ -588,9 +635,18 @@ class SchedulerService:
             raise
 
     async def shutdown(self):
-        """关闭调度器"""
+        """关闭调度器 + 停 K3 watcher。"""
         try:
-            self.scheduler.shutdown(wait=True)
+            if self._standby_task is not None:
+                self._standby_task.cancel()
+                try:
+                    await self._standby_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._standby_task = None
+            if self.scheduler.running:
+                self.scheduler.shutdown(wait=True)
+            self._scheduler_ready = False
             logger.info("任务调度器已关闭")
         except Exception:
             logger.exception("关闭调度器失败")
@@ -874,7 +930,6 @@ class SchedulerService:
             f"(当前并发: {current_running}/{settings.MAX_CONCURRENT_TASKS})"
         )
 
-        log_paths = task_log_service.generate_log_paths(run_id, task.name)
         now = datetime.now(UTC)
         execution = await TaskRun.create(
             run_id=run_id,
@@ -883,8 +938,6 @@ class SchedulerService:
             dispatch_status=DispatchStatus.PENDING,
             runtime_status=None,
             start_time=None,
-            log_file_path=log_paths["log_file_path"],
-            error_log_path=log_paths["error_log_path"],
             retry_count=0,
         )
         await execution.save()
@@ -1011,18 +1064,16 @@ class SchedulerService:
 
     @staticmethod
     async def _persist_result_fields(execution, result):
-        """把 result 中的 log_file_path / error_log_path 落 ``execution``。"""
+        """把 result 落到 ``execution.result_data``。
+
+        迁移 39 (``remove_task_run_log_file_paths``) 已下线 ``TaskRun``
+        的 ``log_file_path`` / ``error_log_path`` 字段，任务日志改由
+        ``task_logs`` 表承载，此处不再落磁盘路径。
+        """
         if not execution:
             return
-        update_fields = ["result_data"]
         execution.result_data = result
-        if result.get("log_file_path"):
-            execution.log_file_path = result["log_file_path"]
-            update_fields.append("log_file_path")
-        if result.get("error_log_path"):
-            execution.error_log_path = result["error_log_path"]
-            update_fields.append("error_log_path")
-        await execution.save(update_fields=update_fields)
+        await execution.save(update_fields=["result_data"])
 
     @staticmethod
     async def _update_terminal_status(
@@ -1318,25 +1369,13 @@ class SchedulerService:
         )
 
     async def _log_execution(self, execution, level, message):
-        """记录执行日志"""
-        if execution and execution.log_file_path:
-            # 写入日志文件并实时推送到WebSocket
-            log_content = f"[{level}] {message}"
-            if level.upper() in ["ERROR", "CRITICAL"]:
-                # 错误日志写入错误日志文件
-                if execution.error_log_path:
-                    await task_log_service.write_log(
-                        execution.error_log_path,
-                        log_content,
-                        run_id=execution.run_id,
-                    )
-            else:
-                # 普通日志写入输出日志文件
-                await task_log_service.write_log(
-                    execution.log_file_path,
-                    log_content,
-                    run_id=execution.run_id,
-                )
+        """记录执行日志到 ``task_logs`` 表（迁移 39 后不再落磁盘）。"""
+        if not execution:
+            return
+        log_type = "stderr" if level.upper() in ("ERROR", "CRITICAL") else "stdout"
+        await task_log_service.write_log(
+            execution.run_id, log_type, f"[{level}] {message}"
+        )
 
     async def _push_execution_status(self, execution, status_data):
         """推送执行状态（预留接口）"""

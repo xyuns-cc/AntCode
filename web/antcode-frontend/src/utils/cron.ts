@@ -50,7 +50,7 @@ export function validateCron(expression: string): { valid: boolean; error?: stri
 
 /**
  * 验证单个字段
- * 支持: *, A, A-B, A,B,C, */N, A-B/N
+ * 支持: `*`, A, A-B, A,B,C, `* / N`, A-B/N
  */
 function validateField(field: string, min: number, max: number): boolean {
   if (!field) return false

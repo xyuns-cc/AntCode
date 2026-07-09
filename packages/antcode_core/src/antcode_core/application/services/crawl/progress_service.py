@@ -28,6 +28,7 @@ DEFAULT_WORKER_TIMEOUT = 120
 @dataclass
 class BatchProgress:
     """批次进度数据类"""
+
     batch_id: str = ""
     project_id: str = ""
     total_urls: int = 0
@@ -70,10 +71,10 @@ class BatchProgress:
         )
 
 
-
 @dataclass
 class Checkpoint:
     """检查点数据类"""
+
     batch_id: str = ""
     project_id: str = ""
     progress: dict = field(default_factory=dict)
@@ -191,7 +192,9 @@ class CrawlProgressService(BaseService):
             last_updated=now,
             started_at=current.get("started_at", ""),
         )
-        logger.debug(f"更新批次进度: project={project_id}, batch={batch_id}, completed={completed}, failed={failed}, new_urls={new_urls}")
+        logger.debug(
+            f"更新批次进度: project={project_id}, batch={batch_id}, completed={completed}, failed={failed}, new_urls={new_urls}"
+        )
         await self._maybe_save_checkpoint(project_id, batch_id, progress)
         return progress
 
@@ -226,7 +229,6 @@ class CrawlProgressService(BaseService):
         count_diff = newest[1] - oldest[1]
         speed = (count_diff / time_diff) * 60
         return round(speed, 2)
-
 
     async def get_progress(self, project_id: str, batch_id: str) -> BatchProgress | None:
         backend = self._get_backend()

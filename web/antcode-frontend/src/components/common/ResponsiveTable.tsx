@@ -1,32 +1,143 @@
 import React from 'react'
-import { Table, Tooltip } from 'antd'
+import { ConfigProvider, Empty, Table, Tooltip } from 'antd'
 import type { TableProps, TableColumnType } from 'antd'
 import type { ColumnGroupType, ColumnType, ColumnsType } from 'antd/es/table'
+import { InboxOutlined } from '@ant-design/icons'
+import { useElementSize } from '@/hooks/useElementSize'
 import styles from './ResponsiveTable.module.css'
 
+const getBody = () => document.body
+
 interface ResponsiveTableProps<T> extends TableProps<T> {
-  minWidth?: number // 表格最小宽度
+  minWidth?: number // 表格最小宽度（水平滚动阈值）
   fixedActions?: boolean // 是否固定操作列
   showIndex?: boolean // 是否显示序号列
+  /**
+   * fill 模式：表格自动撑满父容器（height: 100%），表头固定，表格 body Y 滚动；
+   * 父容器必须有确定高度（如 PageContainer body fill 模式提供的）。
+   */
+  fill?: boolean
+  /** 空数据时显示的文案（默认"暂无数据"） */
+  emptyDescription?: React.ReactNode
+  /** 空数据时显示的操作（如"新建"按钮），在 description 下方 */
+  emptyAction?: React.ReactNode
+  /**
+   * 虚拟滚动阈值：dataSource 长度 ≥ 此值时自动开启 antd Table `virtual` 模式（默认 500）。
+   * 传 `virtual={true/false}` 显式覆盖自动逻辑；传 `virtualThreshold={0}` 关闭自动。
+   */
+  virtualThreshold?: number
 }
 
-// 可排序值类型，用于排序函数内部类型转换
 type SortableValue = string | number | Date | null | undefined
+
+// fill 模式 scroll.y 的兜底值（无法实测时使用）；实际优先用 ResizeObserver 量得的真实高度。
+const FALLBACK_HEADER_HEIGHT = 47
+const FALLBACK_PAGINATION_HEIGHT = 56
 
 function ResponsiveTable<T extends object = Record<string, unknown>>({
   minWidth = 800,
   fixedActions = true,
   showIndex = true,
+  fill = false,
+  emptyDescription = '暂无数据',
+  emptyAction,
+  virtualThreshold = 500,
+  virtual,
   columns,
   scroll,
   pagination,
+  locale,
+  dataSource,
   ...restProps
 }: ResponsiveTableProps<T>) {
-  // 获取当前分页信息
+  // 自动虚拟滚动：数据量大时启用，减少 DOM 节点数量。
+  // 页面显式传 `virtual` 会覆盖自动逻辑（true/false 都尊重）。
+  const autoVirtual = React.useMemo(() => {
+    if (virtual !== undefined) return virtual
+    if (virtualThreshold <= 0) return false
+    const dataLen = Array.isArray(dataSource) ? dataSource.length : 0
+    return dataLen >= virtualThreshold
+  }, [virtual, virtualThreshold, dataSource])
   const currentPage = typeof pagination === 'object' ? (pagination.current || 1) : 1
   const pageSize = typeof pagination === 'object' ? (pagination.pageSize || 10) : 10
 
-  // 处理列配置
+  const [containerRef, { height: containerHeight }] = useElementSize<HTMLDivElement>()
+  const [theadHeight, setTheadHeight] = React.useState(FALLBACK_HEADER_HEIGHT)
+  const [paginationHeight, setPaginationHeight] = React.useState(FALLBACK_PAGINATION_HEIGHT)
+
+  // 实测表头与分页器高度，保证 scroll.y 把可用空间用满（避免表格下方留白）。
+  // 用 rAF 节流，避免 ResizeObserver 触发风暴。
+  React.useEffect(() => {
+    if (!fill) return
+    const root = containerRef.current
+    if (!root) return
+    let rafId = 0
+    const measure = () => {
+      const thead = root.querySelector<HTMLElement>('.ant-table-thead')
+      const pagination = root.querySelector<HTMLElement>('.ant-table-pagination')
+      if (thead && thead.offsetHeight > 0) {
+        setTheadHeight((prev) => (prev === thead.offsetHeight ? prev : thead.offsetHeight))
+      }
+      if (pagination && pagination.offsetHeight > 0) {
+        const cs = window.getComputedStyle(pagination)
+        const marginTop = parseFloat(cs.marginTop) || 0
+        const marginBottom = parseFloat(cs.marginBottom) || 0
+        const total = pagination.offsetHeight + marginTop + marginBottom
+        setPaginationHeight((prev) => (prev === total ? prev : total))
+      }
+    }
+    const observer = new ResizeObserver(() => {
+      if (rafId) cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(measure)
+    })
+    observer.observe(root)
+    const thead = root.querySelector<HTMLElement>('.ant-table-thead')
+    const pagination = root.querySelector<HTMLElement>('.ant-table-pagination')
+    if (thead) observer.observe(thead)
+    if (pagination) observer.observe(pagination)
+    return () => {
+      observer.disconnect()
+      if (rafId) cancelAnimationFrame(rafId)
+    }
+  }, [fill, containerRef])
+
+  // antd 5 在单页时不渲染"跳至 X 页"输入框；为了所有表格分页样式一致，单页时手动注入一个 disabled 占位。
+  React.useEffect(() => {
+    const root = containerRef.current
+    if (!root) return
+
+    const ensureJumper = () => {
+      const pagination = root.querySelector<HTMLElement>('.ant-table-pagination')
+      if (!pagination) return
+      const native = pagination.querySelector('.ant-pagination-options-quick-jumper:not([data-fake-jumper])')
+      const fake = pagination.querySelector('[data-fake-jumper]')
+      if (native) {
+        fake?.remove()
+        return
+      }
+      if (fake) return
+      const li = document.createElement('li')
+      li.className = 'ant-pagination-options-quick-jumper'
+      li.setAttribute('data-fake-jumper', 'true')
+      const labelL = document.createElement('span')
+      labelL.textContent = '跳至'
+      const input = document.createElement('input')
+      input.type = 'text'
+      input.disabled = true
+      input.value = '1'
+      input.setAttribute('aria-label', '跳至页')
+      const labelR = document.createElement('span')
+      labelR.textContent = '页'
+      li.append(labelL, input, labelR)
+      pagination.appendChild(li)
+    }
+
+    const observer = new MutationObserver(ensureJumper)
+    observer.observe(root, { childList: true, subtree: true })
+    ensureJumper()
+    return () => observer.disconnect()
+  }, [containerRef])
+
   const processedColumns = React.useMemo(() => {
     if (!columns) return columns
 
@@ -36,35 +147,30 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
       if ('children' in col && col.children) {
         return {
           ...col,
-          children: (col.children as ColumnsType<T>).map(enhanceColumn)
+          children: (col.children as ColumnsType<T>).map(enhanceColumn),
         }
       }
 
       const leafCol = col as ColumnType<T>
       const newCol: TableColumnType<T> = { ...leafCol }
 
-      // 如果是操作列且需要固定
       if (fixedActions && (newCol.key === 'actions' || newCol.dataIndex === 'actions')) {
         newCol.fixed = 'right'
         newCol.className = `${newCol.className || ''} table-actions-column`.trim()
       } else {
-        // 非操作列添加排序功能（如果没有自定义 sorter）
         if (newCol.dataIndex && newCol.sorter === undefined && newCol.key !== 'index') {
           newCol.sorter = (a: T, b: T) => {
             const aVal = a[newCol.dataIndex as keyof T] as SortableValue
             const bVal = b[newCol.dataIndex as keyof T] as SortableValue
 
-            // 处理 null/undefined
             if (aVal == null && bVal == null) return 0
             if (aVal == null) return -1
             if (bVal == null) return 1
 
-            // 日期类型
             if (aVal instanceof Date && bVal instanceof Date) {
               return aVal.getTime() - bVal.getTime()
             }
 
-            // 字符串日期格式
             if (typeof aVal === 'string' && typeof bVal === 'string') {
               const dateA = Date.parse(aVal)
               const dateB = Date.parse(bVal)
@@ -73,18 +179,15 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
               }
             }
 
-            // 数字类型
             if (typeof aVal === 'number' && typeof bVal === 'number') {
               return aVal - bVal
             }
 
-            // 字符串类型
             return String(aVal).localeCompare(String(bVal), 'zh-CN')
           }
           newCol.sortDirections = ['ascend', 'descend']
         }
 
-        // 非操作列添加溢出省略和气泡提示（如果没有自定义 render 且没有禁用）
         if (!newCol.render && newCol.ellipsis !== false && newCol.key !== 'index') {
           newCol.ellipsis = { showTitle: false }
           newCol.render = (text: React.ReactNode) => {
@@ -102,17 +205,16 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
       return newCol
     }
 
-    // 处理现有列，添加排序和溢出省略
     const enhancedColumns = (columns as ColumnsType<T>).map(enhanceColumn)
 
-    // 添加序号列
     if (showIndex) {
       const indexColumn: TableColumnType<T> = {
         title: '序号',
         key: 'index',
         width: 70,
         fixed: 'left',
-        render: (_: unknown, __: T, index: number) => (currentPage - 1) * pageSize + index + 1
+        render: (_: unknown, __: T, index: number) =>
+          (currentPage - 1) * pageSize + index + 1,
       }
       return [indexColumn, ...enhancedColumns]
     }
@@ -120,27 +222,80 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
     return enhancedColumns
   }, [columns, fixedActions, showIndex, currentPage, pageSize])
 
-  // 合并滚动配置
+  // fill 模式：根据父容器高度 - 表头高度 - 分页区高度，动态计算表格内部可滚区高度
+  const computedScrollY = React.useMemo(() => {
+    if (!fill || containerHeight <= 0) return undefined
+    const hasPagination = pagination !== false
+    const y = containerHeight - theadHeight - (hasPagination ? paginationHeight : 0)
+    return Math.max(120, Math.floor(y))
+  }, [fill, containerHeight, theadHeight, paginationHeight, pagination])
+
   const mergedScroll = React.useMemo(() => {
     return {
       x: minWidth,
-      ...scroll
+      ...(computedScrollY !== undefined ? { y: computedScrollY } : {}),
+      ...scroll,
     }
-  }, [minWidth, scroll])
+  }, [minWidth, computedScrollY, scroll])
+
+  // 统一分页配置：page 只需传 current/pageSize/total/onChange/onShowSizeChange，
+  // 视觉相关项（showSizeChanger / showQuickJumper / showTotal / pageSizeOptions）由 ResponsiveTable 统一注入。
+  const mergedPagination = React.useMemo(() => {
+    if (pagination === false) return false as const
+    const defaults = {
+      showSizeChanger: true,
+      showQuickJumper: true,
+      showTotal: (total: number, range: [number, number]) =>
+        `第 ${range[0]}-${range[1]} 条，共 ${total} 条`,
+      pageSizeOptions: ['10', '20', '50', '100'],
+      defaultPageSize: 20,
+      size: 'default' as const,
+    }
+    if (typeof pagination === 'object' && pagination !== null) {
+      return { ...defaults, ...pagination }
+    }
+    return defaults
+  }, [pagination])
+
+  const containerClassName = fill
+    ? `${styles.container} ${styles.fillWrapper}`
+    : styles.container
+
+  // 统一空状态：图标 + 文案 + 可选 action（如"新建"按钮）
+  const mergedLocale = React.useMemo(
+    () => ({
+      ...locale,
+      emptyText: (
+        <Empty
+          image={<InboxOutlined style={{ fontSize: 48, color: 'var(--ant-color-text-quaternary)' }} />}
+          imageStyle={{ height: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          description={<span style={{ color: 'var(--ant-color-text-tertiary)' }}>{emptyDescription}</span>}
+        >
+          {emptyAction}
+        </Empty>
+      ),
+    }),
+    [locale, emptyDescription, emptyAction]
+  )
 
   return (
-    <div className={styles.container}>
-      <Table<T>
-        {...restProps}
-        columns={processedColumns}
-        scroll={mergedScroll}
-        pagination={pagination}
-        className={`${restProps.className || ''}`.trim()}
-        showSorterTooltip={{ title: '点击排序' }}
-      />
+    <div ref={containerRef} className={containerClassName}>
+      {/* 强制分页器内 Select/Tooltip 等弹层 portal 到 body，避免被 PageContainer 的 overflow:hidden 裁切。 */}
+      <ConfigProvider getPopupContainer={getBody}>
+        <Table<T>
+          {...restProps}
+          dataSource={dataSource}
+          columns={processedColumns}
+          scroll={mergedScroll}
+          pagination={mergedPagination}
+          locale={mergedLocale}
+          virtual={autoVirtual}
+          className={`${restProps.className || ''}`.trim()}
+          showSorterTooltip={{ title: '点击排序' }}
+        />
+      </ConfigProvider>
     </div>
   )
 }
 
-// 直接导出泛型组件，保留类型信息
 export default ResponsiveTable

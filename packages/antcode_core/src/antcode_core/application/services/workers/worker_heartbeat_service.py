@@ -87,10 +87,7 @@ class WorkerHeartbeatService:
         now = datetime.now()
 
         # 如果缓存不存在或已过期，重新加载
-        if force or (
-            not self._cache_updated_at
-            or (now - self._cache_updated_at).total_seconds() > self._cache_ttl
-        ):
+        if force or (not self._cache_updated_at or (now - self._cache_updated_at).total_seconds() > self._cache_ttl):
             workers = await Worker.all()
 
             # 更新现有节点，添加新节点
@@ -193,126 +190,98 @@ class WorkerHeartbeatService:
 
     async def _get_redis_heartbeat(self, worker: Worker) -> datetime | None:
         """从 Redis 获取节点心跳时间（Direct 模式）"""
-        try:
-            from antcode_core.infrastructure.redis import get_redis_client
-            from antcode_core.infrastructure.redis import decode_stream_payload, worker_heartbeat_key
+        from antcode_core.infrastructure.redis import decode_stream_payload, get_redis_client, worker_heartbeat_key
 
-            redis = await get_redis_client()
-            hb_key = worker_heartbeat_key(worker.public_id)
-            raw = await redis.hgetall(hb_key)
-
-            if not raw:
-                return None
-
-            # 解析心跳数据
-            data = decode_stream_payload(raw)
-
-            # 获取时间戳
-            timestamp_str = data.get("timestamp")
-            if not timestamp_str:
-                return None
-
-            # 解析 ISO 格式时间戳
-            try:
-                hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-                if hb_time.tzinfo is not None:
-                    hb_time = hb_time.astimezone().replace(tzinfo=None)
-                return hb_time
-            except Exception as e:
-                logger.debug(f"解析心跳时间戳失败: {timestamp_str}, error={e}")
-                return None
-
-        except Exception as e:
-            logger.debug(f"从 Redis 获取心跳失败: worker={worker.name}, error={e}")
+        redis = await get_redis_client()
+        hb_key = worker_heartbeat_key(worker.public_id)
+        raw = await redis.hgetall(hb_key)
+        if not raw:
             return None
+
+        data = decode_stream_payload(raw)
+        timestamp_str = data.get("timestamp")
+        if not timestamp_str:
+            raise ValueError(f"Redis 心跳缺少 timestamp: worker={worker.public_id}")
+
+        hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        if hb_time.tzinfo is not None:
+            hb_time = hb_time.astimezone().replace(tzinfo=None)
+        return hb_time
 
     async def _sync_redis_heartbeat_to_db(self, worker: Worker) -> bool:
         """将 Redis 心跳同步到数据库（Direct 模式）"""
-        try:
-            from antcode_core.infrastructure.redis import get_redis_client
-            from antcode_core.infrastructure.redis import decode_stream_payload, worker_heartbeat_key
-
-            redis = await get_redis_client()
-            hb_key = worker_heartbeat_key(worker.public_id)
-            raw = await redis.hgetall(hb_key)
-
-            if not raw:
-                return False
-
-            # 解析心跳数据
-            data = decode_stream_payload(raw)
-
-            # 获取时间戳
-            timestamp_str = data.get("timestamp")
-            if not timestamp_str:
-                return False
-
-            # 解析时间戳
-            try:
-                hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-                if hb_time.tzinfo is not None:
-                    hb_time = hb_time.astimezone().replace(tzinfo=None)
-            except Exception:
-                return False
-
-            # 检查是否需要更新（Redis 心跳比数据库新）
-            db_hb = worker.last_heartbeat
-            if db_hb is not None and db_hb.tzinfo is not None:
-                db_hb = db_hb.astimezone().replace(tzinfo=None)
-
-            if db_hb and hb_time <= db_hb:
-                return False  # Redis 心跳不比数据库新
-
-            # 更新数据库
-            worker.last_heartbeat = hb_time
-            worker.status = WorkerStatus.ONLINE.value
-
-            # 更新指标
-            metrics = {}
-            if data.get("cpu_percent"):
-                metrics["cpu"] = float(data["cpu_percent"])
-            if data.get("memory_percent"):
-                metrics["memory"] = float(data["memory_percent"])
-            if data.get("disk_percent"):
-                metrics["disk"] = float(data["disk_percent"])
-            if data.get("running_tasks"):
-                metrics["runningTasks"] = int(data["running_tasks"])
-            if data.get("max_concurrent_tasks"):
-                metrics["maxConcurrentTasks"] = int(data["max_concurrent_tasks"])
-
-            if metrics:
-                current_metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
-                current_metrics.update(metrics)
-                worker.metrics = current_metrics
-
-            # 同步节点信息与能力（网关心跳写入）
-            if data.get("version"):
-                worker.version = data["version"]
-            if data.get("os_type"):
-                worker.os_type = data["os_type"]
-            if data.get("os_version"):
-                worker.os_version = data["os_version"]
-            if data.get("python_version"):
-                worker.python_version = data["python_version"]
-            if data.get("machine_arch"):
-                worker.machine_arch = data["machine_arch"]
-            if data.get("capabilities"):
-                try:
-                    import json
-
-                    capabilities = json.loads(data["capabilities"])
-                    if isinstance(capabilities, dict):
-                        worker.capabilities = capabilities
-                except Exception:
-                    pass
-
-            await worker.save()
-            logger.debug(f"已同步 Redis 心跳到数据库: worker={worker.name}, time={hb_time}")
-            return True
-
-        except Exception as e:
-            logger.debug(f"同步 Redis 心跳失败: worker={worker.name}, error={e}")
+        data = await self._read_redis_heartbeat_payload(worker)
+        if not data:
             return False
+
+        hb_time = self._parse_redis_heartbeat_time(worker, data)
+        db_hb = worker.last_heartbeat
+        if db_hb is not None and db_hb.tzinfo is not None:
+            db_hb = db_hb.astimezone().replace(tzinfo=None)
+        if db_hb and hb_time <= db_hb:
+            return False
+
+        worker.last_heartbeat = hb_time
+        worker.status = WorkerStatus.ONLINE.value
+        self._apply_redis_heartbeat_payload(worker, data)
+        await worker.save()
+        logger.debug(f"已同步 Redis 心跳到数据库: worker={worker.name}, time={hb_time}")
+        return True
+
+    async def _read_redis_heartbeat_payload(self, worker: Worker) -> dict:
+        from antcode_core.infrastructure.redis import decode_stream_payload, get_redis_client, worker_heartbeat_key
+
+        redis = await get_redis_client()
+        raw = await redis.hgetall(worker_heartbeat_key(worker.public_id))
+        return decode_stream_payload(raw) if raw else {}
+
+    def _parse_redis_heartbeat_time(self, worker: Worker, data: dict) -> datetime:
+        timestamp_str = data.get("timestamp")
+        if not timestamp_str:
+            raise ValueError(f"Redis 心跳缺少 timestamp: worker={worker.public_id}")
+        hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        if hb_time.tzinfo is not None:
+            return hb_time.astimezone().replace(tzinfo=None)
+        return hb_time
+
+    def _apply_redis_heartbeat_payload(self, worker: Worker, data: dict) -> None:
+        metrics = self._extract_redis_heartbeat_metrics(data)
+        if metrics:
+            current_metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
+            current_metrics.update(metrics)
+            worker.metrics = current_metrics
+
+        for field_name in (
+            "version",
+            "os_type",
+            "os_version",
+            "python_version",
+            "machine_arch",
+        ):
+            if data.get(field_name):
+                setattr(worker, field_name, data[field_name])
+
+        if data.get("capabilities"):
+            import json
+
+            capabilities = json.loads(data["capabilities"])
+            if not isinstance(capabilities, dict):
+                raise ValueError("Redis 心跳 capabilities 必须是 JSON object")
+            worker.capabilities = capabilities
+
+    def _extract_redis_heartbeat_metrics(self, data: dict) -> dict:
+        metrics = {}
+        if data.get("cpu_percent"):
+            metrics["cpu"] = float(data["cpu_percent"])
+        if data.get("memory_percent"):
+            metrics["memory"] = float(data["memory_percent"])
+        if data.get("disk_percent"):
+            metrics["disk"] = float(data["disk_percent"])
+        if data.get("running_tasks"):
+            metrics["runningTasks"] = int(data["running_tasks"])
+        if data.get("max_concurrent_tasks"):
+            metrics["maxConcurrentTasks"] = int(data["max_concurrent_tasks"])
+        return metrics
 
     async def _check_single_worker(self, worker: Worker, state: dict) -> bool:
         """
@@ -385,7 +354,7 @@ class WorkerHeartbeatService:
         state: dict,
         old_status: WorkerStatus | str,
     ):
-        """处理节点离线"""
+        """处理 Worker 离线"""
         worker.status = WorkerStatus.OFFLINE.value
         state["failures"] += 1
 
@@ -393,20 +362,14 @@ class WorkerHeartbeatService:
         if state["failures"] >= self.HEARTBEAT_MAX_FAILURES:
             if worker.api_key and worker.secret_key:
                 state["suspended"] = False
-                state["next_check"] = datetime.now() + timedelta(
-                    seconds=self.HEARTBEAT_INTERVAL_OFFLINE
-                )
+                state["next_check"] = datetime.now() + timedelta(seconds=self.HEARTBEAT_INTERVAL_OFFLINE)
                 # 只在首次达到最大失败次数时记录警告
                 if state["failures"] == self.HEARTBEAT_MAX_FAILURES:
-                    logger.warning(
-                        f"节点 {worker.name} 连续失败 {state['failures']} 次，保持低频检测等待自动重连"
-                    )
+                    logger.warning(f"节点 {worker.name} 连续失败 {state['failures']} 次，保持低频检测等待自动重连")
             else:
                 # 暂停自动检测
                 state["suspended"] = True
-                logger.warning(
-                    f"节点 {worker.name} 连续失败 {state['failures']} 次，已暂停自动检测，等待手动测试"
-                )
+                logger.warning(f"节点 {worker.name} 连续失败 {state['failures']} 次，已暂停自动检测，等待手动测试")
         else:
             # 逐渐延长检测间隔（指数退避）
             interval = min(
@@ -415,9 +378,7 @@ class WorkerHeartbeatService:
             )
             state["next_check"] = datetime.now() + timedelta(seconds=interval)
 
-            logger.debug(
-                f"节点 {worker.name} 离线（失败{state['failures']}次），下次检测间隔: {interval}秒"
-            )
+            logger.debug(f"节点 {worker.name} 离线（失败{state['failures']}次），下次检测间隔: {interval}秒")
 
         # 状态变化时保存到数据库
         if old_status != WorkerStatus.OFFLINE:
@@ -606,9 +567,7 @@ class WorkerHeartbeatService:
             else:
                 capabilities = self._normalize_capabilities(capabilities)
                 worker.capabilities = capabilities
-                # 记录能力变更
-                has_render = self._check_render_capability(capabilities)
-                logger.info(f"节点 {worker.name} 能力更新: 渲染能力={has_render}")
+                logger.info(f"节点 {worker.name} 能力更新: {list(capabilities.keys())}")
 
         await worker.save()
 
@@ -646,18 +605,6 @@ class WorkerHeartbeatService:
             return None
         self._worker_cache[worker_id] = latest
         return latest
-
-    def _check_render_capability(self, capabilities: dict | None) -> bool:
-        """检查节点是否有渲染能力"""
-        if not capabilities:
-            return False
-        cap = capabilities.get("drissionpage")
-        if isinstance(cap, str):
-            try:
-                cap = from_json(cap)
-            except Exception:
-                return False
-        return bool(isinstance(cap, dict) and cap.get("enabled"))
 
     def _normalize_capabilities(self, capabilities: dict) -> dict:
         normalized: dict = {}

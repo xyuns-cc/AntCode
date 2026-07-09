@@ -138,7 +138,7 @@ class DistributedLock:
         except Exception as e:
             logger.error(f"释放锁异常: {self.key}, 错误: {e}")
             self._token = None
-            return False
+            raise
 
     async def extend(self, additional_seconds: int | None = None) -> bool:
         """延长锁的过期时间
@@ -169,7 +169,7 @@ class DistributedLock:
             return bool(result)
         except Exception as e:
             logger.error(f"延长锁失败: {self.key}, 错误: {e}")
-            return False
+            raise
 
     def _start_renew_task(self) -> None:
         """启动自动续期任务"""
@@ -194,13 +194,15 @@ class DistributedLock:
 
                 success = await self.extend()
                 if not success:
-                    logger.warning(f"锁续期失败，可能已丢失: {self.key}")
-                    break
+                    self._token = None
+                    raise RuntimeError(f"锁续期失败，锁可能已丢失: {self.key}")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"锁续期异常: {self.key}, 错误: {e}")
+                self._token = None
+                raise
 
     async def __aenter__(self):
         """异步上下文管理器入口"""
@@ -215,8 +217,38 @@ class DistributedLock:
 
     @property
     def is_locked(self) -> bool:
-        """是否持有锁"""
+        """本地视角：是否曾经获得过锁（未去过 Redis 校验）。
+
+        注意：这个字段只表示"我有 token"，**不代表 Redis 里锁仍归我**。
+        另一副本抢走或续约超时后 Redis 里 key 已改/已过期，本字段仍会
+        返回 True 直到本地 renew loop 察觉。用 ``verify_ownership()``
+        做真正的权威判断。
+        """
         return self._token is not None
+
+    async def verify_ownership(self) -> bool:
+        """去 Redis 权威校验当前 leader 锁仍归本实例（token 匹配）。
+
+        使用 Lua 脚本一次原子 GET+比较，避免 GET 后 key 被换、决策已错的
+        窗口。Redis 不可达时保守返回 False（宁可让出 leader 也不双写）。
+        """
+        if not self._token:
+            return False
+        try:
+            client = await self._get_client()
+            script = """
+            local v = redis.call("get", KEYS[1])
+            if v == ARGV[1] then
+                return 1
+            else
+                return 0
+            end
+            """
+            result = await client.eval(script, 1, self.key, self._token)
+            return bool(result)
+        except Exception as exc:
+            logger.warning(f"leader 锁权威校验失败(保守返回 False): {self.key} - {exc}")
+            return False
 
 
 class FencingTokenManager:
@@ -294,7 +326,7 @@ class FencingTokenManager:
         current = await self.get_current_token()
 
         if current is None:
-            return True  # 没有 token 时允许
+            return False
 
         return token >= current
 

@@ -11,6 +11,11 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
+from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.logs.task_log_service import task_log_service
+from antcode_core.application.services.monitoring import monitoring_service
+from antcode_core.application.services.projects.relation_service import relation_service
+from antcode_core.application.services.scheduler.spider_dispatcher import spider_task_dispatcher
 from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import (
     DispatchStatus,
@@ -21,11 +26,6 @@ from antcode_core.domain.models.enums import (
 )
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
-from antcode_core.application.services.base import QueryHelper
-from antcode_core.application.services.logs.task_log_service import task_log_service
-from antcode_core.application.services.monitoring import monitoring_service
-from antcode_core.application.services.projects.relation_service import relation_service
-from antcode_core.application.services.scheduler.spider_dispatcher import spider_task_dispatcher
 
 
 class SchedulerService:
@@ -40,16 +40,8 @@ class SchedulerService:
                 "misfire_grace_time": 30,  # 错过执行的宽限时间（秒）
             },
         )
-        self.running_tasks = {}
-
         # 并发控制 - 限制同时执行的任务数量
         self.concurrency_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TASKS)
-        self.task_execution_stats = {
-            "total_executed": 0,
-            "currently_running": 0,
-            "failed_count": 0,
-            "success_count": 0,
-        }
         self._role = settings.SCHEDULER_ROLE.lower()
         self._event_stream = settings.scheduler_event_stream
         self._event_client = None
@@ -70,25 +62,19 @@ class SchedulerService:
     async def _publish_event(self, event: str, task_id: int) -> None:
         if not self._control_plane():
             return
-        if not settings.REDIS_ENABLED:
-            logger.warning("Redis 未启用，无法发布调度事件")
-            return
         if self._event_client is None:
             from antcode_core.infrastructure.redis.streams import StreamClient
 
             self._event_client = StreamClient()
-        try:
-            await self._event_client.xadd(
-                self._event_stream,
-                {
-                    "event": event,
-                    "task_id": str(task_id),
-                    "timestamp": datetime.now(UTC).isoformat(),
-                },
-                maxlen=settings.SCHEDULER_EVENT_MAXLEN,
-            )
-        except Exception as e:
-            logger.warning(f"发布调度事件失败: {e}")
+        await self._event_client.xadd(
+            self._event_stream,
+            {
+                "event": event,
+                "task_id": str(task_id),
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+            maxlen=settings.SCHEDULER_EVENT_MAXLEN,
+        )
 
     async def start(self):
         """启动调度器"""
@@ -112,14 +98,10 @@ class SchedulerService:
             logger.error(f"启动调度器失败: {e}")
             raise
 
-    async def create_task(
-        self, task_data, project_type, user_id, internal_project_id=None, specified_worker_id=None
-    ):
+    async def create_task(self, task_data, project_type, user_id, internal_project_id=None, specified_worker_id=None):
         """创建调度任务"""
         # 使用传入的内部 project_id，或从 task_data 中获取
-        project_id = (
-            internal_project_id if internal_project_id is not None else task_data.project_id
-        )
+        project_id = internal_project_id if internal_project_id is not None else task_data.project_id
 
         # 处理 Worker ID
         from antcode_core.domain.models import Worker
@@ -144,6 +126,19 @@ class SchedulerService:
         # 添加到调度器
         if task.is_active:
             await self.add_task(task)
+
+        # P2: 补齐响应组装依赖的外键 public_id/username 快照，避免
+        # TaskResponseBuilder 里 _resolve_public_id 抛"响应对象缺少 project_public_id"。
+        from antcode_core.application.services.users.user_service import (
+            user_service,
+        )
+        from antcode_core.domain.models import Project
+
+        project = await Project.get_or_none(id=project_id)
+        task.project_public_id = project.public_id if project else None
+        creator = await user_service.get_user_by_id(user_id)
+        task.created_by_public_id = creator.public_id if creator else None
+        task.created_by_username = creator.username if creator else None
 
         logger.info(f"任务创建成功: {task.name} (ID: {task.id})")
         return task
@@ -178,9 +173,7 @@ class SchedulerService:
         if search:
             keyword = str(search).strip()
             if keyword:
-                query = query.filter(
-                    Q(name__icontains=keyword) | Q(description__icontains=keyword)
-                )
+                query = query.filter(Q(name__icontains=keyword) | Q(description__icontains=keyword))
 
         if project_id:
             project = await QueryHelper.get_by_id_or_public_id(
@@ -201,24 +194,22 @@ class SchedulerService:
             else:
                 raise ValueError("指定执行 Worker 不存在")
 
-        # 节点视角筛选：按节点只看与该节点相关的任务
+        # Worker 视角筛选：只看与该 Worker 相关的任务
         if worker_id:
             worker = await Worker.filter(public_id=worker_id).first()
             if not worker:
                 raise ValueError("指定 Worker 不存在")
 
             related_project_ids = await Project.filter(
-                Q(worker_id=worker.public_id)
-                | Q(bound_worker_id=worker.id)
-                | Q(runtime_worker_id=worker.id)
+                Q(worker_id=worker.public_id) | Q(bound_worker_id=worker.id) | Q(runtime_worker_id=worker.id)
             ).values_list("id", flat=True)
 
-            node_query = Q(specified_worker_id=worker.id)
+            worker_query = Q(specified_worker_id=worker.id)
             project_ids = list(related_project_ids)
             if project_ids:
-                node_query = node_query | Q(project_id__in=project_ids)
+                worker_query = worker_query | Q(project_id__in=project_ids)
 
-            query = query.filter(node_query)
+            query = query.filter(worker_query)
 
         total = await query.count()
         offset = (page - 1) * size
@@ -259,17 +250,13 @@ class SchedulerService:
         from antcode_core.domain.models import Project
 
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return None
 
         # 获取创建者信息
-        users_map = await QueryHelper.batch_get_user_info(
-            [task.user_id] if task.user_id else []
-        )
+        users_map = await QueryHelper.batch_get_user_info([task.user_id] if task.user_id else [])
         user_info = users_map.get(task.user_id, {})
         task.created_by_username = user_info.get("username")
         task.created_by_public_id = user_info.get("public_id")
@@ -288,9 +275,7 @@ class SchedulerService:
 
                 bound_worker = await Worker.get_or_none(id=project.bound_worker_id)
                 task.project_bound_worker_name = bound_worker.name if bound_worker else None
-                task.project_bound_worker_public_id = (
-                    bound_worker.public_id if bound_worker else None
-                )
+                task.project_bound_worker_public_id = bound_worker.public_id if bound_worker else None
             else:
                 task.project_bound_worker_name = None
                 task.project_bound_worker_public_id = None
@@ -301,9 +286,7 @@ class SchedulerService:
 
             specified_worker = await Worker.get_or_none(id=task.specified_worker_id)
             task.specified_worker_name = specified_worker.name if specified_worker else None
-            task.specified_worker_public_id = (
-                specified_worker.public_id if specified_worker else None
-            )
+            task.specified_worker_public_id = specified_worker.public_id if specified_worker else None
         else:
             task.specified_worker_name = None
             task.specified_worker_public_id = None
@@ -313,9 +296,7 @@ class SchedulerService:
     async def update_task(self, task_id, task_data, user_id):
         """更新任务（支持 public_id）"""
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return None
@@ -345,9 +326,7 @@ class SchedulerService:
     async def delete_task(self, task_id, user_id):
         """删除任务（支持 public_id）"""
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return False
@@ -378,9 +357,7 @@ class SchedulerService:
     ):
         """获取任务执行记录（支持 public_id）"""
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             raise ValueError("任务不存在或无权访问")
@@ -429,9 +406,7 @@ class SchedulerService:
         import asyncio
 
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return None
@@ -461,33 +436,33 @@ class SchedulerService:
 
         # 计算平均执行时长（只查询有完成时间的记录）
         avg_duration = 0.0
-        completed = await base_query.filter(
-            end_time__isnull=False, start_time__isnull=False
-        ).only("start_time", "end_time").limit(1000)
+        completed = (
+            await base_query.filter(end_time__isnull=False, start_time__isnull=False)
+            .only("start_time", "end_time")
+            .limit(1000)
+        )
 
         if completed:
-                durations = [
-                    (e.end_time - e.start_time).total_seconds() for e in completed
-                ]
-                avg_duration = sum(durations) / len(durations)
+            durations = [(e.end_time - e.start_time).total_seconds() for e in completed]
+            avg_duration = sum(durations) / len(durations)
 
-            return {
-                "task_id": task_id,
-                "total_executions": total,
-                "success_count": success_count,
-                "failed_count": failed_count,
-                "running_count": running_count,
-                "success_rate": success_count / total * 100,
-                "avg_duration": avg_duration,
-                "last_execution": {
-                    "run_id": last_execution.run_id,
-                    "status": last_execution.status,
-                    "start_time": last_execution.start_time,
-                    "end_time": last_execution.end_time,
-                }
-                if last_execution
-                else None,
+        return {
+            "task_id": task_id,
+            "total_executions": total,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "running_count": running_count,
+            "success_rate": success_count / total * 100,
+            "avg_duration": avg_duration,
+            "last_execution": {
+                "run_id": last_execution.run_id,
+                "status": last_execution.status,
+                "start_time": last_execution.start_time,
+                "end_time": last_execution.end_time,
             }
+            if last_execution
+            else None,
+        }
 
     async def verify_admin_permission(self, user_id):
         """验证管理员权限"""
@@ -511,9 +486,7 @@ class SchedulerService:
     async def pause_task_by_user(self, task_id, user_id):
         """暂停用户任务（支持 public_id）"""
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return False
@@ -527,9 +500,7 @@ class SchedulerService:
     async def resume_task_by_user(self, task_id, user_id):
         """恢复用户任务（支持 public_id）"""
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return False
@@ -543,9 +514,7 @@ class SchedulerService:
     async def trigger_task_by_user(self, task_id, user_id):
         """立即触发用户任务（支持 public_id）"""
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-        task = await QueryHelper.get_by_id_or_public_id(
-            Task, task_id, user_id=user_id, check_admin=True
-        )
+        task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
             return False
@@ -755,13 +724,6 @@ class SchedulerService:
         task = None
         execution = None
         result = None
-        distributed_pending = False
-        local_execution = False
-        result_success = None
-
-        # 更新统计信息
-        self.task_execution_stats["total_executed"] += 1
-        self.task_execution_stats["currently_running"] += 1
 
         try:
             # 获取任务及其关联信息
@@ -773,7 +735,6 @@ class SchedulerService:
             task = task_info["task"]
             project = task_info["project"]
             project_detail = task_info["project_detail"]
-            local_execution = project.type == ProjectType.RULE
 
             # 检查任务是否可以执行
             if not task.is_active:
@@ -787,17 +748,12 @@ class SchedulerService:
                 TaskStatus.QUEUED,
             ):
                 logger.warning(f"任务 {task.name} 正在执行中 (状态: {task.status})，跳过重复触发")
-                self.task_execution_stats["currently_running"] -= 1
-                self.task_execution_stats["total_executed"] -= 1
                 return
 
             # 记录并发状态
-            current_running = self.task_execution_stats["currently_running"]
             max_concurrent = settings.MAX_CONCURRENT_TASKS
-            logger.info(f"开始执行任务 {task.name} (当前并发: {current_running}/{max_concurrent})")
-
-            # 生成日志文件路径
-            log_paths = task_log_service.generate_log_paths(run_id, task.name)
+            running_count = await TaskRun.filter(status=TaskStatus.RUNNING).count()
+            logger.info(f"开始执行任务 {task.name} (当前并发: {running_count}/{max_concurrent})")
 
             # 创建执行记录
             now = datetime.now(UTC)
@@ -808,19 +764,10 @@ class SchedulerService:
                 dispatch_status=DispatchStatus.PENDING,
                 runtime_status=None,
                 start_time=None,
-                log_file_path=log_paths["log_file_path"],
-                error_log_path=log_paths["error_log_path"],
                 retry_count=0,
             )
 
             await execution.save()
-
-            # 记录到运行中任务
-            self.running_tasks[run_id] = {
-                "task_id": task_id,
-                "task_name": task.name,
-                "start_time": now,
-            }
 
             # 推送开始状态到WebSocket
             await self._push_execution_status(
@@ -837,8 +784,8 @@ class SchedulerService:
             await self._log_execution(execution, "INFO", f"开始执行任务: {task.name}")
 
             # 使用执行策略解析器确定执行节点
-            from antcode_core.common.exceptions import WorkerUnavailableError
             from antcode_core.application.services.scheduler.execution_resolver import execution_resolver
+            from antcode_core.common.exceptions import WorkerUnavailableError
 
             try:
                 from antcode_core.application.services.scheduler.execution_status_service import (
@@ -853,16 +800,7 @@ class SchedulerService:
 
                 await self._log_execution(execution, "INFO", "正在分配执行 Worker...")
 
-                target_worker, strategy = await execution_resolver.resolve_execution_worker(
-                    task, project
-                )
-
-                if local_execution:
-                    await execution_status_service.update_runtime_status(
-                        run_id=run_id,
-                        status=RuntimeStatus.RUNNING,
-                        status_at=now,
-                    )
+                target_worker, strategy = await execution_resolver.resolve_execution_worker(task, project)
 
                 await self._log_execution(
                     execution,
@@ -882,9 +820,7 @@ class SchedulerService:
                     result = await self._execute_rule_task(task, project, project_detail, execution)
                 else:
                     # 文件/代码项目：分发到 Worker 节点执行
-                    result = await self._execute_distributed_task(
-                        task, project, run_id, execution, target_worker
-                    )
+                    result = await self._execute_distributed_task(task, project, run_id, execution, target_worker)
 
             except WorkerUnavailableError as e:
                 await self._log_execution(execution, "ERROR", f"Worker 不可用: {e.message}")
@@ -896,7 +832,6 @@ class SchedulerService:
                 if result.get("success"):
                     # 检查是否为分布式任务（等待节点执行结果）
                     if result.get("distributed") and result.get("pending"):
-                        distributed_pending = True
                         if execution:
                             execution.result_data = result
                             await execution.save(update_fields=["result_data"])
@@ -919,17 +854,9 @@ class SchedulerService:
                             },
                         )
                     else:
-                        result_success = True
                         if execution:
-                            update_fields = ["result_data"]
                             execution.result_data = result
-                            if result.get("log_file_path"):
-                                execution.log_file_path = result["log_file_path"]
-                                update_fields.append("log_file_path")
-                            if result.get("error_log_path"):
-                                execution.error_log_path = result["error_log_path"]
-                                update_fields.append("error_log_path")
-                            await execution.save(update_fields=update_fields)
+                            await execution.save(update_fields=["result_data"])
 
                         await execution_status_service.update_runtime_status(
                             run_id=run_id,
@@ -955,33 +882,16 @@ class SchedulerService:
                         )
                 else:
                     error_message = result.get("error") or "任务执行失败"
-                    result_success = False
                     if execution:
-                        update_fields = ["result_data"]
                         execution.result_data = result
-                        if result.get("log_file_path"):
-                            execution.log_file_path = result["log_file_path"]
-                            update_fields.append("log_file_path")
-                        if result.get("error_log_path"):
-                            execution.error_log_path = result["error_log_path"]
-                            update_fields.append("error_log_path")
-                        await execution.save(update_fields=update_fields)
+                        await execution.save(update_fields=["result_data"])
 
-                    if local_execution:
-                        await execution_status_service.update_runtime_status(
-                            run_id=run_id,
-                            status=RuntimeStatus.FAILED,
-                            status_at=status_at,
-                            error_message=error_message,
-                            exit_code=result.get("exit_code"),
-                        )
-                    else:
-                        await execution_status_service.update_dispatch_status(
-                            run_id=run_id,
-                            status=DispatchStatus.FAILED,
-                            status_at=status_at,
-                            error_message=error_message,
-                        )
+                    await execution_status_service.update_dispatch_status(
+                        run_id=run_id,
+                        status=DispatchStatus.FAILED,
+                        status_at=status_at,
+                        error_message=error_message,
+                    )
 
                     await self._log_execution(execution, "ERROR", f"任务执行失败: {error_message}")
 
@@ -1006,20 +916,12 @@ class SchedulerService:
                     execution_status_service,
                 )
 
-                if local_execution:
-                    await execution_status_service.update_runtime_status(
-                        run_id=run_id,
-                        status=RuntimeStatus.TIMEOUT,
-                        status_at=datetime.now(UTC),
-                        error_message="任务执行超时",
-                    )
-                else:
-                    await execution_status_service.update_dispatch_status(
-                        run_id=run_id,
-                        status=DispatchStatus.TIMEOUT,
-                        status_at=datetime.now(UTC),
-                        error_message="任务执行超时",
-                    )
+                await execution_status_service.update_dispatch_status(
+                    run_id=run_id,
+                    status=DispatchStatus.TIMEOUT,
+                    status_at=datetime.now(UTC),
+                    error_message="任务执行超时",
+                )
 
             await self._log_execution(execution, "ERROR", "任务执行超时")
 
@@ -1030,50 +932,28 @@ class SchedulerService:
                     execution_status_service,
                 )
 
-                if local_execution:
-                    await execution_status_service.update_runtime_status(
-                        run_id=run_id,
-                        status=RuntimeStatus.FAILED,
-                        status_at=datetime.now(UTC),
-                        error_message=str(e),
-                    )
-                else:
-                    await execution_status_service.update_dispatch_status(
-                        run_id=run_id,
-                        status=DispatchStatus.FAILED,
-                        status_at=datetime.now(UTC),
-                        error_message=str(e),
-                    )
+                await execution_status_service.update_dispatch_status(
+                    run_id=run_id,
+                    status=DispatchStatus.FAILED,
+                    status_at=datetime.now(UTC),
+                    error_message=str(e),
+                )
 
             await self._log_execution(execution, "ERROR", f"任务执行异常: {str(e)}")
 
         finally:
-            # 更新并发统计
-            self.task_execution_stats["currently_running"] -= 1
-
-            # 更新成功/失败统计（分布式任务不在此处统计）
-            if result_success is True:
-                self.task_execution_stats["success_count"] += 1
-            elif result_success is False and not distributed_pending:
-                self.task_execution_stats["failed_count"] += 1
-
-            # 清理运行中任务（分布式任务保留，等待节点回调）
-            if run_id in self.running_tasks and not distributed_pending:
-                del self.running_tasks[run_id]
-
             # 更新任务下次运行时间（避免覆盖最新状态）
             if task:
                 next_run_time = self._get_next_run_time(task_id)
                 await Task.filter(id=task.id).update(next_run_time=next_run_time)
 
-            # 记录任务完成状态
-            current_running = self.task_execution_stats["currently_running"]
-            max_concurrent = settings.MAX_CONCURRENT_TASKS
-            logger.info(f"任务执行完成 (当前并发: {current_running}/{max_concurrent})")
+            # 只有已创建执行记录的任务才需要记录执行后并发状态。
+            if execution:
+                max_concurrent = settings.MAX_CONCURRENT_TASKS
+                running_count = await TaskRun.filter(status=TaskStatus.RUNNING).count()
+                logger.info(f"任务执行完成 (当前并发: {running_count}/{max_concurrent})")
 
-    async def _execute_distributed_task(
-        self, task, project, run_id, execution, target_worker=None
-    ):
+    async def _execute_distributed_task(self, task, project, run_id, execution, target_worker=None):
         """分发任务到 Worker 执行"""
         from antcode_core.application.services.workers import worker_task_dispatcher
 
@@ -1087,18 +967,39 @@ class SchedulerService:
                 f"分发任务到 Worker: {target_worker.name} ({target_worker.host}:{target_worker.port})",
             )
 
-            project_type_str = (
-                project.type.value if hasattr(project.type, "value") else str(project.type)
-            )
+            project_type_str = project.type.value if hasattr(project.type, "value") else str(project.type)
             priority = getattr(task, "priority", None)
             environment_vars = dict(task.environment_vars or {})
             if getattr(project, "env_location", None) == "worker" and project.worker_env_name:
                 environment_vars["ANTCODE_RUNTIME_ENV"] = project.worker_env_name
 
+            # 解析项目语言（M5+M8）：code / file 项目查各自 info 表的 language，其他默认 python
+            language = "python"
+            try:
+                if project_type_str == "code":
+                    from antcode_core.domain.models.project import ProjectCode
+                    info = await ProjectCode.get_or_none(project_id=project.id)
+                    if info and info.language:
+                        language = info.language.strip().lower()
+                elif project_type_str == "file":
+                    from antcode_core.domain.models.project import ProjectFile
+                    info = await ProjectFile.get_or_none(project_id=project.id)
+                    if info and getattr(info, "language", None):
+                        language = info.language.strip().lower()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"读取 project language 失败，默认 python: {exc}")
+
+            params = dict(task.execution_params or {})
+            # 塞入 kwargs.language；worker engine 会把 params.kwargs 展平到 TaskPayload.kwargs
+            kwargs_dict = params.get("kwargs") if isinstance(params.get("kwargs"), dict) else {}
+            kwargs_dict = dict(kwargs_dict)
+            kwargs_dict.setdefault("language", language)
+            params["kwargs"] = kwargs_dict
+
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,
                 run_id=run_id,
-                params=task.execution_params,
+                params=params,
                 environment_vars=environment_vars,
                 timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
                 worker_id=target_worker.public_id,
@@ -1131,9 +1032,33 @@ class SchedulerService:
                     "remote_task_id": result.task_id,
                 }
             else:
+                # T7-B3a (P1-1): 派发失败入补派队列（Redis ZSet，重启不丢），
+                # master.RedispatchLoop 每 10s tick 拉起来重试；超阈值前
+                # execution 停在当前 status（PENDING/DISPATCHING），不直接
+                # 置 FAILED 避免"派发失败一次就永久 FAILED"。
+                try:
+                    from antcode_core.application.services.scheduler.redispatch_service import (
+                        redispatch_service,
+                    )
+
+                    await redispatch_service.enqueue(
+                        run_id=run_id,
+                        task_id=task.id,
+                        project_id=project.public_id,
+                        params=params,
+                        environment_vars=environment_vars,
+                        timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
+                        project_type=project_type_str,
+                        attempts=0,
+                        reason=result.error or "任务分发失败",
+                    )
+                except Exception as exc:
+                    logger.warning(f"入补派队列失败: {exc}")
+
                 return {
                     "success": False,
                     "error": result.error or "任务分发失败",
+                    "queued_for_redispatch": True,
                 }
 
         except Exception as e:
@@ -1151,49 +1076,13 @@ class SchedulerService:
             params["scheduled_task_id"] = task.id
             params["scheduled_task_name"] = task.name
 
-            # 根据规则配置决定提交策略
-            if (
-                rule_detail.pagination_config
-                and rule_detail.pagination_config.get("method") == "url_pattern"
-            ):
-                # URL分页模式：可能需要提交多个任务
-                tasks_submitted = []
-                start_page = rule_detail.pagination_config.get("start_page", 1)
-                max_pages = rule_detail.pagination_config.get("max_pages", 10)
-
-                for page in range(start_page, start_page + max_pages):
-                    page_params = params.copy()
-                    page_params["page_number"] = page
-
-                    # 替换URL中的页码
-                    original_url = rule_detail.target_url
-                    if "{}" in original_url:
-                        rule_detail.target_url = original_url.format(page)
-
-                    result = await spider_task_dispatcher.submit_rule_task(
-                        project=project,
-                        rule_detail=rule_detail,
-                        run_id=f"{execution.run_id}_page_{page}",
-                        params=page_params,
-                    )
-
-                    rule_detail.target_url = original_url  # 恢复原URL
-
-                    if result["success"]:
-                        tasks_submitted.append(result["task_id"])
-
-                    await self._log_execution(
-                        execution,
-                        "INFO",
-                        f"提交页面 {page} 到节点 {result.get('worker_name', 'unknown')}: {result.get('task_id')}",
-                    )
-
-                return {
-                    "success": True,
-                    "message": f"成功提交 {len(tasks_submitted)} 个任务到执行器",
-                    "task_ids": tasks_submitted,
-                    "total_pages": len(tasks_submitted),
-                }
+            # S6 (Scrapy 迁移后)：url_pattern 分页由 UniversalRuleSpider 在
+            # 单个 run 内自展开（``start`` 里遍历 start_page..start_page+max_pages），
+            # 不再需要 scheduler 侧把一个规则任务展开成 N 个独立 run。这里保持
+            # 单任务提交路径统一走 else 分支——去掉了旧的 "URL分页多任务展开"
+            # 逻辑，避免同一 run 被拆成 N 个 execution 导致 UI/统计/去重都错乱。
+            if False:  # 兼容占位：保留旧分支以便 diff 回溯，实际永不进入
+                pass
             else:
                 # 单任务提交
                 result = await spider_task_dispatcher.submit_rule_task(
@@ -1212,6 +1101,8 @@ class SchedulerService:
 
                     return {
                         "success": True,
+                        "distributed": True,
+                        "pending": True,
                         "message": f"任务已提交到节点 {result.get('worker_name', 'unknown')}",
                         "task_id": result.get("task_id"),
                         "worker_id": result.get("worker_id"),
@@ -1230,35 +1121,19 @@ class SchedulerService:
     async def _schedule_retry(self, task, execution):
         """调度重试"""
         execution.retry_count += 1
-        await execution.save()
-
-        # 延迟后重试
         retry_delay = task.retry_delay or settings.TASK_RETRY_DELAY
-
-        # 使用唯一的job_id，包含run_id以避免冲突
-        job_id = f"{task.id}_retry_{execution.run_id}_{execution.retry_count}"
-
-        # 先尝试移除可能存在的旧作业
-        try:
-            self.scheduler.remove_job(job_id)
-        except Exception:
-            pass  # 忽略作业不存在的错误
-
-        try:
-            base_time = (
-                datetime.now(self.scheduler.timezone)
-                if hasattr(self.scheduler, "timezone") and self.scheduler.timezone
-                else datetime.now(UTC)
-            )
-        except Exception:
-            base_time = datetime.now(UTC)
-
-        self.scheduler.add_job(
-            func=self._execute_task,
-            trigger=DateTrigger(run_date=base_time + timedelta(seconds=retry_delay)),
-            id=job_id,
-            kwargs={"task_id": task.id},
-            replace_existing=True,  # 如果存在则替换
+        execution.status = TaskStatus.PENDING
+        execution.dispatch_status = DispatchStatus.PENDING
+        execution.runtime_status = RuntimeStatus.QUEUED
+        execution.next_retry_at = datetime.now(UTC) + timedelta(seconds=retry_delay)
+        await execution.save(
+            update_fields=[
+                "retry_count",
+                "status",
+                "dispatch_status",
+                "runtime_status",
+                "next_retry_at",
+            ]
         )
 
         await self._log_execution(
@@ -1269,24 +1144,11 @@ class SchedulerService:
 
     async def _log_execution(self, execution, level, message):
         """记录执行日志"""
-        if execution and execution.log_file_path:
-            # 写入日志文件并实时推送到WebSocket
-            log_content = f"[{level}] {message}"
-            if level.upper() in ["ERROR", "CRITICAL"]:
-                # 错误日志写入错误日志文件
-                if execution.error_log_path:
-                    await task_log_service.write_log(
-                        execution.error_log_path,
-                        log_content,
-                        run_id=execution.run_id,
-                    )
-            else:
-                # 普通日志写入输出日志文件
-                await task_log_service.write_log(
-                    execution.log_file_path,
-                    log_content,
-                    run_id=execution.run_id,
-                )
+        if not execution:
+            return
+        log_content = f"[{level}] {message}"
+        log_type = "stderr" if level.upper() in ("ERROR", "CRITICAL") else "stdout"
+        await task_log_service.write_log(execution.run_id, log_type, log_content)
 
     async def _push_execution_status(self, execution, status_data):
         """推送执行状态（预留接口）"""
@@ -1299,22 +1161,21 @@ class SchedulerService:
             return job.next_run_time
         return None
 
-    def get_running_tasks(self):
-        """获取运行中的任务"""
-        return list(self.running_tasks.values())
-
-    def get_execution_stats(self):
+    async def get_execution_stats(self):
         """获取任务执行统计信息"""
+        total = await TaskRun.all().count()
+        running = await TaskRun.filter(status=TaskStatus.RUNNING).count()
+        success_count = await TaskRun.filter(status=TaskStatus.SUCCESS).count()
+        failed_count = await TaskRun.filter(status=TaskStatus.FAILED).count()
+        success_rate = success_count / total * 100 if total else 0
         return {
-            **self.task_execution_stats,
-            "success_rate": (
-                self.task_execution_stats["success_count"]
-                / max(1, self.task_execution_stats["total_executed"])
-            )
-            * 100,
+            "total_executed": total,
+            "currently_running": running,
+            "failed_count": failed_count,
+            "success_count": success_count,
+            "success_rate": success_rate,
             "max_concurrent_tasks": settings.MAX_CONCURRENT_TASKS,
-            "available_slots": settings.MAX_CONCURRENT_TASKS
-            - self.task_execution_stats["currently_running"],
+            "available_slots": settings.MAX_CONCURRENT_TASKS - running,
         }
 
     async def _add_monitoring_jobs(self):

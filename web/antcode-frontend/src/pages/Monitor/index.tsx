@@ -206,10 +206,10 @@ const Monitor: React.FC = () => {
     try {
       const [allWorkers, stats] = await Promise.all([
         workerService.getAllWorkers(),
-        workerService.getAggregateStats().catch(() => null)
+        workerService.getAggregateStats()
       ])
       setWorkers(allWorkers.map(transformWorker))
-      if (stats) setWorkerStats(stats)
+      setWorkerStats(stats)
       setLastChecked('刚刚')
     } catch (error) {
       console.error('加载Worker 数据失败:', error)
@@ -434,7 +434,7 @@ const Monitor: React.FC = () => {
       setClusterHistory(history)
     } catch (error) {
       console.error('加载集群历史指标失败:', error)
-      // 静默失败，保持之前的数据
+      message.error(error instanceof Error ? error.message : '加载集群历史指标失败')
     }
   }, [performancePeriod])
 
@@ -445,7 +445,7 @@ const Monitor: React.FC = () => {
       setWorkerHistory(history)
     } catch (error) {
       console.error('加载Worker历史指标失败:', error)
-      setWorkerHistory([])
+      message.error(error instanceof Error ? error.message : '加载Worker历史指标失败')
     }
   }, [])
 

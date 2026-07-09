@@ -19,8 +19,10 @@ import {
   ClusterOutlined,
   FileTextOutlined,
   DatabaseOutlined,
+  BranchesOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useLocation, Outlet } from 'react-router-dom'
+import ErrorBoundary from '@/components/common/ErrorBoundary'
 import { useAuth } from '@/hooks/useAuth'
 import ThemeToggle from '@/components/common/ThemeToggle'
 import DynamicIcon from '@/components/common/DynamicIcon'
@@ -32,7 +34,7 @@ import styles from './Layout.module.css'
 const { Header, Sider, Content, Footer } = AntLayout
 const { Text } = Typography
 
-const WORKER_RELEVANT_PATHS = ['/dashboard', '/tasks', '/projects', '/workers']
+const WORKER_RELEVANT_PATHS = ['/dashboard', '/tasks', '/projects', '/workers', '/repositories']
 
 const Layout: React.FC = () => {
   const navigate = useNavigate()
@@ -48,12 +50,14 @@ const Layout: React.FC = () => {
     { key: '/workers', label: 'Worker 管理', icon: <ClusterOutlined />, path: '/workers', hidden: !user?.is_admin },
     { key: '/envs', label: '环境管理', icon: <CodeOutlined />, path: '/envs' },
     { key: '/projects', label: '项目管理', icon: <ProjectOutlined />, path: '/projects' },
+    { key: '/repositories', label: '代码仓库', icon: <BranchesOutlined />, path: '/repositories' },
     { key: '/tasks', label: '任务管理', icon: <PlayCircleOutlined />, path: '/tasks' },
+    { key: '/crawl-batches', label: '爬取批次', icon: <DatabaseOutlined />, path: '/crawl-batches' },
     { key: '/cookies', label: 'Cookie 账号池', icon: <DatabaseOutlined />, path: '/cookies', hidden: !user?.is_admin },
     { key: '/user-management', label: '用户管理', icon: <TeamOutlined />, path: '/user-management', hidden: !user?.is_admin },
     { key: '/alert-config', label: '告警配置', icon: <BellOutlined />, path: '/alert-config', hidden: !user?.is_admin },
     { key: '/audit-log', label: '审计日志', icon: <FileTextOutlined />, path: '/audit-log', hidden: !user?.is_admin },
-    { key: '/system-config', label: '系统配置', icon: <SettingOutlined />, path: '/system-config', hidden: user?.role !== 'super_admin' && !user?.is_super_admin },
+    { key: '/system-config', label: '系统配置', icon: <SettingOutlined />, path: '/system-config', hidden: user?.role !== 'super_admin' },
   ]
 
   const filteredMenuItems = menuItems.filter((item) => !item.hidden)
@@ -141,7 +145,11 @@ const Layout: React.FC = () => {
 
         <Content className={styles.content}>
           <div className={styles.contentInner}>
-            <Outlet />
+            {/* key=pathname 让每次路由切换 ErrorBoundary 重置，
+                单个页面崩溃时导航/其它页面不受影响 */}
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
           </div>
         </Content>
 

@@ -105,8 +105,7 @@ class WorkerRegistryService:
         self._cleanup_task: asyncio.Task | None = None
         self._shutdown = False
 
-        logger.info(f"初始化 Worker 注册服务: heartbeat_ttl={heartbeat_ttl}s, "
-                    f"offline_threshold={offline_threshold}s")
+        logger.info(f"初始化 Worker 注册服务: heartbeat_ttl={heartbeat_ttl}s, offline_threshold={offline_threshold}s")
 
     async def _get_redis(self):
         """获取 Redis 客户端（支持注入，便于测试）"""
@@ -278,8 +277,7 @@ class WorkerRegistryService:
                     new_batch_key = f"{WORKER_BATCH_PREFIX}{batch_id}"
                     await redis.sadd(new_batch_key, worker_id)
 
-            logger.debug(f"Worker 心跳更新: worker_id={worker_id}, "
-                         f"batch_id={batch_id}, active_tasks={active_tasks}")
+            logger.debug(f"Worker 心跳更新: worker_id={worker_id}, batch_id={batch_id}, active_tasks={active_tasks}")
 
             return True
 
@@ -308,7 +306,7 @@ class WorkerRegistryService:
             if not worker_data:
                 return None
 
-            data = from_json(worker_data.decode('utf-8'))
+            data = from_json(worker_data.decode("utf-8"))
             return WorkerInfo.from_dict(data)
 
         except Exception as e:
@@ -329,7 +327,7 @@ class WorkerRegistryService:
             workers = []
             for _worker_id, worker_data in all_data.items():
                 try:
-                    data = from_json(worker_data.decode('utf-8'))
+                    data = from_json(worker_data.decode("utf-8"))
                     workers.append(WorkerInfo.from_dict(data))
                 except Exception as e:
                     logger.warning(f"解析 Worker 数据失败: {e}")
@@ -366,7 +364,7 @@ class WorkerRegistryService:
 
             workers = []
             for worker_id in worker_ids:
-                worker_id_str = worker_id.decode('utf-8') if isinstance(worker_id, bytes) else worker_id
+                worker_id_str = worker_id.decode("utf-8") if isinstance(worker_id, bytes) else worker_id
                 worker_info = await self.get_worker(worker_id_str)
                 if worker_info:
                     workers.append(worker_info)
@@ -434,8 +432,9 @@ class WorkerRegistryService:
 
                     offline_workers.append(worker.worker_id)
 
-                    logger.warning(f"Worker 离线: worker_id={worker.worker_id}, "
-                                   f"last_heartbeat={time_since_heartbeat:.1f}s ago")
+                    logger.warning(
+                        f"Worker 离线: worker_id={worker.worker_id}, last_heartbeat={time_since_heartbeat:.1f}s ago"
+                    )
 
             return offline_workers
 
@@ -468,8 +467,9 @@ class WorkerRegistryService:
                     await self.unregister_worker(worker.worker_id)
                     cleaned_count += 1
 
-                    logger.info(f"清理离线 Worker: worker_id={worker.worker_id}, "
-                                f"offline_time={time_since_heartbeat:.1f}s")
+                    logger.info(
+                        f"清理离线 Worker: worker_id={worker.worker_id}, offline_time={time_since_heartbeat:.1f}s"
+                    )
 
             return cleaned_count
 

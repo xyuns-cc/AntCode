@@ -23,7 +23,7 @@ interface RegionWorkerSelectorProps {
     require_render?: boolean
   }) => void
   disabled?: boolean
-  /** 是否需要渲染能力（浏览器引擎） */
+  /** 是否需要浏览器渲染能力，会影响可选 worker（一般来自 CrawlEngine === 'browser'） */
   requireRender?: boolean
 }
 
@@ -31,15 +31,13 @@ interface RegionInfo {
   region: string
   workerCount: number
   onlineCount: number
-  renderCapableCount: number
   avgScore: number
 }
 
 const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
   value = {},
   onChange,
-  disabled = false,
-  requireRender = false
+  disabled = false
 }) => {
   const [loading, setLoading] = useState(false)
   const [regions, setRegions] = useState<RegionInfo[]>([])
@@ -62,7 +60,6 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
               region,
               workerCount: 0,
               onlineCount: 0,
-              renderCapableCount: 0,
               avgScore: 0
             })
           }
@@ -72,13 +69,7 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
           
           if (worker.status === 'online') {
             info.onlineCount++
-            
-            // 检查渲染能力
-            const caps = worker.capabilities as Record<string, { enabled?: boolean }> | undefined
-            if (caps?.drissionpage?.enabled) {
-              info.renderCapableCount++
-            }
-            
+
             // 计算负载分数（越低越好）
             const metrics = worker.metrics as { cpu?: number; memory?: number } | undefined
             if (metrics) {
@@ -115,11 +106,7 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
 
   // 获取当前选中区域的信息
   const selectedRegion = regions.find(r => r.region === value.region)
-  
-  // 检查是否有符合条件的 Worker
-  const hasAvailableWorkers = requireRender 
-    ? regions.some(r => r.renderCapableCount > 0)
-    : regions.some(r => r.onlineCount > 0)
+  const hasAvailableWorkers = regions.some(r => r.onlineCount > 0)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -157,7 +144,7 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
           </Select.Option>
           
           {regions.map(region => {
-            const available = requireRender ? region.renderCapableCount : region.onlineCount
+            const available = region.onlineCount
             const isDisabled = available === 0
             
             return (
@@ -175,9 +162,6 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
                     <Tag color={available > 0 ? 'green' : 'default'}>
                       {available} 可用
                     </Tag>
-                    {requireRender && region.renderCapableCount > 0 && (
-                      <Tag color="blue">支持渲染</Tag>
-                    )}
                     {region.avgScore > 0 && (
                       <Text type="secondary" style={{ fontSize: 11 }}>
                         负载: {region.avgScore.toFixed(0)}%
@@ -201,7 +185,6 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
               <CloudServerOutlined />
               <Text>
                 {selectedRegion.region}: {selectedRegion.onlineCount} 个在线 Worker
-                {requireRender && `, ${selectedRegion.renderCapableCount} 个支持浏览器渲染`}
                 {selectedRegion.avgScore > 0 && `, 平均负载 ${selectedRegion.avgScore.toFixed(0)}%`}
               </Text>
             </Space>
@@ -215,20 +198,7 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
         <Alert
           type="warning"
           showIcon
-          message={
-            requireRender 
-              ? '当前没有支持浏览器渲染的在线 Worker，请检查配置'
-              : '当前没有在线 Worker，任务可能无法执行'
-          }
-        />
-      )}
-
-      {/* 渲染能力提示 */}
-      {requireRender && hasAvailableWorkers && (
-        <Alert
-          type="info"
-          showIcon
-          message="已选择浏览器引擎，系统将自动选择具有渲染能力的 Worker 执行任务"
+          message="当前没有在线 Worker，任务可能无法执行"
         />
       )}
     </div>

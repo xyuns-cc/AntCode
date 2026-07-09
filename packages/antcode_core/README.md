@@ -27,11 +27,7 @@ antcode_core/
 │   │   ├── streams.py
 │   │   ├── zsets.py
 │   │   └── locks.py
-│   ├── storage/      # 对象存储
-│   │   ├── base.py
-│   │   ├── s3.py
-│   │   ├── local.py
-│   │   └── presign.py
+│   ├── postgres/     # PostgreSQL blob 与持久化适配
 │   └── observability/ # 可观测性
 │       ├── metrics.py
 │       ├── health.py

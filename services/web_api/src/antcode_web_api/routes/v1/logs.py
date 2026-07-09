@@ -1,16 +1,14 @@
-"""日志管理接口"""
+"""日志管理接口。"""
 
-import gzip
-import os
 from datetime import datetime
 from typing import Any
 
-import aiohttp
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from loguru import logger
-from tortoise.exceptions import DoesNotExist
-
-from antcode_web_api.response import Messages, success
+from antcode_core.application.services.logs.log_security_service import (
+    error_handler,
+    log_security_service,
+)
+from antcode_core.application.services.logs.task_log_service import task_log_service
+from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.logs import (
@@ -21,62 +19,13 @@ from antcode_core.domain.schemas.logs import (
     LogType,
     UnifiedLogResponse,
 )
-from antcode_core.application.services.logs.log_security_service import error_handler, log_security_service
-from antcode_core.application.services.logs.task_log_service import task_log_service
-from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
-from antcode_web_api.websockets.websocket_connection_manager import websocket_manager
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from loguru import logger
+from tortoise.exceptions import DoesNotExist
+
+from antcode_web_api.response import Messages, success
 
 router = APIRouter()
-
-
-async def _get_logs_from_s3(run_id: str, log_type: str | None = None) -> dict[str, str]:
-    """从 S3 读取归档日志（支持压缩文件）"""
-    try:
-        from antcode_core.infrastructure.storage.log_storage import get_log_storage
-
-        log_storage = get_log_storage()
-        result = {"stdout": "", "stderr": ""}
-
-        log_types = [log_type] if log_type else ["stdout", "stderr"]
-
-        for lt in log_types:
-            try:
-                # 先尝试获取预签名下载 URL（压缩文件）
-                url = await log_storage.get_presigned_download_url(run_id, lt)
-                if url:
-                    # 下载并解压
-                    async with (
-                        aiohttp.ClientSession() as session,
-                        session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp,
-                    ):
-                        if resp.status == 200:
-                            data = await resp.read()
-                            try:
-                                content = gzip.decompress(data).decode("utf-8")
-                                result[lt] = content
-                                logger.debug(f"从 S3 读取 {lt} 日志成功: {len(content)} bytes")
-                            except Exception:
-                                # 可能不是压缩文件
-                                result[lt] = data.decode("utf-8", errors="ignore")
-                    continue
-
-                # 回退到 query_logs（JSONL 格式）
-                query_result = await log_storage.query_logs(
-                    run_id=run_id,
-                    log_type=lt,
-                    limit=10000,
-                )
-                if query_result.entries:
-                    lines = [entry.content for entry in query_result.entries]
-                    result[lt] = "\n".join(lines)
-
-            except Exception as e:
-                logger.debug(f"从 S3 读取 {lt} 日志失败: {e}")
-
-        return result
-    except Exception as e:
-        logger.debug(f"S3 日志存储不可用: {e}")
-        return {"stdout": "", "stderr": ""}
 
 
 def _normalize_log_type(log_type: LogType | str | None) -> LogType | None:
@@ -110,194 +59,114 @@ def _normalize_log_level(level: LogLevel | str | None) -> LogLevel | None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的日志级别") from exc
 
 
+def _select_raw_content(logs_data: dict[str, str], log_type: LogType | None) -> str:
+    stdout_content = logs_data.get("output", "")
+    stderr_content = logs_data.get("error", "")
+    if log_type == LogType.STDOUT:
+        return stdout_content
+    if log_type == LogType.STDERR:
+        return stderr_content
+    if stdout_content and stderr_content:
+        return f"=== STDOUT ===\n{stdout_content}\n\n=== STDERR ===\n{stderr_content}"
+    return stdout_content or stderr_content
+
+
+def _tail_content(content: str, lines: int | None) -> str:
+    if not lines or not content:
+        return content
+    return "\n".join(content.split("\n")[-lines:])
+
+
+def _line_entries(
+    lines: list[str],
+    log_type: LogType,
+    execution,
+    run_id: str,
+    search: str | None,
+) -> list[LogEntry]:
+    level = LogLevel.ERROR if log_type == LogType.STDERR else LogLevel.INFO
+    timestamp = execution.start_time or execution.created_at or datetime.utcnow()
+    return [
+        LogEntry(
+            id=index,
+            timestamp=timestamp,
+            level=level,
+            log_type=log_type,
+            run_id=run_id,
+            task_id=str(execution.task_id),
+            message=line.strip(),
+            source="task_execution",
+        )
+        for index, line in enumerate(lines)
+        if line.strip() and (not search or search.lower() in line.lower())
+    ]
+
+
+def _structured_entries(
+    logs_data: dict[str, str],
+    execution,
+    run_id: str,
+    log_type: LogType | None,
+    search: str | None,
+) -> list[LogEntry]:
+    entries: list[LogEntry] = []
+    if not log_type or log_type == LogType.STDOUT:
+        entries.extend(
+            _line_entries(logs_data.get("output", "").split("\n"), LogType.STDOUT, execution, run_id, search)
+        )
+    if not log_type or log_type == LogType.STDERR:
+        entries.extend(_line_entries(logs_data.get("error", "").split("\n"), LogType.STDERR, execution, run_id, search))
+    return entries
+
+
 async def _get_raw_log_response(run_id, execution, log_type, lines):
     try:
         normalized_log_type = _normalize_log_type(log_type)
-        file_path = None
-        content = ""
-        file_size = 0
-        lines_count = 0
-        last_modified = None
-
-        if normalized_log_type == LogType.STDOUT and execution.log_file_path:
-            file_path = execution.log_file_path
-        elif normalized_log_type == LogType.STDERR and execution.error_log_path:
-            file_path = execution.error_log_path
-        else:
-            # 如果没有指定类型，合并两个文件的内容
-            logs_data = await task_log_service.get_execution_logs(run_id)
-            stdout_content = logs_data.get("output", "")
-            stderr_content = logs_data.get("error", "")
-
-            # 如果本地没有日志，尝试从 S3 读取
-            if not stdout_content and not stderr_content:
-                s3_logs = await _get_logs_from_s3(run_id)
-                stdout_content = s3_logs.get("stdout", "")
-                stderr_content = s3_logs.get("stderr", "")
-
-            if stdout_content and stderr_content:
-                content = f"=== STDOUT ===\n{stdout_content}\n\n=== STDERR ===\n{stderr_content}"
-            elif stdout_content:
-                content = stdout_content
-            elif stderr_content:
-                content = stderr_content
-            else:
-                content = ""
-
-            if lines:
-                content_lines = content.split("\n")
-                content = "\n".join(
-                    content_lines[-lines:] if len(content_lines) > lines else content_lines
-                )
-
-            return success(
-                UnifiedLogResponse(
-                    run_id=run_id,
-                    format=LogFormat.RAW,
-                    log_type=normalized_log_type.value if normalized_log_type else "mixed",
-                    raw_content=content,
-                    lines_count=len(content.split("\n")) if content else 0,
-                ),
-                message=Messages.QUERY_SUCCESS,
-            )
-
-        # 读取指定文件
-        if file_path:
-            content = await task_log_service.read_log(file_path, lines)
-            log_info = await task_log_service.get_log_info(file_path)
-            file_size = log_info.get("size", 0)
-            lines_count = log_info.get("lines", 0)
-            last_modified = log_info.get("modified_time")
-
-        # 如果本地文件为空，尝试从 S3 读取
-        if not content:
-            s3_logs = await _get_logs_from_s3(
-                run_id,
-                normalized_log_type.value if normalized_log_type else None,
-            )
-            if normalized_log_type == LogType.STDOUT:
-                content = s3_logs.get("stdout", "")
-            elif normalized_log_type == LogType.STDERR:
-                content = s3_logs.get("stderr", "")
-
-            if lines and content:
-                content_lines = content.split("\n")
-                content = "\n".join(
-                    content_lines[-lines:] if len(content_lines) > lines else content_lines
-                )
-            lines_count = len(content.split("\n")) if content else 0
-
+        logs_data = await task_log_service.get_execution_logs(run_id)
+        content = _tail_content(_select_raw_content(logs_data, normalized_log_type), lines)
         return success(
             UnifiedLogResponse(
                 run_id=run_id,
                 format=LogFormat.RAW,
-                log_type=normalized_log_type.value if normalized_log_type else None,
+                log_type=normalized_log_type.value if normalized_log_type else "mixed",
                 raw_content=content,
-                file_path=file_path,
-                file_size=file_size,
-                lines_count=lines_count,
-                last_modified=last_modified,
+                lines_count=len(content.split("\n")) if content else 0,
             ),
             message=Messages.QUERY_SUCCESS,
         )
-
     except Exception as e:
         logger.error(f"获取原始日志失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取日志失败"
-        )
+        raise HTTPException(status_code=500, detail="获取日志失败")
 
 
 async def _get_structured_log_response(run_id, execution, log_type, level, lines, search):
     try:
         normalized_log_type = _normalize_log_type(log_type)
         normalized_level = _normalize_log_level(level)
-
-        # 获取日志内容
         logs_data = await task_log_service.get_execution_logs(run_id)
-
-        stdout_content = logs_data.get("output", "")
-        stderr_content = logs_data.get("error", "")
-
-        # 如果本地没有日志，尝试从 S3 读取
-        if not stdout_content and not stderr_content:
-            s3_logs = await _get_logs_from_s3(run_id)
-            stdout_content = s3_logs.get("stdout", "")
-            stderr_content = s3_logs.get("stderr", "")
-
-        # 解析日志条目
-        log_entries = []
-        log_timestamp = execution.start_time or execution.created_at or datetime.utcnow()
-
-        # 处理标准输出日志
-        if not normalized_log_type or normalized_log_type == LogType.STDOUT:
-            stdout_lines = stdout_content.split("\n") if stdout_content else []
-            for i, line in enumerate(stdout_lines):
-                if line.strip() and (not search or search.lower() in line.lower()):
-                    log_entries.append(
-                        LogEntry(
-                            id=i,
-                            timestamp=log_timestamp,
-                            level=LogLevel.INFO,
-                            log_type=LogType.STDOUT,
-                            run_id=run_id,
-                            task_id=str(execution.task_id),
-                            message=line.strip(),
-                            source="task_execution",
-                        )
-                    )
-
-        # 处理错误输出日志
-        if not normalized_log_type or normalized_log_type == LogType.STDERR:
-            stderr_lines = stderr_content.split("\n") if stderr_content else []
-            for i, line in enumerate(stderr_lines):
-                if line.strip() and (not search or search.lower() in line.lower()):
-                    log_entries.append(
-                        LogEntry(
-                            id=len(log_entries) + i,
-                            timestamp=log_timestamp,
-                            level=LogLevel.ERROR,
-                            log_type=LogType.STDERR,
-                            run_id=run_id,
-                            task_id=str(execution.task_id),
-                            message=line.strip(),
-                            source="task_execution",
-                        )
-                    )
-
-        # 按级别过滤
+        entries = _structured_entries(logs_data, execution, run_id, normalized_log_type, search)
         if normalized_level:
-            log_entries = [entry for entry in log_entries if entry.level == normalized_level]
-
-        # 限制行数
+            entries = [entry for entry in entries if entry.level == normalized_level]
         if lines:
-            log_entries = log_entries[-lines:]
-
-        structured_data = LogListResponse(
-            total=len(log_entries), page=1, size=len(log_entries), items=log_entries
-        )
-
-        log_type_value = normalized_log_type.value if normalized_log_type else ""
+            entries = entries[-lines:]
+        data = LogListResponse(total=len(entries), page=1, size=len(entries), items=entries)
         return success(
             UnifiedLogResponse(
                 run_id=run_id,
                 format=LogFormat.STRUCTURED,
-                log_type=log_type_value,
-                structured_data=structured_data,
+                log_type=normalized_log_type.value if normalized_log_type else "",
+                structured_data=data,
             ),
             message=Messages.QUERY_SUCCESS,
         )
-
     except Exception as e:
         logger.error(f"获取结构化日志失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取日志失败"
-        )
+        raise HTTPException(status_code=500, detail="获取日志失败")
 
 
 @router.get("/runs/{run_id}", response_model=BaseResponse[UnifiedLogResponse])
 async def get_run_logs(
-    run_id,  # 支持 public_id 和内部 id
+    run_id,
     format: str = Query(LogFormat.STRUCTURED),
     log_type: str = Query(None),
     level: str = Query(None),
@@ -307,120 +176,61 @@ async def get_run_logs(
 ):
     try:
         normalized_format = _normalize_log_format(format)
-
-        # 使用增强的权限验证
-        execution = await log_security_service.verify_log_access_permission(
-            current_user, run_id, "read"
-        )
-
-        # 根据格式返回不同的响应
+        execution = await log_security_service.verify_log_access_permission(current_user, run_id, "read")
         if normalized_format == LogFormat.RAW:
-            # 返回原始文本格式
             return await _get_raw_log_response(run_id, execution, log_type, lines)
-        else:
-            # 返回结构化格式
-            return await _get_structured_log_response(
-                run_id, execution, log_type, level, lines, search
-            )
-
+        return await _get_structured_log_response(run_id, execution, log_type, level, lines, search)
     except HTTPException:
-        # 重新抛出HTTP异常
         raise
     except Exception as e:
-        # 使用增强的错误处理
-        error_id = error_handler.log_error(
-            e,
-            {
-                "endpoint": "get_run_logs",
-                "run_id": run_id,
-                "user_id": current_user.user_id,
-                "format": str(format),
-                "log_type": log_type,
-            },
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取运行日志失败 (error_id: {error_id})",
-        )
-
-
-# 便捷接口：直接获取特定类型的日志
+        error_id = error_handler.log_error(e, {"endpoint": "get_run_logs", "run_id": run_id})
+        raise HTTPException(status_code=500, detail=f"获取运行日志失败 (error_id: {error_id})")
 
 
 @router.get("/runs/{run_id}/stdout", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stdout_logs(
-    run_id,  # 支持 public_id 和内部 id
+    run_id,
     format: str = Query(LogFormat.RAW),
     lines: int = Query(None, ge=1, le=10000),
     current_user=Depends(get_current_user),
 ):
-    """获取标准输出日志"""
-    return await get_run_logs(
-        run_id=run_id,
-        format=format,
-        log_type=LogType.STDOUT,
-        lines=lines,
-        current_user=current_user,
-    )
+    return await get_run_logs(run_id, format, LogType.STDOUT, None, lines, None, current_user)
 
 
 @router.get("/runs/{run_id}/stderr", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stderr_logs(
-    run_id,  # 支持 public_id 和内部 id
+    run_id,
     format: str = Query(LogFormat.RAW),
     lines: int = Query(None, ge=1, le=10000),
     current_user=Depends(get_current_user),
 ):
-    """获取标准错误输出日志"""
-    return await get_run_logs(
-        run_id=run_id,
-        format=format,
-        log_type=LogType.STDERR,
-        lines=lines,
-        current_user=current_user,
-    )
+    return await get_run_logs(run_id, format, LogType.STDERR, None, lines, None, current_user)
 
 
 @router.get("/runs/{run_id}/errors", response_model=BaseResponse[UnifiedLogResponse])
 async def get_error_logs(
-    run_id,  # 支持 public_id 和内部 id
+    run_id,
     format: str = Query(LogFormat.STRUCTURED),
     lines: int = Query(None, ge=1, le=10000),
     search: str = Query(None),
     current_user=Depends(get_current_user),
 ):
-    """获取错误级别的日志"""
-    return await get_run_logs(
-        run_id=run_id,
-        format=format,
-        level=LogLevel.ERROR,
-        lines=lines,
-        search=search,
-        current_user=current_user,
-    )
+    return await get_run_logs(run_id, format, None, LogLevel.ERROR, lines, search, current_user)
 
 
 @router.get("/runs/{run_id}/raw", response_model=BaseResponse[UnifiedLogResponse])
 async def get_raw_logs(
-    run_id,  # 支持 public_id 和内部 id
+    run_id,
     log_type: str = Query(None),
     lines: int = Query(None, ge=1, le=10000),
     current_user=Depends(get_current_user),
 ):
-    """获取原始格式的日志"""
-    return await get_run_logs(
-        run_id=run_id,
-        format=LogFormat.RAW,
-        log_type=log_type,
-        lines=lines,
-        current_user=current_user,
-    )
+    return await get_run_logs(run_id, LogFormat.RAW, log_type, None, lines, None, current_user)
 
 
 @router.get("/tasks/{task_id}", response_model=BaseResponse[LogListResponse])
 async def get_task_logs(
-    task_id,  # 支持 public_id 和内部 id
+    task_id,
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=1000),
     log_type: str = Query(None),
@@ -430,9 +240,7 @@ async def get_task_logs(
     search: str = Query(None),
     current_user=Depends(get_current_user),
 ):
-    """获取指定任务的所有日志"""
     try:
-        # 验证任务权限并获取运行记录
         result = await scheduler_service.get_task_executions(
             task_id=task_id,
             user_id=current_user.user_id,
@@ -441,214 +249,24 @@ async def get_task_logs(
             page=page,
             size=size,
         )
-
-        executions = result["executions"]
-        # result["total"] 可用于分页，当前未使用
-
-        # 收集所有日志条目
-        all_log_entries = []
-
-        for execution in executions:
-            try:
-                logs_data = await task_log_service.get_execution_logs(execution.run_id)
-
-                # 处理标准输出日志
-                if not log_type or log_type == LogType.STDOUT:
-                    stdout_lines = logs_data.get("output", "").split("\n")
-                    for line in stdout_lines:
-                        if line.strip() and (not search or search.lower() in line.lower()):
-                            all_log_entries.append(
-                                LogEntry(
-                                    timestamp=execution.start_time,
-                                    level=LogLevel.INFO,
-                                    log_type=LogType.STDOUT,
-                                    run_id=execution.run_id,
-                                    task_id=task_id,
-                                    message=line.strip(),
-                                    source="task_execution",
-                                )
-                            )
-
-                # 处理错误输出日志
-                if not log_type or log_type == LogType.STDERR:
-                    stderr_lines = logs_data.get("error", "").split("\n")
-                    for line in stderr_lines:
-                        if line.strip() and (not search or search.lower() in line.lower()):
-                            all_log_entries.append(
-                                LogEntry(
-                                    timestamp=execution.start_time,
-                                    level=LogLevel.ERROR,
-                                    log_type=LogType.STDERR,
-                                    run_id=execution.run_id,
-                                    task_id=task_id,
-                                    message=line.strip(),
-                                    source="task_execution",
-                                )
-                            )
-            except Exception as e:
-                logger.warning(f"读取运行记录 {execution.run_id} 日志失败: {e}")
-                continue
-
-        # 按级别过滤
-        if level:
-            all_log_entries = [entry for entry in all_log_entries if entry.level == level]
-
-        # 按时间排序
-        all_log_entries.sort(key=lambda x: x.timestamp, reverse=True)
-
-        return success(
-            LogListResponse(
-                total=len(all_log_entries), page=page, size=size, items=all_log_entries
-            ),
-            message=Messages.QUERY_SUCCESS,
-        )
-
+        entries = []
+        normalized_type = _normalize_log_type(log_type)
+        normalized_level = _normalize_log_level(level)
+        for execution in result["executions"]:
+            logs_data = await task_log_service.get_execution_logs(execution.run_id)
+            entries.extend(_structured_entries(logs_data, execution, execution.run_id, normalized_type, search))
+        if normalized_level:
+            entries = [entry for entry in entries if entry.level == normalized_level]
+        entries.sort(key=lambda item: item.timestamp, reverse=True)
+        return success(LogListResponse(total=len(entries), page=page, size=size, items=entries))
     except DoesNotExist:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    except Exception as e:
-        logger.error(f"获取任务日志失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取任务日志失败"
-        )
+        raise HTTPException(status_code=404, detail="任务不存在")
 
 
 @router.get("/metrics", response_model=BaseResponse[dict[str, Any]])
 async def get_log_metrics(current_user: TokenData = Depends(get_current_user)):
-    """获取简单的日志统计指标"""
-    try:
-        # 获取用户的所有任务ID
-        task_ids = await scheduler_service.get_user_task_ids(current_user.user_id)
-
-        if not task_ids:
-            return success(
-                {"total_log_files": 0, "total_executions": 0},
-                message=Messages.QUERY_SUCCESS,
-            )
-
-        # 获取用户任务的运行记录
-        executions = await scheduler_service.get_task_executions_by_task_ids(task_ids)
-        total_log_files = 0
-
-        for execution in executions:
-            # 统计日志文件
-            if execution.log_file_path and os.path.exists(execution.log_file_path):
-                total_log_files += 1
-            if execution.error_log_path and os.path.exists(execution.error_log_path):
-                total_log_files += 1
-
-        return success(
-            {"total_log_files": total_log_files, "total_executions": len(executions)},
-            message=Messages.QUERY_SUCCESS,
-        )
-
-    except Exception as e:
-        logger.error(f"获取日志指标失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取日志指标失败"
-        )
-
-
-@router.get("/performance/stats", response_model=BaseResponse[dict[str, Any]])
-async def get_performance_stats(current_user: TokenData = Depends(get_current_user)):
-    """获取日志系统性能统计"""
-    try:
-        from antcode_core.application.services.logs.log_performance_service import log_performance_monitor
-
-        # 获取性能摘要
-        performance_summary = log_performance_monitor.get_performance_summary()
-
-        # 获取WebSocket统计
-        websocket_stats = websocket_manager.get_stats()
-
-        return success(
-            {
-                "log_performance": performance_summary,
-                "websocket_performance": websocket_stats,
-                "error_statistics": error_handler.get_error_stats(),
-                "timestamp": datetime.now().isoformat(),
-            },
-            message=Messages.QUERY_SUCCESS,
-        )
-
-    except Exception as e:
-        error_id = error_handler.log_error(
-            e, {"endpoint": "get_performance_stats", "user_id": current_user.user_id}
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取性能统计失败 (错误ID: {error_id})",
-        )
-
-
-@router.get("/performance/slow-operations", response_model=BaseResponse[dict[str, Any]])
-async def get_slow_operations(
-    threshold: float = Query(1.0, ge=0.1, le=10.0),
-    limit: int = Query(10, ge=1, le=100),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取慢操作列表"""
-    try:
-        from antcode_core.application.services.logs.log_performance_service import log_performance_monitor
-
-        slow_operations = log_performance_monitor.get_slow_operations(threshold, limit)
-
-        return success(
-            {
-                "threshold_seconds": threshold,
-                "slow_operations": slow_operations,
-                "count": len(slow_operations),
-            },
-            message=Messages.QUERY_SUCCESS,
-        )
-
-    except Exception as e:
-        error_id = error_handler.log_error(
-            e,
-            {
-                "endpoint": "get_slow_operations",
-                "user_id": current_user.user_id,
-                "threshold": threshold,
-            },
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取慢操作列表失败 (错误ID: {error_id})",
-        )
-
-
-@router.get("/analytics/daily", response_model=BaseResponse[dict[str, Any]])
-async def get_daily_analytics(
-    days: int = Query(7, ge=1, le=30), current_user: TokenData = Depends(get_current_user)
-):
-    """获取日志系统日统计分析"""
-    try:
-        from antcode_core.application.services.logs.log_performance_service import log_statistics_service
-
-        daily_stats = log_statistics_service.get_daily_statistics(days)
-        user_stats = log_statistics_service.get_user_statistics()
-
-        return success(
-            {
-                "daily_statistics": daily_stats,
-                "user_statistics": user_stats,
-                "analysis_period_days": days,
-            },
-            message=Messages.QUERY_SUCCESS,
-        )
-
-    except Exception as e:
-        error_id = error_handler.log_error(
-            e,
-            {
-                "endpoint": "get_daily_analytics",
-                "user_id": current_user.user_id,
-                "days": days,
-            },
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取日统计失败 (错误ID: {error_id})",
-        )
+    task_ids = await scheduler_service.get_user_task_ids(current_user.user_id)
+    if not task_ids:
+        return success({"total_log_rows": 0, "total_executions": 0})
+    executions = await scheduler_service.get_task_executions_by_task_ids(task_ids)
+    return success({"total_log_rows": 0, "total_executions": len(executions)})

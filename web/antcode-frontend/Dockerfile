@@ -23,8 +23,11 @@ RUN ls -la && ls -la src/
 # 构建（跳过 type-check，直接用 vite）
 RUN ./node_modules/.bin/vite build --mode production
 
-# Stage 2: Production
-FROM nginx:1.27-alpine AS runtime
+# Stage 2: Production (J4: nginx unprivileged 镜像以非 root 跑)
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+
+# unprivileged 镜像默认 uid=101 (nginx)，监听 8080 而不是 80
+USER root
 
 WORKDIR /usr/share/nginx/html
 
@@ -33,10 +36,11 @@ RUN rm -rf ./*
 
 # 从构建阶段复制产物
 COPY --from=builder /app/dist .
+RUN chown -R nginx:nginx /usr/share/nginx/html
 
-# Nginx 配置
+# Nginx 配置（unprivileged 监听 8080 而非 80）
 RUN echo 'server { \
-    listen 80; \
+    listen 8080; \
     server_name localhost; \
     root /usr/share/nginx/html; \
     index index.html; \
@@ -62,9 +66,13 @@ RUN echo 'server { \
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml; \
 }' > /etc/nginx/conf.d/default.conf
 
-# 健康检查
+# 健康检查（unprivileged nginx 走 8080）
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost:80/ || exit 1
+    CMD wget --quiet --tries=1 --spider http://localhost:8080/ || exit 1
 
-EXPOSE 80
+EXPOSE 8080
+
+# 切回非 root 运行（J4）
+USER nginx
+
 CMD ["nginx", "-g", "daemon off;"]

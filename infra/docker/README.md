@@ -8,7 +8,7 @@
 - `master`（Schedule Plane）
 - `gateway`（Data Plane）
 - `worker`（Execution Plane）
-- `mysql` / `redis` / `minio` / `frontend`
+- `postgres` / `redis` / `frontend`
 
 ## 快速启动
 
@@ -41,7 +41,6 @@ docker compose -f docker-compose.dev.yml up -d --force-recreate
 - Web API: `http://localhost:8000`
 - Swagger: `http://localhost:8000/docs`
 - Gateway gRPC: `localhost:50051`
-- MinIO Console: `http://localhost:9001`
 
 ## 数据目录规范（最新版）
 
@@ -50,15 +49,13 @@ docker compose -f docker-compose.dev.yml up -d --force-recreate
 ```text
 /app/data/
 ├── backend/          # web_api / master / gateway
-│   ├── db/
-│   ├── logs/
-│   ├── storage/
-│   └── keys/
+│   ├── keys/
+│   ├── work/
+│   └── temp/
 └── worker/           # worker
-    ├── projects/
-    ├── runtimes/
-    ├── logs/
     ├── runs/
+    ├── runtimes/
+    ├── temp/
     ├── secrets/
     └── identity/
 ```
@@ -67,9 +64,8 @@ docker compose -f docker-compose.dev.yml up -d --force-recreate
 
 | Volume | 用途 |
 |---|---|
-| `mysql_data` | MySQL 数据 |
+| `postgres_data` | PostgreSQL 数据 |
 | `redis_data` | Redis 数据 |
-| `minio_data` | MinIO 数据 |
 | `worker_data` | 挂载到 `/app/data` 的运行时数据 |
 
 ## 关键环境变量
@@ -79,9 +75,8 @@ docker compose -f docker-compose.dev.yml up -d --force-recreate
 | `WEB_API_PORT` | Web API 端口 |
 | `GATEWAY_GRPC_PORT` | Gateway gRPC 端口 |
 | `FRONTEND_PORT` | 前端端口 |
-| `MYSQL_*` | MySQL 账号与库配置 |
+| `POSTGRES_*` | PostgreSQL 账号与库配置 |
 | `REDIS_PASSWORD` | Redis 密码 |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO 凭据 |
 | `WORKER_TRANSPORT_MODE` / `WORKER_NAME` | Worker 基础配置 |
 
 ## 故障排查

@@ -12,18 +12,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class WorkerCapabilities(BaseModel):
     """Worker 能力配置"""
-    drissionpage: dict[str, Any] = Field(default_factory=dict, description="DrissionPage 渲染能力")
+
     curl_cffi: dict[str, Any] = Field(default_factory=dict, description="curl_cffi 能力")
+    # T6-T4a fixup: worker 侧的 CapabilityDetector 上报 task_types
+    # (list of plugin names: code/rule/spider/render 等)，供 master
+    # dispatcher.select_best_worker 按 capability 过滤。schema 之前用
+    # extra=forbid 会拒绝这个字段导致 direct 注册 400 Bad Request。
+    task_types: list[str] = Field(default_factory=list, description="worker 已装载的 plugin/task type 列表")
 
-    model_config = ConfigDict(extra="ignore")
-
-    def has_render_capability(self) -> bool:
-        """检查是否有渲染能力"""
-        return bool(self.drissionpage and self.drissionpage.get("enabled"))
+    model_config = ConfigDict(extra="forbid")
 
 
 class WorkerMetrics(BaseModel):
     """Worker 指标"""
+
     cpu: float = Field(0, ge=0, le=100, description="CPU 使用率")
     memory: float = Field(0, ge=0, le=100, description="内存使用率")
     disk: float = Field(0, ge=0, le=100, description="磁盘使用率")
@@ -41,11 +43,12 @@ class WorkerMetrics(BaseModel):
     diskUsed: int = Field(0, description="已用磁盘 (bytes)")
     diskFree: int = Field(0, description="可用磁盘 (bytes)")
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
 
 class WorkerCreateRequest(BaseModel):
     """Worker 创建请求"""
+
     name: str = Field(..., min_length=1, max_length=100, description="Worker 名称")
     host: str = Field(..., min_length=1, max_length=255, description="主机地址")
     port: int = Field(8001, ge=1, le=65535, description="节点端口")
@@ -56,6 +59,7 @@ class WorkerCreateRequest(BaseModel):
 
 class WorkerUpdateRequest(BaseModel):
     """Worker 更新请求"""
+
     name: str = Field("", min_length=0, max_length=100, description="Worker 名称")
     host: str = Field("", min_length=0, max_length=255, description="主机地址")
     port: int = Field(0, ge=0, le=65535, description="端口号")
@@ -67,6 +71,7 @@ class WorkerUpdateRequest(BaseModel):
 
 class WorkerResponse(BaseModel):
     """Worker 响应"""
+
     id: str = Field(..., description="Worker 公开ID")
     name: str = Field(..., description="Worker 名称")
     host: str = Field(..., description="主机地址")
@@ -85,8 +90,6 @@ class WorkerResponse(BaseModel):
     transportMode: str = Field("gateway", description="连接模式: direct/gateway")
 
     capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
-    hasRenderCapability: bool = Field(False, description="是否有渲染能力")
-
     metrics: WorkerMetrics = Field(default_factory=WorkerMetrics)
     lastHeartbeat: str = Field("", description="最后心跳时间")
     createdAt: datetime = Field(..., description="创建时间")
@@ -97,6 +100,7 @@ class WorkerResponse(BaseModel):
 
 class WorkerListResponse(BaseModel):
     """Worker 列表响应"""
+
     items: list[WorkerResponse] = Field(..., description="Worker 列表")
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页")
@@ -105,6 +109,7 @@ class WorkerListResponse(BaseModel):
 
 class WorkerAggregateStats(BaseModel):
     """Worker 聚合统计"""
+
     totalWorkers: int = Field(0, description="总 Worker 数")
     onlineWorkers: int = Field(0, description="在线 Worker 数")
     offlineWorkers: int = Field(0, description="离线 Worker 数")
@@ -153,6 +158,7 @@ class SpiderStatsSummary(BaseModel):
 
 class WorkerHeartbeatRequest(BaseModel):
     """Worker 心跳请求"""
+
     worker_id: str = Field(..., description="Worker ID")
     api_key: str = Field(..., description="API密钥")
     status: str = Field("online", description="Worker 状态")
@@ -198,6 +204,7 @@ class WorkerRegisterResponse(BaseModel):
 
 class WorkerCredentialsResponse(BaseModel):
     """Worker 凭证响应"""
+
     worker_id: str = Field(..., description="Worker 公开ID")
     api_key: str = Field(..., description="API密钥")
     secret_key: str = Field(..., description="密钥")
@@ -210,6 +217,7 @@ class WorkerCredentialsResponse(BaseModel):
 
 class WorkerInstallKeyRequest(BaseModel):
     """生成安装 Key 请求"""
+
     os_type: str = Field(..., description="操作系统类型: linux/macos/windows")
     allowed_source: str | None = Field(
         default=None,
@@ -220,6 +228,7 @@ class WorkerInstallKeyRequest(BaseModel):
 
 class WorkerInstallKeyResponse(BaseModel):
     """安装 Key 响应"""
+
     key: str = Field(..., description="安装Key")
     os_type: str = Field(..., description="操作系统类型")
     allowed_source: str | None = Field(default=None, description="来源绑定")
@@ -229,6 +238,7 @@ class WorkerInstallKeyResponse(BaseModel):
 
 class WorkerRegisterByKeyRequest(BaseModel):
     """使用 Key 注册 Worker 请求"""
+
     key: str = Field(..., min_length=1, description="安装Key")
     name: str = Field(..., min_length=1, max_length=100, description="Worker名称")
     host: str = Field(..., min_length=1, max_length=255, description="主机地址")
@@ -240,6 +250,7 @@ class WorkerRegisterByKeyRequest(BaseModel):
 
 class WorkerRegisterDirectRequest(BaseModel):
     """Direct 模式注册请求"""
+
     worker_id: str = Field(..., min_length=1, max_length=32, description="Worker ID")
     proof: str = Field(..., min_length=1, description="Direct 注册证明")
     name: str = Field("", max_length=100, description="Worker 名称")
@@ -256,8 +267,17 @@ class WorkerRegisterDirectRequest(BaseModel):
 
 class WorkerRegisterDirectResponse(BaseModel):
     """Direct 模式注册响应"""
+
     worker_id: str = Field(..., description="Worker 公开ID")
     created: bool = Field(False, description="是否新建")
+    redis_username: str | None = Field(
+        default=None,
+        description="Worker 专属 Redis ACL 用户名（开启 REDIS_ACL 时返回）",
+    )
+    redis_password: str | None = Field(
+        default=None,
+        description="Worker 专属 Redis ACL 密码（明文，仅此一次）",
+    )
 
 
 __all__ = [

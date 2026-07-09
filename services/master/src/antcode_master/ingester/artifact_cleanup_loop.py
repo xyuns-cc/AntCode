@@ -49,12 +49,43 @@ class ArtifactCleanupLoop:
                     await asyncio.sleep(self._leader_poll_interval)
                     continue
                 await artifact_cleanup_service.cleanup_now()
+                # T7-P2-8: 顺便扫一次孤儿 task_executions（迁移 26 删了 FK，
+                # 需要应用层周检兜底），只打指标+日志不自动删。
+                await self._check_orphans()
                 await asyncio.sleep(self._interval_hours * 3600)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("artifact 清理循环异常: {}", exc)
                 await asyncio.sleep(self._leader_poll_interval)
+
+    async def _check_orphans(self) -> None:
+        """T7-P2-8: 孤儿 task_executions 周检。
+
+        FK 已在迁移 26 删除，仅靠应用层 owner 校验保证参照完整；一旦有
+        drift（比如 scheduled_tasks 手动 DELETE），task_executions 会残留。
+        本方法只打日志 + 指标，不做级联删除——避免误伤运维手工 archive
+        场景。检出孤儿计数 > 0 时提醒运维介入。
+        """
+        try:
+            from tortoise import connections
+
+            conn = connections.get("default")
+            _, rows = await conn.execute_query(
+                'SELECT COUNT(*) AS n FROM "task_executions" te '
+                'WHERE te.task_id IS NOT NULL '
+                'AND NOT EXISTS (SELECT 1 FROM "scheduled_tasks" st WHERE st.id = te.task_id)'
+            )
+            n = int(rows[0]["n"]) if rows else 0
+            if n > 0:
+                logger.warning(
+                    f"[orphan-check] 检出 {n} 条孤儿 task_executions "
+                    "(task_id 指向已不存在的 scheduled_tasks，请人工确认)"
+                )
+            else:
+                logger.debug("[orphan-check] 无孤儿 task_executions")
+        except Exception as exc:
+            logger.warning(f"[orphan-check] 查询失败: {exc}")
 
 
 artifact_cleanup_loop = ArtifactCleanupLoop()

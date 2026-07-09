@@ -27,7 +27,7 @@ Worker 仅通过以下两种方式接入系统：
 ### 场景
 
 - 公网 Worker 或跨网络部署
-- 不希望暴露 Redis / MySQL 给 Worker
+- 不希望暴露 Redis / PostgreSQL 给 Worker
 
 ### 关键配置
 

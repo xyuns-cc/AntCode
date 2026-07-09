@@ -6,7 +6,6 @@ export * from './project'
 export * from './task'
 export * from './worker'
 export * from './branding'
-export * from './version'
 export * from './websocket'
 export * from './system-config'
 

@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from . import control_pb2 as control__pb2  # noqa: E402,F401
+from . import control_pb2 as control__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__

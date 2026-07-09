@@ -214,11 +214,19 @@ class WorkerConfig:
 
     # 沙箱硬限制（POSIX rlimit；非 POSIX 平台自动跳过）
     sandbox_enforce_rlimit: bool = True  # 默认强制开启 rlimit + 独立进程组
-    sandbox_max_open_files: int = 256  # RLIMIT_NOFILE
+    # R1-P1-8 (审查报告)：V13 修复过 256 → 2048（executor/base.py:63-65 有注释）
+    # 但 config 默认仍是 256，V13 在真实部署失效。scrapy 并发 + TLS + DNS
+    # 稍多就会触发 EMFILE，此处同步改为 2048。
+    sandbox_max_open_files: int = 2048  # RLIMIT_NOFILE
     sandbox_max_processes: int = 64  # RLIMIT_NPROC（防 fork 炸弹）
 
     # 传输模式配置
     transport_mode: str = "gateway"  # 传输模式: "direct" 或 "gateway"
+
+    # T6-T4a: RulePlugin 开关。默认开（当前主用途是爬虫）；code-only worker
+    # 部署时可关掉减少 Scrapy 依赖启动开销。也可通过 env
+    # `WORKER_ENABLE_RULE_PLUGIN=false` 覆盖。
+    enable_rule_plugin: bool = True
 
     # Redis 配置（Direct 模式）
     redis_url: str = ""

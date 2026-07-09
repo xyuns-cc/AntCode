@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class UserLoginRequest(BaseModel):
     """用户登录请求"""
+
     username: str = Field(..., min_length=1, max_length=50)
     password: str | None = Field(default=None, min_length=1)
     encrypted_password: str | None = Field(default=None, min_length=1)
@@ -24,8 +25,28 @@ class UserLoginRequest(BaseModel):
         return self
 
 
+_ADMIN_ROLES = {"admin", "super_admin"}
+
+
+def _validate_role_value(role: str | None) -> None:
+    if role is None:
+        return
+    if role not in {"user", "admin", "super_admin"}:
+        raise ValueError("role 取值必须是 user / admin / super_admin")
+
+
+def _validate_role_admin_consistency(is_admin: bool | None, role: str | None) -> None:
+    """is_admin 与 role 必须一致，防客户端注入不一致组合。"""
+    if is_admin is None or role is None:
+        return
+    role_says_admin = role in _ADMIN_ROLES
+    if is_admin != role_says_admin:
+        raise ValueError("is_admin 与 role 不一致：is_admin 必须 = (role in {admin, super_admin})")
+
+
 class UserCreateRequest(BaseModel):
     """用户创建请求"""
+
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8)
     email: str | None = Field(None, max_length=100)
@@ -33,13 +54,21 @@ class UserCreateRequest(BaseModel):
     is_admin: bool = Field(default=False)
     role: str | None = Field(None, max_length=20)
 
+    @model_validator(mode="after")
+    def validate_role_consistency(self) -> "UserCreateRequest":
+        _validate_role_value(self.role)
+        _validate_role_admin_consistency(self.is_admin, self.role)
+        return self
+
 
 class UserUpdateRequest(BaseModel):
     """用户更新请求"""
+
     username: str | None = Field(None, min_length=3, max_length=50)
     email: str | None = Field(None, max_length=100)
     is_active: bool | None = None
     is_admin: bool | None = None
+    role: str | None = Field(None, max_length=20)
     old_password: str | None = Field(None, min_length=1)
     new_password: str | None = Field(None, min_length=8)
 
@@ -47,22 +76,38 @@ class UserUpdateRequest(BaseModel):
     def validate_password_update_fields(self) -> "UserUpdateRequest":
         if self.old_password and not self.new_password:
             raise ValueError("提供 old_password 时必须同时提供 new_password")
+        _validate_role_value(self.role)
+        _validate_role_admin_consistency(self.is_admin, self.role)
+        return self
+
+
+class UserRoleUpdateRequest(BaseModel):
+    """专用于「改用户角色」的请求，仅 SUPER_ADMIN 可调。"""
+
+    role: str = Field(..., max_length=20)
+
+    @model_validator(mode="after")
+    def validate_role_value(self) -> "UserRoleUpdateRequest":
+        _validate_role_value(self.role)
         return self
 
 
 class UserPasswordUpdateRequest(BaseModel):
     """用户密码更新请求"""
+
     old_password: str = Field(..., min_length=1)
     new_password: str = Field(..., min_length=8)
 
 
 class UserAdminPasswordUpdateRequest(BaseModel):
     """管理员重置密码请求"""
+
     new_password: str = Field(..., min_length=8)
 
 
 class UserResponse(BaseModel):
     """用户响应"""
+
     id: str = Field(..., description="用户公开ID")
     username: str
     email: str = ""
@@ -79,6 +124,7 @@ class UserResponse(BaseModel):
 
 class UserSimpleResponse(BaseModel):
     """用户简要响应"""
+
     id: str = Field(..., description="用户公开ID")
     username: str
 
@@ -87,6 +133,7 @@ class UserSimpleResponse(BaseModel):
 
 class UserListResponse(BaseModel):
     """用户列表响应"""
+
     items: list[UserResponse]
     total: int
     page: int
@@ -95,6 +142,7 @@ class UserListResponse(BaseModel):
 
 class UserLoginResponse(BaseModel):
     """用户登录响应"""
+
     access_token: str
     refresh_token: str | None = None
     token_type: str = "bearer"
@@ -104,6 +152,7 @@ class UserLoginResponse(BaseModel):
 
 class LoginPublicKeyResponse(BaseModel):
     """登录公钥响应"""
+
     algorithm: str
     key_id: str
     public_key: str
@@ -113,6 +162,7 @@ __all__ = [
     "UserLoginRequest",
     "UserCreateRequest",
     "UserUpdateRequest",
+    "UserRoleUpdateRequest",
     "UserPasswordUpdateRequest",
     "UserAdminPasswordUpdateRequest",
     "UserResponse",

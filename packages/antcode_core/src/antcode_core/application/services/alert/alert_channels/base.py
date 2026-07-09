@@ -85,17 +85,14 @@ class MultiWebhookChannel(AlertChannel):
 
             if response.status_code != 200:
                 logger.warning(
-                    f"[{self.channel_name}] 告警发送失败: HTTP {response.status_code}, "
-                    f"响应: {response.text[:200]}"
+                    f"[{self.channel_name}] 告警发送失败: HTTP {response.status_code}, 响应: {response.text[:200]}"
                 )
                 return False
 
             try:
                 response_data = response.json()
             except Exception as e:
-                logger.warning(
-                    f"[{self.channel_name}] 响应解析失败: {e}, 原始响应: {response.text[:200]}"
-                )
+                logger.warning(f"[{self.channel_name}] 响应解析失败: {e}, 原始响应: {response.text[:200]}")
                 return False
 
             success, error_msg = self._check_response(response_data)
@@ -117,7 +114,7 @@ class MultiWebhookChannel(AlertChannel):
         """强制发送告警（手动触发，忽略级别过滤）"""
         return await self._do_send_alert(message, level, check_levels=False)
 
-    async def send_alert_with_fallback(self, message, level, default_levels):
+    async def send_alert_for_level(self, message, level, default_levels):
         """自动发送告警（优先级：Webhook LEVELS > AUTO_ALERT_LEVELS）"""
         if not self.webhooks:
             return False
