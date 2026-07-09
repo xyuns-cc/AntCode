@@ -5,7 +5,7 @@ description = "AntCode - 基于FastAPI的任务调度和项目管理平台"
 requires-python = ">=3.11"
 dependencies = [
     # Web框架
-    "fastapi==0.123.7",
+    "fastapi==0.139.0",
     "uvicorn[standard]==0.38.0",
     "python-multipart>=0.0.20",
     # 数据库
