@@ -13,7 +13,7 @@ dependencies = [
     "asyncpg>=0.29.0",  # PostgreSQL驱动
     # 数据验证
     "pydantic[email]>=2.0.0",
-    "pydantic-settings==2.12.0",
+    "pydantic-settings==2.14.2",
     "python-dotenv==1.2.1",
     # 身份认证
     "pyjwt>=2.8.0",
