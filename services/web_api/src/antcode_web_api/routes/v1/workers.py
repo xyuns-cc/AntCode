@@ -18,7 +18,7 @@ from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.common.security.worker_auth import (
     verify_worker_request_with_signature,
 )
-from antcode_core.domain.models import WorkerStatus
+from antcode_core.domain.models import UserRole, WorkerStatus
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
     WorkerAggregateStats,
@@ -54,6 +54,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, sta
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
 
 router = APIRouter()
@@ -460,6 +461,7 @@ async def get_cluster_metrics_history(
     response_model=BaseResponse[WorkerResponse],
     summary="创建 Worker",
     description="手动创建新的 Worker（不推荐，建议使用安装 Key 注册）",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def create_worker(
     request: WorkerCreateRequest,
@@ -583,6 +585,7 @@ async def get_worker(worker_id: str, current_user: TokenData = Depends(get_curre
     response_model=BaseResponse[WorkerResponse],
     summary="更新 Worker",
     description="更新 Worker 信息",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def update_worker(
     worker_id: str,
@@ -601,6 +604,7 @@ async def update_worker(
     response_model=BaseResponse[dict],
     summary="删除 Worker",
     description="删除指定 Worker",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def delete_worker(
     worker_id: str,
@@ -639,6 +643,7 @@ async def delete_worker(
     response_model=BaseResponse[dict],
     summary="批量删除 Worker",
     description="批量删除多个 Worker",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def batch_delete_workers(
     request: dict = Body(...), current_user: TokenData = Depends(get_current_user)
@@ -866,13 +871,15 @@ async def batch_assign_workers(
         else:
             str_ids.append(wid)
 
-    internal_ids = []
+    # 合并成一次查询：Q(id__in=int_ids) | Q(public_id__in=str_ids)
+    from tortoise.expressions import Q as _Q
+    conditions = _Q()
     if int_ids:
-        workers_by_id = await Worker.filter(id__in=int_ids).all()
-        internal_ids.extend([w.id for w in workers_by_id])
+        conditions |= _Q(id__in=int_ids)
     if str_ids:
-        workers_by_public_id = await Worker.filter(public_id__in=str_ids).all()
-        internal_ids.extend([w.id for w in workers_by_public_id])
+        conditions |= _Q(public_id__in=str_ids)
+    workers_matched = await Worker.filter(conditions).only("id").all() if (int_ids or str_ids) else []
+    internal_ids = [w.id for w in workers_matched]
 
     result = await worker_service.batch_assign_workers(
         user_id=user_id,
@@ -1325,15 +1332,16 @@ async def dispatch_task_to_worker(
     import uuid
     from datetime import datetime
 
+    from antcode_core.application.services.projects.project_service import project_service
     from antcode_core.application.services.workers import worker_task_dispatcher
-    from antcode_core.domain.models import Project, TaskRun
+    from antcode_core.domain.models import TaskRun
 
     project_id = request.get("project_id")
     if not project_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="项目ID不能为空")
 
-    # 查找项目
-    project = await Project.filter(public_id=project_id).first()
+    # D1: 按 owner 校验解析项目（admin 放行；非本人 404，防止 IDOR 探测存在性）
+    project = await project_service.get_project_by_id(project_id, current_user.user_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 
@@ -1352,17 +1360,47 @@ async def dispatch_task_to_worker(
         created_at=datetime.now(UTC),
     )
 
+    # O1-followup: rule 项目派发时把 ProjectRule.to_dispatch_dict() 塞进
+    # params.kwargs.rule_detail，让 worker 侧 RulePlugin 能读到规则。
+    params = dict(request.get("params") or {})
+    project_type = request.get("project_type", "code")
+    if project_type == "rule":
+        from antcode_core.domain.models.project import ProjectRule
+
+        rule = await ProjectRule.get_or_none(project_id=project.id)
+        if rule is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="规则项目缺少 ProjectRule 详情",
+            )
+        kwargs = dict(params.get("kwargs") or {})
+        kwargs["rule_detail"] = rule.to_dispatch_dict()
+        params["kwargs"] = kwargs
+
+    # P1: 派发时把 ``project.worker_env_name`` 传给 worker 作为
+    # ``environment.ANTCODE_RUNTIME_ENV``，worker engine._prepare_runtime 会用它
+    # 通过 uv_manager 拿到 python_executable/venv 路径，供 RulePlugin/CodePlugin
+    # 使用。此前只有 scheduler_service._execute_task_internal 这条路径注入，
+    # 直调 dispatch_task 端点没走到 —— rule/code 项目 build_plan 都会因缺
+    # python_path 抛错。
+    environment_vars = dict(request.get("environment_vars") or {})
+    if (
+        getattr(project, "env_location", None) == "worker"
+        and getattr(project, "worker_env_name", None)
+    ):
+        environment_vars.setdefault("ANTCODE_RUNTIME_ENV", project.worker_env_name)
+
     result = await worker_task_dispatcher.dispatch_task(
         project_id=project_id,
         run_id=run_id,
-        params=request.get("params"),
-        environment_vars=request.get("environment_vars"),
+        params=params,
+        environment_vars=environment_vars,
         timeout=request.get("timeout", 3600),
         worker_id=request.get("worker_id"),
         region=request.get("region"),
         tags=request.get("tags"),
         priority=request.get("priority"),
-        project_type=request.get("project_type", "code"),
+        project_type=project_type,
         require_render=request.get("require_render", False),
     )
 
@@ -1378,8 +1416,14 @@ async def dispatch_task_to_worker(
         )
 
     # 更新分发状态
+    # P5: DispatchResult.worker_id 是 public_id 字符串，TaskRun.worker_id 是
+    # BigIntField（internal FK），历史上直接赋值 → save 抛
+    # `invalid literal for int() with base 10: 'worker-xxx'`。解析成 int。
     task_run.dispatch_status = "dispatched"
-    task_run.worker_id = result.worker_id
+    if result.worker_id:
+        from antcode_core.domain.models import Worker as _W
+        _worker = await _W.filter(public_id=result.worker_id).only("id").first()
+        task_run.worker_id = _worker.id if _worker else None
     await task_run.save()
 
     from dataclasses import asdict

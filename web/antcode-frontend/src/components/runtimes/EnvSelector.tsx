@@ -4,7 +4,7 @@
  */
 import type React from 'react'
 import { useState, useEffect, useMemo } from 'react'
-import { Card, Select, Input, Space, Typography, Alert, Radio } from 'antd'
+import { Card, Select, Input, Space, Typography, Alert, Radio, App } from 'antd'
 import { CloudServerOutlined } from '@ant-design/icons'
 import type { Worker } from '@/types'
 import { runtimeService, type RuntimeEnv } from '@/services/runtimes'
@@ -55,6 +55,7 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
   onChange,
   workerList = []
 }) => {
+  const { message } = App.useApp()
   // 环境位置
   const [location] = useState<'worker'>('worker')
 
@@ -81,6 +82,7 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
 
   const [envOptions, setEnvOptions] = useState<RuntimeEnv[]>([])
   const [envLoading, setEnvLoading] = useState(false)
+  const [envLoadError, setEnvLoadError] = useState<string | null>(null)
 
   // 触发onChange
   useEffect(() => {
@@ -117,18 +119,24 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
   useEffect(() => {
     if (!workerId) {
       setEnvOptions([])
+      setEnvLoadError(null)
       return
     }
 
     setEnvLoading(true)
+    setEnvLoadError(null)
     runtimeService
       .listEnvs(workerId, scope)
       .then((data) => {
         setEnvOptions(data)
       })
-      .catch(() => setEnvOptions([]))
+      .catch((error: unknown) => {
+        const errorMessage = error instanceof Error ? error.message : '加载 Worker 环境失败'
+        setEnvLoadError(errorMessage)
+        message.error(errorMessage)
+      })
       .finally(() => setEnvLoading(false))
-  }, [workerId, scope])
+  }, [message, workerId, scope])
 
   useEffect(() => {
     if (existingEnvName && !filteredEnvs.find((env) => env.name === existingEnvName)) {
@@ -206,7 +214,14 @@ const EnvSelector: React.FC<EnvSelectorProps> = ({
         {useExisting && (
           <div>
             <Title level={5}>选择环境</Title>
-            {filteredEnvs.length === 0 ? (
+            {envLoadError ? (
+              <Alert
+                message="加载 Worker 环境失败"
+                description={envLoadError}
+                type="error"
+                showIcon
+              />
+            ) : filteredEnvs.length === 0 ? (
               <Alert
                 message="暂无可用环境"
                 description={scope === 'shared' ? '请先在运行时管理中创建共享环境' : '当前 Worker 未发现可用环境'}

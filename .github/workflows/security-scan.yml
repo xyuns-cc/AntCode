@@ -1,0 +1,72 @@
+name: Security Scan
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # 每周一凌晨 2 点（UTC）跑一次，捕获新披露的 CVE
+    - cron: '0 2 * * 1'
+
+jobs:
+  # ==================== Dockerfile 静态分析 ====================
+  hadolint:
+    name: Hadolint (Dockerfile lint)
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - infra/docker/Dockerfile.web_api
+          - infra/docker/Dockerfile.master
+          - infra/docker/Dockerfile.gateway
+          - infra/docker/Dockerfile.worker
+          - web/antcode-frontend/Dockerfile
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          # DL3008/DL3013/DL3018：apt/pip/apk 版本未固定（仅警告，不阻断）
+          ignore: DL3008,DL3013,DL3018
+          failure-threshold: error
+
+  # ==================== 仓库代码 & 依赖漏洞扫描 ====================
+  trivy-fs:
+    name: Trivy (filesystem & deps)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          format: sarif
+          output: trivy-fs.sarif
+
+      - name: Upload Trivy SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs

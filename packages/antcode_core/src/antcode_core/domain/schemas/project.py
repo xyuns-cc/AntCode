@@ -56,15 +56,23 @@ def _parse_project_dict_field(value, field_name):
     return value
 
 
+def _parse_project_list_field(value, field_name):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if not value.strip():
+            return []
+        return JSONParser.parse_list(value, field_name) or []
+    return value
+
+
 class ExtractionRule(BaseModel):
     """提取规则模型"""
 
     desc: str = Field(..., description="规则描述")
     type: str = Field(..., description="规则类型")
     expr: str = Field(..., description="规则表达式")
-    page_type: str | None = Field(
-        None, description="页面类型：list/detail，不指定则继承项目的callback_type"
-    )
+    page_type: str | None = Field(None, description="页面类型：list/detail，不指定则继承项目的callback_type")
 
 
 class PaginationConfig(BaseModel):
@@ -79,6 +87,8 @@ class PaginationConfig(BaseModel):
 
 class ProjectCreateRequest(BaseModel):
     """项目创建请求基础模式"""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=3, max_length=50, description="项目名称")
     description: str | None = Field(None, max_length=500, description="项目描述")
@@ -96,31 +106,20 @@ class ProjectCreateRequest(BaseModel):
 
     # 使用现有环境 or 创建新环境
     use_existing_env: bool = Field(default=False, description="是否使用现有环境")
-    existing_env_name: str | None = Field(
-        None, description="现有环境名称（节点环境）或标识（本地共享环境）"
-    )
+    existing_env_name: str | None = Field(None, description="现有环境名称（节点环境）或标识（本地共享环境）")
+    env_name: str | None = Field(None, max_length=100, description="新建运行环境名称")
+    env_description: str | None = Field(None, max_length=500, description="运行环境描述")
 
     # 创建新环境时的配置
-    python_version: str | None = Field(
-        None, min_length=3, max_length=20, description="Python版本"
-    )
-    shared_runtime_key: str | None = Field(
-        None, description="共享运行时标识（可选），默认为版本目录"
-    )
-    interpreter_source: str | None = Field("mise", description="解释器来源：mise/local")
-    python_bin: str | None = Field(None, description="当来源为local时的python路径")
+    python_version: str | None = Field(None, min_length=3, max_length=20, description="Python版本")
+    shared_runtime_key: str | None = Field(None, description="共享运行时标识（可选），默认为版本目录")
 
     # ========== 区域配置 ==========
     region: str | None = Field(None, description="执行区域，系统自动选择该区域内负载最低的节点")
 
     # ========== 执行策略配置 ==========
-    execution_strategy: str | None = Field(
-        "auto", description="执行策略：fixed/auto/specified/prefer"
-    )
-    bound_worker_id: str | None = Field(
-        None, description="绑定的执行 Worker ID（用于 fixed/prefer 策略）"
-    )
-    fallback_enabled: bool = Field(True, description="是否启用故障转移（仅 prefer 策略时有效）")
+    execution_strategy: str | None = Field("auto", description="执行策略：fixed/auto/specified/prefer")
+    bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID（用于 fixed/prefer 策略）")
 
     @field_validator("execution_strategy")
     @classmethod
@@ -201,15 +200,14 @@ class ProjectCreateRequest(BaseModel):
 class ProjectFileCreateRequest(ProjectCreateRequest):
     """文件项目创建请求"""
 
+    language: str | None = Field("python", max_length=50, description="执行语言（python/node/go/java 等，默认 python 兼容旧项目）")
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: dict | None = Field(None, description="运行时配置")
     environment_vars: dict | None = Field(None, description="环境变量")
-    source_type: str | None = Field("s3", description="文件来源类型：s3/git")
-    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
-    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
-    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
-    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
-    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
+    repository_id: str = Field(..., max_length=32, description="Git 仓库 ID")
+    ref: str = Field("main", max_length=255, description="Git 引用")
+    subdir: str = Field(..., max_length=500, description="项目子目录")
+    include_paths: list[str] = Field(default_factory=list, description="显式共享路径")
 
     @field_validator("runtime_config", mode="before")
     @classmethod
@@ -223,18 +221,10 @@ class ProjectFileCreateRequest(ProjectCreateRequest):
         """解析环境变量"""
         return _parse_project_dict_field(v, "environment_vars")
 
-
-class BrowserConfig(BaseModel):
-    """浏览器引擎配置"""
-
-    headless: bool = Field(True, description="无头模式")
-    no_imgs: bool = Field(False, description="禁用图片加载")
-    mute: bool = Field(True, description="静音模式")
-    incognito: bool = Field(False, description="匿名/隐私模式")
-    window_size: str | None = Field("1920,1080", description="窗口大小")
-    page_load_timeout: int = Field(30, description="页面加载超时(秒)")
-    user_agent: str | None = Field(None, description="自定义 User-Agent")
-    extra_arguments: str | None = Field(None, description="自定义启动参数，逗号分隔")
+    @field_validator("include_paths", mode="before")
+    @classmethod
+    def parse_include_paths(cls, v):
+        return _parse_project_list_field(v, "include_paths")
 
 
 class ProjectRuleCreateRequest(ProjectCreateRequest):
@@ -250,12 +240,19 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
     max_pages: int = Field(10, ge=1, le=1000, description="最大页数")
     start_page: int = Field(1, ge=1, description="起始页码")
     request_delay: int = Field(1000, ge=0, description="请求间隔(ms)")
+    retry_count: int = Field(3, ge=0, le=10, description="重试次数")
+    timeout: int = Field(30, ge=1, le=300, description="超时时间(s)")
     priority: int = Field(0, description="优先级")
+    dont_filter: bool = Field(False, description="是否去重")
+    data_schema: dict[str, Any] | None = Field(None, description="数据结构定义")
     headers: dict | None = Field(None, description="请求头")
     cookies: dict | None = Field(None, description="Cookie")
-    browser_config: BrowserConfig | None = Field(
-        None, description="浏览器引擎配置（仅当engine=browser时有效）"
-    )
+    proxy_config: dict[str, Any] | None = Field(None, description="代理配置")
+    anti_spider: dict[str, Any] | None = Field(None, description="反爬虫配置")
+    task_config: dict[str, Any] | None = Field(None, description="任务配置")
+    # S10 (Scrapy 迁移收尾)
+    resume_enabled: bool | None = Field(None, description="scrapy-redis 断点续爬 + 分布式")
+    dedup_config: dict[str, Any] | None = Field(None, description="内容级去重（fields/scope/ttl_days/on_hit）")
 
     @field_validator("extraction_rules", mode="before")
     @classmethod
@@ -270,9 +267,7 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
 
             try:
                 # 转换为ExtractionRule对象列表
-                return [
-                    ExtractionRule(**rule) if isinstance(rule, dict) else rule for rule in parsed
-                ]
+                return [ExtractionRule(**rule) if isinstance(rule, dict) else rule for rule in parsed]
             except Exception as e:
                 raise ValueError(f"extraction_rules 对象转换错误: {str(e)}")
         return v
@@ -294,15 +289,20 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
                 raise ValueError(f"pagination_config 对象转换错误: {str(e)}")
         return v
 
-    @field_validator("headers", "cookies", mode="before")
+    @field_validator(
+        "data_schema",
+        "headers",
+        "cookies",
+        "proxy_config",
+        "anti_spider",
+        "task_config",
+        "dedup_config",
+        mode="before",
+    )
     @classmethod
-    def parse_json_fields(cls, v):
-        """解析JSON字段 (headers, cookies) - 支持单引号和双引号"""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return JSONParser.parse_safely(v, "json_field")
-        return v
+    def parse_json_fields(cls, v, info):
+        """解析JSON字段 - 支持单引号和双引号"""
+        return _parse_project_dict_field(v, info.field_name)
 
     @field_validator("extraction_rules")
     @classmethod
@@ -317,20 +317,23 @@ class ProjectCodeCreateRequest(ProjectCreateRequest):
     """代码项目创建请求"""
 
     language: str | None = Field("python", max_length=50, description="编程语言")
-    version: str | None = Field("1.0.0", max_length=20, description="版本号")
-    entry_point: str | None = Field(None, max_length=255, description="入口函数")
+    entry_point: str | None = Field(None, max_length=255, description="入口文件")
     documentation: str | None = Field(None, description="代码文档")
-    source_type: str | None = Field("s3", description="代码来源类型：s3/git/inline(兼容)")
-    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
-    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
-    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
-    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
-    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
-    code_content: str | None = Field(None, description="代码内容（直接提交代码时使用）")
+    repository_id: str = Field(..., max_length=32, description="Git 仓库 ID")
+    ref: str = Field("main", max_length=255, description="Git 引用")
+    subdir: str = Field(..., max_length=500, description="项目子目录")
+    include_paths: list[str] = Field(default_factory=list, description="显式共享路径")
+
+    @field_validator("include_paths", mode="before")
+    @classmethod
+    def parse_include_paths(cls, v):
+        return _parse_project_list_field(v, "include_paths")
 
 
 class ProjectUpdateRequest(BaseModel):
     """项目更新请求"""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(None, min_length=3, max_length=50, description="项目名称")
     description: str | None = Field(None, max_length=500, description="项目描述")
@@ -342,11 +345,8 @@ class ProjectUpdateRequest(BaseModel):
     region: str | None = Field(None, description="执行区域")
 
     # 执行策略配置
-    execution_strategy: str | None = Field(
-        None, description="执行策略：fixed/auto/specified/prefer"
-    )
+    execution_strategy: str | None = Field(None, description="执行策略：fixed/auto/specified/prefer")
     bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID")
-    fallback_enabled: bool | None = Field(None, description="是否启用故障转移")
 
     @field_validator("execution_strategy")
     @classmethod
@@ -359,7 +359,18 @@ class ProjectUpdateRequest(BaseModel):
 
 # Form参数模型（用于multipart/form-data请求）
 class ProjectCreateFormRequest(BaseModel):
-    """项目创建Form请求模式（用于文件上传）"""
+    """项目创建 Form 请求模式。项目源码必须来自 Git 仓库。
+
+    O6-followup: 迁移 44/45 后废弃的 form 字段（``interpreter_source`` /
+    ``python_bin`` / ``code_content`` / ``git_url`` / ``git_branch`` /
+    ``git_credential_id`` / ``file_source_type`` / ``code_source_type`` /
+    ``version`` 等）route 层 form 参数仍在（前端兼容），业务上不再使用。
+    schema 用 ``extra="ignore"`` 让老客户端提交时废弃字段被静默忽略而不
+    422；活跃字段由 route 层显式抽入 ``request_data`` 传给 CreateRequest
+    子类，语义仍受 ``extra="forbid"`` 强约束。
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     # 通用参数
     name: str = Field(..., min_length=3, max_length=50, description="项目名称")
@@ -369,16 +380,8 @@ class ProjectCreateFormRequest(BaseModel):
     dependencies: str | None = Field(None, description="Python依赖包JSON数组")
     runtime_scope: RuntimeScope = Field(..., description="运行时作用域：shared/private")
     runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型：python/java/go")
-    python_version: str | None = Field(
-        None, max_length=20, description="Python版本（私有环境必填）"
-    )
+    python_version: str | None = Field(None, max_length=20, description="Python版本（私有环境必填）")
     shared_runtime_key: str | None = Field(None, description="共享运行时标识（可选）")
-    interpreter_source: str | None = Field(
-        "mise", description="解释器来源：mise/local（私有环境时使用）"
-    )
-    python_bin: str | None = Field(
-        None, description="当来源为local时的python路径（私有环境时使用）"
-    )
 
     # Worker 环境参数
     env_location: str | None = Field("worker", description="环境位置：worker（Worker 执行）")
@@ -392,13 +395,12 @@ class ProjectCreateFormRequest(BaseModel):
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: str | None = Field(None, description="运行时配置JSON")
     environment_vars: str | None = Field(None, description="环境变量JSON")
-    file_source_type: str | None = Field("s3", description="文件来源类型：s3/git")
 
     # 区域配置
     region: str | None = Field(None, description="执行区域")
 
     # 规则项目参数
-    engine: str | None = Field("requests", description="采集引擎 (browser/requests/curl_cffi)")
+    engine: str | None = Field("requests", description="采集引擎 (requests/curl_cffi)")
     target_url: str | None = Field(None, max_length=2000, description="目标URL")
     url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     request_method: str | None = Field("GET", description="请求方法 (GET/POST/PUT/DELETE)")
@@ -408,23 +410,33 @@ class ProjectCreateFormRequest(BaseModel):
     max_pages: int | None = Field(10, ge=1, le=1000, description="最大页数")
     start_page: int | None = Field(1, ge=1, description="起始页码")
     request_delay: int | None = Field(1000, ge=0, description="请求间隔(ms)")
+    retry_count: int | None = Field(3, ge=0, le=10, description="重试次数")
+    timeout: int | None = Field(30, ge=1, le=300, description="超时时间(s)")
     priority: int | None = Field(0, description="优先级")
+    dont_filter: bool | None = Field(False, description="是否去重")
+    data_schema: str | None = Field(None, description="数据结构定义JSON")
     headers: str | None = Field(None, description="请求头JSON")
     cookies: str | None = Field(None, description="Cookie JSON")
-    browser_config: str | None = Field(None, description="浏览器引擎配置JSON")
+    proxy_config: str | None = Field(None, description="代理配置JSON")
+    anti_spider: str | None = Field(None, description="反爬虫配置JSON")
+    task_config: str | None = Field(None, description="任务配置JSON")
+    # S10 (Scrapy 迁移收尾)
+    resume_enabled: bool | None = Field(None, description="scrapy-redis 断点续爬 + 分布式")
+    dedup_config: str | None = Field(None, description="内容级去重配置JSON")
 
     # 代码项目参数
     language: str | None = Field("python", max_length=50, description="编程语言")
-    version: str | None = Field("1.0.0", max_length=20, description="版本号")
-    code_entry_point: str | None = Field(None, max_length=255, description="入口函数")
+    code_entry_point: str | None = Field(None, max_length=255, description="入口文件")
     documentation: str | None = Field(None, description="代码文档")
-    code_source_type: str | None = Field("s3", description="代码来源类型：s3/git/inline(兼容)")
-    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
-    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
-    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
-    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
-    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
-    code_content: str | None = Field(None, description="代码内容（直接提交代码时使用）")
+    repository_id: str | None = Field(None, max_length=32, description="Git 仓库 ID")
+    ref: str | None = Field(None, max_length=255, description="Git 引用")
+    subdir: str | None = Field(None, max_length=500, description="项目子目录")
+    include_paths: list[str] = Field(default_factory=list, description="显式共享路径")
+
+    @field_validator("include_paths", mode="before")
+    @classmethod
+    def parse_include_paths(cls, v):
+        return _parse_project_list_field(v, "include_paths")
 
     @field_validator("runtime_scope", mode="before")
     @classmethod
@@ -478,7 +490,11 @@ class TaskJsonRequest(BaseModel):
 class ProjectRuleUpdateRequest(BaseModel):
     """规则项目更新请求模型"""
 
+    model_config = ConfigDict(extra="forbid")
+
+    engine: CrawlEngine | None = Field(None, description="采集引擎")
     target_url: str | None = Field(None, max_length=2000, description="目标URL")
+    url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     callback_type: CallbackType | None = Field(None, description="回调类型")
     request_method: RequestMethod | None = Field(None, description="请求方法")
     extraction_rules: list[ExtractionRule] | None = Field(None, description="提取规则数组")
@@ -486,44 +502,54 @@ class ProjectRuleUpdateRequest(BaseModel):
     max_pages: int | None = Field(None, ge=1, le=1000, description="最大页数")
     start_page: int | None = Field(None, ge=1, description="起始页码")
     request_delay: int | None = Field(None, ge=0, description="请求间隔(ms)")
+    retry_count: int | None = Field(None, ge=0, le=10, description="重试次数")
+    timeout: int | None = Field(None, ge=1, le=300, description="超时时间(s)")
     priority: int | None = Field(None, description="优先级")
     dont_filter: bool | None = Field(None, description="是否去重")
+    data_schema: dict[str, Any] | None = Field(None, description="数据结构定义")
     headers: dict[str, str] | None = Field(None, description="请求头")
     cookies: dict[str, str] | None = Field(None, description="Cookie")
-    proxy_config: str | None = Field(None, description="代理配置")
+    proxy_config: dict[str, Any] | None = Field(None, description="代理配置")
+    anti_spider: dict[str, Any] | None = Field(None, description="反爬虫配置")
     task_config: dict[str, Any] | None = Field(None, description="任务配置")
+    # S3b / S5
+    resume_enabled: bool | None = Field(None, description="scrapy-redis 断点续爬 + 分布式")
+    dedup_config: dict[str, Any] | None = Field(None, description="内容级去重（fields/scope/ttl_days/on_hit）")
+
+    @field_validator(
+        "data_schema",
+        "headers",
+        "cookies",
+        "proxy_config",
+        "anti_spider",
+        "task_config",
+        mode="before",
+    )
+    @classmethod
+    def parse_json_update_fields(cls, v, info):
+        return _parse_project_dict_field(v, info.field_name)
 
 
 class ProjectCodeUpdateRequest(BaseModel):
     """代码项目更新请求模型"""
 
+    model_config = ConfigDict(extra="forbid")
+
     language: str | None = Field(None, max_length=50, description="编程语言")
-    version: str | None = Field(None, max_length=20, description="版本号")
-    entry_point: str | None = Field(None, max_length=255, description="入口函数")
+    entry_point: str | None = Field(None, max_length=255, description="入口文件")
     documentation: str | None = Field(None, description="代码文档")
-    source_type: str | None = Field(None, description="代码来源类型：s3/git/inline(兼容)")
-    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
-    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
-    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
-    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
-    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
     runtime_config: dict[str, Any] | None = Field(None, description="运行时配置")
     environment_vars: dict[str, Any] | None = Field(None, description="环境变量")
-    code_content: str | None = Field(None, description="代码内容")
 
 
 class ProjectFileUpdateRequest(BaseModel):
     """文件项目更新请求模型"""
 
+    model_config = ConfigDict(extra="forbid")
+
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: str | dict[str, Any] | None = Field(None, description="运行时配置")
     environment_vars: str | dict[str, Any] | None = Field(None, description="环境变量")
-    source_type: str | None = Field(None, description="文件来源类型：s3/git")
-    git_url: str | None = Field(None, max_length=2000, description="Git 仓库地址")
-    git_branch: str | None = Field(None, max_length=255, description="Git 分支")
-    git_commit: str | None = Field(None, max_length=255, description="Git 提交")
-    git_subdir: str | None = Field(None, max_length=500, description="Git 子目录")
-    git_credential_id: str | None = Field(None, max_length=32, description="Git 凭证 ID")
 
     @field_validator("runtime_config", mode="before")
     @classmethod
@@ -538,103 +564,19 @@ class ProjectFileUpdateRequest(BaseModel):
         return _parse_project_dict_field(v, "environment_vars")
 
 
-class ProjectFileContentUpdateRequest(BaseModel):
-    """文件内容更新请求模型"""
-
-    file_path: str = Field(..., max_length=1024, description="文件相对路径")
-    content: str = Field(..., description="文件内容")
-    encoding: str | None = Field("utf-8", max_length=50, description="文件编码")
-
-    @field_validator("file_path")
-    @classmethod
-    def validate_file_path(cls, value: str) -> str:
-        if value is None:
-            raise ValueError("文件路径不能为空")
-
-        sanitized = value.strip()
-
-        # 允许空字符串，表示基础文件路径
-        if sanitized == "" and value == "":
-            return ""
-
-        if sanitized == "":
-            raise ValueError("文件路径不能为空")
-
-        normalized = sanitized.replace("\\", "/")
-        if normalized.startswith("/"):
-            raise ValueError("文件路径不合法")
-
-        if normalized.startswith("..") or ".." in normalized.split("/"):
-            raise ValueError("文件路径不合法")
-
-        return normalized
-
-
 class FileInfo(BaseModel):
-    """文件信息"""
+    """Git 文件项目信息"""
 
-    original_name: str = Field(description="原始文件名")
-    file_size: int = Field(description="文件大小")
-    file_hash: str = Field(description="文件哈希")
-    file_path: str = Field("", description="文件存储路径")
-    file_type: str = Field("", description="文件类型")
-    storage_type: str = Field("", description="存储类型")
     entry_point: str = Field("", description="入口文件")
     runtime_config: dict[str, Any] = Field(default_factory=dict, description="运行时配置")
     environment_vars: dict[str, Any] = Field(default_factory=dict, description="环境变量")
-    is_compressed: bool = Field(False, description="是否为压缩包")
-    original_file_path: str = Field("", description="原始文件路径")
-    source_type: str = Field("s3", description="来源类型")
-    git_url: str | None = Field(None, description="Git 仓库地址")
-    git_branch: str | None = Field(None, description="Git 分支")
-    git_commit: str | None = Field(None, description="Git 提交")
-    git_subdir: str | None = Field(None, description="Git 子目录")
-    git_credential_id: str | None = Field(None, description="Git 凭证 ID")
-    git_credential_name: str | None = Field(None, description="Git 凭证名称")
+    repository_id: str | None = Field(None, description="Git 仓库 ID")
+    repository_name: str | None = Field(None, description="Git 仓库名称")
+    repository_url: str | None = Field(None, description="Git 仓库地址")
+    ref: str | None = Field(None, description="Git 引用")
+    subdir: str | None = Field(None, description="项目子目录")
+    include_paths: list[str] = Field(default_factory=list, description="显式共享路径")
     resolved_revision: str | None = Field(None, description="Git 解析后的提交版本")
-
-
-class FileTreeNode(BaseModel):
-    """文件树节点"""
-
-    name: str = Field(description="文件/目录名")
-    type: str = Field(description="类型: file 或 directory")
-    path: str = Field(description="相对路径")
-    size: int = Field(description="文件大小")
-    modified_time: float = Field(0.0, description="修改时间戳")
-    mime_type: str = Field("", description="MIME类型")
-    is_text: bool = Field(False, description="是否为文本文件")
-    children: list["FileTreeNode"] = Field(default_factory=list, description="子节点")
-    children_count: int = Field(0, description="子节点数量")
-    error: str = Field("", description="错误信息")
-    truncated: bool = Field(False, description="是否被截断")
-
-
-class FileStructureResponse(BaseModel):
-    """文件结构响应"""
-
-    project_id: str = Field(description="项目公开ID")
-    project_name: str = Field(description="项目名称")
-    file_path: str = Field(description="文件路径")
-    structure: FileTreeNode = Field(description="文件结构树")
-    total_files: int = Field(description="总文件数")
-    total_size: int = Field(description="总大小")
-
-
-class FileContentResponse(BaseModel):
-    """文件内容响应"""
-
-    name: str = Field(description="文件名")
-    path: str = Field(description="文件路径")
-    size: int = Field(description="文件大小")
-    modified_time: float = Field(description="修改时间戳")
-    mime_type: str = Field(description="MIME类型")
-    is_text: bool = Field(description="是否为文本文件")
-    content: str = Field("", description="文件内容")
-    encoding: str = Field("utf-8", description="文件编码")
-    error: str = Field("", description="错误信息")
-    too_large: bool = Field(False, description="文件是否过大")
-    binary: bool = Field(False, description="是否为二进制文件")
 
 
 class ProjectResponse(BaseModel):
@@ -651,7 +593,6 @@ class ProjectResponse(BaseModel):
     updated_at: datetime = Field(description="更新时间")
     created_by: str = Field("", description="创建者公开ID")
     created_by_username: str | None = Field(None, description="创建者用户名")
-    download_count: int = Field(0, description="下载次数")
     star_count: int = Field(0, description="收藏次数")
     # 运行环境
     python_version: str | None = Field(None, description="绑定的Python版本")
@@ -665,8 +606,7 @@ class ProjectResponse(BaseModel):
     # 执行策略配置
     execution_strategy: str = Field("", description="执行策略")
     bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID")
-    bound_worker_name: str | None = Field(None, description="绑定的执行节点名称")
-    fallback_enabled: bool = Field(False, description="是否启用故障转移")
+    bound_worker_name: str | None = Field(None, description="绑定的执行 Worker 名称")
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -683,12 +623,7 @@ class ProjectListResponse(BaseModel):
     created_at: datetime = Field(description="创建时间")
     created_by: str = Field("", description="创建者公开ID")
     created_by_username: str = Field("", description="创建者用户名")
-    download_count: int = Field(0, description="下载次数")
     star_count: int = Field(0, description="收藏次数")
     task_count: int = Field(0, description="任务数量")
 
     model_config = ConfigDict(from_attributes=True)
-
-
-# 更新FileTreeNode模型以支持前向引用
-FileTreeNode.model_rebuild()

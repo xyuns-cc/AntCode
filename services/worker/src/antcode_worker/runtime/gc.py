@@ -87,6 +87,7 @@ class RuntimeGC:
         self,
         venvs_dir: str,
         policy: GCPolicy | None = None,
+        in_use_check: Callable[[str], bool] | None = None,
     ):
         """
         初始化垃圾回收器
@@ -94,6 +95,8 @@ class RuntimeGC:
         Args:
             venvs_dir: 虚拟环境目录
             policy: 清理策略
+            in_use_check: 判断某 runtime_hash 是否正在被任务持有；返回 True 时 GC 跳过。
+                          由 RuntimeManager 注入以避免在任务运行中被 rmtree 抢走目录。
         """
         self.venvs_dir = venvs_dir
         self.policy = policy or GCPolicy()
@@ -101,6 +104,11 @@ class RuntimeGC:
         self._running = False
         self._task: asyncio.Task | None = None
         self._on_gc_complete: Callable[[GCStats], None] | None = None
+        self._in_use_check = in_use_check
+
+    def set_in_use_check(self, check: Callable[[str], bool] | None) -> None:
+        """允许延迟绑定 in_use_check（RuntimeManager 构造顺序）。"""
+        self._in_use_check = check
 
     @property
     def stats(self) -> GCStats:
@@ -159,8 +167,8 @@ class RuntimeGC:
                 logger.error(f"GC 循环异常: {e}")
                 await asyncio.sleep(60)
 
-    def _get_dir_size(self, path: str) -> int:
-        """获取目录大小"""
+    def _get_dir_size_sync(self, path: str) -> int:
+        """同步版：目录大小（供 to_thread 包裹）。"""
         total = 0
         try:
             for dirpath, _dirnames, filenames in os.walk(path):
@@ -171,6 +179,15 @@ class RuntimeGC:
         except Exception:
             pass
         return total
+
+    async def _get_dir_size(self, path: str) -> int:
+        """G1: 目录大小走 to_thread，避免 os.walk 卡事件循环。
+
+        原为同步方法，被 ``_collect_runtimes`` 循环调用；node_modules
+        / venv 单个环境几万到几十万文件 × 100 环境 → 数百万 stat 全串在
+        事件循环上，一次 GC 冻住 worker 数十秒（心跳/日志/poll 全停）。
+        """
+        return await asyncio.to_thread(self._get_dir_size_sync, path)
 
     def _get_disk_usage(self) -> float:
         """获取磁盘使用率"""
@@ -243,7 +260,7 @@ class RuntimeGC:
                 RuntimeInfo(
                     runtime_hash=name,
                     path=venv_path,
-                    size_bytes=self._get_dir_size(venv_path),
+                    size_bytes=await self._get_dir_size(venv_path),
                     created_at=created_at,
                     last_used_at=last_used_at,
                 )
@@ -376,8 +393,24 @@ class RuntimeGC:
         Returns:
             是否成功清理
         """
+        # in-use 保护：如果 RuntimeManager 报告该 runtime 仍在被任务持有，跳过。
+        # 少数场景（如策略强制）可通过 RuntimeManager.remove(force=True) 绕过。
+        if self._in_use_check is not None:
+            try:
+                if self._in_use_check(runtime.runtime_hash):
+                    logger.info(
+                        "运行时正在使用中，GC 跳过: {}", runtime.runtime_hash
+                    )
+                    return False
+            except Exception as exc:
+                # 检查失败偏保守：不清理，避免误删
+                logger.warning(
+                    "in_use_check 异常，保守跳过 {}: {}", runtime.runtime_hash, exc
+                )
+                return False
         try:
-            shutil.rmtree(runtime.path)
+            # G1: 走线程池，避免 rmtree 卡事件循环
+            await asyncio.to_thread(shutil.rmtree, runtime.path)
             logger.info(f"已清理运行时: {runtime.runtime_hash}")
             return True
         except Exception as e:
@@ -461,8 +494,9 @@ class RuntimeGC:
             return False
 
         try:
-            size = self._get_dir_size(venv_path)
-            shutil.rmtree(venv_path)
+            size = await self._get_dir_size(venv_path)
+            # G1: rmtree 也走线程池；一个 node_modules 秒级删。
+            await asyncio.to_thread(shutil.rmtree, venv_path)
 
             self._stats.total_cleaned += 1
             self._stats.total_bytes_freed += size
@@ -491,11 +525,15 @@ class RuntimeGC:
         return count
 
     def get_total_size(self) -> int:
-        """获取所有运行时的总大小"""
+        """获取所有运行时的总大小（同步，用于 sync callers 如 stats dict）。
+
+        G1: 这里保留同步以兼容 ``RuntimeManager.get_stats()``；内部走
+        sync 版避免在 sync 上下文里跑事件循环调度。async 上下文请自行
+        用 ``asyncio.to_thread(self.get_total_size)``。
+        """
         if not os.path.exists(self.venvs_dir):
             return 0
-
-        return self._get_dir_size(self.venvs_dir)
+        return self._get_dir_size_sync(self.venvs_dir)
 
 
 # 全局 GC 实例

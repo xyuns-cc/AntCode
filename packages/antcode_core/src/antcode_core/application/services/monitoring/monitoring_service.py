@@ -170,12 +170,8 @@ class MonitoringService:
 
         for worker in workers or []:
             worker_id = worker.decode()
-            status = await redis_client.hgetall(
-                self.config.status_key_tpl.format(worker_id=worker_id)
-            )
-            spider = await redis_client.hgetall(
-                self.config.spider_key_tpl.format(worker_id=worker_id)
-            )
+            status = await redis_client.hgetall(self.config.status_key_tpl.format(worker_id=worker_id))
+            spider = await redis_client.hgetall(self.config.spider_key_tpl.format(worker_id=worker_id))
             result.append(
                 {
                     "worker_id": worker_id,
@@ -222,9 +218,7 @@ class MonitoringService:
 
         totals["success_rate"] = (
             round(
-                100
-                * (totals["requests_total"] - totals["requests_failed"])
-                / totals["requests_total"],
+                100 * (totals["requests_total"] - totals["requests_failed"]) / totals["requests_total"],
                 2,
             )
             if totals["requests_total"] > 0

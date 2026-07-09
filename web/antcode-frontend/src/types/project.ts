@@ -1,8 +1,7 @@
 // 项目类型枚举
 export type ProjectType = 'file' | 'rule' | 'code'
-export type ProjectStatus = 'draft' | 'active' | 'inactive' | 'archived'
-export type ProjectSourceType = 's3' | 'git'
-export type ProjectCodeSourceType = ProjectSourceType | 'legacy_inline'
+export type ProjectStatus = 'active' | 'inactive' | 'archived'
+export type CrawlEngine = 'requests' | 'curl_cffi' | 'browser'
 
 // 执行策略枚举
 export type ExecutionStrategy = 'fixed' | 'specified' | 'auto' | 'prefer'
@@ -12,7 +11,6 @@ export interface ExecutionStrategyConfig {
   strategy: ExecutionStrategy
   bound_worker_id?: string
   bound_worker_name?: string
-  fallback_enabled?: boolean
 }
 
 // 执行策略选项（用于UI展示）
@@ -69,6 +67,9 @@ export interface Project {
   created_by: string  // public_id
   created_by_username?: string
   // 环境信息
+  env_location?: 'worker'
+  worker_id?: string
+  worker_env_name?: string
   python_version?: string
   runtime_scope?: 'shared' | 'private'
   runtime_kind?: 'python' | 'java' | 'go'
@@ -79,7 +80,6 @@ export interface Project {
   execution_strategy?: ExecutionStrategy
   bound_worker_id?: string
   bound_worker_name?: string
-  fallback_enabled?: boolean
   
   // 区域配置
   region?: string
@@ -97,42 +97,28 @@ export interface Project {
 
 // 文件信息（从API返回）
 export interface FileInfo {
-  original_name: string
-  file_size: number
-  file_hash: string
-  file_path?: string
-  original_file_path?: string
-  file_type?: string
   entry_point?: string
   runtime_config?: RuntimeConfig
   environment_vars?: EnvironmentVars
-  source_type?: ProjectSourceType
+  repository_id?: string
+  repository_name?: string
+  repository_url?: string
+  ref?: string
+  subdir?: string
+  include_paths?: string[]
+  resolved_revision?: string
+  // 兼容旧版数据结构（后端某些历史 project 可能仍返回这些字段）
+  source_type?: 'file' | 'git' | 'inline'
   git_url?: string
   git_branch?: string
   git_commit?: string
   git_subdir?: string
   git_credential_id?: string
-  git_credential_name?: string
-  resolved_revision?: string
-}
-
-export interface ProjectFileContent {
-  name: string
-  path: string
-  size: number
-  modified_time: number
-  mime_type: string
-  is_text: boolean
-  content?: string
-  encoding?: string
-  error?: string
-  too_large?: boolean
-  binary?: boolean
 }
 
 // 规则信息（从API返回）
 export interface RuleInfo {
-  engine: string
+  engine: CrawlEngine
   target_url: string
   url_pattern?: string
   callback_type: string
@@ -152,27 +138,31 @@ export interface RuleInfo {
   proxy_config?: ProxyConfig
   anti_spider?: AntiSpiderConfig
   task_config?: TaskConfig
-  browser_config?: BrowserEngineConfig
 }
 
 // 代码信息（从API返回）
 export interface CodeInfo {
-  content: string
   language: string
-  version: string
-  content_hash: string
   entry_point?: string
   runtime_config?: RuntimeConfig
   environment_vars?: EnvironmentVars
   documentation?: string
-  source_type?: ProjectCodeSourceType
+  repository_id?: string
+  repository_name?: string
+  repository_url?: string
+  ref?: string
+  subdir?: string
+  include_paths?: string[]
+  resolved_revision?: string
+  // 兼容旧版数据结构
+  version?: string
+  content?: string
+  source_type?: 'code' | 'git' | 'inline'
   git_url?: string
   git_branch?: string
   git_commit?: string
   git_subdir?: string
   git_credential_id?: string
-  git_credential_name?: string
-  resolved_revision?: string
 }
 
 // 文件项目详情
@@ -187,18 +177,43 @@ export interface ExtractionRule {
   transform?: string  // 转换规则
 }
 
-// 分页配置 - 根据新版API文档优化
+// 分页配置 - S6/S7/S8 扩展
+// S6: 新增 url_pattern / click_element / js_click 三种 method
+// S7: URL 支持 {N} 数字占位符，N 就是起始页号
+// S8: next_page_rule 允许字符串（自动识别 CSS/XPath）或 {type,expr} 结构化
 export interface PaginationConfig {
-  method: 'none' | 'url_param' | 'javascript' | 'ajax' | 'infinite_scroll'  // 分页方式
-  start_page?: number  // 起始页码
-  max_pages?: number  // 最大页数
-  next_page_rule?: ExtractionRule  // 下一页规则
-  wait_after_click_ms?: number  // 点击后等待时间
-  // URL参数方式的配置
-  url_template?: string  // URL模板，如 /page/{page}
-  // AJAX方式的配置
-  ajax_endpoint?: string  // AJAX请求地址
-  ajax_params?: Record<string, unknown>  // AJAX请求参数
+  method:
+    | 'none'
+    | 'url_pattern'      // 用 URL 里 {}/{N}/{page} 占位符展开多页
+    | 'url_param'        // ?page=N query 追加
+    | 'click_element'    // HTTP 引擎，抓 next 元素的 href 递归
+    | 'js_click'         // Playwright 引擎，点击 next 元素翻页
+    | 'infinite_scroll'  // Playwright 引擎，滚动加载
+    | 'javascript'       // 旧兼容：等价 infinite_scroll
+    | 'ajax'             // 旧兼容：等价 infinite_scroll
+  start_page?: number
+  max_pages?: number
+  // next 元素定位：字符串（旧）或 {type: 'css'|'xpath'|'text', expr: string}
+  next_page_rule?: ExtractionRule | { type: 'css' | 'xpath' | 'text'; expr: string } | string
+  wait_after_click_ms?: number  // js_click 点击后等待
+  // url_pattern / url_param 用
+  url_template?: string
+  page_param?: string  // url_param 时的 query 参数名，缺省 'page'
+  // infinite_scroll 用
+  scroll_count?: number
+  scroll_wait_ms?: number
+  // 旧兼容
+  ajax_endpoint?: string
+  ajax_params?: Record<string, unknown>
+}
+
+// S5: 内容级去重配置
+export interface DedupConfig {
+  enabled?: boolean
+  fields?: string[]                  // 参与哈希的字段（顺序敏感）
+  scope?: 'project' | 'run'          // 去重范围
+  ttl_days?: number                  // 去重集 TTL（0=不过期）
+  on_hit?: 'drop' | 'log'            // 命中动作
 }
 
 // v2.0.0 新增配置类型
@@ -220,19 +235,7 @@ export interface AntiSpiderConfig {
   captcha_handling?: boolean  // 是否处理验证码
   cookie_persistence?: boolean  // 是否持久化Cookie
   ip_rotation?: boolean  // 是否轮换IP
-  browser_fingerprint?: boolean  // 是否模拟浏览器指纹
-}
-
-// 浏览器引擎配置
-export interface BrowserEngineConfig {
-  headless?: boolean  // 无头模式
-  no_imgs?: boolean  // 禁用图片加载
-  mute?: boolean  // 静音模式
-  incognito?: boolean  // 匿名/隐私模式
-  window_size?: string  // 窗口大小，如 "1920,1080"
-  page_load_timeout?: number  // 页面加载超时(秒)
-  user_agent?: string  // 自定义 User-Agent
-  extra_arguments?: string  // 自定义启动参数，逗号分隔
+  browser_fingerprint?: boolean  // 是否配置浏览器指纹
 }
 
 export interface TaskConfig {
@@ -281,14 +284,12 @@ export interface ProjectCreateRequest {
   type: ProjectType
   description?: string
   tags?: string[]
-  // 运行环境（新架构）
-  env_location?: string  // worker/local
+  // 运行环境
+  env_location?: 'worker'
   worker_id?: string
   runtime_scope: 'shared' | 'private'
   shared_runtime_key?: string
-  interpreter_source?: string
   python_version: string
-  python_bin?: string
   use_existing_env?: boolean
   existing_env_name?: string
   env_name?: string
@@ -300,21 +301,14 @@ export interface ProjectCreateRequest {
   // 执行策略配置
   execution_strategy?: ExecutionStrategy
   bound_worker_id?: string
-  fallback_enabled?: boolean
   
-  // 文件/代码来源字段
-  source_type?: ProjectCodeSourceType
-  file_source_type?: ProjectSourceType
-  code_source_type?: ProjectCodeSourceType
-  git_url?: string
-  git_branch?: string
-  git_commit?: string
-  git_subdir?: string
-  git_credential_id?: string
+  // Git 来源字段
+  repository_id?: string
+  ref?: string
+  subdir?: string
+  include_paths?: string[] | string
 
   // 文件项目字段
-  file?: File
-  additionalFiles?: Array<File | { originFileObj?: File }>
   entry_point?: string
   runtime_config?: string | RuntimeConfig
   environment_vars?: string | EnvironmentVars
@@ -323,7 +317,7 @@ export interface ProjectCreateRequest {
   // 规则项目字段
   target_url?: string
   url_pattern?: string
-  engine?: string
+  engine?: CrawlEngine
   request_delay?: number
   request_method?: string
   priority?: number
@@ -342,13 +336,9 @@ export interface ProjectCreateRequest {
   anti_spider?: string  // 反爬虫配置JSON
   task_config?: string  // 任务配置JSON
   data_schema?: string  // 数据结构定义JSON
-  browser_config?: string  // 浏览器引擎配置JSON
 
   // 代码项目字段
   language?: string
-  version?: string
-  code_content?: string
-  code_file?: File
   code_entry_point?: string
   documentation?: string
 }
@@ -367,12 +357,11 @@ export interface ProjectUpdateRequest {
   // 执行策略配置
   execution_strategy?: ExecutionStrategy
   bound_worker_id?: string
-  fallback_enabled?: boolean
   
   // 规则项目更新字段
   target_url?: string
   url_pattern?: string
-  engine?: string
+  engine?: CrawlEngine
   request_method?: string
   request_delay?: number
   retry_count?: number
@@ -392,18 +381,14 @@ export interface ProjectUpdateRequest {
   data_schema?: string
   
   // 代码项目更新字段
-  code_content?: string
   language?: string
-  version?: string
   code_entry_point?: string
   documentation?: string
   dependencies?: string[]
-  source_type?: ProjectCodeSourceType
-  git_url?: string
-  git_branch?: string
-  git_commit?: string
-  git_subdir?: string
-  git_credential_id?: string
+  repository_id?: string
+  ref?: string
+  subdir?: string
+  include_paths?: string[] | string
   
   // 文件项目更新字段
   entry_point?: string
@@ -419,31 +404,42 @@ export interface ProjectUpdateRequest {
 
 export interface ProjectCodeConfigUpdateRequest {
   language?: string
-  version?: string
   entry_point?: string
   documentation?: string
-  code_content?: string
-  source_type?: ProjectCodeSourceType
+  runtime_config?: RuntimeConfig
+  environment_vars?: EnvironmentVars
+  // 兼容旧接口（后端仍接受这些字段）
+  version?: string
+  source_type?: 'code' | 'git' | 'inline'
   git_url?: string
   git_branch?: string
   git_commit?: string
   git_subdir?: string
   git_credential_id?: string
-  runtime_config?: RuntimeConfig
-  environment_vars?: EnvironmentVars
+  code_content?: string
 }
 
 export interface ProjectFileConfigUpdateRequest {
   entry_point?: string
   runtime_config?: string | RuntimeConfig
   environment_vars?: string | EnvironmentVars
+  // 兼容旧接口
   file?: File
-  source_type?: ProjectSourceType
+  source_type?: 'file' | 'git' | 'inline'
   git_url?: string
   git_branch?: string
   git_commit?: string
   git_subdir?: string
   git_credential_id?: string
+}
+
+export interface ProjectSourcePayload {
+  repository_id: string
+  ref: string
+  subdir: string
+  entry_point: string
+  include_paths: string[]
+  runtime_config?: RuntimeConfig
 }
 
 // 项目列表查询参数
@@ -483,41 +479,4 @@ export interface ProjectExportConfig {
     start: string
     end: string
   }
-}
-
-// 项目导入配置
-export interface ProjectImportConfig {
-  file: File
-  name?: string
-  description?: string
-  entry_point?: string
-  runtime_scope?: 'shared' | 'private'
-  worker_id?: string
-  use_existing_env?: boolean
-  existing_env_name?: string
-  python_version?: string
-  shared_runtime_key?: string
-  env_name?: string
-  env_description?: string
-  overwrite_existing?: boolean
-  import_tasks?: boolean
-  import_logs?: boolean
-}
-
-export interface ProjectFileNode {
-  name: string
-  type: 'file' | 'directory'
-  path: string
-  size: number
-  modified_time?: number
-  mime_type?: string
-  is_text?: boolean
-  children: ProjectFileNode[]
-  children_count?: number
-  error?: string
-  truncated?: boolean
-}
-
-export interface ProjectFileStructure {
-  structure: ProjectFileNode
 }

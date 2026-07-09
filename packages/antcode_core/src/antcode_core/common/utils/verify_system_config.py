@@ -63,9 +63,7 @@ async def verify_config():
                 if cached_value is not None and value == cached_value:
                     logger.info(f"OK {settings_key} = {value} (已同步)")
                 else:
-                    logger.warning(
-                        f"WARN {settings_key} = {value}, 缓存值 = {cached_value} (不同步)"
-                    )
+                    logger.warning(f"WARN {settings_key} = {value}, 缓存值 = {cached_value} (不同步)")
 
         if missing_attrs:
             logger.error(f"\n缺少 {len(missing_attrs)} 个settings属性: {', '.join(missing_attrs)}")
@@ -96,9 +94,7 @@ async def verify_config():
                         "on",
                         "off",
                     )
-                logger.info(
-                    f"OK {config.config_key}: {config.value_type} = {config.config_value}"
-                )
+                logger.info(f"OK {config.config_key}: {config.value_type} = {config.config_value}")
             except Exception as e:
                 type_errors.append((config.config_key, str(e)))
                 logger.error(f"FAIL {config.config_key}: 类型错误 - {e}")
@@ -134,9 +130,7 @@ async def verify_config():
             if value is not None:
                 if isinstance(value, (int, float)) and (value < min_val or value > max_val):
                     range_errors.append((config_key, value, min_val, max_val))
-                    logger.error(
-                        f"FAIL {config_key} = {value} (超出范围 {min_val}-{max_val})"
-                    )
+                    logger.error(f"FAIL {config_key} = {value} (超出范围 {min_val}-{max_val})")
                 else:
                     logger.info(f"OK {config_key} = {value} (范围正常)")
 

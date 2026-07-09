@@ -4,6 +4,10 @@ from antcode_core.application.services.workers.distributed_log_service import (
     DistributedLogService,
     distributed_log_service,
 )
+from antcode_core.application.services.workers.source_bundle_dispatch_service import (
+    SourceBundleDispatchService,
+    source_bundle_dispatch_service,
+)
 from antcode_core.application.services.workers.worker_connection_service import (
     WorkerConnectionService,
     worker_connection_service,
@@ -17,10 +21,6 @@ from antcode_core.application.services.workers.worker_dispatcher import (
 from antcode_core.application.services.workers.worker_heartbeat_service import (
     WorkerHeartbeatService,
     worker_heartbeat_service,
-)
-from antcode_core.application.services.workers.worker_project_sync import (
-    WorkerProjectSyncService,
-    worker_project_sync_service,
 )
 from antcode_core.application.services.workers.worker_service import WorkerService, worker_service
 from antcode_core.application.services.workers.worker_stats_service import (
@@ -49,7 +49,7 @@ __all__ = [
     # 统计指标
     "worker_stats_service",
     "WorkerStatsService",
-    # 项目同步
-    "worker_project_sync_service",
-    "WorkerProjectSyncService",
+    # source bundle 分发
+    "source_bundle_dispatch_service",
+    "SourceBundleDispatchService",
 ]

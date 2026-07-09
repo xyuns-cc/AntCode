@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import re
 
-from fastapi.routing import APIRoute
-
 from antcode_core.domain.schemas.common import ErrorResponse
+from fastapi.routing import APIRoute
 
 API_TAGS = [
     {"name": "基础", "description": "系统状态、应用信息与认证相关基础接口"},
@@ -53,7 +52,7 @@ def _sanitize_segment(value: str) -> str:
 
 def generate_operation_id(route: APIRoute) -> str:
     """生成稳定且可读的 operationId（便于 SDK 代码生成）。"""
-    method = sorted((route.methods or {"GET"}))[0].lower()
+    method = sorted(route.methods or {"GET"})[0].lower()
     tag = _sanitize_segment(route.tags[0] if route.tags else "default")
     path = _sanitize_segment(route.path_format)
     return "_".join(part for part in (method, tag, path) if part)

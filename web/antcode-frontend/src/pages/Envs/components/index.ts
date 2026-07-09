@@ -1,5 +1,3 @@
-export { default as CreateVenvDrawer } from './CreateVenvDrawer'
-export { default as InstallPackagesButton } from './InstallPackagesButton'
-export { default as EditVenvKeyModal } from './EditVenvKeyModal'
+export { default as EditRuntimeEnvModal } from './EditRuntimeEnvModal'
 export { default as InstallPackagesModal } from './InstallPackagesModal'
-export { default as InterpreterDrawer } from './InterpreterDrawer'
+export { default as CreateRuntimeEnvModal } from './CreateRuntimeEnvModal'

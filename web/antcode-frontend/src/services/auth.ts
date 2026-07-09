@@ -1,8 +1,8 @@
 import apiClient, { TokenManager } from './api'
 import { AuthHandler } from '@/utils/authHandler'
 import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
-import Logger from '@/utils/logger'
 import { encryptLoginPassword } from '@/utils/loginEncryption'
+import Logger from '@/utils/logger'
 import type {
   LoginRequest,
   LoginResponse,
@@ -20,27 +20,17 @@ class AuthService {
       throw new Error('用户名不能为空')
     }
 
-    let loginPayload: {
+    const encrypted = await encryptLoginPassword(credentials.password)
+    const loginPayload: {
       username: string
-      password?: string
-      encrypted_password?: string
-      encryption?: string
-      key_id?: string
+      encrypted_password: string
+      encryption: string
+      key_id: string
     } = {
       username,
-      password: credentials.password,
-    }
-
-    try {
-      const encrypted = await encryptLoginPassword(credentials.password)
-      loginPayload = {
-        username,
-        encrypted_password: encrypted.encryptedPassword,
-        encryption: encrypted.algorithm,
-        key_id: encrypted.keyId,
-      }
-    } catch (error) {
-      Logger.warn('登录密码加密失败，回退明文登录:', error)
+      encrypted_password: encrypted.encryptedPassword,
+      encryption: encrypted.algorithm,
+      key_id: encrypted.keyId,
     }
 
     const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/login', loginPayload)
@@ -50,10 +40,7 @@ class AuthService {
     localStorage.setItem(STORAGE_KEYS.INSTALL_KEY_ALLOWED_SOURCE, allowedSource)
 
     const payload = response.data.data
-    const user = {
-      ...payload.user,
-      is_super_admin: payload.user.role === 'super_admin',
-    }
+    const user = payload.user
 
     // 保存 token 和用户信息
     TokenManager.setTokens(payload.access_token, payload.refresh_token)
@@ -130,10 +117,7 @@ class AuthService {
     })
 
     const payload = response.data.data
-    const user = {
-      ...payload.user,
-      is_super_admin: payload.user.role === 'super_admin',
-    }
+    const user = payload.user
 
     // 更新 token
     TokenManager.setTokens(payload.access_token, payload.refresh_token)

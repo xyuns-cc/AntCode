@@ -93,7 +93,23 @@ class ExecutionStatusService:
         }
         return dispatch_map.get(dispatch_status, TaskStatus.PENDING)
 
-    def _should_update(self, current_status, current_at, new_status, new_at, order_map):
+    def _should_update(
+        self,
+        current_status,
+        current_at,
+        new_status,
+        new_at,
+        order_map,
+        terminal_set=None,
+    ):
+        """B5: 终态吸收态——一旦落到 terminal_set，任何后续 runtime 状态都拒绝写入。
+
+        旧行为：同 rank + 更新时间戳递增即允许覆盖 → reconcile 的 TIMEOUT 可被
+        迟到的 worker SUCCESS 覆盖；user_cancel 可被后到的 SUCCESS 复活。
+        新行为：current 已是终态 → 直接返回 False；避免复活/覆盖。
+        """
+        if terminal_set is not None and current_status in terminal_set:
+            return False
         current_order = order_map.get(current_status, 0) if current_status else 0
         new_order = order_map.get(new_status, 0)
         if new_order < current_order:
@@ -125,6 +141,7 @@ class ExecutionStatusService:
             new_status,
             status_at,
             self._dispatch_order,
+            terminal_set=self._dispatch_terminal,
         ):
             return False
 
@@ -168,6 +185,7 @@ class ExecutionStatusService:
             new_status,
             status_at,
             self._runtime_order,
+            terminal_set=self._runtime_terminal,
         ):
             return False
 

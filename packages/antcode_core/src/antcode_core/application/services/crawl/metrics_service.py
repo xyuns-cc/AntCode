@@ -10,10 +10,10 @@ from datetime import datetime
 
 from loguru import logger
 
-from antcode_core.domain.models.enums import Priority
 from antcode_core.application.services.base import BaseService
 from antcode_core.application.services.crawl.backends import get_queue_backend
 from antcode_core.application.services.crawl.backends.dedup_backend import DedupStore, get_dedup_store
+from antcode_core.domain.models.enums import Priority
 
 # 默认告警阈值
 DEFAULT_STREAM_LENGTH_THRESHOLD = 100000  # Stream 长度告警阈值
@@ -465,8 +465,7 @@ class CrawlMetricsService(BaseService):
                 metric_name="dedup_size",
                 current_value=metrics.dedup_size,
                 threshold=self._alert_config.dedup_size_threshold,
-                message=f"去重集合大小 ({metrics.dedup_size}) "
-                f"超过阈值 ({self._alert_config.dedup_size_threshold})",
+                message=f"去重集合大小 ({metrics.dedup_size}) 超过阈值 ({self._alert_config.dedup_size_threshold})",
                 project_id=project_id,
                 created_at=now,
             )
@@ -499,6 +498,35 @@ class CrawlMetricsService(BaseService):
                 f"value={alert.current_value}, "
                 f"threshold={alert.threshold}"
             )
+
+        # L4: 投递到 alert_service，让 feishu/webhook 等通道真正收到
+        try:
+            import asyncio as _asyncio
+
+            from antcode_core.application.services.alert.alert_service import (
+                alert_service,
+            )
+
+            level = "CRITICAL" if alert.level == "critical" else "WARNING"
+            extra = {
+                "project_id": alert.project_id,
+                "metric_name": alert.metric_name,
+                "current_value": alert.current_value,
+                "threshold": alert.threshold,
+                "created_at": alert.created_at,
+            }
+            coro = alert_service.send_alert(
+                message=alert.message,
+                level=level,
+                source="crawl",
+                extra=extra,
+            )
+            try:
+                _asyncio.get_running_loop().create_task(coro)
+            except RuntimeError:
+                _asyncio.run(coro)
+        except Exception as exc:
+            logger.warning(f"crawl 告警投递 alert_service 失败: {exc}")
 
     # =========================================================================
     # 告警配置管理

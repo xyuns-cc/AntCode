@@ -81,9 +81,7 @@ class DatabaseOptimizer:
             # 批量创建
             if to_create:
                 try:
-                    new_objects = await model_class.bulk_create(
-                        [model_class(**item) for item in to_create]
-                    )
+                    new_objects = await model_class.bulk_create([model_class(**item) for item in to_create])
                     created_objects.extend(new_objects)
                 except Exception as e:
                     errors.append(f"批量创建失败: {e}")
@@ -223,9 +221,7 @@ class DatabaseOptimizer:
 
         while True:
             # 获取一批要删除的对象ID
-            objects = (
-                await model_class.filter(**filters).limit(batch_size).values_list("id", flat=True)
-            )
+            objects = await model_class.filter(**filters).limit(batch_size).values_list("id", flat=True)
 
             if not objects:
                 break
@@ -270,10 +266,7 @@ class ORMProxy:
         return self._data.get(key, default)
 
     def model_dump(self, **kwargs):
-        return {
-            k: (v.model_dump(**kwargs) if isinstance(v, ORMProxy) else v)
-            for k, v in self._data.items()
-        }
+        return {k: (v.model_dump(**kwargs) if isinstance(v, ORMProxy) else v) for k, v in self._data.items()}
 
     def dict(self, **kwargs):
         return self.model_dump(**kwargs)
@@ -332,6 +325,7 @@ def cached_query(ttl=300, namespace=None):
         ttl: 缓存 TTL（秒）
         namespace: 缓存命名空间
     """
+
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -339,11 +333,7 @@ def cached_query(ttl=300, namespace=None):
 
             # 生成缓存键
             try:
-                filtered = {
-                    k: v
-                    for k, v in kwargs.items()
-                    if not hasattr(v, "__dict__") or not hasattr(v, "url")
-                }
+                filtered = {k: v for k, v in kwargs.items() if not hasattr(v, "__dict__") or not hasattr(v, "url")}
                 content = f"{func.__module__}.{func.__name__}:{args}:{sorted(filtered.items())}"
                 raw_key = calculate_content_hash(content)[:16]
                 cache_key = f"{namespace}:{raw_key}" if namespace else raw_key

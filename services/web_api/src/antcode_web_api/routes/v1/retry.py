@@ -3,14 +3,15 @@
 import contextlib
 from typing import Any
 
+from antcode_core.application.services.scheduler.retry_service import retry_service
+from antcode_core.common.security.auth import TokenData, get_current_user
+from antcode_core.domain.models import User, UserRole
+from antcode_core.domain.schemas.common import BaseResponse
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from loguru import logger
 
+from antcode_web_api.deps import require_role
 from antcode_web_api.response import success
-from antcode_core.common.security.auth import TokenData, get_current_user
-from antcode_core.domain.models import User
-from antcode_core.domain.schemas.common import BaseResponse
-from antcode_core.application.services.scheduler.retry_service import retry_service
 
 router = APIRouter()
 
@@ -23,9 +24,22 @@ router = APIRouter()
 )
 async def manual_retry_task(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """手动重试任务"""
-    result = await retry_service.manual_retry(
-        run_id=run_id, user_id=current_user.user_id
-    )
+    # D2: owner 校验，与本文件其它端点（stats/history/cancel）保持一致；此前遗漏
+    # 让任意登录用户可 POST /manual/{任意 run_id} 重跑他人任务。
+    from antcode_core.domain.models.task import Task
+    from antcode_core.domain.models.task_run import TaskRun
+
+    execution = await TaskRun.get_or_none(run_id=run_id)
+    if not execution:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="执行记录不存在")
+    task = await Task.get_or_none(id=execution.task_id)
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="关联任务不存在")
+    user = await User.get_or_none(id=current_user.user_id)
+    if not user or (not user.is_admin and task.user_id != current_user.user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问此任务")
+
+    result = await retry_service.manual_retry(run_id=run_id, user_id=current_user.user_id)
 
     if not result["success"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
@@ -68,13 +82,11 @@ async def get_retry_stats(task_id: str, current_user: TokenData = Depends(get_cu
     summary="获取待重试任务",
     description="获取当前待重试的任务列表（仅管理员）",
 )
-async def get_pending_retries(current_user: TokenData = Depends(get_current_user)):
+async def get_pending_retries(
+    _admin: User = Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
+):
     """获取待重试任务列表"""
     from antcode_core.domain.models.task import Task
-
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
 
     pending = await retry_service.get_pending_retries()
 
@@ -146,9 +158,7 @@ async def update_retry_config(
     summary="取消待重试任务",
     description="取消队列中待重试的任务",
 )
-async def cancel_pending_retry(
-    run_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def cancel_pending_retry(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """取消待重试任务"""
     from antcode_core.domain.models.enums import TaskStatus
     from antcode_core.domain.models.task import Task

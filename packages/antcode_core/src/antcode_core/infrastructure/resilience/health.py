@@ -3,7 +3,7 @@
 
 提供统一的健康检查端点，聚合所有服务组件的健康状态：
 - 数据库连接
-- Redis 连接（可选）
+- Redis 连接
 - 熔断器状态
 - 内存/磁盘使用
 
@@ -222,20 +222,13 @@ class HealthChecker:
         """检查 Redis 连接"""
         start = time.time()
         try:
+            # T6-T1: 走统一 factory
             from antcode_core.common.config import settings
+            from antcode_core.infrastructure.redis.factory import (
+                create_async_redis_client,
+            )
 
-            if not settings.REDIS_ENABLED:
-                return ComponentHealth(
-                    name="redis",
-                    status=HealthStatus.HEALTHY,
-                    latency_ms=0,
-                    message="Redis 未启用（使用内存队列）",
-                    details={"enabled": False},
-                )
-
-            import redis.asyncio as aioredis
-
-            client = aioredis.from_url(
+            client = create_async_redis_client(
                 settings.REDIS_URL,
                 socket_connect_timeout=2.0,
                 socket_timeout=2.0,
@@ -261,9 +254,9 @@ class HealthChecker:
         except ImportError:
             return ComponentHealth(
                 name="redis",
-                status=HealthStatus.DEGRADED,
+                status=HealthStatus.UNHEALTHY,
                 latency_ms=(time.time() - start) * 1000,
-                message="redis 包未安装",
+                message="Redis 必需依赖缺失",
             )
         except Exception as e:
             return ComponentHealth(
@@ -291,9 +284,7 @@ class HealthChecker:
                 )
 
             open_count = sum(1 for cb in breakers.values() if cb.state == CircuitState.OPEN)
-            half_open_count = sum(
-                1 for cb in breakers.values() if cb.state == CircuitState.HALF_OPEN
-            )
+            half_open_count = sum(1 for cb in breakers.values() if cb.state == CircuitState.HALF_OPEN)
 
             if open_count > 0:
                 status = HealthStatus.DEGRADED
@@ -413,9 +404,7 @@ class HealthChecker:
                 details={
                     "online_count": online_count,
                     "total_count": total_workers,
-                    "online_workers": [
-                        {"name": w.name, "host": w.host, "port": w.port} for w in online_workers[:10]
-                    ],
+                    "online_workers": [{"name": w.name, "host": w.host, "port": w.port} for w in online_workers[:10]],
                 },
             )
         except Exception as e:
@@ -441,9 +430,11 @@ class HealthChecker:
         检查应用是否准备好接收流量
         """
         try:
-            # 检查数据库连接
-            db_health = await self._check_database()
-            return db_health.status != HealthStatus.UNHEALTHY
+            db_health, redis_health = await asyncio.gather(
+                self._check_database(),
+                self._check_redis(),
+            )
+            return db_health.status != HealthStatus.UNHEALTHY and redis_health.status != HealthStatus.UNHEALTHY
         except Exception:
             return False
 

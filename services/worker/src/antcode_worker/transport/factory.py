@@ -206,11 +206,13 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
     logger.info("执行 Direct 模式自检...")
 
     try:
-        import redis.asyncio as aioredis
+        # T6-T1: 走统一 factory
+        from antcode_core.infrastructure.redis.factory import (
+            create_async_redis_client,
+        )
 
-        redis_client = aioredis.from_url(
+        redis_client = create_async_redis_client(
             config.direct.redis_url,
-            encoding="utf-8",
             decode_responses=True,
         )
 

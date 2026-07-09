@@ -6,21 +6,31 @@ Domain Models 模块
 - enums: 枚举定义
 - user: 用户模型
 - project: 项目模型
+- project_source: 项目 Git 来源配置
 - task: 任务定义模型
 - task_run: 任务执行实例模型
 - runtime: 运行时环境模型
 - worker: Worker 节点模型
-- worker_project: Worker 项目绑定模型
+- worker_install_key: Worker 安装 Key
 - crawl: 爬取批次模型
 - monitoring: 监控模型
 - audit_log: 审计日志模型
+- git_credential: Git 凭证
+- git_repository: Git 仓库
+- artifact: PostgreSQL source bundle / 产物 blob
+- run_source_snapshot: 任务运行的源码快照
 - system_config: 系统配置模型
 """
 
 # 基础模型
+# Artifact 模型
+from antcode_core.domain.models.artifact import (
+    SourceArtifact,
+    SourceArtifactChunk,
+)
+
 # 审计日志模型
 from antcode_core.domain.models.audit_log import AuditLog
-from antcode_core.domain.models.git_credential import GitCredential
 from antcode_core.domain.models.base import (
     BaseModel,
     SoftDeleteMixin,
@@ -41,7 +51,6 @@ from antcode_core.domain.models.enums import (
     CrawlEngine,
     DispatchStatus,
     ExecutionStrategy,
-    InterpreterSource,
     PaginationType,
     Priority,
     ProjectStatus,
@@ -60,6 +69,8 @@ from antcode_core.domain.models.enums import (
     # Worker 节点相关
     WorkerStatus,
 )
+from antcode_core.domain.models.git_credential import GitCredential
+from antcode_core.domain.models.git_repository import GitRepository
 
 # 监控模型
 from antcode_core.domain.models.monitoring import (
@@ -73,13 +84,13 @@ from antcode_core.domain.models.project import (
     Project,
     ProjectCode,
     ProjectFile,
-    ProjectFileVersion,
     ProjectRule,
 )
+from antcode_core.domain.models.project_source import ProjectSource
+from antcode_core.domain.models.run_source_snapshot import RunSourceSnapshot
 
 # 运行时环境模型
 from antcode_core.domain.models.runtime import (
-    Interpreter,
     ProjectRuntimeBinding,
     Runtime,
 )
@@ -104,12 +115,6 @@ from antcode_core.domain.models.worker import (
 # Worker 安装 Key 模型
 from antcode_core.domain.models.worker_install_key import WorkerInstallKey
 
-# Worker 项目绑定模型
-from antcode_core.domain.models.worker_project import (
-    WorkerProject,
-    WorkerProjectFile,
-)
-
 __all__ = [
     # 基础模型
     "BaseModel",
@@ -132,7 +137,6 @@ __all__ = [
     "ExecutionStrategy",
     "RuntimeScope",
     "RuntimeLocation",
-    "InterpreterSource",
     "WorkerStatus",
     "AuditAction",
     "BatchStatus",
@@ -144,14 +148,13 @@ __all__ = [
     # 项目模型
     "Project",
     "ProjectFile",
-    "ProjectFileVersion",
     "ProjectRule",
     "ProjectCode",
+    "ProjectSource",
     # 任务模型
     "Task",
     "TaskRun",
     # 运行时环境模型
-    "Interpreter",
     "Runtime",
     "ProjectRuntimeBinding",
     # Worker 节点模型
@@ -160,9 +163,6 @@ __all__ = [
     "UserWorkerPermission",
     # Worker 安装 Key 模型
     "WorkerInstallKey",
-    # Worker 项目绑定模型
-    "WorkerProject",
-    "WorkerProjectFile",
     # 爬取批次模型
     "CrawlBatch",
     "CrawlTaskStatus",
@@ -173,6 +173,11 @@ __all__ = [
     # 审计日志模型
     "AuditLog",
     "GitCredential",
+    "GitRepository",
+    # Artifact 模型
+    "SourceArtifact",
+    "SourceArtifactChunk",
+    "RunSourceSnapshot",
     # 系统配置模型
     "SystemConfig",
 ]

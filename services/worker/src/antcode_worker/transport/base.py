@@ -226,6 +226,14 @@ class TransportBase(ABC):
         """
         pass
 
+    # T7-B3b (P1-6): worker 优雅停机时主动 revoke lease，让 master
+    # 立即判死；不再等 lease TTL（30s）自然过期。默认 no-op 保持向后兼容，
+    # 具体 transport 覆写：direct 直接 DEL lease key + heartbeat；
+    # gateway 发 Deregister RPC。
+    async def deregister(self, reason: str = "shutdown") -> None:
+        """主动通知 master worker 下线。默认 no-op。"""
+        return
+
     # ==================== 任务操作 ====================
 
     @abstractmethod

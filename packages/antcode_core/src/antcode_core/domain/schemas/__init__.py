@@ -25,9 +25,6 @@ from antcode_core.domain.schemas.common import (
 from antcode_core.domain.schemas.runtime import (
     CreateRuntimeRequest,
     CreateSharedRuntimeRequest,
-    InstallInterpreterRequest,
-    InterpreterInfo,
-    PythonVersionListResponse,
     RuntimeListItem,
     RuntimeStatusResponse,
 )
@@ -67,10 +64,10 @@ from antcode_core.domain.schemas.worker import (
     WorkerHeartbeatRequest,
     WorkerListResponse,
     WorkerMetrics,
-    WorkerRegisterRequest,
-    WorkerRegisterResponse,
     WorkerRegisterDirectRequest,
     WorkerRegisterDirectResponse,
+    WorkerRegisterRequest,
+    WorkerRegisterResponse,
     WorkerResponse,
     WorkerTestConnectionResponse,
     WorkerUpdateRequest,
@@ -107,9 +104,6 @@ __all__ = [
     "TaskStatsResponse",
     "SystemMetricsResponse",
     # 运行时环境 Schema
-    "PythonVersionListResponse",
-    "InterpreterInfo",
-    "InstallInterpreterRequest",
     "RuntimeStatusResponse",
     "CreateRuntimeRequest",
     "CreateSharedRuntimeRequest",

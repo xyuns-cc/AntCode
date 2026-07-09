@@ -310,7 +310,6 @@ class WorkerService extends BaseService {
   async getBestWorker(params?: {
     region?: string
     tags?: string
-    require_render?: boolean
   }): Promise<{
     available: boolean
     worker?: Worker
@@ -323,86 +322,6 @@ class WorkerService extends BaseService {
       load_score?: number
       message?: string
     }>('/best', { params })
-  }
-
-  /**
-   * 分发任务到 Worker
-   */
-  async dispatchTask(data: {
-    project_id: string
-    params?: Record<string, unknown>
-    environment_vars?: Record<string, string>
-    timeout?: number
-    worker_id?: string
-    region?: string
-    tags?: string[]
-    priority?: number
-    project_type?: string
-    require_render?: boolean
-  }): Promise<{
-    success: boolean
-    run_id?: string
-    worker_id?: string
-    worker_name?: string
-    message?: string
-  }> {
-    return this.post<{
-      success: boolean
-      run_id?: string
-      worker_id?: string
-      worker_name?: string
-      message?: string
-    }>('/dispatch/task', data)
-  }
-
-  /**
-   * 获取分布式任务日志
-   */
-  async getDistributedLogs(runId: string, params?: {
-    log_type?: 'stdout' | 'stderr'
-    tail?: number
-  }): Promise<{
-    run_id: string
-    log_type: string
-    logs: string[]
-    total: number
-  }> {
-    return this.get<{
-      run_id: string
-      log_type: string
-      logs: string[]
-      total: number
-    }>(`/distributed-logs/${runId}`, { params })
-  }
-
-  /**
-   * 获取远程 Worker 任务状态
-   */
-  async getRemoteTaskStatus(workerId: string, taskId: string): Promise<{
-    status: string
-    exit_code?: number
-    error_message?: string
-  }> {
-    return this.get<{
-      status: string
-      exit_code?: number
-      error_message?: string
-    }>(`/dispatch/task/${workerId}/${taskId}/status`)
-  }
-
-  /**
-   * 获取远程 Worker 任务日志
-   */
-  async getRemoteTaskLogs(workerId: string, taskId: string, params?: {
-    tail?: number
-  }): Promise<{
-    logs: string[]
-    total: number
-  }> {
-    return this.get<{
-      logs: string[]
-      total: number
-    }>(`/dispatch/task/${workerId}/${taskId}/logs`, { params })
   }
 
   // ========== Worker 资源管理（管理员功能）==========

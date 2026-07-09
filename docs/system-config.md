@@ -20,13 +20,11 @@
 | `TASK_MAX_RETRIES` | `3` | 最大重试次数 |
 | `TASK_RETRY_DELAY` | `60` | 重试间隔（秒） |
 
-### 日志与归档
+### 日志
 
 | 配置项 | 默认值 | 说明 |
 |---|---:|---|
 | `TASK_LOG_RETENTION_DAYS` | `30` | 任务日志保留天数 |
-| `LOG_STORAGE_BACKEND` | `s3` | 日志存储后端（`s3/local/clickhouse`） |
-| `LOG_ARCHIVE_RETENTION_DAYS` | `30` | 归档保留天数 |
 
 ### 缓存与监控
 

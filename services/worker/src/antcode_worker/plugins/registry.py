@@ -113,3 +113,31 @@ class PluginRegistry:
             self.register(RenderPlugin())
         except ImportError:
             logger.warning("RenderPlugin 加载失败")
+
+        # Rule Plugin —— O1: 让规则爬虫任务在 worker 上有插件 match
+        # T6-T4a: env `WORKER_ENABLE_RULE_PLUGIN=false` 时不加载，让 worker
+        # 变成"code-only worker"。默认开（当前主用途是爬虫）。
+        import os as _os
+
+        rule_enabled = _os.environ.get(
+            "WORKER_ENABLE_RULE_PLUGIN", "true"
+        ).strip().lower() not in ("false", "0", "no", "off")
+        if rule_enabled:
+            try:
+                from antcode_worker.plugins.rule.plugin import RulePlugin
+
+                self.register(RulePlugin())
+            except ImportError as exc:
+                logger.warning(
+                    f"RulePlugin 加载失败（scrapy/依赖未装？）: {exc}"
+                )
+        else:
+            logger.info("WORKER_ENABLE_RULE_PLUGIN=false，跳过 RulePlugin 注册")
+
+    def capabilities(self) -> list[str]:
+        """T6-T4a: 当前 worker 能处理的 task_type 列表。
+
+        供 register/heartbeat 上报到 master，让 dispatcher 按能力路由
+        （避免把 rule 派到关闭了 RulePlugin 的 worker）。
+        """
+        return [p.name for p in self._plugins]

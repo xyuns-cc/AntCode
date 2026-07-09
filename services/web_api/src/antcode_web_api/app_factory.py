@@ -3,13 +3,13 @@
 提供 create_app() 工厂函数，用于创建 FastAPI 应用实例。
 """
 
+from antcode_core.common.config import settings
+from antcode_core.common.logging import setup_logging
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import UJSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from antcode_core.common.config import settings
-from antcode_core.common.logging import setup_logging
 from antcode_web_api.exceptions import (
     BusinessException,
     business_exception_handler,
@@ -33,6 +33,7 @@ def create_app() -> FastAPI:
         FastAPI: 已配置的应用实例。
     """
     setup_logging()
+    # 进程级角色锁定：web_api 进程固定为控制面，禁止与调度器（master）合并部署
     settings.SCHEDULER_ROLE = "control"
     from antcode_web_api.routes import register_routes
 
@@ -58,5 +59,13 @@ def create_app() -> FastAPI:
 
     # 注册路由
     register_routes(app)
+
+    # T7-P2-3: /metrics 端点（Prometheus 惯例挂根路径，与 API v1 分离）
+    try:
+        from antcode_web_api.prometheus_metrics import router as prom_router
+
+        app.include_router(prom_router)
+    except ImportError:
+        pass
 
     return app

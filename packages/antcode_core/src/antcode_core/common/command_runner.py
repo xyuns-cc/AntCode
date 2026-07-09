@@ -1,4 +1,5 @@
 """命令执行工具"""
+
 from __future__ import annotations
 
 import asyncio
@@ -66,7 +67,7 @@ async def run_command(
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             process.kill()
         return CommandResult(exit_code=124, stdout="", stderr=f"命令超时: {cmd_str}")

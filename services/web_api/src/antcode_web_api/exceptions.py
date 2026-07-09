@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from antcode_core.domain.schemas.common import ErrorData, ErrorDetail, ErrorResponse
 from fastapi import HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-
-from antcode_core.domain.schemas.common import ErrorData, ErrorDetail, ErrorResponse
 
 
 class BusinessException(HTTPException):
@@ -161,6 +160,31 @@ def create_error_response(
     return JSONResponse(status_code=status_code, content=content)
 
 
+def _validation_errors_from_detail(detail: Any) -> list[dict[str, str]]:
+    if not isinstance(detail, list):
+        return []
+    errors: list[dict[str, str]] = []
+    for item in detail:
+        if not isinstance(item, dict):
+            errors.append({"field": "", "message": str(item)})
+            continue
+        loc = item.get("loc", "")
+        field = ".".join(str(part) for part in loc) if isinstance(loc, (list, tuple)) else str(loc)
+        errors.append({"field": field, "message": str(item.get("msg", item))})
+    return errors
+
+
+def _http_error_message(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        return "请求参数验证失败"
+    if isinstance(detail, dict):
+        message = detail.get("message") or detail.get("detail")
+        return str(message) if message is not None else str(detail)
+    return str(detail)
+
+
 async def business_exception_handler(request: Request, exc: BusinessException) -> JSONResponse:
     """处理业务异常"""
     return create_error_response(
@@ -176,7 +200,11 @@ async def http_exception_handler(
     exc: HTTPException | StarletteHTTPException,
 ) -> JSONResponse:
     """处理 HTTP 异常"""
-    return create_error_response(status_code=exc.status_code, message=exc.detail)
+    return create_error_response(
+        status_code=exc.status_code,
+        message=_http_error_message(exc.detail),
+        errors=_validation_errors_from_detail(exc.detail),
+    )
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

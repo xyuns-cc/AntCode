@@ -5,11 +5,11 @@ import asyncio
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
+from antcode_core.application.services.base import QueryHelper
 from antcode_core.domain.models.project import Project, ProjectCode, ProjectFile, ProjectRule
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
 from antcode_core.domain.models.user import User
-from antcode_core.application.services.base import QueryHelper
 
 
 class RelationService:
@@ -210,20 +210,14 @@ class RelationService:
             "tasks": 0,
             "executions": 0,
             "details": 0,
-            "venv_bindings": 0,
-            "worker_project_files": 0,
-            "worker_projects": 0,
+            "runtime_bindings": 0,
         }
 
         try:
             # 1. 获取任务ID并删除执行记录
-            task_ids = await Task.filter(project_id=project_id).values_list(
-                "id", flat=True
-            )
+            task_ids = await Task.filter(project_id=project_id).values_list("id", flat=True)
             if task_ids:
-                deleted["executions"] = await TaskRun.filter(
-                    task_id__in=list(task_ids)
-                ).delete()
+                deleted["executions"] = await TaskRun.filter(task_id__in=list(task_ids)).delete()
 
             # 2. 删除任务
             deleted["tasks"] = await Task.filter(project_id=project_id).delete()
@@ -236,25 +230,12 @@ class RelationService:
             )
             deleted["details"] = sum(results)
 
-            # 4. 删除虚拟环境绑定记录
+            # 4. 删除运行时绑定记录
             from antcode_core.domain.models import ProjectRuntimeBinding
 
-            deleted["venv_bindings"] = await ProjectRuntimeBinding.filter(
-                project_id=project_id
-            ).delete()
+            deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(project_id=project_id).delete()
 
-            # 5. 删除 Worker 项目同步记录
-            from antcode_core.domain.models import WorkerProject, WorkerProjectFile
-
-            worker_projects = await WorkerProject.filter(project_id=project_id).all()
-            if worker_projects:
-                wp_ids = [np.id for np in worker_projects]
-                deleted["worker_project_files"] = await WorkerProjectFile.filter(
-                    worker_project_id__in=wp_ids
-                ).delete()
-                deleted["worker_projects"] = await WorkerProject.filter(id__in=wp_ids).delete()
-
-            # 6. 删除项目
+            # 5. 删除项目
             await Project.filter(id=project_id).delete()
 
             logger.info(f"级联删除项目 {project_id}: {deleted}")

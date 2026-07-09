@@ -72,10 +72,21 @@ class StateManager:
         self._lock = asyncio.Lock()
 
     async def add(self, run_id: str, task_id: str, receipt: str | None = None) -> RunInfo:
-        """添加新运行"""
+        """添加新运行；已存在直接返回旧的（保留旧行为，供 legacy 调用点）。"""
+        info, _ = await self.add_if_new(run_id, task_id, receipt=receipt)
+        return info
+
+    async def add_if_new(
+        self, run_id: str, task_id: str, receipt: str | None = None
+    ) -> tuple[RunInfo, bool]:
+        """B2: add 的原子变体，返回 ``(info, is_new)`` 让调用方判断是否重复。
+
+        engine._worker_loop 需要根据 is_new 决定是否 enqueue —— 否则 reclaim
+        取回旧消息或 direct 重投时会双跑同 run_id。
+        """
         async with self._lock:
             if run_id in self._runs:
-                return self._runs[run_id]
+                return self._runs[run_id], False
 
             info = RunInfo(
                 run_id=run_id,
@@ -85,7 +96,7 @@ class StateManager:
             )
             self._runs[run_id] = info
             logger.debug(f"添加运行: {run_id}")
-            return info
+            return info, True
 
     async def get(self, run_id: str) -> RunInfo | None:
         """获取运行信息"""

@@ -224,9 +224,7 @@ def monitor_performance(slow_threshold=1.0):
             try:
                 return await func(*args, **kwargs)
             finally:
-                performance_monitor.record_request(
-                    func.__name__, time.time() - start, slow_threshold
-                )
+                performance_monitor.record_request(func.__name__, time.time() - start, slow_threshold)
 
         return wrapper
 
@@ -240,11 +238,7 @@ def optimize_large_response(chunk_size=100):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             result = await func(*args, **kwargs)
-            if (
-                hasattr(result, "data")
-                and isinstance(result.data, list)
-                and len(result.data) > chunk_size * 2
-            ):
+            if hasattr(result, "data") and isinstance(result.data, list) and len(result.data) > chunk_size * 2:
                 logger.debug(f"大响应: {func.__name__} 返回 {len(result.data)} 条")
             return result
 

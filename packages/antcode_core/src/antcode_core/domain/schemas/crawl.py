@@ -55,8 +55,12 @@ class CrawlBatchResponse(BaseModel):
     status: str = Field(..., description="批次状态")
     is_test: bool = Field(..., description="是否为测试批次")
     created_at: datetime = Field(..., description="创建时间")
-    started_at: str = Field("", description="开始时间")
-    completed_at: str = Field("", description="完成时间")
+    # S7 stress fix: model 里这俩字段是 nullable datetime，Pydantic 会
+    # 拿到 datetime 或 None。之前定义 str 让 running 的 batch 详情端点直接
+    # 500，也没被 list 端点覆盖（新建的 batch 全 None 反而通过）。改成
+    # datetime | None 让 Pydantic 自动序列化 ISO 字符串。
+    started_at: datetime | None = Field(None, description="开始时间")
+    completed_at: datetime | None = Field(None, description="完成时间")
 
     model_config = ConfigDict(from_attributes=True)
 

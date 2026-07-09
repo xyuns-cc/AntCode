@@ -4,9 +4,9 @@
 用户账户的数据模型定义。
 """
 
-import bcrypt
 from enum import Enum
 
+import bcrypt
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
@@ -43,9 +43,7 @@ class User(BaseModel):
     表示系统用户账户。
     """
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     username = fields.CharField(max_length=50, unique=True)
     password_hash = fields.CharField(max_length=128)
     email = fields.CharField(max_length=100, null=True)
@@ -80,6 +78,20 @@ class User(BaseModel):
     def is_super_admin(self) -> bool:
         """是否为超级管理员"""
         return self.role == UserRole.SUPER_ADMIN
+
+    def _sync_admin_flag(self) -> None:
+        """以 ``role`` 为单一权威，自动派生 ``is_admin`` 布尔字段。
+
+        历史代码大量直接读 ``user.is_admin``；新代码应优先走 ``role`` /
+        ``require_role``。本方法保证两者永不漂移。
+        """
+        derived = self.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN)
+        if self.is_admin != derived:
+            self.is_admin = derived
+
+    async def save(self, *args, **kwargs):  # type: ignore[override]
+        self._sync_admin_flag()
+        return await super().save(*args, **kwargs)
 
     def __str__(self):
         return self.username

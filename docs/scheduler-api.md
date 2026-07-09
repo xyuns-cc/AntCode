@@ -429,8 +429,7 @@ curl -X GET "/api/v1/scheduler/tasks/1/executions?page=1&size=10&status=SUCCESS"
                 "exit_code": 0,
                 "output_summary": "处理了1000条记录，成功同步到数据库",
                 "error_message": null,
-                "log_file_path": "/logs/tasks/exec-20240101-001/output.log",
-                "error_log_path": "/logs/tasks/exec-20240101-001/error.log",
+                "log_ref": "postgresql://task_logs/exec-20240101-001",
                 "created_at": "2024-01-01T02:00:00Z"
             }
         ]
@@ -472,9 +471,7 @@ curl -X GET /api/v1/scheduler/executions/exec-20240101-001 \
         "exit_code": 0,
         "output_summary": "处理了1000条记录，成功同步到数据库",
         "error_message": null,
-        "log_file_path": "/logs/tasks/exec-20240101-001/output.log",
-        "error_log_path": "/logs/tasks/exec-20240101-001/error.log",
-        "workspace_path": "/tmp/workspaces/exec-20240101-001",
+        "log_ref": "postgresql://task_logs/exec-20240101-001",
         "resource_usage": {
             "max_memory_mb": 128,
             "avg_cpu_percent": 15.5
@@ -488,20 +485,20 @@ curl -X GET /api/v1/scheduler/executions/exec-20240101-001 \
 
 ### 11. 获取执行日志
 
-**GET** `/api/v1/scheduler/executions/{execution_id}/logs/file`
+**GET** `/api/v1/runs/{run_id}/logs`
 
-获取执行记录的日志文件内容。
+从 PostgreSQL 读取执行记录的历史日志。
 
 #### 路径参数
-- `execution_id` (string, 必需): 执行记录ID
+- `run_id` (string, 必需): 执行记录ID
 
 #### 查询参数
-- `log_type` (string): 日志类型 (`output` | `error`)，默认 `output`
+- `log_type` (string): 日志类型 (`stdout` | `stderr`)，默认 `stdout`
 - `lines` (int, 可选): 返回的日志行数，最大10000
 
 #### 请求示例
 ```bash
-curl -X GET "/api/v1/scheduler/executions/exec-20240101-001/logs/file?log_type=output&lines=100" \
+curl -X GET "/api/v1/runs/exec-20240101-001/logs?log_type=stdout&limit=100" \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -521,10 +518,8 @@ curl -X GET "/api/v1/scheduler/executions/exec-20240101-001/logs/file?log_type=o
             "2024-01-01 02:00:30 [INFO] 数据处理进度: 50%",
             "2024-01-01 02:00:45 [INFO] 任务执行完成，处理了1000条记录"
         ],
-        "file_path": "/logs/tasks/exec-20240101-001/output.log",
-        "file_size": 2048,
         "lines_count": 25,
-        "last_modified": "2024-01-01T02:00:45Z"
+        "storage": "postgresql"
     }
 }
 ```
@@ -651,37 +646,10 @@ curl -X GET /api/v1/scheduler/running \
 
 ---
 
-### 15. 清理执行工作目录
+### 15. PostgreSQL 日志保留策略
 
-**POST** `/api/v1/scheduler/cleanup-workspaces`
-
-手动清理历史执行的工作目录（仅管理员）。
-
-#### 查询参数
-- `max_age_hours` (int): 最大保留时间（小时），默认24
-
-#### 请求示例
-```bash
-curl -X POST "/api/v1/scheduler/cleanup-workspaces?max_age_hours=48" \
-  -H "Authorization: Bearer <token>"
-```
-
-#### 响应示例
-```json
-{
-    "success": true,
-    "code": 200,
-    "message": "清理完成，已删除超过 48 小时的工作目录",
-    "data": {
-        "cleanup_summary": {
-            "directories_removed": 25,
-            "space_freed_mb": 512.3,
-            "oldest_removed": "2023-12-30T10:00:00Z",
-            "cleanup_time": "2024-01-01T10:35:00Z"
-        }
-    }
-}
-```
+历史执行日志保存在 PostgreSQL `task_logs` 表中。生产环境通过数据库分区、
+保留策略或后台清理任务处理历史日志。
 
 ---
 
@@ -755,7 +723,7 @@ curl -X POST "/api/v1/scheduler/cleanup-workspaces?max_age_hours=48" \
 ### 2. 监控和维护
 - 定期查看任务执行统计和失败日志
 - 监控系统资源使用情况
-- 及时清理历史日志和工作目录
+- 及时清理历史日志
 - 对失败任务进行及时处理
 
 ### 3. 性能优化

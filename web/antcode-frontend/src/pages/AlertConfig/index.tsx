@@ -38,6 +38,7 @@ import {
   CloseCircleOutlined
 } from '@ant-design/icons'
 import { useAuthStore } from '@/stores/authStore'
+import PageContainer from '@/components/common/PageContainer'
 import { alertService } from '@/services/alert'
 import type {
   AlertConfigResponse,
@@ -104,7 +105,7 @@ const AlertConfig: React.FC = memo(() => {
   const [testLoading, setTestLoading] = useState<string | null>(null)
 
   // 检查权限
-  const isSuperAdmin = user?.role === 'super_admin' || user?.is_super_admin
+  const isSuperAdmin = user?.role === 'super_admin'
 
   // 加载配置
   const loadConfig = useCallback(async () => {
@@ -679,12 +680,15 @@ const AlertConfig: React.FC = memo(() => {
   }
 
   return (
-    <div className={styles.alertConfigContainer}>
-      <div className={styles.pageHeader}>
-        <h1 className={styles.pageTitle}>
+    <PageContainer
+      scrollable
+      title={
+        <>
           <BellOutlined style={{ marginRight: 8 }} />
           告警配置
-        </h1>
+        </>
+      }
+      extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={handleReloadConfig}>
             重新加载
@@ -698,8 +702,8 @@ const AlertConfig: React.FC = memo(() => {
             测试所有渠道
           </Button>
         </Space>
-      </div>
-
+      }
+    >
       {!isSuperAdmin && (
         <Alert
           message="权限提示"
@@ -1123,7 +1127,7 @@ const AlertConfig: React.FC = memo(() => {
           </Form.Item>
         </Form>
       </Modal>
-    </div>
+    </PageContainer>
   )
 })
 

@@ -79,36 +79,6 @@
   padding: 20px;
 }
 
-/* 上传区域样式 */
-.uploadArea {
-  border: 2px dashed var(--upload-border-color, #d9d9d9);
-  border-radius: 8px;
-  background: var(--upload-bg-color, #fafafa);
-  transition: all 0.3s ease;
-}
-
-.uploadArea:hover {
-  border-color: var(--ant-color-primary, #1890ff);
-  background: var(--upload-hover-bg, #f0f8ff);
-}
-
-.uploadArea.dragOver {
-  border-color: var(--ant-color-primary, #1890ff);
-  background: var(--upload-hover-bg, #f0f8ff);
-}
-
-:global(.light-theme) .uploadArea {
-  --upload-border-color: #d9d9d9;
-  --upload-bg-color: #fafafa;
-  --upload-hover-bg: #f0f8ff;
-}
-
-:global(.dark-theme) .uploadArea {
-  --upload-border-color: #434343;
-  --upload-bg-color: #262626;
-  --upload-hover-bg: rgba(24, 144, 255, 0.1);
-}
-
 /* 规则选择器样式 */
 .ruleSelector {
   background: var(--ant-color-bg-container, #fff);
@@ -135,39 +105,6 @@
   border: 1px solid var(--ant-color-border-secondary, #e8e8e8);
   border-radius: 6px;
   padding: 16px;
-}
-
-/* 代码编辑器样式 */
-.codeEditor {
-  font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  background: var(--code-bg-color, #1e1e1e);
-  color: var(--code-text-color, #d4d4d4);
-  border-radius: 6px;
-}
-
-.codeEditor :global(.ant-input) {
-  background: var(--code-bg-color, #1e1e1e);
-  color: var(--code-text-color, #d4d4d4);
-  border: 1px solid var(--code-border-color, #404040);
-}
-
-.codeEditor :global(.ant-input:focus) {
-  border-color: var(--ant-color-primary, #1890ff);
-  box-shadow: 0 0 0 2px var(--ant-color-primary-bg, rgba(24, 144, 255, 0.2));
-}
-
-:global(.light-theme) .codeEditor {
-  --code-bg-color: #fafafa;
-  --code-text-color: rgba(0, 0, 0, 0.85);
-  --code-border-color: #d9d9d9;
-}
-
-:global(.dark-theme) .codeEditor {
-  --code-bg-color: #1e1e1e;
-  --code-text-color: #d4d4d4;
-  --code-border-color: #404040;
 }
 
 /* 标签样式 */

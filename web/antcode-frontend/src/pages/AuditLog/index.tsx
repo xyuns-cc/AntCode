@@ -5,7 +5,6 @@ import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
 import {
   Card,
-  Table,
   Tag,
   Space,
   Button,
@@ -23,6 +22,8 @@ import {
   InputNumber,
   message
 } from 'antd'
+import PageContainer from '@/components/common/PageContainer'
+import ResponsiveTable from '@/components/common/ResponsiveTable'
 import {
   SearchOutlined,
   ReloadOutlined,
@@ -323,132 +324,98 @@ const AuditLog: React.FC = () => {
   }
 
   return (
-    <div className={styles.auditLogContainer}>
-      <div className={styles.pageHeader}>
-        <h1 className={styles.pageTitle}>
-          <FileTextOutlined style={{ marginRight: 8 }} />
-          审计日志
-        </h1>
+    <PageContainer
+      title={
         <Space>
-          <Button icon={<DeleteOutlined />} onClick={() => setCleanupVisible(true)}>
-            清理日志
-          </Button>
-          <Button icon={<ReloadOutlined />} onClick={() => loadAuditLogs()}>
-            刷新
-          </Button>
+          <FileTextOutlined />
+          <span>审计日志</span>
         </Space>
-      </div>
-
-      {/* 搜索表单 */}
-      <Card size="small" className={styles.searchCard}>
-        <Form form={searchForm} layout="inline" onFinish={handleSearch}>
-          <Form.Item name="action" label="操作类型">
-            <Select placeholder="选择操作类型" allowClear style={{ width: 150 }}>
+      }
+      extra={
+        <Space>
+          <Button icon={<DeleteOutlined />} onClick={() => setCleanupVisible(true)}>清理日志</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => loadAuditLogs()}>刷新</Button>
+        </Space>
+      }
+      banner={stats && (
+        <Row gutter={12}>
+          <Col span={6}>
+            <Card size="small"><Statistic title="近7天总记录" value={stats.total} /></Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic title="成功率" value={stats.success_rate} suffix="%"
+                valueStyle={{ color: stats.success_rate >= 95 ? '#52c41a' : '#faad14' }} />
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic title="失败操作" value={stats.failed_count}
+                valueStyle={{ color: stats.failed_count > 0 ? '#ff4d4f' : '#52c41a' }} />
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small"><Statistic title="当前页记录" value={logs.length} /></Card>
+          </Col>
+        </Row>
+      )}
+      toolbar={
+        <Form form={searchForm} layout="inline" onFinish={handleSearch} className={styles.inlineForm}>
+          <Form.Item name="action">
+            <Select placeholder="操作类型" allowClear style={{ width: 150 }}>
               {actions.map(action => (
-                <Option key={action.value} value={action.value}>
-                  {action.label}
-                </Option>
+                <Option key={action.value} value={action.value}>{action.label}</Option>
               ))}
             </Select>
           </Form.Item>
-
-          <Form.Item name="resource_type" label="资源类型">
-            <Select placeholder="选择资源类型" allowClear style={{ width: 120 }}>
+          <Form.Item name="resource_type">
+            <Select placeholder="资源类型" allowClear style={{ width: 120 }}>
               {Object.entries(RESOURCE_TYPE_LABELS).map(([value, label]) => (
-                <Option key={value} value={value}>
-                  {label}
-                </Option>
+                <Option key={value} value={value}>{label}</Option>
               ))}
             </Select>
           </Form.Item>
-
-          <Form.Item name="username" label="用户名">
-            <Input placeholder="输入用户名" style={{ width: 120 }} />
+          <Form.Item name="username">
+            <Input placeholder="用户名" style={{ width: 120 }} />
           </Form.Item>
-
-          <Form.Item name="user_id" label="用户ID">
-            <Input placeholder="输入用户ID" style={{ width: 120 }} />
+          <Form.Item name="user_id">
+            <Input placeholder="用户ID" style={{ width: 120 }} />
           </Form.Item>
-
-          <Form.Item name="success" label="结果">
-            <Select placeholder="选择结果" allowClear style={{ width: 100 }}>
+          <Form.Item name="success">
+            <Select placeholder="结果" allowClear style={{ width: 100 }}>
               <Option value={true}>成功</Option>
               <Option value={false}>失败</Option>
             </Select>
           </Form.Item>
-
-          <Form.Item name="time_range" label="时间范围">
+          <Form.Item name="time_range">
             <RangePicker />
           </Form.Item>
-
-          <Form.Item>
+          <Form.Item style={{ marginLeft: 'auto' }}>
             <Space>
-              <Button type="primary" htmlType="submit" icon={<SearchOutlined />}>
-                搜索
-              </Button>
+              <Button type="primary" htmlType="submit" icon={<SearchOutlined />}>搜索</Button>
               <Button onClick={handleReset}>重置</Button>
             </Space>
           </Form.Item>
         </Form>
-      </Card>
-
-      {/* 统计信息 */}
-      {stats && (
-        <Row gutter={16} style={{ marginBottom: 16 }}>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic title="近7天总记录" value={stats.total} />
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic
-                title="成功率"
-                value={stats.success_rate}
-                suffix="%"
-                valueStyle={{ color: stats.success_rate >= 95 ? '#52c41a' : '#faad14' }}
-              />
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic
-                title="失败操作"
-                value={stats.failed_count}
-                valueStyle={{ color: stats.failed_count > 0 ? '#ff4d4f' : '#52c41a' }}
-              />
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic title="当前页记录" value={logs.length} />
-            </Card>
-          </Col>
-        </Row>
-      )}
-
-      {/* 审计日志表格 */}
-      <Card>
-        <Table
-          columns={columns}
-          dataSource={logs}
-          rowKey={(record) => record.id?.toString() || `${record.created_at}-${record.action}-${record.username}`}
-          loading={loading}
-          pagination={{
-            current: currentPage,
-            pageSize: pageSize,
-            total: total,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条，共 ${total} 条`,
-            onChange: (page, size) => {
-              setCurrentPage(page)
-              setPageSize(size || 50)
-            }
-          }}
-          size="small"
-        />
-      </Card>
+      }
+    >
+      <ResponsiveTable
+        fill
+        showIndex={false}
+        columns={columns}
+        dataSource={logs}
+        rowKey={(record) => record.id?.toString() || `${record.created_at}-${record.action}-${record.username}`}
+        loading={loading}
+        pagination={{
+          current: currentPage,
+          pageSize: pageSize,
+          total: total,
+          onChange: (page, size) => {
+            setCurrentPage(page)
+            setPageSize(size || 50)
+          },
+        }}
+      />
 
       {/* 详情抽屉 */}
       <Drawer
@@ -555,7 +522,7 @@ const AuditLog: React.FC = () => {
           </Text>
         </Form.Item>
       </Modal>
-    </div>
+    </PageContainer>
   )
 }
 

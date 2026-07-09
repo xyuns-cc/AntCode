@@ -1,6 +1,6 @@
 [project]
 name = "antcode-master"
-version = "0.1.0"
+version = "1.0.0"
 description = "AntCode Master 调度服务 - Schedule Plane"
 requires-python = ">=3.11"
 dependencies = [

@@ -1,70 +1,50 @@
-# 📚 AntCode 文档中心
+# AntCode 文档
 
-欢迎来到 AntCode 文档中心！这里汇集了项目的所有技术细节、架构设计与操作指南。
+按主题分类。开始之前建议先看顶层 [`README.md`](../README.md) 了解总貌。
 
-为了帮助你更快找到所需信息，我们将文档按角色和场景进行了分类。
+## 入门
 
----
+- [顶层 README](../README.md) — 项目介绍 + 5 步跑通
+- [`database-setup.md`](database-setup.md) — 数据库初始化 (`init_db.py` 全流程)
 
-## 🧭 快速导航
+## 架构
 
-### 我是... 新手开发者 (Onboarding)
-如果你刚接触 AntCode，建议按以下顺序阅读：
-1.  **[项目总览](../README.md)**: 了解 AntCode 是什么，以及如何快速启动。
-2.  **[架构设计](ARCHITECTURE.md)**: 理解系统的核心分层（控制面 vs 执行面）与数据流向。
-3.  **[本地开发指南](../README.md#-快速上手)**: 手把手教你搭建开发环境。
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 系统架构总览、数据流、部署拓扑
+- [`resilience.md`](resilience.md) — 熔断 / 重试 / 补派 / 幂等设计
+- [`scrapy-migration.md`](scrapy-migration.md) — 规则爬虫引擎从自建 spiderkit 迁到 Scrapy 的经过和契约
 
-### 我是... 核心贡献者 (Core Contributor)
-深入理解系统内部机制：
--   **[数据库设计](database-setup.md)**: 数据库选型、Schema 定义与 Alembic 迁移指南。
--   **[Worker 通信原理](worker-transport.md)**: 深入剖析 Direct 与 Gateway 两种接入模式的底层差异。
--   **[系统配置详解](system-config.md)**: 掌握所有环境变量与配置项的生效策略。
--   **[节点环境管理](node-env-management.md)**: 了解 Worker 如何自动管理 Python 运行时环境。
--   **[容错与恢复](resilience.md)**: 学习系统如何处理节点故障与网络分区。
+## 部署
 
-### 我是... 前端与 API 开发者 (Frontend/API Developer)
-对接后端接口与数据模型：
--   **[Web API 接口概览](../services/web_api/README.md)**: 快速了解 API 结构（或直接查看 [Swagger UI](http://localhost:8000/docs)）。
--   **[项目管理 API](project-api.md)**: Project 相关的核心接口逻辑。
--   **[Git 凭证管理 API](../services/web_api/src/antcode_web_api/routes/v1/git_credentials.py)**: Git 凭证 CRUD 接口（代码即文档，参见 Swagger）。
--   **[任务调度 API](scheduler-api.md)**: 任务创建、触发与状态查询。
--   **[日志系统 API](logs-api.md)**: 实时日志流与历史日志查询接口。
--   **[用户与权限 API](user-api.md)**: 认证与授权模块。
+- [`worker-transport.md`](worker-transport.md) — Direct（Redis Streams）vs Gateway（gRPC）传输模式的取舍
+- [`worker-capabilities.md`](worker-capabilities.md) — Worker 能力路由（code-only / rule-only worker 部署）
+- [`redis-cluster.md`](redis-cluster.md) — Redis 单机 / 集群 / 哨兵配置
+- [`master-scaling.md`](master-scaling.md) — Master 多实例水平扩容（leader-elect + loop 分片）
+- [`mtls-deployment.md`](mtls-deployment.md) — Gateway mTLS 部署（跨公网场景）
+- [`node-env-management.md`](node-env-management.md) — 多语言运行时（mise）管理
 
-### 我是... 运维工程师 (DevOps/SRE)
-部署、监控与维护：
--   **[Docker 部署手册](../infra/docker/README.md)**: 容器化部署的最佳实践。
--   **[生产环境配置](system-config.md)**: 生产环境下的关键配置建议。
--   **[数据库维护](database-setup.md)**: 数据备份与恢复策略。
+## 系统 API
 
----
+- [`user-api.md`](user-api.md) — 用户 / 认证 / 权限
+- [`project-api.md`](project-api.md) — 项目 CRUD + 规则爬虫配置
+- [`scheduler-api.md`](scheduler-api.md) — 调度器（cron / 一次性 / 周期性 / 依赖链）
+- [`logs-api.md`](logs-api.md) — 任务日志历史查询 + WebSocket 实时推送
+- [`system-config.md`](system-config.md) — 系统级配置项（告警、调度、保留策略）
 
-## 📂 数据与目录规范
+## 运维
 
-为了保证系统的一致性，我们严格约定了运行时的数据存储路径。
+看板与告警：
+- Prometheus `/metrics` — web_api 挂在 `/metrics`，worker 挂在 `:8001/metrics`
+- 关键指标：`antcode_http_requests_total{path,status}` / `antcode_http_request_duration_seconds` / `antcode_workers_online` / `antcode_redispatch_pending`
 
-**根目录**: `data/` (所有运行时数据均在此，且**不应**提交到 Git)
+日志：
+- 结构化日志走 loguru，容器化部署建议 stdout 让日志收集器兜（`LOG_TO_FILE=false`）
+- 业务任务日志走 Redis Stream → PG `task_logs`，前端 WS 实时订阅
 
--   **`data/backend/`**: 控制面服务专用
-    -   `db/`: SQLite 数据库文件（仅限开发环境）
-    -   `logs/`: API、Master、Gateway 的服务日志
-    -   `storage/`: 本地对象存储模拟
--   **`data/worker/`**: 执行面节点专用
-    -   `projects/`: 下载的项目代码缓存
-    -   `runtimes/`: 自动安装的 Python 虚拟环境
-    -   `runs/`: 任务执行产生的临时文件
-    -   `logs/`: 任务执行日志
+## 版本变更
 
----
+- [`../CHANGELOG.md`](../CHANGELOG.md) — 每个 release 的变更
 
-## 📝 变更记录
+## 内部说明
 
-| 版本 | 日期 | 说明 |
-| :--- | :--- | :--- |
-| **v3.2** | 2026-03-12 | 新增 Git 凭证管理、项目多来源类型（git/s3/legacy_inline）、统一 API 响应信封。 |
-| **v3.1** | 2026-02-10 | 统一 `data/backend` 与 `data/worker` 目录结构，精简文档索引。 |
-| **v3.0** | 2026-01-15 | 新架构发布，文档重构。 |
-
----
-
-*文档发现错误？欢迎提交 PR 修正！*
+- [`../migrations/models/README.md`](../migrations/models/README.md) — 首版无迁移策略 + 后续演进方案
+- 内部审计报告、开发过程记录在正式发版时已从 repo 移除。历史请查 git log。

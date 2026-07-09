@@ -1,24 +1,16 @@
 """多优先级队列服务
 
-基于抽象后端实现多优先级任务队列，支持：
+基于 Redis Streams 实现多优先级任务队列，支持：
 - 多优先级队列入队和出队
 - 任务确认和超时回收
 - 死信队列处理
 - 重试机制
-
-通过 CRAWL_BACKEND 环境变量配置后端类型：
-- "memory": 内存队列（默认，适用于开发测试）
-- "redis": Redis Streams（适用于生产环境）
-
-Requirements: 1.9, 2.1, 2.2, 2.3, 4.1, 4.2, 4.3, 11.1, 11.2, 11.3, 11.4, 11.5
 """
 
 from dataclasses import dataclass, field
 
 from loguru import logger
 
-from antcode_core.common.exceptions import CrawlError
-from antcode_core.domain.models.enums import Priority, TaskStatus
 from antcode_core.application.services.base import BaseService
 from antcode_core.application.services.crawl.backends import (
     CrawlQueueBackend,
@@ -26,6 +18,8 @@ from antcode_core.application.services.crawl.backends import (
     get_queue_backend,
 )
 from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
+from antcode_core.common.exceptions import CrawlError
+from antcode_core.domain.models.enums import Priority, TaskStatus
 
 # 默认配置
 DEFAULT_TASK_TIMEOUT_MS = 300000  # 5 分钟
@@ -152,11 +146,13 @@ class TaskStatusTransition:
 
 class TaskStatusError(CrawlError):
     """任务状态错误"""
+
     pass
 
 
 class InvalidStatusTransitionError(TaskStatusError):
     """无效的状态转换"""
+
     pass
 
 
@@ -270,8 +266,9 @@ class CrawlQueueService(BaseService):
         msg_ids = await self._backend.enqueue(project_id, [task], priority)
 
         if msg_ids:
-            logger.debug(f"URL 入队成功: project={project_id}, priority={priority}, "
-                         f"url={url[:50]}..., msg_id={msg_ids[0]}")
+            logger.debug(
+                f"URL 入队成功: project={project_id}, priority={priority}, url={url[:50]}..., msg_id={msg_ids[0]}"
+            )
             return True, msg_ids[0], False
 
         return False, "", False
@@ -314,9 +311,7 @@ class CrawlQueueService(BaseService):
         # 去重过滤（使用批量方法避免 N+1 查询）
         urls_to_enqueue = urls
         if not skip_dedup:
-            urls_to_enqueue, _, _ = await self._dedup_service.filter_and_add_new_urls(
-                project_id, urls
-            )
+            urls_to_enqueue, _, _ = await self._dedup_service.filter_and_add_new_urls(project_id, urls)
 
         if not urls_to_enqueue:
             result.duplicate = len(urls)
@@ -345,9 +340,11 @@ class CrawlQueueService(BaseService):
         result.duplicate = len(urls) - len(msg_ids)
         result.msg_ids = msg_ids
 
-        logger.info(f"批量 URL 入队: project={project_id}, priority={priority}, "
-                    f"total={result.total}, enqueued={result.enqueued}, "
-                    f"duplicate={result.duplicate}")
+        logger.info(
+            f"批量 URL 入队: project={project_id}, priority={priority}, "
+            f"total={result.total}, enqueued={result.enqueued}, "
+            f"duplicate={result.duplicate}"
+        )
 
         return result
 
@@ -393,8 +390,7 @@ class CrawlQueueService(BaseService):
             tasks.append(task)
 
         if tasks:
-            logger.info(f"获取任务完成: project={project_id}, worker={worker_id}, "
-                        f"total={len(tasks)}")
+            logger.info(f"获取任务完成: project={project_id}, worker={worker_id}, total={len(tasks)}")
 
         return tasks
 
@@ -442,8 +438,7 @@ class CrawlQueueService(BaseService):
 
         count = await self._backend.ack(project_id, msg_ids)
 
-        logger.info(f"批量确认任务完成: project={project_id}, "
-                    f"requested={len(msg_ids)}, acked={count}")
+        logger.info(f"批量确认任务完成: project={project_id}, requested={len(msg_ids)}, acked={count}")
 
         return count
 
@@ -511,9 +506,11 @@ class CrawlQueueService(BaseService):
             if item.delivery_count > self._max_retries:
                 task.status = TaskStatus.FAILED
                 dead_letter_tasks.append(task)
-                logger.warning(f"任务超过最大重试次数，移入死信队列: "
-                               f"project={project_id}, msg_id={task.msg_id}, "
-                               f"url={task.url[:50]}..., retries={item.delivery_count}")
+                logger.warning(
+                    f"任务超过最大重试次数，移入死信队列: "
+                    f"project={project_id}, msg_id={task.msg_id}, "
+                    f"url={task.url[:50]}..., retries={item.delivery_count}"
+                )
             else:
                 task.retry_count = item.delivery_count
                 reclaimed_tasks.append(task)
@@ -558,9 +555,11 @@ class CrawlQueueService(BaseService):
         msg_ids = await self._backend.enqueue(project_id, [queue_task], task.priority)
 
         if msg_ids:
-            logger.debug(f"任务重试入队: project={project_id}, priority={task.priority}, "
-                         f"url={task.url[:50]}..., retry_count={task.retry_count}, "
-                         f"new_msg_id={msg_ids[0]}")
+            logger.debug(
+                f"任务重试入队: project={project_id}, priority={task.priority}, "
+                f"url={task.url[:50]}..., retry_count={task.retry_count}, "
+                f"new_msg_id={msg_ids[0]}"
+            )
             return True, msg_ids[0]
 
         return False, ""
@@ -688,8 +687,7 @@ class CrawlQueueService(BaseService):
         result.task = task
         result.success = True
 
-        logger.debug(f"任务状态转换: msg_id={task.msg_id}, "
-                     f"{from_status} → {to_status}")
+        logger.debug(f"任务状态转换: msg_id={task.msg_id}, {from_status} → {to_status}")
 
         return result
 
@@ -764,8 +762,9 @@ class CrawlQueueService(BaseService):
             if success:
                 if task.msg_id:
                     await self.ack_task(task.project_id, task.msg_id)
-                logger.debug(f"任务重试入队: old_msg_id={task.msg_id}, "
-                             f"new_msg_id={new_msg_id}, retry_count={task.retry_count}")
+                logger.debug(
+                    f"任务重试入队: old_msg_id={task.msg_id}, new_msg_id={new_msg_id}, retry_count={task.retry_count}"
+                )
             else:
                 result.success = False
                 result.error = "重试入队失败"
@@ -788,9 +787,7 @@ class CrawlQueueService(BaseService):
                 error=f"无法从状态 {task.status} 转换为 TIMEOUT",
             )
 
-        result = await self.transition_task_status(
-            task, TaskStatus.TIMEOUT, validate=False
-        )
+        result = await self.transition_task_status(task, TaskStatus.TIMEOUT, validate=False)
 
         if result.success:
             logger.debug(f"任务标记为超时: msg_id={task.msg_id}")
@@ -814,15 +811,12 @@ class CrawlQueueService(BaseService):
                 error=f"无法从状态 {task.status} 转换为 FAILED",
             )
 
-        result = await self.transition_task_status(
-            task, TaskStatus.FAILED, validate=False
-        )
+        result = await self.transition_task_status(task, TaskStatus.FAILED, validate=False)
 
         if result.success and move_to_dead_letter:
             queue_task = task.to_queue_task()
             await self._backend.move_to_dead_letter(task.project_id, [queue_task])
-            logger.info(f"任务最终失败，移入死信队列: msg_id={task.msg_id}, "
-                        f"url={task.url[:50]}...")
+            logger.info(f"任务最终失败，移入死信队列: msg_id={task.msg_id}, url={task.url[:50]}...")
 
         return result
 

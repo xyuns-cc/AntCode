@@ -153,9 +153,18 @@ class TaskPollHandler:
             for queue in queues:
                 await self._ensure_consumer_group(redis, queue, self.WORKER_GROUP)
 
+            # B3: 先排空 PEL —— worker 崩溃或断线时，之前 XREADGROUP 到但未
+            # 发出 AckTask 的消息挂在该 consumer 的 PEL 下。旧实现直接读 ">"
+            # 只会拉新消息，PEL 里的孤儿永远无人回收（gateway 侧无 XAUTOCLAIM
+            # loop）。重连时先用 "0" 读一遍 pending，把它们交回给 worker
+            # 处理（幂等由 worker B2 SET NX 保护），然后再读 ">"。
+            pel_results = await self._drain_pending_streams(
+                redis, queues, worker_id, max_tasks
+            )
+
             streams = dict.fromkeys(queues, ">")
 
-            results = await redis.xreadgroup(
+            live_results = await redis.xreadgroup(
                 groupname=self.WORKER_GROUP,
                 consumername=worker_id,
                 streams=streams,
@@ -163,6 +172,7 @@ class TaskPollHandler:
                 block=block_ms,
             )
 
+            results = list(pel_results) + list(live_results or [])
             if not results:
                 return []
 
@@ -193,6 +203,37 @@ class TaskPollHandler:
         except Exception as exc:
             logger.exception(f"读取任务失败: {exc}")
             return []
+
+    async def _drain_pending_streams(
+        self,
+        redis,
+        queues: list[str],
+        worker_id: str,
+        max_tasks: int,
+    ) -> list:
+        """B3: 排空 (worker) 每个 stream 上的 PEL 到本次响应，让重连的 worker
+        真正拿到自己之前未 ack 的消息。仅返回不为空的 stream。
+        """
+        pel_streams = dict.fromkeys(queues, "0")
+        try:
+            pel = await redis.xreadgroup(
+                groupname=self.WORKER_GROUP,
+                consumername=worker_id,
+                streams=pel_streams,
+                count=max_tasks,
+                block=0,
+            )
+        except Exception as exc:
+            logger.warning(f"排空 PEL 失败(继续读新消息): worker={worker_id} err={exc}")
+            return []
+        if not pel:
+            return []
+        # 过滤空 messages 的 stream；有则 log 一下方便运维排查
+        result = [(name, msgs) for name, msgs in pel if msgs]
+        if result:
+            total = sum(len(msgs) for _, msgs in result)
+            logger.info(f"B3 PEL 排空: worker={worker_id} 找到 {total} 条孤儿消息")
+        return result
 
     def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo | None:
         try:
@@ -268,8 +309,14 @@ class TaskPollHandler:
             return await self.ack_task("", queue, message_id)
         return await self._requeue_task(queue, message_id, reason)
 
+    # B7: 与 Direct 模式（redis/transport.py:MAX_REQUEUE_COUNT）对齐；
+    # 超阈值的消息进入死信 stream 而非无限重投。
+    MAX_REQUEUE_COUNT = 5
+    DEAD_LETTER_STREAM_SUFFIX = "task:dead_letter"
+    DEAD_LETTER_MAXLEN = 10000
+
     async def _requeue_task(self, queue: str, message_id: str, reason: str) -> bool:
-        """拒绝任务并回写 ready stream。
+        """拒绝任务并回写 ready stream；超过 ``MAX_REQUEUE_COUNT`` 次进死信。
 
         注：保留 JSON 帧以兼容 Master 当前的 ``_send_batch_to_queue`` 写入端。
         待 Master 切换为 ``ProtoCodec(TaskDispatch)`` 派发后，这里需要改为
@@ -291,8 +338,43 @@ class TaskPollHandler:
                 )
                 for k, v in data.items()
             }
+
+            # B7: 计数 + 死信路径
+            try:
+                requeue_count = int(decoded.get("requeue_count", "0") or "0")
+            except (TypeError, ValueError):
+                requeue_count = 0
+            requeue_count += 1
+
+            now_iso = datetime.now().isoformat()
+            if requeue_count > self.MAX_REQUEUE_COUNT:
+                dead_payload = dict(decoded)
+                dead_payload["requeue_count"] = str(requeue_count)
+                dead_payload["last_requeue_reason"] = reason
+                dead_payload["dead_letter_at"] = now_iso
+                dead_payload["origin_queue"] = queue
+                dead_letter_key = f"antcode:{self.DEAD_LETTER_STREAM_SUFFIX}"
+                try:
+                    await redis.xadd(
+                        dead_letter_key,
+                        dead_payload,
+                        maxlen=self.DEAD_LETTER_MAXLEN,
+                        approximate=True,
+                    )
+                    await redis.xack(queue, self.WORKER_GROUP, message_id)
+                    logger.warning(
+                        f"消息进入死信(超过 {self.MAX_REQUEUE_COUNT} 次 requeue): "
+                        f"queue={queue} msg={message_id} reason={reason}"
+                    )
+                    return True
+                except Exception as dl_exc:
+                    logger.exception(f"死信写入失败: {dl_exc}")
+                    # 死信失败时不 ack，让 PEL/reclaim 兜底
+                    return False
+
+            decoded["requeue_count"] = str(requeue_count)
             decoded["requeue_reason"] = reason
-            decoded["requeue_at"] = datetime.now().isoformat()
+            decoded["requeue_at"] = now_iso
 
             await redis.xadd(queue, decoded)
             await redis.xack(queue, self.WORKER_GROUP, message_id)

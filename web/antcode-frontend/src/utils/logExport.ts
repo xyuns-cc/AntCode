@@ -3,10 +3,11 @@ import Logger from '@/utils/logger'
 import { logService } from '@/services/logs'
 import type { LogEntry, LogFileResponse } from '@/services/logs'
 
-// 导出格式类型
+// LogFileResponse 是 logs.ts 里真实的响应类型
+type RawLogResponse = LogFileResponse
+
 export type ExportFormat = 'txt' | 'json' | 'csv'
 
-// 导出配置接口
 export interface LogExportConfig {
   runId: string
   format: ExportFormat
@@ -18,14 +19,12 @@ export interface LogExportConfig {
   maxLines?: number
 }
 
-// 日志导出工具类
 export class LogExporter {
-  // 导出日志文件内容
   static async exportLogFile(config: LogExportConfig): Promise<void> {
     const { runId, format, includeStdout = true, includeStderr = true } = config
 
     try {
-      const promises: Promise<LogFileResponse>[] = []
+      const promises: Promise<RawLogResponse>[] = []
       
       if (includeStdout) {
         promises.push(logService.getStdoutLogs(runId, config.maxLines))
@@ -36,7 +35,7 @@ export class LogExporter {
       }
 
       const responses = await Promise.all(promises)
-      const logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: LogFileResponse }> = []
+      const logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: RawLogResponse }> = []
 
       responses.forEach((response, index) => {
         if (response.success && response.data.content) {
@@ -83,7 +82,6 @@ export class LogExporter {
     }
   }
 
-  // 导出日志条目
   static async exportLogEntries(runId: string, format: ExportFormat, config?: Partial<LogExportConfig>): Promise<void> {
     try {
       const response = await logService.getRunLogs(runId, {
@@ -125,14 +123,12 @@ export class LogExporter {
     }
   }
 
-  // 格式化为TXT格式
   private static formatAsTxt(
-    logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: LogFileResponse }>,
+    logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: RawLogResponse }>,
     config: LogExportConfig
   ): string {
     const lines: string[] = []
     
-    // 添加头部信息
     lines.push(`# 执行日志导出`)
     lines.push(`# 运行ID: ${config.runId}`)
     lines.push(`# 导出时间: ${new Date().toLocaleString()}`)
@@ -141,19 +137,16 @@ export class LogExporter {
 
     logData.forEach(({ type, content, response }) => {
       lines.push(`## ${type.toUpperCase()} 日志`)
-      lines.push(`# 文件路径: ${response.data.file_path}`)
-      lines.push(`# 文件大小: ${response.data.file_size} 字节`)
+      lines.push(`# 字节数: ${response.data.file_size}`)
       lines.push(`# 行数: ${response.data.lines_count}`)
       lines.push('')
       
-      // 处理日志内容，按行分割并添加时间戳（如果需要）
       const contentLines = content.split('\n')
       contentLines.forEach((line) => {
         if (line.trim()) {
           let formattedLine = line
           if (config.includeTimestamp !== false) {
-            const timestamp = response.data.last_modified || new Date().toISOString()
-            formattedLine = `[${new Date(timestamp).toLocaleString()}] ${line}`
+            formattedLine = `[${new Date().toLocaleString()}] ${line}`
           }
           lines.push(formattedLine)
         }
@@ -165,9 +158,8 @@ export class LogExporter {
     return lines.join('\n')
   }
 
-  // 格式化为JSON格式
   private static formatAsJson(
-    logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: LogFileResponse }>,
+    logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: RawLogResponse }>,
     config: LogExportConfig
   ): string {
     const exportData = {
@@ -180,10 +172,8 @@ export class LogExporter {
       },
       logs: logData.map(({ type, content, response }) => ({
         type,
-        filePath: response.data.file_path,
-        fileSize: response.data.file_size,
+        bytes: response.data.file_size,
         linesCount: response.data.lines_count,
-        lastModified: response.data.last_modified,
         content: content.split('\n').filter(line => line.trim())
       }))
     }
@@ -191,29 +181,26 @@ export class LogExporter {
     return JSON.stringify(exportData, null, 2)
   }
 
-  // 格式化为CSV格式
   private static formatAsCsv(
-    logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: LogFileResponse }>,
+    logData: Array<{ type: 'stdout' | 'stderr'; content: string; response: RawLogResponse }>,
     config: LogExportConfig
   ): string {
     const lines: string[] = []
     
-    // CSV头部
     const headers = ['Type', 'Line', 'Content']
     if (config.includeTimestamp !== false) {
       headers.unshift('Timestamp')
     }
     lines.push(headers.join(','))
 
-    logData.forEach(({ type, content, response }) => {
+    logData.forEach(({ type, content }) => {
       const contentLines = content.split('\n')
       contentLines.forEach((line, index) => {
         if (line.trim()) {
           const row: string[] = []
           
           if (config.includeTimestamp !== false) {
-            const timestamp = response.data.last_modified || new Date().toISOString()
-            row.push(`"${new Date(timestamp).toLocaleString()}"`)
+            row.push(`"${new Date().toLocaleString()}"`)
           }
           
           row.push(`"${type.toUpperCase()}"`)
@@ -228,7 +215,6 @@ export class LogExporter {
     return lines.join('\n')
   }
 
-  // 格式化日志条目为TXT
   private static formatEntriesAsTxt(entries: LogEntry[], config?: Partial<LogExportConfig>): string {
     const lines: string[] = []
     
@@ -262,11 +248,9 @@ export class LogExporter {
     return lines.join('\n')
   }
 
-  // 格式化日志条目为CSV
   private static formatEntriesAsCsv(entries: LogEntry[]): string {
     const lines: string[] = []
     
-    // CSV头部
     const headers = ['Timestamp', 'Level', 'Type', 'Source', 'Message']
     lines.push(headers.join(','))
 
@@ -284,7 +268,6 @@ export class LogExporter {
     return lines.join('\n')
   }
 
-  // 下载文件
   private static downloadFile(content: string, filename: string): void {
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -298,7 +281,6 @@ export class LogExporter {
   }
 }
 
-// 便捷导出函数
 export const exportRunLogs = (runId: string, format: ExportFormat = 'txt') => {
   return LogExporter.exportLogFile({
     runId,

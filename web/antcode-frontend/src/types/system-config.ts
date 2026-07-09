@@ -77,8 +77,8 @@ export interface TaskLogConfig {
  */
 export interface SchedulerConfig {
   scheduler_timezone: string  // 调度器时区
-  cleanup_workspace_on_completion: boolean  // 完成后清理工作空间
-  cleanup_workspace_max_age_hours: number  // 工作空间最大保留时间（小时）
+  cleanup_workspace_on_completion: boolean  // 完成后清理运行时沙箱
+  cleanup_workspace_max_age_hours: number  // 运行时沙箱最大保留时间（小时）
 }
 
 /**
@@ -160,8 +160,8 @@ export const CONFIG_FIELD_LABELS: Record<string, string> = {
   
   // 调度器配置
   scheduler_timezone: '调度器时区',
-  cleanup_workspace_on_completion: '完成后清理工作空间',
-  cleanup_workspace_max_age_hours: '工作空间最大保留时间（小时）',
+  cleanup_workspace_on_completion: '完成后清理运行时沙箱',
+  cleanup_workspace_max_age_hours: '运行时沙箱最大保留时间（小时）',
   
   // 缓存配置
   cache_enabled: '启用缓存',
@@ -195,12 +195,12 @@ export const CONFIG_FIELD_DESCRIPTIONS: Record<string, string> = {
   task_max_retries: '任务失败后的最大重试次数，范围: 0-10',
   task_retry_delay: '任务重试前的等待时间，范围: 10-600秒',
   
-  task_log_retention_days: '日志文件的保留天数，范围: 1-365天',
-  task_log_max_size: '单个日志文件的最大大小，范围: 1-1024 MB',
+  task_log_retention_days: 'PostgreSQL 历史日志保留天数，范围: 1-365天',
+  task_log_max_size: '单次日志查询最大字节数，范围: 1-1024 MB',
   
   scheduler_timezone: '任务调度器使用的时区，如: Asia/Shanghai',
-  cleanup_workspace_on_completion: '任务完成后是否自动清理工作空间',
-  cleanup_workspace_max_age_hours: '工作空间文件的最大保留时间，范围: 1-168小时',
+  cleanup_workspace_on_completion: '任务完成后是否自动清理运行时沙箱目录',
+  cleanup_workspace_max_age_hours: '运行时沙箱目录最大保留时间，范围: 1-168小时',
   
   cache_enabled: '是否启用系统缓存功能',
   cache_default_ttl: '默认缓存过期时间，范围: 60-3600秒',
@@ -220,4 +220,3 @@ export const CONFIG_FIELD_DESCRIPTIONS: Record<string, string> = {
   monitor_stream_interval: '监控数据流处理间隔，范围: 30-600秒',
   monitor_stream_maxlen: '监控数据流最大长度，范围: 1000-100000',
 }
-

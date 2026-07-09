@@ -10,8 +10,8 @@ from typing import Any
 
 from loguru import logger
 
-from antcode_core.common.serialization import from_json, to_json
 from antcode_core.application.services.crawl.backends.progress_backend import ProgressStore
+from antcode_core.common.serialization import from_json, to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
 
 # Redis 键前缀
@@ -105,17 +105,26 @@ class RedisProgressStore(ProgressStore):
         batch_id: str,
         data: dict[str, Any],
     ) -> bool:
-        """设置批次进度"""
+        """设置批次进度。
+
+        R1-P2-20 (审查报告): 老实现 `DELETE` 后 `HSET` 非原子——读端在
+        中间可能看到空 hash，UI 展示进度归零。改成用 pipeline 事务
+        （MULTI/EXEC）把 DEL + HSET 打包，保证原子可见性。
+        """
         client = await self._get_client()
         key = self._get_progress_key(project_id, batch_id)
 
-        # 先删除旧数据
-        await client.delete(key)
+        if not data:
+            # 空数据只删就够了
+            await client.delete(key)
+            return True
 
-        # 设置新数据
-        if data:
-            mapping = {k: to_json(v) for k, v in data.items()}
-            await client.hset(key, mapping=mapping)
+        mapping = {k: to_json(v) for k, v in data.items()}
+        # Redis MULTI/EXEC 保证原子；redis-py async 支持 pipeline(transaction=True)
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.delete(key)
+            pipe.hset(key, mapping=mapping)
+            await pipe.execute()
 
         return True
 
@@ -183,8 +192,7 @@ class RedisProgressStore(ProgressStore):
         value = f"{now}:{ttl}"
         await client.hset(key, worker_id, value)
 
-        logger.debug(f"注册 Worker: project={project_id}, batch={batch_id}, "
-                     f"worker={worker_id}")
+        logger.debug(f"注册 Worker: project={project_id}, batch={batch_id}, worker={worker_id}")
 
         return True
 
@@ -245,8 +253,7 @@ class RedisProgressStore(ProgressStore):
 
         result = await client.hdel(key, worker_id)
 
-        logger.debug(f"注销 Worker: project={project_id}, batch={batch_id}, "
-                     f"worker={worker_id}")
+        logger.debug(f"注销 Worker: project={project_id}, batch={batch_id}, worker={worker_id}")
 
         return bool(result)
 

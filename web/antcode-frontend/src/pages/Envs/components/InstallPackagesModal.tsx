@@ -1,7 +1,6 @@
 import React, { useState } from 'react'
 import { Modal, Select, Space, Typography, Tag, Button, Upload, App } from 'antd'
 import { InboxOutlined } from '@ant-design/icons'
-import envService from '@/services/envs'
 import { runtimeService } from '@/services/runtimes'
 import type { InstallPackagesModalProps } from '../types'
 
@@ -9,7 +8,7 @@ const { Text } = Typography
 
 const InstallPackagesModal: React.FC<InstallPackagesModalProps> = ({
   open,
-  venvId,
+  envId,
   onClose,
   onSuccess,
 }) => {
@@ -19,20 +18,16 @@ const InstallPackagesModal: React.FC<InstallPackagesModalProps> = ({
   const [uploadLoading, setUploadLoading] = useState(false)
 
   const handleSubmit = async () => {
-    if (!pkgs.length || !venvId) return
+    if (!pkgs.length || !envId) return
 
     setLoading(true)
     try {
-      // Worker 环境ID格式: workerId|envName
-      if (venvId.includes('|')) {
-        const [workerId, envName] = venvId.split('|')
-        await runtimeService.installPackages(workerId, envName, pkgs)
-        message.success('Worker 环境依赖安装成功')
-      } else {
-        // 本地环境
-        await envService.installPackagesToVenv(venvId, pkgs)
-        message.success('依赖安装成功')
+      const [workerId, envName] = envId.split('|')
+      if (!workerId || !envName) {
+        throw new Error('Worker 环境 ID 无效')
       }
+      await runtimeService.installPackages(workerId, envName, pkgs)
+      message.success('Worker 环境依赖安装成功')
       onSuccess()
       setPkgs([])
     } catch (error: unknown) {

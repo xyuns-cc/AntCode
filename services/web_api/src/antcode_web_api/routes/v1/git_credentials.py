@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
-
+from antcode_core.application.services.projects.git_credential_service import (
+    git_credential_service,
+)
 from antcode_core.common.security.auth import get_current_user_id
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.git_credential import (
@@ -11,10 +12,10 @@ from antcode_core.domain.schemas.git_credential import (
     GitCredentialResponse,
     GitCredentialUpdateRequest,
 )
-from antcode_core.application.services.projects.git_credential_service import (
-    git_credential_service,
-)
-from antcode_web_api.response import Messages, success as success_response
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from antcode_web_api.response import Messages
+from antcode_web_api.response import success as success_response
 
 router = APIRouter()
 

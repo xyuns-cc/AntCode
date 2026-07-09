@@ -19,6 +19,7 @@ from antcode_gateway.handlers.heartbeat import (
 from antcode_gateway.handlers.logs import LogHandler
 from antcode_gateway.handlers.poll import TaskPollHandler, task_info_to_dispatch
 from antcode_gateway.handlers.result import ResultHandler
+from antcode_gateway.handlers.spider_data import SpiderDataHandler
 
 __all__ = [
     "TaskPollHandler",
@@ -29,4 +30,5 @@ __all__ = [
     "LeaseData",
     "LogHandler",
     "ResultHandler",
+    "SpiderDataHandler",
 ]

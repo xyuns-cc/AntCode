@@ -173,4 +173,3 @@ class LoginPasswordCrypto:
 
 
 login_password_crypto = LoginPasswordCrypto()
-

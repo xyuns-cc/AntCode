@@ -2,12 +2,8 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from loguru import logger
-from tortoise.exceptions import IntegrityError
-
-from antcode_web_api.response import Messages, success
-from antcode_web_api.response import page as page_response
+from antcode_core.application.services.audit import audit_service
+from antcode_core.application.services.users.user_service import user_service
 from antcode_core.common.security.auth import (
     TokenData,
     get_current_admin_user,
@@ -15,8 +11,8 @@ from antcode_core.common.security.auth import (
     get_current_user,
     verify_super_admin,
 )
+from antcode_core.domain.models import User, UserRole
 from antcode_core.domain.models.audit_log import AuditAction
-from antcode_core.domain.models import User
 from antcode_core.domain.schemas import (
     BaseResponse,
     PaginationResponse,
@@ -27,8 +23,14 @@ from antcode_core.domain.schemas import (
     UserUpdateRequest,
 )
 from antcode_core.domain.schemas.common import PaginationInfo
-from antcode_core.application.services.audit import audit_service
-from antcode_core.application.services.users.user_service import user_service
+from antcode_core.domain.schemas.user import UserRoleUpdateRequest
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from loguru import logger
+from tortoise.exceptions import IntegrityError
+
+from antcode_web_api.deps import require_role
+from antcode_web_api.response import Messages, success
+from antcode_web_api.response import page as page_response
 
 router = APIRouter()
 
@@ -46,7 +48,7 @@ def _build_user_response(user) -> UserResponse:
         email=user.email,
         is_active=user.is_active,
         is_admin=user.is_admin,
-        role=user.role.value if hasattr(user.role, 'value') else str(user.role),
+        role=user.role.value if hasattr(user.role, "value") else str(user.role),
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,
@@ -181,6 +183,44 @@ async def get_user_detail(user_id: str, current_user: TokenData = Depends(get_cu
     return success(_build_user_response(user), message=Messages.QUERY_SUCCESS)
 
 
+@router.post(
+    "/{user_id}/role",
+    response_model=BaseResponse,
+    summary="修改用户角色（仅超级管理员）",
+    tags=["用户管理"],
+)
+async def set_user_role(
+    user_id: str,
+    body: UserRoleUpdateRequest,
+    http_request: Request,
+    _admin: User = Depends(require_role(UserRole.SUPER_ADMIN)),
+):
+    """仅 SUPER_ADMIN 调用；专用于角色变更，自动同步 is_admin。"""
+    target = await user_service.get_user_by_public_id(user_id)
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+
+    try:
+        target.role = UserRole(body.role)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="role 取值非法")
+    # User.save() 会按新 role 自动同步 is_admin
+    await target.save(update_fields=["role", "is_admin"])
+    await user_service._invalidate_user_cache(target.id)
+
+    await audit_service.log_user_action(
+        action=AuditAction.USER_UPDATE,
+        operator_username=_admin.username,
+        target_user_id=target.id,
+        target_username=target.username,
+        operator_id=_admin.id,
+        ip_address=http_request.client.host if http_request.client else None,
+        new_value={"role": target.role.value, "is_admin": target.is_admin},
+        description=f"修改用户角色: {target.username} -> {target.role.value}",
+    )
+    return success(_build_user_response(target), message="角色已更新")
+
+
 @router.put("/{user_id}", response_model=BaseResponse, summary="更新用户信息", tags=["用户管理"])
 async def update_user(
     user_id: str,
@@ -229,9 +269,7 @@ async def update_user(
 
         description = f"更新用户信息: {old_snapshot['username']}"
         if username_changed:
-            description = (
-                f"更新用户信息: {old_snapshot['username']} -> {new_snapshot['username']}"
-            )
+            description = f"更新用户信息: {old_snapshot['username']} -> {new_snapshot['username']}"
 
         await audit_service.log_user_action(
             action=AuditAction.USER_UPDATE,
@@ -289,9 +327,7 @@ async def change_password(
 ):
     """修改当前用户密码"""
     try:
-        await user_service.update_user_password(
-            current_user.user_id, request, current_user.user_id
-        )
+        await user_service.update_user_password(current_user.user_id, request, current_user.user_id)
         return success(None, message="密码修改成功")
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
@@ -361,6 +397,7 @@ async def batch_delete_users(
         {"success_count": success_count, "failed_ids": failed_ids},
         message=Messages.DELETED_SUCCESS,
     )
+
 
 @router.delete("/{user_id}", response_model=BaseResponse, summary="删除用户", tags=["用户管理"])
 async def delete_user(

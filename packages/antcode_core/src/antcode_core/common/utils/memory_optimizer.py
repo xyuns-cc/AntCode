@@ -100,25 +100,11 @@ class MemoryMonitor:
         logger.info(f"垃圾回收完成，清理了 {collected} 个对象")
 
     async def _async_memory_cleanup(self):
-        """异步内存清理（包括缓存）"""
+        """异步内存清理。"""
         logger.info("触发异步内存清理...")
 
-        # 强制垃圾回收
         collected = gc.collect()
         logger.info(f"垃圾回收完成，清理了 {collected} 个对象")
-
-        # 异步清理缓存
-        try:
-            from antcode_core.infrastructure.cache import cache_manager
-
-            for name in cache_manager.list_caches():
-                cache = cache_manager.get_cache(name)
-                # 清理过期的内存缓存项
-                if hasattr(cache, "_cleanup_memory_cache"):
-                    cache._cleanup_memory_cache()
-            logger.info("缓存清理完成")
-        except Exception as e:
-            logger.warning(f"缓存清理失败: {e}")
 
     def _trigger_memory_cleanup(self):
         """触发内存清理"""
@@ -242,10 +228,7 @@ async def setup_memory_monitoring():
         while True:
             try:
                 stats = memory_monitor.get_current_stats()
-                logger.debug(
-                    f"内存使用: 进程 {stats.process_memory_mb:.1f}MB, "
-                    f"系统 {stats.system_memory_percent:.1f}%"
-                )
+                logger.debug(f"内存使用: 进程 {stats.process_memory_mb:.1f}MB, 系统 {stats.system_memory_percent:.1f}%")
                 await asyncio.sleep(60)  # 每分钟检查一次
             except Exception as e:
                 logger.error(f"内存监控失败: {e}")

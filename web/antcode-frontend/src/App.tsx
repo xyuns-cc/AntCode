@@ -23,7 +23,9 @@ const Login = lazyLoad(() => import('@/pages/Login'))
 const Dashboard = lazyLoad(() => import('@/pages/Dashboard'))
 const Workers = lazyLoad(() => import('@/pages/Workers'))
 const Projects = lazyLoad(() => import('@/pages/Projects'))
+const Repositories = lazyLoad(() => import('@/pages/Repositories'))
 const Tasks = lazyLoad(() => import('@/pages/Tasks'))
+const CrawlBatchList = lazyLoad(() => import('@/pages/Crawl/BatchList'))
 
 const Settings = lazyLoad(() => import('@/pages/Settings'))
 const Envs = lazyLoad(() => import('@/pages/Envs'))
@@ -104,12 +106,14 @@ const AppRoutes: React.FC = () => (
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="workers" element={<Workers />} />
         <Route path="projects/*" element={<Projects />} />
+        <Route path="repositories" element={<Repositories />} />
         <Route path="envs" element={<Envs />} />
         <Route path="tasks" element={<Tasks />} />
         <Route path="tasks/create" element={<TaskCreate />} />
         <Route path="tasks/:id/edit" element={<TaskEdit />} />
         <Route path="tasks/:id" element={<TaskDetail />} />
         <Route path="tasks/:taskId/runs/:runId" element={<ExecutionLogs />} />
+        <Route path="crawl-batches" element={<CrawlBatchList />} />
 
         <Route path="user-management" element={<AdminRoute><UserManagement /></AdminRoute>} />
         <Route path="system-config" element={<SuperAdminRoute><SystemConfig /></SuperAdminRoute>} />

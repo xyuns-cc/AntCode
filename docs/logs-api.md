@@ -2,7 +2,7 @@
 
 ## 概述
 
-日志管理API提供了完整的任务执行日志查看和管理功能，支持实时日志流式读取、历史日志查询和日志文件管理。
+日志管理 API 提供任务执行日志查看和管理功能。实时日志通过 Redis Stream 分发，历史日志持久化在 PostgreSQL。
 
 ## 基础路径
 
@@ -264,18 +264,18 @@ ws.onmessage = function(event) {
 
 ---
 
-### 5. 下载日志文件
+### 5. 导出历史日志
 
 **GET** `/api/v1/logs/executions/{execution_id}/download`
 
-下载完整的日志文件。
+从 PostgreSQL 导出指定执行的历史日志。
 
 #### 路径参数
 - `execution_id` (string, 必需): 任务执行ID
 
 #### 查询参数
 - `type` (string, 可选): 日志类型 (`stdout` | `stderr` | `all`)，默认 `all`
-- `format` (string, 可选): 文件格式 (`txt` | `json`)，默认 `txt`
+- `format` (string, 可选): 导出格式 (`txt` | `json`)，默认 `txt`
 
 #### 请求示例
 ```bash
@@ -285,7 +285,7 @@ curl -X GET "/api/v1/logs/executions/abc123/download?type=all&format=txt" \
 ```
 
 #### 响应
-返回文件流，Content-Type: `application/octet-stream`
+返回导出流，Content-Type 由导出格式决定。
 
 ---
 
@@ -339,11 +339,8 @@ curl -X GET /api/v1/logs/executions/abc123/stats \
             "cpu_usage_percent": 15.5,
             "avg_response_time_ms": 234
         },
-        "log_files": {
-            "stdout_file": "/logs/tasks/abc123/output.log",
-            "stderr_file": "/logs/tasks/abc123/error.log",
-            "file_exists": true
-        }
+        "storage": "postgresql",
+        "realtime_stream": "redis"
     }
 }
 ```
@@ -427,7 +424,7 @@ curl -X POST /api/v1/logs/batch \
 
 **DELETE** `/api/v1/logs/cleanup`
 
-清理指定时间范围外的历史日志文件。
+清理指定时间范围外的 PostgreSQL 历史日志记录。
 
 #### 查询参数
 - `before_date` (string, 必需): 清理此日期之前的日志，格式: `YYYY-MM-DD`
@@ -453,13 +450,12 @@ curl -X DELETE "/api/v1/logs/cleanup?before_date=2024-01-01&dry_run=true" \
             "log_type": "all"
         },
         "results": {
-            "files_to_delete": 156,
-            "total_size_mb": 234.5,
+            "rows_to_delete": 156,
             "execution_ids": ["old123", "old456", "..."],
             "oldest_log": "2023-11-15",
             "newest_log": "2023-12-31"
         },
-        "note": "预演模式：未实际删除文件"
+        "note": "预演模式：未实际删除记录"
     }
 }
 ```
@@ -533,7 +529,7 @@ curl -X GET "/api/v1/logs/search?query=database error&level=ERROR&limit=20" \
 - **400 Bad Request**: 请求参数错误
 - **401 Unauthorized**: 未认证或token无效
 - **403 Forbidden**: 权限不足
-- **404 Not Found**: 执行记录或日志文件不存在
+- **404 Not Found**: 执行记录或日志记录不存在
 - **429 Too Many Requests**: 请求过于频繁
 - **500 Internal Server Error**: 服务器内部错误
 
@@ -542,11 +538,11 @@ curl -X GET "/api/v1/logs/search?query=database error&level=ERROR&limit=20" \
 {
     "success": false,
     "code": 404,
-    "message": "日志文件不存在",
+    "message": "日志记录不存在",
     "errors": [
         {
             "field": "execution_id",
-            "message": "执行记录 abc123 不存在或日志文件已被清理"
+            "message": "执行记录 abc123 不存在或日志记录已被清理"
         }
     ],
     "timestamp": "2024-01-01T00:00:00Z"
@@ -567,13 +563,13 @@ curl -X GET "/api/v1/logs/search?query=database error&level=ERROR&limit=20" \
 - 结合时间范围筛选提高搜索效率
 - 对于复杂搜索，考虑使用多个API组合
 
-### 3. 日志文件管理
-- 定期清理历史日志文件避免磁盘空间不足
-- 重要日志建议及时下载备份
-- 使用 `dry_run` 模式预览清理结果
+### 3. 日志记录管理
+- 定期按保留策略清理 PostgreSQL 历史日志记录
+- 重要执行可通过导出接口生成审计材料
+- 使用 `dry_run` 模式预览清理影响
 
 ### 4. 性能考虑
-- 大日志文件建议使用流式下载
+- 大日志查询建议使用分页或 tail 参数
 - 避免在高峰期进行大量日志查询
 - 使用缓存减少重复请求
 

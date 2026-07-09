@@ -394,7 +394,11 @@ def start_worker(
     setup_logging(level=log_level)
 
     # 初始化 Worker 配置
-    grace_period = 30.0
+    # T7-B3b (P1-6): grace_period 从 30 抬到 60 —— 长任务（爬虫翻页、
+    # code 项目跑测试）30s 常常不够 drain 完，被 _force_terminate 硬 cancel
+    # 后 master 侧看到 CANCELLED 语义错误。60s 更宽松，配合 deregister
+    # 让 master 尽快感知，整体 SLA 反而更快。
+    grace_period = 60.0
     config_kwargs: dict[str, object] = {
         "host": host,
         "gateway_host": gateway_host,

@@ -1,6 +1,6 @@
 [project]
 name = "antcode-web-api"
-version = "0.1.0"
+version = "1.0.0"
 description = "AntCode Web API 服务 - Control Plane"
 requires-python = ">=3.11"
 dependencies = [
@@ -20,6 +20,10 @@ dependencies = [
 
     # 工具库
     "ujson>=5.9.0",
+    "PyYAML>=6.0",
+
+    # T7-P2-3: Prometheus /metrics 端点
+    "prometheus-client>=0.20.0",
 ]
 
 [tool.uv.sources]

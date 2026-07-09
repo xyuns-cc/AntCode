@@ -34,6 +34,7 @@ class TaskType(str, Enum):
     CODE = "code"  # 代码执行
     SPIDER = "spider"  # 爬虫任务
     RENDER = "render"  # 渲染任务
+    RULE = "rule"  # 规则爬虫（无代码，跑声明式提取）
     CUSTOM = "custom"  # 自定义任务
 
 

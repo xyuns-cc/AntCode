@@ -8,7 +8,6 @@ Database 模块
 
 from antcode_core.infrastructure.db.tortoise import (
     close_db,
-    generate_schemas,
     get_database_url,
     get_default_tortoise_config,
     get_tortoise_config,
@@ -21,5 +20,4 @@ __all__ = [
     "get_database_url",
     "init_db",
     "close_db",
-    "generate_schemas",
 ]

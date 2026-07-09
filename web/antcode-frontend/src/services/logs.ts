@@ -182,12 +182,12 @@ class LogService extends BaseService {
   /**
    * 申请 WebSocket 一次性 ticket（避免把长期 JWT 写入 URL）。
    * 后端 401 时由 apiClient 响应拦截器统一处理；调用方仅在 ticket 缺失时报错。
-   * 如果服务端尚未实现 /api/v1/ws-ticket，则回退到 access_token。
+   * 端点挂载在 /api/v1/ws/ 前缀下（routes/v1/__init__.py:35）。
    */
   async getWsTicket(): Promise<string | null> {
     try {
       const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
-        '/api/v1/ws-ticket'
+        '/api/v1/ws/ws-ticket'
       )
       const body = response.data
       const ticket = body?.data?.ticket ?? body?.ticket

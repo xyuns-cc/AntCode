@@ -132,9 +132,7 @@ class AlertManager:
             return {"status": "not_ready"}
 
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._send_async(message, level, force=True), self._loop
-            )
+            future = asyncio.run_coroutine_threadsafe(self._send_async(message, level, force=True), self._loop)
             self._pending_tasks.append(future)
             self._has_pending = True
             return {"status": "queued"}
@@ -190,7 +188,7 @@ class AlertManager:
                 if force:
                     task = channel.send_alert_force(message, level)
                 else:
-                    task = channel.send_alert_with_fallback(message, level, default_levels)
+                    task = channel.send_alert_for_level(message, level, default_levels)
                 tasks.append(task)
             except Exception as e:
                 logger.error(f"创建告警发送任务失败 [{channel_name}]: {e}")

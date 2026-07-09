@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-
+from antcode_core.application.services.audit import audit_service
+from antcode_core.application.services.users.user_service import user_service
 from antcode_core.common.config import settings
-from antcode_web_api.response import Messages, success
 from antcode_core.common.security.auth import (
     TokenData,
     get_current_user,
@@ -21,6 +19,7 @@ from antcode_core.common.security.login_crypto import (
     LoginPasswordCryptoError,
     login_password_crypto,
 )
+from antcode_core.domain.models.user import UserRole
 from antcode_core.domain.schemas import (
     AppInfoResponse,
     HealthResponse,
@@ -30,10 +29,15 @@ from antcode_core.domain.schemas import (
     UserResponse,
 )
 from antcode_core.domain.schemas.common import BaseResponse
-from antcode_core.application.services.audit import audit_service
-from antcode_core.domain.models.user import UserRole
-from antcode_core.application.services.users.user_service import user_service
 from antcode_core.infrastructure.resilience.health import HealthStatus, health_checker
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from antcode_web_api.response import Messages, success
+
+# K8s probe 单次超时（秒）：任何依赖探测卡住不能拖垮探针
+_PROBE_TIMEOUT = 5.0
 
 router = APIRouter()
 
@@ -137,9 +141,12 @@ async def liveness_check() -> JSONResponse:
     """
     Kubernetes 存活探针端点
 
-    只检查应用是否存活，不检查依赖服务
+    只检查应用是否存活，不检查依赖服务；套 5s 超时防止 event loop 被阻塞时探针卡住
     """
-    is_alive = await health_checker.liveness()
+    try:
+        is_alive = await asyncio.wait_for(health_checker.liveness(), timeout=_PROBE_TIMEOUT)
+    except TimeoutError:
+        is_alive = False
 
     status_code = status.HTTP_200_OK if is_alive else status.HTTP_503_SERVICE_UNAVAILABLE
     probe_status = "alive" if is_alive else "dead"
@@ -158,9 +165,12 @@ async def readiness_check() -> JSONResponse:
     """
     Kubernetes 就绪探针端点
 
-    检查应用是否准备好接收流量
+    检查应用是否准备好接收流量；套 5s 超时防止依赖（DB/Redis）响应慢时探针卡住
     """
-    is_ready = await health_checker.readiness()
+    try:
+        is_ready = await asyncio.wait_for(health_checker.readiness(), timeout=_PROBE_TIMEOUT)
+    except TimeoutError:
+        is_ready = False
 
     status_code = status.HTTP_200_OK if is_ready else status.HTTP_503_SERVICE_UNAVAILABLE
     probe_status = "ready" if is_ready else "not_ready"
@@ -178,6 +188,53 @@ async def readiness_check() -> JSONResponse:
 async def login(request: UserLoginRequest, http_request: Request):
     ip_address = http_request.client.host if http_request.client else None
     user_agent = http_request.headers.get("user-agent")
+
+    # T7-B4a (P1-2): 登录专项限流 + 账户锁定
+    from antcode_core.common.security.login_guard import (
+        check_ip_rate,
+        check_user_rate,
+        clear_failures,
+        is_account_locked,
+        record_failure,
+    )
+
+    if ip_address and not await check_ip_rate(ip_address):
+        await audit_service.log_login(
+            username=request.username,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            success=False,
+            error_message="登录 IP 限流触发",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="登录尝试过于频繁，请稍后再试",
+        )
+    if request.username and not await check_user_rate(request.username):
+        await audit_service.log_login(
+            username=request.username,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            success=False,
+            error_message="登录用户名限流触发",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="该账户登录尝试过于频繁，请稍后再试",
+        )
+    locked, remain = await is_account_locked(request.username)
+    if locked:
+        await audit_service.log_login(
+            username=request.username,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            success=False,
+            error_message=f"账户锁定中 ({remain}s)",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"账户已锁定，请 {remain} 秒后再试",
+        )
 
     password = request.password
     if request.encrypted_password:
@@ -197,17 +254,22 @@ async def login(request: UserLoginRequest, http_request: Request):
     user = await user_service.authenticate_user(request.username, password)
 
     if not user:
-        # 记录登录失败
+        # T7-B4a: 记登录失败 + 累加计数（可能触发新锁定）
+        failures, newly_locked = await record_failure(request.username)
+        err_msg = "用户名或密码错误"
+        if newly_locked:
+            err_msg += f"（连续失败 {failures} 次，账户已被锁定 "
+            err_msg += f"{settings.LOGIN_LOCKOUT_DURATION_SEC // 60} 分钟）"
         await audit_service.log_login(
             username=request.username,
             ip_address=ip_address,
             user_agent=user_agent,
             success=False,
-            error_message="用户名或密码错误",
+            error_message=err_msg,
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误",
+            detail=err_msg,
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -223,7 +285,8 @@ async def login(request: UserLoginRequest, http_request: Request):
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已禁用")
 
-    # 记录登录成功
+    # 记录登录成功 + T7-B4a: 清失败计数
+    await clear_failures(user.username)
     await audit_service.log_login(
         username=user.username,
         user_id=user.id,
@@ -234,9 +297,10 @@ async def login(request: UserLoginRequest, http_request: Request):
 
     await user_service.clear_cache()
 
-    permissions = ["admin"] if user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN) else []
     access_token = jwt_auth.create_access_token(
-        user_id=user.id, username=user.username, is_admin=user.is_admin,
+        user_id=user.id,
+        username=user.username,
+        is_admin=user.is_admin,
         role=user.role.value,
     )
     refresh_token = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
@@ -294,9 +358,10 @@ async def refresh_token(request: RefreshTokenRequest):
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户不可用")
 
-    permissions = ["admin"] if user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN) else []
     access_token = jwt_auth.create_access_token(
-        user_id=user.id, username=user.username, is_admin=user.is_admin,
+        user_id=user.id,
+        username=user.username,
+        is_admin=user.is_admin,
         role=user.role.value,
     )
     refresh_token_value = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)

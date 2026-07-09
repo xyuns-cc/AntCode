@@ -122,12 +122,10 @@ class SystemMetricsService:
         }
 
     async def _collect_active_tasks(self):
-        try:
-            from antcode_core.application.services.scheduler import scheduler_service
+        from antcode_core.domain.models.enums import TaskStatus
+        from antcode_core.domain.models.task_run import TaskRun
 
-            return await asyncio.to_thread(lambda: len(scheduler_service.running_tasks))
-        except Exception:
-            return 0
+        return await TaskRun.filter(status=TaskStatus.RUNNING).count()
 
     async def _collect_uptime_seconds(self):
         try:
@@ -145,10 +143,7 @@ class SystemMetricsService:
             from antcode_core.domain.models.enums import TaskStatus
             from antcode_core.domain.models.task import Task
 
-            return await Task.filter(
-                status=TaskStatus.PENDING,
-                is_active=True
-            ).count()
+            return await Task.filter(status=TaskStatus.PENDING, is_active=True).count()
         except Exception:
             return 0
 
@@ -165,18 +160,14 @@ class SystemMetricsService:
 
             # 查询今日所有已完成的执行记录（成功或失败）
             total_today = await TaskRun.filter(
-                start_time__gte=today_start,
-                status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED]
+                start_time__gte=today_start, status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED]
             ).count()
 
             if total_today == 0:
                 return 0.0
 
             # 查询今日成功的执行记录
-            success_today = await TaskRun.filter(
-                start_time__gte=today_start,
-                status=TaskStatus.SUCCESS
-            ).count()
+            success_today = await TaskRun.filter(start_time__gte=today_start, status=TaskStatus.SUCCESS).count()
 
             return round((success_today / total_today) * 100, 2)
         except Exception:

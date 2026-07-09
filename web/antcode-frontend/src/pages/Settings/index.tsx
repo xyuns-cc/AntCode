@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useState, memo } from 'react'
 import { Card, Tabs, Form, Input, Button, Alert } from 'antd'
+import PageContainer from '@/components/common/PageContainer'
 import { 
   UserOutlined, 
   MailOutlined, 
@@ -175,18 +176,16 @@ const Settings: React.FC = memo(() => {
   )
 
   return (
-    <div className={styles.settingsContainer}>
-      <div className={styles.pageHeader}>
-        <h1 className={styles.pageTitle}>
+    <PageContainer
+      scrollable
+      title={
+        <>
           <UserOutlined style={{ marginRight: 8 }} />
           用户设置
-        </h1>
-        <p className={styles.pageDescription}>
-          管理您的账户信息和安全设置
-        </p>
-      </div>
-
-      <Tabs 
+        </>
+      }
+    >
+      <Tabs
         defaultActiveKey="email" 
         size="large" 
         className={styles.tabsContainer}
@@ -213,7 +212,7 @@ const Settings: React.FC = memo(() => {
           }
         ]}
       />
-    </div>
+    </PageContainer>
   )
 })
 

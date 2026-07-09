@@ -29,9 +29,13 @@ from loguru import logger
 
 from antcode_master.control.lease_sweeper_loop import LeaseSweeperLoop
 from antcode_master.control.reconcile_loop import reconcile_loop
+from antcode_master.control.redispatch_loop import redispatch_loop
 from antcode_master.control.retry_loop import retry_service
 from antcode_master.control.scheduler_event_loop import scheduler_event_loop
 from antcode_master.control.scheduler_loop import scheduler_service
+from antcode_master.ingester.alert_check_loop import alert_check_loop
+from antcode_master.ingester.artifact_cleanup_loop import artifact_cleanup_loop
+from antcode_master.ingester.crawl_batch_status_loop import crawl_batch_status_loop
 from antcode_master.ingester.log_ingest_loop import log_ingest_loop
 from antcode_master.ingester.result_loop import result_loop
 from antcode_master.leader import leader_election
@@ -59,18 +63,35 @@ async def _on_worker_evicted(worker_id: str) -> None:
             await worker.save()
             logger.info(f"Lease 失租 Worker 已下线: worker_id={worker_id}")
 
+            # R1-P2-3 (审查报告): 原实现逐条整行 save()——无 update_fields、
+            # 无状态 CAS、naive datetime、只写 status 不写 runtime_status，
+            # 与 P1-1/P1-2 同族的"复活"漏洞。改走 execution_status_service
+            # 让终态保护 + runtime_status 一起就位。
+            from antcode_core.application.services.scheduler.execution_status_service import (
+                execution_status_service,
+            )
+            from antcode_core.domain.models.enums import RuntimeStatus
+            from datetime import UTC as _UTC
+
             running = await TaskRun.filter(
                 worker_id=worker.id,
                 status=TaskStatus.RUNNING,
-            ).all()
+            ).only("id", "run_id").all()
+            now = datetime.now(_UTC)
+            failed = 0
             for task in running:
-                task.status = TaskStatus.FAILED
-                task.end_time = datetime.now()
-                task.error_message = "Worker 失联（lease expired）"
-                await task.save()
+                ok = await execution_status_service.update_runtime_status(
+                    run_id=task.run_id,
+                    status=RuntimeStatus.FAILED,
+                    status_at=now,
+                    error_message="Worker 失联（lease expired）",
+                )
+                if ok:
+                    failed += 1
             if running:
                 logger.info(
-                    f"Lease 失租 Worker 任务回收: worker_id={worker_id} count={len(running)}"
+                    f"Lease 失租 Worker 任务回收: worker_id={worker_id} "
+                    f"marked_failed={failed}/{len(running)}"
                 )
     except Exception as exc:
         logger.error(f"on_worker_evicted 回调失败: worker_id={worker_id} exc={exc}")
@@ -102,16 +123,21 @@ async def _start_control_group() -> None:
         reconcile_loop.start(),
         retry_service.start(),
         _lease_sweeper.start(),
+        # T7-B3a: 派发失败自动补派 loop（leader-only；gate 在 loop 内部）
+        redispatch_loop.start(),
     )
     logger.info("[control] 控制面 loop 组已就绪")
 
 
 async def _start_ingester_group() -> None:
-    """启动数据面 loop 组（result / log）"""
+    """启动数据面 loop 组（result / log / artifact cleanup）"""
     logger.info("[ingester] 启动数据面 loop 组")
     await asyncio.gather(
         result_loop.start(),
         log_ingest_loop.start(),
+        artifact_cleanup_loop.start(),
+        crawl_batch_status_loop.start(),
+        alert_check_loop.start(),
     )
     logger.info("[ingester] 数据面 loop 组已就绪")
 
@@ -155,6 +181,31 @@ async def start_master() -> None:
     except Exception as e:
         logger.warning(f"任务恢复失败（非致命）: {e}")
 
+    # L4: 显式初始化 alert_service，让告警通道配置从 DB 加载，
+    # 而不是等第一次 send_alert 时懒加载（此前 crawl 阈值告警会因通道未
+    # ready 而丢弃）
+    try:
+        from antcode_core.application.services.alert.alert_service import (
+            alert_service,
+        )
+
+        await alert_service.initialize()
+        logger.info("alert_service 已初始化")
+    except Exception as e:
+        logger.warning(f"alert_service 初始化失败（非致命）: {e}")
+
+    # L5: 订阅 system_config 失效通道；web_api 改配置后 master 也能 reload 缓存
+    try:
+        from antcode_core.application.services.system_config import (
+            system_config_service,
+        )
+
+        # 首次加载（notify=False 因为初始加载不需要 fanout）
+        await system_config_service.reload_config_cache(notify=False)
+        await system_config_service.start_invalidation_subscriber()
+    except Exception as e:
+        logger.warning(f"system_config 订阅启动失败（非致命）: {e}")
+
     # 4. 并行启动 control / ingester 两组 loop
     logger.info("[3/6] 并行启动 control + ingester loop 组")
     results = await asyncio.gather(
@@ -177,6 +228,7 @@ async def _stop_control_group() -> None:
         scheduler_event_loop.stop(),
         scheduler_service.shutdown(),
         retry_service.stop(),
+        redispatch_loop.stop(),
     ]
     if _lease_sweeper is not None:
         coros.append(_lease_sweeper.stop())
@@ -189,6 +241,9 @@ async def _stop_ingester_group() -> None:
     await asyncio.gather(
         result_loop.stop(),
         log_ingest_loop.stop(),
+        artifact_cleanup_loop.stop(),
+        crawl_batch_status_loop.stop(),
+        alert_check_loop.stop(),
         return_exceptions=True,
     )
 
@@ -252,8 +307,15 @@ async def main() -> None:
         logger.info("收到停止信号")
         stop_event.set()
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+    # Windows 上 asyncio 不支持 add_signal_handler，改用 signal.signal
+    if sys.platform == "win32":
+        def _win_handler(signum, frame):  # noqa: ARG001
+            loop.call_soon_threadsafe(signal_handler)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, _win_handler)
+    else:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
 
     try:
         await start_master()

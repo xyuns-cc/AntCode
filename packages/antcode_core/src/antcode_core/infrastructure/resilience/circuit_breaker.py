@@ -180,9 +180,7 @@ class CircuitBreaker:
         if new_state == CircuitState.OPEN:
             self._open_time = time.time()
             self._half_open_calls = 0
-            logger.warning(
-                f"熔断器 '{self.name}' 已打开 (连续失败: {self._stats.consecutive_failures})"
-            )
+            logger.warning(f"熔断器 '{self.name}' 已打开 (连续失败: {self._stats.consecutive_failures})")
         elif new_state == CircuitState.HALF_OPEN:
             self._half_open_calls = 0
             logger.info(f"熔断器 '{self.name}' 进入半开状态")

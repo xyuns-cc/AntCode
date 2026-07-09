@@ -4,7 +4,7 @@
  */
 import type React from 'react'
 import { useEffect, useState, memo, useMemo, useCallback, useRef } from 'react'
-import { Row, Col, Card, Skeleton, theme, Flex, Typography, Select, Empty, Tooltip, Button, Table, Tag, Space, Badge } from 'antd'
+import { Row, Col, Card, Skeleton, theme, Flex, Typography, Select, Empty, Tooltip, Button, Table, Tag, Space, Badge, Alert } from 'antd'
 import {
   CheckCircleOutlined,
   DatabaseOutlined,
@@ -150,6 +150,7 @@ const SpiderStatsTab: React.FC<SpiderStatsTabProps> = memo(({ refreshKey }) => {
 const [workers, setWorkers] = useState<Worker[]>([])
 const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   const [historyData, setHistoryData] = useState<SpiderStatsHistoryPoint[]>([])
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [historyHours, setHistoryHours] = useState<number>(1)
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date())
   const timerRef = useRef<NodeJS.Timeout | null>(null)
@@ -231,10 +232,20 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   }, [loadData])
 
   useEffect(() => {
-    if (!selectedWorkerId) { setHistoryData([]); return }
+    if (!selectedWorkerId) {
+      setHistoryData([])
+      setHistoryError(null)
+      return
+    }
     workerService.getWorkerSpiderStatsHistory(selectedWorkerId, historyHours)
-      .then(setHistoryData)
-      .catch(() => setHistoryData([]))
+      .then((data) => {
+        setHistoryData(data)
+        setHistoryError(null)
+      })
+      .catch((error: unknown) => {
+        Logger.error('加载 Worker 爬虫历史指标失败:', error)
+        setHistoryError(error instanceof Error ? error.message : '加载 Worker 爬虫历史指标失败')
+      })
   }, [selectedWorkerId, historyHours])
 
   const successRate = stats && stats.totalResponses > 0
@@ -412,7 +423,9 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       {/* Worker历史趋势 */}
       <Card title={<Flex align="center" gap={6}><LineChartOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>Worker 历史趋势</span></Flex>} extra={<Space><Select placeholder="选择 Worker" style={{ width: 140 }} allowClear value={selectedWorkerId} onChange={setSelectedWorkerId} size="small" options={workers.map(worker => ({ label: worker.name, value: worker.id }))} /><Select value={historyHours} onChange={setHistoryHours} style={{ width: 80 }} size="small" options={[{ label: '1小时', value: 1 }, { label: '6小时', value: 6 }, { label: '24小时', value: 24 }]} /></Space>} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
         <div style={{ height: 220 }}>
-          {selectedWorkerId ? (
+          {historyError ? (
+            <Alert type="error" showIcon message="历史指标加载失败" description={historyError} />
+          ) : selectedWorkerId ? (
             historyData.length > 0 ? (
               <Line data={{
                 labels: historyData.map(p => { const d = new Date(p.timestamp); return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` }),

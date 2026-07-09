@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from antcode_core.common.config import settings
 
@@ -29,6 +30,11 @@ def log_stream_key(run_id: str, namespace: str | None = None) -> str:
     return f"{redis_namespace(namespace)}:log:stream:{run_id}"
 
 
+def log_ingest_stream_key(namespace: str | None = None) -> str:
+    """Worker 直连日志落库 stream key。"""
+    return f"{redis_namespace(namespace)}:log:ingest"
+
+
 def log_chunk_stream_key(run_id: str, namespace: str | None = None) -> str:
     """运行日志分片 stream key。"""
     return f"{redis_namespace(namespace)}:log:chunk:{run_id}"
@@ -47,6 +53,23 @@ def log_chunk_stream_pattern(namespace: str | None = None) -> str:
 def control_stream(worker_id: str, namespace: str | None = None) -> str:
     """控制通道 stream key。"""
     return f"{redis_namespace(namespace)}:control:{worker_id}"
+
+
+# E5: consumer group 命名带 namespace，避免 REDIS_NAMESPACE 改动后
+# master 侧硬编码 "antcode-workers" 与 worker 侧 "{ns}-workers" 分叉。
+def worker_consumer_group(namespace: str | None = None) -> str:
+    """Worker 拉取任务 ready stream 的 consumer group 名。"""
+    return f"{redis_namespace(namespace)}-workers"
+
+
+def result_consumer_group(namespace: str | None = None) -> str:
+    """Master ingester 消费 task result stream 的 consumer group 名。"""
+    return f"{redis_namespace(namespace)}-results"
+
+
+def log_ingest_consumer_group(namespace: str | None = None) -> str:
+    """Master ingester 消费 log ingest stream 的 consumer group 名。"""
+    return f"{redis_namespace(namespace)}-log-ingest"
 
 
 def control_global_stream(namespace: str | None = None) -> str:
@@ -167,8 +190,8 @@ def decode_stream_payload(data: Mapping[Any, Any]) -> dict[str, Any]:
                 continue
             try:
                 decoded[json_key] = json.loads(raw)
-            except Exception:
-                continue
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Redis Stream 字段 {json_key} 不是合法 JSON") from exc
 
     return decoded
 
@@ -178,6 +201,7 @@ __all__ = [
     "task_ready_stream",
     "task_result_stream",
     "log_stream_key",
+    "log_ingest_stream_key",
     "log_chunk_stream_key",
     "log_stream_pattern",
     "log_chunk_stream_pattern",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -10,6 +11,17 @@ from fastapi import HTTPException, status
 
 from antcode_core.common.security.secret_box import secret_box
 from antcode_core.domain.models import GitCredential
+
+
+def _dev_allow_http() -> bool:
+    """P3: dev 场景显式允许 HTTP git 凭证。
+
+    生产严禁：把凭证附加到明文 HTTP 请求等于把密码明文推上网络。dev/内网测试
+    时（如本地 Gitea/Gogs 无 TLS）通过 ``ANTCODE_GIT_ALLOW_HTTP=true`` 显式
+    声明后才允许，默认 false 与 fail-closed 保持一致。
+    """
+    val = os.environ.get("ANTCODE_GIT_ALLOW_HTTP", "false").strip().lower()
+    return val in ("1", "true", "yes", "on")
 
 
 @dataclass(frozen=True)
@@ -111,7 +123,9 @@ class GitCredentialService:
         return f"Authorization: Basic {token}"
 
     # 允许的 Git 协议白名单:只走 HTTPS,杜绝降级到明文 HTTP 或 file:// 等
+    # P3: dev 通过 ANTCODE_GIT_ALLOW_HTTP=true 显式扩展到 http（默认关）
     _ALLOWED_SCHEMES = frozenset({"https"})
+    _ALLOWED_SCHEMES_WITH_HTTP = frozenset({"https", "http"})
 
     def _validate_host_scope(self, git_url: str, host_scope: str) -> None:
         """校验 Git URL 的 host 与凭证 ``host_scope`` 精确匹配。
@@ -119,14 +133,20 @@ class GitCredentialService:
         历史实现使用 ``host.endswith(f".{scope}")`` 放过任意子域,
         攻击者注册 ``evil.github.com`` 即可窃取 ``github.com`` 范围内
         的凭证(P0-#5)。这里改为:
-        1. scheme 必须在白名单(仅 HTTPS)
+        1. scheme 必须在白名单(仅 HTTPS；dev 显式开关下含 http)
         2. host 与 scope 必须**完全相等**(case-insensitive)
         """
+        allowed = (
+            self._ALLOWED_SCHEMES_WITH_HTTP if _dev_allow_http() else self._ALLOWED_SCHEMES
+        )
         parsed = urlparse(git_url)
-        if parsed.scheme.lower() not in self._ALLOWED_SCHEMES:
+        if parsed.scheme.lower() not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Git 地址协议不允许,仅支持 HTTPS",
+                detail=(
+                    "Git 地址协议不允许，仅支持 HTTPS"
+                    + ("（dev 已开启 HTTP 后仍需以 http:// 开头）" if _dev_allow_http() else "")
+                ),
             )
         host = (parsed.hostname or "").lower()
         scope = host_scope.strip().lower()

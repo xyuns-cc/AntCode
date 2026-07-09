@@ -27,9 +27,7 @@ class MetricsCollector:
         key = self._make_key(name, labels)
         self._gauges[key] = value
 
-    def observe_histogram(
-        self, name: str, value: float, labels: dict | None = None
-    ) -> None:
+    def observe_histogram(self, name: str, value: float, labels: dict | None = None) -> None:
         """记录直方图观测值"""
         key = self._make_key(name, labels)
         if key not in self._histograms:

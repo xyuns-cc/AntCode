@@ -1,0 +1,29 @@
+/* FilterBar：统一筛选 + 操作工具条。在 PageContainer.toolbar 槽内使用，但也可独立使用。 */
+
+.root {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* 确保 antd Select / Input / DatePicker 控件在 wrap 时高度对齐 */
+.filters > * { vertical-align: middle; }

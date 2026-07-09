@@ -6,6 +6,7 @@
 import os
 from functools import cached_property
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +43,40 @@ def _find_project_root() -> Path:
     return current.parent.parent.parent.parent.parent.parent
 
 
+def _validate_database_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise ValueError("DATABASE_URL 只能使用 PostgreSQL 连接串。")
+    if not parsed.hostname:
+        raise ValueError("DATABASE_URL 缺少 host。")
+    if not parsed.username:
+        raise ValueError("DATABASE_URL 缺少 user。")
+    if not parsed.password:
+        raise ValueError("DATABASE_URL 缺少 password。")
+    if not parsed.path.strip("/"):
+        raise ValueError("DATABASE_URL 缺少 database。")
+
+
+def _validate_redis_url(value: str) -> None:
+    parsed = urlparse(value)
+    # T6-T1: 支持集群 (`redis+cluster://`) 与哨兵 (`redis+sentinel://`)。
+    # scheme 决定 create_async_redis_client 走哪条路径。
+    allowed_schemes = {
+        "redis",
+        "rediss",
+        "redis+cluster",
+        "rediss+cluster",
+        "redis+sentinel",
+        "rediss+sentinel",
+    }
+    if parsed.scheme not in allowed_schemes:
+        raise ValueError(
+            f"REDIS_URL scheme 不支持: {parsed.scheme!r}，仅允许 {sorted(allowed_schemes)}"
+        )
+    if not parsed.hostname:
+        raise ValueError("REDIS_URL 缺少 host。")
+
+
 class Settings(BaseSettings):
     """应用配置类，使用 cached_property 优化重复计算"""
 
@@ -49,8 +84,18 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(default="")
     REDIS_URL: str = Field(default="")
     REDIS_NAMESPACE: str = Field(default="antcode")
+    # 是否启用 Redis（关闭时依赖 Redis 的功能会 no-op：批次事件不发布、
+    # scheduler_event_loop 空转、WS 日志不接实时流）。默认 true 与代码假设一致；
+    # 空 REDIS_URL 场景可设 false 让功能显式降级而不是抛 AttributeError。
+    REDIS_ENABLED: bool = Field(default=True)
+    # T6-T1: Redis 部署形态。默认 auto 让 factory 从 URL scheme 判断
+    # （redis+cluster / redis+sentinel）；也可显式覆盖为 standalone / cluster
+    # / sentinel。用于 URL scheme 是标准 redis:// 但实际背后是集群/哨兵的
+    # 反代场景。
+    REDIS_MODE: str = Field(default="")
+    REDIS_SENTINEL_MASTER_NAME: str = Field(default="mymaster")
     API_BASE_URL: str = Field(default="")
-    SERVER_HOST: str = Field(default="0.0.0.0")
+    BIND_HOST: str = Field(default="0.0.0.0")
     SERVER_PORT: int = Field(default=8000)
     SERVER_RELOAD: bool = Field(default=False)
     FRONTEND_PORT: int = Field(default_factory=_default_frontend_port)
@@ -58,13 +103,12 @@ class Settings(BaseSettings):
 
     # === 日志配置 ===
     LOG_LEVEL: str = Field(default="INFO")
-    LOG_TO_FILE: bool = Field(default=True)
 
     # === 应用信息 ===
     APP_NAME: str = "AntCode"
     APP_TITLE: str = "AntCode 任务调度平台"
     APP_DESCRIPTION: str = "基于 FastAPI 的分布式任务调度和项目管理平台"
-    APP_VERSION: str = "1.3.0"
+    APP_VERSION: str = "1.0.0"
     COPYRIGHT_YEAR: str = "2025"
 
     # === JWT 配置 ===
@@ -75,6 +119,9 @@ class Settings(BaseSettings):
 
     # === 加密密钥（独立于 JWT Secret）===
     ENCRYPTION_KEY: str = Field(default="")
+    # T7-P2-5: 密钥轮换。逗号分隔的旧密钥（Fernet 派生前的原文），仅用于解
+    # 密老密文。加密永远用当前 ENCRYPTION_KEY。轮换后一段时间可清空。
+    ENCRYPTION_KEYS_LEGACY: str = Field(default="")
 
     # === 登录密码加密配置 ===
     LOGIN_PASSWORD_ENCRYPTION_ENABLED: bool = Field(default=True)
@@ -109,19 +156,17 @@ class Settings(BaseSettings):
         return os.path.join(self.BASE_DIR, "data", "backend")
 
     @cached_property
+    def public_api_base_url(self) -> str:
+        explicit_url = self.API_BASE_URL.strip().rstrip("/")
+        if explicit_url:
+            return explicit_url
+        domain = self.SERVER_DOMAIN.strip() or "localhost"
+        return f"http://{domain}:{self.SERVER_PORT}"
+
+    @cached_property
     def db_url(self) -> str:
         """数据库连接 URL"""
-        if self.DATABASE_URL:
-            return self.DATABASE_URL
-        return f"sqlite:///{os.path.join(self.data_dir, 'db', 'antcode.sqlite3')}"
-
-    @cached_property
-    def LOG_FILE_PATH(self) -> str:
-        return os.path.join(self.data_dir, "logs", "app.log")
-
-    @cached_property
-    def LOCAL_STORAGE_PATH(self) -> str:
-        return os.path.join(self.data_dir, "storage", "projects")
+        return self.DATABASE_URL
 
     # === 文件配置 ===
     MAX_FILE_SIZE: int = 100 * 1024 * 1024
@@ -150,18 +195,12 @@ class Settings(BaseSettings):
     WORKER_INSTALL_KEY_FAIL_THRESHOLD: int = Field(default=5)
     WORKER_INSTALL_KEY_BLOCK_SECONDS: int = Field(default=600)
 
-    @cached_property
-    def REDIS_ENABLED(self) -> bool:
-        """Redis 是否启用（根据 REDIS_URL 自动判断）"""
-        return bool(self.REDIS_URL and self.REDIS_URL.strip())
-
     # === 默认管理员 ===
     DEFAULT_ADMIN_USERNAME: str = Field(default="admin")
     DEFAULT_ADMIN_PASSWORD: str = Field(default="")
 
-    # === 抽象后端配置 ===
-    CRAWL_BACKEND: str = Field(default="memory")
-    FILE_STORAGE_BACKEND: str = Field(default="local")
+    # === 爬虫数据通道 ===
+    CRAWL_BACKEND: str = Field(default="redis")
 
     # === 日志双通道传输配置 ===
     LOG_CHUNK_SIZE: int = Field(default=131072)
@@ -172,16 +211,10 @@ class Settings(BaseSettings):
     LOG_RETRY_MAX_DELAY: float = Field(default=5.0)
     LOG_RETRY_MAX: int = Field(default=5)
     LOG_WORKER_MAX_RATE: int = Field(default=800 * 1024)
-    WORKER_LOG_RETENTION_DAYS: int = Field(default=7)
     LOG_STREAM_MAXLEN: int = Field(default=10000)
     LOG_STREAM_TTL_SECONDS: int = Field(default=7 * 86400)
     LOG_CHUNK_STREAM_MAXLEN: int = Field(default=2000)
     LOG_CHUNK_TTL_SECONDS: int = Field(default=7 * 86400)
-    LOG_ARCHIVE_PREFIX: str = Field(default="logs")
-    LOG_ARCHIVE_RETENTION_DAYS: int = Field(default=30)
-
-    # === 日志持久化存储配置 ===
-    LOG_STORAGE_BACKEND: str = Field(default="s3")  # s3, local, clickhouse
 
     # === 调度器配置 ===
     SCHEDULER_ROLE: str = Field(default="master")
@@ -197,14 +230,60 @@ class Settings(BaseSettings):
     TASK_RETRY_DELAY: int = 60
     TASK_LOG_RETENTION_DAYS: int = 30
     TASK_LOG_MAX_SIZE: int = 100 * 1024 * 1024
+    ARTIFACT_RETENTION_DAYS: int = 30
+    # T7-B2a (P0-2): audit_logs / worker_events 之前无保留策略——线性增长
+    # 拖慢 audit 查询与 VACUUM。默认 90 / 30 天，运维可覆盖。
+    AUDIT_LOG_RETENTION_DAYS: int = 90
+    WORKER_EVENT_RETENTION_DAYS: int = 30
+    # 单次批式 DELETE 上限，防止长事务锁表；一轮 cleanup 内多次循环直到删完
+    LOG_CLEANUP_BATCH_LIMIT: int = 5000
+    # T7-B3a (P1-1): 派发失败自动补派参数
+    REDISPATCH_MAX_ATTEMPTS: int = 5
+    REDISPATCH_BASE_DELAY_SEC: int = 30
+    REDISPATCH_MAX_DELAY_SEC: int = 300
+    REDISPATCH_TICK_INTERVAL_SEC: int = 10
+    # T7-B4a (P1-2): 登录专项限流 + 账户锁定
+    LOGIN_RATE_LIMIT_IP_MAX: int = 5           # 每 IP 每分钟最多 5 次尝试
+    LOGIN_RATE_LIMIT_IP_PERIOD: int = 60
+    LOGIN_RATE_LIMIT_USER_MAX: int = 10        # 每用户名每 15 分钟最多 10 次
+    LOGIN_RATE_LIMIT_USER_PERIOD: int = 900
+    LOGIN_LOCKOUT_FAILURES: int = 5            # 连续失败 N 次触发锁定
+    LOGIN_LOCKOUT_DURATION_SEC: int = 900      # 锁定 15 分钟
 
-    @cached_property
-    def TASK_LOG_DIR(self) -> str:
-        return os.path.join(self.data_dir, "logs", "tasks")
+    # 运维日志（loguru sink）：默认只写 stderr；置 True 时额外落文件（500MB rotate / 30 天）。
+    # 与业务任务日志（task_logs 表）无关；容器化部署一般让日志由 stdout 采集，故默认 False。
+    LOG_TO_FILE: bool = False
+    LOG_FILE_PATH: str = "logs/app.log"
+
+    # === Redis 熔断器 ===
+    REDIS_CIRCUIT_BREAKER_ENABLED: bool = True
+    REDIS_CIRCUIT_FAILURE_THRESHOLD: int = 5
+    REDIS_CIRCUIT_RECOVERY_SECONDS: float = 30.0
+
+    # === Direct Worker Redis ACL（per-worker 隔离） ===
+    REDIS_ACL_ENABLED: bool = True
+    REDIS_ACL_SAVE_INTERVAL_SECONDS: int = 300
+
+    # === 数据库连接池配置 ===
+    # 每服务独立 maxsize，避免单实例耗尽 PG max_connections。
+    # 未识别的 service 名走全局 DB_POOL_MAX。
+    DB_POOL_MIN: int = 2
+    DB_POOL_MAX: int = 10
+    DB_POOL_MAX_WEB_API: int = 20
+    DB_POOL_MAX_MASTER: int = 15
+    DB_POOL_MAX_GATEWAY: int = 10
+    DB_POOL_MAX_WORKER: int = 5
+
+    def db_pool_max_for(self, service: str | None) -> int:
+        """根据服务名返回 maxsize；未知服务回退到全局 DB_POOL_MAX。"""
+        if not service:
+            return self.DB_POOL_MAX
+        key = f"DB_POOL_MAX_{service.upper().replace('-', '_')}"
+        return int(getattr(self, key, self.DB_POOL_MAX))
 
     @cached_property
     def TASK_EXECUTION_WORK_DIR(self) -> str:
-        return os.path.join(self.data_dir, "storage", "executions")
+        return os.path.join(self.data_dir, "work", "executions")
 
     @cached_property
     def scheduler_event_stream(self) -> str:
@@ -213,12 +292,20 @@ class Settings(BaseSettings):
         return self.SCHEDULER_EVENT_STREAM
 
     @cached_property
-    def VENV_STORAGE_ROOT(self) -> str:
-        return os.path.join(self.data_dir, "storage", "runtimes")
+    def MISE_DATA_ROOT(self) -> str:
+        return os.path.join(self.data_dir, "work", "mise")
 
     @cached_property
-    def MISE_DATA_ROOT(self) -> str:
-        return os.path.join(self.data_dir, "storage", "mise")
+    def LANG_CACHE_ROOT(self) -> str:
+        """多语言依赖 cache 根目录，各语言子目录做隔离。
+
+        - node: 用作 npm/pnpm cache 目录（`npm_config_cache` / `PNPM_STORE_PATH`）
+        - go:   用作 `GOPATH` 和 `GOCACHE`
+        - java: 用作 Maven local repo（`MAVEN_OPTS=-Dmaven.repo.local=...`）
+
+        跨项目复用：相同依赖版本只下载一次，节省磁盘 + 冷启动时间。
+        """
+        return os.path.join(self.data_dir, "work", "lang_cache")
 
     # === 清理配置 ===
     CLEANUP_WORKSPACE_ON_COMPLETION: bool = True
@@ -236,11 +323,11 @@ class Settings(BaseSettings):
 
     @property
     def CACHE_USE_REDIS(self) -> bool:
-        return self.REDIS_ENABLED
+        return True
 
     @property
     def METRICS_USE_REDIS_CACHE(self) -> bool:
-        return self.REDIS_ENABLED
+        return True
 
     # === 监控配置 ===
     MONITORING_ENABLED: bool = True
@@ -275,12 +362,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_backend_config(self) -> "Settings":
-        """验证后端配置：当使用 redis 后端时，REDIS_URL 必须设置"""
-        if self.CRAWL_BACKEND == "redis" and (not self.REDIS_URL or not self.REDIS_URL.strip()):
-            raise ValueError(
-                "CRAWL_BACKEND 设置为 'redis' 时，REDIS_URL 必须设置。"
-                "请在 .env 文件中配置 REDIS_URL，格式: redis://[:password]@host:port/db"
-            )
+        """Validate mandatory PostgreSQL and Redis infrastructure."""
+        database_url = self.DATABASE_URL.strip()
+        if not database_url:
+            raise ValueError("DATABASE_URL 必须设置，且只能使用 PostgreSQL。")
+        _validate_database_url(database_url)
+        redis_url = self.REDIS_URL.strip()
+        if not redis_url:
+            raise ValueError("REDIS_URL 必须设置。")
+        _validate_redis_url(redis_url)
         if self.LOGIN_PASSWORD_ENCRYPTION_REQUIRED and not self.LOGIN_PASSWORD_ENCRYPTION_ENABLED:
             raise ValueError("LOGIN_PASSWORD_ENCRYPTION_REQUIRED 需同时启用 LOGIN_PASSWORD_ENCRYPTION_ENABLED")
         return self

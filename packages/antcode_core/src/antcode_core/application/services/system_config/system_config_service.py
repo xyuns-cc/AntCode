@@ -182,8 +182,69 @@ class SystemConfigService:
         logger.info(f"批量更新 {updated_count} 个配置 by {modified_by}")
         return updated_count
 
-    async def reload_config_cache(self):
-        """重新加载配置缓存（热加载）"""
+    # L5: 跨进程配置失效频道。web_api 写配置后 publish；master 等其它进程订阅并
+    # 各自 reload_config_cache。
+    _INVALIDATION_CHANNEL = "antcode:system_config:invalidate"
+
+    async def publish_invalidation(self) -> None:
+        """L5: 通知其它进程重载配置缓存。web_api 写配置后调用。"""
+        try:
+            from antcode_core.infrastructure.redis import get_redis_client
+
+            redis = await get_redis_client()
+            if redis is None:
+                return
+            await redis.publish(self._INVALIDATION_CHANNEL, "1")
+            logger.debug("已发布 system_config 失效通知")
+        except Exception as exc:
+            logger.warning(f"发布 system_config 失效通知失败（其它进程可能持有旧值）: {exc}")
+
+    async def start_invalidation_subscriber(self) -> None:
+        """L5: master 等非 web_api 进程调用；订阅 invalidation 通道，收到即 reload。
+
+        任务在后台跑，进程关闭时不停止（幂等——重复启动只是叠加订阅）。
+        """
+        try:
+            from antcode_core.infrastructure.redis import get_redis_client
+
+            redis = await get_redis_client()
+            if redis is None:
+                return
+
+            async def _run():
+                pubsub = redis.pubsub()
+                await pubsub.subscribe(self._INVALIDATION_CHANNEL)
+                try:
+                    async for message in pubsub.listen():
+                        if message.get("type") not in ("message", "pmessage"):
+                            continue
+                        try:
+                            # 订阅端 reload 不再 notify，防回环
+                            await self.reload_config_cache(notify=False)
+                            logger.info("收到失效通知，system_config 缓存已重载")
+                        except Exception as exc:
+                            logger.warning(f"响应失效通知失败: {exc}")
+                finally:
+                    try:
+                        await pubsub.unsubscribe(self._INVALIDATION_CHANNEL)
+                        await pubsub.close()
+                    except Exception:
+                        pass
+
+            import asyncio as _asyncio
+
+            _asyncio.create_task(_run())
+            logger.info("system_config 失效订阅已启动")
+        except Exception as exc:
+            logger.warning(f"启动 system_config 失效订阅失败: {exc}")
+
+    async def reload_config_cache(self, notify: bool = True):
+        """重新加载配置缓存（热加载）。
+
+        L5: ``notify=True`` 时自动向 Redis publish 失效通知，让其它进程
+        （如 master）也重载缓存。订阅端本身触发的 reload 请传
+        ``notify=False``，避免回环。
+        """
         try:
             configs = await SystemConfig.filter(is_active=True).all()
 
@@ -232,12 +293,14 @@ class SystemConfigService:
 
             # 提示需要重启的配置
             if restart_required_configs:
-                logger.warning(
-                    f"以下配置已修改但需要重启服务才能完全生效: {', '.join(restart_required_configs)}"
-                )
+                logger.warning(f"以下配置已修改但需要重启服务才能完全生效: {', '.join(restart_required_configs)}")
 
             # 动态更新settings对象
             self._apply_to_settings()
+
+            if notify:
+                # L5: 通知其它进程重载缓存
+                await self.publish_invalidation()
 
         except Exception as e:
             logger.error(f"重新加载配置缓存失败: {e}")

@@ -34,4 +34,3 @@ def build_worker_signed_headers(worker, payload=None):
 
     # 去掉空值，避免发送多余头
     return {k: v for k, v in headers.items() if v}
-

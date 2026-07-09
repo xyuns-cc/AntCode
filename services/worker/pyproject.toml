@@ -1,6 +1,6 @@
 [project]
 name = "antcode-worker"
-version = "0.1.0"
+version = "1.0.0"
 description = "AntCode Worker 执行器服务 - Execution Plane"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,6 +8,8 @@ dependencies = [
     # 核心依赖
     "antcode-core",
     "antcode-contracts",
+    # S1 (Scrapy 迁移): 规则爬虫执行引擎（替换 spiderkit）
+    "antcode-scrapy",
 
     # gRPC 框架
     "grpcio>=1.60.0",
@@ -19,11 +21,11 @@ dependencies = [
 
     # HTTP 客户端
     "aiohttp>=3.9.0",
-    "httpx[socks]>=0.28.0",
+    # P7: RuleSpider/SpiderClient 默认开启 http2=True，httpx 需要 h2 extra
+    "httpx[socks,http2]>=0.28.0",
 
-    # 爬虫相关
-    "lxml>=5.0.0",
-    "cssselect>=1.2.0",
+    # 爬虫能力：curl_cffi 保留供 worker heartbeat capabilities 探测；
+    # lxml/cssselect S4 后不再直接使用（Scrapy 通过 antcode_scrapy 传递）。
     "curl_cffi>=0.7.0",
 
     # 系统与监控
@@ -55,6 +57,7 @@ antcode-worker = "antcode_worker.cli:main"
 [tool.uv.sources]
 antcode-core = { workspace = true }
 antcode-contracts = { workspace = true }
+antcode-scrapy = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

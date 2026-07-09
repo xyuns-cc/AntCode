@@ -285,6 +285,16 @@ def make_middlewares():
     """创建 FastAPI 中间件列表"""
     from antcode_core.common.config import settings
 
+    # T7-P2-3: PrometheusMiddleware 用惰性导入，避免 prometheus_client 未安装
+    # 时启动挂掉；装了就自动采集。
+    prometheus_middleware = None
+    try:
+        from antcode_web_api.prometheus_metrics import PrometheusMiddleware as _Prom
+
+        prometheus_middleware = Middleware(_Prom)
+    except ImportError:
+        pass
+
     middleware = [
         Middleware(RequestIDMiddleware),
         Middleware(
@@ -303,4 +313,7 @@ def make_middlewares():
         Middleware(AdminPermissionMiddleware),
         Middleware(CacheInvalidationMiddleware),
     ]
+    if prometheus_middleware is not None:
+        # 放最外层：先记时再进业务，让 5xx 也能被采集
+        middleware.append(prometheus_middleware)
     return middleware

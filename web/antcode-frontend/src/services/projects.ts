@@ -8,41 +8,33 @@ import type {
   ProjectCreateRequest,
   ProjectCodeConfigUpdateRequest,
   ProjectFileConfigUpdateRequest,
+  ProjectSourcePayload,
   ProjectUpdateRequest,
   ProjectListParams,
   ProjectStats,
-  ProjectExportConfig,
-  ProjectImportConfig,
-  ProjectFileContent,
-  ProjectFileStructure
+  ProjectExportConfig
 } from '@/types'
-
-// Ant Design Upload 组件的文件对象类型
-interface UploadFile {
-  originFileObj?: File
-}
-type FileInput = File | UploadFile
 
 class ProjectService extends BaseService {
   constructor() {
     super('/api/v1/projects')
   }
 
-  private appendGitSourceFields(formData: FormData, data: ProjectCreateRequest): void {
-    if (data.git_url) {
-      formData.append('git_url', data.git_url)
+  private appendRepositorySourceFields(formData: FormData, data: ProjectCreateRequest): void {
+    if (data.repository_id) {
+      formData.append('repository_id', data.repository_id)
     }
-    if (data.git_branch) {
-      formData.append('git_branch', data.git_branch)
+    if (data.ref) {
+      formData.append('ref', data.ref)
     }
-    if (data.git_commit) {
-      formData.append('git_commit', data.git_commit)
+    if (data.subdir) {
+      formData.append('subdir', data.subdir)
     }
-    if (data.git_subdir) {
-      formData.append('git_subdir', data.git_subdir)
-    }
-    if (data.git_credential_id) {
-      formData.append('git_credential_id', data.git_credential_id)
+    if (data.include_paths !== undefined) {
+      const value = Array.isArray(data.include_paths)
+        ? JSON.stringify(data.include_paths)
+        : data.include_paths
+      formData.append('include_paths', value)
     }
   }
 
@@ -61,17 +53,6 @@ class ProjectService extends BaseService {
       return
     }
     formData.append(field, JSON.stringify(value))
-  }
-
-  // 辅助方法：从 File 或 UploadFile 中提取实际的 File 对象
-  private extractFile(fileInput: FileInput): File | null {
-    if (fileInput instanceof File) {
-      return fileInput
-    }
-    if (fileInput && 'originFileObj' in fileInput && fileInput.originFileObj) {
-      return fileInput.originFileObj
-    }
-    return null
   }
 
   // 获取项目列表
@@ -142,28 +123,7 @@ class ProjectService extends BaseService {
 
     // 根据项目类型添加特定字段
     if (data.type === 'file') {
-      const fileSourceType = data.file_source_type ?? (data.source_type === 'git' ? 'git' : 's3')
-      formData.append('file_source_type', fileSourceType)
-      if (fileSourceType === 'git') {
-        this.appendGitSourceFields(formData, data)
-      } else {
-        if (data.file) {
-          // 处理主文件上传 - 适配 Ant Design Upload 组件的文件对象
-          const fileToUpload = this.extractFile(data.file as FileInput)
-          if (fileToUpload) {
-            formData.append('file', fileToUpload)
-          }
-        }
-        // 处理附加文件上传
-        if (data.additionalFiles && data.additionalFiles.length > 0) {
-          data.additionalFiles.forEach((fileItem) => {
-            const fileToUpload = this.extractFile(fileItem)
-            if (fileToUpload) {
-              formData.append('files', fileToUpload)
-            }
-          })
-        }
-      }
+      this.appendRepositorySourceFields(formData, data)
       if (data.entry_point) {
         formData.append('entry_point', data.entry_point)
       }
@@ -173,28 +133,13 @@ class ProjectService extends BaseService {
     } else if (data.type === 'rule') {
       this.appendRuleFields(formData, data)
     } else if (data.type === 'code') {
-      const codeSourceType = data.code_source_type ?? (data.source_type || 's3')
-      formData.append('code_source_type', codeSourceType)
-      if (codeSourceType === 'git') {
-        this.appendGitSourceFields(formData, data)
-      }
+      this.appendRepositorySourceFields(formData, data)
       if (data.language) {
         formData.append('language', data.language)
-      }
-      if (data.version) {
-        formData.append('version', data.version)
       }
       if (data.code_entry_point) {
         formData.append('code_entry_point', data.code_entry_point)
         formData.append('entry_point', data.code_entry_point)
-      }
-      if (codeSourceType !== 'git') {
-        if (data.code_content) {
-          formData.append('code_content', data.code_content)
-        }
-        if (data.code_file) {
-          formData.append('code_file', data.code_file)
-        }
       }
       if (data.documentation) {
         formData.append('documentation', data.documentation)
@@ -225,9 +170,6 @@ class ProjectService extends BaseService {
     if (data.pagination_config) {
       formData.append('pagination_config', data.pagination_config)
     }
-    if (data.anti_spider) {
-      formData.append('anti_spider', data.anti_spider)
-    }
     if (data.request_method) {
       formData.append('request_method', data.request_method)
     }
@@ -243,15 +185,15 @@ class ProjectService extends BaseService {
     if (data.priority !== undefined) {
       formData.append('priority', data.priority.toString())
     }
-    // v2.0.0 新增字段
-    if (data.proxy_config) {
-      formData.append('proxy_config', data.proxy_config)
-    }
-    if (data.task_config) {
-      formData.append('task_config', data.task_config)
-    }
-    if (data.data_schema) {
-      formData.append('data_schema', data.data_schema)
+    this.appendJsonField(formData, 'proxy_config', data.proxy_config)
+    this.appendJsonField(formData, 'anti_spider', data.anti_spider)
+    this.appendJsonField(formData, 'task_config', data.task_config)
+    this.appendJsonField(formData, 'data_schema', data.data_schema)
+    // S10 (Scrapy 迁移收尾): dedup_config 走 JSON 字段，resume_enabled 走 bool 字符串
+    this.appendJsonField(formData, 'dedup_config', (data as Record<string, unknown>).dedup_config)
+    const resumeVal = (data as Record<string, unknown>).resume_enabled
+    if (resumeVal !== undefined && resumeVal !== null) {
+      formData.append('resume_enabled', String(Boolean(resumeVal)))
     }
     if (data.retry_count !== undefined) {
       formData.append('retry_count', data.retry_count.toString())
@@ -274,7 +216,9 @@ class ProjectService extends BaseService {
   async updateRuleConfig(id: string, data: Partial<ProjectUpdateRequest>): Promise<Project> {
     const payload: Record<string, unknown> = {}
     const allowedFields = [
+      'engine',
       'target_url',
+      'url_pattern',
       'callback_type',
       'request_method',
       'extraction_rules',
@@ -287,7 +231,14 @@ class ProjectService extends BaseService {
       'headers',
       'cookies',
       'proxy_config',
-      'task_config'
+      'anti_spider',
+      'task_config',
+      'data_schema',
+      'retry_count',
+      'timeout',
+      // S10 (Scrapy 迁移收尾): 前端提交但后端没接过的两个字段
+      'resume_enabled',
+      'dedup_config'
     ]
     allowedFields.forEach((field) => {
       const value = data[field as keyof ProjectUpdateRequest]
@@ -335,6 +286,18 @@ class ProjectService extends BaseService {
       payload.task_config = parseJson(payload.task_config, 'task_config')
     }
 
+    if (payload.proxy_config !== undefined) {
+      payload.proxy_config = parseJson(payload.proxy_config, 'proxy_config')
+    }
+
+    if (payload.anti_spider !== undefined) {
+      payload.anti_spider = parseJson(payload.anti_spider, 'anti_spider')
+    }
+
+    if (payload.data_schema !== undefined) {
+      payload.data_schema = parseJson(payload.data_schema, 'data_schema')
+    }
+
     const numberFields = ['max_pages', 'start_page', 'request_delay', 'priority', 'retry_count', 'timeout']
     numberFields.forEach((field) => {
       const value = payload[field]
@@ -359,6 +322,14 @@ class ProjectService extends BaseService {
     return this.put<Project>(`/${id}/code-config`, data)
   }
 
+  async getProjectSource(id: string): Promise<ProjectSourcePayload> {
+    return this.get<ProjectSourcePayload>(`/${id}/source`)
+  }
+
+  async updateProjectSource(id: string, data: ProjectSourcePayload): Promise<ProjectSourcePayload> {
+    return this.put<ProjectSourcePayload>(`/${id}/source`, data)
+  }
+
   // 更新文件项目配置
   async updateFileConfig(id: string, data: ProjectFileConfigUpdateRequest): Promise<Project> {
     const formData = new FormData()
@@ -368,27 +339,6 @@ class ProjectService extends BaseService {
     }
     this.appendJsonField(formData, 'runtime_config', data.runtime_config, true)
     this.appendJsonField(formData, 'environment_vars', data.environment_vars, true)
-    if (data.source_type !== undefined) {
-      formData.append('source_type', data.source_type)
-    }
-    if (data.git_url !== undefined) {
-      formData.append('git_url', data.git_url)
-    }
-    if (data.git_branch !== undefined) {
-      formData.append('git_branch', data.git_branch)
-    }
-    if (data.git_commit !== undefined) {
-      formData.append('git_commit', data.git_commit)
-    }
-    if (data.git_subdir !== undefined) {
-      formData.append('git_subdir', data.git_subdir)
-    }
-    if (data.git_credential_id !== undefined) {
-      formData.append('git_credential_id', data.git_credential_id)
-    }
-    if (data.file) {
-      formData.append('file', data.file as File)
-    }
 
     const response = await apiClient.put(`${this.basePath}/${id}/file-config`, formData, {
       headers: {
@@ -450,48 +400,49 @@ class ProjectService extends BaseService {
     return response.data
   }
 
-  // 导入项目
-  async importProject(config: ProjectImportConfig): Promise<Project[]> {
-    const formData = new FormData()
-    formData.append('file', config.file)
-    if (config.name) {
-      formData.append('name', config.name)
+  // 导入项目（上传文件/压缩包 + 环境配置，multipart/form-data）
+  async importProject(params: {
+    file: File
+    name?: string
+    description?: string
+    entry_point?: string
+    runtime_scope: string
+    worker_id?: string
+    use_existing_env?: boolean
+    existing_env_name?: string
+    python_version?: string
+    shared_runtime_key?: string
+    env_name?: string
+    env_description?: string
+    overwrite_existing?: boolean
+    runtime_config?: string
+    environment_vars?: string
+  }): Promise<unknown> {
+    const form = new FormData()
+    form.append('file', params.file)
+    form.append('runtime_scope', params.runtime_scope)
+    if (params.worker_id) form.append('worker_id', params.worker_id)
+    const optional: Array<[string, unknown]> = [
+      ['name', params.name],
+      ['description', params.description],
+      ['entry_point', params.entry_point],
+      ['use_existing_env', params.use_existing_env],
+      ['existing_env_name', params.existing_env_name],
+      ['python_version', params.python_version],
+      ['shared_runtime_key', params.shared_runtime_key],
+      ['env_name', params.env_name],
+      ['env_description', params.env_description],
+      ['overwrite_existing', params.overwrite_existing],
+      ['runtime_config', params.runtime_config],
+      ['environment_vars', params.environment_vars],
+    ]
+    for (const [k, v] of optional) {
+      if (v !== undefined && v !== null && v !== '') form.append(k, String(v))
     }
-    if (config.description) {
-      formData.append('description', config.description)
-    }
-    if (config.entry_point) {
-      formData.append('entry_point', config.entry_point)
-    }
-    if (config.runtime_scope) {
-      formData.append('runtime_scope', config.runtime_scope)
-    }
-    if (config.worker_id) {
-      formData.append('worker_id', config.worker_id)
-    }
-    if (config.use_existing_env !== undefined) {
-      formData.append('use_existing_env', config.use_existing_env.toString())
-    }
-    if (config.existing_env_name) {
-      formData.append('existing_env_name', config.existing_env_name)
-    }
-    if (config.python_version) {
-      formData.append('python_version', config.python_version)
-    }
-    if (config.shared_runtime_key) {
-      formData.append('shared_runtime_key', config.shared_runtime_key)
-    }
-    if (config.env_name) {
-      formData.append('env_name', config.env_name)
-    }
-    if (config.env_description) {
-      formData.append('env_description', config.env_description)
-    }
-    if (config.overwrite_existing !== undefined) {
-      formData.append('overwrite_existing', config.overwrite_existing.toString())
-    }
-
-    return this.uploadFile<Project[]>('/import', formData)
+    const response = await apiClient.post('/api/v1/projects/import', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return response.data
   }
 
   // 验证项目配置
@@ -531,85 +482,6 @@ class ProjectService extends BaseService {
     return result.projects
   }
 
-  // ============ 文件管理API ============
-
-  // 获取项目文件结构
-  async getProjectFileStructure(id: string): Promise<ProjectFileStructure> {
-    try {
-      return await this.get<ProjectFileStructure>(`/${id}/files/structure`)
-    } catch (error) {
-      Logger.error('获取项目文件结构失败:', error)
-      throw error
-    }
-  }
-
-  // 获取文件内容
-  async getFileContent(id: string, filePath: string): Promise<ProjectFileContent> {
-    try {
-      if (!filePath) {
-        throw new Error('文件路径不能为空')
-      }
-      
-      return await this.get<ProjectFileContent>(`/${id}/files/content`, {
-        params: { file_path: filePath }
-      })
-    } catch (error) {
-      Logger.error('获取文件内容失败:', error)
-      throw error
-    }
-  }
-
-  // 更新文件内容
-  async updateFileContent(
-    id: string,
-    payload: { file_path: string; content: string; encoding?: string }
-  ): Promise<ProjectFileContent> {
-    try {
-      if (!payload.file_path) {
-        throw new Error('文件路径不能为空')
-      }
-      if (payload.content === undefined || payload.content === null) {
-        throw new Error('文件内容不能为空')
-      }
-      
-      return await this.put<ProjectFileContent>(`/${id}/files/content`, payload)
-    } catch (error) {
-      Logger.error('更新文件内容失败:', error)
-      throw error
-    }
-  }
-
-  // 下载文件
-  async downloadProjectFile(id: string, filePath?: string): Promise<Blob> {
-    try {
-      const url = filePath 
-        ? `/api/v1/projects/${id}/files/download?file_path=${encodeURIComponent(filePath)}`
-        : `/api/v1/projects/${id}/download`
-      
-      const response = await apiClient.get(url, {
-        responseType: 'blob',
-        timeout: 60000  // 下载超时设置为60秒
-      })
-      
-      if (!response.data || response.data.size === 0) {
-        throw new Error('下载的文件为空')
-      }
-      
-      return response.data
-    } catch (error) {
-      Logger.error('下载文件失败:', error)
-      throw error
-    }
-  }
-
-  // 创建下载链接（用于直接下载）
-  getDownloadUrl(id: string, filePath?: string): string {
-    const baseUrl = apiClient.defaults.baseURL || ''
-    const normalizedBase = baseUrl.replace(/\/api\/?$/, '').replace(/\/$/, '')
-    return filePath 
-      ? `${normalizedBase}/api/v1/projects/${id}/files/download?file_path=${encodeURIComponent(filePath)}`
-      : `${normalizedBase}/api/v1/projects/${id}/download`
-  }
 }
 
 export const projectService = new ProjectService()

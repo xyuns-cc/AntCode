@@ -61,8 +61,9 @@ class MasterElectionService:
         self._watch_task: asyncio.Task | None = None
         self._shutdown = False
 
-        logger.info(f"初始化 Master 选举服务: worker_id={worker_id}, "
-                    f"lock_ttl={lock_ttl}s, heartbeat={heartbeat_interval}s")
+        logger.info(
+            f"初始化 Master 选举服务: worker_id={worker_id}, lock_ttl={lock_ttl}s, heartbeat={heartbeat_interval}s"
+        )
 
     async def _get_redis(self):
         """获取 Redis 客户端（支持注入，便于测试）"""
@@ -110,10 +111,9 @@ class MasterElectionService:
                 # 锁已被其他节点持有
                 current_leader = await redis.get(MASTER_LOCK_KEY)
                 if current_leader:
-                    current_leader = current_leader.decode('utf-8')
+                    current_leader = current_leader.decode("utf-8")
 
-                logger.debug(f"未能成为 Leader: worker_id={self._worker_id}, "
-                            f"current_leader={current_leader}")
+                logger.debug(f"未能成为 Leader: worker_id={self._worker_id}, current_leader={current_leader}")
 
                 return False
 
@@ -137,7 +137,7 @@ class MasterElectionService:
             current_holder = await redis.get(MASTER_LOCK_KEY)
 
             if current_holder:
-                current_holder = current_holder.decode('utf-8')
+                current_holder = current_holder.decode("utf-8")
                 return current_holder == self._worker_id
             else:
                 # 锁已过期
@@ -239,8 +239,7 @@ class MasterElectionService:
             return
 
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        logger.info(f"启动 Leader 心跳: worker_id={self._worker_id}, "
-                    f"interval={self._heartbeat_interval}s")
+        logger.info(f"启动 Leader 心跳: worker_id={self._worker_id}, interval={self._heartbeat_interval}s")
 
     async def _stop_heartbeat(self):
         """停止心跳任务"""
@@ -321,7 +320,7 @@ class MasterElectionService:
                     return False
             else:
                 # 锁仍然有效
-                current_holder = current_holder.decode('utf-8')
+                current_holder = current_holder.decode("utf-8")
                 logger.debug(f"Leader 仍然活跃: current_leader={current_holder}")
                 return False
 
@@ -352,8 +351,7 @@ class MasterElectionService:
             return
 
         self._watch_task = asyncio.create_task(self._watch_loop())
-        logger.info(f"启动 Standby 监听: worker_id={self._worker_id}, "
-                    f"interval={self._watch_interval}s")
+        logger.info(f"启动 Standby 监听: worker_id={self._worker_id}, interval={self._watch_interval}s")
 
     async def _stop_watch(self):
         """停止 Standby 监听任务"""
@@ -436,7 +434,7 @@ class MasterElectionService:
             current_holder = await redis.get(MASTER_LOCK_KEY)
 
             if current_holder:
-                return current_holder.decode('utf-8')
+                return current_holder.decode("utf-8")
             else:
                 return None
 

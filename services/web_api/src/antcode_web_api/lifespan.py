@@ -3,18 +3,31 @@
 提供生命周期上下文管理器和服务初始化/关闭函数。
 """
 
+import asyncio
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-from loguru import logger
-from tortoise import Tortoise
 
 from antcode_core.common.config import settings
 from antcode_core.common.utils.http_client import http_client
 from antcode_core.infrastructure.db.tortoise import get_default_tortoise_config
 from antcode_core.infrastructure.redis import RedisConnectionPool, close_redis_pool
+from fastapi import FastAPI
+from loguru import logger
+from tortoise import Tortoise
+
+# 关闭单步超时（秒）：任何 shutdown 子任务卡住不应阻塞进程退出
+_SHUTDOWN_STEP_TIMEOUT = 10.0
+
+
+async def _run_with_timeout(name: str, coro: Awaitable) -> None:
+    """把 shutdown 单步包成带超时的执行，避免整体优雅关闭被单个卡住的资源拖垮。"""
+    try:
+        await asyncio.wait_for(coro, timeout=_SHUTDOWN_STEP_TIMEOUT)
+    except TimeoutError:
+        logger.warning(f"关闭步骤 {name} 超过 {_SHUTDOWN_STEP_TIMEOUT}s 未完成，强制跳过")
+    except Exception as e:
+        logger.error(f"关闭步骤 {name} 失败: {e}")
 
 
 @asynccontextmanager
@@ -51,40 +64,38 @@ async def init_services() -> None:
     logger.info(f"初始化 {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info("=" * 50)
 
-    logger.info("[1/13] 初始化数据库")
+    logger.info("[1/11] 初始化数据库")
     await _init_db()
 
-    logger.info("[2/13] 初始化存储")
-    await _init_storage()
+    logger.info("[2/11] 初始化运行目录")
+    await _init_runtime_dirs()
 
-    logger.info("[3/13] 创建默认管理员")
+    logger.info("[3/11] 创建默认管理员")
     await _create_default_admin()
 
-    logger.info("[4/13] 初始化系统配置")
+    logger.info("[4/11] 初始化系统配置")
     await _init_system_config()
+    await _init_alert_service()
 
-    logger.info("[5/13] 初始化 Worker 认证")
+    logger.info("[5/11] 初始化 Worker 认证")
     await _init_worker_auth()
 
-    logger.info("[6/13] 初始化Redis")
+    logger.info("[6/11] 初始化Redis")
     await _init_redis()
 
-    logger.info("[7/12] 启动内存监控")
+    logger.info("[7/11] 启动内存监控")
     await _setup_memory_monitoring()
 
-    logger.info("[8/12] 初始化指标缓存")
+    logger.info("[8/11] 初始化指标缓存")
     await _init_metrics_cache()
 
-    logger.info("[9/12] 启动文件清理")
-    await _init_temp_cleanup()
-
-    logger.info("[10/12] 启动日志清理")
+    logger.info("[9/11] 启动日志清理")
     await _init_log_cleanup()
 
-    logger.info("[11/12] 启动分布式日志")
+    logger.info("[10/11] 启动分布式日志")
     await _init_distributed_log()
 
-    logger.info("[12/12] 启动 HTTP 客户端")
+    logger.info("[11/11] 启动 HTTP 客户端")
     await http_client.start()
 
     logger.info("=" * 50)
@@ -94,30 +105,19 @@ async def init_services() -> None:
 
 
 async def shutdown_services() -> None:
-    """关闭所有应用服务"""
+    """关闭所有应用服务。每一步都套 asyncio.wait_for，防止单个资源卡住阻塞进程退出。"""
     logger.info("正在关闭服务")
 
-    # 停止指标缓存后台任务
-    try:
-        from antcode_core.application.services.monitoring import system_metrics_service
+    from antcode_core.application.services.monitoring import system_metrics_service
 
-        await system_metrics_service.stop_background_update()
-        logger.info("指标缓存后台任务已停止")
-    except Exception as e:
-        logger.error(f"停止指标缓存失败: {e}")
+    await _run_with_timeout("stop_metrics_background", system_metrics_service.stop_background_update())
+    await _run_with_timeout("http_client.stop", http_client.stop())
+    await _run_with_timeout("shutdown_distributed_log", _shutdown_distributed_log())
+    await _run_with_timeout("shutdown_log_cleanup", _shutdown_log_cleanup())
+    await _run_with_timeout("shutdown_redis", _shutdown_redis())
 
-    # 关闭 HTTP 客户端
-    await http_client.stop()
-
-    # 按逆序关闭服务
-    await _shutdown_distributed_log()
-    await _shutdown_log_cleanup()
-    await _shutdown_temp_cleanup()
-    await _shutdown_redis()
-
-    # 关闭数据库连接
     logger.info("正在关闭数据库连接")
-    await Tortoise.close_connections()
+    await _run_with_timeout("close_db_connections", Tortoise.close_connections())
 
     logger.info("所有服务已关闭")
     logger.info("应用程序已停止")
@@ -129,19 +129,13 @@ async def shutdown_services() -> None:
 
 
 async def _init_db() -> None:
-    """初始化数据库连接和模式"""
+    """初始化数据库连接；结构变更必须通过 migrations/models 执行。"""
     try:
-        await Tortoise.init(config=get_default_tortoise_config())
-        await Tortoise.generate_schemas(safe=True)
-        await _ensure_task_execution_schema()
-        logger.info("数据库已初始化")
+        await Tortoise.init(config=get_default_tortoise_config(service="web_api"))
+        logger.info("数据库连接已初始化")
     except ConnectionRefusedError:
         logger.error("无法连接数据库: 连接被拒绝，请检查数据库服务是否启动")
-        db_addr = (
-            settings.DATABASE_URL.split("@")[-1]
-            if "@" in settings.DATABASE_URL
-            else settings.DATABASE_URL
-        )
+        db_addr = settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else settings.DATABASE_URL
         logger.error(f"数据库地址: {db_addr}")
         raise SystemExit("数据库连接失败，应用无法启动")
     except TimeoutError:
@@ -161,144 +155,24 @@ async def _init_db() -> None:
             raise
 
 
-async def _ensure_task_execution_schema() -> None:
-    """确保 task_executions 表结构与最新模型一致"""
-    db_url = settings.db_url.lower()
-    if "mysql" in db_url or "mariadb" in db_url:
-        await _ensure_task_execution_schema_mysql()
-        return
-    if db_url.startswith("sqlite"):
-        await _ensure_task_execution_schema_sqlite()
-        return
-    logger.warning("当前数据库类型暂不支持自动修复 task_executions 表结构")
-
-
-async def _ensure_task_execution_schema_mysql() -> None:
-    db = Tortoise.get_connection("default")
-
-    tables = await db.execute_query_dict("SHOW TABLES LIKE 'task_executions'")
-    if not tables:
-        return
-
-    columns = await db.execute_query_dict("SHOW COLUMNS FROM `task_executions`")
-    column_meta = {col["Field"]: col for col in columns}
-    existing_cols = set(column_meta.keys())
-
-    alters: list[str] = []
-    if "dispatch_status" not in existing_cols:
-        alters.append(
-            "ADD COLUMN `dispatch_status` VARCHAR(11) NOT NULL DEFAULT 'pending' "
-            "COMMENT 'PENDING: pending\\nDISPATCHING: dispatching\\nDISPATCHED: dispatched\\n"
-            "ACKED: acked\\nREJECTED: rejected\\nTIMEOUT: timeout\\nFAILED: failed'"
-        )
-        existing_cols.add("dispatch_status")
-    if "runtime_status" not in existing_cols:
-        alters.append(
-            "ADD COLUMN `runtime_status` VARCHAR(9) NULL "
-            "COMMENT 'QUEUED: queued\\nRUNNING: running\\nSUCCESS: success\\nFAILED: failed\\n"
-            "CANCELLED: cancelled\\nTIMEOUT: timeout\\nSKIPPED: skipped'"
-        )
-        existing_cols.add("runtime_status")
-    if "dispatch_updated_at" not in existing_cols:
-        alters.append("ADD COLUMN `dispatch_updated_at` DATETIME(6) NULL")
-        existing_cols.add("dispatch_updated_at")
-    if "runtime_updated_at" not in existing_cols:
-        alters.append("ADD COLUMN `runtime_updated_at` DATETIME(6) NULL")
-        existing_cols.add("runtime_updated_at")
-
-    for statement in alters:
-        await _safe_execute_ddl(db, f"ALTER TABLE `task_executions` {statement}")
-
-    start_time_meta = column_meta.get("start_time")
-    if start_time_meta and start_time_meta.get("Null") == "NO":
-        await _safe_execute_ddl(
-            db,
-            "ALTER TABLE `task_executions` MODIFY COLUMN `start_time` DATETIME(6) NULL",
-        )
-
-    indexes = await db.execute_query_dict("SHOW INDEX FROM `task_executions`")
-    indexed_columns = {row["Column_name"] for row in indexes}
-
-    if "dispatch_status" in existing_cols and "dispatch_status" not in indexed_columns:
-        await _safe_execute_ddl(
-            db,
-            "CREATE INDEX `idx_task_execut_dispatch_status` ON `task_executions` (`dispatch_status`)",
-        )
-
-    if "runtime_status" in existing_cols and "runtime_status" not in indexed_columns:
-        await _safe_execute_ddl(
-            db,
-            "CREATE INDEX `idx_task_execut_runtime_status` ON `task_executions` (`runtime_status`)",
-        )
-
-
-async def _ensure_task_execution_schema_sqlite() -> None:
-    db = Tortoise.get_connection("default")
-
-    table_info = await db.execute_query_dict("PRAGMA table_info(task_executions)")
-    if not table_info:
-        return
-
-    existing_cols = {row["name"] for row in table_info}
-
-    if "dispatch_status" not in existing_cols:
-        await _safe_execute_ddl(
-            db,
-            "ALTER TABLE task_executions ADD COLUMN dispatch_status VARCHAR(11) "
-            "NOT NULL DEFAULT 'pending'",
-        )
-    if "runtime_status" not in existing_cols:
-        await _safe_execute_ddl(
-            db,
-            "ALTER TABLE task_executions ADD COLUMN runtime_status VARCHAR(9) NULL",
-        )
-    if "dispatch_updated_at" not in existing_cols:
-        await _safe_execute_ddl(
-            db,
-            "ALTER TABLE task_executions ADD COLUMN dispatch_updated_at DATETIME NULL",
-        )
-    if "runtime_updated_at" not in existing_cols:
-        await _safe_execute_ddl(
-            db,
-            "ALTER TABLE task_executions ADD COLUMN runtime_updated_at DATETIME NULL",
-        )
-
-
-async def _safe_execute_ddl(db, sql: str) -> None:
-    try:
-        await db.execute_query(sql)
-    except Exception as exc:
-        msg = str(exc).lower()
-        if "duplicate column" in msg or "duplicate key name" in msg or "already exists" in msg:
-            logger.warning(f"跳过已存在的结构变更: {sql}")
-            return
-        raise
-
-
 # ============================================================================
-# 存储初始化
+# 运行目录初始化
 # ============================================================================
 
 
-async def _init_storage() -> None:
-    """初始化存储目录"""
+async def _init_runtime_dirs() -> None:
+    """初始化本地运行目录。持久化数据与日志均写入 PostgreSQL。"""
     try:
-        storage_dirs = [
-            os.path.join(settings.data_dir, "db"),
-            os.path.dirname(settings.LOG_FILE_PATH),
-            settings.TASK_LOG_DIR,
-            settings.LOCAL_STORAGE_PATH,
-            os.path.join(settings.LOCAL_STORAGE_PATH, "files"),
-            os.path.join(settings.LOCAL_STORAGE_PATH, "extracted"),
+        runtime_dirs = [
             settings.TASK_EXECUTION_WORK_DIR,
         ]
 
-        for dir_path in storage_dirs:
+        for dir_path in runtime_dirs:
             os.makedirs(dir_path, exist_ok=True)
 
-        logger.info(f"数据目录已初始化: {settings.data_dir}")
+        logger.info(f"运行目录已初始化: {settings.data_dir}")
     except Exception as e:
-        logger.error(f"存储初始化失败: {e}")
+        logger.error(f"运行目录初始化失败: {e}")
         raise
 
 
@@ -310,8 +184,8 @@ async def _init_storage() -> None:
 async def _create_default_admin() -> None:
     """创建默认管理员用户（如不存在）"""
     try:
-        from antcode_core.domain.schemas.user import UserCreateRequest
         from antcode_core.application.services.users.user_service import user_service
+        from antcode_core.domain.schemas.user import UserCreateRequest
 
         admin_user = await user_service.get_user_by_username(settings.DEFAULT_ADMIN_USERNAME)
 
@@ -351,7 +225,19 @@ async def _init_system_config() -> None:
         await system_config_service.initialize_default_configs()
         logger.info("系统配置已初始化并加载到缓存")
     except Exception as e:
-        logger.warning(f"系统配置初始化失败（非致命）: {e}")
+        logger.error(f"系统配置初始化失败: {e}")
+        raise
+
+
+async def _init_alert_service() -> None:
+    """L4: 显式初始化 alert_service，避免懒加载"""
+    try:
+        from antcode_core.application.services.alert.alert_service import alert_service
+
+        await alert_service.initialize()
+        logger.info("alert_service 已初始化")
+    except Exception as e:
+        logger.warning(f"alert_service 初始化失败（非致命）: {e}")
 
 
 # ============================================================================
@@ -367,6 +253,7 @@ async def _init_worker_auth() -> None:
         await worker_service.init_worker_secrets()
     except Exception as e:
         logger.error(f"Worker 认证初始化失败: {e}")
+        raise
 
 
 # ============================================================================
@@ -376,10 +263,6 @@ async def _init_worker_auth() -> None:
 
 async def _init_redis() -> None:
     """初始化 Redis 连接池"""
-    if not settings.REDIS_ENABLED:
-        logger.info("Redis已禁用，跳过初始化")
-        return
-
     try:
         pool_manager = await RedisConnectionPool.get_instance()
         stats = await pool_manager.get_pool_stats()
@@ -393,22 +276,8 @@ async def _init_redis() -> None:
         # 启动时清理陈旧缓存
         await _clear_stale_cache()
     except Exception as e:
-        error_msg = str(e).lower()
-        if "connection" in error_msg or "connect" in error_msg:
-            logger.warning(f"无法连接Redis: {e}")
-            logger.warning("Redis连接失败，部分功能（任务队列、缓存）将不可用")
-            redis_addr = (
-                settings.REDIS_URL.split("@")[-1]
-                if "@" in settings.REDIS_URL
-                else settings.REDIS_URL
-            )
-            logger.warning(f"Redis地址: {redis_addr}")
-        elif "authentication" in error_msg or "auth" in error_msg:
-            logger.warning("Redis认证失败: 密码错误或未配置")
-            logger.warning("Redis连接失败，部分功能将不可用")
-        else:
-            logger.warning(f"Redis初始化失败: {e}")
-            logger.warning("Redis连接失败，部分功能（任务队列、缓存）将不可用")
+        logger.error(f"Redis 初始化失败: {e}")
+        raise
 
 
 async def _clear_stale_cache() -> None:
@@ -426,14 +295,12 @@ async def _clear_stale_cache() -> None:
 
         logger.info("已清除启动时的旧缓存")
     except Exception as e:
-        logger.warning(f"清除旧缓存失败（非致命）: {e}")
+        logger.error(f"清除旧缓存失败: {e}")
+        raise
 
 
 async def _shutdown_redis() -> None:
     """关闭 Redis 连接池"""
-    if not settings.REDIS_ENABLED:
-        return
-
     try:
         await close_redis_pool()
         logger.info("Redis连接池已关闭")
@@ -467,16 +334,12 @@ async def _init_metrics_cache() -> None:
             await system_metrics_service.start_background_update(settings.METRICS_UPDATE_INTERVAL)
             logger.info(
                 f"指标缓存已初始化: "
-                f"类型={'Redis' if settings.METRICS_USE_REDIS_CACHE else 'memory'}, "
+                f"类型=Redis, "
                 f"TTL={settings.METRICS_CACHE_TTL}s, "
                 f"间隔={settings.METRICS_UPDATE_INTERVAL}s"
             )
         else:
-            logger.info(
-                f"指标缓存已初始化(按需模式): "
-                f"类型={'Redis' if settings.METRICS_USE_REDIS_CACHE else 'memory'}, "
-                f"TTL={settings.METRICS_CACHE_TTL}s"
-            )
+            logger.info(f"指标缓存已初始化(按需模式): 类型=Redis, TTL={settings.METRICS_CACHE_TTL}s")
     except Exception as e:
         logger.error(f"指标缓存初始化失败: {e}")
         raise
@@ -487,27 +350,6 @@ async def _init_metrics_cache() -> None:
 # ============================================================================
 
 
-async def _init_temp_cleanup() -> None:
-    """初始化临时文件清理服务"""
-    try:
-        from antcode_core.application.services.projects.temp_cleanup_service import temp_cleanup_service
-
-        await temp_cleanup_service.start_background_cleanup(interval_hours=6)
-        logger.info("文件清理服务已启动")
-    except Exception as e:
-        logger.warning(f"清理服务启动失败: {e}")
-
-
-async def _shutdown_temp_cleanup() -> None:
-    """关闭临时文件清理服务"""
-    try:
-        from antcode_core.application.services.projects.temp_cleanup_service import temp_cleanup_service
-
-        await temp_cleanup_service.stop_background_cleanup()
-    except Exception as e:
-        logger.error(f"清理服务关闭失败: {e}")
-
-
 async def _init_log_cleanup() -> None:
     """初始化日志清理服务"""
     try:
@@ -516,7 +358,8 @@ async def _init_log_cleanup() -> None:
         await log_cleanup_service.start()
         logger.info("日志清理服务已启动")
     except Exception as e:
-        logger.warning(f"日志清理服务启动失败: {e}")
+        logger.error(f"日志清理服务启动失败: {e}")
+        raise
 
 
 async def _shutdown_log_cleanup() -> None:
@@ -533,13 +376,15 @@ async def _init_distributed_log() -> None:
     """初始化分布式日志服务"""
     try:
         from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
+
         from antcode_web_api.websockets.log_notifier import WebSocketLogNotifier
 
         distributed_log_service.set_notifier(WebSocketLogNotifier())
         await distributed_log_service.start()
         logger.info("分布式日志服务已启动")
     except Exception as e:
-        logger.warning(f"分布式日志服务启动失败: {e}")
+        logger.error(f"分布式日志服务启动失败: {e}")
+        raise
 
 
 async def _shutdown_distributed_log() -> None:

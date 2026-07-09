@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-
+from antcode_core.application.services.monitoring import monitoring_service
+from antcode_core.common.security.auth import TokenData, get_current_user
+from antcode_core.domain.models import User
 from antcode_core.domain.schemas.monitoring import (
     ClusterSummaryResponse,
     WorkerHistoryItem,
@@ -15,9 +16,7 @@ from antcode_core.domain.schemas.monitoring import (
     WorkerStatus,
     WorkerSummary,
 )
-from antcode_core.application.services.monitoring import monitoring_service
-from antcode_core.common.security.auth import TokenData, get_current_user
-from antcode_core.domain.models import User
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 router = APIRouter()
 
@@ -36,7 +35,10 @@ def _convert_status(raw):
             result[key] = None
             continue
         try:
-            if key in {"cpu_percent", "memory_percent", "disk_percent"} or key in {"network_sent_mb", "network_recv_mb"}:
+            if key in {"cpu_percent", "memory_percent", "disk_percent"} or key in {
+                "network_sent_mb",
+                "network_recv_mb",
+            }:
                 result[key] = float(value)
             elif key in {"memory_used_mb", "uptime_seconds", "update_time"}:
                 result[key] = int(value)
@@ -131,13 +133,9 @@ async def get_worker_history(
     start_time_utc = start_time.astimezone(UTC)
     end_time_utc = end_time.astimezone(UTC)
 
-    records = await monitoring_service.get_worker_history(
-        worker_id, start_time_utc, end_time_utc, metric_type
-    )
+    records = await monitoring_service.get_worker_history(worker_id, start_time_utc, end_time_utc, metric_type)
     if not records:
-        return WorkerHistoryQueryResponse(
-            worker_id=worker_id, metric_type=metric_type, data=[], count=0
-        )
+        return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=[], count=0)
 
     items = []
     for record in records:
@@ -155,9 +153,7 @@ async def get_worker_history(
             transformed.pop(extra_key, None)
         items.append(WorkerHistoryItem(**transformed))
 
-    return WorkerHistoryQueryResponse(
-        worker_id=worker_id, metric_type=metric_type, data=items, count=len(items)
-    )
+    return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=items, count=len(items))
 
 
 @router.get("/cluster/summary", response_model=ClusterSummaryResponse, summary="获取集群摘要")

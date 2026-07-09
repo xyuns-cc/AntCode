@@ -44,17 +44,21 @@ async def run_command(
     env: dict | None = None,
     timeout: int = 900,
 ) -> CommandResult:
-    """执行命令"""
+    """执行命令。argv[0] 会经 shutil.which 解析（Windows 上匹配 .cmd/.exe/.bat）。"""
+    from antcode_worker.runtime.win_exec import resolve_argv
+
     final_env = os.environ.copy()
     if env:
         final_env.update(env)
 
-    cmd_str = " ".join(args)
+    # Windows-safe: 把 argv[0] 换成绝对路径（npm→npm.cmd 等）；Unix 也走此逻辑保证一致
+    resolved_args = resolve_argv(args)
+    cmd_str = " ".join(resolved_args)
     logger.debug(f"执行命令: {cmd_str}")
 
     try:
         process = await asyncio.create_subprocess_exec(
-            *args,
+            *resolved_args,
             cwd=cwd,
             env=final_env,
             stdout=asyncio.subprocess.PIPE,
