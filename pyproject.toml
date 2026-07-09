@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Web框架
     "fastapi==0.123.7",
-    "uvicorn[standard]==0.38.0",
+    "uvicorn[standard]==0.51.0",
     "python-multipart>=0.0.20",
     # 数据库
     "tortoise-orm>=0.21.0",
