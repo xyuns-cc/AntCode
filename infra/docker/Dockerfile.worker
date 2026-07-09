@@ -46,9 +46,14 @@ COPY packages/antcode_scrapy/src packages/antcode_scrapy/src/
 COPY services/web_api/pyproject.toml services/web_api/
 COPY services/master/pyproject.toml services/master/
 COPY services/gateway/pyproject.toml services/gateway/
+# antcode_scrapy / services/gateway / services/worker 的 pyproject.toml 声明
+# readme = "README.md"，hatchling 编 editable wheel 时缺 README.md 会直接挂
+COPY packages/antcode_scrapy/README.md packages/antcode_scrapy/
+COPY services/gateway/README.md services/gateway/
 
 # 复制 worker 服务
 COPY services/worker/pyproject.toml services/worker/
+COPY services/worker/README.md services/worker/
 COPY services/worker/src services/worker/src/
 
 # 创建虚拟环境并安装依赖
