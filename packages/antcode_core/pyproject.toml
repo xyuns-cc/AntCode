@@ -30,6 +30,10 @@ dependencies = [
     "httpx[http2]>=0.28.1",
     # 系统监控（monitoring/system_metrics_service 用 psutil）
     "psutil>=5.9.0",
+    # 定时任务调度（scheduler_service 用 apscheduler）
+    "apscheduler>=3.10.0",
+    # 上层 service 抛 HTTPException 用（core 里深度耦合 fastapi 异常类型）
+    "fastapi>=0.100.0",
 ]
 
 [build-system]
