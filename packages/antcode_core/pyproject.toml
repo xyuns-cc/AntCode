@@ -26,6 +26,10 @@ dependencies = [
     # 高性能序列化与压缩
     "msgpack>=1.0.0",
     "lz4>=4.3.0",
+    # HTTP 客户端（alert channel / http_client 用）
+    "httpx[http2]>=0.28.1",
+    # 系统监控（monitoring/system_metrics_service 用 psutil）
+    "psutil>=5.9.0",
 ]
 
 [build-system]

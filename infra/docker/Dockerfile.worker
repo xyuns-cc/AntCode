@@ -130,5 +130,6 @@ ENV ANTCODE_MISE_AUTO_INSTALL=false
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
     CMD pgrep -f antcode_worker >/dev/null || exit 1
 
-# 启动命令
-CMD ["python", "-m", "antcode_worker"]
+# 启动命令：跳过交互式 menu，直接进 run 子命令。
+# 具体 --transport / --name 由 compose environment 覆盖（走 WORKER_NAME / WORKER_TRANSPORT_MODE）
+CMD ["python", "-m", "antcode_worker", "run"]
