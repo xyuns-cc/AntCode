@@ -35,6 +35,14 @@ COPY packages/antcode_core/pyproject.toml packages/antcode_core/
 COPY packages/antcode_core/src packages/antcode_core/src/
 COPY packages/antcode_contracts/pyproject.toml packages/antcode_contracts/
 COPY packages/antcode_contracts/src packages/antcode_contracts/src/
+# workspace 一致性：root pyproject.toml 声明 antcode_scrapy 为 workspace member
+COPY packages/antcode_scrapy/pyproject.toml packages/antcode_scrapy/
+COPY packages/antcode_scrapy/src packages/antcode_scrapy/src/
+
+# workspace 一致性：uv sync 会校验 root pyproject.toml 里所有 members 目录存在
+COPY services/web_api/pyproject.toml services/web_api/
+COPY services/master/pyproject.toml services/master/
+COPY services/worker/pyproject.toml services/worker/
 
 # 复制 gateway 服务
 COPY services/gateway/pyproject.toml services/gateway/
@@ -47,6 +55,9 @@ RUN uv venv /app/.venv && \
 
 # ================== 阶段 2: 运行时镜像 ==================
 FROM python:3.11.11-slim AS runtime
+# buildx multi-arch 时用 TARGETARCH 拉对应架构的 grpc_health_probe，
+# 否则 arm64 镜像里塞 amd64 二进制 → 运行时 exec format error
+ARG TARGETARCH=amd64
 
 WORKDIR /app
 
@@ -62,7 +73,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     && rm -rf /var/lib/apt/lists/* \
     && GRPC_HEALTH_PROBE_VERSION=v0.4.24 \
-    && curl -sSL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64" \
+    && curl -sSL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH}" \
         -o /usr/local/bin/grpc_health_probe \
     && chmod +x /usr/local/bin/grpc_health_probe
 
