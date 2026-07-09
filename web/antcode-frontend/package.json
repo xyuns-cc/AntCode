@@ -22,7 +22,7 @@
     "preinstall": "npx only-allow npm"
   },
   "dependencies": {
-    "@ant-design/icons": "^5.5.1",
+    "@ant-design/icons": "^6.3.2",
     "@tanstack/react-query": "^5.66.1",
     "@types/react-syntax-highlighter": "^15.5.13",
     "antd": "^5.21.6",
