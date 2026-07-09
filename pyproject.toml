@@ -36,7 +36,7 @@ dependencies = [
     # 高性能序列化与压缩
     "msgpack>=1.0.0",
     "lz4>=4.3.0",
-    "bcrypt==4.0.1",
+    "bcrypt==5.0.0",
     # gRPC
     "grpcio>=1.60.0",
     "grpcio-tools>=1.60.0",
