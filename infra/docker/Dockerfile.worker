@@ -37,6 +37,15 @@ COPY packages/antcode_core/pyproject.toml packages/antcode_core/
 COPY packages/antcode_core/src packages/antcode_core/src/
 COPY packages/antcode_contracts/pyproject.toml packages/antcode_contracts/
 COPY packages/antcode_contracts/src packages/antcode_contracts/src/
+# workspace member：antcode_worker 依赖 antcode_scrapy；同时 uv sync 会
+# 校验 root pyproject.toml 里所有 workspace members 目录都存在
+COPY packages/antcode_scrapy/pyproject.toml packages/antcode_scrapy/
+COPY packages/antcode_scrapy/src packages/antcode_scrapy/src/
+
+# workspace 一致性：uv sync 会校验 root pyproject.toml 里所有 members 目录存在
+COPY services/web_api/pyproject.toml services/web_api/
+COPY services/master/pyproject.toml services/master/
+COPY services/gateway/pyproject.toml services/gateway/
 
 # 复制 worker 服务
 COPY services/worker/pyproject.toml services/worker/
@@ -88,6 +97,7 @@ COPY --from=builder /app/.venv /app/.venv
 # 复制应用代码
 COPY --chown=appuser:appgroup packages/antcode_core/src/antcode_core /app/packages/antcode_core/src/antcode_core
 COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /app/packages/antcode_contracts/src/antcode_contracts
+COPY --chown=appuser:appgroup packages/antcode_scrapy/src/antcode_scrapy /app/packages/antcode_scrapy/src/antcode_scrapy
 COPY --chown=appuser:appgroup services/worker/src/antcode_worker /app/services/worker/src/antcode_worker
 
 # 创建数据目录并设置权限

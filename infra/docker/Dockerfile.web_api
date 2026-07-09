@@ -35,6 +35,14 @@ COPY packages/antcode_core/pyproject.toml packages/antcode_core/
 COPY packages/antcode_core/src packages/antcode_core/src/
 COPY packages/antcode_contracts/pyproject.toml packages/antcode_contracts/
 COPY packages/antcode_contracts/src packages/antcode_contracts/src/
+# workspace 一致性：root pyproject.toml 声明 antcode_scrapy 为 workspace member
+COPY packages/antcode_scrapy/pyproject.toml packages/antcode_scrapy/
+COPY packages/antcode_scrapy/src packages/antcode_scrapy/src/
+
+# workspace 一致性：uv sync 会校验 root pyproject.toml 里所有 members 目录存在
+COPY services/master/pyproject.toml services/master/
+COPY services/gateway/pyproject.toml services/gateway/
+COPY services/worker/pyproject.toml services/worker/
 
 # 复制 web_api 服务
 COPY services/web_api/pyproject.toml services/web_api/
