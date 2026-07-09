@@ -300,8 +300,10 @@ version = "1.0.0"
 source = { editable = "packages/antcode_core" }
 dependencies = [
     { name = "aiofiles" },
+    { name = "apscheduler" },
     { name = "asyncpg" },
     { name = "cryptography" },
+    { name = "fastapi" },
     { name = "httpx", extra = ["http2"] },
     { name = "loguru" },
     { name = "lz4" },
@@ -321,8 +323,10 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=23.0.0" },
+    { name = "apscheduler", specifier = ">=3.10.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "cryptography", specifier = ">=41.0.0" },
+    { name = "fastapi", specifier = ">=0.100.0" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "lz4", specifier = ">=4.3.0" },
