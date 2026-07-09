@@ -128,9 +128,7 @@ class RuntimeControlService:
         return await self.send_command(worker_id, "delete_env", {"env_name": env_name})
 
     async def list_packages(self, worker_id: str, env_name: str) -> dict[str, Any]:
-        return await self.send_command(
-            worker_id, "list_packages", {"env_name": env_name}, timeout=120
-        )
+        return await self.send_command(worker_id, "list_packages", {"env_name": env_name}, timeout=120)
 
     async def install_packages(
         self,
@@ -146,55 +144,13 @@ class RuntimeControlService:
             timeout=900,
         )
 
-    async def uninstall_packages(
-        self, worker_id: str, env_name: str, packages: list[str]
-    ) -> dict[str, Any]:
+    async def uninstall_packages(self, worker_id: str, env_name: str, packages: list[str]) -> dict[str, Any]:
         return await self.send_command(
             worker_id,
             "uninstall_packages",
             {"env_name": env_name, "packages": packages},
             timeout=300,
         )
-
-    async def list_interpreters(self, worker_id: str) -> dict[str, Any]:
-        return await self.send_command(worker_id, "list_interpreters", {})
-
-    async def install_interpreter(self, worker_id: str, version: str) -> dict[str, Any]:
-        return await self.send_command(
-            worker_id, "install_interpreter", {"version": version}, timeout=1200
-        )
-
-    async def unregister_interpreter(
-        self, worker_id: str, version: str | None = None, python_bin: str | None = None
-    ) -> dict[str, Any]:
-        return await self.send_command(
-            worker_id,
-            "unregister_interpreter",
-            {"version": version or "", "python_bin": python_bin or ""},
-        )
-
-    async def uninstall_interpreter(self, worker_id: str, version: str) -> dict[str, Any]:
-        return await self.send_command(
-            worker_id,
-            "uninstall_interpreter",
-            {"version": version},
-            timeout=900,
-        )
-
-    async def register_interpreter(
-        self,
-        worker_id: str,
-        python_bin: str,
-        version: str | None = None,
-    ) -> dict[str, Any]:
-        return await self.send_command(
-            worker_id,
-            "register_interpreter",
-            {"python_bin": python_bin, "version": version or ""},
-        )
-
-    async def get_python_versions(self, worker_id: str) -> dict[str, Any]:
-        return await self.send_command(worker_id, "get_python_versions", {})
 
     async def get_platform_info(self, worker_id: str) -> dict[str, Any]:
         return await self.send_command(worker_id, "get_platform_info", {})

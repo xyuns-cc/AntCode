@@ -54,6 +54,19 @@ export const presentApiError = (error: AxiosError<unknown>): PresentedApiError =
   const status = error.response?.status
   const payload = error.response?.data
 
+  // 网络层错误细分：超时、断网、服务不可达
+  if (!status) {
+    if (error.code === 'ECONNABORTED' || /timeout/i.test(error.message || '')) {
+      return { title: '网络超时', description: '请求超过 30 秒未响应，请检查网络后重试' }
+    }
+    if (error.code === 'ERR_NETWORK' || /network/i.test(error.message || '')) {
+      return { title: '网络连接失败', description: '无法连接服务器，请检查网络或后端服务是否运行' }
+    }
+    if (error.code === 'ERR_CANCELED') {
+      return { title: '请求已取消' }
+    }
+  }
+
   const fallbackTitle = status ? DEFAULT_STATUS_MESSAGES[status] ?? `请求失败 (${status})` : '请求失败'
 
   if (payload && typeof payload === 'object' && 'message' in payload) {

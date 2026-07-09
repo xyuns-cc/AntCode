@@ -6,7 +6,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
 SUPPORTED_AUTH_TYPES = {"token", "basic"}
 
 

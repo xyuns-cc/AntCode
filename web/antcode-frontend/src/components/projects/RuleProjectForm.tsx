@@ -14,35 +14,94 @@ import {
   Tag,
   Radio
 } from 'antd'
-import { GlobalOutlined, RocketOutlined, SafetyOutlined, ThunderboltOutlined, BugOutlined, UnorderedListOutlined, FileTextOutlined } from '@ant-design/icons'
+import { RocketOutlined, SafetyOutlined, ThunderboltOutlined, BugOutlined, UnorderedListOutlined, FileTextOutlined } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import RuleSelector from './RuleSelector'
-import BrowserEngineConfig from './BrowserEngineConfig'
-import type { BrowserEngineSettings } from './BrowserEngineConfig'
 import type { ProjectCreateRequest, ExtractionRule, ProxyConfig, AntiSpiderConfig } from '@/types'
 
-// 本地分页配置类型（与表单使用一致）
+// 本地分页配置类型 — S6/S7/S8 扩展
 interface FormPaginationConfig {
-  method: 'none' | 'url_param' | 'javascript' | 'ajax' | 'infinite_scroll'
+  method:
+    | 'none'
+    | 'url_pattern'
+    | 'url_param'
+    | 'click_element'
+    | 'js_click'
+    | 'infinite_scroll'
+    | 'javascript'  // 旧值兼容，运行时映射到 infinite_scroll
+    | 'ajax'        // 旧值兼容
   start_page?: number
   max_pages?: number
-  next_page_rule?: ExtractionRule
+  // next 选择器：字符串（自动识别 CSS/XPath）或结构化 {type, expr}
+  next_page_rule?: ExtractionRule | { type: 'css' | 'xpath' | 'text'; expr: string } | string
   wait_after_click_ms?: number
   url_template?: string
+  page_param?: string
+  scroll_count?: number
+  scroll_wait_ms?: number
+}
+
+// S5: 去重配置
+interface FormDedupConfig {
+  enabled?: boolean
+  fields?: string[]
+  scope?: 'project' | 'run'
+  ttl_days?: number
+  on_hit?: 'drop' | 'log'
+}
+
+// next_page_rule 结构化 selector 类型
+type NextSelectorType = 'css' | 'xpath' | 'text'
+interface NextSelectorObject {
+  type: NextSelectorType
+  expr: string
+}
+function normalizeNextRule(raw: FormPaginationConfig['next_page_rule']): NextSelectorObject {
+  if (!raw) return { type: 'css', expr: '' }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (trimmed.startsWith('//') || trimmed.startsWith('..') || trimmed.startsWith('xpath=')) {
+      return { type: 'xpath', expr: trimmed.replace(/^xpath=/, '') }
+    }
+    return { type: 'css', expr: trimmed }
+  }
+  // ExtractionRule 兼容：desc/type/expr
+  if ('type' in raw && 'expr' in raw) {
+    const t = raw.type
+    if (t === 'css' || t === 'xpath') return { type: t, expr: String(raw.expr || '') }
+    // regex/jsonpath 等旧字段回退到 css
+    return { type: 'css', expr: String(raw.expr || '') }
+  }
+  return { type: 'css', expr: '' }
 }
 
 const { Title, Text } = Typography
 const { TextArea } = Input
 const { Option } = Select
 
+const parseConfigValue = <T extends object>(value: string | T | undefined, emptyValue: T, fieldName: string): T => {
+  if (!value) {
+    return emptyValue
+  }
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T
+    } catch (error) {
+      throw new Error(`${fieldName} JSON 解析失败`, { cause: error })
+    }
+  }
+  return value
+}
+
 // 表单初始数据类型（tags 可以是字符串或数组，headers/cookies 支持字符串或对象格式）
-interface RuleProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags' | 'browser_config' | 'headers' | 'cookies' | 'callback_type' | 'extraction_rules'> {
+interface RuleProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags' | 'headers' | 'cookies' | 'callback_type' | 'extraction_rules' | 'proxy_config' | 'anti_spider'> {
   tags?: string | string[]
-  browser_config?: string | Record<string, unknown>
   headers?: string | Record<string, string>
   cookies?: string | Record<string, string>
   callback_type?: string  // 灵活类型，接受后端返回的任意值
   extraction_rules?: string | ExtractionRule[] | Record<string, unknown>  // 支持字符串、数组或对象格式
+  proxy_config?: string | ProxyConfig
+  anti_spider?: string | AntiSpiderConfig
 }
 
 interface RuleProjectFormProps {
@@ -55,7 +114,7 @@ interface RuleProjectFormProps {
   onRef?: (ref: { submit: () => void }) => void
 }
 
-// 采集引擎配置
+// 采集引擎配置（S1: 新增 Playwright，对齐后端 CrawlEngine 枚举）
 const CRAWL_ENGINES = [
   {
     value: 'requests',
@@ -67,22 +126,22 @@ const CRAWL_ENGINES = [
     scenarios: ['新闻网站', '博客', 'API接口']
   },
   {
-    value: 'browser',
-    label: 'Browser (浏览器引擎)',
-    icon: <GlobalOutlined />,
-    color: 'green',
-    description: '支持JavaScript渲染',
-    features: ['支持JS渲染', '可处理复杂交互', '模拟真实浏览器'],
-    scenarios: ['SPA应用', 'React/Vue网站', '需要登录的网站']
-  },
-  {
     value: 'curl_cffi',
     label: 'Curl CFFI (反检测)',
     icon: <SafetyOutlined />,
     color: 'orange',
     description: '强大的反爬虫能力',
-    features: ['模拟真实curl请求', '反检测能力强', 'TLS指纹伪装'],
+    features: ['真实 curl-cffi 请求栈', '反检测能力强', 'TLS指纹伪装'],
     scenarios: ['电商网站', '有反爬虫的网站', '需要绕过CF的网站']
+  },
+  {
+    value: 'playwright',
+    label: 'Playwright (浏览器渲染)',
+    icon: <RocketOutlined />,
+    color: 'purple',
+    description: 'JS 渲染 + 交互能力',
+    features: ['真实 Chromium', 'SPA/懒加载友好', '支持 JS 点击/滚动翻页'],
+    scenarios: ['SPA 应用', 'JS 动态渲染', 'AJAX 加载列表']
   }
 ]
 
@@ -95,6 +154,13 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   onValidationChange,
   onRef
 }) => {
+  const initialEngine = (
+    initialData.engine === 'curl_cffi' ||
+    initialData.engine === 'playwright' ||
+    initialData.engine === 'requests'
+  )
+    ? initialData.engine
+    : 'requests'
   const [form] = Form.useForm()
   useThemeContext() // 保持主题上下文订阅
   const [listRules, setListRules] = useState<ExtractionRule[]>([])
@@ -105,48 +171,38 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     }
     try {
       return JSON.parse(initialData.pagination_config)
-    } catch {
-      return { method: 'none', max_pages: 10, start_page: 1 }
+    } catch (error) {
+      throw new Error('pagination_config JSON 解析失败', { cause: error })
     }
   })
-  const [selectedEngine, setSelectedEngine] = useState(initialData.engine || 'requests')
+  const [selectedEngine, setSelectedEngine] = useState(initialEngine)
   const [callbackType, setCallbackType] = useState<'list' | 'detail' | 'mixed'>('mixed')
-  const [browserConfig, setBrowserConfig] = useState<BrowserEngineSettings>(() => {
-    // 从 initialData 中解析浏览器配置
-    if (initialData.browser_config) {
-      try {
-        return typeof initialData.browser_config === 'string' 
-          ? JSON.parse(initialData.browser_config)
-          : initialData.browser_config
-      } catch {
-        return { headless: true, mute: true }
-      }
-    }
-    return { headless: true, mute: true }
-  })
   
   // v2.0.0 新增状态 - 安全解析JSON
-  const [proxyConfig, setProxyConfig] = useState<ProxyConfig>(() => {
-    if (!initialData.proxy_config) {
-      return { enabled: false, proxy_type: 'http' }
-    }
-    try {
-      return JSON.parse(initialData.proxy_config)
-    } catch {
-      return { enabled: false, proxy_type: 'http' }
-    }
-  })
+  const [proxyConfig, setProxyConfig] = useState<ProxyConfig>(() =>
+    parseConfigValue(initialData.proxy_config, { enabled: false, proxy_type: 'http' }, 'proxy_config')
+  )
   
-  const [antiSpiderConfig, setAntiSpiderConfig] = useState<AntiSpiderConfig>(() => {
-    if (!initialData.anti_spider) {
-      return { enabled: false, user_agent_rotation: false, random_delay: false }
-    }
-    try {
-      return JSON.parse(initialData.anti_spider)
-    } catch {
-      return { enabled: false, user_agent_rotation: false, random_delay: false }
-    }
-  })
+  const [antiSpiderConfig, setAntiSpiderConfig] = useState<AntiSpiderConfig>(() =>
+    parseConfigValue(initialData.anti_spider, {
+      enabled: false,
+      user_agent_rotation: false,
+      random_delay: false
+    }, 'anti_spider')
+  )
+
+  // S5: 内容去重配置
+  const [dedupConfig, setDedupConfig] = useState<FormDedupConfig>(() =>
+    parseConfigValue(
+      (initialData as Record<string, unknown>).dedup_config as string | FormDedupConfig | undefined,
+      { enabled: false, fields: [], scope: 'project', ttl_days: 30, on_hit: 'drop' } as FormDedupConfig,
+      'dedup_config'
+    )
+  )
+  // S3b: scrapy-redis 断点续爬开关
+  const [resumeEnabled, setResumeEnabled] = useState<boolean>(
+    Boolean((initialData as Record<string, unknown>).resume_enabled)
+  )
   
   // 获取按钮禁用状态
   const getButtonDisabled = useCallback(() => {
@@ -209,10 +265,8 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
           setListRules(listRulesFromData)
           setDetailRules(detailRulesFromData)
         }
-      } catch {
-        // 解析extraction_rules失败，使用默认值
-        setListRules([])
-        setDetailRules([])
+      } catch (error) {
+        throw new Error('extraction_rules JSON 解析失败', { cause: error })
       }
     }
   }, [initialData.extraction_rules, callbackType])
@@ -233,6 +287,69 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     })
   }, [form, onRef])
 
+  const buildSubmitData = useCallback(
+    (
+      values: ProjectCreateRequest,
+      overrides?: {
+        callbackType?: 'list' | 'detail' | 'mixed'
+        listRules?: ExtractionRule[]
+        detailRules?: ExtractionRule[]
+        paginationConfig?: FormPaginationConfig
+      }
+    ) => {
+      const currentCallbackType = overrides?.callbackType ?? callbackType
+      const currentListRules = overrides?.listRules ?? listRules
+      const currentDetailRules = overrides?.detailRules ?? detailRules
+      const currentPaginationConfig = overrides?.paginationConfig ?? paginationConfig
+
+      let allRules: ExtractionRule[] = []
+      if (currentCallbackType === 'mixed') {
+        const listRulesWithType = currentListRules.map(rule => ({ ...rule, page_type: 'list' as const }))
+        const detailRulesWithType = currentDetailRules.map(rule => ({ ...rule, page_type: 'detail' as const }))
+        allRules = [...listRulesWithType, ...detailRulesWithType]
+      } else if (currentCallbackType === 'list') {
+        allRules = currentListRules
+      } else if (currentCallbackType === 'detail') {
+        allRules = currentDetailRules
+      }
+
+      const shouldPersistProxyConfig = proxyConfig.enabled || Boolean(initialData.proxy_config)
+      const shouldPersistAntiSpider = antiSpiderConfig.enabled || Boolean(initialData.anti_spider)
+      const shouldPersistDedup = dedupConfig.enabled ||
+        Boolean((initialData as Record<string, unknown>).dedup_config)
+
+      return {
+        ...values,
+        callback_type: currentCallbackType,
+        extraction_rules: JSON.stringify(allRules),
+        pagination_config: JSON.stringify(currentPaginationConfig),
+        proxy_config: shouldPersistProxyConfig ? JSON.stringify(proxyConfig) : undefined,
+        anti_spider: shouldPersistAntiSpider ? JSON.stringify(antiSpiderConfig) : undefined,
+        // S5 / S3b：只在实际启用时下发
+        dedup_config: shouldPersistDedup ? JSON.stringify(dedupConfig) : undefined,
+        resume_enabled: resumeEnabled ? true : undefined,
+      }
+    },
+    [
+      antiSpiderConfig,
+      callbackType,
+      detailRules,
+      initialData,
+      listRules,
+      paginationConfig,
+      proxyConfig,
+      dedupConfig,
+      resumeEnabled,
+    ]
+  )
+
+  React.useEffect(() => {
+    if (!onDataChange) {
+      return
+    }
+    onDataChange(buildSubmitData(form.getFieldsValue()))
+  }, [antiSpiderConfig, buildSubmitData, form, onDataChange, proxyConfig])
+
   // 表单提交
   const handleFinish = (values: ProjectCreateRequest) => {
     // 处理headers和cookies，根据API文档，统一API支持对象和字符串两种格式
@@ -243,31 +360,23 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     if (processedHeaders && typeof processedHeaders === 'string') {
       try {
         processedHeaders = JSON.parse(processedHeaders)
-      } catch {
-        // 解析失败时保持字符串格式，API会自动处理
+      } catch (error) {
+        throw new Error('headers JSON 解析失败', { cause: error })
       }
     }
     
     if (processedCookies && typeof processedCookies === 'string') {
       try {
         processedCookies = JSON.parse(processedCookies)
-      } catch {
-        // 解析失败时保持字符串格式，API会自动处理
+      } catch (error) {
+        throw new Error('cookies JSON 解析失败', { cause: error })
       }
     }
 
-    // 根据回调类型合并规则
-    let allRules: ExtractionRule[] = []
-    if (callbackType === 'mixed') {
-      // 混合模式：合并两种规则，并设置page_type
-      const listRulesWithType = listRules.map(rule => ({ ...rule, page_type: 'list' as const }))
-      const detailRulesWithType = detailRules.map(rule => ({ ...rule, page_type: 'detail' as const }))
-      allRules = [...listRulesWithType, ...detailRulesWithType]
-    } else if (callbackType === 'list') {
-      allRules = listRules
-    } else if (callbackType === 'detail') {
-      allRules = detailRules
-    }
+    const submitData = buildSubmitData(values)
+    const allRules = typeof submitData.extraction_rules === 'string'
+      ? JSON.parse(submitData.extraction_rules) as ExtractionRule[]
+      : []
 
     // 验证规则不能为空
     if (allRules.length === 0) {
@@ -289,12 +398,10 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       ...(rule.page_type && { page_type: rule.page_type })
     }))
 
-    const submitData: Record<string, unknown> = {
-      ...values,
+    const finalSubmitData: Record<string, unknown> = {
+      ...submitData,
       type: 'rule',
-      callback_type: callbackType,
       extraction_rules: JSON.stringify(cleanedRules), // API文档要求JSON字符串格式
-      pagination_config: JSON.stringify(paginationConfig), // API文档要求JSON字符串格式
       headers: processedHeaders, // 支持对象和字符串两种格式
       cookies: processedCookies, // 支持对象和字符串两种格式
       tags: Array.isArray(values.tags) 
@@ -302,12 +409,10 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
         : (typeof values.tags === 'string' 
           ? (values.tags as string).split(',').map((tag: string) => tag.trim()).filter(Boolean) 
           : []),
-      request_delay: values.request_delay ? Math.round(values.request_delay * 1000) : 1000, // 转换为毫秒整数
-      // 浏览器引擎配置（仅当选择浏览器引擎时）
-      browser_config: selectedEngine === 'browser' ? JSON.stringify(browserConfig) : undefined
+      request_delay: values.request_delay !== undefined ? Math.round(values.request_delay * 1000) : 1000, // 转换为毫秒整数
     }
     
-    onSubmit(submitData)
+    onSubmit(finalSubmitData)
   }
 
   // 表单值变化
@@ -315,24 +420,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     _changedValues: Partial<ProjectCreateRequest>,
     allValues: ProjectCreateRequest
   ) => {
-    // 根据回调类型合并规则
-    let allRules: ExtractionRule[] = []
-    if (callbackType === 'mixed') {
-      const listRulesWithType = listRules.map(rule => ({ ...rule, page_type: 'list' as const }))
-      const detailRulesWithType = detailRules.map(rule => ({ ...rule, page_type: 'detail' as const }))
-      allRules = [...listRulesWithType, ...detailRulesWithType]
-    } else if (callbackType === 'list') {
-      allRules = listRules
-    } else if (callbackType === 'detail') {
-      allRules = detailRules
-    }
-    
-    const updatedData = { 
-      ...allValues, 
-      callback_type: callbackType,
-      extraction_rules: JSON.stringify(allRules),
-      pagination_config: JSON.stringify(paginationConfig)
-    }
+    const updatedData = buildSubmitData(allValues)
     onDataChange?.(updatedData)
   }
 
@@ -354,24 +442,10 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
 
   // 获取更新后的数据
   const getUpdatedData = (currentListRules: ExtractionRule[], currentDetailRules: ExtractionRule[]) => {
-    // 根据回调类型合并规则
-    let allRules: ExtractionRule[] = []
-    if (callbackType === 'mixed') {
-      const listRulesWithType = currentListRules.map(rule => ({ ...rule, page_type: 'list' as const }))
-      const detailRulesWithType = currentDetailRules.map(rule => ({ ...rule, page_type: 'detail' as const }))
-      allRules = [...listRulesWithType, ...detailRulesWithType]
-    } else if (callbackType === 'list') {
-      allRules = currentListRules
-    } else if (callbackType === 'detail') {
-      allRules = currentDetailRules
-    }
-    
-    return { 
-      ...form.getFieldsValue(), 
-      callback_type: callbackType,
-      extraction_rules: JSON.stringify(allRules),
-      pagination_config: JSON.stringify(paginationConfig)
-    }
+    return buildSubmitData(form.getFieldsValue(), {
+      listRules: currentListRules,
+      detailRules: currentDetailRules
+    })
   }
 
   // 回调类型变化
@@ -392,46 +466,18 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
 
   // 获取更新后的数据（考虑新的回调类型）
   const getUpdatedDataWithCallbackType = (currentListRules: ExtractionRule[], currentDetailRules: ExtractionRule[], newCallbackType: 'list' | 'detail' | 'mixed') => {
-    let allRules: ExtractionRule[] = []
-    if (newCallbackType === 'mixed') {
-      const listRulesWithType = currentListRules.map(rule => ({ ...rule, page_type: 'list' as const }))
-      const detailRulesWithType = currentDetailRules.map(rule => ({ ...rule, page_type: 'detail' as const }))
-      allRules = [...listRulesWithType, ...detailRulesWithType]
-    } else if (newCallbackType === 'list') {
-      allRules = currentListRules
-    } else if (newCallbackType === 'detail') {
-      allRules = currentDetailRules
-    }
-    
-    return { 
-      ...form.getFieldsValue(), 
-      callback_type: newCallbackType,
-      extraction_rules: JSON.stringify(allRules),
-      pagination_config: JSON.stringify(paginationConfig)
-    }
+    return buildSubmitData(form.getFieldsValue(), {
+      callbackType: newCallbackType,
+      listRules: currentListRules,
+      detailRules: currentDetailRules
+    })
   }
 
   // 获取更新后的数据（考虑新的分页配置）
   const getUpdatedDataWithPagination = (newPaginationConfig: FormPaginationConfig) => {
-    let allRules: ExtractionRule[] = []
-    if (callbackType === 'mixed') {
-      const listRulesWithType = listRules.map(rule => ({ ...rule, page_type: 'list' as const }))
-      const detailRulesWithType = detailRules.map(rule => ({ ...rule, page_type: 'detail' as const }))
-      allRules = [...listRulesWithType, ...detailRulesWithType]
-    } else if (callbackType === 'list') {
-      allRules = listRules
-    } else if (callbackType === 'detail') {
-      allRules = detailRules
-    }
-    
-    return { 
-      ...form.getFieldsValue(), 
-      callback_type: callbackType,
-      extraction_rules: JSON.stringify(allRules),
-      pagination_config: JSON.stringify(newPaginationConfig),
-      proxy_config: proxyConfig.enabled ? JSON.stringify(proxyConfig) : undefined,
-      anti_spider: antiSpiderConfig.enabled ? JSON.stringify(antiSpiderConfig) : undefined
-    }
+    return buildSubmitData(form.getFieldsValue(), {
+      paginationConfig: newPaginationConfig
+    })
   }
 
 
@@ -589,7 +635,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
               name="engine"
               rules={[{ required: true, message: '请选择采集引擎' }]}
             >
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
                 {CRAWL_ENGINES.map(engine => (
                   <Card
                     key={engine.value}
@@ -637,16 +683,6 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
                 ))}
               </div>
             </Form.Item>
-
-            {/* 浏览器引擎配置 - 仅当选择浏览器引擎时显示 */}
-            {selectedEngine === 'browser' && (
-              <div style={{ marginTop: 16 }}>
-                <BrowserEngineConfig
-                  value={browserConfig}
-                  onChange={setBrowserConfig}
-                />
-              </div>
-            )}
           </Card>
 
         </Space>
@@ -777,8 +813,16 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
             </Card>
           )}
 
-          {/* 翻页配置 */}
-          <Card title="翻页配置" size="small">
+          {/* 翻页配置 — S6/S7/S8 */}
+          <Card
+            title="翻页配置"
+            size="small"
+            extra={
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                提示：目标 URL 里可用 <code>{'{N}'}</code>（N=起始页号）、<code>{'{page}'}</code>、<code>{'{}'}</code> 占位符
+              </Text>
+            }
+          >
             <Row gutter={16}>
               <Col span={8}>
                 <Form.Item label="翻页方式" style={{ marginBottom: 12 }}>
@@ -787,15 +831,16 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
                     onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, method: value })}
                   >
                     <Option value="none">无分页</Option>
-                    <Option value="url_param">URL参数</Option>
-                    <Option value="javascript">JS点击</Option>
-                    <Option value="ajax">AJAX加载</Option>
-                    <Option value="infinite_scroll">无限滚动</Option>
+                    <Option value="url_pattern">URL 模板 (占位符展开)</Option>
+                    <Option value="url_param">URL 参数 (?page=N)</Option>
+                    <Option value="click_element">HTTP 点击 (抓 next href)</Option>
+                    <Option value="js_click">JS 点击 (Playwright)</Option>
+                    <Option value="infinite_scroll">无限滚动 (Playwright)</Option>
                   </Select>
                 </Form.Item>
               </Col>
               <Col span={8}>
-                <Form.Item label="起始页码" style={{ marginBottom: 12 }}>
+                <Form.Item label="起始页码" style={{ marginBottom: 12 }} tooltip="URL 里含 {N} 时以 N 为准，本字段忽略">
                   <InputNumber
                     min={0}
                     max={100}
@@ -818,36 +863,136 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
               </Col>
             </Row>
 
-            {paginationConfig.method === 'url_param' && (
-              <Form.Item label="URL模板" tooltip="使用{page}作为页码占位符" style={{ marginBottom: 0 }}>
+            {/* url_pattern: URL 模板 */}
+            {paginationConfig.method === 'url_pattern' && (
+              <Form.Item
+                label="URL 模板 (可选)"
+                tooltip='留空则用"目标URL"字段。示例：/list/page-{1}.html 或 /page/{page}/'
+                style={{ marginBottom: 0 }}
+              >
                 <Input
-                  placeholder="/list/page/{page} 或 ?page={page}"
+                  placeholder="留空则用目标URL，或另填如 /list/page-{1}.html"
                   value={paginationConfig.url_template}
                   onChange={(e) => handlePaginationConfigChange({ ...paginationConfig, url_template: e.target.value })}
                 />
               </Form.Item>
             )}
 
-            {(paginationConfig.method === 'javascript' || paginationConfig.method === 'ajax') && (
+            {/* url_param: query 参数名 */}
+            {paginationConfig.method === 'url_param' && (
+              <Form.Item label="页码参数名" tooltip="拼到 URL query 上，例如 page → ?page=1&page=2" style={{ marginBottom: 0 }}>
+                <Input
+                  placeholder="page"
+                  value={paginationConfig.page_param || 'page'}
+                  onChange={(e) => handlePaginationConfigChange({ ...paginationConfig, page_param: e.target.value })}
+                />
+              </Form.Item>
+            )}
+
+            {/* click_element / js_click: next 选择器 + 类型 */}
+            {(paginationConfig.method === 'click_element' || paginationConfig.method === 'js_click') && (
               <>
-                <Form.Item label="下一页选择器" style={{ marginBottom: 12 }}>
-                  <RuleSelector
-                    rules={paginationConfig.next_page_rule ? [paginationConfig.next_page_rule] : []}
-                    onChange={(rules) => handlePaginationConfigChange({ ...paginationConfig, next_page_rule: rules[0] || undefined })}
-                    placeholder="配置下一页按钮选择器"
-                  />
-                </Form.Item>
-                <Form.Item label="点击后等待(ms)" style={{ marginBottom: 0 }}>
-                  <InputNumber
-                    min={0}
-                    max={10000}
-                    step={500}
-                    style={{ width: 200 }}
-                    value={paginationConfig.wait_after_click_ms}
-                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, wait_after_click_ms: value || 2000 })}
-                  />
-                </Form.Item>
+                <Row gutter={16}>
+                  <Col span={6}>
+                    <Form.Item label="选择器类型" style={{ marginBottom: 12 }}>
+                      <Select
+                        value={normalizeNextRule(paginationConfig.next_page_rule).type}
+                        onChange={(t) => {
+                          const cur = normalizeNextRule(paginationConfig.next_page_rule)
+                          handlePaginationConfigChange({
+                            ...paginationConfig,
+                            next_page_rule: { type: t, expr: cur.expr },
+                          })
+                        }}
+                      >
+                        <Option value="css">CSS</Option>
+                        <Option value="xpath">XPath</Option>
+                        {paginationConfig.method === 'js_click' && <Option value="text">Text (Playwright)</Option>}
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                  <Col span={18}>
+                    <Form.Item
+                      label="下一页表达式"
+                      style={{ marginBottom: 12 }}
+                      tooltip={
+                        paginationConfig.method === 'js_click'
+                          ? '例：li.next a | //li[@class=\'next\']/a | text=下一页'
+                          : '例：li.next a | //li[@class=\'next\']/a'
+                      }
+                    >
+                      <Input
+                        placeholder={
+                          normalizeNextRule(paginationConfig.next_page_rule).type === 'css'
+                            ? '例: li.next a'
+                            : normalizeNextRule(paginationConfig.next_page_rule).type === 'xpath'
+                            ? '例: //li[@class=\'next\']/a'
+                            : '例: 下一页'
+                        }
+                        value={normalizeNextRule(paginationConfig.next_page_rule).expr}
+                        onChange={(e) => {
+                          const cur = normalizeNextRule(paginationConfig.next_page_rule)
+                          handlePaginationConfigChange({
+                            ...paginationConfig,
+                            next_page_rule: { type: cur.type, expr: e.target.value },
+                          })
+                        }}
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                {paginationConfig.method === 'js_click' && (
+                  <Form.Item label="点击后等待(ms)" style={{ marginBottom: 0 }} tooltip="点击 next 后等 networkidle + 该毫秒数">
+                    <InputNumber
+                      min={0}
+                      max={30000}
+                      step={500}
+                      style={{ width: 200 }}
+                      value={paginationConfig.wait_after_click_ms || 1000}
+                      onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, wait_after_click_ms: value || 1000 })}
+                    />
+                  </Form.Item>
+                )}
               </>
+            )}
+
+            {/* infinite_scroll: 滚动次数 + 每次等待 */}
+            {paginationConfig.method === 'infinite_scroll' && (
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item label="滚动次数" style={{ marginBottom: 0 }}>
+                    <InputNumber
+                      min={1}
+                      max={100}
+                      style={{ width: '100%' }}
+                      value={paginationConfig.scroll_count || 5}
+                      onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, scroll_count: value || 5 })}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item label="每次滚动等待(ms)" style={{ marginBottom: 0 }}>
+                    <InputNumber
+                      min={0}
+                      max={10000}
+                      step={100}
+                      style={{ width: '100%' }}
+                      value={paginationConfig.scroll_wait_ms || 800}
+                      onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, scroll_wait_ms: value || 800 })}
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
+            )}
+
+            {/* 老 method 兼容提示 */}
+            {(paginationConfig.method === 'javascript' || paginationConfig.method === 'ajax') && (
+              <div style={{ padding: 8, background: 'rgba(0,0,0,0.02)', borderRadius: 4 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  旧配置：<code>{paginationConfig.method}</code> 已迁移为 <code>infinite_scroll</code>（Playwright 引擎）。
+                  建议切换到 <code>js_click</code> 或 <code>infinite_scroll</code> 更精确。
+                </Text>
+              </div>
             )}
           </Card>
         </Space>
@@ -884,18 +1029,25 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
           </Card>
 
           {/* 反爬虫配置 */}
-          <Card 
+          <Card
             title={
               <Space>
                 <BugOutlined />
                 反爬虫配置
+                <Tag color="default" style={{ marginLeft: 8 }}>
+                  暂未生效
+                </Tag>
               </Space>
-            } 
+            }
             size="small"
+            /* T7-死列 (P2 附): anti_spider 目前不在 to_dispatch_dict 下发的
+               字段里（core/domain/models/project.py:209-211 已声明），此处
+               标注避免用户配置后期待生效。等 dispatcher 补齐后移除该标注。 */
           >
             <Form.Item
               label="启用反爬虫"
               style={{ marginBottom: 16 }}
+              extra="当前版本未参与派发下发；配置会保存但不影响爬虫行为"
             >
               <Radio.Group
                 value={antiSpiderConfig.enabled}
@@ -1030,6 +1182,105 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
               </Row>
             )}
           </Card>
+
+          {/* S5: 内容去重 */}
+          <Card
+            title="内容去重"
+            size="small"
+            extra={
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                按 item 字段哈希跨 run 持久化去重（存 Redis SET）
+              </Text>
+            }
+          >
+            <Form.Item label="启用去重" style={{ marginBottom: 16 }}>
+              <Radio.Group
+                value={dedupConfig.enabled ?? false}
+                onChange={(e) => setDedupConfig({ ...dedupConfig, enabled: e.target.value })}
+              >
+                <Radio value={false}>关闭</Radio>
+                <Radio value={true}>开启</Radio>
+              </Radio.Group>
+            </Form.Item>
+            {dedupConfig.enabled && (
+              <>
+                <Form.Item
+                  label="去重字段"
+                  tooltip="按顺序参与 SHA256 哈希；命中即 DropItem"
+                  style={{ marginBottom: 12 }}
+                >
+                  <Select
+                    mode="tags"
+                    style={{ width: '100%' }}
+                    placeholder="回车添加字段名，如 title / detail_url"
+                    value={dedupConfig.fields || []}
+                    onChange={(v: string[]) => setDedupConfig({ ...dedupConfig, fields: v })}
+                    tokenSeparators={[',', ' ']}
+                  />
+                </Form.Item>
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <Form.Item label="作用域" style={{ marginBottom: 0 }}>
+                      <Select
+                        value={dedupConfig.scope || 'project'}
+                        onChange={(v: 'project' | 'run') => setDedupConfig({ ...dedupConfig, scope: v })}
+                      >
+                        <Option value="project">项目 (跨 run)</Option>
+                        <Option value="run">本次 run</Option>
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label="TTL (天，0=永久)" style={{ marginBottom: 0 }}>
+                      <InputNumber
+                        min={0}
+                        max={365}
+                        style={{ width: '100%' }}
+                        value={dedupConfig.ttl_days ?? 30}
+                        onChange={(v) => setDedupConfig({ ...dedupConfig, ttl_days: v || 0 })}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label="命中动作" style={{ marginBottom: 0 }}>
+                      <Select
+                        value={dedupConfig.on_hit || 'drop'}
+                        onChange={(v: 'drop' | 'log') => setDedupConfig({ ...dedupConfig, on_hit: v })}
+                      >
+                        <Option value="drop">丢弃 (drop)</Option>
+                        <Option value="log">仅记录 (log)</Option>
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </>
+            )}
+          </Card>
+
+          {/* S3b: scrapy-redis 断点续爬 */}
+          <Card
+            title="断点续爬 / 分布式"
+            size="small"
+            extra={
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                启用后请求队列/去重集持久化到 Redis（scrapy-redis）
+              </Text>
+            }
+          >
+            <Form.Item
+              label="启用断点续爬"
+              style={{ marginBottom: 0 }}
+              tooltip="取消/崩溃后队列保留；多 Worker 消费同一队列自然分片"
+            >
+              <Radio.Group
+                value={resumeEnabled}
+                onChange={(e) => setResumeEnabled(e.target.value)}
+              >
+                <Radio value={false}>关闭</Radio>
+                <Radio value={true}>开启</Radio>
+              </Radio.Group>
+            </Form.Item>
+          </Card>
         </Space>
       )
     }
@@ -1052,7 +1303,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
         layout="vertical"
         initialValues={{
           ...initialData,
-          engine: initialData.engine || 'requests',
+          engine: initialEngine,
           request_method: initialData.request_method || 'GET',
           request_delay: initialData.request_delay !== undefined ? initialData.request_delay : 1,
           retry_count: initialData.retry_count !== undefined ? initialData.retry_count : 3,

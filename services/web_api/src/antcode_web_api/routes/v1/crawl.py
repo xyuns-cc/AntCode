@@ -5,6 +5,8 @@
 需求: 1.1, 1.2, 1.3, 1.4, 1.5, 6.4, 9.1, 9.2, 12.1, 12.3, 12.4
 """
 
+from typing import Any
+
 from antcode_core.application.services.base import QueryHelper
 from antcode_core.application.services.crawl.batch_service import crawl_batch_service
 from antcode_core.application.services.crawl.metrics_service import crawl_metrics_service
@@ -33,6 +35,7 @@ from antcode_core.domain.schemas.crawl import (
     TestStatusResponse,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from antcode_web_api.response import Messages, page
@@ -58,6 +61,30 @@ async def _verify_batch_owner(batch_id: str, current_user: TokenData) -> CrawlBa
     if not getattr(current_user, "is_admin", False) and batch.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该批次")
     return batch
+
+
+async def _verify_project_access(
+    project_public_id: str, current_user: TokenData
+) -> Project:
+    """R1-P2-1 (审查报告)：项目所有权校验。
+
+    ``batches/*``（含 test / metrics 系列）此前都只查项目存在性、不查 owner，
+    任意登录用户能对他人项目建批次、读他人项目指标。这里补上：普通用户仅
+    可访问 ``user_id == current_user.user_id`` 的项目，管理员放行。项目
+    不存在或无权访问都统一返 404（避免 IDOR 探测）。
+    """
+    if not project_public_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="project_id 不能为空")
+    project = await Project.get_or_none(public_id=str(project_public_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
+    if (
+        not getattr(current_user, "is_admin", False)
+        and getattr(project, "user_id", None) != current_user.user_id
+    ):
+        # 与其它端点一致：无权也返 404 而非 403，避免暴露资源存在
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
+    return project
 
 
 # =============================================================================
@@ -118,6 +145,8 @@ async def create_batch(
 
     需求: 1.1 - 用户提交创建批次请求时创建新批次并返回批次 ID
     """
+    # R1-P2-1: 项目所有权校验
+    await _verify_project_access(request.project_id, current_user)
     try:
         batch = await crawl_batch_service.create_batch(
             project_id=request.project_id,
@@ -475,6 +504,8 @@ async def execute_test(
     需求: 12.3 - 测试执行完成时返回详细的执行结果和样本数据
     需求: 12.4 - 测试执行失败时返回具体的错误信息和失败原因
     """
+    # R1-P2-1: 项目所有权校验
+    await _verify_project_access(request.project_id, current_user)
     try:
         result = await crawl_test_service.execute_test(
             project_id=request.project_id,
@@ -522,6 +553,8 @@ async def create_test_batch(
     current_user=Depends(get_current_user),
 ):
     """创建测试批次（不立即执行）"""
+    # R1-P2-1: 项目所有权校验
+    await _verify_project_access(request.project_id, current_user)
     try:
         batch = await crawl_test_service.create_test_batch(
             project_id=request.project_id,
@@ -664,6 +697,202 @@ async def cleanup_test(
 
 
 # =============================================================================
+# R1-P2-28: 批次维度数据聚合 + 导出（产品闭环）
+# =============================================================================
+
+
+def _decode_stream_entry(entry_id: Any, data: dict, run_id: str) -> tuple | None:
+    """把一条 xrange 返回的 stream entry 解成外部 yield tuple；失败返回 None。"""
+    import json as _json
+
+    try:
+        raw_data = data.get(b"data") or data.get("data") or b"{}"
+        if isinstance(raw_data, bytes):
+            raw_data = raw_data.decode("utf-8", errors="ignore")
+        payload = _json.loads(raw_data)
+        url_val = data.get(b"url") or data.get("url") or ""
+        if isinstance(url_val, bytes):
+            url_val = url_val.decode("utf-8", errors="ignore")
+        ts_val = data.get(b"timestamp") or data.get("timestamp") or ""
+        if isinstance(ts_val, bytes):
+            ts_val = ts_val.decode("utf-8", errors="ignore")
+        seq_val = data.get(b"sequence") or data.get("sequence") or "0"
+        if isinstance(seq_val, bytes):
+            seq_val = seq_val.decode("utf-8", errors="ignore")
+        return (int(seq_val or 0), payload, str(url_val), str(ts_val), run_id)
+    except Exception:
+        return None
+
+
+async def _iter_batch_items(batch_id: str, limit: int | None = None):
+    """按批次 → 所有 run → 汇总 spider:data stream items。
+
+    T7-B4b (P1-3): 原实现每个 run 串行发 XRANGE，导出 limit=10000 时上千次
+    Redis RTT。改为**并发桶** —— 每 8 个 run 一组 ``asyncio.gather`` 并发
+    发 XRANGE，单 run 内页数多时仍串行分页。默认每 stream count=1000（比原
+    来 200 大 5x），减少大 stream 的分页次数。
+
+    产物形式：``(seq, item_dict, url, timestamp, run_id)`` 生成器。
+    """
+    import asyncio as _asyncio
+
+    from antcode_core.domain.models.task_run import TaskRun
+    from antcode_core.infrastructure.redis.client import get_redis_client
+    from antcode_core.infrastructure.redis.keys import RedisKeys
+
+    keys = RedisKeys()
+    client = await get_redis_client()
+    runs = await TaskRun.raw(
+        "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 "
+        "ORDER BY id ASC",
+        batch_id,
+    )
+    if not runs:
+        return
+
+    CONCURRENCY = 8
+    PAGE_SIZE = 1000
+    yielded = 0
+
+    async def _read_run(run_id: str) -> list:
+        """把单个 run 的 stream 全部拉下来（分页）。"""
+        stream_key = keys.spider_data_stream(run_id)
+        collected: list = []
+        cursor = "-"
+        while True:
+            page = await client.xrange(stream_key, min=cursor, max="+", count=PAGE_SIZE)
+            if not page:
+                break
+            collected.extend(page)
+            if len(page) < PAGE_SIZE:
+                break  # 已到尾
+            last_id = page[-1][0]
+            if isinstance(last_id, bytes):
+                last_id = last_id.decode("utf-8", errors="ignore")
+            cursor = f"({last_id}"
+        return collected
+
+    # 保持 run 之间的输出顺序（TaskRun.id ASC）；桶内并发但按原序 flush。
+    for i in range(0, len(runs), CONCURRENCY):
+        bucket = runs[i : i + CONCURRENCY]
+        results = await _asyncio.gather(
+            *(_read_run(r.run_id) for r in bucket), return_exceptions=True
+        )
+        for run, entries in zip(bucket, results, strict=False):
+            if isinstance(entries, BaseException):
+                continue
+            for entry_id, data in entries:
+                if limit is not None and yielded >= limit:
+                    return
+                item = _decode_stream_entry(entry_id, data, run.run_id)
+                if item is None:
+                    continue
+                yielded += 1
+                yield item
+
+
+@router.get(
+    "/batches/{batch_id}/items",
+    summary="批次维度聚合抓取数据",
+    description="跨批次内所有 run 汇总 spider:data，按 sequence 排序返回",
+)
+async def get_batch_items(
+    batch_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """P2-28: 补按批次聚合视图。用户之前只能一个 run 一个 run 翻，
+    批次结果没有聚合入口。"""
+    await _verify_batch_owner(batch_id, current_user)
+    items = []
+    async for seq, payload, url, ts, run_id in _iter_batch_items(batch_id, limit=limit):
+        items.append(
+            {
+                "sequence": seq,
+                "url": url,
+                "timestamp": ts,
+                "run_id": run_id,
+                "data": payload,
+            }
+        )
+    return success_response({"batch_id": batch_id, "items": items, "count": len(items)})
+
+
+@router.get(
+    "/batches/{batch_id}/export",
+    summary="导出批次抓取数据",
+    description="按 format 导出 JSON 或 CSV；数据流式返回，避免一次性加载大批",
+)
+async def export_batch(
+    batch_id: str,
+    format: str = Query("json", pattern="^(json|csv)$"),
+    limit: int = Query(10000, ge=1, le=100000),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """P2-28: 数据导出（CSV/JSON），流式响应。"""
+    import csv as _csv
+    import io as _io
+    import json as _json
+
+    await _verify_batch_owner(batch_id, current_user)
+
+    if format == "json":
+        async def _json_stream():
+            yield '{"batch_id": "' + batch_id + '", "items": ['
+            first = True
+            async for seq, payload, url, ts, run_id in _iter_batch_items(batch_id, limit=limit):
+                if not first:
+                    yield ","
+                first = False
+                yield _json.dumps(
+                    {"sequence": seq, "url": url, "timestamp": ts,
+                     "run_id": run_id, "data": payload},
+                    ensure_ascii=False,
+                )
+            yield "]}"
+
+        return StreamingResponse(
+            _json_stream(),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.json"'
+            },
+        )
+
+    # CSV：字段先看第一条 item 决定列头
+    async def _csv_stream():
+        # 先取一条来确定列头
+        columns: list[str] | None = None
+        buf = _io.StringIO()
+        writer = _csv.writer(buf)
+        async for seq, payload, url, ts, run_id in _iter_batch_items(batch_id, limit=limit):
+            data_keys = list(payload.keys()) if isinstance(payload, dict) else []
+            if columns is None:
+                columns = ["sequence", "url", "timestamp", "run_id"] + data_keys
+                writer.writerow(columns)
+                yield buf.getvalue()
+                buf.seek(0); buf.truncate(0)
+            row = [seq, url, ts, run_id]
+            for k in columns[4:]:
+                v = payload.get(k) if isinstance(payload, dict) else ""
+                # 复合值 JSON 序列化
+                if isinstance(v, (dict, list)):
+                    v = _json.dumps(v, ensure_ascii=False)
+                row.append(v if v is not None else "")
+            writer.writerow(row)
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    return StreamingResponse(
+        _csv_stream(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.csv"'
+        },
+    )
+
+
+# =============================================================================
 # 监控指标 API
 # =============================================================================
 
@@ -794,6 +1023,8 @@ async def get_queue_metrics(
     current_user=Depends(get_current_user),
 ):
     """获取队列详细指标"""
+    # R1-P2-1: 项目所有权校验
+    await _verify_project_access(project_id, current_user)
     try:
         # 获取队列统计
         queue_stats = await crawl_queue_service.get_queue_stats(project_id)
@@ -831,6 +1062,8 @@ async def check_alerts(
 
     需求: 9.3 - 指标超过阈值时记录告警日志
     """
+    # R1-P2-1: 项目所有权校验
+    await _verify_project_access(project_id, current_user)
     try:
         # 检测告警
         alerts = await crawl_metrics_service.check_alerts(project_id)
@@ -877,6 +1110,8 @@ async def get_metrics_summary(
     current_user=Depends(get_current_user),
 ):
     """获取指标汇总"""
+    # R1-P2-1: 项目所有权校验
+    await _verify_project_access(project_id, current_user)
     try:
         summary = await crawl_metrics_service.get_metrics_summary(project_id)
 

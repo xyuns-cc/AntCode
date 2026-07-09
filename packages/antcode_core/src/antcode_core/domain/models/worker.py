@@ -28,29 +28,17 @@ class Worker(BaseModel):
     version = fields.CharField(max_length=50, null=True)
 
     # 操作系统信息（由节点上报）
-    os_type = fields.CharField(
-        max_length=20, null=True, description="操作系统类型: Windows/Linux/Darwin"
-    )
+    os_type = fields.CharField(max_length=20, null=True, description="操作系统类型: Windows/Linux/Darwin")
     os_version = fields.CharField(max_length=100, null=True, description="操作系统版本")
     python_version = fields.CharField(max_length=20, null=True, description="Python 版本")
     machine_arch = fields.CharField(max_length=20, null=True, description="CPU 架构: x86_64/arm64")
 
     # 连接模式：direct（直连Redis）或 gateway（通过网关）
-    transport_mode = fields.CharField(
-        max_length=20, default="gateway", description="连接模式: direct/gateway"
-    )
+    transport_mode = fields.CharField(max_length=20, default="gateway", description="连接模式: direct/gateway")
 
     # 节点能力（由节点心跳上报）
     # capabilities 结构: {
-    #   "drissionpage": {
-    #     "enabled": true,
-    #     "browser_path": "/usr/bin/chromium",
-    #     "headless": true,
-    #     "max_instances": 3
-    #   },
-    #   "curl_cffi": {"enabled": true},
-    #   "playwright": {"enabled": false},
-    #   "selenium": {"enabled": false}
+    #   "curl_cffi": {"enabled": true}
     # }
     capabilities = fields.JSONField(null=True, default=dict, description="节点能力配置")
 
@@ -85,6 +73,15 @@ class Worker(BaseModel):
     # 认证信息
     api_key = fields.CharField(max_length=64, null=True)
     secret_key = fields.CharField(max_length=128, null=True)
+    # 轮换期间的旧 API Key（在 grace 期内仍然有效；过期后由 rotate/finalize 清理）
+    api_key_previous = fields.CharField(max_length=64, null=True)
+    api_key_previous_expires_at = fields.DatetimeField(null=True)
+
+    # Direct 模式专属 Redis ACL 凭证（防止 Worker 间横向移动）
+    redis_username = fields.CharField(max_length=80, null=True)
+    redis_password_encrypted = fields.TextField(null=True)
+    redis_acl_revision = fields.IntField(default=0)
+    redis_acl_synced_at = fields.DatetimeField(null=True)
 
     # 时间戳
     last_heartbeat = fields.DatetimeField(null=True)

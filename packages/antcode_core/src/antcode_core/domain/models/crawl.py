@@ -25,13 +25,13 @@ class CrawlTaskStatus:
     - TIMEOUT → FAILED: 超时次数超限
     """
 
-    PENDING = "pending"        # 等待分发
+    PENDING = "pending"  # 等待分发
     DISPATCHED = "dispatched"  # 已分发给 Worker
-    RUNNING = "running"        # Worker 正在执行
-    SUCCESS = "success"        # 执行成功
-    RETRY = "retry"            # 需要重试
-    TIMEOUT = "timeout"        # 执行超时
-    FAILED = "failed"          # 最终失败（进入死信队列）
+    RUNNING = "running"  # Worker 正在执行
+    SUCCESS = "success"  # 执行成功
+    RETRY = "retry"  # 需要重试
+    TIMEOUT = "timeout"  # 执行超时
+    FAILED = "failed"  # 最终失败（进入死信队列）
 
     # 有效的状态转换映射
     VALID_TRANSITIONS = {
@@ -41,7 +41,7 @@ class CrawlTaskStatus:
         RETRY: [DISPATCHED, FAILED],
         TIMEOUT: [DISPATCHED, FAILED],
         SUCCESS: [],  # 终态
-        FAILED: [],   # 终态
+        FAILED: [],  # 终态
     }
 
     # 终态列表
@@ -70,9 +70,7 @@ class CrawlTaskStatus:
 class CrawlBatch(BaseModel):
     """爬取批次模型"""
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     project_id = fields.BigIntField(db_index=True, description="关联项目ID")
     name = fields.CharField(max_length=255, description="批次名称")
     description = fields.TextField(null=True, description="批次描述")
@@ -89,9 +87,7 @@ class CrawlBatch(BaseModel):
     max_retries = fields.IntField(default=3, description="最大重试次数")
 
     # 状态
-    status = fields.CharField(
-        max_length=20, default=BatchStatus.PENDING.value, description="批次状态"
-    )
+    status = fields.CharField(max_length=20, default=BatchStatus.PENDING.value, description="批次状态")
     is_test = fields.BooleanField(default=False, description="是否为测试批次")
 
     # 时间

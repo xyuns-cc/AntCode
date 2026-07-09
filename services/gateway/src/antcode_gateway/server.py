@@ -114,8 +114,20 @@ class GrpcServer:
                 logger.info(f"gRPC 服务器启动于 {listen_addr} ({tls_mode})")
             else:
                 # 非 TLS 模式
+                # D4: 启用鉴权（默认 true）却走明文端口，意味着 api_key/JWT 会明文
+                # 在网络上传输。除非显式声明 dev 场景，否则拒绝启动 fail-closed。
+                if self.config.auth_enabled and not self.config.allow_insecure_with_auth:
+                    logger.error(
+                        "gRPC 明文端口启动被拒绝：AUTH_ENABLED=true 时凭证会明文传输。"
+                        " 请配置 GRPC_TLS_CERT_PATH+GRPC_TLS_KEY_PATH 或显式设置"
+                        " ANTCODE_GATEWAY_ALLOW_INSECURE=true 声明本地/测试环境。"
+                    )
+                    return False
                 bound_port = self._server.add_insecure_port(listen_addr)
-                logger.info(f"gRPC 服务器启动于 {listen_addr} (insecure)")
+                logger.warning(
+                    "gRPC 服务器启动于 %s (insecure — 凭证会明文传输，仅限本地/测试)",
+                    listen_addr,
+                )
 
             if bound_port == 0:
                 logger.error(f"gRPC 服务器端口绑定失败: {listen_addr}")

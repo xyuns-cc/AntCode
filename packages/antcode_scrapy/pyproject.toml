@@ -1,0 +1,43 @@
+[project]
+name = "antcode-scrapy"
+version = "1.0.0"
+description = "AntCode 规则爬虫的 Scrapy 执行引擎（替换 spiderkit）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # 核心依赖：Scrapy 2.11+ 兼容 Python 3.11/3.12
+    "scrapy>=2.11,<3",
+    # 浏览器渲染引擎（rule.engine=playwright/render 时启用）
+    "scrapy-playwright>=0.0.40",
+    "playwright>=1.44",
+    # 断点续爬 + 单爬虫分布式（rule.resume_enabled=true 时启用）
+    "scrapy-redis>=0.9",
+    # 现有契约：数据上报 stream/meta/index
+    "redis>=5.0",
+    # 抽取（Scrapy 自带 parsel，这里显式声明保证版本）
+    "parsel>=1.9",
+    # JSON 结构日志由 loguru 承接，跟 worker 主进程对齐
+    "loguru>=0.7.0",
+    # T6-T3b: gateway 模式的 spider data sink 走 gRPC 直连 gateway
+    "grpcio>=1.60",
+    "antcode-contracts",
+]
+
+[tool.uv.sources]
+antcode-contracts = { workspace = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+antcode-scrapy-crawl = "antcode_scrapy.crawl:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/antcode_scrapy"]

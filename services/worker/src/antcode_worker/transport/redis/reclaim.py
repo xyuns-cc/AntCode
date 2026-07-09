@@ -20,8 +20,11 @@ from antcode_worker.transport.redis.keys import RedisKeys
 class ReclaimConfig:
     """回收配置"""
 
-    # 任务被认为是 pending 的最小时间（毫秒）
-    min_idle_time_ms: int = 60000  # 1 分钟
+    # R1-P0-4 (审查报告): 原 60s 远小于任务时长 (default timeout 3600s)，
+    # reclaimer 与 poll 用相同 consumer 名 → 自己认领自己 → 正常长任务
+    # 被反复认领 3-4 次后就被 XACK 进死信。改成 1 小时基线，实际使用者
+    # 应该按 max_task_timeout + 冗余 传入 override。
+    min_idle_time_ms: int = 3600_000  # 1 小时
 
     # 每次回收的最大任务数
     max_reclaim_count: int = 10
@@ -84,6 +87,7 @@ class PendingTaskReclaimer:
         worker_id: str,
         keys: RedisKeys | None = None,
         config: ReclaimConfig | None = None,
+        on_reclaimed: Any = None,
     ):
         """
         初始化回收器
@@ -93,11 +97,17 @@ class PendingTaskReclaimer:
             worker_id: 当前 Worker ID
             keys: Redis key 生成器
             config: 回收配置
+            on_reclaimed: 认领到消息后的回调（R1-P0-4）。签名：
+                ``async def on_reclaimed(msg_id: str, data: dict) -> None``
+                transport 层需要在这里把消息重新入 engine 队列，否则认领
+                只是把消息从旧 consumer 移到本 consumer 就再没人处理，PEL
+                空积压。
         """
         self._redis = redis_client
         self._worker_id = worker_id
         self._keys = keys or RedisKeys()
         self._config = config or ReclaimConfig()
+        self._on_reclaimed = on_reclaimed
         self._stats = ReclaimStats()
         self._running = False
         self._reclaim_task: asyncio.Task | None = None
@@ -131,10 +141,22 @@ class PendingTaskReclaimer:
             self._reclaim_task = None
 
     async def _reclaim_loop(self) -> None:
-        """回收循环"""
+        """回收循环。
+
+        R1-P0-4 (审查报告): 原实现 `await self._do_reclaim()` 丢弃返回值，
+        认领的消息只是从旧 consumer 挂到本 consumer 的 PEL 上，无人处理。
+        修复：拿到 ReclaimedTask 后调用 on_reclaimed 回调把消息再喂给 engine。
+        """
         while self._running:
             try:
-                await self._do_reclaim()
+                tasks = await self._do_reclaim()
+                if tasks and self._on_reclaimed is not None:
+                    for task in tasks:
+                        try:
+                            await self._on_reclaimed(task.message_id, task.data)
+                        except Exception:
+                            # 单条重投失败不影响下一条；下一轮会再次认领
+                            self._stats.reclaim_errors += 1
             except asyncio.CancelledError:
                 break
             except Exception:

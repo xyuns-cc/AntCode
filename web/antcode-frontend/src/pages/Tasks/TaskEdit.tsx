@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import PageContainer from '@/components/common/PageContainer'
 import {
   Card,
   Form,
@@ -88,7 +89,7 @@ const TaskEdit: React.FC = () => {
       setProjects(response.items || [])
     } catch {
       Logger.error('加载项目列表失败')
-      setProjects([])
+      message.error('加载项目列表失败')
     }
   }, [])
 
@@ -211,7 +212,7 @@ const TaskEdit: React.FC = () => {
   }
 
   return (
-    <div style={{ padding: '24px' }}>
+    <PageContainer scrollable>
       {/* 页面头部 */}
       <Card
         title={
@@ -422,7 +423,7 @@ const TaskEdit: React.FC = () => {
           </Row>
         </Form>
       </Card>
-    </div>
+    </PageContainer>
   )
 }
 

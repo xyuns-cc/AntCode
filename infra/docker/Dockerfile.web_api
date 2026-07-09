@@ -5,7 +5,7 @@
 # =====================================================
 
 # ================== 阶段 1: 构建阶段 ==================
-FROM python:3.11-slim AS builder
+FROM python:3.11.11-slim AS builder
 
 WORKDIR /app
 
@@ -46,7 +46,7 @@ RUN uv venv /app/.venv && \
     uv sync --package antcode-web-api
 
 # ================== 阶段 2: 运行时镜像 ==================
-FROM python:3.11-slim AS runtime
+FROM python:3.11.11-slim AS runtime
 
 WORKDIR /app
 
@@ -75,10 +75,9 @@ COPY --chown=appuser:appgroup services/web_api/src/antcode_web_api /app/services
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
-    /app/data/backend/db \
-    /app/data/backend/logs \
-    /app/data/backend/storage \
     /app/data/backend/keys \
+    /app/data/backend/work/executions \
+    /app/data/backend/temp/source-bundles \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/.venv \
     && chmod -R 755 /app/data
@@ -93,5 +92,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# 启动命令
-CMD ["python", "-m", "antcode_web_api.main"]
+# 启动命令（走包内 __main__.py，与 Makefile / 本地开发保持一致）
+CMD ["python", "-m", "antcode_web_api"]

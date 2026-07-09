@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from . import data_pb2 as data__pb2  # noqa: E402,F401
+from . import data_pb2 as data__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
@@ -54,6 +54,11 @@ class DataServiceStub(object):
                 request_serializer=data__pb2.LogBatch.SerializeToString,
                 response_deserializer=data__pb2.LogAck.FromString,
                 _registered_method=True)
+        self.StreamSpiderData = channel.stream_unary(
+                '/antcode.v1.DataService/StreamSpiderData',
+                request_serializer=data__pb2.SpiderDataBatch.SerializeToString,
+                response_deserializer=data__pb2.SpiderDataAck.FromString,
+                _registered_method=True)
 
 
 class DataServiceServicer(object):
@@ -93,6 +98,17 @@ class DataServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StreamSpiderData(self, request_iterator, context):
+        """T6-T3: Rule/Spider scraped items flow. Client-streaming — Scrapy pipeline
+        sends 1..N items per batch, gateway transcodes to Redis
+        `antcode:spider:data:{run_id}` stream (same wire fields as direct mode).
+        Batch MAY also carry a `meta` heartbeat (items_count / last_item_at) so
+        batch_status_loop / test_service see real-time progress.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DataServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -115,6 +131,11 @@ def add_DataServiceServicer_to_server(servicer, server):
                     servicer.StreamLogs,
                     request_deserializer=data__pb2.LogBatch.FromString,
                     response_serializer=data__pb2.LogAck.SerializeToString,
+            ),
+            'StreamSpiderData': grpc.stream_unary_rpc_method_handler(
+                    servicer.StreamSpiderData,
+                    request_deserializer=data__pb2.SpiderDataBatch.FromString,
+                    response_serializer=data__pb2.SpiderDataAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -225,6 +246,33 @@ class DataService(object):
             '/antcode.v1.DataService/StreamLogs',
             data__pb2.LogBatch.SerializeToString,
             data__pb2.LogAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StreamSpiderData(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/antcode.v1.DataService/StreamSpiderData',
+            data__pb2.SpiderDataBatch.SerializeToString,
+            data__pb2.SpiderDataAck.FromString,
             options,
             channel_credentials,
             insecure,

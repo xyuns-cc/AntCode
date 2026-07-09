@@ -165,12 +165,6 @@ class RedisLogStreamService:
             except Exception as e:
                 logger.debug("per-run stream 历史读取失败 run_id={}: {}", run_id, e)
 
-        # 3. 终极回落：S3
-        if sent == 0:
-            try:
-                sent += await self._send_history_from_s3(run_id)
-            except Exception as e:
-                logger.debug("S3 历史读取失败 run_id={}: {}", run_id, e)
 
         if sent == 0:
             await websocket_manager.send_no_historical_logs(run_id)
@@ -199,68 +193,6 @@ class RedisLogStreamService:
                     sent += 1
         return sent
 
-    async def _send_history_from_s3(self, run_id: str) -> int:
-        """从 S3 读取历史日志（支持压缩文件）"""
-        import gzip
-
-        import aiohttp
-
-        sent = 0
-        try:
-            from antcode_core.infrastructure.storage.log_storage import get_log_storage
-
-            log_storage = get_log_storage()
-
-            for log_type in ["stdout", "stderr"]:
-                try:
-                    url = await log_storage.get_presigned_download_url(run_id, log_type)
-                    if url:
-                        async with (
-                            aiohttp.ClientSession() as session,
-                            session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp,
-                        ):
-                            if resp.status == 200:
-                                data = await resp.read()
-                                try:
-                                    content = gzip.decompress(data).decode("utf-8")
-                                except Exception:
-                                    content = data.decode("utf-8", errors="ignore")
-
-                                for i, line in enumerate(content.split("\n")):
-                                    if line.strip():
-                                        log_entry = {
-                                            "log_type": log_type,
-                                            "content": line,
-                                            "timestamp": "",
-                                            "sequence": str(i),
-                                        }
-                                        await self._emit_log(run_id, log_entry, source="s3_history")
-                                        sent += 1
-                        continue
-
-                    query_result = await log_storage.query_logs(
-                        run_id=run_id,
-                        log_type=log_type,
-                        limit=10000,
-                    )
-
-                    for entry in query_result.entries:
-                        log_entry = {
-                            "log_type": entry.log_type,
-                            "content": entry.content,
-                            "timestamp": entry.timestamp.isoformat() if entry.timestamp else "",
-                            "sequence": str(entry.sequence),
-                        }
-                        await self._emit_log(run_id, log_entry, source="s3_history")
-                        sent += 1
-
-                except Exception as e:
-                    logger.debug(f"从 S3 读取 {log_type} 日志失败: {e}")
-
-        except Exception as e:
-            logger.debug(f"S3 日志存储不可用: {e}")
-
-        return sent
 
     async def _ingest_loop(self) -> None:
         """全局 ingest stream 订阅协程（所有订阅者共享）。

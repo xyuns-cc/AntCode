@@ -10,12 +10,11 @@ Master 选主逻辑
 
 import asyncio
 
-from loguru import logger
-
 from antcode_core.infrastructure.redis.locks import (
     DistributedLock,
     acquire_leader_lock,
 )
+from loguru import logger
 
 
 class LeaderElection:
@@ -67,10 +66,7 @@ class LeaderElection:
             )
 
             self._is_leader = True
-            logger.info(
-                f"成为 Leader: lock_key={self.lock_key}, "
-                f"fencing_token={self._fencing_token}"
-            )
+            logger.info(f"成为 Leader: lock_key={self.lock_key}, fencing_token={self._fencing_token}")
 
             # 启动健康检查
             if self.auto_renew:
@@ -116,14 +112,22 @@ class LeaderElection:
             self._health_check_task = None
 
     async def _health_check_loop(self):
-        """健康检查循环"""
+        """健康检查循环：主动去 Redis 权威校验，不信任 renew loop 的本地状态。"""
         while self._is_leader:
             try:
                 await asyncio.sleep(self.ttl_seconds / 3)
 
-                # 检查锁是否仍然持有
-                if self._lock and not self._lock.is_locked:
-                    logger.warning("检测到 Leader 锁丢失，放弃 Leader 身份")
+                # B1: 用 verify_ownership 去 Redis 校验，而非依赖本地 is_locked。
+                # renew 失败 → 本地 token=None → is_locked=False 已经会翻转；
+                # 但更险的场景是：另一副本因时钟偏移/网络分区抢走了 lock 但
+                # 我们还没被 CancelledError → 直接 GET 命中新值即可。
+                if self._lock is None:
+                    logger.warning("Leader 锁引用丢失，放弃 Leader 身份")
+                    self._is_leader = False
+                    self._fencing_token = None
+                    break
+                if not await self._lock.verify_ownership():
+                    logger.warning("Leader 锁被抢占或已过期，放弃 Leader 身份")
                     self._is_leader = False
                     self._fencing_token = None
                     break
@@ -143,6 +147,7 @@ class LeaderElection:
             token 是否有效
         """
         from antcode_core.infrastructure.redis.locks import fencing_token_manager
+
         return await fencing_token_manager.validate_token(token)
 
 
@@ -151,13 +156,24 @@ leader_election = LeaderElection()
 
 
 async def ensure_leader() -> bool:
-    """确保当前实例是 Leader
+    """确保当前实例是 Leader（权威模式）。
 
-    Returns:
-        是否为 Leader
+    B1: 旧实现只看内存 ``leader_election.is_leader`` 布尔就返回 True，
+    另一副本抢走锁到 renew loop 察觉之间有一个 TTL 窗口（默认 10s）会
+    出现"我以为我是 leader 但 Redis 里锁归别人"，导致两副本同时派发。
+
+    新语义：内存 True 时再去 Redis 权威校验；不符即翻转内存状态，让 loop
+    停止写。校验失败或 Redis 不可达时保守返回 False（宁可让出也不双写）。
     """
     if leader_election.is_leader:
-        return True
+        lock = leader_election._lock
+        if lock is not None and await lock.verify_ownership():
+            return True
+        # 已被抢走 → 翻转本地状态
+        logger.warning("ensure_leader 权威校验失败，放弃 Leader 身份")
+        leader_election._is_leader = False
+        leader_election._fencing_token = None
+        return False
 
     return await leader_election.try_become_leader()
 

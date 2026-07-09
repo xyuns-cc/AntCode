@@ -7,7 +7,6 @@ from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.transactions import in_transaction
 
-from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.domain.models import Project, ProjectCode, ProjectFile, ProjectRule, ProjectType
 
 
@@ -95,9 +94,7 @@ class UnifiedProjectService:
 
                     await project.update_from_dict(basic_fields)
                     await project.save(using_db=connection)
-                    logger.info(
-                        f"更新项目基本信息: {project_id}, 字段: {list(basic_fields.keys())}"
-                    )
+                    logger.info(f"更新项目基本信息: {project_id}, 字段: {list(basic_fields.keys())}")
 
                 # 3. 根据项目类型更新详细配置（使用内部 ID）
                 if project.type == ProjectType.RULE:
@@ -109,6 +106,21 @@ class UnifiedProjectService:
 
                 # 4. 重新获取更新后的项目（使用内部 ID）
                 updated_project = await Project.filter(id=project.id).using_db(connection).first()
+                # S10 (P2 兄弟修复): _resolve_public_id 要求响应对象带
+                # created_by_public_id/username 快照，否则 ProjectResponseBuilder
+                # 会抛 500。update 端点历史上一直漏挂，PUT 一改就报"响应对象缺
+                # 少 created_by_public_id"。这里对齐 create_project 的做法。
+                if updated_project is not None:
+                    from antcode_core.application.services.users.user_service import (
+                        user_service,
+                    )
+                    creator = await user_service.get_user_by_id(updated_project.user_id)
+                    updated_project.created_by_public_id = (
+                        creator.public_id if creator else None
+                    )
+                    updated_project.created_by_username = (
+                        creator.username if creator else None
+                    )
                 return updated_project
 
         except HTTPException:
@@ -168,11 +180,6 @@ class UnifiedProjectService:
         if not code_detail:
             logger.warning(f"代码项目 {project_id} 的详细配置不存在，跳过代码字段更新")
             return
-
-        # 如果更新了代码内容，重新计算哈希
-        if "content" in code_fields:
-            content_hash = calculate_content_hash(code_fields["content"])
-            code_fields["content_hash"] = content_hash
 
         # 更新代码配置
         await code_detail.update_from_dict(code_fields)

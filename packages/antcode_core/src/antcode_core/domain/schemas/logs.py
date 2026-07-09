@@ -47,7 +47,6 @@ class LogEntry(BaseModel):
     task_id: str = Field("", description="任务公开ID")
     message: str
     source: str = ""
-    file_path: str = ""
     line_number: int = 0
     extra_data: dict[str, Any] = Field(default_factory=dict)
 
@@ -75,28 +74,6 @@ class LogListResponse(BaseModel):
     items: list[LogEntry]
 
 
-class LogFileInfo(BaseModel):
-    """日志文件信息"""
-
-    file_path: str
-    file_size: int
-    lines_count: int
-    created_time: datetime = Field(default_factory=datetime.now)
-    modified_time: datetime = Field(default_factory=datetime.now)
-
-
-class LogFileResponse(BaseModel):
-    """日志文件响应"""
-
-    run_id: str
-    log_type: str
-    content: str
-    file_path: str
-    file_size: int
-    lines_count: int
-    last_modified: datetime = Field(default_factory=datetime.now)
-
-
 class UnifiedLogResponse(BaseModel):
     """统一日志响应（支持多种格式）"""
 
@@ -111,10 +88,8 @@ class UnifiedLogResponse(BaseModel):
 
     # 原始格式字段
     raw_content: str = ""
-    file_path: str = ""
     file_size: int = 0
     lines_count: int = 0
-    last_modified: datetime = Field(default_factory=datetime.now)
 
 
 class LogStreamMessage(BaseModel):
@@ -135,25 +110,6 @@ class LogStreamStats(BaseModel):
     uptime_seconds: float
 
 
-class LogArchiveRequest(BaseModel):
-    """日志归档请求"""
-
-    run_ids: list[str] | None = Field(None, description="指定运行ID列表")
-    start_date: datetime | None = Field(None, description="开始日期")
-    end_date: datetime | None = Field(None, description="结束日期")
-    compress: bool = Field(True, description="是否压缩")
-
-
-class LogArchiveResponse(BaseModel):
-    """日志归档响应"""
-
-    archive_id: str
-    file_path: str
-    file_size: int
-    execution_count: int
-    created_at: datetime
-
-
 class LogCleanupRequest(BaseModel):
     """日志清理请求"""
 
@@ -165,8 +121,7 @@ class LogCleanupRequest(BaseModel):
 class LogCleanupResponse(BaseModel):
     """日志清理响应"""
 
-    deleted_files: int
-    freed_space_bytes: int
+    deleted_rows: int
     deleted_runs: list[str]
     dry_run: bool
 
@@ -174,8 +129,7 @@ class LogCleanupResponse(BaseModel):
 class LogMetrics(BaseModel):
     """日志指标"""
 
-    total_log_files: int
-    total_size_bytes: int
+    total_log_rows: int
     oldest_log_date: datetime = Field(default_factory=datetime.now)
     newest_log_date: datetime = Field(default_factory=datetime.now)
     log_levels_count: dict[str, int]

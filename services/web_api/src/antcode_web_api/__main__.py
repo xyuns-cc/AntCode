@@ -8,9 +8,8 @@ import socket
 import sys
 
 import uvicorn
-from uvicorn.config import LOGGING_CONFIG
-
 from antcode_core.common.config import settings
+from uvicorn.config import LOGGING_CONFIG
 
 
 def _port_available(host: str, port: int) -> bool:
@@ -35,10 +34,9 @@ def main():
     )
     LOGGING_CONFIG["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
 
-    if not _port_available(settings.SERVER_HOST, settings.SERVER_PORT):
+    if not _port_available(settings.BIND_HOST, settings.SERVER_PORT):
         print(
-            f"端口 {settings.SERVER_PORT} 已被占用，"
-            "请停止占用进程或修改 .env 的 SERVER_PORT 后重试。",
+            f"端口 {settings.SERVER_PORT} 已被占用，请停止占用进程或修改 .env 的 SERVER_PORT 后重试。",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -46,7 +44,7 @@ def main():
     # 使用配置文件中的主机和端口
     uvicorn.run(
         "antcode_web_api.app:app",
-        host=settings.SERVER_HOST,
+        host=settings.BIND_HOST,
         port=settings.SERVER_PORT,
         reload=settings.SERVER_RELOAD,
         log_config=LOGGING_CONFIG,

@@ -13,15 +13,15 @@ from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.expressions import Q
 
-from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.application.services.workers.worker_connection_service import (
     worker_connection_service,
 )
 
 # 导入拆分的服务
 from antcode_core.application.services.workers.worker_heartbeat_service import worker_heartbeat_service
-from antcode_core.common.config import settings
 from antcode_core.application.services.workers.worker_stats_service import worker_stats_service
+from antcode_core.common.config import settings
+from antcode_core.domain.models import Worker, WorkerStatus
 
 
 class WorkerService:
@@ -122,9 +122,7 @@ class WorkerService:
 
         if search:
             query = query.filter(
-                Q(name__icontains=search)
-                | Q(host__icontains=search)
-                | Q(description__icontains=search)
+                Q(name__icontains=search) | Q(host__icontains=search) | Q(description__icontains=search)
             )
 
         total = await query.count()
@@ -172,9 +170,7 @@ class WorkerService:
         # 检查地址是否已存在
         existing = await Worker.filter(host=host, port=port).first()
         if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail="该地址已被其他 Worker 使用"
-            )
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该地址已被其他 Worker 使用")
 
         # 生成 API 密钥
         api_key = secrets.token_hex(32)
@@ -215,9 +211,7 @@ class WorkerService:
         new_host = update_data.get("host", worker.host)
         new_port = update_data.get("port", worker.port)
         if "host" in update_data or "port" in update_data:
-            new_host, new_port = self._connection_service.normalize_address(
-                new_host, new_port
-            )
+            new_host, new_port = self._connection_service.normalize_address(new_host, new_port)
             update_data["host"] = new_host
             update_data["port"] = new_port
         if new_host != worker.host or new_port != worker.port:
@@ -256,8 +250,6 @@ class WorkerService:
             Runtime,
             UserWorkerPermission,
             WorkerHeartbeat,
-            WorkerProject,
-            WorkerProjectFile,
         )
         from antcode_core.domain.models.monitoring import (
             SpiderMetricsHistory,
@@ -272,8 +264,6 @@ class WorkerService:
             "permissions": 0,
             "runtimes": 0,
             "runtime_bindings": 0,
-            "worker_projects": 0,
-            "worker_project_files": 0,
             "task_executions": 0,
             "tasks": 0,
             "performance_history": 0,
@@ -286,44 +276,25 @@ class WorkerService:
             deleted["heartbeats"] = await WorkerHeartbeat.filter(worker_id=worker_internal_id).delete()
 
             # 2. 删除用户 Worker 权限
-            deleted["permissions"] = await UserWorkerPermission.filter(
-                worker_id=worker_internal_id
-            ).delete()
+            deleted["permissions"] = await UserWorkerPermission.filter(worker_id=worker_internal_id).delete()
 
             # 3. 删除 Worker 上的运行时及其绑定
             runtimes = await Runtime.filter(worker_id=worker_internal_id).all()
             if runtimes:
                 runtime_ids = [r.id for r in runtimes]
-                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(
-                    runtime_id__in=runtime_ids
-                ).delete()
+                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(runtime_id__in=runtime_ids).delete()
                 deleted["runtimes"] = await Runtime.filter(id__in=runtime_ids).delete()
 
-            # 4. 删除 Worker 项目绑定
-            worker_projects = await WorkerProject.filter(worker_id=worker_internal_id).all()
-            if worker_projects:
-                wp_ids = [wp.id for wp in worker_projects]
-                deleted["worker_project_files"] = await WorkerProjectFile.filter(
-                    worker_project_id__in=wp_ids
-                ).delete()
-                deleted["worker_projects"] = await WorkerProject.filter(id__in=wp_ids).delete()
-
-            # 5. 删除 Worker 上的任务及执行记录
+            # 4. 删除 Worker 上的任务及执行记录
             tasks = await Task.filter(specified_worker_id=worker_internal_id).all()
             if tasks:
                 task_ids = [t.id for t in tasks]
-                deleted["task_executions"] = await TaskRun.filter(
-                    task_id__in=task_ids
-                ).delete()
+                deleted["task_executions"] = await TaskRun.filter(task_id__in=task_ids).delete()
                 deleted["tasks"] = await Task.filter(id__in=task_ids).delete()
 
-            # 6. 删除监控数据（使用 public_id，因为监控表的 worker_id 是字符串）
-            deleted["performance_history"] = await WorkerPerformanceHistory.filter(
-                worker_id=worker_public_id
-            ).delete()
-            deleted["spider_metrics"] = await SpiderMetricsHistory.filter(
-                worker_id=worker_public_id
-            ).delete()
+            # 5. 删除监控数据（使用 public_id，因为监控表的 worker_id 是字符串）
+            deleted["performance_history"] = await WorkerPerformanceHistory.filter(worker_id=worker_public_id).delete()
+            deleted["spider_metrics"] = await SpiderMetricsHistory.filter(worker_id=worker_public_id).delete()
             deleted["events"] = await WorkerEvent.filter(worker_id=worker_public_id).delete()
 
         except Exception as e:
@@ -625,9 +596,9 @@ class WorkerService:
         """批量分配 Worker 权限给用户"""
         from antcode_core.domain.models import UserWorkerPermission
 
-        existing_perms = await UserWorkerPermission.filter(
-            user_id=user_id, worker_id__in=worker_ids
-        ).values_list("worker_id", flat=True)
+        existing_perms = await UserWorkerPermission.filter(user_id=user_id, worker_id__in=worker_ids).values_list(
+            "worker_id", flat=True
+        )
 
         existing_worker_ids = set(existing_perms)
 
@@ -662,6 +633,7 @@ class WorkerService:
         deleted = await UserWorkerPermission.filter(user_id=user_id, worker_id__in=worker_ids).delete()
 
         return {"revoked": deleted}
+
 
 # 创建服务实例
 worker_service = WorkerService()

@@ -5,9 +5,9 @@
 ## ✨ 核心特性
 
 - 🎨 **现代化 UI** - Ant Design 5.x 组件库，支持深色/浅色主题
-- 📝 **代码编辑** - Monaco Editor 集成，支持语法高亮和智能提示
+- 🧭 **Git 项目管理** - 管理仓库来源、任务和运行时环境
 - 📊 **数据可视化** - Chart.js 图表展示任务执行统计
-- 🔄 **实时更新** - WebSocket 实时推送日志和节点状态
+- 🔄 **实时更新** - WebSocket 实时推送日志和 Worker 状态
 - 🚀 **性能优化** - 代码分割、懒加载、Gzip/Brotli 压缩
 - 📱 **响应式设计** - 支持桌面端、平板、手机
 
@@ -68,11 +68,10 @@ antcode-frontend/
 │   ├── assets/             # 资源文件
 │   ├── components/         # 可复用组件
 │   │   ├── common/         # 通用组件（Layout, AuthGuard, ErrorBoundary）
-│   │   ├── envs/           # 环境相关组件
-│   │   ├── nodes/          # 节点相关组件
+│   │   ├── runtimes/       # 运行时相关组件
 │   │   ├── projects/       # 项目相关组件
 │   │   ├── runtimes/       # 运行时相关组件
-│   │   ├── ui/             # UI 组件（CodeEditor, LogViewer）
+│   │   ├── ui/             # UI 组件（LogViewer 等）
 │   │   └── workers/        # Worker 相关组件
 │   ├── config/             # 配置文件
 │   ├── contexts/           # React Context
@@ -87,9 +86,8 @@ antcode-frontend/
 │   │   ├── Login/          # 登录页
 │   │   ├── Logs/           # 日志查看
 │   │   ├── Monitor/        # 监控页面
-│   │   ├── Nodes/          # 节点管理
 │   │   ├── Projects/       # 项目管理
-│   │   ├── Runtimes/       # 运行时管理
+│   │   ├── Repositories/   # Git 仓库管理
 │   │   ├── Settings/       # 设置页面
 │   │   ├── SpiderMonitor/  # 爬虫监控
 │   │   ├── SystemConfig/   # 系统配置
@@ -133,10 +131,6 @@ antcode-frontend/
 - **Chart.js**: 4.5.1 - 图表库
 - **react-chartjs-2**: 5.3.1 - React 图表封装
 
-### 代码编辑器
-- **Monaco Editor**: 0.52.0 - 代码编辑器
-- **@monaco-editor/react**: 4.6.0 - React 封装
-
 ### HTTP 客户端
 - **Axios**: 1.7.7 - HTTP 请求库
 
@@ -157,11 +151,10 @@ antcode-frontend/
 
 ### 开发环境配置
 
-创建 `.env.development` 文件:
+前端开发模式会读取仓库根目录 `.env` 中的 `BIND_HOST`、`SERVER_PORT` 和 `FRONTEND_PORT`。
+通常不需要再单独配置 `VITE_API_BASE_URL`；只有前端需要访问独立 API 域名时才设置它作为显式覆盖。
 
 ```env
-VITE_API_BASE_URL=http://localhost:8000
-VITE_WS_BASE_URL=ws://localhost:8000
 VITE_APP_TITLE=AntCode 任务调度平台
 VITE_DEV_MODE=true
 ```
@@ -210,7 +203,7 @@ chore: 构建/工具链更新
 1. **按功能模块组织**：每个页面/功能模块独立目录
 2. **组件分层**：
    - `common/`: 通用组件 (如 Layout, AuthGuard)
-   - `ui/`: 纯 UI 组件 (如 CodeEditor, LogViewer)
+   - `ui/`: 纯 UI 组件 (如 LogViewer)
    - `projects/`: 业务组件 (与项目相关)
 3. **样式管理**：
    - 全局样式放在 `styles/`
@@ -249,7 +242,6 @@ npm run preview
 #### ✅ 代码分割
 - React 核心库独立打包 (~173KB)
 - Ant Design 组件库独立打包 (~724KB)
-- Monaco 编辑器独立打包（懒加载）
 - Chart.js 图表库独立打包 (~165KB)
 - 工具库独立打包 (~62KB)
 
@@ -394,7 +386,6 @@ VITE_LOG_LEVEL=error
 
 #### 2. 加载优化
 - ✅ 懒加载路由组件
-- ✅ Monaco 编辑器按需加载
 - ✅ DNS 预解析
 - ✅ 预连接 API 服务器
 - ✅ 静态资源 Hash 命名
@@ -461,7 +452,7 @@ server: {
 
 ### Q2: API 请求失败？
 
-检查后端服务是否启动在 `localhost:8000`，或修改代理配置。
+检查后端服务是否启动在仓库根目录 `.env` 的 `SERVER_PORT` 端口，或修改代理配置。
 
 ### Q3: 热更新不工作？
 
@@ -528,7 +519,7 @@ npm run build:analyze
 - ✅ **实时日志**: WebSocket 实时日志显示
 - ✅ **用户认证**: JWT 登录认证
 - ✅ **权限控制**: 基于角色的权限管理
-- ✅ **代码编辑**: Monaco 编辑器集成
+- ✅ **Git 项目管理**: 仓库来源、项目配置和任务运行管理
 - ✅ **数据可视化**: Chart.js 图表展示
 
 ### 技术亮点
@@ -557,8 +548,7 @@ npm run build:analyze
 #### 新增
 - ✅ 环境管理页面
 - ✅ 监控页面
-- ✅ 文件管理功能
-- ✅ Monaco 编辑器集成
+- ✅ Git 仓库来源管理
 - ✅ 主题切换功能
 - ✅ 节点环境选择器
 

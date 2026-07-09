@@ -1,12 +1,8 @@
-"""去重存储后端抽象基类
+"""Redis 去重存储后端抽象基类。"""
 
-定义去重存储的抽象接口，支持 Redis Bloom Filter 和内存 Set 两种实现。
-
-Requirements: 2.1, 2.2, 2.3
-"""
-
-import os
 from abc import ABC, abstractmethod
+
+from antcode_core.application.services.crawl.backends.base import _redis_backend_required
 
 
 class DedupStore(ABC):
@@ -130,37 +126,17 @@ _dedup_store_instance: DedupStore | None = None
 
 
 def get_dedup_store() -> DedupStore:
-    """工厂方法：根据配置返回去重存储实现
-
-    通过环境变量 CRAWL_BACKEND 或 DEDUP_BACKEND 配置后端类型：
-    - "memory": 内存 Set 实现（默认）
-    - "redis": Redis Bloom Filter 实现
-
-    Returns:
-        DedupStore 实例
-
-    Raises:
-        ValueError: 无效的后端类型
-
-    Requirements: 2.1, 2.2, 2.3
-    """
+    """返回 Redis 去重存储。"""
     global _dedup_store_instance
 
     if _dedup_store_instance is not None:
         return _dedup_store_instance
 
-    # 优先使用 CRAWL_BACKEND，其次使用 DEDUP_BACKEND
-    backend_type = os.getenv("CRAWL_BACKEND") or os.getenv("DEDUP_BACKEND", "memory")
-    backend_type = backend_type.lower().strip()
+    _redis_backend_required("CRAWL_BACKEND", "DEDUP_BACKEND")
 
-    if backend_type == "redis":
-        from antcode_core.application.services.crawl.backends.redis_dedup import RedisDedupStore
-        _dedup_store_instance = RedisDedupStore()
-    elif backend_type == "memory":
-        from antcode_core.application.services.crawl.backends.memory_dedup import InMemoryDedupStore
-        _dedup_store_instance = InMemoryDedupStore()
-    else:
-        raise ValueError(f"Unknown dedup backend: {backend_type}")
+    from antcode_core.application.services.crawl.backends.redis_dedup import RedisDedupStore
+
+    _dedup_store_instance = RedisDedupStore()
 
     return _dedup_store_instance
 

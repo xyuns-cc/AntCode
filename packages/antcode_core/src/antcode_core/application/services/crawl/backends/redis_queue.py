@@ -11,10 +11,8 @@
 Requirements: 1.2, 1.4, 1.5, 1.6, 1.7, 1.8
 """
 
-
 from loguru import logger
 
-from antcode_core.domain.models.enums import Priority
 from antcode_core.application.services.crawl.backends.base import (
     CrawlQueueBackend,
     QueueMetrics,
@@ -22,6 +20,7 @@ from antcode_core.application.services.crawl.backends.base import (
     QueueTask,
     ReclaimedTask,
 )
+from antcode_core.domain.models.enums import Priority
 from antcode_core.infrastructure.redis.stream_client import StreamClient
 
 # Redis 键前缀和后缀
@@ -138,10 +137,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             task.msg_id = msg_id
 
         if msg_ids:
-            logger.debug(
-                f"入队成功: project={project_id}, priority={priority}, "
-                f"count={len(msg_ids)}"
-            )
+            logger.debug(f"入队成功: project={project_id}, priority={priority}, count={len(msg_ids)}")
 
         return msg_ids
 
@@ -169,9 +165,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             stream_key = get_stream_key(project_id, priority)
 
             # 确保消费者组存在
-            await self._stream_client.ensure_group(
-                stream_key, self._consumer_group
-            )
+            await self._stream_client.ensure_group(stream_key, self._consumer_group)
 
             # 从队列读取
             # 只在最低优先级队列使用阻塞等待
@@ -195,10 +189,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             remaining -= len(messages)
 
         if tasks:
-            logger.debug(
-                f"出队成功: project={project_id}, consumer={consumer}, "
-                f"count={len(tasks)}"
-            )
+            logger.debug(f"出队成功: project={project_id}, consumer={consumer}, count={len(tasks)}")
 
         return tasks
 
@@ -228,9 +219,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             total_acked += count
 
         if total_acked:
-            logger.debug(
-                f"确认成功: project={project_id}, acked={total_acked}"
-            )
+            logger.debug(f"确认成功: project={project_id}, acked={total_acked}")
 
         return total_acked
 
@@ -263,10 +252,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             )
 
             if deleted_ids:
-                logger.debug(
-                    f"发现已删除消息: project={project_id}, "
-                    f"priority={priority}, deleted={len(deleted_ids)}"
-                )
+                logger.debug(f"发现已删除消息: project={project_id}, priority={priority}, deleted={len(deleted_ids)}")
 
             # 获取每个消息的 delivery_count
             for msg in messages:
@@ -289,17 +275,17 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
 
                 task.retry_count = delivery_count
 
-                reclaimed.append(ReclaimedTask(
-                    task=task,
-                    delivery_count=delivery_count,
-                ))
+                reclaimed.append(
+                    ReclaimedTask(
+                        task=task,
+                        delivery_count=delivery_count,
+                    )
+                )
 
             remaining -= len(messages)
 
         if reclaimed:
-            logger.info(
-                f"回收超时任务: project={project_id}, count={len(reclaimed)}"
-            )
+            logger.info(f"回收超时任务: project={project_id}, count={len(reclaimed)}")
 
         return reclaimed
 
@@ -319,9 +305,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             pending += length
 
             # 处理中数量
-            pending_info = await self._stream_client.xpending(
-                stream_key, group_name=self._consumer_group
-            )
+            pending_info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
             processing += pending_info.get("pending_count", 0)
 
         dead_letter = await self.get_dead_letter_count(project_id)
@@ -341,9 +325,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         """获取单个优先级队列指标"""
         stream_key = get_stream_key(project_id, priority)
         stream_length = await self._stream_client.xlen(stream_key)
-        pending_info = await self._stream_client.xpending(
-            stream_key, group_name=self._consumer_group
-        )
+        pending_info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
 
         return QueueMetrics(
             queue_length=stream_length,
@@ -356,15 +338,11 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         try:
             for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
                 stream_key = get_stream_key(project_id, priority)
-                await self._stream_client.ensure_group(
-                    stream_key, self._consumer_group
-                )
+                await self._stream_client.ensure_group(stream_key, self._consumer_group)
 
             # 确保死信队列存在
             dead_letter_key = get_dead_letter_key(project_id)
-            await self._stream_client.ensure_group(
-                dead_letter_key, self._consumer_group
-            )
+            await self._stream_client.ensure_group(dead_letter_key, self._consumer_group)
 
             logger.debug(f"确保队列存在: project={project_id}")
             return True
@@ -415,17 +393,13 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         """获取处理中消息数量"""
         if priority is not None:
             stream_key = get_stream_key(project_id, priority)
-            info = await self._stream_client.xpending(
-                stream_key, group_name=self._consumer_group
-            )
+            info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
             return info.get("pending_count", 0)
 
         total = 0
         for p in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
             stream_key = get_stream_key(project_id, p)
-            info = await self._stream_client.xpending(
-                stream_key, group_name=self._consumer_group
-            )
+            info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
             total += info.get("pending_count", 0)
         return total
 

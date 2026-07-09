@@ -17,16 +17,26 @@ class SpiderTaskDispatcher:
         params=None,
         worker_id=None,
     ):
-        """提交规则任务到工作节点"""
-        task_params = {
-            "rule_detail": self._serialize_rule_detail(rule_detail),
-            **(params or {}),
-        }
+        """提交规则任务到工作节点。
+
+        P16: params 结构必须与 UI 触发路径（workers.py:1367
+        ``dispatch_task_to_worker``）一致——``rule_detail`` 塞进
+        ``params.kwargs``，否则 worker 侧 engine._build_task_payload
+        走 ``kwargs = params.get("kwargs", {})`` 拿到空 dict，
+        RulePlugin.validate 报 "缺 target_url / extraction_rules"，
+        所有 scheduler 触发的 rule 任务全部失败。
+        """
+        outer_params: dict = dict(params or {})
+        kwargs_dict = outer_params.get("kwargs")
+        if not isinstance(kwargs_dict, dict):
+            kwargs_dict = {}
+        kwargs_dict["rule_detail"] = self._serialize_rule_detail(rule_detail)
+        outer_params["kwargs"] = kwargs_dict
 
         result = await worker_task_dispatcher.dispatch_task(
             project_id=project.public_id,
             run_id=run_id,
-            params=task_params,
+            params=outer_params,
             project_type="rule",
             worker_id=worker_id,
         )

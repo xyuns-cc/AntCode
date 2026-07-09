@@ -83,6 +83,21 @@ def create_container(config: Any) -> Container:
     """
     container = Container(config=config)
 
+    # T6-T4a: plugin_registry 提前创建，供 register-direct 上报 capabilities.task_types。
+    # 原顺序里 transport 内部 register-direct 时 registry 还没构建，无法读能力。
+    plugin_registry = _create_plugin_registry(config)
+    container.register("plugin_registry", plugin_registry)
+    # 把 capabilities.task_types 灌进 CapabilityDetector 的缓存，让接下来的
+    # register-direct 里 detect_all() 能拿到。
+    try:
+        from antcode_worker.heartbeat.reporter import get_capability_detector
+
+        get_capability_detector().detect_all(
+            force_refresh=True, task_types=plugin_registry.capabilities()
+        )
+    except Exception as exc:
+        logger.warning(f"预填 capabilities.task_types 失败: {exc}")
+
     # 1. 创建传输层
     transport = _create_transport(config)
     container.register("transport", transport)
@@ -94,10 +109,6 @@ def create_container(config: Any) -> Container:
     # 3. 创建执行器
     executor = _create_executor(config)
     container.register("executor", executor)
-
-    # 4. 创建插件注册表
-    plugin_registry = _create_plugin_registry(config)
-    container.register("plugin_registry", plugin_registry)
 
     # 5. 创建日志管理器工厂
     log_manager = _create_log_manager(config, transport)
@@ -484,11 +495,13 @@ def _register_direct_worker(
         namespace=getattr(config, "redis_namespace", None),
     )
     try:
-        import redis
+        # T6-T1: 走统一 sync factory，支持 cluster/sentinel URL scheme
+        from antcode_core.infrastructure.redis.factory import (
+            create_sync_redis_client,
+        )
 
-        redis_client = redis.Redis.from_url(
+        redis_client = create_sync_redis_client(
             redis_url,
-            encoding="utf-8",
             decode_responses=True,
         )
         redis_client.set(proof_key, proof, ex=60)

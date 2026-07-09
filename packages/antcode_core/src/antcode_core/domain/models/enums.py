@@ -8,8 +8,10 @@ from enum import Enum
 
 # ========== 项目相关枚举 ==========
 
+
 class ProjectType(str, Enum):
     """项目类型"""
+
     FILE = "file"
     RULE = "rule"
     CODE = "code"
@@ -17,21 +19,31 @@ class ProjectType(str, Enum):
 
 class ProjectStatus(str, Enum):
     """项目状态"""
-    DRAFT = "draft"
+
     ACTIVE = "active"
     INACTIVE = "inactive"
     ARCHIVED = "archived"
 
 
 class CrawlEngine(str, Enum):
-    """爬取引擎"""
-    BROWSER = "browser"
+    """爬取引擎。
+
+    S1 (Scrapy 迁移): 新增 ``playwright`` 用于 JS 渲染站点。Scrapy 侧根据
+    此值动态装配 ``DOWNLOAD_HANDLERS``：
+    - requests → Scrapy 内置 HTTP handler
+    - curl_cffi → scrapy-impersonate（TLS/JA3 指纹伪装）
+    - playwright → scrapy-playwright（浏览器渲染）
+    值必须是字符串枚举，DB 迁移不需要（CharEnumField 存字面量）。
+    """
+
     REQUESTS = "requests"
     CURL_CFFI = "curl_cffi"
+    PLAYWRIGHT = "playwright"
 
 
 class PaginationType(str, Enum):
     """分页类型"""
+
     NONE = "none"
     URL_PATTERN = "url_pattern"
     CLICK_ELEMENT = "click_element"
@@ -43,6 +55,7 @@ class PaginationType(str, Enum):
 
 class RuleType(str, Enum):
     """规则类型"""
+
     XPATH = "xpath"
     CSS = "css"
     REGEX = "regex"
@@ -51,6 +64,7 @@ class RuleType(str, Enum):
 
 class CallbackType(str, Enum):
     """回调类型"""
+
     LIST = "list"
     DETAIL = "detail"
     MIXED = "mixed"
@@ -58,6 +72,7 @@ class CallbackType(str, Enum):
 
 class RequestMethod(str, Enum):
     """HTTP 请求方法"""
+
     GET = "GET"
     POST = "POST"
     PUT = "PUT"
@@ -66,53 +81,59 @@ class RequestMethod(str, Enum):
 
 # ========== 任务相关枚举 ==========
 
+
 class TaskStatus(str, Enum):
     """任务状态"""
-    PENDING = "pending"        # 等待调度
+
+    PENDING = "pending"  # 等待调度
     DISPATCHING = "dispatching"  # 正在分配节点
-    QUEUED = "queued"          # 已分发到节点队列，等待执行
-    RUNNING = "running"        # 正在执行
-    SUCCESS = "success"        # 执行成功
-    FAILED = "failed"          # 执行失败
-    CANCELLED = "cancelled"    # 已取消
-    TIMEOUT = "timeout"        # 执行超时
-    PAUSED = "paused"          # 已暂停
-    REJECTED = "rejected"      # 节点拒绝
-    SKIPPED = "skipped"        # 已跳过
+    QUEUED = "queued"  # 已分发到节点队列，等待执行
+    RUNNING = "running"  # 正在执行
+    SUCCESS = "success"  # 执行成功
+    FAILED = "failed"  # 执行失败
+    CANCELLED = "cancelled"  # 已取消
+    TIMEOUT = "timeout"  # 执行超时
+    PAUSED = "paused"  # 已暂停
+    REJECTED = "rejected"  # 节点拒绝
+    SKIPPED = "skipped"  # 已跳过
 
 
 class DispatchStatus(str, Enum):
     """分发状态"""
-    PENDING = "pending"        # 等待分发
+
+    PENDING = "pending"  # 等待分发
     DISPATCHING = "dispatching"  # 分发中
     DISPATCHED = "dispatched"  # 已发送
-    ACKED = "acked"            # 节点确认
-    REJECTED = "rejected"      # 节点拒绝
-    TIMEOUT = "timeout"        # 确认超时
-    FAILED = "failed"          # 分发失败
+    ACKED = "acked"  # 节点确认
+    REJECTED = "rejected"  # 节点拒绝
+    TIMEOUT = "timeout"  # 确认超时
+    FAILED = "failed"  # 分发失败
 
 
 class RuntimeStatus(str, Enum):
     """运行时状态"""
-    QUEUED = "queued"          # 节点队列等待
-    RUNNING = "running"        # 正在执行
-    SUCCESS = "success"        # 执行成功
-    FAILED = "failed"          # 执行失败
-    CANCELLED = "cancelled"    # 已取消
-    TIMEOUT = "timeout"        # 执行超时
-    SKIPPED = "skipped"        # 已跳过
+
+    QUEUED = "queued"  # 节点队列等待
+    RUNNING = "running"  # 正在执行
+    SUCCESS = "success"  # 执行成功
+    FAILED = "failed"  # 执行失败
+    CANCELLED = "cancelled"  # 已取消
+    TIMEOUT = "timeout"  # 执行超时
+    SKIPPED = "skipped"  # 已跳过
 
 
 class TaskType(str, Enum):
     """任务类型"""
+
     FILE = "file"
     CODE = "code"
     RULE = "rule"
-    SPIDER = "spider"          # 通过 Worker 节点执行的爬虫任务
+    SPIDER = "spider"  # 通过 Worker 节点执行的爬虫任务
 
 
 class ScheduleType(str, Enum):
     """调度类型"""
+
     ONCE = "once"
     CRON = "cron"
     INTERVAL = "interval"
@@ -121,16 +142,19 @@ class ScheduleType(str, Enum):
 
 class ExecutionStrategy(str, Enum):
     """执行策略"""
-    FIXED_WORKER = "fixed"     # 固定 Worker（仅在绑定 Worker 执行，不可用时失败）
-    SPECIFIED = "specified"    # 指定 Worker（任务级别指定）
-    AUTO_SELECT = "auto"       # 自动选择（负载均衡）
-    PREFER_BOUND = "prefer"    # 优先绑定 Worker（不可用时自动选择其他 Worker）
+
+    FIXED_WORKER = "fixed"  # 固定 Worker（仅在绑定 Worker 执行，不可用时失败）
+    SPECIFIED = "specified"  # 指定 Worker（任务级别指定）
+    AUTO_SELECT = "auto"  # 自动选择（负载均衡）
+    PREFER_BOUND = "prefer"  # 优先绑定 Worker（不可用时自动选择其他 Worker）
 
 
 # ========== 运行时环境相关枚举 ==========
 
+
 class RuntimeKind(str, Enum):
     """运行时类型"""
+
     PYTHON = "python"
     JAVA = "java"
     GO = "go"
@@ -138,25 +162,23 @@ class RuntimeKind(str, Enum):
 
 class RuntimeScope(str, Enum):
     """运行时环境作用域"""
+
     SHARED = "shared"
     PRIVATE = "private"
 
 
 class RuntimeLocation(str, Enum):
     """运行时环境位置"""
-    WORKER = "worker"          # Worker
 
-
-class InterpreterSource(str, Enum):
-    """解释器来源"""
-    MISE = "mise"
-    LOCAL = "local"
+    WORKER = "worker"  # Worker
 
 
 # ========== Worker 节点相关枚举 ==========
 
+
 class WorkerStatus(str, Enum):
     """Worker 节点状态"""
+
     ONLINE = "online"
     OFFLINE = "offline"
     MAINTENANCE = "maintenance"
@@ -165,8 +187,10 @@ class WorkerStatus(str, Enum):
 
 # ========== 审计日志相关枚举 ==========
 
+
 class AuditAction(str, Enum):
     """审计操作类型"""
+
     # 用户相关
     LOGIN = "login"
     LOGOUT = "logout"
@@ -212,21 +236,24 @@ class AuditAction(str, Enum):
 
 # ========== 爬取批次相关枚举 ==========
 
+
 class BatchStatus(str, Enum):
     """批次状态"""
-    PENDING = "pending"        # 等待开始
-    RUNNING = "running"        # 运行中
-    PAUSED = "paused"          # 已暂停
-    COMPLETED = "completed"    # 已完成
-    FAILED = "failed"          # 失败
-    CANCELLED = "cancelled"    # 已取消
+
+    PENDING = "pending"  # 等待开始
+    RUNNING = "running"  # 运行中
+    PAUSED = "paused"  # 已暂停
+    COMPLETED = "completed"  # 已完成
+    FAILED = "failed"  # 失败
+    CANCELLED = "cancelled"  # 已取消
 
 
 class Priority(int, Enum):
     """任务优先级"""
-    HIGH = 0                   # 高优先级
-    NORMAL = 5                 # 普通优先级
-    LOW = 9                    # 低优先级
+
+    HIGH = 0  # 高优先级
+    NORMAL = 5  # 普通优先级
+    LOW = 9  # 低优先级
 
 
 __all__ = [
@@ -249,7 +276,6 @@ __all__ = [
     "RuntimeKind",
     "RuntimeScope",
     "RuntimeLocation",
-    "InterpreterSource",
     # Worker 节点相关
     "WorkerStatus",
     # 审计日志相关

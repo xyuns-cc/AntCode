@@ -1,8 +1,4 @@
-"""
-数据库配置模块
-
-提供 Tortoise ORM 配置，支持 SQLite、MySQL、PostgreSQL。
-"""
+"""PostgreSQL-only Tortoise ORM configuration."""
 
 import os
 from functools import lru_cache
@@ -16,40 +12,44 @@ from loguru import logger
 load_dotenv()
 
 
-def _find_project_root() -> str:
-    """查找项目根目录"""
-    from pathlib import Path
-
-    current = Path(__file__).resolve()
-    for parent in current.parents:
-        if (parent / "pyproject.toml").exists():
-            return str(parent)
-    return str(current.parent.parent.parent.parent.parent.parent)
-
-
-# 基础目录
-BASE_DIR = _find_project_root()
-DATA_DIR = os.path.join(BASE_DIR, "data", "backend")
-
-
 def get_database_url() -> str:
     """获取数据库 URL"""
-    db_url = os.getenv("DATABASE_URL", "")
-    if db_url:
-        return db_url
-    return f"sqlite:///{os.path.join(DATA_DIR, 'db', 'antcode.sqlite3')}"
+    db_url = os.getenv("DATABASE_URL", "").strip()
+    if not db_url:
+        raise ValueError("DATABASE_URL 必须设置，且只能使用 PostgreSQL。")
+    if not db_url.lower().startswith(("postgres://", "postgresql://")):
+        raise ValueError("DATABASE_URL 只能使用 PostgreSQL 连接串。")
+    return db_url
 
 
 def _parse_db_url(db_url: str) -> dict[str, Any]:
     """解析数据库 URL"""
     parsed = urlparse(db_url)
-    return {
-        "host": parsed.hostname or "localhost",
-        "port": parsed.port or (3306 if "mysql" in db_url.lower() else 5432),
-        "user": parsed.username or "root",
-        "password": parsed.password or "",
-        "database": (parsed.path.lstrip("/").split("?")[0]) or "antcode",
+    database = parsed.path.lstrip("/").split("?")[0]
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("DATABASE_URL port 无效。") from exc
+
+    required_parts = {
+        "host": parsed.hostname,
+        "port": port,
+        "user": parsed.username,
+        "password": parsed.password,
+        "database": database,
     }
+    missing = [name for name, value in required_parts.items() if value in (None, "")]
+    if missing:
+        raise ValueError(f"DATABASE_URL 缺少 {', '.join(missing)}。")
+
+    return {
+        "host": parsed.hostname,
+        "port": port,
+        "user": parsed.username,
+        "password": parsed.password,
+        "database": database,
+    }
+
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -58,106 +58,59 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _resolve_pool_size(
+    service: str | None,
+    min_connections: int | None,
+    max_connections: int | None,
+) -> tuple[int, int]:
+    """从 Settings 解析连接池大小，显式参数优先于配置。"""
+    from antcode_core.common.config import settings
+
+    resolved_min = min_connections if min_connections is not None else settings.DB_POOL_MIN
+    resolved_max = max_connections if max_connections is not None else settings.db_pool_max_for(service)
+    if resolved_min > resolved_max:
+        resolved_min = resolved_max
+    return resolved_min, resolved_max
+
+
 def get_tortoise_config(
     models_module: str = "antcode_core.domain.models",
-    include_aerich: bool = False,
-    min_connections: int = 20,
-    max_connections: int = 200,
+    min_connections: int | None = None,
+    max_connections: int | None = None,
+    service: str | None = None,
 ) -> dict[str, Any]:
     """获取 Tortoise ORM 配置
 
-    支持的数据库类型：
-    - SQLite: sqlite:///path/to/db.sqlite3
-    - MySQL: mysql://user:pass@host:port/dbname
-    - PostgreSQL: postgres://user:pass@host:port/dbname
-
     Args:
         models_module: 模型模块路径
-        include_aerich: 是否包含 aerich 模型（用于迁移）
-        min_connections: 最小连接数
-        max_connections: 最大连接数
+        min_connections: 最小连接数；None 时取 Settings.DB_POOL_MIN
+        max_connections: 最大连接数；None 时按 service 取 Settings.DB_POOL_MAX_*
+        service: 服务名（web_api/master/gateway/worker），用于选择 maxsize 默认值
 
     Returns:
         Tortoise ORM 配置字典
     """
     db_url = get_database_url()
-    db_url_lower = db_url.lower()
-
-    if db_url_lower.startswith("sqlite"):
-        file_path = db_url.replace("sqlite:///", "")
-        if not file_path.startswith("/"):
-            file_path = os.path.join(DATA_DIR, "db", os.path.basename(file_path))
-
-        # 确保目录存在
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        connection_config = {
-            "engine": "tortoise.backends.sqlite",
-            "credentials": {"file_path": file_path},
-        }
-    elif "mysql" in db_url_lower or "mariadb" in db_url_lower:
-        creds = _parse_db_url(db_url)
-        pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "300"))
-        ssl_enabled = _parse_bool_env("DB_SSL", False)
-        ssl_config: dict[str, Any] | None = None
-        if ssl_enabled:
-            ssl_config = {}
-            ssl_ca = os.getenv("DB_SSL_CA")
-            ssl_cert = os.getenv("DB_SSL_CERT")
-            ssl_key = os.getenv("DB_SSL_KEY")
-            ssl_verify = os.getenv("DB_SSL_VERIFY")
-            if ssl_ca:
-                ssl_config["ca"] = ssl_ca
-            if ssl_cert:
-                ssl_config["cert"] = ssl_cert
-            if ssl_key:
-                ssl_config["key"] = ssl_key
-            if ssl_verify is not None and ssl_verify != "":
-                ssl_config["verify_mode"] = ssl_verify
-        connection_config = {
-            "engine": "tortoise.backends.mysql",
-            "credentials": {
-                "host": creds["host"],
-                "port": creds["port"],
-                "user": creds["user"],
-                "password": creds["password"],
-                "database": creds["database"],
-                "charset": "utf8mb4",
-                "connect_timeout": 30,
-            },
-            "minsize": min_connections,
-            "maxsize": max_connections,
-            "pool_recycle": pool_recycle,
-        }
-        if ssl_enabled:
-            connection_config["credentials"]["ssl"] = ssl_config or {}
-    elif "postgres" in db_url_lower:
-        creds = _parse_db_url(db_url)
-        connection_config = {
-            "engine": "tortoise.backends.asyncpg",
-            "credentials": {
-                "host": creds["host"],
-                "port": creds["port"],
-                "user": creds["user"],
-                "password": creds["password"],
-                "database": creds["database"],
-            },
-            "minsize": min_connections,
-            "maxsize": max_connections,
-        }
-    else:
-        raise ValueError(f"不支持的数据库类型: {db_url}")
-
-    # 构建模型列表
-    models_list = [models_module]
-    if include_aerich:
-        models_list.append("aerich.models")
+    creds = _parse_db_url(db_url)
+    pool_min, pool_max = _resolve_pool_size(service, min_connections, max_connections)
+    connection_config = {
+        "engine": "tortoise.backends.asyncpg",
+        "credentials": {
+            "host": creds["host"],
+            "port": creds["port"],
+            "user": creds["user"],
+            "password": creds["password"],
+            "database": creds["database"],
+        },
+        "minsize": pool_min,
+        "maxsize": pool_max,
+    }
 
     return {
         "connections": {"default": connection_config},
         "apps": {
             "models": {
-                "models": models_list,
+                "models": [models_module],
                 "default_connection": "default",
             },
         },
@@ -167,24 +120,62 @@ def get_tortoise_config(
 
 
 @lru_cache
-def get_default_tortoise_config() -> dict[str, Any]:
-    """获取默认的 Tortoise ORM 配置（带缓存）"""
-    return get_tortoise_config()
+def _cached_config(service: str | None) -> dict[str, Any]:
+    return get_tortoise_config(service=service)
 
 
-async def init_db(config: dict[str, Any] | None = None) -> None:
+def get_default_tortoise_config(service: str | None = None) -> dict[str, Any]:
+    """获取默认的 Tortoise ORM 配置（带缓存，按 service 名分键）"""
+    return _cached_config(service)
+
+
+async def _warn_if_pool_oversized(service: str | None) -> None:
+    """启动后校验 PG max_connections 是否足以支撑当前 pool。"""
+    from tortoise import Tortoise
+
+    from antcode_core.common.config import settings
+
+    pool_max = settings.db_pool_max_for(service)
+    try:
+        conn = Tortoise.get_connection("default")
+        rows = await conn.execute_query_dict(
+            "SELECT setting::int AS max_conn FROM pg_settings WHERE name='max_connections'"
+        )
+    except Exception as exc:
+        logger.debug(f"读取 PG max_connections 失败，跳过校验: {exc}")
+        return
+    if not rows:
+        return
+    pg_max = int(rows[0]["max_conn"])
+    if pool_max * 2 > pg_max:
+        logger.warning(
+            "服务 {} 的 DB 连接池 maxsize={} 已超过 PG max_connections={} 的一半，"
+            "多实例部署可能触发 'too many connections'。建议调高 PG max_connections 或下调 DB_POOL_MAX_{}。",
+            service or "default",
+            pool_max,
+            pg_max,
+            (service or "default").upper(),
+        )
+
+
+async def init_db(
+    config: dict[str, Any] | None = None,
+    service: str | None = None,
+) -> None:
     """初始化数据库连接
 
     Args:
-        config: Tortoise ORM 配置，为 None 时使用默认配置
+        config: Tortoise ORM 配置；为 None 时按 service 取默认
+        service: 服务名（web_api/master/gateway/worker），用于选择 maxsize
     """
     from tortoise import Tortoise
 
     if config is None:
-        config = get_default_tortoise_config()
+        config = get_default_tortoise_config(service=service)
 
     await Tortoise.init(config=config)
-    logger.info("数据库连接已初始化")
+    logger.info("数据库连接已初始化 (service={})", service or "default")
+    await _warn_if_pool_oversized(service)
 
 
 async def close_db() -> None:
@@ -193,22 +184,3 @@ async def close_db() -> None:
 
     await Tortoise.close_connections()
     logger.info("数据库连接已关闭")
-
-
-async def generate_schemas(safe: bool = True) -> None:
-    """生成数据库表结构
-
-    Args:
-        safe: 是否安全模式（不删除已存在的表）
-    """
-    from tortoise import Tortoise
-
-    await Tortoise.generate_schemas(safe=safe)
-    logger.info("数据库表结构已生成")
-
-
-# Aerich 使用的配置变量
-TORTOISE_ORM = get_tortoise_config(
-    models_module="antcode_core.domain.models",
-    include_aerich=True,
-)

@@ -42,6 +42,7 @@ from antcode_contracts import common_pb2, data_pb2
 _STATUS_STR_TO_PROTO: dict[str, int] = {
     "": data_pb2.Status.STATUS_UNSPECIFIED,
     "pending": data_pb2.Status.STATUS_PENDING,
+    "preparing": data_pb2.Status.STATUS_PENDING,  # E2: worker 内部准备阶段视为 PENDING
     "running": data_pb2.Status.STATUS_RUNNING,
     "success": data_pb2.Status.STATUS_COMPLETED,
     "completed": data_pb2.Status.STATUS_COMPLETED,
@@ -49,6 +50,7 @@ _STATUS_STR_TO_PROTO: dict[str, int] = {
     "failed": data_pb2.Status.STATUS_FAILED,
     "failure": data_pb2.Status.STATUS_FAILED,
     "error": data_pb2.Status.STATUS_FAILED,
+    "killed": data_pb2.Status.STATUS_FAILED,  # E2: 被 kill 视为失败（proto 无 KILLED）
     "cancelled": data_pb2.Status.STATUS_CANCELLED,
     "canceled": data_pb2.Status.STATUS_CANCELLED,
     "timeout": data_pb2.Status.STATUS_TIMEOUT,

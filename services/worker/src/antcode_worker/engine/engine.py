@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import shutil
+import tempfile
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -283,8 +286,49 @@ class Engine:
                     receipt=getattr(task_msg, "receipt", None),
                 )
 
-                # 添加到状态管理
-                await self._state_manager.add(run_id, task_msg.task_id, receipt=task_msg.receipt)
+                # B2: 本地去重 —— state_manager.add_if_new 报告已存在时跳过 enqueue，
+                # 避免 reclaim / direct 重投时同一 run_id 排入两次本地队列。
+                _, is_new_local = await self._state_manager.add_if_new(
+                    run_id, task_msg.task_id, receipt=task_msg.receipt
+                )
+                if not is_new_local:
+                    logger.warning(
+                        f"跳过重复投递（本地已存在 run）: run_id={run_id} task_id={task_msg.task_id}"
+                    )
+                    # ACK 掉重复消息避免占 PEL
+                    receipt = getattr(task_msg, "receipt", None)
+                    if receipt:
+                        try:
+                            # R1-P1-4 (审查报告): ack_task 必须传 receipt（含
+                            # stream_key|msg_id），传 task_id 会走 _decode_receipt
+                            # 的 ``if "|" not in receipt: return "", ""`` 静默失败
+                            await self._transport.ack_task(receipt, accepted=True)
+                        except Exception as ack_exc:
+                            logger.warning(f"跳过重复投递后 ack 失败: {ack_exc}")
+                    continue
+
+                # B2 跨机 fencing：SET NX processing:{run_id} 抢占，防止 reclaim
+                # 把消息交给另一台 worker 时两台同时跑。Redis 不可达时保守放行
+                # 只依赖本地去重（单节点部署时天然安全）。
+                if not await self._claim_run_ownership(run_id):
+                    logger.warning(
+                        f"跳过重复投递（其它 worker 已持有 run）: run_id={run_id}"
+                    )
+                    # 从本地状态清理（我们没真的接手）；ACK 掉不属于自己的消息避免死锁
+                    try:
+                        await self._state_manager.remove(run_id)
+                    except Exception:
+                        pass
+                    receipt = getattr(task_msg, "receipt", None)
+                    if receipt:
+                        try:
+                            # R1-P1-4 (审查报告): ack_task 必须传 receipt（含
+                            # stream_key|msg_id），传 task_id 会走 _decode_receipt
+                            # 的 ``if "|" not in receipt: return "", ""`` 静默失败
+                            await self._transport.ack_task(receipt, accepted=True)
+                        except Exception as ack_exc:
+                            logger.warning(f"跨机去重后 ack 失败: {ack_exc}")
+                    continue
 
                 # 入队
                 await self._scheduler.enqueue(
@@ -730,8 +774,16 @@ class Engine:
                 finished_at=datetime.now(),
             )
         finally:
+            # R1-P1-6 (审查报告): 隔离 log_manager.stop 异常。老实现里
+            # LogManager.stop() → BatchSender.flush() → 失败 raise RuntimeError
+            # 会替换 try 块的 return 值，被外层 _worker_loop 兜底吞掉，
+            # 结果永远不上报也不 ACK，任务在 master 侧卡永远 running。
+            # 现在 stop 失败降级为告警，不影响结果上报。
             if log_manager:
-                await log_manager.stop()
+                try:
+                    await log_manager.stop()
+                except Exception as exc:
+                    logger.warning(f"log_manager.stop 失败但不影响结果上报: {exc}")
             if runtime_handle and self._runtime_manager:
                 await self._runtime_manager.release(runtime_handle)
             # V3: 清理 fetched workspace,避免无限堆积
@@ -740,6 +792,13 @@ class Engine:
                     await self._project_fetcher.cleanup(run_id)
                 except Exception:
                     logger.exception(f"清理 workspace 失败: run_id={run_id}")
+            # R5-P2-6: rule 插件在无 workspace 时会把 rule JSON 写到
+            # `/tmp/antcode-rule/{run_id}/`（plugin.py:_resolve_rule_dir 的
+            # fallback 分支），fetcher.cleanup 只清 workspace 目录管不到这里。
+            # 长跑几天后 /tmp 会堆一堆 rule-*.json 遗骸。这里按约定路径清一
+            # 下——只清 run_id 子目录，不动 `/tmp/antcode-rule/` 根，避免并发
+            # run 相互踩。
+            await self._cleanup_rule_tmp(run_id)
 
     async def _report_result(self, context: RunContext, result: ExecResult) -> None:
         """上报结果（幂等）"""
@@ -772,10 +831,40 @@ class Engine:
                 await self._transport.ack_task(context.receipt, accepted=True)
             # 清理状态(成功路径)
             await self._state_manager.remove(context.run_id)
+            # B2: 释放跨机归属键，让后续同 run_id 重投（如极端情况下的手动重试）不被锁死
+            await self._release_run_ownership(context.run_id)
         else:
             logger.error(
                 f"report_result 失败,不 ack 让 PEL 自动 reclaim: run_id={context.run_id}"
             )
+            # R1-P1-5 (审查报告): 上报失败必须清理本地 RunInfo。原实现只
+            # release_run_ownership 但不 remove 本地 state → direct 模式
+            # ready stream 是 per-worker，reclaim 后消息还是回到同一 worker，
+            # `add_if_new` 在 state 里已存在就直接吞掉重投，结果永久丢失。
+            try:
+                await self._state_manager.remove(context.run_id)
+            except Exception as exc:
+                logger.debug(f"清理本地 state 失败（可忽略）: {exc}")
+            # 释放本地归属，交给 reclaim 到别的 worker 重试。B2 的跨机 fencing
+            # 在 TTL 内保留，防止老 worker 复活后又抢——由新 worker 的 SET NX 决定归属。
+            await self._release_run_ownership(context.run_id)
+
+    async def _cleanup_rule_tmp(self, run_id: str) -> None:
+        """R5-P2-6: rule plugin fallback 路径 `/tmp/antcode-rule/{run_id}/` 兜底清理。
+
+        与 rule/plugin.py::_resolve_rule_dir 的兜底约定一致。只删 run_id
+        子目录，不 rm -rf 上层 `/tmp/antcode-rule/`（并发 run 会共享该父
+        目录）。用 to_thread 避免阻塞 event loop。
+        """
+        if not run_id:
+            return
+        rule_run_dir = os.path.join(tempfile.gettempdir(), "antcode-rule", run_id)
+        try:
+            if os.path.isdir(rule_run_dir):
+                await asyncio.to_thread(shutil.rmtree, rule_run_dir, ignore_errors=True)
+        except Exception as exc:
+            # 清理失败不影响主流程；下一轮 tmp cleanup 或系统 tmp 清理会兜住
+            logger.debug(f"清理 rule tmp 目录失败: {rule_run_dir}: {exc}")
 
     async def _report_result_by_info(
         self,
@@ -877,6 +966,55 @@ class Engine:
     def _generate_run_id(self, task_id: str) -> str:
         return f"run-{task_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 
+    # B2: 跨机 run 归属期（秒）。任务实际执行时长 ≤ TASK_EXECUTION_TIMEOUT，
+    # 归属期 = timeout + 冗余；正常 ack 或结果回传时会 DEL，Redis 侧不会长期占用。
+    _RUN_OWNERSHIP_TTL_SECONDS = 3600 + 300
+
+    async def _claim_run_ownership(self, run_id: str) -> bool:
+        """B2 跨机去重：SET NX 抢占 ``processing:{run_id}``。
+
+        - 成功 → 只有我在跑这个 run。
+        - 失败 → 别的 worker（reclaim / direct 重投另一台）已持有，跳过。
+        - Redis 不可达 → 保守返回 True 让本地去重继续起作用（单 worker 安全，
+          多 worker 场景由运维监控，不做静默双跑）。
+        """
+        try:
+            from antcode_core.infrastructure.redis import get_redis_client
+
+            redis = await get_redis_client()
+            if redis is None:
+                logger.debug("Redis 不可达，跳过跨机去重（放行本地已去重的消息）")
+                return True
+            key = f"antcode:run:owner:{run_id}"
+            worker_id = getattr(self._transport, "worker_id", "") or "unknown"
+            ok = await redis.set(key, worker_id, nx=True, ex=self._RUN_OWNERSHIP_TTL_SECONDS)
+            return bool(ok)
+        except Exception as exc:
+            logger.warning(f"跨机去重 SET NX 失败(保守放行): run_id={run_id} err={exc}")
+            return True
+
+    async def _release_run_ownership(self, run_id: str) -> None:
+        """任务完成后释放跨机归属键。仅当 key 值为我方 worker_id 时才 DEL（防误删）。"""
+        try:
+            from antcode_core.infrastructure.redis import get_redis_client
+
+            redis = await get_redis_client()
+            if redis is None:
+                return
+            key = f"antcode:run:owner:{run_id}"
+            worker_id = getattr(self._transport, "worker_id", "") or "unknown"
+            # Lua 保证 GET+DEL 原子
+            script = """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('del', KEYS[1])
+            else
+                return 0
+            end
+            """
+            await redis.eval(script, 1, key, worker_id)
+        except Exception as exc:
+            logger.debug(f"释放跨机归属键失败(TTL 会兜底): run_id={run_id} err={exc}")
+
     def _build_payload(self, task_msg: TaskMessage) -> Any:
         """构建任务 payload"""
         from antcode_worker.domain.enums import TaskType
@@ -889,6 +1027,7 @@ class Engine:
             "render": TaskType.RENDER,
             "code": TaskType.CODE,
             "file": TaskType.CODE,  # 文件项目使用 CODE 插件执行
+            "rule": TaskType.RULE,  # O1: 规则项目走 RulePlugin
         }.get(project_type, TaskType.CUSTOM)
 
         params = getattr(task_msg, "params", {}) or {}

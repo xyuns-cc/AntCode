@@ -18,9 +18,9 @@ Worker 默认使用 `data/worker`：
 ```text
 data/worker/
 ├── runtimes/     # Python 运行时缓存
-├── projects/     # 项目缓存
-├── runs/         # 运行产物
-└── logs/         # 执行日志
+├── runs/         # 运行临时文件
+├── temp/         # 依赖构建与沙箱临时文件
+└── identity/     # Worker 本地身份文件
 ```
 
 ## 典型流程
@@ -41,7 +41,7 @@ data/worker/
 
 ## 运维建议
 
-- 定期清理过期运行时与日志
+- 定期清理过期运行时与临时执行文件；历史日志以 PostgreSQL 为准
 - 将 `data/worker` 挂载到持久化磁盘
 - 对关键 Worker 启用独立监控与告警
 - 多 Worker 部署时保持 Python 版本策略一致

@@ -31,6 +31,13 @@ service DataService {
   // Replaces SendLog + SendLogBatch + SendLogChunk - large payloads go via
   // source_bundle (pgartifact://) instead of being chunked through gRPC.
   rpc StreamLogs(stream LogBatch) returns (LogAck);
+
+  // T6-T3: Rule/Spider scraped items flow. Client-streaming — Scrapy pipeline
+  // sends 1..N items per batch, gateway transcodes to Redis
+  // `antcode:spider:data:{run_id}` stream (same wire fields as direct mode).
+  // Batch MAY also carry a `meta` heartbeat (items_count / last_item_at) so
+  // batch_status_loop / test_service see real-time progress.
+  rpc StreamSpiderData(stream SpiderDataBatch) returns (SpiderDataAck);
 }
 
 // =========================================================================
@@ -145,4 +152,45 @@ message LogEntry {
 
 message LogAck {
   int32 received = 1;
+}
+
+// =========================================================================
+// T6-T3: Spider / Rule scraped items (client-streaming, single path)
+// =========================================================================
+// A SpiderDataBatch carries 1..N items scraped from a single run, so a
+// gateway-mode Worker can push Scrapy pipeline output back without direct
+// Redis access. Field names on SpiderDataItem are byte-identical to what the
+// direct-mode `AntCodeRedisPipeline` XADDs into `spider:data:{run_id}`; the
+// gateway just re-encodes into Redis Streams entries.
+
+message SpiderDataBatch {
+  string worker_id = 1;
+  string run_id = 2;
+  string project_id = 3;
+  repeated SpiderDataItem items = 4;
+  // Optional heartbeat — reflects the same fields the direct-mode pipeline
+  // HSETs to `spider:meta:{run_id}` every N items (T6-P2-14).
+  SpiderMetaUpdate meta = 5;
+  TraceContext trace = 100;
+}
+
+message SpiderDataItem {
+  string item_id = 1;               // UUIDv4
+  string spider_name = 2;
+  string item_type = 3;             // "default" 兼容 direct 模式约定
+  bytes data = 4;                   // JSON bytes of extracted fields
+  string url = 5;
+  string timestamp = 6;             // ISO 8601
+  uint64 sequence = 7;              // Per-run monotonic
+}
+
+message SpiderMetaUpdate {
+  string status = 1;                // running / completed / failed (可选)
+  uint64 items_count = 2;
+  string last_item_at = 3;          // ISO 8601
+}
+
+message SpiderDataAck {
+  uint64 accepted = 1;
+  uint64 failed = 2;                // xadd 失败条数
 }

@@ -1,7 +1,4 @@
-"""爬虫后端抽象层
-
-提供队列、去重、进度存储的抽象接口和工厂方法。
-"""
+"""爬虫 Redis 后端抽象层。"""
 
 from antcode_core.application.services.crawl.backends.base import (
     CrawlQueueBackend,
@@ -17,9 +14,6 @@ from antcode_core.application.services.crawl.backends.dedup_backend import (
     get_dedup_store,
     reset_dedup_store,
 )
-from antcode_core.application.services.crawl.backends.memory_dedup import InMemoryDedupStore
-from antcode_core.application.services.crawl.backends.memory_progress import InMemoryProgressStore
-from antcode_core.application.services.crawl.backends.memory_queue import InMemoryCrawlQueueBackend
 from antcode_core.application.services.crawl.backends.progress_backend import (
     ProgressStore,
     get_progress_store,
@@ -57,13 +51,10 @@ __all__ = [
     "get_progress_store",
     "reset_progress_store",
     # 队列具体实现
-    "InMemoryCrawlQueueBackend",
     "RedisCrawlQueueBackend",
     # 去重具体实现
-    "InMemoryDedupStore",
     "RedisDedupStore",
     # 进度具体实现
-    "InMemoryProgressStore",
     "RedisProgressStore",
     # Redis 键名工具函数
     "get_stream_key",

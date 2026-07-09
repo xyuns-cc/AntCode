@@ -1,11 +1,113 @@
 /* ResponsiveTable 组件样式 - CSS Module */
 
-/* 表格容器 */
+/* 表格容器
+ * 注意：不用 overflow:hidden / isolation:isolate —— 否则会创建独立 stacking context，
+ * 导致分页器 sizeChanger 的 Select dropdown 在某些情况下被表格 sticky thead 遮挡。
+ * 水平滚动由 .ant-table-container 自身处理。 */
 .container {
   width: 100%;
   position: relative;
-  overflow: hidden;
-  isolation: isolate; /* 创建新的堆叠上下文 */
+}
+
+/* fill 模式：撑满父容器高度，表头固定，body 内 Y 滚动 */
+.fillWrapper {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fillWrapper :global(.ant-table-wrapper),
+.fillWrapper :global(.ant-spin-nested-loading),
+.fillWrapper :global(.ant-spin-container) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fillWrapper :global(.ant-table) {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 分页区固定在底部，高 z-index 确保其内部 Select 弹层不被表格固定列/sticky thead 遮挡。
+ * margin 收紧到 8px，让表格 body 多占可视空间。 */
+.fillWrapper :global(.ant-table-pagination),
+.container :global(.ant-table-pagination) {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 50;
+  isolation: isolate;
+  margin: 8px 0 0 !important;
+  background: var(--ant-color-bg-container);
+}
+
+/* fill 模式下表格本身不留底 padding（与 pagination margin 共同决定 gap） */
+.fillWrapper :global(.ant-table-container) {
+  padding-bottom: 0;
+}
+
+/* 分页器内 Select / 跳页 InputNumber */
+.container :global(.ant-table-pagination .ant-select),
+.container :global(.ant-table-pagination .ant-pagination-options) {
+  position: relative;
+  z-index: 10;
+}
+
+/* 拦截 antd 没 portal 到 body 的 Select 下拉弹层，强制最高层级 + 把 dropdown 提升到独立 stacking */
+.container :global(.ant-table-pagination .ant-select-dropdown) {
+  z-index: 9999 !important;
+}
+
+/* === 视觉优化：表头、斑马纹、hover、选中 === */
+
+/* 表头：浅灰背景，加粗 */
+.container :global(.ant-table-thead > tr > th) {
+  background-color: var(--ant-color-fill-quaternary) !important;
+  font-weight: 600;
+  color: var(--ant-color-text);
+  border-bottom: 1px solid var(--ant-color-border-secondary) !important;
+}
+
+/* 斑马纹：奇数行白色，偶数行极浅灰（hover 优先级更高） */
+.container :global(.ant-table-tbody > tr:nth-child(even) > td) {
+  background-color: var(--ant-color-fill-alter);
+}
+
+/* hover 行：统一颜色（覆盖斑马纹），过渡平滑 */
+.container :global(.ant-table-tbody > tr > td) {
+  transition: background-color 0.15s ease;
+}
+.container :global(.ant-table-tbody > tr:hover > td),
+.container :global(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right),
+.container :global(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-left) {
+  background-color: var(--ant-color-primary-bg) !important;
+}
+
+/* 选中行：主色高亮 */
+.container :global(.ant-table-tbody > tr.ant-table-row-selected > td),
+.container :global(.ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-right),
+.container :global(.ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-left) {
+  background-color: var(--ant-color-primary-bg-hover) !important;
+}
+
+/* 行分隔线：仅底部细线，更轻盈 */
+.container :global(.ant-table-tbody > tr > td) {
+  border-bottom: 1px solid var(--ant-color-split) !important;
+}
+
+/* 操作列按钮间距更紧凑 */
+.container :global(.table-actions-column .ant-btn) {
+  padding: 0 6px;
+}
+.container :global(.table-actions-column .ant-space) {
+  gap: 2px !important;
+}
+
+/* === 空状态：自定义内边距，更显眼 === */
+.container :global(.ant-table-placeholder .ant-empty) {
+  padding: 48px 0;
 }
 
 /* 表格包装器 */
@@ -170,15 +272,6 @@
 /* 表格加载状态 */
 .container :global(.ant-spin-container) {
   position: relative;
-}
-
-/* 确保分页器不被遮挡 */
-.container :global(.ant-table-pagination) {
-  position: relative;
-  z-index: 1;
-  background: inherit;
-  padding-top: 12px;
-  margin-top: 0;
 }
 
 /* 表格空状态 */

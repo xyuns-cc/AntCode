@@ -3,17 +3,16 @@
 处理项目相关的业务逻辑
 """
 
-import os
-import tarfile
-import zipfile
-from types import SimpleNamespace
-
 from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Q
 
-from antcode_core.common.hash_utils import calculate_content_hash
+from antcode_core.application.services.projects.project_source_service import (
+    project_source_service,
+)
+from antcode_core.application.services.projects.relation_service import relation_service
+from antcode_core.application.services.workers import worker_service
 from antcode_core.common.utils.db_optimizer import DatabaseOptimizer
 from antcode_core.common.utils.json_parser import parse_cookies, parse_headers
 from antcode_core.domain.models import Project, ProjectCode, ProjectFile, ProjectRule, ProjectType
@@ -24,342 +23,160 @@ from antcode_core.domain.schemas.project import (
     TaskJsonRequest,
     TaskMeta,
 )
-from antcode_core.application.services.files.file_storage import file_storage_service
-from antcode_core.application.services.projects.code_source import (
-    SOURCE_TYPE_GIT,
-    SOURCE_TYPE_LEGACY_INLINE,
-    SOURCE_TYPE_S3,
-    build_artifact_config,
-    build_code_source_config,
-    get_runtime_artifact_config,
-    get_runtime_source_config,
-    merge_artifact_runtime_config,
-    merge_code_source_runtime_config,
-    normalize_source_type,
-)
-from antcode_core.application.services.projects.git_credential_service import (
-    git_credential_service,
-)
-from antcode_core.application.services.projects.project_artifact_service import (
-    project_artifact_service,
-)
-from antcode_core.application.services.projects.upload_stream import InMemoryUploadFile
-from antcode_core.application.services.workers import worker_service
-from antcode_core.application.services.projects.relation_service import relation_service
 
 
 class ProjectService:
     """项目服务类"""
-
-    MAX_EXTRACT_SIZE = 500 * 1024 * 1024  # 500MB 展开体积上限
-    MAX_EXTRACT_FILES = 2000  # 最大文件数限制
-
-    @staticmethod
-    def _is_safe_path(base_dir, target_path):
-        """校验目标路径是否位于指定基准目录内"""
-        abs_base = os.path.abspath(base_dir)
-        abs_target = os.path.abspath(target_path)
-        return os.path.commonpath([abs_base, abs_target]) == abs_base
-
-    @staticmethod
-    def _resolve_full_path(path):
-        """将存储路径解析为绝对路径"""
-        if not path:
-            return None
-        if os.path.isabs(path):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="禁止使用绝对路径，请迁移为存储相对路径",
-            )
-        return file_storage_service.get_file_path(path)
-
-    @staticmethod
-    def _is_compressed_filename(filename: str) -> bool:
-        lower_name = (filename or "").lower()
-        return lower_name.endswith((".zip", ".tar.gz", ".tar"))
 
     @staticmethod
     def _clean_runtime_config(runtime_config):
         if not runtime_config:
             return {}
         cleaned = dict(runtime_config)
-        cleaned.pop("source", None)
-        cleaned.pop("artifact", None)
         return cleaned
 
     @staticmethod
-    def _build_s3_source_config(artifact_config):
-        source_key = artifact_config["original_file_path"] or artifact_config["file_path"]
-        return build_code_source_config(
-            source_type=SOURCE_TYPE_S3,
-            s3_key=source_key,
-            original_name=artifact_config["original_name"],
-            is_compressed=artifact_config["is_compressed"],
+    def _build_rule_detail_payload(request):
+        headers_data = parse_headers(getattr(request, "headers", None))
+        cookies_data = parse_cookies(getattr(request, "cookies", None))
+        return {
+            "engine": request.engine,
+            "target_url": request.target_url,
+            "url_pattern": request.url_pattern,
+            "request_method": getattr(request, "request_method", RequestMethod.GET),
+            "callback_type": getattr(request, "callback_type", CallbackType.LIST),
+            "extraction_rules": [rule.dict() for rule in request.extraction_rules]
+            if request.extraction_rules
+            else None,
+            "data_schema": getattr(request, "data_schema", None),
+            "pagination_config": request.pagination_config.dict() if request.pagination_config else None,
+            "max_pages": request.max_pages,
+            "start_page": getattr(request, "start_page", 1),
+            "request_delay": request.request_delay,
+            "retry_count": getattr(request, "retry_count", 3),
+            "timeout": getattr(request, "timeout", 30),
+            "priority": getattr(request, "priority", 0),
+            "dont_filter": getattr(request, "dont_filter", False),
+            "headers": headers_data,
+            "cookies": cookies_data,
+            "proxy_config": getattr(request, "proxy_config", None),
+            "anti_spider": getattr(request, "anti_spider", None),
+            "task_config": getattr(request, "task_config", None),
+            # S10: scrapy-redis 断点续爬 + 内容级去重
+            "resume_enabled": bool(getattr(request, "resume_enabled", None) or False),
+            "dedup_config": getattr(request, "dedup_config", None),
+        }
+
+    @staticmethod
+    def _build_rule_update_payload(request):
+        update_data = {}
+        scalar_fields = (
+            "engine",
+            "target_url",
+            "url_pattern",
+            "callback_type",
+            "request_method",
+            "max_pages",
+            "start_page",
+            "request_delay",
+            "retry_count",
+            "timeout",
+            "priority",
+            "dont_filter",
+            # S10
+            "resume_enabled",
         )
+        for field in scalar_fields:
+            value = getattr(request, field, None)
+            if value is not None:
+                update_data[field] = value
 
-    async def _build_source_config(self, request, owner_user_id, default_source_type):
-        try:
-            source_type = normalize_source_type(
-                getattr(request, "source_type", None),
-                default_source_type,
-            )
-            source_config = build_code_source_config(
-                source_type=source_type,
-                git_url=getattr(request, "git_url", None),
-                git_branch=getattr(request, "git_branch", None),
-                git_commit=getattr(request, "git_commit", None),
-                git_subdir=getattr(request, "git_subdir", None),
-                git_credential_id=getattr(request, "git_credential_id", None),
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
-        if source_config["type"] == SOURCE_TYPE_GIT:
-            await git_credential_service.ensure_accessible(
-                source_config.get("git_credential_id"),
-                owner_user_id,
-            )
-        return source_config
+        if request.extraction_rules is not None:
+            update_data["extraction_rules"] = [rule.dict() for rule in request.extraction_rules]
+        if request.pagination_config is not None:
+            update_data["pagination_config"] = request.pagination_config.dict()
 
-    async def _persist_artifact(self, file, project_id, entry_point):
-        filename = file.filename or ""
-        is_compressed = self._is_compressed_filename(filename)
-        effective_entry_point = entry_point
-        if is_compressed and not (effective_entry_point and str(effective_entry_point).strip()):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="压缩包必须指定入口文件",
-            )
-        storage_path, file_hash, file_size, file_type = await file_storage_service.save_file(file)
-        extracted_path = None
-        if is_compressed:
-            extracted_path = await self._extract_compressed_file(storage_path, filename, project_id)
-        return build_artifact_config(
-            storage_type=SOURCE_TYPE_S3,
-            file_path=extracted_path or storage_path,
-            original_file_path=storage_path if is_compressed else None,
-            original_name=filename,
-            file_size=file_size,
-            file_hash=file_hash,
-            file_type=file_type,
-            is_compressed=is_compressed,
-            entry_point=effective_entry_point,
+        clearable_fields = (
+            "data_schema",
+            "headers",
+            "cookies",
+            "proxy_config",
+            "anti_spider",
+            "task_config",
+            # S10
+            "dedup_config",
         )
+        for field in clearable_fields:
+            if field in request.model_fields_set:
+                update_data[field] = getattr(request, field)
 
-    def _build_runtime_config(
-        self,
-        current_runtime_config,
-        request_runtime_config,
-        source_config,
-        artifact_config=None,
-    ):
+        return update_data
+
+    @staticmethod
+    def _resolve_rule_proxy(rule_detail):
+        proxy_config = getattr(rule_detail, "proxy_config", None)
+        if not isinstance(proxy_config, dict):
+            return None
+        if proxy_config.get("enabled") is False:
+            return None
+        return proxy_config.get("proxy_url") or proxy_config.get("proxy")
+
+    def _build_runtime_config(self, current_runtime_config, request_runtime_config):
         base_runtime_config = request_runtime_config
         if base_runtime_config is None:
             base_runtime_config = current_runtime_config
-        runtime_config = self._clean_runtime_config(base_runtime_config)
-        runtime_config = merge_code_source_runtime_config(runtime_config, source_config)
-        if artifact_config is not None:
-            runtime_config = merge_artifact_runtime_config(runtime_config, artifact_config)
-        return runtime_config
-
-    def _merge_source_request(self, request, current_source, source_type):
-        return SimpleNamespace(
-            source_type=source_type,
-            git_url=getattr(request, "git_url", None)
-            if getattr(request, "git_url", None) is not None
-            else current_source.get("url"),
-            git_branch=getattr(request, "git_branch", None)
-            if getattr(request, "git_branch", None) is not None
-            else current_source.get("branch"),
-            git_commit=getattr(request, "git_commit", None)
-            if getattr(request, "git_commit", None) is not None
-            else current_source.get("commit"),
-            git_subdir=getattr(request, "git_subdir", None)
-            if getattr(request, "git_subdir", None) is not None
-            else current_source.get("subdir"),
-            git_credential_id=getattr(request, "git_credential_id", None)
-            if getattr(request, "git_credential_id", None) is not None
-            else current_source.get("git_credential_id"),
-        )
-
-    def _resolve_code_entry_point(self, request_entry_point, current_entry_point, filename):
-        if request_entry_point and str(request_entry_point).strip():
-            return str(request_entry_point).strip()
-        if current_entry_point and str(current_entry_point).strip():
-            return str(current_entry_point).strip()
-        if filename and not self._is_compressed_filename(filename):
-            return filename
-        return None
-
-    async def _persist_code_artifact(self, project_id, request, code_content, code_file, current_entry_point=None):
-        filename = code_file.filename if code_file else None
-        entry_point = self._resolve_code_entry_point(
-            getattr(request, "entry_point", None),
-            current_entry_point,
-            filename,
-        )
-        if not entry_point:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="S3 代码项目必须提供 entry_point",
-            )
-        if code_file is not None:
-            return await self._persist_artifact(code_file, project_id, entry_point)
-        if not code_content or not code_content.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="代码项目必须提供 code_content 或 code_file",
-            )
-        upload_file = InMemoryUploadFile(
-            filename=entry_point.rsplit("/", 1)[-1],
-            content=code_content.encode("utf-8"),
-        )
-        return await self._persist_artifact(upload_file, project_id, entry_point)
-
-    def _build_managed_artifact_config(self, artifact, entry_point):
-        return build_artifact_config(
-            storage_type="managed",
-            file_path=artifact.file_path,
-            original_file_path=artifact.original_file_path,
-            original_name=artifact.original_name,
-            file_size=artifact.file_size,
-            file_hash=artifact.file_hash,
-            file_type=artifact.file_type,
-            is_compressed=artifact.is_compressed,
-            entry_point=entry_point,
-            resolved_revision=artifact.resolved_revision,
-        )
-
-    def _build_file_artifact_from_detail(self, file_detail, source_type):
-        current_artifact = get_runtime_artifact_config(file_detail)
-        resolved_revision = current_artifact.get("resolved_revision", "")
-        if not resolved_revision and source_type == SOURCE_TYPE_GIT:
-            resolved_revision = file_detail.file_hash
-        return build_artifact_config(
-            storage_type=file_detail.storage_type,
-            file_path=file_detail.file_path,
-            original_file_path=file_detail.original_file_path,
-            original_name=file_detail.original_name,
-            file_size=file_detail.file_size,
-            file_hash=file_detail.file_hash,
-            file_type=file_detail.file_type,
-            is_compressed=file_detail.is_compressed,
-            entry_point=file_detail.entry_point,
-            resolved_revision=resolved_revision,
-        )
+        return self._clean_runtime_config(base_runtime_config)
 
     def _build_file_detail_payload(
         self,
         request,
-        source_config,
-        artifact_config,
         *,
         current_detail=None,
-        file_count=None,
-        additional_files=None,
     ):
+        entry_point = getattr(request, "entry_point", None)
+        if entry_point is None and current_detail is not None:
+            entry_point = current_detail.entry_point
+        if not entry_point or not str(entry_point).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Git 文件项目必须指定入口文件",
+            )
         runtime_config = self._build_runtime_config(
             getattr(current_detail, "runtime_config", None),
             getattr(request, "runtime_config", None),
-            source_config,
-            artifact_config,
         )
-        entry_point = artifact_config.get("entry_point") or getattr(request, "entry_point", None)
-        if entry_point is None and current_detail is not None:
-            entry_point = current_detail.entry_point
         environment_vars = getattr(request, "environment_vars", None)
         if environment_vars is None and current_detail is not None:
             environment_vars = current_detail.environment_vars
-        if file_count is None and current_detail is not None:
-            file_count = current_detail.file_count
-        if additional_files is None and current_detail is not None:
-            additional_files = current_detail.additional_files
         return {
-            "file_path": artifact_config["file_path"],
-            "original_file_path": artifact_config["original_file_path"] or None,
-            "original_name": artifact_config["original_name"],
-            "file_size": artifact_config["file_size"],
-            "file_type": artifact_config["file_type"],
-            "file_hash": artifact_config["file_hash"],
             "entry_point": entry_point,
             "runtime_config": runtime_config,
             "environment_vars": environment_vars,
-            "storage_type": artifact_config["storage_type"],
-            "is_compressed": artifact_config["is_compressed"],
-            "file_count": file_count,
-            "additional_files": additional_files,
         }
 
-    async def _build_updated_source_config(self, request, current_source, owner_user_id):
-        current_type = current_source.get("type") or SOURCE_TYPE_S3
-        requested_type = normalize_source_type(getattr(request, "source_type", None), current_type)
-        source_request = self._merge_source_request(request, current_source, requested_type)
-        return await self._build_source_config(source_request, owner_user_id, requested_type)
-
-    async def _mark_project_outdated(self, project):
-        from antcode_core.application.services.workers.worker_project_service import (
-            worker_project_service,
+    async def _bind_project_source(self, project_id, owner_user_id, request):
+        repository = await project_source_service._get_enabled_repository(
+            request.repository_id,
+            owner_user_id,
         )
+        source = await project_source_service.upsert_source(
+            project_id=project_id,
+            repository_id=repository.id,
+            ref=getattr(request, "ref", None) or repository.default_ref,
+            subdir=request.subdir,
+            entry_point=getattr(request, "entry_point", None) or getattr(request, "code_entry_point", None),
+            include_paths=getattr(request, "include_paths", None) or [],
+            runtime_config=getattr(request, "runtime_config", None),
+        )
+        return repository, source
 
-        await worker_project_service.mark_project_outdated(project.public_id)
-
-    def _check_extract_limits_zip(self, zip_ref, base_dir):
-        total_size = 0
-        file_count = 0
-        for info in zip_ref.infolist():
-            member_path = os.path.abspath(os.path.join(base_dir, info.filename))
-            if not self._is_safe_path(base_dir, member_path):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="压缩包包含非法路径，已拒绝",
-                )
-            if not info.is_dir():
-                total_size += info.file_size
-                file_count += 1
-            if total_size > self.MAX_EXTRACT_SIZE or file_count > self.MAX_EXTRACT_FILES:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="压缩包解压体积或文件数超出限制",
-                )
-
-    def _check_extract_limits_tar(self, tar_ref, base_dir):
-        total_size = 0
-        file_count = 0
-        safe_members = []
-        for member in tar_ref.getmembers():
-            if member.issym() or member.islnk():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="压缩包包含符号链接，已拒绝",
-                )
-            member_path = os.path.abspath(os.path.join(base_dir, member.name))
-            if not self._is_safe_path(base_dir, member_path):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="压缩包包含非法路径，已拒绝",
-                )
-            if member.isfile():
-                total_size += member.size
-                file_count += 1
-            safe_members.append(member)
-            if total_size > self.MAX_EXTRACT_SIZE or file_count > self.MAX_EXTRACT_FILES:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="压缩包解压体积或文件数超出限制",
-                )
-        return safe_members
-
-    async def create_project(self, request, user_id, file=None, files=None, code_file=None):
+    async def create_project(self, request, user_id):
         """
         创建项目
 
         Args:
             request: 项目创建请求
             user_id: 用户ID
-            file: 文件项目的文件（可选）
-            code_file: 代码项目的代码文件（可选）
 
         Returns:
             Project: 创建的项目对象
@@ -381,18 +198,30 @@ class ProjectService:
                     using_db=conn,
                 )
 
-                # 配置项目环境（支持本地和 Worker 运行时）
+                # 配置项目 Worker 运行时
                 await self._setup_project_environment(project, request, user_id, conn)
 
                 # 根据项目类型创建详情记录
                 if request.type == ProjectType.FILE:
-                    await self._create_file_project_detail(project, request, file, files, conn)
+                    await self._create_file_project_detail(project, request, conn)
                 elif request.type == ProjectType.RULE:
                     await self._create_rule_project_detail(project, request, conn)
                 elif request.type == ProjectType.CODE:
-                    await self._create_code_project_detail(project, request, code_file, conn)
+                    await self._create_code_project_detail(project, request, conn)
 
                 logger.info(f"项目创建成功: {project.name} (ID: {project.id})")
+
+                # P2: 响应层 ``_resolve_public_id`` 强要求 ``created_by_public_id``
+                # 才能组装 ProjectResponse；此前只 ``get_project_by_id`` 里 attach，
+                # create 路径直接把 project 传给 response builder 会 ValueError。
+                from antcode_core.application.services.users.user_service import (
+                    user_service,
+                )
+
+                creator = await user_service.get_user_by_id(project.user_id)
+                project.created_by_public_id = creator.public_id if creator else None
+                project.created_by_username = creator.username if creator else None
+
                 return project
 
         except IntegrityError as e:
@@ -409,81 +238,10 @@ class ProjectService:
                 detail=f"项目创建失败: {str(e)}",
             )
 
-    async def _create_file_project_detail(self, project, request, file, files=None, conn=None):
+    async def _create_file_project_detail(self, project, request, conn=None):
         """创建文件项目详情。"""
-        source_config = await self._build_source_config(request, project.user_id, SOURCE_TYPE_LEGACY_INLINE)
-        if source_config["type"] == SOURCE_TYPE_GIT:
-            await self._create_git_file_project_detail(project, request, conn)
-            return
-
-        if not file:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="文件项目必须上传文件",
-            )
-
-        artifact_config = await self._persist_artifact(file, project.id, request.entry_point)
-        source_config = self._build_s3_source_config(artifact_config)
-        runtime_config = self._build_runtime_config(
-            None,
-            request.runtime_config,
-            source_config,
-            artifact_config,
-        )
-        additional_files_info = None
-        total_file_count = 1
-
-        if files:
-            additional_files_info = []
-            total_file_count += len(files)
-            for additional_file in files:
-                if not additional_file.filename:
-                    continue
-                additional_artifact = await self._persist_artifact(
-                    additional_file,
-                    project.id,
-                    None,
-                )
-                additional_files_info.append(additional_artifact)
-
-        await ProjectFile.create(
-            project_id=project.id,
-            file_path=artifact_config["file_path"],
-            original_file_path=artifact_config["original_file_path"] or None,
-            original_name=artifact_config["original_name"],
-            file_size=artifact_config["file_size"],
-            file_type=artifact_config["file_type"],
-            file_hash=artifact_config["file_hash"],
-            entry_point=artifact_config["entry_point"] or request.entry_point,
-            runtime_config=runtime_config,
-            environment_vars=request.environment_vars,
-            storage_type=SOURCE_TYPE_S3,
-            is_compressed=artifact_config["is_compressed"],
-            file_count=total_file_count,
-            additional_files=additional_files_info,
-            using_db=conn,
-        )
-
-    async def _create_git_file_project_detail(self, project, request, conn=None):
-        source_config = await self._build_source_config(request, project.user_id, SOURCE_TYPE_GIT)
-        if not request.entry_point or not str(request.entry_point).strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Git 文件项目必须指定入口文件",
-            )
-
-        artifact = await project_artifact_service.materialize_git_source(
-            project.public_id,
-            source_config,
-        )
-        artifact_config = self._build_managed_artifact_config(artifact, request.entry_point)
-        detail_payload = self._build_file_detail_payload(
-            request,
-            source_config,
-            artifact_config,
-            file_count=1,
-            additional_files=None,
-        )
+        await self._bind_project_source(project.id, project.user_id, request)
+        detail_payload = self._build_file_detail_payload(request)
         await ProjectFile.create(
             project_id=project.id,
             using_db=conn,
@@ -492,152 +250,37 @@ class ProjectService:
 
     async def _create_rule_project_detail(self, project, request, conn=None):
         """创建规则项目详情"""
-
-        # 验证提取规则必须存在
         if not request.extraction_rules:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="必须提供提取规则")
-
-        # 解析headers和cookies数据
-        headers_data = parse_headers(getattr(request, "headers", None))
-        cookies_data = parse_cookies(getattr(request, "cookies", None))
-
         await ProjectRule.create(
             project_id=project.id,  # 使用应用层外键
-            engine=request.engine,
-            target_url=request.target_url,
-            url_pattern=request.url_pattern,
-            request_method=getattr(request, "request_method", RequestMethod.GET),
-            callback_type=getattr(request, "callback_type", CallbackType.LIST),
-            extraction_rules=[rule.dict() for rule in request.extraction_rules]
-            if request.extraction_rules
-            else None,
-            pagination_config=request.pagination_config.dict()
-            if request.pagination_config
-            else None,
-            max_pages=request.max_pages,
-            start_page=getattr(request, "start_page", 1),
-            request_delay=request.request_delay,
-            priority=getattr(request, "priority", 0),
-            headers=headers_data,
-            cookies=cookies_data,
             using_db=conn,
+            **self._build_rule_detail_payload(request),
         )
 
-    async def _create_code_project_detail(self, project, request, code_file, conn=None):
+    async def _create_code_project_detail(self, project, request, conn=None):
         """创建代码项目详情。"""
-        source_config = await self._build_source_config(request, project.user_id, SOURCE_TYPE_LEGACY_INLINE)
-        code_content = await self._resolve_code_project_content(request, code_file, source_config)
-        artifact_config = None
-        content = code_content or ""
         entry_point = request.entry_point
-
-        if source_config["type"] == SOURCE_TYPE_GIT:
-            artifact = await project_artifact_service.materialize_git_source(
-                project.public_id,
-                source_config,
+        if not entry_point or not str(entry_point).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Git 代码项目必须提供 entry_point",
             )
-            artifact_config = self._build_managed_artifact_config(artifact, entry_point)
-            content = ""
-        elif source_config["type"] == SOURCE_TYPE_S3:
-            artifact_config = await self._persist_code_artifact(
-                project.id,
-                request,
-                code_content,
-                code_file,
-            )
-            source_config = self._build_s3_source_config(artifact_config)
-            entry_point = artifact_config.get("entry_point") or request.entry_point
-            content = ""
-
-        content_hash = self._build_code_project_hash(content, source_config, artifact_config)
+        await self._bind_project_source(project.id, project.user_id, request)
         runtime_config = self._build_runtime_config(
             None,
             getattr(request, "runtime_config", None),
-            source_config,
-            artifact_config,
         )
 
         await ProjectCode.create(
             project_id=project.id,
-            content=content,
             language=request.language,
-            version=request.version,
-            content_hash=content_hash,
             entry_point=entry_point,
             runtime_config=runtime_config,
             environment_vars=getattr(request, "environment_vars", None),
             documentation=request.documentation,
             using_db=conn,
         )
-
-    async def _read_code_text(self, request, code_file):
-        if request.code_content is not None:
-            if not request.code_content.strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="代码内容不能为空",
-                )
-            return request.code_content
-        if not code_file:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="代码项目必须提供代码内容或上传代码文件",
-            )
-        try:
-            code_content = (await code_file.read()).decode("utf-8")
-        except UnicodeDecodeError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="代码文件必须是UTF-8编码的文本文件",
-            ) from None
-        if not code_content.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="代码内容不能为空",
-            )
-        return code_content
-
-    async def _resolve_code_project_content(self, request, code_file, source_config):
-        source_type = source_config["type"]
-        if source_type == SOURCE_TYPE_GIT:
-            if not request.entry_point or not request.entry_point.strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Git 代码项目必须提供 entry_point",
-                )
-            return ""
-
-        if source_type == SOURCE_TYPE_S3:
-            entry_point = self._resolve_code_entry_point(
-                getattr(request, "entry_point", None),
-                None,
-                code_file.filename if code_file else None,
-            )
-            if not entry_point:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="S3 代码项目必须提供 entry_point",
-                )
-            if request.code_content is not None:
-                if not request.code_content.strip():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="代码内容不能为空",
-                    )
-                return request.code_content
-            if code_file is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="代码项目必须提供 code_content 或 code_file",
-                )
-            return None
-
-        return await self._read_code_text(request, code_file)
-
-    def _build_code_project_hash(self, code_content, source_config, artifact_config=None):
-        if artifact_config is not None:
-            return artifact_config["file_hash"]
-        return calculate_content_hash(code_content or "", "md5")
 
     async def get_project_by_id(self, project_id, user_id=None):
         """根据ID获取项目（支持 public_id 和内部 id）"""
@@ -696,8 +339,8 @@ class ProjectService:
         """
         from tortoise.functions import Count
 
-        from antcode_core.domain.models.task import Task
         from antcode_core.application.services.base import QueryHelper
+        from antcode_core.domain.models.task import Task
 
         query = Project.all()
 
@@ -819,31 +462,21 @@ class ProjectService:
         """批量更新项目"""
         # 验证用户权限
         project_ids = [update.get("id") for update in updates if "id" in update]
-        user_projects = await Project.filter(id__in=project_ids, user_id=user_id).values_list(
-            "id", flat=True
-        )
+        user_projects = await Project.filter(id__in=project_ids, user_id=user_id).values_list("id", flat=True)
 
         # 过滤出用户有权限的更新
-        valid_updates = [
-            {**update, "updated_by": user_id}
-            for update in updates
-            if update.get("id") in user_projects
-        ]
+        valid_updates = [{**update, "updated_by": user_id} for update in updates if update.get("id") in user_projects]
 
         if not valid_updates:
             return 0
 
         optimizer = DatabaseOptimizer()
-        return await optimizer.bulk_update(
-            model_class=Project, updates=valid_updates, key_field="id"
-        )
+        return await optimizer.bulk_update(model_class=Project, updates=valid_updates, key_field="id")
 
     async def batch_delete_projects(self, project_ids, user_id):
         """批量删除项目"""
         # 验证用户权限
-        valid_ids = await Project.filter(id__in=project_ids, user_id=user_id).values_list(
-            "id", flat=True
-        )
+        valid_ids = await Project.filter(id__in=project_ids, user_id=user_id).values_list("id", flat=True)
 
         if not valid_ids:
             return 0
@@ -889,7 +522,7 @@ class ProjectService:
             pagination=pagination_config,
             rules=rules,
             page_number=1 if pagination_config else None,
-            proxy=rule_detail.proxy_config.get("proxy") if rule_detail.proxy_config else None,
+            proxy=self._resolve_rule_proxy(rule_detail),
             task_id=task_id,
             worker_id=rule_detail.task_config.get("worker_id", "Scraper-Worker-Default-01")
             if rule_detail.task_config
@@ -912,65 +545,18 @@ class ProjectService:
 
     async def update_rule_config(self, project_id, request, user_id):
         """更新规则项目配置"""
-        from antcode_core.application.services.users.user_service import user_service
-
-        # 检查用户是否为管理员
-        user = await user_service.get_user_by_id(user_id)
-
-        if user and user.is_admin:
-            # 管理员可以更新所有项目
-            project = await Project.filter(id=project_id).first()
-        else:
-            # 普通用户只能更新自己的项目
-            project = await Project.filter(id=project_id, user_id=user_id).first()
-
+        project = await self.get_project_by_id(project_id, user_id)
         if not project:
             return None
 
-        # 获取规则详情
-        rule_detail = await relation_service.get_project_rule_detail(project_id)
+        rule_detail = await relation_service.get_project_rule_detail(project.id)
         if not rule_detail:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="规则项目配置不存在"
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="规则项目配置不存在")
 
-        # 更新规则配置
-        update_data = {}
-        if request.target_url is not None:
-            update_data["target_url"] = request.target_url
-        if request.callback_type is not None:
-            update_data["callback_type"] = request.callback_type
-        if request.request_method is not None:
-            update_data["request_method"] = request.request_method
-        if request.extraction_rules is not None:
-            update_data["extraction_rules"] = [rule.dict() for rule in request.extraction_rules]
-        if request.pagination_config is not None:
-            update_data["pagination_config"] = request.pagination_config.dict()
-        if request.max_pages is not None:
-            update_data["max_pages"] = request.max_pages
-        if request.start_page is not None:
-            update_data["start_page"] = request.start_page
-        if request.request_delay is not None:
-            update_data["request_delay"] = request.request_delay
-        if request.priority is not None:
-            update_data["priority"] = request.priority
-        if request.dont_filter is not None:
-            update_data["dont_filter"] = request.dont_filter
-        if request.headers is not None:
-            update_data["headers"] = request.headers
-        if request.cookies is not None:
-            update_data["cookies"] = request.cookies
-        if request.proxy_config is not None:
-            update_data["proxy_config"] = {"proxy": request.proxy_config}
-        if request.task_config is not None:
-            update_data["task_config"] = request.task_config
-
-        # 应用更新
+        update_data = self._build_rule_update_payload(request)
         if update_data:
             await rule_detail.update_from_dict(update_data)
             await rule_detail.save()
-
-            # 更新项目的更新时间
             project.updated_by = user_id
             await project.save()
 
@@ -989,25 +575,10 @@ class ProjectService:
                 detail="代码项目配置不存在",
             )
 
-        current_source = get_runtime_source_config(code_detail)
-        current_source_type = current_source.get("type") or SOURCE_TYPE_LEGACY_INLINE
-        try:
-            target_source_type = normalize_source_type(
-                getattr(request, "source_type", None),
-                current_source_type,
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
         update_data = {
             "language": request.language if request.language is not None else code_detail.language,
-            "version": request.version if request.version is not None else code_detail.version,
             "documentation": (
-                request.documentation
-                if request.documentation is not None
-                else code_detail.documentation
+                request.documentation if request.documentation is not None else code_detail.documentation
             ),
             "environment_vars": (
                 request.environment_vars
@@ -1016,103 +587,35 @@ class ProjectService:
             ),
         }
 
-        if target_source_type == SOURCE_TYPE_GIT:
-            source_config = await self._build_updated_source_config(
-                request,
-                current_source,
-                project.user_id,
+        entry_point = request.entry_point or code_detail.entry_point
+        if not entry_point or not str(entry_point).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Git 代码项目必须提供 entry_point",
             )
-            entry_point = request.entry_point or code_detail.entry_point
-            if not entry_point or not str(entry_point).strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Git 代码项目必须提供 entry_point",
-                )
-            artifact = await project_artifact_service.materialize_git_source(
-                project.public_id,
-                source_config,
+        source = await project_source_service.get_source(project.id)
+        if source is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="项目缺少 project_sources 配置",
             )
-            artifact_config = self._build_managed_artifact_config(artifact, entry_point)
-            update_data.update(
-                {
-                    "content": "",
-                    "content_hash": self._build_code_project_hash("", source_config, artifact_config),
-                    "entry_point": entry_point,
-                    "runtime_config": self._build_runtime_config(
-                        code_detail.runtime_config,
-                        getattr(request, "runtime_config", None),
-                        source_config,
-                        artifact_config,
-                    ),
-                }
-            )
-        elif target_source_type == SOURCE_TYPE_S3:
-            current_artifact = get_runtime_artifact_config(code_detail)
-            if request.code_content is not None:
-                artifact_config = await self._persist_code_artifact(
-                    project.id,
-                    request,
-                    request.code_content,
-                    None,
-                    code_detail.entry_point,
-                )
-            else:
-                if current_source_type != SOURCE_TYPE_S3 or not current_artifact:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="切换到 S3 代码来源时必须提供 code_content",
-                    )
-                artifact_config = dict(current_artifact)
-                if request.entry_point is not None:
-                    artifact_config["entry_point"] = request.entry_point
-            source_config = self._build_s3_source_config(artifact_config)
-            update_data.update(
-                {
-                    "content": "",
-                    "content_hash": self._build_code_project_hash("", source_config, artifact_config),
-                    "entry_point": artifact_config.get("entry_point") or code_detail.entry_point,
-                    "runtime_config": self._build_runtime_config(
-                        code_detail.runtime_config,
-                        getattr(request, "runtime_config", None),
-                        source_config,
-                        artifact_config,
-                    ),
-                }
-            )
-        else:
-            if request.code_content is None and current_source_type != SOURCE_TYPE_LEGACY_INLINE:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="切换到 legacy_inline 代码来源时必须提供 code_content",
-                )
-            content = request.code_content if request.code_content is not None else code_detail.content
-            if not content or not str(content).strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="代码内容不能为空",
-                )
-            source_config = build_code_source_config(SOURCE_TYPE_LEGACY_INLINE)
-            update_data.update(
-                {
-                    "content": content,
-                    "content_hash": self._build_code_project_hash(content, source_config),
-                    "entry_point": request.entry_point if request.entry_point is not None else code_detail.entry_point,
-                    "runtime_config": self._build_runtime_config(
-                        code_detail.runtime_config,
-                        getattr(request, "runtime_config", None),
-                        source_config,
-                    ),
-                }
-            )
+        update_data.update(
+            {
+                "entry_point": entry_point,
+                "runtime_config": self._build_runtime_config(
+                    code_detail.runtime_config,
+                    getattr(request, "runtime_config", None),
+                ),
+            }
+        )
 
         await code_detail.update_from_dict(update_data)
         await code_detail.save()
         project.updated_by = user_id
         await project.save()
-        await self._mark_project_outdated(project)
         return project
 
-    async def update_file_config(self, project_id, request, user_id, file=None):
+    async def update_file_config(self, project_id, request, user_id):
         """更新文件项目配置。"""
         project = await self.get_project_by_id(project_id, user_id)
         if not project:
@@ -1125,178 +628,21 @@ class ProjectService:
                 detail="文件项目配置不存在",
             )
 
-        current_source = get_runtime_source_config(file_detail)
-        current_source_type = current_source.get("type") or SOURCE_TYPE_S3
-        try:
-            target_source_type = normalize_source_type(
-                getattr(request, "source_type", None),
-                current_source_type,
-            )
-        except ValueError as exc:
+        if await project_source_service.get_source(project.id) is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
-
-        if target_source_type == SOURCE_TYPE_GIT:
-            source_config = await self._build_updated_source_config(
-                request,
-                current_source,
-                project.user_id,
+                detail="项目缺少 project_sources 配置",
             )
-            entry_point = request.entry_point if request.entry_point is not None else file_detail.entry_point
-            if not entry_point or not str(entry_point).strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Git 文件项目必须指定入口文件",
-                )
-            artifact = await project_artifact_service.materialize_git_source(
-                project.public_id,
-                source_config,
-            )
-            artifact_config = self._build_managed_artifact_config(artifact, entry_point)
-            update_data = self._build_file_detail_payload(
-                request,
-                source_config,
-                artifact_config,
-                current_detail=file_detail,
-                file_count=1,
-                additional_files=None,
-            )
-        else:
-            current_artifact = get_runtime_artifact_config(file_detail)
-            if file is not None:
-                entry_point = request.entry_point if request.entry_point is not None else file_detail.entry_point
-                artifact_config = await self._persist_artifact(file, project.id, entry_point)
-            else:
-                if current_source_type != SOURCE_TYPE_S3:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="切换到 S3 文件来源时必须重新上传文件",
-                    )
-                artifact_config = current_artifact or self._build_file_artifact_from_detail(
-                    file_detail,
-                    current_source_type,
-                )
-                if request.entry_point is not None:
-                    artifact_config = dict(artifact_config)
-                    artifact_config["entry_point"] = request.entry_point
-            source_config = self._build_s3_source_config(artifact_config)
-            update_data = self._build_file_detail_payload(
-                request,
-                source_config,
-                artifact_config,
-                current_detail=file_detail,
-            )
+        update_data = self._build_file_detail_payload(
+            request,
+            current_detail=file_detail,
+        )
 
         await file_detail.update_from_dict(update_data)
         await file_detail.save()
         project.updated_by = user_id
         await project.save()
-        await self._mark_project_outdated(project)
         return project
-
-    async def _extract_compressed_file(self, storage_path, original_name, project_id):
-        """解压压缩文件到 S3 项目目录
-
-        新架构要求：所有文件项目必须存储到 S3
-        解压后上传到 S3 的 projects/{project_id}/ 前缀
-        """
-        from antcode_core.infrastructure.storage.presign import is_s3_storage_enabled
-
-        if not is_s3_storage_enabled():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="文件项目需要 S3 存储后端，请配置 FILE_STORAGE_BACKEND=s3",
-            )
-
-        try:
-            return await self._extract_to_s3(storage_path, original_name, project_id)
-        except Exception as e:
-            logger.error(f"解压文件到 S3 失败: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"解压文件失败: {str(e)}",
-            )
-
-    async def _extract_to_local(self, storage_path, original_name, project_id):
-        """解压到本地文件系统（已废弃，仅保留兼容性）
-
-        新架构禁止使用本地存储，此方法仅供旧架构兼容
-        """
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="新架构禁止本地存储文件项目，请配置 FILE_STORAGE_BACKEND=s3",
-        )
-
-    async def _extract_to_s3(self, storage_path, original_name, project_id):
-        """解压到 S3
-
-        1. 从 S3 下载压缩包到临时目录
-        2. 解压到临时目录
-        3. 上传解压后的文件到 S3 的 projects/{project_id}/ 前缀
-        4. 清理临时文件
-        """
-        import tempfile
-
-        from antcode_core.infrastructure.storage.base import get_file_storage_backend
-        from antcode_core.infrastructure.storage.s3_client import get_s3_client_manager
-
-        backend = get_file_storage_backend()
-        s3_manager = get_s3_client_manager()
-
-        # S3 项目目录前缀
-        s3_project_prefix = f"projects/{project_id}"
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # 1. 从 S3 下载压缩包
-            temp_archive = os.path.join(temp_dir, original_name)
-            try:
-                file_bytes = await backend.get_file_bytes(storage_path)
-                with open(temp_archive, "wb") as f:
-                    f.write(file_bytes)
-                logger.debug(f"从 S3 下载压缩包: {storage_path} -> {temp_archive}")
-            except Exception as e:
-                raise ValueError(f"从 S3 下载压缩包失败: {e}")
-
-            # 2. 解压到临时目录
-            extract_dir = os.path.join(temp_dir, "extracted")
-            os.makedirs(extract_dir, exist_ok=True)
-            base_dir = os.path.abspath(extract_dir)
-
-            lower_name = (original_name or "").lower()
-            if lower_name.endswith(".zip"):
-                with zipfile.ZipFile(temp_archive, "r") as zip_ref:
-                    self._check_extract_limits_zip(zip_ref, base_dir)
-                    zip_ref.extractall(extract_dir)
-                    logger.info(f"ZIP文件解压完成: {temp_archive}")
-            elif lower_name.endswith(".tar.gz"):
-                with tarfile.open(temp_archive, "r:gz") as tar_ref:
-                    safe_members = self._check_extract_limits_tar(tar_ref, base_dir)
-                    tar_ref.extractall(extract_dir, members=safe_members)
-                    logger.info(f"TAR.GZ文件解压完成: {temp_archive}")
-            elif lower_name.endswith(".tar"):
-                with tarfile.open(temp_archive, "r:") as tar_ref:
-                    safe_members = self._check_extract_limits_tar(tar_ref, base_dir)
-                    tar_ref.extractall(extract_dir, members=safe_members)
-                    logger.info(f"TAR文件解压完成: {temp_archive}")
-            else:
-                raise ValueError(f"不支持的压缩格式: {original_name}")
-
-            # 3. 上传解压后的文件到 S3
-            try:
-                uploaded = await s3_manager.upload_directory(
-                    bucket=backend.bucket,
-                    local_dir=extract_dir,
-                    s3_prefix=s3_project_prefix,
-                    max_files=self.MAX_EXTRACT_FILES,
-                )
-                logger.info(f"项目文件已上传到 S3: {s3_project_prefix}, 共 {len(uploaded)} 个文件")
-            except Exception as e:
-                raise ValueError(f"上传解压文件到 S3 失败: {e}")
-
-        # 返回 S3 前缀路径
-        return s3_project_prefix
 
     # ========== 环境配置方法 ==========
 
@@ -1305,16 +651,14 @@ class ProjectService:
         runtime_scope = getattr(request, "runtime_scope", None)
 
         if not runtime_scope:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="必须选择运行时作用域"
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="必须选择运行时作用域")
 
         await self._setup_worker_environment(project, request, user_id, conn)
 
     async def _setup_worker_environment(self, project, request, user_id, conn):
         """配置 Worker 环境"""
-        from antcode_core.domain.models.worker import Worker
         from antcode_core.application.services.runtime import runtime_control_service
+        from antcode_core.domain.models.worker import Worker
 
         worker_id = getattr(request, "worker_id", None)
         if not worker_id:

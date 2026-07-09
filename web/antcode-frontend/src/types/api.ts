@@ -22,9 +22,6 @@ export interface PaginationData<T> {
 // 分页响应类型（单一响应信封）
 export type PaginationResponse<T> = ApiResponse<PaginationData<T>>
 
-// 兼容别名（与 PaginationResponse 结构一致）
-export type ApiPaginatedResponse<T> = PaginationResponse<T>
-
 export interface ApiErrorDetail {
   field: string
   message: string
@@ -43,18 +40,6 @@ export interface RequestConfig {
   timeout?: number
   headers?: Record<string, string>
   params?: Record<string, unknown>
-}
-
-// 上传文件响应
-export interface UploadResponse {
-  success: boolean
-  data: {
-    filename: string
-    original_name: string
-    file_path: string
-    file_size: number
-    file_hash: string
-  }
 }
 
 // 认证相关类型
@@ -93,7 +78,6 @@ export interface User {
   is_active: boolean
   is_admin: boolean
   role?: 'user' | 'admin' | 'super_admin'
-  is_super_admin?: boolean
   created_at: string
   updated_at: string
   last_login_at?: string

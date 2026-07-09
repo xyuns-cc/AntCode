@@ -140,12 +140,31 @@ class CapabilityDetector:
     def __init__(self):
         self._cached_capabilities: dict | None = None
 
-    def detect_all(self, force_refresh: bool = False) -> dict:
-        """检测所有能力"""
-        if self._cached_capabilities and not force_refresh:
+    def detect_all(
+        self,
+        force_refresh: bool = False,
+        task_types: list[str] | None = None,
+    ) -> dict:
+        """检测所有能力。
+
+        Args:
+            force_refresh: 忽略缓存重新检测。
+            task_types: T6-T4a: 当前 worker 注册的 plugin 名列表（"code"/
+                "rule"/"spider"/"render" 等），供 master dispatcher 按
+                能力路由，避免把 rule 派到关掉 RulePlugin 的 worker。
+                None 表示保持原缓存值不动。
+        """
+        if self._cached_capabilities and not force_refresh and task_types is None:
             return self._cached_capabilities
 
-        capabilities = {"curl_cffi": self._detect_curl_cffi()}
+        capabilities = self._cached_capabilities or {}
+        # 首次或强制刷新时才检测底层依赖
+        if not capabilities or force_refresh:
+            capabilities = {"curl_cffi": self._detect_curl_cffi()}
+
+        # T6-T4a: task_types 覆盖式更新（每次 register 都传最新的）
+        if task_types is not None:
+            capabilities["task_types"] = list(task_types)
 
         self._cached_capabilities = capabilities
         logger.debug(f"Worker能力检测完成: {self._summarize(capabilities)}")
@@ -155,7 +174,12 @@ class CapabilityDetector:
         """生成能力摘要"""
         enabled = []
         for name, cap in capabilities.items():
-            if cap and cap.get("enabled"):
+            # T6-T4a: task_types 是 list[str]，其他是 {"enabled": bool}
+            if name == "task_types":
+                if cap:
+                    enabled.append(f"tasks=[{','.join(cap)}]")
+                continue
+            if isinstance(cap, dict) and cap.get("enabled"):
                 enabled.append(name)
         return ", ".join(enabled) if enabled else "无额外能力"
 

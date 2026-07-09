@@ -93,17 +93,13 @@ class EmailAlertChannel(AlertChannel):
 """
         return subject, html_body
 
-    async def _send_email(
-        self, recipient_email: str, recipient_name: str, subject: str, html_body: str
-    ) -> bool:
+    async def _send_email(self, recipient_email: str, recipient_name: str, subject: str, html_body: str) -> bool:
         """发送单封邮件"""
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = Header(subject, "utf-8")
             msg["From"] = f"{self.sender_name} <{self.smtp_user}>"
-            msg["To"] = (
-                f"{recipient_name} <{recipient_email}>" if recipient_name else recipient_email
-            )
+            msg["To"] = f"{recipient_name} <{recipient_email}>" if recipient_name else recipient_email
 
             # 添加HTML内容
             html_part = MIMEText(html_body, "html", "utf-8")
@@ -133,9 +129,7 @@ class EmailAlertChannel(AlertChannel):
             logger.error(f"邮件发送异常: {e}")
             return False
 
-    async def _send_single_alert_with_retry(
-        self, recipient: dict, subject: str, html_body: str
-    ) -> bool:
+    async def _send_single_alert_with_retry(self, recipient: dict, subject: str, html_body: str) -> bool:
         """发送单条告警（带重试）"""
         retries = self.max_retries if self.retry_enabled else 1
 
@@ -160,9 +154,7 @@ class EmailAlertChannel(AlertChannel):
 
         return False
 
-    async def send_alert_with_fallback(
-        self, message: str, level: str, default_levels: list[str]
-    ) -> bool:
+    async def send_alert_for_level(self, message: str, level: str, default_levels: list[str]) -> bool:
         """发送告警（带级别过滤）"""
         if not self.recipients or not self.smtp_host:
             return False
@@ -174,9 +166,7 @@ class EmailAlertChannel(AlertChannel):
             target_levels = recipient.get("levels", [])
 
             # 优先级逻辑：收件人配置的级别 > 默认级别
-            should_send = (
-                (level in target_levels) if target_levels else (level in (default_levels or []))
-            )
+            should_send = (level in target_levels) if target_levels else (level in (default_levels or []))
 
             if should_send and recipient.get("email"):
                 tasks.append(self._send_single_alert_with_retry(recipient, subject, html_body))

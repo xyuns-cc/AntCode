@@ -1,8 +1,17 @@
 import { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT } from '@/config/app'
+import { resolveApiBaseUrl } from '@/utils/apiEndpoint'
 
-// API 地址（从环境变量读取，默认本地开发地址）
-const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-export const API_BASE_URL = rawApiBaseUrl.replace(/\/api\/?$/, '').replace(/\/$/, '')
+const browserHostname = typeof window === 'undefined' ? '' : window.location.hostname
+const browserProtocol = typeof window === 'undefined' ? 'http' : window.location.protocol
+
+export const API_BASE_URL = resolveApiBaseUrl({
+  explicitApiBaseUrl: import.meta.env.VITE_API_BASE_URL,
+  serverPort: import.meta.env.SERVER_PORT,
+  bindHost: import.meta.env.BIND_HOST,
+  serverDomain: import.meta.env.SERVER_DOMAIN,
+  pageHostname: browserHostname,
+  protocol: browserProtocol,
+})
 // WS 地址（从 API 地址自动推导：http -> ws, https -> wss）
 export const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws')
 

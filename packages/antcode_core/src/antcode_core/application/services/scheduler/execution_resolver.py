@@ -1,12 +1,4 @@
-"""
-执行 Worker 解析器 - 根据执行策略确定任务执行 Worker
-
-支持的执行策略：
-- FIXED_WORKER: 固定 Worker（仅在绑定 Worker 执行，不可用时失败）
-- SPECIFIED: 指定 Worker（任务级别指定）
-- AUTO_SELECT: 自动选择（负载均衡）
-- PREFER_BOUND: 优先绑定 Worker（不可用时自动选择其他 Worker）
-"""
+"""根据执行策略确定任务执行 Worker。"""
 
 from loguru import logger
 
@@ -67,7 +59,7 @@ class ExecutionResolver:
         return ExecutionStrategy.AUTO_SELECT
 
     async def _ensure_worker_online(self, worker: Worker) -> bool:
-        """确保 Worker 在线（含心跳兜底检测）。"""
+        """确保 Worker 在线并刷新心跳状态。"""
         if worker.status == WorkerStatus.ONLINE:
             return True
 
@@ -84,9 +76,10 @@ class ExecutionResolver:
                     worker.last_heartbeat = latest.last_heartbeat
             return is_online
         except Exception as e:
-            logger.debug(f"Worker 在线检测失败，回退到状态判断: worker={worker.id}, error={e}")
-            latest = await Worker.get_or_none(id=worker.id)
-            return bool(latest and latest.status == WorkerStatus.ONLINE)
+            raise WorkerUnavailableError(
+                f"Worker 在线检测失败: {e}",
+                worker.id,
+            ) from e
 
     async def _resolve_fixed_worker(self, project):
         """解析固定 Worker 策略"""
@@ -95,9 +88,7 @@ class ExecutionResolver:
 
         worker = await Worker.get_or_none(id=project.bound_worker_id)
         if not worker:
-            raise WorkerUnavailableError(
-                f"绑定 Worker 不存在 (id={project.bound_worker_id})", project.bound_worker_id
-            )
+            raise WorkerUnavailableError(f"绑定 Worker 不存在 (id={project.bound_worker_id})", project.bound_worker_id)
 
         if not await self._ensure_worker_online(worker):
             raise WorkerUnavailableError(f"绑定 Worker [{worker.name}] 离线", worker.id)
@@ -126,11 +117,7 @@ class ExecutionResolver:
         """解析自动选择策略"""
         from antcode_core.application.services.workers import worker_load_balancer
 
-        require_render = await self._check_render_requirement(project)
-        best_worker = await worker_load_balancer.select_best_worker(
-            exclude_workers=exclude_workers,
-            require_render=require_render,
-        )
+        best_worker = await worker_load_balancer.select_best_worker(exclude_workers=exclude_workers)
 
         if not best_worker:
             logger.warning("AUTO_SELECT: 无可用 Worker")
@@ -153,29 +140,9 @@ class ExecutionResolver:
             else:
                 logger.warning(f"PREFER_BOUND: 绑定 Worker 不存在 (id={project.bound_worker_id})")
 
-        # 检查故障转移
-        if not project.fallback_enabled and project.bound_worker_id:
-            raise WorkerUnavailableError(
-                "绑定 Worker 不可用且未启用故障转移", project.bound_worker_id
-            )
-
-        # 故障转移：自动选择其他 Worker
-        logger.info("PREFER_BOUND: 故障转移，自动选择 Worker")
+        logger.info("PREFER_BOUND: 绑定 Worker 不可用，自动选择 Worker")
         exclude_workers = [project.bound_worker_id] if project.bound_worker_id else None
         return await self._resolve_auto_select(project, exclude_workers)
-
-    async def _check_render_requirement(self, project):
-        """检查项目是否需要渲染能力"""
-        from antcode_core.domain.models.enums import CrawlEngine
-        from antcode_core.domain.models.project import ProjectRule
-
-        # 规则项目：检查是否使用浏览器引擎
-        if project.type.value == "rule":
-            rule = await ProjectRule.get_or_none(project_id=project.id)
-            if rule and rule.engine == CrawlEngine.BROWSER:
-                return True
-
-        return False
 
 
 # 全局实例

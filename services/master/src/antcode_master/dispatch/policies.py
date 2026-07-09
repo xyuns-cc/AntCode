@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 @dataclass
 class TaskPriority:
     """任务优先级"""
+
     HIGH = 0
     NORMAL = 5
     LOW = 9
@@ -23,6 +24,7 @@ class TaskPriority:
 @dataclass
 class WorkerQuota:
     """Worker 配额"""
+
     worker_id: int
     max_concurrent: int
     current_running: int
@@ -52,7 +54,7 @@ class PriorityPolicy:
         Returns:
             优先级值（越小越高）
         """
-        base_priority = getattr(task, 'priority', TaskPriority.NORMAL)
+        base_priority = getattr(task, "priority", TaskPriority.NORMAL)
 
         # 任务老化：等待时间越长，优先级越高
         age_bonus = min(age_seconds // 60, 5)  # 每分钟提升1，最多提升5
@@ -74,7 +76,7 @@ class PriorityPolicy:
             current_time = datetime.now()
 
         def get_priority(task):
-            created_at = getattr(task, 'created_at', current_time)
+            created_at = getattr(task, "created_at", current_time)
             age_seconds = int((current_time - created_at).total_seconds())
             return PriorityPolicy.calculate_priority(task, age_seconds)
 
@@ -107,11 +109,7 @@ class QuotaPolicy:
         Returns:
             Worker ID 列表
         """
-        return [
-            worker_id
-            for worker_id, quota in self._quotas.items()
-            if not quota.is_full
-        ]
+        return [worker_id for worker_id, quota in self._quotas.items() if not quota.is_full]
 
     def get_worker_quota(self, worker_id: int) -> WorkerQuota | None:
         """获取 Worker 配额
@@ -167,7 +165,7 @@ class AntiStarvationPolicy:
         threshold_time = current_time - timedelta(seconds=self.starvation_threshold)
 
         for task in tasks:
-            created_at = getattr(task, 'created_at', current_time)
+            created_at = getattr(task, "created_at", current_time)
             if created_at < threshold_time:
                 starving_tasks.append(task)
 

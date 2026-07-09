@@ -55,13 +55,12 @@ class WorkerConnectionService:
             await existing.save()
 
             if existing.secret_key:
-                worker_auth_verifier.register_worker_secret(
-                    existing.public_id, existing.secret_key
-                )
+                worker_auth_verifier.register_worker_secret(existing.public_id, existing.secret_key)
 
             from antcode_core.application.services.workers.worker_heartbeat_service import (
                 worker_heartbeat_service,
             )
+
             await worker_heartbeat_service.refresh_worker_cache(force=True)
 
             return existing, existing.api_key, existing.secret_key
@@ -88,6 +87,7 @@ class WorkerConnectionService:
         from antcode_core.application.services.workers.worker_heartbeat_service import (
             worker_heartbeat_service,
         )
+
         await worker_heartbeat_service.refresh_worker_cache(force=True)
         return worker, api_key, secret_key
 

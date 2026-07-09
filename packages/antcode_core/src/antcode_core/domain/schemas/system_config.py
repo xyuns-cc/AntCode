@@ -51,12 +51,8 @@ class TaskResourceConfig(BaseModel):
     """任务资源配置"""
 
     max_concurrent_tasks: int = Field(default=10, ge=1, le=100, description="最大并发任务数")
-    task_execution_timeout: int = Field(
-        default=3600, ge=60, le=86400, description="任务执行超时时间（秒）"
-    )
-    task_cpu_time_limit: int = Field(
-        default=600, ge=60, le=3600, description="任务CPU时间限制（秒）"
-    )
+    task_execution_timeout: int = Field(default=3600, ge=60, le=86400, description="任务执行超时时间（秒）")
+    task_cpu_time_limit: int = Field(default=600, ge=60, le=3600, description="任务CPU时间限制（秒）")
     task_memory_limit: int = Field(default=1024, ge=128, le=8192, description="任务内存限制（MB）")
     task_max_retries: int = Field(default=3, ge=0, le=10, description="任务最大重试次数")
     task_retry_delay: int = Field(default=60, ge=10, le=600, description="任务重试延迟（秒）")
@@ -66,9 +62,7 @@ class TaskLogConfig(BaseModel):
     """任务日志配置"""
 
     task_log_retention_days: int = Field(default=30, ge=1, le=365, description="日志保留天数")
-    task_log_max_size: int = Field(
-        default=104857600, ge=1048576, le=1073741824, description="日志最大大小（字节）"
-    )
+    task_log_max_size: int = Field(default=104857600, ge=1048576, le=1073741824, description="日志最大大小（字节）")
 
 
 class SchedulerConfig(BaseModel):
@@ -76,9 +70,7 @@ class SchedulerConfig(BaseModel):
 
     scheduler_timezone: str = Field(default="Asia/Shanghai", description="调度器时区")
     cleanup_workspace_on_completion: bool = Field(default=True, description="完成后清理工作空间")
-    cleanup_workspace_max_age_hours: int = Field(
-        default=24, ge=1, le=168, description="工作空间最大保留时间（小时）"
-    )
+    cleanup_workspace_max_age_hours: int = Field(default=24, ge=1, le=168, description="工作空间最大保留时间（小时）")
 
 
 class CacheConfig(BaseModel):
@@ -99,20 +91,12 @@ class MonitoringConfig(BaseModel):
 
     monitoring_enabled: bool = Field(default=True, description="是否启用监控")
     monitor_status_ttl: int = Field(default=300, ge=60, le=3600, description="监控状态TTL（秒）")
-    monitor_history_ttl: int = Field(
-        default=3600, ge=600, le=86400, description="监控历史TTL（秒）"
-    )
+    monitor_history_ttl: int = Field(default=3600, ge=600, le=86400, description="监控历史TTL（秒）")
     monitor_history_keep_days: int = Field(default=30, ge=1, le=365, description="监控历史保留天数")
     monitor_cluster_ttl: int = Field(default=300, ge=60, le=3600, description="集群状态TTL（秒）")
-    monitor_stream_batch_size: int = Field(
-        default=100, ge=10, le=1000, description="监控流批处理大小"
-    )
-    monitor_stream_interval: int = Field(
-        default=120, ge=30, le=600, description="监控流处理间隔（秒）"
-    )
-    monitor_stream_maxlen: int = Field(
-        default=10000, ge=1000, le=100000, description="监控流最大长度"
-    )
+    monitor_stream_batch_size: int = Field(default=100, ge=10, le=1000, description="监控流批处理大小")
+    monitor_stream_interval: int = Field(default=120, ge=30, le=600, description="监控流处理间隔（秒）")
+    monitor_stream_maxlen: int = Field(default=10000, ge=1000, le=100000, description="监控流最大长度")
 
 
 class BrandingConfig(BaseModel):

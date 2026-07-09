@@ -18,7 +18,6 @@ class RedisKeys:
 
     # === 日志相关 ===
     LOG_STREAM_PREFIX = "log:stream"
-    LOG_ARCHIVE_PREFIX = "log:archive"
 
     # === Worker 相关 ===
     WORKER_STATUS_PREFIX = "worker:status"
@@ -52,7 +51,7 @@ class RedisKeys:
     def _ns(self, key: str) -> str:
         return f"{self.namespace}:{key}"
 
-    # === 兼容旧用法（实例方法） ===
+    # === 命名空间实例方法 ===
     def task_ready_stream(self, worker_id: str) -> str:
         return self._ns(f"{self.TASK_READY_PREFIX}:{worker_id}")
 
@@ -109,11 +108,6 @@ class RedisKeys:
     def log_stream(cls, run_id: str) -> str:
         """日志流 Key（Redis Stream）"""
         return f"{cls.LOG_STREAM_PREFIX}:{run_id}"
-
-    @classmethod
-    def log_archive(cls, run_id: str) -> str:
-        """日志归档路径 Key"""
-        return f"{cls.LOG_ARCHIVE_PREFIX}:{run_id}"
 
     @classmethod
     def worker_status(cls, worker_id: str) -> str:

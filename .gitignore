@@ -39,13 +39,9 @@ env/
 .env.*.local
 *.env
 
-# SQLite Database
-*.sqlite3-shm
-*.sqlite3-wal
-
 # Data directory (auto-generated at runtime)
-data/
-runtime_data/
+/data/
+/runtime_data/
 
 # Legacy directories (已迁移到 data/)
 /logs/
@@ -131,5 +127,13 @@ DOCS_CLEANUP_SUMMARY.md
 # Legacy frontend workspace
 web_new/
 
-# Local utility scripts
-scripts/
+# Claude Code agent 会话缓存（内部工具产物）
+.claude/
+**/.claude/
+
+# 本地 sqlite 数据（生产用 PG，本地 sqlite 仅用于快速开发）
+*.sqlite3
+*.sqlite3-journal
+
+# 本地 build 输出
+web/antcode-frontend/dist/

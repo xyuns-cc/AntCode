@@ -34,6 +34,7 @@ from antcode_contracts.transcode import (
 )
 from loguru import logger
 
+from antcode_worker.domain.models import SourceBundle
 from antcode_worker.transport.base import (
     HeartbeatMessage,
     LogMessage,
@@ -58,6 +59,24 @@ class TaskDecoder:
             params = dict(getattr(dispatch, "params", {}) or {})
             environment = dict(getattr(dispatch, "environment", {}) or {})
 
+            # 大对象走 source_bundle；engine._prepare_workspace 依赖
+            # task_msg.source_bundle 触发 project_fetcher。缺失 → workspace_path
+            # 空 → CodePlugin 找不到 project_cwd 直接抛 ValueError。
+            source_bundle_uri = getattr(dispatch, "source_bundle_uri", "") or ""
+            source_bundle: SourceBundle | None = None
+            if source_bundle_uri:
+                source_bundle = SourceBundle(
+                    uri=source_bundle_uri,
+                    sha256=getattr(dispatch, "source_bundle_sha256", "") or "",
+                    size=int(getattr(dispatch, "source_bundle_size", 0) or 0),
+                    transfer_method=(
+                        getattr(dispatch, "transfer_method", "") or "source_bundle"
+                    ),
+                    entry_point=getattr(dispatch, "entry_point", "") or "",
+                    resolved_revision=getattr(dispatch, "resolved_revision", "") or "",
+                    source_subdir=getattr(dispatch, "source_subdir", "") or "",
+                )
+
             return TaskMessage(
                 task_id=getattr(dispatch, "task_id", "") or "",
                 project_id=getattr(dispatch, "project_id", "") or "",
@@ -67,9 +86,8 @@ class TaskDecoder:
                 environment=environment,
                 # 新 proto 字段名是 timeout_seconds
                 timeout=int(getattr(dispatch, "timeout_seconds", 0) or 3600),
-                # 大对象走 source_bundle，旧的 download_url 留空
-                download_url=getattr(dispatch, "source_bundle_uri", "") or "",
-                file_hash=getattr(dispatch, "source_bundle_sha256", "") or "",
+                source_bundle=source_bundle,
+                source_subdir=getattr(dispatch, "source_subdir", "") or "",
                 entry_point=getattr(dispatch, "entry_point", "") or "",
                 run_id=getattr(dispatch, "run_id", "") or "",
                 receipt=getattr(dispatch, "receipt_id", "") or None,

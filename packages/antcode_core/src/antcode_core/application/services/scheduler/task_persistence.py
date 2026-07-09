@@ -82,10 +82,7 @@ class TaskPersistenceService:
             cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{checkpoint.run_id}"
             await unified_cache.set(cache_key, checkpoint.to_dict(), ttl=self.CHECKPOINT_CACHE_TTL)
 
-            logger.debug(
-                f"检查点已保存: run_id={checkpoint.run_id}, "
-                f"progress={checkpoint.progress:.1%}"
-            )
+            logger.debug(f"检查点已保存: run_id={checkpoint.run_id}, progress={checkpoint.progress:.1%}")
             return True
 
         except Exception as e:
@@ -142,9 +139,7 @@ class TaskPersistenceService:
         from antcode_core.domain.models import TaskRun
 
         try:
-            updated = await TaskRun.filter(run_id=run_id).update(
-                last_heartbeat=datetime.now()
-            )
+            updated = await TaskRun.filter(run_id=run_id).update(last_heartbeat=datetime.now())
             return updated > 0
         except Exception as e:
             logger.debug(f"更新心跳失败: {e}")
@@ -162,10 +157,7 @@ class TaskPersistenceService:
 
             interrupted_executions = (
                 await TaskRun.filter(status=TaskStatus.RUNNING)
-                .filter(
-                    Q(last_heartbeat__lt=cutoff)
-                    | Q(last_heartbeat__isnull=True, start_time__lt=cutoff)
-                )
+                .filter(Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff))
                 .limit(100)
             )
 
@@ -257,8 +249,7 @@ class TaskRecoveryService:
                 try:
                     if checkpoint.retry_count >= TaskPersistenceService.MAX_RETRY_ON_RECOVERY:
                         logger.warning(
-                            f"任务 {checkpoint.run_id} 重试次数过多 "
-                            f"({checkpoint.retry_count}次)，标记为失败"
+                            f"任务 {checkpoint.run_id} 重试次数过多 ({checkpoint.retry_count}次)，标记为失败"
                         )
                         await self._mark_task_failed(checkpoint, "任务恢复失败，重试次数超限")
                         stats["failed"] += 1
@@ -274,10 +265,7 @@ class TaskRecoveryService:
                     logger.error(f"恢复任务 {checkpoint.run_id} 异常: {e}")
                     stats["failed"] += 1
 
-            logger.info(
-                f"任务恢复完成: 成功 {stats['recovered']}, "
-                f"失败 {stats['failed']}, 跳过 {stats['skipped']}"
-            )
+            logger.info(f"任务恢复完成: 成功 {stats['recovered']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
 
         finally:
             self._recovering = False

@@ -25,9 +25,7 @@ class Project(BaseModel):
     表示一个爬虫项目。
     """
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     name = fields.CharField(max_length=255, unique=True)
     description = fields.TextField(null=True)
     type = fields.CharEnumField(ProjectType)
@@ -37,9 +35,7 @@ class Project(BaseModel):
     dependencies = fields.JSONField(null=True)
 
     # ========== 环境相关字段 ==========
-    env_location = fields.CharField(
-        max_length=10, null=True, default="worker", description="环境位置，仅支持 worker"
-    )
+    env_location = fields.CharField(max_length=10, null=True, default="worker", description="环境位置，仅支持 worker")
     worker_id = fields.CharField(max_length=32, null=True, db_index=True)
     worker_env_name = fields.CharField(max_length=100, null=True)
     python_version = fields.CharField(max_length=20, null=True)
@@ -59,10 +55,7 @@ class Project(BaseModel):
         default=ExecutionStrategy.PREFER_BOUND,
         description="执行策略: fixed/specified/auto/prefer",
     )
-    bound_worker_id = fields.BigIntField(
-        null=True, db_index=True, description="绑定 Worker ID"
-    )
-    fallback_enabled = fields.BooleanField(default=True, description="启用故障转移")
+    bound_worker_id = fields.BigIntField(null=True, db_index=True, description="绑定 Worker ID")
 
     # 时间戳
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -71,12 +64,10 @@ class Project(BaseModel):
     user_id = fields.BigIntField()
 
     # 统计
-    download_count = fields.IntField(default=0)
     star_count = fields.IntField(default=0)
 
     def __str__(self):
         return self.name
-
 
     class Meta:
         table = "projects"
@@ -105,111 +96,31 @@ class Project(BaseModel):
 
 
 class ProjectFile(BaseModel):
-    """文件项目详情
+    """Git 文件项目详情。"""
 
-    支持版本化存储：
-    - 草稿（draft）：可编辑的当前工作区
-    - 版本（version）：不可变的已发布快照
-    """
-
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     project_id = fields.BigIntField(unique=True)
 
-    # ========== 文件基础信息 ==========
-    file_path = fields.CharField(max_length=500, description="当前文件路径")
-    original_file_path = fields.CharField(max_length=500, null=True, description="原始上传路径")
-    original_name = fields.CharField(max_length=255)
-    file_size = fields.BigIntField()
-    file_type = fields.CharField(max_length=50)
-    file_hash = fields.CharField(max_length=64)
+    # M8：文件项目也支持非 Python 语言（如 Node/Go/Java 单文件脚本或 jar）
+    language = fields.CharField(max_length=50, default="python")
 
     entry_point = fields.CharField(max_length=255, null=True)
     runtime_config = fields.JSONField(null=True)
     environment_vars = fields.JSONField(null=True)
 
-    storage_type = fields.CharField(max_length=20, default="s3")
-    is_compressed = fields.BooleanField(default=False)
-    compression_ratio = fields.FloatField(null=True)
-
-    file_count = fields.IntField(default=1)
-    additional_files = fields.JSONField(null=True)
-
-    # ========== 草稿管理（新增） ==========
-    draft_manifest_key = fields.CharField(
-        max_length=512, null=True, description="草稿 manifest S3 路径"
-    )
-    draft_root_prefix = fields.CharField(
-        max_length=512, null=True, description="草稿文件树 S3 前缀"
-    )
-
-    # ========== 编辑状态（新增） ==========
-    dirty = fields.BooleanField(default=False, description="草稿是否有未发布修改")
-    dirty_files_count = fields.IntField(default=0, description="修改文件数")
-    last_editor_id = fields.BigIntField(null=True, description="最后编辑者 ID")
-    last_edit_at = fields.DatetimeField(null=True, description="最后编辑时间")
-
-    # ========== 版本指针（新增） ==========
-    published_version = fields.IntField(default=0, description="最新已发布版本号")
-
     class Meta:
         table = "project_files"
         indexes = [
             ("project_id",),
-            ("file_type",),
-            ("storage_type",),
-            ("is_compressed",),
+            ("language",),
             ("public_id",),
-            ("dirty",),
-            ("published_version",),
-        ]
-
-
-class ProjectFileVersion(BaseModel):
-    """项目文件版本（不可变 append-only）
-
-    每次发布草稿时创建新版本，版本一旦创建不可修改。
-    """
-
-    project_id = fields.BigIntField(db_index=True, description="关联项目 ID")
-    version = fields.IntField(description="版本序号 v1/v2...")
-    version_id = fields.CharField(
-        max_length=64, unique=True, description="不可变版本 ID（UUID）"
-    )
-
-    # S3 存储路径
-    manifest_key = fields.CharField(max_length=512, description="S3 manifest 路径")
-    artifact_key = fields.CharField(max_length=512, description="S3 artifact.zip 路径")
-
-    # 内容摘要
-    content_hash = fields.CharField(max_length=64, description="内容哈希（用于缓存/去重）")
-    file_count = fields.IntField(default=0, description="文件数量")
-    total_size = fields.BigIntField(default=0, description="总大小（字节）")
-
-    # 元数据
-    created_at = fields.DatetimeField(auto_now_add=True)
-    created_by = fields.BigIntField(null=True, description="创建者 ID")
-    description = fields.CharField(max_length=500, null=True, description="版本说明")
-
-    class Meta:
-        table = "project_file_versions"
-        unique_together = [("project_id", "version")]
-        indexes = [
-            ("project_id",),
-            ("project_id", "version"),
-            ("version_id",),
-            ("content_hash",),
-            ("created_at",),
         ]
 
 
 class ProjectRule(BaseModel):
     """规则项目详情"""
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     project_id = fields.BigIntField(unique=True)
 
     engine = fields.CharEnumField(CrawlEngine, default=CrawlEngine.REQUESTS)
@@ -238,6 +149,14 @@ class ProjectRule(BaseModel):
 
     task_config = fields.JSONField(null=True)
 
+    # S3b: scrapy-redis 断点续爬 + 单爬虫分布式（跟 Scrapy 引擎配合）
+    resume_enabled = fields.BooleanField(default=False)
+
+    # S5: 内容级去重（跨 run 按业务字段哈希持久化）。JSON 结构:
+    # {enabled: bool, fields: [str], scope: "project"|"run",
+    #  ttl_days: int, on_hit: "drop"|"log"}
+    dedup_config = fields.JSONField(null=True)
+
     class Meta:
         table = "project_rules"
         indexes = [
@@ -248,44 +167,65 @@ class ProjectRule(BaseModel):
         ]
 
     def to_dispatch_dict(self) -> dict:
-        """序列化为分发字典，供 dispatcher 使用"""
+        """序列化为分发字典，供 dispatcher 使用。
+
+        R1-P1-21 (审查报告)：DB 里配置了 ``request_delay/retry_count/timeout/
+        max_pages/start_page`` 但 to_dispatch_dict 从不下发，Scrapy 侧
+        （settings.py 读顶层 rule，spider 读 max_pages/start_page 兜底）
+        永远拿不到，恒用默认 1s 延迟 / 3 重试 / 30s 超时 / 10 页 / 8 并发。
+        **限速失效有对目标站过度请求的合规风险**——统一在这里补齐。
+        """
         data = {
             "target_url": self.target_url,
             "callback_type": self.callback_type.value if hasattr(self.callback_type, "value") else self.callback_type,
-            "request_method": self.request_method.value if hasattr(self.request_method, "value") else self.request_method,
+            "request_method": self.request_method.value
+            if hasattr(self.request_method, "value")
+            else self.request_method,
             "engine": self.engine.value if hasattr(self.engine, "value") else self.engine,
             "headers": self.headers or {},
             "cookies": self.cookies or {},
             "priority": self.priority or 0,
             "dont_filter": self.dont_filter,
+            # R1-P1-21: 限速/重试/超时/页数/并发 — Scrapy settings.py 读顶层
+            "request_delay": int(self.request_delay or 1000),   # 毫秒；settings 会 /1000 转秒
+            "retry_count": int(self.retry_count or 3),
+            "timeout": int(self.timeout or 30),
+            "max_pages": int(self.max_pages or 10),
+            "start_page": int(self.start_page or 1),
         }
-        if hasattr(self, "request_body") and self.request_body:
-            data["request_body"] = self.request_body
         if self.proxy_config:
             data["proxy_config"] = self.proxy_config
         if self.extraction_rules:
             data["extraction_rules"] = self.extraction_rules
         if self.pagination_config:
             data["pagination_config"] = self.pagination_config
-        if hasattr(self, "wait_time") and self.wait_time:
-            data["wait_time"] = self.wait_time
-        if hasattr(self, "javascript_code") and self.javascript_code:
-            data["javascript_code"] = self.javascript_code
+        # R1-P2-27 (审查报告): 老实现 ``hasattr(self, "wait_time")`` /
+        # ``hasattr(..., "javascript_code")`` / ``hasattr(..., "request_body")``
+        # 三个字段是防御性代码，ProjectRule 模型**根本没有这三列**，
+        # hasattr 恒 False，特性永远不可达。javascript_code (页面 JS 注入)
+        # 用户实际想用这个功能只能通过 pagination_config.method=js_click。
+        # 三个 hasattr 分支已清理；如果未来真要支持，需要先加 DB 列 +
+        # 迁移。
+        # 死列（url_pattern / anti_spider / data_schema / task_config /
+        # callback_type）现在也不在这里下发。callback_type spider 不读；
+        # 其他三个仅入库不消费——保留 DB 列但不参与 dispatch。
+        # S3b: scrapy-redis 断点续爬开关（缺省 False，仅开启时下发）
+        if getattr(self, "resume_enabled", False):
+            data["resume_enabled"] = True
+        # S5: 内容级去重配置（有配置时才下发）
+        dedup_cfg = getattr(self, "dedup_config", None)
+        if dedup_cfg:
+            data["dedup_config"] = dedup_cfg
         return data
 
 
 class ProjectCode(BaseModel):
     """代码项目详情"""
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     project_id = fields.BigIntField(unique=True)
 
-    content = fields.TextField()
     language = fields.CharField(max_length=50, default="python")
-    version = fields.CharField(max_length=20, default="1.0.0")
-    content_hash = fields.CharField(max_length=64)
 
     entry_point = fields.CharField(max_length=255, null=True)
     runtime_config = fields.JSONField(null=True)
@@ -299,8 +239,6 @@ class ProjectCode(BaseModel):
         indexes = [
             ("project_id",),
             ("language",),
-            ("version",),
-            ("content_hash",),
             ("public_id",),
         ]
 
@@ -308,7 +246,6 @@ class ProjectCode(BaseModel):
 __all__ = [
     "Project",
     "ProjectFile",
-    "ProjectFileVersion",
     "ProjectRule",
     "ProjectCode",
 ]

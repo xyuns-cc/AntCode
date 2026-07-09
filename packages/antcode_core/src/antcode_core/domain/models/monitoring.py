@@ -12,9 +12,7 @@ from antcode_core.domain.models.base import BaseModel, generate_public_id
 class WorkerPerformanceHistory(BaseModel):
     """Worker 系统性能历史记录（按分钟聚合）"""
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     worker_id = fields.CharField(
         max_length=100,
         db_index=True,
@@ -41,9 +39,7 @@ class WorkerPerformanceHistory(BaseModel):
 class SpiderMetricsHistory(BaseModel):
     """爬虫业务指标历史记录（按分钟聚合）"""
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     worker_id = fields.CharField(
         max_length=100,
         db_index=True,
@@ -77,9 +73,7 @@ class SpiderMetricsHistory(BaseModel):
 class WorkerEvent(BaseModel):
     """Worker 事件日志"""
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     worker_id = fields.CharField(
         max_length=100,
         db_index=True,

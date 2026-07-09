@@ -412,8 +412,6 @@ body.dark-theme .worker-header-compact .worker-version {
   width: 100%;
 }
 
-/* 移除旧的 metric-label-compact，已在上面重新定义 */
-
 .metric-value-compact {
   display: flex;
   align-items: center;
@@ -1405,4 +1403,3 @@ body.dark-theme .worker-log-item.worker-log-info {
     max-width: 160px;
   }
 }
-

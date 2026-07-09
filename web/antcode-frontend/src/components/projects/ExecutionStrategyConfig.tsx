@@ -1,9 +1,8 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
-import { Form, Select, Switch, Space, Tag, Tooltip, Alert, Typography } from 'antd'
+import { Form, Select, Space, Tag, Tooltip, Alert, Typography } from 'antd'
 import {
   CloudServerOutlined,
-  DesktopOutlined,
   ThunderboltOutlined,
   SafetyOutlined,
   QuestionCircleOutlined,
@@ -20,13 +19,11 @@ interface ExecutionStrategyConfigProps {
   value?: {
     execution_strategy?: ExecutionStrategy
     bound_worker_id?: string
-    fallback_enabled?: boolean
   }
   /** 值变化回调 */
   onChange?: (value: {
     execution_strategy: ExecutionStrategy
     bound_worker_id?: string
-    fallback_enabled?: boolean
   }) => void
   /** 是否禁用 */
   disabled?: boolean
@@ -41,13 +38,6 @@ interface ExecutionStrategyConfigProps {
 }
 
 const STRATEGY_OPTIONS = [
-  {
-    value: 'local',
-    label: '本地执行',
-    icon: <DesktopOutlined />,
-    description: '在主控本地执行任务',
-    color: 'blue',
-  },
   {
     value: 'fixed',
     label: '固定 Worker',
@@ -83,7 +73,6 @@ const ExecutionStrategyConfig: React.FC<ExecutionStrategyConfigProps> = ({
 
   const strategy = value?.execution_strategy || 'prefer'
   const boundWorkerId = value?.bound_worker_id
-  const fallbackEnabled = value?.fallback_enabled ?? true
 
   // 加载 Worker 列表
   useEffect(() => {
@@ -105,7 +94,6 @@ const ExecutionStrategyConfig: React.FC<ExecutionStrategyConfigProps> = ({
     onChange?.({
       execution_strategy: newStrategy,
       bound_worker_id: ['fixed', 'prefer'].includes(newStrategy) ? boundWorkerId : undefined,
-      fallback_enabled: newStrategy === 'prefer' ? fallbackEnabled : undefined,
     })
   }
 
@@ -113,20 +101,10 @@ const ExecutionStrategyConfig: React.FC<ExecutionStrategyConfigProps> = ({
     onChange?.({
       execution_strategy: strategy,
       bound_worker_id: workerId,
-      fallback_enabled: fallbackEnabled,
-    })
-  }
-
-  const handleFallbackChange = (enabled: boolean) => {
-    onChange?.({
-      execution_strategy: strategy,
-      bound_worker_id: boundWorkerId,
-      fallback_enabled: enabled,
     })
   }
 
   const needsWorkerSelection = ['fixed', 'prefer'].includes(strategy)
-  const showFallbackSwitch = strategy === 'prefer'
 
   const currentOption = STRATEGY_OPTIONS.find(opt => opt.value === strategy)
 
@@ -141,7 +119,7 @@ const ExecutionStrategyConfig: React.FC<ExecutionStrategyConfigProps> = ({
             <Space>
               <Text>项目执行策略：</Text>
               <Tag color={STRATEGY_OPTIONS.find(o => o.value === projectStrategy.execution_strategy)?.color}>
-                {STRATEGY_OPTIONS.find(o => o.value === projectStrategy.execution_strategy)?.label || '本地执行'}
+                {STRATEGY_OPTIONS.find(o => o.value === projectStrategy.execution_strategy)?.label || '未配置'}
               </Tag>
               {projectStrategy.bound_worker_name && (
                 <Text type="secondary">绑定 Worker: {projectStrategy.bound_worker_name}</Text>
@@ -246,33 +224,6 @@ const ExecutionStrategyConfig: React.FC<ExecutionStrategyConfigProps> = ({
         </Form.Item>
       )}
 
-      {/* 故障转移开关（prefer 策略时显示） */}
-      {showFallbackSwitch && (
-        <Form.Item
-          label={
-            <Space>
-              故障转移
-              <Tooltip title="当绑定 Worker 不可用时，自动选择其他可用 Worker 执行">
-                <QuestionCircleOutlined style={{ color: '#999' }} />
-              </Tooltip>
-            </Space>
-          }
-          style={{ marginBottom: 0 }}
-        >
-          <Switch
-            checked={fallbackEnabled}
-            onChange={handleFallbackChange}
-            disabled={disabled}
-            checkedChildren="启用"
-            unCheckedChildren="禁用"
-          />
-          <Text type="secondary" style={{ marginLeft: 12 }}>
-            {fallbackEnabled
-              ? '绑定 Worker 不可用时自动选择其他 Worker'
-              : '绑定 Worker 不可用时任务将失败'}
-          </Text>
-        </Form.Item>
-      )}
     </div>
   )
 }

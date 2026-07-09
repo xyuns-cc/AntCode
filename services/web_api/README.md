@@ -7,7 +7,7 @@ Web API 是 AntCode 的"大脑"，提供 RESTful API 接口，负责处理外部
 ## 🎯 核心职责
 
 1.  **用户接口 (User Interface)**: 提供任务管理、项目配置、日志查询等 API。
-2.  **节点管理 (Node Mgmt)**: 处理 Worker 的注册、鉴权与心跳接收。
+2.  **Worker 管理 (Worker Mgmt)**: 处理 Worker 的注册、鉴权与心跳接收。
 3.  **配置中心 (Config Center)**: 管理系统全局配置与项目级配置。
 4.  **元数据存储 (Metadata Store)**: 负责所有持久化数据的 CRUD 操作。
 

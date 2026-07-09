@@ -10,6 +10,7 @@ from dataclasses import dataclass
 @dataclass
 class QuotaLimit:
     """配额限制"""
+
     max_projects: int = 100
     max_tasks_per_project: int = 50
     max_concurrent_tasks: int = 10
@@ -21,6 +22,7 @@ class QuotaLimit:
 @dataclass
 class QuotaUsage:
     """配额使用情况"""
+
     projects: int = 0
     tasks: int = 0
     concurrent_tasks: int = 0

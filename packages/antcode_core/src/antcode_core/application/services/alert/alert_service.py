@@ -9,7 +9,6 @@ from datetime import datetime
 
 from loguru import logger
 
-from antcode_core.common.serialization import from_json
 from antcode_core.application.services.alert.alert_channels import (
     DingtalkAlertChannel,
     EmailAlertChannel,
@@ -17,6 +16,7 @@ from antcode_core.application.services.alert.alert_channels import (
     WeComAlertChannel,
 )
 from antcode_core.application.services.alert.alert_manager import alert_manager
+from antcode_core.common.serialization import from_json
 
 
 class AlertService:
@@ -80,9 +80,7 @@ class AlertService:
                 elif key == "email_config":
                     config["email_config"] = self._parse_webhooks(value) if value else {}
                 elif key == "auto_alert_levels":
-                    config["auto_alert_levels"] = [
-                        level.strip() for level in value.split(",") if level.strip()
-                    ]
+                    config["auto_alert_levels"] = [level.strip() for level in value.split(",") if level.strip()]
                 elif key == "rate_limit_enabled":
                     config["rate_limit_enabled"] = value.lower() in ("true", "1", "yes")
                 elif key == "rate_limit_window":

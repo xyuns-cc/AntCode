@@ -270,6 +270,7 @@ class WorkerLoadBalancer:
         region=None,
         tags=None,
         require_render=False,
+        require_task_type: str | None = None,
     ):
         """
         选择最佳节点
@@ -280,6 +281,9 @@ class WorkerLoadBalancer:
         - region: 区域过滤
         - tags: 标签过滤
         - require_render: 是否需要渲染能力（DrissionPage）
+        - require_task_type: T6-T4b: 要求 worker.capabilities.task_types
+          包含此值（"rule" / "code" / "spider" / "render" / "file"）。
+          worker 未上报 task_types 时视为"兼容任意"（向后兼容旧 worker）。
         """
         if workers is None:
             query = Worker.filter(status=WorkerStatus.ONLINE.value)
@@ -306,10 +310,24 @@ class WorkerLoadBalancer:
                 logger.debug(f"节点 [{worker.name}] 无渲染能力，跳过")
                 continue
 
+            # T6-T4b: task_type capability 过滤
+            if require_task_type and not self._supports_task_type(
+                worker, require_task_type
+            ):
+                logger.debug(
+                    f"节点 [{worker.name}] 不支持 task_type={require_task_type}，跳过"
+                )
+                continue
+
             filtered_workers.append(worker)
 
         if not filtered_workers:
-            if require_render:
+            if require_task_type:
+                logger.warning(
+                    f"无支持 task_type={require_task_type!r} 的可用节点 "
+                    "(检查 worker 侧 WORKER_ENABLE_RULE_PLUGIN 等 env)"
+                )
+            elif require_render:
                 logger.warning("无符合条件的渲染节点")
             else:
                 logger.warning("无符合条件节点")
@@ -364,6 +382,21 @@ class WorkerLoadBalancer:
         caps = worker.capabilities
         cap = caps.get("drissionpage")
         return bool(cap and cap.get("enabled"))
+
+    def _supports_task_type(self, worker, task_type: str) -> bool:
+        """T6-T4b: worker.capabilities.task_types 里是否声明支持某 task_type。
+
+        向后兼容：老 worker 没有 task_types 字段 → 视为兼容所有类型
+        （老 dispatcher 行为不变）。新 worker 上报 task_types 后严格匹配。
+        """
+        caps = worker.capabilities or {}
+        declared = caps.get("task_types")
+        if declared is None:
+            # 兼容：老 worker 无声明，认为支持任意
+            return True
+        if not isinstance(declared, list):
+            return True  # 非列表也视为无声明
+        return task_type in declared
 
     async def get_workers_ranking(self, region=None, top_n=10):
         """获取节点排名"""
@@ -701,10 +734,29 @@ class WorkerTaskDispatcher:
                     require_render = True
                     break
 
+        # T6-T4b: 批内如果所有任务的 project_type 一致，把它作为 capability
+        # 过滤条件；否则不加 capability 过滤（不同类型混排时逐个派发更稳）。
+        project_types = {t.get("project_type") for t in tasks if t.get("project_type")}
+        require_task_type: str | None = None
+        if len(project_types) == 1:
+            require_task_type = next(iter(project_types))
+
         # 选择目标 Worker
-        worker = await self._select_worker(worker_id, region, tags, require_render=require_render)
+        worker = await self._select_worker(
+            worker_id,
+            region,
+            tags,
+            require_render=require_render,
+            require_task_type=require_task_type,
+        )
         if not worker:
-            return BatchDispatchResult(success=False, error="无可用 Worker")
+            err = "无可用 Worker"
+            if require_task_type:
+                err = (
+                    f"无支持 task_type={require_task_type!r} 的 Worker "
+                    "(检查 worker 侧插件是否装载)"
+                )
+            return BatchDispatchResult(success=False, error=err)
 
         try:
             # 确保节点在线
@@ -712,29 +764,67 @@ class WorkerTaskDispatcher:
             if not connected:
                 return BatchDispatchResult(success=False, error=f"Worker 未在线: {worker.name}")
 
-            # 同步所有涉及的项目，并获取项目下载信息
-            project_ids = list({t.get("project_id") for t in tasks if t.get("project_id")})
-            (
-                sync_results,
-                project_download_info,
-            ) = await self._sync_projects_to_worker_with_info(worker, project_ids)
+            # A2: 走 SourceBundleDispatchService 构建每个项目的 source bundle 与派发信息。
+            # 迁移 38 已下线 worker_project 分布式同步表；新链路：Master 构建
+            # source_bundle → Worker 按 content-hash 幂等下载。契约字段与
+            # gateway 端一致：source_bundle_uri / _sha256 / _size / source_subdir。
+            #
+            # O1-followup: rule 项目**跳过** source_bundle 构建——rule 定义在
+            # ProjectRule 表里，worker 侧 RulePlugin 从 ``params.kwargs.rule_detail``
+            # 拿到规则，无 git 源码要下发。此处按 project_type 分流。
+            from antcode_core.application.services.workers.source_bundle_dispatch_service import (
+                source_bundle_dispatch_service,
+            )
 
-            if sync_results.get("failed"):
-                failed_items = sync_results.get("failed", [])
-                reason = failed_items[0].get("reason") if failed_items else "项目同步失败"
-                return BatchDispatchResult(success=False, error=reason, sync_results=sync_results)
+            # 分离需要 source_bundle 的项目（code/file）与 rule 项目
+            bundle_project_ids: list[str] = []
+            rule_task_ids: set[str] = set()
+            for t in tasks:
+                pid = t.get("project_id")
+                if not pid:
+                    continue
+                if t.get("project_type") == "rule":
+                    rule_task_ids.add(pid)
+                elif pid not in bundle_project_ids:
+                    bundle_project_ids.append(pid)
 
-            # 为每个任务添加项目下载信息（用于 Worker 端重新同步）
+            # 组装 run_id -> project 映射（RunSourceSnapshot 需要）
+            run_ids_by_project: dict[str, str] = {}
+            for task in tasks:
+                pid = task.get("project_id")
+                rid = task.get("run_id") or task.get("task_id")
+                if pid and rid and pid not in run_ids_by_project:
+                    run_ids_by_project[pid] = rid
+
+            project_download_info: dict = {}
+            sync_results: dict = {"synced": [], "skipped": [], "failed": []}
+            if bundle_project_ids:
+                (
+                    sync_results,
+                    project_download_info,
+                ) = await source_bundle_dispatch_service.build_dispatch_for_worker_with_info(
+                    worker, bundle_project_ids, run_ids_by_project=run_ids_by_project,
+                )
+
+                if sync_results.get("failed"):
+                    failed_items = sync_results.get("failed", [])
+                    reason = failed_items[0].get("reason") if failed_items else "项目同步失败"
+                    return BatchDispatchResult(success=False, error=reason, sync_results=sync_results)
+
+            # 为每个任务添加 source_bundle 契约字段（rule 任务直接透传，无 bundle）
             enriched_tasks = []
             for task in tasks:
                 task_copy = dict(task)
                 pid = task.get("project_id")
                 if pid and pid in project_download_info:
                     info = project_download_info[pid]
-                    task_copy["file_hash"] = info.get("file_hash")
-                    task_copy["entry_point"] = info.get("entry_point")
-                    task_copy["download_url"] = info.get("download_url")
-                    task_copy["is_compressed"] = info.get("is_compressed", True)
+                    task_copy["source_bundle_uri"] = info.get("source_bundle_uri", "")
+                    task_copy["source_bundle_sha256"] = info.get("source_bundle_sha256", "")
+                    task_copy["source_bundle_size"] = info.get("source_bundle_size", 0)
+                    task_copy["source_subdir"] = info.get("source_subdir", "")
+                    task_copy["transfer_method"] = info.get("transfer_method", "source_bundle")
+                    task_copy["entry_point"] = info.get("entry_point") or task.get("entry_point", "")
+                    task_copy["resolved_revision"] = info.get("resolved_revision", "")
                 enriched_tasks.append(task_copy)
 
             # 发送批量任务到节点的优先级队列
@@ -791,12 +881,14 @@ class WorkerTaskDispatcher:
         region=None,
         tags=None,
         require_render=False,
+        require_task_type: str | None = None,
     ):
         """
         选择目标节点
 
         参数:
         - require_render: 是否需要渲染能力
+        - require_task_type: T6-T4b: 要求 worker 声明支持此 task_type
         """
         if worker_id:
             worker = await Worker.filter(public_id=worker_id).first()
@@ -816,24 +908,26 @@ class WorkerTaskDispatcher:
             if require_render and not self.load_balancer._has_render_capability(worker):
                 logger.warning(f"指定 Worker [{worker.name}] 无渲染能力")
                 return None
+            # T6-T4b: 指定 worker 也要满足 capability 声明
+            if require_task_type and not self.load_balancer._supports_task_type(
+                worker, require_task_type
+            ):
+                logger.warning(
+                    f"指定 Worker [{worker.name}] 不支持 task_type={require_task_type!r}"
+                )
+                return None
 
             return worker
         else:
             return await self.load_balancer.select_best_worker(
-                region=region, tags=tags, require_render=require_render
+                region=region,
+                tags=tags,
+                require_render=require_render,
+                require_task_type=require_task_type,
             )
 
-    async def _sync_projects_to_worker(self, worker, project_ids):
-        """批量同步项目到节点"""
-        from antcode_core.application.services.workers.worker_project_sync import worker_project_sync_service
-
-        return await worker_project_sync_service.sync_projects_to_worker(worker, project_ids)
-
-    async def _sync_projects_to_worker_with_info(self, worker, project_ids):
-        """批量同步项目到节点，并返回项目下载信息"""
-        from antcode_core.application.services.workers.worker_project_sync import worker_project_sync_service
-
-        return await worker_project_sync_service.sync_projects_to_worker_with_info(worker, project_ids)
+    # A2/迁移38：旧的 _sync_projects_to_worker* 走 worker_project_sync（表已删）
+    # 已被 SourceBundleDispatchService 取代（见 dispatch_task 主流程）；此处不再保留兼容 shim。
 
     # U3 / #16: ready stream 上限,防止 Worker 长时间挂掉时 stream 无限增长。
     # 用 ~10k entries(近似裁剪,XADD 内部 trim,实际值会大致在 10k 上下)。
@@ -864,9 +958,14 @@ class WorkerTaskDispatcher:
         # Worker 也能 deliver 到历史消息。StreamClient.xgroup_create 已
         # 内置 BUSYGROUP 幂等处理。
         try:
+            # E5: consumer group 名带 namespace 前缀，与 worker 侧对齐
+            from antcode_core.infrastructure.redis.control_plane import (
+                worker_consumer_group,
+            )
+
             await stream.xgroup_create(
                 stream_key,
-                group_name="antcode-workers",
+                group_name=worker_consumer_group(),
                 start_id="0",
                 mkstream=True,
             )
@@ -891,10 +990,14 @@ class WorkerTaskDispatcher:
                     "params": task.get("params") or {},
                     "environment": task.get("environment") or {},
                     "timeout": task.get("timeout", 3600),
-                    "download_url": task.get("download_url") or "",
-                    "file_hash": task.get("file_hash") or "",
+                    # A2: source_bundle 契约（direct 模式 poll 侧读同名字段解出 SourceBundle）
+                    "source_bundle_uri": task.get("source_bundle_uri") or "",
+                    "source_bundle_sha256": task.get("source_bundle_sha256") or "",
+                    "source_bundle_size": task.get("source_bundle_size") or 0,
+                    "transfer_method": task.get("transfer_method") or "source_bundle",
+                    "source_subdir": task.get("source_subdir") or "",
+                    "resolved_revision": task.get("resolved_revision") or "",
                     "entry_point": task.get("entry_point") or "",
-                    "is_compressed": task.get("is_compressed", True),
                     "trace_parent": trace_parent,
                 }
             )
@@ -940,11 +1043,9 @@ class WorkerTaskDispatcher:
         logger.warning("当前架构不支持取消节点队列任务")
         return False
 
-    async def sync_project_to_worker(self, worker, project_id, project_data):
-        """同步项目到节点"""
-        from antcode_core.application.services.workers.worker_project_sync import worker_project_sync_service
-
-        return await worker_project_sync_service.sync_project_to_worker(worker, project_id, project_data)
+    # sync_project_to_worker：迁移 38 已下线；仅 dispatcher 内部引用（现已删除），
+    # 对外无调用点。派发流程改由 SourceBundleDispatchService 提供 content-hash
+    # 幂等 bundle 元信息，worker 端按 sha256 决定是否需要下载。
 
     async def get_task_status_from_worker(self, worker, task_id):
         """从节点获取任务状态"""

@@ -29,10 +29,10 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
     {
       type: 'file' as ProjectType,
       title: '文件项目',
-      description: '上传项目文件或压缩包',
+      description: '从 Git 仓库运行文件项目',
       icon: FileOutlined,
       color: token.colorInfo,
-      features: ['支持 .zip、.tar.gz 压缩包', '自动解析项目依赖']
+      features: ['指定仓库入口文件', '自动解析项目依赖']
     },
     {
       type: 'rule' as ProjectType,
@@ -45,10 +45,10 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
     {
       type: 'code' as ProjectType,
       title: '代码项目',
-      description: '编写自定义代码',
+      description: '从 Git 仓库运行自定义代码',
       icon: CodeOutlined,
       color: token.purple || '#722ed1',
-      features: ['在线代码编辑器', '快速部署执行']
+      features: ['指定入口文件', '快速部署执行']
     },
     {
       type: 'agent' as ProjectType,

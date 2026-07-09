@@ -2,10 +2,10 @@
 
 ## 概述
 
-项目管理API提供了完整的项目生命周期管理功能，支持三种项目类型：
-- **文件项目 (FILE)**: 上传并执行Python文件或压缩包
+项目管理 API 提供项目生命周期管理功能。所有可执行源码都来自已登记的 Git 仓库：
+- **Git 入口项目 (FILE)**: 从 Git 仓库读取入口文件并执行
 - **规则项目 (RULE)**: 配置网页抓取规则，支持多种引擎
-- **代码项目 (CODE)**: 直接编写和执行代码片段
+- **代码项目 (CODE)**: 从 Git 仓库读取代码并执行入口函数
 
 ## 基础路径
 
@@ -34,12 +34,11 @@ Authorization: Bearer <your-jwt-token>
 
 ```python
 ProjectType:
-- FILE: 文件项目
+- FILE: Git 入口项目
 - RULE: 规则项目  
 - CODE: 代码项目
 
 ProjectStatus:
-- DRAFT: 草稿
 - ACTIVE: 激活
 - INACTIVE: 停用
 - ARCHIVED: 归档
@@ -53,7 +52,7 @@ ProjectStatus:
 
 **POST** `/api/v1/projects`
 
-创建新项目，支持文件、规则、代码三种类型。
+创建新项目。源码类项目必须绑定 Git 仓库来源。
 
 #### 请求参数 (Form Data)
 
@@ -64,21 +63,17 @@ ProjectStatus:
 - `tags` (string, 可选): 项目标签，逗号分隔
 - `dependencies` (string, 可选): Python依赖包JSON数组
 
-**文件项目参数：**
+**Git 入口项目参数：**
 - `entry_point` (string, 可选): 入口文件路径
 - `runtime_config` (string, 可选): 运行时配置JSON
 - `environment_vars` (string, 可选): 环境变量JSON
-- `source_type` (string, 可选): 文件来源类型 (`s3` | `git`)，默认 `s3`
-- `file` (file, 条件必需): 项目文件（`source_type=s3` 时必需）
-- `files` (file[], 可选): 多个项目文件
-- `git_url` (string, 条件必需): Git 仓库地址（`source_type=git` 时必需）
-- `git_branch` (string, 可选): Git 分支名
-- `git_commit` (string, 可选): Git 提交哈希
-- `git_subdir` (string, 可选): Git 仓库子目录
-- `git_credential_id` (string, 可选): Git 凭证 ID（私有仓库时使用，参见 [Git 凭证管理](../services/web_api/src/antcode_web_api/routes/v1/git_credentials.py)）
+- `repository_id` (string, 必需): 已管理 Git 仓库 ID
+- `ref` (string, 可选): Git 引用，默认 `main`
+- `subdir` (string, 必需): 仓库内项目子目录
+- `include_paths` (string, 可选): 显式共享目录 JSON 数组
 
 **规则项目参数：**
-- `engine` (string): 采集引擎 (`browser` | `requests` | `curl_cffi`)
+- `engine` (string): 采集引擎 (`requests` | `curl_cffi`)
 - `target_url` (string, 必需): 目标URL
 - `url_pattern` (string, 可选): URL匹配模式
 - `request_method` (string): 请求方法，默认 `GET`
@@ -97,18 +92,14 @@ ProjectStatus:
 - `version` (string, 可选): 语言版本
 - `code_entry_point` (string, 可选): 代码入口点
 - `documentation` (string, 可选): 文档说明
-- `source_type` (string, 可选): 代码来源类型 (`s3` | `git` | `inline`)，默认 `s3`
-- `code_content` (string, 条件可选): 代码内容（`source_type=inline` 时使用）
-- `code_file` (file, 可选): 代码文件（`source_type=s3` 时使用）
-- `git_url` (string, 条件必需): Git 仓库地址（`source_type=git` 时必需）
-- `git_branch` (string, 可选): Git 分支名
-- `git_commit` (string, 可选): Git 提交哈希
-- `git_subdir` (string, 可选): Git 仓库子目录
-- `git_credential_id` (string, 可选): Git 凭证 ID（私有仓库时使用）
+- `repository_id` (string, 必需): 已管理 Git 仓库 ID
+- `ref` (string, 可选): Git 引用，默认 `main`
+- `subdir` (string, 必需): 仓库内项目子目录
+- `include_paths` (string, 可选): 显式共享目录 JSON 数组
 
 #### 请求示例
 
-**创建文件项目：**
+**创建 Git 入口项目：**
 ```bash
 curl -X POST /api/v1/projects \
   -H "Authorization: Bearer <token>" \
@@ -116,7 +107,10 @@ curl -X POST /api/v1/projects \
   -F "description=一个Python测试项目" \
   -F "type=FILE" \
   -F "entry_point=main.py" \
-  -F "file=@test_project.zip"
+  -F "repository_id=repo_abc123" \
+  -F "ref=main" \
+  -F "subdir=spiders/news" \
+  -F 'include_paths=["libs/common"]'
 ```
 
 **创建规则项目：**
@@ -141,14 +135,16 @@ curl -X POST /api/v1/projects \
         "name": "Python测试项目",
         "description": "一个Python测试项目",
         "type": "FILE",
-        "status": "DRAFT",
+        "status": "ACTIVE",
         "tags": [],
         "created_at": "2024-01-01T00:00:00Z",
         "file_info": {
-            "original_name": "test_project.zip",
-            "file_size": 1024,
-            "file_hash": "abc123...",
-            "source_type": "s3"
+            "entry_point": "main.py",
+            "repository_id": "repo_abc123",
+            "repository_name": "crawler-repo",
+            "ref": "main",
+            "subdir": "spiders/news",
+            "include_paths": ["libs/common"]
         }
     }
 }
@@ -238,15 +234,15 @@ curl -X GET /api/v1/projects/1 \
         "dependencies": ["requests", "beautifulsoup4"],
         "created_at": "2024-01-01T00:00:00Z",
         "updated_at": "2024-01-01T01:00:00Z",
-        "file_detail": {
+        "file_info": {
             "entry_point": "main.py",
             "runtime_config": {},
             "environment_vars": {},
-            "file_path": "projects/1/main.py",
-            "original_name": "main.py",
-            "file_size": 1024,
-            "file_hash": "abc123...",
-            "is_compressed": false
+            "repository_id": "repo_abc123",
+            "repository_name": "crawler-repo",
+            "ref": "main",
+            "subdir": "spiders/news",
+            "resolved_revision": "abc123..."
         }
     }
 }
@@ -369,17 +365,13 @@ curl -X POST /api/v1/projects/batch-delete \
 
 #### 请求体示例
 
-**更新文件项目配置：**
+**更新 Git 入口项目配置：**
 ```json
 {
     "file_config": {
         "entry_point": "app.py",
         "runtime_config": {"workers": 2},
-        "environment_vars": {"ENV": "production"},
-        "source_type": "git",
-        "git_url": "https://github.com/example/repo.git",
-        "git_branch": "main",
-        "git_credential_id": "cred_abc123"
+        "environment_vars": {"ENV": "production"}
     }
 }
 ```
@@ -407,14 +399,21 @@ curl -X POST /api/v1/projects/batch-delete \
 ```json
 {
     "code_config": {
-        "code_content": "print('Hello Updated World!')",
         "language": "python",
-        "version": "3.11",
-        "source_type": "git",
-        "git_url": "https://github.com/example/repo.git",
-        "git_branch": "main",
-        "git_credential_id": "cred_abc123"
+        "version": "3.11"
     }
+}
+```
+
+源码配置必须通过 `GET/PUT /api/v1/projects/{project_id}/source` 单独读取或更新：
+
+```json
+{
+    "repository_id": "repo_abc123",
+    "ref": "main",
+    "subdir": "spiders/news",
+    "entry_point": "main.py",
+    "include_paths": ["libs/common"]
 }
 ```
 
@@ -448,7 +447,7 @@ curl -X POST /api/v1/projects/1/generate-task \
         "meta": {
             "fetch_type": "requests",
             "task_id": "crawler-20240101120000123-abc7def",
-            "worker_id": "Scraper-Node-Default",
+            "worker_id": "Worker-Default",
             "rules": [
                 {
                     "name": "title",
@@ -476,8 +475,6 @@ curl -X POST /api/v1/projects/1/generate-task \
 - **403 Forbidden**: 权限不足
 - **404 Not Found**: 项目不存在
 - **409 Conflict**: 项目名称重复
-- **413 Request Entity Too Large**: 文件过大
-- **415 Unsupported Media Type**: 文件类型不支持
 - **422 Unprocessable Entity**: 请求参数验证失败
 
 ### 错误响应示例
@@ -500,10 +497,10 @@ curl -X POST /api/v1/projects/1/generate-task \
 
 ## 最佳实践
 
-### 1. 文件上传限制
-- 单个文件最大100MB
-- 支持的文件类型：`.py`, `.zip`, `.tar.gz`, `.txt`, `.json`, `.md`, `.yml`, `.yaml`
-- 压缩包会自动解压到项目目录
+### 1. Git 来源规范
+- 源码必须来自 `/api/v1/repositories` 已登记仓库。
+- FILE 和 CODE 项目必须提供 `repository_id`、`subdir` 和入口文件。
+- `include_paths` 仅声明同一仓库内需要一并打包的共享路径。
 
 ### 2. 项目命名规范
 - 名称长度：3-50字符

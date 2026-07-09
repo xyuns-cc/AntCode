@@ -47,6 +47,7 @@ class Lifecycle:
         执行启动流程
 
         启动顺序：
+        0. mise 检测 + 可选自动安装（保证多语言任务能跑）
         1. Transport（优先启动）
         2. RuntimeManager
         3. Executor
@@ -59,6 +60,18 @@ class Lifecycle:
         self._shutdown_event = asyncio.Event()
 
         try:
+            # 0. mise 检测（不阻断：失败也让 Python 项目继续可用）
+            # ensure_mise 内部已把 install 失败降级为 available=False；但网络异常/权限异常
+            # 可能仍抛 RuntimeError（比如 detect_mise 走到 shutil.which 突发 PermissionError），
+            # 兜底 try 保证 Worker 启动流程本身不会被"多语言可选依赖"拉断。
+            try:
+                from antcode_worker.runtime.mise_bootstrap import ensure_mise
+                await ensure_mise()
+            except Exception as exc:
+                logger.error(
+                    "mise 启动检测异常（不阻断 Worker 启动，多语言任务将不可用）: {}", exc
+                )
+
             self._bind_transport_state(container)
 
             # 启动传输层
@@ -209,6 +222,16 @@ class Lifecycle:
             if container.engine:
                 await container.engine.stop(grace_period=grace_period)
                 logger.info("引擎已停止")
+
+            # T7-B3b (P1-6): 主动 deregister —— 让 master 立即撤销 lease，
+            # 不再等 TTL（30s）自然过期。在 heartbeat.stop 之前调，保证心跳
+            # 循环还在的时候 revoke 一定能触达（gateway 模式 RPC 走的是同一
+            # 个控制信道；direct 模式走 Redis）。失败仅告警不阻塞后续 stop。
+            if container.transport:
+                try:
+                    await container.transport.deregister("worker_shutdown")
+                except Exception as exc:
+                    logger.warning(f"deregister 失败（不阻塞停机）: {exc}")
 
             # 停止心跳
             if container.heartbeat_reporter:

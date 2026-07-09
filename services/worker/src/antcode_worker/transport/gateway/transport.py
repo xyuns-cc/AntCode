@@ -254,6 +254,33 @@ class GatewayTransport(TransportBase):
         await self._set_state(WorkerState.OFFLINE)
         logger.info("Gateway 传输层已停止")
 
+    async def deregister(self, reason: str = "shutdown") -> None:
+        """T7-B3b (P1-6): worker 优雅停机时调 gateway Deregister RPC。
+
+        让 master 立即撤销 lease；不再等 TTL（30s）到期。RPC 失败仅告警不
+        阻塞后续 stop 流程（即使 gateway 不可达 lease 也会自然过期）。
+        """
+        if not self._control_stub or not self._config.worker_id:
+            return
+        try:
+            from antcode_contracts import control_pb2
+
+            request = control_pb2.DeregisterRequest(
+                worker_id=self._config.worker_id,
+                reason=reason,
+            )
+            metadata = self._get_auth_metadata()
+            # 加短超时，避免 gateway 假死时阻塞停机
+            await asyncio.wait_for(
+                self._control_stub.Deregister(request, metadata=metadata),
+                timeout=3.0,
+            )
+            logger.info(f"worker Deregister 已发送 (reason={reason})")
+        except Exception as exc:
+            logger.warning(
+                f"Deregister RPC 失败（不阻塞停机；lease 会自然过期）: {exc}"
+            )
+
     async def _drain_outbox_queues(self) -> None:
         """等待 status / log outbox 被推送完"""
         while True:
@@ -500,24 +527,31 @@ class GatewayTransport(TransportBase):
         关键不变量:
         * 看到 ``_SHUTDOWN_SENTINEL`` -> ``return``（流正常关闭）。
         * ``yield`` 后捕到异常 -> 把这条消息塞回 outbox 尾部再 raise，
-          上层的 reconnect 会重新打开流并继续 drain（P1-#7：避免断流丢消息）。
-          注意：FIFO 顺序不严格保持（消息被排到尾），是为了简化重试。
+          上层的 reconnect 会重新打开流并继续 drain。
+
+        B4: outbox item 可能是 ``(msg, event)`` — event 用于让上游
+        ``report_result`` 阻塞等消息真正 yield 出去，避免"入队即成功"
+        导致的丢结果。yield 成功后 event.set()；转发失败保留 event。
         """
         while True:
-            msg = await outbox.get()
-            if msg is _SHUTDOWN_SENTINEL:
+            item = await outbox.get()
+            if item is _SHUTDOWN_SENTINEL:
                 return
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], asyncio.Event):
+                msg, event = item
+            else:
+                msg, event = item, None
             try:
                 yield msg
+                if event is not None:
+                    event.set()
             except Exception:
-                # 上游 gRPC 写入失败：保留这条消息，由下一次重连重传。
+                # 上游 gRPC 写入失败：保留这条消息（含 event）由下一次重连重传。
                 try:
-                    outbox.put_nowait(msg)
+                    outbox.put_nowait((msg, event) if event is not None else msg)
                 except asyncio.QueueFull:
-                    # 极端：队列已满，丢失一条但记录日志，避免死锁。
-                    logger.warning(
-                        "outbox 队列已满，丢弃 1 条待发送消息（断流场景）"
-                    )
+                    logger.warning("outbox 队列已满，丢弃 1 条待发送消息（断流场景）")
+                    # 让 report_result 通过 timeout 感知失败
                 raise
 
     # ==================== TransportBase 实现：任务面 ====================
@@ -614,7 +648,24 @@ class GatewayTransport(TransportBase):
             # TaskStatus.trace,Master ResultLoop 解码后可以把状态变更
             # 关联到同一个分布式 trace。
             inject_trace(msg)
-            await self._status_outbox.put(msg)
+
+            # B4: 等 drain 真正 yield 出去（gRPC send 成功）才算成功。
+            # 否则 outbox put 后立即 return True 会让 engine ack + remove，
+            # 若此时流断连 → 结果丢失、上游卡 running 直到 reclaim 触发双跑。
+            sent_event = asyncio.Event()
+            await self._status_outbox.put((msg, sent_event))
+            try:
+                await asyncio.wait_for(
+                    sent_event.wait(), timeout=self._gateway_config.call_timeout
+                )
+            except TimeoutError:
+                logger.warning(
+                    f"结果 outbox 投递超时({self._gateway_config.call_timeout}s), "
+                    f"引擎将保留 PEL 等 reclaim: task_id={result.task_id}"
+                )
+                # 不缓存 True — 让下次重试还能进入
+                return False
+
             if self._gateway_config.enable_receipt_idempotency:
                 self._cache_result(cache_key, True)
             return True

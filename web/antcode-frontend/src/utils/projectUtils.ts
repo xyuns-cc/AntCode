@@ -13,7 +13,6 @@ export const PROJECT_TYPE_MAP: Record<ProjectType, string> = {
 
 // 项目状态中文映射
 export const PROJECT_STATUS_MAP: Record<string, string> = {
-  draft: '草稿',
   active: '活跃',
   inactive: '非活跃',
   archived: '已归档'
@@ -28,7 +27,6 @@ export const PROJECT_TYPE_COLORS: Record<ProjectType, string> = {
 
 // 项目状态颜色映射
 export const PROJECT_STATUS_COLORS: Record<string, string> = {
-  draft: 'processing',
   active: 'success',
   inactive: 'default',
   archived: 'warning'
@@ -91,9 +89,9 @@ export const getProjectTypeIcon = (type: ProjectType): string => {
  */
 export const getProjectTypeDescription = (type: ProjectType): string => {
   const descriptionMap: Record<ProjectType, string> = {
-    file: '上传完整的项目文件或压缩包',
+    file: '从 Git 仓库运行文件项目',
     rule: '配置网页数据采集规则',
-    code: '直接编写或上传源代码'
+    code: '从 Git 仓库运行自定义代码'
   }
   return descriptionMap[type] || ''
 }
@@ -105,7 +103,6 @@ export const getProjectTypeDescription = (type: ProjectType): string => {
  */
 export const getProjectStatusDescription = (status: string): string => {
   const descriptionMap: Record<string, string> = {
-    draft: '项目处于草稿状态',
     active: '项目正常运行中',
     inactive: '项目暂停或未激活',
     archived: '项目已归档'

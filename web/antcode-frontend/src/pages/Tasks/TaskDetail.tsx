@@ -113,7 +113,7 @@ const TaskDetail: React.FC = () => {
       const stopAt = Date.now() + 30_000
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-      // eslint-disable-next-line no-constant-condition
+       
       while (Date.now() < stopAt) {
         await sleep(2_000)
         let latest: TaskExecution[] = []

@@ -9,8 +9,8 @@
 - 队列信息查询 (XLEN/XINFO/XPENDING)
 """
 
-from dataclasses import dataclass, field
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import ujson
@@ -123,10 +123,7 @@ class StreamClient:
         client = await self._get_client()
 
         # 序列化数据为 JSON 字符串
-        serialized = {
-            k: _to_json(v) if not isinstance(v, (str, bytes)) else v
-            for k, v in data.items()
-        }
+        serialized = {k: _to_json(v) if not isinstance(v, (str, bytes)) else v for k, v in data.items()}
 
         kwargs = {}
         if maxlen is not None:
@@ -169,10 +166,7 @@ class StreamClient:
         # 使用 pipeline 批量执行
         pipe = client.pipeline()
         for data in messages:
-            serialized = {
-                k: _to_json(v) if not isinstance(v, (str, bytes)) else v
-                for k, v in data.items()
-            }
+            serialized = {k: _to_json(v) if not isinstance(v, (str, bytes)) else v for k, v in data.items()}
             if maxlen:
                 pipe.xadd(stream_key, serialized, maxlen=maxlen, approximate=True)
             else:
@@ -277,9 +271,7 @@ class StreamClient:
             kwargs["block"] = block_ms
 
         try:
-            result = await client.xreadgroup(
-                group, consumer_name, streams={stream_key: msg_id}, **kwargs
-            )
+            result = await client.xreadgroup(group, consumer_name, streams={stream_key: msg_id}, **kwargs)
             return self._parse_xread_result(result, stream_key)
         except Exception as e:
             if "NOGROUP" in str(e):
@@ -288,9 +280,7 @@ class StreamClient:
             if self._is_connection_error(e):
                 self._redis = None
                 client = await self._get_client()
-                result = await client.xreadgroup(
-                    group, consumer_name, streams={stream_key: msg_id}, **kwargs
-                )
+                result = await client.xreadgroup(group, consumer_name, streams={stream_key: msg_id}, **kwargs)
                 return self._parse_xread_result(result, stream_key)
             raise
 
@@ -319,9 +309,7 @@ class StreamClient:
 
                 data = self._decode_message_data(msg_data[1])
 
-                messages.append(
-                    StreamMessage(msg_id=msg_id, data=data, stream_key=stream_name)
-                )
+                messages.append(StreamMessage(msg_id=msg_id, data=data, stream_key=stream_name))
 
         return messages
 
@@ -345,9 +333,7 @@ class StreamClient:
     # 消息确认
     # =========================================================================
 
-    async def xack(
-        self, stream_key: str, msg_ids: list[str], group_name: str | None = None
-    ) -> int:
+    async def xack(self, stream_key: str, msg_ids: list[str], group_name: str | None = None) -> int:
         """确认消息已处理
 
         Args:
@@ -413,9 +399,7 @@ class StreamClient:
         group = group_name or self.DEFAULT_GROUP
 
         try:
-            result = await client.xautoclaim(
-                stream_key, group, consumer_name, min_idle_time_ms, start_id, count=count
-            )
+            result = await client.xautoclaim(stream_key, group, consumer_name, min_idle_time_ms, start_id, count=count)
 
             next_id = result[0]
             if isinstance(next_id, bytes):
@@ -432,9 +416,7 @@ class StreamClient:
 
                 data = self._decode_message_data(msg_data[1])
 
-                messages.append(
-                    StreamMessage(msg_id=msg_id, data=data, stream_key=stream_key)
-                )
+                messages.append(StreamMessage(msg_id=msg_id, data=data, stream_key=stream_key))
 
             deleted_ids = []
             if len(result) > 2:
@@ -448,7 +430,7 @@ class StreamClient:
 
         except Exception as e:
             logger.error(f"XAUTOCLAIM 失败: {stream_key}, 错误: {e}")
-            return "0-0", [], []
+            raise
 
     # =========================================================================
     # 队列信息查询
@@ -481,11 +463,7 @@ class StreamClient:
                     name = consumer_data[0]
                     if isinstance(name, bytes):
                         name = name.decode("utf-8")
-                    count = (
-                        int(consumer_data[1])
-                        if isinstance(consumer_data[1], bytes)
-                        else consumer_data[1]
-                    )
+                    count = int(consumer_data[1]) if isinstance(consumer_data[1], bytes) else consumer_data[1]
                     consumers[name] = count
 
             min_id = result[1]

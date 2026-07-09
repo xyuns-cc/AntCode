@@ -21,9 +21,7 @@ class Task(BaseModel):
     表示一个计划任务定义，包含调度配置和执行参数。
     """
 
-    public_id = fields.CharField(
-        max_length=32, unique=True, default=generate_public_id, db_index=True
-    )
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
     name = fields.CharField(max_length=255, unique=True)
     description = fields.TextField(null=True)
 

@@ -1,26 +1,20 @@
-"""日志批量持久化服务
+"""日志批量持久化服务。
 
 为 Master ``LogIngestLoop`` 提供批量 ``append_entries`` API，避免上游
-逐条调用 ``task_log_service.write_log`` 导致的 I/O 风暴和异常处理散乱。
+逐条调用 ``task_log_service.write_log`` 导致的 I/O 风暴。
 
-P2 改造：从"写盘聚合"策略改为真正落 PG (``task_logs`` 表)。
-- 通过 Tortoise raw connection 写库，避免引入新的 ORM Model 注册依赖；
-- 表 schema 用 ``CREATE TABLE IF NOT EXISTS`` 在首次写入时懒加载；
-- ``append_entries`` 一次 ``executemany``，端到端零幽灵成功；
-- ``list_entries`` / ``count`` 给 ``task_log_service`` 走 PG 历史查询，
-  也给 ``web_api`` WebSocket 历史回放使用。
+schema 与 migration 37 (``add_task_logs``) 对齐：PostgreSQL 方言，
+``event_id`` 唯一（deduped exactly-once）。表创建以 migration 为准，
+本服务只做 CRUD，不再懒加载 DDL。
 
-设计目标：
 - **签名稳定**：``append_entries(entries: Sequence[PostgresLogEntry])``。
-- **失败可重试**：函数级失败抛 ``Exception``，上游 ingest loop 不 ACK，
-  Redis 消息保留在 pending，靠 ``XAUTOCLAIM`` 重试。
-- **字段对齐**：增加 ``level`` / ``source`` / ``extra_data`` 字段，跟
-  Worker ``LogEntry`` 的元数据完全对齐。
+- **失败可重试**：函数级失败抛 ``Exception``，上游 ingest loop 不 ACK。
+- **exactly-once**：``event_id`` 走 ``INSERT ... ON CONFLICT DO NOTHING``，
+  重放（reclaim）时不重复入库。
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -29,33 +23,10 @@ from typing import Any
 
 from loguru import logger
 
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS `task_logs` (
-    `id` BIGINT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-    `run_id` VARCHAR(64) NOT NULL,
-    `log_type` VARCHAR(16) NOT NULL DEFAULT 'stdout',
-    `content` MEDIUMTEXT NOT NULL,
-    `timestamp` DATETIME(6) NOT NULL,
-    `sequence` BIGINT NOT NULL DEFAULT 0,
-    `level` VARCHAR(16) NOT NULL DEFAULT '',
-    `source` VARCHAR(128) NOT NULL DEFAULT '',
-    `extra_data` JSON NULL,
-    `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    KEY `idx_task_logs_run_id` (`run_id`),
-    KEY `idx_task_logs_run_log_type` (`run_id`, `log_type`),
-    KEY `idx_task_logs_run_seq` (`run_id`, `sequence`)
-) CHARACTER SET utf8mb4 COMMENT='任务运行日志条目';
-"""
-
 
 @dataclass
 class PostgresLogEntry:
-    """日志条目 DTO
-
-    字段命名沿用 ``task_logs`` 表 schema。``level`` / ``source`` /
-    ``extra_data`` 留给 Worker ``LogEntry`` 的扩展元数据,允许默认值,
-    避免上游构造 TypeError。
-    """
+    """日志条目 DTO（对齐 ``task_logs`` 表 schema）。"""
 
     run_id: str
     log_type: str
@@ -65,46 +36,18 @@ class PostgresLogEntry:
     worker_id: str = ""
     level: str = ""
     source: str = ""
-    extra_data: dict[str, Any] = field(default_factory=dict)
+    event_id: str | None = None  # 走 ON CONFLICT 幂等键；None 时不去重
 
 
 class PostgresLogService:
-    """批量日志写入服务（PG 持久化）
+    """批量日志写入 / 查询服务（PostgreSQL）。
 
-    用 ``append_entries`` 一次写一批；通过 Tortoise raw connection
-    走 ``executemany`` 写库。表 schema 在首次写入时懒加载,无需额外
-    迁移依赖。
+    表 schema 由 ``migrations/models/37_...add_task_logs.py`` 建立，
+    本服务假定表已存在（启动流程走 ``db_migrate`` upgrade 分支）。
     """
 
-    _table_initialized: bool = False
-    _init_lock: asyncio.Lock | None = None
-
-    def __init__(self) -> None:
-        self._init_lock = None
-
-    def _ensure_lock(self) -> asyncio.Lock:
-        if self._init_lock is None:
-            self._init_lock = asyncio.Lock()
-        return self._init_lock
-
-    async def _ensure_table(self) -> None:
-        if self._table_initialized:
-            return
-        async with self._ensure_lock():
-            if self._table_initialized:
-                return
-            from tortoise import Tortoise
-
-            conn = Tortoise.get_connection("default")
-            await conn.execute_script(_CREATE_TABLE_SQL)
-            self._table_initialized = True
-
     async def append_entries(self, entries: Sequence[PostgresLogEntry]) -> int:
-        """批量写入日志条目，返回成功写入的条数。
-
-        - 任何 IO 失败都会抛回上游（用于保留消息 pending → 重试）。
-        - 空 ``run_id`` 的条目会被跳过（防御性）。
-        """
+        """批量写入日志条目，返回本次尝试写入的行数（含重复被 ON CONFLICT 忽略）。"""
         if not entries:
             return 0
 
@@ -113,35 +56,38 @@ class PostgresLogService:
             if not entry.run_id:
                 continue
             ts = entry.timestamp or datetime.now(tz=UTC)
-            extra_json = json.dumps(entry.extra_data or {}, ensure_ascii=False)
             rows.append(
                 (
+                    entry.event_id,
                     entry.run_id,
                     entry.log_type or "stdout",
                     entry.content or "",
-                    ts,
                     int(entry.sequence or 0),
-                    entry.level or "",
-                    entry.source or entry.worker_id or "",
-                    extra_json,
+                    ts,
+                    entry.level or "INFO",
+                    entry.source or entry.worker_id or "task_execution",
                 )
             )
-
         if not rows:
             return 0
-
-        await self._ensure_table()
 
         from tortoise import Tortoise
 
         conn = Tortoise.get_connection("default")
+        # P15: task_logs 上是**部分唯一索引** ``idx_task_logs_event_id_unique
+        # WHERE event_id IS NOT NULL``（迁移 27_add_audit_log_indexes 加的）。
+        # PG 的 ``ON CONFLICT (column)`` 推断要求索引断言与 INSERT 的行
+        # 谓词完全匹配，否则报 ``InvalidColumnReferenceError: no unique or
+        # exclusion constraint matching``。加显式 WHERE 让推断命中部分索引。
+        # 此前每一批日志都 raise → 消息进 pending 反复 reclaim → task_logs
+        # 表持续为空 → UI 日志页永远无历史内容。
         sql = (
-            "INSERT INTO `task_logs` "
-            "(`run_id`, `log_type`, `content`, `timestamp`, `sequence`, "
-            " `level`, `source`, `extra_data`) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+            'INSERT INTO "task_logs" '
+            '("event_id", "run_id", "log_type", "content", "sequence", "timestamp", "level", "source") '
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
+            'ON CONFLICT ("event_id") WHERE "event_id" IS NOT NULL DO NOTHING'
         )
-        # Tortoise execute_many 走底层 driver，失败会抛异常上抛
+        # asyncpg-based Tortoise 走 execute_many，失败会抛异常上抛
         await conn.execute_many(sql, rows)
         return len(rows)
 
@@ -157,29 +103,27 @@ class PostgresLogService:
         if not run_id:
             return []
 
-        await self._ensure_table()
-
         from tortoise import Tortoise
 
         conn = Tortoise.get_connection("default")
         if log_type:
             sql = (
-                "SELECT `run_id`, `log_type`, `content`, `timestamp`, "
-                "       `sequence`, `level`, `source`, `extra_data` "
-                "FROM `task_logs` "
-                "WHERE `run_id` = %s AND `log_type` = %s "
-                "ORDER BY `sequence` ASC, `id` ASC "
-                "LIMIT %s OFFSET %s"
+                'SELECT "event_id", "run_id", "log_type", "content", "sequence", '
+                '       "timestamp", "level", "source" '
+                'FROM "task_logs" '
+                'WHERE "run_id" = $1 AND "log_type" = $2 '
+                'ORDER BY "sequence" ASC, "id" ASC '
+                "LIMIT $3 OFFSET $4"
             )
             params: list[Any] = [run_id, log_type, int(limit), int(offset)]
         else:
             sql = (
-                "SELECT `run_id`, `log_type`, `content`, `timestamp`, "
-                "       `sequence`, `level`, `source`, `extra_data` "
-                "FROM `task_logs` "
-                "WHERE `run_id` = %s "
-                "ORDER BY `sequence` ASC, `id` ASC "
-                "LIMIT %s OFFSET %s"
+                'SELECT "event_id", "run_id", "log_type", "content", "sequence", '
+                '       "timestamp", "level", "source" '
+                'FROM "task_logs" '
+                'WHERE "run_id" = $1 '
+                'ORDER BY "sequence" ASC, "id" ASC '
+                "LIMIT $2 OFFSET $3"
             )
             params = [run_id, int(limit), int(offset)]
 
@@ -189,31 +133,19 @@ class PostgresLogService:
             logger.debug("读取 task_logs 失败 run_id={}: {}", run_id, exc)
             return []
 
-        result: list[PostgresLogEntry] = []
-        for row in rows or []:
-            extra_raw = row.get("extra_data")
-            extra: dict[str, Any] = {}
-            if isinstance(extra_raw, str) and extra_raw:
-                try:
-                    extra = json.loads(extra_raw)
-                except Exception:
-                    extra = {}
-            elif isinstance(extra_raw, dict):
-                extra = extra_raw
-
-            result.append(
-                PostgresLogEntry(
-                    run_id=row.get("run_id") or "",
-                    log_type=row.get("log_type") or "stdout",
-                    content=row.get("content") or "",
-                    timestamp=row.get("timestamp"),
-                    sequence=int(row.get("sequence") or 0),
-                    level=row.get("level") or "",
-                    source=row.get("source") or "",
-                    extra_data=extra,
-                )
+        return [
+            PostgresLogEntry(
+                run_id=row.get("run_id") or "",
+                log_type=row.get("log_type") or "stdout",
+                content=row.get("content") or "",
+                timestamp=row.get("timestamp"),
+                sequence=int(row.get("sequence") or 0),
+                level=row.get("level") or "",
+                source=row.get("source") or "",
+                event_id=row.get("event_id"),
             )
-        return result
+            for row in rows or []
+        ]
 
     async def count(
         self,
@@ -224,16 +156,14 @@ class PostgresLogService:
         if not run_id:
             return 0
 
-        await self._ensure_table()
-
         from tortoise import Tortoise
 
         conn = Tortoise.get_connection("default")
         if log_type:
-            sql = "SELECT COUNT(*) AS cnt FROM `task_logs` WHERE `run_id` = %s AND `log_type` = %s"
+            sql = 'SELECT COUNT(*) AS cnt FROM "task_logs" WHERE "run_id" = $1 AND "log_type" = $2'
             params: list[Any] = [run_id, log_type]
         else:
-            sql = "SELECT COUNT(*) AS cnt FROM `task_logs` WHERE `run_id` = %s"
+            sql = 'SELECT COUNT(*) AS cnt FROM "task_logs" WHERE "run_id" = $1'
             params = [run_id]
 
         try:

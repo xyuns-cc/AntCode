@@ -1,13 +1,23 @@
-import type { VenvListItem, VenvScope } from '@/services/envs'
+import type { RuntimePackage, RuntimeScope } from '@/services/runtimes'
 import type { Worker } from '@/types'
 
 /**
- * 扩展的环境项，包含节点信息
+ * 扩展的运行时环境项，包含 Worker 信息
  */
-export interface ExtendedVenvItem extends VenvListItem {
+export interface ExtendedRuntimeEnvItem {
+  id: string
+  scope: RuntimeScope
+  key: string
+  version: string
+  runtime_locator: string
+  created_by?: string | null
+  created_by_username?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  current_project_id?: string | null
+  packages?: RuntimePackage[]
   workerName?: string
   workerId?: string
-  isLocal: boolean
   envName?: string // Worker 环境名称（用于 runtime API 调用）
 }
 
@@ -20,23 +30,11 @@ export interface PackageInfo {
 }
 
 /**
- * 解释器信息
- */
-export interface InterpreterInfo {
-  version: string
-  python_bin: string
-  install_dir: string
-  source?: string
-  workerName?: string
-  workerId?: string
-}
-
-/**
  * 包列表模态框状态
  */
 export interface PackageModalState {
   open: boolean
-  venv?: ExtendedVenvItem
+  env?: ExtendedRuntimeEnvItem
   packages?: PackageInfo[]
   loading?: boolean
 }
@@ -46,7 +44,7 @@ export interface PackageModalState {
  */
 export interface EditModalState {
   open: boolean
-  venv?: ExtendedVenvItem
+  env?: ExtendedRuntimeEnvItem
 }
 
 /**
@@ -54,7 +52,7 @@ export interface EditModalState {
  */
 export interface InstallModalState {
   open: boolean
-  venvId?: string
+  envId?: string
 }
 
 /**
@@ -71,29 +69,11 @@ export interface WorkerFilterOption {
 export type EnvListPageProps = Record<string, never>
 
 /**
- * 创建虚拟环境抽屉 Props
+ * 编辑运行时环境标识模态框 Props
  */
-export interface CreateVenvDrawerProps {
-  onCreated: () => void
-}
-
-/**
- * 安装依赖按钮 Props
- */
-export interface InstallPackagesButtonProps {
-  venvId: string
-  onInstalled?: () => void
-  batch?: boolean
-  selectedIds?: string[]
-  buttonId?: string
-}
-
-/**
- * 编辑环境标识模态框 Props
- */
-export interface EditVenvKeyModalProps {
+export interface EditRuntimeEnvModalProps {
   open: boolean
-  venv?: ExtendedVenvItem
+  env?: ExtendedRuntimeEnvItem
   onClose: () => void
   onSuccess: () => void
 }
@@ -103,17 +83,9 @@ export interface EditVenvKeyModalProps {
  */
 export interface InstallPackagesModalProps {
   open: boolean
-  venvId?: string
+  envId?: string
   onClose: () => void
   onSuccess: () => void
 }
 
-/**
- * 解释器抽屉 Props
- */
-export interface InterpreterDrawerProps {
-  onAdded: () => void
-  currentWorker?: Worker
-}
-
-export type { VenvScope, Worker }
+export type { RuntimeScope, Worker }

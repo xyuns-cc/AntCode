@@ -97,39 +97,31 @@ class SpiderStatsService:
                 if ds.get("successRate", 0) >= 90:
                     agg["successCount"] += reqs
 
-            worker_stats.append({
-                "workerId": worker.public_id,
-                "workerName": worker.name,
-                "stats": SpiderStatsSummary.from_heartbeat(spider_stats).model_dump(),
-            })
+            worker_stats.append(
+                {
+                    "workerId": worker.public_id,
+                    "workerName": worker.name,
+                    "stats": SpiderStatsSummary.from_heartbeat(spider_stats).model_dump(),
+                }
+            )
 
         # 计算加权平均延迟
-        avg_latency = (
-            total_latency_weighted / total_responses if total_responses > 0 else 0.0
-        )
+        avg_latency = total_latency_weighted / total_responses if total_responses > 0 else 0.0
 
         # 转换域名统计为列表格式
         domain_stats_list = []
-        for domain, agg in sorted(
-            domain_stats_agg.items(), key=lambda x: x[1]["reqs"], reverse=True
-        )[:20]:  # Top 20
-            success_rate = (
-                agg["successCount"] / agg["totalCount"] * 100
-                if agg["totalCount"] > 0
-                else 0
+        for domain, agg in sorted(domain_stats_agg.items(), key=lambda x: x[1]["reqs"], reverse=True)[:20]:  # Top 20
+            success_rate = agg["successCount"] / agg["totalCount"] * 100 if agg["totalCount"] > 0 else 0
+            latency_avg = agg["totalLatency"] / agg["totalCount"] if agg["totalCount"] > 0 else 0
+            domain_stats_list.append(
+                {
+                    "domain": domain,
+                    "reqs": agg["reqs"],
+                    "successRate": round(success_rate, 1),
+                    "latency": round(latency_avg, 0),
+                    "status": "Healthy" if success_rate >= 95 else ("Warning" if success_rate >= 90 else "Critical"),
+                }
             )
-            latency_avg = (
-                agg["totalLatency"] / agg["totalCount"]
-                if agg["totalCount"] > 0
-                else 0
-            )
-            domain_stats_list.append({
-                "domain": domain,
-                "reqs": agg["reqs"],
-                "successRate": round(success_rate, 1),
-                "latency": round(latency_avg, 0),
-                "status": "Healthy" if success_rate >= 95 else ("Warning" if success_rate >= 90 else "Critical"),
-            })
 
         return {
             "cluster": {
@@ -146,9 +138,7 @@ class SpiderStatsService:
             "workerCount": len(worker_stats),
         }
 
-    async def get_spider_stats_history(
-        self, worker_id: int | None = None, hours: int = 1
-    ) -> list[dict]:
+    async def get_spider_stats_history(self, worker_id: int | None = None, hours: int = 1) -> list[dict]:
         """
         获取爬虫统计历史趋势
 
@@ -164,9 +154,7 @@ class SpiderStatsService:
         if worker_id:
             # 单节点历史
             heartbeats = (
-                await WorkerHeartbeat.filter(
-                    worker_id=worker_id, timestamp__gte=cutoff_time
-                )
+                await WorkerHeartbeat.filter(worker_id=worker_id, timestamp__gte=cutoff_time)
                 .order_by("timestamp")
                 .all()
             )
@@ -178,9 +166,7 @@ class SpiderStatsService:
                 return []
 
             heartbeats = (
-                await WorkerHeartbeat.filter(
-                    worker_id__in=worker_ids, timestamp__gte=cutoff_time
-                )
+                await WorkerHeartbeat.filter(worker_id__in=worker_ids, timestamp__gte=cutoff_time)
                 .order_by("timestamp")
                 .all()
             )
@@ -221,20 +207,18 @@ class SpiderStatsService:
         result = []
         for time_key in sorted(time_data.keys()):
             data = time_data[time_key]
-            avg_latency = (
-                data["latency_sum"] / data["latency_count"]
-                if data["latency_count"] > 0
-                else 0.0
+            avg_latency = data["latency_sum"] / data["latency_count"] if data["latency_count"] > 0 else 0.0
+            result.append(
+                {
+                    "timestamp": time_key,
+                    "requestCount": data["requests"],
+                    "responseCount": data["responses"],
+                    "itemScrapedCount": data["items"],
+                    "errorCount": data["errors"],
+                    "avgLatencyMs": round(avg_latency, 2),
+                    "requestsPerMinute": round(data["rpm"], 2),
+                }
             )
-            result.append({
-                "timestamp": time_key,
-                "requestCount": data["requests"],
-                "responseCount": data["responses"],
-                "itemScrapedCount": data["items"],
-                "errorCount": data["errors"],
-                "avgLatencyMs": round(avg_latency, 2),
-                "requestsPerMinute": round(data["rpm"], 2),
-            })
 
         return result
 

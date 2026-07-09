@@ -1,13 +1,13 @@
 /**
  * 防抖函数
  */
-export const debounce = <T extends (...args: unknown[]) => unknown>(
-  func: T,
+export const debounce = <A extends unknown[]>(
+  func: (...args: A) => unknown,
   wait: number
-): ((...args: Parameters<T>) => void) => {
+): ((...args: A) => void) => {
   let timeout: NodeJS.Timeout | null = null
-  
-  return (...args: Parameters<T>) => {
+
+  return (...args: A) => {
     if (timeout) clearTimeout(timeout)
     timeout = setTimeout(() => func(...args), wait)
   }
@@ -16,13 +16,13 @@ export const debounce = <T extends (...args: unknown[]) => unknown>(
 /**
  * 节流函数
  */
-export const throttle = <T extends (...args: unknown[]) => unknown>(
-  func: T,
+export const throttle = <A extends unknown[]>(
+  func: (...args: A) => unknown,
   limit: number
-): ((...args: Parameters<T>) => void) => {
+): ((...args: A) => void) => {
   let inThrottle: boolean
-  
-  return (...args: Parameters<T>) => {
+
+  return (...args: A) => {
     if (!inThrottle) {
       func(...args)
       inThrottle = true

@@ -35,9 +35,7 @@ class RedisDedupStore(DedupStore):
     - 可配置的误判率
     - 自动扩展
 
-    注意：
-    - 需要 Redis 安装 RedisBloom 模块
-    - 如果模块不可用，会降级使用 Set 实现
+    注意：需要 Redis 安装 RedisBloom 模块，模块缺失时直接失败。
 
     Requirements: 2.2, 2.4, 2.5, 2.6, 2.7
     """
@@ -62,10 +60,7 @@ class RedisDedupStore(DedupStore):
         key = get_dedup_key(project_id)
         result = await self._bloom_client.bf_exists(key, fingerprint)
 
-        logger.debug(
-            f"检查去重: project={project_id}, "
-            f"fingerprint={fingerprint[:8]}..., exists={result}"
-        )
+        logger.debug(f"检查去重: project={project_id}, fingerprint={fingerprint[:8]}..., exists={result}")
 
         return result
 
@@ -81,10 +76,7 @@ class RedisDedupStore(DedupStore):
         result = await self._bloom_client.bf_add(key, fingerprint)
 
         if result:
-            logger.debug(
-                f"添加去重: project={project_id}, "
-                f"fingerprint={fingerprint[:8]}..."
-            )
+            logger.debug(f"添加去重: project={project_id}, fingerprint={fingerprint[:8]}...")
 
         return result
 
@@ -103,10 +95,7 @@ class RedisDedupStore(DedupStore):
         results = await self._bloom_client.bf_madd(key, fingerprints)
 
         added_count = sum(1 for r in results if r)
-        logger.debug(
-            f"批量添加去重: project={project_id}, "
-            f"total={len(fingerprints)}, added={added_count}"
-        )
+        logger.debug(f"批量添加去重: project={project_id}, total={len(fingerprints)}, added={added_count}")
 
         return results
 
@@ -119,10 +108,7 @@ class RedisDedupStore(DedupStore):
         results = await self._bloom_client.bf_mexists(key, fingerprints)
 
         exists_count = sum(1 for r in results if r)
-        logger.debug(
-            f"批量检查去重: project={project_id}, "
-            f"total={len(fingerprints)}, exists={exists_count}"
-        )
+        logger.debug(f"批量检查去重: project={project_id}, total={len(fingerprints)}, exists={exists_count}")
 
         return results
 
@@ -199,9 +185,6 @@ class RedisDedupStore(DedupStore):
 
         result = await self._bloom_client.clear_filter(key, capacity, error_rate)
 
-        logger.info(
-            f"重建去重存储: project={project_id}, "
-            f"capacity={capacity}, error_rate={error_rate}"
-        )
+        logger.info(f"重建去重存储: project={project_id}, capacity={capacity}, error_rate={error_rate}")
 
         return result

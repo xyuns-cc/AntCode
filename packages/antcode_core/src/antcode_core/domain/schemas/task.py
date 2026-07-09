@@ -20,6 +20,7 @@ from antcode_core.domain.models.enums import (
 
 class TaskCreateRequest(BaseModel):
     """任务创建请求"""
+
     name: str = Field(..., min_length=3, max_length=255, description="任务名称")
     description: str | None = Field(None, max_length=500)
     project_id: str = Field(..., description="关联项目公开ID")
@@ -36,12 +37,8 @@ class TaskCreateRequest(BaseModel):
     execution_params: dict[str, Any] | None = Field(None, description="执行参数")
     environment_vars: dict[str, str] | None = Field(None, description="环境变量")
 
-    execution_strategy: ExecutionStrategy | None = Field(
-        None, description="执行策略"
-    )
-    specified_worker_id: str | None = Field(
-        None, description="指定执行 Worker ID"
-    )
+    execution_strategy: ExecutionStrategy | None = Field(None, description="执行策略")
+    specified_worker_id: str | None = Field(None, description="指定执行 Worker ID")
 
     @field_validator("cron_expression")
     @classmethod
@@ -70,6 +67,7 @@ class TaskCreateRequest(BaseModel):
 
 class TaskUpdateRequest(BaseModel):
     """任务更新请求"""
+
     name: str | None = Field(None, min_length=3, max_length=255)
     description: str | None = Field(None, max_length=500)
     is_active: bool | None = None
@@ -89,6 +87,7 @@ class TaskUpdateRequest(BaseModel):
 
 class TaskResponse(BaseModel):
     """任务响应"""
+
     id: str = Field(description="任务公开ID")
     name: str
     description: str = ""
@@ -124,6 +123,7 @@ class TaskResponse(BaseModel):
 
 class TaskListResponse(BaseModel):
     """任务列表响应"""
+
     total: int
     page: int
     size: int
@@ -132,6 +132,7 @@ class TaskListResponse(BaseModel):
 
 class TaskRunResponse(BaseModel):
     """任务执行记录响应"""
+
     id: str = Field(description="执行记录公开ID")
     run_id: str = Field(description="运行UUID")
     task_id: str = Field(description="任务公开ID")
@@ -178,6 +179,7 @@ class TaskRunResponse(BaseModel):
 
 class TaskRunListResponse(BaseModel):
     """任务执行记录列表响应"""
+
     total: int
     page: int
     size: int
@@ -186,6 +188,7 @@ class TaskRunListResponse(BaseModel):
 
 class TaskStatsResponse(BaseModel):
     """任务统计响应"""
+
     total_executions: int
     success_count: int
     failed_count: int
@@ -195,6 +198,7 @@ class TaskStatsResponse(BaseModel):
 
 class SystemMetricsResponse(BaseModel):
     """系统指标响应"""
+
     cpu_percent: float
     cpu_cores: int = 0
     memory_percent: float

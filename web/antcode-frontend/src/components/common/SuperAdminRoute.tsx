@@ -25,8 +25,7 @@ const SuperAdminRoute: React.FC<SuperAdminRouteProps> = ({
     return <Navigate to="/login" replace />
   }
 
-  // 基于 role 字段判断超级管理员，兼容旧的 is_super_admin 字段
-  if (user?.role !== 'super_admin' && !user?.is_super_admin) {
+  if (user?.role !== 'super_admin') {
     if (fallback) {
       return <>{fallback}</>
     }
@@ -51,4 +50,3 @@ const SuperAdminRoute: React.FC<SuperAdminRouteProps> = ({
 }
 
 export default SuperAdminRoute
-

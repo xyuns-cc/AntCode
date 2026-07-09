@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from loguru import logger
-
-from antcode_web_api.response import BaseResponse, success
-from antcode_core.common.security.auth import TokenData, get_current_super_admin, get_current_user
+from antcode_core.application.services.alert import alert_service
+from antcode_core.common.security.auth import TokenData, get_current_super_admin
 from antcode_core.common.serialization import from_json, to_json
-from antcode_core.domain.models import SystemConfig, User
+from antcode_core.domain.models import SystemConfig, User, UserRole
 from antcode_core.domain.schemas.alert import (
     AlertChannelConfig,
     AlertConfigRequest,
@@ -23,7 +20,13 @@ from antcode_core.domain.schemas.alert import (
     EmailConfig,
     WebhookConfig,
 )
-from antcode_core.application.services.alert import alert_service
+from fastapi import APIRouter, Depends, Query
+from loguru import logger
+
+from antcode_web_api.deps import require_role
+from antcode_web_api.response import BaseResponse, success
+
+_REQUIRE_ADMIN = require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 
 router = APIRouter()
 
@@ -71,9 +74,7 @@ async def _get_alert_config() -> dict:
             except Exception:
                 config["email_config"] = {}
         elif key == "auto_alert_levels":
-            config["auto_alert_levels"] = [
-                level.strip() for level in value.split(",") if level.strip()
-            ]
+            config["auto_alert_levels"] = [level.strip() for level in value.split(",") if level.strip()]
         elif key == "rate_limit_enabled":
             config["rate_limit_enabled"] = value.lower() in ("true", "1", "yes")
         elif key == "rate_limit_window":
@@ -90,9 +91,7 @@ async def _get_alert_config() -> dict:
     return config
 
 
-async def _save_alert_config(
-    key: str, value: str, value_type: str, description: str, username: str
-):
+async def _save_alert_config(key: str, value: str, value_type: str, description: str, username: str):
     """保存告警配置"""
     existing = await SystemConfig.filter(config_key=key).first()
 
@@ -118,13 +117,8 @@ async def _save_alert_config(
     summary="获取告警配置",
     description="获取当前告警配置（管理员）",
 )
-async def get_alert_config(current_user: TokenData = Depends(get_current_user)):
+async def get_alert_config(_admin: User = Depends(_REQUIRE_ADMIN)):
     """获取告警配置"""
-    # 检查管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     config = await _get_alert_config()
 
     # 获取告警服务状态
@@ -206,9 +200,7 @@ async def update_alert_config(
 
         if request.channels.email_config is not None:
             email_data = request.channels.email_config.model_dump()
-            await _save_alert_config(
-                "email_config", to_json(email_data), "json", "邮件告警配置", username
-            )
+            await _save_alert_config("email_config", to_json(email_data), "json", "邮件告警配置", username)
 
     # 保存自动告警级别
     if request.auto_alert_levels is not None:
@@ -260,9 +252,7 @@ async def update_alert_config(
             "最大重试次数",
             username,
         )
-        await _save_alert_config(
-            "retry_delay", str(request.retry.retry_delay), "float", "重试间隔", username
-        )
+        await _save_alert_config("retry_delay", str(request.retry.retry_delay), "float", "重试间隔", username)
 
     # 重新加载配置
     await alert_service.reload_config()
@@ -278,12 +268,8 @@ async def update_alert_config(
     summary="重新加载告警配置",
     description="重新加载告警配置（管理员）",
 )
-async def reload_alert_config(current_user: TokenData = Depends(get_current_user)):
+async def reload_alert_config(_admin: User = Depends(_REQUIRE_ADMIN)):
     """重新加载告警配置"""
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     await alert_service.reload_config()
 
     return success({"reloaded": True}, message="告警配置已重新加载")
@@ -299,18 +285,12 @@ async def get_alert_history(
     limit: int = Query(50, ge=1, le=500, description="返回数量"),
     level: str | None = Query(None, description="按级别过滤"),
     source: str | None = Query(None, description="按来源过滤"),
-    current_user: TokenData = Depends(get_current_user),
+    _admin: User = Depends(_REQUIRE_ADMIN),
 ):
     """获取告警历史"""
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     history = alert_service.get_history(limit=limit, level=level, source=source)
 
-    return success(
-        AlertHistoryResponse(items=[AlertHistoryItem(**h) for h in history], total=len(history))
-    )
+    return success(AlertHistoryResponse(items=[AlertHistoryItem(**h) for h in history], total=len(history)))
 
 
 @router.get(
@@ -319,12 +299,8 @@ async def get_alert_history(
     summary="获取告警统计",
     description="获取告警统计信息（管理员）",
 )
-async def get_alert_stats(current_user: TokenData = Depends(get_current_user)):
+async def get_alert_stats(_admin: User = Depends(_REQUIRE_ADMIN)):
     """获取告警统计"""
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     stats = alert_service.get_stats()
 
     return success(AlertStatsResponse(**stats))
@@ -336,14 +312,8 @@ async def get_alert_stats(current_user: TokenData = Depends(get_current_user)):
     summary="发送测试告警",
     description="发送测试告警（管理员）",
 )
-async def send_test_alert(
-    request: AlertTestRequest, current_user: TokenData = Depends(get_current_user)
-):
+async def send_test_alert(request: AlertTestRequest, _admin: User = Depends(_REQUIRE_ADMIN)):
     """发送测试告警"""
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
     result = await alert_service.send_test_alert(channel=request.channel)
 
     return success(AlertTestResponse(**result))

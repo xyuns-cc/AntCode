@@ -1,6 +1,5 @@
 """调度服务"""
 
-from antcode_core.application.services.scheduler.memory_queue import MemoryQueueBackend
 from antcode_core.application.services.scheduler.queue_backend import (
     QueuedTask,
     TaskQueueBackend,
@@ -42,7 +41,6 @@ __all__ = [
     # 队列后端
     "TaskQueueBackend",
     "QueuedTask",
-    "MemoryQueueBackend",
     "get_queue_backend",
     "get_queue_backend_type",
     "reset_queue_backend",

@@ -49,6 +49,57 @@ from antcode_worker.executor.base import (
     NoOpLogSink,
 )
 
+# C1: 子进程 env 白名单——只透传给 shell / runtime 必需的变量；
+# 其它一律不传给用户代码。防止 WORKER_API_KEY / WORKER_GATEWAY_TOKEN /
+# WORKER_REDIS_PASSWORD / WORKER_CREDENTIAL_SECRET_KEY 泄漏给任务进程。
+#
+# 允许的 host 环境变量前缀（前缀匹配，例如 LANG*、LC_*）
+_ENV_HOST_ALLOWED_EXACT = frozenset({
+    "PATH",
+    "HOME",
+    "USER",
+    "USERNAME",  # Windows
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SHELL",
+    "TERM",
+    "PWD",
+    "HOSTNAME",
+    "LANG",
+    # Node / Python / Go / Java runtime 相关（子进程可能真的需要）
+    "NODE_PATH",
+    "npm_config_cache",
+    "GOCACHE",
+    "GOMODCACHE",
+    "MAVEN_OPTS",
+    "JAVA_HOME",
+    "PYTHONHASHSEED",
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    # mise
+    "MISE_DATA_DIR",
+    "MISE_CACHE_DIR",
+})
+_ENV_HOST_ALLOWED_PREFIX = (
+    "LC_",  # locale
+    "ANTCODE_TASK_",  # 显式声明给任务用的
+    "ANTCODE_SPIDER_",  # spider reporter 配置
+)
+# 二重防线：即便 exec_plan.env 或前缀匹配放进来，也拒绝这些高风险模式
+_ENV_DENY_PATTERNS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE_KEY")
+
+
+def _is_env_allowed_from_host(key: str) -> bool:
+    if key in _ENV_HOST_ALLOWED_EXACT:
+        return True
+    return any(key.startswith(p) for p in _ENV_HOST_ALLOWED_PREFIX)
+
+
+def _is_env_forbidden(key: str) -> bool:
+    upper = key.upper()
+    return any(pat in upper for pat in _ENV_DENY_PATTERNS)
+
 
 def _build_preexec_fn(
     enforce_rlimit: bool,
@@ -56,14 +107,19 @@ def _build_preexec_fn(
     memory_mb: int,
     max_open_files: int,
     max_processes: int,
+    file_size_mb: int = 0,
 ) -> Callable[[], None] | None:
     """构造子进程 preexec_fn：独立进程组 + POSIX rlimit。
 
     None 表示当前平台/配置下无需 preexec_fn（如 Windows 或 enforce_rlimit=False）。
+
+    T7-P2-4: 新增 ``file_size_mb`` → RLIMIT_FSIZE，防止子进程写单个大文件把
+    worker 磁盘打爆。POSIX RLIMIT_FSIZE 只限单文件，配合 artifact_cleanup
+    的总量控制形成双层防护。
     """
     if sys.platform == "win32":
         return None
-    if not enforce_rlimit and not max_open_files and not max_processes:
+    if not enforce_rlimit and not max_open_files and not max_processes and not file_size_mb:
         return None
 
     def _pre() -> None:
@@ -93,6 +149,13 @@ def _build_preexec_fn(
         if max_processes and max_processes > 0 and hasattr(resource, "RLIMIT_NPROC"):
             try:
                 resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
+            except (ValueError, OSError):
+                pass
+        # T7-P2-4: RLIMIT_FSIZE 单文件上限
+        if file_size_mb and file_size_mb > 0 and hasattr(resource, "RLIMIT_FSIZE"):
+            limit = file_size_mb * 1024 * 1024
+            try:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
             except (ValueError, OSError):
                 pass
 
@@ -219,6 +282,11 @@ class ProcessExecutor(BaseExecutor):
                 memory_mb=exec_plan.memory_limit_mb or self.config.default_memory_limit_mb,
                 max_open_files=exec_plan.max_open_files or self.config.default_max_open_files,
                 max_processes=exec_plan.max_processes or self.config.default_max_processes,
+                # T7-P2-4: RLIMIT_FSIZE 单文件上限
+                file_size_mb=(
+                    exec_plan.max_file_size_mb
+                    or getattr(self.config, "default_max_file_size_mb", 0)
+                ),
             )
 
             # 创建子进程
@@ -321,28 +389,45 @@ class ProcessExecutor(BaseExecutor):
         return cmd
 
     def _build_env(self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle) -> dict[str, str]:
-        """构建环境变量"""
-        env = os.environ.copy()
+        """构建子进程环境变量（C1 白名单模式）。
 
-        # 设置 PYTHONPATH
+        用户代码运行时**不继承**宿主 worker 的 secrets。规则：
+        1. 只从 host env 透传 ``_ENV_HOST_ALLOWED_EXACT/PREFIX`` 允许的键。
+        2. runtime 相关键（PATH / VIRTUAL_ENV / PYTHONPATH）由本方法显式构造。
+        3. 覆盖 ``exec_plan.env``（任务自带 env，比如 spider reporter 配置）。
+        4. 二重防线：所有键在最后过一次 ``_ENV_DENY_PATTERNS`` 黑名单。
+        """
+        host_env = os.environ
+
+        # 1. 白名单透传
+        env: dict[str, str] = {
+            key: value
+            for key, value in host_env.items()
+            if _is_env_allowed_from_host(key)
+        }
+
+        # 2. runtime 显式注入
         pythonpath_parts = [runtime_handle.path]
-        existing_pythonpath = env.get("PYTHONPATH", "")
+        existing_pythonpath = host_env.get("PYTHONPATH", "")
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
         env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 
-        # 设置虚拟环境
         env["VIRTUAL_ENV"] = runtime_handle.path
         bin_dir = "Scripts" if os.name == "nt" else "bin"
         venv_bin = os.path.join(runtime_handle.path, bin_dir)
-        existing_path = env.get("PATH", "")
-        if existing_path:
-            env["PATH"] = os.pathsep.join([venv_bin, existing_path])
-        else:
-            env["PATH"] = venv_bin
+        existing_path = env.get("PATH") or host_env.get("PATH", "")
+        env["PATH"] = (
+            os.pathsep.join([venv_bin, existing_path]) if existing_path else venv_bin
+        )
 
-        # 添加执行计划中的环境变量
+        # 3. 任务显式环境变量
         env.update(exec_plan.env)
+
+        # 4. 二重防线：剔除任何命中黑名单模式的键（含被 exec_plan.env 误传的）
+        for key in list(env.keys()):
+            if _is_env_forbidden(key):
+                env.pop(key, None)
 
         return env
 

@@ -65,13 +65,9 @@
 .userInfo:hover { background: var(--ant-color-bg-text-hover); }
 .username { font-size: 14px; max-width: 120px; font-weight: 500; }
 
-/* Content */
+/* Content：padding 与滚动由各页面的 PageContainer 自管 */
 .content { flex: 1; overflow: hidden; }
-.contentInner { height: 100%; padding: 24px; overflow-y: auto; scroll-behavior: smooth; }
-.contentInner::-webkit-scrollbar { width: 6px; }
-.contentInner::-webkit-scrollbar-track { background: transparent; }
-.contentInner::-webkit-scrollbar-thumb { background: var(--ant-color-border); border-radius: 3px; transition: background 0.2s; }
-.contentInner::-webkit-scrollbar-thumb:hover { background: var(--ant-color-border-secondary); }
+.contentInner { height: 100%; padding: 0; overflow: hidden; }
 
 /* Footer */
 .footer { padding: 12px 24px; background: transparent; }

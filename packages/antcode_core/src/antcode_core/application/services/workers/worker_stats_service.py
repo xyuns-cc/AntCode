@@ -57,16 +57,12 @@ class WorkerStatsService:
                     total_responses += resp_count
                     total_items_scraped += spider_stats.get("item_scraped_count", 0)
                     total_errors += spider_stats.get("error_count", 0)
-                    total_latency_weighted += (
-                        spider_stats.get("avg_latency_ms", 0.0) * resp_count
-                    )
+                    total_latency_weighted += spider_stats.get("avg_latency_ms", 0.0) * resp_count
                     total_rpm += spider_stats.get("requests_per_minute", 0.0)
 
         avg_cpu = total_cpu / workers_with_metrics if workers_with_metrics > 0 else 0
         avg_memory = total_memory / workers_with_metrics if workers_with_metrics > 0 else 0
-        avg_latency = (
-            total_latency_weighted / total_responses if total_responses > 0 else 0.0
-        )
+        avg_latency = total_latency_weighted / total_responses if total_responses > 0 else 0.0
 
         return WorkerAggregateStats(
             totalWorkers=total_workers,
@@ -96,9 +92,7 @@ class WorkerStatsService:
         cutoff_time = datetime.now(UTC) - timedelta(hours=hours)
 
         heartbeats = (
-            await WorkerHeartbeat.filter(worker_id=worker_id, timestamp__gte=cutoff_time)
-            .order_by("timestamp")
-            .all()
+            await WorkerHeartbeat.filter(worker_id=worker_id, timestamp__gte=cutoff_time).order_by("timestamp").all()
         )
 
         result = []
@@ -218,9 +212,7 @@ class WorkerStatsService:
             "memory": {"avg": memory_avg, "max": memory_max, "min": memory_min},
         }
 
-    async def get_spider_metrics_history(
-        self, worker_id: int, hours: int = 24
-    ) -> list[dict]:
+    async def get_spider_metrics_history(self, worker_id: int, hours: int = 24) -> list[dict]:
         """
         获取节点爬虫指标历史
 
@@ -234,9 +226,7 @@ class WorkerStatsService:
         cutoff_time = datetime.now(UTC) - timedelta(hours=hours)
 
         heartbeats = (
-            await WorkerHeartbeat.filter(worker_id=worker_id, timestamp__gte=cutoff_time)
-            .order_by("timestamp")
-            .all()
+            await WorkerHeartbeat.filter(worker_id=worker_id, timestamp__gte=cutoff_time).order_by("timestamp").all()
         )
 
         result = []
@@ -245,15 +235,17 @@ class WorkerStatsService:
             spider_stats = metrics.get("spider_stats")
 
             if spider_stats:
-                result.append({
-                    "timestamp": hb.timestamp.isoformat(),
-                    "requestCount": spider_stats.get("request_count", 0),
-                    "responseCount": spider_stats.get("response_count", 0),
-                    "itemScrapedCount": spider_stats.get("item_scraped_count", 0),
-                    "errorCount": spider_stats.get("error_count", 0),
-                    "avgLatencyMs": spider_stats.get("avg_latency_ms", 0.0),
-                    "requestsPerMinute": spider_stats.get("requests_per_minute", 0.0),
-                })
+                result.append(
+                    {
+                        "timestamp": hb.timestamp.isoformat(),
+                        "requestCount": spider_stats.get("request_count", 0),
+                        "responseCount": spider_stats.get("response_count", 0),
+                        "itemScrapedCount": spider_stats.get("item_scraped_count", 0),
+                        "errorCount": spider_stats.get("error_count", 0),
+                        "avgLatencyMs": spider_stats.get("avg_latency_ms", 0.0),
+                        "requestsPerMinute": spider_stats.get("requests_per_minute", 0.0),
+                    }
+                )
 
         return result
 

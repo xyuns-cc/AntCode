@@ -163,6 +163,9 @@ class ExecPlan:
     # 沙箱硬限制（0 = 使用 ExecutorConfig 默认；POSIX rlimit）
     max_open_files: int = 0
     max_processes: int = 0
+    # T7-P2-4: RLIMIT_FSIZE 上限（MB），保护 worker 磁盘被失控子进程写满
+    # 0 = 使用 ExecutorConfig.default_max_file_size_mb（默认 1GB 单文件）
+    max_file_size_mb: int = 0
     enforce_rlimit: bool = True
 
     # 产物策略
@@ -209,6 +212,11 @@ class ExecResult:
     # 日志统计
     stdout_lines: int = 0
     stderr_lines: int = 0
+
+    # L2/O2: 日志归档 URI（LogManager.archive_logs 生成的 pgartifact:// URI）
+    # + 日志归档标记；engine._report_result 会读取此字段
+    log_archive_uri: str | None = None
+    log_archived: bool = False
 
     # 额外数据
     data: dict[str, Any] = field(default_factory=dict)

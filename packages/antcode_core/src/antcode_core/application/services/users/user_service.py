@@ -79,9 +79,7 @@ class UserService:
 
         return cached
 
-    def _generate_cache_key(
-        self, page, size, is_active=None, is_admin=None, sort_by=None, sort_order=None
-    ):
+    def _generate_cache_key(self, page, size, is_active=None, is_admin=None, sort_by=None, sort_order=None):
         """生成缓存键"""
         parts = [f"p{page}", f"s{size}"]
         if is_active is not None:
@@ -134,8 +132,9 @@ class UserService:
                 is_active=request.is_active,
                 is_admin=request.is_admin,
             )
-            if hasattr(request, 'role') and request.role:
+            if hasattr(request, "role") and request.role:
                 from antcode_core.domain.models.user import UserRole
+
                 try:
                     user.role = UserRole(request.role)
                 except ValueError:
@@ -179,24 +178,15 @@ class UserService:
     async def is_admin(self, user_id):
         """检查用户是否为管理员（带缓存）"""
         cache_key = f"user:admin:{user_id}"
-        try:
-            from antcode_core.infrastructure.redis import redis_pool
 
-            cached = await redis_pool.get(cache_key)
-            if cached is not None:
-                return cached == "1"
-        except Exception:
-            pass
+        cached = await user_cache.get(cache_key)
+        if cached is not None:
+            return cached == "1"
 
         user = await User.get_or_none(id=user_id).only("id", "is_admin")
         is_admin = bool(user and user.is_admin)
 
-        try:
-            from antcode_core.infrastructure.redis import redis_pool
-
-            await redis_pool.set(cache_key, "1" if is_admin else "0", ex=300)
-        except Exception:
-            pass
+        await user_cache.set(cache_key, "1" if is_admin else "0", ttl=300)
 
         return is_admin
 
@@ -255,7 +245,7 @@ class UserService:
                     email=u.email,
                     is_active=u.is_active,
                     is_admin=u.is_admin,
-                    role=u.role.value if hasattr(u.role, 'value') else str(u.role),
+                    role=u.role.value if hasattr(u.role, "value") else str(u.role),
                     created_at=created_at,
                     updated_at=updated_at,
                     last_login_at=u.last_login_at,
@@ -291,9 +281,7 @@ class UserService:
             pass
 
         users = await User.all().order_by("username")
-        result = [
-            UserSimpleResponse(id=u.public_id, username=u.username).model_dump() for u in users
-        ]
+        result = [UserSimpleResponse(id=u.public_id, username=u.username).model_dump() for u in users]
 
         with contextlib.suppress(Exception):
             await user_cache.set(cache_key, result)
