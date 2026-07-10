@@ -1176,6 +1176,11 @@ async def delete_project(
     description="批量删除多个项目（不可逆操作）",
     response_description="返回批量删除操作结果",
 )
+# P2-25: 批量删除单次上限, 防止公开 API 被打爆
+# 若未来需按环境放开, 可从 settings 读 BATCH_DELETE_MAX_ITEMS (默认 100)
+BATCH_DELETE_MAX_PROJECTS = 100
+
+
 @fast_response(background_execution=True)  # 后台执行
 @monitor_performance(slow_threshold=2.0)  # 监控超过2秒的批量操作
 async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_current_user_id)):
@@ -1183,6 +1188,13 @@ async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_c
     project_ids = request.get("project_ids", [])
     if not project_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="项目ID列表不能为空")
+
+    # P2-25: 强制单次上限, 防止调用方一次性拖垮后台 semaphore + DB
+    if len(project_ids) > BATCH_DELETE_MAX_PROJECTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"批量删除单次上限 {BATCH_DELETE_MAX_PROJECTS} 个项目, 当前 {len(project_ids)} 个",
+        )
 
     success_count = 0
     failed_count = 0

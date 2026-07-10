@@ -66,7 +66,11 @@ class LogIngestLoop:
         group_name: str | None = None,
         consumer_name: str | None = None,
         poll_interval: float = 1.0,
-        block_ms: int = 5000,
+        # P2-06: block_ms 从 5000 下调到 1000 —— XREADGROUP block 期间
+        # 无法响应 asyncio 取消，5s block 会让 shutdown 阻塞 5s+；多个 loop
+        # gather 累积后总停机时长会非常显著。1s 是空转开销与关停响应速度的
+        # 折中。
+        block_ms: int = 1000,
         batch_size: int = 100,
     ):
         # 默认订阅"全局聚合 ingest stream"，对齐 Worker 侧统一写入路径。

@@ -113,6 +113,9 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
     # 如果任务正在 Worker 上运行，发送取消指令
     if execution.worker_id:
         try:
+            from antcode_core.application.services.runtime.runtime_control_service import (
+                write_control_event,
+            )
             from antcode_core.application.services.workers.worker_service import (
                 worker_service,
             )
@@ -125,7 +128,11 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
                     run_id=execution.run_id,
                     reason=f"user_cancel:{current_user.user_id}",
                 )
-                await redis.xadd(control_stream(worker.public_id), payload)
+                # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
+                # 避免 control:{worker_id} stream 无限增长。
+                await write_control_event(
+                    redis, control_stream(worker.public_id), payload
+                )
                 cancelled = True
                 logger.info(f"已发送取消指令到 Worker: {worker.name}")
             else:

@@ -420,6 +420,103 @@ class UserService:
 
         logger.info(f"用户已删除: {user.username}, 级联删除: {deleted_counts}")
 
+    async def revoke_all_sessions(self, user_id: int) -> int:
+        """P1-09: 一键撤销该用户所有活跃 refresh session。
+
+        触发场景: 改密、离职、检测到异常登录、admin 强制登出。
+        实现: 把 ``UserSession.revoked_at`` 从 NULL 改为 now(); 已 revoke
+        的记录不动 (幂等), 避免二次撤销把审计时间戳覆盖成新值。
+
+        返回被撤销的 session 数 (供调用方回显 "已登出 N 个设备")。
+        """
+        from datetime import datetime, timezone
+
+        from antcode_core.domain.models.user_session import UserSession
+
+        now = datetime.now(timezone.utc)
+        updated = await UserSession.filter(
+            user_id=user_id, revoked_at__isnull=True
+        ).update(revoked_at=now)
+        logger.info(
+            f"P1-09: revoke_all_sessions user={user_id} revoked_count={updated}"
+        )
+        return updated
+
+    async def delete_user_with_reassign(
+        self,
+        user_id: int,
+        reassign_to_user_id: int | None = None,
+    ) -> bool:
+        """P1-09: 软删除用户, 可选把关联资源转移给接收人。
+
+        为什么不物理删:
+        - Task/Project.user_id 是 BigIntField 裸引用, 没有 ON DELETE 约束;
+          物理删除会留 dangling 引用, 前端页面加载时 join 空导致 500。
+        - 审计链路要求保留 "谁做过什么" 的原始 user_id, 物理删会断链。
+
+        流程:
+        1. 若指定 ``reassign_to_user_id``, 把 Task / Project 的 ``user_id``
+           批量改成接收人 (常见于把离职员工资产转 admin 池);
+        2. 撤销该用户所有 refresh session, 防止残留 token 继续用;
+        3. 把 ``is_active=False`` + username 后缀化 (释放用户名给新账号) 完成
+           软删除。
+
+        与 ``delete_user`` 的区别:
+        - ``delete_user`` 走 "有资源就拒绝" 严格路径, 需要业务侧显式清理;
+        - 本方法是 "带转移的强制下线" 路径, 用于离职流程等批处理场景。
+
+        返回 True = 已处理; False = 用户不存在。
+        """
+        from datetime import datetime, timezone
+
+        from antcode_core.domain.models import Project, User
+        from antcode_core.domain.models.task import Task
+        from antcode_core.domain.models.user_session import UserSession
+
+        user = await User.get_or_none(id=user_id)
+        if user is None:
+            return False
+
+        async with in_transaction():
+            reassigned_counts: dict[str, int] = {}
+            if reassign_to_user_id:
+                # 校验接收人存在且 active, 避免把资产转给一个僵尸账号
+                receiver = await User.get_or_none(id=reassign_to_user_id)
+                if receiver is None or not receiver.is_active:
+                    raise ValueError(
+                        f"接收人 user_id={reassign_to_user_id} 不存在或已停用"
+                    )
+                reassigned_counts["tasks"] = await Task.filter(
+                    user_id=user_id
+                ).update(user_id=reassign_to_user_id)
+                reassigned_counts["projects"] = await Project.filter(
+                    user_id=user_id
+                ).update(user_id=reassign_to_user_id)
+                # Worker 归属: 当前 Worker 模型没有直接 owner 字段
+                # (由 UserWorkerPermission 关联表管理), 权限清理走 revoke 路径
+                # 不在这里迁移, 避免语义歧义 (共享 worker 不该被独占转移)。
+
+            # 撤销所有 refresh session (走同一事务, 迁移失败时也一起回滚)
+            now = datetime.now(timezone.utc)
+            revoked = await UserSession.filter(
+                user_id=user_id, revoked_at__isnull=True
+            ).update(revoked_at=now)
+
+            # 软删除: 停用 + 用户名后缀化以释放原名
+            ts = int(now.timestamp())
+            user.is_active = False
+            user.username = f"{user.username}__deleted_{ts}"
+            await user.save()
+
+        await self._invalidate_user_cache(user_id)
+
+        logger.info(
+            f"P1-09: delete_user_with_reassign user={user_id} "
+            f"reassign_to={reassign_to_user_id} reassigned={reassigned_counts if reassign_to_user_id else 'skip'} "
+            f"revoked_sessions={revoked}"
+        )
+        return True
+
     async def _cascade_delete_user_data(self, user):
         """级联删除用户的关联数据(含 User 自身)。
 

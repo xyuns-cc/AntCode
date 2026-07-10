@@ -2081,9 +2081,15 @@ async def update_worker_resources(
     # 通过 Redis 控制通道发送配置更新
     synced = False
     try:
+        from antcode_core.application.services.runtime.runtime_control_service import (
+            write_control_event,
+        )
+
         redis = await get_redis_client()
         payload = build_config_update_control_payload(config_params)
-        await redis.xadd(control_stream(worker.public_id), payload)
+        # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
+        # 避免 control:{worker_id} stream 无限增长。
+        await write_control_event(redis, control_stream(worker.public_id), payload)
         synced = True
     except Exception as e:
         logger.warning(f"发送配置更新失败: {e}")

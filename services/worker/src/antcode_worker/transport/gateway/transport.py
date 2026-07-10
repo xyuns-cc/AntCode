@@ -259,14 +259,22 @@ class GatewayTransport(TransportBase):
 
         让 master 立即撤销 lease；不再等 TTL（30s）到期。RPC 失败仅告警不
         阻塞后续 stop 流程（即使 gateway 不可达 lease 也会自然过期）。
+
+        P2-20: worker_id 只保存在 ``_gateway_config``（``ServerConfig`` 里
+        没有该字段）。旧实现读 ``self._config.worker_id`` 会拿到 AttributeError
+        或 None,导致 Deregister RPC 永远发不出去,worker 停机后仍要等 lease
+        TTL(30s) 到期,期间 master 继续向已下线的 worker 派发任务。这里改成
+        统一从 ``self._gateway_config.worker_id`` 读,与 ``lease_renew`` /
+        ``ack_task`` / ``ack_control`` 等保持一致。
         """
-        if not self._control_stub or not self._config.worker_id:
+        worker_id = self._gateway_config.worker_id or ""
+        if not self._control_stub or not worker_id:
             return
         try:
             from antcode_contracts import control_pb2
 
             request = control_pb2.DeregisterRequest(
-                worker_id=self._config.worker_id,
+                worker_id=worker_id,
                 reason=reason,
             )
             metadata = self._get_auth_metadata()

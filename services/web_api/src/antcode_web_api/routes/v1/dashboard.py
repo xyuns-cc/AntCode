@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from antcode_core.application.services.monitoring import system_metrics_service
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.common.security.auth import get_current_user
+from antcode_core.domain.models import UserRole
 from antcode_core.domain.models.enums import ProjectStatus, ProjectType, TaskStatus
 from antcode_core.domain.models.project import Project
 from antcode_core.domain.models.task import Task
@@ -17,6 +18,7 @@ from antcode_core.infrastructure.cache import unified_cache
 from fastapi import APIRouter, Depends, HTTPException, status
 from loguru import logger
 
+from antcode_web_api.deps import require_role
 from antcode_web_api.response import Messages, success
 
 router = APIRouter()
@@ -35,6 +37,12 @@ _HOURLY_TREND_CACHE_KEY = "dashboard:tasks:hourly-trend:v1"
 _HOURLY_TREND_CACHE_TTL = 60
 
 
+# P2-19: /summary 与 /metrics 返回的是**全库**聚合(所有 Project/Task),
+# 任何登录用户都能看到。产品定位:仪表盘是"平台级"概览而非"我的",
+# 因此保留全局可见;若日后需要多租户按 owner 隔离,应在这里补上 owner
+# filter(参考 projects/tasks 路由里 non-admin 的 owner_id filter 模式)。
+# 与之相对,写路径(/metrics/refresh)和管理路径(cache-info、cache 清理)
+# 已在下方收紧到 ADMIN/SUPER_ADMIN,避免普通用户触发 CPU 采样 / 缓存清空。
 @router.get("/summary", response_model=BaseResponse[dict], summary="仪表盘摘要")
 async def get_dashboard_summary(current_user=Depends(get_current_user)):
     try:
@@ -135,7 +143,15 @@ async def get_metrics_cache_info(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"获取缓存信息失败: {str(e)}")
 
 
-@router.post("/metrics/refresh", response_model=BaseResponse[dict], summary="刷新指标")
+# P2-19: /metrics/refresh 会强制重跑 CPU 采样 + PG/Redis 聚合,属于重路径。
+# 相邻的 /metrics/cache-info 和 DELETE /metrics/cache 都是 admin-only,
+# 这里对齐,防止普通用户绕过 15s 缓存持续压后端。
+@router.post(
+    "/metrics/refresh",
+    response_model=BaseResponse[dict],
+    summary="刷新指标",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
+)
 async def refresh_system_metrics(current_user=Depends(get_current_user)):
     try:
         metrics = await system_metrics_service.get_metrics(force_refresh=True)

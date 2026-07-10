@@ -59,6 +59,12 @@ async def verify_api_key(api_key: str, worker_id: str | None = None) -> bool:
 
     任何模块不可用 / DB 异常都直接拒绝(返回 ``False``),不存在
     "开发模式 fallback" —— 防止环境降级时鉴权自动通过(P0-#4)。
+
+    P1-10: 双路查询
+    - 优先按 ``api_key_hash`` 匹配(新数据 & 未来主路径)
+    - 也覆盖 ``api_key_previous_hash``(轮换 grace 期旧 key)
+    - fallback 明文 ``api_key`` / ``api_key_previous`` 列以兼容尚未回填 hash 的旧数据
+      (迁移完成清空明文列后可移除)
     """
     if not api_key:
         return False
@@ -69,14 +75,64 @@ async def verify_api_key(api_key: str, worker_id: str | None = None) -> bool:
         logger.exception("Worker 模型不可用,拒绝 API Key 鉴权(无 fallback)")
         return False
 
+    key_hash = hash_api_key(api_key)
+
     try:
-        query = Worker.filter(api_key=api_key)
+        # 主路径:按 hash 查询(新写入的数据 & 迁移回填后的旧数据)
+        from tortoise.expressions import Q
+
+        query = Worker.filter(Q(api_key_hash=key_hash) | Q(api_key_previous_hash=key_hash))
         if worker_id:
             query = query.filter(public_id=worker_id)
-        return await query.exists()
+        if await query.exists():
+            return True
+
+        # fallback: 老明文列(尚未回填 hash 的历史 Worker,迁移期兼容)
+        legacy_query = Worker.filter(
+            Q(api_key=api_key) | Q(api_key_previous=api_key)
+        )
+        if worker_id:
+            legacy_query = legacy_query.filter(public_id=worker_id)
+        return await legacy_query.exists()
     except Exception:
         logger.exception("API Key 查询失败,拒绝鉴权(无 fallback)")
         return False
+
+
+def store_api_key(worker: Any, plain_key: str) -> None:
+    """P1-10: 在 Worker 实例上落 api_key + api_key_hash。
+
+    调用方在 create/rotate/finalize 路径必须走这个 helper,以保证
+    hash 列跟明文列同步(明文列本 release 仍写,下个 release 清空)。
+
+    NOTE: 只赋值到实例,由调用方决定 ``await worker.save(...)``。
+    """
+    if not plain_key:
+        worker.api_key = None
+        worker.api_key_hash = None
+        return
+    worker.api_key = plain_key
+    worker.api_key_hash = hash_api_key(plain_key)
+
+
+def store_api_key_previous(worker: Any, plain_key: str | None) -> None:
+    """P1-10: 轮换时把旧 key 落到 previous 列(明文 + hash 同步)。"""
+    if not plain_key:
+        worker.api_key_previous = None
+        worker.api_key_previous_hash = None
+        return
+    worker.api_key_previous = plain_key
+    worker.api_key_previous_hash = hash_api_key(plain_key)
+
+
+def store_secret_key(worker: Any, plain_secret: str) -> None:
+    """P1-10: 在 Worker 实例上落 secret_key + secret_key_hash。"""
+    if not plain_secret:
+        worker.secret_key = None
+        worker.secret_key_hash = None
+        return
+    worker.secret_key = plain_secret
+    worker.secret_key_hash = hash_api_key(plain_secret)
 
 
 class APIKeyManager:

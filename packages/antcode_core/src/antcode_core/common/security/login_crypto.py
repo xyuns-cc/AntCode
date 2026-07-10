@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -77,13 +78,9 @@ class LoginPasswordCrypto:
             return self._private_key
 
         private_key_path = self._resolve_private_key_path()
-        if private_key_path.exists():
-            self._private_key = self._load_private_key(private_key_path)
-            return self._private_key
-
-        self._private_key = self._generate_private_key()
-        self._persist_private_key(private_key_path, self._private_key)
-        self._persist_public_key(self._resolve_public_key_path(), self._private_key.public_key())
+        # P2-17: 统一走 _load_private_key —— FileNotFoundError 才生成,
+        # 其他错误(损坏/权限/共享卷抖动)必须 raise,禁止静默覆盖。
+        self._private_key = self._load_private_key(private_key_path)
         return self._private_key
 
     def _get_public_key_pem(self) -> str:
@@ -127,15 +124,36 @@ class LoginPasswordCrypto:
         return Path(settings.data_dir) / "keys" / "login_rsa_public.pem"
 
     def _load_private_key(self, path: Path) -> rsa.RSAPrivateKey:
+        """P2-17: 读取登录私钥。
+
+        - FileNotFoundError(首次启动/未落盘) → 生成并原子落盘
+        - 读取或解析失败(损坏 / 权限 / 共享卷抖动 / 半写) → **raise**,
+          阻断启动,禁止重新生成覆盖(旧密钥丢失会永久破坏 grace 期内所有
+          已发出登录 payload 的解密路径)
+        """
         try:
             key_bytes = path.read_bytes()
+        except FileNotFoundError:
+            logger.info(f"登录私钥不存在,首次生成: {path}")
+            private_key = self._generate_private_key()
+            self._persist_private_key_atomic(path, private_key)
+            self._persist_public_key_atomic(
+                self._resolve_public_key_path(), private_key.public_key()
+            )
+            return private_key
+        except OSError as exc:
+            raise RuntimeError(
+                f"登录私钥读取失败,拒绝重新生成覆盖"
+                f"(可能是共享卷抖动/权限问题): {path}, {exc}"
+            ) from exc
+
+        try:
             return serialization.load_pem_private_key(key_bytes, password=None)
         except Exception as exc:
-            logger.warning(f"读取登录私钥失败: {exc}, 将重新生成密钥")
-            private_key = self._generate_private_key()
-            self._persist_private_key(path, private_key)
-            self._persist_public_key(self._resolve_public_key_path(), private_key.public_key())
-            return private_key
+            raise RuntimeError(
+                f"登录私钥解析失败,拒绝重新生成覆盖"
+                f"(可能被截断/损坏,继续会永久丢失旧密钥): {path}, {exc}"
+            ) from exc
 
     def _generate_private_key(self) -> rsa.RSAPrivateKey:
         return rsa.generate_private_key(
@@ -143,33 +161,57 @@ class LoginPasswordCrypto:
             key_size=settings.LOGIN_RSA_KEY_SIZE,
         )
 
-    def _persist_private_key(self, path: Path, private_key: rsa.RSAPrivateKey) -> None:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            key_bytes = private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-            path.write_bytes(key_bytes)
-            path.chmod(0o600)
-        except Exception as exc:
-            logger.warning(f"保存登录私钥失败: {exc}")
+    def _persist_private_key_atomic(self, path: Path, private_key: rsa.RSAPrivateKey) -> None:
+        """P2-17: 原子写入登录私钥(tmp + rename),失败必须 raise。
 
-    def _persist_public_key(self, path: Path, public_key: rsa.RSAPublicKey) -> None:
+        rename 在同一文件系统内是原子的;避免部分写入产生"看似存在但解析失败"
+        的坏文件,又被后续启动误判成损坏而(在旧逻辑下)覆盖。
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_bytes(key_bytes)
+            try:
+                tmp.chmod(0o600)
+            except OSError:
+                # Windows / 特殊文件系统不支持 chmod —— 记录但不阻断
+                logger.warning(f"设置登录私钥权限失败(跳过): {tmp}")
+            os.replace(tmp, path)
+        except Exception:
+            # 清理半写的临时文件
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
+    def _persist_public_key_atomic(self, path: Path, public_key: rsa.RSAPublicKey) -> None:
+        """P2-17: 原子写入登录公钥。公钥丢失可重新导出,失败仅 warning。"""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             key_bytes = public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-            path.write_bytes(key_bytes)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_bytes(key_bytes)
             try:
-                path.chmod(0o644)
+                tmp.chmod(0o644)
             except OSError:
                 pass
+            os.replace(tmp, path)
         except Exception as exc:
             logger.warning(f"保存登录公钥失败: {exc}")
+            # 尽力清理 tmp
+            try:
+                path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 login_password_crypto = LoginPasswordCrypto()

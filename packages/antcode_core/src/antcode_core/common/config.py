@@ -138,12 +138,19 @@ class Settings(BaseSettings):
     LOGIN_RSA_KEY_SIZE: int = Field(default=2048)
 
     # === CORS 配置 ===
+    # P2-13: allow_origins 严禁配 ["*"] + allow_credentials=True。当前 origins
+    # 从 SERVER_DOMAIN / FRONTEND_PORT 组装为具体域名白名单（见下方
+    # CORS_ORIGINS），非通配，且浏览器也会拒绝 * + credentials 的组合。
+    # allow_methods / allow_headers 用 "*" 在带 credentials 时是允许的（不会
+    # 触发浏览器拒绝），保持现状。若未来需接入更多前端域名，在此 property 里
+    # 追加或改为从环境变量读白名单。
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: list[str] = ["*"]
     CORS_ALLOW_HEADERS: list[str] = ["*"]
 
     @cached_property
     def CORS_ORIGINS(self) -> list[str]:
+        # P2-13: 明确列出的具体源，绝不返回 ["*"]。
         origins = [
             f"http://{self.SERVER_DOMAIN}:{self.FRONTEND_PORT}",
             f"http://localhost:{self.FRONTEND_PORT}",

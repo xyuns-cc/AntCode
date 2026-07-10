@@ -45,7 +45,11 @@ class SchedulerEventLoop:
 
     def __init__(
         self,
-        block_ms: int = 3000,
+        # P2-06: block_ms 从 3000 下调到 1000 —— XREADGROUP 处于 block 时
+        # asyncio.CancelledError 需等 Redis 端 block 到期才返回，多个 loop
+        # gather 停机时 block 越长 shutdown 拖延越严重。1s 已足够摊薄空转
+        # 频次；关停时最坏多等 1s。
+        block_ms: int = 1000,
         batch_size: int = 50,
         idle_sleep: float = 1.0,
     ):

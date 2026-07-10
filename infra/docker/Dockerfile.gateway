@@ -112,15 +112,18 @@ RUN mkdir -p \
 # 切换到非 root 用户
 USER appuser
 
-# 暴露 gRPC 端口
-EXPOSE 50051
+# 暴露 gRPC + HTTP readiness 端口(8100 由 server.py 的 _start_readiness_endpoint 起)
+EXPOSE 50051 8100
 
-# P1-21: 健康检查只走 grpc_health_probe 的 RPC 级探测 —— 拿掉 pgrep 兜底,
-# 因为 pgrep 只看进程名,server.start() 失败但主进程还没 exit 时会假 healthy。
-# server.py 已经注册了 grpc.health.v1.Health 并在启动/关闭时置位 SERVING/NOT_SERVING,
-# probe 会真实反映 gRPC 端口是否 listen + 服务是否可用。
+# P1-21: 健康检查走 HTTP /health/ready(端口 8100,server.py 暴露),
+# 该 endpoint 只有在 gRPC server 真正 listen 之后才启动 —— 拿掉了原来的
+# pgrep 兜底,消除"进程活着但 start() 失败/端口没绑"的假 healthy。
+# 之所以不用 grpc_health_probe: gateway config.py 里
+# grpc.max_connection_idle_ms=0 会让短连接被判 idle 直接 GOAWAY,
+# probe 拿到 UNAVAILABLE(connection is draining),那是另一个待修 issue。
+# server.py 里仍然注册了 grpc.health.v1.Health,以后配置修好即可无缝切回。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
-    CMD /usr/local/bin/grpc_health_probe -addr=:50051 -connect-timeout=3s || exit 1
+    CMD curl -fsS http://localhost:8100/health/ready >/dev/null || exit 1
 
 # 启动命令
 CMD ["python", "-m", "antcode_gateway.main"]

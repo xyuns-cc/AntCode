@@ -17,6 +17,49 @@ from antcode_core.infrastructure.redis import (
     get_redis_client,
 )
 
+# P2-24: control:{worker_id} stream 的近似最大长度,与 gateway 侧
+# ``CONTROL_STREAM_MAXLEN`` 保持一致。以前 4 处 XADD(tasks.cancel /
+# runs.cancel / workers.resources / runtime_manage)都是裸 xadd,没有任何
+# maxlen 或 MINID 裁剪,每个 worker 的控制历史随着时间单调增长,Redis 内存
+# 和 AOF 无限膨胀,消费端只 XACK 不裁剪。
+#
+# 现在所有生产方走 ``write_control_event`` 或者内联 ``maxlen=CONTROL_STREAM_MAXLEN,
+# approximate=True``,让 stream 的近似长度限定在 1000 条以内,再叠加消费端
+# 的裁剪(可能后续基于 XPENDING/group ACK 游标做精确 MINID 裁剪)。
+CONTROL_STREAM_MAXLEN = 1_000
+
+
+async def write_control_event(
+    redis: Any,
+    control_stream_key: str,
+    payload: dict[str, Any],
+    *,
+    maxlen: int = CONTROL_STREAM_MAXLEN,
+) -> str:
+    """向指定 worker 的 control stream 写一条控制事件,带近似 maxlen 裁剪。
+
+    生产方(web_api / runtime 服务)统一走这个入口,避免 4 处 XADD 各自
+    忘记加 maxlen 导致 Redis 无界增长(P2-24)。
+
+    Args:
+        redis: aioredis 客户端。
+        control_stream_key: 通常是 ``control_stream(worker_id)`` 的返回值。
+        payload: 事件负载(由 ``build_cancel_control_payload`` /
+            ``build_config_update_control_payload`` /
+            ``build_runtime_manage_control_payload`` 之一构造)。
+        maxlen: 近似上限,默认 ``CONTROL_STREAM_MAXLEN``。使用 ``~`` 语义
+            (approximate=True),不牺牲写性能。
+
+    Returns:
+        新条目的 stream id(与 ``redis.xadd`` 返回值一致)。
+    """
+    return await redis.xadd(
+        control_stream_key,
+        payload,
+        maxlen=maxlen,
+        approximate=True,
+    )
+
 
 class RuntimeControlService:
     """运行时管理控制服务"""
@@ -45,7 +88,8 @@ class RuntimeControlService:
             payload=payload or {},
         )
 
-        await redis.xadd(control_stream_key, data)
+        # P2-24: 走公共 helper,写入时带上 CONTROL_STREAM_MAXLEN 近似裁剪。
+        await write_control_event(redis, control_stream_key, data)
 
         timeout_ms = int((timeout or self._default_timeout) * 1000)
         result = await redis.xread({reply_stream_key: "0-0"}, count=1, block=timeout_ms)
@@ -158,4 +202,9 @@ class RuntimeControlService:
 
 runtime_control_service = RuntimeControlService()
 
-__all__ = ["RuntimeControlService", "runtime_control_service"]
+__all__ = [
+    "CONTROL_STREAM_MAXLEN",
+    "RuntimeControlService",
+    "runtime_control_service",
+    "write_control_event",
+]

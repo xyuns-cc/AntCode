@@ -257,29 +257,68 @@ async def get_running_tasks(
     limit: int = Query(100, ge=1, le=500),
     current_user=Depends(get_current_user),
 ):
-    """获取运行中的任务（带分页）"""
-    from antcode_core.domain.models import Task
+    """获取运行中的任务（带分页）
 
-    running = scheduler_service.get_running_tasks()
+    P2-15: 之前调用的 `scheduler_service.get_running_tasks()` 并不存在，
+    命中即 500。这里改成直接查 TaskRun：取 DISPATCHING / QUEUED /
+    RUNNING 三种"正在进行中"的执行记录，非管理员按 Task.user_id
+    做归属过滤，最多返回 200 条防止响应体爆炸。
+    """
+    # 覆盖"已分发 / 已排队 / 正在跑"三种进行中态；PENDING 是尚未分发的调度
+    # 候选，Dashboard 页面不需要展示。
+    running_statuses = [
+        TaskStatus.DISPATCHING.value,
+        TaskStatus.QUEUED.value,
+        TaskStatus.RUNNING.value,
+    ]
 
-    if not running:
-        return success_response([], message=Messages.QUERY_SUCCESS)
-
-    # 批量获取任务 ID，避免 N+1 查询
-    task_ids = [info["task_id"] for info in running]
-
-    # 批量查询用户有权限的任务
+    # 先按 Task 表限定可见范围，避免 TaskRun 全表扫描后再挑一堆没权限的
+    # 记录出来 —— 与本文件其它 endpoint 用 current_user.is_admin 的判定方式对齐。
     if current_user.is_admin:
-        tasks = await Task.filter(id__in=task_ids).all()
+        allowed_task_ids: list[int] | None = None  # None = 不限
     else:
-        tasks = await Task.filter(id__in=task_ids, user_id=current_user.user_id).all()
+        allowed_task_ids = await Task.filter(
+            user_id=current_user.user_id
+        ).values_list("id", flat=True)
+        if not allowed_task_ids:
+            return success_response([], message=Messages.QUERY_SUCCESS)
 
-    valid_task_ids = {t.id for t in tasks}
+    run_query = TaskRun.filter(status__in=running_statuses)
+    if allowed_task_ids is not None:
+        run_query = run_query.filter(task_id__in=list(allowed_task_ids))
 
-    # 过滤只显示当前用户有权限的任务，再分页（避免无界返回打爆响应体）
-    user_tasks = [info for info in running if info["task_id"] in valid_task_ids]
-    paginated = user_tasks[offset : offset + limit]
+    # 200 是硬上限，用户分页参数只在这 200 条里切
+    HARD_CAP = 200
+    runs = await run_query.order_by("-created_at").limit(HARD_CAP)
 
+    # 关联 Task 拿 public_id / name，Dashboard 展示需要人类可读字段
+    task_ids = list({r.task_id for r in runs})
+    tasks_by_id = (
+        {
+            t.id: t
+            for t in await Task.filter(id__in=task_ids).only("id", "public_id", "name")
+        }
+        if task_ids
+        else {}
+    )
+
+    items: list[dict[str, Any]] = []
+    for r in runs:
+        task = tasks_by_id.get(r.task_id)
+        items.append(
+            {
+                "task_id": task.public_id if task else None,
+                "task_name": task.name if task else None,
+                "run_id": r.run_id,
+                "status": r.status.value if hasattr(r.status, "value") else r.status,
+                "start_time": r.start_time.isoformat() if r.start_time else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "worker_id": r.worker_id,
+                "retry_count": r.retry_count,
+            }
+        )
+
+    paginated = items[offset : offset + limit]
     return success_response(paginated, message=Messages.QUERY_SUCCESS)
 
 
@@ -489,7 +528,23 @@ async def import_task_config(
     current_user=Depends(get_current_user),
 ):
     """导入任务配置"""
-    raw_text = (await file.read()).decode("utf-8", errors="ignore")
+    # P2-16: 强制 UTF-8 严格解码,拒绝二进制 / 错编码文件;body 大小上限 1MiB 防止
+    # 被塞入超大文件把整个 event loop 卡在 file.read()。errors="ignore" 会静默
+    # 吞掉非 UTF-8 字节,再走 YAML/JSON 时可能构造出误导性配置。
+    _MAX_IMPORT_BYTES = 1 * 1024 * 1024
+    raw_bytes = await file.read()
+    if len(raw_bytes) > _MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"导入文件超过上限 {_MAX_IMPORT_BYTES // 1024} KiB",
+        )
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"导入文件必须为 UTF-8 编码: {exc}",
+        ) from exc
     payload = _parse_task_import_payload(raw_text)
     task_payload = payload.get("task") if isinstance(payload.get("task"), dict) else payload
 
@@ -742,6 +797,9 @@ async def batch_operate_tasks(
                 cancelled = False
                 if execution.worker_id:
                     try:
+                        from antcode_core.application.services.runtime.runtime_control_service import (
+                            write_control_event,
+                        )
                         from antcode_core.application.services.workers.worker_service import (
                             worker_service,
                         )
@@ -754,7 +812,11 @@ async def batch_operate_tasks(
                                 run_id=execution.run_id,
                                 reason=f"user_cancel:{current_user.user_id}",
                             )
-                            await redis.xadd(control_stream(worker.public_id), payload)
+                            # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
+                            # 避免 control:{worker_id} stream 无限增长。
+                            await write_control_event(
+                                redis, control_stream(worker.public_id), payload
+                            )
                             cancelled = True
                     except Exception as e:
                         logger.warning(f"发送取消指令失败: {e}")
@@ -1143,6 +1205,9 @@ async def stop_task_execution(run_id: str, current_user=Depends(get_current_user
     cancelled = False
     if execution.worker_id:
         try:
+            from antcode_core.application.services.runtime.runtime_control_service import (
+                write_control_event,
+            )
             from antcode_core.application.services.workers.worker_service import worker_service
             from antcode_core.infrastructure.redis import get_redis_client
 
@@ -1153,7 +1218,11 @@ async def stop_task_execution(run_id: str, current_user=Depends(get_current_user
                     run_id=execution.run_id,
                     reason=f"user_cancel:{current_user.user_id}",
                 )
-                await redis.xadd(control_stream(worker.public_id), payload)
+                # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
+                # 避免 control:{worker_id} stream 无限增长。
+                await write_control_event(
+                    redis, control_stream(worker.public_id), payload
+                )
                 cancelled = True
         except Exception as e:
             logger.warning(f"发送取消指令失败: {e}")

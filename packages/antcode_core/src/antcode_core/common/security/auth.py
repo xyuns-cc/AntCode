@@ -1,6 +1,22 @@
-"""认证模块"""
+"""认证模块
+
+P1-09: refresh token 从纯 JWT 升级为 JWT + 服务端 jti (UserSession 表), 支持
+撤销 (改密/离职/泄漏). 相关变更:
+
+- ``create_refresh_token`` 现在返回 ``(token, jti, expires_at)`` 三元组;
+  调用方 (登录/刷新路由) 必须解包并异步写 ``UserSession`` 记录。
+- ``verify_refresh_token`` 改为 **async**, 校验 payload 的 jti 是否存在于
+  UserSession 且未 revoked。
+- **兼容性中断**: 老 refresh token (无 jti) 一律 401, 所有用户强制重新登录。
+  这是安全升级的合理代价; 前端已有的 401 拦截器会自动跳转登录页。
+  若需灰度, 可在下面 verify 分支加临时 warning+accept, 3-7 天后关闭。
+
+调用侧需同步更新: ``services/web_api/.../routes/v1/base.py`` 的 ``login`` 和
+``auth/refresh`` 端点。
+"""
 
 import os
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -143,14 +159,38 @@ class JWTAuth:
 
     def create_refresh_token(
         self, user_id: int, username: str, expires_delta: timedelta | None = None
-    ) -> str:
-        """创建刷新令牌"""
-        return self._create_token(
-            user_id=user_id,
-            username=username,
-            expires_delta=expires_delta or timedelta(days=self.refresh_expire_days),
-            token_type="refresh",
+    ) -> tuple[str, str, datetime]:
+        """创建刷新令牌 (P1-09)
+
+        返回 ``(token, jti, expires_at)`` 三元组; 调用方 **必须** 在同一请求
+        里 ``await record_refresh_session(user_id, jti, expires_at, ...)`` 把
+        jti 写入 UserSession 表, 否则该 refresh token 首次校验就会 401
+        ("会话已撤销或不存在")。
+
+        为什么 return 三元组而不是内部直接写 DB:
+        - ``create_refresh_token`` 是同步方法, 走内部异步写会引入 loop 依赖
+          和 create_task 的失败静默问题;
+        - 调用方需要 jti + expires_at 才能在同一 DB 事务里把 session 落库,
+          出错时能与 access_token 签发一起回滚。
+
+        Breaking change: 老调用 ``refresh_token = jwt_auth.create_refresh_token(...)``
+        会拿到 tuple, 需改为 ``token, jti, exp = jwt_auth.create_refresh_token(...)``
+        并异步 ``await record_refresh_session(user_id, jti, exp)``。
+        """
+        jti = uuid.uuid4().hex  # 32-char, RFC 7519 §4.1.7
+        expire = datetime.utcnow() + (
+            expires_delta or timedelta(days=self.refresh_expire_days)
         )
+        payload = {
+            "user_id": user_id,
+            "username": username,
+            "sub": str(user_id),
+            "exp": expire,
+            "token_type": "refresh",
+            "jti": jti,
+        }
+        token = jwt.encode(payload, self._get_secret(), algorithm=self.algorithm)
+        return token, jti, expire
 
     def create_action_token(
         self,
@@ -279,9 +319,89 @@ def get_current_user_from_token(token: str) -> TokenData:
     return jwt_auth.verify_token(token)
 
 
-def verify_refresh_token(token: str) -> TokenData:
-    """验证刷新令牌（同步）"""
-    return jwt_auth.verify_token(token, expected_type="refresh")
+async def verify_refresh_token(token: str) -> TokenData:
+    """验证刷新令牌 (P1-09: 改为 async, 查 UserSession jti)
+
+    与原 sync 版本的差异:
+    - 强制要求 payload 携带 ``jti`` (老 refresh token 会 401)
+    - 从 UserSession 表查该 jti 是否存在且未撤销
+    - 任何 DB / 校验失败均 401, 不泄漏内部错误
+
+    Breaking change: 原 ``token_data = verify_refresh_token(t)`` 需要改为
+    ``token_data = await verify_refresh_token(t)``。前端的 401 拦截器不受
+    影响, 但用户会被强制重新登录一次。
+
+    灰度兼容 (可选): 如果需要保平滑, 可在 "jti is None" 分支临时改为
+    ``logger.warning(...); return token_data`` 让老 token 继续工作 3-7 天。
+    默认走硬切换。
+    """
+    # 1) 先做 JWT 结构 / exp / type 校验 (复用现成路径)
+    token_data = jwt_auth.verify_token(token, expected_type="refresh")
+
+    # 2) 独立解 payload 拿 jti (verify_token 已完整校验过签名/exp)
+    try:
+        payload = jwt.decode(
+            token,
+            jwt_auth._get_secret(),
+            algorithms=[jwt_auth.algorithm],
+            options={"verify_exp": True, "require": ["exp"]},
+        )
+    except jwt.PyJWTError:
+        # 理论上不可达 (上一步已通过), 保险起见兜底
+        raise AUTH_ERROR
+
+    jti = payload.get("jti")
+    if not jti:
+        # 老 refresh token 无 jti → 强制失效, 触发用户重新登录
+        logger.info("P1-09: refresh token 缺少 jti, 拒绝 (老 token 已强制失效)")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="refresh token 已失效, 请重新登录",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 3) 查服务端 session 状态
+    # 延迟 import 避免 auth.py <-> models 循环依赖 (auth 会被 base model
+    # 的路径侧引进来)
+    from antcode_core.domain.models.user_session import UserSession
+
+    session = await UserSession.filter(jti=jti).first()
+    if session is None or session.revoked_at is not None:
+        logger.info(
+            f"P1-09: refresh 拒绝 user={token_data.user_id} jti={jti[:8]}… "
+            f"(session={'missing' if session is None else 'revoked'})"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="会话已撤销或不存在, 请重新登录",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return token_data
+
+
+async def record_refresh_session(
+    user_id: int,
+    jti: str,
+    expires_at: datetime,
+    device_info: str | None = None,
+) -> None:
+    """P1-09: 把新签发的 refresh token jti 落到 UserSession 表。
+
+    ``create_refresh_token`` 返回 (token, jti, expires_at) 后, 调用方必须
+    ``await`` 本函数; 否则该 refresh token 首次 verify 就会 401。
+
+    ``device_info`` 建议传 ``f"{ua_short}|{ip}"``, 便于后续做 "查看登录设备
+    / 撤销单个设备" 交互。为空也不影响功能, 只是审计信息缺失。
+    """
+    from antcode_core.domain.models.user_session import UserSession
+
+    await UserSession.create(
+        user_id=user_id,
+        jti=jti,
+        expires_at=expires_at,
+        device_info=device_info,
+    )
 
 
 async def verify_token(token: str) -> TokenData:

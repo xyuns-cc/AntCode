@@ -242,10 +242,12 @@ class DashboardService extends BaseService {
   }
 
   // 获取完整的仪表板统计数据
-  async getDashboardStats(): Promise<DashboardStats> {
+  // P2-22: 允许外层传入已经拿到的 metrics,避免重复触发 /dashboard/metrics
+  // (Dashboard 页面本身也需要 metrics,不传参会打两次同样的请求)。
+  async getDashboardStats(metrics?: SystemMetrics): Promise<DashboardStats> {
     const [summary, systemMetrics] = await Promise.all([
       this.get<DashboardSummaryPayload>('/dashboard/summary'),
-      this.getSystemMetrics()
+      metrics ? Promise.resolve(metrics) : this.getSystemMetrics()
     ])
 
     return {

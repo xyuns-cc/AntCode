@@ -111,8 +111,16 @@ const BatchListPage: React.FC = () => {
     }
   }
 
-  const download = (batch: CrawlBatchSummary, format: 'json' | 'csv') => {
-    window.open(crawlService.exportBatchUrl(batch.id, format), '_blank')
+  const download = async (batch: CrawlBatchSummary, format: 'json' | 'csv') => {
+    // P2-15: 原来是 window.open(exportBatchUrl(...))，会开新标签页拿不到 axios
+    // 拦截器注入的 Authorization → 登录用户导出直接 401。改走
+    // crawlService.exportBatch() 用 blob + Bearer 拉字节流再本地触发下载。
+    try {
+      await crawlService.exportBatch(batch.id, format)
+    } catch (e) {
+      Logger.error('export batch failed', e)
+      message.error(`导出 ${format.toUpperCase()} 失败`)
+    }
   }
 
   const submitCreate = async () => {
