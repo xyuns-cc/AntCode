@@ -4,6 +4,7 @@
 任务相关的请求和响应模式。
 """
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +18,27 @@ from antcode_core.domain.models.enums import (
     TaskType,
 )
 
+# P1-29 JSON 字段边界:64KB 已经能兜住任何合理的执行参数/环境变量,
+# 超过就 422,防止攻击者塞进 MB 级 dict 打爆 DB / event loop。
+_MAX_JSON_FIELD_BYTES = 64 * 1024
+
+
+def _assert_json_payload_within(value: dict[str, Any] | None, field: str) -> None:
+    """确保 JSONField 序列化后 <= _MAX_JSON_FIELD_BYTES,超过直接 ValueError。"""
+    if value is None:
+        return
+    try:
+        # default=str 兜住 datetime 等非 JSON 原生类型,避免这里抛出把
+        # 422 消息带偏成 TypeError。
+        encoded = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{field} 不是可序列化的 JSON: {e}") from e
+    size = len(encoded.encode("utf-8"))
+    if size > _MAX_JSON_FIELD_BYTES:
+        raise ValueError(
+            f"{field} 序列化后为 {size} 字节,超过上限 {_MAX_JSON_FIELD_BYTES} 字节"
+        )
+
 
 class TaskCreateRequest(BaseModel):
     """任务创建请求"""
@@ -27,15 +49,19 @@ class TaskCreateRequest(BaseModel):
     schedule_type: ScheduleType = Field(..., description="调度类型")
     is_active: bool = Field(True, description="是否激活")
 
-    cron_expression: str | None = Field(None, description="Cron表达式")
+    # cron_expression 对齐 DB 列 CharField(max_length=100),避免 10MB
+    # cron 触发 asyncpg StringDataRightTruncation 500(P1-29)。
+    cron_expression: str | None = Field(
+        None, max_length=100, description="Cron表达式(<= 100 字符)"
+    )
     interval_seconds: int | None = Field(None, gt=0, description="间隔秒数")
     scheduled_time: datetime | None = Field(None, description="计划执行时间")
     max_instances: int = Field(1, ge=1, le=10, description="最大并发实例数")
     timeout_seconds: int = Field(3600, gt=0, description="超时时间(秒)")
     retry_count: int = Field(3, ge=0, le=10, description="重试次数")
     retry_delay: int = Field(60, gt=0, description="重试延迟(秒)")
-    execution_params: dict[str, Any] | None = Field(None, description="执行参数")
-    environment_vars: dict[str, str] | None = Field(None, description="环境变量")
+    execution_params: dict[str, Any] | None = Field(None, description="执行参数(JSON <= 64KB)")
+    environment_vars: dict[str, str] | None = Field(None, description="环境变量(JSON <= 64KB)")
 
     execution_strategy: ExecutionStrategy | None = Field(None, description="执行策略")
     specified_worker_id: str | None = Field(None, description="指定执行 Worker ID")
@@ -65,6 +91,10 @@ class TaskCreateRequest(BaseModel):
         elif self.schedule_type == ScheduleType.DATE:
             if not self.scheduled_time:
                 raise ValueError("DATE 任务必须提供 scheduled_time")
+
+        # P1-29 JSON 字段边界:cap execution_params / environment_vars 序列化后总量
+        _assert_json_payload_within(self.execution_params, "execution_params")
+        _assert_json_payload_within(self.environment_vars, "environment_vars")
         return self
 
 
@@ -74,7 +104,8 @@ class TaskUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=3, max_length=255)
     description: str | None = Field(None, max_length=500)
     is_active: bool | None = None
-    cron_expression: str | None = None
+    # 对齐 DB 列 max_length=100,防止超长 cron 触发 asyncpg 截断 500(P1-29)。
+    cron_expression: str | None = Field(None, max_length=100)
     interval_seconds: int | None = Field(None, gt=0)
     scheduled_time: datetime | None = None
     max_instances: int | None = Field(None, ge=1, le=10)
@@ -98,6 +129,10 @@ class TaskUpdateRequest(BaseModel):
                 CronTrigger.from_crontab(self.cron_expression)
             except Exception as e:  # noqa: BLE001
                 raise ValueError(f"非法 cron 表达式: {e}") from e
+
+        # P1-29 JSON 字段边界:同 create,防止 update 通道绕过大小 cap。
+        _assert_json_payload_within(self.execution_params, "execution_params")
+        _assert_json_payload_within(self.environment_vars, "environment_vars")
         return self
 
 

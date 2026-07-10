@@ -222,7 +222,10 @@ class WorkerHeartbeatService:
             return False
 
         worker.last_heartbeat = hb_time
-        worker.status = WorkerStatus.ONLINE.value
+        # P1-33: MAINTENANCE 是运维显式设置的目标态,心跳不能把它打回 ONLINE。
+        # 只在原状态是 OFFLINE/CONNECTING/(旧数据)ONLINE 时才允许 heartbeat 覆盖。
+        if worker.status != WorkerStatus.MAINTENANCE.value:
+            worker.status = WorkerStatus.ONLINE.value
         self._apply_redis_heartbeat_payload(worker, data)
         await worker.save()
         logger.debug(f"已同步 Redis 心跳到数据库: worker={worker.name}, time={hb_time}")
@@ -309,13 +312,17 @@ class WorkerHeartbeatService:
                     await self._sync_redis_heartbeat_to_db(worker)
             state["failures"] = 0
             state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
-            if old_status != WorkerStatus.ONLINE:
+            # P1-33: MAINTENANCE 是运维显式设置的目标态,即使观测到心跳新鲜也不能
+            # 把它翻回 ONLINE;dispatcher 侧 is_worker_available 只放行 ONLINE,所以
+            # MAINTENANCE 会自动不接新任务,达到"运维停机窗口"的语义。
+            if old_status != WorkerStatus.ONLINE and old_status != WorkerStatus.MAINTENANCE.value:
                 latest = await self._refresh_worker_from_db(worker.id)
                 if latest:
                     worker = latest
-                worker.status = WorkerStatus.ONLINE.value
-                await worker.save()
-                logger.info(f"节点 {worker.name} 恢复在线")
+                if worker.status != WorkerStatus.MAINTENANCE.value:
+                    worker.status = WorkerStatus.ONLINE.value
+                    await worker.save()
+                    logger.info(f"节点 {worker.name} 恢复在线")
             return True
 
         # 数据库心跳过期，尝试从 Redis 获取（Direct 模式支持）
@@ -336,11 +343,13 @@ class WorkerHeartbeatService:
             if last_hb is not None and last_hb.tzinfo is not None:
                 last_hb = last_hb.astimezone().replace(tzinfo=None)
             if last_hb and (now - last_hb).total_seconds() <= self.HEARTBEAT_TIMEOUT:
-                latest.status = WorkerStatus.ONLINE.value
+                # P1-33: 同上,MAINTENANCE 不允许被 refresh 后的心跳判定覆盖
+                if latest.status != WorkerStatus.MAINTENANCE.value:
+                    latest.status = WorkerStatus.ONLINE.value
                 state["failures"] = 0
                 state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
                 await latest.save()
-                if old_status != WorkerStatus.ONLINE:
+                if old_status != WorkerStatus.ONLINE and latest.status == WorkerStatus.ONLINE.value:
                     logger.info(f"节点 {latest.name} 恢复在线")
                 return True
             worker = latest

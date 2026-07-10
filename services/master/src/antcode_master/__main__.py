@@ -293,7 +293,9 @@ async def main() -> None:
     """主函数"""
     setup_logging()
 
-    await init_db()
+    # P2-a2: 必须传 service="master",否则 helper 走 default 池,
+    # DB_POOL_MAX_MASTER 配置将静默失效。
+    await init_db(service="master")
 
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()

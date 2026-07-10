@@ -1,9 +1,8 @@
 """应用层关联关系管理服务"""
 
-import asyncio
-
 from loguru import logger
 from tortoise.exceptions import DoesNotExist
+from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.base import QueryHelper
 from antcode_core.domain.models.project import Project, ProjectCode, ProjectFile, ProjectRule
@@ -205,43 +204,69 @@ class RelationService:
 
     @staticmethod
     async def delete_project_cascade(project_id):
-        """级联删除项目及其相关数据"""
+        """级联删除项目及其相关数据
+
+        P1-20 修复要点:
+        - 全流程包裹在 `in_transaction()` 里,任一步骤失败整体回滚,不会
+          出现"任务清了、项目还在"的半状态。
+        - 补漏此前遗漏的子表:
+          * ProjectSource (project_id 唯一, 一对一)
+          * RunSourceSnapshot (project_id 索引, 一对多)
+        - GitCredential **不**跟随项目删除:它 owner_user_id 归属用户,
+          可能被同一用户的多个项目复用,由 user_service.delete_user 负责清理。
+        """
+        from antcode_core.domain.models import ProjectRuntimeBinding, ProjectSource, RunSourceSnapshot
+
         deleted = {
             "tasks": 0,
             "executions": 0,
             "details": 0,
             "runtime_bindings": 0,
+            "project_sources": 0,
+            "run_source_snapshots": 0,
         }
 
         try:
-            # 1. 获取任务ID并删除执行记录
-            task_ids = await Task.filter(project_id=project_id).values_list("id", flat=True)
-            if task_ids:
-                deleted["executions"] = await TaskRun.filter(task_id__in=list(task_ids)).delete()
+            async with in_transaction():
+                # 1. 任务 → 执行记录(先删 child 避免悬挂)
+                task_ids = await Task.filter(project_id=project_id).values_list("id", flat=True)
+                if task_ids:
+                    deleted["executions"] = await TaskRun.filter(
+                        task_id__in=list(task_ids)
+                    ).delete()
 
-            # 2. 删除任务
-            deleted["tasks"] = await Task.filter(project_id=project_id).delete()
+                # 2. 任务本体
+                deleted["tasks"] = await Task.filter(project_id=project_id).delete()
 
-            # 3. 并发删除项目详情
-            results = await asyncio.gather(
-                ProjectFile.filter(project_id=project_id).delete(),
-                ProjectRule.filter(project_id=project_id).delete(),
-                ProjectCode.filter(project_id=project_id).delete(),
-            )
-            deleted["details"] = sum(results)
+                # 3. 项目详情(file / rule / code 至多命中其一)
+                #    事务内不并发,顺序执行以避免共享同一连接时的并发冲突
+                d_file = await ProjectFile.filter(project_id=project_id).delete()
+                d_rule = await ProjectRule.filter(project_id=project_id).delete()
+                d_code = await ProjectCode.filter(project_id=project_id).delete()
+                deleted["details"] = d_file + d_rule + d_code
 
-            # 4. 删除运行时绑定记录
-            from antcode_core.domain.models import ProjectRuntimeBinding
+                # 4. 运行时绑定
+                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(
+                    project_id=project_id
+                ).delete()
 
-            deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(project_id=project_id).delete()
+                # 5. 补漏 - ProjectSource(Git 源配置, 一对一)
+                deleted["project_sources"] = await ProjectSource.filter(
+                    project_id=project_id
+                ).delete()
 
-            # 5. 删除项目
-            await Project.filter(id=project_id).delete()
+                # 6. 补漏 - RunSourceSnapshot(任务运行时的源码快照, 一对多)
+                deleted["run_source_snapshots"] = await RunSourceSnapshot.filter(
+                    project_id=project_id
+                ).delete()
+
+                # 7. 项目本体
+                await Project.filter(id=project_id).delete()
 
             logger.info(f"级联删除项目 {project_id}: {deleted}")
             return deleted
         except Exception as e:
-            logger.error(f"级联删除项目 {project_id} 失败: {e}")
+            logger.error(f"级联删除项目 {project_id} 失败(事务已回滚): {e}")
             raise
 
     @staticmethod
@@ -250,17 +275,18 @@ class RelationService:
         deleted_counts = {"executions": 0}
 
         try:
-            # 1. 删除执行记录
-            deleted_counts["executions"] = await TaskRun.filter(task_id=task_id).delete()
+            async with in_transaction():
+                # 1. 执行记录
+                deleted_counts["executions"] = await TaskRun.filter(task_id=task_id).delete()
 
-            # 2. 删除任务本身
-            await Task.filter(id=task_id).delete()
+                # 2. 任务本体
+                await Task.filter(id=task_id).delete()
 
             logger.info(f"级联删除任务 {task_id} 完成: {deleted_counts}")
             return deleted_counts
 
         except Exception as e:
-            logger.error(f"级联删除任务 {task_id} 失败: {e}")
+            logger.error(f"级联删除任务 {task_id} 失败(事务已回滚): {e}")
             raise
 
 

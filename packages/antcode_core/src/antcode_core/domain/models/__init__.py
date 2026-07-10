@@ -9,6 +9,7 @@ Domain Models 模块
 - project_source: 项目 Git 来源配置
 - task: 任务定义模型
 - task_run: 任务执行实例模型
+- task_log: 任务执行日志模型
 - runtime: 运行时环境模型
 - worker: Worker 节点模型
 - worker_install_key: Worker 安装 Key
@@ -100,6 +101,7 @@ from antcode_core.domain.models.system_config import SystemConfig
 
 # 任务模型
 from antcode_core.domain.models.task import Task
+from antcode_core.domain.models.task_log import TaskLog
 from antcode_core.domain.models.task_run import TaskRun
 
 # 用户模型
@@ -153,6 +155,7 @@ __all__ = [
     "ProjectSource",
     # 任务模型
     "Task",
+    "TaskLog",
     "TaskRun",
     # 运行时环境模型
     "Runtime",

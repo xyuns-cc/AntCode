@@ -54,6 +54,23 @@ class Lease:
     granted_at_ms: int
 
 
+class LeaseRevokedError(RuntimeError):
+    """P1-15 fail-closed 信号：目标 worker 的 ``current_lease_id`` 出现在
+    死信 revoked set 里,说明该 lease 已被 master/gateway 主动撤销,继续 grant
+    会让被撤 worker 复活。上层应把此异常翻译成"revoked"响应,拒绝新租约。
+
+    ``current_lease_id`` 为空时不会触发本异常——那是首发租的正常路径。
+    """
+
+    def __init__(self, worker_id: str, lease_id: str, message: str = ""):
+        self.worker_id = worker_id
+        self.lease_id = lease_id
+        super().__init__(
+            message
+            or f"lease 已被撤销,拒绝再次 grant: worker_id={worker_id}, lease_id={lease_id}"
+        )
+
+
 @dataclass(frozen=True)
 class LeasePolicy:
     """Lease 时长策略。
@@ -68,15 +85,23 @@ class LeasePolicy:
 
 
 # ---------------------------------------------------------------------------
-# Lua 脚本：grant lease_key 单 key 操作
+# Lua 脚本：grant lease_key + revoked_key（同 slot）
 #
 # T6-T1c: Redis Cluster 下 EVAL 只能碰同 slot 的 key。原实现一次改
 # lease_key + expiring_zset + active_set 三个跨 slot key 会 CROSSSLOT 报错。
-# 拆成"Lua 只管 lease_key，index 走 pipeline"两段——lease_key 有 EXPIRE
-# 兜底，index 漏更新最坏情况就是 sweep 少扫一次，可接受。
+# 拆成"Lua 只管 lease_key（+ revoked_key，共用 {worker_id} hash tag），
+# index 走 pipeline"两段——lease_key 有 EXPIRE 兜底，index 漏更新最坏
+# 情况就是 sweep 少扫一次，可接受。
+#
+# P1-15 fail-closed:
+#   revoked_key（``{ns}:{{worker_id}}:lease:revoked``）与 lease_key 共享
+#   ``{worker_id}`` hash tag，一定同 slot。grant 时先 SISMEMBER 目标
+#   current_lease_id 是否在死信集里,命中即 abort,防止被撤 worker 用旧
+#   lease_id 复活。
 #
 # KEYS:
 #   1. lease_key       — {ns}:{{worker_id}}:lease:data
+#   2. revoked_key     — {ns}:{{worker_id}}:lease:revoked
 #
 # ARGV:
 #   1. worker_id
@@ -87,10 +112,12 @@ class LeasePolicy:
 #   6. metrics_json        ("" 表示不更新 metrics)
 #
 # 返回:
-#   {final_lease_id, expires_at_ms, granted_at_ms, "new"|"renewed"}
+#   {final_lease_id, expires_at_ms, granted_at_ms, "new"|"renewed"|"revoked"}
+#   outcome=="revoked" 时前 3 个字段是空串,上层需抛 LeaseRevokedError。
 # ---------------------------------------------------------------------------
 _GRANT_LUA = """
-local lease_key = KEYS[1]
+local lease_key   = KEYS[1]
+local revoked_key = KEYS[2]
 
 local worker_id        = ARGV[1]
 local current_lease_id = ARGV[2]
@@ -99,8 +126,22 @@ local now_ms           = tonumber(ARGV[4])
 local expires_at_ms    = tonumber(ARGV[5])
 local metrics_json     = ARGV[6]
 
+-- P1-15 fail-closed: 目标 current_lease_id 若在死信集里就拒绝 grant
+if current_lease_id ~= '' then
+    if redis.call('SISMEMBER', revoked_key, current_lease_id) == 1 then
+        return {'', '', '', 'revoked'}
+    end
+end
+
 local stored_lease_id = redis.call('HGET', lease_key, 'lease_id')
 local stored_expires  = tonumber(redis.call('HGET', lease_key, 'expires_at_ms') or "0")
+
+-- P1-15 fail-closed（进阶）: 存储中的 lease_id 也可能被撤(edge case:
+-- revoke 与 grant 并发时 revoke 只 DEL 了 lease_key 但 SADD 了 stored id)。
+if stored_lease_id
+   and redis.call('SISMEMBER', revoked_key, stored_lease_id) == 1 then
+    return {'', '', '', 'revoked'}
+end
 
 local final_lease_id
 local outcome
@@ -138,17 +179,81 @@ return {final_lease_id, tostring(expires_at_ms), tostring(now_ms), outcome}
 
 
 # ---------------------------------------------------------------------------
-# Lua 脚本：revoke lease_key 单 key 操作（T6-T1c）
+# Lua 脚本：revoke lease_key + revoked_key（同 slot, P1-15）
 #
-# KEYS: 1. lease_key
-# ARGV: (none)
+# 除了 DEL lease_key,还把当前 stored_lease_id 与调用方指定的 lease_id
+# 一起 SADD 到 revoked_key,并给 revoked_key EXPIRE 一个略大于 lease TTL
+# 的窗口,让后续 grant 能凭 SISMEMBER 拒绝旧 worker 复活。
+#
+# KEYS:
+#   1. lease_key
+#   2. revoked_key
+# ARGV:
+#   1. explicit_lease_id   (可选,空串代表只封存 stored)
+#   2. revoked_ttl_seconds (死信保留时长)
 # 返回 1 (曾经有 lease) 或 0
 # ---------------------------------------------------------------------------
 _REVOKE_LUA = """
-local lease_key = KEYS[1]
-local existed = redis.call('EXISTS', lease_key)
+local lease_key   = KEYS[1]
+local revoked_key = KEYS[2]
+
+local explicit_lease_id   = ARGV[1]
+local revoked_ttl_seconds = tonumber(ARGV[2])
+if revoked_ttl_seconds == nil or revoked_ttl_seconds < 1 then
+    revoked_ttl_seconds = 1
+end
+
+local existed         = redis.call('EXISTS', lease_key)
+local stored_lease_id = redis.call('HGET', lease_key, 'lease_id')
+
 redis.call('DEL', lease_key)
+
+local added = 0
+if stored_lease_id and stored_lease_id ~= '' then
+    redis.call('SADD', revoked_key, stored_lease_id)
+    added = added + 1
+end
+if explicit_lease_id ~= '' and explicit_lease_id ~= stored_lease_id then
+    redis.call('SADD', revoked_key, explicit_lease_id)
+    added = added + 1
+end
+if added > 0 then
+    redis.call('EXPIRE', revoked_key, revoked_ttl_seconds)
+end
+
 return existed
+"""
+
+
+# ---------------------------------------------------------------------------
+# Lua 脚本：sweep CAS 删除（P1-15）
+#
+# ``sweep_expired`` 先 ZRANGEBYSCORE 拿到"看起来过期"的 worker_ids,再逐
+# 个 DEL 时用本脚本 CAS 校验: 若 lease 已被续租(stored_expires_at_ms >
+# now_ms),就跳过 DEL,只在快照 tick 已真正过期时才清 lease_key。
+#
+# KEYS: 1. lease_key
+# ARGV: 1. now_ms
+# 返回 1 (真的删了) / 0 (跳过, 已续租或早已消失)
+# ---------------------------------------------------------------------------
+_SWEEP_DELETE_LUA = """
+local lease_key = KEYS[1]
+local now_ms    = tonumber(ARGV[1])
+
+local raw = redis.call('HGET', lease_key, 'expires_at_ms')
+if raw == false or raw == nil then
+    return 0
+end
+local stored_expires = tonumber(raw)
+if stored_expires == nil then
+    return 0
+end
+if stored_expires > now_ms then
+    -- 已被续租,快照过期时刻已作废,不能 DEL
+    return 0
+end
+redis.call('DEL', lease_key)
+return 1
 """
 
 
@@ -163,8 +268,13 @@ class LeaseStore:
     # 数据落同 slot。Lua 脚本因此只操作单 key，跨 slot 的 index（zset/set）
     # 走 pipeline。
     LEASE_KEY_TEMPLATE = "{ns}:{{{worker_id}}}:lease:data"
+    # P1-15 死信集: 与 lease_key 共享 {worker_id} hash tag → 同 slot,
+    # grant/revoke 的 Lua 可以在同一次 EVAL 里同时读写两个 key。
+    REVOKED_SET_TEMPLATE = "{ns}:{{{worker_id}}}:lease:revoked"
     EXPIRING_ZSET_SUFFIX = "lease:expiring"
     ACTIVE_SET_SUFFIX = "lease:active"
+    # P1-15 死信保留额外冗余(秒),防止旧 worker 在死信 TTL 边界赢下竞赛
+    REVOKED_TTL_MARGIN_SECONDS = 30
 
     def __init__(
         self,
@@ -184,6 +294,7 @@ class LeaseStore:
         self._policy = policy or LeasePolicy()
         self._grant_script_sha: str | None = None
         self._revoke_script_sha: str | None = None
+        self._sweep_delete_script_sha: str | None = None
         # _ensure_scripts_loaded 用 Event 做快速路径(无锁开销),用 Lock 做
         # 慢路径串行化:第一次 SCRIPT LOAD 期间多个 grant/revoke 并发到达时,
         # 只让一个协程真正发 SCRIPT LOAD,其它人在锁外面等 Event。
@@ -195,6 +306,18 @@ class LeaseStore:
     def _lease_key(self, worker_id: str) -> str:
         # 输出 `{ns}:{worker_id}:lease:data`，worker_id 在 Redis hash tag `{}` 里
         return self.LEASE_KEY_TEMPLATE.format(ns=self._namespace, worker_id=worker_id)
+
+    def _revoked_key(self, worker_id: str) -> str:
+        # P1-15: 与 lease_key 同 slot 的 revoked lease_id 死信集
+        return self.REVOKED_SET_TEMPLATE.format(ns=self._namespace, worker_id=worker_id)
+
+    def _revoked_ttl_seconds(self) -> int:
+        """revoked set 存活时长: lease TTL + margin(≥30s)。"""
+        ttl_ms = int(self._policy.ttl_ms) + self.REVOKED_TTL_MARGIN_SECONDS * 1000
+        seconds = ttl_ms // 1000
+        if seconds < self.REVOKED_TTL_MARGIN_SECONDS:
+            seconds = self.REVOKED_TTL_MARGIN_SECONDS
+        return int(seconds)
 
     def _expiring_zset(self) -> str:
         return f"{self._namespace}:{self.EXPIRING_ZSET_SUFFIX}"
@@ -230,6 +353,10 @@ class LeaseStore:
                 self._grant_script_sha = await self._redis.script_load(_GRANT_LUA)
             if self._revoke_script_sha is None:
                 self._revoke_script_sha = await self._redis.script_load(_REVOKE_LUA)
+            if self._sweep_delete_script_sha is None:
+                self._sweep_delete_script_sha = await self._redis.script_load(
+                    _SWEEP_DELETE_LUA
+                )
             self._scripts_loaded.set()
 
     async def _evalsha_grant(self, keys: list[str], args: list[str]) -> list[Any]:
@@ -256,6 +383,21 @@ class LeaseStore:
                 self._revoke_script_sha = None
                 self._scripts_loaded.clear()
                 return await self._redis.eval(_REVOKE_LUA, len(keys), *keys, *args)
+            raise
+
+    async def _evalsha_sweep_delete(self, keys: list[str], args: list[str]) -> Any:
+        """P1-15 sweep CAS: 只有在 stored_expires_at_ms ≤ now_ms 时才 DEL lease_key。"""
+        await self._ensure_scripts_loaded()
+        try:
+            return await self._redis.evalsha(
+                self._sweep_delete_script_sha, len(keys), *keys, *args
+            )
+        except Exception as exc:
+            if "NOSCRIPT" in str(exc):
+                logger.warning("Lease sweep 脚本未在 Redis 缓存中，回退 EVAL")
+                self._sweep_delete_script_sha = None
+                self._scripts_loaded.clear()
+                return await self._redis.eval(_SWEEP_DELETE_LUA, len(keys), *keys, *args)
             raise
 
     # ------------------------------------------------------------------ API
@@ -294,8 +436,9 @@ class LeaseStore:
                 logger.warning(f"Lease grant: metrics 序列化失败，忽略: {exc}")
                 metrics_json = ""
 
-        # T6-T1c: Lua 只操作 lease_key 单 key（集群 slot 安全）
-        keys = [self._lease_key(worker_id)]
+        # T6-T1c: Lua 只操作 lease_key + revoked_key 两个同 slot key
+        # （通过 {worker_id} hash tag 保证同 slot）
+        keys = [self._lease_key(worker_id), self._revoked_key(worker_id)]
         args = [
             worker_id,
             current_lease_id or "",
@@ -307,10 +450,19 @@ class LeaseStore:
         result = await self._evalsha_grant(keys, args)
 
         # Lua 返回 [lease_id, expires_at_ms, granted_at_ms, outcome]
+        # outcome == "revoked" 时前三项均为空串
+        outcome = _to_str(result[3]) if len(result) > 3 else ""
+        if outcome == "revoked":
+            # P1-15 fail-closed: 目标 lease_id 在死信集里,拒绝 grant
+            logger.warning(
+                f"Lease grant 被拒绝(revoked): worker_id={worker_id}, "
+                f"current_lease_id={current_lease_id!r}"
+            )
+            raise LeaseRevokedError(worker_id=worker_id, lease_id=current_lease_id or "")
+
         final_lease_id = _to_str(result[0])
         final_expires = int(_to_str(result[1]))
         final_granted = int(_to_str(result[2]))
-        outcome = _to_str(result[3]) if len(result) > 3 else ""
 
         # T6-T1c: 索引结构在 Lua 外用 pipeline 追加。集群模式下
         # pipeline(transaction=False) 会按 key 路由到对应节点；zset/set 是全局
@@ -345,12 +497,24 @@ class LeaseStore:
             granted_at_ms=final_granted,
         )
 
-    async def revoke(self, worker_id: str, reason: str = "") -> bool:
+    async def revoke(
+        self,
+        worker_id: str,
+        reason: str = "",
+        lease_id: str = "",
+    ) -> bool:
         """Master / Gateway 主动撤销 Worker 的 lease。
+
+        P1-15: 除了 DEL lease_key,还把被撤 lease_id(以及调用方明确指定的
+        ``lease_id``)写入死信集 ``{ns}:{{worker_id}}:lease:revoked``,窗口
+        为 ``lease TTL + 30s margin``。后续 grant 会 SISMEMBER 检查,命中即
+        拒绝,防止旧 worker 用被撤 lease_id 重新获租(fail-closed)。
 
         Args:
             worker_id: Worker 标识。
             reason: 仅用于日志，便于运维审计。
+            lease_id: 可选;显式指定要封存的 lease_id(用于并发场景下
+                stored 已被 DEL 但调用方仍持有旧 id 的情况)。
 
         Returns:
             True 表示曾经有 lease 被撤销，False 表示本来就没 lease。
@@ -358,9 +522,10 @@ class LeaseStore:
         if not worker_id:
             return False
 
-        # T6-T1c: Lua 只删 lease_key 单 key
-        keys = [self._lease_key(worker_id)]
-        result = await self._evalsha_revoke(keys, [])
+        # T6-T1c/P1-15: Lua 同时操作 lease_key + revoked_key(同 slot)
+        keys = [self._lease_key(worker_id), self._revoked_key(worker_id)]
+        args = [lease_id or "", str(self._revoked_ttl_seconds())]
+        result = await self._evalsha_revoke(keys, args)
         revoked = int(result or 0) > 0
         # 索引清理走 pipeline（同 grant 的追加逻辑）
         try:
@@ -419,6 +584,12 @@ class LeaseStore:
     ) -> list[str]:
         """扫描过期 lease，剔除离线 Worker。
 
+        P1-15 CAS: ZRANGEBYSCORE 拿到的是"某个瞬间过期"的 worker_ids 快照;
+        在 sweep 与 DEL 之间, worker 可能已经续租(expires_at_ms 被推后)。
+        本方法用 ``_SWEEP_DELETE_LUA`` 在 DEL 前重新 HGET expires_at_ms,只
+        有真过期(stored ≤ now_ms)才 DEL,避免误删刚续租的 lease。ZSet/Set
+        的 index 清理只对真正被 DEL 的 worker 执行。
+
         Args:
             now_ms: 截止时间（毫秒）；默认取当前时间。
             batch: 每轮 ZRANGEBYSCORE 的上限，避免单次清理过多 worker 阻塞 loop。
@@ -447,16 +618,52 @@ class LeaseStore:
         if not worker_ids:
             return []
 
-        # 用 pipeline 一次清理 Hash + ZSet + Set
-        pipe = self._redis.pipeline(transaction=False)
+        # P1-15: 逐个 CAS-delete。Lua 只吃单 key(lease_key),跨 slot 安全。
+        # ZSet/Set 的清理放到 pipeline 里,只对真正 DEL 成功的 worker 执行,
+        # 让被续租的 worker 保留在 active_set 中。
+        evicted: list[str] = []
+        renewed: list[str] = []
         for worker_id in worker_ids:
-            pipe.delete(self._lease_key(worker_id))
-            pipe.zrem(expiring_key, worker_id)
-            pipe.srem(active_key, worker_id)
-        await pipe.execute()
+            try:
+                deleted = await self._evalsha_sweep_delete(
+                    [self._lease_key(worker_id)],
+                    [str(now_ms)],
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Lease sweep CAS 校验失败,跳过本 worker: worker_id={worker_id}, err={exc}"
+                )
+                continue
+            if int(deleted or 0) > 0:
+                evicted.append(worker_id)
+            else:
+                # 已被续租或早已消失:从 ZSet 里同步移除过期快照,让下一轮
+                # sweep 不再重复扫。active_set 保留(仍在线)。
+                renewed.append(worker_id)
 
-        logger.info(f"Lease sweep 剔除 {len(worker_ids)} 个过期 worker: {worker_ids}")
-        return worker_ids
+        if not evicted and not renewed:
+            return []
+
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for worker_id in evicted:
+                pipe.zrem(expiring_key, worker_id)
+                pipe.srem(active_key, worker_id)
+            # 被续租的成员:清掉旧的过期 score(其实 grant 已经用新
+            # expires_at_ms ZADD 覆盖过,这里保险 no-op)。
+            await pipe.execute()
+        except Exception as exc:
+            logger.warning(
+                f"Lease sweep index 清理失败(EXPIRE 兜底): evicted={evicted}, err={exc}"
+            )
+
+        if evicted:
+            logger.info(f"Lease sweep 剔除 {len(evicted)} 个过期 worker: {evicted}")
+        if renewed:
+            logger.debug(
+                f"Lease sweep 跳过 {len(renewed)} 个已续租/已消失 worker: {renewed}"
+            )
+        return evicted
 
 
 # ----------------------------------------------------------------------------
@@ -475,5 +682,6 @@ def _to_str(value: Any) -> str:
 __all__ = [
     "Lease",
     "LeasePolicy",
+    "LeaseRevokedError",
     "LeaseStore",
 ]

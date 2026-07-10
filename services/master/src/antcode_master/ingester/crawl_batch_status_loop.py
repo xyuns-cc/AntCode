@@ -89,6 +89,12 @@ class CrawlBatchStatusLoop:
     # 避免永久 RUNNING 被 alert loop 无限扫。
     EMPTY_BATCH_TIMEOUT_SECONDS = 900  # 15 分钟
 
+    # P1-14 (审查报告): seed_urls 尚未派完但 loop 就认为"所有 run 终态"要
+    # 提前终结批次。给部分派发的批次一个允许继续追派发的窗口，超时才 FAILED。
+    # 场景：seed_urls=100 但派发只到 60 个（redispatch pipeline 卡死等），
+    # 原实现 total=60 全 SUCCESS 就把批次标 COMPLETED，剩 40 个永远丢。
+    INCOMPLETE_DISPATCH_TIMEOUT_SECONDS = 1800  # 30 分钟
+
     async def _tick(self) -> None:
         # R1-P1-15: PAUSED 批次**不能**在 _reconcile_batch 里推成 COMPLETED，
         # PAUSED 语义是"暂停"、未派发的 seed 应能 RESUME 继续，若推成终态
@@ -164,6 +170,10 @@ class CrawlBatchStatusLoop:
 
         `stat=None` 表示该 batch 目前一条 run 都没有——走空批次超时兜底。
         """
+        # P1-14 (审查报告): seed_urls 完整性检查所需的分母。JSONField 可能
+        # 是 None/空 list/list[str]，统一 fallback。
+        seed_count = len(batch.seed_urls or [])
+
         if not stat:
             # R1-P1-16: 空批次超时兜底 FAILED，避免永久 RUNNING
             if batch.started_at:
@@ -174,7 +184,7 @@ class CrawlBatchStatusLoop:
                     await batch.save(update_fields=["status", "completed_at"])
                     logger.warning(
                         f"batch 空转超时 FAILED: batch_id={batch.public_id} "
-                        f"elapsed={elapsed:.0f}s"
+                        f"elapsed={elapsed:.0f}s seed_count={seed_count}"
                     )
             return
 
@@ -185,6 +195,28 @@ class CrawlBatchStatusLoop:
         success = stat["success"]
         failed = stat["failed"]
         cancelled = stat["cancelled"]
+
+        # P1-14: seed 完整性判定——现有 run 数 < seed_urls 数时不能终结批次，
+        # 说明还有 URL 从未派发出去。旧实现只看现有 run 的终态占比就落
+        # COMPLETED，会把还没派发到的 40 URL 永久截断。
+        if seed_count > 0 and total < seed_count:
+            if batch.started_at:
+                elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
+                if elapsed > self.INCOMPLETE_DISPATCH_TIMEOUT_SECONDS:
+                    batch.status = BatchStatus.FAILED.value
+                    batch.completed_at = datetime.now(UTC)
+                    await batch.save(update_fields=["status", "completed_at"])
+                    logger.warning(
+                        f"batch seed 未派完超时 FAILED: batch_id={batch.public_id} "
+                        f"total={total} seed={seed_count} elapsed={elapsed:.0f}s"
+                    )
+                    return
+            # 未超时：让 batch_dispatcher/redispatch 继续追派剩余 URL，本轮不动。
+            logger.debug(
+                f"batch seed 未派完，等待派发: batch_id={batch.public_id} "
+                f"total={total} seed={seed_count}"
+            )
+            return
 
         if success == total:
             new_status = BatchStatus.COMPLETED.value
@@ -201,7 +233,8 @@ class CrawlBatchStatusLoop:
         await batch.save(update_fields=["status", "completed_at"])
         logger.info(
             f"batch 状态推导: batch_id={batch.public_id} status={new_status} "
-            f"total={total} success={success} failed={failed} cancelled={cancelled}"
+            f"total={total} seed={seed_count} success={success} "
+            f"failed={failed} cancelled={cancelled}"
         )
 
 

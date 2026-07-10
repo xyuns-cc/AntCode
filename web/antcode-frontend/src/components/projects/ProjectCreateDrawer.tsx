@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useEffect, useState, memo } from 'react'
+import { useEffect, useState, memo, useCallback } from 'react'
 import {
   Drawer,
   Steps,
@@ -146,28 +146,30 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
     setFormData({ type })
   }
 
+  // P1-31: 所有传给子表单的回调都用 useCallback 稳定引用,避免每次
+  // Drawer 渲染都新建函数导致子表单 effect 依赖回调引用 → 无限渲染循环。
   // 表单数据更新
-  const handleFormDataChange = (data: Partial<ProjectCreateRequest>) => {
+  const handleFormDataChange = useCallback((data: Partial<ProjectCreateRequest>) => {
     setFormData(prev => ({ ...prev, ...data }))
-  }
+  }, [])
 
   // 处理规则表单验证状态变化
-  const handleRuleValidationChange = (isValid: boolean, tooltip: string) => {
+  const handleRuleValidationChange = useCallback((isValid: boolean, tooltip: string) => {
     setRuleFormValid(isValid)
     setRuleFormTooltip(tooltip)
-  }
+  }, [])
 
   // 处理文件表单验证状态变化
-  const handleFileValidationChange = (isValid: boolean, tooltip: string) => {
+  const handleFileValidationChange = useCallback((isValid: boolean, tooltip: string) => {
     setFileFormValid(isValid)
     setFileFormTooltip(tooltip)
-  }
+  }, [])
 
   // 处理代码表单验证状态变化
-  const handleCodeValidationChange = (isValid: boolean, tooltip: string) => {
+  const handleCodeValidationChange = useCallback((isValid: boolean, tooltip: string) => {
     setCodeFormValid(isValid)
     setCodeFormTooltip(tooltip)
-  }
+  }, [])
 
   // 提交创建
   const handleSubmit = async (finalData: Record<string, unknown>) => {

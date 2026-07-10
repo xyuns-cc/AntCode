@@ -67,11 +67,152 @@ class CrawlBatchService(BaseService):
         self._dedup_service = dedup_service or crawl_dedup_service
         self._event_client = None
 
+    # P1-14 (审查报告): 事件发送失败旧版直接 warn 吞掉，DB 已改但 Master 端
+    # 永远收不到事件；批次要么永久 PENDING/RUNNING，要么状态与实际漂移。
+    # 简化版 outbox：xadd 失败入 Redis ZSet 重试队列，下次发送 opportunistic
+    # 顺带 flush 到期条目。ZSet key: ``{namespace}:crawl:batch:events:retry``
+    # member = JSON payload，score = 到期时间戳（ms）。
+    _RETRY_MAX_ATTEMPTS = 5
+    _RETRY_BASE_DELAY_SEC = 30
+    _RETRY_MAX_DELAY_SEC = 300
+
+    def _retry_queue_key(self) -> str:
+        ns = settings.REDIS_NAMESPACE or "antcode"
+        return f"{ns}:crawl:batch:events:retry"
+
+    @classmethod
+    def _next_retry_delay(cls, attempts: int) -> int:
+        """指数退避 base * 2^attempts capped 到 max，30s..300s。"""
+        if attempts <= 0:
+            return cls._RETRY_BASE_DELAY_SEC
+        delay = cls._RETRY_BASE_DELAY_SEC * (2 ** min(attempts, 10))
+        return min(delay, cls._RETRY_MAX_DELAY_SEC)
+
+    async def _enqueue_event_retry(
+        self, event: str, batch_id: str, attempts: int = 0, reason: str = ""
+    ) -> bool:
+        """把发送失败的事件挂入 Redis ZSet 重试队列。
+
+        返回 True 表示已入队；False 表示超阈值或队列不可用。
+        """
+        import json
+        import time
+
+        if attempts >= self._RETRY_MAX_ATTEMPTS:
+            logger.error(
+                f"批次事件 retry 超上限 {self._RETRY_MAX_ATTEMPTS} 丢弃: "
+                f"event={event} batch_id={batch_id} reason={reason!r}"
+            )
+            return False
+        try:
+            from antcode_core.infrastructure.redis.client import get_redis_client
+
+            redis = await get_redis_client()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                f"批次事件 retry 入队失败(Redis 不可用): {event}({batch_id}) err={exc}"
+            )
+            return False
+        payload = json.dumps(
+            {
+                "event": event,
+                "batch_id": batch_id,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "attempts": int(attempts),
+                "reason": reason,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        delay = self._next_retry_delay(attempts)
+        score = int(time.time() * 1000) + delay * 1000
+        try:
+            await redis.zadd(self._retry_queue_key(), {payload: score})
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"批次事件 retry ZADD 失败: {event}({batch_id}) err={exc}")
+            return False
+        logger.warning(
+            f"批次事件入 retry queue: event={event} batch_id={batch_id} "
+            f"attempts={attempts + 1}/{self._RETRY_MAX_ATTEMPTS} delay={delay}s"
+        )
+        return True
+
+    async def _flush_pending_event_retries(self, limit: int = 20) -> int:
+        """拉取到期的 retry 事件，重发到 stream；失败重新入队递增 attempts。
+
+        每次 xadd 成功后 opportunistically 调用，保证 flush 与批次生命周期共
+        享同一进程。返回本次成功发送的条数。
+        """
+        import json
+        import time
+
+        if not settings.REDIS_ENABLED or self._event_client is None:
+            return 0
+        try:
+            from antcode_core.infrastructure.redis.client import get_redis_client
+
+            redis = await get_redis_client()
+        except Exception:  # noqa: BLE001
+            return 0
+        key = self._retry_queue_key()
+        now_ms = int(time.time() * 1000)
+        try:
+            members = await redis.zrangebyscore(
+                key, min=0, max=now_ms, start=0, num=limit
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"flush retry queue ZRANGEBYSCORE 失败: {exc}")
+            return 0
+        if not members:
+            return 0
+        try:
+            await redis.zrem(key, *members)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"flush retry queue ZREM 失败: {exc}")
+            return 0
+
+        sent = 0
+        for raw in members:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="ignore")
+            try:
+                payload = json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                logger.debug(f"retry payload 反序列化失败,丢弃: {exc}")
+                continue
+            event = payload.get("event")
+            batch_id = payload.get("batch_id")
+            attempts = int(payload.get("attempts", 0))
+            if not event or not batch_id:
+                continue
+            try:
+                await self._event_client.xadd(
+                    settings.scheduler_event_stream,
+                    {
+                        "event": event,
+                        "batch_id": batch_id,
+                        "timestamp": payload.get(
+                            "timestamp", datetime.now(UTC).isoformat()
+                        ),
+                    },
+                    maxlen=settings.SCHEDULER_EVENT_MAXLEN,
+                )
+                sent += 1
+                logger.info(f"批次事件 retry 成功: {event}({batch_id})")
+            except Exception as exc:  # noqa: BLE001
+                await self._enqueue_event_retry(
+                    event, batch_id, attempts=attempts + 1, reason=str(exc)
+                )
+        return sent
+
     async def _publish_batch_event(self, event: str, batch_id: str) -> None:
         """发布批次生命周期事件到调度事件流
 
         让 Master 端的控制平面接管批次的实际任务分发逻辑（暂停/恢复/取消等）。
-        Master 端响应这些事件的接管逻辑由控制平面负责（follow-up）。
+
+        P1-14: xadd 失败不再吞异常；改为入 Redis ZSet 重试队列，后续 publish
+        调用会 opportunistically drain。若 Redis 完全不可用（连 retry 也入不
+        了队），抛出让调用方决定；DB 状态已改但事件真丢时至少要 crash 醒目。
 
         Args:
             event: 事件名，如 batch_started / batch_paused / batch_resumed / batch_cancelled
@@ -80,11 +221,18 @@ class CrawlBatchService(BaseService):
         if not settings.REDIS_ENABLED:
             logger.debug(f"Redis 未启用，跳过批次事件发布: {event}({batch_id})")
             return
-        try:
-            if self._event_client is None:
-                from antcode_core.infrastructure.redis.streams import StreamClient
+        if self._event_client is None:
+            from antcode_core.infrastructure.redis.streams import StreamClient
 
-                self._event_client = StreamClient()
+            self._event_client = StreamClient()
+
+        # 先 opportunistic flush 一批到期的 retry，尽早追上进度
+        try:
+            await self._flush_pending_event_retries()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"flush retry queue 忽略异常: {exc}")
+
+        try:
             await self._event_client.xadd(
                 settings.scheduler_event_stream,
                 {
@@ -95,8 +243,17 @@ class CrawlBatchService(BaseService):
                 maxlen=settings.SCHEDULER_EVENT_MAXLEN,
             )
             logger.info(f"已发布批次事件: {event}({batch_id})")
-        except Exception as e:
-            logger.warning(f"发布批次事件失败: {event}({batch_id}): {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"发布批次事件失败，入 retry queue: {event}({batch_id}): {e}"
+            )
+            enqueued = await self._enqueue_event_retry(
+                event, batch_id, attempts=0, reason=str(e)
+            )
+            if not enqueued:
+                # retry 也入不了队（Redis 彻底挂了 or 超阈值），显式抛错让调
+                # 用方感知——总比默默把 DB 改了事件没发要好。
+                raise
 
     # =========================================================================
     # 批次创建

@@ -670,8 +670,20 @@ def _create_runtime_manager(config: Any) -> Any:
 
 
 def _create_executor(config: Any) -> Any:
-    """创建执行器"""
-    from antcode_worker.executor import ExecutorConfig, ProcessExecutor
+    """创建执行器。
+
+    P0-a5: 按 config.sandbox_mode 分派 ProcessExecutor(默认,兼容) 或
+    SandboxExecutor(生产推荐)。之前 wiring 硬编码 ProcessExecutor,导致
+    SandboxExecutor 虽定义但从不被使用。
+    """
+    import shlex
+
+    from antcode_worker.executor import (
+        ExecutorConfig,
+        ProcessExecutor,
+        SandboxConfig,
+        SandboxExecutor,
+    )
 
     max_concurrent = getattr(config, "max_concurrent_tasks", 5)
     default_timeout = getattr(config, "task_timeout", 3600)
@@ -689,6 +701,48 @@ def _create_executor(config: Any) -> Any:
         enforce_rlimit=enforce_rlimit,
         default_max_open_files=max_open_files,
         default_max_processes=max_processes,
+    )
+
+    sandbox_mode = str(getattr(config, "sandbox_mode", "process") or "process").strip().lower()
+    if sandbox_mode == "sandbox":
+        # 解析可选的外接沙箱命令(如 firejail / bwrap)
+        sandbox_command_str = str(getattr(config, "sandbox_command", "") or "").strip()
+        sandbox_command_list: list[str] | None = None
+        if sandbox_command_str:
+            try:
+                sandbox_command_list = shlex.split(sandbox_command_str)
+            except ValueError:
+                logger.warning(
+                    "P0-a5: sandbox_command 无法解析为 shell 参数,忽略: %r",
+                    sandbox_command_str,
+                )
+                sandbox_command_list = None
+
+        sandbox_config = SandboxConfig(
+            enabled=True,
+            network_isolated=bool(getattr(config, "sandbox_network_isolated", False)),
+            fs_isolated=True,
+            sandbox_command=sandbox_command_list,
+        )
+        logger.info(
+            "P0-a5: 使用 SandboxExecutor (sandbox_mode=sandbox, "
+            "sandbox_command={}, network_isolated={})",
+            sandbox_command_list,
+            sandbox_config.network_isolated,
+        )
+        return SandboxExecutor(config=exec_config, sandbox_config=sandbox_config)
+
+    if sandbox_mode not in ("process", ""):
+        logger.warning(
+            "P0-a5: 未知的 sandbox_mode={!r},回退 process",
+            sandbox_mode,
+        )
+
+    logger.warning(
+        "P0-a5: sandbox_mode=process,子进程与 Worker 主进程同 UID + 同网络 "
+        "namespace + 共享 FS 视图,**不是真隔离**。生产建议:配置 "
+        "WORKER_SANDBOX_MODE=sandbox 并可选 WORKER_SANDBOX_COMMAND='firejail "
+        "--private --net=none',或部署到独立容器/VM。"
     )
     return ProcessExecutor(exec_config)
 

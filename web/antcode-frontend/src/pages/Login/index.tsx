@@ -8,30 +8,14 @@ import { AuthHandler } from '@/utils/authHandler'
 import { STORAGE_KEYS } from '@/utils/constants'
 import { validationRules } from '@/utils/validators'
 import Logger from '@/utils/logger'
-import SecureStorage from '@/utils/crypto'
 import { useBrandingStore } from '@/stores/brandingStore'
 import type { LoginRequest } from '@/types'
 import styles from './Login.module.css'
 
-const isPrintableText = (value: string): boolean => {
-  if (!value) {
-    return false
-  }
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i)
-    if (code < 32 || code > 126) {
-      return false
-    }
-  }
-  return true
-}
-
+// P1-07: 已移除 SecureStorage import 与 isValidRememberedPassword —— 密码不再持久化,
+// 相关"加密"是 XOR + 公开设备指纹派生 key,无法抵御 XSS/扩展/日志系统。
 const isValidRememberedUsername = (value: string): boolean => {
   return /^[a-zA-Z0-9_]{3,32}$/.test(value)
-}
-
-const isValidRememberedPassword = (value: string): boolean => {
-  return value.length >= 4 && value.length <= 128 && isPrintableText(value)
 }
 
 // 登录页面专用主题配置，覆盖深色主题的输入框样式
@@ -64,44 +48,42 @@ const Login: React.FC = () => {
       return undefined
     }
 
-    // 读取并自动填充记住的凭据
+    // P1-07: 只自动填用户名,**不再持久化密码**。
+    // 密码用 XOR + 公开设备指纹派生 key "加密"没有任何真正安全性,
+    // XSS/扩展/日志系统均可离线还原,直接删除该行为。
     const rememberMe = localStorage.getItem(STORAGE_KEYS.REMEMBER_ME) === 'true'
     if (!rememberMe) {
       return undefined
     }
 
-    const username = (SecureStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || '').trim()
-    const password = SecureStorage.getItem(STORAGE_KEYS.REMEMBER_PASSWORD) || ''
+    // 一次性清理历史密码存储(升级前的用户仍可能有残留)
+    localStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
+    localStorage.removeItem('remember_password')  // 兜底清老 key
 
-    const rememberedValid =
-      isValidRememberedUsername(username) &&
-      isValidRememberedPassword(password)
+    const username = (localStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || '').trim()
 
-    if (!rememberedValid) {
+    if (!isValidRememberedUsername(username)) {
       localStorage.removeItem(STORAGE_KEYS.REMEMBER_ME)
-      SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_USERNAME)
-      SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
+      localStorage.removeItem(STORAGE_KEYS.REMEMBER_USERNAME)
       return undefined
     }
 
     const setFormValues = () => {
-      const touched = form.isFieldsTouched(['username', 'password'], true)
+      const touched = form.isFieldsTouched(['username'], true)
       if (touched) {
         return
       }
 
-      const currentValues = form.getFieldsValue(['username', 'password']) as {
+      const currentValues = form.getFieldsValue(['username']) as {
         username?: string
-        password?: string
       }
       const currentUsername = (currentValues.username || '').trim()
-      const currentPassword = currentValues.password || ''
 
-      if ((currentUsername && currentUsername !== username) || (currentPassword && currentPassword !== password)) {
+      if (currentUsername && currentUsername !== username) {
         return
       }
 
-      form.setFieldsValue({ username, password, remember: true })
+      form.setFieldsValue({ username, remember: true })
     }
 
     setFormValues()
@@ -113,16 +95,16 @@ const Login: React.FC = () => {
 
   const handleSubmit = async (values: LoginRequest & { remember: boolean }) => {
     try {
-      // 处理记住我功能
+      // P1-07: 记住我 = 只记用户名,**不记密码**
       if (values.remember) {
         localStorage.setItem(STORAGE_KEYS.REMEMBER_ME, 'true')
-        SecureStorage.setItem(STORAGE_KEYS.REMEMBER_USERNAME, values.username)
-        SecureStorage.setItem(STORAGE_KEYS.REMEMBER_PASSWORD, values.password)
+        localStorage.setItem(STORAGE_KEYS.REMEMBER_USERNAME, values.username)
       } else {
         localStorage.removeItem(STORAGE_KEYS.REMEMBER_ME)
-        SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_USERNAME)
-        SecureStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
+        localStorage.removeItem(STORAGE_KEYS.REMEMBER_USERNAME)
       }
+      // 无论选没选记住我,一律清理历史密码存储
+      localStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
 
       await login({ username: values.username.trim(), password: values.password })
       navigate(AuthHandler.getRedirectPath(), { replace: true })
