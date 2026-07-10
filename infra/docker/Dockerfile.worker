@@ -99,6 +99,25 @@ RUN groupadd --gid 1000 appgroup && \
 # 从构建阶段复制虚拟环境
 COPY --from=builder /app/.venv /app/.venv
 
+# 安装 Playwright Chromium + 系统依赖（root 权限,先于 USER appuser 切换）
+# --with-deps 会拉 apt-get 系统包(fonts / libs),arm64/amd64 均自适应
+# rule.engine=playwright/render、js_click、infinite_scroll 任务必需
+RUN . /app/.venv/bin/activate && \
+    playwright install --with-deps chromium && \
+    rm -rf /var/lib/apt/lists/*
+
+# Playwright 默认把浏览器装到 /root/.cache/ms-playwright(root HOME),
+# 但运行时是 appuser,需要复制或让 appuser 也能读到。这里直接把缓存搬到
+# 全局位置并让 appuser 可读。
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN mkdir -p /opt/ms-playwright && \
+    if [ -d /root/.cache/ms-playwright ]; then \
+        cp -a /root/.cache/ms-playwright/. /opt/ms-playwright/ && \
+        rm -rf /root/.cache/ms-playwright; \
+    fi && \
+    chown -R appuser:appgroup /opt/ms-playwright && \
+    chmod -R a+rX /opt/ms-playwright
+
 # 复制应用代码
 COPY --chown=appuser:appgroup packages/antcode_core/src/antcode_core /app/packages/antcode_core/src/antcode_core
 COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /app/packages/antcode_contracts/src/antcode_contracts

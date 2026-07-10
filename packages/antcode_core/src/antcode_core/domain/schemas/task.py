@@ -7,7 +7,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from antcode_core.domain.models.enums import (
     DispatchStatus,
@@ -40,29 +40,32 @@ class TaskCreateRequest(BaseModel):
     execution_strategy: ExecutionStrategy | None = Field(None, description="执行策略")
     specified_worker_id: str | None = Field(None, description="指定执行 Worker ID")
 
-    @field_validator("cron_expression")
-    @classmethod
-    def validate_cron(cls, v, info):
-        values = info.data
-        if values.get("schedule_type") == ScheduleType.CRON and not v:
-            raise ValueError("Cron expression is required for cron schedule type")
-        return v
+    @model_validator(mode="after")
+    def _validate_trigger_fields(self):
+        """跨字段校验:根据 schedule_type 强制要求对应触发器字段,并对 cron 语法做即时试构造。
 
-    @field_validator("interval_seconds")
-    @classmethod
-    def validate_interval(cls, v, info):
-        values = info.data
-        if values.get("schedule_type") == ScheduleType.INTERVAL and not v:
-            raise ValueError("Interval seconds is required for interval schedule type")
-        return v
+        用 field_validator 时,如果字段本身缺失(比如请求根本没带 cron_expression),
+        对应 validator 不会执行,导致非法请求可以落库。改成 model_validator(after)
+        确保无论字段是否出现都能触发校验。
+        """
+        if self.schedule_type == ScheduleType.CRON:
+            if not self.cron_expression:
+                raise ValueError("CRON 任务必须提供 cron_expression")
+            # 立刻用 APScheduler 试构造一次 CronTrigger 验证语法,
+            # 让非法 cron 在 schema 层就 422,而不是等到落库后 add_job 才 400。
+            try:
+                from apscheduler.triggers.cron import CronTrigger
 
-    @field_validator("scheduled_time")
-    @classmethod
-    def validate_scheduled_time(cls, v, info):
-        values = info.data
-        if values.get("schedule_type") == ScheduleType.DATE and not v:
-            raise ValueError("Scheduled time is required for date schedule type")
-        return v
+                CronTrigger.from_crontab(self.cron_expression)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(f"非法 cron 表达式: {e}") from e
+        elif self.schedule_type == ScheduleType.INTERVAL:
+            if not self.interval_seconds:
+                raise ValueError("INTERVAL 任务必须提供 interval_seconds")
+        elif self.schedule_type == ScheduleType.DATE:
+            if not self.scheduled_time:
+                raise ValueError("DATE 任务必须提供 scheduled_time")
+        return self
 
 
 class TaskUpdateRequest(BaseModel):
@@ -83,6 +86,19 @@ class TaskUpdateRequest(BaseModel):
 
     execution_strategy: ExecutionStrategy | None = Field(None)
     specified_worker_id: str | None = Field(None)
+
+    @model_validator(mode="after")
+    def _validate_cron_syntax(self):
+        """更新时若传了 cron_expression,也立刻用 CronTrigger 试构造一次,
+        避免非法 cron 落到 DB 后 reschedule_job 才炸出 500。"""
+        if self.cron_expression:
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+
+                CronTrigger.from_crontab(self.cron_expression)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(f"非法 cron 表达式: {e}") from e
+        return self
 
 
 class TaskResponse(BaseModel):

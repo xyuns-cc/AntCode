@@ -222,7 +222,14 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         api_key = metadata.get(self.API_KEY_HEADER)
         worker_id = metadata.get(self.WORKER_ID_HEADER)
 
+        # P0-a1: API Key 认证必须显式指定 X-Worker-ID,不再从 key 前缀构造
+        # fake worker_id;这样任何"只给 key 不给 worker_id"的调用都会被拒。
         if api_key:
+            if not worker_id:
+                return AuthResult(
+                    success=False,
+                    error="API Key 认证必须提供 X-Worker-ID header",
+                )
             result = await self._authenticate_api_key(api_key, worker_id)
             if result.success:
                 return result
@@ -252,13 +259,20 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             return AuthResult(success=False, error="API Key 为空")
 
         # 使用自定义验证器
+        # P0-a1: 严格要求 worker_id 参与绑定,不再对无 worker_id 的调用做兜底。
+        # 上层 _authenticate 已在 API Key 分支预先校验 worker_id 非空,这里
+        # 二次防御(直接绕过入口调用本方法的路径也不会失守)。
+        if not worker_id:
+            return AuthResult(success=False, error="API Key 认证缺少 X-Worker-ID")
+
         if self._api_key_validator:
             try:
+                # 自定义验证器返回 True 时仍严格绑定客户端声明的 worker_id
                 is_valid = self._api_key_validator(api_key)
                 if is_valid:
                     return AuthResult(
                         success=True,
-                        worker_id=worker_id or f"worker-{api_key[:8]}",
+                        worker_id=worker_id,
                         auth_method="api_key",
                     )
                 return AuthResult(success=False, error="无效的 API Key")
@@ -266,7 +280,8 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 logger.exception(f"API Key 验证异常: {e}")
                 return AuthResult(success=False, error="API Key 验证失败")
 
-        # 默认验证：尝试从 antcode_core 验证
+        # 默认验证:调 antcode_core 的 verify_api_key,它会把 api_key 与
+        # public_id=worker_id 联合过滤,严格绑定
         try:
             from antcode_core.common.security import verify_api_key
 
@@ -274,7 +289,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             if is_valid:
                 return AuthResult(
                     success=True,
-                    worker_id=worker_id or f"worker-{api_key[:8]}",
+                    worker_id=worker_id,
                     auth_method="api_key",
                 )
             return AuthResult(success=False, error="无效的 API Key")
@@ -307,20 +322,27 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 logger.exception(f"JWT 验证异常: {e}")
                 return AuthResult(success=False, error="JWT 验证失败")
 
-        # 默认验证：调用 antcode_core 的 JWTAuth.verify_token，
-        # 强制校验 exp + token_type=access，不再走 decode_token(verify_exp=False) 路径。
+        # 默认验证:调 antcode_core JWTAuth.verify_token,**强制 expected_class="worker"**。
+        # P0-a1: 只接受 payload token_class="worker" 的 JWT;普通 Web access token 会被拒。
+        # 这样任何"拿 Web JWT 冒充 Worker"的调用都在 JWT 层就拒掉,不到 mTLS 兜底。
         try:
             from antcode_core.common.security.auth import jwt_auth
 
             try:
-                token_data = jwt_auth.verify_token(token, expected_type="access")
+                token_data = jwt_auth.verify_token(
+                    token,
+                    expected_type="access",
+                    expected_class="worker",
+                )
             except Exception as verify_exc:  # noqa: BLE001 - HTTPException / AuthError 都归为无效
-                logger.warning(f"JWT 校验失败: {verify_exc}")
-                return AuthResult(success=False, error="无效或过期的 JWT token")
+                logger.warning(f"Worker JWT 校验失败: {verify_exc}")
+                return AuthResult(success=False, error="无效的 Worker JWT token")
 
-            worker_id = getattr(token_data, "username", None) or (
-                str(getattr(token_data, "user_id", "") or "") or None
-            )
+            # Worker token 里 username 已由 verify_token 设为 worker_id;为防
+            # 万一,严格取 username 字段
+            worker_id = getattr(token_data, "username", None)
+            if not worker_id:
+                return AuthResult(success=False, error="Worker JWT 缺少 worker_id")
             return AuthResult(
                 success=True,
                 worker_id=worker_id,

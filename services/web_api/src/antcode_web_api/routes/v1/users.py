@@ -23,7 +23,7 @@ from antcode_core.domain.schemas import (
     UserUpdateRequest,
 )
 from antcode_core.domain.schemas.common import PaginationInfo
-from antcode_core.domain.schemas.user import UserRoleUpdateRequest
+from antcode_core.domain.schemas.user import AdminUserRoleUpdateRequest
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
 from tortoise.exceptions import IntegrityError
@@ -191,19 +191,43 @@ async def get_user_detail(user_id: str, current_user: TokenData = Depends(get_cu
 )
 async def set_user_role(
     user_id: str,
-    body: UserRoleUpdateRequest,
+    body: AdminUserRoleUpdateRequest,
     http_request: Request,
     _admin: User = Depends(require_role(UserRole.SUPER_ADMIN)),
 ):
-    """仅 SUPER_ADMIN 调用；专用于角色变更，自动同步 is_admin。"""
+    """仅 SUPER_ADMIN 调用；专用于角色变更，自动同步 is_admin。
+
+    强制要求 ``old_role`` + ``new_role`` 显式传参，路由层校验 ``old_role`` 与
+    DB 当前 role 一致（防 stale UI），并在审计日志里同时留下 old/new 快照，
+    使任何提权/降权动作都留痕。
+    """
     target = await user_service.get_user_by_public_id(user_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
 
     try:
-        target.role = UserRole(body.role)
+        new_role_enum = UserRole(body.new_role)
+        old_role_enum = UserRole(body.old_role)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="role 取值非法")
+
+    current_role_value = target.role.value if hasattr(target.role, "value") else str(target.role)
+    if old_role_enum.value != current_role_value:
+        # 与 DB 现值不一致 → 说明客户端拿到的是过期快照，拒绝以避免误改
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"old_role 与当前 role 不一致：期望 {current_role_value}，收到 {old_role_enum.value}",
+        )
+
+    # 防止 SUPER_ADMIN 把自己降级导致失去唯一超管
+    if target.id == _admin.id and new_role_enum != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="超级管理员不能通过该接口降级自己",
+        )
+
+    old_is_admin = target.is_admin
+    target.role = new_role_enum
     # User.save() 会按新 role 自动同步 is_admin
     await target.save(update_fields=["role", "is_admin"])
     await user_service._invalidate_user_cache(target.id)
@@ -215,8 +239,11 @@ async def set_user_role(
         target_username=target.username,
         operator_id=_admin.id,
         ip_address=http_request.client.host if http_request.client else None,
+        old_value={"role": old_role_enum.value, "is_admin": old_is_admin},
         new_value={"role": target.role.value, "is_admin": target.is_admin},
-        description=f"修改用户角色: {target.username} -> {target.role.value}",
+        description=(
+            f"修改用户角色: {target.username} {old_role_enum.value} -> {target.role.value}"
+        ),
     )
     return success(_build_user_response(target), message="角色已更新")
 
@@ -228,7 +255,16 @@ async def update_user(
     http_request: Request,
     current_user: TokenData = Depends(get_current_user),
 ):
-    """更新用户信息"""
+    """更新用户资料（用户名 / 邮箱 / 启用状态）。
+
+    安全约束：
+    - Schema 已经通过 ``extra="forbid"`` 拒绝 ``role``/``is_admin``/``password``
+      等权限或凭证字段——请求里带这些字段会直接被 Pydantic 以 422 拦截。
+    - 普通 ``admin`` **不能**修改其他 admin/super_admin 的资料，只有 super_admin
+      才能修改管理员账户（普通 admin 仅能改自己 + 改普通用户）。
+    - 角色变更请走 ``POST /users/{id}/role``，密码变更请走
+      ``POST /users/change-password`` 或 ``PUT /users/{id}/reset-password``。
+    """
     current_user_obj = await user_service.get_user_by_id(current_user.user_id)
     if not current_user_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前用户不存在")
@@ -237,20 +273,24 @@ async def update_user(
     if not target_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
 
-    if not current_user_obj.is_admin and current_user_obj.id != target_user.id:
+    is_self = current_user_obj.id == target_user.id
+    if not current_user_obj.is_admin and not is_self:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
-    if request.is_admin is not None and not await verify_super_admin(current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有超级管理员可以修改管理员权限")
-    if request.new_password and current_user_obj.id != target_user.id and not current_user_obj.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权修改其他用户密码")
-    if request.new_password and current_user_obj.id == target_user.id and not request.old_password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="修改自己的密码必须提供当前密码")
+
+    # 关键防线：admin 不能横向修改其他 admin/super_admin 的资料，只有 super_admin 才行。
+    # 这堵住了「admin 通过通用更新接口踩点管理员账号」的场景。
+    if not is_self and target_user.is_admin and not await verify_super_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有超级管理员可以修改管理员账户",
+        )
 
     old_snapshot = {
         "username": target_user.username,
         "email": target_user.email,
         "is_active": target_user.is_active,
         "is_admin": target_user.is_admin,
+        "role": target_user.role.value if hasattr(target_user.role, "value") else str(target_user.role),
     }
 
     try:
@@ -261,11 +301,11 @@ async def update_user(
             "email": user.email,
             "is_active": user.is_active,
             "is_admin": user.is_admin,
-            "password_updated": bool(request.new_password),
+            "role": user.role.value if hasattr(user.role, "value") else str(user.role),
         }
 
         username_changed = old_snapshot["username"] != new_snapshot["username"]
-        operator_username = user.username if current_user_obj.id == user.id else current_user_obj.username
+        operator_username = user.username if is_self else current_user_obj.username
 
         description = f"更新用户信息: {old_snapshot['username']}"
         if username_changed:
@@ -297,7 +337,7 @@ async def update_user(
 @router.put(
     "/{user_id}/password",
     response_model=BaseResponse,
-    summary="修改用户密码",
+    summary="修改用户密码（需当前密码，仅本人）",
     tags=["用户管理"],
 )
 async def update_user_password(
@@ -305,7 +345,20 @@ async def update_user_password(
     request: UserPasswordUpdateRequest,
     current_user: TokenData = Depends(get_current_user),
 ):
-    """修改用户密码"""
+    """修改用户密码。
+
+    该端点**仅允许用户改自己的密码**，并强制校验当前密码。管理员/超管
+    重置他人密码请走 ``PUT /users/{id}/reset-password``（需 super_admin），
+    以此避免「普通 admin 拿着任意 old_password 就能改超管密码」的提权路径。
+    """
+    target_user = await user_service.get_user_by_public_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    if target_user.id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅可修改自己的密码；如需重置他人密码请使用 reset-password 接口",
+        )
     try:
         await user_service.update_user_password(user_id, request, current_user.user_id)
         return success(None, message="密码修改成功")

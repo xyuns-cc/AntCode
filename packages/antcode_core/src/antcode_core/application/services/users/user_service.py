@@ -288,13 +288,25 @@ class UserService:
 
         return result
 
+    # 通用更新接口允许写入的字段白名单——权限相关的 role/is_admin 以及
+    # 凭证相关的 password 必须走各自的独立端点，绝不允许从这里透传。
+    _UPDATABLE_FIELDS: frozenset[str] = frozenset({"username", "email", "is_active"})
+
     async def update_user(self, user_id, request):
-        """更新用户（支持 public_id 和内部 id）"""
+        """更新用户（支持 public_id 和内部 id）。
+
+        安全约束：只处理 ``_UPDATABLE_FIELDS`` 白名单里的字段。即便调用方
+        (或未来某个 schema 演进) 把 ``role``/``is_admin``/``new_password``
+        塞进 payload，也会在这里被静默丢弃 —— 单点防线，避免 setattr 走漏。
+        """
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
 
-        update_data = request.model_dump(exclude_unset=True)
+        raw_data = request.model_dump(exclude_unset=True)
+        # 白名单过滤：任何未在白名单里的字段（含 role/is_admin/old_password/
+        # new_password 等敏感字段）都拒绝写入。
+        update_data = {k: v for k, v in raw_data.items() if k in self._UPDATABLE_FIELDS}
 
         new_username = update_data.get("username")
         if new_username and new_username != user.username:
@@ -309,21 +321,7 @@ class UserService:
                 raise IntegrityError("邮箱已存在")
 
         for field, value in update_data.items():
-            if field in {"old_password", "new_password"}:
-                continue
             setattr(user, field, value)
-
-        old_password = update_data.get("old_password")
-        new_password = update_data.get("new_password")
-        if new_password:
-            if old_password and not user.verify_password(old_password):
-                raise ValueError("当前密码错误")
-
-            is_valid, error_msg = validate_password_strength(new_password)
-            if not is_valid:
-                raise ValueError(error_msg)
-
-            user.set_password(new_password)
 
         await user.save()
         await self._invalidate_user_cache(user.id)

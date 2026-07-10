@@ -17,6 +17,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import ujson
 from loguru import logger
@@ -27,6 +28,26 @@ IS_MACOS = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
 
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/+=:~\\-\\[\\]\\(\\),<>!#]*$")
+
+# 环境名白名单：字母/数字/点/下划线/连字符，长度 1-64
+# 严格限制以防止路径遍历攻击 (../.. 等)
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _validate_env_name(name: str) -> str:
+    """
+    校验环境名合法性，防止路径遍历攻击。
+
+    合法的 env_name 必须只包含 [A-Za-z0-9._-]，长度 1-64。
+    禁止 "." / ".." / 空字符串 / 含分隔符或空白 / 超长字符串。
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"非法环境名: {name!r}")
+    if name in {".", ".."}:
+        raise ValueError(f"非法环境名: {name!r}")
+    if not _ENV_NAME_PATTERN.match(name):
+        raise ValueError(f"非法环境名: {name!r}")
+    return name
 
 
 @dataclass
@@ -125,10 +146,19 @@ class UVManager:
         return self._locks[key]
 
     def _get_venv_path(self, env_name: str) -> str:
-        """获取虚拟环境路径"""
+        """获取虚拟环境路径（含名称白名单 + realpath 越界校验）"""
         if not self.venvs_dir:
             raise RuntimeError("venvs_dir 未设置")
-        return os.path.join(self.venvs_dir, env_name)
+
+        _validate_env_name(env_name)
+
+        base = Path(self.venvs_dir).resolve()
+        target = (base / env_name).resolve()
+        # env_name 必须解析为 venvs_dir 的直接子目录，防止符号链接或异常拼接越界
+        if target.parent != base:
+            raise ValueError(f"非法环境路径（越界）: {env_name!r}")
+
+        return str(target)
 
     def _get_python_executable(self, venv_path: str) -> str:
         """获取虚拟环境中的 Python 可执行文件路径"""
@@ -200,6 +230,7 @@ class UVManager:
 
     async def get_env(self, env_name: str) -> dict | None:
         """获取虚拟环境详情"""
+        _validate_env_name(env_name)
         envs = await self.list_envs()
         return next((e for e in envs if e["name"] == env_name), None)
 
@@ -210,6 +241,7 @@ class UVManager:
         description: str | None = None,
     ) -> dict:
         """更新虚拟环境元数据（manifest）"""
+        _validate_env_name(env_name)
         lock = self._get_lock(f"env:{env_name}")
         async with lock:
             venv_path = self._get_venv_path(env_name)
@@ -271,6 +303,7 @@ class UVManager:
             packages: 要安装的包列表
             created_by: 创建人用户名
         """
+        _validate_env_name(env_name)
         lock = self._get_lock(f"env:{env_name}")
         async with lock:
             venv_path = self._get_venv_path(env_name)
@@ -323,6 +356,7 @@ class UVManager:
 
     async def delete_env(self, env_name: str) -> bool:
         """删除虚拟环境"""
+        _validate_env_name(env_name)
         lock = self._get_lock(f"env:{env_name}")
         async with lock:
             venv_path = self._get_venv_path(env_name)
@@ -330,8 +364,14 @@ class UVManager:
             if not os.path.exists(venv_path):
                 return False
 
+            # rmtree 前二次校验：解析后的路径必须仍是 venvs_dir 的直接子目录
+            base = Path(self.venvs_dir).resolve()
+            target = Path(venv_path).resolve()
+            if target.parent != base:
+                raise ValueError(f"拒绝删除越界路径: {venv_path}")
+
             try:
-                shutil.rmtree(venv_path)
+                shutil.rmtree(str(target))
                 logger.info(f"虚拟环境删除成功: {env_name}")
                 return True
             except Exception as e:
@@ -340,6 +380,7 @@ class UVManager:
 
     async def install_packages(self, env_name: str, packages: list[str], upgrade: bool = False) -> dict:
         """安装包到虚拟环境"""
+        _validate_env_name(env_name)
         self._validate_packages(packages)
         lock = self._get_lock(f"env:{env_name}")
         async with lock:
@@ -372,6 +413,7 @@ class UVManager:
 
     async def uninstall_packages(self, env_name: str, packages: list[str]) -> dict:
         """从虚拟环境卸载包"""
+        _validate_env_name(env_name)
         self._validate_packages(packages)
         lock = self._get_lock(f"env:{env_name}")
         async with lock:
@@ -402,6 +444,7 @@ class UVManager:
 
     async def list_packages(self, env_name: str) -> list[dict]:
         """列出虚拟环境中已安装的包"""
+        _validate_env_name(env_name)
         venv_path = self._get_venv_path(env_name)
 
         if not os.path.exists(venv_path):
@@ -483,3 +526,7 @@ class UVManager:
 
 # 全局实例
 uv_manager = UVManager()
+
+
+# 公开的名称白名单校验入口，供 API 层复用
+validate_env_name = _validate_env_name

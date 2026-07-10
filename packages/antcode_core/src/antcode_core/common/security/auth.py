@@ -167,11 +167,21 @@ class JWTAuth:
             token_type=token_type,
         )
 
-    def verify_token(self, token: str, expected_type: str | None = "access") -> TokenData:
+    def verify_token(
+        self,
+        token: str,
+        expected_type: str | None = "access",
+        expected_class: str | None = "web",
+    ) -> TokenData:
         """验证令牌
 
-        默认 ``verify_exp=True``、``verify_type=True``;调用方若需放宽必须
-        显式传 ``expected_type=None``,**不允许跳过过期校验**。
+        默认 ``verify_exp=True``、``verify_type=True``、``verify_class=True``。
+        调用方若需放宽必须显式传 ``expected_type=None`` / ``expected_class=None``,
+        **不允许跳过过期校验**。
+
+        P0-a1: token_class 用于隔离 Web 用户会话(``web``)与 Worker 凭据(``worker``),
+        Gateway 侧强制 ``expected_class="worker"``,防止普通 Web access JWT 冒充 Worker。
+        为向后兼容,payload 里没有 ``token_class`` 字段时视为 ``"web"``。
         """
         try:
             # 显式强制启用过期校验,杜绝 verify_exp=False 旁路
@@ -181,9 +191,6 @@ class JWTAuth:
                 algorithms=[self.algorithm],
                 options={"verify_exp": True, "require": ["exp"]},
             )
-            user_id, username = payload.get("user_id"), payload.get("username")
-            if not user_id or not username:
-                raise AUTH_ERROR
             token_type = payload.get("token_type")
             if expected_type:
                 if token_type:
@@ -191,6 +198,31 @@ class JWTAuth:
                         raise AUTH_ERROR
                 elif expected_type != "access":
                     raise AUTH_ERROR
+
+            # P0-a1: 强制校验 token_class,隔离 web / worker 凭据。
+            # payload 无 token_class 时向后兼容为 "web"。
+            if expected_class:
+                actual_class = payload.get("token_class", "web")
+                if actual_class != expected_class:
+                    raise AUTH_ERROR
+
+            # Worker token 走独立分支:worker_id 从 payload 取,不使用 user_id/username
+            if payload.get("token_class") == "worker":
+                worker_id = payload.get("worker_id") or payload.get("sub")
+                if not worker_id:
+                    raise AUTH_ERROR
+                return TokenData(
+                    user_id=0,  # worker token 不对应 DB user_id
+                    username=str(worker_id),
+                    is_admin=False,
+                    role="worker",
+                    exp=datetime.fromtimestamp(payload["exp"]),
+                )
+
+            # 常规 Web token 分支
+            user_id, username = payload.get("user_id"), payload.get("username")
+            if not user_id or not username:
+                raise AUTH_ERROR
             return TokenData(
                 user_id=user_id,
                 username=username,
@@ -202,6 +234,27 @@ class JWTAuth:
             raise TOKEN_EXPIRED_ERROR
         except (jwt.InvalidTokenError, jwt.DecodeError):
             raise AUTH_ERROR
+
+    def create_worker_token(
+        self,
+        worker_id: str,
+        expires_delta: timedelta | None = None,
+    ) -> str:
+        """P0-a1: 签发专用于 Worker <-> Gateway 认证的 JWT。
+
+        payload 里 ``token_class="worker"`` + ``worker_id=...``,不携带用户身份信息;
+        Gateway ``_authenticate_jwt`` 强制要求 ``expected_class="worker"``,
+        拒绝任何 Web access token 冒充 Worker。
+        """
+        expire = datetime.utcnow() + (expires_delta or timedelta(days=90))
+        payload = {
+            "sub": worker_id,
+            "worker_id": worker_id,
+            "token_class": "worker",
+            "token_type": "access",
+            "exp": expire,
+        }
+        return jwt.encode(payload, self._get_secret(), algorithm=self.algorithm)
 
 
 jwt_auth = JWTAuth()

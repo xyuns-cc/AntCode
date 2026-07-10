@@ -78,10 +78,11 @@ async def _resolve_ws_token(ticket: str | None, token: str | None) -> str:
 
         redis = await get_redis_client()
         key = f"{_WS_TICKET_PREFIX}{ticket}"
-        raw = await redis.get(key)
+        # P1-08: 原子消费票据，避免并发下两次 get 到同一条 → 重放。
+        # redis-py 5+ 提供 async getdel()；GET + DEL 拆两步会有 TOCTOU 窗口。
+        raw = await redis.getdel(key)
         if not raw:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="票据无效或已过期")
-        await redis.delete(key)  # 一次性
         user_id = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         # 重新签发短时 JWT 喂给下游 connect()，避免改动 websocket_log_service 内部签名校验
         user = await User.get_or_none(id=int(user_id))

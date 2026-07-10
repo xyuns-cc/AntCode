@@ -33,7 +33,8 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv sync --all-packages
+        # ruff 在 [project.optional-dependencies].dev,不加 --dev 就装不上 → ruff step 会挂
+        run: uv sync --all-packages --dev
 
       - name: Run ruff check
         run: uv run ruff check .
@@ -59,15 +60,21 @@ jobs:
         run: uv sync --all-packages --dev
 
       - name: Run bandit security scan
-        run: uv run bandit -r packages/ services/ -f json -o bandit-report.json || true
+        # bandit 找到 HIGH/HIGH 会 exit 1；靠 continue-on-error 让报告继续生成,
+        # 真正阻断 PR 的判定在下一个 step 的 fail_on_high_vulns.py 里完成。
+        # 不再用 `|| true`：scanner 自身 crash (schema 破 / OOM) 时报告文件不存在,
+        # 让 CI 直接挂,避免"扫描失败 = 无风险"的 fail-open 反模式。
+        run: uv run bandit -r packages/ services/ -f json -o bandit-report.json
+        continue-on-error: true
 
       - name: Block on HIGH severity bandit findings
         run: python scripts/fail_on_high_vulns.py bandit-report.json --tool bandit
 
       - name: Run pip-audit (deps CVE scan)
-        run: |
-          uv pip install pip-audit
-          uv run pip-audit --format=json --output=pip-audit-report.json || true
+        # pip-audit 检测到 CVE 会 exit 1；同上,靠 continue-on-error 让报告落盘,
+        # 判定交给 fail_on_high_vulns.py。scanner 崩掉时报告文件缺失 → 下一步 fail-closed。
+        run: uv run pip-audit --format=json --output=pip-audit-report.json
+        continue-on-error: true
 
       - name: Block on HIGH/CRITICAL pip-audit findings
         run: python scripts/fail_on_high_vulns.py pip-audit-report.json --tool pip-audit
