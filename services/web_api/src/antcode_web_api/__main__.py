@@ -41,14 +41,19 @@ def main():
         )
         raise SystemExit(1)
 
-    # 使用配置文件中的主机和端口
-    uvicorn.run(
-        "antcode_web_api.app:app",
-        host=settings.BIND_HOST,
-        port=settings.SERVER_PORT,
-        reload=settings.SERVER_RELOAD,
-        log_config=LOGGING_CONFIG,
-    )
+    # workers>1 和 reload 互斥（reload 需要单进程持有 socket + inotify watcher）
+    # dev 场景保持 reload=True + workers=1；生产 workers=SERVER_WORKERS
+    run_kwargs: dict = {
+        "host": settings.BIND_HOST,
+        "port": settings.SERVER_PORT,
+        "log_config": LOGGING_CONFIG,
+    }
+    if settings.SERVER_WORKERS > 1:
+        run_kwargs["workers"] = settings.SERVER_WORKERS
+    else:
+        run_kwargs["reload"] = settings.SERVER_RELOAD
+
+    uvicorn.run("antcode_web_api.app:app", **run_kwargs)
 
 
 if __name__ == "__main__":
