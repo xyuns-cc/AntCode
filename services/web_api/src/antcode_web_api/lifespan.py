@@ -112,6 +112,14 @@ async def shutdown_services() -> None:
 
     await _run_with_timeout("stop_metrics_background", system_metrics_service.stop_background_update())
     await _run_with_timeout("http_client.stop", http_client.stop())
+    # P2-a1: drain 后台任务 (batch_delete / submit_background_task),避免 uvicorn 强杀
+    # 造成半写数据 / 未 flush 日志。放在 distributed_log / redis 关闭前,让后台任务先收尾。
+    try:
+        from antcode_core.common.utils.api_optimizer import async_processor
+
+        await _run_with_timeout("async_processor.shutdown", async_processor.shutdown(timeout=8.0))
+    except Exception as exc:
+        logger.warning(f"async_processor.shutdown 失败(非致命): {exc}")
     await _run_with_timeout("shutdown_distributed_log", _shutdown_distributed_log())
     await _run_with_timeout("shutdown_log_cleanup", _shutdown_log_cleanup())
     await _run_with_timeout("shutdown_redis", _shutdown_redis())

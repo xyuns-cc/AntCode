@@ -290,6 +290,10 @@ def _create_transport(config: Any) -> Any:
     else:
         from antcode_worker.transport.gateway import GatewayConfig, GatewayTransport
 
+        # P2-20: worker_id 必须在 GatewayConfig 构造时就写入,后续
+        # deregister() 会读 ``_gateway_config.worker_id`` 来发 Deregister RPC。
+        # ``set_credentials`` 只是二次兜底(比如 api_key 后置注入的场景),
+        # 真正的 single source of truth 是构造参数里的 ``worker_id``。
         gateway_config = GatewayConfig(
             gateway_host=gateway_host,
             gateway_port=gateway_port,
@@ -302,6 +306,9 @@ def _create_transport(config: Any) -> Any:
         )
         transport = GatewayTransport(gateway_config=gateway_config)
         if worker_id:
+            # 显式再走一次 set_credentials,让 ``_gateway_config.worker_id``
+            # 一定与 wiring 拿到的 worker_id 保持一致(防御式,即使上面
+            # dataclass 构造有默认值覆盖也能纠正)。
             transport.set_credentials(worker_id=worker_id)
         return transport
 

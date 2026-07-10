@@ -149,9 +149,34 @@ class CrawlService extends BaseService {
     )
   }
 
-  // 导出：走浏览器下载
+  // 导出：走浏览器下载（历史 URL 拼接方式）
+  //
+  // P2-15: 保留只为兼容旧调用点，新代码请用 exportBatch()。
+  // window.open(exportBatchUrl(...)) 会绕过 axios 拦截器，Authorization
+  // 头不会带上 → 服务端 401。
   exportBatchUrl(batchId: string, format: 'json' | 'csv', limit = 10000): string {
     return `/api/v1/crawl/batches/${batchId}/export?format=${format}&limit=${limit}`
+  }
+
+  /**
+   * P2-15: 通过 axios 走 Bearer 认证下载导出文件，再本地触发下载。
+   *
+   * 原来 BatchList 直接 `window.open(exportBatchUrl(...))`，浏览器新标签页
+   * 不会带 axios 拦截器注入的 Authorization 头，登录用户导出永远 401。
+   * 这里改成 responseType: 'blob' 走鉴权拿字节流，再合成 <a download>
+   * 触发下载。
+   */
+  async exportBatch(
+    batchId: string,
+    format: 'json' | 'csv',
+    limit = 10000
+  ): Promise<void> {
+    // BaseService.downloadFile 已经封装了 blob 请求 + content-disposition
+    // 解析 + <a> 触发；这里直接复用，避免各页面再手写一遍下载胶水。
+    await this.downloadFile(
+      `/batches/${batchId}/export?format=${format}&limit=${limit}`,
+      `crawl-batch-${batchId}.${format}`
+    )
   }
 }
 

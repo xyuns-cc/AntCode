@@ -71,10 +71,31 @@ class Worker(BaseModel):
     metrics = fields.JSONField(null=True)
 
     # 认证信息
+    # DEPRECATED(P1-10): api_key / secret_key 明文列在迁移期保留,新代码请写 *_hash 列。
+    # 只读账号 dump 该表即可拿到全部凭证,后续 release 逐步清空明文列并移除。
     api_key = fields.CharField(max_length=64, null=True)
     secret_key = fields.CharField(max_length=128, null=True)
+    # P1-10: 认证不再依赖明文列——查询按 api_key_hash;写入同时落 hash + 明文(过渡期)
+    api_key_hash = fields.CharField(
+        max_length=128,
+        null=True,
+        db_index=True,
+        description="P1-10: SHA256(api_key) hex,新字段;旧 api_key 明文列在迁移期保留",
+    )
+    secret_key_hash = fields.CharField(
+        max_length=128,
+        null=True,
+        description="P1-10: SHA256(secret_key) hex,过渡期与明文列并存",
+    )
     # 轮换期间的旧 API Key（在 grace 期内仍然有效；过期后由 rotate/finalize 清理）
+    # DEPRECATED(P1-10): 同上,新代码请落 api_key_previous_hash
     api_key_previous = fields.CharField(max_length=64, null=True)
+    api_key_previous_hash = fields.CharField(
+        max_length=128,
+        null=True,
+        db_index=True,
+        description="P1-10: SHA256(api_key_previous) hex",
+    )
     api_key_previous_expires_at = fields.DatetimeField(null=True)
 
     # Direct 模式专属 Redis ACL 凭证（防止 Worker 间横向移动）

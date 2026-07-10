@@ -52,6 +52,9 @@ class GatewaySpiderDataSink:
         )
         self._last_flush = 0.0
         self._lock = asyncio.Lock()
+        # P2-02: 后台定时 flush 任务
+        self._flush_task: asyncio.Task | None = None
+        self._closing = False
 
     async def open(
         self,
@@ -79,6 +82,16 @@ class GatewaySpiderDataSink:
             f"secure={self._secure} run_id={run_id}"
         )
         self._last_flush = asyncio.get_event_loop().time()
+
+        # P2-02: 起后台定时 flush 任务。老实现只在 write_item 时按
+        # ``now - _last_flush >= flush_interval`` 触发 flush，慢速 spider
+        # 抓完最后 <batch_size 条后长时间空转，buffer 数据就滞留在内存里。
+        # 用独立 task 保证即使无新 item 进来也能按周期把 buffer 排出去。
+        self._closing = False
+        self._flush_task = asyncio.create_task(self._periodic_flush())
+        # 挂个 done_callback 吃掉未 await 的异常，避免 "Task exception was
+        # never retrieved" 噪音（真业务失败在 _flush 内部已 log）。
+        self._flush_task.add_done_callback(self._on_flush_task_done)
 
     def _build_item(
         self,
@@ -216,6 +229,40 @@ class GatewaySpiderDataSink:
             await self._restore_pending(pending_items, pending_meta)
             return False, 0
 
+    @staticmethod
+    def _on_flush_task_done(task: asyncio.Task) -> None:
+        """吃掉后台 task 未处理的异常，避免 asyncio warning。"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(f"gateway 后台 flush task 异常退出: {exc}")
+
+    async def _periodic_flush(self) -> None:
+        """P2-02: 后台按 ``_flush_interval_s`` 周期把 buffer 排出去。
+
+        - buffer 空 → 跳过（不发空 batch，不额外 RPC）
+        - buffer 非空 → 调 ``_flush()`` 走正常路径（含失败恢复）
+        - close() 会置 ``_closing=True`` 并 cancel 本 task，正常退出
+        """
+        while not self._closing:
+            try:
+                await asyncio.sleep(self._flush_interval_s)
+            except asyncio.CancelledError:
+                break
+            if self._closing:
+                break
+            try:
+                async with self._lock:
+                    has_data = bool(self._batch_items) or bool(self._pending_meta)
+                if has_data:
+                    await self._flush()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:  # pragma: no cover
+                # _flush 内部已经处理失败恢复；这里兜底防止 task 意外崩掉
+                logger.warning(f"gateway 周期 flush 失败: {exc}")
+
     async def _restore_pending(
         self,
         pending_items: list[Any],
@@ -242,11 +289,27 @@ class GatewaySpiderDataSink:
         **P1-27 修复**：调用方必须知道 close 是否真的把 buffer 排干净；旧版
         丢弃 ``_flush()`` 结果导致 pipeline 把 "还有 N 条没送出去" 当成成功。
 
+        **P2-02 修复**：先把后台 ``_periodic_flush`` task cancel 掉再做最终
+        flush；否则后台 task 与 close() 会并发抢 ``_flush()``，还可能在
+        channel 关闭后继续尝试发送导致 "Cannot invoke RPC on closed channel"
+        噪音日志。cancel 后 await 一次让它干净退出。
+
         Returns:
             ``(ok, remaining)``：
             - ok=True 且 remaining=0：全部落地成功
             - ok=False 或 remaining>0：有数据未成功送达，pipeline/CLI 需以失败计
         """
+        # P2-02: 先停后台 flush，避免与本次 final flush 抢锁 / channel
+        self._closing = True
+        if self._flush_task is not None and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except (asyncio.CancelledError, Exception):
+                # 已挂 done_callback 兜异常；这里等 task 落地即可
+                pass
+        self._flush_task = None
+
         if final_meta:
             await self.write_meta(final_meta)
         # flush 掉最后剩余的

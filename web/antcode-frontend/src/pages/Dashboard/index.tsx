@@ -81,9 +81,13 @@ const Dashboard: React.FC = memo(() => {
     }
     
     try {
+      // P2-22: /dashboard/metrics 之前会被打两次(getSystemMetrics 一次,
+      // getDashboardStats 内部又拉一次)。这里只发一次,把结果同时喂给
+      // getDashboardStats 和外层 systemMetrics state,保证并行度不下降。
+      const metricsPromise = dashboardService.getSystemMetrics()
       const [stats, metrics, workers, spider, trend] = await Promise.all([
-        dashboardService.getDashboardStats(),
-        dashboardService.getSystemMetrics(),
+        metricsPromise.then((m) => dashboardService.getDashboardStats(m)),
+        metricsPromise,
         workerService.getAggregateStats(),
         workerService.getClusterSpiderStats(),
         dashboardService.getHourlyTrend()

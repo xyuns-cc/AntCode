@@ -93,6 +93,21 @@ async def run_command(
 
         return CommandResult(exit_code=process.returncode or 0, stdout=stdout, stderr=stderr)
     except TimeoutError:
+        # P2-11: 超时后必须显式 kill + reap 子进程,否则 wait_for 只取消 await,
+        # 子进程仍在 OS 层继续运行 → 僵尸进程 / 端口占用 / 资源泄漏。
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        except Exception as kill_err:
+            logger.warning(f"kill 超时子进程失败: {kill_err}")
+        try:
+            # reap 避免 zombie;SIGKILL 后应快速返回,给 5s 上限
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            logger.warning(f"kill 后 process.wait() 仍超时,可能残留 zombie: {cmd_str}")
+        except Exception:
+            pass
         return CommandResult(exit_code=124, stdout="", stderr=f"命令超时: {cmd_str}")
     except FileNotFoundError:
         return CommandResult(exit_code=127, stdout="", stderr=f"命令未找到: {args[0]}")

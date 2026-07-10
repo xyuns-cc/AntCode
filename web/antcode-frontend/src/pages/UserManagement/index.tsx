@@ -308,22 +308,9 @@ const UserManagement: React.FC = () => {
     }
   }
 
-  // 踢下线（仅超级管理员）
-  const handleKickUser = async (userId: string) => {
-    try {
-      const response = await apiClient.post<ApiResponse<{ revoked_sessions: number }>>(`/api/v1/users/${userId}/kick`)
-      if (response.data.success) {
-        fetchUsers({
-          page: pagination.current,
-          size: pagination.pageSize,
-          sortField,
-          sortOrder
-        })
-      }
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '踢下线失败')
-    }
-  }
+  // P2-15: 踢下线（仅超级管理员）—— 后端 /users/{id}/kick 会话吊销接口尚未
+  // 上线，前端按钮已在渲染处禁用并加 tooltip 说明；等 session revocation
+  // API 就绪后把 handler 恢复即可（可参考 handleDeleteUser 的 apiClient 用法）。
 
   // 批量删除用户
   const handleBatchDelete = () => {
@@ -524,17 +511,20 @@ const UserManagement: React.FC = () => {
             改密
           </Button>
           {currentUser?.role === 'super_admin' && record.role !== 'super_admin' && String(record.id) !== String(currentUser?.id) && (
-            <Popconfirm
-              title="确认踢下线"
-              description={`确定要踢下线用户 "${record.username}" 吗？`}
-              onConfirm={() => handleKickUser(record.id)}
-              okText="确定"
-              cancelText="取消"
-            >
-              <Button type="link" size="small" danger icon={<LogoutOutlined />}>
+            // P2-15: 后端 /users/{id}/kick 会话吊销接口尚未实现，直接点击一定 404。
+            // 保留按钮位置便于日后接回，但禁用并加 tooltip 说明；等后端补齐
+            // session revocation API 后再放开 handleKickUser 逻辑。
+            <Tooltip title="该功能待实现（后端会话吊销接口尚未上线）">
+              <Button
+                type="link"
+                size="small"
+                danger
+                icon={<LogoutOutlined />}
+                disabled
+              >
                 踢下线
               </Button>
-            </Popconfirm>
+            </Tooltip>
           )}
           {String(record.id) !== String(currentUser?.id) && (
             <Popconfirm

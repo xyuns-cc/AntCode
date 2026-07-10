@@ -25,6 +25,17 @@ Redis key:
 
 **注意**：本 pipeline **在 AntCodeRedisPipeline 之前**执行（priority 较小），
 命中即 DropItem，Redis stream 不会写入重复项。
+
+**P2-01 修复**：老实现是 ``SISMEMBER`` 判存 + 由 RedisPipeline 在 xadd 成功
+后再 ``SADD`` 提交占位（两阶段），并发同 digest 的两条 item 都过 SISMEMBER
+→ 都写 stream，去重击穿；且 gateway 模式下 sink 没有 ``_redis`` 属性，SADD
+静默失效。修复思路：直接用 ``SADD`` 返回值判存（1 = 新增，0 = 已存在），一
+次原子操作合并"判存 + 占位"；dedup pipeline 自己持有独立 Redis 连接（
+``ANTCODE_SPIDER_DEDUP_REDIS_URL`` / ``ANTCODE_SPIDER_REDIS_URL`` /
+``REDIS_URL`` 顺序回退），gateway 模式也能正常工作。
+
+**fail-open 策略**：Redis 连接失败或 SADD 抛异常时**放行 item**（不去重），
+避免 Redis 抖动导致全量 drop。命中 DropItem（真去重）例外，直接抛出。
 """
 
 from __future__ import annotations
@@ -61,7 +72,13 @@ class AntCodeDedupPipeline:
         return cls()
 
     async def open_spider(self, spider) -> None:
-        """R1-P2-15 (审查报告): 用 redis.asyncio 避免阻塞 asyncio reactor。"""
+        """初始化去重配置 + 独立 Redis 连接。
+
+        P2-01: dedup pipeline 需要自己的 Redis 连接（不能借 sink 的），因为
+        gateway 模式下 sink 不含 Redis。env 回退顺序：
+        ``ANTCODE_SPIDER_DEDUP_REDIS_URL`` > ``ANTCODE_SPIDER_REDIS_URL``
+        > ``REDIS_URL``。全都缺 → 去重跳过（不 fail 掉爬取）。
+        """
         rule = getattr(spider, "rule", {}) or {}
         cfg = rule.get("dedup_config") or {}
         if not cfg.get("enabled"):
@@ -72,9 +89,17 @@ class AntCodeDedupPipeline:
             logger.warning("dedup_config.enabled=True 但 fields 为空，去重跳过")
             return
 
-        url = os.environ.get("ANTCODE_SPIDER_REDIS_URL", "")
+        url = (
+            os.environ.get("ANTCODE_SPIDER_DEDUP_REDIS_URL", "").strip()
+            or os.environ.get("ANTCODE_SPIDER_REDIS_URL", "").strip()
+            or os.environ.get("REDIS_URL", "").strip()
+        )
         if not url:
-            logger.warning("ANTCODE_SPIDER_REDIS_URL 未配置，去重跳过")
+            logger.warning(
+                "dedup 需要的 Redis URL 未配置 "
+                "(ANTCODE_SPIDER_DEDUP_REDIS_URL / ANTCODE_SPIDER_REDIS_URL / "
+                "REDIS_URL 均缺失)，去重跳过"
+            )
             return
 
         try:
@@ -86,7 +111,6 @@ class AntCodeDedupPipeline:
             logger.warning(f"antcode_core.infrastructure.redis 不可用，去重跳过: {exc}")
             return
 
-        self._enabled = True
         self._fields = [str(f) for f in fields]
         self._scope = str(cfg.get("scope") or "project").lower()
         self._on_hit = str(cfg.get("on_hit") or "drop").lower()
@@ -97,7 +121,13 @@ class AntCodeDedupPipeline:
         )
         self._project_id = getattr(spider, "project_id", "") or ""
         self._run_id = getattr(spider, "run_id", "") or ""
-        self._redis = create_async_redis_client(url, decode_responses=True)
+        try:
+            self._redis = create_async_redis_client(url, decode_responses=True)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"dedup Redis 客户端创建失败，去重跳过: {exc}")
+            return
+
+        self._enabled = True
         logger.info(
             f"AntCodeDedupPipeline 就绪: fields={self._fields} "
             f"scope={self._scope} on_hit={self._on_hit} ttl_days={ttl_days} "
@@ -105,37 +135,51 @@ class AntCodeDedupPipeline:
         )
 
     async def process_item(self, item: dict[str, Any], spider):
+        """P2-01: 用 SADD 返回值原子判存 + 占位。
+
+        - ``SADD key digest`` 返回 1 = 新增（未命中，放行）
+        - 返回 0 = 已存在（命中，按 ``on_hit`` 处理）
+        - 一次 Redis round-trip 完成"判存 + 占位"，消除 check-then-act
+          竞态：并发同 digest 的两条 item，只会有一条拿到 added=1。
+
+        **fail-open**：SADD 抛异常时**放行 item**（不 dedup 优于 drop 所有
+        item）。命中 DropItem 例外。
+        """
         if not self._enabled or self._redis is None:
             return item
 
-        # R1-P1-10 (审查报告): 老实现"先 SADD 后 xadd" —— 一旦 xadd 失败或
-        # 进程崩溃，digest 已占位，重跑必被 DropItem 永久误杀。改成"两阶段"：
-        # (1) 本 pipeline 只做 SISMEMBER 判存 + fail-open（Redis 挂了放行）；
-        # (2) 把 digest 挂到 item 上，交给 RedisPipeline 在 xadd 成功**后**
-        # 通过 spider._defer_dedup_commit 提交 SADD。
-        # 这样重跑幂等且不会误杀。
-        self._checked_count += 1
-        key = self._set_key()
         digest = self._compute_digest(item)
-        try:
-            exists = bool(await self._redis.sismember(key, digest))
-        except Exception as exc:
-            logger.warning(f"dedup SISMEMBER 失败 (fail-open): {exc}")
+        if not digest:
             return item
 
-        if exists:
+        self._checked_count += 1
+        key = self._set_key()
+
+        try:
+            # SADD 返回新增的元素数：1 = 新增，0 = 已存在
+            added = int(await self._redis.sadd(key, digest))
+        except Exception as exc:
+            # P2-01: Redis 抖动/网络异常时 fail-open —— 放行本条 item，
+            # 避免整批 drop。真去重（added=0）走下面 DropItem，不吃这里。
+            logger.warning(f"dedup SADD 失败，放行 item (fail-open): {exc}")
+            return item
+
+        if added == 0:
+            # 已存在 → 命中
             self._hit_count += 1
             if self._on_hit == "drop":
                 raise DropItem(f"AntCodeDedup: 命中已抓 digest={digest[:12]}")
             logger.info(f"dedup hit but keep (on_hit=log): digest={digest[:12]}")
             return item
 
-        # 未命中 → 把 digest + key + TTL 挂到 item，让 RedisPipeline 在 xadd 成功后 SADD
-        item["_antcode_dedup"] = {
-            "key": key,
-            "digest": digest,
-            "ttl_seconds": self._ttl_seconds,
-        }
+        # 新增成功 → 顺手续 TTL（每次续，保证 project 级 SET 不会被卡死过期）
+        if self._ttl_seconds > 0:
+            try:
+                await self._redis.expire(key, self._ttl_seconds)
+            except Exception as exc:
+                # TTL 续期失败不影响本次 item，只是可能提前过期，忽略即可
+                logger.debug(f"dedup EXPIRE 失败 (忽略): {exc}")
+
         return item
 
     async def close_spider(self, spider) -> None:

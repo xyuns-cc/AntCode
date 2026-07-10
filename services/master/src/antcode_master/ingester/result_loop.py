@@ -55,7 +55,11 @@ class ResultLoop:
         group_name: str | None = None,
         consumer_name: str | None = None,
         poll_interval: float = 1.0,
-        block_ms: int = 5000,
+        # P2-06: block_ms 从 5000 下调到 1000 —— XREADGROUP block 期间
+        # asyncio 取消无法穿透到 Redis 端，5s block 会让 shutdown 阻塞 5s+;
+        # 多个 loop asyncio.gather 停机时累积拖延更明显。1s 兼顾空转开销与
+        # 关停响应速度。
+        block_ms: int = 1000,
         batch_size: int = 50,
         pending_check_interval: int = 30,
     ):

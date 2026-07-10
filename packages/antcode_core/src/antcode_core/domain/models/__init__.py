@@ -107,6 +107,9 @@ from antcode_core.domain.models.task_run import TaskRun
 # 用户模型
 from antcode_core.domain.models.user import User, UserRole, pwd_context
 
+# 用户会话模型 (P1-09: refresh token jti 存储)
+from antcode_core.domain.models.user_session import UserSession
+
 # Worker 节点模型
 from antcode_core.domain.models.worker import (
     UserWorkerPermission,
@@ -147,6 +150,8 @@ __all__ = [
     "User",
     "UserRole",
     "pwd_context",
+    # 用户会话模型
+    "UserSession",
     # 项目模型
     "Project",
     "ProjectFile",

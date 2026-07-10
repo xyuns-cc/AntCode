@@ -21,10 +21,17 @@ class AsyncProcessor:
         self.background_tasks: dict[str, asyncio.Task] = {}
 
     async def submit_background_task(self, task_id, coro, *args, **kwargs):
-        """提交后台任务"""
-        async with self.semaphore:
+        """提交后台任务
 
-            async def task_wrapper():
+        P2-a1 修复: `async with self.semaphore` 必须包在 wrapper 内部,
+        覆盖真正的执行期。之前实现是先 `async with self.semaphore`,再在其中
+        `create_task` 并立即返回, permit 在 create_task 返回后即释放,
+        wrapper 实际执行时并不持有 permit —— 信号量对并发无任何限制作用。
+        """
+
+        async def task_wrapper():
+            # 在 wrapper 内 acquire, permit 覆盖 coro 的整个执行期
+            async with self.semaphore:
                 try:
                     result = await coro(*args, **kwargs)
                     logger.debug(f"后台任务完成: {task_id}")
@@ -35,8 +42,66 @@ class AsyncProcessor:
                 finally:
                     self.background_tasks.pop(task_id, None)
 
-            self.background_tasks[task_id] = asyncio.create_task(task_wrapper())
-            return task_id
+        # 强引用挂在 self.background_tasks 上,避免被 GC 提前回收
+        self.background_tasks[task_id] = asyncio.create_task(task_wrapper())
+        return task_id
+
+    async def batch_delete(self, ids, delete_fn):
+        """批量并行删除,受 semaphore 限流。
+
+        P2-25 修复: 之前实现在 `create_task` 前 acquire permit, 与 submit_background_task
+        同款问题(permit 在返回 task 后立即释放, 并发无限制)。现在改为在 delete_one
+        内部 `async with self.semaphore`, 覆盖真正的 IO 期。
+
+        Args:
+            ids: 待删除项的 id 列表
+            delete_fn: 单项删除的 async 函数, 签名为 `async def(id) -> bool`
+
+        Returns:
+            (successes: list[id], failures: list[tuple[id, Exception | None]])
+            当 delete_fn 返回 False 表示业务层判定失败(如不存在), 此时 Exception 为 None。
+        """
+
+        async def delete_one(item_id):
+            async with self.semaphore:  # permit 覆盖真正的删除 IO
+                try:
+                    ok = await delete_fn(item_id)
+                    return item_id, bool(ok), None
+                except Exception as exc:
+                    logger.error(f"批量删除失败 [{item_id}]: {exc}")
+                    return item_id, False, exc
+
+        # 收集 task 强引用,防止 asyncio.create_task 结果被 GC (官方文档提醒)
+        tasks: list[asyncio.Task] = [asyncio.create_task(delete_one(i)) for i in ids]
+        if not tasks:
+            return [], []
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+
+        successes: list = []
+        failures: list = []
+        for item_id, ok, exc in results:
+            if ok:
+                successes.append(item_id)
+            else:
+                failures.append((item_id, exc))
+        return successes, failures
+
+    async def shutdown(self, timeout: float = 30.0):
+        """等待正在执行的后台任务收尾, 超时后 cancel。
+
+        应在应用 shutdown 事件里 await, 避免 uvicorn 直接退出时后台任务被
+        event loop 强杀, 造成半写数据 / 未 flush 日志。
+        """
+        tasks = list(self.background_tasks.values())
+        if not tasks:
+            return
+        logger.info(f"AsyncProcessor.shutdown: 等待 {len(tasks)} 个后台任务收尾 (timeout={timeout}s)")
+        _done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(f"AsyncProcessor.shutdown: {len(pending)} 个任务超时未完成, 发送 cancel")
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def get_task_status(self, task_id):
         """获取任务状态"""
