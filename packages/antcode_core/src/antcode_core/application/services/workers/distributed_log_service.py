@@ -98,9 +98,11 @@ class DistributedLogService:
         cache = self._log_cache.get(cache_key, [])
         if tail is not None and len(cache) >= tail:
             return cache[-tail:]
+        # postgres_task_log_service.list_entries 的 log_type 是 keyword-only，
+        # 位置参数会抛 TypeError；必须以 log_type=... 传参。
         entries = await postgres_task_log_service.list_entries(
             run_id,
-            log_type,
+            log_type=log_type,
             limit=max(tail or MAX_CACHE_LINES, MAX_CACHE_LINES),
         )
         lines = [entry.content for entry in entries]

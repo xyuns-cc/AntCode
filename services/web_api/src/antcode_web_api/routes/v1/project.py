@@ -986,29 +986,19 @@ async def duplicate_project(
         if project.type == ProjectType.FILE:
             detail = await relation_service.get_project_file_detail(project.id)
             if detail:
+                # P1-04: ProjectFile 迁移 20261216120000_remove_local_env_location
+                # 后仅剩 language/entry_point/runtime_config/environment_vars。
+                # 复制时若沿用旧的磁盘字段（file_path/original_name/file_size/
+                # file_type/file_hash/storage_type/is_compressed/...）会立刻
+                # AttributeError，复制 FILE 项目 100% 500。
+                # 源码复用统一走 project_sources + Git repository —— 这里不复
+                # 制源码绑定，交给用户在新项目里重新绑定（与 CODE 分支行为一致）。
                 await ProjectFile.create(
                     project_id=new_project.id,
-                    file_path=detail.file_path,
-                    original_file_path=detail.original_file_path,
-                    original_name=detail.original_name,
-                    file_size=detail.file_size,
-                    file_type=detail.file_type,
-                    file_hash=detail.file_hash,
+                    language=detail.language,
                     entry_point=detail.entry_point,
                     runtime_config=detail.runtime_config,
                     environment_vars=detail.environment_vars,
-                    storage_type=detail.storage_type,
-                    is_compressed=detail.is_compressed,
-                    compression_ratio=detail.compression_ratio,
-                    file_count=detail.file_count,
-                    additional_files=detail.additional_files,
-                    draft_manifest_key=detail.draft_manifest_key,
-                    draft_root_prefix=detail.draft_root_prefix,
-                    dirty=detail.dirty,
-                    dirty_files_count=detail.dirty_files_count,
-                    last_editor_id=detail.last_editor_id,
-                    last_edit_at=detail.last_edit_at,
-                    published_version=detail.published_version,
                 )
         elif project.type == ProjectType.RULE:
             detail = await relation_service.get_project_rule_detail(project.id)
@@ -1039,17 +1029,15 @@ async def duplicate_project(
         elif project.type == ProjectType.CODE:
             detail = await relation_service.get_project_code_detail(project.id)
             if detail:
+                # P1-04 关联修复:同 FILE 分支,ProjectCode model 已迁移删除
+                # content/version/content_hash/documentation/changelog 5 个字段。
+                # 只保留 model 现存可赋值字段,防止 duplicate CODE 项目 500。
                 await ProjectCode.create(
                     project_id=new_project.id,
-                    content=detail.content,
                     language=detail.language,
-                    version=detail.version,
-                    content_hash=detail.content_hash,
                     entry_point=detail.entry_point,
                     runtime_config=detail.runtime_config,
                     environment_vars=detail.environment_vars,
-                    documentation=detail.documentation,
-                    changelog=detail.changelog,
                 )
 
     response_data = create_project_response(new_project)
@@ -1337,16 +1325,19 @@ async def update_file_config(
     entry_point=Form(None),
     runtime_config=Form(None),
     environment_vars=Form(None),
-    source_type=Form(None),
-    git_url=Form(None),
-    git_branch=Form(None),
-    git_commit=Form(None),
-    git_subdir=Form(None),
-    git_credential_id=Form(None),
-    file=File(None),
     current_user_id=Depends(get_current_user_id),
 ):
-    """更新文件项目配置"""
+    """更新文件项目配置
+
+    P1-04: FILE 项目源码走 project_sources + Git repository（迁移
+    20261216120000_remove_local_env_location 拆掉了本地磁盘字段），
+    file-config 端点现在只负责 entry_point/runtime_config/environment_vars 三项。
+    旧的 source_type/git_url/git_branch/git_commit/git_subdir/git_credential_id/
+    file 六个 Form 参数 + 上传文件已随字段一并下线；请求源码变更请走
+    /projects/{id} 的统一更新接口（UnifiedProjectUpdateRequest 里的
+    repository_id/ref/subdir 字段）。这里保留三项 Form 是为了兼容仍以
+    multipart/form-data 提交的旧前端。
+    """
     try:
         # 获取项目详情
         project = await project_service.get_project_by_id(project_id, current_user_id)
@@ -1360,22 +1351,16 @@ async def update_file_config(
                 detail="只有文件项目才能更新文件配置",
             )
 
-        # 构建更新请求
+        # 构建更新请求 —— schema (extra="forbid") 只接受这 3 个字段
         request = ProjectFileUpdateRequest(
             entry_point=entry_point,
             runtime_config=runtime_config,
             environment_vars=environment_vars,
-            source_type=source_type,
-            git_url=git_url,
-            git_branch=git_branch,
-            git_commit=git_commit,
-            git_subdir=git_subdir,
-            git_credential_id=git_credential_id,
         )
 
-        # 更新文件配置
+        # 更新文件配置 —— service.update_file_config 签名是 (project_id, request, user_id)
         updated_project = await project_service.update_file_config(
-            project_id, request, current_user_id, file
+            project_id, request, current_user_id
         )
 
         if not updated_project:

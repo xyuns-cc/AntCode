@@ -736,16 +736,20 @@ async def _iter_batch_items(batch_id: str, limit: int | None = None):
     """
     import asyncio as _asyncio
 
-    from antcode_core.domain.models.task_run import TaskRun
+    from tortoise import Tortoise
+
     from antcode_core.infrastructure.redis.client import get_redis_client
     from antcode_core.infrastructure.redis.keys import RedisKeys
 
     keys = RedisKeys()
     client = await get_redis_client()
-    runs = await TaskRun.raw(
+    # Tortoise Model.raw(sql, using_db) 只接受 SQL 字符串和可选连接对象,
+    # 第二位参不是查询参数;必须走底层 conn.execute_query_dict 才能绑定 $1。
+    conn = Tortoise.get_connection("default")
+    runs = await conn.execute_query_dict(
         "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 "
         "ORDER BY id ASC",
-        batch_id,
+        [batch_id],
     )
     if not runs:
         return
@@ -776,7 +780,7 @@ async def _iter_batch_items(batch_id: str, limit: int | None = None):
     for i in range(0, len(runs), CONCURRENCY):
         bucket = runs[i : i + CONCURRENCY]
         results = await _asyncio.gather(
-            *(_read_run(r.run_id) for r in bucket), return_exceptions=True
+            *(_read_run(r["run_id"]) for r in bucket), return_exceptions=True
         )
         for run, entries in zip(bucket, results, strict=False):
             if isinstance(entries, BaseException):
@@ -784,7 +788,7 @@ async def _iter_batch_items(batch_id: str, limit: int | None = None):
             for entry_id, data in entries:
                 if limit is not None and yielded >= limit:
                     return
-                item = _decode_stream_entry(entry_id, data, run.run_id)
+                item = _decode_stream_entry(entry_id, data, run["run_id"])
                 if item is None:
                     continue
                 yielded += 1
@@ -911,6 +915,9 @@ async def get_system_metrics(
 
     需求: 9.1 - 查询系统指标时返回 Stream 长度、PEL 大小、去重集合大小等
     """
+    # P0-a2: 与 queues/alerts/summary 保持一致的项目所有权校验，
+    # 避免任意登录用户传他人 project_id 读他人系统指标（IDOR）。
+    await _verify_project_access(project_id, current_user)
     try:
         # 使用 metrics_service 收集系统指标
         system_metrics = await crawl_metrics_service.collect_system_metrics(project_id)

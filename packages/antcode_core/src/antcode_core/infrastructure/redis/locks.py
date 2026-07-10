@@ -13,7 +13,16 @@ import uuid
 
 from loguru import logger
 
+from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis.client import get_redis_client
+
+
+def _ns_prefix() -> str:
+    """P1-a14: 从配置读 REDIS_NAMESPACE,生产选主锁与 fencing token 都必须带此前缀,
+    否则多套部署共用同一 Redis DB 时会互相争主 / 抢 token,单调不变式被打破。
+    """
+    ns = (settings.REDIS_NAMESPACE or "antcode").strip().strip(":")
+    return ns or "antcode"
 
 
 class DistributedLock:
@@ -40,7 +49,14 @@ class DistributedLock:
             auto_renew: 是否自动续期
             renew_interval: 续期间隔（秒），默认为 ttl 的 1/3
         """
-        self.key = f"lock:{key}"
+        # P1-a14: 加 <namespace>:lock:<key> 前缀。避免两套不同 REDIS_NAMESPACE 的
+        # 部署共享同一 Redis DB 时抢同一把 leader 锁。若 key 已经带命名空间前缀
+        # (如已经手动传入 "antcode:lock:xxx")就不再重复。
+        _ns = _ns_prefix()
+        if key.startswith(f"{_ns}:"):
+            self.key = key if key.startswith(f"{_ns}:lock:") else f"{_ns}:lock:{key[len(_ns) + 1:]}"
+        else:
+            self.key = f"{_ns}:lock:{key}"
         self.ttl_seconds = ttl_seconds
         self.auto_renew = auto_renew
         self.renew_interval = renew_interval or (ttl_seconds / 3)
@@ -256,13 +272,18 @@ class FencingTokenManager:
 
     用于防止旧 leader 的写入覆盖新 leader 的决策。
     每次获取 leader 锁时生成单调递增的 token。
+
+    P1-a14: TOKEN_KEY 从类属性硬编码改为实例属性,构造时按 REDIS_NAMESPACE 拼前缀。
+    否则两套不同 namespace 但共用 Redis DB 的部署会共享同一 token 计数器,
+    "新 leader token 必然大于旧" 的单调不变式被打破,过期写会被误接受。
     """
 
-    TOKEN_KEY = "fencing:token:master"
-
-    def __init__(self):
+    def __init__(self, token_name: str = "master"):
         self._redis = None
         self._current_token: int | None = None
+        # 生成带 namespace 的 token key: <namespace>:fencing:token:<name>
+        _ns = _ns_prefix()
+        self.TOKEN_KEY = f"{_ns}:fencing:token:{token_name}"
 
     async def _get_client(self):
         """获取 Redis 客户端"""

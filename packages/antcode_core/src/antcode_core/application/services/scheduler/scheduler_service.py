@@ -99,8 +99,17 @@ class SchedulerService:
             raise
 
     async def create_task(self, task_data, project_type, user_id, internal_project_id=None, specified_worker_id=None):
-        """创建调度任务"""
-        # 使用传入的内部 project_id，或从 task_data 中获取
+        """创建调度任务
+
+        修复顺序:
+        1. 先构造 Trigger 验证 schedule 配置(schema 里已经试构造过,这里再保底,
+           覆盖 dict 直接传入 / schema 被绕过等情况)。
+        2. 在同一个 DB 事务里 Task.create + scheduler.add_job,
+           add_job 失败则事务回滚,避免"数据库里躺着一个永远调度不起来的任务"。
+        """
+        from tortoise.transactions import in_transaction
+
+        # 使用传入的内部 project_id,或从 task_data 中获取
         project_id = internal_project_id if internal_project_id is not None else task_data.project_id
 
         # 处理 Worker ID
@@ -114,20 +123,39 @@ class SchedulerService:
             else:
                 raise ValueError("指定执行 Worker 不存在")
 
-        # 创建任务
-        task = await Task.create(
-            **task_data.model_dump(exclude={"project_id", "specified_worker_id"}),
-            project_id=project_id,
-            task_type=project_type,
-            user_id=user_id,
-            specified_worker_id=worker_internal_id,
-        )
+        # 1) 先构造 Trigger 校验触发器字段/语法。_create_trigger 只读
+        #    schedule_type / cron_expression / interval_seconds / scheduled_time,
+        #    TaskCreateRequest 上都有,可以直接复用它做鸭子类型输入。
+        #    如果失败会抛 ValueError,由上层 API 层映射成 400/422,
+        #    此时 DB 尚未写入,不会残留脏任务。
+        try:
+            self._create_trigger(task_data)
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"任务触发器配置非法: {e}") from e
 
-        # 添加到调度器
-        if task.is_active:
-            await self.add_task(task)
+        # 2) 事务内 Task.create + add_job。add_job 失败会向上抛,
+        #    tortoise 的 in_transaction 会自动回滚 Task.create。
+        async with in_transaction() as conn:
+            task = await Task.create(
+                **task_data.model_dump(exclude={"project_id", "specified_worker_id"}),
+                project_id=project_id,
+                task_type=project_type,
+                user_id=user_id,
+                specified_worker_id=worker_internal_id,
+                using_db=conn,
+            )
 
-        # P2: 补齐响应组装依赖的外键 public_id/username 快照，避免
+            # 添加到调度器(注意:add_task 在非 master 角色下只发事件,
+            # 不会真的构造 trigger,所以上面 stub 那次试构造是唯一的语法兜底)。
+            if task.is_active:
+                try:
+                    await self.add_task(task)
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"任务 {task.name} 加入调度器失败,回滚事务: {e}")
+                    # 抛出让 in_transaction 回滚 Task.create
+                    raise ValueError(f"任务加入调度器失败: {e}") from e
+
+        # P2: 补齐响应组装依赖的外键 public_id/username 快照,避免
         # TaskResponseBuilder 里 _resolve_public_id 抛"响应对象缺少 project_public_id"。
         from antcode_core.application.services.users.user_service import (
             user_service,
@@ -294,7 +322,12 @@ class SchedulerService:
         return task
 
     async def update_task(self, task_id, task_data, user_id):
-        """更新任务（支持 public_id）"""
+        """更新任务（支持 public_id）
+
+        触发器相关字段(cron_expression / interval_seconds / scheduled_time)
+        变化时,必须同步 reschedule 内存中的 Job,否则 DB 已改但 APScheduler
+        还按老的 trigger 触发,DB 和内存不一致。
+        """
         # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
         task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
@@ -305,6 +338,15 @@ class SchedulerService:
         update_data = task_data.model_dump(exclude_unset=True)
         for field, value in update_data.items():
             setattr(task, field, value)
+
+        # 触发器字段变更,需要在保存前先试构造一次 Trigger 避免坏 cron 落库
+        trigger_fields = {"cron_expression", "interval_seconds", "scheduled_time"}
+        trigger_changed = bool(trigger_fields & update_data.keys())
+        if trigger_changed:
+            try:
+                self._create_trigger(task)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(f"任务触发器配置非法: {e}") from e
 
         await task.save()
 
@@ -319,9 +361,30 @@ class SchedulerService:
                 await self.add_task(task)
             else:
                 await self.remove_task(task.id)
+        elif trigger_changed and task.is_active and self._scheduler_enabled():
+            # is_active 没变但 trigger 变了 —— 必须 reschedule_job,
+            # 不能只改 DB;否则 APScheduler 还按老 trigger 触发。
+            await self.reschedule_task(task)
 
         logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
         return task
+
+    async def reschedule_task(self, task):
+        """用新的 trigger 更新 APScheduler 内存中已有的 Job。
+
+        如果 Job 不存在(比如任务之前 is_active=False 从未加入调度器),
+        则 fallback 到 add_task 走一次 add_job(replace_existing=True)。
+        """
+        if not self._scheduler_enabled():
+            await self._publish_event("task_changed", task.id)
+            return
+        trigger = self._create_trigger(task)
+        try:
+            self.scheduler.reschedule_job(str(task.id), trigger=trigger)
+            logger.info(f"任务 {task.name} 触发器已重建")
+        except JobLookupError:
+            logger.info(f"任务 {task.name} 之前未在调度器中,改为 add_job")
+            await self.add_task(task)
 
     async def delete_task(self, task_id, user_id):
         """删除任务（支持 public_id）"""

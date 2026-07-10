@@ -1,7 +1,6 @@
 """Worker 管理 API"""
 
 import asyncio
-import contextlib
 import hmac
 import json
 import os
@@ -555,6 +554,7 @@ redis_url: "{settings.REDIS_URL}"
     response_model=BaseResponse[dict],
     summary="断开 Worker",
     description="断开与 Worker 的连接",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def disconnect_worker(
     worker_id: str, current_user: TokenData = Depends(get_current_user)
@@ -942,8 +942,10 @@ async def register_direct_worker(
             detail=str(exc),
         ) from exc
     proof_key = direct_register_proof_key(request.worker_id)
+    # P1-08: 原子消费 Direct 注册证明，避免两个并发注册请求同时读到同一条 proof
+    # 之后各自成功。redis-py 5+ 的 async getdel() 一次 RTT 完成 GET+DEL。
     try:
-        stored_proof = await redis.get(proof_key)
+        stored_proof = await redis.getdel(proof_key)
     except Exception as exc:
         logger.warning(
             "Direct 注册读取 Redis 证明失败: worker_id={}, error={}",
@@ -957,32 +959,16 @@ async def register_direct_worker(
     if isinstance(stored_proof, (bytes, bytearray)):
         stored_proof = stored_proof.decode("utf-8")
     if not stored_proof or stored_proof != request.proof:
-        ttl = None
-        with contextlib.suppress(Exception):
-            ttl = await redis.ttl(proof_key)
         logger.warning(
-            "Direct 注册证明无效: worker_id={}, redis={}, exists={}, ttl={}",
+            "Direct 注册证明无效: worker_id={}, redis={}, exists={}",
             request.worker_id,
             _mask_redis_url(settings.REDIS_URL),
             bool(stored_proof),
-            ttl,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无效的 Direct 注册证明",
         )
-    try:
-        await redis.delete(proof_key)
-    except Exception as exc:
-        logger.warning(
-            "Direct 注册删除 Redis 证明失败: worker_id={}, error={}",
-            request.worker_id,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis 访问失败",
-        ) from exc
 
     try:
         worker, created = await worker_service.register_direct_worker(request)
@@ -1458,11 +1444,37 @@ async def dispatch_batch_to_worker(
     - batch_id: 批次ID (可选)
     - require_render: 是否需要渲染能力 (可选，默认false)
     """
+    from antcode_core.application.services.projects.project_service import project_service
     from antcode_core.application.services.workers import worker_task_dispatcher
 
     tasks = request.get("tasks")
     if not tasks or not isinstance(tasks, list):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务列表不能为空")
+
+    # P0-a2: 逐 task 按 owner 校验 project（与单条 dispatch_task_to_worker L1344 保持一致）
+    # 非本人/不存在均返回 404，避免 IDOR 探测存在性；缺 project_id 直接 400。
+    seen_project_ids: set = set()
+    for idx, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"tasks[{idx}] 必须是对象",
+            )
+        pid = task.get("project_id")
+        if not pid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"tasks[{idx}].project_id 不能为空",
+            )
+        if pid in seen_project_ids:
+            continue
+        proj = await project_service.get_project_by_id(pid, current_user.user_id)
+        if not proj:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"tasks[{idx}] 项目不存在",
+            )
+        seen_project_ids.add(pid)
 
     result = await worker_task_dispatcher.dispatch_batch(
         tasks=tasks,
@@ -1508,6 +1520,7 @@ async def get_worker_queue_status(
     response_model=BaseResponse[dict],
     summary="更新任务优先级",
     description="更新 Worker 队列中任务的优先级",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def update_worker_task_priority(
     worker_id: str,
@@ -1549,6 +1562,7 @@ async def update_worker_task_priority(
     response_model=BaseResponse[dict],
     summary="取消队列中的任务",
     description="取消 Worker 优先级队列中的任务",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def cancel_worker_queued_task(
     worker_id: str, task_id: str, current_user: TokenData = Depends(get_current_user)

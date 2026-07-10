@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from antcode_core.application.services.runtime import runtime_control_service
@@ -20,6 +21,21 @@ from antcode_web_api.routes.v1.runtime_models import (
 )
 
 runtime_router = APIRouter()
+
+# 环境名白名单：字母/数字/点/下划线/连字符，长度 1-64
+# 与 worker 侧 uv_manager._ENV_NAME_PATTERN 保持一致，防止路径遍历攻击
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _validate_env_name(env_name: str) -> str:
+    """API 边界：拒绝任何可能导致路径遍历的 env_name。"""
+    if not isinstance(env_name, str) or not env_name:
+        raise HTTPException(status_code=400, detail=f"非法环境名: {env_name!r}")
+    if env_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail=f"非法环境名: {env_name!r}")
+    if not _ENV_NAME_PATTERN.match(env_name):
+        raise HTTPException(status_code=400, detail=f"非法环境名: {env_name!r}")
+    return env_name
 
 
 @runtime_router.get(
@@ -66,6 +82,7 @@ async def create_env(
     scope = payload.scope.value
     python_version = payload.python_version
     env_name = resolve_env_name(scope, python_version, payload.env_name)
+    _validate_env_name(env_name)
     created_by = current_user.username if current_user else str(current_user_id)
 
     result = await runtime_control_service.create_env(
@@ -102,6 +119,7 @@ async def get_env_detail(
 ):
     """获取运行时环境详情"""
     _ = current_user
+    _validate_env_name(env_name)
     await ensure_worker_access(worker_id, current_user_id)
 
     result = await runtime_control_service.get_env(worker_id, env_name)
@@ -127,6 +145,7 @@ async def update_env_detail(
 ):
     """更新环境元数据"""
     _ = current_user
+    _validate_env_name(env_name)
     await ensure_worker_access(worker_id, current_user_id)
 
     result = await runtime_control_service.update_env(
@@ -155,6 +174,7 @@ async def delete_env(
 ):
     """删除运行时环境"""
     _ = current_user
+    _validate_env_name(env_name)
     await ensure_worker_access(worker_id, current_user_id)
 
     result = await runtime_control_service.delete_env(worker_id, env_name)
@@ -179,6 +199,7 @@ async def list_packages(
 ):
     """列出环境依赖"""
     _ = current_user
+    _validate_env_name(env_name)
     await ensure_worker_access(worker_id, current_user_id)
 
     result = await runtime_control_service.list_packages(worker_id, env_name)
@@ -204,6 +225,7 @@ async def install_packages(
 ):
     """安装依赖"""
     _ = current_user
+    _validate_env_name(env_name)
     await ensure_worker_access(worker_id, current_user_id)
     if not payload.packages:
         raise HTTPException(status_code=400, detail="必须提供依赖列表")
@@ -233,6 +255,7 @@ async def uninstall_packages(
 ):
     """卸载依赖"""
     _ = current_user
+    _validate_env_name(env_name)
     await ensure_worker_access(worker_id, current_user_id)
     if not payload.packages:
         raise HTTPException(status_code=400, detail="必须提供依赖列表")

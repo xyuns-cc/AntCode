@@ -62,34 +62,49 @@ class UserCreateRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    """用户更新请求"""
+    """通用用户更新请求。
+
+    安全约束：这是所有登录用户都能触达的通用更新接口，因此**严禁**在此暴露
+    权限相关或凭证相关字段。以下字段必须走各自的独立端点：
+
+    - ``role`` / ``is_admin``：必须走 super-admin-only 的 ``PATCH /users/{id}/role``
+      （载荷：:class:`AdminUserRoleUpdateRequest`）。
+    - ``password`` / ``new_password``：改自己密码走 ``POST /users/change-password``；
+      super-admin 给他人重置走 ``PUT /users/{id}/reset-password``。
+
+    使用 ``extra="forbid"`` 让 Pydantic 直接把带这些字段的请求以 422 拒掉，
+    实现深度防御（即便调用方漏检也不会被 setattr 到模型上）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     username: str | None = Field(None, min_length=3, max_length=50)
     email: str | None = Field(None, max_length=100)
     is_active: bool | None = None
-    is_admin: bool | None = None
-    role: str | None = Field(None, max_length=20)
-    old_password: str | None = Field(None, min_length=1)
-    new_password: str | None = Field(None, min_length=8)
+
+
+class AdminUserRoleUpdateRequest(BaseModel):
+    """专用于「改用户角色」的请求，仅 SUPER_ADMIN 可调。
+
+    必须同时显式传入 ``old_role`` 和 ``new_role``：
+    - ``old_role`` 用于乐观并发防护，避免 stale UI 触发意外提权/降权；
+    - 路由层会校验 ``old_role`` 与 DB 中的当前 role 一致。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    old_role: str = Field(..., max_length=20)
+    new_role: str = Field(..., max_length=20)
 
     @model_validator(mode="after")
-    def validate_password_update_fields(self) -> "UserUpdateRequest":
-        if self.old_password and not self.new_password:
-            raise ValueError("提供 old_password 时必须同时提供 new_password")
-        _validate_role_value(self.role)
-        _validate_role_admin_consistency(self.is_admin, self.role)
+    def validate_role_values(self) -> "AdminUserRoleUpdateRequest":
+        _validate_role_value(self.old_role)
+        _validate_role_value(self.new_role)
         return self
 
 
-class UserRoleUpdateRequest(BaseModel):
-    """专用于「改用户角色」的请求，仅 SUPER_ADMIN 可调。"""
-
-    role: str = Field(..., max_length=20)
-
-    @model_validator(mode="after")
-    def validate_role_value(self) -> "UserRoleUpdateRequest":
-        _validate_role_value(self.role)
-        return self
+# 兼容旧命名，避免下游引用突然断裂；新代码请直接用 AdminUserRoleUpdateRequest
+UserRoleUpdateRequest = AdminUserRoleUpdateRequest
 
 
 class UserPasswordUpdateRequest(BaseModel):
@@ -162,6 +177,7 @@ __all__ = [
     "UserLoginRequest",
     "UserCreateRequest",
     "UserUpdateRequest",
+    "AdminUserRoleUpdateRequest",
     "UserRoleUpdateRequest",
     "UserPasswordUpdateRequest",
     "UserAdminPasswordUpdateRequest",

@@ -389,8 +389,9 @@ class CrawlTestService(BaseService):
         SUCCESS/FAILED）。TaskRun 是 batch 派发时创建的，
         result_data.crawl_batch_id 关联到 batch。
         """
+        from tortoise import Tortoise
+
         from antcode_core.domain.models.enums import TaskStatus
-        from antcode_core.domain.models.task_run import TaskRun
 
         _run_terminal = {
             TaskStatus.SUCCESS,
@@ -420,17 +421,22 @@ class CrawlTestService(BaseService):
                 break
 
             # R1-P1-22: 优先看 TaskRun 终态（比 batch 状态更精细也更快）
-            # 用 raw SQL 走 JSONB where 下推：result_data->>'crawl_batch_id' = $1
-            matched = await TaskRun.raw(
-                "SELECT * FROM task_executions WHERE result_data->>'crawl_batch_id' = $1",
-                batch_id,
+            # 用参数化 raw SQL 走 JSONB where 下推：result_data->>'crawl_batch_id' = $1
+            # 注：Tortoise 的 Model.raw(sql, using_db) 只接受 SQL 字符串与
+            # 可选连接，不支持位置参数绑定，因此直接走底层 conn.execute_query_dict。
+            conn = Tortoise.get_connection("default")
+            matched = await conn.execute_query_dict(
+                "SELECT status FROM task_executions WHERE result_data->>'crawl_batch_id' = $1",
+                [batch_id],
             )
             if matched:
-                all_terminal = all(r.status in _run_terminal for r in matched)
+                all_terminal = all(TaskStatus(row["status"]) in _run_terminal for row in matched)
                 if all_terminal:
                     result = await self._collect_results(batch_id, project_id)
                     result.total_pages = len(matched)
-                    result.success_pages = sum(1 for r in matched if r.status == TaskStatus.SUCCESS)
+                    result.success_pages = sum(
+                        1 for row in matched if TaskStatus(row["status"]) == TaskStatus.SUCCESS
+                    )
                     result.failed_pages = result.total_pages - result.success_pages
                     result.success = result.failed_pages == 0
                     if not result.success:
@@ -491,16 +497,20 @@ class CrawlTestService(BaseService):
         # add_sample_data 全仓库零生产调用方，样本永远为空。真正的样本
         # 数据来自 scrapy 侧 AntCodeRedisPipeline 写入 spider:data stream。
         try:
-            from antcode_core.domain.models.task_run import TaskRun
+            from tortoise import Tortoise
+
             from antcode_core.infrastructure.redis.client import get_redis_client
             from antcode_core.infrastructure.redis.keys import RedisKeys
             from antcode_worker.plugins.spider.data.models import SpiderDataItem
             import json as _json
 
-            matched = await TaskRun.raw(
+            # Tortoise Model.raw 只接受 SQL + using_db，第二位参不是查询参数，
+            # 必须走底层 conn.execute_query_dict 才能真正绑定 $1。
+            conn = Tortoise.get_connection("default")
+            matched = await conn.execute_query_dict(
                 "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 "
                 "ORDER BY id DESC LIMIT 20",
-                batch_id,
+                [batch_id],
             )
             if matched:
                 keys = RedisKeys()
@@ -510,7 +520,7 @@ class CrawlTestService(BaseService):
                 for run in matched:
                     if len(samples) >= MAX_SAMPLES:
                         break
-                    stream_key = keys.spider_data_stream(run.run_id)
+                    stream_key = keys.spider_data_stream(run["run_id"])
                     entries = await client.xrange(stream_key, count=MAX_SAMPLES - len(samples))
                     for _, data in entries:
                         try:
