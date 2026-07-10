@@ -39,7 +39,13 @@ class CrawlBatchDispatcherService:
     """响应批次生命周期事件，把 seed URLs 派发到 worker。"""
 
     async def handle_batch_event(self, event: str, batch_id: str) -> None:
-        """事件入口。event ∈ {batch_started, batch_paused, batch_resumed, batch_cancelled}。"""
+        """事件入口。event ∈ {batch_started, batch_paused, batch_resumed, batch_cancelled}。
+
+        P1-14 (审查报告): 原实现 ``try/except`` 全吞后 return None，
+        ``scheduler_event_loop`` 就 ACK 掉消息，事件永久丢失但 DB 已改。
+        改为异常直接向上抛：由 ``scheduler_event_loop`` 的 XPENDING +
+        deliver_count 死信机制处理重试（默认 5 次后进死信）。
+        """
         if not batch_id:
             logger.warning(f"crawl batch 事件缺 batch_id: {event}")
             return
@@ -52,12 +58,10 @@ class CrawlBatchDispatcherService:
         if handler is None:
             logger.debug(f"crawl batch 事件未处理: {event}")
             return
-        try:
-            await handler(batch_id)
-        except Exception as exc:
-            logger.exception(
-                f"crawl batch 事件处理失败: event={event} batch_id={batch_id} err={exc}"
-            )
+        # NOTE: 不再 try/except 吞异常。让 scheduler_event_loop 感知失败以
+        # 触发 PEL 重投（未 ACK 消息 XPENDING 累计 deliver_count 超阈值后
+        # 才 ACK 进死信），保证事件"至少一次"而非"至多一次"。
+        await handler(batch_id)
 
     # ---------- start / resume ----------
 
@@ -165,12 +169,23 @@ class CrawlBatchDispatcherService:
         rule: "ProjectRule",
         url: str,
     ) -> bool:
-        """把单个 URL 作为一个 rule 任务派发。TaskRun.result_data 存 batch_id 用于关联。"""
+        """把单个 URL 作为一个 rule 任务派发。TaskRun.result_data 存 batch_id 用于关联。
+
+        P1-14 (审查报告): 派发流程做了 URL 幂等清理：
+        - 保持 ``TaskRun.create → dispatch`` 的原顺序（这样 worker 早期状态
+          回写有目标 TaskRun 可 update，避免竞态）。
+        - 但 dispatch **失败且补派入队也失败**时，改为 **删除刚建的 TaskRun**
+          （旧实现是 UPDATE status=FAILED），这样 ``_already_dispatched_urls``
+          不会再把这个 URL 当"已派发"，下次 ``batch_resumed`` 能重试。
+        - 外层 Exception 同理：清理孤儿 TaskRun，异常继续向上抛让 ingest
+          loop 走 PEL 重投。
+        """
         # 组装 rule dict（覆盖 target_url 为本次 URL）
         rule_dict = rule.to_dispatch_dict()
         rule_dict["target_url"] = url
 
         run_id = self._generate_run_id(batch.public_id)
+        task_run_created = False
         try:
             # 先建 TaskRun 占位（关联批次；task_id 留 0 表示 batch-issued）
             await TaskRun.create(
@@ -185,6 +200,7 @@ class CrawlBatchDispatcherService:
                 },
                 created_by=batch.user_id,
             )
+            task_run_created = True
 
             # 派发
             from antcode_core.application.services.workers import worker_task_dispatcher
@@ -240,17 +256,16 @@ class CrawlBatchDispatcherService:
                         attempts=0,
                         reason=err_msg,
                     )
-                except Exception as exc:
-                    logger.warning(f"入补派队列失败，直接置 FAILED: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"入补派队列失败: {exc}")
                     enqueued = False
 
                 if not enqueued:
-                    # 补派服务不可用或超阈值 → 老路径兜底
-                    await TaskRun.filter(run_id=run_id).update(
-                        status=TaskStatus.FAILED,
-                        end_time=datetime.now(UTC),
-                        error_message=err_msg,
-                    )
+                    # P1-14: 补派也不可用 → 删除刚建的 TaskRun 占位，让
+                    # ``_already_dispatched_urls`` 不再把这个 URL 视为已派发。
+                    # 下次 batch_resumed 能重派；避免旧实现里 FAILED 占位
+                    # 使 URL 永久跳过的"重放死锁"。
+                    await self._delete_task_run(run_id)
                     return False
                 # 已入补派队列：run 仍处于 PENDING/DISPATCHING，等 loop 重试
                 return True
@@ -259,7 +274,17 @@ class CrawlBatchDispatcherService:
             logger.exception(
                 f"batch URL 派发异常: batch_id={batch.public_id} url={url} err={exc}"
             )
+            # P1-14: 出异常且已建 TaskRun 时清孤儿，让 URL 可重派
+            if task_run_created:
+                await self._delete_task_run(run_id)
             return False
+
+    async def _delete_task_run(self, run_id: str) -> None:
+        """删除派发失败留下的 TaskRun 占位（吞掉删除异常，不影响主流程）。"""
+        try:
+            await TaskRun.filter(run_id=run_id).delete()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"删除失败 TaskRun 占位失败: run_id={run_id} err={exc}")
 
     async def _already_dispatched_urls(self, batch_id: str) -> set[str]:
         """幂等派发：读取该 batch 已有 TaskRun 的 seed_url 集合。"""

@@ -39,7 +39,16 @@ def _lock_key(username: str) -> str:
 
 
 async def check_ip_rate(ip: str) -> bool:
-    """True = 通过；False = 该 IP 已被限流。"""
+    """True = 通过；False = 该 IP 已被限流。
+
+    P1-06 契约:``ip`` **必须** 是经过受信代理白名单解析后的最终客户端 IP,
+    而不是 ``request.client.host`` 的 socket 对端地址。生产环境 Nginx / LB
+    的对端 IP 对所有用户都相同,如果直接拿 socket IP 做限流键,一个用户
+    很快就把整个入口的 IP 桶(默认 5/min)打爆,导致其他用户无法登录。
+    调用方(如 ``routes/v1/base.py:login``)应先用
+    ``antcode_web_api.middleware.middleware.get_client_ip`` 拿真实客户端 IP,
+    再传进来。此处不再回退到 ``request.client.host``,避免绕过白名单校验。
+    """
     if not ip:
         return True
     identifier = f"login:ip:{ip}"

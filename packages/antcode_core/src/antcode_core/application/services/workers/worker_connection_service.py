@@ -48,7 +48,9 @@ class WorkerConnectionService:
             existing.name = request.name
             existing.region = request.region
             existing.version = request.version
-            existing.status = WorkerStatus.ONLINE.value
+            # P1-33: MAINTENANCE 是运维态,重新注册不能把它翻回 ONLINE
+            if existing.status != WorkerStatus.MAINTENANCE.value:
+                existing.status = WorkerStatus.ONLINE.value
             existing.last_heartbeat = datetime.now()
             if request.metrics:
                 existing.metrics = request.metrics.model_dump()
@@ -129,7 +131,9 @@ class WorkerConnectionService:
                     worker.capabilities = request.capabilities.model_dump()
                 except Exception:
                     worker.capabilities = request.capabilities
-            worker.status = WorkerStatus.ONLINE.value
+            # P1-33: MAINTENANCE 是运维态,重复注册路径不能覆盖它
+            if worker.status != WorkerStatus.MAINTENANCE.value:
+                worker.status = WorkerStatus.ONLINE.value
             worker.last_heartbeat = datetime.now(UTC)
             await worker.save()
             return worker, created
@@ -229,7 +233,15 @@ class WorkerConnectionService:
         return {"success": False, "error": "心跳超时"}
 
     async def refresh_worker_status(self, worker: Worker) -> Worker | None:
-        """刷新 Worker 状态（基于心跳时间戳）"""
+        """刷新 Worker 状态（基于心跳时间戳）
+
+        P1-33: MAINTENANCE 是运维显式设置的目标态,心跳新鲜度检查不应覆盖它。
+        只在原状态不是 MAINTENANCE 时才做 ONLINE/OFFLINE 判定。
+        """
+        if worker.status == WorkerStatus.MAINTENANCE.value:
+            # 维护窗口内,只更新 last_heartbeat 的观测,不改 status
+            await worker.save()
+            return worker
         if not worker.last_heartbeat:
             worker.status = WorkerStatus.OFFLINE.value
         else:

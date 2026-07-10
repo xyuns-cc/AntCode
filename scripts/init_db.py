@@ -57,6 +57,51 @@ PERFORMANCE_INDEXES: list[tuple[str, str]] = [
             ON "crawl_batches" ("status", "created_at" DESC)
         """,
     ),
+    # P1-01: task_logs.event_id 的**部分唯一索引**。
+    # LogIngestLoop 走 ``INSERT ... ON CONFLICT ("event_id") WHERE
+    # "event_id" IS NOT NULL DO NOTHING``，PG 的 ON CONFLICT 推断需要索引
+    # 谓词与 INSERT WHERE 完全一致；用普通 UNIQUE 会无法命中推断。
+    # Tortoise 不支持声明部分唯一索引，故此处显式建。
+    (
+        "idx_task_logs_event_id_unique",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS "idx_task_logs_event_id_unique"
+            ON "task_logs" ("event_id")
+            WHERE "event_id" IS NOT NULL
+        """,
+    ),
+]
+
+# P1-01: 启动完成后必须存在的核心表清单。缺任何一张都属于灾难性 model
+# 漏声明（例如迁移 37 add_task_logs 消失后 task_logs 表不建的历史故障），
+# 必须在部署脚本里立刻 fail-fast，不能让服务带着"空日志页"上线。
+REQUIRED_TABLES: list[str] = [
+    "users",
+    "workers",
+    "worker_heartbeats",
+    "worker_events",
+    "worker_install_keys",
+    "scheduled_tasks",
+    "task_executions",
+    "task_logs",
+    "projects",
+    "project_files",
+    "project_rules",
+    "project_codes",
+    "project_sources",
+    "runtimes",
+    "project_runtime_bindings",
+    "crawl_batches",
+    "audit_logs",
+    "system_configs",
+    "git_credentials",
+    "git_repositories",
+    "source_artifacts",
+    "source_artifact_chunks",
+    "run_source_snapshots",
+    "worker_performance_history",
+    "spider_metrics_history",
+    "user_worker_permissions",
 ]
 
 
@@ -69,6 +114,43 @@ async def _check_env() -> None:
             ", ".join(missing),
         )
         sys.exit(1)
+
+
+async def _check_required_tables() -> None:
+    """校验核心表全部落地；缺一即 fail-fast。
+
+    历史 P1-01：迁移 37 add_task_logs 被删后没有对应 model，
+    ``generate_schemas`` 不建 task_logs 表，服务照常启动但日志页永远空。
+    这里在建表后立即 SELECT information_schema，让部署脚本 exit 1。
+    """
+    from antcode_core.infrastructure.db.tortoise import (
+        close_db,
+        get_default_tortoise_config,
+        init_db,
+    )
+    from tortoise import Tortoise
+
+    config = get_default_tortoise_config(service="web_api")
+    await init_db(config=config, service="web_api")
+    conn = Tortoise.get_connection("default")
+    missing: list[str] = []
+    for tbl in REQUIRED_TABLES:
+        rows = await conn.execute_query_dict(
+            "SELECT 1 AS ok FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = $1",
+            [tbl],
+        )
+        if not rows:
+            missing.append(tbl)
+    await close_db()
+    if missing:
+        logger.error(
+            "必要表未创建: {}. 请检查 antcode_core.domain.models 是否声明了对应 model，"
+            "或补写 SQL 迁移。",
+            ", ".join(missing),
+        )
+        raise RuntimeError(f"必要表缺失: {missing}")
+    logger.info("核心表校验通过（{} 张）", len(REQUIRED_TABLES))
 
 
 async def _generate_schemas() -> None:
@@ -172,6 +254,7 @@ async def main() -> None:
     logger.info("=== AntCode 数据库初始化 ===")
     logger.info("目标 DB: {}", os.environ["DATABASE_URL"].split("@")[-1])
     await _generate_schemas()
+    await _check_required_tables()
     await _create_performance_indexes()
     await _init_system_config()
     await _create_admin()

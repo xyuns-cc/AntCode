@@ -12,6 +12,7 @@ from datetime import datetime
 from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.expressions import Q
+from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.workers.worker_connection_service import (
     worker_connection_service,
@@ -229,27 +230,41 @@ class WorkerService:
         return worker
 
     async def delete_worker(self, worker_id) -> bool:
-        """删除 Worker（级联删除所有关联数据）"""
+        """删除 Worker（级联删除所有关联数据）
+
+        P1-20: 级联删除 + Worker.delete() 走同一事务;任一步骤失败则整体回滚,
+        Worker 不会残留在"半删"状态。
+        """
         worker = await self.get_worker_by_id(worker_id)
         if not worker:
             return False
 
-        # 级联删除所有关联数据
-        deleted_counts = await self._cascade_delete_worker_data(worker.id, worker.public_id)
-
-        # 删除 Worker
-        await worker.delete()
+        # 级联删除所有关联数据（含 Worker 自身），失败即抛出让上层感知
+        deleted_counts = await self._cascade_delete_worker_data(worker)
 
         logger.info(f"Worker 删除成功: {worker.name}, 级联删除: {deleted_counts}")
         return True
 
-    async def _cascade_delete_worker_data(self, worker_internal_id: int, worker_public_id: str) -> dict:
-        """级联删除 Worker 的所有关联数据"""
+    async def _cascade_delete_worker_data(self, worker: Worker) -> dict:
+        """级联删除 Worker 的所有关联数据（含 Worker 自身），单事务原子。
+
+        P1-20 修复要点:
+        - 全部子表操作 + Worker 自身 delete 放在同一 `in_transaction()` 内,
+          任一步骤异常会回滚,不会出现 "子表半删 / Worker 残留" 的状态。
+        - 补齐此前遗漏的关联字段:
+          * Project.bound_worker_id / runtime_worker_id (BigInt) → 解绑
+          * Project.worker_id (CharField, 存 public_id) → 解绑
+          * WorkerInstallKey.used_by_worker (public_id) → 删除历史 Key
+        - 未加真实 FK 之前,这些字段是"逻辑外键";
+          解绑而非删项目/任务,因为它们归用户所有,不该跟着 Worker 一起没。
+        """
         from antcode_core.domain.models import (
+            Project,
             ProjectRuntimeBinding,
             Runtime,
             UserWorkerPermission,
             WorkerHeartbeat,
+            WorkerInstallKey,
         )
         from antcode_core.domain.models.monitoring import (
             SpiderMetricsHistory,
@@ -258,6 +273,9 @@ class WorkerService:
         )
         from antcode_core.domain.models.task import Task
         from antcode_core.domain.models.task_run import TaskRun
+
+        worker_internal_id = worker.id
+        worker_public_id = worker.public_id
 
         deleted = {
             "heartbeats": 0,
@@ -269,42 +287,97 @@ class WorkerService:
             "performance_history": 0,
             "spider_metrics": 0,
             "events": 0,
+            "install_keys": 0,
+            "projects_unbound": 0,
+            "projects_runtime_unbound": 0,
+            "projects_worker_id_unbound": 0,
         }
 
         try:
-            # 1. 删除心跳记录
-            deleted["heartbeats"] = await WorkerHeartbeat.filter(worker_id=worker_internal_id).delete()
+            async with in_transaction():
+                # 1. 心跳记录
+                deleted["heartbeats"] = await WorkerHeartbeat.filter(
+                    worker_id=worker_internal_id
+                ).delete()
 
-            # 2. 删除用户 Worker 权限
-            deleted["permissions"] = await UserWorkerPermission.filter(worker_id=worker_internal_id).delete()
+                # 2. 用户 Worker 权限
+                deleted["permissions"] = await UserWorkerPermission.filter(
+                    worker_id=worker_internal_id
+                ).delete()
 
-            # 3. 删除 Worker 上的运行时及其绑定
-            runtimes = await Runtime.filter(worker_id=worker_internal_id).all()
-            if runtimes:
-                runtime_ids = [r.id for r in runtimes]
-                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(runtime_id__in=runtime_ids).delete()
-                deleted["runtimes"] = await Runtime.filter(id__in=runtime_ids).delete()
+                # 3. Worker 上的运行时及其绑定
+                runtime_ids = await Runtime.filter(
+                    worker_id=worker_internal_id
+                ).values_list("id", flat=True)
+                if runtime_ids:
+                    runtime_ids = list(runtime_ids)
+                    deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(
+                        runtime_id__in=runtime_ids
+                    ).delete()
+                    deleted["runtimes"] = await Runtime.filter(
+                        id__in=runtime_ids
+                    ).delete()
 
-            # 4. 删除 Worker 上的任务及执行记录
-            tasks = await Task.filter(specified_worker_id=worker_internal_id).all()
-            if tasks:
-                task_ids = [t.id for t in tasks]
-                deleted["task_executions"] = await TaskRun.filter(task_id__in=task_ids).delete()
-                deleted["tasks"] = await Task.filter(id__in=task_ids).delete()
+                # 4. 解绑项目上指向本 Worker 的字段(不删项目,项目归用户所有)
+                deleted["projects_unbound"] = await Project.filter(
+                    bound_worker_id=worker_internal_id
+                ).update(bound_worker_id=None)
+                deleted["projects_runtime_unbound"] = await Project.filter(
+                    runtime_worker_id=worker_internal_id
+                ).update(runtime_worker_id=None)
+                # Project.worker_id 是 CharField(存 public_id)
+                deleted["projects_worker_id_unbound"] = await Project.filter(
+                    worker_id=worker_public_id
+                ).update(worker_id=None)
 
-            # 5. 删除监控数据（使用 public_id，因为监控表的 worker_id 是字符串）
-            deleted["performance_history"] = await WorkerPerformanceHistory.filter(worker_id=worker_public_id).delete()
-            deleted["spider_metrics"] = await SpiderMetricsHistory.filter(worker_id=worker_public_id).delete()
-            deleted["events"] = await WorkerEvent.filter(worker_id=worker_public_id).delete()
+                # 5. Worker 上的任务及执行记录(specified_worker 语义是"绑死这台 Worker"
+                #    的任务,Worker 没了它们无处执行,与运行时绑定一起删是历史行为)
+                task_ids = await Task.filter(
+                    specified_worker_id=worker_internal_id
+                ).values_list("id", flat=True)
+                if task_ids:
+                    task_ids = list(task_ids)
+                    deleted["task_executions"] = await TaskRun.filter(
+                        task_id__in=task_ids
+                    ).delete()
+                    deleted["tasks"] = await Task.filter(
+                        id__in=task_ids
+                    ).delete()
 
+                # 5b. 其它历史 TaskRun.worker_id 指向本 Worker 的记录:
+                #     属于其它任务的执行痕迹,置空以保留任务历史(避免主键悬挂)。
+                await TaskRun.filter(worker_id=worker_internal_id).update(worker_id=None)
+
+                # 6. 监控数据(worker_id 是字符串 public_id)
+                deleted["performance_history"] = await WorkerPerformanceHistory.filter(
+                    worker_id=worker_public_id
+                ).delete()
+                deleted["spider_metrics"] = await SpiderMetricsHistory.filter(
+                    worker_id=worker_public_id
+                ).delete()
+                deleted["events"] = await WorkerEvent.filter(
+                    worker_id=worker_public_id
+                ).delete()
+
+                # 7. 补漏:安装 Key 记录(used_by_worker 存 public_id)
+                deleted["install_keys"] = await WorkerInstallKey.filter(
+                    used_by_worker=worker_public_id
+                ).delete()
+
+                # 8. 最后删 Worker 本体,同事务保证原子
+                await worker.delete()
         except Exception as e:
-            logger.error(f"级联删除 Worker 数据失败: {e}")
+            logger.error(f"级联删除 Worker 数据失败(事务已回滚): {e}")
             raise
 
         return deleted
 
     async def batch_delete_workers(self, worker_ids: list) -> dict:
-        """批量删除 Worker（级联删除所有关联数据）"""
+        """批量删除 Worker（级联删除所有关联数据）
+
+        P1-20: 每个 Worker 单独走一次原子事务;若级联失败,该 Worker 会被
+        保留(而非旧实现里"子表清了、Worker 却也一并删了"的坏状态)。
+        """
         # 批量解析 Worker ID（支持 public_id 和内部 ID 混合），避免 N+1 查询
         int_ids = []
         str_ids = []
@@ -329,27 +402,28 @@ class WorkerService:
                 "failed_ids": worker_ids,
             }
 
-        # 级联删除每个 Worker 的关联数据
-        total_deleted = {}
+        # 逐个原子级联删除:仅统计成功的
+        total_deleted: dict = {}
+        succeeded_public_ids: list[str] = []
         for worker in workers_to_delete:
             try:
-                deleted = await self._cascade_delete_worker_data(worker.id, worker.public_id)
+                deleted = await self._cascade_delete_worker_data(worker)
                 for key, count in deleted.items():
                     total_deleted[key] = total_deleted.get(key, 0) + count
+                succeeded_public_ids.append(worker.public_id)
             except Exception as e:
-                logger.error(f"级联删除 Worker {worker.name} 数据失败: {e}")
+                # 事务已回滚,Worker 仍在;下次可重试
+                logger.error(f"级联删除 Worker {worker.name} 数据失败,已回滚: {e}")
 
-        # 批量删除 Worker
-        internal_ids = [w.id for w in workers_to_delete]
-        deleted_count = await Worker.filter(id__in=internal_ids).delete()
+        success_count = len(succeeded_public_ids)
+        requested = set(str(x) for x in worker_ids)
+        succeeded_set = set(succeeded_public_ids)
+        failed_ids = [x for x in worker_ids if str(x) not in succeeded_set and str(x) in requested]
 
-        success_ids = [w.public_id for w in workers_to_delete]
-        failed_ids = list(set(worker_ids) - set(success_ids))
-
-        logger.info(f"批量删除 Worker: 成功{deleted_count}个, 级联删除: {total_deleted}")
+        logger.info(f"批量删除 Worker: 成功{success_count}个, 级联删除: {total_deleted}")
 
         return {
-            "success_count": deleted_count,
+            "success_count": success_count,
             "failed_count": len(failed_ids),
             "failed_ids": failed_ids,
         }

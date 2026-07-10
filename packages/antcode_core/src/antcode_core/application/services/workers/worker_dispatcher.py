@@ -930,8 +930,18 @@ class WorkerTaskDispatcher:
     # 已被 SourceBundleDispatchService 取代（见 dispatch_task 主流程）；此处不再保留兼容 shim。
 
     # U3 / #16: ready stream 上限,防止 Worker 长时间挂掉时 stream 无限增长。
-    # 用 ~10k entries(近似裁剪,XADD 内部 trim,实际值会大致在 10k 上下)。
+    # 用 ~10k entries(近似裁剪)。
+    #
+    # P1-19: 之前 XADD MAXLEN=N 会物理删除超出的历史 entry,与 consumer
+    # group ACK 游标无关——Worker 离线积压超过 MAXLEN 时,未 ACK 的老任务
+    # 会被静默删除。现改为:
+    #   1) XADD 不带 MAXLEN(避免撞未 ACK)
+    #   2) XADD 后 XPENDING 拿 group 最小未 ACK msg_id,XTRIM MINID
+    #      仅裁剪比它老的(即已全部 ACK 的)entry
+    #   3) 若 PEL 为空,退化为 MAXLEN(全量已消费,安全)
+    #   4) 未 ACK 数超 ALERT_THRESHOLD 立即告警,提示 Worker 长期离线/卡死
     READY_STREAM_MAXLEN = 10000
+    READY_STREAM_PENDING_ALERT_THRESHOLD = 8000
 
     async def _send_batch_to_queue(self, worker, tasks, batch_id):
         """写入 Redis Stream 分发批量任务
@@ -948,24 +958,29 @@ class WorkerTaskDispatcher:
 
         #16: 给 ready stream 加 ``maxlen`` 近似裁剪,防止 Worker 离线时
         stream 无限增长把 Redis 撑爆。
+
+        P1-19: 裁剪策略从"XADD MAXLEN=N"改成"XADD 后按 group 最小
+        未 ACK msg_id 做 XTRIM MINID",避免离线积压超阈值时静默删掉
+        未消费的任务(参见 ``_trim_ready_stream``)。
         """
         from antcode_core.infrastructure.redis.streams import StreamClient
 
+        # E5: consumer group 名带 namespace 前缀，与 worker 侧对齐
+        from antcode_core.infrastructure.redis.control_plane import (
+            worker_consumer_group,
+        )
+
         stream = StreamClient()
         stream_key = task_ready_stream(worker.public_id)
+        group_name = worker_consumer_group()
 
         # U3: 写入前确保 consumer group 存在,start_id="0" 让起得晚的
         # Worker 也能 deliver 到历史消息。StreamClient.xgroup_create 已
         # 内置 BUSYGROUP 幂等处理。
         try:
-            # E5: consumer group 名带 namespace 前缀，与 worker 侧对齐
-            from antcode_core.infrastructure.redis.control_plane import (
-                worker_consumer_group,
-            )
-
             await stream.xgroup_create(
                 stream_key,
-                group_name=worker_consumer_group(),
+                group_name=group_name,
                 start_id="0",
                 mkstream=True,
             )
@@ -1003,14 +1018,21 @@ class WorkerTaskDispatcher:
             )
 
         try:
-            # #16: maxlen 近似裁剪。StreamClient.xadd_batch(maxlen=N) 会
-            # 对 pipeline 内每条 XADD 都加 MAXLEN ~N。
-            await stream.xadd_batch(
-                stream_key, messages, maxlen=self.READY_STREAM_MAXLEN
-            )
+            # P1-19: 不再传 maxlen——旧行为会在每条 XADD 上加 MAXLEN ~N,
+            # 撞到未 ACK 消息也照删。裁剪改到写入后的 _trim_ready_stream。
+            await stream.xadd_batch(stream_key, messages)
         except Exception as e:
             logger.exception("任务写入 Redis 失败")
             return {"success": False, "error": str(e)}
+
+        # P1-19: 写入成功后按 group 已 ACK 游标做安全裁剪。裁剪失败仅
+        # 记 warning——不影响本批任务已经落 Redis 的语义。
+        try:
+            await self._trim_ready_stream(stream, stream_key, group_name)
+        except Exception as exc:
+            logger.warning(
+                "ready stream 裁剪失败 stream={} err={}", stream_key, exc
+            )
 
         accepted_tasks = [{"task_id": task.get("task_id")} for task in tasks]
         return {
@@ -1022,6 +1044,59 @@ class WorkerTaskDispatcher:
             "rejected_tasks": [],
             "message": "批量任务已写入 Redis 队列",
         }
+
+    async def _trim_ready_stream(self, stream, stream_key: str, group_name: str) -> None:
+        """P1-19: 按 consumer group 已 ACK 游标做安全裁剪。
+
+        - XPENDING <stream> <group> 拿最小未 ACK msg_id
+        - 有未 ACK: XTRIM MINID = 该 msg_id,只删已 ACK 的老 entry
+        - 无未 ACK: XTRIM MAXLEN ~ READY_STREAM_MAXLEN 兜底(全部已消费,安全)
+        - 未 ACK 数超阈值告警,提示 Worker 长期离线/卡死
+
+        为什么不再走 XADD MAXLEN=N:
+          MAXLEN 是纯物理裁剪,不查 PEL——离线积压超阈值时会把 Worker
+          还没消费的任务当垃圾删掉,这就是 P1-19 的静默丢消息根因。
+        """
+        pending_info: dict | None = None
+        try:
+            pending_info = await stream.xpending(stream_key, group_name=group_name)
+        except Exception as exc:
+            # XPENDING 失败退化到 MAXLEN,但记 warning——继续保护 Redis 内存
+            logger.warning(
+                "xpending 失败退化到 MAXLEN 裁剪 stream={} err={}",
+                stream_key, exc,
+            )
+
+        pending_count = int(pending_info.get("pending_count", 0)) if pending_info else 0
+        min_id = pending_info.get("min_id") if pending_info else None
+
+        # 告警:未 ACK 逼近上限说明 Worker 长期离线或消费卡死
+        if pending_count >= self.READY_STREAM_PENDING_ALERT_THRESHOLD:
+            logger.error(
+                "ready stream 积压逼近上限(可能 Worker 离线/卡死): "
+                "stream={} pending={} threshold={} maxlen={}",
+                stream_key, pending_count,
+                self.READY_STREAM_PENDING_ALERT_THRESHOLD,
+                self.READY_STREAM_MAXLEN,
+            )
+
+        if pending_count > 0 and min_id:
+            # XTRIM MINID:仅删 msg_id < min_id 的 entry(必然已全部 ACK)
+            try:
+                await stream.xtrim(stream_key, minid=min_id, approximate=True)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "xtrim MINID 失败,退化到 MAXLEN: stream={} minid={} err={}",
+                    stream_key, min_id, exc,
+                )
+
+        # PEL 为空(或 MINID 走不通)——用 MAXLEN 兜底
+        await stream.xtrim(
+            stream_key,
+            maxlen=self.READY_STREAM_MAXLEN,
+            approximate=True,
+        )
 
     async def update_task_priority(self, worker, task_id, priority):
         """更新节点上任务的优先级"""

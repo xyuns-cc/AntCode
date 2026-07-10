@@ -184,6 +184,71 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class BodySizeMiddleware(BaseHTTPMiddleware):
+    """请求体总量限制中间件
+
+    通过 ``Content-Length`` 头在业务处理前直接拒掉超大 body，防止例如
+    ``PUT /projects/{id}`` 收到 500MB JSON 打到 asyncpg / Pydantic 之前把
+    整个 event loop 拉爆(P1-29)。
+
+    - 默认 JSON/普通请求上限为 ``max_body_size``(10MB)。
+    - 对 ``multipart/*`` (文件上传)允许使用更高的 ``max_upload_size``
+      (与配置里的 ``MAX_FILE_SIZE`` 对齐,默认 100MB),避免误伤 tasks
+      导入等上传端点。
+    - 若客户端未上报 Content-Length(chunked / 空 body),放行进入下一环,
+      不做启发式估计——真正的下游解析器(Pydantic / DB)自会兜底。
+    """
+
+    def __init__(
+        self,
+        app,
+        max_body_size: int = 10 * 1024 * 1024,
+        max_upload_size: int | None = None,
+    ):
+        super().__init__(app)
+        self.max_body_size = max_body_size
+        # 允许 upload 端点单独放宽;默认对齐 MAX_FILE_SIZE
+        self.max_upload_size = (
+            max_upload_size if max_upload_size is not None else max_body_size
+        )
+
+    async def dispatch(self, request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                size = int(content_length)
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "success": False,
+                        "code": status.HTTP_400_BAD_REQUEST,
+                        "message": "非法的 Content-Length",
+                        "data": None,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+
+            content_type = request.headers.get("content-type", "") or ""
+            limit = (
+                self.max_upload_size
+                if content_type.lower().startswith("multipart/")
+                else self.max_body_size
+            )
+            if size > limit:
+                return JSONResponse(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    content={
+                        "success": False,
+                        "code": status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        "message": "请求体过大",
+                        "data": {"limit": limit, "received": size},
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+        return await call_next(request)
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Redis 分布式滑动窗口限流中间件"""
 
@@ -295,8 +360,26 @@ def make_middlewares():
     except ImportError:
         pass
 
+    # P1-29 请求体总量兜底:
+    # 默认 10MB JSON,复用 settings.MAX_FILE_SIZE 作为 multipart 上限,
+    # 优先使用 settings.MAX_BODY_SIZE / MAX_UPLOAD_BODY_SIZE(若配置里加了)。
+    default_body = 10 * 1024 * 1024
+    max_body_size = int(getattr(settings, "MAX_BODY_SIZE", default_body) or default_body)
+    max_upload_size = int(
+        getattr(settings, "MAX_UPLOAD_BODY_SIZE", None)
+        or getattr(settings, "MAX_FILE_SIZE", max_body_size)
+        or max_body_size
+    )
+
     middleware = [
         Middleware(RequestIDMiddleware),
+        # 最外层业务前直接拒超大 body(P1-29),避免 rate limit / auth 已经
+        # 消耗资源之后才发现 body 打爆内存。
+        Middleware(
+            BodySizeMiddleware,
+            max_body_size=max_body_size,
+            max_upload_size=max_upload_size,
+        ),
         Middleware(
             CORSMiddleware,
             allow_origins=settings.CORS_ORIGINS,

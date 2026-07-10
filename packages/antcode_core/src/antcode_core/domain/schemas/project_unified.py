@@ -17,7 +17,9 @@ class UnifiedProjectUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # ======= 基本信息字段 (所有项目类型) =======
-    name: str | None = Field(None, min_length=3, max_length=50, description="项目名称")
+    # P1-29:max_length 从 50 提到 255,对齐 model 的 CharField(max_length=255)。
+    # 之前已入库的、名字长度 > 50 的项目在改任何字段时都会 422。
+    name: str | None = Field(None, min_length=3, max_length=255, description="项目名称")
     description: str | None = Field(None, max_length=500, description="项目描述")
     status: ProjectStatus | None = Field(None, description="项目状态")
     tags: list[str] | None = Field(None, description="项目标签")

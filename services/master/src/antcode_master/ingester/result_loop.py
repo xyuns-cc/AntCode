@@ -177,22 +177,39 @@ class ResultLoop:
                 ack_ids: list[str] = []
                 dlq_ids: list[str] = []
                 for message in messages:
+                    # P1-19: typed decoder 现在会为解码失败的消息返回一个
+                    # 带 decode_error 的 envelope（payload=None）。这类消息
+                    # 直接走 DLQ,无需等 deliver_count 累计。
+                    if getattr(message, "decode_error", None):
+                        logger.error(
+                            "结果消息解码失败 → 直接 DLQ: msg_id={} err={}",
+                            message.msg_id, message.decode_error,
+                        )
+                        if await self._move_to_dlq(message):
+                            dlq_ids.append(message.msg_id)
+                        # DLQ 写失败：不 ACK,留在 PEL 由下轮 XAUTOCLAIM 再试
+                        continue
+
                     try:
                         handled = await self._handle_message(message.payload)
                         if handled:
                             ack_ids.append(message.msg_id)
                         elif await self._should_dead_letter(message.msg_id):
-                            await self._move_to_dlq(message)
-                            dlq_ids.append(message.msg_id)
+                            # P1-19: 只有 DLQ 写入成功才能 ACK,否则结果正文
+                            # 会丢失。写失败保留 PEL 让 reclaim 循环再试。
+                            if await self._move_to_dlq(message):
+                                dlq_ids.append(message.msg_id)
                     except Exception:
                         logger.exception(
                             "处理结果消息失败: msg_id={}", message.msg_id
                         )
                         if await self._should_dead_letter(message.msg_id):
-                            await self._move_to_dlq(message)
-                            dlq_ids.append(message.msg_id)
+                            if await self._move_to_dlq(message):
+                                dlq_ids.append(message.msg_id)
 
                 # 正常处理完毕 + DLQ 后的消息都需要 ACK（防止重投阻塞 group）。
+                # P1-19: dlq_ids 现在只包含 DLQ **写入成功** 的 msg_id;写入
+                # 失败的会自然停留在 PEL,下一轮循环重试。
                 final_ack_ids = ack_ids + dlq_ids
                 if final_ack_ids:
                     await self._stream.xack(self._stream_key, final_ack_ids, self._group)
@@ -287,34 +304,62 @@ class ResultLoop:
             logger.exception("XPENDING 查询失败: msg_id={}", msg_id)
             return False
 
-    async def _move_to_dlq(self, message) -> None:
+    async def _move_to_dlq(self, message) -> bool:
         """把一条坏掉的消息搬到 ``antcode:dead_letter:result``。
 
         DLQ 内消息仍是 Proto bytes，保留原 payload；同时附带 ``orig_msg_id``
         和 ``orig_stream`` 方便后续人工排障。
+
+        P1-19: 返回 bool 而不是 None——**必须** 只在 DLQ 写入成功后调用方
+        才可以 ACK。之前老实现里 DLQ 写异常被吞掉,调用方照样 ACK,结果
+        正文彻底丢失。
         """
         try:
             redis = await get_redis_client()
             payload = message.payload
-            raw_bytes = payload.SerializeToString() if hasattr(payload, "SerializeToString") else b""
+            # 解码失败的 envelope(payload=None + decode_error) 用 raw_fields
+            # 里的原始 Proto bytes 兜底,别丢原始内容。
+            if payload is not None and hasattr(payload, "SerializeToString"):
+                raw_bytes = payload.SerializeToString()
+            else:
+                raw_fields = getattr(message, "raw_fields", None) or {}
+                raw_bytes = (
+                    raw_fields.get(b"p")
+                    or raw_fields.get("p")
+                    or b""
+                )
+                if isinstance(raw_bytes, str):
+                    raw_bytes = raw_bytes.encode("utf-8", errors="replace")
+            entry = {
+                "payload": raw_bytes,
+                "orig_stream": self._stream_key,
+                "orig_msg_id": message.msg_id,
+                "moved_at_ms": str(int(time.time() * 1000)),
+            }
+            decode_error = getattr(message, "decode_error", None)
+            if decode_error:
+                entry["decode_error"] = decode_error
             await redis.xadd(
                 _dead_letter_stream_key(),
-                {
-                    "payload": raw_bytes,
-                    "orig_stream": self._stream_key,
-                    "orig_msg_id": message.msg_id,
-                    "moved_at_ms": str(int(time.time() * 1000)),
-                },
+                entry,
                 maxlen=10_000,
                 approximate=True,
             )
             logger.warning(
-                "消息超过最大重投次数已进 DLQ: msg_id={} stream={}",
+                "消息进入 DLQ: msg_id={} stream={} decode_error={}",
                 message.msg_id,
                 self._stream_key,
+                decode_error or "(runtime failure)",
             )
+            return True
         except Exception:
-            logger.exception("写 DLQ 失败: msg_id={}", message.msg_id)
+            # P1-19: 关键告警。DLQ 长时间写不进会导致 PEL 无限增长,需要
+            # 人工介入。这里用 exception 级别 log 保证不被吞。
+            logger.exception(
+                "DLQ 写入失败(将保留 PEL 由下轮 XAUTOCLAIM 再试): msg_id={}",
+                message.msg_id,
+            )
+            return False
 
 
 def _safe_has_field(msg: Any, field_name: str) -> bool:

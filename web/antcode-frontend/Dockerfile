@@ -38,8 +38,19 @@ RUN rm -rf ./*
 COPY --from=builder /app/dist .
 RUN chown -R nginx:nginx /usr/share/nginx/html
 
+# P1-06: Nginx upstream 从环境变量读取（默认 web-api:8000,对齐 docker-compose 服务名）
+#   - 通过 /etc/nginx/templates/*.template 让 nginxinc 入口脚本在启动时用 envsubst
+#     生成 /etc/nginx/conf.d/*.conf,支持在部署时用 WEB_API_UPSTREAM 覆盖后端地址。
+#   - NGINX_ENVSUBST_FILTER 用正则精确锁死只替换 WEB_API_UPSTREAM,避免误伤
+#     $http_upgrade / $host / $remote_addr 等 nginx 自身变量。
+ENV WEB_API_UPSTREAM=web-api:8000
+# 正则不加锚点(避免 Dockerfile 对末尾 $ 的解释),现网仅此一个 WEB_API_UPSTREAM 命名的
+# 环境变量,不会误匹配其它。envsubst 只对这个变量做替换,$http_upgrade / $host 保持原样。
+ENV NGINX_ENVSUBST_FILTER=WEB_API_UPSTREAM
+
 # Nginx 配置（unprivileged 监听 8080 而非 80）
-RUN echo 'server { \
+# P1-06: /api/v1/ws/ 独立 location 补齐 WebSocket Upgrade 头,避免落进普通 /api 走 HTTP/1.0
+RUN mkdir -p /etc/nginx/templates && echo 'server { \
     listen 8080; \
     server_name localhost; \
     root /usr/share/nginx/html; \
@@ -47,16 +58,35 @@ RUN echo 'server { \
     location / { \
         try_files $uri $uri/ /index.html; \
     } \
-    location /api { \
-        proxy_pass http://backend:8000; \
-        proxy_set_header Host $host; \
-        proxy_set_header X-Real-IP $remote_addr; \
-    } \
-    location /ws { \
-        proxy_pass http://backend:8000; \
+    location /api/v1/ws/ { \
+        proxy_pass http://${WEB_API_UPSTREAM}; \
         proxy_http_version 1.1; \
         proxy_set_header Upgrade $http_upgrade; \
         proxy_set_header Connection "upgrade"; \
+        proxy_set_header Host $host; \
+        proxy_set_header X-Real-IP $remote_addr; \
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
+        proxy_set_header X-Forwarded-Proto $scheme; \
+        proxy_read_timeout 3600s; \
+        proxy_send_timeout 3600s; \
+    } \
+    location /api { \
+        proxy_pass http://${WEB_API_UPSTREAM}; \
+        proxy_set_header Host $host; \
+        proxy_set_header X-Real-IP $remote_addr; \
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
+        proxy_set_header X-Forwarded-Proto $scheme; \
+    } \
+    location /ws { \
+        proxy_pass http://${WEB_API_UPSTREAM}; \
+        proxy_http_version 1.1; \
+        proxy_set_header Upgrade $http_upgrade; \
+        proxy_set_header Connection "upgrade"; \
+        proxy_set_header Host $host; \
+        proxy_set_header X-Real-IP $remote_addr; \
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
+        proxy_read_timeout 3600s; \
+        proxy_send_timeout 3600s; \
     } \
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ { \
         expires 1y; \
@@ -64,7 +94,7 @@ RUN echo 'server { \
     } \
     gzip on; \
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml; \
-}' > /etc/nginx/conf.d/default.conf
+}' > /etc/nginx/templates/default.conf.template
 
 # 健康检查（unprivileged nginx 走 8080）
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

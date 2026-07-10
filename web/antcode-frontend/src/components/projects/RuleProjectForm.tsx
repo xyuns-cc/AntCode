@@ -272,11 +272,20 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   }, [initialData.extraction_rules, callbackType])
 
   // 通知父组件验证状态变化
+  // P1-31: 依赖里去掉 onValidationChange/getButtonDisabled/getButtonTooltip 三个
+  // 函数引用 —— 它们每次渲染都是新引用,会导致 effect 死循环。用 ref 承接
+  // onValidationChange,并只在**序列化后的验证状态**变化时重触发。
+  const onValidationChangeRef = React.useRef(onValidationChange)
+  React.useEffect(() => {
+    onValidationChangeRef.current = onValidationChange
+  }, [onValidationChange])
+
   React.useEffect(() => {
     const isValid = !getButtonDisabled()
     const tooltip = getButtonTooltip()
-    onValidationChange?.(isValid, tooltip)
-  }, [listRules, detailRules, callbackType, onValidationChange, getButtonDisabled, getButtonTooltip])
+    onValidationChangeRef.current?.(isValid, tooltip)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listRules, detailRules, callbackType])
 
   // 提供submit方法给父组件
   React.useEffect(() => {
@@ -343,12 +352,20 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
     ]
   )
 
+  // P1-31: 稳定 onDataChange 引用,依赖里只放真实状态数据(不放 buildSubmitData / form / onDataChange
+  // 三个每次都新的引用),避免父组件回调无 memo 时死循环。
+  const onDataChangeRef = React.useRef(onDataChange)
   React.useEffect(() => {
-    if (!onDataChange) {
+    onDataChangeRef.current = onDataChange
+  }, [onDataChange])
+
+  React.useEffect(() => {
+    if (!onDataChangeRef.current) {
       return
     }
-    onDataChange(buildSubmitData(form.getFieldsValue()))
-  }, [antiSpiderConfig, buildSubmitData, form, onDataChange, proxyConfig])
+    onDataChangeRef.current(buildSubmitData(form.getFieldsValue()))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [antiSpiderConfig, proxyConfig, dedupConfig, resumeEnabled])
 
   // 表单提交
   const handleFinish = (values: ProjectCreateRequest) => {

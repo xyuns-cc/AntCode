@@ -9,12 +9,26 @@ import asyncio
 import contextlib
 import os
 import socket
+import time
+from typing import Any
 
 from antcode_core.common.config import settings
+from antcode_core.common.utils.serialization import to_json
+from antcode_core.infrastructure.redis.client import get_redis_client
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.streams import StreamClient
 from loguru import logger
 
 from antcode_master.leader import ensure_leader
+
+
+# P1-19: 死信队列 stream key。达阈值的事件先写这里再 ACK；写失败不 ACK。
+def _dead_letter_stream_key(namespace: str | None = None) -> str:
+    return f"{redis_namespace(namespace)}:dead_letter:scheduler_event"
+
+
+# DLQ 保留上限（近似），防止死信本身无限膨胀。
+_DLQ_MAXLEN = 10_000
 
 
 class SchedulerEventLoop:
@@ -165,11 +179,30 @@ class SchedulerEventLoop:
                             logger.debug(f"XPENDING 查询失败，退回 1: {pend_exc}")
                             count = 1
                         if count >= self.DLQ_DELIVERY_THRESHOLD:
-                            logger.error(
-                                f"调度事件处理失败 {count} 次，ACK 进死信: "
-                                f"msg_id={message.msg_id} event={message.data} err={e}"
+                            # P1-19: 到阈值不能直接 ACK，否则事件正文丢失。
+                            # 先写 DLQ、写成功再 ACK；DLQ 写失败则 keep-in-PEL
+                            # 交给下一轮 XAUTOCLAIM 再试，不静默丢消息。
+                            dlq_ok = await self._write_to_dlq(
+                                stream_key=self._stream,
+                                msg_id=message.msg_id,
+                                payload=message.data,
+                                reason=f"delivery_count>={count}: {e}",
                             )
-                            ack_ids.append(message.msg_id)
+                            if dlq_ok:
+                                logger.error(
+                                    "调度事件失败 {} 次 → 已入 DLQ + ACK: "
+                                    "msg_id={} event={} err={}",
+                                    count, message.msg_id, message.data, e,
+                                )
+                                ack_ids.append(message.msg_id)
+                            else:
+                                # DLQ 写入失败——保留 PEL，下轮 XAUTOCLAIM
+                                # 会再次触达；同时告警便于人工介入。
+                                logger.error(
+                                    "调度事件失败 {} 次 但 DLQ 写入失败，保留 PEL: "
+                                    "msg_id={} event={}",
+                                    count, message.msg_id, message.data,
+                                )
                         else:
                             logger.warning(
                                 f"处理调度事件失败 (第 {count} 次): msg_id={message.msg_id} err={e}"
@@ -183,6 +216,46 @@ class SchedulerEventLoop:
             except Exception as e:
                 logger.error(f"调度事件循环异常: {e}")
                 await asyncio.sleep(self.idle_sleep)
+
+    async def _write_to_dlq(
+        self,
+        *,
+        stream_key: str,
+        msg_id: str,
+        payload: dict,
+        reason: str,
+    ) -> bool:
+        """P1-19: 把达阈值的调度事件搬到 DLQ；写入成功返回 True。
+
+        DLQ 内保留原 payload（JSON 序列化）+ 追溯字段 orig_stream / orig_msg_id
+        / reason / moved_at_ms，便于人工排障。写入失败返回 False，让调用方
+        选择保留 PEL 而不是 ACK 丢消息。
+        """
+        try:
+            redis = await get_redis_client()
+            # payload 内部可能有 dict / list / int / str，统一 JSON 化以确保
+            # Redis Streams 字段能接受（Streams 只接受 str/bytes/int/float）。
+            entry: dict[str, Any] = {
+                "orig_stream": stream_key,
+                "orig_msg_id": msg_id,
+                "reason": reason,
+                "moved_at_ms": str(int(time.time() * 1000)),
+                "payload": to_json(payload),
+            }
+            await redis.xadd(
+                _dead_letter_stream_key(),
+                entry,
+                maxlen=_DLQ_MAXLEN,
+                approximate=True,
+            )
+            return True
+        except Exception as exc:
+            logger.exception(
+                "写调度事件 DLQ 失败(将保留 PEL 由下轮重试): "
+                "msg_id={} err={}",
+                msg_id, exc,
+            )
+            return False
 
     async def _xpending_deliver_count(self, msg_id: str) -> int:
         """T6-T2: 查 XPENDING 里指定 msg 的投递次数。

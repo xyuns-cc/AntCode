@@ -156,6 +156,12 @@ class Engine:
         self._policies.resource.memory_limit_mb = memory_limit_mb
         self._policies.resource.cpu_limit_seconds = cpu_limit_seconds
 
+        # P1-15: worker_id 缓存与续租后台任务。首次调用 _resolve_worker_id
+        # 时从 transport / config 里解析并缓存;若最终解析不到就 raise,
+        # 不再静默用 "unknown"。
+        self._worker_id_cache: str | None = None
+        self._ownership_renewal_task: asyncio.Task | None = None
+
     @property
     def scheduler(self) -> Scheduler:
         return self._scheduler
@@ -186,6 +192,23 @@ class Engine:
             task = asyncio.create_task(self._worker_loop(i))
             self._worker_tasks.append(task)
 
+        # P1-15: 后台续租跨机归属键,避免长跑任务 TTL 到期被重投另一台
+        self._ownership_renewal_task = asyncio.create_task(
+            self._renew_run_ownership_loop()
+        )
+
+        # P1-15: 启动时尝试解析 worker_id, 让配置错误在拉到第一条任务前
+        # 就暴露出来。测试里 transport 是 MagicMock,resolve 会命中 fallback
+        # RuntimeError, 这里只 warn 不 raise, 让单测的 start/stop 用例仍可
+        # 通过; 真正跑到 _claim_run_ownership 时会 raise 拒绝静默继续。
+        try:
+            resolved = self._resolve_worker_id()
+            logger.debug(f"engine 已解析 worker_id: {resolved}")
+        except RuntimeError as exc:
+            logger.warning(
+                f"engine 启动时无法解析 worker_id, 首个任务到达时将 raise: {exc}"
+            )
+
         logger.info(f"引擎已启动 (workers={self._max_concurrent})")
 
     async def stop(self, grace_period: float = 30.0) -> None:
@@ -209,6 +232,9 @@ class Engine:
             self._poll_task.cancel()
         if self._control_task:
             self._control_task.cancel()
+        # P1-15: 停掉后台续租循环,避免关机中还在写归属键
+        if self._ownership_renewal_task:
+            self._ownership_renewal_task.cancel()
 
         # 等待运行中任务完成
         active_count = await self._state_manager.count_active()
@@ -969,6 +995,56 @@ class Engine:
     # B2: 跨机 run 归属期（秒）。任务实际执行时长 ≤ TASK_EXECUTION_TIMEOUT，
     # 归属期 = timeout + 冗余；正常 ack 或结果回传时会 DEL，Redis 侧不会长期占用。
     _RUN_OWNERSHIP_TTL_SECONDS = 3600 + 300
+    # P1-15: 后台续租间隔。取 TTL 的 1/6,保证在 TTL 内至少能续 5 次;
+    # 单次 Redis 抖动/连接重连不至于让归属键失效。
+    _RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS = 600
+
+    def _resolve_worker_id(self) -> str:
+        """P1-15: 从 transport / config 里解析 worker_id 并缓存。
+
+        原实现直接读 ``self._transport.worker_id``——TransportBase 上并没有
+        这个属性,所有 ownership 值退化为 ``"unknown"``,固定 TTL 又不续,
+        Redis 异常还静默放行,等于跨机去重完全失效。
+
+        新实现按顺序尝试:
+
+        1. ``transport.worker_id`` (未来若在基类上补齐 property)
+        2. Redis 直连 transport 的私有 ``_worker_id``
+        3. Gateway transport 的 ``_gateway_config.worker_id``
+        4. ``transport._config.worker_id`` (兜底)
+
+        全部为空则 raise ``RuntimeError``——engine 启动就失败,不再静默
+        用 "unknown" 让跨机去重形同虚设。
+        """
+        if self._worker_id_cache:
+            return self._worker_id_cache
+
+        transport = self._transport
+        candidates: list[Any] = []
+        # 1. 公开属性(未来可能在 TransportBase 上补齐)
+        candidates.append(getattr(transport, "worker_id", None))
+        # 2. Redis 直连模式: RedisTransport._worker_id
+        candidates.append(getattr(transport, "_worker_id", None))
+        # 3. Gateway 模式: GatewayTransport._gateway_config.worker_id
+        gw_config = getattr(transport, "_gateway_config", None)
+        if gw_config is not None:
+            candidates.append(getattr(gw_config, "worker_id", None))
+        # 4. 通用 ServerConfig fallback
+        cfg = getattr(transport, "_config", None)
+        if cfg is not None:
+            candidates.append(getattr(cfg, "worker_id", None))
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                resolved = candidate.strip()
+                self._worker_id_cache = resolved
+                return resolved
+
+        raise RuntimeError(
+            "engine 无法解析 worker_id: transport / config 都没有暴露有效 "
+            "worker_id;请确认 wiring 层把 worker_id 写入了 transport(_worker_id 或 "
+            "_gateway_config.worker_id)。不再静默用 'unknown' 兜底,避免跨机 fencing 失效。"
+        )
 
     async def _claim_run_ownership(self, run_id: str) -> bool:
         """B2 跨机去重：SET NX 抢占 ``processing:{run_id}``。
@@ -977,7 +1053,19 @@ class Engine:
         - 失败 → 别的 worker（reclaim / direct 重投另一台）已持有，跳过。
         - Redis 不可达 → 保守返回 True 让本地去重继续起作用（单 worker 安全，
           多 worker 场景由运维监控，不做静默双跑）。
+
+        P1-15: worker_id 走 ``_resolve_worker_id`` 严格解析。解析不到时
+        fail-closed(返回 False)让本 worker 放弃本条消息, 交给 reclaim 兜
+        底; 打印 ERROR 让运维立刻能看到——绝不用 "unknown" 静默继续。
         """
+        try:
+            worker_id = self._resolve_worker_id()
+        except RuntimeError as exc:
+            # fail-closed: 不接手无主消息, 让 reclaim 交给其它 worker
+            logger.error(
+                f"跨机去重被拒(worker_id 未解析): run_id={run_id} err={exc}"
+            )
+            return False
         try:
             from antcode_core.infrastructure.redis import get_redis_client
 
@@ -986,7 +1074,6 @@ class Engine:
                 logger.debug("Redis 不可达，跳过跨机去重（放行本地已去重的消息）")
                 return True
             key = f"antcode:run:owner:{run_id}"
-            worker_id = getattr(self._transport, "worker_id", "") or "unknown"
             ok = await redis.set(key, worker_id, nx=True, ex=self._RUN_OWNERSHIP_TTL_SECONDS)
             return bool(ok)
         except Exception as exc:
@@ -1002,7 +1089,7 @@ class Engine:
             if redis is None:
                 return
             key = f"antcode:run:owner:{run_id}"
-            worker_id = getattr(self._transport, "worker_id", "") or "unknown"
+            worker_id = self._resolve_worker_id()
             # Lua 保证 GET+DEL 原子
             script = """
             if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -1014,6 +1101,66 @@ class Engine:
             await redis.eval(script, 1, key, worker_id)
         except Exception as exc:
             logger.debug(f"释放跨机归属键失败(TTL 会兜底): run_id={run_id} err={exc}")
+
+    async def _renew_run_ownership_loop(self) -> None:
+        """P1-15: 后台续租跨机归属键。
+
+        原实现固定 TTL 3900s 且不续: 长跑任务(比如 spider 跑 90 分钟)
+        在 65 分钟时归属键就已过期,一旦被 reclaimer 认领,双 worker
+        同时跑同一 run。这里每 ``_RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS``
+        秒扫一次 state_manager 的 active run,只对 owner 值等于我方
+        worker_id 的键 PEXPIRE 一次,续到全 TTL。用 Lua 保证 GET+PEXPIRE
+        原子,防止在续租瞬间 key 被别的 worker 抢过去后误续。
+        """
+        script = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('pexpire', KEYS[1], ARGV[2])
+        else
+            return 0
+        end
+        """
+        ttl_ms = self._RUN_OWNERSHIP_TTL_SECONDS * 1000
+        while self._running:
+            try:
+                await asyncio.sleep(self._RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS)
+                if not self._running:
+                    break
+                try:
+                    worker_id = self._resolve_worker_id()
+                except RuntimeError as exc:
+                    logger.warning(f"ownership 续租跳过(worker_id 未就绪): {exc}")
+                    continue
+                try:
+                    from antcode_core.infrastructure.redis import get_redis_client
+
+                    redis = await get_redis_client()
+                except Exception as exc:
+                    logger.debug(f"ownership 续租拿不到 redis client(跳过): {exc}")
+                    continue
+                if redis is None:
+                    continue
+                # 只续 RUNNING / CANCELLING 状态的 run,PREPARING 的还没
+                # claim 归属,COMPLETED 已经 release。
+                runs = await self._state_manager.get_all()
+                for info in runs:
+                    if info.state not in (
+                        RunState.RUNNING,
+                        RunState.CANCELLING,
+                        RunState.PREPARING,
+                    ):
+                        continue
+                    key = f"antcode:run:owner:{info.run_id}"
+                    try:
+                        await redis.eval(script, 1, key, worker_id, str(ttl_ms))
+                    except Exception as exc:
+                        logger.debug(
+                            f"ownership 续租失败(单条,忽略): run_id={info.run_id} err={exc}"
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("ownership 续租循环异常")
+                await asyncio.sleep(5)
 
     def _build_payload(self, task_msg: TaskMessage) -> Any:
         """构建任务 payload"""

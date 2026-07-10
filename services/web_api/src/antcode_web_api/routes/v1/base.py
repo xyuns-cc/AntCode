@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from antcode_web_api.middleware.middleware import get_client_ip
 from antcode_web_api.response import Messages, success
 
 # K8s probe 单次超时（秒）：任何依赖探测卡住不能拖垮探针
@@ -186,7 +187,15 @@ async def readiness_check() -> JSONResponse:
     tags=["认证"],
 )
 async def login(request: UserLoginRequest, http_request: Request):
-    ip_address = http_request.client.host if http_request.client else None
+    # P1-06: 登录限流 / 审计使用受信代理白名单解析后的客户端 IP
+    #   生产 Nginx 会把真实 IP 放到 X-Real-IP / X-Forwarded-For,如果这里直接
+    #   拿 socket 对端 IP,所有用户都会共用同一个反代 IP 的限流桶(默认 5/min),
+    #   一个用户失败几次就把整个入口打爆。get_client_ip 只在 socket 对端命中
+    #   ANTCODE_TRUSTED_PROXIES 白名单时才采信转发头,防止外部伪造。
+    ip_address = get_client_ip(http_request) if http_request.client else None
+    # get_client_ip 兜底会返回 "unknown"——限流键要求 falsy 才跳过,归一为 None
+    if ip_address == "unknown":
+        ip_address = None
     user_agent = http_request.headers.get("user-agent")
 
     # T7-B4a (P1-2): 登录专项限流 + 账户锁定

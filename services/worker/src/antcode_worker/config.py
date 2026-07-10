@@ -220,6 +220,27 @@ class WorkerConfig:
     sandbox_max_open_files: int = 2048  # RLIMIT_NOFILE
     sandbox_max_processes: int = 64  # RLIMIT_NPROC（防 fork 炸弹）
 
+    # P0-a5: 沙箱执行器模式。审查报告认定"生产执行链没有真正沙箱,用户任务
+    # 可接管 Worker 身份"是 P0(SandboxExecutor 定义了但 wiring 未接入)。
+    #   - "process": 直接 ProcessExecutor,仅 rlimit + env 白名单。默认值,兼容旧行为。
+    #                **子进程与 Worker 主进程同 UID + 同网络 namespace + 共享 FS
+    #                视图**,不是真隔离。仅内网 dev / 受信租户可用。
+    #   - "sandbox": SandboxExecutor + BasicSandbox,除 rlimit 外还做:
+    #                * env 严格白名单(默认只透传 PATH/HOME/PYTHONPATH/LANG 等)
+    #                * SECRET/PASSWORD/TOKEN/API_KEY/CREDENTIAL/PRIVATE 关键词二次过滤
+    #                * 强制 fs_isolated 独立工作目录 + cleanup_on_exit
+    #                * 可选:配合 sandbox_command 外接 firejail / bubblewrap
+    #                  实现真正的进程/网络/文件系统 namespace 隔离
+    # 生产强烈建议 "sandbox" 并配 sandbox_command=["firejail","--private","--net=none"]
+    # 或独立容器/VM(通过 K8s per-task pod 之类)。
+    sandbox_mode: str = "process"
+    # 外接沙箱命令前缀(空列表 = 不外接)。示例:
+    #   ["firejail","--private","--net=none"] 或 ["bwrap","--unshare-all","--ro-bind","/","/"]
+    # 值由 env WORKER_SANDBOX_COMMAND 提供,用 shlex 兼容格式;wiring 层解析。
+    sandbox_command: str = ""
+    # 沙箱是否启用网络隔离(需要 sandbox_command 支持,如 firejail --net=none)
+    sandbox_network_isolated: bool = False
+
     # 传输模式配置
     transport_mode: str = "gateway"  # 传输模式: "direct" 或 "gateway"
 

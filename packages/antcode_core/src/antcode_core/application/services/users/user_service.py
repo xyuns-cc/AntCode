@@ -6,6 +6,7 @@ from datetime import datetime
 
 from loguru import logger
 from tortoise.exceptions import IntegrityError
+from tortoise.transactions import in_transaction
 
 from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.domain.models.user import User
@@ -371,7 +372,21 @@ class UserService:
         logger.info(f"密码已重置: {user.username}")
 
     async def delete_user(self, user_id, current_user_id):
-        """删除用户（支持 public_id 和内部 id，级联删除关联数据）"""
+        """删除用户（支持 public_id 和内部 id，级联删除关联数据）
+
+        P1-20 修复要点:
+        - 事务化:权限/凭证清理 + user.delete() 走同一 `in_transaction()`,
+          任一步骤失败整体回滚,避免出现"权限清了、user 还在"的半状态。
+        - **拒绝策略**:如果用户名下仍有项目(user_id 引用),拒绝删除并
+          提示先移交资源。选择这个策略而不是"转移到系统用户"是因为:
+            1) 项目里存在 Git 凭证、私钥引用等敏感上下文,静默改归属会
+               让审计链路断裂;
+            2) 代码库当前**没有** SYSTEM_USER 常量或哨兵用户概念,强行
+               引入等于新增一个隐式全局对象;
+            3) 已有 "不能删除自己" 的显式拒绝分支,风格上一致。
+          需要"强制清理"时,业务侧应先调用现有的 delete_project_cascade
+          逐个把项目处理掉,再来删用户。
+        """
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -383,27 +398,57 @@ class UserService:
         if not current_user.is_admin:
             raise PermissionError("仅管理员可删除用户")
 
-        # 级联删除用户关联数据
-        deleted_counts = await self._cascade_delete_user_data(user.id)
+        # 拒绝策略:名下仍有项目/任务时不允许删,要求先移交或删除资源
+        from antcode_core.domain.models import Project
+        from antcode_core.domain.models.task import Task
 
-        await user.delete()
+        project_count = await Project.filter(user_id=user.id).count()
+        if project_count > 0:
+            raise ValueError(
+                f"该用户名下仍有 {project_count} 个项目,请先移交或删除后再删除用户"
+            )
+        task_count = await Task.filter(user_id=user.id).count()
+        if task_count > 0:
+            raise ValueError(
+                f"该用户名下仍有 {task_count} 个任务,请先移交或删除后再删除用户"
+            )
+
+        # 级联删除用户关联数据(单事务原子)
+        deleted_counts = await self._cascade_delete_user_data(user)
+
         await self._invalidate_user_cache(user.id)
 
         logger.info(f"用户已删除: {user.username}, 级联删除: {deleted_counts}")
 
-    async def _cascade_delete_user_data(self, user_id):
-        """级联删除用户的所有关联数据"""
-        from antcode_core.domain.models import UserWorkerPermission
+    async def _cascade_delete_user_data(self, user):
+        """级联删除用户的关联数据(含 User 自身)。
+
+        单个 `in_transaction()` 事务保证:权限/凭证/User 主体全部成功或
+        全部回滚。审计日志(AuditLog.user_id 可空)刻意保留以维持追溯链。
+        """
+        from antcode_core.domain.models import GitCredential, UserWorkerPermission
 
         deleted = {
             "worker_permissions": 0,
+            "git_credentials": 0,
         }
 
         try:
-            # 删除用户 Worker 权限
-            deleted["worker_permissions"] = await UserWorkerPermission.filter(user_id=user_id).delete()
+            async with in_transaction():
+                # 1. Worker 权限
+                deleted["worker_permissions"] = await UserWorkerPermission.filter(
+                    user_id=user.id
+                ).delete()
+
+                # 2. Git 凭证(GitCredential.owner_user_id 明确归属单个用户,可安全删)
+                deleted["git_credentials"] = await GitCredential.filter(
+                    owner_user_id=user.id
+                ).delete()
+
+                # 3. User 本体
+                await user.delete()
         except Exception as e:
-            logger.error(f"级联删除用户数据失败: {e}")
+            logger.error(f"级联删除用户数据失败(事务已回滚): {e}")
             raise
 
         return deleted

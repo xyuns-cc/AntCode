@@ -15,7 +15,11 @@ class CrawlBatchCreateRequest(BaseModel):
     project_id: str = Field(..., description="项目公开ID")
     name: str = Field(..., min_length=1, max_length=255, description="批次名称")
     description: str = Field("", max_length=1000, description="批次描述")
-    seed_urls: list[str] = Field(..., min_length=1, description="种子URL列表")
+    # P1-29 集合大小兜底:1w 个种子 URL 已远超真实业务需要,超过就 422,
+    # 避免 10M 条 URL 打爆 asyncpg / Pydantic 反序列化 OOM。
+    seed_urls: list[str] = Field(
+        ..., min_length=1, max_length=10000, description="种子URL列表(最多 10000)"
+    )
     max_depth: int = Field(3, ge=1, le=10, description="最大爬取深度")
     max_pages: int = Field(10000, ge=1, le=1000000, description="最大爬取页面数")
     max_concurrency: int = Field(50, ge=1, le=500, description="最大并发数")

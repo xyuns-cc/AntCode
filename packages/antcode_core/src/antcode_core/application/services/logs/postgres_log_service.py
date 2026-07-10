@@ -3,12 +3,15 @@
 为 Master ``LogIngestLoop`` 提供批量 ``append_entries`` API，避免上游
 逐条调用 ``task_log_service.write_log`` 导致的 I/O 风暴。
 
-schema 与 migration 37 (``add_task_logs``) 对齐：PostgreSQL 方言，
-``event_id`` 唯一（deduped exactly-once）。表创建以 migration 为准，
-本服务只做 CRUD，不再懒加载 DDL。
+schema 由 ORM model ``antcode_core.domain.models.task_log.TaskLog`` 定义，
+新部署走 ``scripts/init_db.py`` 的 ``Tortoise.generate_schemas`` 建表；
+``event_id`` 的部分唯一索引（``WHERE event_id IS NOT NULL``）由
+``PERFORMANCE_INDEXES`` 显式补建。本服务只做 CRUD，不再懒加载 DDL。
 
 - **签名稳定**：``append_entries(entries: Sequence[PostgresLogEntry])``。
-- **失败可重试**：函数级失败抛 ``Exception``，上游 ingest loop 不 ACK。
+- **失败可重试**：所有 CRUD 失败一律显式抛 ``Exception``，绝不吞异常返
+  空列表 / 0 —— DB 故障必须冒泡，让 UI 报错 / 上游不 ACK，而不是伪装成
+  "无历史日志"（历史上的 P1-01 就是被 debug + return [] 掩盖了半年）。
 - **exactly-once**：``event_id`` 走 ``INSERT ... ON CONFLICT DO NOTHING``，
   重放（reclaim）时不重复入库。
 """
@@ -42,8 +45,10 @@ class PostgresLogEntry:
 class PostgresLogService:
     """批量日志写入 / 查询服务（PostgreSQL）。
 
-    表 schema 由 ``migrations/models/37_...add_task_logs.py`` 建立，
-    本服务假定表已存在（启动流程走 ``db_migrate`` upgrade 分支）。
+    表 schema 由 ORM model ``antcode_core.domain.models.task_log.TaskLog``
+    定义，``scripts/init_db.py`` 的 ``Tortoise.generate_schemas(safe=True)``
+    在首次启动时把表 + 常规索引建齐，随后 ``PERFORMANCE_INDEXES`` 补上
+    ``event_id`` 的部分唯一索引。本服务只做 CRUD。
     """
 
     async def append_entries(self, entries: Sequence[PostgresLogEntry]) -> int:
@@ -127,11 +132,15 @@ class PostgresLogService:
             )
             params = [run_id, int(limit), int(offset)]
 
+        # 不吞异常：DB 故障必须显式冒泡，绝不能返 [] 伪装成"没有历史日志"。
+        # 之前 debug + return [] 让 task_logs 表不存在 / 权限缺失 / 连接池打满
+        # 全部退化成 UI 空白，用户完全无感知。上游（web_api 路由 /
+        # redis_log_stream_service）会把异常转成 5xx 或结构化错误。
         try:
             _, rows = await conn.execute_query(sql, params)
-        except Exception as exc:
-            logger.debug("读取 task_logs 失败 run_id={}: {}", run_id, exc)
-            return []
+        except Exception:
+            logger.exception("读取 task_logs 失败 run_id={}", run_id)
+            raise
 
         return [
             PostgresLogEntry(
@@ -166,11 +175,12 @@ class PostgresLogService:
             sql = 'SELECT COUNT(*) AS cnt FROM "task_logs" WHERE "run_id" = $1'
             params = [run_id]
 
+        # 同 list_entries：DB 异常直接抛，绝不返 0 掩盖问题。
         try:
             _, rows = await conn.execute_query(sql, params)
-        except Exception as exc:
-            logger.debug("统计 task_logs 失败 run_id={}: {}", run_id, exc)
-            return 0
+        except Exception:
+            logger.exception("统计 task_logs 失败 run_id={}", run_id)
+            raise
 
         if not rows:
             return 0

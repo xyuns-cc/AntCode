@@ -42,11 +42,18 @@ class TypedStreamMessage(Generic[T]):
     """带类型解码后的 Stream 消息
 
     `payload` 字段已经被对应的 codec 解码为业务对象（如 Proto Message）。
+
+    P1-19 修复：当 codec.decode 抛异常时不再静默丢消息，而是把
+    ``payload`` 置为 None 并填充 ``decode_error`` / ``raw_fields``。
+    上层调用方检查 ``decode_error`` 就直接走死信路径，避免坏消息
+    永久卡在 PEL、也避免被"当作没这条消息"漏 ACK。
     """
 
     msg_id: str = ""
     payload: Any = None
     stream_key: str = ""
+    decode_error: str | None = None
+    raw_fields: dict | None = None
 
 
 @dataclass
@@ -574,7 +581,13 @@ class StreamClient:
     def _decode_typed_entries(
         self, entries, stream_name: str
     ) -> list[TypedStreamMessage]:
-        """对单个 stream 的 entries 列表执行 codec.decode"""
+        """对单个 stream 的 entries 列表执行 codec.decode
+
+        P1-19: 解码失败时不再 ``continue`` 静默跳过——那样上层看不到消息、
+        也不会 ACK / 不会 DLQ，坏消息会永久卡 PEL。改为返回一个"raw
+        envelope"（``payload=None`` + ``decode_error`` + ``raw_fields``），
+        让调用方能识别并转投死信队列。
+        """
         out: list[TypedStreamMessage] = []
         for msg_data in entries:
             if len(msg_data) < 2:
@@ -582,13 +595,24 @@ class StreamClient:
             msg_id = msg_data[0]
             if isinstance(msg_id, bytes):
                 msg_id = msg_id.decode("utf-8")
+            raw_fields = msg_data[1]
             try:
-                payload = self._codec.decode(msg_data[1])
+                payload = self._codec.decode(raw_fields)
             except Exception as exc:
                 logger.error(
-                    "Codec 解码失败: stream={}, msg_id={}, codec={}, err={}",
+                    "Codec 解码失败(将由上层转 DLQ): stream={}, msg_id={}, "
+                    "codec={}, err={}",
                     stream_name, msg_id, type(self._codec).__name__, exc,
                 )
+                out.append(TypedStreamMessage(
+                    msg_id=msg_id,
+                    payload=None,
+                    stream_key=stream_name,
+                    decode_error=f"{type(exc).__name__}: {exc}",
+                    # raw_fields 保留原始 dict（bytes-key/bytes-value）方便
+                    # 死信队列存档，注意里面可能含 Proto bytes，不做 utf-8 解码
+                    raw_fields=dict(raw_fields) if isinstance(raw_fields, dict) else None,
+                ))
                 continue
             out.append(TypedStreamMessage(
                 msg_id=msg_id, payload=payload, stream_key=stream_name,
@@ -1035,19 +1059,38 @@ class StreamClient:
     # 清理操作
     # =========================================================================
 
-    async def xtrim(self, stream_key: str, maxlen: int,
-                    approximate: bool = True) -> int:
+    async def xtrim(self, stream_key: str, maxlen: int | None = None,
+                    approximate: bool = True,
+                    minid: str | None = None) -> int:
         """裁剪 Stream
 
         Args:
             stream_key: Stream 键名
-            maxlen: 最大长度
+            maxlen: 最大长度（与 minid 二选一）
             approximate: 是否使用近似裁剪
+            minid: P1-19：MINID 模式——裁剪所有 msg_id < minid 的消息。
+                优先级高于 maxlen；用于按"消费者组已 ACK 游标"安全裁剪，
+                避免 MAXLEN 撞未 ACK 消息导致静默丢消息。
 
         Returns:
             删除的消息数量
         """
         client = await self._get_client()
+        if minid is not None:
+            # redis-py 支持 xtrim(name, minid=..., approximate=...)。
+            # 保底捕获旧版本不支持 minid 的情况，退化到 maxlen。
+            try:
+                return await client.xtrim(
+                    stream_key, minid=minid, approximate=approximate
+                )
+            except TypeError:
+                if maxlen is None:
+                    raise
+                logger.warning(
+                    "redis-py 不支持 xtrim MINID，退化到 MAXLEN={}", maxlen
+                )
+        if maxlen is None:
+            raise ValueError("xtrim 需要 maxlen 或 minid 至少一个参数")
         return await client.xtrim(stream_key, maxlen=maxlen, approximate=approximate)
 
     async def delete_stream(self, stream_key: str) -> bool:

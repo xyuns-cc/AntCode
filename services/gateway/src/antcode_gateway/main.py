@@ -28,7 +28,9 @@ async def main():
     """主函数"""
     logger.info("Gateway 服务启动")
 
-    await init_db()
+    # P2-a2: 必须传 service="gateway",否则 helper 走 default 池,
+    # DB_POOL_MAX_GATEWAY 配置将静默失效。
+    await init_db(service="gateway")
 
     # 获取服务器实例
     server = get_grpc_server()
