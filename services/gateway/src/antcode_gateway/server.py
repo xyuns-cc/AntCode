@@ -23,10 +23,12 @@ from antcode_gateway.config import GatewayConfig, gateway_config
 # P1-21: 引入标准 gRPC 健康检查(grpc.health.v1)——Dockerfile 里带的
 # grpc_health_probe 需要服务端真的注册了 HealthServicer 才能拿到
 # SERVING/NOT_SERVING。包不存在时静默退化,避免离线测试环境构建失败。
-# 注意: 目前 config.server_options 里 grpc.max_connection_idle_ms=0 会让
-# grpc_health_probe 短连接被判定为 idle 直接 GOAWAY(pre-existing 问题,
-# 不在本次改动范围),所以 Dockerfile HEALTHCHECK 目前走下面的 HTTP /health/ready,
-# 但 HealthServicer 保留注册,便于以后 config 修好后无缝切回 gRPC 探针。
+#
+# P2-04: 原先 config.server_options 里 grpc.max_connection_idle_ms=0 会让
+# grpc_health_probe 短连接被判定为 idle 直接 GOAWAY, 已经改成 300_000
+# (5min), grpc_health_probe 探针可以直接用了。Dockerfile HEALTHCHECK 当前
+# 仍走独立的 HTTP /health/ready (顺便覆盖 Redis / DB 探活), 后续如果只需
+# gRPC 侧健康态, 可以无缝切回 grpc_health_probe -addr=localhost:50051。
 try:
     from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 

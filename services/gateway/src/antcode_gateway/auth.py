@@ -68,14 +68,32 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     WORKER_ID_HEADER = "x-worker-id"
     AUTHORIZATION_HEADER = "authorization"
 
-    # 不需要认证的方法：只保留首次注册（必须免鉴权，此时 worker 尚未获取 api_key）
-    # 与健康检查。Deregister 需要鉴权，否则可被利用发 Deregister{任意 worker_id} 撤销
-    # 他人 lease 造成 DoS。
-    SKIP_AUTH_METHODS = frozenset([
+    # P2-03: 严格白名单 —— 只允许下列 method 免认证,任何**新增**的 RPC 都必须
+    # 明确决定是走认证还是加进这个 set,不能默认放行。intercept_service() 用
+    # ``method in AUTH_EXEMPT_METHODS`` 做精确匹配,不支持前缀/正则通配,避免
+    # "凡是 /grpc.health.v1.Health/* 都放行" 这种模糊边界被 accidental
+    # /grpc.health.v1.Health/Drain(假想)拿去绕过鉴权。
+    #
+    # 当前豁免:
+    # - /antcode.v1.ControlService/Register: 首次注册,此时 worker 尚未拿到
+    #   api_key,只能允许一次匿名调用。Register 内部有 install_key 一次性
+    #   token 校验,不构成完全匿名入口。
+    # - /grpc.health.v1.Health/Check|Watch: 标准 gRPC 健康检查,给
+    #   grpc_health_probe / K8s L7 探针用,不携带业务凭证。
+    #
+    # Deregister **不**在豁免列表:必须鉴权,否则任何人都能发
+    # Deregister{任意 worker_id} 撤销他人 lease 造成 DoS。
+    #
+    # 想新增 method?先回答: 这个 RPC 有没有独立的凭证/一次性 token 校验?
+    # 有 → 可以加;没有 → 不要加,让它走认证。
+    AUTH_EXEMPT_METHODS = frozenset([
         "/antcode.v1.ControlService/Register",      # 首次注册（此时无 api_key）
         "/grpc.health.v1.Health/Check",             # gRPC 健康检查
         "/grpc.health.v1.Health/Watch",
     ])
+
+    # 兼容旧命名（仅本模块内部曾用；保留避免误伤外部引用）
+    SKIP_AUTH_METHODS = AUTH_EXEMPT_METHODS
 
     def __init__(
         self,
@@ -150,9 +168,10 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         if not self.enabled:
             return await continuation(handler_call_details)
 
-        # 检查是否跳过认证
+        # P2-03: 严格白名单精确匹配 —— 未在 AUTH_EXEMPT_METHODS 里的 method
+        # 一律走完整认证,不做前缀/正则通配,新增 method 默认拒绝。
         method = handler_call_details.method
-        if method in self.SKIP_AUTH_METHODS:
+        if method in self.AUTH_EXEMPT_METHODS:
             return await continuation(handler_call_details)
 
         # 获取元数据

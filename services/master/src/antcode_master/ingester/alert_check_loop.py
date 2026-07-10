@@ -58,6 +58,11 @@ class AlertCheckLoop:
     async def _run_loop(self) -> None:
         while self._running:
             try:
+                # P2-21: 多副本 master 部署时,`ensure_leader()` 走 Redis
+                # 权威校验(见 `leader.ensure_leader`),只有 Leader 副本会
+                # 进入 `_tick()` 拉 CrawlBatch → check_alerts → send_alert。
+                # Follower 副本恒短路 continue,不会出现 N 个副本各评估一遍
+                # 同一 project 导致同一条告警被 fanout N 次的情况。
                 if not await ensure_leader():
                     await asyncio.sleep(self._poll_interval)
                     continue

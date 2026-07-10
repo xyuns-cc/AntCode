@@ -200,7 +200,15 @@ class DistributedLock:
             self._renew_task = None
 
     async def _renew_loop(self) -> None:
-        """续期循环"""
+        """续期循环。
+
+        P2-07: 显式检查 ``extend()`` 返回值 —— 底层 Lua 走
+        ``get==token ? expire : 0`` 语义,``bool(result)`` 明确区分
+        ``0`` / ``1`` / ``None`` / 抛出。任何"没成功续到"的情况(锁被抢/
+        已过期/Redis 抖动)都会把 ``_token`` 置空并 ``raise``,让上层
+        ``LeaderElection.is_leader`` 立即通过 ``lock.is_locked`` 感知失租,
+        不允许静默继续持有。
+        """
         while True:
             try:
                 await asyncio.sleep(self.renew_interval)
@@ -210,6 +218,8 @@ class DistributedLock:
 
                 success = await self.extend()
                 if not success:
+                    # extend 返回 False → Lua 里 GET 值 ≠ 我们的 token,
+                    # 或 key 已消失 → 锁不再归我,主动放弃 + 抛给 LeaderElection。
                     self._token = None
                     raise RuntimeError(f"锁续期失败，锁可能已丢失: {self.key}")
 

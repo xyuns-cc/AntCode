@@ -141,10 +141,19 @@ class GatewayConfig:
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
             ("grpc.http2.max_pings_without_data", 0),
             # P1-#17: 限制每个 HTTP/2 连接最大并发 stream 数, 避免 worker
-            # 端无界 multiplex 把 gateway 资源打满; 同时关闭 idle 超时
-            # (=0), 保活由 keepalive_* 参数控制。
+            # 端无界 multiplex 把 gateway 资源打满。
             ("grpc.max_concurrent_streams", 1000),
-            ("grpc.max_connection_idle_ms", 0),
+            # P2-04: max_connection_idle_ms=0 在 grpc-python 里会被内部
+            # clamp 成很小的窗口, 导致 grpc_health_probe 这类短连接
+            # (打开→Check→关闭, 全程亚秒) 被判 idle 直接 GOAWAY, 触发
+            # probe 侧偶发 "connection closed" 假 unhealthy。
+            #
+            # 修法: 给一个明显大于 grpc_health_probe / 常规探针 RTT 的值
+            # (5 分钟), 让 idle 检测存在但不会误杀短连接; 长连接的
+            # 保活/心跳仍由 keepalive_time_ms / keepalive_timeout_ms 处理。
+            # max_connection_age_ms 不显式设置, 沿用 grpc 默认 INT_MAX
+            # (禁用主动老化), 避免把 worker↔gateway 的长连接周期性砍断。
+            ("grpc.max_connection_idle_ms", 300_000),
         ]
 
     @property
