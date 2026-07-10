@@ -98,11 +98,12 @@ class Settings(BaseSettings):
     BIND_HOST: str = Field(default="0.0.0.0")
     SERVER_PORT: int = Field(default=8000)
     SERVER_RELOAD: bool = Field(default=False)
-    # uvicorn worker 进程数。默认 4：IO-bound（PG/Redis）单进程压不满多核，
-    # 4 workers 覆盖 4 核物理机 + K8s 4 vCPU pod 的常见形态。生产扩容优先
-    # 加实例数而不是加 workers（每 worker 独立 DB 池，撞 max_connections 更快）。
-    # 单机 dev / 资源受限容器可降到 1-2。>1 时自动禁用 --reload。
-    SERVER_WORKERS: int = Field(default=4)
+    # uvicorn worker 进程数。默认 2：保守值，与单机跑多服务、K8s 2 vCPU
+    # pod 常见形态对齐。IO-bound 场景需要更高吞吐时通过 env SERVER_WORKERS
+    # 覆盖，压测参考 workers=4 时 RPS ~3x、MEM ~4x。生产扩容优先加实例数
+    # 而非无脑加 workers（每 worker 独立 DB 池，撞 max_connections 更快）。
+    # >1 时自动禁用 --reload。
+    SERVER_WORKERS: int = Field(default=2)
     FRONTEND_PORT: int = Field(default_factory=_default_frontend_port)
     SERVER_DOMAIN: str = Field(default="localhost")
 
