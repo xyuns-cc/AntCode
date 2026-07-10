@@ -1,9 +1,29 @@
-"""任务重试与补偿服务"""
+"""任务重试与补偿服务(Master 侧副本)
+
+**P1-18 修复**:原实现把 pending retries 存到进程内 in-memory 队列,
+Master 重启 / Leader 切换会永久丢失重试(retry 实际是 at-most-once)。
+
+现在改用 Redis ZSet ``{ns}:retry:pending`` 做持久化 scheduled queue,
+配合 ``{ns}:retry:processing`` hash 做崩溃恢复。原子 claim 用 Lua 一步
+完成 ZRANGEBYSCORE+ZREM+HSET(见 ``_RETRY_CLAIM_LUA``);处理成功后
+``HDEL`` processing;崩溃时下轮 tick 由 ``sweep_stalled`` 恢复。
+
+对外 API (``schedule_retry`` / ``manual_retry`` / ``get_pending_retries`` /
+``get_retry_stats`` / ``register_compensation_handler`` / ``start`` /
+``stop``) 保持不变,scheduler_loop._schedule_retry 通过 schedule_retry
+接口写入即可(不再摸 ``_retry_queue``)。
+"""
+
+from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+import json
+import time
+from datetime import UTC, datetime, timedelta
 from enum import Enum
+from typing import Any
 
+from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -57,24 +77,249 @@ class RetryConfig:
         ]
 
 
+# ---------------------------------------------------------------------------
+# Lua: 原子 claim —— ZRANGEBYSCORE + ZREM + HSET processing 一步完成
+# ---------------------------------------------------------------------------
+# KEYS[1] = pending ZSet, KEYS[2] = processing Hash
+# ARGV[1] = now_ms, ARGV[2] = limit, ARGV[3] = claim_ms(processing value)
+_RETRY_CLAIM_LUA = """
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+if #due == 0 then return {} end
+redis.call('ZREM', KEYS[1], unpack(due))
+for i, payload in ipairs(due) do
+    redis.call('HSET', KEYS[2], payload, ARGV[3])
+end
+return due
+"""
+
+
+class _RetryQueueBackend:
+    """Redis ZSet 后端 —— schedule / claim / ack / sweep_stalled"""
+
+    DEFAULT_PROCESSING_TIMEOUT_SEC = 60
+
+    def __init__(self) -> None:
+        self._namespace = settings.REDIS_NAMESPACE or "antcode"
+        self._processing_timeout_sec = int(
+            getattr(
+                settings,
+                "RETRY_PROCESSING_TIMEOUT_SEC",
+                self.DEFAULT_PROCESSING_TIMEOUT_SEC,
+            )
+        )
+        self._claim_sha: str | None = None
+        self._script_lock = asyncio.Lock()
+
+    def pending_key(self) -> str:
+        return f"{self._namespace}:retry:pending"
+
+    def processing_key(self) -> str:
+        return f"{self._namespace}:retry:processing"
+
+    @staticmethod
+    def _encode(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _decode(raw: bytes | str) -> dict[str, Any] | None:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning(f"retry payload 反序列化失败,丢弃: {exc}")
+            return None
+
+    async def _get_redis(self):
+        from antcode_core.infrastructure.redis.client import get_redis_client
+
+        return await get_redis_client()
+
+    async def _ensure_script(self, redis) -> None:
+        if self._claim_sha is not None:
+            return
+        async with self._script_lock:
+            if self._claim_sha is None:
+                self._claim_sha = await redis.script_load(_RETRY_CLAIM_LUA)
+
+    async def schedule(
+        self,
+        *,
+        task_id: Any,
+        run_id: str,
+        retry_time: datetime,
+        retry_count: int,
+    ) -> None:
+        redis = await self._get_redis()
+        payload = self._encode(
+            {
+                "task_id": task_id,
+                "run_id": run_id,
+                "retry_time": retry_time.isoformat(),
+                "retry_count": retry_count,
+            }
+        )
+        score = int(retry_time.timestamp() * 1000)
+        await redis.zadd(self.pending_key(), {payload: score})
+
+    async def claim_due(self, limit: int = 32) -> list[dict[str, Any]]:
+        redis = await self._get_redis()
+        await self._ensure_script(redis)
+        now_ms = int(time.time() * 1000)
+        try:
+            raw_list = await redis.evalsha(
+                self._claim_sha,
+                2,
+                self.pending_key(),
+                self.processing_key(),
+                str(now_ms),
+                str(limit),
+                str(now_ms),
+            )
+        except Exception as exc:
+            if "NOSCRIPT" in str(exc):
+                logger.warning("retry claim 脚本未在 Redis 缓存中,回退 EVAL")
+                self._claim_sha = None
+                raw_list = await redis.eval(
+                    _RETRY_CLAIM_LUA,
+                    2,
+                    self.pending_key(),
+                    self.processing_key(),
+                    str(now_ms),
+                    str(limit),
+                    str(now_ms),
+                )
+            else:
+                raise
+        out: list[dict[str, Any]] = []
+        for raw in raw_list or []:
+            item = self._decode(raw)
+            if item is not None:
+                item["__raw_payload"] = (
+                    raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+                )
+                out.append(item)
+        return out
+
+    async def ack(self, raw_payload: str) -> None:
+        redis = await self._get_redis()
+        try:
+            await redis.hdel(self.processing_key(), raw_payload)
+        except Exception as exc:
+            logger.warning(f"retry ack 失败(可忽略): {exc}")
+
+    async def requeue(self, raw_payload: str, *, delay_seconds: int = 0) -> None:
+        redis = await self._get_redis()
+        score = int((time.time() + max(0, delay_seconds)) * 1000)
+        try:
+            pipe = redis.pipeline(transaction=True)
+            pipe.zadd(self.pending_key(), {raw_payload: score})
+            pipe.hdel(self.processing_key(), raw_payload)
+            await pipe.execute()
+        except Exception as exc:
+            logger.warning(f"retry requeue 失败: {exc}")
+
+    async def sweep_stalled(self) -> int:
+        """崩溃恢复:把 processing hash 里超时的条目 requeue 回 ZSet。"""
+        redis = await self._get_redis()
+        now_ms = int(time.time() * 1000)
+        threshold_ms = now_ms - self._processing_timeout_sec * 1000
+        try:
+            entries = await redis.hgetall(self.processing_key())
+        except Exception as exc:
+            logger.warning(f"retry sweep hgetall 失败: {exc}")
+            return 0
+        if not entries:
+            return 0
+        requeued = 0
+        for raw, claim_ms_raw in entries.items():
+            try:
+                claim_ms = int(
+                    claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw
+                )
+            except (ValueError, AttributeError):
+                claim_ms = 0
+            if claim_ms > threshold_ms:
+                continue
+            raw_str = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+            await self.requeue(raw_str, delay_seconds=0)
+            requeued += 1
+        if requeued:
+            logger.warning(
+                f"retry sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务"
+            )
+        return requeued
+
+    async def peek_all(self) -> list[dict[str, Any]]:
+        redis = await self._get_redis()
+        raw_members = await redis.zrange(
+            self.pending_key(), 0, -1, withscores=True
+        )
+        out: list[dict[str, Any]] = []
+        for raw, score in raw_members or []:
+            item = self._decode(raw)
+            if item is None:
+                continue
+            item["_score_ms"] = int(score)
+            out.append(item)
+        return out
+
+
+class _RetryQueueShim:
+    """兼容旧调用点 ``retry_service._retry_queue.put({...})``。
+
+    scheduler_loop._schedule_retry 直接 poke 私有属性 put 一个 dict
+    (keys: task_id, run_id, retry_time, retry_count),这里做一个 shim
+    把它翻译成 backend.schedule() 落 Redis ZSet。禁止改 scheduler_loop
+    的前提下,只能这样兼容。
+    """
+
+    def __init__(self, backend: "_RetryQueueBackend") -> None:
+        self._backend = backend
+
+    async def put(self, item: dict[str, Any]) -> None:
+        retry_time = item.get("retry_time")
+        # 保底: 允许 None / naive datetime,直接落 now
+        if not isinstance(retry_time, datetime):
+            retry_time = datetime.now(UTC)
+        elif retry_time.tzinfo is None:
+            retry_time = retry_time.replace(tzinfo=UTC)
+        await self._backend.schedule(
+            task_id=item.get("task_id"),
+            run_id=item.get("run_id") or "",
+            retry_time=retry_time,
+            retry_count=int(item.get("retry_count") or 0),
+        )
+
+
 class RetryService:
     """任务重试服务"""
 
     def __init__(self):
         self.default_config = RetryConfig()
         self.compensation_handlers = {}
-        self._retry_queue = asyncio.Queue()
+        self._backend = _RetryQueueBackend()
+        # 兼容 scheduler_loop._schedule_retry 里对 _retry_queue.put() 的旧调用
+        self._retry_queue = _RetryQueueShim(self._backend)
         self._running = False
+        self._worker_task: asyncio.Task | None = None
 
     async def start(self):
         """启动重试服务"""
         self._running = True
-        asyncio.create_task(self._process_retry_queue())
-        logger.info("任务重试服务已启动")
+        self._worker_task = asyncio.create_task(self._run_loop())
+        logger.info("任务重试服务已启动 (Redis ZSet 持久化)")
 
     async def stop(self):
         """停止重试服务"""
         self._running = False
+        if self._worker_task is not None and not self._worker_task.done():
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._worker_task = None
         logger.info("任务重试服务已停止")
 
     def calculate_delay(self, retry_count, config=None):
@@ -127,7 +372,7 @@ class RetryService:
             return None
 
         delay = self.calculate_delay(current_retry, config)
-        next_retry_time = datetime.now() + timedelta(seconds=delay)
+        next_retry_time = datetime.now(UTC) + timedelta(seconds=delay)
 
         execution.retry_count = current_retry + 1
         execution.status = TaskStatus.PENDING
@@ -137,13 +382,11 @@ class RetryService:
         task.failure_count += 1
         await task.save()
 
-        await self._retry_queue.put(
-            {
-                "task_id": task.id,
-                "run_id": execution.run_id,
-                "retry_time": next_retry_time,
-                "retry_count": execution.retry_count,
-            }
+        await self._backend.schedule(
+            task_id=task.id,
+            run_id=execution.run_id,
+            retry_time=next_retry_time,
+            retry_count=execution.retry_count,
         )
 
         logger.info(
@@ -198,7 +441,7 @@ class RetryService:
             await task.save()
 
             execution.status = TaskStatus.FAILED
-            execution.end_time = datetime.now()
+            execution.end_time = datetime.now(UTC)
             execution.error_message = f"重试耗尽: {error}"
             await execution.save()
 
@@ -225,7 +468,7 @@ class RetryService:
                 f"执行ID: {execution.run_id}\n"
                 f"重试次数: {execution.retry_count}\n"
                 f"错误信息: {error}\n"
-                f"失败时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                f"失败时间: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
             await alert_service.send_alert(
@@ -235,41 +478,62 @@ class RetryService:
         except Exception as e:
             logger.error(f"发送任务失败告警失败: {e}")
 
-    async def _process_retry_queue(self):
-        """处理重试队列
+    async def _run_loop(self):
+        """从 Redis ZSet 原子 claim 到期任务并 trigger。
 
-        #15: 入口加 leader 闸口 —— 双 Master 场景下,非 Leader 不能 trigger
-        任务,否则会和 Leader 的 scheduler 双跑。空转 sleep 让出循环。
+        #15: 入口加 leader 闸口 —— 双 Master 场景下,非 Leader 不能 trigger。
+        P1-18: 每轮 sweep_stalled 恢复崩溃遗留 -> claim_due -> trigger -> ack。
+        Master 重启 / 切主后 ZSet 数据仍在 Redis,新 Leader 直接接管。
         """
         from antcode_master.leader import ensure_leader
+
+        sweep_every_n = 10
+        tick_counter = 0
 
         while self._running:
             try:
                 if not await ensure_leader():
-                    # 非 Leader,空转;不消费队列 —— 让 Leader 的 retry_service
-                    # 来 trigger。
+                    # 非 Leader,空转;不消费队列 —— 让 Leader 处理
                     await asyncio.sleep(1.0)
                     continue
 
+                tick_counter += 1
+                if tick_counter % sweep_every_n == 1:
+                    try:
+                        await self._backend.sweep_stalled()
+                    except Exception as exc:
+                        logger.warning(f"retry sweep_stalled 异常: {exc}")
+
                 try:
-                    retry_item = await asyncio.wait_for(self._retry_queue.get(), timeout=1.0)
-                except TimeoutError:
+                    claimed = await self._backend.claim_due(limit=32)
+                except Exception as exc:
+                    logger.error(f"retry claim_due 异常: {exc}")
+                    await asyncio.sleep(1)
                     continue
 
-                retry_time = retry_item["retry_time"]
-                now = datetime.now()
+                if not claimed:
+                    await asyncio.sleep(1.0)
+                    continue
 
-                if retry_time > now:
-                    wait_seconds = (retry_time - now).total_seconds()
-                    await asyncio.sleep(wait_seconds)
+                for item in claimed:
+                    raw_payload = item.get("__raw_payload", "")
+                    task_id = item.get("task_id")
+                    try:
+                        from antcode_master.control.scheduler_loop import (
+                            scheduler_service,
+                        )
 
-                task_id = retry_item["task_id"]
-                from antcode_master.control.scheduler_loop import scheduler_service
+                        await scheduler_service.trigger_task(task_id)
+                        logger.info(f"任务 {task_id} 重试已触发")
+                        await self._backend.ack(raw_payload)
+                    except Exception as exc:
+                        logger.error(
+                            f"trigger_task({task_id}) 失败,requeue: {exc}"
+                        )
+                        await self._backend.requeue(raw_payload, delay_seconds=5)
 
-                await scheduler_service.trigger_task(task_id)
-
-                logger.info(f"任务 {task_id} 重试已触发")
-
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"处理重试队列失败: {e}")
                 await asyncio.sleep(1)
@@ -310,29 +574,23 @@ class RetryService:
         }
 
     async def get_pending_retries(self):
-        """获取待重试的任务列表"""
+        """获取待重试的任务列表(Redis ZSet 只读快照)"""
+        try:
+            snapshot = await self._backend.peek_all()
+        except Exception as exc:
+            logger.warning(f"peek pending retries 失败: {exc}")
+            return []
+
         pending = []
-        queue_size = self._retry_queue.qsize()
-        items = []
-
-        for _ in range(queue_size):
-            try:
-                item = self._retry_queue.get_nowait()
-                items.append(item)
-                pending.append(
-                    {
-                        "task_id": item["task_id"],
-                        "run_id": item["run_id"],
-                        "retry_time": item["retry_time"].isoformat(),
-                        "retry_count": item["retry_count"],
-                    }
-                )
-            except asyncio.QueueEmpty:
-                break
-
-        for item in items:
-            await self._retry_queue.put(item)
-
+        for item in snapshot:
+            pending.append(
+                {
+                    "task_id": item.get("task_id"),
+                    "run_id": item.get("run_id"),
+                    "retry_time": item.get("retry_time"),
+                    "retry_count": item.get("retry_count"),
+                }
+            )
         return pending
 
 

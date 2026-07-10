@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from antcode_master.leader import ensure_leader
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from antcode_core.application.services.lease_service import LeaseStore
     from antcode_core.infrastructure.redis.stream_client import StreamClient
@@ -100,6 +102,18 @@ class LeaseSweeperLoop:
     async def _run_loop(self) -> None:
         while self._running:
             try:
+                # P1-16: 多 master 副本时,必须 leader gate,否则每个副本都会
+                # 独立 sweep -> 重复触发 _on_worker_evicted、重复写 audit、
+                # 让原本正常的 worker 被误杀 N 倍。与同目录 redispatch_loop /
+                # retry_loop / reconcile_loop 一致,in-loop check + sleep(interval)
+                # continue,让副本 follower 时保持 idle 而非退出。
+                if not await ensure_leader():
+                    try:
+                        await asyncio.sleep(self._interval)
+                    except asyncio.CancelledError:
+                        break
+                    continue
+
                 evicted = await self._lease_store.sweep_expired(batch=self._batch)
                 if evicted:
                     await self._handle_evictions(evicted)

@@ -623,15 +623,38 @@ class GatewayTransport(TransportBase):
         return await self.ack_task(receipt, accepted=False, reason=reason)
 
     async def report_result(self, result: TaskResult) -> bool:
-        """报告任务结果：``TaskStatus`` 入 outbox，后台流推送。"""
+        """报告任务结果：走 ``DataService.StreamStatus`` 单条 client-stream，
+        阻塞等真实 ``StatusAck``。
+
+        P1-25 修复:
+        --------
+        旧实现走的是 outbox → ``_status_push_loop`` → 长连接 ``StreamStatus``
+        的路径。虽然 B4 用 ``sent_event`` 等 generator ``yield`` 出去，但
+        gRPC ``yield msg`` 完成只代表消息 flush 到本地 HTTP/2 send buffer,
+        **服务端是否落 Redis 未确认** —— server 侧 handler 是 client-stream,
+        只有整条流关闭时才返回 ``StatusAck``, 中间任何一条持久化失败会
+        ``abort(UNAVAILABLE)``, 但那时 ``sent_event`` 已经被 set 了,
+        engine 认为上报成功 → XACK 源消息 → 结果丢失。
+
+        修复策略: 每次上报开一条 **单元素 client-stream**, 只 yield 这一条
+        ``TaskStatus``, 然后关闭发送端等 server 回 ``StatusAck``:
+          * ``ack.received >= 1`` → server 已经把这条 TaskStatus 落到
+            ``task:result`` Redis stream (见 gateway data_service.StreamStatus 实现)
+            → 返回 True, engine 可以安全 XACK。
+          * 任何异常 / ``received == 0`` → 返回 False, engine 保留 PEL,
+            下一轮 reclaim 重试。
+        代价: 每个结果上报多一次 stream 建立/关闭的 RTT; 结果上报是低频
+        (每个任务一次), 换来的精确 ack 语义值得。日志侧继续走 outbox
+        长连接, 不受影响。
+        """
         if not self._running:
             logger.warning(f"上报结果失败: 传输未运行 task_id={result.task_id}")
             return False
-        if self._status_outbox is None:
-            logger.warning(f"上报结果失败: status outbox 未就绪 task_id={result.task_id}")
+        if not self._data_stub:
+            logger.warning(f"上报结果失败: data_stub 未就绪 task_id={result.task_id}")
             return False
 
-        # 幂等性：相同 task_id 重复入队就跳过
+        # 幂等性：相同 task_id 已经上报过就跳过
         cache_key = f"result:{result.task_id}"
         if self._gateway_config.enable_receipt_idempotency:
             cached = self._get_cached_result(cache_key)
@@ -649,28 +672,54 @@ class GatewayTransport(TransportBase):
             # 关联到同一个分布式 trace。
             inject_trace(msg)
 
-            # B4: 等 drain 真正 yield 出去（gRPC send 成功）才算成功。
-            # 否则 outbox put 后立即 return True 会让 engine ack + remove，
-            # 若此时流断连 → 结果丢失、上游卡 running 直到 reclaim 触发双跑。
-            sent_event = asyncio.Event()
-            await self._status_outbox.put((msg, sent_event))
+            async def _one_shot():
+                # 单条 client-stream: yield 一次即关闭发送端, 触发 server 回
+                # StatusAck。gRPC AsyncIO 语义: async generator 正常 return
+                # 表示 half-close (client done sending), server 处理完剩余
+                # 请求后返回 unary response。
+                yield msg
+
             try:
-                await asyncio.wait_for(
-                    sent_event.wait(), timeout=self._gateway_config.call_timeout
+                ack = await asyncio.wait_for(
+                    self._data_stub.StreamStatus(
+                        _one_shot(),
+                        metadata=self._get_auth_metadata(),
+                    ),
+                    timeout=self._gateway_config.call_timeout,
                 )
             except TimeoutError:
                 logger.warning(
-                    f"结果 outbox 投递超时({self._gateway_config.call_timeout}s), "
+                    f"report_result StreamStatus 超时"
+                    f"({self._gateway_config.call_timeout}s), "
                     f"引擎将保留 PEL 等 reclaim: task_id={result.task_id}"
                 )
-                # 不缓存 True — 让下次重试还能进入
+                self._consecutive_failures += 1
+                return False
+            except Exception as exc:
+                # gRPC 错误(UNAVAILABLE / abort) 都归到重试路径, 不缓存 True。
+                self._consecutive_failures += 1
+                logger.warning(
+                    f"report_result StreamStatus 失败: task_id={result.task_id} exc={exc}"
+                )
+                await self._handle_connection_error(exc)
                 return False
 
+            received = int(getattr(ack, "received", 0) or 0)
+            if received < 1:
+                # server 返回了但没确认落库(极少见, 可能是 abort 早于第一次
+                # handle), 视为失败让 engine 重试。
+                logger.warning(
+                    f"report_result StatusAck.received={received}, "
+                    f"服务端未确认持久化, 视为失败: task_id={result.task_id}"
+                )
+                return False
+
+            self._consecutive_failures = 0
             if self._gateway_config.enable_receipt_idempotency:
                 self._cache_result(cache_key, True)
             return True
         except Exception:
-            logger.exception("入队任务状态失败")
+            logger.exception("上报任务状态失败")
             return False
 
     # ==================== TransportBase 实现：日志面 ====================

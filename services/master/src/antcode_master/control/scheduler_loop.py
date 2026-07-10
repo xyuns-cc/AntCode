@@ -1030,6 +1030,19 @@ class SchedulerService:
             if execution:
                 execution.result_data = result
                 await execution.save(update_fields=["result_data"])
+            # P1-17: 分发成功后必须显式把 dispatch_status 推到 DISPATCHED,
+            # 不能只写 result_data。否则:
+            # - reconcile_loop 只查 RUNNING/DISPATCHED 都捞不到分发出去但
+            #   worker 没上报 RUNNING 的僵尸任务;
+            # - 上游 status 派生器还停留在 DISPATCHING,导致 TaskStatus 也
+            #   停在 DISPATCHING,前端展示与真实分发链路脱节。
+            # 走 status_service CAS 保证:并发 worker 迟到的 ACKED 报文能
+            # 覆盖到,但不会翻转已经命中终态(FAILED/TIMEOUT)的记录。
+            await execution_status_service.update_dispatch_status(
+                run_id=run_id,
+                status=DispatchStatus.DISPATCHED,
+                status_at=status_at,
+            )
             await self._log_execution(
                 execution,
                 "INFO",

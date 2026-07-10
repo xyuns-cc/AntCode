@@ -68,10 +68,10 @@ const BatchListPage: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
+      // listBatches 已经把后端 PaginationResponse 里的 pagination.total 拍平。
       const res = await crawlService.listBatches({ page, size })
-      const list = (res as unknown as { items?: CrawlBatchSummary[] })?.items || []
-      setItems(list)
-      setTotal((res as unknown as { total?: number })?.total ?? list.length)
+      setItems(res.items)
+      setTotal(res.total)
     } catch (e) {
       Logger.error('load crawl batches failed', e)
       message.error('加载批次失败')
@@ -89,11 +89,11 @@ const BatchListPage: React.FC = () => {
     batch: CrawlBatchSummary
   ) => {
     try {
-      if (action === 'start') await crawlService.startBatch(batch.batch_id)
-      else if (action === 'pause') await crawlService.pauseBatch(batch.batch_id)
-      else if (action === 'resume') await crawlService.resumeBatch(batch.batch_id)
-      else if (action === 'cancel') await crawlService.cancelBatch(batch.batch_id)
-      else await crawlService.deleteBatch(batch.batch_id)
+      if (action === 'start') await crawlService.startBatch(batch.id)
+      else if (action === 'pause') await crawlService.pauseBatch(batch.id)
+      else if (action === 'resume') await crawlService.resumeBatch(batch.id)
+      else if (action === 'cancel') await crawlService.cancelBatch(batch.id)
+      else await crawlService.deleteBatch(batch.id)
       message.success('操作成功')
       refresh()
     } catch (e) {
@@ -104,7 +104,7 @@ const BatchListPage: React.FC = () => {
 
   const openItems = async (batch: CrawlBatchSummary) => {
     try {
-      const res = await crawlService.getBatchItems(batch.batch_id, 100)
+      const res = await crawlService.getBatchItems(batch.id, 100)
       setItemsModal({ open: true, batch, items: res.items || [] })
     } catch (e) {
       message.error('加载抓取数据失败')
@@ -112,7 +112,7 @@ const BatchListPage: React.FC = () => {
   }
 
   const download = (batch: CrawlBatchSummary, format: 'json' | 'csv') => {
-    window.open(crawlService.exportBatchUrl(batch.batch_id, format), '_blank')
+    window.open(crawlService.exportBatchUrl(batch.id, format), '_blank')
   }
 
   const submitCreate = async () => {
@@ -145,7 +145,7 @@ const BatchListPage: React.FC = () => {
         <Space direction="vertical" size={0}>
           <Text strong>{name}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {r.batch_id?.slice(0, 12)}…
+            {r.id?.slice(0, 12)}…
           </Text>
         </Space>
       ),
@@ -233,7 +233,7 @@ const BatchListPage: React.FC = () => {
     >
       <Card size="small" bodyStyle={{ padding: 0 }}>
         <Table<CrawlBatchSummary>
-          rowKey="batch_id"
+          rowKey="id"
           columns={columns}
           dataSource={items}
           loading={loading}

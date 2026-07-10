@@ -8,7 +8,9 @@
 import { BaseService } from './base'
 
 export interface CrawlBatchSummary {
-  batch_id: string
+  // 后端 CrawlBatchResponse.id 承载的是 batch.public_id（对齐 crawl.py:110）；
+  // 前端别再自造 batch_id 名字，历史上因此走出 /batches/undefined/... 请求。
+  id: string
   project_id: string
   name: string
   description?: string
@@ -23,6 +25,14 @@ export interface CrawlBatchSummary {
   created_at: string
   started_at?: string
   completed_at?: string
+}
+
+export interface CrawlBatchListResult {
+  items: CrawlBatchSummary[]
+  total: number
+  page: number
+  size: number
+  pages: number
 }
 
 export interface CrawlBatchCreatePayload {
@@ -61,17 +71,31 @@ class CrawlService extends BaseService {
     super('/api/v1/crawl')
   }
 
-  // 批次列表（支持项目筛选）
+  // 批次列表（支持项目筛选）。后端返回 PaginationResponse ——
+  // BaseService.extractData 会剥掉最外层 `.data`，拿到的是
+  // `{ items, pagination: { page, size, total, pages } }`（见
+  // packages/antcode_core/.../schemas/common.py PaginationData）。
+  // 前端上层只关心 items+total，这里把嵌套拍平，避免 BatchList 里出现
+  // res.total ?? list.length 之类的 fallback（总数会永远等于当前页长度）。
   async listBatches(params?: {
     project_id?: string
     status?: string
     page?: number
     size?: number
-  }): Promise<{ items: CrawlBatchSummary[]; total: number }> {
-    return this.get<{ items: CrawlBatchSummary[]; total: number }>(
-      '/batches',
-      { params }
-    )
+  }): Promise<CrawlBatchListResult> {
+    const raw = await this.get<{
+      items: CrawlBatchSummary[]
+      pagination: { page: number; size: number; total: number; pages: number }
+    }>('/batches', { params })
+    const items = raw?.items ?? []
+    const pagination = raw?.pagination
+    return {
+      items,
+      total: pagination?.total ?? items.length,
+      page: pagination?.page ?? params?.page ?? 1,
+      size: pagination?.size ?? params?.size ?? items.length,
+      pages: pagination?.pages ?? 1,
+    }
   }
 
   // 批次详情

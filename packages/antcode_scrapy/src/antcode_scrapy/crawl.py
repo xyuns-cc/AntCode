@@ -70,17 +70,34 @@ def _run(rule: dict[str, Any]) -> int:
     # 覆盖 "Redis 宕机时每条 item 被吞、items>0 但 written=0" 的假成功场景。
     xadd_failed = int(stats.get_value("antcode/redis_xadd_failed", 0) or 0)
     written = int(stats.get_value("antcode/redis_items_written", 0) or 0)
+    # P1-27: pipeline close_spider 里 sink.close 报告的最终 flush 情况——
+    # 老实说这两个字段是新加的，None 表示没触发（direct 模式 close 返回 None）。
+    final_flush_failed = int(
+        stats.get_value("antcode/final_flush_failed", 0) or 0
+    )
+    final_flush_remaining = int(
+        stats.get_value("antcode/final_flush_remaining", 0) or 0
+    )
 
     print(
         f"[antcode-scrapy] finish_reason={finish_reason} "
-        f"items={items} written={written} errors={errors} xadd_failed={xadd_failed}"
+        f"items={items} written={written} errors={errors} "
+        f"xadd_failed={xadd_failed} final_flush_failed={final_flush_failed} "
+        f"final_flush_remaining={final_flush_remaining}"
     )
 
+    # P1-27: close 阶段 flush 失败或 buffer 剩余数据 → 非零退出
+    if final_flush_failed > 0 or final_flush_remaining > 0:
+        return 1
     # R1-P1-9: xadd 有失败 → 非零退出
     if xadd_failed > 0:
         return 1
     # items > 0 但一条都没写进 Redis → 假成功场景，非零退出
     if items > 0 and written == 0:
+        return 1
+    # P1-27: items > written（有条目没被 sink ack）也算失败，
+    # 覆盖 gateway 模式 buffer 里还有条目没送出去的情况
+    if items > 0 and written < items:
         return 1
     # 与旧 run_rule.py 语义：有 item 即成功；无 item 且有 ERROR → 失败
     if items > 0:

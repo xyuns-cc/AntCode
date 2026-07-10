@@ -23,13 +23,13 @@ P3 LeaseStore 已接管租约状态机:
   ``XREADGROUP`` 后封装成 ``ControlEvent`` yield 给 Worker。
 - ``AckControl`` XACK 对应 stream 的 message。``event_id`` 编码格式
   ``{stream_key}|{redis_msg_id}``，与服务端 yield 时使用的 ``event_id`` 一致。
+  P1-16：格式化 event_id 无进程内映射，多 gateway 副本 / 重启后依然可 ACK。
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import secrets
 import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -86,10 +86,11 @@ class GatewayControlService(ControlServiceServicer):
         self._lease_store = lease_store
         self._control_group_lock = asyncio.Lock()
         self._initialized_control_groups: set[tuple[str, str]] = set()
-        # P2-#21: event_id 不再直接暴露 stream key/msg id, 用 server 端短 token
-        # 映射, AckControl 时反查。
-        self._event_id_map: dict[str, tuple[str, str]] = {}
-        self._event_id_lock = asyncio.Lock()
+        # P1-16: event_id 使用可自解释格式 f"{stream_key}|{msg_id}",AckControl
+        # 直接反解析。原方案的进程内 _event_id_map 在多 gateway 副本 / 单副本重启
+        # 后会丢失映射,导致 AckControl 恒返回 received=False,control 事件被
+        # 无限重投。stream_key 本身是 control:{worker_id} / control:global,
+        # worker 侧本就知道自己的 worker_id,不构成新的信息泄露。
         if lease_store is not None:
             logger.info(
                 "ControlService 已初始化（LeaseStore 已注入: ttl_ms={}, renew_after_ms={}）",
@@ -410,7 +411,61 @@ class GatewayControlService(ControlServiceServicer):
         consumer = worker_id
         logger.info(f"WatchControl 已建立: worker_id={worker_id}")
 
+        # P1-16: 先排空该 consumer 的 PEL —— worker 断线重连时,gateway 上一次
+        # XREADGROUP 已经把 cancel/kill/config_update 交付到该 consumer 名下,
+        # 但 worker 掉线之前没来得及回 AckControl,消息挂在 PEL。旧实现只读
+        # ">"(新消息),PEL 里的孤儿事件永远不会重投,直到有另一个 consumer 用
+        # XAUTOCLAIM 抢过来 —— 但 gateway 侧并没有这样的 loop。
+        # 参考 handlers/poll.py:_drain_pending_streams 的做法,重连时先用 "0"
+        # 读一遍自己的 PEL,把未 ack 的消息重新投给 worker,幂等由 worker 侧
+        # (event_id 去重 / 任务级 SET NX) 保证。
+        # 注意:PEL 采用"一次性大批量读 + 立即 yield 完 + 翻转"策略,而不是像
+        # 主循环那样 count=1 轮询;否则未及时 ACK 时会重复读到同一批 PEL 记录,
+        # 无限制 yield 重复事件。
         try:
+            try:
+                pel_result = await redis.xreadgroup(
+                    groupname=group,
+                    consumername=consumer,
+                    streams=dict.fromkeys(streams, "0"),
+                    count=CONTROL_STREAM_MAXLEN,
+                    block=0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"WatchControl PEL 排空失败(继续读新消息): worker={worker_id} err={exc}"
+                )
+                pel_result = None
+
+            if pel_result:
+                pel_total = 0
+                for stream_data in pel_result:
+                    stream_key = stream_data[0]
+                    if isinstance(stream_key, bytes):
+                        stream_key = stream_key.decode()
+                    messages = stream_data[1]
+                    for msg_id, data in messages:
+                        if isinstance(msg_id, bytes):
+                            msg_id = msg_id.decode()
+                        pel_total += 1
+                        event = self._build_control_event(
+                            stream_key=stream_key,
+                            msg_id=msg_id,
+                            data=data,
+                        )
+                        if event is None:
+                            with contextlib.suppress(Exception):
+                                await redis.xack(stream_key, group, msg_id)
+                            continue
+                        yield event
+                if pel_total:
+                    logger.info(
+                        f"WatchControl PEL 排空: worker_id={worker_id} "
+                        f"replayed={pel_total}"
+                    )
+
             while True:
                 # 客户端取消即退出
                 if context.cancelled():
@@ -442,7 +497,7 @@ class GatewayControlService(ControlServiceServicer):
                     for msg_id, data in messages:
                         if isinstance(msg_id, bytes):
                             msg_id = msg_id.decode()
-                        event = await self._build_control_event(
+                        event = self._build_control_event(
                             stream_key=stream_key,
                             msg_id=msg_id,
                             data=data,
@@ -460,7 +515,7 @@ class GatewayControlService(ControlServiceServicer):
         finally:
             logger.info(f"WatchControl 已断开: worker_id={worker_id}")
 
-    async def _build_control_event(
+    def _build_control_event(
         self,
         stream_key: str,
         msg_id: str,
@@ -468,9 +523,10 @@ class GatewayControlService(ControlServiceServicer):
     ) -> control_pb2.ControlEvent | None:
         """把 Stream 一条消息封装成 ``ControlEvent``。
 
-        P2-#21: event_id 是 server 端生成的短 token (secrets.token_hex(8)),
-        在 ``_event_id_map`` 维护 token -> (stream_key, msg_id) 的映射,
-        AckControl 时反查。不再把 stream key 明文塞回客户端。
+        P1-16: event_id 使用 ``f"{stream_key}|{msg_id}"`` 可自解释格式。
+        AckControl 直接解析,避免进程内 map 在多 gateway 副本 / 重启后失效。
+        stream_key 形如 ``control:{worker_id}`` / ``control:global``,worker 侧
+        本就知道自己的 worker_id,不构成新的信息泄露。
         """
         try:
             decoded = decode_stream_payload(data)
@@ -478,7 +534,7 @@ class GatewayControlService(ControlServiceServicer):
             logger.exception(f"control stream payload 解码失败: {exc}")
             return None
 
-        event_id = await self._register_event_id(stream_key, msg_id)
+        event_id = f"{stream_key}|{msg_id}"
         control_type = decoded.get("control_type", "")
 
         if control_type in ("cancel", "kill"):
@@ -569,17 +625,15 @@ class GatewayControlService(ControlServiceServicer):
         if not event_id:
             return control_pb2.AckControlResponse(received=False)
 
-        # P2-#21: 反查 server 端映射拿到真实 stream_key/msg_id;
-        # 兼容旧 "stream|msg" 形式以平滑滚动升级。
-        resolved = await self._resolve_event_id(event_id)
-        if resolved is None:
-            if "|" in event_id:
-                stream_key, msg_id = event_id.split("|", 1)
-            else:
-                logger.warning(f"AckControl 未知 event_id: {event_id}")
-                return control_pb2.AckControlResponse(received=False)
-        else:
-            stream_key, msg_id = resolved
+        # P1-16: event_id 是 f"{stream_key}|{msg_id}" 格式,直接解析,
+        # 无进程内 map -> 多 gateway 副本 / 重启后依然可以 ACK。
+        if "|" not in event_id:
+            logger.warning(f"AckControl 未知格式 event_id: {event_id}")
+            return control_pb2.AckControlResponse(received=False)
+        stream_key, msg_id = event_id.split("|", 1)
+        if not stream_key or not msg_id:
+            logger.warning(f"AckControl event_id 缺失字段: {event_id}")
+            return control_pb2.AckControlResponse(received=False)
 
         try:
             redis = await get_redis_client()
@@ -620,27 +674,3 @@ class GatewayControlService(ControlServiceServicer):
                     raise
             self._initialized_control_groups.add(key)
 
-    async def _register_event_id(self, stream_key: str, msg_id: str) -> str:
-        """P2-#21: 生成短 token 作为对外 event_id, 服务器端维护映射。
-
-        与旧 ``{stream}|{msg}`` 形式不同, 这里不暴露 redis stream key。
-        worker 端 AckControl 时只看到 token, 由 _resolve_event_id 反查。
-        """
-        token = secrets.token_hex(8)
-        async with self._event_id_lock:
-            # 限制 map 大小, 简单防御内存溢出: 超过 10000 条时清掉最早一半。
-            if len(self._event_id_map) > 10_000:
-                # dict 在 3.7+ 是有序的, 直接砍前一半 keys。
-                cutoff = len(self._event_id_map) // 2
-                stale_keys = list(self._event_id_map.keys())[:cutoff]
-                for k in stale_keys:
-                    self._event_id_map.pop(k, None)
-            self._event_id_map[token] = (stream_key, msg_id)
-        return token
-
-    async def _resolve_event_id(
-        self, event_id: str
-    ) -> tuple[str, str] | None:
-        """根据 token 反查 (stream_key, msg_id)。命中后即从 map 移除避免重放。"""
-        async with self._event_id_lock:
-            return self._event_id_map.pop(event_id, None)

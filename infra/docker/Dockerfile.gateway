@@ -56,7 +56,11 @@ COPY services/gateway/src services/gateway/src/
 # 创建虚拟环境并安装依赖
 RUN uv venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    uv sync --package antcode-gateway
+    uv sync --package antcode-gateway && \
+    # P1-21: 装 grpcio-health-checking(不在 pyproject.toml 里),让 server.py
+    # 能注册 grpc.health.v1.Health 服务,healthcheck 走 grpc_health_probe 时
+    # 才能真正拿到 SERVING/NOT_SERVING;否则 probe 会拿到 UNIMPLEMENTED。
+    uv pip install "grpcio-health-checking>=1.60.0"
 
 # ================== 阶段 2: 运行时镜像 ==================
 FROM python:3.11.11-slim AS runtime
@@ -111,10 +115,12 @@ USER appuser
 # 暴露 gRPC 端口
 EXPOSE 50051
 
-# J5: 健康检查改用 grpc_health_probe 做 RPC 级探测（回退 pgrep 若 probe 不可用）
+# P1-21: 健康检查只走 grpc_health_probe 的 RPC 级探测 —— 拿掉 pgrep 兜底,
+# 因为 pgrep 只看进程名,server.start() 失败但主进程还没 exit 时会假 healthy。
+# server.py 已经注册了 grpc.health.v1.Health 并在启动/关闭时置位 SERVING/NOT_SERVING,
+# probe 会真实反映 gRPC 端口是否 listen + 服务是否可用。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
-    CMD /usr/local/bin/grpc_health_probe -addr=:50051 -connect-timeout=3s \
-        || pgrep -f antcode_gateway >/dev/null || exit 1
+    CMD /usr/local/bin/grpc_health_probe -addr=:50051 -connect-timeout=3s || exit 1
 
 # 启动命令
 CMD ["python", "-m", "antcode_gateway.main"]

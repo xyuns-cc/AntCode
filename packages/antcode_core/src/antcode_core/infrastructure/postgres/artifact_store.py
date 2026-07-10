@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from tortoise.transactions import in_transaction
+
 from antcode_core.domain.models import SourceArtifact, SourceArtifactChunk
 
 ARTIFACT_CHUNK_SIZE_BYTES = 1024 * 1024
@@ -29,11 +31,24 @@ class PostgresArtifactStore:
         media_type: str = "application/octet-stream",
         metadata: dict[str, object] | None = None,
     ) -> StoredArtifact:
+        # P1-13: SourceArtifact + SourceArtifactChunk 必须同事务写入。否则:
+        #   1) 并发同 hash 两个 get_or_none 都返回 None → 各自 create 撞唯一约束
+        #   2) SourceArtifact.create 成功但 chunks bulk_create 失败 → chunk_count
+        #      对不上,后续 read_blob 抛 "chunk 数量不一致"
         content_hash = hashlib.sha256(content).hexdigest()
-        artifact = await SourceArtifact.get_or_none(content_hash=content_hash)
         chunks = _split_chunks(content)
-        if artifact is None:
-            artifact = await self._create_artifact(content_hash, content, media_type, chunks, metadata)
+        async with in_transaction("default") as conn:
+            artifact = await SourceArtifact.filter(content_hash=content_hash).using_db(conn).first()
+            if artifact is None:
+                try:
+                    artifact = await self._create_artifact(
+                        content_hash, content, media_type, chunks, metadata, conn=conn
+                    )
+                except Exception:
+                    # 并发竞态:另一事务已写入,重查并复用
+                    artifact = await SourceArtifact.filter(content_hash=content_hash).using_db(conn).first()
+                    if artifact is None:
+                        raise
         return _stored_artifact(artifact)
 
     async def read_blob(self, content_hash: str) -> bytes:
@@ -55,9 +70,11 @@ class PostgresArtifactStore:
         media_type: str,
         chunks: list[bytes],
         metadata: dict[str, object] | None,
+        conn=None,
     ) -> SourceArtifact:
+        # P1-13: 接受外部 conn,与 write_blob in_transaction 复用同事务
         values = _artifact_values(content_hash, content, media_type, chunks, metadata)
-        artifact = await SourceArtifact.create(**values)
+        artifact = await SourceArtifact.create(**values, using_db=conn)
         await SourceArtifactChunk.bulk_create(
             [
                 SourceArtifactChunk(
@@ -66,7 +83,8 @@ class PostgresArtifactStore:
                     content=chunk,
                 )
                 for index, chunk in enumerate(chunks)
-            ]
+            ],
+            using_db=conn,
         )
         return artifact
 

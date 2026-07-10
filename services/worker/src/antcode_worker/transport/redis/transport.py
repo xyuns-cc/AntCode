@@ -193,7 +193,14 @@ class RedisTransport(TransportBase):
                 self._running = True
                 await self._set_state(WorkerState.ONLINE)
 
-                logger.info(f"Redis 传输层已启动: {self._redis_url}")
+                # P1-10: 明文 Redis URL 含 ACL 用户名/密码,禁止直接落 INFO 日志
+                _masked = self._redis_url
+                if "@" in _masked:
+                    _prefix, _suffix = _masked.split("@", 1)
+                    if ":" in _prefix:
+                        _prefix = _prefix.rsplit(":", 1)[0] + ":***"
+                    _masked = f"{_prefix}@{_suffix}"
+                logger.info(f"Redis 传输层已启动: {_masked}")
                 return True
 
             except Exception as e:
@@ -404,6 +411,14 @@ class RedisTransport(TransportBase):
         P1b：从 dict 切换到 Proto bytes（``data_pb2.TaskStatus``），写到
         ``task:result`` Stream 的单字段 ``PROTO_FIELD``。Master ``result_loop``
         通过 ``ProtoCodec(TaskStatus)`` 解码。
+
+        P1-25 修复: 之前无脑 ``await xadd(...); return True`` —— 只要没抛
+        异常就返回 True，但 XADD 返回 ``None`` / 空 msg id（极少见，例如
+        pipeline 内部报错被 lib 吞）时就无声“成功”了，然后 engine 会 XACK
+        掉源 ready-stream 消息，结果彻底丢。改为显式取 msg id，falsy 就
+        返回 False，让 engine 保留本地状态、不 XACK，等下一轮 reclaim。
+        Redis XADD 是同步语义（redis-py 返回时 server 已经写入并回 ack），
+        所以只要拿到非空 msg id 就等价于服务端持久化确认。
         """
         if not self._redis or not self._running:
             return False
@@ -432,7 +447,7 @@ class RedisTransport(TransportBase):
 
             # R1-P1-18 (审查报告): task:result 流之前没 maxlen 也无清理任务，
             # 随任务量线性增长直至 Redis 内存耗尽。加 approximate MAXLEN。
-            await self._run_with_reconnect(
+            msg_id = await self._run_with_reconnect(
                 "上报结果",
                 lambda: self._redis.xadd(
                     result_key,
@@ -441,6 +456,13 @@ class RedisTransport(TransportBase):
                     approximate=True,
                 ),
             )
+            if not msg_id:
+                # P1-25: 显式失败, 不 return True。
+                logger.error(
+                    "report_result XADD 未返回 msg_id, 视为持久化失败: "
+                    f"run_id={result.run_id} task_id={result.task_id}"
+                )
+                return False
             return True
 
         except Exception:

@@ -34,15 +34,43 @@ SOURCE_BUNDLE_MEDIA_TYPE = "application/vnd.antcode.source-bundle+tar-gzip"
 # git 特殊 remote helper（在控制面主机上等于任意命令/文件读）。
 _ALLOWED_GIT_SCHEMES = ("http://", "https://", "ssh://", "git@")
 
+# P1-11: Git 操作 timeout,防止恶意 slow-loris / 大 repo 拖死 master。
+# ls-remote 快速探测(30s);clone 主操作(300s = 5 分钟,大 repo 应改 shallow)。
+_GIT_LS_REMOTE_TIMEOUT_SEC = 30
+_GIT_CLONE_TIMEOUT_SEC = 300
+
+# P1-11: SSRF 防护 —— host 私网/回环/云元数据端点白名单/黑名单
+# 云元数据地址(AWS/GCP/Azure/阿里云等)一律禁止,防抓 IAM 凭证。
+_BLOCKED_HOST_PATTERNS = frozenset({
+    "169.254.169.254",  # AWS/GCP/Azure IMDS
+    "metadata.google.internal",  # GCP
+    "100.100.100.200",  # 阿里云
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "::1",
+})
+
+
+def _is_private_ipv4(host: str) -> bool:
+    """粗粒度检查是否为 IPv4 私网/回环/链路本地地址。"""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+
 
 def _validate_git_url(url: str) -> str:
-    """校验用户传入的 Git URL，防止 git remote helper 注入。
+    """校验用户传入的 Git URL，防止 git remote helper 注入和 SSRF。
 
     拒绝：
     - 空 / 非 str
     - 以 ``-`` 开头（被 git 当 flag）
     - 包含 ``::`` 或 ``ext::`` / ``file::`` 类 remote helper 语法
     - 不在允许 scheme 白名单内
+    - P1-11: host 是回环 / 云元数据端点(除非显式配置 ALLOW_PRIVATE_NODES)
 
     调用方仍需用 ``--`` 分隔 URL 与 argv（防御纵深）。
     """
@@ -58,6 +86,39 @@ def _validate_git_url(url: str) -> str:
         raise ValueError(
             f"Git URL 不合法：仅支持 {', '.join(_ALLOWED_GIT_SCHEMES)}"
         )
+
+    # P1-11: SSRF 防护 —— 解析 host 检查是否为回环/云元数据
+    try:
+        from antcode_core.common.config import settings
+        allow_private = bool(getattr(settings, "ALLOW_PRIVATE_NODES", False))
+    except Exception:
+        allow_private = False
+
+    # 简单 host 提取(不完整,但覆盖主流 http(s)/ssh 格式)
+    host_part = ""
+    for scheme in ("http://", "https://", "ssh://"):
+        if lowered.startswith(scheme):
+            host_part = stripped[len(scheme):].split("/", 1)[0].split("@")[-1]
+            # 去掉 port
+            if ":" in host_part and "[" not in host_part:
+                host_part = host_part.rsplit(":", 1)[0]
+            break
+    if not host_part and lowered.startswith("git@"):
+        host_part = stripped[4:].split(":", 1)[0]
+
+    host_lower = host_part.lower().strip()
+    if host_lower and not allow_private:
+        if host_lower in _BLOCKED_HOST_PATTERNS:
+            raise ValueError(
+                f"Git URL 不合法：禁止指向本地/云元数据端点 {host_lower!r}"
+                "（ALLOW_PRIVATE_NODES=true 显式放开）"
+            )
+        if _is_private_ipv4(host_lower):
+            raise ValueError(
+                f"Git URL 不合法：禁止指向私网/回环地址 {host_lower!r}"
+                "（ALLOW_PRIVATE_NODES=true 显式放开）"
+            )
+
     return stripped
 
 
@@ -170,7 +231,15 @@ def _run_git(
     command: list[str],
     cwd: Path | None = None,
     auth_config: GitAuthConfig | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    # P1-11: 无 timeout 的 git ls-remote / clone 可被 slow-loris / 巨型 repo 无限拖住 master。
+    # 默认按命令类型分配:ls-remote 短超时,clone 长超时。
+    if timeout is None:
+        if command and len(command) >= 2 and command[1] == "ls-remote":
+            timeout = _GIT_LS_REMOTE_TIMEOUT_SEC
+        else:
+            timeout = _GIT_CLONE_TIMEOUT_SEC
     return subprocess.run(
         command,
         cwd=cwd,
@@ -178,6 +247,7 @@ def _run_git(
         check=True,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 

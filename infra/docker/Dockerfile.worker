@@ -145,9 +145,12 @@ ENV PATH="/home/appuser/.local/bin:${PATH}"
 # 镜像已预装 mise，禁止 worker 启动时再走 curl|sh
 ENV ANTCODE_MISE_AUTO_INSTALL=false
 
-# 健康检查：进程存活探测（worker 无 HTTP/gRPC 端口）
+# P1-21: 健康检查走 observability HTTP /health/ready (端口 8001,
+# 由 antcode_worker.observability.server.ObservabilityServer 暴露)。
+# 该 endpoint 会检查 transport 连接 + lifecycle ready 状态,pgrep 只看进程名
+# 会让"传输层断开但进程还在"的场景被误判 healthy。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
-    CMD pgrep -f antcode_worker >/dev/null || exit 1
+    CMD curl -fsS http://localhost:8001/health/ready >/dev/null || exit 1
 
 # 启动命令：跳过交互式 menu，直接进 run 子命令。
 # 具体 --transport / --name 由 compose environment 覆盖（走 WORKER_NAME / WORKER_TRANSPORT_MODE）
