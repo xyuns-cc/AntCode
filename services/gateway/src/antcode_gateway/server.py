@@ -18,6 +18,19 @@ from loguru import logger
 
 from antcode_gateway.config import GatewayConfig, gateway_config
 
+# P1-21: 引入标准 gRPC 健康检查(grpc.health.v1)——Dockerfile 里带的
+# grpc_health_probe 需要服务端真的注册了 HealthServicer 才能拿到
+# SERVING/NOT_SERVING。包不存在时静默退化,避免离线测试环境构建失败。
+try:
+    from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+
+    _HEALTH_AVAILABLE = True
+except ImportError:  # pragma: no cover - 依赖缺失回退
+    health = None  # type: ignore[assignment]
+    health_pb2 = None  # type: ignore[assignment]
+    health_pb2_grpc = None  # type: ignore[assignment]
+    _HEALTH_AVAILABLE = False
+
 
 class GrpcServer:
     """gRPC 服务器
@@ -38,6 +51,8 @@ class GrpcServer:
         self._started = False
         self._servicers: list[tuple[Any, Callable]] = []
         self._interceptors: list[grpc.aio.ServerInterceptor] = []
+        # grpc.health.v1 HealthServicer 实例(SERVING/NOT_SERVING 由启动/停止流程写入)
+        self._health_servicer: Any | None = None
 
     @property
     def is_running(self) -> bool:
@@ -99,6 +114,24 @@ class GrpcServer:
                 add_func(servicer, self._server)
                 logger.debug(f"已注册服务: {servicer.__class__.__name__}")
 
+            # 注册 grpc.health.v1.Health —— 让 grpc_health_probe / L7 探针
+            # 拿到真实 SERVING/NOT_SERVING 状态。auth.py / rate_limit.py 已把
+            # /grpc.health.v1.Health/Check 加入白名单,不会被拦截器截掉。
+            if _HEALTH_AVAILABLE:
+                self._health_servicer = health.HealthServicer(
+                    experimental_non_blocking=True,
+                    experimental_thread_pool=self._executor,
+                )
+                health_pb2_grpc.add_HealthServicer_to_server(
+                    self._health_servicer, self._server
+                )
+                logger.debug("已注册 grpc.health.v1.Health 服务")
+            else:
+                logger.warning(
+                    "grpcio-health-checking 未安装,grpc_health_probe 探针会失败 "
+                    "(容器镜像里应已通过 pip 装好)"
+                )
+
             # 绑定端口
             listen_addr = f"[::]:{self.config.port}"
 
@@ -107,6 +140,8 @@ class GrpcServer:
                 credentials = self._create_server_credentials()
                 if credentials is None:
                     logger.error("创建 TLS 凭证失败")
+                    self._server = None
+                    self._health_servicer = None
                     return False
 
                 bound_port = self._server.add_secure_port(listen_addr, credentials)
@@ -122,6 +157,8 @@ class GrpcServer:
                         " 请配置 GRPC_TLS_CERT_PATH+GRPC_TLS_KEY_PATH 或显式设置"
                         " ANTCODE_GATEWAY_ALLOW_INSECURE=true 声明本地/测试环境。"
                     )
+                    self._server = None
+                    self._health_servicer = None
                     return False
                 bound_port = self._server.add_insecure_port(listen_addr)
                 logger.warning(
@@ -132,11 +169,29 @@ class GrpcServer:
             if bound_port == 0:
                 logger.error(f"gRPC 服务器端口绑定失败: {listen_addr}")
                 self._server = None
+                self._health_servicer = None
                 return False
 
             # 启动服务器
             await self._server.start()
             self._started = True
+
+            # 标记 SERVING —— 只有端口真正 listen 之后才置为 SERVING,
+            # 避免 healthcheck 在启动过程中就返回 healthy(P1-21 假 healthy 修复)。
+            if self._health_servicer is not None:
+                # 空字符串 "" 是标准的整体健康状态 key(grpc_health_probe 默认查询)
+                self._health_servicer.set(
+                    "", health_pb2.HealthCheckResponse.SERVING
+                )
+                # 同时把已注册的业务服务也标记为 SERVING,方便按 service 查询
+                for servicer, _ in self._servicers:
+                    service_name = servicer.__class__.__name__
+                    try:
+                        self._health_servicer.set(
+                            service_name, health_pb2.HealthCheckResponse.SERVING
+                        )
+                    except Exception:  # pragma: no cover - 防御性容错
+                        pass
 
             logger.info(
                 f"gRPC 服务器已启动 - 端口: {self.config.port}, "
@@ -149,6 +204,7 @@ class GrpcServer:
             logger.exception(f"gRPC 服务器启动失败: {e}")
             self._server = None
             self._started = False
+            self._health_servicer = None
             return False
 
     def _create_server_credentials(self) -> grpc.ServerCredentials | None:
@@ -203,15 +259,24 @@ class GrpcServer:
 
         try:
             logger.info(f"正在停止 gRPC 服务器，优雅关闭等待 {grace} 秒...")
+            # 先把 Health 状态置为 NOT_SERVING,让 LB / probe 立刻把这台摘掉,
+            # 避免优雅关闭窗口里继续被路由流量。
+            if self._health_servicer is not None:
+                try:
+                    self._health_servicer.enter_graceful_shutdown()
+                except Exception:  # pragma: no cover - 防御性容错
+                    logger.exception("HealthServicer.enter_graceful_shutdown 失败")
             await self._server.stop(grace)
             self._started = False
             self._server = None
+            self._health_servicer = None
             logger.info("gRPC 服务器已停止")
 
         except Exception as e:
             logger.exception(f"gRPC 服务器停止失败: {e}")
             self._started = False
             self._server = None
+            self._health_servicer = None
         finally:
             if self._executor:
                 self._executor.shutdown(wait=False, cancel_futures=True)

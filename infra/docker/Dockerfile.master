@@ -100,9 +100,14 @@ RUN mkdir -p \
 # 切换到非 root 用户
 USER appuser
 
-# 健康检查：进程存活探测（master 无 HTTP 端口）
+# P1-21: 健康检查改成"进程存活 + Redis 可达",不再只 pgrep。
+# master 没有 HTTP/gRPC 端口,单看进程名会让"进程活着但 Redis 掉线 / 事件循环卡死"
+# 的场景被误判 healthy。redis(sync) 已随 antcode_core 装进 venv,ping() 是同步调用,
+# 3s 连接 + 3s 读超时把整体控制在 healthcheck 10s timeout 内。REDIS_URL 由 compose 注入。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
-    CMD pgrep -f antcode_master >/dev/null || exit 1
+    CMD pgrep -f antcode_master >/dev/null \
+        && python -c "import os,redis; redis.Redis.from_url(os.environ.get('REDIS_URL','redis://redis:6379/0'), socket_connect_timeout=3, socket_timeout=3).ping()" \
+        || exit 1
 
 # 启动命令（走包内 __main__.py，与 Makefile / 本地开发保持一致）
 CMD ["python", "-m", "antcode_master"]

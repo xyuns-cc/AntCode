@@ -68,6 +68,10 @@ async def get_retry_stats(task_id: str, current_user: TokenData = Depends(get_cu
 
     # 检查权限
     user = await User.get_or_none(id=current_user.user_id)
+    # P1-09: token 里的 user_id 已被删除时,返回 401 而不是 AttributeError → 500
+    if not user:
+        from fastapi import HTTPException, status as _st
+        raise HTTPException(status_code=_st.HTTP_401_UNAUTHORIZED, detail='用户不存在或已被删除')
     if not user.is_admin and task.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问此任务")
 
@@ -131,6 +135,10 @@ async def update_retry_config(
 
     # 检查权限
     user = await User.get_or_none(id=current_user.user_id)
+    # P1-09: token 里的 user_id 已被删除时,返回 401 而不是 AttributeError → 500
+    if not user:
+        from fastapi import HTTPException, status as _st
+        raise HTTPException(status_code=_st.HTTP_401_UNAUTHORIZED, detail='用户不存在或已被删除')
     if not user.is_admin and task.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权修改此任务")
 
@@ -174,6 +182,10 @@ async def cancel_pending_retry(run_id: str, current_user: TokenData = Depends(ge
 
     # 检查权限
     user = await User.get_or_none(id=current_user.user_id)
+    # P1-09: token 里的 user_id 已被删除时,返回 401 而不是 AttributeError → 500
+    if not user:
+        from fastapi import HTTPException, status as _st
+        raise HTTPException(status_code=_st.HTTP_401_UNAUTHORIZED, detail='用户不存在或已被删除')
     if not user.is_admin and task.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作此任务")
 
@@ -214,6 +226,10 @@ async def get_retry_history(
 
     # 检查权限
     user = await User.get_or_none(id=current_user.user_id)
+    # P1-09: token 里的 user_id 已被删除时,返回 401 而不是 AttributeError → 500
+    if not user:
+        from fastapi import HTTPException, status as _st
+        raise HTTPException(status_code=_st.HTTP_401_UNAUTHORIZED, detail='用户不存在或已被删除')
     if not user.is_admin and task.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问此任务")
 

@@ -162,6 +162,14 @@ class Engine:
         self._worker_id_cache: str | None = None
         self._ownership_renewal_task: asyncio.Task | None = None
 
+        # P1-26: 优雅缩容用的 drain 集合。_resize_workers 缩容时不直接
+        # cancel worker task(会让 ProcessExecutor 的子进程孤儿化, master 侧
+        # 任务永卡 DISPATCHING / PEL reclaim 后另一台 worker 双跑), 而是把
+        # 要退的 worker task 塞进这里, worker 在下一轮起点自然退出。
+        # 超过 grace period 才走 self.cancel(kill 子进程 + 上报 CANCELLED),
+        # 最后才 hard cancel 兜底。
+        self._draining_worker_tasks: set[asyncio.Task] = set()
+
     @property
     def scheduler(self) -> Scheduler:
         return self._scheduler
@@ -639,8 +647,20 @@ class Engine:
     async def _worker_loop(self, worker_id: int) -> None:
         """工作协程"""
         logger.debug(f"Worker-{worker_id} 启动")
+        my_task = asyncio.current_task()
 
         while self._running:
+            # P1-26: 缩容优雅退出 —— 被 _resize_workers 塞进 drain 集合的
+            # worker 会在下一轮起点自然退出,让在途任务先跑完再退。
+            if my_task is not None and my_task in self._draining_worker_tasks:
+                self._draining_worker_tasks.discard(my_task)
+                logger.info(f"Worker-{worker_id} drain 完成, 优雅退出")
+                return
+
+            # active_context 在 try 外面声明, 让 except CancelledError 分支
+            # 也能拿到 —— 强制 cancel 时需要它触发 executor.cancel + 上报
+            # CANCELLED 终态, 否则子进程孤儿化 + master 侧永卡 DISPATCHING。
+            active_context: RunContext | None = None
             try:
                 # 从队列取任务
                 item = await self._scheduler.dequeue(timeout=1.0)
@@ -648,6 +668,7 @@ class Engine:
                     continue
 
                 run_id, (context, task_msg) = item
+                active_context = context
 
                 # P5.4: 把 TaskDispatch 携带的 traceparent 绑定到当前
                 # asyncio.Task 的 ContextVar。一旦绑定,后续 logger 调用
@@ -670,11 +691,64 @@ class Engine:
 
                 # 上报结果
                 await self._report_result(context, result)
+                active_context = None
 
             except asyncio.CancelledError:
+                # P1-26: 强制取消分支 —— 直接 task.cancel() 会让 ProcessExecutor
+                # 的子进程孤儿化(asyncio 只 cancel 读 pipe 的协程, 不 kill
+                # subprocess),master 侧看不到终态、PEL reclaim 后新 worker
+                # 又跑一遍,产生外部副作用双写。这里兜底:
+                # 1) executor.cancel(run_id) 触发 _do_cancel → _terminate_process,
+                #    SIGTERM + grace + SIGKILL 保证子进程真的死。
+                # 2) 走 report_result 上报 status=CANCELLED,让 master 走 CAS
+                #    终态吸收态,PEL 也被 ACK 掉,不会再被 reclaim。
+                # 正常场景(shrink drain flag 命中)走上面的 return 分支,不会
+                # 进这里;只有 grace period 超时被 hard cancel 时才走这里。
+                if active_context is not None:
+                    await self._handle_forced_cancel(active_context, worker_id)
                 break
             except Exception:
                 logger.exception(f"Worker-{worker_id} 异常")
+
+    async def _handle_forced_cancel(
+        self, context: RunContext, worker_id: int
+    ) -> None:
+        """P1-26: worker 被 hard cancel 时的清理路径。
+
+        走这里意味着 ``_worker_loop`` 已经被 ``task.cancel()`` 中断,
+        必须尽力做到:
+        - 子进程被 SIGTERM/SIGKILL,不再产生外部副作用
+        - master 侧看到 CANCELLED 终态,dispatch/runtime 都进终态吸收态
+        - PEL 消息被 ACK,不会被其它 worker reclaim 后再跑一遍
+        """
+        run_id = context.run_id
+        logger.warning(
+            f"Worker-{worker_id} 被强制取消, 清理在途任务: run_id={run_id}"
+        )
+        # 1) kill 子进程
+        try:
+            if self._executor is not None:
+                await self._executor.cancel(run_id)
+        except Exception:
+            logger.exception(
+                f"强制取消时 executor.cancel 失败: run_id={run_id}"
+            )
+        # 2) 上报 CANCELLED 终态 + ACK PEL
+        try:
+            await self._report_result_by_info(
+                run_id=run_id,
+                task_id=context.task_id,
+                receipt=context.receipt,
+                result=self._build_cancelled_result(
+                    run_id,
+                    datetime.now(),
+                    reason="worker cancelled (shutdown/shrink)",
+                ),
+            )
+        except Exception:
+            logger.exception(
+                f"强制取消时上报 CANCELLED 失败: run_id={run_id}"
+            )
 
     async def _execute_task(self, context: RunContext, task_msg: TaskMessage) -> ExecResult:
         """执行单个任务"""
@@ -686,6 +760,19 @@ class Engine:
         try:
             # 转换状态
             await self._state_manager.transition(run_id, RunState.PREPARING)
+
+            # P1-17: worker 收到任务后必须主动上报一次 status=RUNNING。
+            # 底层复用 transport.report_result 的 task:result Stream 通道,
+            # master.result_loop → task_run_service.update_result 会把
+            # dispatch_status → ACKED, runtime_status → RUNNING(见
+            # STATUS_MAPPING["running"]),同时终态保护不会翻转已终态记录。
+            #
+            # 不上报的话:worker 在准备 runtime / 下载 bundle / 起子进程
+            # 之间任一阶段崩溃,master 侧永远只看到 dispatch_status=DISPATCHED
+            # + runtime_status=NULL,任务永卡在 DISPATCHING 不失败也不补派。
+            # 这里做的是"best-effort 心跳":失败只 warn,不阻断执行 —— 后续
+            # reconcile_loop._check_dispatched_no_ack 会兜底把僵尸分发标 FAILED。
+            await self._report_running_start(context, started_at)
 
             # 生成任务 payload
             payload = self._build_payload(task_msg)
@@ -825,6 +912,47 @@ class Engine:
             # 下——只清 run_id 子目录，不动 `/tmp/antcode-rule/` 根，避免并发
             # run 相互踩。
             await self._cleanup_rule_tmp(run_id)
+
+    async def _report_running_start(
+        self, context: RunContext, started_at: datetime
+    ) -> None:
+        """P1-17: worker 接单后主动上报一次 RUNNING(best-effort)。
+
+        通道:走 transport.report_result 把 status="running" 写到 task:result
+        Stream, master 的 result_loop → task_run_service.update_result 会:
+        - dispatch_status → ACKED (rank 3 覆盖 DISPATCHED rank 2)
+        - runtime_status  → RUNNING (从 NULL 进入 rank 2)
+
+        故意不 ACK 也不 remove 本地 state:任务还没跑完,最终终态还是
+        由 _report_result 上报并 ACK。这里失败(网络抖动等)只 warn,
+        由 reconcile_loop._check_dispatched_no_ack 兜底把超时的僵尸
+        分发拉到 FAILED 上,不吞掉真正的错误。
+        """
+        from antcode_worker.transport.base import TaskResult
+
+        try:
+            running_result = TaskResult(
+                run_id=context.run_id,
+                task_id=context.task_id,
+                status="running",
+                exit_code=0,
+                error_message="",
+                started_at=started_at,
+                finished_at=None,
+                duration_ms=0,
+                data={"event": "worker_ack"},
+            )
+            ok = await self._transport.report_result(running_result)
+            if not ok:
+                logger.warning(
+                    f"P1-17: RUNNING 心跳上报失败(不阻断执行, reconcile 兜底): "
+                    f"run_id={context.run_id}"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"P1-17: RUNNING 心跳上报异常(不阻断执行, reconcile 兜底): "
+                f"run_id={context.run_id} err={exc}"
+            )
 
     async def _report_result(self, context: RunContext, result: ExecResult) -> None:
         """上报结果（幂等）"""
@@ -1230,8 +1358,27 @@ class Engine:
             except Exception:
                 logger.warning(f"无效的 task_cpu_time_limit_sec: {cpu_limit_seconds}")
 
+    # P1-26: 缩容 grace period(秒) —— worker 收到 drain 标记后, 最多等
+    # 这么久让在途任务跑完; 超时才走 self.cancel(kill 子进程 + 上报
+    # CANCELLED) 和 hard cancel。300s 大于常见短任务, 又不至于让配置更新
+    # 长期挂起。运维要拉长可以基于 _policies.timeout.execution_timeout
+    # 覆写这个常量。
+    _SHRINK_DRAIN_GRACE_SECONDS = 300.0
+    # hard cancel 前留给 self.cancel 走完 executor.cancel + 上报 CANCELLED
+    # 链路的窗口。
+    _SHRINK_CANCEL_TIMEOUT_SECONDS = 30.0
+
     async def _resize_workers(self, new_max: int) -> None:
-        """动态调整并发 worker 数量"""
+        """动态调整并发 worker 数量
+
+        P1-26: 缩容不再直接 task.cancel()。原实现在 worker 上有在途任务时
+        cancel 会让 ProcessExecutor 的子进程孤儿化(asyncio 只 cancel 读
+        pipe 的协程, 不 kill subprocess),后果:
+        - 旧子进程继续跑 → 产生外部副作用(写库/发消息)但不再上报 / ACK
+        - master 侧 dispatch_status 停在 DISPATCHED 不进终态
+        - PEL reclaim 后新 worker 再次执行同 run_id → 双跑
+        新实现走三段式优雅关闭: drain → 走 cancel 通道 → hard cancel 兜底。
+        """
         diff = new_max - self._max_concurrent
         if diff == 0:
             return
@@ -1249,13 +1396,87 @@ class Engine:
                 task = asyncio.create_task(self._worker_loop(worker_id))
                 self._worker_tasks.append(task)
         else:
-            for _ in range(-diff):
-                if not self._worker_tasks:
-                    break
-                task = self._worker_tasks.pop()
+            await self._shrink_workers(-diff)
+
+    async def _shrink_workers(self, drain_count: int) -> None:
+        """P1-26: 三段式优雅缩容。
+
+        阶段 1 (drain): 把要退的 worker task 塞进 _draining_worker_tasks,
+                        worker 在下一轮起点自然退出;在途任务不受影响,
+                        跑完 + 正常 ACK + 上报终态。
+        阶段 2 (cancel):  超过 grace period 还没退, 找到该 worker 上仍在跑
+                          的 run, 走 self.cancel(run_id) 触发 executor 的
+                          _terminate_process(SIGTERM + grace + SIGKILL),
+                          让 _execute_task 拿到 CANCELLED 结果, 走
+                          _report_result 正常上报终态 + ACK PEL。
+        阶段 3 (force):   还挂着就 task.cancel(), _worker_loop 的
+                          CancelledError 分支兜底 kill + 上报。
+        """
+        if drain_count <= 0:
+            return
+        draining: list[asyncio.Task] = []
+        for _ in range(drain_count):
+            if not self._worker_tasks:
+                break
+            task = self._worker_tasks.pop()
+            self._draining_worker_tasks.add(task)
+            draining.append(task)
+        if not draining:
+            return
+        logger.info(f"P1-26: 优雅缩容 {len(draining)} 个 worker (drain 阶段开始)")
+
+        # 阶段 1: 等待 drain 自然退出
+        _, pending = await asyncio.wait(
+            draining, timeout=self._SHRINK_DRAIN_GRACE_SECONDS
+        )
+        if not pending:
+            for task in draining:
+                self._draining_worker_tasks.discard(task)
+            logger.info("P1-26: 缩容完成(drain 阶段全部退出)")
+            return
+
+        logger.warning(
+            f"P1-26: {len(pending)} 个 worker drain 超时, 进入 cancel 阶段 "
+            f"(grace={self._SHRINK_DRAIN_GRACE_SECONDS}s)"
+        )
+        # 阶段 2: 走 self.cancel 通道, kill 子进程 + 上报 CANCELLED。
+        # 注意: 这里没法定位"哪个 run 属于哪个 worker task", 直接遍历所有
+        # 在途 run 做 cancel —— 对已经完成的 no-op, 对新进来的 worker 也不
+        # 会误伤(它们不在 pending 里)。
+        active_states = (
+            RunState.PREPARING,
+            RunState.RUNNING,
+            RunState.CANCELLING,
+        )
+        try:
+            for state in active_states:
+                for info in await self._state_manager.list_by_state(state):
+                    try:
+                        await self.cancel(info.run_id, reason="worker shrink")
+                    except Exception:
+                        logger.exception(
+                            f"P1-26: shrink cancel 失败: run_id={info.run_id}"
+                        )
+        except Exception:
+            logger.exception("P1-26: 遍历在途任务 cancel 失败")
+
+        _, still_pending = await asyncio.wait(
+            pending, timeout=self._SHRINK_CANCEL_TIMEOUT_SECONDS
+        )
+        if still_pending:
+            # 阶段 3: hard cancel 兜底。_worker_loop 的 CancelledError 分支
+            # 会做 executor.cancel + _report_result_by_info(CANCELLED)。
+            logger.warning(
+                f"P1-26: {len(still_pending)} 个 worker cancel 超时, 强制 cancel"
+            )
+            for task in still_pending:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+            for task in still_pending:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+        for task in draining:
+            self._draining_worker_tasks.discard(task)
+        logger.info("P1-26: 缩容完成")
 
     async def _prepare_runtime(self, context: RunContext) -> Any:
         """准备运行时句柄"""

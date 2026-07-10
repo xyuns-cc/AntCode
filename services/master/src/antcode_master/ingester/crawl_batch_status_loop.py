@@ -169,6 +169,16 @@ class CrawlBatchStatusLoop:
         """基于聚合结果推导单个 batch 终态。
 
         `stat=None` 表示该 batch 目前一条 run 都没有——走空批次超时兜底。
+
+        **P1-32 修复**：所有终态写入改成"仅当仍是 RUNNING 才生效"的条件
+        UPDATE，杜绝下面这条 lost-update 竞态：
+        1. loop._tick 加载 RUNNING 批次列表 A
+        2. API 把 A 里某个批次改成 PAUSED / CANCELLED（合法状态机迁移）
+        3. loop 拿老对象照旧 ``batch.save()``，把 PAUSED / CANCELLED 又刷回
+           COMPLETED / FAILED，API 侧的操作被静默吞掉
+
+        CAS 允许的 from-status 集合固定为 ``{RUNNING}``——loop 本来就只处理
+        RUNNING 批次，其他任何状态都表示"API 已抢先，loop 让位"。
         """
         # P1-14 (审查报告): seed_urls 完整性检查所需的分母。JSONField 可能
         # 是 None/空 list/list[str]，统一 fallback。
@@ -179,13 +189,13 @@ class CrawlBatchStatusLoop:
             if batch.started_at:
                 elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
                 if elapsed > self.EMPTY_BATCH_TIMEOUT_SECONDS:
-                    batch.status = BatchStatus.FAILED.value
-                    batch.completed_at = datetime.now(UTC)
-                    await batch.save(update_fields=["status", "completed_at"])
-                    logger.warning(
-                        f"batch 空转超时 FAILED: batch_id={batch.public_id} "
-                        f"elapsed={elapsed:.0f}s seed_count={seed_count}"
-                    )
+                    if await self._cas_terminate(
+                        batch, BatchStatus.FAILED.value
+                    ):
+                        logger.warning(
+                            f"batch 空转超时 FAILED: batch_id={batch.public_id} "
+                            f"elapsed={elapsed:.0f}s seed_count={seed_count}"
+                        )
             return
 
         if stat["active"] > 0:
@@ -203,13 +213,13 @@ class CrawlBatchStatusLoop:
             if batch.started_at:
                 elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
                 if elapsed > self.INCOMPLETE_DISPATCH_TIMEOUT_SECONDS:
-                    batch.status = BatchStatus.FAILED.value
-                    batch.completed_at = datetime.now(UTC)
-                    await batch.save(update_fields=["status", "completed_at"])
-                    logger.warning(
-                        f"batch seed 未派完超时 FAILED: batch_id={batch.public_id} "
-                        f"total={total} seed={seed_count} elapsed={elapsed:.0f}s"
-                    )
+                    if await self._cas_terminate(
+                        batch, BatchStatus.FAILED.value
+                    ):
+                        logger.warning(
+                            f"batch seed 未派完超时 FAILED: batch_id={batch.public_id} "
+                            f"total={total} seed={seed_count} elapsed={elapsed:.0f}s"
+                        )
                     return
             # 未超时：让 batch_dispatcher/redispatch 继续追派剩余 URL，本轮不动。
             logger.debug(
@@ -228,14 +238,45 @@ class CrawlBatchStatusLoop:
         else:
             new_status = BatchStatus.COMPLETED.value
 
+        if await self._cas_terminate(batch, new_status):
+            logger.info(
+                f"batch 状态推导: batch_id={batch.public_id} status={new_status} "
+                f"total={total} seed={seed_count} success={success} "
+                f"failed={failed} cancelled={cancelled}"
+            )
+
+    async def _cas_terminate(
+        self,
+        batch: CrawlBatch,
+        new_status: str,
+    ) -> bool:
+        """把 batch 从 RUNNING 条件 UPDATE 到指定终态。
+
+        Returns:
+            True  - 更新成功（本 loop 是首个改状态的写者）
+            False - 更新失败（API 已抢先把状态改成 PAUSED/CANCELLED/... 或
+                    上一轮 loop 已经推过），本 loop 不再动这行数据
+
+        允许的 from-status：``{RUNNING}``。其他状态（PAUSED / CANCELLED /
+        COMPLETED / FAILED / PENDING）一律拒绝——PAUSED 走 RESUME 逻辑，
+        终态不可回退，PENDING 应由 start_batch 触发。
+        """
+        now = datetime.now(UTC)
+        updated = await CrawlBatch.filter(
+            id=batch.id,
+            status=BatchStatus.RUNNING.value,
+        ).update(status=new_status, completed_at=now)
+        if not updated:
+            logger.info(
+                f"batch {batch.public_id} 状态被 API 抢先改动 "
+                f"(loop 期望 running→{new_status}), 跳过本轮 loop 更新"
+            )
+            return False
+        # 同步内存对象，方便后续 caller 使用（虽然本函数返回后 batch 就不会
+        # 再被读了，但保持一致性避免遗漏 bug）
         batch.status = new_status
-        batch.completed_at = datetime.now(UTC)
-        await batch.save(update_fields=["status", "completed_at"])
-        logger.info(
-            f"batch 状态推导: batch_id={batch.public_id} status={new_status} "
-            f"total={total} seed={seed_count} success={success} "
-            f"failed={failed} cancelled={cancelled}"
-        )
+        batch.completed_at = now
+        return True
 
 
 crawl_batch_status_loop = CrawlBatchStatusLoop()

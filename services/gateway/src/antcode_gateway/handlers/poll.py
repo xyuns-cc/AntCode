@@ -37,7 +37,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 @dataclass
 class TaskInfo:
-    """任务信息（保持向后兼容的 dataclass，方便单元测试）"""
+    """任务信息（保持向后兼容的 dataclass，方便单元测试）。
+
+    P1-24: 新增 ``source_bundle_*`` / ``transfer_method`` / ``resolved_revision``
+    / ``source_subdir`` 字段，与 Master ``worker_dispatcher._send_batch_to_queue``
+    实际写入 ready stream 的字段名对齐；旧的 ``download_url`` / ``file_hash``
+    仅作为兜底解析，禁止再作为主链路来源。
+    """
 
     task_id: str
     project_id: str
@@ -45,43 +51,85 @@ class TaskInfo:
     project_type: str = "spider"
     priority: int = 0
     timeout: int = 3600
+    # 兼容旧字段（Master 切换 source bundle 之前的老实现）
     download_url: str = ""
     file_hash: str = ""
+    # P1-24: 新字段，Master 现在写这些
+    source_bundle_uri: str = ""
+    source_bundle_sha256: str = ""
+    source_bundle_size: int = 0
+    transfer_method: str = ""
+    resolved_revision: str = ""
+    source_subdir: str = ""
     entry_point: str = ""
     params: dict[str, object] = field(default_factory=dict)
     environment: dict[str, object] = field(default_factory=dict)
     receipt_id: str = ""
+    trace_parent: str = ""
+
+
+def _pb_scalar_for(value: object) -> str:
+    """P1-24: 把嵌套 params/environment 值序列化成字符串。
+
+    ``TaskDispatch.params`` / ``.environment`` proto 是 ``map<string,string>``,
+    非字符串值必须先编码。旧实现 ``str(value)`` 对 dict/list 会得到 Python
+    ``repr``（``"{'a': 1}"``），worker 侧 ``json.loads`` 会抛。改用 ``json.dumps``
+    保证 round-trip 安全。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, bool):
+        # bool 是 int 的子类，单独处理避免 True → "true" 之外的意外
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
     """把内部 ``TaskInfo`` 转码为 Proto ``TaskDispatch`` 供 StreamTasks 推送。
 
-    ready stream 当前的 ``download_url`` / ``file_hash`` 暂时映射到
-    ``source_bundle_uri`` / ``source_bundle_sha256`` 字段（Master 切换 source bundle
-    派发后会自然对齐）。
+    P1-24: 优先使用新的 ``source_bundle_*`` 字段，仅在缺失时才 fallback 到
+    旧 ``download_url`` / ``file_hash``。这样 Code/File 主链在 gateway
+    模式下能真正拿到 Master 派发的 source bundle 元数据。
 
     P1-#6: 把 TaskInfo 上携带的 ``trace_parent`` 写到 dispatch.trace,
-    让 worker 端拿到 W3C traceparent 后能续接。``TaskInfo`` 当前没正式
-    声明 ``trace_parent`` 字段(归 Agent P 改 contracts/core), 这里用
-    getattr 做 fallback 拿空字符串。
+    让 worker 端拿到 W3C traceparent 后能续接。
     """
+    # P1-24: source bundle 元数据 —— 新字段优先，旧字段兜底
+    src_uri = task.source_bundle_uri or task.download_url or ""
+    src_sha = task.source_bundle_sha256 or task.file_hash or ""
+    src_size = int(task.source_bundle_size or 0)
+    transfer_method = task.transfer_method or ("source_bundle" if src_uri else "")
+
     dispatch = data_pb2.TaskDispatch(
         task_id=task.task_id,
         project_id=task.project_id,
         project_type=task.project_type,
         priority=int(task.priority),
         timeout_seconds=int(task.timeout),
-        source_bundle_uri=task.download_url,
-        source_bundle_sha256=task.file_hash,
-        transfer_method="source_bundle" if task.download_url else "",
+        source_bundle_uri=src_uri,
+        source_bundle_sha256=src_sha,
+        source_bundle_size=src_size,
+        transfer_method=transfer_method,
+        resolved_revision=task.resolved_revision or "",
+        source_subdir=task.source_subdir or "",
         entry_point=task.entry_point,
         run_id=task.run_id,
         receipt_id=task.receipt_id,
     )
+    # P1-24: 用 json.dumps 而不是 str(value)，避免嵌套 dict 变 Python repr。
     for key, value in (task.params or {}).items():
-        dispatch.params[str(key)] = str(value) if value is not None else ""
+        dispatch.params[str(key)] = _pb_scalar_for(value)
     for key, value in (task.environment or {}).items():
-        dispatch.environment[str(key)] = str(value) if value is not None else ""
+        dispatch.environment[str(key)] = _pb_scalar_for(value)
     inject_trace(dispatch, traceparent=getattr(task, "trace_parent", "") or "")
     return dispatch
 
@@ -244,18 +292,46 @@ class TaskPollHandler:
                 logger.warning(f"任务数据缺少 task_id: {message_id}")
                 return None
 
+            # P1-24: 优先读 Master 现在真正写的字段名
+            # (worker_dispatcher._send_batch_to_queue L1009-1015)。
+            # 旧字段 ``download_url`` / ``file_hash`` 仅作兜底，保证滚动升级期
+            # 老 Master 的 payload 也能解析。
+            source_bundle_uri = (
+                decoded.get("source_bundle_uri")
+                or decoded.get("download_url", "")
+                or ""
+            )
+            source_bundle_sha256 = (
+                decoded.get("source_bundle_sha256")
+                or decoded.get("file_hash", "")
+                or ""
+            )
+            try:
+                source_bundle_size = int(decoded.get("source_bundle_size", 0) or 0)
+            except (TypeError, ValueError):
+                source_bundle_size = 0
+
             return TaskInfo(
                 task_id=task_id,
                 project_id=decoded.get("project_id", ""),
                 run_id=decoded.get("run_id", ""),
                 project_type=decoded.get("project_type", "spider"),
-                priority=int(decoded.get("priority", 0)),
-                timeout=int(decoded.get("timeout", 3600)),
-                download_url=decoded.get("download_url", ""),
-                file_hash=decoded.get("file_hash", ""),
-                entry_point=decoded.get("entry_point", ""),
+                priority=int(decoded.get("priority", 0) or 0),
+                timeout=int(decoded.get("timeout", 3600) or 3600),
+                # 兼容字段（仅用于 TaskInfo 内部字段展示；映射由 task_info_to_dispatch 处理）
+                download_url=decoded.get("download_url", "") or "",
+                file_hash=decoded.get("file_hash", "") or "",
+                # P1-24: 新字段
+                source_bundle_uri=source_bundle_uri,
+                source_bundle_sha256=source_bundle_sha256,
+                source_bundle_size=source_bundle_size,
+                transfer_method=decoded.get("transfer_method", "") or "",
+                resolved_revision=decoded.get("resolved_revision", "") or "",
+                source_subdir=decoded.get("source_subdir", "") or "",
+                entry_point=decoded.get("entry_point", "") or "",
                 params=self._parse_json(decoded.get("params", "{}")),
                 environment=self._parse_json(decoded.get("environment", "{}")),
+                trace_parent=decoded.get("trace_parent", "") or "",
             )
 
         except Exception as exc:

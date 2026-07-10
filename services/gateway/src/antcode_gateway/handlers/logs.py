@@ -129,29 +129,34 @@ class LogHandler:
 
         redis = await self._get_redis_client()
         if redis is None:
-            logger.warning("Redis 不可用，跳过日志 Stream 写入")
-        else:
-            from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
+            # P1-02: Redis 不可用时**必须** fail-closed 返回 False,让 worker
+            # StreamLogs 端拿到 StatusAck=failed,保留发送端 outbox + 原任务 PEL,
+            # 下一轮重试。之前 warning 后 return True 是"发送端认为成功、服务端尚未持久化"→
+            # 日志永久丢失。
+            logger.error("Redis 不可用,拒绝确认日志接收(fail-closed,worker 保留 outbox)")
+            return False
 
-            stream_key = self._stream_key()
-            pipe = redis.pipeline(transaction=False)
-            pipe.xadd(
-                stream_key,
-                {PROTO_FIELD: batch.SerializeToString()},
-                maxlen=self.MAX_STREAM_LENGTH,
-                approximate=True,
-            )
-            if self.STREAM_TTL_SECONDS > 0:
-                pipe.expire(stream_key, self.STREAM_TTL_SECONDS)
+        from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 
-            try:
-                await pipe.execute()
-            except Exception as exc:
-                logger.exception(f"写入日志 ingest stream 失败: {exc}")
-                return False
+        stream_key = self._stream_key()
+        pipe = redis.pipeline(transaction=False)
+        pipe.xadd(
+            stream_key,
+            {PROTO_FIELD: batch.SerializeToString()},
+            maxlen=self.MAX_STREAM_LENGTH,
+            approximate=True,
+        )
+        if self.STREAM_TTL_SECONDS > 0:
+            pipe.expire(stream_key, self.STREAM_TTL_SECONDS)
 
-        # 日志经 Redis ingest stream 由 master log_ingest_loop 消费落 PG，
-        # gateway 端不再做副持久化（旧 log_storage 模块已随重构下线）。
+        try:
+            await pipe.execute()
+        except Exception as exc:
+            logger.exception(f"写入日志 ingest stream 失败: {exc}")
+            return False
+
+        # 日志经 Redis ingest stream 由 master log_ingest_loop 消费落 PG,
+        # gateway 端不再做副持久化(旧 log_storage 模块已随重构下线)。
         return True
 
     # =========================================================================

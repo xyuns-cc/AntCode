@@ -20,14 +20,25 @@ import contextlib
 from datetime import UTC, datetime, timedelta
 
 from antcode_core.domain.models import TaskRun
-from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from loguru import logger
+from tortoise.expressions import Q
 
 from antcode_master.leader import ensure_leader, get_fencing_token
 
 
 class ReconcileLoop:
     """协调循环"""
+
+    # P1-17: 分布式任务分发后节点还没上报 RUNNING 的最大容忍时长（秒）。
+    # 覆盖场景:worker 收到 XREADGROUP 的任务后、进入 _execute_task 前崩溃
+    # (进程被 OOM kill / 断电 / kubelet 重启) —— 此时 dispatch_status 已经写
+    # 到 DISPATCHED/DISPATCHING,但 runtime_status 永远是 NULL/PENDING/QUEUED,
+    # 旧实现只查 RUNNING 完全捞不到,任务永卡 DISPATCHING。
+    #
+    # 默认 180s = 3 分钟:大于常见冷启动(bundle 下载 + venv 准备)时长,
+    # 又能在业务感知得到的时窗内失败并进入补派/重试链路。
+    DISPATCH_ACK_TIMEOUT_SECONDS = 180
 
     def __init__(
         self,
@@ -108,6 +119,10 @@ class ReconcileLoop:
         # 1. 检测超时任务
         await self._check_timeout_tasks(fencing_token)
 
+        # 1b. P1-17: 检测"分发出去但节点没上报 RUNNING"的僵尸分发
+        #     (worker 收到任务后崩溃在 runtime 准备阶段的场景)
+        await self._check_dispatched_no_ack(fencing_token)
+
         # 2. 检测失联 Worker —— P3 已迁移到 LeaseSweeperLoop
         #    （Worker 失租 → Master sweep → 自动剔除 + 任务回收），
         #    这里不再做 last_heartbeat 阈值判活。
@@ -185,6 +200,76 @@ class ReconcileLoop:
 
         except Exception:
             logger.exception("检测超时任务失败")
+
+    async def _check_dispatched_no_ack(self, fencing_token: int):
+        """P1-17: 检测"已分发到 Worker 但 Worker 从未上报 RUNNING"的僵尸分发。
+
+        触发场景:``scheduler_loop._record_dispatch_result`` 把 dispatch_status
+        置为 DISPATCHED,``worker.Engine._execute_task`` 内部会主动上报一次
+        status="running" 把 runtime_status 推到 RUNNING。如果 Worker 在
+        "收到任务 → 上报 RUNNING" 之间的窗口崩溃(常见于 bundle 下载
+        阶段被 OOM kill / 节点断电 / kubelet 重启),master 侧就出现:
+
+        - dispatch_status = DISPATCHING 或 DISPATCHED
+        - runtime_status  = NULL / QUEUED / PENDING
+        - dispatch_updated_at 老于 ``DISPATCH_ACK_TIMEOUT_SECONDS``
+
+        旧实现只查 ``TaskStatus.RUNNING`` 完全捞不到,任务永卡 DISPATCHING、
+        不失败也不超时也不补派。这里通过 ``update_dispatch_status(FAILED)``
+        统一收敛终态,由 status_service 的 CAS 保证:
+        (a) 一旦 worker 迟到 RUNNING 上来就命中 dispatch 终态吸收,不会翻转;
+        (b) 迟到的 SUCCESS 也不会复活 —— runtime_status 终态保护。
+        """
+        from antcode_core.application.services.scheduler.execution_status_service import (
+            execution_status_service,
+        )
+
+        try:
+            now = datetime.now(UTC)
+            cutoff = now - timedelta(seconds=int(self.DISPATCH_ACK_TIMEOUT_SECONDS))
+
+            # 命中条件:dispatch 侧已发出去(DISPATCHING/DISPATCHED),runtime 侧
+            # 还没进入 RUNNING (NULL / QUEUED / PENDING 都算未 ACK),且超阈值。
+            candidates = (
+                await TaskRun.filter(
+                    Q(dispatch_status__in=[
+                        DispatchStatus.DISPATCHING,
+                        DispatchStatus.DISPATCHED,
+                    ]),
+                    Q(runtime_status__isnull=True) | Q(runtime_status=RuntimeStatus.QUEUED),
+                    Q(dispatch_updated_at__lt=cutoff)
+                    | Q(dispatch_updated_at__isnull=True, created_at__lt=cutoff),
+                )
+                .only("id", "run_id", "dispatch_status", "runtime_status", "dispatch_updated_at")
+                .limit(200)
+                .all()
+            )
+            if not candidates:
+                return
+
+            logger.warning(
+                f"P1-17: 发现 {len(candidates)} 个已分发但节点未上报 RUNNING 的僵尸任务"
+            )
+            marked = 0
+            for run in candidates:
+                # 走 dispatch_status → FAILED,复用 _derive_overall 把 status 同步为
+                # TaskStatus.FAILED,并由 execution_status_service 触发 Task 计数。
+                ok = await execution_status_service.update_dispatch_status(
+                    run_id=run.run_id,
+                    status=DispatchStatus.FAILED,
+                    status_at=now,
+                    error_message=(
+                        f"节点未在 {self.DISPATCH_ACK_TIMEOUT_SECONDS}s 内上报 RUNNING"
+                        "(worker 可能在收到任务后崩溃)"
+                    ),
+                )
+                if ok:
+                    marked += 1
+            logger.info(
+                f"P1-17: 已标记 {marked}/{len(candidates)} 条僵尸分发为 FAILED"
+            )
+        except Exception:
+            logger.exception("P1-17: 检测僵尸分发失败")
 
     async def _check_inconsistent_states(self, fencing_token: int):
         """检测状态不一致（拆 2 次 bulk update：有 error 走 FAILED，否则 SUCCESS）。

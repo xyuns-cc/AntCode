@@ -4,11 +4,16 @@
 - `scheduler_service._execute_task_internal` 派发失败 → 入队
 - `batch_dispatcher_service._dispatch_single_url_run` 派发失败 → 入队
 
-本 loop 每 10s tick 一次，从 ``{ns}:task:redispatch`` ZSet 拿到期任务，逐个
+本 loop 每 10s tick 一次,从 ``{ns}:task:redispatch`` ZSet 拿到期任务,逐个
 调 ``worker_task_dispatcher.dispatch_task`` 重派：
-- 成功 → 队列已 pop 完毕
-- 仍失败 → attempts++ 重新入队（指数退避，见 redispatch_service.next_delay_seconds）
+- 成功 → ``ack`` 从 processing hash 移除
+- 仍失败 → attempts++ ``enqueue`` 新 payload 再 ``ack`` 旧 raw_payload
+  (原子先入后出,防止丢单;指数退避见 redispatch_service.next_delay_seconds)
 - 超阈值 → 触发放弃：置 TaskRun.FAILED + 写 audit_log + 告警
+
+**P1-18 修复**:每轮 tick 先 ``sweep_stalled()`` 恢复上轮崩溃遗留的 claim,
+再 ``claim_due()`` 原子拿新任务;处理成功走 ``ack``,处理失败走
+``ack + enqueue``;handler 本身抛异常走 ``requeue_raw``(不动 attempts)。
 """
 
 from __future__ import annotations
@@ -74,21 +79,40 @@ class RedispatchLoop:
             await asyncio.sleep(self._tick_interval)
 
     async def _tick(self) -> None:
-        due = await redispatch_service.pop_due(limit=50)
+        # 崩溃恢复:上轮 leader crash / 切主 / claim 后异常都会在 processing
+        # hash 留下漂浮 entry,这里把超时的捞回 ZSet 再走一遍。
+        try:
+            await redispatch_service.sweep_stalled()
+        except Exception as exc:
+            logger.warning(f"redispatch sweep_stalled 异常: {exc}")
+
+        due = await redispatch_service.claim_due(limit=50)
         if not due:
             return
         logger.info(f"补派 tick: 到期 {len(due)} 项")
         for payload in due:
+            raw_payload = payload.get("__raw_payload", "")
             try:
-                await self._handle_one(payload)
+                handled = await self._handle_one(payload)
+                if handled:
+                    # 成功或已重排/放弃 -> 从 processing hash 移除
+                    if raw_payload:
+                        await redispatch_service.ack(raw_payload)
             except Exception as exc:
                 logger.exception(
                     f"补派单项处理异常: run_id={payload.get('run_id')} err={exc}"
                 )
-                # 处理本身异常也再入队（累计 attempts）
-                await self._reenqueue_or_give_up(payload, reason=f"handler err: {exc}")
+                # 处理本身异常: raw_payload 放回 ZSet(不改 attempts),下轮重来
+                if raw_payload:
+                    await redispatch_service.requeue_raw(
+                        raw_payload, delay_seconds=self._tick_interval
+                    )
 
-    async def _handle_one(self, payload: dict[str, Any]) -> None:
+    async def _handle_one(self, payload: dict[str, Any]) -> bool:
+        """处理单条:返回 True 表示已终结(需要 ack),False 表示尚未终结。
+
+        终结状态包括:派发成功、已 re-enqueue 新 payload、已放弃。
+        """
         from antcode_core.application.services.workers.worker_dispatcher import (
             worker_task_dispatcher,
         )
@@ -96,8 +120,8 @@ class RedispatchLoop:
         run_id = payload.get("run_id") or ""
         project_id = payload.get("project_id") or ""
         if not run_id or not project_id:
-            logger.warning(f"补派 payload 缺关键字段，丢弃: {payload}")
-            return
+            logger.warning(f"补派 payload 缺关键字段,丢弃: {payload}")
+            return True
 
         result = await worker_task_dispatcher.dispatch_task(
             project_id=project_id,
@@ -113,13 +137,15 @@ class RedispatchLoop:
                 f"补派成功: run_id={run_id} attempts={payload.get('attempts')} "
                 f"worker={getattr(result, 'worker_name', '')}"
             )
-            return
+            return True
 
-        # 仍失败 → 再入队或放弃
+        # 仍失败 → 再入队或放弃(内部会先 enqueue 新 payload 再返回,
+        # 外层 ack 旧 raw_payload,顺序保证不丢单)
         await self._reenqueue_or_give_up(
             payload,
             reason=getattr(result, "error", "") or "dispatch failed",
         )
+        return True
 
     async def _reenqueue_or_give_up(
         self, payload: dict[str, Any], *, reason: str

@@ -127,6 +127,33 @@ class AntCodeRedisPipeline:
             f"heartbeat_every={self._heartbeat_interval}"
         )
 
+    @staticmethod
+    def _normalize_write_result(result: Any) -> tuple[bool, int]:
+        """兼容 sink.write_item 返回 ``bool`` 或 ``(ok, n_written)``。
+
+        - RedisSpiderDataSink (direct 模式) 每条一次 xadd → 老式 bool
+          语义: True 表示这一条落地，n_written=1；False 表示这条丢，n_written=0
+        - GatewaySpiderDataSink 走 batch flush → 新式 ``(ok, n_written)``
+          语义: n_written 是本次 flush 真正 ack 的条数（未 flush 时为 0）
+        """
+        if isinstance(result, tuple) and len(result) == 2:
+            ok, n = result
+            return bool(ok), int(n)
+        ok = bool(result)
+        return ok, 1 if ok else 0
+
+    @staticmethod
+    def _normalize_close_result(result: Any) -> tuple[bool, int]:
+        """兼容 sink.close 返回 ``None`` 或 ``(ok, remaining)``。
+
+        - 老式返回 None：视为成功、无剩余（保持 direct 模式向后兼容）
+        - 新式返回 ``(ok, remaining)``：ok=False 或 remaining>0 都视为失败
+        """
+        if isinstance(result, tuple) and len(result) == 2:
+            ok, remaining = result
+            return bool(ok), int(remaining)
+        return True, 0
+
     async def process_item(self, item: dict[str, Any], spider):
         if not self._enabled or self._sink is None:
             return item
@@ -141,7 +168,7 @@ class AntCodeRedisPipeline:
         item_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
 
-        ok = await self._sink.write_item(
+        raw = await self._sink.write_item(
             item_id=item_id,
             item_type="default",
             data_json=data_json,
@@ -149,11 +176,19 @@ class AntCodeRedisPipeline:
             timestamp=timestamp,
             sequence=self._sequence,
         )
+        ok, n_written = self._normalize_write_result(raw)
         if ok:
-            try:
-                spider.crawler.stats.inc_value("antcode/redis_items_written")
-            except Exception:
-                pass
+            # P1-27 修复: 只有 sink 真正 ack 了 flush 才算 written。
+            # gateway 模式 buffer 命中时 n_written=0（还没送出去，不能算成功）,
+            # 触发 flush 时 n_written = 本批次条数一次性累加。
+            # direct 模式每条 xadd 都是原子的，成功即 n_written=1。
+            if n_written > 0:
+                try:
+                    spider.crawler.stats.inc_value(
+                        "antcode/redis_items_written", count=n_written
+                    )
+                except Exception:
+                    pass
             # R5-P2-14: 心跳
             if (
                 self._heartbeat_interval > 0
@@ -204,32 +239,71 @@ class AntCodeRedisPipeline:
     async def close_spider(self, spider) -> None:
         if not self._enabled or self._sink is None:
             return
+        stats = spider.crawler.stats
+        items = int(stats.get_value("item_scraped_count", 0))
+        errors = int(stats.get_value("log_count/ERROR", 0))
+        xadd_failed_pre = int(stats.get_value("antcode/redis_xadd_failed", 0))
+        elapsed_ms = 0.0
+        if self._started_at:
+            elapsed_ms = (datetime.now() - self._started_at).total_seconds() * 1000
+
+        # P1-27: 决定 final meta 里发的 status——因为 close() 里会把 status
+        # 一并发出去，我们先按当前已知信息给出乐观判定；close 完再核对，
+        # 若 close 报告失败/有 remaining 就补记 xadd_failed，CLI 靠它判 exit code。
+        pre_written = int(stats.get_value("antcode/redis_items_written", 0))
+        if xadd_failed_pre > 0 or (items > 0 and pre_written == 0 and items > 0):
+            optimistic_status = "failed"
+        else:
+            optimistic_status = "completed"
+
+        close_ok = True
+        remaining = 0
         try:
-            stats = spider.crawler.stats
-            items = int(stats.get_value("item_scraped_count", 0))
-            errors = int(stats.get_value("log_count/ERROR", 0))
-            xadd_failed = int(stats.get_value("antcode/redis_xadd_failed", 0))
-            written = int(stats.get_value("antcode/redis_items_written", 0))
-            elapsed_ms = 0.0
-            if self._started_at:
-                elapsed_ms = (datetime.now() - self._started_at).total_seconds() * 1000
-            if xadd_failed > 0 or (items > 0 and written == 0):
-                status = "failed"
-            else:
-                status = "completed"
-            await self._sink.close(
+            raw_close = await self._sink.close(
                 {
-                    "status": status,
+                    "status": optimistic_status,
                     "finished_at": datetime.now().isoformat(),
-                    "items_count": str(written),
-                    "errors_count": str(errors + xadd_failed),
+                    # items_count 送 scraped 总数（gateway 里最终的 items_count
+                    # 反映的是抓到的总量，实际落地量看 CLI 侧 written 校核）
+                    "items_count": str(items),
+                    "errors_count": str(errors + xadd_failed_pre),
                     "duration_ms": str(elapsed_ms),
                 }
             )
-            logger.info(
-                f"AntCodeRedisPipeline 完成: run_id={self._run_id} status={status} "
-                f"scraped={items} written={written} xadd_failed={xadd_failed} "
-                f"errors={errors} duration_ms={elapsed_ms:.0f}"
-            )
+            close_ok, remaining = self._normalize_close_result(raw_close)
         except Exception as exc:
-            logger.exception(f"close_spider 异常: {exc}")
+            close_ok = False
+            logger.exception(f"sink.close 抛异常: {exc}")
+
+        if not close_ok or remaining > 0:
+            # P1-27: 最终 flush 失败——补一次 xadd_failed，让 crawl.py 里
+            # ``if xadd_failed > 0: return 1`` 生效。
+            try:
+                stats.inc_value("antcode/redis_xadd_failed")
+            except Exception:
+                pass
+            # 新增标记供 CLI 直接感知 close 阶段失败
+            try:
+                stats.set_value("antcode/final_flush_failed", 1)
+                stats.set_value("antcode/final_flush_remaining", int(remaining))
+            except Exception:
+                pass
+
+        final_xadd_failed = int(stats.get_value("antcode/redis_xadd_failed", 0))
+        final_written = int(stats.get_value("antcode/redis_items_written", 0))
+        final_status = (
+            "failed"
+            if (
+                final_xadd_failed > 0
+                or not close_ok
+                or remaining > 0
+                or (items > 0 and final_written < items)
+            )
+            else "completed"
+        )
+        logger.info(
+            f"AntCodeRedisPipeline 完成: run_id={self._run_id} status={final_status} "
+            f"scraped={items} written={final_written} xadd_failed={final_xadd_failed} "
+            f"errors={errors} duration_ms={elapsed_ms:.0f} "
+            f"close_ok={close_ok} remaining={remaining}"
+        )

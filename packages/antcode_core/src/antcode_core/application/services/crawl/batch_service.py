@@ -513,6 +513,12 @@ class CrawlBatchService(BaseService):
 
         Returns:
             更新后的 CrawlBatch 对象
+
+        **P1-32 修复**：``batch.save()`` 只带主键做 UPDATE，同一批次并发被 loop
+        （见 ``crawl_batch_status_loop``）或 API 其他调用改成 PAUSED/CANCELLED
+        时，会把用户已经生效的暂停/取消状态静默覆盖成 COMPLETED/FAILED。改用
+        条件 UPDATE + 允许的 from-status 白名单，落地失败时抛 BatchStateError
+        让调用方感知竞态。
         """
         batch = await self._get_batch_by_public_id(batch_id)
         if not batch:
@@ -520,7 +526,7 @@ class CrawlBatchService(BaseService):
 
         target_status = BatchStatus.COMPLETED if success else BatchStatus.FAILED
 
-        # 检查状态转换是否有效
+        # 检查状态转换是否有效（in-memory，防呆；下面 CAS 才是权威守卫）
         self._validate_state_transition(batch, target_status)
 
         # 获取项目公开 ID
@@ -533,10 +539,31 @@ class CrawlBatchService(BaseService):
             batch_id=batch.public_id,
         )
 
-        # 更新批次状态
+        # P1-32: 条件 UPDATE。允许 from-status 集合 = ``{RUNNING}``；
+        # PAUSED/PENDING → COMPLETED/FAILED 语义上不成立（暂停未运行的批次不
+        # 该被 auto-complete），其他终态是幂等无效转移。这里跟 loop 里 CAS
+        # 保持同一 from-status 白名单，两端才不会互相打架。
+        now = datetime.now()
+        updated = await CrawlBatch.filter(
+            id=batch.id,
+            status=BatchStatus.RUNNING.value,
+        ).update(status=target_status, completed_at=now)
+        if not updated:
+            # 竞态 or 期望状态不匹配：重新读取当前状态告诉调用方
+            fresh = await CrawlBatch.filter(id=batch.id).only("status").first()
+            current = fresh.status if fresh else "unknown"
+            logger.warning(
+                f"complete_batch CAS 失败: batch_id={batch_id} "
+                f"expected=running actual={current} target={target_status}"
+            )
+            raise BatchStateError(
+                batch_id=batch.public_id,
+                current_state=str(current),
+                expected_states=[BatchStatus.RUNNING.value],
+            )
+        # 同步内存对象
         batch.status = target_status
-        batch.completed_at = datetime.now()
-        await batch.save()
+        batch.completed_at = now
 
         logger.info(f"批次完成: batch_id={batch_id}, status={target_status}")
 

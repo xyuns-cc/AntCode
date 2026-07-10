@@ -515,13 +515,23 @@ async def get_worker_credentials(
     if not worker:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
-    # 生成配置示例
+    # P1-10: 配置示例里凭证改为占位符,真实值只放结构化字段由前端一次性展示。
+    # 避免明文 api_key/secret_key/redis 密码嵌进响应体文本 → 被日志/缓存/前端持久化二次落盘。
+    def _mask_redis_url(url: str) -> str:
+        if not url or "@" not in url:
+            return url
+        prefix, suffix = url.split("@", 1)
+        if ":" in prefix:
+            prefix = prefix.rsplit(":", 1)[0] + ":***"
+        return f"{prefix}@{suffix}"
+
+    masked_redis_url = _mask_redis_url(settings.REDIS_URL)
     config_example = f"""# Worker 配置 (worker_config.yaml)
 name: "{worker.name}"
 transport_mode: "{settings.WORKER_TRANSPORT_MODE}"
 gateway_host: "{settings.GATEWAY_HOST}"
 gateway_port: {settings.GATEWAY_PORT}
-redis_url: "{settings.REDIS_URL}"
+redis_url: "{masked_redis_url}"
 
 # Gateway 首次注册推荐使用安装 Key（无需手动配置凭证）
 # ANTCODE_WORKER_KEY=你的安装Key ANTCODE_API_BASE_URL={settings.API_BASE_URL or f"http://{settings.GATEWAY_HOST}:{settings.GATEWAY_PORT}"} \\
@@ -530,8 +540,8 @@ redis_url: "{settings.REDIS_URL}"
 # 若已有凭证，可使用环境变量凭证存储（容器场景推荐）
 # WORKER_CREDENTIAL_STORE=env
 # WORKER_CREDENTIAL_WORKER_ID={worker.public_id}
-# WORKER_CREDENTIAL_API_KEY={worker.api_key}
-# WORKER_CREDENTIAL_SECRET_KEY={worker.secret_key}
+# WORKER_CREDENTIAL_API_KEY=<从响应 api_key 字段读取,严禁嵌入示例文本>
+# WORKER_CREDENTIAL_SECRET_KEY=<从响应 secret_key 字段读取,严禁嵌入示例文本>
 """
 
     return success(
@@ -542,7 +552,7 @@ redis_url: "{settings.REDIS_URL}"
             gateway_host=settings.GATEWAY_HOST,
             gateway_port=settings.GATEWAY_PORT,
             transport_mode=settings.WORKER_TRANSPORT_MODE,
-            redis_url=settings.REDIS_URL,
+            redis_url=masked_redis_url,
             config_example=config_example,
         ),
         message="请将凭证配置到 Worker",
@@ -1305,6 +1315,9 @@ async def dispatch_task_to_worker(
 
     参数:
     - project_id: 项目ID (必须)
+    - task_id: 任务ID (必须) —— P1-23 修复: 之前 fallback 到 project.id 会静默
+      归属到无关任务(Tortoise 忽略未知字段)或 orphan 执行, 现在强校验;
+      如果调用方只想按 project 执行, 应改用带真实 task 的调度入口。
     - params: 执行参数 (可选)
     - environment_vars: 环境变量 (可选)
     - timeout: 超时时间，秒 (默认3600)
@@ -1320,16 +1333,47 @@ async def dispatch_task_to_worker(
 
     from antcode_core.application.services.projects.project_service import project_service
     from antcode_core.application.services.workers import worker_task_dispatcher
-    from antcode_core.domain.models import TaskRun
+    from antcode_core.domain.models import Task, TaskRun
 
     project_id = request.get("project_id")
     if not project_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="项目ID不能为空")
 
+    # P1-23: 必须显式提供 task_id。之前把 project.id 直接当 task_id 写入 TaskRun
+    # 会有两种后果:
+    #   * 若数据库里恰好有一条 Task.id == project.id 的记录 → run 静默归到无关任务
+    #     (Tortoise 忽略未知字段, 也不会报错)
+    #   * 若没有 → orphan run, list_task_runs / task 页面永远查不到, 无法追踪。
+    # 修复: 强要求 payload.task_id, 并校验它确实属于当前 project。
+    task_id_raw = request.get("task_id")
+    if task_id_raw in (None, "", 0):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "缺少 task_id: 单任务分发必须显式提供真实 task_id, "
+                "不接受用 project_id 兜底 (会导致 orphan / 错误归属)"
+            ),
+        )
+    try:
+        task_id_int = int(task_id_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="task_id 必须是整数",
+        ) from None
+
     # D1: 按 owner 校验解析项目（admin 放行；非本人 404，防止 IDOR 探测存在性）
     project = await project_service.get_project_by_id(project_id, current_user.user_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
+
+    # P1-23: 校验 task 存在且属于该 project, 否则 400。避免跨 project 借用 task_id。
+    task_obj = await Task.filter(id=task_id_int, project_id=project.id).first()
+    if not task_obj:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"task_id={task_id_int} 不存在或不属于 project_id={project_id}",
+        )
 
     run_id = str(uuid.uuid4())
 
@@ -1338,7 +1382,8 @@ async def dispatch_task_to_worker(
     task_run = await TaskRun.create(
         run_id=run_id,
         public_id=public_id,
-        task_id=project.id,
+        # P1-23: 使用校验过的真实 task_id, 而不是 project.id
+        task_id=task_obj.id,
         project_id=project.id,
         status="pending",
         dispatch_status="pending",

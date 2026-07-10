@@ -88,8 +88,20 @@ async def main():
     server.add_servicer(GatewayDataService(), add_DataServiceServicer_to_server)
     logger.info("ControlService + DataService 已注册")
 
-    # 启动服务器
-    await server.start()
+    # 启动服务器 —— P1-21: start() 失败返回 False,必须 fail-fast 退出,
+    # 否则 pod 里进程还在但端口没 listen,healthcheck 只 pgrep 就误判 healthy,
+    # Worker 打过来的连接会全部超时。
+    if not await server.start():
+        logger.error(
+            "Gateway gRPC 服务器启动失败 (端口未绑定 / TLS 凭证缺失 / 明文被拒),"
+            " 触发退出以让容器编排层重启并暴露给上游 healthcheck"
+        )
+        # DB 已在 init_db 里初始化过,退出前做一次 best-effort 关闭。
+        try:
+            await asyncio.wait_for(close_db(), timeout=5)
+        except Exception:  # pragma: no cover - 退出路径的清理不阻塞
+            logger.exception("退出前 close_db 失败,忽略")
+        sys.exit(1)
     logger.info("Gateway 服务已启动")
 
     shutdown_event = asyncio.Event()

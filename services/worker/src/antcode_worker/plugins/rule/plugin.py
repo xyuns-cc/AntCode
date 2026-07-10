@@ -98,26 +98,38 @@ class RulePlugin(PluginBase):
         transport_mode = str(getattr(wcfg, "transport_mode", "") or "").lower()
 
         if transport_mode == "gateway":
-            # gateway 模式：注入 SpiderData gRPC endpoint
-            endpoint = str(getattr(wcfg, "gateway_endpoint", "") or "").strip() or (
-                os.environ.get("WORKER_GATEWAY_ENDPOINT", "").strip()
-            )
+            # P1-24 (审查报告): WorkerConfig 上并不存在 ``gateway_endpoint`` /
+            # ``gateway_use_tls`` / ``gateway_auth_token`` 三个字段（见
+            # ``worker/config.py::WorkerConfig``），旧实现全部走 ``getattr(..., "")``
+            # 静默拿到空串，然后 fallback 到 env 变量；如果 env 也没配就直接
+            # ``raise RuntimeError`` —— 用户从配置文件里根本没办法为规则爬虫
+            # 打开 gateway sink，导致 rule 项目在 gateway 模式必然 exit 1。
+            #
+            # 修复：
+            # 1. 优先从 WorkerConfig 真正存在的字段 ``gateway_host`` / ``gateway_port``
+            #    组装 endpoint（这是 gateway 模式下 worker 自身连的 gateway 地址,
+            #    子进程 SpiderData sink 也应该走同一个 endpoint）。
+            # 2. TLS / auth token 目前 WorkerConfig 未建模，走 env fallback；
+            #    若两处都没配置就明确 error message 提示缺什么。
+            endpoint = os.environ.get("WORKER_GATEWAY_ENDPOINT", "").strip()
+            if not endpoint:
+                host = str(getattr(wcfg, "gateway_host", "") or "").strip()
+                port = getattr(wcfg, "gateway_port", 0) or 0
+                if host and int(port) > 0:
+                    endpoint = f"{host}:{int(port)}"
             if not endpoint:
                 raise RuntimeError(
-                    "规则爬虫 gateway 模式需要 WORKER_GATEWAY_ENDPOINT / "
-                    "gateway_endpoint 配置，但当前为空。"
+                    "规则爬虫 gateway 模式需要 gateway endpoint，但 worker 配置的 "
+                    "gateway_host/gateway_port 为空且 WORKER_GATEWAY_ENDPOINT 未设置。"
                 )
             env["ANTCODE_SPIDER_SINK_MODE"] = "gateway"
             env["ANTCODE_SPIDER_GATEWAY_ENDPOINT"] = endpoint
-            if str(getattr(wcfg, "gateway_use_tls", "")).lower() in (
-                "1",
-                "true",
-                "yes",
-            ):
+            # TLS 开关只从 env 读（WorkerConfig 未建模）
+            tls_flag = os.environ.get("WORKER_GATEWAY_USE_TLS", "").strip().lower()
+            if tls_flag in ("1", "true", "yes", "on"):
                 env["ANTCODE_SPIDER_GATEWAY_SECURE"] = "1"
-            token = str(getattr(wcfg, "gateway_auth_token", "") or "").strip() or (
-                os.environ.get("WORKER_GATEWAY_AUTH_TOKEN", "").strip()
-            )
+            # auth token 同上，仅走 env fallback
+            token = os.environ.get("WORKER_GATEWAY_AUTH_TOKEN", "").strip()
             if token:
                 env["ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"] = token
         else:
