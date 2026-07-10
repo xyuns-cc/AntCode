@@ -309,7 +309,9 @@ async def main() -> None:
         logger.info("收到停止信号")
         stop_event.set()
 
-    # Windows 上 asyncio 不支持 add_signal_handler，改用 signal.signal
+    # P2-14: SIGTERM/SIGINT 都注册了 handler,K8s 优雅关停时 stop_event.set()
+    # 会触发 stop_master() drain(停 loop + step_down leader + 关连接池)。
+    # Windows 上 asyncio 不支持 add_signal_handler，改用 signal.signal。
     if sys.platform == "win32":
         def _win_handler(signum, frame):  # noqa: ARG001
             loop.call_soon_threadsafe(signal_handler)

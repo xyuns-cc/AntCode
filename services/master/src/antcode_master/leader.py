@@ -44,8 +44,22 @@ class LeaderElection:
 
     @property
     def is_leader(self) -> bool:
-        """是否为 Leader"""
-        return self._is_leader
+        """是否为 Leader（本地视角，未走 Redis 权威校验）。
+
+        P2-07: 兜住 DistributedLock 续租失败但 LeaderElection 健康检查
+        尚未察觉的窗口。renew_loop 检查 ``extend()`` 返回值发现 ``False``
+        或抛异常时会先把 ``_lock._token`` 置空,本属性此时立刻感知并翻转
+        ``_is_leader``,不再等 ``_health_check_loop`` 睡 ``ttl/3`` 才纠正。
+        权威判断仍走 ``ensure_leader()`` → ``verify_ownership()``。
+        """
+        if not self._is_leader:
+            return False
+        # renew_task 已死(extend 抛/返回 False → _token=None)时,本地视角立刻放弃
+        if self._lock is None or not self._lock.is_locked:
+            self._is_leader = False
+            self._fencing_token = None
+            return False
+        return True
 
     @property
     def fencing_token(self) -> int | None:

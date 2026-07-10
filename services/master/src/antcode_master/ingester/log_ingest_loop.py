@@ -82,6 +82,12 @@ class LogIngestLoop:
         self._stream_key = stream_key or _log_ingest_stream_key()
         self._group = group_name or log_ingest_consumer_group()
         # R1-P0-2 (审查报告): consumer 名去掉 id(self)，与 result_loop 保持一致
+        # P2-18: consumer 名 = "{hostname}-{pid}",多副本 master 下天然不重
+        # (K8s pod 名唯一 + pid),不会出现共用 consumer 名导致 PEL owner_id
+        # 反复被抢占的 starve 场景。message_id 幂等由 postgres_log_service
+        # 的 event_id ON CONFLICT DO NOTHING 兜底(见 `_handle_batch` 拼
+        # ``event_id=f"{msg_id}:{i}"``)。XAUTOCLAIM 只搬 PEL,DB 层去重
+        # 保证同一批 Redis 消息 replay 也不会插重复行。
         self._consumer = consumer_name or f"{socket.gethostname()}-{os.getpid()}"
         self._poll_interval = poll_interval
         self._block_ms = block_ms

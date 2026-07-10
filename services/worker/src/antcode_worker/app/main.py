@@ -40,7 +40,14 @@ class GracefulShutdown:
         return self._shutdown_event.is_set()
 
     def install_handlers(self) -> None:
-        """安装信号处理器"""
+        """安装信号处理器。
+
+        P2-14: 优先走 ``loop.add_signal_handler``(Linux/macOS 原生 async),
+        回退到 ``signal.signal``(Windows 或未跑在 asyncio 里的场景)。
+        K8s SIGTERM 会触发 ``_handle_signal`` → 置 ``_shutdown_event``,让
+        ``Lifecycle`` 执行 drain(停接单 + 等运行中任务 + deregister),
+        而非被 SIGKILL 硬杀。第二次信号强制 ``os._exit`` 保底。
+        """
         if self._handlers_installed:
             return
 

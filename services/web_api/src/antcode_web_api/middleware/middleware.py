@@ -250,7 +250,19 @@ class BodySizeMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Redis 分布式滑动窗口限流中间件"""
+    """Redis 分布式滑动窗口限流中间件
+
+    P2-05: 计数器实际存储在 Redis 的 Sorted Set 里 (见
+    ``antcode_core.infrastructure.redis.rate_limiter``:
+    Lua 脚本 ZREMRANGEBYSCORE + ZCARD + ZADD 原子完成滑动窗口判断),
+    因此多个 web_api 副本会共享同一份 counter, **不会** 出现
+    "副本数 × limit" 的漏洞。SERVER_WORKERS>1 或多容器副本上线
+    也不需要额外协调。
+
+    如果未来把 counter 拆回进程内内存(如加了本地 LRU 快路径),
+    必须保留 Redis 兜底路径,并在多副本部署时把 limit / N 副本再传进来,
+    否则 P2-05 会回归。
+    """
 
     def __init__(self, app, calls: int = 100, period: int = 60):
         super().__init__(app)
@@ -260,6 +272,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         client_ip = self._get_client_ip(request)
 
+        # 分布式滑动窗口:所有副本落到同一个 Redis key, counter 全局共享。
         from antcode_core.infrastructure.redis.rate_limiter import redis_rate_limiter
 
         allowed = await redis_rate_limiter.is_allowed(client_ip, self.calls, self.period)
