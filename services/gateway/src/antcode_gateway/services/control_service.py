@@ -29,6 +29,7 @@ P3 LeaseStore 已接管租约状态机:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -411,7 +412,17 @@ class GatewayControlService(ControlServiceServicer):
                             data=data,
                         )
                         if event is None:
-                            raise ValueError(f"未知 control event: stream={stream_key} msg_id={msg_id}")
+                            # 回归修复(review): 毒消息(载荷解码失败 / 未知
+                            # control_type / 被旧版 MAXLEN 裁剪后残留在 PEL 的
+                            # 幽灵条目,其 data 为 None)必须 ack 丢弃。若像先前
+                            # 那样 raise,WatchControl 流断开 → worker 重连 →
+                            # PEL 排空再次读到同一条毒消息 → 再 raise,该 worker
+                            # (control:global 上则是全部 worker)的控制通道被
+                            # 永久钉死,cancel/kill 永远送不到。
+                            logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={msg_id}")
+                            with contextlib.suppress(Exception):
+                                await redis.xack(stream_key, group, msg_id)
+                            continue
                         yield event
                 if pel_total:
                     logger.info(f"WatchControl PEL 排空: worker_id={worker_id} replayed={pel_total}")
@@ -451,7 +462,13 @@ class GatewayControlService(ControlServiceServicer):
                             data=data,
                         )
                         if event is None:
-                            raise ValueError(f"未知 control event: stream={stream_key} msg_id={msg_id}")
+                            # 回归修复(review): 与 PEL 排空分支同理 —— 此处 raise
+                            # 会把毒消息留在 PEL,worker 重连后在 PEL 排空阶段
+                            # 无限重放,控制通道永久失效。ack 丢弃 + 继续。
+                            logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={msg_id}")
+                            with contextlib.suppress(Exception):
+                                await redis.xack(stream_key, group, msg_id)
+                            continue
                         yield event
 
         except asyncio.CancelledError:

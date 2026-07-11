@@ -9,6 +9,18 @@ from abc import ABC, abstractmethod
 import httpx
 from loguru import logger
 
+from antcode_core.application.services.projects.git_url_security import validate_webhook_url
+
+
+def _safe_webhook_label(url):
+    """日志用的 Webhook 标识：只取 host，避免把含 token 的 URL 写进日志。"""
+    try:
+        from urllib.parse import urlsplit
+
+        return urlsplit(url).hostname or "webhook"
+    except Exception:
+        return "webhook"
+
 
 class AlertChannel(ABC):
     """告警渠道抽象基类"""
@@ -51,6 +63,15 @@ class MultiWebhookChannel(AlertChannel):
     async def _send_single_alert_with_retry(self, url, payload, webhook_name):
         """发送单条告警（带重试）"""
         if not url:
+            return False
+
+        # SSRF 防护（发送侧兜底）：路由层已校验，但配置也可能经由通用
+        # system-config 接口直写 DB，这里在真正发起请求前再校验一次，
+        # 拒绝 http(s) 以外的协议及本地/私网/云元数据端点。
+        try:
+            await asyncio.to_thread(validate_webhook_url, url)
+        except ValueError as exc:
+            logger.error(f"[{self.channel_name}] 拒绝发送告警，Webhook URL 校验失败 [{webhook_name}]: {exc}")
             return False
 
         retries = self.max_retries if self.retry_enabled else 1
@@ -129,7 +150,7 @@ class MultiWebhookChannel(AlertChannel):
 
             if should_send:
                 webhook_url = webhook_config.get("url", "")
-                webhook_name = webhook_config.get("name", webhook_url[:50])
+                webhook_name = webhook_config.get("name") or _safe_webhook_label(webhook_url)
                 tasks.append(self._send_single_alert_with_retry(webhook_url, payload, webhook_name))
 
         if not tasks:
@@ -152,7 +173,7 @@ class MultiWebhookChannel(AlertChannel):
 
             if should_send:
                 webhook_url = webhook_config.get("url", "")
-                webhook_name = webhook_config.get("name", webhook_url[:50])
+                webhook_name = webhook_config.get("name") or _safe_webhook_label(webhook_url)
                 tasks.append(self._send_single_alert_with_retry(webhook_url, payload, webhook_name))
 
         if not tasks:

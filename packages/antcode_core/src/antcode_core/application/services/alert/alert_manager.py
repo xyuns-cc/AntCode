@@ -11,19 +11,36 @@ from antcode_core.common.hash_utils import calculate_content_hash
 
 
 class RateLimiter:
+    # 超过该键数时清理已全部过期的键，防止长期运行内存无界增长
+    _PRUNE_THRESHOLD = 512
+
     def __init__(self, window=60, max_count=3):
         self.window = window
         self.max_count = max_count
         self._records = defaultdict(list)
 
-    def _get_message_key(self, message, level):
-        content = f"{level}:{message}"
+    def _get_message_key(self, message, level, rate_key=None):
+        # rate_key 允许调用方提供不含时间戳/瞬时数值的稳定去重键，
+        # 否则同一告警每次因时间戳不同而哈希不同，限流永远不生效。
+        content = rate_key if rate_key else f"{level}:{message}"
         return calculate_content_hash(content)
 
-    def should_allow(self, message, level):
-        key = self._get_message_key(message, level)
+    def _prune_expired(self, current_time):
+        if len(self._records) <= self._PRUNE_THRESHOLD:
+            return
+        expired = [
+            key
+            for key, timestamps in self._records.items()
+            if not timestamps or current_time - timestamps[-1] >= self.window
+        ]
+        for key in expired:
+            del self._records[key]
+
+    def should_allow(self, message, level, rate_key=None):
+        key = self._get_message_key(message, level, rate_key)
         current_time = time.time()
 
+        self._prune_expired(current_time)
         self._records[key] = [ts for ts in self._records[key] if current_time - ts < self.window]
 
         if len(self._records[key]) >= self.max_count:
@@ -119,12 +136,12 @@ class AlertManager:
         if channel_name in self._enabled_channels:
             self._enabled_channels.remove(channel_name)
 
-    def send_alert(self, message, level="INFO"):
+    def send_alert(self, message, level="INFO", rate_key=None):
         """发送告警（手动触发）"""
         if self._shutting_down:
             return {"status": "shutting_down"}
 
-        if not self._check_rate_limit(message, level):
+        if not self._check_rate_limit(message, level, rate_key):
             return {"rate_limited": True}
 
         if not self._enabled_channels:
@@ -136,19 +153,18 @@ class AlertManager:
 
         try:
             future = asyncio.run_coroutine_threadsafe(self._send_async(message, level, force=True), self._loop)
-            self._pending_tasks.append(future)
-            self._has_pending = True
+            self._track_pending(future)
             return {"status": "queued"}
         except Exception as e:
             logger.error(f"告警加入队列失败: {e}")
             return {"status": "error"}
 
-    def send_alert_auto(self, message, level, default_levels):
+    def send_alert_auto(self, message, level, default_levels, rate_key=None):
         """发送告警（自动触发）"""
         if self._shutting_down:
             return {"status": "shutting_down"}
 
-        if not self._check_rate_limit(message, level):
+        if not self._check_rate_limit(message, level, rate_key):
             return {"rate_limited": True}
 
         if not self._enabled_channels:
@@ -162,18 +178,24 @@ class AlertManager:
                 self._send_async(message, level, force=False, default_levels=default_levels),
                 self._loop,
             )
-            self._pending_tasks.append(future)
-            self._has_pending = True
+            self._track_pending(future)
             return {"status": "queued"}
         except Exception as e:
             logger.error(f"告警加入队列失败: {e}")
             return {"status": "error"}
 
-    def _check_rate_limit(self, message, level):
+    def _track_pending(self, future):
+        """记录待完成任务，顺带清理已完成的（否则长期运行无界增长）"""
+        with self._lock:
+            self._pending_tasks = [f for f in self._pending_tasks if not f.done()]
+            self._pending_tasks.append(future)
+            self._has_pending = True
+
+    def _check_rate_limit(self, message, level, rate_key=None):
         """检查限流"""
         if self._rate_limit_enabled and self._rate_limiter:
             with self._lock:
-                allowed, reason = self._rate_limiter.should_allow(message, level)
+                allowed, reason = self._rate_limiter.should_allow(message, level, rate_key)
             if not allowed:
                 return False
         return True

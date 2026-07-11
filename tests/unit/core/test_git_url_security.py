@@ -19,6 +19,13 @@ def test_remote_helper_syntax_is_rejected() -> None:
         git_url_security.validate_git_url("ext::sh -c id")
 
 
+def test_cgnat_shared_address_is_rejected() -> None:
+    # 100.64.0.0/10 是 CGNAT/共享地址(含阿里云 metadata 邻域),
+    # is_private=False 但绝非公网可路由目标。
+    with pytest.raises(ValueError, match="私网|本地"):
+        git_url_security.validate_git_url("ssh://git@100.64.1.1/repo.git")
+
+
 def test_public_git_host_resolves_only_to_public_addresses(monkeypatch) -> None:
     monkeypatch.setattr(
         socket,

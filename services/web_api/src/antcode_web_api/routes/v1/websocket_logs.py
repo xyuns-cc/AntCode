@@ -37,9 +37,13 @@ async def issue_ws_ticket(current_user: TokenData = Depends(get_current_user)):
 
     ticket = secrets.token_urlsafe(32)
     redis = await get_redis_client()
+    # 票据同时携带签发时所属的会话 jti（P1-09），使 WS 连接可以绑定到
+    # 服务端会话：revoke_all_sessions / 登出后，连接管理器的周期重校验
+    # 能据此踢掉存活的 WebSocket。
+    ticket_value = f"{current_user.user_id}:{current_user.session_jti or ''}"
     stored = await redis.set(
         f"{_WS_TICKET_PREFIX}{ticket}",
-        str(current_user.user_id),
+        ticket_value,
         nx=True,
         ex=_WS_TICKET_TTL_SECONDS,
     )
@@ -48,7 +52,7 @@ async def issue_ws_ticket(current_user: TokenData = Depends(get_current_user)):
         ticket = secrets.token_urlsafe(32)
         await redis.set(
             f"{_WS_TICKET_PREFIX}{ticket}",
-            str(current_user.user_id),
+            ticket_value,
             ex=_WS_TICKET_TTL_SECONDS,
         )
     return success(
@@ -69,16 +73,19 @@ async def _resolve_ws_token(ticket: str | None) -> str:
         raw = await redis.getdel(key)
         if not raw:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="票据无效或已过期")
-        user_id = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        value = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        # 兼容两种格式："<user_id>" (旧) 与 "<user_id>:<session_jti>" (新)
+        user_id, _, session_jti = value.partition(":")
         # 重新签发短时 JWT 喂给下游 connect()，避免改动 websocket_log_service 内部签名校验
         user = await User.get_or_none(id=int(user_id))
-        if not user:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
+        if not user or not getattr(user, "is_active", True):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用")
         return jwt_auth.create_access_token(
             user_id=user.id,
             username=user.username,
             is_admin=bool(getattr(user, "is_admin", False)),
             role=getattr(user, "role", "user") or "user",
+            session_jti=session_jti or None,
         )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少一次性 ticket")
 

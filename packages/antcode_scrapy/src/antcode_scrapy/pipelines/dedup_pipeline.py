@@ -116,6 +116,14 @@ class AntCodeDedupPipeline:
         self._on_hit = str(cfg.get("on_hit") or "drop").lower()
         ttl_days = int(cfg.get("ttl_days", self.DEFAULT_TTL_DAYS))
         self._ttl_seconds = ttl_days * 86400 if ttl_days > 0 else 0
+        # R2 seam-4 (接缝修复): ``ttl_days=0``（不过期）对 project 级去重集
+        # 是合法语义（长期业务去重），但对 run 级等于每个 run 永久泄漏一个
+        # Redis SET —— run_id 全局唯一不复用，run 结束后没有任何环节清理
+        # ``{ns}:spider:dedup:run:{run_id}``。给 run 级强制兜底 TTL，防止
+        # 高吞吐批次把 Redis 内存拖爆。
+        if self._scope == "run" and self._ttl_seconds <= 0:
+            self._ttl_seconds = self.DEFAULT_TTL_DAYS * 86400
+            logger.info(f"dedup scope=run 且 ttl_days=0，应用兜底 TTL {self.DEFAULT_TTL_DAYS} 天防 Redis 泄漏")
         self._namespace = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
         self._project_id = getattr(spider, "project_id", "") or ""
         self._run_id = getattr(spider, "run_id", "") or ""

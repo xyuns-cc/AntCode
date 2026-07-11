@@ -36,6 +36,7 @@ class ConnectionInfo:
     run_id: str
     user_id: int
     websocket: WebSocket
+    session_jti: str | None = None
     state: ConnectionState = ConnectionState.CONNECTING
     connected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -81,6 +82,7 @@ class ConnectionPool:
         self,
         max_connections_per_execution: int = 50,
         max_total_connections: int = 10000,
+        max_connections_per_user: int = 20,
     ):
         from antcode_core.common.config import settings
 
@@ -88,30 +90,50 @@ class ConnectionPool:
             settings, "WEBSOCKET_MAX_CONN_PER_EXECUTION", max_connections_per_execution
         )
         self.max_total_connections = getattr(settings, "WEBSOCKET_MAX_TOTAL_CONN", max_total_connections)
+        # 资源边界: 单用户连接数上限,防止单账号占满全局连接池 (DoS 其他用户)
+        self.max_connections_per_user = getattr(settings, "WEBSOCKET_MAX_CONN_PER_USER", max_connections_per_user)
         self._connections: dict[str, dict[str, ConnectionInfo]] = defaultdict(dict)
         self._locks: dict[str, asyncio.Lock] = {}
         self._lock_users: dict[str, int] = {}
         self._global_lock = asyncio.Lock()  # 仅用于创建新的 execution 分段
         self._total_count = 0
+        self._user_counts: dict[int, int] = {}
 
     async def _checkout_lock(
         self,
         run_id: str,
         *,
         reserve_connection: bool = False,
+        user_id: int | None = None,
     ) -> asyncio.Lock | None:
         async with self._global_lock:
-            if reserve_connection and self._total_count >= self.max_total_connections:
-                return None
+            if reserve_connection:
+                if self._total_count >= self.max_total_connections:
+                    logger.warning(f"总连接数超限: {self._total_count}/{self.max_total_connections}")
+                    return None
+                if user_id is not None and self._user_counts.get(user_id, 0) >= self.max_connections_per_user:
+                    logger.warning(
+                        f"用户连接数超限: user_id={user_id}, "
+                        f"{self._user_counts.get(user_id, 0)}/{self.max_connections_per_user}"
+                    )
+                    return None
             lock = self._locks.setdefault(run_id, asyncio.Lock())
             self._lock_users[run_id] = self._lock_users.get(run_id, 0) + 1
             if reserve_connection:
                 self._total_count += 1
+                if user_id is not None:
+                    self._user_counts[user_id] = self._user_counts.get(user_id, 0) + 1
             return lock
 
-    async def _release_connection_slot(self) -> None:
+    async def _release_connection_slot(self, user_id: int | None = None) -> None:
         async with self._global_lock:
             self._total_count -= 1
+            if user_id is not None:
+                remaining = self._user_counts.get(user_id, 0) - 1
+                if remaining > 0:
+                    self._user_counts[user_id] = remaining
+                else:
+                    self._user_counts.pop(user_id, None)
 
     async def _return_lock(self, run_id: str, lock: asyncio.Lock) -> None:
         async with self._global_lock:
@@ -128,9 +150,8 @@ class ConnectionPool:
         run_id = connection_info.run_id
         connection_id = connection_info.connection_id
 
-        lock = await self._checkout_lock(run_id, reserve_connection=True)
+        lock = await self._checkout_lock(run_id, reserve_connection=True, user_id=connection_info.user_id)
         if lock is None:
-            logger.error(f"总连接数超限: {self._total_count}/{self.max_total_connections}")
             return False
         added = False
         try:
@@ -142,7 +163,7 @@ class ConnectionPool:
                     )
                     await self._close_connection_unsafe(oldest)
                     self._connections[run_id].pop(oldest.connection_id, None)
-                    await self._release_connection_slot()
+                    await self._release_connection_slot(oldest.user_id)
                     logger.warning(f"执行ID {run_id} 连接数超限，移除最旧连接")
 
                 self._connections[run_id][connection_id] = connection_info
@@ -151,7 +172,7 @@ class ConnectionPool:
                 return True
         finally:
             if not added:
-                await self._release_connection_slot()
+                await self._release_connection_slot(connection_info.user_id)
             await self._return_lock(run_id, lock)
 
     async def remove_connection(self, run_id, connection_id):
@@ -163,6 +184,7 @@ class ConnectionPool:
         if lock is None:
             return False
         removed = False
+        removed_user_id: int | None = None
         try:
             async with lock:
                 if connection_id not in self._connections.get(run_id, {}):
@@ -170,12 +192,13 @@ class ConnectionPool:
                 conn = self._connections[run_id].pop(connection_id)
                 conn.state = ConnectionState.CLOSED
                 removed = True
+                removed_user_id = conn.user_id
                 if not self._connections[run_id]:
                     self._connections.pop(run_id, None)
                 return True
         finally:
             if removed:
-                await self._release_connection_slot()
+                await self._release_connection_slot(removed_user_id)
             await self._return_lock(run_id, lock)
 
     async def clear(self) -> None:
@@ -184,6 +207,7 @@ class ConnectionPool:
             self._locks.clear()
             self._lock_users.clear()
             self._total_count = 0
+            self._user_counts.clear()
 
     async def _close_connection_unsafe(self, conn):
         """关闭连接（调用者需持有锁）"""
@@ -424,13 +448,19 @@ class WebSocketConnectionManager:
         max_missed_pongs: int = 3,
         cleanup_interval: float = 300.0,
         inactive_timeout: float = 1800.0,
+        max_connection_lifetime: float = 28800.0,
     ):
+        from antcode_core.common.config import settings
+
         self.connection_pool = ConnectionPool(max_connections_per_execution)
         self.message_queue = MessageQueue()
         self.heartbeat_manager = HeartbeatManager(ping_interval, pong_timeout, max_missed_pongs)
 
         self.cleanup_interval = cleanup_interval
         self.inactive_timeout = inactive_timeout
+        # 会话生命周期: ticket 是一次性的,但连接建立后不再重新认证;
+        # 上限连接生存时长(默认 8h),超时强制断开让前端重新走 ticket 握手。
+        self.max_connection_lifetime = getattr(settings, "WEBSOCKET_MAX_CONNECTION_LIFETIME", max_connection_lifetime)
 
         # 统计信息
         self._stats = WebSocketStats()
@@ -483,8 +513,12 @@ class WebSocketConnectionManager:
         """生成连接ID"""
         return f"{run_id}_{id(websocket)}_{time.time_ns()}"
 
-    async def connect(self, websocket, run_id, user_id):
-        """建立WebSocket连接"""
+    async def connect(self, websocket, run_id, user_id, session_jti=None):
+        """建立WebSocket连接
+
+        Returns:
+            str | None: 连接 ID; 连接数超限被拒绝时返回 ``None`` (连接已关闭)。
+        """
         # 确保管理器已启动
         if not self._started:
             await self.start()
@@ -501,10 +535,16 @@ class WebSocketConnectionManager:
                 run_id=run_id,
                 user_id=user_id,
                 websocket=websocket,
+                session_jti=session_jti,
             )
 
-            # 添加到连接池
-            await self.connection_pool.add_connection(conn_info)
+            # 添加到连接池；超限(全局/单用户)时拒绝并关闭,不能当作成功继续订阅
+            added = await self.connection_pool.add_connection(conn_info)
+            if not added:
+                with contextlib.suppress(Exception):
+                    await websocket.close(code=1013, reason="连接数超限，请稍后重试")
+                logger.warning(f"WebSocket连接被拒绝(连接数超限): 执行ID={run_id}, 用户={user_id}")
+                return None
 
             # 更新统计
             self._stats.total_connections += 1
@@ -545,6 +585,7 @@ class WebSocketConnectionManager:
             try:
                 await asyncio.sleep(self.cleanup_interval)
                 await self._cleanup_inactive_connections()
+                await self._revalidate_connection_auth()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -555,9 +596,10 @@ class WebSocketConnectionManager:
         return await self._cleanup_inactive_connections()
 
     async def _cleanup_inactive_connections(self) -> int:
-        """清理不活跃连接"""
+        """清理不活跃连接与超过最大生存时长的连接"""
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self.inactive_timeout)
+        lifetime_cutoff = now - timedelta(seconds=self.max_connection_lifetime)
         cleaned = 0
 
         all_connections = self.connection_pool.get_all_connections()
@@ -568,10 +610,68 @@ class WebSocketConnectionManager:
                         await conn.websocket.close(code=4009, reason="连接不活跃")
                     await self.connection_pool.remove_connection(run_id, conn.connection_id)
                     cleaned += 1
+                elif conn.connected_at < lifetime_cutoff:
+                    # ticket 一次性消费后连接不再重新认证,活跃客户端(持续 pong)
+                    # 可以无限存活;这里兜底强制断开,前端重新走 ticket 握手即可。
+                    with contextlib.suppress(Exception):
+                        await conn.websocket.close(code=4401, reason="连接超过最大生存时长，请重新连接")
+                    await self.connection_pool.remove_connection(run_id, conn.connection_id)
+                    cleaned += 1
 
         if cleaned > 0:
-            logger.info(f"清理了 {cleaned} 个不活跃连接")
+            logger.info(f"清理了 {cleaned} 个不活跃/超时连接")
         return cleaned
+
+    async def _revalidate_connection_auth(self) -> int:
+        """周期重校验存活连接的用户/会话状态 (P1-09 的 WS 补齐)。
+
+        ticket 在握手时一次性消费,连接存活期间用户可能被禁用、登出或
+        ``revoke_all_sessions``;这里按 cleanup_interval 批量复查:
+        - 用户不存在或 ``is_active=False`` → 踢;
+        - 连接携带的 ``session_jti`` 对应 UserSession 已撤销/不存在 → 踢。
+
+        DB 异常时跳过本轮 (fail-open,最大生存时长仍然兜底)。
+        """
+        all_connections = self.connection_pool.get_all_connections()
+        conns = [conn for connections in all_connections.values() for conn in connections]
+        if not conns:
+            return 0
+
+        user_ids = {conn.user_id for conn in conns}
+        jtis = {conn.session_jti for conn in conns if conn.session_jti}
+        try:
+            from antcode_core.domain.models.user import User
+            from antcode_core.domain.models.user_session import UserSession
+
+            active_user_ids = set(await User.filter(id__in=list(user_ids), is_active=True).values_list("id", flat=True))
+            valid_jtis: set[str] = set()
+            if jtis:
+                # values_list(flat=True) 的 Tortoise stub 未建模 flat,标注成
+                # list[tuple];用显式 str() 推导既满足 set[str] 又对齐 runtime 标量。
+                valid_jtis = {
+                    str(row)
+                    for row in await UserSession.filter(jti__in=list(jtis), revoked_at__isnull=True).values_list(
+                        "jti", flat=True
+                    )
+                }
+        except Exception as e:
+            logger.debug(f"WS 会话重校验跳过 (DB 不可用): {e}")
+            return 0
+
+        kicked = 0
+        for conn in conns:
+            user_invalid = conn.user_id not in active_user_ids
+            session_invalid = bool(conn.session_jti) and conn.session_jti not in valid_jtis
+            if not (user_invalid or session_invalid):
+                continue
+            with contextlib.suppress(Exception):
+                await conn.websocket.close(code=4401, reason="会话已失效，请重新登录")
+            await self.connection_pool.remove_connection(conn.run_id, conn.connection_id)
+            kicked += 1
+
+        if kicked > 0:
+            logger.info(f"会话重校验踢掉 {kicked} 个 WebSocket 连接 (用户禁用/会话撤销)")
+        return kicked
 
     async def handle_client_message(self, run_id, connection_id, message):
         """处理客户端消息"""
@@ -655,11 +755,26 @@ class WebSocketConnectionManager:
         await websocket.send_text(message_str)
 
     async def send_to_connection(self, run_id, connection_id, message):
-        """只向指定连接发送消息。"""
+        """只向指定连接发送消息。
+
+        历史回放走这条路;慢消费者(前端不读)会让 send 一直阻塞在传输层
+        背压上,与广播路径 (``_send_serialized_batch``) 对齐加发送超时,
+        超时即摘除连接,防止 10000 条历史日志长期滞留内存。
+        """
         connection = self.connection_pool.get_connection(run_id, connection_id)
         if connection is None or connection.state != ConnectionState.CONNECTED:
             return False
-        await self._send_direct(connection.websocket, message)
+        try:
+            await asyncio.wait_for(
+                self._send_direct(connection.websocket, message),
+                timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(f"发送消息超时(慢消费者): {connection_id}")
+            with contextlib.suppress(Exception):
+                await connection.websocket.close(code=1013, reason="消费过慢")
+            await self.connection_pool.remove_connection(run_id, connection_id)
+            return False
         connection.messages_sent += 1
         return True
 
