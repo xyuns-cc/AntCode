@@ -55,9 +55,7 @@ async def test_stop_with_grace_period_completes(transport):
     ),
     strict=False,
 )
-async def test_unacked_task_is_reclaimable_after_disconnect(
-    transport, task_producer, fresh_ids
-):
+async def test_unacked_task_is_reclaimable_after_disconnect(transport, task_producer, fresh_ids):
     """Goal of this test (not yet enforceable): if a worker polls a task
     and then dies without acking, another worker on the same group must
     eventually be able to poll the same logical task again.
@@ -98,6 +96,4 @@ async def test_state_change_callback_fires(transport, fresh_ids):  # noqa: ARG00
     await transport.stop(grace_period=0.1)
 
     # We required at least one transition into OFFLINE.
-    assert any(new == "offline" for _old, new in events), (
-        f"expected a transition into OFFLINE, got {events!r}"
-    )
+    assert any(new == "offline" for _old, new in events), f"expected a transition into OFFLINE, got {events!r}"

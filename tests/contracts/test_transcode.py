@@ -107,9 +107,7 @@ def test_log_type_str_to_proto_alias(alias: str, expected: int) -> None:
 def test_log_type_str_to_proto_none_and_empty() -> None:
     assert log_type_str_to_proto(None) == data_pb2.LogType.LOG_TYPE_UNSPECIFIED
     assert log_type_str_to_proto("") == data_pb2.LogType.LOG_TYPE_UNSPECIFIED
-    assert (
-        log_type_str_to_proto("nonsense") == data_pb2.LogType.LOG_TYPE_UNSPECIFIED
-    )
+    assert log_type_str_to_proto("nonsense") == data_pb2.LogType.LOG_TYPE_UNSPECIFIED
 
 
 def test_proto_log_type_to_str() -> None:

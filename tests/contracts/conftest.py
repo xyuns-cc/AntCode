@@ -37,7 +37,6 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-
 # ----------------------------------------------------------------------------
 # sys.path injection — runs at import time so the test files themselves can
 # do `from antcode_worker.transport.base import TransportBase` cleanly.
@@ -127,8 +126,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "transport(mode): mark a test as covering a specific transport mode "
-        "('redis' or 'gateway').",
+        "transport(mode): mark a test as covering a specific transport mode ('redis' or 'gateway').",
     )
 
 

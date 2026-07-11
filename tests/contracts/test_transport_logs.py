@@ -60,9 +60,7 @@ async def test_send_log_batch_empty_is_noop(transport):
     assert ok is True
 
 
-async def test_send_log_chunk_concat_round_trips(
-    transport, fresh_ids, redis_admin
-):
+async def test_send_log_chunk_concat_round_trips(transport, fresh_ids, redis_admin):
     """When you send chunks of bytes, the concatenated payload from the
     storage stream must be byte-equal to the original."""
     payload = b"".join(bytes([i % 256]) for i in range(1024))
@@ -83,23 +81,17 @@ async def test_send_log_chunk_concat_round_trips(
 
     if redis_admin is not None:
         keys = transport._test_keys  # type: ignore[attr-defined]
-        entries = await redis_admin.xrange(
-            keys.log_chunk_stream(fresh_ids.run_id), count=1000
-        )
+        entries = await redis_admin.xrange(keys.log_chunk_stream(fresh_ids.run_id), count=1000)
         assert len(entries) == len(chunks)
         # Sort by offset just in case implementation reorders.
         sorted_entries = sorted(entries, key=lambda e: int(e[1]["offset"]))
-        reconstructed = b"".join(
-            base64.b64decode(e[1]["data"]) for e in sorted_entries
-        )
+        reconstructed = b"".join(base64.b64decode(e[1]["data"]) for e in sorted_entries)
         assert reconstructed == payload
         # The final chunk's `is_final` field must be truthy.
         assert sorted_entries[-1][1]["is_final"].lower() in ("true", "1")
 
 
-async def test_send_log_chunk_marks_intermediate_not_final(
-    transport, fresh_ids, redis_admin
-):
+async def test_send_log_chunk_marks_intermediate_not_final(transport, fresh_ids, redis_admin):
     """`is_final=False` chunks must not be flagged as final."""
     ok = await transport.send_log_chunk(
         run_id=fresh_ids.run_id,
@@ -112,9 +104,7 @@ async def test_send_log_chunk_marks_intermediate_not_final(
 
     if redis_admin is not None:
         keys = transport._test_keys  # type: ignore[attr-defined]
-        entries = await redis_admin.xrange(
-            keys.log_chunk_stream(fresh_ids.run_id), count=10
-        )
+        entries = await redis_admin.xrange(keys.log_chunk_stream(fresh_ids.run_id), count=10)
         assert len(entries) == 1
         _id, fields = entries[0]
         assert fields["is_final"].lower() in ("false", "0")
