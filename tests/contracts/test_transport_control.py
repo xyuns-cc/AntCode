@@ -15,9 +15,7 @@ async def test_poll_control_empty_returns_none(transport):
     assert msg is None
 
 
-async def test_poll_control_receives_targeted_message(
-    transport, fresh_ids, redis_admin
-):
+async def test_poll_control_receives_targeted_message(transport, fresh_ids, redis_admin):
     """A control message pushed to the worker-specific stream must come
     back with a populated `control_type` and `receipt`."""
     if redis_admin is None:
@@ -44,9 +42,7 @@ async def test_poll_control_receives_targeted_message(
     assert msg.receipt, "poll_control() must populate a receipt for ack"
 
 
-async def test_ack_control_consumes_message(
-    transport, fresh_ids, redis_admin
-):
+async def test_ack_control_consumes_message(transport, fresh_ids, redis_admin):
     """After ack_control(), a re-poll on the same group must not return
     the same message."""
     if redis_admin is None:
@@ -102,9 +98,7 @@ async def test_send_control_result_round_trips(transport, redis_admin):
     assert "ack" in fields["data"]
 
 
-async def test_send_control_result_failure_records_error(
-    transport, redis_admin
-):
+async def test_send_control_result_failure_records_error(transport, redis_admin):
     """Failure case must set success=false and surface the error string."""
     if redis_admin is None:
         pytest.skip("redis-only assertion on reply stream contents")

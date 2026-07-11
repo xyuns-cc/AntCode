@@ -39,9 +39,7 @@ async def test_poll_returns_message_with_receipt(transport, task_producer, fresh
     assert msg.receipt, "poll_task() must populate `receipt` so ack/requeue work"
 
 
-async def test_ack_accepted_consumes_message(
-    transport, task_producer, fresh_ids, redis_admin
-):
+async def test_ack_accepted_consumes_message(transport, task_producer, fresh_ids, redis_admin):
     """ack_task(accepted=True) must consume the message — a subsequent poll
     must NOT return it again (i.e. pending count goes to 0)."""
     await task_producer(
@@ -74,9 +72,7 @@ async def test_ack_accepted_consumes_message(
             assert pending[0] == 0
 
 
-async def test_ack_rejected_requeues(
-    transport, task_producer, fresh_ids, await_with_timeout
-):
+async def test_ack_rejected_requeues(transport, task_producer, fresh_ids, await_with_timeout):
     """ack_task(accepted=False, reason=...) must put the task back where
     another `poll_task` can retrieve it (possibly with a different receipt)."""
     await task_producer(
@@ -99,9 +95,7 @@ async def test_ack_rejected_requeues(
     assert second.task_id == fresh_ids.task_id
 
 
-async def test_requeue_then_poll_returns_task(
-    transport, task_producer, fresh_ids
-):
+async def test_requeue_then_poll_returns_task(transport, task_producer, fresh_ids):
     """`requeue_task(receipt)` must make the task pollable again."""
     await task_producer(
         transport,
@@ -145,9 +139,7 @@ async def test_report_result_success(transport, fresh_ids, redis_admin):
         assert length == 1
 
 
-async def test_report_result_failure_preserves_exit_code(
-    transport, fresh_ids, redis_admin
-):
+async def test_report_result_failure_preserves_exit_code(transport, fresh_ids, redis_admin):
     """report_result with status=failed must preserve exit_code & error_message."""
     from antcode_worker.transport.base import TaskResult
 

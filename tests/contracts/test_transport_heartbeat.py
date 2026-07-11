@@ -40,9 +40,7 @@ async def test_send_heartbeat_updates_key(transport, fresh_ids, redis_admin):
         assert fields["running_tasks"] == "2"
 
 
-async def test_send_heartbeat_overwrites_previous(
-    transport, fresh_ids, redis_admin
-):
+async def test_send_heartbeat_overwrites_previous(transport, fresh_ids, redis_admin):
     """Sending two heartbeats in a row must end with the later values
     visible (this is the only sane semantics for an HSET-style key)."""
     from antcode_worker.transport.base import HeartbeatMessage
