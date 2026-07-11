@@ -1,6 +1,8 @@
 """系统配置服务"""
 
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 from loguru import logger
 
@@ -247,64 +249,41 @@ class SystemConfigService:
         """
         try:
             configs = await SystemConfig.filter(is_active=True).all()
-
-            # 记录需要重启才能生效的配置变更
-            restart_required_configs = []
-
-            # 清空并重建缓存
             old_cache = self._config_cache.copy()
             self._config_cache.clear()
-
+            restart_required_configs = []
             for config in configs:
-                try:
-                    # 根据数据类型解析配置值
-                    value: object
-                    if config.value_type == "int":
-                        value = int(config.config_value)
-                    elif config.value_type == "float":
-                        value = float(config.config_value)
-                    elif config.value_type == "bool":
-                        value = config.config_value.lower() in (
-                            "true",
-                            "1",
-                            "yes",
-                            "on",
-                        )
-                    elif config.value_type == "json":
-                        value = from_json(config.config_value)
-                    else:
-                        value = config.config_value
-
-                    self._config_cache[config.config_key] = value
-
-                    # 检测需要重启的配置变更
-                    if config.config_key in old_cache and old_cache[config.config_key] != value:
-                        if config.config_key in [
-                            "max_concurrent_tasks",
-                            "scheduler_timezone",
-                        ]:
-                            restart_required_configs.append(config.config_key)
-
-                except Exception as e:
-                    logger.error(f"解析配置 {config.config_key} 失败: {e}")
-                    self._config_cache[config.config_key] = config.config_value
-
+                value = self._parse_cached_config(config)
+                self._config_cache[config.config_key] = value
+                if self._requires_restart(config.config_key, value, old_cache):
+                    restart_required_configs.append(config.config_key)
             self._last_reload = datetime.now()
             logger.info(f"配置缓存已重新加载，共 {len(self._config_cache)} 个配置项")
-
-            # 提示需要重启的配置
             if restart_required_configs:
                 logger.warning(f"以下配置已修改但需要重启服务才能完全生效: {', '.join(restart_required_configs)}")
-
-            # 动态更新settings对象
             self._apply_to_settings()
-
             if notify:
-                # L5: 通知其它进程重载缓存
                 await self.publish_invalidation()
-
         except Exception as e:
             logger.error(f"重新加载配置缓存失败: {e}")
+
+    @staticmethod
+    def _parse_cached_config(config):
+        parsers: dict[str, Callable[[str], Any]] = {
+            "int": int,
+            "float": float,
+            "json": from_json,
+            "bool": lambda value: value.lower() in ("true", "1", "yes", "on"),
+        }
+        parser = parsers.get(config.value_type)
+        if parser is None:
+            return config.config_value
+        return parser(config.config_value)
+
+    @staticmethod
+    def _requires_restart(key, value, old_cache):
+        restart_keys = {"max_concurrent_tasks", "scheduler_timezone"}
+        return key in restart_keys and key in old_cache and old_cache[key] != value
 
     def _apply_to_settings(self):
         """将配置应用到settings对象"""
@@ -354,7 +333,7 @@ class SystemConfigService:
     async def initialize_default_configs(self):
         """初始化默认配置"""
         default_logo_short = self._default_logo_short(settings.APP_NAME)
-        default_configs = [
+        default_configs: list[dict[str, Any]] = [
             # 品牌配置
             {
                 "config_key": "brand_name",
@@ -616,7 +595,7 @@ class SystemConfigService:
         configs = await self.get_all_configs()
 
         # 按分类组织配置
-        config_dict = {}
+        config_dict: dict[str, dict[str, Any]] = {}
         for config in configs:
             if config.category not in config_dict:
                 config_dict[config.category] = {}
@@ -624,7 +603,7 @@ class SystemConfigService:
             # 解析配置值
             try:
                 if config.value_type == "int":
-                    value = int(config.config_value)
+                    value: Any = int(config.config_value)
                 elif config.value_type == "float":
                     value = float(config.config_value)
                 elif config.value_type == "bool":

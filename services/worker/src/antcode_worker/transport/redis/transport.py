@@ -617,6 +617,9 @@ class RedisTransport(TransportBase):
             return True
 
         try:
+            redis = self._redis
+            if redis is None:
+                return False
             maxlen = self._keys.config.stream_max_len
 
             # 按 run_id 分组打包,每个 run_id 一条 Proto LogBatch
@@ -628,7 +631,7 @@ class RedisTransport(TransportBase):
             ingest_key = self._keys.log_ingest_stream()
 
             async def _write_batches():
-                pipe = self._redis.pipeline(transaction=False)
+                pipe = redis.pipeline(transaction=False)
                 for run_id, run_logs in batches.items():
                     batch_msg = data_pb2.LogBatch(
                         worker_id=self._worker_id or "",
@@ -784,6 +787,9 @@ class RedisTransport(TransportBase):
         machine_arch = getattr(os_info, "machine_arch", None) if os_info else None
 
         hb_key = self._keys.heartbeat_key(worker_id)
+        redis = self._redis
+        if redis is None:
+            raise RuntimeError("Redis transport is not connected")
 
         async def _write_heartbeat():
             mapping = {
@@ -819,7 +825,7 @@ class RedisTransport(TransportBase):
                 except Exception:
                     pass
 
-            pipe = self._redis.pipeline(transaction=False)
+            pipe = redis.pipeline(transaction=False)
             pipe.hset(hb_key, mapping=mapping)
             pipe.expire(hb_key, self._config.heartbeat_interval * 3)
             await pipe.execute()

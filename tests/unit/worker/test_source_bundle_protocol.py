@@ -24,9 +24,10 @@ class _ArtifactStore:
         self._blob = blob
         self.read_hashes: list[str] = []
 
-    async def read_blob(self, content_hash: str) -> bytes:
+    async def read_blob_to_file(self, content_hash: str, destination: Path, *, max_bytes: int) -> None:
         self.read_hashes.append(content_hash)
-        return self._blob
+        assert len(self._blob) <= max_bytes
+        destination.write_bytes(self._blob)
 
 
 def _zip_blob() -> bytes:

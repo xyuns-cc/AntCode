@@ -10,6 +10,7 @@ import contextlib
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import Any, cast, overload
 
 from loguru import logger
 from tortoise.expressions import Q
@@ -24,9 +25,17 @@ from antcode_core.domain.models.monitoring import (
 from antcode_core.infrastructure.redis import get_redis_client
 
 
-def _to_int(value, default=0):
+@overload
+def _to_int(value: object, default: None) -> int | None: ...
+
+
+@overload
+def _to_int(value: object, default: int = 0) -> int: ...
+
+
+def _to_int(value: object, default: int | None = 0) -> int | None:
     try:
-        return int(value)
+        return int(cast(Any, value))
     except (TypeError, ValueError):
         return default
 
@@ -72,78 +81,79 @@ class MonitoringService:
         if not settings.MONITORING_ENABLED:
             return 0
 
+        stream_batch = await self._read_stream_batch()
+        if stream_batch is None:
+            return 0
+        redis_client, last_id, streams = stream_batch
+        records, processed, new_last_id = self._collect_stream_records(streams, last_id)
+        await self._persist_stream_records(records)
+        if processed:
+            await redis_client.set(self.config.stream_last_id_key, new_last_id)
+            logger.debug(
+                f"批量持久化监控数据: 性能{len(records['performance'])}条, "
+                f"爬虫{len(records['spider'])}条, 事件{len(records['event'])}条"
+            )
+        return processed
+
+    async def _read_stream_batch(self):
         try:
             redis_client = await self._get_redis()
             last_id = await redis_client.get(self.config.stream_last_id_key)
-            last_id = last_id.decode() if isinstance(last_id, (bytes, bytearray)) else last_id
-            if not last_id:
-                last_id = "0-0"
-
+            if isinstance(last_id, (bytes, bytearray)):
+                last_id = last_id.decode()
+            last_id = last_id or "0-0"
             streams = await redis_client.xread(
                 {self.config.stream_key: last_id},
                 count=self.config.stream_batch_size,
                 block=5000,
             )
-
-            if not streams:
-                return 0
+            return (redis_client, last_id, streams) if streams else None
         except asyncio.CancelledError:
-            # 应用关闭时会取消任务，这是正常行为
             logger.debug("监控数据流处理被取消（应用正在关闭）")
-            return 0
-        except Exception as e:
-            logger.warning(f"读取监控数据流失败: {e}")
-            return 0
+            return None
 
+    def _collect_stream_records(self, streams, last_id):
+        records: dict[str, list[dict[str, Any]]] = {"performance": [], "spider": [], "event": []}
         processed = 0
         new_last_id = last_id
-
-        # 批量收集数据
-        performance_records = []
-        spider_records = []
-        event_records = []
-
         for _, messages in streams:
             for message_id, payload in messages:
-                try:
-                    data = self._parse_stream_payload(payload)
-                    if not data:
-                        continue
-
-                    # 收集数据而不是立即插入
-                    record = self._prepare_record(data)
-                    if record:
-                        if record["type"] == "event":
-                            event_records.append(record["data"])
-                        elif record["type"] == "metrics":
-                            performance_records.append(record["performance"])
-                            spider_records.append(record["spider"])
-
+                if self._collect_stream_record(records, message_id, payload):
                     new_last_id = message_id
                     processed += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "处理监控数据失败: {} (message_id={})",
-                        exc,
-                        message_id,
-                    )
+        return records, processed, new_last_id
 
-        # 批量插入数据库
-        if event_records:
-            await WorkerEvent.bulk_create(event_records)
-        if performance_records:
-            await WorkerPerformanceHistory.bulk_create(performance_records)
-        if spider_records:
-            await SpiderMetricsHistory.bulk_create(spider_records)
+    def _collect_stream_record(self, records, message_id, payload):
+        try:
+            data = self._parse_stream_payload(payload)
+            if not data:
+                return False
+            record = self._prepare_record(data)
+            self._append_prepared_record(records, record)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("处理监控数据失败: {} (message_id={})", exc, message_id)
+            return False
 
-        if processed:
-            await redis_client.set(self.config.stream_last_id_key, new_last_id)
-            logger.debug(
-                f"批量持久化监控数据: 性能{len(performance_records)}条, "
-                f"爬虫{len(spider_records)}条, 事件{len(event_records)}条"
-            )
+    @staticmethod
+    def _append_prepared_record(records, record):
+        if not record:
+            return
+        if record["type"] == "event":
+            records["event"].append(record["data"])
+            return
+        if record["type"] == "metrics":
+            records["performance"].append(record["performance"])
+            records["spider"].append(record["spider"])
 
-        return processed
+    @staticmethod
+    async def _persist_stream_records(records):
+        if records["event"]:
+            await WorkerEvent.bulk_create(records["event"])
+        if records["performance"]:
+            await WorkerPerformanceHistory.bulk_create(records["performance"])
+        if records["spider"]:
+            await SpiderMetricsHistory.bulk_create(records["spider"])
 
     async def cleanup_old_data(self, days=None):
         """清理过期的监控数据（批量操作）"""
@@ -201,7 +211,7 @@ class MonitoringService:
     async def get_cluster_summary(self):
         """汇总集群级别的实时统计。"""
         workers = await self.get_online_workers()
-        totals = {
+        totals: dict[str, int | float] = {
             "workers_online": len(workers),
             "requests_total": 0,
             "requests_failed": 0,
@@ -301,47 +311,57 @@ class MonitoringService:
         if "event" in data:
             return {
                 "type": "event",
-                "data": WorkerEvent(
-                    worker_id=data.get("worker_id"),
-                    event_type=data.get("event"),
-                    event_message=data.get("reason"),
-                    created_at=dt,
-                ),
+                "data": self._worker_event_record(data, dt),
             }
-
-        # 性能和爬虫数据一起返回
         return {
             "type": "metrics",
-            "performance": WorkerPerformanceHistory(
-                worker_id=data.get("worker_id"),
-                timestamp=dt,
-                cpu_percent=_to_decimal(data.get("cpu_percent")),
-                memory_percent=_to_decimal(data.get("memory_percent")),
-                memory_used_mb=_to_int(data.get("memory_used_mb"), None),
-                disk_percent=_to_decimal(data.get("disk_percent")),
-                network_sent_mb=_to_decimal(data.get("network_sent_mb")),
-                network_recv_mb=_to_decimal(data.get("network_recv_mb")),
-                uptime_seconds=_to_int(data.get("uptime_seconds"), None),
-                status=data.get("status", "online"),
-            ),
-            "spider": SpiderMetricsHistory(
-                worker_id=data.get("worker_id"),
-                timestamp=dt,
-                tasks_total=_to_int(data.get("tasks_total")),
-                tasks_success=_to_int(data.get("tasks_success")),
-                tasks_failed=_to_int(data.get("tasks_failed")),
-                tasks_running=_to_int(data.get("tasks_running")),
-                pages_crawled=_to_int(data.get("pages_crawled")),
-                items_scraped=_to_int(data.get("items_scraped")),
-                requests_total=_to_int(data.get("requests_total")),
-                requests_failed=_to_int(data.get("requests_failed")),
-                avg_response_time_ms=_to_int(data.get("avg_response_time_ms")),
-                error_timeout=_to_int(data.get("error_timeout")),
-                error_network=_to_int(data.get("error_network")),
-                error_parse=_to_int(data.get("error_parse")),
-                error_other=_to_int(data.get("error_other")),
-            ),
+            "performance": self._performance_record(data, dt),
+            "spider": self._spider_record(data, dt),
         }
+
+    @staticmethod
+    def _worker_event_record(data, timestamp):
+        return WorkerEvent(
+            worker_id=data.get("worker_id"),
+            event_type=data.get("event"),
+            event_message=data.get("reason"),
+            created_at=timestamp,
+        )
+
+    @staticmethod
+    def _performance_record(data, timestamp):
+        return WorkerPerformanceHistory(
+            worker_id=data.get("worker_id"),
+            timestamp=timestamp,
+            cpu_percent=_to_decimal(data.get("cpu_percent")),
+            memory_percent=_to_decimal(data.get("memory_percent")),
+            memory_used_mb=_to_int(data.get("memory_used_mb"), None),
+            disk_percent=_to_decimal(data.get("disk_percent")),
+            network_sent_mb=_to_decimal(data.get("network_sent_mb")),
+            network_recv_mb=_to_decimal(data.get("network_recv_mb")),
+            uptime_seconds=_to_int(data.get("uptime_seconds"), None),
+            status=data.get("status", "online"),
+        )
+
+    @staticmethod
+    def _spider_record(data, timestamp):
+        fields = (
+            "tasks_total",
+            "tasks_success",
+            "tasks_failed",
+            "tasks_running",
+            "pages_crawled",
+            "items_scraped",
+            "requests_total",
+            "requests_failed",
+            "avg_response_time_ms",
+            "error_timeout",
+            "error_network",
+            "error_parse",
+            "error_other",
+        )
+        values = {field: _to_int(data.get(field)) for field in fields}
+        return SpiderMetricsHistory(worker_id=data.get("worker_id"), timestamp=timestamp, **values)
 
     async def _persist_data(self, data):
         """单条持久化"""

@@ -6,8 +6,10 @@
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, cast
 
 from loguru import logger
 
@@ -100,7 +102,7 @@ class WorkerLoadBalancer:
 
                     redis = await get_redis_client()
                     hb_key = worker_heartbeat_key(worker.public_id)
-                    raw = await redis.hgetall(hb_key)
+                    raw = await cast(Awaitable[dict[Any, Any]], redis.hgetall(hb_key))
                     metrics = {
                         (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                         for k, v in raw.items()
@@ -185,6 +187,7 @@ class WorkerLoadBalancer:
 
         # 网络延迟评分
         latency = self._worker_latencies.get(worker.id, 100)
+        latency_score: float
         if latency <= 10:
             latency_score = 0
         elif latency >= 1000:
@@ -813,6 +816,12 @@ class WorkerTaskDispatcher:
                     task_copy["resolved_revision"] = info.get("resolved_revision", "")
                 enriched_tasks.append(task_copy)
 
+            # 在任务进入 Worker 可消费的 Redis Stream 前先持久化归属。Gateway
+            # 与 Direct 上报入口会据此校验 run_id -> worker，若等入队后再写，
+            # Worker 抢先执行时会把合法日志/状态判成越权。不存在 TaskRun 的
+            # 兼容调用保持不变；一旦后续上报该 run，ownership 校验仍会拒绝。
+            await self._bind_task_runs_to_worker(enriched_tasks, worker.id)
+
             # 发送批量任务到节点的优先级队列
             result = await self._send_batch_to_queue(
                 worker=worker,
@@ -842,6 +851,23 @@ class WorkerTaskDispatcher:
                 worker_id=worker.public_id,
                 worker_name=worker.name,
             )
+
+    async def _bind_task_runs_to_worker(self, tasks: list[dict], worker_id: int) -> int:
+        from antcode_core.domain.models import TaskRun
+
+        run_ids = {
+            str(run_id) for task in tasks if (run_id := task.get("run_id") or task.get("task_id")) not in (None, "")
+        }
+        if not run_ids:
+            return 0
+        updated = await TaskRun.filter(run_id__in=run_ids).update(worker_id=worker_id)
+        if updated != len(run_ids):
+            logger.warning(
+                "部分派发任务没有 TaskRun 归属记录: expected={} updated={}",
+                len(run_ids),
+                updated,
+            )
+        return updated
 
     async def _ensure_worker_connected(self, worker):
         """确保节点在线（依赖心跳状态）"""

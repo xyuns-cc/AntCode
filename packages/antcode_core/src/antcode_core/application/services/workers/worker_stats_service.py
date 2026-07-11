@@ -137,79 +137,49 @@ class WorkerStatsService:
             .all()
         )
 
-        # 根据时间范围决定聚合粒度
-        interval_hours = 1
-        if hours <= 24:
-            # 24小时内：按小时聚合
-            time_format = "%Y-%m-%d %H:00"
-        elif hours <= 168:  # 7天
-            # 7天内：按4小时聚合
-            time_format = None  # 使用自定义逻辑
-            interval_hours = 4
-        else:  # 30天或更长
-            # 30天内：按天聚合
-            time_format = "%Y-%m-%d"
-
-        # 按时间聚合
-        time_data: dict[str, dict[str, list[float]]] = {}
-
-        for hb in heartbeats:
-            # 生成时间key
-            if time_format:
-                time_key = hb.timestamp.strftime(time_format)
-            else:
-                # 7天数据：按4小时聚合
-                hour_bucket = (hb.timestamp.hour // interval_hours) * interval_hours
-                time_key = hb.timestamp.strftime(f"%Y-%m-%d {hour_bucket:02d}:00")
-
-            if time_key not in time_data:
-                time_data[time_key] = {"cpu": [], "memory": [], "disk": []}
-
-            metrics = hb.metrics or {}
-            if metrics.get("cpu") is not None:
-                time_data[time_key]["cpu"].append(metrics.get("cpu", 0))
-            if metrics.get("memory") is not None:
-                time_data[time_key]["memory"].append(metrics.get("memory", 0))
-            if metrics.get("disk") is not None:
-                time_data[time_key]["disk"].append(metrics.get("disk", 0))
-
-        # 计算每个时间点的平均、最大、最小值
-        timestamps = []
-        cpu_avg = []
-        cpu_max = []
-        cpu_min = []
-        memory_avg = []
-        memory_max = []
-        memory_min = []
-
-        for time_key in sorted(time_data.keys()):
-            data = time_data[time_key]
-            timestamps.append(time_key)
-
-            # CPU 指标
-            if data["cpu"]:
-                cpu_avg.append(round(sum(data["cpu"]) / len(data["cpu"]), 1))
-                cpu_max.append(round(max(data["cpu"]), 1))
-                cpu_min.append(round(min(data["cpu"]), 1))
-            else:
-                cpu_avg.append(0)
-                cpu_max.append(0)
-                cpu_min.append(0)
-
-            # 内存
-            if data["memory"]:
-                memory_avg.append(round(sum(data["memory"]) / len(data["memory"]), 1))
-                memory_max.append(round(max(data["memory"]), 1))
-                memory_min.append(round(min(data["memory"]), 1))
-            else:
-                memory_avg.append(0)
-                memory_max.append(0)
-                memory_min.append(0)
-
+        time_format, interval_hours = self._history_interval(hours)
+        time_data = self._bucket_heartbeats(heartbeats, time_format, interval_hours)
+        timestamps = sorted(time_data)
         return {
             "timestamps": timestamps,
-            "cpu": {"avg": cpu_avg, "max": cpu_max, "min": cpu_min},
-            "memory": {"avg": memory_avg, "max": memory_max, "min": memory_min},
+            "cpu": self._metric_summary(time_data, timestamps, "cpu"),
+            "memory": self._metric_summary(time_data, timestamps, "memory"),
+        }
+
+    @staticmethod
+    def _history_interval(hours):
+        if hours <= 24:
+            return "%Y-%m-%d %H:00", 1
+        if hours <= 168:
+            return None, 4
+        return "%Y-%m-%d", 1
+
+    @staticmethod
+    def _bucket_heartbeats(heartbeats, time_format, interval_hours):
+        time_data: dict[str, dict[str, list[float]]] = {}
+        for heartbeat in heartbeats:
+            time_key = WorkerStatsService._heartbeat_bucket(heartbeat, time_format, interval_hours)
+            bucket = time_data.setdefault(time_key, {"cpu": [], "memory": [], "disk": []})
+            metrics = heartbeat.metrics or {}
+            for metric in bucket:
+                if metrics.get(metric) is not None:
+                    bucket[metric].append(metrics.get(metric, 0))
+        return time_data
+
+    @staticmethod
+    def _heartbeat_bucket(heartbeat, time_format, interval_hours):
+        if time_format:
+            return heartbeat.timestamp.strftime(time_format)
+        hour_bucket = (heartbeat.timestamp.hour // interval_hours) * interval_hours
+        return heartbeat.timestamp.strftime(f"%Y-%m-%d {hour_bucket:02d}:00")
+
+    @staticmethod
+    def _metric_summary(time_data, timestamps, metric):
+        values = [time_data[timestamp][metric] for timestamp in timestamps]
+        return {
+            "avg": [round(sum(items) / len(items), 1) if items else 0 for items in values],
+            "max": [round(max(items), 1) if items else 0 for items in values],
+            "min": [round(min(items), 1) if items else 0 for items in values],
         }
 
     async def get_spider_metrics_history(self, worker_id: int, hours: int = 24) -> list[dict]:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 
+import aiofiles  # type: ignore[import-untyped]
 from tortoise.transactions import in_transaction
 
 from antcode_core.domain.models import SourceArtifact, SourceArtifactChunk
@@ -77,6 +79,46 @@ class PostgresArtifactStore:
         content = b"".join(bytes(chunk.content) for chunk in chunks)
         _verify_content(content, artifact)
         return content
+
+    async def read_blob_to_file(
+        self,
+        content_hash: str,
+        destination: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> StoredArtifact:
+        """Stream ordered chunks to disk without assembling the artifact in memory."""
+        normalized = _normalize_sha256(content_hash)
+        artifact = await SourceArtifact.get_or_none(content_hash=normalized)
+        if artifact is None:
+            raise FileNotFoundError(f"Artifact 不存在: {normalized}")
+        if max_bytes is not None and artifact.size_bytes > max_bytes:
+            raise ValueError(f"Artifact 超过大小上限: {artifact.size_bytes} > {max_bytes}")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        written = 0
+        try:
+            async with aiofiles.open(destination, "wb") as output:
+                for index in range(artifact.chunk_count):
+                    chunk = await SourceArtifactChunk.get_or_none(
+                        artifact_id=artifact.id,
+                        chunk_index=index,
+                    )
+                    if chunk is None:
+                        raise ValueError(f"Artifact chunk 缺失: index={index}")
+                    content = bytes(chunk.content)
+                    written += len(content)
+                    if max_bytes is not None and written > max_bytes:
+                        raise ValueError(f"Artifact 超过大小上限: {written} > {max_bytes}")
+                    digest.update(content)
+                    await output.write(content)
+            _verify_streamed_content(written, digest.hexdigest(), artifact)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+
+        return _stored_artifact(artifact)
 
 
 def _artifact_values(
@@ -169,6 +211,13 @@ def _verify_content(content: bytes, artifact: SourceArtifact) -> None:
         raise ValueError("Artifact 大小不一致")
     actual_hash = hashlib.sha256(content).hexdigest()
     if actual_hash != artifact.content_hash:
+        raise ValueError("Artifact sha256 不一致")
+
+
+def _verify_streamed_content(size_bytes: int, content_hash: str, artifact: SourceArtifact) -> None:
+    if size_bytes != artifact.size_bytes:
+        raise ValueError("Artifact 大小不一致")
+    if content_hash != artifact.content_hash:
         raise ValueError("Artifact sha256 不一致")
 
 

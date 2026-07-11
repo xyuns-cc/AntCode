@@ -46,7 +46,10 @@ class TestAuthInterceptor:
 
         def jwt_validator(token: str) -> dict | None:
             if token == "valid_token":
-                return {"sub": "worker-jwt-001"}
+                return {
+                    "sub": "worker-jwt-001",
+                    "token_class": "worker",
+                }
             return None
 
         return AuthInterceptor(
@@ -128,6 +131,20 @@ class TestAuthInterceptor:
         result = await custom_validator_interceptor._authenticate_jwt("invalid_token")
 
         assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_custom_jwt_validator_rejects_web_principal(self):
+        interceptor = AuthInterceptor(
+            jwt_validator=lambda _token: {
+                "sub": "user-1",
+                "token_class": "web",
+            }
+        )
+
+        result = await interceptor._authenticate_jwt("valid-web-token")
+
+        assert result.success is False
+        assert "Worker 专用" in result.error
 
     @pytest.mark.asyncio
     async def test_api_key_requires_real_validator_when_security_unavailable(self, interceptor):

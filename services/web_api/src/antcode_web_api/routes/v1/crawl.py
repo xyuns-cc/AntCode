@@ -5,8 +5,6 @@
 需求: 1.1, 1.2, 1.3, 1.4, 1.5, 6.4, 9.1, 9.2, 12.1, 12.3, 12.4
 """
 
-from typing import Any
-
 from antcode_core.application.services.base import QueryHelper
 from antcode_core.application.services.crawl.batch_service import crawl_batch_service
 from antcode_core.application.services.crawl.metrics_service import crawl_metrics_service
@@ -40,6 +38,7 @@ from loguru import logger
 
 from antcode_web_api.response import Messages, page
 from antcode_web_api.response import success as success_response
+from antcode_web_api.services.crawl_item_stream import iter_batch_items
 
 router = APIRouter()
 
@@ -692,96 +691,6 @@ async def cleanup_test(
 # =============================================================================
 
 
-def _decode_stream_entry(entry_id: Any, data: dict, run_id: str) -> tuple | None:
-    """把一条 xrange 返回的 stream entry 解成外部 yield tuple；失败返回 None。"""
-    import json as _json
-
-    try:
-        raw_data = data.get(b"data") or data.get("data") or b"{}"
-        if isinstance(raw_data, bytes):
-            raw_data = raw_data.decode("utf-8", errors="ignore")
-        payload = _json.loads(raw_data)
-        url_val = data.get(b"url") or data.get("url") or ""
-        if isinstance(url_val, bytes):
-            url_val = url_val.decode("utf-8", errors="ignore")
-        ts_val = data.get(b"timestamp") or data.get("timestamp") or ""
-        if isinstance(ts_val, bytes):
-            ts_val = ts_val.decode("utf-8", errors="ignore")
-        seq_val = data.get(b"sequence") or data.get("sequence") or "0"
-        if isinstance(seq_val, bytes):
-            seq_val = seq_val.decode("utf-8", errors="ignore")
-        return (int(seq_val or 0), payload, str(url_val), str(ts_val), run_id)
-    except Exception:
-        return None
-
-
-async def _iter_batch_items(batch_id: str, limit: int | None = None):
-    """按批次 → 所有 run → 汇总 spider:data stream items。
-
-    T7-B4b (P1-3): 原实现每个 run 串行发 XRANGE，导出 limit=10000 时上千次
-    Redis RTT。改为**并发桶** —— 每 8 个 run 一组 ``asyncio.gather`` 并发
-    发 XRANGE，单 run 内页数多时仍串行分页。默认每 stream count=1000（比原
-    来 200 大 5x），减少大 stream 的分页次数。
-
-    产物形式：``(seq, item_dict, url, timestamp, run_id)`` 生成器。
-    """
-    import asyncio as _asyncio
-
-    from antcode_core.infrastructure.redis.client import get_redis_client
-    from antcode_core.infrastructure.redis.keys import RedisKeys
-    from tortoise import Tortoise
-
-    keys = RedisKeys()
-    client = await get_redis_client()
-    # Tortoise Model.raw(sql, using_db) 只接受 SQL 字符串和可选连接对象,
-    # 第二位参不是查询参数;必须走底层 conn.execute_query_dict 才能绑定 $1。
-    conn = Tortoise.get_connection("default")
-    runs = await conn.execute_query_dict(
-        "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 ORDER BY id ASC",
-        [batch_id],
-    )
-    if not runs:
-        return
-
-    CONCURRENCY = 8
-    PAGE_SIZE = 1000
-    yielded = 0
-
-    async def _read_run(run_id: str) -> list:
-        """把单个 run 的 stream 全部拉下来（分页）。"""
-        stream_key = keys.spider_data_stream(run_id)
-        collected: list = []
-        cursor = "-"
-        while True:
-            page = await client.xrange(stream_key, min=cursor, max="+", count=PAGE_SIZE)
-            if not page:
-                break
-            collected.extend(page)
-            if len(page) < PAGE_SIZE:
-                break  # 已到尾
-            last_id = page[-1][0]
-            if isinstance(last_id, bytes):
-                last_id = last_id.decode("utf-8", errors="ignore")
-            cursor = f"({last_id}"
-        return collected
-
-    # 保持 run 之间的输出顺序（TaskRun.id ASC）；桶内并发但按原序 flush。
-    for i in range(0, len(runs), CONCURRENCY):
-        bucket = runs[i : i + CONCURRENCY]
-        results = await _asyncio.gather(*(_read_run(r["run_id"]) for r in bucket), return_exceptions=True)
-        for run, entries in zip(bucket, results, strict=False):
-            if isinstance(entries, BaseException):
-                continue
-            for entry_id, data in entries:
-                if limit is not None and yielded >= limit:
-                    return
-                item = _decode_stream_entry(entry_id, data, run["run_id"])
-                if item is None:
-                    continue
-                yielded += 1
-                yield item
-
-
 @router.get(
     "/batches/{batch_id}/items",
     summary="批次维度聚合抓取数据",
@@ -796,14 +705,14 @@ async def get_batch_items(
     批次结果没有聚合入口。"""
     await _verify_batch_owner(batch_id, current_user)
     items = []
-    async for seq, payload, url, ts, run_id in _iter_batch_items(batch_id, limit=limit):
+    async for item in iter_batch_items(batch_id, limit):
         items.append(
             {
-                "sequence": seq,
-                "url": url,
-                "timestamp": ts,
-                "run_id": run_id,
-                "data": payload,
+                "sequence": item.sequence,
+                "url": item.url,
+                "timestamp": item.timestamp,
+                "run_id": item.run_id,
+                "data": item.payload,
             }
         )
     return success_response({"batch_id": batch_id, "items": items, "count": len(items)})
@@ -832,12 +741,18 @@ async def export_batch(
         async def _json_stream():
             yield '{"batch_id": "' + batch_id + '", "items": ['
             first = True
-            async for seq, payload, url, ts, run_id in _iter_batch_items(batch_id, limit=limit):
+            async for item in iter_batch_items(batch_id, limit):
                 if not first:
                     yield ","
                 first = False
                 yield _json.dumps(
-                    {"sequence": seq, "url": url, "timestamp": ts, "run_id": run_id, "data": payload},
+                    {
+                        "sequence": item.sequence,
+                        "url": item.url,
+                        "timestamp": item.timestamp,
+                        "run_id": item.run_id,
+                        "data": item.payload,
+                    },
                     ensure_ascii=False,
                 )
             yield "]}"
@@ -854,7 +769,8 @@ async def export_batch(
         columns: list[str] | None = None
         buf = _io.StringIO()
         writer = _csv.writer(buf)
-        async for seq, payload, url, ts, run_id in _iter_batch_items(batch_id, limit=limit):
+        async for item in iter_batch_items(batch_id, limit):
+            payload = item.payload
             data_keys = list(payload.keys()) if isinstance(payload, dict) else []
             if columns is None:
                 columns = ["sequence", "url", "timestamp", "run_id"] + data_keys
@@ -862,7 +778,7 @@ async def export_batch(
                 yield buf.getvalue()
                 buf.seek(0)
                 buf.truncate(0)
-            row = [seq, url, ts, run_id]
+            row = [item.sequence, item.url, item.timestamp, item.run_id]
             for k in columns[4:]:
                 v = payload.get(k) if isinstance(payload, dict) else ""
                 # 复合值 JSON 序列化

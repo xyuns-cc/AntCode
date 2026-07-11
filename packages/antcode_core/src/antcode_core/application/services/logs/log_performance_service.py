@@ -8,7 +8,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypedDict
 
 import psutil
 from loguru import logger
@@ -26,7 +26,18 @@ class PerformanceMetric:
     memory_usage: float = 0.0
     cpu_usage: float = 0.0
     success: bool = True
-    error_message = None
+    error_message: str | None = None
+
+
+class OperationStats(TypedDict):
+    count: int
+    total_duration: float
+    total_bytes: int
+    total_lines: int
+    errors: int
+    avg_duration: float
+    min_duration: float
+    max_duration: float
 
 
 class LogPerformanceMonitor:
@@ -34,10 +45,10 @@ class LogPerformanceMonitor:
 
     def __init__(self, max_history=10000):
         self.max_history = max_history
-        self.metrics_history = deque(maxlen=max_history)
+        self.metrics_history: deque[PerformanceMetric] = deque(maxlen=max_history)
 
         # 实时统计
-        self.operation_stats = defaultdict(
+        self.operation_stats: defaultdict[str, OperationStats] = defaultdict(
             lambda: {
                 "count": 0,
                 "total_duration": 0.0,
@@ -51,8 +62,8 @@ class LogPerformanceMonitor:
         )
 
         # 系统资源监控
-        self.system_metrics = {}
-        self._monitor_task = None
+        self.system_metrics: dict[str, float] = {}
+        self._monitor_task: asyncio.Task[None] | None = None
         # 不在初始化时启动监控，而是在需要时启动
 
     def _start_system_monitoring(self):

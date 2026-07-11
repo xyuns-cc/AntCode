@@ -84,9 +84,7 @@ class AntCodeRedisPipeline:
 
         sink = create_sink()
         if sink is None:
-            raise RuntimeError(
-                "spider data sink 未配置: ANTCODE_SPIDER_SINK_MODE 对应的 URL/endpoint 缺失"
-            )
+            raise RuntimeError("spider data sink 未配置: ANTCODE_SPIDER_SINK_MODE 对应的 URL/endpoint 缺失")
 
         self._namespace = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
         self._run_id = getattr(spider, "run_id", "") or ""

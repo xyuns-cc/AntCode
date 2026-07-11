@@ -303,64 +303,65 @@ class WorkerHeartbeatService:
         """
         old_status = worker.status
         now = datetime.now()
-        last_hb = worker.last_heartbeat
-
-        if last_hb is not None and last_hb.tzinfo is not None:
-            last_hb = last_hb.astimezone().replace(tzinfo=None)
-
-        if last_hb and (now - last_hb).total_seconds() <= self.HEARTBEAT_TIMEOUT:
-            redis_hb = await self._get_redis_heartbeat(worker)
-            if redis_hb is not None:
-                if redis_hb.tzinfo is not None:
-                    redis_hb = redis_hb.astimezone().replace(tzinfo=None)
-                if not last_hb or redis_hb > last_hb:
-                    await self._sync_redis_heartbeat_to_db(worker)
-            state["failures"] = 0
-            state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
-            # P1-33: MAINTENANCE 是运维显式设置的目标态,即使观测到心跳新鲜也不能
-            # 把它翻回 ONLINE;dispatcher 侧 is_worker_available 只放行 ONLINE,所以
-            # MAINTENANCE 会自动不接新任务,达到"运维停机窗口"的语义。
-            if old_status != WorkerStatus.ONLINE and old_status != WorkerStatus.MAINTENANCE.value:
-                latest = await self._refresh_worker_from_db(worker.id)
-                if latest:
-                    worker = latest
-                if worker.status != WorkerStatus.MAINTENANCE.value:
-                    worker.status = WorkerStatus.ONLINE.value
-                    await worker.save()
-                    logger.info(f"节点 {worker.name} 恢复在线")
+        last_hb = self._naive_datetime(worker.last_heartbeat)
+        if self._heartbeat_is_fresh(last_hb, now):
+            await self._accept_database_heartbeat(worker, state, old_status, now, last_hb)
             return True
 
-        # 数据库心跳过期，尝试从 Redis 获取（Direct 模式支持）
         redis_hb = await self._get_redis_heartbeat(worker)
-        if redis_hb and (now - redis_hb).total_seconds() <= self.HEARTBEAT_TIMEOUT:
-            # Redis 有有效心跳，同步到数据库
-            await self._sync_redis_heartbeat_to_db(worker)
-            state["failures"] = 0
-            state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
-            if old_status != WorkerStatus.ONLINE:
-                logger.info(f"节点 {worker.name} 恢复在线（从 Redis 同步）")
+        if self._heartbeat_is_fresh(self._naive_datetime(redis_hb), now):
+            await self._accept_redis_heartbeat(worker, state, old_status, now)
             return True
 
-        # 使用最新数据库记录再次确认，避免缓存过期导致误判
         latest = await self._refresh_worker_from_db(worker.id)
-        if latest:
-            last_hb = latest.last_heartbeat
-            if last_hb is not None and last_hb.tzinfo is not None:
-                last_hb = last_hb.astimezone().replace(tzinfo=None)
-            if last_hb and (now - last_hb).total_seconds() <= self.HEARTBEAT_TIMEOUT:
-                # P1-33: 同上,MAINTENANCE 不允许被 refresh 后的心跳判定覆盖
-                if latest.status != WorkerStatus.MAINTENANCE.value:
-                    latest.status = WorkerStatus.ONLINE.value
-                state["failures"] = 0
-                state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
-                await latest.save()
-                if old_status != WorkerStatus.ONLINE and latest.status == WorkerStatus.ONLINE.value:
-                    logger.info(f"节点 {latest.name} 恢复在线")
-                return True
-            worker = latest
-
+        if latest and self._heartbeat_is_fresh(self._naive_datetime(latest.last_heartbeat), now):
+            await self._accept_refreshed_heartbeat(latest, state, old_status, now)
+            return True
+        worker = latest or worker
         await self._handle_worker_offline(worker, state, old_status)
         return False
+
+    @staticmethod
+    def _naive_datetime(value):
+        if value is not None and value.tzinfo is not None:
+            return value.astimezone().replace(tzinfo=None)
+        return value
+
+    def _heartbeat_is_fresh(self, heartbeat, now):
+        return bool(heartbeat and (now - heartbeat).total_seconds() <= self.HEARTBEAT_TIMEOUT)
+
+    def _mark_heartbeat_healthy(self, state, now):
+        state["failures"] = 0
+        state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
+
+    async def _accept_database_heartbeat(self, worker, state, old_status, now, last_hb):
+        redis_hb = self._naive_datetime(await self._get_redis_heartbeat(worker))
+        if redis_hb is not None and redis_hb > last_hb:
+            await self._sync_redis_heartbeat_to_db(worker)
+        self._mark_heartbeat_healthy(state, now)
+        if old_status in (WorkerStatus.ONLINE, WorkerStatus.MAINTENANCE.value):
+            return
+        latest = await self._refresh_worker_from_db(worker.id)
+        worker = latest or worker
+        if worker.status == WorkerStatus.MAINTENANCE.value:
+            return
+        worker.status = WorkerStatus.ONLINE.value
+        await worker.save()
+        logger.info(f"节点 {worker.name} 恢复在线")
+
+    async def _accept_redis_heartbeat(self, worker, state, old_status, now):
+        await self._sync_redis_heartbeat_to_db(worker)
+        self._mark_heartbeat_healthy(state, now)
+        if old_status != WorkerStatus.ONLINE:
+            logger.info(f"节点 {worker.name} 恢复在线（从 Redis 同步）")
+
+    async def _accept_refreshed_heartbeat(self, worker, state, old_status, now):
+        if worker.status != WorkerStatus.MAINTENANCE.value:
+            worker.status = WorkerStatus.ONLINE.value
+        self._mark_heartbeat_healthy(state, now)
+        await worker.save()
+        if old_status != WorkerStatus.ONLINE and worker.status == WorkerStatus.ONLINE.value:
+            logger.info(f"节点 {worker.name} 恢复在线")
 
     async def _handle_worker_offline(
         self,
@@ -540,66 +541,56 @@ class WorkerHeartbeatService:
             capabilities: 节点能力
             spider_stats: 爬虫统计摘要
         """
-        status_value = self._normalize_status_value(status_value)
-
-        # MAINTENANCE 是运维态，Worker 心跳不能自行解除。
+        normalized_status = self._normalize_status_value(status_value)
         if worker.status != WorkerStatus.MAINTENANCE.value:
-            worker.status = status_value
+            worker.status = normalized_status
         worker.last_heartbeat = datetime.now()
-
-        # 处理 metrics，合并爬虫统计
-        if metrics:
-            # 如果心跳中包含 spider_stats，合并到 metrics
-            if spider_stats:
-                metrics["spider_stats"] = spider_stats
-            current_metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
-            current_metrics.update(metrics)
-            worker.metrics = current_metrics
-        elif spider_stats:
-            # 如果只有 spider_stats，更新现有 metrics
-            current_metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
-            current_metrics["spider_stats"] = spider_stats
-            worker.metrics = current_metrics
-
+        heartbeat_metrics = self._apply_heartbeat_metrics(worker, metrics, spider_stats)
         if version:
             worker.version = version
-
-        # 更新操作系统信息（如果提供）
-        if os_type:
-            worker.os_type = os_type
-        if os_version:
-            worker.os_version = os_version
-        if python_version:
-            worker.python_version = python_version
-        if machine_arch:
-            worker.machine_arch = machine_arch
-
-        # 更新节点能力（如果提供）
-        if capabilities:
-            if not isinstance(capabilities, dict):
-                logger.warning(f"capabilities 类型错误: {type(capabilities)}, 值: {capabilities}")
-                capabilities = None
-            else:
-                capabilities = self._normalize_capabilities(capabilities)
-                worker.capabilities = capabilities
-                logger.info(f"节点 {worker.name} 能力更新: {list(capabilities.keys())}")
-
+        self._apply_system_info(worker, os_type, os_version, python_version, machine_arch)
+        self._apply_capabilities(worker, capabilities)
         await worker.save()
-
         self._sync_cache_on_heartbeat(worker)
-
-        # 记录心跳历史（包含爬虫统计）
-        heartbeat_metrics = metrics.copy() if metrics else {}
-        if spider_stats and "spider_stats" not in heartbeat_metrics:
-            heartbeat_metrics["spider_stats"] = spider_stats
-
         await WorkerHeartbeat.create(
             worker_id=worker.id,
-            status=status_value,
+            status=normalized_status,
             metrics=heartbeat_metrics if heartbeat_metrics else None,
         )
-
         return True
+
+    @staticmethod
+    def _apply_heartbeat_metrics(worker, metrics, spider_stats):
+        heartbeat_metrics = dict(metrics or {})
+        if spider_stats:
+            heartbeat_metrics["spider_stats"] = spider_stats
+        if heartbeat_metrics:
+            current_metrics = dict(worker.metrics) if isinstance(worker.metrics, dict) else {}
+            current_metrics.update(heartbeat_metrics)
+            worker.metrics = current_metrics
+        return heartbeat_metrics
+
+    @staticmethod
+    def _apply_system_info(worker, os_type, os_version, python_version, machine_arch):
+        updates = {
+            "os_type": os_type,
+            "os_version": os_version,
+            "python_version": python_version,
+            "machine_arch": machine_arch,
+        }
+        for field_name, value in updates.items():
+            if value:
+                setattr(worker, field_name, value)
+
+    def _apply_capabilities(self, worker, capabilities):
+        if not capabilities:
+            return
+        if not isinstance(capabilities, dict):
+            logger.warning(f"capabilities 类型错误: {type(capabilities)}, 值: {capabilities}")
+            return
+        normalized = self._normalize_capabilities(capabilities)
+        worker.capabilities = normalized
+        logger.info(f"节点 {worker.name} 能力更新: {list(normalized.keys())}")
 
     def _sync_cache_on_heartbeat(self, worker: Worker) -> None:
         """同步心跳到缓存，避免健康检查使用过期节点信息"""

@@ -15,10 +15,12 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
 import grpc
 from loguru import logger
+
+from antcode_gateway.redis_token_bucket import RedisTokenBucketLimiter, RedisTokenBucketResult
 
 
 @dataclass
@@ -214,6 +216,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
         enabled: bool = True,
         rate: float = 100.0,
         capacity: int = 200,
+        redis_client: Any | None = None,
     ):
         """初始化限流拦截器
 
@@ -223,7 +226,27 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
             capacity: 令牌桶容量
         """
         self.enabled = enabled
-        self.limiter = TokenBucketLimiter(rate=rate, capacity=capacity)
+        self._rate = rate
+        self._capacity = capacity
+        self._redis_client = redis_client
+        self._limiter: RedisTokenBucketLimiter | None = None
+
+    async def _get_limiter(self) -> RedisTokenBucketLimiter:
+        if self._limiter is not None:
+            return self._limiter
+        if self._redis_client is None:
+            from antcode_core.infrastructure.redis.client import get_redis_client
+
+            self._redis_client = await get_redis_client()
+        from antcode_core.infrastructure.redis.control_plane import redis_namespace
+
+        self._limiter = RedisTokenBucketLimiter(
+            cast(Any, self._redis_client),
+            rate=self._rate,
+            capacity=self._capacity,
+            key_prefix=f"{redis_namespace()}:gateway:rate-limit",
+        )
+        return self._limiter
 
     async def intercept_service(
         self,
@@ -248,7 +271,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
             key = self._infer_peer_key(metadata)
 
         # 检查限流
-        result = self.limiter.allow(key)
+        result = await (await self._get_limiter()).allow(key)
 
         if not result.allowed:
             logger.warning(f"请求被限流: key={key}, method={method}, retry_after={result.retry_after:.2f}s")
@@ -275,7 +298,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
     def _create_rate_limited_handler(
         self,
-        result: RateLimitResult,
+        result: RateLimitResult | RedisTokenBucketResult,
     ) -> grpc.RpcMethodHandler:
         """创建限流响应处理器"""
 

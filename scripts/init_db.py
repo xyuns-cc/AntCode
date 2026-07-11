@@ -48,6 +48,14 @@ PERFORMANCE_INDEXES: list[tuple[str, str]] = [
             WHERE "result_data"->>'crawl_batch_id' IS NOT NULL
         """,
     ),
+    (
+        "idx_task_executions_crawl_batch_status",
+        """
+        CREATE INDEX IF NOT EXISTS "idx_task_executions_crawl_batch_status"
+            ON "task_executions" (("result_data"->>'crawl_batch_id'), "status")
+            WHERE "result_data"->>'crawl_batch_id' IS NOT NULL
+        """,
+    ),
     # T7-B1c (P2-1): crawl_batches 状态列表 + 时间排序
     (
         "idx_crawl_batches_status_created",
@@ -291,9 +299,7 @@ async def _upgrade_legacy_schema() -> None:
         ["project_sources", "entry_point"],
     )
     if rows and rows[0]["is_nullable"] == "NO":
-        await conn.execute_query(
-            'ALTER TABLE "project_sources" ALTER COLUMN "entry_point" DROP NOT NULL'
-        )
+        await conn.execute_query('ALTER TABLE "project_sources" ALTER COLUMN "entry_point" DROP NOT NULL')
         logger.warning(
             "旧库 project_sources.entry_point 已放开 NOT NULL（新版本不再写该列）。"
             "彻底删列请手动执行 migrations/models/20260711_remove_project_source_mirrors.sql"

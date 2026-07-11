@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 
 from loguru import logger
+from redis import Redis
 
 
 class AntCodeProxyMiddleware:
@@ -39,7 +40,7 @@ class AntCodeProxyMiddleware:
         self.redis_url = redis_url
         self.namespace = namespace
         self.strategy = strategy
-        self._redis = None
+        self._redis: Redis | None = None
         self._sticky_proxy: str | None = None
 
     @classmethod

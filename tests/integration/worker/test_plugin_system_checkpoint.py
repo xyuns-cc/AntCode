@@ -11,7 +11,7 @@ Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7
 import pytest
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.errors import PluginError
-from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
+from antcode_worker.domain.models import ExecPlan, RunContext, RuntimeSpec, TaskPayload
 from antcode_worker.plugins.base import PluginBase
 from antcode_worker.plugins.registry import PluginRegistry
 
@@ -349,6 +349,7 @@ class TestExecPlanGeneration:
             run_id="test-run-004",
             task_id="task-004",
             project_id="project-004",
+            runtime_spec=RuntimeSpec(python_path="/runtime/bin/python"),
         )
         payload = TaskPayload(
             task_type=TaskType.RENDER,
@@ -364,9 +365,25 @@ class TestExecPlanGeneration:
 
         plan = await self.registry.build_plan(context, payload)
 
-        assert "-c" in plan.args  # 内联脚本模式
+        assert plan.command == "/runtime/bin/python"
+        assert "-c" not in plan.args
+        assert plan.args[0].endswith("plugins/render/_runner.py")
+        assert plan.args[plan.args.index("--template-path") + 1] == "template.html"
         assert "output.html" in plan.artifact_patterns
         assert plan.plugin_name == "render"
+
+    def test_render_plugin_rejects_template_path_traversal(self):
+        payload = TaskPayload(
+            task_type=TaskType.RENDER,
+            entry_point="../../worker-secrets.json",
+            project_cwd="/tmp/workspace/render_project",
+            kwargs={"engine": "jinja2", "output_file": "output.html"},
+        )
+
+        plugin = self.registry.match(payload)
+
+        assert plugin is not None
+        assert any("不允许包含 '..'" in error for error in plugin.validate(payload))
 
     @pytest.mark.asyncio
     async def test_render_plugin_rejects_playwright_engine(self):

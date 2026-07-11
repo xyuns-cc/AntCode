@@ -43,12 +43,11 @@ class AuthService {
     const user = payload.user
 
     // 保存 token 和用户信息
-    TokenManager.setTokens(payload.access_token, payload.refresh_token)
+    TokenManager.setTokens(payload.access_token)
     localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(user))
 
     return {
       access_token: payload.access_token,
-      refresh_token: payload.refresh_token,
       token_type: payload.token_type,
       expires_in: payload.expires_in ?? 3600,
       user
@@ -108,25 +107,17 @@ class AuthService {
 
   // 刷新 Token
   async refreshToken(): Promise<LoginResponse> {
-    const refreshToken = TokenManager.getRefreshToken()
-    if (!refreshToken) {
-      throw new Error('No refresh token available')
-    }
-
-    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/refresh', {
-      refresh_token: refreshToken,
-    })
+    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/refresh', {})
 
     const payload = response.data.data
     const user = payload.user
 
     // 更新 token
-    TokenManager.setTokens(payload.access_token, payload.refresh_token)
+    TokenManager.setTokens(payload.access_token)
     localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(user))
 
     return {
       access_token: payload.access_token,
-      refresh_token: payload.refresh_token,
       token_type: payload.token_type,
       expires_in: payload.expires_in ?? 3600,
       user,

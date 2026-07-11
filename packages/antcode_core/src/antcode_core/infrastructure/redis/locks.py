@@ -12,6 +12,7 @@ import time
 import uuid
 
 from loguru import logger
+from redis.asyncio import Redis
 
 from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis.client import get_redis_client
@@ -63,7 +64,7 @@ class DistributedLock:
 
         self._token: str | None = None
         self._renew_task: asyncio.Task | None = None
-        self._redis = None
+        self._redis: Redis | None = None
 
     async def _get_client(self):
         """获取 Redis 客户端"""
@@ -289,7 +290,7 @@ class FencingTokenManager:
     """
 
     def __init__(self, token_name: str = "master"):
-        self._redis = None
+        self._redis: Redis | None = None
         self._current_token: int | None = None
         # 生成带 namespace 的 token key: <namespace>:fencing:token:<name>
         _ns = _ns_prefix()

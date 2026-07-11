@@ -66,13 +66,13 @@ class JWTSecretManager:
         if env_secret := os.getenv("JWT_SECRET"):
             self._secret = env_secret.strip()
             if self._secret:
-                return self._secret
+                return self._validate_secret(self._secret)
 
         # 2. 从指定文件加载
         if self.secret_file and self.secret_file.exists():
             try:
                 if secret := self.secret_file.read_text().strip():
-                    self._secret = secret
+                    self._secret = self._validate_secret(secret)
                     return self._secret
             except Exception:
                 logger.exception("读取 JWT 密钥失败")
@@ -83,6 +83,12 @@ class JWTSecretManager:
             "lazy secret generation is disabled to avoid multi-process race "
             "conditions and container-restart key loss."
         )
+
+    @staticmethod
+    def _validate_secret(secret: str) -> str:
+        if len(secret.encode("utf-8")) < 32:
+            raise RuntimeError("JWT_SECRET 必须至少包含 32 字节高熵材料")
+        return secret
 
     def regenerate(self) -> str:
         """重新生成密钥 —— 已禁用,改为运维侧轮换。"""
@@ -235,50 +241,53 @@ class JWTAuth:
                 algorithms=[self.algorithm],
                 options={"verify_exp": True, "require": ["exp"]},
             )
-            token_type = payload.get("token_type")
-            if expected_type:
-                if token_type:
-                    if token_type != expected_type:
-                        raise AUTH_ERROR
-                elif expected_type != "access":
-                    raise AUTH_ERROR
-
-            # P0-a1: 强制校验 token_class,隔离 web / worker 凭据。
-            # payload 无 token_class 时向后兼容为 "web"。
-            if expected_class:
-                actual_class = payload.get("token_class", "web")
-                if actual_class != expected_class:
-                    raise AUTH_ERROR
-
-            # Worker token 走独立分支:worker_id 从 payload 取,不使用 user_id/username
+            self._verify_token_claims(payload, expected_type, expected_class)
             if payload.get("token_class") == "worker":
-                worker_id = payload.get("worker_id") or payload.get("sub")
-                if not worker_id:
-                    raise AUTH_ERROR
-                return TokenData(
-                    user_id=0,  # worker token 不对应 DB user_id
-                    username=str(worker_id),
-                    is_admin=False,
-                    role="worker",
-                    exp=datetime.fromtimestamp(payload["exp"]),
-                )
-
-            # 常规 Web token 分支
-            user_id, username = payload.get("user_id"), payload.get("username")
-            if not user_id or not username:
-                raise AUTH_ERROR
-            return TokenData(
-                user_id=user_id,
-                username=username,
-                is_admin=payload.get("is_admin", False),
-                role=payload.get("role", "admin" if payload.get("is_admin") else "user"),
-                exp=datetime.fromtimestamp(payload["exp"]),
-                session_jti=payload.get("session_jti"),
-            )
+                return self._worker_token_data(payload)
+            return self._web_token_data(payload)
         except jwt.ExpiredSignatureError:
             raise TOKEN_EXPIRED_ERROR
         except (jwt.InvalidTokenError, jwt.DecodeError):
             raise AUTH_ERROR
+
+    @staticmethod
+    def _verify_token_claims(payload, expected_type, expected_class):
+        token_type = payload.get("token_type")
+        if expected_type and token_type and token_type != expected_type:
+            raise AUTH_ERROR
+        if expected_type and not token_type and expected_type != "access":
+            raise AUTH_ERROR
+        actual_class = payload.get("token_class", "web")
+        if expected_class and actual_class != expected_class:
+            raise AUTH_ERROR
+
+    @staticmethod
+    def _worker_token_data(payload):
+        worker_id = payload.get("worker_id") or payload.get("sub")
+        if not worker_id:
+            raise AUTH_ERROR
+        return TokenData(
+            user_id=0,
+            username=str(worker_id),
+            is_admin=False,
+            role="worker",
+            exp=datetime.fromtimestamp(payload["exp"]),
+        )
+
+    @staticmethod
+    def _web_token_data(payload):
+        user_id, username = payload.get("user_id"), payload.get("username")
+        if not user_id or not username:
+            raise AUTH_ERROR
+        is_admin = payload.get("is_admin", False)
+        return TokenData(
+            user_id=user_id,
+            username=username,
+            is_admin=is_admin,
+            role=payload.get("role", "admin" if is_admin else "user"),
+            exp=datetime.fromtimestamp(payload["exp"]),
+            session_jti=payload.get("session_jti"),
+        )
 
     def create_worker_token(
         self,
@@ -342,21 +351,7 @@ def get_current_user_from_token(token: str) -> TokenData:
 
 
 async def verify_refresh_token(token: str) -> TokenData:
-    """验证刷新令牌 (P1-09: 改为 async, 查 UserSession jti)
-
-    与原 sync 版本的差异:
-    - 强制要求 payload 携带 ``jti`` (老 refresh token 会 401)
-    - 从 UserSession 表查该 jti 是否存在且未撤销
-    - 任何 DB / 校验失败均 401, 不泄漏内部错误
-
-    Breaking change: 原 ``token_data = verify_refresh_token(t)`` 需要改为
-    ``token_data = await verify_refresh_token(t)``。前端的 401 拦截器不受
-    影响, 但用户会被强制重新登录一次。
-
-    灰度兼容 (可选): 如果需要保平滑, 可在 "jti is None" 分支临时改为
-    ``logger.warning(...); return token_data`` 让老 token 继续工作 3-7 天。
-    默认走硬切换。
-    """
+    """验证 refresh JWT 及其服务端 UserSession jti。"""
     # 1) 先做 JWT 结构 / exp / type 校验 (复用现成路径)
     token_data = jwt_auth.verify_token(token, expected_type="refresh")
 

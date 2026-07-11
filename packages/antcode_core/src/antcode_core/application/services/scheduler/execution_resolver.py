@@ -88,10 +88,13 @@ class ExecutionResolver:
 
         worker = await Worker.get_or_none(id=project.bound_worker_id)
         if not worker:
-            raise WorkerUnavailableError(f"绑定 Worker 不存在 (id={project.bound_worker_id})", project.bound_worker_id)
+            raise WorkerUnavailableError(
+                f"绑定 Worker 不存在 (id={project.bound_worker_id})",
+                str(project.bound_worker_id),
+            )
 
         if not await self._ensure_worker_online(worker):
-            raise WorkerUnavailableError(f"绑定 Worker [{worker.name}] 离线", worker.id)
+            raise WorkerUnavailableError(f"绑定 Worker [{worker.name}] 离线", str(worker.id))
 
         logger.info(f"FIXED_WORKER: 使用 Worker [{worker.name}]")
         return worker
@@ -104,11 +107,12 @@ class ExecutionResolver:
         worker = await Worker.get_or_none(id=task.specified_worker_id)
         if not worker:
             raise WorkerUnavailableError(
-                f"指定 Worker 不存在 (id={task.specified_worker_id})", task.specified_worker_id
+                f"指定 Worker 不存在 (id={task.specified_worker_id})",
+                str(task.specified_worker_id),
             )
 
         if not await self._ensure_worker_online(worker):
-            raise WorkerUnavailableError(f"指定 Worker [{worker.name}] 离线", worker.id)
+            raise WorkerUnavailableError(f"指定 Worker [{worker.name}] 离线", str(worker.id))
 
         logger.info(f"SPECIFIED: 使用 Worker [{worker.name}]")
         return worker

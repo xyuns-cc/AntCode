@@ -74,3 +74,86 @@ async def test_ack_control_rejects_foreign_worker_stream():
 
     with pytest.raises(AbortCalled):
         await wrapped.unary_unary(request, _context())
+
+
+async def _single(message):
+    yield message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "message", "handler_name", "handler_result", "expected_runs"),
+    [
+        (
+            "StreamStatus",
+            data_pb2.TaskStatus(worker_id="worker-a", run_id="run-status"),
+            "result_handler",
+            True,
+            {"run-status"},
+        ),
+        (
+            "StreamLogs",
+            data_pb2.LogBatch(
+                worker_id="worker-a",
+                entries=[data_pb2.LogEntry(run_id="run-log")],
+            ),
+            "log_handler",
+            True,
+            {"run-log"},
+        ),
+        (
+            "StreamSpiderData",
+            data_pb2.SpiderDataBatch(
+                worker_id="worker-a",
+                run_id="run-spider",
+                project_id="project-a",
+            ),
+            "spider_data_handler",
+            (0, 0),
+            {"run-spider"},
+        ),
+    ],
+)
+async def test_gateway_data_streams_verify_run_ownership(
+    method_name,
+    message,
+    handler_name,
+    handler_result,
+    expected_runs,
+):
+    ownership_verifier = AsyncMock()
+    handler = MagicMock()
+    if method_name == "StreamStatus":
+        handler.handle = AsyncMock(return_value=handler_result)
+    elif method_name == "StreamLogs":
+        handler.handle_log_batch = AsyncMock(return_value=handler_result)
+    else:
+        handler.handle_batch = AsyncMock(return_value=handler_result)
+    service = GatewayDataService(
+        **{handler_name: handler},
+        ownership_verifier=ownership_verifier,
+    )
+    original = grpc.stream_unary_rpc_method_handler(getattr(service, method_name))
+    wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
+
+    await wrapped.stream_unary(_single(message), _context())
+
+    ownership_verifier.assert_awaited_once_with("worker-a", expected_runs)
+
+
+@pytest.mark.asyncio
+async def test_gateway_data_stream_rejects_foreign_run_before_persistence():
+    ownership_verifier = AsyncMock(side_effect=PermissionError("foreign run"))
+    result_handler = MagicMock(handle=AsyncMock(return_value=True))
+    service = GatewayDataService(
+        result_handler=result_handler,
+        ownership_verifier=ownership_verifier,
+    )
+    original = grpc.stream_unary_rpc_method_handler(service.StreamStatus)
+    wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
+    message = data_pb2.TaskStatus(worker_id="worker-a", run_id="run-foreign")
+
+    with pytest.raises(AbortCalled):
+        await wrapped.stream_unary(_single(message), _context())
+
+    result_handler.handle.assert_not_awaited()

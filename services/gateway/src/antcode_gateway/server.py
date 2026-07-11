@@ -114,108 +114,100 @@ class GrpcServer:
             return True
 
         try:
-            # 创建服务器（带拦截器）
-            self._executor = futures.ThreadPoolExecutor(max_workers=self.config.max_workers)
-            self._server = grpc_aio.server(
-                self._executor,
-                options=self.config.server_options,
-                interceptors=self._interceptors if self._interceptors else None,
-            )
-
-            # 注册所有服务
-            for servicer, add_func in self._servicers:
-                add_func(servicer, self._server)
-                logger.debug(f"已注册服务: {servicer.__class__.__name__}")
-
-            # 注册 grpc.health.v1.Health —— 让 grpc_health_probe / L7 探针
-            # 拿到真实 SERVING/NOT_SERVING 状态。auth.py / rate_limit.py 已把
-            # /grpc.health.v1.Health/Check 加入白名单,不会被拦截器截掉。
-            if _HEALTH_AVAILABLE:
-                self._health_servicer = health.HealthServicer(
-                    experimental_non_blocking=True,
-                    experimental_thread_pool=self._executor,
-                )
-                health_pb2_grpc.add_HealthServicer_to_server(self._health_servicer, self._server)
-                logger.debug("已注册 grpc.health.v1.Health 服务")
-            else:
-                logger.warning(
-                    "grpcio-health-checking 未安装,grpc_health_probe 探针会失败 (容器镜像里应已通过 pip 装好)"
-                )
-
-            # 绑定端口
-            listen_addr = f"[::]:{self.config.port}"
-
-            if self.config.tls_enabled:
-                # TLS/mTLS 模式
-                credentials = self._create_server_credentials()
-                if credentials is None:
-                    logger.error("创建 TLS 凭证失败")
-                    self._server = None
-                    self._health_servicer = None
-                    return False
-
-                bound_port = self._server.add_secure_port(listen_addr, credentials)
-                tls_mode = "mTLS" if self.config.mtls_enabled else "TLS"
-                logger.info(f"gRPC 服务器启动于 {listen_addr} ({tls_mode})")
-            else:
-                # 非 TLS 模式
-                # D4: 启用鉴权（默认 true）却走明文端口，意味着 api_key/JWT 会明文
-                # 在网络上传输。除非显式声明 dev 场景，否则拒绝启动 fail-closed。
-                if self.config.auth_enabled and not self.config.allow_insecure_with_auth:
-                    logger.error(
-                        "gRPC 明文端口启动被拒绝：AUTH_ENABLED=true 时凭证会明文传输。"
-                        " 请配置 GRPC_TLS_CERT_PATH+GRPC_TLS_KEY_PATH 或显式设置"
-                        " ANTCODE_GATEWAY_ALLOW_INSECURE=true 声明本地/测试环境。"
-                    )
-                    self._server = None
-                    self._health_servicer = None
-                    return False
-                bound_port = self._server.add_insecure_port(listen_addr)
-                logger.warning(
-                    "gRPC 服务器启动于 %s (insecure — 凭证会明文传输，仅限本地/测试)",
-                    listen_addr,
-                )
-
+            self._create_server()
+            self._register_servicers()
+            self._register_health_service()
+            bound_port = self._bind_port()
             if bound_port == 0:
-                logger.error(f"gRPC 服务器端口绑定失败: {listen_addr}")
-                self._server = None
-                self._health_servicer = None
+                logger.error(f"gRPC 服务器端口绑定失败: [::]:{self.config.port}")
+                self._reset_start_state()
                 return False
-
-            # 启动服务器
+            assert self._server is not None
             await self._server.start()
             self._started = True
-
-            # 标记 SERVING —— 只有端口真正 listen 之后才置为 SERVING,
-            # 避免 healthcheck 在启动过程中就返回 healthy(P1-21 假 healthy 修复)。
-            if self._health_servicer is not None:
-                # 空字符串 "" 是标准的整体健康状态 key(grpc_health_probe 默认查询)
-                self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-                # 同时把已注册的业务服务也标记为 SERVING,方便按 service 查询
-                for servicer, _ in self._servicers:
-                    service_name = servicer.__class__.__name__
-                    try:
-                        self._health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
-                    except Exception:  # pragma: no cover - 防御性容错
-                        pass
-
+            self._mark_services_serving()
             logger.info(
                 f"gRPC 服务器已启动 - 端口: {self.config.port}, "
                 f"最大工作线程: {self.config.max_workers}, "
                 f"拦截器数: {len(self._interceptors)}"
             )
-
-            # P1-21: 启动独立 HTTP readiness endpoint 供 Docker HEALTHCHECK 使用
             await self._start_readiness_endpoint()
-
             return True
-
         except Exception as e:
             logger.exception(f"gRPC 服务器启动失败: {e}")
-            self._server = None
-            self._started = False
-            self._health_servicer = None
+            self._reset_start_state()
             return False
+
+    def _create_server(self) -> None:
+        self._executor = futures.ThreadPoolExecutor(max_workers=self.config.max_workers)
+        self._server = grpc_aio.server(
+            self._executor,
+            options=self.config.server_options,
+            interceptors=self._interceptors if self._interceptors else None,
+        )
+
+    def _register_servicers(self) -> None:
+        assert self._server is not None
+        for servicer, add_func in self._servicers:
+            add_func(servicer, self._server)
+            logger.debug(f"已注册服务: {servicer.__class__.__name__}")
+
+    def _register_health_service(self) -> None:
+        if not _HEALTH_AVAILABLE:
+            logger.warning("grpcio-health-checking 未安装,grpc_health_probe 探针会失败")
+            return
+        assert self._server is not None
+        self._health_servicer = health.HealthServicer(
+            experimental_non_blocking=True,
+            experimental_thread_pool=self._executor,
+        )
+        health_pb2_grpc.add_HealthServicer_to_server(self._health_servicer, self._server)
+        logger.debug("已注册 grpc.health.v1.Health 服务")
+
+    def _bind_port(self) -> int:
+        if self.config.tls_enabled:
+            return self._bind_secure_port()
+        return self._bind_insecure_port()
+
+    def _bind_secure_port(self) -> int:
+        credentials = self._create_server_credentials()
+        if credentials is None:
+            logger.error("创建 TLS 凭证失败")
+            return 0
+        assert self._server is not None
+        listen_addr = f"[::]:{self.config.port}"
+        bound_port = self._server.add_secure_port(listen_addr, credentials)
+        mode = "mTLS" if self.config.mtls_enabled else "TLS"
+        logger.info(f"gRPC 服务器启动于 {listen_addr} ({mode})")
+        return bound_port
+
+    def _bind_insecure_port(self) -> int:
+        if self.config.auth_enabled and not self.config.allow_insecure_with_auth:
+            logger.error("gRPC 明文端口启动被拒绝：AUTH_ENABLED=true 时凭证会明文传输")
+            return 0
+        assert self._server is not None
+        listen_addr = f"[::]:{self.config.port}"
+        bound_port = self._server.add_insecure_port(listen_addr)
+        logger.warning("gRPC 服务器启动于 %s (insecure，仅限本地/测试)", listen_addr)
+        return bound_port
+
+    def _mark_services_serving(self) -> None:
+        if self._health_servicer is None:
+            return
+        self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        for servicer, _ in self._servicers:
+            try:
+                self._health_servicer.set(
+                    servicer.__class__.__name__,
+                    health_pb2.HealthCheckResponse.SERVING,
+                )
+            except Exception:  # pragma: no cover
+                pass
+
+    def _reset_start_state(self) -> None:
+        self._server = None
+        self._started = False
+        self._health_servicer = None
 
     def _create_server_credentials(self) -> grpc.ServerCredentials | None:
         """创建服务器 TLS 凭证

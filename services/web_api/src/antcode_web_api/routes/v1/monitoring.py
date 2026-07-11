@@ -47,7 +47,7 @@ async def _ensure_worker_access(worker_id: str, current_user: TokenData) -> User
 
 
 def _convert_status(raw):
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in raw.items():
         if value is None or value == "":
             result[key] = None
@@ -68,7 +68,7 @@ def _convert_status(raw):
 
 
 def _convert_spider(raw):
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in raw.items():
         if value is None or value == "":
             result[key] = None
@@ -159,23 +159,22 @@ async def get_worker_history(
     if not records:
         return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=[], count=0)
 
-    items = []
-    for record in records:
-        transformed: dict[str, Any] = {}
-        for key, value in record.items():
-            if isinstance(value, datetime):
-                transformed[key] = value
-            elif value is None:
-                transformed[key] = None
-            elif isinstance(value, Decimal):
-                transformed[key] = float(value)
-            else:
-                transformed[key] = value
-        for extra_key in ("id", "worker_id", "created_at", "status"):
-            transformed.pop(extra_key, None)
-        items.append(WorkerHistoryItem(**transformed))
+    items = [_worker_history_item(record) for record in records]
 
     return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=items, count=len(items))
+
+
+def _worker_history_item(record: dict[str, Any]) -> WorkerHistoryItem:
+    transformed = {key: _history_value(value) for key, value in record.items()}
+    for extra_key in ("id", "worker_id", "created_at", "status"):
+        transformed.pop(extra_key, None)
+    return WorkerHistoryItem.model_validate(transformed)
+
+
+def _history_value(value: object) -> object:
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 @router.get(

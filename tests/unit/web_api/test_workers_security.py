@@ -11,6 +11,13 @@ from fastapi import HTTPException, status
 from pydantic import ValidationError
 
 
+@pytest.fixture(autouse=True)
+def _mock_run_ownership(monkeypatch):
+    ownership_module = importlib.import_module("antcode_core.application.services.workers.run_ownership_service")
+    monkeypatch.setattr(ownership_module, "require_worker_owns_run", AsyncMock())
+    monkeypatch.setattr(ownership_module, "require_worker_owns_runs", AsyncMock())
+
+
 @pytest.mark.asyncio
 async def test_verify_worker_credential_headers_requires_worker_id(monkeypatch):
     async def fake_get_worker_by_id(_worker_id):
@@ -292,7 +299,7 @@ async def test_register_worker_by_key_rejects_when_blocked(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_report_task_logs_batch_counts_success_when_partial_fail(monkeypatch):
+async def test_report_task_logs_batch_exposes_partial_failure(monkeypatch):
     async def fake_append_logs(run_id, log_type, contents):
         _ = log_type
         if run_id == "run-fail":
@@ -323,11 +330,10 @@ async def test_report_task_logs_batch_counts_success_when_partial_fail(monkeypat
         ]
     )
 
-    response = await workers_route.report_task_logs_batch(payload, auth_context={"worker": object()})
+    with pytest.raises(HTTPException) as exc_info:
+        await workers_route.report_task_logs_batch(payload, auth_context={"worker": object()})
 
-    assert response.success is True
-    assert response.data["received"] == 2
-    assert response.data["total"] == 3
+    assert exc_info.value.status_code == 503
 
 
 @pytest.mark.asyncio

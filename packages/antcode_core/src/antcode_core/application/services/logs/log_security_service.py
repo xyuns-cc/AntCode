@@ -58,54 +58,19 @@ class LogSecurityService:
             HTTPException: 其他错误
         """
         try:
-            # 检查访问频率限制
             if not self._check_rate_limit(user.user_id):
                 raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="访问频率过高，请稍后再试")
 
-            # 检查权限缓存
             cache_key = self._generate_cache_key(user.user_id, run_id)
-            if cache_key in self._permission_cache:
-                cache_entry = self._permission_cache[cache_key]
-                if self._is_cache_valid(cache_entry):
-                    if cache_entry.get("has_permission"):
-                        return cache_entry.get("execution")
-                    else:
-                        raise LogPermissionError("无权访问此执行记录")
+            cached_execution = self._get_cached_permission(cache_key)
+            if cached_execution is not None:
+                return cached_execution
 
-            # 数据库验证（支持 run_id UUID 和 public_id）
-            run_id_str = str(run_id)
-            execution = await TaskRun.get_or_none(run_id=run_id_str)
-            if not execution and len(run_id_str) <= 32:
-                execution = await TaskRun.get_or_none(public_id=run_id_str)
-            if not execution:
-                raise DoesNotExist("执行记录不存在")
-
-            # 获取关联任务
+            execution = await self._find_execution(run_id)
             task = await Task.get(id=execution.task_id)
-
-            # 检查基础权限
-            if task.user_id != user.user_id:
-                # 检查是否为管理员
-                is_admin = await QueryHelper.is_admin(user.user_id)
-                if not is_admin:
-                    # 缓存权限结果
-                    self._permission_cache[cache_key] = {
-                        "has_permission": False,
-                        "timestamp": time.time(),
-                        "reason": "not_owner_or_admin",
-                    }
-                    raise LogPermissionError("无权访问此执行记录")
-
-            # 检查操作特定权限
+            await self._verify_owner_or_admin(user.user_id, task, cache_key)
             await self._verify_operation_permission(user, execution, task, operation)
-
-            # 缓存成功结果
-            self._permission_cache[cache_key] = {
-                "has_permission": True,
-                "execution": execution,
-                "timestamp": time.time(),
-            }
-
+            self._cache_permission(cache_key, execution)
             logger.debug(f"用户 {user.user_id} 访问执行记录 {run_id} 权限验证通过")
             return execution
 
@@ -116,6 +81,41 @@ class LogSecurityService:
         except Exception as e:
             logger.error(f"权限验证异常: {e}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="权限验证失败")
+
+    def _get_cached_permission(self, cache_key):
+        cache_entry = self._permission_cache.get(cache_key)
+        if not cache_entry or not self._is_cache_valid(cache_entry):
+            return None
+        if not cache_entry.get("has_permission"):
+            raise LogPermissionError("无权访问此执行记录")
+        return cache_entry.get("execution")
+
+    @staticmethod
+    async def _find_execution(run_id):
+        run_id_str = str(run_id)
+        execution = await TaskRun.get_or_none(run_id=run_id_str)
+        if not execution and len(run_id_str) <= 32:
+            execution = await TaskRun.get_or_none(public_id=run_id_str)
+        if not execution:
+            raise DoesNotExist("执行记录不存在")
+        return execution
+
+    async def _verify_owner_or_admin(self, user_id, task, cache_key):
+        if task.user_id == user_id or await QueryHelper.is_admin(user_id):
+            return
+        self._permission_cache[cache_key] = {
+            "has_permission": False,
+            "timestamp": time.time(),
+            "reason": "not_owner_or_admin",
+        }
+        raise LogPermissionError("无权访问此执行记录")
+
+    def _cache_permission(self, cache_key, execution):
+        self._permission_cache[cache_key] = {
+            "has_permission": True,
+            "execution": execution,
+            "timestamp": time.time(),
+        }
 
     async def _verify_operation_permission(self, user, execution, task, operation):
         """验证操作权限"""

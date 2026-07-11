@@ -228,9 +228,9 @@ class SchedulerService:
             ).values_list("id", flat=True)
 
             worker_query = Q(specified_worker_id=worker.id)
-            project_ids = list(related_project_ids)
-            if project_ids:
-                worker_query = worker_query | Q(project_id__in=project_ids)
+            related_ids = list(related_project_ids)
+            if related_ids:
+                worker_query = worker_query | Q(project_id__in=related_ids)
 
             query = query.filter(worker_query)
 
@@ -1040,22 +1040,22 @@ class SchedulerService:
                 if project_type_str == "code":
                     from antcode_core.domain.models.project import ProjectCode
 
-                    info = await ProjectCode.get_or_none(project_id=project.id)
-                    if info and info.language:
-                        language = info.language.strip().lower()
+                    code_info = await ProjectCode.get_or_none(project_id=project.id)
+                    if code_info and code_info.language:
+                        language = code_info.language.strip().lower()
                 elif project_type_str == "file":
                     from antcode_core.domain.models.project import ProjectFile
 
-                    info = await ProjectFile.get_or_none(project_id=project.id)
-                    if info and getattr(info, "language", None):
-                        language = info.language.strip().lower()
+                    file_info = await ProjectFile.get_or_none(project_id=project.id)
+                    if file_info and getattr(file_info, "language", None):
+                        language = file_info.language.strip().lower()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"读取 project language 失败，默认 python: {exc}")
 
             params = dict(task.execution_params or {})
             # 塞入 kwargs.language；worker engine 会把 params.kwargs 展平到 TaskPayload.kwargs
-            kwargs_dict = params.get("kwargs") if isinstance(params.get("kwargs"), dict) else {}
-            kwargs_dict = dict(kwargs_dict)
+            raw_kwargs = params.get("kwargs")
+            kwargs_dict = dict(raw_kwargs) if isinstance(raw_kwargs, dict) else {}
             kwargs_dict.setdefault("language", language)
             params["kwargs"] = kwargs_dict
 

@@ -13,7 +13,7 @@ from antcode_core.application.services.projects.project_source_service import (
 )
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.workers import worker_service
-from antcode_core.common.utils.db_optimizer import DatabaseOptimizer
+from antcode_core.common.utils.db_optimizer import BulkUpdateOptions, DatabaseOptimizer
 from antcode_core.common.utils.json_parser import parse_cookies, parse_headers
 from antcode_core.domain.models import Project, ProjectCode, ProjectFile, ProjectRule, ProjectType
 from antcode_core.domain.models.enums import CallbackType, RequestMethod, RuntimeKind, RuntimeScope
@@ -169,16 +169,7 @@ class ProjectService:
         return repository, source
 
     async def create_project(self, request, user_id):
-        """
-        创建项目
-
-        Args:
-            request: 项目创建请求
-            user_id: 用户ID
-
-        Returns:
-            Project: 创建的项目对象
-        """
+        """在单个事务中创建项目、运行时与类型详情。"""
         from tortoise.transactions import in_transaction
 
         try:
@@ -209,17 +200,7 @@ class ProjectService:
 
                 logger.info(f"项目创建成功: {project.name} (ID: {project.id})")
 
-                # P2: 响应层 ``_resolve_public_id`` 强要求 ``created_by_public_id``
-                # 才能组装 ProjectResponse；此前只 ``get_project_by_id`` 里 attach，
-                # create 路径直接把 project 传给 response builder 会 ValueError。
-                from antcode_core.application.services.users.user_service import (
-                    user_service,
-                )
-
-                creator = await user_service.get_user_by_id(project.user_id)
-                project.created_by_public_id = creator.public_id if creator else None
-                project.created_by_username = creator.username if creator else None
-
+                await self._attach_project_creator(project)
                 return project
 
         except IntegrityError as e:
@@ -235,6 +216,14 @@ class ProjectService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"项目创建失败: {str(e)}",
             )
+
+    @staticmethod
+    async def _attach_project_creator(project):
+        from antcode_core.application.services.users.user_service import user_service
+
+        creator = await user_service.get_user_by_id(project.user_id)
+        project.created_by_public_id = creator.public_id if creator else None
+        project.created_by_username = creator.username if creator else None
 
     async def _create_file_project_detail(self, project, request, conn=None):
         """创建文件项目详情。"""
@@ -330,11 +319,7 @@ class ProjectService:
         search=None,
         worker_id=None,
     ):
-        """获取项目列表（优化版本）
-
-        注意：不缓存此方法的结果，因为包含动态关联数据（用户信息）。
-        缓存在 API 层通过 @fast_response 实现，TTL 较短（2分钟）。
-        """
+        """分页查询项目，并批量附加创建者与任务数量。"""
         from tortoise.functions import Count
 
         from antcode_core.application.services.base import QueryHelper
@@ -469,7 +454,11 @@ class ProjectService:
             return 0
 
         optimizer = DatabaseOptimizer()
-        return await optimizer.bulk_update(model_class=Project, updates=valid_updates, key_field="id")
+        return await optimizer.bulk_update(
+            model_class=Project,
+            updates=valid_updates,
+            options=BulkUpdateOptions(key_field="id"),
+        )
 
     async def batch_delete_projects(self, project_ids, user_id):
         """批量删除项目"""
@@ -656,128 +645,111 @@ class ProjectService:
     async def _setup_worker_environment(self, project, request, user_id, conn):
         """配置 Worker 环境"""
         from antcode_core.application.services.runtime import runtime_control_service
+
+        worker, created_by = await self._authorize_worker(request, user_id)
+        runtime = self._worker_runtime_request(request)
+        runtime["created_by"] = created_by
+        await self._resolve_worker_environment(project, runtime, runtime_control_service)
+        await self._bind_worker_runtime(project, worker, runtime, conn)
+
+    async def _authorize_worker(self, request, user_id):
+        from antcode_core.application.services.users.user_service import user_service
         from antcode_core.domain.models.worker import Worker
 
         worker_id = getattr(request, "worker_id", None)
         if not worker_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="使用 Worker 运行时必须指定 worker_id",
-            )
-
-        # 验证 Worker 存在且在线
+            raise HTTPException(status_code=400, detail="使用 Worker 运行时必须指定 worker_id")
         worker = await Worker.get_or_none(public_id=worker_id)
         if not worker:
             raise HTTPException(status_code=404, detail="Worker 不存在")
         if worker.status != "online":
             raise HTTPException(status_code=400, detail=f"Worker {worker.name} 当前不在线")
-
-        # 权限校验
-        from antcode_core.application.services.users.user_service import user_service
-
         user_obj = await user_service.get_user_by_id(user_id)
-        is_admin = bool(user_obj and user_obj.is_admin)
-        created_by = user_obj.username if user_obj else str(user_id)
-        if not is_admin:
-            allowed = await worker_service.check_user_worker_permission(
-                user_id=user_id,
-                worker_id=worker.id,
-                is_admin=False,
-                required_permission="use",
-            )
-            if not allowed:
-                raise HTTPException(status_code=403, detail="无 Worker 访问权限")
+        if user_obj and user_obj.is_admin:
+            return worker, user_obj.username
+        allowed = await worker_service.check_user_worker_permission(
+            user_id=user_id,
+            worker_id=worker.id,
+            is_admin=False,
+            required_permission="use",
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="无 Worker 访问权限")
+        return worker, user_obj.username if user_obj else str(user_id)
 
-        use_existing_env = getattr(request, "use_existing_env", False)
-        runtime_scope = request.runtime_scope
+    @staticmethod
+    def _worker_runtime_request(request):
         runtime_kind = getattr(request, "runtime_kind", RuntimeKind.PYTHON)
         if runtime_kind != RuntimeKind.PYTHON:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="当前仅支持 python 运行时",
-            )
-        python_version = getattr(request, "python_version", None)
-        existing_env_name = getattr(request, "existing_env_name", None)
-        shared_runtime_key = getattr(request, "shared_runtime_key", None)
-        requested_env_name = getattr(request, "env_name", None)
+            raise HTTPException(status_code=400, detail="当前仅支持 python 运行时")
         dependencies = getattr(request, "dependencies", None)
-        if not isinstance(dependencies, list):
-            dependencies = []
+        return {
+            "worker_id": request.worker_id,
+            "use_existing": getattr(request, "use_existing_env", False),
+            "scope": request.runtime_scope,
+            "kind": runtime_kind,
+            "python_version": getattr(request, "python_version", None),
+            "existing_name": getattr(request, "existing_env_name", None),
+            "shared_key": getattr(request, "shared_runtime_key", None),
+            "requested_name": getattr(request, "env_name", None),
+            "dependencies": dependencies if isinstance(dependencies, list) else [],
+        }
 
-        env_name = None
+    async def _resolve_worker_environment(self, project, runtime, runtime_service):
+        if runtime["use_existing"]:
+            await self._select_existing_environment(runtime, runtime_service)
+            return
+        await self._create_worker_environment(project, runtime, runtime_service)
 
-        if use_existing_env:
-            # 使用现有 Worker 运行时
-            if not existing_env_name:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="使用现有环境时必须指定 existing_env_name",
-                )
-            env_name = existing_env_name
+    @staticmethod
+    async def _select_existing_environment(runtime, runtime_service):
+        env_name = runtime["existing_name"]
+        if not env_name:
+            raise HTTPException(status_code=400, detail="使用现有环境时必须指定 existing_env_name")
+        result = await runtime_service.get_env(runtime["worker_id"], env_name)
+        if not result.get("success") or not result.get("data"):
+            raise HTTPException(status_code=400, detail="指定环境不存在或不可用")
+        if runtime["scope"] == RuntimeScope.SHARED and not env_name.startswith("shared-"):
+            raise HTTPException(status_code=400, detail="共享环境必须选择共享运行时")
+        if runtime["scope"] == RuntimeScope.PRIVATE and env_name.startswith("shared-"):
+            raise HTTPException(status_code=400, detail="私有环境不允许使用共享运行时")
+        runtime["env_name"] = env_name
+        runtime["python_version"] = runtime["python_version"] or result["data"].get("python_version")
 
-            env_result = await runtime_control_service.get_env(worker_id, env_name)
-            if not env_result.get("success") or not env_result.get("data"):
-                raise HTTPException(status_code=400, detail="指定环境不存在或不可用")
+    @staticmethod
+    async def _create_worker_environment(project, runtime, runtime_service):
+        if runtime["scope"] == RuntimeScope.SHARED:
+            raise HTTPException(status_code=400, detail="共享环境必须从环境管理中选择现有环境")
+        python_version = runtime["python_version"]
+        if not python_version:
+            raise HTTPException(status_code=400, detail="创建新环境时必须指定 python_version")
+        requested_name = runtime["requested_name"]
+        if requested_name and requested_name.startswith("shared-"):
+            raise HTTPException(status_code=400, detail="私有环境名称不允许以 shared- 开头")
+        runtime["env_name"] = requested_name or f"project-{project.public_id}-py{python_version.replace('.', '')}"
+        result = await runtime_service.create_env(
+            worker_id=runtime["worker_id"],
+            env_name=runtime["env_name"],
+            python_version=python_version,
+            packages=runtime["dependencies"],
+            created_by=runtime["created_by"],
+        )
+        if not result.get("success"):
+            detail = result.get("error") or "未知错误"
+            raise HTTPException(status_code=500, detail=f"创建运行时失败: {detail}")
 
-            env_info = env_result.get("data") or {}
-            if runtime_scope == RuntimeScope.SHARED and not env_name.startswith("shared-"):
-                raise HTTPException(status_code=400, detail="共享环境必须选择共享运行时")
-            if runtime_scope == RuntimeScope.PRIVATE and env_name.startswith("shared-"):
-                raise HTTPException(status_code=400, detail="私有环境不允许使用共享运行时")
-
-            if not python_version and env_info.get("python_version"):
-                python_version = env_info.get("python_version")
-        else:
-            if runtime_scope == RuntimeScope.SHARED:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="共享环境必须从环境管理中选择现有环境",
-                )
-            # 创建新 Worker 运行时
-            if not python_version:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="创建新环境时必须指定 python_version",
-                )
-
-            # 生成环境名称
-            if runtime_scope == RuntimeScope.PRIVATE:
-                if requested_env_name and requested_env_name.startswith("shared-"):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="私有环境名称不允许以 shared- 开头",
-                    )
-                env_name = requested_env_name or f"project-{project.public_id}-py{python_version.replace('.', '')}"
-            else:  # 共享环境
-                shared_key = shared_runtime_key or f"py{python_version.replace('.', '')}"
-                env_name = f"shared-{shared_key}"
-
-            create_result = await runtime_control_service.create_env(
-                worker_id=worker_id,
-                env_name=env_name,
-                python_version=python_version,
-                packages=dependencies,
-                created_by=created_by,
-            )
-            if not create_result.get("success"):
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"创建运行时失败: {create_result.get('error') or '未知错误'}",
-                )
-
-        # 更新项目的 Worker 运行时信息
+    @staticmethod
+    async def _bind_worker_runtime(project, worker, runtime, conn):
         project.env_location = "worker"
-        project.worker_id = worker_id
-        project.worker_env_name = env_name
-        project.python_version = python_version
-        project.runtime_scope = runtime_scope
-        project.runtime_kind = runtime_kind
-        # Worker 运行时不使用本地字段
+        project.worker_id = runtime["worker_id"]
+        project.worker_env_name = runtime["env_name"]
+        project.python_version = runtime["python_version"]
+        project.runtime_scope = runtime["scope"]
+        project.runtime_kind = runtime["kind"]
         project.runtime_locator = None
         project.current_runtime_id = None
         await project.save(using_db=conn)
-
-        logger.info(f"项目 {project.name} 绑定 Worker 运行时: {worker.name}/{env_name}")
+        logger.info(f"项目 {project.name} 绑定 Worker 运行时: {worker.name}/{runtime['env_name']}")
 
 
 # 创建项目服务实例

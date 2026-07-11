@@ -23,6 +23,7 @@ import uuid
 from datetime import UTC, datetime
 
 from loguru import logger
+from tortoise import Tortoise
 
 from antcode_core.domain.models import CrawlBatch, Project, TaskRun
 from antcode_core.domain.models.enums import (
@@ -128,8 +129,8 @@ class CrawlBatchDispatcherService:
         改走 ``execution_status_service.update_runtime_status``：它带条件 CAS +
         同步写 status/runtime_status/timestamps，能守住终态。
         """
-        active_runs = await self._active_runs_for_batch(batch_id)
-        if not active_runs:
+        active_run_ids = await self._active_run_ids_for_batch(batch_id)
+        if not active_run_ids:
             logger.info(f"batch 无活跃 run，取消 no-op: batch_id={batch_id}")
             return
 
@@ -140,16 +141,16 @@ class CrawlBatchDispatcherService:
 
         now = datetime.now(UTC)
         cancelled = 0
-        for run in active_runs:
+        for run_id in active_run_ids:
             ok = await execution_status_service.update_runtime_status(
-                run_id=run.run_id,
+                run_id=run_id,
                 status=RuntimeStatus.CANCELLED,
                 status_at=now,
                 error_message=f"batch cancelled: {batch_id}",
             )
             if ok:
                 cancelled += 1
-        logger.info(f"batch 取消: batch_id={batch_id} cancelled_runs={cancelled}/{len(active_runs)}")
+        logger.info(f"batch 取消: batch_id={batch_id} cancelled_runs={cancelled}/{len(active_run_ids)}")
         # 已实际派发到 worker 的运行中任务，还需要发 control 取消给 worker。
         # 一期先只标 DB，让 worker 侧的 heartbeat + reclaim 兜底；等 F1-B 再补 control。
 
@@ -273,35 +274,34 @@ class CrawlBatchDispatcherService:
 
     async def _already_dispatched_urls(self, batch_id: str) -> set[str]:
         """幂等派发：读取该 batch 已有 TaskRun 的 seed_url 集合。"""
-        # tortoise JSONField 查询：走原始 SQL 会更精准，一期先扫全部再过滤
-        # （seed_urls 通常几百到几千，量级可控）
-        runs = await TaskRun.all().values_list("result_data", flat=True)
-        already: set[str] = set()
-        for data in runs:
-            if not isinstance(data, dict):
-                continue
-            if data.get("crawl_batch_id") != batch_id:
-                continue
-            url = data.get("seed_url")
-            if isinstance(url, str):
-                already.add(url)
-        return already
+        rows = await self._query_batch_runs(
+            "SELECT result_data->>'seed_url' AS seed_url FROM task_executions "
+            "WHERE result_data->>'crawl_batch_id' = $1 "
+            "AND result_data->>'seed_url' IS NOT NULL",
+            [batch_id],
+        )
+        return {str(row["seed_url"]) for row in rows}
 
-    async def _active_runs_for_batch(self, batch_id: str) -> list[TaskRun]:
-        """扫非终态且关联该 batch 的 run。终态集合参考 execution_status_service。"""
-        non_terminal = [
-            TaskStatus.PENDING,
-            TaskStatus.DISPATCHING,
-            TaskStatus.QUEUED,
-            TaskStatus.RUNNING,
+    async def _active_run_ids_for_batch(self, batch_id: str) -> list[str]:
+        """在数据库中筛选该批次的非终态 run。"""
+        statuses = [
+            TaskStatus.PENDING.value,
+            TaskStatus.DISPATCHING.value,
+            TaskStatus.QUEUED.value,
+            TaskStatus.RUNNING.value,
         ]
-        candidates = await TaskRun.filter(status__in=non_terminal).all()
-        active: list[TaskRun] = []
-        for run in candidates:
-            data = run.result_data
-            if isinstance(data, dict) and data.get("crawl_batch_id") == batch_id:
-                active.append(run)
-        return active
+        rows = await self._query_batch_runs(
+            "SELECT run_id FROM task_executions "
+            "WHERE result_data->>'crawl_batch_id' = $1 "
+            "AND status IN ($2, $3, $4, $5) ORDER BY id ASC",
+            [batch_id, *statuses],
+        )
+        return [str(row["run_id"]) for row in rows]
+
+    @staticmethod
+    async def _query_batch_runs(query: str, values: list[str]) -> list[dict]:
+        connection = Tortoise.get_connection("default")
+        return await connection.execute_query_dict(query, values)
 
     @staticmethod
     def _generate_run_id(batch_id: str) -> str:

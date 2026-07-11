@@ -36,6 +36,8 @@ from redis.exceptions import ConnectionError as RedisConnectionExc
 from redis.exceptions import TimeoutError as RedisTimeoutExc
 from redis.retry import Retry as SyncRetry
 
+from antcode_core.infrastructure.redis.sentinel_url import parse_sentinel_url as _parse_sentinel_url
+
 REDIS_MODE_STANDALONE = "standalone"
 REDIS_MODE_CLUSTER = "cluster"
 REDIS_MODE_SENTINEL = "sentinel"
@@ -70,62 +72,6 @@ def _normalize_url_for_client(url: str, mode: str) -> str:
     if mode == REDIS_MODE_SENTINEL:
         return url.replace("redis+sentinel://", "redis://", 1).replace("rediss+sentinel://", "rediss://", 1)
     return url
-
-
-def _parse_sentinel_url(url: str) -> tuple[str, list[tuple[str, int]], dict[str, Any]]:
-    """`redis+sentinel://[password@]master_name@host1:26379,host2:26379/db`
-
-    返回 (master_name, sentinel_endpoints, kwargs)。
-    master_name 从 URL 里 `@host` 前面的最后一段取；
-    否则回退到 env `REDIS_SENTINEL_MASTER_NAME`。
-
-    多主机场景下 `urlparse.port` 会因逗号崩，所以 netloc 手工分。
-    """
-    normalized = _normalize_url_for_client(url, REDIS_MODE_SENTINEL)
-    # 去掉 scheme
-    if "://" in normalized:
-        _, _, rest = normalized.partition("://")
-    else:
-        rest = normalized
-    # 路径 (db) 拆开
-    db_part = ""
-    if "/" in rest:
-        rest, _, db_part = rest.partition("/")
-    # userinfo 拆开：可能是 password@master@hosts, master@hosts, 或纯 hosts
-    userinfo, sep, hosts_part = rest.rpartition("@")
-    if not sep:
-        hosts_part = rest
-        userinfo = ""
-    # userinfo 里再拆 password/master：password@master 时前一段是密码，后一段是 master
-    password = ""
-    master_from_url = ""
-    if userinfo:
-        if "@" in userinfo:
-            password, _, master_from_url = userinfo.rpartition("@")
-        else:
-            master_from_url = userinfo
-    master_name = master_from_url or os.environ.get("REDIS_SENTINEL_MASTER_NAME", "").strip() or "mymaster"
-
-    endpoints: list[tuple[str, int]] = []
-    for part in hosts_part.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" in part:
-            h, p = part.rsplit(":", 1)
-            endpoints.append((h, int(p)))
-        else:
-            endpoints.append((part, 26379))
-
-    extra: dict[str, Any] = {}
-    if password:
-        extra["password"] = password
-    if db_part:
-        try:
-            extra["db"] = int(db_part)
-        except ValueError:
-            pass
-    return master_name, endpoints, extra
 
 
 def _build_common_kwargs(

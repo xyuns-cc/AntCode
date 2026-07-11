@@ -201,21 +201,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     ) -> Any:
         """拦截服务调用进行认证"""
         if not self.enabled:
-            if handler_call_details.method in self.AUTH_EXEMPT_METHODS:
-                return await continuation(handler_call_details)
-            metadata = dict(handler_call_details.invocation_metadata)
-            declared_worker_id = metadata.get(self.WORKER_ID_HEADER) or ""
-            if not declared_worker_id:
-                return await self._build_reject_handler(
-                    continuation,
-                    handler_call_details,
-                    "AUTH_ENABLED=false 时仍必须提供 X-Worker-ID",
-                )
-            return await self._wrap_with_mtls_check(
-                continuation,
-                handler_call_details,
-                declared_worker_id,
-            )
+            return await self._intercept_disabled(continuation, handler_call_details)
 
         # P2-03: 严格白名单精确匹配 —— 未在 AUTH_EXEMPT_METHODS 里的 method
         # 一律走完整认证,不做前缀/正则通配,新增 method 默认拒绝。
@@ -230,37 +216,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         auth_result = await self._authenticate(metadata)
 
         if not auth_result.success:
-            has_api_key = bool(metadata.get(self.API_KEY_HEADER))
-            # P2-#28: worker_id 写日志前先 strip 换行 / 截断长度,防止日志注入
-            worker_id = self._sanitize_worker_id(metadata.get(self.WORKER_ID_HEADER))
-            logger.warning(
-                f"认证失败: {auth_result.error}, method={method}, has_api_key={has_api_key}, worker_id={worker_id}"
-            )
-
-            # 追加结构化安全审计（不影响主流程）
-            auth_header = metadata.get(self.AUTHORIZATION_HEADER) or ""
-            has_jwt = auth_header.lower().startswith("bearer ")
-            if has_api_key:
-                event_type = "api_key_invalid"
-            elif has_jwt:
-                event_type = "jwt_invalid"
-            else:
-                # 没有任何认证凭证：归类为 mTLS 拒绝 / 凭证缺失
-                event_type = "mtls_reject"
-            peer = metadata.get("x-forwarded-for") or metadata.get("x-real-ip") or ""
-            # P5.4: 如果 worker 在 metadata 里带了 W3C traceparent 头,
-            # 把 trace_id 一起记入审计事件,方便事后跨服务追查"为什么
-            # 这次请求被拒"。无 traceparent 时 trace_id=None,审计字段
-            # 自动省略,不影响兼容性。
-            trace_id = _extract_trace_id_from_metadata(metadata)
-            await self._emit_audit(
-                event_type=event_type,
-                worker_id=worker_id,
-                peer=peer,
-                reason=auth_result.error or "",
-                trace_id=trace_id,
-            )
-
+            await self._audit_auth_failure(metadata, method, auth_result)
             return await self._build_reject_handler(continuation, handler_call_details, auth_result.error or "")
 
         logger.debug(f"认证成功: worker_id={auth_result.worker_id}, method={auth_result.auth_method}")
@@ -289,6 +245,38 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             continuation=continuation,
             handler_call_details=handler_call_details,
             authenticated_worker_id=authenticated_worker_id,
+        )
+
+    async def _intercept_disabled(self, continuation: Callable, details: grpc.HandlerCallDetails) -> Any:
+        if details.method in self.AUTH_EXEMPT_METHODS:
+            return await continuation(details)
+        metadata = dict(details.invocation_metadata)
+        worker_id = metadata.get(self.WORKER_ID_HEADER) or ""
+        if not worker_id:
+            return await self._build_reject_handler(
+                continuation,
+                details,
+                "AUTH_ENABLED=false 时仍必须提供 X-Worker-ID",
+            )
+        return await self._wrap_with_mtls_check(continuation, details, worker_id)
+
+    async def _audit_auth_failure(self, metadata: dict, method: str, result: AuthResult) -> None:
+        has_api_key = bool(metadata.get(self.API_KEY_HEADER))
+        worker_id = self._sanitize_worker_id(metadata.get(self.WORKER_ID_HEADER))
+        logger.warning(f"认证失败: {result.error}, method={method}, has_api_key={has_api_key}, worker_id={worker_id}")
+        auth_header = metadata.get(self.AUTHORIZATION_HEADER) or ""
+        if has_api_key:
+            event_type = "api_key_invalid"
+        elif auth_header.lower().startswith("bearer "):
+            event_type = "jwt_invalid"
+        else:
+            event_type = "mtls_reject"
+        await self._emit_audit(
+            event_type=event_type,
+            worker_id=worker_id,
+            peer=metadata.get("x-forwarded-for") or metadata.get("x-real-ip") or "",
+            reason=result.error or "",
+            trace_id=_extract_trace_id_from_metadata(metadata),
         )
 
     async def _authenticate(self, metadata: dict) -> AuthResult:
@@ -344,39 +332,33 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             return AuthResult(success=False, error="API Key 认证缺少 X-Worker-ID")
 
         if self._api_key_validator:
-            try:
-                result, validator_bound_worker = await self._call_api_key_validator(
-                    api_key,
-                    worker_id,
-                )
-                return self._normalize_api_key_result(
-                    result,
-                    worker_id,
-                    validator_bound_worker,
-                )
-            except Exception as e:
-                logger.exception(f"API Key 验证异常: {e}")
-                return AuthResult(success=False, error="API Key 验证失败")
+            return await self._authenticate_custom_api_key(api_key, worker_id)
+        return await self._authenticate_default_api_key(api_key, worker_id)
 
-        # 默认验证:调 antcode_core 的 verify_api_key,它会把 api_key 与
-        # public_id=worker_id 联合过滤,严格绑定
+    async def _authenticate_custom_api_key(self, api_key: str, worker_id: str) -> AuthResult:
+        try:
+            result, bound_worker = await self._call_api_key_validator(api_key, worker_id)
+            return self._normalize_api_key_result(result, worker_id, bound_worker)
+        except Exception as e:
+            logger.exception(f"API Key 验证异常: {e}")
+            return AuthResult(success=False, error="API Key 验证失败")
+
+    async def _authenticate_default_api_key(self, api_key: str, worker_id: str) -> AuthResult:
         try:
             from antcode_core.common.security import verify_api_key
 
-            is_valid = await verify_api_key(api_key, worker_id)
-            if is_valid:
-                return AuthResult(
-                    success=True,
-                    worker_id=worker_id,
-                    auth_method="api_key",
-                )
-            return AuthResult(success=False, error="无效的 API Key")
-        except ImportError as e:
-            # fail-closed: 安全模块不可用一律拒绝，绝不退回"格式正确即通过"
-            logger.exception(f"安全模块不可用,拒绝认证: {e}")
+            valid = await verify_api_key(api_key, worker_id)
+            return AuthResult(
+                success=valid,
+                worker_id=worker_id if valid else None,
+                auth_method="api_key" if valid else None,
+                error=None if valid else "无效的 API Key",
+            )
+        except ImportError as exc:
+            logger.exception(f"安全模块不可用,拒绝认证: {exc}")
             return AuthResult(success=False, error="security_module_unavailable")
-        except Exception as e:
-            logger.exception(f"API Key 验证异常: {e}")
+        except Exception as exc:
+            logger.exception(f"API Key 验证异常: {exc}")
             return AuthResult(success=False, error="API Key 验证失败")
 
     async def _call_api_key_validator(
@@ -405,57 +387,57 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         declared_worker_id: str,
         validator_bound_worker: bool,
     ) -> AuthResult:
+        normalized = AuthResult(success=False, error="无效的 API Key")
         if isinstance(result, AuthResult):
-            if result.success and result.worker_id == declared_worker_id:
-                return result
-            return AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
-        if isinstance(result, dict):
+            normalized = result
+            if not result.success or result.worker_id != declared_worker_id:
+                normalized = AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
+        elif isinstance(result, dict):
             identity = result.get("worker_id") or result.get("sub")
             if identity == declared_worker_id:
-                return AuthResult(True, declared_worker_id, auth_method="api_key")
-            return AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
-        if isinstance(result, str):
+                normalized = AuthResult(True, declared_worker_id, auth_method="api_key")
+            else:
+                normalized = AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
+        elif isinstance(result, str):
             if result == declared_worker_id:
-                return AuthResult(True, declared_worker_id, auth_method="api_key")
-            return AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
-        if isinstance(result, bool) and validator_bound_worker and result:
-            return AuthResult(True, declared_worker_id, auth_method="api_key")
-        if isinstance(result, bool) and not validator_bound_worker and result:
-            return AuthResult(
+                normalized = AuthResult(True, declared_worker_id, auth_method="api_key")
+            else:
+                normalized = AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
+        elif isinstance(result, bool) and validator_bound_worker and result:
+            normalized = AuthResult(True, declared_worker_id, auth_method="api_key")
+        elif isinstance(result, bool) and not validator_bound_worker and result:
+            normalized = AuthResult(
                 success=False,
                 error="自定义 API Key validator 必须绑定 Worker 身份",
             )
-        return AuthResult(success=False, error="无效的 API Key")
+        return normalized
 
     async def _authenticate_jwt(self, token: str) -> AuthResult:
         """JWT 认证"""
         if not token:
             return AuthResult(success=False, error="JWT token 为空")
 
-        # 使用自定义验证器
         if self._jwt_validator:
-            try:
-                payload = self._jwt_validator(token)
-                if payload:
-                    worker_id = payload.get("sub") or payload.get("worker_id")
-                    if not worker_id:
-                        return AuthResult(
-                            success=False,
-                            error="自定义 JWT validator 未返回 Worker 身份",
-                        )
-                    return AuthResult(
-                        success=True,
-                        worker_id=worker_id,
-                        auth_method="jwt",
-                    )
-                return AuthResult(success=False, error="无效的 JWT token")
-            except Exception as e:
-                logger.exception(f"JWT 验证异常: {e}")
-                return AuthResult(success=False, error="JWT 验证失败")
+            return self._authenticate_custom_jwt(token)
+        return self._authenticate_default_jwt(token)
 
-        # 默认验证:调 antcode_core JWTAuth.verify_token,**强制 expected_class="worker"**。
-        # P0-a1: 只接受 payload token_class="worker" 的 JWT;普通 Web access token 会被拒。
-        # 这样任何"拿 Web JWT 冒充 Worker"的调用都在 JWT 层就拒掉,不到 mTLS 兜底。
+    def _authenticate_custom_jwt(self, token: str) -> AuthResult:
+        try:
+            payload = self._jwt_validator(token) if self._jwt_validator else None
+            if not payload:
+                return AuthResult(success=False, error="无效的 JWT token")
+            if payload.get("token_class") != "worker":
+                return AuthResult(success=False, error="自定义 JWT validator 必须验证 Worker 专用 token_class")
+            worker_id = payload.get("worker_id") or payload.get("sub")
+            if not worker_id:
+                return AuthResult(success=False, error="自定义 JWT validator 未返回 Worker 身份")
+            return AuthResult(success=True, worker_id=worker_id, auth_method="jwt")
+        except Exception as exc:
+            logger.exception(f"JWT 验证异常: {exc}")
+            return AuthResult(success=False, error="JWT 验证失败")
+
+    @staticmethod
+    def _authenticate_default_jwt(token: str) -> AuthResult:
         try:
             from antcode_core.common.security.auth import jwt_auth
 
@@ -479,12 +461,11 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 worker_id=worker_id,
                 auth_method="jwt",
             )
-        except ImportError as e:
-            # fail-closed: 安全模块不可用一律拒绝，绝不退回"格式正确即通过"
-            logger.exception(f"安全模块不可用,拒绝认证: {e}")
+        except ImportError as exc:
+            logger.exception(f"安全模块不可用,拒绝认证: {exc}")
             return AuthResult(success=False, error="security_module_unavailable")
-        except Exception as e:
-            logger.exception(f"JWT 验证异常: {e}")
+        except Exception as exc:
+            logger.exception(f"JWT 验证异常: {exc}")
             return AuthResult(success=False, error="JWT 验证失败")
 
     @staticmethod
@@ -568,80 +549,82 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         original: grpc.RpcMethodHandler,
         authenticated_worker_id: str,
     ) -> grpc.RpcMethodHandler:
-        check = self._check_mtls_binding
+        if original.unary_unary is not None:
+            return self._wrap_unary_unary_handler(original, authenticated_worker_id)
+        if original.unary_stream is not None:
+            return self._wrap_unary_stream_handler(original, authenticated_worker_id)
+        if original.stream_unary is not None:
+            return self._wrap_stream_unary_handler(original, authenticated_worker_id)
+        if original.stream_stream is not None:
+            return self._wrap_stream_stream_handler(original, authenticated_worker_id)
+        return original
 
-        async def _abort_pd(context: grpc.aio.ServicerContext, reason: str) -> None:
+    async def _require_mtls_binding(self, context, worker_id: str) -> None:
+        ok, reason = self._check_mtls_binding(context, worker_id)
+        if not ok:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, reason)
 
-        async def wrapped_unary_unary(request, context):
-            ok, reason = check(context, authenticated_worker_id)
-            if not ok:
-                await _abort_pd(context, reason)
-            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+    def _wrap_unary_unary_handler(self, original, worker_id: str):
+        async def wrapped(request, context):
+            await self._require_mtls_binding(context, worker_id)
+            token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
                 return await original.unary_unary(request, context)
             finally:
                 _AUTHENTICATED_WORKER_ID.reset(token)
 
-        async def wrapped_unary_stream(request, context):
-            ok, reason = check(context, authenticated_worker_id)
-            if not ok:
-                await _abort_pd(context, reason)
-                return
-            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+        return grpc.unary_unary_rpc_method_handler(
+            wrapped,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    def _wrap_unary_stream_handler(self, original, worker_id: str):
+        async def wrapped(request, context):
+            await self._require_mtls_binding(context, worker_id)
+            token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
-                async for resp in original.unary_stream(request, context):
-                    yield resp
+                async for response in original.unary_stream(request, context):
+                    yield response
             finally:
                 _AUTHENTICATED_WORKER_ID.reset(token)
 
-        async def wrapped_stream_unary(request_iterator, context):
-            ok, reason = check(context, authenticated_worker_id)
-            if not ok:
-                await _abort_pd(context, reason)
-            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+        return grpc.unary_stream_rpc_method_handler(
+            wrapped,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    def _wrap_stream_unary_handler(self, original, worker_id: str):
+        async def wrapped(request_iterator, context):
+            await self._require_mtls_binding(context, worker_id)
+            token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
                 return await original.stream_unary(request_iterator, context)
             finally:
                 _AUTHENTICATED_WORKER_ID.reset(token)
 
-        async def wrapped_stream_stream(request_iterator, context):
-            ok, reason = check(context, authenticated_worker_id)
-            if not ok:
-                await _abort_pd(context, reason)
-                return
-            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+        return grpc.stream_unary_rpc_method_handler(
+            wrapped,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    def _wrap_stream_stream_handler(self, original, worker_id: str):
+        async def wrapped(request_iterator, context):
+            await self._require_mtls_binding(context, worker_id)
+            token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
-                async for resp in original.stream_stream(request_iterator, context):
-                    yield resp
+                async for response in original.stream_stream(request_iterator, context):
+                    yield response
             finally:
                 _AUTHENTICATED_WORKER_ID.reset(token)
 
-        if original.unary_unary is not None:
-            return grpc.unary_unary_rpc_method_handler(
-                wrapped_unary_unary,
-                request_deserializer=original.request_deserializer,
-                response_serializer=original.response_serializer,
-            )
-        if original.unary_stream is not None:
-            return grpc.unary_stream_rpc_method_handler(
-                wrapped_unary_stream,
-                request_deserializer=original.request_deserializer,
-                response_serializer=original.response_serializer,
-            )
-        if original.stream_unary is not None:
-            return grpc.stream_unary_rpc_method_handler(
-                wrapped_stream_unary,
-                request_deserializer=original.request_deserializer,
-                response_serializer=original.response_serializer,
-            )
-        if original.stream_stream is not None:
-            return grpc.stream_stream_rpc_method_handler(
-                wrapped_stream_stream,
-                request_deserializer=original.request_deserializer,
-                response_serializer=original.response_serializer,
-            )
-        return original
+        return grpc.stream_stream_rpc_method_handler(
+            wrapped,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
 
     @staticmethod
     def _check_mtls_binding(
@@ -662,20 +645,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         except Exception:  # noqa: BLE001 - 不应阻断主流程,但要拒绝
             return False, "无法读取 mTLS auth_context"
 
-        # gRPC 把对端证书身份放在 x509_common_name / x509_subject_alternative_name
-        identities: list[str] = []
-        for key in (
-            "x509_common_name",
-            "x509_subject_alternative_name",
-        ):
-            for raw in auth_ctx.get(key, []) or []:
-                if isinstance(raw, bytes):
-                    try:
-                        identities.append(raw.decode("utf-8", errors="ignore"))
-                    except Exception:  # noqa: BLE001
-                        continue
-                else:
-                    identities.append(str(raw))
+        identities = AuthInterceptor._peer_identities(auth_ctx)
 
         # 没拿到任何证书身份: 视为未开启 mTLS,放行(开发环境兼容)。
         if not identities:
@@ -694,3 +664,13 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 return True, ""
 
         return False, "mTLS 证书身份与 worker_id 不匹配"
+
+    @staticmethod
+    def _peer_identities(auth_context: dict) -> list[str]:
+        identities: list[str] = []
+        keys = ("x509_common_name", "x509_subject_alternative_name")
+        for key in keys:
+            for raw in auth_context.get(key, []) or []:
+                value = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+                identities.append(value)
+        return identities

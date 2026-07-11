@@ -7,13 +7,16 @@ import asyncio
 import contextlib
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+from typing import Any
 
 from antcode_core.common.serialization import to_json
 from fastapi import WebSocket
 from loguru import logger
+
+WEBSOCKET_SEND_TIMEOUT_SECONDS = 5.0
 
 
 class ConnectionState(Enum):
@@ -43,6 +46,26 @@ class ConnectionInfo:
     bytes_sent: int = 0
     bytes_received: int = 0
     missed_pongs: int = 0
+
+
+@dataclass
+class WebSocketStats:
+    total_connections: int = 0
+    total_disconnections: int = 0
+    messages_sent: int = 0
+    messages_received: int = 0
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    errors_count: int = 0
+    heartbeat_timeouts: int = 0
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass(frozen=True)
+class SerializedBatch:
+    messages: tuple[str, ...]
+    total_bytes: int
+    message_count: int
 
 
 class ConnectionPool:
@@ -302,8 +325,8 @@ class MessageQueue:
         self.max_queue_size = max_queue_size
         self.batch_size = batch_size
         self.flush_interval = flush_interval
-        self._queues: dict[str, deque] = defaultdict(lambda: deque(maxlen=max_queue_size))
-        self._processing: dict[str, asyncio.Task] = {}
+        self._queues: dict[str, deque[Any]] = defaultdict(lambda: deque(maxlen=max_queue_size))
+        self._processing: dict[str, asyncio.Task[None]] = {}
         self._dropped_count: dict[str, int] = defaultdict(int)
 
     async def enqueue(self, run_id, message):
@@ -328,44 +351,42 @@ class MessageQueue:
     async def _process_queue(self, run_id):
         """处理队列（批量发送）"""
         try:
-            while True:
-                queue = self._queues.get(run_id)
-                if not queue:
-                    break
-
-                # 收集一批消息
-                batch = []
-                while queue and len(batch) < self.batch_size:
-                    try:
-                        batch.append(queue.popleft())
-                    except IndexError:
-                        break
-
-                if batch:
-                    from antcode_web_api.websockets.websocket_connection_manager import (
-                        websocket_manager,
-                    )
-
-                    await websocket_manager._broadcast_batch(run_id, batch)
-
-                # 如果队列空了，等待一小段时间看是否有新消息
-                if not queue:
-                    await asyncio.sleep(self.flush_interval)
-                    if not self._queues.get(run_id):
-                        break
-                else:
-                    # 队列还有消息，立即继续处理
-                    await asyncio.sleep(0)
-
+            await self._drain_queue(run_id)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"处理消息队列失败: {run_id}, {e}")
         finally:
-            self._processing.pop(run_id, None)
-            if not self._queues.get(run_id):
-                self._queues.pop(run_id, None)
-                self._dropped_count.pop(run_id, None)
+            self._release_queue_state(run_id)
+
+    async def _drain_queue(self, run_id: str) -> None:
+        while queue := self._queues.get(run_id):
+            batch = self._take_batch(queue)
+            if batch:
+                await self._broadcast(run_id, batch)
+            if queue:
+                await asyncio.sleep(0)
+                continue
+            await asyncio.sleep(self.flush_interval)
+
+    def _take_batch(self, queue: deque[Any]) -> list[Any]:
+        batch: list[Any] = []
+        while queue and len(batch) < self.batch_size:
+            batch.append(queue.popleft())
+        return batch
+
+    @staticmethod
+    async def _broadcast(run_id: str, batch: list[Any]) -> None:
+        from antcode_web_api.websockets.websocket_connection_manager import websocket_manager
+
+        await websocket_manager._broadcast_batch(run_id, batch)
+
+    def _release_queue_state(self, run_id: str) -> None:
+        self._processing.pop(run_id, None)
+        if self._queues.get(run_id):
+            return
+        self._queues.pop(run_id, None)
+        self._dropped_count.pop(run_id, None)
 
     async def shutdown(self) -> None:
         tasks = list(self._processing.values())
@@ -412,17 +433,7 @@ class WebSocketConnectionManager:
         self.inactive_timeout = inactive_timeout
 
         # 统计信息
-        self._stats = {
-            "total_connections": 0,
-            "total_disconnections": 0,
-            "messages_sent": 0,
-            "messages_received": 0,
-            "bytes_sent": 0,
-            "bytes_received": 0,
-            "errors_count": 0,
-            "heartbeat_timeouts": 0,
-            "start_time": datetime.now(UTC),
-        }
+        self._stats = WebSocketStats()
 
         self._cleanup_task: asyncio.Task | None = None
         self._started = False
@@ -496,14 +507,14 @@ class WebSocketConnectionManager:
             await self.connection_pool.add_connection(conn_info)
 
             # 更新统计
-            self._stats["total_connections"] += 1
+            self._stats.total_connections += 1
 
             logger.info(f"WebSocket连接建立: {connection_id} (执行ID: {run_id}, 用户: {user_id})")
 
             return connection_id
 
         except Exception as e:
-            self._stats["errors_count"] += 1
+            self._stats.errors_count += 1
             logger.error(f"WebSocket连接建立失败: {e}")
             raise
 
@@ -514,13 +525,13 @@ class WebSocketConnectionManager:
         for conn in connections:
             if conn.websocket == websocket:
                 await self.connection_pool.remove_connection(run_id, conn.connection_id)
-                self._stats["total_disconnections"] += 1
+                self._stats.total_disconnections += 1
                 logger.info(f"WebSocket连接断开: {conn.connection_id}")
                 return
 
     async def _handle_heartbeat_timeout(self, conn):
         """处理心跳超时"""
-        self._stats["heartbeat_timeouts"] += 1
+        self._stats.heartbeat_timeouts += 1
 
         with contextlib.suppress(Exception):
             await conn.websocket.close(code=4008, reason="心跳超时")
@@ -571,7 +582,7 @@ class WebSocketConnectionManager:
         # 更新活动时间
         conn.last_activity = datetime.now(UTC)
         conn.messages_received += 1
-        self._stats["messages_received"] += 1
+        self._stats.messages_received += 1
 
         message_type = message.get("type")
 
@@ -597,45 +608,46 @@ class WebSocketConnectionManager:
         connections = self.connection_pool.get_connections(run_id)
         if not connections:
             return
-
-        # 预序列化消息（避免重复序列化）
-        serialized_messages = []
-        total_bytes = 0
-        for message in messages:
-            msg_str = to_json(message)
-            serialized_messages.append(msg_str)
-            total_bytes += len(msg_str.encode("utf-8"))
-
-        # 并发发送到所有连接
-        async def send_to_connection(conn):
-            if conn.state != ConnectionState.CONNECTED:
-                return None
-            try:
-                for msg_str in serialized_messages:
-                    await asyncio.wait_for(conn.websocket.send_text(msg_str), timeout=5.0)
-                conn.messages_sent += len(messages)
-                conn.bytes_sent += total_bytes
-                return None
-            except TimeoutError:
-                logger.warning(f"发送消息超时: {conn.connection_id}")
-                return conn
-            except Exception as e:
-                logger.debug(f"广播消息失败: {conn.connection_id}, {e}")
-                return conn
-
-        # 并发执行
-        tasks = [send_to_connection(conn) for conn in connections]
+        batch = self._serialize_batch(messages)
+        tasks = [self._send_serialized_batch(conn, batch) for conn in connections]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        sent_count = await self._remove_failed_connections(results)
+        self._stats.messages_sent += batch.message_count * sent_count
 
-        # 统计和清理
+    @staticmethod
+    def _serialize_batch(messages: list[Any]) -> SerializedBatch:
+        serialized = tuple(to_json(message) for message in messages)
+        total_bytes = sum(len(message.encode("utf-8")) for message in serialized)
+        return SerializedBatch(messages=serialized, total_bytes=total_bytes, message_count=len(messages))
+
+    @staticmethod
+    async def _send_serialized_batch(conn: ConnectionInfo, batch: SerializedBatch) -> ConnectionInfo | None:
+        if conn.state != ConnectionState.CONNECTED:
+            return None
+        try:
+            for message in batch.messages:
+                await asyncio.wait_for(
+                    conn.websocket.send_text(message),
+                    timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                )
+            conn.messages_sent += batch.message_count
+            conn.bytes_sent += batch.total_bytes
+            return None
+        except TimeoutError:
+            logger.warning(f"发送消息超时: {conn.connection_id}")
+            return conn
+        except Exception as exc:
+            logger.debug(f"广播消息失败: {conn.connection_id}, {exc}")
+            return conn
+
+    async def _remove_failed_connections(self, results: list[Any]) -> int:
         sent_count = 0
         for result in results:
             if result is None:
                 sent_count += 1
             elif isinstance(result, ConnectionInfo):
                 await self.connection_pool.remove_connection(result.run_id, result.connection_id)
-
-        self._stats["messages_sent"] += len(messages) * sent_count
+        return sent_count
 
     async def _send_direct(self, websocket, message):
         """直接发送消息"""
@@ -717,14 +729,14 @@ class WebSocketConnectionManager:
 
     def get_stats(self):
         """获取统计信息"""
-        uptime = (datetime.now(UTC) - self._stats["start_time"]).total_seconds()
+        uptime = (datetime.now(UTC) - self._stats.start_time).total_seconds()
 
         # 计算吞吐量
-        messages_per_second = self._stats["messages_sent"] / uptime if uptime > 0 else 0
-        bytes_per_second = self._stats.get("bytes_sent", 0) / uptime if uptime > 0 else 0
+        messages_per_second = self._stats.messages_sent / uptime if uptime > 0 else 0
+        bytes_per_second = self._stats.bytes_sent / uptime if uptime > 0 else 0
 
         return {
-            **self._stats,
+            **asdict(self._stats),
             "uptime_seconds": round(uptime, 2),
             "active_connections": self.connection_pool.get_total_connection_count(),
             "active_runs": len(self.connection_pool.get_all_connections()),

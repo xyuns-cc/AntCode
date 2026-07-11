@@ -6,6 +6,7 @@
 
 from tortoise import fields
 
+from antcode_core.common.security.encrypted_fields import EncryptedJSONField
 from antcode_core.domain.models.base import BaseModel, generate_public_id
 from antcode_core.domain.models.enums import (
     CallbackType,
@@ -105,8 +106,8 @@ class ProjectFile(BaseModel):
     language = fields.CharField(max_length=50, default="python")
 
     entry_point = fields.CharField(max_length=255, null=True)
-    runtime_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
-    environment_vars: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
+    runtime_config: fields.JSONField[dict[str, object] | None] = EncryptedJSONField(null=True)
+    environment_vars: fields.JSONField[dict[str, str] | None] = EncryptedJSONField(null=True)
 
     class Meta:
         table = "project_files"
@@ -142,12 +143,12 @@ class ProjectRule(BaseModel):
     priority = fields.IntField(default=0)
     dont_filter = fields.BooleanField(default=False)
 
-    headers: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
-    cookies: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
-    proxy_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
+    headers: fields.JSONField[dict[str, str] | None] = EncryptedJSONField(null=True)
+    cookies: fields.JSONField[dict[str, str] | None] = EncryptedJSONField(null=True)
+    proxy_config: fields.JSONField[dict[str, object] | None] = EncryptedJSONField(null=True)
     anti_spider: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
 
-    task_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
+    task_config: fields.JSONField[dict[str, object] | None] = EncryptedJSONField(null=True)
 
     # S3b: scrapy-redis 断点续爬 + 单爬虫分布式（跟 Scrapy 引擎配合）
     resume_enabled = fields.BooleanField(default=False)
@@ -228,8 +229,8 @@ class ProjectCode(BaseModel):
     language = fields.CharField(max_length=50, default="python")
 
     entry_point = fields.CharField(max_length=255, null=True)
-    runtime_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
-    environment_vars: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
+    runtime_config: fields.JSONField[dict[str, object] | None] = EncryptedJSONField(null=True)
+    environment_vars: fields.JSONField[dict[str, str] | None] = EncryptedJSONField(null=True)
 
     documentation = fields.TextField(null=True)
     changelog = fields.TextField(null=True)

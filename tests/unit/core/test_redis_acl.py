@@ -13,11 +13,14 @@ import pytest
 @pytest.fixture(autouse=True)
 def _ensure_encryption_key(monkeypatch):
     """secret_box 加解密需要 ENCRYPTION_KEY。"""
-    monkeypatch.setenv("ENCRYPTION_KEY", "test-key-for-acl-suite")
+    monkeypatch.setenv("ENCRYPTION_KEY", "test-key-for-acl-suite-32-bytes-minimum")
     # 同时刷新 settings 缓存
     from antcode_core.common import config as cfg
 
-    cfg.settings.ENCRYPTION_KEY = "test-key-for-acl-suite"
+    cfg.settings.ENCRYPTION_KEY = "test-key-for-acl-suite-32-bytes-minimum"
+    cfg.settings.ENCRYPTION_KEY_SALT = "redis-acl-test-salt-value"
+    cfg.settings.ENCRYPTION_LEGACY_KDF_SALT = ""
+    cfg.settings.ENCRYPTION_ALLOW_LEGACY_SHA256 = False
     cfg.settings.REDIS_ACL_ENABLED = True
 
 

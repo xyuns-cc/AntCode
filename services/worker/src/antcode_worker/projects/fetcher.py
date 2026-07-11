@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import os
 import re
 import shutil
@@ -81,12 +80,27 @@ class ArtifactFetcher:
             source_bundle_size,
         )
 
-        blob = await self._artifact_store.read_blob(content_hash)
-        self._verify_blob(blob, source_bundle_sha256, source_bundle_size)
-
         project_dir = self._workspace.project_dir(run_id, project_id, content_hash)
         await asyncio.to_thread(self._prepare_project_dir, project_dir)
-        extracted_path = await asyncio.to_thread(self._extract_bundle, blob, project_dir)
+        archive_path = project_dir / "source.bundle"
+        try:
+            await self._artifact_store.read_blob_to_file(
+                content_hash,
+                archive_path,
+                max_bytes=MAX_ARCHIVE_BYTES,
+            )
+            await asyncio.to_thread(
+                self._verify_bundle_file,
+                archive_path,
+                source_bundle_sha256,
+                source_bundle_size,
+            )
+            extracted_path = await asyncio.to_thread(self._extract_bundle, archive_path, project_dir)
+        except Exception:
+            await asyncio.to_thread(shutil.rmtree, project_dir, True)
+            raise
+        finally:
+            archive_path.unlink(missing_ok=True)
         project_cwd = self._resolve_project_cwd(extracted_path, source_subdir)
         return FetchedWorkspace(bundle_root=str(extracted_path), project_cwd=str(project_cwd))
 
@@ -123,12 +137,17 @@ class ArtifactFetcher:
             raise ValueError("pgartifact URI sha256 与 source_bundle_sha256 不一致")
         return content_hash.lower()
 
-    def _verify_blob(self, blob: bytes, expected_sha256: str, expected_size: int) -> None:
-        if len(blob) > MAX_ARCHIVE_BYTES:
-            raise ValueError(f"source bundle 超过压缩包上限: {len(blob)} > {MAX_ARCHIVE_BYTES}")
-        if len(blob) != expected_size:
-            raise ValueError(f"source bundle 大小不一致: expected={expected_size}, actual={len(blob)}")
-        actual = hashlib.sha256(blob).hexdigest()
+    def _verify_bundle_file(self, path: Path, expected_sha256: str, expected_size: int) -> None:
+        actual_size = path.stat().st_size
+        if actual_size > MAX_ARCHIVE_BYTES:
+            raise ValueError(f"source bundle 超过压缩包上限: {actual_size} > {MAX_ARCHIVE_BYTES}")
+        if actual_size != expected_size:
+            raise ValueError(f"source bundle 大小不一致: expected={expected_size}, actual={actual_size}")
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        actual = digest.hexdigest()
         if actual.lower() != expected_sha256.lower():
             raise ValueError(f"source bundle sha256 不一致: expected={expected_sha256}, actual={actual}")
 
@@ -137,31 +156,30 @@ class ArtifactFetcher:
             shutil.rmtree(project_dir)
         project_dir.mkdir(parents=True, exist_ok=True)
 
-    def _extract_bundle(self, blob: bytes, project_dir: Path) -> Path:
+    def _extract_bundle(self, archive_path: Path, project_dir: Path) -> Path:
         extract_dir = project_dir / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
 
-        if zipfile.is_zipfile(io.BytesIO(blob)):
-            self._safe_extract_zip(blob, extract_dir)
+        if zipfile.is_zipfile(archive_path):
+            self._safe_extract_zip(archive_path, extract_dir)
             return extract_dir
-        fileobj = io.BytesIO(blob)
-        if self._is_tar_blob(fileobj):
-            fileobj.seek(0)
-            self._safe_extract_tar(fileobj, extract_dir)
+        if self._is_tar_file(archive_path):
+            self._safe_extract_tar(archive_path, extract_dir)
             return extract_dir
 
         raise ValueError("source bundle 必须是 zip 或 tar 压缩包")
 
-    def _is_tar_blob(self, fileobj: io.BytesIO) -> bool:
+    def _is_tar_file(self, archive_path: Path) -> bool:
         try:
-            with tarfile.open(fileobj=fileobj, mode="r:*"):
+            with tarfile.open(archive_path, mode="r:*"):
                 return True
         except tarfile.TarError:
             return False
 
-    def _safe_extract_zip(self, blob: bytes, dest: Path) -> None:
+    def _safe_extract_zip(self, archive_path: Path, dest: Path) -> None:
         base_dir = dest.resolve()
-        with zipfile.ZipFile(io.BytesIO(blob), "r") as archive:
+        archive_size = archive_path.stat().st_size
+        with zipfile.ZipFile(archive_path, "r") as archive:
             members = archive.infolist()
             self._validate_member_count(len(members))
             total = 0
@@ -171,7 +189,7 @@ class ArtifactFetcher:
                 if member.file_size > MAX_MEMBER_BYTES:
                     raise ValueError(f"压缩包单文件过大: {member.filename}")
                 total += member.file_size
-                self._validate_extracted_total(total, len(blob))
+                self._validate_extracted_total(total, archive_size)
                 if member.is_dir():
                     (base_dir / member.filename).mkdir(parents=True, exist_ok=True)
                     continue
@@ -180,10 +198,10 @@ class ArtifactFetcher:
                 with archive.open(member, "r") as source, open(target, "wb") as output:
                     shutil.copyfileobj(source, output, length=1024 * 1024)
 
-    def _safe_extract_tar(self, fileobj: io.BytesIO, dest: Path) -> None:
+    def _safe_extract_tar(self, archive_path: Path, dest: Path) -> None:
         base_dir = dest.resolve()
-        archive_size = len(fileobj.getbuffer())
-        with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
+        archive_size = archive_path.stat().st_size
+        with tarfile.open(archive_path, mode="r:*") as archive:
             members = archive.getmembers()
             self._validate_member_count(len(members))
             total = 0

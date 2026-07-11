@@ -25,6 +25,9 @@ from typing import TYPE_CHECKING
 import grpc
 from antcode_contracts import data_pb2
 from antcode_contracts.data_pb2_grpc import DataServiceServicer
+from antcode_core.application.services.workers.run_ownership_service import (
+    require_worker_owns_runs,
+)
 from antcode_core.infrastructure.redis import task_ready_stream
 from loguru import logger
 
@@ -54,13 +57,29 @@ class GatewayDataService(DataServiceServicer):
         result_handler: ResultHandler | None = None,
         log_handler: LogHandler | None = None,
         spider_data_handler: SpiderDataHandler | None = None,
+        ownership_verifier=require_worker_owns_runs,
     ):
         self._poll = poll_handler or TaskPollHandler()
         self._result = result_handler or ResultHandler()
         self._logs = log_handler or LogHandler()
         # T6-T3b: gateway 模式的 rule/spider 数据落地通道
         self._spider_data = spider_data_handler or SpiderDataHandler()
+        self._ownership_verifier = ownership_verifier
         logger.info("DataService 已初始化")
+
+    async def _require_run_ownership(
+        self,
+        context: grpc.aio.ServicerContext,
+        worker_id: str,
+        run_ids: set[str],
+    ) -> None:
+        try:
+            await self._ownership_verifier(worker_id, run_ids)
+        except (PermissionError, ValueError) as exc:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
+        except Exception:
+            logger.exception("TaskRun ownership 校验失败")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "TaskRun ownership 校验失败")
 
     # =========================================================================
     # StreamTasks (server-streaming)
@@ -168,7 +187,8 @@ class GatewayDataService(DataServiceServicer):
         failed = 0
         try:
             async for task_status in request_iterator:
-                await require_authenticated_worker(context, task_status.worker_id)
+                worker_id = await require_authenticated_worker(context, task_status.worker_id)
+                await self._require_run_ownership(context, worker_id, {task_status.run_id})
                 try:
                     ok = await self._result.handle(task_status)
                 except Exception as exc:
@@ -215,7 +235,12 @@ class GatewayDataService(DataServiceServicer):
         failed = 0
         try:
             async for batch in request_iterator:
-                await require_authenticated_worker(context, batch.worker_id)
+                worker_id = await require_authenticated_worker(context, batch.worker_id)
+                await self._require_run_ownership(
+                    context,
+                    worker_id,
+                    {entry.run_id for entry in batch.entries},
+                )
                 try:
                     ok = await self._logs.handle_log_batch(batch)
                 except Exception as exc:
@@ -264,7 +289,8 @@ class GatewayDataService(DataServiceServicer):
         total_failed = 0
         try:
             async for batch in request_iterator:
-                await require_authenticated_worker(context, batch.worker_id)
+                worker_id = await require_authenticated_worker(context, batch.worker_id)
+                await self._require_run_ownership(context, worker_id, {batch.run_id})
                 try:
                     accepted, failed = await self._spider_data.handle_batch(batch)
                 except Exception as exc:

@@ -190,28 +190,7 @@ class CrawlTestService(BaseService):
         timeout: int = DEFAULT_TEST_TIMEOUT,
         concurrency: int = DEFAULT_TEST_CONCURRENCY,
     ) -> CrawlBatch:
-        """创建测试批次
-
-        创建一个限制范围的测试批次，用于验证爬取规则。
-
-        Args:
-            project_id: 项目公开 ID
-            seed_urls: 种子 URL 列表
-            user_id: 创建者 ID
-            max_depth: 最大爬取深度（默认 2，最大 3）
-            max_pages: 最大爬取页面数（默认 10，最大 100）
-            timeout: 超时时间（秒）
-            concurrency: 并发数
-
-        Returns:
-            创建的 CrawlBatch 对象
-
-        Raises:
-            ValueError: 配置无效时抛出
-
-        需求: 12.1 - 用户请求测试执行时创建一个限制范围的测试批次
-        需求: 12.2 - 测试批次执行时限制最大爬取页面数和深度
-        """
+        """创建用于验证爬取规则的受限测试批次。"""
         # 验证配置
         config = CrawlTestConfig(
             max_depth=max_depth,
@@ -316,23 +295,7 @@ class CrawlTestService(BaseService):
         max_pages: int = DEFAULT_TEST_MAX_PAGES,
         timeout: int = DEFAULT_TEST_TIMEOUT,
     ) -> CrawlTestResult:
-        """执行完整的测试流程
-
-        创建测试批次、启动执行、等待完成、收集结果、清理数据。
-
-        Args:
-            project_id: 项目公开 ID
-            seed_urls: 种子 URL 列表
-            user_id: 创建者 ID
-            max_depth: 最大爬取深度
-            max_pages: 最大爬取页面数
-            timeout: 超时时间（秒）
-
-        Returns:
-            CrawlTestResult 对象
-
-        需求: 12.1, 12.2, 12.3, 12.4, 12.5
-        """
+        """创建批次、执行、收集结果并清理测试数据。"""
         start_time = time.time()
         result = CrawlTestResult()
 
@@ -384,24 +347,12 @@ class CrawlTestService(BaseService):
         project_id: str,
         timeout: int,
     ) -> CrawlTestResult:
-        """等待测试完成。
-
-        R1-P1-22 (审查报告): 老实现的两个退出条件都不可达——
-        (a) batch 终态 = 依赖 crawl_batch_status_loop（在 P0-1 修复前批次
-        任务全失败）；
-        (b) progress 页面限制 = 依赖 progress_service 计数，但生产代码
-        零调用方（P1-17）恒为 0。
-        结果：测试必然跑满 timeout（60s~300s）后以"测试执行超时"失败。
-
-        修复：改成查 **TaskRun 终态**（P0-1 修完后 rule 任务会正常
-        SUCCESS/FAILED）。TaskRun 是 batch 派发时创建的，
-        result_data.crawl_batch_id 关联到 batch。
-        """
+        """等待 TaskRun 或批次进入终态，直到超时。"""
         from tortoise import Tortoise
 
         from antcode_core.domain.models.enums import TaskStatus
 
-        _run_terminal = {
+        run_terminal = {
             TaskStatus.SUCCESS,
             TaskStatus.FAILED,
             TaskStatus.TIMEOUT,
@@ -413,7 +364,6 @@ class CrawlTestService(BaseService):
         start_time = time.time()
 
         while True:
-            # 检查超时
             elapsed = time.time() - start_time
             if elapsed >= timeout:
                 result.success = False
@@ -421,47 +371,49 @@ class CrawlTestService(BaseService):
                 logger.warning(f"测试执行超时: batch_id={batch_id}, timeout={timeout}")
                 break
 
-            # 获取批次状态
             batch = await self._batch_service.get_batch(batch_id)
             if not batch:
                 result.success = False
                 result.errors.append("批次不存在")
                 break
 
-            # R1-P1-22: 优先看 TaskRun 终态（比 batch 状态更精细也更快）
-            # 用参数化 raw SQL 走 JSONB where 下推：result_data->>'crawl_batch_id' = $1
-            # 注：Tortoise 的 Model.raw(sql, using_db) 只接受 SQL 字符串与
-            # 可选连接，不支持位置参数绑定，因此直接走底层 conn.execute_query_dict。
             conn = Tortoise.get_connection("default")
             matched = await conn.execute_query_dict(
                 "SELECT status FROM task_executions WHERE result_data->>'crawl_batch_id' = $1",
                 [batch_id],
             )
-            if matched:
-                all_terminal = all(TaskStatus(row["status"]) in _run_terminal for row in matched)
-                if all_terminal:
-                    result = await self._collect_results(batch_id, project_id)
-                    result.total_pages = len(matched)
-                    result.success_pages = sum(1 for row in matched if TaskStatus(row["status"]) == TaskStatus.SUCCESS)
-                    result.failed_pages = result.total_pages - result.success_pages
-                    result.success = result.failed_pages == 0
-                    if not result.success:
-                        result.errors.append(f"{result.failed_pages} 个 URL 失败")
-                    break
-
-            # 检查是否完成（批次终态兜底）
-            if batch.status in [BatchStatus.COMPLETED, BatchStatus.FAILED, BatchStatus.CANCELLED]:
-                result = await self._collect_results(batch_id, project_id)
-                result.success = batch.status == BatchStatus.COMPLETED
-                if batch.status == BatchStatus.FAILED:
-                    result.errors.append("测试执行失败")
-                elif batch.status == BatchStatus.CANCELLED:
-                    result.errors.append("测试被取消")
+            all_terminal = matched and all(TaskStatus(row["status"]) in run_terminal for row in matched)
+            if all_terminal:
+                result = await self._terminal_run_result(batch_id, project_id, matched)
                 break
-
-            # 等待一段时间后再检查
+            if batch.status in [BatchStatus.COMPLETED, BatchStatus.FAILED, BatchStatus.CANCELLED]:
+                result = await self._terminal_batch_result(batch, batch_id, project_id)
+                break
             await asyncio.sleep(1)
 
+        return result
+
+    async def _terminal_run_result(self, batch_id, project_id, matched):
+        from antcode_core.domain.models.enums import TaskStatus
+
+        result = await self._collect_results(batch_id, project_id)
+        result.total_pages = len(matched)
+        result.success_pages = sum(1 for row in matched if TaskStatus(row["status"]) == TaskStatus.SUCCESS)
+        result.failed_pages = result.total_pages - result.success_pages
+        result.success = result.failed_pages == 0
+        if not result.success:
+            result.errors.append(f"{result.failed_pages} 个 URL 失败")
+        return result
+
+    async def _terminal_batch_result(self, batch, batch_id, project_id):
+        result = await self._collect_results(batch_id, project_id)
+        result.success = batch.status == BatchStatus.COMPLETED
+        messages = {
+            BatchStatus.FAILED: "测试执行失败",
+            BatchStatus.CANCELLED: "测试被取消",
+        }
+        if batch.status in messages:
+            result.errors.append(messages[batch.status])
         return result
 
     # =========================================================================
@@ -486,66 +438,19 @@ class CrawlTestService(BaseService):
         """
         result = CrawlTestResult(batch_id=batch_id)
 
-        # 获取进度信息
         progress = await self._progress_service.get_progress(project_id, batch_id)
         if progress:
-            result.total_pages = progress.completed_urls + progress.failed_urls
-            result.success_pages = progress.completed_urls
-            result.failed_pages = progress.failed_urls
+            self._apply_progress(result, progress)
 
-        # 获取缓存的测试结果（包含样本数据）
         cached_result = self._test_results.get(batch_id)
         if cached_result:
             result.sample_data = cached_result.sample_data
             result.errors = cached_result.errors
 
-        # R1-P1-22 (审查报告): 样本数据从 spider:data:{run_id} 读——
-        # add_sample_data 全仓库零生产调用方，样本永远为空。真正的样本
-        # 数据来自 scrapy 侧 AntCodeRedisPipeline 写入 spider:data stream。
         try:
-            import json as _json
-
-            from tortoise import Tortoise
-
-            from antcode_core.infrastructure.redis.client import get_redis_client
-            from antcode_core.infrastructure.redis.keys import RedisKeys
-
-            # Tortoise Model.raw 只接受 SQL + using_db，第二位参不是查询参数，
-            # 必须走底层 conn.execute_query_dict 才能真正绑定 $1。
-            conn = Tortoise.get_connection("default")
-            matched = await conn.execute_query_dict(
-                "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 "
-                "ORDER BY id DESC LIMIT 20",
-                [batch_id],
-            )
-            if matched:
-                keys = RedisKeys()
-                client = await get_redis_client()
-                samples: list[dict] = []
-                MAX_SAMPLES = 10
-                for run in matched:
-                    if len(samples) >= MAX_SAMPLES:
-                        break
-                    stream_key = keys.spider_data_stream(run["run_id"])
-                    entries = await client.xrange(stream_key, count=MAX_SAMPLES - len(samples))
-                    for _, data in entries:
-                        try:
-                            item_data = data.get(b"data") or data.get("data") or ""
-                            if isinstance(item_data, bytes):
-                                item_data = item_data.decode("utf-8", errors="ignore")
-                            payload = _json.loads(item_data) if item_data else {}
-                            url_val = data.get(b"url") or data.get("url") or ""
-                            if isinstance(url_val, bytes):
-                                url_val = url_val.decode("utf-8", errors="ignore")
-                            if url_val:
-                                payload["_url"] = url_val
-                            samples.append(payload)
-                        except Exception:
-                            continue
-                        if len(samples) >= MAX_SAMPLES:
-                            break
-                if samples:
-                    result.sample_data = samples
+            samples = await self._load_stream_samples(batch_id)
+            if samples:
+                result.sample_data = samples
         except Exception as exc:
             logger.debug(f"读取 spider:data 样本失败（不影响其他字段）: {exc}")
 
@@ -556,6 +461,68 @@ class CrawlTestService(BaseService):
         )
 
         return result
+
+    @staticmethod
+    def _apply_progress(result, progress):
+        result.total_pages = progress.completed_urls + progress.failed_urls
+        result.success_pages = progress.completed_urls
+        result.failed_pages = progress.failed_urls
+
+    async def _load_stream_samples(self, batch_id):
+        from tortoise import Tortoise
+
+        from antcode_core.infrastructure.redis.client import get_redis_client
+        from antcode_core.infrastructure.redis.keys import RedisKeys
+
+        conn = Tortoise.get_connection("default")
+        matched = await conn.execute_query_dict(
+            "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 ORDER BY id DESC LIMIT 20",
+            [batch_id],
+        )
+        if not matched:
+            return []
+        return await self._collect_stream_samples(
+            await get_redis_client(),
+            RedisKeys(),
+            matched,
+        )
+
+    async def _collect_stream_samples(self, client, keys, matched):
+        max_samples = 10
+        samples: list[dict] = []
+        for run in matched:
+            if len(samples) >= max_samples:
+                break
+            stream_key = keys.spider_data_stream(run["run_id"])
+            entries = await client.xrange(stream_key, count=max_samples - len(samples))
+            samples.extend(self._decode_sample_entries(entries, max_samples - len(samples)))
+        return samples
+
+    def _decode_sample_entries(self, entries, limit):
+        samples = []
+        for _, data in entries:
+            try:
+                samples.append(self._decode_sample_entry(data))
+            except Exception:
+                continue
+            if len(samples) >= limit:
+                break
+        return samples
+
+    @staticmethod
+    def _decode_sample_entry(data):
+        import json
+
+        item_data = data.get(b"data") or data.get("data") or ""
+        if isinstance(item_data, bytes):
+            item_data = item_data.decode("utf-8", errors="ignore")
+        payload = json.loads(item_data) if item_data else {}
+        url = data.get(b"url") or data.get("url") or ""
+        if isinstance(url, bytes):
+            url = url.decode("utf-8", errors="ignore")
+        if url:
+            payload["_url"] = url
+        return payload
 
     async def add_sample_data(
         self,
@@ -771,14 +738,7 @@ class CrawlTestService(BaseService):
         self,
         batch_id: str,
     ) -> dict:
-        """获取测试状态
-
-        Args:
-            batch_id: 批次 ID
-
-        Returns:
-            测试状态字典
-        """
+        """获取测试批次、进度与结果摘要。"""
         batch = await self._batch_service.get_batch(batch_id)
         if not batch:
             return {

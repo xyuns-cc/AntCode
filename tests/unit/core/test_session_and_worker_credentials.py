@@ -21,7 +21,10 @@ from pydantic import ValidationError
 @pytest.fixture(autouse=True)
 def auth_secrets(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "session-tests-jwt-secret-0123456789")
-    monkeypatch.setattr(settings, "ENCRYPTION_KEY", "session-tests-encryption-key")
+    monkeypatch.setattr(settings, "ENCRYPTION_KEY", "session-tests-encryption-key-32-bytes")
+    monkeypatch.setattr(settings, "ENCRYPTION_KEY_SALT", "session-tests-salt-value")
+    monkeypatch.setattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "")
+    monkeypatch.setattr(settings, "ENCRYPTION_ALLOW_LEGACY_SHA256", False)
     jwt_secret_manager._secret = None
     secret_box._cached = None
     secret_box._cache_key = None

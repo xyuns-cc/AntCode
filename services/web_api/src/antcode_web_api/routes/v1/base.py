@@ -33,7 +33,7 @@ from antcode_core.domain.schemas import (
 )
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.infrastructure.resilience.health import HealthStatus, health_checker
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,8 @@ from antcode_web_api.response import Messages, success
 
 # K8s probe 单次超时（秒）：任何依赖探测卡住不能拖垮探针
 _PROBE_TIMEOUT = 5.0
+_REFRESH_COOKIE_NAME = "antcode_refresh"
+_REFRESH_COOKIE_PATH = "/api/v1/auth"
 
 router = APIRouter()
 
@@ -50,7 +52,7 @@ AUTH_SELF_SERVICE_DISABLED_DETAIL = "企业内部系统已禁用自助认证接�
 
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str = Field(..., min_length=1)
+    refresh_token: str | None = Field(default=None, min_length=1)
 
 
 class ProbeStatusResponse(BaseModel):
@@ -62,6 +64,44 @@ def _session_device_info(request: Request, client_ip: str | None = None) -> str:
     user_agent = request.headers.get("user-agent", "unknown")
     resolved_ip = client_ip or get_client_ip(request)
     return f"{user_agent}|{resolved_ip}"[:256]
+
+
+def _refresh_cookie_secure() -> bool:
+    configured = settings.AUTH_COOKIE_SECURE
+    if configured is not None:
+        return configured
+    return settings.SERVER_DOMAIN.strip().lower() not in {"", "localhost", "127.0.0.1"}
+
+
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=int(settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60),
+        path=_REFRESH_COOKIE_PATH,
+        secure=_refresh_cookie_secure(),
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        path=_REFRESH_COOKIE_PATH,
+        secure=_refresh_cookie_secure(),
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def _resolve_refresh_token(request: RefreshTokenRequest | None, http_request: Request) -> str:
+    token = http_request.cookies.get(_REFRESH_COOKIE_NAME)
+    if not token and request is not None:
+        token = request.refresh_token
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少刷新令牌")
+    return token
 
 
 @router.get(
@@ -195,7 +235,7 @@ async def readiness_check() -> JSONResponse:
     summary="用户登录",
     tags=["认证"],
 )
-async def login(request: UserLoginRequest, http_request: Request):
+async def login(request: UserLoginRequest, http_request: Request, response: Response):
     # P1-06: 登录限流 / 审计使用受信代理白名单解析后的客户端 IP
     #   生产 Nginx 会把真实 IP 放到 X-Real-IP / X-Forwarded-For,如果这里直接
     #   拿 socket 对端 IP,所有用户都会共用同一个反代 IP 的限流桶(默认 5/min),
@@ -346,11 +386,12 @@ async def login(request: UserLoginRequest, http_request: Request):
     )
     payload = UserLoginResponse(
         access_token=access_token,
-        refresh_token=refresh_token,
+        refresh_token=None,
         token_type="bearer",
         expires_in=int(settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60),
         user=user_payload,
     )
+    _set_refresh_cookie(response, refresh_token)
     return success(payload, message=Messages.LOGIN_SUCCESS)
 
 
@@ -373,10 +414,15 @@ async def get_login_public_key():
     summary="刷新令牌",
     tags=["认证"],
 )
-async def refresh_token(request: RefreshTokenRequest, http_request: Request):
+async def refresh_token(
+    http_request: Request,
+    response: Response,
+    request: RefreshTokenRequest | None = None,
+):
     """使用刷新令牌获取新的访问令牌"""
+    refresh_token_input = _resolve_refresh_token(request, http_request)
     try:
-        token_data = await verify_refresh_token(request.refresh_token)
+        token_data = await verify_refresh_token(refresh_token_input)
     except HTTPException:
         raise
     except Exception as exc:
@@ -418,11 +464,12 @@ async def refresh_token(request: RefreshTokenRequest, http_request: Request):
     )
     payload = UserLoginResponse(
         access_token=access_token,
-        refresh_token=refresh_token_value,
+        refresh_token=None,
         token_type="bearer",
         expires_in=int(settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60),
         user=user_payload,
     )
+    _set_refresh_cookie(response, refresh_token_value)
     return success(payload, message=Messages.OPERATION_SUCCESS)
 
 
@@ -432,12 +479,13 @@ async def refresh_token(request: RefreshTokenRequest, http_request: Request):
     summary="用户登出",
     tags=["认证"],
 )
-async def logout(current_user: TokenData = Depends(get_current_user)):
+async def logout(response: Response, current_user: TokenData = Depends(get_current_user)):
     """撤销当前 access token 绑定的服务端会话。"""
     await revoke_refresh_session(
         user_id=current_user.user_id,
         jti=current_user.session_jti or "",
     )
+    _clear_refresh_cookie(response)
     return success(None, message="已退出登录")
 
 
