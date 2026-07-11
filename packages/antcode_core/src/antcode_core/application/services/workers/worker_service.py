@@ -276,8 +276,8 @@ class WorkerService:
             "permissions": 0,
             "runtimes": 0,
             "runtime_bindings": 0,
-            "task_executions": 0,
-            "tasks": 0,
+            "task_executions_unbound": 0,
+            "tasks_unbound": 0,
             "performance_history": 0,
             "spider_metrics": 0,
             "events": 0,
@@ -316,17 +316,14 @@ class WorkerService:
                     worker_id=None
                 )
 
-                # 5. Worker 上的任务及执行记录(specified_worker 语义是"绑死这台 Worker"
-                #    的任务,Worker 没了它们无处执行,与运行时绑定一起删是历史行为)
-                task_ids = await Task.filter(specified_worker_id=worker_internal_id).values_list("id", flat=True)
-                if task_ids:
-                    task_ids = list(task_ids)
-                    deleted["task_executions"] = await TaskRun.filter(task_id__in=task_ids).delete()
-                    deleted["tasks"] = await Task.filter(id__in=task_ids).delete()
-
-                # 5b. 其它历史 TaskRun.worker_id 指向本 Worker 的记录:
-                #     属于其它任务的执行痕迹,置空以保留任务历史(避免主键悬挂)。
-                await TaskRun.filter(worker_id=worker_internal_id).update(worker_id=None)
+                # 5. Worker 删除只解绑调度偏好和执行归属，任务定义与历史执行
+                # 是用户业务数据，不能随基础设施节点一起删除。
+                deleted["tasks_unbound"] = await Task.filter(
+                    specified_worker_id=worker_internal_id
+                ).update(specified_worker_id=None)
+                deleted["task_executions_unbound"] = await TaskRun.filter(
+                    worker_id=worker_internal_id
+                ).update(worker_id=None)
 
                 # 6. 监控数据(worker_id 是字符串 public_id)
                 deleted["performance_history"] = await WorkerPerformanceHistory.filter(
