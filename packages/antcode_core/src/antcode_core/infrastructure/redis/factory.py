@@ -26,17 +26,15 @@ import os
 import platform
 import socket
 from typing import Any
-from urllib.parse import urlparse
 
-import redis.asyncio as async_redis
 import redis as sync_redis
+import redis.asyncio as async_redis
 from loguru import logger
 from redis.asyncio.retry import Retry as AsyncRetry
-from redis.retry import Retry as SyncRetry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionExc
 from redis.exceptions import TimeoutError as RedisTimeoutExc
-
+from redis.retry import Retry as SyncRetry
 
 REDIS_MODE_STANDALONE = "standalone"
 REDIS_MODE_CLUSTER = "cluster"
@@ -60,9 +58,7 @@ def _resolve_mode(url: str, mode_override: str | None) -> str:
     env_mode = (mode_override or os.environ.get("REDIS_MODE", "")).strip().lower()
     if env_mode:
         if env_mode not in _VALID_MODES:
-            raise ValueError(
-                f"REDIS_MODE={env_mode!r} 无效，仅支持 {sorted(_VALID_MODES)}"
-            )
+            raise ValueError(f"REDIS_MODE={env_mode!r} 无效，仅支持 {sorted(_VALID_MODES)}")
         return env_mode
     return _detect_mode_from_url(url)
 
@@ -70,13 +66,9 @@ def _resolve_mode(url: str, mode_override: str | None) -> str:
 def _normalize_url_for_client(url: str, mode: str) -> str:
     """去掉 `+cluster` / `+sentinel` 后缀，让底层 redis-py 认识。"""
     if mode == REDIS_MODE_CLUSTER:
-        return url.replace("redis+cluster://", "redis://", 1).replace(
-            "rediss+cluster://", "rediss://", 1
-        )
+        return url.replace("redis+cluster://", "redis://", 1).replace("rediss+cluster://", "rediss://", 1)
     if mode == REDIS_MODE_SENTINEL:
-        return url.replace("redis+sentinel://", "redis://", 1).replace(
-            "rediss+sentinel://", "rediss://", 1
-        )
+        return url.replace("redis+sentinel://", "redis://", 1).replace("rediss+sentinel://", "rediss://", 1)
     return url
 
 
@@ -112,11 +104,7 @@ def _parse_sentinel_url(url: str) -> tuple[str, list[tuple[str, int]], dict[str,
             password, _, master_from_url = userinfo.rpartition("@")
         else:
             master_from_url = userinfo
-    master_name = (
-        master_from_url
-        or os.environ.get("REDIS_SENTINEL_MASTER_NAME", "").strip()
-        or "mymaster"
-    )
+    master_name = master_from_url or os.environ.get("REDIS_SENTINEL_MASTER_NAME", "").strip() or "mymaster"
 
     endpoints: list[tuple[str, int]] = []
     for part in hosts_part.split(","):
@@ -227,9 +215,9 @@ def create_async_redis_client(
         # RedisCluster 不吃这几个 kwargs
         for k in ("retry", "retry_on_timeout"):
             cluster_kwargs.pop(k, None)
-        client = AsyncRedisCluster.from_url(cluster_url, **cluster_kwargs)
+        cluster_client = AsyncRedisCluster.from_url(cluster_url, **cluster_kwargs)
         logger.debug(f"Redis client 就绪 (mode=cluster, url={cluster_url})")
-        return client  # type: ignore[return-value]
+        return cluster_client  # type: ignore[return-value]
 
     if resolved_mode == REDIS_MODE_SENTINEL:
         from redis.asyncio.sentinel import Sentinel as AsyncSentinel
@@ -242,18 +230,21 @@ def create_async_redis_client(
         )
         # Sentinel 构造只接受 socket_timeout / password / db
         sentinel_ctor_kwargs = {
-            k: sentinel_kwargs[k]
-            for k in ("socket_timeout", "socket_connect_timeout")
-            if k in sentinel_kwargs
+            k: sentinel_kwargs[k] for k in ("socket_timeout", "socket_connect_timeout") if k in sentinel_kwargs
         }
         sentinel_ctor_kwargs.update(extra)
         sentinel = AsyncSentinel(endpoints, **sentinel_ctor_kwargs)
-        client = sentinel.master_for(master_name, redis_class=async_redis.Redis)
-        logger.debug(
-            f"Redis client 就绪 (mode=sentinel, master={master_name}, "
-            f"endpoints={endpoints})"
+        master_kwargs = {key: extra[key] for key in ("password", "db") if key in extra}
+        master_kwargs["decode_responses"] = decode_responses
+        if max_connections is not None:
+            master_kwargs["max_connections"] = max_connections
+        sentinel_client = sentinel.master_for(
+            master_name,
+            redis_class=async_redis.Redis,
+            **master_kwargs,
         )
-        return client
+        logger.debug(f"Redis client 就绪 (mode=sentinel, master={master_name}, endpoints={endpoints})")
+        return sentinel_client
 
     # standalone
     standalone_url = _normalize_url_for_client(url, resolved_mode)
@@ -263,9 +254,9 @@ def create_async_redis_client(
         **overrides,
     )
     pool = async_redis.ConnectionPool.from_url(standalone_url, **pool_kwargs)
-    client = async_redis.Redis(connection_pool=pool)
+    standalone_client = async_redis.Redis(connection_pool=pool)
     logger.debug(f"Redis client 就绪 (mode=standalone, url={standalone_url})")
-    return client
+    return standalone_client
 
 
 def create_sync_redis_client(
@@ -306,7 +297,15 @@ def create_sync_redis_client(
         ctor_kwargs = {"socket_timeout": 10}
         ctor_kwargs.update(extra)
         sentinel = SyncSentinel(endpoints, **ctor_kwargs)
-        return sentinel.master_for(master_name, redis_class=sync_redis.Redis)
+        master_kwargs = {key: extra[key] for key in ("password", "db") if key in extra}
+        master_kwargs["decode_responses"] = decode_responses
+        if max_connections is not None:
+            master_kwargs["max_connections"] = max_connections
+        return sentinel.master_for(
+            master_name,
+            redis_class=sync_redis.Redis,
+            **master_kwargs,
+        )
 
     standalone_url = _normalize_url_for_client(url, resolved_mode)
     pool_kwargs = _build_common_kwargs(

@@ -8,14 +8,14 @@
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 
 from loguru import logger
 
 from antcode_core.infrastructure.cache import unified_cache
 
 
-class CheckpointState(str, Enum):
+class CheckpointState(StrEnum):
     """检查点状态"""
 
     PENDING = "pending"
@@ -37,10 +37,10 @@ class TaskCheckpoint:
     progress: float = 0.0
     checkpoint_data: dict = field(default_factory=dict)
     last_log_offset: int = 0
-    started_at: datetime = None
-    last_checkpoint_at: datetime = None
+    started_at: datetime | None = None
+    last_checkpoint_at: datetime | None = None
     retry_count: int = 0
-    error_message: str = None
+    error_message: str | None = None
 
     def to_dict(self):
         """转换为字典"""

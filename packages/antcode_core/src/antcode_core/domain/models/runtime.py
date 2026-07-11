@@ -19,7 +19,7 @@ class Runtime(BaseModel):
     key = fields.CharField(max_length=100, null=True)
     version = fields.CharField(max_length=20)
     runtime_locator = fields.CharField(max_length=500, unique=True)
-    runtime_details = fields.JSONField(default=dict)
+    runtime_details: fields.JSONField[dict[str, object]] = fields.JSONField(default=dict)
 
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)

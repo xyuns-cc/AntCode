@@ -37,6 +37,13 @@ def _default_grpc_workers() -> int:
     return min(32, (os.cpu_count() or 4) * 4)
 
 
+def _required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"缺少必需环境变量: {name}")
+    return value
+
+
 @dataclass
 class GatewayConfig:
     """Gateway 服务器配置
@@ -54,9 +61,7 @@ class GatewayConfig:
     max_workers: int = field(default_factory=_default_grpc_workers)
 
     # 是否启用 gRPC 服务
-    enabled: bool = field(
-        default_factory=lambda: os.getenv("GRPC_ENABLED", "true").lower() == "true"
-    )
+    enabled: bool = field(default_factory=lambda: os.getenv("GRPC_ENABLED", "true").lower() == "true")
 
     # 最大发送消息大小 (50MB)
     max_send_message_length: int = 50 * 1024 * 1024
@@ -74,57 +79,34 @@ class GatewayConfig:
     keepalive_permit_without_calls: bool = True
 
     # 心跳间隔 (秒)
-    heartbeat_interval: int = field(
-        default_factory=lambda: int(os.getenv("GRPC_HEARTBEAT_INTERVAL", "30"))
-    )
+    heartbeat_interval: int = field(default_factory=lambda: int(os.getenv("GRPC_HEARTBEAT_INTERVAL", "30")))
 
     # 心跳超时 (秒) - 超过此时间未收到心跳则标记节点离线
-    heartbeat_timeout: int = field(
-        default_factory=lambda: int(os.getenv("GRPC_HEARTBEAT_TIMEOUT", "90"))
-    )
+    heartbeat_timeout: int = field(default_factory=lambda: int(os.getenv("GRPC_HEARTBEAT_TIMEOUT", "90")))
 
     # 优雅关闭等待时间 (秒)
-    shutdown_grace_period: float = field(
-        default_factory=lambda: float(os.getenv("GRPC_SHUTDOWN_GRACE_PERIOD", "5.0"))
-    )
+    shutdown_grace_period: float = field(default_factory=lambda: float(os.getenv("GRPC_SHUTDOWN_GRACE_PERIOD", "5.0")))
 
     # TLS 配置 (可选)
-    tls_cert_path: str | None = field(
-        default_factory=lambda: os.getenv("GRPC_TLS_CERT_PATH") or None
-    )
-    tls_key_path: str | None = field(
-        default_factory=lambda: os.getenv("GRPC_TLS_KEY_PATH") or None
-    )
-    tls_ca_path: str | None = field(
-        default_factory=lambda: os.getenv("GRPC_TLS_CA_PATH") or None
-    )
+    tls_cert_path: str | None = field(default_factory=lambda: os.getenv("GRPC_TLS_CERT_PATH") or None)
+    tls_key_path: str | None = field(default_factory=lambda: os.getenv("GRPC_TLS_KEY_PATH") or None)
+    tls_ca_path: str | None = field(default_factory=lambda: os.getenv("GRPC_TLS_CA_PATH") or None)
 
     # 认证配置
-    auth_enabled: bool = field(
-        default_factory=lambda: os.getenv("AUTH_ENABLED", "true").lower() == "true"
-    )
+    auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "true").lower() == "true")
     # 显式允许在启用鉴权的情况下用明文端口启动（仅本地/测试）。
     # 生产必须走 TLS/mTLS；把 api_key 或 JWT 放在明文 gRPC 上等于把凭证挂到公网。
     allow_insecure_with_auth: bool = field(
-        default_factory=lambda: os.getenv("ANTCODE_GATEWAY_ALLOW_INSECURE", "false").lower()
-        == "true"
+        default_factory=lambda: os.getenv("ANTCODE_GATEWAY_ALLOW_INSECURE", "false").lower() == "true"
     )
 
     # 限流配置
-    rate_limit_enabled: bool = field(
-        default_factory=lambda: os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
-    )
-    rate_limit_rate: int = field(
-        default_factory=lambda: int(os.getenv("RATE_LIMIT_RATE", "100"))
-    )
-    rate_limit_capacity: int = field(
-        default_factory=lambda: int(os.getenv("RATE_LIMIT_CAPACITY", "200"))
-    )
+    rate_limit_enabled: bool = field(default_factory=lambda: os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
+    rate_limit_rate: int = field(default_factory=lambda: int(os.getenv("RATE_LIMIT_RATE", "100")))
+    rate_limit_capacity: int = field(default_factory=lambda: int(os.getenv("RATE_LIMIT_CAPACITY", "200")))
 
     # Redis 配置（用于 Streams 读取）
-    redis_url: str = field(
-        default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    )
+    redis_url: str = field(default_factory=lambda: _required_env("REDIS_URL"))
 
     @property
     def server_options(self) -> list[tuple]:

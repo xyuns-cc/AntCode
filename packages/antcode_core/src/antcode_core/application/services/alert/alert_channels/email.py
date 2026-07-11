@@ -97,7 +97,7 @@ class EmailAlertChannel(AlertChannel):
         """发送单封邮件"""
         try:
             msg = MIMEMultipart("alternative")
-            msg["Subject"] = Header(subject, "utf-8")
+            msg["Subject"] = str(Header(subject, "utf-8"))
             msg["From"] = f"{self.sender_name} <{self.smtp_user}>"
             msg["To"] = f"{recipient_name} <{recipient_email}>" if recipient_name else recipient_email
 
@@ -106,6 +106,7 @@ class EmailAlertChannel(AlertChannel):
             msg.attach(html_part)
 
             # 发送邮件
+            server: smtplib.SMTP
             if self.smtp_ssl:
                 server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10)
             else:

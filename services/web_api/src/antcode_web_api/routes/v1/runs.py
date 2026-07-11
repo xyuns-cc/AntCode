@@ -10,12 +10,11 @@ from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.task import TaskRunResponse
-from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
+from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from tortoise.exceptions import DoesNotExist
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
@@ -27,15 +26,11 @@ runs_router = APIRouter()
 async def get_run(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """获取执行详情"""
     try:
-        execution = await scheduler_service.get_execution_with_permission(
-            run_id, current_user.user_id
-        )
+        execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
         if not execution:
             raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
-        return success_response(
-            TaskRunResponse.from_orm(execution), message=Messages.QUERY_SUCCESS
-        )
+        return success_response(TaskRunResponse.from_orm(execution), message=Messages.QUERY_SUCCESS)
     except HTTPException:
         raise
     except Exception as e:
@@ -54,9 +49,7 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
     from antcode_core.domain.models.task import Task
 
     # 获取执行记录
-    execution = await scheduler_service.get_execution_with_permission(
-        run_id, current_user.user_id
-    )
+    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
@@ -67,9 +60,7 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
         TaskStatus.QUEUED,
         TaskStatus.RUNNING,
     ):
-        raise HTTPException(
-            status_code=400, detail=f"任务状态为 {execution.status.value}，无法取消"
-        )
+        raise HTTPException(status_code=400, detail=f"任务状态为 {execution.status.value}，无法取消")
 
     # 获取任务信息
     task = await Task.get_or_none(id=execution.task_id)
@@ -101,9 +92,7 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
                 message="任务已取消",
             )
         # 0 行命中：在 CAS 期间已被 dispatch，重新加载 execution
-        execution = await scheduler_service.get_execution_with_permission(
-            run_id, current_user.user_id
-        )
+        execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
         if not execution:
             raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
@@ -130,9 +119,7 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
                 )
                 # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
                 # 避免 control:{worker_id} stream 无限增长。
-                await write_control_event(
-                    redis, control_stream(worker.public_id), payload
-                )
+                await write_control_event(redis, control_stream(worker.public_id), payload)
                 cancelled = True
                 logger.info(f"已发送取消指令到 Worker: {worker.name}")
             else:
@@ -227,13 +214,9 @@ def _sanitize_artifact_public(artifact: dict[str, Any]) -> dict[str, Any]:
 
 
 @runs_router.get("/{run_id}/artifacts", response_model=BaseResponse[dict])
-async def list_run_artifacts(
-    run_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def list_run_artifacts(run_id: str, current_user: TokenData = Depends(get_current_user)):
     """列出某次执行产出的所有 artifacts（不含下载 URI，敏感字段脱敏）。"""
-    execution = await scheduler_service.get_execution_with_permission(
-        run_id, current_user.user_id
-    )
+    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
     artifacts = _parse_artifacts(execution.result_data)
@@ -243,9 +226,7 @@ async def list_run_artifacts(
     )
 
 
-def _match_artifact_by_name(
-    artifacts: list[dict[str, Any]], name: str
-) -> dict[str, Any] | None:
+def _match_artifact_by_name(artifacts: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     for artifact in artifacts:
         if artifact.get("name") == name:
             return artifact
@@ -266,9 +247,7 @@ async def download_run_artifact(
     current_user: TokenData = Depends(get_current_user),
 ):
     """按 name 下载单个 artifact；权限校验后从 PG blob store 读原始 bytes。"""
-    execution = await scheduler_service.get_execution_with_permission(
-        run_id, current_user.user_id
-    )
+    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
     artifacts = _parse_artifacts(execution.result_data)
@@ -278,9 +257,7 @@ async def download_run_artifact(
 
     content_hash = _extract_content_hash(artifact.get("uri", ""))
     if not content_hash:
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE, detail="产物 URI 不合法或已下线"
-        )
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="产物 URI 不合法或已下线")
 
     store = PostgresArtifactStore()
     try:
@@ -295,6 +272,7 @@ async def download_run_artifact(
         ) from exc
 
     mime_type = artifact.get("mime_type") or "application/octet-stream"
+
     # 用 iterable 包一层做 StreamingResponse，避免整块 bytes 长期驻留
     def _iter():
         chunk_size = 64 * 1024
@@ -329,17 +307,15 @@ async def list_spider_items(
     count: int = Query(100, ge=1, le=1000, description="每页数量"),
 ):
     """列出该 run 由 SpiderDataReporter 写入的 items（按时序）。"""
-    execution = await scheduler_service.get_execution_with_permission(
-        run_id, current_user.user_id
-    )
+    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
 
     # 从 Redis 直接读取 spider:data:{run_id} stream
     try:
+        from antcode_core.common.config import settings as _settings
         from antcode_core.infrastructure.redis import get_redis_client
         from antcode_core.infrastructure.redis.keys import RedisKeys
-        from antcode_core.common.config import settings as _settings
 
         redis = await get_redis_client()
         if redis is None:

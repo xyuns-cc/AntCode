@@ -14,13 +14,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol
 
 from loguru import logger
 
 
-class HeartbeatState(str, Enum):
+class HeartbeatState(StrEnum):
     """心跳状态"""
 
     IDLE = "idle"  # 空闲

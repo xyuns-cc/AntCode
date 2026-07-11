@@ -16,7 +16,7 @@ class RunSourceSnapshot(BaseModel):
     resolved_commit = fields.CharField(max_length=64, db_index=True)
     subdir = fields.CharField(max_length=500)
     entry_point = fields.CharField(max_length=255)
-    include_paths = fields.JSONField(default=list)
+    include_paths: fields.JSONField[list[str]] = fields.JSONField(default=list)
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:

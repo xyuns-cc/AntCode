@@ -167,11 +167,11 @@ async def _get_structured_log_response(run_id, execution, log_type, level, lines
 @router.get("/runs/{run_id}", response_model=BaseResponse[UnifiedLogResponse])
 async def get_run_logs(
     run_id,
-    format: str = Query(LogFormat.STRUCTURED),
-    log_type: str = Query(None),
-    level: str = Query(None),
-    lines: int = Query(None, ge=1, le=10000),
-    search: str = Query(None),
+    format: LogFormat | str = Query(LogFormat.STRUCTURED),
+    log_type: LogType | str | None = Query(None),
+    level: LogLevel | str | None = Query(None),
+    lines: int | None = Query(None, ge=1, le=10000),
+    search: str | None = Query(None),
     current_user=Depends(get_current_user),
 ):
     try:
@@ -190,8 +190,8 @@ async def get_run_logs(
 @router.get("/runs/{run_id}/stdout", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stdout_logs(
     run_id,
-    format: str = Query(LogFormat.RAW),
-    lines: int = Query(None, ge=1, le=10000),
+    format: LogFormat | str = Query(LogFormat.RAW),
+    lines: int | None = Query(None, ge=1, le=10000),
     current_user=Depends(get_current_user),
 ):
     return await get_run_logs(run_id, format, LogType.STDOUT, None, lines, None, current_user)
@@ -200,8 +200,8 @@ async def get_stdout_logs(
 @router.get("/runs/{run_id}/stderr", response_model=BaseResponse[UnifiedLogResponse])
 async def get_stderr_logs(
     run_id,
-    format: str = Query(LogFormat.RAW),
-    lines: int = Query(None, ge=1, le=10000),
+    format: LogFormat | str = Query(LogFormat.RAW),
+    lines: int | None = Query(None, ge=1, le=10000),
     current_user=Depends(get_current_user),
 ):
     return await get_run_logs(run_id, format, LogType.STDERR, None, lines, None, current_user)
@@ -210,9 +210,9 @@ async def get_stderr_logs(
 @router.get("/runs/{run_id}/errors", response_model=BaseResponse[UnifiedLogResponse])
 async def get_error_logs(
     run_id,
-    format: str = Query(LogFormat.STRUCTURED),
-    lines: int = Query(None, ge=1, le=10000),
-    search: str = Query(None),
+    format: LogFormat | str = Query(LogFormat.STRUCTURED),
+    lines: int | None = Query(None, ge=1, le=10000),
+    search: str | None = Query(None),
     current_user=Depends(get_current_user),
 ):
     return await get_run_logs(run_id, format, None, LogLevel.ERROR, lines, search, current_user)
@@ -221,8 +221,8 @@ async def get_error_logs(
 @router.get("/runs/{run_id}/raw", response_model=BaseResponse[UnifiedLogResponse])
 async def get_raw_logs(
     run_id,
-    log_type: str = Query(None),
-    lines: int = Query(None, ge=1, le=10000),
+    log_type: LogType | str | None = Query(None),
+    lines: int | None = Query(None, ge=1, le=10000),
     current_user=Depends(get_current_user),
 ):
     return await get_run_logs(run_id, LogFormat.RAW, log_type, None, lines, None, current_user)

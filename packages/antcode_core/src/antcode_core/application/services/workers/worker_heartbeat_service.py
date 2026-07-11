@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable
 from datetime import datetime, timedelta
+from typing import cast
 
 from loguru import logger
 
@@ -194,7 +196,7 @@ class WorkerHeartbeatService:
 
         redis = await get_redis_client()
         hb_key = worker_heartbeat_key(worker.public_id)
-        raw = await redis.hgetall(hb_key)
+        raw = await cast(Awaitable[dict[bytes, bytes]], redis.hgetall(hb_key))
         if not raw:
             return None
 
@@ -235,7 +237,10 @@ class WorkerHeartbeatService:
         from antcode_core.infrastructure.redis import decode_stream_payload, get_redis_client, worker_heartbeat_key
 
         redis = await get_redis_client()
-        raw = await redis.hgetall(worker_heartbeat_key(worker.public_id))
+        raw = await cast(
+            Awaitable[dict[bytes, bytes]],
+            redis.hgetall(worker_heartbeat_key(worker.public_id)),
+        )
         return decode_stream_payload(raw) if raw else {}
 
     def _parse_redis_heartbeat_time(self, worker: Worker, data: dict) -> datetime:
@@ -369,7 +374,7 @@ class WorkerHeartbeatService:
 
         # 根据失败次数调整检测间隔
         if state["failures"] >= self.HEARTBEAT_MAX_FAILURES:
-            if worker.api_key and worker.secret_key:
+            if worker.api_key_hash and worker.secret_key_encrypted:
                 state["suspended"] = False
                 state["next_check"] = datetime.now() + timedelta(seconds=self.HEARTBEAT_INTERVAL_OFFLINE)
                 # 只在首次达到最大失败次数时记录警告
@@ -537,8 +542,9 @@ class WorkerHeartbeatService:
         """
         status_value = self._normalize_status_value(status_value)
 
-        # 更新节点状态
-        worker.status = status_value
+        # MAINTENANCE 是运维态，Worker 心跳不能自行解除。
+        if worker.status != WorkerStatus.MAINTENANCE.value:
+            worker.status = status_value
         worker.last_heartbeat = datetime.now()
 
         # 处理 metrics，合并爬虫统计

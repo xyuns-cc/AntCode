@@ -7,13 +7,13 @@ Requirements: 4.3
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from loguru import logger
 
 
-class RunState(str, Enum):
+class RunState(StrEnum):
     """运行状态"""
 
     QUEUED = "queued"  # 在本地队列中
@@ -76,9 +76,7 @@ class StateManager:
         info, _ = await self.add_if_new(run_id, task_id, receipt=receipt)
         return info
 
-    async def add_if_new(
-        self, run_id: str, task_id: str, receipt: str | None = None
-    ) -> tuple[RunInfo, bool]:
+    async def add_if_new(self, run_id: str, task_id: str, receipt: str | None = None) -> tuple[RunInfo, bool]:
         """B2: add 的原子变体，返回 ``(info, is_new)`` 让调用方判断是否重复。
 
         engine._worker_loop 需要根据 is_new 决定是否 enqueue —— 否则 reclaim

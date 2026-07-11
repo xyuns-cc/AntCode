@@ -32,6 +32,7 @@ def resolve_argv(argv: list[str], *, extra_search_paths: Iterable[str] = ()) -> 
     search_path = None
     if extra_search_paths:
         import os
+
         current = os.environ.get("PATH", "")
         parts = [*extra_search_paths, current] if current else list(extra_search_paths)
         search_path = ";".join(parts) if sys.platform == "win32" else ":".join(parts)

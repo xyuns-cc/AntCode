@@ -11,7 +11,7 @@ import contextlib
 import random
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 from loguru import logger
 
@@ -79,7 +79,7 @@ class ExponentialBackoff:
 # ==================== 断路器 ====================
 
 
-class CircuitState(str, Enum):
+class CircuitState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
@@ -238,7 +238,7 @@ class CircuitBreaker:
 # ==================== 限流器 ====================
 
 
-class RateLimiterState(str, Enum):
+class RateLimiterState(StrEnum):
     NORMAL = "normal"
     RATE_LIMITED = "rate_limited"
     OVERLOADED = "overloaded"
@@ -315,32 +315,31 @@ class RateLimiter:
 
     async def _check_overload(self) -> AcquireResult | None:
         """检查系统负载"""
-        try:
-            # 尝试导入系统指标模块
-            from antcode_worker.heartbeat.system_metrics import get_system_metrics
+        from antcode_worker.heartbeat.system_metrics import (
+            get_metrics_collector,
+            init_metrics_collector,
+        )
 
-            metrics = get_system_metrics()
+        collector = get_metrics_collector() or init_metrics_collector()
+        metrics = await collector.collect()
 
-            if metrics.cpu_percent > self._config.cpu_threshold:
-                self._pause_reason = f"CPU overload: {metrics.cpu_percent:.1f}%"
-                if self._state != RateLimiterState.OVERLOADED:
-                    self._state = RateLimiterState.OVERLOADED
-                    self._start_recovery()
-                return AcquireResult(False, 5.0, self._pause_reason)
+        if metrics.cpu.percent > self._config.cpu_threshold:
+            self._pause_reason = f"CPU overload: {metrics.cpu.percent:.1f}%"
+            if self._state != RateLimiterState.OVERLOADED:
+                self._state = RateLimiterState.OVERLOADED
+                self._start_recovery()
+            return AcquireResult(False, 5.0, self._pause_reason)
 
-            if metrics.memory_percent > self._config.memory_threshold:
-                self._pause_reason = f"Memory overload: {metrics.memory_percent:.1f}%"
-                if self._state != RateLimiterState.OVERLOADED:
-                    self._state = RateLimiterState.OVERLOADED
-                    self._start_recovery()
-                return AcquireResult(False, 5.0, self._pause_reason)
+        if metrics.memory.percent > self._config.memory_threshold:
+            self._pause_reason = f"Memory overload: {metrics.memory.percent:.1f}%"
+            if self._state != RateLimiterState.OVERLOADED:
+                self._state = RateLimiterState.OVERLOADED
+                self._start_recovery()
+            return AcquireResult(False, 5.0, self._pause_reason)
 
-            if self._state == RateLimiterState.OVERLOADED:
-                self._state = RateLimiterState.NORMAL
-                self._pause_reason = None
-        except ImportError:
-            # 如果无法导入系统指标模块，跳过负载检查
-            pass
+        if self._state == RateLimiterState.OVERLOADED:
+            self._state = RateLimiterState.NORMAL
+            self._pause_reason = None
 
         return None
 
@@ -355,12 +354,16 @@ class RateLimiter:
                 await asyncio.sleep(self._config.recovery_interval)
 
                 try:
-                    from antcode_worker.heartbeat.system_metrics import get_system_metrics
+                    from antcode_worker.heartbeat.system_metrics import (
+                        get_metrics_collector,
+                        init_metrics_collector,
+                    )
 
-                    metrics = get_system_metrics()
+                    collector = get_metrics_collector() or init_metrics_collector()
+                    metrics = await collector.collect()
 
-                    cpu_ok = metrics.cpu_percent < (self._config.cpu_threshold - 5)
-                    mem_ok = metrics.memory_percent < (self._config.memory_threshold - 5)
+                    cpu_ok = metrics.cpu.percent < (self._config.cpu_threshold - 5)
+                    mem_ok = metrics.memory.percent < (self._config.memory_threshold - 5)
 
                     if cpu_ok and mem_ok:
                         self._state = RateLimiterState.NORMAL

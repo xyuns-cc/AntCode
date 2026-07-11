@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import scrapy
 
@@ -39,7 +39,7 @@ def _xpath_string_literal(s: str) -> str:
     concat_parts = []
     for i, part in enumerate(parts):
         if i > 0:
-            concat_parts.append('\'"\'')  # XPath: '"'
+            concat_parts.append("'\"'")  # XPath: '"'
         if part:
             concat_parts.append(f'"{part}"')
     return f"concat({', '.join(concat_parts)})"
@@ -51,7 +51,7 @@ class UniversalRuleSpider(scrapy.Spider):
     name = "antcode_rule"
 
     # 关掉 Scrapy 默认的 robots 遵守（AntCode 已在业务层控制）
-    custom_settings: dict[str, Any] = {}
+    custom_settings: dict[bool | float | int | str | None, Any] = {}
 
     def __init__(
         self,
@@ -76,11 +76,7 @@ class UniversalRuleSpider(scrapy.Spider):
         self.extraction_rules = extraction_rules
         self.pagination_cfg = rule.get("pagination_config") or {}
         # max_pages 优先取 pagination_config.max_pages，兼容顶层 rule.max_pages
-        self.max_pages = int(
-            self.pagination_cfg.get("max_pages")
-            or rule.get("max_pages")
-            or 10
-        )
+        self.max_pages = int(self.pagination_cfg.get("max_pages") or rule.get("max_pages") or 10)
         # start_page 优先级：URL/template 里的 {N} > pagination_config.start_page > rule.start_page > 1
         # 例：``target_url = ".../page/{5}/"`` → start_page=5
         numeric_start = self._extract_numeric_placeholder_start(rule)
@@ -115,11 +111,7 @@ class UniversalRuleSpider(scrapy.Spider):
         # 页却只有一页）；用户设了 dont_filter=true 时更糟，真正重复请求
         # max_pages 次浪费带宽。在启动时校验模板必须含占位符。
         if method == "url_pattern":
-            template = str(
-                self.pagination_cfg.get("url_template")
-                or self.rule.get("target_url")
-                or ""
-            )
+            template = str(self.pagination_cfg.get("url_template") or self.rule.get("target_url") or "")
             if not self._PAGE_PLACEHOLDER_RE.search(template):
                 raise ValueError(
                     f"pagination_config.method=url_pattern 但 URL "
@@ -146,10 +138,7 @@ class UniversalRuleSpider(scrapy.Spider):
         if engine in ("playwright", "render"):
             meta["playwright"] = True
             # javascript_code / infinite_scroll / js_click 都需要拿 page 对象
-            if (
-                self.rule.get("javascript_code")
-                or self.pagination_method in ("infinite_scroll", "js_click")
-            ):
+            if self.rule.get("javascript_code") or self.pagination_method in ("infinite_scroll", "js_click"):
                 meta["playwright_include_page"] = True
                 need_page_obj = True
 
@@ -162,9 +151,8 @@ class UniversalRuleSpider(scrapy.Spider):
         if need_page_obj and self.pagination_method == "js_click":
             try:
                 from scrapy_playwright.page import PageMethod
-                meta["playwright_page_methods"] = [
-                    PageMethod("wait_for_load_state", "networkidle")
-                ]
+
+                meta["playwright_page_methods"] = [PageMethod("wait_for_load_state", "networkidle")]
             except ImportError:
                 pass
 
@@ -190,9 +178,7 @@ class UniversalRuleSpider(scrapy.Spider):
         wait_ms = int(self.pagination_cfg.get("scroll_wait_ms") or 800)
         methods = [PageMethod("wait_for_load_state", "networkidle")]
         for _ in range(scroll_count):
-            methods.append(
-                PageMethod("evaluate", "window.scrollTo(0, document.body.scrollHeight)")
-            )
+            methods.append(PageMethod("evaluate", "window.scrollTo(0, document.body.scrollHeight)"))
             methods.append(PageMethod("wait_for_timeout", wait_ms))
         return methods
 
@@ -201,136 +187,94 @@ class UniversalRuleSpider(scrapy.Spider):
     # ------------------------------------------------------------------
     async def parse(self, response, **kwargs):
         self._pages_crawled += 1
-        # 把已抓页数写进 Scrapy stats，便于 UI/监控看
-        try:
-            self.crawler.stats.set_value("antcode/pages_crawled", self._pages_crawled)
-        except Exception:
-            pass
-
-        # R1-P2-21 (审查报告): Playwright page 泄漏兜底。
-        # 老实现有两个泄漏点：
-        # (a) page.evaluate 抛异常直接进 except，page 未 close；
-        # (b) infinite_scroll + 无 javascript_code 组合下 include_page=True
-        #     但 parse 全程无 close。
-        # PLAYWRIGHT_MAX_CONTEXTS 默认 4，连续 4 次泄漏就耗尽上下文，
-        # 后续请求全部阻塞。这里用 try/finally 保证所有非 js_click 分支
-        # 都关掉 page；js_click 分支自己有 finally 关。
+        self._record_pages_crawled()
         page = response.meta.get("playwright_page")
-        js_code = self.rule.get("javascript_code")
-        # js_click 路径下 page 要保留给循环 click 用，别提前 close
-        keep_page_for_click = (
-            page is not None and self.pagination_method == "js_click"
-        )
-        if page is not None and js_code:
-            try:
+        response = await self._render_response(response, page)
+        page_number = response.meta.get("antcode_page_number") or self._pages_crawled
+        yield self._build_item(response, page_number)
+
+        if self.pagination_method == "click_element":
+            next_request = self._next_request(response)
+            if next_request is not None:
+                yield next_request
+        elif self.pagination_method == "js_click" and page is not None:
+            async for item in self._clicked_items(response, page):
+                yield item
+
+    async def _render_response(self, response, page):
+        if page is None:
+            return response
+        try:
+            js_code = self.rule.get("javascript_code")
+            if js_code:
                 await page.evaluate(js_code)
                 await page.wait_for_load_state("networkidle")
-                # 用渲染后 DOM 重建 selector
                 html = await page.content()
                 response = response.replace(body=html.encode("utf-8"))
-            except Exception as exc:
-                self.logger.warning(f"playwright evaluate 失败: {exc}")
-                # 出错时非 keep 场景马上关 page（原实现会漏关）
-
-        # R1-P2-21: 非 js_click 路径（含 infinite_scroll、evaluate 出错场景）
-        # 现在**统一**在这里关 page；不再依赖各分支各自记得关。
-        if page is not None and not keep_page_for_click:
-            try:
+            return response
+        except Exception:
+            if self.pagination_method == "js_click":
                 await page.close()
-            except Exception as pc_exc:
-                self.logger.debug(f"page.close 失败（可忽略）: {pc_exc}")
+            raise
+        finally:
+            if self.pagination_method != "js_click":
+                await page.close()
 
-        # 单条 item：一页一条，字段名 = extraction_rules[*].desc
-        item: dict[str, Any] = {
-            "_url": response.url,
-            "_page_number": response.meta.get("antcode_page_number") or self._pages_crawled,
+    def _record_pages_crawled(self) -> None:
+        stats = self.crawler.stats
+        if stats is None:
+            raise RuntimeError("Scrapy stats collector 未初始化")
+        stats.set_value("antcode/pages_crawled", self._pages_crawled)
+
+    def _build_item(self, response, page_number: int) -> dict[str, Any]:
+        item: dict[str, Any] = {"_url": response.url, "_page_number": page_number}
+        for rule in self.extraction_rules:
+            desc = rule.get("desc") or rule.get("field") or "value"
+            item[desc] = self._apply_rule(response, rule)
+        return item
+
+    def _next_request(self, response):
+        if self._pages_crawled >= self.max_pages:
+            return None
+        next_url = self._resolve_next_url(response)
+        if not next_url:
+            return None
+        current_page = response.meta.get("antcode_page_number") or self.start_page
+        inherited = {
+            key: response.meta[key] for key in ("playwright", "playwright_include_page") if key in response.meta
         }
-        for r in self.extraction_rules:
-            desc = r.get("desc") or r.get("field") or "value"
-            item[desc] = self._apply_rule(response, r)
-        yield item
+        inherited["antcode_page_number"] = current_page + 1
+        return response.follow(next_url, callback=self.parse, meta=inherited)
 
-        # 分页调度：
-        # - url_pattern / url_param 在 ``start`` 已展开，无需 follow
-        # - click_element 顺着 next_page_rule 抓 href 递归
-        # - infinite_scroll 单页搞定（滚动已在 playwright_page_methods 里执行）
-        # - js_click 在同一 Playwright page 里循环点击、抽下一页，一次请求
-        #   多页解析（yield 多条 item）
-        if self.pagination_method == "click_element":
-            if self._pages_crawled >= self.max_pages:
-                return
-            next_url = self._resolve_next_url(response)
-            if next_url:
-                next_page = (response.meta.get("antcode_page_number") or self.start_page) + 1
-                # response.meta 里有些 scrapy 内部字段不能透传，用白名单挑
-                inherited = {
-                    k: response.meta[k]
-                    for k in ("playwright", "playwright_include_page")
-                    if k in response.meta
-                }
-                inherited["antcode_page_number"] = next_page
-                yield response.follow(
-                    next_url,
-                    callback=self.parse,
-                    meta=inherited,
-                )
+    async def _clicked_items(self, response, page):
+        selector_type, expression = self._parse_next_selector()
+        selector = self._to_playwright_selector(selector_type, expression)
+        wait_ms = int(
+            self.pagination_cfg.get("wait_after_click_ms") or self.pagination_cfg.get("scroll_wait_ms") or 1000
+        )
+        current_page = response.meta.get("antcode_page_number") or self.start_page
+        try:
+            while self._pages_crawled < self.max_pages and selector:
+                if not await self._click_next(page, selector, wait_ms):
+                    break
+                self._pages_crawled += 1
+                current_page += 1
+                html = await page.content()
+                rendered = response.replace(body=html.encode("utf-8"), url=page.url)
+                self._record_pages_crawled()
+                yield self._build_item(rendered, current_page)
+        finally:
+            await page.close()
 
-        elif self.pagination_method == "js_click" and page is not None:
-            sel_type, expr = self._parse_next_selector()
-            playwright_selector = self._to_playwright_selector(sel_type, expr)
-            wait_ms = int(
-                self.pagination_cfg.get("wait_after_click_ms")
-                or self.pagination_cfg.get("scroll_wait_ms")
-                or 1000
-            )
-            current_page = response.meta.get("antcode_page_number") or self.start_page
-            try:
-                while self._pages_crawled < self.max_pages and playwright_selector:
-                    try:
-                        locator = page.locator(playwright_selector).first
-                        if await locator.count() == 0:
-                            self.logger.info(
-                                f"js_click: next selector {playwright_selector!r} 不存在，停止翻页"
-                            )
-                            break
-                        await locator.click()
-                    except Exception as exc:
-                        self.logger.info(f"js_click: click 失败/无更多页: {exc}")
-                        break
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=wait_ms + 5000)
-                    except Exception:
-                        await page.wait_for_timeout(wait_ms)
-                    else:
-                        # 保底再等 wait_ms，防止 SPA 局部渲染没触发 networkidle
-                        await page.wait_for_timeout(wait_ms)
-
-                    self._pages_crawled += 1
-                    current_page += 1
-                    html = await page.content()
-                    fake_response = response.replace(
-                        body=html.encode("utf-8"),
-                        url=page.url,
-                    )
-                    item2: dict[str, Any] = {
-                        "_url": page.url,
-                        "_page_number": current_page,
-                    }
-                    for r in self.extraction_rules:
-                        desc = r.get("desc") or r.get("field") or "value"
-                        item2[desc] = self._apply_rule(fake_response, r)
-                    yield item2
-                    try:
-                        self.crawler.stats.set_value(
-                            "antcode/pages_crawled", self._pages_crawled
-                        )
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+    async def _click_next(self, page, selector: str, wait_ms: int) -> bool:
+        locator = page.locator(selector).first
+        if await locator.count() == 0:
+            self.logger.info(f"js_click: next selector {selector!r} 不存在，停止翻页")
+            return False
+        await locator.click()
+        await page.wait_for_load_state("networkidle", timeout=wait_ms + 5000)
+        await page.wait_for_timeout(wait_ms)
+        return True
 
     def _apply_rule(self, response, rule: dict[str, Any]) -> Any:
         """一条规则：type=css/xpath/regex；单值返元素，多值返 list。"""
@@ -348,15 +292,11 @@ class UniversalRuleSpider(scrapy.Spider):
                 # 更彻底的方案是用支持超时的正则引擎（如 regex 库或 re2），
                 # 一期先做规则层拦截，避免恶意规则拖挂 worker。
                 if len(expr) > 512:
-                    self.logger.warning(
-                        f"regex 规则过长（{len(expr)}> 512）拒绝执行 desc={rule.get('desc')}"
-                    )
+                    self.logger.warning(f"regex 规则过长（{len(expr)}> 512）拒绝执行 desc={rule.get('desc')}")
                     return None
                 # 嵌套量词的启发式：(...)+... 或 (...)*... 里面又含 + 或 *
                 if re.search(r"\([^)]*[+*][^)]*\)[+*]", expr):
-                    self.logger.warning(
-                        f"regex 可能存在 catastrophic backtracking 拒绝执行: {expr!r}"
-                    )
+                    self.logger.warning(f"regex 可能存在 catastrophic backtracking 拒绝执行: {expr!r}")
                     return None
                 text = response.text if hasattr(response, "text") else ""
                 values = re.findall(expr, text)
@@ -398,7 +338,7 @@ class UniversalRuleSpider(scrapy.Spider):
                 # 直接抛 ValueError 被 except 吞掉，翻页静默终止。正确做法：
                 # 若含双引号则用单引号包，两者都含则用 XPath concat() 拼。
                 target = _xpath_string_literal(expr)
-                target = f'//a[contains(normalize-space(.), {target})]/@href'
+                target = f"//a[contains(normalize-space(.), {target})]/@href"
                 href = response.xpath(target).get()
             else:
                 # CSS：自动补 ::attr(href) 让抓 <a> 也能拿到链接
@@ -498,20 +438,18 @@ class UniversalRuleSpider(scrapy.Spider):
         ``list?p={0}`` 变 ``list?p=0`` `list?p=1` ... （0-indexed 也 OK）。
         """
         if self.pagination_method == "url_pattern":
-            template = str(
-                self.pagination_cfg.get("url_template")
-                or self.rule.get("target_url")
-                or ""
-            )
+            template = str(self.pagination_cfg.get("url_template") or self.rule.get("target_url") or "")
             if not template:
                 return None
             # {} 语义：str.format 风格，只替换第一次
             if "{}" in template:
                 return template.replace("{}", str(page), 1)
+
             # 优先命中数字 {N}（S7：N 起始页由构造函数已提取过，这里所有
             # {N} 都统一替换成当前 page，不管原本 N 是几）
-            def _replace_num(m: "re.Match[str]") -> str:
+            def _replace_num(m: re.Match[str]) -> str:
                 return str(page)
+
             replaced = self._NUMERIC_PLACEHOLDER_RE.sub(_replace_num, template)
             # 再替换命名 {page}/{page_number}
             return self._NAMED_PLACEHOLDER_RE.sub(str(page), replaced)

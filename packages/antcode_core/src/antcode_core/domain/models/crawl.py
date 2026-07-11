@@ -76,7 +76,7 @@ class CrawlBatch(BaseModel):
     description = fields.TextField(null=True, description="批次描述")
 
     # 种子配置
-    seed_urls = fields.JSONField(default=list, description="种子URL列表")
+    seed_urls: fields.JSONField[list[str]] = fields.JSONField(default=list, description="种子URL列表")
 
     # 爬取配置
     max_depth = fields.IntField(default=3, description="最大爬取深度")

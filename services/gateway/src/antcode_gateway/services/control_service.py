@@ -29,7 +29,6 @@ P3 LeaseStore 已接管租约状态机:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -46,9 +45,11 @@ from antcode_core.infrastructure.redis import (
     control_stream,
     decode_stream_payload,
     get_redis_client,
+    trim_acknowledged_stream,
 )
 from loguru import logger
 
+from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import LeaseHandler
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -116,33 +117,32 @@ class GatewayControlService(ControlServiceServicer):
         if not api_key:
             return control_pb2.RegisterResponse(success=False, error="缺少 API Key")
 
-        is_valid, error_msg, _worker = await self._verify_registration(
-            api_key=api_key, worker_id=worker_id
-        )
+        is_valid, error_msg, _worker = await self._verify_registration(api_key=api_key, worker_id=worker_id)
         if not is_valid:
-            logger.warning(
-                f"Register 验证失败: worker_id={worker_id}, error={error_msg}"
-            )
+            logger.warning(f"Register 验证失败: worker_id={worker_id}, error={error_msg}")
             return control_pb2.RegisterResponse(success=False, error=error_msg)
 
-        # 注册成功后立刻发首个 lease（若已注入 LeaseStore），
-        # 让 Worker 拿到注册响应就已经在 active 集合里。
-        ttl_ms = DEFAULT_LEASE_TTL_MS
-        renew_after_ms = DEFAULT_LEASE_RENEW_AFTER_MS
-        if self._lease_store is not None:
-            try:
-                await self._lease_store.grant(worker_id, current_lease_id="")
-                ttl_ms = self._lease_store.policy.ttl_ms
-                renew_after_ms = self._lease_store.policy.renew_after_ms
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(f"Register 阶段发首个 lease 失败（不阻塞注册）: {exc}")
+        if self._lease_store is None:
+            logger.error("Register 拒绝: LeaseStore 未就绪")
+            return control_pb2.RegisterResponse(
+                success=False,
+                error="lease service unavailable",
+            )
+        try:
+            await self._lease_store.grant(worker_id, current_lease_id="")
+        except Exception as exc:
+            logger.exception(f"Register 阶段发首个 lease 失败: {exc}")
+            return control_pb2.RegisterResponse(
+                success=False,
+                error="lease grant failed",
+            )
 
         logger.info(f"Worker 注册成功: worker_id={worker_id}")
         return control_pb2.RegisterResponse(
             success=True,
             worker_id=worker_id,
-            lease_ttl_ms=ttl_ms,
-            lease_renew_after_ms=renew_after_ms,
+            lease_ttl_ms=self._lease_store.policy.ttl_ms,
+            lease_renew_after_ms=self._lease_store.policy.renew_after_ms,
         )
 
     async def _verify_registration(
@@ -152,11 +152,14 @@ class GatewayControlService(ControlServiceServicer):
     ) -> tuple[bool, str, Worker | None]:
         """与旧 GatewayServiceImpl 行为一致的注册校验。"""
         try:
+            from antcode_core.common.security.api_key import verify_api_key
             from antcode_core.domain.models import Worker
 
-            worker = await Worker.filter(api_key=api_key).first()
-            if not worker:
+            if not await verify_api_key(api_key, worker_id or None):
                 return False, "无效的 API Key", None
+            worker = await Worker.filter(public_id=worker_id).first()
+            if worker is None:
+                return False, "Worker 不存在", None
             if worker_id and worker.public_id and worker_id != worker.public_id:
                 return False, "Worker ID 不匹配", None
             return True, "", worker
@@ -172,23 +175,8 @@ class GatewayControlService(ControlServiceServicer):
         request: control_pb2.DeregisterRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.DeregisterResponse:
-        worker_id = request.worker_id
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         reason = request.reason or "explicit"
-        # D7-1: 归属校验——请求头里的 worker 身份必须与被 Deregister 的 worker_id
-        # 一致，避免持有合法凭证的 worker A 去 Deregister worker B（DoS）。
-        # AuthInterceptor 已把 caller 身份写到 metadata；直接读，不再回查 DB。
-        caller_worker_id = ""
-        for md_key, md_val in context.invocation_metadata() or ():
-            if md_key == "x-worker-id":
-                caller_worker_id = md_val
-                break
-        if caller_worker_id and worker_id and caller_worker_id != worker_id:
-            logger.warning(
-                "拒绝 Deregister：caller x-worker-id=%s 与请求 worker_id=%s 不一致",
-                caller_worker_id, worker_id,
-            )
-            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "worker_id 不匹配")
-            return control_pb2.DeregisterResponse(success=False)
         logger.info(f"Worker Deregister: worker_id={worker_id}, reason={reason}")
         # 主动撤销 lease（让 Master 端立刻看到 worker 下线）。
         if self._lease_store is not None:
@@ -217,7 +205,7 @@ class GatewayControlService(ControlServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.LeaseResponse:
         """发租或续租：P3 走 LeaseStore，未注入时退回占位。"""
-        worker_id = request.worker_id
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         if not worker_id:
             return control_pb2.LeaseResponse(
                 lease_id="",
@@ -254,37 +242,23 @@ class GatewayControlService(ControlServiceServicer):
             except Exception as exc:
                 logger.warning(f"Lease 写 Redis 心跳 Hash 失败: {exc}")
 
-        # 主路径：LeaseStore.grant
-        if self._lease_store is not None:
-            try:
-                lease = await self._lease_store.grant(
-                    worker_id,
-                    current_lease_id=request.current_lease_id or "",
-                    metrics=metrics_dict,
-                )
-                return control_pb2.LeaseResponse(
-                    lease_id=lease.lease_id,
-                    expires_at_ms=lease.expires_at_ms,
-                    renew_after_ms=self._lease_store.policy.renew_after_ms,
-                    revoked=False,
-                )
-            except Exception as exc:
-                logger.exception(f"Lease grant 失败，降级为占位响应: worker_id={worker_id}, exc={exc}")
-                # 不要直接 abort —— 让 Worker 拿到非 revoked 响应继续运行，
-                # 下一次 sweep 自然剔除。
-
-        # 兜底（LeaseStore 未注入或 grant 异常）：占位 30s lease。
-        now_ms = int(time.time() * 1000)
-        placeholder_lease_id = f"lease-{worker_id}-{now_ms}"
-        expires_at_ms = now_ms + DEFAULT_LEASE_TTL_MS
-        logger.debug(
-            f"Lease 占位响应: worker_id={worker_id}, lease_id={placeholder_lease_id}, "
-            f"expires_at_ms={expires_at_ms}"
-        )
+        if self._lease_store is None:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
+            return control_pb2.LeaseResponse(revoked=True)
+        try:
+            lease = await self._lease_store.grant(
+                worker_id,
+                current_lease_id=request.current_lease_id or "",
+                metrics=metrics_dict,
+            )
+        except Exception as exc:
+            logger.exception(f"Lease grant 失败: worker_id={worker_id}, exc={exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease grant failed")
+            return control_pb2.LeaseResponse(revoked=True)
         return control_pb2.LeaseResponse(
-            lease_id=placeholder_lease_id,
-            expires_at_ms=expires_at_ms,
-            renew_after_ms=DEFAULT_LEASE_RENEW_AFTER_MS,
+            lease_id=lease.lease_id,
+            expires_at_ms=lease.expires_at_ms,
+            renew_after_ms=self._lease_store.policy.renew_after_ms,
             revoked=False,
         )
 
@@ -297,12 +271,10 @@ class GatewayControlService(ControlServiceServicer):
         request: control_pb2.CancelTaskRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.CancelTaskResponse:
-        worker_id = request.worker_id
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         # P2-#19: 协议违规 (参数缺失 / redis 不可用) 走 gRPC error。
         if not worker_id:
-            await context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空"
-            )
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空")
             return control_pb2.CancelTaskResponse(success=False, error="worker_id 不能为空")
 
         payload = build_cancel_control_payload(
@@ -310,25 +282,19 @@ class GatewayControlService(ControlServiceServicer):
             reason=request.reason,
             task_id=request.task_id or request.run_id,
         )
+        stream_payload: dict[str | bytes | int | float, str | bytes | int | float] = {
+            key: value for key, value in payload.items()
+        }
         try:
             redis = await get_redis_client()
             if redis is None:
-                await context.abort(
-                    grpc.StatusCode.UNAVAILABLE, "redis unavailable"
-                )
-                return control_pb2.CancelTaskResponse(
-                    success=False, error="redis unavailable"
-                )
-            # P1-#8: 限制 control stream 长度,避免无界增长。
+                await context.abort(grpc.StatusCode.UNAVAILABLE, "redis unavailable")
+                return control_pb2.CancelTaskResponse(success=False, error="redis unavailable")
             await redis.xadd(
                 control_stream(worker_id),
-                payload,
-                maxlen=CONTROL_STREAM_MAXLEN,
-                approximate=True,
+                stream_payload,
             )
-            logger.info(
-                f"已下发任务取消到 control:{worker_id}: task_id={request.task_id}"
-            )
+            logger.info(f"已下发任务取消到 control:{worker_id}: task_id={request.task_id}")
             return control_pb2.CancelTaskResponse(success=True)
         except grpc.aio.AbortError:
             raise
@@ -342,33 +308,25 @@ class GatewayControlService(ControlServiceServicer):
         request: control_pb2.UpdateConfigRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.UpdateConfigResponse:
-        worker_id = request.worker_id
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         # P2-#19: 协议违规 (参数缺失 / redis 不可用) 走 gRPC error。
         if not worker_id:
-            await context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空"
-            )
-            return control_pb2.UpdateConfigResponse(
-                success=False, error="worker_id 不能为空"
-            )
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空")
+            return control_pb2.UpdateConfigResponse(success=False, error="worker_id 不能为空")
 
         config = dict(request.config) if request.config else {}
         payload = build_config_update_control_payload(config)
+        stream_payload: dict[str | bytes | int | float, str | bytes | int | float] = {
+            key: value for key, value in payload.items()
+        }
         try:
             redis = await get_redis_client()
             if redis is None:
-                await context.abort(
-                    grpc.StatusCode.UNAVAILABLE, "redis unavailable"
-                )
-                return control_pb2.UpdateConfigResponse(
-                    success=False, error="redis unavailable"
-                )
-            # P1-#8: 限制 control stream 长度,避免无界增长。
+                await context.abort(grpc.StatusCode.UNAVAILABLE, "redis unavailable")
+                return control_pb2.UpdateConfigResponse(success=False, error="redis unavailable")
             await redis.xadd(
                 control_stream(worker_id),
-                payload,
-                maxlen=CONTROL_STREAM_MAXLEN,
-                approximate=True,
+                stream_payload,
             )
             logger.info(f"已下发配置更新到 control:{worker_id}")
             return control_pb2.UpdateConfigResponse(success=True)
@@ -393,7 +351,7 @@ class GatewayControlService(ControlServiceServicer):
         从旧 ``GatewayServiceImpl._control_poller`` 抽取并改造为 server-streaming
         模式，避免 worker 端的拉取协程开销。
         """
-        worker_id = request.worker_id
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         if not worker_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空")
             return
@@ -434,10 +392,7 @@ class GatewayControlService(ControlServiceServicer):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(
-                    f"WatchControl PEL 排空失败(继续读新消息): worker={worker_id} err={exc}"
-                )
-                pel_result = None
+                raise RuntimeError(f"WatchControl PEL 排空失败: worker={worker_id}") from exc
 
             if pel_result:
                 pel_total = 0
@@ -456,15 +411,10 @@ class GatewayControlService(ControlServiceServicer):
                             data=data,
                         )
                         if event is None:
-                            with contextlib.suppress(Exception):
-                                await redis.xack(stream_key, group, msg_id)
-                            continue
+                            raise ValueError(f"未知 control event: stream={stream_key} msg_id={msg_id}")
                         yield event
                 if pel_total:
-                    logger.info(
-                        f"WatchControl PEL 排空: worker_id={worker_id} "
-                        f"replayed={pel_total}"
-                    )
+                    logger.info(f"WatchControl PEL 排空: worker_id={worker_id} replayed={pel_total}")
 
             while True:
                 # 客户端取消即退出
@@ -482,9 +432,7 @@ class GatewayControlService(ControlServiceServicer):
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    logger.exception(f"WatchControl xreadgroup 异常: {exc}")
-                    await asyncio.sleep(1.0)
-                    continue
+                    raise RuntimeError("WatchControl xreadgroup 失败") from exc
 
                 if not result:
                     continue
@@ -503,10 +451,7 @@ class GatewayControlService(ControlServiceServicer):
                             data=data,
                         )
                         if event is None:
-                            # 未识别的 control_type - 直接 ack 避免阻塞
-                            with contextlib.suppress(Exception):
-                                await redis.xack(stream_key, group, msg_id)
-                            continue
+                            raise ValueError(f"未知 control event: stream={stream_key} msg_id={msg_id}")
                         yield event
 
         except asyncio.CancelledError:
@@ -610,10 +555,7 @@ class GatewayControlService(ControlServiceServicer):
                 ),
             )
 
-        logger.warning(
-            f"未识别的 control_type: stream={stream_key} msg_id={msg_id} "
-            f"control_type={control_type}"
-        )
+        logger.warning(f"未识别的 control_type: stream={stream_key} msg_id={msg_id} control_type={control_type}")
         return None
 
     async def AckControl(
@@ -621,6 +563,7 @@ class GatewayControlService(ControlServiceServicer):
         request: control_pb2.AckControlRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.AckControlResponse:
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         event_id = request.event_id
         if not event_id:
             return control_pb2.AckControlResponse(received=False)
@@ -634,6 +577,16 @@ class GatewayControlService(ControlServiceServicer):
         if not stream_key or not msg_id:
             logger.warning(f"AckControl event_id 缺失字段: {event_id}")
             return control_pb2.AckControlResponse(received=False)
+        allowed_streams = {
+            control_stream(worker_id),
+            control_global_stream(),
+        }
+        if stream_key not in allowed_streams:
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "control stream does not belong to authenticated worker",
+            )
+            return control_pb2.AckControlResponse(received=False)
 
         try:
             redis = await get_redis_client()
@@ -641,14 +594,23 @@ class GatewayControlService(ControlServiceServicer):
                 return control_pb2.AckControlResponse(received=False)
             acked = await redis.xack(stream_key, control_group(), msg_id)
             received = int(acked or 0) > 0
+            if received:
+                try:
+                    await trim_acknowledged_stream(
+                        redis,
+                        stream_key,
+                        control_group(),
+                    )
+                except Exception:
+                    logger.exception(
+                        "AckControl 后裁剪失败: stream={} msg_id={}",
+                        stream_key,
+                        msg_id,
+                    )
             if not received:
-                logger.warning(
-                    f"AckControl 未命中: stream={stream_key} msg_id={msg_id}"
-                )
+                logger.warning(f"AckControl 未命中: stream={stream_key} msg_id={msg_id}")
             if not request.success and request.error:
-                logger.warning(
-                    f"Worker 上报控制事件执行失败: event_id={event_id} error={request.error}"
-                )
+                logger.warning(f"Worker 上报控制事件执行失败: event_id={event_id} error={request.error}")
             return control_pb2.AckControlResponse(received=received)
         except Exception as exc:
             logger.exception(f"AckControl 异常: {exc}")
@@ -673,4 +635,3 @@ class GatewayControlService(ControlServiceServicer):
                     logger.exception(f"创建 control 消费者组失败: {exc}")
                     raise
             self._initialized_control_groups.add(key)
-

@@ -38,7 +38,6 @@ from prometheus_client import (
     generate_latest,
 )
 
-
 REGISTRY = CollectorRegistry(auto_describe=True)
 
 HTTP_REQUESTS = Counter(
@@ -165,9 +164,7 @@ class PrometheusMiddleware:
             request = Request(scope)
             path = _normalize_path(request)
             method = scope.get("method", "?")
-            HTTP_REQUESTS.labels(
-                method=method, path=path, status=str(status_holder["code"])
-            ).inc()
+            HTTP_REQUESTS.labels(method=method, path=path, status=str(status_holder["code"])).inc()
             HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
 
 

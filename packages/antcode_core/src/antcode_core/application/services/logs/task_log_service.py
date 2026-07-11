@@ -10,6 +10,7 @@ stream 相关能力（``file_stream_service`` / ``log_chunk_receiver`` /
 - ``get_execution_logs(run_id)``：读取 ``task_logs``，Redis Stream 作为
   PG ingest 尚未刷盘时的短期回落。
 """
+
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -66,9 +67,7 @@ class TaskLogService:
         normalized_type = (log_type or "stdout").lower()
         limit = int(lines) if lines and lines > 0 else 10000
         try:
-            entries = await postgres_log_service.list_entries(
-                run_id, limit=limit, log_type=normalized_type
-            )
+            entries = await postgres_log_service.list_entries(run_id, limit=limit, log_type=normalized_type)
         except Exception as exc:
             logger.debug("read_log PG 查询失败 run_id={}: {}", run_id, exc)
             return ""
@@ -172,11 +171,7 @@ class TaskLogService:
                     if run_id_filter and entry.run_id != run_id_filter:
                         continue
                     name = data_pb2.LogType.Name(entry.log_type)
-                    log_type = (
-                        name.removeprefix("LOG_TYPE_").lower()
-                        if name.startswith("LOG_TYPE_")
-                        else name.lower()
-                    )
+                    log_type = name.removeprefix("LOG_TYPE_").lower() if name.startswith("LOG_TYPE_") else name.lower()
                     out.append((log_type, entry.content or ""))
                 return out
             except Exception:

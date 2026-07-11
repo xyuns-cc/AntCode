@@ -17,7 +17,7 @@ P1-09: refresh token 从纯 JWT 升级为 JWT + 服务端 jti (UserSession 表),
 
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import jwt
@@ -87,8 +87,7 @@ class JWTSecretManager:
     def regenerate(self) -> str:
         """重新生成密钥 —— 已禁用,改为运维侧轮换。"""
         raise RuntimeError(
-            "JWTSecretManager.regenerate() is disabled; "
-            "rotate JWT_SECRET via deployment configuration instead."
+            "JWTSecretManager.regenerate() is disabled; rotate JWT_SECRET via deployment configuration instead."
         )
 
 
@@ -103,6 +102,7 @@ class TokenData(BaseModel):
     is_admin: bool = False
     role: str = "user"
     exp: datetime
+    session_jti: str | None = None
 
     @property
     def is_super_admin(self) -> bool:
@@ -143,12 +143,18 @@ class JWTAuth:
         self,
         user_id: int,
         username: str,
+        *,
         expires_delta: timedelta | None = None,
         is_admin: bool = False,
         role: str = "user",
+        session_jti: str | None = None,
     ) -> str:
         """创建访问令牌"""
-        extra = {"is_admin": is_admin, "role": role}
+        extra = {
+            "is_admin": is_admin,
+            "role": role,
+            "session_jti": session_jti,
+        }
         return self._create_token(
             user_id=user_id,
             username=username,
@@ -178,9 +184,7 @@ class JWTAuth:
         并异步 ``await record_refresh_session(user_id, jti, exp)``。
         """
         jti = uuid.uuid4().hex  # 32-char, RFC 7519 §4.1.7
-        expire = datetime.utcnow() + (
-            expires_delta or timedelta(days=self.refresh_expire_days)
-        )
+        expire = datetime.utcnow() + (expires_delta or timedelta(days=self.refresh_expire_days))
         payload = {
             "user_id": user_id,
             "username": username,
@@ -269,6 +273,7 @@ class JWTAuth:
                 is_admin=payload.get("is_admin", False),
                 role=payload.get("role", "admin" if payload.get("is_admin") else "user"),
                 exp=datetime.fromtimestamp(payload["exp"]),
+                session_jti=payload.get("session_jti"),
             )
         except jwt.ExpiredSignatureError:
             raise TOKEN_EXPIRED_ERROR
@@ -304,9 +309,26 @@ security = HTTPBearer()
 # === 依赖注入函数 ===
 
 
-def get_current_user(credentials=Depends(security)) -> TokenData:
-    """获取当前用户"""
-    return jwt_auth.verify_token(credentials.credentials)
+async def get_current_user(credentials=Depends(security)) -> TokenData:
+    """获取当前用户，并校验 access token 对应的服务端会话。"""
+    token_data = jwt_auth.verify_token(credentials.credentials)
+    if not token_data.session_jti:
+        raise AUTH_ERROR
+
+    from antcode_core.domain.models.user import User
+    from antcode_core.domain.models.user_session import UserSession
+
+    session = await UserSession.filter(
+        jti=token_data.session_jti,
+        user_id=token_data.user_id,
+        revoked_at__isnull=True,
+    ).first()
+    user = await User.get_or_none(id=token_data.user_id)
+    if session is None or user is None or not user.is_active:
+        raise AUTH_ERROR
+
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return token_data.model_copy(update={"username": user.username, "is_admin": user.is_admin, "role": role})
 
 
 def get_current_user_id(current_user: TokenData = Depends(get_current_user)) -> int:
@@ -366,7 +388,7 @@ async def verify_refresh_token(token: str) -> TokenData:
     from antcode_core.domain.models.user_session import UserSession
 
     session = await UserSession.filter(jti=jti).first()
-    if session is None or session.revoked_at is not None:
+    if session is None or session.revoked_at is not None or session.user_id != token_data.user_id:
         logger.info(
             f"P1-09: refresh 拒绝 user={token_data.user_id} jti={jti[:8]}… "
             f"(session={'missing' if session is None else 'revoked'})"
@@ -377,7 +399,7 @@ async def verify_refresh_token(token: str) -> TokenData:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return token_data
+    return token_data.model_copy(update={"session_jti": jti})
 
 
 async def record_refresh_session(
@@ -402,6 +424,52 @@ async def record_refresh_session(
         expires_at=expires_at,
         device_info=device_info,
     )
+
+
+async def rotate_refresh_session(
+    *,
+    user_id: int,
+    previous_jti: str,
+    new_jti: str,
+    expires_at: datetime,
+    device_info: str | None = None,
+) -> None:
+    """原子消费旧 refresh session 并创建下一代 session。"""
+    from tortoise.transactions import in_transaction
+
+    from antcode_core.domain.models.user_session import UserSession
+
+    async with in_transaction() as connection:
+        revoked = (
+            await UserSession.filter(
+                user_id=user_id,
+                jti=previous_jti,
+                revoked_at__isnull=True,
+            )
+            .using_db(connection)
+            .update(revoked_at=datetime.now(UTC))
+        )
+        if revoked != 1:
+            raise AUTH_ERROR
+        await UserSession.create(
+            using_db=connection,
+            user_id=user_id,
+            jti=new_jti,
+            expires_at=expires_at,
+            device_info=device_info,
+        )
+
+
+async def revoke_refresh_session(user_id: int, jti: str) -> bool:
+    """撤销单个用户会话，供显式登出使用。"""
+    from antcode_core.domain.models.user_session import UserSession
+
+    updated = await UserSession.filter(
+        user_id=user_id,
+        jti=jti,
+        revoked_at__isnull=True,
+    ).update(revoked_at=datetime.now(UTC))
+    return updated == 1
 
 
 async def verify_token(token: str) -> TokenData:

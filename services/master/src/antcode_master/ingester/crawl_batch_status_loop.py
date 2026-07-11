@@ -18,10 +18,9 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from loguru import logger
-
 from antcode_core.domain.models import CrawlBatch, TaskRun  # noqa: F401  # TaskRun 用于 raw() 类型标注
 from antcode_core.domain.models.enums import BatchStatus, TaskStatus
+from loguru import logger
 
 from antcode_master.leader import ensure_leader
 
@@ -55,9 +54,7 @@ class CrawlBatchStatusLoop:
             return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
-        logger.info(
-            f"crawl 批次状态推导 loop 已启动: interval={self._poll_interval}s"
-        )
+        logger.info(f"crawl 批次状态推导 loop 已启动: interval={self._poll_interval}s")
 
     async def stop(self) -> None:
         if not self._running:
@@ -114,13 +111,9 @@ class CrawlBatchStatusLoop:
             try:
                 await self._reconcile_batch(batch, stats.get(batch.public_id))
             except Exception as exc:
-                logger.exception(
-                    f"batch 状态推导失败: batch_id={batch.public_id} err={exc}"
-                )
+                logger.exception(f"batch 状态推导失败: batch_id={batch.public_id} err={exc}")
 
-    async def _fetch_batch_stats(
-        self, batch_ids: list[str]
-    ) -> dict[str, dict[str, int]]:
+    async def _fetch_batch_stats(self, batch_ids: list[str]) -> dict[str, dict[str, int]]:
         """一次拉出所有 batch 的 run 状态计数。
 
         Returns:
@@ -189,9 +182,7 @@ class CrawlBatchStatusLoop:
             if batch.started_at:
                 elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
                 if elapsed > self.EMPTY_BATCH_TIMEOUT_SECONDS:
-                    if await self._cas_terminate(
-                        batch, BatchStatus.FAILED.value
-                    ):
+                    if await self._cas_terminate(batch, BatchStatus.FAILED.value):
                         logger.warning(
                             f"batch 空转超时 FAILED: batch_id={batch.public_id} "
                             f"elapsed={elapsed:.0f}s seed_count={seed_count}"
@@ -213,19 +204,14 @@ class CrawlBatchStatusLoop:
             if batch.started_at:
                 elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
                 if elapsed > self.INCOMPLETE_DISPATCH_TIMEOUT_SECONDS:
-                    if await self._cas_terminate(
-                        batch, BatchStatus.FAILED.value
-                    ):
+                    if await self._cas_terminate(batch, BatchStatus.FAILED.value):
                         logger.warning(
                             f"batch seed 未派完超时 FAILED: batch_id={batch.public_id} "
                             f"total={total} seed={seed_count} elapsed={elapsed:.0f}s"
                         )
                     return
             # 未超时：让 batch_dispatcher/redispatch 继续追派剩余 URL，本轮不动。
-            logger.debug(
-                f"batch seed 未派完，等待派发: batch_id={batch.public_id} "
-                f"total={total} seed={seed_count}"
-            )
+            logger.debug(f"batch seed 未派完，等待派发: batch_id={batch.public_id} total={total} seed={seed_count}")
             return
 
         if success == total:
@@ -268,8 +254,7 @@ class CrawlBatchStatusLoop:
         ).update(status=new_status, completed_at=now)
         if not updated:
             logger.info(
-                f"batch {batch.public_id} 状态被 API 抢先改动 "
-                f"(loop 期望 running→{new_status}), 跳过本轮 loop 更新"
+                f"batch {batch.public_id} 状态被 API 抢先改动 (loop 期望 running→{new_status}), 跳过本轮 loop 更新"
             )
             return False
         # 同步内存对象，方便后续 caller 使用（虽然本函数返回后 batch 就不会

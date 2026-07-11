@@ -286,7 +286,7 @@ class StreamClient:
 
     def _parse_xread_result(self, result, stream_key: str) -> list[StreamMessage]:
         """解析 XREAD/XREADGROUP 结果"""
-        messages = []
+        messages: list[StreamMessage] = []
 
         if not result:
             return messages

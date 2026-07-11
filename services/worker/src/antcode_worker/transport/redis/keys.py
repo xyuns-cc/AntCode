@@ -441,7 +441,7 @@ class RedisKeys:
     # ==================== 工具方法 ====================
 
     @staticmethod
-    def parse_key(key: str) -> dict[str, str]:
+    def parse_key(key: str) -> dict[str, str | list[str]]:
         """
         解析 key 结构
 
@@ -452,7 +452,7 @@ class RedisKeys:
             解析后的字典，包含 namespace、type、id 等
         """
         parts = key.split(":")
-        result = {"raw": key, "parts": parts}
+        result: dict[str, str | list[str]] = {"raw": key, "parts": parts}
 
         if len(parts) >= 1:
             result["namespace"] = parts[0]

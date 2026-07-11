@@ -31,18 +31,12 @@ class UserSession(models.Model):
     """
 
     id = fields.IntField(pk=True)
-    user_id = fields.IntField(index=True, description="所属用户 User.id")
-    jti = fields.CharField(
-        max_length=64, unique=True, description="refresh token JWT ID (uuid4.hex, 32 chars)"
-    )
+    user_id = fields.BigIntField(index=True, description="所属用户 User.id")
+    jti = fields.CharField(max_length=64, unique=True, description="refresh token JWT ID (uuid4.hex, 32 chars)")
     created_at = fields.DatetimeField(auto_now_add=True)
     expires_at = fields.DatetimeField(index=True, description="refresh token 过期时间 (清理用)")
-    revoked_at = fields.DatetimeField(
-        null=True, description="P1-09: 撤销时间戳; 非空即视为已失效"
-    )
-    device_info = fields.CharField(
-        max_length=256, null=True, description="UA/IP 摘要 (可选, 用于登录审计)"
-    )
+    revoked_at = fields.DatetimeField(null=True, description="P1-09: 撤销时间戳; 非空即视为已失效")
+    device_info = fields.CharField(max_length=256, null=True, description="UA/IP 摘要 (可选, 用于登录审计)")
 
     class Meta:
         table = "user_sessions"

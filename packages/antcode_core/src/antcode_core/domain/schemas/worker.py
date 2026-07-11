@@ -26,22 +26,22 @@ class WorkerCapabilities(BaseModel):
 class WorkerMetrics(BaseModel):
     """Worker 指标"""
 
-    cpu: float = Field(0, ge=0, le=100, description="CPU 使用率")
-    memory: float = Field(0, ge=0, le=100, description="内存使用率")
-    disk: float = Field(0, ge=0, le=100, description="磁盘使用率")
-    taskCount: int = Field(0, ge=0, description="任务总数")
-    runningTasks: int = Field(0, ge=0, description="运行中任务数")
-    maxConcurrentTasks: int = Field(5, ge=1, description="最大并发任务数")
-    projectCount: int = Field(0, ge=0, description="项目总数")
-    envCount: int = Field(0, ge=0, description="环境总数")
-    uptime: int = Field(0, ge=0, description="运行时间（秒）")
-    cpuCores: int = Field(0, description="CPU 核心数")
-    memoryTotal: int = Field(0, description="总内存 (bytes)")
-    memoryUsed: int = Field(0, description="已用内存 (bytes)")
-    memoryAvailable: int = Field(0, description="可用内存 (bytes)")
-    diskTotal: int = Field(0, description="总磁盘 (bytes)")
-    diskUsed: int = Field(0, description="已用磁盘 (bytes)")
-    diskFree: int = Field(0, description="可用磁盘 (bytes)")
+    cpu: float = Field(default=0, ge=0, le=100, description="CPU 使用率")
+    memory: float = Field(default=0, ge=0, le=100, description="内存使用率")
+    disk: float = Field(default=0, ge=0, le=100, description="磁盘使用率")
+    taskCount: int = Field(default=0, ge=0, description="任务总数")
+    runningTasks: int = Field(default=0, ge=0, description="运行中任务数")
+    maxConcurrentTasks: int = Field(default=5, ge=1, description="最大并发任务数")
+    projectCount: int = Field(default=0, ge=0, description="项目总数")
+    envCount: int = Field(default=0, ge=0, description="环境总数")
+    uptime: int = Field(default=0, ge=0, description="运行时间（秒）")
+    cpuCores: int = Field(default=0, description="CPU 核心数")
+    memoryTotal: int = Field(default=0, description="总内存 (bytes)")
+    memoryUsed: int = Field(default=0, description="已用内存 (bytes)")
+    memoryAvailable: int = Field(default=0, description="可用内存 (bytes)")
+    diskTotal: int = Field(default=0, description="总磁盘 (bytes)")
+    diskUsed: int = Field(default=0, description="已用磁盘 (bytes)")
+    diskFree: int = Field(default=0, description="可用磁盘 (bytes)")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -132,12 +132,12 @@ class WorkerAggregateStats(BaseModel):
 class SpiderStatsSummary(BaseModel):
     """爬虫统计摘要 - 用于心跳上报和 API 响应"""
 
-    requestCount: int = Field(0, ge=0, description="请求总数")
-    responseCount: int = Field(0, ge=0, description="响应总数")
-    itemScrapedCount: int = Field(0, ge=0, description="抓取数据项数")
-    errorCount: int = Field(0, ge=0, description="错误总数")
-    avgLatencyMs: float = Field(0.0, ge=0, description="平均延迟(毫秒)")
-    requestsPerMinute: float = Field(0.0, ge=0, description="每分钟请求数")
+    requestCount: int = Field(default=0, ge=0, description="请求总数")
+    responseCount: int = Field(default=0, ge=0, description="响应总数")
+    itemScrapedCount: int = Field(default=0, ge=0, description="抓取数据项数")
+    errorCount: int = Field(default=0, ge=0, description="错误总数")
+    avgLatencyMs: float = Field(default=0.0, ge=0, description="平均延迟(毫秒)")
+    requestsPerMinute: float = Field(default=0.0, ge=0, description="每分钟请求数")
     statusCodes: dict[str, int] = Field(default_factory=dict, description="状态码分布")
 
     @classmethod
@@ -200,19 +200,6 @@ class WorkerRegisterResponse(BaseModel):
     worker_id: str = Field(..., description="Worker 公开ID")
     api_key: str = Field(..., description="API密钥")
     secret_key: str = Field(..., description="密钥")
-
-
-class WorkerCredentialsResponse(BaseModel):
-    """Worker 凭证响应"""
-
-    worker_id: str = Field(..., description="Worker 公开ID")
-    api_key: str = Field(..., description="API密钥")
-    secret_key: str = Field(..., description="密钥")
-    gateway_host: str = Field(..., description="Gateway 主机")
-    gateway_port: int = Field(..., description="Gateway 端口")
-    transport_mode: str = Field(..., description="Worker 传输模式")
-    redis_url: str = Field("", description="Redis URL（Direct 模式）")
-    config_example: str = Field(..., description="Worker 配置示例")
 
 
 class WorkerInstallKeyRequest(BaseModel):
@@ -295,7 +282,6 @@ __all__ = [
     "WorkerRegisterResponse",
     "WorkerRegisterDirectRequest",
     "WorkerRegisterDirectResponse",
-    "WorkerCredentialsResponse",
     "WorkerInstallKeyRequest",
     "WorkerInstallKeyResponse",
     "WorkerRegisterByKeyRequest",

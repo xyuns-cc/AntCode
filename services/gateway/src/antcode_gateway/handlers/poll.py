@@ -26,6 +26,7 @@ from antcode_core.infrastructure.redis import (
     decode_stream_payload,
     redis_namespace,
     task_ready_stream,
+    trim_acknowledged_stream,
     worker_group,
 )
 from antcode_core.observability.tracing import inject_trace
@@ -37,13 +38,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 @dataclass
 class TaskInfo:
-    """任务信息（保持向后兼容的 dataclass，方便单元测试）。
-
-    P1-24: 新增 ``source_bundle_*`` / ``transfer_method`` / ``resolved_revision``
-    / ``source_subdir`` 字段，与 Master ``worker_dispatcher._send_batch_to_queue``
-    实际写入 ready stream 的字段名对齐；旧的 ``download_url`` / ``file_hash``
-    仅作为兜底解析，禁止再作为主链路来源。
-    """
+    """与当前 ready stream 契约一致的任务信息。"""
 
     task_id: str
     project_id: str
@@ -51,10 +46,6 @@ class TaskInfo:
     project_type: str = "spider"
     priority: int = 0
     timeout: int = 3600
-    # 兼容旧字段（Master 切换 source bundle 之前的老实现）
-    download_url: str = ""
-    file_hash: str = ""
-    # P1-24: 新字段，Master 现在写这些
     source_bundle_uri: str = ""
     source_bundle_sha256: str = ""
     source_bundle_size: int = 0
@@ -94,18 +85,9 @@ def _pb_scalar_for(value: object) -> str:
 
 
 def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
-    """把内部 ``TaskInfo`` 转码为 Proto ``TaskDispatch`` 供 StreamTasks 推送。
-
-    P1-24: 优先使用新的 ``source_bundle_*`` 字段，仅在缺失时才 fallback 到
-    旧 ``download_url`` / ``file_hash``。这样 Code/File 主链在 gateway
-    模式下能真正拿到 Master 派发的 source bundle 元数据。
-
-    P1-#6: 把 TaskInfo 上携带的 ``trace_parent`` 写到 dispatch.trace,
-    让 worker 端拿到 W3C traceparent 后能续接。
-    """
-    # P1-24: source bundle 元数据 —— 新字段优先，旧字段兜底
-    src_uri = task.source_bundle_uri or task.download_url or ""
-    src_sha = task.source_bundle_sha256 or task.file_hash or ""
+    """把内部 ``TaskInfo`` 转码为 Proto ``TaskDispatch`` 供 Worker 消费。"""
+    src_uri = task.source_bundle_uri or ""
+    src_sha = task.source_bundle_sha256 or ""
     src_size = int(task.source_bundle_size or 0)
     transfer_method = task.transfer_method or ("source_bundle" if src_uri else "")
 
@@ -180,100 +162,92 @@ class TaskPollHandler:
     async def handle(
         self,
         worker_id: str,
+        *,
         max_tasks: int = 1,
         block_ms: int = 5000,
         queues: list[str] | None = None,
     ) -> list[TaskInfo]:
         """处理任务轮询请求（同步式拉取，用于 StreamTasks 内部循环）。"""
-        logger.debug(
-            f"Worker {worker_id} 轮询任务，最多 {max_tasks} 个，阻塞 {block_ms}ms"
-        )
+        logger.debug(f"Worker {worker_id} 轮询任务，最多 {max_tasks} 个，阻塞 {block_ms}ms")
 
         redis = await self._get_redis_client()
         if redis is None:
-            logger.warning("Redis 不可用，返回空任务列表")
-            return []
+            raise RuntimeError("Redis 不可用，无法轮询任务")
 
-        try:
-            if queues is None:
-                queues = [task_ready_stream(worker_id)]
+        queue_names = queues or [task_ready_stream(worker_id)]
+        results = await self._read_streams(
+            redis,
+            queue_names,
+            worker_id,
+            max_tasks=max_tasks,
+            block_ms=block_ms,
+        )
+        tasks = self._tasks_from_results(results)
+        logger.info(f"Worker {worker_id} 获取了 {len(tasks)} 个任务")
+        return tasks
 
-            for queue in queues:
-                await self._ensure_consumer_group(redis, queue, self.WORKER_GROUP)
+    async def _read_streams(
+        self,
+        redis,
+        queues: list[str],
+        worker_id: str,
+        *,
+        max_tasks: int,
+        block_ms: int,
+    ) -> list:
+        for queue in queues:
+            await self._ensure_consumer_group(redis, queue, self.WORKER_GROUP)
+        pending = await self._drain_pending_streams(
+            redis,
+            queues,
+            worker_id,
+            max_tasks=max_tasks,
+        )
+        live = await redis.xreadgroup(
+            groupname=self.WORKER_GROUP,
+            consumername=worker_id,
+            streams=dict.fromkeys(queues, ">"),
+            count=max_tasks,
+            block=block_ms,
+        )
+        return [*pending, *(live or [])]
 
-            # B3: 先排空 PEL —— worker 崩溃或断线时，之前 XREADGROUP 到但未
-            # 发出 AckTask 的消息挂在该 consumer 的 PEL 下。旧实现直接读 ">"
-            # 只会拉新消息，PEL 里的孤儿永远无人回收（gateway 侧无 XAUTOCLAIM
-            # loop）。重连时先用 "0" 读一遍 pending，把它们交回给 worker
-            # 处理（幂等由 worker B2 SET NX 保护），然后再读 ">"。
-            pel_results = await self._drain_pending_streams(
-                redis, queues, worker_id, max_tasks
-            )
+    def _tasks_from_results(self, results: list) -> list[TaskInfo]:
+        tasks = []
+        for stream_name, messages in results:
+            stream = self._decode_identifier(stream_name)
+            for message_id, data in messages:
+                message = self._decode_identifier(message_id)
+                task = self._parse_task_data(data, message_id)
+                task.receipt_id = f"{stream}|{message}"
+                tasks.append(task)
+                logger.debug(f"读取任务: task_id={task.task_id}, stream={stream}, message_id={message}")
+        return tasks
 
-            streams = dict.fromkeys(queues, ">")
-
-            live_results = await redis.xreadgroup(
-                groupname=self.WORKER_GROUP,
-                consumername=worker_id,
-                streams=streams,
-                count=max_tasks,
-                block=block_ms,
-            )
-
-            results = list(pel_results) + list(live_results or [])
-            if not results:
-                return []
-
-            tasks = []
-            for stream_name, messages in results:
-                for message_id, data in messages:
-                    task = self._parse_task_data(data, message_id)
-                    if task:
-                        sname = (
-                            stream_name.decode()
-                            if isinstance(stream_name, bytes)
-                            else str(stream_name)
-                        )
-                        mid = (
-                            message_id.decode()
-                            if isinstance(message_id, bytes)
-                            else str(message_id)
-                        )
-                        task.receipt_id = f"{sname}|{mid}"
-                        tasks.append(task)
-                        logger.debug(
-                            f"读取任务: task_id={task.task_id}, stream={sname}, message_id={mid}"
-                        )
-
-            logger.info(f"Worker {worker_id} 获取了 {len(tasks)} 个任务")
-            return tasks
-
-        except Exception as exc:
-            logger.exception(f"读取任务失败: {exc}")
-            return []
+    @staticmethod
+    def _decode_identifier(value: object) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return str(value)
 
     async def _drain_pending_streams(
         self,
         redis,
         queues: list[str],
         worker_id: str,
+        *,
         max_tasks: int,
     ) -> list:
         """B3: 排空 (worker) 每个 stream 上的 PEL 到本次响应，让重连的 worker
         真正拿到自己之前未 ack 的消息。仅返回不为空的 stream。
         """
-        pel_streams = dict.fromkeys(queues, "0")
-        try:
-            pel = await redis.xreadgroup(
-                groupname=self.WORKER_GROUP,
-                consumername=worker_id,
-                streams=pel_streams,
-                count=max_tasks,
-                block=0,
-            )
-        except Exception as exc:
-            logger.warning(f"排空 PEL 失败(继续读新消息): worker={worker_id} err={exc}")
-            return []
+        pel = await redis.xreadgroup(
+            groupname=self.WORKER_GROUP,
+            consumername=worker_id,
+            streams=dict.fromkeys(queues, "0"),
+            count=max_tasks,
+            block=0,
+        )
         if not pel:
             return []
         # 过滤空 messages 的 stream；有则 log 一下方便运维排查
@@ -283,78 +257,49 @@ class TaskPollHandler:
             logger.info(f"B3 PEL 排空: worker={worker_id} 找到 {total} 条孤儿消息")
         return result
 
-    def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo | None:
-        try:
-            decoded = decode_stream_payload(data)
+    def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo:
+        decoded = decode_stream_payload(data)
+        task_id = decoded.get("task_id")
+        if not task_id:
+            raise ValueError(f"任务数据缺少 task_id: {message_id}")
+        return TaskInfo(
+            task_id=str(task_id),
+            project_id=str(decoded.get("project_id", "")),
+            run_id=str(decoded.get("run_id", "")),
+            project_type=str(decoded.get("project_type", "spider")),
+            priority=int(decoded.get("priority", 0) or 0),
+            timeout=int(decoded.get("timeout", 3600) or 3600),
+            source_bundle_uri=str(decoded.get("source_bundle_uri", "") or ""),
+            source_bundle_sha256=str(decoded.get("source_bundle_sha256", "") or ""),
+            source_bundle_size=int(decoded.get("source_bundle_size", 0) or 0),
+            transfer_method=str(decoded.get("transfer_method", "") or ""),
+            resolved_revision=str(decoded.get("resolved_revision", "") or ""),
+            source_subdir=str(decoded.get("source_subdir", "") or ""),
+            entry_point=str(decoded.get("entry_point", "") or ""),
+            params=self._parse_json(decoded.get("params", "{}"), "params"),
+            environment=self._parse_json(decoded.get("environment", "{}"), "environment"),
+            trace_parent=str(decoded.get("trace_parent", "") or ""),
+        )
 
-            task_id = decoded.get("task_id")
-            if not task_id:
-                logger.warning(f"任务数据缺少 task_id: {message_id}")
-                return None
-
-            # P1-24: 优先读 Master 现在真正写的字段名
-            # (worker_dispatcher._send_batch_to_queue L1009-1015)。
-            # 旧字段 ``download_url`` / ``file_hash`` 仅作兜底，保证滚动升级期
-            # 老 Master 的 payload 也能解析。
-            source_bundle_uri = (
-                decoded.get("source_bundle_uri")
-                or decoded.get("download_url", "")
-                or ""
-            )
-            source_bundle_sha256 = (
-                decoded.get("source_bundle_sha256")
-                or decoded.get("file_hash", "")
-                or ""
-            )
-            try:
-                source_bundle_size = int(decoded.get("source_bundle_size", 0) or 0)
-            except (TypeError, ValueError):
-                source_bundle_size = 0
-
-            return TaskInfo(
-                task_id=task_id,
-                project_id=decoded.get("project_id", ""),
-                run_id=decoded.get("run_id", ""),
-                project_type=decoded.get("project_type", "spider"),
-                priority=int(decoded.get("priority", 0) or 0),
-                timeout=int(decoded.get("timeout", 3600) or 3600),
-                # 兼容字段（仅用于 TaskInfo 内部字段展示；映射由 task_info_to_dispatch 处理）
-                download_url=decoded.get("download_url", "") or "",
-                file_hash=decoded.get("file_hash", "") or "",
-                # P1-24: 新字段
-                source_bundle_uri=source_bundle_uri,
-                source_bundle_sha256=source_bundle_sha256,
-                source_bundle_size=source_bundle_size,
-                transfer_method=decoded.get("transfer_method", "") or "",
-                resolved_revision=decoded.get("resolved_revision", "") or "",
-                source_subdir=decoded.get("source_subdir", "") or "",
-                entry_point=decoded.get("entry_point", "") or "",
-                params=self._parse_json(decoded.get("params", "{}")),
-                environment=self._parse_json(decoded.get("environment", "{}")),
-                trace_parent=decoded.get("trace_parent", "") or "",
-            )
-
-        except Exception as exc:
-            logger.exception(f"解析任务数据失败: {exc}, message_id={message_id}")
-            return None
-
-    def _parse_json(self, value: object) -> dict[str, object]:
+    @staticmethod
+    def _parse_json(value: object, field_name: str) -> dict[str, object]:
         if not value:
             return {}
-
         if isinstance(value, dict):
-            return value
-
-        raw = (
-            value.decode("utf-8", errors="ignore")
-            if isinstance(value, (bytes, bytearray))
-            else str(value)
-        )
+            return dict(value)
+        if isinstance(value, (bytes, bytearray)):
+            raw = value.decode("utf-8")
+        elif isinstance(value, str):
+            raw = value
+        else:
+            raise ValueError(f"{field_name} 必须是 JSON object")
         try:
             parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field_name} 不是有效 JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{field_name} 必须是 JSON object")
+        return parsed
 
     async def ack_task(self, worker_id: str, queue: str, message_id: str) -> bool:
         redis = await self._get_redis_client()
@@ -362,10 +307,18 @@ class TaskPollHandler:
             return False
 
         try:
-            await redis.xack(queue, self.WORKER_GROUP, message_id)
-            logger.debug(
-                f"任务已确认: worker_id={worker_id}, queue={queue}, message_id={message_id}"
-            )
+            acked = await redis.xack(queue, self.WORKER_GROUP, message_id)
+            if int(acked or 0) != 1:
+                return False
+            try:
+                await trim_acknowledged_stream(redis, queue, self.WORKER_GROUP)
+            except Exception:
+                logger.exception(
+                    "任务 ACK 后裁剪失败: worker_id={} queue={}",
+                    worker_id,
+                    queue,
+                )
+            logger.debug(f"任务已确认: worker_id={worker_id}, queue={queue}, message_id={message_id}")
             return True
         except Exception as exc:
             logger.exception(f"确认任务失败: {exc}")
@@ -409,9 +362,7 @@ class TaskPollHandler:
 
             _, data = messages[0]
             decoded = {
-                (k.decode() if isinstance(k, bytes) else k): (
-                    v.decode() if isinstance(v, bytes) else v
-                )
+                (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                 for k, v in data.items()
             }
 

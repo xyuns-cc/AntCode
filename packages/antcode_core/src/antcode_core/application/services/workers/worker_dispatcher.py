@@ -102,9 +102,7 @@ class WorkerLoadBalancer:
                     hb_key = worker_heartbeat_key(worker.public_id)
                     raw = await redis.hgetall(hb_key)
                     metrics = {
-                        (k.decode() if isinstance(k, bytes) else k): (
-                            v.decode() if isinstance(v, bytes) else v
-                        )
+                        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                         for k, v in raw.items()
                     }
                 except Exception:
@@ -114,9 +112,7 @@ class WorkerLoadBalancer:
             memory = float(metrics.get("memory") or metrics.get("memory_percent") or 100)
             disk = float(metrics.get("disk") or metrics.get("disk_percent") or 100)
             running_tasks = int(metrics.get("runningTasks") or metrics.get("running_tasks") or 0)
-            max_concurrent = int(
-                metrics.get("maxConcurrentTasks") or metrics.get("max_concurrent_tasks") or 1
-            )
+            max_concurrent = int(metrics.get("maxConcurrentTasks") or metrics.get("max_concurrent_tasks") or 1)
             queued_tasks = int(metrics.get("queuedTasks") or metrics.get("queued_tasks") or 0)
 
             normalized = {
@@ -203,11 +199,7 @@ class WorkerLoadBalancer:
 
         # 综合评分（调整权重）
         total_score = (
-            cpu_score * 0.30
-            + memory_score * 0.25
-            + task_score * 0.20
-            + latency_score * 0.15
-            + success_score * 0.10
+            cpu_score * 0.30 + memory_score * 0.25 + task_score * 0.20 + latency_score * 0.15 + success_score * 0.10
         )
 
         return round(total_score, 2)
@@ -311,12 +303,8 @@ class WorkerLoadBalancer:
                 continue
 
             # T6-T4b: task_type capability 过滤
-            if require_task_type and not self._supports_task_type(
-                worker, require_task_type
-            ):
-                logger.debug(
-                    f"节点 [{worker.name}] 不支持 task_type={require_task_type}，跳过"
-                )
+            if require_task_type and not self._supports_task_type(worker, require_task_type):
+                logger.debug(f"节点 [{worker.name}] 不支持 task_type={require_task_type}，跳过")
                 continue
 
             filtered_workers.append(worker)
@@ -380,22 +368,21 @@ class WorkerLoadBalancer:
         if not worker.capabilities:
             return False
         caps = worker.capabilities
-        cap = caps.get("drissionpage")
-        return bool(cap and cap.get("enabled"))
+        task_types = caps.get("task_types")
+        if isinstance(task_types, list) and "render" in task_types:
+            return True
+        playwright = caps.get("playwright")
+        return bool(isinstance(playwright, dict) and playwright.get("enabled"))
 
     def _supports_task_type(self, worker, task_type: str) -> bool:
         """T6-T4b: worker.capabilities.task_types 里是否声明支持某 task_type。
 
-        向后兼容：老 worker 没有 task_types 字段 → 视为兼容所有类型
-        （老 dispatcher 行为不变）。新 worker 上报 task_types 后严格匹配。
+        Worker 必须显式声明能力，缺失或格式错误时 fail-closed。
         """
         caps = worker.capabilities or {}
         declared = caps.get("task_types")
-        if declared is None:
-            # 兼容：老 worker 无声明，认为支持任意
-            return True
         if not isinstance(declared, list):
-            return True  # 非列表也视为无声明
+            return False
         return task_type in declared
 
     async def get_workers_ranking(self, region=None, top_n=10):
@@ -752,10 +739,7 @@ class WorkerTaskDispatcher:
         if not worker:
             err = "无可用 Worker"
             if require_task_type:
-                err = (
-                    f"无支持 task_type={require_task_type!r} 的 Worker "
-                    "(检查 worker 侧插件是否装载)"
-                )
+                err = f"无支持 task_type={require_task_type!r} 的 Worker (检查 worker 侧插件是否装载)"
             return BatchDispatchResult(success=False, error=err)
 
         try:
@@ -803,7 +787,9 @@ class WorkerTaskDispatcher:
                     sync_results,
                     project_download_info,
                 ) = await source_bundle_dispatch_service.build_dispatch_for_worker_with_info(
-                    worker, bundle_project_ids, run_ids_by_project=run_ids_by_project,
+                    worker,
+                    bundle_project_ids,
+                    run_ids_by_project=run_ids_by_project,
                 )
 
                 if sync_results.get("failed"):
@@ -909,12 +895,8 @@ class WorkerTaskDispatcher:
                 logger.warning(f"指定 Worker [{worker.name}] 无渲染能力")
                 return None
             # T6-T4b: 指定 worker 也要满足 capability 声明
-            if require_task_type and not self.load_balancer._supports_task_type(
-                worker, require_task_type
-            ):
-                logger.warning(
-                    f"指定 Worker [{worker.name}] 不支持 task_type={require_task_type!r}"
-                )
+            if require_task_type and not self.load_balancer._supports_task_type(worker, require_task_type):
+                logger.warning(f"指定 Worker [{worker.name}] 不支持 task_type={require_task_type!r}")
                 return None
 
             return worker
@@ -963,12 +945,11 @@ class WorkerTaskDispatcher:
         未 ACK msg_id 做 XTRIM MINID",避免离线积压超阈值时静默删掉
         未消费的任务(参见 ``_trim_ready_stream``)。
         """
-        from antcode_core.infrastructure.redis.streams import StreamClient
-
         # E5: consumer group 名带 namespace 前缀，与 worker 侧对齐
         from antcode_core.infrastructure.redis.control_plane import (
             worker_consumer_group,
         )
+        from antcode_core.infrastructure.redis.streams import StreamClient
 
         stream = StreamClient()
         stream_key = task_ready_stream(worker.public_id)
@@ -1030,9 +1011,7 @@ class WorkerTaskDispatcher:
         try:
             await self._trim_ready_stream(stream, stream_key, group_name)
         except Exception as exc:
-            logger.warning(
-                "ready stream 裁剪失败 stream={} err={}", stream_key, exc
-            )
+            logger.warning("ready stream 裁剪失败 stream={} err={}", stream_key, exc)
 
         accepted_tasks = [{"task_id": task.get("task_id")} for task in tasks]
         return {
@@ -1046,57 +1025,32 @@ class WorkerTaskDispatcher:
         }
 
     async def _trim_ready_stream(self, stream, stream_key: str, group_name: str) -> None:
-        """P1-19: 按 consumer group 已 ACK 游标做安全裁剪。
-
-        - XPENDING <stream> <group> 拿最小未 ACK msg_id
-        - 有未 ACK: XTRIM MINID = 该 msg_id,只删已 ACK 的老 entry
-        - 无未 ACK: XTRIM MAXLEN ~ READY_STREAM_MAXLEN 兜底(全部已消费,安全)
-        - 未 ACK 数超阈值告警,提示 Worker 长期离线/卡死
-
-        为什么不再走 XADD MAXLEN=N:
-          MAXLEN 是纯物理裁剪,不查 PEL——离线积压超阈值时会把 Worker
-          还没消费的任务当垃圾删掉,这就是 P1-19 的静默丢消息根因。
-        """
-        pending_info: dict | None = None
+        """Trim only below the group's proven delivery or pending boundary."""
         try:
             pending_info = await stream.xpending(stream_key, group_name=group_name)
         except Exception as exc:
-            # XPENDING 失败退化到 MAXLEN,但记 warning——继续保护 Redis 内存
             logger.warning(
-                "xpending 失败退化到 MAXLEN 裁剪 stream={} err={}",
-                stream_key, exc,
+                "xpending 失败，跳过 ready stream 裁剪 stream={} err={}",
+                stream_key,
+                exc,
             )
+            return
 
-        pending_count = int(pending_info.get("pending_count", 0)) if pending_info else 0
-        min_id = pending_info.get("min_id") if pending_info else None
-
-        # 告警:未 ACK 逼近上限说明 Worker 长期离线或消费卡死
+        pending_count = int(pending_info.get("pending_count", 0))
         if pending_count >= self.READY_STREAM_PENDING_ALERT_THRESHOLD:
             logger.error(
-                "ready stream 积压逼近上限(可能 Worker 离线/卡死): "
-                "stream={} pending={} threshold={} maxlen={}",
-                stream_key, pending_count,
+                "ready stream 积压逼近上限(可能 Worker 离线/卡死): stream={} pending={} threshold={} maxlen={}",
+                stream_key,
+                pending_count,
                 self.READY_STREAM_PENDING_ALERT_THRESHOLD,
                 self.READY_STREAM_MAXLEN,
             )
-
-        if pending_count > 0 and min_id:
-            # XTRIM MINID:仅删 msg_id < min_id 的 entry(必然已全部 ACK)
-            try:
-                await stream.xtrim(stream_key, minid=min_id, approximate=True)
-                return
-            except Exception as exc:
-                logger.warning(
-                    "xtrim MINID 失败,退化到 MAXLEN: stream={} minid={} err={}",
-                    stream_key, min_id, exc,
-                )
-
-        # PEL 为空(或 MINID 走不通)——用 MAXLEN 兜底
-        await stream.xtrim(
-            stream_key,
-            maxlen=self.READY_STREAM_MAXLEN,
-            approximate=True,
+        from antcode_core.infrastructure.redis.stream_retention import (
+            trim_acknowledged_stream,
         )
+
+        client = await stream._get_client()
+        await trim_acknowledged_stream(client, stream_key, group_name)
 
     async def update_task_priority(self, worker, task_id, priority):
         """更新节点上任务的优先级"""
@@ -1109,8 +1063,7 @@ class WorkerTaskDispatcher:
         return {
             "queued_tasks": metrics.get("queuedTasks") or metrics.get("queued_tasks", 0),
             "running_tasks": metrics.get("runningTasks") or metrics.get("running_tasks", 0),
-            "max_concurrent_tasks": metrics.get("maxConcurrentTasks")
-            or metrics.get("max_concurrent_tasks", 0),
+            "max_concurrent_tasks": metrics.get("maxConcurrentTasks") or metrics.get("max_concurrent_tasks", 0),
         }
 
     async def cancel_queued_task(self, worker, task_id):
@@ -1137,9 +1090,7 @@ class WorkerTaskDispatcher:
             return {
                 "run_id": execution.run_id,
                 "status": execution.status,
-                "start_time": execution.start_time.isoformat()
-                if execution.start_time
-                else None,
+                "start_time": execution.start_time.isoformat() if execution.start_time else None,
                 "end_time": execution.end_time.isoformat() if execution.end_time else None,
                 "exit_code": execution.exit_code,
                 "error_message": execution.error_message,

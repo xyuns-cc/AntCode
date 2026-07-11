@@ -60,7 +60,7 @@ class WebSocketLogService:
                 redis_log_stream_service,
             )
 
-            await redis_log_stream_service.subscribe(run_id)
+            await redis_log_stream_service.subscribe(run_id, connection_id)
 
             # 6. 处理客户端消息（阻塞直到断开）
             await self._handle_client_messages(websocket, run_id, connection_id)

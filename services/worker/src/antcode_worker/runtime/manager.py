@@ -310,7 +310,7 @@ class RuntimeManager:
         Returns:
             GC 结果
         """
-        return await self._gc.run_gc()
+        return dict(await self._gc.run_gc())
 
     def get_stats(self) -> dict[str, Any]:
         """

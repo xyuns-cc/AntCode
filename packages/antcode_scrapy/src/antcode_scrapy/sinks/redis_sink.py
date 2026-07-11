@@ -7,9 +7,14 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable
 from datetime import datetime
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -31,7 +36,7 @@ class RedisSpiderDataSink:
 
     def __init__(self, url: str) -> None:
         self._url = url
-        self._redis = None
+        self._redis: Redis | None = None
         self._run_id = ""
         self._project_id = ""
         self._spider_name = ""
@@ -56,18 +61,15 @@ class RedisSpiderDataSink:
         self._project_id = project_id
         self._spider_name = spider_name
         self._namespace = namespace or "antcode"
-        self._stream_maxlen = _env_int(
-            "ANTCODE_SPIDER_STREAM_MAXLEN", self.DEFAULT_STREAM_MAXLEN
-        )
-        self._meta_ttl = _env_int(
-            "ANTCODE_SPIDER_META_TTL_SECONDS", self.DEFAULT_META_TTL_SECONDS
-        )
+        self._stream_maxlen = _env_int("ANTCODE_SPIDER_STREAM_MAXLEN", self.DEFAULT_STREAM_MAXLEN)
+        self._meta_ttl = _env_int("ANTCODE_SPIDER_META_TTL_SECONDS", self.DEFAULT_META_TTL_SECONDS)
         # index: ZADD 项目→run 时间轴
+        redis = self._redis
         started_at = datetime.now()
         idx_key = f"{self._namespace}:spider:index:{project_id}"
         try:
-            await self._redis.zadd(idx_key, {run_id: started_at.timestamp()})
-            await self._redis.expire(idx_key, self._meta_ttl * 7)
+            await redis.zadd(idx_key, {run_id: started_at.timestamp()})
+            await redis.expire(idx_key, self._meta_ttl * 7)
         except Exception as exc:
             logger.warning(f"写 spider:index 失败: {exc}")
 
@@ -103,7 +105,7 @@ class RedisSpiderDataSink:
         try:
             await self._redis.xadd(
                 self._stream_key(),
-                payload,
+                cast(dict[Any, Any], payload),
                 maxlen=self._stream_maxlen,
                 approximate=True,
             )
@@ -128,7 +130,10 @@ class RedisSpiderDataSink:
         }
         base.update({k: str(v) for k, v in fields.items() if v is not None})
         try:
-            await self._redis.hset(self._meta_key(), mapping=base)
+            await cast(
+                Awaitable[Any],
+                self._redis.hset(self._meta_key(), mapping=base),
+            )
             await self._redis.expire(self._meta_key(), self._meta_ttl)
         except Exception as exc:
             logger.warning(f"写 spider:meta 失败: {exc}")

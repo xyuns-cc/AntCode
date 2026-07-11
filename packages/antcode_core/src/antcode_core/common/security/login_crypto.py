@@ -137,22 +137,19 @@ class LoginPasswordCrypto:
             logger.info(f"登录私钥不存在,首次生成: {path}")
             private_key = self._generate_private_key()
             self._persist_private_key_atomic(path, private_key)
-            self._persist_public_key_atomic(
-                self._resolve_public_key_path(), private_key.public_key()
-            )
+            self._persist_public_key_atomic(self._resolve_public_key_path(), private_key.public_key())
             return private_key
         except OSError as exc:
-            raise RuntimeError(
-                f"登录私钥读取失败,拒绝重新生成覆盖"
-                f"(可能是共享卷抖动/权限问题): {path}, {exc}"
-            ) from exc
+            raise RuntimeError(f"登录私钥读取失败,拒绝重新生成覆盖(可能是共享卷抖动/权限问题): {path}, {exc}") from exc
 
         try:
-            return serialization.load_pem_private_key(key_bytes, password=None)
+            loaded_key = serialization.load_pem_private_key(key_bytes, password=None)
+            if not isinstance(loaded_key, rsa.RSAPrivateKey):
+                raise TypeError("登录私钥必须是 RSA 私钥")
+            return loaded_key
         except Exception as exc:
             raise RuntimeError(
-                f"登录私钥解析失败,拒绝重新生成覆盖"
-                f"(可能被截断/损坏,继续会永久丢失旧密钥): {path}, {exc}"
+                f"登录私钥解析失败,拒绝重新生成覆盖(可能被截断/损坏,继续会永久丢失旧密钥): {path}, {exc}"
             ) from exc
 
     def _generate_private_key(self) -> rsa.RSAPrivateKey:

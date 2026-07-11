@@ -114,13 +114,10 @@ class UnifiedProjectService:
                     from antcode_core.application.services.users.user_service import (
                         user_service,
                     )
+
                     creator = await user_service.get_user_by_id(updated_project.user_id)
-                    updated_project.created_by_public_id = (
-                        creator.public_id if creator else None
-                    )
-                    updated_project.created_by_username = (
-                        creator.username if creator else None
-                    )
+                    updated_project.created_by_public_id = creator.public_id if creator else None
+                    updated_project.created_by_username = creator.username if creator else None
                 return updated_project
 
         except HTTPException:

@@ -31,9 +31,7 @@ def _load_rule(args: argparse.Namespace) -> dict[str, Any]:
     else:
         env_val = os.environ.get("ANTCODE_RULE_JSON") or ""
         if not env_val:
-            raise SystemExit(
-                "缺少规则输入：--rule-file / --rule-json / env ANTCODE_RULE_JSON 三选一"
-            )
+            raise SystemExit("缺少规则输入：--rule-file / --rule-json / env ANTCODE_RULE_JSON 三选一")
         raw = env_val
     try:
         return json.loads(raw)
@@ -61,6 +59,8 @@ def _run(rule: dict[str, Any]) -> int:
     process.start()  # 阻塞直到所有 spider 结束
 
     stats = crawler.stats
+    if stats is None:
+        raise RuntimeError("Scrapy crawler 未初始化统计收集器")
     items = int(stats.get_value("item_scraped_count", 0) or 0)
     errors = int(stats.get_value("log_count/ERROR", 0) or 0)
     finish_reason = stats.get_value("finish_reason", "unknown")
@@ -72,12 +72,8 @@ def _run(rule: dict[str, Any]) -> int:
     written = int(stats.get_value("antcode/redis_items_written", 0) or 0)
     # P1-27: pipeline close_spider 里 sink.close 报告的最终 flush 情况——
     # 老实说这两个字段是新加的，None 表示没触发（direct 模式 close 返回 None）。
-    final_flush_failed = int(
-        stats.get_value("antcode/final_flush_failed", 0) or 0
-    )
-    final_flush_remaining = int(
-        stats.get_value("antcode/final_flush_remaining", 0) or 0
-    )
+    final_flush_failed = int(stats.get_value("antcode/final_flush_failed", 0) or 0)
+    final_flush_remaining = int(stats.get_value("antcode/final_flush_remaining", 0) or 0)
 
     print(
         f"[antcode-scrapy] finish_reason={finish_reason} "

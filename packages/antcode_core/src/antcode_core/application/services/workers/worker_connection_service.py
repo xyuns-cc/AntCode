@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
+from antcode_core.common.security.api_key import store_api_key, store_secret_key
+from antcode_core.common.security.secret_box import secret_box
 from antcode_core.domain.models import Worker, WorkerStatus
 
 
@@ -45,6 +47,8 @@ class WorkerConnectionService:
 
         existing = await Worker.filter(host=host, port=port).first()
         if existing:
+            api_key = secrets.token_hex(32)
+            secret_key = secrets.token_hex(64)
             existing.name = request.name
             existing.region = request.region
             existing.version = request.version
@@ -54,10 +58,11 @@ class WorkerConnectionService:
             existing.last_heartbeat = datetime.now()
             if request.metrics:
                 existing.metrics = request.metrics.model_dump()
+            store_api_key(existing, api_key)
+            store_secret_key(existing, secret_key)
             await existing.save()
 
-            if existing.secret_key:
-                worker_auth_verifier.register_worker_secret(existing.public_id, existing.secret_key)
+            worker_auth_verifier.register_worker_secret(existing.public_id, secret_key)
 
             from antcode_core.application.services.workers.worker_heartbeat_service import (
                 worker_heartbeat_service,
@@ -65,24 +70,25 @@ class WorkerConnectionService:
 
             await worker_heartbeat_service.refresh_worker_cache(force=True)
 
-            return existing, existing.api_key, existing.secret_key
+            return existing, api_key, secret_key
 
         api_key = secrets.token_hex(32)
         secret_key = secrets.token_hex(64)
 
-        worker = await Worker.create(
+        worker = Worker(
             name=request.name,
             host=host,
             port=port,
             region=request.region,
             version=request.version,
             status=WorkerStatus.ONLINE.value,
-            api_key=api_key,
-            secret_key=secret_key,
             last_heartbeat=datetime.now(UTC),
             metrics=request.metrics.model_dump() if request.metrics else None,
             transport_mode="gateway",
         )
+        store_api_key(worker, api_key)
+        store_secret_key(worker, secret_key)
+        await worker.save()
 
         worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
         logger.info(f"Worker 注册成功: {worker.name} ({worker.host}:{worker.port})")
@@ -95,8 +101,6 @@ class WorkerConnectionService:
 
     async def register_direct_worker(self, request) -> tuple[Worker, bool]:
         """Direct Worker 注册（使用 worker_id 作为 public_id）"""
-        from antcode_core.common.security.worker_auth import worker_auth_verifier
-
         worker_id = (request.worker_id or "").strip()
         if not worker_id:
             raise ValueError("worker_id 不能为空")
@@ -138,9 +142,6 @@ class WorkerConnectionService:
             await worker.save()
             return worker, created
 
-        api_key = secrets.token_hex(32)
-        secret_key = secrets.token_hex(64)
-
         base_name = ((request.name or "").strip() or worker_id)[:100]
         name = base_name
         if await Worker.filter(name=name).exists():
@@ -178,8 +179,6 @@ class WorkerConnectionService:
             region=request.region or "",
             version=request.version or None,
             status=WorkerStatus.ONLINE.value,
-            api_key=api_key,
-            secret_key=secret_key,
             last_heartbeat=datetime.now(UTC),
             os_type=request.os_type or None,
             os_version=request.os_version or None,
@@ -189,7 +188,6 @@ class WorkerConnectionService:
             transport_mode="direct",
         )
 
-        worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
         created = True
         logger.info(f"Direct Worker 注册成功: {worker.name} ({worker.public_id})")
         return worker, created
@@ -259,26 +257,16 @@ class WorkerConnectionService:
         """初始化时加载所有 Worker 密钥到验证器"""
         from antcode_core.common.security.worker_auth import worker_auth_verifier
 
-        workers = await Worker.filter(secret_key__isnull=False).all()
+        workers = await Worker.filter(secret_key_encrypted__isnull=False).all()
         for worker in workers:
-            if worker.secret_key:
-                worker_auth_verifier.register_worker_secret(worker.public_id, worker.secret_key)
+            secret_key = secret_box.decrypt(worker.secret_key_encrypted)
+            worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
 
         logger.info(f"已加载 {len(workers)} 个 Worker 密钥")
 
     async def get_worker_credentials(self, worker: Worker) -> dict:
-        """获取 Worker 凭证信息（用于配置 Worker）"""
-        from antcode_core.common.config import settings
-
-        return {
-            "worker_id": worker.public_id,
-            "api_key": worker.api_key,
-            "secret_key": worker.secret_key,
-            "gateway_host": settings.GATEWAY_HOST,
-            "gateway_port": settings.GATEWAY_PORT,
-            "transport_mode": settings.WORKER_TRANSPORT_MODE,
-            "redis_url": settings.REDIS_URL,
-        }
+        """凭据不可恢复，只允许注册响应返回一次。"""
+        raise RuntimeError(f"Worker {worker.public_id} 凭据不可恢复")
 
 
 # 创建服务实例

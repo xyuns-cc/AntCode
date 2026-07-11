@@ -31,9 +31,7 @@ class WorkerInstallKey(BaseModel):
     created_by = fields.BigIntField(description="创建者用户ID")
 
     # 使用此 Key 注册的 Worker public_id
-    used_by_worker = fields.CharField(
-        max_length=32, null=True, description="使用此Key注册的Worker"
-    )
+    used_by_worker = fields.CharField(max_length=32, null=True, description="使用此Key注册的Worker")
 
     # 使用时间
     used_at = fields.DatetimeField(null=True, description="使用时间")

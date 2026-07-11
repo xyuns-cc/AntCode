@@ -11,7 +11,7 @@ from antcode_core.common.security.auth import (
     get_current_user,
     verify_super_admin,
 )
-from antcode_core.domain.models import User, UserRole
+from antcode_core.domain.models import User, UserRole, UserSession
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas import (
     BaseResponse,
@@ -241,9 +241,7 @@ async def set_user_role(
         ip_address=http_request.client.host if http_request.client else None,
         old_value={"role": old_role_enum.value, "is_admin": old_is_admin},
         new_value={"role": target.role.value, "is_admin": target.is_admin},
-        description=(
-            f"修改用户角色: {target.username} {old_role_enum.value} -> {target.role.value}"
-        ),
+        description=(f"修改用户角色: {target.username} {old_role_enum.value} -> {target.role.value}"),
     )
     return success(_build_user_response(target), message="角色已更新")
 
@@ -419,7 +417,13 @@ async def batch_update_status(
     if not user_ids or is_active is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="参数不完整")
 
+    target_user_ids = await User.filter(public_id__in=user_ids).values_list("id", flat=True)
     updated = await User.filter(public_id__in=user_ids).update(is_active=bool(is_active))
+    if not bool(is_active) and target_user_ids:
+        await UserSession.filter(
+            user_id__in=target_user_ids,
+            revoked_at__isnull=True,
+        ).update(revoked_at=datetime.now())
     return success({"updated": updated}, message=Messages.UPDATED_SUCCESS)
 
 

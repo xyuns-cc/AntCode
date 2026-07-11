@@ -12,8 +12,10 @@ Security 模块
 from antcode_core.common.security.api_key import (
     APIKeyManager,
     api_key_manager,
+    finalize_worker_api_key_rotation,
     generate_api_key,
     hash_api_key,
+    rotate_worker_api_key,
     verify_api_key,
     verify_api_key_hash,
 )
@@ -60,8 +62,10 @@ __all__ = [
     # api_key
     "APIKeyManager",
     "api_key_manager",
+    "finalize_worker_api_key_rotation",
     "generate_api_key",
     "hash_api_key",
+    "rotate_worker_api_key",
     "verify_api_key",
     "verify_api_key_hash",
     # permissions

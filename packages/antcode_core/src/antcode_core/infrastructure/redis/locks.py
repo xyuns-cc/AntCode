@@ -54,7 +54,7 @@ class DistributedLock:
         # (如已经手动传入 "antcode:lock:xxx")就不再重复。
         _ns = _ns_prefix()
         if key.startswith(f"{_ns}:"):
-            self.key = key if key.startswith(f"{_ns}:lock:") else f"{_ns}:lock:{key[len(_ns) + 1:]}"
+            self.key = key if key.startswith(f"{_ns}:lock:") else f"{_ns}:lock:{key[len(_ns) + 1 :]}"
         else:
             self.key = f"{_ns}:lock:{key}"
         self.ttl_seconds = ttl_seconds

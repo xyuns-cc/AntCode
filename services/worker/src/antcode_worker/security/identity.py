@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from loguru import logger
 
 from antcode_worker.utils.ids import generate_worker_id

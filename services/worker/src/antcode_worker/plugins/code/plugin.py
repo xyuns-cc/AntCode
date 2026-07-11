@@ -197,9 +197,7 @@ class CodePlugin(PluginBase):
             local_tsnode = os.path.join(payload.workspace_path or "", "node_modules", ".bin", "ts-node")
             if os.path.isfile(local_tsnode):
                 return local_tsnode, [payload.entry_point, *payload.args]
-            raise RuntimeError(
-                "TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）"
-            )
+            raise RuntimeError("TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）")
         node_exe = shutil.which("node") or "node"
         return node_exe, [payload.entry_point, *payload.args]
 
@@ -288,6 +286,7 @@ class CodePlugin(PluginBase):
         """
         try:
             from antcode_core.common.config import settings
+
             cache_root = getattr(settings, "LANG_CACHE_ROOT", "")
         except Exception:
             cache_root = ""

@@ -11,13 +11,13 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from loguru import logger
 
 
-class FlowControlStrategy(str, Enum):
+class FlowControlStrategy(StrEnum):
     """流量控制策略"""
 
     TOKEN_BUCKET = "token_bucket"  # 令牌桶
@@ -25,7 +25,7 @@ class FlowControlStrategy(str, Enum):
     SLIDING_WINDOW = "sliding_window"  # 滑动窗口
 
 
-class BackpressureLevel(str, Enum):
+class BackpressureLevel(StrEnum):
     """背压级别"""
 
     NONE = "none"  # 无背压

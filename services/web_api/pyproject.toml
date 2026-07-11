@@ -10,7 +10,7 @@ dependencies = [
     # Web 框架
     "fastapi>=0.123.0",
     "uvicorn[standard]>=0.38.0",
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.31",
 
     # WebSocket
     "websockets>=12.0",
@@ -19,7 +19,7 @@ dependencies = [
     "httpx>=0.28.0",
 
     # 工具库
-    "ujson>=5.9.0",
+    "ujson>=5.13.0",
     "PyYAML>=6.0",
 
     # T7-P2-3: Prometheus /metrics 端点

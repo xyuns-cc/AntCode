@@ -6,25 +6,16 @@ import csv
 import io
 import json
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import Annotated, TypedDict
 
 from antcode_core.application.services.audit import audit_service
-from antcode_core.application.services.projects.code_source import (
-    SOURCE_TYPE_GIT,
-    SOURCE_TYPE_S3,
-    get_code_source_config,
-    get_runtime_artifact_config,
-    get_runtime_source_config,
-    normalize_source_type,
-)
-from antcode_core.application.services.projects.git_credential_service import (
-    git_credential_service,
-)
 from antcode_core.application.services.projects.project_service import project_service
+from antcode_core.application.services.projects.project_source_service import (
+    project_source_service,
+)
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.projects.unified_project_service import unified_project_service
 from antcode_core.application.services.users.user_service import user_service
-from antcode_core.common.config import settings
 from antcode_core.common.security.auth import get_current_user, get_current_user_id
 from antcode_core.common.utils.api_optimizer import (
     fast_response,
@@ -33,10 +24,12 @@ from antcode_core.common.utils.api_optimizer import (
 )
 from antcode_core.domain.models import Task, TaskRun, User
 from antcode_core.domain.models.audit_log import AuditAction
-from antcode_core.domain.models.enums import ProjectType
+from antcode_core.domain.models.enums import ProjectStatus, ProjectType
 from antcode_core.domain.models.project import Project, ProjectCode, ProjectFile, ProjectRule
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.project import (
+    CodeInfo,
+    FileInfo,
     ProjectCodeCreateRequest,
     ProjectCodeUpdateRequest,
     ProjectCreateFormRequest,
@@ -49,22 +42,21 @@ from antcode_core.domain.schemas.project import (
     ProjectRuleCreateRequest,
     TaskJsonRequest,
 )
+from antcode_core.domain.schemas.project_source import ProjectSourcePayload, ProjectSourceResponse
 from antcode_core.domain.schemas.project_unified import UnifiedProjectUpdateRequest
 from fastapi import (
     APIRouter,
     Body,
     Depends,
-    File,
     Form,
     HTTPException,
     Query,
     Request,
-    UploadFile,
     status,
 )
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from antcode_web_api.exceptions import ProjectNotFoundException
 from antcode_web_api.response import (
@@ -80,6 +72,19 @@ from antcode_web_api.response import (
 )
 
 project_router = APIRouter()
+
+# 批量删除单次上限，避免单个请求占满后台执行资源。
+BATCH_DELETE_MAX_PROJECTS = 100
+
+
+class SourceResponseFields(TypedDict):
+    repository_id: str
+    repository_name: str
+    repository_url: str
+    ref: str
+    subdir: str
+    include_paths: list[str]
+    resolved_revision: str | None
 
 
 def create_project_response(project: Project) -> ProjectResponse:
@@ -99,15 +104,16 @@ class ProjectExportRequest(BaseModel):
 
 
 class ProjectValidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
     type: str | None = None
     runtime_scope: str | None = None
     python_version: str | None = None
     target_url: str | None = None
     extraction_rules: str | dict | None = None
-    code_content: str | None = None
-    source_type: str | None = None
-    git_url: str | None = None
+    repository_id: str | None = None
+    subdir: str | None = None
     entry_point: str | None = None
 
 
@@ -143,7 +149,7 @@ def _yaml_scalar(value: object) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     text = str(value)
-    if any(c in text for c in [":", "-", "#", "\n", "\"", "'"]):
+    if any(c in text for c in [":", "-", "#", "\n", '"', "'"]):
         return json.dumps(text, ensure_ascii=False)
     return text
 
@@ -179,133 +185,14 @@ def _task_export_payload(task: Task, project_public_id: str) -> dict[str, object
     }
 
 
+CREATE_PROJECT_FORM_FIELDS = frozenset(ProjectCreateFormRequest.model_fields)
+
+
 async def get_project_create_form(
-    name: str = Form(..., min_length=3, max_length=50),
-    description: str | None = Form(None, max_length=500),
-    project_type: str = Form(..., alias="type"),
-    tags: str | None = Form(None),
-    dependencies: str | None = Form(None),
-    runtime_scope: str = Form(...),
-    shared_runtime_key: str | None = Form(None),
-    interpreter_source: str = Form("mise"),
-    python_version: str | None = Form(None),
-    python_bin: str | None = Form(None),
-    # Worker 环境参数
-    env_location: str = Form("worker"),
-    worker_id: str | None = Form(None),
-    use_existing_env: bool | str | None = Form(None),
-    existing_env_name: str | None = Form(None),
-    env_name: str | None = Form(None),
-    env_description: str | None = Form(None),
-    # 文件项目参数
-    entry_point: str | None = Form(None, max_length=255),
-    runtime_config: str | None = Form(None),
-    environment_vars: str | None = Form(None),
-    file_source_type: str | None = Form("s3"),
-    engine: str = Form("requests"),
-    target_url: str | None = Form(None, max_length=2000),
-    url_pattern: str | None = Form(None, max_length=500),
-    request_method: str = Form("GET"),
-    callback_type: str = Form("list"),
-    extraction_rules: str | None = Form(None),
-    pagination_config: str | None = Form(None),
-    max_pages: int = Form(10, ge=1, le=1000),
-    start_page: int = Form(1, ge=1),
-    request_delay: int = Form(1000, ge=0),
-    priority: int = Form(0),
-    headers: str | None = Form(None),
-    cookies: str | None = Form(None),
-    # S10 (Scrapy 迁移收尾): UI 提交但后端没接的两个字段——scrapy-redis
-    # 断点续爬 + 内容级去重。加进 Form 参数，再往下传到 ProjectRule。
-    resume_enabled: bool | str | None = Form(None),
-    dedup_config: str | None = Form(None),
-    language: str = Form("python", max_length=50),
-    version: str = Form("1.0.0", max_length=20),
-    code_entry_point: str | None = Form(None, max_length=255),
-    documentation: str | None = Form(None),
-    code_source_type: str | None = Form("s3"),
-    git_url: str | None = Form(None, max_length=2000),
-    git_branch: str | None = Form(None, max_length=255),
-    git_commit: str | None = Form(None, max_length=255),
-    git_subdir: str | None = Form(None, max_length=500),
-    git_credential_id: str | None = Form(None, max_length=32),
-    code_content: str | None = Form(None),
-    # O6: Git repository 源码字段（前端 appendRepositorySourceFields 传的）。
-    # 迁移 44/45 后 code/file 项目源码统一走这里，旧的 git_* 字段已废弃。
-    repository_id: str | None = Form(None, max_length=32),
-    ref: str | None = Form(None, max_length=255),
-    subdir: str | None = Form(None, max_length=500),
-    include_paths: str | None = Form(None),
+    form_data: Annotated[ProjectCreateFormRequest, Form()],
 ) -> ProjectCreateFormRequest:
-    # 处理 use_existing_env 布尔值
-    use_existing_env_bool = False
-    if use_existing_env is not None:
-        if isinstance(use_existing_env, bool):
-            use_existing_env_bool = use_existing_env
-        elif isinstance(use_existing_env, str):
-            use_existing_env_bool = use_existing_env.lower() in ("true", "1", "yes")
-
-    # S10: resume_enabled 表单侧可能是 "true"/"false" 字符串
-    resume_enabled_bool: bool | None = None
-    if resume_enabled is not None:
-        if isinstance(resume_enabled, bool):
-            resume_enabled_bool = resume_enabled
-        elif isinstance(resume_enabled, str) and resume_enabled.strip():
-            resume_enabled_bool = resume_enabled.strip().lower() in ("true", "1", "yes", "on")
-
-    return ProjectCreateFormRequest(
-        name=name,
-        description=description,
-        type=project_type,
-        tags=tags,
-        dependencies=dependencies,
-        runtime_scope=runtime_scope,
-        python_version=python_version,
-        shared_runtime_key=shared_runtime_key,
-        interpreter_source=interpreter_source,
-        python_bin=python_bin,
-        env_location=env_location,
-        worker_id=worker_id,
-        use_existing_env=use_existing_env_bool,
-        existing_env_name=existing_env_name,
-        env_name=env_name,
-        env_description=env_description,
-        entry_point=entry_point,
-        runtime_config=runtime_config,
-        environment_vars=environment_vars,
-        file_source_type=file_source_type,
-        engine=engine,
-        target_url=target_url,
-        url_pattern=url_pattern,
-        request_method=request_method,
-        callback_type=callback_type,
-        extraction_rules=extraction_rules,
-        pagination_config=pagination_config,
-        max_pages=max_pages,
-        start_page=start_page,
-        request_delay=request_delay,
-        priority=priority,
-        headers=headers,
-        cookies=cookies,
-        language=language,
-        version=version,
-        code_entry_point=code_entry_point,
-        documentation=documentation,
-        code_source_type=code_source_type,
-        git_url=git_url,
-        git_branch=git_branch,
-        git_commit=git_commit,
-        git_subdir=git_subdir,
-        git_credential_id=git_credential_id,
-        code_content=code_content,
-        repository_id=repository_id,
-        ref=ref,
-        subdir=subdir,
-        include_paths=include_paths,
-        # S10
-        resume_enabled=resume_enabled_bool,
-        dedup_config=dedup_config,
-    )
+    """使用单一严格 schema 解析 multipart 表单。"""
+    return form_data
 
 
 def _extract_repo_source_fields(form_data) -> dict:
@@ -325,12 +212,12 @@ def _extract_repo_source_fields(form_data) -> dict:
 async def get_project_list_query(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=500),
-    project_type: str | None = Query(None, alias="type"),
-    status: str = Query(None),
-    tag: str = Query(None),
-    created_by: str = Query(None),
-    search: str = Query(None),
-    worker_id: str = Query(None, description="Worker ID 筛选"),
+    project_type: ProjectType | None = Query(None, alias="type"),
+    status: ProjectStatus | None = Query(None),
+    tag: str | None = Query(None),
+    created_by: str | None = Query(None),
+    search: str | None = Query(None),
+    worker_id: str | None = Query(None, description="Worker ID 筛选"),
 ):
     return ProjectListQueryRequest(
         page=page,
@@ -344,6 +231,7 @@ async def get_project_list_query(
     )
 
 
+# P2-25: 批量删除单次上限, 防止公开 API 被打爆
 @project_router.post(
     "",
     response_model=BaseResponse[ProjectResponse],
@@ -365,11 +253,8 @@ async def create_project(
     修复方向：
     - 删除已废弃的 file/files/code_file File 参数——新架构下项目源码统一
       走 Git repository，不再接受 upload；前端也已不再传这些字段。
-    - 清理 request_data 里向 CreateRequest 传递的旧 git_*/code_content
-      /file_source_type/interpreter_source/python_bin/version 字段
-      （schema ``extra="forbid"`` 遇到即 422）；这些字段在迁移 44/45 后
-      已被 repository_id 取代。
-    - 保留 form 参数向后兼容（老客户端传了会被忽略）。
+    - 请求字段严格匹配当前 CreateRequest，源码只接受仓库绑定字段。
+    - 废弃字段不再声明为 Form 参数，避免客户端误以为这些配置仍然生效。
     """
 
     # 构建请求数据 —— 仅包含 Pydantic Create schemas 声明的字段
@@ -423,9 +308,16 @@ async def create_project(
                 "max_pages": form_data.max_pages,
                 "start_page": form_data.start_page,
                 "request_delay": form_data.request_delay,
+                "retry_count": form_data.retry_count,
+                "timeout": form_data.timeout,
                 "priority": form_data.priority,
+                "dont_filter": form_data.dont_filter,
+                "data_schema": form_data.data_schema,
                 "headers": form_data.headers,
                 "cookies": form_data.cookies,
+                "proxy_config": form_data.proxy_config,
+                "anti_spider": form_data.anti_spider,
+                "task_config": form_data.task_config,
                 # S10: scrapy-redis 断点续爬 + 内容级去重
                 "resume_enabled": getattr(form_data, "resume_enabled", None),
                 "dedup_config": getattr(form_data, "dedup_config", None),
@@ -442,6 +334,7 @@ async def create_project(
         )
 
     # 根据项目类型创建不同的请求对象
+    request: ProjectCreateRequest
     if form_data.type == ProjectType.RULE:
         request = ProjectRuleCreateRequest(**request_data)
     elif form_data.type == ProjectType.FILE:
@@ -641,36 +534,27 @@ async def validate_project_config(
         if not payload.extraction_rules:
             errors.append("规则项目必须提供 extraction_rules")
     elif project_type == ProjectType.FILE or project_type == ProjectType.FILE.value:
-        try:
-            source_type = normalize_source_type(payload.source_type, SOURCE_TYPE_S3)
-        except ValueError as exc:
-            errors.append(str(exc))
-            source_type = SOURCE_TYPE_S3
-        if source_type == SOURCE_TYPE_GIT:
-            if not payload.git_url:
-                errors.append("Git 文件项目必须提供 git_url")
-            if not payload.entry_point:
-                errors.append("Git 文件项目必须提供 entry_point")
+        _validate_repository_project(payload, "文件", errors)
     elif project_type == ProjectType.CODE or project_type == ProjectType.CODE.value:
-        try:
-            source_type = normalize_source_type(payload.source_type, SOURCE_TYPE_S3)
-        except ValueError as exc:
-            errors.append(str(exc))
-            source_type = SOURCE_TYPE_S3
-        if source_type == SOURCE_TYPE_GIT:
-            if not payload.git_url:
-                errors.append("Git 代码项目必须提供 git_url")
-            if not payload.entry_point:
-                errors.append("Git 代码项目必须提供 entry_point")
-        elif source_type == SOURCE_TYPE_S3 and not payload.code_content:
-            errors.append("S3 代码项目必须提供 code_content")
-        elif source_type != SOURCE_TYPE_GIT and source_type != SOURCE_TYPE_S3 and not payload.code_content:
-            errors.append("legacy inline 代码项目必须提供 code_content")
+        _validate_repository_project(payload, "代码", errors)
 
     return success_response(
         {"valid": len(errors) == 0, "errors": errors if errors else None},
         message=Messages.QUERY_SUCCESS,
     )
+
+
+def _validate_repository_project(
+    payload: ProjectValidateRequest,
+    project_label: str,
+    errors: list[str],
+) -> None:
+    if not payload.repository_id:
+        errors.append(f"Git {project_label}项目必须提供 repository_id")
+    if not payload.subdir:
+        errors.append(f"Git {project_label}项目必须提供 subdir")
+    if not payload.entry_point:
+        errors.append(f"Git {project_label}项目必须提供 entry_point")
 
 
 @project_router.post(
@@ -767,24 +651,28 @@ async def export_project_config(
         if include_tasks and task_items:
             writer.writerow(["task_id", "name", "schedule_type", "is_active", "status", "project_id"])
             for item in task_items:
-                writer.writerow([
-                    "",
-                    item.get("name"),
-                    item.get("schedule_type"),
-                    item.get("is_active"),
-                    "",
-                    item.get("project_id"),
-                ])
+                writer.writerow(
+                    [
+                        "",
+                        item.get("name"),
+                        item.get("schedule_type"),
+                        item.get("is_active"),
+                        "",
+                        item.get("project_id"),
+                    ]
+                )
         else:
             writer.writerow(["project_id", "name", "type", "status", "description", "tags"])
-            writer.writerow([
-                project_payload.get("id"),
-                project_payload.get("name"),
-                project_payload.get("type"),
-                project_payload.get("status"),
-                project_payload.get("description"),
-                ",".join(project_payload.get("tags") or []),
-            ])
+            writer.writerow(
+                [
+                    project_payload.get("id"),
+                    project_payload.get("name"),
+                    project_payload.get("type"),
+                    project_payload.get("status"),
+                    project_payload.get("description"),
+                    ",".join(project_payload.get("tags") or []),
+                ]
+            )
         content = output.getvalue()
         media_type = "text/csv"
         filename = f"project_{project.public_id}.csv"
@@ -819,46 +707,65 @@ async def get_project_detail(project_id: str, current_user_id: int = Depends(get
     return success_response(response_data, message=Messages.QUERY_SUCCESS)
 
 
+@project_router.get(
+    "/{project_id}/source",
+    response_model=BaseResponse[ProjectSourceResponse],
+    summary="获取项目 Git 来源",
+)
+async def get_project_source(
+    project_id: str,
+    current_user_id: int = Depends(get_current_user_id),
+):
+    project = await _get_repository_project(project_id, current_user_id)
+    try:
+        source = await project_source_service.get_response(project.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return success_response(source, message=Messages.QUERY_SUCCESS)
+
+
+@project_router.put(
+    "/{project_id}/source",
+    response_model=BaseResponse[ProjectSourceResponse],
+    summary="更新项目 Git 来源",
+)
+async def update_project_source(
+    project_id: str,
+    payload: ProjectSourcePayload,
+    current_user_id: int = Depends(get_current_user_id),
+):
+    project = await _get_repository_project(project_id, current_user_id)
+    try:
+        source = await project_source_service.update_from_payload(
+            project.id,
+            payload,
+            owner_user_id=current_user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return success_response(source, message=Messages.UPDATED_SUCCESS)
+
+
+async def _get_repository_project(project_id: str, current_user_id: int):
+    project = await project_service.get_project_by_id(project_id, current_user_id)
+    if project is None:
+        raise ProjectNotFoundException(project_id)
+    if project.type not in {ProjectType.FILE, ProjectType.CODE}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="规则项目没有 Git 项目来源")
+    return project
+
+
 async def _attach_project_detail_info(response_data: ProjectResponse, project):
     """为项目响应附加详细信息。"""
     if project.type == ProjectType.FILE:
         if detail := await relation_service.get_project_file_detail(project.id):
-            source_config = get_runtime_source_config(detail)
-            artifact_config = get_runtime_artifact_config(detail)
-            credential_id = source_config.get("git_credential_id")
-            credential = (
-                await git_credential_service.get_by_public_id(credential_id)
-                if credential_id
-                else None
+            source = await project_source_service.get_response(project.id)
+            response_data.file_info = FileInfo(
+                entry_point=detail.entry_point,
+                runtime_config=detail.runtime_config or {},
+                environment_vars=detail.environment_vars or {},
+                **_source_response_fields(source),
             )
-            # P11: ProjectFile 迁移后只留 language/entry_point/runtime_config/
-            # environment_vars（迁移 20261216120000_remove_local_env_location 拆掉
-            # 了 original_name/file_size/file_hash/file_path/file_type/storage_type/
-            # is_compressed/original_file_path 等磁盘字段——现在源码统一走 Git
-            # repository + source_bundle）。此处响应装配还引用旧字段，导致
-            # 每次 GET file 项目详情都 AttributeError 返 500。
-            # P13: 键名要匹配 FileInfo schema（repository_id/repository_name/
-            # repository_url/ref/subdir）而不是 git_* 前缀；environment_vars
-            # 必须是 dict（schema default_factory=dict），不能传 None。
-            _ = credential  # 若前端后续需要凭证名，在此挂 credential.name
-            from antcode_core.domain.models import GitRepository, ProjectSource
-            project_source = await ProjectSource.get_or_none(project_id=project.id)
-            repository = None
-            if project_source and project_source.repository_id:
-                repository = await GitRepository.get_or_none(id=project_source.repository_id)
-            response_data.file_info = {
-                "entry_point": detail.entry_point,
-                "runtime_config": detail.runtime_config or {},
-                "environment_vars": detail.environment_vars or {},
-                "repository_id": repository.public_id if repository else None,
-                "repository_name": repository.name if repository else None,
-                "repository_url": (repository.url if repository else None) or source_config.get("url"),
-                "ref": (project_source.ref if project_source else None) or source_config.get("branch"),
-                "subdir": (project_source.subdir if project_source else None) or source_config.get("subdir"),
-                "include_paths": (project_source.include_paths if project_source else None) or [],
-                "resolved_revision": artifact_config.get("resolved_revision")
-                or source_config.get("commit"),
-            }
     elif project.type == ProjectType.RULE:
         if detail := await relation_service.get_project_rule_detail(project.id):
             response_data.rule_info = {
@@ -886,47 +793,37 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 "dedup_config": getattr(detail, "dedup_config", None),
             }
     elif project.type == ProjectType.CODE and (detail := await relation_service.get_project_code_detail(project.id)):
-        source_config = get_code_source_config(detail)
-        artifact_config = get_runtime_artifact_config(detail)
-        credential_id = source_config.get("git_credential_id")
-        credential = (
-            await git_credential_service.get_by_public_id(credential_id)
-            if credential_id
-            else None
+        source = await project_source_service.get_response(project.id)
+        response_data.code_info = CodeInfo(
+            language=detail.language,
+            entry_point=detail.entry_point,
+            runtime_config=detail.runtime_config or {},
+            environment_vars=detail.environment_vars or {},
+            documentation=detail.documentation,
+            **_source_response_fields(source),
         )
-        response_data.code_info = {
-            "content": detail.content,
-            "language": detail.language,
-            "version": detail.version,
-            "content_hash": detail.content_hash,
-            "entry_point": detail.entry_point,
-            "runtime_config": detail.runtime_config,
-            "environment_vars": detail.environment_vars,
-            "source_type": source_config.get("type", "s3"),
-            "git_url": source_config.get("url"),
-            "git_branch": source_config.get("branch"),
-            "git_commit": source_config.get("commit"),
-            "git_subdir": source_config.get("subdir"),
-            "git_credential_id": credential_id,
-            "git_credential_name": credential.name if credential else None,
-            "resolved_revision": artifact_config.get("resolved_revision")
-            or detail.content_hash
-            or source_config.get("commit"),
-        }
 
 
-@project_router.put(
-    "/{project_id}", response_model=BaseResponse[ProjectResponse], summary="更新项目"
-)
+def _source_response_fields(source: ProjectSourceResponse) -> SourceResponseFields:
+    return {
+        "repository_id": source.repository_id,
+        "repository_name": source.repository_name,
+        "repository_url": source.repository_url,
+        "ref": source.ref,
+        "subdir": source.subdir,
+        "include_paths": source.include_paths,
+        "resolved_revision": source.resolved_commit,
+    }
+
+
+@project_router.put("/{project_id}", response_model=BaseResponse[ProjectResponse], summary="更新项目")
 async def update_project(
     project_id: str,
     request: UnifiedProjectUpdateRequest,
     current_user_id: int = Depends(get_current_user_id),
 ):
     """统一更新项目"""
-    project = await unified_project_service.update_project_unified(
-        project_id, request, current_user_id
-    )
+    project = await unified_project_service.update_project_unified(project_id, request, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
 
@@ -1029,9 +926,7 @@ async def duplicate_project(
         elif project.type == ProjectType.CODE:
             detail = await relation_service.get_project_code_detail(project.id)
             if detail:
-                # P1-04 关联修复:同 FILE 分支,ProjectCode model 已迁移删除
-                # content/version/content_hash/documentation/changelog 5 个字段。
-                # 只保留 model 现存可赋值字段,防止 duplicate CODE 项目 500。
+                # 源码绑定不随复制操作隐式继承，避免两个项目意外共享来源。
                 await ProjectCode.create(
                     project_id=new_project.id,
                     language=detail.language,
@@ -1176,11 +1071,6 @@ async def delete_project(
     description="批量删除多个项目（不可逆操作）",
     response_description="返回批量删除操作结果",
 )
-# P2-25: 批量删除单次上限, 防止公开 API 被打爆
-# 若未来需按环境放开, 可从 settings 读 BATCH_DELETE_MAX_ITEMS (默认 100)
-BATCH_DELETE_MAX_PROJECTS = 100
-
-
 @fast_response(background_execution=True)  # 后台执行
 @monitor_performance(slow_threshold=2.0)  # 监控超过2秒的批量操作
 async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_current_user_id)):
@@ -1302,14 +1192,10 @@ async def update_code_config(
     """更新代码项目配置"""
     try:
         # 更新代码配置
-        updated_project = await project_service.update_code_config(
-            project_id, request, current_user_id
-        )
+        updated_project = await project_service.update_code_config(project_id, request, current_user_id)
 
         if not updated_project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在或无权限访问"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在或无权限访问")
 
         # 构建响应数据
         response_data = create_project_response(updated_project)
@@ -1343,12 +1229,8 @@ async def update_file_config(
 
     P1-04: FILE 项目源码走 project_sources + Git repository（迁移
     20261216120000_remove_local_env_location 拆掉了本地磁盘字段），
-    file-config 端点现在只负责 entry_point/runtime_config/environment_vars 三项。
-    旧的 source_type/git_url/git_branch/git_commit/git_subdir/git_credential_id/
-    file 六个 Form 参数 + 上传文件已随字段一并下线；请求源码变更请走
-    /projects/{id} 的统一更新接口（UnifiedProjectUpdateRequest 里的
-    repository_id/ref/subdir 字段）。这里保留三项 Form 是为了兼容仍以
-    multipart/form-data 提交的旧前端。
+    file-config 端点只负责 entry_point/runtime_config/environment_vars。
+    源码变更必须走 /projects/{id}/source。
     """
     try:
         # 获取项目详情
@@ -1371,14 +1253,10 @@ async def update_file_config(
         )
 
         # 更新文件配置 —— service.update_file_config 签名是 (project_id, request, user_id)
-        updated_project = await project_service.update_file_config(
-            project_id, request, current_user_id
-        )
+        updated_project = await project_service.update_file_config(project_id, request, current_user_id)
 
         if not updated_project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在或无权限访问"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在或无权限访问")
 
         # 构建响应数据
         response_data = create_project_response(updated_project)
@@ -1390,7 +1268,4 @@ async def update_file_config(
         raise
     except Exception as e:
         logger.error(f"更新文件配置失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文件配置更新失败"
-        )
-
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文件配置更新失败")

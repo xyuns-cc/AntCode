@@ -3,12 +3,12 @@
 提供权限定义和检查功能。
 """
 
-from enum import Enum
+from enum import StrEnum
 
 from antcode_core.common.exceptions import AuthorizationError
 
 
-class Permission(str, Enum):
+class Permission(StrEnum):
     """权限枚举"""
 
     # 用户权限

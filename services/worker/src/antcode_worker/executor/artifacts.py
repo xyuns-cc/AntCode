@@ -320,9 +320,9 @@ class ArtifactCollector:
         if algorithm == "sha256":
             hasher = hashlib.sha256()
         elif algorithm == "sha1":
-            hasher = hashlib.sha1()
+            hasher = hashlib.sha1(usedforsecurity=False)
         elif algorithm == "md5":
-            hasher = hashlib.md5()
+            hasher = hashlib.md5(usedforsecurity=False)
         else:
             hasher = hashlib.sha256()
 
@@ -508,9 +508,9 @@ def compute_file_checksum(
     if algorithm == "sha256":
         hasher = hashlib.sha256()
     elif algorithm == "sha1":
-        hasher = hashlib.sha1()
+        hasher = hashlib.sha1(usedforsecurity=False)
     elif algorithm == "md5":
-        hasher = hashlib.md5()
+        hasher = hashlib.md5(usedforsecurity=False)
     else:
         hasher = hashlib.sha256()
 

@@ -15,7 +15,9 @@ Requirements: 7.2, 11.3
 from __future__ import annotations
 
 import sys
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from typing import cast
 
 from antcode_core.infrastructure.redis import (
     control_stream,
@@ -30,12 +32,14 @@ from antcode_worker.transport.base import TransportBase
 
 class TransportConfigError(Exception):
     """传输层配置错误"""
+
     pass
 
 
 @dataclass
 class DirectConfig:
     """Direct 模式配置"""
+
     redis_url: str = ""
     redis_password: str | None = None
     redis_namespace: str = redis_namespace()
@@ -58,6 +62,7 @@ class DirectConfig:
 @dataclass
 class GatewayConfigSpec:
     """Gateway 模式配置"""
+
     endpoint: str = ""  # host:port
     host: str = "localhost"
     port: int = 50051
@@ -71,6 +76,7 @@ class GatewayConfigSpec:
 @dataclass
 class TransportConfig:
     """传输层配置"""
+
     mode: str = "gateway"  # direct | gateway
     worker_id: str | None = None
     direct: DirectConfig = field(default_factory=DirectConfig)
@@ -91,50 +97,39 @@ def validate_transport_config(config: TransportConfig) -> None:
     mode = config.mode.lower()
 
     if mode not in ("direct", "gateway"):
-        raise TransportConfigError(
-            f"无效的 transport.mode: '{mode}'，必须是 'direct' 或 'gateway'"
-        )
+        raise TransportConfigError(f"无效的 transport.mode: '{mode}'，必须是 'direct' 或 'gateway'")
 
     if mode == "direct":
         # Direct 模式校验
         if not config.direct.redis_url:
-            raise TransportConfigError(
-                "Direct 模式必须配置 redis_url\n"
-                "示例: WORKER_REDIS_URL=redis://10.0.0.10:6379/0"
-            )
+            raise TransportConfigError("Direct 模式必须配置 redis_url\n示例: WORKER_REDIS_URL=redis://10.0.0.10:6379/0")
 
         # 禁止同时配置 gateway（非默认值）
         has_gateway_config = (
-            config.gateway.endpoint or
-            (config.gateway.host and config.gateway.host != "localhost") or
-            (config.gateway.port and config.gateway.port != 50051)
+            config.gateway.endpoint
+            or (config.gateway.host and config.gateway.host != "localhost")
+            or (config.gateway.port and config.gateway.port != 50051)
         )
         if has_gateway_config:
             raise TransportConfigError(
-                "Direct 模式禁止配置 gateway.endpoint/host\n"
-                "请移除 WORKER_GATEWAY_HOST 等 Gateway 相关配置"
+                "Direct 模式禁止配置 gateway.endpoint/host\n请移除 WORKER_GATEWAY_HOST 等 Gateway 相关配置"
             )
 
     elif mode == "gateway":
         # Gateway 模式校验
         if not config.gateway.host and not config.gateway.endpoint:
             raise TransportConfigError(
-                "Gateway 模式必须配置 gateway.host 或 gateway.endpoint\n"
-                "示例: WORKER_GATEWAY_HOST=gateway.example.com"
+                "Gateway 模式必须配置 gateway.host 或 gateway.endpoint\n示例: WORKER_GATEWAY_HOST=gateway.example.com"
             )
 
-        # 禁止同时配置 redis_url（除非是默认值）
-        if config.direct.redis_url and "localhost" not in config.direct.redis_url:
+        # Gateway Worker 不应拥有任何 Redis 凭证，包括 localhost 地址。
+        if config.direct.redis_url:
             raise TransportConfigError(
-                "Gateway 模式禁止配置 redis_url\n"
-                "请移除 WORKER_REDIS_URL 配置，Gateway 模式下 Worker 不直连 Redis"
+                "Gateway 模式禁止配置 redis_url\n请移除 WORKER_REDIS_URL 配置，Gateway 模式下 Worker 不直连 Redis"
             )
 
     if not config.worker_id:
-        raise TransportConfigError(
-            "必须配置 worker_id\n"
-            "示例: WORKER_ID=worker-001，或使用安装 Key 注册生成凭证"
-        )
+        raise TransportConfigError("必须配置 worker_id\n示例: WORKER_ID=worker-001，或使用安装 Key 注册生成凭证")
 
 
 def print_transport_banner(config: TransportConfig) -> None:
@@ -160,35 +155,41 @@ def print_transport_banner(config: TransportConfig) -> None:
             parts = redis_url.split("@")
             redis_url = parts[0].rsplit(":", 1)[0] + ":***@" + parts[1]
 
-        banner_lines.extend([
-            "  Mode:     DIRECT (内网直连 Redis)",
-            f"  Redis:    {redis_url}",
-            f"  Namespace:{redis_namespace(config.direct.redis_namespace)}",
-            f"  Group:    {config.direct.consumer_group}",
-            f"  Worker:   {config.worker_id}",
-            "",
-            "  WARN: Direct 模式仅限内网使用，请勿暴露 Redis 到公网",
-        ])
+        banner_lines.extend(
+            [
+                "  Mode:     DIRECT (内网直连 Redis)",
+                f"  Redis:    {redis_url}",
+                f"  Namespace:{redis_namespace(config.direct.redis_namespace)}",
+                f"  Group:    {config.direct.consumer_group}",
+                f"  Worker:   {config.worker_id}",
+                "",
+                "  WARN: Direct 模式仅限内网使用，请勿暴露 Redis 到公网",
+            ]
+        )
 
     elif mode == "gateway":
         endpoint = config.gateway.endpoint or f"{config.gateway.host}:{config.gateway.port}"
         tls_status = "ON" if config.gateway.tls else "OFF"
         auth_method = "mTLS" if config.gateway.client_cert else "API Key"
 
-        banner_lines.extend([
-            "  Mode:     GATEWAY (公网 gRPC 接入)",
-            f"  Endpoint: {endpoint}",
-            f"  TLS:      {tls_status}",
-            f"  Auth:     {auth_method}",
-            f"  Worker:   {config.worker_id}",
-            "",
-            "  INFO: Gateway 模式下 Worker 不直连 Redis/MySQL",
-        ])
+        banner_lines.extend(
+            [
+                "  Mode:     GATEWAY (公网 gRPC 接入)",
+                f"  Endpoint: {endpoint}",
+                f"  TLS:      {tls_status}",
+                f"  Auth:     {auth_method}",
+                f"  Worker:   {config.worker_id}",
+                "",
+                "  INFO: Gateway 模式下 Worker 不直连 Redis/MySQL",
+            ]
+        )
 
-    banner_lines.extend([
-        "=" * 60,
-        "",
-    ])
+    banner_lines.extend(
+        [
+            "=" * 60,
+            "",
+        ]
+    )
 
     for line in banner_lines:
         logger.info(line)
@@ -217,11 +218,14 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
         )
 
         # 1. PING
-        await redis_client.ping()
+        await cast(Awaitable[bool], redis_client.ping())
         logger.info("  OK  Redis PING 成功")
 
         # 2. 检查/创建消费者组
-        stream_key = task_ready_stream(config.worker_id, namespace=config.direct.redis_namespace)
+        worker_id = config.worker_id
+        if not worker_id:
+            raise TransportConfigError("Direct 模式自检需要 worker_id")
+        stream_key = task_ready_stream(worker_id, namespace=config.direct.redis_namespace)
         group_name = config.direct.consumer_group or worker_group(config.direct.redis_namespace)
 
         try:
@@ -236,7 +240,7 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
         # 3. 尝试非阻塞读取
         await redis_client.xreadgroup(
             groupname=group_name,
-            consumername=config.worker_id,
+            consumername=worker_id,
             streams={stream_key: ">"},
             count=1,
             block=0,  # 非阻塞
@@ -286,11 +290,13 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
 
             if config.gateway.ca_cert:
                 from pathlib import Path
+
                 root_certs = Path(config.gateway.ca_cert).read_bytes()
                 logger.info(f"  OK  CA 证书已加载: {config.gateway.ca_cert}")
 
             if config.gateway.client_cert and config.gateway.client_key:
                 from pathlib import Path
+
                 certificate_chain = Path(config.gateway.client_cert).read_bytes()
                 private_key = Path(config.gateway.client_key).read_bytes()
                 logger.info(f"  OK  客户端证书已加载: {config.gateway.client_cert}")
@@ -308,6 +314,7 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
 
         # 等待 channel 就绪
         import asyncio
+
         await asyncio.wait_for(channel.channel_ready(), timeout=10.0)
         logger.info(f"  OK  gRPC 连接成功: {endpoint}")
 
@@ -460,8 +467,8 @@ def build_transport_config_from_env(
     import os
 
     # 读取环境变量
-    mode = transport_mode or os.getenv("WORKER_TRANSPORT_MODE", "gateway")
-    wid = worker_id or os.getenv("WORKER_ID") or os.getenv("ANTCODE_WORKER_ID")
+    mode = transport_mode or os.getenv("WORKER_TRANSPORT_MODE") or "gateway"
+    wid = worker_id or os.getenv("WORKER_ID")
 
     config = TransportConfig(
         mode=mode,
@@ -469,11 +476,9 @@ def build_transport_config_from_env(
     )
 
     # Direct 配置
-    config.direct.redis_url = redis_url or os.getenv("WORKER_REDIS_URL", "")
+    config.direct.redis_url = redis_url or os.getenv("WORKER_REDIS_URL") or ""
     config.direct.redis_namespace = redis_namespace(
-        os.getenv("WORKER_REDIS_NAMESPACE")
-        or os.getenv("REDIS_NAMESPACE")
-        or config.direct.redis_namespace
+        os.getenv("WORKER_REDIS_NAMESPACE") or config.direct.redis_namespace
     )
     config.direct.consumer_group = os.getenv(
         "WORKER_CONSUMER_GROUP",
@@ -481,10 +486,10 @@ def build_transport_config_from_env(
     )
 
     # Gateway 配置
-    config.gateway.host = gateway_host or os.getenv("WORKER_GATEWAY_HOST", "localhost")
+    config.gateway.host = gateway_host or os.getenv("WORKER_GATEWAY_HOST") or "localhost"
     config.gateway.port = gateway_port or int(os.getenv("WORKER_GATEWAY_PORT", "50051"))
     config.gateway.tls = gateway_tls or os.getenv("WORKER_GATEWAY_TLS", "").lower() in ("true", "1", "yes")
-    config.gateway.api_key = api_key or os.getenv("WORKER_API_KEY") or os.getenv("ANTCODE_API_KEY")
+    config.gateway.api_key = api_key or os.getenv("WORKER_API_KEY")
     config.gateway.ca_cert = ca_cert or os.getenv("WORKER_CA_CERT")
     config.gateway.client_cert = client_cert or os.getenv("WORKER_CLIENT_CERT")
     config.gateway.client_key = client_key or os.getenv("WORKER_CLIENT_KEY")

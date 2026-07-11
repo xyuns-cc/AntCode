@@ -28,9 +28,12 @@ import json
 import os
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from antcode_scrapy.sinks import SpiderDataSink
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -40,9 +43,11 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return default
     try:
         val = int(raw)
-    except ValueError:
-        return default
-    return val if val >= minimum else default
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数: {raw!r}") from exc
+    if val < minimum:
+        raise ValueError(f"{name} 必须大于等于 {minimum}: {val}")
+    return val
 
 
 class AntCodeRedisPipeline:
@@ -54,7 +59,7 @@ class AntCodeRedisPipeline:
     DEFAULT_HEARTBEAT_INTERVAL = 50
 
     def __init__(self) -> None:
-        self._sink = None
+        self._sink: SpiderDataSink | None = None
         self._namespace: str = "antcode"
         self._run_id: str = ""
         self._project_id: str = ""
@@ -75,52 +80,43 @@ class AntCodeRedisPipeline:
         try:
             from antcode_scrapy.sinks import create_sink
         except ImportError as exc:  # pragma: no cover
-            logger.warning(f"antcode_scrapy.sinks 不可用，pipeline 禁用: {exc}")
-            return
+            raise RuntimeError("antcode_scrapy.sinks 不可用") from exc
 
         sink = create_sink()
         if sink is None:
-            logger.info(
-                "spider data sink 未配置 (ANTCODE_SPIDER_SINK_MODE / SINK_URL / "
-                "GATEWAY_ENDPOINT)，pipeline 静默禁用"
+            raise RuntimeError(
+                "spider data sink 未配置: ANTCODE_SPIDER_SINK_MODE 对应的 URL/endpoint 缺失"
             )
-            return
 
-        self._sink = sink
-        self._enabled = True
-        self._namespace = (
-            os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
-        )
+        self._namespace = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
         self._run_id = getattr(spider, "run_id", "") or ""
         self._project_id = getattr(spider, "project_id", "") or ""
         self._spider_name = spider.name or "antcode_rule"
         self._sequence = 0
         self._started_at = datetime.now()
 
-        self._xadd_fail_threshold = _env_int(
-            "ANTCODE_SPIDER_XADD_FAIL_THRESHOLD", self.DEFAULT_XADD_FAIL_THRESHOLD
-        )
-        self._heartbeat_interval = _env_int(
-            "ANTCODE_SPIDER_HEARTBEAT_INTERVAL", self.DEFAULT_HEARTBEAT_INTERVAL
-        )
+        self._xadd_fail_threshold = _env_int("ANTCODE_SPIDER_XADD_FAIL_THRESHOLD", self.DEFAULT_XADD_FAIL_THRESHOLD)
+        self._heartbeat_interval = _env_int("ANTCODE_SPIDER_HEARTBEAT_INTERVAL", self.DEFAULT_HEARTBEAT_INTERVAL)
 
         if not self._run_id:
-            logger.warning("spider.run_id 为空，落地时会用 empty key")
+            raise RuntimeError("spider.run_id 不能为空")
 
-        await self._sink.open(
+        await sink.open(
             run_id=self._run_id,
             project_id=self._project_id,
             spider_name=self._spider_name,
             namespace=self._namespace,
         )
         # 初始 meta
-        await self._sink.write_meta(
+        await sink.write_meta(
             {
                 "status": "running",
                 "started_at": self._started_at.isoformat(),
                 "items_count": "0",
             }
         )
+        self._sink = sink
+        self._enabled = True
         logger.info(
             f"AntCodeRedisPipeline 就绪: sink={type(self._sink).__name__} "
             f"run_id={self._run_id} project={self._project_id} "
@@ -154,6 +150,12 @@ class AntCodeRedisPipeline:
             return bool(ok), int(remaining)
         return True, 0
 
+    async def _consume_background_written(self) -> int:
+        consume = getattr(self._sink, "consume_written_count", None)
+        if consume is None:
+            return 0
+        return int(await consume())
+
     async def process_item(self, item: dict[str, Any], spider):
         if not self._enabled or self._sink is None:
             return item
@@ -178,63 +180,70 @@ class AntCodeRedisPipeline:
         )
         ok, n_written = self._normalize_write_result(raw)
         if ok:
-            # P1-27 修复: 只有 sink 真正 ack 了 flush 才算 written。
-            # gateway 模式 buffer 命中时 n_written=0（还没送出去，不能算成功）,
-            # 触发 flush 时 n_written = 本批次条数一次性累加。
-            # direct 模式每条 xadd 都是原子的，成功即 n_written=1。
-            if n_written > 0:
-                try:
-                    spider.crawler.stats.inc_value(
-                        "antcode/redis_items_written", count=n_written
-                    )
-                except Exception:
-                    pass
-            # R5-P2-14: 心跳
-            if (
-                self._heartbeat_interval > 0
-                and self._sequence % self._heartbeat_interval == 0
-            ):
-                try:
-                    await self._sink.write_meta(
-                        {
-                            "items_count": str(self._sequence),
-                            "last_item_at": timestamp,
-                        }
-                    )
-                except Exception as hexc:
-                    logger.debug(f"heartbeat 写 meta 失败 (可忽略): {hexc}")
-            # R1-P1-10: 成功后再提交 dedup SADD —— 只有 direct 模式的 Redis
-            # sink 才有 SADD 语义；gateway 模式的去重集应该由 gateway 侧或
-            # dedup pipeline 自己完成（DedupPipeline 早于此 pipeline 运行，
-            # 前置 SISMEMBER 已经命中过；写回集合只需要保证 xadd 成功后再做）。
-            if dedup_commit and isinstance(dedup_commit, dict):
-                try:
-                    inner_redis = getattr(self._sink, "_redis", None)
-                    if inner_redis is not None:
-                        dedup_key = str(dedup_commit.get("key", ""))
-                        digest = str(dedup_commit.get("digest", ""))
-                        ttl = int(dedup_commit.get("ttl_seconds", 0) or 0)
-                        if dedup_key and digest:
-                            added = await inner_redis.sadd(dedup_key, digest)
-                            if ttl and added:
-                                await inner_redis.expire(dedup_key, ttl)
-                except Exception as dexc:
-                    logger.warning(f"dedup 延迟 SADD 失败 (幂等，不影响本次): {dexc}")
+            await self._handle_write_success(
+                spider=spider,
+                written=n_written,
+                timestamp=timestamp,
+                dedup_commit=dedup_commit,
+            )
         else:
-            self._xadd_fail_count += 1
-            try:
-                spider.crawler.stats.inc_value("antcode/redis_xadd_failed")
-            except Exception:
-                pass
-            if self._xadd_fail_count >= self._xadd_fail_threshold:
-                from scrapy.exceptions import CloseSpider
-
-                raise CloseSpider(
-                    f"AntCodeRedisPipeline: sink 连续失败 "
-                    f"{self._xadd_fail_count} 次，中止爬取"
-                )
+            self._handle_write_failure(spider)
 
         return item
+
+    async def _handle_write_success(
+        self,
+        *,
+        spider: Any,
+        written: int,
+        timestamp: str,
+        dedup_commit: Any,
+    ) -> None:
+        if written > 0:
+            spider.crawler.stats.inc_value(
+                "antcode/redis_items_written",
+                count=written,
+            )
+        await self._write_heartbeat(timestamp)
+        await self._commit_dedup(dedup_commit)
+
+    async def _write_heartbeat(self, timestamp: str) -> None:
+        if self._heartbeat_interval <= 0:
+            return
+        if self._sequence % self._heartbeat_interval != 0:
+            return
+        if self._sink is None:
+            raise RuntimeError("spider data sink 未初始化")
+        await self._sink.write_meta(
+            {
+                "items_count": str(self._sequence),
+                "last_item_at": timestamp,
+            }
+        )
+
+    async def _commit_dedup(self, dedup_commit: Any) -> None:
+        if not isinstance(dedup_commit, dict):
+            return
+        redis = getattr(self._sink, "_redis", None)
+        if redis is None:
+            return
+        key = str(dedup_commit.get("key", ""))
+        digest = str(dedup_commit.get("digest", ""))
+        if not key or not digest:
+            return
+        added = await redis.sadd(key, digest)
+        ttl = int(dedup_commit.get("ttl_seconds", 0) or 0)
+        if ttl and added:
+            await redis.expire(key, ttl)
+
+    def _handle_write_failure(self, spider: Any) -> None:
+        self._xadd_fail_count += 1
+        spider.crawler.stats.inc_value("antcode/redis_xadd_failed")
+        if self._xadd_fail_count < self._xadd_fail_threshold:
+            return
+        from scrapy.exceptions import CloseSpider
+
+        raise CloseSpider(f"AntCodeRedisPipeline: sink 连续失败 {self._xadd_fail_count} 次，中止爬取")
 
     async def close_spider(self, spider) -> None:
         if not self._enabled or self._sink is None:
@@ -271,6 +280,12 @@ class AntCodeRedisPipeline:
                 }
             )
             close_ok, remaining = self._normalize_close_result(raw_close)
+            background_written = await self._consume_background_written()
+            if background_written > 0:
+                stats.inc_value(
+                    "antcode/redis_items_written",
+                    count=background_written,
+                )
         except Exception as exc:
             close_ok = False
             logger.exception(f"sink.close 抛异常: {exc}")
@@ -293,12 +308,7 @@ class AntCodeRedisPipeline:
         final_written = int(stats.get_value("antcode/redis_items_written", 0))
         final_status = (
             "failed"
-            if (
-                final_xadd_failed > 0
-                or not close_ok
-                or remaining > 0
-                or (items > 0 and final_written < items)
-            )
+            if (final_xadd_failed > 0 or not close_ok or remaining > 0 or (items > 0 and final_written < items))
             else "completed"
         )
         logger.info(

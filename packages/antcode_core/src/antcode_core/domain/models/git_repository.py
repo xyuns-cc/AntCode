@@ -1,5 +1,7 @@
 """Git repository resource model."""
 
+from typing import TYPE_CHECKING
+
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
@@ -21,8 +23,11 @@ class GitRepository(BaseModel):
     enabled = fields.BooleanField(default=True)
     owner_user_id = fields.BigIntField(db_index=True)
     last_scan_status = fields.CharField(max_length=32, null=True)
-    last_scan_error = fields.TextField(null=True)
-    last_scan_result = fields.JSONField(null=True)
+    if TYPE_CHECKING:
+        last_scan_error: str | None
+    else:
+        last_scan_error = fields.TextField(null=True)
+    last_scan_result: fields.JSONField[list[dict[str, object]] | None] = fields.JSONField(null=True)
     last_scanned_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)

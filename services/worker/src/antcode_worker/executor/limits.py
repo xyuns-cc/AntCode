@@ -106,7 +106,7 @@ class ConcurrencyLimiter:
         # 统计
         self._total_acquired = 0
         self._total_rejected = 0
-        self._total_wait_time_ms = 0
+        self._total_wait_time_ms = 0.0
 
     @property
     def max_concurrent(self) -> int:

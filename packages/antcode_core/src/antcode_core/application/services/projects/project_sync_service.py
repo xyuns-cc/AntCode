@@ -36,13 +36,10 @@ class ProjectSyncService:
         return str(value)
 
     def _ensure_source_bundle_project_type(self, project_type: str) -> None:
-        # O1-followup: rule 项目也能派发到 worker（走 RulePlugin，不需要 source bundle
-        # 因为 rule 定义在 params.kwargs.rule_detail 里，workspace 由 CLI runner 生成
-        # 临时 rule 目录承载）。
-        if project_type not in {"code", "file", "rule"}:
+        if project_type not in {"code", "file"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="分布式执行只支持 Git 文件、代码或规则项目",
+                detail="源码包派发只支持 Git 文件或代码项目",
             )
 
 

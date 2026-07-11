@@ -78,7 +78,7 @@ class ExecutionResolver:
         except Exception as e:
             raise WorkerUnavailableError(
                 f"Worker 在线检测失败: {e}",
-                worker.id,
+                str(worker.id),
             ) from e
 
     async def _resolve_fixed_worker(self, project):

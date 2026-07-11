@@ -84,6 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxslt1.1 \
     # 用于 curl_cffi
     libcurl4 \
+    bubblewrap \
     # 进程管理
     procps \
     && rm -rf /var/lib/apt/lists/*
@@ -144,6 +145,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 # 镜像已预装 mise，禁止 worker 启动时再走 curl|sh
 ENV ANTCODE_MISE_AUTO_INSTALL=false
+ENV WORKER_SANDBOX_MODE=sandbox \
+    WORKER_SANDBOX_COMMAND=bwrap \
+    WORKER_SANDBOX_NETWORK_ISOLATED=true
 
 # P1-21: 健康检查走 observability HTTP /health/ready (端口 8001,
 # 由 antcode_worker.observability.server.ObservabilityServer 暴露)。

@@ -20,7 +20,11 @@ from antcode_core.common.security.auth import (
 
 def create_access_token(user_id: int, username: str, expires_delta=None) -> str:
     """创建访问令牌(向后兼容入口)。"""
-    return jwt_auth.create_access_token(user_id, username, expires_delta)
+    return jwt_auth.create_access_token(
+        user_id,
+        username,
+        expires_delta=expires_delta,
+    )
 
 
 def verify_token(token: str) -> TokenData:

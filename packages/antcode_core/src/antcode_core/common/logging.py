@@ -10,14 +10,19 @@ P5.4: 集成 W3C TraceContext —— 每条日志会自动从当前 ContextVar
 方便从单条日志反查整个分布式调用链。
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from antcode_core.common.config import settings
+
+if TYPE_CHECKING:
+    from loguru import Record
 
 # 日志格式
 # ``extra[trace_id]`` 在未绑定 trace 时由 ``_inject_trace_id`` 填一个 "-"
@@ -30,8 +35,7 @@ CONSOLE_FORMAT = (
     "<level>{message}</level>"
 )
 FILE_FORMAT = (
-    "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | trace={extra[trace_id]} | "
-    "{name}:{function}:{line} - {message}"
+    "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | trace={extra[trace_id]} | {name}:{function}:{line} - {message}"
 )
 
 # 敏感字段模式（用于脱敏）
@@ -112,7 +116,7 @@ SENSITIVE_PATTERNS = [
 ]
 
 
-# 字典脱敏:命中即整体 value 替换为 ``"***"`` 的 key 名(子串匹配)。
+# 字典脱敏:命中即整体 value 替换为固定掩码的 key 名(子串匹配)。
 # 给 web_api access log middleware 直接调用,避免在请求体里漏字段。
 DEFAULT_SENSITIVE_KEY_TOKENS: frozenset[str] = frozenset(
     {
@@ -136,6 +140,15 @@ DEFAULT_SENSITIVE_KEY_TOKENS: frozenset[str] = frozenset(
         "certificate",
         "private_key",
         "install_key",
+        "gateway_token",
+        "worker_install_key",
+        "encryption_key",
+        "jwt_secret",
+        "bearer",
+        "redis_password",
+        "client_key",
+        "cookie",
+        "session",
     }
 )
 
@@ -155,7 +168,7 @@ def sanitize_log_message(message: str) -> str:
 def sanitize_dict(
     data: dict[str, Any],
     sensitive_keys: set[str] | frozenset[str] | None = None,
-    mask: str = "***",
+    mask: str = "***REDACTED***",
 ) -> dict[str, Any]:
     """对字典数据进行敏感信息脱敏。
 
@@ -191,7 +204,7 @@ def sanitize_dict(
     return result
 
 
-def _inject_trace_id(record: dict[str, Any]) -> None:
+def _inject_trace_id(record: Record) -> None:
     """把 ContextVar 中的当前 trace_id 注入到 ``record['extra']``。
 
     若未绑定 trace,填一个 ``"-"`` 占位,避免 loguru 在格式串里渲染
@@ -214,7 +227,7 @@ def _inject_trace_id(record: dict[str, Any]) -> None:
 class SanitizingFilter:
     """日志脱敏过滤器(同时承担 trace_id 注入)"""
 
-    def __call__(self, record: dict[str, Any]) -> bool:
+    def __call__(self, record: Record) -> bool:
         """对日志记录进行脱敏处理 + trace_id 注入。
 
         顺序: 先注入 trace_id(它不属于敏感字段),再脱敏。这样即便
@@ -287,9 +300,7 @@ def setup_logging(
             filter=sanitizing_filter,
         )
 
-    logger.info(
-        f"日志初始化完成: level={log_level}, file={should_log_to_file}, sanitize=True"
-    )
+    logger.info(f"日志初始化完成: level={log_level}, file={should_log_to_file}, sanitize=True")
 
 
 def get_logger(name: str | None = None):

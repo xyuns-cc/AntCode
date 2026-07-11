@@ -7,7 +7,7 @@ from antcode_core.application.services.projects.source_bundle_paths import (
     normalize_source_subdir,
     string_list,
 )
-from antcode_core.domain.models import GitRepository, Project, ProjectCode, ProjectSource
+from antcode_core.domain.models import GitRepository, Project, ProjectCode, ProjectFile, ProjectSource
 from antcode_core.domain.models.enums import ExecutionStrategy, ProjectType, RuntimeKind, RuntimeScope
 
 
@@ -24,24 +24,27 @@ class ProjectSourceService:
         repository_id: int,
         ref: str,
         subdir: str,
-        entry_point: str,
         include_paths: list[str] | None = None,
-        runtime_config: dict | None = None,
     ) -> ProjectSource:
-        values = self._source_values(ref, subdir, entry_point, include_paths, runtime_config)
+        normalized_ref, normalized_subdir, normalized_includes = self._source_values(
+            ref,
+            subdir,
+            include_paths,
+        )
         source = await ProjectSource.get_or_none(project_id=project_id)
         if source is None:
             return await ProjectSource.create(
                 project_id=project_id,
                 repository_id=repository_id,
-                **values,
+                ref=normalized_ref,
+                subdir=normalized_subdir,
+                include_paths=normalized_includes,
             )
         source.repository_id = repository_id
-        source.ref = values["ref"]
-        source.subdir = values["subdir"]
-        source.entry_point = values["entry_point"]
-        source.include_paths = values["include_paths"]
-        source.runtime_config = values["runtime_config"]
+        source.ref = normalized_ref
+        source.subdir = normalized_subdir
+        source.include_paths = normalized_includes
+        source.resolved_commit = None
         await source.save()
         return source
 
@@ -52,10 +55,11 @@ class ProjectSourceService:
         repository = await self._get_repository(source.repository_id)
         if repository is None:
             raise ValueError("项目关联的 Git 仓库不存在")
+        entry_point = await self._get_entry_point(project_id)
         return {
             "transfer_method": "source_bundle",
             "source": self._build_source_config(repository, source),
-            "entry_point": source.entry_point,
+            "entry_point": entry_point,
         }
 
     async def get_response(self, project_id: int):
@@ -73,9 +77,7 @@ class ProjectSourceService:
             repository_id=repository.id,
             ref=payload.ref,
             subdir=payload.subdir,
-            entry_point=payload.entry_point,
             include_paths=payload.include_paths,
-            runtime_config=payload.runtime_config,
         )
         project = await Project.get(id=project_id)
         return self._response(project, repository, source)
@@ -96,9 +98,7 @@ class ProjectSourceService:
                 repository_id=repository.id,
                 ref=item.ref,
                 subdir=item.subdir,
-                entry_point=item.entry_point,
                 include_paths=item.include_paths,
-                runtime_config=item.runtime_config,
             )
             # P10: 走 import 路径的 code 项目也必须在 worker 上准备 venv，
             # 否则 dispatch 时 RulePlugin/CodePlugin 拿不到 python_path
@@ -166,17 +166,30 @@ class ProjectSourceService:
         self,
         ref: str,
         subdir: str,
-        entry_point: str,
         include_paths: list[str] | None,
-        runtime_config: dict | None,
-    ) -> dict[str, object]:
-        return {
-            "ref": (ref or "main").strip(),
-            "subdir": normalize_source_subdir(subdir),
-            "entry_point": normalize_relative_path(entry_point, field_name="入口文件"),
-            "include_paths": string_list(include_paths or []),
-            "runtime_config": runtime_config,
-        }
+    ) -> tuple[str, str, list[str]]:
+        return (
+            (ref or "main").strip(),
+            normalize_source_subdir(subdir),
+            string_list(include_paths or []),
+        )
+
+    async def _get_entry_point(self, project_id: int) -> str:
+        project = await Project.get_or_none(id=project_id)
+        if project is None:
+            raise ValueError("项目不存在")
+        model: type[ProjectCode] | type[ProjectFile]
+        if project.type == ProjectType.CODE:
+            model = ProjectCode
+        elif project.type == ProjectType.FILE:
+            model = ProjectFile
+        else:
+            raise ValueError("只有 Git 文件或代码项目支持源码包")
+        detail = await model.get_or_none(project_id=project_id)
+        entry_point = getattr(detail, "entry_point", None)
+        if not entry_point:
+            raise ValueError("项目缺少入口文件配置")
+        return normalize_relative_path(entry_point, field_name="入口文件")
 
     def _build_source_config(self, repository, source) -> dict[str, object]:
         config: dict[str, object] = {
@@ -230,7 +243,6 @@ class ProjectSourceService:
             repository_url=repository.url,
             ref=source.ref,
             subdir=source.subdir,
-            entry_point=source.entry_point,
             include_paths=source.include_paths or [],
             resolved_commit=source.resolved_commit,
         )

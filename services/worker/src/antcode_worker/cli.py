@@ -13,8 +13,9 @@ import os
 import secrets
 import sys
 import time
+from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from loguru import logger
 
 from antcode_worker.config import (
@@ -27,7 +28,7 @@ from antcode_worker.config import (
 
 
 def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
+    print("\033[2J\033[H", end="", flush=True)
 
 
 def _generate_default_worker_name() -> str:
@@ -399,7 +400,7 @@ def start_worker(
     # 后 master 侧看到 CANCELLED 语义错误。60s 更宽松，配合 deregister
     # 让 master 尽快感知，整体 SLA 反而更快。
     grace_period = 60.0
-    config_kwargs: dict[str, object] = {
+    config_kwargs: dict[str, Any] = {
         "host": host,
         "gateway_host": gateway_host,
         "gateway_port": gateway_port,

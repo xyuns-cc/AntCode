@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -120,7 +121,7 @@ class SpiderDataReader:
         """
         try:
             meta_key = self._keys.spider_meta_key(run_id)
-            data = await self._redis.hgetall(meta_key)
+            data = await cast(Awaitable[dict[Any, Any]], self._redis.hgetall(meta_key))
 
             if not data:
                 return None
@@ -172,10 +173,7 @@ class SpiderDataReader:
                 num=limit,
             )
 
-            return [
-                r.decode() if isinstance(r, bytes) else r
-                for r in results
-            ]
+            return [r.decode() if isinstance(r, bytes) else r for r in results]
         except Exception as e:
             logger.error(f"列出 Spider 运行记录失败: {e}")
             return []
@@ -192,7 +190,7 @@ class SpiderDataReader:
         """
         try:
             config_key = self._keys.spider_config_key(project_id)
-            data = await self._redis.hgetall(config_key)
+            data = await cast(Awaitable[dict[Any, Any]], self._redis.hgetall(config_key))
 
             if not data:
                 return None
@@ -221,7 +219,10 @@ class SpiderDataReader:
         """
         try:
             config_key = self._keys.spider_config_key(config.project_id)
-            await self._redis.hset(config_key, mapping=config.to_redis_dict())
+            await cast(
+                Awaitable[Any],
+                self._redis.hset(config_key, mapping=config.to_redis_dict()),
+            )
             return True
         except Exception as e:
             logger.error(f"设置 Spider 配置失败: {e}")

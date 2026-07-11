@@ -55,8 +55,7 @@ def _candidate_paths() -> list[str]:
             if p.exists():
                 paths.append(str(p))
     # 去重保序
-    seen = set()
-    return [p for p in paths if not (p in seen or seen.add(p))]
+    return list(dict.fromkeys(paths))
 
 
 async def _get_version(mise_path: str) -> str:
@@ -106,9 +105,7 @@ async def _install_mise_unix() -> MiseStatus:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=MISE_INSTALL_TIMEOUT
-        )
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=MISE_INSTALL_TIMEOUT)
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
@@ -119,8 +116,7 @@ async def _install_mise_unix() -> MiseStatus:
 
     if proc.returncode != 0:
         raise RuntimeError(
-            f"mise 自动安装失败 (exit={proc.returncode}): "
-            f"{(stderr_b or b'').decode(errors='ignore').strip()[:500]}"
+            f"mise 自动安装失败 (exit={proc.returncode}): {(stderr_b or b'').decode(errors='ignore').strip()[:500]}"
         )
     stdout = (stdout_b or b"").decode(errors="ignore")
     logger.info(f"mise 安装脚本输出:\n{stdout[:500]}")

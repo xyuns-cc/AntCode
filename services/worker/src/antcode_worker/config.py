@@ -14,14 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import aiofiles
-import yaml
+import aiofiles  # type: ignore[import-untyped]
+import yaml  # type: ignore[import-untyped]
 from loguru import logger
 
 try:
-    from dotenv import load_dotenv
+    import dotenv
 except ImportError:  # pragma: no cover - optional dependency
-    load_dotenv = None
+    dotenv = None  # type: ignore[assignment]
 
 # Worker根目录
 WORKER_ROOT = Path(__file__).parent
@@ -44,12 +44,12 @@ def _load_env_file() -> None:
         return
     _ENV_LOADED = True
 
-    if not load_dotenv:
+    if dotenv is None:
         return
 
     env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
-        load_dotenv(env_path, override=False)
+        dotenv.load_dotenv(env_path, override=False)
 
 
 def _get_env_value(*keys: str) -> str | None:
@@ -117,10 +117,10 @@ def _load_env_config() -> dict[str, Any]:
     gateway_endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT")
     if gateway_endpoint:
         if ":" in gateway_endpoint:
-            host, port = gateway_endpoint.rsplit(":", 1)
-            env_config["gateway_host"] = host
+            endpoint_host, endpoint_port = gateway_endpoint.rsplit(":", 1)
+            env_config["gateway_host"] = endpoint_host
             with contextlib.suppress(ValueError):
-                env_config["gateway_port"] = int(port)
+                env_config["gateway_port"] = int(endpoint_port)
         else:
             env_config["gateway_host"] = gateway_endpoint
 
@@ -131,6 +131,18 @@ def _load_env_config() -> dict[str, Any]:
     gateway_port = _get_env_int("WORKER_GATEWAY_PORT")
     if gateway_port is not None:
         env_config["gateway_port"] = gateway_port
+
+    sandbox_mode = _get_env_value("WORKER_SANDBOX_MODE")
+    if sandbox_mode:
+        env_config["sandbox_mode"] = sandbox_mode
+
+    sandbox_command = _get_env_value("WORKER_SANDBOX_COMMAND")
+    if sandbox_command:
+        env_config["sandbox_command"] = sandbox_command
+
+    sandbox_network_isolated = _get_env_bool("WORKER_SANDBOX_NETWORK_ISOLATED")
+    if sandbox_network_isolated is not None:
+        env_config["sandbox_network_isolated"] = sandbox_network_isolated
 
     name = _get_env_value("WORKER_NAME")
     if name:
@@ -233,13 +245,13 @@ class WorkerConfig:
     #                  实现真正的进程/网络/文件系统 namespace 隔离
     # 生产强烈建议 "sandbox" 并配 sandbox_command=["firejail","--private","--net=none"]
     # 或独立容器/VM(通过 K8s per-task pod 之类)。
-    sandbox_mode: str = "process"
+    sandbox_mode: str = "sandbox"
     # 外接沙箱命令前缀(空列表 = 不外接)。示例:
     #   ["firejail","--private","--net=none"] 或 ["bwrap","--unshare-all","--ro-bind","/","/"]
     # 值由 env WORKER_SANDBOX_COMMAND 提供,用 shlex 兼容格式;wiring 层解析。
-    sandbox_command: str = ""
+    sandbox_command: str = "bwrap"
     # 沙箱是否启用网络隔离(需要 sandbox_command 支持,如 firejail --net=none)
-    sandbox_network_isolated: bool = False
+    sandbox_network_isolated: bool = True
 
     # 传输模式配置
     transport_mode: str = "gateway"  # 传输模式: "direct" 或 "gateway"
@@ -317,6 +329,9 @@ class WorkerConfig:
             "redis_namespace": self.redis_namespace,
             "gateway_host": self.gateway_host,
             "gateway_port": self.gateway_port,
+            "sandbox_mode": self.sandbox_mode,
+            "sandbox_command": self.sandbox_command,
+            "sandbox_network_isolated": self.sandbox_network_isolated,
             "api_base_url": self.api_base_url,
             "credential_store": self.credential_store,
             "data_dir": self.data_dir,
@@ -528,7 +543,7 @@ def init_worker_config(name: str = "Worker-001", port: int = 8001, region: str =
     env_config = _load_env_config()
 
     # 首先尝试从配置文件加载
-    file_config = {}
+    file_config: dict[str, Any] = {}
     if WORKER_CONFIG_FILE.exists():
         try:
             with open(WORKER_CONFIG_FILE, encoding="utf-8") as f:

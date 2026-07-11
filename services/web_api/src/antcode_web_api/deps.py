@@ -7,7 +7,7 @@
 from collections.abc import Callable
 from typing import Annotated
 
-from antcode_core.common.security.auth import jwt_auth
+from antcode_core.common.security.auth import get_current_user as get_token_user
 from antcode_core.common.security.permissions import (
     Permission,
     get_role_permissions,
@@ -33,15 +33,14 @@ async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, 
         HTTPException: 认证失败时抛出 401
     """
     try:
-        token = credentials.credentials
-        token_data = jwt_auth.verify_token(token)
+        token_data = await get_token_user(credentials)
 
         # 从数据库获取用户
         from antcode_core.application.services.users.user_service import user_service
 
         user = await user_service.get_user_by_id(token_data.user_id)
 
-        if not user:
+        if not user or not user.is_active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
 
         return user

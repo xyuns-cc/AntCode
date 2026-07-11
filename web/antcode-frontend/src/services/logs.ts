@@ -1,6 +1,5 @@
 import { BaseService } from './base'
 import apiClient from './api'
-import { STORAGE_KEYS } from '@/utils/constants'
 import Logger from '@/utils/logger'
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
@@ -184,18 +183,16 @@ class LogService extends BaseService {
    * 后端 401 时由 apiClient 响应拦截器统一处理；调用方仅在 ticket 缺失时报错。
    * 端点挂载在 /api/v1/ws/ 前缀下（routes/v1/__init__.py:35）。
    */
-  async getWsTicket(): Promise<string | null> {
-    try {
-      const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
-        '/api/v1/ws/ws-ticket'
-      )
-      const body = response.data
-      const ticket = body?.data?.ticket ?? body?.ticket
-      if (ticket) return ticket
-    } catch (error) {
-      Logger.warn('获取 WebSocket ticket 失败，回退到 access_token', error)
+  async getWsTicket(): Promise<string> {
+    const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
+      '/api/v1/ws/ws-ticket'
+    )
+    const body = response.data
+    const ticket = body?.data?.ticket ?? body?.ticket
+    if (!ticket) {
+      throw new Error('WebSocket ticket 接口未返回 ticket')
     }
-    return localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+    return ticket
   }
 
   connectLogStream(
@@ -236,21 +233,15 @@ class LogService extends BaseService {
       return `${entry.timestamp ?? ''}|${seq}|${entry.log_type ?? ''}|${msg}`
     }
 
-    const buildUrl = async (): Promise<string | null> => {
+    const buildUrl = async (): Promise<string> => {
       // 通过一次性 ticket 鉴权（401 时拦截器会刷新 token + 重试）
       const ticket = await this.getWsTicket()
-      if (!ticket) {
-        onError?.('No access token / ticket available')
-        return null
-      }
       return `${wsProtocol}//${wsHost}/api/v1/ws/runs/${runId}/logs?ticket=${encodeURIComponent(ticket)}`
     }
 
     const connect = async () => {
       try {
         const wsUrl = await buildUrl()
-        if (!wsUrl) return
-
         ws = new WebSocket(wsUrl)
 
         ws.onopen = () => {

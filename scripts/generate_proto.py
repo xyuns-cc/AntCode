@@ -17,6 +17,7 @@ from pathlib import Path
 
 from loguru import logger
 
+
 def _fix_imports(file_path: Path) -> None:
     """修复生成文件中的绝对导入为相对导入。"""
     content = file_path.read_text(encoding="utf-8")

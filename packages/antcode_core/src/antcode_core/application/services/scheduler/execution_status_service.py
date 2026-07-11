@@ -45,6 +45,15 @@ class ExecutionStatusService:
             DispatchStatus.TIMEOUT,
             DispatchStatus.FAILED,
         }
+        # P1-17 review: dispatch 侧"失败终态"子集（不含 ACKED）。
+        # 语义区分：ACKED = worker 已接单、run 存活；REJECTED/TIMEOUT/FAILED =
+        # run 在 runtime 从未启动的情况下已经结束。只有后者允许补写 end_time，
+        # 也只有后者构成"迟到 worker 上报不得复活"的吸收闸门。
+        self._dispatch_failure_terminal = {
+            DispatchStatus.REJECTED,
+            DispatchStatus.TIMEOUT,
+            DispatchStatus.FAILED,
+        }
         self._failure_task_states = (
             TaskStatus.FAILED,
             TaskStatus.TIMEOUT,
@@ -174,11 +183,14 @@ class ExecutionStatusService:
         if error_message:
             updates["error_message"] = error_message
 
-        if (
-            new_status in self._dispatch_terminal
-            and not execution.runtime_status
-            and not execution.end_time
-        ):
+        # P1-17 review: 这里必须用"失败终态"子集而不是 _dispatch_terminal ——
+        # ACKED 虽是 dispatch 吸收态，但语义是"worker 已接单、任务刚开始跑"。
+        # P1-17 引入 worker 开跑即上报 running（→ 本方法收到 ACKED、此刻
+        # runtime_status 仍为 NULL）后，旧条件会把 end_time 写成开跑时刻；
+        # reconcile._check_inconsistent_states 随后按 "status=RUNNING 且
+        # end_time 非空且无 error" 把仍在跑的任务整批翻成 SUCCESS，
+        # _check_timeout_tasks（只扫 status=RUNNING）同时失去对它的超时保护。
+        if new_status in self._dispatch_failure_terminal and not execution.runtime_status and not execution.end_time:
             updates["end_time"] = status_at
 
         updates["status"] = self._derive_overall(new_status, execution.runtime_status)
@@ -193,9 +205,7 @@ class ExecutionStatusService:
 
         updated = await TaskRun.filter(run_id=run_id).filter(cas_q).update(**updates)
         if not updated:
-            logger.debug(
-                f"分发状态 CAS 失败(并发写入或终态保护): run_id={run_id} -> {new_status}"
-            )
+            logger.debug(f"分发状态 CAS 失败(并发写入或终态保护): run_id={run_id} -> {new_status}")
             return False
 
         # 重新加载最新行给 _sync_task_status 使用，避免用陈旧的 execution 视图。
@@ -233,6 +243,23 @@ class ExecutionStatusService:
         ):
             return False
 
+        # P1-17 review: dispatch 侧已收敛失败终态（REJECTED/TIMEOUT/FAILED）且
+        # runtime 从未启动（NULL/QUEUED）的记录，是 reconcile._check_dispatched_no_ack
+        # 或分发失败路径已判"死"的 run。迟到的 worker 上报（RUNNING 心跳乃至
+        # 终态 SUCCESS）不允许把它复活——runtime 侧的终态保护只挡"runtime 已
+        # 是终态"的覆盖，挡不住 NULL→RUNNING/SUCCESS 这条路，导致整体 status
+        # 从 FAILED 翻回 RUNNING/SUCCESS，与 reconcile 承诺的终态吸收矛盾，
+        # 且会与重试链路的新一次执行互相踩踏。下方 CAS 谓词里有同条件的
+        # 原子闸门；这里的预检查仅为提前返回 + 明确日志。
+        if execution.dispatch_status in self._dispatch_failure_terminal and (
+            execution.runtime_status is None or execution.runtime_status == RuntimeStatus.QUEUED
+        ):
+            logger.debug(
+                f"运行状态更新被拒(dispatch 已失败终态且 runtime 未启动): "
+                f"run_id={run_id} dispatch={execution.dispatch_status} -> {new_status}"
+            )
+            return False
+
         # 组装 UPDATE 字段（真 CAS：filter().update() 而不是 fetch → 修改 → save）
         updates = {
             "runtime_status": new_status,
@@ -267,11 +294,18 @@ class ExecutionStatusService:
         if allowed_from:
             cas_q = cas_q | Q(runtime_status__in=allowed_from)
 
-        updated = await TaskRun.filter(run_id=run_id).filter(cas_q).update(**updates)
+        # P1-17 review: 与上面预检查对应的原子闸门，防止 fetch 与 UPDATE 之间
+        # reconcile 恰好把 dispatch 翻成失败终态。写成正向条件（而非 ~Q）避免
+        # SQL NOT + NULL 三值逻辑歧义：允许写入当且仅当
+        #   dispatch 未失败终态  OR  runtime 已经启动过（=RUNNING）。
+        # cas_q 已把 runtime 限制在 {NULL, allowed_from} 内，因此
+        # "runtime 非 NULL/QUEUED" 在该集合内等价于 runtime=RUNNING。
+        non_failure_dispatch = [s for s in self._dispatch_order if s not in self._dispatch_failure_terminal]
+        guard_q = Q(dispatch_status__in=non_failure_dispatch) | Q(runtime_status=RuntimeStatus.RUNNING)
+
+        updated = await TaskRun.filter(run_id=run_id).filter(cas_q).filter(guard_q).update(**updates)
         if not updated:
-            logger.debug(
-                f"运行状态 CAS 失败(并发写入或终态保护): run_id={run_id} -> {new_status}"
-            )
+            logger.debug(f"运行状态 CAS 失败(并发写入或终态保护): run_id={run_id} -> {new_status}")
             return False
 
         refreshed = await TaskRun.get_or_none(run_id=run_id)
@@ -306,10 +340,7 @@ class ExecutionStatusService:
 
         if new_task_status == TaskStatus.SUCCESS and previous_status != TaskStatus.SUCCESS:
             updates["success_count"] = F("success_count") + 1
-        elif (
-            new_task_status in self._failure_task_states
-            and previous_status not in self._failure_task_states
-        ):
+        elif new_task_status in self._failure_task_states and previous_status not in self._failure_task_states:
             updates["failure_count"] = F("failure_count") + 1
 
         await Task.filter(id=task.id).update(**updates)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -13,9 +11,7 @@ class ProjectSourcePayload(BaseModel):
     repository_id: str = Field(..., max_length=32)
     ref: str = Field("main", max_length=255)
     subdir: str = Field(..., max_length=500)
-    entry_point: str = Field(..., max_length=255)
     include_paths: list[str] = Field(default_factory=list)
-    runtime_config: dict[str, Any] | None = None
 
 
 class ProjectImportItem(ProjectSourcePayload):
@@ -29,6 +25,8 @@ class ProjectImportItem(ProjectSourcePayload):
     worker_id: str | None = None
     execution_strategy: str = "auto"
     bound_worker_id: str | None = None
+    entry_point: str = Field(..., max_length=255)
+    runtime_config: dict | None = None
 
 
 class ProjectImportFromRepositoryRequest(BaseModel):
@@ -44,7 +42,6 @@ class ProjectSourceResponse(BaseModel):
     repository_url: str
     ref: str
     subdir: str
-    entry_point: str
     include_paths: list[str]
     resolved_commit: str | None = None
 

@@ -60,6 +60,7 @@ class RuntimeLock:
             cleanup_interval: 清理过期锁的间隔（秒）
         """
         self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_users: dict[str, int] = {}
         self._lock_info: dict[str, LockInfo] = {}
         self._default_timeout = default_timeout
         self._cleanup_interval = cleanup_interval
@@ -124,11 +125,21 @@ class RuntimeLock:
         # 注意：asyncio.Lock 不支持强制释放
         # 这里只清理元数据，实际的 Lock 对象会在下次获取时重建
 
-    def _get_lock(self, runtime_hash: str) -> asyncio.Lock:
-        """获取或创建锁对象"""
+    def _checkout_lock(self, runtime_hash: str) -> asyncio.Lock:
+        """获取锁并登记当前持有者或等待者。"""
         if runtime_hash not in self._locks:
             self._locks[runtime_hash] = asyncio.Lock()
+        self._lock_users[runtime_hash] = self._lock_users.get(runtime_hash, 0) + 1
         return self._locks[runtime_hash]
+
+    def _return_lock(self, runtime_hash: str, lock: asyncio.Lock) -> None:
+        users = self._lock_users.get(runtime_hash, 0) - 1
+        if users > 0:
+            self._lock_users[runtime_hash] = users
+            return
+        self._lock_users.pop(runtime_hash, None)
+        if not lock.locked() and self._locks.get(runtime_hash) is lock:
+            self._locks.pop(runtime_hash, None)
 
     async def acquire(
         self,
@@ -149,7 +160,7 @@ class RuntimeLock:
         Returns:
             是否成功获取锁
         """
-        lock = self._get_lock(runtime_hash)
+        lock = self._checkout_lock(runtime_hash)
         timeout = timeout or self._default_timeout
 
         if wait:
@@ -157,13 +168,18 @@ class RuntimeLock:
                 # 使用 wait_for 实现超时
                 await asyncio.wait_for(lock.acquire(), timeout=timeout)
             except TimeoutError:
+                self._return_lock(runtime_hash, lock)
                 logger.warning(f"获取锁超时: {runtime_hash}")
                 self._stats.total_contention += 1
                 return False
+            except BaseException:
+                self._return_lock(runtime_hash, lock)
+                raise
         else:
             if not lock.locked():
                 await lock.acquire()
             else:
+                self._return_lock(runtime_hash, lock)
                 self._stats.total_contention += 1
                 return False
 
@@ -202,6 +218,7 @@ class RuntimeLock:
         except RuntimeError:
             # 锁未被当前任务持有
             return False
+        self._return_lock(runtime_hash, lock)
 
         # 清理锁信息
         if runtime_hash in self._lock_info:

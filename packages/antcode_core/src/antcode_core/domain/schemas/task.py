@@ -35,9 +35,7 @@ def _assert_json_payload_within(value: dict[str, Any] | None, field: str) -> Non
         raise ValueError(f"{field} 不是可序列化的 JSON: {e}") from e
     size = len(encoded.encode("utf-8"))
     if size > _MAX_JSON_FIELD_BYTES:
-        raise ValueError(
-            f"{field} 序列化后为 {size} 字节,超过上限 {_MAX_JSON_FIELD_BYTES} 字节"
-        )
+        raise ValueError(f"{field} 序列化后为 {size} 字节,超过上限 {_MAX_JSON_FIELD_BYTES} 字节")
 
 
 class TaskCreateRequest(BaseModel):
@@ -51,9 +49,7 @@ class TaskCreateRequest(BaseModel):
 
     # cron_expression 对齐 DB 列 CharField(max_length=100),避免 10MB
     # cron 触发 asyncpg StringDataRightTruncation 500(P1-29)。
-    cron_expression: str | None = Field(
-        None, max_length=100, description="Cron表达式(<= 100 字符)"
-    )
+    cron_expression: str | None = Field(None, max_length=100, description="Cron表达式(<= 100 字符)")
     interval_seconds: int | None = Field(None, gt=0, description="间隔秒数")
     scheduled_time: datetime | None = Field(None, description="计划执行时间")
     max_instances: int = Field(1, ge=1, le=10, description="最大并发实例数")
@@ -101,22 +97,22 @@ class TaskCreateRequest(BaseModel):
 class TaskUpdateRequest(BaseModel):
     """任务更新请求"""
 
-    name: str | None = Field(None, min_length=3, max_length=255)
-    description: str | None = Field(None, max_length=500)
+    name: str | None = Field(default=None, min_length=3, max_length=255)
+    description: str | None = Field(default=None, max_length=500)
     is_active: bool | None = None
     # 对齐 DB 列 max_length=100,防止超长 cron 触发 asyncpg 截断 500(P1-29)。
-    cron_expression: str | None = Field(None, max_length=100)
-    interval_seconds: int | None = Field(None, gt=0)
+    cron_expression: str | None = Field(default=None, max_length=100)
+    interval_seconds: int | None = Field(default=None, gt=0)
     scheduled_time: datetime | None = None
-    max_instances: int | None = Field(None, ge=1, le=10)
-    timeout_seconds: int | None = Field(None, gt=0)
-    retry_count: int | None = Field(None, ge=0, le=10)
-    retry_delay: int | None = Field(None, gt=0)
+    max_instances: int | None = Field(default=None, ge=1, le=10)
+    timeout_seconds: int | None = Field(default=None, gt=0)
+    retry_count: int | None = Field(default=None, ge=0, le=10)
+    retry_delay: int | None = Field(default=None, gt=0)
     execution_params: dict[str, Any] | None = None
     environment_vars: dict[str, str] | None = None
 
-    execution_strategy: ExecutionStrategy | None = Field(None)
-    specified_worker_id: str | None = Field(None)
+    execution_strategy: ExecutionStrategy | None = Field(default=None)
+    specified_worker_id: str | None = Field(default=None)
 
     @model_validator(mode="after")
     def _validate_cron_syntax(self):

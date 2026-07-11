@@ -116,7 +116,7 @@ services:
     networks:
       - antcode-network
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f antcode_ >/dev/null || exit 1"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8101/health/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -151,7 +151,7 @@ services:
     networks:
       - antcode-network
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f antcode_ >/dev/null || exit 1"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8100/health/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -174,6 +174,9 @@ services:
       - REDIS_ACL_ENABLED=false
       - WORKER_TRANSPORT_MODE=direct
       - WORKER_NAME=${WORKER_NAME:-worker-1}
+      - WORKER_SANDBOX_MODE=sandbox
+      - WORKER_SANDBOX_COMMAND=bwrap
+      - WORKER_SANDBOX_NETWORK_ISOLATED=true
       # direct 模式必需：worker config 只读 WORKER_REDIS_URL，不读 REDIS_URL
       - WORKER_REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     volumes:
@@ -185,12 +188,6 @@ services:
         condition: service_healthy
     networks:
       - antcode-network
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep -f antcode_ >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 45s
 
   # ================== 前端服务 ==================
 

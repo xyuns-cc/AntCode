@@ -53,11 +53,7 @@ class WorkerAuthVerifier:
             return
 
         current_time = time.time()
-        expired = [
-            nonce
-            for nonce, ts in self._used_nonces.items()
-            if current_time - ts > self.NONCE_EXPIRY
-        ]
+        expired = [nonce for nonce, ts in self._used_nonces.items() if current_time - ts > self.NONCE_EXPIRY]
 
         for nonce in expired:
             del self._used_nonces[nonce]
@@ -156,16 +152,12 @@ class WorkerAuthVerifier:
             logger.exception("nonce 协程执行失败")
             return None
 
-    def _generate_signature(
-        self, secret_key: str, payload: dict, timestamp: int, nonce: str
-    ) -> str:
+    def _generate_signature(self, secret_key: str, payload: dict, timestamp: int, nonce: str) -> str:
         """生成签名"""
         headers = generate_hmac_signature(payload, secret_key, timestamp, nonce)
         return headers["X-Signature"]
 
-    def verify_signature(
-        self, worker_id: str, payload: dict, timestamp: int, nonce: str, signature: str
-    ) -> bool:
+    def verify_signature(self, worker_id: str, payload: dict, timestamp: int, nonce: str, signature: str) -> bool:
         """验证 HMAC-SHA256 签名"""
         secret_key = self.get_worker_secret(worker_id)
         if not secret_key:
@@ -258,9 +250,7 @@ class WorkerAuthVerifier:
         }
 
         if worker_id and not self.check_rate_limit(worker_id):
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求频率过高"
-            )
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求频率过高")
 
         if require_signature:
             if not all([worker_id, timestamp_str, nonce, signature]):
@@ -269,18 +259,14 @@ class WorkerAuthVerifier:
             try:
                 timestamp = int(timestamp_str)
             except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="时间戳格式错误"
-                )
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="时间戳格式错误")
 
             try:
                 body = await request.json()
             except Exception:
                 body = {}
 
-            if not await self.verify_signature_async(
-                worker_id, body, timestamp, nonce, signature
-            ):
+            if not await self.verify_signature_async(worker_id, body, timestamp, nonce, signature):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="签名验证失败")
 
             result["signature_verified"] = True
@@ -302,4 +288,3 @@ async def verify_worker_request(request: Request) -> dict:
 async def verify_worker_request_with_signature(request: Request) -> dict:
     """Worker 请求验证（HMAC签名）"""
     return await worker_auth_verifier.verify_request(request, require_signature=True)
-

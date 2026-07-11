@@ -252,16 +252,10 @@ class AuditService:
                 created_at__lt=cursor_created_at,
             )
             total = await self._approximate_count()  # 近似值，避免全表扫
-            logs = (
-                await query.order_by("-created_at", "-id")
-                .limit(page_size)
-                .all()
-            )
+            logs = await query.order_by("-created_at", "-id").limit(page_size).all()
         else:
             total = await query.count()
-            logs = await query.order_by("-created_at", "-id").offset(
-                (page - 1) * page_size
-            ).limit(page_size)
+            logs = await query.order_by("-created_at", "-id").offset((page - 1) * page_size).limit(page_size)
 
         return {
             "total": total,
@@ -306,10 +300,7 @@ class AuditService:
             from tortoise import Tortoise
 
             conn = Tortoise.get_connection("default")
-            sql = (
-                "SELECT reltuples::bigint AS n FROM pg_class "
-                "WHERE relname = 'audit_logs'"
-            )
+            sql = "SELECT reltuples::bigint AS n FROM pg_class WHERE relname = 'audit_logs'"
             _, rows = await conn.execute_query(sql, [])
             if rows:
                 return int(rows[0].get("n") or 0)

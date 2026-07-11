@@ -92,9 +92,7 @@ def create_container(config: Any) -> Container:
     try:
         from antcode_worker.heartbeat.reporter import get_capability_detector
 
-        get_capability_detector().detect_all(
-            force_refresh=True, task_types=plugin_registry.capabilities()
-        )
+        get_capability_detector().detect_all(force_refresh=True, task_types=plugin_registry.capabilities())
     except Exception as exc:
         logger.warning(f"预填 capabilities.task_types 失败: {exc}")
 
@@ -238,6 +236,8 @@ def _create_transport(config: Any) -> Any:
         logger.info("Direct 模式未配置 worker_id，已生成本地身份: {}", worker_id)
 
     if transport_mode == "direct":
+        if not worker_id:
+            raise RuntimeError("Direct 模式无法建立稳定 worker_id")
         _register_direct_worker(config=config, worker_id=worker_id)
         # 已注册过的旧 worker：本地有 api_key 但无 redis_username → 自动迁移
         _migrate_legacy_direct_worker_to_acl(config=config, worker_id=worker_id)
@@ -684,10 +684,10 @@ def _create_executor(config: Any) -> Any:
     SandboxExecutor 虽定义但从不被使用。
     """
     import shlex
+    import shutil
 
     from antcode_worker.executor import (
         ExecutorConfig,
-        ProcessExecutor,
         SandboxConfig,
         SandboxExecutor,
     )
@@ -710,20 +710,23 @@ def _create_executor(config: Any) -> Any:
         default_max_processes=max_processes,
     )
 
-    sandbox_mode = str(getattr(config, "sandbox_mode", "process") or "process").strip().lower()
+    sandbox_mode = str(getattr(config, "sandbox_mode", "sandbox") or "sandbox").strip().lower()
     if sandbox_mode == "sandbox":
         # 解析可选的外接沙箱命令(如 firejail / bwrap)
         sandbox_command_str = str(getattr(config, "sandbox_command", "") or "").strip()
         sandbox_command_list: list[str] | None = None
-        if sandbox_command_str:
-            try:
-                sandbox_command_list = shlex.split(sandbox_command_str)
-            except ValueError:
-                logger.warning(
-                    "P0-a5: sandbox_command 无法解析为 shell 参数,忽略: %r",
-                    sandbox_command_str,
-                )
-                sandbox_command_list = None
+        if not sandbox_command_str:
+            raise RuntimeError(
+                "sandbox_mode=sandbox 必须配置 WORKER_SANDBOX_COMMAND；生产执行链禁止退化为同 UID 的普通子进程"
+            )
+        try:
+            sandbox_command_list = shlex.split(sandbox_command_str)
+        except ValueError as exc:
+            raise RuntimeError("WORKER_SANDBOX_COMMAND 不是合法参数列表") from exc
+        if not sandbox_command_list or shutil.which(sandbox_command_list[0]) is None:
+            raise RuntimeError(
+                f"沙箱工具不可用: {sandbox_command_list[0] if sandbox_command_list else sandbox_command_str}"
+            )
 
         sandbox_config = SandboxConfig(
             enabled=True,
@@ -732,26 +735,15 @@ def _create_executor(config: Any) -> Any:
             sandbox_command=sandbox_command_list,
         )
         logger.info(
-            "P0-a5: 使用 SandboxExecutor (sandbox_mode=sandbox, "
-            "sandbox_command={}, network_isolated={})",
+            "P0-a5: 使用 SandboxExecutor (sandbox_mode=sandbox, sandbox_command={}, network_isolated={})",
             sandbox_command_list,
             sandbox_config.network_isolated,
         )
         return SandboxExecutor(config=exec_config, sandbox_config=sandbox_config)
 
-    if sandbox_mode not in ("process", ""):
-        logger.warning(
-            "P0-a5: 未知的 sandbox_mode={!r},回退 process",
-            sandbox_mode,
-        )
-
-    logger.warning(
-        "P0-a5: sandbox_mode=process,子进程与 Worker 主进程同 UID + 同网络 "
-        "namespace + 共享 FS 视图,**不是真隔离**。生产建议:配置 "
-        "WORKER_SANDBOX_MODE=sandbox 并可选 WORKER_SANDBOX_COMMAND='firejail "
-        "--private --net=none',或部署到独立容器/VM。"
-    )
-    return ProcessExecutor(exec_config)
+    if sandbox_mode == "process":
+        raise RuntimeError("WORKER_SANDBOX_MODE=process 已禁用：用户任务必须运行在真实隔离环境中")
+    raise RuntimeError(f"未知的 WORKER_SANDBOX_MODE: {sandbox_mode!r}")
 
 
 def _create_plugin_registry(config: Any) -> Any:
@@ -877,7 +869,7 @@ def _create_flow_controller(config: Any) -> Any:
         bucket_capacity=getattr(config, "flow_control_capacity", 200),
         refill_rate=getattr(config, "flow_control_rate", 100.0),
     )
-    return create_flow_controller(flow_config)
+    return create_flow_controller(strategy, flow_config)
 
 
 def _create_project_fetcher(config: Any) -> Any:

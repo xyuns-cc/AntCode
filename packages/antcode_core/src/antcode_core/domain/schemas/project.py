@@ -4,7 +4,7 @@
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -70,7 +70,7 @@ class ExtractionRule(BaseModel):
     """提取规则模型"""
 
     desc: str = Field(..., description="规则描述")
-    type: str = Field(..., description="规则类型")
+    type: Literal["css", "xpath", "regex"] = Field(..., description="规则类型")
     expr: str = Field(..., description="规则表达式")
     page_type: str | None = Field(None, description="页面类型：list/detail，不指定则继承项目的callback_type")
 
@@ -200,7 +200,9 @@ class ProjectCreateRequest(BaseModel):
 class ProjectFileCreateRequest(ProjectCreateRequest):
     """文件项目创建请求"""
 
-    language: str | None = Field("python", max_length=50, description="执行语言（python/node/go/java 等，默认 python 兼容旧项目）")
+    language: str | None = Field(
+        "python", max_length=50, description="执行语言（python/node/go/java 等，默认 python 兼容旧项目）"
+    )
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: dict | None = Field(None, description="运行时配置")
     environment_vars: dict | None = Field(None, description="环境变量")
@@ -359,18 +361,9 @@ class ProjectUpdateRequest(BaseModel):
 
 # Form参数模型（用于multipart/form-data请求）
 class ProjectCreateFormRequest(BaseModel):
-    """项目创建 Form 请求模式。项目源码必须来自 Git 仓库。
+    """项目创建 Form 请求模式。项目源码必须来自 Git 仓库。"""
 
-    O6-followup: 迁移 44/45 后废弃的 form 字段（``interpreter_source`` /
-    ``python_bin`` / ``code_content`` / ``git_url`` / ``git_branch`` /
-    ``git_credential_id`` / ``file_source_type`` / ``code_source_type`` /
-    ``version`` 等）route 层 form 参数仍在（前端兼容），业务上不再使用。
-    schema 用 ``extra="ignore"`` 让老客户端提交时废弃字段被静默忽略而不
-    422；活跃字段由 route 层显式抽入 ``request_data`` 传给 CreateRequest
-    子类，语义仍受 ``extra="forbid"`` 强约束。
-    """
-
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     # 通用参数
     name: str = Field(..., min_length=3, max_length=50, description="项目名称")
@@ -400,7 +393,7 @@ class ProjectCreateFormRequest(BaseModel):
     region: str | None = Field(None, description="执行区域")
 
     # 规则项目参数
-    engine: str | None = Field("requests", description="采集引擎 (requests/curl_cffi)")
+    engine: CrawlEngine | None = Field(CrawlEngine.REQUESTS, description="采集引擎")
     target_url: str | None = Field(None, max_length=2000, description="目标URL")
     url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     request_method: str | None = Field("GET", description="请求方法 (GET/POST/PUT/DELETE)")
@@ -579,6 +572,13 @@ class FileInfo(BaseModel):
     resolved_revision: str | None = Field(None, description="Git 解析后的提交版本")
 
 
+class CodeInfo(FileInfo):
+    """Git 代码项目信息。"""
+
+    language: str = Field("python", description="编程语言")
+    documentation: str | None = Field(None, description="代码文档")
+
+
 class ProjectResponse(BaseModel):
     """项目响应模式"""
 
@@ -601,7 +601,7 @@ class ProjectResponse(BaseModel):
     runtime_locator: str | None = Field(None, description="运行时定位符")
     file_info: FileInfo | None = Field(None, description="文件信息")
     rule_info: dict[str, Any] | None = Field(default_factory=dict, description="规则信息")
-    code_info: dict[str, Any] | None = Field(default_factory=dict, description="代码信息")
+    code_info: CodeInfo | None = Field(None, description="代码信息")
 
     # 执行策略配置
     execution_strategy: str = Field("", description="执行策略")

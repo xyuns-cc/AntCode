@@ -46,9 +46,12 @@ _HOURLY_TREND_CACHE_TTL = 60
 @router.get("/summary", response_model=BaseResponse[dict], summary="仪表盘摘要")
 async def get_dashboard_summary(current_user=Depends(get_current_user)):
     try:
-        cached = await unified_cache.get(_SUMMARY_CACHE_KEY)
+        cache_key = _SUMMARY_CACHE_KEY if current_user.is_admin else f"{_SUMMARY_CACHE_KEY}:user:{current_user.user_id}"
+        cached = await unified_cache.get(cache_key)
         if cached is not None:
             return success(cached, message=Messages.QUERY_SUCCESS)
+        project_scope = {} if current_user.is_admin else {"user_id": current_user.user_id}
+        task_scope = {} if current_user.is_admin else {"user_id": current_user.user_id}
         # 并行执行所有 count 查询，减少总耗时
         (
             total_projects,
@@ -65,19 +68,19 @@ async def get_dashboard_summary(current_user=Depends(get_current_user)):
             tasks_failed,
             tasks_paused,
         ) = await asyncio.gather(
-            Project.all().count(),
-            Project.filter(status=ProjectStatus.ACTIVE).count(),
-            Project.filter(status=ProjectStatus.INACTIVE).count(),
-            Project.filter(status=ProjectStatus.ARCHIVED).count(),
-            Project.filter(type=ProjectType.FILE).count(),
-            Project.filter(type=ProjectType.RULE).count(),
-            Project.filter(type=ProjectType.CODE).count(),
-            Task.all().count(),
-            Task.filter(is_active=True).count(),
-            Task.filter(status=TaskStatus.RUNNING).count(),
-            Task.filter(status=TaskStatus.SUCCESS).count(),
-            Task.filter(status=TaskStatus.FAILED).count(),
-            Task.filter(status=TaskStatus.PAUSED).count(),
+            Project.filter(**project_scope).count(),
+            Project.filter(status=ProjectStatus.ACTIVE, **project_scope).count(),
+            Project.filter(status=ProjectStatus.INACTIVE, **project_scope).count(),
+            Project.filter(status=ProjectStatus.ARCHIVED, **project_scope).count(),
+            Project.filter(type=ProjectType.FILE, **project_scope).count(),
+            Project.filter(type=ProjectType.RULE, **project_scope).count(),
+            Project.filter(type=ProjectType.CODE, **project_scope).count(),
+            Task.filter(**task_scope).count(),
+            Task.filter(is_active=True, **task_scope).count(),
+            Task.filter(status=TaskStatus.RUNNING, **task_scope).count(),
+            Task.filter(status=TaskStatus.SUCCESS, **task_scope).count(),
+            Task.filter(status=TaskStatus.FAILED, **task_scope).count(),
+            Task.filter(status=TaskStatus.PAUSED, **task_scope).count(),
         )
 
         data = {
@@ -106,14 +109,19 @@ async def get_dashboard_summary(current_user=Depends(get_current_user)):
             },
         }
 
-        await unified_cache.set(_SUMMARY_CACHE_KEY, data, ttl=_SUMMARY_CACHE_TTL)
+        await unified_cache.set(cache_key, data, ttl=_SUMMARY_CACHE_TTL)
         return success(data, message=Messages.QUERY_SUCCESS)
     except Exception as e:
         logger.error(f"获取仪表盘摘要失败: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取摘要失败")
 
 
-@router.get("/metrics", response_model=BaseResponse[dict], summary="系统指标")
+@router.get(
+    "/metrics",
+    response_model=BaseResponse[dict],
+    summary="系统指标",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
+)
 async def get_system_metrics(current_user=Depends(get_current_user)):
     try:
         # T7-B1b: 与 summary 同款 unified_cache 兜住轮询；15s TTL 平衡新鲜度
@@ -179,7 +187,12 @@ async def get_tasks_hourly_trend(current_user=Depends(get_current_user)):
     """获取过去24小时每小时的任务完成数量趋势"""
     try:
         # T7-B1b: 趋势数据 60s 内不会有可感知变化，缓存兜住前端轮询
-        cached = await unified_cache.get(_HOURLY_TREND_CACHE_KEY)
+        cache_key = (
+            _HOURLY_TREND_CACHE_KEY
+            if current_user.is_admin
+            else f"{_HOURLY_TREND_CACHE_KEY}:user:{current_user.user_id}"
+        )
+        cached = await unified_cache.get(cache_key)
         if cached is not None:
             return success(cached, message=Messages.QUERY_SUCCESS)
         now = datetime.now()
@@ -187,8 +200,11 @@ async def get_tasks_hourly_trend(current_user=Depends(get_current_user)):
         start_time = now - timedelta(hours=24)
 
         # 查询过去24小时所有已完成的任务执行记录
+        run_scope = {} if current_user.is_admin else {"created_by": current_user.user_id}
         executions = await TaskRun.filter(
-            start_time__gte=start_time, status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED]
+            start_time__gte=start_time,
+            status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED],
+            **run_scope,
         ).all()
 
         # 按小时分组统计
@@ -210,9 +226,7 @@ async def get_tasks_hourly_trend(current_user=Depends(get_current_user)):
         # 按小时顺序排列（从0点到23点）
         result = [hourly_data[i] for i in range(24)]
 
-        await unified_cache.set(
-            _HOURLY_TREND_CACHE_KEY, result, ttl=_HOURLY_TREND_CACHE_TTL
-        )
+        await unified_cache.set(cache_key, result, ttl=_HOURLY_TREND_CACHE_TTL)
         return success(result, message=Messages.QUERY_SUCCESS)
     except Exception as e:
         logger.error(f"获取任务趋势失败: {e}")

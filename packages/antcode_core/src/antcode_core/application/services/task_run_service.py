@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
+from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.scheduler.execution_status_service import (
     execution_status_service,
@@ -61,7 +62,7 @@ class TaskRunService:
         execution = await self._get_execution(run_id)
         if not execution:
             logger.warning(f"执行记录不存在: {run_id}")
-            return True
+            return False
 
         runtime_status = self._normalize_status(status)
         if not runtime_status:
@@ -72,13 +73,13 @@ class TaskRunService:
         finish_dt = self._parse_dt(finished_at)
         status_at = finish_dt or start_dt or datetime.now(UTC)
 
-        await execution_status_service.update_dispatch_status(
+        dispatch_updated = await execution_status_service.update_dispatch_status(
             run_id=execution.run_id,
             status=DispatchStatus.ACKED,
             status_at=status_at,
         )
 
-        await execution_status_service.update_runtime_status(
+        runtime_updated = await execution_status_service.update_runtime_status(
             run_id=execution.run_id,
             status=runtime_status,
             status_at=status_at,
@@ -86,34 +87,121 @@ class TaskRunService:
             error_message=error_message,
         )
 
-        # 重新加载，避免覆盖状态字段
         execution = await self._get_execution(run_id)
         if not execution:
-            return True
+            return False
+        # P1-17 review: running/queued 是非终态"进度心跳"事件。多 master 消费组
+        # 分区 / XAUTOCLAIM reclaim 都可能让它迟到（终态或 reconcile 的失败判定
+        # 已先落库）。此时 CAS 被终态保护拒绝是**预期行为**，事件本身已无信息
+        # 量——必须按"已消费"返回 True，让 result_loop 正常 XACK。否则该消息会
+        # 重投 MAX_DELIVER_COUNT 次后进入 dead-letter stream，把良性心跳灌成
+        # DLQ 噪音。终态不会被拉回：update_runtime_status 的终态吸收 + CAS
+        # allowed_from（RUNNING 只允许来自 NULL/QUEUED）双重保证。
+        # 终态结果的 CAS 冲突仍返回 False → 走 DLQ 保留结果正文（P1-19 设计）。
+        is_progress_event = runtime_status in (RuntimeStatus.QUEUED, RuntimeStatus.RUNNING)
+        if not runtime_updated and execution.runtime_status != runtime_status:
+            if is_progress_event:
+                logger.debug(
+                    "忽略迟到的非终态状态事件: run_id={} current={} incoming={}",
+                    run_id,
+                    execution.runtime_status,
+                    runtime_status,
+                )
+                return True
+            logger.warning(
+                "结果状态 CAS 冲突: run_id={} current={} incoming={}",
+                run_id,
+                execution.runtime_status,
+                runtime_status,
+            )
+            return False
+        if not dispatch_updated and execution.dispatch_status != DispatchStatus.ACKED:
+            if is_progress_event:
+                logger.debug(
+                    "忽略 dispatch 已终态记录上的非终态状态事件: run_id={} dispatch={}",
+                    run_id,
+                    execution.dispatch_status,
+                )
+                return True
+            logger.warning(
+                "分发状态 CAS 冲突: run_id={} current={}",
+                run_id,
+                execution.dispatch_status,
+            )
+            return False
+        return await self._update_result_metadata(
+            run_id=execution.run_id,
+            runtime_status=runtime_status,
+            start_dt=start_dt,
+            finish_dt=finish_dt,
+            duration_ms=duration_ms,
+            exit_code=exit_code,
+            error_message=error_message,
+            output=output,
+            data=data,
+        )
 
-        # 同步额外字段
+    async def _update_result_metadata(
+        self,
+        *,
+        run_id: str,
+        runtime_status: RuntimeStatus,
+        start_dt: datetime | None,
+        finish_dt: datetime | None,
+        duration_ms: float | str | None,
+        exit_code: int | None,
+        error_message: str | None,
+        output: str | None,
+        data: dict[str, Any] | None,
+    ) -> bool:
+        async with in_transaction("default") as conn:
+            execution = await TaskRun.filter(run_id=run_id).using_db(conn).select_for_update().first()
+            if execution is None or execution.runtime_status != runtime_status:
+                return False
+            updates = self._build_result_updates(
+                execution,
+                start_dt,
+                finish_dt,
+                duration_ms,
+                exit_code,
+                error_message,
+                output,
+                data,
+            )
+            if updates:
+                await TaskRun.filter(id=execution.id).using_db(conn).update(**updates)
+        return True
+
+    def _build_result_updates(
+        self,
+        execution: TaskRun,
+        start_dt: datetime | None,
+        finish_dt: datetime | None,
+        duration_ms: float | str | None,
+        exit_code: int | None,
+        error_message: str | None,
+        output: str | None,
+        data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        updates: dict[str, Any] = {}
         if start_dt and not execution.start_time:
-            execution.start_time = start_dt
+            updates["start_time"] = start_dt
         if finish_dt:
-            execution.end_time = finish_dt
+            updates["end_time"] = finish_dt
         if duration_ms and not execution.duration_seconds:
-            duration_sec = self._to_float(duration_ms) / 1000.0
-            execution.duration_seconds = duration_sec
+            updates["duration_seconds"] = self._to_float(duration_ms) / 1000.0
         if exit_code is not None:
-            execution.exit_code = exit_code
+            updates["exit_code"] = exit_code
         if error_message:
-            execution.error_message = error_message
-
+            updates["error_message"] = error_message
         result_data = dict(execution.result_data or {})
         if output:
             result_data["output"] = output
         if data:
             result_data.update(data)
         if result_data:
-            execution.result_data = result_data
-
-        await execution.save()
-        return True
+            updates["result_data"] = result_data
+        return updates
 
     async def update_status(
         self,
@@ -134,14 +222,13 @@ class TaskRunService:
             logger.warning(f"无法识别的运行状态: {status}")
             return False
 
-        await execution_status_service.update_runtime_status(
+        return await execution_status_service.update_runtime_status(
             run_id=execution.run_id,
             status=runtime_status,
             status_at=self._parse_dt(status_at) or datetime.now(UTC),
             exit_code=exit_code,
             error_message=error_message,
         )
-        return True
 
     async def _get_execution(self, run_id: str) -> TaskRun | None:
         run_id_str = str(run_id)

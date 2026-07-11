@@ -107,9 +107,9 @@ class CrawlProgressService(BaseService):
     def __init__(
         self,
         backend: ProgressStore | None = None,
-        checkpoint_interval: int = None,
-        speed_window: int = None,
-        worker_timeout: int = None,
+        checkpoint_interval: int | None = None,
+        speed_window: int | None = None,
+        worker_timeout: int | None = None,
     ):
         super().__init__()
         self._backend = backend
@@ -259,7 +259,12 @@ class CrawlProgressService(BaseService):
             "last_updated": progress.last_updated,
         }
 
-    async def save_checkpoint(self, project_id: str, batch_id: str, queue_state: dict = None) -> Checkpoint:
+    async def save_checkpoint(
+        self,
+        project_id: str,
+        batch_id: str,
+        queue_state: dict | None = None,
+    ) -> Checkpoint:
         backend = self._get_backend()
         progress = await self.get_progress(project_id, batch_id)
         progress_dict = progress.to_dict() if progress else {}

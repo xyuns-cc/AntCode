@@ -4,10 +4,10 @@ Worker 域枚举定义
 Requirements: 3.7
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     """运行状态"""
 
     PENDING = "pending"  # 等待执行
@@ -20,7 +20,7 @@ class RunStatus(str, Enum):
     KILLED = "killed"  # 被强制终止
 
 
-class LogStream(str, Enum):
+class LogStream(StrEnum):
     """日志流类型"""
 
     STDOUT = "stdout"
@@ -28,7 +28,7 @@ class LogStream(str, Enum):
     SYSTEM = "system"  # Worker 系统日志
 
 
-class TaskType(str, Enum):
+class TaskType(StrEnum):
     """任务类型"""
 
     CODE = "code"  # 代码执行
@@ -38,7 +38,7 @@ class TaskType(str, Enum):
     CUSTOM = "custom"  # 自定义任务
 
 
-class ExitReason(str, Enum):
+class ExitReason(StrEnum):
     """退出原因"""
 
     NORMAL = "normal"  # 正常退出
@@ -52,7 +52,7 @@ class ExitReason(str, Enum):
     RUNTIME_ERROR = "runtime_error"  # 运行时环境错误
 
 
-class ArtifactType(str, Enum):
+class ArtifactType(StrEnum):
     """产物类型"""
 
     FILE = "file"  # 普通文件

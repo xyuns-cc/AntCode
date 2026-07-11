@@ -184,20 +184,14 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class BodySizeMiddleware(BaseHTTPMiddleware):
-    """请求体总量限制中间件
+class _RequestBodyTooLarge(Exception):
+    def __init__(self, limit: int, received: int):
+        self.limit = limit
+        self.received = received
 
-    通过 ``Content-Length`` 头在业务处理前直接拒掉超大 body，防止例如
-    ``PUT /projects/{id}`` 收到 500MB JSON 打到 asyncpg / Pydantic 之前把
-    整个 event loop 拉爆(P1-29)。
 
-    - 默认 JSON/普通请求上限为 ``max_body_size``(10MB)。
-    - 对 ``multipart/*`` (文件上传)允许使用更高的 ``max_upload_size``
-      (与配置里的 ``MAX_FILE_SIZE`` 对齐,默认 100MB),避免误伤 tasks
-      导入等上传端点。
-    - 若客户端未上报 Content-Length(chunked / 空 body),放行进入下一环,
-      不做启发式估计——真正的下游解析器(Pydantic / DB)自会兜底。
-    """
+class BodySizeMiddleware:
+    """按 ASGI 分片累计实际请求体大小，覆盖 chunked 请求。"""
 
     def __init__(
         self,
@@ -205,48 +199,76 @@ class BodySizeMiddleware(BaseHTTPMiddleware):
         max_body_size: int = 10 * 1024 * 1024,
         max_upload_size: int | None = None,
     ):
-        super().__init__(app)
+        self.app = app
         self.max_body_size = max_body_size
-        # 允许 upload 端点单独放宽;默认对齐 MAX_FILE_SIZE
-        self.max_upload_size = (
-            max_upload_size if max_upload_size is not None else max_body_size
+        self.max_upload_size = max_upload_size if max_upload_size is not None else max_body_size
+
+    @staticmethod
+    def _header(scope: dict, name: bytes) -> str:
+        for key, value in scope.get("headers", []):
+            if key.lower() == name:
+                return value.decode("latin-1")
+        return ""
+
+    def _error_response(self, status_code: int, message: str, data=None) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "success": False,
+                "code": status_code,
+                "message": message,
+                "data": data,
+                "timestamp": datetime.now().isoformat(),
+            },
         )
 
-    async def dispatch(self, request, call_next):
-        content_length = request.headers.get("content-length")
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        content_type = self._header(scope, b"content-type").lower()
+        limit = self.max_upload_size if content_type.startswith("multipart/") else self.max_body_size
+        content_length = self._header(scope, b"content-length")
         if content_length:
             try:
-                size = int(content_length)
+                declared_size = int(content_length)
             except ValueError:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={
-                        "success": False,
-                        "code": status.HTTP_400_BAD_REQUEST,
-                        "message": "非法的 Content-Length",
-                        "data": None,
-                        "timestamp": datetime.now().isoformat(),
-                    },
+                response = self._error_response(status.HTTP_400_BAD_REQUEST, "非法的 Content-Length")
+                await response(scope, receive, send)
+                return
+            if declared_size < 0:
+                response = self._error_response(status.HTTP_400_BAD_REQUEST, "非法的 Content-Length")
+                await response(scope, receive, send)
+                return
+            if declared_size > limit:
+                response = self._error_response(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    "请求体过大",
+                    {"limit": limit, "received": declared_size},
                 )
+                await response(scope, receive, send)
+                return
 
-            content_type = request.headers.get("content-type", "") or ""
-            limit = (
-                self.max_upload_size
-                if content_type.lower().startswith("multipart/")
-                else self.max_body_size
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise _RequestBodyTooLarge(limit, received)
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _RequestBodyTooLarge as exc:
+            response = self._error_response(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                "请求体过大",
+                {"limit": exc.limit, "received": exc.received},
             )
-            if size > limit:
-                return JSONResponse(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    content={
-                        "success": False,
-                        "code": status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        "message": "请求体过大",
-                        "data": {"limit": limit, "received": size},
-                        "timestamp": datetime.now().isoformat(),
-                    },
-                )
-        return await call_next(request)
+            await response(scope, receive, send)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -345,9 +367,7 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
             # 提取资源 ID 并添加 detail 前缀
             if ns in self._id_patterns and ns in self._detail_prefix_map:
                 if m := self._id_patterns[ns].match(path):
-                    prefixes.append(
-                        self._detail_prefix_map[ns].format(id=m.group(1))
-                    )
+                    prefixes.append(self._detail_prefix_map[ns].format(id=m.group(1)))
 
             if prefixes:
                 from antcode_core.infrastructure.cache import unified_cache

@@ -148,8 +148,7 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
   const selectorTypes = [
     { value: 'css', label: 'CSS选择器', example: '.title, #content' },
     { value: 'xpath', label: 'XPath', example: '//h1[@class="title"]' },
-    { value: 'regex', label: '正则表达式', example: '<title>(.*?)</title>' },
-    { value: 'jsonpath', label: 'JSONPath', example: '$.data.title' }
+    { value: 'regex', label: '正则表达式', example: '<title>(.*?)</title>' }
   ]
 
   // 属性类型选项
@@ -169,7 +168,6 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
       case 'css': return 'blue'
       case 'xpath': return 'green'
       case 'regex': return 'orange'
-      case 'jsonpath': return 'purple'
       default: return 'default'
     }
   }
@@ -396,7 +394,7 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
           ),
           children: (
             <Row gutter={16}>
-              <Col span={6}>
+              <Col span={8}>
                 <Text strong>CSS选择器:</Text>
                 <div style={getHelpTextStyle()}>
                   <div>• .title (类选择器)</div>
@@ -406,7 +404,7 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
                   <div>• div &gt; p (子元素)</div>
                 </div>
               </Col>
-              <Col span={6}>
+              <Col span={8}>
                 <Text strong>XPath:</Text>
                 <div style={getHelpTextStyle()}>
                   <div>• //h1[@class='title']</div>
@@ -415,22 +413,13 @@ const RuleSelector: React.FC<RuleSelectorProps> = ({
                   <div>• //p[contains(@class,'content')]</div>
                 </div>
               </Col>
-              <Col span={6}>
+              <Col span={8}>
                 <Text strong>正则表达式:</Text>
                 <div style={getHelpTextStyle()}>
                   <div>• &lt;title&gt;(.*?)&lt;/title&gt;</div>
                   <div>• href="([^"]*)"</div>
                   <div>• (\d{'{'}4{'}'}-\d{'{'}2{'}'}-\d{'{'}2{'}'})</div>
                   <div>• price:\s*(\d+\.?\d*)</div>
-                </div>
-              </Col>
-              <Col span={6}>
-                <Text strong>JSONPath:</Text>
-                <div style={getHelpTextStyle()}>
-                  <div>• $.data.title</div>
-                  <div>• $..items[*].name</div>
-                  <div>• $.result[0]</div>
-                  <div>• $..author</div>
                 </div>
               </Col>
             </Row>

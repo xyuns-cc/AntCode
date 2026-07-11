@@ -22,14 +22,13 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
-from loguru import logger
-
 from antcode_core.application.services.scheduler.redispatch_service import (
     redispatch_service,
 )
 from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
+from loguru import logger
 
 from antcode_master.leader import ensure_leader
 
@@ -38,10 +37,14 @@ class RedispatchLoop:
     """派发失败补派 loop。"""
 
     def __init__(self, tick_interval_seconds: float | None = None) -> None:
-        self._tick_interval = float(
+        configured_interval = (
             tick_interval_seconds
-            or getattr(settings, "REDISPATCH_TICK_INTERVAL_SEC", 10)
+            if tick_interval_seconds is not None
+            else getattr(settings, "REDISPATCH_TICK_INTERVAL_SEC", 10)
         )
+        if configured_interval is None:
+            raise ValueError("REDISPATCH_TICK_INTERVAL_SEC 不能为空")
+        self._tick_interval = float(configured_interval)
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -99,14 +102,10 @@ class RedispatchLoop:
                     if raw_payload:
                         await redispatch_service.ack(raw_payload)
             except Exception as exc:
-                logger.exception(
-                    f"补派单项处理异常: run_id={payload.get('run_id')} err={exc}"
-                )
+                logger.exception(f"补派单项处理异常: run_id={payload.get('run_id')} err={exc}")
                 # 处理本身异常: raw_payload 放回 ZSet(不改 attempts),下轮重来
                 if raw_payload:
-                    await redispatch_service.requeue_raw(
-                        raw_payload, delay_seconds=self._tick_interval
-                    )
+                    await redispatch_service.requeue_raw(raw_payload, delay_seconds=int(self._tick_interval))
 
     async def _handle_one(self, payload: dict[str, Any]) -> bool:
         """处理单条:返回 True 表示已终结(需要 ack),False 表示尚未终结。
@@ -147,9 +146,7 @@ class RedispatchLoop:
         )
         return True
 
-    async def _reenqueue_or_give_up(
-        self, payload: dict[str, Any], *, reason: str
-    ) -> None:
+    async def _reenqueue_or_give_up(self, payload: dict[str, Any], *, reason: str) -> None:
         attempts = int(payload.get("attempts") or 0) + 1
         enqueued = await redispatch_service.enqueue(
             run_id=payload.get("run_id") or "",
@@ -201,19 +198,17 @@ class RedispatchLoop:
             from antcode_core.application.services.alert import alert_service
 
             await alert_service.send_alert(
-                title=f"派发补派耗尽: run_id={run_id}",
-                content=(
-                    f"run_id={run_id} project_id={payload.get('project_id')} "
+                message=(
+                    f"派发补派耗尽: run_id={run_id} project_id={payload.get('project_id')} "
                     f"attempts={attempts} 最后错误: {reason}"
                 ),
-                level="error",
+                level="ERROR",
+                source="redispatch",
             )
         except Exception as exc:
             logger.debug(f"补派放弃告警发送失败（可忽略）: {exc}")
 
-        logger.error(
-            f"补派放弃: run_id={run_id} attempts={attempts} reason={reason!r}"
-        )
+        logger.error(f"补派放弃: run_id={run_id} attempts={attempts} reason={reason!r}")
 
 
 redispatch_loop = RedispatchLoop()

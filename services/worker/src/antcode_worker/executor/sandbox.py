@@ -11,6 +11,7 @@ import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -29,6 +30,21 @@ from antcode_worker.executor.base import (
     NoOpLogSink,
 )
 from antcode_worker.executor.process import ProcessExecutor
+
+_RULE_PLUGIN_ENV_VARS = frozenset(
+    {
+        "ANTCODE_SPIDER_RUN_ID",
+        "ANTCODE_SPIDER_PROJECT_ID",
+        "ANTCODE_SPIDER_SINK_MODE",
+        "ANTCODE_SPIDER_GATEWAY_ENDPOINT",
+        "ANTCODE_SPIDER_GATEWAY_SECURE",
+        "ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN",
+        "ANTCODE_SPIDER_REDIS_URL",
+        "ANTCODE_SPIDER_REDIS_NAMESPACE",
+        "ANTCODE_SPIDER_WORKER_ID",
+    }
+)
+_RULE_PLUGIN_SECRET_ENV = frozenset({"ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"})
 
 
 @dataclass
@@ -192,10 +208,13 @@ class BasicSandbox(SandboxProvider):
             "original_work_dir": work_dir,
             "temp_work_dir": None,
             "cleanup_dirs": [],
+            "plugin_name": exec_plan.plugin_name,
         }
 
-        # 如果启用文件系统隔离，创建临时工作目录
-        if self.config.fs_isolated:
+        # 外部 namespace 沙箱直接绑定当前 run 的独立 workspace。创建空临时
+        # cwd 会让相对资源和源码入口不可见，因此只在无外部沙箱的测试 provider
+        # 中保留临时目录行为。
+        if self.config.fs_isolated and not self.config.sandbox_command:
             temp_base = self.config.temp_dir or str(DATA_ROOT / "temp" / "sandbox")
             os.makedirs(temp_base, exist_ok=True)
             temp_work_dir = os.path.join(temp_base, f"sandbox_{os.getpid()}_{id(exec_plan)}")
@@ -210,10 +229,60 @@ class BasicSandbox(SandboxProvider):
 
     def wrap_command(self, cmd: list[str], context: dict[str, Any]) -> list[str]:
         """包装命令"""
-        # 如果配置了自定义沙箱命令，使用它
-        if self.config.sandbox_command:
-            return self.config.sandbox_command + cmd
-        return cmd
+        if not self.config.sandbox_command:
+            raise RuntimeError("真实沙箱命令未配置，拒绝执行用户任务")
+
+        executable = os.path.basename(self.config.sandbox_command[0])
+        if executable != "bwrap":
+            return [*self.config.sandbox_command, *cmd]
+
+        work_dir = str(context["work_dir"])
+        wrapped = [
+            *self.config.sandbox_command,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup-try",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+        ]
+        if self.config.network_isolated:
+            wrapped.append("--unshare-net")
+
+        sensitive_dirs = (
+            DATA_ROOT / "secrets",
+            DATA_ROOT / "identity",
+            DATA_ROOT / "runs",
+            DATA_ROOT / "temp",
+        )
+        for sensitive_dir in sensitive_dirs:
+            if sensitive_dir.exists():
+                wrapped.extend(["--tmpfs", str(sensitive_dir)])
+
+        resolved_work_dir = Path(work_dir).resolve()
+        for hidden_root in sensitive_dirs:
+            try:
+                relative = resolved_work_dir.relative_to(hidden_root.resolve())
+            except ValueError:
+                continue
+            current = hidden_root
+            for part in relative.parts:
+                current /= part
+                wrapped.extend(["--dir", str(current)])
+            break
+
+        wrapped.extend(["--bind", work_dir, work_dir, "--chdir", work_dir, "--"])
+        return [*wrapped, *cmd]
 
     def filter_env(self, env: dict[str, str], context: dict[str, Any]) -> dict[str, str]:
         """过滤环境变量"""
@@ -229,12 +298,18 @@ class BasicSandbox(SandboxProvider):
             "PRIVATE",
         }
 
+        plugin_name = context.get("plugin_name")
+        allowed_env_vars = set(self.config.allowed_env_vars)
+        if plugin_name == "rule":
+            allowed_env_vars.update(_RULE_PLUGIN_ENV_VARS)
+
         # 只保留允许的环境变量，同时过滤敏感信息
-        for key in self.config.allowed_env_vars:
+        for key in allowed_env_vars:
             if key in env:
                 key_upper = key.upper()
                 is_sensitive = any(p in key_upper for p in sensitive_patterns)
-                if not is_sensitive:
+                trusted_plugin_secret = plugin_name == "rule" and key in _RULE_PLUGIN_SECRET_ENV
+                if not is_sensitive or trusted_plugin_secret:
                     filtered[key] = env[key]
 
         return filtered

@@ -19,8 +19,6 @@ request.meta.proxy"。代理池的**补充与探活**是平台级 loop（master 
 from __future__ import annotations
 
 import os
-import random
-from typing import Any
 
 from loguru import logger
 
@@ -71,9 +69,7 @@ class AntCodeProxyMiddleware:
                 create_sync_redis_client,
             )
 
-            self._redis = create_sync_redis_client(
-                self.redis_url, decode_responses=True
-            )
+            self._redis = create_sync_redis_client(self.redis_url, decode_responses=True)
         return self._redis
 
     def _pool_key(self) -> str:
@@ -85,6 +81,7 @@ class AntCodeProxyMiddleware:
         # 对整个 proxy URL 做 sha256 得固定长度 hex 作为 key 后缀，凭证
         # 只在 pool ZSET 的 member 里出现（member 本身访问受控 ACL）。
         import hashlib as _hashlib
+
         digest = _hashlib.sha256(proxy.encode("utf-8")).hexdigest()[:32]
         return f"{self.namespace}:proxy:cooldown:{digest}"
 
@@ -101,9 +98,7 @@ class AntCodeProxyMiddleware:
         # 修复：全员冷却时返回 None，让请求走"无代理直连"或触发上游降级
         # (Scrapy 会走默认下载链)，配合日志告警让运维知道代理池全废。
         if candidates:
-            logger.warning(
-                "proxy 池全员冷却中，本次请求不加代理"
-            )
+            logger.warning("proxy 池全员冷却中，本次请求不加代理")
         return None
 
     # ------------------------------------------------------------------

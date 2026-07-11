@@ -214,8 +214,7 @@ class GatewayTransport(TransportBase):
             await self._set_state(WorkerState.ONLINE)
 
             logger.info(
-                f"Gateway 传输层已启动: "
-                f"{self._gateway_config.gateway_host}:{self._gateway_config.gateway_port}"
+                f"Gateway 传输层已启动: {self._gateway_config.gateway_host}:{self._gateway_config.gateway_port}"
             )
             return True
 
@@ -285,9 +284,7 @@ class GatewayTransport(TransportBase):
             )
             logger.info(f"worker Deregister 已发送 (reason={reason})")
         except Exception as exc:
-            logger.warning(
-                f"Deregister RPC 失败（不阻塞停机；lease 会自然过期）: {exc}"
-            )
+            logger.warning(f"Deregister RPC 失败（不阻塞停机；lease 会自然过期）: {exc}")
 
     async def _drain_outbox_queues(self) -> None:
         """等待 status / log outbox 被推送完"""
@@ -346,8 +343,10 @@ class GatewayTransport(TransportBase):
                             )
                         if self._task_inbox is not None:
                             await self._task_inbox.put(task)
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("StreamTasks 投递失败")
+                        if self._task_inbox is not None:
+                            await self._task_inbox.put(exc)
 
             except asyncio.CancelledError:
                 break
@@ -405,9 +404,7 @@ class GatewayTransport(TransportBase):
                 await asyncio.sleep(backoff)
                 backoff = min(self._gateway_config.max_backoff, backoff * 2)
 
-    def _control_event_to_message(
-        self, event: Any, decoder: Any
-    ) -> ControlMessage | None:
+    def _control_event_to_message(self, event: Any, decoder: Any) -> ControlMessage | None:
         """``control_pb2.ControlEvent`` → 内部 ``ControlMessage``"""
         event_id = getattr(event, "event_id", "") or ""
         try:
@@ -483,9 +480,7 @@ class GatewayTransport(TransportBase):
                     self._drain_outbox_to_stream(self._status_outbox),
                     metadata=self._get_auth_metadata(),
                 )
-                logger.debug(
-                    f"StreamStatus 流结束: received={getattr(ack, 'received', 0)}"
-                )
+                logger.debug(f"StreamStatus 流结束: received={getattr(ack, 'received', 0)}")
                 backoff = 1.0
 
             except asyncio.CancelledError:
@@ -515,9 +510,7 @@ class GatewayTransport(TransportBase):
                     self._drain_outbox_to_stream(self._log_outbox),
                     metadata=self._get_auth_metadata(),
                 )
-                logger.debug(
-                    f"StreamLogs 流结束: received={getattr(ack, 'received', 0)}"
-                )
+                logger.debug(f"StreamLogs 流结束: received={getattr(ack, 'received', 0)}")
                 backoff = 1.0
 
             except asyncio.CancelledError:
@@ -570,12 +563,14 @@ class GatewayTransport(TransportBase):
             return None
         try:
             task = await asyncio.wait_for(self._task_inbox.get(), timeout=timeout)
+            if isinstance(task, Exception):
+                raise task
             return task
         except TimeoutError:
             return None
         except Exception:
             logger.exception("poll_task 出队失败")
-            return None
+            raise
 
     async def ack_task(self, task_id: str, accepted: bool, reason: str = "") -> bool:
         """``DataService.AckTask``：unary 应答任务接受/拒绝。
@@ -662,8 +657,16 @@ class GatewayTransport(TransportBase):
             logger.warning(f"上报结果失败: data_stub 未就绪 task_id={result.task_id}")
             return False
 
-        # 幂等性：相同 task_id 已经上报过就跳过
-        cache_key = f"result:{result.task_id}"
+        # 幂等性：相同 run + 相同状态 已经上报过就跳过。
+        #
+        # 契约修复: key 必须含 run_id 和 status，不能只用 task_id ——
+        # engine._report_running_start 会先用同一个 task_id 上报一次
+        # status="running"（P1-17 心跳），若 key 只含 task_id，这次 running
+        # 上报会把 ``result:{task_id}`` 缓存为 True（TTL 300s），任务在
+        # 5 分钟内跑完时最终终态上报直接命中缓存被跳过 —— engine 拿到
+        # True 后 XACK + 清状态，master 永远收不到终态，结果凭空丢失。
+        # 含 run_id 同时避免同 task 5 分钟内重跑（不同 run_id）被误吞。
+        cache_key = f"result:{result.run_id}:{result.task_id}:{result.status}"
         if self._gateway_config.enable_receipt_idempotency:
             cached = self._get_cached_result(cache_key)
             if cached is not None:
@@ -706,9 +709,7 @@ class GatewayTransport(TransportBase):
             except Exception as exc:
                 # gRPC 错误(UNAVAILABLE / abort) 都归到重试路径, 不缓存 True。
                 self._consecutive_failures += 1
-                logger.warning(
-                    f"report_result StreamStatus 失败: task_id={result.task_id} exc={exc}"
-                )
+                logger.warning(f"report_result StreamStatus 失败: task_id={result.task_id} exc={exc}")
                 await self._handle_connection_error(exc)
                 return False
 
@@ -869,9 +870,7 @@ class GatewayTransport(TransportBase):
             if new_lease_id:
                 self._lease_id = new_lease_id
             if revoked:
-                logger.warning(
-                    f"Lease 被服务端撤销: reason={getattr(response, 'revoke_reason', '')}"
-                )
+                logger.warning(f"Lease 被服务端撤销: reason={getattr(response, 'revoke_reason', '')}")
                 # 清空本地 lease，下一次会重新发租
                 self._lease_id = ""
             else:
@@ -902,12 +901,14 @@ class GatewayTransport(TransportBase):
             return None
         try:
             msg = await asyncio.wait_for(self._control_inbox.get(), timeout=timeout)
+            if isinstance(msg, Exception):
+                raise msg
             return msg
         except TimeoutError:
             return None
         except Exception:
             logger.exception("poll_control 出队失败")
-            return None
+            raise
 
     async def ack_control(self, receipt: str) -> bool:
         """``ControlService.AckControl(event_id=receipt, success=True)``。"""
@@ -1000,9 +1001,7 @@ class GatewayTransport(TransportBase):
             "auth_method": self._gateway_config.auth_method,
             "worker_id": self._gateway_config.worker_id,
             "lease_id": self._lease_id,
-            "last_heartbeat": (
-                self._last_heartbeat.isoformat() if self._last_heartbeat else None
-            ),
+            "last_heartbeat": (self._last_heartbeat.isoformat() if self._last_heartbeat else None),
             "consecutive_failures": self._consecutive_failures,
             "reconnect_stats": reconnect_stats,
         }
@@ -1069,7 +1068,9 @@ class GatewayTransport(TransportBase):
             if self._gateway_config.use_tls:
                 credentials = self._create_tls_credentials()
                 self._channel = grpc_aio.secure_channel(
-                    target, credentials, options=options,
+                    target,
+                    credentials,
+                    options=options,
                 )
             else:
                 self._channel = grpc_aio.insecure_channel(target, options=options)
@@ -1185,8 +1186,7 @@ class GatewayTransport(TransportBase):
             self._auth_failure_count += 1
             if self._auth_failure_count >= self._max_auth_failures:
                 logger.error(
-                    f"认证连续失败 {self._auth_failure_count} 次，停止重连。"
-                    f"请检查 WORKER_API_KEY 配置是否正确"
+                    f"认证连续失败 {self._auth_failure_count} 次，停止重连。请检查 WORKER_API_KEY 配置是否正确"
                 )
                 await self._set_state(WorkerState.OFFLINE)
                 self._running = False
@@ -1253,17 +1253,11 @@ class GatewayTransport(TransportBase):
         now = datetime.now().timestamp()
         ttl = self._gateway_config.receipt_cache_ttl
 
-        expired_keys = [
-            key for key, (ts, _) in self._result_cache.items()
-            if now - ts > ttl
-        ]
+        expired_keys = [key for key, (ts, _) in self._result_cache.items() if now - ts > ttl]
         for key in expired_keys:
             del self._result_cache[key]
 
-        expired_keys = [
-            key for key, (ts, _) in self._receipt_cache.items()
-            if now - ts > ttl
-        ]
+        expired_keys = [key for key, (ts, _) in self._receipt_cache.items() if now - ts > ttl]
         for key in expired_keys:
             del self._receipt_cache[key]
 

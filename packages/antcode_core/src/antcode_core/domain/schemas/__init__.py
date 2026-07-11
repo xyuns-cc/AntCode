@@ -60,7 +60,6 @@ from antcode_core.domain.schemas.worker import (
     WorkerAggregateStats,
     WorkerCapabilities,
     WorkerCreateRequest,
-    WorkerCredentialsResponse,
     WorkerHeartbeatRequest,
     WorkerListResponse,
     WorkerMetrics,
@@ -122,5 +121,4 @@ __all__ = [
     "WorkerRegisterResponse",
     "WorkerRegisterDirectRequest",
     "WorkerRegisterDirectResponse",
-    "WorkerCredentialsResponse",
 ]

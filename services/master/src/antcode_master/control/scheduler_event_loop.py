@@ -10,16 +10,13 @@ import contextlib
 import os
 import socket
 import time
-from typing import Any
-
 from antcode_core.common.config import settings
 from antcode_core.common.utils.serialization import to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
+from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
 from antcode_core.infrastructure.redis.streams import StreamClient
 from loguru import logger
-
-from antcode_master.leader import ensure_leader
 
 
 # P1-19: 死信队列 stream key。达阈值的事件先写这里再 ACK；写失败不 ACK。
@@ -76,10 +73,7 @@ class SchedulerEventLoop:
             return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
-        logger.info(
-            f"调度事件循环已启动: stream={self._stream}, group={self._group}, "
-            f"consumer={self._consumer}"
-        )
+        logger.info(f"调度事件循环已启动: stream={self._stream}, group={self._group}, consumer={self._consumer}")
 
     async def stop(self) -> None:
         """停止事件循环"""
@@ -103,10 +97,6 @@ class SchedulerEventLoop:
 
         while self._running:
             try:
-                if not settings.REDIS_ENABLED:
-                    await asyncio.sleep(self.idle_sleep)
-                    continue
-
                 # T6-T2: 去掉 leader gate —— scheduler_event 也走 consumer
                 # group（虽然生产者只有 leader，消费端可以多实例分担）。
                 # PEL deliver_count 走 XPENDING 权威源（下方 _handle_message
@@ -194,26 +184,36 @@ class SchedulerEventLoop:
                             )
                             if dlq_ok:
                                 logger.error(
-                                    "调度事件失败 {} 次 → 已入 DLQ + ACK: "
-                                    "msg_id={} event={} err={}",
-                                    count, message.msg_id, message.data, e,
+                                    "调度事件失败 {} 次 → 已入 DLQ + ACK: msg_id={} event={} err={}",
+                                    count,
+                                    message.msg_id,
+                                    message.data,
+                                    e,
                                 )
                                 ack_ids.append(message.msg_id)
                             else:
                                 # DLQ 写入失败——保留 PEL，下轮 XAUTOCLAIM
                                 # 会再次触达；同时告警便于人工介入。
                                 logger.error(
-                                    "调度事件失败 {} 次 但 DLQ 写入失败，保留 PEL: "
-                                    "msg_id={} event={}",
-                                    count, message.msg_id, message.data,
+                                    "调度事件失败 {} 次 但 DLQ 写入失败，保留 PEL: msg_id={} event={}",
+                                    count,
+                                    message.msg_id,
+                                    message.data,
                                 )
                         else:
-                            logger.warning(
-                                f"处理调度事件失败 (第 {count} 次): msg_id={message.msg_id} err={e}"
-                            )
+                            logger.warning(f"处理调度事件失败 (第 {count} 次): msg_id={message.msg_id} err={e}")
 
                 if ack_ids:
                     await self._stream_client.xack(self._stream, ack_ids, self._group)
+                    try:
+                        client = await self._stream_client._get_client()
+                        await trim_acknowledged_stream(
+                            client,
+                            self._stream,
+                            self._group,
+                        )
+                    except Exception:
+                        logger.exception("调度事件 Stream ACK 后裁剪失败")
 
             except asyncio.CancelledError:
                 break
@@ -239,7 +239,7 @@ class SchedulerEventLoop:
             redis = await get_redis_client()
             # payload 内部可能有 dict / list / int / str，统一 JSON 化以确保
             # Redis Streams 字段能接受（Streams 只接受 str/bytes/int/float）。
-            entry: dict[str, Any] = {
+            entry: dict[str | bytes | int | float, bytes | str | int | float] = {
                 "orig_stream": stream_key,
                 "orig_msg_id": msg_id,
                 "reason": reason,
@@ -255,9 +255,9 @@ class SchedulerEventLoop:
             return True
         except Exception as exc:
             logger.exception(
-                "写调度事件 DLQ 失败(将保留 PEL 由下轮重试): "
-                "msg_id={} err={}",
-                msg_id, exc,
+                "写调度事件 DLQ 失败(将保留 PEL 由下轮重试): msg_id={} err={}",
+                msg_id,
+                exc,
             )
             return False
 
@@ -268,9 +268,7 @@ class SchedulerEventLoop:
         times_delivered；这是跨 master 实例的权威计数。
         """
         client = await self._stream_client._get_client()  # type: ignore[attr-defined]
-        raw = await client.xpending_range(
-            self._stream, self._group, min=msg_id, max=msg_id, count=1
-        )
+        raw = await client.xpending_range(self._stream, self._group, min=msg_id, max=msg_id, count=1)
         if not raw:
             return 1
         entry = raw[0]
@@ -304,9 +302,7 @@ class SchedulerEventLoop:
                 crawl_batch_dispatcher_service,
             )
 
-            await crawl_batch_dispatcher_service.handle_batch_event(
-                event_type, str(batch_id)
-            )
+            await crawl_batch_dispatcher_service.handle_batch_event(event_type, str(batch_id))
             return
 
         task_id_raw = data.get("task_id")
@@ -341,4 +337,3 @@ class SchedulerEventLoop:
 
 
 scheduler_event_loop = SchedulerEventLoop()
-

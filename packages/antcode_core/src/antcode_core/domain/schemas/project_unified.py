@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from antcode_core.common.utils.json_parser import JSONParser
 from antcode_core.domain.models.enums import CallbackType, CrawlEngine, ProjectStatus, RequestMethod
+from antcode_core.domain.schemas.project import ExtractionRule
 
 
 class UnifiedProjectUpdateRequest(BaseModel):
@@ -73,8 +74,8 @@ class UnifiedProjectUpdateRequest(BaseModel):
         if isinstance(v, str):
             if v.strip() == "":
                 return []
-            return JSONParser.parse_list(v, "extraction_rules")
-        return v
+            v = JSONParser.parse_list(v, "extraction_rules")
+        return [ExtractionRule.model_validate(rule).model_dump() for rule in v]
 
     @field_validator("pagination_config", mode="before")
     @classmethod

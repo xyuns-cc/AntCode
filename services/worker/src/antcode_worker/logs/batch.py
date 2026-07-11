@@ -10,7 +10,7 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol
 
 from loguru import logger
@@ -31,7 +31,7 @@ class TransportProtocol(Protocol):
         ...
 
 
-class BackpressureState(str, Enum):
+class BackpressureState(StrEnum):
     """Backpressure 状态"""
 
     NORMAL = "normal"  # 正常
@@ -251,9 +251,7 @@ class BatchSender:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(
-                    f"[{self.run_id}] 批量发送循环异常 (退避 {backoff:.1f}s): {e}"
-                )
+                logger.error(f"[{self.run_id}] 批量发送循环异常 (退避 {backoff:.1f}s): {e}")
                 try:
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:

@@ -4,6 +4,8 @@
 任务执行记录的数据模型定义。
 """
 
+from typing import Any
+
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
@@ -43,7 +45,7 @@ class TaskRun(BaseModel):
     error_message = fields.TextField(null=True)
     retry_count = fields.IntField(default=0)
 
-    result_data = fields.JSONField(null=True)
+    result_data: fields.JSONField[dict[str, Any] | None] = fields.JSONField(null=True)
 
     # 资源使用
     cpu_usage = fields.FloatField(null=True)

@@ -145,15 +145,13 @@ export const RuleInfoCard: React.FC<DetailCardProps> = ({ project, codeBlockStyl
         <Descriptions.Item label="最大页数">{project.rule_info.max_pages}</Descriptions.Item>
         {/* S10: Scrapy 引擎相关能力开关 */}
         <Descriptions.Item label="断点续爬">
-          <Tag color={(project.rule_info as Record<string, unknown>).resume_enabled ? 'purple' : 'default'}>
-            {(project.rule_info as Record<string, unknown>).resume_enabled ? '已启用' : '未启用'}
+          <Tag color={project.rule_info.resume_enabled ? 'purple' : 'default'}>
+            {project.rule_info.resume_enabled ? '已启用' : '未启用'}
           </Tag>
         </Descriptions.Item>
         <Descriptions.Item label="内容去重">
           {(() => {
-            const cfg = (project.rule_info as Record<string, unknown>).dedup_config as
-              | { enabled?: boolean; fields?: string[]; scope?: string }
-              | undefined
+            const cfg = project.rule_info.dedup_config
             if (!cfg || !cfg.enabled) return <Tag>未启用</Tag>
             return (
               <span>

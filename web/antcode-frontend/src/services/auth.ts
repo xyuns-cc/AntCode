@@ -57,6 +57,7 @@ class AuthService {
 
   // 用户登出
   async logout(): Promise<void> {
+    await apiClient.post('/api/v1/auth/logout')
     AuthHandler.clearAuthData()
   }
 

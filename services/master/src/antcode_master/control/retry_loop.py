@@ -20,7 +20,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from antcode_core.common.config import settings
@@ -30,7 +30,7 @@ from antcode_core.domain.models.task_run import TaskRun
 from loguru import logger
 
 
-class RetryStrategy(str, Enum):
+class RetryStrategy(StrEnum):
     """重试策略"""
 
     FIXED = "fixed"
@@ -39,7 +39,7 @@ class RetryStrategy(str, Enum):
     CUSTOM = "custom"
 
 
-class CompensationType(str, Enum):
+class CompensationType(StrEnum):
     """补偿类型"""
 
     ROLLBACK = "rollback"
@@ -121,14 +121,13 @@ class _RetryQueueBackend:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
     @staticmethod
-    def _decode(raw: bytes | str) -> dict[str, Any] | None:
+    def _decode(raw: bytes | str) -> dict[str, Any]:
         if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", errors="ignore")
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            logger.warning(f"retry payload 反序列化失败,丢弃: {exc}")
-            return None
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("retry payload 必须是 JSON object")
+        return payload
 
     async def _get_redis(self):
         from antcode_core.infrastructure.redis.client import get_redis_client
@@ -194,30 +193,25 @@ class _RetryQueueBackend:
         out: list[dict[str, Any]] = []
         for raw in raw_list or []:
             item = self._decode(raw)
-            if item is not None:
-                item["__raw_payload"] = (
-                    raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
-                )
-                out.append(item)
+            item["__raw_payload"] = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            out.append(item)
         return out
 
     async def ack(self, raw_payload: str) -> None:
         redis = await self._get_redis()
-        try:
-            await redis.hdel(self.processing_key(), raw_payload)
-        except Exception as exc:
-            logger.warning(f"retry ack 失败(可忽略): {exc}")
+        removed = await redis.hdel(self.processing_key(), raw_payload)
+        if int(removed or 0) != 1:
+            raise RuntimeError("retry ack did not remove the processing entry")
 
     async def requeue(self, raw_payload: str, *, delay_seconds: int = 0) -> None:
         redis = await self._get_redis()
         score = int((time.time() + max(0, delay_seconds)) * 1000)
-        try:
-            pipe = redis.pipeline(transaction=True)
-            pipe.zadd(self.pending_key(), {raw_payload: score})
-            pipe.hdel(self.processing_key(), raw_payload)
-            await pipe.execute()
-        except Exception as exc:
-            logger.warning(f"retry requeue 失败: {exc}")
+        pipe = redis.pipeline(transaction=True)
+        pipe.zadd(self.pending_key(), {raw_payload: score})
+        pipe.hdel(self.processing_key(), raw_payload)
+        results = await pipe.execute()
+        if len(results) < 2 or int(results[1] or 0) != 1:
+            raise RuntimeError("retry requeue did not clear the processing entry")
 
     async def sweep_stalled(self) -> int:
         """崩溃恢复:把 processing hash 里超时的条目 requeue 回 ZSet。"""
@@ -234,27 +228,21 @@ class _RetryQueueBackend:
         requeued = 0
         for raw, claim_ms_raw in entries.items():
             try:
-                claim_ms = int(
-                    claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw
-                )
+                claim_ms = int(claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw)
             except (ValueError, AttributeError):
                 claim_ms = 0
             if claim_ms > threshold_ms:
                 continue
-            raw_str = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+            raw_str = raw.decode("utf-8") if isinstance(raw, bytes) else raw
             await self.requeue(raw_str, delay_seconds=0)
             requeued += 1
         if requeued:
-            logger.warning(
-                f"retry sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务"
-            )
+            logger.warning(f"retry sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务")
         return requeued
 
     async def peek_all(self) -> list[dict[str, Any]]:
         redis = await self._get_redis()
-        raw_members = await redis.zrange(
-            self.pending_key(), 0, -1, withscores=True
-        )
+        raw_members = await redis.zrange(self.pending_key(), 0, -1, withscores=True)
         out: list[dict[str, Any]] = []
         for raw, score in raw_members or []:
             item = self._decode(raw)
@@ -274,7 +262,7 @@ class _RetryQueueShim:
     的前提下,只能这样兼容。
     """
 
-    def __init__(self, backend: "_RetryQueueBackend") -> None:
+    def __init__(self, backend: _RetryQueueBackend) -> None:
         self._backend = backend
 
     async def put(self, item: dict[str, Any]) -> None:
@@ -471,9 +459,7 @@ class RetryService:
                 f"失败时间: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-            await alert_service.send_alert(
-                title=f"任务失败: {task.name}", content=alert_message, level="error"
-            )
+            await alert_service.send_alert(title=f"任务失败: {task.name}", content=alert_message, level="error")
 
         except Exception as e:
             logger.error(f"发送任务失败告警失败: {e}")
@@ -500,6 +486,7 @@ class RetryService:
                 tick_counter += 1
                 if tick_counter % sweep_every_n == 1:
                     try:
+                        await self._recover_from_db()
                         await self._backend.sweep_stalled()
                     except Exception as exc:
                         logger.warning(f"retry sweep_stalled 异常: {exc}")
@@ -526,10 +513,11 @@ class RetryService:
                         await scheduler_service.trigger_task(task_id)
                         logger.info(f"任务 {task_id} 重试已触发")
                         await self._backend.ack(raw_payload)
-                    except Exception as exc:
-                        logger.error(
-                            f"trigger_task({task_id}) 失败,requeue: {exc}"
+                        await TaskRun.filter(run_id=item.get("run_id")).update(
+                            next_retry_at=None,
                         )
+                    except Exception as exc:
+                        logger.error(f"trigger_task({task_id}) 失败,requeue: {exc}")
                         await self._backend.requeue(raw_payload, delay_seconds=5)
 
             except asyncio.CancelledError:
@@ -537,6 +525,32 @@ class RetryService:
             except Exception as e:
                 logger.error(f"处理重试队列失败: {e}")
                 await asyncio.sleep(1)
+
+    async def _recover_from_db(self) -> int:
+        """Rebuild Redis retry entries from durable TaskRun intent."""
+        pending = (
+            await TaskRun.filter(
+                next_retry_at__not_isnull=True,
+                status=TaskStatus.PENDING,
+            )
+            .only("task_id", "run_id", "retry_count", "next_retry_at")
+            .limit(500)
+        )
+        recovered = 0
+        for execution in pending:
+            retry_time = execution.next_retry_at
+            if retry_time is None:
+                continue
+            await self._backend.schedule(
+                task_id=execution.task_id,
+                run_id=execution.run_id,
+                retry_time=retry_time,
+                retry_count=execution.retry_count,
+            )
+            recovered += 1
+        if recovered:
+            logger.info(f"从 TaskRun 恢复 retry 意图: {recovered} 条")
+        return recovered
 
     def _get_task_retry_config(self, task):
         """获取任务的重试配置"""
@@ -554,12 +568,8 @@ class RetryService:
         retried_executions = sum(1 for e in executions if e.retry_count > 0)
         total_retries = sum(e.retry_count for e in executions)
 
-        retry_success = sum(
-            1 for e in executions if e.retry_count > 0 and e.status == TaskStatus.SUCCESS
-        )
-        retry_success_rate = (
-            retry_success / retried_executions * 100 if retried_executions > 0 else 0
-        )
+        retry_success = sum(1 for e in executions if e.retry_count > 0 and e.status == TaskStatus.SUCCESS)
+        retry_success_rate = retry_success / retried_executions * 100 if retried_executions > 0 else 0
 
         return {
             "task_id": task_id,

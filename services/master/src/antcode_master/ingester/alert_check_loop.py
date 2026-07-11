@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import asyncio
 
-from loguru import logger
-
 from antcode_core.application.services.crawl.metrics_service import (
     crawl_metrics_service,
 )
 from antcode_core.domain.models import CrawlBatch
 from antcode_core.domain.models.enums import BatchStatus
+from loguru import logger
 
 from antcode_master.leader import ensure_leader
 

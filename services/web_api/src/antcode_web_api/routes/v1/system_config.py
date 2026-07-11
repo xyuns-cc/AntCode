@@ -24,7 +24,7 @@ router = APIRouter()
     description="获取所有系统配置列表（仅超级管理员）",
     tags=["系统配置"],
 )
-async def get_all_configs(category: str = None, current_admin=Depends(get_current_super_admin)):
+async def get_all_configs(category: str | None = None, current_admin=Depends(get_current_super_admin)):
     """获取所有系统配置（仅超级管理员可访问）"""
 
     try:

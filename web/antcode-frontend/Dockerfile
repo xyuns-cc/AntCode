@@ -20,8 +20,8 @@ COPY . .
 # 列出文件确认复制成功
 RUN ls -la && ls -la src/
 
-# 构建（跳过 type-check，直接用 vite）
-RUN ./node_modules/.bin/vite build --mode production
+# 镜像构建必须经过与 CI 一致的静态门禁。
+RUN npm run type-check && npm run lint:ci && npm run build
 
 # Stage 2: Production (J4: nginx unprivileged 镜像以非 root 跑)
 FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime

@@ -13,6 +13,7 @@ P1c 改造：彻底移除 JSON 落库路径，统一走 Proto bytes，端到端�
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 from antcode_contracts import data_pb2
 from antcode_contracts.common_pb2 import Timestamp
@@ -21,7 +22,7 @@ from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamCl
 from loguru import logger
 
 # Status 字符串 -> data_pb2.Status enum 的映射（用于兼容旧调用方传入字符串）
-_STATUS_FROM_STR: dict[str, int] = {
+_STATUS_FROM_STR: dict[str, data_pb2.Status] = {
     "": data_pb2.STATUS_UNSPECIFIED,
     "pending": data_pb2.STATUS_PENDING,
     "running": data_pb2.STATUS_RUNNING,
@@ -34,10 +35,12 @@ _STATUS_FROM_STR: dict[str, int] = {
 }
 
 
-def _to_status_enum(status: object) -> int:
+def _to_status_enum(status: object) -> data_pb2.Status:
     """把传入的 status（int 或字符串）映射成 ``data_pb2.Status`` 数值。"""
     if isinstance(status, int):
-        return status
+        if status in data_pb2.Status.values():
+            return cast(data_pb2.Status, status)
+        return data_pb2.STATUS_UNSPECIFIED
     if isinstance(status, str):
         return _STATUS_FROM_STR.get(status.strip().lower(), data_pb2.STATUS_UNSPECIFIED)
     return data_pb2.STATUS_UNSPECIFIED

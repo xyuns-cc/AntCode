@@ -70,9 +70,7 @@ def _validate_redis_url(value: str) -> None:
         "rediss+sentinel",
     }
     if parsed.scheme not in allowed_schemes:
-        raise ValueError(
-            f"REDIS_URL scheme 不支持: {parsed.scheme!r}，仅允许 {sorted(allowed_schemes)}"
-        )
+        raise ValueError(f"REDIS_URL scheme 不支持: {parsed.scheme!r}，仅允许 {sorted(allowed_schemes)}")
     if not parsed.hostname:
         raise ValueError("REDIS_URL 缺少 host。")
 
@@ -87,7 +85,6 @@ class Settings(BaseSettings):
     # 是否启用 Redis（关闭时依赖 Redis 的功能会 no-op：批次事件不发布、
     # scheduler_event_loop 空转、WS 日志不接实时流）。默认 true 与代码假设一致；
     # 空 REDIS_URL 场景可设 false 让功能显式降级而不是抛 AttributeError。
-    REDIS_ENABLED: bool = Field(default=True)
     # T6-T1: Redis 部署形态。默认 auto 让 factory 从 URL scheme 判断
     # （redis+cluster / redis+sentinel）；也可显式覆盖为 standalone / cluster
     # / sentinel。用于 URL scheme 是标准 redis:// 但实际背后是集群/哨兵的
@@ -256,12 +253,12 @@ class Settings(BaseSettings):
     REDISPATCH_MAX_DELAY_SEC: int = 300
     REDISPATCH_TICK_INTERVAL_SEC: int = 10
     # T7-B4a (P1-2): 登录专项限流 + 账户锁定
-    LOGIN_RATE_LIMIT_IP_MAX: int = 5           # 每 IP 每分钟最多 5 次尝试
+    LOGIN_RATE_LIMIT_IP_MAX: int = 5  # 每 IP 每分钟最多 5 次尝试
     LOGIN_RATE_LIMIT_IP_PERIOD: int = 60
-    LOGIN_RATE_LIMIT_USER_MAX: int = 10        # 每用户名每 15 分钟最多 10 次
+    LOGIN_RATE_LIMIT_USER_MAX: int = 10  # 每用户名每 15 分钟最多 10 次
     LOGIN_RATE_LIMIT_USER_PERIOD: int = 900
-    LOGIN_LOCKOUT_FAILURES: int = 5            # 连续失败 N 次触发锁定
-    LOGIN_LOCKOUT_DURATION_SEC: int = 900      # 锁定 15 分钟
+    LOGIN_LOCKOUT_FAILURES: int = 5  # 连续失败 N 次触发锁定
+    LOGIN_LOCKOUT_DURATION_SEC: int = 900  # 锁定 15 分钟
 
     # 运维日志（loguru sink）：默认只写 stderr；置 True 时额外落文件（500MB rotate / 30 天）。
     # 与业务任务日志（task_logs 表）无关；容器化部署一般让日志由 stdout 采集，故默认 False。

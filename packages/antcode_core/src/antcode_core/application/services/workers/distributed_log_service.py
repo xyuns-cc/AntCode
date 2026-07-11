@@ -17,7 +17,9 @@ from antcode_core.application.services.logs.postgres_log_service import (
 from antcode_core.application.services.workers.log_notifier import LogRealtimeNotifier
 
 MAX_CACHE_LINES = 1000
+MAX_WS_QUEUE_LINES = 1000
 LOG_TYPES = ("stdout", "stderr")
+TERMINAL_STATUSES = {"success", "failed", "timeout", "cancelled", "skipped", "rejected"}
 
 
 class DistributedLogService:
@@ -66,7 +68,7 @@ class DistributedLogService:
         entries = await self._record_cache_and_entries(run_id, log_type, lines, timestamp)
         await postgres_task_log_service.append_entries(entries)
         if await self._has_ws_connections(run_id):
-            self._enqueue_ws_logs(run_id, log_type, lines)
+            await self._enqueue_ws_logs(run_id, log_type, lines)
 
     async def update_task_status(
         self,
@@ -86,6 +88,8 @@ class DistributedLogService:
         await self._update_runtime_status(run_id, status, exit_code, error_message, status_at)
         await self.append_log(run_id, "stdout", self._status_message(status, exit_code, error_message))
         await self._push_task_status(run_id)
+        if status.lower() in TERMINAL_STATUSES:
+            self._clear_hot_cache(run_id)
         logger.info(f"分布式任务状态更新: {run_id} -> {status}")
 
     async def get_logs(
@@ -117,14 +121,17 @@ class DistributedLogService:
         return {log_type: await self.get_logs(run_id, log_type, 5000) for log_type in LOG_TYPES}
 
     def clear_cache(self, run_id: str) -> None:
-        for log_type in LOG_TYPES:
-            self._log_cache.pop(self._cache_key(run_id, log_type), None)
-            self._sequences.pop(self._cache_key(run_id, log_type), None)
-        self._task_status.pop(run_id, None)
+        self._clear_hot_cache(run_id)
         task = self._ws_tasks.pop(run_id, None)
         if task and not task.done():
             task.cancel()
         self._ws_queues.pop(run_id, None)
+
+    def _clear_hot_cache(self, run_id: str) -> None:
+        for log_type in LOG_TYPES:
+            self._log_cache.pop(self._cache_key(run_id, log_type), None)
+            self._sequences.pop(self._cache_key(run_id, log_type), None)
+        self._task_status.pop(run_id, None)
 
     async def cleanup_old_logs(self, days: int = 7) -> None:
         raise RuntimeError("PostgreSQL log cleanup is handled by LogCleanupService")
@@ -173,12 +180,16 @@ class DistributedLogService:
             return False
         return await self._notifier.has_connections(run_id)
 
-    def _enqueue_ws_logs(self, run_id: str, log_type: str, lines: list[str]) -> None:
-        queue = self._ws_queues.setdefault(run_id, asyncio.Queue())
-        for line in lines:
-            queue.put_nowait((log_type, line))
-        if run_id not in self._ws_tasks:
+    async def _enqueue_ws_logs(self, run_id: str, log_type: str, lines: list[str]) -> None:
+        queue = self._ws_queues.setdefault(
+            run_id,
+            asyncio.Queue(maxsize=MAX_WS_QUEUE_LINES),
+        )
+        task = self._ws_tasks.get(run_id)
+        if task is None or task.done():
             self._ws_tasks[run_id] = asyncio.create_task(self._ws_loop(run_id))
+        for line in lines:
+            await queue.put((log_type, line))
 
     async def _ws_loop(self, run_id: str) -> None:
         queue = self._ws_queues.get(run_id)
@@ -250,7 +261,9 @@ class DistributedLogService:
             "status": execution.status.value,
             "exit_code": execution.exit_code,
             "error_message": execution.error_message,
-            "updated_at": execution.updated_at.isoformat(),
+            "updated_at": (
+                execution.runtime_updated_at or execution.dispatch_updated_at or execution.created_at
+            ).isoformat(),
         }
 
     async def _drain_ws_tasks(self) -> None:
@@ -291,8 +304,7 @@ class DistributedLogService:
         return f"任务状态: {value}"
 
     def _progress_for_status(self, status: str) -> float | None:
-        terminal = {"success", "failed", "timeout", "cancelled", "skipped", "rejected"}
-        return 100.0 if status.lower() in terminal else None
+        return 100.0 if status.lower() in TERMINAL_STATUSES else None
 
     def _cache_key(self, run_id: str, log_type: str) -> str:
         return f"{run_id}:{log_type}"

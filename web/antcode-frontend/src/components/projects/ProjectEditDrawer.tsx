@@ -11,6 +11,7 @@ import type {
   Project,
   ProjectCodeConfigUpdateRequest,
   ProjectFileConfigUpdateRequest,
+  ProjectSourcePayload,
   ProjectUpdateRequest,
 } from '@/types'
 import styles from './ProjectEditDrawer.module.css'
@@ -21,6 +22,21 @@ interface ProjectEditDrawerProps {
   project: Project | null
   onSuccess?: () => void
 }
+
+const normalizeSourceList = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === 'string')
+  }
+  if (typeof value !== 'string') return []
+  return value.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+const buildSourcePayload = (data: Record<string, unknown>): ProjectSourcePayload => ({
+  repository_id: String(data.repository_id ?? ''),
+  ref: String(data.ref ?? 'main'),
+  subdir: String(data.subdir ?? ''),
+  include_paths: normalizeSourceList(data.include_paths),
+})
 
 const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
   open,
@@ -129,19 +145,20 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
             )
           },
         })
-      } else if (project.type === 'code') {
+      } else {
+        steps.push({
+          name: 'Git 来源',
+          run: async () => {
+            await projectService.updateProjectSource(project.id, buildSourcePayload(data))
+          },
+        })
+      }
+
+      if (project.type === 'code') {
         const payload: ProjectCodeConfigUpdateRequest = {
           language: data.language as string | undefined,
-          version: data.version as string | undefined,
-          entry_point: data.entry_point as string | undefined,
+          entry_point: data.code_entry_point as string | undefined,
           documentation: data.documentation as string | undefined,
-          source_type: data.source_type as ProjectCodeConfigUpdateRequest['source_type'],
-          git_url: data.git_url as string | undefined,
-          git_branch: data.git_branch as string | undefined,
-          git_commit: data.git_commit as string | undefined,
-          git_subdir: data.git_subdir as string | undefined,
-          git_credential_id: data.git_credential_id as string | undefined,
-          code_content: data.code_content as string | undefined,
         }
         steps.push({
           name: '代码配置',
@@ -154,13 +171,6 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
           entry_point: data.entry_point as string | undefined,
           runtime_config: data.runtime_config as ProjectFileConfigUpdateRequest['runtime_config'],
           environment_vars: data.environment_vars as ProjectFileConfigUpdateRequest['environment_vars'],
-          file: data.file as File | undefined,
-          source_type: data.source_type as ProjectFileConfigUpdateRequest['source_type'],
-          git_url: data.git_url as string | undefined,
-          git_branch: data.git_branch as string | undefined,
-          git_commit: data.git_commit as string | undefined,
-          git_subdir: data.git_subdir as string | undefined,
-          git_credential_id: data.git_credential_id as string | undefined,
         }
         steps.push({
           name: '文件配置',
@@ -284,17 +294,13 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
     if (project.type === 'code' && project.code_info) {
       return {
         ...baseData,
-        source_type: project.code_info.source_type,
-        git_url: project.code_info.git_url,
-        git_branch: project.code_info.git_branch,
-        git_commit: project.code_info.git_commit,
-        git_subdir: project.code_info.git_subdir,
-        git_credential_id: project.code_info.git_credential_id,
+        repository_id: project.code_info.repository_id,
+        ref: project.code_info.ref,
+        subdir: project.code_info.subdir,
+        include_paths: project.code_info.include_paths,
         language: project.code_info.language,
-        version: project.code_info.version,
         code_entry_point: project.code_info.entry_point,
         documentation: project.code_info.documentation,
-        code_content: project.code_info.content,
         dependencies: project.dependencies || []
       }
     }
@@ -302,12 +308,10 @@ const ProjectEditDrawer: React.FC<ProjectEditDrawerProps> = ({
     if (project.type === 'file' && project.file_info) {
       return {
         ...baseData,
-        source_type: project.file_info.source_type,
-        git_url: project.file_info.git_url,
-        git_branch: project.file_info.git_branch,
-        git_commit: project.file_info.git_commit,
-        git_subdir: project.file_info.git_subdir,
-        git_credential_id: project.file_info.git_credential_id,
+        repository_id: project.file_info.repository_id,
+        ref: project.file_info.ref,
+        subdir: project.file_info.subdir,
+        include_paths: project.file_info.include_paths,
         entry_point: project.file_info.entry_point,
         runtime_config: project.file_info.runtime_config ? JSON.stringify(project.file_info.runtime_config, null, 2) : '',
         environment_vars: project.file_info.environment_vars ? JSON.stringify(project.file_info.environment_vars, null, 2) : '',

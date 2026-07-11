@@ -21,13 +21,13 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any
+from enum import StrEnum
+from typing import Any, cast
 
 from loguru import logger
 
 
-class HealthStatus(str, Enum):
+class HealthStatus(StrEnum):
     """健康状态"""
 
     HEALTHY = "healthy"
@@ -235,7 +235,7 @@ class HealthChecker:
             )
 
             try:
-                await client.ping()
+                await cast(Awaitable[bool], client.ping())
                 info = await client.info("server")
 
                 return ComponentHealth(

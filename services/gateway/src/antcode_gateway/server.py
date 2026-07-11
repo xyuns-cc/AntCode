@@ -10,9 +10,9 @@ gRPC 服务器模块
 
 import asyncio
 import os
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
 from concurrent import futures
+from typing import Any, cast
 
 import grpc
 from grpc import aio as grpc_aio
@@ -65,9 +65,7 @@ class GrpcServer:
         self._readiness_server: asyncio.base_events.Server | None = None
         self._readiness_host: str = os.getenv("READINESS_HOST", "0.0.0.0")
         self._readiness_port: int = int(os.getenv("READINESS_PORT", "8100"))
-        self._readiness_enabled: bool = os.getenv(
-            "READINESS_HTTP_ENABLED", "true"
-        ).lower() == "true"
+        self._readiness_enabled: bool = os.getenv("READINESS_HTTP_ENABLED", "true").lower() == "true"
 
     @property
     def is_running(self) -> bool:
@@ -137,14 +135,11 @@ class GrpcServer:
                     experimental_non_blocking=True,
                     experimental_thread_pool=self._executor,
                 )
-                health_pb2_grpc.add_HealthServicer_to_server(
-                    self._health_servicer, self._server
-                )
+                health_pb2_grpc.add_HealthServicer_to_server(self._health_servicer, self._server)
                 logger.debug("已注册 grpc.health.v1.Health 服务")
             else:
                 logger.warning(
-                    "grpcio-health-checking 未安装,grpc_health_probe 探针会失败 "
-                    "(容器镜像里应已通过 pip 装好)"
+                    "grpcio-health-checking 未安装,grpc_health_probe 探针会失败 (容器镜像里应已通过 pip 装好)"
                 )
 
             # 绑定端口
@@ -195,16 +190,12 @@ class GrpcServer:
             # 避免 healthcheck 在启动过程中就返回 healthy(P1-21 假 healthy 修复)。
             if self._health_servicer is not None:
                 # 空字符串 "" 是标准的整体健康状态 key(grpc_health_probe 默认查询)
-                self._health_servicer.set(
-                    "", health_pb2.HealthCheckResponse.SERVING
-                )
+                self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
                 # 同时把已注册的业务服务也标记为 SERVING,方便按 service 查询
                 for servicer, _ in self._servicers:
                     service_name = servicer.__class__.__name__
                     try:
-                        self._health_servicer.set(
-                            service_name, health_pb2.HealthCheckResponse.SERVING
-                        )
+                        self._health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
                     except Exception:  # pragma: no cover - 防御性容错
                         pass
 
@@ -233,15 +224,23 @@ class GrpcServer:
             服务器凭证，失败返回 None
         """
         try:
+            cert_path = self.config.tls_cert_path
+            key_path = self.config.tls_key_path
+            if not cert_path or not key_path:
+                raise ValueError("TLS 已启用但证书或私钥路径缺失")
+
             # 读取证书和密钥
-            with open(self.config.tls_cert_path, "rb") as f:
+            with open(cert_path, "rb") as f:
                 cert = f.read()
-            with open(self.config.tls_key_path, "rb") as f:
+            with open(key_path, "rb") as f:
                 key = f.read()
 
             if self.config.mtls_enabled:
                 # mTLS 模式：需要客户端证书
-                with open(self.config.tls_ca_path, "rb") as f:
+                ca_path = self.config.tls_ca_path
+                if not ca_path:
+                    raise ValueError("mTLS 已启用但 CA 证书路径缺失")
+                with open(ca_path, "rb") as f:
                     ca_cert = f.read()
 
                 credentials = grpc.ssl_server_credentials(
@@ -326,7 +325,7 @@ class GrpcServer:
             client = await asyncio.wait_for(get_redis_client(), timeout=3.0)
             if client is None:
                 return False, "redis_client_none"
-            await asyncio.wait_for(client.ping(), timeout=3.0)
+            await asyncio.wait_for(cast(Awaitable[bool], client.ping()), timeout=3.0)
             return True, "ok"
         except Exception as exc:  # pragma: no cover - 依赖运行时环境
             return False, f"redis_error:{type(exc).__name__}"
@@ -374,9 +373,7 @@ class GrpcServer:
         status = 200 if healthy else 503
         return status, body
 
-    async def _handle_readiness_request(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _handle_readiness_request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """极简 HTTP/1.1 GET 处理器 —— 只识别 /health/ready,其他一律 404。"""
         try:
             request_line = await asyncio.wait_for(reader.readline(), timeout=3.0)
