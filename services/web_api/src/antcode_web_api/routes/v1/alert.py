@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from antcode_core.application.services.alert import alert_service
+from antcode_core.application.services.projects.git_url_security import validate_webhook_url
 from antcode_core.common.security.auth import TokenData, get_current_super_admin
 from antcode_core.common.serialization import from_json, to_json
 from antcode_core.domain.models import SystemConfig, User, UserRole
@@ -54,6 +55,16 @@ def _merge_webhooks(incoming: list[WebhookConfig], existing: list[dict]) -> list
             if not old_url:
                 raise HTTPException(status_code=422, detail=f"Webhook {item['name']} 缺少 URL")
             item["url"] = old_url
+        else:
+            # SSRF 防护：新增/修改的 Webhook URL 必须是 http(s) 且不指向
+            # 本地/私网/云元数据端点（复用 git_url_security 的私网检查）。
+            try:
+                item["url"] = validate_webhook_url(item["url"])
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Webhook {item['name']} URL 不合法: {exc}",
+                ) from exc
         merged.append(item)
     return merged
 

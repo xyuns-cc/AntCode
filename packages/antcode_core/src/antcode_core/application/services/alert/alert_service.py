@@ -160,7 +160,7 @@ class AlertService:
             self._config_cache = config
             logger.info("告警配置已重新加载")
 
-    async def send_alert(self, message, level="ERROR", source="system", extra=None):
+    async def send_alert(self, message, level="ERROR", source="system", extra=None, rate_key=None):
         """
         发送告警
 
@@ -169,6 +169,8 @@ class AlertService:
             level: 告警级别 (ERROR, CRITICAL, WARNING, INFO)
             source: 告警来源 (system, task, worker, scheduler)
             extra: 额外信息
+            rate_key: 限流去重键（不传时用 level|source|message；
+                消息含瞬时数值时调用方应传稳定键，否则限流不生效）
 
         Returns:
             发送结果
@@ -196,8 +198,13 @@ class AlertService:
             }
         )
 
-        # 发送告警
-        result = alert_manager.send_alert(formatted_message, level)
+        # 发送告警。限流键必须排除时间戳/extra（含 created_at 等易变字段），
+        # 否则每条消息哈希唯一，同一告警重复轰炸时限流形同虚设。
+        result = alert_manager.send_alert(
+            formatted_message,
+            level,
+            rate_key=rate_key or f"{level}|{source}|{message}",
+        )
 
         # 更新历史状态
         if self._alert_history:

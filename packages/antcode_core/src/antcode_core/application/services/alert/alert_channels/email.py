@@ -1,7 +1,10 @@
 """邮件告警渠道"""
 
 import asyncio
+import html
+import os
 import smtplib
+import ssl
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -9,6 +12,25 @@ from email.mime.text import MIMEText
 from loguru import logger
 
 from antcode_core.application.services.alert.alert_channels.base import AlertChannel
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """构建 SMTP TLS 上下文。
+
+    Python 的 smtplib 默认使用不校验证书的 ``ssl._create_stdlib_context()``，
+    存在中间人窃取 SMTP 凭据/告警内容的风险。这里默认启用证书校验，
+    与 Webhook 渠道一致，可通过 ``ALERT_VERIFY_SSL=false`` 显式关闭。
+    """
+    context = ssl.create_default_context()
+    if os.getenv("ALERT_VERIFY_SSL", "true").lower() == "false":
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _clean_header(value: str) -> str:
+    """清理邮件头字段，防止 CR/LF 注入额外头部。"""
+    return str(value).replace("\r", " ").replace("\n", " ").strip()
 
 
 class EmailAlertChannel(AlertChannel):
@@ -54,7 +76,12 @@ class EmailAlertChannel(AlertChannel):
 
         color = level_colors.get(level, "#6c757d")
 
-        subject = f"[{level}] AntCode 系统告警"
+        # 消息中包含用户可控内容（任务名/项目名/错误信息），必须转义后
+        # 才能进 HTML，否则可注入任意 HTML/JS 到收件人邮箱。
+        safe_level = html.escape(level)
+        safe_message = html.escape(message)
+
+        subject = f"[{_clean_header(level)}] AntCode 系统告警"
 
         html_body = f"""
 <!DOCTYPE html>
@@ -79,9 +106,9 @@ class EmailAlertChannel(AlertChannel):
             <h2>AntCode 系统告警</h2>
         </div>
         <div class="content">
-            <p><span class="level-badge">{level}</span></p>
+            <p><span class="level-badge">{safe_level}</span></p>
             <div class="message">
-                <pre>{message}</pre>
+                <pre>{safe_message}</pre>
             </div>
             <div class="footer">
                 <p>此邮件由 AntCode 告警系统自动发送，请勿直接回复。</p>
@@ -96,22 +123,29 @@ class EmailAlertChannel(AlertChannel):
     async def _send_email(self, recipient_email: str, recipient_name: str, subject: str, html_body: str) -> bool:
         """发送单封邮件"""
         try:
+            # 头部字段统一清理 CR/LF，防止收件人/发件人名注入额外邮件头
+            recipient_email = _clean_header(recipient_email)
+            recipient_name = _clean_header(recipient_name)
+            sender_name = _clean_header(self.sender_name)
+            smtp_user = _clean_header(self.smtp_user)
+
             msg = MIMEMultipart("alternative")
             msg["Subject"] = str(Header(subject, "utf-8"))
-            msg["From"] = f"{self.sender_name} <{self.smtp_user}>"
+            msg["From"] = f"{sender_name} <{smtp_user}>"
             msg["To"] = f"{recipient_name} <{recipient_email}>" if recipient_name else recipient_email
 
             # 添加HTML内容
             html_part = MIMEText(html_body, "html", "utf-8")
             msg.attach(html_part)
 
-            # 发送邮件
+            # 发送邮件（默认校验 TLS 证书，见 _make_ssl_context）
+            context = _make_ssl_context()
             server: smtplib.SMTP
             if self.smtp_ssl:
-                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10)
+                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10, context=context)
             else:
                 server = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10)
-                server.starttls()
+                server.starttls(context=context)
 
             server.login(self.smtp_user, self.smtp_password)
             server.sendmail(self.smtp_user, [recipient_email], msg.as_string())

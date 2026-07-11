@@ -27,7 +27,12 @@ def _is_private_ip(host: str) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return address.is_private or address.is_loopback or address.is_link_local or address.is_reserved
+    if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+        return True
+    # 兜底: 任何非全局可路由地址一律拒绝, 覆盖 CGNAT/共享地址空间
+    # (100.64.0.0/10, 含阿里云 metadata 邻域 100.100.100.0/24)、
+    # benchmarking(198.18.0.0/15) 等 is_private=False 的内网向量。
+    return not address.is_global
 
 
 def _extract_host(url: str) -> str:
@@ -80,4 +85,31 @@ def validate_git_url(url: object) -> str:
     return stripped
 
 
-__all__ = ["validate_git_url"]
+ALLOWED_WEBHOOK_SCHEMES = ("http://", "https://")
+
+
+def validate_webhook_url(url: object) -> str:
+    """Validate an outbound alert webhook URL (SSRF protection).
+
+    复用 Git URL 的私网/元数据检查：禁止 localhost、回环、私网、link-local
+    及云元数据端点（169.254.169.254 等），仅允许 http/https。
+    ``ALLOW_PRIVATE_NODES=true`` 时放行私网地址（内网自建 IM 网关等场景）。
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Webhook URL 不能为空")
+    stripped = url.strip()
+    if not stripped.lower().startswith(ALLOWED_WEBHOOK_SCHEMES):
+        raise ValueError("Webhook URL 不合法：仅支持 http:// 或 https://")
+    if settings.ALLOW_PRIVATE_NODES:
+        return stripped
+
+    host = _extract_host(stripped).lower()
+    if not host:
+        raise ValueError("Webhook URL 缺少主机")
+    if host in BLOCKED_GIT_HOSTS or _is_private_ip(host):
+        raise ValueError(f"Webhook URL 不合法：禁止指向本地、私网或云元数据端点 {host!r}")
+    _validate_resolved_host(host)
+    return stripped
+
+
+__all__ = ["validate_git_url", "validate_webhook_url"]

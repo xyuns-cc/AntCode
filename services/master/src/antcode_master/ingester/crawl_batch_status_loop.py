@@ -106,12 +106,30 @@ class CrawlBatchStatusLoop:
         # 30s tick 变成放大器。改成 WHERE ... = ANY($1) GROUP BY，一次拿
         # 所有批次的计数快照，Python 端按 batch_id 分派决策。
         stats = await self._fetch_batch_stats([b.public_id for b in batches])
+        # R2 seam-5: 进度 hash 以 project **public_id** 为 key（与
+        # batch_service.start_batch 的 init_progress 对齐），一次批量解析。
+        project_public_ids = await self._fetch_project_public_ids([b.project_id for b in batches])
 
         for batch in batches:
             try:
-                await self._reconcile_batch(batch, stats.get(batch.public_id))
+                await self._reconcile_batch(
+                    batch,
+                    stats.get(batch.public_id),
+                    project_public_ids.get(batch.project_id),
+                )
             except Exception as exc:
                 logger.exception(f"batch 状态推导失败: batch_id={batch.public_id} err={exc}")
+
+    @staticmethod
+    async def _fetch_project_public_ids(project_ids: list[int]) -> dict[int, str]:
+        """批量解析 project 内部 ID → 公开 ID（进度 key 的组成部分）。"""
+        unique_ids = list({pid for pid in project_ids if pid})
+        if not unique_ids:
+            return {}
+        from antcode_core.domain.models import Project
+
+        rows = await Project.filter(id__in=unique_ids).only("id", "public_id").all()
+        return {row.id: row.public_id for row in rows}
 
     async def _fetch_batch_stats(self, batch_ids: list[str]) -> dict[str, dict[str, int]]:
         """一次拉出所有 batch 的 run 状态计数。
@@ -158,6 +176,7 @@ class CrawlBatchStatusLoop:
         self,
         batch: CrawlBatch,
         stat: dict[str, int] | None,
+        project_public_id: str | None = None,
     ) -> None:
         """基于聚合结果推导单个 batch 终态。
 
@@ -176,6 +195,18 @@ class CrawlBatchStatusLoop:
         # P1-14 (审查报告): seed_urls 完整性检查所需的分母。JSONField 可能
         # 是 None/空 list/list[str]，统一 fallback。
         seed_count = len(batch.seed_urls or [])
+
+        # R2 seam-5 (接缝修复): crawl 链路没有任何环节做进度加法——
+        # batch_dispatcher 走 TaskRun 派发，不经过 queue_service，
+        # progress_service.update_progress 全链路零调用，进度 hash 永远停在
+        # init 值（completed=0 / pending=total）。本 loop 已经持有每个 batch
+        # 的 run 状态聚合，把它作为权威值同步进进度 hash（绝对值覆写，幂等）。
+        # 失败不阻断状态推导（进度是展示面，状态机是主干）。
+        if stat and project_public_id:
+            try:
+                await self._sync_progress(batch, stat, project_public_id, seed_count)
+            except Exception as exc:
+                logger.warning(f"batch 进度同步失败(不影响状态推导): batch_id={batch.public_id} err={exc}")
 
         if not stat:
             # R1-P1-16: 空批次超时兜底 FAILED，避免永久 RUNNING
@@ -230,6 +261,42 @@ class CrawlBatchStatusLoop:
                 f"total={total} seed={seed_count} success={success} "
                 f"failed={failed} cancelled={cancelled}"
             )
+
+    @staticmethod
+    async def _sync_progress(
+        batch: CrawlBatch,
+        stat: dict[str, int],
+        project_public_id: str,
+        seed_count: int,
+    ) -> None:
+        """R2 seam-5: 把 run 状态聚合覆写到批次进度 hash。
+
+        计数映射（progress 只有 4 个计数位）：
+        - completed_urls = SUCCESS run 数
+        - failed_urls    = FAILED/TIMEOUT/REJECTED + CANCELLED run 数
+          （CANCELLED 归入 failed 侧，保证 total = completed + failed + pending
+          恒等式对消费者成立）
+        - pending_urls   = 分母 - completed - failed（含仍在跑的 run 和
+          尚未派发出去的 seed）
+        - total_urls     = max(seed 数, 已建 run 数)——正常时两者相等；
+          重复派发（at-least-once 副作用）时取 run 数避免 pending 变负。
+        """
+        from antcode_core.application.services.crawl.progress_service import (
+            crawl_progress_service,
+        )
+
+        completed = stat["success"]
+        failed = stat["failed"] + stat["cancelled"]
+        total = max(seed_count, stat["total"])
+        pending = max(total - completed - failed, 0)
+        await crawl_progress_service.sync_progress_counters(
+            project_id=project_public_id,
+            batch_id=batch.public_id,
+            total_urls=total,
+            completed_urls=completed,
+            failed_urls=failed,
+            pending_urls=pending,
+        )
 
     async def _cas_terminate(
         self,

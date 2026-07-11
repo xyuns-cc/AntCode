@@ -48,8 +48,17 @@ class WebSocketLogService:
                 await self._reject_connection(websocket, 4004, "执行记录不存在")
                 return
 
-            # 3. 建立连接
-            connection_id = await websocket_manager.connect(websocket, run_id, user_id)
+            # 3. 建立连接（携带 session_jti，供周期重校验在 revoke 后踢连接）
+            connection_id = await websocket_manager.connect(
+                websocket,
+                run_id,
+                user_id,
+                session_jti=token_data.session_jti,
+            )
+            if connection_id is None:
+                # 连接数超限，manager 已关闭连接
+                logger.warning(f"WebSocket连接被拒绝(超限): run_id={run_id}, user_id={user_id}")
+                return
             logger.info(f"WebSocket连接成功: {connection_id}")
 
             # 4. 发送当前执行状态（让前端立即获取最新状态）

@@ -183,7 +183,7 @@ class TaskPollHandler:
             max_tasks=max_tasks,
             block_ms=block_ms,
         )
-        tasks = self._tasks_from_results(results)
+        tasks = await self._tasks_from_results(redis, results, worker_id)
         logger.info(f"Worker {worker_id} 获取了 {len(tasks)} 个任务")
         return tasks
 
@@ -213,13 +213,31 @@ class TaskPollHandler:
         )
         return [*pending, *(live or [])]
 
-    def _tasks_from_results(self, results: list) -> list[TaskInfo]:
+    async def _tasks_from_results(self, redis, results: list, worker_id: str) -> list[TaskInfo]:
         tasks = []
         for stream_name, messages in results:
             stream = self._decode_identifier(stream_name)
             for message_id, data in messages:
                 message = self._decode_identifier(message_id)
-                task = self._parse_task_data(data, message_id)
+                try:
+                    task = self._parse_task_data(data, message_id)
+                except Exception as exc:
+                    # 回归修复(review): 毒消息(缺 task_id / JSON 损坏 / 被旧版
+                    # MAXLEN 裁剪后残留在 PEL 的幽灵条目,其 data 为 None)必须
+                    # 逐条 ack 丢弃。若让解析异常向上冒泡:StreamTasks 外层
+                    # catch 后 sleep-重试,而 _drain_pending_streams 每轮都会
+                    # 重读同一条毒消息 → 每轮都 raise → 同批合法任务一并丢弃,
+                    # 该 worker 永久拿不到任何任务。run 级失败由 master
+                    # reconcile._check_dispatched_no_ack 在 180s 内收敛为 FAILED。
+                    logger.warning(
+                        f"丢弃无法解析的任务消息(已 ACK): worker={worker_id} "
+                        f"stream={stream} message_id={message} err={exc}"
+                    )
+                    try:
+                        await redis.xack(stream, self.WORKER_GROUP, message)
+                    except Exception:
+                        logger.exception(f"毒消息 ACK 失败: stream={stream} message_id={message}")
+                    continue
                 task.receipt_id = f"{stream}|{message}"
                 tasks.append(task)
                 logger.debug(f"读取任务: task_id={task.task_id}, stream={stream}, message_id={message}")

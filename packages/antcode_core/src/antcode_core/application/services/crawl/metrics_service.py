@@ -521,6 +521,9 @@ class CrawlMetricsService(BaseService):
                 level=level,
                 source="crawl",
                 extra=extra,
+                # message 里含波动的当前值，用 project+metric 作稳定去重键，
+                # 避免阈值持续超标时 alert_check_loop 每 tick 重发同一告警
+                rate_key=f"crawl|{alert.project_id}|{alert.metric_name}",
             )
             try:
                 _asyncio.get_running_loop().create_task(coro)

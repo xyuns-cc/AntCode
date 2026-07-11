@@ -198,6 +198,48 @@ class CrawlProgressService(BaseService):
         await self._maybe_save_checkpoint(project_id, batch_id, progress)
         return progress
 
+    async def sync_progress_counters(
+        self,
+        project_id: str,
+        batch_id: str,
+        *,
+        total_urls: int,
+        completed_urls: int,
+        failed_urls: int,
+        pending_urls: int,
+    ) -> None:
+        """接缝修复（R2 seam-5）：用权威值（DB run 状态聚合）覆写进度计数。
+
+        背景：crawl 主链路（batch_dispatcher → TaskRun → worker）**不经过**
+        ``queue_service``，全链路没有任何环节调用 ``update_progress`` 做增量
+        计数，进度 hash 自 ``init_progress`` 后永远停留在
+        ``completed=0 / pending=total``。由 master 的
+        ``crawl_batch_status_loop`` 周期性把 TaskRun 状态聚合同步进来。
+
+        语义是**绝对值覆写**（幂等），不做增量加法——单一写者 + 幂等覆写，
+        天然避免"sink 报一次、gateway 又加一次"式双计。
+        """
+        backend = self._get_backend()
+        batch_key = f"{project_id}:{batch_id}"
+        await self._update_speed_history(batch_key, completed_urls)
+        speed = await self._calculate_speed(batch_key)
+        await backend.update_progress(
+            project_id,
+            batch_id,
+            {
+                # batch_id / project_id 一并写入：进度 hash 可能已被
+                # clear_progress 清掉（如 API 侧清理），HSET 需重建完整字段。
+                "batch_id": batch_id,
+                "project_id": project_id,
+                "total_urls": int(total_urls),
+                "pending_urls": int(pending_urls),
+                "completed_urls": int(completed_urls),
+                "failed_urls": int(failed_urls),
+                "speed_per_minute": speed,
+                "last_updated": datetime.now().isoformat(),
+            },
+        )
+
     async def increment_total_urls(self, project_id: str, batch_id: str, count: int) -> int:
         backend = self._get_backend()
         new_total = await backend.increment_progress(project_id, batch_id, "total_urls", count)

@@ -7,6 +7,19 @@ from typing import Any
 from antcode_core.application.services.alert.alert_channels.base import MultiWebhookChannel
 
 
+def _escape_lark_md(text):
+    """中和 lark_md/markdown 标签注入。
+
+    告警内容中可能包含用户可控文本（任务名/项目名/错误信息），若原样进
+    lark_md，`<at id=all></at>` 会真实 @所有人，"```" 可跳出堆栈代码块围栏。
+    这里在 '<' 后插入零宽空格阻断标签解析，并拆断 "```" 围栏（渲染视觉
+    不受影响）。
+    """
+    if not text:
+        return text
+    return str(text).replace("<", "<\u200b").replace("```", "`\u200b``")
+
+
 class FeishuAlertChannel(MultiWebhookChannel):
     """飞书告警渠道"""
 
@@ -86,6 +99,11 @@ class FeishuAlertChannel(MultiWebhookChannel):
 
         config = level_config.get(level, {"icon": f"[{level}]", "color": "grey", "title": level})
         parsed = self._parse_log_message(message)
+
+        # 注入防护：所有进入 lark_md/markdown 元素的字段先中和标签语法，
+        # 防止用户可控内容注入 <at id=all> 等富文本指令。
+        for key in ("timestamp", "location", "message", "exception_msg", "exception_type", "traceback"):
+            parsed[key] = _escape_lark_md(parsed[key])
 
         elements: list[dict[str, Any]] = []
 
