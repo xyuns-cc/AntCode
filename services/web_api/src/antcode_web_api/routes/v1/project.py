@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from datetime import UTC, datetime
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.projects.project_service import project_service
@@ -257,8 +257,30 @@ async def create_project(
     - 废弃字段不再声明为 Form 参数，避免客户端误以为这些配置仍然生效。
     """
 
-    # 构建请求数据 —— 仅包含 Pydantic Create schemas 声明的字段
-    request_data = {
+    request = _build_project_create_request(form_data)
+    project = await project_service.create_project(
+        request=request,
+        user_id=current_user_id,
+    )
+    response_data = create_project_response(project)
+    await _attach_project_detail_info(response_data, project)
+    await _audit_project_creation(http_request, current_user, project)
+    return success_response(response_data, message=Messages.CREATED_SUCCESS, code=201)
+
+
+def _build_project_create_request(form_data: ProjectCreateFormRequest) -> ProjectCreateRequest:
+    request_data = {**_base_project_create_data(form_data), **_project_type_create_data(form_data)}
+    schema_by_type = {
+        ProjectType.RULE: ProjectRuleCreateRequest,
+        ProjectType.FILE: ProjectFileCreateRequest,
+        ProjectType.CODE: ProjectCodeCreateRequest,
+    }
+    schema = schema_by_type.get(form_data.type, ProjectCreateRequest)
+    return schema(**request_data)
+
+
+def _base_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
+    return {
         "name": form_data.name,
         "description": form_data.description,
         "type": form_data.type,
@@ -267,7 +289,6 @@ async def create_project(
         "runtime_scope": form_data.runtime_scope,
         "python_version": form_data.python_version,
         "shared_runtime_key": form_data.shared_runtime_key,
-        # Worker 环境参数
         "env_location": form_data.env_location,
         "worker_id": form_data.worker_id,
         "use_existing_env": form_data.use_existing_env,
@@ -276,85 +297,59 @@ async def create_project(
         "env_description": form_data.env_description,
     }
 
-    # 从 form 抽 Git repository 源码字段（file/code 项目共用契约）
-    repo_fields = _extract_repo_source_fields(form_data)
 
-    # 根据项目类型添加特定参数
+def _project_type_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
     if form_data.type == ProjectType.FILE:
-        request_data.update(
-            {
-                "entry_point": form_data.entry_point,
-                "runtime_config": form_data.runtime_config,
-                "environment_vars": form_data.environment_vars,
-                **repo_fields,
-            }
-        )
-    elif form_data.type == ProjectType.RULE:
-        # 验证规则项目必需字段
-        if not form_data.target_url:
-            raise HTTPException(status_code=400, detail="规则项目必须提供target_url")
-        if not form_data.extraction_rules:
-            raise HTTPException(status_code=400, detail="规则项目必须提供extraction_rules")
-
-        request_data.update(
-            {
-                "engine": form_data.engine,
-                "target_url": form_data.target_url,
-                "url_pattern": form_data.url_pattern,
-                "request_method": form_data.request_method,
-                "callback_type": form_data.callback_type,
-                "extraction_rules": form_data.extraction_rules,
-                "pagination_config": form_data.pagination_config,
-                "max_pages": form_data.max_pages,
-                "start_page": form_data.start_page,
-                "request_delay": form_data.request_delay,
-                "retry_count": form_data.retry_count,
-                "timeout": form_data.timeout,
-                "priority": form_data.priority,
-                "dont_filter": form_data.dont_filter,
-                "data_schema": form_data.data_schema,
-                "headers": form_data.headers,
-                "cookies": form_data.cookies,
-                "proxy_config": form_data.proxy_config,
-                "anti_spider": form_data.anti_spider,
-                "task_config": form_data.task_config,
-                # S10: scrapy-redis 断点续爬 + 内容级去重
-                "resume_enabled": getattr(form_data, "resume_enabled", None),
-                "dedup_config": getattr(form_data, "dedup_config", None),
-            }
-        )
-    elif form_data.type == ProjectType.CODE:
-        request_data.update(
-            {
-                "language": form_data.language,
-                "entry_point": form_data.code_entry_point,
-                "documentation": form_data.documentation,
-                **repo_fields,
-            }
-        )
-
-    # 根据项目类型创建不同的请求对象
-    request: ProjectCreateRequest
+        return {
+            "entry_point": form_data.entry_point,
+            "runtime_config": form_data.runtime_config,
+            "environment_vars": form_data.environment_vars,
+            **_extract_repo_source_fields(form_data),
+        }
     if form_data.type == ProjectType.RULE:
-        request = ProjectRuleCreateRequest(**request_data)
-    elif form_data.type == ProjectType.FILE:
-        request = ProjectFileCreateRequest(**request_data)
-    elif form_data.type == ProjectType.CODE:
-        request = ProjectCodeCreateRequest(**request_data)
-    else:
-        request = ProjectCreateRequest(**request_data)
+        return _rule_project_create_data(form_data)
+    if form_data.type == ProjectType.CODE:
+        return {
+            "language": form_data.language,
+            "entry_point": form_data.code_entry_point,
+            "documentation": form_data.documentation,
+            **_extract_repo_source_fields(form_data),
+        }
+    return {}
 
-    # 创建项目
-    project = await project_service.create_project(
-        request=request,
-        user_id=current_user_id,
-    )
 
-    # 构建响应数据
-    response_data = create_project_response(project)
-    await _attach_project_detail_info(response_data, project)
+def _rule_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
+    if not form_data.target_url:
+        raise HTTPException(status_code=400, detail="规则项目必须提供target_url")
+    if not form_data.extraction_rules:
+        raise HTTPException(status_code=400, detail="规则项目必须提供extraction_rules")
+    return {
+        "engine": form_data.engine,
+        "target_url": form_data.target_url,
+        "url_pattern": form_data.url_pattern,
+        "request_method": form_data.request_method,
+        "callback_type": form_data.callback_type,
+        "extraction_rules": form_data.extraction_rules,
+        "pagination_config": form_data.pagination_config,
+        "max_pages": form_data.max_pages,
+        "start_page": form_data.start_page,
+        "request_delay": form_data.request_delay,
+        "retry_count": form_data.retry_count,
+        "timeout": form_data.timeout,
+        "priority": form_data.priority,
+        "dont_filter": form_data.dont_filter,
+        "data_schema": form_data.data_schema,
+        "headers": form_data.headers,
+        "cookies": form_data.cookies,
+        "proxy_config": form_data.proxy_config,
+        "anti_spider": form_data.anti_spider,
+        "task_config": form_data.task_config,
+        "resume_enabled": getattr(form_data, "resume_enabled", None),
+        "dedup_config": getattr(form_data, "dedup_config", None),
+    }
 
-    # 记录审计日志
+
+async def _audit_project_creation(http_request: Request, current_user: Any, project: Project) -> None:
     user = await user_service.get_user_by_id(current_user.user_id)
     await audit_service.log_project_action(
         action=AuditAction.PROJECT_CREATE,
@@ -365,8 +360,6 @@ async def create_project(
         ip_address=http_request.client.host if http_request.client else None,
         description=f"创建项目: {project.name} (类型: {project.type})",
     )
-
-    return success_response(response_data, message=Messages.CREATED_SUCCESS, code=201)
 
 
 @project_router.get(
@@ -513,35 +506,37 @@ async def validate_project_config(
 ):
     """验证项目配置"""
     _ = current_user
-    errors: list[str] = []
-
-    project_type = payload.type
-    if project_type and isinstance(project_type, str):
-        project_type = project_type.lower()
-
-    if not payload.name:
-        errors.append("项目名称不能为空")
-    if not payload.type:
-        errors.append("项目类型不能为空")
-    if not payload.runtime_scope:
-        errors.append("运行时作用域不能为空")
-    if not payload.python_version:
-        errors.append("Python 版本不能为空")
-
-    if project_type == ProjectType.RULE or project_type == ProjectType.RULE.value:
-        if not payload.target_url:
-            errors.append("规则项目必须提供 target_url")
-        if not payload.extraction_rules:
-            errors.append("规则项目必须提供 extraction_rules")
-    elif project_type == ProjectType.FILE or project_type == ProjectType.FILE.value:
-        _validate_repository_project(payload, "文件", errors)
-    elif project_type == ProjectType.CODE or project_type == ProjectType.CODE.value:
-        _validate_repository_project(payload, "代码", errors)
+    errors = _required_project_errors(payload)
+    _validate_project_type(payload, errors)
 
     return success_response(
         {"valid": len(errors) == 0, "errors": errors if errors else None},
         message=Messages.QUERY_SUCCESS,
     )
+
+
+def _required_project_errors(payload: ProjectValidateRequest) -> list[str]:
+    required = (
+        (payload.name, "项目名称不能为空"),
+        (payload.type, "项目类型不能为空"),
+        (payload.runtime_scope, "运行时作用域不能为空"),
+        (payload.python_version, "Python 版本不能为空"),
+    )
+    return [message for value, message in required if not value]
+
+
+def _validate_project_type(payload: ProjectValidateRequest, errors: list[str]) -> None:
+    project_type = payload.type.lower() if payload.type else None
+    if project_type == ProjectType.RULE.value:
+        if not payload.target_url:
+            errors.append("规则项目必须提供 target_url")
+        if not payload.extraction_rules:
+            errors.append("规则项目必须提供 extraction_rules")
+        return
+    if project_type == ProjectType.FILE.value:
+        _validate_repository_project(payload, "文件", errors)
+    elif project_type == ProjectType.CODE.value:
+        _validate_repository_project(payload, "代码", errors)
 
 
 def _validate_repository_project(
@@ -600,7 +595,7 @@ async def export_project_config(
     await _attach_project_detail_info(response_data, project)
     project_payload = response_data.model_dump(mode="json")
 
-    payload = {
+    payload: dict[str, object] = {
         "version": 1,
         "exported_at": datetime.now(UTC).isoformat(),
         "project": project_payload,
@@ -608,82 +603,130 @@ async def export_project_config(
 
     include_tasks = bool(request.include_tasks)
     include_logs = bool(request.include_logs)
-
-    task_items: list[dict[str, object]] = []
+    task_items = await _load_export_tasks(
+        project,
+        include_tasks=include_tasks,
+        current_user_id=current_user_id,
+        is_admin=await user_service.is_admin(current_user.user_id),
+    )
     if include_tasks:
-        is_admin = await user_service.is_admin(current_user.user_id)
-        task_query = Task.filter(project_id=project.id)
-        if not is_admin:
-            task_query = task_query.filter(user_id=current_user_id)
-        tasks = await task_query.all()
-        task_items = [_task_export_payload(task, project.public_id) for task in tasks]
         payload["tasks"] = task_items
 
     if include_logs and task_items:
-        task_ids = await Task.filter(project_id=project.id).values_list("id", flat=True)
-        run_query = TaskRun.filter(task_id__in=list(task_ids))
-        if request.date_range:
-            start = request.date_range.get("start")
-            end = request.date_range.get("end")
-            if start:
-                try:
-                    start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                    run_query = run_query.filter(created_at__gte=start_dt)
-                except ValueError:
-                    raise HTTPException(status_code=400, detail="date_range.start 格式错误")
-            if end:
-                try:
-                    end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-                    run_query = run_query.filter(created_at__lte=end_dt)
-                except ValueError:
-                    raise HTTPException(status_code=400, detail="date_range.end 格式错误")
-        runs = await run_query.order_by("-created_at").limit(200)
-        payload["executions"] = ExecutionResponseBuilder.build_list(runs)
+        payload["executions"] = await _load_export_executions(project, request.date_range)
 
     fmt = (request.format or "json").lower()
-    if fmt == "yaml":
-        content = _yaml_dump(payload)
-        media_type = "text/yaml"
-        filename = f"project_{project.public_id}.yaml"
-    elif fmt == "csv":
-        output = io.StringIO()
-        writer = csv.writer(output)
-        if include_tasks and task_items:
-            writer.writerow(["task_id", "name", "schedule_type", "is_active", "status", "project_id"])
-            for item in task_items:
-                writer.writerow(
-                    [
-                        "",
-                        item.get("name"),
-                        item.get("schedule_type"),
-                        item.get("is_active"),
-                        "",
-                        item.get("project_id"),
-                    ]
-                )
-        else:
-            writer.writerow(["project_id", "name", "type", "status", "description", "tags"])
-            writer.writerow(
-                [
-                    project_payload.get("id"),
-                    project_payload.get("name"),
-                    project_payload.get("type"),
-                    project_payload.get("status"),
-                    project_payload.get("description"),
-                    ",".join(project_payload.get("tags") or []),
-                ]
-            )
-        content = output.getvalue()
-        media_type = "text/csv"
-        filename = f"project_{project.public_id}.csv"
-    else:
-        content = json.dumps(payload, ensure_ascii=False, indent=2)
-        media_type = "application/json"
-        filename = f"project_{project.public_id}.json"
+    content, media_type, filename = _render_project_export(
+        fmt,
+        payload,
+        project,
+        include_tasks=include_tasks,
+        task_items=task_items,
+    )
 
     buffer = io.BytesIO(content.encode("utf-8"))
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(buffer, media_type=media_type, headers=headers)
+
+
+async def _load_export_tasks(
+    project: Project,
+    *,
+    include_tasks: bool,
+    current_user_id: int,
+    is_admin: bool,
+) -> list[dict[str, object]]:
+    if not include_tasks:
+        return []
+    task_query = Task.filter(project_id=project.id)
+    if not is_admin:
+        task_query = task_query.filter(user_id=current_user_id)
+    tasks = await task_query.all()
+    return [_task_export_payload(task, project.public_id) for task in tasks]
+
+
+async def _load_export_executions(project: Project, date_range: dict[str, str] | None) -> list[Any]:
+    task_ids = await Task.filter(project_id=project.id).values_list("id", flat=True)
+    run_query = TaskRun.filter(task_id__in=list(task_ids))
+    run_query = _filter_export_date_range(run_query, date_range)
+    runs = await run_query.order_by("-created_at").limit(200)
+    return ExecutionResponseBuilder.build_list(runs)
+
+
+def _filter_export_date_range(run_query: Any, date_range: dict[str, str] | None) -> Any:
+    if not date_range:
+        return run_query
+    start = _parse_export_date(date_range.get("start"), "start")
+    end = _parse_export_date(date_range.get("end"), "end")
+    if start:
+        run_query = run_query.filter(created_at__gte=start)
+    if end:
+        run_query = run_query.filter(created_at__lte=end)
+    return run_query
+
+
+def _parse_export_date(value: str | None, field: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"date_range.{field} 格式错误")
+
+
+def _render_project_export(
+    fmt: str,
+    payload: dict[str, object],
+    project: Project,
+    *,
+    include_tasks: bool,
+    task_items: list[dict[str, object]],
+) -> tuple[str, str, str]:
+    filename_prefix = f"project_{project.public_id}"
+    if fmt == "yaml":
+        return _yaml_dump(payload), "text/yaml", f"{filename_prefix}.yaml"
+    if fmt == "csv":
+        content = _render_project_csv(payload["project"], task_items, include_tasks)
+        return content, "text/csv", f"{filename_prefix}.csv"
+    return json.dumps(payload, ensure_ascii=False, indent=2), "application/json", f"{filename_prefix}.json"
+
+
+def _render_project_csv(
+    project_payload: object,
+    task_items: list[dict[str, object]],
+    include_tasks: bool,
+) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    if include_tasks and task_items:
+        _write_task_export_rows(writer, task_items)
+    else:
+        _write_project_export_rows(writer, project_payload)
+    return output.getvalue()
+
+
+def _write_task_export_rows(writer: Any, task_items: list[dict[str, object]]) -> None:
+    writer.writerow(["task_id", "name", "schedule_type", "is_active", "status", "project_id"])
+    for item in task_items:
+        writer.writerow(
+            ["", item.get("name"), item.get("schedule_type"), item.get("is_active"), "", item.get("project_id")]
+        )
+
+
+def _write_project_export_rows(writer: Any, project_payload: object) -> None:
+    if not isinstance(project_payload, dict):
+        raise TypeError("project export payload must be a mapping")
+    writer.writerow(["project_id", "name", "type", "status", "description", "tags"])
+    writer.writerow(
+        [
+            project_payload.get("id"),
+            project_payload.get("name"),
+            project_payload.get("type"),
+            project_payload.get("status"),
+            project_payload.get("description"),
+            ",".join(project_payload.get("tags") or []),
+        ]
+    )
 
 
 @project_router.get(
@@ -762,8 +805,8 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
             source = await project_source_service.get_response(project.id)
             response_data.file_info = FileInfo(
                 entry_point=detail.entry_point,
-                runtime_config=detail.runtime_config or {},
-                environment_vars=detail.environment_vars or {},
+                runtime_config={},
+                environment_vars={},
                 **_source_response_fields(source),
             )
     elif project.type == ProjectType.RULE:
@@ -784,10 +827,10 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 "timeout": detail.timeout,
                 "priority": getattr(detail, "priority", 0),
                 "dont_filter": getattr(detail, "dont_filter", False),
-                "headers": detail.headers,
-                "cookies": detail.cookies,
-                "proxy_config": detail.proxy_config,
-                "task_config": getattr(detail, "task_config", None),
+                "headers": None,
+                "cookies": None,
+                "proxy_config": None,
+                "task_config": None,
                 # S10: 详情页展示这两个字段
                 "resume_enabled": bool(getattr(detail, "resume_enabled", False) or False),
                 "dedup_config": getattr(detail, "dedup_config", None),
@@ -797,8 +840,8 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
         response_data.code_info = CodeInfo(
             language=detail.language,
             entry_point=detail.entry_point,
-            runtime_config=detail.runtime_config or {},
-            environment_vars=detail.environment_vars or {},
+            runtime_config={},
+            environment_vars={},
             documentation=detail.documentation,
             **_source_response_fields(source),
         )
@@ -857,87 +900,97 @@ async def duplicate_project(
     name = await _generate_unique_project_name(base_name)
 
     async with in_transaction():
-        new_project = await Project.create(
-            name=name,
-            description=project.description,
-            type=project.type,
-            status=project.status,
-            tags=project.tags or [],
-            dependencies=project.dependencies,
-            env_location=project.env_location,
-            worker_id=project.worker_id,
-            worker_env_name=project.worker_env_name,
-            python_version=project.python_version,
-            runtime_scope=project.runtime_scope,
-            runtime_kind=project.runtime_kind,
-            runtime_locator=project.runtime_locator,
-            current_runtime_id=project.current_runtime_id,
-            runtime_worker_id=project.runtime_worker_id,
-            execution_strategy=project.execution_strategy,
-            bound_worker_id=project.bound_worker_id,
-            fallback_enabled=project.fallback_enabled,
-            user_id=current_user_id,
-            updated_by=current_user_id,
-        )
-
-        if project.type == ProjectType.FILE:
-            detail = await relation_service.get_project_file_detail(project.id)
-            if detail:
-                # P1-04: ProjectFile 迁移 20261216120000_remove_local_env_location
-                # 后仅剩 language/entry_point/runtime_config/environment_vars。
-                # 复制时若沿用旧的磁盘字段（file_path/original_name/file_size/
-                # file_type/file_hash/storage_type/is_compressed/...）会立刻
-                # AttributeError，复制 FILE 项目 100% 500。
-                # 源码复用统一走 project_sources + Git repository —— 这里不复
-                # 制源码绑定，交给用户在新项目里重新绑定（与 CODE 分支行为一致）。
-                await ProjectFile.create(
-                    project_id=new_project.id,
-                    language=detail.language,
-                    entry_point=detail.entry_point,
-                    runtime_config=detail.runtime_config,
-                    environment_vars=detail.environment_vars,
-                )
-        elif project.type == ProjectType.RULE:
-            detail = await relation_service.get_project_rule_detail(project.id)
-            if detail:
-                await ProjectRule.create(
-                    project_id=new_project.id,
-                    engine=detail.engine,
-                    target_url=detail.target_url,
-                    url_pattern=detail.url_pattern,
-                    callback_type=detail.callback_type,
-                    request_method=detail.request_method,
-                    extraction_rules=detail.extraction_rules,
-                    data_schema=detail.data_schema,
-                    pagination_config=detail.pagination_config,
-                    max_pages=detail.max_pages,
-                    start_page=detail.start_page,
-                    request_delay=detail.request_delay,
-                    retry_count=detail.retry_count,
-                    timeout=detail.timeout,
-                    priority=getattr(detail, "priority", 0),
-                    dont_filter=getattr(detail, "dont_filter", False),
-                    headers=detail.headers,
-                    cookies=detail.cookies,
-                    proxy_config=detail.proxy_config,
-                    anti_spider=detail.anti_spider,
-                    task_config=getattr(detail, "task_config", None),
-                )
-        elif project.type == ProjectType.CODE:
-            detail = await relation_service.get_project_code_detail(project.id)
-            if detail:
-                # 源码绑定不随复制操作隐式继承，避免两个项目意外共享来源。
-                await ProjectCode.create(
-                    project_id=new_project.id,
-                    language=detail.language,
-                    entry_point=detail.entry_point,
-                    runtime_config=detail.runtime_config,
-                    environment_vars=detail.environment_vars,
-                )
+        new_project = await _create_duplicate_project(project, name, current_user_id)
+        await _duplicate_project_detail(project, new_project)
 
     response_data = create_project_response(new_project)
     await _attach_project_detail_info(response_data, new_project)
     return success_response(response_data, message=Messages.CREATED_SUCCESS)
+
+
+async def _create_duplicate_project(project: Project, name: str, user_id: int) -> Project:
+    return await Project.create(
+        name=name,
+        description=project.description,
+        type=project.type,
+        status=project.status,
+        tags=project.tags or [],
+        dependencies=project.dependencies,
+        env_location=project.env_location,
+        worker_id=project.worker_id,
+        worker_env_name=project.worker_env_name,
+        python_version=project.python_version,
+        runtime_scope=project.runtime_scope,
+        runtime_kind=project.runtime_kind,
+        runtime_locator=project.runtime_locator,
+        current_runtime_id=project.current_runtime_id,
+        runtime_worker_id=project.runtime_worker_id,
+        execution_strategy=project.execution_strategy,
+        bound_worker_id=project.bound_worker_id,
+        user_id=user_id,
+        updated_by=user_id,
+    )
+
+
+async def _duplicate_project_detail(source: Project, target: Project) -> None:
+    if source.type == ProjectType.FILE:
+        detail = await relation_service.get_project_file_detail(source.id)
+        if detail:
+            await _duplicate_file_detail(detail, target.id)
+    elif source.type == ProjectType.RULE:
+        detail = await relation_service.get_project_rule_detail(source.id)
+        if detail:
+            await _duplicate_rule_detail(detail, target.id)
+    elif source.type == ProjectType.CODE:
+        detail = await relation_service.get_project_code_detail(source.id)
+        if detail:
+            await _duplicate_code_detail(detail, target.id)
+
+
+async def _duplicate_file_detail(detail: Any, project_id: int) -> None:
+    await ProjectFile.create(
+        project_id=project_id,
+        language=detail.language,
+        entry_point=detail.entry_point,
+        runtime_config=detail.runtime_config,
+        environment_vars=detail.environment_vars,
+    )
+
+
+async def _duplicate_rule_detail(detail: Any, project_id: int) -> None:
+    await ProjectRule.create(
+        project_id=project_id,
+        engine=detail.engine,
+        target_url=detail.target_url,
+        url_pattern=detail.url_pattern,
+        callback_type=detail.callback_type,
+        request_method=detail.request_method,
+        extraction_rules=detail.extraction_rules,
+        data_schema=detail.data_schema,
+        pagination_config=detail.pagination_config,
+        max_pages=detail.max_pages,
+        start_page=detail.start_page,
+        request_delay=detail.request_delay,
+        retry_count=detail.retry_count,
+        timeout=detail.timeout,
+        priority=getattr(detail, "priority", 0),
+        dont_filter=getattr(detail, "dont_filter", False),
+        headers=detail.headers,
+        cookies=detail.cookies,
+        proxy_config=detail.proxy_config,
+        anti_spider=detail.anti_spider,
+        task_config=getattr(detail, "task_config", None),
+    )
+
+
+async def _duplicate_code_detail(detail: Any, project_id: int) -> None:
+    await ProjectCode.create(
+        project_id=project_id,
+        language=detail.language,
+        entry_point=detail.entry_point,
+        runtime_config=detail.runtime_config,
+        environment_vars=detail.environment_vars,
+    )
 
 
 @project_router.post(
@@ -1130,7 +1183,7 @@ async def generate_task_json(project_id, current_user_id=Depends(get_current_use
     """生成任务JSON"""
 
     # 获取项目详情
-    project = await project_service.get_project_detail(project_id, current_user_id)
+    project = await project_service.get_project_by_id(project_id, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
 
@@ -1225,13 +1278,7 @@ async def update_file_config(
     environment_vars=Form(None),
     current_user_id=Depends(get_current_user_id),
 ):
-    """更新文件项目配置
-
-    P1-04: FILE 项目源码走 project_sources + Git repository（迁移
-    20261216120000_remove_local_env_location 拆掉了本地磁盘字段），
-    file-config 端点只负责 entry_point/runtime_config/environment_vars。
-    源码变更必须走 /projects/{id}/source。
-    """
+    """更新 Git FILE 项目的运行配置，不处理源码变更。"""
     try:
         # 获取项目详情
         project = await project_service.get_project_by_id(project_id, current_user_id)

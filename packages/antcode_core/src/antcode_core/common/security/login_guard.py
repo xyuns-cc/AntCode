@@ -99,8 +99,7 @@ async def record_failure(username: str) -> tuple[int, bool]:
         await redis.delete(key)
         if newly_locked:
             logger.warning(
-                f"账户锁定: username={username} failures={count} "
-                f"lock_duration={settings.LOGIN_LOCKOUT_DURATION_SEC}s"
+                f"账户锁定: username={username} failures={count} lock_duration={settings.LOGIN_LOCKOUT_DURATION_SEC}s"
             )
     return count, newly_locked
 

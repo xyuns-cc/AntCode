@@ -318,12 +318,12 @@ class WorkerService:
 
                 # 5. Worker 删除只解绑调度偏好和执行归属，任务定义与历史执行
                 # 是用户业务数据，不能随基础设施节点一起删除。
-                deleted["tasks_unbound"] = await Task.filter(
-                    specified_worker_id=worker_internal_id
-                ).update(specified_worker_id=None)
-                deleted["task_executions_unbound"] = await TaskRun.filter(
-                    worker_id=worker_internal_id
-                ).update(worker_id=None)
+                deleted["tasks_unbound"] = await Task.filter(specified_worker_id=worker_internal_id).update(
+                    specified_worker_id=None
+                )
+                deleted["task_executions_unbound"] = await TaskRun.filter(worker_id=worker_internal_id).update(
+                    worker_id=None
+                )
 
                 # 6. 监控数据(worker_id 是字符串 public_id)
                 deleted["performance_history"] = await WorkerPerformanceHistory.filter(

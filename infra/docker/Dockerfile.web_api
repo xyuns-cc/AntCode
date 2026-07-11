@@ -103,7 +103,7 @@ EXPOSE 8000
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+    CMD curl -fsS http://localhost:8000/api/v1/health/ready >/dev/null || exit 1
 
 # 启动命令（走包内 __main__.py，与 Makefile / 本地开发保持一致）
 CMD ["python", "-m", "antcode_web_api"]

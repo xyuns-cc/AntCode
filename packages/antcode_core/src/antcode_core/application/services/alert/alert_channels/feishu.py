@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime
+from typing import Any
 
 from antcode_core.application.services.alert.alert_channels.base import MultiWebhookChannel
 
@@ -86,7 +87,7 @@ class FeishuAlertChannel(MultiWebhookChannel):
         config = level_config.get(level, {"icon": f"[{level}]", "color": "grey", "title": level})
         parsed = self._parse_log_message(message)
 
-        elements = []
+        elements: list[dict[str, Any]] = []
 
         # 基础信息
         elements.append(

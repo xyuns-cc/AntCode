@@ -31,6 +31,7 @@ from tortoise.exceptions import IntegrityError
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import Messages, success
 from antcode_web_api.response import page as page_response
+from antcode_web_api.routing import promote_static_routes
 
 router = APIRouter()
 
@@ -500,3 +501,6 @@ async def clear_user_list_cache(current_admin=Depends(get_current_admin_user)):
     """清除用户列表缓存（仅管理员）"""
     await user_service.clear_cache()
     return success(None, message="缓存已清除")
+
+
+promote_static_routes(router, {"/cache", "/cache/info"})

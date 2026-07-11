@@ -23,6 +23,7 @@ GRANT ALL PRIVILEGES ON DATABASE "AntCode" TO antcode;
 DATABASE_URL=postgresql://antcode:change-me@127.0.0.1:5432/AntCode
 REDIS_URL=redis://:redis-pass@127.0.0.1:6379/0
 ENCRYPTION_KEY=<openssl rand -base64 48>
+ENCRYPTION_KEY_SALT=<openssl rand -hex 16>
 JWT_SECRET=<openssl rand -base64 48>
 DEFAULT_ADMIN_USERNAME=admin
 DEFAULT_ADMIN_PASSWORD=<强口令>

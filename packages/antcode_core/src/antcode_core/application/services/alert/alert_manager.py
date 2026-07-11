@@ -83,8 +83,11 @@ class AlertManager:
     def _run_loop(self):
         """在独立线程中运行事件循环"""
         try:
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_forever()
+            loop = self._loop
+            if loop is None:
+                raise RuntimeError("alert event loop is not configured")
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
         except Exception as e:
             logger.error(f"告警事件循环异常: {e}")
 

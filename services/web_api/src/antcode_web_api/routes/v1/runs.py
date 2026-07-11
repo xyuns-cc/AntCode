@@ -20,6 +20,13 @@ from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
 
 runs_router = APIRouter()
+_CANCELLABLE_STATUSES = (
+    TaskStatus.PENDING,
+    TaskStatus.DISPATCHING,
+    TaskStatus.QUEUED,
+    TaskStatus.RUNNING,
+)
+_UNASSIGNED_CANCELLABLE_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED)
 
 
 @runs_router.get("/{run_id}", response_model=BaseResponse[TaskRunResponse])
@@ -46,117 +53,99 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
     - 如果任务在 Worker 上运行，会发送取消指令到 Worker
     - 如果任务在队列中等待，会使用 CAS UPDATE 抢占式标记为已取消（T5）
     """
-    from antcode_core.domain.models.task import Task
-
-    # 获取执行记录
-    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
-    if not execution:
-        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
-
-    # 检查状态
-    if execution.status not in (
-        TaskStatus.PENDING,
-        TaskStatus.DISPATCHING,
-        TaskStatus.QUEUED,
-        TaskStatus.RUNNING,
-    ):
-        raise HTTPException(status_code=400, detail=f"任务状态为 {execution.status.value}，无法取消")
-
-    # 获取任务信息
-    task = await Task.get_or_none(id=execution.task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="关联任务不存在")
-
-    # T5: 未分发的执行使用 CAS UPDATE 抢占式置为 CANCELLED
-    if execution.worker_id is None and execution.status in (
-        TaskStatus.PENDING,
-        TaskStatus.QUEUED,
-    ):
-        updated = await TaskRun.filter(
-            run_id=execution.run_id,
-            worker_id__isnull=True,
-            status__in=[TaskStatus.PENDING, TaskStatus.QUEUED],
-        ).update(
-            status=TaskStatus.CANCELLED,
-            end_time=datetime.now(UTC),
-            error_message=f"用户取消 (user_id={current_user.user_id})",
-        )
-        if updated:
+    execution = await _get_cancellable_execution(run_id, current_user.user_id)
+    if _is_unassigned_execution(execution):
+        if await _cancel_unassigned_execution(execution, current_user.user_id):
             logger.info(f"执行已取消 (CAS): {run_id}")
-            return success_response(
-                {
-                    "run_id": run_id,
-                    "status": "cancelled",
-                    "remote_cancelled": False,
-                },
-                message="任务已取消",
-            )
-        # 0 行命中：在 CAS 期间已被 dispatch，重新加载 execution
-        execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
-        if not execution:
-            raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
+            return _cancel_success(run_id, remote_cancelled=False)
+        execution = await _get_execution(run_id, current_user.user_id)
 
-    cancelled = False
-    send_error: str | None = None
-
-    # 如果任务正在 Worker 上运行，发送取消指令
-    if execution.worker_id:
-        try:
-            from antcode_core.application.services.runtime.runtime_control_service import (
-                write_control_event,
-            )
-            from antcode_core.application.services.workers.worker_service import (
-                worker_service,
-            )
-            from antcode_core.infrastructure.redis import get_redis_client
-
-            worker = await worker_service.get_worker_by_id(execution.worker_id)
-            if worker:
-                redis = await get_redis_client()
-                payload = build_cancel_control_payload(
-                    run_id=execution.run_id,
-                    reason=f"user_cancel:{current_user.user_id}",
-                )
-                # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
-                # 避免 control:{worker_id} stream 无限增长。
-                await write_control_event(redis, control_stream(worker.public_id), payload)
-                cancelled = True
-                logger.info(f"已发送取消指令到 Worker: {worker.name}")
-            else:
-                send_error = "worker 不存在"
-        except Exception as e:
-            send_error = str(e)
-            logger.warning(f"发送取消指令失败: {e}")
-
-    # L3: 取消指令必须真正发出去才落 CANCELLED。发送失败仍置终态会导致
-    # 「UI 显示已取消 / worker 仍在跑」，之后 worker 回传 SUCCESS 还会（叠加 B5）
-    # 让状态复活。此处保持 execution 处于原状态，让前端 503 后可重试。
+    cancelled, send_error = await _send_worker_cancel(execution, current_user.user_id)
     if execution.worker_id and not cancelled:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"取消指令发送失败，请重试：{send_error or '未知错误'}",
         )
 
-    # 更新数据库状态（仅在没有 worker 或已成功发送时执行）
-    from antcode_core.application.services.scheduler.execution_status_service import (
-        execution_status_service,
+    await _mark_execution_cancelled(execution.run_id, current_user.user_id)
+    logger.info(f"执行已取消: {run_id}, 远程取消={cancelled}")
+    return _cancel_success(run_id, remote_cancelled=cancelled)
+
+
+async def _get_execution(run_id: str, user_id: int) -> TaskRun:
+    execution = await scheduler_service.get_execution_with_permission(run_id, user_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
+    return execution
+
+
+async def _get_cancellable_execution(run_id: str, user_id: int) -> TaskRun:
+    from antcode_core.domain.models.task import Task
+
+    execution = await _get_execution(run_id, user_id)
+    if execution.status not in _CANCELLABLE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"任务状态为 {execution.status.value}，无法取消")
+    if not await Task.get_or_none(id=execution.task_id):
+        raise HTTPException(status_code=404, detail="关联任务不存在")
+    return execution
+
+
+def _is_unassigned_execution(execution: TaskRun) -> bool:
+    return execution.worker_id is None and execution.status in _UNASSIGNED_CANCELLABLE_STATUSES
+
+
+async def _cancel_unassigned_execution(execution: TaskRun, user_id: int) -> bool:
+    updated = await TaskRun.filter(
+        run_id=execution.run_id,
+        worker_id__isnull=True,
+        status__in=list(_UNASSIGNED_CANCELLABLE_STATUSES),
+    ).update(
+        status=TaskStatus.CANCELLED,
+        end_time=datetime.now(UTC),
+        error_message=f"用户取消 (user_id={user_id})",
     )
+    return bool(updated)
+
+
+async def _send_worker_cancel(execution: TaskRun, user_id: int) -> tuple[bool, str | None]:
+    if not execution.worker_id:
+        return False, None
+    try:
+        await _write_worker_cancel_event(execution, user_id)
+        return True, None
+    except Exception as exc:
+        logger.warning(f"发送取消指令失败: {exc}")
+        return False, str(exc)
+
+
+async def _write_worker_cancel_event(execution: TaskRun, user_id: int) -> None:
+    from antcode_core.application.services.runtime.runtime_control_service import write_control_event
+    from antcode_core.application.services.workers.worker_service import worker_service
+    from antcode_core.infrastructure.redis import get_redis_client
+
+    worker = await worker_service.get_worker_by_id(execution.worker_id)
+    if not worker:
+        raise LookupError("worker 不存在")
+    redis = await get_redis_client()
+    payload = build_cancel_control_payload(run_id=execution.run_id, reason=f"user_cancel:{user_id}")
+    await write_control_event(redis, control_stream(worker.public_id), payload)
+    logger.info(f"已发送取消指令到 Worker: {worker.name}")
+
+
+async def _mark_execution_cancelled(run_id: str, user_id: int) -> None:
+    from antcode_core.application.services.scheduler.execution_status_service import execution_status_service
 
     await execution_status_service.update_runtime_status(
-        run_id=execution.run_id,
+        run_id=run_id,
         status="cancelled",
         status_at=datetime.now(UTC),
-        error_message=f"用户取消 (user_id={current_user.user_id})",
+        error_message=f"用户取消 (user_id={user_id})",
     )
 
-    logger.info(f"执行已取消: {run_id}, 远程取消={cancelled}")
 
+def _cancel_success(run_id: str, *, remote_cancelled: bool) -> BaseResponse[dict]:
     return success_response(
-        {
-            "run_id": run_id,
-            "status": "cancelled",
-            "remote_cancelled": cancelled,
-        },
+        {"run_id": run_id, "status": "cancelled", "remote_cancelled": remote_cancelled},
         message="任务已取消",
     )
 
@@ -310,8 +299,15 @@ async def list_spider_items(
     execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
+    raw, note = await _read_spider_stream(run_id, start_id, count)
+    items, last_id = _decode_spider_items(raw, start_id)
+    data = {"items": items, "last_id": last_id, "count": len(items)}
+    if note:
+        data["note"] = note
+    return success_response(data, message=Messages.QUERY_SUCCESS)
 
-    # 从 Redis 直接读取 spider:data:{run_id} stream
+
+async def _read_spider_stream(run_id: str, start_id: str, count: int) -> tuple[list[Any], str | None]:
     try:
         from antcode_core.common.config import settings as _settings
         from antcode_core.infrastructure.redis import get_redis_client
@@ -319,45 +315,44 @@ async def list_spider_items(
 
         redis = await get_redis_client()
         if redis is None:
-            return success_response(
-                {"items": [], "last_id": start_id, "note": "Redis 不可用"},
-                message=Messages.QUERY_SUCCESS,
-            )
+            return [], "Redis 不可用"
         keys = RedisKeys(namespace=_settings.REDIS_NAMESPACE)
         stream_key = keys.spider_data_stream(run_id)
         min_id = f"({start_id}" if start_id and start_id != "0" else "-"
         raw = await redis.xrange(stream_key, min=min_id, max="+", count=count)
     except Exception as exc:
         logger.warning(f"读取 spider items 失败: run_id={run_id} err={exc}")
-        return success_response(
-            {"items": [], "last_id": start_id},
-            message=Messages.QUERY_SUCCESS,
-        )
+        return [], None
+    return list(raw or []), None
 
+
+def _decode_spider_items(raw: list[Any], start_id: str) -> tuple[list[dict[str, Any]], str]:
     items: list[dict[str, Any]] = []
     last_id: str = start_id
     for msg_id, fields in raw or []:
         decoded_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
         last_id = decoded_id
-        row: dict[str, Any] = {"_id": decoded_id}
-        # 解 bytes
-        for k, v in (fields or {}).items():
-            key = k.decode() if isinstance(k, bytes) else k
-            val = v.decode() if isinstance(v, bytes) else v
-            # data 字段是 JSON 字符串
-            if key == "data" and isinstance(val, str):
-                try:
-                    row["data"] = json.loads(val)
-                except (json.JSONDecodeError, TypeError):
-                    row["data"] = val
-            else:
-                row[key] = val
+        row = {"_id": decoded_id, **_decode_spider_fields(fields)}
         items.append(row)
+    return items, last_id
 
-    return success_response(
-        {"items": items, "last_id": last_id, "count": len(items)},
-        message=Messages.QUERY_SUCCESS,
-    )
+
+def _decode_spider_fields(fields: dict[Any, Any] | None) -> dict[str, Any]:
+    decoded: dict[str, Any] = {}
+    for raw_key, raw_value in (fields or {}).items():
+        key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+        value = raw_value.decode() if isinstance(raw_value, bytes) else raw_value
+        decoded[key] = _decode_spider_value(key, value)
+    return decoded
+
+
+def _decode_spider_value(key: str, value: Any) -> Any:
+    if key != "data" or not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
 
 
 router = runs_router

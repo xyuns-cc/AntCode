@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from loguru import logger
 from tortoise.expressions import F, Q
+from tortoise.transactions import in_transaction
 
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from antcode_core.domain.models.task import Task
@@ -317,33 +318,26 @@ class ExecutionStatusService:
         # P1-12: latest-run 约束。旧 run 迟到的终态回报不能覆盖新 run 的 Task 状态
         # （例如 run_A 已被取消/超时后 reconcile 又跑了 run_B，此时旧的 run_A worker
         # 汇报 SUCCESS 不应把 Task 翻回 SUCCESS）。
-        latest = await TaskRun.filter(task_id=execution.task_id).order_by("-id").first()
-        if latest is None or latest.id != execution.id:
-            logger.debug(
-                f"跳过 Task 状态同步(非最新 run): task_id={execution.task_id} "
-                f"execution.id={execution.id} latest.id={getattr(latest, 'id', None)}"
-            )
-            return
+        async with in_transaction() as conn:
+            task = await Task.filter(id=execution.task_id).using_db(conn).select_for_update().first()
+            if task is None:
+                return
+            latest = await TaskRun.filter(task_id=execution.task_id).using_db(conn).order_by("-id").first()
+            if latest is None or latest.id != execution.id:
+                logger.debug(
+                    f"跳过 Task 状态同步(非最新 run): task_id={execution.task_id} "
+                    f"execution.id={execution.id} latest.id={getattr(latest, 'id', None)}"
+                )
+                return
 
-        task = await Task.get_or_none(id=execution.task_id)
-        if not task:
-            return
-
-        previous_status = task.status
-        new_task_status = execution.status
-
-        # 组装 UPDATE 字段——计数器改用 F() 原子自增，Task 状态走一次 filter().update()，
-        # 不再 fetch → 修改 → save（并发时的丢计数 / Task 状态互相覆盖问题就此解决）。
-        updates: dict = {"status": new_task_status}
-        if execution.runtime_status == RuntimeStatus.RUNNING:
-            updates["last_run_time"] = status_at
-
-        if new_task_status == TaskStatus.SUCCESS and previous_status != TaskStatus.SUCCESS:
-            updates["success_count"] = F("success_count") + 1
-        elif new_task_status in self._failure_task_states and previous_status not in self._failure_task_states:
-            updates["failure_count"] = F("failure_count") + 1
-
-        await Task.filter(id=task.id).update(**updates)
+            updates: dict = {"status": execution.status}
+            if execution.runtime_status == RuntimeStatus.RUNNING:
+                updates["last_run_time"] = status_at
+            if execution.status == TaskStatus.SUCCESS and task.status != TaskStatus.SUCCESS:
+                updates["success_count"] = F("success_count") + 1
+            elif execution.status in self._failure_task_states and task.status not in self._failure_task_states:
+                updates["failure_count"] = F("failure_count") + 1
+            await Task.filter(id=task.id).using_db(conn).update(**updates)
 
 
 execution_status_service = ExecutionStatusService()

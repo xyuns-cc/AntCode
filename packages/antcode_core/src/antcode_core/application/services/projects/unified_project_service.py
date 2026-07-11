@@ -72,52 +72,18 @@ class UnifiedProjectService:
                 basic_fields = request.get_basic_fields()
                 if basic_fields:
                     basic_fields["updated_by"] = user_id
-
-                    # 处理执行策略相关字段
-                    if "bound_worker_id" in basic_fields:
-                        bound_worker_id = basic_fields["bound_worker_id"]
-                        if bound_worker_id:
-                            # 将 public_id 转换为内部 id
-                            from antcode_core.domain.models import Worker
-
-                            worker = await Worker.get_or_none(public_id=str(bound_worker_id))
-                            if worker:
-                                basic_fields["bound_worker_id"] = worker.id
-                            else:
-                                # 尝试直接作为内部 id 使用
-                                try:
-                                    basic_fields["bound_worker_id"] = int(bound_worker_id)
-                                except (ValueError, TypeError):
-                                    basic_fields["bound_worker_id"] = None
-                        else:
-                            basic_fields["bound_worker_id"] = None
-
+                    await self._resolve_bound_worker(basic_fields)
                     await project.update_from_dict(basic_fields)
                     await project.save(using_db=connection)
                     logger.info(f"更新项目基本信息: {project_id}, 字段: {list(basic_fields.keys())}")
 
-                # 3. 根据项目类型更新详细配置（使用内部 ID）
-                if project.type == ProjectType.RULE:
-                    await self._update_rule_config(project.id, request, connection)
-                elif project.type == ProjectType.FILE:
-                    await self._update_file_config(project.id, request, connection)
-                elif project.type == ProjectType.CODE:
-                    await self._update_code_config(project.id, request, connection)
-
-                # 4. 重新获取更新后的项目（使用内部 ID）
+                await self._update_type_config(project, request, connection)
                 updated_project = await Project.filter(id=project.id).using_db(connection).first()
                 # S10 (P2 兄弟修复): _resolve_public_id 要求响应对象带
                 # created_by_public_id/username 快照，否则 ProjectResponseBuilder
                 # 会抛 500。update 端点历史上一直漏挂，PUT 一改就报"响应对象缺
                 # 少 created_by_public_id"。这里对齐 create_project 的做法。
-                if updated_project is not None:
-                    from antcode_core.application.services.users.user_service import (
-                        user_service,
-                    )
-
-                    creator = await user_service.get_user_by_id(updated_project.user_id)
-                    updated_project.created_by_public_id = creator.public_id if creator else None
-                    updated_project.created_by_username = creator.username if creator else None
+                await self._attach_creator(updated_project)
                 return updated_project
 
         except HTTPException:
@@ -128,6 +94,45 @@ class UnifiedProjectService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"更新项目失败: {str(e)}",
             )
+
+    @staticmethod
+    async def _resolve_bound_worker(basic_fields):
+        if "bound_worker_id" not in basic_fields:
+            return
+        bound_worker_id = basic_fields["bound_worker_id"]
+        if not bound_worker_id:
+            basic_fields["bound_worker_id"] = None
+            return
+        from antcode_core.domain.models import Worker
+
+        worker = await Worker.get_or_none(public_id=str(bound_worker_id))
+        if worker:
+            basic_fields["bound_worker_id"] = worker.id
+            return
+        try:
+            basic_fields["bound_worker_id"] = int(bound_worker_id)
+        except (ValueError, TypeError):
+            basic_fields["bound_worker_id"] = None
+
+    async def _update_type_config(self, project, request, connection):
+        handlers = {
+            ProjectType.RULE: self._update_rule_config,
+            ProjectType.FILE: self._update_file_config,
+            ProjectType.CODE: self._update_code_config,
+        }
+        handler = handlers.get(project.type)
+        if handler:
+            await handler(project.id, request, connection)
+
+    @staticmethod
+    async def _attach_creator(project):
+        if project is None:
+            return
+        from antcode_core.application.services.users.user_service import user_service
+
+        creator = await user_service.get_user_by_id(project.user_id)
+        project.created_by_public_id = creator.public_id if creator else None
+        project.created_by_username = creator.username if creator else None
 
     async def _update_rule_config(self, project_id, request, connection):
         """更新规则项目配置"""

@@ -64,6 +64,7 @@ from tortoise.expressions import Q
 
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
+from antcode_web_api.routing import promote_static_routes
 
 router = APIRouter()
 
@@ -1244,10 +1245,6 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
     store_secret_key(worker, secret_key)
     await worker.save()
 
-    from antcode_core.common.security.worker_auth import worker_auth_verifier
-
-    worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
-
     # 标记 Key 为已使用
     await install_key.mark_used(worker.public_id)
     await _clear_install_key_fail_counter(request.key, request_source)
@@ -1794,25 +1791,15 @@ async def get_render_capable_workers(
     query = Worker.filter(status=WorkerStatus.ONLINE.value)
     if region:
         query = query.filter(region=region)
+    query = query.filter(
+        Q(capabilities__contains={"task_types": ["render"]})
+        | Q(capabilities__contains={"playwright": {"enabled": True}})
+    )
 
-    all_workers = await query.all()
-
-    # 过滤有渲染能力的 Worker
-    render_workers = []
-    for worker in all_workers:
-        if worker.capabilities:
-            task_types = worker.capabilities.get("task_types")
-            playwright = worker.capabilities.get("playwright")
-            if (isinstance(task_types, list) and "render" in task_types) or (
-                isinstance(playwright, dict) and playwright.get("enabled")
-            ):
-                render_workers.append(worker)
-
-    total = len(render_workers)
+    total = await query.count()
     offset = (page - 1) * size
-    paged_workers = render_workers[offset : offset + size]
-
-    items = [_worker_to_response(worker) for worker in paged_workers]
+    workers = await query.offset(offset).limit(size)
+    items = [_worker_to_response(worker) for worker in workers]
 
     return success(WorkerListResponse(items=items, total=total, page=page, size=size))
 
@@ -1832,8 +1819,11 @@ async def report_task_log(
 ):
     """任务日志上报（签名 + Worker 标识 + API Key）"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
+    from antcode_core.application.services.workers.run_ownership_service import (
+        require_worker_owns_run,
+    )
 
-    _ = auth_context
+    await require_worker_owns_run(auth_context["worker"], request.run_id)
 
     # 存储日志
     await distributed_log_service.append_log(
@@ -1857,10 +1847,12 @@ async def report_task_logs_batch(
 ):
     """批量任务日志上报（签名 + Worker 标识 + API Key）"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
-
-    _ = auth_context
+    from antcode_core.application.services.workers.run_ownership_service import (
+        require_worker_owns_runs,
+    )
 
     logs = request.logs
+    await require_worker_owns_runs(auth_context["worker"], {item.run_id for item in logs})
 
     grouped_logs: dict[tuple[str, str], list[str]] = {}
     for item in logs:
@@ -1870,29 +1862,19 @@ async def report_task_logs_batch(
     semaphore = asyncio.Semaphore(16)
 
     async def _append_group(run_id: str, log_type: str, contents: list[str]) -> int:
-        try:
-            async with semaphore:
-                await distributed_log_service.append_logs(
-                    run_id,
-                    log_type,
-                    contents,
-                )
-            return len(contents)
-        except Exception as exc:
-            logger.warning(
-                "批量日志写入失败: run_id={}, log_type={}, count={}, error={}",
-                run_id,
-                log_type,
-                len(contents),
-                exc,
-            )
-            return 0
+        async with semaphore:
+            await distributed_log_service.append_logs(run_id, log_type, contents)
+        return len(contents)
 
     results = await asyncio.gather(
         *(_append_group(run_id, log_type, contents) for (run_id, log_type), contents in grouped_logs.items()),
-        return_exceptions=False,
+        return_exceptions=True,
     )
-    received_count = sum(results)
+    failures = [result for result in results if isinstance(result, Exception)]
+    if failures:
+        logger.error("批量日志写入失败: failed_groups={} total_groups={}", len(failures), len(results))
+        raise HTTPException(status_code=503, detail="批量日志未全部持久化，请重试")
+    received_count = sum(result for result in results if isinstance(result, int))
 
     return success({"received": received_count, "total": len(logs)})
 
@@ -1909,8 +1891,11 @@ async def report_execution_heartbeat(
 ):
     """任务执行心跳上报"""
     from antcode_core.application.services.scheduler.task_persistence import task_persistence_service
+    from antcode_core.application.services.workers.run_ownership_service import (
+        require_worker_owns_run,
+    )
 
-    _ = auth_context
+    await require_worker_owns_run(auth_context["worker"], request.run_id)
 
     success_flag = await task_persistence_service.update_heartbeat(request.run_id)
     return success({"updated": success_flag})
@@ -1928,8 +1913,11 @@ async def report_task_status(
 ):
     """任务状态上报（签名 + Worker 标识 + API Key）"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
+    from antcode_core.application.services.workers.run_ownership_service import (
+        require_worker_owns_run,
+    )
 
-    _ = auth_context
+    await require_worker_owns_run(auth_context["worker"], request.run_id)
 
     # 更新任务状态
     await distributed_log_service.update_task_status(
@@ -2211,6 +2199,8 @@ async def get_worker_spider_stats_history(
     history = await spider_stats_service.get_spider_stats_history(worker_id=worker.id, hours=hours)
     return success(history)
 
+
+promote_static_routes(router, {"/best", "/render-capable"})
 
 workers_router = router
 

@@ -6,6 +6,7 @@
 
 from tortoise import fields
 
+from antcode_core.common.security.encrypted_fields import EncryptedTextField
 from antcode_core.domain.models.base import BaseModel
 
 
@@ -19,7 +20,7 @@ class SystemConfig(BaseModel):
     config_key = fields.CharField(max_length=100, unique=True, db_index=True)
 
     # 配置值（JSON字符串）
-    config_value = fields.TextField()
+    config_value = EncryptedTextField()
 
     # 配置分类（用于分组展示）
     category = fields.CharField(max_length=50, db_index=True)
@@ -49,7 +50,7 @@ class SystemConfig(BaseModel):
         ]
 
     def __str__(self):
-        return f"{self.config_key}: {self.config_value}"
+        return self.config_key
 
 
 __all__ = [

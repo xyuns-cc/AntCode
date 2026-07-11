@@ -8,14 +8,27 @@
 """
 
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from loguru import logger
 
 from antcode_core.common.security.api_key import store_api_key, store_secret_key
-from antcode_core.common.security.secret_box import secret_box
 from antcode_core.domain.models import Worker, WorkerStatus
+from antcode_core.domain.schemas.worker import WorkerRegisterDirectRequest
+
+MAX_WORKER_NAME_LENGTH = 100
+RANDOM_NAME_ATTEMPTS = 6
+RANDOM_SUFFIX_BYTES = 3
+
+
+@dataclass(frozen=True)
+class _DirectWorkerIdentity:
+    worker_id: str
+    name: str
+    host: str | None
+    port: int | None
 
 
 class WorkerConnectionService:
@@ -41,8 +54,6 @@ class WorkerConnectionService:
 
     async def register_worker(self, request) -> tuple[Worker, str, str]:
         """Worker 自注册（通过心跳触发）"""
-        from antcode_core.common.security.worker_auth import worker_auth_verifier
-
         host, port = self.normalize_address(request.host, request.port)
 
         existing = await Worker.filter(host=host, port=port).first()
@@ -61,8 +72,6 @@ class WorkerConnectionService:
             store_api_key(existing, api_key)
             store_secret_key(existing, secret_key)
             await existing.save()
-
-            worker_auth_verifier.register_worker_secret(existing.public_id, secret_key)
 
             from antcode_core.application.services.workers.worker_heartbeat_service import (
                 worker_heartbeat_service,
@@ -90,7 +99,6 @@ class WorkerConnectionService:
         store_secret_key(worker, secret_key)
         await worker.save()
 
-        worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
         logger.info(f"Worker 注册成功: {worker.name} ({worker.host}:{worker.port})")
         from antcode_core.application.services.workers.worker_heartbeat_service import (
             worker_heartbeat_service,
@@ -99,83 +107,90 @@ class WorkerConnectionService:
         await worker_heartbeat_service.refresh_worker_cache(force=True)
         return worker, api_key, secret_key
 
-    async def register_direct_worker(self, request) -> tuple[Worker, bool]:
+    async def register_direct_worker(self, request: WorkerRegisterDirectRequest) -> tuple[Worker, bool]:
         """Direct Worker 注册（使用 worker_id 作为 public_id）"""
         worker_id = (request.worker_id or "").strip()
         if not worker_id:
             raise ValueError("worker_id 不能为空")
 
-        host, port = self.normalize_address(request.host, request.port)
+        address = self.normalize_address(request.host, request.port)
         worker = await Worker.filter(public_id=worker_id).first()
-        created = False
-
         if worker:
-            if request.name and request.name != worker.name:
-                exists = await Worker.filter(name=request.name).exclude(id=worker.id).first()
-                if not exists:
-                    worker.name = request.name
-            if host:
-                worker.host = host
-            if port:
-                worker.port = port
-            if request.region is not None:
-                worker.region = request.region
-            if request.version:
-                worker.version = request.version
-            if request.os_type:
-                worker.os_type = request.os_type
-            if request.os_version:
-                worker.os_version = request.os_version
-            if request.python_version:
-                worker.python_version = request.python_version
-            if request.machine_arch:
-                worker.machine_arch = request.machine_arch
-            if request.capabilities:
-                try:
-                    worker.capabilities = request.capabilities.model_dump()
-                except Exception:
-                    worker.capabilities = request.capabilities
-            # P1-33: MAINTENANCE 是运维态,重复注册路径不能覆盖它
-            if worker.status != WorkerStatus.MAINTENANCE.value:
-                worker.status = WorkerStatus.ONLINE.value
-            worker.last_heartbeat = datetime.now(UTC)
-            await worker.save()
-            return worker, created
+            return await self._update_direct_worker(worker, request, address), False
 
-        base_name = ((request.name or "").strip() or worker_id)[:100]
-        name = base_name
-        if await Worker.filter(name=name).exists():
-            candidate_names = [
-                f"{base_name}-{worker_id[:6]}",
-                f"{base_name}-{worker_id[-6:]}",
-                f"worker-{worker_id[:12]}",
-            ]
+        name = await self._select_direct_worker_name(request.name, worker_id)
+        identity = _DirectWorkerIdentity(worker_id, name, *address)
+        worker = await self._create_direct_worker(request, identity)
+        logger.info(f"Direct Worker 注册成功: {worker.name} ({worker.public_id})")
+        return worker, True
 
-            selected_name = None
-            for candidate in candidate_names:
-                candidate = candidate[:100]
-                if not await Worker.filter(name=candidate).exists():
-                    selected_name = candidate
-                    break
+    async def _update_direct_worker(
+        self,
+        worker: Worker,
+        request: WorkerRegisterDirectRequest,
+        address: tuple[str | None, int | None],
+    ) -> Worker:
+        requested_name = (request.name or "").strip()
+        if requested_name and requested_name != worker.name:
+            duplicate = await Worker.filter(name=requested_name).exclude(id=worker.id).exists()
+            if not duplicate:
+                worker.name = requested_name
 
-            if selected_name is None:
-                base = base_name[:92]
-                for _ in range(6):
-                    candidate = f"{base}-{secrets.token_hex(3)}"
-                    if not await Worker.filter(name=candidate).exists():
-                        selected_name = candidate
-                        break
+        host, port = address
+        truthy_values = {
+            "host": host,
+            "port": port,
+            "version": request.version,
+            "os_type": request.os_type,
+            "os_version": request.os_version,
+            "python_version": request.python_version,
+            "machine_arch": request.machine_arch,
+        }
+        for field, value in truthy_values.items():
+            if value:
+                setattr(worker, field, value)
+        if request.region is not None:
+            worker.region = request.region
+        if request.capabilities is not None:
+            worker.capabilities = request.capabilities.model_dump()
+        if worker.status != WorkerStatus.MAINTENANCE.value:
+            worker.status = WorkerStatus.ONLINE.value
+        worker.last_heartbeat = datetime.now(UTC)
+        await worker.save()
+        return worker
 
-            if selected_name is None:
-                raise ValueError("无法为 Worker 生成唯一名称")
+    async def _select_direct_worker_name(self, requested_name: str | None, worker_id: str) -> str:
+        base_name = ((requested_name or "").strip() or worker_id)[:MAX_WORKER_NAME_LENGTH]
+        candidates = (
+            base_name,
+            f"{base_name}-{worker_id[:6]}",
+            f"{base_name}-{worker_id[-6:]}",
+            f"worker-{worker_id[:12]}",
+        )
+        for candidate in candidates:
+            normalized = candidate[:MAX_WORKER_NAME_LENGTH]
+            if not await Worker.filter(name=normalized).exists():
+                return normalized
 
-            name = selected_name
+        prefix = base_name[: MAX_WORKER_NAME_LENGTH - 8]
+        for _ in range(RANDOM_NAME_ATTEMPTS):
+            candidate = f"{prefix}-{secrets.token_hex(RANDOM_SUFFIX_BYTES)}"
+            if not await Worker.filter(name=candidate).exists():
+                return candidate
+        raise ValueError("无法为 Worker 生成唯一名称")
 
-        worker = await Worker.create(
-            public_id=worker_id,
-            name=name,
-            host=host or "",
-            port=port or 0,
+    @staticmethod
+    async def _create_direct_worker(
+        request: WorkerRegisterDirectRequest,
+        identity: _DirectWorkerIdentity,
+    ) -> Worker:
+        capabilities = request.capabilities.model_dump() if request.capabilities else {}
+
+        return await Worker.create(
+            public_id=identity.worker_id,
+            name=identity.name,
+            host=identity.host or "",
+            port=identity.port or 0,
             region=request.region or "",
             version=request.version or None,
             status=WorkerStatus.ONLINE.value,
@@ -184,13 +199,9 @@ class WorkerConnectionService:
             os_version=request.os_version or None,
             python_version=request.python_version or None,
             machine_arch=request.machine_arch or None,
-            capabilities=request.capabilities.model_dump() if request.capabilities else {},
+            capabilities=capabilities,
             transport_mode="direct",
         )
-
-        created = True
-        logger.info(f"Direct Worker 注册成功: {worker.name} ({worker.public_id})")
-        return worker, created
 
     async def disconnect_worker(self, worker: Worker) -> bool:
         """断开 Worker 连接（标记离线）"""
@@ -254,15 +265,16 @@ class WorkerConnectionService:
         return worker
 
     async def init_worker_secrets(self):
-        """初始化时加载所有 Worker 密钥到验证器"""
-        from antcode_core.common.security.worker_auth import worker_auth_verifier
+        """启动时验证所有持久化 Worker 密钥可解密且哈希一致。"""
+        from antcode_core.common.security.worker_auth import load_worker_secret
 
-        workers = await Worker.filter(secret_key_encrypted__isnull=False).all()
+        workers = await Worker.filter(secret_key_encrypted__isnull=False).only("public_id")
         for worker in workers:
-            secret_key = secret_box.decrypt(worker.secret_key_encrypted)
-            worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
+            secret = await load_worker_secret(worker.public_id)
+            if secret is None:
+                raise RuntimeError(f"Worker HMAC secret 不完整: {worker.public_id}")
 
-        logger.info(f"已加载 {len(workers)} 个 Worker 密钥")
+        logger.info(f"已验证 {len(workers)} 个 Worker HMAC 密钥")
 
     async def get_worker_credentials(self, worker: Worker) -> dict:
         """凭据不可恢复，只允许注册响应返回一次。"""

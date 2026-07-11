@@ -113,47 +113,46 @@ class TaskLogService:
             return "", ""
 
         try:
-            from antcode_core.infrastructure.redis.client import get_redis_client
-            from antcode_core.infrastructure.redis.control_plane import redis_namespace
-            from antcode_core.infrastructure.redis.keys import RedisKeys
-        except Exception as e:
-            logger.debug(f"Redis 客户端不可用: {e}")
-            return "", ""
-
-        try:
-            redis = await get_redis_client()
-            keys = RedisKeys(settings.REDIS_NAMESPACE)
-            ns = redis_namespace(settings.REDIS_NAMESPACE)
-            candidate_keys = [
-                keys.log_stream_key(run_id),  # 兼容旧 per-run stream
-                f"{ns}:log:ingest",  # 新全局 ingest stream
-            ]
-            stdout_lines: list[str] = []
-            stderr_lines: list[str] = []
-
-            for stream_key in candidate_keys:
-                last_id = "0-0"
-                while True:
-                    result = await redis.xread({stream_key: last_id}, count=200)
-                    if not result:
-                        break
-                    _, messages = result[0]
-                    if not messages:
-                        break
-                    for msg_id, fields in messages:
-                        last_id = self._decode_redis_value(msg_id)
-                        for log_type, content in self._decode_stream_message(fields, run_id):
-                            if not content:
-                                continue
-                            if log_type == "stderr":
-                                stderr_lines.append(content)
-                            else:
-                                stdout_lines.append(content)
-
-            return "\n".join(stdout_lines), "\n".join(stderr_lines)
+            redis, candidate_keys = await self._redis_log_sources(run_id)
+            lines = await self._read_redis_log_sources(redis, candidate_keys, run_id)
+            return "\n".join(lines["stdout"]), "\n".join(lines["stderr"])
         except Exception as e:
             logger.debug(f"读取 Redis 日志流失败: {e}")
             return "", ""
+
+    @staticmethod
+    async def _redis_log_sources(run_id):
+        from antcode_core.infrastructure.redis.client import get_redis_client
+        from antcode_core.infrastructure.redis.control_plane import redis_namespace
+        from antcode_core.infrastructure.redis.keys import RedisKeys
+
+        redis = await get_redis_client()
+        keys = RedisKeys(settings.REDIS_NAMESPACE)
+        namespace = redis_namespace(settings.REDIS_NAMESPACE)
+        return redis, [keys.log_stream_key(run_id), f"{namespace}:log:ingest"]
+
+    async def _read_redis_log_sources(self, redis, stream_keys, run_id):
+        lines: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        for stream_key in stream_keys:
+            await self._read_redis_log_stream(redis, stream_key, run_id, lines)
+        return lines
+
+    async def _read_redis_log_stream(self, redis, stream_key, run_id, lines):
+        last_id = "0-0"
+        while True:
+            result = await redis.xread({stream_key: last_id}, count=200)
+            if not result or not result[0][1]:
+                return
+            for msg_id, fields in result[0][1]:
+                last_id = self._decode_redis_value(msg_id)
+                self._append_stream_message(lines, fields, run_id)
+
+    def _append_stream_message(self, lines, fields, run_id):
+        for log_type, content in self._decode_stream_message(fields, run_id):
+            if not content:
+                continue
+            target = "stderr" if log_type == "stderr" else "stdout"
+            lines[target].append(content)
 
     def _decode_stream_message(self, fields: dict, run_id_filter: str) -> list[tuple[str, str]]:
         """解码 Stream 消息：返回 ``[(log_type, content), ...]``，按 run_id 过滤。"""

@@ -138,7 +138,7 @@ class ProjectResponseBuilder:
             created_at=project.created_at,
             updated_at=project.updated_at,
             created_by=created_by_public_id,
-            created_by_username=getattr(project, "created_by_username", None),
+            created_by_username=str(getattr(project, "created_by_username", "") or ""),
             star_count=project.star_count,
             file_info=getattr(project, "file_info", None),
             rule_info=getattr(project, "rule_info", None),
@@ -168,7 +168,7 @@ class ProjectResponseBuilder:
             tags=project.tags or [],
             created_at=project.created_at,
             created_by=created_by_public_id,
-            created_by_username=getattr(project, "created_by_username", None),
+            created_by_username=str(getattr(project, "created_by_username", "") or ""),
             star_count=project.star_count,
             task_count=getattr(project, "task_count", 0),
         )

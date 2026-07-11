@@ -85,8 +85,7 @@ class TaskDecoder:
             # 必须还原成 dict/list，否则 engine._build_payload 的
             # isinstance(dict/list) 检查全部落空，RulePlugin 拿不到 rule_detail。
             params = {
-                str(key): _maybe_json(value)
-                for key, value in dict(getattr(dispatch, "params", {}) or {}).items()
+                str(key): _maybe_json(value) for key, value in dict(getattr(dispatch, "params", {}) or {}).items()
             }
             # environment 刻意**不**做 _maybe_json：env 值最终要进子进程
             # environ，必须是字符串；且 JSON 字符串形态的 env 值（如内嵌

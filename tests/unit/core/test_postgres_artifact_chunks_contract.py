@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -120,3 +121,58 @@ async def test_write_blob_reuses_concurrent_insert_without_duplicate_chunks():
 
     assert stored.artifact_id == artifact.id
     bulk_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_read_blob_to_file_streams_ordered_chunks(tmp_path: Path):
+    content = b"first-second"
+    content_hash = hashlib.sha256(content).hexdigest()
+    artifact = SimpleNamespace(
+        id=42,
+        content_hash=content_hash,
+        size_bytes=len(content),
+        media_type="application/octet-stream",
+        chunk_count=2,
+    )
+    chunks = [SimpleNamespace(content=b"first-"), SimpleNamespace(content=b"second")]
+
+    with (
+        patch.object(SourceArtifact, "get_or_none", new=AsyncMock(return_value=artifact)),
+        patch.object(SourceArtifactChunk, "get_or_none", new=AsyncMock(side_effect=chunks)) as get_chunk,
+    ):
+        destination = tmp_path / "artifact.bin"
+        stored = await PostgresArtifactStore().read_blob_to_file(
+            content_hash,
+            destination,
+            max_bytes=len(content),
+        )
+
+    assert destination.read_bytes() == content
+    assert stored.content_hash == content_hash
+    assert [call.kwargs["chunk_index"] for call in get_chunk.await_args_list] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_read_blob_to_file_removes_partial_file_when_chunk_is_missing(tmp_path: Path):
+    content_hash = hashlib.sha256(b"first-second").hexdigest()
+    artifact = SimpleNamespace(
+        id=42,
+        content_hash=content_hash,
+        size_bytes=12,
+        media_type="application/octet-stream",
+        chunk_count=2,
+    )
+    destination = tmp_path / "partial.bin"
+
+    with (
+        patch.object(SourceArtifact, "get_or_none", new=AsyncMock(return_value=artifact)),
+        patch.object(
+            SourceArtifactChunk,
+            "get_or_none",
+            new=AsyncMock(side_effect=[SimpleNamespace(content=b"first-"), None]),
+        ),
+    ):
+        with pytest.raises(ValueError, match="chunk 缺失"):
+            await PostgresArtifactStore().read_blob_to_file(content_hash, destination)
+
+    assert not destination.exists()

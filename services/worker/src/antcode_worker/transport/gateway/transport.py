@@ -60,7 +60,6 @@ if TYPE_CHECKING:
 # P2-#36: 用一个独立 sentinel 对象代替每秒 wait_for(timeout=1.0) 轮询。
 # ``stop()`` 显式把 sentinel 放进 outbox，``_gen()`` 一识别就立刻 return,
 # 客户端流随之关闭。和 ``None`` 区分开以免和合法消息混淆。
-_SHUTDOWN_SENTINEL = object()
 
 
 @dataclass
@@ -144,14 +143,10 @@ class GatewayTransport(TransportBase):
         # 内部队列（streaming RPC 与 transport 接口之间的解耦）
         self._task_inbox: asyncio.Queue[Any] | None = None
         self._control_inbox: asyncio.Queue[Any] | None = None
-        self._status_outbox: asyncio.Queue[Any] | None = None
-        self._log_outbox: asyncio.Queue[Any] | None = None
 
         # 后台 streaming tasks
         self._task_subscriber: asyncio.Task | None = None
         self._control_subscriber: asyncio.Task | None = None
-        self._status_pusher: asyncio.Task | None = None
-        self._log_pusher: asyncio.Task | None = None
 
         # 幂等性缓存
         self._receipt_cache: dict[str, tuple[float, Any]] = {}
@@ -200,17 +195,11 @@ class GatewayTransport(TransportBase):
             # 初始化队列
             self._task_inbox = asyncio.Queue(maxsize=self._gateway_config.task_queue_maxsize)
             self._control_inbox = asyncio.Queue(maxsize=self._gateway_config.control_queue_maxsize)
-            self._status_outbox = asyncio.Queue(maxsize=self._gateway_config.status_queue_maxsize)
-            self._log_outbox = asyncio.Queue(maxsize=self._gateway_config.log_queue_maxsize)
-
             self._running = True
 
             # 启动 streaming 后台任务（指数退避重连内置）
             self._task_subscriber = asyncio.create_task(self._task_subscription_loop())
             self._control_subscriber = asyncio.create_task(self._control_subscription_loop())
-            self._status_pusher = asyncio.create_task(self._status_push_loop())
-            self._log_pusher = asyncio.create_task(self._log_push_loop())
-
             await self._set_state(WorkerState.ONLINE)
 
             logger.info(
@@ -227,22 +216,6 @@ class GatewayTransport(TransportBase):
             return
 
         self._running = False
-
-        # 优雅 drain：等待 status / log 队列被推完（限定 grace_period 内）
-        try:
-            await asyncio.wait_for(
-                self._drain_outbox_queues(),
-                timeout=max(0.0, grace_period),
-            )
-        except TimeoutError:
-            logger.warning("Gateway transport stop: outbox drain timeout，强制关闭")
-
-        # P2-#36: 显式 sentinel 通知 push loop 的 generator 关闭流。
-        # 队列已经 drain 完，sentinel 之后不会再有新消息。
-        for outbox in (self._status_outbox, self._log_outbox):
-            if outbox is not None:
-                with contextlib.suppress(asyncio.QueueFull):
-                    outbox.put_nowait(_SHUTDOWN_SENTINEL)
 
         await self._cancel_background_tasks()
         await self._disconnect()
@@ -285,17 +258,6 @@ class GatewayTransport(TransportBase):
             logger.info(f"worker Deregister 已发送 (reason={reason})")
         except Exception as exc:
             logger.warning(f"Deregister RPC 失败（不阻塞停机；lease 会自然过期）: {exc}")
-
-    async def _drain_outbox_queues(self) -> None:
-        """等待 status / log outbox 被推送完"""
-        while True:
-            if self._status_outbox is None and self._log_outbox is None:
-                return
-            status_empty = self._status_outbox is None or self._status_outbox.empty()
-            log_empty = self._log_outbox is None or self._log_outbox.empty()
-            if status_empty and log_empty:
-                return
-            await asyncio.sleep(0.05)
 
     # ==================== 任务订阅 (StreamTasks) ====================
 
@@ -450,110 +412,6 @@ class GatewayTransport(TransportBase):
                     asyncio.create_task(self.ack_control(event_id))
             return None
         return None
-
-    # ==================== 状态/日志推送 (StreamStatus / StreamLogs) ====================
-
-    async def _status_push_loop(self) -> None:
-        """从 outbox 取 ``TaskStatus`` 推到 ``DataService.StreamStatus``。
-
-        client-streaming RPC 在 worker 端是 ``call(generator)`` 的形式 —
-        我们维护一个 async generator，从队列出队作为流元素。
-
-        P1-#7：以前 ``_gen()`` 一旦 ``yield msg`` 后 gRPC 写入抛错，那条消息
-        就丢了。现在用 ``_drain_outbox_to_stream`` 抓住 generator 内的异常，
-        把当前消息塞回队列（FIFO 顺序退化为消息被排到尾部，由上层 retry
-        重新写入；可接受的折中）。
-
-        P2-#36：以前每秒 ``wait_for(timeout=1.0)`` 轮询检查 ``self._running``。
-        现在 ``stop()`` 直接把 ``_SHUTDOWN_SENTINEL`` 放进队列，``_gen`` 一识别
-        就 return，省掉空转。
-        """
-        backoff = 1.0
-        while self._running:
-            if not self._data_stub or self._status_outbox is None:
-                await asyncio.sleep(backoff)
-                backoff = min(self._gateway_config.max_backoff, backoff * 2)
-                continue
-
-            try:
-                ack = await self._data_stub.StreamStatus(
-                    self._drain_outbox_to_stream(self._status_outbox),
-                    metadata=self._get_auth_metadata(),
-                )
-                logger.debug(f"StreamStatus 流结束: received={getattr(ack, 'received', 0)}")
-                backoff = 1.0
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                if not self._running:
-                    break
-                logger.warning(f"StreamStatus 流断开，{backoff:.1f}s 后重连: {e}")
-                await asyncio.sleep(backoff)
-                backoff = min(self._gateway_config.max_backoff, backoff * 2)
-
-    async def _log_push_loop(self) -> None:
-        """从 outbox 取 ``LogBatch`` 推到 ``DataService.StreamLogs``。
-
-        同 ``_status_push_loop``：使用 ``_drain_outbox_to_stream`` 共享 sentinel
-        + re-queue-on-error 行为，避免断流丢消息（P1-#7）和 1s 轮询（P2-#36）。
-        """
-        backoff = 1.0
-        while self._running:
-            if not self._data_stub or self._log_outbox is None:
-                await asyncio.sleep(backoff)
-                backoff = min(self._gateway_config.max_backoff, backoff * 2)
-                continue
-
-            try:
-                ack = await self._data_stub.StreamLogs(
-                    self._drain_outbox_to_stream(self._log_outbox),
-                    metadata=self._get_auth_metadata(),
-                )
-                logger.debug(f"StreamLogs 流结束: received={getattr(ack, 'received', 0)}")
-                backoff = 1.0
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                if not self._running:
-                    break
-                logger.warning(f"StreamLogs 流断开，{backoff:.1f}s 后重连: {e}")
-                await asyncio.sleep(backoff)
-                backoff = min(self._gateway_config.max_backoff, backoff * 2)
-
-    async def _drain_outbox_to_stream(self, outbox: asyncio.Queue):
-        """把 outbox 转成 gRPC client-streaming 用的 async generator。
-
-        关键不变量:
-        * 看到 ``_SHUTDOWN_SENTINEL`` -> ``return``（流正常关闭）。
-        * ``yield`` 后捕到异常 -> 把这条消息塞回 outbox 尾部再 raise，
-          上层的 reconnect 会重新打开流并继续 drain。
-
-        B4: outbox item 可能是 ``(msg, event)`` — event 用于让上游
-        ``report_result`` 阻塞等消息真正 yield 出去，避免"入队即成功"
-        导致的丢结果。yield 成功后 event.set()；转发失败保留 event。
-        """
-        while True:
-            item = await outbox.get()
-            if item is _SHUTDOWN_SENTINEL:
-                return
-            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], asyncio.Event):
-                msg, event = item
-            else:
-                msg, event = item, None
-            try:
-                yield msg
-                if event is not None:
-                    event.set()
-            except Exception:
-                # 上游 gRPC 写入失败：保留这条消息（含 event）由下一次重连重传。
-                try:
-                    outbox.put_nowait((msg, event) if event is not None else msg)
-                except asyncio.QueueFull:
-                    logger.warning("outbox 队列已满，丢弃 1 条待发送消息（断流场景）")
-                    # 让 report_result 通过 timeout 感知失败
-                raise
 
     # ==================== TransportBase 实现：任务面 ====================
 
@@ -737,7 +595,7 @@ class GatewayTransport(TransportBase):
         return await self.send_log_batch([log])
 
     async def send_log_batch(self, logs: list[LogMessage]) -> bool:
-        if not self._running or self._log_outbox is None:
+        if not self._running or not self._data_stub:
             return False
         if not logs:
             return True
@@ -749,10 +607,23 @@ class GatewayTransport(TransportBase):
             # P5.4: 透传当前 trace,Master 端 log ingester 解码后可以把
             # 这批日志按 trace_id 接到调用链上(全链路日志查询)。
             inject_trace(batch)
-            await self._log_outbox.put(batch)
+
+            async def _one_shot():
+                yield batch
+
+            ack = await asyncio.wait_for(
+                self._data_stub.StreamLogs(
+                    _one_shot(),
+                    metadata=self._get_auth_metadata(),
+                ),
+                timeout=self._gateway_config.call_timeout,
+            )
+            received = int(getattr(ack, "received", 0) or 0)
+            if received != len(logs):
+                raise RuntimeError(f"日志 ACK 数量不匹配: expected={len(logs)} received={received}")
             return True
         except Exception:
-            logger.exception("入队日志批次失败")
+            logger.exception("日志批次持久化失败")
             return False
 
     async def send_log_chunk(
@@ -1268,8 +1139,6 @@ class GatewayTransport(TransportBase):
         for task in (
             self._task_subscriber,
             self._control_subscriber,
-            self._status_pusher,
-            self._log_pusher,
         ):
             if task is not None and not task.done():
                 task.cancel()
@@ -1281,5 +1150,3 @@ class GatewayTransport(TransportBase):
 
         self._task_subscriber = None
         self._control_subscriber = None
-        self._status_pusher = None
-        self._log_pusher = None

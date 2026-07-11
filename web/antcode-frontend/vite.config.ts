@@ -92,27 +92,12 @@ export default defineConfig(({ mode }) => {
       chunkSizeWarningLimit: 1500,
       rollupOptions: {
         output: {
-          manualChunks: (id) => {
-            if (!id.includes('node_modules')) return
-            if (/[\\/]node_modules[\\/](react|react-dom|react-router-dom|zustand|immer)/.test(id)) {
-              return 'core-vendor'
-            }
-            if (id.includes('@ant-design/icons')) {
-              return 'antd-icons'
-            }
-            if (/[\\/]node_modules[\\/]antd[\\/]es[\\/]locale/.test(id)) {
-              return 'antd-locale'
-            }
-            if (id.includes('antd') || id.includes('@ant-design')) {
-              return 'antd-vendor'
-            }
-            if (id.includes('chart') || id.includes('react-chartjs')) {
-              return 'chart-vendor'
-            }
-            if (id.includes('react-syntax-highlighter') || id.includes('highlight.js') || id.includes('refractor')) {
-              return 'syntax-vendor'
-            }
-            return 'vendor'
+          manualChunks: {
+            core: ['react', 'react-dom', 'react-router-dom', 'zustand', 'immer'],
+            antd: ['antd'],
+            icons: ['@ant-design/icons'],
+            charts: ['chart.js', 'react-chartjs-2', 'chartjs-plugin-zoom'],
+            syntax: ['react-syntax-highlighter'],
           },
           chunkFileNames: 'js/[name]-[hash].js',
           entryFileNames: 'js/[name]-[hash].js',

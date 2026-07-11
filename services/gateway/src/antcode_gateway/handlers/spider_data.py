@@ -87,64 +87,70 @@ class SpiderDataHandler:
 
         stream_key = self._stream_key(run_id)
         meta_key = self._meta_key(run_id)
-
-        # 字段名/顺序/类型必须逐字对齐 direct 模式的 AntCodeRedisPipeline
-        # （否则 web_api SpiderDataItem.from_redis_dict 解析失败）。
         pipe = redis.pipeline(transaction=False)
+        accepted, failed = self._queue_items(pipe, stream_key, batch)
+        self._queue_meta(pipe, meta_key, batch)
+        if not await self._execute_pipeline(redis, pipe, stream_key, accepted):
+            return (0, len(batch.items))
+        return (accepted, failed)
+
+    def _queue_items(self, pipe, stream_key: str, batch: data_pb2.SpiderDataBatch) -> tuple[int, int]:
         accepted = 0
         failed = 0
         for item in batch.items:
-            payload = {
-                "item_id": item.item_id,
-                "run_id": run_id,
-                "project_id": batch.project_id,
-                "spider_name": item.spider_name,
-                "item_type": item.item_type or "default",
-                "data": item.data,  # bytes，直接透传
-                "url": item.url,
-                "timestamp": item.timestamp,
-                "sequence": str(item.sequence),
-            }
             try:
                 pipe.xadd(
                     stream_key,
-                    payload,
+                    self._item_payload(batch, item),
                     maxlen=self._stream_maxlen,
                     approximate=True,
                 )
                 accepted += 1
             except Exception as exc:
-                logger.error(f"pipe.xadd 组装失败 run_id={run_id} seq={item.sequence}: {exc}")
+                logger.error(f"pipe.xadd 组装失败 run_id={batch.run_id} seq={item.sequence}: {exc}")
                 failed += 1
+        return accepted, failed
 
-        # meta 心跳（可选） —— 与 AntCodeRedisPipeline.process_item 里每 N 条
-        # HSET 一次是同一个语义
-        if batch.HasField("meta"):
-            meta = batch.meta
-            fields: dict[str, str] = {"run_id": run_id, "project_id": batch.project_id}
-            if meta.status:
-                fields["status"] = meta.status
-            if meta.items_count > 0:
-                fields["items_count"] = str(meta.items_count)
-            if meta.last_item_at:
-                fields["last_item_at"] = meta.last_item_at
-            if fields:
-                pipe.hset(meta_key, mapping=fields)
-                pipe.expire(meta_key, self._meta_ttl_seconds)
+    @staticmethod
+    def _item_payload(batch: data_pb2.SpiderDataBatch, item) -> dict:
+        return {
+            "item_id": item.item_id,
+            "run_id": batch.run_id,
+            "project_id": batch.project_id,
+            "spider_name": item.spider_name,
+            "item_type": item.item_type or "default",
+            "data": item.data,
+            "url": item.url,
+            "timestamp": item.timestamp,
+            "sequence": str(item.sequence),
+        }
 
+    def _queue_meta(self, pipe, meta_key: str, batch: data_pb2.SpiderDataBatch) -> None:
+        if not batch.HasField("meta"):
+            return
+        meta = batch.meta
+        fields = {"run_id": batch.run_id, "project_id": batch.project_id}
+        if meta.status:
+            fields["status"] = meta.status
+        if meta.items_count > 0:
+            fields["items_count"] = str(meta.items_count)
+        if meta.last_item_at:
+            fields["last_item_at"] = meta.last_item_at
+        pipe.hset(meta_key, mapping=fields)
+        pipe.expire(meta_key, self._meta_ttl_seconds)
+
+    async def _execute_pipeline(self, redis, pipe, stream_key: str, accepted: int) -> bool:
         try:
             await pipe.execute()
-            # 首条时刷 stream TTL（与 direct 模式对齐）
             if accepted > 0:
                 try:
                     await redis.expire(stream_key, self._meta_ttl_seconds)
                 except Exception:
                     pass
+            return True
         except Exception as exc:
-            logger.exception(f"pipe.execute 失败 run_id={run_id} accepted={accepted}: {exc}")
-            return (0, len(batch.items))
-
-        return (accepted, failed)
+            logger.exception(f"pipe.execute 失败: {exc}")
+            return False
 
 
 __all__ = ["SpiderDataHandler"]

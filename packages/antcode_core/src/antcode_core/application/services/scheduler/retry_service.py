@@ -474,7 +474,12 @@ class RetryService:
                 f"失败时间: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-            await alert_service.send_alert(title=f"任务失败: {task.name}", content=alert_message, level="error")
+            await alert_service.send_alert(
+                alert_message,
+                level="ERROR",
+                source="scheduler",
+                extra={"title": f"任务失败: {task.name}"},
+            )
 
         except Exception as e:
             logger.error(f"发送任务失败告警失败: {e}")

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import os
-import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -17,6 +15,7 @@ from antcode_core.application.services.projects.git_credential_service import (
     GitAuthConfig,
     git_credential_service,
 )
+from antcode_core.application.services.projects.git_url_security import validate_git_url as _validate_git_url
 from antcode_core.application.services.projects.source_bundle_paths import (
     create_deterministic_tar_gz as _create_deterministic_tar_gz,
 )
@@ -32,10 +31,6 @@ from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifact
 SOURCE_BUNDLE_MEDIA_TYPE = "application/vnd.antcode.source-bundle+tar-gzip"
 
 
-# D7-2: 允许的 Git remote scheme。禁止 file:// / ext:: / --upload-pack=cmd 之类的
-# git 特殊 remote helper（在控制面主机上等于任意命令/文件读）。
-_ALLOWED_GIT_SCHEMES = ("http://", "https://", "ssh://", "git@")
-
 # P1-11: Git 操作 timeout,防止恶意 slow-loris / 大 repo 拖死 master。
 # ls-remote 快速探测(30s);clone 主操作(300s = 5 分钟,大 repo 应改 shallow)。
 _GIT_LS_REMOTE_TIMEOUT_SEC = 30
@@ -44,99 +39,6 @@ MAX_BUNDLE_FILE_COUNT = 10_000
 MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 MAX_BUNDLE_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_BUNDLE_ARCHIVE_BYTES = 100 * 1024 * 1024
-
-# P1-11: SSRF 防护 —— host 私网/回环/云元数据端点白名单/黑名单
-# 云元数据地址(AWS/GCP/Azure/阿里云等)一律禁止,防抓 IAM 凭证。
-_BLOCKED_HOST_PATTERNS = frozenset(
-    {
-        "169.254.169.254",  # AWS/GCP/Azure IMDS
-        "metadata.google.internal",  # GCP
-        "100.100.100.200",  # 阿里云
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "::1",
-    }
-)
-
-
-def _is_private_ip(host: str) -> bool:
-    """检查 IPv4/IPv6 是否为不可访问的内部或特殊地址。"""
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
-
-
-def _validate_resolved_host(host: str) -> None:
-    try:
-        addresses = {str(item[4][0]) for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError(f"Git 主机无法解析: {host!r}") from exc
-    if not addresses:
-        raise ValueError(f"Git 主机没有可用地址: {host!r}")
-    blocked = sorted(address for address in addresses if _is_private_ip(address))
-    if blocked:
-        raise ValueError(f"Git URL 解析到私网/回环/保留地址: {host!r} -> {', '.join(blocked)}")
-
-
-def _validate_git_url(url: str) -> str:
-    """校验用户传入的 Git URL，防止 git remote helper 注入和 SSRF。
-
-    拒绝：
-    - 空 / 非 str
-    - 以 ``-`` 开头（被 git 当 flag）
-    - 包含 ``::`` 或 ``ext::`` / ``file::`` 类 remote helper 语法
-    - 不在允许 scheme 白名单内
-    - P1-11: host 是回环 / 云元数据端点(除非显式配置 ALLOW_PRIVATE_NODES)
-
-    调用方仍需用 ``--`` 分隔 URL 与 argv（防御纵深）。
-    """
-    if not isinstance(url, str) or not url.strip():
-        raise ValueError("Git URL 不能为空")
-    stripped = url.strip()
-    if stripped.startswith("-"):
-        raise ValueError("Git URL 不合法：不允许以 '-' 开头")
-    if "::" in stripped:
-        raise ValueError("Git URL 不合法：不允许包含 '::'（git remote helper 语法）")
-    lowered = stripped.lower()
-    if not any(lowered.startswith(scheme) for scheme in _ALLOWED_GIT_SCHEMES):
-        raise ValueError(f"Git URL 不合法：仅支持 {', '.join(_ALLOWED_GIT_SCHEMES)}")
-
-    # P1-11: SSRF 防护 —— 解析 host 检查是否为回环/云元数据
-    try:
-        from antcode_core.common.config import settings
-
-        allow_private = bool(getattr(settings, "ALLOW_PRIVATE_NODES", False))
-    except Exception:
-        allow_private = False
-
-    # 简单 host 提取(不完整,但覆盖主流 http(s)/ssh 格式)
-    host_part = ""
-    for scheme in ("http://", "https://", "ssh://"):
-        if lowered.startswith(scheme):
-            host_part = stripped[len(scheme) :].split("/", 1)[0].split("@")[-1]
-            # 去掉 port
-            if ":" in host_part and "[" not in host_part:
-                host_part = host_part.rsplit(":", 1)[0]
-            break
-    if not host_part and lowered.startswith("git@"):
-        host_part = stripped[4:].split(":", 1)[0]
-
-    host_lower = host_part.lower().strip()
-    if host_lower and not allow_private:
-        if host_lower in _BLOCKED_HOST_PATTERNS:
-            raise ValueError(
-                f"Git URL 不合法：禁止指向本地/云元数据端点 {host_lower!r}（ALLOW_PRIVATE_NODES=true 显式放开）"
-            )
-        if _is_private_ip(host_lower):
-            raise ValueError(
-                f"Git URL 不合法：禁止指向私网/回环地址 {host_lower!r}（ALLOW_PRIVATE_NODES=true 显式放开）"
-            )
-        _validate_resolved_host(host_lower)
-
-    return stripped
 
 
 @dataclass(frozen=True)

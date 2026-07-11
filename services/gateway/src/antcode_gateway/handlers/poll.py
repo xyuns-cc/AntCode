@@ -68,20 +68,21 @@ def _pb_scalar_for(value: object) -> str:
     保证 round-trip 安全。
     """
     if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8", errors="replace")
-    if isinstance(value, bool):
-        # bool 是 int 的子类，单独处理避免 True → "true" 之外的意外
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(value)
+        scalar = ""
+    elif isinstance(value, str):
+        scalar = value
+    elif isinstance(value, (bytes, bytearray)):
+        scalar = value.decode("utf-8", errors="replace")
+    elif isinstance(value, bool):
+        scalar = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        scalar = str(value)
+    else:
+        try:
+            scalar = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            scalar = str(value)
+    return scalar
 
 
 def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:

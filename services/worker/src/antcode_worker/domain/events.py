@@ -14,6 +14,7 @@ import bisect
 import contextlib
 import inspect
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
@@ -83,7 +84,7 @@ class Signal(Enum):
 class SignalReceiver:
     """信号接收器"""
 
-    callback: object
+    callback: Callable[..., Any]
     priority: int = 0
     weak: bool = False
     _ref: weakref.ReferenceType[Any] | None = field(default=None, repr=False)

@@ -1,55 +1,66 @@
-name: Build and Push Docker Images
+name: Build, Scan and Sign Docker Images
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
+  workflow_call:
   workflow_dispatch:
-    inputs:
-      build_web_api:
-        description: '构建 Web API 镜像'
-        required: false
-        default: true
-        type: boolean
-      build_master:
-        description: '构建 Master 镜像'
-        required: false
-        default: true
-        type: boolean
-      build_gateway:
-        description: '构建 Gateway 镜像'
-        required: false
-        default: true
-        type: boolean
-      build_worker:
-        description: '构建 Worker 镜像'
-        required: false
-        default: true
-        type: boolean
-      build_frontend:
-        description: '构建前端镜像'
-        required: false
-        default: true
-        type: boolean
 
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/antcode
 
 jobs:
-  # ==================== Web API 镜像构建 ====================
-  build-web-api:
-    name: Build Web API Image
+  verify-ci:
+    name: Verify source CI
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_web_api }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require successful CI for manual publication
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci.yml',
+              head_sha: context.sha,
+              status: 'success',
+              per_page: 1,
+            });
+            if (runs.data.total_count === 0) {
+              core.setFailed(`No successful CI run found for ${context.sha}`);
+            }
+
+  publish:
+    name: Publish ${{ matrix.service }}
+    needs: verify-ci
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: web-api
+            context: .
+            dockerfile: infra/docker/Dockerfile.web_api
+          - service: master
+            context: .
+            dockerfile: infra/docker/Dockerfile.master
+          - service: gateway
+            context: .
+            dockerfile: infra/docker/Dockerfile.gateway
+          - service: worker
+            context: .
+            dockerfile: infra/docker/Dockerfile.worker
+          - service: frontend
+            context: web/antcode-frontend
+            dockerfile: web/antcode-frontend/Dockerfile
 
     steps:
       - name: Checkout repository
@@ -58,258 +69,72 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
+      - name: Log in to container registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for Web API
+      - name: Extract immutable image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_PREFIX }}-web-api
+          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
+            type=sha,prefix=sha-
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push Web API image
-        uses: docker/build-push-action@v5
+      - name: Build scan candidate
+        uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./infra/docker/Dockerfile.web_api
-          push: ${{ github.event_name != 'pull_request' }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          platforms: linux/amd64
+          tags: local/antcode-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan candidate image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/antcode-${{ matrix.service }}:${{ github.sha }}
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          format: table
+
+      - name: Build and push multi-platform image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          sbom: true
+          provenance: mode=max
 
-  # ==================== Master 镜像构建 ====================
-  build-master:
-    name: Build Master Image
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_master }}
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+      - name: Scan published digest
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}@${{ steps.push.outputs.digest }}
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          format: table
 
-      - name: Extract metadata for Master
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}-master
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.2
 
-      - name: Build and push Master image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./infra/docker/Dockerfile.master
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-  # ==================== Gateway 镜像构建 ====================
-  build-gateway:
-    name: Build Gateway Image
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_gateway }}
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Gateway
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}-gateway
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push Gateway image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./infra/docker/Dockerfile.gateway
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-  # ==================== Worker 镜像构建 ====================
-  build-worker:
-    name: Build Worker Image
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_worker }}
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Worker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}-worker
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push Worker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./infra/docker/Dockerfile.worker
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-  # ==================== 前端镜像构建 ====================
-  build-frontend:
-    name: Build Frontend Image
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_frontend }}
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Frontend
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}-frontend
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push Frontend image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./web/antcode-frontend
-          file: ./web/antcode-frontend/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-  # ==================== 构建摘要 ====================
-  summary:
-    name: Build Summary
-    runs-on: ubuntu-latest
-    needs: [build-web-api, build-master, build-gateway, build-worker, build-frontend]
-    if: always()
-
-    steps:
-      - name: Summary
-        run: |
-          echo "## 🐳 Docker 镜像构建结果" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| 服务 | 状态 |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Web API | ${{ needs.build-web-api.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Master | ${{ needs.build-master.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Gateway | ${{ needs.build-gateway.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Worker | ${{ needs.build-worker.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend | ${{ needs.build-frontend.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 镜像地址" >> $GITHUB_STEP_SUMMARY
-          echo "- **Web API**: \`${{ env.IMAGE_PREFIX }}-web-api\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Master**: \`${{ env.IMAGE_PREFIX }}-master\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Gateway**: \`${{ env.IMAGE_PREFIX }}-gateway\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Worker**: \`${{ env.IMAGE_PREFIX }}-worker\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Frontend**: \`${{ env.IMAGE_PREFIX }}-frontend\`" >> $GITHUB_STEP_SUMMARY
+      - name: Sign published digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

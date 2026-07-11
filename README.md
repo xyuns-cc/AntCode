@@ -128,7 +128,7 @@ docker compose -f docker-compose.dev.yml up -d
 生产部署请优先考虑：
 1. HTTPS（nginx / Caddy 收口）
 2. PG 每日备份 + Redis AOF
-3. 强 `ENCRYPTION_KEY` 和 `JWT_SECRET`（`openssl rand -base64 48`）
+3. 强 `ENCRYPTION_KEY` 和 `JWT_SECRET`（`openssl rand -base64 48`），并设置每部署唯一的 `ENCRYPTION_KEY_SALT`（`openssl rand -hex 16`）
 4. 挂 Prometheus + Grafana 抓 `/metrics`
 5. 参考 [`docs/mtls-deployment.md`](docs/mtls-deployment.md) 配 Gateway mTLS
 

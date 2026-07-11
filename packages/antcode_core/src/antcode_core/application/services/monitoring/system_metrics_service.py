@@ -18,17 +18,17 @@ from antcode_core.infrastructure.cache.cache import metrics_cache
 @dataclass
 class SystemMetrics:
     cpu_percent: float
-    cpu_cores: int | None
+    cpu_cores: int
     memory_percent: float
-    memory_total: int | None
-    memory_used: int | None
-    memory_available: int | None
+    memory_total: int
+    memory_used: int
+    memory_available: int
     disk_percent: float  # 统一命名：改为 disk_percent
-    disk_total: int | None
-    disk_used: int | None
-    disk_free: int | None
+    disk_total: int
+    disk_used: int
+    disk_free: int
     active_tasks: int
-    uptime_seconds: int | None
+    uptime_seconds: int
     collected_at: datetime
     # 新增字段
     queue_size: int = 0  # 待执行任务队列大小
@@ -88,7 +88,7 @@ class SystemMetricsService:
         if not self._is_valid_percent(cpu_percent_sample):
             cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 1.0)
         cpu_percent = self._normalize_percent(cpu_percent_sample)
-        cpu_cores = await asyncio.to_thread(psutil.cpu_count, True)
+        cpu_cores = await asyncio.to_thread(psutil.cpu_count, True) or 0
 
         if cpu_percent <= 0.0:
             try:
@@ -135,7 +135,7 @@ class SystemMetricsService:
             )
             return int(current_time - boot_time)
         except Exception:
-            return None
+            return 0
 
     async def _collect_queue_size(self):
         """收集待执行任务队列大小（pending 状态的任务数）"""
@@ -214,17 +214,17 @@ class SystemMetricsService:
             logger.error(f"收集指标失败: {e}")
             return SystemMetrics(
                 cpu_percent=0.0,
-                cpu_cores=None,
+                cpu_cores=0,
                 memory_percent=0.0,
-                memory_total=None,
-                memory_used=None,
-                memory_available=None,
+                memory_total=0,
+                memory_used=0,
+                memory_available=0,
                 disk_percent=0.0,  # 统一使用 disk_percent
-                disk_total=None,
-                disk_used=None,
-                disk_free=None,
+                disk_total=0,
+                disk_used=0,
+                disk_free=0,
                 active_tasks=0,
-                uptime_seconds=None,
+                uptime_seconds=0,
                 collected_at=datetime.now(),
                 queue_size=0,
                 success_rate=0.0,

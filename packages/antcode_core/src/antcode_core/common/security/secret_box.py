@@ -8,27 +8,24 @@ T7-P2-5: 支持密钥轮换 (MultiFernet)
   重启服务 → 老密文由 legacy 解密解开，写回时用新 key 重加密（Fernet 自
   带 rotate）→ 一段时间后把 legacy 清空。
 
-老部署（无 legacy 配置）行为不变；MultiFernet 单密钥退化为普通 Fernet。
+旧 SHA256 派生只在显式迁移开关开启时加入 keyring，迁移完成后必须关闭。
 
 P2-17: KDF 加固
 ---------------
 旧派生 ``base64(sha256(key))`` 无盐单轮,低熵 ``ENCRYPTION_KEY`` (常见运维随机
 串)可被离线爆破。加固为:
 - 优先识别 **Fernet 原生 key**(44 字节 urlsafe-base64 编码后是 32 字节): 直接使用。
-- 否则走 **PBKDF2-HMAC-SHA256, 100k 迭代**,盐取自 ``ENCRYPTION_KEY_SALT``
-  env(默认 ``antcode-fernet-v1``)。相同 salt+key 派生结果稳定,可复现。
+- 否则走 **PBKDF2-HMAC-SHA256, 100k 迭代**，并强制要求显式、每部署唯一的
+  ``ENCRYPTION_KEY_SALT``（至少 16 字节），不再使用全局固定盐。
 
-向后兼容(dual-decrypt):MultiFernet 的密钥列表同时包含
-``[PBKDF2(primary), SHA256(primary), PBKDF2(legacy_i)..., SHA256(legacy_i)...]``。
-第一个 key(PBKDF2 派生)是 encrypt/rotate 的写入版本;后续 key 只用于 decrypt,
-让旧 SHA256 密文可以继续解开,rotate 后自然升级到 PBKDF2 版本。
+向后兼容由 ``ENCRYPTION_ALLOW_LEGACY_SHA256`` 显式控制。开启时旧 SHA256 key
+只用于 decrypt；执行 rotate 后关闭开关，避免弱派生 key 永久驻留 keyring。
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import os
 
 from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import hashes
@@ -36,10 +33,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from antcode_core.common.config import settings
 
-# P2-17: 默认盐固定,让相同 ENCRYPTION_KEY 派生稳定;运维可通过
-# ENCRYPTION_KEY_SALT 覆盖(改 salt 需要重加密,类同轮换)。
-_DEFAULT_KDF_SALT = "antcode-fernet-v1"
 _PBKDF2_ITERATIONS = 100_000
+_MIN_SALT_BYTES = 16
 
 
 class SecretBox:
@@ -48,7 +43,7 @@ class SecretBox:
     def __init__(self) -> None:
         self._cached: MultiFernet | None = None
         # 缓存 key 也要包含 salt 变化,避免 env 改 salt 后仍返回旧实例
-        self._cache_key: tuple[str, str, str] | None = None
+        self._cache_key: tuple[str, str, str, str, bool] | None = None
 
     def encrypt(self, plaintext: str) -> str:
         return self._multi().encrypt(plaintext.encode("utf-8")).decode("utf-8")
@@ -75,6 +70,10 @@ class SecretBox:
                 return key_material.encode("utf-8")
         except Exception:
             pass
+        if len(key_material.encode("utf-8")) < 32:
+            raise RuntimeError("ENCRYPTION_KEY 必须至少包含 32 字节高熵材料")
+        if len(salt.encode("utf-8")) < _MIN_SALT_BYTES:
+            raise RuntimeError("ENCRYPTION_KEY_SALT 必须显式配置且至少包含 16 字节")
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
@@ -91,21 +90,22 @@ class SecretBox:
     def _multi(self) -> MultiFernet:
         primary = (settings.ENCRYPTION_KEY or "").strip()
         legacy = (getattr(settings, "ENCRYPTION_KEYS_LEGACY", "") or "").strip()
-        salt = (os.getenv("ENCRYPTION_KEY_SALT") or _DEFAULT_KDF_SALT).strip() or _DEFAULT_KDF_SALT
+        salt = (getattr(settings, "ENCRYPTION_KEY_SALT", "") or "").strip()
+        legacy_kdf_salt = (getattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "") or "").strip()
+        allow_legacy_sha256 = bool(getattr(settings, "ENCRYPTION_ALLOW_LEGACY_SHA256", False))
         # 缓存命中（primary/legacy/salt 三者未变）
-        cache_key = (primary, legacy, salt)
+        cache_key = (primary, legacy, salt, legacy_kdf_salt, allow_legacy_sha256)
         if self._cached is not None and self._cache_key == cache_key:
             return self._cached
 
         if not primary:
-            raise RuntimeError("ENCRYPTION_KEY 未配置。请在 .env 中设置 ENCRYPTION_KEY（任意随机字符串）")
+            raise RuntimeError("ENCRYPTION_KEY 未配置。请设置至少 32 字节的高熵密钥")
 
-        # dual-decrypt:第一个 key 是加固后的 PBKDF2 派生(encrypt/rotate 会写入这个);
-        # 其后保留同一 primary 的旧 SHA256 派生,让升级前的密文能继续解开。
-        fernets: list[Fernet] = [
-            Fernet(self._derive_fernet_key(primary, salt)),
-            Fernet(self._derive_legacy_sha256_key(primary)),
-        ]
+        fernets: list[Fernet] = [Fernet(self._derive_fernet_key(primary, salt))]
+        if legacy_kdf_salt and legacy_kdf_salt != salt:
+            fernets.append(Fernet(self._derive_fernet_key(primary, legacy_kdf_salt)))
+        if allow_legacy_sha256:
+            fernets.append(Fernet(self._derive_legacy_sha256_key(primary)))
         if legacy:
             seen: set[str] = {primary}
             for k in legacy.split(","):
@@ -113,9 +113,11 @@ class SecretBox:
                 if not k or k in seen:
                     continue
                 seen.add(k)
-                # legacy 也同时挂 PBKDF2 + 旧 SHA256 版本,兼容"轮换前后各时期"的密文
                 fernets.append(Fernet(self._derive_fernet_key(k, salt)))
-                fernets.append(Fernet(self._derive_legacy_sha256_key(k)))
+                if legacy_kdf_salt and legacy_kdf_salt != salt:
+                    fernets.append(Fernet(self._derive_fernet_key(k, legacy_kdf_salt)))
+                if allow_legacy_sha256:
+                    fernets.append(Fernet(self._derive_legacy_sha256_key(k)))
         self._cached = MultiFernet(fernets)
         self._cache_key = cache_key
         return self._cached

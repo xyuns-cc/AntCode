@@ -20,7 +20,7 @@ from antcode_core.domain.schemas.alert import (
     EmailConfig,
     WebhookConfig,
 )
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 
 from antcode_web_api.deps import require_role
@@ -29,6 +29,40 @@ from antcode_web_api.response import BaseResponse, success
 _REQUIRE_ADMIN = require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 
 router = APIRouter()
+_SECRET_MASK = "***REDACTED***"
+_JSON_CONFIG_DEFAULTS: dict[str, object] = {
+    "feishu_webhooks": [],
+    "dingtalk_webhooks": [],
+    "wecom_webhooks": [],
+    "email_config": {},
+}
+_BOOLEAN_CONFIG_KEYS = {"rate_limit_enabled", "retry_enabled"}
+_INTEGER_CONFIG_KEYS = {"rate_limit_window", "rate_limit_max_count", "max_retries"}
+
+
+def _mask_webhooks(webhooks: list[dict]) -> list[dict]:
+    return [{**item, "url": _SECRET_MASK if item.get("url") else ""} for item in webhooks]
+
+
+def _merge_webhooks(incoming: list[WebhookConfig], existing: list[dict]) -> list[dict]:
+    existing_by_name = {item.get("name"): item for item in existing}
+    merged: list[dict] = []
+    for webhook in incoming:
+        item = webhook.model_dump()
+        if item["url"] == _SECRET_MASK:
+            old_url = existing_by_name.get(item["name"], {}).get("url")
+            if not old_url:
+                raise HTTPException(status_code=422, detail=f"Webhook {item['name']} 缺少 URL")
+            item["url"] = old_url
+        merged.append(item)
+    return merged
+
+
+def _masked_email(config: dict) -> EmailConfig:
+    masked = dict(config)
+    if masked.get("smtp_password"):
+        masked["smtp_password"] = _SECRET_MASK
+    return EmailConfig(**masked) if masked else EmailConfig()
 
 
 async def _get_alert_config() -> dict:
@@ -50,45 +84,41 @@ async def _get_alert_config() -> dict:
     configs = await SystemConfig.filter(category="alert", is_active=True).all()
 
     for cfg in configs:
-        key = cfg.config_key
-        value = cfg.config_value
-
-        if key == "feishu_webhooks":
-            try:
-                config["feishu_webhooks"] = from_json(value) if value else []
-            except Exception:
-                config["feishu_webhooks"] = []
-        elif key == "dingtalk_webhooks":
-            try:
-                config["dingtalk_webhooks"] = from_json(value) if value else []
-            except Exception:
-                config["dingtalk_webhooks"] = []
-        elif key == "wecom_webhooks":
-            try:
-                config["wecom_webhooks"] = from_json(value) if value else []
-            except Exception:
-                config["wecom_webhooks"] = []
-        elif key == "email_config":
-            try:
-                config["email_config"] = from_json(value) if value else {}
-            except Exception:
-                config["email_config"] = {}
-        elif key == "auto_alert_levels":
-            config["auto_alert_levels"] = [level.strip() for level in value.split(",") if level.strip()]
-        elif key == "rate_limit_enabled":
-            config["rate_limit_enabled"] = value.lower() in ("true", "1", "yes")
-        elif key == "rate_limit_window":
-            config["rate_limit_window"] = int(value)
-        elif key == "rate_limit_max_count":
-            config["rate_limit_max_count"] = int(value)
-        elif key == "retry_enabled":
-            config["retry_enabled"] = value.lower() in ("true", "1", "yes")
-        elif key == "max_retries":
-            config["max_retries"] = int(value)
-        elif key == "retry_delay":
-            config["retry_delay"] = float(value)
+        config = _apply_alert_config(config, cfg.config_key, cfg.config_value)
 
     return config
+
+
+def _apply_alert_config(config: dict, key: str, value: str) -> dict:
+    parsed = _parse_alert_config_value(key, value)
+    if parsed is _UNKNOWN_CONFIG:
+        return config
+    return {**config, key: parsed}
+
+
+_UNKNOWN_CONFIG = object()
+
+
+def _parse_alert_config_value(key: str, value: str) -> object:
+    if key in _JSON_CONFIG_DEFAULTS:
+        return _parse_json_config(key, value)
+    if key == "auto_alert_levels":
+        return [level.strip() for level in value.split(",") if level.strip()]
+    if key in _BOOLEAN_CONFIG_KEYS:
+        return value.lower() in ("true", "1", "yes")
+    if key in _INTEGER_CONFIG_KEYS:
+        return int(value)
+    if key == "retry_delay":
+        return float(value)
+    return _UNKNOWN_CONFIG
+
+
+def _parse_json_config(key: str, value: str) -> object:
+    default = _JSON_CONFIG_DEFAULTS[key]
+    try:
+        return from_json(value) if value else default
+    except Exception:
+        return default
 
 
 async def _save_alert_config(key: str, value: str, value_type: str, description: str, username: str):
@@ -126,14 +156,14 @@ async def get_alert_config(_admin: User = Depends(_REQUIRE_ADMIN)):
 
     # 构建邮件配置
     email_config_data = config.get("email_config", {})
-    email_config = EmailConfig(**email_config_data) if email_config_data else EmailConfig()
+    email_config = _masked_email(email_config_data)
 
     return success(
         AlertConfigResponse(
             channels=AlertChannelConfig(
-                feishu_webhooks=[WebhookConfig(**w) for w in config["feishu_webhooks"]],
-                dingtalk_webhooks=[WebhookConfig(**w) for w in config["dingtalk_webhooks"]],
-                wecom_webhooks=[WebhookConfig(**w) for w in config["wecom_webhooks"]],
+                feishu_webhooks=[WebhookConfig(**w) for w in _mask_webhooks(config["feishu_webhooks"])],
+                dingtalk_webhooks=[WebhookConfig(**w) for w in _mask_webhooks(config["dingtalk_webhooks"])],
+                wecom_webhooks=[WebhookConfig(**w) for w in _mask_webhooks(config["wecom_webhooks"])],
                 email_config=email_config,
             ),
             auto_alert_levels=config["auto_alert_levels"],
@@ -165,44 +195,9 @@ async def update_alert_config(
 ):
     """更新告警配置"""
     username = current_user.username
-
-    # 保存渠道配置
+    existing_config = await _get_alert_config()
     if request.channels:
-        if request.channels.feishu_webhooks is not None:
-            webhooks = [w.model_dump() for w in request.channels.feishu_webhooks]
-            await _save_alert_config(
-                "feishu_webhooks",
-                to_json(webhooks),
-                "json",
-                "飞书 Webhook 配置",
-                username,
-            )
-
-        if request.channels.dingtalk_webhooks is not None:
-            webhooks = [w.model_dump() for w in request.channels.dingtalk_webhooks]
-            await _save_alert_config(
-                "dingtalk_webhooks",
-                to_json(webhooks),
-                "json",
-                "钉钉 Webhook 配置",
-                username,
-            )
-
-        if request.channels.wecom_webhooks is not None:
-            webhooks = [w.model_dump() for w in request.channels.wecom_webhooks]
-            await _save_alert_config(
-                "wecom_webhooks",
-                to_json(webhooks),
-                "json",
-                "企业微信 Webhook 配置",
-                username,
-            )
-
-        if request.channels.email_config is not None:
-            email_data = request.channels.email_config.model_dump()
-            await _save_alert_config("email_config", to_json(email_data), "json", "邮件告警配置", username)
-
-    # 保存自动告警级别
+        await _save_channel_config(request.channels, existing_config, username)
     if request.auto_alert_levels is not None:
         await _save_alert_config(
             "auto_alert_levels",
@@ -211,55 +206,54 @@ async def update_alert_config(
             "自动告警级别",
             username,
         )
-
-    # 保存限流配置
     if request.rate_limit:
-        await _save_alert_config(
-            "rate_limit_enabled",
-            str(request.rate_limit.enabled).lower(),
-            "bool",
-            "限流启用",
-            username,
-        )
-        await _save_alert_config(
-            "rate_limit_window",
-            str(request.rate_limit.window),
-            "int",
-            "限流窗口",
-            username,
-        )
-        await _save_alert_config(
-            "rate_limit_max_count",
-            str(request.rate_limit.max_count),
-            "int",
-            "限流次数",
-            username,
-        )
-
-    # 保存重试配置
+        await _save_rate_limit_config(request.rate_limit, username)
     if request.retry:
-        await _save_alert_config(
-            "retry_enabled",
-            str(request.retry.enabled).lower(),
-            "bool",
-            "重试启用",
-            username,
-        )
-        await _save_alert_config(
-            "max_retries",
-            str(request.retry.max_retries),
-            "int",
-            "最大重试次数",
-            username,
-        )
-        await _save_alert_config("retry_delay", str(request.retry.retry_delay), "float", "重试间隔", username)
-
-    # 重新加载配置
+        await _save_retry_config(request.retry, username)
     await alert_service.reload_config()
-
     logger.info(f"告警配置已更新 by {username}")
-
     return success({"updated": True}, message="告警配置已更新")
+
+
+async def _save_channel_config(channels: AlertChannelConfig, existing: dict, username: str) -> None:
+    webhook_configs = (
+        ("feishu_webhooks", channels.feishu_webhooks, "飞书 Webhook 配置"),
+        ("dingtalk_webhooks", channels.dingtalk_webhooks, "钉钉 Webhook 配置"),
+        ("wecom_webhooks", channels.wecom_webhooks, "企业微信 Webhook 配置"),
+    )
+    for key, incoming, description in webhook_configs:
+        if incoming is not None:
+            webhooks = _merge_webhooks(incoming, existing[key])
+            await _save_alert_config(key, to_json(webhooks), "json", description, username)
+    if channels.email_config is not None:
+        await _save_email_config(channels.email_config, existing, username)
+
+
+async def _save_email_config(email: EmailConfig, existing: dict, username: str) -> None:
+    email_data = email.model_dump()
+    if email_data.get("smtp_password") == _SECRET_MASK:
+        email_data["smtp_password"] = existing.get("email_config", {}).get("smtp_password", "")
+    await _save_alert_config("email_config", to_json(email_data), "json", "邮件告警配置", username)
+
+
+async def _save_rate_limit_config(config: AlertRateLimitConfig, username: str) -> None:
+    values = (
+        ("rate_limit_enabled", str(config.enabled).lower(), "bool", "限流启用"),
+        ("rate_limit_window", str(config.window), "int", "限流窗口"),
+        ("rate_limit_max_count", str(config.max_count), "int", "限流次数"),
+    )
+    for key, value, value_type, description in values:
+        await _save_alert_config(key, value, value_type, description, username)
+
+
+async def _save_retry_config(config: AlertRetryConfig, username: str) -> None:
+    values = (
+        ("retry_enabled", str(config.enabled).lower(), "bool", "重试启用"),
+        ("max_retries", str(config.max_retries), "int", "最大重试次数"),
+        ("retry_delay", str(config.retry_delay), "float", "重试间隔"),
+    )
+    for key, value, value_type, description in values:
+        await _save_alert_config(key, value, value_type, description, username)
 
 
 @router.post(

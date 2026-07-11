@@ -4,6 +4,7 @@ import gzip
 from dataclasses import dataclass
 
 from loguru import logger
+from redis.asyncio import Redis
 
 from antcode_core.common.config import settings
 from antcode_core.common.serialization import from_json, to_json
@@ -33,7 +34,7 @@ class UnifiedCache:
     def __init__(self, config: CacheConfig, name: str = "default"):
         self.config = config
         self.name = name
-        self._redis_client = None
+        self._redis_client: Redis | None = None
         self._stats = {"hits": 0, "misses": 0, "sets": 0, "deletes": 0, "errors": 0}
         logger.info(f"Redis 缓存 '{name}' 已初始化: TTL={config.default_ttl}s")
 
