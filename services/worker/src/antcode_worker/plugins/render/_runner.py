@@ -40,9 +40,12 @@ def _load_context(context_file: str | None) -> dict:
 
 
 def _render_jinja2(template_path: str, template_dir: str, context_data: dict) -> str:
-    from jinja2 import Environment, FileSystemLoader  # noqa: PLC0415
+    from jinja2 import Environment, FileSystemLoader, select_autoescape  # noqa: PLC0415
 
-    env = Environment(loader=FileSystemLoader(template_dir))
+    env = Environment(
+        loader=FileSystemLoader(template_dir),
+        autoescape=select_autoescape(("html", "htm", "xml")),
+    )
     template = env.get_template(template_path)
     return template.render(**context_data)
 

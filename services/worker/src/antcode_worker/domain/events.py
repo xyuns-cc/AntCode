@@ -17,6 +17,7 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
+from typing import Any
 
 from loguru import logger
 
@@ -85,7 +86,7 @@ class SignalReceiver:
     callback: object
     priority: int = 0
     weak: bool = False
-    _ref: weakref.ref = field(default=None, repr=False)
+    _ref: weakref.ReferenceType[Any] | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.weak and hasattr(self.callback, "__self__"):

@@ -51,6 +51,7 @@ from antcode_core.infrastructure.redis.locks import (
     fencing_token_manager,
 )
 from antcode_core.infrastructure.redis.rate_limiter import RedisRateLimiter, redis_rate_limiter
+from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
 from antcode_core.infrastructure.redis.streams import StreamClient
 
 __all__ = [
@@ -93,4 +94,5 @@ __all__ = [
     "build_config_update_control_payload",
     "build_runtime_manage_control_payload",
     "decode_stream_payload",
+    "trim_acknowledged_stream",
 ]

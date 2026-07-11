@@ -15,8 +15,13 @@ AntCode Master 主入口
 import asyncio
 import signal
 import sys
+from collections.abc import Awaitable
+from typing import cast
 
 from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
+from antcode_core.application.services.scheduler.outbox_service import (
+    scheduler_outbox_service,
+)
 from antcode_core.common.config import settings
 from antcode_core.common.logging import setup_logging
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
@@ -39,6 +44,7 @@ from antcode_master.ingester.crawl_batch_status_loop import crawl_batch_status_l
 from antcode_master.ingester.log_ingest_loop import log_ingest_loop
 from antcode_master.ingester.result_loop import result_loop
 from antcode_master.leader import leader_election
+from antcode_master.readiness import master_readiness
 
 # P3:LeaseStore + LeaseSweeperLoop 单例持有,便于 stop_master 关闭
 _lease_store: LeaseStore | None = None
@@ -51,10 +57,13 @@ async def _on_worker_evicted(worker_id: str) -> None:
     1. Worker.status → OFFLINE
     2. 该 Worker 上 RUNNING 的 TaskRun 标记为失败(Worker 失联)
     """
-    from datetime import datetime
+    from datetime import UTC, datetime
 
+    from antcode_core.application.services.scheduler.execution_status_service import (
+        execution_status_service,
+    )
     from antcode_core.domain.models import TaskRun, Worker
-    from antcode_core.domain.models.enums import TaskStatus, WorkerStatus
+    from antcode_core.domain.models.enums import RuntimeStatus, TaskStatus, WorkerStatus
 
     try:
         worker = await Worker.filter(public_id=worker_id).first()
@@ -67,17 +76,15 @@ async def _on_worker_evicted(worker_id: str) -> None:
             # 无状态 CAS、naive datetime、只写 status 不写 runtime_status，
             # 与 P1-1/P1-2 同族的"复活"漏洞。改走 execution_status_service
             # 让终态保护 + runtime_status 一起就位。
-            from antcode_core.application.services.scheduler.execution_status_service import (
-                execution_status_service,
+            running = (
+                await TaskRun.filter(
+                    worker_id=worker.id,
+                    status=TaskStatus.RUNNING,
+                )
+                .only("id", "run_id")
+                .all()
             )
-            from antcode_core.domain.models.enums import RuntimeStatus
-            from datetime import UTC as _UTC
-
-            running = await TaskRun.filter(
-                worker_id=worker.id,
-                status=TaskStatus.RUNNING,
-            ).only("id", "run_id").all()
-            now = datetime.now(_UTC)
+            now = datetime.now(UTC)
             failed = 0
             for task in running:
                 ok = await execution_status_service.update_runtime_status(
@@ -89,12 +96,10 @@ async def _on_worker_evicted(worker_id: str) -> None:
                 if ok:
                     failed += 1
             if running:
-                logger.info(
-                    f"Lease 失租 Worker 任务回收: worker_id={worker_id} "
-                    f"marked_failed={failed}/{len(running)}"
-                )
+                logger.info(f"Lease 失租 Worker 任务回收: worker_id={worker_id} marked_failed={failed}/{len(running)}")
     except Exception as exc:
         logger.error(f"on_worker_evicted 回调失败: worker_id={worker_id} exc={exc}")
+
 
 # 可选的 cold Redis client（P5.2）。当前 control 组的 loop 默认仍走 StreamClient
 # 的单例 hot pool；保留这个引用便于未来控制面需要直接拿低频客户端时使用，
@@ -120,6 +125,7 @@ async def _start_control_group() -> None:
     await asyncio.gather(
         scheduler_service.start(),
         scheduler_event_loop.start(),
+        scheduler_outbox_service.start(),
         reconcile_loop.start(),
         retry_service.start(),
         _lease_sweeper.start(),
@@ -158,10 +164,10 @@ async def start_master() -> None:
         await get_redis_client()
         _cold_redis_client = make_cold_client()
         # 简单 ping 验证 cold pool 可用
-        await _cold_redis_client.ping()
+        await cast(Awaitable[bool], _cold_redis_client.ping())
         logger.info("Redis hot/cold 连接池已就绪")
     except Exception as e:
-        logger.warning(f"Redis 连接池预热失败（继续启动）: {e}")
+        raise RuntimeError("Redis 连接池预热失败") from e
 
     # 2. 尝试成为 Leader
     logger.info("[1/6] 尝试成为 Leader")
@@ -215,8 +221,9 @@ async def start_master() -> None:
     )
     for group_name, result in zip(("control", "ingester"), results):
         if isinstance(result, Exception):
-            logger.error(f"{group_name} 组启动失败: {result}")
+            raise RuntimeError(f"{group_name} 组启动失败") from result
 
+    await master_readiness.start()
     logger.info("Master 服务已启动")
 
 
@@ -226,6 +233,7 @@ async def _stop_control_group() -> None:
     coros = [
         reconcile_loop.stop(),
         scheduler_event_loop.stop(),
+        scheduler_outbox_service.stop(),
         scheduler_service.shutdown(),
         retry_service.stop(),
         redispatch_loop.stop(),
@@ -253,6 +261,7 @@ async def stop_master() -> None:
     global _cold_redis_client
 
     logger.info("正在停止 Master 服务...")
+    await master_readiness.stop()
 
     # 1. 并行停止两组 loop
     results = await asyncio.gather(
@@ -313,8 +322,10 @@ async def main() -> None:
     # 会触发 stop_master() drain(停 loop + step_down leader + 关连接池)。
     # Windows 上 asyncio 不支持 add_signal_handler，改用 signal.signal。
     if sys.platform == "win32":
+
         def _win_handler(signum, frame):  # noqa: ARG001
             loop.call_soon_threadsafe(signal_handler)
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, _win_handler)
     else:

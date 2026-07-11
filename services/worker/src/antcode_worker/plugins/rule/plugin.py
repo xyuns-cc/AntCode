@@ -49,18 +49,14 @@ class RulePlugin(PluginBase):
             errors.append("规则任务缺少 extraction_rules")
         return errors
 
-    async def build_plan(
-        self, context: RunContext, payload: TaskPayload
-    ) -> ExecPlan:
+    async def build_plan(self, context: RunContext, payload: TaskPayload) -> ExecPlan:
         python_exe = self._get_python_executable(context)
         rule = self._extract_rule(payload)
 
         # 把 rule JSON 写到 run 目录下的临时文件（extraction_rules 可能很大）
         rule_dir = self._resolve_rule_dir(context, payload)
         os.makedirs(rule_dir, exist_ok=True)
-        fd, rule_path = tempfile.mkstemp(
-            prefix=f"rule-{context.run_id[:12]}-", suffix=".json", dir=rule_dir
-        )
+        fd, rule_path = tempfile.mkstemp(prefix=f"rule-{context.run_id[:12]}-", suffix=".json", dir=rule_dir)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(rule, f, ensure_ascii=False)
@@ -134,10 +130,7 @@ class RulePlugin(PluginBase):
                 env["ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"] = token
         else:
             # direct 模式：Redis URL 走原路径
-            redis_url = (
-                getattr(wcfg, "redis_url", "")
-                or os.environ.get("WORKER_REDIS_URL", "")
-            )
+            redis_url = getattr(wcfg, "redis_url", "") or os.environ.get("WORKER_REDIS_URL", "")
             if not redis_url:
                 raise RuntimeError(
                     "规则爬虫 direct 模式需要 Redis 上报通道，但 worker 未配置 "
@@ -146,10 +139,7 @@ class RulePlugin(PluginBase):
             env["ANTCODE_SPIDER_SINK_MODE"] = "redis"
             env["ANTCODE_SPIDER_REDIS_URL"] = redis_url
 
-        namespace = (
-            getattr(wcfg, "redis_namespace", "")
-            or os.environ.get("WORKER_REDIS_NAMESPACE", "")
-        )
+        namespace = getattr(wcfg, "redis_namespace", "") or os.environ.get("WORKER_REDIS_NAMESPACE", "")
         if namespace:
             env["ANTCODE_SPIDER_REDIS_NAMESPACE"] = namespace
         # 传 worker_id 让子进程 gateway sink 上报时能带上
@@ -180,9 +170,7 @@ class RulePlugin(PluginBase):
             return dict(kwargs)
         for key in ("rule", "rule_detail", "dispatch"):
             candidate = kwargs.get(key)
-            if isinstance(candidate, dict) and (
-                "target_url" in candidate or "extraction_rules" in candidate
-            ):
+            if isinstance(candidate, dict) and ("target_url" in candidate or "extraction_rules" in candidate):
                 return dict(candidate)
         # 什么都没有：交给 validate 报错
         return dict(kwargs)
@@ -198,6 +186,7 @@ class RulePlugin(PluginBase):
         用户 venv 只服务 code/file 项目。
         """
         import sys
+
         return sys.executable
 
     def _resolve_rule_dir(self, context: RunContext, payload: TaskPayload) -> str:
@@ -206,6 +195,4 @@ class RulePlugin(PluginBase):
         if base:
             return os.path.join(base, ".antcode-rule")
         # 没有 workspace 时（rule 项目通常没有代码）用 /tmp 分片目录
-        return os.path.join(
-            tempfile.gettempdir(), "antcode-rule", context.run_id or "unknown"
-        )
+        return os.path.join(tempfile.gettempdir(), "antcode-rule", context.run_id or "unknown")

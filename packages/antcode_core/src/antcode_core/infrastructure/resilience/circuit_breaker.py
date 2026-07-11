@@ -21,14 +21,14 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any
 
 from loguru import logger
 
 
-class CircuitState(str, Enum):
+class CircuitState(StrEnum):
     """熔断器状态"""
 
     CLOSED = "closed"  # 正常，请求通过
@@ -226,6 +226,7 @@ class CircuitBreaker:
             self._stats.consecutive_successes += 1
 
             if self._state == CircuitState.HALF_OPEN:
+                self._half_open_calls = max(0, self._half_open_calls - 1)
                 if self._stats.consecutive_successes >= self.config.success_threshold:
                     await self._transition_to(CircuitState.CLOSED)
 
@@ -237,6 +238,8 @@ class CircuitBreaker:
             self._stats.last_failure_time = time.time()
             self._stats.consecutive_successes = 0
 
+            if self._state == CircuitState.HALF_OPEN:
+                self._half_open_calls = max(0, self._half_open_calls - 1)
             if not self._should_trip(exception):
                 return
 
@@ -338,9 +341,6 @@ class CircuitBreaker:
         }
 
 
-T = TypeVar("T")
-
-
 def circuit_breaker(
     name: str,
     failure_threshold: int = 5,
@@ -348,7 +348,7 @@ def circuit_breaker(
     timeout: float = 30.0,
     exception_types: set[type] | None = None,
     excluded_exceptions: set[type] | None = None,
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
     熔断器装饰器
 
@@ -380,13 +380,13 @@ def circuit_breaker(
     if cb is None:
         cb = CircuitBreaker(name, config)
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             return await cb.call(func, *args, **kwargs)
 
         @wraps(func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> T:
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             return asyncio.get_event_loop().run_until_complete(cb.call(func, *args, **kwargs))
 
         if asyncio.iscoroutinefunction(func):

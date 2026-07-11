@@ -6,11 +6,11 @@ Requirements: 12.2
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class HealthStatus(str, Enum):
+class HealthStatus(StrEnum):
     """健康状态"""
 
     HEALTHY = "healthy"

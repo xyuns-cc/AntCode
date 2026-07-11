@@ -17,7 +17,7 @@ env 变量：
 from __future__ import annotations
 
 import os
-from typing import Any, Protocol
+from typing import Protocol
 
 
 class SpiderDataSink(Protocol):
@@ -41,11 +41,11 @@ class SpiderDataSink(Protocol):
         url: str,
         timestamp: str,
         sequence: int,
-    ) -> bool: ...
+    ) -> bool | tuple[bool, int]: ...
 
     async def write_meta(self, fields: dict[str, str]) -> None: ...
 
-    async def close(self, final_meta: dict[str, str] | None = None) -> None: ...
+    async def close(self, final_meta: dict[str, str] | None = None) -> None | tuple[bool, int]: ...
 
 
 def create_sink() -> SpiderDataSink | None:

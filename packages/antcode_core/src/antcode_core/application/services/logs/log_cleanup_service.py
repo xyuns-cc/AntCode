@@ -22,6 +22,7 @@ class CleanupResult:
     postgres_rows_deleted: int = 0
     audit_rows_deleted: int = 0
     worker_event_rows_deleted: int = 0
+    user_session_rows_deleted: int = 0
     redis_streams_checked: int = 0
     redis_streams_trimmed: int = 0
     redis_streams_expired: int = 0
@@ -38,9 +39,11 @@ class LogCleanupService:
         self._retention_days = getattr(settings, "TASK_LOG_RETENTION_DAYS", 30)
         # T7-B2a: audit_logs / worker_events 保留期
         self._audit_retention_days = getattr(settings, "AUDIT_LOG_RETENTION_DAYS", 90)
-        self._worker_event_retention_days = getattr(
-            settings, "WORKER_EVENT_RETENTION_DAYS", 30
-        )
+        self._worker_event_retention_days = getattr(settings, "WORKER_EVENT_RETENTION_DAYS", 30)
+        # P1-09: user_sessions 里 expires_at 已过期的行对认证毫无作用
+        # (verify_refresh_token 先做 JWT exp 校验就会拒绝), 只在这里保留
+        # 一段时间供登录设备审计, 之后批式清掉, 防止表无限增长。
+        self._session_retention_days = getattr(settings, "USER_SESSION_RETENTION_DAYS", 30)
         self._batch_limit = getattr(settings, "LOG_CLEANUP_BATCH_LIMIT", 5000)
         self._redis_namespace = settings.REDIS_NAMESPACE
         self._log_stream_maxlen = settings.LOG_STREAM_MAXLEN
@@ -90,13 +93,22 @@ class LogCleanupService:
             time_column="created_at",
             retention_days=self._worker_event_retention_days,
         )
+        # P1-09: 清理过期超过保留期的 refresh session 行 (expires_at 有索引)。
+        # 只删 "expires_at < now - retention" 的行, 未过期的 revoked 行保留,
+        # 不影响 verify_refresh_token / revoke_all_sessions 语义。
+        result.user_session_rows_deleted = await self._cleanup_table(
+            table="user_sessions",
+            time_column="expires_at",
+            retention_days=self._session_retention_days,
+        )
         await self._cleanup_redis_streams(result)
         logger.info(
-            "日志清理完成: pg_task_logs={}, audit_logs={}, worker_events={}, "
+            "日志清理完成: pg_task_logs={}, audit_logs={}, worker_events={}, user_sessions={}, "
             "redis_checked={}, trimmed={}, expired={}",
             result.postgres_rows_deleted,
             result.audit_rows_deleted,
             result.worker_event_rows_deleted,
+            result.user_session_rows_deleted,
             result.redis_streams_checked,
             result.redis_streams_trimmed,
             result.redis_streams_expired,
@@ -132,10 +144,10 @@ class LogCleanupService:
         while True:
             query = (
                 f'DELETE FROM "{table}" '
-                f'WHERE id IN ('
+                f"WHERE id IN ("
                 f'  SELECT id FROM "{table}" WHERE "{time_column}" < $1 '
-                f'  ORDER BY id LIMIT {int(self._batch_limit)}'
-                f')'
+                f"  ORDER BY id LIMIT {int(self._batch_limit)}"
+                f")"
             )
             deleted, _rows = await conn.execute_query(query, [cutoff])
             n = int(deleted or 0)

@@ -13,6 +13,9 @@ from antcode_core.common.security.auth import (
     TokenData,
     get_current_user,
     jwt_auth,
+    record_refresh_session,
+    revoke_refresh_session,
+    rotate_refresh_session,
     verify_refresh_token,
 )
 from antcode_core.common.security.login_crypto import (
@@ -53,6 +56,12 @@ class RefreshTokenRequest(BaseModel):
 class ProbeStatusResponse(BaseModel):
     status: str
     timestamp: str
+
+
+def _session_device_info(request: Request, client_ip: str | None = None) -> str:
+    user_agent = request.headers.get("user-agent", "unknown")
+    resolved_ip = client_ip or get_client_ip(request)
+    return f"{user_agent}|{resolved_ip}"[:256]
 
 
 @router.get(
@@ -306,13 +315,23 @@ async def login(request: UserLoginRequest, http_request: Request):
 
     await user_service.clear_cache()
 
+    refresh_token, session_jti, expires_at = jwt_auth.create_refresh_token(
+        user_id=user.id,
+        username=user.username,
+    )
+    await record_refresh_session(
+        user_id=user.id,
+        jti=session_jti,
+        expires_at=expires_at,
+        device_info=_session_device_info(http_request, ip_address),
+    )
     access_token = jwt_auth.create_access_token(
         user_id=user.id,
         username=user.username,
         is_admin=user.is_admin,
         role=user.role.value,
+        session_jti=session_jti,
     )
-    refresh_token = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
 
     user_payload = UserResponse(
         id=user.public_id,
@@ -354,10 +373,10 @@ async def get_login_public_key():
     summary="刷新令牌",
     tags=["认证"],
 )
-async def refresh_token(request: RefreshTokenRequest):
+async def refresh_token(request: RefreshTokenRequest, http_request: Request):
     """使用刷新令牌获取新的访问令牌"""
     try:
-        token_data = verify_refresh_token(request.refresh_token)
+        token_data = await verify_refresh_token(request.refresh_token)
     except HTTPException:
         raise
     except Exception as exc:
@@ -367,13 +386,24 @@ async def refresh_token(request: RefreshTokenRequest):
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户不可用")
 
+    refresh_token_value, new_jti, expires_at = jwt_auth.create_refresh_token(
+        user_id=user.id,
+        username=user.username,
+    )
+    await rotate_refresh_session(
+        user_id=user.id,
+        previous_jti=token_data.session_jti or "",
+        new_jti=new_jti,
+        expires_at=expires_at,
+        device_info=_session_device_info(http_request),
+    )
     access_token = jwt_auth.create_access_token(
         user_id=user.id,
         username=user.username,
         is_admin=user.is_admin,
         role=user.role.value,
+        session_jti=new_jti,
     )
-    refresh_token_value = jwt_auth.create_refresh_token(user_id=user.id, username=user.username)
 
     user_payload = UserResponse(
         id=user.public_id,
@@ -394,6 +424,21 @@ async def refresh_token(request: RefreshTokenRequest):
         user=user_payload,
     )
     return success(payload, message=Messages.OPERATION_SUCCESS)
+
+
+@router.post(
+    "/auth/logout",
+    response_model=BaseResponse[None],
+    summary="用户登出",
+    tags=["认证"],
+)
+async def logout(current_user: TokenData = Depends(get_current_user)):
+    """撤销当前 access token 绑定的服务端会话。"""
+    await revoke_refresh_session(
+        user_id=current_user.user_id,
+        jti=current_user.session_jti or "",
+    )
+    return success(None, message="已退出登录")
 
 
 @router.get(

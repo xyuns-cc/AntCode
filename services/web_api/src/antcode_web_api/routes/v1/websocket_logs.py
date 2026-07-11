@@ -4,7 +4,6 @@ import contextlib
 import secrets
 from typing import Any
 
-from antcode_core.common.config import settings
 from antcode_core.common.security.auth import TokenData, get_current_user, jwt_auth
 from antcode_core.domain.models import User
 from antcode_core.domain.schemas.common import BaseResponse
@@ -34,11 +33,6 @@ async def issue_ws_ticket(current_user: TokenData = Depends(get_current_user)):
     T2: WebSocket 连接不再直接传 JWT。前端用此票据在 60s 内换取 WS 接入；
     一次性消耗，避免 token 出现在 URL/access log 中泄露。
     """
-    if not settings.REDIS_ENABLED:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="WebSocket 票据签发依赖 Redis，请检查后端配置",
-        )
     from antcode_core.infrastructure.redis import get_redis_client
 
     ticket = secrets.token_urlsafe(32)
@@ -63,17 +57,9 @@ async def issue_ws_ticket(current_user: TokenData = Depends(get_current_user)):
     )
 
 
-async def _resolve_ws_token(ticket: str | None, token: str | None) -> str:
-    """从 ticket 或 token 解析 JWT；ticket 优先并一次性消耗。
-
-    向后兼容旧的 `?token=<JWT>` 方式（标记为 deprecated，由前端尽快迁移）。
-    """
+async def _resolve_ws_token(ticket: str | None) -> str:
+    """原子消费一次性 ticket，并生成短时连接令牌。"""
     if ticket:
-        if not settings.REDIS_ENABLED:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="票据校验依赖 Redis",
-            )
         from antcode_core.infrastructure.redis import get_redis_client
 
         redis = await get_redis_client()
@@ -94,23 +80,19 @@ async def _resolve_ws_token(ticket: str | None, token: str | None) -> str:
             is_admin=bool(getattr(user, "is_admin", False)),
             role=getattr(user, "role", "user") or "user",
         )
-    if token:
-        logger.warning("WebSocket 使用 token query 参数（deprecated），请改用 /ws-ticket 流程")
-        return token
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 ticket 或 token")
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少一次性 ticket")
 
 
 @router.websocket("/runs/{run_id}/logs")
 async def websocket_logs_endpoint(
     websocket: WebSocket,
     run_id: str,
-    ticket: str | None = Query(None, description="一次性票据，优先使用"),
-    token: str | None = Query(None, description="（deprecated）JWT，兼容旧前端"),
+    ticket: str | None = Query(None, description="一次性票据"),
 ):
     logger.info(f"WebSocket 连接请求: run_id={run_id}")
 
     try:
-        resolved_token = await _resolve_ws_token(ticket, token)
+        resolved_token = await _resolve_ws_token(ticket)
     except HTTPException as exc:
         with contextlib.suppress(Exception):
             await websocket.accept()

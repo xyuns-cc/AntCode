@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from enum import Enum
+from typing import Any
 
 from antcode_core.domain.schemas.common import ErrorResponse
 from fastapi.routing import APIRoute
@@ -30,7 +32,7 @@ API_TAGS = [
     {"name": "分布式爬取", "description": "分布式爬取任务与节点管理接口"},
 ]
 
-DEFAULT_ERROR_RESPONSES = {
+DEFAULT_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse, "description": "请求参数错误"},
     401: {"model": ErrorResponse, "description": "未认证或令牌无效"},
     403: {"model": ErrorResponse, "description": "权限不足"},
@@ -43,8 +45,9 @@ DEFAULT_ERROR_RESPONSES = {
 }
 
 
-def _sanitize_segment(value: str) -> str:
-    normalized = value.strip().lower().replace("-", "_")
+def _sanitize_segment(value: str | Enum) -> str:
+    raw_value = value.value if isinstance(value, Enum) else value
+    normalized = str(raw_value).strip().lower().replace("-", "_")
     normalized = re.sub(r"\{([^}]+)\}", r"by_\1", normalized)
     normalized = re.sub(r"[^a-z0-9_]+", "_", normalized)
     return normalized.strip("_")

@@ -25,8 +25,10 @@ from typing import TYPE_CHECKING
 import grpc
 from antcode_contracts import data_pb2
 from antcode_contracts.data_pb2_grpc import DataServiceServicer
+from antcode_core.infrastructure.redis import task_ready_stream
 from loguru import logger
 
+from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import (
     LogHandler,
     ResultHandler,
@@ -69,15 +71,13 @@ class GatewayDataService(DataServiceServicer):
         request: data_pb2.SubscribeRequest,
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[data_pb2.TaskDispatch]:
-        worker_id = request.worker_id
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         if not worker_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空")
             return
 
         prefetch = request.prefetch if request.prefetch > 0 else 1
-        logger.info(
-            f"StreamTasks 建立: worker_id={worker_id} prefetch={prefetch}"
-        )
+        logger.info(f"StreamTasks 建立: worker_id={worker_id} prefetch={prefetch}")
 
         try:
             while True:
@@ -118,6 +118,7 @@ class GatewayDataService(DataServiceServicer):
         request: data_pb2.AckTaskRequest,
         context: grpc.aio.ServicerContext,
     ) -> data_pb2.AckTaskResponse:
+        worker_id = await require_authenticated_worker(context, request.worker_id)
         receipt_id = request.receipt_id or ""
         # P2-#19: 协议违规走 gRPC error, 业务失败保留 response 字段
         if not receipt_id:
@@ -126,6 +127,16 @@ class GatewayDataService(DataServiceServicer):
                 "receipt_id 缺失",
             )
             return data_pb2.AckTaskResponse(success=False, error="receipt_id 缺失")
+        receipt_stream = receipt_id.split("|", 1)[0]
+        if receipt_stream != task_ready_stream(worker_id):
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "receipt stream does not belong to authenticated worker",
+            )
+            return data_pb2.AckTaskResponse(
+                success=False,
+                error="receipt stream ownership mismatch",
+            )
         try:
             success = await self._poll.ack_receipt(
                 receipt_id=receipt_id,
@@ -157,12 +168,11 @@ class GatewayDataService(DataServiceServicer):
         failed = 0
         try:
             async for task_status in request_iterator:
+                await require_authenticated_worker(context, task_status.worker_id)
                 try:
                     ok = await self._result.handle(task_status)
                 except Exception as exc:
-                    logger.exception(
-                        f"StreamStatus.handle 异常: run_id={task_status.run_id} exc={exc}"
-                    )
+                    logger.exception(f"StreamStatus.handle 异常: run_id={task_status.run_id} exc={exc}")
                     failed += 1
                     await context.abort(
                         grpc.StatusCode.UNAVAILABLE,
@@ -173,9 +183,7 @@ class GatewayDataService(DataServiceServicer):
                     received += 1
                 else:
                     failed += 1
-                    logger.warning(
-                        f"StreamStatus 落 stream 失败: run_id={task_status.run_id}"
-                    )
+                    logger.warning(f"StreamStatus 落 stream 失败: run_id={task_status.run_id}")
                     # ack 写入失败 -> 让 worker 重试。
                     await context.abort(
                         grpc.StatusCode.UNAVAILABLE,
@@ -183,9 +191,7 @@ class GatewayDataService(DataServiceServicer):
                     )
                     return data_pb2.StatusAck(received=received)
         except asyncio.CancelledError:
-            logger.info(
-                f"StreamStatus 被取消，已 received={received} failed={failed}"
-            )
+            logger.info(f"StreamStatus 被取消，已 received={received} failed={failed}")
             raise
         except grpc.aio.AbortError:
             raise
@@ -209,12 +215,11 @@ class GatewayDataService(DataServiceServicer):
         failed = 0
         try:
             async for batch in request_iterator:
+                await require_authenticated_worker(context, batch.worker_id)
                 try:
                     ok = await self._logs.handle_log_batch(batch)
                 except Exception as exc:
-                    logger.exception(
-                        f"StreamLogs.handle_log_batch 异常: worker_id={batch.worker_id} exc={exc}"
-                    )
+                    logger.exception(f"StreamLogs.handle_log_batch 异常: worker_id={batch.worker_id} exc={exc}")
                     failed += 1
                     await context.abort(
                         grpc.StatusCode.UNAVAILABLE,
@@ -225,18 +230,14 @@ class GatewayDataService(DataServiceServicer):
                     received += len(batch.entries)
                 else:
                     failed += 1
-                    logger.warning(
-                        f"StreamLogs 写 Stream 失败: worker_id={batch.worker_id}"
-                    )
+                    logger.warning(f"StreamLogs 写 Stream 失败: worker_id={batch.worker_id}")
                     await context.abort(
                         grpc.StatusCode.UNAVAILABLE,
                         "log stream write failed",
                     )
                     return data_pb2.LogAck(received=received)
         except asyncio.CancelledError:
-            logger.info(
-                f"StreamLogs 被取消，已 received={received} failed={failed}"
-            )
+            logger.info(f"StreamLogs 被取消，已 received={received} failed={failed}")
             raise
         except grpc.aio.AbortError:
             raise
@@ -263,6 +264,7 @@ class GatewayDataService(DataServiceServicer):
         total_failed = 0
         try:
             async for batch in request_iterator:
+                await require_authenticated_worker(context, batch.worker_id)
                 try:
                     accepted, failed = await self._spider_data.handle_batch(batch)
                 except Exception as exc:
@@ -274,22 +276,15 @@ class GatewayDataService(DataServiceServicer):
                         grpc.StatusCode.UNAVAILABLE,
                         f"spider data write failed: {exc}",
                     )
-                    return data_pb2.SpiderDataAck(
-                        accepted=total_accepted, failed=total_failed
-                    )
+                    return data_pb2.SpiderDataAck(accepted=total_accepted, failed=total_failed)
                 total_accepted += accepted
                 total_failed += failed
         except asyncio.CancelledError:
-            logger.info(
-                f"StreamSpiderData 被取消: accepted={total_accepted} "
-                f"failed={total_failed}"
-            )
+            logger.info(f"StreamSpiderData 被取消: accepted={total_accepted} failed={total_failed}")
             raise
         except grpc.aio.AbortError:
             raise
         except Exception as exc:
             logger.exception(f"StreamSpiderData 异常: {exc}")
             await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
-        return data_pb2.SpiderDataAck(
-            accepted=total_accepted, failed=total_failed
-        )
+        return data_pb2.SpiderDataAck(accepted=total_accepted, failed=total_failed)

@@ -55,7 +55,7 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const BatchListPage: React.FC = () => {
-  const { message, modal } = App.useApp()
+  const { message } = App.useApp()
   const [items, setItems] = useState<CrawlBatchSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [total, setTotal] = useState(0)
@@ -106,7 +106,7 @@ const BatchListPage: React.FC = () => {
     try {
       const res = await crawlService.getBatchItems(batch.id, 100)
       setItemsModal({ open: true, batch, items: res.items || [] })
-    } catch (e) {
+    } catch (_e) {
       message.error('加载抓取数据失败')
     }
   }

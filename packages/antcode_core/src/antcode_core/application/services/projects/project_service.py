@@ -164,9 +164,7 @@ class ProjectService:
             repository_id=repository.id,
             ref=getattr(request, "ref", None) or repository.default_ref,
             subdir=request.subdir,
-            entry_point=getattr(request, "entry_point", None) or getattr(request, "code_entry_point", None),
             include_paths=getattr(request, "include_paths", None) or [],
-            runtime_config=getattr(request, "runtime_config", None),
         )
         return repository, source
 

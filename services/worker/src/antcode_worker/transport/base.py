@@ -13,20 +13,20 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from antcode_worker.domain.models import SourceBundle
 
 
-class TransportMode(str, Enum):
+class TransportMode(StrEnum):
     """传输模式枚举"""
 
     DIRECT = "direct"  # 内网直连 Redis Streams
     GATEWAY = "gateway"  # 公网通过 Gateway gRPC
 
 
-class WorkerState(str, Enum):
+class WorkerState(StrEnum):
     """Worker 状态枚举"""
 
     WAITING = "waiting"  # 等待连接
@@ -37,7 +37,7 @@ class WorkerState(str, Enum):
     OFFLINE = "offline"  # 离线
 
 
-class ControlType(str, Enum):
+class ControlType(StrEnum):
     """控制消息类型"""
 
     CANCEL = "cancel"
@@ -101,7 +101,7 @@ class TaskMessage:
             f"timeout={self.timeout}, source_bundle={self.source_bundle!r}, "
             f"source_subdir={self.source_subdir!r}, entry_point={self.entry_point!r}, "
             f"run_id={self.run_id!r}, created_at={self.created_at!r}, "
-            f"receipt={'***' if self.receipt else None})"
+            f"receipt={'***REDACTED***' if self.receipt else None})"
         )
 
     __str__ = __repr__

@@ -65,8 +65,7 @@ class ReconcileLoop:
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         logger.info(
-            f"协调循环已启动: check_interval={self.check_interval}s, "
-      f"timeout_threshold={self.timeout_threshold}s"
+            f"协调循环已启动: check_interval={self.check_interval}s, timeout_threshold={self.timeout_threshold}s"
         )
 
     async def stop(self):
@@ -155,10 +154,18 @@ class ReconcileLoop:
 
             now = datetime.now(UTC)
             # 拉活跃 RUNNING 记录：per-run 判定
-            candidates = await TaskRun.filter(status=TaskStatus.RUNNING).only(
-                "id", "run_id", "start_time", "last_heartbeat", "created_at",
-                "task_id",
-            ).all()
+            candidates = (
+                await TaskRun.filter(status=TaskStatus.RUNNING)
+                .only(
+                    "id",
+                    "run_id",
+                    "start_time",
+                    "last_heartbeat",
+                    "created_at",
+                    "task_id",
+                )
+                .all()
+            )
 
             if not candidates:
                 return
@@ -168,6 +175,7 @@ class ReconcileLoop:
             task_ids = [c.task_id for c in candidates if c.task_id]
             if task_ids:
                 from antcode_core.domain.models import Task
+
                 for t in await Task.filter(id__in=task_ids).only("id", "timeout_seconds").all():
                     timeout_map[t.id] = int(getattr(t, "timeout_seconds", 0) or 0)
 
@@ -192,7 +200,7 @@ class ReconcileLoop:
                     run_id=run.run_id,
                     status=RuntimeStatus.TIMEOUT,
                     status_at=now,
-                    error_message=f"任务执行超时（超过 per-run timeout）",
+                    error_message="任务执行超时（超过 per-run timeout）",
                 )
                 if ok:
                     marked += 1
@@ -232,13 +240,14 @@ class ReconcileLoop:
             # 还没进入 RUNNING (NULL / QUEUED / PENDING 都算未 ACK),且超阈值。
             candidates = (
                 await TaskRun.filter(
-                    Q(dispatch_status__in=[
-                        DispatchStatus.DISPATCHING,
-                        DispatchStatus.DISPATCHED,
-                    ]),
+                    Q(
+                        dispatch_status__in=[
+                            DispatchStatus.DISPATCHING,
+                            DispatchStatus.DISPATCHED,
+                        ]
+                    ),
                     Q(runtime_status__isnull=True) | Q(runtime_status=RuntimeStatus.QUEUED),
-                    Q(dispatch_updated_at__lt=cutoff)
-                    | Q(dispatch_updated_at__isnull=True, created_at__lt=cutoff),
+                    Q(dispatch_updated_at__lt=cutoff) | Q(dispatch_updated_at__isnull=True, created_at__lt=cutoff),
                 )
                 .only("id", "run_id", "dispatch_status", "runtime_status", "dispatch_updated_at")
                 .limit(200)
@@ -247,9 +256,7 @@ class ReconcileLoop:
             if not candidates:
                 return
 
-            logger.warning(
-                f"P1-17: 发现 {len(candidates)} 个已分发但节点未上报 RUNNING 的僵尸任务"
-            )
+            logger.warning(f"P1-17: 发现 {len(candidates)} 个已分发但节点未上报 RUNNING 的僵尸任务")
             marked = 0
             for run in candidates:
                 # 走 dispatch_status → FAILED,复用 _derive_overall 把 status 同步为
@@ -259,15 +266,12 @@ class ReconcileLoop:
                     status=DispatchStatus.FAILED,
                     status_at=now,
                     error_message=(
-                        f"节点未在 {self.DISPATCH_ACK_TIMEOUT_SECONDS}s 内上报 RUNNING"
-                        "(worker 可能在收到任务后崩溃)"
+                        f"节点未在 {self.DISPATCH_ACK_TIMEOUT_SECONDS}s 内上报 RUNNING(worker 可能在收到任务后崩溃)"
                     ),
                 )
                 if ok:
                     marked += 1
-            logger.info(
-                f"P1-17: 已标记 {marked}/{len(candidates)} 条僵尸分发为 FAILED"
-            )
+            logger.info(f"P1-17: 已标记 {marked}/{len(candidates)} 条僵尸分发为 FAILED")
         except Exception:
             logger.exception("P1-17: 检测僵尸分发失败")
 

@@ -39,9 +39,7 @@ def _lazy_import(name: str):
     try:
         return importlib.import_module(f".{name}", __package__)
     except ImportError as e:
-        raise ImportError(
-            f"无法导入 {name}。请先运行 proto 生成脚本：./scripts/gen_proto.sh"
-        ) from e
+        raise ImportError(f"无法导入 {name}。请先运行 proto 生成脚本：./scripts/gen_proto.sh") from e
 
 
 def __getattr__(name: str):

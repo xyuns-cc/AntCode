@@ -1,5 +1,7 @@
 """Git 凭证模型。"""
 
+from typing import TYPE_CHECKING
+
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
@@ -16,7 +18,10 @@ class GitCredential(BaseModel):
     )
     name = fields.CharField(max_length=100)
     auth_type = fields.CharField(max_length=20)
-    username = fields.CharField(max_length=255, null=True)
+    if TYPE_CHECKING:
+        username: str | None
+    else:
+        username = fields.CharField(max_length=255, null=True)
     secret_encrypted = fields.TextField()
     host_scope = fields.CharField(max_length=255)
     owner_user_id = fields.BigIntField(db_index=True)

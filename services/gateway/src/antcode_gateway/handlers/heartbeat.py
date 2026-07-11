@@ -84,9 +84,7 @@ class HeartbeatHandler:
         worker_id = heartbeat.worker_id
 
         logger.debug(
-            f"收到 Worker 心跳: {worker_id}, "
-            f"status={heartbeat.status}, "
-            f"running_tasks={heartbeat.running_tasks}"
+            f"收到 Worker 心跳: {worker_id}, status={heartbeat.status}, running_tasks={heartbeat.running_tasks}"
         )
 
         # 更新 Redis 状态
@@ -105,8 +103,7 @@ class HeartbeatHandler:
         """
         redis = await self._get_redis_client()
         if redis is None:
-            logger.warning("Redis 不可用，跳过状态更新")
-            return True  # 不阻塞心跳
+            raise RuntimeError("Redis 不可用，无法持久化 Worker 心跳")
 
         try:
             worker_id = heartbeat.worker_id
@@ -130,9 +127,8 @@ class HeartbeatHandler:
             }
             if heartbeat.capabilities:
                 import json
-                status_data["capabilities"] = json.dumps(
-                    heartbeat.capabilities, ensure_ascii=False
-                )
+
+                status_data["capabilities"] = json.dumps(heartbeat.capabilities, ensure_ascii=False)
 
             pipe = redis.pipeline(transaction=False)
             pipe.hset(heartbeat_key, mapping=status_data)

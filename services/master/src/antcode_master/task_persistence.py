@@ -8,13 +8,13 @@
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 
 from antcode_core.infrastructure.cache import unified_cache
 from loguru import logger
 
 
-class CheckpointState(str, Enum):
+class CheckpointState(StrEnum):
     """检查点状态"""
 
     PENDING = "pending"
@@ -36,10 +36,10 @@ class TaskCheckpoint:
     progress: float = 0.0
     checkpoint_data: dict = field(default_factory=dict)
     last_log_offset: int = 0
-    started_at: datetime = None
-    last_checkpoint_at: datetime = None
+    started_at: datetime | None = None
+    last_checkpoint_at: datetime | None = None
     retry_count: int = 0
-    error_message: str = None
+    error_message: str | None = None
 
     def to_dict(self):
         """转换为字典"""
@@ -54,13 +54,14 @@ class TaskCheckpoint:
     @classmethod
     def from_dict(cls, data):
         """从字典创建"""
-        if data.get("started_at") and isinstance(data["started_at"], str):
-            data["started_at"] = datetime.fromisoformat(data["started_at"])
-        if data.get("last_checkpoint_at") and isinstance(data["last_checkpoint_at"], str):
-            data["last_checkpoint_at"] = datetime.fromisoformat(data["last_checkpoint_at"])
-        if data.get("state") and isinstance(data["state"], str):
-            data["state"] = CheckpointState(data["state"])
-        return cls(**data)
+        payload = dict(data)
+        if payload.get("started_at") and isinstance(payload["started_at"], str):
+            payload["started_at"] = datetime.fromisoformat(payload["started_at"])
+        if payload.get("last_checkpoint_at") and isinstance(payload["last_checkpoint_at"], str):
+            payload["last_checkpoint_at"] = datetime.fromisoformat(payload["last_checkpoint_at"])
+        if payload.get("state") and isinstance(payload["state"], str):
+            payload["state"] = CheckpointState(payload["state"])
+        return cls(**payload)
 
 
 class TaskPersistenceService:
@@ -81,10 +82,7 @@ class TaskPersistenceService:
             cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{checkpoint.run_id}"
             await unified_cache.set(cache_key, checkpoint.to_dict(), ttl=self.CHECKPOINT_CACHE_TTL)
 
-            logger.debug(
-                f"检查点已保存: run_id={checkpoint.run_id}, "
-                f"progress={checkpoint.progress:.1%}"
-            )
+            logger.debug(f"检查点已保存: run_id={checkpoint.run_id}, progress={checkpoint.progress:.1%}")
             return True
 
         except Exception as e:
@@ -141,9 +139,7 @@ class TaskPersistenceService:
         from antcode_core.domain.models import TaskRun
 
         try:
-            updated = await TaskRun.filter(run_id=run_id).update(
-                last_heartbeat=datetime.now()
-            )
+            updated = await TaskRun.filter(run_id=run_id).update(last_heartbeat=datetime.now())
             return updated > 0
         except Exception as e:
             logger.debug(f"更新心跳失败: {e}")
@@ -160,10 +156,7 @@ class TaskPersistenceService:
 
             interrupted_executions = (
                 await TaskRun.filter(status=TaskStatus.RUNNING)
-                .filter(
-                    Q(last_heartbeat__lt=cutoff)
-                    | Q(last_heartbeat__isnull=True, start_time__lt=cutoff)
-                )
+                .filter(Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff))
                 .limit(100)
             )
 
@@ -201,10 +194,7 @@ class TaskPersistenceService:
                 # B6: worker 仍持有 lease → 视为存活，跳过恢复（避免双跑）
                 pub_id = worker_pub_map.get(execution.worker_id) if execution.worker_id else None
                 if pub_id and pub_id in active_worker_ids:
-                    logger.debug(
-                        f"跳过恢复（worker lease 仍活跃）: run_id={execution.run_id} "
-                        f"worker={pub_id}"
-                    )
+                    logger.debug(f"跳过恢复（worker lease 仍活跃）: run_id={execution.run_id} worker={pub_id}")
                     continue
 
                 checkpoint = None
@@ -292,8 +282,7 @@ class TaskRecoveryService:
                 try:
                     if checkpoint.retry_count >= TaskPersistenceService.MAX_RETRY_ON_RECOVERY:
                         logger.warning(
-                            f"任务 {checkpoint.run_id} 重试次数过多 "
-                            f"({checkpoint.retry_count}次)，标记为失败"
+                            f"任务 {checkpoint.run_id} 重试次数过多 ({checkpoint.retry_count}次)，标记为失败"
                         )
                         await self._mark_task_failed(checkpoint, "任务恢复失败，重试次数超限")
                         stats["failed"] += 1
@@ -309,10 +298,7 @@ class TaskRecoveryService:
                     logger.error(f"恢复任务 {checkpoint.run_id} 异常: {e}")
                     stats["failed"] += 1
 
-            logger.info(
-                f"任务恢复完成: 成功 {stats['recovered']}, "
-                f"失败 {stats['failed']}, 跳过 {stats['skipped']}"
-            )
+            logger.info(f"任务恢复完成: 成功 {stats['recovered']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
 
         finally:
             self._recovering = False

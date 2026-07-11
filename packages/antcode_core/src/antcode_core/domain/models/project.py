@@ -31,8 +31,8 @@ class Project(BaseModel):
     type = fields.CharEnumField(ProjectType)
     status = fields.CharEnumField(ProjectStatus, default=ProjectStatus.ACTIVE)
 
-    tags = fields.JSONField(default=list)
-    dependencies = fields.JSONField(null=True)
+    tags: fields.JSONField[list[str]] = fields.JSONField(default=list)
+    dependencies: fields.JSONField[list[str] | None] = fields.JSONField(null=True)
 
     # ========== 环境相关字段 ==========
     env_location = fields.CharField(max_length=10, null=True, default="worker", description="环境位置，仅支持 worker")
@@ -105,8 +105,8 @@ class ProjectFile(BaseModel):
     language = fields.CharField(max_length=50, default="python")
 
     entry_point = fields.CharField(max_length=255, null=True)
-    runtime_config = fields.JSONField(null=True)
-    environment_vars = fields.JSONField(null=True)
+    runtime_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
+    environment_vars: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
 
     class Meta:
         table = "project_files"
@@ -129,10 +129,10 @@ class ProjectRule(BaseModel):
     callback_type = fields.CharEnumField(CallbackType, default=CallbackType.LIST)
     request_method = fields.CharEnumField(RequestMethod, default=RequestMethod.GET)
 
-    extraction_rules = fields.JSONField(null=True)
-    data_schema = fields.JSONField(null=True)
+    extraction_rules: fields.JSONField[object | None] = fields.JSONField(null=True)
+    data_schema: fields.JSONField[object | None] = fields.JSONField(null=True)
 
-    pagination_config = fields.JSONField(null=True)
+    pagination_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
     max_pages = fields.IntField(default=10)
     start_page = fields.IntField(default=1)
 
@@ -142,12 +142,12 @@ class ProjectRule(BaseModel):
     priority = fields.IntField(default=0)
     dont_filter = fields.BooleanField(default=False)
 
-    headers = fields.JSONField(null=True)
-    cookies = fields.JSONField(null=True)
-    proxy_config = fields.JSONField(null=True)
-    anti_spider = fields.JSONField(null=True)
+    headers: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
+    cookies: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
+    proxy_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
+    anti_spider: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
 
-    task_config = fields.JSONField(null=True)
+    task_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
 
     # S3b: scrapy-redis 断点续爬 + 单爬虫分布式（跟 Scrapy 引擎配合）
     resume_enabled = fields.BooleanField(default=False)
@@ -155,7 +155,7 @@ class ProjectRule(BaseModel):
     # S5: 内容级去重（跨 run 按业务字段哈希持久化）。JSON 结构:
     # {enabled: bool, fields: [str], scope: "project"|"run",
     #  ttl_days: int, on_hit: "drop"|"log"}
-    dedup_config = fields.JSONField(null=True)
+    dedup_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
 
     class Meta:
         table = "project_rules"
@@ -166,7 +166,7 @@ class ProjectRule(BaseModel):
             ("public_id",),
         ]
 
-    def to_dispatch_dict(self) -> dict:
+    def to_dispatch_dict(self) -> dict[str, object]:
         """序列化为分发字典，供 dispatcher 使用。
 
         R1-P1-21 (审查报告)：DB 里配置了 ``request_delay/retry_count/timeout/
@@ -175,7 +175,7 @@ class ProjectRule(BaseModel):
         永远拿不到，恒用默认 1s 延迟 / 3 重试 / 30s 超时 / 10 页 / 8 并发。
         **限速失效有对目标站过度请求的合规风险**——统一在这里补齐。
         """
-        data = {
+        data: dict[str, object] = {
             "target_url": self.target_url,
             "callback_type": self.callback_type.value if hasattr(self.callback_type, "value") else self.callback_type,
             "request_method": self.request_method.value
@@ -187,7 +187,7 @@ class ProjectRule(BaseModel):
             "priority": self.priority or 0,
             "dont_filter": self.dont_filter,
             # R1-P1-21: 限速/重试/超时/页数/并发 — Scrapy settings.py 读顶层
-            "request_delay": int(self.request_delay or 1000),   # 毫秒；settings 会 /1000 转秒
+            "request_delay": int(self.request_delay or 1000),  # 毫秒；settings 会 /1000 转秒
             "retry_count": int(self.retry_count or 3),
             "timeout": int(self.timeout or 30),
             "max_pages": int(self.max_pages or 10),
@@ -228,8 +228,8 @@ class ProjectCode(BaseModel):
     language = fields.CharField(max_length=50, default="python")
 
     entry_point = fields.CharField(max_length=255, null=True)
-    runtime_config = fields.JSONField(null=True)
-    environment_vars = fields.JSONField(null=True)
+    runtime_config: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
+    environment_vars: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
 
     documentation = fields.TextField(null=True)
     changelog = fields.TextField(null=True)

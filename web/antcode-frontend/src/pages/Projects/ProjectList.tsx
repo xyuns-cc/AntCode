@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useEffect, useReducer, useRef, useState, useCallback, Suspense, lazy, useMemo } from 'react'
 import {
+  App,
   Button,
   Space,
   Tag,
@@ -43,6 +44,7 @@ import showNotification from '@/utils/notification'
 import useAuth from '@/hooks/useAuth'
 import { userService, type SimpleUser } from '@/services/users'
 import { isAbortError } from '@/utils/helpers'
+import Logger from '@/utils/logger'
 import type { Project, ProjectListParams, ProjectType } from '@/types'
 import type { UploadFile } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -160,6 +162,7 @@ function uiReducer(state: UIState, action: UIAction): UIState {
 }
 
 const ProjectList: React.FC = () => {
+  const { message } = App.useApp()
   const navigate = useNavigate()
   const { isAuthenticated, loading: authLoading, user } = useAuth()
   const { currentWorker, workers, refreshWorkers } = useWorkerStore()
@@ -255,13 +258,14 @@ const ProjectList: React.FC = () => {
       setUserList(users)
     } catch (error) {
       if (isAbortError(error)) return
-      // 错误由拦截器处理
+      Logger.error('加载用户列表失败:', error)
+      message.error('加载用户列表失败')
     } finally {
       if (mountedRef.current && isLatestController('users', controller)) {
         setLoadingUsers(false)
       }
     }
-  }, [user?.is_admin, createController, isLatestController])
+  }, [user?.is_admin, createController, isLatestController, message])
 
   // 智能加载所有项目数据
   const fetchAllProjects = useCallback(async () => {
@@ -306,16 +310,15 @@ const ProjectList: React.FC = () => {
       setProjects(allItems)
     } catch (error) {
       if (isAbortError(error)) return
-      // 错误由拦截器处理
       if (!mountedRef.current || !isLatestController('projects', controller)) return
-      setAllProjects([])
-      setProjects([])
+      Logger.error('加载项目列表失败:', error)
+      message.error('加载项目列表失败')
     } finally {
       if (mountedRef.current && isLatestController('projects', controller)) {
         dispatch({ type: 'SET_LOADING', payload: false })
       }
     }
-  }, [isAuthenticated, user, setProjects, currentWorker?.id, createController, isLatestController])
+  }, [isAuthenticated, user, setProjects, currentWorker?.id, createController, isLatestController, message])
 
   // 前端筛选和分页逻辑
   const filteredAndPaginatedProjects = useMemo(() => {
@@ -460,7 +463,10 @@ const ProjectList: React.FC = () => {
   }, [])
 
   const openImportModal = useCallback(() => {
-    refreshWorkers().catch(() => undefined)
+    void refreshWorkers().catch((error) => {
+      Logger.error('刷新 Worker 列表失败:', error)
+      message.error('刷新 Worker 列表失败')
+    })
     setImportEnvConfig({
       location: 'worker',
       workerId: currentWorker?.id,
@@ -472,7 +478,7 @@ const ProjectList: React.FC = () => {
       envDescription: undefined,
     })
     setImportModalVisible(true)
-  }, [currentWorker?.id, refreshWorkers])
+  }, [currentWorker?.id, message, refreshWorkers])
 
   const handleImportSubmit = useCallback(async () => {
     const projectFile = importProjectFiles[0]?.originFileObj as File | undefined
@@ -527,8 +533,9 @@ const ProjectList: React.FC = () => {
       setImportModalVisible(false)
       resetImportState()
       fetchAllProjects()
-    } catch {
-      // 错误提示由拦截器统一处理
+    } catch (error) {
+      Logger.error('导入项目失败:', error)
+      message.error('导入项目失败')
     } finally {
       setImportSubmitting(false)
     }
@@ -540,6 +547,7 @@ const ProjectList: React.FC = () => {
     importProjectFiles,
     importProjectName,
     isCompressedFile,
+    message,
     resetImportState,
   ])
 
@@ -556,12 +564,13 @@ const ProjectList: React.FC = () => {
       const fullProject = await projectService.getProject(project.id)
       dispatch({ type: 'SET_CURRENT_EDIT_PROJECT', payload: fullProject })
       dispatch({ type: 'TOGGLE_EDIT_DRAWER', payload: true })
-    } catch {
-      // 错误提示由拦截器统一处理
+    } catch (error) {
+      Logger.error('加载项目详情失败:', error)
+      message.error('加载项目详情失败')
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false })
     }
-  }, [dispatch])
+  }, [dispatch, message])
 
   // 确认删除单个项目
   const confirmDelete = async () => {
@@ -578,8 +587,9 @@ const ProjectList: React.FC = () => {
       if (uiState.selectedRowKeys.includes(uiState.currentDeleteProject.id)) {
         dispatch({ type: 'REMOVE_SELECTED_PROJECT', payload: uiState.currentDeleteProject.id })
       }
-    } catch {
-      // 错误提示由拦截器统一处理
+    } catch (error) {
+      Logger.error('删除项目失败:', error)
+      message.error('删除项目失败')
     } finally {
       dispatch({ type: 'HIDE_DELETE_MODAL' })
     }
@@ -621,8 +631,9 @@ const ProjectList: React.FC = () => {
 
       // 清空选中状态
       dispatch({ type: 'CLEAR_SELECTION' })
-    } catch {
-      // 错误提示由拦截器统一处理
+    } catch (error) {
+      Logger.error('批量删除项目失败:', error)
+      message.error('批量删除项目失败')
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false })
       dispatch({ type: 'HIDE_BATCH_DELETE_MODAL' })

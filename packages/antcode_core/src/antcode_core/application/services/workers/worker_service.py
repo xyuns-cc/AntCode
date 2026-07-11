@@ -6,8 +6,7 @@
 - worker_stats_service.py: 统计指标
 """
 
-import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from loguru import logger
@@ -22,6 +21,7 @@ from antcode_core.application.services.workers.worker_connection_service import 
 from antcode_core.application.services.workers.worker_heartbeat_service import worker_heartbeat_service
 from antcode_core.application.services.workers.worker_stats_service import worker_stats_service
 from antcode_core.common.config import settings
+from antcode_core.common.security.api_key import verify_api_key_hash
 from antcode_core.domain.models import Worker, WorkerStatus
 
 
@@ -173,10 +173,6 @@ class WorkerService:
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该地址已被其他 Worker 使用")
 
-        # 生成 API 密钥
-        api_key = secrets.token_hex(32)
-        secret_key = secrets.token_hex(64)
-
         worker = await Worker.create(
             name=request.name,
             host=host,
@@ -185,8 +181,6 @@ class WorkerService:
             description=request.description,
             tags=request.tags or [],
             status=WorkerStatus.OFFLINE.value,
-            api_key=api_key,
-            secret_key=secret_key,
             created_by=user_id,
             transport_mode="gateway",
         )
@@ -296,53 +290,39 @@ class WorkerService:
         try:
             async with in_transaction():
                 # 1. 心跳记录
-                deleted["heartbeats"] = await WorkerHeartbeat.filter(
-                    worker_id=worker_internal_id
-                ).delete()
+                deleted["heartbeats"] = await WorkerHeartbeat.filter(worker_id=worker_internal_id).delete()
 
                 # 2. 用户 Worker 权限
-                deleted["permissions"] = await UserWorkerPermission.filter(
-                    worker_id=worker_internal_id
-                ).delete()
+                deleted["permissions"] = await UserWorkerPermission.filter(worker_id=worker_internal_id).delete()
 
                 # 3. Worker 上的运行时及其绑定
-                runtime_ids = await Runtime.filter(
-                    worker_id=worker_internal_id
-                ).values_list("id", flat=True)
+                runtime_ids = await Runtime.filter(worker_id=worker_internal_id).values_list("id", flat=True)
                 if runtime_ids:
                     runtime_ids = list(runtime_ids)
                     deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(
                         runtime_id__in=runtime_ids
                     ).delete()
-                    deleted["runtimes"] = await Runtime.filter(
-                        id__in=runtime_ids
-                    ).delete()
+                    deleted["runtimes"] = await Runtime.filter(id__in=runtime_ids).delete()
 
                 # 4. 解绑项目上指向本 Worker 的字段(不删项目,项目归用户所有)
-                deleted["projects_unbound"] = await Project.filter(
-                    bound_worker_id=worker_internal_id
-                ).update(bound_worker_id=None)
-                deleted["projects_runtime_unbound"] = await Project.filter(
-                    runtime_worker_id=worker_internal_id
-                ).update(runtime_worker_id=None)
+                deleted["projects_unbound"] = await Project.filter(bound_worker_id=worker_internal_id).update(
+                    bound_worker_id=None
+                )
+                deleted["projects_runtime_unbound"] = await Project.filter(runtime_worker_id=worker_internal_id).update(
+                    runtime_worker_id=None
+                )
                 # Project.worker_id 是 CharField(存 public_id)
-                deleted["projects_worker_id_unbound"] = await Project.filter(
-                    worker_id=worker_public_id
-                ).update(worker_id=None)
+                deleted["projects_worker_id_unbound"] = await Project.filter(worker_id=worker_public_id).update(
+                    worker_id=None
+                )
 
                 # 5. Worker 上的任务及执行记录(specified_worker 语义是"绑死这台 Worker"
                 #    的任务,Worker 没了它们无处执行,与运行时绑定一起删是历史行为)
-                task_ids = await Task.filter(
-                    specified_worker_id=worker_internal_id
-                ).values_list("id", flat=True)
+                task_ids = await Task.filter(specified_worker_id=worker_internal_id).values_list("id", flat=True)
                 if task_ids:
                     task_ids = list(task_ids)
-                    deleted["task_executions"] = await TaskRun.filter(
-                        task_id__in=task_ids
-                    ).delete()
-                    deleted["tasks"] = await Task.filter(
-                        id__in=task_ids
-                    ).delete()
+                    deleted["task_executions"] = await TaskRun.filter(task_id__in=task_ids).delete()
+                    deleted["tasks"] = await Task.filter(id__in=task_ids).delete()
 
                 # 5b. 其它历史 TaskRun.worker_id 指向本 Worker 的记录:
                 #     属于其它任务的执行痕迹,置空以保留任务历史(避免主键悬挂)。
@@ -352,17 +332,11 @@ class WorkerService:
                 deleted["performance_history"] = await WorkerPerformanceHistory.filter(
                     worker_id=worker_public_id
                 ).delete()
-                deleted["spider_metrics"] = await SpiderMetricsHistory.filter(
-                    worker_id=worker_public_id
-                ).delete()
-                deleted["events"] = await WorkerEvent.filter(
-                    worker_id=worker_public_id
-                ).delete()
+                deleted["spider_metrics"] = await SpiderMetricsHistory.filter(worker_id=worker_public_id).delete()
+                deleted["events"] = await WorkerEvent.filter(worker_id=worker_public_id).delete()
 
                 # 7. 补漏:安装 Key 记录(used_by_worker 存 public_id)
-                deleted["install_keys"] = await WorkerInstallKey.filter(
-                    used_by_worker=worker_public_id
-                ).delete()
+                deleted["install_keys"] = await WorkerInstallKey.filter(used_by_worker=worker_public_id).delete()
 
                 # 8. 最后删 Worker 本体,同事务保证原子
                 await worker.delete()
@@ -460,7 +434,6 @@ class WorkerService:
     async def heartbeat(
         self,
         worker_id,
-        api_key: str,
         status_value=None,
         metrics=None,
         version: str | None = None,
@@ -475,11 +448,6 @@ class WorkerService:
         worker = await self.get_worker_by_id(worker_id)
         if not worker:
             logger.warning(f"心跳失败: Worker 不存在 {worker_id}")
-            return False
-
-        # 验证 API 密钥
-        if worker.api_key != api_key:
-            logger.warning(f"心跳失败: API密钥不匹配 {worker_id}")
             return False
 
         # 委托给心跳服务
@@ -501,7 +469,15 @@ class WorkerService:
         """验证 Worker 的 API Key"""
         if not worker or not api_key:
             return False
-        return worker.api_key == api_key
+        if worker.api_key_hash and verify_api_key_hash(api_key, worker.api_key_hash):
+            return True
+        if not worker.api_key_previous_hash or not verify_api_key_hash(api_key, worker.api_key_previous_hash):
+            return False
+        expires_at = worker.api_key_previous_expires_at
+        if expires_at is None:
+            return False
+        normalized_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+        return normalized_expiry > datetime.now(UTC)
 
     # ==================== Worker 权限管理 ====================
 

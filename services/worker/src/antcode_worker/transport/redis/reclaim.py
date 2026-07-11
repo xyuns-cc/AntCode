@@ -254,17 +254,26 @@ class PendingTaskReclaimer:
             )
 
             if result:
-                # result = [[message_id, consumer, idle_time, delivery_count], ...]
                 entry = result[0]
+                if isinstance(entry, dict):
+                    idle_time = int(entry.get("time_since_delivered", 0) or 0)
+                    delivery_count = int(entry.get("times_delivered", 1) or 1)
+                    pending_message_id = entry.get("message_id", message_id)
+                    consumer = entry.get("consumer", "")
+                else:
+                    pending_message_id = entry[0]
+                    consumer = entry[1]
+                    idle_time = int(entry[2])
+                    delivery_count = int(entry[3])
                 return {
-                    "message_id": entry[0],
-                    "consumer": entry[1],
-                    "idle_time_ms": entry[2],
-                    "delivery_count": entry[3],
-                    "last_delivery_time": datetime.now() - timedelta(milliseconds=entry[2]),
+                    "message_id": pending_message_id,
+                    "consumer": consumer,
+                    "idle_time_ms": idle_time,
+                    "delivery_count": delivery_count,
+                    "last_delivery_time": datetime.now() - timedelta(milliseconds=idle_time),
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"读取 pending 信息失败: stream={stream_key} message={message_id}") from exc
 
         return {"idle_time_ms": 0, "delivery_count": 1}
 
@@ -292,6 +301,7 @@ class PendingTaskReclaimer:
             dead_letter_key,
             dead_letter_data,
             maxlen=10000,  # 限制死信队列大小
+            approximate=True,
         )
 
         # 设置过期时间
@@ -299,7 +309,9 @@ class PendingTaskReclaimer:
 
         # ACK 原消息
         group_name = self._keys.consumer_group_name()
-        await self._redis.xack(source_stream, group_name, task.message_id)
+        acknowledged = await self._redis.xack(source_stream, group_name, task.message_id)
+        if int(acknowledged or 0) != 1:
+            raise RuntimeError(f"DLQ 已写入但原消息 ACK 失败: {source_stream}:{task.message_id}")
 
     async def reclaim_once(self) -> list[ReclaimedTask]:
         """

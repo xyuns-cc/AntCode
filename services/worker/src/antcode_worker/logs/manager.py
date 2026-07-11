@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol
 
 from loguru import logger
@@ -15,6 +15,8 @@ from antcode_worker.domain.models import LogEntry
 from antcode_worker.logs.batch import BackpressureState, BatchConfig, BatchSender
 from antcode_worker.logs.realtime import RealtimeConfig, RealtimeSender
 from antcode_worker.logs.streamer import LogStreamer
+
+MAX_DISPATCH_QUEUE_SIZE = 1000
 
 
 class TransportProtocol(Protocol):
@@ -26,7 +28,7 @@ class TransportProtocol(Protocol):
     def is_connected(self) -> bool: ...
 
 
-class DropPolicy(str, Enum):
+class DropPolicy(StrEnum):
     NONE = "none"
     OLDEST = "oldest"
     NEWEST = "newest"
@@ -64,16 +66,13 @@ class LogManager:
         self._batch: BatchSender | None = None
         self._running = False
         self._backpressure_state = BackpressureState.NORMAL
-        self._dispatch_tasks: set[asyncio.Task] = set()
+        self._dispatch_queue: asyncio.Queue[LogEntry] = asyncio.Queue(maxsize=MAX_DISPATCH_QUEUE_SIZE)
+        self._dispatch_task: asyncio.Task | None = None
         self._dispatch_errors: list[BaseException] = []
         self._total_entries = 0
         self._total_dropped = 0
         self._stdout_lines = 0
         self._stderr_lines = 0
-        # P2: 软失败累积阈值（rate-limit / not-connected 视为软跳过,不计数）
-        self._soft_drop_count = 0
-        self._hard_dispatch_failures = 0
-        self._hard_failure_threshold = 10
 
     @property
     def backpressure_state(self) -> BackpressureState:
@@ -88,6 +87,7 @@ class LogManager:
             return
         self._running = True
         await self._init_components()
+        self._dispatch_task = asyncio.create_task(self._dispatch_loop())
         logger.info(f"[{self.run_id}] 日志管理器已启动")
 
     async def stop(self) -> None:
@@ -96,7 +96,7 @@ class LogManager:
         self._running = False
         if self._streamer:
             await self._streamer.stop()
-        await self._wait_dispatch_tasks()
+        await self._wait_dispatch_queue()
         if self._batch:
             await self._batch.flush()
             await self._batch.stop()
@@ -131,74 +131,51 @@ class LogManager:
         if not self._running:
             return
         self._record_entry(entry)
-        task = asyncio.create_task(self._dispatch_entry(entry))
-        self._dispatch_tasks.add(task)
-        task.add_done_callback(self._track_dispatch_result)
+        try:
+            self._dispatch_queue.put_nowait(entry)
+        except asyncio.QueueFull as exc:
+            raise RuntimeError(f"日志分发队列已满: run_id={self.run_id} limit={MAX_DISPATCH_QUEUE_SIZE}") from exc
 
     async def _dispatch_entry(self, entry: LogEntry) -> None:
-        """P2: 单路径分发——只走 batch.
-
-        - ``False`` 不再立即升级为 RuntimeError。
-        - rate-limited / disabled / not-connected / backpressure-drop 视为
-          *软跳过*: ``_soft_drop_count++``，debug log，不抛异常。
-        - 其它非预期失败累计到 ``_hard_dispatch_failures``，达到阈值
-          才 ``raise`` 关闭 worker。
-        """
+        """Dispatch one entry and expose every transport failure."""
         if self._should_drop(entry):
             self._drop_entry(entry)
             return
 
         if not self._batch:
-            # batch 未启用时退回 realtime（旧行为兼容）。
-            if self._realtime:
-                ok = await self._realtime.write(entry)
-                if not ok:
-                    self._soft_drop_count += 1
-                    logger.debug(
-                        f"[{self.run_id}] 实时日志软跳过: seq={entry.seq}"
-                    )
+            if self._realtime is None:
+                raise RuntimeError(f"日志发送器未配置: run_id={self.run_id}")
+            if not await self._realtime.write(entry):
+                raise RuntimeError(f"实时日志上报失败: run_id={self.run_id} seq={entry.seq}")
             return
 
         try:
             batch_queued = await self._batch.write(entry)
         except Exception as exc:
-            self._hard_dispatch_failures += 1
-            logger.error(
-                f"[{self.run_id}] 批量日志入队异常 (累计 {self._hard_dispatch_failures}): {exc}"
-            )
-            if self._hard_dispatch_failures >= self._hard_failure_threshold:
-                raise RuntimeError(
-                    f"日志分发硬失败超过阈值 {self._hard_failure_threshold}: run_id={self.run_id}"
-                ) from exc
-            return
+            raise RuntimeError(f"批量日志入队异常: run_id={self.run_id}") from exc
 
         if not batch_queued:
-            # 已知软原因（backpressure drop / queue full / disconnected）走 debug,
-            # 让 worker 在反压退潮后恢复，不撕掉整条任务。
-            self._soft_drop_count += 1
-            logger.debug(
-                f"[{self.run_id}] 批量日志软跳过 seq={entry.seq} (backpressure 或未连接)"
-            )
+            raise RuntimeError(f"批量日志入队失败: run_id={self.run_id} seq={entry.seq}")
 
-    async def _wait_dispatch_tasks(self) -> None:
-        if not self._dispatch_tasks:
-            if self._dispatch_errors:
-                self._raise_dispatch_error()
-            return
-        tasks = list(self._dispatch_tasks)
-        self._dispatch_tasks.clear()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        self._dispatch_errors.extend(result for result in results if isinstance(result, Exception))
+    async def _dispatch_loop(self) -> None:
+        while True:
+            entry = await self._dispatch_queue.get()
+            try:
+                await self._dispatch_entry(entry)
+            except Exception as exc:
+                self._dispatch_errors.append(exc)
+            finally:
+                self._dispatch_queue.task_done()
+
+    async def _wait_dispatch_queue(self) -> None:
+        await self._dispatch_queue.join()
+        task = self._dispatch_task
+        self._dispatch_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if self._dispatch_errors:
             self._raise_dispatch_error()
-
-    def _track_dispatch_result(self, task: asyncio.Task) -> None:
-        self._dispatch_tasks.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error:
-            self._dispatch_errors.append(error)
 
     def _raise_dispatch_error(self) -> None:
         error = self._dispatch_errors[0]
@@ -266,17 +243,6 @@ class LogManager:
         if self._batch:
             await self._batch.flush()
 
-    async def archive_logs(self) -> list:
-        """P6: engine._execute_task 期望在归档阶段调用此方法把 run 的日志固化。
-
-        当前架构下日志已经通过 ``_dispatch_entry`` 流式写入 PG，PG 里就是
-        权威归档，无需再上传 blob。只要在这里 flush 剩余 buffer 保证 PG
-        看到全部日志即可；返回空列表让 engine 走 log_archived=False 分支
-        （``ExecResult.log_archive_uri`` 保持默认）。
-        """
-        await self.flush()
-        return []
-
     def get_stats(self) -> dict:
         return {
             "run_id": self.run_id,
@@ -286,8 +252,6 @@ class LogManager:
             "total_dropped": self._total_dropped,
             "stdout_lines": self._stdout_lines,
             "stderr_lines": self._stderr_lines,
-            "soft_drop_count": self._soft_drop_count,
-            "hard_dispatch_failures": self._hard_dispatch_failures,
         }
 
 

@@ -119,18 +119,19 @@ class PluginRegistry:
         # 变成"code-only worker"。默认开（当前主用途是爬虫）。
         import os as _os
 
-        rule_enabled = _os.environ.get(
-            "WORKER_ENABLE_RULE_PLUGIN", "true"
-        ).strip().lower() not in ("false", "0", "no", "off")
+        rule_enabled = _os.environ.get("WORKER_ENABLE_RULE_PLUGIN", "true").strip().lower() not in (
+            "false",
+            "0",
+            "no",
+            "off",
+        )
         if rule_enabled:
             try:
                 from antcode_worker.plugins.rule.plugin import RulePlugin
 
                 self.register(RulePlugin())
             except ImportError as exc:
-                logger.warning(
-                    f"RulePlugin 加载失败（scrapy/依赖未装？）: {exc}"
-                )
+                logger.warning(f"RulePlugin 加载失败（scrapy/依赖未装？）: {exc}")
         else:
             logger.info("WORKER_ENABLE_RULE_PLUGIN=false，跳过 RulePlugin 注册")
 

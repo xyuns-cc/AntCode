@@ -67,7 +67,7 @@ make dev-web     # 起前端
 ## 核心能力
 
 - **调度**：一次性 / 周期性 / Cron / 依赖链
-- **规则爬虫**：Scrapy 2.16 引擎，5 种翻页策略，XPath/CSS/正则/JSONPath 抽取，内容级去重（跨 run 持久化），代理池 + curl_cffi + Playwright + scrapy-redis 断点续爬
+- **规则爬虫**：Scrapy 2.16 引擎，5 种翻页策略，XPath/CSS/正则抽取，内容级去重（跨 run 持久化），代理池 + curl_cffi + Playwright + scrapy-redis 断点续爬
 - **可观测**：Prometheus `/metrics` 端点（HTTP QPS / 延迟 / worker 在线数 / 补派队列），WebSocket 实时日志，全链路 trace_id
 - **可靠性**：at-least-once（XAUTOCLAIM + PEL 回收 + 跨机 SET NX 去重）、派发失败自动补派（指数退避）、优雅停机（SIGTERM + drain + deregister）
 - **多租户与安全**：JWT + 项目所有权校验、登录专项限流 + 账户锁定、密钥轮换（MultiFernet）、审计日志保留策略

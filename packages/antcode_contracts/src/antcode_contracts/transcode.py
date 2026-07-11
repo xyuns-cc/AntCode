@@ -39,7 +39,7 @@ from antcode_contracts import common_pb2, data_pb2
 #
 # 同一别名集出现在历史的多个文件中（worker direct / worker gateway /
 # master ingester）。本模块作为唯一来源，避免三份独立列表漂移。
-_STATUS_STR_TO_PROTO: dict[str, int] = {
+_STATUS_STR_TO_PROTO: dict[str, data_pb2.Status] = {
     "": data_pb2.Status.STATUS_UNSPECIFIED,
     "pending": data_pb2.Status.STATUS_PENDING,
     "preparing": data_pb2.Status.STATUS_PENDING,  # E2: worker 内部准备阶段视为 PENDING
@@ -69,7 +69,7 @@ _PROTO_STATUS_TO_CANONICAL: dict[int, str] = {
 }
 
 
-def status_str_to_proto(status: str | None) -> int:
+def status_str_to_proto(status: str | None) -> data_pb2.Status:
     """字符串 status → Proto enum int。
 
     ``None`` / 空字符串 / 未知值 → ``STATUS_UNSPECIFIED``。
@@ -87,7 +87,7 @@ def proto_status_to_str(status: int) -> str:
 # ---------------------------------------------------------------------------
 # LogType 映射
 # ---------------------------------------------------------------------------
-_LOG_TYPE_STR_TO_PROTO: dict[str, int] = {
+_LOG_TYPE_STR_TO_PROTO: dict[str, data_pb2.LogType] = {
     "": data_pb2.LogType.LOG_TYPE_UNSPECIFIED,
     "stdout": data_pb2.LogType.LOG_TYPE_STDOUT,
     "stderr": data_pb2.LogType.LOG_TYPE_STDERR,
@@ -103,16 +103,14 @@ _PROTO_LOG_TYPE_TO_STR: dict[int, str] = {
 }
 
 
-def log_type_str_to_proto(log_type: str | None) -> int:
+def log_type_str_to_proto(log_type: str | None) -> data_pb2.LogType:
     """字符串 log_type → Proto enum int。
 
     ``None`` / 空字符串 / 未知值 → ``LOG_TYPE_UNSPECIFIED``。
     """
     if not log_type:
         return data_pb2.LogType.LOG_TYPE_UNSPECIFIED
-    return _LOG_TYPE_STR_TO_PROTO.get(
-        log_type.lower(), data_pb2.LogType.LOG_TYPE_UNSPECIFIED
-    )
+    return _LOG_TYPE_STR_TO_PROTO.get(log_type.lower(), data_pb2.LogType.LOG_TYPE_UNSPECIFIED)
 
 
 def proto_log_type_to_str(log_type: int) -> str:
@@ -224,12 +222,8 @@ def task_status_to_dict(ts: data_pb2.TaskStatus) -> dict[str, Any]:
         "status": proto_status_to_str(ts.status),
         "exit_code": int(ts.exit_code or 0),
         "error_message": ts.error_message or "",
-        "started_at": proto_timestamp_to_datetime(
-            ts.started_at if ts.HasField("started_at") else None
-        ),
-        "finished_at": proto_timestamp_to_datetime(
-            ts.finished_at if ts.HasField("finished_at") else None
-        ),
+        "started_at": proto_timestamp_to_datetime(ts.started_at if ts.HasField("started_at") else None),
+        "finished_at": proto_timestamp_to_datetime(ts.finished_at if ts.HasField("finished_at") else None),
         "duration_ms": int(ts.duration_ms or 0),
         "data": dict(ts.data) if ts.data else {},
     }

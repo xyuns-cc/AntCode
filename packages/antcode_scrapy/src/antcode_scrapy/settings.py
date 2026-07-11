@@ -52,9 +52,7 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
     # 需要 Playwright；老实现 rule.engine 若不是 playwright，spider 侧
     # request meta 挂了 playwright=True 但 handler 未装 → playwright_page
     # 为 None，翻页整段跳过静默单页。这里强制把 engine 提升为 playwright。
-    pagination_method = (
-        (rule.get("pagination_config") or {}).get("method") or ""
-    ).lower()
+    pagination_method = ((rule.get("pagination_config") or {}).get("method") or "").lower()
     if pagination_method in ("js_click", "infinite_scroll"):
         if engine not in ("playwright", "render"):
             # 自动提升 engine 到 playwright（用户配了 method=js_click 但没配
@@ -70,17 +68,11 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
                     "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
                     "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
                 },
-                "PLAYWRIGHT_BROWSER_TYPE": os.environ.get(
-                    "ANTCODE_PLAYWRIGHT_BROWSER", "chromium"
-                ),
+                "PLAYWRIGHT_BROWSER_TYPE": os.environ.get("ANTCODE_PLAYWRIGHT_BROWSER", "chromium"),
                 "PLAYWRIGHT_LAUNCH_OPTIONS": {"headless": True},
                 # 上下文上限：与 worker memory_limit_mb 配合避免爆内存
-                "PLAYWRIGHT_MAX_CONTEXTS": int(
-                    os.environ.get("ANTCODE_PLAYWRIGHT_MAX_CONTEXTS", "4")
-                ),
-                "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": (
-                    int(rule.get("timeout") or 30) * 1000
-                ),
+                "PLAYWRIGHT_MAX_CONTEXTS": int(os.environ.get("ANTCODE_PLAYWRIGHT_MAX_CONTEXTS", "4")),
+                "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": (int(rule.get("timeout") or 30) * 1000),
             }
         )
 
@@ -92,10 +84,9 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
         # 修复：探测导入，缺失时明确报错让用户知道要装依赖 或 降级到 requests。
         try:
             import scrapy_impersonate  # noqa: F401
+
             # 装了就用
-            settings["TWISTED_REACTOR"] = (
-                "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
-            )
+            settings["TWISTED_REACTOR"] = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
             settings["DOWNLOAD_HANDLERS"] = {
                 "http": "scrapy_impersonate.ImpersonateDownloadHandler",
                 "https": "scrapy_impersonate.ImpersonateDownloadHandler",
@@ -130,12 +121,9 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
         redis_url = os.environ.get("ANTCODE_SPIDER_REDIS_URL") or ""
         if not redis_url:
             raise RuntimeError(
-                "rule.resume_enabled=True 需要 ANTCODE_SPIDER_REDIS_URL，"
-                "但环境变量为空。请检查 worker 侧 Redis 配置。"
+                "rule.resume_enabled=True 需要 ANTCODE_SPIDER_REDIS_URL，但环境变量为空。请检查 worker 侧 Redis 配置。"
             )
-        project_id = (
-            os.environ.get("ANTCODE_SPIDER_PROJECT_ID", "") or "default"
-        )
+        project_id = os.environ.get("ANTCODE_SPIDER_PROJECT_ID", "") or "default"
         ns = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "") or "antcode"
         # dupefilter key 带 run_id 后缀（一次 run 内保留、跨 run 不共享）——
         # scrapy-redis 老实现无 TTL，二次跑同 project 静默 0 items。若真需要
@@ -144,7 +132,7 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
         settings.update(
             {
                 "SCHEDULER": "scrapy_redis.scheduler.Scheduler",
-                "SCHEDULER_PERSIST": False,   # run 结束清空调度器队列，避免陈旧
+                "SCHEDULER_PERSIST": False,  # run 结束清空调度器队列，避免陈旧
                 "DUPEFILTER_CLASS": "scrapy_redis.dupefilter.RFPDupeFilter",
                 "SCHEDULER_QUEUE_KEY": f"{ns}:scrapy:{project_id}:{run_id}:requests",
                 "DUPEFILTER_KEY": f"{ns}:scrapy:{project_id}:{run_id}:dupefilter",

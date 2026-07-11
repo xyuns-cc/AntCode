@@ -188,8 +188,8 @@ class CrawlMetricsService(BaseService):
     def __init__(
         self,
         backend=None,
-        dedup_store: DedupStore = None,
-        alert_config: AlertConfig = None,
+        dedup_store: DedupStore | None = None,
+        alert_config: AlertConfig | None = None,
     ):
         """初始化监控服务
 
@@ -240,7 +240,7 @@ class CrawlMetricsService(BaseService):
         )
 
         # 收集各优先级队列指标
-        all_consumers = set()
+        all_consumers: set[str] = set()
 
         for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
             queue_metrics = await self._collect_queue_metrics(project_id, priority)
@@ -325,11 +325,12 @@ class CrawlMetricsService(BaseService):
 
     def _get_priority_name(self, priority: int) -> str:
         """获取优先级名称"""
-        return {
+        priority_names: dict[int, str] = {
             Priority.HIGH: "high",
             Priority.NORMAL: "normal",
             Priority.LOW: "low",
-        }.get(priority, str(priority))
+        }
+        return priority_names.get(priority, str(priority))
 
     # =========================================================================
     # 批次指标收集
@@ -340,8 +341,8 @@ class CrawlMetricsService(BaseService):
         project_id: str,
         batch_id: str,
         batch_status: str = "",
-        progress: dict = None,
-        config: dict = None,
+        progress: dict | None = None,
+        config: dict | None = None,
     ) -> BatchMetrics:
         """收集批次级监控指标
 
@@ -534,10 +535,10 @@ class CrawlMetricsService(BaseService):
 
     def update_alert_config(
         self,
-        stream_length_threshold: int = None,
-        pel_size_threshold: int = None,
-        dead_letter_threshold: int = None,
-        dedup_size_threshold: int = None,
+        stream_length_threshold: int | None = None,
+        pel_size_threshold: int | None = None,
+        dead_letter_threshold: int | None = None,
+        dedup_size_threshold: int | None = None,
     ):
         """更新告警配置
 
@@ -606,8 +607,8 @@ crawl_metrics_service = CrawlMetricsService()
 
 def create_metrics_service(
     backend=None,
-    dedup_store: DedupStore = None,
-    alert_config: AlertConfig = None,
+    dedup_store: DedupStore | None = None,
+    alert_config: AlertConfig | None = None,
 ) -> CrawlMetricsService:
     """创建监控指标服务实例
 

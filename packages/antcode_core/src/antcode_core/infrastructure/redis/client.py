@@ -9,7 +9,8 @@ import os
 import platform
 import socket
 import time
-from typing import Optional
+from collections.abc import Awaitable
+from typing import Optional, cast
 
 import redis.asyncio as redis
 from loguru import logger
@@ -93,7 +94,7 @@ class RedisConnectionPool:
             # cluster/sentinel 客户端没有暴露 pool，只有 standalone 才存
             self.pool = getattr(self.redis_client, "connection_pool", None)
 
-            await self.redis_client.ping()
+            await cast(Awaitable[bool], self.redis_client.ping())
             self._connected = True
             self._last_health_check = time.monotonic()
 
@@ -108,11 +109,7 @@ class RedisConnectionPool:
             logger.warning(error_msg)
             raise RedisConnectionError(error_msg)
         except redis.ConnectionError:
-            redis_host = (
-                settings.REDIS_URL.split("@")[-1]
-                if "@" in settings.REDIS_URL
-                else settings.REDIS_URL
-            )
+            redis_host = settings.REDIS_URL.split("@")[-1] if "@" in settings.REDIS_URL else settings.REDIS_URL
             error_msg = f"无法连接 Redis ({redis_host}): 请检查 Redis 服务是否启动"
             logger.warning(error_msg)
             raise RedisConnectionError(error_msg)
@@ -127,7 +124,7 @@ class RedisConnectionPool:
             now = time.monotonic()
             if now - self._last_health_check >= self._health_check_interval:
                 try:
-                    await self.redis_client.ping()
+                    await cast(Awaitable[bool], self.redis_client.ping())
                     self._last_health_check = now
                     return self.redis_client
                 except Exception:
@@ -147,7 +144,7 @@ class RedisConnectionPool:
             return False
 
         try:
-            await self.redis_client.ping()
+            await cast(Awaitable[bool], self.redis_client.ping())
             return True
         except Exception:
             self._connected = False
@@ -187,7 +184,7 @@ class RedisConnectionPool:
                 await asyncio.sleep(30)
 
                 if self.redis_client:
-                    await self.redis_client.ping()
+                    await cast(Awaitable[bool], self.redis_client.ping())
                     logger.debug("Redis 健康检查通过")
                 else:
                     logger.warning("Redis 客户端为空，跳过健康检查")
@@ -210,10 +207,12 @@ class RedisConnectionPool:
             return {"error": "连接池未初始化"}
 
         try:
+            available_connections = len(self.pool._available_connections)
+            in_use_connections = len(self.pool._in_use_connections)
             stats = {
-                "created_connections": self.pool.created_connections,
-                "available_connections": len(self.pool._available_connections),
-                "in_use_connections": len(self.pool._in_use_connections),
+                "created_connections": available_connections + in_use_connections,
+                "available_connections": available_connections,
+                "in_use_connections": in_use_connections,
                 "max_connections": self.pool.max_connections,
                 "is_connected": self._connected,
             }
@@ -320,9 +319,7 @@ def _make_client(
         decode_responses=False,
         **overrides,
     )
-    logger.debug(
-        f"Redis {pool_label} 客户端已创建 (max_connections={max_connections})"
-    )
+    logger.debug(f"Redis {pool_label} 客户端已创建 (max_connections={max_connections})")
     return client
 
 
@@ -333,9 +330,7 @@ def make_hot_client(
     **kwargs,
 ) -> redis.Redis:
     """高吞吐场景使用 - Master ingester 组、Gateway 写入路径等"""
-    return _make_client(
-        url, max_connections=max_connections, pool_label="hot", **kwargs
-    )
+    return _make_client(url, max_connections=max_connections, pool_label="hot", **kwargs)
 
 
 def make_cold_client(
@@ -345,6 +340,4 @@ def make_cold_client(
     **kwargs,
 ) -> redis.Redis:
     """低频场景使用 - Master control 组、辅助查询等"""
-    return _make_client(
-        url, max_connections=max_connections, pool_label="cold", **kwargs
-    )
+    return _make_client(url, max_connections=max_connections, pool_label="cold", **kwargs)

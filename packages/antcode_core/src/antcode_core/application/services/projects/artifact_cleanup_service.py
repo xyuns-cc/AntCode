@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from loguru import logger
-from tortoise import connections
 from tortoise.transactions import in_transaction
 
 from antcode_core.common.config import settings
@@ -75,8 +74,7 @@ class ArtifactCleanupService:
         result = ArtifactCleanupResult()
         cutoff = datetime.now(UTC) - timedelta(days=self._retention_days)
         result.cutoff = cutoff
-        conn = connections.get("default")
-        async with in_transaction("default"):
+        async with in_transaction("default") as conn:
             # P1-13: 删掉 "AND created_at >= $1" — 只要 run_source_snapshots 里有引用,
             # 不管 snapshot 创建时间早于还是晚于 cutoff,都不能删对应的 artifact,
             # 否则历史 run 的源码快照会永久失效(读时抛 FileNotFoundError)。

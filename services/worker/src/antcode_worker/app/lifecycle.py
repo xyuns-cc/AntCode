@@ -66,11 +66,10 @@ class Lifecycle:
             # 兜底 try 保证 Worker 启动流程本身不会被"多语言可选依赖"拉断。
             try:
                 from antcode_worker.runtime.mise_bootstrap import ensure_mise
+
                 await ensure_mise()
             except Exception as exc:
-                logger.error(
-                    "mise 启动检测异常（不阻断 Worker 启动，多语言任务将不可用）: {}", exc
-                )
+                logger.error("mise 启动检测异常（不阻断 Worker 启动，多语言任务将不可用）: {}", exc)
 
             self._bind_transport_state(container)
 

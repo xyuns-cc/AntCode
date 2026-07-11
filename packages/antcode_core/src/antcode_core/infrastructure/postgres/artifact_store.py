@@ -8,8 +8,27 @@ from dataclasses import dataclass
 from tortoise.transactions import in_transaction
 
 from antcode_core.domain.models import SourceArtifact, SourceArtifactChunk
+from antcode_core.domain.models.base import generate_public_id
 
 ARTIFACT_CHUNK_SIZE_BYTES = 1024 * 1024
+
+_INSERT_ARTIFACT_SQL = """
+INSERT INTO source_artifacts (
+    public_id,
+    content_hash,
+    media_type,
+    size_bytes,
+    chunk_count,
+    repository_id,
+    resolved_commit,
+    source_subdir,
+    include_paths_hash,
+    created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+ON CONFLICT (content_hash) DO NOTHING
+RETURNING id
+"""
 
 
 @dataclass(frozen=True)
@@ -31,24 +50,20 @@ class PostgresArtifactStore:
         media_type: str = "application/octet-stream",
         metadata: dict[str, object] | None = None,
     ) -> StoredArtifact:
-        # P1-13: SourceArtifact + SourceArtifactChunk 必须同事务写入。否则:
-        #   1) 并发同 hash 两个 get_or_none 都返回 None → 各自 create 撞唯一约束
-        #   2) SourceArtifact.create 成功但 chunks bulk_create 失败 → chunk_count
-        #      对不上,后续 read_blob 抛 "chunk 数量不一致"
         content_hash = hashlib.sha256(content).hexdigest()
         chunks = _split_chunks(content)
+        values = _artifact_values(
+            content_hash,
+            content,
+            media_type=media_type,
+            chunks=chunks,
+            metadata=metadata,
+        )
         async with in_transaction("default") as conn:
-            artifact = await SourceArtifact.filter(content_hash=content_hash).using_db(conn).first()
-            if artifact is None:
-                try:
-                    artifact = await self._create_artifact(
-                        content_hash, content, media_type, chunks, metadata, conn=conn
-                    )
-                except Exception:
-                    # 并发竞态:另一事务已写入,重查并复用
-                    artifact = await SourceArtifact.filter(content_hash=content_hash).using_db(conn).first()
-                    if artifact is None:
-                        raise
+            artifact_id = await _insert_artifact(values, conn)
+            if artifact_id is not None:
+                await _create_chunks(artifact_id, chunks, conn)
+            artifact = await _get_artifact(content_hash, conn)
         return _stored_artifact(artifact)
 
     async def read_blob(self, content_hash: str) -> bytes:
@@ -63,35 +78,11 @@ class PostgresArtifactStore:
         _verify_content(content, artifact)
         return content
 
-    async def _create_artifact(
-        self,
-        content_hash: str,
-        content: bytes,
-        media_type: str,
-        chunks: list[bytes],
-        metadata: dict[str, object] | None,
-        conn=None,
-    ) -> SourceArtifact:
-        # P1-13: 接受外部 conn,与 write_blob in_transaction 复用同事务
-        values = _artifact_values(content_hash, content, media_type, chunks, metadata)
-        artifact = await SourceArtifact.create(**values, using_db=conn)
-        await SourceArtifactChunk.bulk_create(
-            [
-                SourceArtifactChunk(
-                    artifact_id=artifact.id,
-                    chunk_index=index,
-                    content=chunk,
-                )
-                for index, chunk in enumerate(chunks)
-            ],
-            using_db=conn,
-        )
-        return artifact
-
 
 def _artifact_values(
     content_hash: str,
     content: bytes,
+    *,
     media_type: str,
     chunks: list[bytes],
     metadata: dict[str, object] | None,
@@ -112,6 +103,45 @@ def _artifact_values(
             }
         )
     return values
+
+
+async def _insert_artifact(values: dict[str, object], conn) -> int | None:
+    params = [
+        generate_public_id(),
+        values["content_hash"],
+        values["media_type"],
+        values["size_bytes"],
+        values["chunk_count"],
+        values.get("repository_id"),
+        values.get("resolved_commit"),
+        values.get("source_subdir"),
+        values.get("include_paths_hash"),
+    ]
+    rows = await conn.execute_query_dict(_INSERT_ARTIFACT_SQL, params)
+    if not rows:
+        return None
+    return int(rows[0]["id"])
+
+
+async def _create_chunks(artifact_id: int, chunks: list[bytes], conn) -> None:
+    await SourceArtifactChunk.bulk_create(
+        [
+            SourceArtifactChunk(
+                artifact_id=artifact_id,
+                chunk_index=index,
+                content=chunk,
+            )
+            for index, chunk in enumerate(chunks)
+        ],
+        using_db=conn,
+    )
+
+
+async def _get_artifact(content_hash: str, conn) -> SourceArtifact:
+    artifact = await SourceArtifact.filter(content_hash=content_hash).using_db(conn).first()
+    if artifact is None:
+        raise RuntimeError(f"Artifact 写入后不存在: {content_hash}")
+    return artifact
 
 
 def _stored_artifact(artifact: SourceArtifact) -> StoredArtifact:

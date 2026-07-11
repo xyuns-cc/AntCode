@@ -4,6 +4,9 @@ Worker 节点模型
 分布式工作节点的数据模型定义。
 """
 
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel
@@ -24,7 +27,7 @@ class Worker(BaseModel):
     # 节点信息
     region = fields.CharField(max_length=50, null=True)
     description = fields.TextField(null=True)
-    tags = fields.JSONField(default=list)
+    tags: fields.JSONField[list[str]] = fields.JSONField(default=list)
     version = fields.CharField(max_length=50, null=True)
 
     # 操作系统信息（由节点上报）
@@ -40,7 +43,9 @@ class Worker(BaseModel):
     # capabilities 结构: {
     #   "curl_cffi": {"enabled": true}
     # }
-    capabilities = fields.JSONField(null=True, default=dict, description="节点能力配置")
+    capabilities: fields.JSONField[dict[str, Any] | None] = fields.JSONField(
+        null=True, default=dict, description="节点能力配置"
+    )
 
     # 资源限制配置（由主控下发）
     # resource_limits 结构: {
@@ -54,7 +59,9 @@ class Worker(BaseModel):
     #   "max_output_lines": 100000,  # 最大输出行数
     #   "enable_security_scan": true  # 是否启用安全扫描
     # }
-    resource_limits = fields.JSONField(null=True, default=dict, description="资源限制配置")
+    resource_limits: fields.JSONField[dict[str, Any] | None] = fields.JSONField(
+        null=True, default=dict, description="资源限制配置"
+    )
 
     # 节点指标（由节点定期上报）
     # metrics 结构: {
@@ -68,35 +75,36 @@ class Worker(BaseModel):
     #   "uptime": 86400,
     #   "maxConcurrentTasks": 5
     # }
-    metrics = fields.JSONField(null=True)
+    metrics: fields.JSONField[dict[str, Any] | None] = fields.JSONField(null=True)
 
-    # 认证信息
-    # DEPRECATED(P1-10): api_key / secret_key 明文列在迁移期保留,新代码请写 *_hash 列。
-    # 只读账号 dump 该表即可拿到全部凭证,后续 release 逐步清空明文列并移除。
-    api_key = fields.CharField(max_length=64, null=True)
-    secret_key = fields.CharField(max_length=128, null=True)
-    # P1-10: 认证不再依赖明文列——查询按 api_key_hash;写入同时落 hash + 明文(过渡期)
+    # 认证信息：API Key 只存不可逆哈希；HMAC secret 使用应用密钥加密。
     api_key_hash = fields.CharField(
         max_length=128,
         null=True,
         db_index=True,
-        description="P1-10: SHA256(api_key) hex,新字段;旧 api_key 明文列在迁移期保留",
+        description="SHA256(api_key) hex",
     )
     secret_key_hash = fields.CharField(
         max_length=128,
         null=True,
-        description="P1-10: SHA256(secret_key) hex,过渡期与明文列并存",
+        description="SHA256(secret_key) hex,用于迁移完整性校验",
     )
-    # 轮换期间的旧 API Key（在 grace 期内仍然有效；过期后由 rotate/finalize 清理）
-    # DEPRECATED(P1-10): 同上,新代码请落 api_key_previous_hash
-    api_key_previous = fields.CharField(max_length=64, null=True)
-    api_key_previous_hash = fields.CharField(
-        max_length=128,
+    secret_key_encrypted = fields.TextField(
         null=True,
-        db_index=True,
-        description="P1-10: SHA256(api_key_previous) hex",
+        description="使用 ENCRYPTION_KEY 加密的 Worker HMAC secret",
     )
-    api_key_previous_expires_at = fields.DatetimeField(null=True)
+    # 轮换期间只保留旧 API Key 哈希。
+    if TYPE_CHECKING:
+        api_key_previous_hash: str | None
+        api_key_previous_expires_at: datetime | None
+    else:
+        api_key_previous_hash = fields.CharField(
+            max_length=128,
+            null=True,
+            db_index=True,
+            description="P1-10: SHA256(api_key_previous) hex",
+        )
+        api_key_previous_expires_at = fields.DatetimeField(null=True)
 
     # Direct 模式专属 Redis ACL 凭证（防止 Worker 间横向移动）
     redis_username = fields.CharField(max_length=80, null=True)
@@ -129,7 +137,7 @@ class WorkerHeartbeat(BaseModel):
     """Worker 心跳记录"""
 
     worker_id = fields.BigIntField()
-    metrics = fields.JSONField(null=True)
+    metrics: fields.JSONField[dict[str, Any] | None] = fields.JSONField(null=True)
     status = fields.CharField(max_length=20)
     timestamp = fields.DatetimeField(auto_now_add=True)
 
@@ -154,11 +162,17 @@ class UserWorkerPermission(BaseModel):
     permission = fields.CharField(max_length=20, default="use", description="权限级别")
 
     # 分配信息
-    assigned_by = fields.BigIntField(null=True, description="分配者ID（管理员）")
+    if TYPE_CHECKING:
+        assigned_by: int | None
+    else:
+        assigned_by = fields.BigIntField(null=True, description="分配者ID（管理员）")
     assigned_at = fields.DatetimeField(auto_now_add=True, description="分配时间")
 
     # 备注
-    note = fields.TextField(null=True, description="备注说明")
+    if TYPE_CHECKING:
+        note: str | None
+    else:
+        note = fields.TextField(null=True, description="备注说明")
 
     class Meta:
         table = "user_worker_permissions"

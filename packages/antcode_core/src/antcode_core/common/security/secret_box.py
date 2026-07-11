@@ -98,9 +98,7 @@ class SecretBox:
             return self._cached
 
         if not primary:
-            raise RuntimeError(
-                "ENCRYPTION_KEY 未配置。请在 .env 中设置 ENCRYPTION_KEY（任意随机字符串）"
-            )
+            raise RuntimeError("ENCRYPTION_KEY 未配置。请在 .env 中设置 ENCRYPTION_KEY（任意随机字符串）")
 
         # dual-decrypt:第一个 key 是加固后的 PBKDF2 派生(encrypt/rotate 会写入这个);
         # 其后保留同一 primary 的旧 SHA256 派生,让升级前的密文能继续解开。

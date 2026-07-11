@@ -95,6 +95,7 @@ from antcode_core.domain.models.runtime import (
     ProjectRuntimeBinding,
     Runtime,
 )
+from antcode_core.domain.models.scheduler_outbox import SchedulerOutbox
 
 # 系统配置模型
 from antcode_core.domain.models.system_config import SystemConfig
@@ -146,6 +147,7 @@ __all__ = [
     "AuditAction",
     "BatchStatus",
     "Priority",
+    "SchedulerOutbox",
     # 用户模型
     "User",
     "UserRole",

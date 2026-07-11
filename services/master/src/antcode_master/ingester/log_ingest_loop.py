@@ -40,9 +40,8 @@ from antcode_core.application.services.logs.postgres_log_service import (
 )
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
+from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
 from loguru import logger
-
-from antcode_master.leader import ensure_leader
 
 
 def _log_ingest_stream_key(namespace: str | None = None) -> str:
@@ -191,6 +190,15 @@ class LogIngestLoop:
 
                 if ack_ids:
                     await self._stream.xack(self._stream_key, ack_ids, self._group)
+                    try:
+                        client = await self._stream._get_client()
+                        await trim_acknowledged_stream(
+                            client,
+                            self._stream_key,
+                            self._group,
+                        )
+                    except Exception:
+                        logger.exception("日志 Stream ACK 后裁剪失败")
 
             except asyncio.CancelledError:
                 break

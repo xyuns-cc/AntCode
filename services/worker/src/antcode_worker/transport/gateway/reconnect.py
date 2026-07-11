@@ -15,13 +15,13 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from loguru import logger
 
 
-class ReconnectState(str, Enum):
+class ReconnectState(StrEnum):
     """重连状态"""
 
     IDLE = "idle"  # 空闲（已连接）

@@ -23,6 +23,11 @@ from urllib.parse import urlparse
 SOURCE_BUNDLE_METHOD = "source_bundle"
 PGARTIFACT_SCHEME = "pgartifact"
 SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 256 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 100
 
 
 def _safe_slug(value: str) -> str:
@@ -100,6 +105,8 @@ class ArtifactFetcher:
             raise ValueError("source_bundle_sha256 必须是 64 位十六进制 sha256")
         if size < 0:
             raise ValueError("source_bundle_size 不能为负数")
+        if size > MAX_ARCHIVE_BYTES:
+            raise ValueError(f"source bundle 超过压缩包上限: {size} > {MAX_ARCHIVE_BYTES}")
 
         parsed = urlparse(uri)
         if parsed.scheme != PGARTIFACT_SCHEME:
@@ -117,6 +124,8 @@ class ArtifactFetcher:
         return content_hash.lower()
 
     def _verify_blob(self, blob: bytes, expected_sha256: str, expected_size: int) -> None:
+        if len(blob) > MAX_ARCHIVE_BYTES:
+            raise ValueError(f"source bundle 超过压缩包上限: {len(blob)} > {MAX_ARCHIVE_BYTES}")
         if len(blob) != expected_size:
             raise ValueError(f"source bundle 大小不一致: expected={expected_size}, actual={len(blob)}")
         actual = hashlib.sha256(blob).hexdigest()
@@ -154,19 +163,59 @@ class ArtifactFetcher:
         base_dir = dest.resolve()
         with zipfile.ZipFile(io.BytesIO(blob), "r") as archive:
             members = archive.infolist()
+            self._validate_member_count(len(members))
+            total = 0
             for member in members:
                 if self._is_unsafe_zip_member(member, base_dir):
                     raise ValueError(f"不安全的压缩路径: {member.filename}")
-            archive.extractall(base_dir)
+                if member.file_size > MAX_MEMBER_BYTES:
+                    raise ValueError(f"压缩包单文件过大: {member.filename}")
+                total += member.file_size
+                self._validate_extracted_total(total, len(blob))
+                if member.is_dir():
+                    (base_dir / member.filename).mkdir(parents=True, exist_ok=True)
+                    continue
+                target = (base_dir / member.filename).resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member, "r") as source, open(target, "wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
 
     def _safe_extract_tar(self, fileobj: io.BytesIO, dest: Path) -> None:
         base_dir = dest.resolve()
+        archive_size = len(fileobj.getbuffer())
         with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
             members = archive.getmembers()
+            self._validate_member_count(len(members))
+            total = 0
             for member in members:
                 if self._is_unsafe_tar_member(member, base_dir):
                     raise ValueError(f"不安全的压缩路径: {member.name}")
-            archive.extractall(base_dir, members=members)
+                if member.size > MAX_MEMBER_BYTES:
+                    raise ValueError(f"压缩包单文件过大: {member.name}")
+                total += member.size
+                self._validate_extracted_total(total, archive_size)
+                target = (base_dir / member.name).resolve()
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError(f"无法读取压缩包成员: {member.name}")
+                with source, open(target, "wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+
+    @staticmethod
+    def _validate_member_count(count: int) -> None:
+        if count > MAX_ARCHIVE_MEMBERS:
+            raise ValueError(f"压缩包成员数超过上限: {count} > {MAX_ARCHIVE_MEMBERS}")
+
+    @staticmethod
+    def _validate_extracted_total(total: int, archive_size: int) -> None:
+        if total > MAX_EXTRACTED_BYTES:
+            raise ValueError(f"解压总量超过上限: {total} > {MAX_EXTRACTED_BYTES}")
+        if archive_size > 0 and total > archive_size * MAX_COMPRESSION_RATIO:
+            raise ValueError(f"压缩比超过上限: extracted={total}, archive={archive_size}")
 
     def _resolve_project_cwd(self, bundle_root: Path, source_subdir: str | None) -> Path:
         relative = self._normalize_subdir(source_subdir)

@@ -12,14 +12,14 @@ import hashlib
 import hmac
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 
-class AuthMethod(str, Enum):
+class AuthMethod(StrEnum):
     """认证方法"""
 
     NONE = "none"  # 无认证（仅用于测试）

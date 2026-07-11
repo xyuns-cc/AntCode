@@ -73,7 +73,7 @@ class ArtifactCleanupLoop:
             conn = connections.get("default")
             _, rows = await conn.execute_query(
                 'SELECT COUNT(*) AS n FROM "task_executions" te '
-                'WHERE te.task_id IS NOT NULL '
+                "WHERE te.task_id IS NOT NULL "
                 'AND NOT EXISTS (SELECT 1 FROM "scheduled_tasks" st WHERE st.id = te.task_id)'
             )
             n = int(rows[0]["n"]) if rows else 0

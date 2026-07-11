@@ -1,5 +1,8 @@
 """Redis 分布式滑动窗口限流器。"""
 
+from collections.abc import Awaitable
+from typing import cast
+
 # Lua 脚本：原子化滑动窗口限流
 # KEYS[1] = 限流 key
 # ARGV[1] = 窗口大小（秒）
@@ -73,12 +76,18 @@ class RedisRateLimiter:
 
         sha = await self._ensure_script(redis_client)
         try:
-            result = await redis_client.evalsha(sha, 1, key, period, limit, now_us)
+            result = await cast(
+                Awaitable[list[int]],
+                redis_client.evalsha(sha, 1, key, period, limit, now_us),
+            )
         except Exception:
             # SHA 可能因 Redis 重启失效，重新加载后重试一次；仍失败则暴露异常。
             self._script_sha = None
             sha = await self._ensure_script(redis_client)
-            result = await redis_client.evalsha(sha, 1, key, period, limit, now_us)
+            result = await cast(
+                Awaitable[list[int]],
+                redis_client.evalsha(sha, 1, key, period, limit, now_us),
+            )
 
         # result = [count, allowed(1/0)]
         return result[1] == 1

@@ -16,6 +16,13 @@ from datetime import datetime
 import ujson
 from loguru import logger
 
+from antcode_worker.runtime.gc_types import (
+    CacheGCResult,
+    CacheStats,
+    CleanupResult,
+    EnvInfo,
+)
+
 
 @dataclass
 class GCConfig:
@@ -53,10 +60,10 @@ class CacheGC:
         self._config = config or GCConfig()
         self._running = False
         self._task: asyncio.Task | None = None
-        self._on_gc_complete: Callable[[dict], None] | None = None
+        self._on_gc_complete: Callable[[CacheGCResult], None] | None = None
 
         # 统计信息
-        self._stats = {
+        self._stats: CacheStats = {
             "last_gc_time": None,
             "envs_cleaned": 0,
             "temp_cleaned": 0,
@@ -69,11 +76,11 @@ class CacheGC:
         return self._config
 
     @property
-    def stats(self) -> dict:
+    def stats(self) -> CacheStats:
         """获取统计信息"""
         return self._stats.copy()
 
-    def set_gc_callback(self, callback: Callable[[dict], None]) -> None:
+    def set_gc_callback(self, callback: Callable[[CacheGCResult], None]) -> None:
         """设置 GC 完成回调"""
         self._on_gc_complete = callback
 
@@ -127,14 +134,14 @@ class CacheGC:
                 logger.error(f"GC 循环异常: {e}")
                 await asyncio.sleep(60)
 
-    async def run_gc(self) -> dict:
+    async def run_gc(self) -> CacheGCResult:
         """
         执行一次 GC
 
         Returns:
             GC 结果统计
         """
-        result = {
+        result: CacheGCResult = {
             "envs_cleaned": 0,
             "temp_cleaned": 0,
             "bytes_freed": 0,
@@ -163,16 +170,16 @@ class CacheGC:
 
         return result
 
-    async def _gc_envs(self) -> dict:
+    async def _gc_envs(self) -> CleanupResult:
         """清理过期虚拟环境"""
-        result = {"cleaned": 0, "bytes_freed": 0, "errors": []}
+        result: CleanupResult = {"cleaned": 0, "bytes_freed": 0, "errors": []}
 
         if not self.venvs_dir or not os.path.exists(self.venvs_dir):
             return result
 
         now = time.time()
         cutoff = now - self._config.env_ttl
-        envs_info = []
+        envs_info: list[EnvInfo] = []
 
         # 收集环境信息
         for name in os.listdir(self.venvs_dir):
@@ -181,7 +188,7 @@ class CacheGC:
                 continue
 
             manifest_path = os.path.join(venv_path, "manifest.json")
-            last_used = 0
+            last_used = 0.0
 
             if os.path.exists(manifest_path):
                 try:
@@ -234,9 +241,9 @@ class CacheGC:
 
         return result
 
-    async def _gc_temp(self) -> dict:
+    async def _gc_temp(self) -> CleanupResult:
         """清理临时文件"""
-        result = {"cleaned": 0, "bytes_freed": 0, "errors": []}
+        result: CleanupResult = {"cleaned": 0, "bytes_freed": 0, "errors": []}
 
         if not self.temp_dir or not os.path.exists(self.temp_dir):
             return result

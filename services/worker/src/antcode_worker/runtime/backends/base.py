@@ -111,10 +111,7 @@ def get_backend(language: str | None) -> RuntimeBackend:
     key = (language or "python").strip().lower()
     backend = _backends.get(key)
     if backend is None:
-        raise UnsupportedLanguageError(
-            f"未注册 language={key!r} 的 backend；"
-            f"已注册: {sorted(_backends.keys())}"
-        )
+        raise UnsupportedLanguageError(f"未注册 language={key!r} 的 backend；已注册: {sorted(_backends.keys())}")
     return backend
 
 

@@ -121,7 +121,7 @@ class WorkerRegistryService:
         self,
         worker_id: str,
         batch_id: str = "",
-        metadata: dict = None,
+        metadata: dict | None = None,
     ) -> WorkerInfo:
         """注册 Worker
 
@@ -375,7 +375,7 @@ class WorkerRegistryService:
             logger.error(f"获取批次 Worker 失败: batch_id={batch_id}, 错误: {e}")
             return []
 
-    async def get_active_worker_count(self, batch_id: str = None) -> int:
+    async def get_active_worker_count(self, batch_id: str | None = None) -> int:
         """获取活跃 Worker 数量
 
         Args:

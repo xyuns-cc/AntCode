@@ -7,8 +7,7 @@
 """
 
 from datetime import UTC, datetime
-
-import pytz
+from zoneinfo import ZoneInfo
 
 # 默认时区
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -32,7 +31,7 @@ def now_local(tz: str = DEFAULT_TIMEZONE) -> datetime:
     Returns:
         带时区信息的本地 datetime
     """
-    local_tz = pytz.timezone(tz)
+    local_tz = ZoneInfo(tz)
     return datetime.now(local_tz)
 
 
@@ -66,7 +65,7 @@ def utc_to_local(dt: datetime, tz: str = DEFAULT_TIMEZONE) -> datetime:
     """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    local_tz = pytz.timezone(tz)
+    local_tz = ZoneInfo(tz)
     return dt.astimezone(local_tz)
 
 
@@ -81,8 +80,7 @@ def local_to_utc(dt: datetime, tz: str = DEFAULT_TIMEZONE) -> datetime:
         UTC datetime
     """
     if dt.tzinfo is None:
-        local_tz = pytz.timezone(tz)
-        dt = local_tz.localize(dt)
+        dt = dt.replace(tzinfo=ZoneInfo(tz))
     return dt.astimezone(UTC)
 
 
@@ -154,6 +152,5 @@ def parse_datetime(
     """
     dt = datetime.strptime(s, fmt)
     if tz:
-        local_tz = pytz.timezone(tz)
-        dt = local_tz.localize(dt)
+        dt = dt.replace(tzinfo=ZoneInfo(tz))
     return dt

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import os
+import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -38,28 +40,45 @@ _ALLOWED_GIT_SCHEMES = ("http://", "https://", "ssh://", "git@")
 # ls-remote 快速探测(30s);clone 主操作(300s = 5 分钟,大 repo 应改 shallow)。
 _GIT_LS_REMOTE_TIMEOUT_SEC = 30
 _GIT_CLONE_TIMEOUT_SEC = 300
+MAX_BUNDLE_FILE_COUNT = 10_000
+MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_ARCHIVE_BYTES = 100 * 1024 * 1024
 
 # P1-11: SSRF 防护 —— host 私网/回环/云元数据端点白名单/黑名单
 # 云元数据地址(AWS/GCP/Azure/阿里云等)一律禁止,防抓 IAM 凭证。
-_BLOCKED_HOST_PATTERNS = frozenset({
-    "169.254.169.254",  # AWS/GCP/Azure IMDS
-    "metadata.google.internal",  # GCP
-    "100.100.100.200",  # 阿里云
-    "localhost",
-    "127.0.0.1",
-    "0.0.0.0",
-    "::1",
-})
+_BLOCKED_HOST_PATTERNS = frozenset(
+    {
+        "169.254.169.254",  # AWS/GCP/Azure IMDS
+        "metadata.google.internal",  # GCP
+        "100.100.100.200",  # 阿里云
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+    }
+)
 
 
-def _is_private_ipv4(host: str) -> bool:
-    """粗粒度检查是否为 IPv4 私网/回环/链路本地地址。"""
-    import ipaddress
+def _is_private_ip(host: str) -> bool:
+    """检查 IPv4/IPv6 是否为不可访问的内部或特殊地址。"""
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
     return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+
+
+def _validate_resolved_host(host: str) -> None:
+    try:
+        addresses = {str(item[4][0]) for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
+    except socket.gaierror as exc:
+        raise ValueError(f"Git 主机无法解析: {host!r}") from exc
+    if not addresses:
+        raise ValueError(f"Git 主机没有可用地址: {host!r}")
+    blocked = sorted(address for address in addresses if _is_private_ip(address))
+    if blocked:
+        raise ValueError(f"Git URL 解析到私网/回环/保留地址: {host!r} -> {', '.join(blocked)}")
 
 
 def _validate_git_url(url: str) -> str:
@@ -83,13 +102,12 @@ def _validate_git_url(url: str) -> str:
         raise ValueError("Git URL 不合法：不允许包含 '::'（git remote helper 语法）")
     lowered = stripped.lower()
     if not any(lowered.startswith(scheme) for scheme in _ALLOWED_GIT_SCHEMES):
-        raise ValueError(
-            f"Git URL 不合法：仅支持 {', '.join(_ALLOWED_GIT_SCHEMES)}"
-        )
+        raise ValueError(f"Git URL 不合法：仅支持 {', '.join(_ALLOWED_GIT_SCHEMES)}")
 
     # P1-11: SSRF 防护 —— 解析 host 检查是否为回环/云元数据
     try:
         from antcode_core.common.config import settings
+
         allow_private = bool(getattr(settings, "ALLOW_PRIVATE_NODES", False))
     except Exception:
         allow_private = False
@@ -98,7 +116,7 @@ def _validate_git_url(url: str) -> str:
     host_part = ""
     for scheme in ("http://", "https://", "ssh://"):
         if lowered.startswith(scheme):
-            host_part = stripped[len(scheme):].split("/", 1)[0].split("@")[-1]
+            host_part = stripped[len(scheme) :].split("/", 1)[0].split("@")[-1]
             # 去掉 port
             if ":" in host_part and "[" not in host_part:
                 host_part = host_part.rsplit(":", 1)[0]
@@ -110,14 +128,13 @@ def _validate_git_url(url: str) -> str:
     if host_lower and not allow_private:
         if host_lower in _BLOCKED_HOST_PATTERNS:
             raise ValueError(
-                f"Git URL 不合法：禁止指向本地/云元数据端点 {host_lower!r}"
-                "（ALLOW_PRIVATE_NODES=true 显式放开）"
+                f"Git URL 不合法：禁止指向本地/云元数据端点 {host_lower!r}（ALLOW_PRIVATE_NODES=true 显式放开）"
             )
-        if _is_private_ipv4(host_lower):
+        if _is_private_ip(host_lower):
             raise ValueError(
-                f"Git URL 不合法：禁止指向私网/回环地址 {host_lower!r}"
-                "（ALLOW_PRIVATE_NODES=true 显式放开）"
+                f"Git URL 不合法：禁止指向私网/回环地址 {host_lower!r}（ALLOW_PRIVATE_NODES=true 显式放开）"
             )
+        _validate_resolved_host(host_lower)
 
     return stripped
 
@@ -192,7 +209,24 @@ def _materialize_bundle(
             entry_point=entry_point,
             include_paths=string_list(source_config.get("include_paths")),
         )
-        return _create_deterministic_tar_gz(repo_dir, bundle_paths)
+        _validate_bundle_paths(bundle_paths)
+        content = _create_deterministic_tar_gz(repo_dir, bundle_paths)
+        if len(content) > MAX_BUNDLE_ARCHIVE_BYTES:
+            raise ValueError(f"source bundle 压缩包超过上限: {len(content)} > {MAX_BUNDLE_ARCHIVE_BYTES}")
+        return content
+
+
+def _validate_bundle_paths(paths: list[Path]) -> None:
+    if len(paths) > MAX_BUNDLE_FILE_COUNT:
+        raise ValueError(f"source bundle 文件数超过上限: {len(paths)} > {MAX_BUNDLE_FILE_COUNT}")
+    total = 0
+    for path in paths:
+        size = path.stat().st_size
+        if size > MAX_BUNDLE_FILE_BYTES:
+            raise ValueError(f"source bundle 单文件超过上限: {path.name} {size} > {MAX_BUNDLE_FILE_BYTES}")
+        total += size
+        if total > MAX_BUNDLE_TOTAL_BYTES:
+            raise ValueError(f"source bundle 总大小超过上限: {total} > {MAX_BUNDLE_TOTAL_BYTES}")
 
 
 def _resolve_git_revision(source_config: dict[str, object], auth_config) -> str:
@@ -200,9 +234,7 @@ def _resolve_git_revision(source_config: dict[str, object], auth_config) -> str:
     ref = ref or _optional_str(source_config.get("branch")) or "HEAD"
     url = _validate_git_url(str(source_config["url"]))
     # ``--`` 阻止 git 把 URL/ref 解析成 flag（防御纵深）
-    result = _run_git(
-        ["git", "ls-remote", "--", url, ref], auth_config=auth_config
-    )
+    result = _run_git(["git", "ls-remote", "--", url, ref], auth_config=auth_config)
     lines = result.stdout.strip().splitlines()
     if not lines:
         raise ValueError("无法解析 Git 引用版本")

@@ -28,6 +28,17 @@ PROTO_FIELD = b"p"
 T = TypeVar("T")
 
 
+class ProtoMessage(Protocol):
+    """Structural subset of protobuf Message used by the stream codec."""
+
+    def SerializeToString(self) -> bytes: ...
+
+    def ParseFromString(self, data: bytes) -> int: ...
+
+
+P = TypeVar("P", bound=ProtoMessage)
+
+
 @dataclass
 class StreamMessage:
     """Stream 消息数据类"""
@@ -95,13 +106,16 @@ class JsonCodec:
 
     def encode(self, msg: dict) -> dict:
         if not isinstance(msg, dict):
-            raise TypeError(
-                f"JsonCodec.encode expects dict, got {type(msg).__name__}"
-            )
-        return {
-            k: to_json(v) if not isinstance(v, (str, int, float, bytes)) else v
-            for k, v in msg.items()
-        }
+            raise TypeError(f"JsonCodec.encode expects dict, got {type(msg).__name__}")
+        return {k: self._encode_value(v) for k, v in msg.items()}
+
+    @staticmethod
+    def _encode_value(value):
+        if isinstance(value, bool):
+            return to_json(value)
+        if isinstance(value, (str, int, float, bytes)):
+            return value
+        return to_json(value)
 
     def decode(self, fields: dict) -> dict:
         out: dict = {}
@@ -126,7 +140,7 @@ class JsonCodec:
         return out
 
 
-class ProtoCodec(Generic[T]):
+class ProtoCodec(Generic[P]):
     """Proto bytes 序列化
 
     将 Proto Message 整个序列化为字节并存到单字段（默认 'p'）。读取时
@@ -137,33 +151,26 @@ class ProtoCodec(Generic[T]):
         field_name: 存放序列化字节的字段名，默认 ``b"p"``。
     """
 
-    def __init__(self, msg_type: type[T], field_name: bytes = PROTO_FIELD):
+    def __init__(self, msg_type: type[P], field_name: bytes = PROTO_FIELD):
         self._msg_type = msg_type
         self._field = field_name
-        self._field_str = (
-            field_name.decode("utf-8") if isinstance(field_name, bytes) else field_name
-        )
+        self._field_str = field_name.decode("utf-8") if isinstance(field_name, bytes) else field_name
 
     @property
-    def msg_type(self) -> type[T]:
+    def msg_type(self) -> type[P]:
         return self._msg_type
 
-    def encode(self, msg: T) -> dict:
+    def encode(self, msg: P) -> dict:
         if not hasattr(msg, "SerializeToString"):
-            raise TypeError(
-                f"ProtoCodec.encode expects a Proto Message, got {type(msg).__name__}"
-            )
+            raise TypeError(f"ProtoCodec.encode expects a Proto Message, got {type(msg).__name__}")
         return {self._field: msg.SerializeToString()}
 
-    def decode(self, fields: dict) -> T:
+    def decode(self, fields: dict) -> P:
         raw = fields.get(self._field)
         if raw is None:
             raw = fields.get(self._field_str)
         if raw is None:
-            raise ValueError(
-                f"missing '{self._field_str}' field for proto codec "
-                f"({self._msg_type.__name__})"
-            )
+            raise ValueError(f"missing '{self._field_str}' field for proto codec ({self._msg_type.__name__})")
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
         msg = self._msg_type()
@@ -221,8 +228,9 @@ class StreamClient:
     # 消息发布
     # =========================================================================
 
-    async def xadd(self, stream_key: str, data: dict, msg_id: str = "*",
-                   maxlen: int | None = None, approximate: bool = True) -> str:
+    async def xadd(
+        self, stream_key: str, data: dict, msg_id: str = "*", maxlen: int | None = None, approximate: bool = True
+    ) -> str:
         """添加消息到 Stream
 
         Args:
@@ -238,8 +246,7 @@ class StreamClient:
         client = await self._get_client()
 
         # 序列化数据为 JSON 字符串
-        serialized = {k: to_json(v) if not isinstance(v, (str, bytes)) else v
-                      for k, v in data.items()}
+        serialized = {k: to_json(v) if not isinstance(v, (str, bytes)) else v for k, v in data.items()}
 
         kwargs = {}
         if maxlen is not None:
@@ -253,8 +260,7 @@ class StreamClient:
             return result.decode("utf-8")
         return result
 
-    async def xadd_batch(self, stream_key: str, messages: list,
-                         maxlen: int | None = None) -> list:
+    async def xadd_batch(self, stream_key: str, messages: list, maxlen: int | None = None) -> list:
         """批量添加消息到 Stream
 
         Args:
@@ -271,8 +277,7 @@ class StreamClient:
         # 使用 pipeline 批量执行
         pipe = client.pipeline()
         for data in messages:
-            serialized = {k: to_json(v) if not isinstance(v, (str, bytes)) else v
-                          for k, v in data.items()}
+            serialized = {k: to_json(v) if not isinstance(v, (str, bytes)) else v for k, v in data.items()}
             if maxlen:
                 pipe.xadd(stream_key, serialized, maxlen=maxlen, approximate=True)
             else:
@@ -325,8 +330,9 @@ class StreamClient:
     # 消费者组管理
     # =========================================================================
 
-    async def xgroup_create(self, stream_key: str, group_name: str = None,
-                            start_id: str = "0", mkstream: bool = True) -> bool:
+    async def xgroup_create(
+        self, stream_key: str, group_name: str | None = None, start_id: str = "0", mkstream: bool = True
+    ) -> bool:
         """创建消费者组
 
         Args:
@@ -353,7 +359,7 @@ class StreamClient:
             logger.error(f"创建消费者组失败: {stream_key} -> {group}, 错误: {e}")
             raise
 
-    async def xgroup_destroy(self, stream_key: str, group_name: str = None) -> bool:
+    async def xgroup_destroy(self, stream_key: str, group_name: str | None = None) -> bool:
         """删除消费者组
 
         Args:
@@ -374,7 +380,7 @@ class StreamClient:
             logger.error(f"删除消费者组失败: {stream_key} -> {group}, 错误: {e}")
             return False
 
-    async def ensure_group(self, stream_key: str, group_name: str = None) -> bool:
+    async def ensure_group(self, stream_key: str, group_name: str | None = None) -> bool:
         """确保消费者组存在
 
         Args:
@@ -390,10 +396,15 @@ class StreamClient:
     # 消息读取
     # =========================================================================
 
-    async def xreadgroup(self, stream_key: str, group_name: str = None,
-                         consumer_name: str = "worker", count: int = 10,
-                         block_ms: int | None = None,
-                         read_pending: bool = False) -> list:
+    async def xreadgroup(
+        self,
+        stream_key: str,
+        group_name: str | None = None,
+        consumer_name: str = "worker",
+        count: int = 10,
+        block_ms: int | None = None,
+        read_pending: bool = False,
+    ) -> list:
         """从消费者组读取消息
 
         Args:
@@ -418,11 +429,7 @@ class StreamClient:
             kwargs["block"] = block_ms
 
         try:
-            result = await client.xreadgroup(
-                group, consumer_name,
-                streams={stream_key: msg_id},
-                **kwargs
-            )
+            result = await client.xreadgroup(group, consumer_name, streams={stream_key: msg_id}, **kwargs)
 
             return self._parse_xread_result(result, stream_key)
 
@@ -433,9 +440,14 @@ class StreamClient:
                 return []
             raise
 
-    async def xreadgroup_multi(self, stream_keys: list, group_name: str = None,
-                               consumer_name: str = "worker", count: int = 10,
-                               block_ms: int | None = None) -> dict:
+    async def xreadgroup_multi(
+        self,
+        stream_keys: list,
+        group_name: str | None = None,
+        consumer_name: str = "worker",
+        count: int = 10,
+        block_ms: int | None = None,
+    ) -> dict:
         """从多个 Stream 读取消息（按优先级）
 
         Args:
@@ -462,17 +474,13 @@ class StreamClient:
             kwargs["block"] = block_ms
 
         try:
-            result = await client.xreadgroup(
-                group, consumer_name,
-                streams=streams,
-                **kwargs
-            )
+            result = await client.xreadgroup(group, consumer_name, streams=streams, **kwargs)
 
             return self._parse_xread_result_multi(result)
 
         except Exception as e:
             logger.error(f"多 Stream 读取失败: {e}")
-            return {}
+            raise
 
     async def xreadgroup_typed(
         self,
@@ -502,11 +510,7 @@ class StreamClient:
             kwargs["block"] = block_ms
 
         try:
-            result = await client.xreadgroup(
-                group, consumer_name,
-                streams={stream_key: msg_id},
-                **kwargs
-            )
+            result = await client.xreadgroup(group, consumer_name, streams={stream_key: msg_id}, **kwargs)
             return self._parse_typed_result(result, stream_key)
 
         except Exception as e:
@@ -537,11 +541,7 @@ class StreamClient:
             kwargs["block"] = block_ms
 
         try:
-            result = await client.xreadgroup(
-                group, consumer_name,
-                streams=streams,
-                **kwargs
-            )
+            result = await client.xreadgroup(group, consumer_name, streams=streams, **kwargs)
 
             result_dict: dict[str, list[TypedStreamMessage]] = {}
             if not result:
@@ -552,18 +552,14 @@ class StreamClient:
                 stream_name = stream_data[0]
                 if isinstance(stream_name, bytes):
                     stream_name = stream_name.decode("utf-8")
-                result_dict[stream_name] = self._decode_typed_entries(
-                    stream_data[1], stream_name
-                )
+                result_dict[stream_name] = self._decode_typed_entries(stream_data[1], stream_name)
             return result_dict
 
         except Exception as e:
             logger.error(f"多 Stream typed 读取失败: {e}")
-            return {}
+            raise
 
-    def _parse_typed_result(
-        self, result, stream_key: str
-    ) -> list[TypedStreamMessage]:
+    def _parse_typed_result(self, result, stream_key: str) -> list[TypedStreamMessage]:
         """解析 XREAD/XREADGROUP 结果并通过 codec 解码 payload"""
         if not result:
             return []
@@ -578,9 +574,7 @@ class StreamClient:
             messages.extend(self._decode_typed_entries(stream_data[1], stream_name))
         return messages
 
-    def _decode_typed_entries(
-        self, entries, stream_name: str
-    ) -> list[TypedStreamMessage]:
+    def _decode_typed_entries(self, entries, stream_name: str) -> list[TypedStreamMessage]:
         """对单个 stream 的 entries 列表执行 codec.decode
 
         P1-19: 解码失败时不再 ``continue`` 静默跳过——那样上层看不到消息、
@@ -600,28 +594,36 @@ class StreamClient:
                 payload = self._codec.decode(raw_fields)
             except Exception as exc:
                 logger.error(
-                    "Codec 解码失败(将由上层转 DLQ): stream={}, msg_id={}, "
-                    "codec={}, err={}",
-                    stream_name, msg_id, type(self._codec).__name__, exc,
+                    "Codec 解码失败(将由上层转 DLQ): stream={}, msg_id={}, codec={}, err={}",
+                    stream_name,
+                    msg_id,
+                    type(self._codec).__name__,
+                    exc,
                 )
-                out.append(TypedStreamMessage(
-                    msg_id=msg_id,
-                    payload=None,
-                    stream_key=stream_name,
-                    decode_error=f"{type(exc).__name__}: {exc}",
-                    # raw_fields 保留原始 dict（bytes-key/bytes-value）方便
-                    # 死信队列存档，注意里面可能含 Proto bytes，不做 utf-8 解码
-                    raw_fields=dict(raw_fields) if isinstance(raw_fields, dict) else None,
-                ))
+                out.append(
+                    TypedStreamMessage(
+                        msg_id=msg_id,
+                        payload=None,
+                        stream_key=stream_name,
+                        decode_error=f"{type(exc).__name__}: {exc}",
+                        # raw_fields 保留原始 dict（bytes-key/bytes-value）方便
+                        # 死信队列存档，注意里面可能含 Proto bytes，不做 utf-8 解码
+                        raw_fields=dict(raw_fields) if isinstance(raw_fields, dict) else None,
+                    )
+                )
                 continue
-            out.append(TypedStreamMessage(
-                msg_id=msg_id, payload=payload, stream_key=stream_name,
-            ))
+            out.append(
+                TypedStreamMessage(
+                    msg_id=msg_id,
+                    payload=payload,
+                    stream_key=stream_name,
+                )
+            )
         return out
 
     def _parse_xread_result(self, result, stream_key: str) -> list:
         """解析 XREAD/XREADGROUP 结果"""
-        messages = []
+        messages: list[StreamMessage] = []
 
         if not result:
             return messages
@@ -646,17 +648,13 @@ class StreamClient:
                 # 解析消息数据
                 data = self._decode_message_data(msg_data[1])
 
-                messages.append(StreamMessage(
-                    msg_id=msg_id,
-                    data=data,
-                    stream_key=stream_name
-                ))
+                messages.append(StreamMessage(msg_id=msg_id, data=data, stream_key=stream_name))
 
         return messages
 
     def _parse_xread_result_multi(self, result) -> dict:
         """解析多 Stream 读取结果"""
-        result_dict = {}
+        result_dict: dict[str, list[StreamMessage]] = {}
 
         if not result:
             return result_dict
@@ -680,11 +678,7 @@ class StreamClient:
 
                 data = self._decode_message_data(msg_data[1])
 
-                messages.append(StreamMessage(
-                    msg_id=msg_id,
-                    data=data,
-                    stream_key=stream_name
-                ))
+                messages.append(StreamMessage(msg_id=msg_id, data=data, stream_key=stream_name))
 
             result_dict[stream_name] = messages
 
@@ -711,8 +705,7 @@ class StreamClient:
     # 消息确认
     # =========================================================================
 
-    async def xack(self, stream_key: str, msg_ids: list,
-                   group_name: str = None) -> int:
+    async def xack(self, stream_key: str, msg_ids: list, group_name: str | None = None) -> int:
         """确认消息已处理
 
         Args:
@@ -753,9 +746,15 @@ class StreamClient:
     # 超时任务转移
     # =========================================================================
 
-    async def xclaim(self, stream_key: str, msg_ids: list,
-                     group_name: str = None, consumer_name: str = "worker",
-                     min_idle_time_ms: int = 0, retry_count: int | None = None) -> list:
+    async def xclaim(
+        self,
+        stream_key: str,
+        msg_ids: list,
+        group_name: str | None = None,
+        consumer_name: str = "worker",
+        min_idle_time_ms: int = 0,
+        retry_count: int | None = None,
+    ) -> list:
         """转移消息所有权
 
         Args:
@@ -780,11 +779,7 @@ class StreamClient:
             kwargs["retrycount"] = retry_count
 
         try:
-            result = await client.xclaim(
-                stream_key, group, consumer_name,
-                min_idle_time_ms, msg_ids,
-                **kwargs
-            )
+            result = await client.xclaim(stream_key, group, consumer_name, min_idle_time_ms, msg_ids, **kwargs)
 
             messages = []
             for msg_data in result:
@@ -797,21 +792,23 @@ class StreamClient:
 
                 data = self._decode_message_data(msg_data[1])
 
-                messages.append(StreamMessage(
-                    msg_id=msg_id,
-                    data=data,
-                    stream_key=stream_key
-                ))
+                messages.append(StreamMessage(msg_id=msg_id, data=data, stream_key=stream_key))
 
             return messages
 
         except Exception as e:
             logger.error(f"XCLAIM 失败: {stream_key}, 错误: {e}")
-            return []
+            raise
 
-    async def xautoclaim(self, stream_key: str, group_name: str = None,
-                         consumer_name: str = "worker", min_idle_time_ms: int = 300000,
-                         start_id: str = "0-0", count: int = 100) -> tuple:
+    async def xautoclaim(
+        self,
+        stream_key: str,
+        group_name: str | None = None,
+        consumer_name: str = "worker",
+        min_idle_time_ms: int = 300000,
+        start_id: str = "0-0",
+        count: int = 100,
+    ) -> tuple:
         """自动转移超时消息
 
         Args:
@@ -829,11 +826,7 @@ class StreamClient:
         group = group_name or self.DEFAULT_GROUP
 
         try:
-            result = await client.xautoclaim(
-                stream_key, group, consumer_name,
-                min_idle_time_ms, start_id,
-                count=count
-            )
+            result = await client.xautoclaim(stream_key, group, consumer_name, min_idle_time_ms, start_id, count=count)
 
             # result 示例: [next_start_id, [(msg_id, {data}), ...], [deleted_ids]]
             next_id = result[0]
@@ -851,11 +844,7 @@ class StreamClient:
 
                 data = self._decode_message_data(msg_data[1])
 
-                messages.append(StreamMessage(
-                    msg_id=msg_id,
-                    data=data,
-                    stream_key=stream_key
-                ))
+                messages.append(StreamMessage(msg_id=msg_id, data=data, stream_key=stream_key))
 
             deleted_ids = []
             if len(result) > 2:
@@ -869,7 +858,7 @@ class StreamClient:
 
         except Exception as e:
             logger.error(f"XAUTOCLAIM 失败: {stream_key}, 错误: {e}")
-            return "0-0", [], []
+            raise
 
     # =========================================================================
     # 队列信息查询
@@ -887,7 +876,7 @@ class StreamClient:
         client = await self._get_client()
         return await client.xlen(stream_key)
 
-    async def xpending(self, stream_key: str, group_name: str = None) -> dict:
+    async def xpending(self, stream_key: str, group_name: str | None = None) -> dict:
         """获取 pending 消息摘要
 
         Args:
@@ -904,12 +893,7 @@ class StreamClient:
             result = await client.xpending(stream_key, group)
 
             if not result or result[0] == 0:
-                return {
-                    "pending_count": 0,
-                    "min_id": None,
-                    "max_id": None,
-                    "consumers": {}
-                }
+                return {"pending_count": 0, "min_id": None, "max_id": None, "consumers": {}}
 
             # result 示例: [count, min_id, max_id, [[consumer, count], ...]]
             consumers = {}
@@ -928,26 +912,22 @@ class StreamClient:
             if isinstance(max_id, bytes):
                 max_id = max_id.decode("utf-8")
 
-            return {
-                "pending_count": result[0],
-                "min_id": min_id,
-                "max_id": max_id,
-                "consumers": consumers
-            }
+            return {"pending_count": result[0], "min_id": min_id, "max_id": max_id, "consumers": consumers}
 
         except Exception as e:
             if "NOGROUP" in str(e):
-                return {
-                    "pending_count": 0,
-                    "min_id": None,
-                    "max_id": None,
-                    "consumers": {}
-                }
+                return {"pending_count": 0, "min_id": None, "max_id": None, "consumers": {}}
             raise
 
-    async def xpending_range(self, stream_key: str, group_name: str = None,
-                             start: str = "-", end: str = "+", count: int = 100,
-                             consumer_name: str | None = None) -> list:
+    async def xpending_range(
+        self,
+        stream_key: str,
+        group_name: str | None = None,
+        start: str = "-",
+        end: str = "+",
+        count: int = 100,
+        consumer_name: str | None = None,
+    ) -> list:
         """获取 pending 消息详情
 
         Args:
@@ -969,9 +949,7 @@ class StreamClient:
             if consumer_name:
                 kwargs["consumername"] = consumer_name
 
-            result = await client.xpending_range(
-                stream_key, group, start, end, count, **kwargs
-            )
+            result = await client.xpending_range(stream_key, group, start, end, count, **kwargs)
 
             messages = []
             for item in result:
@@ -983,12 +961,9 @@ class StreamClient:
                 if isinstance(consumer, bytes):
                     consumer = consumer.decode("utf-8")
 
-                messages.append(PendingMessage(
-                    msg_id=msg_id,
-                    consumer=consumer,
-                    idle_time_ms=item[2],
-                    delivery_count=item[3]
-                ))
+                messages.append(
+                    PendingMessage(msg_id=msg_id, consumer=consumer, idle_time_ms=item[2], delivery_count=item[3])
+                )
 
             return messages
 
@@ -1059,9 +1034,9 @@ class StreamClient:
     # 清理操作
     # =========================================================================
 
-    async def xtrim(self, stream_key: str, maxlen: int | None = None,
-                    approximate: bool = True,
-                    minid: str | None = None) -> int:
+    async def xtrim(
+        self, stream_key: str, maxlen: int | None = None, approximate: bool = True, minid: str | None = None
+    ) -> int:
         """裁剪 Stream
 
         Args:
@@ -1078,17 +1053,10 @@ class StreamClient:
         client = await self._get_client()
         if minid is not None:
             # redis-py 支持 xtrim(name, minid=..., approximate=...)。
-            # 保底捕获旧版本不支持 minid 的情况，退化到 maxlen。
             try:
-                return await client.xtrim(
-                    stream_key, minid=minid, approximate=approximate
-                )
-            except TypeError:
-                if maxlen is None:
-                    raise
-                logger.warning(
-                    "redis-py 不支持 xtrim MINID，退化到 MAXLEN={}", maxlen
-                )
+                return await client.xtrim(stream_key, minid=minid, approximate=approximate)
+            except TypeError as exc:
+                raise RuntimeError("当前 redis-py 不支持安全的 XTRIM MINID") from exc
         if maxlen is None:
             raise ValueError("xtrim 需要 maxlen 或 minid 至少一个参数")
         return await client.xtrim(stream_key, maxlen=maxlen, approximate=approximate)

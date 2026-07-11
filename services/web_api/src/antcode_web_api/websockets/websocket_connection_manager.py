@@ -66,62 +66,101 @@ class ConnectionPool:
         )
         self.max_total_connections = getattr(settings, "WEBSOCKET_MAX_TOTAL_CONN", max_total_connections)
         self._connections: dict[str, dict[str, ConnectionInfo]] = defaultdict(dict)
-        # 分段锁：每个 run_id 一个锁
-        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_users: dict[str, int] = {}
         self._global_lock = asyncio.Lock()  # 仅用于创建新的 execution 分段
         self._total_count = 0
+
+    async def _checkout_lock(
+        self,
+        run_id: str,
+        *,
+        reserve_connection: bool = False,
+    ) -> asyncio.Lock | None:
+        async with self._global_lock:
+            if reserve_connection and self._total_count >= self.max_total_connections:
+                return None
+            lock = self._locks.setdefault(run_id, asyncio.Lock())
+            self._lock_users[run_id] = self._lock_users.get(run_id, 0) + 1
+            if reserve_connection:
+                self._total_count += 1
+            return lock
+
+    async def _release_connection_slot(self) -> None:
+        async with self._global_lock:
+            self._total_count -= 1
+
+    async def _return_lock(self, run_id: str, lock: asyncio.Lock) -> None:
+        async with self._global_lock:
+            users = self._lock_users.get(run_id, 0) - 1
+            if users > 0:
+                self._lock_users[run_id] = users
+                return
+            self._lock_users.pop(run_id, None)
+            if not self._connections.get(run_id) and self._locks.get(run_id) is lock:
+                self._locks.pop(run_id, None)
 
     async def add_connection(self, connection_info):
         """添加连接"""
         run_id = connection_info.run_id
         connection_id = connection_info.connection_id
 
-        # 检查总连接数限制
-        if self._total_count >= self.max_total_connections:
+        lock = await self._checkout_lock(run_id, reserve_connection=True)
+        if lock is None:
             logger.error(f"总连接数超限: {self._total_count}/{self.max_total_connections}")
             return False
+        added = False
+        try:
+            async with lock:
+                if len(self._connections[run_id]) >= self.max_connections_per_execution:
+                    oldest = min(
+                        self._connections[run_id].values(),
+                        key=lambda c: c.connected_at,
+                    )
+                    await self._close_connection_unsafe(oldest)
+                    self._connections[run_id].pop(oldest.connection_id, None)
+                    await self._release_connection_slot()
+                    logger.warning(f"执行ID {run_id} 连接数超限，移除最旧连接")
 
-        # 获取或创建分段锁
-        async with self._global_lock:
-            lock = self._locks[run_id]
-
-        async with lock:
-            # 检查单执行连接数限制
-            if len(self._connections[run_id]) >= self.max_connections_per_execution:
-                oldest = min(
-                    self._connections[run_id].values(),
-                    key=lambda c: c.connected_at,
-                )
-                await self._close_connection_unsafe(oldest)
-                self._total_count -= 1
-                logger.warning(f"执行ID {run_id} 连接数超限，移除最旧连接")
-
-            self._connections[run_id][connection_id] = connection_info
-            connection_info.state = ConnectionState.CONNECTED
-            self._total_count += 1
-            return True
+                self._connections[run_id][connection_id] = connection_info
+                connection_info.state = ConnectionState.CONNECTED
+                added = True
+                return True
+        finally:
+            if not added:
+                await self._release_connection_slot()
+            await self._return_lock(run_id, lock)
 
     async def remove_connection(self, run_id, connection_id):
         """移除连接"""
         if run_id not in self._connections:
             return False
 
-        lock = self._locks.get(run_id)
-        if not lock:
+        lock = await self._checkout_lock(run_id)
+        if lock is None:
             return False
-
-        async with lock:
-            if connection_id in self._connections.get(run_id, {}):
+        removed = False
+        try:
+            async with lock:
+                if connection_id not in self._connections.get(run_id, {}):
+                    return False
                 conn = self._connections[run_id].pop(connection_id)
                 conn.state = ConnectionState.CLOSED
-                self._total_count -= 1
-
-                # 清理空的 execution
+                removed = True
                 if not self._connections[run_id]:
-                    del self._connections[run_id]
-                    # 延迟清理锁，避免竞态
+                    self._connections.pop(run_id, None)
                 return True
-            return False
+        finally:
+            if removed:
+                await self._release_connection_slot()
+            await self._return_lock(run_id, lock)
+
+    async def clear(self) -> None:
+        async with self._global_lock:
+            self._connections.clear()
+            self._locks.clear()
+            self._lock_users.clear()
+            self._total_count = 0
 
     async def _close_connection_unsafe(self, conn):
         """关闭连接（调用者需持有锁）"""
@@ -324,6 +363,19 @@ class MessageQueue:
             logger.error(f"处理消息队列失败: {run_id}, {e}")
         finally:
             self._processing.pop(run_id, None)
+            if not self._queues.get(run_id):
+                self._queues.pop(run_id, None)
+                self._dropped_count.pop(run_id, None)
+
+    async def shutdown(self) -> None:
+        tasks = list(self._processing.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._processing.clear()
+        self._queues.clear()
+        self._dropped_count.clear()
 
     def get_queue_size(self, run_id):
         """获取队列大小"""
@@ -411,6 +463,8 @@ class WebSocketConnectionManager:
             for conn in connections:
                 with contextlib.suppress(Exception):
                     await conn.websocket.close(code=1001, reason="服务器关闭")
+        await self.message_queue.shutdown()
+        await self.connection_pool.clear()
 
         logger.info("WebSocket连接管理器已关闭")
 
@@ -485,7 +539,11 @@ class WebSocketConnectionManager:
             except Exception as e:
                 logger.error(f"清理任务异常: {e}")
 
-    async def _cleanup_inactive_connections(self):
+    async def cleanup_inactive_connections(self) -> int:
+        """立即清理不活跃连接并返回清理数量。"""
+        return await self._cleanup_inactive_connections()
+
+    async def _cleanup_inactive_connections(self) -> int:
         """清理不活跃连接"""
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self.inactive_timeout)
@@ -502,6 +560,7 @@ class WebSocketConnectionManager:
 
         if cleaned > 0:
             logger.info(f"清理了 {cleaned} 个不活跃连接")
+        return cleaned
 
     async def handle_client_message(self, run_id, connection_id, message):
         """处理客户端消息"""
@@ -582,6 +641,15 @@ class WebSocketConnectionManager:
         """直接发送消息"""
         message_str = to_json(message)
         await websocket.send_text(message_str)
+
+    async def send_to_connection(self, run_id, connection_id, message):
+        """只向指定连接发送消息。"""
+        connection = self.connection_pool.get_connection(run_id, connection_id)
+        if connection is None or connection.state != ConnectionState.CONNECTED:
+            return False
+        await self._send_direct(connection.websocket, message)
+        connection.messages_sent += 1
+        return True
 
     # ==================== 便捷方法 ====================
 

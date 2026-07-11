@@ -26,7 +26,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from loguru import logger
@@ -37,7 +37,7 @@ from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
 
 
-class RetryStrategy(str, Enum):
+class RetryStrategy(StrEnum):
     """重试策略"""
 
     FIXED = "fixed"
@@ -46,7 +46,7 @@ class RetryStrategy(str, Enum):
     CUSTOM = "custom"
 
 
-class CompensationType(str, Enum):
+class CompensationType(StrEnum):
     """补偿类型"""
 
     ROLLBACK = "rollback"
@@ -214,32 +214,27 @@ class _RetryQueueBackend:
             item = self._decode(raw)
             if item is not None:
                 # 原始 payload 字符串,供 ack/requeue 用
-                item["__raw_payload"] = (
-                    raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
-                )
+                item["__raw_payload"] = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
                 out.append(item)
         return out
 
     async def ack(self, raw_payload: str) -> None:
         """处理成功 -> 从 processing hash 移除。"""
         redis = await self._get_redis()
-        try:
-            await redis.hdel(self.processing_key(), raw_payload)
-        except Exception as exc:
-            logger.warning(f"retry ack 失败(可忽略): {exc}")
+        removed = await redis.hdel(self.processing_key(), raw_payload)
+        if int(removed or 0) != 1:
+            raise RuntimeError("retry ack did not remove the processing entry")
 
     async def requeue(self, raw_payload: str, *, delay_seconds: int = 0) -> None:
         """重新排回 pending(用于处理失败重排 / 崩溃恢复)。"""
         redis = await self._get_redis()
         score = int((time.time() + max(0, delay_seconds)) * 1000)
-        try:
-            # 原子: 加回 ZSet 并从 processing 移除
-            pipe = redis.pipeline(transaction=True)
-            pipe.zadd(self.pending_key(), {raw_payload: score})
-            pipe.hdel(self.processing_key(), raw_payload)
-            await pipe.execute()
-        except Exception as exc:
-            logger.warning(f"retry requeue 失败: {exc}")
+        pipe = redis.pipeline(transaction=True)
+        pipe.zadd(self.pending_key(), {raw_payload: score})
+        pipe.hdel(self.processing_key(), raw_payload)
+        results = await pipe.execute()
+        if len(results) < 2 or int(results[1] or 0) != 1:
+            raise RuntimeError("retry requeue did not clear the processing entry")
 
     async def sweep_stalled(self) -> int:
         """扫 processing hash,把 claim 超时的条目 requeue 回 ZSet。
@@ -260,9 +255,7 @@ class _RetryQueueBackend:
         requeued = 0
         for raw, claim_ms_raw in entries.items():
             try:
-                claim_ms = int(
-                    claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw
-                )
+                claim_ms = int(claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw)
             except (ValueError, AttributeError):
                 claim_ms = 0
             if claim_ms > threshold_ms:
@@ -272,17 +265,13 @@ class _RetryQueueBackend:
             await self.requeue(raw_str, delay_seconds=0)
             requeued += 1
         if requeued:
-            logger.warning(
-                f"retry sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务"
-            )
+            logger.warning(f"retry sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务")
         return requeued
 
     async def peek_all(self) -> list[dict[str, Any]]:
         """只读:返回 pending ZSet 的全部快照(用于 API 展示)。"""
         redis = await self._get_redis()
-        raw_members = await redis.zrange(
-            self.pending_key(), 0, -1, withscores=True
-        )
+        raw_members = await redis.zrange(self.pending_key(), 0, -1, withscores=True)
         out: list[dict[str, Any]] = []
         for raw, score in raw_members or []:
             item = self._decode(raw)
@@ -389,6 +378,7 @@ class RetryService:
 
         execution.retry_count = current_retry + 1
         execution.status = TaskStatus.PENDING
+        execution.next_retry_at = next_retry_time
         execution.error_message = f"重试 {execution.retry_count}/{config.max_retries}: {error}"
         await execution.save()
 
@@ -484,9 +474,7 @@ class RetryService:
                 f"失败时间: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-            await alert_service.send_alert(
-                title=f"任务失败: {task.name}", content=alert_message, level="error"
-            )
+            await alert_service.send_alert(title=f"任务失败: {task.name}", content=alert_message, level="error")
 
         except Exception as e:
             logger.error(f"发送任务失败告警失败: {e}")
@@ -494,29 +482,15 @@ class RetryService:
     async def _drain_due_retries(self):
         """处理重试队列 —— 从 Redis ZSet 原子 claim,处理成功后 ack。
 
-        #15: 入口加 leader 闸口 —— 双 Master 部署时,非 Leader 不能 trigger
-        任务。``antcode_master`` 在非 master 进程(例如 web_api / 单元测试)
-        不一定可 import,这里软性探测:能 import 且非 Leader 则空转,其它
-        情况维持原行为。
-
         P1-18: 每轮先 sweep_stalled 恢复崩溃遗留,再 claim 到期任务。
         Master 重启/切主后 ZSet 数据仍在 Redis,新 Leader 直接接管。
         """
-        try:
-            from antcode_master.leader import ensure_leader  # type: ignore
-        except Exception:
-            ensure_leader = None  # type: ignore[assignment]
-
         # 崩溃恢复的扫描间隔(每 N 轮 tick 扫一次,避免每秒都 HGETALL)
         sweep_every_n = 10
         tick_counter = 0
 
         while self._running:
             try:
-                if ensure_leader is not None and not await ensure_leader():
-                    await asyncio.sleep(1.0)
-                    continue
-
                 tick_counter += 1
                 if tick_counter % sweep_every_n == 1:
                     # 崩溃恢复: 把 processing hash 里超时的 claim requeue
@@ -549,9 +523,7 @@ class RetryService:
                         await self._backend.ack(raw_payload)
                     except Exception as exc:
                         # trigger 失败: requeue 一次(带短延迟),留到下轮
-                        logger.error(
-                            f"trigger_task({task_id}) 失败,requeue: {exc}"
-                        )
+                        logger.error(f"trigger_task({task_id}) 失败,requeue: {exc}")
                         await self._backend.requeue(raw_payload, delay_seconds=5)
 
             except asyncio.CancelledError:
@@ -576,12 +548,8 @@ class RetryService:
         retried_executions = sum(1 for e in executions if e.retry_count > 0)
         total_retries = sum(e.retry_count for e in executions)
 
-        retry_success = sum(
-            1 for e in executions if e.retry_count > 0 and e.status == TaskStatus.SUCCESS
-        )
-        retry_success_rate = (
-            retry_success / retried_executions * 100 if retried_executions > 0 else 0
-        )
+        retry_success = sum(1 for e in executions if e.retry_count > 0 and e.status == TaskStatus.SUCCESS)
+        retry_success_rate = retry_success / retried_executions * 100 if retried_executions > 0 else 0
 
         return {
             "task_id": task_id,

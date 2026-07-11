@@ -67,8 +67,8 @@ def _check_pip_audit(report: Any) -> list[str]:
     (comma-separated GHSA-/PYSEC- IDs) instead of trusting a missing field.
     """
     failures: list[str] = []
-    if not isinstance(report, dict):
-        return failures
+    if not isinstance(report, dict) or not isinstance(report.get("dependencies"), list):
+        return ["  - malformed pip-audit report: missing dependencies list"]
     ignored = _pip_audit_ignore_ids()
     deps = report.get("dependencies") or []
     for dep in deps:
@@ -91,8 +91,8 @@ def _check_pip_audit(report: Any) -> list[str]:
 def _check_bandit(report: Any) -> list[str]:
     """bandit -f json schema: {'results': [{issue_severity, issue_confidence, ...}]}."""
     failures: list[str] = []
-    if not isinstance(report, dict):
-        return failures
+    if not isinstance(report, dict) or not isinstance(report.get("results"), list):
+        return ["  - malformed bandit report: missing results list"]
     for issue in report.get("results") or []:
         sev = (issue.get("issue_severity") or "").upper()
         conf = (issue.get("issue_confidence") or "").upper()

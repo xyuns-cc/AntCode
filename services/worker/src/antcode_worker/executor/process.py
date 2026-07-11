@@ -54,33 +54,35 @@ from antcode_worker.executor.base import (
 # WORKER_REDIS_PASSWORD / WORKER_CREDENTIAL_SECRET_KEY 泄漏给任务进程。
 #
 # 允许的 host 环境变量前缀（前缀匹配，例如 LANG*、LC_*）
-_ENV_HOST_ALLOWED_EXACT = frozenset({
-    "PATH",
-    "HOME",
-    "USER",
-    "USERNAME",  # Windows
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "SHELL",
-    "TERM",
-    "PWD",
-    "HOSTNAME",
-    "LANG",
-    # Node / Python / Go / Java runtime 相关（子进程可能真的需要）
-    "NODE_PATH",
-    "npm_config_cache",
-    "GOCACHE",
-    "GOMODCACHE",
-    "MAVEN_OPTS",
-    "JAVA_HOME",
-    "PYTHONHASHSEED",
-    "PYTHONUNBUFFERED",
-    "PYTHONDONTWRITEBYTECODE",
-    # mise
-    "MISE_DATA_DIR",
-    "MISE_CACHE_DIR",
-})
+_ENV_HOST_ALLOWED_EXACT = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "USERNAME",  # Windows
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SHELL",
+        "TERM",
+        "PWD",
+        "HOSTNAME",
+        "LANG",
+        # Node / Python / Go / Java runtime 相关（子进程可能真的需要）
+        "NODE_PATH",
+        "npm_config_cache",
+        "GOCACHE",
+        "GOMODCACHE",
+        "MAVEN_OPTS",
+        "JAVA_HOME",
+        "PYTHONHASHSEED",
+        "PYTHONUNBUFFERED",
+        "PYTHONDONTWRITEBYTECODE",
+        # mise
+        "MISE_DATA_DIR",
+        "MISE_CACHE_DIR",
+    }
+)
 _ENV_HOST_ALLOWED_PREFIX = (
     "LC_",  # locale
     "ANTCODE_TASK_",  # 显式声明给任务用的
@@ -88,6 +90,9 @@ _ENV_HOST_ALLOWED_PREFIX = (
 )
 # 二重防线：即便 exec_plan.env 或前缀匹配放进来，也拒绝这些高风险模式
 _ENV_DENY_PATTERNS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE_KEY")
+_TRUSTED_PLUGIN_SECRET_ENV = {
+    "rule": frozenset({"ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"}),
+}
 
 
 def _is_env_allowed_from_host(key: str) -> bool:
@@ -96,7 +101,9 @@ def _is_env_allowed_from_host(key: str) -> bool:
     return any(key.startswith(p) for p in _ENV_HOST_ALLOWED_PREFIX)
 
 
-def _is_env_forbidden(key: str) -> bool:
+def _is_env_forbidden(key: str, plugin_name: str | None = None) -> bool:
+    if key in _TRUSTED_PLUGIN_SECRET_ENV.get(plugin_name or "", frozenset()):
+        return False
     upper = key.upper()
     return any(pat in upper for pat in _ENV_DENY_PATTERNS)
 
@@ -118,8 +125,6 @@ def _build_preexec_fn(
     的总量控制形成双层防护。
     """
     if sys.platform == "win32":
-        return None
-    if not enforce_rlimit and not max_open_files and not max_processes and not file_size_mb:
         return None
 
     def _pre() -> None:
@@ -283,10 +288,7 @@ class ProcessExecutor(BaseExecutor):
                 max_open_files=exec_plan.max_open_files or self.config.default_max_open_files,
                 max_processes=exec_plan.max_processes or self.config.default_max_processes,
                 # T7-P2-4: RLIMIT_FSIZE 单文件上限
-                file_size_mb=(
-                    exec_plan.max_file_size_mb
-                    or getattr(self.config, "default_max_file_size_mb", 0)
-                ),
+                file_size_mb=(exec_plan.max_file_size_mb or getattr(self.config, "default_max_file_size_mb", 0)),
             )
 
             # 创建子进程
@@ -350,6 +352,13 @@ class ProcessExecutor(BaseExecutor):
 
                 return result
 
+            except asyncio.CancelledError:
+                await self._terminate_process(
+                    process_info,
+                    exec_plan.grace_period_seconds or self.config.default_grace_period,
+                )
+                raise
+
             finally:
                 # 停止资源监控
                 if monitor_task:
@@ -400,11 +409,7 @@ class ProcessExecutor(BaseExecutor):
         host_env = os.environ
 
         # 1. 白名单透传
-        env: dict[str, str] = {
-            key: value
-            for key, value in host_env.items()
-            if _is_env_allowed_from_host(key)
-        }
+        env: dict[str, str] = {key: value for key, value in host_env.items() if _is_env_allowed_from_host(key)}
 
         # 2. runtime 显式注入
         pythonpath_parts = [runtime_handle.path]
@@ -417,16 +422,14 @@ class ProcessExecutor(BaseExecutor):
         bin_dir = "Scripts" if os.name == "nt" else "bin"
         venv_bin = os.path.join(runtime_handle.path, bin_dir)
         existing_path = env.get("PATH") or host_env.get("PATH", "")
-        env["PATH"] = (
-            os.pathsep.join([venv_bin, existing_path]) if existing_path else venv_bin
-        )
+        env["PATH"] = os.pathsep.join([venv_bin, existing_path]) if existing_path else venv_bin
 
         # 3. 任务显式环境变量
         env.update(exec_plan.env)
 
         # 4. 二重防线：剔除任何命中黑名单模式的键（含被 exec_plan.env 误传的）
         for key in list(env.keys()):
-            if _is_env_forbidden(key):
+            if _is_env_forbidden(key, exec_plan.plugin_name):
                 env.pop(key, None)
 
         return env
@@ -518,8 +521,15 @@ class ProcessExecutor(BaseExecutor):
                 return task.result()
             return 0
 
+        stdout_task: asyncio.Task | None = None
+        stderr_task: asyncio.Task | None = None
+        wait_task: asyncio.Task | None = None
+        stdout_count = 0
+        stderr_count = 0
         try:
             # 创建读取任务
+            if process.stdout is None or process.stderr is None:
+                raise RuntimeError("执行进程未创建 stdout/stderr 管道")
             stdout_task = asyncio.create_task(read_stream(process.stdout, "stdout"))
             stderr_task = asyncio.create_task(read_stream(process.stderr, "stderr"))
             wait_task = asyncio.create_task(process.wait())
@@ -553,6 +563,19 @@ class ProcessExecutor(BaseExecutor):
 
             return process.returncode or 0, stdout_count, stderr_count
 
+        except asyncio.CancelledError:
+            for child_task in (stdout_task, stderr_task, wait_task):
+                if child_task is not None and not child_task.done():
+                    child_task.cancel()
+            await self._terminate_process(
+                process_info,
+                process_info.exec_plan.grace_period_seconds or self.config.default_grace_period,
+            )
+            for child_task in (stdout_task, stderr_task, wait_task):
+                if child_task is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await child_task
+            raise
         except TimeoutError:
             # 超时处理
             await self._terminate_process(

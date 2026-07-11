@@ -18,9 +18,8 @@ schema 由 ORM model ``antcode_core.domain.models.task_log.TaskLog`` 定义，
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,13 +55,13 @@ class PostgresLogService:
         if not entries:
             return 0
 
-        rows: list[tuple[Any, ...]] = []
+        rows: list[list[Any]] = []
         for entry in entries:
             if not entry.run_id:
                 continue
             ts = entry.timestamp or datetime.now(tz=UTC)
             rows.append(
-                (
+                [
                     entry.event_id,
                     entry.run_id,
                     entry.log_type or "stdout",
@@ -71,7 +70,7 @@ class PostgresLogService:
                     ts,
                     entry.level or "INFO",
                     entry.source or entry.worker_id or "task_execution",
-                )
+                ]
             )
         if not rows:
             return 0

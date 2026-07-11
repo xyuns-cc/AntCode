@@ -18,9 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 try:
     from antcode_worker.cli import main
 except ImportError as exc:
-    raise SystemExit(
-        "无法导入 antcode_worker，请先在项目根目录执行 `uv sync` 安装依赖。"
-    ) from exc
+    raise SystemExit("无法导入 antcode_worker，请先在项目根目录执行 `uv sync` 安装依赖。") from exc
 
 if __name__ == "__main__":
     main()

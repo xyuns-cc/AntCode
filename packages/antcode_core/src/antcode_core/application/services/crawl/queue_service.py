@@ -19,7 +19,8 @@ from antcode_core.application.services.crawl.backends import (
 )
 from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
 from antcode_core.common.exceptions import CrawlError
-from antcode_core.domain.models.enums import Priority, TaskStatus
+from antcode_core.domain.models.crawl import CrawlTaskStatus
+from antcode_core.domain.models.enums import Priority
 
 # 默认配置
 DEFAULT_TASK_TIMEOUT_MS = 300000  # 5 分钟
@@ -44,7 +45,7 @@ class CrawlTask:
     parent_url: str | None = None
     batch_id: str = ""
     project_id: str = ""
-    status: str = TaskStatus.PENDING
+    status: str = CrawlTaskStatus.PENDING
 
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -75,7 +76,7 @@ class CrawlTask:
             parent_url=data.get("parent_url") or None,
             batch_id=data.get("batch_id", ""),
             project_id=data.get("project_id", ""),
-            status=data.get("status", TaskStatus.PENDING),
+            status=data.get("status", CrawlTaskStatus.PENDING),
         )
 
     @classmethod
@@ -171,10 +172,10 @@ class CrawlQueueService(BaseService):
 
     def __init__(
         self,
-        backend: CrawlQueueBackend = None,
-        dedup_service: CrawlDedupService = None,
-        task_timeout_ms: int = None,
-        max_retries: int = None,
+        backend: CrawlQueueBackend | None = None,
+        dedup_service: CrawlDedupService | None = None,
+        task_timeout_ms: int | None = None,
+        max_retries: int | None = None,
     ):
         """初始化队列服务
 
@@ -216,9 +217,9 @@ class CrawlQueueService(BaseService):
         batch_id: str = "",
         priority: int = Priority.NORMAL,
         depth: int = 0,
-        parent_url: str = None,
+        parent_url: str | None = None,
         method: str = "GET",
-        headers: dict = None,
+        headers: dict | None = None,
         skip_dedup: bool = False,
     ) -> tuple:
         """单个 URL 入队
@@ -280,9 +281,9 @@ class CrawlQueueService(BaseService):
         batch_id: str = "",
         priority: int = Priority.NORMAL,
         depth: int = 0,
-        parent_url: str = None,
+        parent_url: str | None = None,
         method: str = "GET",
-        headers: dict = None,
+        headers: dict | None = None,
         skip_dedup: bool = False,
     ) -> EnqueueResult:
         """批量 URL 入队
@@ -357,7 +358,7 @@ class CrawlQueueService(BaseService):
         project_id: str,
         worker_id: str,
         count: int = DEFAULT_BATCH_SIZE,
-        block_ms: int = None,
+        block_ms: int | None = None,
     ) -> list:
         """获取任务（按优先级）
 
@@ -386,7 +387,7 @@ class CrawlQueueService(BaseService):
         tasks = []
         for qt in queue_tasks:
             task = CrawlTask.from_queue_task(qt)
-            task.status = TaskStatus.DISPATCHED
+            task.status = CrawlTaskStatus.DISPATCHED
             tasks.append(task)
 
         if tasks:
@@ -398,7 +399,7 @@ class CrawlQueueService(BaseService):
     # 任务确认
     # =========================================================================
 
-    async def ack_task(self, project_id: str, msg_id: str, priority: int = None) -> bool:
+    async def ack_task(self, project_id: str, msg_id: str, priority: int | None = None) -> bool:
         """确认单个任务完成
 
         Args:
@@ -420,7 +421,7 @@ class CrawlQueueService(BaseService):
         logger.warning(f"确认任务失败: project={project_id}, msg_id={msg_id}")
         return False
 
-    async def ack_tasks(self, project_id: str, msg_ids: list, priority: int = None) -> int:
+    async def ack_tasks(self, project_id: str, msg_ids: list, priority: int | None = None) -> int:
         """批量确认任务完成
 
         Args:
@@ -469,7 +470,7 @@ class CrawlQueueService(BaseService):
     async def reclaim_timeout_tasks(
         self,
         project_id: str,
-        timeout_ms: int = None,
+        timeout_ms: int | None = None,
         count: int = 100,
     ) -> list:
         """回收所有优先级队列中的超时任务
@@ -500,11 +501,11 @@ class CrawlQueueService(BaseService):
 
         for item in reclaimed_items:
             task = CrawlTask.from_queue_task(item.task)
-            task.status = TaskStatus.TIMEOUT
+            task.status = CrawlTaskStatus.TIMEOUT
 
             # 检查是否超过最大重试次数
             if item.delivery_count > self._max_retries:
-                task.status = TaskStatus.FAILED
+                task.status = CrawlTaskStatus.FAILED
                 dead_letter_tasks.append(task)
                 logger.warning(
                     f"任务超过最大重试次数，移入死信队列: "
@@ -568,7 +569,7 @@ class CrawlQueueService(BaseService):
     # 队列信息查询
     # =========================================================================
 
-    async def get_queue_length(self, project_id: str, priority: int = None) -> int:
+    async def get_queue_length(self, project_id: str, priority: int | None = None) -> int:
         """获取队列长度
 
         Args:
@@ -580,7 +581,7 @@ class CrawlQueueService(BaseService):
         """
         return await self._backend.get_queue_length(project_id, priority)
 
-    async def get_pending_count(self, project_id: str, priority: int = None) -> int:
+    async def get_pending_count(self, project_id: str, priority: int | None = None) -> int:
         """获取待处理（处理中）消息数量
 
         Args:
@@ -620,6 +621,19 @@ class CrawlQueueService(BaseService):
             "total_pending": stats.processing,
             "dead_letter_count": stats.dead_letter,
         }
+
+    async def get_consumer_stats(self, project_id: str) -> dict[str, dict]:
+        """获取各优先级队列的消费者统计。"""
+        priorities = (
+            (Priority.HIGH, "high"),
+            (Priority.NORMAL, "normal"),
+            (Priority.LOW, "low"),
+        )
+        result: dict[str, dict] = {}
+        for priority, name in priorities:
+            metrics = await self._backend.get_queue_metrics(project_id, priority)
+            result[name] = metrics.consumers
+        return result
 
     # =========================================================================
     # 清理操作
@@ -676,7 +690,7 @@ class CrawlQueueService(BaseService):
         )
 
         # 验证状态转换
-        if validate and not TaskStatus.is_valid_transition(from_status, to_status):
+        if validate and not CrawlTaskStatus.is_valid_transition(from_status, to_status):
             error_msg = f"无效的状态转换: {from_status} → {to_status}"
             logger.warning(f"任务状态转换失败: msg_id={task.msg_id}, {error_msg}")
             result.error = error_msg
@@ -696,14 +710,14 @@ class CrawlQueueService(BaseService):
 
         Requirements: 8.2
         """
-        return await self.transition_task_status(task, TaskStatus.DISPATCHED)
+        return await self.transition_task_status(task, CrawlTaskStatus.DISPATCHED)
 
     async def start_task(self, task: CrawlTask) -> TaskStatusTransition:
         """开始执行任务（DISPATCHED → RUNNING）
 
         Requirements: 8.3
         """
-        return await self.transition_task_status(task, TaskStatus.RUNNING)
+        return await self.transition_task_status(task, CrawlTaskStatus.RUNNING)
 
     async def complete_task_success(
         self,
@@ -721,7 +735,7 @@ class CrawlQueueService(BaseService):
 
         Requirements: 8.4
         """
-        result = await self.transition_task_status(task, TaskStatus.SUCCESS)
+        result = await self.transition_task_status(task, CrawlTaskStatus.SUCCESS)
 
         if result.success and auto_ack and task.msg_id:
             await self.ack_task(task.project_id, task.msg_id)
@@ -748,7 +762,7 @@ class CrawlQueueService(BaseService):
 
         Requirements: 8.5, 11.5
         """
-        result = await self.transition_task_status(task, TaskStatus.RETRY)
+        result = await self.transition_task_status(task, CrawlTaskStatus.RETRY)
 
         if not result.success:
             return result
@@ -779,15 +793,15 @@ class CrawlQueueService(BaseService):
 
         Requirements: 8.6
         """
-        if task.status not in [TaskStatus.RUNNING, TaskStatus.DISPATCHED]:
+        if task.status not in [CrawlTaskStatus.RUNNING, CrawlTaskStatus.DISPATCHED]:
             return TaskStatusTransition(
                 success=False,
                 from_status=task.status,
-                to_status=TaskStatus.TIMEOUT,
+                to_status=CrawlTaskStatus.TIMEOUT,
                 error=f"无法从状态 {task.status} 转换为 TIMEOUT",
             )
 
-        result = await self.transition_task_status(task, TaskStatus.TIMEOUT, validate=False)
+        result = await self.transition_task_status(task, CrawlTaskStatus.TIMEOUT, validate=False)
 
         if result.success:
             logger.debug(f"任务标记为超时: msg_id={task.msg_id}")
@@ -803,15 +817,15 @@ class CrawlQueueService(BaseService):
 
         Requirements: 8.7
         """
-        if task.status not in [TaskStatus.RETRY, TaskStatus.TIMEOUT, TaskStatus.RUNNING]:
+        if task.status not in [CrawlTaskStatus.RETRY, CrawlTaskStatus.TIMEOUT, CrawlTaskStatus.RUNNING]:
             return TaskStatusTransition(
                 success=False,
                 from_status=task.status,
-                to_status=TaskStatus.FAILED,
+                to_status=CrawlTaskStatus.FAILED,
                 error=f"无法从状态 {task.status} 转换为 FAILED",
             )
 
-        result = await self.transition_task_status(task, TaskStatus.FAILED, validate=False)
+        result = await self.transition_task_status(task, CrawlTaskStatus.FAILED, validate=False)
 
         if result.success and move_to_dead_letter:
             queue_task = task.to_queue_task()
@@ -824,7 +838,7 @@ class CrawlQueueService(BaseService):
         self,
         task: CrawlTask,
         success: bool,
-        error: str = None,
+        error: str | None = None,
     ) -> TaskStatusTransition:
         """处理任务执行结果
 

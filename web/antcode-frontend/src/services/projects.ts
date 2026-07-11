@@ -8,6 +8,7 @@ import type {
   ProjectCreateRequest,
   ProjectCodeConfigUpdateRequest,
   ProjectFileConfigUpdateRequest,
+  ProjectSourceInfo,
   ProjectSourcePayload,
   ProjectUpdateRequest,
   ProjectListParams,
@@ -41,7 +42,7 @@ class ProjectService extends BaseService {
   private appendJsonField(
     formData: FormData,
     field: string,
-    value: string | Record<string, unknown> | undefined,
+    value: string | object | undefined,
     emptyObjectWhenBlank = false,
   ): void {
     if (value === undefined) {
@@ -190,8 +191,8 @@ class ProjectService extends BaseService {
     this.appendJsonField(formData, 'task_config', data.task_config)
     this.appendJsonField(formData, 'data_schema', data.data_schema)
     // S10 (Scrapy 迁移收尾): dedup_config 走 JSON 字段，resume_enabled 走 bool 字符串
-    this.appendJsonField(formData, 'dedup_config', (data as Record<string, unknown>).dedup_config)
-    const resumeVal = (data as Record<string, unknown>).resume_enabled
+    this.appendJsonField(formData, 'dedup_config', data.dedup_config)
+    const resumeVal = data.resume_enabled
     if (resumeVal !== undefined && resumeVal !== null) {
       formData.append('resume_enabled', String(Boolean(resumeVal)))
     }
@@ -322,12 +323,12 @@ class ProjectService extends BaseService {
     return this.put<Project>(`/${id}/code-config`, data)
   }
 
-  async getProjectSource(id: string): Promise<ProjectSourcePayload> {
-    return this.get<ProjectSourcePayload>(`/${id}/source`)
+  async getProjectSource(id: string): Promise<ProjectSourceInfo> {
+    return this.get<ProjectSourceInfo>(`/${id}/source`)
   }
 
-  async updateProjectSource(id: string, data: ProjectSourcePayload): Promise<ProjectSourcePayload> {
-    return this.put<ProjectSourcePayload>(`/${id}/source`, data)
+  async updateProjectSource(id: string, data: ProjectSourcePayload): Promise<ProjectSourceInfo> {
+    return this.put<ProjectSourceInfo>(`/${id}/source`, data)
   }
 
   // 更新文件项目配置

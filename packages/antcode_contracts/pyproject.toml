@@ -5,7 +5,7 @@ description = "AntCode gRPC 契约包 - Proto 生成的 Python 代码"
 requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.60.0",
-    "protobuf>=4.25.0",
+    "protobuf>=6.33.5",
 ]
 
 [build-system]

@@ -18,6 +18,8 @@ from typing import Any
 import ujson
 from loguru import logger
 
+from antcode_worker.runtime.gc_types import GCRunResult
+
 
 @dataclass
 class GCPolicy:
@@ -214,7 +216,7 @@ class RuntimeGC:
 
     async def _collect_runtimes(self) -> list[RuntimeInfo]:
         """收集所有运行时信息"""
-        runtimes = []
+        runtimes: list[RuntimeInfo] = []
 
         if not os.path.exists(self.venvs_dir):
             return runtimes
@@ -282,7 +284,7 @@ class RuntimeGC:
 
         now = datetime.now()
         cutoff = now.timestamp() - self.policy.ttl_seconds
-        to_clean = []
+        to_clean: list[RuntimeInfo] = []
 
         for rt in runtimes:
             last_used = rt.last_used_at or rt.created_at
@@ -313,7 +315,7 @@ class RuntimeGC:
             return []
 
         # 按最后使用时间排序（最旧的在前）
-        remaining.sort(key=lambda x: (x.last_used_at or x.created_at or datetime.min))
+        remaining.sort(key=lambda x: x.last_used_at or x.created_at or datetime.min)
 
         # 计算需要清理的数量
         to_clean_count = len(remaining) - self.policy.max_count
@@ -351,9 +353,9 @@ class RuntimeGC:
         remaining = [rt for rt in runtimes if rt.runtime_hash not in already_marked]
 
         # 按最后使用时间排序（最旧的在前）
-        remaining.sort(key=lambda x: (x.last_used_at or x.created_at or datetime.min))
+        remaining.sort(key=lambda x: x.last_used_at or x.created_at or datetime.min)
 
-        to_clean = []
+        to_clean: list[RuntimeInfo] = []
         current_usage = disk_usage
 
         for rt in remaining:
@@ -398,15 +400,11 @@ class RuntimeGC:
         if self._in_use_check is not None:
             try:
                 if self._in_use_check(runtime.runtime_hash):
-                    logger.info(
-                        "运行时正在使用中，GC 跳过: {}", runtime.runtime_hash
-                    )
+                    logger.info("运行时正在使用中，GC 跳过: {}", runtime.runtime_hash)
                     return False
             except Exception as exc:
                 # 检查失败偏保守：不清理，避免误删
-                logger.warning(
-                    "in_use_check 异常，保守跳过 {}: {}", runtime.runtime_hash, exc
-                )
+                logger.warning("in_use_check 异常，保守跳过 {}: {}", runtime.runtime_hash, exc)
                 return False
         try:
             # G1: 走线程池，避免 rmtree 卡事件循环
@@ -418,14 +416,14 @@ class RuntimeGC:
             self._stats.errors.append(f"清理 {runtime.runtime_hash} 失败: {e}")
             return False
 
-    async def run_gc(self) -> dict[str, Any]:
+    async def run_gc(self) -> GCRunResult:
         """
         执行一次垃圾回收
 
         Returns:
             GC 结果
         """
-        result = {
+        result: GCRunResult = {
             "cleaned": 0,
             "bytes_freed": 0,
             "errors": [],

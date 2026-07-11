@@ -10,11 +10,15 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
+from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.base import QueryHelper
 from antcode_core.application.services.logs.task_log_service import task_log_service
 from antcode_core.application.services.monitoring import monitoring_service
 from antcode_core.application.services.projects.relation_service import relation_service
+from antcode_core.application.services.scheduler.outbox_service import (
+    scheduler_outbox_service,
+)
 from antcode_core.application.services.scheduler.spider_dispatcher import spider_task_dispatcher
 from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import (
@@ -43,14 +47,11 @@ class SchedulerService:
         # 并发控制 - 限制同时执行的任务数量
         self.concurrency_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TASKS)
         self._role = settings.SCHEDULER_ROLE.lower()
-        self._event_stream = settings.scheduler_event_stream
-        self._event_client = None
 
     def _refresh_role(self) -> str:
         role = settings.SCHEDULER_ROLE.lower()
         if role != self._role:
             self._role = role
-        self._event_stream = settings.scheduler_event_stream
         return self._role
 
     def _scheduler_enabled(self) -> bool:
@@ -59,21 +60,15 @@ class SchedulerService:
     def _control_plane(self) -> bool:
         return self._refresh_role() == "control"
 
-    async def _publish_event(self, event: str, task_id: int) -> None:
+    async def _publish_event(self, event: str, task_id: int, connection=None) -> None:
         if not self._control_plane():
             return
-        if self._event_client is None:
-            from antcode_core.infrastructure.redis.streams import StreamClient
-
-            self._event_client = StreamClient()
-        await self._event_client.xadd(
-            self._event_stream,
-            {
-                "event": event,
-                "task_id": str(task_id),
-                "timestamp": datetime.now(UTC).isoformat(),
-            },
-            maxlen=settings.SCHEDULER_EVENT_MAXLEN,
+        await scheduler_outbox_service.enqueue(
+            event_type=event,
+            aggregate_type="task",
+            aggregate_id=task_id,
+            payload={"task_id": str(task_id)},
+            connection=connection,
         )
 
     async def start(self):
@@ -107,8 +102,6 @@ class SchedulerService:
         2. 在同一个 DB 事务里 Task.create + scheduler.add_job,
            add_job 失败则事务回滚,避免"数据库里躺着一个永远调度不起来的任务"。
         """
-        from tortoise.transactions import in_transaction
-
         # 使用传入的内部 project_id,或从 task_data 中获取
         project_id = internal_project_id if internal_project_id is not None else task_data.project_id
 
@@ -147,7 +140,9 @@ class SchedulerService:
 
             # 添加到调度器(注意:add_task 在非 master 角色下只发事件,
             # 不会真的构造 trigger,所以上面 stub 那次试构造是唯一的语法兜底)。
-            if task.is_active:
+            if task.is_active and self._control_plane():
+                await self._publish_event("task_changed", task.id, connection=conn)
+            elif task.is_active:
                 try:
                     await self.add_task(task)
                 except Exception as e:  # noqa: BLE001
@@ -348,12 +343,13 @@ class SchedulerService:
             except Exception as e:  # noqa: BLE001
                 raise ValueError(f"任务触发器配置非法: {e}") from e
 
-        await task.save()
-
         if self._control_plane():
-            await self._publish_event("task_changed", task.id)
+            async with in_transaction("default") as conn:
+                await task.save(using_db=conn)
+                await self._publish_event("task_changed", task.id, connection=conn)
             logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
             return task
+        await task.save()
 
         # 如果任务状态改变，更新调度器（使用内部 ID）
         if "is_active" in update_data:
@@ -394,16 +390,16 @@ class SchedulerService:
         if not task:
             return False
 
-        # 从调度器移除（使用内部 ID）
-        await self.remove_task(task.id)
+        if self._scheduler_enabled():
+            await self.remove_task(task.id)
 
-        # 级联删除执行记录
-        deleted_count = await TaskRun.filter(task_id=task.id).delete()
+        async with in_transaction("default") as conn:
+            deleted_count = await TaskRun.filter(task_id=task.id).using_db(conn).delete()
+            await task.delete(using_db=conn)
+            if self._control_plane():
+                await self._publish_event("task_changed", task.id, connection=conn)
         if deleted_count > 0:
             logger.info(f"已删除任务 {task.id} 的 {deleted_count} 条执行记录")
-
-        # 删除数据库记录
-        await task.delete()
 
         logger.info(f"任务删除成功: {task.name} (ID: {task.id})")
         return True
@@ -682,8 +678,9 @@ class SchedulerService:
             task = await Task.get(id=task_id)
             task.status = TaskStatus.PAUSED
             task.is_active = False
-            await task.save()
-            await self._publish_event("task_changed", task_id)
+            async with in_transaction("default") as conn:
+                await task.save(using_db=conn)
+                await self._publish_event("task_changed", task_id, connection=conn)
             logger.info(f"任务 {task_id} 已暂停")
             return
         try:
@@ -706,8 +703,9 @@ class SchedulerService:
             task = await Task.get(id=task_id)
             task.status = TaskStatus.PENDING
             task.is_active = True
-            await task.save()
-            await self._publish_event("task_changed", task_id)
+            async with in_transaction("default") as conn:
+                await task.save(using_db=conn)
+                await self._publish_event("task_changed", task_id, connection=conn)
             logger.info(f"任务 {task_id} 已恢复")
             return
         try:
@@ -1041,11 +1039,13 @@ class SchedulerService:
             try:
                 if project_type_str == "code":
                     from antcode_core.domain.models.project import ProjectCode
+
                     info = await ProjectCode.get_or_none(project_id=project.id)
                     if info and info.language:
                         language = info.language.strip().lower()
                 elif project_type_str == "file":
                     from antcode_core.domain.models.project import ProjectFile
+
                     info = await ProjectFile.get_or_none(project_id=project.id)
                     if info and getattr(info, "language", None):
                         language = info.language.strip().lower()
@@ -1139,43 +1139,29 @@ class SchedulerService:
             params["scheduled_task_id"] = task.id
             params["scheduled_task_name"] = task.name
 
-            # S6 (Scrapy 迁移后)：url_pattern 分页由 UniversalRuleSpider 在
-            # 单个 run 内自展开（``start`` 里遍历 start_page..start_page+max_pages），
-            # 不再需要 scheduler 侧把一个规则任务展开成 N 个独立 run。这里保持
-            # 单任务提交路径统一走 else 分支——去掉了旧的 "URL分页多任务展开"
-            # 逻辑，避免同一 run 被拆成 N 个 execution 导致 UI/统计/去重都错乱。
-            if False:  # 兼容占位：保留旧分支以便 diff 回溯，实际永不进入
-                pass
-            else:
-                # 单任务提交
-                result = await spider_task_dispatcher.submit_rule_task(
-                    project=project,
-                    rule_detail=rule_detail,
-                    run_id=execution.run_id,
-                    params=params,
-                )
+            result = await spider_task_dispatcher.submit_rule_task(
+                project=project,
+                rule_detail=rule_detail,
+                run_id=execution.run_id,
+                params=params,
+            )
+            if not result["success"]:
+                return {"success": False, "error": result.get("message", "提交失败")}
 
-                if result["success"]:
-                    await self._log_execution(
-                        execution,
-                        "INFO",
-                        f"任务已提交到节点 {result.get('worker_name', 'unknown')}: {result.get('task_id')}",
-                    )
-
-                    return {
-                        "success": True,
-                        "distributed": True,
-                        "pending": True,
-                        "message": f"任务已提交到节点 {result.get('worker_name', 'unknown')}",
-                        "task_id": result.get("task_id"),
-                        "worker_id": result.get("worker_id"),
-                        "worker_name": result.get("worker_name"),
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": result.get("message", "提交失败"),
-                    }
+            await self._log_execution(
+                execution,
+                "INFO",
+                f"任务已提交到节点 {result.get('worker_name', 'unknown')}: {result.get('task_id')}",
+            )
+            return {
+                "success": True,
+                "distributed": True,
+                "pending": True,
+                "message": f"任务已提交到节点 {result.get('worker_name', 'unknown')}",
+                "task_id": result.get("task_id"),
+                "worker_id": result.get("worker_id"),
+                "worker_name": result.get("worker_name"),
+            }
 
         except Exception as e:
             logger.error(f"执行规则任务失败: {e}")

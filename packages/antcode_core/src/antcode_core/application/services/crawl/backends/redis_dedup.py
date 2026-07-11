@@ -44,7 +44,7 @@ class RedisDedupStore(DedupStore):
     DEFAULT_CAPACITY = 1000000  # 默认容量 100 万
     DEFAULT_ERROR_RATE = 0.001  # 默认误判率 0.1%
 
-    def __init__(self, bloom_client: BloomFilterClient = None):
+    def __init__(self, bloom_client: BloomFilterClient | None = None):
         """初始化 Redis 去重存储
 
         Args:
@@ -166,8 +166,8 @@ class RedisDedupStore(DedupStore):
     async def recreate_store(
         self,
         project_id: str,
-        capacity: int = None,
-        error_rate: float = None,
+        capacity: int | None = None,
+        error_rate: float | None = None,
     ) -> bool:
         """清空并重建去重存储
 

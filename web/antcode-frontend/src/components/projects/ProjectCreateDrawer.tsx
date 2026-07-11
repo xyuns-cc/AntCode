@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useEffect, useState, memo, useCallback } from 'react'
 import {
+  App,
   Drawer,
   Steps,
   Button,
@@ -40,6 +41,7 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
   onClose,
   onSuccess
 }) => {
+  const { message } = App.useApp()
   const [currentStep, setCurrentStep] = useState(0)
   const [projectType, setProjectType] = useState<ProjectType | null>(null)
   const [loading, setLoading] = useState(false)
@@ -64,11 +66,24 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
   const [regionConfig, setRegionConfig] = useState<{ region?: string; require_render?: boolean }>({})
 
   useEffect(() => {
-    if (open) {
-      // 加载 Worker 列表
-      workerService.getAllWorkers().then(setWorkerList).catch(() => setWorkerList([]))
+    if (!open) return
+
+    let active = true
+    const loadWorkers = async () => {
+      try {
+        const workers = await workerService.getAllWorkers()
+        if (active) setWorkerList(workers)
+      } catch (error) {
+        Logger.error('加载 Worker 列表失败:', error)
+        message.error('加载 Worker 列表失败')
+      }
     }
-  }, [open])
+
+    void loadWorkers()
+    return () => {
+      active = false
+    }
+  }, [message, open])
 
   // 步骤配置
   const steps = [
@@ -305,11 +320,11 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo(({
                   onChange={(config) => {
                     setRegionConfig(config)
                     // 根据引擎类型更新 require_render
-                    if (formData.engine === 'browser') {
+                    if (formData.engine === 'playwright') {
                       setRegionConfig({ ...config, require_render: true })
                     }
                   }}
-                  requireRender={formData.engine === 'browser'}
+                  requireRender={formData.engine === 'playwright'}
                 />
               </Card>
               <RuleProjectForm {...commonProps} onValidationChange={handleRuleValidationChange} onRef={setRuleFormRef} />

@@ -185,8 +185,10 @@ def _http_error_message(detail: Any) -> str:
     return str(detail)
 
 
-async def business_exception_handler(request: Request, exc: BusinessException) -> JSONResponse:
+async def business_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """处理业务异常"""
+    if not isinstance(exc, BusinessException):
+        raise TypeError("business_exception_handler requires BusinessException")
     return create_error_response(
         status_code=exc.status_code,
         message=exc.detail,
@@ -197,9 +199,11 @@ async def business_exception_handler(request: Request, exc: BusinessException) -
 
 async def http_exception_handler(
     request: Request,
-    exc: HTTPException | StarletteHTTPException,
+    exc: Exception,
 ) -> JSONResponse:
     """处理 HTTP 异常"""
+    if not isinstance(exc, (HTTPException, StarletteHTTPException)):
+        raise TypeError("http_exception_handler requires HTTPException")
     return create_error_response(
         status_code=exc.status_code,
         message=_http_error_message(exc.detail),
@@ -207,8 +211,10 @@ async def http_exception_handler(
     )
 
 
-async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """处理请求验证异常"""
+    if not isinstance(exc, RequestValidationError):
+        raise TypeError("validation_exception_handler requires RequestValidationError")
     errors: list[dict[str, Any]] = []
     for error in exc.errors():
         field = ".".join(str(loc) for loc in error.get("loc", []))

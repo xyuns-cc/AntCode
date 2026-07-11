@@ -146,9 +146,7 @@ class LeaseSweeperLoop:
             )
             for worker_id, result in zip(worker_ids, results, strict=False):
                 if isinstance(result, BaseException):
-                    logger.opt(exception=result).error(
-                        f"on_worker_evicted 回调异常: worker_id={worker_id}"
-                    )
+                    logger.opt(exception=result).error(f"on_worker_evicted 回调异常: worker_id={worker_id}")
 
         # 2) 并发 audit — 与 gateway 安全审计一致的字段 schema。
         audit_results = await asyncio.gather(
@@ -157,9 +155,7 @@ class LeaseSweeperLoop:
         )
         for worker_id, result in zip(worker_ids, audit_results, strict=False):
             if isinstance(result, BaseException):
-                logger.opt(exception=result).error(
-                    f"写 worker_evicted audit 失败: worker_id={worker_id}"
-                )
+                logger.opt(exception=result).error(f"写 worker_evicted audit 失败: worker_id={worker_id}")
 
     async def _emit_audit(self, worker_id: str) -> None:
         if self._audit_stream is None:
@@ -178,9 +174,7 @@ class LeaseSweeperLoop:
                 approximate=True,
             )
         except Exception:  # noqa: BLE001
-            logger.exception(
-                f"写 worker_evicted audit 失败: worker_id={worker_id}"
-            )
+            logger.exception(f"写 worker_evicted audit 失败: worker_id={worker_id}")
 
 
 __all__ = [

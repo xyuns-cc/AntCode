@@ -55,7 +55,7 @@ class AntCodeDedupPipeline:
     DEFAULT_TTL_DAYS = 30
 
     def __init__(self) -> None:
-        self._redis = None
+        self._redis: Any | None = None
         self._enabled = False
         self._fields: list[str] = []
         self._scope: str = "project"
@@ -116,9 +116,7 @@ class AntCodeDedupPipeline:
         self._on_hit = str(cfg.get("on_hit") or "drop").lower()
         ttl_days = int(cfg.get("ttl_days", self.DEFAULT_TTL_DAYS))
         self._ttl_seconds = ttl_days * 86400 if ttl_days > 0 else 0
-        self._namespace = (
-            os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
-        )
+        self._namespace = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
         self._project_id = getattr(spider, "project_id", "") or ""
         self._run_id = getattr(spider, "run_id", "") or ""
         try:

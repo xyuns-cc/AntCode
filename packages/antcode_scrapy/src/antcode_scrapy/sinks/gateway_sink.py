@@ -28,33 +28,28 @@ class GatewaySpiderDataSink:
     DEFAULT_BATCH_SIZE = 50
     DEFAULT_FLUSH_INTERVAL_S = 2.0
 
-    def __init__(
-        self, *, endpoint: str, secure: bool = False, token: str = ""
-    ) -> None:
+    def __init__(self, *, endpoint: str, secure: bool = False, token: str = "") -> None:
         self._endpoint = endpoint
         self._secure = secure
         self._token = token
-        self._channel = None
-        self._stub = None
+        self._channel: Any = None
+        self._stub: Any = None
         self._worker_id = os.environ.get("ANTCODE_WORKER_ID", "").strip() or "unknown"
         self._run_id = ""
         self._project_id = ""
         self._spider_name = ""
         self._batch_items: list[Any] = []
         self._pending_meta: dict[str, str] = {}
-        self._batch_size = int(
-            os.environ.get("ANTCODE_SPIDER_GATEWAY_BATCH_SIZE", "")
-            or self.DEFAULT_BATCH_SIZE
-        )
+        self._batch_size = int(os.environ.get("ANTCODE_SPIDER_GATEWAY_BATCH_SIZE", "") or self.DEFAULT_BATCH_SIZE)
         self._flush_interval_s = float(
-            os.environ.get("ANTCODE_SPIDER_GATEWAY_FLUSH_INTERVAL", "")
-            or self.DEFAULT_FLUSH_INTERVAL_S
+            os.environ.get("ANTCODE_SPIDER_GATEWAY_FLUSH_INTERVAL", "") or self.DEFAULT_FLUSH_INTERVAL_S
         )
         self._last_flush = 0.0
         self._lock = asyncio.Lock()
         # P2-02: 后台定时 flush 任务
         self._flush_task: asyncio.Task | None = None
         self._closing = False
+        self._unreported_written = 0
 
     async def open(
         self,
@@ -77,10 +72,7 @@ class GatewaySpiderDataSink:
         else:
             self._channel = grpc.aio.insecure_channel(self._endpoint)
         self._stub = data_pb2_grpc.DataServiceStub(self._channel)
-        logger.info(
-            f"GatewaySpiderDataSink 就绪: endpoint={self._endpoint} "
-            f"secure={self._secure} run_id={run_id}"
-        )
+        logger.info(f"GatewaySpiderDataSink 就绪: endpoint={self._endpoint} secure={self._secure} run_id={run_id}")
         self._last_flush = asyncio.get_event_loop().time()
 
         # P2-02: 起后台定时 flush 任务。老实现只在 write_item 时按
@@ -145,12 +137,21 @@ class GatewaySpiderDataSink:
             self._batch_items.append(item)
             now = asyncio.get_event_loop().time()
             should_flush = (
-                len(self._batch_items) >= self._batch_size
-                or (now - self._last_flush) >= self._flush_interval_s
+                len(self._batch_items) >= self._batch_size or (now - self._last_flush) >= self._flush_interval_s
             )
         if should_flush:
-            return await self._flush()
+            ok, _ = await self._flush()
+            if not ok:
+                return False, 0
+            return True, await self.consume_written_count()
         return True, 0
+
+    async def consume_written_count(self) -> int:
+        """返回后台或前台 flush 已确认但尚未计入 Scrapy stats 的条数。"""
+        async with self._lock:
+            written = self._unreported_written
+            self._unreported_written = 0
+            return written
 
     async def write_meta(self, fields: dict[str, str]) -> None:
         async with self._lock:
@@ -169,65 +170,80 @@ class GatewaySpiderDataSink:
             - RPC 成功且 ack.failed=0 → ``(True, len(items))``
             - 任一失败 → ``(False, 0)``（buffer/meta 已合并回队首）
         """
-        from antcode_contracts import data_pb2
+        pending_items, pending_meta = await self._take_pending()
+        if not pending_items and not pending_meta:
+            return True, 0
+        batch = self._build_batch(pending_items, pending_meta)
+        return await self._send_pending(batch, pending_items, pending_meta)
 
+    async def _take_pending(self) -> tuple[list[Any], dict[str, str]]:
         async with self._lock:
-            if not self._batch_items and not self._pending_meta:
-                return True, 0
             pending_items = list(self._batch_items)
             pending_meta = dict(self._pending_meta)
             self._batch_items.clear()
             self._pending_meta.clear()
             self._last_flush = asyncio.get_event_loop().time()
+            return pending_items, pending_meta
+
+    def _build_batch(self, pending_items: list[Any], pending_meta: dict[str, str]):
+        from antcode_contracts import data_pb2
 
         batch = data_pb2.SpiderDataBatch(
             worker_id=self._worker_id,
             run_id=self._run_id,
             project_id=self._project_id,
         )
-        for item in pending_items:
-            batch.items.append(item)
+        batch.items.extend(pending_items)
         if pending_meta:
-            meta = data_pb2.SpiderMetaUpdate()
-            if "status" in pending_meta:
-                meta.status = pending_meta["status"]
-            if "items_count" in pending_meta:
-                try:
-                    meta.items_count = int(pending_meta["items_count"])
-                except (TypeError, ValueError):
-                    pass
-            if "last_item_at" in pending_meta:
-                meta.last_item_at = pending_meta["last_item_at"]
-            batch.meta.CopyFrom(meta)
+            batch.meta.CopyFrom(self._build_meta(pending_meta))
+        return batch
 
-        # 单 batch 一条 client-streaming 消息即可完成往返（gateway 的
-        # StreamSpiderData 是 client-streaming，一次 request → 一个 ack）。
-        # 用一个 one-shot 的 async generator 送这一个 batch。
+    @staticmethod
+    def _build_meta(pending_meta: dict[str, str]):
+        from antcode_contracts import data_pb2
+
+        meta = data_pb2.SpiderMetaUpdate()
+        meta.status = pending_meta.get("status", "")
+        items_count = pending_meta.get("items_count")
+        if items_count is not None:
+            meta.items_count = int(items_count)
+        meta.last_item_at = pending_meta.get("last_item_at", "")
+        return meta
+
+    async def _send_pending(
+        self,
+        batch: Any,
+        pending_items: list[Any],
+        pending_meta: dict[str, str],
+    ) -> tuple[bool, int]:
+        try:
+            ack = await self._send_batch(batch)
+        except Exception as exc:
+            logger.error(f"gateway StreamSpiderData 失败: {exc}；恢复 {len(pending_items)} 条待重试")
+            await self._restore_pending(pending_items, pending_meta)
+            return False, 0
+        if getattr(ack, "failed", 0):
+            logger.warning(
+                f"gateway StreamSpiderData 部分失败: accepted={getattr(ack, 'accepted', 0)} "
+                f"failed={ack.failed}；恢复 {len(pending_items)} 条待重试"
+            )
+            await self._restore_pending(pending_items, pending_meta)
+            return False, 0
+        async with self._lock:
+            self._unreported_written += len(pending_items)
+        return True, len(pending_items)
+
+    async def _send_batch(self, batch: Any) -> Any:
+        if self._stub is None:
+            raise RuntimeError("Gateway sink 尚未 open")
+
         async def _iter():
             yield batch
 
         metadata = []
         if self._token:
             metadata.append(("authorization", f"Bearer {self._token}"))
-        try:
-            ack = await self._stub.StreamSpiderData(_iter(), metadata=metadata)
-            failed = getattr(ack, "failed", 0)
-            if failed:
-                accepted = getattr(ack, "accepted", 0)
-                logger.warning(
-                    f"gateway StreamSpiderData 部分失败: accepted={accepted} "
-                    f"failed={failed}；恢复 {len(pending_items)} 条待重试"
-                )
-                await self._restore_pending(pending_items, pending_meta)
-                return False, 0
-            return True, len(pending_items)
-        except Exception as exc:
-            logger.error(
-                f"gateway StreamSpiderData 失败: {exc}；恢复 "
-                f"{len(pending_items)} 条待重试"
-            )
-            await self._restore_pending(pending_items, pending_meta)
-            return False, 0
+        return await self._stub.StreamSpiderData(_iter(), metadata=metadata)
 
     @staticmethod
     def _on_flush_task_done(task: asyncio.Task) -> None:
@@ -281,9 +297,7 @@ class GatewaySpiderDataSink:
                 merged.update(self._pending_meta)
                 self._pending_meta = merged
 
-    async def close(
-        self, final_meta: dict[str, str] | None = None
-    ) -> tuple[bool, int]:
+    async def close(self, final_meta: dict[str, str] | None = None) -> tuple[bool, int]:
         """把剩余的 items + final_meta 一起 flush 出去，然后关 channel。
 
         **P1-27 修复**：调用方必须知道 close 是否真的把 buffer 排干净；旧版

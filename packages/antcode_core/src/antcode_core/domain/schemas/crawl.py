@@ -17,9 +17,7 @@ class CrawlBatchCreateRequest(BaseModel):
     description: str = Field("", max_length=1000, description="批次描述")
     # P1-29 集合大小兜底:1w 个种子 URL 已远超真实业务需要,超过就 422,
     # 避免 10M 条 URL 打爆 asyncpg / Pydantic 反序列化 OOM。
-    seed_urls: list[str] = Field(
-        ..., min_length=1, max_length=10000, description="种子URL列表(最多 10000)"
-    )
+    seed_urls: list[str] = Field(..., min_length=1, max_length=10000, description="种子URL列表(最多 10000)")
     max_depth: int = Field(3, ge=1, le=10, description="最大爬取深度")
     max_pages: int = Field(10000, ge=1, le=1000000, description="最大爬取页面数")
     max_concurrency: int = Field(50, ge=1, le=500, description="最大并发数")
@@ -79,7 +77,7 @@ class BatchProgressResponse(BaseModel):
     failed_urls: int = Field(0, description="失败数")
     active_workers: int = Field(0, description="活跃Worker数")
     speed_per_minute: float = Field(0.0, description="速度(URLs/分钟)")
-    last_updated: str = Field("", description="最后更新时间")
+    last_updated: str | None = Field(default=None, description="最后更新时间")
 
 
 class CrawlMetricsResponse(BaseModel):
@@ -115,28 +113,28 @@ class CrawlTestResultResponse(BaseModel):
 class BatchProgressInfo(BaseModel):
     """批次进度信息"""
 
-    total_urls: int = Field(0, description="总URL数")
-    completed_urls: int = Field(0, description="已完成数")
-    failed_urls: int = Field(0, description="失败数")
-    pending_urls: int = Field(0, description="待处理数")
-    speed_per_minute: float = Field(0.0, description="速度(URLs/分钟)")
-    active_workers: int = Field(0, description="活跃Worker数")
+    total_urls: int = Field(default=0, description="总URL数")
+    completed_urls: int = Field(default=0, description="已完成数")
+    failed_urls: int = Field(default=0, description="失败数")
+    pending_urls: int = Field(default=0, description="待处理数")
+    speed_per_minute: float = Field(default=0.0, description="速度(URLs/分钟)")
+    active_workers: int = Field(default=0, description="活跃Worker数")
 
 
 class BatchQueueInfo(BaseModel):
     """批次队列信息"""
 
-    length: int = Field(0, description="队列长度")
-    pel_size: int = Field(0, description="PEL待确认消息数")
+    length: int = Field(default=0, description="队列长度")
+    pel_size: int = Field(default=0, description="PEL待确认消息数")
 
 
 class BatchConfigInfo(BaseModel):
     """批次配置信息"""
 
-    max_depth: int = Field(0, description="最大爬取深度")
-    max_pages: int = Field(0, description="最大爬取页面数")
-    max_concurrency: int = Field(0, description="最大并发数")
-    max_retries: int = Field(0, description="最大重试次数")
+    max_depth: int = Field(default=0, description="最大爬取深度")
+    max_pages: int = Field(default=0, description="最大爬取页面数")
+    max_concurrency: int = Field(default=0, description="最大并发数")
+    max_retries: int = Field(default=0, description="最大重试次数")
 
 
 class BatchMetricsResponse(BaseModel):
@@ -261,9 +259,9 @@ class TestStatusResponse(BaseModel):
 
     batch_id: str = Field("", description="批次ID")
     status: str = Field(..., description="状态(pending/running/completed/failed/not_found)")
-    progress: BatchProgressResponse | None = Field(None, description="进度信息")
-    started_at: str | None = Field(None, description="开始时间")
-    completed_at: str | None = Field(None, description="完成时间")
+    progress: BatchProgressResponse | None = Field(default=None, description="进度信息")
+    started_at: str | None = Field(default=None, description="开始时间")
+    completed_at: str | None = Field(default=None, description="完成时间")
 
 
 # =============================================================================

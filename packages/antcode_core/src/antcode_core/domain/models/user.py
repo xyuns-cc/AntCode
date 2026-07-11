@@ -4,7 +4,7 @@
 用户账户的数据模型定义。
 """
 
-from enum import Enum
+from enum import StrEnum
 
 import bcrypt
 from tortoise import fields
@@ -12,7 +12,7 @@ from tortoise import fields
 from antcode_core.domain.models.base import BaseModel, generate_public_id
 
 
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     """用户角色"""
 
     USER = "user"

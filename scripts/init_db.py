@@ -36,7 +36,6 @@ sys.path.insert(0, str(ROOT / "services" / "web_api" / "src"))
 from dotenv import load_dotenv  # noqa: E402
 from loguru import logger  # noqa: E402
 
-
 # T7 阶段新加的性能索引 —— 全部 IF NOT EXISTS 幂等
 PERFORMANCE_INDEXES: list[tuple[str, str]] = [
     # T7-B1a (P0-1): task_executions JSONB 函数索引，
@@ -72,6 +71,50 @@ PERFORMANCE_INDEXES: list[tuple[str, str]] = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# 旧库升级补丁（幂等）
+# ---------------------------------------------------------------------------
+# ``generate_schemas(safe=True)`` 只创建**不存在的表**，不会给已存在的表加列。
+# 全新部署无感；但如果 DATABASE_URL 指向老版本建过的库（例如压测遗留库），
+# workers 表就缺 P1-10 新增的凭证 hash 列，启动后
+# ``Worker.filter(api_key_hash=...)`` 会直接 SQL 报错（UndefinedColumn）。
+# 这里按 information_schema 探测，缺列才 ALTER，可重复执行。
+# 列定义与 migrations/models/20260710_secure_worker_credentials.sql 保持一致。
+WORKERS_LEGACY_COLUMNS: list[tuple[str, str]] = [
+    (
+        "api_key_hash",
+        'ALTER TABLE "workers" ADD COLUMN IF NOT EXISTS "api_key_hash" VARCHAR(128) NULL',
+    ),
+    (
+        "secret_key_hash",
+        'ALTER TABLE "workers" ADD COLUMN IF NOT EXISTS "secret_key_hash" VARCHAR(128) NULL',
+    ),
+    (
+        "secret_key_encrypted",
+        'ALTER TABLE "workers" ADD COLUMN IF NOT EXISTS "secret_key_encrypted" TEXT NULL',
+    ),
+    (
+        "api_key_previous_hash",
+        'ALTER TABLE "workers" ADD COLUMN IF NOT EXISTS "api_key_previous_hash" VARCHAR(128) NULL',
+    ),
+]
+
+# workers 凭证 hash 列的查询索引（model 里 db_index=True，认证按 hash 查询）。
+# 只有当该列上**一个索引都没有**时才补建 —— 全新库 Tortoise 已按自己的命名
+# 建过索引，重复建第二个纯属浪费。
+WORKERS_LEGACY_INDEXES: list[tuple[str, str, str]] = [
+    (
+        "api_key_hash",
+        "idx_workers_api_key_hash",
+        'CREATE INDEX IF NOT EXISTS "idx_workers_api_key_hash" ON "workers" ("api_key_hash")',
+    ),
+    (
+        "api_key_previous_hash",
+        "idx_workers_api_key_previous_hash",
+        'CREATE INDEX IF NOT EXISTS "idx_workers_api_key_previous_hash" ON "workers" ("api_key_previous_hash")',
+    ),
+]
+
 # P1-01: 启动完成后必须存在的核心表清单。缺任何一张都属于灾难性 model
 # 漏声明（例如迁移 37 add_task_logs 消失后 task_logs 表不建的历史故障），
 # 必须在部署脚本里立刻 fail-fast，不能让服务带着"空日志页"上线。
@@ -102,6 +145,8 @@ REQUIRED_TABLES: list[str] = [
     "worker_performance_history",
     "spider_metrics_history",
     "user_worker_permissions",
+    "user_sessions",
+    "scheduler_outbox",
 ]
 
 
@@ -136,8 +181,7 @@ async def _check_required_tables() -> None:
     missing: list[str] = []
     for tbl in REQUIRED_TABLES:
         rows = await conn.execute_query_dict(
-            "SELECT 1 AS ok FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name = $1",
+            "SELECT 1 AS ok FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
             [tbl],
         )
         if not rows:
@@ -145,8 +189,7 @@ async def _check_required_tables() -> None:
     await close_db()
     if missing:
         logger.error(
-            "必要表未创建: {}. 请检查 antcode_core.domain.models 是否声明了对应 model，"
-            "或补写 SQL 迁移。",
+            "必要表未创建: {}. 请检查 antcode_core.domain.models 是否声明了对应 model，或补写 SQL 迁移。",
             ", ".join(missing),
         )
         raise RuntimeError(f"必要表缺失: {missing}")
@@ -167,6 +210,97 @@ async def _generate_schemas() -> None:
     await Tortoise.generate_schemas(safe=True)
     logger.info("schema 已就位（safe=True，只补缺失的表）")
     await close_db()
+
+
+async def _upgrade_legacy_schema() -> None:
+    """老库（非全新部署）结构对齐 —— 幂等，可重复执行。
+
+    ``generate_schemas(safe=True)`` 只补缺失的表，不改已存在的表。本函数
+    覆盖两类"老库跑新代码"的断裂点：
+
+    1. **workers 凭证 hash 列**（P1-10）：老库缺 api_key_hash /
+       secret_key_hash / secret_key_encrypted / api_key_previous_hash，
+       认证查询 ``Worker.filter(api_key_hash=...)`` 会直接 UndefinedColumn。
+       按列探测补 ALTER + 查询索引。
+    2. **project_sources.entry_point**：新 model 已删除该字段，但老库上它
+       是 NOT NULL —— 新代码 INSERT project_sources 不再写这列，会违反
+       约束。此处只 ``DROP NOT NULL``（非破坏性）；要彻底删列请手动执行
+       migrations/models/20260711_remove_project_source_mirrors.sql。
+
+    全新库上以上探测全部命中"已就位/列不存在"，本函数是纯 no-op。
+    """
+    from antcode_core.infrastructure.db.tortoise import (
+        close_db,
+        get_default_tortoise_config,
+        init_db,
+    )
+    from tortoise import Tortoise
+
+    config = get_default_tortoise_config(service="web_api")
+    await init_db(config=config, service="web_api")
+    conn = Tortoise.get_connection("default")
+
+    async def _column_exists(table: str, column: str) -> bool:
+        rows = await conn.execute_query_dict(
+            "SELECT 1 AS ok FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+            [table, column],
+        )
+        return bool(rows)
+
+    # 1. workers 凭证 hash 列（generate_schemas 建过 workers 表，ALTER 一定可执行）
+    added_columns = 0
+    for column, ddl in WORKERS_LEGACY_COLUMNS:
+        if await _column_exists("workers", column):
+            continue
+        await conn.execute_query(ddl)
+        added_columns += 1
+        logger.info("旧库补列: workers.{}", column)
+
+    # 补 hash 查询索引 —— 仅当该列上没有任何索引时（全新库 Tortoise 自带）
+    for column, index_name, ddl in WORKERS_LEGACY_INDEXES:
+        rows = await conn.execute_query_dict(
+            """
+            SELECT 1 AS ok
+            FROM pg_index i
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (i.indkey)
+            WHERE n.nspname = 'public' AND t.relname = 'workers' AND a.attname = $1
+            """,
+            [column],
+        )
+        if rows:
+            continue
+        await conn.execute_query(ddl)
+        logger.info("旧库补索引: {}", index_name)
+
+    if added_columns:
+        logger.warning(
+            "workers 表补了 {} 个凭证 hash 列（老库升级路径）。"
+            "存量 Worker 的明文凭证需要回填 hash 才能继续认证，"
+            "请执行 `uv run python scripts/migrate_worker_credentials.py`（见 "
+            "migrations/models/20260710_secure_worker_credentials.sql 注释）。",
+            added_columns,
+        )
+
+    # 2. project_sources.entry_point：新 model 已删；老库上放开 NOT NULL
+    rows = await conn.execute_query_dict(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        ["project_sources", "entry_point"],
+    )
+    if rows and rows[0]["is_nullable"] == "NO":
+        await conn.execute_query(
+            'ALTER TABLE "project_sources" ALTER COLUMN "entry_point" DROP NOT NULL'
+        )
+        logger.warning(
+            "旧库 project_sources.entry_point 已放开 NOT NULL（新版本不再写该列）。"
+            "彻底删列请手动执行 migrations/models/20260711_remove_project_source_mirrors.sql"
+        )
+
+    await close_db()
+    logger.info("旧库结构对齐检查完成")
 
 
 async def _create_performance_indexes() -> None:
@@ -214,10 +348,7 @@ async def _create_admin() -> None:
     username = os.environ.get("DEFAULT_ADMIN_USERNAME", "admin").strip()
     password = os.environ.get("DEFAULT_ADMIN_PASSWORD", "").strip()
     if not password:
-        logger.warning(
-            "未设置 DEFAULT_ADMIN_PASSWORD —— 跳过默认管理员创建。"
-            "上线前请在 .env 里显式配置。"
-        )
+        logger.warning("未设置 DEFAULT_ADMIN_PASSWORD —— 跳过默认管理员创建。上线前请在 .env 里显式配置。")
         return
 
     from antcode_core.domain.models.enums import UserRole
@@ -254,6 +385,8 @@ async def main() -> None:
     logger.info("=== AntCode 数据库初始化 ===")
     logger.info("目标 DB: {}", os.environ["DATABASE_URL"].split("@")[-1])
     await _generate_schemas()
+    # generate_schemas 只建缺表；老库跑新代码时还要补新加的列（见函数 docstring）
+    await _upgrade_legacy_schema()
     await _check_required_tables()
     await _create_performance_indexes()
     await _init_system_config()

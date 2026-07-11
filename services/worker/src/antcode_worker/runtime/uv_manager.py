@@ -11,10 +11,12 @@ UV 运行时管理器
 """
 
 import asyncio
+import contextlib
 import os
 import platform
 import re
 import shutil
+import signal
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +29,7 @@ IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
 
-PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/+=:~\\-\\[\\]\\(\\),<>!#]*$")
+PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/+=:~\-\[\]\(\),<>!#]*$")
 
 # 环境名白名单：字母/数字/点/下划线/连字符，长度 1-64
 # 严格限制以防止路径遍历攻击 (../.. 等)
@@ -59,6 +61,19 @@ class CommandResult:
     stderr: str
 
 
+async def _terminate_command_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        if IS_WINDOWS:
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    await asyncio.wait_for(process.wait(), timeout=5)
+
+
 async def run_command(
     args: list[str],
     cwd: str | None = None,
@@ -77,6 +92,7 @@ async def run_command(
     cmd_str = " ".join(resolved_args)
     logger.debug(f"执行命令: {cmd_str}")
 
+    process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
             *resolved_args,
@@ -84,31 +100,23 @@ async def run_command(
             env=final_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=not IS_WINDOWS,
         )
 
         stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=timeout)
 
-        stdout = stdout_b.decode(errors="ignore") if stdout_b else ""
-        stderr = stderr_b.decode(errors="ignore") if stderr_b else ""
+        stdout = stdout_b.decode() if stdout_b else ""
+        stderr = stderr_b.decode() if stderr_b else ""
 
         return CommandResult(exit_code=process.returncode or 0, stdout=stdout, stderr=stderr)
     except TimeoutError:
-        # P2-11: 超时后必须显式 kill + reap 子进程,否则 wait_for 只取消 await,
-        # 子进程仍在 OS 层继续运行 → 僵尸进程 / 端口占用 / 资源泄漏。
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        except Exception as kill_err:
-            logger.warning(f"kill 超时子进程失败: {kill_err}")
-        try:
-            # reap 避免 zombie;SIGKILL 后应快速返回,给 5s 上限
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except TimeoutError:
-            logger.warning(f"kill 后 process.wait() 仍超时,可能残留 zombie: {cmd_str}")
-        except Exception:
-            pass
+        if process is not None:
+            await _terminate_command_process(process)
         return CommandResult(exit_code=124, stdout="", stderr=f"命令超时: {cmd_str}")
+    except asyncio.CancelledError:
+        if process is not None:
+            await _terminate_command_process(process)
+        raise
     except FileNotFoundError:
         return CommandResult(exit_code=127, stdout="", stderr=f"命令未找到: {args[0]}")
     except Exception as e:
@@ -125,6 +133,7 @@ class UVManager:
     def __init__(self, venvs_dir: str | None = None):
         self.venvs_dir = venvs_dir
         self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_users: dict[str, int] = {}
         self._env_count_cache = 0
 
     def set_venvs_dir(self, venvs_dir: str) -> None:
@@ -154,11 +163,24 @@ class UVManager:
         self._update_env_count_cache()
         return self._env_count_cache
 
-    def _get_lock(self, key: str) -> asyncio.Lock:
-        """获取指定 key 的锁"""
+    @contextlib.asynccontextmanager
+    async def _env_operation(self, key: str):
+        """按 key 串行操作，并在最后一个等待者退出时回收锁。"""
         if key not in self._locks:
             self._locks[key] = asyncio.Lock()
-        return self._locks[key]
+        lock = self._locks[key]
+        self._lock_users[key] = self._lock_users.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            users = self._lock_users.get(key, 0) - 1
+            if users > 0:
+                self._lock_users[key] = users
+            else:
+                self._lock_users.pop(key, None)
+                if not lock.locked() and self._locks.get(key) is lock:
+                    self._locks.pop(key, None)
 
     def _get_venv_path(self, env_name: str) -> str:
         """获取虚拟环境路径（含名称白名单 + realpath 越界校验）"""
@@ -257,8 +279,7 @@ class UVManager:
     ) -> dict:
         """更新虚拟环境元数据（manifest）"""
         _validate_env_name(env_name)
-        lock = self._get_lock(f"env:{env_name}")
-        async with lock:
+        async with self._env_operation(f"env:{env_name}"):
             venv_path = self._get_venv_path(env_name)
             if not os.path.exists(venv_path):
                 raise RuntimeError(f"虚拟环境 {env_name} 不存在")
@@ -319,8 +340,7 @@ class UVManager:
             created_by: 创建人用户名
         """
         _validate_env_name(env_name)
-        lock = self._get_lock(f"env:{env_name}")
-        async with lock:
+        async with self._env_operation(f"env:{env_name}"):
             venv_path = self._get_venv_path(env_name)
 
             if os.path.exists(venv_path):
@@ -350,7 +370,7 @@ class UVManager:
                 ujson.dump(manifest, f, ensure_ascii=False, indent=2)
 
             if packages:
-                await self.install_packages(env_name, packages)
+                await self._install_packages_locked(env_name, packages, upgrade=False)
 
             await self._update_packages_count(env_name)
 
@@ -372,14 +392,15 @@ class UVManager:
     async def delete_env(self, env_name: str) -> bool:
         """删除虚拟环境"""
         _validate_env_name(env_name)
-        lock = self._get_lock(f"env:{env_name}")
-        async with lock:
+        async with self._env_operation(f"env:{env_name}"):
             venv_path = self._get_venv_path(env_name)
 
             if not os.path.exists(venv_path):
                 return False
 
             # rmtree 前二次校验：解析后的路径必须仍是 venvs_dir 的直接子目录
+            if self.venvs_dir is None:
+                raise RuntimeError("venvs_dir 未设置")
             base = Path(self.venvs_dir).resolve()
             target = Path(venv_path).resolve()
             if target.parent != base:
@@ -397,41 +418,35 @@ class UVManager:
         """安装包到虚拟环境"""
         _validate_env_name(env_name)
         self._validate_packages(packages)
-        lock = self._get_lock(f"env:{env_name}")
-        async with lock:
-            venv_path = self._get_venv_path(env_name)
+        async with self._env_operation(f"env:{env_name}"):
+            return await self._install_packages_locked(env_name, packages, upgrade)
 
-            if not os.path.exists(venv_path):
-                raise RuntimeError(f"虚拟环境 {env_name} 不存在")
-
-            python_exe = self._get_python_executable(venv_path)
-
-            args = ["uv", "pip", "install", "--python", python_exe]
-            if upgrade:
-                args.append("-U")
-            args.extend(packages)
-
-            res = await run_command(args, timeout=1800)
-
-            if res.exit_code != 0:
-                raise RuntimeError(f"安装包失败: {res.stderr}")
-
-            await self._update_packages_count(env_name)
-
-            logger.info(f"安装包成功: {packages} -> {env_name}")
-
-            return {
-                "success": True,
-                "installed": packages,
-                "output": res.stdout,
-            }
+    async def _install_packages_locked(
+        self,
+        env_name: str,
+        packages: list[str],
+        upgrade: bool,
+    ) -> dict:
+        venv_path = self._get_venv_path(env_name)
+        if not os.path.exists(venv_path):
+            raise RuntimeError(f"虚拟环境 {env_name} 不存在")
+        python_exe = self._get_python_executable(venv_path)
+        args = ["uv", "pip", "install", "--python", python_exe]
+        if upgrade:
+            args.append("-U")
+        args.extend(packages)
+        res = await run_command(args, timeout=1800)
+        if res.exit_code != 0:
+            raise RuntimeError(f"安装包失败: {res.stderr}")
+        await self._update_packages_count(env_name)
+        logger.info(f"安装包成功: {packages} -> {env_name}")
+        return {"success": True, "installed": packages, "output": res.stdout}
 
     async def uninstall_packages(self, env_name: str, packages: list[str]) -> dict:
         """从虚拟环境卸载包"""
         _validate_env_name(env_name)
         self._validate_packages(packages)
-        lock = self._get_lock(f"env:{env_name}")
-        async with lock:
+        async with self._env_operation(f"env:{env_name}"):
             venv_path = self._get_venv_path(env_name)
 
             if not os.path.exists(venv_path):

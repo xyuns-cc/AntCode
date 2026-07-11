@@ -9,8 +9,10 @@
 **Validates: Requirements 6.2**
 """
 
+import inspect
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +31,11 @@ AUDIT_SECURITY_MAXLEN = 100_000
 
 # W3C TraceContext metadata header(grpc 元数据按 HTTP/2 习惯全小写)
 TRACEPARENT_HEADER = "traceparent"
+
+_AUTHENTICATED_WORKER_ID: ContextVar[str | None] = ContextVar(
+    "antcode_authenticated_worker_id",
+    default=None,
+)
 
 
 def _extract_trace_id_from_metadata(metadata: dict[str, Any]) -> str | None:
@@ -52,6 +59,32 @@ class AuthResult:
     worker_id: str | None = None
     error: str | None = None
     auth_method: str | None = None  # "api_key", "jwt", "mtls"
+
+
+def get_authenticated_worker_id() -> str | None:
+    """Return the server-verified Worker identity for the active RPC."""
+    return _AUTHENTICATED_WORKER_ID.get()
+
+
+async def require_authenticated_worker(
+    context: grpc.aio.ServicerContext,
+    declared_worker_id: str | None = None,
+) -> str:
+    """Require the active RPC principal and optionally bind a request field to it."""
+    worker_id = get_authenticated_worker_id()
+    if not worker_id:
+        await context.abort(
+            grpc.StatusCode.UNAUTHENTICATED,
+            "authenticated worker identity is missing",
+        )
+        return ""
+    if declared_worker_id and declared_worker_id != worker_id:
+        await context.abort(
+            grpc.StatusCode.PERMISSION_DENIED,
+            "worker_id does not match authenticated principal",
+        )
+        return ""
+    return worker_id
 
 
 class AuthInterceptor(grpc.aio.ServerInterceptor):
@@ -86,11 +119,13 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     #
     # 想新增 method?先回答: 这个 RPC 有没有独立的凭证/一次性 token 校验?
     # 有 → 可以加;没有 → 不要加,让它走认证。
-    AUTH_EXEMPT_METHODS = frozenset([
-        "/antcode.v1.ControlService/Register",      # 首次注册（此时无 api_key）
-        "/grpc.health.v1.Health/Check",             # gRPC 健康检查
-        "/grpc.health.v1.Health/Watch",
-    ])
+    AUTH_EXEMPT_METHODS = frozenset(
+        [
+            "/antcode.v1.ControlService/Register",  # 首次注册（此时无 api_key）
+            "/grpc.health.v1.Health/Check",  # gRPC 健康检查
+            "/grpc.health.v1.Health/Watch",
+        ]
+    )
 
     # 兼容旧命名（仅本模块内部曾用；保留避免误伤外部引用）
     SKIP_AUTH_METHODS = AUTH_EXEMPT_METHODS
@@ -98,7 +133,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     def __init__(
         self,
         enabled: bool = True,
-        api_key_validator: Callable[[str], bool] | None = None,
+        api_key_validator: Callable[..., Any] | None = None,
         jwt_validator: Callable[[str], dict | None] | None = None,
         audit_stream: "StreamClient | None" = None,
     ):
@@ -166,7 +201,21 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     ) -> Any:
         """拦截服务调用进行认证"""
         if not self.enabled:
-            return await continuation(handler_call_details)
+            if handler_call_details.method in self.AUTH_EXEMPT_METHODS:
+                return await continuation(handler_call_details)
+            metadata = dict(handler_call_details.invocation_metadata)
+            declared_worker_id = metadata.get(self.WORKER_ID_HEADER) or ""
+            if not declared_worker_id:
+                return await self._build_reject_handler(
+                    continuation,
+                    handler_call_details,
+                    "AUTH_ENABLED=false 时仍必须提供 X-Worker-ID",
+                )
+            return await self._wrap_with_mtls_check(
+                continuation,
+                handler_call_details,
+                declared_worker_id,
+            )
 
         # P2-03: 严格白名单精确匹配 —— 未在 AUTH_EXEMPT_METHODS 里的 method
         # 一律走完整认证,不做前缀/正则通配,新增 method 默认拒绝。
@@ -185,8 +234,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             # P2-#28: worker_id 写日志前先 strip 换行 / 截断长度,防止日志注入
             worker_id = self._sanitize_worker_id(metadata.get(self.WORKER_ID_HEADER))
             logger.warning(
-                f"认证失败: {auth_result.error}, method={method}, "
-                f"has_api_key={has_api_key}, worker_id={worker_id}"
+                f"认证失败: {auth_result.error}, method={method}, has_api_key={has_api_key}, worker_id={worker_id}"
             )
 
             # 追加结构化安全审计（不影响主流程）
@@ -213,23 +261,34 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 trace_id=trace_id,
             )
 
+            return await self._build_reject_handler(continuation, handler_call_details, auth_result.error or "")
+
+        logger.debug(f"认证成功: worker_id={auth_result.worker_id}, method={auth_result.auth_method}")
+
+        authenticated_worker_id = auth_result.worker_id or ""
+        if not authenticated_worker_id:
             return await self._build_reject_handler(
-                continuation, handler_call_details, auth_result.error or ""
+                continuation,
+                handler_call_details,
+                "认证凭据缺少 Worker 身份",
             )
 
-        logger.debug(
-            f"认证成功: worker_id={auth_result.worker_id}, "
-            f"method={auth_result.auth_method}"
-        )
+        # Header 只是客户端声明，必须与凭据解析出的主体完全一致。
+        declared_worker_id = metadata.get(self.WORKER_ID_HEADER) or ""
+        if declared_worker_id and declared_worker_id != authenticated_worker_id:
+            return await self._build_reject_handler(
+                continuation,
+                handler_call_details,
+                "X-Worker-ID 与认证主体不匹配",
+            )
 
-        # 认证成功:对开启 mTLS 的链路再做 CN/SAN <-> worker_id 绑定校验。
+        # 认证成功:对开启 mTLS 的链路再做 CN/SAN <-> authenticated worker 绑定校验。
         # 由于 intercept_service 阶段拿不到 ServicerContext,这里 wrap 一层
         # handler,在实际 RPC 调用时校验 peer 证书。
-        declared_worker_id = metadata.get(self.WORKER_ID_HEADER) or ""
         return await self._wrap_with_mtls_check(
             continuation=continuation,
             handler_call_details=handler_call_details,
-            declared_worker_id=declared_worker_id,
+            authenticated_worker_id=authenticated_worker_id,
         )
 
     async def _authenticate(self, metadata: dict) -> AuthResult:
@@ -286,15 +345,15 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
 
         if self._api_key_validator:
             try:
-                # 自定义验证器返回 True 时仍严格绑定客户端声明的 worker_id
-                is_valid = self._api_key_validator(api_key)
-                if is_valid:
-                    return AuthResult(
-                        success=True,
-                        worker_id=worker_id,
-                        auth_method="api_key",
-                    )
-                return AuthResult(success=False, error="无效的 API Key")
+                result, validator_bound_worker = await self._call_api_key_validator(
+                    api_key,
+                    worker_id,
+                )
+                return self._normalize_api_key_result(
+                    result,
+                    worker_id,
+                    validator_bound_worker,
+                )
             except Exception as e:
                 logger.exception(f"API Key 验证异常: {e}")
                 return AuthResult(success=False, error="API Key 验证失败")
@@ -320,6 +379,54 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             logger.exception(f"API Key 验证异常: {e}")
             return AuthResult(success=False, error="API Key 验证失败")
 
+    async def _call_api_key_validator(
+        self,
+        api_key: str,
+        worker_id: str,
+    ) -> tuple[Any, bool]:
+        validator = self._api_key_validator
+        if validator is None:
+            return None, False
+        try:
+            inspect.signature(validator).bind(api_key, worker_id)
+        except (TypeError, ValueError):
+            result = validator(api_key)
+            bound_worker = False
+        else:
+            result = validator(api_key, worker_id)
+            bound_worker = True
+        if inspect.isawaitable(result):
+            result = await result
+        return result, bound_worker
+
+    @staticmethod
+    def _normalize_api_key_result(
+        result: Any,
+        declared_worker_id: str,
+        validator_bound_worker: bool,
+    ) -> AuthResult:
+        if isinstance(result, AuthResult):
+            if result.success and result.worker_id == declared_worker_id:
+                return result
+            return AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
+        if isinstance(result, dict):
+            identity = result.get("worker_id") or result.get("sub")
+            if identity == declared_worker_id:
+                return AuthResult(True, declared_worker_id, auth_method="api_key")
+            return AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
+        if isinstance(result, str):
+            if result == declared_worker_id:
+                return AuthResult(True, declared_worker_id, auth_method="api_key")
+            return AuthResult(success=False, error="API Key 与 Worker 身份不匹配")
+        if isinstance(result, bool) and validator_bound_worker and result:
+            return AuthResult(True, declared_worker_id, auth_method="api_key")
+        if isinstance(result, bool) and not validator_bound_worker and result:
+            return AuthResult(
+                success=False,
+                error="自定义 API Key validator 必须绑定 Worker 身份",
+            )
+        return AuthResult(success=False, error="无效的 API Key")
+
     async def _authenticate_jwt(self, token: str) -> AuthResult:
         """JWT 认证"""
         if not token:
@@ -331,6 +438,11 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 payload = self._jwt_validator(token)
                 if payload:
                     worker_id = payload.get("sub") or payload.get("worker_id")
+                    if not worker_id:
+                        return AuthResult(
+                            success=False,
+                            error="自定义 JWT validator 未返回 Worker 身份",
+                        )
                     return AuthResult(
                         success=True,
                         worker_id=worker_id,
@@ -442,19 +554,19 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         self,
         continuation: Callable,
         handler_call_details: grpc.HandlerCallDetails,
-        declared_worker_id: str,
+        authenticated_worker_id: str,
     ) -> grpc.RpcMethodHandler:
         """P1-#12: 在 mTLS 链路上,确保 peer 证书 CN/SAN 与 metadata 中的
         worker_id 一致。开发环境(无客户端证书)直接放行,生产环境(挂了
         require_client_auth=True)证书必现,不一致即 PERMISSION_DENIED。
         """
         original = await continuation(handler_call_details)
-        return self._make_mtls_wrapped_handler(original, declared_worker_id)
+        return self._make_mtls_wrapped_handler(original, authenticated_worker_id)
 
     def _make_mtls_wrapped_handler(
         self,
         original: grpc.RpcMethodHandler,
-        declared_worker_id: str,
+        authenticated_worker_id: str,
     ) -> grpc.RpcMethodHandler:
         check = self._check_mtls_binding
 
@@ -462,32 +574,48 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, reason)
 
         async def wrapped_unary_unary(request, context):
-            ok, reason = check(context, declared_worker_id)
+            ok, reason = check(context, authenticated_worker_id)
             if not ok:
                 await _abort_pd(context, reason)
-            return await original.unary_unary(request, context)
+            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+            try:
+                return await original.unary_unary(request, context)
+            finally:
+                _AUTHENTICATED_WORKER_ID.reset(token)
 
         async def wrapped_unary_stream(request, context):
-            ok, reason = check(context, declared_worker_id)
+            ok, reason = check(context, authenticated_worker_id)
             if not ok:
                 await _abort_pd(context, reason)
                 return
-            async for resp in original.unary_stream(request, context):
-                yield resp
+            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+            try:
+                async for resp in original.unary_stream(request, context):
+                    yield resp
+            finally:
+                _AUTHENTICATED_WORKER_ID.reset(token)
 
         async def wrapped_stream_unary(request_iterator, context):
-            ok, reason = check(context, declared_worker_id)
+            ok, reason = check(context, authenticated_worker_id)
             if not ok:
                 await _abort_pd(context, reason)
-            return await original.stream_unary(request_iterator, context)
+            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+            try:
+                return await original.stream_unary(request_iterator, context)
+            finally:
+                _AUTHENTICATED_WORKER_ID.reset(token)
 
         async def wrapped_stream_stream(request_iterator, context):
-            ok, reason = check(context, declared_worker_id)
+            ok, reason = check(context, authenticated_worker_id)
             if not ok:
                 await _abort_pd(context, reason)
                 return
-            async for resp in original.stream_stream(request_iterator, context):
-                yield resp
+            token = _AUTHENTICATED_WORKER_ID.set(authenticated_worker_id)
+            try:
+                async for resp in original.stream_stream(request_iterator, context):
+                    yield resp
+            finally:
+                _AUTHENTICATED_WORKER_ID.reset(token)
 
         if original.unary_unary is not None:
             return grpc.unary_unary_rpc_method_handler(
@@ -518,7 +646,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     @staticmethod
     def _check_mtls_binding(
         context: grpc.aio.ServicerContext,
-        declared_worker_id: str,
+        authenticated_worker_id: str,
     ) -> tuple[bool, str]:
         """从 context.auth_context() 读 peer CN/SAN,和 metadata worker_id 对齐。
 
@@ -527,7 +655,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         - 没有 auth_context 或没有 peer 身份 (开发环境无 mTLS): 放行。
         - 有 peer 身份但与 worker_id 不一致: 拒绝。
         """
-        if not declared_worker_id:
+        if not authenticated_worker_id:
             return True, ""
         try:
             auth_ctx = context.auth_context() or {}
@@ -553,11 +681,14 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         if not identities:
             return True, ""
 
-        if declared_worker_id in identities:
+        if authenticated_worker_id in identities:
             return True, ""
 
         # 也兼容 SAN 里挂了 "worker:<id>" / URI 形式
-        suffixes = {f"worker:{declared_worker_id}", f"/{declared_worker_id}"}
+        suffixes = {
+            f"worker:{authenticated_worker_id}",
+            f"/{authenticated_worker_id}",
+        }
         for ident in identities:
             if any(ident.endswith(s) for s in suffixes):
                 return True, ""

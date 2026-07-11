@@ -25,7 +25,7 @@ def _jwt_exp(token: str):
 
 def _read_cached_token(path: str):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         token = data.get("access_token")
         exp = data.get("exp") or _jwt_exp(token or "")
@@ -63,16 +63,8 @@ def main():
     port = os.getenv("SERVER_PORT", "8000")
     base_url = os.getenv("HEALTHCHECK_BASE_URL", f"http://127.0.0.1:{port}")
 
-    username = (
-        os.getenv("HEALTHCHECK_USERNAME")
-        or os.getenv("DEFAULT_ADMIN_USERNAME")
-        or "admin"
-    )
-    password = (
-        os.getenv("HEALTHCHECK_PASSWORD")
-        or os.getenv("DEFAULT_ADMIN_PASSWORD")
-        or "Admin123!"
-    )
+    username = os.getenv("HEALTHCHECK_USERNAME") or os.getenv("DEFAULT_ADMIN_USERNAME") or "admin"
+    password = os.getenv("HEALTHCHECK_PASSWORD") or os.getenv("DEFAULT_ADMIN_PASSWORD") or "Admin123!"
 
     cache_path = os.getenv("HEALTHCHECK_TOKEN_CACHE", "/tmp/antcode_healthcheck_token.json")
 

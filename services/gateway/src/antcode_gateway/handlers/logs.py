@@ -18,11 +18,9 @@ SendLog / SendLogBatch / SendLogChunk 三套 RPC 合并为 ``StreamLogs`` 单一
 from __future__ import annotations
 
 import time
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from antcode_contracts import data_pb2
-from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis import decode_stream_payload, log_stream_key
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
@@ -37,6 +35,7 @@ def log_ingest_stream_key(namespace: str | None = None) -> str:
     路径：``<namespace>:log:ingest``。
     """
     return f"{redis_namespace(namespace)}:log:ingest"
+
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -64,9 +63,6 @@ class LogHandler:
     接受 ``LogBatch`` Proto 消息，按 ``run_id`` 拆分后写入对应日志 Stream，
     每条 Stream 消息即一个 ``LogBatch`` Proto 的序列化字节（单字段 'p'）。
     """
-
-    MAX_STREAM_LENGTH = settings.LOG_STREAM_MAXLEN
-    STREAM_TTL_SECONDS = settings.LOG_STREAM_TTL_SECONDS
 
     def __init__(
         self,
@@ -108,7 +104,6 @@ class LogHandler:
                 return None
         return self._redis_client
 
-
     # =========================================================================
     # Proto 入口 - StreamLogs / 内部测试都从这里进
     # =========================================================================
@@ -143,12 +138,7 @@ class LogHandler:
         pipe.xadd(
             stream_key,
             {PROTO_FIELD: batch.SerializeToString()},
-            maxlen=self.MAX_STREAM_LENGTH,
-            approximate=True,
         )
-        if self.STREAM_TTL_SECONDS > 0:
-            pipe.expire(stream_key, self.STREAM_TTL_SECONDS)
-
         try:
             await pipe.execute()
         except Exception as exc:

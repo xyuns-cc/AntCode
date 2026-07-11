@@ -136,9 +136,7 @@ class GitCredentialService:
         1. scheme 必须在白名单(仅 HTTPS；dev 显式开关下含 http)
         2. host 与 scope 必须**完全相等**(case-insensitive)
         """
-        allowed = (
-            self._ALLOWED_SCHEMES_WITH_HTTP if _dev_allow_http() else self._ALLOWED_SCHEMES
-        )
+        allowed = self._ALLOWED_SCHEMES_WITH_HTTP if _dev_allow_http() else self._ALLOWED_SCHEMES
         parsed = urlparse(git_url)
         if parsed.scheme.lower() not in allowed:
             raise HTTPException(

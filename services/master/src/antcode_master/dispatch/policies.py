@@ -62,7 +62,7 @@ class PriorityPolicy:
         return max(0, base_priority - age_bonus)
 
     @staticmethod
-    def sort_tasks_by_priority(tasks: list, current_time: datetime = None) -> list:
+    def sort_tasks_by_priority(tasks: list, current_time: datetime | None = None) -> list:
         """按优先级排序任务
 
         Args:
@@ -148,7 +148,7 @@ class AntiStarvationPolicy:
         """
         self.starvation_threshold = starvation_threshold
 
-    def detect_starving_tasks(self, tasks: list, current_time: datetime = None) -> list:
+    def detect_starving_tasks(self, tasks: list, current_time: datetime | None = None) -> list:
         """检测饿死任务
 
         Args:

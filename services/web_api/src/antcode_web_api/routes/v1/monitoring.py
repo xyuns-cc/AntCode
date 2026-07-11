@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from antcode_core.application.services.monitoring import monitoring_service
+from antcode_core.application.services.workers.worker_service import worker_service
 from antcode_core.common.security.auth import TokenData, get_current_user
-from antcode_core.domain.models import User
+from antcode_core.domain.models import User, UserRole, Worker
 from antcode_core.domain.schemas.monitoring import (
     ClusterSummaryResponse,
     WorkerHistoryItem,
@@ -18,13 +20,29 @@ from antcode_core.domain.schemas.monitoring import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from antcode_web_api.deps import require_role
+
 router = APIRouter()
 
 
 async def _ensure_authenticated_user(current_user: TokenData) -> User:
     user = await User.get_or_none(id=current_user.user_id)
-    if not user:
+    if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或会话已失效")
+    return user
+
+
+async def _ensure_worker_access(worker_id: str, current_user: TokenData) -> User:
+    user = await _ensure_authenticated_user(current_user)
+    worker = await Worker.get_or_none(public_id=worker_id)
+    allowed = worker and await worker_service.check_user_worker_permission(
+        user_id=user.id,
+        worker_id=worker.id,
+        is_admin=user.is_admin,
+        required_permission="view",
+    )
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
     return user
 
 
@@ -67,8 +85,12 @@ def _convert_spider(raw):
 
 @router.get("/workers", response_model=list[WorkerSummary], summary="列出在线 Worker")
 async def list_online_workers(current_user: TokenData = Depends(get_current_user)):
-    await _ensure_authenticated_user(current_user)
+    user = await _ensure_authenticated_user(current_user)
     workers = await monitoring_service.get_online_workers()
+    if not user.is_admin:
+        allowed_workers = await worker_service.get_user_workers(user.id, is_admin=False)
+        allowed_ids = {worker.public_id for worker in allowed_workers}
+        workers = [worker for worker in workers if worker.get("worker_id") in allowed_ids]
     summaries = []
     for worker in workers:
         status = WorkerStatus(**_convert_status(worker.get("status", {})))
@@ -92,7 +114,7 @@ async def get_worker_realtime(
     worker_id: str,
     current_user: TokenData = Depends(get_current_user),
 ):
-    await _ensure_authenticated_user(current_user)
+    await _ensure_worker_access(worker_id, current_user)
     data = await monitoring_service.get_worker_realtime(worker_id)
     if not data:
         raise HTTPException(status_code=404, detail="Worker 实时数据不存在")
@@ -100,7 +122,7 @@ async def get_worker_realtime(
     return WorkerRealtimeResponse(worker_id=worker_id, data=points)
 
 
-def _require_timezone(dt, field):
+def _require_timezone(dt: datetime, field: str) -> datetime:
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         raise HTTPException(status_code=400, detail=f"{field} 必须包含时区信息")
     return dt
@@ -114,11 +136,11 @@ def _require_timezone(dt, field):
 async def get_worker_history(
     worker_id: str,
     metric_type: str = Query("performance", pattern="^(performance|spider)$"),
-    start_time: datetime = None,
-    end_time: datetime = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     current_user: TokenData = Depends(get_current_user),
 ):
-    await _ensure_authenticated_user(current_user)
+    await _ensure_worker_access(worker_id, current_user)
     if end_time is None:
         end_time = datetime.now(UTC)
     if start_time is None:
@@ -139,7 +161,7 @@ async def get_worker_history(
 
     items = []
     for record in records:
-        transformed = {}
+        transformed: dict[str, Any] = {}
         for key, value in record.items():
             if isinstance(value, datetime):
                 transformed[key] = value
@@ -156,7 +178,12 @@ async def get_worker_history(
     return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=items, count=len(items))
 
 
-@router.get("/cluster/summary", response_model=ClusterSummaryResponse, summary="获取集群摘要")
+@router.get(
+    "/cluster/summary",
+    response_model=ClusterSummaryResponse,
+    summary="获取集群摘要",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
+)
 async def get_cluster_summary(current_user: TokenData = Depends(get_current_user)):
     await _ensure_authenticated_user(current_user)
     summary = await monitoring_service.get_cluster_summary()

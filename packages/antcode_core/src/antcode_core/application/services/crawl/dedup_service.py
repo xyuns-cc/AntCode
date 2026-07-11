@@ -41,7 +41,7 @@ class CrawlDedupService(BaseService):
     DEFAULT_CAPACITY = 1000000  # 默认容量 100 万
     DEFAULT_ERROR_RATE = 0.001  # 默认误判率 0.1%
 
-    def __init__(self, dedup_store: DedupStore = None):
+    def __init__(self, dedup_store: DedupStore | None = None):
         """初始化去重服务
 
         Args:
@@ -60,8 +60,8 @@ class CrawlDedupService(BaseService):
     async def ensure_filter(
         self,
         project_id: str,
-        capacity: int = None,
-        error_rate: float = None,
+        capacity: int | None = None,
+        error_rate: float | None = None,
     ) -> bool:
         """确保项目的去重存储存在
 
@@ -247,8 +247,8 @@ class CrawlDedupService(BaseService):
     async def clear_filter(
         self,
         project_id: str,
-        capacity: int = None,
-        error_rate: float = None,
+        capacity: int | None = None,
+        error_rate: float | None = None,
     ) -> bool:
         """清空并重建去重存储
 

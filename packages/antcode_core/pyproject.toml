@@ -9,22 +9,22 @@ dependencies = [
     "asyncpg>=0.29.0",
     # 数据验证
     "pydantic[email]>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.14.2,<3",
+    "python-dotenv>=1.2.2",
     # 身份认证
-    "pyjwt>=2.8.0",
+    "pyjwt>=2.13.0",
     "passlib[bcrypt]>=1.7.4",
-    "cryptography>=41.0.0",
+    "cryptography>=48.0.1",
     # 缓存
     "redis>=5.0.0",
     # 日志
     "loguru>=0.7.0",
     # 工具库
     "aiofiles>=23.0.0",
-    "ujson>=5.9.0",
+    "ujson>=5.13.0",
     "pytz>=2024.1",
     # 高性能序列化与压缩
-    "msgpack>=1.0.0",
+    "msgpack>=1.2.1",
     "lz4>=4.3.0",
     # HTTP 客户端（alert channel / http_client 用）
     "httpx[http2]>=0.28.1",

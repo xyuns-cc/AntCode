@@ -49,8 +49,8 @@ class Task(BaseModel):
     success_count = fields.IntField(default=0)
 
     # 执行参数
-    execution_params = fields.JSONField(null=True)
-    environment_vars = fields.JSONField(null=True)
+    execution_params: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
+    environment_vars: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
 
     # 时间戳
     created_at = fields.DatetimeField(auto_now_add=True)

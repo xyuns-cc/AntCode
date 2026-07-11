@@ -231,9 +231,7 @@ class RelationService:
                 # 1. 任务 → 执行记录(先删 child 避免悬挂)
                 task_ids = await Task.filter(project_id=project_id).values_list("id", flat=True)
                 if task_ids:
-                    deleted["executions"] = await TaskRun.filter(
-                        task_id__in=list(task_ids)
-                    ).delete()
+                    deleted["executions"] = await TaskRun.filter(task_id__in=list(task_ids)).delete()
 
                 # 2. 任务本体
                 deleted["tasks"] = await Task.filter(project_id=project_id).delete()
@@ -246,19 +244,13 @@ class RelationService:
                 deleted["details"] = d_file + d_rule + d_code
 
                 # 4. 运行时绑定
-                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(
-                    project_id=project_id
-                ).delete()
+                deleted["runtime_bindings"] = await ProjectRuntimeBinding.filter(project_id=project_id).delete()
 
                 # 5. 补漏 - ProjectSource(Git 源配置, 一对一)
-                deleted["project_sources"] = await ProjectSource.filter(
-                    project_id=project_id
-                ).delete()
+                deleted["project_sources"] = await ProjectSource.filter(project_id=project_id).delete()
 
                 # 6. 补漏 - RunSourceSnapshot(任务运行时的源码快照, 一对多)
-                deleted["run_source_snapshots"] = await RunSourceSnapshot.filter(
-                    project_id=project_id
-                ).delete()
+                deleted["run_source_snapshots"] = await RunSourceSnapshot.filter(project_id=project_id).delete()
 
                 # 7. 项目本体
                 await Project.filter(id=project_id).delete()

@@ -2,7 +2,7 @@
 
 import contextlib
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
 from loguru import logger
 from tortoise.exceptions import IntegrityError
@@ -352,6 +352,7 @@ class UserService:
 
         user.set_password(request.new_password)
         await user.save()
+        await self.revoke_all_sessions(user.id)
 
         logger.info(f"密码已更新: {user.username}")
 
@@ -368,6 +369,7 @@ class UserService:
 
         user.set_password(new_password)
         await user.save()
+        await self.revoke_all_sessions(user.id)
 
         logger.info(f"密码已重置: {user.username}")
 
@@ -404,14 +406,10 @@ class UserService:
 
         project_count = await Project.filter(user_id=user.id).count()
         if project_count > 0:
-            raise ValueError(
-                f"该用户名下仍有 {project_count} 个项目,请先移交或删除后再删除用户"
-            )
+            raise ValueError(f"该用户名下仍有 {project_count} 个项目,请先移交或删除后再删除用户")
         task_count = await Task.filter(user_id=user.id).count()
         if task_count > 0:
-            raise ValueError(
-                f"该用户名下仍有 {task_count} 个任务,请先移交或删除后再删除用户"
-            )
+            raise ValueError(f"该用户名下仍有 {task_count} 个任务,请先移交或删除后再删除用户")
 
         # 级联删除用户关联数据(单事务原子)
         deleted_counts = await self._cascade_delete_user_data(user)
@@ -429,17 +427,13 @@ class UserService:
 
         返回被撤销的 session 数 (供调用方回显 "已登出 N 个设备")。
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from antcode_core.domain.models.user_session import UserSession
 
-        now = datetime.now(timezone.utc)
-        updated = await UserSession.filter(
-            user_id=user_id, revoked_at__isnull=True
-        ).update(revoked_at=now)
-        logger.info(
-            f"P1-09: revoke_all_sessions user={user_id} revoked_count={updated}"
-        )
+        now = datetime.now(UTC)
+        updated = await UserSession.filter(user_id=user_id, revoked_at__isnull=True).update(revoked_at=now)
+        logger.info(f"P1-09: revoke_all_sessions user={user_id} revoked_count={updated}")
         return updated
 
     async def delete_user_with_reassign(
@@ -467,7 +461,7 @@ class UserService:
 
         返回 True = 已处理; False = 用户不存在。
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from antcode_core.domain.models import Project, User
         from antcode_core.domain.models.task import Task
@@ -483,24 +477,18 @@ class UserService:
                 # 校验接收人存在且 active, 避免把资产转给一个僵尸账号
                 receiver = await User.get_or_none(id=reassign_to_user_id)
                 if receiver is None or not receiver.is_active:
-                    raise ValueError(
-                        f"接收人 user_id={reassign_to_user_id} 不存在或已停用"
-                    )
-                reassigned_counts["tasks"] = await Task.filter(
-                    user_id=user_id
-                ).update(user_id=reassign_to_user_id)
-                reassigned_counts["projects"] = await Project.filter(
-                    user_id=user_id
-                ).update(user_id=reassign_to_user_id)
+                    raise ValueError(f"接收人 user_id={reassign_to_user_id} 不存在或已停用")
+                reassigned_counts["tasks"] = await Task.filter(user_id=user_id).update(user_id=reassign_to_user_id)
+                reassigned_counts["projects"] = await Project.filter(user_id=user_id).update(
+                    user_id=reassign_to_user_id
+                )
                 # Worker 归属: 当前 Worker 模型没有直接 owner 字段
                 # (由 UserWorkerPermission 关联表管理), 权限清理走 revoke 路径
                 # 不在这里迁移, 避免语义歧义 (共享 worker 不该被独占转移)。
 
             # 撤销所有 refresh session (走同一事务, 迁移失败时也一起回滚)
-            now = datetime.now(timezone.utc)
-            revoked = await UserSession.filter(
-                user_id=user_id, revoked_at__isnull=True
-            ).update(revoked_at=now)
+            now = datetime.now(UTC)
+            revoked = await UserSession.filter(user_id=user_id, revoked_at__isnull=True).update(revoked_at=now)
 
             # 软删除: 停用 + 用户名后缀化以释放原名
             ts = int(now.timestamp())
@@ -523,26 +511,30 @@ class UserService:
         单个 `in_transaction()` 事务保证:权限/凭证/User 主体全部成功或
         全部回滚。审计日志(AuditLog.user_id 可空)刻意保留以维持追溯链。
         """
-        from antcode_core.domain.models import GitCredential, UserWorkerPermission
+        from antcode_core.domain.models import (
+            GitCredential,
+            UserSession,
+            UserWorkerPermission,
+        )
 
         deleted = {
             "worker_permissions": 0,
             "git_credentials": 0,
+            "user_sessions": 0,
         }
 
         try:
             async with in_transaction():
                 # 1. Worker 权限
-                deleted["worker_permissions"] = await UserWorkerPermission.filter(
-                    user_id=user.id
-                ).delete()
+                deleted["worker_permissions"] = await UserWorkerPermission.filter(user_id=user.id).delete()
 
                 # 2. Git 凭证(GitCredential.owner_user_id 明确归属单个用户,可安全删)
-                deleted["git_credentials"] = await GitCredential.filter(
-                    owner_user_id=user.id
-                ).delete()
+                deleted["git_credentials"] = await GitCredential.filter(owner_user_id=user.id).delete()
 
-                # 3. User 本体
+                # 3. 服务端会话
+                deleted["user_sessions"] = await UserSession.filter(user_id=user.id).delete()
+
+                # 4. User 本体
                 await user.delete()
         except Exception as e:
             logger.error(f"级联删除用户数据失败(事务已回滚): {e}")

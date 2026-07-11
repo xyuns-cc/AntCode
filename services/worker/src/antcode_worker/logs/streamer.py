@@ -20,6 +20,7 @@ from antcode_worker.domain.models import LogEntry
 try:
     from antcode_core.common.logging import sanitize_log_message
 except Exception:  # pragma: no cover - import safety net
+
     def sanitize_log_message(message: str) -> str:  # type: ignore[override]
         return message
 

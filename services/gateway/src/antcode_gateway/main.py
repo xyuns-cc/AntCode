@@ -39,11 +39,10 @@ async def main():
     if gateway_config.auth_enabled:
         # 注入共享 StreamClient 用于安全审计落 Redis Stream (audit:security)
         audit_stream = StreamClient()
-        server.add_interceptor(
-            AuthInterceptor(enabled=True, audit_stream=audit_stream)
-        )
+        server.add_interceptor(AuthInterceptor(enabled=True, audit_stream=audit_stream))
         logger.info("AuthInterceptor 已启用（含安全审计 Stream）")
     else:
+        server.add_interceptor(AuthInterceptor(enabled=False))
         logger.info("AuthInterceptor 已禁用")
 
     if gateway_config.rate_limit_enabled:
@@ -58,26 +57,26 @@ async def main():
     else:
         logger.info("RateLimitInterceptor 已禁用")
 
-    # 构建 LeaseStore (P3) —— 把真实 Lease 状态机注入 ControlService。
-    lease_store: LeaseStore | None = None
+    # Lease/fencing 是 Gateway 正确性的前置条件，Redis 不可用时必须拒绝启动。
     try:
         redis_client = await get_redis_client()
-        if redis_client is not None:
-            lease_store = LeaseStore(
-                redis_client=redis_client,
-                namespace=redis_namespace(),
-                policy=LeasePolicy(),  # 默认 30s TTL / 10s renew
-            )
-            logger.info(
-                "LeaseStore 已构建: namespace={} ttl_ms={} renew_after_ms={}",
-                lease_store.namespace,
-                lease_store.policy.ttl_ms,
-                lease_store.policy.renew_after_ms,
-            )
-        else:
-            logger.warning("Redis 不可用，ControlService 将退化为占位 Lease")
-    except Exception as exc:  # pragma: no cover - defensive bootstrap
-        logger.exception(f"构建 LeaseStore 失败，ControlService 将退化为占位 Lease: {exc}")
+        if redis_client is None:
+            raise RuntimeError("Redis client unavailable")
+        lease_store = LeaseStore(
+            redis_client=redis_client,
+            namespace=redis_namespace(),
+            policy=LeasePolicy(),
+        )
+        logger.info(
+            "LeaseStore 已构建: namespace={} ttl_ms={} renew_after_ms={}",
+            lease_store.namespace,
+            lease_store.policy.ttl_ms,
+            lease_store.policy.renew_after_ms,
+        )
+    except Exception as exc:
+        logger.exception(f"构建 LeaseStore 失败，Gateway 拒绝启动: {exc}")
+        await close_db()
+        raise
 
     # 注册服务实现：ControlService (lifecycle/lease/control) + DataService (tasks/status/logs)
     logger.info("注册 gRPC 服务")
@@ -145,8 +144,10 @@ async def main():
         loop.create_task(shutdown(signum))
 
     if sys.platform == "win32":
+
         def _sync_signal_handler(signum, _frame):
             loop.call_soon_threadsafe(request_shutdown, signum)
+
         signal.signal(signal.SIGINT, _sync_signal_handler)
         signal.signal(signal.SIGTERM, _sync_signal_handler)
     else:

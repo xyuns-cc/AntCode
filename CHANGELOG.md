@@ -19,7 +19,7 @@
 #### 规则爬虫（Scrapy 引擎）
 - Scrapy 2.16 底座，替代原 spiderkit
 - 5 种翻页策略：`page_param` / `path_param` / `link_selector` / `js_click` / `infinite_scroll`
-- 抽取：XPath / CSS / 正则 / JSONPath 四选一，按字段组合
+- 抽取：XPath / CSS / 正则三选一，按字段组合
 - `{N}` 起始页占位符 + XPath / text / 结构化 next 选择器
 - 内容级去重（跨 run 持久化，两阶段提交，防脏 digest）
 - 代理池 + curl_cffi 指纹 + Playwright 渲染 + scrapy-redis 断点续爬

@@ -16,7 +16,7 @@ try:
     HAS_AIOHTTP = True
 except ImportError:
     HAS_AIOHTTP = False
-    web = None
+    web = None  # type: ignore[assignment]
 
 from antcode_worker.observability.health import HealthChecker, HealthStatus
 from antcode_worker.observability.metrics import MetricsCollector

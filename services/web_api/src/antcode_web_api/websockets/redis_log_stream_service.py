@@ -43,7 +43,6 @@ def _log_ingest_stream_key(namespace: str | None = None) -> str:
 class StreamFollower:
     run_id: str
     ref_count: int = 0
-    history_sent: bool = False
 
 
 class RedisLogStreamService:
@@ -72,7 +71,7 @@ class RedisLogStreamService:
         self._ingest_running = False
         self._ingest_last_id = "$"  # 只关心新消息；历史走 PG
 
-    async def subscribe(self, run_id: str) -> None:
+    async def subscribe(self, run_id: str, connection_id: str) -> None:
         """订阅执行日志（多客户端 ref-count）"""
         async with self._lock:
             follower = self._followers.get(run_id)
@@ -82,15 +81,8 @@ class RedisLogStreamService:
                 follower = StreamFollower(run_id=run_id, ref_count=1)
                 self._followers[run_id] = follower
             self._subscribed_runs.add(run_id)
-            need_history = not follower.history_sent
 
-        if need_history:
-            await self._send_history(run_id)
-            async with self._lock:
-                f = self._followers.get(run_id)
-                if f:
-                    f.history_sent = True
-
+        await self._send_history(run_id, connection_id)
         await self._ensure_ingest_task()
 
     async def unsubscribe(self, run_id: str) -> None:
@@ -128,9 +120,13 @@ class RedisLogStreamService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    async def _send_history(self, run_id: str) -> None:
+    async def _send_history(self, run_id: str, connection_id: str) -> None:
         """历史回放：主路径 PG, 回落 per-run stream + S3"""
-        await websocket_manager.send_historical_logs_start(run_id)
+        await self._send_to_connection(
+            run_id,
+            connection_id,
+            {"type": "historical_logs_start", "timestamp": datetime.now(UTC).isoformat()},
+        )
         sent = 0
 
         # 1. PG 历史（主路径）
@@ -153,7 +149,12 @@ class RedisLogStreamService:
                     "timestamp": ts,
                     "sequence": str(entry.sequence),
                 }
-                await self._emit_log(run_id, log_entry, source="pg_history")
+                await self._emit_log(
+                    run_id,
+                    log_entry,
+                    source="pg_history",
+                    connection_id=connection_id,
+                )
                 sent += 1
         except Exception as e:
             logger.debug("PG 历史日志读取失败 run_id={}: {}", run_id, e)
@@ -161,17 +162,18 @@ class RedisLogStreamService:
         # 2. 回落：旧 per-run stream（ingest pipeline 还没把日志刷到 PG 时）
         if sent == 0:
             try:
-                sent += await self._send_history_from_per_run_stream(run_id)
+                sent += await self._send_history_from_per_run_stream(run_id, connection_id)
             except Exception as e:
                 logger.debug("per-run stream 历史读取失败 run_id={}: {}", run_id, e)
 
+        message = self._history_complete_message(sent)
+        await self._send_to_connection(run_id, connection_id, message)
 
-        if sent == 0:
-            await websocket_manager.send_no_historical_logs(run_id)
-        else:
-            await websocket_manager.send_historical_logs_end(run_id, sent)
-
-    async def _send_history_from_per_run_stream(self, run_id: str) -> int:
+    async def _send_history_from_per_run_stream(
+        self,
+        run_id: str,
+        connection_id: str,
+    ) -> int:
         """旧 per-run stream 兼容路径。"""
         redis = await get_redis_client()
         if redis is None:
@@ -189,10 +191,14 @@ class RedisLogStreamService:
             for msg_id, fields in messages:
                 last_id = self._decode_value(msg_id)
                 for log_entry in self._decode_batch(fields, run_id_filter=run_id):
-                    await self._emit_log(run_id, log_entry, source="legacy_history")
+                    await self._emit_log(
+                        run_id,
+                        log_entry,
+                        source="legacy_history",
+                        connection_id=connection_id,
+                    )
                     sent += 1
         return sent
-
 
     async def _ingest_loop(self) -> None:
         """全局 ingest stream 订阅协程（所有订阅者共享）。
@@ -240,7 +246,13 @@ class RedisLogStreamService:
 
         self._ingest_running = False
 
-    async def _emit_log(self, run_id: str, log_entry: dict[str, Any], source: str) -> None:
+    async def _emit_log(
+        self,
+        run_id: str,
+        log_entry: dict[str, Any],
+        source: str,
+        connection_id: str | None = None,
+    ) -> None:
         log_type = log_entry.get("log_type") or "stdout"
         content = log_entry.get("content") or ""
         timestamp = log_entry.get("timestamp") or datetime.now(UTC).isoformat()
@@ -259,15 +271,37 @@ class RedisLogStreamService:
             },
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        await websocket_manager.broadcast_to_run(run_id, message)
+        if connection_id is None:
+            await websocket_manager.broadcast_to_run(run_id, message)
+            return
+        await self._send_to_connection(run_id, connection_id, message)
+
+    async def _send_to_connection(
+        self,
+        run_id: str,
+        connection_id: str,
+        message: dict[str, Any],
+    ) -> None:
+        sent = await websocket_manager.send_to_connection(run_id, connection_id, message)
+        if not sent:
+            raise RuntimeError(f"WebSocket 连接已不可用: {connection_id}")
+
+    @staticmethod
+    def _history_complete_message(sent: int) -> dict[str, Any]:
+        message = {
+            "type": "historical_logs_end",
+            "sent_lines": sent,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        if sent == 0:
+            message["type"] = "no_historical_logs"
+        return message
 
     # ------------------------------------------------------------------ #
     # 解码工具
     # ------------------------------------------------------------------ #
 
-    def _decode_batch(
-        self, fields: dict[Any, Any], run_id_filter: str | None = None
-    ) -> list[dict[str, Any]]:
+    def _decode_batch(self, fields: dict[Any, Any], run_id_filter: str | None = None) -> list[dict[str, Any]]:
         """解码一个 stream 消息 -> entry 列表。支持 Proto LogBatch 和旧 JSON。"""
         proto_raw = fields.get(b"p") or fields.get("p")
         if proto_raw is not None:
@@ -283,11 +317,7 @@ class RedisLogStreamService:
                     if run_id_filter and entry.run_id != run_id_filter:
                         continue
                     name = data_pb2.LogType.Name(entry.log_type)
-                    log_type = (
-                        name.removeprefix("LOG_TYPE_").lower()
-                        if name.startswith("LOG_TYPE_")
-                        else name.lower()
-                    )
+                    log_type = name.removeprefix("LOG_TYPE_").lower() if name.startswith("LOG_TYPE_") else name.lower()
                     ts = ""
                     if entry.HasField("timestamp"):
                         seconds = entry.timestamp.seconds + entry.timestamp.nanos / 1e9
@@ -321,9 +351,7 @@ class RedisLogStreamService:
             }
         ]
 
-    def _decode_batch_grouped(
-        self, fields: dict[Any, Any], subscribed: set[str]
-    ) -> dict[str, list[dict[str, Any]]]:
+    def _decode_batch_grouped(self, fields: dict[Any, Any], subscribed: set[str]) -> dict[str, list[dict[str, Any]]]:
         """ingest stream 专用：批量解码并按 ``run_id`` 分组,仅保留命中 ``subscribed`` 的。"""
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
@@ -340,11 +368,7 @@ class RedisLogStreamService:
                     if entry.run_id not in subscribed:
                         continue
                     name = data_pb2.LogType.Name(entry.log_type)
-                    log_type = (
-                        name.removeprefix("LOG_TYPE_").lower()
-                        if name.startswith("LOG_TYPE_")
-                        else name.lower()
-                    )
+                    log_type = name.removeprefix("LOG_TYPE_").lower() if name.startswith("LOG_TYPE_") else name.lower()
                     ts = ""
                     if entry.HasField("timestamp"):
                         seconds = entry.timestamp.seconds + entry.timestamp.nanos / 1e9

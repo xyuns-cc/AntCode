@@ -4,12 +4,12 @@
 所有业务枚举类型的集中定义。
 """
 
-from enum import Enum
+from enum import Enum, StrEnum
 
 # ========== 项目相关枚举 ==========
 
 
-class ProjectType(str, Enum):
+class ProjectType(StrEnum):
     """项目类型"""
 
     FILE = "file"
@@ -17,7 +17,7 @@ class ProjectType(str, Enum):
     CODE = "code"
 
 
-class ProjectStatus(str, Enum):
+class ProjectStatus(StrEnum):
     """项目状态"""
 
     ACTIVE = "active"
@@ -25,7 +25,7 @@ class ProjectStatus(str, Enum):
     ARCHIVED = "archived"
 
 
-class CrawlEngine(str, Enum):
+class CrawlEngine(StrEnum):
     """爬取引擎。
 
     S1 (Scrapy 迁移): 新增 ``playwright`` 用于 JS 渲染站点。Scrapy 侧根据
@@ -41,7 +41,7 @@ class CrawlEngine(str, Enum):
     PLAYWRIGHT = "playwright"
 
 
-class PaginationType(str, Enum):
+class PaginationType(StrEnum):
     """分页类型"""
 
     NONE = "none"
@@ -53,16 +53,15 @@ class PaginationType(str, Enum):
     INFINITE_SCROLL = "infinite_scroll"
 
 
-class RuleType(str, Enum):
+class RuleType(StrEnum):
     """规则类型"""
 
     XPATH = "xpath"
     CSS = "css"
     REGEX = "regex"
-    JSONPATH = "jsonpath"
 
 
-class CallbackType(str, Enum):
+class CallbackType(StrEnum):
     """回调类型"""
 
     LIST = "list"
@@ -70,7 +69,7 @@ class CallbackType(str, Enum):
     MIXED = "mixed"
 
 
-class RequestMethod(str, Enum):
+class RequestMethod(StrEnum):
     """HTTP 请求方法"""
 
     GET = "GET"
@@ -82,7 +81,7 @@ class RequestMethod(str, Enum):
 # ========== 任务相关枚举 ==========
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     """任务状态"""
 
     PENDING = "pending"  # 等待调度
@@ -98,7 +97,7 @@ class TaskStatus(str, Enum):
     SKIPPED = "skipped"  # 已跳过
 
 
-class DispatchStatus(str, Enum):
+class DispatchStatus(StrEnum):
     """分发状态"""
 
     PENDING = "pending"  # 等待分发
@@ -110,7 +109,7 @@ class DispatchStatus(str, Enum):
     FAILED = "failed"  # 分发失败
 
 
-class RuntimeStatus(str, Enum):
+class RuntimeStatus(StrEnum):
     """运行时状态"""
 
     QUEUED = "queued"  # 节点队列等待
@@ -122,7 +121,7 @@ class RuntimeStatus(str, Enum):
     SKIPPED = "skipped"  # 已跳过
 
 
-class TaskType(str, Enum):
+class TaskType(StrEnum):
     """任务类型"""
 
     FILE = "file"
@@ -131,7 +130,7 @@ class TaskType(str, Enum):
     SPIDER = "spider"  # 通过 Worker 节点执行的爬虫任务
 
 
-class ScheduleType(str, Enum):
+class ScheduleType(StrEnum):
     """调度类型"""
 
     ONCE = "once"
@@ -140,7 +139,7 @@ class ScheduleType(str, Enum):
     DATE = "date"
 
 
-class ExecutionStrategy(str, Enum):
+class ExecutionStrategy(StrEnum):
     """执行策略"""
 
     FIXED_WORKER = "fixed"  # 固定 Worker（仅在绑定 Worker 执行，不可用时失败）
@@ -152,7 +151,7 @@ class ExecutionStrategy(str, Enum):
 # ========== 运行时环境相关枚举 ==========
 
 
-class RuntimeKind(str, Enum):
+class RuntimeKind(StrEnum):
     """运行时类型"""
 
     PYTHON = "python"
@@ -160,14 +159,14 @@ class RuntimeKind(str, Enum):
     GO = "go"
 
 
-class RuntimeScope(str, Enum):
+class RuntimeScope(StrEnum):
     """运行时环境作用域"""
 
     SHARED = "shared"
     PRIVATE = "private"
 
 
-class RuntimeLocation(str, Enum):
+class RuntimeLocation(StrEnum):
     """运行时环境位置"""
 
     WORKER = "worker"  # Worker
@@ -176,7 +175,7 @@ class RuntimeLocation(str, Enum):
 # ========== Worker 节点相关枚举 ==========
 
 
-class WorkerStatus(str, Enum):
+class WorkerStatus(StrEnum):
     """Worker 节点状态"""
 
     ONLINE = "online"
@@ -188,7 +187,7 @@ class WorkerStatus(str, Enum):
 # ========== 审计日志相关枚举 ==========
 
 
-class AuditAction(str, Enum):
+class AuditAction(StrEnum):
     """审计操作类型"""
 
     # 用户相关
@@ -237,7 +236,7 @@ class AuditAction(str, Enum):
 # ========== 爬取批次相关枚举 ==========
 
 
-class BatchStatus(str, Enum):
+class BatchStatus(StrEnum):
     """批次状态"""
 
     PENDING = "pending"  # 等待开始

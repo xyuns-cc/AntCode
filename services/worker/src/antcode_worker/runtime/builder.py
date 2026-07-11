@@ -407,7 +407,7 @@ class RuntimeBuilder:
         Returns:
             运行时信息列表
         """
-        runtimes = []
+        runtimes: list[dict[str, Any]] = []
 
         if not os.path.exists(self.venvs_dir):
             return runtimes

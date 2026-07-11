@@ -17,7 +17,13 @@ import {
 import { RocketOutlined, SafetyOutlined, ThunderboltOutlined, BugOutlined, UnorderedListOutlined, FileTextOutlined } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import RuleSelector from './RuleSelector'
-import type { ProjectCreateRequest, ExtractionRule, ProxyConfig, AntiSpiderConfig } from '@/types'
+import type {
+  AntiSpiderConfig,
+  CrawlEngine,
+  ExtractionRule,
+  ProjectCreateRequest,
+  ProxyConfig
+} from '@/types'
 
 // 本地分页配置类型 — S6/S7/S8 扩展
 interface FormPaginationConfig {
@@ -69,7 +75,7 @@ function normalizeNextRule(raw: FormPaginationConfig['next_page_rule']): NextSel
   if ('type' in raw && 'expr' in raw) {
     const t = raw.type
     if (t === 'css' || t === 'xpath') return { type: t, expr: String(raw.expr || '') }
-    // regex/jsonpath 等旧字段回退到 css
+    // regex 等非 next-selector 类型回退到 css
     return { type: 'css', expr: String(raw.expr || '') }
   }
   return { type: 'css', expr: '' }
@@ -115,7 +121,15 @@ interface RuleProjectFormProps {
 }
 
 // 采集引擎配置（S1: 新增 Playwright，对齐后端 CrawlEngine 枚举）
-const CRAWL_ENGINES = [
+const CRAWL_ENGINES: ReadonlyArray<{
+  value: CrawlEngine
+  label: string
+  icon: React.ReactNode
+  color: string
+  description: string
+  features: string[]
+  scenarios: string[]
+}> = [
   {
     value: 'requests',
     label: 'Requests (轻量快速)',
@@ -154,7 +168,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   onValidationChange,
   onRef
 }) => {
-  const initialEngine = (
+  const initialEngine: CrawlEngine = (
     initialData.engine === 'curl_cffi' ||
     initialData.engine === 'playwright' ||
     initialData.engine === 'requests'
@@ -175,7 +189,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       throw new Error('pagination_config JSON 解析失败', { cause: error })
     }
   })
-  const [selectedEngine, setSelectedEngine] = useState(initialEngine)
+  const [selectedEngine, setSelectedEngine] = useState<CrawlEngine>(initialEngine)
   const [callbackType, setCallbackType] = useState<'list' | 'detail' | 'mixed'>('mixed')
   
   // v2.0.0 新增状态 - 安全解析JSON
@@ -194,14 +208,14 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   // S5: 内容去重配置
   const [dedupConfig, setDedupConfig] = useState<FormDedupConfig>(() =>
     parseConfigValue(
-      (initialData as Record<string, unknown>).dedup_config as string | FormDedupConfig | undefined,
+      initialData.dedup_config,
       { enabled: false, fields: [], scope: 'project', ttl_days: 30, on_hit: 'drop' } as FormDedupConfig,
       'dedup_config'
     )
   )
   // S3b: scrapy-redis 断点续爬开关
   const [resumeEnabled, setResumeEnabled] = useState<boolean>(
-    Boolean((initialData as Record<string, unknown>).resume_enabled)
+    Boolean(initialData.resume_enabled)
   )
   
   // 获取按钮禁用状态
@@ -324,8 +338,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
 
       const shouldPersistProxyConfig = proxyConfig.enabled || Boolean(initialData.proxy_config)
       const shouldPersistAntiSpider = antiSpiderConfig.enabled || Boolean(initialData.anti_spider)
-      const shouldPersistDedup = dedupConfig.enabled ||
-        Boolean((initialData as Record<string, unknown>).dedup_config)
+      const shouldPersistDedup = dedupConfig.enabled || Boolean(initialData.dedup_config)
 
       return {
         ...values,

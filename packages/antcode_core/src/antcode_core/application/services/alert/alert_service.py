@@ -304,7 +304,7 @@ class AlertService:
             errors = []
 
             for result in results:
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     fail_count += 1
                     errors.append(str(result))
                 else:

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 from loguru import logger
 
@@ -72,16 +71,13 @@ class CrawlBatchDispatcherService:
             logger.warning(f"crawl batch 不存在: {batch_id}")
             return
         if batch.status not in (BatchStatus.RUNNING.value, BatchStatus.RUNNING):
-            logger.info(
-                f"batch 非 RUNNING 状态，跳过派发: batch_id={batch_id} status={batch.status}"
-            )
+            logger.info(f"batch 非 RUNNING 状态，跳过派发: batch_id={batch_id} status={batch.status}")
             return
 
         project = await Project.get_or_none(id=batch.project_id)
         if project is None or project.type != ProjectType.RULE:
             logger.warning(
-                f"batch 关联项目非规则项目，跳过: batch_id={batch_id} "
-                f"project_type={getattr(project, 'type', None)}"
+                f"batch 关联项目非规则项目，跳过: batch_id={batch_id} project_type={getattr(project, 'type', None)}"
             )
             return
 
@@ -108,8 +104,7 @@ class CrawlBatchDispatcherService:
             else:
                 failed += 1
         logger.info(
-            f"batch 派发完成: batch_id={batch_id} dispatched={dispatched} "
-            f"failed={failed} total={len(pending_urls)}"
+            f"batch 派发完成: batch_id={batch_id} dispatched={dispatched} failed={failed} total={len(pending_urls)}"
         )
 
     async def _on_batch_resumed(self, batch_id: str) -> None:
@@ -154,9 +149,7 @@ class CrawlBatchDispatcherService:
             )
             if ok:
                 cancelled += 1
-        logger.info(
-            f"batch 取消: batch_id={batch_id} cancelled_runs={cancelled}/{len(active_runs)}"
-        )
+        logger.info(f"batch 取消: batch_id={batch_id} cancelled_runs={cancelled}/{len(active_runs)}")
         # 已实际派发到 worker 的运行中任务，还需要发 control 取消给 worker。
         # 一期先只标 DB，让 worker 侧的 heartbeat + reclaim 兜底；等 F1-B 再补 control。
 
@@ -164,9 +157,9 @@ class CrawlBatchDispatcherService:
 
     async def _dispatch_single_url(
         self,
-        batch: "CrawlBatch",
-        project: "Project",
-        rule: "ProjectRule",
+        batch: CrawlBatch,
+        project: Project,
+        rule: ProjectRule,
         url: str,
     ) -> bool:
         """把单个 URL 作为一个 rule 任务派发。TaskRun.result_data 存 batch_id 用于关联。
@@ -214,10 +207,7 @@ class CrawlBatchDispatcherService:
             # R1-P1-3: timeout 用独立任务级字段（batch.task_timeout），不再
             # 复用 ``batch.timeout``（那是 HTTP 请求超时，默认 30s，容易杀
             # 掉慢站点抓取）。
-            task_timeout = int(
-                getattr(batch, "task_timeout", None)
-                or 3600
-            )
+            task_timeout = int(getattr(batch, "task_timeout", None) or 3600)
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,
                 run_id=run_id,
@@ -232,10 +222,7 @@ class CrawlBatchDispatcherService:
 
             if not getattr(result, "success", False):
                 err_msg = getattr(result, "error", "派发失败")
-                logger.warning(
-                    f"batch URL 派发失败: batch_id={batch.public_id} url={url} "
-                    f"err={err_msg}"
-                )
+                logger.warning(f"batch URL 派发失败: batch_id={batch.public_id} url={url} err={err_msg}")
                 # T7-B3a (P1-1): 派发失败入补派队列，退避后由 RedispatchLoop
                 # 重试；不再直接置 FAILED（超阈值时 loop 会自己落 FAILED）
                 try:
@@ -271,9 +258,7 @@ class CrawlBatchDispatcherService:
                 return True
             return True
         except Exception as exc:
-            logger.exception(
-                f"batch URL 派发异常: batch_id={batch.public_id} url={url} err={exc}"
-            )
+            logger.exception(f"batch URL 派发异常: batch_id={batch.public_id} url={url} err={exc}")
             # P1-14: 出异常且已建 TaskRun 时清孤儿，让 URL 可重派
             if task_run_created:
                 await self._delete_task_run(run_id)

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -60,11 +61,9 @@ async def verify_api_key(api_key: str, worker_id: str | None = None) -> bool:
     任何模块不可用 / DB 异常都直接拒绝(返回 ``False``),不存在
     "开发模式 fallback" —— 防止环境降级时鉴权自动通过(P0-#4)。
 
-    P1-10: 双路查询
-    - 优先按 ``api_key_hash`` 匹配(新数据 & 未来主路径)
-    - 也覆盖 ``api_key_previous_hash``(轮换 grace 期旧 key)
-    - fallback 明文 ``api_key`` / ``api_key_previous`` 列以兼容尚未回填 hash 的旧数据
-      (迁移完成清空明文列后可移除)
+    P1-10: 只按哈希查询
+    - 优先按 ``api_key_hash`` 匹配当前 key
+    - previous hash 只有在 grace 期未过期时才可用
     """
     if not api_key:
         return False
@@ -78,61 +77,95 @@ async def verify_api_key(api_key: str, worker_id: str | None = None) -> bool:
     key_hash = hash_api_key(api_key)
 
     try:
-        # 主路径:按 hash 查询(新写入的数据 & 迁移回填后的旧数据)
-        from tortoise.expressions import Q
-
-        query = Worker.filter(Q(api_key_hash=key_hash) | Q(api_key_previous_hash=key_hash))
+        query = Worker.filter(api_key_hash=key_hash)
         if worker_id:
             query = query.filter(public_id=worker_id)
         if await query.exists():
             return True
 
-        # fallback: 老明文列(尚未回填 hash 的历史 Worker,迁移期兼容)
-        legacy_query = Worker.filter(
-            Q(api_key=api_key) | Q(api_key_previous=api_key)
+        previous_query = Worker.filter(
+            api_key_previous_hash=key_hash,
+            api_key_previous_expires_at__gt=datetime.now(UTC),
         )
         if worker_id:
-            legacy_query = legacy_query.filter(public_id=worker_id)
-        return await legacy_query.exists()
+            previous_query = previous_query.filter(public_id=worker_id)
+        return await previous_query.exists()
     except Exception:
         logger.exception("API Key 查询失败,拒绝鉴权(无 fallback)")
         return False
 
 
 def store_api_key(worker: Any, plain_key: str) -> None:
-    """P1-10: 在 Worker 实例上落 api_key + api_key_hash。
-
-    调用方在 create/rotate/finalize 路径必须走这个 helper,以保证
-    hash 列跟明文列同步(明文列本 release 仍写,下个 release 清空)。
-
-    NOTE: 只赋值到实例,由调用方决定 ``await worker.save(...)``。
-    """
+    """在 Worker 实例上只保存 API Key 哈希。"""
     if not plain_key:
-        worker.api_key = None
         worker.api_key_hash = None
         return
-    worker.api_key = plain_key
     worker.api_key_hash = hash_api_key(plain_key)
 
 
 def store_api_key_previous(worker: Any, plain_key: str | None) -> None:
-    """P1-10: 轮换时把旧 key 落到 previous 列(明文 + hash 同步)。"""
+    """轮换时只保存旧 API Key 哈希。"""
     if not plain_key:
-        worker.api_key_previous = None
         worker.api_key_previous_hash = None
         return
-    worker.api_key_previous = plain_key
     worker.api_key_previous_hash = hash_api_key(plain_key)
 
 
+async def rotate_worker_api_key(
+    worker_id: str,
+    grace_minutes: int = 30,
+) -> dict[str, Any]:
+    """轮换 Worker API Key，只持久化当前/旧 key 的哈希。"""
+    if grace_minutes <= 0:
+        raise ValueError("grace_minutes 必须大于 0")
+
+    from antcode_core.domain.models.worker import Worker
+
+    worker = await Worker.get_or_none(public_id=worker_id)
+    if worker is None:
+        raise ValueError("Worker 不存在")
+    if not worker.api_key_hash:
+        raise ValueError("Worker 当前 API Key 哈希不存在")
+
+    plain_key = generate_api_key()
+    worker.api_key_previous_hash = worker.api_key_hash
+    worker.api_key_previous_expires_at = datetime.now(UTC) + timedelta(minutes=grace_minutes)
+    store_api_key(worker, plain_key)
+    await worker.save(
+        update_fields=[
+            "api_key_hash",
+            "api_key_previous_hash",
+            "api_key_previous_expires_at",
+        ]
+    )
+    return {
+        "api_key": plain_key,
+        "previous_expires_at": worker.api_key_previous_expires_at,
+    }
+
+
+async def finalize_worker_api_key_rotation(worker_id: str) -> None:
+    """结束 grace 期并立即撤销旧 API Key。"""
+    from antcode_core.domain.models.worker import Worker
+
+    worker = await Worker.get_or_none(public_id=worker_id)
+    if worker is None:
+        raise ValueError("Worker 不存在")
+    worker.api_key_previous_hash = None
+    worker.api_key_previous_expires_at = None
+    await worker.save(update_fields=["api_key_previous_hash", "api_key_previous_expires_at"])
+
+
 def store_secret_key(worker: Any, plain_secret: str) -> None:
-    """P1-10: 在 Worker 实例上落 secret_key + secret_key_hash。"""
+    """加密保存 HMAC secret，并保留哈希用于完整性校验。"""
+    from antcode_core.common.security.secret_box import secret_box
+
     if not plain_secret:
-        worker.secret_key = None
         worker.secret_key_hash = None
+        worker.secret_key_encrypted = None
         return
-    worker.secret_key = plain_secret
     worker.secret_key_hash = hash_api_key(plain_secret)
+    worker.secret_key_encrypted = secret_box.encrypt(plain_secret)
 
 
 class APIKeyManager:

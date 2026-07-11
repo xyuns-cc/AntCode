@@ -11,8 +11,8 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
-from enum import Enum
-from typing import Any, ClassVar, TypeVar
+from enum import Enum, StrEnum
+from typing import Any, ClassVar, TypeVar, cast
 
 from antcode_worker.domain.enums import (
     ArtifactType,
@@ -34,7 +34,7 @@ from antcode_worker.domain.models import (
 T = TypeVar("T")
 
 
-class SchemaVersion(str, Enum):
+class SchemaVersion(StrEnum):
     """消息 schema 版本"""
 
     V1 = "v1"
@@ -239,15 +239,15 @@ class JsonCodec(MessageCodec):
     def _dict_to_object(self, data: dict[str, Any], target_type: type[T]) -> T:
         """将字典转换为目标类型对象"""
         if target_type == RunContext:
-            return self._decode_run_context(data)
+            return cast(T, self._decode_run_context(data))
         elif target_type == TaskPayload:
-            return self._decode_task_payload(data)
+            return cast(T, self._decode_task_payload(data))
         elif target_type == ExecResult:
-            return self._decode_exec_result(data)
+            return cast(T, self._decode_exec_result(data))
         elif target_type == LogEntry:
-            return self._decode_log_entry(data)
+            return cast(T, self._decode_log_entry(data))
         elif target_type == ArtifactRef:
-            return self._decode_artifact_ref(data)
+            return cast(T, self._decode_artifact_ref(data))
         elif target_type is dict:
             return data  # type: ignore
         else:
@@ -293,8 +293,8 @@ class JsonCodec(MessageCodec):
 
         return TaskPayload(
             task_type=task_type,
-            workspace_path=None,
-            project_cwd=None,
+            workspace_path="",
+            project_cwd="",
             source_bundle=source_bundle,
             entry_point=data.get("entry_point", ""),
             function=data.get("function"),
@@ -399,7 +399,6 @@ class JsonCodec(MessageCodec):
             mime_type=data.get("mime_type"),
             created_at=created_at,
         )
-
 
 
 class LogMessageCodec(JsonCodec):

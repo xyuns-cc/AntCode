@@ -25,7 +25,6 @@ from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.rate_limiter import redis_rate_limiter
 
-
 _FAIL_KEY_PREFIX = "login:fail:"
 _LOCK_KEY_PREFIX = "login:lock:"
 
@@ -75,13 +74,10 @@ async def is_account_locked(username: str) -> tuple[bool, int]:
     """返回 (锁定中?, 剩余秒数)。"""
     if not username:
         return False, 0
-    try:
-        redis = await get_redis_client()
-        ttl = await redis.ttl(_lock_key(username))
-        if ttl and ttl > 0:
-            return True, int(ttl)
-    except Exception as exc:
-        logger.debug(f"is_account_locked 检查失败（放行）: {exc}")
+    redis = await get_redis_client()
+    ttl = await redis.ttl(_lock_key(username))
+    if ttl and ttl > 0:
+        return True, int(ttl)
     return False, 0
 
 
@@ -89,46 +85,32 @@ async def record_failure(username: str) -> tuple[int, bool]:
     """登录失败计数 +1；返回 (当前失败次数, 是否触发新锁定)。"""
     if not username:
         return 0, False
-    try:
-        redis = await get_redis_client()
-        key = _fail_key(username)
-        count = await redis.incr(key)
-        count = int(count or 0)
-        # 首次设置窗口 TTL —— 与锁定持续时间一致，锁定结束自然重置计数
-        if count == 1:
-            await redis.expire(key, settings.LOGIN_LOCKOUT_DURATION_SEC)
-        newly_locked = False
-        if count >= settings.LOGIN_LOCKOUT_FAILURES:
-            # 触发锁定：写 lock key + 清失败计数
-            lock_key = _lock_key(username)
-            existed = await redis.exists(lock_key)
-            await redis.set(
-                lock_key,
-                int(time.time()),
-                ex=settings.LOGIN_LOCKOUT_DURATION_SEC,
+    redis = await get_redis_client()
+    key = _fail_key(username)
+    count = int(await redis.incr(key) or 0)
+    if count == 1:
+        await redis.expire(key, settings.LOGIN_LOCKOUT_DURATION_SEC)
+    newly_locked = False
+    if count >= settings.LOGIN_LOCKOUT_FAILURES:
+        lock_key = _lock_key(username)
+        existed = await redis.exists(lock_key)
+        await redis.set(lock_key, int(time.time()), ex=settings.LOGIN_LOCKOUT_DURATION_SEC)
+        newly_locked = not existed
+        await redis.delete(key)
+        if newly_locked:
+            logger.warning(
+                f"账户锁定: username={username} failures={count} "
+                f"lock_duration={settings.LOGIN_LOCKOUT_DURATION_SEC}s"
             )
-            newly_locked = not existed
-            await redis.delete(key)  # 锁定后重置失败计数
-            if newly_locked:
-                logger.warning(
-                    f"账户锁定: username={username} failures={count} "
-                    f"lock_duration={settings.LOGIN_LOCKOUT_DURATION_SEC}s"
-                )
-        return count, newly_locked
-    except Exception as exc:
-        logger.warning(f"record_failure 失败: {exc}")
-        return 0, False
+    return count, newly_locked
 
 
 async def clear_failures(username: str) -> None:
     """登录成功后清失败计数（不清锁定 —— 锁定期内成功也不解锁）。"""
     if not username:
         return
-    try:
-        redis = await get_redis_client()
-        await redis.delete(_fail_key(username))
-    except Exception as exc:
-        logger.debug(f"clear_failures 失败: {exc}")
+    redis = await get_redis_client()
+    await redis.delete(_fail_key(username))
 
 
 __all__ = [

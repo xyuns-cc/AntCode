@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import os
-import time
 
 from antcode_contracts import data_pb2
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
@@ -83,9 +82,7 @@ class SpiderDataHandler:
 
         run_id = batch.run_id
         if not run_id:
-            logger.warning(
-                f"SpiderDataBatch 缺 run_id，drop worker_id={batch.worker_id}"
-            )
+            logger.warning(f"SpiderDataBatch 缺 run_id，drop worker_id={batch.worker_id}")
             return (0, len(batch.items))
 
         stream_key = self._stream_key(run_id)
@@ -117,9 +114,7 @@ class SpiderDataHandler:
                 )
                 accepted += 1
             except Exception as exc:
-                logger.error(
-                    f"pipe.xadd 组装失败 run_id={run_id} seq={item.sequence}: {exc}"
-                )
+                logger.error(f"pipe.xadd 组装失败 run_id={run_id} seq={item.sequence}: {exc}")
                 failed += 1
 
         # meta 心跳（可选） —— 与 AntCodeRedisPipeline.process_item 里每 N 条
@@ -146,9 +141,7 @@ class SpiderDataHandler:
                 except Exception:
                     pass
         except Exception as exc:
-            logger.exception(
-                f"pipe.execute 失败 run_id={run_id} accepted={accepted}: {exc}"
-            )
+            logger.exception(f"pipe.execute 失败 run_id={run_id} accepted={accepted}: {exc}")
             return (0, len(batch.items))
 
         return (accepted, failed)

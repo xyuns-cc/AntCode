@@ -4,13 +4,13 @@
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class LogLevel(str, Enum):
+class LogLevel(StrEnum):
     """日志级别枚举"""
 
     DEBUG = "DEBUG"
@@ -20,7 +20,7 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
-class LogType(str, Enum):
+class LogType(StrEnum):
     """日志类型枚举"""
 
     STDOUT = "stdout"
@@ -29,7 +29,7 @@ class LogType(str, Enum):
     APPLICATION = "application"
 
 
-class LogFormat(str, Enum):
+class LogFormat(StrEnum):
     """日志输出格式枚举"""
 
     STRUCTURED = "structured"  # 结构化JSON格式

@@ -213,11 +213,6 @@ class ExecResult:
     stdout_lines: int = 0
     stderr_lines: int = 0
 
-    # L2/O2: 日志归档 URI（LogManager.archive_logs 生成的 pgartifact:// URI）
-    # + 日志归档标记；engine._report_result 会读取此字段
-    log_archive_uri: str | None = None
-    log_archived: bool = False
-
     # 额外数据
     data: dict[str, Any] = field(default_factory=dict)
 

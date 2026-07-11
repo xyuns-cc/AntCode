@@ -32,8 +32,8 @@ class AuditLog(Model):
 
     # 操作详情
     description = fields.TextField(null=True, description="操作描述")
-    old_value = fields.JSONField(null=True, description="修改前的值")
-    new_value = fields.JSONField(null=True, description="修改后的值")
+    old_value: fields.JSONField[object | None] = fields.JSONField(null=True, description="修改前的值")
+    new_value: fields.JSONField[object | None] = fields.JSONField(null=True, description="修改后的值")
 
     # 结果
     success = fields.BooleanField(default=True, description="是否成功")

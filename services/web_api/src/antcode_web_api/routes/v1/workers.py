@@ -12,18 +12,26 @@ from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
-from antcode_core.common.security import constant_time_compare
+from antcode_core.common.security.api_key import store_api_key, store_secret_key
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.common.security.worker_auth import (
     verify_worker_request_with_signature,
 )
-from antcode_core.domain.models import UserRole, WorkerStatus
+from antcode_core.domain.models import (
+    DispatchStatus,
+    Task,
+    TaskRun,
+    TaskStatus,
+    User,
+    UserRole,
+    Worker,
+    WorkerStatus,
+)
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
     WorkerAggregateStats,
     WorkerCapabilities,
     WorkerCreateRequest,
-    WorkerCredentialsResponse,
     WorkerHeartbeatRequest,
     WorkerInstallKeyRequest,
     WorkerInstallKeyResponse,
@@ -52,6 +60,7 @@ from antcode_core.infrastructure.redis import (
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
+from tortoise.expressions import Q
 
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
@@ -100,6 +109,39 @@ class WorkerTaskStatusReportRequest(_WorkerReportBaseModel):
 _INSTALL_KEY_GLOBAL_FAIL_KEY = "install_key:fail:global"
 _INSTALL_KEY_GLOBAL_FAIL_WINDOW_SECONDS = 60
 _INSTALL_KEY_GLOBAL_FAIL_THRESHOLD = 50
+_MAX_DISPATCH_BATCH_TASKS = 500
+_MAX_DISPATCH_TIMEOUT_SECONDS = 86400
+
+
+class _StrictRequestModel(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    def get(self, key: str, default=None):
+        value = getattr(self, key, default)
+        return default if value is None else value
+
+
+class WorkerDispatchTaskRequest(_StrictRequestModel):
+    project_id: str = Field(..., min_length=1, max_length=64)
+    task_id: int = Field(..., gt=0)
+    params: dict = Field(default_factory=dict)
+    environment_vars: dict[str, str] = Field(default_factory=dict)
+    timeout: int = Field(default=3600, ge=1, le=_MAX_DISPATCH_TIMEOUT_SECONDS)
+    worker_id: str | None = Field(default=None, min_length=1, max_length=64)
+    region: str | None = Field(default=None, max_length=50)
+    tags: list[str] | None = Field(default=None, max_length=32)
+    priority: int | None = Field(default=None, ge=0, le=4)
+    project_type: str = Field(default="code", pattern="^(code|file|rule)$")
+    require_render: bool = False
+
+
+class WorkerDispatchBatchRequest(_StrictRequestModel):
+    tasks: list[dict] = Field(..., min_length=1, max_length=_MAX_DISPATCH_BATCH_TASKS)
+    worker_id: str | None = Field(default=None, min_length=1, max_length=64)
+    region: str | None = Field(default=None, max_length=50)
+    tags: list[str] | None = Field(default=None, max_length=32)
+    batch_id: str | None = Field(default=None, max_length=128)
+    require_render: bool = False
 
 
 async def _check_install_key_global_block() -> tuple[bool, int]:
@@ -241,7 +283,9 @@ async def _claim_install_key_source_once(
 
     existing_source = await redis.get(claim_key)
     if existing_source:
-        existing_value = existing_source.decode("utf-8") if isinstance(existing_source, (bytes, bytearray)) else str(existing_source)
+        existing_value = (
+            existing_source.decode("utf-8") if isinstance(existing_source, (bytes, bytearray)) else str(existing_source)
+        )
         if existing_value != source:
             return False, "安装 Key 已绑定其它来源"
         return True, "ok"
@@ -257,10 +301,23 @@ async def _claim_install_key_source_once(
 
     existing_source = await redis.get(claim_key)
     if existing_source:
-        existing_value = existing_source.decode("utf-8") if isinstance(existing_source, (bytes, bytearray)) else str(existing_source)
+        existing_value = (
+            existing_source.decode("utf-8") if isinstance(existing_source, (bytes, bytearray)) else str(existing_source)
+        )
         if existing_value != source:
             return False, "安装 Key 已绑定其它来源"
     return True, "ok"
+
+
+def _parse_install_key_metadata(raw: object) -> dict:
+    try:
+        value = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        payload = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("invalid install key metadata") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid install key metadata")
+    return payload
 
 
 async def _set_install_key_allowed_source_once(key: str, source: str) -> str:
@@ -270,13 +327,7 @@ async def _set_install_key_allowed_source_once(key: str, source: str) -> str:
     if not raw:
         return ""
 
-    payload: dict = {}
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode("utf-8", errors="ignore")
-    try:
-        payload = json.loads(str(raw)) or {}
-    except Exception:
-        payload = {}
+    payload = _parse_install_key_metadata(raw)
 
     current_allowed = (payload.get("allowed_source") or "").strip()
     if current_allowed:
@@ -295,13 +346,8 @@ async def _get_install_key_allowed_source(key: str) -> str:
     value = await redis.get(meta_key)
     if not value:
         return ""
-    if isinstance(value, (bytes, bytearray)):
-        value = value.decode("utf-8", errors="ignore")
-    try:
-        payload = json.loads(str(value))
-    except Exception:
-        return ""
-    allowed_source = (payload or {}).get("allowed_source")
+    payload = _parse_install_key_metadata(value)
+    allowed_source = payload.get("allowed_source")
     return (allowed_source or "").strip()
 
 
@@ -325,7 +371,7 @@ async def _verify_worker_credential_headers(
     if not api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 API Key")
 
-    if not worker.api_key or not constant_time_compare(api_key, worker.api_key):
+    if not await worker_service.verify_api_key(worker, api_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的 API Key")
 
     return {"worker": worker, "auth_info": auth_info}
@@ -340,6 +386,95 @@ def _mask_redis_url(redis_url: str) -> str:
     return f"{prefix}@{suffix}"
 
 
+async def _request_user(current_user: TokenData) -> User:
+    user = await User.get_or_none(id=current_user.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不可用")
+    return user
+
+
+async def _require_worker_access(
+    worker_id: str,
+    current_user: TokenData,
+    required_permission: str = "view",
+) -> Worker:
+    worker = await worker_service.get_worker_by_id(worker_id)
+    if worker is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    user = await _request_user(current_user)
+    allowed = await worker_service.check_user_worker_permission(
+        user_id=user.id,
+        worker_id=worker.id,
+        is_admin=user.is_admin,
+        required_permission=required_permission,
+    )
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    return worker
+
+
+async def _list_accessible_workers(
+    current_user: TokenData,
+    *,
+    page: int,
+    size: int,
+    status_filter: str | None,
+    region: str | None,
+    search: str | None,
+) -> tuple[list[Worker], int]:
+    user = await _request_user(current_user)
+    if user.is_admin:
+        return await worker_service.get_workers(
+            page=page,
+            size=size,
+            status_filter=status_filter,
+            region=region,
+            search=search,
+        )
+    workers = await worker_service.get_user_workers(user_id=user.id, is_admin=False)
+    search_value = (search or "").strip().lower()
+    filtered = [
+        worker
+        for worker in workers
+        if (not status_filter or worker.status == status_filter)
+        and (not region or worker.region == region)
+        and (
+            not search_value
+            or search_value in (worker.name or "").lower()
+            or search_value in (worker.host or "").lower()
+            or search_value in (worker.description or "").lower()
+        )
+    ]
+    offset = (page - 1) * size
+    return filtered[offset : offset + size], len(filtered)
+
+
+async def _require_run_access(run_id: str, current_user: TokenData) -> None:
+    user = await _request_user(current_user)
+    if user.is_admin:
+        return
+    execution = await TaskRun.filter(Q(run_id=run_id) | Q(public_id=run_id)).first()
+    task = await Task.get_or_none(id=execution.task_id) if execution else None
+    if task is None or task.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+
+
+async def _resolve_dispatch_worker(
+    requested_worker_id: str | None,
+    current_user: TokenData,
+) -> str | None:
+    user = await _request_user(current_user)
+    if user.is_admin:
+        return requested_worker_id
+    if not requested_worker_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="普通用户分发任务时必须显式指定已授权 Worker",
+        )
+    worker = await _require_worker_access(requested_worker_id, current_user, "use")
+    return worker.public_id
+
+
 def _worker_to_response(worker) -> WorkerResponse:
     """将 Worker 模型转换为响应对象"""
     metrics = WorkerMetrics()
@@ -351,14 +486,11 @@ def _worker_to_response(worker) -> WorkerResponse:
 
     # 解析 Worker 能力
     capabilities = WorkerCapabilities()
-    has_render = False
     if worker.capabilities:
         try:
             capabilities = WorkerCapabilities(**worker.capabilities)
-            has_render = capabilities.has_render_capability()
         except Exception:
             capabilities = WorkerCapabilities()
-            has_render = False
 
     # 处理时间字段，转换为 ISO 格式字符串
     last_heartbeat = ""
@@ -372,9 +504,7 @@ def _worker_to_response(worker) -> WorkerResponse:
     updated_at = ""
     if worker.updated_at:
         updated_at = (
-            worker.updated_at.isoformat()
-            if hasattr(worker.updated_at, "isoformat")
-            else str(worker.updated_at)
+            worker.updated_at.isoformat() if hasattr(worker.updated_at, "isoformat") else str(worker.updated_at)
         )
 
     return WorkerResponse(
@@ -396,7 +526,6 @@ def _worker_to_response(worker) -> WorkerResponse:
         transportMode=getattr(worker, "transport_mode", None) or "gateway",
         # Worker 能力
         capabilities=capabilities,
-        hasRenderCapability=has_render,
         metrics=metrics,
         lastHeartbeat=last_heartbeat,
         createdAt=worker.created_at,
@@ -419,8 +548,13 @@ async def get_workers(
     current_user: TokenData = Depends(get_current_user),
 ):
     """获取 Worker 列表"""
-    workers, total = await worker_service.get_workers(
-        page=page, size=size, status_filter=status_filter, region=region, search=search
+    workers, total = await _list_accessible_workers(
+        current_user,
+        page=page,
+        size=size,
+        status_filter=status_filter,
+        region=region,
+        search=search,
     )
 
     items = [_worker_to_response(worker) for worker in workers]
@@ -433,6 +567,7 @@ async def get_workers(
     response_model=BaseResponse[WorkerAggregateStats],
     summary="获取 Worker 统计",
     description="获取所有 Worker 的聚合统计信息",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_worker_stats(current_user: TokenData = Depends(get_current_user)):
     """获取 Worker 统计信息"""
@@ -445,6 +580,7 @@ async def get_worker_stats(current_user: TokenData = Depends(get_current_user)):
     response_model=BaseResponse[dict],
     summary="获取集群历史指标",
     description="获取所有 Worker 的聚合历史指标",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_cluster_metrics_history(
     hours: int = Query(24, ge=1, le=720, description="查询时间范围（小时）"),
@@ -490,72 +626,17 @@ async def create_worker(
 
 @router.get(
     "/{worker_id}/credentials",
-    response_model=BaseResponse[WorkerCredentialsResponse],
+    response_model=BaseResponse[dict],
     summary="获取 Worker 凭证",
-    description="获取 Worker 凭证用于配置 Worker（仅管理员）",
+    description="Worker 凭证不可恢复，仅在注册响应中返回一次",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def get_worker_credentials(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
-    """获取 Worker 凭证
-
-    返回 Worker 配置所需的凭证信息和配置示例
-    """
-    from antcode_core.common.config import settings
-    from antcode_core.domain.models import User
-
-    # 检查管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限"
-        )
-
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    # P1-10: 配置示例里凭证改为占位符,真实值只放结构化字段由前端一次性展示。
-    # 避免明文 api_key/secret_key/redis 密码嵌进响应体文本 → 被日志/缓存/前端持久化二次落盘。
-    def _mask_redis_url(url: str) -> str:
-        if not url or "@" not in url:
-            return url
-        prefix, suffix = url.split("@", 1)
-        if ":" in prefix:
-            prefix = prefix.rsplit(":", 1)[0] + ":***"
-        return f"{prefix}@{suffix}"
-
-    masked_redis_url = _mask_redis_url(settings.REDIS_URL)
-    config_example = f"""# Worker 配置 (worker_config.yaml)
-name: "{worker.name}"
-transport_mode: "{settings.WORKER_TRANSPORT_MODE}"
-gateway_host: "{settings.GATEWAY_HOST}"
-gateway_port: {settings.GATEWAY_PORT}
-redis_url: "{masked_redis_url}"
-
-# Gateway 首次注册推荐使用安装 Key（无需手动配置凭证）
-# ANTCODE_WORKER_KEY=你的安装Key ANTCODE_API_BASE_URL={settings.API_BASE_URL or f"http://{settings.GATEWAY_HOST}:{settings.GATEWAY_PORT}"} \\
-#   python -m antcode_worker
-
-# 若已有凭证，可使用环境变量凭证存储（容器场景推荐）
-# WORKER_CREDENTIAL_STORE=env
-# WORKER_CREDENTIAL_WORKER_ID={worker.public_id}
-# WORKER_CREDENTIAL_API_KEY=<从响应 api_key 字段读取,严禁嵌入示例文本>
-# WORKER_CREDENTIAL_SECRET_KEY=<从响应 secret_key 字段读取,严禁嵌入示例文本>
-"""
-
-    return success(
-        WorkerCredentialsResponse(
-            worker_id=worker.public_id,
-            api_key=worker.api_key,
-            secret_key=worker.secret_key,
-            gateway_host=settings.GATEWAY_HOST,
-            gateway_port=settings.GATEWAY_PORT,
-            transport_mode=settings.WORKER_TRANSPORT_MODE,
-            redis_url=masked_redis_url,
-            config_example=config_example,
-        ),
-        message="请将凭证配置到 Worker",
+async def get_worker_credentials(worker_id: str, current_user: TokenData = Depends(get_current_user)):
+    """拒绝恢复性读取，凭据只能在注册时一次性取得。"""
+    await _require_worker_access(worker_id, current_user)
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Worker 凭据不可恢复，请使用新的安装 Key 重新注册",
     )
 
 
@@ -566,9 +647,7 @@ redis_url: "{masked_redis_url}"
     description="断开与 Worker 的连接",
     dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def disconnect_worker(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def disconnect_worker(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """断开 Worker 连接"""
     result = await worker_service.disconnect_worker(worker_id)
     if not result:
@@ -584,9 +663,7 @@ async def disconnect_worker(
 )
 async def get_worker(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """获取 Worker 详情"""
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    worker = await _require_worker_access(worker_id, current_user)
     return success(_worker_to_response(worker))
 
 
@@ -655,9 +732,7 @@ async def delete_worker(
     description="批量删除多个 Worker",
     dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def batch_delete_workers(
-    request: dict = Body(...), current_user: TokenData = Depends(get_current_user)
-):
+async def batch_delete_workers(request: dict = Body(...), current_user: TokenData = Depends(get_current_user)):
     """批量删除 Worker"""
     worker_ids = request.get("worker_ids", [])
     if not worker_ids:
@@ -680,10 +755,9 @@ async def batch_delete_workers(
     response_model=BaseResponse[WorkerTestConnectionResponse],
     summary="测试 Worker 连接",
     description="测试与 Worker 的网络连接",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def test_worker_connection(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def test_worker_connection(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """测试 Worker 连接"""
     result = await worker_service.test_connection(worker_id)
     return success(WorkerTestConnectionResponse(**result))
@@ -694,10 +768,9 @@ async def test_worker_connection(
     response_model=BaseResponse[WorkerResponse],
     summary="刷新 Worker 状态",
     description="重新检测并更新 Worker 状态",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def refresh_worker_status(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def refresh_worker_status(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """刷新 Worker 状态"""
     worker = await worker_service.refresh_worker_status(worker_id)
     if not worker:
@@ -722,9 +795,7 @@ async def get_my_available_workers(current_user: TokenData = Depends(get_current
     user = await User.get_or_none(id=current_user.user_id)
     is_admin = user.is_admin if user else False
 
-    workers = await worker_service.get_user_workers(
-        user_id=current_user.user_id, is_admin=is_admin
-    )
+    workers = await worker_service.get_user_workers(user_id=current_user.user_id, is_admin=is_admin)
 
     items = [_worker_to_response(worker) for worker in workers]
 
@@ -737,9 +808,7 @@ async def get_my_available_workers(current_user: TokenData = Depends(get_current
     summary="获取 Worker 授权用户",
     description="获取该 Worker 的授权用户列表（管理员）",
 )
-async def get_worker_users(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def get_worker_users(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """获取 Worker 的授权用户列表"""
     from antcode_core.domain.models import User
 
@@ -810,9 +879,7 @@ async def assign_worker_permission(
     summary="撤销 Worker 权限",
     description="撤销用户的 Worker 访问权限（管理员）",
 )
-async def revoke_worker_permission(
-    worker_id: str, user_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def revoke_worker_permission(worker_id: str, user_id: str, current_user: TokenData = Depends(get_current_user)):
     """撤销用户的 Worker 权限"""
     from antcode_core.domain.models import User
 
@@ -826,7 +893,6 @@ async def revoke_worker_permission(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
     # 支持 public_id 或内部 id
-    internal_user_id = user_id
     try:
         internal_user_id = int(user_id)
     except ValueError:
@@ -850,9 +916,7 @@ async def revoke_worker_permission(
     summary="批量分配 Worker 权限",
     description="批量给用户分配多个 Worker 权限（管理员）",
 )
-async def batch_assign_workers(
-    request: dict = Body(...), current_user: TokenData = Depends(get_current_user)
-):
+async def batch_assign_workers(request: dict = Body(...), current_user: TokenData = Depends(get_current_user)):
     """批量分配 Worker 权限"""
     from antcode_core.domain.models import User, Worker
 
@@ -883,6 +947,7 @@ async def batch_assign_workers(
 
     # 合并成一次查询：Q(id__in=int_ids) | Q(public_id__in=str_ids)
     from tortoise.expressions import Q as _Q
+
     conditions = _Q()
     if int_ids:
         conditions |= _Q(id__in=int_ids)
@@ -916,9 +981,7 @@ async def get_worker_metrics_history(
     current_user: TokenData = Depends(get_current_user),
 ):
     """获取 Worker 历史指标"""
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    worker = await _require_worker_access(worker_id, current_user)
 
     history = await worker_service.get_metrics_history(worker.id, hours=hours)
     return success(history)
@@ -1028,9 +1091,7 @@ async def generate_install_key(
     # 检查管理员权限
     user = await User.get_or_none(id=current_user.user_id)
     if not user or not user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
 
     # 验证操作系统类型
     os_type = request.os_type.lower()
@@ -1063,14 +1124,10 @@ async def generate_install_key(
 
     if os_type == "windows":
         install_command = (
-            f'powershell -c "$env:ANTCODE_WORKER_KEY=\'{install_key.key}\'; '
-            f'irm {api_base}/install.ps1 | iex"'
+            f"powershell -c \"$env:ANTCODE_WORKER_KEY='{install_key.key}'; irm {api_base}/install.ps1 | iex\""
         )
     else:
-        install_command = (
-            f"curl -sSL {api_base}/install.sh | "
-            f"ANTCODE_WORKER_KEY={install_key.key} bash"
-        )
+        install_command = f"curl -sSL {api_base}/install.sh | ANTCODE_WORKER_KEY={install_key.key} bash"
 
     return success(
         WorkerInstallKeyResponse(
@@ -1133,9 +1190,7 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
     if not install_key:
         await _record_install_key_failed_attempt(request.key, request_source)
         await _record_install_key_global_failure()
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="安装 Key 不存在"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="安装 Key 不存在")
 
     if not install_key.is_valid():
         await _record_install_key_failed_attempt(request.key, request_source)
@@ -1176,17 +1231,22 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
     api_key = secrets.token_hex(16)
     secret_key = secrets.token_hex(32)
 
-    worker = await Worker.create(
+    worker = Worker(
         name=request.name,
         host=request.host,
         port=request.port,
         region=request.region or "",
-        api_key=api_key,
-        secret_key=secret_key,
         status="connecting",
         created_by=install_key.created_by,
         transport_mode="gateway",
     )
+    store_api_key(worker, api_key)
+    store_secret_key(worker, secret_key)
+    await worker.save()
+
+    from antcode_core.common.security.worker_auth import worker_auth_verifier
+
+    worker_auth_verifier.register_worker_secret(worker.public_id, secret_key)
 
     # 标记 Key 为已使用
     await install_key.mark_used(worker.public_id)
@@ -1230,36 +1290,26 @@ async def worker_heartbeat(
     # 防止攻击者用窃取的明文 api_key 伪造心跳,以及防止 body 字段被签名头绕过
     signed_worker_id = (auth_info.get("worker_id") or "").strip()
     if not signed_worker_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名认证身份"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名认证身份")
 
     if request.worker_id and request.worker_id != signed_worker_id:
         logger.warning(
-            "心跳 body worker_id 与 HMAC 签名身份不一致, "
-            f"signed={signed_worker_id}, body={request.worker_id}"
+            f"心跳 body worker_id 与 HMAC 签名身份不一致, signed={signed_worker_id}, body={request.worker_id}"
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="worker_id 与签名身份不一致"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="worker_id 与签名身份不一致")
 
     # 旁路:如果客户端仍把 api_key 放进 body,记一次弃用告警,但不让它进入日志
     if request.api_key:
         logger.warning(
-            "心跳 body 中携带了弃用的 api_key 字段,worker_id="
-            f"{signed_worker_id};请升级 Worker 端只使用 HMAC 签名头"
+            f"心跳 body 中携带了弃用的 api_key 字段,worker_id={signed_worker_id};请升级 Worker 端只使用 HMAC 签名头"
         )
 
     worker = await worker_service.get_worker_by_id(signed_worker_id)
-    if not worker or not worker.api_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败"
-        )
+    if not worker:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败")
 
     heartbeat_success = await worker_service.heartbeat(
         worker_id=signed_worker_id,
-        # 用服务端持有的 api_key 调下游服务,避免 body 字段成为信任来源
-        api_key=worker.api_key,
         status_value=request.status,
         metrics=request.metrics,
         version=request.version,
@@ -1288,6 +1338,7 @@ async def worker_heartbeat(
     response_model=BaseResponse[list],
     summary="获取 Worker 负载排名",
     description="获取所有在线 Worker 的负载排名，用于任务分发决策",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_workers_load_ranking(
     region: str | None = Query(None, description="区域过滤"),
@@ -1308,7 +1359,8 @@ async def get_workers_load_ranking(
     description="自动选择最佳 Worker 或指定 Worker 执行任务",
 )
 async def dispatch_task_to_worker(
-    request: dict = Body(...), current_user: TokenData = Depends(get_current_user)
+    request: WorkerDispatchTaskRequest,
+    current_user: TokenData = Depends(get_current_user),
 ):
     """
     分发任务到 Worker 执行（支持优先级调度）
@@ -1339,6 +1391,11 @@ async def dispatch_task_to_worker(
     if not project_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="项目ID不能为空")
 
+    dispatch_worker_id = await _resolve_dispatch_worker(
+        request.get("worker_id"),
+        current_user,
+    )
+
     # P1-23: 必须显式提供 task_id。之前把 project.id 直接当 task_id 写入 TaskRun
     # 会有两种后果:
     #   * 若数据库里恰好有一条 Task.id == project.id 的记录 → run 静默归到无关任务
@@ -1350,8 +1407,7 @@ async def dispatch_task_to_worker(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "缺少 task_id: 单任务分发必须显式提供真实 task_id, "
-                "不接受用 project_id 兜底 (会导致 orphan / 错误归属)"
+                "缺少 task_id: 单任务分发必须显式提供真实 task_id, 不接受用 project_id 兜底 (会导致 orphan / 错误归属)"
             ),
         )
     try:
@@ -1415,10 +1471,7 @@ async def dispatch_task_to_worker(
     # 直调 dispatch_task 端点没走到 —— rule/code 项目 build_plan 都会因缺
     # python_path 抛错。
     environment_vars = dict(request.get("environment_vars") or {})
-    if (
-        getattr(project, "env_location", None) == "worker"
-        and getattr(project, "worker_env_name", None)
-    ):
+    if getattr(project, "env_location", None) == "worker" and getattr(project, "worker_env_name", None):
         environment_vars.setdefault("ANTCODE_RUNTIME_ENV", project.worker_env_name)
 
     result = await worker_task_dispatcher.dispatch_task(
@@ -1427,7 +1480,7 @@ async def dispatch_task_to_worker(
         params=params,
         environment_vars=environment_vars,
         timeout=request.get("timeout", 3600),
-        worker_id=request.get("worker_id"),
+        worker_id=dispatch_worker_id,
         region=request.get("region"),
         tags=request.get("tags"),
         priority=request.get("priority"),
@@ -1437,8 +1490,8 @@ async def dispatch_task_to_worker(
 
     if not result.success:
         # 分发失败，更新执行记录状态
-        task_run.status = "failed"
-        task_run.dispatch_status = "failed"
+        task_run.status = TaskStatus.FAILED
+        task_run.dispatch_status = DispatchStatus.FAILED
         task_run.error_message = result.error or "任务分发失败"
         await task_run.save()
         raise HTTPException(
@@ -1450,14 +1503,17 @@ async def dispatch_task_to_worker(
     # P5: DispatchResult.worker_id 是 public_id 字符串，TaskRun.worker_id 是
     # BigIntField（internal FK），历史上直接赋值 → save 抛
     # `invalid literal for int() with base 10: 'worker-xxx'`。解析成 int。
-    task_run.dispatch_status = "dispatched"
+    task_run.dispatch_status = DispatchStatus.DISPATCHED
     if result.worker_id:
         from antcode_core.domain.models import Worker as _W
+
         _worker = await _W.filter(public_id=result.worker_id).only("id").first()
-        task_run.worker_id = _worker.id if _worker else None
+        if _worker:
+            task_run.worker_id = _worker.id
     await task_run.save()
 
     from dataclasses import asdict
+
     return success(asdict(result), message="任务已分发到 Worker")
 
 
@@ -1468,7 +1524,8 @@ async def dispatch_task_to_worker(
     description="批量分发多个任务到指定 Worker 的优先级队列",
 )
 async def dispatch_batch_to_worker(
-    request: dict = Body(...), current_user: TokenData = Depends(get_current_user)
+    request: WorkerDispatchBatchRequest,
+    current_user: TokenData = Depends(get_current_user),
 ):
     """
     批量分发任务到 Worker 执行
@@ -1495,6 +1552,11 @@ async def dispatch_batch_to_worker(
     tasks = request.get("tasks")
     if not tasks or not isinstance(tasks, list):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务列表不能为空")
+
+    dispatch_worker_id = await _resolve_dispatch_worker(
+        request.get("worker_id"),
+        current_user,
+    )
 
     # P0-a2: 逐 task 按 owner 校验 project（与单条 dispatch_task_to_worker L1344 保持一致）
     # 非本人/不存在均返回 404，避免 IDOR 探测存在性；缺 project_id 直接 400。
@@ -1523,7 +1585,7 @@ async def dispatch_batch_to_worker(
 
     result = await worker_task_dispatcher.dispatch_batch(
         tasks=tasks,
-        worker_id=request.get("worker_id"),
+        worker_id=dispatch_worker_id,
         region=request.get("region"),
         tags=request.get("tags"),
         batch_id=request.get("batch_id"),
@@ -1537,6 +1599,7 @@ async def dispatch_batch_to_worker(
         )
 
     from dataclasses import asdict
+
     return success(asdict(result), message="批量任务已分发到 Worker")
 
 
@@ -1545,10 +1608,9 @@ async def dispatch_batch_to_worker(
     response_model=BaseResponse[dict],
     summary="获取 Worker 队列状态",
     description="获取指定 Worker 的优先级队列状态",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def get_worker_queue_status(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def get_worker_queue_status(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """获取 Worker 队列状态"""
     from antcode_core.application.services.workers import worker_task_dispatcher
 
@@ -1609,9 +1671,7 @@ async def update_worker_task_priority(
     description="取消 Worker 优先级队列中的任务",
     dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def cancel_worker_queued_task(
-    worker_id: str, task_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def cancel_worker_queued_task(worker_id: str, task_id: str, current_user: TokenData = Depends(get_current_user)):
     """取消 Worker 队列中的任务"""
     from antcode_core.application.services.workers import worker_task_dispatcher
 
@@ -1639,16 +1699,13 @@ async def get_distributed_task_status(
     """从 Worker 获取任务状态"""
     from antcode_core.application.services.workers import worker_task_dispatcher
 
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    worker = await _require_worker_access(worker_id, current_user)
+    await _require_run_access(task_id, current_user)
 
     status_data = await worker_task_dispatcher.get_task_status_from_worker(worker, task_id)
 
     if not status_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在或无法获取状态"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在或无法获取状态")
 
     return success(status_data)
 
@@ -1669,15 +1726,12 @@ async def get_distributed_task_logs(
     """从 Worker 获取任务日志"""
     from antcode_core.application.services.workers import worker_task_dispatcher
 
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    worker = await _require_worker_access(worker_id, current_user)
+    await _require_run_access(task_id, current_user)
 
     logs = await worker_task_dispatcher.get_task_logs_from_worker(worker, task_id, log_type, tail)
 
-    return success(
-        {"logs": logs, "total": len(logs), "worker_id": worker_id, "task_id": task_id}
-    )
+    return success({"logs": logs, "total": len(logs), "worker_id": worker_id, "task_id": task_id})
 
 
 @router.get(
@@ -1685,6 +1739,7 @@ async def get_distributed_task_logs(
     response_model=BaseResponse[dict],
     summary="获取最佳 Worker",
     description="根据负载自动选择最适合执行任务的 Worker",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_best_worker(
     region: str | None = Query(None, description="区域过滤"),
@@ -1725,6 +1780,7 @@ async def get_best_worker(
     response_model=BaseResponse[WorkerListResponse],
     summary="获取有渲染能力的 Worker",
     description="获取所有具有浏览器渲染能力（DrissionPage）的在线 Worker",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_render_capable_workers(
     page: int = Query(1, ge=1, description="页码"),
@@ -1745,8 +1801,11 @@ async def get_render_capable_workers(
     render_workers = []
     for worker in all_workers:
         if worker.capabilities:
-            cap = worker.capabilities.get("drissionpage")
-            if cap and cap.get("enabled"):
+            task_types = worker.capabilities.get("task_types")
+            playwright = worker.capabilities.get("playwright")
+            if (isinstance(task_types, list) and "render" in task_types) or (
+                isinstance(playwright, dict) and playwright.get("enabled")
+            ):
                 render_workers.append(worker)
 
     total = len(render_workers)
@@ -1830,10 +1889,7 @@ async def report_task_logs_batch(
             return 0
 
     results = await asyncio.gather(
-        *(
-            _append_group(run_id, log_type, contents)
-            for (run_id, log_type), contents in grouped_logs.items()
-        ),
+        *(_append_group(run_id, log_type, contents) for (run_id, log_type), contents in grouped_logs.items()),
         return_exceptions=False,
     )
     received_count = sum(results)
@@ -1901,9 +1957,9 @@ async def get_distributed_logs(
     """获取分布式任务的日志"""
     from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
-    logs = await distributed_log_service.get_logs(
-        run_id, log_type=log_type, tail=tail
-    )
+    await _require_run_access(run_id, current_user)
+
+    logs = await distributed_log_service.get_logs(run_id, log_type=log_type, tail=tail)
 
     return success(
         {
@@ -1924,9 +1980,7 @@ async def get_distributed_logs(
     summary="获取 Worker 资源限制",
     description="获取指定 Worker 的资源限制和监控状态（需要管理员权限）",
 )
-async def get_worker_resources(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def get_worker_resources(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """
     获取 Worker 资源限制（管理员可查看）
 
@@ -1941,22 +1995,20 @@ async def get_worker_resources(
     # 检查管理员权限
     user = await User.get_or_none(id=current_user.user_id)
     if not user or not user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限查看资源配置"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限查看资源配置")
 
     # 获取 Worker 信息
     worker = await worker_service.get_worker_by_id(worker_id)
     if not worker:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
     # 基于心跳/数据库指标返回资源信息
     resources = worker.metrics if isinstance(worker.metrics, dict) else {}
     limits = worker.resource_limits if isinstance(worker.resource_limits, dict) else {}
 
     def _to_float(value: object, default: float = 0.0) -> float:
+        if not isinstance(value, (str, int, float)):
+            return default
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -1966,26 +2018,28 @@ async def get_worker_resources(
     memory_default = settings.TASK_MEMORY_LIMIT_MB
     cpu_default = settings.TASK_CPU_TIME_LIMIT_SEC
 
-    return success({
-        "limits": {
-            "max_concurrent_tasks": limits.get("max_concurrent_tasks", max_concurrent_default),
-            "task_memory_limit_mb": limits.get("task_memory_limit_mb", memory_default),
-            "task_cpu_time_limit_sec": limits.get("task_cpu_time_limit_sec", cpu_default),
-        },
-        "auto_adjustment": limits.get("auto_resource_limit", True),
-        "resource_stats": {
-            "cpu_percent": round(_to_float(resources.get("cpu", resources.get("cpu_percent", 0))), 1),
-            "memory_percent": round(_to_float(resources.get("memory", resources.get("memory_percent", 0))), 1),
-            "disk_percent": round(_to_float(resources.get("disk", resources.get("disk_percent", 0))), 1),
-            "memory_used_mb": resources.get("memoryUsed", resources.get("memory_used_mb", 0)),
-            "memory_total_mb": resources.get("memoryTotal", resources.get("memory_total_mb", 0)),
-            "disk_used_gb": resources.get("diskUsed", resources.get("disk_used_gb", 0)),
-            "disk_total_gb": resources.get("diskTotal", resources.get("disk_total_gb", 0)),
-            "running_tasks": resources.get("runningTasks", resources.get("running_tasks", 0)),
-            "queued_tasks": resources.get("queuedTasks", resources.get("queued_tasks", 0)),
-            "uptime_seconds": resources.get("uptime", resources.get("uptime_seconds", 0)),
-        },
-    })
+    return success(
+        {
+            "limits": {
+                "max_concurrent_tasks": limits.get("max_concurrent_tasks", max_concurrent_default),
+                "task_memory_limit_mb": limits.get("task_memory_limit_mb", memory_default),
+                "task_cpu_time_limit_sec": limits.get("task_cpu_time_limit_sec", cpu_default),
+            },
+            "auto_adjustment": limits.get("auto_resource_limit", True),
+            "resource_stats": {
+                "cpu_percent": round(_to_float(resources.get("cpu", resources.get("cpu_percent", 0))), 1),
+                "memory_percent": round(_to_float(resources.get("memory", resources.get("memory_percent", 0))), 1),
+                "disk_percent": round(_to_float(resources.get("disk", resources.get("disk_percent", 0))), 1),
+                "memory_used_mb": resources.get("memoryUsed", resources.get("memory_used_mb", 0)),
+                "memory_total_mb": resources.get("memoryTotal", resources.get("memory_total_mb", 0)),
+                "disk_used_gb": resources.get("diskUsed", resources.get("disk_used_gb", 0)),
+                "disk_total_gb": resources.get("diskTotal", resources.get("disk_total_gb", 0)),
+                "running_tasks": resources.get("runningTasks", resources.get("running_tasks", 0)),
+                "queued_tasks": resources.get("queuedTasks", resources.get("queued_tasks", 0)),
+                "uptime_seconds": resources.get("uptime", resources.get("uptime_seconds", 0)),
+            },
+        }
+    )
 
 
 @router.post(
@@ -2022,9 +2076,7 @@ async def update_worker_resources(
     # 获取 Worker 信息
     worker = await worker_service.get_worker_by_id(worker_id)
     if not worker:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
     # 参数验证
     max_concurrent = request.get("max_concurrent_tasks")
@@ -2061,9 +2113,7 @@ async def update_worker_resources(
         config_params["auto_resource_limit"] = str(auto_limit).lower()
 
     if not config_params:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="至少需要提供一个配置项"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少需要提供一个配置项")
 
     # 更新数据库中的资源限制配置
     if worker.resource_limits is None:
@@ -2094,9 +2144,7 @@ async def update_worker_resources(
     except Exception as e:
         logger.warning(f"发送配置更新失败: {e}")
 
-    logger.info(
-        f"超级管理员 {user.username} 调整了 Worker {worker_id} 的资源限制: {config_params}"
-    )
+    logger.info(f"超级管理员 {user.username} 调整了 Worker {worker_id} 的资源限制: {config_params}")
 
     return success(
         {"updated": config_params, "synced": synced},
@@ -2112,6 +2160,7 @@ async def update_worker_resources(
     response_model=BaseResponse[dict],
     summary="获取集群爬虫统计",
     description="获取所有在线 Worker 的爬虫统计聚合数据",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_cluster_spider_stats(current_user: TokenData = Depends(get_current_user)):
     """获取集群爬虫统计"""
@@ -2126,10 +2175,9 @@ async def get_cluster_spider_stats(current_user: TokenData = Depends(get_current
     response_model=BaseResponse[dict],
     summary="获取单 Worker 爬虫统计",
     description="获取指定 Worker 的爬虫统计数据",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
-async def get_worker_spider_stats(
-    worker_id: str, current_user: TokenData = Depends(get_current_user)
-):
+async def get_worker_spider_stats(worker_id: str, current_user: TokenData = Depends(get_current_user)):
     """获取单 Worker 爬虫统计"""
     from antcode_core.application.services.workers.spider_stats_service import spider_stats_service
 
@@ -2146,6 +2194,7 @@ async def get_worker_spider_stats(
     response_model=BaseResponse[list],
     summary="获取 Worker 爬虫统计历史",
     description="获取指定 Worker 的爬虫统计历史趋势数据",
+    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
 )
 async def get_worker_spider_stats_history(
     worker_id: str,
@@ -2159,9 +2208,7 @@ async def get_worker_spider_stats_history(
     if not worker:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
-    history = await spider_stats_service.get_spider_stats_history(
-        worker_id=worker.id, hours=hours
-    )
+    history = await spider_stats_service.get_spider_stats_history(worker_id=worker.id, hours=hours)
     return success(history)
 
 

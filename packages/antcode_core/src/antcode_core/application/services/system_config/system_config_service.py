@@ -258,6 +258,7 @@ class SystemConfigService:
             for config in configs:
                 try:
                     # 根据数据类型解析配置值
+                    value: object
                     if config.value_type == "int":
                         value = int(config.config_value)
                     elif config.value_type == "float":

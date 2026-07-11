@@ -39,13 +39,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, cast
 
 from loguru import logger
 
 from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis.client import get_redis_client
-
 
 # ---------------------------------------------------------------------------
 # Lua: 原子 claim —— ZRANGEBYSCORE + ZREM + HSET processing 一步完成
@@ -76,15 +76,9 @@ class RedispatchService:
 
     def __init__(self) -> None:
         self._namespace = settings.REDIS_NAMESPACE
-        self._max_attempts = int(
-            getattr(settings, "REDISPATCH_MAX_ATTEMPTS", self.DEFAULT_MAX_ATTEMPTS)
-        )
-        self._base_delay = int(
-            getattr(settings, "REDISPATCH_BASE_DELAY_SEC", self.DEFAULT_BASE_DELAY)
-        )
-        self._max_delay = int(
-            getattr(settings, "REDISPATCH_MAX_DELAY_SEC", self.DEFAULT_MAX_DELAY)
-        )
+        self._max_attempts = int(getattr(settings, "REDISPATCH_MAX_ATTEMPTS", self.DEFAULT_MAX_ATTEMPTS))
+        self._base_delay = int(getattr(settings, "REDISPATCH_BASE_DELAY_SEC", self.DEFAULT_BASE_DELAY))
+        self._max_delay = int(getattr(settings, "REDISPATCH_MAX_DELAY_SEC", self.DEFAULT_MAX_DELAY))
         self._processing_timeout_sec = int(
             getattr(
                 settings,
@@ -141,8 +135,7 @@ class RedispatchService:
         """
         if self.should_give_up(attempts):
             logger.warning(
-                f"补派放弃: run_id={run_id} attempts={attempts} 已超上限 "
-                f"{self._max_attempts},交调用方置 FAILED"
+                f"补派放弃: run_id={run_id} attempts={attempts} 已超上限 {self._max_attempts},交调用方置 FAILED"
             )
             return False
 
@@ -169,8 +162,7 @@ class RedispatchService:
         # 但我们希望"attempts 递增后"是新的 member（reason 会变）,实际 payload 不同→天然区分
         await redis.zadd(self._key(), {payload: score})
         logger.info(
-            f"补派入队: run_id={run_id} attempts={attempts + 1}/{self._max_attempts} "
-            f"delay={delay}s reason={reason!r}"
+            f"补派入队: run_id={run_id} attempts={attempts + 1}/{self._max_attempts} delay={delay}s reason={reason!r}"
         )
         return True
 
@@ -183,47 +175,47 @@ class RedispatchService:
         """
         redis = await get_redis_client()
         await self._ensure_script(redis)
+        claim_sha = self._claim_sha
+        if claim_sha is None:
+            raise RuntimeError("redispatch claim 脚本未加载")
         now_ms = int(time.time() * 1000)
         try:
-            raw_list = await redis.evalsha(
-                self._claim_sha,
-                2,
-                self._key(),
-                self._processing_key(),
-                str(now_ms),
-                str(limit),
-                str(now_ms),
-            )
-        except Exception as exc:
-            if "NOSCRIPT" in str(exc):
-                logger.warning("redispatch claim 脚本未在 Redis 缓存中,回退 EVAL")
-                self._claim_sha = None
-                raw_list = await redis.eval(
-                    _REDISPATCH_CLAIM_LUA,
+            raw_list = await cast(
+                Awaitable[list[bytes | str]],
+                redis.evalsha(
+                    claim_sha,
                     2,
                     self._key(),
                     self._processing_key(),
                     str(now_ms),
                     str(limit),
                     str(now_ms),
+                ),
+            )
+        except Exception as exc:
+            if "NOSCRIPT" in str(exc):
+                logger.warning("redispatch claim 脚本未在 Redis 缓存中,回退 EVAL")
+                self._claim_sha = None
+                raw_list = await cast(
+                    Awaitable[list[bytes | str]],
+                    redis.eval(
+                        _REDISPATCH_CLAIM_LUA,
+                        2,
+                        self._key(),
+                        self._processing_key(),
+                        str(now_ms),
+                        str(limit),
+                        str(now_ms),
+                    ),
                 )
             else:
                 raise
         out: list[dict[str, Any]] = []
         for m in raw_list or []:
-            raw_str = (
-                m.decode("utf-8", errors="ignore") if isinstance(m, bytes) else m
-            )
-            try:
-                item = json.loads(raw_str)
-            except json.JSONDecodeError as exc:
-                logger.warning(f"补派 payload 反序列化失败,丢弃: {exc}")
-                # 反序列化失败: 也从 processing 里清掉,否则永远卡在里面
-                try:
-                    await redis.hdel(self._processing_key(), raw_str)
-                except Exception:
-                    pass
-                continue
+            raw_str = m.decode("utf-8") if isinstance(m, bytes) else m
+            item = json.loads(raw_str)
+            if not isinstance(item, dict):
+                raise ValueError("redispatch payload 必须是 JSON object")
             item["__raw_payload"] = raw_str
             out.append(item)
         return out
@@ -246,14 +238,11 @@ class RedispatchService:
     async def ack(self, raw_payload: str) -> None:
         """处理成功 -> 从 processing hash 移除。"""
         redis = await get_redis_client()
-        try:
-            await redis.hdel(self._processing_key(), raw_payload)
-        except Exception as exc:
-            logger.warning(f"redispatch ack 失败(可忽略): {exc}")
+        removed = await cast(Awaitable[int], redis.hdel(self._processing_key(), raw_payload))
+        if int(removed or 0) != 1:
+            raise RuntimeError("redispatch ack did not remove the processing entry")
 
-    async def requeue_raw(
-        self, raw_payload: str, *, delay_seconds: int = 0
-    ) -> None:
+    async def requeue_raw(self, raw_payload: str, *, delay_seconds: int = 0) -> None:
         """把已 claim 的原始 payload 放回 ZSet(用于处理异常或崩溃恢复)。
 
         与 ``enqueue`` 不同:这里保持原 payload 字节完全一致,不改 attempts;
@@ -261,13 +250,12 @@ class RedispatchService:
         """
         redis = await get_redis_client()
         score = int((time.time() + max(0, delay_seconds)) * 1000)
-        try:
-            pipe = redis.pipeline(transaction=True)
-            pipe.zadd(self._key(), {raw_payload: score})
-            pipe.hdel(self._processing_key(), raw_payload)
-            await pipe.execute()
-        except Exception as exc:
-            logger.warning(f"redispatch requeue_raw 失败: {exc}")
+        pipe = redis.pipeline(transaction=True)
+        pipe.zadd(self._key(), {raw_payload: score})
+        pipe.hdel(self._processing_key(), raw_payload)
+        results = await pipe.execute()
+        if len(results) < 2 or int(results[1] or 0) != 1:
+            raise RuntimeError("redispatch requeue did not clear the processing entry")
 
     async def sweep_stalled(self) -> int:
         """崩溃恢复:把 processing hash 里超时的条目 requeue 回 ZSet。
@@ -280,7 +268,10 @@ class RedispatchService:
         now_ms = int(time.time() * 1000)
         threshold_ms = now_ms - self._processing_timeout_sec * 1000
         try:
-            entries = await redis.hgetall(self._processing_key())
+            entries = await cast(
+                Awaitable[dict[bytes | str, bytes | str]],
+                redis.hgetall(self._processing_key()),
+            )
         except Exception as exc:
             logger.warning(f"redispatch sweep hgetall 失败: {exc}")
             return 0
@@ -289,20 +280,16 @@ class RedispatchService:
         requeued = 0
         for raw, claim_ms_raw in entries.items():
             try:
-                claim_ms = int(
-                    claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw
-                )
+                claim_ms = int(claim_ms_raw.decode() if isinstance(claim_ms_raw, bytes) else claim_ms_raw)
             except (ValueError, AttributeError):
                 claim_ms = 0
             if claim_ms > threshold_ms:
                 continue
-            raw_str = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+            raw_str = raw.decode("utf-8") if isinstance(raw, bytes) else raw
             await self.requeue_raw(raw_str, delay_seconds=0)
             requeued += 1
         if requeued:
-            logger.warning(
-                f"redispatch sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务"
-            )
+            logger.warning(f"redispatch sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务")
         return requeued
 
     async def pending_count(self) -> int:

@@ -10,6 +10,7 @@ import asyncio
 import os
 import signal
 import sys
+from functools import partial
 from typing import Any
 
 from loguru import logger
@@ -70,7 +71,10 @@ class GracefulShutdown:
             if self._loop:
                 try:
                     for sig in (signal.SIGTERM, signal.SIGINT):
-                        self._loop.add_signal_handler(sig, lambda s=sig: self._handle_signal(s, None))
+                        self._loop.add_signal_handler(
+                            sig,
+                            partial(self._handle_signal, sig, None),
+                        )
                     installed = True
                 except (RuntimeError, ValueError, NotImplementedError):
                     installed = False

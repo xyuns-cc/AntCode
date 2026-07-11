@@ -15,7 +15,7 @@ def create_ssl_context(
     cert_path: str | Path,
     key_path: str | Path,
     ca_path: str | Path | None = None,
-    verify_mode: int = ssl.CERT_REQUIRED,
+    verify_mode: ssl.VerifyMode = ssl.CERT_REQUIRED,
 ) -> ssl.SSLContext:
     """创建 SSL 上下文
 
@@ -99,7 +99,7 @@ def create_client_ssl_context(
         raise ConfigurationError(f"SSL 配置错误: {e}")
 
 
-def extract_client_cert_info(ssl_object: ssl.SSLObject | None) -> dict | None:
+def extract_client_cert_info(ssl_object: ssl.SSLObject | None) -> dict[str, object] | None:
     """从 SSL 连接中提取客户端证书信息
 
     Args:
@@ -117,8 +117,8 @@ def extract_client_cert_info(ssl_object: ssl.SSLObject | None) -> dict | None:
             return None
 
         return {
-            "subject": dict(x[0] for x in cert.get("subject", [])),
-            "issuer": dict(x[0] for x in cert.get("issuer", [])),
+            "subject": _flatten_certificate_name(cert.get("subject")),
+            "issuer": _flatten_certificate_name(cert.get("issuer")),
             "serial_number": cert.get("serialNumber"),
             "not_before": cert.get("notBefore"),
             "not_after": cert.get("notAfter"),
@@ -126,6 +126,23 @@ def extract_client_cert_info(ssl_object: ssl.SSLObject | None) -> dict | None:
     except Exception as e:
         logger.warning(f"提取客户端证书信息失败: {e}")
         return None
+
+
+def _flatten_certificate_name(value: object) -> dict[str, str]:
+    """Convert OpenSSL's nested distinguished-name tuples into a mapping."""
+    result: dict[str, str] = {}
+    if not isinstance(value, tuple):
+        return result
+    for relative_name in value:
+        if not isinstance(relative_name, tuple):
+            continue
+        for attribute in relative_name:
+            if not isinstance(attribute, tuple) or len(attribute) != 2:
+                continue
+            key, item = attribute
+            if isinstance(key, str) and isinstance(item, str):
+                result[key] = item
+    return result
 
 
 def verify_client_cert_cn(
@@ -149,6 +166,8 @@ def verify_client_cert_cn(
         raise AuthenticationError("无法获取客户端证书")
 
     subject = cert_info.get("subject", {})
+    if not isinstance(subject, dict):
+        raise AuthenticationError("客户端证书 subject 格式无效")
     actual_cn = subject.get("commonName")
 
     if actual_cn != expected_cn:

@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -141,10 +142,7 @@ class RedisDataReporter(SpiderDataReporter):
         # 启动定时刷新任务
         self._flush_task = asyncio.create_task(self._periodic_flush())
 
-        logger.info(
-            f"Spider 数据上报器已启动: run_id={self._run_id}, "
-            f"batch_size={self._batch_size}"
-        )
+        logger.info(f"Spider 数据上报器已启动: run_id={self._run_id}, batch_size={self._batch_size}")
 
     async def stop(self) -> None:
         """停止上报器"""
@@ -197,7 +195,10 @@ class RedisDataReporter(SpiderDataReporter):
         """更新元数据"""
         try:
             meta_key = self._keys.spider_meta_key(self._run_id)
-            await self._redis.hset(meta_key, mapping=meta.to_redis_dict())
+            await cast(
+                Awaitable[Any],
+                self._redis.hset(meta_key, mapping=meta.to_redis_dict()),
+            )
 
             if self._ttl_seconds > 0:
                 await self._redis.expire(meta_key, self._ttl_seconds)
@@ -237,7 +238,7 @@ class RedisDataReporter(SpiderDataReporter):
 
                 updates["errors"] = json.dumps(errors, ensure_ascii=False)
 
-            await self._redis.hset(meta_key, mapping=updates)
+            await cast(Awaitable[Any], self._redis.hset(meta_key, mapping=updates))
 
             logger.info(
                 f"Spider 爬取完成: run_id={run_id}, status={status}, "
@@ -266,12 +267,12 @@ class RedisDataReporter(SpiderDataReporter):
                 if self._stream_max_len > 0:
                     pipe.xadd(
                         stream_key,
-                        item.to_redis_dict(),
+                        cast(dict[Any, Any], item.to_redis_dict()),
                         maxlen=self._stream_max_len,
                         approximate=True,
                     )
                 else:
-                    pipe.xadd(stream_key, item.to_redis_dict())
+                    pipe.xadd(stream_key, cast(dict[Any, Any], item.to_redis_dict()))
 
             # 设置 TTL
             if self._ttl_seconds > 0:
@@ -417,7 +418,7 @@ async def create_data_reporter(
         if not redis_client or not keys:
             raise ValueError("Direct 模式需要 redis_client 和 keys")
 
-        reporter = RedisDataReporter(
+        reporter: SpiderDataReporter = RedisDataReporter(
             redis_client=redis_client,
             keys=keys,
             run_id=run_id,

@@ -4,14 +4,10 @@ JSON 工具
 Requirements: 13.3
 """
 
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Any
-
-try:
-    import ujson as json
-except ImportError:
-    import json
 
 
 def dumps(obj: Any, **kwargs) -> str:

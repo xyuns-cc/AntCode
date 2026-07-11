@@ -63,9 +63,7 @@ async def _verify_batch_owner(batch_id: str, current_user: TokenData) -> CrawlBa
     return batch
 
 
-async def _verify_project_access(
-    project_public_id: str, current_user: TokenData
-) -> Project:
+async def _verify_project_access(project_public_id: str, current_user: TokenData) -> Project:
     """R1-P2-1 (审查报告)：项目所有权校验。
 
     ``batches/*``（含 test / metrics 系列）此前都只查项目存在性、不查 owner，
@@ -78,10 +76,7 @@ async def _verify_project_access(
     project = await Project.get_or_none(public_id=str(project_public_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
-    if (
-        not getattr(current_user, "is_admin", False)
-        and getattr(project, "user_id", None) != current_user.user_id
-    ):
+    if not getattr(current_user, "is_admin", False) and getattr(project, "user_id", None) != current_user.user_id:
         # 与其它端点一致：无权也返 404 而非 403，避免暴露资源存在
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
     return project
@@ -241,10 +236,7 @@ async def list_batches(
         if project_ids:
             project_public_id_map = await QueryHelper.batch_get_project_public_ids(project_ids)
 
-        items = [
-            await _build_batch_response(b, project_public_id_map=project_public_id_map)
-            for b in batches
-        ]
+        items = [await _build_batch_response(b, project_public_id_map=project_public_id_map) for b in batches]
         return page(items, total, page_num, size, message=Messages.QUERY_SUCCESS)
 
     except Exception as e:
@@ -411,7 +403,6 @@ async def cancel_batch(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="取消批次失败",
         )
-
 
 
 # =============================================================================
@@ -736,10 +727,9 @@ async def _iter_batch_items(batch_id: str, limit: int | None = None):
     """
     import asyncio as _asyncio
 
-    from tortoise import Tortoise
-
     from antcode_core.infrastructure.redis.client import get_redis_client
     from antcode_core.infrastructure.redis.keys import RedisKeys
+    from tortoise import Tortoise
 
     keys = RedisKeys()
     client = await get_redis_client()
@@ -747,8 +737,7 @@ async def _iter_batch_items(batch_id: str, limit: int | None = None):
     # 第二位参不是查询参数;必须走底层 conn.execute_query_dict 才能绑定 $1。
     conn = Tortoise.get_connection("default")
     runs = await conn.execute_query_dict(
-        "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 "
-        "ORDER BY id ASC",
+        "SELECT run_id FROM task_executions WHERE result_data->>'crawl_batch_id' = $1 ORDER BY id ASC",
         [batch_id],
     )
     if not runs:
@@ -779,9 +768,7 @@ async def _iter_batch_items(batch_id: str, limit: int | None = None):
     # 保持 run 之间的输出顺序（TaskRun.id ASC）；桶内并发但按原序 flush。
     for i in range(0, len(runs), CONCURRENCY):
         bucket = runs[i : i + CONCURRENCY]
-        results = await _asyncio.gather(
-            *(_read_run(r["run_id"]) for r in bucket), return_exceptions=True
-        )
+        results = await _asyncio.gather(*(_read_run(r["run_id"]) for r in bucket), return_exceptions=True)
         for run, entries in zip(bucket, results, strict=False):
             if isinstance(entries, BaseException):
                 continue
@@ -841,6 +828,7 @@ async def export_batch(
     await _verify_batch_owner(batch_id, current_user)
 
     if format == "json":
+
         async def _json_stream():
             yield '{"batch_id": "' + batch_id + '", "items": ['
             first = True
@@ -849,8 +837,7 @@ async def export_batch(
                     yield ","
                 first = False
                 yield _json.dumps(
-                    {"sequence": seq, "url": url, "timestamp": ts,
-                     "run_id": run_id, "data": payload},
+                    {"sequence": seq, "url": url, "timestamp": ts, "run_id": run_id, "data": payload},
                     ensure_ascii=False,
                 )
             yield "]}"
@@ -858,9 +845,7 @@ async def export_batch(
         return StreamingResponse(
             _json_stream(),
             media_type="application/json",
-            headers={
-                "Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.json"'
-            },
+            headers={"Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.json"'},
         )
 
     # CSV：字段先看第一条 item 决定列头
@@ -875,7 +860,8 @@ async def export_batch(
                 columns = ["sequence", "url", "timestamp", "run_id"] + data_keys
                 writer.writerow(columns)
                 yield buf.getvalue()
-                buf.seek(0); buf.truncate(0)
+                buf.seek(0)
+                buf.truncate(0)
             row = [seq, url, ts, run_id]
             for k in columns[4:]:
                 v = payload.get(k) if isinstance(payload, dict) else ""
@@ -885,14 +871,13 @@ async def export_batch(
                 row.append(v if v is not None else "")
             writer.writerow(row)
             yield buf.getvalue()
-            buf.seek(0); buf.truncate(0)
+            buf.seek(0)
+            buf.truncate(0)
 
     return StreamingResponse(
         _csv_stream(),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.csv"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.csv"'},
     )
 
 

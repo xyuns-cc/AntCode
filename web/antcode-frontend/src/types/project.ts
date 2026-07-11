@@ -1,7 +1,15 @@
 // 项目类型枚举
 export type ProjectType = 'file' | 'rule' | 'code'
 export type ProjectStatus = 'active' | 'inactive' | 'archived'
-export type CrawlEngine = 'requests' | 'curl_cffi' | 'browser'
+export type CrawlEngine = 'requests' | 'curl_cffi' | 'playwright'
+
+export interface RuleDedupConfig {
+  enabled?: boolean
+  fields?: string[]
+  scope?: 'project' | 'run'
+  ttl_days?: number
+  on_hit?: 'drop' | 'log'
+}
 
 // 执行策略枚举
 export type ExecutionStrategy = 'fixed' | 'specified' | 'auto' | 'prefer'
@@ -107,13 +115,6 @@ export interface FileInfo {
   subdir?: string
   include_paths?: string[]
   resolved_revision?: string
-  // 兼容旧版数据结构（后端某些历史 project 可能仍返回这些字段）
-  source_type?: 'file' | 'git' | 'inline'
-  git_url?: string
-  git_branch?: string
-  git_commit?: string
-  git_subdir?: string
-  git_credential_id?: string
 }
 
 // 规则信息（从API返回）
@@ -138,6 +139,8 @@ export interface RuleInfo {
   proxy_config?: ProxyConfig
   anti_spider?: AntiSpiderConfig
   task_config?: TaskConfig
+  resume_enabled?: boolean
+  dedup_config?: RuleDedupConfig
 }
 
 // 代码信息（从API返回）
@@ -154,22 +157,13 @@ export interface CodeInfo {
   subdir?: string
   include_paths?: string[]
   resolved_revision?: string
-  // 兼容旧版数据结构
-  version?: string
-  content?: string
-  source_type?: 'code' | 'git' | 'inline'
-  git_url?: string
-  git_branch?: string
-  git_commit?: string
-  git_subdir?: string
-  git_credential_id?: string
 }
 
 // 文件项目详情
 // 提取规则 - 根据v2.0.0 API文档更新
 export interface ExtractionRule {
   desc: string  // 规则描述
-  type: 'css' | 'xpath' | 'regex' | 'jsonpath'  // 规则类型
+  type: 'css' | 'xpath' | 'regex'  // 规则类型
   expr: string  // 规则表达式
   page_type?: 'list' | 'detail'  // 页面类型（混合模式下使用）
   // 前端扩展字段（不发送到后端）
@@ -336,6 +330,8 @@ export interface ProjectCreateRequest {
   anti_spider?: string  // 反爬虫配置JSON
   task_config?: string  // 任务配置JSON
   data_schema?: string  // 数据结构定义JSON
+  resume_enabled?: boolean
+  dedup_config?: string | RuleDedupConfig
 
   // 代码项目字段
   language?: string
@@ -378,6 +374,8 @@ export interface ProjectUpdateRequest {
   proxy_config?: string
   anti_spider?: string
   task_config?: string
+  resume_enabled?: boolean
+  dedup_config?: string | RuleDedupConfig
   data_schema?: string
   
   // 代码项目更新字段
@@ -385,10 +383,6 @@ export interface ProjectUpdateRequest {
   code_entry_point?: string
   documentation?: string
   dependencies?: string[]
-  repository_id?: string
-  ref?: string
-  subdir?: string
-  include_paths?: string[] | string
   
   // 文件项目更新字段
   entry_point?: string
@@ -408,38 +402,26 @@ export interface ProjectCodeConfigUpdateRequest {
   documentation?: string
   runtime_config?: RuntimeConfig
   environment_vars?: EnvironmentVars
-  // 兼容旧接口（后端仍接受这些字段）
-  version?: string
-  source_type?: 'code' | 'git' | 'inline'
-  git_url?: string
-  git_branch?: string
-  git_commit?: string
-  git_subdir?: string
-  git_credential_id?: string
-  code_content?: string
 }
 
 export interface ProjectFileConfigUpdateRequest {
   entry_point?: string
   runtime_config?: string | RuntimeConfig
   environment_vars?: string | EnvironmentVars
-  // 兼容旧接口
-  file?: File
-  source_type?: 'file' | 'git' | 'inline'
-  git_url?: string
-  git_branch?: string
-  git_commit?: string
-  git_subdir?: string
-  git_credential_id?: string
 }
 
 export interface ProjectSourcePayload {
   repository_id: string
   ref: string
   subdir: string
-  entry_point: string
   include_paths: string[]
-  runtime_config?: RuntimeConfig
+}
+
+export interface ProjectSourceInfo extends ProjectSourcePayload {
+  project_id: string
+  repository_name: string
+  repository_url: string
+  resolved_commit?: string
 }
 
 // 项目列表查询参数

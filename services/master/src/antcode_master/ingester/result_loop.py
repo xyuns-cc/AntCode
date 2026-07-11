@@ -32,9 +32,8 @@ from antcode_core.infrastructure.redis import task_result_stream
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
+from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
 from loguru import logger
-
-from antcode_master.leader import ensure_leader
 
 
 def _dead_letter_stream_key(namespace: str | None = None) -> str:
@@ -187,7 +186,8 @@ class ResultLoop:
                     if getattr(message, "decode_error", None):
                         logger.error(
                             "结果消息解码失败 → 直接 DLQ: msg_id={} err={}",
-                            message.msg_id, message.decode_error,
+                            message.msg_id,
+                            message.decode_error,
                         )
                         if await self._move_to_dlq(message):
                             dlq_ids.append(message.msg_id)
@@ -204,9 +204,7 @@ class ResultLoop:
                             if await self._move_to_dlq(message):
                                 dlq_ids.append(message.msg_id)
                     except Exception:
-                        logger.exception(
-                            "处理结果消息失败: msg_id={}", message.msg_id
-                        )
+                        logger.exception("处理结果消息失败: msg_id={}", message.msg_id)
                         if await self._should_dead_letter(message.msg_id):
                             if await self._move_to_dlq(message):
                                 dlq_ids.append(message.msg_id)
@@ -217,6 +215,15 @@ class ResultLoop:
                 final_ack_ids = ack_ids + dlq_ids
                 if final_ack_ids:
                     await self._stream.xack(self._stream_key, final_ack_ids, self._group)
+                    try:
+                        client = await self._stream._get_client()
+                        await trim_acknowledged_stream(
+                            client,
+                            self._stream_key,
+                            self._group,
+                        )
+                    except Exception:
+                        logger.exception("结果 Stream ACK 后裁剪失败")
 
                 consecutive_errors = 0  # 一次成功迭代 → 清零
 
@@ -224,9 +231,7 @@ class ResultLoop:
                 break
             except Exception:
                 consecutive_errors += 1
-                logger.exception(
-                    "结果消费循环异常（连续第 {} 次），指数退避中", consecutive_errors
-                )
+                logger.exception("结果消费循环异常（连续第 {} 次），指数退避中", consecutive_errors)
                 # 1s → 2s → 4s → ... → 上限 60s，加 jitter
                 await sleep_with_backoff(consecutive_errors, base_delay=1.0, max_delay=60.0)
 
@@ -248,16 +253,8 @@ class ResultLoop:
         error_message = task_status.error_message or ""
 
         # Timestamp 是 message 字段，可用 HasField 区分"已设置"和"零值默认"
-        started_at = (
-            _ts_to_datetime(task_status.started_at)
-            if _safe_has_field(task_status, "started_at")
-            else None
-        )
-        finished_at = (
-            _ts_to_datetime(task_status.finished_at)
-            if _safe_has_field(task_status, "finished_at")
-            else None
-        )
+        started_at = _ts_to_datetime(task_status.started_at) if _safe_has_field(task_status, "started_at") else None
+        finished_at = _ts_to_datetime(task_status.finished_at) if _safe_has_field(task_status, "finished_at") else None
 
         duration_ms = task_status.duration_ms or None
 
@@ -327,14 +324,10 @@ class ResultLoop:
                 raw_bytes = payload.SerializeToString()
             else:
                 raw_fields = getattr(message, "raw_fields", None) or {}
-                raw_bytes = (
-                    raw_fields.get(b"p")
-                    or raw_fields.get("p")
-                    or b""
-                )
+                raw_bytes = raw_fields.get(b"p") or raw_fields.get("p") or b""
                 if isinstance(raw_bytes, str):
                     raw_bytes = raw_bytes.encode("utf-8", errors="replace")
-            entry = {
+            entry: dict[str | bytes | int | float, bytes | str | int | float] = {
                 "payload": raw_bytes,
                 "orig_stream": self._stream_key,
                 "orig_msg_id": message.msg_id,

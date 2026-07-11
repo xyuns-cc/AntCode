@@ -30,9 +30,7 @@ from typing import Any
 # Async-safe 当前 trace 上下文。
 # 每个 asyncio Task 会继承父任务的 ContextVar 快照,但 ``set`` 只影响
 # 本任务,天然支持 Worker 同时跑 N 个任务的场景。
-_current_trace: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "antcode_trace", default=None
-)
+_current_trace: contextvars.ContextVar[str | None] = contextvars.ContextVar("antcode_trace", default=None)
 
 
 @dataclass(frozen=True)
