@@ -27,7 +27,7 @@ dependencies = [
     "loguru>=0.7.0",
     # 工具库
     "aiofiles==25.1.0",
-    "psutil==7.1.3",
+    "psutil==7.2.2",
     # P7: worker 的 RuleSpider/SpiderClient 默认 http2=True → 需要 h2 extra
     "httpx[http2]>=0.28.1",
     "ujson>=5.9.0",
