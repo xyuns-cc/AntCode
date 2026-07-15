@@ -5,10 +5,11 @@ from unittest.mock import AsyncMock
 import antcode_web_api.websockets.websocket_connection_manager as ws_module
 import pytest
 from antcode_core.application.services.workers.distributed_log_service import (
-    MAX_WS_QUEUE_LINES,
+    MAX_PUSH_QUEUE_LINES,
     DistributedLogService,
     postgres_task_log_service,
 )
+from antcode_core.application.services.logs.postgres_log_service import PostgresLogEntry
 from antcode_web_api.websockets.websocket_connection_manager import (
     ConnectionInfo,
     ConnectionPool,
@@ -33,7 +34,7 @@ async def test_distributed_log_terminal_status_releases_hot_state(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_distributed_log_websocket_queue_is_bounded():
+async def test_distributed_log_push_queue_is_bounded():
     service = DistributedLogService()
     service.set_notifier(
         SimpleNamespace(
@@ -41,9 +42,18 @@ async def test_distributed_log_websocket_queue_is_bounded():
         )
     )
 
-    await service._enqueue_ws_logs("run-1", "stdout", ["line"])
+    entry = PostgresLogEntry(
+        run_id="run-1",
+        log_type="stdout",
+        content="line",
+        sequence=1,
+        timestamp=None,
+        level="INFO",
+        source="worker_report",
+    )
+    await service._enqueue_push_logs("run-1", [entry])
 
-    assert service._ws_queues["run-1"].maxsize == MAX_WS_QUEUE_LINES
+    assert service._push_queues["run-1"].maxsize == MAX_PUSH_QUEUE_LINES
     await service.stop()
 
 

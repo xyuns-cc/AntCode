@@ -17,7 +17,7 @@ from antcode_core.application.services.logs.postgres_log_service import (
 from antcode_core.application.services.workers.log_notifier import LogRealtimeNotifier
 
 MAX_CACHE_LINES = 1000
-MAX_WS_QUEUE_LINES = 1000
+MAX_PUSH_QUEUE_LINES = 1000
 LOG_TYPES = ("stdout", "stderr")
 TERMINAL_STATUSES = {"success", "failed", "timeout", "cancelled", "skipped", "rejected"}
 
@@ -30,9 +30,9 @@ class DistributedLogService:
         self._task_status: dict[str, dict[str, Any]] = {}
         self._sequences: dict[str, int] = defaultdict(int)
         self._lock = asyncio.Lock()
-        self._ws_queues: dict[str, asyncio.Queue[tuple[str, str]]] = {}
-        self._ws_tasks: dict[str, asyncio.Task] = {}
-        self._ws_idle_timeout = 1.0
+        self._push_queues: dict[str, asyncio.Queue[tuple[str, str, int]]] = {}
+        self._push_tasks: dict[str, asyncio.Task] = {}
+        self._push_idle_timeout = 1.0
         self._notifier: LogRealtimeNotifier | None = None
         self._running = False
 
@@ -42,11 +42,11 @@ class DistributedLogService:
 
     async def stop(self) -> None:
         self._running = False
-        for task in self._ws_tasks.values():
+        for task in self._push_tasks.values():
             task.cancel()
-        await self._drain_ws_tasks()
-        self._ws_tasks.clear()
-        self._ws_queues.clear()
+        await self._drain_push_tasks()
+        self._push_tasks.clear()
+        self._push_queues.clear()
         logger.debug("分布式日志服务已停止")
 
     def set_notifier(self, notifier: LogRealtimeNotifier | None) -> None:
@@ -67,8 +67,8 @@ class DistributedLogService:
         lines = self._format_lines(contents, timestamp)
         entries = await self._record_cache_and_entries(run_id, log_type, lines, timestamp)
         await postgres_task_log_service.append_entries(entries)
-        if await self._has_ws_connections(run_id):
-            await self._enqueue_ws_logs(run_id, log_type, lines)
+        if await self._has_stream_connections(run_id):
+            await self._enqueue_push_logs(run_id, entries)
 
     async def update_task_status(
         self,
@@ -122,10 +122,10 @@ class DistributedLogService:
 
     def clear_cache(self, run_id: str) -> None:
         self._clear_hot_cache(run_id)
-        task = self._ws_tasks.pop(run_id, None)
+        task = self._push_tasks.pop(run_id, None)
         if task and not task.done():
             task.cancel()
-        self._ws_queues.pop(run_id, None)
+        self._push_queues.pop(run_id, None)
 
     def _clear_hot_cache(self, run_id: str) -> None:
         for log_type in LOG_TYPES:
@@ -175,48 +175,48 @@ class DistributedLogService:
             )
         return entries
 
-    async def _has_ws_connections(self, run_id: str) -> bool:
+    async def _has_stream_connections(self, run_id: str) -> bool:
         if not self._notifier:
             return False
         return await self._notifier.has_connections(run_id)
 
-    async def _enqueue_ws_logs(self, run_id: str, log_type: str, lines: list[str]) -> None:
-        queue = self._ws_queues.setdefault(
+    async def _enqueue_push_logs(self, run_id: str, entries: list[PostgresLogEntry]) -> None:
+        queue = self._push_queues.setdefault(
             run_id,
-            asyncio.Queue(maxsize=MAX_WS_QUEUE_LINES),
+            asyncio.Queue(maxsize=MAX_PUSH_QUEUE_LINES),
         )
-        task = self._ws_tasks.get(run_id)
+        task = self._push_tasks.get(run_id)
         if task is None or task.done():
-            self._ws_tasks[run_id] = asyncio.create_task(self._ws_loop(run_id))
-        for line in lines:
-            await queue.put((log_type, line))
+            self._push_tasks[run_id] = asyncio.create_task(self._push_loop(run_id))
+        for entry in entries:
+            await queue.put((entry.log_type, entry.content, entry.sequence))
 
-    async def _ws_loop(self, run_id: str) -> None:
-        queue = self._ws_queues.get(run_id)
+    async def _push_loop(self, run_id: str) -> None:
+        queue = self._push_queues.get(run_id)
         if not queue:
             return
         try:
             while True:
                 try:
-                    log_type, content = await asyncio.wait_for(
+                    log_type, content, sequence = await asyncio.wait_for(
                         queue.get(),
-                        timeout=self._ws_idle_timeout,
+                        timeout=self._push_idle_timeout,
                     )
                 except TimeoutError:
                     if queue.empty():
                         return
                     continue
-                await self._push_log(run_id, log_type, content)
+                await self._push_log(run_id, log_type, content, sequence)
         finally:
-            self._ws_tasks.pop(run_id, None)
+            self._push_tasks.pop(run_id, None)
             if queue.empty():
-                self._ws_queues.pop(run_id, None)
+                self._push_queues.pop(run_id, None)
 
-    async def _push_log(self, run_id: str, log_type: str, content: str) -> None:
+    async def _push_log(self, run_id: str, log_type: str, content: str, sequence: int | None) -> None:
         if not self._notifier:
             return
         level = "ERROR" if log_type == "stderr" else "INFO"
-        await self._notifier.send_log(run_id, log_type, content, level)
+        await self._notifier.send_log(run_id, log_type, content, level, sequence=sequence)
 
     async def _push_task_status(self, run_id: str) -> None:
         if not self._notifier:
@@ -266,11 +266,11 @@ class DistributedLogService:
             ).isoformat(),
         }
 
-    async def _drain_ws_tasks(self) -> None:
-        if not self._ws_tasks:
+    async def _drain_push_tasks(self) -> None:
+        if not self._push_tasks:
             return
         with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(*self._ws_tasks.values(), return_exceptions=True)
+            await asyncio.gather(*self._push_tasks.values(), return_exceptions=True)
 
     def _format_lines(self, contents: list[str], timestamp: datetime) -> list[str]:
         formatted_at = timestamp.strftime("%Y-%m-%d %H:%M:%S")
