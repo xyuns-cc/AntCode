@@ -4,8 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import antcode_web_api.websockets.websocket_log_service as websocket_log_service_module
 import pytest
+from antcode_web_api.streams.log_stream_service import build_current_status_message
 from fastapi import HTTPException
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -116,7 +116,6 @@ async def test_get_run_logs_rejects_invalid_format(monkeypatch):
     assert "日志格式" in str(exc_info.value.detail)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status, expected_message, expected_progress",
     [
@@ -126,26 +125,17 @@ async def test_get_run_logs_rejects_invalid_format(monkeypatch):
         ("queued", "任务排队中", None),
     ],
 )
-async def test_send_current_status_maps_message_and_progress(
-    monkeypatch,
+def test_current_status_message_maps_message_and_progress(
     status,
     expected_message,
     expected_progress,
 ):
-    service = websocket_log_service_module.WebSocketLogService()
-    send_status_mock = AsyncMock()
-    monkeypatch.setattr(
-        websocket_log_service_module.websocket_manager,
-        "send_run_status",
-        send_status_mock,
-    )
-
     execution = SimpleNamespace(status=SimpleNamespace(value=status))
-    await service._send_current_status("run-1", execution)
 
-    send_status_mock.assert_awaited_once_with(
-        run_id="run-1",
-        status=status,
-        progress=expected_progress,
-        message=expected_message,
-    )
+    message = build_current_status_message("run-1", execution)
+
+    assert message["type"] == "run_status"
+    assert message["run_id"] == "run-1"
+    assert message["data"]["status"] == status
+    assert message["data"]["progress"] == expected_progress
+    assert message["data"]["message"] == expected_message

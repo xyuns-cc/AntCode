@@ -9,6 +9,7 @@ class LogRealtimeNotifier(Protocol):
 
     async def send_log(
         self,
+        *,
         run_id: str,
         log_type: str,
         content: str,
@@ -19,6 +20,7 @@ class LogRealtimeNotifier(Protocol):
 
     async def send_status(
         self,
+        *,
         run_id: str,
         status: str,
         progress: float | None,

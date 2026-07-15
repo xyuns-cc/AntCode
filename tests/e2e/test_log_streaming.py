@@ -1,70 +1,99 @@
 """
 日志流端到端测试
 
-覆盖基础日志链路：API 查询与 WebSocket 推送。
+覆盖基础日志链路：API 查询与 SSE 实时推送。
 """
 
 import httpx
 import pytest
 
 from .conftest import requires_postgres, requires_redis
-from .helpers import (
-    create_run_context,
-    get_logs,
-    get_worker,
-    login,
-    wait_for_websocket_message,
-)
+from .helpers import get_worker, trigger_task
+from .log_client import get_logs, wait_for_realtime_stream_log
+from .run_scenarios import RunScenario, provision_scenario, trigger_and_wait, wait_for_status
+
+REALTIME_LOG_DELAY_SECONDS = 10.0
+RUNNING_STATUSES = frozenset({"running"})
+SUCCESS_STATUSES = frozenset({"success"})
 
 
 @requires_postgres
 @requires_redis
 @pytest.mark.asyncio
-async def test_log_api_raw_and_structured(e2e_config):
+async def test_log_api_raw_and_structured(e2e_config, e2e_token):
     """日志 API 可读取 raw/structured"""
     async with httpx.AsyncClient(
         base_url=e2e_config.web_api_url,
         timeout=e2e_config.http_timeout,
     ) as client:
-        token = await login(client, e2e_config)
-        worker = await get_worker(client, token, e2e_config.worker_id)
-        context = await create_run_context(client, token, worker["id"], e2e_config)
-        run_id = context["run"]["run_id"]
-        log_token = context["log_token"]
+        worker = await get_worker(client, e2e_token, e2e_config.worker_id)
+        async with provision_scenario(
+            client,
+            e2e_token,
+            worker["id"],
+            config=e2e_config,
+            scenario=RunScenario(expected_status="success"),
+        ) as resources:
+            run = await trigger_and_wait(client, e2e_token, resources, config=e2e_config)
+            run_id = run["run_id"]
+            log_token = resources.source.expected_log_token
 
-        raw_logs = await get_logs(client, token, run_id, log_format="raw")
-        raw_content = raw_logs.get("raw_content", "")
-        assert log_token in raw_content
+            raw_logs = await get_logs(client, e2e_token, run_id, log_format="raw")
+            raw_content = raw_logs.get("raw_content", "")
+            assert log_token in raw_content
 
-        structured_logs = await get_logs(client, token, run_id, log_format="structured")
-        items = (structured_logs.get("structured_data") or {}).get("items", [])
-        assert items, "结构化日志为空"
+            structured_logs = await get_logs(client, e2e_token, run_id, log_format="structured")
+            items = (structured_logs.get("structured_data") or {}).get("items", [])
+            assert items, "结构化日志为空"
 
 
 @requires_postgres
 @requires_redis
 @pytest.mark.asyncio
-async def test_websocket_log_push(e2e_config):
-    """WebSocket 日志可收到消息"""
+async def test_sse_log_push(e2e_config, e2e_token):
+    """任务运行中建立 SSE 订阅并收到增量日志。"""
     async with httpx.AsyncClient(
         base_url=e2e_config.web_api_url,
         timeout=e2e_config.http_timeout,
     ) as client:
-        token = await login(client, e2e_config)
-        worker = await get_worker(client, token, e2e_config.worker_id)
-        context = await create_run_context(client, token, worker["id"], e2e_config)
-        run_id = context["run"]["run_id"]
-        log_token = context["log_token"]
+        worker = await get_worker(client, e2e_token, e2e_config.worker_id)
+        async with provision_scenario(
+            client,
+            e2e_token,
+            worker["id"],
+            config=e2e_config,
+            scenario=RunScenario(
+                expected_status="success",
+                log_delay_seconds=REALTIME_LOG_DELAY_SECONDS,
+            ),
+        ) as resources:
+            await trigger_task(client, e2e_token, resources.task["id"])
+            run = await wait_for_status(
+                client,
+                e2e_token,
+                resources.task["id"],
+                expected=RUNNING_STATUSES,
+                timeout=e2e_config.poll_timeout,
+                interval=e2e_config.poll_interval,
+            )
+            run_id = run["run_id"]
+            log_token = resources.source.expected_log_token
 
-        message = await wait_for_websocket_message(e2e_config, run_id, token)
-        msg_type = message.get("type")
-        assert msg_type in {
-            "run_status",
-            "log_line",
-            "historical_logs_start",
-            "historical_logs_end",
-            "no_historical_logs",
-        }
-        if msg_type == "log_line":
-            content = (message.get("data") or {}).get("content", "")
-            assert log_token in content
+            message = await wait_for_realtime_stream_log(
+                client,
+                run_id,
+                token=e2e_token,
+                expected_content=log_token,
+                timeout=e2e_config.poll_timeout,
+            )
+            assert message["type"] == "log_line"
+            assert log_token in (message.get("data") or {})["content"]
+            assert (message.get("data") or {})["source"] == "realtime"
+            await wait_for_status(
+                client,
+                e2e_token,
+                resources.task["id"],
+                expected=SUCCESS_STATUSES,
+                timeout=e2e_config.poll_timeout,
+                interval=e2e_config.poll_interval,
+            )
