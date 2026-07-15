@@ -77,7 +77,7 @@ interface EnhancedLogViewerProps {
   onStatusUpdate?: (status: ExecutionStatusUpdate) => void // 新增：状态更新回调
 }
 
-// WebSocket连接状态
+// 日志流连接状态
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 type HistoricalStatus = 'idle' | 'loading' | 'loaded' | 'empty'
 
@@ -158,7 +158,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     })
   }, [isPaused, maxLines])
 
-  // WebSocket 功能已更新为使用新的连接管理
+  // 建立 SSE 日志流连接
   const connect = useCallback(async () => {
     if (connectionStatus === 'connected' || connectionStatus === 'connecting') {
       return
@@ -181,7 +181,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
         timestamp: new Date().toISOString()
       })
 
-      // 使用新的WebSocket连接管理
+      // 建立 SSE 日志流连接（内部自管重连与探活）
       const conn = logService.connectLogStream(
         runId,
         (logEntry) => {
@@ -205,12 +205,12 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
           addLogMessage(logMessage)
         },
         (error) => {
-          console.error('WebSocket连接错误:', error)
+          console.error('日志流连接错误:', error)
           setConnectionStatus('error')
           addLogMessage({
             id: generateUniqueId(),
             type: 'error',
-            content: `[错误] WebSocket连接错误: ${error instanceof Error ? error.message : String(error)}`,
+            content: `[错误] 日志流连接错误: ${error instanceof Error ? error.message : String(error)}`,
             timestamp: new Date().toISOString()
           })
         },
@@ -221,7 +221,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
             addLogMessage({
               id: generateUniqueId(),
               type: 'success',
-              content: '[成功] WebSocket连接已建立',
+              content: '[成功] 日志流连接已建立',
               timestamp: new Date().toISOString()
             })
             return
@@ -231,7 +231,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
             addLogMessage({
               id: generateUniqueId(),
               type: 'warning',
-              content: '[重连] WebSocket连接中...',
+              content: '[重连] 日志流连接中...',
               timestamp: new Date().toISOString()
             })
             return
@@ -265,6 +265,9 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
           if (historicalUpdate.phase === 'loading') {
             setHistoryStatus('loading')
             setHistorySentLines(0)
+            // 每次（重）连接服务端都会重放全量历史：清空现有 buffer，
+            // 靠"历史重放 + 服务端 sequence 过滤"保证不重不漏，前端无需去重
+            setMessages([])
             addLogMessage({
               id: generateUniqueId(),
               type: 'info',
@@ -303,16 +306,16 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       if (conn) {
         setStream(conn)
       } else {
-        throw new Error('无法创建WebSocket连接')
+        throw new Error('无法创建日志流连接')
       }
 
     } catch (error) {
-      console.error('WebSocket creation failed:', error)
+      console.error('日志流连接创建失败:', error)
       setConnectionStatus('error')
       addLogMessage({
         id: generateUniqueId(),
         type: 'error',
-        content: `创建WebSocket失败: ${error instanceof Error ? error.message : String(error)}`,
+        content: `创建日志流连接失败: ${error instanceof Error ? error.message : String(error)}`,
         timestamp: new Date().toISOString()
       })
     }
