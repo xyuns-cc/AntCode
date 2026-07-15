@@ -55,7 +55,7 @@ redis-cli -u "$ANTCODE_LOADTEST_REDIS_URL" SET \
 This verifies deliberate binding to the configured Redis database. It does not
 claim that the Web API exposes or proves its private Redis connection settings.
 
-Use one administrative token for the three write scenarios. For WebSocket loads
+Use one administrative token for the three write scenarios. For SSE stream loads
 above the configured per-user connection limit, run the log scenario separately
 with tokens for distinct authorized users; multiple sessions for the same user do
 not increase the per-user limit.
@@ -64,7 +64,7 @@ not increase the per-user limit.
 
 - `task-submission`, `task-dispatch`, and `backlog-trigger` exercise real task
   creation, scheduling, Worker execution, terminal-state recovery, and cleanup.
-- `websocket-log-history`, `http-log-readers`, and `log-archive-download` are
+- `sse-log-history`, `http-log-readers`, and `log-archive-download` are
   retained-log read workloads. They do not generate realtime log ingest traffic.
 - `worker-inventory`, `worker-heartbeat`, and `worker-churn` load and observe the
   Web API control plane. They do not create Worker transport connections or send

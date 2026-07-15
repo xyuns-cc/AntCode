@@ -7,7 +7,7 @@
 - 🎨 **现代化 UI** - Ant Design 5.x 组件库，支持深色/浅色主题
 - 🧭 **Git 项目管理** - 管理仓库来源、任务和运行时环境
 - 📊 **数据可视化** - Chart.js 图表展示任务执行统计
-- 🔄 **实时更新** - WebSocket 实时推送日志和 Worker 状态
+- 🔄 **实时更新** - SSE 实时推送日志与执行状态
 - 🚀 **性能优化** - 代码分割、懒加载、Gzip/Brotli 压缩
 - 📱 **响应式设计** - 支持桌面端、平板、手机
 
@@ -269,7 +269,7 @@ cp -r dist/* /usr/share/nginx/html/
 
 #### 2. Nginx 配置
 
-参考 `nginx.conf.example`:
+参考配置（与 `Dockerfile` 内置 nginx 模板一致）:
 
 ```nginx
 server {
@@ -296,20 +296,27 @@ server {
         add_header Cache-Control "no-store, no-cache, must-revalidate";
     }
 
-    # API 反向代理
-    location /api/ {
-        proxy_pass http://backend:8000/api/;
+    # SSE 实时日志流：必须关闭缓冲并放宽读超时，否则事件被攒批、
+    # 静默流 60s 被掐断（后端 15s ping + X-Accel-Buffering: no 兜底）
+    location ~ ^/api/v1/logs/runs/[^/]+/stream$ {
+        proxy_pass http://web-api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 
-    # WebSocket 支持
-    location /ws/ {
-        proxy_pass http://backend:8000/ws/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+    # API 反向代理
+    location /api/ {
+        proxy_pass http://web-api:8000/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
     # SPA 路由支持
@@ -365,7 +372,6 @@ docker run -d -p 80:80 antcode-frontend
 
 ```env
 VITE_API_BASE_URL=/api
-VITE_WS_BASE_URL=/ws
 VITE_APP_TITLE=AntCode 任务调度平台
 VITE_DEV_MODE=false
 VITE_LOG_LEVEL=error
@@ -516,7 +522,7 @@ npm run build:analyze
 - ✅ **主题切换**: 浅色/深色主题
 - ✅ **项目管理**: 创建、编辑、删除项目
 - ✅ **任务管理**: 任务执行和监控
-- ✅ **实时日志**: WebSocket 实时日志显示
+- ✅ **实时日志**: SSE 实时日志显示
 - ✅ **用户认证**: JWT 登录认证
 - ✅ **权限控制**: 基于角色的权限管理
 - ✅ **Git 项目管理**: 仓库来源、项目配置和任务运行管理

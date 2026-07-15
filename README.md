@@ -22,7 +22,7 @@
 
 ```bash
 # 1. 装依赖
-uv sync --all-packages
+uv sync --all-packages --extra dev
 
 # 2. 复制配置模板并填关键项
 cp .env.example .env
@@ -57,7 +57,7 @@ make dev-web     # 起前端
 
 ## 架构一句话
 
-- **web_api** — 用户入口 REST + WebSocket，落 PG，走 Redis 分布式限流
+- **web_api** — 用户入口 REST + SSE 实时日志流，落 PG，走 Redis 分布式限流
 - **master** — 调度 + 状态收敛：8 个后台 loop（scheduler / result / log_ingest / reconcile / crawl_batch_status / alert_check / artifact_cleanup / redispatch），leader 抢主，可分片 3 个 loop 到多实例
 - **worker** — 任务执行：插件化（code / spider / render / rule），沙箱 rlimit（CPU/RAM/FSIZE），支持 Direct（Redis Streams）和 Gateway（gRPC）双传输
 - **gateway** — 跨网络接入：worker 走 gRPC 到 gateway，gateway 落 Redis，master 消费
@@ -68,7 +68,7 @@ make dev-web     # 起前端
 
 - **调度**：一次性 / 周期性 / Cron / 依赖链
 - **规则爬虫**：Scrapy 2.16 引擎，5 种翻页策略，XPath/CSS/正则抽取，内容级去重（跨 run 持久化），代理池 + curl_cffi + Playwright + scrapy-redis 断点续爬
-- **可观测**：Prometheus `/metrics` 端点（HTTP QPS / 延迟 / worker 在线数 / 补派队列），WebSocket 实时日志，全链路 trace_id
+- **可观测**：Prometheus `/metrics` 端点（HTTP QPS / 延迟 / worker 在线数 / 补派队列），SSE 实时日志，全链路 trace_id
 - **可靠性**：at-least-once（XAUTOCLAIM + PEL 回收 + 跨机 SET NX 去重）、派发失败自动补派（指数退避）、优雅停机（SIGTERM + drain + deregister）
 - **多租户与安全**：JWT + 项目所有权校验、登录专项限流 + 账户锁定、密钥轮换（MultiFernet）、审计日志保留策略
 - **扩展性**：Redis standalone / cluster / sentinel 无感切换、master 多实例水平扩容、worker capability 路由（code-only worker / rule-only worker）
@@ -82,7 +82,7 @@ packages/           workspace 包
 └── antcode_scrapy/       # Scrapy 引擎 + sink 抽象（Redis / Gateway）
 
 services/           独立服务
-├── web_api/              # FastAPI REST + WebSocket
+├── web_api/              # FastAPI REST + SSE 日志流
 ├── master/               # 调度 + 状态 loop 组
 ├── worker/               # 任务执行引擎
 └── gateway/              # gRPC 网关（可选）
