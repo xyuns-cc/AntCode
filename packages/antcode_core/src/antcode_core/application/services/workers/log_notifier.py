@@ -13,8 +13,9 @@ class LogRealtimeNotifier(Protocol):
         log_type: str,
         content: str,
         level: str,
+        sequence: int | None = None,
     ) -> None:
-        """推送日志内容。"""
+        """推送日志内容。sequence 与 PG task_logs 持久化序号一致，供订阅端做历史/实时重叠过滤。"""
 
     async def send_status(
         self,

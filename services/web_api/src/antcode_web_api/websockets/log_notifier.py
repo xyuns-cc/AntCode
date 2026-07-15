@@ -15,7 +15,9 @@ class WebSocketLogNotifier(LogRealtimeNotifier):
         log_type: str,
         content: str,
         level: str,
+        sequence: int | None = None,
     ) -> None:
+        # WS 前端靠内容去重，不消费 sequence
         await websocket_manager.send_log_message(run_id=run_id, log_type=log_type, content=content, level=level)
 
     async def send_status(
