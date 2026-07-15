@@ -27,7 +27,7 @@
 - [`user-api.md`](user-api.md) — 用户 / 认证 / 权限
 - [`project-api.md`](project-api.md) — 项目 CRUD + 规则爬虫配置
 - [`scheduler-api.md`](scheduler-api.md) — 调度器（cron / 一次性 / 周期性 / 依赖链）
-- [`logs-api.md`](logs-api.md) — 任务日志历史查询 + WebSocket 实时推送
+- [`logs-api.md`](logs-api.md) — 任务日志历史查询 + SSE 实时推送
 - [`system-config.md`](system-config.md) — 系统级配置项（告警、调度、保留策略）
 
 ## 运维

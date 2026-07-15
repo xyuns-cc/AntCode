@@ -234,33 +234,103 @@ curl -X GET "/api/v1/logs/executions/abc123/stderr?level=ERROR" \
 
 ---
 
-### 4. 实时日志流 (WebSocket)
+### 4. 实时日志流 (SSE)
 
-**WebSocket** `/api/v1/ws/runs/{run_id}/logs`
+实时日志通过 Server-Sent Events 推送，分两步：
 
-实时接收任务执行日志流。
+**第一步：签发一次性票据**
+
+**POST** `/api/v1/logs/stream-ticket`（需要 `Authorization: Bearer <jwt>`）
+
+票据一次性消费、60 秒过期、绑定当前登录会话（登出 / 撤销会话后流会被服务端终止）。
+JWT 永远不出现在流 URL 中。
+
+```json
+{
+    "success": true,
+    "data": { "ticket": "kX3…（一次性票据）", "ttl": 60 }
+}
+```
+
+**第二步：建立 SSE 流**
+
+**GET** `/api/v1/logs/runs/{run_id}/stream?ticket=<ticket>`
+
+响应为 `text/event-stream`。鉴权 / 权限 / 容量问题在流开始前以标准
+HTTP 状态码返回：401（票据无效或已消费）、403（无权访问）、404（执行
+记录不存在）、429（订阅数超限）。
 
 #### 连接示例
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/api/v1/ws/runs/<run_id>/logs?token=<jwt-token>');
+const { data } = await fetch('/api/v1/logs/stream-ticket', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${jwt}` },
+}).then(r => r.json());
 
-ws.onmessage = function(event) {
-    const logData = JSON.parse(event.data);
-    console.log(`[${logData.timestamp}] ${logData.level}: ${logData.message}`);
-};
+const es = new EventSource(`/api/v1/logs/runs/${runId}/stream?ticket=${data.ticket}`);
+es.addEventListener('log_line', (event) => {
+    const message = JSON.parse(event.data);
+    console.log(`[${message.data.timestamp}] ${message.data.level}: ${message.data.content}`);
+});
+// 注意：票据是一次性的，onerror 中必须 es.close() 后换新票据重连，
+// 不能依赖 EventSource 的自动重连（会复用已消费的票据导致 401）。
 ```
 
-#### 消息格式
+命令行调试：
+
+```bash
+T=$(curl -s -X POST http://localhost:8000/api/v1/logs/stream-ticket \
+  -H "Authorization: Bearer $JWT" | jq -r .data.ticket)
+curl -N "http://localhost:8000/api/v1/logs/runs/$RUN_ID/stream?ticket=$T"
+```
+
+#### 事件类型
+
+帧格式 `event: <类型>` + `data: <JSON>`；连接建立后的固定序列：
+`run_status` → `historical_logs_start` → `log_line`* →
+`historical_logs_end` | `no_historical_logs` → 实时帧。
+
+| 事件 | 说明 |
+| --- | --- |
+| `run_status` | 执行状态（连接后立即推一次；终态 `progress=100`） |
+| `historical_logs_start` | 历史回放开始（客户端应清空本地缓冲） |
+| `log_line` | 一行日志（历史回放与实时共用） |
+| `historical_logs_end` | 历史回放结束，`sent_lines` 为回放行数 |
+| `no_historical_logs` | 无历史日志，直接进入实时 |
+| `ping` | 心跳（每 15s，无数据时；可用于客户端探活） |
+| `stream_error` | 服务端业务错误（会话失效 / 消费过慢 / 超过 8h 最大寿命），随后流结束 |
+
+#### log_line 消息格式
 ```json
 {
-    "execution_id": "abc123",
-    "timestamp": "2024-01-01T10:00:01Z",
-    "level": "INFO",
-    "source": "stdout",
-    "message": "处理进度: 25%",
-    "line_number": 123
+    "type": "log_line",
+    "run_id": "abc123",
+    "data": {
+        "run_id": "abc123",
+        "log_type": "stdout",
+        "content": "处理进度: 25%",
+        "timestamp": "2026-01-01T10:00:01Z",
+        "level": "INFO",
+        "source": "pg_history",
+        "sequence": 123
+    },
+    "timestamp": "2026-01-01T10:00:01Z"
 }
 ```
+
+`sequence` 与 PostgreSQL `task_logs` 持久化序号一致；服务端已按它过滤
+历史回放与实时推送的重叠，客户端无需去重。
+
+#### 反向代理注意事项
+
+SSE 需要代理层关闭响应缓冲并放宽读超时（前端容器内置 nginx 已配置专用
+location：`proxy_buffering off` + `proxy_read_timeout 3600s`）。自建代理
+可依赖后端响应头 `X-Accel-Buffering: no` 与 15s `ping` 事件兜底。
+
+#### 管理端点
+
+**GET** `/api/v1/logs/stream/stats`（管理员）：活跃订阅统计（总数 / 按
+run 分布 / 溢出断开次数 / 上限配置）。
 
 ---
 
@@ -340,7 +410,7 @@ curl -X GET /api/v1/logs/executions/abc123/stats \
             "avg_response_time_ms": 234
         },
         "storage": "postgresql",
-        "realtime_stream": "redis"
+        "realtime_stream": "sse"
     }
 }
 ```

@@ -2,7 +2,7 @@
 # AntCode 多服务架构 - 开发环境 Docker Compose
 # =====================================================
 # 服务架构:
-#   - web_api (Control Plane): HTTP API + WebSocket/SSE
+#   - web_api (Control Plane): HTTP API + SSE 日志流
 #   - master (Schedule Plane): 调度循环 + 一致性维护
 #   - gateway (Data Plane): 公网 Worker 接入 (gRPC/TLS)
 #   - worker (Execution Plane): 任务执行器
@@ -13,14 +13,14 @@ services:
 
   # PostgreSQL 数据库
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     container_name: antcode-postgres
     restart: unless-stopped
     command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-antcode}
       POSTGRES_USER: ${POSTGRES_USER:-antcode}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -37,12 +37,12 @@ services:
   # NOTE: --aclfile 在生产环境通过外部挂载启用；dev compose 使用 requirepass 简化启动。
   # 启用 ACL: 取消下方注释并提供 ./redis/users.acl 文件（应用层 ACL 由 REDIS_ACL_ENABLED 控制）。
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     container_name: antcode-redis
     restart: unless-stopped
     command: >-
       redis-server
-      --requirepass ${REDIS_PASSWORD}
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}
       --appendonly yes
     volumes:
       - redis_data:/data
@@ -52,7 +52,7 @@ services:
     networks:
       - antcode-network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -78,8 +78,8 @@ services:
       - path: ../../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antcode}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
       # dev compose 只跑 requirepass 无 ACL 文件；显式关闭应用层 ACL 与 compose 状态对齐
       - REDIS_ACL_ENABLED=false
       # 容器内监听地址/端口固定：宿主端口映射与下方 healthcheck 都假设容器内 8000。
@@ -117,8 +117,8 @@ services:
       - path: ../../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antcode}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
       # dev compose 只跑 requirepass 无 ACL 文件；显式关闭应用层 ACL 与 compose 状态对齐
       - REDIS_ACL_ENABLED=false
       - MASTER_ID=${MASTER_ID:-master-1}
@@ -153,8 +153,8 @@ services:
       - path: ../../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antcode}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
       # dev compose 只跑 requirepass 无 ACL 文件；显式关闭应用层 ACL 与 compose 状态对齐
       - REDIS_ACL_ENABLED=false
       - GRPC_PORT=50051
@@ -183,6 +183,14 @@ services:
     image: antcode-worker:dev
     container_name: antcode-worker
     restart: unless-stopped
+    # bubblewrap 需要在 Docker 内创建嵌套 user/mount/pid namespace。
+    # Worker 主进程仍以镜像内 appuser 运行；不要改成 privileged 或 root。
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
     env_file:
       # 注入链同 web-api：docker .env → 项目根 .env（根 .env 优先）
       - path: ./.env
@@ -190,8 +198,8 @@ services:
       - path: ../../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antcode}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
       # dev compose 只跑 requirepass 无 ACL 文件；显式关闭应用层 ACL 与 compose 状态对齐
       - REDIS_ACL_ENABLED=false
       - WORKER_TRANSPORT_MODE=direct
@@ -202,13 +210,16 @@ services:
       - WORKER_SANDBOX_COMMAND=bwrap
       - WORKER_SANDBOX_NETWORK_ISOLATED=true
       # direct 模式必需：worker config 只读 WORKER_REDIS_URL，不读 REDIS_URL
-      - WORKER_REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - WORKER_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
+      - WORKER_API_BASE_URL=http://web-api:8000
     volumes:
       - worker_data:/app/data
     depends_on:
       redis:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      web-api:
         condition: service_healthy
     networks:
       - antcode-network
@@ -231,7 +242,7 @@ services:
     networks:
       - antcode-network
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 3s
       retries: 3

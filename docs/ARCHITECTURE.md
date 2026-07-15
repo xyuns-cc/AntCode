@@ -60,6 +60,7 @@ AntCode 要求日志也是实时的：
     -   Worker 将日志分片 (Chunk) 压缩。
     -   通过 Redis Stream (Direct) 或 gRPC Stream (Gateway) 发送。
 3.  **持久化**: `master` 或专门的 Log Consumer 消费日志流，将历史日志写入 PostgreSQL `task_logs` 表。
+4.  **前端分发**: `web_api` 跟随全局 ingest stream，通过 SSE（`/api/v1/logs/runs/{id}/stream`）向浏览器推送——历史回放读 PostgreSQL，实时帧按 sequence 过滤重叠。
 
 ---
 

@@ -30,7 +30,7 @@
 
 ### 3) 日志可靠传输
 
-- 实时流：Worker 写入 Redis Stream，WebSocket 只跟随 Redis 热流
+- 实时流：Worker 写入 Redis Stream，SSE 只跟随 Redis 热流
 - 历史日志：Master ingest 消费 Redis 日志队列并写入 PostgreSQL
 - 失败暴露：Redis 写入、ACK、PostgreSQL 落库失败必须显式失败
 
