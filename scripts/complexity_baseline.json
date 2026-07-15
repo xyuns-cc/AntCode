@@ -1,0 +1,2394 @@
+{
+  "version": 1,
+  "scope": [
+    "packages/**/*.py",
+    "services/**/*.py",
+    "scripts/**/*.py",
+    "tests/**/*.py"
+  ],
+  "thresholds": {
+    "C901": 10,
+    "PLR0911": 6,
+    "PLR0912": 12,
+    "PLR0915": 50,
+    "POSITIONAL_ARGS": 3
+  },
+  "violations": [
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_channels/base.py",
+      "function": "MultiWebhookChannel._send_single_alert",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_channels/email.py",
+      "function": "EmailAlertChannel._send_email",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_manager.py",
+      "function": "AlertManager._send_async",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_manager.py",
+      "function": "AlertManager.send_alert_auto",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
+      "function": "AlertService._successful_test_result",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
+      "function": "AlertService.send_alert",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
+      "function": "AlertService.send_task_alert",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
+      "function": "AlertService.send_worker_alert",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.get_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 11
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.log",
+      "rule": "POSITIONAL_ARGS",
+      "value": 13
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.log_config_change",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.log_login",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.log_project_action",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.log_task_action",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
+      "function": "AuditService.log_user_action",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/base.py",
+      "function": "QueryHelper.get_by_id_or_public_id",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/base.py",
+      "function": "QueryHelper.paginate",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/base.py",
+      "function": "CrawlQueueBackend.dequeue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/progress_backend.py",
+      "function": "ProgressStore.increment_progress",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/progress_backend.py",
+      "function": "ProgressStore.register_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/redis_progress.py",
+      "function": "RedisProgressStore.increment_progress",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/redis_progress.py",
+      "function": "RedisProgressStore.register_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/redis_queue.py",
+      "function": "RedisCrawlQueueBackend.dequeue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_dispatcher_service.py",
+      "function": "CrawlBatchDispatcherService._dispatch_single_url",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_service.py",
+      "function": "CrawlBatchService.create_batch",
+      "rule": "POSITIONAL_ARGS",
+      "value": 12
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_service.py",
+      "function": "CrawlBatchService.list_batches",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
+      "function": "CrawlMetricsService.collect_batch_metrics",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
+      "function": "CrawlMetricsService.update_alert_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/progress_service.py",
+      "function": "CrawlProgressService.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/progress_service.py",
+      "function": "CrawlProgressService.update_progress",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
+      "function": "CrawlQueueService.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
+      "function": "CrawlQueueService.enqueue_url",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
+      "function": "CrawlQueueService.enqueue_urls",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
+      "function": "CrawlQueueService.fetch_tasks",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
+      "function": "CrawlTestService.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
+      "function": "CrawlTestService.create_test_batch",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
+      "function": "CrawlTestService.execute_test",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
+      "function": "CrawlTestService.list_test_batches",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
+      "function": "WorkerRegistryService.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
+      "function": "WorkerRegistryService.heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
+      "function": "create_worker_registry_service",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_cleanup_service.py",
+      "function": "LogCleanupService._trim_redis_stream",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_performance_service.py",
+      "function": "LogPerformanceMonitor.record_metric",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_security_service.py",
+      "function": "LogSecurityService._verify_operation_permission",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/logs/task_log_service.py",
+      "function": "TaskLogService._read_redis_log_stream",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/monitoring/monitoring_service.py",
+      "function": "MonitoringService.get_worker_history",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/git_url_security.py",
+      "function": "_resolved_url",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/project_service.py",
+      "function": "ProjectService._bind_worker_runtime",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/project_service.py",
+      "function": "ProjectService._setup_project_environment",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/project_service.py",
+      "function": "ProjectService._setup_worker_environment",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/project_service.py",
+      "function": "ProjectService.get_projects_list",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/repository_service.py",
+      "function": "RepositoryService._record_scan",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/source_bundle_service.py",
+      "function": "_clone_repo",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/source_bundle_service.py",
+      "function": "_materialize_bundle",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/projects/source_bundle_service.py",
+      "function": "_run_git",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/runtime/runtime_control_service.py",
+      "function": "RuntimeControlService.create_env",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/runtime/runtime_control_service.py",
+      "function": "RuntimeControlService.install_packages",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/runtime/runtime_control_service.py",
+      "function": "RuntimeControlService.send_command",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/runtime/runtime_control_service.py",
+      "function": "RuntimeControlService.update_env",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
+      "function": "ExecutionStatusService._should_update",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
+      "function": "ExecutionStatusService.update_dispatch_status",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
+      "function": "ExecutionStatusService.update_runtime_status",
+      "rule": "C901",
+      "value": 16
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
+      "function": "ExecutionStatusService.update_runtime_status",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
+      "function": "ExecutionStatusService.update_runtime_status",
+      "rule": "PLR0912",
+      "value": 15
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
+      "function": "ExecutionStatusService.update_runtime_status",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/outbox_service.py",
+      "function": "SchedulerOutboxService.enqueue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/queue_backend.py",
+      "function": "BaseQueueBackend.enqueue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/queue_backend.py",
+      "function": "TaskQueueBackend.enqueue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/redis_queue.py",
+      "function": "RedisQueueBackend.enqueue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
+      "function": "RetryConfig.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
+      "function": "RetryService.schedule_retry",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService._execute_distributed_task",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService._execute_distributed_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService._execute_rule_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService._execute_task_internal",
+      "rule": "C901",
+      "value": 20
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService._execute_task_internal",
+      "rule": "PLR0912",
+      "value": 23
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService._execute_task_internal",
+      "rule": "PLR0915",
+      "value": 88
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService.create_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService.get_task_executions",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService.get_user_tasks",
+      "rule": "C901",
+      "value": 14
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService.get_user_tasks",
+      "rule": "PLR0912",
+      "value": 14
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService.get_user_tasks",
+      "rule": "PLR0915",
+      "value": 51
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
+      "function": "SchedulerService.get_user_tasks",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/spider_dispatcher.py",
+      "function": "SpiderTaskDispatcher.submit_batch_tasks",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/spider_dispatcher.py",
+      "function": "SpiderTaskDispatcher.submit_rule_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
+      "function": "TaskRunService._build_result_updates",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
+      "function": "TaskRunService.update_result",
+      "rule": "PLR0911",
+      "value": 9
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
+      "function": "TaskRunService.update_status",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/users/user_service.py",
+      "function": "UserService._generate_cache_key",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/users/user_service.py",
+      "function": "UserService.get_users_list",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/distributed_log_service.py",
+      "function": "DistributedLogService._entries_for_lines",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/distributed_log_service.py",
+      "function": "DistributedLogService._record_cache_and_entries",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/distributed_log_service.py",
+      "function": "DistributedLogService._update_runtime_status",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/distributed_log_service.py",
+      "function": "DistributedLogService.update_task_status",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/source_bundle_dispatch_service.py",
+      "function": "SourceBundleDispatchService._build_source_bundle_dispatch_info",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerLoadBalancer.select_best_worker",
+      "rule": "C901",
+      "value": 19
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerLoadBalancer.select_best_worker",
+      "rule": "PLR0912",
+      "value": 20
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerLoadBalancer.select_best_worker",
+      "rule": "PLR0915",
+      "value": 52
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerLoadBalancer.select_best_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher._select_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.dispatch_batch",
+      "rule": "C901",
+      "value": 20
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.dispatch_batch",
+      "rule": "PLR0912",
+      "value": 19
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.dispatch_batch",
+      "rule": "PLR0915",
+      "value": 61
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.dispatch_batch",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.dispatch_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 12
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.enqueue_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.get_task_logs_from_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
+      "function": "WorkerHeartbeatService._accept_database_heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
+      "function": "WorkerHeartbeatService._accept_redis_heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
+      "function": "WorkerHeartbeatService._accept_refreshed_heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
+      "function": "WorkerHeartbeatService._apply_system_info",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
+      "function": "WorkerHeartbeatService.heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
+      "function": "WorkerHeartbeatService.update_heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 13
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
+      "function": "WorkerService.assign_worker_to_user",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
+      "function": "WorkerService.batch_assign_workers",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
+      "function": "WorkerService.check_user_worker_permission",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
+      "function": "WorkerService.get_workers",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
+      "function": "WorkerService.heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/command_runner.py",
+      "function": "run_command",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security.py",
+      "function": "generate_hmac_signature",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security.py",
+      "function": "verify_hmac_signature",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
+      "function": "JWTAuth._create_token",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
+      "function": "JWTAuth.create_action_token",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
+      "function": "record_refresh_session",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/hmac_utils.py",
+      "function": "generate_hmac_signature",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/hmac_utils.py",
+      "function": "verify_hmac_signature",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/mtls.py",
+      "function": "create_client_ssl_context",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/mtls.py",
+      "function": "create_ssl_context",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/security/worker_auth.py",
+      "function": "WorkerAuthVerifier.verify_signature_async",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/serialization.py",
+      "function": "Serializer.to_json",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/serialization.py",
+      "function": "json_dump_file",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/serialization.py",
+      "function": "to_json",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/api_optimizer.py",
+      "function": "fast_response",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/serialization.py",
+      "function": "Serializer.to_json",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/serialization.py",
+      "function": "json_dump_file",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/serialization.py",
+      "function": "to_json",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/verify_system_config.py",
+      "function": "verify_config",
+      "rule": "C901",
+      "value": 17
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/verify_system_config.py",
+      "function": "verify_config",
+      "rule": "PLR0912",
+      "value": 24
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/common/utils/verify_system_config.py",
+      "function": "verify_config",
+      "rule": "PLR0915",
+      "value": 77
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/db/tortoise.py",
+      "function": "get_tortoise_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/bloom_client.py",
+      "function": "BloomFilterClient.bf_reserve",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/client.py",
+      "function": "RedisConnectionPool.connect",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/control_plane.py",
+      "function": "build_runtime_manage_control_payload",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/locks.py",
+      "function": "DistributedLock.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xadd",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xadd_typed",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xautoclaim",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xclaim",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xgroup_create",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xpending_range",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xreadgroup",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xreadgroup_multi",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xreadgroup_multi_typed",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xreadgroup_typed",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
+      "function": "StreamClient.xtrim",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/streams.py",
+      "function": "StreamClient.xadd",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/streams.py",
+      "function": "StreamClient.xautoclaim",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/streams.py",
+      "function": "StreamClient.xgroup_create",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/streams.py",
+      "function": "StreamClient.xreadgroup",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/infrastructure/resilience/circuit_breaker.py",
+      "function": "circuit_breaker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "packages/antcode_scrapy/src/antcode_scrapy/crawl.py",
+      "function": "_run",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "packages/antcode_scrapy/src/antcode_scrapy/spiders/rule_spider.py",
+      "function": "UniversalRuleSpider.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "packages/antcode_scrapy/src/antcode_scrapy/spiders/rule_spider.py",
+      "function": "UniversalRuleSpider._infer_pagination_method",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/auth.py",
+      "function": "AuthInterceptor.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/auth.py",
+      "function": "AuthInterceptor._emit_audit",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/handlers/result.py",
+      "function": "ResultHandler.handle_status_update",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/rate_limit.py",
+      "function": "RateLimitInterceptor.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/rate_limit.py",
+      "function": "RateLimiter.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService.AckControl",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService.AckControl",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService.WatchControl",
+      "rule": "C901",
+      "value": 24
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService.WatchControl",
+      "rule": "PLR0912",
+      "value": 24
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService.WatchControl",
+      "rule": "PLR0915",
+      "value": 69
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService._build_control_event",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/control_service.py",
+      "function": "GatewayControlService._build_control_event",
+      "rule": "PLR0912",
+      "value": 13
+    },
+    {
+      "path": "services/gateway/src/antcode_gateway/services/data_service.py",
+      "function": "GatewayDataService.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/dispatcher_loop.py",
+      "function": "SpiderTaskDispatcher.submit_batch_tasks",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/dispatcher_loop.py",
+      "function": "SpiderTaskDispatcher.submit_rule_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/lease_sweeper_loop.py",
+      "function": "LeaseSweeperLoop.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/reconcile_loop.py",
+      "function": "ReconcileLoop._check_timeout_tasks",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/master/src/antcode_master/control/retry_loop.py",
+      "function": "RetryConfig.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "services/master/src/antcode_master/control/retry_loop.py",
+      "function": "RetryService._run_loop",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/master/src/antcode_master/control/retry_loop.py",
+      "function": "RetryService.schedule_retry",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_event_loop.py",
+      "function": "SchedulerEventLoop._dispatch_message",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_event_loop.py",
+      "function": "SchedulerEventLoop._run_loop",
+      "rule": "C901",
+      "value": 21
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_event_loop.py",
+      "function": "SchedulerEventLoop._run_loop",
+      "rule": "PLR0912",
+      "value": 22
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_event_loop.py",
+      "function": "SchedulerEventLoop._run_loop",
+      "rule": "PLR0915",
+      "value": 64
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._dispatch_and_run",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._execute_distributed_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._execute_rule_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._finalize_stats",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._handle_failure",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._record_dispatch_result",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService._update_terminal_status",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService.create_task",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService.get_task_executions",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/master/src/antcode_master/control/scheduler_loop.py",
+      "function": "SchedulerService.get_user_tasks",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",
+      "function": "CrawlBatchStatusLoop._reconcile_batch",
+      "rule": "C901",
+      "value": 16
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",
+      "function": "CrawlBatchStatusLoop._reconcile_batch",
+      "rule": "PLR0912",
+      "value": 16
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",
+      "function": "CrawlBatchStatusLoop._sync_progress",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/log_ingest_loop.py",
+      "function": "LogIngestLoop.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/log_ingest_loop.py",
+      "function": "LogIngestLoop._run_loop",
+      "rule": "C901",
+      "value": 18
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/log_ingest_loop.py",
+      "function": "LogIngestLoop._run_loop",
+      "rule": "PLR0912",
+      "value": 17
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/log_ingest_loop.py",
+      "function": "LogIngestLoop._run_loop",
+      "rule": "PLR0915",
+      "value": 51
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/result_loop.py",
+      "function": "ResultLoop.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/result_loop.py",
+      "function": "ResultLoop._run_loop",
+      "rule": "C901",
+      "value": 23
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/result_loop.py",
+      "function": "ResultLoop._run_loop",
+      "rule": "PLR0912",
+      "value": 22
+    },
+    {
+      "path": "services/master/src/antcode_master/ingester/result_loop.py",
+      "function": "ResultLoop._run_loop",
+      "rule": "PLR0915",
+      "value": 61
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/exceptions.py",
+      "function": "BusinessException.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/exceptions.py",
+      "function": "create_error_response",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/response.py",
+      "function": "execution_list",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/response.py",
+      "function": "page",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/response.py",
+      "function": "task_list",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/alert.py",
+      "function": "_save_alert_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/alert.py",
+      "function": "get_alert_history",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/audit.py",
+      "function": "get_audit_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/audit.py",
+      "function": "get_user_activity",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/base.py",
+      "function": "login",
+      "rule": "C901",
+      "value": 12
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
+      "function": "export_batch",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
+      "function": "list_batches",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
+      "function": "update_alert_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "_get_raw_log_response",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "_get_structured_log_response",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "_line_entries",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "_structured_entries",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "get_error_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "get_raw_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "get_run_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "get_stderr_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "get_stdout_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
+      "function": "get_task_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/monitoring.py",
+      "function": "get_worker_history",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
+      "function": "create_project",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
+      "function": "delete_project",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
+      "function": "export_project_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
+      "function": "get_project_list_query",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
+      "function": "update_file_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/retry.py",
+      "function": "get_retry_history",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/retry.py",
+      "function": "update_retry_config",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runs.py",
+      "function": "list_spider_items",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "create_env",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "delete_env",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "get_env_detail",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "install_packages",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "list_envs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "list_packages",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "uninstall_packages",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/runtimes.py",
+      "function": "update_env_detail",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
+      "function": "_duplicate_task_data",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
+      "function": "get_task_execution_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
+      "function": "get_task_schedule_history",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
+      "function": "list_task_runs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
+      "function": "list_tasks",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
+      "function": "get_users_list",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
+      "function": "set_user_role",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
+      "function": "update_user",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "_claim_install_key_source_once",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "_claim_install_key_source_once",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "get_best_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "get_distributed_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "get_distributed_task_logs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "get_render_capable_workers",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "get_workers",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "update_worker_resources",
+      "rule": "C901",
+      "value": 17
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "update_worker_resources",
+      "rule": "PLR0912",
+      "value": 16
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "update_worker_resources",
+      "rule": "PLR0915",
+      "value": 51
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
+      "function": "update_worker_task_priority",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/services/crawl_item_stream.py",
+      "function": "RedisRangeClient.xrange",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/services/worker_installer.py",
+      "function": "_build_powershell_command",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/services/worker_installer.py",
+      "function": "_build_unix_command",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/utils/simple_yaml.py",
+      "function": "_parse_scalar",
+      "rule": "PLR0911",
+      "value": 9
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/lifecycle.py",
+      "function": "Lifecycle.shutdown",
+      "rule": "C901",
+      "value": 15
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/lifecycle.py",
+      "function": "Lifecycle.shutdown",
+      "rule": "PLR0912",
+      "value": 15
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/lifecycle.py",
+      "function": "Lifecycle.startup",
+      "rule": "C901",
+      "value": 15
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/lifecycle.py",
+      "function": "Lifecycle.startup",
+      "rule": "PLR0912",
+      "value": 15
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_create_engine",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_create_transport",
+      "rule": "C901",
+      "value": 16
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_create_transport",
+      "rule": "PLR0912",
+      "value": 16
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_create_transport",
+      "rule": "PLR0915",
+      "value": 66
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_migrate_legacy_direct_worker_to_acl",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_register_direct_worker",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_register_direct_worker",
+      "rule": "PLR0912",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/app/wiring.py",
+      "function": "_register_direct_worker",
+      "rule": "PLR0915",
+      "value": 63
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "prompt_start_worker",
+      "rule": "C901",
+      "value": 12
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "prompt_start_worker",
+      "rule": "PLR0912",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "prompt_start_worker",
+      "rule": "PLR0915",
+      "value": 53
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "run_doctor",
+      "rule": "C901",
+      "value": 23
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "run_doctor",
+      "rule": "PLR0912",
+      "value": 28
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "run_doctor",
+      "rule": "PLR0915",
+      "value": 94
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "start_worker",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "start_worker",
+      "rule": "PLR0912",
+      "value": 14
+    },
+    {
+      "path": "services/worker/src/antcode_worker/cli.py",
+      "function": "start_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "services/worker/src/antcode_worker/config.py",
+      "function": "_load_env_config",
+      "rule": "C901",
+      "value": 21
+    },
+    {
+      "path": "services/worker/src/antcode_worker/config.py",
+      "function": "_load_env_config",
+      "rule": "PLR0912",
+      "value": 21
+    },
+    {
+      "path": "services/worker/src/antcode_worker/config.py",
+      "function": "_load_env_config",
+      "rule": "PLR0915",
+      "value": 65
+    },
+    {
+      "path": "services/worker/src/antcode_worker/config.py",
+      "function": "init_worker_config",
+      "rule": "C901",
+      "value": 19
+    },
+    {
+      "path": "services/worker/src/antcode_worker/config.py",
+      "function": "init_worker_config",
+      "rule": "PLR0912",
+      "value": 16
+    },
+    {
+      "path": "services/worker/src/antcode_worker/domain/errors.py",
+      "function": "CancellationError.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/domain/errors.py",
+      "function": "ExecutionError.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/domain/errors.py",
+      "function": "ResourceLimitError.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/worker/src/antcode_worker/domain/errors.py",
+      "function": "TimeoutError.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/domain/errors.py",
+      "function": "TransportError.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/domain/events.py",
+      "function": "SignalManager.connect",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 12
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._control_loop",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._execute_task",
+      "rule": "C901",
+      "value": 22
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._execute_task",
+      "rule": "PLR0912",
+      "value": 24
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._execute_task",
+      "rule": "PLR0915",
+      "value": 81
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._poll_loop",
+      "rule": "C901",
+      "value": 19
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._poll_loop",
+      "rule": "PLR0912",
+      "value": 19
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._poll_loop",
+      "rule": "PLR0915",
+      "value": 61
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._renew_run_ownership_loop",
+      "rule": "C901",
+      "value": 12
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._report_result_by_info",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._shrink_workers",
+      "rule": "C901",
+      "value": 14
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "Engine._shrink_workers",
+      "rule": "PLR0912",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/engine.py",
+      "function": "_arg_list",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/engine/scheduler.py",
+      "function": "Scheduler.enqueue",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/base.py",
+      "function": "BaseExecutor._create_result",
+      "rule": "POSITIONAL_ARGS",
+      "value": 8
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/limits.py",
+      "function": "ResourceMonitor.start_monitoring",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/limits.py",
+      "function": "ResourceMonitor.start_monitoring",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/limits.py",
+      "function": "with_timeout",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/process.py",
+      "function": "ProcessExecutor._determine_result",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/process.py",
+      "function": "ProcessExecutor._execute",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/process.py",
+      "function": "ProcessExecutor._stream_output",
+      "rule": "C901",
+      "value": 19
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/process.py",
+      "function": "ProcessExecutor._stream_output",
+      "rule": "PLR0915",
+      "value": 64
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/process.py",
+      "function": "ProcessExecutor._stream_output",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/process.py",
+      "function": "_build_preexec_fn",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/worker/src/antcode_worker/executor/sandbox.py",
+      "function": "SandboxExecutor._execute_in_sandbox",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",
+      "function": "HeartbeatReporter.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",
+      "function": "init_heartbeat_reporter",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "services/worker/src/antcode_worker/logging/streamer.py",
+      "function": "BufferedLogStreamer.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/logs/batch.py",
+      "function": "BatchSender.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/logs/manager.py",
+      "function": "LogManager.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/logs/realtime.py",
+      "function": "RealtimeSender.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/code/plugin.py",
+      "function": "CodePlugin._detect_language",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/render/plugin.py",
+      "function": "RenderPlugin._build_script_plan",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/render/plugin.py",
+      "function": "RenderPlugin._build_template_plan",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/render/plugin.py",
+      "function": "RenderPlugin._validate_relative_path",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/spider/data/reader.py",
+      "function": "SpiderDataReader.list_runs",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/spider/plugin.py",
+      "function": "SpiderPlugin._build_scrapy_plan",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/plugins/spider/plugin.py",
+      "function": "SpiderPlugin._build_script_plan",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/projects/fetcher.py",
+      "function": "ArtifactFetcher.fetch",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/builder.py",
+      "function": "RuntimeBuilder._save_manifest",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/cache_gc.py",
+      "function": "CacheGC._gc_envs",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/gc.py",
+      "function": "RuntimeGC._collect_runtimes",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/locks.py",
+      "function": "RuntimeLock.acquire",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/manager.py",
+      "function": "create_runtime_manager",
+      "rule": "POSITIONAL_ARGS",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/uv_manager.py",
+      "function": "UVManager.create_env",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/runtime/uv_manager.py",
+      "function": "run_command",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/identity.py",
+      "function": "Identity.load_or_generate",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/identity.py",
+      "function": "IdentityManager.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/identity.py",
+      "function": "init_identity_manager",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/secrets.py",
+      "function": "init_secrets_manager",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/verify.py",
+      "function": "Verifier.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/verify.py",
+      "function": "Verifier.verify_task",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/security/verify.py",
+      "function": "init_verifiers",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/base.py",
+      "function": "TransportBase.send_control_result",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/base.py",
+      "function": "TransportBase.send_log_chunk",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/factory.py",
+      "function": "build_transport_config_from_env",
+      "rule": "POSITIONAL_ARGS",
+      "value": 10
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/factory.py",
+      "function": "create_transport",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/factory.py",
+      "function": "preflight_check_gateway",
+      "rule": "PLR0915",
+      "value": 54
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/reconnect.py",
+      "function": "ExponentialBackoff.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport._control_subscription_loop",
+      "rule": "C901",
+      "value": 12
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport._handle_connection_error",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport._handle_connection_error",
+      "rule": "PLR0912",
+      "value": 14
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport._task_subscription_loop",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport.report_result",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport.report_result",
+      "rule": "PLR0911",
+      "value": 8
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport.send_control_result",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
+      "function": "GatewayTransport.send_log_chunk",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
+      "function": "HeartbeatCodec.encode_heartbeat",
+      "rule": "POSITIONAL_ARGS",
+      "value": 9
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
+      "function": "JsonCodec._dict_to_object",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
+      "function": "JsonCodec._parse_string_value",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
+      "function": "JsonCodec._serialize_value",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/reclaim.py",
+      "function": "PendingTaskReclaimer.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/reclaim.py",
+      "function": "cleanup_dead_consumers",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/reclaim.py",
+      "function": "ensure_consumer_group",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport.__init__",
+      "rule": "POSITIONAL_ARGS",
+      "value": 6
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport._build_task_message",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport._decode_data",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport._write_legacy_heartbeat_hash",
+      "rule": "C901",
+      "value": 16
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport._write_legacy_heartbeat_hash",
+      "rule": "PLR0915",
+      "value": 62
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport._write_legacy_heartbeat_hash._write_heartbeat",
+      "rule": "C901",
+      "value": 12
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport.send_control_result",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport.send_log_batch",
+      "rule": "C901",
+      "value": 13
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport.send_log_batch",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
+      "function": "RedisTransport.send_log_chunk",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "tests/boundary/test_browser_feature_removal.py",
+      "function": "test_browser_feature_residues_are_removed",
+      "rule": "C901",
+      "value": 11
+    },
+    {
+      "path": "tests/contracts/test_transport_task_flow.py",
+      "function": "test_ack_accepted_consumes_message",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "tests/contracts/test_transport_task_flow.py",
+      "function": "test_ack_rejected_requeues",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "tests/unit/core/test_api_key_rotation.py",
+      "function": "_fake_worker",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "tests/unit/core/test_source_bundle_service.py",
+      "function": "test_materialize_bundle_uses_root_data_temp_directory.fake_clone",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "tests/unit/gateway/test_auth_principal_binding.py",
+      "function": "test_gateway_data_streams_verify_run_ownership",
+      "rule": "POSITIONAL_ARGS",
+      "value": 5
+    },
+    {
+      "path": "tests/unit/gateway/test_poll_handler_modernization.py",
+      "function": "_FakeRedis.xgroup_create",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "tests/unit/web_api/test_crawl_item_stream.py",
+      "function": "FakeRedis.xrange",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "tests/unit/web_api/test_workers_security.py",
+      "function": "test_generate_install_key_persists_explicit_allowed_source.DummyRedis.set",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    }
+  ]
+}

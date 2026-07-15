@@ -385,9 +385,9 @@ async def _init_distributed_log() -> None:
     try:
         from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
-        from antcode_web_api.websockets.log_notifier import WebSocketLogNotifier
+        from antcode_web_api.streams.log_notifier import SSELogNotifier
 
-        distributed_log_service.set_notifier(WebSocketLogNotifier())
+        distributed_log_service.set_notifier(SSELogNotifier())
         await distributed_log_service.start()
         logger.info("分布式日志服务已启动")
     except Exception as e:

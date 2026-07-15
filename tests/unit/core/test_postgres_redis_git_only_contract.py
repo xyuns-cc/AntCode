@@ -154,7 +154,7 @@ def test_frontend_auth_has_no_plaintext_password_fallback():
     assert "rememberedPassword" not in source
 
 
-def test_log_websocket_auth_has_no_access_token_url_fallback():
+def test_log_stream_auth_has_no_access_token_url_fallback():
     source = (REPO_ROOT / "web/antcode-frontend/src/services/logs.ts").read_text(encoding="utf-8")
 
     assert "STORAGE_KEYS.ACCESS_TOKEN" not in source

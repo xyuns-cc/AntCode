@@ -206,17 +206,23 @@ class DistributedLogService:
                     if queue.empty():
                         return
                     continue
-                await self._push_log(run_id, log_type, content, sequence)
+                await self._push_log(run_id, log_type, content, sequence=sequence)
         finally:
             self._push_tasks.pop(run_id, None)
             if queue.empty():
                 self._push_queues.pop(run_id, None)
 
-    async def _push_log(self, run_id: str, log_type: str, content: str, sequence: int | None) -> None:
+    async def _push_log(self, run_id: str, log_type: str, content: str, *, sequence: int | None) -> None:
         if not self._notifier:
             return
         level = "ERROR" if log_type == "stderr" else "INFO"
-        await self._notifier.send_log(run_id, log_type, content, level, sequence=sequence)
+        await self._notifier.send_log(
+            run_id=run_id,
+            log_type=log_type,
+            content=content,
+            level=level,
+            sequence=sequence,
+        )
 
     async def _push_task_status(self, run_id: str) -> None:
         if not self._notifier:

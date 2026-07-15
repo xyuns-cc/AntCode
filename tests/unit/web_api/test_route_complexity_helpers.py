@@ -6,10 +6,6 @@ from unittest.mock import AsyncMock
 import pytest
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_web_api.routes.v1 import alert, monitoring, project, runs, tasks
-from antcode_web_api.websockets.websocket_connection_manager import (
-    ConnectionState,
-    WebSocketConnectionManager,
-)
 from fastapi import HTTPException
 
 
@@ -74,24 +70,3 @@ def test_unassigned_pending_execution_is_cancellable_without_worker():
     execution = SimpleNamespace(worker_id=None, status=TaskStatus.PENDING)
 
     assert runs._is_unassigned_execution(execution) is True
-
-
-@pytest.mark.asyncio
-async def test_websocket_serialized_batch_updates_connection_counters():
-    manager = WebSocketConnectionManager()
-    websocket = SimpleNamespace(send_text=AsyncMock())
-    connection = SimpleNamespace(
-        state=ConnectionState.CONNECTED,
-        websocket=websocket,
-        connection_id="connection-1",
-        messages_sent=0,
-        bytes_sent=0,
-    )
-    batch = manager._serialize_batch([{"type": "one"}, {"type": "two"}])
-
-    failed = await manager._send_serialized_batch(connection, batch)
-
-    assert failed is None
-    assert websocket.send_text.await_count == 2
-    assert connection.messages_sent == 2
-    assert connection.bytes_sent == batch.total_bytes
