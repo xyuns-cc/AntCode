@@ -1,7 +1,7 @@
 # AntCode Frontend - Multi-stage Build Dockerfile
 
 # Stage 1: Build
-FROM node:22-alpine AS builder
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS builder
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN ls -la && ls -la src/
 RUN npm run type-check && npm run lint:ci && npm run build
 
 # Stage 2: Production (J4: nginx unprivileged 镜像以非 root 跑)
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 AS runtime
 
 # unprivileged 镜像默认 uid=101 (nginx)，监听 8080 而不是 80
 USER root
@@ -49,24 +49,35 @@ ENV WEB_API_UPSTREAM=web-api:8000
 ENV NGINX_ENVSUBST_FILTER=WEB_API_UPSTREAM
 
 # Nginx 配置（unprivileged 监听 8080 而非 80）
-# P1-06: /api/v1/ws/ 独立 location 补齐 WebSocket Upgrade 头,避免落进普通 /api 走 HTTP/1.0
+# SSE 日志流（/api/v1/logs/runs/{id}/stream）需要独立 location：关闭 proxy_buffering
+# （默认 on 会把事件攒批推送，"实时"变成成批延迟）并拉长 read timeout（默认 60s 会
+# 掐断静默流；后端另有 15s ping 事件与 X-Accel-Buffering: no 响应头兜底）。
 RUN mkdir -p /etc/nginx/templates && echo 'server { \
     listen 8080; \
     server_name localhost; \
     root /usr/share/nginx/html; \
     index index.html; \
+    # P2-01: SPA 层安全头 (Web API 已由 SecurityHeadersMiddleware 覆盖 /api 响应, \
+    # 这里补齐 nginx 直出的 HTML/JS 资源, 避免 XSS/clickjacking/HTTPS 降级). \
+    add_header Content-Security-Policy "default-src '\''self'\''; script-src '\''self'\''; style-src '\''self'\'' '\''unsafe-inline'\''; img-src '\''self'\'' data: blob:; font-src '\''self'\'' data:; connect-src '\''self'\''; object-src '\''none'\''; base-uri '\''self'\''; frame-ancestors '\''none'\''; form-action '\''self'\''" always; \
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always; \
+    add_header X-Frame-Options "DENY" always; \
+    add_header X-Content-Type-Options "nosniff" always; \
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always; \
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always; \
     location / { \
         try_files $uri $uri/ /index.html; \
     } \
-    location /api/v1/ws/ { \
+    location ~ ^/api/v1/logs/runs/[^/]+/stream$ { \
         proxy_pass http://${WEB_API_UPSTREAM}; \
         proxy_http_version 1.1; \
-        proxy_set_header Upgrade $http_upgrade; \
-        proxy_set_header Connection "upgrade"; \
+        proxy_set_header Connection ""; \
         proxy_set_header Host $host; \
         proxy_set_header X-Real-IP $remote_addr; \
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
         proxy_set_header X-Forwarded-Proto $scheme; \
+        proxy_buffering off; \
+        proxy_cache off; \
         proxy_read_timeout 3600s; \
         proxy_send_timeout 3600s; \
     } \
@@ -77,20 +88,8 @@ RUN mkdir -p /etc/nginx/templates && echo 'server { \
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
         proxy_set_header X-Forwarded-Proto $scheme; \
     } \
-    location /ws { \
-        proxy_pass http://${WEB_API_UPSTREAM}; \
-        proxy_http_version 1.1; \
-        proxy_set_header Upgrade $http_upgrade; \
-        proxy_set_header Connection "upgrade"; \
-        proxy_set_header Host $host; \
-        proxy_set_header X-Real-IP $remote_addr; \
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
-        proxy_read_timeout 3600s; \
-        proxy_send_timeout 3600s; \
-    } \
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ { \
         expires 1y; \
-        add_header Cache-Control "public, immutable"; \
     } \
     gzip on; \
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml; \
@@ -98,7 +97,7 @@ RUN mkdir -p /etc/nginx/templates && echo 'server { \
 
 # 健康检查（unprivileged nginx 走 8080）
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost:8080/ || exit 1
+    CMD wget --quiet --tries=1 --spider http://127.0.0.1:8080/ || exit 1
 
 EXPOSE 8080
 
