@@ -1,103 +1,140 @@
-"""
-压力测试配置和 fixtures
-"""
+from __future__ import annotations
 
-import asyncio
-import time
-from collections.abc import Generator
-from dataclasses import dataclass, field
-from typing import Any
+import os
+from collections.abc import Callable
 
 import pytest
+import pytest_asyncio
+
+from tests.loadtest.tool.binding import verify_redis_target_binding
+from tests.loadtest.tool.config import (
+    DEFAULT_BACKLOG_TIMEOUT_SECONDS,
+    DEFAULT_MAX_ERROR_RATE,
+    DEFAULT_MAX_P50_MS,
+    DEFAULT_MAX_P95_MS,
+    DEFAULT_MAX_P99_MS,
+    DEFAULT_MIN_LOG_LINES,
+    DEFAULT_MIN_QPS_RATIO,
+    DEFAULT_MIN_WORKERS,
+    DEFAULT_TIMEOUT_SECONDS,
+    FULL_CONFIRMATION,
+    READ_ONLY_CONFIRMATION,
+    LoadSettings,
+    Thresholds,
+    load_tokens,
+    nonnegative_ratio,
+    parse_csv,
+    parse_stage,
+    positive_float,
+    positive_int,
+    validate_base_url,
+    validate_confirmation,
+    validate_redis_binding_key,
+    validate_redis_url,
+)
+
+ENV_PREFIX = "ANTCODE_LOADTEST_"
+LOAD_SETTINGS_KEY: pytest.StashKey[LoadSettings] = pytest.StashKey()
 
 
-@dataclass
-class LoadTestMetrics:
-    """压力测试指标"""
-
-    total_requests: int = 0
-    successful_requests: int = 0
-    failed_requests: int = 0
-    total_latency_ms: float = 0.0
-    min_latency_ms: float = float("inf")
-    max_latency_ms: float = 0.0
-    start_time: float = field(default_factory=time.time)
-    end_time: float = 0.0
-
-    @property
-    def duration_seconds(self) -> float:
-        """测试持续时间"""
-        return self.end_time - self.start_time if self.end_time else time.time() - self.start_time
-
-    @property
-    def avg_latency_ms(self) -> float:
-        """平均延迟"""
-        return self.total_latency_ms / self.total_requests if self.total_requests else 0
-
-    @property
-    def requests_per_second(self) -> float:
-        """每秒请求数"""
-        return self.total_requests / self.duration_seconds if self.duration_seconds else 0
-
-    @property
-    def success_rate(self) -> float:
-        """成功率"""
-        return self.successful_requests / self.total_requests if self.total_requests else 0
-
-    def record_request(self, success: bool, latency_ms: float) -> None:
-        """记录请求"""
-        self.total_requests += 1
-        if success:
-            self.successful_requests += 1
-        else:
-            self.failed_requests += 1
-        self.total_latency_ms += latency_ms
-        self.min_latency_ms = min(self.min_latency_ms, latency_ms)
-        self.max_latency_ms = max(self.max_latency_ms, latency_ms)
-
-    def finish(self) -> None:
-        """完成测试"""
-        self.end_time = time.time()
-
-    def report(self) -> str:
-        """生成报告"""
-        return f"""
-=== 压力测试报告 ===
-总请求数: {self.total_requests}
-成功请求: {self.successful_requests}
-失败请求: {self.failed_requests}
-成功率: {self.success_rate:.2%}
-持续时间: {self.duration_seconds:.2f}s
-QPS: {self.requests_per_second:.2f}
-平均延迟: {self.avg_latency_ms:.2f}ms
-最小延迟: {self.min_latency_ms:.2f}ms
-最大延迟: {self.max_latency_ms:.2f}ms
-"""
+def pytest_addoption(parser: pytest.Parser) -> None:
+    group = parser.getgroup("AntCode load tests")
+    group.addoption("--run-loadtests", action="store_true", help="Enable guarded load-test scenarios")
+    _add(group, "base-url", "Target AntCode base URL")
+    _add(group, "redis-url", "Redis URL with a non-zero database and target binding marker")
+    _add(group, "redis-binding-key", "Redis key containing the exact target binding marker")
+    _add(group, "token-file", "Owner-only file containing one bearer token per line")
+    _add(group, "stage", "Load stage formatted as VUS:QPS:DURATION_SECONDS")
+    _add(group, "project-id", "Dedicated load-test project public ID")
+    _add(group, "worker-id", "Dedicated load-test Worker public ID")
+    _add(group, "run-ids", "Comma-separated run IDs with retained logs")
+    _add(group, "churn-worker-ids", "Comma-separated externally restarted Worker IDs")
+    _add(group, "min-workers", "Minimum accessible Worker count")
+    _add(group, "min-log-lines", "Minimum historical lines required per WebSocket run")
+    _add(group, "timeout-seconds", "Per-operation timeout")
+    _add(group, "backlog-timeout-seconds", "Backlog completion deadline")
+    _add(group, "max-p50-ms", "Maximum P50 latency")
+    _add(group, "max-p95-ms", "Maximum P95 latency")
+    _add(group, "max-p99-ms", "Maximum P99 latency")
+    _add(group, "max-error-rate", "Maximum request error rate")
+    _add(group, "min-qps-ratio", "Minimum achieved/target QPS ratio")
 
 
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    """创建事件循环"""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+def _add(group: pytest.OptionGroup, name: str, help_text: str) -> None:
+    group.addoption(f"--loadtest-{name}", action="store", default=None, help=help_text)
 
 
-@pytest.fixture
-def load_test_metrics() -> LoadTestMetrics:
-    """创建压力测试指标收集器"""
-    return LoadTestMetrics()
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "loadtest_scenario: guarded external load-test scenario")
+    config.addinivalue_line("markers", "loadtest_write: scenario that creates or triggers tasks")
 
 
-@pytest.fixture
-def load_test_config() -> dict[str, Any]:
-    """压力测试配置"""
-    return {
-        "concurrent_users": 100,  # 并发用户数
-        "requests_per_user": 100,  # 每用户请求数
-        "ramp_up_seconds": 10,  # 预热时间
-        "duration_seconds": 60,  # 测试持续时间
-        "target_qps": 1000,  # 目标 QPS
-        "max_latency_ms": 500,  # 最大可接受延迟
-        "min_success_rate": 0.99,  # 最小成功率
-    }
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    scenarios = [item for item in items if item.get_closest_marker("loadtest_scenario")]
+    if not config.getoption("--run-loadtests"):
+        _deselect(config, items, scenarios)
+        return
+    try:
+        confirmation = validate_confirmation(os.getenv(f"{ENV_PREFIX}CONFIRM"))
+        settings = _build_settings(lambda name: _value(config, name))
+    except ValueError as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    except OSError as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    config.stash[LOAD_SETTINGS_KEY] = settings
+    if confirmation == READ_ONLY_CONFIRMATION:
+        write_items = [item for item in scenarios if item.get_closest_marker("loadtest_write")]
+        _deselect(config, items, write_items)
+
+
+def _deselect(config: pytest.Config, items: list[pytest.Item], selected: list[pytest.Item]) -> None:
+    if not selected:
+        return
+    selected_ids = {id(item) for item in selected}
+    items[:] = [item for item in items if id(item) not in selected_ids]
+    config.hook.pytest_deselected(items=selected)
+
+
+def _value(config: pytest.Config, name: str) -> str | None:
+    cli_value = config.getoption(f"--loadtest-{name}")
+    env_name = f"{ENV_PREFIX}{name.replace('-', '_').upper()}"
+    return cli_value or os.getenv(env_name)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def load_settings(pytestconfig: pytest.Config) -> LoadSettings:
+    settings = pytestconfig.stash[LOAD_SETTINGS_KEY]
+    await verify_redis_target_binding(settings)
+    return settings
+
+
+def _build_settings(value: Callable[[str], str | None]) -> LoadSettings:
+    confirmation = validate_confirmation(os.getenv(f"{ENV_PREFIX}CONFIRM"))
+    if confirmation not in {READ_ONLY_CONFIRMATION, FULL_CONFIRMATION}:
+        raise ValueError("invalid load-test confirmation")
+    thresholds = Thresholds(
+        max_p50_ms=positive_float(value("max-p50-ms"), "max P50", DEFAULT_MAX_P50_MS),
+        max_p95_ms=positive_float(value("max-p95-ms"), "max P95", DEFAULT_MAX_P95_MS),
+        max_p99_ms=positive_float(value("max-p99-ms"), "max P99", DEFAULT_MAX_P99_MS),
+        max_error_rate=nonnegative_ratio(value("max-error-rate"), "max error rate", DEFAULT_MAX_ERROR_RATE),
+        min_qps_ratio=nonnegative_ratio(value("min-qps-ratio"), "min QPS ratio", DEFAULT_MIN_QPS_RATIO),
+    )
+    return LoadSettings(
+        base_url=validate_base_url(value("base-url")),
+        redis_url=validate_redis_url(value("redis-url")),
+        redis_binding_key=validate_redis_binding_key(value("redis-binding-key")),
+        tokens=load_tokens(value("token-file")),
+        confirmation=confirmation,
+        stage=parse_stage(value("stage")),
+        thresholds=thresholds,
+        timeout_seconds=positive_float(value("timeout-seconds"), "timeout", DEFAULT_TIMEOUT_SECONDS),
+        backlog_timeout_seconds=positive_float(
+            value("backlog-timeout-seconds"), "backlog timeout", DEFAULT_BACKLOG_TIMEOUT_SECONDS
+        ),
+        project_id=value("project-id"),
+        worker_id=value("worker-id"),
+        run_ids=parse_csv(value("run-ids")),
+        churn_worker_ids=parse_csv(value("churn-worker-ids")),
+        min_workers=positive_int(value("min-workers"), "minimum workers", DEFAULT_MIN_WORKERS),
+        min_log_lines=positive_int(value("min-log-lines"), "minimum log lines", DEFAULT_MIN_LOG_LINES),
+    )
