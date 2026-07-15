@@ -12,8 +12,6 @@ export const API_BASE_URL = resolveApiBaseUrl({
   pageHostname: browserHostname,
   protocol: browserProtocol,
 })
-// WS 地址（从 API 地址自动推导：http -> ws, https -> wss）
-export const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws')
 
 // 应用配置
 export { APP_TITLE, APP_BRAND_NAME, PLATFORM_TITLE, APP_LOGO_ICON, APP_LOGO_SHORT }
@@ -52,14 +50,6 @@ export const LOG_TYPES = {
 export const PAGINATION = {
   DEFAULT_PAGE_SIZE: 10,
   PAGE_SIZE_OPTIONS: ['10', '20', '50', '100'],
-} as const
-
-// WebSocket 连接状态
-export const WS_CONNECTION_STATUS = {
-  DISCONNECTED: 'disconnected',
-  CONNECTING: 'connecting',
-  CONNECTED: 'connected',
-  ERROR: 'error',
 } as const
 
 // 本地存储键名

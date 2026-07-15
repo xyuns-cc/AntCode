@@ -19,8 +19,6 @@ export default defineConfig(({ mode }) => {
   const serverPort = env.SERVER_PORT || '8000'
   const apiHost = bindHost === '0.0.0.0' ? 'localhost' : bindHost
   const apiBaseUrl = env.VITE_API_BASE_URL || `http://${apiHost}:${serverPort}`
-  // 显式 VITE_WS_BASE_URL 优先；否则从 API base 推导（仅替换协议头，不动 path）。
-  const wsBaseUrl = env.VITE_WS_BASE_URL || apiBaseUrl.replace(/^https?:/, (m) => m === 'https:' ? 'wss:' : 'ws:')
   const frontendPort = Number(env.FRONTEND_PORT || '3000')
   
   const config: UserConfig = {
@@ -51,25 +49,12 @@ export default defineConfig(({ mode }) => {
         overlay: true,
       },
       proxy: {
-        // P14: 前端 WebSocket 端点全部挂在 /api/v1/ws/**（不是 /ws），必须
-        // 先声明带 ws:true 的更具体前缀，否则 /api proxy 会先命中把 WS 握手
-        // 当普通 HTTP 转发，导致所有实时日志页永远停在 "连接中"。key 顺序
-        // 决定 Vite proxy 匹配顺序：从长到短。
-        '/api/v1/ws': {
-          target: wsBaseUrl,
-          ws: true,
-          changeOrigin: true,
-        },
+        // 实时日志改用 SSE（GET /api/v1/logs/runs/{id}/stream），普通 HTTP
+        // 代理即可覆盖；http-proxy 对流式响应默认逐块转发，无需额外配置。
         '/api': {
           target: apiBaseUrl,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, '/api')
-        },
-        '/ws': {
-          target: wsBaseUrl,
-          ws: true,
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/ws/, '/ws')
         },
       },
     },

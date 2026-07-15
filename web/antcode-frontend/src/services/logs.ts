@@ -179,18 +179,18 @@ class LogService extends BaseService {
   }
 
   /**
-   * 申请 WebSocket 一次性 ticket（避免把长期 JWT 写入 URL）。
-   * 后端 401 时由 apiClient 响应拦截器统一处理；调用方仅在 ticket 缺失时报错。
-   * 端点挂载在 /api/v1/ws/ 前缀下（routes/v1/__init__.py:35）。
+   * 申请日志流一次性 ticket（避免把长期 JWT 写入 URL）。
+   * 原生 EventSource 无法携带 Authorization 头，故用 60s TTL 的一次性票据换取接入；
+   * 后端 401 时由 apiClient 响应拦截器统一处理（刷新 token + 重试）。
    */
-  async getWsTicket(): Promise<string> {
+  async getStreamTicket(): Promise<string> {
     const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
-      '/api/v1/ws/ws-ticket'
+      '/api/v1/logs/stream-ticket'
     )
     const body = response.data
     const ticket = body?.data?.ticket ?? body?.ticket
     if (!ticket) {
-      throw new Error('WebSocket ticket 接口未返回 ticket')
+      throw new Error('日志流 ticket 接口未返回 ticket')
     }
     return ticket
   }
@@ -204,167 +204,181 @@ class LogService extends BaseService {
     onHistoricalLogsUpdate?: (update: HistoricalLogsUpdate) => void
   ): LogStreamConnection | null {
     if (!runId) {
-      onError?.('runId is required for WebSocket connection')
+      onError?.('runId is required for log stream connection')
       return null
     }
 
-    const wsHost = import.meta.env.VITE_WS_HOST || window.location.host
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-
-    let ws: WebSocket | null = null
+    let source: EventSource | null = null
     let reconnectAttempts = 0
     const maxReconnectAttempts = 5
     let manualClose = false
-    let closeCode = 0
-    // 历史日志去重（按 timestamp|sequence|log_type|content 前 64 字节）
-    const seenKeys = new Set<string>()
-    const MAX_SEEN = 50_000
-    const SEEN_AGE_HALF = 25_000
+    // 探活 watchdog：服务端每 15s 发 ping 事件，45s 无任何事件视为死连接
+    const WATCHDOG_STALE_MS = 45_000
+    const WATCHDOG_CHECK_MS = 15_000
+    let lastEventAt = Date.now()
+    let watchdog: ReturnType<typeof setInterval> | null = null
 
-    const logKey = (entry: {
-      timestamp?: string
-      log_type?: string
-      sequence?: number
-      line_number?: number
-      message?: string
-    }): string => {
-      const seq = entry.sequence ?? entry.line_number ?? ''
-      const msg = (entry.message ?? '').slice(0, 64)
-      return `${entry.timestamp ?? ''}|${seq}|${entry.log_type ?? ''}|${msg}`
+    const stopWatchdog = () => {
+      if (watchdog) {
+        clearInterval(watchdog)
+        watchdog = null
+      }
     }
 
-    const buildUrl = async (): Promise<string> => {
-      // 通过一次性 ticket 鉴权（401 时拦截器会刷新 token + 重试）
-      const ticket = await this.getWsTicket()
-      return `${wsProtocol}//${wsHost}/api/v1/ws/runs/${runId}/logs?ticket=${encodeURIComponent(ticket)}`
+    const teardown = () => {
+      stopWatchdog()
+      source?.close()
+      source = null
+    }
+
+    const scheduleReconnect = () => {
+      if (manualClose) return
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        onStateChange?.('failed')
+        onError?.('日志流连接失败：已达最大重连次数')
+        return
+      }
+      reconnectAttempts += 1
+      const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts - 1), 30000)
+      onStateChange?.('reconnecting')
+      setTimeout(() => {
+        if (manualClose) return
+        void connect()
+      }, delay)
+    }
+
+    const parseData = <T = Record<string, unknown>>(event: MessageEvent): T | null => {
+      try {
+        return JSON.parse(event.data) as T
+      } catch (e) {
+        Logger.error('解析日志 SSE 消息失败:', e)
+        return null
+      }
     }
 
     const connect = async () => {
       try {
-        const wsUrl = await buildUrl()
-        ws = new WebSocket(wsUrl)
+        // ticket 为一次性消费，每次（重）连接都必须先换新 ticket
+        const ticket = await this.getStreamTicket()
+        const url = `/api/v1/logs/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`
+        const es = new EventSource(url)
+        source = es
+        lastEventAt = Date.now()
 
-        ws.onopen = () => {
+        const touch = () => {
+          lastEventAt = Date.now()
+        }
+
+        es.onopen = () => {
           reconnectAttempts = 0
+          touch()
           onStateChange?.('connected')
         }
 
-        ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data)
-
-            if (message.type === 'log_line' && message.data) {
-              const data = message.data
-              const dedupKey = logKey({
-                timestamp: data.timestamp || message.timestamp,
-                log_type: data.log_type,
-                sequence: data.sequence,
-                line_number: data.line_number,
-                message: data.content || data.message,
-              })
-
-              // 重连后历史日志可能与已收到的实时日志重叠，去重防止 UI 重复
-              if (seenKeys.has(dedupKey)) return
-              seenKeys.add(dedupKey)
-              // 老化：超 50k 条仅保留最近 25k
-              if (seenKeys.size > MAX_SEEN) {
-                const arr = Array.from(seenKeys)
-                seenKeys.clear()
-                for (const k of arr.slice(arr.length - SEEN_AGE_HALF)) {
-                  seenKeys.add(k)
-                }
-              }
-
-              const logEntry: LogEntry = {
-                id: `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-                timestamp: data.timestamp || message.timestamp,
-                level: (data.level || 'INFO') as LogLevel,
-                log_type: (data.log_type || 'stdout') as LogType,
-                run_id: data.run_id || runId,
-                message: data.content || data.message || '',
-                source: data.source,
-                line_number: data.line_number,
-              }
-              onMessage?.(logEntry)
-              return
+        es.addEventListener('log_line', (event) => {
+          touch()
+          const message = parseData<{
+            timestamp?: string
+            data?: {
+              timestamp?: string
+              level?: string
+              log_type?: string
+              run_id?: string
+              content?: string
+              message?: string
+              source?: string
+              sequence?: number | null
             }
+          }>(event)
+          const data = message?.data
+          if (!data) return
 
-            if (message.type === 'ping') {
-              ws?.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }))
-              return
-            }
-
-            if (message.type === 'run_status' && message.data) {
-              onStatusUpdate?.({
-                status: message.data.status,
-                message: message.data.message,
-                progress: message.data.progress,
-              })
-              return
-            }
-
-            if (message.type === 'historical_logs_start') {
-              onHistoricalLogsUpdate?.({ phase: 'loading' })
-              return
-            }
-
-            if (message.type === 'historical_logs_end') {
-              const sentLines = Number(message.sent_lines)
-              onHistoricalLogsUpdate?.({
-                phase: 'loaded',
-                sentLines: Number.isFinite(sentLines) ? sentLines : 0,
-              })
-              return
-            }
-
-            if (message.type === 'no_historical_logs') {
-              onHistoricalLogsUpdate?.({ phase: 'empty', sentLines: 0 })
-              return
-            }
-
-            if (message.type === 'error') {
-              onError?.(message.message || 'WebSocket server error')
-            }
-          } catch (e) {
-            Logger.error('解析日志 WebSocket 消息失败:', e)
+          const logEntry: LogEntry = {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+            timestamp: data.timestamp || message?.timestamp || new Date().toISOString(),
+            level: (data.level || 'INFO') as LogLevel,
+            log_type: (data.log_type || 'stdout') as LogType,
+            run_id: data.run_id || runId,
+            message: data.content || data.message || '',
+            source: data.source,
           }
-        }
+          onMessage?.(logEntry)
+        })
 
-        ws.onerror = (error) => {
-          onStateChange?.('error')
-          onError?.(error)
-        }
+        es.addEventListener('run_status', (event) => {
+          touch()
+          const message = parseData<{
+            data?: { status?: string; message?: string; progress?: number }
+          }>(event)
+          if (!message?.data?.status) return
+          onStatusUpdate?.({
+            status: message.data.status,
+            message: message.data.message,
+            progress: message.data.progress,
+          })
+        })
 
-        ws.onclose = (event) => {
-          closeCode = event.code
+        es.addEventListener('historical_logs_start', (event) => {
+          touch()
+          void event
+          onHistoricalLogsUpdate?.({ phase: 'loading' })
+        })
+
+        es.addEventListener('historical_logs_end', (event) => {
+          touch()
+          const message = parseData<{ sent_lines?: number }>(event)
+          const sentLines = Number(message?.sent_lines)
+          onHistoricalLogsUpdate?.({
+            phase: 'loaded',
+            sentLines: Number.isFinite(sentLines) ? sentLines : 0,
+          })
+        })
+
+        es.addEventListener('no_historical_logs', (event) => {
+          touch()
+          void event
+          onHistoricalLogsUpdate?.({ phase: 'empty', sentLines: 0 })
+        })
+
+        es.addEventListener('ping', () => {
+          // 仅用于保活与 watchdog 刷新，SSE 单向推送无需回 pong
+          touch()
+        })
+
+        // 服务端业务错误（会话失效 / 慢消费者 / 超过最大寿命），与网络层 onerror 区分
+        es.addEventListener('stream_error', (event) => {
+          touch()
+          const message = parseData<{ message?: string }>(event)
+          onError?.(message?.message || '日志流服务端错误')
+          // 服务端随后会结束流，触发 onerror 走统一重连
+        })
+
+        es.onerror = () => {
+          // 关键：ticket 是一次性的，绝不能让 EventSource 用旧 URL 自动重连
+          //（自动重连必然 401 且无限打后端），统一 close 后自管退避重连
+          teardown()
           onStateChange?.('disconnected')
+          scheduleReconnect()
+        }
 
-          if (manualClose) return
-
-          // 鉴权失败（4401/4403）：尝试刷新 token 再重连一次
-          const isAuthClose = closeCode === 4401 || closeCode === 4403
-
-          if (reconnectAttempts < maxReconnectAttempts) {
-            reconnectAttempts += 1
-            const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts - 1), 30000)
-            onStateChange?.('reconnecting')
-            setTimeout(() => {
-              if (manualClose) return
-              if (isAuthClose) {
-                // 异步刷新 token：通过任何 API 调用触发拦截器；这里直接重新申请 ticket
-                void connect()
-              } else {
-                void connect()
-              }
-            }, delay)
+        stopWatchdog()
+        watchdog = setInterval(() => {
+          if (manualClose) {
+            stopWatchdog()
             return
           }
-
-          onStateChange?.('failed')
-          onError?.(`WebSocket closed: ${event.code} - ${event.reason}`)
-        }
+          if (Date.now() - lastEventAt > WATCHDOG_STALE_MS) {
+            Logger.warn('日志流超过 45s 无事件，判定为死连接，重连')
+            teardown()
+            onStateChange?.('disconnected')
+            scheduleReconnect()
+          }
+        }, WATCHDOG_CHECK_MS)
       } catch (error) {
+        // ticket 申请失败等
+        onStateChange?.('error')
         onError?.(error)
+        scheduleReconnect()
       }
     }
 
@@ -373,7 +387,7 @@ class LogService extends BaseService {
     return {
       disconnect: () => {
         manualClose = true
-        ws?.close(1000, '客户端主动断开')
+        teardown()
       },
     }
   }
