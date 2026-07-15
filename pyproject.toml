@@ -7,6 +7,7 @@ dependencies = [
     # Web框架
     "fastapi>=0.123.7",
     "uvicorn[standard]==0.38.0",
+    "click>=8.3.3",  # 修复 PYSEC-2026-2132 / CVE-2026-7246
     "python-multipart>=0.0.31",
     "starlette>=1.0.1",
     # 数据库
@@ -34,7 +35,6 @@ dependencies = [
     "ujson>=5.13.0",
     "idna>=3.15",
     "PyYAML>=6.0",
-    "websockets>=12.0",
     # 高性能序列化与压缩
     "msgpack>=1.2.1",
     "lz4>=4.3.0",
@@ -104,45 +104,37 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-# J1: AGENTS.md 硬指标（函数≤50 行、参数≤3、圈复杂度≤10、无魔法数字）通过
-# C901+PLR* 强制。存量违规目前全域宽松（per-file-ignores 白名单），保证增量
-# 不再劣化；批次 J2 里逐目录收紧。
+# 复杂度由 scripts.check_complexity 的显式函数级 baseline 统一执行。
+# 不在这里启用 C901/PLR，避免为了兼容存量债务再次引入整目录 silent ignore。
 select = [
     "E",
     "F",
     "W",
     "I",
     "UP",
-    "C901",  # 圈复杂度
-    # PLR: pylint refactor 检查（参数数/魔法数字/分支数/语句数）
-    # 存量违规多，先只 select，per-file-ignores 全域放开，让 baseline 干净后再收紧
 ]
 ignore = ["E501"]  # 行长由 formatter 控制
-# 圈复杂度上限 = AGENTS.md 的 10
-[tool.ruff.lint.mccabe]
-max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["F401", "F841", "C901"]
-"scripts/**/*.py" = ["E402", "C901"]
-# J1 存量白名单：现有超复杂度函数尚未拆，先豁免让 baseline 通过；
-# 批次 J2 里按目录逐个收紧。新代码走全局 max-complexity=10。
-"packages/antcode_core/**/*.py" = ["C901"]
-"services/master/**/*.py" = ["C901"]
-"services/web_api/**/*.py" = ["C901"]
-"services/worker/**/*.py" = ["C901"]
-"services/gateway/**/*.py" = ["C901"]
+"tests/**/*.py" = ["F401", "F841"]
+"scripts/**/*.py" = ["E402"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
-addopts = "-p no:unraisableexception"
+addopts = "--strict-markers"
+pythonpath = ["."]
 filterwarnings = [
     # 忽略 passlib 库中的 crypt 模块弃用警告（第三方库问题，Python 3.13 前无法解决）
     "ignore:'crypt' is deprecated:DeprecationWarning",
-    "ignore:Exception ignored in:pytest.PytestUnraisableExceptionWarning",
+    # 后台任务、析构器和未 await 协程中的异常必须阻断测试，不能被全局隐藏。
+    "error::pytest.PytestUnraisableExceptionWarning",
 ]
 
 markers = [
     "integration: 集成测试标记",
+    "e2e: 需要显式确认和专用测试环境的端到端测试",
     "pbt: 边界/属性测试标记",
+    "transport(mode): Worker transport implementation covered by a contract test",
+    "loadtest_scenario: guarded external load-test scenario",
+    "loadtest_write: load-test scenario that creates or triggers tasks",
 ]
