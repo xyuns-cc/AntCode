@@ -24,7 +24,10 @@ from typing import Any
 from antcode_core.common.config import settings
 from loguru import logger
 
-QUEUE_MAXSIZE = 1000
+# 队列容量需覆盖历史回放窗口：生成器回放 HISTORY_LIMIT（10000）帧期间不消费
+# 队列，期间实时帧全部积压于此。容量过小会造成"回放必溢出 → 重连 → 回放更长
+# 更必溢出"的活锁（每帧 dict ~0.5KB，5000 帧 ≈ 2.5MB/慢连接，仅溢出场景短暂驻留）。
+QUEUE_MAXSIZE = 5000
 
 # 溢出哨兵：慢消费者队列满时投放，消费端读到后应终止流
 QUEUE_OVERFLOW = object()
@@ -120,8 +123,10 @@ class RunStreamBroker:
             except asyncio.QueueFull:
                 subscription.overflowed = True
                 self._overflow_count += 1
-                # 腾出一个槽位保证哨兵可入队，消费端下一次 get 尽快看到
-                _evict_one(subscription.queue)
+                # 清空积压后投哨兵：溢出即断的语义要求消费端下一次 get 立即
+                # 看到哨兵——若只腾一个槽位把哨兵追加到 FIFO 队尾，慢消费者
+                # 还要先拖完几千条陈旧帧（期间新日志全部静默丢弃）才会重连
+                _drain(subscription.queue)
                 subscription.queue.put_nowait(QUEUE_OVERFLOW)
                 logger.warning(
                     "日志流慢消费者，队列溢出断开: run_id={} subscription_id={}",
@@ -147,12 +152,13 @@ class RunStreamBroker:
         }
 
 
-def _evict_one(queue: asyncio.Queue[Any]) -> None:
-    """弹出队首一个元素为哨兵腾位（队列已满时必然非空，防御 QueueEmpty）。"""
-    try:
-        queue.get_nowait()
-    except asyncio.QueueEmpty:
-        pass
+def _drain(queue: asyncio.Queue[Any]) -> None:
+    """清空队列（溢出后陈旧帧已无投递价值，重连全量历史回放会补齐）。"""
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
 
 
 run_stream_broker = RunStreamBroker()

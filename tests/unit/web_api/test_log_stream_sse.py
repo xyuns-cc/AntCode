@@ -182,11 +182,24 @@ async def test_revoked_session_terminates_stream(monkeypatch):
 
     event, data = _parse_frame(await anext(generator))
     assert event == "stream_error"
+    assert data["code"] == "session_revoked"
     assert "会话已失效" in data["message"]
 
     with pytest.raises(StopAsyncIteration):
         await anext(generator)
     follower.unfollow.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_session_recheck_fails_open_on_db_error(monkeypatch):
+    """PG 抖动时会话重校验 fail-open：不能集体杀掉存活流（8h 寿命兜底）。"""
+    monkeypatch.setattr(
+        svc_module.UserSession,
+        "filter",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+
+    assert await svc_module._session_still_valid(7, "jti") is True
 
 
 @pytest.mark.asyncio
@@ -199,6 +212,7 @@ async def test_queue_overflow_terminates_stream(monkeypatch):
 
     event, data = _parse_frame(await anext(generator))
     assert event == "stream_error"
+    assert data["code"] == "overflow"
     assert "积压" in data["message"]
 
     with pytest.raises(StopAsyncIteration):

@@ -49,7 +49,6 @@ class IngestLogFollower:
         self._lock = asyncio.Lock()
         self._ingest_task: asyncio.Task | None = None
         self._ingest_running = False
-        self._ingest_last_id = "$"  # 只关心新消息；历史走 PG
 
     async def follow(self, run_id: str) -> None:
         """开始跟随执行日志（多订阅者 ref-count）。"""
@@ -78,6 +77,10 @@ class IngestLogFollower:
 
     async def _stop_ingest_task(self) -> None:
         async with self._lock:
+            # 决策与摘取同一临界区：unfollow 算出"无人跟随"到这里之间，
+            # 可能有新 follow 复用了存活任务——重查计数避免误杀新订阅者的任务
+            if self._follow_counts:
+                return
             self._ingest_running = False
             task = self._ingest_task
             self._ingest_task = None
@@ -94,33 +97,33 @@ class IngestLogFollower:
         """历史日志：主路径 PG，PG 空时回落旧 per-run stream。
 
         返回归一化条目 ``{log_type, content, timestamp, sequence(int|None), source}``。
+        latest=True：超长日志截断时保留最新窗口（用户关心尾部；若截最旧，
+        前端重连清屏后会把正在看的最新日志替换成最旧 1 万行）。
+        PG 异常不吞（对齐 postgres_log_service 的"DB 故障必须冒泡"契约）——
+        由编排层转成 stream_error 帧，否则故障会伪装成"无历史日志"。
         """
+        from antcode_core.application.services.logs.postgres_log_service import (
+            postgres_log_service,
+        )
+
         entries: list[dict[str, Any]] = []
-
-        try:
-            from antcode_core.application.services.logs.postgres_log_service import (
-                postgres_log_service,
+        pg_entries = await postgres_log_service.list_entries(run_id, limit=limit, latest=True)
+        for entry in pg_entries:
+            ts = ""
+            if entry.timestamp:
+                try:
+                    ts = entry.timestamp.isoformat()
+                except Exception:
+                    ts = str(entry.timestamp)
+            entries.append(
+                {
+                    "log_type": entry.log_type or "stdout",
+                    "content": entry.content or "",
+                    "timestamp": ts,
+                    "sequence": normalize_sequence(entry.sequence),
+                    "source": "pg_history",
+                }
             )
-
-            pg_entries = await postgres_log_service.list_entries(run_id, limit=limit)
-            for entry in pg_entries:
-                ts = ""
-                if entry.timestamp:
-                    try:
-                        ts = entry.timestamp.isoformat()
-                    except Exception:
-                        ts = str(entry.timestamp)
-                entries.append(
-                    {
-                        "log_type": entry.log_type or "stdout",
-                        "content": entry.content or "",
-                        "timestamp": ts,
-                        "sequence": normalize_sequence(entry.sequence),
-                        "source": "pg_history",
-                    }
-                )
-        except Exception as e:
-            logger.debug("PG 历史日志读取失败 run_id={}: {}", run_id, e)
 
         if entries:
             return entries
@@ -128,7 +131,8 @@ class IngestLogFollower:
         try:
             return await self._fetch_history_from_per_run_stream(run_id)
         except Exception as e:
-            logger.debug("per-run stream 历史读取失败 run_id={}: {}", run_id, e)
+            # 兼容回落路径保持宽容（多数部署 per-run stream 本就为空）
+            logger.warning("per-run stream 历史读取失败 run_id={}: {}", run_id, e)
             return []
 
     async def _fetch_history_from_per_run_stream(self, run_id: str) -> list[dict[str, Any]]:
@@ -159,14 +163,17 @@ class IngestLogFollower:
 
     async def _ingest_loop(self) -> None:
         """全局 ingest stream 订阅协程（所有订阅者共享）。"""
+        this_task = asyncio.current_task()
         redis = await get_redis_client()
         if redis is None:
             logger.warning("Redis 不可用，跳过 ingest stream 订阅")
-            self._ingest_running = False
+            self._set_not_running(this_task)
             return
 
         stream_key = _log_ingest_stream_key(self._namespace)
-        last_id = self._ingest_last_id
+        # 每次启动固定从 "$" 只读新消息（历史走 PG）。不能跨启停沿用旧位点：
+        # 长时间无订阅者后重启会从数小时前的 ID 回放全局 ingest 积压
+        last_id = "$"
 
         while self._ingest_running:
             try:
@@ -198,15 +205,23 @@ class IngestLogFollower:
                                 ),
                             )
 
-                self._ingest_last_id = last_id
-
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"ingest stream 读取失败: {e}")
                 await asyncio.sleep(1.0)
 
-        self._ingest_running = False
+        self._set_not_running(this_task)
+
+    def _set_not_running(self, this_task: asyncio.Task | None) -> None:
+        """退出路径只允许"当前在任"的任务清运行标志。
+
+        被 cancel 的旧任务收尾时，_ensure_ingest_task 可能已为新订阅者创建
+        接替任务并置位 _ingest_running——旧任务无条件写 False 会扼杀接替任务
+        （其 while 循环首轮即退出，订阅者只收 ping 收不到实时帧）。
+        """
+        if self._ingest_task is this_task or self._ingest_task is None:
+            self._ingest_running = False
 
     # ------------------------------------------------------------------ #
     # 解码工具

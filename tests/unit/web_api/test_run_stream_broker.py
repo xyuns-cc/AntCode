@@ -84,6 +84,21 @@ def test_slow_consumer_receives_overflow_sentinel_and_stops_delivery():
     assert subscription.queue.empty()
 
 
+def test_overflow_sentinel_is_first_element_not_behind_backlog():
+    """溢出即断：哨兵必须是消费端下一个元素，不能排在积压帧之后。"""
+    broker = RunStreamBroker()
+    subscription = broker.subscribe("run-1", user_id=7)
+    subscription.queue = asyncio.Queue(maxsize=3)
+
+    for seq in range(4):  # 第 4 条触发溢出
+        broker.publish("run-1", {"type": "log_line", "seq": seq})
+
+    assert subscription.overflowed is True
+    # 积压帧被清空，哨兵是队列中唯一且第一个元素
+    assert subscription.queue.get_nowait() is QUEUE_OVERFLOW
+    assert subscription.queue.empty()
+
+
 def test_publish_without_subscribers_is_noop():
     broker = RunStreamBroker()
     broker.publish("run-x", {"type": "log_line"})

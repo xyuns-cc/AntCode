@@ -102,22 +102,27 @@ class PostgresLogService:
         offset: int = 0,
         limit: int = 100,
         log_type: str | None = None,
+        latest: bool = False,
     ) -> list[PostgresLogEntry]:
-        """按 ``run_id`` 读取历史日志（按 sequence/timestamp 升序）。"""
+        """按 ``run_id`` 读取历史日志（返回顺序恒为 sequence 升序）。
+
+        latest=True 时取最新的 ``limit`` 行再按升序返回——超长日志被 limit
+        截断时保留尾部而非头部，供实时日志流的历史回放使用（用户关心最新内容）。
+        """
         if not run_id:
             return []
 
         from tortoise import Tortoise
 
+        # 排序方向只来自布尔分支，不含外部输入
+        order = 'ORDER BY "sequence" DESC, "id" DESC ' if latest else 'ORDER BY "sequence" ASC, "id" ASC '
         conn = Tortoise.get_connection("default")
         if log_type:
             sql = (
                 'SELECT "event_id", "run_id", "log_type", "content", "sequence", '
                 '       "timestamp", "level", "source" '
                 'FROM "task_logs" '
-                'WHERE "run_id" = $1 AND "log_type" = $2 '
-                'ORDER BY "sequence" ASC, "id" ASC '
-                "LIMIT $3 OFFSET $4"
+                'WHERE "run_id" = $1 AND "log_type" = $2 ' + order + "LIMIT $3 OFFSET $4"
             )
             params: list[Any] = [run_id, log_type, int(limit), int(offset)]
         else:
@@ -125,23 +130,21 @@ class PostgresLogService:
                 'SELECT "event_id", "run_id", "log_type", "content", "sequence", '
                 '       "timestamp", "level", "source" '
                 'FROM "task_logs" '
-                'WHERE "run_id" = $1 '
-                'ORDER BY "sequence" ASC, "id" ASC '
-                "LIMIT $2 OFFSET $3"
+                'WHERE "run_id" = $1 ' + order + "LIMIT $2 OFFSET $3"
             )
             params = [run_id, int(limit), int(offset)]
 
         # 不吞异常：DB 故障必须显式冒泡，绝不能返 [] 伪装成"没有历史日志"。
         # 之前 debug + return [] 让 task_logs 表不存在 / 权限缺失 / 连接池打满
         # 全部退化成 UI 空白，用户完全无感知。上游（web_api 路由 /
-        # redis_log_stream_service）会把异常转成 5xx 或结构化错误。
+        # ingest_follower.fetch_history）会把异常转成 5xx 或结构化错误。
         try:
             _, rows = await conn.execute_query(sql, params)
         except Exception:
             logger.exception("读取 task_logs 失败 run_id={}", run_id)
             raise
 
-        return [
+        entries = [
             PostgresLogEntry(
                 run_id=row.get("run_id") or "",
                 log_type=row.get("log_type") or "stdout",
@@ -154,6 +157,27 @@ class PostgresLogService:
             )
             for row in rows or []
         ]
+        if latest:
+            entries.reverse()
+        return entries
+
+    async def max_sequence(self, run_id: str, log_type: str) -> int:
+        """(run_id, log_type) 的持久化 sequence 高水位（无记录返回 0）。
+
+        供 HTTP 上报路径的进程内计数器在重启后播种，避免同 run 重新从 1
+        编号与 PG 已有高 sequence 冲突（订阅端按 sequence 过滤会误丢新帧）。
+        """
+        if not run_id:
+            return 0
+
+        from tortoise import Tortoise
+
+        conn = Tortoise.get_connection("default")
+        sql = 'SELECT COALESCE(MAX("sequence"), 0) AS "max_seq" FROM "task_logs" WHERE "run_id" = $1 AND "log_type" = $2'
+        _, rows = await conn.execute_query(sql, [run_id, log_type])
+        if not rows:
+            return 0
+        return int(rows[0].get("max_seq") or 0)
 
     async def count(
         self,

@@ -124,11 +124,20 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
   // Refs
   const logContainerRef = useRef<HTMLDivElement>(null)
   const mountedRef = useRef(true)
+  // SSE 回调是 connect() 时刻的闭包，读 state 会拿到过期值（stale closure）——
+  // 暂停判定必须走 ref，否则"暂停接收"对已建立的流不生效
+  const isPausedRef = useRef(false)
+  // 暂停期间发生了历史重放（被跳过清屏）→ 恢复接收时需强制重连补齐
+  const pendingResyncRef = useRef(false)
+
+  useEffect(() => {
+    isPausedRef.current = isPaused
+  }, [isPaused])
 
   // 确保组件挂载时mountedRef为true
   useEffect(() => {
     mountedRef.current = true
-    
+
     return () => {
       mountedRef.current = false
     }
@@ -142,9 +151,9 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
     }
   }, [messages, onLogUpdate])
 
-  // 添加日志消息
+  // 添加日志消息（isPaused 走 ref：该回调被 SSE 流的闭包长期持有）
   const addLogMessage = useCallback((logMessage: LogMessage) => {
-    if (!mountedRef.current || isPaused) {
+    if (!mountedRef.current || isPausedRef.current) {
       return
     }
 
@@ -156,7 +165,7 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
       }
       return newMessages
     })
-  }, [isPaused, maxLines])
+  }, [maxLines])
 
   // 建立 SSE 日志流连接
   const connect = useCallback(async () => {
@@ -266,7 +275,13 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
             setHistoryStatus('loading')
             setHistorySentLines(0)
             // 每次（重）连接服务端都会重放全量历史：清空现有 buffer，
-            // 靠"历史重放 + 服务端 sequence 过滤"保证不重不漏，前端无需去重
+            // 靠"历史重放 + 服务端 sequence 过滤"保证不重不漏，前端无需去重。
+            // 暂停接收期间不清屏（重放行会被 addLogMessage 丢弃，清了就永久空白），
+            // 标记待重同步，恢复接收时强制重连补齐
+            if (isPausedRef.current) {
+              pendingResyncRef.current = true
+              return
+            }
             setMessages([])
             addLogMessage({
               id: generateUniqueId(),
@@ -846,9 +861,20 @@ const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
                 >
                   <Text style={{ fontSize: 13 }}>自动滚动</Text>
                 </Checkbox>
-                <Checkbox 
-                  checked={isPaused} 
-                  onChange={(e) => setIsPaused(e.target.checked)}
+                <Checkbox
+                  checked={isPaused}
+                  onChange={(e) => {
+                    const paused = e.target.checked
+                    setIsPaused(paused)
+                    isPausedRef.current = paused
+                    // 暂停期间发生过重连（历史重放被跳过）：恢复时强制重连，
+                    // 走"清屏+全量重放"补齐暂停窗口内的缺口
+                    if (!paused && pendingResyncRef.current) {
+                      pendingResyncRef.current = false
+                      disconnect()
+                      setTimeout(connect, 1000)
+                    }
+                  }}
                 >
                   <Text style={{ fontSize: 13 }}>暂停接收</Text>
                 </Checkbox>

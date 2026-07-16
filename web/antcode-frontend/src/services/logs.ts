@@ -260,6 +260,9 @@ class LogService extends BaseService {
       try {
         // ticket 为一次性消费，每次（重）连接都必须先换新 ticket
         const ticket = await this.getStreamTicket()
+        // ticket 请求在途期间可能已被 disconnect（关闭页面/切换 run），
+        // 此处不复查会产生无人引用的孤儿 EventSource（未消费的 ticket 60s 自然过期）
+        if (manualClose) return
         const url = `/api/v1/logs/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`
         const es = new EventSource(url)
         source = es
@@ -270,7 +273,9 @@ class LogService extends BaseService {
         }
 
         es.onopen = () => {
-          reconnectAttempts = 0
+          // 注意：不在此处清零 reconnectAttempts——服务端"open 成功后随即
+          // stream_error 关流"的场景（如慢消费者溢出）会让熔断永不生效，
+          // 形成 1s 节奏的无限重连循环。清零移到历史回放完成（连接被证明健康）。
           touch()
           onStateChange?.('connected')
         }
@@ -326,6 +331,8 @@ class LogService extends BaseService {
 
         es.addEventListener('historical_logs_end', (event) => {
           touch()
+          // 历史回放完整送达 = 连接被证明健康，此时才重置重连熔断计数
+          reconnectAttempts = 0
           const message = parseData<{ sent_lines?: number }>(event)
           const sentLines = Number(message?.sent_lines)
           onHistoricalLogsUpdate?.({
@@ -336,6 +343,7 @@ class LogService extends BaseService {
 
         es.addEventListener('no_historical_logs', (event) => {
           touch()
+          reconnectAttempts = 0
           void event
           onHistoricalLogsUpdate?.({ phase: 'empty', sentLines: 0 })
         })
@@ -348,9 +356,17 @@ class LogService extends BaseService {
         // 服务端业务错误（会话失效 / 慢消费者 / 超过最大寿命），与网络层 onerror 区分
         es.addEventListener('stream_error', (event) => {
           touch()
-          const message = parseData<{ message?: string }>(event)
+          const message = parseData<{ code?: string; message?: string }>(event)
           onError?.(message?.message || '日志流服务端错误')
-          // 服务端随后会结束流，触发 onerror 走统一重连
+          if (message?.code === 'session_revoked') {
+            // 会话已失效：重连拿新 ticket 也必然 401，直接终止（登录流程接管）
+            manualClose = true
+            teardown()
+            onStateChange?.('failed')
+            return
+          }
+          // 其余 code（overflow/max_lifetime/limit）：服务端随后结束流，
+          // 触发 onerror 走统一退避重连
         })
 
         es.onerror = () => {
@@ -364,7 +380,9 @@ class LogService extends BaseService {
         stopWatchdog()
         watchdog = setInterval(() => {
           if (manualClose) {
-            stopWatchdog()
+            // teardown 而非仅停定时器：若存在竞态漏网的孤儿连接，
+            // 这里是最后的自愈点（≤15s 内关闭）
+            teardown()
             return
           }
           if (Date.now() - lastEventAt > WATCHDOG_STALE_MS) {
