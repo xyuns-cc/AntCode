@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     WORKER_INSTALL_KEY_REPLAY_WINDOW_SECONDS: int = Field(default=60)
     WORKER_INSTALL_KEY_FAIL_THRESHOLD: int = Field(default=5)
     WORKER_INSTALL_KEY_BLOCK_SECONDS: int = Field(default=600)
+    WORKER_INSTALL_SOURCE_URL: str = Field(default="")
+    WORKER_INSTALL_SOURCE_REF: str = Field(default="")
+    WORKER_INSTALL_GATEWAY_TLS: bool = Field(default=False)
+    WORKER_INSTALL_UV_VERSION: str = Field(default="0.8.17")
 
     # === 默认管理员 ===
     DEFAULT_ADMIN_USERNAME: str = Field(default="admin")
@@ -367,9 +371,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_CALLS: int = 1000
     RATE_LIMIT_PERIOD: int = 60
 
-    # === WebSocket 配置 ===
+    # === 实时日志流（SSE）连接上限；沿用 WEBSOCKET_* 命名保持部署面配置兼容 ===
     WEBSOCKET_MAX_CONN_PER_EXECUTION: int = 200
     WEBSOCKET_MAX_TOTAL_CONN: int = 20000
+    # 必须在此声明：pydantic extra="ignore" 会静默丢弃未声明的环境变量，
+    # 只靠消费端 getattr 兜底会让运维配置的 per-user 上限永远不生效
+    WEBSOCKET_MAX_CONN_PER_USER: int = 20
 
     model_config = SettingsConfigDict(
         env_file=str(_find_project_root() / ".env"),

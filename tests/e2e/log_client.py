@@ -14,6 +14,9 @@ from .helpers import API_PREFIX, extract_data, request_json
 
 DEFAULT_STREAM_TIMEOUT_SECONDS = 15.0
 HISTORY_END_TYPES = frozenset({"historical_logs_end", "no_historical_logs"})
+# 实时帧的两个来源：Redis ingest 路径（direct/gateway worker）source='realtime'，
+# Worker HTTP 上报路径（distributed_log_service → SSELogNotifier）source='task_execution'
+REALTIME_SOURCES = frozenset({"realtime", "task_execution"})
 
 
 async def get_logs(
@@ -83,7 +86,7 @@ async def scan_for_target_log(
             history_complete = True
             continue
         data = message.get("data") or {}
-        is_realtime = data.get("source") == "realtime"
+        is_realtime = data.get("source") in REALTIME_SOURCES
         if message_type == "log_line" and expected_content in str(data.get("content", "")):
             if history_complete and (not realtime_only or is_realtime):
                 return message

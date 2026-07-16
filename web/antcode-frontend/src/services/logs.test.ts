@@ -146,11 +146,66 @@ describe('logService.connectLogStream (SSE)', () => {
     const conn = logService.connectLogStream('run-1', undefined, (error) => errors.push(error))
     await flushConnect()
 
-    FakeEventSource.instances[0].emit('stream_error', { type: 'stream_error', message: '会话已失效，连接终止' })
+    FakeEventSource.instances[0].emit('stream_error', {
+      type: 'stream_error',
+      code: 'overflow',
+      message: '服务端推送积压，连接已重置',
+    })
 
-    expect(errors).toEqual(['会话已失效，连接终止'])
+    expect(errors).toEqual(['服务端推送积压，连接已重置'])
 
     conn?.disconnect()
+  })
+
+  it('stream_error code=session_revoked 时终止流且不再重连', async () => {
+    const states: string[] = []
+    logService.connectLogStream('run-1', undefined, undefined, (state) => states.push(state))
+    await flushConnect()
+
+    const es = FakeEventSource.instances[0]
+    es.emit('stream_error', { type: 'stream_error', code: 'session_revoked', message: '会话已失效，连接终止' })
+
+    expect(es.closed).toBe(true)
+    expect(states).toContain('failed')
+
+    // 服务端关流触发的 onerror 与后续时间推进都不应产生新连接
+    es.onerror?.()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('open 成功但服务端反复关流时熔断可达（attempts 不因 onopen 清零）', async () => {
+    const states: string[] = []
+    logService.connectLogStream('run-1', undefined, undefined, (state) => states.push(state))
+    await flushConnect()
+
+    // 初连 + 5 次重连，每轮 open 成功后立即被服务端关流（未收到历史完成帧）
+    for (let round = 0; round < 6; round++) {
+      const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]
+      es.onopen?.()
+      es.onerror?.()
+      await vi.advanceTimersByTimeAsync(35_000) // 覆盖最大退避 30s
+    }
+
+    expect(states).toContain('failed')
+    expect(FakeEventSource.instances).toHaveLength(6)
+  })
+
+  it('历史回放完成后重置熔断计数（健康连接可长期自愈重连）', async () => {
+    logService.connectLogStream('run-1')
+    await flushConnect()
+
+    for (let round = 0; round < 8; round++) {
+      const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]
+      es.onopen?.()
+      // 每轮都完整收到历史 → attempts 清零 → 永远不会 failed
+      es.emit('historical_logs_end', { type: 'historical_logs_end', sent_lines: 0 })
+      es.onerror?.()
+      await vi.advanceTimersByTimeAsync(2_000) // 计数已清零，退避恒为第一档 1s
+    }
+
+    expect(FakeEventSource.instances).toHaveLength(9)
+    FakeEventSource.instances[8].onerror?.()
   })
 
   it('超过 45s 无任何事件时 watchdog 判死重连', async () => {

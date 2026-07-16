@@ -145,11 +145,25 @@ class DistributedLogService:
     ) -> list[PostgresLogEntry]:
         async with self._lock:
             key = self._cache_key(run_id, log_type)
+            if key not in self._sequences:
+                # 进程内计数器重启后归零，而 sequence 是 SSE 订阅端历史/实时
+                # 重叠过滤的判据：同 run 重新从 1 编号会让新实时帧全部落在
+                # PG 历史高水位之下被静默丢弃。首次见到该 key 时从 PG 播种。
+                self._sequences[key] = await self._load_sequence_floor(run_id, log_type)
             entries = self._entries_for_lines(run_id, log_type, lines, timestamp)
             cache = self._log_cache[key]
             cache.extend(lines)
             self._log_cache[key] = cache[-MAX_CACHE_LINES:]
             return entries
+
+    async def _load_sequence_floor(self, run_id: str, log_type: str) -> int:
+        try:
+            return await postgres_task_log_service.max_sequence(run_id, log_type)
+        except Exception as e:
+            # 播种失败退回 0（与旧行为一致）：宁可退化为旧的重编号瑕疵，
+            # 也不能让日志上报路径因 DB 抖动而失败
+            logger.warning("日志序号播种失败，从 0 起编: run_id={} log_type={} err={}", run_id, log_type, e)
+            return 0
 
     def _entries_for_lines(
         self,

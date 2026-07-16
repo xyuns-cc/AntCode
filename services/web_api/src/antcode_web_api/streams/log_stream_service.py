@@ -56,6 +56,10 @@ HISTORY_LIMIT = 10000
 TERMINAL_STATUSES = {"success", "failed", "timeout", "cancelled", "skipped", "rejected"}
 
 
+class _HistoryUnavailableError(Exception):
+    """历史读取失败（DB 故障等），流应发 stream_error 后终止。"""
+
+
 async def verify_execution_access(run_id: str, user: User) -> TaskRun:
     """验证用户对执行记录的访问权限（在流式响应开始前调用，403/404 直出）。"""
     # 执行记录可能还在创建中，等待最多 5 秒
@@ -106,15 +110,25 @@ def build_current_status_message(run_id: str, execution: TaskRun) -> dict:
 
 
 async def _session_still_valid(user_id: int, session_jti: str) -> bool:
-    session = await UserSession.filter(
-        jti=session_jti,
-        user_id=user_id,
-        revoked_at__isnull=True,
-    ).first()
-    if session is None:
-        return False
-    user = await User.get_or_none(id=user_id)
-    return user is not None and getattr(user, "is_active", True)
+    """周期会话重校验（P1-09）。
+
+    DB 异常时 fail-open（与原 WS 连接管理器语义对齐）：短暂 PG 抖动不应
+    集体杀掉全部存活流——重连路径同样依赖 PG，抖动期间前端重连必然失败并
+    在 5 次退避后永久 failed。安全性由 8h 最大流寿命兜底。
+    """
+    try:
+        session = await UserSession.filter(
+            jti=session_jti,
+            user_id=user_id,
+            revoked_at__isnull=True,
+        ).first()
+        if session is None:
+            return False
+        user = await User.get_or_none(id=user_id)
+        return user is not None and getattr(user, "is_active", True)
+    except Exception as e:
+        logger.warning("日志流会话重校验失败（DB 异常，本轮跳过）: user_id={} err={}", user_id, e)
+        return True
 
 
 class LogStreamService:
@@ -133,7 +147,7 @@ class LogStreamService:
             subscription = run_stream_broker.subscribe(run_id, user_id)
         except StreamLimitExceededError as exc:
             # 路由层 ensure_capacity 已预检 429；此处兜底并发竞态窗口
-            yield format_sse_event("stream_error", build_stream_error_message(str(exc)))
+            yield format_sse_event("stream_error", build_stream_error_message(str(exc), code="limit"))
             return
 
         followed = False
@@ -146,8 +160,17 @@ class LogStreamService:
 
             # 历史回放（队列已注册：期间到达的实时帧全部入队，之后按阈值过滤）
             max_history_seq: dict[str, int] = {}
-            async for frame in self._history_frames(run_id, max_history_seq):
-                yield frame
+            try:
+                async for frame in self._history_frames(run_id, max_history_seq):
+                    yield frame
+            except _HistoryUnavailableError:
+                # DB 故障必须对客户端可见：伪装成"无历史日志"会让已有几千行
+                # 日志的 run 凭空显示为空且无任何错误提示（客户端重连自愈）
+                yield format_sse_event(
+                    "stream_error",
+                    build_stream_error_message("历史日志暂时不可用，请稍后重试", code="history_unavailable"),
+                )
+                return
 
             # 实时消费（ping 保活 + 周期会话重校验 + 最大寿命）
             async for frame in self._realtime_frames(
@@ -173,8 +196,13 @@ class LogStreamService:
             "historical_logs_start",
             {"type": "historical_logs_start", "timestamp": _now_iso()},
         )
+        try:
+            history = await ingest_log_follower.fetch_history(run_id, limit=HISTORY_LIMIT)
+        except Exception as e:
+            logger.warning("日志流历史读取失败 run_id={}: {}", run_id, e)
+            raise _HistoryUnavailableError() from e
+
         sent = 0
-        history = await ingest_log_follower.fetch_history(run_id, limit=HISTORY_LIMIT)
         for entry in history:
             message = build_log_line_message(
                 run_id,
@@ -187,11 +215,15 @@ class LogStreamService:
             yield format_sse_event("log_line", message)
             sent += 1
             seq = entry["sequence"]
-            if seq is not None:
+            # sequence=0 不抬阈值：master 写入的系统行（派发/状态消息）sequence
+            # 缺省 0，若以此为阈值，worker 真实的 seq=0 首行会被 0<=0 误滤。
+            # 代价是"worker 仅有 seq=0 一行且恰好同时在快照与队列"这一极窄
+            # 窗口下重复显示一行（重复优于丢失）。
+            if seq is not None and seq > 0:
                 log_type = entry["log_type"]
                 max_history_seq[log_type] = max(max_history_seq.get(log_type, -1), seq)
 
-        complete = build_history_complete_message(sent)
+        complete = build_history_complete_message(sent, truncated=sent >= HISTORY_LIMIT)
         yield format_sse_event(complete["type"], complete)
         logger.debug("日志流历史回放完成: run_id={} sent={}", run_id, sent)
 
@@ -210,7 +242,7 @@ class LogStreamService:
             if now - started > MAX_STREAM_LIFETIME_SECONDS:
                 yield format_sse_event(
                     "stream_error",
-                    build_stream_error_message("连接超过最大生存时长，请重新连接"),
+                    build_stream_error_message("连接超过最大生存时长，请重新连接", code="max_lifetime"),
                 )
                 return
             if now >= next_recheck:
@@ -218,7 +250,7 @@ class LogStreamService:
                 if not await _session_still_valid(user_id, session_jti):
                     yield format_sse_event(
                         "stream_error",
-                        build_stream_error_message("会话已失效，连接终止"),
+                        build_stream_error_message("会话已失效，连接终止", code="session_revoked"),
                     )
                     return
 
@@ -234,7 +266,7 @@ class LogStreamService:
             if message is QUEUE_OVERFLOW:
                 yield format_sse_event(
                     "stream_error",
-                    build_stream_error_message("服务端推送积压，连接已重置，请重新连接"),
+                    build_stream_error_message("服务端推送积压，连接已重置，请重新连接", code="overflow"),
                 )
                 return
 

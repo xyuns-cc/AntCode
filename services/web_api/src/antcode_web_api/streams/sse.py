@@ -77,15 +77,27 @@ def build_ping_message() -> dict[str, Any]:
     return {"type": "ping", "timestamp": _now_iso()}
 
 
-def build_stream_error_message(message: str) -> dict[str, Any]:
-    return {"type": "stream_error", "message": message, "timestamp": _now_iso()}
+def build_stream_error_message(message: str, *, code: str) -> dict[str, Any]:
+    """服务端业务错误帧。
+
+    code 供客户端区分处理策略：
+    - session_revoked: 会话已失效，客户端应停止重连（登录流程接管）
+    - overflow: 慢消费者被重置，重连拿全量历史即可自愈
+    - max_lifetime: 到达最大流寿命，属预期轮换，立即重连即可
+    - limit: 订阅容量竞态兜底
+    """
+    return {"type": "stream_error", "code": code, "message": message, "timestamp": _now_iso()}
 
 
-def build_history_complete_message(sent: int) -> dict[str, Any]:
-    """历史回放结束帧：有内容 -> historical_logs_end，无内容 -> no_historical_logs。"""
+def build_history_complete_message(sent: int, *, truncated: bool = False) -> dict[str, Any]:
+    """历史回放结束帧：有内容 -> historical_logs_end，无内容 -> no_historical_logs。
+
+    truncated=True 表示历史超过回放上限、仅回放了最新窗口（客户端可提示）。
+    """
     return {
         "type": "historical_logs_end" if sent > 0 else "no_historical_logs",
         "sent_lines": sent,
+        "truncated": truncated,
         "timestamp": _now_iso(),
     }
 
