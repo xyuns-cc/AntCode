@@ -52,13 +52,16 @@ ENV NGINX_ENVSUBST_FILTER=WEB_API_UPSTREAM
 # SSE 日志流（/api/v1/logs/runs/{id}/stream）需要独立 location：关闭 proxy_buffering
 # （默认 on 会把事件攒批推送，"实时"变成成批延迟）并拉长 read timeout（默认 60s 会
 # 掐断静默流；后端另有 15s ping 事件与 X-Accel-Buffering: no 响应头兜底）。
+# P2-01: add_header 安全头系列补齐 nginx 直出的 HTML/JS 资源（Web API 已由
+# SecurityHeadersMiddleware 覆盖 /api 响应），避免 XSS/clickjacking/HTTPS 降级。
+#
+# 警告：echo 块内绝不能写 # 注释——Docker 续行会把模板拼成单个物理行，
+# nginx 的 # 注释直达行尾，会把其后全部配置（含闭合大括号）吞掉导致启动失败。
 RUN mkdir -p /etc/nginx/templates && echo 'server { \
     listen 8080; \
     server_name localhost; \
     root /usr/share/nginx/html; \
     index index.html; \
-    # P2-01: SPA 层安全头 (Web API 已由 SecurityHeadersMiddleware 覆盖 /api 响应, \
-    # 这里补齐 nginx 直出的 HTML/JS 资源, 避免 XSS/clickjacking/HTTPS 降级). \
     add_header Content-Security-Policy "default-src '\''self'\''; script-src '\''self'\''; style-src '\''self'\'' '\''unsafe-inline'\''; img-src '\''self'\'' data: blob:; font-src '\''self'\'' data:; connect-src '\''self'\''; object-src '\''none'\''; base-uri '\''self'\''; frame-ancestors '\''none'\''; form-action '\''self'\''" always; \
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always; \
     add_header X-Frame-Options "DENY" always; \
