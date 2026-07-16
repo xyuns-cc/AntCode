@@ -1,24 +1,26 @@
 import asyncio
 import base64
-import json
-import subprocess
-import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 
 import httpx
-import websockets
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from .conftest import E2EConfig
+from .source_repository import E2EGitSource
 
 API_PREFIX = "/api/v1"
-TERMINAL_STATUSES = {"success", "failed", "cancelled", "timeout"}
-_E2E_REPOS: list[TemporaryDirectory[str]] = []
+DEFAULT_TASK_TIMEOUT_SECONDS = 120
+DEFAULT_RETRY_DELAY_SECONDS = 1
+
+
+@dataclass(frozen=True)
+class CodeProjectResources:
+    project: dict[str, Any]
+    repository: dict[str, Any]
 
 
 def _api_path(path: str) -> str:
@@ -40,6 +42,7 @@ async def request_json(
     client: httpx.AsyncClient,
     method: str,
     path: str,
+    *,
     token: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -129,10 +132,22 @@ async def get_worker(client: httpx.AsyncClient, token: str, worker_id: str | Non
     raise AssertionError("未找到在线 Worker")
 
 
+def assert_worker_transport_mode(worker: dict[str, Any], expected_mode: str) -> None:
+    worker_id = worker.get("id")
+    assert "transportMode" in worker, f"Worker 响应缺少 transportMode: worker_id={worker_id!r}"
+    raw_mode = worker["transportMode"]
+    assert raw_mode is not None and str(raw_mode).strip(), f"Worker 响应 transportMode 为空: worker_id={worker_id!r}"
+    actual_mode = str(raw_mode).strip().lower()
+    assert actual_mode == expected_mode, (
+        f"Worker 传输模式不匹配: worker_id={worker_id!r}, expected={expected_mode!r}, actual={actual_mode!r}"
+    )
+
+
 async def ensure_shared_env(
     client: httpx.AsyncClient,
     token: str,
     worker_id: str,
+    *,
     config: E2EConfig,
 ) -> str:
     payload = await request_json(
@@ -169,11 +184,11 @@ async def create_code_project(
     client: httpx.AsyncClient,
     token: str,
     worker_id: str,
+    *,
     config: E2EConfig,
-    log_token: str,
-) -> dict[str, Any]:
+    source: E2EGitSource,
+) -> CodeProjectResources:
     project_name = f"e2e-code-{uuid.uuid4().hex[:8]}"
-    repository_url = create_git_repo_with_main(log_token)
     repository_payload = await request_json(
         client,
         "POST",
@@ -181,8 +196,8 @@ async def create_code_project(
         token=token,
         json={
             "name": f"e2e-repo-{uuid.uuid4().hex[:8]}",
-            "url": repository_url,
-            "default_ref": "main",
+            "url": source.url,
+            "default_ref": source.ref,
         },
     )
     repository = extract_data(repository_payload) or {}
@@ -194,50 +209,36 @@ async def create_code_project(
         "use_existing_env": "true",
         "existing_env_name": config.shared_env_name,
         "worker_id": worker_id,
-        "code_entry_point": "main.py",
+        "code_entry_point": source.entry_point,
         "repository_id": repository["id"],
-        "ref": "main",
-        "subdir": "spiders/e2e",
+        "ref": source.ref,
+        "subdir": source.subdir,
     }
-    payload = await request_json(client, "POST", "/projects", token=token, data=form)
+    try:
+        payload = await request_json(client, "POST", "/projects", token=token, data=form)
+    except BaseException as create_error:
+        try:
+            await request_json(client, "DELETE", f"/repositories/{repository['id']}", token=token)
+        except Exception as cleanup_error:
+            raise BaseExceptionGroup(
+                "E2E 项目创建与仓库清理均失败",
+                [create_error, cleanup_error],
+            ) from create_error
+        raise
     data = extract_data(payload) or {}
     assert data.get("id"), "项目创建失败"
-    return data
-
-
-def create_git_repo_with_main(log_token: str) -> str:
-    temp_dir = TemporaryDirectory()
-    _E2E_REPOS.append(temp_dir)
-    repo = Path(temp_dir.name)
-    source_dir = repo / "spiders" / "e2e"
-    source_dir.mkdir(parents=True)
-    (source_dir / "main.py").write_text(_main_py(log_token), encoding="utf-8")
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "e2e@example.com")
-    _git(repo, "config", "user.name", "AntCode E2E")
-    _git(repo, "add", "spiders/e2e/main.py")
-    _git(repo, "commit", "-m", "init")
-    return repo.as_uri()
-
-
-def _main_py(log_token: str) -> str:
-    return (
-        "import logging\n"
-        "logging.basicConfig(level=logging.INFO, format='%(message)s')\n"
-        "logger = logging.getLogger(__name__)\n"
-        f"logger.info('{log_token}')\n"
-    )
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    return CodeProjectResources(project=data, repository=repository)
 
 
 async def create_task(
     client: httpx.AsyncClient,
     token: str,
     project_id: str,
+    *,
     worker_id: str,
+    timeout_seconds: int = DEFAULT_TASK_TIMEOUT_SECONDS,
+    retry_count: int = 0,
+    retry_delay: int = DEFAULT_RETRY_DELAY_SECONDS,
 ) -> dict[str, Any]:
     task_name = f"e2e-task-{uuid.uuid4().hex[:8]}"
     body = {
@@ -247,8 +248,9 @@ async def create_task(
         "is_active": True,
         "execution_strategy": "specified",
         "specified_worker_id": worker_id,
-        "timeout_seconds": 120,
-        "retry_count": 0,
+        "timeout_seconds": timeout_seconds,
+        "retry_count": retry_count,
+        "retry_delay": retry_delay,
     }
     payload = await request_json(client, "POST", "/tasks", token=token, json=body)
     data = extract_data(payload) or {}
@@ -259,97 +261,6 @@ async def create_task(
 async def trigger_task(client: httpx.AsyncClient, token: str, task_id: str) -> None:
     payload = await request_json(client, "POST", f"/tasks/{task_id}/trigger", token=token)
     _ = extract_data(payload)
-
-
-async def wait_for_run(
-    client: httpx.AsyncClient,
-    token: str,
-    task_id: str,
-    timeout: float,
-    interval: float,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    last_status = None
-    while time.monotonic() < deadline:
-        payload = await request_json(
-            client,
-            "GET",
-            f"/tasks/{task_id}/runs",
-            token=token,
-            params={"page": 1, "size": 5},
-        )
-        data = extract_data(payload)
-        if isinstance(data, dict):
-            items = data.get("items", [])
-        elif isinstance(data, list):
-            items = data
-        else:
-            items = []
-        if items:
-            run = items[0]
-            status = run.get("status")
-            last_status = status
-            if status in TERMINAL_STATUSES:
-                if status != "success":
-                    raise AssertionError(f"任务执行失败: {status}, run={run}")
-                return run
-        await asyncio.sleep(interval)
-    raise AssertionError(f"等待任务完成超时: last_status={last_status}")
-
-
-async def create_run_context(
-    client: httpx.AsyncClient,
-    token: str,
-    worker_id: str,
-    config: E2EConfig,
-) -> dict[str, Any]:
-    log_token = f"E2E-OK-{uuid.uuid4().hex[:8]}"
-    await ensure_shared_env(client, token, worker_id, config)
-    project = await create_code_project(client, token, worker_id, config, log_token)
-    task = await create_task(client, token, project["id"], worker_id)
-    await trigger_task(client, token, task["id"])
-    run = await wait_for_run(
-        client,
-        token,
-        task["id"],
-        timeout=config.poll_timeout,
-        interval=config.poll_interval,
-    )
-    return {
-        "project": project,
-        "task": task,
-        "run": run,
-        "log_token": log_token,
-    }
-
-
-async def get_logs(
-    client: httpx.AsyncClient,
-    token: str,
-    run_id: str,
-    log_format: str,
-) -> dict[str, Any]:
-    payload = await request_json(
-        client,
-        "GET",
-        f"/logs/runs/{run_id}",
-        token=token,
-        params={"format": log_format},
-    )
-    return extract_data(payload) or {}
-
-
-async def wait_for_websocket_message(
-    config: E2EConfig,
-    run_id: str,
-    token: str,
-    timeout: float = 15.0,
-) -> dict[str, Any]:
-    url = f"{config.ws_url}{API_PREFIX}/ws/runs/{run_id}/logs?token={token}"
-    async with websockets.connect(url, ping_interval=None) as websocket:
-        message = await asyncio.wait_for(websocket.recv(), timeout=timeout)
-        data = json.loads(message)
-        return data
 
 
 def parse_heartbeat(worker: dict[str, Any]) -> datetime | None:
