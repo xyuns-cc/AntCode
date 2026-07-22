@@ -26,7 +26,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 # 确保 packages/services 在 path
 ROOT = Path(__file__).resolve().parent.parent
@@ -77,6 +79,29 @@ PERFORMANCE_INDEXES: list[tuple[str, str]] = [
             WHERE "event_id" IS NOT NULL
         """,
     ),
+    # SSE 历史回放以 PG 主键作为权威游标；并发建索引避免旧库升级时
+    # 长时间阻塞 task_logs 写入。该函数不在显式事务中执行。
+    (
+        "idx_task_logs_run_id_id",
+        """
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_task_logs_run_id_id"
+            ON "task_logs" ("run_id", "id")
+        """,
+    ),
+    # 20260717: Worker 注册回收清理的**部分索引**。RegistrationCleanupService
+    # 的过期扫描按 status='used' AND registration_acknowledged_at IS NULL 过滤
+    # （见 registration_cleanup_service.py 的 _expired_registrations），谓词
+    # 与本索引一致时才能走索引扫而非全表顺序扫。谓词/命名/列与
+    # migrations/models/20260717_add_worker_registration_recovery.sql 完全一致，
+    # 保证全新库(init_db)与既有集群(SQL)建出同一条索引。
+    (
+        "idx_worker_install_keys_unacknowledged_recovery",
+        """
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_worker_install_keys_unacknowledged_recovery"
+            ON "worker_install_keys" ("recovery_expires_at")
+            WHERE "status" = 'used' AND "registration_acknowledged_at" IS NULL
+        """,
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -120,6 +145,88 @@ WORKERS_LEGACY_INDEXES: list[tuple[str, str, str]] = [
         "api_key_previous_hash",
         "idx_workers_api_key_previous_hash",
         'CREATE INDEX IF NOT EXISTS "idx_workers_api_key_previous_hash" ON "workers" ("api_key_previous_hash")',
+    ),
+]
+
+# 20260713 / 20260717 新增业务列 —— generate_schemas(safe=True) 只补缺失的
+# **表**、不给已存在的表加列，_upgrade_legacy_schema 原本只 patch workers /
+# project_sources。老库跑新代码时以下列全部缺失，会直接 UndefinedColumn：
+#   task_executions.lease_id（lease_service 租约回收）
+#   scheduler_outbox.consume_*（调度 outbox 消费去重）
+#   worker_install_keys.registration_*/recovery_*/allowed_source（注册回收）
+# 列定义与对应 migrations/models/20260713_*.sql、20260717_*.sql 保持一致，
+# 按 (表, 列, DDL) 探测补，可重复执行。
+NEW_FEATURE_COLUMNS: list[tuple[str, str, str]] = [
+    # 20260713_add_task_run_lease_id.sql
+    (
+        "task_executions",
+        "lease_id",
+        'ALTER TABLE "task_executions" ADD COLUMN IF NOT EXISTS "lease_id" VARCHAR(64) NULL',
+    ),
+    # 20260722_add_task_run_lease_gen.sql (P1-GW-04: lease 代际单调 CAS)
+    (
+        "task_executions",
+        "lease_gen",
+        'ALTER TABLE "task_executions" ADD COLUMN IF NOT EXISTS "lease_gen" BIGINT NULL',
+    ),
+    # 20260713_add_scheduler_outbox_consumption.sql
+    (
+        "scheduler_outbox",
+        "consumed_at",
+        'ALTER TABLE "scheduler_outbox" ADD COLUMN IF NOT EXISTS "consumed_at" TIMESTAMPTZ NULL',
+    ),
+    (
+        "scheduler_outbox",
+        "consume_owner",
+        'ALTER TABLE "scheduler_outbox" ADD COLUMN IF NOT EXISTS "consume_owner" VARCHAR(128) NULL',
+    ),
+    # 20260720_add_scheduler_outbox_consume_attempts.sql
+    (
+        "scheduler_outbox",
+        "consume_attempts",
+        'ALTER TABLE "scheduler_outbox" ADD COLUMN IF NOT EXISTS "consume_attempts" INTEGER NOT NULL DEFAULT 0',
+    ),
+    (
+        "scheduler_outbox",
+        "consume_started_at",
+        'ALTER TABLE "scheduler_outbox" ADD COLUMN IF NOT EXISTS "consume_started_at" TIMESTAMPTZ NULL',
+    ),
+    # 20260713_add_worker_install_key_allowed_source.sql
+    (
+        "worker_install_keys",
+        "allowed_source",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "allowed_source" VARCHAR(64) NULL',
+    ),
+    # 20260717_add_worker_registration_recovery.sql
+    (
+        "worker_install_keys",
+        "registration_id",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "registration_id" VARCHAR(32) NULL',
+    ),
+    (
+        "worker_install_keys",
+        "recovery_secret_hash",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "recovery_secret_hash" VARCHAR(64) NULL',
+    ),
+    (
+        "worker_install_keys",
+        "registration_request_hash",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "registration_request_hash" VARCHAR(64) NULL',
+    ),
+    (
+        "worker_install_keys",
+        "credential_derivation_version",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "credential_derivation_version" SMALLINT NULL',
+    ),
+    (
+        "worker_install_keys",
+        "recovery_expires_at",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "recovery_expires_at" TIMESTAMPTZ NULL',
+    ),
+    (
+        "worker_install_keys",
+        "registration_acknowledged_at",
+        'ALTER TABLE "worker_install_keys" ADD COLUMN IF NOT EXISTS "registration_acknowledged_at" TIMESTAMPTZ NULL',
     ),
 ]
 
@@ -234,6 +341,13 @@ async def _upgrade_legacy_schema() -> None:
        是 NOT NULL —— 新代码 INSERT project_sources 不再写这列，会违反
        约束。此处只 ``DROP NOT NULL``（非破坏性）；要彻底删列请手动执行
        migrations/models/20260711_remove_project_source_mirrors.sql。
+    3. **20260713/20260717 新增业务列**（见 NEW_FEATURE_COLUMNS）：老库缺
+       task_executions.lease_id / scheduler_outbox.consume_* /
+       worker_install_keys.registration_*/recovery_*/allowed_source，
+       租约回收、outbox 消费、Worker 注册回收查询会 UndefinedColumn。
+       按 (表, 列) 探测补 ``ADD COLUMN IF NOT EXISTS``。索引不在此补，走
+       _create_performance_indexes 或手工执行对应 SQL 迁移（见
+       docs/database-setup.md 的既有集群升级清单）。
 
     全新库上以上探测全部命中"已就位/列不存在"，本函数是纯 no-op。
     """
@@ -305,8 +419,39 @@ async def _upgrade_legacy_schema() -> None:
             "彻底删列请手动执行 migrations/models/20260711_remove_project_source_mirrors.sql"
         )
 
+    # 3. 20260713/20260717 新增业务列 —— 老库补齐，避免 UndefinedColumn
+    await _backfill_feature_columns(conn, _column_exists)
+
     await close_db()
     logger.info("旧库结构对齐检查完成")
+
+
+async def _backfill_feature_columns(
+    conn: Any,
+    column_exists: Callable[[str, str], Awaitable[bool]],
+) -> None:
+    """老库补 20260713/20260717 新增业务列（NEW_FEATURE_COLUMNS），幂等。"""
+    feature_columns_added = 0
+    install_key_columns_added = False
+    for table, column, ddl in NEW_FEATURE_COLUMNS:
+        if await column_exists(table, column):
+            continue
+        await conn.execute_query(ddl)
+        feature_columns_added += 1
+        if table == "worker_install_keys":
+            install_key_columns_added = True
+        logger.info("旧库补列: {}.{}", table, column)
+
+    if install_key_columns_added:
+        logger.warning(
+            "worker_install_keys 补了注册来源/回收列（老库升级路径）。"
+            "存量安装 Key 的来源限制需从 Redis meta 回填，"
+            "请执行 `uv run python scripts/migrate_worker_install_keys.py`（见 "
+            "migrations/models/20260713_add_worker_install_key_allowed_source.sql 与 "
+            "docs/database-setup.md 的既有集群升级清单）。"
+        )
+    if feature_columns_added:
+        logger.info("旧库补业务列 {} 个（20260713/20260717）", feature_columns_added)
 
 
 async def _create_performance_indexes() -> None:
@@ -321,12 +466,30 @@ async def _create_performance_indexes() -> None:
     await init_db(config=config, service="web_api")
     conn = connections.get("default")
     for name, sql in PERFORMANCE_INDEXES:
-        try:
-            await conn.execute_query(sql)
-            logger.info("索引 OK: {}", name)
-        except Exception as exc:
-            logger.warning("索引 {} 建立失败（可能已存在）: {}", name, exc)
+        # P2 §4.5: 同名 INVALID 残留索引（CONCURRENTLY 被打断）会被
+        # IF NOT EXISTS 跳过并误报成功 —— 先清 INVALID 再建，建完复核
+        # indisvalid，失败显式抛错而不是假 OK。
+        await _drop_invalid_index(conn, name)
+        await conn.execute_query(sql)
+        if not await _index_is_valid(conn, name):
+            raise RuntimeError(f"索引创建后仍为 INVALID（需人工排查）: {name}")
+        logger.info("索引 OK: {}", name)
     await close_db()
+
+
+_INDEX_VALIDITY_SQL = "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = $1"
+
+
+async def _drop_invalid_index(conn, name: str) -> None:
+    _, rows = await conn.execute_query(_INDEX_VALIDITY_SQL, [name])
+    if rows and not rows[0]["indisvalid"]:
+        logger.warning("发现 INVALID 残留索引，先删除再重建: {}", name)
+        await conn.execute_query(f'DROP INDEX IF EXISTS "{name}"')
+
+
+async def _index_is_valid(conn, name: str) -> bool:
+    _, rows = await conn.execute_query(_INDEX_VALIDITY_SQL, [name])
+    return bool(rows) and bool(rows[0]["indisvalid"])
 
 
 async def _init_system_config() -> None:
@@ -341,12 +504,9 @@ async def _init_system_config() -> None:
 
     config = get_default_tortoise_config(service="web_api")
     await init_db(config=config, service="web_api")
-    try:
-        await system_config_service.initialize_default_configs()
-        await system_config_service.reload_config_cache()
-        logger.info("默认系统配置已初始化")
-    except Exception as exc:
-        logger.warning("初始化系统配置失败（可忽略并继续）: {}", exc)
+    await system_config_service.initialize_default_configs()
+    await system_config_service.reload_config_cache()
+    logger.info("默认系统配置已初始化")
     await close_db()
 
 
@@ -357,8 +517,7 @@ async def _create_admin() -> None:
         logger.warning("未设置 DEFAULT_ADMIN_PASSWORD —— 跳过默认管理员创建。上线前请在 .env 里显式配置。")
         return
 
-    from antcode_core.domain.models.enums import UserRole
-    from antcode_core.domain.models.user import User
+    from antcode_core.domain.models.user import User, UserRole
     from antcode_core.infrastructure.db.tortoise import (
         close_db,
         get_default_tortoise_config,
