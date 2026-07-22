@@ -16,9 +16,9 @@ from __future__ import annotations
 import time
 
 import pytest
-from antcode_gateway.handlers.task_settle import (
-    _legacy_settle_argv,
-    _resolve_legacy_settle_until_ts,
+from antcode_gateway.handlers._settle_legacy_boundary import (
+    legacy_settle_argv as _legacy_settle_argv,
+    resolve_legacy_settle_until_ts as _resolve_legacy_settle_until_ts,
 )
 
 

@@ -815,10 +815,7 @@ class SchedulerService:
         async with self.concurrency_semaphore:
             created_run_id = await self._execute_task_internal(intent.task_id, options)
         if created_run_id is None:
-            # P1-FN-10: 语义细分。_claim_task_run 返回 None 主要来自 busy 路径,
-            # 是合法的暂时性状态而非真正的失败;真正的失败(比如 Task 已被删除)
-            # 已由内部 raise 抛出。抛更具体的 RetryClaimBusyError 让 retry_loop
-            # 区分对待。
+            # P1-FN-10: _claim_task_run None 视为 busy（非失败），抛 RetryClaimBusyError 让 retry_loop 区分对待。
             from antcode_master.control.retry_loop import RetryClaimBusyError
 
             raise RetryClaimBusyError(f"retry run 未创建(可能 task busy): source_run_id={intent.source_run_id}")
@@ -1068,10 +1065,7 @@ class SchedulerService:
         from antcode_master.dispatch.selector import execution_resolver
 
         try:
-            # P1-FN-01: PENDING→DISPATCHING 的 CAS 是取消对派发的 fence。
-            # CAS 失败说明该 run 已被并发取消（cancel_unassigned_run 会把
-            # dispatch_status 收敛到失败终态）或被其它路径推进 —— 必须中止
-            # 派发，绝不能把已取消的 run 继续投给 Worker 执行。
+            # P1-FN-01: PENDING→DISPATCHING CAS 作为取消对派发的 fence；失败即中止派发以防已取消 run 被投递。
             claimed = await execution_status_service.update_dispatch_status(
                 run_id=run_id,
                 status=DispatchStatus.DISPATCHING,
@@ -1119,19 +1113,13 @@ class SchedulerService:
         """
         status_at = datetime.now(UTC)
         if result.get("aborted"):
-            # P1-FN-01: 派发前置 CAS 失败的收敛 —— run 状态归取消/推进方所有
-            # （终态已由对方写入），这里不再覆盖状态、不计失败、也不触发重试。
+            # P1-FN-01: 派发前置 CAS 失败：run 状态归取消/推进方，本路径不覆盖不计失败不重试。
             await self._log_execution(execution, "WARNING", f"派发已中止: {result.get('error')}")
             return None, False
         if not result.get("success"):
             await self._persist_result_fields(execution, result)
             error_message = result.get("error") or "任务执行失败"
-            # P1-FN-07: 消费 update_dispatch_status 返回值。CAS 返回 False 时
-            # 意味着并发路径(retry_loop/reconcile/其他 worker)已把 dispatch
-            # 推到终态或更晚的状态点,本次 FAILED 写入被 CAS 谓词拒绝——此时
-            # 不该再触发 retry(否则 retry_loop 会为已成功/已取消/已在重试的
-            # run 再创建一个 retry run,重复执行 + 双上报)。返回明确的
-            # cas_conflict=True 让 caller 走跳过路径,不写 WS 也不重放 log。
+            # P1-FN-07: 消费 update_dispatch_status 返回值——CAS 冲突时跳过 WS/log/retry，避免为终态 run 重复创建 retry run。
             cas_ok = await execution_status_service.update_dispatch_status(
                 run_id=run_id,
                 status=DispatchStatus.FAILED,

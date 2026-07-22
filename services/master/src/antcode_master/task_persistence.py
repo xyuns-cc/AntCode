@@ -153,100 +153,96 @@ class TaskPersistenceService:
 
         try:
             cutoff = datetime.now() - timedelta(minutes=self.INTERRUPTED_THRESHOLD_MINUTES)
-
             interrupted_executions = (
                 await TaskRun.filter(status=TaskStatus.RUNNING)
                 .filter(Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff))
                 .limit(100)
             )
-
             if not interrupted_executions:
                 return []
-
-            # B6: 用 LeaseStore 权威判活——心跳超阈值只是提示，真正判"死"的
-            # 是"lease 不再有效"。旧实现只看 last_heartbeat < cutoff 就重跑，
-            # 长跑任务或临时心跳丢失都会被误判 → 与真实执行的 worker 双跑。
             active_worker_ids = await self._get_active_worker_ids()
-            # P1-FN-13: Lease store 不可达时 _get_active_worker_ids 返回 None,
-            # 此时"任何 worker 都可能仍活着",不能仅凭心跳超时把 RUNNING run
-            # 判死重跑(否则与真实执行 worker 双跑)。返回空列表 = 本轮不恢复,
-            # 等下一轮 Redis 恢复后再判。
             if active_worker_ids is None:
+                # P1-FN-13: Lease store 不可达时保守跳过,不误判 RUNNING run
                 logger.warning(
                     "Lease store 不可达,本轮 get_interrupted_tasks 保守跳过 (candidate={} 条待判)",
                     len(interrupted_executions),
                 )
                 return []
-            worker_ids_in_batch = [e.worker_id for e in interrupted_executions if e.worker_id]
-            workers = await Worker.filter(id__in=worker_ids_in_batch) if worker_ids_in_batch else []
-            worker_pub_map = {w.id: w.public_id for w in workers}
-
-            task_ids = [e.task_id for e in interrupted_executions]
-            tasks = await Task.filter(id__in=task_ids)
-            task_map = {t.id: t for t in tasks}
-
-            orphan_executions = [e for e in interrupted_executions if e.task_id not in task_map]
-            if orphan_executions:
-                orphan_ids = [e.run_id for e in orphan_executions]
-                await TaskRun.filter(run_id__in=orphan_ids).update(
-                    status=TaskStatus.FAILED,
-                    error_message="任务已被删除",
-                    end_time=datetime.now(),
-                )
-                logger.info(f"已清理 {len(orphan_executions)} 条孤立的执行记录（任务已删除）")
-
-            checkpoints = []
-            for execution in interrupted_executions:
-                task = task_map.get(execution.task_id)
-                if not task:
-                    continue
-
-                # B6: worker 仍持有 lease → 视为存活，跳过恢复（避免双跑）
-                pub_id = worker_pub_map.get(execution.worker_id) if execution.worker_id else None
-                if pub_id and pub_id in active_worker_ids:
-                    logger.debug(f"跳过恢复（worker lease 仍活跃）: run_id={execution.run_id} worker={pub_id}")
-                    continue
-
-                checkpoint = None
-                if execution.result_data and execution.result_data.get("checkpoint"):
-                    try:
-                        checkpoint = TaskCheckpoint.from_dict(execution.result_data["checkpoint"])
-                        checkpoint.state = CheckpointState.CHECKPOINTED
-                    except Exception:
-                        pass
-
-                if not checkpoint:
-                    checkpoint = TaskCheckpoint(
-                        run_id=execution.run_id,
-                        task_id=execution.task_id,
-                        task_public_id=task.public_id,
-                        state=CheckpointState.CHECKPOINTED,
-                        progress=0.0,
-                        started_at=execution.start_time,
-                    )
-
-                checkpoints.append(checkpoint)
-
-            return checkpoints
-
+            worker_pub_map = await self._load_worker_public_ids(interrupted_executions, Worker)
+            task_map = await self._load_tasks_by_id(interrupted_executions, Task)
+            await self._cleanup_orphan_runs(interrupted_executions, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
+            return self._build_recovery_checkpoints(
+                interrupted_executions,
+                task_map,
+                worker_pub_map=worker_pub_map,
+                active_worker_ids=active_worker_ids,
+            )
         except Exception as e:
             logger.error(f"获取中断任务失败: {e}")
             return []
 
+    @staticmethod
+    async def _load_worker_public_ids(interrupted_executions, Worker) -> dict[int, str]:
+        worker_ids_in_batch = [e.worker_id for e in interrupted_executions if e.worker_id]
+        workers = await Worker.filter(id__in=worker_ids_in_batch) if worker_ids_in_batch else []
+        return {w.id: w.public_id for w in workers}
+
+    @staticmethod
+    async def _load_tasks_by_id(interrupted_executions, Task) -> dict:
+        task_ids = [e.task_id for e in interrupted_executions]
+        tasks = await Task.filter(id__in=task_ids)
+        return {t.id: t for t in tasks}
+
+    @staticmethod
+    async def _cleanup_orphan_runs(interrupted_executions, task_map, *, TaskRun, TaskStatus) -> None:
+        orphan_executions = [e for e in interrupted_executions if e.task_id not in task_map]
+        if not orphan_executions:
+            return
+        orphan_ids = [e.run_id for e in orphan_executions]
+        await TaskRun.filter(run_id__in=orphan_ids).update(
+            status=TaskStatus.FAILED,
+            error_message="任务已被删除",
+            end_time=datetime.now(),
+        )
+        logger.info(f"已清理 {len(orphan_executions)} 条孤立的执行记录（任务已删除）")
+
+    @classmethod
+    def _build_recovery_checkpoints(cls, interrupted_executions, task_map, *, worker_pub_map, active_worker_ids):
+        checkpoints = []
+        for execution in interrupted_executions:
+            task = task_map.get(execution.task_id)
+            if not task:
+                continue
+            # B6: worker 仍持有 lease → 视为存活,跳过恢复(避免双跑)
+            pub_id = worker_pub_map.get(execution.worker_id) if execution.worker_id else None
+            if pub_id and pub_id in active_worker_ids:
+                logger.debug(f"跳过恢复（worker lease 仍活跃）: run_id={execution.run_id} worker={pub_id}")
+                continue
+            checkpoints.append(cls._checkpoint_for_execution(execution, task))
+        return checkpoints
+
+    @staticmethod
+    def _checkpoint_for_execution(execution, task):
+        checkpoint = None
+        if execution.result_data and execution.result_data.get("checkpoint"):
+            try:
+                checkpoint = TaskCheckpoint.from_dict(execution.result_data["checkpoint"])
+                checkpoint.state = CheckpointState.CHECKPOINTED
+            except Exception:
+                pass
+        if not checkpoint:
+            checkpoint = TaskCheckpoint(
+                run_id=execution.run_id,
+                task_id=execution.task_id,
+                task_public_id=task.public_id,
+                state=CheckpointState.CHECKPOINTED,
+                progress=0.0,
+                started_at=execution.start_time,
+            )
+        return checkpoint
+
     async def _get_active_worker_ids(self) -> set[str] | None:
-        """B6/P1-FN-13: 从 LeaseStore 拿当前活跃 worker 集合。
-
-        - 返回 set(): 成功查询,可能为空(真的没有活跃 worker)
-        - 返回 None: Redis 不可达/异常。**保守语义** —— 上层看到 None 应
-          跳过判死轮次,而不是把空集当"没有活跃 worker"从而把全部 in-flight
-          run 判死重跑(激进语义)。
-
-        原实现异常时返回 set(),看似"保守"但实际语义是**激进**:
-        recover_on_startup 与 get_interrupted_tasks 都用 `pub_id in active_set`
-        判"仍活着",空集意味着"任何 worker 都不算活",于是 Redis 短故障期间
-        所有 RUNNING 任务都被判死并重跑,产生真实执行的 worker 与恢复 worker
-        双跑。修复为返回 None + 上层 skip,才是审查报告要求的"保守"。
-        """
+        """B6/P1-FN-13: 返回 set()=成功；None=Redis 不可达（保守：上层跳过判死轮次，不把空集当"没有活跃 worker"从而误判死所有 RUNNING run）。"""
         try:
             from antcode_core.application.services.lease_service import (
                 LeasePolicy,

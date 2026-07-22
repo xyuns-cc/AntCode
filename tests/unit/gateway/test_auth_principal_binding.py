@@ -205,8 +205,7 @@ async def _single(message):
     [
         (
             "StreamStatus",
-            # P1-GW-06: TaskStatus 必须携带 data["lease_id"], StreamStatus 会与
-            # AckTask 对称做 _require_current_lease 校验。
+            # P1-GW-06: TaskStatus 必须带 data["lease_id"]，StreamStatus 与 AckTask 对称做 lease 校验。
             data_pb2.TaskStatus(worker_id="worker-a", run_id="run-status", data={"lease_id": "lease-a"}),
             "result_handler",
             True,
@@ -306,8 +305,7 @@ async def test_gateway_data_stream_rejects_foreign_run_before_persistence():
     )
     original = grpc.stream_unary_rpc_method_handler(service.StreamStatus)
     wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
-    # P1-GW-06: TaskStatus 现在必须带 lease_id, 否则会先被 lease 校验拒;
-    # 这里带上 lease_id 让流程走到 ownership 检查再触发 PermissionError。
+    # P1-GW-06: TaskStatus 必须带 lease_id 才能走到 ownership 检查触发 PermissionError。
     message = data_pb2.TaskStatus(worker_id="worker-a", run_id="run-foreign", data={"lease_id": "lease-a"})
 
     with pytest.raises(AbortCalled):

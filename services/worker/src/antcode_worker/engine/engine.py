@@ -185,9 +185,7 @@ class Engine:
         # 不再静默用 "unknown"。
         self._worker_id_cache: str | None = None
         self._ownership_renewal_task: asyncio.Task | None = None
-        # P1-GW-02: 由 transport revoke 立即唤醒 _renew_run_ownership_loop,
-        # 不必等下一次 sleep 到期; loop 用 wait_for 在 wakeup 与 sleep 间选早的返回。
-        self._ownership_renew_wakeup: asyncio.Event | None = None
+        self._ownership_renew_wakeup: asyncio.Event | None = None  # P1-GW-02
 
         # P1-26: 优雅缩容用的 drain 集合。_resize_workers 缩容时不直接
         # cancel worker task(会让 ProcessExecutor 的子进程孤儿化, master 侧
@@ -235,8 +233,7 @@ class Engine:
         # P1-15: 后台续租跨机归属键,避免长跑任务 TTL 到期被重投另一台
         self._ownership_renewal_task = asyncio.create_task(self._renew_run_ownership_loop())
 
-        # P1-GW-02: 向 transport 注册 lease-revoked 回调,让 Gateway 主动撤销时
-        # engine 立即 cancel_all + 唤醒 ownership renew loop,不必等下一个周期。
+        # P1-GW-02: transport revoke → engine 立即 cancel_all + 唤醒 renew loop
         register = getattr(self._transport, "set_lease_revoked_callback", None)
         if callable(register):
             register(self._on_transport_lease_revoked)
@@ -422,47 +419,37 @@ class Engine:
                 if not self._transport or not self._transport.is_connected:
                     await asyncio.sleep(0.5)
                     continue
-
                 control = await self._transport.poll_control(timeout=self._policies.timeout.poll_timeout)
                 if control is None:
                     continue
-
-                if control.control_type in ("cancel", "kill"):
-                    target = control.run_id or control.task_id
-                    if not target:
-                        # P1-FN-04: 缺 target 的 control 是无操作,但仍 ACK 让它离开
-                        # PEL,否则会永远重投并 poison 消费组;上层观测方需靠告警排查。
-                        logger.warning(
-                            "cancel/kill control 缺 target: control_type={} receipt={}",
-                            control.control_type,
-                            control.receipt,
-                        )
-                    else:
-                        # P1-FN-04: 消费 cancel() 返回值。False 表示 run 已在终态
-                        # (COMPLETED/FAILED/CANCELLED),此时 ACK 是安全幂等的;
-                        # True 意味着已记录 tombstone 或已发起 executor.cancel。
-                        # 抛异常时不进这行(await 直接跳到外层 except),因此不 ACK,
-                        # PEL 会被 XAUTOCLAIM 重投让下一轮再试。
-                        cancel_ok = await self.cancel(target, reason=control.reason or control.control_type)
-                        if not cancel_ok:
-                            logger.info(
-                                "cancel/kill control 对已终态 run 是 no-op: target={} type={}",
-                                target,
-                                control.control_type,
-                            )
-                elif control.control_type == "config_update":
-                    await self.apply_config_update(control.payload or {})
-                elif control.control_type == "runtime_manage":
-                    self._schedule_runtime_control(control)
-                    continue
-
-                if control.receipt:
-                    await self._transport.ack_control(control.receipt)
+                await self._dispatch_control(control)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("控制通道异常")
                 await asyncio.sleep(1)
+
+    async def _dispatch_control(self, control: ControlMessage) -> None:
+        """P0-03a: 从 _control_loop 拆出的分派 + ACK,C901 12 → 11。"""
+        if control.control_type in ("cancel", "kill"):
+            await self._invoke_cancel_control(control)
+        elif control.control_type == "config_update":
+            await self.apply_config_update(control.payload or {})
+        elif control.control_type == "runtime_manage":
+            self._schedule_runtime_control(control)
+            return
+        if control.receipt:
+            await self._transport.ack_control(control.receipt)
+
+    async def _invoke_cancel_control(self, control: ControlMessage) -> None:
+        """P1-FN-04: 缺 target 只 log; cancel False 仍 ACK; 异常跳外层不 ACK。"""
+        target = control.run_id or control.task_id
+        if not target:
+            logger.warning("cancel/kill control 缺 target: type={}", control.control_type)
+            return
+        cancel_ok = await self.cancel(target, reason=control.reason or control.control_type)
+        if not cancel_ok:
+            logger.info("cancel/kill 对已终态 run no-op: target={}", target)
 
     def _schedule_runtime_control(self, control: ControlMessage) -> bool:
         receipt = control.receipt
@@ -1109,17 +1096,7 @@ class Engine:
             raise RuntimeError(f"RUNNING 状态持久化失败: run_id={context.run_id}")
 
     async def _report_result(self, context: RunContext, result: ExecResult) -> None:
-        """上报结果（幂等）。
-
-        P1-GW-05: 无论 report/ACK 成功失败,最终都释放跨机归属键。
-        原实现只在成功路径释放,报告失败时依赖 TTL(3600+300s ≈ 65 分钟)
-        才让 L2 接管;这段时间 L2 XAUTOCLAIM 拿到 PEL 后 claim_run_ownership
-        会 HELD_BY_OTHER,dead-holder takeover 又要求 Lease 已死,活着的 L1
-        重试期(31s)内无法接管,PEL 反复空转。改为 try/finally 主动释放:
-        - 成功路径:一切照旧
-        - 失败路径:重试耗尽后主动 release,L2 可立即 claim + 重跑
-        释放本身失败时只 warn,不覆盖原异常。
-        """
+        """上报结果（幂等）; P1-GW-05: try/finally 保证任何路径都释放 ownership。"""
         from antcode_worker.transport.base import TaskResult
 
         task_result = TaskResult(
@@ -1139,19 +1116,15 @@ class Engine:
             },
         )
 
-        release_needed = True
         try:
-            # 幂等上报（复审 D1: 结算带有界重试 —— 服务端 ack/结果吸收均已
-            # 幂等，瞬时失败（响应丢失/网络抖动）不再直接把 receipt 变成永久
-            # 孤儿并在重启后整任务重跑；重试耗尽仍显式抛错保留 PEL）。
+            # 复审 D1: 结算带有界重试;瞬时失败不把 receipt 变成永久孤儿
             report_ok = await self._settle_with_retry(
                 f"结果上报 run_id={context.run_id}",
                 lambda: self._transport.report_result(task_result),
             )
             if report_ok:
                 logger.info(f"结果已上报: {context.run_id}")
-                # V12: 只有 report_result 成功才 ack;
-                # 失败时不 ack,Stream 上的 PEL 会被 XAUTOCLAIM 回收交给其它 worker 重试。
+                # V12: 只有 report 成功才 ack,失败靠 PEL XAUTOCLAIM 让其它 worker 重试
                 if context.receipt:
                     ack_ok = await self._settle_with_retry(
                         f"任务 ACK run_id={context.run_id}",
@@ -1159,23 +1132,15 @@ class Engine:
                     )
                     if not ack_ok:
                         raise RuntimeError(f"任务 ACK 失败: run_id={context.run_id}")
-                # 清理状态(成功路径)
                 await self._state_manager.remove(context.run_id)
             else:
                 raise RuntimeError(f"结果上报失败: run_id={context.run_id}")
         finally:
-            if release_needed:
-                try:
-                    await self._release_run_ownership(context.run_id)
-                except Exception as exc:
-                    # P1-GW-05: release 失败只 warn。异常路径下我们不能让 release
-                    # 的失败覆盖 report/ACK 的原始异常;成功路径下 ownership 会由
-                    # TTL 自然过期,不会永久阻塞。
-                    logger.warning(
-                        "release_run_ownership 失败: run_id={}, err={}",
-                        context.run_id,
-                        exc,
-                    )
+            # P1-GW-05: 任何路径都释放 ownership; release 失败只 warn 不覆盖原异常
+            try:
+                await self._release_run_ownership(context.run_id)
+            except Exception as exc:
+                logger.warning("release_run_ownership 失败: run_id={}, err={}", context.run_id, exc)
 
     # 结算重试参数：指数退避 1s→16s，共 5 次尝试（总窗口 ~31s）。
     _SETTLE_MAX_ATTEMPTS = 5
@@ -1299,17 +1264,10 @@ class Engine:
         if info.state == RunState.RUNNING:
             await self._state_manager.transition(run_id, RunState.CANCELLING)
             if self._executor:
-                # P1-FN-04: 消费 executor.cancel 返回值。False 意味着 executor
-                # 内部找不到 run(可能已自然结束或从未注册),此时状态已推到
-                # CANCELLING 且不会再有子进程可 kill,继续走结算路径;但要 warn
-                # 让运维知道"状态与真实执行分裂"的边界情况。
+                # P1-FN-04: False = executor 内已无 run(可能自然结束),继续走结算但 warn
                 executor_cancelled = await self._executor.cancel(run_id)
                 if not executor_cancelled:
-                    logger.warning(
-                        "executor.cancel 未找到 run(可能已自然结束): run_id={} state={}",
-                        run_id,
-                        info.state,
-                    )
+                    logger.warning("executor.cancel 未找到 run: run_id={}", run_id)
         elif info.state == RunState.PREPARING:
             await self._state_manager.transition(run_id, RunState.CANCELLED)
 
@@ -1346,10 +1304,7 @@ class Engine:
     # B2: 跨机 run 归属期（秒）。任务实际执行时长 ≤ TASK_EXECUTION_TIMEOUT，
     # 归属期 = timeout + 冗余；正常 ack 或结果回传时会 DEL，Redis 侧不会长期占用。
     _RUN_OWNERSHIP_TTL_SECONDS = 3600 + 300
-    # P1-GW-02: 后台续租间隔从 600s 缩短到 60s。审查发现原 600s 让 Gateway 派
-    # 新 Lease 后旧代际最长可继续跑 10 分钟才被 renew 拒(LEASE_STALE),期间的
-    # 外部副作用无法回滚。缩短到 60s 后最坏窗口 ≤ 1 分钟;transport 撤销时通过
-    # _ownership_renew_wakeup.set() 立即唤醒本 loop,进一步压到 sub-second。
+    # P1-GW-02: 600s → 60s + wakeup 事件,把切代窗口从 10 分钟压到 sub-second
     _RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS = 60
 
     def _resolve_worker_id(self) -> str:
@@ -1491,14 +1446,7 @@ class Engine:
         self._running = False
 
     async def _renew_run_ownership_loop(self) -> None:
-        """Renew active run fences and stop execution when fencing is lost.
-
-        P1-GW-02: 在 sleep 与外部 wakeup 事件之间 wait_for。transport 侧
-        _abort_lease_revocation 会调 request_ownership_renew_now() → set(),
-        本 loop 立即返回并做一次 renew;renew 命中 LEASE_STALE 就 abort 所有
-        RUNNING/PREPARING run。同时 sleep 从 600s 缩到 60s(常量已改),两条路径
-        叠加把最坏窗口从 10 分钟压到 sub-second。
-        """
+        """Renew active run fences; P1-GW-02 wakeup 可提前触发一次 renew。"""
         if self._ownership_renew_wakeup is None:
             self._ownership_renew_wakeup = asyncio.Event()
         while self._running:
@@ -1509,7 +1457,7 @@ class Engine:
                         timeout=self._RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS,
                     )
                 except TimeoutError:
-                    pass  # 正常周期到期,继续 renew
+                    pass
                 else:
                     self._ownership_renew_wakeup.clear()
                 if not self._running:
@@ -1523,14 +1471,7 @@ class Engine:
                 raise
 
     async def _on_transport_lease_revoked(self, reason: str = "lease-revoked") -> None:
-        """P1-GW-02 回调:transport 检测到 Lease 被 Gateway 撤销时调用。
-
-        路径:GatewayTransport._abort_lease_revocation() → 本回调。
-        动作:1) 唤醒 renew loop 立刻走一次(通常会命中 LEASE_STALE 自然 abort)
-             2) cancel_all() 兜底,直接 kill 所有在飞子进程
-        避免旧代际继续产生外部副作用(HTTP/PG 写/日志),把最坏窗口从 10 分钟
-        (renew 周期 600s) 压到 sub-second。
-        """
+        """P1-GW-02 回调: transport 撤销 → 唤醒 renew + cancel_all 兜底。"""
         logger.warning("transport 报告 Lease 被撤销 (reason={}), 触发 engine cancel_all", reason)
         self.request_ownership_renew_now()
         try:
@@ -1540,23 +1481,12 @@ class Engine:
             logger.exception("engine cancel_all 异常: {}", exc)
 
     def request_ownership_renew_now(self) -> None:
-        """P1-GW-02: 外部(transport revoke)请求立即进行一次 ownership renew。
-
-        非 async, 不阻塞调用方;transport 撤销路径已经在 event loop 里,直接 set。
-        loop 未启动时(_ownership_renew_wakeup is None)静默忽略——此时没有 run
-        在飞,也不需要 renew。
-        """
+        """P1-GW-02: 请求立即 renew(loop 未启动时 no-op)。"""
         if self._ownership_renew_wakeup is not None:
             self._ownership_renew_wakeup.set()
 
     async def cancel_all(self, reason: str = "") -> int:
-        """P1-GW-02: 取消所有正在飞的 run(RUNNING/CANCELLING/PREPARING/QUEUED)。
-
-        transport 侧 _abort_lease_revocation 会调这个方法,把子进程主动 kill,
-        避免旧代际继续产生外部副作用(写 Artifact/写日志/发 HTTP);之前只 halt
-        transport,子进程要等 renew loop 下次周期 + Lease HSET 拒绝才停,最坏
-        10 分钟窗口。返回被取消的 run 数,供测试与日志断言。
-        """
+        """P1-GW-02: 取消所有 RUNNING/CANCELLING/PREPARING/QUEUED run,返回取消数。"""
         runs = await self._state_manager.get_all()
         cancellable = {RunState.RUNNING, RunState.CANCELLING, RunState.PREPARING, RunState.QUEUED}
         cancelled = 0

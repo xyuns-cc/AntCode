@@ -76,21 +76,14 @@ class TaskRunService:
         if not runtime_status:
             logger.warning(f"无法识别的运行状态: {status}")
             return False
-        if not await self._validate_result_source(execution, worker_id, data, runtime_status):
+        if not await self._validate_result_source(execution, worker_id, data, incoming_status=runtime_status):
             return False
 
         start_dt = self._parse_dt(started_at)
         finish_dt = self._parse_dt(finished_at)
         status_at = finish_dt or start_dt or datetime.now(UTC)
 
-        # P1-FN-12: 把 dispatch/runtime/metadata 三步 CAS 合并到同一事务。
-        # 之前每步独立提交,X→Y 换代/reconcile 判死可能穿插其间形成状态碎片
-        # (dispatch=ACKED 但 runtime 未推进;或 metadata 写入了不属于当前
-        # runtime_status 的字段)。Tortoise 的 in_transaction 是可嵌套的
-        # (SAVEPOINT),各 service 内部的 CAS 仍生效,只是整体成/败保持一致。
-        # Lease 校验放在事务外:P1-DR-02 已让 is_current 加了 revoked fence,
-        # 一旦"validated=True"就代表校验瞬间代际是当前;后续 CAS 若因换代
-        # 失败,整个事务回滚,不会留下部分状态。
+        # P1-FN-12: dispatch/runtime/metadata 三步 CAS 合并同事务，避免换代穿插形成状态碎片；lease 校验 (P1-DR-02 revoked fence) 在事务外，事务体内 CAS 失败整体回滚。
         async with in_transaction("default"):
             dispatch_updated = await execution_status_service.update_dispatch_status(
                 run_id=execution.run_id,
@@ -109,14 +102,7 @@ class TaskRunService:
             execution = await self._get_execution(run_id)
             if not execution:
                 return False
-            # P1-17 review: running/queued 是非终态"进度心跳"事件。多 master 消费组
-            # 分区 / XAUTOCLAIM reclaim 都可能让它迟到（终态或 reconcile 的失败判定
-            # 已先落库）。此时 CAS 被终态保护拒绝是**预期行为**，事件本身已无信息
-            # 量——必须按"已消费"返回 True，让 result_loop 正常 XACK。否则该消息会
-            # 重投 MAX_DELIVER_COUNT 次后进入 dead-letter stream，把良性心跳灌成
-            # DLQ 噪音。终态不会被拉回：update_runtime_status 的终态吸收 + CAS
-            # allowed_from（RUNNING 只允许来自 NULL/QUEUED）双重保证。
-            # 终态结果的 CAS 冲突仍返回 False → 走 DLQ 保留结果正文（P1-19 设计）。
+            # P1-17: 迟到 running/queued 心跳被终态保护拒绝时返回 True 让 result_loop 正常 XACK，避免 DLQ 噪音；终态结果 CAS 冲突仍返 False 走 DLQ (P1-19)。
             is_progress_event = runtime_status in (RuntimeStatus.QUEUED, RuntimeStatus.RUNNING)
             if not runtime_updated and execution.runtime_status != runtime_status:
                 if is_progress_event:
@@ -180,8 +166,7 @@ class TaskRunService:
             )
         return bool(updated)
 
-    # P1-GW-06: 终态状态集合。迟到放行分支仅对这些状态允许(见 _validate_result_lease
-    # 注释),避免已撤销 L1 通过 late RUNNING/QUEUED 帧覆盖 L2 的真实进度。
+    # P1-GW-06: 迟到放行分支仅限终态帧，避免已撤销 L1 用非终态帧覆盖 L2 进度。
     _TERMINAL_RUNTIME_STATUSES = frozenset(
         {
             RuntimeStatus.SUCCESS,
@@ -197,6 +182,7 @@ class TaskRunService:
         execution: TaskRun,
         worker_id: str | None,
         data: dict[str, Any] | None,
+        *,
         incoming_status: RuntimeStatus | None = None,
     ) -> bool:
         declared_worker_id = str(worker_id or "").strip()
@@ -214,13 +200,14 @@ class TaskRunService:
                 declared_worker_id,
             )
             return False
-        return await self._validate_result_lease(execution, declared_worker_id, data, incoming_status)
+        return await self._validate_result_lease(execution, declared_worker_id, data, incoming_status=incoming_status)
 
     async def _validate_result_lease(
         self,
         execution: TaskRun,
         declared_worker_id: str,
         data: dict[str, Any] | None,
+        *,
         incoming_status: RuntimeStatus | None = None,
     ) -> bool:
         incoming_lease_id = str((data or {}).get("lease_id") or "").strip()
@@ -231,18 +218,7 @@ class TaskRunService:
             logger.error("结果租约校验器未配置，拒绝状态更新: run_id={}", execution.run_id)
             return False
         if not await self._lease_validator(declared_worker_id, incoming_lease_id):
-            # 复审 D4: "消费时仍 current" 过宽 —— worker 正常完成后即关机/
-            # 崩溃，lease 30s 自然过期；result_loop 积压时合法终态结果会被
-            # 拒收进 DLQ，run 卡死后被 reconcile 误判失败重跑。若该 run 已
-            # 绑定同一 lease 代际（绑定 CAS 只允许 NULL→X 或 X→X，旧代际
-            # 无法抢绑），即便 lease 过期也接受本代际生前的结算。
-            #
-            # P1-GW-06: 收紧迟到放行分支 —— 仅当**且是终态帧**时才放行。
-            # 之前放行任何状态,让被撤销的旧 L1 通过 late RUNNING/QUEUED 帧覆盖
-            # 已绑定同代际的运行时状态,把 L2 的实际进度冲掉。终态帧本身幂等
-            # (SUCCESS/FAILED/CANCELLED/TIMEOUT/SKIPPED),被吸收后不会再被拉回,
-            # 因此可以安全放行。非终态帧一律拒收,让 result_loop XAUTOCLAIM 后
-            # 交给当前 L2 重发。
+            # P1-GW-06 (含 D4): lease 过期时仅当已绑同代际且是终态帧才放行；非终态一律拒收，交 XAUTOCLAIM 转当前 L2。
             if (
                 execution.lease_id
                 and execution.lease_id == incoming_lease_id

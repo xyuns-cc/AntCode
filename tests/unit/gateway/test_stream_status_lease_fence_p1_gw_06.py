@@ -137,12 +137,16 @@ async def test_validate_lease_late_arrival_allows_terminal_only():
         RuntimeStatus.TIMEOUT,
         RuntimeStatus.SKIPPED,
     ):
-        ok = await service._validate_result_lease(execution, "worker-a", {"lease_id": "lease-1"}, status)
+        ok = await service._validate_result_lease(
+            execution, "worker-a", {"lease_id": "lease-1"}, incoming_status=status
+        )
         assert ok is True, f"迟到 {status} 应被放行"
 
     # 非终态 → 拒绝
     for status in (RuntimeStatus.QUEUED, RuntimeStatus.RUNNING):
-        ok = await service._validate_result_lease(execution, "worker-a", {"lease_id": "lease-1"}, status)
+        ok = await service._validate_result_lease(
+            execution, "worker-a", {"lease_id": "lease-1"}, incoming_status=status
+        )
         assert ok is False, f"迟到 {status} 应被拒绝"
 
 
@@ -152,7 +156,7 @@ async def test_validate_lease_late_arrival_rejects_when_no_status_given():
     service = TaskRunService(lease_validator=AsyncMock(return_value=False))
     execution = _FakeExecution(lease_id="lease-1")
 
-    ok = await service._validate_result_lease(execution, "worker-a", {"lease_id": "lease-1"}, None)
+    ok = await service._validate_result_lease(execution, "worker-a", {"lease_id": "lease-1"}, incoming_status=None)
     assert ok is False
 
 
@@ -162,5 +166,7 @@ async def test_validate_lease_late_arrival_rejects_mismatched_lease():
     service = TaskRunService(lease_validator=AsyncMock(return_value=False))
     execution = _FakeExecution(lease_id="lease-1")
 
-    ok = await service._validate_result_lease(execution, "worker-a", {"lease_id": "lease-2"}, RuntimeStatus.SUCCESS)
+    ok = await service._validate_result_lease(
+        execution, "worker-a", {"lease_id": "lease-2"}, incoming_status=RuntimeStatus.SUCCESS
+    )
     assert ok is False

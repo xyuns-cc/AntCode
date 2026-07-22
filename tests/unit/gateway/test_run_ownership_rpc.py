@@ -244,64 +244,6 @@ async def test_foreign_taskrun_is_rejected_before_redis(monkeypatch):
     bind_generation.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_claim_binds_pg_generation_only_after_fence_acquired(monkeypatch):
-    # P1-GW-02: fence ACQUIRED → 才把 PG 改绑到当前代际（同 worker 换代允许）。
-    # P1-GW-04: 现在 bind 会带 lease_gen(fence 时点的 Unix ms)做单调 CAS 谓词,
-    # 阻止旧代际迟到 bind 覆盖新代际 PG 状态。
-    redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
-
-    response = await _Service().ClaimRunOwnership(_claim(), _context())
-
-    assert response.acquired is True
-    # 只断言核心参数,不锁死具体 gen 值(由 time.time() 决定)
-    assert bind_generation.await_count == 1
-    call = bind_generation.await_args
-    assert call.args == ("worker-1", "run-1")
-    assert call.kwargs["lease_id"] == "lease-1"
-    assert isinstance(call.kwargs["lease_gen"], int)
-    assert call.kwargs["lease_gen"] > 0
-
-
-@pytest.mark.asyncio
-async def test_claim_held_by_other_does_not_bind_pg(monkeypatch):
-    # 未取得 ownership 就绝不改绑 PG（另一存活 worker 正持有该 run）。
-    redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
-    redis.values["{tenant-a}:run:owner:run-1"] = "worker-2:lease-x"
-    redis.lease[fence._lease_key("worker-2", None)] = "lease-x"
-
-    response = await _Service().ClaimRunOwnership(_claim(), _context())
-
-    assert response.acquired is False
-    bind_generation.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_bind_failure_after_fence_aborts_permission_denied(monkeypatch):
-    # fence 后 run 已不属于该 worker（并发改派）：abort 且不返回 acquired。
-    redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
-    bind_generation.side_effect = PermissionError("TaskRun 不存在或不属于当前 Worker")
-    context = _context()
-
-    response = await _Service().ClaimRunOwnership(_claim(), context)
-
-    assert response.acquired is False
-    assert context.abort.await_args.args[0] == grpc.StatusCode.PERMISSION_DENIED
-
-
-@pytest.mark.asyncio
-async def test_invalid_ttl_is_rejected_before_lease_and_redis(monkeypatch):
-    redis = _Redis()
-    _install(monkeypatch, redis)
-    service = _Service()
-    context = _context()
-
-    response = await service.ClaimRunOwnership(_claim(ttl_ms=MAX_RUN_OWNERSHIP_TTL_MS + 1), context)
-
-    assert response.acquired is False
-    assert context.abort.await_args.args[0] == grpc.StatusCode.INVALID_ARGUMENT
-    service._lease_verifier.assert_not_awaited()
-    assert redis.eval_calls == []
+# P0-03a: 以下 4 个测试(claim_binds_pg / claim_held_by_other_does_not_bind /
+# bind_failure_after_fence_aborts / invalid_ttl_is_rejected)已拆到
+# tests/unit/gateway/test_run_ownership_rpc_bind_cas.py, 让本文件保持 <300 行。

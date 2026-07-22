@@ -243,11 +243,7 @@ class BasicSandbox(SandboxProvider):
         if not self.config.sandbox_command:
             raise RuntimeError("真实沙箱命令未配置，拒绝执行用户任务")
 
-        # P0-01: 沙箱启动器必须是绝对路径,防止任务 env.PATH 注入后
-        # asyncio.create_subprocess_exec 走 workspace 内伪造的同名程序。
-        # wiring._create_executor 在启动时通过 shutil.which 解析并写回绝对路径;
-        # 这里作 defense-in-depth 断言,任何绕过 wiring 的构造(单测/自定义 provider)
-        # 传入相对路径都会立刻失败,而不是等到运行时被劫持。
+        # P0-01: 沙箱启动器必须是绝对路径（wiring 已 shutil.which 解析）；defense-in-depth 断言防绕过 wiring 的相对路径被 env.PATH 劫持。
         if not os.path.isabs(self.config.sandbox_command[0]):
             raise RuntimeError(
                 f"沙箱启动命令必须是绝对路径,当前 {self.config.sandbox_command[0]!r} 会被任务 env.PATH 劫持"
@@ -325,11 +321,7 @@ class BasicSandbox(SandboxProvider):
             Path.home() / ".docker",
             Path("/root/.ssh"),
             Path("/root/.aws"),
-            # P0-03: Docker/K8s Secret 挂载点。docker-compose 的 secrets: 会挂到
-            # /run/secrets,K8s Pod 的 ServiceAccount token 在
-            # /var/run/secrets/kubernetes.io,kubeconfig 在 /etc/kubernetes,
-            # kubelet 状态在 /var/lib/kubelet。--ro-bind / / 会把这些全部暴露
-            # 给用户载荷,K8s SA token 更是自动挂到每个 Pod 的默认路径,一律 tmpfs 掩掉。
+            # P0-03: Docker/K8s Secret 挂载点（/run/secrets, /var/run/secrets/kubernetes.io, /etc/kubernetes, /var/lib/kubelet），一律 tmpfs 掩掉防 SA token 泄漏给用户载荷。
             Path("/run/secrets"),
             Path("/var/run/secrets/kubernetes.io"),
             Path("/etc/kubernetes"),
@@ -603,13 +595,7 @@ class SandboxExecutor(BaseExecutor):
         wrapped_cmd = self._sandbox.wrap_command(cmd, context)
 
         # 过滤环境变量
-        # P0-01: 环境合并顺序 = os.environ(baseline) → exec_plan.env(任务请求)
-        # → filter_env(白名单过滤) → 强制关键变量(Worker 权威)。
-        # 之前的顺序把 runtime 变量放在 exec_plan.env 之前,导致任务可以覆盖
-        # PYTHONPATH / VIRTUAL_ENV / PATH; 且 PATH 在白名单里,filter_env 不会剥离。
-        # 修复:任务 env 先与 os.environ 合并,filter 白名单过滤后,再由 Worker
-        # 权威强制写入 PYTHONPATH / VIRTUAL_ENV / PATH,并删除 LD_*/BASH_ENV 类
-        # 进程劫持向量(白名单不含但双保险)。
+        # P0-01: 环境合并顺序 = os.environ → exec_plan.env → filter_env(白名单) → Worker 权威强写 PYTHONPATH/VIRTUAL_ENV/PATH，并剥离 LD_*/BASH_ENV/ENV 劫持向量。
         env = os.environ.copy()
         env.update(exec_plan.env)
         filtered_env = self._sandbox.filter_env(env, context)
@@ -619,11 +605,7 @@ class SandboxExecutor(BaseExecutor):
         for hijack_key in ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV"):
             filtered_env.pop(hijack_key, None)
 
-        # 创建新的执行计划
-        # P0-02: 必须原样透传 run_id 和全部资源/rlimit 字段。
-        # 否则内层 ProcessExecutor 会退回用 plugin_name（共享键）注册，导致同插件并发覆盖 +
-        # 外层 cancel 命中不了；且用户配置的 max_open_files / max_processes / max_file_size_mb /
-        # enforce_rlimit 会在沙箱模式下被丢弃。
+        # P0-02: 创建执行计划必须原样透传 run_id + 全部资源/rlimit 字段，避免 ProcessExecutor 退回 plugin_name 共享键导致 cancel 失联 + rlimit 被丢弃。
         return ExecPlan(
             command=wrapped_cmd[0],
             args=wrapped_cmd[1:],

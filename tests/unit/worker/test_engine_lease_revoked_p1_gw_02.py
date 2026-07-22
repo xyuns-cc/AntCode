@@ -40,9 +40,15 @@ def _make_engine_with_mock_transport():
     return engine, transport
 
 
+EXPECTED_RENEW_INTERVAL_SECONDS = 60
+LEGACY_RENEW_INTERVAL_SECONDS = 600  # 修复前的旧值,用于文档语义
+EXPECTED_CANCELLED_COUNT = 2  # cancel_all 预期取消的 run 数(RUNNING + QUEUED)
+
+
 def test_renew_interval_shortened_from_600_to_60():
     """P1-GW-02:审查报告点名的常量必须缩短。"""
-    assert Engine._RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS == 60
+    assert Engine._RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS == EXPECTED_RENEW_INTERVAL_SECONDS
+    assert Engine._RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS < LEGACY_RENEW_INTERVAL_SECONDS
 
 
 def test_transport_exposes_set_lease_revoked_callback():
@@ -155,7 +161,7 @@ async def test_engine_cancel_all_cancels_active_runs():
 
     cancelled = await engine.cancel_all(reason="test-revoke")
 
-    assert cancelled == 2
+    assert cancelled == EXPECTED_CANCELLED_COUNT
     cancelled_ids = {rid for rid, _ in cancel_calls}
     assert cancelled_ids == {"run-running", "run-queued"}
     assert all("test-revoke" in reason for _, reason in cancel_calls)

@@ -66,11 +66,7 @@ PERFORMANCE_INDEXES: list[tuple[str, str]] = [
             ON "crawl_batches" ("status", "created_at" DESC)
         """,
     ),
-    # P1-01: task_logs.event_id 的**部分唯一索引**。
-    # LogIngestLoop 走 ``INSERT ... ON CONFLICT ("event_id") WHERE
-    # "event_id" IS NOT NULL DO NOTHING``，PG 的 ON CONFLICT 推断需要索引
-    # 谓词与 INSERT WHERE 完全一致；用普通 UNIQUE 会无法命中推断。
-    # Tortoise 不支持声明部分唯一索引，故此处显式建。
+    # P1-01: task_logs.event_id 部分唯一索引；谓词须与 INSERT ... ON CONFLICT WHERE 一致才能命中推断。
     (
         "idx_task_logs_event_id_unique",
         """
@@ -230,9 +226,7 @@ NEW_FEATURE_COLUMNS: list[tuple[str, str, str]] = [
     ),
 ]
 
-# P1-01: 启动完成后必须存在的核心表清单。缺任何一张都属于灾难性 model
-# 漏声明（例如迁移 37 add_task_logs 消失后 task_logs 表不建的历史故障），
-# 必须在部署脚本里立刻 fail-fast，不能让服务带着"空日志页"上线。
+# P1-01: 启动必须存在的核心表清单，缺任何一张 fail-fast 拒绝服务上线。
 REQUIRED_TABLES: list[str] = [
     "users",
     "workers",
