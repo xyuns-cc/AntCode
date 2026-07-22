@@ -422,30 +422,6 @@
       "value": 4
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/files/async_file_stream_service.py",
-      "function": "AsyncFileStreamService._format_size",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/files/async_file_stream_service.py",
-      "function": "AsyncFileStreamService.search_in_file",
-      "rule": "C901",
-      "value": 13
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/files/async_file_stream_service.py",
-      "function": "AsyncFileStreamService.search_in_file",
-      "rule": "PLR0912",
-      "value": 14
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/files/async_file_stream_service.py",
-      "function": "AsyncFileStreamService.search_in_file",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -566,42 +542,6 @@
       "value": 319
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/draft_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 438
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/draft_service.py",
-      "function": "DraftManifest.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/draft_service.py",
-      "function": "DraftManifest.set_file",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/draft_service.py",
-      "function": "ProjectDraftService.delete_file",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/draft_service.py",
-      "function": "ProjectDraftService.move_file",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/draft_service.py",
-      "function": "ProjectDraftService.update_file_content",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/projects/git_ssh_proxy.py",
       "function": "main",
       "rule": "PLR2004",
@@ -672,18 +612,6 @@
       "function": "_run_git",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/version_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 427
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/projects/version_service.py",
-      "function": "VersionManifest.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/runtime/runtime_control_service.py",
@@ -1664,126 +1592,6 @@
       "value": 4
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/base.py",
-      "function": "LogStorageBackend.finalize_chunks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/base.py",
-      "function": "LogStorageBackend.get_presigned_upload_url",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/base.py",
-      "function": "LogStorageBackend.query_logs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/clickhouse.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 703
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/clickhouse.py",
-      "function": "ClickHouseLogStorage.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/clickhouse.py",
-      "function": "ClickHouseLogStorage.finalize_chunks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/clickhouse.py",
-      "function": "ClickHouseLogStorage.get_presigned_upload_url",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/clickhouse.py",
-      "function": "ClickHouseLogStorage.query_logs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/clickhouse.py",
-      "function": "ClickHouseLogStorage.search_logs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/local.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 367
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/local.py",
-      "function": "LocalLogStorage.finalize_chunks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/local.py",
-      "function": "LocalLogStorage.get_presigned_upload_url",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/local.py",
-      "function": "LocalLogStorage.query_logs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/s3.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 528
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/s3.py",
-      "function": "S3LogStorage.finalize_chunks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/s3.py",
-      "function": "S3LogStorage.get_presigned_upload_url",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/log_storage/s3.py",
-      "function": "S3LogStorage.query_logs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/s3_client.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 389
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/s3_client.py",
-      "function": "S3ClientManager.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/storage/s3_client.py",
-      "function": "S3ClientManager.upload_directory",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/observability/tracing.py",
       "function": "child_span",
       "rule": "PLR2004",
@@ -1994,66 +1802,6 @@
       "value": 431
     },
     {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 710
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl.PollControl",
-      "rule": "C901",
-      "value": 11
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl.PollControl",
-      "rule": "PLR0911",
-      "value": 7
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl.WorkerStream",
-      "rule": "C901",
-      "value": 16
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl.WorkerStream",
-      "rule": "PLR0912",
-      "value": 16
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl.WorkerStream",
-      "rule": "PLR0915",
-      "value": 63
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl._control_poller",
-      "rule": "C901",
-      "value": 15
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl._control_poller",
-      "rule": "PLR0912",
-      "value": 14
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl._verify_registration",
-      "rule": "PLR0911",
-      "value": 7
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/services/gateway_service.py",
-      "function": "GatewayServiceImpl._verify_registration",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
       "path": "services/gateway/src/antcode_gateway/services/runtime_control_result.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -2258,102 +2006,6 @@
       "value": 16
     },
     {
-      "path": "services/master/src/antcode_master/loops/dispatcher_loop.py",
-      "function": "SpiderTaskDispatcher.submit_batch_tasks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/dispatcher_loop.py",
-      "function": "SpiderTaskDispatcher.submit_rule_task",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/result_loop.py",
-      "function": "ResultLoop.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 7
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/result_loop.py",
-      "function": "ResultLoop._run_loop",
-      "rule": "C901",
-      "value": 12
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/retry_loop.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 321
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/retry_loop.py",
-      "function": "RetryConfig.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 8
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/retry_loop.py",
-      "function": "RetryService.schedule_retry",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 1302
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService._execute_distributed_task",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService._execute_rule_task",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService._execute_task_internal",
-      "rule": "C901",
-      "value": 30
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService._execute_task_internal",
-      "rule": "PLR0912",
-      "value": 36
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService._execute_task_internal",
-      "rule": "PLR0915",
-      "value": 132
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService.create_task",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService.get_task_executions",
-      "rule": "POSITIONAL_ARGS",
-      "value": 7
-    },
-    {
-      "path": "services/master/src/antcode_master/loops/scheduler_loop.py",
-      "function": "SchedulerService.get_user_tasks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
       "path": "services/master/src/antcode_master/memory_queue.py",
       "function": "MemoryQueueBackend.enqueue",
       "rule": "POSITIONAL_ARGS",
@@ -2516,78 +2168,6 @@
       "value": 5
     },
     {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 873
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "create_or_bind_project_venv",
-      "rule": "C901",
-      "value": 18
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "create_or_bind_project_venv",
-      "rule": "PLR0912",
-      "value": 20
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "create_or_bind_project_venv",
-      "rule": "PLR0915",
-      "value": 78
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "create_or_bind_project_venv",
-      "rule": "POSITIONAL_ARGS",
-      "value": 8
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "create_shared_venv",
-      "rule": "C901",
-      "value": 12
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "create_shared_venv",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "delete_venv",
-      "rule": "C901",
-      "value": 11
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "list_venvs",
-      "rule": "C901",
-      "value": 15
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "list_venvs",
-      "rule": "PLR0912",
-      "value": 16
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "list_venvs",
-      "rule": "PLR0915",
-      "value": 55
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/envs.py",
-      "function": "list_venvs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 10
-    },
-    {
       "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
       "function": "_get_raw_log_response",
       "rule": "POSITIONAL_ARGS",
@@ -2694,60 +2274,6 @@
       "function": "update_file_config",
       "rule": "POSITIONAL_ARGS",
       "value": 5
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_download.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 355
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_download.py",
-      "function": "download_project_file",
-      "rule": "C901",
-      "value": 11
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_download.py",
-      "function": "download_specific_file",
-      "rule": "C901",
-      "value": 12
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_versions.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 494
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_versions.py",
-      "function": "delete_draft_file",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_versions.py",
-      "function": "move_draft_file",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_versions.py",
-      "function": "publish_draft",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_versions.py",
-      "function": "rollback_to_version",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/project_versions.py",
-      "function": "update_draft_file_content",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/retry.py",
@@ -2994,108 +2520,6 @@
       "function": "_read_bounded_response",
       "rule": "PLR2004",
       "value": 2
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 1327
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._get_directory_structure",
-      "rule": "C901",
-      "value": 14
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._get_directory_structure",
-      "rule": "PLR0915",
-      "value": 67
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._get_directory_structure.build_tree",
-      "rule": "C901",
-      "value": 12
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._get_directory_structure.build_tree",
-      "rule": "PLR0912",
-      "value": 13
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._get_directory_structure.build_tree",
-      "rule": "PLR0915",
-      "value": 61
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._get_s3_directory_structure",
-      "rule": "C901",
-      "value": 15
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService._update_s3_file_content",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.get_file_content",
-      "rule": "C901",
-      "value": 12
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.get_file_content",
-      "rule": "PLR0912",
-      "value": 13
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.get_versioned_file_content",
-      "rule": "C901",
-      "value": 17
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.get_versioned_file_content",
-      "rule": "PLR0912",
-      "value": 20
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.get_versioned_file_content",
-      "rule": "PLR0915",
-      "value": 66
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.update_file_content",
-      "rule": "C901",
-      "value": 18
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.update_file_content",
-      "rule": "PLR0912",
-      "value": 16
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.update_file_content",
-      "rule": "PLR0915",
-      "value": 52
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/services/projects/project_file_service.py",
-      "function": "ProjectFileService.update_file_content",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
     },
     {
       "path": "services/web_api/src/antcode_web_api/services/worker_installer.py",
@@ -3608,38 +3032,8 @@
       "value": 463
     },
     {
-      "path": "services/worker/src/antcode_worker/logging/archiver.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 503
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logging/archiver.py",
-      "function": "LogArchiver.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 7
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logging/archiver.py",
-      "function": "LogArchiver._send_chunk",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
       "path": "services/worker/src/antcode_worker/logging/streamer.py",
       "function": "BufferedLogStreamer.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logs/archive.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 548
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logs/archive.py",
-      "function": "S3Uploader.upload_compressed",
       "rule": "POSITIONAL_ARGS",
       "value": 4
     },
@@ -3668,28 +3062,10 @@
       "value": 4
     },
     {
-      "path": "services/worker/src/antcode_worker/logs/spool.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 456
-    },
-    {
       "path": "services/worker/src/antcode_worker/logs/streamer.py",
       "function": "-",
       "rule": "FILE_LINES",
       "value": 316
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logs/wal.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 539
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logs/wal.py",
-      "function": "WALManager.cleanup_expired",
-      "rule": "C901",
-      "value": 11
     },
     {
       "path": "services/worker/src/antcode_worker/plugins/code/plugin.py",
@@ -4260,12 +3636,6 @@
       "function": "test_browser_feature_residues_are_removed",
       "rule": "C901",
       "value": 11
-    },
-    {
-      "path": "tests/boundary/test_log_completeness.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 487
     },
     {
       "path": "tests/contracts/test_tracing.py",
@@ -5426,30 +4796,6 @@
       "value": 1
     },
     {
-      "path": "tests/unit/test_artifact_fetcher.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 386
-    },
-    {
-      "path": "tests/unit/test_artifact_fetcher.py",
-      "function": "TestProjectCache.test_cache_eviction",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_artifact_fetcher.py",
-      "function": "TestProjectCache.test_cache_init",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_artifact_fetcher.py",
-      "function": "TestS3PresignedUrlIntegration.test_cache_invalidation_on_hash_change",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "tests/unit/test_browser_feature_removal.py",
       "function": "test_rule_requests_accept_new_rule_fields",
       "rule": "PLR2004",
@@ -5468,94 +4814,10 @@
       "value": 1
     },
     {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_create_empty_manifest",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_from_dict",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_remove_file",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_rename_file",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_set_file",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_to_dict",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_to_json",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestDraftManifest.test_update_existing_file",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/test_project_versions.py",
-      "function": "TestProjectDraftService.test_get_edit_status",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/test_project_versions_api.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 343
-    },
-    {
-      "path": "tests/unit/test_project_versions_api.py",
-      "function": "TestEditStatusResponse.test_edit_status_response",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/test_project_versions_api.py",
-      "function": "TestHelperFunction.test_get_project_and_file_detail_no_file_detail",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions_api.py",
-      "function": "TestHelperFunction.test_get_project_and_file_detail_wrong_type",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/test_project_versions_api.py",
-      "function": "TestVersionInfo.test_version_info",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "tests/unit/test_worker_project_sync.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 344
+      "value": 343
     },
     {
       "path": "tests/unit/web_api/test_admin_permission_middleware.py",
