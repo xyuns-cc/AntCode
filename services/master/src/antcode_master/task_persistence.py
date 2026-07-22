@@ -146,40 +146,36 @@ class TaskPersistenceService:
             return False
 
     async def get_interrupted_tasks(self):
-        """获取所有被中断的任务"""
+        """获取所有被中断的任务; P1-FN-13: 非预期异常向上抛让 startup fatal。"""
         from antcode_core.domain.models import Task, TaskRun, Worker
         from antcode_core.domain.models.enums import TaskStatus
         from tortoise.expressions import Q
 
-        try:
-            cutoff = datetime.now() - timedelta(minutes=self.INTERRUPTED_THRESHOLD_MINUTES)
-            interrupted_executions = (
-                await TaskRun.filter(status=TaskStatus.RUNNING)
-                .filter(Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff))
-                .limit(100)
-            )
-            if not interrupted_executions:
-                return []
-            active_worker_ids = await self._get_active_worker_ids()
-            if active_worker_ids is None:
-                # P1-FN-13: Lease store 不可达时保守跳过,不误判 RUNNING run
-                logger.warning(
-                    "Lease store 不可达,本轮 get_interrupted_tasks 保守跳过 (candidate={} 条待判)",
-                    len(interrupted_executions),
-                )
-                return []
-            worker_pub_map = await self._load_worker_public_ids(interrupted_executions, Worker)
-            task_map = await self._load_tasks_by_id(interrupted_executions, Task)
-            await self._cleanup_orphan_runs(interrupted_executions, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
-            return self._build_recovery_checkpoints(
-                interrupted_executions,
-                task_map,
-                worker_pub_map=worker_pub_map,
-                active_worker_ids=active_worker_ids,
-            )
-        except Exception as e:
-            logger.error(f"获取中断任务失败: {e}")
+        cutoff = datetime.now() - timedelta(minutes=self.INTERRUPTED_THRESHOLD_MINUTES)
+        interrupted_executions = (
+            await TaskRun.filter(status=TaskStatus.RUNNING)
+            .filter(Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff))
+            .limit(100)
+        )
+        if not interrupted_executions:
             return []
+        active_worker_ids = await self._get_active_worker_ids()
+        if active_worker_ids is None:
+            # P1-FN-13: Lease store 不可达 → 保守跳过本轮判死(非致命,下轮再判)
+            logger.warning(
+                "Lease store 不可达,本轮 get_interrupted_tasks 保守跳过 (candidate={} 条待判)",
+                len(interrupted_executions),
+            )
+            return []
+        worker_pub_map = await self._load_worker_public_ids(interrupted_executions, Worker)
+        task_map = await self._load_tasks_by_id(interrupted_executions, Task)
+        await self._cleanup_orphan_runs(interrupted_executions, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
+        return self._build_recovery_checkpoints(
+            interrupted_executions,
+            task_map,
+            worker_pub_map=worker_pub_map,
+            active_worker_ids=active_worker_ids,
+        )
 
     @staticmethod
     async def _load_worker_public_ids(interrupted_executions, Worker) -> dict[int, str]:
