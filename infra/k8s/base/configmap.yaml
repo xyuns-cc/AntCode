@@ -1,0 +1,35 @@
+# 非敏感全局配置。敏感字段(密码、JWT/加密密钥、Worker install key、
+# Gateway TLS 证书)一律走 Secret,由 overlay 提供,不进此 ConfigMap。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: antcode-config
+data:
+  # 应用层
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+
+  # 服务发现 (K8s 内)
+  DATABASE_HOST: "postgres.antcode.svc.cluster.local"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "antcode"
+  REDIS_HOST: "redis.antcode.svc.cluster.local"
+  REDIS_PORT: "6379"
+
+  # Gateway 端口
+  GRPC_HOST: "0.0.0.0"
+  GRPC_PORT: "50051"
+
+  # Web API
+  WEB_API_HOST: "0.0.0.0"
+  WEB_API_PORT: "8000"
+
+  # Worker
+  WORKER_TRANSPORT_MODE: "gateway"
+  WORKER_SANDBOX_COMMAND: "bwrap"
+  # P0-03: Rule 网络默认关闭,生产仅通过 egress-proxy 显式开启
+  # (需 K8s NetworkPolicy 收敛出网)
+  ANTCODE_RULE_ALLOW_NETWORK: "0"
+
+  # 反向代理 IP 信任(overlay 按 Ingress controller CIDR 覆盖)
+  ANTCODE_TRUSTED_PROXIES: ""
