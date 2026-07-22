@@ -61,6 +61,21 @@ class TaskRun(BaseModel):
         db_index=True,
         description="执行 Worker ID",
     )
+    lease_id = fields.CharField(
+        max_length=64,
+        null=True,
+        db_index=True,
+        description="Worker 执行该 run 时持有的 Lease 代际",
+    )
+    # P1-GW-04: Lease 代际的单调序号,fence bind 时的 Unix ms 时间戳。
+    # bind_worker_run_lease_generation 用它做 CAS 谓词:
+    #   WHERE lease_gen IS NULL OR lease_gen <= NEW.lease_gen
+    # L1 迟到 bind 时 gen 较小 → CAS 拒绝,PG 保留 L2 的 lease_id。
+    # null=True 兼容存量记录(旧 run 未标记 gen,首次 bind 时补齐)。
+    lease_gen = fields.BigIntField(
+        null=True,
+        description="Lease 代际单调序号(fence 时点 Unix ms),防旧代际迟到 bind 覆盖",
+    )
 
     # 时间戳
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -80,6 +95,8 @@ class TaskRun(BaseModel):
             ("status", "start_time"),
             ("public_id",),
             ("worker_id",),
+            ("lease_id",),
+            ("worker_id", "lease_id", "status"),
             ("status", "last_heartbeat"),
             ("status", "next_retry_at"),
         ]

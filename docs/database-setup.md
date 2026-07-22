@@ -51,6 +51,76 @@ uv run python scripts/init_db.py
 - 索引已存在 → `IF NOT EXISTS` 兜住
 - 管理员已存在 → 跳过创建（**不会**重置密码）
 
+## 升级旧版 Worker 安装 Key
+
+从存储明文安装 Key 的版本升级时，必须在启动新版 Web API 前执行：
+
+```bash
+psql "$DATABASE_URL" -f migrations/models/20260713_add_worker_install_key_allowed_source.sql
+uv run python scripts/migrate_worker_install_keys.py
+```
+
+该脚本会执行两步迁移：
+
+1. 先把已过期的 `pending` Key 标为 `expired`；再从 Redis meta 恢复仍有效
+   Key 的来源限制，仅接受 IP/CIDR，并与 Key 哈希一起在单个数据库事务中
+   写入 PostgreSQL；
+2. 用 `SCAN + RENAMENX` 把 Redis 中旧的 `meta/claim/nonce/fail/block` 明文键
+   改为固定长度哈希键，并保留原 TTL。
+
+已是 64 位 SHA-256 且已具备权威来源信息的数据库记录会跳过；已迁移的
+Redis 键也不会再次改名，因此可以安全重跑。数据库迁移失败会整体回滚；
+Redis 迁移遇到目标冲突会显式停止，
+修复冲突后重跑即可。脚本只扫描当前 `REDIS_NAMESPACE`，升级时必须保持它与
+旧部署一致。不要在同一数据库或 Redis 上并发执行多个迁移进程。
+
+若某个 pending Key 的 Redis meta 已丢失，或历史来源配置是 hostname，脚本
+会拒绝继续：系统无法安全判断原限制，必须先撤销该 Key 并生成新的 IP/CIDR
+来源 Key。新版运行时只以 PostgreSQL `allowed_source` 为权威，Redis meta
+缺失不会再放宽来源限制。
+
+## 既有集群升级：按序执行以下迁移
+
+老库（非全新部署）跑新代码时，`generate_schemas(safe=True)` 只补缺失的**表**、
+不给已存在的表加列。`init_db.py` 的 `_upgrade_legacy_schema` 已能幂等自愈**新增列**
+（task_executions.lease_id / scheduler_outbox.consume_* /
+worker_install_keys.registration_*/recovery_*/allowed_source），启动即补；
+但**索引与数据回填**仍需按序手工执行下列迁移（升级新版 Web API 前）：
+
+```bash
+# 1. task_executions 租约列 + 并发建索引（CONCURRENTLY，不在事务内）
+psql "$DATABASE_URL" -f migrations/models/20260713_add_task_run_lease_id.sql
+# 2. scheduler_outbox 消费列 + 并发建索引
+psql "$DATABASE_URL" -f migrations/models/20260713_add_scheduler_outbox_consumption.sql
+# 3. worker_install_keys.allowed_source（来源限制列）
+psql "$DATABASE_URL" -f migrations/models/20260713_add_worker_install_key_allowed_source.sql
+# 4. task_logs SSE 回放游标索引（CONCURRENTLY，不在事务内）
+psql "$DATABASE_URL" -f migrations/models/20260717_add_task_logs_run_id_id_index.sql
+# 5. worker_install_keys 注册回收列 + 唯一/部分索引
+psql "$DATABASE_URL" -f migrations/models/20260717_add_worker_registration_recovery.sql
+# 6. scheduler_outbox.consume_attempts（消费侧重投计数列，ORM 强依赖；纯加列事务迁移）
+psql "$DATABASE_URL" -f migrations/models/20260720_add_scheduler_outbox_consume_attempts.sql
+# 7. task_executions.lease_gen（P1-GW-04：Lease 代际单调 CAS 列，纯加列事务迁移）
+psql "$DATABASE_URL" -f migrations/models/20260722_add_task_run_lease_gen.sql
+
+# 8. **必须**：回填存量安装 Key 的来源限制与哈希（配合第 3、5 步）
+uv run python scripts/migrate_worker_install_keys.py
+```
+
+要点：
+
+- 第 1、2、4 步含 `CREATE INDEX CONCURRENTLY`，`psql -f` 会在事务块外以
+  autocommit 执行；不要手工包进 `BEGIN/COMMIT`。CONCURRENTLY 中途被打断可能残留
+  永久 INVALID 索引，重跑前先按 `pg_index.indisvalid = false` 查出同名索引
+  `DROP INDEX CONCURRENTLY` 再重跑（各 SQL 文件头注释已给出查询）。
+- 第 7 步的 `scripts/migrate_worker_install_keys.py` 是 allowed_source 与注册回收列
+  的**强制**配套回填脚本：仅加列不回填，存量 Key 缺来源限制会被新运行时拒绝。
+  幂等可重跑，细节见上一节「升级旧版 Worker 安装 Key」。
+- 若只跑 `init_db.py` 而不执行上面的 SQL：列会被自愈，`idx_task_logs_run_id_id`
+  与 `idx_worker_install_keys_unacknowledged_recovery` 也会由 `_create_performance_indexes`
+  并发补建，但 task_executions/scheduler_outbox 的租约/消费索引以及
+  registration_id 唯一索引不会自动补——请照上表手工执行对应 SQL。
+
 如果要**重置管理员密码**，直接用 REPL：
 
 ```python
