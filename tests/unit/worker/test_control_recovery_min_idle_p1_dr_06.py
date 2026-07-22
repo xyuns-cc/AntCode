@@ -20,6 +20,9 @@ from antcode_worker.transport.redis.control_recovery import (
 )
 from antcode_worker.transport.redis.runtime_control_models import ControlChannel
 
+MIN_IDLE_LOWER_BOUND_MS = 1000  # 至少 1s(常量的下限)
+MIN_IDLE_UPPER_BOUND_MS = 15_000  # 上界防错配(TTL/4 不应过大)
+
 
 def test_legacy_claim_min_idle_is_at_least_1s_and_derived_from_lease_ttl():
     """P1-DR-06:min_idle 常量应至少 1s,且从 LeasePolicy.ttl_ms 派生。"""
@@ -27,8 +30,8 @@ def test_legacy_claim_min_idle_is_at_least_1s_and_derived_from_lease_ttl():
 
     expected = max(LeasePolicy().ttl_ms // 4, 1000)
     assert _LEGACY_CLAIM_MIN_IDLE_MS == expected
-    assert _LEGACY_CLAIM_MIN_IDLE_MS >= 1000  # 至少 1s
-    assert _LEGACY_CLAIM_MIN_IDLE_MS <= 15_000  # 上界防错配(TTL/4 不应过大)
+    assert _LEGACY_CLAIM_MIN_IDLE_MS >= MIN_IDLE_LOWER_BOUND_MS
+    assert _LEGACY_CLAIM_MIN_IDLE_MS <= MIN_IDLE_UPPER_BOUND_MS
 
 
 @pytest.mark.asyncio

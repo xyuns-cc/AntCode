@@ -253,11 +253,7 @@ async def start_master() -> None:
 
     # 3. 恢复中断任务（控制面初始化前的一次性动作）
     logger.info("[2/6] 恢复中断任务")
-    # P1-FN-13: 启动恢复失败改为 fatal(原 warn 后继续,让 Master 半启动)。
-    # recover_on_startup 内部的判死逻辑本身已经在 Lease store 不可达时保守
-    # 跳过(见 task_persistence._get_active_worker_ids 返回 None 的分支),
-    # 走到这个 except 说明遇到的是数据库/序列化/其他非预期错误——不该让
-    # Master 带残破恢复状态继续跑,直接 raise 让 orchestration 层重启。
+    # P1-FN-13: 启动恢复失败改 fatal（判死已保守跳过；其他非预期错直接 raise 让 orchestration 重启）。
     from antcode_master.task_persistence import task_recovery_service
 
     stats = await task_recovery_service.recover_on_startup()

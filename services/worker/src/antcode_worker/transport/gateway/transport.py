@@ -1407,14 +1407,7 @@ class GatewayTransport(TransportBase):
         )
         if bool(getattr(response, "revoked", False)):
             self._lease_revoked = True
-        # P1-GW-01: 重连时若 Gateway 派新 Lease(response.lease_id != self._lease_id),
-        # 意味着旧代际已被剥夺——旧进程可能被 Gateway 判死或被人工撤销,新 Lease
-        # 应由新一次的 Register 流程获取,不能就地无缝接管。旧行为直接覆盖
-        # self._lease_id,让新代际的 result/ACK/log 由持有旧内存状态的进程发出,
-        # 与真正获得新 Lease 的 Worker 争抢 ownership 与 PEL,造成"两个 L 都在
-        # 结算同一 run"的双执行。修复:视新 Lease 为 revoke 信号,触发
-        # self-fence(_abort_lease_revocation → _halt_transport)让 Master reconcile
-        # 后重新走完整 Register 拉起新代际。
+        # P1-GW-01: 重连时 Gateway 派新 Lease 视为旧代际被剥夺，触发 self-fence 而非无缝覆盖，避免旧内存状态与新 L 争抢 ownership/PEL 双执行。
         new_lease_id = getattr(response, "lease_id", "") or ""
         if self._lease_id and new_lease_id and new_lease_id != self._lease_id:
             logger.warning(
@@ -1619,20 +1612,12 @@ class GatewayTransport(TransportBase):
         self._authenticator = None
 
     def set_lease_revoked_callback(self, callback: Any) -> None:
-        """P1-GW-02: engine 通过此方法注册"Lease 撤销时的处理"回调。
-
-        transport 检测到 Lease 撤销/被 Gateway 派新代际时,先调 callback 让
-        engine 立即 cancel_all,再 halt transport(以免 halt 后 engine 找不到
-        transport 里的 lease_id 状态)。callback 应为 async 或 None。
-        """
+        """P1-GW-02: engine 注册 Lease 撤销回调；撤销/换代时先调 callback (async) 让 engine cancel_all，再 halt transport。"""
         self._lease_revoked_callback = callback
 
     async def _abort_lease_revocation(self) -> None:
         self._lease_revoked = True
-        # P1-GW-02: 先通知 engine 立刻 cancel 所有在飞 run,再 halt transport。
-        # 顺序很关键——halt 后 transport 的 lease_id/channel 会被清,engine 后
-        # 续通过 transport 结算/上报都会失败;但只要子进程已被 kill,残余上报
-        # 失败也不再产生新副作用。
+        # P1-GW-02: 顺序关键——先 callback 让 engine cancel_all 再 halt transport（halt 清 lease_id/channel 后残余上报失败也不再有副作用）。
         callback = self._lease_revoked_callback
         if callback is not None:
             try:

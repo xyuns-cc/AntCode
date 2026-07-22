@@ -82,10 +82,7 @@ class RetryConfig:
 MAX_CLAIM_ATTEMPTS = 5
 
 
-# P1-FN-10: 语义细分。task 处于合法 busy 状态(concurrent 已达上限)时,
-# scheduler_service.trigger_retry_intent 抛此异常;retry_loop._handle_claimed_item
-# 见到就 requeue 但不计入 MAX_CLAIM_ATTEMPTS,让 retry 意图能等 task
-# 空闲后被正常消费,而不是在 5 次 busy 后被误判 poison 丢弃。
+# P1-FN-10: task 合法 busy 时抛此异常，requeue 但不计入 MAX_CLAIM_ATTEMPTS，避免 busy → 被误判 poison 丢弃。
 class RetryClaimBusyError(RuntimeError):
     """Retry intent 无法立即消费(target task busy),需 requeue 但不算失败。"""
 
@@ -587,9 +584,7 @@ class RetryService:
             await self._discard_claimed(raw_payload, source_run_id)
             return None
         except RetryClaimBusyError as exc:
-            # P1-FN-10: 合法 busy 不计入 attempts,不触发 poison 判死;换更长的
-            # 回退间隔(30s vs 常规 5s)让 target task 有时间空闲。这类失败
-            # 频率高但非"payload 坏",一旦 task 空闲即可正常消费。
+            # P1-FN-10: 合法 busy 不计 attempts，换 30s 长退避等 task 空闲。
             logger.info(
                 f"retry intent target task busy,延后 30s requeue(不计入 poison): "
                 f"task_id={item.get('task_id')} exc={exc}"

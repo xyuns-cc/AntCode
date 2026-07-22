@@ -31,13 +31,7 @@ _CANCELLABLE_STATUSES = (
     TaskStatus.QUEUED,
     TaskStatus.RUNNING,
 )
-# P1-FN-01: DISPATCHING 也在"未绑定 Worker"的可 CAS 取消区间内。
-# 之前只覆盖 {PENDING, QUEUED},让 scheduler_loop 把 dispatch 从 PENDING
-# CAS 到 DISPATCHING、但绑 Worker 之前的窗口里的 cancel 走 "_send_worker_cancel"
-# 分支 —— 那里因 execution.worker_id is None 直接返回 False,只依赖后续
-# runtime CAS,不阻止 Master 绑定并继续派发。API 显示已取消,但用户任务
-# 仍真实执行。DISPATCHING+worker_id=NULL 也纳入 CAS 抢占范围,由
-# execution_status_service.cancel_unassigned_run 收敛 dispatch_status。
+# P1-FN-01: DISPATCHING+worker_id=NULL 空绑窗口也纳入 CAS 取消区间，交 cancel_unassigned_run 收敛 dispatch_status，防"API 显示已取消但仍真实执行"。
 _UNASSIGNED_CANCELLABLE_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.DISPATCHING)
 
 

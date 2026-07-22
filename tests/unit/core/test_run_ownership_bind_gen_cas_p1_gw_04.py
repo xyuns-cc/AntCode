@@ -89,7 +89,8 @@ async def test_bind_lease_gen_cas_conflict_raises_permission_error():
             with pytest.raises(PermissionError, match="lease_gen 单调 CAS 失败"):
                 await svc.bind_worker_run_lease_generation("worker-1", "run-1", lease_id="lease-old", lease_gen=100)
 
-    assert len(filter_calls) == 2
+    expected_filter_calls = 2  # CAS 失败后额外一次 exists 探针
+    assert len(filter_calls) == expected_filter_calls
 
 
 @pytest.mark.asyncio

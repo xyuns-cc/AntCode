@@ -335,22 +335,7 @@ class ExecutionStatusService:
     )
 
     async def cancel_unassigned_run(self, run_id: str, user_id: int) -> bool:
-        """未分配 run 的抢占式取消（P1-FN-02/01）。
-
-        CAS 条件：仍未分配 worker 且处于可取消的排队状态。除 ``status``
-        外必须同步把 ``dispatch_status`` 收敛到失败终态 —— 否则 reconcile
-        / 补投路径仍把该 run 视为可派发，取消形同虚设；成功后同步 Task
-        状态（此前 Task 卡在 QUEUED，busy 检查会阻塞后续触发）。
-
-        P1-FN-01: 覆盖状态扩到 DISPATCHING。之前只覆盖 {PENDING, QUEUED},
-        scheduler_loop 把 dispatch 从 PENDING CAS 到 DISPATCHING 后但绑定
-        Worker 之前的窗口里的 cancel 走 _send_worker_cancel(worker_id=None)
-        分支只依赖 runtime CAS,不阻止 Master 绑定,任务仍真实执行。
-        DISPATCHING+worker_id=NULL 加入覆盖后,cancel 走这里的 CAS UPDATE
-        原子把 status 推 CANCELLED + dispatch_status → FAILED,再进入
-        scheduler_loop 的 dispatch_bind_guard CAS 谓词就命中 status=CANCELLED
-        被排除,不会被绑到 Worker。
-        """
+        """未分配 run 的抢占式取消（P1-FN-02/01；P1-FN-01: 覆盖状态扩到 DISPATCHING+worker_id=NULL 的空绑窗口，CAS 同步 status→CANCELLED 与 dispatch_status→FAILED 阻断 Master 绑定）。"""
         now = datetime.now(UTC)
         updated = await TaskRun.filter(
             run_id=run_id,
@@ -388,11 +373,7 @@ class ExecutionStatusService:
 
             incoming_status = execution.status
 
-            # P1-04：终态保护。
-            # execution_status_service.update_runtime_status 的调用方来自多个源
-            # （worker 上报、reconcile、cancel、timeout scheduler），并发时可能
-            # 一个 caller 拿到 RUNNING 快照后另一 caller 已经把 run/task 推到
-            # SUCCESS；此时 RUNNING 快照不能把 Task 从 SUCCESS 翻回 RUNNING。
+            # P1-04: 终态保护——阻止 RUNNING 快照把 Task 从 SUCCESS/FAILED 等终态翻回。
             if task.status in self._task_terminal_states and incoming_status not in self._task_terminal_states:
                 logger.warning(
                     f"P1-04 阻止 Task 从终态回退: task_id={task.id} "

@@ -90,34 +90,7 @@ class LeasePolicy:
     renew_after_ms: int = 10_000
 
 
-# ---------------------------------------------------------------------------
-# Lua 脚本：原子 grant 主记录与索引。
-#
-# P1-15 fail-closed:
-#   revoked_key（``{ns}:{{worker_id}}:lease:revoked``）与 lease_key 共享
-#   ``{worker_id}`` hash tag，一定同 slot。grant 时先 SISMEMBER 目标
-#   current_lease_id 是否在死信集里,命中即 abort,防止被撤 worker 用旧
-#   lease_id 复活。
-#
-# KEYS:
-#   1. lease_key
-#   2. revoked_key
-#   3. expiring_zset
-#   4. active_set
-#
-# ARGV:
-#   1. worker_id
-#   2. current_lease_id    (空字符串表示首次)
-#   3. new_lease_id        (服务端预生成)
-#   4. ttl_ms
-#   5. record_retention_ms (逻辑过期后保留代际证据的时长)
-#   6. metrics_json        ("" 表示不更新 metrics)
-#
-# 返回:
-#   {final_lease_id, expires_at_ms, granted_at_ms,
-#    "new"|"renewed"|"revoked"|"conflict"}
-#   outcome 为 rejected 状态时前 3 个字段是空串，上层抛对应异常。
-# ---------------------------------------------------------------------------
+# P1-15 fail-closed: SISMEMBER revoked_key 拒绝 grant 被撤 lease_id 复活；outcome ∈ {new,renewed,revoked,conflict}。KEYS=[lease_key,revoked_key,expiring_zset,active_set]; ARGV=[worker_id,current_lease_id,new_lease_id,ttl_ms,record_retention_ms,metrics_json].
 _GRANT_LUA = """
 local lease_key   = KEYS[1]
 local revoked_key = KEYS[2]

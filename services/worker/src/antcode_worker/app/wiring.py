@@ -654,10 +654,7 @@ def _create_executor(config: Any) -> Any:
             raise RuntimeError("WORKER_SANDBOX_COMMAND 不是合法参数列表") from exc
         if not sandbox_command_list:
             raise RuntimeError(f"沙箱工具不可用: {sandbox_command_str}")
-        # P0-01: 用启动时的 PATH 解析出绝对路径固化到 SandboxConfig,防止任务
-        # exec_plan.env 注入 PATH 覆盖后使 asyncio.create_subprocess_exec 走
-        # workspace 内的伪造 bwrap。shutil.which 只用于校验 + 解析,SandboxConfig
-        # 里必须存绝对路径,后续 wrap_command 也会对绝对路径做断言(defense in depth)。
+        # P0-01: 启动时 PATH 解析绝对路径固化到 SandboxConfig，阻断 exec_plan.env 注入 PATH 走伪造 bwrap（wrap_command 再断言绝对路径）。
         resolved_sandbox_bin = shutil.which(sandbox_command_list[0])
         if resolved_sandbox_bin is None:
             raise RuntimeError(f"沙箱工具不可用: {sandbox_command_list[0]}")

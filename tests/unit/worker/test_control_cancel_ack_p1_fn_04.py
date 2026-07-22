@@ -23,7 +23,7 @@ from antcode_worker.engine.state import RunState
 
 
 class _FakeControl:
-    def __init__(self, control_type: str, receipt: str, run_id: str = "", task_id: str = "", reason: str = ""):
+    def __init__(self, *, control_type: str, receipt: str, run_id: str = "", task_id: str = "", reason: str = ""):
         self.control_type = control_type
         self.receipt = receipt
         self.run_id = run_id
