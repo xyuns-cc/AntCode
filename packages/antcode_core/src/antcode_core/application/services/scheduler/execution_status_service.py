@@ -222,6 +222,7 @@ class ExecutionStatusService:
         status_at=None,
         exit_code=None,
         error_message=None,
+        expected_lease_id=None,
     ):
         new_status = self._normalize_runtime(status)
         if not new_status:
@@ -232,6 +233,9 @@ class ExecutionStatusService:
         execution = await TaskRun.get_or_none(run_id=run_id)
         if not execution:
             logger.warning(f"执行记录不存在: {run_id}")
+            return False
+        if expected_lease_id and execution.lease_id != expected_lease_id:
+            logger.debug(f"运行状态更新被 Lease fencing 拒绝: run_id={run_id}")
             return False
 
         if not self._should_update(
@@ -304,7 +308,10 @@ class ExecutionStatusService:
         non_failure_dispatch = [s for s in self._dispatch_order if s not in self._dispatch_failure_terminal]
         guard_q = Q(dispatch_status__in=non_failure_dispatch) | Q(runtime_status=RuntimeStatus.RUNNING)
 
-        updated = await TaskRun.filter(run_id=run_id).filter(cas_q).filter(guard_q).update(**updates)
+        query = TaskRun.filter(run_id=run_id).filter(cas_q).filter(guard_q)
+        if expected_lease_id:
+            query = query.filter(lease_id=expected_lease_id)
+        updated = await query.update(**updates)
         if not updated:
             logger.debug(f"运行状态 CAS 失败(并发写入或终态保护): run_id={run_id} -> {new_status}")
             return False
@@ -312,6 +319,55 @@ class ExecutionStatusService:
         refreshed = await TaskRun.get_or_none(run_id=run_id)
         if refreshed is not None:
             await self._sync_task_status(refreshed, status_at)
+        return True
+
+    # P1-04：Task 终态集合。一旦落到终态就不允许被 RUNNING/PREPARING/QUEUED
+    # 等非终态覆盖（同一 run 的并发陈旧快照回退）。同终态之间也不重复计数。
+    _task_terminal_states = frozenset(
+        {
+            TaskStatus.SUCCESS,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.TIMEOUT,
+            TaskStatus.REJECTED,
+            TaskStatus.SKIPPED,
+        }
+    )
+
+    async def cancel_unassigned_run(self, run_id: str, user_id: int) -> bool:
+        """未分配 run 的抢占式取消（P1-FN-02/01）。
+
+        CAS 条件：仍未分配 worker 且处于可取消的排队状态。除 ``status``
+        外必须同步把 ``dispatch_status`` 收敛到失败终态 —— 否则 reconcile
+        / 补投路径仍把该 run 视为可派发，取消形同虚设；成功后同步 Task
+        状态（此前 Task 卡在 QUEUED，busy 检查会阻塞后续触发）。
+
+        P1-FN-01: 覆盖状态扩到 DISPATCHING。之前只覆盖 {PENDING, QUEUED},
+        scheduler_loop 把 dispatch 从 PENDING CAS 到 DISPATCHING 后但绑定
+        Worker 之前的窗口里的 cancel 走 _send_worker_cancel(worker_id=None)
+        分支只依赖 runtime CAS,不阻止 Master 绑定,任务仍真实执行。
+        DISPATCHING+worker_id=NULL 加入覆盖后,cancel 走这里的 CAS UPDATE
+        原子把 status 推 CANCELLED + dispatch_status → FAILED,再进入
+        scheduler_loop 的 dispatch_bind_guard CAS 谓词就命中 status=CANCELLED
+        被排除,不会被绑到 Worker。
+        """
+        now = datetime.now(UTC)
+        updated = await TaskRun.filter(
+            run_id=run_id,
+            worker_id__isnull=True,
+            status__in=[TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.DISPATCHING],
+        ).update(
+            status=TaskStatus.CANCELLED,
+            dispatch_status=DispatchStatus.FAILED,
+            dispatch_updated_at=now,
+            end_time=now,
+            error_message=f"用户取消 (user_id={user_id})",
+        )
+        if not updated:
+            return False
+        refreshed = await TaskRun.get_or_none(run_id=run_id)
+        if refreshed is not None:
+            await self._sync_task_status(refreshed, now)
         return True
 
     async def _sync_task_status(self, execution, status_at):
@@ -330,12 +386,27 @@ class ExecutionStatusService:
                 )
                 return
 
-            updates: dict = {"status": execution.status}
+            incoming_status = execution.status
+
+            # P1-04：终态保护。
+            # execution_status_service.update_runtime_status 的调用方来自多个源
+            # （worker 上报、reconcile、cancel、timeout scheduler），并发时可能
+            # 一个 caller 拿到 RUNNING 快照后另一 caller 已经把 run/task 推到
+            # SUCCESS；此时 RUNNING 快照不能把 Task 从 SUCCESS 翻回 RUNNING。
+            if task.status in self._task_terminal_states and incoming_status not in self._task_terminal_states:
+                logger.warning(
+                    f"P1-04 阻止 Task 从终态回退: task_id={task.id} "
+                    f"current={task.status} incoming={incoming_status} "
+                    f"run_id={execution.run_id}"
+                )
+                return
+
+            updates: dict = {"status": incoming_status}
             if execution.runtime_status == RuntimeStatus.RUNNING:
                 updates["last_run_time"] = status_at
-            if execution.status == TaskStatus.SUCCESS and task.status != TaskStatus.SUCCESS:
+            if incoming_status == TaskStatus.SUCCESS and task.status != TaskStatus.SUCCESS:
                 updates["success_count"] = F("success_count") + 1
-            elif execution.status in self._failure_task_states and task.status not in self._failure_task_states:
+            elif incoming_status in self._failure_task_states and task.status not in self._failure_task_states:
                 updates["failure_count"] = F("failure_count") + 1
             await Task.filter(id=task.id).using_db(conn).update(**updates)
 

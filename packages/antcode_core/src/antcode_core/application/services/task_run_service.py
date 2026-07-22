@@ -83,73 +83,82 @@ class TaskRunService:
         finish_dt = self._parse_dt(finished_at)
         status_at = finish_dt or start_dt or datetime.now(UTC)
 
-        dispatch_updated = await execution_status_service.update_dispatch_status(
-            run_id=execution.run_id,
-            status=DispatchStatus.ACKED,
-            status_at=status_at,
-        )
+        # P1-FN-12: 把 dispatch/runtime/metadata 三步 CAS 合并到同一事务。
+        # 之前每步独立提交,X→Y 换代/reconcile 判死可能穿插其间形成状态碎片
+        # (dispatch=ACKED 但 runtime 未推进;或 metadata 写入了不属于当前
+        # runtime_status 的字段)。Tortoise 的 in_transaction 是可嵌套的
+        # (SAVEPOINT),各 service 内部的 CAS 仍生效,只是整体成/败保持一致。
+        # Lease 校验放在事务外:P1-DR-02 已让 is_current 加了 revoked fence,
+        # 一旦"validated=True"就代表校验瞬间代际是当前;后续 CAS 若因换代
+        # 失败,整个事务回滚,不会留下部分状态。
+        async with in_transaction("default"):
+            dispatch_updated = await execution_status_service.update_dispatch_status(
+                run_id=execution.run_id,
+                status=DispatchStatus.ACKED,
+                status_at=status_at,
+            )
 
-        runtime_updated = await execution_status_service.update_runtime_status(
-            run_id=execution.run_id,
-            status=runtime_status,
-            status_at=status_at,
-            exit_code=exit_code,
-            error_message=error_message,
-        )
+            runtime_updated = await execution_status_service.update_runtime_status(
+                run_id=execution.run_id,
+                status=runtime_status,
+                status_at=status_at,
+                exit_code=exit_code,
+                error_message=error_message,
+            )
 
-        execution = await self._get_execution(run_id)
-        if not execution:
-            return False
-        # P1-17 review: running/queued 是非终态"进度心跳"事件。多 master 消费组
-        # 分区 / XAUTOCLAIM reclaim 都可能让它迟到（终态或 reconcile 的失败判定
-        # 已先落库）。此时 CAS 被终态保护拒绝是**预期行为**，事件本身已无信息
-        # 量——必须按"已消费"返回 True，让 result_loop 正常 XACK。否则该消息会
-        # 重投 MAX_DELIVER_COUNT 次后进入 dead-letter stream，把良性心跳灌成
-        # DLQ 噪音。终态不会被拉回：update_runtime_status 的终态吸收 + CAS
-        # allowed_from（RUNNING 只允许来自 NULL/QUEUED）双重保证。
-        # 终态结果的 CAS 冲突仍返回 False → 走 DLQ 保留结果正文（P1-19 设计）。
-        is_progress_event = runtime_status in (RuntimeStatus.QUEUED, RuntimeStatus.RUNNING)
-        if not runtime_updated and execution.runtime_status != runtime_status:
-            if is_progress_event:
-                logger.debug(
-                    "忽略迟到的非终态状态事件: run_id={} current={} incoming={}",
+            execution = await self._get_execution(run_id)
+            if not execution:
+                return False
+            # P1-17 review: running/queued 是非终态"进度心跳"事件。多 master 消费组
+            # 分区 / XAUTOCLAIM reclaim 都可能让它迟到（终态或 reconcile 的失败判定
+            # 已先落库）。此时 CAS 被终态保护拒绝是**预期行为**，事件本身已无信息
+            # 量——必须按"已消费"返回 True，让 result_loop 正常 XACK。否则该消息会
+            # 重投 MAX_DELIVER_COUNT 次后进入 dead-letter stream，把良性心跳灌成
+            # DLQ 噪音。终态不会被拉回：update_runtime_status 的终态吸收 + CAS
+            # allowed_from（RUNNING 只允许来自 NULL/QUEUED）双重保证。
+            # 终态结果的 CAS 冲突仍返回 False → 走 DLQ 保留结果正文（P1-19 设计）。
+            is_progress_event = runtime_status in (RuntimeStatus.QUEUED, RuntimeStatus.RUNNING)
+            if not runtime_updated and execution.runtime_status != runtime_status:
+                if is_progress_event:
+                    logger.debug(
+                        "忽略迟到的非终态状态事件: run_id={} current={} incoming={}",
+                        run_id,
+                        execution.runtime_status,
+                        runtime_status,
+                    )
+                    return True
+                logger.warning(
+                    "结果状态 CAS 冲突: run_id={} current={} incoming={}",
                     run_id,
                     execution.runtime_status,
                     runtime_status,
                 )
-                return True
-            logger.warning(
-                "结果状态 CAS 冲突: run_id={} current={} incoming={}",
-                run_id,
-                execution.runtime_status,
-                runtime_status,
-            )
-            return False
-        if not dispatch_updated and execution.dispatch_status != DispatchStatus.ACKED:
-            if is_progress_event:
-                logger.debug(
-                    "忽略 dispatch 已终态记录上的非终态状态事件: run_id={} dispatch={}",
+                return False
+            if not dispatch_updated and execution.dispatch_status != DispatchStatus.ACKED:
+                if is_progress_event:
+                    logger.debug(
+                        "忽略 dispatch 已终态记录上的非终态状态事件: run_id={} dispatch={}",
+                        run_id,
+                        execution.dispatch_status,
+                    )
+                    return True
+                logger.warning(
+                    "分发状态 CAS 冲突: run_id={} current={}",
                     run_id,
                     execution.dispatch_status,
                 )
-                return True
-            logger.warning(
-                "分发状态 CAS 冲突: run_id={} current={}",
-                run_id,
-                execution.dispatch_status,
+                return False
+            return await self._update_result_metadata(
+                run_id=execution.run_id,
+                runtime_status=runtime_status,
+                start_dt=start_dt,
+                finish_dt=finish_dt,
+                duration_ms=duration_ms,
+                exit_code=exit_code,
+                error_message=error_message,
+                output=output,
+                data=data,
             )
-            return False
-        return await self._update_result_metadata(
-            run_id=execution.run_id,
-            runtime_status=runtime_status,
-            start_dt=start_dt,
-            finish_dt=finish_dt,
-            duration_ms=duration_ms,
-            exit_code=exit_code,
-            error_message=error_message,
-            output=output,
-            data=data,
-        )
 
     async def _bind_lease_generation(self, execution: TaskRun, data: dict[str, Any] | None) -> bool:
         incoming = str((data or {}).get("lease_id") or "").strip()
