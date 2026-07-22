@@ -1,10 +1,14 @@
 """任务运行接口"""
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
+from antcode_core.common.runtime_paths import ensure_runtime_dir
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
@@ -13,8 +17,9 @@ from antcode_core.domain.schemas.task import TaskRunResponse
 from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
 from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from loguru import logger
+from starlette.background import BackgroundTask
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
@@ -26,7 +31,14 @@ _CANCELLABLE_STATUSES = (
     TaskStatus.QUEUED,
     TaskStatus.RUNNING,
 )
-_UNASSIGNED_CANCELLABLE_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED)
+# P1-FN-01: DISPATCHING 也在"未绑定 Worker"的可 CAS 取消区间内。
+# 之前只覆盖 {PENDING, QUEUED},让 scheduler_loop 把 dispatch 从 PENDING
+# CAS 到 DISPATCHING、但绑 Worker 之前的窗口里的 cancel 走 "_send_worker_cancel"
+# 分支 —— 那里因 execution.worker_id is None 直接返回 False,只依赖后续
+# runtime CAS,不阻止 Master 绑定并继续派发。API 显示已取消,但用户任务
+# 仍真实执行。DISPATCHING+worker_id=NULL 也纳入 CAS 抢占范围,由
+# execution_status_service.cancel_unassigned_run 收敛 dispatch_status。
+_UNASSIGNED_CANCELLABLE_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.DISPATCHING)
 
 
 @runs_router.get("/{run_id}", response_model=BaseResponse[TaskRunResponse])
@@ -40,9 +52,9 @@ async def get_run(run_id: str, current_user: TokenData = Depends(get_current_use
         return success_response(TaskRunResponse.from_orm(execution), message=Messages.QUERY_SUCCESS)
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"获取执行详情失败: {e}")
-        raise HTTPException(status_code=500, detail="获取执行详情失败")
+    except Exception as exc:
+        logger.exception("获取执行详情失败: run_id={}", run_id)
+        raise HTTPException(status_code=500, detail="获取执行详情失败") from exc
 
 
 @runs_router.post("/{run_id}/cancel", response_model=BaseResponse[dict])
@@ -60,15 +72,19 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
             return _cancel_success(run_id, remote_cancelled=False)
         execution = await _get_execution(run_id, current_user.user_id)
 
-    cancelled, send_error = await _send_worker_cancel(execution, current_user.user_id)
+    cancelled = await _send_worker_cancel(execution, current_user.user_id)
     if execution.worker_id and not cancelled:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"取消指令发送失败，请重试：{send_error or '未知错误'}",
+            detail="取消指令发送失败，请稍后重试",
         )
 
-    await _mark_execution_cancelled(execution.run_id, current_user.user_id)
-    logger.info(f"执行已取消: {run_id}, 远程取消={cancelled}")
+    # P1-FN-02: 状态机 CAS 结果必须被尊重 —— 完成结果抢先落终态时不能
+    # 对外谎报 cancelled。
+    marked = await _mark_execution_cancelled(execution.run_id, current_user.user_id)
+    if not marked:
+        await _raise_if_terminal_conflict(run_id, current_user.user_id)
+    logger.info(f"执行已取消: {run_id}, 远程取消={cancelled}, 状态标记={marked}")
     return _cancel_success(run_id, remote_cancelled=cancelled)
 
 
@@ -95,27 +111,39 @@ def _is_unassigned_execution(execution: TaskRun) -> bool:
 
 
 async def _cancel_unassigned_execution(execution: TaskRun, user_id: int) -> bool:
-    updated = await TaskRun.filter(
-        run_id=execution.run_id,
-        worker_id__isnull=True,
-        status__in=list(_UNASSIGNED_CANCELLABLE_STATUSES),
-    ).update(
-        status=TaskStatus.CANCELLED,
-        end_time=datetime.now(UTC),
-        error_message=f"用户取消 (user_id={user_id})",
-    )
-    return bool(updated)
+    # P1-FN-02: 委托核心服务 —— 同步收敛 dispatch_status 并回写 Task 状态，
+    # 阻止 Master 派发已取消的 run。
+    from antcode_core.application.services.scheduler.execution_status_service import execution_status_service
+
+    return await execution_status_service.cancel_unassigned_run(execution.run_id, user_id)
 
 
-async def _send_worker_cancel(execution: TaskRun, user_id: int) -> tuple[bool, str | None]:
+async def _raise_if_terminal_conflict(run_id: str, user_id: int) -> None:
+    """runtime CAS 未生效时的诚实回应。
+
+    - 已是 CANCELLED → 幂等成功（不抛）；
+    - 已进入其它终态 → 409，返回真实状态；
+    - 仍是非终态 → 取消指令已发出，最终状态由 Worker 结果决定（不抛）。
+    """
+    final = await _get_execution(run_id, user_id)
+    final_status = final.status.value if final.status else "unknown"
+    terminal = {"success", "failed", "timeout", "skipped", "rejected"}
+    if final_status in terminal:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"任务已进入终态({final_status})，取消未生效",
+        )
+
+
+async def _send_worker_cancel(execution: TaskRun, user_id: int) -> bool:
     if not execution.worker_id:
-        return False, None
+        return False
     try:
         await _write_worker_cancel_event(execution, user_id)
-        return True, None
-    except Exception as exc:
-        logger.warning(f"发送取消指令失败: {exc}")
-        return False, str(exc)
+        return True
+    except Exception:
+        logger.exception("发送取消指令失败: run_id={} worker_id={}", execution.run_id, execution.worker_id)
+        return False
 
 
 async def _write_worker_cancel_event(execution: TaskRun, user_id: int) -> None:
@@ -132,14 +160,16 @@ async def _write_worker_cancel_event(execution: TaskRun, user_id: int) -> None:
     logger.info(f"已发送取消指令到 Worker: {worker.name}")
 
 
-async def _mark_execution_cancelled(run_id: str, user_id: int) -> None:
+async def _mark_execution_cancelled(run_id: str, user_id: int) -> bool:
     from antcode_core.application.services.scheduler.execution_status_service import execution_status_service
 
-    await execution_status_service.update_runtime_status(
-        run_id=run_id,
-        status="cancelled",
-        status_at=datetime.now(UTC),
-        error_message=f"用户取消 (user_id={user_id})",
+    return bool(
+        await execution_status_service.update_runtime_status(
+            run_id=run_id,
+            status="cancelled",
+            status_at=datetime.now(UTC),
+            error_message=f"用户取消 (user_id={user_id})",
+        )
     )
 
 
@@ -229,13 +259,18 @@ def _extract_content_hash(uri: str) -> str | None:
     return uri[len("pgartifact://") :].strip() or None
 
 
-@runs_router.get("/{run_id}/artifacts/{artifact_name}/download")
+@runs_router.get("/{run_id}/artifacts/{artifact_name:path}/download")
 async def download_run_artifact(
     run_id: str,
     artifact_name: str,
     current_user: TokenData = Depends(get_current_user),
 ):
-    """按 name 下载单个 artifact；权限校验后从 PG blob store 读原始 bytes。"""
+    """按 name 下载单个 artifact；权限校验后从 PG blob store 读原始 bytes。
+
+    P2-05：artifact name 允许含斜杠（如 ``reports/2026/result.json``）。
+    路由用 ``:path`` 转换器捕获整段子路径；不再因单路径段限制而 404。
+    同时下载改为按 chunk 流式，避免大文件全量常驻内存。
+    """
     execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
@@ -249,33 +284,33 @@ async def download_run_artifact(
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="产物 URI 不合法或已下线")
 
     store = PostgresArtifactStore()
+    download_dir = ensure_runtime_dir("web_api", "tmp", "artifact-downloads")
+    file_descriptor, temp_name = tempfile.mkstemp(prefix="artifact-", dir=download_dir)
+    os.close(file_descriptor)
+    temp_path = Path(temp_name)
     try:
-        content = await store.read_blob(content_hash)
+        await store.read_blob_to_file(content_hash, temp_path)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        temp_path.unlink(missing_ok=True)
+        logger.exception("artifact blob 不存在: run_id={} name={}", run_id, artifact_name)
+        raise HTTPException(status_code=404, detail="产物不存在") from exc
     except Exception as exc:
-        logger.exception(f"读取 artifact blob 失败: run_id={run_id} name={artifact_name}")
+        temp_path.unlink(missing_ok=True)
+        logger.exception("读取 artifact blob 失败: run_id={} name={}", run_id, artifact_name)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"下载失败: {exc}",
+            detail="产物下载失败",
         ) from exc
 
     mime_type = artifact.get("mime_type") or "application/octet-stream"
 
-    # 用 iterable 包一层做 StreamingResponse，避免整块 bytes 长期驻留
-    def _iter():
-        chunk_size = 64 * 1024
-        for i in range(0, len(content), chunk_size):
-            yield content[i : i + chunk_size]
-
-    safe_name = artifact_name.replace('"', "'")
-    return StreamingResponse(
-        _iter(),
+    # 只用 basename 作为下载文件名（不含目录路径），且转义引号
+    safe_basename = artifact_name.rsplit("/", 1)[-1].replace('"', "'")
+    return FileResponse(
+        temp_path,
         media_type=mime_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
-            "Content-Length": str(len(content)),
-        },
+        filename=safe_basename,
+        background=BackgroundTask(temp_path.unlink, missing_ok=True),
     )
 
 
@@ -283,7 +318,7 @@ async def download_run_artifact(
 # O2: 爬虫数据链闭环
 #
 # worker 端 RuleSpider / Scrapy 通过 SpiderDataReporter 把抓到的 items 写到
-# Redis stream ``spider:data:{run_id}``。此处对外暴露列表端点，让前端"抓取
+# Redis stream ``spider:{run_id}:data``。此处对外暴露列表端点，让前端"抓取
 # 数据"tab 能看到 items。权限走 ``scheduler_service.get_execution_with_permission``。
 # ---------------------------------------------------------------------------
 
@@ -299,31 +334,33 @@ async def list_spider_items(
     execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
-    raw, note = await _read_spider_stream(run_id, start_id, count)
+    try:
+        raw = await _read_spider_stream(run_id, start_id, count)
+    except Exception as exc:
+        logger.exception(f"读取 spider items 失败: run_id={run_id}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="抓取数据存储暂不可用",
+        ) from exc
     items, last_id = _decode_spider_items(raw, start_id)
     data = {"items": items, "last_id": last_id, "count": len(items)}
-    if note:
-        data["note"] = note
     return success_response(data, message=Messages.QUERY_SUCCESS)
 
 
-async def _read_spider_stream(run_id: str, start_id: str, count: int) -> tuple[list[Any], str | None]:
-    try:
-        from antcode_core.common.config import settings as _settings
-        from antcode_core.infrastructure.redis import get_redis_client
-        from antcode_core.infrastructure.redis.keys import RedisKeys
+async def _read_spider_stream(run_id: str, start_id: str, count: int) -> list[Any]:
+    """读取失败向上抛出，由路由返回 503，不能伪装成空结果。"""
+    from antcode_core.common.config import settings as _settings
+    from antcode_core.infrastructure.redis import get_redis_client
+    from antcode_core.infrastructure.redis.keys import RedisKeys
 
-        redis = await get_redis_client()
-        if redis is None:
-            return [], "Redis 不可用"
-        keys = RedisKeys(namespace=_settings.REDIS_NAMESPACE)
-        stream_key = keys.spider_data_stream(run_id)
-        min_id = f"({start_id}" if start_id and start_id != "0" else "-"
-        raw = await redis.xrange(stream_key, min=min_id, max="+", count=count)
-    except Exception as exc:
-        logger.warning(f"读取 spider items 失败: run_id={run_id} err={exc}")
-        return [], None
-    return list(raw or []), None
+    redis = await get_redis_client()
+    if redis is None:
+        raise RuntimeError("Redis client unavailable")
+    keys = RedisKeys(namespace=_settings.REDIS_NAMESPACE)
+    stream_key = keys.spider_data_stream(run_id)
+    min_id = f"({start_id}" if start_id and start_id != "0" else "-"
+    raw = await redis.xrange(stream_key, min=min_id, max="+", count=count)
+    return list(raw or [])
 
 
 def _decode_spider_items(raw: list[Any], start_id: str) -> tuple[list[dict[str, Any]], str]:
