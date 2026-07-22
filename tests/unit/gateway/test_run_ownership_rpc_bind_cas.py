@@ -36,8 +36,11 @@ async def test_claim_binds_pg_generation_only_after_fence_acquired(monkeypatch):
     call = bind_generation.await_args
     assert call.args == ("worker-1", "run-1")
     assert call.kwargs["lease_id"] == "lease-1"
-    assert isinstance(call.kwargs["lease_gen"], int)
-    assert call.kwargs["lease_gen"] > 0
+    # P1-GW-04 (round4 修正): lease_gen 必须来自 Lease Hash 的 granted_at_ms
+    # (授予时刻),不是 time.time() (bind 时刻)。_install() mock 里 granted_at_ms=100。
+    # 反证:若旧 bug 存在(time.time()*1000),该值应远大于 100 (毫秒时间戳)。
+    expected_gen_from_granted_at_ms = 100
+    assert call.kwargs["lease_gen"] == expected_gen_from_granted_at_ms
 
 
 @pytest.mark.asyncio

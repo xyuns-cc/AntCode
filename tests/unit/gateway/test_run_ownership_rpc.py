@@ -26,12 +26,33 @@ class _Redis:
 
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        # lease: 存 str (lease_id) 为原有 Lua 分支消费；同时用 lease_hash 存
+        # {'lease_id':..., 'granted_at_ms':..., 'expires_at_ms':...} 供
+        # LeaseStore.get() (P1-GW-04 修正后 bind 从 granted_at_ms 取 gen) 用。
         self.lease: dict[str, str] = {}
+        self.lease_hash: dict[str, dict[str, str]] = {}
         self.pttl_ms = _LEASE_PTTL_MS
         self.eval_calls: list[tuple] = []
 
     async def get(self, key):
         return self.values.get(key)
+
+    async def hgetall(self, key):
+        # P1-GW-04: _bind_lease_generation 通过 LeaseStore.get() 拿
+        # granted_at_ms 作为单调 gen。Mock 提供最小 Hash。
+        stored_lease_id = self.lease.get(key)
+        if not stored_lease_id:
+            return {}
+        # 若 lease_hash 有精细字段就用,否则合成合理默认(granted_at_ms=1)
+        return self.lease_hash.get(
+            key,
+            {"lease_id": stored_lease_id, "granted_at_ms": "1", "expires_at_ms": "999999999"},
+        )
+
+    async def time(self):
+        # LeaseStore.get(include_expired=False) 会调 redis.time();这里返回
+        # 一个远小于 expires_at_ms 的固定值,保证 lease 不过期
+        return (0, 0)
 
     async def eval(self, script, numkeys, *rest):
         keys, argv = rest[:numkeys], rest[numkeys:]
@@ -108,7 +129,18 @@ def _install(monkeypatch, redis: _Redis) -> tuple[AsyncMock, AsyncMock, AsyncMoc
     monkeypatch.setattr(module, "require_worker_owns_runs", owns_runs)
     monkeypatch.setattr(module, "require_worker_owns_runs_for_lease", owns_runs_for_lease)
     monkeypatch.setattr(fence, "redis_namespace", lambda ns=None: ns or "tenant-a")
-    redis.lease[fence._lease_key("worker-1", None)] = "lease-1"
+    # P1-GW-04 修正后 _bind_lease_generation 会通过 LeaseStore.get() 拿
+    # granted_at_ms 作 gen; LeaseStore 内部用 module.redis_namespace(),这里
+    # 也要 patch 让 lease_key 命名空间与 fence 侧一致。
+    monkeypatch.setattr(module, "redis_namespace", lambda ns=None: ns or "tenant-a")
+    lease_key = fence._lease_key("worker-1", None)
+    redis.lease[lease_key] = "lease-1"
+    # P1-GW-04: LeaseStore.get() 读 hgetall, 提供 granted_at_ms=100 作固定 gen
+    redis.lease_hash[lease_key] = {
+        "lease_id": "lease-1",
+        "granted_at_ms": "100",
+        "expires_at_ms": "999999999",
+    }
     return bind_generation, owns_runs, owns_runs_for_lease
 
 

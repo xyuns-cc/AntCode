@@ -32,6 +32,7 @@ from antcode_core.application.services.workers.run_ownership_service import (
     require_worker_owns_runs_for_lease,
 )
 from antcode_core.infrastructure.redis import get_redis_client
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker
@@ -194,15 +195,33 @@ class RunOwnershipRpcMixin:
         identity: _RunOwnershipIdentity,
         context: grpc.aio.ServicerContext,
     ) -> bool:
-        """fence ACQUIRED 之后把 PG 绑定改到当前代际（允许同 worker 换代）。
+        """fence ACQUIRED 之后把 PG 绑定改到当前代际(允许同 worker 换代)。
 
-        P1-GW-04: 传入 lease_gen(fence 时点 Unix ms),让 PG 侧做单调 CAS,
-        防旧代际 L1 迟到 bind 覆盖 L2 已生效的 bind。
+        P1-GW-04 (round4 修正):lease_gen 必须用 **lease 授予时刻**
+        (Redis Hash granted_at_ms),不能用 fence 后 bind 时的 time.time()。
+        原实现的 bug 场景:L1 fence(T=110) → asyncio 调度切走暂停到 T=250,
+        L2 在 T=210 fence+bind,PG.lease_gen=210, lease_id=lease-2;L1 T=250
+        醒来 bind 用 time.time()=250,CAS `stored(210) <= NEW(250)`? true
+        → 覆盖 L2。
+        正确:用 granted_at_ms 作为 gen(L1 lease 更早授予,granted<L2),CAS
+        `stored(200) <= NEW(100)`? false → 拒绝 L1 迟到覆盖 ✓。
         """
-        import time
+        from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
 
-        lease_gen = int(time.time() * 1000)
         try:
+            redis = await get_redis_client()
+            if redis is None:
+                raise RuntimeError("Redis unavailable")
+            store = LeaseStore(redis, namespace=redis_namespace(), policy=LeasePolicy())
+            lease = await store.get(identity.worker_id, include_expired=True)
+            if lease is None or lease.lease_id != identity.lease_id:
+                # 从 fence ACQUIRED 到本次 HGET 之间被撤销/换代 → 拒绝 bind
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"lease 已失效或换代(fence 后被撤销): run_id={identity.run_id}",
+                )
+                return False
+            lease_gen = int(lease.granted_at_ms)
             await bind_worker_run_lease_generation(
                 identity.worker_id,
                 identity.run_id,
