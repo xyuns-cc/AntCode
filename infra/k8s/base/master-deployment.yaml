@@ -1,0 +1,63 @@
+# P0-02 骨架:Master 调度器。副本数 > 1 时靠 Redis leader election 决定谁写。
+# 启动恢复失败会 fatal (P1-FN-13 修复),K8s 会自动重启,避免半启动。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: master
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: master
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: master
+    spec:
+      securityContext:
+        runAsUser: 10002
+        runAsGroup: 10002
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: master
+          image: antcode/master:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9100
+          envFrom:
+            - configMapRef:
+                name: antcode-config
+            - secretRef:
+                name: antcode-secrets
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
