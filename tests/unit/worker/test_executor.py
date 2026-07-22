@@ -72,23 +72,24 @@ class TestArtifactManager:
         artifact_path = tmp_path / "result.txt"
         artifact_path.write_text("ok", encoding="utf-8")
         store = MagicMock()
-        store.write_blob.return_value = SimpleNamespace(
+        store.upload_task_artifact.return_value = SimpleNamespace(
             uri="pgartifact://abc",
             content_hash="abc",
             size_bytes=2,
         )
-        store.write_blob = AsyncMock(return_value=store.write_blob.return_value)
+        store.upload_task_artifact = AsyncMock(return_value=store.upload_task_artifact.return_value)
         manager = ArtifactManager(artifact_store=store)
+        collection = await manager.collect_artifacts(str(tmp_path), ["result.txt"], "run-001")
 
         stored = await manager.store_artifact(
-            ArtifactRef(name="result.txt", local_path=str(artifact_path)),
+            collection.artifacts[0],
             "run-001",
         )
 
         assert stored.uri == "pgartifact://abc"
         assert stored.local_path is None
         assert stored.checksum == "abc"
-        store.write_blob.assert_awaited_once()
+        store.upload_task_artifact.assert_awaited_once()
 
 
 class TestNoOpLogSink:
@@ -262,6 +263,7 @@ class TestBasicSandbox:
         env = {
             "PATH": "/bin",
             "ANTCODE_SPIDER_RUN_ID": "run-1",
+            "ANTCODE_SPIDER_SPOOL_PATH": "/workspace/spool.jsonl",
             "ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN": "worker-token",
             "UNRELATED_TOKEN": "must-not-leak",
         }
@@ -269,18 +271,27 @@ class TestBasicSandbox:
         filtered = sandbox.filter_env(env, {"plugin_name": "rule"})
 
         assert filtered["ANTCODE_SPIDER_RUN_ID"] == "run-1"
-        assert filtered["ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"] == "worker-token"
+        assert filtered["ANTCODE_SPIDER_SPOOL_PATH"] == "/workspace/spool.jsonl"
+        assert "ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN" not in filtered
         assert "UNRELATED_TOKEN" not in filtered
 
     def test_wrap_command_with_custom_sandbox(self):
-        """测试自定义沙箱命令"""
-        config = SandboxConfig(sandbox_command=["firejail", "--quiet"])
+        """测试自定义沙箱命令 (P0-01: 必须绝对路径)"""
+        config = SandboxConfig(sandbox_command=["/usr/bin/firejail", "--quiet"])
         sandbox = BasicSandbox(config)
 
         cmd = ["python", "test.py"]
         wrapped = sandbox.wrap_command(cmd, {})
 
-        assert wrapped == ["firejail", "--quiet", "python", "test.py"]
+        assert wrapped == ["/usr/bin/firejail", "--quiet", "python", "test.py"]
+
+    def test_wrap_command_rejects_relative_sandbox_command(self):
+        """P0-01: 相对命令名直接被 wrap_command 拒绝(防 PATH 劫持)"""
+        config = SandboxConfig(sandbox_command=["firejail", "--quiet"])
+        sandbox = BasicSandbox(config)
+
+        with pytest.raises(RuntimeError, match="沙箱启动命令必须是绝对路径"):
+            sandbox.wrap_command(["python", "test.py"], {})
 
     @pytest.mark.asyncio
     async def test_prepare_creates_temp_dir(self):

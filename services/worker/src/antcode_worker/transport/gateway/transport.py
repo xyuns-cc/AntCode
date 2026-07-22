@@ -27,11 +27,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from antcode_core.common.log_limits import (
+    DEFAULT_LOG_MAX_BATCH_BYTES,
+    DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
+    LogBatchLimits,
+    positive_env_int,
+)
 from antcode_core.observability.tracing import (
     extract_traceparent,
     inject_trace,
@@ -51,10 +59,39 @@ from antcode_worker.transport.base import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from grpc import aio as grpc_aio
 
     from antcode_worker.transport.gateway.auth import GatewayAuthenticator
     from antcode_worker.transport.gateway.reconnect import ReconnectManager
+
+
+def _is_permanent_control_result_error(error: Exception) -> bool:
+    import grpc
+
+    code = error.code() if hasattr(error, "code") else None
+    return code in {
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.UNIMPLEMENTED,
+    }
+
+
+_MIN_LEASE_RENEW_AFTER_MS = 1_000
+
+
+@dataclass(frozen=True)
+class _GatewayConnection:
+    channel: Any
+    control_stub: Any
+    data_stub: Any
+    artifact_stub: Any
+    lease_id: str
+
+
+class _LeaseRevokedError(RuntimeError):
+    """The current Worker process may never acquire another lease generation."""
 
 
 # P2-#36: 用一个独立 sentinel 对象代替每秒 wait_for(timeout=1.0) 轮询。
@@ -80,6 +117,15 @@ class GatewayConfig:
     # gRPC 配置
     max_send_message_length: int = 50 * 1024 * 1024  # 50MB
     max_receive_message_length: int = 50 * 1024 * 1024  # 50MB
+    log_max_batch_bytes: int = field(
+        default_factory=lambda: positive_env_int("GATEWAY_LOG_MAX_BATCH_BYTES", DEFAULT_LOG_MAX_BATCH_BYTES)
+    )
+    log_max_entry_content_bytes: int = field(
+        default_factory=lambda: positive_env_int(
+            "GATEWAY_LOG_MAX_ENTRY_CONTENT_BYTES",
+            DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
+        )
+    )
     keepalive_time_ms: int = 30000
     keepalive_timeout_ms: int = 10000
     keepalive_permit_without_calls: bool = True
@@ -87,6 +133,7 @@ class GatewayConfig:
     # 超时配置
     connect_timeout: float = 10.0
     call_timeout: float = 30.0
+    artifact_transfer_timeout: float = 300.0
 
     # 重连配置
     enable_reconnect: bool = True
@@ -133,6 +180,8 @@ class GatewayTransport(TransportBase):
         self._channel: grpc_aio.Channel | None = None
         self._control_stub: Any = None
         self._data_stub: Any = None
+        self._artifact_stub: Any = None
+        self._connect_lock = asyncio.Lock()
 
         # 认证器
         self._authenticator: GatewayAuthenticator | None = None
@@ -161,9 +210,15 @@ class GatewayTransport(TransportBase):
         self._reconnecting = False
         self._auth_failure_count = 0
         self._max_auth_failures = 5
+        self._stopping = False
 
         # Lease 状态（替代 SendHeartbeat）
         self._lease_id: str = ""
+        self._lease_revoked = False
+
+        # P1-GW-02: Lease 被撤销/换代时的对外回调 (由 engine 注册),让 engine
+        # 立即 cancel_all + 唤醒 ownership renew, 而不是等下一个 600s 续租周期。
+        self._lease_revoked_callback: Any | None = None
 
     @property
     def mode(self) -> TransportMode:
@@ -174,6 +229,19 @@ class GatewayTransport(TransportBase):
         return self._gateway_config
 
     @property
+    def artifact_stub(self) -> Any:
+        return self._artifact_stub
+
+    def artifact_rpc_session(self) -> tuple[Any, str, str, tuple[tuple[str, str], ...]]:
+        """Return one authenticated ArtifactService session snapshot."""
+        return (
+            self._require_artifact_stub(),
+            self._gateway_config.worker_id or "",
+            self._require_lease_id(),
+            tuple(self._get_auth_metadata()),
+        )
+
+    @property
     def is_connected(self) -> bool:
         return self._connected and self._channel is not None
 
@@ -182,7 +250,11 @@ class GatewayTransport(TransportBase):
     async def start(self) -> bool:
         if self._running:
             return True
+        if self._lease_revoked:
+            logger.error("Gateway Worker 代际已被撤销，本进程拒绝重启")
+            return False
 
+        self._stopping = False
         try:
             await self._init_authenticator()
             await self._init_reconnect_manager()
@@ -190,6 +262,7 @@ class GatewayTransport(TransportBase):
             success = await self._connect()
             if not success:
                 logger.error("Gateway 初始连接失败")
+                await self._cleanup_failed_start()
                 return False
 
             # 初始化队列
@@ -209,22 +282,27 @@ class GatewayTransport(TransportBase):
 
         except Exception:
             logger.exception("Gateway 启动失败")
+            await self._cleanup_failed_start()
             return False
 
     async def stop(self, grace_period: float = 5.0) -> None:
-        if not self._running:
-            return
-
+        self._stopping = True
         self._running = False
-
         await self._cancel_background_tasks()
+        if self._reconnect_manager is not None:
+            await self._reconnect_manager.stop()
         await self._disconnect()
-
         self._receipt_cache.clear()
         self._result_cache.clear()
-
         await self._set_state(WorkerState.OFFLINE)
         logger.info("Gateway 传输层已停止")
+
+    async def _cleanup_failed_start(self) -> None:
+        if self._reconnect_manager is not None:
+            await self._reconnect_manager.stop()
+        await self._disconnect()
+        self._authenticator = None
+        await self._set_state(WorkerState.OFFLINE)
 
     async def deregister(self, reason: str = "shutdown") -> None:
         """T7-B3b (P1-6): worker 优雅停机时调 gateway Deregister RPC。
@@ -248,6 +326,7 @@ class GatewayTransport(TransportBase):
             request = control_pb2.DeregisterRequest(
                 worker_id=worker_id,
                 reason=reason,
+                lease_id=self._lease_id or "",
             )
             metadata = self._get_auth_metadata()
             # 加短超时，避免 gateway 假死时阻塞停机
@@ -269,55 +348,41 @@ class GatewayTransport(TransportBase):
         """
         from antcode_worker.transport.gateway.codecs import TaskDecoder
 
-        backoff = 1.0
-        while self._running:
-            try:
-                if not self._data_stub:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._gateway_config.max_backoff, backoff * 2)
-                    continue
+        await self._run_subscription(
+            "StreamTasks",
+            lambda on_open: self._consume_task_stream(TaskDecoder, on_open),
+        )
 
-                request = self._build_subscribe_request()
-                stream = self._data_stub.StreamTasks(
-                    request,
-                    metadata=self._get_auth_metadata(),
+    async def _consume_task_stream(self, decoder: Any, on_open: Callable[[], None]) -> bool:
+        stub = self._data_stub
+        if stub is None:
+            raise RuntimeError("Gateway DataService stub 未就绪")
+        return await self._consume_stream(
+            lambda: stub.StreamTasks(
+                self._build_subscribe_request(),
+                metadata=self._get_auth_metadata(),
+            ),
+            lambda dispatch: self._deliver_task_dispatch(dispatch, decoder),
+            on_open,
+        )
+
+    async def _deliver_task_dispatch(self, dispatch: Any, decoder: Any) -> None:
+        try:
+            task = decoder.decode(dispatch)
+            inbound_traceparent = extract_traceparent(dispatch)
+            if inbound_traceparent:
+                task.traceparent = inbound_traceparent  # type: ignore[attr-defined]
+            if task.receipt:
+                self._receipt_cache[task.receipt] = (
+                    datetime.now().timestamp(),
+                    task.task_id,
                 )
-                # 重置 backoff（流建立成功）
-                backoff = 1.0
-
-                async for dispatch in stream:
-                    if not self._running:
-                        break
-                    try:
-                        task = TaskDecoder.decode(dispatch)
-                        # P5.4: 从 ``TaskDispatch.trace`` 提取 traceparent
-                        # 透传给 engine。TaskDecoder 当前不读 trace 字段
-                        # (为保证 P3 codec 不动),这里 setattr 给 TaskMessage
-                        # 挂一个动态属性,engine ``_worker_loop`` 会读取并
-                        # set_current_trace,实现 Master → Worker 链路。
-                        inbound_traceparent = extract_traceparent(dispatch)
-                        if inbound_traceparent:
-                            task.traceparent = inbound_traceparent  # type: ignore[attr-defined]
-                        if task.receipt:
-                            self._receipt_cache[task.receipt] = (
-                                datetime.now().timestamp(),
-                                task.task_id,
-                            )
-                        if self._task_inbox is not None:
-                            await self._task_inbox.put(task)
-                    except Exception as exc:
-                        logger.exception("StreamTasks 投递失败")
-                        if self._task_inbox is not None:
-                            await self._task_inbox.put(exc)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                if not self._running:
-                    break
-                logger.warning(f"StreamTasks 流断开，{backoff:.1f}s 后重连: {e}")
-                await asyncio.sleep(backoff)
-                backoff = min(self._gateway_config.max_backoff, backoff * 2)
+            if self._task_inbox is not None:
+                await self._task_inbox.put(task)
+        except Exception as exc:
+            logger.exception("StreamTasks 投递失败")
+            if self._task_inbox is not None:
+                await self._task_inbox.put(exc)
 
     # ==================== 控制订阅 (WatchControl) ====================
 
@@ -325,54 +390,135 @@ class GatewayTransport(TransportBase):
         """长连接订阅 ``ControlService.WatchControl``，把 ControlEvent 投递到 inbox。"""
         from antcode_worker.transport.gateway.codecs import ControlDecoder
 
-        backoff = 1.0
+        await self._run_subscription(
+            "WatchControl",
+            lambda on_open: self._consume_control_stream(ControlDecoder, on_open),
+        )
+
+    async def _consume_control_stream(self, decoder: Any, on_open: Callable[[], None]) -> bool:
+        stub = self._control_stub
+        if stub is None:
+            raise RuntimeError("Gateway ControlService stub 未就绪")
+        return await self._consume_stream(
+            lambda: stub.WatchControl(
+                self._build_watch_control_request(),
+                metadata=self._get_auth_metadata(),
+            ),
+            lambda event: self._deliver_control_event(event, decoder),
+            on_open,
+        )
+
+    async def _deliver_control_event(self, event: Any, decoder: Any) -> None:
+        try:
+            ctrl_msg = self._control_event_to_message(event, decoder)
+            if ctrl_msg is None:
+                await self._handle_non_engine_control(event)
+                return
+            if self._control_inbox is not None:
+                await self._control_inbox.put(ctrl_msg)
+        except Exception as exc:
+            logger.exception("WatchControl 投递失败")
+            if self._control_inbox is not None:
+                await self._control_inbox.put(exc)
+
+    # ==================== 订阅通用循环 ====================
+
+    async def _run_subscription(
+        self,
+        name: str,
+        open_and_consume: Callable[[Callable[[], None]], Awaitable[bool]],
+    ) -> None:
+        """通用订阅循环：StreamTasks / WatchControl 共用的指数退避重连骨架。
+
+        W1: 语义对齐 HEAD —— 流一打开就把退避归零（``on_open`` 回调）。退避策略
+        分三种收尾：
+        - 流内**收到过数据**后的干净 EOF：数据在流动，立即重订阅、不 sleep。
+        - 流**没收到任何数据**的干净 EOF（空 EOF）：加一个**固定 floor**
+          （``initial_backoff``）睡眠、**不指数增长**。既避免 server 端瞬时反复
+          空 EOF 时的忙循环 / 内存暴涨（真实 gRPC 流会阻塞，但异常网关可能秒
+          级反复 EOF），又不像退化实现那样把退避推到 max_backoff(60s) 拖延投递。
+        - ERROR 路径：``_wait_stream_retry`` 指数增长退避。
+        """
+        backoff = self._gateway_config.initial_backoff
+
+        def _reset_backoff() -> None:
+            nonlocal backoff
+            backoff = self._gateway_config.initial_backoff
+
         while self._running:
             try:
-                if not self._control_stub:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._gateway_config.max_backoff, backoff * 2)
-                    continue
-
-                request = self._build_watch_control_request()
-                stream = self._control_stub.WatchControl(
-                    request,
-                    metadata=self._get_auth_metadata(),
-                )
-                backoff = 1.0
-
-                async for event in stream:
-                    if not self._running:
-                        break
-                    try:
-                        ctrl_msg = self._control_event_to_message(event, ControlDecoder)
-                        if ctrl_msg is None:
-                            # 未知 payload 直接 ack 掉，避免阻塞
-                            event_id = getattr(event, "event_id", "") or ""
-                            if event_id:
-                                with contextlib.suppress(Exception):
-                                    await self.ack_control(event_id)
-                            continue
-                        if self._control_inbox is not None:
-                            await self._control_inbox.put(ctrl_msg)
-                    except Exception:
-                        logger.exception("WatchControl 投递失败")
-
+                received = await open_and_consume(_reset_backoff)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 if not self._running:
                     break
-                logger.warning(f"WatchControl 流断开，{backoff:.1f}s 后重连: {e}")
-                await asyncio.sleep(backoff)
-                backoff = min(self._gateway_config.max_backoff, backoff * 2)
+                backoff = await self._wait_stream_retry(name, backoff, e)
+                continue
+            # 干净 EOF：收到过数据则立即重订阅；空 EOF 加固定 floor 防忙循环。
+            if not received and self._running:
+                await asyncio.sleep(self._gateway_config.initial_backoff)
+
+    async def _consume_stream(
+        self,
+        open_stream: Callable[[], Any],
+        deliver: Callable[[Any], Awaitable[None]],
+        on_open: Callable[[], None] | None = None,
+    ) -> bool:
+        """打开一条 server-stream 并逐条投递，返回是否收到过消息。"""
+        stream = open_stream()
+        # 流已建立：退避归零（对齐 HEAD 在 stream OPEN 后 ``backoff = 1.0``）。
+        if on_open is not None:
+            on_open()
+        received = False
+        async for item in stream:
+            if not self._running:
+                return received
+            received = True
+            await deliver(item)
+        return received
+
+    async def _wait_stream_retry(
+        self,
+        stream_name: str,
+        backoff: float,
+        error: Exception | None = None,
+    ) -> float:
+        reason = f": {error}" if error is not None else "（正常 EOF）"
+        logger.warning(f"{stream_name} 流结束{reason}，{backoff:.1f}s 后重连")
+        await asyncio.sleep(backoff)
+        return min(self._gateway_config.max_backoff, backoff * 2)
+
+    async def _handle_non_engine_control(self, event: Any) -> None:
+        payload_kind = self._control_payload_kind(event)
+        event_id = getattr(event, "event_id", "") or ""
+        if not event_id:
+            # 连 receipt 都没有的畸形事件才继续抛：没法 ACK，只能交给
+            # 订阅循环记录异常。
+            raise RuntimeError(f"ControlEvent 缺少 event_id，无法 ACK: kind={payload_kind}")
+        if payload_kind == "ping":
+            if not await self.ack_control(event_id):
+                raise RuntimeError(f"ping ControlEvent ACK 失败: event_id={event_id}")
+            return
+        # W3: 未知 payload 直接 ack 掉，避免阻塞——版本偏斜时 Gateway 可能
+        # 推送本 Worker 不认识的新事件类型；若在这里抛异常，事件永不 ACK，
+        # Gateway 每次 WatchControl 重建都会重放 PEL，形成永久毒消息循环。
+        logger.warning(f"未知 ControlEvent payload，直接 ACK 跳过: event_id={event_id} kind={payload_kind}")
+        if not await self.ack_control(event_id):
+            # ACK 失败不抛：事件留在 PEL，重投后会再次走到这里重试 ACK。
+            logger.warning(f"未知 ControlEvent ACK 失败，等待 Gateway 重投后重试: event_id={event_id}")
+
+    @staticmethod
+    def _control_payload_kind(event: Any) -> str | None:
+        try:
+            return event.WhichOneof("payload")
+        except Exception:
+            return None
 
     def _control_event_to_message(self, event: Any, decoder: Any) -> ControlMessage | None:
         """``control_pb2.ControlEvent`` → 内部 ``ControlMessage``"""
         event_id = getattr(event, "event_id", "") or ""
-        try:
-            payload_kind = event.WhichOneof("payload")
-        except Exception:
-            payload_kind = None
+        payload_kind = self._control_payload_kind(event)
 
         if payload_kind == "task_cancel":
             data = decoder.decode_task_cancel(event.task_cancel)
@@ -398,6 +544,7 @@ class GatewayTransport(TransportBase):
                 payload={
                     "request_id": rt.get("request_id", ""),
                     "action": rt.get("action", ""),
+                    "expires_at_ms": rt.get("expires_at_ms", 0),
                     "params": rt.get("params", {}),
                     "args": rt.get("args", {}),
                     # 兼容 engine 旧路径继续读 ``payload.get("payload")``
@@ -406,10 +553,7 @@ class GatewayTransport(TransportBase):
                 receipt=event_id,
             )
         if payload_kind == "ping":
-            # ping 不投递给 engine，直接 ack
-            with contextlib.suppress(Exception):
-                if event_id:
-                    asyncio.create_task(self.ack_control(event_id))
+            # ping 不投递给 engine；订阅循环统一负责 ACK。
             return None
         return None
 
@@ -458,6 +602,9 @@ class GatewayTransport(TransportBase):
                 task_id=actual_task_id or "",
                 accepted=accepted,
                 reason=reason or "",
+                # P1-GW-01: 结算携带当前代际 lease；旧代际进程的 ACK/requeue
+                # 会被 Gateway FAILED_PRECONDITION 拒绝。
+                lease_id=self._lease_id or "",
             )
             response = await asyncio.wait_for(
                 self._data_stub.AckTask(
@@ -467,7 +614,9 @@ class GatewayTransport(TransportBase):
                 timeout=self._gateway_config.call_timeout,
             )
             success = bool(response.success)
-            if self._gateway_config.enable_receipt_idempotency:
+            # 复审 D2: 只缓存成功结果。缓存 False 会把服务端瞬时失败
+            # （如 Redis 抖动）固化 300s，封死结算重试通道。
+            if success and self._gateway_config.enable_receipt_idempotency:
                 self._cache_result(cache_key, success)
             if success:
                 self._receipt_cache.pop(receipt_id, None)
@@ -478,6 +627,14 @@ class GatewayTransport(TransportBase):
             logger.exception("确认任务失败")
             await self._handle_connection_error(e)
             return False
+
+    async def defer_task(self, receipt: str, reason: str = "") -> bool:
+        """Gateway 已把任务放入 PEL；本地丢弃缓存即可等待服务端重投。"""
+        if "|" not in receipt:
+            return False
+        self._receipt_cache.pop(receipt, None)
+        logger.info(f"任务保留在 Gateway PEL 等待重投: receipt={receipt} reason={reason}")
+        return True
 
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
         """重新入队 = ack(accepted=False)，与 Direct 模式语义一致。"""
@@ -589,6 +746,114 @@ class GatewayTransport(TransportBase):
             logger.exception("上报任务状态失败")
             return False
 
+    async def report_spider_data(
+        self,
+        run_id: str,
+        items: list[dict[str, Any]],
+    ) -> bool:
+        if not items:
+            return True
+        batch = self._build_spider_item_batch(run_id, items)
+        return await self._send_spider_batch(batch, len(items))
+
+    async def update_spider_meta(
+        self,
+        run_id: str,
+        meta: dict[str, Any],
+    ) -> bool:
+        from antcode_contracts import data_pb2
+
+        update = self._build_spider_meta_update(meta, data_pb2)
+        batch = data_pb2.SpiderDataBatch(
+            worker_id=self._gateway_config.worker_id or "",
+            run_id=run_id,
+            project_id=str(meta.get("project_id", "")),
+            lease_id=self._lease_id,
+            meta=update,
+        )
+        return await self._send_spider_batch(batch, 0)
+
+    @staticmethod
+    def _build_spider_meta_update(meta: dict[str, Any], data_pb2: Any) -> Any:
+        fields: dict[str, Any] = {
+            "status": str(meta.get("status", "")),
+            "last_item_at": str(meta.get("last_item_at", "")),
+            "spider_name": str(meta.get("spider_name", "")),
+            "started_at": str(meta.get("started_at", "")),
+            "finished_at": str(meta.get("finished_at", "")),
+            "config": str(meta.get("config", "")),
+            "errors": str(meta.get("errors", "")),
+        }
+        for name in ("items_count", "pages_count", "errors_count"):
+            value = meta.get(name)
+            if value is not None and value != "":
+                fields[name] = int(value)
+        duration_ms = meta.get("duration_ms")
+        if duration_ms is not None and duration_ms != "":
+            fields["duration_ms"] = float(duration_ms)
+        return data_pb2.SpiderMetaUpdate(**fields)
+
+    def _build_spider_item_batch(
+        self,
+        run_id: str,
+        items: list[dict[str, Any]],
+    ) -> Any:
+        from antcode_contracts import data_pb2
+
+        encoded = [self._encode_spider_item(item, data_pb2) for item in items]
+        return data_pb2.SpiderDataBatch(
+            worker_id=self._gateway_config.worker_id or "",
+            run_id=run_id,
+            project_id=str(items[0].get("project_id", "")),
+            lease_id=self._lease_id,
+            items=encoded,
+        )
+
+    @staticmethod
+    def _encode_spider_item(item: dict[str, Any], data_pb2: Any) -> Any:
+        data = item.get("data", "")
+        encoded_data = data if isinstance(data, bytes) else str(data).encode()
+        return data_pb2.SpiderDataItem(
+            item_id=str(item.get("item_id", "")),
+            spider_name=str(item.get("spider_name", "")),
+            item_type=str(item.get("item_type", "default")),
+            data=encoded_data,
+            url=str(item.get("url", "")),
+            timestamp=str(item.get("timestamp", "")),
+            sequence=int(item.get("sequence", 0) or 0),
+        )
+
+    async def _send_spider_batch(self, batch: Any, expected_items: int) -> bool:
+        if not self._running or not self._data_stub:
+            return False
+        from antcode_core.spider_ingest import SpiderIngestLimits
+
+        limits = SpiderIngestLimits.from_env()
+        if len(batch.items) > limits.max_batch_items:
+            raise ValueError(f"SpiderData batch items 超限: {len(batch.items)}")
+        if batch.ByteSize() > limits.max_batch_bytes:
+            raise ValueError(f"SpiderData batch bytes 超限: {batch.ByteSize()}")
+        if any(item.ByteSize() > limits.max_item_bytes for item in batch.items):
+            raise ValueError("SpiderData item 编码大小超限")
+        inject_trace(batch)
+        try:
+            ack = await asyncio.wait_for(
+                self._data_stub.StreamSpiderData(
+                    self._one_spider_batch(batch),
+                    metadata=self._get_auth_metadata(),
+                ),
+                timeout=self._gateway_config.call_timeout,
+            )
+        except Exception as exc:
+            logger.warning(f"StreamSpiderData 上报失败: run_id={batch.run_id} exc={exc}")
+            await self._handle_connection_error(exc)
+            return False
+        return int(ack.accepted) == expected_items and int(ack.failed) == 0
+
+    @staticmethod
+    async def _one_spider_batch(batch: Any):
+        yield batch
+
     # ==================== TransportBase 实现：日志面 ====================
 
     async def send_log(self, log: LogMessage) -> bool:
@@ -600,20 +865,26 @@ class GatewayTransport(TransportBase):
         if not logs:
             return True
 
+        from antcode_worker.transport.log_batches import (
+            build_log_batches,
+            is_invalid_argument_error,
+            iter_log_batches,
+        )
+
+        limits = LogBatchLimits(
+            max_batch_bytes=self._gateway_config.log_max_batch_bytes,
+            max_entry_content_bytes=self._gateway_config.log_max_entry_content_bytes,
+        )
+        batches = build_log_batches(
+            logs,
+            worker_id=self._gateway_config.worker_id or "",
+            lease_id=self._require_lease_id(),
+            limits=limits,
+        )
         try:
-            from antcode_worker.transport.gateway.codecs import LogEncoder
-
-            batch = LogEncoder.encode_batch(logs, self._gateway_config.worker_id or "")
-            # P5.4: 透传当前 trace,Master 端 log ingester 解码后可以把
-            # 这批日志按 trace_id 接到调用链上(全链路日志查询)。
-            inject_trace(batch)
-
-            async def _one_shot():
-                yield batch
-
             ack = await asyncio.wait_for(
                 self._data_stub.StreamLogs(
-                    _one_shot(),
+                    iter_log_batches(batches),
                     metadata=self._get_auth_metadata(),
                 ),
                 timeout=self._gateway_config.call_timeout,
@@ -622,7 +893,11 @@ class GatewayTransport(TransportBase):
             if received != len(logs):
                 raise RuntimeError(f"日志 ACK 数量不匹配: expected={len(logs)} received={received}")
             return True
-        except Exception:
+        except ValueError:
+            raise
+        except Exception as exc:
+            if is_invalid_argument_error(exc):
+                raise ValueError(f"Gateway 拒绝日志批次: {exc}") from exc
             logger.exception("日志批次持久化失败")
             return False
 
@@ -652,13 +927,8 @@ class GatewayTransport(TransportBase):
     # ==================== TransportBase 实现：心跳/Lease ====================
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
-        """心跳 — P3 桥接到 ``lease_renew``，对外仍保留 send_heartbeat 名字。
-
-        本方法把 ``HeartbeatMessage`` 摊平成 metrics dict，调用 ``lease_renew``
-        实际触发 ``ControlService.Lease`` RPC，并把返回的 lease 元数据缓存在
-        ``self._lease_id``。``revoked=True`` 视为心跳失败，调用方据此触发
-        重新注册。
-        """
+        """心跳 — P3 桥接到 ``lease_renew``（触发 ``ControlService.Lease``
+        RPC 并缓存返回的 lease 元数据）；``revoked=True`` 视为心跳失败。"""
         if not self._running:
             return False
 
@@ -738,12 +1008,17 @@ class GatewayTransport(TransportBase):
             renew_after_ms = int(getattr(response, "renew_after_ms", 0) or 0)
             revoked = bool(getattr(response, "revoked", False))
 
+            # P1-GW-03: 换代=旧代际已死；按撤销永久停机 fail-closed。
+            if new_lease_id and self._lease_id and new_lease_id != self._lease_id:
+                logger.error(f"Lease 代际切换被拒绝: old={self._lease_id} new={new_lease_id}，本进程按撤销停机")
+                await self._abort_lease_revocation()
+                return ("", 0, 0, True)
             if new_lease_id:
                 self._lease_id = new_lease_id
             if revoked:
                 logger.warning(f"Lease 被服务端撤销: reason={getattr(response, 'revoke_reason', '')}")
-                # 清空本地 lease，下一次会重新发租
-                self._lease_id = ""
+                self._lease_revoked = True
+                await self._abort_lease_revocation()
             else:
                 self._consecutive_failures = 0
             return (new_lease_id, expires_at_ms, renew_after_ms, revoked)
@@ -781,29 +1056,115 @@ class GatewayTransport(TransportBase):
             logger.exception("poll_control 出队失败")
             raise
 
+    async def claim_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
+        return await self._ownership_call(
+            run_id,
+            rpc_name="ClaimRunOwnership",
+            request_cls="RunOwnershipClaimRequest",
+            response_field="acquired",
+            ttl_ms=ttl_ms,
+        )
+
+    async def renew_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
+        return await self._ownership_call(
+            run_id,
+            rpc_name="RenewRunOwnership",
+            request_cls="RunOwnershipRenewRequest",
+            response_field="renewed",
+            ttl_ms=ttl_ms,
+        )
+
+    async def release_run_ownership(self, run_id: str) -> bool:
+        return await self._ownership_call(
+            run_id,
+            rpc_name="ReleaseRunOwnership",
+            request_cls="RunOwnershipReleaseRequest",
+            response_field="released",
+        )
+
+    async def _ownership_call(
+        self,
+        run_id: str,
+        *,
+        rpc_name: str,
+        request_cls: str,
+        response_field: str,
+        ttl_ms: int | None = None,
+    ) -> bool:
+        """Run ownership 三个 RPC 的公共实现：构建请求 + 调用 + 取响应布尔位。"""
+        from antcode_contracts import artifact_pb2
+
+        stub = self._require_artifact_stub()
+        fields: dict[str, Any] = {
+            "worker_id": self._gateway_config.worker_id or "",
+            "lease_id": self._require_lease_id(),
+            "run_id": run_id,
+        }
+        if ttl_ms is not None:
+            fields["ttl_ms"] = ttl_ms
+        request = getattr(artifact_pb2, request_cls)(**fields)
+        response = await asyncio.wait_for(
+            getattr(stub, rpc_name)(request, metadata=self._get_auth_metadata()),
+            timeout=self._gateway_config.call_timeout,
+        )
+        return bool(getattr(response, response_field))
+
+    def _require_artifact_stub(self) -> Any:
+        if not self._running or self._artifact_stub is None:
+            raise RuntimeError("Gateway ArtifactService stub 未初始化")
+        return self._artifact_stub
+
+    def _require_lease_id(self) -> str:
+        if not self._lease_id:
+            raise RuntimeError("Gateway run ownership 缺少当前 lease_id")
+        return self._lease_id
+
+    async def _ack_control_rpc(
+        self,
+        receipt: str,
+        *,
+        success: bool = True,
+        error: str = "",
+        request_id: str | None = None,
+        data_json: str | None = None,
+    ) -> bool:
+        """构建并发送 ``AckControlRequest``，返回 ``response.received``。
+
+        只封装公共的请求构建 + RPC 调用；异常处理策略由两个调用方自行
+        决定（见 ``ack_control`` / ``send_control_result`` 内注释）。
+        """
+        from antcode_contracts import control_pb2
+
+        request = control_pb2.AckControlRequest(
+            worker_id=self._gateway_config.worker_id or "",
+            event_id=receipt,
+            success=bool(success),
+            error=error or "",
+            request_id=request_id or "",
+            data_json=data_json or "",
+            lease_id=self._lease_id,
+        )
+        response = await asyncio.wait_for(
+            self._control_stub.AckControl(
+                request,
+                metadata=self._get_auth_metadata(),
+            ),
+            timeout=self._gateway_config.call_timeout,
+        )
+        return bool(getattr(response, "received", False))
+
     async def ack_control(self, receipt: str) -> bool:
         """``ControlService.AckControl(event_id=receipt, success=True)``。"""
         if not self._control_stub or not self._running:
             return False
 
         try:
-            from antcode_contracts import control_pb2
-
-            request = control_pb2.AckControlRequest(
-                worker_id=self._gateway_config.worker_id or "",
-                event_id=receipt,
-                success=True,
-                error="",
-            )
-            response = await asyncio.wait_for(
-                self._control_stub.AckControl(
-                    request,
-                    metadata=self._get_auth_metadata(),
-                ),
-                timeout=self._gateway_config.call_timeout,
-            )
-            return bool(getattr(response, "received", False))
+            return await self._ack_control_rpc(receipt)
         except Exception as e:
+            # 有意保留的行为差异：普通 ACK 吞掉错误只返回 False，不计
+            # _consecutive_failures，也不甄别永久错误——事件留在 PEL 由
+            # Gateway 重投即可；带结果结算的 send_control_result 才需要
+            # 失败计数 + 永久错误上抛。
             logger.exception("确认控制消息失败")
             await self._handle_connection_error(e)
             return False
@@ -811,40 +1172,48 @@ class GatewayTransport(TransportBase):
     async def send_control_result(
         self,
         request_id: str,
-        reply_stream: str,  # noqa: ARG002 - legacy 参数，新协议不需要
+        reply_stream: str,  # noqa: ARG002 - Gateway 从原始事件安全派生 reply stream
         success: bool,
-        data: dict | None = None,  # noqa: ARG002 - typed map 暂未透传到 AckControl
+        *,
+        receipt: str = "",
+        data: Any = None,
         error: str = "",
     ) -> bool:
-        """回传控制结果：新协议下走 ``AckControl(success, error)``。
-
-        说明：
-        - ``reply_stream`` 在新协议不再需要（双向流自带 correlation）。
-        - 旧 ``data: dict`` 因为 ``AckControlResponse`` 没有结构化结果字段，
-          这里只回传 ``success`` / ``error``，详细结果由 worker 自行落地。
-        - request_id（即 ControlEvent.event_id）作为 ``event_id`` 回传。
-        """
+        """通过 AckControl 原子回传运行时结果并确认原控制事件。"""
         if not self._control_stub or not self._running:
             return False
+        if not receipt:
+            raise ValueError("Gateway 运行时控制结果缺少原控制事件 receipt")
+
+        # W2: 序列化必须放在网络 try 之外。data 含 datetime/bytes/NaN 时
+        # json.dumps 抛 TypeError/ValueError，这是本地永久性错误——若混进
+        # 下面的网络异常分支会被计入 _consecutive_failures（3 次即拆掉健康
+        # 连接触发重连），且 engine 拿同一个不可序列化 payload 无限重试。
+        # 降级为失败结果照常结算原控制事件，让事件得到 ACK。
+        try:
+            data_json = json.dumps(data, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(f"控制结果序列化失败，降级为失败结算: request_id={request_id} exc={exc}")
+            note = f"结果序列化失败: {exc}"
+            error = f"{error}; {note}" if error else note
+            success = False
+            data_json = "null"
 
         try:
-            from antcode_contracts import control_pb2
-
-            request = control_pb2.AckControlRequest(
-                worker_id=self._gateway_config.worker_id or "",
-                event_id=request_id,
+            return await self._ack_control_rpc(
+                receipt,
                 success=bool(success),
-                error=error or "",
+                error=error,
+                request_id=request_id,
+                data_json=data_json,
             )
-            response = await asyncio.wait_for(
-                self._control_stub.AckControl(
-                    request,
-                    metadata=self._get_auth_metadata(),
-                ),
-                timeout=self._gateway_config.call_timeout,
-            )
-            return bool(getattr(response, "received", False))
         except Exception as e:
+            # 有意保留的行为差异（相对 ack_control）：结果结算失败要计
+            # _consecutive_failures 并甄别永久错误——永久拒绝直接上抛，
+            # 让 engine 停止重试同一结算。
+            if _is_permanent_control_result_error(e):
+                raise RuntimeError(f"Gateway 永久拒绝运行时控制结果: {e}") from e
+            self._consecutive_failures += 1
             logger.exception("回传控制结果失败")
             await self._handle_connection_error(e)
             return False
@@ -855,6 +1224,8 @@ class GatewayTransport(TransportBase):
         self._gateway_config.worker_id = worker_id
         if api_key:
             self._gateway_config.api_key = api_key
+        if self._authenticator is not None:
+            self._authenticator = self._build_authenticator()
 
     def get_status(self) -> dict[str, Any]:
         reconnect_stats = None
@@ -872,18 +1243,21 @@ class GatewayTransport(TransportBase):
             "auth_method": self._gateway_config.auth_method,
             "worker_id": self._gateway_config.worker_id,
             "lease_id": self._lease_id,
+            "lease_revoked": self._lease_revoked,
             "last_heartbeat": (self._last_heartbeat.isoformat() if self._last_heartbeat else None),
             "consecutive_failures": self._consecutive_failures,
             "reconnect_stats": reconnect_stats,
         }
 
     async def reconnect(self) -> bool:
-        await self._disconnect()
         return await self._connect()
 
     # ==================== 私有：初始化 ====================
 
     async def _init_authenticator(self) -> None:
+        self._authenticator = self._build_authenticator()
+
+    def _build_authenticator(self) -> GatewayAuthenticator:
         from antcode_worker.transport.gateway.auth import (
             AuthConfig,
             AuthMethod,
@@ -898,7 +1272,7 @@ class GatewayTransport(TransportBase):
             client_cert_path=self._gateway_config.client_cert_path,
             client_key_path=self._gateway_config.client_key_path,
         )
-        self._authenticator = GatewayAuthenticator(auth_config)
+        return GatewayAuthenticator(auth_config)
 
     async def _init_reconnect_manager(self) -> None:
         if not self._gateway_config.enable_reconnect:
@@ -919,64 +1293,181 @@ class GatewayTransport(TransportBase):
             reconnect_config,
             connect_func=self._connect,
         )
+        self._reconnect_manager.on_reconnect_success(self._restore_online_after_reconnect)
+        await self._reconnect_manager.start()
+
+    async def _restore_online_after_reconnect(self) -> None:
+        if not self._running or self._lease_revoked or not self.is_connected:
+            return
+        self._consecutive_failures = 0
+        await self._set_state(WorkerState.ONLINE)
 
     async def _connect(self) -> bool:
-        target = f"{self._gateway_config.gateway_host}:{self._gateway_config.gateway_port}"
+        target = self._gateway_target()
+        error: Exception | None = None
+        old_channel: Any = None
+        async with self._connect_lock:
+            if self._stopping:
+                return False
+            try:
+                connection = await self._build_candidate_connection(target)
+                if self._stopping:
+                    await self._close_channel(connection.channel)
+                    return False
+                old_channel = self._install_connection(connection)
+            except Exception as exc:
+                error = exc
+        if error is not None:
+            await self._handle_connect_failure(target, error)
+            return False
+        await self._close_channel(old_channel)
+        logger.info(f"Gateway 连接成功: {target}")
+        return True
 
+    def _gateway_target(self) -> str:
+        from antcode_worker.gateway_endpoint import parse_gateway_address
+
+        return parse_gateway_address(
+            endpoint="",
+            host=self._gateway_config.gateway_host,
+            port=self._gateway_config.gateway_port,
+        ).target
+
+    async def _build_candidate_connection(self, target: str) -> _GatewayConnection:
+        channel = self._create_channel(target)
         try:
-            from grpc import aio as grpc_aio
+            await asyncio.wait_for(channel.channel_ready(), timeout=self._gateway_config.connect_timeout)
+            control_stub, data_stub, artifact_stub = self._create_stubs(channel)
+            await self._check_protocol_capabilities(control_stub)
+            lease_id = await self._validate_reconnect_lease(control_stub)
+            return _GatewayConnection(channel, control_stub, data_stub, artifact_stub, lease_id)
+        except BaseException:
+            await self._close_channel(channel)
+            raise
 
-            options = [
-                ("grpc.max_send_message_length", self._gateway_config.max_send_message_length),
-                ("grpc.max_receive_message_length", self._gateway_config.max_receive_message_length),
-                ("grpc.keepalive_time_ms", self._gateway_config.keepalive_time_ms),
-                ("grpc.keepalive_timeout_ms", self._gateway_config.keepalive_timeout_ms),
-                ("grpc.keepalive_permit_without_calls", self._gateway_config.keepalive_permit_without_calls),
-            ]
-            for key, value in self._gateway_config.extra_options.items():
-                options.append((key, value))
+    def _create_channel(self, target: str) -> Any:
+        from grpc import aio as grpc_aio
 
-            if self._gateway_config.use_tls:
-                credentials = self._create_tls_credentials()
-                self._channel = grpc_aio.secure_channel(
-                    target,
-                    credentials,
-                    options=options,
-                )
-            else:
-                self._channel = grpc_aio.insecure_channel(target, options=options)
+        options = self._channel_options()
+        if not self._gateway_config.use_tls:
+            return grpc_aio.insecure_channel(target, options=options)
+        return grpc_aio.secure_channel(target, self._create_tls_credentials(), options=options)
 
-            await asyncio.wait_for(
-                self._channel.channel_ready(),
-                timeout=self._gateway_config.connect_timeout,
+    def _channel_options(self) -> list[tuple[str, Any]]:
+        config = self._gateway_config
+        options = [
+            ("grpc.max_send_message_length", config.max_send_message_length),
+            ("grpc.max_receive_message_length", config.max_receive_message_length),
+            ("grpc.keepalive_time_ms", config.keepalive_time_ms),
+            ("grpc.keepalive_timeout_ms", config.keepalive_timeout_ms),
+            ("grpc.keepalive_permit_without_calls", config.keepalive_permit_without_calls),
+        ]
+        options.extend(config.extra_options.items())
+        return options
+
+    async def _check_protocol_capabilities(self, control_stub: Any = None) -> None:
+        """Fail closed when Gateway cannot persist runtime-control results."""
+        from antcode_contracts import control_pb2
+
+        stub = control_stub or self._control_stub
+        if stub is None:
+            raise RuntimeError("Gateway ControlService stub 未初始化")
+        request = control_pb2.CapabilitiesRequest(
+            worker_id=self._gateway_config.worker_id or "",
+        )
+        response = await asyncio.wait_for(
+            stub.GetCapabilities(request, metadata=self._get_auth_metadata()),
+            timeout=self._gateway_config.call_timeout,
+        )
+        if not response.runtime_control_results_v1:
+            raise RuntimeError("Gateway 不支持 runtime_control_results_v1，拒绝启动")
+        if not response.runtime_control_lease_fencing_v1:
+            raise RuntimeError("Gateway 不支持 runtime_control_lease_fencing_v1，拒绝启动")
+        if not response.runtime_control_deadline_v1:
+            raise RuntimeError("Gateway 不支持 runtime_control_deadline_v1，拒绝启动")
+        if not response.artifact_transfer_v1:
+            raise RuntimeError("Gateway 不支持 artifact_transfer_v1，拒绝启动")
+
+    async def _validate_reconnect_lease(self, control_stub: Any) -> str:
+        if not self._running:
+            return self._lease_id
+        if self._lease_revoked:
+            raise _LeaseRevokedError("Gateway Worker 代际已被撤销")
+        if not self._lease_id:
+            raise RuntimeError("Gateway 重连时缺少当前 lease_id")
+        from antcode_contracts import control_pb2
+
+        request = control_pb2.LeaseRequest(
+            worker_id=self._gateway_config.worker_id or "",
+            current_lease_id=self._lease_id,
+        )
+        response = await asyncio.wait_for(
+            control_stub.Lease(request, metadata=self._get_auth_metadata()),
+            timeout=self._gateway_config.call_timeout,
+        )
+        if bool(getattr(response, "revoked", False)):
+            self._lease_revoked = True
+        # P1-GW-01: 重连时若 Gateway 派新 Lease(response.lease_id != self._lease_id),
+        # 意味着旧代际已被剥夺——旧进程可能被 Gateway 判死或被人工撤销,新 Lease
+        # 应由新一次的 Register 流程获取,不能就地无缝接管。旧行为直接覆盖
+        # self._lease_id,让新代际的 result/ACK/log 由持有旧内存状态的进程发出,
+        # 与真正获得新 Lease 的 Worker 争抢 ownership 与 PEL,造成"两个 L 都在
+        # 结算同一 run"的双执行。修复:视新 Lease 为 revoke 信号,触发
+        # self-fence(_abort_lease_revocation → _halt_transport)让 Master reconcile
+        # 后重新走完整 Register 拉起新代际。
+        new_lease_id = getattr(response, "lease_id", "") or ""
+        if self._lease_id and new_lease_id and new_lease_id != self._lease_id:
+            logger.warning(
+                "Gateway 重连返回新 Lease {} != 本地 {},视为旧代际被剥夺,触发 self-fence",
+                new_lease_id,
+                self._lease_id,
             )
+            self._lease_revoked = True
+            raise _LeaseRevokedError(f"Gateway 派新 Lease {new_lease_id},本地 {self._lease_id} 已被剥夺")
+        return self._require_valid_lease_response(response)
 
-            self._control_stub, self._data_stub = self._create_stubs()
+    @staticmethod
+    def _require_valid_lease_response(response: Any) -> str:
+        lease_id = getattr(response, "lease_id", "") or ""
+        expires_at_ms = int(getattr(response, "expires_at_ms", 0) or 0)
+        renew_after_ms = int(getattr(response, "renew_after_ms", 0) or 0)
+        if bool(getattr(response, "revoked", False)):
+            raise _LeaseRevokedError("Gateway 重连 lease 已被撤销")
+        if not lease_id or expires_at_ms <= int(time.time() * 1000):
+            raise RuntimeError("Gateway 重连未取得有效 lease")
+        if renew_after_ms < _MIN_LEASE_RENEW_AFTER_MS:
+            raise RuntimeError("Gateway 重连 lease 续租周期无效")
+        return lease_id
 
-            self._connected = True
-            logger.info(f"Gateway 连接成功: {target}")
-            return True
-
-        except TimeoutError:
-            logger.error(f"Gateway 连接超时: {target}")
-            return False
-        except Exception:
-            logger.exception("Gateway 连接失败")
-            return False
+    def _install_connection(self, connection: _GatewayConnection) -> Any:
+        old_channel = self._channel
+        self._channel = connection.channel
+        self._control_stub = connection.control_stub
+        self._data_stub = connection.data_stub
+        self._artifact_stub = connection.artifact_stub
+        self._lease_id = connection.lease_id
+        self._connected = True
+        self._auth_failure_count = 0
+        return old_channel
 
     async def _disconnect(self) -> None:
-        self._connected = False
+        async with self._connect_lock:
+            channel = self._channel
+            self._connected = False
+            self._channel = None
+            self._control_stub = None
+            self._data_stub = None
+            self._artifact_stub = None
+        await self._close_channel(channel)
 
-        if self._channel:
-            try:
-                await self._channel.close()
-            except Exception as e:
-                logger.warning(f"关闭 channel 时出错: {e}")
-            finally:
-                self._channel = None
-
-        self._control_stub = None
-        self._data_stub = None
+    @staticmethod
+    async def _close_channel(channel: Any) -> None:
+        if channel is None:
+            return
+        try:
+            await channel.close()
+        except Exception as exc:
+            logger.warning(f"关闭 channel 时出错: {exc}")
 
     def _create_tls_credentials(self) -> Any:
         import grpc
@@ -998,12 +1489,16 @@ class GatewayTransport(TransportBase):
             certificate_chain=certificate_chain,
         )
 
-    def _create_stubs(self) -> tuple[Any, Any]:
-        from antcode_contracts import control_pb2_grpc, data_pb2_grpc
+    def _create_stubs(self, channel: Any = None) -> tuple[Any, Any, Any]:
+        from antcode_contracts import artifact_pb2_grpc, control_pb2_grpc, data_pb2_grpc
 
-        control_stub = control_pb2_grpc.ControlServiceStub(self._channel)
-        data_stub = data_pb2_grpc.DataServiceStub(self._channel)
-        return control_stub, data_stub
+        active_channel = channel or self._channel
+        if active_channel is None:
+            raise RuntimeError("Gateway channel 未初始化")
+        control_stub = control_pb2_grpc.ControlServiceStub(active_channel)
+        data_stub = data_pb2_grpc.DataServiceStub(active_channel)
+        artifact_stub = artifact_pb2_grpc.ArtifactServiceStub(active_channel)
+        return control_stub, data_stub, artifact_stub
 
     def _get_auth_metadata(self) -> list[tuple[str, str]]:
         if self._authenticator:
@@ -1019,6 +1514,7 @@ class GatewayTransport(TransportBase):
             worker_id=self._gateway_config.worker_id or "",
             capabilities=list(self._gateway_config.capabilities),
             prefetch=int(self._gateway_config.task_prefetch or 1),
+            lease_id=self._require_lease_id(),
         )
 
     def _build_watch_control_request(self) -> Any:
@@ -1026,6 +1522,7 @@ class GatewayTransport(TransportBase):
 
         return control_pb2.WatchControlRequest(
             worker_id=self._gateway_config.worker_id or "",
+            lease_id=self._lease_id,
         )
 
     def _get_receipt_task_id(self, receipt_id: str) -> str:
@@ -1043,24 +1540,13 @@ class GatewayTransport(TransportBase):
 
     async def _handle_connection_error(self, error: Exception) -> None:
         """处理连接错误（保留原 P0 实现的认证退避 + 重连管理逻辑）。"""
-        import grpc
-
-        is_auth_error = False
-        if hasattr(error, "code") and callable(error.code):
-            try:
-                if error.code() == grpc.StatusCode.UNAUTHENTICATED:
-                    is_auth_error = True
-            except Exception:
-                pass
-
-        if is_auth_error:
+        if self._is_auth_error(error):
             self._auth_failure_count += 1
             if self._auth_failure_count >= self._max_auth_failures:
                 logger.error(
                     f"认证连续失败 {self._auth_failure_count} 次，停止重连。请检查 WORKER_API_KEY 配置是否正确"
                 )
-                await self._set_state(WorkerState.OFFLINE)
-                self._running = False
+                await self._abort_authentication()
                 return
             backoff = min(30.0, 5.0 * self._auth_failure_count)
             logger.warning(
@@ -1077,6 +1563,7 @@ class GatewayTransport(TransportBase):
             return
 
         if self._consecutive_failures >= 3:
+            self._connected = False
             self._reconnecting = True
             try:
                 logger.warning(f"连续失败 {self._consecutive_failures} 次，尝试重连")
@@ -1102,6 +1589,66 @@ class GatewayTransport(TransportBase):
                         await self._set_state(WorkerState.OFFLINE)
             finally:
                 self._reconnecting = False
+
+    async def _handle_connect_failure(self, target: str, error: Exception) -> None:
+        if isinstance(error, TimeoutError):
+            logger.error(f"Gateway 连接超时: {target}")
+        else:
+            logger.error(f"Gateway 连接失败: {error}")
+        if isinstance(error, _LeaseRevokedError):
+            await self._abort_lease_revocation()
+            return
+        if not self._is_auth_error(error):
+            return
+        self._auth_failure_count += 1
+        if self._auth_failure_count >= self._max_auth_failures:
+            await self._abort_authentication()
+
+    @staticmethod
+    def _is_auth_error(error: Exception) -> bool:
+        import grpc
+
+        if not hasattr(error, "code") or not callable(error.code):
+            return False
+        with contextlib.suppress(Exception):
+            return error.code() == grpc.StatusCode.UNAUTHENTICATED
+        return False
+
+    async def _abort_authentication(self) -> None:
+        await self._halt_transport()
+        self._authenticator = None
+
+    def set_lease_revoked_callback(self, callback: Any) -> None:
+        """P1-GW-02: engine 通过此方法注册"Lease 撤销时的处理"回调。
+
+        transport 检测到 Lease 撤销/被 Gateway 派新代际时,先调 callback 让
+        engine 立即 cancel_all,再 halt transport(以免 halt 后 engine 找不到
+        transport 里的 lease_id 状态)。callback 应为 async 或 None。
+        """
+        self._lease_revoked_callback = callback
+
+    async def _abort_lease_revocation(self) -> None:
+        self._lease_revoked = True
+        # P1-GW-02: 先通知 engine 立刻 cancel 所有在飞 run,再 halt transport。
+        # 顺序很关键——halt 后 transport 的 lease_id/channel 会被清,engine 后
+        # 续通过 transport 结算/上报都会失败;但只要子进程已被 kill,残余上报
+        # 失败也不再产生新副作用。
+        callback = self._lease_revoked_callback
+        if callback is not None:
+            try:
+                await callback("gateway-revoke")
+            except Exception as exc:
+                logger.warning("lease-revoked callback 异常: {}", exc)
+        await self._halt_transport()
+
+    async def _halt_transport(self) -> None:
+        self._stopping = True
+        self._running = False
+        await self._cancel_background_tasks()
+        if self._reconnect_manager is not None:
+            await self._reconnect_manager.stop()
+        await self._disconnect()
+        await self._set_state(WorkerState.OFFLINE)
 
     # ==================== 私有：幂等性缓存 ====================
 
@@ -1136,11 +1683,12 @@ class GatewayTransport(TransportBase):
 
     async def _cancel_background_tasks(self) -> None:
         tasks = []
+        current = asyncio.current_task()
         for task in (
             self._task_subscriber,
             self._control_subscriber,
         ):
-            if task is not None and not task.done():
+            if task is not None and task is not current and not task.done():
                 task.cancel()
                 tasks.append(task)
 

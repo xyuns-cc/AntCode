@@ -27,8 +27,9 @@ from antcode_contracts import data_pb2
 from antcode_contracts.data_pb2_grpc import DataServiceServicer
 from antcode_core.application.services.workers.run_ownership_service import (
     require_worker_owns_runs,
+    require_worker_owns_runs_for_lease,
+    require_worker_owns_spider_run,
 )
-from antcode_core.infrastructure.redis import task_ready_stream
 from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker
@@ -39,6 +40,7 @@ from antcode_gateway.handlers import (
     TaskPollHandler,
 )
 from antcode_gateway.handlers.poll import task_info_to_dispatch
+from antcode_gateway.services.stream_frame_guards import require_bounded_status_frame, require_owned_receipt
 
 if TYPE_CHECKING:  # pragma: no cover
     pass
@@ -48,16 +50,24 @@ if TYPE_CHECKING:  # pragma: no cover
 STREAM_TASKS_BLOCK_MS = 2_000
 
 
+async def _missing_lease_verifier(_worker_id: str, _lease_id: str) -> bool:
+    raise RuntimeError("Gateway lease verifier 未配置")
+
+
 class GatewayDataService(DataServiceServicer):
     """DataService Gateway 端实现。"""
 
     def __init__(
         self,
+        *,
         poll_handler: TaskPollHandler | None = None,
         result_handler: ResultHandler | None = None,
         log_handler: LogHandler | None = None,
         spider_data_handler: SpiderDataHandler | None = None,
         ownership_verifier=require_worker_owns_runs,
+        log_ownership_verifier=require_worker_owns_runs_for_lease,
+        spider_ownership_verifier=require_worker_owns_spider_run,
+        lease_verifier=_missing_lease_verifier,
     ):
         self._poll = poll_handler or TaskPollHandler()
         self._result = result_handler or ResultHandler()
@@ -65,6 +75,9 @@ class GatewayDataService(DataServiceServicer):
         # T6-T3b: gateway 模式的 rule/spider 数据落地通道
         self._spider_data = spider_data_handler or SpiderDataHandler()
         self._ownership_verifier = ownership_verifier
+        self._log_ownership_verifier = log_ownership_verifier
+        self._spider_ownership_verifier = spider_ownership_verifier
+        self._lease_verifier = lease_verifier
         logger.info("DataService 已初始化")
 
     async def _require_run_ownership(
@@ -80,6 +93,62 @@ class GatewayDataService(DataServiceServicer):
         except Exception:
             logger.exception("TaskRun ownership 校验失败")
             await context.abort(grpc.StatusCode.UNAVAILABLE, "TaskRun ownership 校验失败")
+
+    async def _require_spider_ownership(
+        self,
+        context: grpc.aio.ServicerContext,
+        *,
+        worker_id: str,
+        run_id: str,
+        project_id: str,
+        lease_id: str,
+    ) -> None:
+        try:
+            if not await self._lease_verifier(worker_id, lease_id):
+                raise PermissionError("SpiderData lease_id 不是当前 Worker Lease")
+            await self._spider_ownership_verifier(
+                worker_id,
+                run_id,
+                project_id,
+                lease_id=lease_id,
+            )
+        except (PermissionError, ValueError) as exc:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
+        except Exception:
+            logger.exception("SpiderData ownership 校验失败")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "SpiderData ownership 校验失败")
+
+    async def _require_current_lease(self, context, worker_id: str, lease_id: str) -> None:
+        if not lease_id:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "worker lease is not current")
+        try:
+            current = await self._lease_verifier(worker_id, lease_id)
+        except grpc.aio.AbortError:
+            raise
+        except Exception:
+            logger.exception("Worker lease 校验失败")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "worker lease verification unavailable")
+        if not current:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "worker lease is not current")
+
+    async def _require_log_ownership(
+        self,
+        context,
+        *,
+        worker_id: str,
+        lease_id: str,
+        run_ids: set[str],
+    ) -> None:
+        await self._require_current_lease(context, worker_id, lease_id)
+        try:
+            await self._log_ownership_verifier(worker_id, run_ids, lease_id=lease_id)
+        except (PermissionError, ValueError) as exc:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
+        except grpc.aio.AbortError:
+            raise
+        except Exception:
+            logger.exception("Log TaskRun lease ownership 校验失败")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "Log TaskRun ownership 校验失败")
 
     # =========================================================================
     # StreamTasks (server-streaming)
@@ -102,9 +171,13 @@ class GatewayDataService(DataServiceServicer):
             while True:
                 if context.cancelled():
                     break
+                await self._require_current_lease(context, worker_id, request.lease_id)
                 try:
+                    # P1-GW-01: 以代际 consumer 读取，结算侧按 consumer 归属
+                    # 原子校验（见 poll.generation_consumer）。
                     tasks = await self._poll.handle(
                         worker_id=worker_id,
+                        lease_id=request.lease_id,
                         max_tasks=prefetch,
                         block_ms=STREAM_TASKS_BLOCK_MS,
                     )
@@ -117,6 +190,13 @@ class GatewayDataService(DataServiceServicer):
 
                 if not tasks:
                     continue
+
+                # P1-GW-01: XREADGROUP 返回后、下发前必须复检 Lease。阻塞读
+                # 期间代际可能已切换（新进程 L2 已建立），旧流继续下发会打开
+                # 双执行窗口。复检失败即 abort：消息不 yield、不 ACK，留在
+                # PEL 由新代际按 visibility timeout xautoclaim 接管；结算侧
+                # 另有 AckTask lease fence + run ownership Lua fence 兜底。
+                await self._require_current_lease(context, worker_id, request.lease_id)
 
                 for task in tasks:
                     dispatch = task_info_to_dispatch(task)
@@ -138,39 +218,37 @@ class GatewayDataService(DataServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> data_pb2.AckTaskResponse:
         worker_id = await require_authenticated_worker(context, request.worker_id)
+        # P1-GW-01: 结算（ACK/requeue）也必须持有当前代际 Lease，旧代际
+        # 进程不得再结算新代际拥有的任务。
+        await self._require_current_lease(context, worker_id, request.lease_id)
         receipt_id = request.receipt_id or ""
-        # P2-#19: 协议违规走 gRPC error, 业务失败保留 response 字段
-        if not receipt_id:
-            await context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                "receipt_id 缺失",
-            )
-            return data_pb2.AckTaskResponse(success=False, error="receipt_id 缺失")
-        receipt_stream = receipt_id.split("|", 1)[0]
-        if receipt_stream != task_ready_stream(worker_id):
-            await context.abort(
-                grpc.StatusCode.PERMISSION_DENIED,
-                "receipt stream does not belong to authenticated worker",
-            )
-            return data_pb2.AckTaskResponse(
-                success=False,
-                error="receipt stream ownership mismatch",
-            )
+        if not await require_owned_receipt(context, worker_id, receipt_id):  # P2-#19
+            return data_pb2.AckTaskResponse(success=False, error="receipt 校验失败")
         try:
-            success = await self._poll.ack_receipt(
+            outcome = await self._poll.ack_receipt(
                 receipt_id=receipt_id,
                 accepted=bool(request.accepted),
                 reason=request.reason or "",
-            )
-            return data_pb2.AckTaskResponse(
-                success=success,
-                error="" if success else "ack failed",
+                worker_id=worker_id,
+                lease_id=request.lease_id,
             )
         except Exception as exc:
             logger.exception(f"AckTask 异常: {exc}")
             # 底层异常归为不可用,触发 worker retry
             await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
             return data_pb2.AckTaskResponse(success=False, error=str(exc))
+        if outcome == self._poll.ACK_OUTCOME_NOT_OWNER:
+            # P1-GW-01: entry 已被新代际接管，旧代际结算被 Lua 原子拒绝。
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "task receipt owned by another lease generation",
+            )
+            return data_pb2.AckTaskResponse(success=False, error="not owner")
+        success = self._poll.is_settle_success(outcome)
+        return data_pb2.AckTaskResponse(
+            success=success,
+            error="" if success else "ack failed",
+        )
 
     # =========================================================================
     # StreamStatus (client-streaming)
@@ -187,7 +265,16 @@ class GatewayDataService(DataServiceServicer):
         failed = 0
         try:
             async for task_status in request_iterator:
+                if not await require_bounded_status_frame(context, task_status):  # P1-SEC-04
+                    return data_pb2.StatusAck(received=received)
                 worker_id = await require_authenticated_worker(context, task_status.worker_id)
+                # P1-GW-06: StreamStatus 与 AckTask 对称 —— 也必须校验当前代际 Lease,
+                # 否则被撤销/换代的旧 Worker 仍能上报 RUNNING/终态帧,把新 L2 的状态
+                # 覆盖或伪造。TaskStatus proto 没有 top-level lease_id, Worker 在
+                # engine._report_result / _report_running_start 都把 lease_id 塞到
+                # data map 里, 这里读同一约定字段做代际 fence。
+                status_lease_id = str(task_status.data.get("lease_id", "") or "").strip()
+                await self._require_current_lease(context, worker_id, status_lease_id)
                 await self._require_run_ownership(context, worker_id, {task_status.run_id})
                 try:
                     ok = await self._result.handle(task_status)
@@ -236,13 +323,22 @@ class GatewayDataService(DataServiceServicer):
         try:
             async for batch in request_iterator:
                 worker_id = await require_authenticated_worker(context, batch.worker_id)
-                await self._require_run_ownership(
+                await self._require_log_ownership(
                     context,
-                    worker_id,
-                    {entry.run_id for entry in batch.entries},
+                    worker_id=worker_id,
+                    lease_id=batch.lease_id,
+                    run_ids={entry.run_id for entry in batch.entries},
                 )
                 try:
                     ok = await self._logs.handle_log_batch(batch)
+                except ValueError as exc:
+                    logger.warning(f"StreamLogs 输入无效: worker_id={batch.worker_id} exc={exc}")
+                    failed += 1
+                    await context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                        f"invalid log batch: {exc}",
+                    )
+                    return data_pb2.LogAck(received=received)
                 except Exception as exc:
                     logger.exception(f"StreamLogs.handle_log_batch 异常: worker_id={batch.worker_id} exc={exc}")
                     failed += 1
@@ -290,9 +386,19 @@ class GatewayDataService(DataServiceServicer):
         try:
             async for batch in request_iterator:
                 worker_id = await require_authenticated_worker(context, batch.worker_id)
-                await self._require_run_ownership(context, worker_id, {batch.run_id})
+                await self._require_canonical_spider_ids(context, batch)
+                await self._require_spider_ownership(
+                    context,
+                    worker_id=worker_id,
+                    run_id=batch.run_id,
+                    project_id=batch.project_id,
+                    lease_id=batch.lease_id,
+                )
                 try:
                     accepted, failed = await self._spider_data.handle_batch(batch)
+                except ValueError as exc:
+                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                    return data_pb2.SpiderDataAck(accepted=total_accepted, failed=total_failed)
                 except Exception as exc:
                     logger.exception(
                         f"StreamSpiderData.handle_batch 异常: "
@@ -314,3 +420,20 @@ class GatewayDataService(DataServiceServicer):
             logger.exception(f"StreamSpiderData 异常: {exc}")
             await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
         return data_pb2.SpiderDataAck(accepted=total_accepted, failed=total_failed)
+
+    @staticmethod
+    async def _require_canonical_spider_ids(
+        context: grpc.aio.ServicerContext,
+        batch: data_pb2.SpiderDataBatch,
+    ) -> None:
+        identifiers = {
+            "run_id": batch.run_id,
+            "project_id": batch.project_id,
+            "lease_id": batch.lease_id,
+        }
+        invalid = [name for name, value in identifiers.items() if not value or value != value.strip()]
+        if invalid:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"SpiderData 标识必须非空且无首尾空白: {', '.join(invalid)}",
+            )

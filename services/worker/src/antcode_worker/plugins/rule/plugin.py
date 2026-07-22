@@ -22,6 +22,7 @@ from typing import Any
 
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
+from antcode_worker.executor.rule_policy import RULE_SANDBOX_ALLOW_NETWORK
 from antcode_worker.plugins.base import PluginBase
 
 
@@ -47,6 +48,7 @@ class RulePlugin(PluginBase):
         extraction_rules = rule.get("extraction_rules") or []
         if not isinstance(extraction_rules, list) or not extraction_rules:
             errors.append("规则任务缺少 extraction_rules")
+        errors.extend(self._validate_secure_spool_features(rule))
         return errors
 
     async def build_plan(self, context: RunContext, payload: TaskPayload) -> ExecPlan:
@@ -68,8 +70,7 @@ class RulePlugin(PluginBase):
                 pass
             raise
 
-        # 规则爬虫执行引擎：``antcode_scrapy.crawl`` (Scrapy)。
-        # env 变量名与 --rule-file 参数与旧 spiderkit CLI 完全兼容。
+        spool_path = self._create_spool(rule_dir, context.run_id)
         args = [
             "-m",
             "antcode_scrapy.crawl",
@@ -77,77 +78,26 @@ class RulePlugin(PluginBase):
             rule_path,
         ]
 
-        env = dict(payload.env_vars)
-        env.setdefault("ANTCODE_SPIDER_RUN_ID", context.run_id)
-        env.setdefault("ANTCODE_SPIDER_PROJECT_ID", payload.project_id or "")
-        # R1-P0-7 (审查报告): Redis URL 必须从**实际 transport/config** 拿，
-        # 不能只看 os.environ["WORKER_REDIS_URL"]——用户通过配置文件/CLI
-        # 传的 redis_url 从来不会 write back 到 environ（config.py:109 只
-        # 从 env 读，从不回写）。
-        #
-        # T6-T3b: gateway 传输模式下通过新增的 SpiderData sink 走 gRPC 上报，
-        # 不再直连 Redis；老 fail-fast 分支删除。子进程根据
-        # ANTCODE_SPIDER_SINK_MODE 决定走哪条 sink。
-        from antcode_worker.config import get_worker_config
-
-        wcfg = get_worker_config()
-        transport_mode = str(getattr(wcfg, "transport_mode", "") or "").lower()
-
-        if transport_mode == "gateway":
-            # P1-24 (审查报告): WorkerConfig 上并不存在 ``gateway_endpoint`` /
-            # ``gateway_use_tls`` / ``gateway_auth_token`` 三个字段（见
-            # ``worker/config.py::WorkerConfig``），旧实现全部走 ``getattr(..., "")``
-            # 静默拿到空串，然后 fallback 到 env 变量；如果 env 也没配就直接
-            # ``raise RuntimeError`` —— 用户从配置文件里根本没办法为规则爬虫
-            # 打开 gateway sink，导致 rule 项目在 gateway 模式必然 exit 1。
-            #
-            # 修复：
-            # 1. 优先从 WorkerConfig 真正存在的字段 ``gateway_host`` / ``gateway_port``
-            #    组装 endpoint（这是 gateway 模式下 worker 自身连的 gateway 地址,
-            #    子进程 SpiderData sink 也应该走同一个 endpoint）。
-            # 2. TLS / auth token 目前 WorkerConfig 未建模，走 env fallback；
-            #    若两处都没配置就明确 error message 提示缺什么。
-            endpoint = os.environ.get("WORKER_GATEWAY_ENDPOINT", "").strip()
-            if not endpoint:
-                host = str(getattr(wcfg, "gateway_host", "") or "").strip()
-                port = getattr(wcfg, "gateway_port", 0) or 0
-                if host and int(port) > 0:
-                    endpoint = f"{host}:{int(port)}"
-            if not endpoint:
-                raise RuntimeError(
-                    "规则爬虫 gateway 模式需要 gateway endpoint，但 worker 配置的 "
-                    "gateway_host/gateway_port 为空且 WORKER_GATEWAY_ENDPOINT 未设置。"
-                )
-            env["ANTCODE_SPIDER_SINK_MODE"] = "gateway"
-            env["ANTCODE_SPIDER_GATEWAY_ENDPOINT"] = endpoint
-            # TLS 开关只从 env 读（WorkerConfig 未建模）
-            tls_flag = os.environ.get("WORKER_GATEWAY_USE_TLS", "").strip().lower()
-            if tls_flag in ("1", "true", "yes", "on"):
-                env["ANTCODE_SPIDER_GATEWAY_SECURE"] = "1"
-            # auth token 同上，仅走 env fallback
-            token = os.environ.get("WORKER_GATEWAY_AUTH_TOKEN", "").strip()
-            if token:
-                env["ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"] = token
-        else:
-            # direct 模式：Redis URL 走原路径
-            redis_url = getattr(wcfg, "redis_url", "") or os.environ.get("WORKER_REDIS_URL", "")
-            if not redis_url:
-                raise RuntimeError(
-                    "规则爬虫 direct 模式需要 Redis 上报通道，但 worker 未配置 "
-                    "redis_url（config.redis_url / WORKER_REDIS_URL 均为空）。"
-                )
-            env["ANTCODE_SPIDER_SINK_MODE"] = "redis"
-            env["ANTCODE_SPIDER_REDIS_URL"] = redis_url
-
-        namespace = getattr(wcfg, "redis_namespace", "") or os.environ.get("WORKER_REDIS_NAMESPACE", "")
-        if namespace:
-            env["ANTCODE_SPIDER_REDIS_NAMESPACE"] = namespace
-        # 传 worker_id 让子进程 gateway sink 上报时能带上
-        worker_id = str(getattr(wcfg, "worker_id", "") or "").strip()
-        if worker_id:
-            env["ANTCODE_WORKER_ID"] = worker_id
+        env = {
+            "ANTCODE_SPIDER_RUN_ID": context.run_id,
+            "ANTCODE_SPIDER_PROJECT_ID": payload.project_id or "",
+            "ANTCODE_SPIDER_SINK_MODE": "spool",
+            "ANTCODE_SPIDER_SPOOL_PATH": spool_path,
+        }
 
         cwd = payload.project_cwd or payload.workspace_path or rule_dir
+
+        # P0-03: Rule 插件默认不放行网络。历史上恒 True 因为爬虫要访问
+        # target_url,但那把整个宿主网络暴露给用户提供的规则(headers/cookies
+        # 可含内部凭据、target_url 可指向内部地址),对于不可信租户是横向移动向量。
+        # 现在改为需显式 ANTCODE_RULE_ALLOW_NETWORK=1 才放行;生产环境应结合
+        # K8s NetworkPolicy / egress proxy 而非依赖 Worker 全放行。
+        allow_network = os.getenv("ANTCODE_RULE_ALLOW_NETWORK", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
         return ExecPlan(
             command=python_exe,
@@ -158,6 +108,7 @@ class RulePlugin(PluginBase):
             memory_limit_mb=context.memory_limit_mb,
             cpu_limit_seconds=context.cpu_limit_seconds,
             artifact_patterns=list(payload.artifact_patterns),
+            sandbox_config={RULE_SANDBOX_ALLOW_NETWORK: allow_network},
         )
 
     # ---------- helpers ----------
@@ -175,6 +126,18 @@ class RulePlugin(PluginBase):
         # 什么都没有：交给 validate 报错
         return dict(kwargs)
 
+    @staticmethod
+    def _validate_secure_spool_features(rule: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        if rule.get("resume_enabled"):
+            errors.append("安全 spool 模式暂不支持 resume_enabled：需要 Worker 父进程 checkpoint")
+        proxy_config = rule.get("proxy_config")
+        if proxy_config is not None and not isinstance(proxy_config, dict):
+            errors.append("proxy_config 必须是对象")
+        elif proxy_config and proxy_config.get("enabled"):
+            errors.append("安全 spool 模式暂不支持 proxy_config：拒绝把代理凭据交给子进程")
+        return errors
+
     def _get_python_executable(self, context: RunContext) -> str:
         """P8: rule 任务恒用 worker 自己的 python。
 
@@ -191,8 +154,18 @@ class RulePlugin(PluginBase):
 
     def _resolve_rule_dir(self, context: RunContext, payload: TaskPayload) -> str:
         """把 rule JSON 放到 run 目录里，交给 project_fetcher.cleanup 一起清。"""
-        base = payload.workspace_path or payload.project_cwd
+        base = payload.project_cwd or payload.workspace_path
         if base:
             return os.path.join(base, ".antcode-rule")
         # 没有 workspace 时（rule 项目通常没有代码）用 /tmp 分片目录
         return os.path.join(tempfile.gettempdir(), "antcode-rule", context.run_id or "unknown")
+
+    @staticmethod
+    def _create_spool(rule_dir: str, run_id: str) -> str:
+        fd, path = tempfile.mkstemp(
+            prefix=f"spool-{run_id[:12]}-",
+            suffix=".jsonl",
+            dir=rule_dir,
+        )
+        os.close(fd)
+        return path

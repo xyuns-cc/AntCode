@@ -6,7 +6,8 @@
 Requirements: 2.4
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -71,6 +72,17 @@ class Container:
         self._initialized = True
 
 
+@dataclass(frozen=True)
+class _TransportBootstrap:
+    worker_id: str | None
+    gateway_host: str
+    gateway_port: int
+    api_key: str | None
+    credentials: Any
+    credential_service: Any
+    direct_acl_enabled: bool
+
+
 def create_container(config: Any) -> Container:
     """
     创建并配置依赖容器
@@ -121,9 +133,9 @@ def create_container(config: Any) -> Container:
     container.register("heartbeat_reporter", heartbeat_reporter)
 
     # 8. 创建项目获取器与产物管理器
-    project_fetcher = _create_project_fetcher(config)
+    project_fetcher = _create_project_fetcher(config, transport)
     container.register("project_fetcher", project_fetcher)
-    artifact_manager = _create_artifact_manager(config)
+    artifact_manager = _create_artifact_manager(config, transport)
     container.register("artifact_manager", artifact_manager)
 
     # 9. 创建引擎（依赖其他组件）
@@ -157,107 +169,41 @@ def _create_transport(config: Any) -> Any:
     - 启动 Banner 打印
     - 启动自检（可选）
     """
-    from antcode_worker.services.credential import (
-        get_credential_store,
-        init_credential_service,
-    )
     from antcode_worker.transport.factory import (
         DirectConfig,
         GatewayConfigSpec,
         TransportConfig,
+        build_gateway_transport_config,
     )
 
     # 构建传输层配置
     transport_mode = getattr(config, "transport_mode", "gateway")
 
-    # 加载凭证
-    credential_store = getattr(config, "credential_store", "env")
-    credential_service = init_credential_service(get_credential_store(credential_store))
-    credentials = credential_service.load()
-
-    # Gateway 模式：若无有效凭证，必须使用安装 Key 注册
-    if transport_mode == "gateway" and (not credentials or not credentials.is_valid()):
-        credentials = _register_by_install_key(
-            config=config,
-            credential_service=credential_service,
-        )
-        if not credentials or not credentials.is_valid():
-            from antcode_worker.transport.factory import TransportConfigError
-
-            message = "Gateway 模式首次启动必须配置安装 Key\n示例: ANTCODE_WORKER_KEY=xxx"
-            logger.error(f"传输层配置错误: {message}")
-            raise TransportConfigError(message)
-    worker_id = None
-
-    # 从环境变量读取 worker_id（优先级高于配置与凭证）
-    import os
-
-    env_worker_id = os.getenv("WORKER_ID")
-    if env_worker_id:
-        worker_id = env_worker_id
-
-    # 从凭证覆盖配置
-    gateway_host = getattr(config, "gateway_host", "localhost")
-    gateway_port = getattr(config, "gateway_port", 50051)
-    api_key = getattr(config, "api_key", None)
-
-    if not api_key:
-        api_key = os.getenv("WORKER_API_KEY")
-
-    if credentials and credentials.is_valid():
-        if credentials.gateway_host:
-            gateway_host = credentials.gateway_host
-        if credentials.gateway_port:
-            gateway_port = credentials.gateway_port
-        # 环境变量优先级高于凭证文件
-        if not env_worker_id and credentials.worker_id:
-            worker_id = credentials.worker_id
-        if not api_key and credentials.api_key:
-            api_key = credentials.api_key
-
-    if not worker_id and transport_mode == "direct":
-        from pathlib import Path
-
-        from antcode_worker.config import DATA_ROOT
-        from antcode_worker.security import init_identity_manager
-
-        data_dir = getattr(config, "data_dir", str(DATA_ROOT))
-        identity_path = Path(data_dir) / "identity" / "worker_identity.yaml"
-        name = getattr(config, "name", "")
-        labels = {"name": name} if name else None
-        identity_manager = init_identity_manager(
-            identity_path=identity_path,
-            zone=getattr(config, "region", "default"),
-            labels=labels,
-            version=getattr(config, "version", "0.1.0"),
-            install_signal_handler=False,
-        )
-        worker_id = identity_manager.worker_id
-        logger.info("Direct 模式未配置 worker_id，已生成本地身份: {}", worker_id)
-
+    bootstrap = _prepare_transport_bootstrap(config, transport_mode)
+    worker_id = bootstrap.worker_id
+    credentials = bootstrap.credentials
     if transport_mode == "direct":
-        if not worker_id:
-            raise RuntimeError("Direct 模式无法建立稳定 worker_id")
-        _register_direct_worker(config=config, worker_id=worker_id)
-        # 已注册过的旧 worker：本地有 api_key 但无 redis_username → 自动迁移
-        _migrate_legacy_direct_worker_to_acl(config=config, worker_id=worker_id)
+        worker_id, credentials = _prepare_direct_transport(config, bootstrap)
 
     # 构建配置对象
     transport_config = TransportConfig(
         mode=transport_mode,
         worker_id=worker_id,
         direct=DirectConfig(
-            redis_url=_build_authenticated_redis_url(getattr(config, "redis_url", "")),
+            redis_url=_build_authenticated_redis_url(
+                getattr(config, "redis_url", ""),
+                credentials,
+            ),
             redis_namespace=getattr(config, "redis_namespace", "antcode"),
         ),
         gateway=GatewayConfigSpec(
-            host=gateway_host,
-            port=gateway_port,
+            host=bootstrap.gateway_host,
+            port=bootstrap.gateway_port,
             tls=getattr(config, "gateway_tls", False),
             ca_cert=getattr(config, "ca_cert", None),
             client_cert=getattr(config, "client_cert", None),
             client_key=getattr(config, "client_key", None),
-            api_key=api_key,
+            api_key=bootstrap.api_key,
         ),
     )
 
@@ -288,22 +234,13 @@ def _create_transport(config: Any) -> Any:
             consumer_group=transport_config.direct.consumer_group,
         )
     else:
-        from antcode_worker.transport.gateway import GatewayConfig, GatewayTransport
+        from antcode_worker.transport.gateway import GatewayTransport
 
         # P2-20: worker_id 必须在 GatewayConfig 构造时就写入,后续
         # deregister() 会读 ``_gateway_config.worker_id`` 来发 Deregister RPC。
         # ``set_credentials`` 只是二次兜底(比如 api_key 后置注入的场景),
         # 真正的 single source of truth 是构造参数里的 ``worker_id``。
-        gateway_config = GatewayConfig(
-            gateway_host=gateway_host,
-            gateway_port=gateway_port,
-            use_tls=transport_config.gateway.tls,
-            ca_cert_path=transport_config.gateway.ca_cert,
-            client_cert_path=transport_config.gateway.client_cert,
-            client_key_path=transport_config.gateway.client_key,
-            api_key=api_key,
-            worker_id=worker_id,
-        )
+        gateway_config = build_gateway_transport_config(transport_config)
         transport = GatewayTransport(gateway_config=gateway_config)
         if worker_id:
             # 显式再走一次 set_credentials,让 ``_gateway_config.worker_id``
@@ -313,22 +250,106 @@ def _create_transport(config: Any) -> Any:
         return transport
 
 
-def _build_authenticated_redis_url(base_url: str) -> str:
-    """如果本地 SecretsManager 有 redis_username/password，则注入到 URL。"""
+def _prepare_transport_bootstrap(config: Any, transport_mode: str) -> _TransportBootstrap:
+    import os
+
+    from antcode_core.common.config import settings
+
+    from antcode_worker.services.credential import get_credential_store, init_credential_service
+
+    store = get_credential_store(
+        getattr(config, "credential_store", "persistent"),
+        Path(getattr(config, "data_dir")),
+    )
+    credential_service = init_credential_service(store)
+    credentials = credential_service.load()
+    from antcode_worker.app.worker_registration import resume_registration_ack
+
+    resume_registration_ack(credential_service, credentials)
+    direct_acl_enabled = transport_mode == "direct" and settings.REDIS_ACL_ENABLED
+    credentials = _require_control_credentials(
+        config,
+        credential_service,
+        credentials,
+        required=transport_mode == "gateway" or direct_acl_enabled,
+    )
+    env_worker_id = os.getenv("WORKER_ID")
+    worker_id = env_worker_id or getattr(credentials, "worker_id", None)
+    if direct_acl_enabled and env_worker_id and env_worker_id != credentials.worker_id:
+        raise RuntimeError("WORKER_ID 与安装 Key 注册身份不匹配")
+    gateway_host = getattr(credentials, "gateway_host", "") or getattr(config, "gateway_host", "localhost")
+    gateway_port = getattr(credentials, "gateway_port", 0) or getattr(config, "gateway_port", 50051)
+    api_key = getattr(config, "api_key", None) or os.getenv("WORKER_API_KEY")
+    api_key = api_key or getattr(credentials, "api_key", None)
+    return _TransportBootstrap(
+        worker_id=worker_id,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        api_key=api_key,
+        credentials=credentials,
+        credential_service=credential_service,
+        direct_acl_enabled=direct_acl_enabled,
+    )
+
+
+def _require_control_credentials(
+    config: Any,
+    credential_service: Any,
+    credentials: Any,
+    *,
+    required: bool,
+) -> Any:
+    if not required or (credentials and credentials.is_valid()):
+        return credentials
+    credentials = _register_by_install_key(config=config, credential_service=credential_service)
+    if credentials and credentials.is_valid():
+        return credentials
+    from antcode_worker.transport.factory import TransportConfigError
+
+    message = "Gateway 或 Direct ACL 模式首次启动必须配置安装 Key\n示例: ANTCODE_WORKER_KEY=xxx"
+    raise TransportConfigError(message)
+
+
+def _prepare_direct_transport(config: Any, bootstrap: _TransportBootstrap) -> tuple[str, Any]:
+    worker_id = bootstrap.worker_id or _create_local_worker_id(config)
+    if not worker_id:
+        raise RuntimeError("Direct 模式无法建立稳定 worker_id")
+    if not bootstrap.direct_acl_enabled:
+        _register_direct_worker(config=config, worker_id=worker_id)
+        return worker_id, bootstrap.credentials
+    credentials = _issue_direct_redis_acl(
+        config=config,
+        credentials=bootstrap.credentials,
+        credential_service=bootstrap.credential_service,
+    )
+    return credentials.worker_id, credentials
+
+
+def _create_local_worker_id(config: Any) -> str:
+    from antcode_worker.config import DATA_ROOT
+    from antcode_worker.security import init_identity_manager
+
+    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
+    name = getattr(config, "name", "")
+    manager = init_identity_manager(
+        identity_path=Path(data_dir) / "identity" / "worker_identity.yaml",
+        zone=getattr(config, "region", "default"),
+        labels={"name": name} if name else None,
+        version=getattr(config, "version", "0.1.0"),
+        install_signal_handler=False,
+    )
+    logger.info("Direct 模式未配置 worker_id，已生成本地身份: {}", manager.worker_id)
+    return manager.worker_id
+
+
+def _build_authenticated_redis_url(base_url: str, credentials: Any | None) -> str:
+    """Inject the atomically persisted per-Worker Redis credentials."""
     from urllib.parse import urlsplit, urlunsplit
 
     if not base_url:
         return base_url
-    try:
-        from antcode_worker.security.secrets import get_secrets_manager
-
-        mgr = get_secrets_manager()
-    except Exception:
-        return base_url
-    if mgr is None:
-        return base_url
-    username = mgr.get("redis_username")
-    password = mgr.get("redis_password")
+    username = getattr(credentials, "redis_username", "")
+    password = getattr(credentials, "redis_password", "")
     if not username or not password:
         return base_url
     parsed = urlsplit(base_url)
@@ -339,13 +360,19 @@ def _build_authenticated_redis_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
-def _normalize_api_base_url(value: str | None, gateway_host: str) -> str:
-    url = (value or "").strip()
-    if not url:
-        url = f"http://{gateway_host}:8000"
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
+def _normalize_api_base_url(
+    value: str | None,
+    gateway_host: str,
+    *,
+    allow_insecure_internal: bool = False,
+) -> str:
+    from antcode_worker.app.worker_registration import normalize_api_base_url
+
+    return normalize_api_base_url(
+        value,
+        gateway_host,
+        allow_insecure_internal=allow_insecure_internal,
+    )
 
 
 def _should_trust_env_proxy(api_base_url: str) -> bool:
@@ -376,91 +403,72 @@ def _register_by_install_key(
     config: Any,
     credential_service: Any,
 ):
-    """使用安装 Key 注册 Worker，返回凭证（失败抛错）"""
-    import os
-    import secrets
-    import time
+    from antcode_worker.app.worker_registration import register_by_install_key
 
-    worker_key = getattr(config, "worker_key", "") or os.getenv("ANTCODE_WORKER_KEY")
-    if not worker_key:
-        return None
+    return register_by_install_key(config, credential_service)
 
-    gateway_host = getattr(config, "gateway_host", "localhost")
-    gateway_port = getattr(config, "gateway_port", 50051)
+
+def _issue_direct_redis_acl(
+    *,
+    config: Any,
+    credentials: Any | None,
+    credential_service: Any,
+):
+    """Rotate Direct Redis ACL credentials through the signed Web API."""
+    credential_service.ensure_durable_writable()
+    with credential_service.registration_session():
+        current = credential_service.load()
+        if current is None or not current.is_valid():
+            raise RuntimeError("Direct ACL 签发缺少有效的 Worker API/HMAC 凭据")
+        if credentials is not None and current.worker_id != credentials.worker_id:
+            raise RuntimeError("Direct ACL 签发期间 Worker 身份发生变化")
+        return _rotate_direct_redis_acl(config, current, credential_service)
+
+
+def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: Any):
+    from types import SimpleNamespace
+
+    import httpx
+    from antcode_core.common.utils.worker_request import build_worker_signed_headers
+
     api_base_url = _normalize_api_base_url(
-        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
-        gateway_host,
+        getattr(config, "api_base_url", ""),
+        getattr(config, "gateway_host", "localhost"),
+        allow_insecure_internal=getattr(config, "api_allow_insecure_internal", False),
     )
+    url = f"{api_base_url}/api/v1/workers/{credentials.worker_id}/redis-acl/issue"
+    headers = build_worker_signed_headers(
+        SimpleNamespace(public_id=credentials.worker_id),
+        api_key=credentials.api_key,
+        secret_key=credentials.secret_key,
+        payload={},
+    )
+    with httpx.Client(timeout=15.0, trust_env=_should_trust_env_proxy(api_base_url)) as client:
+        response = client.post(url, json={}, headers=headers)
+    body = _require_success_response(response, operation="Direct Redis ACL 签发")
+    data = body.get("data") or {}
+    username = str(data.get("redis_username") or "")
+    password = str(data.get("redis_password") or "")
+    if not username or not password:
+        raise RuntimeError("Direct Redis ACL 签发返回数据不完整")
+    updated = replace(credentials, redis_username=username, redis_password=password)
+    if not credential_service.save(updated):
+        raise RuntimeError("Direct Redis ACL 已轮换，但新凭据持久化失败")
+    return updated
 
-    host = getattr(config, "host", "")
-    if host in ("", "0.0.0.0", "127.0.0.1", "localhost"):
-        from antcode_worker.config import get_local_ip
 
-        host = get_local_ip()
-
-    payload = {
-        "key": worker_key,
-        "name": getattr(config, "name", "Worker-001"),
-        "host": host,
-        "port": getattr(config, "port", 8001),
-        "region": getattr(config, "region", ""),
-        "client_timestamp": int(time.time()),
-        "client_nonce": secrets.token_hex(16),
-    }
-
-    url = f"{api_base_url}/api/v1/workers/register-by-key"
-    logger.info("检测到安装 Key，开始注册 Worker: {}", url)
-
-    try:
-        import httpx
-
-        trust_env = _should_trust_env_proxy(api_base_url)
-        with httpx.Client(timeout=15.0, trust_env=trust_env) as client:
-            response = client.post(url, json=payload)
-    except Exception as e:
-        logger.error("安装 Key 注册请求失败: {}", e)
-        raise
-
+def _require_success_response(response: Any, *, operation: str) -> dict[str, Any]:
     try:
         body = response.json()
-    except ValueError:
-        body = None
-
+    except ValueError as exc:
+        raise RuntimeError(f"{operation}返回非 JSON 响应") from exc
     if response.status_code >= 400:
-        detail = None
-        if isinstance(body, dict):
-            detail = body.get("message") or body.get("detail")
-        raise RuntimeError(detail or f"安装 Key 注册失败 (HTTP {response.status_code})")
-
+        detail = body.get("message") or body.get("detail") if isinstance(body, dict) else None
+        raise RuntimeError(detail or f"{operation}失败 (HTTP {response.status_code})")
     if not isinstance(body, dict) or not body.get("success"):
         message = body.get("message") if isinstance(body, dict) else None
-        raise RuntimeError(message or "安装 Key 注册失败")
-
-    data = body.get("data") or {}
-    worker_id = data.get("worker_id", "")
-    api_key = data.get("api_key", "")
-    secret_key = data.get("secret_key", "")
-
-    if not worker_id or not api_key or not secret_key:
-        raise RuntimeError("安装 Key 注册返回数据不完整")
-
-    from antcode_worker.services.credential import WorkerCredentials
-
-    credentials = WorkerCredentials(
-        worker_id=worker_id,
-        api_key=api_key,
-        secret_key=secret_key,
-        gateway_host=gateway_host,
-        gateway_port=gateway_port,
-    )
-
-    saved = credential_service.save(credentials)
-    if not saved:
-        logger.warning("安装 Key 注册成功，但保存凭证失败")
-    else:
-        logger.info("安装 Key 注册成功: worker_id={}", worker_id)
-
-    return credentials
+        raise RuntimeError(message or f"{operation}失败")
+    return body
 
 
 def _register_direct_worker(
@@ -482,6 +490,7 @@ def _register_direct_worker(
     api_base_url = _normalize_api_base_url(
         getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
         gateway_host,
+        allow_insecure_internal=getattr(config, "api_allow_insecure_internal", False),
     )
 
     host = getattr(config, "host", "")
@@ -572,87 +581,6 @@ def _register_direct_worker(
     else:
         logger.info("Direct Worker 已注册: worker_id={}", worker_id)
 
-    # 若服务端返回了独立的 Redis ACL 凭证，立即持久化到 secrets 目录
-    redis_username = data.get("redis_username")
-    redis_password = data.get("redis_password")
-    if redis_username and redis_password:
-        _persist_worker_redis_credentials(config, redis_username, redis_password)
-        logger.info("Worker {} 已获得独立 Redis ACL 凭证: user={}", worker_id, redis_username)
-
-
-def _persist_worker_redis_credentials(config: Any, redis_username: str, redis_password: str) -> None:
-    """把服务端下发的 Worker Redis 账户写入 SecretsManager（含本地文件）。"""
-    from antcode_worker.security.secrets import get_secrets_manager
-
-    try:
-        mgr = get_secrets_manager()
-    except Exception as exc:
-        logger.warning("无法获取 SecretsManager 持久化 Redis 凭证: {}", exc)
-        return
-    if mgr is None:
-        return
-    try:
-        mgr.store("redis_username", redis_username)
-        mgr.store("redis_password", redis_password)
-    except Exception as exc:
-        logger.warning("写入 Redis 凭证到 secrets 失败: {}", exc)
-
-
-def _migrate_legacy_direct_worker_to_acl(config: Any, worker_id: str) -> None:
-    """旧 Worker 自动迁移：已注册但本地无 redis_username → 调 issue 路由领取。
-
-    要求本地已有 worker api_key（注册时拿到的）才能鉴权。
-    """
-    import os
-
-    import httpx
-
-    from antcode_worker.security.secrets import get_secrets_manager
-
-    try:
-        mgr = get_secrets_manager()
-    except Exception:
-        return
-    if mgr is None:
-        return
-    if mgr.get("redis_username"):
-        return  # 已经有 ACL 凭证
-    api_key = mgr.get("api_key")
-    if not api_key:
-        return  # 第一次启动还没注册，走 register-direct 主路径
-
-    gateway_host = getattr(config, "gateway_host", "localhost")
-    api_base_url = _normalize_api_base_url(
-        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
-        gateway_host,
-    )
-    url = f"{api_base_url}/api/v1/workers/{worker_id}/redis-acl/issue"
-    trust_env = _should_trust_env_proxy(api_base_url)
-    try:
-        with httpx.Client(timeout=10.0, trust_env=trust_env) as client:
-            resp = client.post(url, headers={"X-API-Key": api_key})
-    except Exception as exc:
-        logger.warning("Worker {} 自动迁移 Redis ACL 失败: {}", worker_id, exc)
-        return
-    if resp.status_code >= 400:
-        logger.warning(
-            "Worker {} 自动迁移 Redis ACL 失败 HTTP={} body={}",
-            worker_id,
-            resp.status_code,
-            resp.text[:200],
-        )
-        return
-    try:
-        body = resp.json()
-    except ValueError:
-        return
-    data = (body or {}).get("data") or {}
-    redis_username = data.get("redis_username")
-    redis_password = data.get("redis_password")
-    if redis_username and redis_password:
-        _persist_worker_redis_credentials(config, redis_username, redis_password)
-        logger.info("Worker {} 自动迁移 Redis ACL 完成: user={}", worker_id, redis_username)
-
 
 def _create_runtime_manager(config: Any) -> Any:
     """创建运行时管理器"""
@@ -683,6 +611,7 @@ def _create_executor(config: Any) -> Any:
     SandboxExecutor(生产推荐)。之前 wiring 硬编码 ProcessExecutor,导致
     SandboxExecutor 虽定义但从不被使用。
     """
+    import os
     import shlex
     import shutil
 
@@ -723,10 +652,16 @@ def _create_executor(config: Any) -> Any:
             sandbox_command_list = shlex.split(sandbox_command_str)
         except ValueError as exc:
             raise RuntimeError("WORKER_SANDBOX_COMMAND 不是合法参数列表") from exc
-        if not sandbox_command_list or shutil.which(sandbox_command_list[0]) is None:
-            raise RuntimeError(
-                f"沙箱工具不可用: {sandbox_command_list[0] if sandbox_command_list else sandbox_command_str}"
-            )
+        if not sandbox_command_list:
+            raise RuntimeError(f"沙箱工具不可用: {sandbox_command_str}")
+        # P0-01: 用启动时的 PATH 解析出绝对路径固化到 SandboxConfig,防止任务
+        # exec_plan.env 注入 PATH 覆盖后使 asyncio.create_subprocess_exec 走
+        # workspace 内的伪造 bwrap。shutil.which 只用于校验 + 解析,SandboxConfig
+        # 里必须存绝对路径,后续 wrap_command 也会对绝对路径做断言(defense in depth)。
+        resolved_sandbox_bin = shutil.which(sandbox_command_list[0])
+        if resolved_sandbox_bin is None:
+            raise RuntimeError(f"沙箱工具不可用: {sandbox_command_list[0]}")
+        sandbox_command_list[0] = os.path.abspath(resolved_sandbox_bin)
 
         sandbox_config = SandboxConfig(
             enabled=True,
@@ -872,11 +807,25 @@ def _create_flow_controller(config: Any) -> Any:
     return create_flow_controller(strategy, flow_config)
 
 
-def _create_project_fetcher(config: Any) -> Any:
+def _create_artifact_transfer_store(config: Any, transport: Any) -> Any:
+    """Select the artifact data plane that matches the Worker transport."""
+    mode = str(getattr(config, "transport_mode", "gateway") or "gateway").lower()
+    if mode == "direct":
+        from antcode_worker.artifact_transfer import PostgresArtifactTransferStore
+
+        return PostgresArtifactTransferStore()
+    if mode == "gateway":
+        from antcode_worker.transport.gateway.artifacts import (
+            GatewayArtifactTransferStore,
+        )
+
+        return GatewayArtifactTransferStore(transport)
+    raise RuntimeError(f"未知的 Worker transport_mode: {mode!r}")
+
+
+def _create_project_fetcher(config: Any, transport: Any) -> Any:
     """创建项目获取器"""
     import os
-
-    from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
 
     from antcode_worker.config import DATA_ROOT
     from antcode_worker.projects.fetcher import ArtifactFetcher, ProjectWorkspace
@@ -884,16 +833,16 @@ def _create_project_fetcher(config: Any) -> Any:
     data_dir = getattr(config, "data_dir", str(DATA_ROOT))
     runs_dir = getattr(config, "runs_dir", None) or os.path.join(data_dir, "runs")
     workspace = ProjectWorkspace(root_dir=os.path.join(runs_dir, "sources"))
-    return ArtifactFetcher(workspace=workspace, artifact_store=PostgresArtifactStore())
+    store = _create_artifact_transfer_store(config, transport)
+    return ArtifactFetcher(workspace=workspace, artifact_store=store)
 
 
-def _create_artifact_manager(config: Any) -> Any:
+def _create_artifact_manager(config: Any, transport: Any) -> Any:
     """创建产物管理器"""
-    from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
-
     from antcode_worker.executor.artifacts import ArtifactManager
 
-    return ArtifactManager(artifact_store=PostgresArtifactStore())
+    store = _create_artifact_transfer_store(config, transport)
+    return ArtifactManager(artifact_store=store)
 
 
 def _create_observability_server(config: Any, transport: Any, engine: Any) -> Any:

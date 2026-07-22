@@ -6,6 +6,8 @@
 Requirements: 7.4
 """
 
+import asyncio
+import contextlib
 import os
 import shutil
 from abc import ABC, abstractmethod
@@ -30,21 +32,14 @@ from antcode_worker.executor.base import (
     NoOpLogSink,
 )
 from antcode_worker.executor.process import ProcessExecutor
-
-_RULE_PLUGIN_ENV_VARS = frozenset(
-    {
-        "ANTCODE_SPIDER_RUN_ID",
-        "ANTCODE_SPIDER_PROJECT_ID",
-        "ANTCODE_SPIDER_SINK_MODE",
-        "ANTCODE_SPIDER_GATEWAY_ENDPOINT",
-        "ANTCODE_SPIDER_GATEWAY_SECURE",
-        "ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN",
-        "ANTCODE_SPIDER_REDIS_URL",
-        "ANTCODE_SPIDER_REDIS_NAMESPACE",
-        "ANTCODE_SPIDER_WORKER_ID",
-    }
+from antcode_worker.executor.rule_policy import (
+    RULE_PLUGIN_ENV_VARS,
+    RULE_SANDBOX_ALLOW_NETWORK,
 )
-_RULE_PLUGIN_SECRET_ENV = frozenset({"ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"})
+
+_RULE_PLUGIN_ENV_VARS = RULE_PLUGIN_ENV_VARS
+_PRLIMIT_EXECUTABLE = "prlimit"
+_PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
 
 
 @dataclass
@@ -74,6 +69,14 @@ class SandboxConfig:
             "LC_ALL",
             "VIRTUAL_ENV",
             "UV_CACHE_DIR",
+            "GOCACHE",
+            "GOMODCACHE",
+            "GOENV",
+            "GOTOOLCHAIN",
+            # P2 §4.4: 沙箱内 go 必须离线（GOPROXY=off）使用 prep 阶段
+            # 预热的模块缓存；GOFLAGS=-mod=mod 允许按 go.mod 读缓存。
+            "GOPROXY",
+            "GOFLAGS",
         ]
     )
 
@@ -91,6 +94,13 @@ class SandboxConfig:
 
     # 自定义沙箱命令前缀（如 firejail, bubblewrap 等）
     sandbox_command: list[str] | None = None
+
+
+@dataclass
+class SandboxRunMarker:
+    """连接沙箱准备阶段与内层进程启动阶段的取消状态。"""
+
+    cancel_requested: bool = False
 
 
 class SandboxProvider(ABC):
@@ -209,6 +219,7 @@ class BasicSandbox(SandboxProvider):
             "temp_work_dir": None,
             "cleanup_dirs": [],
             "plugin_name": exec_plan.plugin_name,
+            "allow_network": self._rule_network_allowed(exec_plan),
         }
 
         # 外部 namespace 沙箱直接绑定当前 run 的独立 workspace。创建空临时
@@ -231,6 +242,16 @@ class BasicSandbox(SandboxProvider):
         """包装命令"""
         if not self.config.sandbox_command:
             raise RuntimeError("真实沙箱命令未配置，拒绝执行用户任务")
+
+        # P0-01: 沙箱启动器必须是绝对路径,防止任务 env.PATH 注入后
+        # asyncio.create_subprocess_exec 走 workspace 内伪造的同名程序。
+        # wiring._create_executor 在启动时通过 shutil.which 解析并写回绝对路径;
+        # 这里作 defense-in-depth 断言,任何绕过 wiring 的构造(单测/自定义 provider)
+        # 传入相对路径都会立刻失败,而不是等到运行时被劫持。
+        if not os.path.isabs(self.config.sandbox_command[0]):
+            raise RuntimeError(
+                f"沙箱启动命令必须是绝对路径,当前 {self.config.sandbox_command[0]!r} 会被任务 env.PATH 劫持"
+            )
 
         executable = os.path.basename(self.config.sandbox_command[0])
         if executable != "bwrap":
@@ -256,7 +277,7 @@ class BasicSandbox(SandboxProvider):
             "--tmpfs",
             "/tmp",
         ]
-        if self.config.network_isolated:
+        if self.config.network_isolated and not context.get("allow_network", False):
             wrapped.append("--unshare-net")
 
         sensitive_dirs = (
@@ -269,20 +290,102 @@ class BasicSandbox(SandboxProvider):
             if sensitive_dir.exists():
                 wrapped.extend(["--tmpfs", str(sensitive_dir)])
 
-        resolved_work_dir = Path(work_dir).resolve()
-        for hidden_root in sensitive_dirs:
+        # 主机凭据目录 masking: --ro-bind / / 会把整棵主机 FS 只读暴露给不可信
+        # 载荷,凭据目录必须额外用 tmpfs 盖掉。载荷/运行时(uv/go/python/
+        # playwright,缓存均在 DATA_ROOT / /opt / /app)从不需要这些目录,tmpfs
+        # 后仍可写只是不映射主机内容;.exists() 守卫保证目录缺失时不下发挂载点
+        # (避免 ro 根下 bwrap 建挂载点失败)。仅盖凭据子目录,不整体盖 $HOME/
+        # /root,防止误伤潜在缓存。
+        for cred_dir in self._credential_mask_dirs():
+            wrapped.extend(["--tmpfs", str(cred_dir)])
+
+        self._append_mount_dirs(wrapped, Path(work_dir), sensitive_dirs)
+
+        wrapped.extend(["--bind", work_dir, work_dir, "--chdir", work_dir, "--"])
+        return [*wrapped, *self._limit_payload_processes(cmd, context)]
+
+    @staticmethod
+    def _credential_mask_dirs() -> list[Path]:
+        """返回需要用 tmpfs 盖掉的主机凭据目录(仅返回真实存在的目录)。
+
+        ``--ro-bind / /`` 把整棵主机 FS 只读暴露给载荷,这里挑出常见凭据目录额外
+        tmpfs 遮蔽。要点:
+        - 用 ``.is_dir()`` 而非 ``.exists()`` 过滤:``--tmpfs`` 只能挂在目录挂载点上,
+          对普通文件下 tmpfs 会让 bwrap 直接失败,导致所有任务无法启动。
+        - 返回 ``resolve()`` 后的**真实路径**而非原候选路径:若 ``~/.aws`` 是指向
+          ``/root/.aws`` 的符号链接,只盖符号链接会留下真实目录经 ``--ro-bind / /``
+          仍可读(屏蔽被绕过);盖真实路径则符号链接访问也一并落空。
+        - 按真实路径去重(HOME 可能就是 /root,或多个候选指向同一目录)。
+        """
+        candidates = [
+            Path.home() / ".ssh",
+            Path.home() / ".aws",
+            Path.home() / ".config" / "gcloud",
+            Path.home() / ".kube",
+            Path.home() / ".docker",
+            Path("/root/.ssh"),
+            Path("/root/.aws"),
+            # P0-03: Docker/K8s Secret 挂载点。docker-compose 的 secrets: 会挂到
+            # /run/secrets,K8s Pod 的 ServiceAccount token 在
+            # /var/run/secrets/kubernetes.io,kubeconfig 在 /etc/kubernetes,
+            # kubelet 状态在 /var/lib/kubelet。--ro-bind / / 会把这些全部暴露
+            # 给用户载荷,K8s SA token 更是自动挂到每个 Pod 的默认路径,一律 tmpfs 掩掉。
+            Path("/run/secrets"),
+            Path("/var/run/secrets/kubernetes.io"),
+            Path("/etc/kubernetes"),
+            Path("/var/lib/kubelet"),
+        ]
+        seen: set[Path] = set()
+        masked: list[Path] = []
+        for candidate in candidates:
             try:
-                relative = resolved_work_dir.relative_to(hidden_root.resolve())
+                if not candidate.is_dir():  # is_dir() 跟随符号链接,同时排除文件
+                    continue
+                resolved = candidate.resolve()
+                if not resolved.is_dir():
+                    continue
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            masked.append(resolved)
+        return masked
+
+    @staticmethod
+    def _limit_payload_processes(cmd: list[str], context: dict[str, Any]) -> list[str]:
+        limit = int(context.get(_PAYLOAD_PROCESS_LIMIT_KEY, 0))
+        if limit <= 0:
+            return cmd
+        prlimit = shutil.which(_PRLIMIT_EXECUTABLE)
+        if not prlimit:
+            raise RuntimeError("启用 bwrap 进程限制需要 prlimit")
+        return [prlimit, f"--nproc={limit}:{limit}", "--", *cmd]
+
+    @staticmethod
+    def _rule_network_allowed(exec_plan: ExecPlan) -> bool:
+        if exec_plan.plugin_name != "rule":
+            return False
+        return exec_plan.sandbox_config.get(RULE_SANDBOX_ALLOW_NETWORK) is True
+
+    @staticmethod
+    def _append_mount_dirs(
+        wrapped: list[str],
+        work_dir: Path,
+        sensitive_dirs: tuple[Path, ...],
+    ) -> None:
+        resolved = work_dir.resolve()
+        masked_roots = (Path("/tmp"), *sensitive_dirs)
+        for root in masked_roots:
+            try:
+                relative = resolved.relative_to(root.resolve())
             except ValueError:
                 continue
-            current = hidden_root
+            current = root
             for part in relative.parts:
                 current /= part
                 wrapped.extend(["--dir", str(current)])
-            break
-
-        wrapped.extend(["--bind", work_dir, work_dir, "--chdir", work_dir, "--"])
-        return [*wrapped, *cmd]
+            return
 
     def filter_env(self, env: dict[str, str], context: dict[str, Any]) -> dict[str, str]:
         """过滤环境变量"""
@@ -308,8 +411,7 @@ class BasicSandbox(SandboxProvider):
             if key in env:
                 key_upper = key.upper()
                 is_sensitive = any(p in key_upper for p in sensitive_patterns)
-                trusted_plugin_secret = plugin_name == "rule" and key in _RULE_PLUGIN_SECRET_ENV
-                if not is_sensitive or trusted_plugin_secret:
+                if not is_sensitive:
                     filtered[key] = env[key]
 
         return filtered
@@ -401,7 +503,9 @@ class SandboxExecutor(BaseExecutor):
         Requirements: 7.4
         """
         sink = log_sink or NoOpLogSink()
-        run_id = exec_plan.plugin_name or f"sandbox_{id(exec_plan)}"
+        # P0-02: 用真实 run_id 注册任务；plugin_name 是共享键（"rule"/"code"），
+        # 会让 base.cancel() 找不到真 run_id 而直接返回 False，也会让同插件并发任务互相覆盖。
+        run_id = exec_plan.run_id or exec_plan.plugin_name or f"sandbox_{id(exec_plan)}"
 
         # 获取信号量
         async with self._semaphore:
@@ -417,6 +521,12 @@ class SandboxExecutor(BaseExecutor):
         """在沙箱中执行任务"""
         started_at = datetime.now()
         context: dict[str, Any] = {}
+        process_task: asyncio.Task[ExecResult] | None = None
+
+        # P0-02: 外层用真 run_id 注册一个哨兵，让 BaseExecutor.cancel(run_id) 能命中并走到 _do_cancel。
+        # 真实进程句柄在内层 ProcessExecutor 中，取消时委托到 self._process_executor.cancel(run_id)。
+        marker = SandboxRunMarker()
+        await self._register_task(run_id, marker)
 
         try:
             # 准备沙箱环境
@@ -426,8 +536,24 @@ class SandboxExecutor(BaseExecutor):
             # 创建沙箱化的执行计划
             sandboxed_plan = self._create_sandboxed_plan(exec_plan, runtime_handle, context)
 
-            # 使用 ProcessExecutor 执行
-            result = await self._process_executor.run(sandboxed_plan, runtime_handle, log_sink)
+            if marker.cancel_requested:
+                result = self._cancelled_before_process_start(run_id, started_at)
+                self._update_stats(result.status)
+                return result
+
+            startup_event = asyncio.Event()
+            process_task = asyncio.create_task(
+                self._process_executor.run(
+                    sandboxed_plan,
+                    runtime_handle,
+                    log_sink,
+                    startup_event=startup_event,
+                )
+            )
+            await startup_event.wait()
+            if marker.cancel_requested:
+                await self._process_executor.cancel(run_id)
+            result = await process_task
 
             # 更新统计
             self._update_stats(result.status)
@@ -450,9 +576,12 @@ class SandboxExecutor(BaseExecutor):
             return result
 
         finally:
+            await self._cancel_pending_process_task(process_task)
             # 清理沙箱环境
             if context:
                 await self._sandbox.cleanup(context)
+            # P0-02: 无论成功/失败/异常都要注销，避免 _running_tasks 泄漏
+            await self._unregister_task(run_id)
 
     def _create_sandboxed_plan(
         self,
@@ -468,37 +597,84 @@ class SandboxExecutor(BaseExecutor):
             cmd = [exec_plan.command]
         cmd.extend(exec_plan.args)
 
+        context[_PAYLOAD_PROCESS_LIMIT_KEY] = self._payload_process_limit(exec_plan)
+
         # 包装命令
         wrapped_cmd = self._sandbox.wrap_command(cmd, context)
 
         # 过滤环境变量
+        # P0-01: 环境合并顺序 = os.environ(baseline) → exec_plan.env(任务请求)
+        # → filter_env(白名单过滤) → 强制关键变量(Worker 权威)。
+        # 之前的顺序把 runtime 变量放在 exec_plan.env 之前,导致任务可以覆盖
+        # PYTHONPATH / VIRTUAL_ENV / PATH; 且 PATH 在白名单里,filter_env 不会剥离。
+        # 修复:任务 env 先与 os.environ 合并,filter 白名单过滤后,再由 Worker
+        # 权威强制写入 PYTHONPATH / VIRTUAL_ENV / PATH,并删除 LD_*/BASH_ENV 类
+        # 进程劫持向量(白名单不含但双保险)。
         env = os.environ.copy()
-        env["PYTHONPATH"] = runtime_handle.path
-        env["VIRTUAL_ENV"] = runtime_handle.path
         env.update(exec_plan.env)
         filtered_env = self._sandbox.filter_env(env, context)
+        filtered_env["PYTHONPATH"] = runtime_handle.path
+        filtered_env["VIRTUAL_ENV"] = runtime_handle.path
+        filtered_env["PATH"] = os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        for hijack_key in ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV"):
+            filtered_env.pop(hijack_key, None)
 
         # 创建新的执行计划
+        # P0-02: 必须原样透传 run_id 和全部资源/rlimit 字段。
+        # 否则内层 ProcessExecutor 会退回用 plugin_name（共享键）注册，导致同插件并发覆盖 +
+        # 外层 cancel 命中不了；且用户配置的 max_open_files / max_processes / max_file_size_mb /
+        # enforce_rlimit 会在沙箱模式下被丢弃。
         return ExecPlan(
             command=wrapped_cmd[0],
             args=wrapped_cmd[1:],
             env=filtered_env,
             cwd=context.get("work_dir", exec_plan.cwd),
+            run_id=exec_plan.run_id,
             timeout_seconds=exec_plan.timeout_seconds,
             grace_period_seconds=exec_plan.grace_period_seconds,
             memory_limit_mb=exec_plan.memory_limit_mb,
             cpu_limit_seconds=exec_plan.cpu_limit_seconds,
+            max_open_files=exec_plan.max_open_files,
+            max_processes=exec_plan.max_processes,
+            max_file_size_mb=exec_plan.max_file_size_mb,
+            enforce_rlimit=exec_plan.enforce_rlimit,
             artifact_patterns=exec_plan.artifact_patterns,
             collect_stdout=exec_plan.collect_stdout,
             collect_stderr=exec_plan.collect_stderr,
             sandbox_enabled=False,  # 已经在沙箱中
+            sandbox_config=dict(exec_plan.sandbox_config),
             plugin_name=exec_plan.plugin_name,
         )
 
+    def _payload_process_limit(self, exec_plan: ExecPlan) -> int:
+        enforce = exec_plan.enforce_rlimit if exec_plan.enforce_rlimit is not None else self.config.enforce_rlimit
+        if not enforce:
+            return 0
+        return exec_plan.max_processes or self.config.default_max_processes
+
     async def _do_cancel(self, run_id: str, task_info: Any) -> None:
         """执行取消操作"""
-        # 委托给 ProcessExecutor
+        if isinstance(task_info, SandboxRunMarker):
+            task_info.cancel_requested = True
         await self._process_executor.cancel(run_id)
+
+    def _cancelled_before_process_start(self, run_id: str, started_at: datetime) -> ExecResult:
+        return self._create_result(
+            run_id=run_id,
+            status=RunStatus.CANCELLED,
+            exit_reason=ExitReason.CANCELLED,
+            error_message="任务在沙箱准备阶段被取消",
+            started_at=started_at,
+            finished_at=datetime.now(),
+        )
+
+    @staticmethod
+    async def _cancel_pending_process_task(process_task: asyncio.Task[ExecResult] | None) -> None:
+        if process_task is None or process_task.done():
+            return
+        process_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await process_task
 
 
 # 沙箱工厂函数
