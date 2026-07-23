@@ -22,20 +22,20 @@ import re
 import time
 from collections.abc import Awaitable
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
 from antcode_contracts import data_pb2
-from antcode_contracts.transcode import (
-    datetime_to_proto_timestamp,
-    encode_task_status,
-    log_type_str_to_proto,
-)
+from antcode_contracts.transcode import encode_task_status
+from antcode_core.common.log_limits import LogBatchLimits
+from antcode_core.infrastructure.redis import decode_stream_payload
 from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
 from antcode_core.observability.tracing import inject_trace
+from antcode_core.spider_retention import SpiderRetention
 from loguru import logger
 from redis.exceptions import ConnectionError, TimeoutError
 
@@ -51,15 +51,28 @@ from antcode_worker.transport.base import (
     TransportMode,
     WorkerState,
 )
+from antcode_worker.transport.redis.deferred_recovery import DeferredTaskRecovery
 from antcode_worker.transport.redis.keys import RedisKeys
+from antcode_worker.transport.redis.lease_generation import LeaseGenerationMixin
+from antcode_worker.transport.redis.owned_stream_ack import ack_owned_stream_entry
+from antcode_worker.transport.redis.pending_recovery import PendingMessageRecovery
 from antcode_worker.transport.redis.reclaim import PendingTaskReclaimer, ensure_consumer_group
+from antcode_worker.transport.redis.runtime_control import (
+    ControlChannel,
+    ControlSource,
+    PendingControlRecovery,
+    RuntimeControlResult,
+    recover_runtime_control_settlement,
+    settle_runtime_control_result,
+)
+from antcode_worker.transport.redis.runtime_control_evidence import SettlementEvidenceError
+from antcode_worker.transport.redis.task_settlement import ack_owned_task, requeue_owned_task
+
 
 # P1: Status / LogType / Timestamp 转换全部走 ``antcode_contracts.transcode``
 # （原来这里有本地 ``_STATUS_STR_TO_PROTO`` / ``_log_type_str_to_proto`` /
 # ``_datetime_to_proto_timestamp`` 三份拷贝，与 gateway/codecs.py 重复）。
-
-
-class RedisTransport(TransportBase):
+class RedisTransport(LeaseGenerationMixin, TransportBase):
     """
     Redis 传输层实现
 
@@ -90,11 +103,31 @@ class RedisTransport(TransportBase):
         self._worker_id = worker_id
         resolved_namespace = namespace or getattr(self._config, "redis_namespace", None)
         self._keys = RedisKeys(namespace=resolved_namespace)
+        self._spider_retention = SpiderRetention.from_env(
+            stream_max_len_env="ANTCODE_SPIDER_STREAM_MAXLEN",
+            ttl_seconds_env="ANTCODE_SPIDER_META_TTL_SECONDS",
+        )
         self._consumer_group = consumer_group or self._keys.consumer_group_name()
         self._consumer_name = self._keys.consumer_name(worker_id) if worker_id else "worker"
+        self._task_consumer_name = self._consumer_name
+        self._control_consumer_name = self._consumer_name
         self._control_group = control_group or self._keys.consumer_group_name("control")
         self._global_control_group = f"{self._control_group}:{worker_id or 'worker'}"
+        self._control_channels = self._build_control_channels()
+        # 控制面 poll 轮转标志：per-worker 与 global 交替优先，防饥饿。
+        self._control_poll_flip = True
+        self._control_recovery = PendingControlRecovery(
+            self._control_channels,
+            legacy_consumer_name=self._consumer_name,
+        )
+        self._task_recovery = PendingMessageRecovery(
+            self._keys.task_ready_stream(worker_id),
+            self._consumer_group,
+        )
         self._reclaimer: PendingTaskReclaimer | None = None
+        # W3: 串行化 reconnect()，避免并发重连各自 start() 建 fresh redis /
+        # PendingTaskReclaimer / DeferredTaskRecovery 并孤儿化更早的实例。
+        self._reconnect_lock = asyncio.Lock()
         self._receipt_cache: dict[str, tuple[str, str, dict[str, Any]]] = {}
         self._poll_error_count = 0
         self._poll_backoff_until = 0.0
@@ -104,6 +137,16 @@ class RedisTransport(TransportBase):
         # P3：Direct 模式下 Worker 直连 Redis，自带 LeaseStore（共享 redis_client）。
         self._lease_store: Any = None
         self._lease_id: str = ""
+        self._lease_fencing_enabled = False
+        # 复审 P1-GW-03: 代际丢失后置位，本进程拒绝以新代际继续。
+        self._generation_lost = False
+        self._deferred_recovery = DeferredTaskRecovery(
+            redis_provider=lambda: self._redis,
+            consumer_group=self._consumer_group,
+            current_consumer_name=lambda: self._task_consumer_name,
+            generation_guard=self._is_current_generation,
+            on_visible=self._enqueue_reclaimed,
+        )
 
     def _is_connection_error(self, exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError)):
@@ -124,6 +167,16 @@ class RedisTransport(TransportBase):
     @property
     def mode(self) -> TransportMode:
         return TransportMode.DIRECT
+
+    @property
+    def ownership_redis_client(self) -> "Redis | None":
+        """run ownership fence 必须复用本 transport 的 ACL client（P1-DR-01）。"""
+        return self._redis
+
+    @property
+    def ownership_redis_namespace(self) -> str:
+        """run ownership fence 必须复用本 transport 解析出的 namespace（P1-DR-01）。"""
+        return self._keys.namespace
 
     async def start(self) -> bool:
         """启动 Redis 连接"""
@@ -165,6 +218,20 @@ class RedisTransport(TransportBase):
                     self._keys.control_global_stream(),
                     self._global_control_group,
                 )
+                self._control_recovery.reset()
+                self._task_recovery.reset()
+
+                from antcode_core.application.services.lease_service import (
+                    LeasePolicy,
+                    LeaseStore,
+                )
+
+                self._lease_store = LeaseStore(
+                    redis_client=self._redis,
+                    namespace=self._keys.namespace,
+                    policy=LeasePolicy(),
+                )
+                self._lease_fencing_enabled = True
 
                 # 启动 pending 回收器
                 # R1-P0-4 (审查报告)：认领到的消息通过 on_reclaimed 回调塞进
@@ -174,26 +241,14 @@ class RedisTransport(TransportBase):
                     redis_client=self._redis,
                     worker_id=self._worker_id,
                     keys=self._keys,
+                    consumer_group=self._consumer_group,
+                    generation_guard=self._is_current_generation,
+                    current_consumer_name=lambda: self._task_consumer_name,
                     on_reclaimed=self._enqueue_reclaimed,
+                    on_delivery_failed=self._task_recovery.reset,
                 )
                 await self._reclaimer.start()
-
-                # P3：构造本地 LeaseStore（共享 redis_client + namespace）。
-                # Direct 模式没有 Gateway 接管 lease，Worker 自己 grant 即可。
-                try:
-                    from antcode_core.application.services.lease_service import (
-                        LeasePolicy,
-                        LeaseStore,
-                    )
-
-                    ns = getattr(self._keys, "namespace", None) or "antcode"
-                    self._lease_store = LeaseStore(
-                        redis_client=self._redis,
-                        namespace=ns,
-                        policy=LeasePolicy(),
-                    )
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(f"Direct 模式构造 LeaseStore 失败: {exc}")
+                await self._deferred_recovery.start()
 
                 self._running = True
                 await self._set_state(WorkerState.ONLINE)
@@ -228,13 +283,17 @@ class RedisTransport(TransportBase):
 
         self._running = False
 
+        shutdown_steps = []
         if self._reclaimer:
-            await self._reclaimer.stop()
-            self._reclaimer = None
-
+            shutdown_steps.append(self._reclaimer.stop())
+        shutdown_steps.append(self._deferred_recovery.stop())
         if self._redis:
-            await self._redis.aclose()
-            self._redis = None
+            shutdown_steps.append(self._redis.aclose())
+        if shutdown_steps:
+            await asyncio.gather(*shutdown_steps)
+
+        self._reclaimer = None
+        self._redis = None
 
         await self._set_state(WorkerState.OFFLINE)
         logger.info("Redis 传输层已停止")
@@ -248,10 +307,19 @@ class RedisTransport(TransportBase):
         if not self._worker_id or not self._redis:
             return
         try:
-            if self._lease_store is not None:
-                await self._lease_store.revoke(self._worker_id, reason=reason)
+            if self._lease_store is None:
+                raise RuntimeError("Direct lease store 未初始化")
+            revoked = await self._lease_store.revoke(
+                self._worker_id,
+                lease_id=self._lease_id,
+                reason=reason,
+            )
         except Exception as exc:
             logger.warning(f"deregister revoke lease 失败: {exc}")
+            return
+        if not revoked:
+            logger.warning("跳过旧 generation deregister: worker_id={}", self._worker_id)
+            return
         try:
             from antcode_core.infrastructure.redis import worker_heartbeat_key
 
@@ -278,6 +346,8 @@ class RedisTransport(TransportBase):
         if not self._redis or not self._running:
             return None
 
+        await self._require_current_generation()
+
         # R1-P0-4: 优先出被认领的旧消息
         reclaimed: tuple[str, dict[str, str]] | None = None
         try:
@@ -289,15 +359,12 @@ class RedisTransport(TransportBase):
             stream_key = self._keys.task_ready_stream(self._worker_id)
             if reclaimed is not None:
                 msg_id, data = reclaimed
-                stream_name = stream_key
-                decoded = self._decode_data(data)
-                receipt = self._encode_receipt(stream_name, msg_id)
-                # 走原来的构造分支
-                self._poll_error_count = 0
-                self._poll_backoff_until = 0.0
-                # fallthrough 到下面构造 TaskMessage 用 decoded
-                # 但为了不重复代码，跳到公共构造点：复制一份
-                return self._build_task_message(stream_name, msg_id, decoded, receipt)
+                return await self._build_guarded_task(stream_key, msg_id, data)
+
+            pending = await self._task_recovery.poll(self._redis, self._task_consumer_name)
+            if pending is not None:
+                msg_id, data = pending
+                return await self._build_guarded_task(stream_key, msg_id, data)
 
             now = time.monotonic()
             if self._poll_backoff_until > now:
@@ -305,7 +372,7 @@ class RedisTransport(TransportBase):
 
             result = await self._redis.xreadgroup(
                 groupname=self._consumer_group,
-                consumername=self._consumer_name,
+                consumername=self._task_consumer_name,
                 streams={stream_key: ">"},
                 count=1,
                 block=int(timeout * 1000),
@@ -323,12 +390,10 @@ class RedisTransport(TransportBase):
                 return None
 
             msg_id, data = messages[0]
-            decoded = self._decode_data(data)
-            receipt = self._encode_receipt(stream_name, msg_id)
-            # 构造 TaskMessage 走公共入口（含 SourceBundle 契约、traceparent 挂载）
-            return self._build_task_message(stream_name, msg_id, decoded, receipt)
+            return await self._build_guarded_task(stream_name, msg_id, data)
 
         except Exception:
+            self._task_recovery.reset()
             self._poll_error_count += 1
             delay = min(30.0, 0.5 * (2 ** (self._poll_error_count - 1)))
             self._poll_backoff_until = time.monotonic() + delay
@@ -337,6 +402,58 @@ class RedisTransport(TransportBase):
             if self._poll_error_count % 3 == 0:
                 await self.reconnect()
             raise
+
+    # 解码/构造类失败 = 坏帧（内容永久无效）；连接、代际类异常不在此列，
+    # 仍走 poll 重试路径。
+    _BAD_FRAME_ERRORS = (ValueError, KeyError, TypeError)
+
+    async def _build_guarded_task(
+        self,
+        stream_name: str,
+        message_id: str,
+        data: dict[Any, Any],
+    ) -> TaskMessage | None:
+        await self._require_current_generation()
+        try:
+            decoded = self._decode_data(data)
+            receipt = self._encode_receipt(stream_name, message_id)
+            message = self._build_task_message(stream_name, message_id, decoded, receipt)
+        except self._BAD_FRAME_ERRORS as exc:
+            # P1-DR-02: 坏帧此前只 reset recovery，又被 pending recovery
+            # 反复重投（reclaim_generation 跳过当前 consumer），单个事件即可
+            # 永久堵塞任务面。现在当前代际直接 DLQ + ACK（幂等 settlement），
+            # 保留原始帧证据并解放 PEL。DLQ 写失败则冒泡，消息留 PEL 重试。
+            await self._dead_letter_bad_task_frame(stream_name, message_id, data, exc)
+            return None
+        self._poll_error_count = 0
+        self._poll_backoff_until = 0.0
+        return message
+
+    async def _dead_letter_bad_task_frame(
+        self,
+        stream_name: str,
+        message_id: str,
+        data: dict[Any, Any],
+        error: Exception,
+    ) -> None:
+        if self._reclaimer is None:
+            raise RuntimeError(f"坏任务帧无法 DLQ（reclaimer 未启动）: stream={stream_name} msg={message_id}")
+        logger.error(
+            "坏任务帧进 DLQ: stream={} msg={} error={}: {}",
+            stream_name,
+            message_id,
+            type(error).__name__,
+            error,
+        )
+        payload = {self._settlement_text(k): self._settlement_text(v) for k, v in (data or {}).items()}
+        payload["_bad_frame_error"] = f"{type(error).__name__}: {error}"
+        await self._reclaimer.dead_letter_owned(stream_name, message_id, payload)
+
+    @staticmethod
+    def _settlement_text(value: Any) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
 
     def _build_task_message(
         self,
@@ -362,6 +479,7 @@ class RedisTransport(TransportBase):
             source_bundle=source_bundle,
             source_subdir=decoded.get("source_subdir", "") or "",
             entry_point=decoded.get("entry_point", "") or "",
+            runtime_env_name=decoded.get("runtime_env_name", "") or "",
             run_id=decoded.get("run_id", "") or "",
             receipt=receipt,
         )
@@ -379,18 +497,24 @@ class RedisTransport(TransportBase):
             return False
 
         try:
+            await self._require_current_generation()
             if not accepted:
                 return await self.requeue_task(task_id, reason=reason)
 
-            stream_key, msg_id = self._decode_receipt(task_id)
-            if not stream_key:
-                return False
-
+            stream_key, msg_id, _data = self._task_source(task_id)
+            await self._require_current_generation()
             acknowledged = await self._run_with_reconnect(
                 "确认任务",
-                lambda: self._redis.xack(stream_key, self._consumer_group, msg_id),
+                lambda: ack_owned_task(
+                    self._redis,
+                    stream_key=stream_key,
+                    group=self._consumer_group,
+                    message_id=msg_id,
+                    consumer_name=self._task_consumer_name,
+                ),
             )
-            if int(acknowledged or 0) != 1:
+            if int(acknowledged) < 0:
+                self._task_recovery.reset()
                 return False
             try:
                 await trim_acknowledged_stream(
@@ -404,8 +528,26 @@ class RedisTransport(TransportBase):
             return True
 
         except Exception:
+            self._task_recovery.reset()
             logger.exception("确认任务失败")
             return False
+
+    async def defer_task(self, receipt: str, reason: str = "") -> bool:
+        """登记精确 receipt，到可见时间后恢复当前 consumer 的该条 PEL。"""
+        try:
+            await self._require_current_generation()
+            stream_key, message_id, _data = self._task_source(receipt)
+            await self._deferred_recovery.defer(
+                stream_key=stream_key,
+                message_id=message_id,
+                consumer_name=self._task_consumer_name,
+            )
+        except Exception:
+            logger.exception("登记 deferred task 恢复失败: receipt={}", receipt)
+            return False
+        self._receipt_cache.pop(receipt, None)
+        logger.info(f"任务保留在 PEL 等待重投: receipt={receipt} reason={reason}")
+        return True
 
     async def report_result(self, result: TaskResult) -> bool:
         """上报任务结果
@@ -426,7 +568,14 @@ class RedisTransport(TransportBase):
             return False
 
         try:
+            await self._require_current_generation()
             result_key = self._keys.task_result_stream()
+            result_data = dict(result.data or {})
+            if self._lease_id:
+                producing_lease = str(result_data.get("lease_id") or "")
+                if producing_lease and producing_lease != self._lease_id:
+                    raise ValueError("TaskResult lease_id 与当前 Direct generation 冲突")
+                result_data["lease_id"] = self._lease_id
             ts_msg = encode_task_status(
                 run_id=result.run_id or "",
                 task_id=result.task_id or "",
@@ -437,7 +586,7 @@ class RedisTransport(TransportBase):
                 started_at=result.started_at,
                 finished_at=result.finished_at,
                 duration_ms=int(result.duration_ms or 0),
-                data=result.data,
+                data=result_data,
             )
 
             # P5.4: 透传当前 trace(由 engine ``_worker_loop`` set_current_trace
@@ -460,69 +609,50 @@ class RedisTransport(TransportBase):
                     f"report_result XADD 未返回 msg_id, 视为持久化失败: run_id={result.run_id} task_id={result.task_id}"
                 )
                 return False
+            # P1-GW-04 (round6): XADD 后代际若切换, 主动 XDEL 掉刚写入的 msg_id,
+            # 避免 master 侧 lease_validator 之外还有孤儿消息在 stream 里堆积;
+            # XDEL 失败不阻塞 (master 侧 fence 已够), 只 warn。
+            if not await self._is_current_generation():
+                try:
+                    await self._redis.xdel(result_key, msg_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("代际已切换但 XDEL 撤销 orphan result 失败: msg_id={} err={}", msg_id, exc)
+                from antcode_worker.transport.base import GenerationLostError
+
+                raise GenerationLostError("Direct Worker lease generation 在 XADD 后失效")
             return True
 
         except Exception:
             logger.exception("上报结果失败")
             return False
 
-    # U6: requeue 病毒消息阈值 + 死信 stream。
+    # U6: requeue 病毒消息阈值。
     MAX_REQUEUE_COUNT = 5
-    DEAD_LETTER_STREAM_SUFFIX = "task:dead_letter"
 
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
-        """重新入队任务
-
-        U6 修复点:
-        - 之前的实现没有 requeue 次数上限,某条"恶意 / 总是失败"的消息
-          会被无限重投,把 Worker 卡死在一条任务上(病毒消息)。这里加
-          ``MAX_REQUEUE_COUNT`` 上限,超过后写入 ``task:dead_letter``
-          Stream 并直接 ACK,避免死循环。
-        - 之前的实现把 cached dict 直接 ``xadd`` —— 但缓存里的 ``params``
-          / ``environment`` 已经被 ``_decode_data`` ``json.loads`` 成 dict,
-          ``xadd`` 不接受 nested dict 值(redis-py 会按 ``str(dict)`` stringify,
-          下一次 Worker poll 时再 ``json.loads`` 直接抛异常)。这里对
-          这几个字段在 requeue 写回前重新 ``json.dumps``。
-        """
+        """Atomically requeue an owned task or settle it through the shared DLQ protocol."""
         if not self._redis or not self._running:
             return False
 
         try:
-            cached = self._receipt_cache.get(receipt)
-            if not cached:
-                return False
-
-            stream_key, msg_id, data = cached
+            await self._require_current_generation()
+            stream_key, msg_id, data = self._task_source(receipt)
             data = dict(data)
-
-            # ---- 1) 计数 + 死信检查 ----
+            # U6: 毒消息防御——requeue_count 字段被污染成非数字时按 0 处理，
+            # 否则这里 ValueError → 外层 except 返回 False，消息永远卡在
+            # PEL 里等 reclaimer 兜底，requeue/DLQ 通路直接断掉。
             try:
                 current_count = int(data.get("requeue_count", "0") or "0")
             except (TypeError, ValueError):
                 current_count = 0
             requeue_count = current_count + 1
-
             if requeue_count > self.MAX_REQUEUE_COUNT:
-                # 写死信 + ack 原消息。死信 stream 用 namespace 拼接,与
-                # 现有 stream key naming 风格一致。
-                ns = getattr(self._keys, "namespace", None) or "antcode"
-                dead_letter_key = f"{ns}:{self.DEAD_LETTER_STREAM_SUFFIX}"
-                dead_payload = self._serialize_for_xadd(data)
-                dead_payload["requeue_count"] = str(requeue_count)
-                dead_payload["requeue_reason"] = reason or ""
-                dead_payload["dead_at"] = datetime.now().isoformat()
-                await self._run_with_reconnect(
-                    "写入死信 stream",
-                    lambda: self._redis.xadd(
-                        dead_letter_key,
-                        cast(dict[Any, Any], dead_payload),
-                        maxlen=10000,
-                        approximate=True,
-                    ),
-                )
-                await self._run_with_reconnect(
-                    "死信 ack",
-                    lambda: self._redis.xack(stream_key, self._consumer_group, msg_id),
+                if self._reclaimer is None:
+                    raise RuntimeError("Direct task reclaimer 未启动，无法写入统一 DLQ")
+                await self._reclaimer.dead_letter_owned(
+                    stream_key,
+                    msg_id,
+                    self._serialize_for_xadd(data),
                 )
                 self._receipt_cache.pop(receipt, None)
                 logger.warning(
@@ -530,29 +660,37 @@ class RedisTransport(TransportBase):
                     f"receipt={receipt} count={requeue_count} reason={reason}"
                 )
                 return True
-
-            # ---- 2) 正常 requeue:把 nested dict 字段重新 JSON 编码 ----
-            requeue_payload = self._serialize_for_xadd(data)
-            requeue_payload["requeue_count"] = str(requeue_count)
-            requeue_payload["requeue_reason"] = reason or ""
-            requeue_payload["requeue_at"] = datetime.now().isoformat()
-
+            payload = self._serialize_for_xadd(data)
+            payload["requeue_count"] = str(requeue_count)
+            payload["requeue_reason"] = reason or ""
+            await self._require_current_generation()
             await self._run_with_reconnect(
                 "任务重新入队",
-                lambda: self._redis.xadd(
-                    stream_key,
-                    cast(dict[Any, Any], requeue_payload),
+                lambda: requeue_owned_task(
+                    self._redis,
+                    stream_key=stream_key,
+                    group=self._consumer_group,
+                    message_id=msg_id,
+                    consumer_name=self._task_consumer_name,
+                    payload=payload,
                 ),
-            )
-            await self._run_with_reconnect(
-                "重新入队确认",
-                lambda: self._redis.xack(stream_key, self._consumer_group, msg_id),
             )
             self._receipt_cache.pop(receipt, None)
             return True
         except Exception:
             logger.exception("重新入队失败")
             return False
+
+    def _task_source(self, receipt: str) -> tuple[str, str, dict[str, Any]]:
+        stream_key, message_id = self._decode_receipt(receipt)
+        expected_stream = self._keys.task_ready_stream(self._worker_id)
+        cached = self._receipt_cache.get(receipt)
+        if not message_id or stream_key != expected_stream or cached is None:
+            raise ValueError("Direct task receipt 不属于当前 Worker")
+        cached_stream, cached_message_id, data = cached
+        if cached_stream != stream_key or cached_message_id != message_id:
+            raise ValueError("Direct task receipt 与本地交付记录冲突")
+        return stream_key, message_id, data
 
     def _serialize_for_xadd(self, data: dict[str, Any]) -> dict[str, str]:
         """把缓存中的解码后 dict 还原成 ``xadd`` 可接受的 ``str/bytes`` map。
@@ -584,88 +722,70 @@ class RedisTransport(TransportBase):
         # 内部转批，避免两条编码路径走样
         return await self.send_log_batch([log])
 
-    def _build_log_entry_proto(self, log: LogMessage):
-        """``LogMessage`` → ``data_pb2.LogEntry``"""
-        entry = data_pb2.LogEntry(
-            run_id=log.run_id or "",
-            log_type=log_type_str_to_proto(log.log_type),
-            content=log.content or "",
-            sequence=int(log.sequence or 0),
-        )
-        ts = datetime_to_proto_timestamp(log.timestamp or datetime.now())
-        if ts is not None:
-            entry.timestamp.CopyFrom(ts)
-        return entry
-
     async def send_log_batch(self, logs: list[LogMessage]) -> bool:
-        """发送批量日志
+        """构批与 Gateway 共用 ``transport.log_batches``（P1-DR-03/P1-GW-03）。
 
-        Follow-up #1 (post-review): 不再按 run_id 写到 per-run stream
-        ``antcode:log:stream:{run_id}``,改为统一写到全局 ingest stream
-        ``antcode:log:ingest``。这是和 Master ``log_ingest_loop`` 默认订阅 key
-        对齐的关键 —— 此前两边 key 永不相交,Direct 模式日志无法落库。
-
-        每个 ``run_id`` 仍单独打包成一条 ``LogBatch`` Proto(保持 batch 内
-        单一 run_id 语义),多个 run_id 的 batch 在同一 pipeline 内全部
-        XADD 到同一个 ingest stream。stream 由 MAXLEN 维持大小,不设
-        EXPIRE(共享 stream 永久存在,Master 通过 XACK 维护游标)。
+        - 同一 8 MiB 批 / 1 MiB 单行预算：超限在生产端显式 ``ValueError``，
+          不再出现"XADD 成功、Master 消费端拒收进 DLQ"的契约不一致。
+        - 内容确定性 ``batch_id``：XADD 响应丢失后重发得到相同 event_id，
+          Master 侧唯一索引去重。
         """
         if not self._redis or not self._running:
             return False
-
         if not logs:
             return True
 
         try:
+            await self._require_current_generation()
             redis = self._redis
             if redis is None:
                 return False
-            maxlen = self._keys.config.stream_max_len
-
-            # 按 run_id 分组打包,每个 run_id 一条 Proto LogBatch
-            batches: dict[str, list[LogMessage]] = {}
-            for log in logs:
-                batches.setdefault(log.run_id or "", []).append(log)
-
-            # Follow-up #1: 统一 ingest stream,不再按 run_id 分 stream
-            ingest_key = self._keys.log_ingest_stream()
-
-            async def _write_batches():
-                pipe = redis.pipeline(transaction=False)
-                for run_id, run_logs in batches.items():
-                    batch_msg = data_pb2.LogBatch(
-                        worker_id=self._worker_id or "",
-                    )
-                    for log in run_logs:
-                        batch_msg.entries.append(self._build_log_entry_proto(log))
-                    # P5.4: 把当前 trace 注入到每个 LogBatch,Master 端
-                    # ingester 可据此把同一 run 的日志按 trace_id 关联到调用链。
-                    inject_trace(batch_msg)
-                    payload_bytes = batch_msg.SerializeToString()
-                    if maxlen > 0:
-                        pipe.xadd(
-                            ingest_key,
-                            {PROTO_FIELD: payload_bytes},
-                            maxlen=maxlen,
-                            approximate=self._keys.config.stream_approx_max_len,
-                        )
-                    else:
-                        pipe.xadd(ingest_key, {PROTO_FIELD: payload_bytes})
-
-                return await pipe.execute(raise_on_error=False)
-
-            results = await self._run_with_reconnect("发送批量日志", _write_batches)
-            if len(results) != len(batches):
-                logger.error("发送批量日志返回数量不匹配")
-                return False
-            for result in results:
-                if isinstance(result, Exception) or not result:
-                    logger.error(f"发送批量日志失败: {result}")
-                    return False
-            return True
+            batches = self._build_log_batch_protos(logs)
+            write = partial(self._write_log_batches, redis, batches)
+            results = await self._run_with_reconnect("发送批量日志", write)
+            await self._require_current_generation()
+            return self._log_batch_results_succeeded(results, len(batches))
+        except ValueError:
+            # 永久无效输入（如单行超 1 MiB）必须冒泡，BatchSender 据此
+            # 终止发送循环，而不是把它当可重试失败无限重试。
+            raise
         except Exception:
             logger.exception("发送批量日志失败")
             return False
+
+    def _build_log_batch_protos(self, logs: list[LogMessage]) -> list[data_pb2.LogBatch]:
+        from antcode_worker.transport.log_batches import build_log_batches
+
+        if not self._lease_id:
+            raise RuntimeError("Direct 日志批次缺少当前 lease_id")
+        return build_log_batches(
+            logs,
+            worker_id=self._worker_id or "",
+            lease_id=self._lease_id,
+            limits=LogBatchLimits(),
+        )
+
+    async def _write_log_batches(
+        self,
+        redis: Any,
+        batches: list[data_pb2.LogBatch],
+    ) -> list[Any]:
+        pipe = redis.pipeline(transaction=False)
+        ingest_key = self._keys.log_ingest_stream()
+        for batch in batches:
+            # Producer-side MAXLEN can delete entries not yet ACKed by Master.
+            pipe.xadd(ingest_key, {PROTO_FIELD: batch.SerializeToString()})
+        return await pipe.execute(raise_on_error=False)
+
+    def _log_batch_results_succeeded(self, results: list[Any], expected: int) -> bool:
+        if len(results) != expected:
+            logger.error("发送批量日志返回数量不匹配")
+            return False
+        for result in results:
+            if isinstance(result, Exception) or not result:
+                logger.error(f"发送批量日志失败: {result}")
+                return False
+        return True
 
     async def send_log_chunk(
         self,
@@ -832,34 +952,6 @@ class RedisTransport(TransportBase):
 
         await self._run_with_reconnect("写心跳 Hash", _write_heartbeat)
 
-    async def lease_renew(
-        self,
-        current_lease_id: str,
-        metrics: dict | None = None,
-    ) -> tuple[str, int, int, bool]:
-        """Direct 模式 lease 续租：直接走本地 ``LeaseStore.grant``。
-
-        Returns:
-            ``(new_lease_id, expires_at_ms, renew_after_ms, revoked)``。
-            Direct 模式没有外部 Master 主动撤销链路，``revoked`` 恒为 False
-            （Worker 把 ``lease_renew`` 拿到的 lease_id 作为下一次续租入参）。
-        """
-        if not self._lease_store or not self._worker_id:
-            return ("", 0, 0, False)
-
-        lease = await self._lease_store.grant(
-            worker_id=self._worker_id,
-            current_lease_id=current_lease_id or "",
-            metrics=metrics,
-        )
-        self._lease_id = lease.lease_id
-        return (
-            lease.lease_id,
-            lease.expires_at_ms,
-            self._lease_store.policy.renew_after_ms,
-            False,
-        )
-
     async def poll_control(self, timeout: float = 5.0) -> ControlMessage | None:
         """拉取控制消息
 
@@ -873,24 +965,29 @@ class RedisTransport(TransportBase):
             return None
 
         try:
-            per_worker_stream = self._keys.control_stream(self._worker_id)
-            global_stream = self._keys.control_global_stream()
+            await self._require_current_generation()
+            pending = await self._control_recovery.poll(self._redis, self._control_consumer_name)
+            if pending is not None:
+                return await self._decode_control_delivery(*pending)
+            per_worker = (self._control_group, self._keys.control_stream(self._worker_id))
+            global_ = (self._global_control_group, self._keys.control_global_stream())
+            # P2: 每次 poll 轮转两个来源的先后顺序。此前固定 per-worker
+            # 优先，per-worker 持续有消息时 global 事件（全局取消/配置）
+            # 会被无限饿死。
+            order = (per_worker, global_) if self._control_poll_flip else (global_, per_worker)
+            self._control_poll_flip = not self._control_poll_flip
             half_block_ms = max(1, int(timeout * 500))
-            results = await self._redis.xreadgroup(
-                groupname=self._control_group,
-                consumername=self._consumer_name,
-                streams={per_worker_stream: ">"},
-                count=1,
-                block=half_block_ms,
-            )
-            if not results:
+            results = None
+            for group_name, stream_key in order:
                 results = await self._redis.xreadgroup(
-                    groupname=self._global_control_group,
-                    consumername=self._consumer_name,
-                    streams={global_stream: ">"},
+                    groupname=group_name,
+                    consumername=self._control_consumer_name,
+                    streams={stream_key: ">"},
                     count=1,
                     block=half_block_ms,
                 )
+                if results:
+                    break
             if not results:
                 return None
 
@@ -899,18 +996,9 @@ class RedisTransport(TransportBase):
                 return None
 
             msg_id, data = messages[0]
-            decoded = self._decode_data(data)
-            receipt = self._encode_receipt(stream_key, msg_id)
-
-            return ControlMessage(
-                control_type=decoded.get("control_type", ""),
-                task_id=decoded.get("task_id", ""),
-                run_id=decoded.get("run_id", ""),
-                reason=decoded.get("reason", ""),
-                payload=decoded,
-                receipt=receipt,
-            )
+            return await self._decode_control_delivery(stream_key, msg_id, data)
         except Exception:
+            self._control_recovery.reset()
             logger.exception("拉取控制消息失败")
             raise
 
@@ -920,21 +1008,12 @@ class RedisTransport(TransportBase):
             return False
 
         try:
-            stream_key, msg_id = self._decode_receipt(receipt)
-            if not stream_key:
-                return False
-            group = (
-                self._global_control_group if stream_key == self._keys.control_global_stream() else self._control_group
-            )
-            acknowledged = await self._redis.xack(stream_key, group, msg_id)
-            if int(acknowledged or 0) != 1:
-                return False
-            try:
-                await trim_acknowledged_stream(self._redis, stream_key, group)
-            except Exception:
-                logger.exception("控制 ACK 后裁剪失败: stream={}", stream_key)
+            await self._require_current_generation()
+            source = self._control_source(receipt)
+            await self._ack_control_source(source)
             return True
         except Exception:
+            self._control_recovery.reset()
             logger.exception("确认控制消息失败")
             return False
 
@@ -943,7 +1022,9 @@ class RedisTransport(TransportBase):
         request_id: str,
         reply_stream: str,
         success: bool,
-        data: dict | None = None,
+        *,
+        receipt: str = "",
+        data: Any = None,
         error: str = "",
     ) -> bool:
         """回传控制结果
@@ -956,35 +1037,219 @@ class RedisTransport(TransportBase):
         if not self._redis or not self._running:
             return False
 
+        source: ControlSource | None = None
         try:
-            payload = {
-                "request_id": request_id,
-                "success": str(bool(success)).lower(),
-                "data": "" if data is None else json.dumps(data, ensure_ascii=False),
-                "error": error or "",
-            }
-            msg_id = await self._redis.xadd(
-                reply_stream,
-                cast(dict[Any, Any], payload),
-                maxlen=1,
-                approximate=True,
+            await self._require_current_generation()
+            if not receipt:
+                raise ValueError("Direct 运行时控制结果缺少原控制事件 receipt")
+            source = self._control_source(receipt)
+            expected_reply = f"{self._keys.namespace}:control:reply:{request_id}"
+            result = RuntimeControlResult(
+                request_id=request_id,
+                reply_stream=reply_stream,
+                success=success,
+                data=data,
+                error=error,
             )
-            if not msg_id:
+            await settle_runtime_control_result(
+                self._redis,
+                source=source,
+                result=result,
+                expected_reply_stream=expected_reply,
+                worker_id=self._worker_id or "",
+                lease_id=self._lease_id,
+                lease_key=self._lease_store.lease_key(self._worker_id or ""),
+                namespace=self._keys.namespace,
+            )
+            await self._require_current_generation()
+            acknowledged = await ack_owned_stream_entry(
+                self._redis,
+                stream_key=source.channel.stream_key,
+                group=source.channel.group,
+                message_id=source.message_id,
+                consumer_name=source.consumer_name,
+            )
+            if int(acknowledged or 0) not in (0, 1):
+                raise RuntimeError("Direct 运行时控制 ACK 响应无效")
+            await self._trim_committed_control(source.channel)
+            return True
+        except SettlementEvidenceError:
+            logger.exception("Direct 运行时控制 settlement 证据损坏，隔离原控制事件")
+            if source is None:
                 return False
-            return bool(await self._redis.expire(reply_stream, 120))
+            try:
+                await self._ack_quarantined_control_source(source)
+            except Exception:
+                logger.exception("Direct 运行时控制损坏事件隔离失败")
+                return False
+            return True
         except Exception:
             logger.exception("回传控制结果失败")
             return False
 
+    def _build_control_channels(self) -> tuple[ControlChannel, ...]:
+        worker_stream = self._keys.control_stream(self._worker_id or "worker")
+        global_stream = self._keys.control_global_stream()
+        return (
+            ControlChannel(worker_stream, self._control_group),
+            ControlChannel(global_stream, self._global_control_group),
+        )
+
+    def _build_control_message(self, stream_key: str, msg_id: str, data: dict[Any, Any]) -> ControlMessage:
+        decoded = self._decode_data(data)
+        return ControlMessage(
+            control_type=decoded.get("control_type", ""),
+            task_id=decoded.get("task_id", ""),
+            run_id=decoded.get("run_id", ""),
+            reason=decoded.get("reason", ""),
+            payload=decoded,
+            receipt=self._encode_receipt(stream_key, msg_id),
+        )
+
+    # 坏控制帧日志里的单字段截断长度，避免刷爆日志。
+    _BAD_CONTROL_FIELD_LOG_CHARS = 512
+
+    async def _decode_control_delivery(
+        self,
+        stream_key: str,
+        message_id: str,
+        data: dict[Any, Any],
+    ) -> ControlMessage | None:
+        await self._require_current_generation()
+        try:
+            message = self._build_control_message(stream_key, message_id, data)
+        except self._BAD_FRAME_ERRORS as exc:
+            # P1-DR-02（控制面）：坏帧只 reset recovery 会被 pending
+            # recovery 无限重投，堵塞整个控制面（cancel 等指令全部延迟）。
+            # 复用 settlement 证据损坏的隔离出口：记录原始帧（截断）后
+            # owned-ACK 释放 PEL。ACK 失败会冒泡，消息保留重试。
+            raw_sample = {
+                self._settlement_text(k)[: self._BAD_CONTROL_FIELD_LOG_CHARS]: self._settlement_text(v)[
+                    : self._BAD_CONTROL_FIELD_LOG_CHARS
+                ]
+                for k, v in (data or {}).items()
+            }
+            logger.error(
+                "坏控制帧隔离(ACK 释放 PEL): stream={} msg={} error={}: {} raw={}",
+                stream_key,
+                message_id,
+                type(exc).__name__,
+                exc,
+                raw_sample,
+            )
+            source = self._control_source(self._encode_receipt(stream_key, message_id))
+            await self._ack_quarantined_control_source(source)
+            return None
+        global_stream = self._keys.control_global_stream()
+        if stream_key != global_stream or message.control_type != "runtime_manage":
+            if message.control_type != "runtime_manage":
+                return message
+            source = self._control_source(self._encode_receipt(stream_key, message_id))
+            try:
+                recovered = await recover_runtime_control_settlement(
+                    self._redis,
+                    source=source,
+                    worker_id=self._worker_id or "",
+                    lease_id=self._lease_id,
+                    lease_key=self._lease_store.lease_key(self._worker_id or ""),
+                    namespace=self._keys.namespace,
+                )
+            except SettlementEvidenceError:
+                logger.exception("Direct 运行时控制 settlement 证据损坏，隔离原控制事件")
+                await self._ack_quarantined_control_source(source)
+                return None
+            if not recovered:
+                return message
+            await self._ack_control_source(source)
+            return None
+        logger.error(
+            "拒绝 Direct global runtime_manage: stream={} msg_id={} request_id={}",
+            stream_key,
+            message_id,
+            (message.payload or {}).get("request_id", ""),
+        )
+        await self._ack_rejected_global_runtime(global_stream, message_id)
+        return None
+
+    async def _ack_rejected_global_runtime(self, stream_key: str, message_id: str) -> None:
+        if self._redis is None:
+            raise RuntimeError("Direct Redis 未连接，无法确认 global runtime_manage")
+        try:
+            source = self._control_source(self._encode_receipt(stream_key, message_id))
+            await self._ack_control_source(source)
+        except Exception:
+            self._control_recovery.reset()
+            raise
+
+    async def _ack_control_source(self, source: ControlSource) -> None:
+        if self._redis is None:
+            raise RuntimeError("Direct Redis 未连接，无法确认控制事件")
+        await self._require_current_generation()
+        acknowledged = await ack_owned_stream_entry(
+            self._redis,
+            stream_key=source.channel.stream_key,
+            group=source.channel.group,
+            message_id=source.message_id,
+            consumer_name=source.consumer_name,
+        )
+        if acknowledged != 1:
+            raise RuntimeError("Direct 控制 ACK 响应无效")
+        await self._trim_committed_control(source.channel)
+
+    async def _ack_quarantined_control_source(self, source: ControlSource) -> None:
+        if self._redis is None:
+            raise RuntimeError("Direct Redis 未连接，无法隔离控制事件")
+        await self._require_current_generation()
+        acknowledged = await ack_owned_stream_entry(
+            self._redis,
+            stream_key=source.channel.stream_key,
+            group=source.channel.group,
+            message_id=source.message_id,
+            consumer_name=source.consumer_name,
+        )
+        if int(acknowledged or 0) != 1:
+            raise RuntimeError("Direct 损坏控制事件 ACK 失败")
+
+    def _control_source(self, receipt: str) -> ControlSource:
+        stream_key, message_id = self._decode_receipt(receipt)
+        channels = {channel.stream_key: channel for channel in self._control_channels}
+        if not message_id or stream_key not in channels:
+            raise ValueError("Direct 运行时控制 receipt 不属于当前 Worker control stream")
+        return ControlSource(channels[stream_key], message_id, self._control_consumer_name)
+
+    async def _trim_committed_control(self, channel: ControlChannel) -> None:
+        if channel.stream_key == self._keys.control_global_stream():
+            return
+        try:
+            await trim_acknowledged_stream(self._redis, channel.stream_key, channel.group)
+        except Exception:
+            logger.exception("控制结果 ACK 后裁剪失败: stream={}", channel.stream_key)
+
     def get_status(self) -> dict[str, Any]:
-        """获取传输层状态"""
+        """获取传输层状态（凭据打码，不得回显 ACL 密码）。"""
         return {
             "mode": self.mode.value,
             "state": self._state.value,
             "running": self._running,
-            "redis_url": self._redis_url,
+            "redis_url": self._redacted_redis_url(),
             "connected": self._redis is not None,
         }
+
+    def _redacted_redis_url(self) -> str:
+        from urllib.parse import urlsplit, urlunsplit
+
+        try:
+            parts = urlsplit(self._redis_url)
+        except ValueError:
+            return "<unparseable redis url>"
+        if not parts.password and not parts.username:
+            return self._redis_url
+        host = parts.hostname or ""
+        if parts.port is not None:
+            host = f"{host}:{parts.port}"
+        username = parts.username or ""
+        netloc = f"{username}:***@{host}" if username else f":***@{host}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
     # ==================== 爬虫数据操作 ====================
 
@@ -992,8 +1257,6 @@ class RedisTransport(TransportBase):
         self,
         run_id: str,
         items: list[dict[str, Any]],
-        ttl_seconds: int = 86400,
-        stream_max_len: int = 10000,
     ) -> bool:
         """
         上报爬虫数据到 Redis
@@ -1001,9 +1264,6 @@ class RedisTransport(TransportBase):
         Args:
             run_id: 运行 ID
             items: 数据条目列表（每条需包含 to_redis_dict 方法或为 dict）
-            ttl_seconds: 数据过期时间
-            stream_max_len: Stream 最大长度
-
         Returns:
             是否成功
         """
@@ -1014,9 +1274,11 @@ class RedisTransport(TransportBase):
             return True
 
         try:
-            stream_key = self._keys.spider_data_stream(run_id)
-            pipe = self._redis.pipeline()
+            await self._require_current_generation()
+            from antcode_core.spider_write_fence import append_fenced_spider_items
 
+            stream_key = self._keys.spider_data_stream(run_id)
+            payloads = []
             for item in items:
                 # 支持 SpiderDataItem 对象或普通 dict
                 if hasattr(item, "to_redis_dict"):
@@ -1024,15 +1286,16 @@ class RedisTransport(TransportBase):
                 else:
                     data = {k: str(v) if not isinstance(v, str) else v for k, v in item.items()}
 
-                if stream_max_len > 0:
-                    pipe.xadd(stream_key, data, maxlen=stream_max_len, approximate=True)
-                else:
-                    pipe.xadd(stream_key, data)
-
-            if ttl_seconds > 0:
-                pipe.expire(stream_key, ttl_seconds)
-
-            await pipe.execute()
+                payloads.append(data)
+            await append_fenced_spider_items(
+                self._redis,
+                stream_key,
+                tombstone_key=self._keys.spider_tombstone_key(run_id),
+                items=payloads,
+                max_len=self._spider_retention.stream_max_len,
+                ttl_seconds=self._spider_retention.ttl_seconds,
+            )
+            await self._require_current_generation()
             return True
         except Exception:
             logger.exception("上报爬虫数据失败")
@@ -1042,7 +1305,6 @@ class RedisTransport(TransportBase):
         self,
         run_id: str,
         meta: dict[str, Any],
-        ttl_seconds: int = 86400,
     ) -> bool:
         """
         更新爬虫元数据
@@ -1050,8 +1312,6 @@ class RedisTransport(TransportBase):
         Args:
             run_id: 运行 ID
             meta: 元数据字典（或 SpiderMeta 对象）
-            ttl_seconds: 过期时间
-
         Returns:
             是否成功
         """
@@ -1059,6 +1319,12 @@ class RedisTransport(TransportBase):
             return False
 
         try:
+            await self._require_current_generation()
+            from antcode_core.spider_write_fence import (
+                compensate_spider_index,
+                write_fenced_spider_meta,
+            )
+
             meta_key = self._keys.spider_meta_key(run_id)
 
             # 支持 SpiderMeta 对象或普通 dict
@@ -1067,15 +1333,59 @@ class RedisTransport(TransportBase):
             else:
                 data = {k: str(v) if not isinstance(v, str) else v for k, v in meta.items()}
 
-            await cast(Awaitable[Any], self._redis.hset(meta_key, mapping=data))
-
-            if ttl_seconds > 0:
-                await self._redis.expire(meta_key, ttl_seconds)
-
+            # W4: pipe.execute() 歧义失败（不知 ZADD 是否落盘、且 meta 尚未写）
+            # 时按原语义补偿掉可能的半写 entry —— 默认 added_by_us=True。
+            added_by_us = True
+            try:
+                pipe = self._redis.pipeline(transaction=False)
+                zadd_position = self._queue_spider_index(pipe, run_id, data)
+                results = await pipe.execute()
+                # W4: 捕获 ZADD NX 结果。NX no-op(0) 说明 entry 早已由更早的成功
+                # meta 写建立；此时后续 meta 写瞬时失败【不得】ZREM 掉仍存活的
+                # run（对齐 gateway spider_data.handle_batch 的 added_by_us 契约）。
+                if zadd_position is not None:
+                    added_by_us = len(results) > zadd_position and bool(results[zadd_position])
+                await write_fenced_spider_meta(
+                    self._redis,
+                    meta_key,
+                    tombstone_key=self._keys.spider_tombstone_key(run_id),
+                    fields=data,
+                    ttl_seconds=self._spider_retention.ttl_seconds,
+                )
+            except BaseException as exc:
+                project_id = data.get("project_id")
+                if project_id:
+                    await compensate_spider_index(
+                        self._redis,
+                        self._keys.spider_index_key(project_id),
+                        run_id=run_id,
+                        primary=exc,
+                        added_by_us=added_by_us,
+                    )
+                raise
+            await self._require_current_generation()
             return True
         except Exception:
             logger.exception("更新爬虫元数据失败")
             return False
+
+    def _queue_spider_index(self, pipe: Any, run_id: str, meta: dict[str, str]) -> int | None:
+        """把 index 写入排进 pipeline，返回 ZADD 结果在 execute() 里的下标；
+        无 project_id 时不排 ZADD，返回 None。"""
+        if not meta.get("project_id"):
+            return None
+        index_key = self._keys.spider_index_key(meta["project_id"])
+        score = datetime.now().timestamp()
+        zadd_position = 0
+        if self._spider_retention.ttl_seconds > 0:
+            pipe.zremrangebyscore(index_key, "-inf", score - self._spider_retention.ttl_seconds)
+            zadd_position = 1
+        pipe.zadd(index_key, {run_id: score}, nx=True)
+        if self._spider_retention.ttl_seconds > 0:
+            pipe.expire(index_key, self._spider_retention.ttl_seconds)
+        else:
+            pipe.persist(index_key)
+        return zadd_position
 
     def get_spider_data_reporter(
         self,
@@ -1100,22 +1410,41 @@ class RedisTransport(TransportBase):
 
         if self._redis is None:
             raise RuntimeError("Redis transport 尚未启动")
+        options = {
+            "ttl_seconds": self._spider_retention.ttl_seconds,
+            "stream_max_len": self._spider_retention.stream_max_len,
+            **kwargs,
+        }
         return RedisDataReporter(
             redis_client=self._redis,
             keys=self._keys,
             run_id=run_id,
             project_id=project_id,
             spider_name=spider_name,
-            **kwargs,
+            **options,
         )
 
     async def reconnect(self) -> bool:
-        """重连 Redis"""
-        try:
-            await self.stop()
-            return await self.start()
-        except Exception:
-            return False
+        """重连 Redis。
+
+        W3: 用 _reconnect_lock 串行化，避免并发调用者（poll_task 异常路径、
+        _run_with_reconnect、心跳上报器）各自跑 stop()+start()、交错建出多套
+        redis / PendingTaskReclaimer / DeferredTaskRecovery 并孤儿化更早的实例。
+        锁只在 reconnect() 里持有并跨越 stop()+start() 临界区；start()/stop()
+        自身不取该锁，故无重入死锁（_run_with_reconnect 也从不在持锁时被调用）。
+        """
+        stale = self._redis
+        async with self._reconnect_lock:
+            # 去重：另一路并发重连已把 client 换新并恢复运行 —— 直接复用，
+            # 不再把刚建好的连接拆掉重建。若 client 仍是本调用进入前观察到的
+            # 那一个（即错误确实发生在当前 client 上），才真正重连。
+            if self._running and self._redis is not None and self._redis is not stale:
+                return True
+            try:
+                await self.stop()
+                return await self.start()
+            except Exception:
+                return False
 
     def _encode_receipt(self, stream_key: str, msg_id: str) -> str:
         return f"{stream_key}|{msg_id}"
@@ -1127,20 +1456,7 @@ class RedisTransport(TransportBase):
         return stream_key, msg_id
 
     def _decode_data(self, data: dict[str, Any]) -> dict[str, Any]:
-        decoded: dict[str, Any] = {}
-        for key, value in data.items():
-            if isinstance(key, bytes):
-                key = key.decode("utf-8")
-            if isinstance(value, bytes):
-                value = value.decode("utf-8")
-            decoded[key] = value
-
-        for field in ("params", "environment", "data", "payload"):
-            if field in decoded and isinstance(decoded[field], str):
-                try:
-                    decoded[field] = json.loads(decoded[field])
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{field} 不是合法 JSON: {exc}") from exc
+        decoded = decode_stream_payload(data)
 
         # 处理布尔值字段
         for field in ("is_compressed",):
