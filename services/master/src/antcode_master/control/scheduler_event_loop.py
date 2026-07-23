@@ -11,6 +11,11 @@ import os
 import socket
 import time
 
+from antcode_core.application.services.scheduler.outbox_service import (
+    OUTBOX_CONSUME_CLAIM_TIMEOUT_SECONDS,
+    OutboxConsumeClaim,
+    scheduler_outbox_service,
+)
 from antcode_core.common.config import settings
 from antcode_core.common.utils.serialization import to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
@@ -27,6 +32,11 @@ def _dead_letter_stream_key(namespace: str | None = None) -> str:
 
 # DLQ 保留上限（近似），防止死信本身无限膨胀。
 _DLQ_MAXLEN = 10_000
+_OUTBOX_HEARTBEAT_SECONDS = OUTBOX_CONSUME_CLAIM_TIMEOUT_SECONDS / 3
+
+
+class OutboxClaimBusy(RuntimeError):
+    """另一个 Master 正在处理同一 outbox_id；消息必须保留 PEL。"""
 
 
 class SchedulerEventLoop:
@@ -62,8 +72,7 @@ class SchedulerEventLoop:
         # 会变，靠 XAUTOCLAIM 认领旧 PEL）
         self._consumer = f"{socket.gethostname()}-{os.getpid()}"
         self._stream_client = StreamClient()
-        # T6-T2: delivery counter 走 XPENDING 权威源，不再用进程内 dict。
-        # _deliveries 已废弃，保留字段名以防外部访问但不用于决策。
+        # T6-T2: delivery counter 走 XPENDING 权威源；_deliveries 已废弃。
         self._deliveries: dict[str, int] = {}
         self._last_pending_check = 0.0
 
@@ -162,6 +171,11 @@ class SchedulerEventLoop:
                     try:
                         await self._handle_message(message.data)
                         ack_ids.append(message.msg_id)
+                    except OutboxClaimBusy:
+                        logger.debug(
+                            "outbox claim 正由其他 Master 持有，保留 PEL: msg_id={}",
+                            message.msg_id,
+                        )
                     except Exception as e:
                         # R1-P0-3: 失败不 ACK 会永远卡在 PEL；累计投递次数
                         # 超阈值后 ACK 进死信，避免 PEL 无限膨胀。
@@ -174,33 +188,8 @@ class SchedulerEventLoop:
                             logger.debug(f"XPENDING 查询失败，退回 1: {pend_exc}")
                             count = 1
                         if count >= self.DLQ_DELIVERY_THRESHOLD:
-                            # P1-19: 到阈值不能直接 ACK，否则事件正文丢失。
-                            # 先写 DLQ、写成功再 ACK；DLQ 写失败则 keep-in-PEL
-                            # 交给下一轮 XAUTOCLAIM 再试，不静默丢消息。
-                            dlq_ok = await self._write_to_dlq(
-                                stream_key=self._stream,
-                                msg_id=message.msg_id,
-                                payload=message.data,
-                                reason=f"delivery_count>={count}: {e}",
-                            )
-                            if dlq_ok:
-                                logger.error(
-                                    "调度事件失败 {} 次 → 已入 DLQ + ACK: msg_id={} event={} err={}",
-                                    count,
-                                    message.msg_id,
-                                    message.data,
-                                    e,
-                                )
+                            if await self._dead_letter_failed_message(message, e, count):
                                 ack_ids.append(message.msg_id)
-                            else:
-                                # DLQ 写入失败——保留 PEL，下轮 XAUTOCLAIM
-                                # 会再次触达；同时告警便于人工介入。
-                                logger.error(
-                                    "调度事件失败 {} 次 但 DLQ 写入失败，保留 PEL: msg_id={} event={}",
-                                    count,
-                                    message.msg_id,
-                                    message.data,
-                                )
                         else:
                             logger.warning(f"处理调度事件失败 (第 {count} 次): msg_id={message.msg_id} err={e}")
 
@@ -282,28 +271,94 @@ class SchedulerEventLoop:
         except (IndexError, TypeError, ValueError):
             return 1
 
-    async def _handle_message(self, data: dict) -> None:
-        """处理单条事件。
+    async def _dead_letter_failed_message(self, message, error: Exception, count: int) -> bool:
+        reason = f"delivery_count>={count}: {error}"
+        if not await self._write_to_dlq(
+            stream_key=self._stream,
+            msg_id=message.msg_id,
+            payload=message.data,
+            reason=reason,
+        ):
+            logger.error("调度事件 DLQ 写入失败，保留 PEL: msg_id={}", message.msg_id)
+            return False
+        outbox_id = str(message.data.get("outbox_id") or "")
+        if outbox_id:
+            try:
+                requeued = await scheduler_outbox_service.requeue_consumption_failure(outbox_id, reason)
+            except Exception:
+                logger.exception("调度 outbox 耐久重投标记失败，保留 PEL: outbox_id={}", outbox_id)
+                return False
+            # L3: 达消费重投上限后 requeue_consumption_failure 返回 False —— 事件已
+            # 被终止(标记 consumed),不再 republish。DLQ 记录仍在,ACK 掉 Redis
+            # 消息即可,避免 poison 事件无限循环。
+            if not requeued:
+                logger.error(
+                    "调度 outbox 消费重投达上限,终止不再重投(已入 DLQ): outbox_id={}",
+                    outbox_id,
+                )
+        logger.error(
+            "调度事件失败 {} 次，已入 DLQ{}: msg_id={} event={} err={}",
+            count,
+            "并耐久重投" if outbox_id else "",
+            message.msg_id,
+            message.data,
+            error,
+        )
+        return True
 
-        F: 分两族事件：
-        - **task_*** 事件：依赖 ``task_id``，走 scheduler_service（原逻辑）。
-        - **batch_*** 事件：依赖 ``batch_id``，走 crawl_batch_dispatcher_service。
-          旧实现遇到 batch 事件因 ``task_id`` 缺失直接丢，是 crawl 主链路的
-          断点之一。
-        """
+    async def _handle_message(self, data: dict) -> None:
+        """通过 PostgreSQL durable claim 保证同一 outbox_id 单消费者执行。"""
+        outbox_id = str(data.get("outbox_id") or "")
+        if not outbox_id:
+            await self._dispatch_message(data)
+            return
+
+        claim = await scheduler_outbox_service.claim_consumption(outbox_id, self._consumer)
+        if claim == OutboxConsumeClaim.CONSUMED:
+            logger.debug("outbox 事件已完成，重复消息可 ACK: outbox_id={}", outbox_id)
+            return
+        if claim == OutboxConsumeClaim.BUSY:
+            raise OutboxClaimBusy(outbox_id)
+
+        try:
+            await self._dispatch_with_claim_heartbeat(data, outbox_id)
+            await scheduler_outbox_service.complete_consumption(outbox_id, self._consumer)
+        except BaseException:
+            await scheduler_outbox_service.release_consumption(outbox_id, self._consumer)
+            raise
+
+    async def _dispatch_with_claim_heartbeat(self, data: dict, outbox_id: str) -> None:
+        business = asyncio.create_task(self._dispatch_message(data))
+        heartbeat = asyncio.create_task(self._heartbeat_outbox_claim(outbox_id))
+        try:
+            done, _pending = await asyncio.wait(
+                {business, heartbeat},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if business in done:
+                await business
+                return
+            business.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await business
+            await heartbeat
+        finally:
+            for task in (business, heartbeat):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(business, heartbeat, return_exceptions=True)
+
+    async def _heartbeat_outbox_claim(self, outbox_id: str) -> None:
+        while True:
+            await asyncio.sleep(_OUTBOX_HEARTBEAT_SECONDS)
+            await scheduler_outbox_service.heartbeat_consumption(outbox_id, self._consumer)
+
+    async def _dispatch_message(self, data: dict) -> None:
+        """按事件族路由业务处理；异常必须向上暴露给 PEL 重试。"""
+
         event_type = str(data.get("event", ""))
 
-        # F: batch_* 事件分支
-        if event_type.startswith("batch_"):
-            batch_id = data.get("batch_id")
-            if not batch_id:
-                logger.warning(f"批次事件缺 batch_id: {event_type}")
-                return
-            from antcode_core.application.services.crawl.batch_dispatcher_service import (
-                crawl_batch_dispatcher_service,
-            )
-
-            await crawl_batch_dispatcher_service.handle_batch_event(event_type, str(batch_id))
+        if await self._dispatch_special_event(data, event_type):
             return
 
         task_id_raw = data.get("task_id")
@@ -322,7 +377,8 @@ class SchedulerEventLoop:
         from antcode_master.control.scheduler_loop import scheduler_service
 
         if event_type == "task_trigger":
-            await scheduler_service.trigger_task(task_id)
+            # P1-DB-01: at-least-once 消费；outbox_id 作幂等键折叠重放。
+            await scheduler_service.trigger_task(task_id, idempotency_key=str(data.get("outbox_id") or "") or None)
             return
 
         if event_type != "task_changed":
@@ -335,6 +391,60 @@ class SchedulerEventLoop:
             return
 
         await scheduler_service.add_task(task)
+
+    async def _dispatch_special_event(self, data: dict, event_type: str) -> bool:
+        if event_type == "spider_storage_cleanup":
+            await self._cleanup_spider_storage(data)
+            return True
+        if event_type == "task_logs_purge":
+            await self._purge_task_logs(data)
+            return True
+        if not event_type.startswith("batch_"):
+            return False
+        batch_id = data.get("batch_id")
+        if not batch_id:
+            raise ValueError(f"批次事件缺 batch_id: {event_type}")
+        from antcode_core.application.services.crawl.batch_dispatcher_service import (
+            crawl_batch_dispatcher_service,
+        )
+
+        await crawl_batch_dispatcher_service.handle_batch_event(event_type, str(batch_id))
+        return True
+
+    @staticmethod
+    async def _cleanup_spider_storage(data: dict) -> None:
+        from antcode_core.application.services.crawl.spider_storage_cleanup import (
+            SpiderStorageCleanupService,
+        )
+        from antcode_core.infrastructure.redis.keys import RedisKeys
+
+        run_ids = data.get("run_ids")
+        project_id = str(data.get("project_id") or "")
+        if not isinstance(run_ids, list) or not all(isinstance(run_id, str) for run_id in run_ids):
+            raise ValueError("spider_storage_cleanup run_ids 格式非法")
+        redis = await get_redis_client()
+        cleaner = SpiderStorageCleanupService(redis, RedisKeys(namespace=redis_namespace()))
+        await cleaner.delete_runs(run_ids, project_id)
+
+    @staticmethod
+    async def _purge_task_logs(data: dict) -> None:
+        """P1-round6 5.2 durable cleanup: delete_project_cascade 事务后同步
+        purge_task_logs_for_runs 若崩溃, logs 变孤儿。改由 outbox 事件驱动:
+        事务内 enqueue task_logs_purge, 消费失败自动 requeue, 达上限进 DLQ。
+        purge_task_logs_for_runs 走 advisory lock 与 late writer 串行化, 天然
+        幂等 (在锁内校验 TaskRun 已删除, 重复消费只是重复 DELETE 无匹配行)。
+        """
+        from antcode_core.application.services.logs.task_log_run_guard import (
+            purge_task_logs_for_runs,
+        )
+
+        run_ids = data.get("run_ids")
+        if not isinstance(run_ids, list) or not all(isinstance(rid, str) for rid in run_ids):
+            raise ValueError("task_logs_purge run_ids 格式非法")
+        if not run_ids:
+            return
+        deleted = await purge_task_logs_for_runs(run_ids)
+        logger.info("outbox 驱动 task_logs_purge 完成: run_batch={} deleted={}", len(run_ids), deleted)
 
 
 scheduler_event_loop = SchedulerEventLoop()
