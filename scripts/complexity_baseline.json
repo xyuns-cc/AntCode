@@ -5753,7 +5753,7 @@
       "path": "web/antcode-frontend/src/pages/Cookies/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 611
+      "value": 624
     },
     {
       "path": "web/antcode-frontend/src/pages/Crawl/BatchList.tsx",
