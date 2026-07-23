@@ -2951,7 +2951,7 @@
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 838
+      "value": 845
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",
@@ -5765,7 +5765,7 @@
       "path": "web/antcode-frontend/src/pages/Dashboard/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 536
+      "value": 554
     },
     {
       "path": "web/antcode-frontend/src/pages/Projects/ProjectList.tsx",
@@ -5783,7 +5783,7 @@
       "path": "web/antcode-frontend/src/pages/Tasks/ExecutionLogs.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 808
+      "value": 839
     },
     {
       "path": "web/antcode-frontend/src/pages/Tasks/TaskCreate.tsx",
