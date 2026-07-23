@@ -6,6 +6,7 @@ TaskRun 结果与状态更新服务
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,30 @@ from antcode_core.application.services.scheduler.execution_status_service import
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus
 from antcode_core.domain.models.task_run import TaskRun
 from antcode_core.domain.models.worker import Worker
+
+# P1-round6 5.3: result_data 单 run 总字节 hard cap, 同 result_metadata 常量
+_MAX_RESULT_DATA_BYTES = 2 * 1024 * 1024
+
+
+def _apply_bounded_result_data(current: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    """按 2 MiB 上限合并 result_data; 超限丢弃 update 保留 current。"""
+    if not update:
+        return current
+    candidate = {**current, **update}
+    try:
+        candidate_size = len(json.dumps(candidate, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        logger.warning("result_data update 无法 JSON 序列化, 丢弃本次合并")
+        return current
+    if candidate_size > _MAX_RESULT_DATA_BYTES:
+        logger.warning(
+            "result_data 合并后 {} bytes 超上限 {} bytes, 丢弃本次 update({} keys) 保留 current",
+            candidate_size,
+            _MAX_RESULT_DATA_BYTES,
+            len(update),
+        )
+        return current
+    return candidate
 
 
 class TaskRunService:
@@ -297,10 +322,16 @@ class TaskRunService:
             updates["error_message"] = error_message
         result_data = dict(execution.result_data or {})
         result_data.pop("lease_id", None)
+        candidate_update: dict[str, Any] = {}
         if output:
-            result_data["output"] = output
+            candidate_update["output"] = output
         if data:
-            result_data.update({key: value for key, value in data.items() if key != "lease_id"})
+            candidate_update.update({key: value for key, value in data.items() if key != "lease_id"})
+        # P1-round6 5.3: result_data 单 run 总字节 hard cap 2 MiB。原实现
+        # dict.update 无上限, 同一 run 通过不同 key 反复 merge 可无界扩大
+        # Redis/PG JSONB/WAL。超上限时丢弃本次 update 并 warn, 保留 current
+        # 不破坏语义(重试仍看到已有进度)。
+        result_data = _apply_bounded_result_data(result_data, candidate_update)
         if result_data:
             updates["result_data"] = result_data
         return updates
