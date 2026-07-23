@@ -233,7 +233,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_dispatcher_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 412
+      "value": 423
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_dispatcher_service.py",
