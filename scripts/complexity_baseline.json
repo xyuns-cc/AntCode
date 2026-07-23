@@ -1244,6 +1244,12 @@
       "value": 4
     },
     {
+      "path": "packages/antcode_core/src/antcode_core/common/security/redis_acl.py",
+      "function": "-",
+      "rule": "FILE_LINES",
+      "value": 301
+    },
+    {
       "path": "packages/antcode_core/src/antcode_core/common/security/secret_box.py",
       "function": "SecretBox._derive_fernet_key",
       "rule": "PLR2004",
