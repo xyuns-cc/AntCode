@@ -5819,7 +5819,7 @@
       "path": "web/antcode-frontend/src/services/projects.ts",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 489
+      "value": 471
     },
     {
       "path": "web/antcode-frontend/src/services/workers.ts",
