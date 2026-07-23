@@ -4814,12 +4814,6 @@
       "value": 1
     },
     {
-      "path": "tests/unit/test_worker_project_sync.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 343
-    },
-    {
       "path": "tests/unit/web_api/test_admin_permission_middleware.py",
       "function": "test_admin_middleware_allows_admin",
       "rule": "PLR2004",

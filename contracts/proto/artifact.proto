@@ -1,0 +1,91 @@
+// Artifact transfer service for Gateway-isolated Workers.
+
+syntax = "proto3";
+
+package antcode.v1;
+
+import "common.proto";
+
+service ArtifactService {
+  rpc DownloadSourceBundle(SourceBundleDownloadRequest) returns (stream ArtifactChunk);
+  rpc UploadTaskArtifact(stream ArtifactUploadFrame) returns (ArtifactUploadResponse);
+
+  rpc ClaimRunOwnership(RunOwnershipClaimRequest) returns (RunOwnershipClaimResponse);
+  rpc RenewRunOwnership(RunOwnershipRenewRequest) returns (RunOwnershipRenewResponse);
+  rpc ReleaseRunOwnership(RunOwnershipReleaseRequest) returns (RunOwnershipReleaseResponse);
+}
+
+message SourceBundleDownloadRequest {
+  string worker_id = 1;
+  string lease_id = 2;
+  string run_id = 3;
+  string project_id = 4;
+  string sha256 = 5;
+  int64 size_bytes = 6;
+  TraceContext trace = 100;
+}
+
+message ArtifactChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+}
+
+message TaskArtifactMetadata {
+  string worker_id = 1;
+  string lease_id = 2;
+  string run_id = 3;
+  string name = 4;
+  string media_type = 5;
+  string sha256 = 6;
+  int64 size_bytes = 7;
+  TraceContext trace = 100;
+}
+
+message ArtifactUploadFrame {
+  oneof payload {
+    TaskArtifactMetadata metadata = 1;
+    ArtifactChunk chunk = 2;
+  }
+}
+
+message ArtifactUploadResponse {
+  string uri = 1;
+  string sha256 = 2;
+  int64 size_bytes = 3;
+  string media_type = 4;
+}
+
+message RunOwnershipClaimRequest {
+  string worker_id = 1;
+  string lease_id = 2;
+  string run_id = 3;
+  int32 ttl_ms = 4;
+  TraceContext trace = 100;
+}
+
+message RunOwnershipClaimResponse {
+  bool acquired = 1;
+}
+
+message RunOwnershipRenewRequest {
+  string worker_id = 1;
+  string lease_id = 2;
+  string run_id = 3;
+  int32 ttl_ms = 4;
+  TraceContext trace = 100;
+}
+
+message RunOwnershipRenewResponse {
+  bool renewed = 1;
+}
+
+message RunOwnershipReleaseRequest {
+  string worker_id = 1;
+  string lease_id = 2;
+  string run_id = 3;
+  TraceContext trace = 100;
+}
+
+message RunOwnershipReleaseResponse {
+  bool released = 1;
+}
