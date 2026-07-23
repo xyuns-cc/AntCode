@@ -57,16 +57,6 @@ const formatNumber = (num: number): string => {
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 }
 
-// 格式化字节
-const formatBytes = (bytes: number, decimals = 2): string => {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const dm = decimals < 0 ? 0 : decimals
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]
-}
-
 // 深色主题指标卡片 - 统一设计风格（方形圆角图标 + 装饰圆）
 const MetricCard: React.FC<{
   title: string
@@ -358,12 +348,17 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
         </Space>
       </Flex>
 
-      {/* 核心指标卡片 */}
+      {/* 核心指标卡片
+        P1-round6 5.4: 移除 (a) 硬编码 trend 数值(合成不能作为真实趋势)、
+        (b) "每分钟抓取数据" = req*0.7 假数据(后端未提供)、(c) P99 = latency*2.5
+        与 (d) Retries = errors*1.5 合成 subValue。真实无来源的字段改为 "—",
+        避免用户误认为是真实监控。
+      */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={12} md={6}><MetricCard title="每分钟请求 (RPM)" value={stats?.clusterRequestsPerMinute?.toFixed(0) || 0} icon={<ThunderboltOutlined />} accentColor="#667eea" trend={2.5} /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="每分钟抓取数据" value={Math.floor((stats?.clusterRequestsPerMinute || 0) * 0.7)} icon={<DatabaseOutlined />} accentColor="#52c41a" trend={1.2} /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="平均响应延迟" value={stats?.avgLatencyMs?.toFixed(0) || 0} suffix="ms" subValue={`P99: ${((stats?.avgLatencyMs || 0) * 2.5).toFixed(0)} ms`} icon={<FieldTimeOutlined />} accentColor="#faad14" trend={-5.4} /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="异常 & 错误" value={stats?.totalErrors || 0} subValue={`Retries: ${Math.floor((stats?.totalErrors || 0) * 1.5)}`} icon={<WarningOutlined />} accentColor="#ff4d4f" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="每分钟请求 (RPM)" value={stats?.clusterRequestsPerMinute?.toFixed(0) || 0} icon={<ThunderboltOutlined />} accentColor="#667eea" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="每分钟抓取数据" value="—" icon={<DatabaseOutlined />} accentColor="#52c41a" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="平均响应延迟" value={stats?.avgLatencyMs?.toFixed(0) || 0} suffix="ms" icon={<FieldTimeOutlined />} accentColor="#faad14" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="异常 & 错误" value={stats?.totalErrors || 0} icon={<WarningOutlined />} accentColor="#ff4d4f" /></Col>
       </Row>
 
       {/* 流量趋势 + 状态码分布 */}
@@ -392,9 +387,13 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
               {[
                 { icon: <UploadOutlined />, label: '请求总数', value: formatNumber(stats?.totalRequests || 0) },
                 { icon: <DownloadOutlined />, label: '响应总数', value: formatNumber(stats?.totalResponses || 0) },
-                { icon: null, label: '数据流量 (下行)', value: formatBytes((stats?.totalResponses || 0) * 7200) },
-                { icon: null, label: '去重过滤 (DupeFilter)', value: '12,403' },
-                { icon: null, label: '丢弃项 (Dropped)', value: String(Math.floor((stats?.totalErrors || 0) * 0.5)) }
+                // P1-round6 5.4: 移除合成运维数据 (响应*7200 假下行流量 /
+                // 硬编码 DupeFilter=12,403 / 错误*0.5 假 Dropped)。真实无来源
+                // 的字段改为 "—"; 后端后续如提供 total_bytes / dupe_filter /
+                // dropped 字段再回填。
+                { icon: null, label: '数据流量 (下行)', value: '—' },
+                { icon: null, label: '去重过滤 (DupeFilter)', value: '—' },
+                { icon: null, label: '丢弃项 (Dropped)', value: '—' }
               ].map((item, idx) => (
                 <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: idx < 4 ? `1px solid ${token.colorBorderSecondary}` : 'none' }}>
                   <span style={{ color: token.colorTextSecondary, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>{item.icon} {item.label}</span>
