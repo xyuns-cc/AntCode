@@ -126,7 +126,7 @@ async def test_control_cancel_raises_does_not_ack():
 
 @pytest.mark.asyncio
 async def test_engine_cancel_running_with_executor_missing_returns_true_with_warn():
-    """P1-FN-04:executor.cancel 返回 False 时,engine.cancel 仍推到 CANCELLING。"""
+    """P1-FN-04:executor 内已无 run(自然结束)时,engine.cancel 仍返回 True 走结算。"""
     engine, transport = _make_engine_and_transport()
 
     # 注入一个 RUNNING run
@@ -135,8 +135,9 @@ async def test_engine_cancel_running_with_executor_missing_returns_true_with_war
     await engine._state_manager.transition("r-1", RunState.PREPARING)
     await engine._state_manager.transition("r-1", RunState.RUNNING)
 
-    # executor.cancel 返回 False(找不到 run)
+    # executor.cancel 返回 False 且 is_running=False (run 已自然结束)
     engine._executor = MagicMock()
+    engine._executor.has_task = MagicMock(return_value=False)  # 已消失
     engine._executor.cancel = AsyncMock(return_value=False)
 
     result = await engine.cancel("r-1", reason="test-warn-path")
@@ -145,4 +146,30 @@ async def test_engine_cancel_running_with_executor_missing_returns_true_with_war
     engine._executor.cancel.assert_awaited_once_with("r-1")
     info = await engine._state_manager.get("r-1")
     assert info is not None
-    assert info.state == RunState.CANCELLING  # 状态已推到 CANCELLING
+    assert info.state == RunState.CANCELLING
+
+
+@pytest.mark.asyncio
+async def test_engine_cancel_kill_failure_returns_false_p1_gw_05_round6():
+    """P1-GW-05 (round6):is_running=True + cancel=False = kill 真失败,engine.cancel 返 False。
+
+    审查:cancel/kill 失败可能仍报告成功 → 旧子进程与 L2 接管者双执行。
+    修:executor 内仍有 run 但 cancel 返回 False,视为 kill 真失败,不能
+    报告取消成功让上游继续 ACK,而应返 False 让 control cancel 走 PEL 重投。
+    """
+    engine, transport = _make_engine_and_transport()
+
+    await engine._state_manager.add("r-1", task_id="t-1")
+    await engine._state_manager.transition("r-1", RunState.QUEUED)
+    await engine._state_manager.transition("r-1", RunState.PREPARING)
+    await engine._state_manager.transition("r-1", RunState.RUNNING)
+
+    # is_running=True (executor 内仍有 run) + cancel=False = kill 真失败
+    engine._executor = MagicMock()
+    engine._executor.has_task = MagicMock(return_value=True)  # 未消失
+    engine._executor.cancel = AsyncMock(return_value=False)  # kill 失败
+
+    result = await engine.cancel("r-1", reason="test-kill-fail")
+
+    # 关键:必须返 False, 不能欺骗上游"取消成功"
+    assert result is False, "P1-GW-05: kill 失败必须返 False, 不能假装取消成功"
