@@ -206,6 +206,12 @@ class ProjectService extends BaseService {
       formData.append('dont_filter', data.dont_filter.toString())
     }
     if (data.dependencies) { formData.append('dependencies', JSON.stringify(data.dependencies)) }
+    // P1-round6 5.4: region 是 rule 项目的调度约束(bound_region), 之前只在
+    // 类型里声明但从未 append 到 FormData, 后端拿到空 region → 任意 worker
+    // 都能派;需要在此显式落盘, 与 target_url / execution_strategy 同层。
+    if (data.region) {
+      formData.append('region', data.region)
+    }
   }
 
   // 更新项目

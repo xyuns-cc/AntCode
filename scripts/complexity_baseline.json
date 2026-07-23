@@ -5825,7 +5825,7 @@
       "path": "web/antcode-frontend/src/services/projects.ts",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 471
+      "value": 477
     },
     {
       "path": "web/antcode-frontend/src/services/workers.ts",
