@@ -125,6 +125,7 @@ end
 
 local stored_lease_id = redis.call('HGET', lease_key, 'lease_id')
 local stored_expires  = tonumber(redis.call('HGET', lease_key, 'expires_at_ms') or "0")
+local stored_granted  = tonumber(redis.call('HGET', lease_key, 'granted_at_ms') or "0")
 
 -- P1-15 fail-closed（进阶）: 存储中的 lease_id 也可能被撤(edge case:
 -- revoke 与 grant 并发时 revoke 只 DEL 了 lease_key 但 SADD 了 stored id)。
@@ -134,27 +135,33 @@ if stored_lease_id
 end
 
 local final_lease_id
+local final_granted_ms
 local outcome
 
 if stored_lease_id and stored_expires > now_ms then
     if current_lease_id ~= '' and stored_lease_id == current_lease_id then
         -- 续租：lease_id 不变，只刷新过期时间
+        -- P1-GW-01 (round5/6): granted_at_ms 保留原值,不重写为 now_ms。
+        -- 否则 gen = granted_at_ms 会在 renew 时前进,破坏"L1 gen < L2 gen"
+        -- 单调性,让迟到 L1 bind 反而拿到更大 gen 覆盖 L2。
         final_lease_id = stored_lease_id
+        final_granted_ms = stored_granted > 0 and stored_granted or now_ms
         outcome = 'renewed'
     else
         -- 活跃代际只能由其持有者续租；冲突路径不得修改任何状态。
         return {'', '', '', 'conflict'}
     end
 else
-    -- 首次或上一代已过期：用新的 lease_id
+    -- 首次或上一代已过期：用新的 lease_id 与当前时刻作为 grant 时点
     final_lease_id = new_lease_id
+    final_granted_ms = now_ms
     outcome = 'new'
 end
 
 redis.call('HSET', lease_key,
     'lease_id', final_lease_id,
     'expires_at_ms', tostring(expires_at_ms),
-    'granted_at_ms', tostring(now_ms),
+    'granted_at_ms', tostring(final_granted_ms),
     'worker_id', worker_id)
 
 if metrics_json ~= '' then
@@ -167,7 +174,7 @@ redis.call('PEXPIRE', lease_key, ttl_ms + record_retention_ms)
 redis.call('ZADD', expiring_key, expires_at_ms, worker_id)
 redis.call('SADD', active_key, worker_id)
 
-return {final_lease_id, tostring(expires_at_ms), tostring(now_ms), outcome}
+return {final_lease_id, tostring(expires_at_ms), tostring(final_granted_ms), outcome}
 """
 
 
