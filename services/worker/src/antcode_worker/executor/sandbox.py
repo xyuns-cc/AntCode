@@ -250,8 +250,14 @@ class BasicSandbox(SandboxProvider):
             )
 
         executable = os.path.basename(self.config.sandbox_command[0])
+        # P0-04 (round6): 只允许 bwrap。原实现对任何非 bwrap 名的绝对命令直接前缀
+        # 执行(如 WORKER_SANDBOX_COMMAND=/usr/bin/env),相当于绕过所有 --unshare-*
+        # 隔离,配置错误就把整个沙箱语义变成空壳。firejail 等其他隔离器暂不支持,
+        # 显式拒绝而不是静默前缀。若需要扩展,应在下面 else 分支加对应 wrap 逻辑。
         if executable != "bwrap":
-            return [*self.config.sandbox_command, *cmd]
+            raise RuntimeError(
+                f"仅支持 bwrap 沙箱,拒绝执行未知启动器 {executable!r}; 其他前缀命令(如 /usr/bin/env)会绕过所有隔离语义"
+            )
 
         work_dir = str(context["work_dir"])
         wrapped = [
@@ -326,6 +332,18 @@ class BasicSandbox(SandboxProvider):
             Path("/var/run/secrets/kubernetes.io"),
             Path("/etc/kubernetes"),
             Path("/var/lib/kubelet"),
+            # P0-04 (round6): Worker 自身身份 + mTLS 私钥 + 运行时数据目录。
+            # bwrap --ro-bind / / 会把 Worker 进程可见的凭据文件都暴露给任务;
+            # 这些目录一律 tmpfs 掩掉,任务不能通过读文件或 argv 外带凭据。
+            # 具体覆盖:
+            #  - /etc/antcode/tls     (Gateway/Web API mTLS 证书私钥挂载点)
+            #  - /etc/antcode          (Worker YAML 配置 + Direct Redis URL)
+            #  - /app/data/worker      (Worker identity 存储目录; secrets/, runtime_data/)
+            #  - /var/lib/antcode      (K8s 时代备用挂载点,即使退役也保持防御)
+            Path("/etc/antcode/tls"),
+            Path("/etc/antcode"),
+            Path("/app/data/worker"),
+            Path("/var/lib/antcode"),
         ]
         seen: set[Path] = set()
         masked: list[Path] = []
