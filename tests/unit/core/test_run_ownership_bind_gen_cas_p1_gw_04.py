@@ -24,6 +24,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+_EXPECTED_FILTER_CALLS = 2  # P1-GW-02: 1 次终态探针 + 1 次 update
+
+
+def _make_bind_filter_mock(status: str = "running", update_return: int = 1):
+    """P1-GW-02 后 bind 需先 filter().only().first() 判终态,再走 update。
+
+    返回一个 MagicMock, 支持:
+    - filter(...).only(...).first() → MagicMock(status=status)
+    - filter(...).update(...) → update_return
+    """
+    existing = MagicMock(id=1, worker_id=42, status=status)
+    only_chain = MagicMock()
+    only_chain.first = AsyncMock(return_value=existing)
+    filter_mock = MagicMock()
+    filter_mock.only = MagicMock(return_value=only_chain)
+    filter_mock.update = AsyncMock(return_value=update_return)
+    return filter_mock
+
+
 @pytest.mark.asyncio
 async def test_bind_lease_gen_none_preserves_original_compat_path():
     """P1-GW-04:lease_gen=None 走兼容路径,不做 gen CAS。"""
@@ -31,14 +50,14 @@ async def test_bind_lease_gen_none_preserves_original_compat_path():
 
     resolved_worker = MagicMock(id=42)
     with patch.object(svc, "_resolve_worker", AsyncMock(return_value=resolved_worker)):
-        # 用真实 filter 会走 tortoise ORM,单测里 mock 掉
-        filter_mock = MagicMock()
-        filter_mock.update = AsyncMock(return_value=1)
+        filter_mock = _make_bind_filter_mock()
         with patch.object(svc.TaskRun, "filter", MagicMock(return_value=filter_mock)) as pf:
             await svc.bind_worker_run_lease_generation("worker-1", "run-1", lease_id="lease-1", lease_gen=None)
 
-            # 兼容路径:只传 (run_id, worker_id), update 只带 lease_id
-            pf.assert_called_once_with(run_id="run-1", worker_id=42)
+            # 兼容路径:调 filter 2 次(第一次判终态,第二次 update)
+            # 第 2 次调用: filter(run_id="run-1", worker_id=42).update(lease_id="lease-1")
+            assert pf.call_count == _EXPECTED_FILTER_CALLS
+            assert pf.call_args_list[-1].kwargs == {"run_id": "run-1", "worker_id": 42}
             filter_mock.update.assert_awaited_once_with(lease_id="lease-1")
 
 
@@ -50,20 +69,37 @@ async def test_bind_lease_gen_positive_writes_gen_with_cas():
 
     resolved_worker = MagicMock(id=42)
     with patch.object(svc, "_resolve_worker", AsyncMock(return_value=resolved_worker)):
-        filter_mock = MagicMock()
-        filter_mock.update = AsyncMock(return_value=1)
+        filter_mock = _make_bind_filter_mock()
         with patch.object(svc.TaskRun, "filter", MagicMock(return_value=filter_mock)) as pf:
             await svc.bind_worker_run_lease_generation(
                 "worker-1", "run-1", lease_id="lease-2", lease_gen=1_700_000_000_000
             )
 
-            # CAS 路径:filter 第一个参数是 Q 表达式, kwargs 包含 run_id/worker_id
-            call = pf.call_args
-            assert len(call.args) == 1
-            q = call.args[0]
+            # CAS 路径:第 1 次 filter(run_id=...) 判终态,第 2 次 filter(Q, ...) CAS
+            assert pf.call_count == _EXPECTED_FILTER_CALLS
+            cas_call = pf.call_args_list[-1]
+            assert len(cas_call.args) == 1
+            q = cas_call.args[0]
             assert isinstance(q, Q)
-            assert call.kwargs == {"run_id": "run-1", "worker_id": 42}
+            assert cas_call.kwargs == {"run_id": "run-1", "worker_id": 42}
             filter_mock.update.assert_awaited_once_with(lease_id="lease-2", lease_gen=1_700_000_000_000)
+
+
+@pytest.mark.asyncio
+async def test_bind_rejects_terminal_taskrun():
+    """P1-GW-02 (round6): TaskRun 已终态时 bind 拒绝,防重复 claim 执行。"""
+    from antcode_core.application.services.workers import run_ownership_service as svc
+
+    resolved_worker = MagicMock(id=42)
+    filter_mock = _make_bind_filter_mock(status="success")
+    with patch.object(svc, "_resolve_worker", AsyncMock(return_value=resolved_worker)):
+        with patch.object(svc.TaskRun, "filter", MagicMock(return_value=filter_mock)):
+            with pytest.raises(PermissionError, match="已在终态"):
+                await svc.bind_worker_run_lease_generation(
+                    "worker-1", "run-1", lease_id="lease-x", lease_gen=100
+                )
+    # update 不应被调用
+    filter_mock.update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -78,9 +114,15 @@ async def test_bind_lease_gen_cas_conflict_raises_permission_error():
     def mock_filter(*args, **kwargs):
         filter_calls.append((args, kwargs))
         m = MagicMock()
-        if len(args) > 0:  # 第一次: Q + kwargs, update 返回 0
+        if len(args) > 0:  # CAS 分支: Q + kwargs, update 返回 0
             m.update = AsyncMock(return_value=0)
-        else:  # 第二次(区分是否存在): 只按 kwargs, exists 返回 True
+        elif "run_id" in kwargs and "worker_id" not in kwargs:
+            # P1-GW-02 终态探针: filter(run_id=...).only(...).first() → 非终态 mock
+            existing = MagicMock(id=1, worker_id=42, status="running")
+            only_chain = MagicMock()
+            only_chain.first = AsyncMock(return_value=existing)
+            m.only = MagicMock(return_value=only_chain)
+        else:  # CAS 失败后区分是否存在: filter(run_id=..., worker_id=...).exists() → True
             m.exists = AsyncMock(return_value=True)
         return m
 
@@ -89,7 +131,8 @@ async def test_bind_lease_gen_cas_conflict_raises_permission_error():
             with pytest.raises(PermissionError, match="lease_gen 单调 CAS 失败"):
                 await svc.bind_worker_run_lease_generation("worker-1", "run-1", lease_id="lease-old", lease_gen=100)
 
-    expected_filter_calls = 2  # CAS 失败后额外一次 exists 探针
+    # P1-GW-02 后:1 次终态探针 + 1 次 CAS + 1 次 exists = 3
+    expected_filter_calls = 3
     assert len(filter_calls) == expected_filter_calls
 
 
@@ -102,8 +145,13 @@ async def test_bind_lease_gen_missing_run_raises_specific_permission_error():
 
     def mock_filter(*args, **kwargs):
         m = MagicMock()
-        if len(args) > 0:
+        if len(args) > 0:  # CAS
             m.update = AsyncMock(return_value=0)
+        elif "run_id" in kwargs and "worker_id" not in kwargs:
+            # P1-GW-02 终态探针: run 不存在 → first 返回 None
+            only_chain = MagicMock()
+            only_chain.first = AsyncMock(return_value=None)
+            m.only = MagicMock(return_value=only_chain)
         else:
             m.exists = AsyncMock(return_value=False)
         return m
