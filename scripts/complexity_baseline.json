@@ -425,7 +425,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 712
+      "value": 719
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
