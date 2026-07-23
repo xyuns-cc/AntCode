@@ -221,7 +221,10 @@ class RunOwnershipRpcMixin:
                     f"lease 已失效或换代(fence 后被撤销): run_id={identity.run_id}",
                 )
                 return False
-            lease_gen = int(lease.granted_at_ms)
+            # P1-GW-01 (round6): 优先用 sequence 作 gen(严格单调,同毫秒无碰撞);
+            # 存量 lease 无 sequence 字段时 (=0) 回退到 granted_at_ms 保持兼容。
+            # sequence 存在时 gen 一定 > 0, granted_at_ms 场景与它不会混用。
+            lease_gen = int(lease.sequence) if lease.sequence > 0 else int(lease.granted_at_ms)
             await bind_worker_run_lease_generation(
                 identity.worker_id,
                 identity.run_id,
