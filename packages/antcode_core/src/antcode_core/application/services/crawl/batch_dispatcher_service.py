@@ -34,6 +34,8 @@ from antcode_core.domain.models.enums import (
 )
 from antcode_core.domain.models.project import ProjectRule
 
+DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS = 3600
+
 
 class CrawlBatchDispatcherService:
     """响应批次生命周期事件，把 seed URLs 派发到 worker。"""
@@ -107,6 +109,15 @@ class CrawlBatchDispatcherService:
         logger.info(
             f"batch 派发完成: batch_id={batch_id} dispatched={dispatched} failed={failed} total={len(pending_urls)}"
         )
+        # 任一 seed 既未直派成功、也未获得 durable redispatch intent 时，
+        # batch_started 都不能 ACK。成功 seed 已有 TaskRun，重投时会被
+        # _already_dispatched_urls 跳过；失败 seed 会在下一轮单独重试。
+        if failed > 0:
+            raise RuntimeError(
+                f"batch 派发存在未持久化失败: batch_id={batch_id} failed={failed} "
+                f"dispatched={dispatched} "
+                f"total={len(pending_urls)} —— 事件将保留 PEL 由 reclaim 重投"
+            )
 
     async def _on_batch_resumed(self, batch_id: str) -> None:
         # 恢复 = 派发剩余未完成/未派发的 URL；用同一逻辑
@@ -128,31 +139,100 @@ class CrawlBatchDispatcherService:
             runtime_status；迟到的 SUCCESS 报告会**穿过闸门**把状态翻回。
         改走 ``execution_status_service.update_runtime_status``：它带条件 CAS +
         同步写 status/runtime_status/timestamps，能守住终态。
-        """
-        active_run_ids = await self._active_run_ids_for_batch(batch_id)
-        if not active_run_ids:
-            logger.info(f"batch 无活跃 run，取消 no-op: batch_id={batch_id}")
-            return
 
+        P1-round6 5.2: 原实现只取一次快照,`_on_batch_started` 和
+        `_on_batch_cancelled` 事件并发时,快照后新建的 run 会被漏掉继续执行。
+        改为 loop-until-empty: 每轮拿最新 active runs,减去已处理集合,新增
+        为空才退出;上游 batch.status 已 CANCELLED, 后续 `_on_batch_started`
+        会被 L76 拦住不再产新 run, 循环必然收敛。
+        """
+        now = datetime.now(UTC)
+        seen: set[str] = set()
+        cancelled = 0
+        control_sent = 0
+        failed_run_ids: list[str] = []
+        max_rounds = 5  # 硬止损: 上游收敛后 1-2 轮足够, 5 轮避免病态 loop
+        for round_idx in range(max_rounds):
+            active_run_ids = await self._active_run_ids_for_batch(batch_id)
+            new_run_ids = [rid for rid in active_run_ids if rid not in seen]
+            if not new_run_ids:
+                if round_idx == 0:
+                    logger.info(f"batch 无活跃 run,取消 no-op: batch_id={batch_id}")
+                break
+            for run_id in new_run_ids:
+                ok, sent = await self._cancel_active_run(run_id, batch_id, now)
+                seen.add(run_id)
+                if ok:
+                    cancelled += 1
+                    control_sent += int(sent)
+                else:
+                    failed_run_ids.append(run_id)
+        if seen:
+            logger.info(
+                f"batch 取消: batch_id={batch_id} cancelled_runs={cancelled}/{len(seen)} control_sent={control_sent}"
+            )
+        if failed_run_ids:
+            raise RuntimeError(f"batch 取消未完成: batch_id={batch_id} failed_run_ids={failed_run_ids}; 保留 PEL 重投")
+
+    async def _cancel_active_run(self, run_id: str, batch_id: str, now: datetime) -> tuple[bool, bool]:
         from antcode_core.application.services.scheduler.execution_status_service import (
             execution_status_service,
         )
         from antcode_core.domain.models.enums import RuntimeStatus
 
-        now = datetime.now(UTC)
-        cancelled = 0
-        for run_id in active_run_ids:
-            ok = await execution_status_service.update_runtime_status(
-                run_id=run_id,
-                status=RuntimeStatus.CANCELLED,
-                status_at=now,
-                error_message=f"batch cancelled: {batch_id}",
+        try:
+            control_sent = await self._send_worker_cancel(run_id, reason=f"batch_cancelled:{batch_id}")
+        except Exception as exc:
+            logger.warning(f"batch 取消发送 Worker control 失败: batch_id={batch_id} run_id={run_id} exc={exc}")
+            return False, False
+        if control_sent is False:
+            return False, False
+        updated = await execution_status_service.update_runtime_status(
+            run_id=run_id,
+            status=RuntimeStatus.CANCELLED,
+            status_at=now,
+            error_message=f"batch cancelled: {batch_id}",
+        )
+        return bool(updated), control_sent is True
+
+    async def _send_worker_cancel(self, run_id: str, reason: str) -> bool | None:
+        """P1-07：复用单 run 取消的 control 通道给 batch 里的每个活跃 run。
+
+        ``None`` 表示无需/无法发送 control——尚未分配 Worker，或分配的
+        Worker 记录已删除（control 永久不可达），调用方可直接置
+        CANCELLED；``False`` 表示已分配但 control 暂时无法投递（如 Redis
+        不可用），此时调用方不得写 CANCELLED，保留 PEL 重投。
+        """
+        from antcode_core.application.services.runtime.runtime_control_service import (
+            write_control_event,
+        )
+        from antcode_core.application.services.workers.worker_service import worker_service
+        from antcode_core.domain.models import TaskRun
+        from antcode_core.infrastructure.redis import get_redis_client
+        from antcode_core.infrastructure.redis.control_plane import (
+            build_cancel_control_payload,
+            control_stream,
+        )
+
+        exe = await TaskRun.filter(run_id=run_id).only("id", "run_id", "worker_id").first()
+        if exe is None or not exe.worker_id:
+            return None
+        worker = await worker_service.get_worker_by_id(exe.worker_id)
+        if worker is None:
+            # C4: Worker 记录已删除 → control 永久不可达。若按 False 处理，
+            # _on_batch_cancelled 会永远重投失败，幽灵活跃 run 阻塞项目
+            # 删除。跳过 control，允许直接置 CANCELLED。
+            logger.warning(
+                f"batch 取消: 分配的 Worker 记录已不存在，跳过 control 直接取消: "
+                f"run_id={run_id} worker_id={exe.worker_id}"
             )
-            if ok:
-                cancelled += 1
-        logger.info(f"batch 取消: batch_id={batch_id} cancelled_runs={cancelled}/{len(active_run_ids)}")
-        # 已实际派发到 worker 的运行中任务，还需要发 control 取消给 worker。
-        # 一期先只标 DB，让 worker 侧的 heartbeat + reclaim 兜底；等 F1-B 再补 control。
+            return None
+        redis = await get_redis_client()
+        if redis is None:
+            return False
+        payload = build_cancel_control_payload(run_id=run_id, reason=reason)
+        await write_control_event(redis, control_stream(worker.public_id), payload)
+        return True
 
     # ---------- helpers ----------
 
@@ -177,6 +257,7 @@ class CrawlBatchDispatcherService:
         # 组装 rule dict（覆盖 target_url 为本次 URL）
         rule_dict = rule.to_dispatch_dict()
         rule_dict["target_url"] = url
+        rule_dict.update(self._batch_rule_overrides(batch))
 
         run_id = self._generate_run_id(batch.public_id)
         task_run_created = False
@@ -205,10 +286,9 @@ class CrawlBatchDispatcherService:
             # RulePlugin.validate 就报"缺少 target_url/extraction_rules"。
             # 与 spider_dispatcher.py 的 P16 修复对齐——rule_detail 必须
             # 塞在 ``params.kwargs`` 里。crawl_batch_id 保留顶层供审计追溯。
-            # R1-P1-3: timeout 用独立任务级字段（batch.task_timeout），不再
-            # 复用 ``batch.timeout``（那是 HTTP 请求超时，默认 30s，容易杀
-            # 掉慢站点抓取）。
-            task_timeout = int(getattr(batch, "task_timeout", None) or 3600)
+            # batch.timeout 是单次 HTTP DOWNLOAD_TIMEOUT，不能复用成整个爬虫
+            # 进程的任务超时。批次默认请求超时 30 秒，但总任务通常远超 30 秒。
+            task_timeout = DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,
                 run_id=run_id,
@@ -271,6 +351,38 @@ class CrawlBatchDispatcherService:
             await TaskRun.filter(run_id=run_id).delete()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"删除失败 TaskRun 占位失败: run_id={run_id} err={exc}")
+
+    @classmethod
+    def _batch_rule_overrides(cls, batch: CrawlBatch) -> dict[str, int]:
+        """显式转换批次配置；无效值必须阻止派发。"""
+        mappings = (
+            ("max_pages", "max_pages"),
+            ("max_retries", "retry_count"),
+            ("timeout", "timeout"),
+            ("max_concurrency", "concurrent_requests"),
+            ("max_depth", "max_depth"),
+        )
+        overrides = {
+            target: cls._batch_int_value(batch, source)
+            for source, target in mappings
+            if getattr(batch, source) is not None
+        }
+        if batch.request_delay is not None:
+            try:
+                overrides["request_delay"] = int(float(batch.request_delay) * 1000)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"batch 配置无效: batch_id={batch.public_id} field=request_delay value={batch.request_delay!r}"
+                ) from exc
+        return overrides
+
+    @staticmethod
+    def _batch_int_value(batch: CrawlBatch, field: str) -> int:
+        value = getattr(batch, field)
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"batch 配置无效: batch_id={batch.public_id} field={field} value={value!r}") from exc
 
     async def _already_dispatched_urls(self, batch_id: str) -> set[str]:
         """幂等派发：读取该 batch 已有 TaskRun 的 seed_url 集合。"""
