@@ -142,6 +142,9 @@ class Engine:
         max_concurrent: int = 5,
         memory_limit_mb: int = 0,
         cpu_limit_seconds: int = 0,
+        *,
+        tombstone_redis: Any = None,
+        tombstone_namespace: str = "antcode",
     ):
         # P2-#31: ``transport`` 与 ``executor`` 是核心依赖，按抽象基类标注；
         # 其他 manager / registry 仍保留 Any，因为它们的接口尚未稳定
@@ -160,7 +163,8 @@ class Engine:
 
         self._scheduler = Scheduler(max_queue_size=max_concurrent * 2)
         self._state_manager = StateManager()
-        self._cancel_tombstones = CancelTombstones()  # FN-01(c)
+        # FN-01(c) + P1-SM-03 (round6): 可选 Redis 备份防重启丢 fence
+        self._cancel_tombstones = CancelTombstones(redis_client=tombstone_redis, namespace=tombstone_namespace)
 
         self._running = False
         self._polling = False
@@ -382,7 +386,7 @@ class Engine:
         """poll 准入：tombstone → 去重 → ownership fence；False=已按各自语义处置。"""
         # FN-01(c): 取消先于任务到达时 cancel() 记了 tombstone；命中即按
         # CANCELLED 结算并 ACK，任务绝不执行。
-        if self._cancel_tombstones.consume(run_id):
+        if await self._cancel_tombstones.consume(run_id):
             await self._settle_tombstoned_task(run_id, task_msg)
             return False
         # B2: 本地去重——同一 PEL 消息重投时保持 pending，由原执行路径
@@ -1240,7 +1244,7 @@ class Engine:
         if not info:
             # FN-01(c): run 尚未到达本地——记 tombstone 并放行 control ACK；
             # 任务消息随后到达时在 poll 准入被拦截。
-            self._cancel_tombstones.record(run_id, reason)
+            await self._cancel_tombstones.record(run_id, reason)
             return True
 
         if info.state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):

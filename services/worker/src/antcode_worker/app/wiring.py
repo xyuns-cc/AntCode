@@ -148,6 +148,7 @@ def create_container(config: Any) -> Container:
         log_manager=log_manager,
         project_fetcher=project_fetcher,
         artifact_manager=artifact_manager,
+        tombstone_redis=_create_tombstone_redis(config),
     )
     container.register("engine", engine)
 
@@ -740,6 +741,20 @@ def _create_heartbeat_reporter(config: Any, transport: Any, metrics_collector: A
     )
 
 
+def _create_tombstone_redis(config: Any) -> Any:
+    # P1-SM-03 (round6): async Redis for CancelTombstones; None = 降级纯内存
+    redis_url = getattr(config, "redis_url", "")
+    if not redis_url:
+        return None
+    try:
+        from antcode_core.infrastructure.redis.factory import create_async_redis_client
+
+        return create_async_redis_client(redis_url, decode_responses=True)
+    except Exception as exc:  # noqa: BLE001 - 备份可选,不阻塞 Worker
+        logger.warning("cancel tombstones Redis client 创建失败,降级纯内存: {}", exc)
+        return None
+
+
 def _create_engine(
     config: Any,
     transport: Any,
@@ -749,6 +764,8 @@ def _create_engine(
     log_manager: Any,
     project_fetcher: Any,
     artifact_manager: Any,
+    *,
+    tombstone_redis: Any = None,
 ) -> Any:
     """创建引擎"""
     from antcode_worker.engine.engine import Engine
@@ -768,6 +785,8 @@ def _create_engine(
         max_concurrent=max_concurrent,
         memory_limit_mb=getattr(config, "task_memory_limit_mb", 0),
         cpu_limit_seconds=getattr(config, "task_cpu_time_limit_sec", 0),
+        tombstone_redis=tombstone_redis,
+        tombstone_namespace=getattr(config, "redis_namespace", "antcode"),
     )
 
     # 绑定指标采集器
