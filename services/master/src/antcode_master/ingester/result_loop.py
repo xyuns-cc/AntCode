@@ -27,13 +27,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 from antcode_contracts import data_pb2
-from antcode_core.application.services.task_run_service import task_run_service
+from antcode_core.application.services.lease_service import LeaseStore
+from antcode_core.application.services.task_run_service import TaskRunService
 from antcode_core.infrastructure.redis import task_result_stream
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
+from antcode_core.infrastructure.redis.sse_event_stream import SSEEventPublishError
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
 from loguru import logger
+
+from antcode_master.ingester.run_status_publisher import publish_persisted_run_status
 
 
 def _dead_letter_stream_key(namespace: str | None = None) -> str:
@@ -43,6 +47,17 @@ def _dead_letter_stream_key(namespace: str | None = None) -> str:
 
 # 单条消息最大重投次数；超过后进入 DLQ。
 MAX_DELIVER_COUNT = 5
+
+
+async def _validate_current_worker_lease(worker_id: str, lease_id: str) -> bool:
+    if not worker_id or not lease_id:
+        return False
+    redis = await get_redis_client()
+    store = LeaseStore(redis, namespace=redis_namespace())
+    return await store.is_current(worker_id, lease_id)
+
+
+task_run_service = TaskRunService(_validate_current_worker_lease)
 
 
 class ResultLoop:
@@ -180,34 +195,11 @@ class ResultLoop:
                 ack_ids: list[str] = []
                 dlq_ids: list[str] = []
                 for message in messages:
-                    # P1-19: typed decoder 现在会为解码失败的消息返回一个
-                    # 带 decode_error 的 envelope（payload=None）。这类消息
-                    # 直接走 DLQ,无需等 deliver_count 累计。
-                    if getattr(message, "decode_error", None):
-                        logger.error(
-                            "结果消息解码失败 → 直接 DLQ: msg_id={} err={}",
-                            message.msg_id,
-                            message.decode_error,
-                        )
-                        if await self._move_to_dlq(message):
-                            dlq_ids.append(message.msg_id)
-                        # DLQ 写失败：不 ACK,留在 PEL 由下轮 XAUTOCLAIM 再试
-                        continue
-
-                    try:
-                        handled = await self._handle_message(message.payload)
-                        if handled:
-                            ack_ids.append(message.msg_id)
-                        elif await self._should_dead_letter(message.msg_id):
-                            # P1-19: 只有 DLQ 写入成功才能 ACK,否则结果正文
-                            # 会丢失。写失败保留 PEL 让 reclaim 循环再试。
-                            if await self._move_to_dlq(message):
-                                dlq_ids.append(message.msg_id)
-                    except Exception:
-                        logger.exception("处理结果消息失败: msg_id={}", message.msg_id)
-                        if await self._should_dead_letter(message.msg_id):
-                            if await self._move_to_dlq(message):
-                                dlq_ids.append(message.msg_id)
+                    should_ack, moved_to_dlq = await self._process_message(message)
+                    if should_ack:
+                        ack_ids.append(message.msg_id)
+                    if moved_to_dlq:
+                        dlq_ids.append(message.msg_id)
 
                 # 正常处理完毕 + DLQ 后的消息都需要 ACK（防止重投阻塞 group）。
                 # P1-19: dlq_ids 现在只包含 DLQ **写入成功** 的 msg_id;写入
@@ -235,6 +227,34 @@ class ResultLoop:
                 # 1s → 2s → 4s → ... → 上限 60s，加 jitter
                 await sleep_with_backoff(consecutive_errors, base_delay=1.0, max_delay=60.0)
 
+    async def _process_message(self, message: Any) -> tuple[bool, bool]:
+        """Return ``(ack, moved_to_dlq)`` for one result stream message."""
+        decode_error = getattr(message, "decode_error", None)
+        if decode_error:
+            logger.error(
+                "结果消息解码失败 → 直接 DLQ: msg_id={} err={}",
+                message.msg_id,
+                decode_error,
+            )
+            return False, await self._move_to_dlq(message)
+
+        try:
+            if await self._handle_message(message.payload):
+                return True, False
+            if await self._should_dead_letter(message.msg_id):
+                return False, await self._move_to_dlq(message)
+        except SSEEventPublishError:
+            logger.exception(
+                "结果状态实时事件发布失败，保留 PEL 重试: msg_id={}",
+                message.msg_id,
+            )
+            return False, False
+        except Exception:
+            logger.exception("处理结果消息失败: msg_id={}", message.msg_id)
+            if await self._should_dead_letter(message.msg_id):
+                return False, await self._move_to_dlq(message)
+        return False, False
+
     async def _handle_message(self, task_status: data_pb2.TaskStatus) -> bool:
         """处理单条 ``TaskStatus`` 消息"""
         run_id = task_status.run_id
@@ -261,7 +281,7 @@ class ResultLoop:
         # Proto map<string, string> → dict，直接落 result_data
         result_data: dict[str, Any] = dict(task_status.data)
 
-        return await task_run_service.update_result(
+        ok = await task_run_service.update_result(
             run_id=run_id,
             status=status,
             exit_code=exit_code,
@@ -270,7 +290,101 @@ class ResultLoop:
             finished_at=finished_at,
             duration_ms=duration_ms,
             data=result_data,
+            worker_id=task_status.worker_id,
         )
+
+        # G4: 'killed' 从自动重试门槛移除 —— kill 是取消/运维介入的产物而非
+        # 瞬态失败,不应触发自动重试;且 proto 契约本无 KILLED(worker 侧
+        # killed 上行时已被 transcode 成 STATUS_FAILED),该分支实际不可达,
+        # 保留只会误导。系统无独立的 cancel-request 持久标记,取消证据仅剩
+        # DB 里的 CANCELLED 状态,由 _schedule_remote_retry 再核对。
+        #
+        # V5: retry 调度失败不再让已持久化的结果消息进 DLQ。
+        # ``_schedule_remote_retry`` → ``scheduler_service._schedule_retry`` 是
+        # durable-first:先在 TaskRun 行锁内写 ``next_retry_at`` 再投 Redis。
+        # 因此 Redis 入队失败可由 ``retry_loop._recover_from_db`` 从
+        # ``next_retry_at`` 恢复;结果本身(update_result)已落库,不应因重试
+        # 入队失败而被 dead-letter 永久丢结果。捕获后照常 ACK + 推送状态。
+        # 残留:若异常发生在 ``next_retry_at`` 落库之前(如重载查询/claim 事务
+        # 失败),该 run 的自动重试会丢失;此时 DB 多半也不可用,原"留 PEL 重放"
+        # 路径同样会在 MAX_DELIVER_COUNT 次后 dead-letter 丢失,交由 reconcile /
+        # 人工兜底,不比旧行为差。
+        if ok and status in ("failed", "timeout", "timed_out", "error"):
+            try:
+                await self._schedule_remote_retry(run_id)
+            except Exception:
+                logger.exception("远程失败重试调度失败: run_id={}", run_id)
+                # P1-FN-04: 只有确认 durable intent 已落库（recover_from_db
+                # 能接管）或该 run 本就不需要重试时才 ACK；否则保留 PEL 让
+                # 结果消息重放，绝不静默丢失自动重试。
+                if not await self._retry_intent_durable_or_ineligible(run_id):
+                    logger.warning("重试意图无 durable 证据,保留 PEL 重放: run_id={}", run_id)
+                    return False
+        if ok:
+            await publish_persisted_run_status(run_id)
+        return ok
+
+    async def _retry_intent_durable_or_ineligible(self, run_id: str) -> bool:
+        """重试调度异常后的证据核验（P1-FN-04）。
+
+        True = 可以安全 ACK：durable intent 已写、或 run 已取消、或任务
+        不允许/已耗尽重试。核验本身失败时保守返回 False（保留 PEL）。
+        """
+        try:
+            from antcode_core.domain.models import Task, TaskRun
+            from antcode_core.domain.models.enums import RuntimeStatus, TaskStatus
+
+            execution = (
+                await TaskRun.filter(run_id=run_id)
+                .only("task_id", "retry_count", "next_retry_at", "status", "runtime_status")
+                .first()
+            )
+            if execution is None:
+                return True
+            if execution.next_retry_at is not None:
+                return True
+            if execution.status == TaskStatus.CANCELLED or execution.runtime_status == RuntimeStatus.CANCELLED:
+                return True
+            task = await Task.filter(id=execution.task_id).only("retry_count").first()
+            if task is None or not task.retry_count or task.retry_count <= 0:
+                return True
+            return execution.retry_count >= task.retry_count
+        except Exception:
+            logger.exception("重试意图核验失败,保守保留 PEL: run_id={}", run_id)
+            return False
+
+    async def _schedule_remote_retry(self, run_id: str) -> None:
+        """P1-05：为远程 FAILED/TIMEOUT run 写 retry intent（若 task 允许）。
+
+        绕开循环导入：延迟到函数体内 import scheduler_service。
+        """
+        from antcode_core.domain.models import Task, TaskRun
+        from antcode_core.domain.models.enums import RuntimeStatus, TaskStatus
+
+        from antcode_master.control.scheduler_loop import scheduler_service
+
+        execution = (
+            await TaskRun.filter(run_id=run_id)
+            .only("id", "run_id", "task_id", "retry_count", "result_data", "status", "runtime_status")
+            .first()
+        )
+        if execution is None:
+            return
+        # G4: 用户取消与失败结果存在竞态 —— 取消 API 先发 control 再落库
+        # CANCELLED,失败结果先落库时取消方 CAS 会输。这里基于重新加载的行,
+        # 只要看到任一取消证据(overall status 或 runtime_status 为 CANCELLED)
+        # 就跳过自动重试:用户已取消的 run 不应被复活。
+        if execution.status == TaskStatus.CANCELLED or execution.runtime_status == RuntimeStatus.CANCELLED:
+            logger.info("run 已取消,跳过自动重试: run_id={}", run_id)
+            return
+        task = (
+            await Task.filter(id=execution.task_id)
+            .only("id", "retry_count", "retry_delay", "is_active", "name")
+            .first()
+        )
+        if task is None or not task.retry_count or task.retry_count <= 0:
+            return
+        await scheduler_service._schedule_retry(task, execution)
 
     # E1: 已弃用本地映射，改用 antcode_contracts.transcode.proto_status_to_str。
     # 旧方法保留兼容旧测试导入，转发到权威实现。
@@ -367,15 +481,39 @@ def _safe_has_field(msg: Any, field_name: str) -> bool:
         return False
 
 
+# P1-round6 5.3: Timestamp 合理值域上限 = 9999-12-31T23:59:59 UTC (datetime.max)
+_TS_MAX_SECONDS = 253402300799
+_TS_NANOS_UPPER = 1_000_000_000
+
+
 def _ts_to_datetime(ts: Any) -> datetime | None:
-    """``common_pb2.Timestamp`` → ``datetime``，未设置时返回 None。"""
+    """``common_pb2.Timestamp`` → ``datetime``，未设置时返回 None。
+
+    P1-round6 5.3: seconds/nanos 极值(如 seconds=2^62)会让 datetime.fromtimestamp
+    抛 OverflowError/ValueError, 之前直接向上传播到 result_loop 主循环, 消息可能
+    被 catch + ACK 但不会真正结算(started_at/finished_at 缺失)。这里做值域校验,
+    超范或非法就 log warning 返回 None(caller 会用 status_at fallback / status_at
+    也不设的话由 update_result 用 datetime.now(UTC) 补), 保证极值不阻塞管道。
+    """
     if ts is None:
         return None
     seconds = getattr(ts, "seconds", 0)
     nanos = getattr(ts, "nanos", 0)
     if seconds == 0 and nanos == 0:
         return None
-    return datetime.fromtimestamp(seconds + nanos / 1e9, tz=UTC)
+    # datetime 支持范围: [1970-01-01, 9999-12-31]. Timestamp seconds 上限约 253402300799.
+    if not (0 <= seconds < _TS_MAX_SECONDS) or not (0 <= nanos < _TS_NANOS_UPPER):
+        logger.warning(
+            "Timestamp 超合理范围, 视为未设置: seconds={} nanos={}",
+            seconds,
+            nanos,
+        )
+        return None
+    try:
+        return datetime.fromtimestamp(seconds + nanos / 1e9, tz=UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        logger.warning("Timestamp 转换失败, 视为未设置: seconds={} nanos={} err={}", seconds, nanos, exc)
+        return None
 
 
 result_loop = ResultLoop()
