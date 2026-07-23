@@ -401,8 +401,11 @@ class ProjectService extends BaseService {
     return response.data
   }
 
-  // 导入项目（上传文件/压缩包 + 环境配置，multipart/form-data）
-  async importProject(params: {
+  // Round6 P1-FE (5.4): 文件上传导入功能已下线; 后端 /api/v1/projects/import
+  // 固定返回 410 Gone。改为客户端预先抛清晰错误, 引导用户走仓库导入(
+  // repositoryProjectImportService.importFromRepository) 替代方案, 避免 410
+  // 混乱错误 + 无谓的文件上传。
+  async importProject(_params: {
     file: File
     name?: string
     description?: string
@@ -419,31 +422,10 @@ class ProjectService extends BaseService {
     runtime_config?: string
     environment_vars?: string
   }): Promise<unknown> {
-    const form = new FormData()
-    form.append('file', params.file)
-    form.append('runtime_scope', params.runtime_scope)
-    if (params.worker_id) form.append('worker_id', params.worker_id)
-    const optional: Array<[string, unknown]> = [
-      ['name', params.name],
-      ['description', params.description],
-      ['entry_point', params.entry_point],
-      ['use_existing_env', params.use_existing_env],
-      ['existing_env_name', params.existing_env_name],
-      ['python_version', params.python_version],
-      ['shared_runtime_key', params.shared_runtime_key],
-      ['env_name', params.env_name],
-      ['env_description', params.env_description],
-      ['overwrite_existing', params.overwrite_existing],
-      ['runtime_config', params.runtime_config],
-      ['environment_vars', params.environment_vars],
-    ]
-    for (const [k, v] of optional) {
-      if (v !== undefined && v !== null && v !== '') form.append(k, String(v))
-    }
-    const response = await apiClient.post('/api/v1/projects/import', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-    return response.data
+    throw new Error(
+      '文件上传导入已下线, 请通过"仓库导入"从 Git 仓库导入项目。' +
+      ' (POST /api/v1/repositories/import-from-repository)'
+    )
   }
 
   // 验证项目配置
