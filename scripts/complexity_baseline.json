@@ -3587,7 +3587,7 @@
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1487
+      "value": 1497
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
