@@ -29,7 +29,8 @@ def test_public_lease_key_matches_the_authoritative_key_format() -> None:
 async def test_grant_updates_primary_record_and_indexes_in_one_script():
     redis = MagicMock()
     store = LeaseStore(redis, namespace="tenant")
-    store._evalsha_grant = AsyncMock(return_value=["lease-id", "2000", "1000", "new"])
+    # P1-GW-01 (round6): Lua 返回值增加第 5 项 sequence
+    store._evalsha_grant = AsyncMock(return_value=["lease-id", "2000", "1000", "new", "7"])
 
     lease = await store.grant("worker-a")
 
@@ -39,10 +40,13 @@ async def test_grant_updates_primary_record_and_indexes_in_one_script():
         "{tenant}:lease:revoked:worker-a",
         "{tenant}:lease:expiring",
         "{tenant}:lease:active",
+        "{tenant}:lease:sequence",  # P1-GW-01 (round6): 全局 seq 计数器
     ]
     args = store._evalsha_grant.await_args.args[1]
     assert args[3:] == ["30000", "5000", ""]
     assert lease.lease_id == "lease-id"
+    expected_sequence = 7  # P1-GW-01 (round6): sequence 单调 tie-breaker,mock 固定值
+    assert lease.sequence == expected_sequence
     redis.pipeline.assert_not_called()
 
 

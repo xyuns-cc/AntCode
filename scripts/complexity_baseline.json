@@ -425,7 +425,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 719
+      "value": 759
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
@@ -437,7 +437,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
       "function": "LeaseStore.grant",
       "rule": "PLR2004",
-      "value": 1
+      "value": 2
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",

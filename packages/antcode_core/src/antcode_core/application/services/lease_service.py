@@ -46,12 +46,20 @@ LEASE_RECORD_RETENTION_MS = 5_000
 
 @dataclass(frozen=True)
 class Lease:
-    """单个 Worker 的 lease 快照（grant 后返回）。"""
+    """单个 Worker 的 lease 快照（grant 后返回）。
+
+    P1-GW-01 (round6): ``sequence`` 是 grant 时通过 ``INCR`` 拿到的全局单调
+    序号,用作 lease_gen 的严格单调 tie-breaker。同毫秒内两个 grant 也不会
+    拿到相同 sequence。renew 保留原 sequence,让"L1 old sequence < L2 new sequence"
+    永远成立。存量 lease Hash 里没有 sequence 字段时回退到 0(仍向后兼容,
+    只是同毫秒下失去区分)。
+    """
 
     worker_id: str
     lease_id: str
     expires_at_ms: int
     granted_at_ms: int
+    sequence: int = 0  # P1-GW-01 (round6): 严格单调 tie-breaker
 
 
 class LeaseRevokedError(RuntimeError):
@@ -90,12 +98,19 @@ class LeasePolicy:
     renew_after_ms: int = 10_000
 
 
-# P1-15 fail-closed: SISMEMBER revoked_key 拒绝 grant 被撤 lease_id 复活；outcome ∈ {new,renewed,revoked,conflict}。KEYS=[lease_key,revoked_key,expiring_zset,active_set]; ARGV=[worker_id,current_lease_id,new_lease_id,ttl_ms,record_retention_ms,metrics_json].
+# P1-15 fail-closed: SISMEMBER revoked_key 拒绝 grant 被撤 lease_id 复活;
+# outcome ∈ {new,renewed,revoked,conflict}。
+# P1-GW-01 (round6): 增加 seq_key(KEYS[5], 与其他 lease keys 同 slot),grant
+# 时 INCR 拿严格单调 sequence 作 gen tie-breaker。同毫秒下不同 lease grant
+# 也不会碰撞;renew 保留原 sequence。
+# KEYS=[lease_key,revoked_key,expiring_zset,active_set,seq_key];
+# ARGV=[worker_id,current_lease_id,new_lease_id,ttl_ms,record_retention_ms,metrics_json].
 _GRANT_LUA = """
 local lease_key   = KEYS[1]
 local revoked_key = KEYS[2]
 local expiring_key = KEYS[3]
 local active_key = KEYS[4]
+local seq_key = KEYS[5]
 
 local worker_id        = ARGV[1]
 local current_lease_id = ARGV[2]
@@ -126,6 +141,7 @@ end
 local stored_lease_id = redis.call('HGET', lease_key, 'lease_id')
 local stored_expires  = tonumber(redis.call('HGET', lease_key, 'expires_at_ms') or "0")
 local stored_granted  = tonumber(redis.call('HGET', lease_key, 'granted_at_ms') or "0")
+local stored_sequence = tonumber(redis.call('HGET', lease_key, 'sequence') or "0")
 
 -- P1-15 fail-closed（进阶）: 存储中的 lease_id 也可能被撤(edge case:
 -- revoke 与 grant 并发时 revoke 只 DEL 了 lease_key 但 SADD 了 stored id)。
@@ -136,25 +152,30 @@ end
 
 local final_lease_id
 local final_granted_ms
+local final_sequence
 local outcome
 
 if stored_lease_id and stored_expires > now_ms then
     if current_lease_id ~= '' and stored_lease_id == current_lease_id then
         -- 续租：lease_id 不变，只刷新过期时间
-        -- P1-GW-01 (round5/6): granted_at_ms 保留原值,不重写为 now_ms。
-        -- 否则 gen = granted_at_ms 会在 renew 时前进,破坏"L1 gen < L2 gen"
-        -- 单调性,让迟到 L1 bind 反而拿到更大 gen 覆盖 L2。
+        -- P1-GW-01 (round5/6): granted_at_ms + sequence 保留原值,不重写。
+        -- renew 前进 granted_at_ms/sequence 会破坏"L1 gen < L2 gen"单调性,
+        -- 让迟到 L1 bind 反而覆盖 L2。
         final_lease_id = stored_lease_id
         final_granted_ms = stored_granted > 0 and stored_granted or now_ms
+        final_sequence = stored_sequence > 0 and stored_sequence or 0
         outcome = 'renewed'
     else
         -- 活跃代际只能由其持有者续租；冲突路径不得修改任何状态。
         return {'', '', '', 'conflict'}
     end
 else
-    -- 首次或上一代已过期：用新的 lease_id 与当前时刻作为 grant 时点
+    -- 首次或上一代已过期：用新的 lease_id + 当前时刻 + 新 sequence
+    -- P1-GW-01 (round6): INCR seq_key 拿严格单调 sequence 作 gen tie-breaker。
+    -- Redis INCR 是原子的,同毫秒下 L1/L2 会拿到不同 sequence,单调递增。
     final_lease_id = new_lease_id
     final_granted_ms = now_ms
+    final_sequence = redis.call('INCR', seq_key)
     outcome = 'new'
 end
 
@@ -162,6 +183,7 @@ redis.call('HSET', lease_key,
     'lease_id', final_lease_id,
     'expires_at_ms', tostring(expires_at_ms),
     'granted_at_ms', tostring(final_granted_ms),
+    'sequence', tostring(final_sequence),
     'worker_id', worker_id)
 
 if metrics_json ~= '' then
@@ -174,7 +196,7 @@ redis.call('PEXPIRE', lease_key, ttl_ms + record_retention_ms)
 redis.call('ZADD', expiring_key, expires_at_ms, worker_id)
 redis.call('SADD', active_key, worker_id)
 
-return {final_lease_id, tostring(expires_at_ms), tostring(final_granted_ms), outcome}
+return {final_lease_id, tostring(expires_at_ms), tostring(final_granted_ms), outcome, tostring(final_sequence)}
 """
 
 
@@ -281,6 +303,11 @@ class LeaseStore:
     REVOKED_SET_TEMPLATE = "{{{ns}}}:lease:revoked:{worker_id}"
     EXPIRING_ZSET_SUFFIX = "lease:expiring"
     ACTIVE_SET_SUFFIX = "lease:active"
+    # P1-GW-01 (round6): 全局单调 sequence 计数器,与 lease_key 同 hash slot。
+    # grant INCR 拿到严格单调值,作 lease_gen tie-breaker;同毫秒下 L1/L2
+    # 也拿不同 seq。所有 worker 共用同一 seq_key(Redis Cluster 下 hash tag
+    # 保证同 slot,不跨节点)。
+    SEQ_KEY_TEMPLATE = "{{{ns}}}:lease:sequence"
     # P1-15 死信保留额外冗余(秒),防止旧 worker 在死信 TTL 边界赢下竞赛
     REVOKED_TTL_MARGIN_SECONDS = 30
 
@@ -338,6 +365,10 @@ class LeaseStore:
 
     def _active_set(self) -> str:
         return f"{{{self._namespace}}}:{self.ACTIVE_SET_SUFFIX}"
+
+    def _seq_key(self) -> str:
+        # P1-GW-01 (round6): grant 全局单调 sequence 键
+        return self.SEQ_KEY_TEMPLATE.format(ns=self._namespace)
 
     @property
     def policy(self) -> LeasePolicy:
@@ -451,6 +482,7 @@ class LeaseStore:
             self._revoked_key(worker_id),
             self._expiring_zset(),
             self._active_set(),
+            self._seq_key(),  # P1-GW-01 (round6): grant seq 计数器
         ]
         args = [
             worker_id,
@@ -462,25 +494,29 @@ class LeaseStore:
         ]
         result = await self._evalsha_grant(keys, args)
 
-        # Lua 返回 [lease_id, expires_at_ms, granted_at_ms, outcome]。
-        # rejected outcome 的前三项均为空串。
+        # Lua 返回 [lease_id, expires_at_ms, granted_at_ms, outcome, sequence]。
+        # rejected outcome 的前三项均为空串;sequence 位是 round6 新增的严格
+        # 单调 tie-breaker,老 Lua/存量 lease 无该位时 fallback 到 0。
         outcome = _to_str(result[3]) if len(result) > 3 else ""
         _ensure_grant_accepted(outcome, worker_id, current_lease_id or "")
 
         final_lease_id = _to_str(result[0])
         final_expires = int(_to_str(result[1]))
         final_granted = int(_to_str(result[2]))
+        # P1-GW-01 (round6): sequence 是新加的第 5 项;老脚本无该项时 fallback 0
+        final_sequence = int(_to_str(result[4])) if len(result) > 4 else 0
 
         if outcome == "new":
-            logger.debug(f"Lease 新发: worker_id={worker_id}, expires_at_ms={final_expires}")
+            logger.debug(f"Lease 新发: worker_id={worker_id}, expires_at_ms={final_expires}, seq={final_sequence}")
         else:
-            logger.debug(f"Lease 续租: worker_id={worker_id}, expires_at_ms={final_expires}")
+            logger.debug(f"Lease 续租: worker_id={worker_id}, expires_at_ms={final_expires}, seq={final_sequence}")
 
         return Lease(
             worker_id=worker_id,
             lease_id=final_lease_id,
             expires_at_ms=final_expires,
             granted_at_ms=final_granted,
+            sequence=final_sequence,
         )
 
     async def revoke(
@@ -546,6 +582,9 @@ class LeaseStore:
         try:
             expires_at_ms = int(decoded.get("expires_at_ms", "0"))
             granted_at_ms = int(decoded.get("granted_at_ms", "0"))
+            # P1-GW-01 (round6): sequence 是 round6 新加字段;存量 lease 无此字段
+            # 时 fallback 0(向后兼容,只是失去同毫秒 tie-breaker 效果)
+            sequence = int(decoded.get("sequence", "0"))
         except ValueError:
             return None
         if not include_expired:
@@ -557,6 +596,7 @@ class LeaseStore:
             lease_id=lease_id,
             expires_at_ms=expires_at_ms,
             granted_at_ms=granted_at_ms,
+            sequence=sequence,
         )
 
     async def is_active(self, worker_id: str) -> bool:
