@@ -18,7 +18,8 @@ import {
     theme,
     Avatar,
     Badge,
-    Typography
+    Typography,
+    Alert
 } from 'antd'
 import {
     PlusOutlined,
@@ -352,6 +353,18 @@ const Cookies: React.FC = () => {
                     自动化会话管理与登录脚本配置
                 </p>
             </div>
+
+            {/* P1-round6 5.4: 显式标注 demo 语义, 页面数据为前端模拟(status 由
+                Math.random 生成, 账号列表来自 INITIAL_ACCOUNTS 常量), 未接后端,
+                不代表任何真实账号池状态。 */}
+            <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="Demo 页面"
+                description="本页数据为前端模拟(status 由随机数生成, 账号来自内置常量), 尚未接入后端账号池服务, 展示效果不代表任何真实运行状态。"
+            />
+
 
             {/* 统计卡片 */}
             <Row gutter={16} style={{ marginBottom: 24 }}>
