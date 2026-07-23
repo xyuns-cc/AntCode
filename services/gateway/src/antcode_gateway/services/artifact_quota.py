@@ -26,6 +26,9 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Any
+
+from loguru import logger
 
 MEBIBYTE = 1024 * 1024
 # 与 antcode_worker.executor.artifact_collector.DEFAULT_MAX_FILE_COUNT 对齐
@@ -35,6 +38,11 @@ MAX_ARTIFACT_BYTES_PER_RUN = 500 * MEBIBYTE
 # 进程内跟踪的 run 数上限（LRU 驱逐），限制配额账本自身的内存占用。
 # 上传前已通过 run ownership + 活跃 run 校验，能进入账本的 run 有限。
 MAX_TRACKED_RUNS = 4096
+
+# P1-round6 5.3: Redis 备份 key 模板 (Cluster hash tag = run_id 让 count/bytes
+# 落同 slot, 支持原子 HSET/HINCRBY)。TTL 与合理 run 生命周期对齐 (24h)。
+_QUOTA_KEY_TEMPLATE = "{{{ns}}}:{{{run_id}}}:artifact:quota"
+_QUOTA_TTL_SECONDS = 24 * 3600
 
 
 class RunArtifactQuotaExceeded(Exception):
@@ -64,6 +72,8 @@ class RunArtifactQuota:
         max_artifacts: int = MAX_ARTIFACTS_PER_RUN,
         max_total_bytes: int = MAX_ARTIFACT_BYTES_PER_RUN,
         max_tracked_runs: int = MAX_TRACKED_RUNS,
+        redis_client: Any = None,
+        namespace: str = "antcode",
     ) -> None:
         if max_artifacts < 1 or max_total_bytes < 1 or max_tracked_runs < 1:
             raise ValueError("artifact 配额参数必须为正数")
@@ -74,6 +84,11 @@ class RunArtifactQuota:
         # P1-round6 5.3 (observability): 累积计数, 便于运维观察配额边界
         self._evicted_runs = 0
         self._exceeded_events = 0
+        # P1-round6 5.3 (durability): 可选 Redis 备份, 进程重启后能 restore
+        # 已占用的 count/bytes, 攻击者无法通过 Gateway 重启把 quota 放大到
+        # N 倍。None 时降级纯内存(向后兼容 + 单元测试)。
+        self._redis = redis_client
+        self._namespace = namespace
 
     def reserve(self, run_id: str, size_bytes: int) -> None:
         """为一次上传预留配额；超限抛 ``RunArtifactQuotaExceeded``。"""
@@ -116,6 +131,76 @@ class RunArtifactQuota:
             self._usage.popitem(last=False)
             self._evicted_runs += 1
         return usage
+
+    def _redis_key(self, run_id: str) -> str:
+        return _QUOTA_KEY_TEMPLATE.format(ns=self._namespace, run_id=run_id)
+
+    async def restore_from_redis(self, run_id: str) -> None:
+        """P1-round6 5.3: Gateway 重启后按需从 Redis 恢复 run 的用量账目。
+
+        应在 reserve 前调用(如果内存 miss); 无 redis_client / 无键 / Redis
+        不可达时 no-op, 让 quota 走纯内存兜底(仍能 fence 后续超限)。
+        HGETALL 返回 bytes → int, 空表返回 0。
+        """
+        if self._redis is None or run_id in self._usage:
+            return
+        try:
+            data = await self._redis.hgetall(self._redis_key(run_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("artifact quota restore Redis 查询失败: run={} err={}", run_id, exc)
+            return
+        if not data:
+            return
+
+        def _int(v: Any) -> int:
+            if isinstance(v, bytes):
+                v = v.decode("utf-8", "replace")
+            try:
+                return max(0, int(v))
+            except (TypeError, ValueError):
+                return 0
+
+        # Redis-py 有的返回 str-key 有的返回 bytes-key, 都归一
+        norm = {(k.decode() if isinstance(k, bytes) else k): v for k, v in data.items()}
+        usage = _RunUploadUsage(count=_int(norm.get("count")), total_bytes=_int(norm.get("total_bytes")))
+        self._usage[run_id] = usage
+        # 触发 LRU 驱逐边界
+        while len(self._usage) > self._max_tracked_runs:
+            self._usage.popitem(last=False)
+            self._evicted_runs += 1
+
+    async def async_reserve(self, run_id: str, size_bytes: int) -> None:
+        """P1-round6 5.3: 在 reserve 前先尝试从 Redis 恢复 (幂等),然后 fence 计数
+        + 写回 Redis 备份。async 变体, 调用方在 grpc handler 中 await。
+        Redis 写失败仅 warn, 不阻塞 quota 判定(内存已 fence)。
+        """
+        await self.restore_from_redis(run_id)
+        self.reserve(run_id, size_bytes)
+        if self._redis is None:
+            return
+        try:
+            key = self._redis_key(run_id)
+            pipeline = self._redis.pipeline(transaction=False)
+            pipeline.hincrby(key, "count", 1)
+            pipeline.hincrby(key, "total_bytes", size_bytes)
+            pipeline.expire(key, _QUOTA_TTL_SECONDS)
+            await pipeline.execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("artifact quota Redis 备份写入失败(仅内存 fence): run={} err={}", run_id, exc)
+
+    async def async_release(self, run_id: str, size_bytes: int) -> None:
+        """与 async_reserve 对称的归还; Redis 失败仅 warn。"""
+        self.release(run_id, size_bytes)
+        if self._redis is None:
+            return
+        try:
+            key = self._redis_key(run_id)
+            pipeline = self._redis.pipeline(transaction=False)
+            pipeline.hincrby(key, "count", -1)
+            pipeline.hincrby(key, "total_bytes", -size_bytes)
+            await pipeline.execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("artifact quota Redis 备份归还失败: run={} err={}", run_id, exc)
 
     def metrics(self) -> dict[str, int]:
         """P1-round6 5.3: 只读快照, 供 /metrics 或健康检查暴露给运维观察。
