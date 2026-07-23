@@ -157,10 +157,12 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   const isFirstLoad = useRef(true)
 
   // 实时趋势数据
+  // P1-round6 5.4: 移除 itemRate 合成字段(此前 = reqRate * 0.7 硬编码, 与
+  // 后端真实数据无关, 不能作为监控依据)。后端未提供 itemsPerMinute 时,
+  // 图上不再画伪造线,只展示 reqRate/latency 两条真实曲线。
   const [realtimeTrend, setRealtimeTrend] = useState<Array<{
     time: string
     reqRate: number
-    itemRate: number
     latency: number
   }>>([])
 
@@ -190,7 +192,6 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
         const newData = [...prev, {
           time: timeStr,
           reqRate,
-          itemRate: Math.floor(reqRate * 0.7),
           latency
         }]
         return newData.slice(-20) // 保留最近 20 个数据点
@@ -280,7 +281,6 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       labels: realtimeTrend.map(p => p.time),
       datasets: [
         { label: '请求数/分钟', data: realtimeTrend.map(p => p.reqRate), borderColor: '#667eea', backgroundColor: 'rgba(102, 126, 234, 0.15)', fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2 },
-        { label: '数据项/分钟', data: realtimeTrend.map(p => p.itemRate), borderColor: '#52c41a', backgroundColor: 'transparent', tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2, borderDash: [4, 4] }
       ]
     }
   }, [realtimeTrend])
