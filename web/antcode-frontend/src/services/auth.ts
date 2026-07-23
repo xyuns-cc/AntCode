@@ -1,6 +1,8 @@
-import apiClient, { TokenManager } from './api'
+import apiClient, { refreshSessionToken, TokenManager } from './api'
+import { broadcastAuthEvent, setSessionHint } from './authToken'
 import { AuthHandler } from '@/utils/authHandler'
 import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
+import { useAuthStore } from '@/stores/authStore'
 import { encryptLoginPassword } from '@/utils/loginEncryption'
 import Logger from '@/utils/logger'
 import type {
@@ -42,9 +44,10 @@ class AuthService {
     const payload = response.data.data
     const user = payload.user
 
-    // 保存 token 和用户信息
+    // Access token 仅保存在进程内存；refresh token 由后端 HttpOnly cookie 管理。
     TokenManager.setTokens(payload.access_token)
-    localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(user))
+    // 记录“存在会话”提示标记（不含敏感信息），供应用启动时决定是否尝试恢复会话
+    setSessionHint()
 
     return {
       access_token: payload.access_token,
@@ -62,17 +65,10 @@ class AuthService {
 
   // 获取当前用户信息
   async getCurrentUser(): Promise<User> {
-    // 由于后端没有 /auth/me 端点，我们从本地存储获取用户信息
-    const userInfo = localStorage.getItem(STORAGE_KEYS.USER_INFO)
-    if (!userInfo) {
-      throw new Error('用户信息不存在')
-    }
-
-    try {
-      return JSON.parse(userInfo)
-    } catch {
-      throw new Error('用户信息格式错误')
-    }
+    const resp = await apiClient.get<{ data: User }>('/api/v1/auth/me')
+    const user: User | undefined = (resp as unknown as { data?: { data?: User } })?.data?.data
+    if (!user) throw new Error('服务端未返回当前用户信息')
+    return user
   }
 
   // 更新用户信息
@@ -86,8 +82,6 @@ class AuthService {
     const response = await apiClient.put<ApiResponse<User>>(`/api/v1/users/${userInfo.id}`, userData)
 
     // 更新本地存储的用户信息
-    localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(response.data.data))
-
     return response.data.data
   }
 
@@ -103,18 +97,30 @@ class AuthService {
       old_password: currentPassword,
       new_password: newPassword,
     })
+    // P1-round6 5.4: 修密码后后端 revoke 所有 session, 其他 tab 仍持旧 access
+    // token → 下一次请求 401 循环。这里主动广播 logout, 其他 tab 收到后统一
+    // 清 session hint 并跳登录, 避免半认证状态。本 tab 立即 refresh 拿新
+    // token (refresh cookie 会随请求带上, 后端在 revoke 时应保留最后一次登录
+    // session 或让 refresh 自动重登)。
+    try {
+      broadcastAuthEvent('logout')
+    } catch {
+      // BroadcastChannel 不可用不阻塞主流程
+    }
+    try {
+      await this.refreshToken()
+    } catch {
+      // refresh 失败留由拦截器统一 401 → 登录
+    }
   }
 
   // 刷新 Token
   async refreshToken(): Promise<LoginResponse> {
-    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/refresh', {})
-
-    const payload = response.data.data
+    const payload = await refreshSessionToken() as BackendLoginResponse
     const user = payload.user
 
     // 更新 token
     TokenManager.setTokens(payload.access_token)
-    localStorage.setItem(STORAGE_KEYS.USER_INFO, JSON.stringify(user))
 
     return {
       access_token: payload.access_token,
@@ -122,6 +128,13 @@ class AuthService {
       expires_in: payload.expires_in ?? 3600,
       user,
     }
+  }
+
+  async restoreSession(): Promise<User> {
+    if (this.isAuthenticated()) {
+      return this.getCurrentUser()
+    }
+    return (await this.refreshToken()).user
   }
 
   // 检查是否已登录
@@ -143,16 +156,9 @@ class AuthService {
     return TokenManager.getAccessToken()
   }
 
-  // 获取用户信息（从本地存储）
+  // 获取当前进程内的权威用户状态。
   getUserInfo(): User | null {
-    const userInfo = localStorage.getItem(STORAGE_KEYS.USER_INFO)
-    if (!userInfo) return null
-
-    try {
-      return JSON.parse(userInfo)
-    } catch {
-      return null
-    }
+    return useAuthStore.getState().user
   }
 
   // 获取用户权限
@@ -160,13 +166,17 @@ class AuthService {
     const response = await apiClient.get<ApiResponse<{ permissions: string[] }>>(
       '/api/v1/auth/permissions'
     )
-    return response.data.data.permissions
+    const permissions = response.data.data?.permissions
+    if (!Array.isArray(permissions)) {
+      throw new Error('服务端未返回用户权限')
+    }
+    return permissions
   }
 
   // 检查用户是否有特定权限
   hasPermission(permission: string, userPermissions?: string[]): boolean {
     const permissions = userPermissions || this.getCachedPermissions()
-    return permissions.includes(permission) || permissions.includes('admin')
+    return permissions.includes(permission)
   }
 
   // 获取缓存的权限（从 token 中解析）
