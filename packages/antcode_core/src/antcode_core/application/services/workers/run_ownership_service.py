@@ -8,9 +8,29 @@ from antcode_core.application.services.crawl.spider_storage_cleanup import (
     SPIDER_WRITABLE_TASK_STATUSES,
 )
 from antcode_core.domain.models import Project, Task, TaskRun, Worker
+from antcode_core.domain.models.enums import TaskStatus
 
 # Lease ID 契约上限（与 Gateway/Lua 侧一致）。
 MAX_LEASE_ID_LENGTH = 64
+
+# P1-GW-02 (round6): TaskRun 终态集合。ownership claim/bind 遇到这些状态一律拒,
+# 防"已完成 run 的 ACK 丢失后 L2 重新 claim 造成重复执行"。审查场景:
+# - L1 完成任务, ReportResult 成功持久化 TaskStatus=SUCCESS
+# - L1 网络抖动, AckTask 丢失, PEL 未 XACK
+# - Master reconcile 判 L1 死, L2 XAUTOCLAIM 拿到消息
+# - L2 调 ClaimRunOwnership, 若不查终态就 acquired=True, 启动子进程重复
+#   跑该 run 的外部副作用(付款/文件上传/邮件); 迟到 SUCCESS 的终态吸收
+#   规则不能撤销已产生的物理副作用。
+_TASK_TERMINAL_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCESS,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.TIMEOUT,
+        TaskStatus.SKIPPED,
+        TaskStatus.REJECTED,
+    }
+)
 
 
 async def _resolve_worker(worker: Worker | str) -> Worker:
@@ -110,6 +130,17 @@ async def bind_worker_run_lease_generation(
         raise ValueError("lease_gen 必须非负")
 
     resolved = await _resolve_worker(worker)
+
+    # P1-GW-02 (round6): bind 前查 TaskRun 终态,已终态则拒绝 bind。防"L1 完成
+    # 后 ACK 丢失, L2 reclaim + claim + bind → 重复执行副作用"。fence Lua 只
+    # 保证 Redis ownership 单进程,不查 PG 终态; 这里补上 PG 侧的兜底。
+    # (fence + bind 已经原子, 但终态判断放 PG 侧因为 Redis ownership TTL 短,
+    #  终态可能在 Redis owner 已 DEL 后到, PG 是权威)
+    existing = await TaskRun.filter(run_id=normalized_run).only("id", "status", "worker_id").first()
+    if existing is not None and existing.status in _TASK_TERMINAL_STATUSES:
+        raise PermissionError(
+            f"TaskRun 已在终态 {existing.status}, 拒绝 bind (防已完成 run 被重复 claim 执行)"
+        )
 
     if lease_gen is None:
         # 兼容路径:不做代际单调 CAS(仅当 Gateway 未升级时使用)
