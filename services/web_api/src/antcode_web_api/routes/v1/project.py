@@ -16,6 +16,7 @@ from antcode_core.application.services.projects.project_source_service import (
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.projects.unified_project_service import unified_project_service
 from antcode_core.application.services.users.user_service import user_service
+from antcode_core.common.config import settings
 from antcode_core.common.security.auth import get_current_user, get_current_user_id
 from antcode_core.common.utils.api_optimizer import (
     fast_response,
@@ -54,7 +55,7 @@ from fastapi import (
     Request,
     status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
@@ -70,6 +71,19 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
+from antcode_web_api.routes.v1.project_export_executions import bound_execution_export_payloads
+from antcode_web_api.routes.v1.project_export_logs import load_export_task_logs
+from antcode_web_api.services.project_connection import (
+    ProjectConnectionError,
+    ProjectConnectionResponseTooLargeError,
+    ProjectConnectionTimeoutError,
+    probe_project_connection,
+)
+from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
+from antcode_web_api.utils.csv_security import sanitize_csv_row
+
+# 复审 P3: 旧本地实现缺保留标量/数字串引号防护，统一走共享导出工具。
+from antcode_web_api.utils.yaml_export import yaml_dump as _yaml_dump
 
 project_router = APIRouter()
 
@@ -117,43 +131,6 @@ class ProjectValidateRequest(BaseModel):
     entry_point: str | None = None
 
 
-def _yaml_dump(data: object, indent: int = 0) -> str:
-    """简单 YAML 序列化（避免额外依赖）"""
-    prefix = "  " * indent
-    if isinstance(data, dict):
-        lines = []
-        for key, value in data.items():
-            if isinstance(value, (dict, list)):
-                lines.append(f"{prefix}{key}:")
-                lines.append(_yaml_dump(value, indent + 1))
-            else:
-                lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
-        return "\n".join(lines)
-    if isinstance(data, list):
-        lines = []
-        for item in data:
-            if isinstance(item, (dict, list)):
-                lines.append(f"{prefix}-")
-                lines.append(_yaml_dump(item, indent + 1))
-            else:
-                lines.append(f"{prefix}- {_yaml_scalar(item)}")
-        return "\n".join(lines)
-    return f"{prefix}{_yaml_scalar(data)}"
-
-
-def _yaml_scalar(value: object) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value)
-    if any(c in text for c in [":", "-", "#", "\n", '"', "'"]):
-        return json.dumps(text, ensure_ascii=False)
-    return text
-
-
 async def _generate_unique_project_name(base_name: str) -> str:
     name = base_name
     idx = 1
@@ -164,7 +141,7 @@ async def _generate_unique_project_name(base_name: str) -> str:
 
 
 def _task_export_payload(task: Task, project_public_id: str) -> dict[str, object]:
-    """导出任务配置（适配 TaskCreateRequest）"""
+    """导出可重导入的任务配置，不包含透明解密后的运行时秘密。"""
     return {
         "name": task.name,
         "description": task.description or "",
@@ -177,8 +154,6 @@ def _task_export_payload(task: Task, project_public_id: str) -> dict[str, object
         "timeout_seconds": task.timeout_seconds,
         "retry_count": task.retry_count,
         "retry_delay": task.retry_delay,
-        "execution_params": task.execution_params or {},
-        "environment_vars": task.environment_vars or {},
         "is_active": task.is_active,
         "execution_strategy": task.execution_strategy,
         "specified_worker_id": None,
@@ -603,17 +578,41 @@ async def export_project_config(
 
     include_tasks = bool(request.include_tasks)
     include_logs = bool(request.include_logs)
+    is_admin = await user_service.is_admin(current_user.user_id)
     task_items = await _load_export_tasks(
         project,
         include_tasks=include_tasks,
         current_user_id=current_user_id,
-        is_admin=await user_service.is_admin(current_user.user_id),
+        is_admin=is_admin,
     )
     if include_tasks:
         payload["tasks"] = task_items
 
     if include_logs and task_items:
-        payload["executions"] = await _load_export_executions(project, request.date_range)
+        # P1-SEC-01: 执行结果必须沿用与任务相同的 owner 过滤。此前按项目
+        # 重新加载全部执行并导出 result_data/stdout/stderr —— 同项目多用户
+        # 场景下会读取其他用户任务的执行结果。
+        executions, run_ids = await _load_export_executions(
+            project,
+            request.date_range,
+            current_user_id=current_user_id,
+            is_admin=is_admin,
+        )
+        # P1-round6 5.3: 200 条 execution 的 result_data/stdout/stderr/error_message
+        # 之前不受预算约束, 峰值可达数 GB 内存。走 8 MiB 独立预算,超预算的
+        # execution 保留元数据但把可膨胀字段替换成 truncated 标记, 顶层
+        # executions_truncated 显式暴露。
+        exec_dicts = [e.model_dump(mode="json") if hasattr(e, "model_dump") else dict(e) for e in executions]
+        exec_truncated = bound_execution_export_payloads(exec_dicts)
+        payload["executions"] = exec_dicts
+        payload["executions_truncated"] = exec_truncated
+        # P2 §4.4: include_logs 此前只导出 execution 元数据；现在附带
+        # TaskLog（每 run 截取最新 N 行，超限在条目里显式标记）。
+        # P1-SEC-03: 叠加全局字节预算，防止 200 run × 200 行 × ~1MiB/行
+        # 撑爆内存；预算耗尽即停止读库，顶层 truncated 标记显式暴露截断。
+        task_logs, logs_truncated = await load_export_task_logs(run_ids)
+        payload["task_logs"] = task_logs
+        payload["task_logs_truncated"] = logs_truncated
 
     fmt = (request.format or "json").lower()
     content, media_type, filename = _render_project_export(
@@ -624,9 +623,10 @@ async def export_project_config(
         task_items=task_items,
     )
 
-    buffer = io.BytesIO(content.encode("utf-8"))
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    return StreamingResponse(buffer, media_type=media_type, headers=headers)
+    # P1-SEC-03: 直接返回 Response，不再 encode + BytesIO 造两份完整副本，
+    # 峰值内存保持在预算量级。
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 async def _load_export_tasks(
@@ -645,12 +645,23 @@ async def _load_export_tasks(
     return [_task_export_payload(task, project.public_id) for task in tasks]
 
 
-async def _load_export_executions(project: Project, date_range: dict[str, str] | None) -> list[Any]:
-    task_ids = await Task.filter(project_id=project.id).values_list("id", flat=True)
+async def _load_export_executions(
+    project: Project,
+    date_range: dict[str, str] | None,
+    *,
+    current_user_id: int,
+    is_admin: bool,
+) -> tuple[list[Any], list[str]]:
+    task_query = Task.filter(project_id=project.id)
+    if not is_admin:
+        # P1-SEC-01: 非管理员只导出自己任务的执行结果。
+        task_query = task_query.filter(user_id=current_user_id)
+    task_ids = await task_query.values_list("id", flat=True)
     run_query = TaskRun.filter(task_id__in=list(task_ids))
     run_query = _filter_export_date_range(run_query, date_range)
     runs = await run_query.order_by("-created_at").limit(200)
-    return ExecutionResponseBuilder.build_list(runs)
+    run_ids = [run.run_id for run in runs if run.run_id]
+    return ExecutionResponseBuilder.build_list(runs), run_ids
 
 
 def _filter_export_date_range(run_query: Any, date_range: dict[str, str] | None) -> Any:
@@ -709,7 +720,9 @@ def _write_task_export_rows(writer: Any, task_items: list[dict[str, object]]) ->
     writer.writerow(["task_id", "name", "schedule_type", "is_active", "status", "project_id"])
     for item in task_items:
         writer.writerow(
-            ["", item.get("name"), item.get("schedule_type"), item.get("is_active"), "", item.get("project_id")]
+            sanitize_csv_row(
+                ["", item.get("name"), item.get("schedule_type"), item.get("is_active"), "", item.get("project_id")]
+            )
         )
 
 
@@ -718,14 +731,16 @@ def _write_project_export_rows(writer: Any, project_payload: object) -> None:
         raise TypeError("project export payload must be a mapping")
     writer.writerow(["project_id", "name", "type", "status", "description", "tags"])
     writer.writerow(
-        [
-            project_payload.get("id"),
-            project_payload.get("name"),
-            project_payload.get("type"),
-            project_payload.get("status"),
-            project_payload.get("description"),
-            ",".join(project_payload.get("tags") or []),
-        ]
+        sanitize_csv_row(
+            [
+                project_payload.get("id"),
+                project_payload.get("name"),
+                project_payload.get("type"),
+                project_payload.get("status"),
+                project_payload.get("description"),
+                ",".join(project_payload.get("tags") or []),
+            ]
+        )
     )
 
 
@@ -1019,20 +1034,29 @@ async def test_project_connection(
     cookies = detail.cookies if isinstance(detail.cookies, dict) else None
 
     try:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.request(method.upper(), url, headers=headers, cookies=cookies)
-        ok = resp.status_code < 400
-        return success_response(
-            {"success": ok, "message": "连接成功" if ok else "连接失败", "data": {"status_code": resp.status_code}},
-            message=Messages.QUERY_SUCCESS,
+        result = await probe_project_connection(
+            url,
+            method,
+            headers=headers,
+            cookies=cookies,
+            timeout_seconds=settings.PROJECT_TEST_CONNECTION_TIMEOUT_SECONDS,
+            max_response_bytes=settings.PROJECT_TEST_CONNECTION_MAX_RESPONSE_BYTES,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"目标 URL 不合法或指向禁止地址: {exc}")
+    except ProjectConnectionResponseTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except ProjectConnectionTimeoutError as exc:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
+    except ProjectConnectionError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:
-        return success_response(
-            {"success": False, "message": f"连接失败: {exc}"},
-            message=Messages.QUERY_SUCCESS,
-        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="连接测试失败") from exc
+    ok = result.status_code < 400
+    return success_response(
+        {"success": ok, "message": "连接成功" if ok else "连接失败", "data": {"status_code": result.status_code}},
+        message=Messages.QUERY_SUCCESS,
+    )
 
 
 @project_router.get(
@@ -1098,7 +1122,10 @@ async def delete_project(
     project_name = project.name if project else project_id
 
     # 删除项目
-    deleted = await project_service.delete_project(project_id, current_user_id)
+    try:
+        deleted = await project_service.delete_project(project_id, current_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not deleted:
         raise ProjectNotFoundException(project_id)
 
@@ -1128,9 +1155,7 @@ async def delete_project(
 @monitor_performance(slow_threshold=2.0)  # 监控超过2秒的批量操作
 async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_current_user_id)):
     """批量删除项目"""
-    project_ids = request.get("project_ids", [])
-    if not project_ids:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="项目ID列表不能为空")
+    project_ids = bounded_distinct_ids(request.get("project_ids"), "project_ids")
 
     # P2-25: 强制单次上限, 防止调用方一次性拖垮后台 semaphore + DB
     if len(project_ids) > BATCH_DELETE_MAX_PROJECTS:
@@ -1257,11 +1282,12 @@ async def update_code_config(
         return success_response(response_data, message=Messages.UPDATED_SUCCESS)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as exc:
+        logger.exception("更新代码项目配置失败: project_id={}", project_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"更新代码项目配置失败: {str(e)}",
-        )
+            detail="更新代码项目配置失败",
+        ) from exc
 
 
 @project_router.put(
