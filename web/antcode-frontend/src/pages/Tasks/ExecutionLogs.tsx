@@ -34,10 +34,14 @@ import { runsService, type RunArtifact, type SpiderItem } from '@/services/runs'
 import type { Task, TaskExecution } from '@/types'
 import { formatDateTime, formatDuration } from '@/utils/format'
 import Logger from '@/utils/logger'
+import { isTerminalTaskStatus } from '@/utils/taskStatus'
 import { DownloadOutlined, FileOutlined } from '@ant-design/icons'
 import { List } from 'antd'
 
 const { Title, Text } = Typography
+
+// 浏览器端仅保留最新 N 行（后端历史回放上限更大）；截断时查看器会显式提示。
+const LOG_VIEWER_MAX_LINES = 5000
 
 const ExecutionLogs: React.FC = () => {
   const navigate = useNavigate()
@@ -55,11 +59,14 @@ const ExecutionLogs: React.FC = () => {
   // L2 产物链：从 /api/v1/runs/{run_id}/artifacts 拉列表；执行结束再取一次
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
   const [artifactsLoading, setArtifactsLoading] = useState(false)
+  // P1-round6 5.4: 失败必须区别于"确实无数据",UI 展示"加载失败"而非空。
+  const [artifactsError, setArtifactsError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
 
   // O2 抓取数据：从 /api/v1/runs/{run_id}/spider-items 拉分页
   const [spiderItems, setSpiderItems] = useState<SpiderItem[]>([])
   const [spiderItemsLoading, setSpiderItemsLoading] = useState(false)
+  const [spiderItemsError, setSpiderItemsError] = useState<string | null>(null)
 
   // 加载任务信息
   const loadTask = useCallback(async () => {
@@ -75,27 +82,38 @@ const ExecutionLogs: React.FC = () => {
   }, [taskId])
 
   // 加载执行信息
-  const loadExecution = useCallback(async () => {
+  // P1-round6 5.4: 返回 boolean 让 refreshExecution 判断真实结果, 避免"内部
+  // setError 但外层仍 notify 刷新成功"; 同时校验 execution.task_id === URL.taskId
+  // 防越权(URL 换 taskId 但 runId 是别人的会渲染别的 task 的日志)。
+  const loadExecution = useCallback(async (): Promise<boolean> => {
     if (!taskId || !runId) {
       setError('缺少任务ID或运行ID')
       setLoading(false)
-      return
+      return false
     }
 
     try {
-      const executions = await taskService.getTaskRuns(taskId)
-      const exec = executions.items.find(e => e.run_id === runId)
-
-      if (exec) {
-        setExecution(exec)
-        setError(null)
-      } else {
+      // P2-04：用精确的 getTaskRun(runId) 直接取该 run，之前列表默认 size=20，
+      // 第 21 次以前的历史链接会错误显示"未找到执行记录"。
+      const exec = await taskService.getTaskRun(runId)
+      if (!exec) {
         setError(`未找到执行记录: ${runId}`)
+        return false
       }
+      // 归属校验: exec.task_id 必须与 URL taskId 匹配, 否则拒渲染
+      const execTaskId = String((exec as { task_id?: unknown }).task_id ?? '')
+      if (execTaskId && execTaskId !== taskId) {
+        setError(`运行 ${runId} 不属于任务 ${taskId}`)
+        return false
+      }
+      setExecution(exec)
+      setError(null)
+      return true
     } catch (error: unknown) {
       Logger.error('加载执行信息失败:', error)
       const errMsg = error instanceof Error ? error.message : '加载执行信息失败'
       setError(errMsg)
+      return false
     } finally {
       setLoading(false)
     }
@@ -105,10 +123,8 @@ const ExecutionLogs: React.FC = () => {
   const refreshExecution = useCallback(async () => {
     setRefreshing(true)
     try {
-      await loadExecution()
-      showNotification('success', '执行状态已刷新')
-    } catch (_error) {
-      showNotification('error', '刷新失败')
+      const ok = await loadExecution()
+      showNotification(ok ? 'success' : 'error', ok ? '执行状态已刷新' : '刷新失败')
     } finally {
       setRefreshing(false)
     }
@@ -121,9 +137,12 @@ const ExecutionLogs: React.FC = () => {
     try {
       const items = await runsService.listArtifacts(runId)
       setArtifacts(items)
+      setArtifactsError(null)
     } catch (err) {
       Logger.warn('获取产物列表失败', err)
       setArtifacts([])
+      // P1-round6 5.4: 失败展示"加载失败"而非空, 避免用户误认为无产物
+      setArtifactsError(err instanceof Error ? err.message : '获取产物列表失败')
     } finally {
       setArtifactsLoading(false)
     }
@@ -152,9 +171,11 @@ const ExecutionLogs: React.FC = () => {
     try {
       const resp = await runsService.listSpiderItems(runId, { count: 200 })
       setSpiderItems(resp.items || [])
+      setSpiderItemsError(null)
     } catch (err) {
       Logger.warn('获取抓取数据失败', err)
       setSpiderItems([])
+      setSpiderItemsError(err instanceof Error ? err.message : '获取抓取数据失败')
     } finally {
       setSpiderItemsLoading(false)
     }
@@ -171,7 +192,7 @@ const ExecutionLogs: React.FC = () => {
 
   // 执行进入终态时刷新产物列表和抓取数据（写库有延迟）
   useEffect(() => {
-    if (execution && ['success', 'failed', 'timeout', 'cancelled'].includes(execution.status)) {
+    if (execution && isTerminalTaskStatus(execution.status)) {
       loadArtifacts()
       loadSpiderItems()
     }
@@ -179,7 +200,7 @@ const ExecutionLogs: React.FC = () => {
 
   // 自动刷新（如果任务正在运行）
   useEffect(() => {
-    if (!execution || execution.status === 'success' || execution.status === 'failed') {
+    if (!execution || isTerminalTaskStatus(execution.status)) {
       return
     }
 
@@ -586,7 +607,7 @@ const ExecutionLogs: React.FC = () => {
             autoConnect={true}
             showStdout={true}
             showStderr={true}
-            maxLines={5000}
+            maxLines={LOG_VIEWER_MAX_LINES}
             enableSearch={true}
             enableExport={true}
             enableVirtualization={true}
@@ -600,7 +621,7 @@ const ExecutionLogs: React.FC = () => {
                 } : null)
               }
               // 如果任务完成，刷新完整的执行信息
-              if (['success', 'failed', 'timeout', 'cancelled'].includes(statusUpdate.status)) {
+              if (isTerminalTaskStatus(statusUpdate.status)) {
                 loadExecution()
               }
             }}
@@ -644,7 +665,14 @@ const ExecutionLogs: React.FC = () => {
             </Button>
           }
         >
-          {spiderItems.length === 0 ? (
+          {spiderItemsError && spiderItems.length === 0 ? (
+            <Alert
+              type="error"
+              showIcon
+              message="抓取数据加载失败"
+              description={spiderItemsError}
+            />
+          ) : spiderItems.length === 0 ? (
             <Empty
               description={
                 spiderItemsLoading
@@ -726,7 +754,14 @@ const ExecutionLogs: React.FC = () => {
             </Button>
           }
         >
-          {artifacts.length === 0 ? (
+          {artifactsError && artifacts.length === 0 ? (
+            <Alert
+              type="error"
+              showIcon
+              message="产物列表加载失败"
+              description={artifactsError}
+            />
+          ) : artifacts.length === 0 ? (
             <Empty
               description={
                 artifactsLoading

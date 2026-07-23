@@ -92,6 +92,9 @@ _ENV_HOST_ALLOWED_PREFIX = (
 # 二重防线：即便 exec_plan.env 或前缀匹配放进来，也拒绝这些高风险模式
 _ENV_DENY_PATTERNS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE_KEY")
 _BWRAP_EXECUTABLE = "bwrap"
+# P1-round6 5.3: asyncio.subprocess.PIPE 默认 64 KiB, 与业务合同允许 1 MiB
+# 单行冲突; 提到 1 MiB 与合同对齐, 超限行由 read_stream 的 drop 兜底。
+_STREAM_READER_LIMIT_BYTES = 1024 * 1024
 
 
 def _is_env_allowed_from_host(key: str) -> bool:
@@ -320,7 +323,10 @@ class ProcessExecutor(BaseExecutor):
                 file_size_mb=(exec_plan.max_file_size_mb or getattr(self.config, "default_max_file_size_mb", 0)),
             )
 
-            # 创建子进程
+            # P1-round6 5.3: asyncio.subprocess StreamReader 默认 buffer 64 KiB,
+            # 业务合同允许 1 MiB 单行 -> readline() 抛 LimitOverrunError 阻塞。
+            # 把 limit 提到 1 MiB 与合同对齐, 超限行仍走 read_stream 的 drop
+            # 兜底(不 break, 保证 drain), 不会因缓冲区大而放大内存。
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd,
@@ -328,6 +334,7 @@ class ProcessExecutor(BaseExecutor):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 preexec_fn=preexec,
+                limit=_STREAM_READER_LIMIT_BYTES,
             )
 
             # 创建进程信息

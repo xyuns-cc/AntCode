@@ -84,24 +84,42 @@ const Dashboard: React.FC = memo(() => {
       // P2-22: /dashboard/metrics 之前会被打两次(getSystemMetrics 一次,
       // getDashboardStats 内部又拉一次)。这里只发一次,把结果同时喂给
       // getDashboardStats 和外层 systemMetrics state,保证并行度不下降。
+      //
+      // P1-round6 5.4: /dashboard/metrics 是 admin-only, 普通用户拿 403 会
+      // 让 Promise.all 整体 reject → 整页数据都不提交并周期性重试。改用
+      // allSettled 允许分项失败: 每块数据独立决定 set/skip, 只有全部失败
+      // 才置 loadError。
       const metricsPromise = dashboardService.getSystemMetrics()
-      const [stats, metrics, workers, spider, trend] = await Promise.all([
+      const [statsResult, metricsResult, workersResult, spiderResult, trendResult] = await Promise.allSettled([
         metricsPromise.then((m) => dashboardService.getDashboardStats(m)),
         metricsPromise,
         workerService.getAggregateStats(),
         workerService.getClusterSpiderStats(),
         dashboardService.getHourlyTrend()
       ])
-      
-      // 批量更新状态，减少重渲染
-      setDashboardStats(stats)
-      setSystemMetrics(metrics)
-      setWorkerStats(workers)
-      setSpiderStats(spider)
-      setHourlyTrend(trend)
-      setLastUpdated(new Date())
-      setLoadError(null)
-      
+
+      const results = [statsResult, metricsResult, workersResult, spiderResult, trendResult]
+      const anySuccess = results.some((r) => r.status === 'fulfilled')
+      const failures = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[]
+
+      if (statsResult.status === 'fulfilled') setDashboardStats(statsResult.value)
+      if (metricsResult.status === 'fulfilled') setSystemMetrics(metricsResult.value)
+      if (workersResult.status === 'fulfilled') setWorkerStats(workersResult.value)
+      if (spiderResult.status === 'fulfilled') setSpiderStats(spiderResult.value)
+      if (trendResult.status === 'fulfilled') setHourlyTrend(trendResult.value)
+
+      if (failures.length > 0) {
+        for (const failure of failures) console.warn('Dashboard partial failure:', failure.reason)
+      }
+
+      if (anySuccess) {
+        setLastUpdated(new Date())
+        setLoadError(null)
+      } else {
+        const first = failures[0]?.reason
+        setLoadError(first instanceof Error ? first.message : '加载仪表盘数据失败')
+      }
+
       // 标记首次加载完成
       if (!isInitialLoadDone.current) {
         isInitialLoadDone.current = true
