@@ -5723,7 +5723,7 @@
       "path": "web/antcode-frontend/src/components/workers/SpiderStatsTab.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 446
+      "value": 445
     },
     {
       "path": "web/antcode-frontend/src/components/workers/WorkerResourceManagement.tsx",
@@ -5820,6 +5820,12 @@
       "function": "-",
       "rule": "FILE_LINES",
       "value": 334
+    },
+    {
+      "path": "web/antcode-frontend/src/services/logStreamConnection.ts",
+      "function": "-",
+      "rule": "FILE_LINES",
+      "value": 305
     },
     {
       "path": "web/antcode-frontend/src/services/projects.ts",
