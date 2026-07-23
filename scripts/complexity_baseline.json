@@ -1991,7 +1991,7 @@
       "path": "services/master/src/antcode_master/ingester/result_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 497
+      "value": 521
     },
     {
       "path": "services/master/src/antcode_master/ingester/result_loop.py",
@@ -2417,7 +2417,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 2293
+      "value": 2308
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -5249,7 +5249,7 @@
       "path": "tests/unit/web_api/test_workers_security.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 517
+      "value": 526
     },
     {
       "path": "tests/unit/web_api/test_workers_security.py",
