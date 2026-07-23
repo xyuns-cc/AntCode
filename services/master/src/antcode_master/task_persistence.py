@@ -277,7 +277,25 @@ class TaskRecoveryService:
         self._recovering = False
 
     async def recover_on_startup(self):
-        """Master 启动时恢复中断的任务"""
+        """Master 启动时恢复中断的任务
+
+        P1-round6 5.2 (leader gate): standby Master 也会跑 startup 恢复,
+        触发对同一批 run 的重复副作用(cancel/republish)。加 leader gate:
+        非 leader 直接跳过, 返回统计零占位。当前 leader 在 __main__.py 已
+        try_become_leader,只有获得 leader 的 Master 会真正恢复;后台
+        _health_check_loop 提升后, 下一次启动/触发路径会重新落到 leader。
+        """
+        # 惰性导入避免测试 harness 无 Master 二进制场景
+        try:
+            from antcode_master.leader import leader_election  # noqa: PLC0415
+
+            if not leader_election.is_leader:
+                logger.info("非 Leader Master, 跳过启动恢复 (由当前 leader 执行)")
+                return {"recovered": 0, "failed": 0, "skipped": 0}
+        except ImportError:
+            # 无 leader 模块(如纯 core 单测环境)时保留原行为
+            pass
+
         if self._recovering:
             logger.warning("恢复任务已在进行中")
             return {"recovered": 0, "failed": 0, "skipped": 0}
