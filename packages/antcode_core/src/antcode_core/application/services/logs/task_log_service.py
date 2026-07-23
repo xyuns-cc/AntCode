@@ -15,6 +15,10 @@ from datetime import UTC, datetime
 
 from loguru import logger
 
+from antcode_core.application.services.logs.log_sequence_allocator import (
+    LogSequenceAllocator,
+    redis_log_sequence_allocator,
+)
 from antcode_core.application.services.logs.postgres_log_service import (
     PostgresLogEntry,
     postgres_log_service,
@@ -22,12 +26,44 @@ from antcode_core.application.services.logs.postgres_log_service import (
 )
 from antcode_core.common.config import settings
 
+# P1-round6 5.3: 单次读日志的字节预算 (统一限制点)。10_000 行 * 1 MiB 单行
+# 上限 = 10 GiB Python str, 之前只在 lines 上限, 内存无护栏。默认 32 MiB
+# 与 HTTP 响应合理边界对齐; 达到即截断并在结尾追加提示行。
+_MAX_LOG_READ_BYTES = 32 * 1024 * 1024
+_LOG_TRUNCATED_MARKER = "\n… (log truncated to fit response size budget)"
+
+
+def _join_bounded(contents: list[str]) -> str:
+    """按 UTF-8 字节预算拼接 contents, 越界立即截断并追加 marker。"""
+    if not contents:
+        return ""
+    parts: list[str] = []
+    total = 0
+    for line in contents:
+        line_bytes = len(line.encode("utf-8"))
+        # 换行符本身也算 1 字节
+        if parts and total + line_bytes + 1 > _MAX_LOG_READ_BYTES:
+            parts.append(_LOG_TRUNCATED_MARKER)
+            break
+        if not parts and line_bytes > _MAX_LOG_READ_BYTES:
+            # 单条超预算, 硬截段
+            parts.append(line.encode("utf-8")[:_MAX_LOG_READ_BYTES].decode("utf-8", "ignore"))
+            parts.append(_LOG_TRUNCATED_MARKER)
+            break
+        parts.append(line)
+        total += line_bytes + (1 if len(parts) > 1 else 0)
+    return "\n".join(parts)
+
+
 # 兼容旧 ``from .task_log_service import postgres_task_log_service`` 引用
 __all__ = ["TaskLogService", "task_log_service", "postgres_task_log_service"]
 
 
 class TaskLogService:
     """任务日志管理服务（PG-only）。"""
+
+    def __init__(self, sequence_allocator: LogSequenceAllocator) -> None:
+        self._sequence_allocator = sequence_allocator
 
     async def write_log(self, run_id: str, log_type: str, content: str) -> None:
         """把一条日志写入 ``task_logs`` 表。
@@ -45,16 +81,23 @@ class TaskLogService:
         if normalized_type not in ("stdout", "stderr", "system"):
             normalized_type = "stdout"
 
+        sequences = await self._sequence_allocator.allocate(run_id, normalized_type, 1)
+        if len(sequences) != 1 or sequences[0] <= 0:
+            raise RuntimeError(f"日志序号分配结果非法: run_id={run_id} sequences={sequences!r}")
         entry = PostgresLogEntry(
             run_id=run_id,
             log_type=normalized_type,
             content=str(content),
             timestamp=datetime.now(UTC),
+            sequence=sequences[0],
         )
         try:
-            await postgres_log_service.append_entries([entry])
-        except Exception as e:
-            logger.error(f"写入日志到 PG 失败 run_id={run_id}: {e}")
+            written = await postgres_log_service.append_entries([entry])
+        except Exception:
+            logger.exception("写入日志到 PG 失败 run_id={}", run_id)
+            raise
+        if written != 1:
+            raise RuntimeError(f"写入日志到 PG 未持久化唯一行: run_id={run_id} written={written}")
 
     async def read_log(self, run_id: str, log_type: str, lines: int | None = None) -> str:
         """按 ``run_id`` + ``log_type`` 读取历史日志正文（PG-only）。
@@ -69,9 +112,9 @@ class TaskLogService:
         try:
             entries = await postgres_log_service.list_entries(run_id, limit=limit, log_type=normalized_type)
         except Exception as exc:
-            logger.debug("read_log PG 查询失败 run_id={}: {}", run_id, exc)
-            return ""
-        return "\n".join(entry.content for entry in entries)
+            logger.exception("read_log PG 查询失败 run_id={}", run_id)
+            raise RuntimeError(f"PG 日志读取失败: run_id={run_id}") from exc
+        return _join_bounded([entry.content for entry in entries])
 
     async def get_execution_logs(self, run_id: str, include_distributed: bool = True) -> dict[str, str]:
         """获取某次执行的所有日志。
@@ -87,6 +130,7 @@ class TaskLogService:
 
         pg_stdout: list[str] = []
         pg_stderr: list[str] = []
+        pg_failure: Exception | None = None
         try:
             entries = await postgres_log_service.list_entries(run_id, limit=10000)
             for entry in entries:
@@ -95,16 +139,22 @@ class TaskLogService:
                 else:
                     pg_stdout.append(entry.content)
         except Exception as e:
-            logger.debug(f"PG 日志读取失败 run_id={run_id}: {e}")
+            logger.exception(f"PG 日志读取失败 run_id={run_id}")
+            pg_failure = e
 
         redis_output = ""
         redis_error = ""
         if include_distributed and not (pg_stdout or pg_stderr):
             redis_output, redis_error = await self._get_redis_stream_logs(run_id)
+        if pg_failure is not None and not (redis_output or redis_error):
+            raise RuntimeError(f"日志存储不可用: run_id={run_id}") from pg_failure
 
+        # P1-round6 5.3: 走字节预算拼接, 避免 10000 行 * 1 MiB 单行拷贝到 GB 级
+        pg_stdout_text = _join_bounded(pg_stdout)
+        pg_stderr_text = _join_bounded(pg_stderr)
         return {
-            "output": "\n".join(filter(None, ["\n".join(pg_stdout), redis_output.strip()])),
-            "error": "\n".join(filter(None, ["\n".join(pg_stderr), redis_error.strip()])),
+            "output": "\n".join(filter(None, [pg_stdout_text, redis_output.strip()])),
+            "error": "\n".join(filter(None, [pg_stderr_text, redis_error.strip()])),
         }
 
     async def _get_redis_stream_logs(self, run_id: str) -> tuple[str, str]:
@@ -112,13 +162,9 @@ class TaskLogService:
         if not settings.REDIS_URL:
             return "", ""
 
-        try:
-            redis, candidate_keys = await self._redis_log_sources(run_id)
-            lines = await self._read_redis_log_sources(redis, candidate_keys, run_id)
-            return "\n".join(lines["stdout"]), "\n".join(lines["stderr"])
-        except Exception as e:
-            logger.debug(f"读取 Redis 日志流失败: {e}")
-            return "", ""
+        redis, candidate_keys = await self._redis_log_sources(run_id)
+        lines = await self._read_redis_log_sources(redis, candidate_keys, run_id)
+        return "\n".join(lines["stdout"]), "\n".join(lines["stderr"])
 
     @staticmethod
     async def _redis_log_sources(run_id):
@@ -156,8 +202,9 @@ class TaskLogService:
 
     def _decode_stream_message(self, fields: dict, run_id_filter: str) -> list[tuple[str, str]]:
         """解码 Stream 消息：返回 ``[(log_type, content), ...]``，按 run_id 过滤。"""
-        proto_raw = fields.get(b"p") or fields.get("p")
-        if proto_raw is not None:
+        proto_present = b"p" in fields or "p" in fields
+        if proto_present:
+            proto_raw = fields[b"p"] if b"p" in fields else fields["p"]
             try:
                 from antcode_contracts import data_pb2
 
@@ -173,8 +220,8 @@ class TaskLogService:
                     log_type = name.removeprefix("LOG_TYPE_").lower() if name.startswith("LOG_TYPE_") else name.lower()
                     out.append((log_type, entry.content or ""))
                 return out
-            except Exception:
-                pass
+            except Exception as exc:
+                raise ValueError(f"日志 Stream protobuf 解码失败: run_id={run_id_filter}") from exc
 
         decoded = self._decode_redis_log(fields)
         msg_run_id = fields.get(b"run_id") or fields.get("run_id") or ""
@@ -201,4 +248,4 @@ class TaskLogService:
         return str(value) if value is not None else ""
 
 
-task_log_service = TaskLogService()
+task_log_service = TaskLogService(redis_log_sequence_allocator)
