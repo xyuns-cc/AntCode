@@ -48,6 +48,7 @@ from antcode_worker.executor.base import (
     LogSink,
     NoOpLogSink,
 )
+from antcode_worker.executor.rule_policy import is_rule_env_allowed
 
 # C1: 子进程 env 白名单——只透传给 shell / runtime 必需的变量；
 # 其它一律不传给用户代码。防止 WORKER_API_KEY / WORKER_GATEWAY_TOKEN /
@@ -90,9 +91,7 @@ _ENV_HOST_ALLOWED_PREFIX = (
 )
 # 二重防线：即便 exec_plan.env 或前缀匹配放进来，也拒绝这些高风险模式
 _ENV_DENY_PATTERNS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE_KEY")
-_TRUSTED_PLUGIN_SECRET_ENV = {
-    "rule": frozenset({"ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN"}),
-}
+_BWRAP_EXECUTABLE = "bwrap"
 
 
 def _is_env_allowed_from_host(key: str) -> bool:
@@ -102,10 +101,31 @@ def _is_env_allowed_from_host(key: str) -> bool:
 
 
 def _is_env_forbidden(key: str, plugin_name: str | None = None) -> bool:
-    if key in _TRUSTED_PLUGIN_SECRET_ENV.get(plugin_name or "", frozenset()):
-        return False
+    del plugin_name
     upper = key.upper()
     return any(pat in upper for pat in _ENV_DENY_PATTERNS)
+
+
+def _filter_rule_application_env(env: dict[str, str]) -> dict[str, str]:
+    """Rule 只获得运行时基础变量与本地 spool 协议变量。"""
+    runtime_keys = {*_ENV_HOST_ALLOWED_EXACT, "PYTHONPATH", "VIRTUAL_ENV"}
+    return {
+        key: value
+        for key, value in env.items()
+        if key in runtime_keys or key.startswith("LC_") or is_rule_env_allowed(key)
+    }
+
+
+def _try_set_rlimit(limit_name: str, soft_limit: int, hard_limit: int) -> None:
+    if not HAS_RESOURCE or resource is None:
+        return
+    limit_kind = getattr(resource, limit_name, None)
+    if limit_kind is None:
+        return
+    try:
+        resource.setrlimit(limit_kind, (soft_limit, hard_limit))
+    except (ValueError, OSError):
+        pass
 
 
 def _build_preexec_fn(
@@ -132,39 +152,28 @@ def _build_preexec_fn(
             os.setsid()
         except OSError:
             pass
-        if not HAS_RESOURCE or resource is None:
+        if not enforce_rlimit:
             return
-        # 每条 setrlimit 独立保护，避免某一项不支持就放弃所有限制
-        if cpu_seconds and cpu_seconds > 0 and hasattr(resource, "RLIMIT_CPU"):
-            try:
-                resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-            except (ValueError, OSError):
-                pass
-        if memory_mb and memory_mb > 0 and hasattr(resource, "RLIMIT_AS"):
+        if cpu_seconds and cpu_seconds > 0:
+            _try_set_rlimit("RLIMIT_CPU", cpu_seconds, cpu_seconds)
+        if memory_mb and memory_mb > 0:
             limit = memory_mb * 1024 * 1024
-            try:
-                resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-            except (ValueError, OSError):
-                pass
-        if max_open_files and max_open_files > 0 and hasattr(resource, "RLIMIT_NOFILE"):
-            try:
-                resource.setrlimit(resource.RLIMIT_NOFILE, (max_open_files, max_open_files))
-            except (ValueError, OSError):
-                pass
-        if max_processes and max_processes > 0 and hasattr(resource, "RLIMIT_NPROC"):
-            try:
-                resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
-            except (ValueError, OSError):
-                pass
-        # T7-P2-4: RLIMIT_FSIZE 单文件上限
-        if file_size_mb and file_size_mb > 0 and hasattr(resource, "RLIMIT_FSIZE"):
+            _try_set_rlimit("RLIMIT_AS", limit, limit)
+        if max_open_files and max_open_files > 0:
+            _try_set_rlimit("RLIMIT_NOFILE", max_open_files, max_open_files)
+        if max_processes and max_processes > 0:
+            _try_set_rlimit("RLIMIT_NPROC", max_processes, max_processes)
+        if file_size_mb and file_size_mb > 0:
             limit = file_size_mb * 1024 * 1024
-            try:
-                resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
-            except (ValueError, OSError):
-                pass
+            _try_set_rlimit("RLIMIT_FSIZE", limit, limit)
 
     return _pre
+
+
+def _host_max_processes(command: list[str], configured_limit: int) -> int:
+    if command and os.path.basename(command[0]) == _BWRAP_EXECUTABLE:
+        return 0
+    return configured_limit
 
 
 def _signal_process_group(process: asyncio.subprocess.Process, sig: int) -> None:
@@ -223,12 +232,16 @@ class ProcessExecutor(BaseExecutor):
             config: 执行器配置
         """
         super().__init__(config)
+        self._launch_cancellations: dict[str, asyncio.Event] = {}
+        self._launch_lock = asyncio.Lock()
 
     async def run(
         self,
         exec_plan: ExecPlan,
         runtime_handle: RuntimeHandle,
         log_sink: LogSink | None = None,
+        *,
+        startup_event: asyncio.Event | None = None,
     ) -> ExecResult:
         """
         执行任务
@@ -245,13 +258,20 @@ class ProcessExecutor(BaseExecutor):
         """
         # 生成 run_id（如果 exec_plan 没有提供）
         run_id = exec_plan.run_id or exec_plan.plugin_name or f"run_{int(time.time() * 1000)}"
+        cancel_event = await self._begin_launch(run_id)
+        if startup_event is not None:
+            startup_event.set()
 
         # 使用空日志接收器如果未提供
         sink = log_sink or NoOpLogSink()
 
-        # 获取信号量
-        async with self._semaphore:
-            return await self._execute(run_id, exec_plan, runtime_handle, sink)
+        try:
+            async with self._semaphore:
+                if cancel_event.is_set():
+                    return self._cancelled_before_start(run_id)
+                return await self._execute(run_id, exec_plan, runtime_handle, sink, cancel_event)
+        finally:
+            await self._finish_launch(run_id, cancel_event)
 
     async def _execute(
         self,
@@ -259,6 +279,7 @@ class ProcessExecutor(BaseExecutor):
         exec_plan: ExecPlan,
         runtime_handle: RuntimeHandle,
         log_sink: LogSink,
+        cancel_event: asyncio.Event,
     ) -> ExecResult:
         """执行任务的内部实现"""
         started_at = datetime.now()
@@ -277,7 +298,12 @@ class ProcessExecutor(BaseExecutor):
             # 确定工作目录
             cwd = exec_plan.cwd or runtime_handle.path
 
-            logger.debug(f"执行命令: {' '.join(cmd)}, cwd={cwd}")
+            # P0-04 (round6): 完整 argv 可能带 token/API_KEY/credentials(Rule 插件
+            # 的 target_url、Go/Python CLI 的 --api-key= 等)。用 sanitize_log_message
+            # 脱敏后再 log,避免通过 Worker debug 日志外带凭据。
+            from antcode_core.common.logging import sanitize_log_message
+
+            logger.debug(f"执行命令: {sanitize_log_message(' '.join(cmd))}, cwd={cwd}")
 
             # 构造 preexec_fn：独立进程组 + POSIX rlimit
             enforce = exec_plan.enforce_rlimit if exec_plan.enforce_rlimit is not None else self.config.enforce_rlimit
@@ -286,7 +312,10 @@ class ProcessExecutor(BaseExecutor):
                 cpu_seconds=exec_plan.cpu_limit_seconds or self.config.default_cpu_limit_seconds,
                 memory_mb=exec_plan.memory_limit_mb or self.config.default_memory_limit_mb,
                 max_open_files=exec_plan.max_open_files or self.config.default_max_open_files,
-                max_processes=exec_plan.max_processes or self.config.default_max_processes,
+                max_processes=_host_max_processes(
+                    cmd,
+                    exec_plan.max_processes or self.config.default_max_processes,
+                ),
                 # T7-P2-4: RLIMIT_FSIZE 单文件上限
                 file_size_mb=(exec_plan.max_file_size_mb or getattr(self.config, "default_max_file_size_mb", 0)),
             )
@@ -311,6 +340,12 @@ class ProcessExecutor(BaseExecutor):
 
             # 注册任务
             await self._register_task(run_id, process_info)
+            if cancel_event.is_set():
+                process_info.cancelled = True
+                await self._terminate_process(
+                    process_info,
+                    exec_plan.grace_period_seconds or self.config.default_grace_period,
+                )
 
             # 启动资源监控
             monitor_task = None
@@ -384,6 +419,49 @@ class ProcessExecutor(BaseExecutor):
             self._update_stats(RunStatus.FAILED)
             return result
 
+    async def cancel(self, run_id: str) -> bool:
+        """记录启动期取消，并终止已经注册的进程。"""
+        launch_found = await self._request_launch_cancel(run_id)
+        process_cancelled = await super().cancel(run_id)
+        return launch_found or process_cancelled
+
+    async def stop(self, grace_period: float = 10.0) -> None:
+        """停止时同时阻止尚未创建子进程的 launch。"""
+        async with self._launch_lock:
+            for cancel_event in self._launch_cancellations.values():
+                cancel_event.set()
+        await super().stop(grace_period)
+
+    async def _begin_launch(self, run_id: str) -> asyncio.Event:
+        cancel_event = asyncio.Event()
+        async with self._launch_lock:
+            self._launch_cancellations[run_id] = cancel_event
+        return cancel_event
+
+    async def _finish_launch(self, run_id: str, cancel_event: asyncio.Event) -> None:
+        async with self._launch_lock:
+            if self._launch_cancellations.get(run_id) is cancel_event:
+                self._launch_cancellations.pop(run_id, None)
+
+    async def _request_launch_cancel(self, run_id: str) -> bool:
+        async with self._launch_lock:
+            cancel_event = self._launch_cancellations.get(run_id)
+            if cancel_event is None:
+                return False
+            cancel_event.set()
+            return True
+
+    def _cancelled_before_start(self, run_id: str) -> ExecResult:
+        now = datetime.now()
+        return self._create_result(
+            run_id=run_id,
+            status=RunStatus.CANCELLED,
+            exit_reason=ExitReason.CANCELLED,
+            error_message="任务在进程启动前被取消",
+            started_at=now,
+            finished_at=now,
+        )
+
     def _build_command(self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle) -> list[str]:
         """构建执行命令"""
         # 使用运行时的 Python 解释器
@@ -426,6 +504,9 @@ class ProcessExecutor(BaseExecutor):
 
         # 3. 任务显式环境变量
         env.update(exec_plan.env)
+
+        if exec_plan.plugin_name == "rule":
+            env = _filter_rule_application_env(env)
 
         # 4. 二重防线：剔除任何命中黑名单模式的键（含被 exec_plan.env 误传的）
         for key in list(env.keys()):
@@ -489,6 +570,14 @@ class ProcessExecutor(BaseExecutor):
 
                     # 解码内容
                     content = line.decode("utf-8", errors="replace").rstrip()
+
+                    # P0-04 (round6): 主执行 stdout/stderr 必须走脱敏器,防子进程原样
+                    # 打印 token/password/API_KEY 进 Redis/PG/SSE/浏览器。原实现直接
+                    # 把 content 写进 LogEntry, 只有独立的 LogStreamer 路径有脱敏,
+                    # 主链完全绕过。
+                    from antcode_core.common.logging import sanitize_log_message
+
+                    content = sanitize_log_message(content)
 
                     # 更新序列号
                     seq_counter[stream_type] += 1
@@ -616,7 +705,17 @@ class ProcessExecutor(BaseExecutor):
             # 进程已退出
             pass
         except Exception as e:
-            logger.error(f"终止进程失败: {e}")
+            # P0-04 (round6): 终止失败必须向上抛,让调用方(engine.cancel /
+            # forced_cancel)知道 kill 未生效,不能报告"取消成功"给 Master;
+            # 否则旧子进程与 L2 接管者并行执行,PEL reclaim 双执行。
+            logger.error(f"终止进程失败(将向上抛让 caller 感知): run_id={process_info.run_id} err={e}")
+            raise RuntimeError(f"终止进程失败: run_id={process_info.run_id}") from e
+
+        # P0-04 (round6): SIGKILL + process.wait() 后如果 returncode 仍是 None,
+        # 说明子进程未死透(极端情况:D-state / kernel bug / cgroup 冻结),
+        # 这时也必须让 caller 知道,不能沉默返回。
+        if process.returncode is None:
+            raise RuntimeError(f"终止进程失败: 发送 SIGKILL 后进程仍未退出: run_id={process_info.run_id}")
 
     async def _monitor_resources(self, process_info: ProcessInfo) -> None:
         """

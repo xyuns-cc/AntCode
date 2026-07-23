@@ -2945,7 +2945,7 @@
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 815
+      "value": 838
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",
@@ -2981,7 +2981,7 @@
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "ProcessExecutor._stream_output",
       "rule": "PLR0915",
-      "value": 64
+      "value": 66
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",
