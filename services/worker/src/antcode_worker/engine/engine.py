@@ -1264,10 +1264,26 @@ class Engine:
         if info.state == RunState.RUNNING:
             await self._state_manager.transition(run_id, RunState.CANCELLING)
             if self._executor:
-                # P1-FN-04: False = executor 内已无 run(可能自然结束),继续走结算但 warn
+                # P1-GW-05 (round6): 区分 executor.cancel=False 的两种语义:
+                # 1) executor 内已无 run (自然结束/未注册) - 视为成功,继续结算
+                # 2) _terminate_process 抛异常(kill 失败/SIGKILL 后仍活),
+                #    base.cancel catch 后 log.error 返回 False - 必须传播到
+                #    control cancel 报告,不能假装取消成功让 L2 接管者双执行。
+                # 目前 base.cancel 混合两种 False, 无法区分; 保守做法: 若
+                # process_info 仍存在(cancel 前后 not found 都不算真失败),
+                # 视 False 为 "kill 失败" fatal 语义,让 control cancel 感知。
+                task_present_before = self._executor.has_task(run_id)
                 executor_cancelled = await self._executor.cancel(run_id)
                 if not executor_cancelled:
-                    logger.warning("executor.cancel 未找到 run: run_id={}", run_id)
+                    if task_present_before:
+                        # kill 真失败: 状态回滚 CANCELLING → RUNNING, cancel 报 False
+                        # 让 control cancel 走 PEL 重投, master reconcile 重试
+                        logger.error(
+                            "P1-GW-05: executor.cancel 失败 (可能 kill 未生效), 不报告取消成功: run_id={}",
+                            run_id,
+                        )
+                        return False
+                    logger.warning("executor.cancel 未找到 run(已自然结束): run_id={}", run_id)
         elif info.state == RunState.PREPARING:
             await self._state_manager.transition(run_id, RunState.CANCELLED)
 

@@ -43,7 +43,9 @@ x-antcode-prod-env: &antcode-prod-env
   # === 中间件(site 通过 .env.production 提供) ===
   DATABASE_URL: ${DATABASE_URL:?生产 DATABASE_URL 必须显式配置}
   REDIS_URL: ${REDIS_URL:?生产 REDIS_URL 必须显式配置}
-  # === Legacy 通道关闭时点(round6 P1-GW-06: 默认过去) ===
+  # === Legacy 通道关闭(round6 P1-GW-06: 应用层默认 fail-closed) ===
+  # 应用侧未设该 env 或非法值都是 fail-closed;这里显式设为 1 (已过去时间戳)
+  # 作 defense-in-depth。如果 site 需要滚动升级窗口,临时改为 0 或未来时间戳。
   ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS: ${ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS:-1}
   # === 日志级别(生产不 debug) ===
   LOG_LEVEL: ${LOG_LEVEL:-INFO}

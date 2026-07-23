@@ -2825,7 +2825,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1782
+      "value": 1798
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
@@ -2909,7 +2909,7 @@
       "path": "services/worker/src/antcode_worker/executor/base.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 423
+      "value": 432
     },
     {
       "path": "services/worker/src/antcode_worker/executor/base.py",

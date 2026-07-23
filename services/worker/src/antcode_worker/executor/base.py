@@ -187,6 +187,15 @@ class BaseExecutor(ABC):
 
         logger.info(f"{self.__class__.__name__} 已停止")
 
+    def has_task(self, run_id: str) -> bool:
+        """P1-GW-05 (round6): 判 run_id 是否在 executor 内。
+
+        engine.cancel 用来区分 executor.cancel=False 的两种语义:
+        - has_task=True + cancel=False → kill 真失败(状态回滚 + 上抛)
+        - has_task=False + cancel=False → 自然结束/未注册(继续结算)
+        """
+        return run_id in self._running_tasks
+
     async def cancel(self, run_id: str) -> bool:
         """
         取消任务
