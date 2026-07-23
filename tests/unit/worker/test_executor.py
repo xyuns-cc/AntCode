@@ -275,15 +275,21 @@ class TestBasicSandbox:
         assert "ANTCODE_SPIDER_GATEWAY_AUTH_TOKEN" not in filtered
         assert "UNRELATED_TOKEN" not in filtered
 
-    def test_wrap_command_with_custom_sandbox(self):
-        """测试自定义沙箱命令 (P0-01: 必须绝对路径)"""
+    def test_wrap_command_rejects_non_bwrap_sandbox(self):
+        """P0-04 (round6): 非 bwrap 绝对命令一律拒绝(防 /usr/bin/env 前缀绕过隔离)。"""
         config = SandboxConfig(sandbox_command=["/usr/bin/firejail", "--quiet"])
         sandbox = BasicSandbox(config)
 
-        cmd = ["python", "test.py"]
-        wrapped = sandbox.wrap_command(cmd, {})
+        with pytest.raises(RuntimeError, match="仅支持 bwrap 沙箱"):
+            sandbox.wrap_command(["python", "test.py"], {})
 
-        assert wrapped == ["/usr/bin/firejail", "--quiet", "python", "test.py"]
+    def test_wrap_command_rejects_env_prefix_bypass(self):
+        """P0-04 (round6): /usr/bin/env 也拒绝(审查明确点名的攻击向量)。"""
+        config = SandboxConfig(sandbox_command=["/usr/bin/env"])
+        sandbox = BasicSandbox(config)
+
+        with pytest.raises(RuntimeError, match="仅支持 bwrap 沙箱"):
+            sandbox.wrap_command(["python", "test.py"], {})
 
     def test_wrap_command_rejects_relative_sandbox_command(self):
         """P0-01: 相对命令名直接被 wrap_command 拒绝(防 PATH 劫持)"""

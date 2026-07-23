@@ -2999,7 +2999,7 @@
       "path": "services/worker/src/antcode_worker/executor/sandbox.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 708
+      "value": 726
     },
     {
       "path": "services/worker/src/antcode_worker/executor/sandbox.py",
@@ -5321,7 +5321,7 @@
       "path": "tests/unit/worker/test_executor.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 328
+      "value": 334
     },
     {
       "path": "tests/unit/worker/test_executor.py",
@@ -5747,7 +5747,7 @@
       "path": "web/antcode-frontend/src/pages/Cookies/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 605
+      "value": 611
     },
     {
       "path": "web/antcode-frontend/src/pages/Crawl/BatchList.tsx",
