@@ -138,9 +138,7 @@ async def bind_worker_run_lease_generation(
     #  终态可能在 Redis owner 已 DEL 后到, PG 是权威)
     existing = await TaskRun.filter(run_id=normalized_run).only("id", "status", "worker_id").first()
     if existing is not None and existing.status in _TASK_TERMINAL_STATUSES:
-        raise PermissionError(
-            f"TaskRun 已在终态 {existing.status}, 拒绝 bind (防已完成 run 被重复 claim 执行)"
-        )
+        raise PermissionError(f"TaskRun 已在终态 {existing.status}, 拒绝 bind (防已完成 run 被重复 claim 执行)")
 
     if lease_gen is None:
         # 兼容路径:不做代际单调 CAS(仅当 Gateway 未升级时使用)
@@ -199,6 +197,20 @@ async def require_worker_owns_runs_for_lease(
         raise PermissionError("TaskRun lease_id 与当前 Worker 代际不匹配")
 
 
+async def _verify_spider_project_binding(execution, normalized_project_id: str) -> None:
+    # P1-round6 5.2: batch-issued TaskRun 用 task_id=0 占位, 没有关联 Task。
+    # task_id>0 走 Task → project 反向校验; task_id=0 直接查 Project 存在。
+    if execution.task_id and int(execution.task_id) > 0:
+        task = await Task.filter(id=execution.task_id).first()
+        if task is None:
+            raise PermissionError("TaskRun 关联任务不存在")
+        if not await Project.filter(id=task.project_id, public_id=normalized_project_id).exists():
+            raise PermissionError("SpiderData project_id 与 TaskRun 不匹配")
+        return
+    if not await Project.filter(public_id=normalized_project_id).exists():
+        raise PermissionError("SpiderData project_id 不存在")
+
+
 async def require_worker_owns_spider_run(
     worker: Worker | str,
     run_id: str,
@@ -220,11 +232,7 @@ async def require_worker_owns_spider_run(
     stored_lease_id = execution.lease_id
     if stored_lease_id and stored_lease_id != normalized_lease_id:
         raise PermissionError("SpiderData lease_id 与 TaskRun 代际不匹配")
-    task = await Task.filter(id=execution.task_id).first()
-    if task is None:
-        raise PermissionError("TaskRun 关联任务不存在")
-    if not await Project.filter(id=task.project_id, public_id=normalized_project_id).exists():
-        raise PermissionError("SpiderData project_id 与 TaskRun 不匹配")
+    await _verify_spider_project_binding(execution, normalized_project_id)
     if stored_lease_id is None:
         updated = await TaskRun.filter(
             id=execution.id,
