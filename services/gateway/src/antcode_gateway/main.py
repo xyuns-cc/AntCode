@@ -9,10 +9,12 @@ import os
 import signal
 import sys
 
+from antcode_contracts.artifact_pb2_grpc import add_ArtifactServiceServicer_to_server
 from antcode_contracts.control_pb2_grpc import add_ControlServiceServicer_to_server
 from antcode_contracts.data_pb2_grpc import add_DataServiceServicer_to_server
 from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
+from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
 from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 from antcode_core.infrastructure.redis.stream_client import StreamClient
 from loguru import logger
@@ -21,7 +23,7 @@ from antcode_gateway.auth import AuthInterceptor
 from antcode_gateway.config import gateway_config
 from antcode_gateway.rate_limit import RateLimitInterceptor
 from antcode_gateway.server import get_grpc_server
-from antcode_gateway.services import GatewayControlService, GatewayDataService
+from antcode_gateway.services import GatewayArtifactService, GatewayControlService, GatewayDataService
 
 
 def _configure_interceptors(server) -> None:
@@ -64,14 +66,32 @@ async def _create_lease_store() -> LeaseStore:
     return lease_store
 
 
-def _register_services(server, lease_store: LeaseStore) -> None:
+def _register_services(server, lease_store: LeaseStore, redis_client) -> None:
     logger.info("注册 gRPC 服务")
     server.add_servicer(
         GatewayControlService(lease_store=lease_store),
         add_ControlServiceServicer_to_server,
     )
-    server.add_servicer(GatewayDataService(), add_DataServiceServicer_to_server)
-    logger.info("ControlService + DataService 已注册")
+    server.add_servicer(
+        GatewayDataService(lease_verifier=lease_store.is_current),
+        add_DataServiceServicer_to_server,
+    )
+    # P1-round6 5.3: 传入 async Redis client 让 RunArtifactQuota 在 async_reserve
+    # 时双写 Redis 备份, Gateway 重启后 restore_from_redis 恢复账目, 攻击者
+    # 无法通过重启放大 quota。Redis 不可达时 async_reserve 内部 try/except
+    # warn 不阻塞 (内存 fence 仍生效)。
+    from antcode_gateway.services.artifact_quota import RunArtifactQuota
+
+    run_quota = RunArtifactQuota(redis_client=redis_client, namespace=redis_namespace())
+    server.add_servicer(
+        GatewayArtifactService(
+            artifact_store=PostgresArtifactStore(),
+            lease_verifier=lease_store.is_current,
+            run_quota=run_quota,
+        ),
+        add_ArtifactServiceServicer_to_server,
+    )
+    logger.info("ControlService + DataService + ArtifactService 已注册 (quota 带 Redis 备份)")
 
 
 async def _close_db_with_timeout(timeout: float, message: str) -> None:
@@ -154,7 +174,8 @@ async def main():
         logger.exception(f"构建 LeaseStore 失败，Gateway 拒绝启动: {exc}")
         await close_db()
         raise
-    _register_services(server, lease_store)
+    redis_client = await get_redis_client()
+    _register_services(server, lease_store, redis_client)
     if not await server.start():
         logger.error("Gateway gRPC 服务器启动失败，触发退出")
         await _close_db_with_timeout(5, "退出前 close_db 失败,忽略")
