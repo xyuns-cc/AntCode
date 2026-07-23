@@ -863,7 +863,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 377
+      "value": 378
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
@@ -2639,7 +2639,7 @@
       "path": "services/worker/src/antcode_worker/app/wiring.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 868
+      "value": 887
     },
     {
       "path": "services/worker/src/antcode_worker/app/wiring.py",
@@ -2831,7 +2831,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1798
+      "value": 1802
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",

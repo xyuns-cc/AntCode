@@ -147,23 +147,24 @@ class TaskRunService:
             )
 
     async def _bind_lease_generation(self, execution: TaskRun, data: dict[str, Any] | None) -> bool:
+        # P1-GW-03 (round6): Direct L2 takeover 后 PG 换代 L1 → L2。同 worker
+        # 一律接受 incoming(caller 已过 lease_validator); 跨 worker 由 worker_id
+        # CAS 天然拒。无 worker_id 时(测试 fixture)退回原 lease_id CAS 分支。
         incoming = str((data or {}).get("lease_id") or "").strip()
-        if not incoming:
-            logger.warning(f"结果缺少 lease_id: run_id={execution.run_id}")
+        if not incoming or len(incoming) > 64:
+            logger.warning(f"结果 lease_id 缺失或超长: run_id={execution.run_id}")
             return False
-        if len(incoming) > 64:
-            logger.warning(f"结果 lease_id 过长: run_id={execution.run_id}")
-            return False
-        updated = (
-            await TaskRun.filter(run_id=execution.run_id)
-            .filter(Q(lease_id__isnull=True) | Q(lease_id=incoming))
-            .update(lease_id=incoming)
-        )
-        if not updated:
-            logger.warning(
-                "拒绝旧 Lease 结果: run_id={}",
-                execution.run_id,
+        exec_worker_id = getattr(execution, "worker_id", None)
+        if exec_worker_id is not None:
+            updated = await TaskRun.filter(run_id=execution.run_id, worker_id=exec_worker_id).update(lease_id=incoming)
+        else:
+            updated = (
+                await TaskRun.filter(run_id=execution.run_id)
+                .filter(Q(lease_id__isnull=True) | Q(lease_id=incoming))
+                .update(lease_id=incoming)
             )
+        if not updated:
+            logger.warning("拒绝跨 Worker 或不存在的 Lease 结果: run_id={} incoming={}", execution.run_id, incoming)
         return bool(updated)
 
     # P1-GW-06: 迟到放行分支仅限终态帧，避免已撤销 L1 用非终态帧覆盖 L2 进度。
