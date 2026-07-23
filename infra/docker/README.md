@@ -137,6 +137,42 @@ Worker 主进程仍使用镜像内非 root 的 `appuser`。不要使用 `privile
 
 未落地这些前提前，**禁止把 dev/remote 画像直接投放到承接不可信任务的生产环境**。
 
+## 生产部署合同 (compose.prod.yml)
+
+round6 P0-03 后 K8s 决策废止，仓库以 `infra/docker/docker-compose.prod.yml`
+作为**非 K8s 生产画像的最小起点**。它不是交钥匙方案；上线前必须完成
+site-specific 落地：
+
+1. `.env.production` 显式提供 `DATABASE_URL`/`REDIS_URL`/`POSTGRES_*`/
+   `REDIS_PASSWORD`/`JWT_SECRET`/`ANTCODE_ENCRYPTION_KEY` 等生产密钥。
+2. `ANTCODE_GATEWAY_TLS_DIR` 与 `ANTCODE_WORKER_TLS_DIR` 挂载真实 mTLS
+   证书（server + ca + 每 Worker 独立 client 证书）；私钥不能进镜像。
+3. `ANTCODE_REVERSE_PROXY_CONFIG` 指向 site 自建 nginx/traefik/caddy 配置，
+   完成 HTTP→HTTPS 301、`connect-src` CSP、Gateway gRPC 转发。
+4. `ANTCODE_TLS_CERTS_DIR` 挂载反向代理证书；cert-manager/acme.sh 自动续签。
+5. `ANTCODE_IMAGE_REGISTRY` + `ANTCODE_IMAGE_TAG` 用 immutable digest 或语义
+   化版本，禁止 `latest`；镜像必须经 Cosign 签名。
+6. `backup` sidecar 骨架默认写 `/backup` 卷，site 通过 override 补 rclone /
+   aws s3 上传 + 保留策略；`docker-compose.prod.backup.yml` 后续加入。
+7. Prometheus scrape `/metrics` + alertmanager；Loki/ELK 收 json-file 日志。
+8. Worker 承接不可信任务前必须落 gVisor/Kata + 独立宿主/网络域；此文件
+   仍保留 `SYS_ADMIN` 是 bwrap 嵌套 namespace 硬需求，非独立宿主时
+   仅适用于自有代码执行。
+
+`compose.prod.yml` 相对 remote 画像的强制安全差异：
+
+- `AUTH_COOKIE_SECURE=true`
+- `REDIS_ACL_ENABLED=true`
+- `ANTCODE_GATEWAY_ALLOW_INSECURE=false` + `WORKER_GATEWAY_TLS=true`
+- `ANTCODE_RULE_ALLOW_NETWORK` 默认 `0`（Rule 断网），site 显式打开
+- `ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS=1`（legacy 通道关闭，
+  round6 P1-GW-06）
+- PG/Redis 不 `ports:` 对外，仅 `expose` 到 `antcode-internal` 网络
+- Web API/Master `read_only: true` 根文件系统 + `/tmp` tmpfs
+
+验证：`docker compose -f docker-compose.prod.yml config` 返回渲染 YAML
+且不缺任何 `${?}` 必填变量。
+
 ## 远程验收传输模式
 
 `docker-compose.remote.yml` 固定为 Direct Worker，避免同时注入 Gateway 和
