@@ -24,7 +24,7 @@ from antcode_core.domain.schemas.task import (
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from tortoise.exceptions import IntegrityError
 
 from antcode_web_api.response import (
@@ -37,6 +37,10 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
+
+# P2 拆分: batch-delete + batch 2 个 handler + _operate_task helper +
+# TaskBatchRequest schema 移至 tasks_batch.py。顶层 re-export schema。
+from antcode_web_api.routes.v1 import tasks_batch as _tasks_batch
 
 # P2 拆分: pause/resume/trigger/execute/toggle 5 个 handler + 3 helper +
 # 2 schema (TaskExecuteRequest / TaskToggleRequest) 移至 tasks_execute.py。
@@ -61,7 +65,6 @@ from antcode_web_api.routes.v1.task_cancel import (  # noqa: F401
     mark_task_run_cancelled,
     stop_unassigned_task_run,
 )
-from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 # P2 §4.4 / 复审 P3: YAML 导出统一走共享工具（保留标量/数字串必须引号）。
 from antcode_web_api.utils.yaml_export import yaml_dump as _yaml_dump
@@ -82,17 +85,9 @@ TaskExecuteRequest = _tasks_execute.TaskExecuteRequest
 TaskToggleRequest = _tasks_execute.TaskToggleRequest
 
 
-class TaskBatchRequest(BaseModel):
-    task_ids: list[str] = Field(default_factory=list, max_length=100)
-    action: str = Field(..., description="start/stop/cancel/delete/enable/disable")
-    execution_config: dict[str, Any] | None = None
-
-    @field_validator("task_ids")
-    @classmethod
-    def reject_duplicate_task_ids(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("task_ids 不允许重复")
-        return value
+# TaskBatchRequest 定义已移至 tasks_batch.py; 顶层 re-export 保证
+# tests import tasks.TaskBatchRequest 继续可命中。
+TaskBatchRequest = _tasks_batch.TaskBatchRequest
 
 
 class TaskDuplicateRequest(BaseModel):
@@ -636,82 +631,17 @@ async def delete_task(task_id, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="删除任务失败")
 
 
-@tasks_router.post("/batch-delete", response_model=BaseResponse)
-async def batch_delete_tasks(request: dict, current_user=Depends(get_current_user)):
-    """批量删除任务"""
-    task_ids = bounded_distinct_ids(request.get("task_ids"), "task_ids")
-
-    success_count = 0
-    failed_count = 0
-    failed_ids = []
-
-    for task_id in task_ids:
-        try:
-            deleted = await scheduler_service.delete_task(task_id, current_user.user_id)
-            if deleted:
-                success_count += 1
-            else:
-                failed_count += 1
-                failed_ids.append(task_id)
-        except Exception as e:
-            logger.warning(f"删除任务 {task_id} 失败: {e}")
-            failed_count += 1
-            failed_ids.append(task_id)
-
-    return success_response(
-        {
-            "success_count": success_count,
-            "failed_count": failed_count,
-            "failed_ids": failed_ids,
-        },
-        message=f"成功删除 {success_count} 个任务" + (f"，{failed_count} 个失败" if failed_count > 0 else ""),
-    )
+# P2 拆分: batch-delete + batch 2 个 handler + _operate_task helper 移至
+# tasks_batch.py, 通过 register_batch_routes 挂路由。顶层 shim 保留原名。
+async def batch_delete_tasks(request: dict, current_user=None):
+    return await _tasks_batch.batch_delete_tasks(request, current_user)
 
 
-@tasks_router.post("/batch", response_model=BaseResponse[dict])
-async def batch_operate_tasks(request: TaskBatchRequest, current_user=Depends(get_current_user)):
-    """批量操作任务"""
-    if not request.task_ids:
-        raise HTTPException(status_code=400, detail="task_ids不能为空")
-
-    success_ids: list[str] = []
-    failed_ids: list[str] = []
-
-    for task_id in request.task_ids:
-        try:
-            succeeded = await _operate_task(task_id, request.action, current_user.user_id)
-            if succeeded:
-                success_ids.append(task_id)
-            else:
-                failed_ids.append(task_id)
-        except Exception:
-            failed_ids.append(task_id)
-
-    return success_response(
-        {
-            "success_count": len(success_ids),
-            "failed_count": len(failed_ids),
-            "success_ids": success_ids,
-            "failed_ids": failed_ids,
-        },
-        message=Messages.OPERATION_SUCCESS,
-    )
+async def batch_operate_tasks(request, current_user=None):
+    return await _tasks_batch.batch_operate_tasks(request, current_user)
 
 
-async def _operate_task(task_id: str, action: str, user_id: int) -> bool:
-    if action == "delete":
-        return bool(await scheduler_service.delete_task(task_id, user_id))
-    if action == "enable":
-        return bool(await scheduler_service.update_task(task_id, TaskUpdate(is_active=True), user_id))
-    if action == "disable":
-        return bool(await scheduler_service.update_task(task_id, TaskUpdate(is_active=False), user_id))
-    if action == "start":
-        return bool(await scheduler_service.trigger_task_by_user(task_id, user_id))
-    if action == "stop":
-        return bool(await scheduler_service.pause_task_by_user(task_id, user_id))
-    if action == "cancel":
-        return await cancel_latest_task_run(task_id, user_id)
-    raise HTTPException(status_code=400, detail="不支持的操作类型")
+_operate_task = _tasks_batch._operate_task
 
 
 # P2 拆分: pause/resume/trigger/execute/toggle 5 个 handler + 3 helper +
@@ -843,6 +773,9 @@ async def _try_send_stop_event_with_reason(execution, user_id: int):
 async def _raise_if_stop_terminal_conflict(run_id: str, user_id: int) -> None:
     await _tasks_runs._raise_if_stop_terminal_conflict(run_id, user_id)
 
+
+# P2 拆分: 2 个 batch handler 挂路由 (batch-delete / batch)
+_tasks_batch.register_batch_routes(tasks_router)
 
 # P2 拆分: 5 个执行控制 handler 挂路由 (pause/resume/trigger/execute/toggle)
 _tasks_execute.register_execute_routes(tasks_router, create_task_response=create_task_response)
