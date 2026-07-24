@@ -26,7 +26,6 @@ from antcode_core.domain.models import (
     UserRole,
     Worker,
     WorkerInstallKey,
-    WorkerStatus,
 )
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
@@ -69,12 +68,28 @@ from tortoise.expressions import Q
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
 
+# P2 拆分: 3 个纯查询接口 (load ranking / best worker / render-capable) 移到
+# workers_query.py。主 workers.py 底部调 register_query_routes 挂路由 +
+# 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
+from antcode_web_api.routes.v1 import workers_query as _workers_query
+
 # P2 拆分: Worker 上报接口的 schema + handler + 常量集中在 workers_report.py,
 # 主 workers.py 只保留 re-export 与底部 register_report_routes 注册, 让
 # 测试的 workers_route.WorkerTaskLogReportRequest / workers_route.report_task_log
-# 等引用继续可命中。
-from antcode_web_api.routes.v1.workers_report import (
+# 等引用继续可命中。noqa: F401 显式保留 re-export 防 ruff 误删。
+from antcode_web_api.routes.v1.workers_report import (  # noqa: F401
+    MAX_LOG_BATCH_ENTRIES,
+    MAX_LOG_LINE_CHARS,
+    WorkerTaskHeartbeatReportRequest,
+    WorkerTaskLogReportRequest,
+    WorkerTaskLogsBatchReportRequest,
+    WorkerTaskStatusReportRequest,
+    _WorkerReportBaseModel,
     register_report_routes,
+    report_execution_heartbeat,
+    report_task_log,
+    report_task_logs_batch,
+    report_task_status,
 )
 from antcode_web_api.routing import promote_static_routes
 from antcode_web_api.services.worker_installer import (
@@ -1406,23 +1421,32 @@ async def _get_dispatch_task(project_id: str, task_id_raw, project) -> Task:
     return task
 
 
-@router.get(
-    "/load/ranking",
-    response_model=BaseResponse[list],
-    summary="获取 Worker 负载排名",
-    description="获取所有在线 Worker 的负载排名，用于任务分发决策",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_workers_load_ranking(
-    region: str | None = Query(None, description="区域过滤"),
-    top_n: int = Query(10, ge=1, le=50, description="返回前N个 Worker"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取 Worker 负载排名"""
-    from antcode_core.application.services.workers import worker_load_balancer
+# P2 拆分: get_workers_load_ranking / get_best_worker / get_render_capable_workers
+# 已移至 workers_query.py; 此处仅保留 shim 让 workers_route.get_best_worker(...)
+# 等测试引用继续可用。@router 装饰通过 register_query_routes 在文件末尾完成。
+async def get_workers_load_ranking(*, region=None, top_n=10, current_user=None):
+    _ = current_user
+    return await _workers_query.get_workers_load_ranking(region=region, top_n=top_n)
 
-    rankings = await worker_load_balancer.get_workers_ranking(region=region, top_n=top_n)
-    return success(rankings)
+
+async def get_best_worker(*, region=None, tags=None, require_render=False, current_user=None):
+    _ = current_user
+    return await _workers_query.get_best_worker(
+        region=region,
+        tags=tags,
+        require_render=require_render,
+        worker_to_response=_worker_to_response,
+    )
+
+
+async def get_render_capable_workers(*, page=1, size=20, region=None, current_user=None):
+    _ = current_user
+    return await _workers_query.get_render_capable_workers(
+        page=page,
+        size=size,
+        region=region,
+        worker_to_response=_worker_to_response,
+    )
 
 
 @router.post(
@@ -1780,82 +1804,13 @@ async def get_distributed_task_logs(
     return success({"logs": logs, "total": len(logs), "worker_id": worker_id, "task_id": task_id})
 
 
-@router.get(
-    "/best",
-    response_model=BaseResponse[dict],
-    summary="获取最佳 Worker",
-    description="根据负载自动选择最适合执行任务的 Worker",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_best_worker(
-    region: str | None = Query(None, description="区域过滤"),
-    tags: str | None = Query(None, description="标签过滤，逗号分隔"),
-    require_render: bool = Query(False, description="是否需要渲染能力"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取当前负载最低的最佳 Worker"""
-    from antcode_core.application.services.workers import worker_load_balancer
-
-    tag_list = tags.split(",") if tags else None
-
-    best_worker = await worker_load_balancer.select_best_worker(
-        region=region, tags=tag_list, require_render=require_render
-    )
-
-    if not best_worker:
-        return success(
-            {
-                "available": False,
-                "message": "没有可用的渲染 Worker" if require_render else "没有可用的 Worker",
-            }
-        )
-
-    score = worker_load_balancer.calculate_load_score(best_worker)
-
-    return success(
-        {
-            "available": True,
-            "worker": _worker_to_response(best_worker).model_dump(),
-            "load_score": score,
-        }
-    )
-
-
-@router.get(
-    "/render-capable",
-    response_model=BaseResponse[WorkerListResponse],
-    summary="获取有渲染能力的 Worker",
-    description="获取所有具有浏览器渲染能力（DrissionPage）的在线 Worker",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_render_capable_workers(
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
-    region: str | None = Query(None, description="区域过滤"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取有渲染能力的 Worker 列表"""
-    from antcode_core.domain.models import Worker
-
-    query = Worker.filter(status=WorkerStatus.ONLINE.value)
-    if region:
-        query = query.filter(region=region)
-    query = query.filter(
-        Q(capabilities__contains={"task_types": ["render"]})
-        | Q(capabilities__contains={"playwright": {"enabled": True}})
-    )
-
-    total = await query.count()
-    offset = (page - 1) * size
-    workers = await query.offset(offset).limit(size)
-    items = [_worker_to_response(worker) for worker in workers]
-
-    return success(WorkerListResponse(items=items, total=total, page=page, size=size))
-
-
 # P2 拆分: 4 个 Worker 上报接口注册委托给 workers_report.register_report_routes,
 # 传入 _verify_worker_credential_headers 依赖, 保持 URL / 契约不变。
 register_report_routes(router, _verify_worker_credential_headers)
+
+# P2 拆分: 3 个查询接口通过 workers_query.register_query_routes 挂路由, 保持
+# URL (/load/ranking, /best, /render-capable) 与 DI 不变。
+_workers_query.register_query_routes(router, _worker_to_response)
 
 
 @router.get(
