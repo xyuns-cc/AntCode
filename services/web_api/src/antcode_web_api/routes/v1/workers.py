@@ -6,7 +6,6 @@ import sys as _sys
 import time
 from ipaddress import ip_address, ip_network
 
-from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings
 from antcode_core.common.security.api_key import store_api_key, store_secret_key
@@ -19,11 +18,9 @@ from antcode_core.domain.models import (
     Task,
     TaskRun,
     User,
-    UserRole,
     Worker,
     WorkerInstallKey,
 )
-from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (  # noqa: F401
     WorkerCapabilities,
     WorkerCreateRequest,
@@ -52,12 +49,14 @@ from antcode_core.infrastructure.redis import (
     worker_install_source_block_key,
     worker_install_source_fail_counter_key,
 )
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from tortoise.expressions import Q
 
-from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
+
+# P2 拆分: 10 个 CRUD handler 移到 workers_crud.py。
+from antcode_web_api.routes.v1 import workers_crud as _workers_crud
 
 # P2 拆分: 5 个 dispatch handler + 3 schema + 4 helper 移至 workers_dispatch.py。
 # 顶层 re-export schema/常量 让测试引用继续可命中。
@@ -119,7 +118,6 @@ from antcode_web_api.services.worker_installer import (
     build_worker_install_command,
     load_worker_install_config,
 )
-from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 router = APIRouter()
 
@@ -513,35 +511,6 @@ def _worker_to_response(worker) -> WorkerResponse:
     )
 
 
-@router.get(
-    "",
-    response_model=BaseResponse[WorkerListResponse],
-    summary="获取 Worker 列表",
-    description="获取所有 Worker 列表，支持分页和过滤",
-)
-async def get_workers(
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
-    status_filter: str | None = Query(None, alias="status", description="状态过滤"),
-    region: str | None = Query(None, description="区域过滤"),
-    search: str | None = Query(None, description="搜索关键词"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取 Worker 列表"""
-    workers, total = await _list_accessible_workers(
-        current_user,
-        page=page,
-        size=size,
-        status_filter=status_filter,
-        region=region,
-        search=search,
-    )
-
-    items = [_worker_to_response(worker) for worker in workers]
-
-    return success(WorkerListResponse(items=items, total=total, page=page, size=size))
-
-
 # P2 拆分: get_worker_stats / get_cluster_metrics_history / get_worker_metrics_history
 # 移至 workers_stats.py, 通过 register_stats_routes 挂路由; 顶层 shim 保留原名。
 async def get_worker_stats(current_user=None):
@@ -554,189 +523,69 @@ async def get_cluster_metrics_history(hours: int = 24, current_user=None):
     return await _workers_stats.get_cluster_metrics_history(hours)
 
 
-@router.post(
-    "",
-    response_model=BaseResponse[WorkerResponse],
-    summary="创建 Worker",
-    description="手动创建新的 Worker（不推荐，建议使用安装 Key 注册）",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def create_worker(
-    request: WorkerCreateRequest,
-    http_request: Request,
-    current_user: TokenData = Depends(get_current_user),
-):
-    """创建 Worker"""
-    from antcode_core.application.services.users.user_service import user_service
-
-    worker = await worker_service.create_worker(request, current_user.user_id)
-
-    # 记录审计日志
-    user = await user_service.get_user_by_id(current_user.user_id)
-    await audit_service.log(
-        action=AuditAction.WORKER_CREATE,
-        resource_type="worker",
-        username=user.username if user else "unknown",
-        resource_id=worker.public_id,
-        resource_name=worker.name,
-        user_id=current_user.user_id,
-        ip_address=http_request.client.host if http_request.client else None,
-        description=f"创建 Worker: {worker.name}",
-    )
-
-    return success(_worker_to_response(worker), message="Worker 创建成功")
-
-
-@router.get(
-    "/{worker_id}/credentials",
-    response_model=BaseResponse[dict],
-    summary="获取 Worker 凭证",
-    description="Worker 凭证不可恢复，仅在注册响应中返回一次",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_worker_credentials(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """拒绝恢复性读取，凭据只能在注册时一次性取得。"""
-    await _require_worker_access(worker_id, current_user)
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="Worker 凭据不可恢复，请使用新的安装 Key 重新注册",
+# P2 拆分: 10 个 CRUD handler 移至 workers_crud.py, 通过 register_crud_routes
+# 挂 @router; 顶层 shim 保留原名让测试引用继续可命中。
+async def get_workers(*, page=1, size=20, status_filter=None, region=None, search=None, current_user=None):
+    return await _workers_crud.get_workers(
+        page=page,
+        size=size,
+        status_filter=status_filter,
+        region=region,
+        search=search,
+        current_user=current_user,
+        list_accessible_workers=_list_accessible_workers,
+        worker_to_response=_worker_to_response,
     )
 
 
-@router.post(
-    "/{worker_id}/disconnect",
-    response_model=BaseResponse[dict],
-    summary="断开 Worker",
-    description="断开与 Worker 的连接",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def disconnect_worker(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """断开 Worker 连接"""
-    result = await worker_service.disconnect_worker(worker_id)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-    return success({"disconnected": True}, message="Worker 已断开")
-
-
-@router.get(
-    "/{worker_id}",
-    response_model=BaseResponse[WorkerResponse],
-    summary="获取 Worker 详情",
-    description="根据ID获取 Worker 详细信息",
-)
-async def get_worker(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """获取 Worker 详情"""
-    worker = await _require_worker_access(worker_id, current_user)
-    return success(_worker_to_response(worker))
-
-
-@router.put(
-    "/{worker_id}",
-    response_model=BaseResponse[WorkerResponse],
-    summary="更新 Worker",
-    description="更新 Worker 信息",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def update_worker(
-    worker_id: str,
-    request: WorkerUpdateRequest,
-    current_user: TokenData = Depends(get_current_user),
-):
-    """更新 Worker"""
-    worker = await worker_service.update_worker(worker_id, request)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-    return success(_worker_to_response(worker), message="Worker 更新成功")
-
-
-@router.delete(
-    "/{worker_id}",
-    response_model=BaseResponse[dict],
-    summary="删除 Worker",
-    description="删除指定 Worker",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def delete_worker(
-    worker_id: str,
-    http_request: Request,
-    current_user: TokenData = Depends(get_current_user),
-):
-    """删除 Worker"""
-    from antcode_core.application.services.users.user_service import user_service
-
-    # 获取 Worker 信息用于审计
-    worker = await worker_service.get_worker_by_id(worker_id)
-    worker_name = worker.name if worker else worker_id
-
-    deleted = await worker_service.delete_worker(worker_id)
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    # 记录审计日志
-    user = await user_service.get_user_by_id(current_user.user_id)
-    await audit_service.log(
-        action=AuditAction.WORKER_DELETE,
-        resource_type="worker",
-        username=user.username if user else "unknown",
-        resource_id=worker_id,
-        resource_name=worker_name,
-        user_id=current_user.user_id,
-        ip_address=http_request.client.host if http_request.client else None,
-        description=f"删除 Worker: {worker_name}",
+async def create_worker(request, http_request, current_user):
+    return await _workers_crud.create_worker(
+        request, http_request, current_user, worker_to_response=_worker_to_response
     )
 
-    return success({"deleted": True}, message="Worker 删除成功")
+
+async def get_worker_credentials(worker_id, current_user):
+    return await _workers_crud.get_worker_credentials(
+        worker_id, current_user, require_worker_access=_require_worker_access
+    )
 
 
-@router.post(
-    "/batch-delete",
-    response_model=BaseResponse[dict],
-    summary="批量删除 Worker",
-    description="批量删除多个 Worker",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def batch_delete_workers(request: dict = Body(...), current_user: TokenData = Depends(get_current_user)):
-    """批量删除 Worker"""
-    worker_ids = bounded_distinct_ids(request.get("worker_ids"), "worker_ids")
-
-    result = await worker_service.batch_delete_workers(worker_ids)
-
-    if result["failed_count"] == 0:
-        message = f"成功删除 {result['success_count']} 个 Worker"
-    elif result["success_count"] == 0:
-        message = f"删除失败，{result['failed_count']} 个 Worker 删除失败"
-    else:
-        message = f"部分成功：{result['success_count']} 个删除成功，{result['failed_count']} 个失败"
-
-    return success(result, message=message)
+async def disconnect_worker(worker_id, current_user=None):
+    _ = current_user
+    return await _workers_crud.disconnect_worker(worker_id)
 
 
-@router.post(
-    "/{worker_id}/test",
-    response_model=BaseResponse[WorkerTestConnectionResponse],
-    summary="测试 Worker 连接",
-    description="测试与 Worker 的网络连接",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def test_worker_connection(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """测试 Worker 连接"""
-    result = await worker_service.test_connection(worker_id)
-    return success(WorkerTestConnectionResponse(**result))
+async def get_worker(worker_id, current_user):
+    return await _workers_crud.get_worker(
+        worker_id,
+        current_user,
+        require_worker_access=_require_worker_access,
+        worker_to_response=_worker_to_response,
+    )
 
 
-@router.post(
-    "/{worker_id}/refresh",
-    response_model=BaseResponse[WorkerResponse],
-    summary="刷新 Worker 状态",
-    description="重新检测并更新 Worker 状态",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def refresh_worker_status(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """刷新 Worker 状态"""
-    worker = await worker_service.refresh_worker_status(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-    return success(_worker_to_response(worker))
+async def update_worker(worker_id, request, current_user=None):
+    _ = current_user
+    return await _workers_crud.update_worker(worker_id, request, worker_to_response=_worker_to_response)
+
+
+async def delete_worker(worker_id, http_request, current_user):
+    return await _workers_crud.delete_worker(worker_id, http_request, current_user)
+
+
+async def batch_delete_workers(request, current_user=None):
+    _ = current_user
+    return await _workers_crud.batch_delete_workers(request)
+
+
+async def test_worker_connection(worker_id, current_user=None):
+    _ = current_user
+    return await _workers_crud.test_worker_connection(worker_id)
+
+
+async def refresh_worker_status(worker_id, current_user=None):
+    _ = current_user
+    return await _workers_crud.refresh_worker_status(worker_id, worker_to_response=_worker_to_response)
 
 
 # ====== Worker 权限管理 API（需要管理员权限）======
@@ -1149,6 +998,13 @@ _workers_dispatch.register_dispatch_routes(router, _sys.modules[__name__])
 _workers_stats.register_stats_routes(router, _require_worker_access)
 # P2 拆分: register-direct / register(410) / heartbeat 3 handler 挂路由
 _workers_register.register_register_routes(router, _mask_redis_url)
+# P2 拆分: 10 个 CRUD handler 挂路由
+_workers_crud.register_crud_routes(
+    router,
+    worker_to_response=_worker_to_response,
+    require_worker_access=_require_worker_access,
+    list_accessible_workers=_list_accessible_workers,
+)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
