@@ -73,6 +73,9 @@ from antcode_web_api.response import BaseResponse, success
 # 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
 from antcode_web_api.routes.v1 import workers_query as _workers_query
 
+# P2 拆分: 3 个 spider stats 查询接口移到 workers_spider.py。
+from antcode_web_api.routes.v1 import workers_spider as _workers_spider
+
 # P2 拆分: Worker 上报接口的 schema + handler + 常量集中在 workers_report.py,
 # 主 workers.py 只保留 re-export 与底部 register_report_routes 注册, 让
 # 测试的 workers_route.WorkerTaskLogReportRequest / workers_route.report_task_log
@@ -2023,65 +2026,25 @@ async def update_worker_resources(
     )
 
 
-# ====== 爬虫统计 API ======
+# P2 拆分: 3 个 spider stats 查询接口移至 workers_spider.py, 通过
+# register_spider_routes 挂 @router 装饰; workers_route.get_cluster_spider_stats
+# 等测试引用通过下面的 shim 保留。
+async def get_cluster_spider_stats(current_user=None):
+    _ = current_user
+    return await _workers_spider.get_cluster_spider_stats()
 
 
-@router.get(
-    "/stats/spider",
-    response_model=BaseResponse[dict],
-    summary="获取集群爬虫统计",
-    description="获取所有在线 Worker 的爬虫统计聚合数据",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_cluster_spider_stats(current_user: TokenData = Depends(get_current_user)):
-    """获取集群爬虫统计"""
-    from antcode_core.application.services.workers.spider_stats_service import spider_stats_service
-
-    stats = await spider_stats_service.get_cluster_spider_stats()
-    return success(stats)
+async def get_worker_spider_stats(worker_id: str, current_user=None):
+    _ = current_user
+    return await _workers_spider.get_worker_spider_stats(worker_id)
 
 
-@router.get(
-    "/{worker_id}/stats/spider",
-    response_model=BaseResponse[dict],
-    summary="获取单 Worker 爬虫统计",
-    description="获取指定 Worker 的爬虫统计数据",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_worker_spider_stats(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """获取单 Worker 爬虫统计"""
-    from antcode_core.application.services.workers.spider_stats_service import spider_stats_service
-
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    stats = await spider_stats_service.get_worker_spider_stats(worker.id)
-    return success(stats.model_dump())
+async def get_worker_spider_stats_history(worker_id: str, hours: int = 1, current_user=None):
+    _ = current_user
+    return await _workers_spider.get_worker_spider_stats_history(worker_id, hours)
 
 
-@router.get(
-    "/{worker_id}/stats/spider/history",
-    response_model=BaseResponse[list],
-    summary="获取 Worker 爬虫统计历史",
-    description="获取指定 Worker 的爬虫统计历史趋势数据",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_worker_spider_stats_history(
-    worker_id: str,
-    hours: int = Query(1, ge=1, le=24, description="查询时间范围（小时）"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取 Worker 爬虫统计历史"""
-    from antcode_core.application.services.workers.spider_stats_service import spider_stats_service
-
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    history = await spider_stats_service.get_spider_stats_history(worker_id=worker.id, hours=hours)
-    return success(history)
-
+_workers_spider.register_spider_routes(router)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
