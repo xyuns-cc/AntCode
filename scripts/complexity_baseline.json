@@ -2357,7 +2357,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1167
+      "value": 989
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
@@ -2373,21 +2373,15 @@
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
-      "function": "get_task_schedule_history",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
-      "function": "list_task_runs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 7
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
       "function": "list_tasks",
       "rule": "POSITIONAL_ARGS",
       "value": 10
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks_query.py",
+      "function": "-",
+      "rule": "FILE_LINES",
+      "value": 375
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
