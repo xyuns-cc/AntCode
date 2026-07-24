@@ -2417,7 +2417,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 612
+      "value": 613
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -2459,7 +2459,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers_install_key.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 544
+      "value": 548
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers_install_key.py",

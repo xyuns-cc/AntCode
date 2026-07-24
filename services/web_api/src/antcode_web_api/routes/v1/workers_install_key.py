@@ -27,7 +27,6 @@ import time
 from ipaddress import ip_address, ip_network
 
 from antcode_core.common.config import settings
-from antcode_core.common.security.api_key import store_api_key, store_secret_key
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.common.security.network_source import extract_client_ip
 from antcode_core.domain.models import WorkerInstallKey
@@ -259,8 +258,10 @@ async def _create_worker_from_install_key(request, install_key, request_source: 
             created_by=install_key.created_by,
             transport_mode=request.transport_mode,
         )
-        store_api_key(worker, api_key)
-        store_secret_key(worker, secret_key)
+        # 走 workers namespace lookup 让测试 patch_object(workers_route, "store_api_key") 命中
+        _workers = _workers_module()
+        _workers.store_api_key(worker, api_key)
+        _workers.store_secret_key(worker, secret_key)
         await worker.save(using_db=connection)
 
         updated = await WorkerInstallKey.finalize_claim(
@@ -476,7 +477,10 @@ async def issue_worker_redis_acl(worker_id: str, auth_context: dict):
             status_code=status.HTTP_409_CONFLICT,
             detail="Worker V2 注册尚未完成 ACK，拒绝签发 Redis ACL",
         )
-    redis = await _workers.get_redis_client()
+    # delay import 让测试 monkeypatch antcode_core.infrastructure.redis.get_redis_client 生效
+    from antcode_core.infrastructure.redis import get_redis_client
+
+    redis = await get_redis_client()
     if redis is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis ACL 服务不可用")
     password = await ensure_worker_acl(redis, worker)

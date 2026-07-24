@@ -4,6 +4,7 @@ import sys as _sys
 
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings  # noqa: F401  # 供测试 monkeypatch workers_route.settings 使用
+from antcode_core.common.security.api_key import store_api_key, store_secret_key  # noqa: F401
 from antcode_core.common.security.auth import TokenData
 from antcode_core.common.security.worker_auth import (
     verify_worker_request_with_signature,
