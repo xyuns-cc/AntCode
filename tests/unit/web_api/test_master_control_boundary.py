@@ -23,7 +23,15 @@ def test_web_api_routes_use_bounded_control_stream_writer():
 
 
 def test_log_routes_enforce_run_access():
-    source = "\n".join([_read("tasks.py"), _read("workers.py")])
+    # P2 拆分后 /distributed-logs/{run_id} 挂在 workers_distributed.py, 契约
+    # 未变 (register_distributed_routes 挂 @router), grep 扩到该模块。
+    source = "\n".join(
+        [
+            _read("tasks.py"),
+            _read("workers.py"),
+            _read("workers_distributed.py"),
+        ]
+    )
 
     assert "/runs/{run_id}/logs/download" in source
     assert "get_execution_with_permission" in source

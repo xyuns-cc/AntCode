@@ -2417,7 +2417,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 2053
+      "value": 2015
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",

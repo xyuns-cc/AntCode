@@ -68,6 +68,9 @@ from tortoise.expressions import Q
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
 
+# P2 拆分: 3 个 distributed logs / status 查询接口移到 workers_distributed.py。
+from antcode_web_api.routes.v1 import workers_distributed as _workers_distributed
+
 # P2 拆分: 3 个纯查询接口 (load ranking / best worker / render-capable) 移到
 # workers_query.py。主 workers.py 底部调 register_query_routes 挂路由 +
 # 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
@@ -1760,51 +1763,31 @@ async def cancel_worker_queued_task(worker_id: str, task_id: str, current_user: 
     return success({"task_id": task_id}, message="任务已取消")
 
 
-@router.get(
-    "/dispatch/task/{worker_id}/{task_id}/status",
-    response_model=BaseResponse[dict],
-    summary="获取分布式任务状态",
-    description="从指定 Worker 获取任务执行状态",
-)
-async def get_distributed_task_status(
-    worker_id: str, task_id: str, current_user: TokenData = Depends(get_current_user)
-):
-    """从 Worker 获取任务状态"""
-    from antcode_core.application.services.workers import worker_task_dispatcher
-
-    worker = await _require_worker_access(worker_id, current_user)
-    await _require_run_access(task_id, current_user)
-
-    status_data = await worker_task_dispatcher.get_task_status_from_worker(worker, task_id)
-
-    if not status_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在或无法获取状态")
-
-    return success(status_data)
+# P2 拆分: distributed task status/logs 3 个 handler 移至 workers_distributed.py,
+# 通过 register_distributed_routes 挂 @router 装饰(见文件末尾)。
+# workers_route.get_distributed_task_status 等测试引用通过下面 shim 保留。
+async def get_distributed_task_status(worker_id: str, task_id: str, current_user):
+    return await _workers_distributed.get_distributed_task_status(
+        worker_id,
+        task_id,
+        current_user,
+        require_worker_access=_require_worker_access,
+        require_run_access=_require_run_access,
+    )
 
 
-@router.get(
-    "/dispatch/task/{worker_id}/{task_id}/logs",
-    response_model=BaseResponse[dict],
-    summary="获取分布式任务日志",
-    description="从指定 Worker 获取任务执行日志",
-)
 async def get_distributed_task_logs(
-    worker_id: str,
-    task_id: str,
-    log_type: str = Query("output", description="日志类型: output/error"),
-    tail: int = Query(100, ge=1, le=1000, description="返回最后N行"),
-    current_user: TokenData = Depends(get_current_user),
+    worker_id: str, task_id: str, log_type: str = "output", tail: int = 100, current_user=None
 ):
-    """从 Worker 获取任务日志"""
-    from antcode_core.application.services.workers import worker_task_dispatcher
-
-    worker = await _require_worker_access(worker_id, current_user)
-    await _require_run_access(task_id, current_user)
-
-    logs = await worker_task_dispatcher.get_task_logs_from_worker(worker, task_id, log_type, tail)
-
-    return success({"logs": logs, "total": len(logs), "worker_id": worker_id, "task_id": task_id})
+    return await _workers_distributed.get_distributed_task_logs(
+        worker_id,
+        task_id,
+        log_type,
+        tail=tail,
+        current_user=current_user,
+        require_worker_access=_require_worker_access,
+        require_run_access=_require_run_access,
+    )
 
 
 # P2 拆分: 4 个 Worker 上报接口注册委托给 workers_report.register_report_routes,
@@ -1816,32 +1799,9 @@ register_report_routes(router, _verify_worker_credential_headers)
 _workers_query.register_query_routes(router, _worker_to_response)
 
 
-@router.get(
-    "/distributed-logs/{run_id}",
-    response_model=BaseResponse[dict],
-    summary="获取分布式任务日志",
-    description="获取在远程 Worker 执行的任务日志",
-)
-async def get_distributed_logs(
-    run_id: str,
-    log_type: str = Query("stdout", description="日志类型: stdout/stderr"),
-    tail: int = Query(100, ge=1, le=5000, description="返回最后N行"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取分布式任务的日志"""
-    from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
-
-    await _require_run_access(run_id, current_user)
-
-    logs = await distributed_log_service.get_logs(run_id, log_type=log_type, tail=tail)
-
-    return success(
-        {
-            "run_id": run_id,
-            "log_type": log_type,
-            "logs": logs,
-            "total": len(logs),
-        }
+async def get_distributed_logs(run_id: str, log_type: str = "stdout", tail: int = 100, current_user=None):
+    return await _workers_distributed.get_distributed_logs(
+        run_id, log_type, tail=tail, current_user=current_user, require_run_access=_require_run_access
     )
 
 
@@ -2045,6 +2005,8 @@ async def get_worker_spider_stats_history(worker_id: str, hours: int = 1, curren
 
 
 _workers_spider.register_spider_routes(router)
+# P2 拆分: distributed logs / status 3 handler 挂路由
+_workers_distributed.register_distributed_routes(router, _require_worker_access, _require_run_access)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
