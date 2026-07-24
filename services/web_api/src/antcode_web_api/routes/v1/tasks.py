@@ -9,7 +9,7 @@ from typing import Any
 from antcode_core.application.services.projects.relation_service import relation_service
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.common.security.auth import get_current_user
-from antcode_core.domain.models import Project, Task, TaskRun
+from antcode_core.domain.models import Project, Task
 from antcode_core.domain.models.enums import ProjectType
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.task import (
@@ -37,6 +37,11 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
+
+# P2 拆分: pause/resume/trigger/execute/toggle 5 个 handler + 3 helper +
+# 2 schema (TaskExecuteRequest / TaskToggleRequest) 移至 tasks_execute.py。
+# 顶层 re-export schema 让测试 import tasks.TaskExecuteRequest 继续可命中。
+from antcode_web_api.routes.v1 import tasks_execute as _tasks_execute
 
 # P2 拆分: /running, /stats, /{task_id}/runs, /{task_id}/schedule-history,
 # /{task_id}/stats 5 个查询 handler + 6 个 helper 移至 tasks_query.py; 通过
@@ -71,9 +76,10 @@ def create_task_response(task) -> TaskResponse:
     return TaskResponseBuilder.build_detail(task)
 
 
-class TaskExecuteRequest(BaseModel):
-    execution_config: dict[str, Any] | None = None
-    environment_variables: dict[str, str] | None = None
+# TaskExecuteRequest / TaskToggleRequest 定义已移至 tasks_execute.py; 顶层 re-export
+# 保证 tests / 其它模块 import tasks.TaskExecuteRequest 继续可命中。
+TaskExecuteRequest = _tasks_execute.TaskExecuteRequest
+TaskToggleRequest = _tasks_execute.TaskToggleRequest
 
 
 class TaskBatchRequest(BaseModel):
@@ -87,10 +93,6 @@ class TaskBatchRequest(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("task_ids 不允许重复")
         return value
-
-
-class TaskToggleRequest(BaseModel):
-    enabled: bool
 
 
 class TaskDuplicateRequest(BaseModel):
@@ -712,168 +714,35 @@ async def _operate_task(task_id: str, action: str, user_id: int) -> bool:
     raise HTTPException(status_code=400, detail="不支持的操作类型")
 
 
-@tasks_router.post("/{task_id}/pause", response_model=BaseResponse)
-async def pause_task(task_id, current_user=Depends(get_current_user)):
-    """暂停任务"""
-    try:
-        paused = await scheduler_service.pause_task_by_user(task_id, current_user.user_id)
-        if not paused:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        return success_response(None, message="任务已暂停")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"暂停任务失败: {e}")
-        raise HTTPException(status_code=500, detail="暂停任务失败")
+# P2 拆分: pause/resume/trigger/execute/toggle 5 个 handler + 3 helper +
+# 2 schema 移至 tasks_execute.py, 通过 register_execute_routes 挂路由。
+# 顶层保留 shim 让 tests / 其它模块 import 继续可命中。
+async def pause_task(task_id, current_user=None):
+    return await _tasks_execute.pause_task(task_id, current_user)
 
 
-@tasks_router.post("/{task_id}/resume", response_model=BaseResponse)
-async def resume_task(task_id, current_user=Depends(get_current_user)):
-    """恢复任务"""
-    try:
-        resumed = await scheduler_service.resume_task_by_user(task_id, current_user.user_id)
-        if not resumed:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        return success_response(None, message="任务已恢复")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"恢复任务失败: {e}")
-        raise HTTPException(status_code=500, detail="恢复任务失败")
+async def resume_task(task_id, current_user=None):
+    return await _tasks_execute.resume_task(task_id, current_user)
 
 
-async def _acquire_trigger_dedup_lock(task_id: str, user_id: int) -> bool:
-    """5s 内禁止同一用户重复触发同一任务
-
-    返回 True 表示获得锁；False 表示 5 秒内已经触发过。
-    Redis 不可用时显式失败，避免重复触发绕过去重约束。
-    """
-    try:
-        from antcode_core.infrastructure.redis import get_redis_client
-
-        redis = await get_redis_client()
-        lock_key = f"trigger_dedup:{task_id}:{user_id}"
-        acquired = await redis.set(lock_key, "1", nx=True, ex=5)
-        return bool(acquired)
-    except Exception as exc:
-        logger.exception("触发去重锁获取失败")
-        raise HTTPException(status_code=503, detail="任务触发去重服务不可用") from exc
+async def trigger_task(task_id, current_user=None):
+    return await _tasks_execute.trigger_task(task_id, current_user)
 
 
-# 触发后等待新 run 落库的轮询参数：Master 经事件/调度异步建 run。
-_NEW_RUN_POLL_ATTEMPTS = 10
-_NEW_RUN_POLL_INTERVAL_SECONDS = 0.2
+async def execute_task(task_id: str, request, current_user=None):
+    return await _tasks_execute.execute_task(task_id, request, current_user)
 
 
-async def _latest_run_pk(task_id_or_public: str, user_id: int) -> tuple[int | None, int | None]:
-    """返回 (task内部id, 触发前最新 run 主键)；任务不可见时 (None, None)。"""
-    task = await scheduler_service.get_task_by_id(task_id_or_public, user_id)
-    if not task:
-        return None, None
-    latest = await TaskRun.filter(task_id=task.id).order_by("-id").only("id").first()
-    return task.id, (latest.id if latest else 0)
+async def toggle_task(task_id: str, request, current_user=None):
+    return await _tasks_execute.toggle_task(task_id, request, current_user, create_task_response=create_task_response)
 
 
-async def _resolve_new_run_id(internal_task_id: int | None, baseline_pk: int | None) -> str | None:
-    """P2 §4.4: 只返回触发**之后**新建的 run_id。
-
-    此前直接查 latest，Master 尚未建新 run 时会把上一次执行的 run_id
-    返回给前端订阅。现在以触发前主键为基线短暂轮询；窗口内没有新 run
-    则返回 None（前端可稍后从任务详情拿）。
-    """
-    if internal_task_id is None or baseline_pk is None:
-        return None
-    import asyncio as _asyncio
-
-    for _ in range(_NEW_RUN_POLL_ATTEMPTS):
-        latest = await TaskRun.filter(task_id=internal_task_id).order_by("-id").only("id", "run_id").first()
-        if latest and latest.id > baseline_pk:
-            return latest.run_id
-        await _asyncio.sleep(_NEW_RUN_POLL_INTERVAL_SECONDS)
-    return None
-
-
-@tasks_router.post("/{task_id}/trigger", response_model=BaseResponse[dict])
-async def trigger_task(task_id, current_user=Depends(get_current_user)):
-    """立即触发任务
-
-    - T15: Redis 锁去重，5s 内同 task_id+user 只允许触发一次
-    - S6: 返回最新一次执行的 run_id，便于前端立即订阅日志
-    """
-    try:
-        if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
-            raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
-
-        internal_task_id, baseline_pk = await _latest_run_pk(str(task_id), current_user.user_id)
-        triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
-        if not triggered:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        # 调度器异步创建 TaskRun；只等待并返回触发后新建的 run_id
-        run_id = await _resolve_new_run_id(internal_task_id, baseline_pk)
-
-        return success_response(
-            {"task_id": str(task_id), "run_id": run_id, "triggered": True},
-            message="任务已触发",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"触发任务失败: {e}")
-        raise HTTPException(status_code=500, detail="触发任务失败")
-
-
-@tasks_router.post("/{task_id}/execute", response_model=BaseResponse[dict])
-async def execute_task(
-    task_id: str,
-    request: TaskExecuteRequest,
-    current_user=Depends(get_current_user),
-):
-    """执行任务（触发立即执行）"""
-    try:
-        # P2 §4.4: execute 覆盖参数此前被静默忽略 —— 用户以为带覆盖执行，
-        # 实际按任务原配置跑。单次覆盖执行的全链路（web_api → 事件 →
-        # Master 调度 → 派发）尚未支持，显式拒绝而非静默丢弃。
-        if request.execution_config or request.environment_variables:
-            raise HTTPException(
-                status_code=400,
-                detail="execute 暂不支持单次覆盖 execution_config/environment_variables；请先更新任务配置后触发",
-            )
-        if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
-            raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
-
-        internal_task_id, baseline_pk = await _latest_run_pk(str(task_id), current_user.user_id)
-        triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
-        if not triggered:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        run_id = await _resolve_new_run_id(internal_task_id, baseline_pk)
-        return success_response(
-            {"task_id": task_id, "run_id": run_id, "triggered": True},
-            message="任务已触发",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"执行任务失败: {e}")
-        raise HTTPException(status_code=500, detail="执行任务失败")
-
-
-@tasks_router.patch("/{task_id}/toggle", response_model=BaseResponse[TaskResponse])
-async def toggle_task(task_id: str, request: TaskToggleRequest, current_user=Depends(get_current_user)):
-    """启用/禁用任务"""
-    try:
-        task = await scheduler_service.update_task(task_id, TaskUpdate(is_active=request.enabled), current_user.user_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        return success_response(create_task_response(task), message=Messages.UPDATED_SUCCESS)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"切换任务状态失败: {e}")
-        raise HTTPException(status_code=500, detail="切换任务状态失败")
+# helper / 常量 module-alias 供测试与其它模块继续引用
+_acquire_trigger_dedup_lock = _tasks_execute._acquire_trigger_dedup_lock
+_latest_run_pk = _tasks_execute._latest_run_pk
+_resolve_new_run_id = _tasks_execute._resolve_new_run_id
+_NEW_RUN_POLL_ATTEMPTS = _tasks_execute._NEW_RUN_POLL_ATTEMPTS
+_NEW_RUN_POLL_INTERVAL_SECONDS = _tasks_execute._NEW_RUN_POLL_INTERVAL_SECONDS
 
 
 @tasks_router.post("/{task_id}/duplicate", response_model=BaseResponse[TaskResponse])
@@ -974,6 +843,9 @@ async def _try_send_stop_event_with_reason(execution, user_id: int):
 async def _raise_if_stop_terminal_conflict(run_id: str, user_id: int) -> None:
     await _tasks_runs._raise_if_stop_terminal_conflict(run_id, user_id)
 
+
+# P2 拆分: 5 个执行控制 handler 挂路由 (pause/resume/trigger/execute/toggle)
+_tasks_execute.register_execute_routes(tasks_router, create_task_response=create_task_response)
 
 # P2 拆分: 5 个查询 handler 挂路由 (running/stats/{id}/runs/schedule-history/stats)
 _tasks_query.register_query_routes(tasks_router, running_task_hard_cap=RUNNING_TASK_HARD_CAP)
