@@ -47,8 +47,6 @@ from antcode_core.domain.schemas.worker import (
     WorkerUpdateRequest,
 )
 from antcode_core.infrastructure.redis import (
-    build_config_update_control_payload,
-    control_stream,
     direct_register_proof_key,
     get_redis_client,
     install_key_redis_digest,
@@ -79,6 +77,9 @@ from antcode_web_api.routes.v1 import workers_permission as _workers_permission
 # workers_query.py。主 workers.py 底部调 register_query_routes 挂路由 +
 # 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
 from antcode_web_api.routes.v1 import workers_query as _workers_query
+
+# P2 拆分: 2 个资源管理 handler (get/update resources) 移到 workers_resources.py。
+from antcode_web_api.routes.v1 import workers_resources as _workers_resources
 
 # P2 拆分: 3 个 spider stats 查询接口移到 workers_spider.py。
 from antcode_web_api.routes.v1 import workers_spider as _workers_spider
@@ -1649,185 +1650,14 @@ async def get_distributed_logs(run_id: str, log_type: str = "stdout", tail: int 
     )
 
 
-# ====== Worker 资源管理 API（管理员功能）======
+# P2 拆分: get/update resources 2 handler 移至 workers_resources.py, 通过
+# register_resources_routes 挂 @router; 顶层 shim 保留原名。
+async def get_worker_resources(worker_id: str, current_user):
+    return await _workers_resources.get_worker_resources(worker_id, current_user)
 
 
-@router.get(
-    "/{worker_id}/resources",
-    response_model=BaseResponse[dict],
-    summary="获取 Worker 资源限制",
-    description="获取指定 Worker 的资源限制和监控状态（需要管理员权限）",
-)
-async def get_worker_resources(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """
-    获取 Worker 资源限制（管理员可查看）
-
-    返回:
-    - limits: 当前资源限制配置
-    - auto_adjustment: 是否启用自适应调整
-    - resource_stats: 实时资源统计
-    """
-    from antcode_core.common.config import settings
-    from antcode_core.domain.models import User
-
-    # 检查管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限查看资源配置")
-
-    # 获取 Worker 信息
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    # 基于心跳/数据库指标返回资源信息
-    resources = worker.metrics if isinstance(worker.metrics, dict) else {}
-    limits = worker.resource_limits if isinstance(worker.resource_limits, dict) else {}
-
-    def _to_float(value: object, default: float = 0.0) -> float:
-        if not isinstance(value, (str, int, float)):
-            return default
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    max_concurrent_default = settings.MAX_CONCURRENT_TASKS
-    memory_default = settings.TASK_MEMORY_LIMIT_MB
-    cpu_default = settings.TASK_CPU_TIME_LIMIT_SEC
-
-    return success(
-        {
-            "limits": {
-                "max_concurrent_tasks": limits.get("max_concurrent_tasks", max_concurrent_default),
-                "task_memory_limit_mb": limits.get("task_memory_limit_mb", memory_default),
-                "task_cpu_time_limit_sec": limits.get("task_cpu_time_limit_sec", cpu_default),
-            },
-            "auto_adjustment": limits.get("auto_resource_limit", True),
-            "resource_stats": {
-                "cpu_percent": round(_to_float(resources.get("cpu", resources.get("cpu_percent", 0))), 1),
-                "memory_percent": round(_to_float(resources.get("memory", resources.get("memory_percent", 0))), 1),
-                "disk_percent": round(_to_float(resources.get("disk", resources.get("disk_percent", 0))), 1),
-                "memory_used_mb": resources.get("memoryUsed", resources.get("memory_used_mb", 0)),
-                "memory_total_mb": resources.get("memoryTotal", resources.get("memory_total_mb", 0)),
-                "disk_used_gb": resources.get("diskUsed", resources.get("disk_used_gb", 0)),
-                "disk_total_gb": resources.get("diskTotal", resources.get("disk_total_gb", 0)),
-                "running_tasks": resources.get("runningTasks", resources.get("running_tasks", 0)),
-                "queued_tasks": resources.get("queuedTasks", resources.get("queued_tasks", 0)),
-                "uptime_seconds": resources.get("uptime", resources.get("uptime_seconds", 0)),
-            },
-        }
-    )
-
-
-@router.post(
-    "/{worker_id}/resources",
-    response_model=BaseResponse[dict],
-    summary="调整 Worker 资源限制",
-    description="手动调整指定 Worker 的资源限制（仅超级管理员）",
-)
-async def update_worker_resources(
-    worker_id: str,
-    request: dict = Body(...),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """
-    调整 Worker 资源限制（仅 admin 用户可修改）
-
-    参数:
-    - max_concurrent_tasks: 最大并发任务数 (1-20)
-    - task_memory_limit_mb: 单任务内存限制 (256-8192 MB)
-    - task_cpu_time_limit_sec: 单任务CPU时间限制 (60-3600 秒)
-    - auto_resource_limit: 是否启用自适应资源限制
-    """
-    from antcode_core.domain.models import User
-    from antcode_core.infrastructure.redis import get_redis_client
-
-    # 检查超级管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_super_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要超级管理员权限修改资源配置",
-        )
-
-    # 获取 Worker 信息
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    # 参数验证
-    max_concurrent = request.get("max_concurrent_tasks")
-    memory_limit = request.get("task_memory_limit_mb")
-    cpu_limit = request.get("task_cpu_time_limit_sec")
-    auto_limit = request.get("auto_resource_limit")
-
-    # 范围校验
-    if max_concurrent is not None and not (1 <= max_concurrent <= 20):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="最大并发任务数必须在 1-20 之间",
-        )
-    if memory_limit is not None and not (256 <= memory_limit <= 8192):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="单任务内存限制必须在 256-8192 MB 之间",
-        )
-    if cpu_limit is not None and not (60 <= cpu_limit <= 3600):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="单任务CPU时间限制必须在 60-3600 秒之间",
-        )
-
-    # 构建配置参数
-    config_params = {}
-    if max_concurrent is not None:
-        config_params["max_concurrent_tasks"] = str(max_concurrent)
-    if memory_limit is not None:
-        config_params["task_memory_limit_mb"] = str(memory_limit)
-    if cpu_limit is not None:
-        config_params["task_cpu_time_limit_sec"] = str(cpu_limit)
-    if auto_limit is not None:
-        config_params["auto_resource_limit"] = str(auto_limit).lower()
-
-    if not config_params:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少需要提供一个配置项")
-
-    # 更新数据库中的资源限制配置
-    if worker.resource_limits is None:
-        worker.resource_limits = {}
-    if max_concurrent is not None:
-        worker.resource_limits["max_concurrent_tasks"] = max_concurrent
-    if memory_limit is not None:
-        worker.resource_limits["task_memory_limit_mb"] = memory_limit
-    if cpu_limit is not None:
-        worker.resource_limits["task_cpu_time_limit_sec"] = cpu_limit
-    if auto_limit is not None:
-        worker.resource_limits["auto_resource_limit"] = auto_limit
-    await worker.save()
-
-    # 通过 Redis 控制通道发送配置更新
-    synced = False
-    try:
-        from antcode_core.application.services.runtime.runtime_control_service import (
-            write_control_event,
-        )
-
-        redis = await get_redis_client()
-        payload = build_config_update_control_payload(config_params)
-        # P2-24: 走 write_control_event 带 maxlen 近似裁剪,
-        # 避免 control:{worker_id} stream 无限增长。
-        await write_control_event(redis, control_stream(worker.public_id), payload)
-        synced = True
-    except Exception as e:
-        logger.warning(f"发送配置更新失败: {e}")
-
-    logger.info(f"超级管理员 {user.username} 调整了 Worker {worker_id} 的资源限制: {config_params}")
-
-    return success(
-        {"updated": config_params, "synced": synced},
-        message="资源限制已更新",
-    )
+async def update_worker_resources(worker_id: str, request: dict, current_user):
+    return await _workers_resources.update_worker_resources(worker_id, request, current_user)
 
 
 # P2 拆分: 3 个 spider stats 查询接口移至 workers_spider.py, 通过
@@ -1853,6 +1683,8 @@ _workers_spider.register_spider_routes(router)
 _workers_distributed.register_distributed_routes(router, _require_worker_access, _require_run_access)
 # P2 拆分: 5 个权限管理 handler 挂路由 (my/available, users, assign, revoke, batch-assign)
 _workers_permission.register_permission_routes(router, _worker_to_response)
+# P2 拆分: 2 个资源管理 handler 挂路由 (GET/POST /workers/{id}/resources)
+_workers_resources.register_resources_routes(router)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
