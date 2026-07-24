@@ -2417,7 +2417,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1861
+      "value": 1693
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -2466,30 +2466,6 @@
       "function": "register_worker_by_key",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "update_worker_resources",
-      "rule": "C901",
-      "value": 17
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "update_worker_resources",
-      "rule": "PLR0912",
-      "value": 16
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "update_worker_resources",
-      "rule": "PLR0915",
-      "value": 51
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "update_worker_resources",
-      "rule": "PLR2004",
-      "value": 5
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
