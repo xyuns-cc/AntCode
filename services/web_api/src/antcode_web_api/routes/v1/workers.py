@@ -26,7 +26,6 @@ from antcode_core.domain.models import (
 )
 from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
-    WorkerAggregateStats,
     WorkerCapabilities,
     WorkerCreateRequest,
     WorkerHeartbeatRequest,
@@ -83,6 +82,9 @@ from antcode_web_api.routes.v1 import workers_resources as _workers_resources
 
 # P2 拆分: 3 个 spider stats 查询接口移到 workers_spider.py。
 from antcode_web_api.routes.v1 import workers_spider as _workers_spider
+
+# P2 拆分: 3 个 stats/history 查询接口移到 workers_stats.py。
+from antcode_web_api.routes.v1 import workers_stats as _workers_stats
 from antcode_web_api.routes.v1.workers_dispatch import (  # noqa: F401
     WorkerDispatchBatchRequest,
     WorkerDispatchBatchTaskRequest,
@@ -537,33 +539,16 @@ async def get_workers(
     return success(WorkerListResponse(items=items, total=total, page=page, size=size))
 
 
-@router.get(
-    "/stats",
-    response_model=BaseResponse[WorkerAggregateStats],
-    summary="获取 Worker 统计",
-    description="获取所有 Worker 的聚合统计信息",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_worker_stats(current_user: TokenData = Depends(get_current_user)):
-    """获取 Worker 统计信息"""
-    stats = await worker_service.get_aggregate_stats()
-    return success(stats)
+# P2 拆分: get_worker_stats / get_cluster_metrics_history / get_worker_metrics_history
+# 移至 workers_stats.py, 通过 register_stats_routes 挂路由; 顶层 shim 保留原名。
+async def get_worker_stats(current_user=None):
+    _ = current_user
+    return await _workers_stats.get_worker_stats()
 
 
-@router.get(
-    "/cluster/metrics/history",
-    response_model=BaseResponse[dict],
-    summary="获取集群历史指标",
-    description="获取所有 Worker 的聚合历史指标",
-    dependencies=[Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
-)
-async def get_cluster_metrics_history(
-    hours: int = Query(24, ge=1, le=720, description="查询时间范围（小时）"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取集群历史指标"""
-    history = await worker_service.get_cluster_metrics_history(hours=hours)
-    return success(history)
+async def get_cluster_metrics_history(hours: int = 24, current_user=None):
+    _ = current_user
+    return await _workers_stats.get_cluster_metrics_history(hours)
 
 
 @router.post(
@@ -779,22 +764,10 @@ async def batch_assign_workers(request: dict, current_user):
 # ====== Worker 端调用的 API（无需用户认证）======
 
 
-@router.get(
-    "/{worker_id}/metrics/history",
-    response_model=BaseResponse[list],
-    summary="获取 Worker 历史指标",
-    description="获取 Worker 的历史指标数据用于图表展示",
-)
-async def get_worker_metrics_history(
-    worker_id: str,
-    hours: int = Query(24, ge=1, le=720, description="查询时间范围（小时）"),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """获取 Worker 历史指标"""
-    worker = await _require_worker_access(worker_id, current_user)
-
-    history = await worker_service.get_metrics_history(worker.id, hours=hours)
-    return success(history)
+async def get_worker_metrics_history(worker_id: str, hours: int = 24, current_user=None):
+    return await _workers_stats.get_worker_metrics_history(
+        worker_id, hours, current_user, require_worker_access=_require_worker_access
+    )
 
 
 @router.post(
@@ -1309,6 +1282,8 @@ _workers_permission.register_permission_routes(router, _worker_to_response)
 _workers_resources.register_resources_routes(router)
 # P2 拆分: 5 个 dispatch handler 挂路由 (task/batch/queue/priority/cancel_queued)
 _workers_dispatch.register_dispatch_routes(router, _sys.modules[__name__])
+# P2 拆分: 3 个 stats/history 查询 handler 挂路由
+_workers_stats.register_stats_routes(router, _require_worker_access)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
