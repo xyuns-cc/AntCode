@@ -2417,19 +2417,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1013
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "_claim_install_key_source_once",
-      "rule": "PLR0911",
-      "value": 7
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "_claim_install_key_source_once",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
+      "value": 612
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -2442,12 +2430,6 @@
       "function": "get_distributed_task_logs",
       "rule": "POSITIONAL_ARGS",
       "value": 5
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
-      "function": "register_worker_by_key",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -2472,6 +2454,30 @@
       "function": "-",
       "rule": "FILE_LINES",
       "value": 436
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers_install_key.py",
+      "function": "-",
+      "rule": "FILE_LINES",
+      "value": 544
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers_install_key.py",
+      "function": "_claim_install_key_source_once",
+      "rule": "PLR0911",
+      "value": 7
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers_install_key.py",
+      "function": "_claim_install_key_source_once",
+      "rule": "POSITIONAL_ARGS",
+      "value": 4
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/workers_install_key.py",
+      "function": "register_worker_by_key",
+      "rule": "PLR2004",
+      "value": 1
     },
     {
       "path": "services/web_api/src/antcode_web_api/services/crawl_item_stream.py",
