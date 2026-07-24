@@ -23,11 +23,13 @@ def test_web_api_routes_use_bounded_control_stream_writer():
 
 
 def test_log_routes_enforce_run_access():
-    # P2 拆分后 /distributed-logs/{run_id} 挂在 workers_distributed.py, 契约
-    # 未变 (register_distributed_routes 挂 @router), grep 扩到该模块。
+    # P2 拆分后 /distributed-logs/{run_id} 挂在 workers_distributed.py, /runs/{run_id}/logs*
+    # 3 个 handler 挂在 tasks_runs.py; 契约未变 (register_*_routes 挂 @router),
+    # grep 扩到相应模块。
     source = "\n".join(
         [
             _read("tasks.py"),
+            _read("tasks_runs.py"),
             _read("workers.py"),
             _read("workers_distributed.py"),
         ]

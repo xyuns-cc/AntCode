@@ -2,6 +2,7 @@
 
 import io
 import json
+import sys as _sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,11 +23,10 @@ from antcode_core.domain.schemas.task import (
 from antcode_core.domain.schemas.task import (
     TaskUpdateRequest as TaskUpdate,
 )
-from antcode_core.infrastructure.redis import build_cancel_control_payload, control_stream
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from tortoise.exceptions import IntegrityError
 
 from antcode_web_api.response import (
@@ -40,6 +40,24 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
+
+# P2 拆分: /runs/{run_id}/stop, /runs/{run_id}/logs, /runs/{run_id}/logs/download
+# 3 个 handler + 4 个 helper 移至 tasks_runs.py; 通过 register_runs_routes 挂路由,
+# 顶层 shim 保留 tasks._get_stoppable_execution / stop_task_execution 等测试引用。
+# 同时 re-export task_cancel 的 4 个符号让 tests monkeypatch tasks.is_unassigned_task_run
+# 等继续生效 (stop_task_execution 通过 tasks_module lookup)。
+from antcode_web_api.routes.v1 import tasks_runs as _tasks_runs
+from antcode_web_api.routes.v1.runtime_access import ensure_worker_use_access
+from antcode_web_api.routes.v1.task_cancel import (  # noqa: F401
+    cancel_latest_task_run,
+    is_unassigned_task_run,
+    mark_task_run_cancelled,
+    stop_unassigned_task_run,
+)
+from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
+
+# P2 §4.4 / 复审 P3: YAML 导出统一走共享工具（保留标量/数字串必须引号）。
+from antcode_web_api.utils.yaml_export import yaml_dump as _yaml_dump
 
 tasks_router = APIRouter()
 RUNNING_TASK_HARD_CAP = 200
@@ -57,9 +75,16 @@ class TaskExecuteRequest(BaseModel):
 
 
 class TaskBatchRequest(BaseModel):
-    task_ids: list[str] = Field(default_factory=list)
+    task_ids: list[str] = Field(default_factory=list, max_length=100)
     action: str = Field(..., description="start/stop/cancel/delete/enable/disable")
     execution_config: dict[str, Any] | None = None
+
+    @field_validator("task_ids")
+    @classmethod
+    def reject_duplicate_task_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("task_ids 不允许重复")
+        return value
 
 
 class TaskToggleRequest(BaseModel):
@@ -81,43 +106,6 @@ class CronValidateRequest(BaseModel):
 TASK_TEMPLATES: list[dict[str, Any]] = []
 
 
-def _yaml_dump(data: Any, indent: int = 0) -> str:
-    """简单 YAML 序列化（避免额外依赖）"""
-    prefix = "  " * indent
-    if isinstance(data, dict):
-        lines = []
-        for key, value in data.items():
-            if isinstance(value, (dict, list)):
-                lines.append(f"{prefix}{key}:")
-                lines.append(_yaml_dump(value, indent + 1))
-            else:
-                lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
-        return "\n".join(lines)
-    if isinstance(data, list):
-        lines = []
-        for item in data:
-            if isinstance(item, (dict, list)):
-                lines.append(f"{prefix}-")
-                lines.append(_yaml_dump(item, indent + 1))
-            else:
-                lines.append(f"{prefix}- {_yaml_scalar(item)}")
-        return "\n".join(lines)
-    return f"{prefix}{_yaml_scalar(data)}"
-
-
-def _yaml_scalar(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value)
-    if any(c in text for c in [":", "-", "#", "\n", '"', "'"]):
-        return json.dumps(text, ensure_ascii=False)
-    return text
-
-
 def _parse_task_import_payload(raw_text: str) -> dict[str, Any]:
     """解析任务导入内容"""
     try:
@@ -129,9 +117,11 @@ def _parse_task_import_payload(raw_text: str) -> dict[str, Any]:
         pass
 
     try:
-        import yaml  # type: ignore
+        import yaml  # type: ignore  # noqa: F401
 
-        data = yaml.safe_load(raw_text)
+        from antcode_web_api.utils.safe_yaml import load_untrusted_yaml
+
+        data = load_untrusted_yaml(raw_text, max_input_bytes=MAX_TASK_IMPORT_BYTES)
         if isinstance(data, dict):
             return data
         raise ValueError("导入内容必须为 YAML 对象")
@@ -158,6 +148,7 @@ async def _generate_unique_task_name(base_name: str) -> str:
 
 
 async def _task_export_payload(task: Task, project: Project) -> dict[str, Any]:
+    """Build a re-importable definition without decrypted runtime secrets."""
     return {
         "name": task.name,
         "description": task.description or "",
@@ -170,12 +161,18 @@ async def _task_export_payload(task: Task, project: Project) -> dict[str, Any]:
         "timeout_seconds": task.timeout_seconds,
         "retry_count": task.retry_count,
         "retry_delay": task.retry_delay,
-        "execution_params": task.execution_params or {},
-        "environment_vars": task.environment_vars or {},
         "is_active": task.is_active,
         "execution_strategy": task.execution_strategy,
         "specified_worker_id": None,
     }
+
+
+async def _ensure_specified_worker_access(task_data: TaskCreate | TaskUpdate, current_user) -> None:
+    if "specified_worker_id" not in task_data.model_fields_set:
+        return
+    worker_id = task_data.specified_worker_id
+    if worker_id:
+        await ensure_worker_use_access(worker_id, current_user.user_id)
 
 
 @tasks_router.post("", response_model=BaseResponse[TaskResponse])
@@ -195,6 +192,7 @@ async def create_task(task_data: TaskCreate, current_user=Depends(get_current_us
     project = project_info["project"]
 
     try:
+        await _ensure_specified_worker_access(task_data, current_user)
         specified_worker_id = getattr(task_data, "specified_worker_id", None)
         # 使用service层创建任务，传递内部 project_id
         task = await scheduler_service.create_task(
@@ -206,10 +204,16 @@ async def create_task(task_data: TaskCreate, current_user=Depends(get_current_us
         )
 
         return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
+    except HTTPException:
+        raise
     except IntegrityError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task name already exists")
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ValueError as exc:
+        logger.info("创建任务配置校验失败: {}", exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务配置无效") from exc
+    except Exception as exc:
+        logger.exception("创建任务失败")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="创建任务失败") from exc
 
 
 @tasks_router.get("", response_model=PaginationResponse[TaskResponse])
@@ -471,11 +475,13 @@ async def create_task_from_template(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     project = project_info["project"]
 
+    await _ensure_specified_worker_access(task_data, current_user)
     task = await scheduler_service.create_task(
         task_data=task_data,
         project_type=ProjectType(project.type),
         user_id=current_user.user_id,
         internal_project_id=project.id,
+        specified_worker_id=task_data.specified_worker_id,
     )
 
     return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
@@ -541,6 +547,7 @@ async def import_task_config(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"任务配置无效: {exc}") from exc
     project = project_info["project"]
+    await _ensure_specified_worker_access(task_data, current_user)
     task = await scheduler_service.create_task(
         task_data=task_data,
         project_type=ProjectType(project.type),
@@ -552,7 +559,7 @@ async def import_task_config(
 
 
 async def _read_task_import(file: UploadFile) -> dict[str, Any]:
-    raw_bytes = await file.read()
+    raw_bytes = await file.read(MAX_TASK_IMPORT_BYTES + 1)
     if len(raw_bytes) > MAX_TASK_IMPORT_BYTES:
         raise HTTPException(
             status_code=413,
@@ -606,20 +613,69 @@ async def update_task_dependencies(
     request: TaskDependencyUpdateRequest,
     current_user=Depends(get_current_user),
 ):
-    """更新任务依赖关系"""
+    """更新任务依赖关系。
+
+    P2 §4.4: 此前只存 JSON，不做任何校验 —— 不存在的依赖、自依赖和环
+    都能写入。现在写入前校验存在性（限本人任务，admin 放宽）、拒绝
+    自依赖并做环检测。
+    """
     task = await scheduler_service.get_task_by_id(task_id, current_user.user_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    dependency_ids = [str(dep) for dep in (request.dependency_ids or [])]
+    await _validate_task_dependencies(task, dependency_ids, current_user.user_id)
+
     params = task.execution_params if isinstance(task.execution_params, dict) else {}
-    params["dependency_ids"] = request.dependency_ids
+    params["dependency_ids"] = dependency_ids
     task.execution_params = params
     await task.save()
 
     return success_response(
-        {"dependency_ids": request.dependency_ids},
+        {"dependency_ids": dependency_ids},
         message=Messages.UPDATED_SUCCESS,
     )
+
+
+async def _validate_task_dependencies(task, dependency_ids: list[str], user_id: int) -> None:
+    if not dependency_ids:
+        return
+    if len(set(dependency_ids)) != len(dependency_ids):
+        raise HTTPException(status_code=400, detail="dependency_ids 存在重复项")
+    if task.public_id in dependency_ids:
+        raise HTTPException(status_code=400, detail="任务不能依赖自身")
+    from antcode_core.application.services.users.user_service import user_service
+
+    is_admin = await user_service.is_admin(user_id)
+    dep_query = Task.filter(public_id__in=dependency_ids)
+    if not is_admin:
+        dep_query = dep_query.filter(user_id=user_id)
+    found = {dep.public_id for dep in await dep_query.only("id", "public_id").all()}
+    missing = sorted(set(dependency_ids) - found)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"依赖任务不存在或无权访问: {', '.join(missing)}")
+    await _reject_dependency_cycle(task, dependency_ids, is_admin=is_admin, user_id=user_id)
+
+
+async def _reject_dependency_cycle(task, dependency_ids: list[str], *, is_admin: bool, user_id: int) -> None:
+    """DFS 检测：从新依赖出发若能回到本任务即成环。"""
+    scope_query = Task.all() if is_admin else Task.filter(user_id=user_id)
+    graph: dict[str, list[str]] = {}
+    for candidate in await scope_query.only("id", "public_id", "execution_params").all():
+        params = candidate.execution_params if isinstance(candidate.execution_params, dict) else {}
+        deps = params.get("dependency_ids")
+        graph[candidate.public_id] = [str(d) for d in deps] if isinstance(deps, list) else []
+    graph[task.public_id] = list(dependency_ids)
+    stack = list(dependency_ids)
+    visited: set[str] = set()
+    while stack:
+        node = stack.pop()
+        if node == task.public_id:
+            raise HTTPException(status_code=400, detail="依赖关系存在环，拒绝保存")
+        if node in visited:
+            continue
+        visited.add(node)
+        stack.extend(graph.get(node, []))
 
 
 @tasks_router.get("/{task_id}", response_model=BaseResponse[TaskResponse])
@@ -640,6 +696,7 @@ async def get_task(task_id, current_user=Depends(get_current_user)):
 @tasks_router.put("/{task_id}", response_model=BaseResponse[TaskResponse])
 async def update_task(task_id, task_data: TaskUpdate, current_user=Depends(get_current_user)):
     try:
+        await _ensure_specified_worker_access(task_data, current_user)
         task = await scheduler_service.update_task(task_id, task_data, current_user.user_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -662,6 +719,8 @@ async def delete_task(task_id, current_user=Depends(get_current_user)):
         return success_response(None, message=Messages.DELETED_SUCCESS)
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception as e:
         logger.error(f"删除任务失败: {e}")
         raise HTTPException(status_code=500, detail="删除任务失败")
@@ -670,9 +729,7 @@ async def delete_task(task_id, current_user=Depends(get_current_user)):
 @tasks_router.post("/batch-delete", response_model=BaseResponse)
 async def batch_delete_tasks(request: dict, current_user=Depends(get_current_user)):
     """批量删除任务"""
-    task_ids = request.get("task_ids", [])
-    if not task_ids:
-        raise HTTPException(status_code=400, detail="task_ids不能为空")
+    task_ids = bounded_distinct_ids(request.get("task_ids"), "task_ids")
 
     success_count = 0
     failed_count = 0
@@ -743,69 +800,8 @@ async def _operate_task(task_id: str, action: str, user_id: int) -> bool:
     if action == "stop":
         return bool(await scheduler_service.pause_task_by_user(task_id, user_id))
     if action == "cancel":
-        return await _cancel_latest_task_run(task_id, user_id)
+        return await cancel_latest_task_run(task_id, user_id)
     raise HTTPException(status_code=400, detail="不支持的操作类型")
-
-
-async def _cancel_latest_task_run(task_id: str, user_id: int) -> bool:
-    task = await scheduler_service.get_task_by_id(task_id, user_id)
-    if not task:
-        return False
-    execution = await _latest_cancellable_run(task.id)
-    if not execution:
-        return False
-    if execution.worker_id:
-        await _try_send_task_cancel(execution, user_id)
-    await _mark_task_run_cancelled(execution.run_id, user_id)
-    return True
-
-
-async def _latest_cancellable_run(task_id: int) -> TaskRun | None:
-    return (
-        await TaskRun.filter(
-            task_id=task_id,
-            status__in=[
-                TaskStatus.PENDING,
-                TaskStatus.DISPATCHING,
-                TaskStatus.QUEUED,
-                TaskStatus.RUNNING,
-            ],
-        )
-        .order_by("-created_at")
-        .first()
-    )
-
-
-async def _try_send_task_cancel(execution: TaskRun, user_id: int) -> None:
-    try:
-        await _send_task_cancel(execution, user_id)
-    except Exception as exc:
-        logger.warning(f"发送取消指令失败: {exc}")
-
-
-async def _send_task_cancel(execution: TaskRun, user_id: int) -> bool:
-    from antcode_core.application.services.runtime.runtime_control_service import write_control_event
-    from antcode_core.application.services.workers.worker_service import worker_service
-    from antcode_core.infrastructure.redis import get_redis_client
-
-    worker = await worker_service.get_worker_by_id(execution.worker_id)
-    if not worker:
-        return False
-    redis = await get_redis_client()
-    payload = build_cancel_control_payload(run_id=execution.run_id, reason=f"user_cancel:{user_id}")
-    await write_control_event(redis, control_stream(worker.public_id), payload)
-    return True
-
-
-async def _mark_task_run_cancelled(run_id: str, user_id: int) -> None:
-    from antcode_core.application.services.scheduler.execution_status_service import execution_status_service
-
-    await execution_status_service.update_runtime_status(
-        run_id=run_id,
-        status="cancelled",
-        status_at=datetime.now(UTC),
-        error_message=f"用户取消 (user_id={user_id})",
-    )
 
 
 @tasks_router.post("/{task_id}/pause", response_model=BaseResponse)
@@ -858,21 +854,37 @@ async def _acquire_trigger_dedup_lock(task_id: str, user_id: int) -> bool:
         raise HTTPException(status_code=503, detail="任务触发去重服务不可用") from exc
 
 
-async def _resolve_latest_run_id(task_id_or_public: str, user_id: int) -> str | None:
-    """触发后查找该任务最新一次执行的 run_id
+# 触发后等待新 run 落库的轮询参数：Master 经事件/调度异步建 run。
+_NEW_RUN_POLL_ATTEMPTS = 10
+_NEW_RUN_POLL_INTERVAL_SECONDS = 0.2
 
-    trigger_task 是异步排程的，run_id 在 worker 执行流程中生成；这里返回
-    用户视角能立即拿到的 run_id（若已落库），便于前端立刻订阅日志。
+
+async def _latest_run_pk(task_id_or_public: str, user_id: int) -> tuple[int | None, int | None]:
+    """返回 (task内部id, 触发前最新 run 主键)；任务不可见时 (None, None)。"""
+    task = await scheduler_service.get_task_by_id(task_id_or_public, user_id)
+    if not task:
+        return None, None
+    latest = await TaskRun.filter(task_id=task.id).order_by("-id").only("id").first()
+    return task.id, (latest.id if latest else 0)
+
+
+async def _resolve_new_run_id(internal_task_id: int | None, baseline_pk: int | None) -> str | None:
+    """P2 §4.4: 只返回触发**之后**新建的 run_id。
+
+    此前直接查 latest，Master 尚未建新 run 时会把上一次执行的 run_id
+    返回给前端订阅。现在以触发前主键为基线短暂轮询；窗口内没有新 run
+    则返回 None（前端可稍后从任务详情拿）。
     """
-    try:
-        task = await scheduler_service.get_task_by_id(task_id_or_public, user_id)
-        if not task:
-            return None
-        latest = await TaskRun.filter(task_id=task.id).order_by("-created_at").only("run_id").first()
-        return latest.run_id if latest else None
-    except Exception as exc:
-        logger.debug(f"解析最新 run_id 失败: {exc}")
+    if internal_task_id is None or baseline_pk is None:
         return None
+    import asyncio as _asyncio
+
+    for _ in range(_NEW_RUN_POLL_ATTEMPTS):
+        latest = await TaskRun.filter(task_id=internal_task_id).order_by("-id").only("id", "run_id").first()
+        if latest and latest.id > baseline_pk:
+            return latest.run_id
+        await _asyncio.sleep(_NEW_RUN_POLL_INTERVAL_SECONDS)
+    return None
 
 
 @tasks_router.post("/{task_id}/trigger", response_model=BaseResponse[dict])
@@ -886,12 +898,13 @@ async def trigger_task(task_id, current_user=Depends(get_current_user)):
         if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
             raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
 
+        internal_task_id, baseline_pk = await _latest_run_pk(str(task_id), current_user.user_id)
         triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
         if not triggered:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        # 调度器异步创建 TaskRun，此处尝试查询最新一次执行的 run_id
-        run_id = await _resolve_latest_run_id(str(task_id), current_user.user_id)
+        # 调度器异步创建 TaskRun；只等待并返回触发后新建的 run_id
+        run_id = await _resolve_new_run_id(internal_task_id, baseline_pk)
 
         return success_response(
             {"task_id": str(task_id), "run_id": run_id, "triggered": True},
@@ -912,14 +925,23 @@ async def execute_task(
 ):
     """执行任务（触发立即执行）"""
     try:
+        # P2 §4.4: execute 覆盖参数此前被静默忽略 —— 用户以为带覆盖执行，
+        # 实际按任务原配置跑。单次覆盖执行的全链路（web_api → 事件 →
+        # Master 调度 → 派发）尚未支持，显式拒绝而非静默丢弃。
+        if request.execution_config or request.environment_variables:
+            raise HTTPException(
+                status_code=400,
+                detail="execute 暂不支持单次覆盖 execution_config/environment_variables；请先更新任务配置后触发",
+            )
         if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
             raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
 
+        internal_task_id, baseline_pk = await _latest_run_pk(str(task_id), current_user.user_id)
         triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
         if not triggered:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        run_id = await _resolve_latest_run_id(str(task_id), current_user.user_id)
+        run_id = await _resolve_new_run_id(internal_task_id, baseline_pk)
         return success_response(
             {"task_id": task_id, "run_id": run_id, "triggered": True},
             message="任务已触发",
@@ -966,6 +988,7 @@ async def duplicate_task(
         name = await _generate_unique_task_name(base_name)
         specified_worker_id = await _duplicate_worker_id(task.specified_worker_id)
         task_data = _duplicate_task_data(task, project, name, specified_worker_id)
+        await _ensure_specified_worker_access(task_data, current_user)
         new_task = await scheduler_service.create_task(
             task_data=task_data,
             project_type=ProjectType(project.type),
@@ -1101,153 +1124,41 @@ async def get_task_stats(task_id, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="获取任务统计失败")
 
 
-@tasks_router.post("/runs/{run_id}/stop", response_model=BaseResponse[dict])
-async def stop_task_execution(run_id: str, current_user=Depends(get_current_user)):
-    """停止任务执行
-
-    T5: 对未被 dispatch 出去的执行（PENDING/QUEUED 且 worker_id 为空）使用 CAS
-    UPDATE 直接置为 CANCELLED，避免 read-modify-write 之间的竞态：若 UPDATE
-    实际命中 0 行，说明已被分发，改走 worker 控制平面。
-    """
-    execution = await _get_stoppable_execution(run_id, current_user.user_id)
-    if execution.status not in _CANCELLABLE_TASK_STATUSES:
-        raise HTTPException(status_code=400, detail="任务当前状态无法停止")
-    if _is_unassigned_task_run(execution):
-        if await _stop_unassigned_task_run(execution, current_user.user_id):
-            return _stop_task_response(run_id, remote_cancelled=False)
-        execution = await _get_stoppable_execution(run_id, current_user.user_id)
-    cancelled = await _try_send_stop_event(execution, current_user.user_id)
-    await _mark_task_run_cancelled(execution.run_id, current_user.user_id)
-    return _stop_task_response(run_id, remote_cancelled=cancelled)
+# P2 拆分: stop_task_execution / get_task_execution_logs / download_task_execution_logs
+# + 4 helper 移至 tasks_runs.py, 通过 register_runs_routes 挂路由。顶层 shim 保留
+# tasks._get_stoppable_execution 等测试引用可继续可命中; stop_task_execution 通过
+# tasks_module=sys.modules[__name__] lookup 让 monkeypatch(tasks, ...) 生效。
+async def stop_task_execution(run_id: str, current_user=None):
+    return await _tasks_runs.stop_task_execution(run_id, current_user, tasks_module=_sys.modules[__name__])
 
 
-_CANCELLABLE_TASK_STATUSES = (
-    TaskStatus.PENDING,
-    TaskStatus.DISPATCHING,
-    TaskStatus.QUEUED,
-    TaskStatus.RUNNING,
-)
-_UNASSIGNED_TASK_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED)
+async def get_task_execution_logs(run_id: str, page: int = 1, size: int = 200, current_user=None):
+    return await _tasks_runs.get_task_execution_logs(run_id, page=page, size=size, current_user=current_user)
 
 
-async def _get_stoppable_execution(run_id: str, user_id: int) -> TaskRun:
-    execution = await scheduler_service.get_execution_with_permission(run_id, user_id)
-    if not execution:
-        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
-    return execution
+async def download_task_execution_logs(run_id: str, format: str = "txt", current_user=None):
+    return await _tasks_runs.download_task_execution_logs(run_id, format, current_user)
 
 
-def _is_unassigned_task_run(execution: TaskRun) -> bool:
-    return execution.worker_id is None and execution.status in _UNASSIGNED_TASK_STATUSES
+async def _get_stoppable_execution(run_id: str, user_id: int):
+    return await _tasks_runs._get_stoppable_execution(run_id, user_id)
 
 
-async def _stop_unassigned_task_run(execution: TaskRun, user_id: int) -> bool:
-    updated = await TaskRun.filter(
-        run_id=execution.run_id,
-        worker_id__isnull=True,
-        status__in=list(_UNASSIGNED_TASK_STATUSES),
-    ).update(
-        status=TaskStatus.CANCELLED,
-        end_time=datetime.now(UTC),
-        error_message=f"用户取消 (user_id={user_id})",
-    )
-    return bool(updated)
+def _stop_task_response(run_id: str, *, remote_cancelled: bool):
+    return _tasks_runs._stop_task_response(run_id, remote_cancelled=remote_cancelled)
 
 
-async def _try_send_stop_event(execution: TaskRun, user_id: int) -> bool:
-    if execution.worker_id:
-        try:
-            return await _send_task_cancel(execution, user_id)
-        except Exception as exc:
-            logger.warning(f"发送取消指令失败: {exc}")
-    return False
+async def _try_send_stop_event_with_reason(execution, user_id: int):
+    return await _tasks_runs._try_send_stop_event_with_reason(execution, user_id)
 
 
-def _stop_task_response(run_id: str, *, remote_cancelled: bool) -> BaseResponse[dict]:
-    return success_response(
-        {"run_id": run_id, "status": "cancelled", "remote_cancelled": remote_cancelled},
-        message="任务已停止",
-    )
+async def _raise_if_stop_terminal_conflict(run_id: str, user_id: int) -> None:
+    await _tasks_runs._raise_if_stop_terminal_conflict(run_id, user_id)
 
 
-@tasks_router.get("/runs/{run_id}/logs", response_model=PaginationResponse[dict])
-async def get_task_execution_logs(
-    run_id: str,
-    page: int = Query(1, ge=1),
-    size: int = Query(200, ge=1, le=1000),
-    current_user=Depends(get_current_user),
-):
-    """获取任务执行日志（分页）
-
-    T6 备注: 若 task_log_service 后续提供 list_entries(run_id, offset, limit)
-    走 PG 的接口（由 Agent Y 提供），应直接替换为按需查询，无需读全量内容。
-    当前实现按行解析后切片，对超大日志而言成本较高。
-    """
-    from antcode_core.application.services.logs.task_log_service import task_log_service
-
-    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
-    if not execution:
-        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
-
-    logs = await task_log_service.get_execution_logs(execution.run_id)
-
-    # 单次扫描组装条目，避免对超大文本反复 splitlines + strip
-    items: list[dict] = []
-    for log_type, payload_key in (("stdout", "output"), ("stderr", "error")):
-        raw = logs.get(payload_key) or ""
-        if not raw:
-            continue
-        for line in raw.splitlines():
-            stripped = line.strip()
-            if stripped:
-                items.append({"type": log_type, "message": stripped})
-
-    total = len(items)
-    start = (page - 1) * size
-    end = start + size
-    return page_response(
-        items=items[start:end],
-        total=total,
-        page=page,
-        size=size,
-        message=Messages.QUERY_SUCCESS,
-    )
-
-
-@tasks_router.get("/runs/{run_id}/logs/download", response_model=None)
-async def download_task_execution_logs(
-    run_id: str,
-    format: str = Query("txt", pattern="^(txt|json)$"),
-    current_user=Depends(get_current_user),
-):
-    """下载任务执行日志"""
-    from antcode_core.application.services.logs.task_log_service import task_log_service
-
-    execution = await scheduler_service.get_execution_with_permission(run_id, current_user.user_id)
-    if not execution:
-        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
-
-    logs = await task_log_service.get_execution_logs(execution.run_id)
-    if format == "json":
-        content = json.dumps(logs, ensure_ascii=False, indent=2)
-        media_type = "application/json"
-        filename = f"run_{run_id}.json"
-    else:
-        content = "\n".join(
-            [
-                "=== STDOUT ===",
-                logs.get("output", ""),
-                "",
-                "=== STDERR ===",
-                logs.get("error", ""),
-            ]
-        )
-        media_type = "text/plain"
-        filename = f"run_{run_id}.txt"
-
-    buffer = io.BytesIO(content.encode("utf-8"))
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    return StreamingResponse(buffer, media_type=media_type, headers=headers)
+# P2 拆分: 3 个 /runs/{run_id}/... handler 挂路由; 传入本模块让 handler 通过
+# tasks_module 引用 monkeypatch 目标符号。
+_tasks_runs.register_runs_routes(tasks_router, _sys.modules[__name__])
 
 
 # 标准导出
