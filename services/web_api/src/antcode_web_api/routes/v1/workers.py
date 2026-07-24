@@ -71,6 +71,10 @@ from antcode_web_api.response import BaseResponse, success
 # P2 拆分: 3 个 distributed logs / status 查询接口移到 workers_distributed.py。
 from antcode_web_api.routes.v1 import workers_distributed as _workers_distributed
 
+# P2 拆分: 5 个权限管理 handler (my/available, users, assign, revoke, batch-assign)
+# 移到 workers_permission.py。
+from antcode_web_api.routes.v1 import workers_permission as _workers_permission
+
 # P2 拆分: 3 个纯查询接口 (load ranking / best worker / render-capable) 移到
 # workers_query.py。主 workers.py 底部调 register_query_routes 挂路由 +
 # 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
@@ -792,186 +796,26 @@ async def refresh_worker_status(worker_id: str, current_user: TokenData = Depend
 # ====== Worker 权限管理 API（需要管理员权限）======
 
 
-@router.get(
-    "/my/available",
-    response_model=BaseResponse[WorkerListResponse],
-    summary="获取我可用的 Worker",
-    description="获取当前用户有权限访问的 Worker 列表",
-)
-async def get_my_available_workers(current_user: TokenData = Depends(get_current_user)):
-    """获取当前用户可用的 Worker 列表"""
-    from antcode_core.domain.models import User
-
-    # 从数据库获取用户信息
-    user = await User.get_or_none(id=current_user.user_id)
-    is_admin = user.is_admin if user else False
-
-    workers = await worker_service.get_user_workers(user_id=current_user.user_id, is_admin=is_admin)
-
-    items = [_worker_to_response(worker) for worker in workers]
-
-    return success(WorkerListResponse(items=items, total=len(items), page=1, size=len(items)))
+# P2 拆分: 5 个权限管理 handler 移至 workers_permission.py, 通过
+# register_permission_routes 挂 @router; 顶层 shim 保留原名让测试引用可继续。
+async def get_my_available_workers(current_user):
+    return await _workers_permission.get_my_available_workers(current_user, _worker_to_response)
 
 
-@router.get(
-    "/{worker_id}/users",
-    response_model=BaseResponse[list],
-    summary="获取 Worker 授权用户",
-    description="获取该 Worker 的授权用户列表（管理员）",
-)
-async def get_worker_users(worker_id: str, current_user: TokenData = Depends(get_current_user)):
-    """获取 Worker 的授权用户列表"""
-    from antcode_core.domain.models import User
-
-    # 从数据库获取用户信息以检查管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    users = await worker_service.get_worker_users(worker.id)
-    return success(users)
+async def get_worker_users(worker_id: str, current_user):
+    return await _workers_permission.get_worker_users(worker_id, current_user)
 
 
-@router.post(
-    "/{worker_id}/assign",
-    response_model=BaseResponse[dict],
-    summary="分配 Worker 权限",
-    description="给用户分配 Worker 访问权限（管理员）",
-)
-async def assign_worker_permission(
-    worker_id: str,
-    request: dict = Body(...),
-    current_user: TokenData = Depends(get_current_user),
-):
-    """分配 Worker 权限给用户"""
-    from antcode_core.domain.models import User
-
-    # 从数据库获取用户信息以检查管理员权限
-    admin_user = await User.get_or_none(id=current_user.user_id)
-    if not admin_user or not admin_user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    user_id = request.get("user_id")
-    permission = request.get("permission", "use")
-    note = request.get("note")
-
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户ID不能为空")
-
-    # 支持 public_id 或内部 id
-    if isinstance(user_id, str):
-        user = await User.filter(public_id=user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        user_id = user.id
-
-    await worker_service.assign_worker_to_user(
-        worker_id=worker.id,
-        user_id=user_id,
-        permission=permission,
-        assigned_by=current_user.user_id,
-        note=note,
-    )
-
-    return success({"assigned": True}, message="权限分配成功")
+async def assign_worker_permission(worker_id: str, request: dict, current_user):
+    return await _workers_permission.assign_worker_permission(worker_id, request, current_user)
 
 
-@router.delete(
-    "/{worker_id}/revoke/{user_id}",
-    response_model=BaseResponse[dict],
-    summary="撤销 Worker 权限",
-    description="撤销用户的 Worker 访问权限（管理员）",
-)
-async def revoke_worker_permission(worker_id: str, user_id: str, current_user: TokenData = Depends(get_current_user)):
-    """撤销用户的 Worker 权限"""
-    from antcode_core.domain.models import User
-
-    # 从数据库获取用户信息以检查管理员权限
-    admin_user = await User.get_or_none(id=current_user.user_id)
-    if not admin_user or not admin_user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
-    worker = await worker_service.get_worker_by_id(worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-
-    # 支持 public_id 或内部 id
-    try:
-        internal_user_id = int(user_id)
-    except ValueError:
-        # 是 public_id
-        user = await User.filter(public_id=user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        internal_user_id = user.id
-
-    revoked = await worker_service.revoke_worker_from_user(worker.id, internal_user_id)
-
-    if revoked:
-        return success({"revoked": True}, message="权限撤销成功")
-    else:
-        return success({"revoked": False}, message="该用户没有此 Worker 权限")
+async def revoke_worker_permission(worker_id: str, user_id: str, current_user):
+    return await _workers_permission.revoke_worker_permission(worker_id, user_id, current_user)
 
 
-@router.post(
-    "/batch-assign",
-    response_model=BaseResponse[dict],
-    summary="批量分配 Worker 权限",
-    description="批量给用户分配多个 Worker 权限（管理员）",
-)
-async def batch_assign_workers(request: dict = Body(...), current_user: TokenData = Depends(get_current_user)):
-    """批量分配 Worker 权限"""
-    from antcode_core.domain.models import User, Worker
-
-    # 从数据库获取用户信息以检查管理员权限
-    admin_user = await User.get_or_none(id=current_user.user_id)
-    if not admin_user or not admin_user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
-    user_id = request.get("user_id")
-    worker_ids = bounded_distinct_ids(request.get("worker_ids"), "worker_ids")
-    permission = request.get("permission", "use")
-
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户ID不能为空")
-
-    # 批量获取 Worker 的内部ID，避免 N+1 查询
-    # 支持 public_id 和内部 ID 混合查询
-    int_ids = []
-    str_ids = []
-    for wid in worker_ids:
-        if isinstance(wid, int) or (isinstance(wid, str) and wid.isdigit()):
-            int_ids.append(int(wid) if isinstance(wid, str) else wid)
-        else:
-            str_ids.append(wid)
-
-    # 合并成一次查询：Q(id__in=int_ids) | Q(public_id__in=str_ids)
-    from tortoise.expressions import Q as _Q
-
-    conditions = _Q()
-    if int_ids:
-        conditions |= _Q(id__in=int_ids)
-    if str_ids:
-        conditions |= _Q(public_id__in=str_ids)
-    workers_matched = await Worker.filter(conditions).only("id").all() if (int_ids or str_ids) else []
-    internal_ids = [w.id for w in workers_matched]
-
-    result = await worker_service.batch_assign_workers(
-        user_id=user_id,
-        worker_ids=internal_ids,
-        permission=permission,
-        assigned_by=current_user.user_id,
-    )
-
-    return success(result, message=f"成功分配 {result['success']} 个 Worker 权限")
+async def batch_assign_workers(request: dict, current_user):
+    return await _workers_permission.batch_assign_workers(request, current_user)
 
 
 # ====== Worker 端调用的 API（无需用户认证）======
@@ -2007,6 +1851,8 @@ async def get_worker_spider_stats_history(worker_id: str, hours: int = 1, curren
 _workers_spider.register_spider_routes(router)
 # P2 拆分: distributed logs / status 3 handler 挂路由
 _workers_distributed.register_distributed_routes(router, _require_worker_access, _require_run_access)
+# P2 拆分: 5 个权限管理 handler 挂路由 (my/available, users, assign, revoke, batch-assign)
+_workers_permission.register_permission_routes(router, _worker_to_response)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
