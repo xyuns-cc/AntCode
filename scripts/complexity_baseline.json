@@ -2357,13 +2357,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 794
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
-      "function": "_duplicate_task_data",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
+      "value": 554
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
@@ -2382,6 +2376,12 @@
       "function": "-",
       "rule": "FILE_LINES",
       "value": 375
+    },
+    {
+      "path": "services/web_api/src/antcode_web_api/routes/v1/tasks_transfer.py",
+      "function": "-",
+      "rule": "FILE_LINES",
+      "value": 534
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
