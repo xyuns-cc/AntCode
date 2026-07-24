@@ -9,7 +9,6 @@ from ipaddress import ip_address, ip_network
 from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings
-from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.common.security.api_key import store_api_key, store_secret_key
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.common.security.network_source import extract_client_ip
@@ -25,7 +24,7 @@ from antcode_core.domain.models import (
     WorkerInstallKey,
 )
 from antcode_core.domain.models.audit_log import AuditAction
-from antcode_core.domain.schemas.worker import (
+from antcode_core.domain.schemas.worker import (  # noqa: F401
     WorkerCapabilities,
     WorkerCreateRequest,
     WorkerHeartbeatRequest,
@@ -43,7 +42,6 @@ from antcode_core.domain.schemas.worker import (
     WorkerUpdateRequest,
 )
 from antcode_core.infrastructure.redis import (
-    direct_register_proof_key,
     get_redis_client,
     install_key_redis_digest,
     worker_install_key_block_key,
@@ -76,6 +74,11 @@ from antcode_web_api.routes.v1 import workers_permission as _workers_permission
 # workers_query.py。主 workers.py 底部调 register_query_routes 挂路由 +
 # 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
 from antcode_web_api.routes.v1 import workers_query as _workers_query
+
+# P2 拆分: register-direct / register(410 shim) / heartbeat 移到 workers_register.py。
+# install_key 相关 (generate_install_key / register_worker_by_key + 5 helper)
+# 仍留主文件, 因依赖链耦合深。
+from antcode_web_api.routes.v1 import workers_register as _workers_register
 
 # P2 拆分: 2 个资源管理 handler (get/update resources) 移到 workers_resources.py。
 from antcode_web_api.routes.v1 import workers_resources as _workers_resources
@@ -770,79 +773,9 @@ async def get_worker_metrics_history(worker_id: str, hours: int = 24, current_us
     )
 
 
-@router.post(
-    "/register-direct",
-    response_model=BaseResponse[WorkerRegisterDirectResponse],
-    summary="Direct Worker 注册",
-    description="仅供未启用 Redis ACL 的可信内网 Direct Worker 使用 Redis 证明注册",
-)
-async def register_direct_worker(
-    request: WorkerRegisterDirectRequest,
-):
-    """Direct Worker 注册（worker_id 作为 public_id）"""
-    from antcode_core.common.config import settings
-    from antcode_core.infrastructure.redis import get_redis_client
-
-    if settings.REDIS_ACL_ENABLED:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Redis ACL 已启用，请使用安装 Key 注册并通过签名接口签发 Redis 凭据",
-        )
-    if not settings.REDIS_URL:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Direct 注册需要 Redis 支持",
-        )
-
-    try:
-        redis = await get_redis_client()
-    except RedisConnectionError as exc:
-        logger.exception("Direct 注册 Redis 连接失败")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Direct 注册依赖服务暂不可用",
-        ) from exc
-    proof_key = direct_register_proof_key(request.worker_id)
-    # P1-08: 原子消费 Direct 注册证明，避免两个并发注册请求同时读到同一条 proof
-    # 之后各自成功。redis-py 5+ 的 async getdel() 一次 RTT 完成 GET+DEL。
-    try:
-        stored_proof = await redis.getdel(proof_key)
-    except Exception as exc:
-        logger.exception("Direct 注册读取 Redis 证明失败: worker_id={}", request.worker_id)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Direct 注册依赖服务暂不可用",
-        ) from exc
-    if isinstance(stored_proof, (bytes, bytearray)):
-        stored_proof = stored_proof.decode("utf-8")
-    if not stored_proof or stored_proof != request.proof:
-        logger.warning(
-            "Direct 注册证明无效: worker_id={}, redis={}, exists={}",
-            request.worker_id,
-            _mask_redis_url(settings.REDIS_URL),
-            bool(stored_proof),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无效的 Direct 注册证明",
-        )
-
-    try:
-        worker, created = await worker_service.register_direct_worker(request)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    return success(
-        WorkerRegisterDirectResponse(
-            worker_id=worker.public_id,
-            created=created,
-            redis_username=None,
-            redis_password=None,
-        ),
-        message="Direct Worker 注册成功",
-    )
+# P2 拆分: register_direct_worker 移至 workers_register.py; 顶层 shim 保留原名。
+async def register_direct_worker(request):
+    return await _workers_register.register_direct_worker(request, mask_redis_url=_mask_redis_url)
 
 
 @router.post(
@@ -892,18 +825,9 @@ async def _is_registration_acknowledged(worker_id: str) -> bool:
     ).exists()
 
 
-@router.post(
-    "/register",
-    response_model=BaseResponse[WorkerRegisterResponse],
-    summary="Worker 注册",
-    description="Worker 主动注册到平台",
-)
-async def register_worker(request: WorkerRegisterRequest):
-    """Worker 注册（已废弃，统一使用安装 Key 或 Direct 注册）"""
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="该注册方式已下线，请使用 /workers/register-by-key 或 /workers/register-direct",
-    )
+# P2 拆分: register_worker (410 shim) 移至 workers_register.py
+async def register_worker(request):
+    return await _workers_register.register_worker(request)
 
 
 @router.post(
@@ -1080,70 +1004,9 @@ async def register_worker_by_key(request: WorkerRegisterByKeyRequest, http_reque
     )
 
 
-@router.post(
-    "/heartbeat",
-    response_model=BaseResponse[dict],
-    summary="Worker 心跳",
-    description="Worker 定期上报心跳",
-)
-async def worker_heartbeat(
-    request: WorkerHeartbeatRequest,
-    auth_info: dict = Depends(verify_worker_request_with_signature),
-):
-    """Worker 心跳上报（HMAC签名验证）
-
-    认证以 HMAC 签名头(``X-AntCode-Signature`` + ``X-AntCode-Timestamp``)为唯一
-    依据,worker_id 从签名校验结果中取出。``WorkerHeartbeatRequest.api_key``
-    字段保留为向后兼容,但**不再用于身份校验**——任何凭此字段做认证的逻辑
-    都会让明文 API Key 出现在 body / 访问日志里,被视为已弃用。
-    """
-    # 处理能力上报
-    capabilities_dict = None
-    if request.capabilities:
-        capabilities_dict = request.capabilities.model_dump()
-
-    # 以 HMAC 验签后的 worker_id 为准,忽略 body 里的 worker_id/api_key
-    # 防止攻击者用窃取的明文 api_key 伪造心跳,以及防止 body 字段被签名头绕过
-    signed_worker_id = (auth_info.get("worker_id") or "").strip()
-    if not signed_worker_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名认证身份")
-
-    if request.worker_id and request.worker_id != signed_worker_id:
-        logger.warning(
-            f"心跳 body worker_id 与 HMAC 签名身份不一致, signed={signed_worker_id}, body={request.worker_id}"
-        )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="worker_id 与签名身份不一致")
-
-    # 旁路:如果客户端仍把 api_key 放进 body,记一次弃用告警,但不让它进入日志
-    if request.api_key:
-        logger.warning(
-            f"心跳 body 中携带了弃用的 api_key 字段,worker_id={signed_worker_id};请升级 Worker 端只使用 HMAC 签名头"
-        )
-
-    worker = await worker_service.get_worker_by_id(signed_worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败")
-
-    heartbeat_success = await worker_service.heartbeat(
-        worker_id=signed_worker_id,
-        status_value=request.status,
-        metrics=request.metrics,
-        version=request.version,
-        # 操作系统信息
-        os_type=request.os_type,
-        os_version=request.os_version,
-        python_version=request.python_version,
-        machine_arch=request.machine_arch,
-        # Worker 能力
-        capabilities=capabilities_dict,
-        # 爬虫统计
-        spider_stats=request.spider_stats,
-    )
-
-    if not heartbeat_success:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败")
-
-    return success({"success": True}, message="心跳成功")
+# P2 拆分: worker_heartbeat 移至 workers_register.py
+async def worker_heartbeat(request, auth_info):
+    return await _workers_register.worker_heartbeat(request, auth_info)
 
 
 # P2 拆分: 3 query shim (load_ranking / best_worker / render_capable) 已移至
@@ -1284,6 +1147,8 @@ _workers_resources.register_resources_routes(router)
 _workers_dispatch.register_dispatch_routes(router, _sys.modules[__name__])
 # P2 拆分: 3 个 stats/history 查询 handler 挂路由
 _workers_stats.register_stats_routes(router, _require_worker_access)
+# P2 拆分: register-direct / register(410) / heartbeat 3 handler 挂路由
+_workers_register.register_register_routes(router, _mask_redis_url)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 
