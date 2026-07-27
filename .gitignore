@@ -42,6 +42,7 @@ env/
 # Data directory (auto-generated at runtime)
 /data/
 /runtime_data/
+**/runtime_data/
 
 # Legacy directories (已迁移到 data/)
 /logs/
@@ -111,6 +112,33 @@ DOCS_CLEANUP_SUMMARY.md
 # Keep example env templates
 !.env.example
 !**/.env.example
+
+# Credentials and private key material
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pub
+.netrc
+.pypirc
+.npmrc
+!web/antcode-frontend/.npmrc
+credentials.json
+*credentials*.json
+service-account*.json
+*.tfstate
+*.tfstate.*
+*.tfvars
+.aws/
+.azure/
+.config/gcloud/
+.kube/config
 
 # Legacy frontend workspace
 web_new/

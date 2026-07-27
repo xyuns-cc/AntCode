@@ -225,7 +225,7 @@ class TestAuthInterceptorIntegration:
         """完整认证流程 - 成功"""
         interceptor = AuthInterceptor(
             enabled=True,
-            api_key_validator=lambda key, worker_id: key == "x" and worker_id == "worker-001",
+            api_key_validator=lambda key, worker_id: key == "test-api-key" and worker_id == "worker-001",
         )
 
         original = grpc.unary_unary_rpc_method_handler(AsyncMock())
@@ -233,7 +233,7 @@ class TestAuthInterceptorIntegration:
         handler_details = MagicMock()
         handler_details.method = "/antcode.v1.GatewayService/SendHeartbeat"
         handler_details.invocation_metadata = [
-            ("x-api-key", "x"),
+            ("x-api-key", "test-api-key"),
             ("x-worker-id", "worker-001"),
         ]
 
