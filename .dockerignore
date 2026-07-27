@@ -34,19 +34,51 @@ Thumbs.db
 
 # 测试
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 .coverage
+.coverage.*
 htmlcov/
 .tox/
-tests/
+/tests/
+!/tests/
+!/tests/**
 
 # 数据目录（运行时生成，通过 volume 挂载）
-data/
+/data/
+**/runtime_data/
 
 # 日志
 *.log
+/logs/
 
 # 密钥文件（在 data/ 目录下，通过 volume 挂载）
-data/.jwt_secret
+/data/.jwt_secret
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pub
+.netrc
+.pypirc
+.npmrc
+credentials.json
+*credentials*.json
+service-account*.json
+*.tfstate
+*.tfstate.*
+*.tfvars
+.aws/
+.azure/
+.config/gcloud/
+.kube/config
 
 # 环境配置
 .env
@@ -54,22 +86,25 @@ data/.jwt_secret
 !.env.example
 
 # 前端（后端镜像不需要）
-web/
+/web/
 node_modules/
 
 # Docker
-docker/
-Dockerfile*
-docker-compose*.yml
+/docker/
+/Dockerfile*
+/docker-compose*.yml
 .dockerignore
 
 # 文档
-docs/
+/docs/
 *.md
+!README.md
+!packages/**/README.md
+!services/**/README.md
 
 # 其他
-.serena/
-.cursor/
+/.serena/
+/.cursor/
 *.backup
-demo.py
-dummy_task.py
+/demo.py
+/dummy_task.py

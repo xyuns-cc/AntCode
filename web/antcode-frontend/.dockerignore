@@ -19,6 +19,32 @@ build/
 .env.local
 .env.*.local
 
+# Credentials and private key material
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pub
+.netrc
+.pypirc
+.npmrc
+credentials.json
+*credentials*.json
+service-account*.json
+*.tfstate
+*.tfstate.*
+*.tfvars
+.aws/
+.azure/
+.config/gcloud/
+.kube/config
+
 # Logs
 *.log
 npm-debug.log*

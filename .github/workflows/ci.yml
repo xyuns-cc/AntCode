@@ -13,30 +13,35 @@ on:
       - develop
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "22.10.0"
+  UV_VERSION: "0.8.17"
 
 jobs:
 
   # ==================== 后端代码检查 ====================
   backend-lint:
     name: Backend Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
 
       - name: Install dependencies
-        # ruff 在 [project.optional-dependencies].dev,不加 --dev 就装不上 → ruff step 会挂
-        run: uv sync --all-packages --dev
+        # ruff 位于 [project.optional-dependencies].dev，必须安装 dev extra。
+        # --frozen：严格按 uv.lock 安装，禁止 CI 里隐式改写解析结果。
+        run: uv sync --all-packages --extra dev --frozen
 
       - name: Run ruff check
         run: uv run ruff check .
+
+      - name: Enforce complexity baseline
+        run: make complexity
 
       - name: Run ruff format check
         run: uv run ruff format --check .
@@ -44,19 +49,54 @@ jobs:
   # ==================== 后端测试 ====================
   backend-test:
     name: Backend Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      DATABASE_URL: postgresql://antcode@localhost:15432/antcode_e2e_test
+      REDIS_URL: redis://localhost:16379/14
+    services:
+      redis:
+        image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_DB: antcode_migration_test
+          POSTGRES_USER: antcode
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U antcode -d antcode_migration_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
 
       - name: Install dependencies
-        run: uv sync --all-packages --extra dev
+        run: uv sync --all-packages --extra dev --frozen
+
+      - name: Prepare integration databases
+        run: |
+          psql --host=localhost --port=15432 --username=antcode \
+            --dbname=antcode_migration_test --set=ON_ERROR_STOP=1 \
+            --command="CREATE DATABASE antcode_e2e_test"
+          /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 \
+            uv run --extra dev python -c \
+            'import asyncio; from scripts.init_db import _generate_schemas; asyncio.run(_generate_schemas())'
 
       - name: Run core unit tests
         run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/unit/test_*.py tests/unit/core -q
@@ -74,24 +114,382 @@ jobs:
         run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/boundary -q
 
       - name: Run contract tests
+        env:
+          ANTCODE_CONTRACT_REDIS_URL: redis://localhost:16379/14
         run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/contracts -q
+
+      - name: Run integration tests
+        env:
+          ANTCODE_INTEGRATION_REDIS_URL: redis://localhost:16379/14
+          DATABASE_URL: postgresql://antcode@localhost:15432/antcode_e2e_test
+          TEST_DATABASE_URL: postgresql://antcode@localhost:15432/antcode_migration_test
+        run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/integration -q
+
+      - name: Run load-test self checks
+        run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/loadtest -q
+
+      - name: Collect E2E tests
+        # 仅做导入/收集健全性快检；真实 E2E 门禁在下方 e2e job（compose 全栈真跑）。
+        run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/e2e --collect-only -q
+
+  # ==================== 端到端测试（compose 全栈真实执行） ====================
+  # 门禁语义：本 job 用 docker compose 构建与将要发布完全相同的 Dockerfile，
+  # 启动完整栈（postgres/redis/web-api/master/gateway/worker/frontend），然后
+  # 真实执行 pytest tests/e2e（不是 --collect-only）。summary 与 publish-images
+  # 都依赖本 job：E2E 未真实通过时分支保护不放行、任何镜像都不允许发布。
+  e2e:
+    name: E2E (compose stack)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      COMPOSE_ARGS: --env-file .env -f infra/docker/docker-compose.dev.yml
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-packages --extra dev --frozen
+
+      - name: Allow unprivileged user namespaces for worker sandbox
+        # Ubuntu 24.04 默认限制 unprivileged userns；worker 容器内 bwrap 沙箱需要。
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Generate ephemeral stack secrets
+        # 一次性随机密钥仅存活于本 job；.env 同时用于 compose 变量替换与
+        # env_file 注入（dev compose 的注入链会读项目根 .env）。
+        run: |
+          host_ip="$(hostname -I | awk '{print $1}')"
+          pg_password="$(openssl rand -hex 16)"
+          admin_password="$(openssl rand -base64 24 | tr -d '\n')Aa1!"
+          {
+            echo "HOST_IP=$host_ip"
+            echo "E2E_POSTGRES_PASSWORD=$pg_password"
+            echo "DEFAULT_ADMIN_PASSWORD=$admin_password"
+          } >> "$GITHUB_ENV"
+          {
+            echo "POSTGRES_DB=antcode_e2e_test"
+            echo "POSTGRES_PASSWORD=$pg_password"
+            echo "REDIS_PASSWORD=$(openssl rand -hex 16)"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "ENCRYPTION_KEY=$(openssl rand -hex 32)"
+            echo "ENCRYPTION_KEY_SALT=$(openssl rand -hex 16)"
+            echo "DEFAULT_ADMIN_PASSWORD=$admin_password"
+            # E2E 要求显式绑定专用 Worker（tests/e2e/conftest.py 的 fail-closed 校验）
+            echo "WORKER_ID=worker-e2e-001"
+            # CI 内 E2E git 源跑在 runner 私网地址上，控制面需要放行私网 git URL
+            echo "ALLOW_PRIVATE_NODES=true"
+            # P1-CI-04: generate-install-key 端点要求安装分发配置完整；
+            # SOURCE_URL 只会拼进安装命令文本，冒烟不真正拉取该仓库。
+            echo "WORKER_INSTALL_SOURCE_URL=https://github.com/antcode/antcode.git"
+            echo "WORKER_INSTALL_SOURCE_REF=${GITHUB_SHA}"
+          } > .env
+
+      - name: Build stack images
+        run: docker compose $COMPOSE_ARGS build
+
+      - name: Start database and cache
+        run: docker compose $COMPOSE_ARGS up -d --wait --wait-timeout 300 postgres redis
+
+      - name: Initialize database schema
+        # P1-CI-03: 全新 Postgres 必须先显式建表（infra/docker/README.md 的
+        # scripts.init_db 步骤）；Web API lifespan 只建连接、不建表，直接
+        # compose up 会让服务在空库上带病启动。
+        run: docker compose $COMPOSE_ARGS run --rm --no-deps web-api python -m scripts.init_db
+
+      - name: Start control plane stack
+        run: docker compose $COMPOSE_ARGS up -d --wait --wait-timeout 900 web-api master gateway frontend
+
+      - name: Generate Direct Worker install key
+        env:
+          ANTCODE_E2E_WEB_API_URL: http://127.0.0.1:8000
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+          import os
+          from types import SimpleNamespace
+
+          import httpx
+
+          from tests.e2e.helpers import extract_data, login, request_json
+
+
+          async def main() -> None:
+              config = SimpleNamespace(
+                  admin_user="admin",
+                  admin_password=os.environ["DEFAULT_ADMIN_PASSWORD"],
+              )
+              base_url = os.environ["ANTCODE_E2E_WEB_API_URL"]
+              async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                  token = await login(client, config)
+                  payload = await request_json(
+                      client,
+                      "POST",
+                      "/workers/generate-install-key",
+                      token=token,
+                      json={"os_type": "linux"},
+                  )
+              install_key = (extract_data(payload) or {})["key"]
+              print(f"::add-mask::{install_key}")
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+                  handle.write(f"ANTCODE_WORKER_KEY={install_key}\n")
+
+
+          asyncio.run(main())
+          PY
+
+      - name: Start Direct Worker
+        run: docker compose $COMPOSE_ARGS up -d --wait --wait-timeout 300 worker
+
+      - name: Wait for worker readiness
+        # worker 服务没有 compose healthcheck，就绪状态以容器内 /health/ready 为准
+        # （其中隐含 Worker 已完成 direct 注册）。
+        run: |
+          timeout 300 bash -c \
+            "until docker compose $COMPOSE_ARGS exec -T worker curl -fsS http://localhost:8001/health/ready >/dev/null 2>&1; do sleep 5; done"
+
+      - name: Start E2E git HTTP server
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-git"
+          nohup uv run python -m tests.e2e.git_http_server \
+            --root "$RUNNER_TEMP/e2e-git" --host 0.0.0.0 --port 18081 \
+            > "$RUNNER_TEMP/e2e-git-http.log" 2>&1 &
+          timeout 30 bash -c 'until curl -fsS http://127.0.0.1:18081/ >/dev/null; do sleep 1; done'
+
+      - name: Run E2E tests
+        env:
+          ANTCODE_E2E_CONFIRM: FULL
+          DATABASE_URL: postgresql://antcode:${{ env.E2E_POSTGRES_PASSWORD }}@127.0.0.1:5432/antcode_e2e_test
+          ANTCODE_E2E_DATABASE_HOST: 127.0.0.1
+          ANTCODE_E2E_DATABASE_NAME: antcode_e2e_test
+          ANTCODE_E2E_WORKER_ID: worker-e2e-001
+          ANTCODE_E2E_WEB_API_URL: http://127.0.0.1:8000
+          ANTCODE_E2E_EXPECT_TRANSPORT_MODE: direct
+          ANTCODE_E2E_GIT_ROOT: ${{ runner.temp }}/e2e-git
+          ANTCODE_E2E_GIT_BASE_URL: http://${{ env.HOST_IP }}:18081
+        run: uv run --extra dev pytest tests/e2e -q
+
+      # ---- P1-CI-04: Gateway backendless 生产链路最小冒烟 ----
+      # 覆盖：安装 Key 注册（Web API）-> 凭据认证连 Gateway(gRPC) ->
+      # 初始 lease 授予 -> 心跳经 Gateway 上报并在控制面标记 online。
+      # 已知缺口：dev compose Gateway 是 h2c 明文（ANTCODE_GATEWAY_ALLOW_INSECURE=true），
+      # TLS/mTLS 证书链路仍未被 CI 覆盖，需在远程验收环境验证。
+      - name: Prepare gateway smoke credentials
+        run: |
+          uv run python - <<'PY'
+          """管理员登录 -> 生成一次性安装 Key -> 记录当前在线 Worker 基线。"""
+          import asyncio
+          import json
+          import os
+          from types import SimpleNamespace
+
+          import httpx
+
+          from tests.e2e.helpers import extract_data, login, request_json
+
+
+          async def main() -> None:
+              base_url = os.environ.get("ANTCODE_E2E_WEB_API_URL", "http://127.0.0.1:8000")
+              config = SimpleNamespace(
+                  admin_user=os.environ.get("ANTCODE_E2E_ADMIN_USER", "admin"),
+                  admin_password=os.environ["DEFAULT_ADMIN_PASSWORD"],
+              )
+              async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                  token = await login(client, config)
+                  payload = await request_json(
+                      client,
+                      "POST",
+                      "/workers/generate-install-key",
+                      token=token,
+                      json={"os_type": "linux"},
+                  )
+                  install_key = (extract_data(payload) or {})["key"]
+                  online = await request_json(
+                      client,
+                      "GET",
+                      "/workers",
+                      token=token,
+                      params={"page": 1, "size": 100, "status": "online"},
+                  )
+                  baseline = sorted(
+                      str(item.get("id"))
+                      for item in ((extract_data(online) or {}).get("items") or [])
+                  )
+              tmp = os.environ["RUNNER_TEMP"]
+              for name, content in (
+                  ("gateway-smoke.key", install_key),
+                  ("gateway-smoke.token", token),
+                  ("gateway-smoke.baseline.json", json.dumps(baseline)),
+              ):
+                  fd = os.open(
+                      os.path.join(tmp, name),
+                      os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                      0o600,
+                  )
+                  with os.fdopen(fd, "w") as handle:
+                      handle.write(content)
+
+
+          asyncio.run(main())
+          PY
+        env:
+          ANTCODE_E2E_WEB_API_URL: http://127.0.0.1:8000
+
+      - name: Run gateway backendless worker smoke
+        run: |
+          install_key="$(cat "$RUNNER_TEMP/gateway-smoke.key")"
+          # 复用 worker 服务定义与镜像，仅用环境变量切到 Gateway backendless：
+          # 清空 DATABASE_URL/REDIS_URL/WORKER_REDIS_URL（backendless fail-closed 校验）
+          # 与 WORKER_ID（身份改由安装 Key 注册的凭据提供），数据目录隔离避免
+          # 与 direct Worker 共享凭据存储。
+          docker compose $COMPOSE_ARGS run -d --no-deps \
+            --name antcode-worker-gateway-smoke \
+            -e WORKER_TRANSPORT_MODE=gateway \
+            -e WORKER_GATEWAY_BACKENDLESS=true \
+            -e WORKER_GATEWAY_HOST=gateway \
+            -e WORKER_GATEWAY_PORT=50051 \
+            -e WORKER_GATEWAY_TLS=false \
+            -e DATABASE_URL= \
+            -e REDIS_URL= \
+            -e WORKER_REDIS_URL= \
+            -e WORKER_ID= \
+            -e WORKER_NAME=worker-e2e-gateway \
+            -e WORKER_DATA_DIR=/app/data/gateway-smoke \
+            -e ANTCODE_WORKER_KEY="$install_key" \
+            worker
+          # /health/ready 通过意味着安装 Key 注册、Gateway 认证与初始 lease
+          # 全部成功（任一失败 worker 启动 fail-fast，永远不会 ready）。
+          timeout 240 bash -c \
+            'until docker exec antcode-worker-gateway-smoke curl -fsS http://localhost:8001/health/ready >/dev/null 2>&1; do sleep 5; done'
+
+      - name: Verify gateway worker heartbeat on control plane
+        run: |
+          uv run python - <<'PY'
+          """轮询控制面在线列表，要求出现基线之外的新 Worker（即 Gateway 冒烟实例）。"""
+          import asyncio
+          import json
+          import os
+          import time
+
+          import httpx
+
+          from tests.e2e.helpers import extract_data, request_json
+
+          POLL_TIMEOUT_SECONDS = 180
+          POLL_INTERVAL_SECONDS = 5
+
+
+          async def main() -> None:
+              base_url = os.environ.get("ANTCODE_E2E_WEB_API_URL", "http://127.0.0.1:8000")
+              tmp = os.environ["RUNNER_TEMP"]
+              with open(os.path.join(tmp, "gateway-smoke.token")) as handle:
+                  token = handle.read().strip()
+              with open(os.path.join(tmp, "gateway-smoke.baseline.json")) as handle:
+                  baseline = set(json.load(handle))
+              deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
+              async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                  while True:
+                      payload = await request_json(
+                          client,
+                          "GET",
+                          "/workers",
+                          token=token,
+                          params={"page": 1, "size": 100, "status": "online"},
+                      )
+                      items = (extract_data(payload) or {}).get("items") or []
+                      new_online = [
+                          item for item in items if str(item.get("id")) not in baseline
+                      ]
+                      if new_online:
+                          print(
+                              "Gateway worker 心跳已上线:",
+                              [item.get("id") for item in new_online],
+                          )
+                          return
+                      if time.monotonic() > deadline:
+                          raise SystemExit("Gateway worker 未在超时窗口内通过心跳上线")
+                      await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+          asyncio.run(main())
+          PY
+          docker rm -f antcode-worker-gateway-smoke
+        env:
+          ANTCODE_E2E_WEB_API_URL: http://127.0.0.1:8000
+
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          docker compose $COMPOSE_ARGS ps -a || true
+          docker compose $COMPOSE_ARGS logs --tail=300 || true
+          docker logs --tail=300 antcode-worker-gateway-smoke 2>/dev/null || true
+          cat "$RUNNER_TEMP/e2e-git-http.log" || true
+
+      - name: Tear down stack
+        if: always()
+        run: |
+          docker rm -f antcode-worker-gateway-smoke 2>/dev/null || true
+          docker compose $COMPOSE_ARGS down -v --remove-orphans || true
+
+  # ==================== Windows 产物安全 ====================
+  windows-artifact-security:
+    name: Windows Artifact Security
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-packages --extra dev --frozen
+
+      - name: Run Windows artifact security tests
+        shell: pwsh
+        run: |
+          $arguments = @(
+            "run", "--extra", "dev", "pytest",
+            "tests/unit/worker/test_artifact_io_windows.py",
+            "tests/unit/worker/test_artifact_io_windows_real.py", "-q"
+          )
+          $process = Start-Process uv -ArgumentList $arguments -NoNewWindow -PassThru
+          try {
+            Wait-Process -Id $process.Id -Timeout 60 -ErrorAction Stop
+          } catch {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Windows artifact security tests exceeded 60 seconds"
+          }
+          $process.Refresh()
+          if ($process.ExitCode -ne 0) {
+            exit $process.ExitCode
+          }
 
   # ==================== 后端安全扫描 ====================
   backend-security:
     name: Backend Security & Type Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
 
       - name: Install dependencies
-        run: uv sync --all-packages --dev
+        run: uv sync --all-packages --extra dev --frozen
 
       - name: Run bandit security scan
         run: |
@@ -102,13 +500,19 @@ jobs:
           test -s bandit-report.json
 
       - name: Block on HIGH severity bandit findings
-        run: python scripts/fail_on_high_vulns.py bandit-report.json --tool bandit
+        run: uv run --extra dev python scripts/fail_on_high_vulns.py bandit-report.json --tool bandit
 
       - name: Run pip-audit (deps CVE scan)
         run: |
           rm -f pip-audit-report.json
+          # P1-CI-06: --all-packages 导出整个 workspace 全部成员的依赖闭包；
+          # 只导出根包时实测 98 个依赖，完整 workspace 为 141 个，漏扫 43 个。
+          uv export --locked --all-packages --extra dev --no-emit-workspace --no-hashes \
+            --output-file audit-requirements.txt
           set +e
-          uv run pip-audit --strict --format=json --output=pip-audit-report.json
+          uv run --extra dev pip-audit --strict --no-deps --disable-pip \
+            --requirement audit-requirements.txt \
+            --format=json --output=pip-audit-report.json
           scan_status=$?
           set -e
           test -s pip-audit-report.json
@@ -117,7 +521,7 @@ jobs:
           fi
 
       - name: Block on HIGH/CRITICAL pip-audit findings
-        run: python scripts/fail_on_high_vulns.py pip-audit-report.json --tool pip-audit
+        run: uv run --extra dev python scripts/fail_on_high_vulns.py pip-audit-report.json --tool pip-audit
 
       - name: Run mypy type check
         # J1: 去掉 || true 让 mypy 真正阻断 PR；type-check 存量白名单靠 mypy.ini
@@ -126,7 +530,7 @@ jobs:
 
       - name: Upload security reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: security-reports
           path: |
@@ -137,14 +541,14 @@ jobs:
   # ==================== 前端测试 ====================
   frontend-test:
     name: Frontend Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -161,19 +565,22 @@ jobs:
       - name: Run lint
         working-directory: web/antcode-frontend
         run: npm run lint:ci
-      # 前端没有 test script（package.json 只暴露 lint/type-check/build）
+
+      - name: Run behavior tests
+        working-directory: web/antcode-frontend
+        run: npm run test:ci
 
   # ==================== 前端安全扫描 ====================
   frontend-security:
     name: Frontend Security
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -190,14 +597,14 @@ jobs:
   # ==================== 前端构建 ====================
   frontend-build:
     name: Frontend Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -214,12 +621,21 @@ jobs:
   # ==================== 摘要 ====================
   summary:
     name: CI Summary
-    runs-on: ubuntu-latest
-    needs: [backend-lint, backend-test, backend-security, frontend-test, frontend-security, frontend-build]
+    runs-on: ubuntu-24.04
+    needs: [backend-lint, backend-test, e2e, backend-security, windows-artifact-security, frontend-test, frontend-security, frontend-build]
     if: always()
 
     steps:
       - name: Summary
+        env:
+          BACKEND_LINT_RESULT: ${{ needs.backend-lint.result }}
+          BACKEND_TEST_RESULT: ${{ needs.backend-test.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          BACKEND_SECURITY_RESULT: ${{ needs.backend-security.result }}
+          WINDOWS_ARTIFACT_RESULT: ${{ needs.windows-artifact-security.result }}
+          FRONTEND_TEST_RESULT: ${{ needs.frontend-test.result }}
+          FRONTEND_SECURITY_RESULT: ${{ needs.frontend-security.result }}
+          FRONTEND_BUILD_RESULT: ${{ needs.frontend-build.result }}
         run: |
           echo "## CI 检查结果" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -227,15 +643,35 @@ jobs:
           echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| 后端代码检查 | ${{ needs.backend-lint.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 后端测试 | ${{ needs.backend-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 端到端测试 | ${{ needs.e2e.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 后端安全扫描 | ${{ needs.backend-security.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows 产物安全 | ${{ needs.windows-artifact-security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端 lint/type-check | ${{ needs.frontend-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端安全扫描 | ${{ needs.frontend-security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 前端构建 | ${{ needs.frontend-build.result }} |" >> $GITHUB_STEP_SUMMARY
+          checks=(
+            "backend-lint=$BACKEND_LINT_RESULT"
+            "backend-test=$BACKEND_TEST_RESULT"
+            "e2e=$E2E_RESULT"
+            "backend-security=$BACKEND_SECURITY_RESULT"
+            "windows-artifact-security=$WINDOWS_ARTIFACT_RESULT"
+            "frontend-test=$FRONTEND_TEST_RESULT"
+            "frontend-security=$FRONTEND_SECURITY_RESULT"
+            "frontend-build=$FRONTEND_BUILD_RESULT"
+          )
+          for check in "${checks[@]}"; do
+            if [ "${check#*=}" != "success" ]; then
+              echo "::error::Required job ${check%%=*} ended with ${check#*=}"
+              exit 1
+            fi
+          done
 
   publish-images:
     name: Publish verified images
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: [backend-lint, backend-test, backend-security, frontend-test, frontend-security, frontend-build]
+    # 门禁语义：镜像发布必须被真实执行的 E2E（e2e job，compose 全栈真跑）阻断，
+    # 而不是仅靠 pytest collect。
+    needs: [backend-lint, backend-test, e2e, backend-security, windows-artifact-security, frontend-test, frontend-security, frontend-build]
     permissions:
       actions: read
       contents: read
