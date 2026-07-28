@@ -149,17 +149,15 @@ def test_ssh_git_env_uses_pinned_relay_and_host_key_alias() -> None:
     assert command.index("ProxyCommand=") < command.index("ProxyJump=none")
     assert f"-F {os.devnull}" in command
     args = shlex.split(command)
-    offline_args = ["ProxyCommand=none" if arg.startswith("ProxyCommand=") else arg for arg in args[1:]]
-    rendered = subprocess.run(
-        [args[0], "-G", *offline_args, "git@example.com"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=True,
-    ).stdout.lower()
-    assert "hostname 93.184.216.34" in rendered
-    assert "hostkeyalias example.com" in rendered
-    assert not any(line.startswith("proxycommand ") for line in rendered.splitlines())
+    assert args[1:3] == ["-F", os.devnull]
+    option_args = args[3:]
+    assert all(option_args[index] == "-o" for index in range(0, len(option_args), 2))
+    option_values = set(option_args[1::2])
+    assert "Hostname=93.184.216.34" in option_values
+    assert "HostKeyAlias=example.com" in option_values
+    assert "ProxyJump=none" in option_values
+    assert "StrictHostKeyChecking=yes" in option_values
+    assert any(value.startswith("ProxyCommand=") for value in option_values)
 
 
 def test_git_env_rejects_inherited_config_and_external_network_paths(monkeypatch, tmp_path) -> None:

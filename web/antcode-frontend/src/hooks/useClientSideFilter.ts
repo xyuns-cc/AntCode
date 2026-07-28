@@ -198,14 +198,11 @@ export function useSortableClientFilter<T>(
       if (aValue == null) return 1
       if (bValue == null) return -1
 
-      let comparison = 0
-      if (typeof aValue === 'string' && typeof bValue === 'string') {
-        comparison = aValue.localeCompare(bValue)
-      } else if (typeof aValue === 'number' && typeof bValue === 'number') {
-        comparison = aValue - bValue
-      } else {
-        comparison = String(aValue).localeCompare(String(bValue))
-      }
+      const comparison = typeof aValue === 'string' && typeof bValue === 'string'
+        ? aValue.localeCompare(bValue)
+        : typeof aValue === 'number' && typeof bValue === 'number'
+          ? aValue - bValue
+          : String(aValue).localeCompare(String(bValue))
 
       return sortConfig.direction === 'asc' ? comparison : -comparison
     })

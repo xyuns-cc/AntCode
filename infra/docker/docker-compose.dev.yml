@@ -56,7 +56,8 @@ services:
         fi
         chown redis:redis "$${acl_file}"
         chmod 600 "$${acl_file}"
-        exec su-exec redis redis-server --appendonly yes --aclfile "$${acl_file}"
+        exec /usr/local/bin/docker-entrypoint.sh \
+          redis-server --appendonly yes --aclfile "$${acl_file}"
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}
     volumes:
@@ -67,7 +68,7 @@ services:
     networks:
       - antcode-network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping"]
       interval: 5s
       timeout: 3s
       retries: 3

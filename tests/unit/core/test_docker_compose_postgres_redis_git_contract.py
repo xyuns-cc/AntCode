@@ -21,7 +21,12 @@ def test_dev_redis_persists_acl_and_control_plane_enables_it():
     redis = services["redis"]
 
     assert "--aclfile" in redis["command"][0]
-    assert "su-exec redis redis-server" in redis["command"][0]
+    assert "/usr/local/bin/docker-entrypoint.sh" in redis["command"][0]
+    assert "su-exec" not in redis["command"][0]
+    assert redis["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping',
+    ]
     assert "redis_acl:/etc/redis-acl" in redis["volumes"]
     for service_name in ("web-api", "master", "gateway"):
         assert "REDIS_ACL_ENABLED=true" in services[service_name]["environment"]

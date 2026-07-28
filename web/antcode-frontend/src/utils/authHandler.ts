@@ -174,7 +174,7 @@ export function withAuthErrorHandling<Args extends unknown[], ReturnType>(
     } catch (error) {
       if (AuthHandler.handleApiError(error, showMessage)) {
         // 如果是认证错误，已经处理了，抛出一个特殊的错误
-        throw new Error('AUTH_FAILURE')
+        throw new Error('AUTH_FAILURE', { cause: error })
       }
       // 不是认证错误，重新抛出原错误
       throw error

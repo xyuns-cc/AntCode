@@ -22,7 +22,10 @@ export default tseslint.config([
       'react-refresh': reactRefresh,
     },
     rules: {
-      ...reactHooks.configs.recommended.rules,
+      // Keep the Hooks gate stable across plugin releases. React Compiler rules
+      // require a dedicated migration and are not part of this application's build.
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
       'react-refresh/only-export-components': [
         'warn',
         { allowConstantExport: true },

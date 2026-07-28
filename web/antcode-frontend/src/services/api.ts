@@ -101,7 +101,7 @@ async function ensureFreshToken(): Promise<string | null> {
       return null
     }
     if (getSessionGeneration() !== payload?.session_jti) {
-      throw new Error('无法同步当前共享会话，已取消请求')
+      throw new Error('无法同步当前共享会话，已取消请求', { cause: err })
     }
     return token
   }

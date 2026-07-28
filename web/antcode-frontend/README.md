@@ -492,10 +492,10 @@ npm install
 
 ```bash
 # 切换到 Node.js 22
-nvm use v22.12.0
+nvm use v22.13.0
 
 # 验证版本
-node --version  # 应该显示 v22.12.0
+node --version  # 应该显示 v22.13.0
 npm --version   # 应该显示 >= v10.0.0
 ```
 
@@ -544,7 +544,7 @@ npm run build:analyze
 ### v1.0.0 (2026-01-15)
 
 #### 优化
-- ✅ 升级到 Node.js 22.12.0
+- ✅ 升级到 Node.js 22.13.0
 - ✅ 修复所有 ESLint 错误
 - ✅ 实施代码分割和懒加载
 - ✅ 添加 Gzip/Brotli 压缩
