@@ -1,11 +1,9 @@
 """
 Gateway Protobuf 编解码模块（P1b 重写）
 
-负责在 ``antcode_worker.transport.base`` 的内部数据结构与新的
-``antcode_contracts.control_pb2`` / ``data_pb2`` Proto 消息之间转换。
+负责内部数据结构与 ControlService / DataService Proto 消息之间转换。
 
-新协议要点：
-- 不再使用 ``gateway_pb2``（已被 ControlService + DataService 取代）。
+新协议不再使用 ``gateway_pb2``，由 ControlService + DataService 取代：
 - 任务投递走 ``DataService.StreamTasks``（server-stream），消息体是
   ``data_pb2.TaskDispatch``。
 - 任务状态走 ``DataService.StreamStatus``（client-stream），消息体是
@@ -29,6 +27,7 @@ from typing import Any
 
 from antcode_contracts.transcode import (
     datetime_to_proto_timestamp,
+    encode_capabilities,
     encode_task_status,
     proto_timestamp_to_datetime,
 )
@@ -245,6 +244,7 @@ class HeartbeatEncoder:
             worker_id=worker_id or "",
             current_lease_id=current_lease_id or "",
             metrics=metrics,
+            capabilities=encode_capabilities(getattr(heartbeat, "capabilities", None)),
         )
 
 

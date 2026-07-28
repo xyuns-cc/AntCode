@@ -220,7 +220,13 @@ async def test_batch_preserves_existing_snapshot_while_building_missing_run():
 @pytest.mark.asyncio
 async def test_dispatcher_enriches_same_project_tasks_by_run(monkeypatch):
     dispatcher = WorkerTaskDispatcher()
-    worker = SimpleNamespace(id=7, public_id="worker-7", name="Worker 7")
+    worker = SimpleNamespace(
+        id=7,
+        public_id="worker-7",
+        name="Worker 7",
+        transport_mode="direct",
+        capabilities={"task_types": ["code", "rule"]},
+    )
     bundle_dispatch = SimpleNamespace(
         build_dispatch_for_worker_with_info=AsyncMock(
             return_value=(

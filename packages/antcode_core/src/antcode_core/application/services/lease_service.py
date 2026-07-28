@@ -1,14 +1,12 @@
 """Worker Lease 状态管理 — 替代心跳超时判活 (P3)
 
 Lease 模型用 Redis 上的一组数据结构维护 Worker 的强一致存活状态：
-
 - ``{{ns}}:lease:data:{worker_id}`` (Hash) —— namespace 使用 Redis hash tag，
   让 lease 主记录、撤销集和全局索引位于同一个 slot，可由单个 Lua 原子更新。字段:
     - ``lease_id``        — 16 字节 hex token，唯一标识本次 lease
     - ``expires_at_ms``   — 绝对过期时间（epoch ms）
     - ``granted_at_ms``   — 本次 lease 被发出 / 续租的时间
-    - ``metrics_json``    — Worker 上报的 metrics（JSON dict，过渡期可选）
-
+    - ``metrics_json`` / ``capabilities_json`` — Worker 指标与能力 JSON
 - ``{ns}:lease:expiring`` / ``{ns}:lease:active`` 维护过期索引和在线集合。
 
 设计要点：
@@ -19,20 +17,18 @@ Lease 模型用 Redis 上的一组数据结构维护 Worker 的强一致存活�
   或不匹配 ID 会得到显式冲突，不能覆盖当前代际。无有效记录时才发新代际。
 - ``sweep_expired`` 用 Lua CAS 清理过期记录；Master 端的
   ``LeaseSweeperLoop`` 每秒调一次即可。
-
-Validates: Requirements (P3 设计文档 §Lease)
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 
+from antcode_core.application.services.lease_serialization import serialize_lease_value
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
 LEASE_RECORD_RETENTION_MS = 5_000
@@ -97,8 +93,8 @@ class LeasePolicy:
 # P1-GW-01 (round6): 增加 seq_key(KEYS[5], 与其他 lease keys 同 slot),grant
 # 时 INCR 拿严格单调 sequence 作 gen tie-breaker。同毫秒下不同 lease grant
 # 也不会碰撞;renew 保留原 sequence。
-# KEYS=[lease_key,revoked_key,expiring_zset,active_set,seq_key];
-# ARGV=[worker_id,current_lease_id,new_lease_id,ttl_ms,record_retention_ms,metrics_json].
+# KEYS=[lease_key,revoked_key,expiring_zset,active_set,seq_key].
+# ARGV also carries metrics_json and capabilities_json.
 _GRANT_LUA = """
 local lease_key   = KEYS[1]
 local revoked_key = KEYS[2]
@@ -112,6 +108,7 @@ local new_lease_id     = ARGV[3]
 local ttl_ms           = tonumber(ARGV[4])
 local record_retention_ms = tonumber(ARGV[5])
 local metrics_json     = ARGV[6]
+local capabilities_json = ARGV[7]
 
 if ttl_ms == nil or ttl_ms < 1 then
     return redis.error_reply('lease ttl_ms must be positive')
@@ -187,6 +184,9 @@ redis.call('HSET', lease_key,
 
 if metrics_json ~= '' then
     redis.call('HSET', lease_key, 'metrics_json', metrics_json)
+end
+if capabilities_json ~= '' then
+    redis.call('HSET', lease_key, 'capabilities_json', capabilities_json)
 end
 
 -- 逻辑过期后短暂保留 Hash，供 sweeper 取得 doomed lease_id。
@@ -447,13 +447,16 @@ class LeaseStore:
         worker_id: str,
         current_lease_id: str = "",
         metrics: dict[str, Any] | None = None,
+        *,
+        capabilities: dict[str, Any] | None = None,
     ) -> Lease:
         """首次发租或续租。
 
         Args:
             worker_id: Worker 标识。
             current_lease_id: Worker 端持有的 lease_id，空表示首次发租。
-            metrics: 可选的指标快照，序列化为 JSON 落入 Hash（运维 dashboard 兼容）。
+            metrics: 可选的指标快照。
+            capabilities: 已校验能力，和 Lease 在同一 Lua 中原子持久化。
 
         Returns:
             包含最终 ``lease_id`` 与过期时间的 ``Lease`` 对象。
@@ -468,13 +471,8 @@ class LeaseStore:
 
         new_lease_id = secrets.token_hex(16)
 
-        metrics_json = ""
-        if metrics:
-            try:
-                metrics_json = json.dumps(metrics, ensure_ascii=False, default=str)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(f"Lease grant: metrics 序列化失败，忽略: {exc}")
-                metrics_json = ""
+        metrics_json = serialize_lease_value(metrics)
+        capabilities_json = serialize_lease_value(capabilities, preserve_empty=True)
 
         keys = [
             self._lease_key(worker_id),
@@ -490,6 +488,7 @@ class LeaseStore:
             str(int(self._policy.ttl_ms)),
             str(LEASE_RECORD_RETENTION_MS),
             metrics_json,
+            capabilities_json,
         ]
         result = await self._evalsha_grant(keys, args)
 

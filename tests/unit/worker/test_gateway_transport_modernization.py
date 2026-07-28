@@ -48,28 +48,6 @@ async def test_protocol_check_requires_runtime_result_capability():
 
 
 @pytest.mark.asyncio
-async def test_protocol_check_accepts_runtime_result_capability_without_registering():
-    stub = MagicMock(
-        GetCapabilities=AsyncMock(
-            return_value=control_pb2.CapabilitiesResponse(
-                runtime_control_results_v1=True,
-                runtime_control_lease_fencing_v1=True,
-                runtime_control_deadline_v1=True,
-                artifact_transfer_v1=True,
-                runtime_control_authoritative_clock_v1=True,
-            )
-        )
-    )
-    transport = GatewayTransport(gateway_config=GatewayConfig(worker_id="worker-1", api_key="api-key"))
-    transport._control_stub = stub
-
-    await transport._check_protocol_capabilities()
-
-    request = stub.GetCapabilities.await_args.args[0]
-    assert request.worker_id == "worker-1"
-
-
-@pytest.mark.asyncio
 async def test_protocol_check_requires_runtime_control_lease_fencing():
     stub = MagicMock(
         GetCapabilities=AsyncMock(

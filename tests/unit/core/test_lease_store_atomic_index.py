@@ -43,11 +43,37 @@ async def test_grant_updates_primary_record_and_indexes_in_one_script():
         "{tenant}:lease:sequence",  # P1-GW-01 (round6): 全局 seq 计数器
     ]
     args = store._evalsha_grant.await_args.args[1]
-    assert args[3:] == ["30000", "5000", ""]
+    assert args[3:] == ["30000", "5000", "", ""]
     assert lease.lease_id == "lease-id"
     expected_sequence = 7  # P1-GW-01 (round6): sequence 单调 tie-breaker,mock 固定值
     assert lease.sequence == expected_sequence
     redis.pipeline.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_grant_atomically_persists_capabilities_with_lease():
+    store = LeaseStore(MagicMock(), namespace="tenant")
+    store._evalsha_grant = AsyncMock(return_value=["lease-id", "2000", "1000", "new", "7"])
+
+    await store.grant(
+        "worker-a",
+        metrics={"cpu": 1.5},
+        capabilities={"task_types": ["code", "rule"]},
+    )
+
+    args = store._evalsha_grant.await_args.args[1]
+    assert args[-2:] == ['{"cpu":1.5}', '{"task_types":["code","rule"]}']
+    assert "'capabilities_json', capabilities_json" in _GRANT_LUA
+
+
+@pytest.mark.asyncio
+async def test_grant_explicit_empty_capabilities_clear_the_previous_snapshot():
+    store = LeaseStore(MagicMock(), namespace="tenant")
+    store._evalsha_grant = AsyncMock(return_value=["lease-id", "2000", "1000", "renewed", "7"])
+
+    await store.grant("worker-a", current_lease_id="lease-id", capabilities={})
+
+    assert store._evalsha_grant.await_args.args[1][-1] == "{}"
 
 
 def test_grant_lua_uses_redis_time_and_physical_ttl_as_authority() -> None:

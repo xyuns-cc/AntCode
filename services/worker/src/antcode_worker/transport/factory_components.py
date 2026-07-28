@@ -84,6 +84,7 @@ async def check_gateway_capabilities(
         "runtime_control_deadline_v1": response.runtime_control_deadline_v1,
         "artifact_transfer_v1": response.artifact_transfer_v1,
         "runtime_control_authoritative_clock_v1": response.runtime_control_authoritative_clock_v1,
+        "worker_capabilities_v1": response.worker_capabilities_v1,
     }
     missing = next((name for name, supported in capabilities.items() if not supported), None)
     if missing:

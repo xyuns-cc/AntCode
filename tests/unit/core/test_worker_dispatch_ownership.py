@@ -99,7 +99,13 @@ def _scope_task() -> dict:
 @pytest.mark.asyncio
 async def test_dispatch_binds_run_before_publishing(monkeypatch):
     dispatcher = WorkerTaskDispatcher()
-    worker = SimpleNamespace(id=_WORKER_ID, public_id="worker-7", name="Worker 7")
+    worker = SimpleNamespace(
+        id=_WORKER_ID,
+        public_id="worker-7",
+        name="Worker 7",
+        transport_mode="direct",
+        capabilities={"task_types": ["rule"]},
+    )
     events: list[str] = []
 
     dispatcher._select_worker = AsyncMock(return_value=worker)

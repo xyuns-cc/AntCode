@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any
 
 from antcode_contracts import common_pb2, data_pb2
+from antcode_contracts.capabilities import decode_capabilities, encode_capabilities, validate_capabilities
 
 # ---------------------------------------------------------------------------
 # Status 别名映射
@@ -242,4 +243,7 @@ __all__ = [
     # 高层组合
     "encode_task_status",
     "task_status_to_dict",
+    "validate_capabilities",
+    "encode_capabilities",
+    "decode_capabilities",
 ]

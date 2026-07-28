@@ -1,26 +1,7 @@
-"""
-Gateway 传输层实现（Gateway 模式，P1b 重写）
+"""Gateway transport over typed ControlService and DataService gRPC streams.
 
-公网 Worker 通过 ``ControlService`` + ``DataService`` 两个 gRPC stub 接入。
-所有数据面 RPC 现在都是 streaming：
-- ``DataService.StreamTasks``：server-stream，Worker 订阅一次，Gateway 推
-  ``TaskDispatch``。``poll_task`` 从内部队列出队。
-- ``DataService.AckTask``：unary，每条任务回 ack。
-- ``DataService.StreamStatus``：client-stream，Worker 推 ``TaskStatus``。
-  ``report_result`` 把结果 put 到队列，后台任务真正发送。
-- ``DataService.StreamLogs``：client-stream，Worker 推 ``LogBatch``。
-  ``send_log`` / ``send_log_batch`` / ``send_log_chunk`` 全部归一到队列。
-- ``ControlService.WatchControl``：server-stream，Gateway 推
-  ``ControlEvent``；``poll_control`` 从内部队列出队。
-- ``ControlService.AckControl``：unary，每条事件回 ack。
-- ``ControlService.Lease``：unary，替代旧 SendHeartbeat（参数 metrics）。
-
-注意：本文件**只动实现**，``TransportBase`` 接口签名不变（``send_heartbeat``
-保留名字，内部走 Lease；``send_control_result`` 通过 AckControl 携带
-``success`` / ``error`` 回报；``send_log_chunk`` 暂时归并入日志流，
-chunked binary 后续 P3 走 source_bundle/pgartifact）。
-
-Requirements: 5.5, 5.6, 5.7
+The internal ``TransportBase`` contract stays transport-independent; this module
+owns lease fencing, subscriptions, acknowledgements, status, logs, and artifacts.
 """
 
 from __future__ import annotations
@@ -33,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from antcode_contracts.transcode import encode_capabilities
 from antcode_core.common.log_limits import (
     DEFAULT_LOG_MAX_BATCH_BYTES,
     DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
@@ -183,6 +165,7 @@ class GatewayTransport(TransportBase):
     ):
         super().__init__(config)
         self._gateway_config = gateway_config or GatewayConfig()
+        self._lease_capabilities: dict[str, str] = {}
 
         # gRPC 组件
         self._channel: grpc_aio.Channel | None = None
@@ -908,10 +891,13 @@ class GatewayTransport(TransportBase):
             return False
 
         metrics_dict = self._heartbeat_to_metrics_dict(heartbeat)
+        capabilities = encode_capabilities(getattr(heartbeat, "capabilities", None))
+        self._lease_capabilities = capabilities
         try:
             new_lease_id, _exp, _renew, revoked = await self.lease_renew(
                 current_lease_id=self._lease_id,
                 metrics=metrics_dict,
+                capabilities=capabilities,
             )
             if revoked:
                 return False
@@ -947,6 +933,7 @@ class GatewayTransport(TransportBase):
         self,
         current_lease_id: str,
         metrics: dict | None = None,
+        capabilities: dict[str, str] | None = None,
     ) -> tuple[str, int, int, bool]:
         """Gateway 模式 lease 续租：调用 ``ControlService.Lease``。
 
@@ -969,6 +956,7 @@ class GatewayTransport(TransportBase):
                 worker_id=worker_id,
                 current_lease_id=current_lease_id or "",
                 metrics=metrics_msg,
+                capabilities=capabilities if capabilities is not None else self._lease_capabilities,
             )
             response = await asyncio.wait_for(
                 self._control_stub.Lease(
@@ -1209,6 +1197,9 @@ class GatewayTransport(TransportBase):
         if self._authenticator is not None:
             self._authenticator = self._build_authenticator()
 
+    def set_capabilities(self, capabilities: object) -> None:
+        self._lease_capabilities = encode_capabilities(capabilities)
+
     def get_status(self) -> dict[str, Any]:
         reconnect_stats = None
         if self._reconnect_manager:
@@ -1372,6 +1363,8 @@ class GatewayTransport(TransportBase):
             raise RuntimeError("Gateway 不支持 artifact_transfer_v1，拒绝启动")
         if not response.runtime_control_authoritative_clock_v1:
             raise RuntimeError("Gateway 不支持 runtime_control_authoritative_clock_v1，拒绝启动")
+        if not response.worker_capabilities_v1:
+            raise RuntimeError("Gateway 不支持 worker_capabilities_v1，拒绝启动")
 
     async def _validate_reconnect_lease(self, control_stub: Any) -> str:
         if not self._running:
@@ -1385,6 +1378,7 @@ class GatewayTransport(TransportBase):
         request = control_pb2.LeaseRequest(
             worker_id=self._gateway_config.worker_id or "",
             current_lease_id=self._lease_id,
+            capabilities=self._lease_capabilities,
         )
         response = await asyncio.wait_for(
             control_stub.Lease(request, metadata=self._get_auth_metadata()),

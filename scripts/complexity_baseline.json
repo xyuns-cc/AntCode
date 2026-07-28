@@ -425,7 +425,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 758
+      "value": 757
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
@@ -947,19 +947,19 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "C901",
-      "value": 18
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher.dispatch_batch",
-      "rule": "PLR0912",
       "value": 17
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
+      "rule": "PLR0912",
+      "value": 16
+    },
+    {
+      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
+      "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "PLR0915",
-      "value": 57
+      "value": 55
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
@@ -1649,7 +1649,7 @@
       "path": "services/gateway/src/antcode_gateway/services/control_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 904
+      "value": 879
     },
     {
       "path": "services/gateway/src/antcode_gateway/services/data_service.py",
@@ -2345,7 +2345,7 @@
       "path": "services/worker/src/antcode_worker/app/wiring.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 764
+      "value": 761
     },
     {
       "path": "services/worker/src/antcode_worker/app/wiring.py",
@@ -3065,7 +3065,7 @@
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1675
+      "value": 1669
     },
     {
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
@@ -4769,7 +4769,7 @@
       "path": "tests/unit/worker/test_gateway_transport_modernization.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 440
+      "value": 418
     },
     {
       "path": "tests/unit/worker/test_gateway_transport_modernization.py",

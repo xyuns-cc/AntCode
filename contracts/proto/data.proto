@@ -46,7 +46,7 @@ service DataService {
 
 message SubscribeRequest {
   string worker_id = 1;
-  repeated string capabilities = 2;         // Capability tags this worker can serve
+  repeated string capabilities = 2 [deprecated = true]; // LeaseRequest.capabilities is authoritative
   int32 prefetch = 3;                       // Hint: how many tasks Master may push ahead
   string lease_id = 4;                      // Current Worker lease generation
   TraceContext trace = 100;

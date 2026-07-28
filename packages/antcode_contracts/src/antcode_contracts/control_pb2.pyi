@@ -55,18 +55,20 @@ class CapabilitiesRequest(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class CapabilitiesResponse(_message.Message):
-    __slots__ = ("runtime_control_results_v1", "runtime_control_lease_fencing_v1", "runtime_control_deadline_v1", "artifact_transfer_v1", "runtime_control_authoritative_clock_v1")
+    __slots__ = ("runtime_control_results_v1", "runtime_control_lease_fencing_v1", "runtime_control_deadline_v1", "artifact_transfer_v1", "runtime_control_authoritative_clock_v1", "worker_capabilities_v1")
     RUNTIME_CONTROL_RESULTS_V1_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_CONTROL_LEASE_FENCING_V1_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_CONTROL_DEADLINE_V1_FIELD_NUMBER: _ClassVar[int]
     ARTIFACT_TRANSFER_V1_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_CONTROL_AUTHORITATIVE_CLOCK_V1_FIELD_NUMBER: _ClassVar[int]
+    WORKER_CAPABILITIES_V1_FIELD_NUMBER: _ClassVar[int]
     runtime_control_results_v1: bool
     runtime_control_lease_fencing_v1: bool
     runtime_control_deadline_v1: bool
     artifact_transfer_v1: bool
     runtime_control_authoritative_clock_v1: bool
-    def __init__(self, runtime_control_results_v1: bool = ..., runtime_control_lease_fencing_v1: bool = ..., runtime_control_deadline_v1: bool = ..., artifact_transfer_v1: bool = ..., runtime_control_authoritative_clock_v1: bool = ...) -> None: ...
+    worker_capabilities_v1: bool
+    def __init__(self, runtime_control_results_v1: bool = ..., runtime_control_lease_fencing_v1: bool = ..., runtime_control_deadline_v1: bool = ..., artifact_transfer_v1: bool = ..., runtime_control_authoritative_clock_v1: bool = ..., worker_capabilities_v1: bool = ...) -> None: ...
 
 class DeregisterRequest(_message.Message):
     __slots__ = ("worker_id", "reason", "lease_id", "trace")
@@ -89,16 +91,25 @@ class DeregisterResponse(_message.Message):
     def __init__(self, success: bool = ..., error: _Optional[str] = ...) -> None: ...
 
 class LeaseRequest(_message.Message):
-    __slots__ = ("worker_id", "current_lease_id", "metrics", "trace")
+    __slots__ = ("worker_id", "current_lease_id", "metrics", "capabilities", "trace")
+    class CapabilitiesEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     CURRENT_LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
+    CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     current_lease_id: str
     metrics: _common_pb2.Metrics
+    capabilities: _containers.ScalarMap[str, str]
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., current_lease_id: _Optional[str] = ..., metrics: _Optional[_Union[_common_pb2.Metrics, _Mapping]] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., current_lease_id: _Optional[str] = ..., metrics: _Optional[_Union[_common_pb2.Metrics, _Mapping]] = ..., capabilities: _Optional[_Mapping[str, str]] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class LeaseResponse(_message.Message):
     __slots__ = ("lease_id", "expires_at_ms", "renew_after_ms", "revoked", "revoke_reason")

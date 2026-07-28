@@ -67,6 +67,7 @@ message CapabilitiesResponse {
   bool runtime_control_deadline_v1 = 3;     // Runtime commands carry an execution deadline
   bool artifact_transfer_v1 = 4;            // Gateway streams source bundles and task artifacts
   bool runtime_control_authoritative_clock_v1 = 5; // Gateway attaches its Redis TIME observation
+  bool worker_capabilities_v1 = 6;          // Lease atomically persists Worker task capabilities
 }
 
 // =========================================================================
@@ -93,6 +94,7 @@ message LeaseRequest {
   string worker_id = 1;
   string current_lease_id = 2;              // Empty on first call, prior lease_id on renew
   Metrics metrics = 3;                      // System + spider metrics piggy-back here
+  map<string, string> capabilities = 4;     // JSON-encoded Worker capability values
   TraceContext trace = 100;
 }
 

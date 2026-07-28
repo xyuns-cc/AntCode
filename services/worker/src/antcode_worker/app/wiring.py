@@ -98,17 +98,14 @@ def create_container(config: Any) -> Container:
     # 原顺序里 transport 内部 register-direct 时 registry 还没构建，无法读能力。
     plugin_registry = _create_plugin_registry(config)
     container.register("plugin_registry", plugin_registry)
-    # 把 capabilities.task_types 灌进 CapabilityDetector 的缓存，让接下来的
-    # register-direct 里 detect_all() 能拿到。
-    try:
-        from antcode_worker.heartbeat.reporter import get_capability_detector
+    from antcode_worker.app.capabilities import detect_plugin_capabilities
 
-        get_capability_detector().detect_all(force_refresh=True, task_types=plugin_registry.capabilities())
-    except Exception as exc:
-        logger.warning(f"预填 capabilities.task_types 失败: {exc}")
+    capabilities = detect_plugin_capabilities(plugin_registry)
 
     # 1. 创建传输层
     transport = _create_transport(config)
+    if hasattr(transport, "set_capabilities"):
+        transport.set_capabilities(capabilities)
     container.register("transport", transport)
 
     # 2. 创建运行时管理器

@@ -56,6 +56,7 @@ from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import LeaseHandler
+from antcode_gateway.services.lease_heartbeat import decode_lease_heartbeat, persist_legacy_heartbeat
 from antcode_gateway.services.runtime_control_expiry import (
     build_runtime_control_event,
     prepare_runtime_control_delivery,
@@ -282,6 +283,7 @@ class GatewayControlService(ControlServiceServicer):
             runtime_control_deadline_v1=True,
             artifact_transfer_v1=True,
             runtime_control_authoritative_clock_v1=True,
+            worker_capabilities_v1=True,
         )
 
     async def _require_current_lease(
@@ -378,12 +380,18 @@ class GatewayControlService(ControlServiceServicer):
         if self._lease_store is None:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
             return control_pb2.LeaseResponse(revoked=True)
-        metrics_dict, lease_data = self._lease_request_metrics(request, worker_id)
+        try:
+            heartbeat = decode_lease_heartbeat(request, worker_id)
+        except ValueError:
+            logger.warning("Lease capabilities 非法: worker_id={}", worker_id)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid worker capabilities")
+            raise RuntimeError("gRPC context.abort returned unexpectedly")
         try:
             lease = await self._lease_store.grant(
                 worker_id,
                 current_lease_id=request.current_lease_id or "",
-                metrics=metrics_dict,
+                metrics=heartbeat.metrics,
+                capabilities=heartbeat.capabilities,
             )
         except (LeaseConflictError, LeaseRevokedError) as exc:
             logger.warning("Lease 被 fencing: worker_id={} lease_id={}", worker_id, request.current_lease_id)
@@ -398,46 +406,13 @@ class GatewayControlService(ControlServiceServicer):
             logger.exception(f"Lease grant 失败: worker_id={worker_id}, exc={exc}")
             await context.abort(grpc.StatusCode.UNAVAILABLE, "lease grant failed")
             return control_pb2.LeaseResponse(revoked=True)
-        await self._persist_lease_heartbeat(lease_data)
+        await persist_legacy_heartbeat(self._lease_handler, heartbeat.heartbeat)
         return control_pb2.LeaseResponse(
             lease_id=lease.lease_id,
             expires_at_ms=lease.expires_at_ms,
             renew_after_ms=self._lease_store.policy.renew_after_ms,
             revoked=False,
         )
-
-    @staticmethod
-    def _lease_request_metrics(request: control_pb2.LeaseRequest, worker_id: str) -> tuple[dict | None, Any]:
-        if not request.HasField("metrics"):
-            return None, None
-        from antcode_gateway.handlers.heartbeat import LeaseData
-
-        metrics = request.metrics
-        values = {
-            "cpu": metrics.cpu,
-            "memory": metrics.memory,
-            "disk": metrics.disk,
-            "running_tasks": metrics.running_tasks,
-            "max_concurrent_tasks": metrics.max_concurrent_tasks,
-        }
-        lease_data = LeaseData(
-            worker_id=worker_id,
-            status="online",
-            cpu=metrics.cpu,
-            memory=metrics.memory,
-            disk=metrics.disk,
-            running_tasks=metrics.running_tasks,
-            max_concurrent_tasks=metrics.max_concurrent_tasks,
-        )
-        return values, lease_data
-
-    async def _persist_lease_heartbeat(self, lease_data: Any) -> None:
-        if lease_data is None:
-            return
-        try:
-            await self._lease_handler.handle(lease_data)
-        except Exception as exc:
-            logger.warning(f"Lease 写 Redis 心跳 Hash 失败: {exc}")
 
     # =========================================================================
     # CancelTask / UpdateConfig - 推到 control stream

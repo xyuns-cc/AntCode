@@ -13,6 +13,15 @@ from typing import Any, cast
 
 from loguru import logger
 
+from antcode_core.application.services.workers.worker_capability_routing import (
+    capability_requirement_label,
+    has_render_capability,
+    require_worker_current_requirements,
+    required_execution_task_types,
+    resolve_capability_map,
+    resolve_selection_capabilities,
+    supports_task_types,
+)
 from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
@@ -269,7 +278,7 @@ class WorkerLoadBalancer:
         region=None,
         tags=None,
         require_render=False,
-        require_task_type: str | None = None,
+        require_task_type: str | frozenset[str] | None = None,
     ):
         """
         选择最佳节点
@@ -282,7 +291,7 @@ class WorkerLoadBalancer:
         - require_render: 是否需要渲染能力（DrissionPage）
         - require_task_type: T6-T4b: 要求 worker.capabilities.task_types
           包含此值（"rule" / "code" / "spider" / "render" / "file"）。
-          worker 未上报 task_types 时视为"兼容任意"（向后兼容旧 worker）。
+          worker 未上报或格式错误时 fail-closed，避免派给不支持的节点。
         """
         if workers is None:
             query = Worker.filter(status=WorkerStatus.ONLINE.value)
@@ -293,6 +302,8 @@ class WorkerLoadBalancer:
         if not workers:
             logger.warning("无可用节点")
             return None
+
+        capabilities = await resolve_selection_capabilities(workers, require_render, require_task_type)
 
         filtered_workers = []
         for worker in workers:
@@ -305,13 +316,12 @@ class WorkerLoadBalancer:
                     continue
 
             # 检查渲染能力要求
-            if require_render and not self._has_render_capability(worker):
+            if require_render and not has_render_capability(capabilities[worker.id]):
                 logger.debug(f"节点 [{worker.name}] 无渲染能力，跳过")
                 continue
 
             # T6-T4b: task_type capability 过滤
-            if require_task_type and not self._supports_task_type(worker, require_task_type):
-                logger.debug(f"节点 [{worker.name}] 不支持 task_type={require_task_type}，跳过")
+            if require_task_type and not supports_task_types(capabilities[worker.id], require_task_type):
                 continue
 
             filtered_workers.append(worker)
@@ -319,7 +329,7 @@ class WorkerLoadBalancer:
         if not filtered_workers:
             if require_task_type:
                 logger.warning(
-                    f"无支持 task_type={require_task_type!r} 的可用节点 "
+                    f"无支持 task_type={capability_requirement_label(require_task_type)} 的可用节点 "
                     "(检查 worker 侧 WORKER_ENABLE_RULE_PLUGIN 等 env)"
                 )
             elif require_render:
@@ -372,25 +382,14 @@ class WorkerLoadBalancer:
 
     def _has_render_capability(self, worker):
         """检查节点是否有渲染能力"""
-        if not worker.capabilities:
-            return False
-        caps = worker.capabilities
-        task_types = caps.get("task_types")
-        if isinstance(task_types, list) and "render" in task_types:
-            return True
-        playwright = caps.get("playwright")
-        return bool(isinstance(playwright, dict) and playwright.get("enabled"))
+        return has_render_capability(worker.capabilities)
 
-    def _supports_task_type(self, worker, task_type: str) -> bool:
+    def _supports_task_type(self, worker, task_type: str | frozenset[str]) -> bool:
         """T6-T4b: worker.capabilities.task_types 里是否声明支持某 task_type。
 
         Worker 必须显式声明能力，缺失或格式错误时 fail-closed。
         """
-        caps = worker.capabilities or {}
-        declared = caps.get("task_types")
-        if not isinstance(declared, list):
-            return False
-        return task_type in declared
+        return supports_task_types(worker.capabilities, task_type)
 
     async def get_workers_ranking(self, region=None, top_n=10):
         """获取节点排名"""
@@ -732,12 +731,7 @@ class WorkerTaskDispatcher:
                     require_render = True
                     break
 
-        # T6-T4b: 批内如果所有任务的 project_type 一致，把它作为 capability
-        # 过滤条件；否则不加 capability 过滤（不同类型混排时逐个派发更稳）。
-        project_types = {t.get("project_type") for t in tasks if t.get("project_type")}
-        require_task_type: str | None = None
-        if len(project_types) == 1:
-            require_task_type = next(iter(project_types))
+        require_task_type = required_execution_task_types(tasks)
 
         # 选择目标 Worker
         worker = await self._select_worker(
@@ -750,7 +744,8 @@ class WorkerTaskDispatcher:
         if not worker:
             err = "无可用 Worker"
             if require_task_type:
-                err = f"无支持 task_type={require_task_type!r} 的 Worker (检查 worker 侧插件是否装载)"
+                label = capability_requirement_label(require_task_type)
+                err = f"无支持 task_type={label} 的 Worker (检查 worker 侧插件是否装载)"
             return BatchDispatchResult(success=False, error=err)
 
         try:
@@ -759,19 +754,11 @@ class WorkerTaskDispatcher:
             if not connected:
                 return BatchDispatchResult(success=False, error=f"Worker 未在线: {worker.name}")
 
-            # A2: 走 SourceBundleDispatchService 构建每个项目的 source bundle 与派发信息。
-            # 迁移 38 已下线 worker_project 分布式同步表；新链路：Master 构建
-            # source_bundle → Worker 按 content-hash 幂等下载。契约字段与
-            # gateway 端一致：source_bundle_uri / _sha256 / _size / source_subdir。
-            #
-            # O1-followup: rule 项目**跳过** source_bundle 构建——rule 定义在
-            # ProjectRule 表里，worker 侧 RulePlugin 从 ``params.kwargs.rule_detail``
-            # 拿到规则，无 git 源码要下发。此处按 project_type 分流。
+            # Master 构建 source bundle；rule 定义随参数下发，不需要 bundle。
             from antcode_core.application.services.workers.source_bundle_dispatch_service import (
                 source_bundle_dispatch_service,
             )
 
-            # 分离需要 source_bundle 的项目（code/file）与 rule 项目
             bundle_project_ids: list[str] = []
             rule_task_ids: set[str] = set()
             for t in tasks:
@@ -783,7 +770,6 @@ class WorkerTaskDispatcher:
                 elif pid not in bundle_project_ids:
                     bundle_project_ids.append(pid)
 
-            # 同一项目可包含多个 run；每个 run 都必须固化并使用自己的源码快照。
             run_ids_by_project = _group_run_ids_by_project(tasks)
 
             run_download_info: dict = {}
@@ -803,7 +789,6 @@ class WorkerTaskDispatcher:
                     reason = failed_items[0].get("reason") if failed_items else "项目同步失败"
                     return BatchDispatchResult(success=False, error=reason, sync_results=sync_results)
 
-            # 为每个任务添加 source_bundle 契约字段（rule 任务直接透传，无 bundle）
             enriched_tasks = []
             for task in tasks:
                 task_copy = dict(task)
@@ -822,11 +807,12 @@ class WorkerTaskDispatcher:
                     task_copy["resolved_revision"] = info.get("resolved_revision", "")
                 enriched_tasks.append(task_copy)
 
-            # 在任务进入 Worker 可消费的 Redis Stream 前先持久化归属。Gateway
-            # 与 Direct 上报入口会据此校验 run_id -> worker，若等入队后再写，
-            # Worker 抢先执行时会把合法日志/状态判成越权。不存在 TaskRun 的
-            # 兼容调用保持不变；一旦后续上报该 run，ownership 校验仍会拒绝。
-            await self._bind_task_runs_to_worker(enriched_tasks, worker.id)
+            await self._revalidate_and_bind(
+                enriched_tasks,
+                worker,
+                require_render=require_render,
+                required=require_task_type,
+            )
 
             # 发送批量任务到节点的优先级队列
             result = await self._send_batch_to_queue(
@@ -866,6 +852,14 @@ class WorkerTaskDispatcher:
 
         return await bind_task_runs_to_worker(tasks, worker_id)
 
+    async def _revalidate_and_bind(self, tasks, worker, *, require_render, required) -> int:
+        await require_worker_current_requirements(
+            worker,
+            require_render=require_render,
+            required=required,
+        )
+        return await self._bind_task_runs_to_worker(tasks, worker.id)
+
     async def _ensure_worker_connected(self, worker):
         """确保节点在线（依赖心跳状态）"""
         from antcode_core.application.services.workers.worker_heartbeat_service import (
@@ -890,7 +884,7 @@ class WorkerTaskDispatcher:
         region=None,
         tags=None,
         require_render=False,
-        require_task_type: str | None = None,
+        require_task_type: str | frozenset[str] | None = None,
     ):
         """
         选择目标节点
@@ -913,12 +907,18 @@ class WorkerTaskDispatcher:
                 logger.warning(f"节点离线: {worker.name}")
                 return None
 
+            capability_map = await resolve_capability_map(
+                [worker],
+                authoritative=bool(require_render or require_task_type),
+            )
+            worker_capabilities = capability_map[worker.id]
+
             # 检查指定 Worker 是否满足渲染要求
-            if require_render and not self.load_balancer._has_render_capability(worker):
+            if require_render and not has_render_capability(worker_capabilities):
                 logger.warning(f"指定 Worker [{worker.name}] 无渲染能力")
                 return None
             # T6-T4b: 指定 worker 也要满足 capability 声明
-            if require_task_type and not self.load_balancer._supports_task_type(worker, require_task_type):
+            if require_task_type and not supports_task_types(worker_capabilities, require_task_type):
                 logger.warning(f"指定 Worker [{worker.name}] 不支持 task_type={require_task_type!r}")
                 return None
 

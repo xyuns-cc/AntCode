@@ -38,7 +38,7 @@ class HeartbeatData:
     os_version: str = ""
     python_version: str = ""
     machine_arch: str = ""
-    capabilities: dict[str, str] = field(default_factory=dict)
+    capabilities: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
 
@@ -125,10 +125,9 @@ class HeartbeatHandler:
                 "machine_arch": heartbeat.machine_arch,
                 "timestamp": timestamp.isoformat(),
             }
-            if heartbeat.capabilities:
-                import json
+            import json
 
-                status_data["capabilities"] = json.dumps(heartbeat.capabilities, ensure_ascii=False)
+            status_data["capabilities"] = json.dumps(heartbeat.capabilities, ensure_ascii=False)
 
             pipe = redis.pipeline(transaction=False)
             pipe.hset(heartbeat_key, mapping=status_data)

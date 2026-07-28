@@ -24,6 +24,7 @@ def _capabilities_response() -> control_pb2.CapabilitiesResponse:
         runtime_control_deadline_v1=True,
         artifact_transfer_v1=True,
         runtime_control_authoritative_clock_v1=True,
+        worker_capabilities_v1=True,
     )
 
 
