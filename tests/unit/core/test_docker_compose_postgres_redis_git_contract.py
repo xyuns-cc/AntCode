@@ -50,6 +50,13 @@ def test_direct_worker_waits_for_web_api_and_uses_service_url():
     )
 
 
+def test_web_api_uses_a_non_root_compatible_named_data_volume():
+    compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+
+    assert "web_data:/app/data" in compose["services"]["web-api"]["volumes"]
+    assert compose["volumes"]["web_data"] == {"driver": "local"}
+
+
 def test_worker_grants_only_required_nested_sandbox_options():
     compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
     worker = compose["services"]["worker"]

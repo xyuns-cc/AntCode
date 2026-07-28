@@ -108,7 +108,7 @@ services:
       - SERVER_PORT=8000
       - BIND_HOST=0.0.0.0
     volumes:
-      - ../../data:/app/data
+      - web_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -294,4 +294,6 @@ volumes:
   redis_acl:
     driver: local
   worker_data:
+    driver: local
+  web_data:
     driver: local
