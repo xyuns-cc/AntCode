@@ -87,7 +87,11 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --chown=appuser:appgroup packages/antcode_core/src/antcode_core /app/packages/antcode_core/src/antcode_core
 COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /app/packages/antcode_contracts/src/antcode_contracts
 COPY --chown=appuser:appgroup services/web_api/src/antcode_web_api /app/services/web_api/src/antcode_web_api
-COPY --chown=appuser:appgroup scripts/__init__.py scripts/init_db.py /app/scripts/
+COPY --chown=appuser:appgroup \
+    scripts/__init__.py \
+    scripts/init_db.py \
+    scripts/init_db_environment.py \
+    /app/scripts/
 
 # 创建数据目录并设置权限
 RUN mkdir -p \

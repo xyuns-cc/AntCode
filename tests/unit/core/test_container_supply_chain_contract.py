@@ -91,7 +91,9 @@ def test_worker_image_preinstalls_default_python_runtime():
 def test_web_api_image_contains_database_initializer():
     dockerfile = _read(ROOT / "infra/docker/Dockerfile.web_api")
 
-    assert "scripts/__init__.py scripts/init_db.py /app/scripts/" in dockerfile
+    for path in ("scripts/__init__.py", "scripts/init_db.py", "scripts/init_db_environment.py"):
+        assert path in dockerfile
+    assert "/app/scripts/" in dockerfile
 
 
 def test_web_api_runtime_contains_git_for_repository_scan():
