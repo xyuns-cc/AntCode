@@ -58,11 +58,15 @@ def test_ci_does_not_commit_fixed_database_or_admin_passwords() -> None:
     integration = _step(backend, "Run integration tests")
     generate = _step(jobs["e2e"], "Generate ephemeral stack secrets")["run"]
 
-    assert postgres["env"]["POSTGRES_HOST_AUTH_METHOD"] == "trust"
-    assert "POSTGRES_PASSWORD" not in postgres["env"]
-    for url in (backend["env"]["DATABASE_URL"], *integration["env"].values()):
-        if str(url).startswith("postgresql://"):
-            assert urlsplit(str(url)).password is None
+    runtime_password = "ci-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert "POSTGRES_HOST_AUTH_METHOD" not in postgres["env"]
+    assert postgres["env"]["POSTGRES_PASSWORD"] == runtime_password
+    database_urls = (
+        backend["env"]["DATABASE_URL"],
+        integration["env"]["DATABASE_URL"],
+        integration["env"]["TEST_DATABASE_URL"],
+    )
+    assert all(urlsplit(str(url)).password == runtime_password for url in database_urls)
     assert "PGPASSWORD" not in _step(backend, "Prepare integration databases").get("env", {})
     assert 'admin_password="$(openssl rand -base64 24' in generate
 
