@@ -1,12 +1,16 @@
 import ast
 import json
 import tomllib
+from datetime import date
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+SECURITY_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "security-scan.yml"
+DOCKER_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "docker-build.yml"
+TRIVY_IGNORE_PATH = ROOT / ".trivyignore.yaml"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 MAKEFILE_PATH = ROOT / "Makefile"
 TESTS_README_PATH = ROOT / "tests" / "README.md"
@@ -14,6 +18,7 @@ MIGRATION_TEST_PATH = ROOT / "tests/integration/postgres/test_20260713_migration
 SCHEDULER_TEST_PATH = ROOT / "tests/unit/master/test_scheduler_concurrency_stats.py"
 FRONTEND_LOCK_PATH = ROOT / "web/antcode-frontend/package-lock.json"
 FRONTEND_PACKAGE_PATH = ROOT / "web/antcode-frontend/package.json"
+FRONTEND_SOURCE_PATH = ROOT / "web/antcode-frontend/src"
 
 
 def _workflow() -> dict:
@@ -119,6 +124,47 @@ def test_frontend_install_does_not_execute_lockfile_external_npx() -> None:
     assert "only-allow" not in preinstall
 
 
+def test_trivy_rsc_advisory_exception_is_narrow_and_expires() -> None:
+    policy = yaml.safe_load(TRIVY_IGNORE_PATH.read_text(encoding="utf-8"))
+    assert policy == {
+        "vulnerabilities": [
+            {
+                "id": "GHSA-qwww-vcr4-c8h2",
+                "paths": ["web/antcode-frontend/package-lock.json"],
+                "expired_at": date(2026, 8, 31),
+                "statement": (
+                    "Not affected: AntCode is a React 18 SPA using react-router-dom browser APIs. "
+                    "The advisory explicitly affects only unstable React Server Components APIs, "
+                    "which are not imported or enabled. Re-evaluate before this exception expires."
+                ),
+            }
+        ]
+    }
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in FRONTEND_SOURCE_PATH.rglob("*") if path.suffix in {".ts", ".tsx"}
+    )
+    assert "react-server" not in source
+    assert "unstable_RSC" not in source
+    assert "RSCHydratedRouter" not in source
+    assert "RSCStaticRouter" not in source
+
+
+def test_every_trivy_gate_loads_the_structured_exception() -> None:
+    workflows = (
+        yaml.safe_load(SECURITY_WORKFLOW_PATH.read_text(encoding="utf-8")),
+        yaml.safe_load(DOCKER_WORKFLOW_PATH.read_text(encoding="utf-8")),
+    )
+    trivy_steps = [
+        step
+        for workflow in workflows
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
+    ]
+    assert len(trivy_steps) == 4
+    assert all(step["with"]["trivyignores"] == ".trivyignore.yaml" for step in trivy_steps)
+
+
 def test_click_security_floor_is_pinned() -> None:
     pyproject = PYPROJECT_PATH.read_text(encoding="utf-8")
 
@@ -194,3 +240,13 @@ def test_e2e_job_really_runs_and_gates_image_publication() -> None:
     # 镜像发布与分支保护 summary 都必须被真实 E2E 阻断
     assert "e2e" in jobs["publish-images"]["needs"]
     assert "e2e" in jobs["summary"]["needs"]
+
+
+def test_windows_security_job_publishes_actionable_failure_annotations() -> None:
+    job = _workflow()["jobs"]["windows-artifact-security"]
+    test_step = _step_command(job, "Run Windows artifact security tests")
+    annotation_step = _step_command(job, "Annotate Windows artifact test failures")
+
+    assert "--junitxml=windows-artifact-results.xml" in test_step
+    assert "windows-artifact-results.xml" in annotation_step
+    assert "::error title=Windows artifact test failed:" in annotation_step

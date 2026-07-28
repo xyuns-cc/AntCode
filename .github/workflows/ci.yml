@@ -13,7 +13,7 @@ on:
       - develop
 
 env:
-  NODE_VERSION: "22.10.0"
+  NODE_VERSION: "22.12.0"
   UV_VERSION: "0.8.17"
 
 jobs:
@@ -91,6 +91,8 @@ jobs:
         run: uv sync --all-packages --extra dev --frozen
 
       - name: Prepare integration databases
+        env:
+          PGPASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           psql --host=localhost --port=15432 --username=antcode \
             --dbname=antcode_migration_test --set=ON_ERROR_STOP=1 \
@@ -172,6 +174,9 @@ jobs:
             echo "HOST_IP=$host_ip"
             echo "E2E_POSTGRES_PASSWORD=$pg_password"
             echo "DEFAULT_ADMIN_PASSWORD=$admin_password"
+            # Compose 会在 build/run 阶段解析所有 service；控制面启动后，
+            # Generate Direct Worker install key 步骤会用真实一次性 Key 覆盖此值。
+            echo "ANTCODE_WORKER_KEY=$(openssl rand -hex 32)"
           } >> "$GITHUB_ENV"
           {
             echo "POSTGRES_DB=antcode_e2e_test"
@@ -461,7 +466,8 @@ jobs:
           $arguments = @(
             "run", "--extra", "dev", "pytest",
             "tests/unit/worker/test_artifact_io_windows.py",
-            "tests/unit/worker/test_artifact_io_windows_real.py", "-q"
+            "tests/unit/worker/test_artifact_io_windows_real.py", "-q",
+            "--junitxml=windows-artifact-results.xml"
           )
           $process = Start-Process uv -ArgumentList $arguments -NoNewWindow -PassThru
           try {
@@ -473,6 +479,20 @@ jobs:
           $process.Refresh()
           if ($process.ExitCode -ne 0) {
             exit $process.ExitCode
+          }
+
+      - name: Annotate Windows artifact test failures
+        if: failure() && hashFiles('windows-artifact-results.xml') != ''
+        shell: pwsh
+        run: |
+          [xml]$report = Get-Content windows-artifact-results.xml
+          $cases = @($report.testsuites.testsuite.testcase) + @($report.testsuite.testcase)
+          foreach ($case in $cases) {
+            $failure = if ($case.failure) { $case.failure } else { $case.error }
+            if (-not $failure) { continue }
+            $message = [string]$failure.'#text'
+            $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows artifact test failed: $($case.name)::$message"
           }
 
   # ==================== 后端安全扫描 ====================

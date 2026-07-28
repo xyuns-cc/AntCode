@@ -1,0 +1,9 @@
+vulnerabilities:
+  - id: GHSA-qwww-vcr4-c8h2
+    paths:
+      - "web/antcode-frontend/package-lock.json"
+    expired_at: 2026-08-31
+    statement: >-
+      Not affected: AntCode is a React 18 SPA using react-router-dom browser APIs.
+      The advisory explicitly affects only unstable React Server Components APIs,
+      which are not imported or enabled. Re-evaluate before this exception expires.

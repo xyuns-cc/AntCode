@@ -67,8 +67,9 @@ def test_ci_does_not_commit_fixed_database_or_admin_passwords() -> None:
         integration["env"]["TEST_DATABASE_URL"],
     )
     assert all(urlsplit(str(url)).password == runtime_password for url in database_urls)
-    assert "PGPASSWORD" not in _step(backend, "Prepare integration databases").get("env", {})
+    assert _step(backend, "Prepare integration databases")["env"]["PGPASSWORD"] == runtime_password
     assert 'admin_password="$(openssl rand -base64 24' in generate
+    assert 'echo "ANTCODE_WORKER_KEY=$(openssl rand -hex 32)"' in generate
 
 
 def test_git_and_docker_contexts_ignore_credential_files() -> None:

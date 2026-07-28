@@ -83,6 +83,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           exit-code: '1'
+          trivyignores: .trivyignore.yaml
           format: sarif
           output: trivy-fs.sarif
 

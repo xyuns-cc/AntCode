@@ -104,6 +104,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           exit-code: '1'
+          trivyignores: .trivyignore.yaml
           format: table
 
       - name: Scan candidate image (arm64)
@@ -113,6 +114,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           exit-code: '1'
+          trivyignores: .trivyignore.yaml
           format: table
 
       # P1-CI-06: 发布顺序重排为 构建 -> 按 digest 扫描 -> 通过后才打正式标签。
@@ -147,6 +149,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           exit-code: '1'
+          trivyignores: .trivyignore.yaml
           format: table
 
       # 扫描通过后才创建正式标签：纯 manifest 指向操作，不重新构建，
