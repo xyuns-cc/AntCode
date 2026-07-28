@@ -16,12 +16,33 @@ IGNORE_PATHS = (
 )
 REQUIRED_CREDENTIAL_PATTERNS = frozenset(
     {
+        "*.der",
+        "*.kubeconfig",
+        "*.ovpn",
         "*.pem",
         "*.key",
+        "*.pkcs12",
+        "**/.aws/",
+        "**/.azure/",
+        "**/.config/gcloud/",
+        "**/.docker/config.json",
+        "**/.kube/config",
+        "**/.ssh/",
+        ".authinfo",
+        ".git-credentials",
+        ".my.cnf",
         ".netrc",
         ".pypirc",
+        ".pgpass",
         ".npmrc",
+        ".vault-token",
         "*credentials*.json",
+        "auth.json",
+        "pip.conf",
+        "pip.ini",
+        "secret*.json",
+        "secrets.yaml",
+        "secrets.yml",
         "service-account*.json",
         "*.tfstate",
         "*.tfvars",
@@ -44,11 +65,27 @@ def test_security_workflow_scans_git_history_with_pinned_gitleaks() -> None:
     scanner = _step(job, "Scan committed secrets")
 
     assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["persist-credentials"] is False
     action, revision = scanner["uses"].split("@", maxsplit=1)
     assert action == "gitleaks/gitleaks-action"
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
     assert scanner["env"]["GITLEAKS_VERSION"] == "8.24.3"
     assert scanner["env"]["GITLEAKS_ENABLE_UPLOAD_ARTIFACT"] == "false"
+
+
+def test_security_workflow_explicitly_scans_current_tree_secrets() -> None:
+    jobs = _workflow(SECURITY_PATH)["jobs"]
+    checkout_steps = [
+        step
+        for job in jobs.values()
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    trivy = _step(jobs["trivy-fs"], "Run Trivy filesystem scan")
+
+    assert checkout_steps
+    assert all(step["with"]["persist-credentials"] is False for step in checkout_steps)
+    assert set(trivy["with"]["scanners"].split(",")) == {"vuln", "secret"}
 
 
 def test_ci_does_not_commit_fixed_database_or_admin_passwords() -> None:

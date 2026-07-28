@@ -30,6 +30,8 @@ build/
 *.pkcs12
 *.jks
 *.keystore
+*.der
+*.ovpn
 id_rsa
 id_dsa
 id_ecdsa
@@ -44,9 +46,17 @@ id_ed25519
 .authinfo.gpg
 .pgpass
 .my.cnf
+.git-credentials
+.vault-token
+pip.conf
+pip.ini
 credentials.json
 *credentials*.json
 service-account*.json
+secrets.yaml
+secrets.yml
+secrets.json
+secret*.json
 auth.json
 .docker/config.json
 **/.docker/config.json
