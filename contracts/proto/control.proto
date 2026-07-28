@@ -17,6 +17,7 @@ service ControlService {
   // Worker lifecycle
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+  rpc GetCapabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
 
   // Lease replaces periodic heartbeat as the liveness signal.
   // Metrics piggy-back on the same call so we don't need a separate channel.
@@ -52,6 +53,19 @@ message RegisterResponse {
   string error = 3;                         // Empty on success
   int32 lease_ttl_ms = 4;                   // Lease lifetime granted on success
   int32 lease_renew_after_ms = 5;           // Recommended renewal interval (< ttl)
+  bool runtime_control_results_v1 = 6 [deprecated = true]; // Use GetCapabilities
+}
+
+message CapabilitiesRequest {
+  string worker_id = 1;
+  TraceContext trace = 100;
+}
+
+message CapabilitiesResponse {
+  bool runtime_control_results_v1 = 1;      // Gateway persists AckControl runtime results
+  bool runtime_control_lease_fencing_v1 = 2;// Watch/Ack require the current lease generation
+  bool runtime_control_deadline_v1 = 3;     // Runtime commands carry an execution deadline
+  bool artifact_transfer_v1 = 4;            // Gateway streams source bundles and task artifacts
 }
 
 // =========================================================================
@@ -61,6 +75,7 @@ message RegisterResponse {
 message DeregisterRequest {
   string worker_id = 1;
   string reason = 2;                        // e.g. "shutdown", "drain"
+  string lease_id = 3;                      // Current lease generation being released
   TraceContext trace = 100;
 }
 
@@ -122,6 +137,7 @@ message UpdateConfigResponse {
 
 message WatchControlRequest {
   string worker_id = 1;
+  string lease_id = 2;                      // Current Worker generation fence
   TraceContext trace = 100;
 }
 
@@ -143,6 +159,9 @@ message AckControlRequest {
   string event_id = 2;
   bool success = 3;                         // Whether the worker applied the event
   string error = 4;                         // Empty on success
+  string request_id = 5;                    // Runtime command correlation id
+  string data_json = 6;                     // Runtime command result encoded as JSON
+  string lease_id = 7;                      // Current Worker generation fence
   TraceContext trace = 100;
 }
 
@@ -177,6 +196,7 @@ message RuntimeControl {
   string action = 2;                        // Action name (legacy field, kept for routing)
   map<string, string> params = 3;           // Top-level params (e.g. reply_stream)
   RuntimeAction action_typed = 4;           // Typed payload (preferred)
+  int64 expires_at_ms = 5;                  // Do not start side effects after this deadline
 }
 
 message RuntimeAction {

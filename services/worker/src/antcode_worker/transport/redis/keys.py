@@ -16,9 +16,6 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from antcode_core.infrastructure.redis import (
-    control_global_stream as shared_control_global_stream,
-)
-from antcode_core.infrastructure.redis import (
     control_group as shared_control_group,
 )
 from antcode_core.infrastructure.redis import (
@@ -176,17 +173,6 @@ class RedisKeys:
             Stream key，如 "antcode:control:{worker_id}"
         """
         return shared_control_stream(worker_id, namespace=self._namespace)
-
-    def control_global_stream(self) -> str:
-        """
-        全局控制通道 Stream key
-
-        用于向所有 Worker 广播控制命令。
-
-        Returns:
-            Stream key，如 "antcode:control:global"
-        """
-        return shared_control_global_stream(namespace=self._namespace)
 
     # ==================== 日志 Keys ====================
 
@@ -392,9 +378,9 @@ class RedisKeys:
             run_id: 运行 ID
 
         Returns:
-            Stream key，如 "antcode:spider:data:{run_id}"
+            Stream key，如 "{antcode}:spider:run-1:data"
         """
-        return f"{self._namespace}:spider:data:{run_id}"
+        return f"{{{self._namespace}}}:spider:{run_id}:data"
 
     def spider_meta_key(self, run_id: str) -> str:
         """
@@ -406,9 +392,18 @@ class RedisKeys:
             run_id: 运行 ID
 
         Returns:
-            Hash key，如 "antcode:spider:meta:{run_id}"
+            Hash key，如 "{antcode}:spider:run-1:meta"
         """
-        return f"{self._namespace}:spider:meta:{run_id}"
+        return f"{{{self._namespace}}}:spider:{run_id}:meta"
+
+    def spider_item_ids_key(self, run_id: str) -> str:
+        return f"{{{self._namespace}}}:spider:{run_id}:item-ids"
+
+    def spider_item_order_key(self, run_id: str) -> str:
+        return f"{{{self._namespace}}}:spider:{run_id}:item-order"
+
+    def spider_tombstone_key(self, run_id: str) -> str:
+        return f"{{{self._namespace}}}:spider:{run_id}:tombstone"
 
     def spider_index_key(self, project_id: str) -> str:
         """
@@ -420,9 +415,12 @@ class RedisKeys:
             project_id: 项目 ID
 
         Returns:
-            Sorted Set key，如 "antcode:spider:index:{project_id}"
+            Sorted Set key，如 "{antcode}:spider:index:project-1"
         """
-        return f"{self._namespace}:spider:index:{project_id}"
+        return f"{{{self._namespace}}}:spider:index:{project_id}"
+
+    def spider_index_expiry_key(self, project_id: str) -> str:
+        return f"{{{self._namespace}}}:spider:index:expiry:{project_id}"
 
     def spider_config_key(self, project_id: str) -> str:
         """

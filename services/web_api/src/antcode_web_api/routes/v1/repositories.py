@@ -5,7 +5,10 @@ from __future__ import annotations
 from antcode_core.application.services.projects.project_source_service import (
     project_source_service,
 )
-from antcode_core.application.services.projects.repository_service import repository_service
+from antcode_core.application.services.projects.repository_service import (
+    RepositoryDeleteStatus,
+    repository_service,
+)
 from antcode_core.common.security.auth import get_current_user_id
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.repository import (
@@ -21,6 +24,10 @@ from antcode_core.domain.schemas.repository import (
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from antcode_web_api.response import success as success_response
+from antcode_web_api.routes.v1.runtime_access import (
+    ensure_worker_access,
+    ensure_worker_admin_access,
+)
 
 router = APIRouter()
 
@@ -50,6 +57,19 @@ async def update_repository(
     if repository is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Git 仓库不存在")
     return success_response(_repository_response(repository))
+
+
+@router.delete("/{repository_id}", response_model=BaseResponse[None])
+async def delete_repository(
+    repository_id: str,
+    current_user_id: int = Depends(get_current_user_id),
+):
+    result = await repository_service.delete_for_user(repository_id, current_user_id)
+    if result == RepositoryDeleteStatus.NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Git 仓库不存在")
+    if result == RepositoryDeleteStatus.IN_USE:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Git 仓库仍被项目引用")
+    return success_response(None)
 
 
 @router.post("/{repository_id}/scan", response_model=BaseResponse[RepositoryScanResponse])
@@ -89,6 +109,7 @@ async def import_projects_from_repository(
     enabled repo + Project shell + ProjectCode + upsert_source），
     此路由把它暴露给前端 ``services/repositories.ts.importFromRepository``。
     """
+    await _authorize_import_workers(payload.projects, current_user_id)
     try:
         created = await project_source_service.import_projects(
             user_id=current_user_id,
@@ -97,6 +118,24 @@ async def import_projects_from_repository(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return success_response(ImportProjectsResult(created=created))
+
+
+async def _authorize_import_workers(items, user_id: int) -> None:
+    for worker_id, admin_required in _worker_access_requirements(items).items():
+        if admin_required:
+            await ensure_worker_admin_access(worker_id, user_id)
+        else:
+            await ensure_worker_access(worker_id, user_id)
+
+
+def _worker_access_requirements(items) -> dict[str, bool]:
+    requirements: dict[str, bool] = {}
+    for item in items:
+        if item.worker_id:
+            requirements[item.worker_id] = requirements.get(item.worker_id, False) or bool(item.dependencies)
+        if item.bound_worker_id:
+            requirements.setdefault(item.bound_worker_id, False)
+    return requirements
 
 
 def _repository_response(repository) -> RepositoryResponse:

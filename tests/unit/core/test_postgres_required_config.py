@@ -1,3 +1,5 @@
+import ssl
+
 import pytest
 from antcode_core.common.config import Settings
 from antcode_core.infrastructure.db import tortoise
@@ -26,6 +28,62 @@ def test_tortoise_config_uses_asyncpg(monkeypatch):
     config = tortoise.get_tortoise_config()
 
     assert config["connections"]["default"]["engine"] == "tortoise.backends.asyncpg"
+
+
+def test_tortoise_config_preserves_required_tls_mode(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://antcode:secret@127.0.0.1:5432/antcode?sslmode=require",
+    )
+
+    credentials = tortoise.get_tortoise_config()["connections"]["default"]["credentials"]
+
+    assert credentials["ssl"] == "require"
+
+
+def test_tortoise_config_loads_root_cert_for_verify_full(monkeypatch, tmp_path):
+    root_cert = tmp_path / "postgres-ca.pem"
+    root_cert.write_text("test certificate", encoding="utf-8")
+    loaded: list[str] = []
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    def fake_create_default_context(*, cafile):
+        loaded.append(cafile)
+        return context
+
+    monkeypatch.setattr(tortoise.ssl, "create_default_context", fake_create_default_context)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql://antcode:secret@127.0.0.1:5432/antcode?sslmode=verify-full&sslrootcert={root_cert}",
+    )
+
+    credentials = tortoise.get_tortoise_config()["connections"]["default"]["credentials"]
+
+    assert credentials["ssl"] is context
+    assert context.check_hostname is True
+    assert loaded == [str(root_cert)]
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("sslmode=unknown", "sslmode 无效"),
+        ("sslmode=verify-ca", "必须显式设置 sslrootcert"),
+        ("sslrootcert=/tmp/ca.pem", "必须与 sslmode 一起设置"),
+        ("sslmode=disable&sslrootcert=/tmp/ca.pem", "禁止设置 sslrootcert"),
+        ("sslmode=prefer&sslrootcert=/tmp/ca.pem", "不会校验证书"),
+        ("sslmode=require&sslmode=verify-full", "只能设置一次"),
+        ("sslmode=require&sslcert=/tmp/client.pem", "不支持的 TLS 参数: sslcert"),
+    ],
+)
+def test_tortoise_config_rejects_invalid_tls_options(monkeypatch, query, expected):
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql://antcode:secret@127.0.0.1:5432/antcode?{query}",
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        tortoise.get_tortoise_config()
 
 
 @pytest.mark.parametrize(
@@ -58,6 +116,35 @@ def test_settings_require_postgres_and_redis():
     assert not hasattr(settings, "REDIS_ENABLED")
     assert not hasattr(settings, "LOG_STORAGE_BACKEND")
     assert not hasattr(settings, "FILE_STORAGE_BACKEND")
+
+
+def test_backendless_gateway_worker_rejects_backend_credentials():
+    settings = Settings(
+        DATABASE_URL="",
+        REDIS_URL="",
+        WORKER_TRANSPORT_MODE="gateway",
+        WORKER_GATEWAY_BACKENDLESS=True,
+    )
+
+    assert settings.WORKER_GATEWAY_BACKENDLESS is True
+
+    with pytest.raises(ValueError, match="禁止注入"):
+        Settings(
+            DATABASE_URL="postgresql://antcode:secret@127.0.0.1:5432/antcode",
+            REDIS_URL="",
+            WORKER_TRANSPORT_MODE="gateway",
+            WORKER_GATEWAY_BACKENDLESS=True,
+        )
+
+
+def test_backendless_mode_rejects_direct_worker():
+    with pytest.raises(ValueError, match="仅允许 Gateway Worker"):
+        Settings(
+            DATABASE_URL="",
+            REDIS_URL="",
+            WORKER_TRANSPORT_MODE="direct",
+            WORKER_GATEWAY_BACKENDLESS=True,
+        )
 
 
 @pytest.mark.parametrize(

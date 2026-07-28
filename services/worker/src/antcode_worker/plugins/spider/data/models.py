@@ -157,8 +157,8 @@ class SpiderConfig:
     project_id: str
     item_schema: dict[str, Any] | None = None  # JSON Schema 验证
     dedup_fields: list[str] = field(default_factory=list)  # 去重字段
-    ttl_seconds: int = 86400  # 数据过期时间
-    max_items: int = 10000  # 最大数据条数
+    ttl_seconds: int = 0  # 0 = 不自动过期
+    max_items: int = 0  # 0 = 不裁剪
     post_processors: list[str] = field(default_factory=list)  # 后处理器
     custom_settings: dict[str, Any] = field(default_factory=dict)
 
@@ -203,8 +203,8 @@ class SpiderConfig:
             project_id=data.get("project_id", ""),
             item_schema=item_schema,
             dedup_fields=dedup_fields,
-            ttl_seconds=int(data.get("ttl_seconds", 86400)),
-            max_items=int(data.get("max_items", 10000)),
+            ttl_seconds=int(data.get("ttl_seconds", 0)),
+            max_items=int(data.get("max_items", 0)),
             post_processors=post_processors,
             custom_settings=custom_settings,
         )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import uuid
 from typing import Any
@@ -15,7 +14,33 @@ from antcode_core.infrastructure.redis import (
     control_stream,
     decode_stream_payload,
     get_redis_client,
+    runtime_control_request_id,
 )
+
+MILLISECONDS_PER_SECOND = 1000
+MICROSECONDS_PER_MILLISECOND = 1000
+MAX_RUNTIME_RESULT_BYTES = 1024 * 1024
+MAX_RUNTIME_ERROR_BYTES = 16 * 1024
+
+
+def _decode_runtime_response(decoded: dict[str, Any]) -> dict[str, Any]:
+    success_value = str(decoded.get("success", "")).lower()
+    if success_value not in {"true", "false"}:
+        raise RuntimeError("运行时控制响应 success 字段无效")
+    error = str(decoded.get("error") or "")
+    if len(error.encode("utf-8")) > MAX_RUNTIME_ERROR_BYTES:
+        raise RuntimeError("运行时控制响应 error 超过 16 KiB 上限")
+    if "data" not in decoded:
+        raise RuntimeError("运行时控制响应缺少 data JSON")
+    data_obj = decoded["data"]
+    if isinstance(data_obj, str) and not data_obj:
+        # decode_stream_payload 对空字符串字段宽容跳过（兼容旧写入端）；
+        # 运行时控制响应是新协议，空 data 视为响应损坏（无数据必须用 null）。
+        raise RuntimeError("运行时控制响应 data 不是合法 JSON")
+    serialized = json.dumps(data_obj, ensure_ascii=False, allow_nan=False)
+    if len(serialized.encode("utf-8")) > MAX_RUNTIME_RESULT_BYTES:
+        raise RuntimeError("运行时控制响应 data 超过 1 MiB 上限")
+    return {"success": success_value == "true", "error": error, "data": data_obj}
 
 
 async def write_control_event(
@@ -25,6 +50,21 @@ async def write_control_event(
 ) -> str:
     """Write a control event; successful ACK paths own retention."""
     return await redis.xadd(control_stream_key, payload)
+
+
+async def redis_server_now_ms(redis: Any) -> int:
+    """Redis 服务端时钟（毫秒）。
+
+    复审 P1-DR-04: 运行时控制 deadline 必须以 Redis TIME 为单一时钟权威
+    ——Master/Worker 各自的 wall clock 存在偏移，会执行已过期指令或拒绝
+    有效指令。与 worker 侧 ``settlement_expiry_ms`` 使用同一时钟。
+    """
+    redis_time = await redis.time()
+    try:
+        seconds, microseconds = (int(value) for value in redis_time)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Redis TIME 响应无效") from exc
+    return seconds * MILLISECONDS_PER_SECOND + microseconds // MICROSECONDS_PER_MILLISECOND
 
 
 class RuntimeControlService:
@@ -42,21 +82,27 @@ class RuntimeControlService:
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """发送运行时管理控制指令"""
+        timeout_seconds = self._default_timeout if timeout is None else timeout
+        if timeout_seconds <= 0:
+            raise ValueError("运行时控制 timeout 必须大于 0")
+        request_id = runtime_control_request_id(worker_id, uuid.uuid4().hex)
         redis = await get_redis_client()
-        request_id = uuid.uuid4().hex
         reply_stream_key = control_reply_stream(request_id)
         control_stream_key = control_stream(worker_id)
+        # P1-DR-04: deadline 以 Redis 服务端时钟为准，消除跨机器时钟偏移。
+        expires_at_ms = await redis_server_now_ms(redis) + int(timeout_seconds * 1000)
 
         data = build_runtime_manage_control_payload(
             action=action,
             request_id=request_id,
             reply_stream=reply_stream_key,
             payload=payload or {},
+            expires_at_ms=expires_at_ms,
         )
 
         await write_control_event(redis, control_stream_key, data)
 
-        timeout_ms = int((timeout or self._default_timeout) * 1000)
+        timeout_ms = int(timeout_seconds * 1000)
         result = await redis.xread({reply_stream_key: "0-0"}, count=1, block=timeout_ms)
 
         if not result:
@@ -74,21 +120,10 @@ class RuntimeControlService:
         msg_id, raw = messages[0]
         _ = msg_id
         decoded = decode_stream_payload(raw)
+        if str(decoded.get("request_id") or "") != request_id:
+            raise RuntimeError("运行时控制响应 request_id 不匹配")
 
-        success = str(decoded.get("success", "")).lower() in ("1", "true", "yes")
-        error = decoded.get("error", "")
-        data_raw = decoded.get("data", "")
-        data_obj = None
-        if data_raw:
-            try:
-                data_obj = json.loads(data_raw)
-            except Exception:
-                data_obj = data_raw
-
-        with contextlib.suppress(Exception):
-            await redis.delete(reply_stream_key)
-
-        return {"success": success, "error": error, "data": data_obj}
+        return _decode_runtime_response(decoded)
 
     async def list_envs(self, worker_id: str, scope: str | None = None) -> dict[str, Any]:
         return await self.send_command(worker_id, "list_envs", {"scope": scope or ""})
@@ -169,6 +204,7 @@ runtime_control_service = RuntimeControlService()
 
 __all__ = [
     "RuntimeControlService",
+    "redis_server_now_ms",
     "runtime_control_service",
     "write_control_event",
 ]

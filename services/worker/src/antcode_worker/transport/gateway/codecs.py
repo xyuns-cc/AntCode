@@ -25,13 +25,11 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 from typing import Any
 
 from antcode_contracts.transcode import (
     datetime_to_proto_timestamp,
     encode_task_status,
-    log_type_str_to_proto,
     proto_timestamp_to_datetime,
 )
 from loguru import logger
@@ -111,6 +109,7 @@ class TaskDecoder:
                 source_bundle=source_bundle,
                 source_subdir=getattr(dispatch, "source_subdir", "") or "",
                 entry_point=getattr(dispatch, "entry_point", "") or "",
+                runtime_env_name=getattr(dispatch, "runtime_env_name", "") or "",
                 run_id=getattr(dispatch, "run_id", "") or "",
                 receipt=getattr(dispatch, "receipt_id", "") or None,
             )
@@ -179,24 +178,23 @@ class LogEncoder:
 
     @staticmethod
     def encode_entry(log: LogMessage) -> Any:
-        from antcode_contracts import data_pb2
+        # 唯一实现在 transport.log_batches（Gateway/Direct 共用）。
+        from antcode_worker.transport.log_batches import encode_log_entry
 
-        entry = data_pb2.LogEntry(
-            run_id=log.run_id or "",
-            log_type=log_type_str_to_proto(log.log_type),
-            content=log.content or "",
-            sequence=int(log.sequence or 0),
-        )
-        ts = datetime_to_proto_timestamp(log.timestamp or datetime.now())
-        if ts is not None:
-            entry.timestamp.CopyFrom(ts)
-        return entry
+        return encode_log_entry(log)
 
     @staticmethod
-    def encode_batch(logs: list[LogMessage], worker_id: str = "") -> Any:
+    def encode_batch(
+        logs: list[LogMessage],
+        worker_id: str = "",
+        lease_id: str = "",
+    ) -> Any:
         from antcode_contracts import data_pb2
 
-        batch = data_pb2.LogBatch(worker_id=worker_id or "")
+        batch = data_pb2.LogBatch(
+            worker_id=worker_id or "",
+            lease_id=lease_id or "",
+        )
         for log in logs:
             batch.entries.append(LogEncoder.encode_entry(log))
         return batch
@@ -289,6 +287,7 @@ class ControlDecoder:
         """
         request_id = getattr(runtime, "request_id", "") or ""
         action = getattr(runtime, "action", "") or ""
+        expires_at_ms = int(getattr(runtime, "expires_at_ms", 0) or 0)
         params = dict(getattr(runtime, "params", {}) or {})
 
         args: dict[str, str] = {}
@@ -311,6 +310,7 @@ class ControlDecoder:
         return {
             "request_id": request_id,
             "action": action,
+            "expires_at_ms": expires_at_ms,
             "params": params,
             "args": args,
         }

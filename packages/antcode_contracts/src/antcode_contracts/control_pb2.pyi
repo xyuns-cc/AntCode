@@ -1,4 +1,4 @@
-import common_pb2 as _common_pb2
+from . import common_pb2 as _common_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
@@ -31,28 +31,52 @@ class RegisterRequest(_message.Message):
     def __init__(self, api_key: _Optional[str] = ..., worker_id: _Optional[str] = ..., os_info: _Optional[_Union[_common_pb2.OSInfo, _Mapping]] = ..., capabilities: _Optional[_Mapping[str, str]] = ..., version: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class RegisterResponse(_message.Message):
-    __slots__ = ("success", "worker_id", "error", "lease_ttl_ms", "lease_renew_after_ms")
+    __slots__ = ("success", "worker_id", "error", "lease_ttl_ms", "lease_renew_after_ms", "runtime_control_results_v1")
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     LEASE_TTL_MS_FIELD_NUMBER: _ClassVar[int]
     LEASE_RENEW_AFTER_MS_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_CONTROL_RESULTS_V1_FIELD_NUMBER: _ClassVar[int]
     success: bool
     worker_id: str
     error: str
     lease_ttl_ms: int
     lease_renew_after_ms: int
-    def __init__(self, success: bool = ..., worker_id: _Optional[str] = ..., error: _Optional[str] = ..., lease_ttl_ms: _Optional[int] = ..., lease_renew_after_ms: _Optional[int] = ...) -> None: ...
+    runtime_control_results_v1: bool
+    def __init__(self, success: bool = ..., worker_id: _Optional[str] = ..., error: _Optional[str] = ..., lease_ttl_ms: _Optional[int] = ..., lease_renew_after_ms: _Optional[int] = ..., runtime_control_results_v1: bool = ...) -> None: ...
+
+class CapabilitiesRequest(_message.Message):
+    __slots__ = ("worker_id", "trace")
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    TRACE_FIELD_NUMBER: _ClassVar[int]
+    worker_id: str
+    trace: _common_pb2.TraceContext
+    def __init__(self, worker_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+
+class CapabilitiesResponse(_message.Message):
+    __slots__ = ("runtime_control_results_v1", "runtime_control_lease_fencing_v1", "runtime_control_deadline_v1", "artifact_transfer_v1")
+    RUNTIME_CONTROL_RESULTS_V1_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_CONTROL_LEASE_FENCING_V1_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_CONTROL_DEADLINE_V1_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_TRANSFER_V1_FIELD_NUMBER: _ClassVar[int]
+    runtime_control_results_v1: bool
+    runtime_control_lease_fencing_v1: bool
+    runtime_control_deadline_v1: bool
+    artifact_transfer_v1: bool
+    def __init__(self, runtime_control_results_v1: bool = ..., runtime_control_lease_fencing_v1: bool = ..., runtime_control_deadline_v1: bool = ..., artifact_transfer_v1: bool = ...) -> None: ...
 
 class DeregisterRequest(_message.Message):
-    __slots__ = ("worker_id", "reason", "trace")
+    __slots__ = ("worker_id", "reason", "lease_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     reason: str
+    lease_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., reason: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., reason: _Optional[str] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class DeregisterResponse(_message.Message):
     __slots__ = ("success", "error")
@@ -136,12 +160,14 @@ class UpdateConfigResponse(_message.Message):
     def __init__(self, success: bool = ..., error: _Optional[str] = ...) -> None: ...
 
 class WatchControlRequest(_message.Message):
-    __slots__ = ("worker_id", "trace")
+    __slots__ = ("worker_id", "lease_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
+    lease_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class ControlEvent(_message.Message):
     __slots__ = ("event_id", "trace", "task_cancel", "config_update", "runtime_control", "ping")
@@ -160,18 +186,24 @@ class ControlEvent(_message.Message):
     def __init__(self, event_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ..., task_cancel: _Optional[_Union[TaskCancel, _Mapping]] = ..., config_update: _Optional[_Union[ConfigUpdate, _Mapping]] = ..., runtime_control: _Optional[_Union[RuntimeControl, _Mapping]] = ..., ping: _Optional[_Union[Ping, _Mapping]] = ...) -> None: ...
 
 class AckControlRequest(_message.Message):
-    __slots__ = ("worker_id", "event_id", "success", "error", "trace")
+    __slots__ = ("worker_id", "event_id", "success", "error", "request_id", "data_json", "lease_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     EVENT_ID_FIELD_NUMBER: _ClassVar[int]
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    DATA_JSON_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     event_id: str
     success: bool
     error: str
+    request_id: str
+    data_json: str
+    lease_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., event_id: _Optional[str] = ..., success: bool = ..., error: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., event_id: _Optional[str] = ..., success: bool = ..., error: _Optional[str] = ..., request_id: _Optional[str] = ..., data_json: _Optional[str] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class AckControlResponse(_message.Message):
     __slots__ = ("received",)
@@ -203,7 +235,7 @@ class ConfigUpdate(_message.Message):
     def __init__(self, config: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class RuntimeControl(_message.Message):
-    __slots__ = ("request_id", "action", "params", "action_typed")
+    __slots__ = ("request_id", "action", "params", "action_typed", "expires_at_ms")
     class ParamsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -215,11 +247,13 @@ class RuntimeControl(_message.Message):
     ACTION_FIELD_NUMBER: _ClassVar[int]
     PARAMS_FIELD_NUMBER: _ClassVar[int]
     ACTION_TYPED_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     action: str
     params: _containers.ScalarMap[str, str]
     action_typed: RuntimeAction
-    def __init__(self, request_id: _Optional[str] = ..., action: _Optional[str] = ..., params: _Optional[_Mapping[str, str]] = ..., action_typed: _Optional[_Union[RuntimeAction, _Mapping]] = ...) -> None: ...
+    expires_at_ms: int
+    def __init__(self, request_id: _Optional[str] = ..., action: _Optional[str] = ..., params: _Optional[_Mapping[str, str]] = ..., action_typed: _Optional[_Union[RuntimeAction, _Mapping]] = ..., expires_at_ms: _Optional[int] = ...) -> None: ...
 
 class RuntimeAction(_message.Message):
     __slots__ = ("generic",)

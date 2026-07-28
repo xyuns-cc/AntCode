@@ -13,9 +13,27 @@ from typing import Any, cast
 
 from loguru import logger
 
+from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
 from antcode_core.observability.tracing import get_current_trace
+
+RUNTIME_ENV_KEY = "ANTCODE_RUNTIME_ENV"
+
+
+def _group_run_ids_by_project(tasks: list[dict]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for task in tasks:
+        if task.get("project_type") == "rule":
+            continue
+        project_id = task.get("project_id")
+        run_id = task.get("run_id") or task.get("task_id")
+        if not project_id or not run_id:
+            continue
+        project_run_ids = grouped.setdefault(project_id, [])
+        if run_id not in project_run_ids:
+            project_run_ids.append(run_id)
+    return grouped
 
 
 @dataclass
@@ -110,27 +128,13 @@ class WorkerLoadBalancer:
                 except Exception:
                     metrics = {}
 
-            cpu = float(metrics.get("cpu") or metrics.get("cpu_percent") or 100)
-            memory = float(metrics.get("memory") or metrics.get("memory_percent") or 100)
-            disk = float(metrics.get("disk") or metrics.get("disk_percent") or 100)
-            running_tasks = int(metrics.get("runningTasks") or metrics.get("running_tasks") or 0)
-            max_concurrent = int(metrics.get("maxConcurrentTasks") or metrics.get("max_concurrent_tasks") or 1)
-            queued_tasks = int(metrics.get("queuedTasks") or metrics.get("queued_tasks") or 0)
-
-            normalized = {
-                "cpu": cpu,
-                "memory": memory,
-                "disk": disk,
-                "runningTasks": running_tasks,
-                "maxConcurrentTasks": max_concurrent,
-                "queuedTasks": queued_tasks,
-            }
+            normalized = normalize_worker_metrics(metrics)
 
             self._resource_cache[worker.id] = normalized
             self._resource_cache_time[worker.id] = asyncio.get_event_loop().time()
             return normalized
         except Exception as e:
-            logger.debug(f"资源查询失败: worker={worker.name}, error={e}")
+            logger.warning(f"资源指标无效: worker={worker.name}, error={e}")
             return None
 
     async def _refresh_resources(self, worker):
@@ -644,6 +648,7 @@ class WorkerTaskDispatcher:
         priority=None,
         project_type="code",
         require_render=False,
+        runtime_env_name=None,
     ):
         """
         分发单个任务到节点（使用批量接口）
@@ -651,14 +656,17 @@ class WorkerTaskDispatcher:
         参数:
         - require_render: 是否需要渲染能力（用于需要浏览器渲染的爬虫任务）
         """
-        # 构建单任务批量请求
+        # 保留键只能通过可信顶层字段派发，不能由普通子进程环境决定 runtime。
+        environment = dict(environment_vars or {})
+        environment.pop(RUNTIME_ENV_KEY, None)
         task_item = {
             "task_id": run_id,
             "project_id": project_id,
             "project_type": project_type,
             "priority": priority,
             "params": params or {},
-            "environment": environment_vars or {},
+            "environment": environment,
+            "runtime_env_name": runtime_env_name or "",
             "timeout": timeout,
             "require_render": require_render,
         }
@@ -775,20 +783,15 @@ class WorkerTaskDispatcher:
                 elif pid not in bundle_project_ids:
                     bundle_project_ids.append(pid)
 
-            # 组装 run_id -> project 映射（RunSourceSnapshot 需要）
-            run_ids_by_project: dict[str, str] = {}
-            for task in tasks:
-                pid = task.get("project_id")
-                rid = task.get("run_id") or task.get("task_id")
-                if pid and rid and pid not in run_ids_by_project:
-                    run_ids_by_project[pid] = rid
+            # 同一项目可包含多个 run；每个 run 都必须固化并使用自己的源码快照。
+            run_ids_by_project = _group_run_ids_by_project(tasks)
 
-            project_download_info: dict = {}
+            run_download_info: dict = {}
             sync_results: dict = {"synced": [], "skipped": [], "failed": []}
             if bundle_project_ids:
                 (
                     sync_results,
-                    project_download_info,
+                    run_download_info,
                 ) = await source_bundle_dispatch_service.build_dispatch_for_worker_with_info(
                     worker,
                     bundle_project_ids,
@@ -804,9 +807,12 @@ class WorkerTaskDispatcher:
             enriched_tasks = []
             for task in tasks:
                 task_copy = dict(task)
-                pid = task.get("project_id")
-                if pid and pid in project_download_info:
-                    info = project_download_info[pid]
+                environment = dict(task_copy.get("environment") or {})
+                environment.pop(RUNTIME_ENV_KEY, None)
+                task_copy["environment"] = environment
+                run_id = task.get("run_id") or task.get("task_id")
+                if run_id and run_id in run_download_info:
+                    info = run_download_info[run_id]
                     task_copy["source_bundle_uri"] = info.get("source_bundle_uri", "")
                     task_copy["source_bundle_sha256"] = info.get("source_bundle_sha256", "")
                     task_copy["source_bundle_size"] = info.get("source_bundle_size", 0)
@@ -853,21 +859,12 @@ class WorkerTaskDispatcher:
             )
 
     async def _bind_task_runs_to_worker(self, tasks: list[dict], worker_id: int) -> int:
-        from antcode_core.domain.models import TaskRun
+        """P1-FN-03/04: 委托 dispatch_bind_guard(Worker 行锁 + 可派发状态 CAS)。"""
+        from antcode_core.application.services.workers.dispatch_bind_guard import (
+            bind_task_runs_to_worker,
+        )
 
-        run_ids = {
-            str(run_id) for task in tasks if (run_id := task.get("run_id") or task.get("task_id")) not in (None, "")
-        }
-        if not run_ids:
-            return 0
-        updated = await TaskRun.filter(run_id__in=run_ids).update(worker_id=worker_id)
-        if updated != len(run_ids):
-            logger.warning(
-                "部分派发任务没有 TaskRun 归属记录: expected={} updated={}",
-                len(run_ids),
-                updated,
-            )
-        return updated
+        return await bind_task_runs_to_worker(tasks, worker_id)
 
     async def _ensure_worker_connected(self, worker):
         """确保节点在线（依赖心跳状态）"""
@@ -1005,12 +1002,16 @@ class WorkerTaskDispatcher:
             messages.append(
                 {
                     "task_id": task_id,
+                    # P1-FN-02: 确定性 dispatch_id(=run_id)。XADD 用自动 Stream ID,
+                    # 响应丢失后靠该字段在 stream 尾部查重确认是否已提交。
+                    "dispatch_id": task.get("run_id") or task_id,
                     "run_id": task.get("run_id") or task_id,
                     "project_id": task.get("project_id", ""),
                     "project_type": task.get("project_type", "code"),
                     "priority": task.get("priority") or 0,
                     "params": task.get("params") or {},
                     "environment": task.get("environment") or {},
+                    "runtime_env_name": task.get("runtime_env_name") or "",
                     "timeout": task.get("timeout", 3600),
                     # A2: source_bundle 契约（direct 模式 poll 侧读同名字段解出 SourceBundle）
                     "source_bundle_uri": task.get("source_bundle_uri") or "",
@@ -1030,7 +1031,14 @@ class WorkerTaskDispatcher:
             await stream.xadd_batch(stream_key, messages)
         except Exception as e:
             logger.exception("任务写入 Redis 失败")
-            return {"success": False, "error": str(e)}
+            # P1-FN-02: 服务端已提交但响应丢失时,直接判失败会触发上游创建
+            # retry run → 原消息 + 新 run 双执行。先按 dispatch_id 查重确认
+            # (分类/查重/兜底语义见 stream_dedup 模块注释)。
+            from antcode_core.infrastructure.redis.stream_dedup import confirm_dispatch_committed
+
+            if not await confirm_dispatch_committed(stream, stream_key, messages, error=e):
+                return {"success": False, "error": str(e)}
+            logger.warning("P1-FN-02: XADD 响应丢失但派发消息已确认提交,按成功处理: stream={}", stream_key)
 
         # P1-19: 写入成功后按 group 已 ACK 游标做安全裁剪。裁剪失败仅
         # 记 warning——不影响本批任务已经落 Redis 的语义。

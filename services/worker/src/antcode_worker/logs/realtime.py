@@ -199,6 +199,8 @@ class RealtimeSender:
                 last_error = "Transport returned False"
                 logger.debug(f"[{self.run_id}] 日志发送失败: Transport returned False")
 
+            except ValueError:
+                raise
             except Exception as e:
                 last_error = str(e)
                 logger.debug(f"[{self.run_id}] 发送日志失败 (attempt {attempt + 1}): {e}")

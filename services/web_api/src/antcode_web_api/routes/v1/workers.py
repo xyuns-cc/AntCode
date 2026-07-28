@@ -40,6 +40,7 @@ from tortoise.expressions import Q
 
 # P2 拆分: 10 个 CRUD handler 移到 workers_crud.py。
 from antcode_web_api.routes.v1 import workers_crud as _workers_crud
+from antcode_web_api.routes.v1 import workers_direct_control_routes as _workers_direct_control_routes
 
 # P2 拆分: 5 个 dispatch handler + 3 schema + 4 helper 移至 workers_dispatch.py。
 # 顶层 re-export schema/常量 让测试引用继续可命中。
@@ -595,16 +596,14 @@ _workers_dispatch.register_dispatch_routes(router, _sys.modules[__name__])
 _workers_stats.register_stats_routes(router, _require_worker_access)
 # P2 拆分: register-direct / register(410) / heartbeat 3 handler 挂路由
 _workers_register.register_register_routes(router, _mask_redis_url)
-# P2 拆分: 10 个 CRUD handler 挂路由
 _workers_crud.register_crud_routes(
     router,
     worker_to_response=_worker_to_response,
     require_worker_access=_require_worker_access,
     list_accessible_workers=_list_accessible_workers,
 )
-# P2 拆分: install_key 3 handler 挂路由 (generate-install-key / register-by-key /
-# {worker_id}/redis-acl/issue), 复用主文件的 _verify_worker_credential_headers。
 _workers_install_key.register_install_key_routes(router, _verify_worker_credential_headers)
+_workers_direct_control_routes.register_direct_control_routes(router, _verify_worker_credential_headers)
 
 promote_static_routes(router, {"/best", "/render-capable"})
 

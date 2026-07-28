@@ -32,12 +32,12 @@ async def get_all_configs(category: str | None = None, current_admin=Depends(get
         config_list = [SystemConfigResponse.model_validate(config) for config in configs]
         return success(config_list, message=Messages.QUERY_SUCCESS)
 
-    except Exception as e:
-        logger.error(f"获取系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("获取系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取系统配置失败: {str(e)}",
-        )
+            detail="获取系统配置失败",
+        ) from exc
 
 
 @router.get(
@@ -54,12 +54,12 @@ async def get_configs_by_category(current_admin=Depends(get_current_super_admin)
         all_configs = await system_config_service.get_all_configs_by_category()
         return success(all_configs, message=Messages.QUERY_SUCCESS)
 
-    except Exception as e:
-        logger.error(f"获取系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("获取系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取系统配置失败: {str(e)}",
-        )
+            detail="获取系统配置失败",
+        ) from exc
 
 
 @router.get(
@@ -85,12 +85,12 @@ async def get_config(config_key: str, current_admin=Depends(get_current_super_ad
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"获取系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("获取系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取系统配置失败: {str(e)}",
-        )
+            detail="获取系统配置失败",
+        ) from exc
 
 
 @router.post(
@@ -112,12 +112,12 @@ async def create_config(config_data: SystemConfigCreate, current_admin=Depends(g
 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.error(f"创建系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("创建系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"创建系统配置失败: {str(e)}",
-        )
+            detail="创建系统配置失败",
+        ) from exc
 
 
 @router.put(
@@ -142,12 +142,12 @@ async def update_config(
 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except Exception as e:
-        logger.error(f"更新系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("更新系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"更新系统配置失败: {str(e)}",
-        )
+            detail="更新系统配置失败",
+        ) from exc
 
 
 @router.post(
@@ -170,12 +170,12 @@ async def batch_update_configs(batch_data: SystemConfigBatchUpdate, current_admi
             message=f"成功更新 {updated_count} 个配置项",
         )
 
-    except Exception as e:
-        logger.error(f"批量更新系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("批量更新系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"批量更新系统配置失败: {str(e)}",
-        )
+            detail="批量更新系统配置失败",
+        ) from exc
 
 
 @router.delete(
@@ -201,12 +201,12 @@ async def delete_config(config_key: str, current_admin=Depends(get_current_super
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"删除系统配置失败: {e}")
+    except Exception as exc:
+        logger.exception("删除系统配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"删除系统配置失败: {str(e)}",
-        )
+            detail="删除系统配置失败",
+        ) from exc
 
 
 @router.post(
@@ -223,12 +223,12 @@ async def reload_configs(current_admin=Depends(get_current_super_admin)):
         await system_config_service.reload_config_cache()
         return success(None, message="配置已重新加载")
 
-    except Exception as e:
-        logger.error(f"重新加载配置失败: {e}")
+    except Exception as exc:
+        logger.exception("重新加载配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"重新加载配置失败: {str(e)}",
-        )
+            detail="重新加载配置失败",
+        ) from exc
 
 
 @router.post(
@@ -245,9 +245,9 @@ async def initialize_default_configs(current_admin=Depends(get_current_super_adm
         await system_config_service.initialize_default_configs()
         return success(None, message="默认配置已初始化")
 
-    except Exception as e:
-        logger.error(f"初始化默认配置失败: {e}")
+    except Exception as exc:
+        logger.exception("初始化默认配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"初始化默认配置失败: {str(e)}",
-        )
+            detail="初始化默认配置失败",
+        ) from exc

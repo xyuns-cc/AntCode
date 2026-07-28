@@ -1,0 +1,3 @@
+user default off
+user antcode-admin on >CHANGE_TO_A_LONG_RANDOM_ADMIN_PASSWORD ~* &* +@all
+user health on >CHANGE_TO_A_DIFFERENT_RANDOM_HEALTH_PASSWORD &* +ping

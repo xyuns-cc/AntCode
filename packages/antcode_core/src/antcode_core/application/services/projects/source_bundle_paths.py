@@ -6,24 +6,70 @@ import gzip
 import io
 import os
 import tarfile
+from dataclasses import dataclass
 from pathlib import Path
 
 ENTRYPOINT_CANDIDATES = ("main.py", "spider.py", "crawler.py", "app.py")
 PROJECT_MARKERS = ENTRYPOINT_CANDIDATES + ("pyproject.toml", "requirements.txt")
+MAX_BUNDLE_FILE_COUNT = 10_000
+MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_INCLUDE_PATHS = 100
+MAX_LFS_POINTER_BYTES = 1024
+LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 
 
-def scan_repository_candidates(repo_dir: Path) -> list[dict[str, object]]:
+@dataclass(frozen=True)
+class RepositoryScanLimits:
+    max_files: int
+    max_directories: int
+    max_depth: int
+    max_candidates: int
+
+
+DEFAULT_REPOSITORY_SCAN_LIMITS = RepositoryScanLimits(
+    max_files=100_000,
+    max_directories=20_000,
+    max_depth=50,
+    max_candidates=10_000,
+)
+
+
+def scan_repository_candidates(
+    repo_dir: Path,
+    limits: RepositoryScanLimits | None = None,
+) -> list[dict[str, object]]:
     root = repo_dir.resolve()
+    scan_limits = limits or DEFAULT_REPOSITORY_SCAN_LIMITS
     candidates: list[dict[str, object]] = []
+    file_count = 0
+    directory_count = 0
     for current, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name != ".git")
-        relative = Path(current).resolve().relative_to(root).as_posix()
+        relative_path = Path(current).resolve().relative_to(root)
+        if len(relative_path.parts) > scan_limits.max_depth:
+            raise ValueError(f"Git 仓库目录深度超过上限 {scan_limits.max_depth}")
+        directory_count += len(dirnames)
+        file_count += len(filenames)
+        _validate_scan_counts(file_count, directory_count, scan_limits)
+        relative = relative_path.as_posix()
         if relative == ".":
             continue
+        entry_point_files = set(filenames).intersection(ENTRYPOINT_CANDIDATES)
+        if not entry_point_files:
+            continue
         marker_files = sorted(set(filenames).intersection(PROJECT_MARKERS))
-        if marker_files:
-            candidates.append(_candidate(relative, marker_files))
+        candidates.append(_candidate(relative, marker_files))
+        if len(candidates) > scan_limits.max_candidates:
+            raise ValueError(f"Git 仓库候选项目数超过上限 {scan_limits.max_candidates}")
     return candidates
+
+
+def _validate_scan_counts(file_count: int, directory_count: int, limits: RepositoryScanLimits) -> None:
+    if file_count > limits.max_files:
+        raise ValueError(f"Git 仓库扫描文件数超过上限 {limits.max_files}")
+    if directory_count > limits.max_directories:
+        raise ValueError(f"Git 仓库扫描目录数超过上限 {limits.max_directories}")
 
 
 def resolve_bundle_paths(
@@ -56,6 +102,30 @@ def create_deterministic_tar_gz(repo_dir: Path, paths: list[Path] | None = None)
     return compressed.getvalue()
 
 
+def validate_bundle_paths(paths: list[Path]) -> None:
+    if len(paths) > MAX_BUNDLE_FILE_COUNT:
+        raise ValueError(f"source bundle 文件数超过上限: {len(paths)} > {MAX_BUNDLE_FILE_COUNT}")
+    total = 0
+    for path in paths:
+        size = path.stat().st_size
+        _reject_lfs_pointer(path, size)
+        if size > MAX_BUNDLE_FILE_BYTES:
+            raise ValueError(f"source bundle 单文件超过上限: {path.name} {size} > {MAX_BUNDLE_FILE_BYTES}")
+        total += size
+        if total > MAX_BUNDLE_TOTAL_BYTES:
+            raise ValueError(f"source bundle 总大小超过上限: {total} > {MAX_BUNDLE_TOTAL_BYTES}")
+
+
+def _reject_lfs_pointer(path: Path, size: int) -> None:
+    if size > MAX_LFS_POINTER_BYTES:
+        return
+    content = path.read_bytes().replace(b"\r\n", b"\n")
+    if not content.startswith(LFS_POINTER_PREFIX):
+        return
+    if b"\noid sha256:" in content and b"\nsize " in content:
+        raise ValueError(f"Git LFS 文件未物化，拒绝生成不完整 source bundle: {path.name}")
+
+
 def list_tar_names(content: bytes) -> list[str]:
     with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
         return tar.getnames()
@@ -85,7 +155,12 @@ def string_list(value: object) -> list[str]:
         return []
     if not isinstance(value, list):
         raise ValueError("include_paths 必须是数组")
-    return [normalize_relative_path(str(item), field_name="include_paths") for item in value]
+    if len(value) > MAX_BUNDLE_INCLUDE_PATHS:
+        raise ValueError(f"include_paths 超过上限 {MAX_BUNDLE_INCLUDE_PATHS}")
+    normalized = [normalize_relative_path(str(item), field_name="include_paths") for item in value]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("include_paths 不允许重复")
+    return normalized
 
 
 def resolve_existing_dir(root: Path, relative_path: str, label: str) -> Path:
@@ -122,6 +197,8 @@ def iter_unique_source_files(repo_root: Path, roots: list[Path]) -> list[Path]:
         for path in iter_source_files(source_root):
             relative = path.resolve().relative_to(repo_root).as_posix()
             files[relative] = path
+            if len(files) > MAX_BUNDLE_FILE_COUNT:
+                raise ValueError(f"source bundle 文件数超过上限: {len(files)} > {MAX_BUNDLE_FILE_COUNT}")
     return [files[name] for name in sorted(files)]
 
 
@@ -133,6 +210,8 @@ def iter_source_files(source_root: Path) -> list[Path]:
             path = Path(current) / filename
             if not path.is_symlink() and path.is_file():
                 files.append(path)
+                if len(files) > MAX_BUNDLE_FILE_COUNT:
+                    raise ValueError(f"source bundle 文件数超过上限: {len(files)} > {MAX_BUNDLE_FILE_COUNT}")
     return files
 
 
@@ -160,4 +239,4 @@ def _select_entry_point(marker_files: list[str]) -> str:
     for candidate in ENTRYPOINT_CANDIDATES:
         if candidate in marker_files:
             return candidate
-    return marker_files[0]
+    raise ValueError("候选项目缺少可执行入口文件")

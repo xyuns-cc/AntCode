@@ -65,7 +65,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 396
+      "value": 388
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
@@ -425,7 +425,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 759
+      "value": 758
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
@@ -444,36 +444,6 @@
       "function": "_parse_sweep_delete_result",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_chunk_receiver.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 566
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_chunk_receiver.py",
-      "function": "LogChunkReceiver._update_state",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_chunk_receiver.py",
-      "function": "LogChunkReceiver._write_chunk",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_chunk_receiver.py",
-      "function": "LogChunkReceiver._write_chunk",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_chunk_receiver.py",
-      "function": "LogChunkReceiver.handle_chunk",
-      "rule": "POSITIONAL_ARGS",
-      "value": 7
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_cleanup_service.py",
@@ -641,7 +611,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 395
+      "value": 389
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/execution_status_service.py",
@@ -737,7 +707,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 611
+      "value": 558
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
@@ -761,7 +731,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1374
+      "value": 1366
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
@@ -861,18 +831,6 @@
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 409
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
-      "function": "TaskRunService._bind_lease_generation",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
       "function": "TaskRunService._build_result_updates",
       "rule": "POSITIONAL_ARGS",
       "value": 8
@@ -882,12 +840,6 @@
       "function": "TaskRunService._get_execution",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
-      "function": "TaskRunService.update_result",
-      "rule": "PLR0911",
-      "value": 9
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/task_run_service.py",
@@ -923,7 +875,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/distributed_log_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 340
+      "value": 337
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/source_bundle_dispatch_service.py",
@@ -953,7 +905,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1159
+      "value": 1156
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
@@ -995,19 +947,19 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "C901",
-      "value": 20
+      "value": 18
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "PLR0912",
-      "value": 19
+      "value": 17
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "PLR0915",
-      "value": 61
+      "value": 57
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
@@ -1043,7 +995,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 630
+      "value": 577
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
@@ -1065,12 +1017,6 @@
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
-      "function": "WorkerHeartbeatService._apply_system_info",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",
       "function": "WorkerHeartbeatService.heartbeat",
       "rule": "POSITIONAL_ARGS",
       "value": 10
@@ -1088,34 +1034,10 @@
       "value": 8
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_project_sync.py",
-      "function": "WorkerProjectSyncService.sync_projects_to_worker_with_info",
-      "rule": "C901",
-      "value": 16
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_project_sync.py",
-      "function": "WorkerProjectSyncService.sync_projects_to_worker_with_info",
-      "rule": "PLR0912",
-      "value": 17
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_project_sync.py",
-      "function": "WorkerProjectSyncService.sync_projects_to_worker_with_info",
-      "rule": "PLR0915",
-      "value": 75
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_project_sync.py",
-      "function": "WorkerProjectSyncService.sync_single_project",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 762
+      "value": 749
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
@@ -1242,12 +1164,6 @@
       "function": "create_ssl_context",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/security/redis_acl.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 301
     },
     {
       "path": "packages/antcode_core/src/antcode_core/common/security/secret_box.py",
@@ -1398,12 +1314,6 @@
       "function": "DistributedLock.__init__",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/sentinel_url.py",
-      "function": "_parse_endpoint",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/stream_client.py",
@@ -1667,55 +1577,13 @@
       "path": "scripts/init_db.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 558
+      "value": 554
     },
     {
       "path": "scripts/migrate_lease_keys.py",
       "function": "_read_snapshot",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 380
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "create_code_project",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "create_task",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "ensure_shared_env",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "get_logs",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "request_json",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "scripts/verify_full_chain.py",
-      "function": "wait_for_execution",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
     },
     {
       "path": "services/gateway/src/antcode_gateway/auth.py",
@@ -1746,18 +1614,6 @@
       "function": "ResultHandler.handle_status_update",
       "rule": "POSITIONAL_ARGS",
       "value": 6
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/handlers/spider_data.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 321
-    },
-    {
-      "path": "services/gateway/src/antcode_gateway/handlers/spider_item_writer.py",
-      "function": "IdempotentSpiderItemWriter._parse_result",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "services/gateway/src/antcode_gateway/rate_limit.py",
@@ -1805,7 +1661,7 @@
       "path": "services/gateway/src/antcode_gateway/services/data_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 431
+      "value": 428
     },
     {
       "path": "services/gateway/src/antcode_gateway/services/runtime_control_result.py",
@@ -1847,7 +1703,7 @@
       "path": "services/master/src/antcode_master/control/retry_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 765
+      "value": 733
     },
     {
       "path": "services/master/src/antcode_master/control/retry_loop.py",
@@ -1901,7 +1757,7 @@
       "path": "services/master/src/antcode_master/control/scheduler_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1518
+      "value": 1502
     },
     {
       "path": "services/master/src/antcode_master/control/scheduler_loop.py",
@@ -1991,7 +1847,7 @@
       "path": "services/master/src/antcode_master/ingester/result_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 521
+      "value": 520
     },
     {
       "path": "services/master/src/antcode_master/ingester/result_loop.py",
@@ -2012,46 +1868,10 @@
       "value": 16
     },
     {
-      "path": "services/master/src/antcode_master/memory_queue.py",
-      "function": "MemoryQueueBackend.enqueue",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "services/master/src/antcode_master/queue_backend.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 361
-    },
-    {
-      "path": "services/master/src/antcode_master/queue_backend.py",
-      "function": "BaseQueueBackend.enqueue",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "services/master/src/antcode_master/queue_backend.py",
-      "function": "TaskQueueBackend.enqueue",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
       "path": "services/master/src/antcode_master/readiness.py",
       "function": "MasterReadinessServer._request_path",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "services/master/src/antcode_master/redis_queue.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 532
-    },
-    {
-      "path": "services/master/src/antcode_master/redis_queue.py",
-      "function": "RedisQueueBackend.enqueue",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
     },
     {
       "path": "services/master/src/antcode_master/task_persistence.py",
@@ -2288,12 +2108,6 @@
       "value": 4
     },
     {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/retry.py",
-      "function": "update_retry_config",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
       "path": "services/web_api/src/antcode_web_api/routes/v1/runs.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -2357,7 +2171,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 554
+      "value": 550
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
@@ -2411,7 +2225,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 613
+      "value": 612
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -2435,7 +2249,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers_crud.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 325
+      "value": 323
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers_crud.py",
@@ -2522,66 +2336,6 @@
       "value": 9
     },
     {
-      "path": "services/web_api/src/antcode_web_api/websockets/log_notifier.py",
-      "function": "WebSocketLogNotifier.send_log",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/log_notifier.py",
-      "function": "WebSocketLogNotifier.send_status",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/log_realtime_handler.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 472
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/log_realtime_handler.py",
-      "function": "LogRealtimeHandler.handle_realtime_log",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/redis_log_stream_service.py",
-      "function": "RedisLogStreamService._send_history_from_s3",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/websocket_connection_manager.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 672
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/websocket_connection_manager.py",
-      "function": "WebSocketConnectionManager.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/websocket_connection_manager.py",
-      "function": "WebSocketConnectionManager._broadcast_batch",
-      "rule": "C901",
-      "value": 11
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/websocket_connection_manager.py",
-      "function": "WebSocketConnectionManager.send_execution_status",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/websockets/websocket_connection_manager.py",
-      "function": "WebSocketConnectionManager.send_log_message",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
       "path": "services/worker/src/antcode_worker/app/lifecycle.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -2597,31 +2351,13 @@
       "path": "services/worker/src/antcode_worker/app/wiring.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 887
+      "value": 764
     },
     {
       "path": "services/worker/src/antcode_worker/app/wiring.py",
       "function": "_create_engine",
       "rule": "POSITIONAL_ARGS",
       "value": 8
-    },
-    {
-      "path": "services/worker/src/antcode_worker/app/wiring.py",
-      "function": "_register_direct_worker",
-      "rule": "C901",
-      "value": 12
-    },
-    {
-      "path": "services/worker/src/antcode_worker/app/wiring.py",
-      "function": "_register_direct_worker",
-      "rule": "PLR0915",
-      "value": 58
-    },
-    {
-      "path": "services/worker/src/antcode_worker/app/wiring.py",
-      "function": "_register_direct_worker",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "services/worker/src/antcode_worker/app/wiring.py",
@@ -2789,7 +2525,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1802
+      "value": 1753
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
@@ -3086,78 +2822,6 @@
       "value": 4
     },
     {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/base.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 361
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/client.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 311
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/middlewares.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 381
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_client.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 703
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_client.py",
-      "function": "BrowserPool._create_options",
-      "rule": "C901",
-      "value": 21
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_client.py",
-      "function": "BrowserPool._create_options",
-      "rule": "PLR0912",
-      "value": 23
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_client.py",
-      "function": "RenderClient._execute_script_sync",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_client.py",
-      "function": "RenderClient._render_sync",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_client.py",
-      "function": "RenderResponse.ok",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_spider.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 341
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/render_spider.py",
-      "function": "RenderSpider.re_first",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/spider/spiderkit/request.py",
-      "function": "Response.ok",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
       "path": "services/worker/src/antcode_worker/projects/fetcher.py",
       "function": "ArtifactFetcher._is_unsafe_zip_member",
       "rule": "PLR2004",
@@ -3332,18 +2996,6 @@
       "value": 1
     },
     {
-      "path": "services/worker/src/antcode_worker/services/log_cleanup.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 366
-    },
-    {
-      "path": "services/worker/src/antcode_worker/services/log_cleanup.py",
-      "function": "LogCleanupService._format_bytes",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "services/worker/src/antcode_worker/services/resilience.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -3365,7 +3017,7 @@
       "path": "services/worker/src/antcode_worker/transport/factory.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 572
+      "value": 567
     },
     {
       "path": "services/worker/src/antcode_worker/transport/factory.py",
@@ -3419,7 +3071,7 @@
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1685
+      "value": 1681
     },
     {
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
@@ -3491,7 +3143,7 @@
       "path": "services/worker/src/antcode_worker/transport/redis/keys.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 494
+      "value": 483
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/keys.py",
@@ -3545,13 +3197,7 @@
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1497
-    },
-    {
-      "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
-      "function": "RedisTransport.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
+      "value": 1373
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
@@ -3734,40 +3380,16 @@
       "value": 3
     },
     {
-      "path": "tests/integration/postgres/migration_cases.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 384
-    },
-    {
       "path": "tests/integration/postgres/test_20260713_migrations.py",
       "function": "test_install_key_data_migration_rolls_back_then_retries_idempotently",
       "rule": "PLR2004",
       "value": 1
     },
     {
-      "path": "tests/integration/test_s3_storage.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 501
-    },
-    {
-      "path": "tests/integration/test_s3_storage.py",
-      "function": "test_presigned_url",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/test_s3_storage.py",
-      "function": "test_project_extract_to_s3",
-      "rule": "PLR0915",
-      "value": 51
-    },
-    {
       "path": "tests/integration/worker/test_direct_mode_e2e.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 609
+      "value": 608
     },
     {
       "path": "tests/integration/worker/test_direct_mode_e2e.py",
@@ -3785,7 +3407,7 @@
       "path": "tests/integration/worker/test_disconnect_recovery.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 735
+      "value": 729
     },
     {
       "path": "tests/integration/worker/test_disconnect_recovery.py",
@@ -3809,7 +3431,7 @@
       "path": "tests/integration/worker/test_fault_tolerance.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1660
+      "value": 1659
     },
     {
       "path": "tests/integration/worker/test_fault_tolerance.py",
@@ -3828,108 +3450,6 @@
       "function": "_assert_duplicate_master_processing",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 1317
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayCodecs.test_heartbeat_encoder",
-      "rule": "PLR2004",
-      "value": 5
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayCodecs.test_result_encoder",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayCodecs.test_task_decoder",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayModeE2EFlow.test_gateway_reconnect_flow.mock_connect",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayReconnect.test_exponential_backoff",
-      "rule": "PLR2004",
-      "value": 4
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayTransportConnection.test_gateway_transport_initialization",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestGatewayTransportStatus.test_transport_status",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_gateway_mode_e2e.py",
-      "function": "TestReceiptIdempotency.test_receipt_pending_list",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 768
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestHeartbeatReporter.test_heartbeat_failure_handling",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestHeartbeatReporter.test_heartbeat_recovery",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestLogManagerIntegration.test_log_manager_full_flow",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestLogSpoolRecovery.test_spool_persistence_across_restart",
-      "rule": "PLR2004",
-      "value": 3
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestLogSpoolRecovery.test_spool_write_and_recovery",
-      "rule": "PLR2004",
-      "value": 6
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestSystemMetricsCollector.test_heartbeat_metrics_integration",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_logs_heartbeat_checkpoint.py",
-      "function": "TestSystemMetricsCollector.test_metrics_collection",
-      "rule": "PLR2004",
-      "value": 4
     },
     {
       "path": "tests/integration/worker/test_observability_checkpoint.py",
@@ -4016,18 +3536,6 @@
       "value": 1
     },
     {
-      "path": "tests/integration/worker/test_redis_acl_live.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 303
-    },
-    {
-      "path": "tests/integration/worker/test_result_reporting.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 708
-    },
-    {
       "path": "tests/integration/worker/test_runtime_executor_checkpoint.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -4073,7 +3581,7 @@
       "path": "tests/integration/worker/test_task_cancellation.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 519
+      "value": 518
     },
     {
       "path": "tests/integration/worker/test_task_cancellation.py",
@@ -4085,7 +3593,7 @@
       "path": "tests/integration/worker/test_task_dispatch_execution.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 741
+      "value": 734
     },
     {
       "path": "tests/integration/worker/test_task_dispatch_execution.py",
@@ -4127,7 +3635,7 @@
       "path": "tests/integration/worker/test_worker_registration.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 382
+      "value": 378
     },
     {
       "path": "tests/integration/worker/test_worker_registration.py",
@@ -4454,12 +3962,6 @@
       "value": 1
     },
     {
-      "path": "tests/unit/core/test_scheduler_task_delete_transaction.py",
-      "function": "test_dependency_cleanup_chunks_large_run_sets",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
       "path": "tests/unit/core/test_session_and_worker_credentials.py",
       "function": "test_access_token_rejects_shortened_server_session",
       "rule": "PLR2004",
@@ -4510,18 +4012,6 @@
     {
       "path": "tests/unit/core/test_spider_dispatcher_contract.py",
       "function": "test_rule_dispatch_forwards_limits_and_requires_render",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/core/test_spider_retention.py",
-      "function": "test_legacy_sink_default_has_no_maxlen_or_expire",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/core/test_spider_retention.py",
-      "function": "test_legacy_sink_explicit_retention_is_consistent",
       "rule": "PLR2004",
       "value": 2
     },
@@ -4637,7 +4127,7 @@
       "path": "tests/unit/gateway/test_spider_retention.py",
       "function": "test_gateway_explicit_retention_covers_stream_meta_index",
       "rule": "PLR2004",
-      "value": 2
+      "value": 1
     },
     {
       "path": "tests/unit/master/test_lease_eviction_generation.py",
@@ -4650,12 +4140,6 @@
       "function": "test_l2_regranted_before_failover_skips_null_lease_runs",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "tests/unit/master/test_log_ingest_loop.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 409
     },
     {
       "path": "tests/unit/master/test_log_ingest_loop.py",
@@ -4738,18 +4222,6 @@
     {
       "path": "tests/unit/scripts/test_migrate_worker_credentials.py",
       "function": "test_migrate_rows_hashes_and_encrypts_real_credentials",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/scripts/test_migrate_worker_install_keys.py",
-      "function": "_Redis.scan",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/scripts/test_migrate_worker_install_keys.py",
-      "function": "test_legacy_redis_keys_are_renamed_without_plaintext_components",
       "rule": "PLR2004",
       "value": 1
     },
@@ -5133,12 +4605,6 @@
     },
     {
       "path": "tests/unit/web_api/test_task_worker_acl.py",
-      "function": "test_scheduler_update_resolves_worker_public_id",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/web_api/test_task_worker_acl.py",
       "function": "test_task_create_preserves_worker_acl_forbidden",
       "rule": "PLR2004",
       "value": 1
@@ -5276,12 +4742,6 @@
       "value": 1
     },
     {
-      "path": "tests/unit/worker/test_engine_ownership_fail_closed.py",
-      "function": "test_ownership_claim_uses_transport_namespace_and_lease_fence",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "tests/unit/worker/test_executor.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -5393,7 +4853,7 @@
       "path": "tests/unit/worker/test_persistent_credentials.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 542
+      "value": 482
     },
     {
       "path": "tests/unit/worker/test_persistent_credentials.py",
@@ -5450,16 +4910,10 @@
       "value": 1
     },
     {
-      "path": "tests/unit/worker/test_redis_pending_recovery.py",
-      "function": "test_dead_letter_retry_after_ack_loss_uses_atomic_settlement_marker",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "tests/unit/worker/test_redis_transport_modernization.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1089
+      "value": 1052
     },
     {
       "path": "tests/unit/worker/test_redis_transport_modernization.py",
@@ -5470,12 +4924,6 @@
     {
       "path": "tests/unit/worker/test_redis_transport_modernization.py",
       "function": "test_ack_task_atomically_requires_owned_worker_receipt",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/worker/test_redis_transport_modernization.py",
-      "function": "test_poll_control_drains_both_consumer_pels_before_new_events",
       "rule": "PLR2004",
       "value": 1
     },
@@ -5564,22 +5012,10 @@
       "value": 4
     },
     {
-      "path": "tests/unit/worker/test_spider_parent_transport.py",
-      "function": "test_direct_transport_explicit_retention_covers_stream_meta_index",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "tests/unit/worker/test_spider_retention_reporter.py",
-      "function": "test_reporter_explicit_retention_uses_same_ttl",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
       "path": "tests/unit/worker/test_transport_factory.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 316
+      "value": 310
     },
     {
       "path": "tests/unit/worker/test_transport_factory.py",
@@ -5690,12 +5126,6 @@
       "value": 349
     },
     {
-      "path": "web/antcode-frontend/src/hooks/useAuth.ts",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 351
-    },
-    {
       "path": "web/antcode-frontend/src/pages/AlertConfig/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
@@ -5778,12 +5208,6 @@
       "function": "-",
       "rule": "FILE_LINES",
       "value": 334
-    },
-    {
-      "path": "web/antcode-frontend/src/services/logStreamConnection.ts",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 305
     },
     {
       "path": "web/antcode-frontend/src/services/projects.ts",

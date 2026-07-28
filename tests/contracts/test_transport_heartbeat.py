@@ -11,7 +11,7 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
-async def test_send_heartbeat_updates_key(transport, fresh_ids, redis_admin):
+async def test_send_heartbeat_updates_key(transport, fresh_ids, contract_probe):
     """A successful heartbeat must materialize the worker's heartbeat hash."""
     from antcode_worker.transport.base import HeartbeatMessage
 
@@ -29,18 +29,12 @@ async def test_send_heartbeat_updates_key(transport, fresh_ids, redis_admin):
     ok = await transport.send_heartbeat(hb)
     assert ok is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        hb_key = keys.heartbeat_key(fresh_ids.worker_id)
-        exists = await redis_admin.exists(hb_key)
-        assert exists == 1
-        fields = await redis_admin.hgetall(hb_key)
-        assert fields["status"] == "online"
-        assert fields["cpu_percent"] == "12.5"
-        assert fields["running_tasks"] == "2"
+    fields = await contract_probe.heartbeat_fields()
+    assert float(fields["cpu_percent"]) == pytest.approx(12.5)
+    assert int(fields["running_tasks"]) == 2
 
 
-async def test_send_heartbeat_overwrites_previous(transport, fresh_ids, redis_admin):
+async def test_send_heartbeat_overwrites_previous(transport, fresh_ids, contract_probe):
     """Sending two heartbeats in a row must end with the later values
     visible (this is the only sane semantics for an HSET-style key)."""
     from antcode_worker.transport.base import HeartbeatMessage
@@ -60,16 +54,12 @@ async def test_send_heartbeat_overwrites_previous(transport, fresh_ids, redis_ad
     assert await transport.send_heartbeat(first) is True
     assert await transport.send_heartbeat(second) is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        hb_key = keys.heartbeat_key(fresh_ids.worker_id)
-        fields = await redis_admin.hgetall(hb_key)
-        # The later send wins.
-        assert fields["cpu_percent"] == "88.8"
-        assert fields["running_tasks"] == "4"
+    fields = await contract_probe.heartbeat_fields()
+    assert float(fields["cpu_percent"]) == pytest.approx(88.8)
+    assert int(fields["running_tasks"]) == 4
 
 
-async def test_send_heartbeat_sets_ttl(transport, fresh_ids, redis_admin):
+async def test_send_heartbeat_sets_ttl(transport, fresh_ids, contract_probe):
     """The heartbeat key must carry a positive TTL — otherwise dead workers
     would linger forever in the cluster view."""
     from antcode_worker.transport.base import HeartbeatMessage
@@ -77,10 +67,5 @@ async def test_send_heartbeat_sets_ttl(transport, fresh_ids, redis_admin):
     hb = HeartbeatMessage(worker_id=fresh_ids.worker_id, status="online")
     assert await transport.send_heartbeat(hb) is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        hb_key = keys.heartbeat_key(fresh_ids.worker_id)
-        ttl = await redis_admin.ttl(hb_key)
-        # Either positive seconds (TTL set) or 0/-1 are visible signals — we
-        # require strictly positive: dead workers must auto-expire.
-        assert ttl > 0, f"heartbeat key must have a positive TTL, got {ttl}"
+    ttl = await contract_probe.heartbeat_ttl()
+    assert ttl > 0, f"heartbeat must have a positive TTL, got {ttl}"

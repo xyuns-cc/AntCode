@@ -1,0 +1,30 @@
+ARG UV_VERSION=0.8.17
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 AS uv-bin
+
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
+COPY . /app
+
+RUN uv sync --all-packages --extra dev --frozen
+
+RUN groupadd --gid 1000 appgroup && \
+    useradd --uid 1000 --gid appgroup --shell /bin/bash --create-home appuser && \
+    chown -R appuser:appgroup /app
+
+USER appuser
+
+ENTRYPOINT ["/app/.venv/bin/pytest"]

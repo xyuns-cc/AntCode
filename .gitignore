@@ -153,3 +153,8 @@ web_new/
 
 # 本地 build 输出
 web/antcode-frontend/dist/
+
+# Local operator and test-machine artifacts
+infra/docker/docker-compose.*.local-backup.yml
+infra/docker/docker-compose.remote*.yml
+scripts/cookies.ts

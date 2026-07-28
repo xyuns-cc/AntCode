@@ -33,6 +33,15 @@ class TestTransportConfigValidation:
 
         assert "无效的 transport.mode" in str(exc_info.value)
 
+    def test_direct_bootstrap_rejects_disabled_worker_acl(self, monkeypatch):
+        from antcode_core.common import config as core_config
+        from antcode_worker.app import wiring
+
+        monkeypatch.setattr(core_config.settings, "REDIS_ACL_ENABLED", False)
+
+        with pytest.raises(TransportConfigError, match="必须启用 REDIS_ACL_ENABLED"):
+            wiring._prepare_transport_bootstrap(object(), "direct")
+
     def test_direct_mode_requires_redis_url(self):
         """Direct 模式必须配置 redis_url"""
         config = TransportConfig(
@@ -105,11 +114,41 @@ class TestTransportConfigValidation:
         config = TransportConfig(
             mode="direct",
             worker_id="worker-001",
-            direct=DirectConfig(redis_url="redis://10.0.0.10:6379/0"),
+            direct=DirectConfig(
+                redis_url="redis://10.0.0.10:6379/0",
+                api_base_url="https://api.example.com",
+                api_key="api-key",
+                secret_key="secret-key",
+            ),
             gateway=GatewayConfigSpec(),  # 默认值
         )
 
         validate_transport_config(config)
+
+    def test_direct_mode_requires_control_plane_credentials(self):
+        config = TransportConfig(
+            mode="direct",
+            worker_id="worker-001",
+            direct=DirectConfig(redis_url="redis://10.0.0.10:6379/0"),
+        )
+
+        with pytest.raises(TransportConfigError, match="Web API"):
+            validate_transport_config(config)
+
+    def test_direct_mode_rejects_remote_plain_http_control_plane(self):
+        config = TransportConfig(
+            mode="direct",
+            worker_id="worker-001",
+            direct=DirectConfig(
+                redis_url="redis://10.0.0.10:6379/0",
+                api_base_url="http://api.example.com",
+                api_key="api-key",
+                secret_key="secret-key",
+            ),
+        )
+
+        with pytest.raises(TransportConfigError, match="必须使用 HTTPS"):
+            validate_transport_config(config)
 
     def test_valid_gateway_config(self):
         """有效的 Gateway 配置应该通过校验"""

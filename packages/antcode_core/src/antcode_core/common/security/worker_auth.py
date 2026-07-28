@@ -106,18 +106,15 @@ class WorkerAuthVerifier:
             return False
         return True
 
-    async def verify_request(self, request: Request, require_signature: bool = False) -> dict[str, Any]:
+    async def verify_request(self, request: Request) -> dict[str, Any]:
         worker_id = request.headers.get("X-Worker-ID", "").strip()
-        if worker_id and not await self.check_rate_limit(worker_id):
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求频率过高")
-        if not require_signature:
-            return {"worker_id": worker_id, "verified": True, "signature_verified": False}
-
         timestamp, nonce, signature = self._signature_headers(request, worker_id)
         payload = await self._request_payload(request)
         verified = await self.verify_signature_async(worker_id, payload, timestamp, nonce, signature)
         if not verified:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="签名验证失败")
+        if not await self.check_rate_limit(worker_id):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求频率过高")
         return {"worker_id": worker_id, "verified": True, "signature_verified": True}
 
     @staticmethod
@@ -148,19 +145,14 @@ class WorkerAuthVerifier:
 worker_auth_verifier = WorkerAuthVerifier()
 
 
-async def verify_worker_request(request: Request) -> dict[str, Any]:
-    return await worker_auth_verifier.verify_request(request, require_signature=False)
-
-
 async def verify_worker_request_with_signature(request: Request) -> dict[str, Any]:
-    return await worker_auth_verifier.verify_request(request, require_signature=True)
+    return await worker_auth_verifier.verify_request(request)
 
 
 __all__ = [
     "WorkerAuthVerifier",
     "claim_worker_nonce",
     "load_worker_secret",
-    "verify_worker_request",
     "verify_worker_request_with_signature",
     "worker_auth_verifier",
 ]

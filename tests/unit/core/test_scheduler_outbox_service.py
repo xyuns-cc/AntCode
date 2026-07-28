@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from antcode_core.application.services.scheduler.outbox_claims import OUTBOX_REPUBLISH_SECONDS
 from antcode_core.application.services.scheduler.outbox_service import (
     OUTBOX_CONSUME_MAX_ATTEMPTS,
     OutboxConsumeClaim,
@@ -36,6 +37,21 @@ class _ClaimQuery:
         return self
 
     def select_for_update(self):
+        return self
+
+
+class _PublishQuery:
+    def __init__(self, event=None):
+        self.first = AsyncMock(return_value=event)
+        self.update = AsyncMock(return_value=1)
+
+    def using_db(self, _connection):
+        return self
+
+    def select_for_update(self, **_kwargs):
+        return self
+
+    def order_by(self, *_fields):
         return self
 
 
@@ -77,6 +93,43 @@ async def test_publish_adds_stable_outbox_id_without_maxlen():
     args = stream.xadd.await_args.args
     assert args[1]["outbox_id"] == "event-id"
     assert stream.xadd.await_args.kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_published_unconsumed_event_is_republished_after_recovery_window():
+    now = datetime.now(UTC)
+    event = MagicMock(
+        id=7,
+        payload={"task_id": "42"},
+        event_type="task_changed",
+        public_id="event-id",
+        created_at=now - timedelta(minutes=5),
+    )
+    select_query = _PublishQuery(event)
+    update_query = _PublishQuery()
+    stream = MagicMock(xadd=AsyncMock())
+    service = SchedulerOutboxService(stream=stream)
+
+    with (
+        patch(
+            "antcode_core.application.services.scheduler.outbox_service.in_transaction",
+            return_value=_Transaction(),
+        ),
+        patch.object(service, "_db_now", AsyncMock(return_value=now)),
+        patch(
+            "antcode_core.application.services.scheduler.outbox_service.SchedulerOutbox.filter",
+            MagicMock(side_effect=[select_query, update_query]),
+        ) as outbox_filter,
+    ):
+        assert await service._publish_one() is True
+
+    replay_filter = outbox_filter.call_args_list[0]
+    replay_q = replay_filter.args[0]
+    assert replay_q.children[0].filters == {"published_at__isnull": True}
+    assert replay_q.children[1].filters == {"published_at__lte": now - timedelta(seconds=OUTBOX_REPUBLISH_SECONDS)}
+    assert replay_filter.kwargs["consumed_at__isnull"] is True
+    stream.xadd.assert_awaited_once()
+    assert update_query.update.await_args.kwargs["published_at"] == now
 
 
 @pytest.mark.asyncio

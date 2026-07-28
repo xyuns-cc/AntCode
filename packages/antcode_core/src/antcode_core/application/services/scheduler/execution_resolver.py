@@ -93,6 +93,13 @@ class ExecutionResolver:
                 str(project.bound_worker_id),
             )
 
+        runtime_worker_id = getattr(project, "worker_id", None)
+        if runtime_worker_id and worker.public_id != runtime_worker_id:
+            raise WorkerUnavailableError(
+                "固定 Worker 与项目运行时 Worker 不一致",
+                str(worker.id),
+            )
+
         if not await self._ensure_worker_online(worker):
             raise WorkerUnavailableError(f"绑定 Worker [{worker.name}] 离线", str(worker.id))
 

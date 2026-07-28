@@ -86,6 +86,7 @@ class TaskMessage:
     source_bundle: SourceBundle | None = None
     source_subdir: str = ""
     entry_point: str = ""
+    runtime_env_name: str = ""
     run_id: str = ""
     created_at: datetime | None = None
     receipt: str | None = None
@@ -100,6 +101,7 @@ class TaskMessage:
             f"environment={sanitize_dict(self.environment)!r}, "
             f"timeout={self.timeout}, source_bundle={self.source_bundle!r}, "
             f"source_subdir={self.source_subdir!r}, entry_point={self.entry_point!r}, "
+            f"runtime_env_name={self.runtime_env_name!r}, "
             f"run_id={self.run_id!r}, created_at={self.created_at!r}, "
             f"receipt={'***REDACTED***' if self.receipt else None})"
         )
@@ -135,6 +137,12 @@ class HeartbeatMessage:
     max_concurrent_tasks: int = 5
     version: str = ""
     timestamp: datetime | None = None
+
+
+class GenerationLostError(RuntimeError):
+    """本进程的 Lease generation 已被新代际取代（复审 D2）。engine 捕获后
+    必须立即 abort 所有执行，而不是当普通轮询异常退避重试——否则旧代际
+    僵尸进程最长可与新代际并行到下一次 ownership 续租 tick（~600s）。"""
 
 
 @dataclass
@@ -204,6 +212,11 @@ class TransportBase(ABC):
         """传输模式"""
         pass
 
+    async def authoritative_now_ms(self) -> int:
+        """运行时控制 deadline 时钟（P1-DR-04）：Direct 覆写为 Redis TIME；
+        Gateway 权威过滤在中继侧，本地默认实现仅作粗粒度防线（本地时钟）。"""
+        return int(datetime.now().timestamp() * 1000)
+
     # ==================== 生命周期 ====================
 
     @abstractmethod
@@ -226,10 +239,8 @@ class TransportBase(ABC):
         """
         pass
 
-    # T7-B3b (P1-6): worker 优雅停机时主动 revoke lease，让 master
-    # 立即判死；不再等 lease TTL（30s）自然过期。默认 no-op 保持向后兼容，
-    # 具体 transport 覆写：direct 直接 DEL lease key + heartbeat；
-    # gateway 发 Deregister RPC。
+    # T7-B3b (P1-6): worker 优雅停机时主动 revoke lease 让 master 立即判死
+    # （不等 30s TTL）。默认 no-op；direct DEL lease key，gateway 发 RPC。
     async def deregister(self, reason: str = "shutdown") -> None:
         """主动通知 master worker 下线。默认 no-op。"""
         return
@@ -265,6 +276,15 @@ class TransportBase(ABC):
         pass
 
     @abstractmethod
+    async def defer_task(self, receipt: str, reason: str = "") -> bool:
+        """保留任务在 PEL，等待可见性超时后重新投递。
+
+        ownership contention 不属于业务拒绝，不能 XADD 新消息、XACK 原消息，
+        也不能累计普通 requeue 次数。
+        """
+        pass
+
+    @abstractmethod
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
         """
         重新入队任务
@@ -289,6 +309,24 @@ class TransportBase(ABC):
         Returns:
             是否成功
         """
+        pass
+
+    @abstractmethod
+    async def report_spider_data(
+        self,
+        run_id: str,
+        items: list[dict[str, Any]],
+    ) -> bool:
+        """通过主进程 transport 上报一批 SpiderData item。"""
+        pass
+
+    @abstractmethod
+    async def update_spider_meta(
+        self,
+        run_id: str,
+        meta: dict[str, Any],
+    ) -> bool:
+        """通过主进程 transport 更新 SpiderData meta。"""
         pass
 
     # ==================== 日志操作 ====================
@@ -401,6 +439,18 @@ class TransportBase(ABC):
         ok = await self.send_heartbeat(heartbeat)
         return ("" if not ok else current_lease_id, 0, 0, False)
 
+    async def claim_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
+        """Claim the cross-worker execution fence for one run."""
+        raise RuntimeError(f"{self.mode} transport 不支持 run ownership claim")
+
+    async def renew_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
+        """Renew a previously acquired execution fence."""
+        raise RuntimeError(f"{self.mode} transport 不支持 run ownership renew")
+
+    async def release_run_ownership(self, run_id: str) -> bool:
+        """Release this Worker's execution fence for one run."""
+        raise RuntimeError(f"{self.mode} transport 不支持 run ownership release")
+
     # ==================== 控制通道 ====================
 
     @abstractmethod
@@ -435,7 +485,9 @@ class TransportBase(ABC):
         request_id: str,
         reply_stream: str,
         success: bool,
-        data: dict | None = None,
+        *,
+        receipt: str = "",
+        data: Any = None,
         error: str = "",
     ) -> bool:
         """
@@ -445,6 +497,7 @@ class TransportBase(ABC):
             request_id: 请求标识
             reply_stream: 回执 Stream
             success: 是否成功
+            receipt: 原控制事件回执
             data: 结果数据
             error: 错误信息
 

@@ -8,23 +8,30 @@ import httpx
 import pytest
 
 from .conftest import requires_postgres, requires_redis
-from .helpers import create_run_context, get_worker, login
+from .helpers import get_worker
+from .run_scenarios import RunScenario, provision_scenario, trigger_and_wait
 
 
 @requires_postgres
 @requires_redis
 @pytest.mark.asyncio
-async def test_task_lifecycle_success(e2e_config):
+async def test_task_lifecycle_success(e2e_config, e2e_token):
     """任务生命周期基本成功路径"""
     async with httpx.AsyncClient(
         base_url=e2e_config.web_api_url,
         timeout=e2e_config.http_timeout,
     ) as client:
-        token = await login(client, e2e_config)
-        worker = await get_worker(client, token, e2e_config.worker_id)
-        context = await create_run_context(client, token, worker["id"], e2e_config)
-        run = context["run"]
+        worker = await get_worker(client, e2e_token, e2e_config.worker_id)
+        scenario = RunScenario(expected_status="success")
+        async with provision_scenario(
+            client,
+            e2e_token,
+            worker["id"],
+            config=e2e_config,
+            scenario=scenario,
+        ) as resources:
+            run = await trigger_and_wait(client, e2e_token, resources, config=e2e_config)
 
-        assert run.get("status") == "success"
-        assert run.get("exit_code", 0) == 0
-        assert run.get("worker_id") == worker["id"]
+            assert run.get("status") == "success"
+            assert run.get("exit_code", 0) == 0
+            assert run.get("worker_id") == worker["id"]

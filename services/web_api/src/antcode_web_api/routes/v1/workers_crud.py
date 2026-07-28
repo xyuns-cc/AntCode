@@ -161,9 +161,7 @@ async def refresh_worker_status(worker_id: str, *, worker_to_response):
     return success(worker_to_response(worker))
 
 
-def register_crud_routes(
-    router, *, worker_to_response, require_worker_access, list_accessible_workers
-) -> None:
+def register_crud_routes(router, *, worker_to_response, require_worker_access, list_accessible_workers) -> None:
     admin_dep = Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN))
 
     @router.get(

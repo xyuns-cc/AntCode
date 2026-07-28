@@ -8,8 +8,10 @@ Worker Engine 单元测试
 - 取消任务
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import antcode_worker.engine.engine as engine_module
 import pytest
 from antcode_worker.domain.enums import RunStatus
 from antcode_worker.domain.models import ExecResult, RunContext, SourceBundle, TaskPayload
@@ -20,6 +22,8 @@ from antcode_worker.engine.policies import (
 )
 from antcode_worker.engine.scheduler import Scheduler
 from antcode_worker.engine.state import RunState, StateManager
+
+FUTURE_RUNTIME_DEADLINE_MS = 4_102_444_800_000
 
 
 class TestPolicies:
@@ -230,6 +234,9 @@ class TestEngine:
         transport.report_result = AsyncMock(return_value=True)
         transport.ack_task = AsyncMock(return_value=True)
         transport.ack_control = AsyncMock(return_value=True)
+        # P1-DR-04: 运行时控制 deadline 判定改用 transport 权威时钟。
+        transport.authoritative_now_ms = AsyncMock(return_value=1_000)
+        transport._lease_id = "lease-test"
         return transport
 
     @pytest.fixture
@@ -373,6 +380,9 @@ class TestEngine:
     async def test_report_result_failure_does_not_ack_task(self, mock_transport, mock_executor):
         mock_transport.report_result = AsyncMock(return_value=False)
         engine = Engine(transport=mock_transport, executor=mock_executor)
+        # 实例属性覆盖类常量，把 _settle_with_retry 的指数退避收敛到 0，
+        # 避免失败路径在单测里真实 sleep 1+2+4+8 秒（重试次数语义不变）。
+        engine._SETTLE_BACKOFF_BASE_SECONDS = 0.0
         context = RunContext(
             run_id="run-1",
             task_id="task-1",
@@ -392,6 +402,8 @@ class TestEngine:
     async def test_report_result_ack_failure_keeps_task_state(self, mock_transport, mock_executor):
         mock_transport.ack_task = AsyncMock(return_value=False)
         engine = Engine(transport=mock_transport, executor=mock_executor)
+        # 同上：注入零退避，消除失败路径的真实指数退避 sleep。
+        engine._SETTLE_BACKOFF_BASE_SECONDS = 0.0
         context = RunContext(
             run_id="run-1",
             task_id="task-1",
@@ -423,6 +435,7 @@ class TestEngine:
         control.payload = {
             "action": "get_platform_info",
             "request_id": "req-1",
+            "expires_at_ms": FUTURE_RUNTIME_DEADLINE_MS,
             "reply_stream": "reply-stream",
             "payload": {},
         }
@@ -434,14 +447,13 @@ class TestEngine:
         mock_transport.ack_control.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_runtime_control_ack_failure_is_exposed(
+    async def test_runtime_control_result_owns_event_ack(
         self,
         mock_transport,
         mock_executor,
         monkeypatch,
     ):
         mock_transport.send_control_result = AsyncMock(return_value=True)
-        mock_transport.ack_control = AsyncMock(return_value=False)
         engine = Engine(transport=mock_transport, executor=mock_executor)
         monkeypatch.setattr(
             "antcode_worker.runtime.uv_manager.uv_manager.get_platform_info_async",
@@ -451,10 +463,180 @@ class TestEngine:
         control.payload = {
             "action": "get_platform_info",
             "request_id": "req-1",
+            "expires_at_ms": FUTURE_RUNTIME_DEADLINE_MS,
             "reply_stream": "reply-stream",
             "payload": {},
         }
         control.receipt = "receipt-1"
 
-        with pytest.raises(RuntimeError, match="控制消息 ACK 失败"):
+        await engine._handle_runtime_control(control)
+
+        assert mock_transport.send_control_result.await_args.kwargs["receipt"] == "receipt-1"
+        mock_transport.ack_control.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_runtime_control_missing_request_id_is_acked_and_dropped(
+        self,
+        mock_transport,
+        mock_executor,
+        monkeypatch,
+    ):
+        """W4 回归：有 receipt 但缺 request_id 的畸形事件必须就地 ACK。
+
+        退化行为是直接 raise（settlement try 块之前），事件永不 ACK →
+        Direct 的 PendingControlRecovery / Gateway 的 WatchControl PEL
+        重放会无限重投同一条坏消息。
+        """
+        mock_transport.send_control_result = AsyncMock(return_value=True)
+        action = AsyncMock(return_value={"platform": "must-not-run"})
+        monkeypatch.setattr(
+            "antcode_worker.runtime.uv_manager.uv_manager.get_platform_info_async",
+            action,
+        )
+        engine = Engine(transport=mock_transport, executor=mock_executor)
+        control = MagicMock(
+            payload={
+                "action": "get_platform_info",
+                "expires_at_ms": FUTURE_RUNTIME_DEADLINE_MS,
+            },
+            receipt="receipt-1",
+        )
+
+        await engine._handle_runtime_control(control)
+
+        mock_transport.ack_control.assert_awaited_once_with("receipt-1")
+        mock_transport.send_control_result.assert_not_awaited()
+        action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_runtime_control_missing_request_id_ack_failure_does_not_raise(
+        self,
+        mock_transport,
+        mock_executor,
+    ):
+        """W4：畸形事件的 ACK 是 best-effort，失败不 raise（等重投后再试）。"""
+        mock_transport.send_control_result = AsyncMock(return_value=True)
+        mock_transport.ack_control = AsyncMock(side_effect=RuntimeError("ack down"))
+        engine = Engine(transport=mock_transport, executor=mock_executor)
+        control = MagicMock(payload={"action": "noop"}, receipt="receipt-1")
+
+        await engine._handle_runtime_control(control)
+
+        mock_transport.ack_control.assert_awaited_once_with("receipt-1")
+        mock_transport.send_control_result.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_runtime_control_without_receipt_still_raises(
+        self,
+        mock_transport,
+        mock_executor,
+    ):
+        """无 receipt 的事件没有 settlement 通路，保持 fail-fast。"""
+        mock_transport.send_control_result = AsyncMock(return_value=True)
+        engine = Engine(transport=mock_transport, executor=mock_executor)
+        control = MagicMock(payload={"action": "noop", "request_id": "req-1"}, receipt="")
+
+        with pytest.raises(RuntimeError, match="缺少 receipt"):
             await engine._handle_runtime_control(control)
+
+        mock_transport.ack_control.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_runtime_control_duplicate_receipt_is_not_scheduled_twice(
+        self,
+        mock_transport,
+        mock_executor,
+    ):
+        engine = Engine(transport=mock_transport, executor=mock_executor)
+        release = asyncio.Event()
+
+        async def wait_for_release(_control):
+            await release.wait()
+
+        engine._handle_runtime_control = wait_for_release
+        control = MagicMock(receipt="receipt-1")
+
+        assert engine._schedule_runtime_control(control) is True
+        assert engine._schedule_runtime_control(control) is False
+        release.set()
+        await asyncio.gather(*engine._inflight_controls)
+        await asyncio.sleep(0)
+
+        assert "receipt-1" not in engine._runtime_control_tasks
+        assert not engine._runtime_control_receipts
+        assert not engine._inflight_controls
+
+    @pytest.mark.asyncio
+    async def test_cancelled_runtime_action_stays_unsettled_and_can_be_redelivered(
+        self,
+        mock_transport,
+        mock_executor,
+        monkeypatch,
+    ):
+        mock_transport.send_control_result = AsyncMock(return_value=True)
+        engine = Engine(transport=mock_transport, executor=mock_executor)
+        action_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def cancellable_action():
+            action_started.set()
+            await release.wait()
+            return {"platform": "test"}
+
+        monkeypatch.setattr(
+            "antcode_worker.runtime.uv_manager.uv_manager.get_platform_info_async",
+            cancellable_action,
+        )
+        control = MagicMock(
+            payload={
+                "action": "get_platform_info",
+                "request_id": "req-1",
+                "expires_at_ms": FUTURE_RUNTIME_DEADLINE_MS,
+            },
+            receipt="receipt-1",
+        )
+
+        assert engine._schedule_runtime_control(control) is True
+        task = engine._runtime_control_tasks["receipt-1"]
+        await action_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+
+        mock_transport.send_control_result.assert_not_awaited()
+        mock_transport.ack_control.assert_not_awaited()
+        assert "receipt-1" not in engine._runtime_control_tasks
+        assert task not in engine._runtime_control_receipts
+
+        release.set()
+        assert engine._schedule_runtime_control(control) is True
+        await asyncio.gather(*engine._inflight_controls)
+
+    @pytest.mark.asyncio
+    async def test_runtime_control_background_failure_is_observed(
+        self,
+        mock_transport,
+        *,
+        mock_executor,
+        monkeypatch,
+    ):
+        engine = Engine(transport=mock_transport, executor=mock_executor)
+        observed_logger = MagicMock()
+        monkeypatch.setattr("antcode_worker.engine.engine.logger", observed_logger)
+
+        async def fail_control():
+            raise RuntimeError("control delivery failed")
+
+        engine._handle_runtime_control = lambda _control: fail_control()
+        control = MagicMock(receipt="receipt-1")
+        assert engine._schedule_runtime_control(control) is True
+        task = engine._runtime_control_tasks["receipt-1"]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert task not in engine._inflight_controls
+        assert "receipt-1" not in engine._runtime_control_tasks
+        assert task not in engine._runtime_control_receipts
+        observed_logger.opt.assert_called_once()
+        observed_logger.opt.return_value.error.assert_called_once_with("运行时控制后台任务失败")

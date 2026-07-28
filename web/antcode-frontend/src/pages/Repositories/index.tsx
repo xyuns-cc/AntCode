@@ -15,7 +15,7 @@ import type { GitRepository, RepositoryScanResult } from '@/types/repository'
 import { formatDate } from '@/utils/format'
 import CreateRepositoryDrawer from './components/CreateRepositoryDrawer'
 import ScanImportDrawer from './components/ScanImportDrawer'
-import { buildImportDefaults } from './helpers'
+import { buildImportDefaults, buildImportProjects } from './helpers'
 
 const { Text } = Typography
 
@@ -119,7 +119,7 @@ const Repositories: React.FC = () => {
   const importProjects = async () => {
     if (!scanResult) return
     const values = await importForm.validateFields()
-    const projects = selectedSubdirs.map(subdir => values.projects[subdir])
+    const projects = buildImportProjects(values, selectedSubdirs)
     await repositoryProjectImportService.importFromRepository({ projects })
     message.success(`已导入 ${projects.length} 个项目`)
     setScanOpen(false)

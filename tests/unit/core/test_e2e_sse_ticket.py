@@ -18,10 +18,12 @@ async def test_issue_stream_ticket_uses_authenticated_http_endpoint(monkeypatch)
     monkeypatch.setattr(log_client, "request_json", fake_request_json)
     client = object()
 
-    ticket = await log_client.issue_stream_ticket(client, "access-jwt")
+    ticket = await log_client.issue_stream_ticket(client, "access-jwt", "run-1")
 
     assert ticket == "one-time-ticket"
-    assert calls == [(client, "POST", "/logs/stream-ticket", "access-jwt", {})]
+    assert calls == [
+        (client, "POST", "/logs/stream-ticket", "access-jwt", {"params": {"run_id": "run-1"}}),
+    ]
 
 
 def test_stream_path_contains_only_encoded_ticket() -> None:
@@ -94,6 +96,25 @@ async def test_realtime_scan_ignores_history_and_requires_realtime_source() -> N
 
     assert message["data"]["source"] == "realtime"
     assert message["data"]["content"] == "target-log"
+
+
+@pytest.mark.asyncio
+async def test_same_stream_scanner_requires_realtime_log_and_terminal_status() -> None:
+    messages = [
+        {"type": "run_status", "data": {"status": "running"}},
+        {"type": "no_historical_logs"},
+        {"type": "log_line", "data": {"content": "target-log", "source": "realtime"}},
+        {"type": "run_status", "data": {"status": "success"}},
+    ]
+
+    log, status = await log_client.scan_for_realtime_log_and_status(
+        _aiter(messages),
+        "target-log",
+        terminal_statuses=frozenset({"success"}),
+    )
+
+    assert log["data"]["content"] == "target-log"
+    assert status["data"]["status"] == "success"
 
 
 @pytest.mark.asyncio

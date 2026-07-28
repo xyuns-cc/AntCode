@@ -1,5 +1,7 @@
 """Redis URL display helpers."""
 
+from urllib.parse import unquote
+
 _SENTINEL_SCHEMES = {"redis+sentinel", "rediss+sentinel"}
 
 
@@ -9,10 +11,14 @@ def redact_redis_url(url: str) -> str:
     if not separator:
         return url
 
-    authority, path_separator, path = location.partition("/")
+    location, fragment_separator, fragment = location.partition("#")
+    base, query_separator, query = location.partition("?")
+    authority, path_separator, path = base.partition("/")
     redacted_authority = _redact_authority(scheme.lower(), authority)
     suffix = f"/{path}" if path_separator else ""
-    return f"{scheme}://{redacted_authority}{suffix}"
+    query_suffix = f"?{_redact_query(query)}" if query_separator else ""
+    fragment_suffix = f"#{fragment}" if fragment_separator else ""
+    return f"{scheme}://{redacted_authority}{suffix}{query_suffix}{fragment_suffix}"
 
 
 def _redact_authority(scheme: str, authority: str) -> str:
@@ -27,10 +33,23 @@ def _redact_authority(scheme: str, authority: str) -> str:
 
 
 def _redact_sentinel_authority(authority: str) -> str:
-    password, separator, remainder = authority.partition("@")
+    credentials, separator, remainder = authority.partition("@")
     if not separator or "@" not in remainder:
         return authority
-    return f"***@{remainder}"
+    username, password_separator, _password = credentials.partition(":")
+    redacted = f"{username}:***" if password_separator else "***"
+    return f"{redacted}@{remainder}"
+
+
+def _redact_query(query: str) -> str:
+    redacted: list[str] = []
+    for item in query.split("&"):
+        key, separator, _value = item.partition("=")
+        if separator and unquote(key).lower().endswith("password"):
+            redacted.append(f"{key}=***")
+        else:
+            redacted.append(item)
+    return "&".join(redacted)
 
 
 __all__ = ["redact_redis_url"]

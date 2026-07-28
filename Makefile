@@ -3,7 +3,7 @@
 # 统一的开发、测试、构建命令入口
 # =============================================================================
 
-.PHONY: help install sync lint lint-fix format type-check check \
+.PHONY: help install sync lint lint-fix format complexity complexity-baseline-update type-check check \
         test test-cov test-unit test-int \
         proto clean init-db \
         dev-api dev-master dev-worker dev-gateway dev-web \
@@ -36,8 +36,10 @@ help:
 	@echo "  make lint         - ruff 检查"
 	@echo "  make lint-fix     - ruff 自动修复"
 	@echo "  make format       - ruff 格式化"
+	@echo "  make complexity   - 严格复杂度增量门禁"
+	@echo "  make complexity-baseline-update - 仅收紧复杂度基线"
 	@echo "  make type-check   - mypy 类型检查"
-	@echo "  make check        - lint + type-check"
+	@echo "  make check        - lint + complexity + type-check"
 	@echo ""
 	@echo "测试:"
 	@echo "  make test         - 全量 pytest"
@@ -49,10 +51,10 @@ help:
 	@echo "  make proto        - 重新生成 gRPC pb2"
 	@echo ""
 	@echo "Docker:"
-	@echo "  make docker-up    - docker compose up -d"
-	@echo "  make docker-down  - docker compose down"
-	@echo "  make docker-build - 单架构构建"
-	@echo "  make docker-buildx- amd64 + arm64 多架构构建"
+	@echo "  make docker-up    - 启动 dev Compose"
+	@echo "  make docker-down  - 停止 dev Compose"
+	@echo "  make docker-build - 构建 dev Compose 镜像"
+	@echo "  make docker-buildx- amd64 + arm64 多架构构建并推送"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 清 pycache / ruff cache / coverage 等"
@@ -61,7 +63,7 @@ help:
 # 依赖管理
 # =============================================================================
 install:
-	uv sync --all-packages
+	uv sync --all-packages --extra dev
 
 sync:
 	uv sync
@@ -108,10 +110,16 @@ lint-fix:
 format:
 	uv run ruff format .
 
+complexity:
+	uv run python -m scripts.check_complexity
+
+complexity-baseline-update:
+	uv run python -m scripts.check_complexity --update-baseline
+
 type-check:
 	uv run mypy packages services --ignore-missing-imports
 
-check: lint type-check
+check: lint complexity type-check
 
 # =============================================================================
 # 测试
@@ -123,41 +131,53 @@ test-cov:
 	uv run pytest --cov --cov-report=html --cov-report=term-missing
 
 test-unit:
-	uv run pytest -m "not integration and not e2e" -v
+	uv run pytest tests/unit -v
 
 test-int:
-	uv run pytest -m integration -v
+	@: "$${ANTCODE_INTEGRATION_REDIS_URL:?ANTCODE_INTEGRATION_REDIS_URL must be set}"
+	@: "$${DATABASE_URL:?DATABASE_URL must be set}"
+	@: "$${TEST_DATABASE_URL:?TEST_DATABASE_URL must be set}"
+	uv run pytest tests/integration -v
 
 # =============================================================================
 # Proto 生成
 # =============================================================================
 proto:
 	@echo "生成 gRPC 代码..."
-	@bash scripts/gen_proto.sh
+	@uv run python scripts/generate_proto.py
 
 # =============================================================================
 # Docker
 # =============================================================================
 docker-up:
-	cd infra/docker && docker compose up -d
+	docker compose -f infra/docker/docker-compose.dev.yml up -d
 
 docker-down:
-	cd infra/docker && docker compose down
+	docker compose -f infra/docker/docker-compose.dev.yml down
 
 docker-build:
 	@echo "构建 Docker 镜像..."
-	@cd infra/docker && docker compose build
+	@docker compose -f infra/docker/docker-compose.dev.yml build
 
-# 构建多架构镜像（amd64 + arm64），需事先 `docker buildx create --use`
-# 用于跨平台部署（x86 服务器 + Apple Silicon / 国产鲲鹏 arm64）
+# 构建并推送多架构镜像，需显式提供 registry 和不可变 tag。
 docker-buildx:
-	@echo "多架构构建 amd64+arm64（推送到本地 daemon 仅支持单架构，用 --push 上传 registry 才能保留全部）..."
-	@for svc in web_api master gateway worker; do \
+	@: "$${BUILDX_REGISTRY:?BUILDX_REGISTRY must be set}"
+	@: "$${BUILDX_TAG:?BUILDX_TAG must be set}"
+	@test "$${BUILDX_TAG}" != "latest" || { echo "BUILDX_TAG must be immutable, not latest"; exit 2; }
+	@for spec in \
+		"web-api|.|infra/docker/Dockerfile.web_api" \
+		"master|.|infra/docker/Dockerfile.master" \
+		"gateway|.|infra/docker/Dockerfile.gateway" \
+		"worker|.|infra/docker/Dockerfile.worker" \
+		"frontend|web/antcode-frontend|web/antcode-frontend/Dockerfile"; do \
+		svc="$${spec%%|*}"; rest="$${spec#*|}"; \
+		context="$${rest%%|*}"; dockerfile="$${rest#*|}"; \
 		docker buildx build --platform linux/amd64,linux/arm64 \
-			-f infra/docker/Dockerfile.$$svc \
-			-t antcode-$$svc:multiarch . || exit 1; \
+			-f "$$dockerfile" \
+			-t "$${BUILDX_REGISTRY}/antcode-$$svc:$${BUILDX_TAG}" \
+			--push "$$context" || exit 1; \
 	done
-	@echo "多架构构建完成。生产推送请 append --push --tag your-registry/antcode-xxx:tag"
+	@echo "多架构镜像已推送到 $${BUILDX_REGISTRY}，tag=$${BUILDX_TAG}"
 
 # =============================================================================
 # 清理

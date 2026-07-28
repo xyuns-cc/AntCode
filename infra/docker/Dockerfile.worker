@@ -4,9 +4,14 @@
 # 任务执行、运行时管理（uv）、日志输出、心跳上报
 # 支持 Direct 模式（内网直连 Redis）和 Gateway 模式（公网走 gRPC）
 # =====================================================
+ARG UV_VERSION=0.8.17
+ARG MISE_VERSION=2025.2.7
+ARG DEFAULT_RUNTIME_PYTHON=3.12.11
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 AS uv-bin
 
 # ================== 阶段 1: 构建阶段 ==================
-FROM python:3.11.11-slim AS builder
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5 AS builder
 
 WORKDIR /app
 
@@ -17,17 +22,14 @@ ENV PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖和 uv
+# 安装构建依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
-    curl \
     git \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 
-# 设置 uv 路径
-ENV PATH="/root/.local/bin:${PATH}"
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
 
 # 复制 workspace 配置
 COPY pyproject.toml uv.lock ./
@@ -59,10 +61,15 @@ COPY services/worker/src services/worker/src/
 # 创建虚拟环境并安装依赖
 RUN uv venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    uv sync --package antcode-worker
+    uv sync --frozen --package antcode-worker
 
 # ================== 阶段 2: 运行时镜像 ==================
-FROM python:3.11.11-slim AS runtime
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5 AS runtime
+ARG TARGETARCH
+ARG MISE_VERSION
+ARG DEFAULT_RUNTIME_PYTHON
+ARG MISE_SHA256_AMD64=92be0433432ecd579de77d3ba90fb61f1845d68be0602bc623cd0ff8a11892e3
+ARG MISE_SHA256_ARM64=9d4e52b81490975d533e0d4535bb7307b5fa7f4605bf6636954c58084904dbe0
 
 WORKDIR /app
 
@@ -85,13 +92,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # 用于 curl_cffi
     libcurl4 \
     bubblewrap \
+    # bwrap 进程数限制硬性依赖 prlimit（util-linux 提供），
+    # executor/sandbox.py 缺失时直接 RuntimeError，不能只靠基础镜像碰巧自带
+    util-linux \
     # 进程管理
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv（用于运行时管理 Python 环境）
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
+
+# 安装经过 SHA256 校验的 mise 多架构二进制。
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) mise_arch=x64; mise_sha256="${MISE_SHA256_AMD64}" ;; \
+        arm64) mise_arch=arm64; mise_sha256="${MISE_SHA256_ARM64}" ;; \
+        *) echo "Unsupported TARGETARCH for mise: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mise_asset="mise-v${MISE_VERSION}-linux-${mise_arch}"; \
+    curl -fsSLo "/tmp/${mise_asset}" \
+        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/${mise_asset}"; \
+    echo "${mise_sha256}  /tmp/${mise_asset}" | sha256sum -c -; \
+    install -m 0755 "/tmp/${mise_asset}" /usr/local/bin/mise; \
+    rm "/tmp/${mise_asset}"
 
 # 创建非 root 用户（安全最佳实践）
 RUN groupadd --gid 1000 appgroup && \
@@ -135,15 +157,17 @@ RUN mkdir -p \
     /app/data/worker/temp/sandbox \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/.venv \
-    && chmod -R 755 /app/data
+    && chmod -R 755 /app/data \
+    && chmod 0700 /app/data/worker/secrets /app/data/worker/identity
 
-# 为 appuser 安装 uv + mise（多语言 runtime 管理器；C4/M2：镜像内置避免
-# 首次运行时 curl|sh 的 MITM 风险；同时容器化部署更希望镜像自包含）
+# uv 与 mise 已安装到 /usr/local/bin，appuser 直接复用经过固定和校验的二进制。
 USER appuser
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    curl -fsSL https://mise.run | sh
 ENV PATH="/home/appuser/.local/bin:${PATH}"
-# 镜像已预装 mise，禁止 worker 启动时再走 curl|sh
+# E2E 与默认代码项目使用 Python 3.12。构建时预装固定补丁版本，避免首次
+# 创建环境依赖运行中容器的外网 DNS；其他显式版本仍由 uv 按请求安装。
+RUN uv python install "${DEFAULT_RUNTIME_PYTHON}" && \
+    uv python find "${DEFAULT_RUNTIME_PYTHON}" >/dev/null
+# 镜像已预装 mise，禁止 worker 启动时再执行网络安装脚本。
 ENV ANTCODE_MISE_AUTO_INSTALL=false
 ENV WORKER_SANDBOX_MODE=sandbox \
     WORKER_SANDBOX_COMMAND=bwrap \

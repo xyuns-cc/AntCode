@@ -11,6 +11,7 @@ Requirements: 11.2
 
 import os
 import signal
+import tempfile
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,6 +28,41 @@ class Credential:
     value: str
     source: str  # "file", "env", "default"
     path: str | None = None  # 文件来源路径
+
+
+def _atomic_write_secret(path: Path, value: str) -> None:
+    """Write a 0600 secret file with atomic replacement and durability checks."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(value)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_secret_key(key: str) -> None:
+    if not key or key in {".", ".."} or Path(key).name != key:
+        raise ValueError(f"非法凭据键名: {key!r}")
 
 
 class SecretsManager:
@@ -175,17 +211,21 @@ class SecretsManager:
         - 优先写文件（``data/worker/secrets/<key>``，0600 权限）；secrets_dir
           未配置时仅写入内存缓存
         - 写入后立即更新缓存，下次 get() 不再回退文件
+
+        使用同目录 0600 临时文件、文件 fsync、os.replace 和目录 fsync，
+        避免更新过程中崩溃把已有凭据截断为空或半截内容。
         """
         with self._lock:
+            _validate_secret_key(key)
             stored_path: Path | None = None
             if self._secrets_dir:
                 self._secrets_dir.mkdir(parents=True, exist_ok=True)
-                stored_path = self._secrets_dir / key
-                stored_path.write_text(value, encoding="utf-8")
                 try:
-                    os.chmod(stored_path, 0o600)
+                    os.chmod(self._secrets_dir, 0o700)
                 except OSError as exc:
-                    logger.debug("chmod {} 失败（忽略）: {}", stored_path, exc)
+                    raise OSError(f"secrets 目录 chmod 0700 失败: {self._secrets_dir}") from exc
+                stored_path = self._secrets_dir / key
+                _atomic_write_secret(stored_path, value)
             self._cache[key] = Credential(
                 key=key,
                 value=value,

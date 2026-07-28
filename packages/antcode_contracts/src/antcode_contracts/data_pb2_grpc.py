@@ -101,7 +101,7 @@ class DataServiceServicer(object):
     def StreamSpiderData(self, request_iterator, context):
         """T6-T3: Rule/Spider scraped items flow. Client-streaming — Scrapy pipeline
         sends 1..N items per batch, gateway transcodes to Redis
-        `antcode:spider:data:{run_id}` stream (same wire fields as direct mode).
+        `{antcode}:spider:<run_id>:data` stream (same wire fields as direct mode).
         Batch MAY also carry a `meta` heartbeat (items_count / last_item_at) so
         batch_status_loop / test_service see real-time progress.
         """

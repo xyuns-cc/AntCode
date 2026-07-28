@@ -9,7 +9,7 @@ import pytest
 
 from .conftest import requires_postgres, requires_redis
 from .helpers import get_worker, trigger_task
-from .log_client import get_logs, wait_for_realtime_stream_log
+from .log_client import get_logs, wait_for_realtime_log_and_status
 from .run_scenarios import RunScenario, provision_scenario, trigger_and_wait, wait_for_status
 
 REALTIME_LOG_DELAY_SECONDS = 10.0
@@ -79,16 +79,19 @@ async def test_sse_log_push(e2e_config, e2e_token):
             run_id = run["run_id"]
             log_token = resources.source.expected_log_token
 
-            message = await wait_for_realtime_stream_log(
+            message, status_message = await wait_for_realtime_log_and_status(
                 client,
                 run_id,
                 token=e2e_token,
                 expected_content=log_token,
+                terminal_statuses=SUCCESS_STATUSES,
                 timeout=e2e_config.poll_timeout,
             )
             assert message["type"] == "log_line"
             assert log_token in (message.get("data") or {})["content"]
             assert (message.get("data") or {})["source"] == "realtime"
+            assert status_message["type"] == "run_status"
+            assert (status_message.get("data") or {})["status"] == "success"
             await wait_for_status(
                 client,
                 e2e_token,

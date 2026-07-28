@@ -8,6 +8,12 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from antcode_core.common.log_limits import (
+    DEFAULT_LOG_MAX_BATCH_BYTES,
+    DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
+    positive_env_int,
+)
+
 # 在读 env 前先加载 .env（GatewayConfig 用 os.getenv 直连 os.environ，无此步骤会
 # 读不到项目根 .env）。dotenv 缺失时静默跳过，不影响 CI/CD 已通过 env 注入的场景。
 try:
@@ -68,6 +74,17 @@ class GatewayConfig:
 
     # 最大接收消息大小 (50MB)
     max_receive_message_length: int = 50 * 1024 * 1024
+
+    # StreamLogs 业务层实际 protobuf/content 字节上限
+    log_max_batch_bytes: int = field(
+        default_factory=lambda: positive_env_int("GATEWAY_LOG_MAX_BATCH_BYTES", DEFAULT_LOG_MAX_BATCH_BYTES)
+    )
+    log_max_entry_content_bytes: int = field(
+        default_factory=lambda: positive_env_int(
+            "GATEWAY_LOG_MAX_ENTRY_CONTENT_BYTES",
+            DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
+        )
+    )
 
     # 心跳保活时间（毫秒）
     keepalive_time_ms: int = 30000

@@ -6,7 +6,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class UserLoginRequest(BaseModel):
@@ -123,7 +123,11 @@ class UserAdminPasswordUpdateRequest(BaseModel):
 class UserResponse(BaseModel):
     """用户响应"""
 
-    id: str = Field(..., description="用户公开ID")
+    id: str = Field(
+        ...,
+        description="用户公开ID",
+        validation_alias=AliasChoices("public_id", "id"),
+    )
     username: str
     email: str = ""
     is_active: bool
@@ -136,11 +140,20 @@ class UserResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_nullable_email(cls, value: str | None) -> str:
+        return value or ""
+
 
 class UserSimpleResponse(BaseModel):
     """用户简要响应"""
 
-    id: str = Field(..., description="用户公开ID")
+    id: str = Field(
+        ...,
+        description="用户公开ID",
+        validation_alias=AliasChoices("public_id", "id"),
+    )
     username: str
 
     model_config = ConfigDict(from_attributes=True)

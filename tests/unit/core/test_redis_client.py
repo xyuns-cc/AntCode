@@ -75,10 +75,18 @@ class TestRedisKeys:
 
         data_key = keys.spider_data_stream("run-001")
         meta_key = keys.spider_meta_key("run-001")
+        item_ids_key = keys.spider_item_ids_key("run-001")
+        item_order_key = keys.spider_item_order_key("run-001")
+        tombstone_key = keys.spider_tombstone_key("run-001")
         index_key = keys.spider_index_key("proj-001")
+        index_expiry_key = keys.spider_index_expiry_key("proj-001")
         config_key = keys.spider_config_key("proj-001")
 
-        assert "spider" in data_key
-        assert "spider" in meta_key
-        assert "spider" in index_key
-        assert "spider" in config_key
+        assert data_key == "{antcode}:spider:run-001:data"
+        assert meta_key == "{antcode}:spider:run-001:meta"
+        assert item_ids_key == "{antcode}:spider:run-001:item-ids"
+        assert item_order_key == "{antcode}:spider:run-001:item-order"
+        assert tombstone_key == "{antcode}:spider:run-001:tombstone"
+        assert index_key == "{antcode}:spider:index:proj-001"
+        assert index_expiry_key == "{antcode}:spider:index:expiry:proj-001"
+        assert config_key == "antcode:spider:config:proj-001"

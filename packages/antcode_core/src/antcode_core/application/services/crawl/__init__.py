@@ -35,6 +35,12 @@ from antcode_core.application.services.crawl.queue_service import (
     TaskStatusTransition,
     crawl_queue_service,
 )
+from antcode_core.application.services.crawl.takeover_recovery_service import (
+    CrawlTakeoverRecoveryService,
+    TakeoverRecoveryConfig,
+    TakeoverRecoveryError,
+    TakeoverRecoveryReport,
+)
 from antcode_core.application.services.crawl.test_service import (
     CrawlTestConfig,
     CrawlTestResult,
@@ -72,6 +78,10 @@ __all__ = [
     "crawl_test_service",
     "MasterElectionService",
     "create_election_service",
+    "CrawlTakeoverRecoveryService",
+    "TakeoverRecoveryConfig",
+    "TakeoverRecoveryError",
+    "TakeoverRecoveryReport",
     "WorkerRegistryService",
     "WorkerInfo",
     "worker_registry_service",

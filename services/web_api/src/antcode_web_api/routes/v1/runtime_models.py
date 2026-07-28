@@ -7,18 +7,33 @@ from typing import Any
 
 from antcode_core.domain.models.enums import RuntimeScope
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+MAX_RUNTIME_PACKAGE_BATCH = 100
 
 
-class CreateEnvRequest(BaseModel):
+class _PackageListModel(BaseModel):
+    packages: list[str] = Field(default_factory=list, max_length=MAX_RUNTIME_PACKAGE_BATCH, description="包列表")
+
+    @field_validator("packages")
+    @classmethod
+    def reject_duplicate_packages(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("packages 不允许重复")
+        return value
+
+
+class CreateEnvRequest(_PackageListModel):
     scope: RuntimeScope = Field(..., description="运行时作用域")
-    python_version: str = Field(..., description="Python 版本")
+    python_version: str = Field(
+        ...,
+        pattern=r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$",
+        description="Python 版本",
+    )
     env_name: str | None = Field(None, description="环境名称")
-    packages: list[str] = Field(default_factory=list, description="初始依赖")
 
 
-class PackageRequest(BaseModel):
-    packages: list[str] = Field(default_factory=list, description="包列表")
+class PackageRequest(_PackageListModel):
     upgrade: bool = Field(False, description="是否升级安装")
 
 

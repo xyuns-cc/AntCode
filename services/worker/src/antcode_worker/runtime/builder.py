@@ -19,7 +19,7 @@ from loguru import logger
 
 from antcode_worker.runtime.hash import compute_runtime_hash
 from antcode_worker.runtime.spec import RuntimeSpec
-from antcode_worker.runtime.uv_manager import CommandResult, run_command
+from antcode_worker.runtime.uv_manager import CommandResult, _normalize_python_version, run_command
 
 
 @dataclass
@@ -122,7 +122,7 @@ class RuntimeBuilder:
         if spec.python_spec.path:
             args.extend(["--python", spec.python_spec.path])
         elif spec.python_spec.version:
-            args.extend(["--python", f"python@{spec.python_spec.version}"])
+            args.extend(["--python", _normalize_python_version(spec.python_spec.version)])
         else:
             return CommandResult(
                 exit_code=1,

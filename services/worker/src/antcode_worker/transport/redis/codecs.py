@@ -8,6 +8,7 @@ Requirements: 5.4
 """
 
 import json
+import math
 from abc import ABC, abstractmethod
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -32,6 +33,10 @@ from antcode_worker.domain.models import (
 )
 
 T = TypeVar("T")
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-standard JSON constant: {value}")
 
 
 class SchemaVersion(StrEnum):
@@ -196,9 +201,11 @@ class JsonCodec(MessageCodec):
             elif isinstance(value, bool):
                 result[key] = "true" if value else "false"
             elif isinstance(value, (int, float)):
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise CodecError("Non-finite float is not valid JSON")
                 result[key] = str(value)
             elif isinstance(value, (dict, list)):
-                result[key] = json.dumps(value, ensure_ascii=False)
+                result[key] = json.dumps(value, ensure_ascii=False, allow_nan=False)
             else:
                 result[key] = str(value)
         return result
@@ -230,9 +237,9 @@ class JsonCodec(MessageCodec):
         # 尝试解析为 JSON
         if value.startswith(("{", "[")):
             try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                pass
+                return json.loads(value, parse_constant=_reject_json_constant)
+            except json.JSONDecodeError as exc:
+                raise CodecError("Invalid JSON field") from exc
 
         return value
 

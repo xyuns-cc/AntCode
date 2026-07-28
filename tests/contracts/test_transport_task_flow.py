@@ -5,10 +5,30 @@ Task-flow contract — `poll_task`, `ack_task`, `requeue_task`, `report_result`.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import pytest
+from antcode_contracts import data_pb2
 
 pytestmark = pytest.mark.asyncio
+
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _task_payload(fresh_ids, **overrides: Any) -> dict[str, Any]:
+    payload = {
+        "task_id": fresh_ids.task_id,
+        "project_id": fresh_ids.project_id,
+        "run_id": fresh_ids.run_id,
+        "project_type": "code",
+        "source_bundle_uri": f"pgartifact://{_EMPTY_SHA256}",
+        "source_bundle_sha256": _EMPTY_SHA256,
+        "source_bundle_size": "0",
+        "transfer_method": "source_bundle",
+        "resolved_revision": "contract-test",
+    }
+    payload.update(overrides)
+    return payload
 
 
 async def test_poll_empty_queue_returns_none(transport):
@@ -21,14 +41,7 @@ async def test_poll_returns_message_with_receipt(transport, task_producer, fresh
     """A pushed task must come back with a non-empty `receipt` for later ack."""
     await task_producer(
         transport,
-        {
-            "task_id": fresh_ids.task_id,
-            "project_id": fresh_ids.project_id,
-            "run_id": fresh_ids.run_id,
-            "project_type": "code",
-            "priority": "0",
-            "timeout": "60",
-        },
+        _task_payload(fresh_ids, priority="0", timeout="60"),
     )
 
     msg = await transport.poll_task(timeout=2.0)
@@ -39,16 +52,12 @@ async def test_poll_returns_message_with_receipt(transport, task_producer, fresh
     assert msg.receipt, "poll_task() must populate `receipt` so ack/requeue work"
 
 
-async def test_ack_accepted_consumes_message(transport, task_producer, fresh_ids, redis_admin):
+async def test_ack_accepted_consumes_message(transport, task_producer, fresh_ids, contract_probe):
     """ack_task(accepted=True) must consume the message — a subsequent poll
     must NOT return it again (i.e. pending count goes to 0)."""
     await task_producer(
         transport,
-        {
-            "task_id": fresh_ids.task_id,
-            "project_id": fresh_ids.project_id,
-            "run_id": fresh_ids.run_id,
-        },
+        _task_payload(fresh_ids),
     )
 
     msg = await transport.poll_task(timeout=2.0)
@@ -60,16 +69,7 @@ async def test_ack_accepted_consumes_message(transport, task_producer, fresh_ids
     second = await transport.poll_task(timeout=0.5)
     assert second is None
 
-    # For redis we can also assert pending=0 via XPENDING for stronger proof.
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        stream = keys.task_ready_stream(transport._worker_id)  # type: ignore[attr-defined]
-        pending = await redis_admin.xpending(stream, keys.consumer_group_name())
-        # xpending returns {'pending': N, ...} on redis-py 7+
-        if isinstance(pending, dict):
-            assert pending.get("pending", 0) == 0
-        else:
-            assert pending[0] == 0
+    assert await contract_probe.pending_task_count() == 0
 
 
 async def test_ack_rejected_requeues(transport, task_producer, fresh_ids, await_with_timeout):
@@ -77,11 +77,7 @@ async def test_ack_rejected_requeues(transport, task_producer, fresh_ids, await_
     another `poll_task` can retrieve it (possibly with a different receipt)."""
     await task_producer(
         transport,
-        {
-            "task_id": fresh_ids.task_id,
-            "project_id": fresh_ids.project_id,
-            "run_id": fresh_ids.run_id,
-        },
+        _task_payload(fresh_ids),
     )
 
     first = await transport.poll_task(timeout=2.0)
@@ -99,11 +95,7 @@ async def test_requeue_then_poll_returns_task(transport, task_producer, fresh_id
     """`requeue_task(receipt)` must make the task pollable again."""
     await task_producer(
         transport,
-        {
-            "task_id": fresh_ids.task_id,
-            "project_id": fresh_ids.project_id,
-            "run_id": fresh_ids.run_id,
-        },
+        _task_payload(fresh_ids),
     )
 
     first = await transport.poll_task(timeout=2.0)
@@ -116,7 +108,7 @@ async def test_requeue_then_poll_returns_task(transport, task_producer, fresh_id
     assert second.task_id == fresh_ids.task_id
 
 
-async def test_report_result_success(transport, fresh_ids, redis_admin):
+async def test_report_result_success(transport, fresh_ids, contract_probe):
     """report_result with status=success must land a single entry on the
     result stream."""
     from antcode_worker.transport.base import TaskResult
@@ -133,13 +125,20 @@ async def test_report_result_success(transport, fresh_ids, redis_admin):
     ok = await transport.report_result(result)
     assert ok is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        length = await redis_admin.xlen(keys.task_result_stream())
-        assert length == 1
+    statuses = await contract_probe.result_statuses()
+    assert len(statuses) == 1
+    status = statuses[0]
+    assert status.run_id == fresh_ids.run_id
+    assert status.task_id == fresh_ids.task_id
+    assert status.worker_id == fresh_ids.worker_id
+    assert status.status == data_pb2.STATUS_COMPLETED
+    assert status.exit_code == 0
+    assert status.duration_ms == 12
+    assert status.HasField("started_at")
+    assert status.HasField("finished_at")
 
 
-async def test_report_result_failure_preserves_exit_code(transport, fresh_ids, redis_admin):
+async def test_report_result_failure_preserves_exit_code(transport, fresh_ids, contract_probe):
     """report_result with status=failed must preserve exit_code & error_message."""
     from antcode_worker.transport.base import TaskResult
 
@@ -153,11 +152,12 @@ async def test_report_result_failure_preserves_exit_code(transport, fresh_ids, r
     ok = await transport.report_result(result)
     assert ok is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        entries = await redis_admin.xrange(keys.task_result_stream(), count=10)
-        assert len(entries) == 1
-        _msg_id, fields = entries[0]
-        assert fields["status"] == "failed"
-        assert fields["exit_code"] == "137"
-        assert fields["error_message"] == "OOM kill"
+    statuses = await contract_probe.result_statuses()
+    assert len(statuses) == 1
+    status = statuses[0]
+    assert status.run_id == fresh_ids.run_id
+    assert status.task_id == fresh_ids.task_id
+    assert status.worker_id == fresh_ids.worker_id
+    assert status.status == data_pb2.STATUS_FAILED
+    assert status.exit_code == 137
+    assert status.error_message == "OOM kill"

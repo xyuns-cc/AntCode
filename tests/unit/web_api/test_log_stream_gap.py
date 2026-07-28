@@ -129,6 +129,25 @@ async def test_gap_reader_stops_at_byte_budget_before_more_fetches(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_oversized_first_frame_advances_cursor_in_its_own_pass(monkeypatch):
+    monkeypatch.setattr(gap_module, "GAP_MAX_BYTES_PER_PASS", 100)
+    rows = [_row(1, content="\x00" * 1000), _row(2, content="next")]
+    reader, _ = _reader_on(monkeypatch, rows)
+    window = await reader.plan("run-1", 0)
+    first_progress = GapScanProgress()
+
+    first_entries = await _scan(reader, window, first_progress)
+
+    assert [entry["storage_id"] for entry in first_entries] == [1]
+    assert (first_progress.truncated, first_progress.last_id) == (True, 1)
+
+    second_window = gap_module.GapWindow("run-1", first_progress.last_id, window.snapshot_id)
+    second_progress = GapScanProgress()
+    second_entries = await _scan(reader, second_window, second_progress)
+    assert [entry["storage_id"] for entry in second_entries] == [2]
+
+
+@pytest.mark.asyncio
 async def test_gap_reader_empty_gap_emits_nothing(monkeypatch):
     rows = [_row(1), _row(2)]
     reader, connection = _reader_on(monkeypatch, rows)

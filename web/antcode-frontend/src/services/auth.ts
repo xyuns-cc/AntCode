@@ -1,5 +1,16 @@
-import apiClient, { refreshSessionToken, TokenManager } from './api'
-import { broadcastAuthEvent, setSessionHint } from './authToken'
+import apiClient, {
+  refreshSessionToken,
+  requestSessionLogin,
+  requestSessionLogout,
+  TokenManager,
+} from './api'
+import { isAxiosError } from 'axios'
+import {
+  broadcastAuthEvent,
+  clearSessionHint,
+  getSessionGeneration,
+  setSessionHint,
+} from './authToken'
 import { AuthHandler } from '@/utils/authHandler'
 import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
 import { useAuthStore } from '@/stores/authStore'
@@ -35,7 +46,7 @@ class AuthService {
       key_id: encrypted.keyId,
     }
 
-    const response = await apiClient.post<ApiResponse<BackendLoginResponse>>('/api/v1/auth/login', loginPayload)
+    const response = await requestSessionLogin<ApiResponse<BackendLoginResponse>>(loginPayload)
 
     const allowedSource = this.resolveClientEndpoint(API_BASE_URL)
 
@@ -44,8 +55,7 @@ class AuthService {
     const payload = response.data.data
     const user = payload.user
 
-    // Access token 仅保存在进程内存；refresh token 由后端 HttpOnly cookie 管理。
-    TokenManager.setTokens(payload.access_token)
+    // requestSessionLogin 已在跨标签锁内安装并广播 access token。
     // 记录“存在会话”提示标记（不含敏感信息），供应用启动时决定是否尝试恢复会话
     setSessionHint()
 
@@ -59,7 +69,7 @@ class AuthService {
 
   // 用户登出
   async logout(): Promise<void> {
-    await apiClient.post('/api/v1/auth/logout')
+    await requestSessionLogout()
     AuthHandler.clearAuthData()
   }
 
@@ -97,30 +107,17 @@ class AuthService {
       old_password: currentPassword,
       new_password: newPassword,
     })
-    // P1-round6 5.4: 修密码后后端 revoke 所有 session, 其他 tab 仍持旧 access
-    // token → 下一次请求 401 循环。这里主动广播 logout, 其他 tab 收到后统一
-    // 清 session hint 并跳登录, 避免半认证状态。本 tab 立即 refresh 拿新
-    // token (refresh cookie 会随请求带上, 后端在 revoke 时应保留最后一次登录
-    // session 或让 refresh 自动重登)。
-    try {
-      broadcastAuthEvent('logout')
-    } catch {
-      // BroadcastChannel 不可用不阻塞主流程
-    }
-    try {
-      await this.refreshToken()
-    } catch {
-      // refresh 失败留由拦截器统一 401 → 登录
-    }
+    // 后端在改密成功时撤销该用户全部会话，当前 refresh cookie 也已失效。
+    // 不再尝试刷新一个必然失败的会话，而是明确清理当前页并通知其他标签。
+    clearSessionHint()
+    AuthHandler.handleAuthFailure(false)
+    broadcastAuthEvent('logout')
   }
 
   // 刷新 Token
   async refreshToken(): Promise<LoginResponse> {
     const payload = await refreshSessionToken() as BackendLoginResponse
-    const user = payload.user
-
-    // 更新 token
-    TokenManager.setTokens(payload.access_token)
+    const user = payload.user ?? await this.getCurrentUser()
 
     return {
       access_token: payload.access_token,
@@ -210,15 +207,39 @@ class AuthService {
     const token = TokenManager.getAccessToken()
     if (!token) return
 
-    // 如果 token 即将过期（5分钟内），尝试刷新
-    const payload = TokenManager.getTokenPayload(token)
-    if (payload?.exp && payload.exp * 1000 - Date.now() < 5 * 60 * 1000) {
-      try {
+    try {
+      const payload = TokenManager.getTokenPayload(token)
+      if (payload?.exp && payload.exp * 1000 - Date.now() < 5 * 60 * 1000) {
         await this.refreshToken()
-      } catch (error) {
-        Logger.warn('Auto refresh token failed:', error)
-        TokenManager.clearTokens()
       }
+      await this.reloadAuthoritativeState()
+    } catch (error) {
+      this.handleAutoRefreshError(error)
+    }
+  }
+
+  private async reloadAuthoritativeState(): Promise<void> {
+    const start = useAuthStore.getState()
+    const startEpoch = start.authEpoch
+    const generation = getSessionGeneration()
+    const [user, permissions] = await Promise.all([
+      this.getCurrentUser(),
+      this.getUserPermissions(),
+    ])
+    const store = useAuthStore.getState()
+    if (store.authEpoch !== startEpoch) return
+    if (getSessionGeneration() !== generation) return
+    store.setPermissions(permissions)
+    store.setUser(user)
+  }
+
+  private handleAutoRefreshError(error: unknown): void {
+    Logger.warn('Auto refresh token failed:', error)
+    const status = isAxiosError(error) ? error.response?.status : undefined
+    if (status === 401 || status === 403) {
+      clearSessionHint()
+      AuthHandler.handleAuthFailure(false)
+      broadcastAuthEvent('logout')
     }
   }
 }

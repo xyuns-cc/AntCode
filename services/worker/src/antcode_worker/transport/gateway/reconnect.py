@@ -123,6 +123,7 @@ class ReconnectManager:
         # 事件
         self._stop_event = asyncio.Event()
         self._connected_event = asyncio.Event()
+        self._terminal_event = asyncio.Event()
         self._connected_event.set()  # 初始假设已连接
 
         # Receipt 跟踪
@@ -131,7 +132,7 @@ class ReconnectManager:
 
         # 回调
         self._on_reconnect_start: Callable[[], None] | None = None
-        self._on_reconnect_success: Callable[[], None] | None = None
+        self._on_reconnect_success: Callable[[], Any] | None = None
         self._on_reconnect_failure: Callable[[str], None] | None = None
 
     @property
@@ -160,7 +161,7 @@ class ReconnectManager:
         """注册重连开始回调"""
         self._on_reconnect_start = callback
 
-    def on_reconnect_success(self, callback: Callable[[], None]) -> None:
+    def on_reconnect_success(self, callback: Callable[[], Any]) -> None:
         """注册重连成功回调"""
         self._on_reconnect_success = callback
 
@@ -171,26 +172,32 @@ class ReconnectManager:
     async def start(self) -> None:
         """启动重连管理器"""
         self._stop_event.clear()
+        self._terminal_event.clear()
+        self._state = ReconnectState.IDLE
+        self._connected_event.set()
 
         # 启动健康检查任务
-        if self._health_check_func:
+        if self._health_check_func and (self._health_check_task is None or self._health_check_task.done()):
             self._health_check_task = asyncio.create_task(self._health_check_loop())
 
     async def stop(self) -> None:
         """停止重连管理器"""
         self._stop_event.set()
         self._state = ReconnectState.STOPPED
+        self._connected_event.clear()
+        self._terminal_event.set()
+        await self._cancel_task(self._reconnect_task)
+        await self._cancel_task(self._health_check_task)
+        self._reconnect_task = None
+        self._health_check_task = None
 
-        # 取消任务
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._reconnect_task
-
-        if self._health_check_task and not self._health_check_task.done():
-            self._health_check_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._health_check_task
+    @staticmethod
+    async def _cancel_task(task: asyncio.Task | None) -> None:
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     def notify_disconnected(self, reason: str = "") -> None:
         """
@@ -203,6 +210,7 @@ class ReconnectManager:
 
         self._state = ReconnectState.DISCONNECTED
         self._connected_event.clear()
+        self._terminal_event.clear()
         self._stats.last_failure_time = datetime.now()
         self._stats.last_failure_reason = reason
 
@@ -218,6 +226,8 @@ class ReconnectManager:
 
         重置退避并更新状态。
         """
+        if self._stop_event.is_set():
+            return
         self._state = ReconnectState.IDLE
         self._connected_event.set()
         self._stats.last_success_time = datetime.now()
@@ -237,52 +247,62 @@ class ReconnectManager:
             logger.error("未设置连接函数")
             return False
 
+        self._begin_reconnect()
+        try:
+            success = await self._connect_func()
+        except Exception as e:
+            return self._finish_reconnect_error(e)
+        return await self._finish_reconnect(success)
+
+    def _begin_reconnect(self) -> None:
         self._state = ReconnectState.RECONNECTING
         self._stats.total_reconnects += 1
         self._stats.last_reconnect_time = datetime.now()
-
-        # 触发回调
-        if self._on_reconnect_start:
-            try:
-                self._on_reconnect_start()
-            except Exception as e:
-                logger.error(f"重连开始回调异常: {e}")
-
+        if self._on_reconnect_start is None:
+            return
         try:
-            success = await self._connect_func()
+            self._on_reconnect_start()
+        except Exception as exc:
+            logger.error(f"重连开始回调异常: {exc}")
 
-            if success:
-                self._stats.successful_reconnects += 1
-                self.notify_connected()
-
-                # 触发回调
-                if self._on_reconnect_success:
-                    try:
-                        self._on_reconnect_success()
-                    except Exception as e:
-                        logger.error(f"重连成功回调异常: {e}")
-
-                logger.info("重连成功")
-                return True
-            else:
-                self._stats.failed_reconnects += 1
-                self._state = ReconnectState.DISCONNECTED
-                return False
-
-        except Exception as e:
-            self._stats.failed_reconnects += 1
-            self._stats.last_failure_reason = str(e)
-            self._state = ReconnectState.DISCONNECTED
-
-            # 触发回调
-            if self._on_reconnect_failure:
-                try:
-                    self._on_reconnect_failure(str(e))
-                except Exception as cb_error:
-                    logger.error(f"重连失败回调异常: {cb_error}")
-
-            logger.error(f"重连失败: {e}")
+    async def _finish_reconnect(self, success: bool) -> bool:
+        if self._stop_event.is_set():
+            self._state = ReconnectState.STOPPED
             return False
+        if not success:
+            self._stats.failed_reconnects += 1
+            self._state = ReconnectState.DISCONNECTED
+            return False
+        self._stats.successful_reconnects += 1
+        self.notify_connected()
+        await self._notify_reconnect_success()
+        logger.info("重连成功")
+        return True
+
+    def _finish_reconnect_error(self, error: Exception) -> bool:
+        if self._stop_event.is_set():
+            self._state = ReconnectState.STOPPED
+            return False
+        self._stats.failed_reconnects += 1
+        self._stats.last_failure_reason = str(error)
+        self._state = ReconnectState.DISCONNECTED
+        if self._on_reconnect_failure is not None:
+            try:
+                self._on_reconnect_failure(str(error))
+            except Exception as exc:
+                logger.error(f"重连失败回调异常: {exc}")
+        logger.error(f"重连失败: {error}")
+        return False
+
+    async def _notify_reconnect_success(self) -> None:
+        if self._on_reconnect_success is None:
+            return
+        try:
+            result = self._on_reconnect_success()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.error(f"重连成功回调异常: {exc}")
 
     async def wait_connected(self, timeout: float | None = None) -> bool:
         """
@@ -294,14 +314,20 @@ class ReconnectManager:
         Returns:
             是否已连接
         """
-        try:
-            await asyncio.wait_for(
-                self._connected_event.wait(),
-                timeout=timeout,
-            )
-            return True
-        except TimeoutError:
+        if self._state in {ReconnectState.FAILED, ReconnectState.STOPPED}:
             return False
+        connected = asyncio.create_task(self._connected_event.wait())
+        terminal = asyncio.create_task(self._terminal_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {connected, terminal},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return bool(done) and self._connected_event.is_set()
+        finally:
+            await self._cancel_task(connected)
+            await self._cancel_task(terminal)
 
     # ==================== Receipt 幂等性 ====================
 
@@ -390,6 +416,7 @@ class ReconnectManager:
             # 检查最大重试次数
             if self._config.max_attempts > 0 and self._stats.current_attempt >= self._config.max_attempts:
                 self._state = ReconnectState.FAILED
+                self._terminal_event.set()
                 self._stats.total_downtime_seconds += time.time() - disconnect_time
 
                 logger.error(f"达到最大重试次数 ({self._config.max_attempts})，停止重连")

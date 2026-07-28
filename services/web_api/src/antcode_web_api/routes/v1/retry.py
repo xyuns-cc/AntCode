@@ -1,8 +1,13 @@
 """任务重试与补偿 API"""
 
 import contextlib
+from datetime import UTC, datetime
 from typing import Any
 
+from antcode_core.application.services.scheduler.retry_configuration_service import (
+    RetryConfigurationConflictError,
+    apply_retry_configuration,
+)
 from antcode_core.application.services.scheduler.retry_service import retry_service
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User, UserRole
@@ -12,6 +17,7 @@ from loguru import logger
 
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import success
+from antcode_web_api.routes.v1.retry_config import RetryConfigUpdate
 
 router = APIRouter()
 
@@ -118,9 +124,7 @@ async def get_pending_retries(
 )
 async def update_retry_config(
     task_id: str,
-    max_retries: int = Body(3, ge=0, le=10, description="最大重试次数"),
-    retry_delay: int = Body(60, ge=10, le=3600, description="重试延迟（秒）"),
-    strategy: str = Body("exponential", description="重试策略"),
+    config: RetryConfigUpdate = Body(...),
     current_user: TokenData = Depends(get_current_user),
 ):
     """更新任务重试配置"""
@@ -146,19 +150,33 @@ async def update_retry_config(
     if not user.is_admin and task.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权修改此任务")
 
-    # 更新配置
-    task.retry_count = max_retries
-    task.retry_delay = retry_delay
-    await task.save()
+    changes = config.database_changes()
+    if changes:
+        changes["updated_at"] = datetime.now(UTC)
+    try:
+        cancelled_runs = await apply_retry_configuration(
+            task.id,
+            changes,
+            user_id=current_user.user_id,
+        )
+    except RetryConfigurationConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    for run_id in cancelled_runs:
+        await retry_service.cancel_pending(run_id)
 
-    logger.info(f"任务 {task.name} 重试配置已更新: max_retries={max_retries}, delay={retry_delay}")
+    refreshed = await Task.get_or_none(id=task.id)
+    if not refreshed:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务已被并发删除")
+    logger.info(
+        f"任务 {refreshed.name} 重试配置已更新: max_retries={refreshed.retry_count}, delay={refreshed.retry_delay}"
+    )
 
     return success(
         {
-            "task_id": task_id,
-            "max_retries": max_retries,
-            "retry_delay": retry_delay,
-            "strategy": strategy,
+            "task_id": refreshed.public_id,
+            "max_retries": refreshed.retry_count,
+            "retry_delay": refreshed.retry_delay,
+            "strategy": config.strategy or "exponential",
         },
         message="重试配置已更新",
     )
@@ -171,8 +189,16 @@ async def update_retry_config(
     description="取消队列中待重试的任务",
 )
 async def cancel_pending_retry(run_id: str, current_user: TokenData = Depends(get_current_user)):
-    """取消待重试任务"""
-    from antcode_core.domain.models.enums import TaskStatus
+    """取消待重试任务。
+
+    P1-FN-01 修复：此前只改 TaskRun.status，Redis pending 意图和 DB
+    ``next_retry_at`` 都保留 —— Master 会照常 claim 并创建新 run，取消
+    实际无效。现在按顺序：
+    1. 清 DB durable intent（``next_retry_at=None``）并置终态 —— Master
+       的 ``_validate_retry_source`` / ``_recover_from_db`` 都以此为准，
+       之后任何在途 claim 都会被判定 intent 失效丢弃；
+    2. 再移除 Redis pending 条目（尽力而为，失败也不影响正确性）。
+    """
     from antcode_core.domain.models.task import Task
     from antcode_core.domain.models.task_run import TaskRun
 
@@ -195,12 +221,19 @@ async def cancel_pending_retry(run_id: str, current_user: TokenData = Depends(ge
     if not user.is_admin and task.user_id != current_user.user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作此任务")
 
-    # 更新状态为已取消
-    execution.status = TaskStatus.CANCELLED
-    execution.error_message = f"重试已取消 by user {current_user.user_id}"
-    await execution.save()
+    from antcode_core.application.services.scheduler.retry_cancellation_service import (
+        RetryIntentNotPendingError,
+        cancel_retry_intent,
+    )
 
-    logger.info(f"任务 {task.name} 的重试已取消 by user {current_user.user_id}")
+    try:
+        await cancel_retry_intent(run_id, user_id=current_user.user_id)
+    except RetryIntentNotPendingError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    removed = await retry_service.cancel_pending(run_id)
+
+    logger.info(f"任务 {task.name} 的重试已取消 by user {current_user.user_id} (redis_removed={removed})")
 
     return success({"run_id": run_id, "status": "cancelled"}, message="重试已取消")
 

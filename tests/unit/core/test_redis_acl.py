@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,36 +36,6 @@ def _fake_worker(public_id="w-1", redis_username=None, redis_password_encrypted=
     )
 
 
-def test_per_worker_key_patterns_include_all_dedicated_streams():
-    from antcode_core.common.security.redis_acl import PER_WORKER_KEY_PATTERNS
-
-    joined = " ".join(PER_WORKER_KEY_PATTERNS)
-    for must_have in [
-        "task:ready:{wid}",
-        "task:pending:{wid}",
-        "control:{wid}",
-        "worker:info:{wid}",
-        "worker:state:{wid}",
-        "heartbeat:{wid}",
-    ]:
-        assert must_have in joined, f"missing dedicated pattern: {must_have}"
-
-
-def test_shared_key_patterns_include_result_and_log_aggregations():
-    from antcode_core.common.security.redis_acl import SHARED_KEY_PATTERNS
-
-    joined = " ".join(SHARED_KEY_PATTERNS)
-    for must_have in [
-        "task:result",
-        "log:ingest",
-        "log:stream:*",
-        "log:chunk:*",
-        "spider:data:*",
-        "control:global",
-    ]:
-        assert must_have in joined, f"missing shared pattern: {must_have}"
-
-
 @pytest.mark.asyncio
 async def test_ensure_worker_acl_sends_setuser_with_correct_username_and_keys():
     from antcode_core.common.security import redis_acl
@@ -90,10 +61,24 @@ async def test_ensure_worker_acl_sends_setuser_with_correct_username_and_keys():
     assert args[1] == "SETUSER"
     assert args[2] == "worker_w-1"
     flat = " ".join(args)
-    assert "~antcode:task:ready:w-1" in flat
-    assert "~antcode:task:result" in flat
-    assert "-flushall" in flat
-    assert "-acl" in flat  # worker 不能再调 ACL 自我提权
+    assert "%RW~antcode:task:ready:w-1" in flat
+    assert "(+xadd %W~antcode:task:result)" in args
+    assert "log:ingest" not in flat
+    assert "%RW~antcode:control:reply:w-1:*" in flat
+    assert "%RW~{antcode}:control:settlement:w-1:*" in flat
+    assert "spider" not in flat
+    assert "%RW~{antcode}:lease:data:w-1" in flat
+    assert "%R~{antcode}:lease:revoked:w-1" in flat
+    assert "~{antcode}:lease:expiring" not in flat
+    assert "~{antcode}:lease:active" not in flat
+    assert "control:global" not in flat
+    assert all("~" not in arg for arg in args if not arg.startswith("("))
+    assert "reset" in args
+    assert "+@read" not in flat
+    assert "+@write" not in flat
+    assert "+@stream" not in flat
+    assert "+acl" not in flat
+    assert "+config" not in flat
     # 第二条命令是 ACL SAVE
     save_call = fake_redis.execute_command.await_args_list[1]
     assert save_call.args[:2] == ("ACL", "SAVE")
@@ -117,6 +102,79 @@ async def test_ensure_worker_acl_second_call_increments_revision_and_replaces_pa
 
 
 @pytest.mark.asyncio
+async def test_ensure_worker_acl_database_failure_restores_previous_redis_password():
+    from antcode_core.common.security import redis_acl
+    from antcode_core.common.security.secret_box import secret_box
+
+    old_encrypted = secret_box.encrypt("old-password")
+    worker = _fake_worker(
+        public_id="w-rollback",
+        redis_username="worker_w-rollback",
+        redis_password_encrypted=old_encrypted,
+    )
+    worker.redis_acl_revision = 4
+    worker.redis_acl_synced_at = datetime.now(UTC)
+    worker.save.side_effect = RuntimeError("database unavailable")
+    redis = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await redis_acl.ensure_worker_acl(redis, worker, new_password="new-password")
+
+    commands = [call.args for call in redis.execute_command.await_args_list]
+    assert commands[0][:3] == ("ACL", "SETUSER", "worker_w-rollback")
+    assert ">new-password" in commands[0]
+    assert commands[2][:3] == ("ACL", "SETUSER", "worker_w-rollback")
+    assert ">old-password" in commands[2]
+    assert commands[1][:2] == commands[3][:2] == ("ACL", "SAVE")
+    assert worker.redis_password_encrypted == old_encrypted
+    assert worker.redis_acl_revision == 4
+
+
+@pytest.mark.asyncio
+async def test_ensure_worker_acl_ambiguous_setuser_failure_restores_snapshot():
+    from antcode_core.common.security import redis_acl
+    from antcode_core.common.security.secret_box import secret_box
+
+    old_encrypted = secret_box.encrypt("old-password")
+    worker = _fake_worker(
+        public_id="w-ambiguous",
+        redis_username="worker_w-ambiguous",
+        redis_password_encrypted=old_encrypted,
+    )
+    redis = AsyncMock()
+    redis.execute_command.side_effect = [RuntimeError("response lost"), None, None]
+
+    with pytest.raises(RuntimeError, match="response lost"):
+        await redis_acl.ensure_worker_acl(redis, worker, new_password="new-password")
+
+    commands = [call.args for call in redis.execute_command.await_args_list]
+    assert commands[0][:3] == ("ACL", "SETUSER", "worker_w-ambiguous")
+    assert commands[1][:3] == ("ACL", "SETUSER", "worker_w-ambiguous")
+    assert ">old-password" in commands[1]
+    assert commands[2][:2] == ("ACL", "SAVE")
+    assert worker.redis_password_encrypted == old_encrypted
+
+
+@pytest.mark.asyncio
+async def test_ensure_worker_acl_cancelled_setuser_restores_then_propagates():
+    from antcode_core.common.security import redis_acl
+    from antcode_core.common.security.secret_box import secret_box
+
+    worker = _fake_worker(
+        public_id="w-cancelled",
+        redis_username="worker_w-cancelled",
+        redis_password_encrypted=secret_box.encrypt("old-password"),
+    )
+    redis = AsyncMock()
+    redis.execute_command.side_effect = [asyncio.CancelledError(), None, None]
+
+    with pytest.raises(asyncio.CancelledError):
+        await redis_acl.ensure_worker_acl(redis, worker, new_password="new-password")
+
+    assert redis.execute_command.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_revoke_worker_acl_calls_deluser_and_clears_fields():
     from antcode_core.common.security import redis_acl
     from antcode_core.common.security.secret_box import secret_box
@@ -134,6 +192,31 @@ async def test_revoke_worker_acl_calls_deluser_and_clears_fields():
     assert deluser_call.args == ("ACL", "DELUSER", "worker_w-3")
     assert worker.redis_username is None
     assert worker.redis_password_encrypted is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_worker_acl_ambiguous_deluser_failure_restores_snapshot():
+    from antcode_core.common.security import redis_acl
+    from antcode_core.common.security.secret_box import secret_box
+
+    encrypted = secret_box.encrypt("old-password")
+    worker = _fake_worker(
+        public_id="w-revoke-ambiguous",
+        redis_username="worker_w-revoke-ambiguous",
+        redis_password_encrypted=encrypted,
+    )
+    redis = AsyncMock()
+    redis.execute_command.side_effect = [RuntimeError("response lost"), None, None]
+
+    with pytest.raises(RuntimeError, match="response lost"):
+        await redis_acl.revoke_worker_acl(redis, worker)
+
+    commands = [call.args for call in redis.execute_command.await_args_list]
+    assert commands[0] == ("ACL", "DELUSER", "worker_w-revoke-ambiguous")
+    assert commands[1][:3] == ("ACL", "SETUSER", "worker_w-revoke-ambiguous")
+    assert ">old-password" in commands[1]
+    assert worker.redis_username == "worker_w-revoke-ambiguous"
+    assert worker.redis_password_encrypted == encrypted
 
 
 @pytest.mark.asyncio
@@ -176,6 +259,32 @@ def test_secrets_manager_store_persists_to_file_with_strict_mode(tmp_path):
 
     # 后续 get 直接命中缓存
     assert mgr.get("redis_username") == "worker_w-1"
+
+
+def test_secrets_manager_failed_replace_preserves_existing_value(tmp_path, monkeypatch):
+    import antcode_worker.security.secrets as secrets_module
+    from antcode_worker.security.secrets import SecretsManager
+
+    path = tmp_path / "redis_password"
+    path.write_text("old-value", encoding="utf-8")
+    manager = SecretsManager(secrets_dir=tmp_path)
+
+    def fail_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(secrets_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        manager.store("redis_password", "new-value")
+
+    assert path.read_text(encoding="utf-8") == "old-value"
+
+
+def test_secrets_manager_rejects_path_traversal(tmp_path):
+    from antcode_worker.security.secrets import SecretsManager
+
+    with pytest.raises(ValueError, match="非法凭据键名"):
+        SecretsManager(secrets_dir=tmp_path).store("../outside", "secret")
 
 
 def test_secrets_manager_known_keys_include_redis_username():

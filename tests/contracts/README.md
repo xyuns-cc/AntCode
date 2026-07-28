@@ -11,13 +11,15 @@
 
 ## 设计要点
 
-- 每个测试方法都用 `@pytest.mark.parametrize("transport_mode", ["redis", "gateway"])`
-  双跑两个实现,使得契约差异立即暴露。
+- `transport_mode` fixture 让每个共享契约双跑 Redis Direct 与 Gateway 实现,
+  使契约差异立即暴露。
 - 测试只接触 `TransportBase` 的公开接口(详见 `services/worker/src/antcode_worker/transport/base.py`),
   不会去摸具体实现的私有属性。
-- Gateway 那一组目前依赖 P2 proto 重写后才能跑通,
-  暂时全部 `@pytest.mark.skip(reason="depends on P2 proto refactor")`,
-  但 fixture / parametrize 框架已经预接好,P2 落地后只需取消 skip 即可。
+- Gateway 使用 function-scope 的 in-process `grpc.aio` fake server,覆盖真实
+  protobuf 序列化、server/client streaming、ACK 与 Lease RPC,不依赖 Redis
+  或 PostgreSQL。
+- 后端差异由 `ContractProbe` 适配为同一组语义断言,不会把 Gateway 失败
+  降级为 skip。
 
 ## 运行方式
 
@@ -25,15 +27,24 @@
 # 1. 起一个一次性的 Redis 容器(端口 16379,不与本机默认 6379 冲突)
 docker compose -f tests/contracts/docker-compose.test.yml up -d
 
-# 2. 在仓库根目录跑契约测试
+# 2. 在仓库根目录跑契约测试；默认使用 Redis DB 14
 uv run pytest tests/contracts/ -v
+
+# 只运行不依赖 Redis 的 Gateway 契约
+uv run pytest tests/contracts/ -v -k gateway
 
 # 3. 跑完清理
 docker compose -f tests/contracts/docker-compose.test.yml down -v
 ```
 
-如果 `localhost:16379` 上没有 Redis,**redis** 这一组会被自动 skip
-(不会让 pipeline 红掉)。Gateway 这一组目前总是 skip。
+如果 `localhost:16379` 上没有 Redis，Redis Direct 与 LeaseStore 契约会
+明确失败；Gateway 契约仍会通过进程内 fake server 真实运行，但不能替代
+Redis 契约覆盖。
+
+`unacked_task_is_reclaimable_after_disconnect` 会把测试后端的消息 idle 时间
+推进到各自生产阈值,再验证 at-least-once 重投：Direct 使用真实
+`ReclaimConfig.min_idle_time_ms`,Gateway 使用真实
+`TaskPollHandler.PENDING_VISIBILITY_TIMEOUT_MS`。测试不会缩短运行时 TTL。
 
 ## 文件组织
 

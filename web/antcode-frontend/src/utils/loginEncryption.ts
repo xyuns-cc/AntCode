@@ -6,17 +6,11 @@ const SUPPORTED_ALGORITHM = 'RSA-OAEP-256'
 
 type CachedKey = {
   payload: LoginPublicKeyResponse
-  cryptoKey: CryptoKey
+  cryptoKey: CryptoKey | null
 }
 
 let cachedKey: CachedKey | null = null
 let pendingKeyPromise: Promise<CachedKey> | null = null
-
-const ensureWebCrypto = () => {
-  if (!window.crypto?.subtle) {
-    throw new Error('当前浏览器不支持安全加密，请更换浏览器后再试')
-  }
-}
 
 const pemToArrayBuffer = (pem: string): ArrayBuffer => {
   const normalized = pem
@@ -47,7 +41,8 @@ const fetchLoginPublicKey = async (): Promise<LoginPublicKeyResponse> => {
   return unwrapResponse<LoginPublicKeyResponse>(response)
 }
 
-const importPublicKey = async (publicKeyPem: string): Promise<CryptoKey> => {
+const importPublicKey = async (publicKeyPem: string): Promise<CryptoKey | null> => {
+  if (!window.crypto?.subtle) return null
   const keyData = pemToArrayBuffer(publicKeyPem)
   return window.crypto.subtle.importKey(
     'spki',
@@ -56,6 +51,16 @@ const importPublicKey = async (publicKeyPem: string): Promise<CryptoKey> => {
     false,
     ['encrypt']
   )
+}
+
+const encryptWithForge = async (password: string, publicKeyPem: string): Promise<string> => {
+  const forge = await import('node-forge')
+  const publicKey = forge.pki.publicKeyFromPem(publicKeyPem)
+  const encrypted = publicKey.encrypt(forge.util.encodeUtf8(password), 'RSA-OAEP', {
+    md: forge.md.sha256.create(),
+    mgf1: { md: forge.md.sha256.create() },
+  })
+  return forge.util.encode64(encrypted)
 }
 
 const getLoginPublicKey = async (): Promise<CachedKey> => {
@@ -87,18 +92,22 @@ export const encryptLoginPassword = async (password: string): Promise<{
   algorithm: string
   keyId: string
 }> => {
-  ensureWebCrypto()
   const trimmed = password ?? ''
   if (!trimmed) {
     throw new Error('密码不能为空')
   }
 
   const { payload, cryptoKey } = await getLoginPublicKey()
-  const encoded = new TextEncoder().encode(trimmed)
-  const encrypted = await window.crypto.subtle.encrypt({ name: 'RSA-OAEP' }, cryptoKey, encoded)
+  const encryptedPassword = cryptoKey
+    ? arrayBufferToBase64(await window.crypto.subtle.encrypt(
+      { name: 'RSA-OAEP' },
+      cryptoKey,
+      new TextEncoder().encode(trimmed),
+    ))
+    : await encryptWithForge(trimmed, payload.public_key)
 
   return {
-    encryptedPassword: arrayBufferToBase64(encrypted),
+    encryptedPassword,
     algorithm: payload.algorithm,
     keyId: payload.key_id,
   }
@@ -107,4 +116,3 @@ export const encryptLoginPassword = async (password: string): Promise<{
 export const clearLoginPublicKeyCache = () => {
   cachedKey = null
 }
-

@@ -1,46 +1,9 @@
 """Executable legacy-schema cases for every hand-written PostgreSQL migration."""
 
+from .migration_generation_cases import TASK_RUN_LEASE, TASK_RUN_LEASE_GEN, TASK_RUN_LEASE_GENERATIONS
 from .migration_index_cases import TASK_LOG_STORAGE_INDEX
+from .migration_outbox_cases import SCHEDULER_OUTBOX
 from .migration_support import FailureExpectation, MigrationCase, SchemaExpectation
-
-SCHEDULER_OUTBOX = MigrationCase(
-    name="20260710_add_scheduler_outbox.sql",
-    setup_sql="CREATE TABLE migration_sentinel (marker TEXT NOT NULL)",
-    seed_after_first_sql="""
-        INSERT INTO scheduler_outbox
-            (public_id, event_type, aggregate_type, aggregate_id, payload, available_at)
-        VALUES ('outbox-1', 'dispatch', 'task', 'task-1', '{"marker":"outbox"}', NOW())
-    """,
-    marker_query="SELECT payload->>'marker' FROM scheduler_outbox WHERE public_id = 'outbox-1'",
-    marker_value="outbox",
-    schema=SchemaExpectation(
-        table="scheduler_outbox",
-        columns=(
-            "id",
-            "public_id",
-            "event_type",
-            "aggregate_type",
-            "aggregate_id",
-            "payload",
-            "attempts",
-            "available_at",
-            "published_at",
-            "last_error",
-            "created_at",
-        ),
-        indexes=("idx_scheduler_outbox_pending", "idx_scheduler_outbox_aggregate"),
-    ),
-    failure=FailureExpectation(
-        setup_sql="""
-            CREATE TABLE scheduler_outbox (id BIGINT PRIMARY KEY, marker TEXT NOT NULL);
-            INSERT INTO scheduler_outbox VALUES (1, 'preserved');
-        """,
-        marker_query="SELECT marker FROM scheduler_outbox WHERE id = 1",
-        marker_value="preserved",
-        present_columns=("id", "marker"),
-        absent_indexes=("idx_scheduler_outbox_pending", "idx_scheduler_outbox_aggregate"),
-    ),
-)
 
 TASK_LOGS = MigrationCase(
     name="20260710_add_task_logs.sql",
@@ -218,37 +181,6 @@ OUTBOX_CONSUMPTION = MigrationCase(
     ),
 )
 
-TASK_RUN_LEASE = MigrationCase(
-    name="20260713_add_task_run_lease_id.sql",
-    setup_sql="""
-        CREATE TABLE task_executions (
-            id BIGINT PRIMARY KEY, worker_id BIGINT, status VARCHAR(32), marker TEXT NOT NULL
-        );
-        INSERT INTO task_executions VALUES (1, 7, 'running', 'preserved');
-    """,
-    seed_after_first_sql="",
-    marker_query="SELECT marker FROM task_executions WHERE id = 1",
-    marker_value="preserved",
-    schema=SchemaExpectation(
-        table="task_executions",
-        columns=("lease_id",),
-        indexes=("idx_task_executions_lease_id", "idx_task_executions_worker_lease_status"),
-    ),
-    failure=FailureExpectation(
-        setup_sql="""
-            CREATE TABLE task_executions (
-                id BIGINT PRIMARY KEY, worker_id JSON, status VARCHAR(32), marker TEXT NOT NULL
-            );
-            INSERT INTO task_executions VALUES (1, '7', 'running', 'preserved');
-        """,
-        marker_query="SELECT marker FROM task_executions WHERE id = 1",
-        marker_value="preserved",
-        present_columns=("id", "worker_id", "status", "marker"),
-        absent_columns=("lease_id",),
-        absent_indexes=("idx_task_executions_lease_id", "idx_task_executions_worker_lease_status"),
-    ),
-)
-
 INSTALL_KEY_SOURCE = MigrationCase(
     name="20260713_add_worker_install_key_allowed_source.sql",
     setup_sql="""
@@ -336,38 +268,6 @@ OUTBOX_CONSUME_ATTEMPTS = MigrationCase(
     ),
 )
 
-# P0-03b: 20260722 lease_gen(BIGINT NULL) 只加不删；不兼容类型 RAISE 拒迁；兼容则 ADD COLUMN + CREATE INDEX IF NOT EXISTS。
-TASK_RUN_LEASE_GEN = MigrationCase(
-    name="20260722_add_task_run_lease_gen.sql",
-    setup_sql="""
-        CREATE TABLE task_executions (
-            id BIGINT PRIMARY KEY, worker_id BIGINT, lease_id VARCHAR(64), marker TEXT NOT NULL
-        );
-        INSERT INTO task_executions VALUES (1, 7, 'lease-x', 'preserved');
-    """,
-    seed_after_first_sql="",
-    marker_query="SELECT marker FROM task_executions WHERE id = 1",
-    marker_value="preserved",
-    schema=SchemaExpectation(
-        table="task_executions",
-        columns=("lease_gen",),
-        indexes=("idx_task_executions_lease_gen",),
-    ),
-    failure=FailureExpectation(
-        setup_sql="""
-            CREATE TABLE task_executions (
-                id BIGINT PRIMARY KEY, worker_id BIGINT, lease_id VARCHAR(64),
-                lease_gen JSON, marker TEXT NOT NULL
-            );
-            INSERT INTO task_executions VALUES (1, 7, 'lease-x', '{}', 'preserved');
-        """,
-        marker_query="SELECT marker FROM task_executions WHERE id = 1",
-        marker_value="preserved",
-        present_columns=("id", "worker_id", "lease_id", "lease_gen", "marker"),
-        absent_indexes=("idx_task_executions_lease_gen",),
-    ),
-)
-
 MIGRATION_CASES = (
     SCHEDULER_OUTBOX,
     TASK_LOGS,
@@ -381,4 +281,5 @@ MIGRATION_CASES = (
     INSTALL_KEY_RECOVERY,
     OUTBOX_CONSUME_ATTEMPTS,
     TASK_RUN_LEASE_GEN,
+    TASK_RUN_LEASE_GENERATIONS,
 )

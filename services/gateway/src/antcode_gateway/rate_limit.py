@@ -10,6 +10,7 @@
 **Validates: Requirements 6.2**
 """
 
+import os
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -18,9 +19,11 @@ from threading import Lock
 from typing import Any, cast
 
 import grpc
+from antcode_core.common.security.network_source import extract_client_ip
 from loguru import logger
 
-from antcode_gateway.redis_token_bucket import RedisTokenBucketLimiter, RedisTokenBucketResult
+from antcode_gateway.auth import get_authenticated_worker_id
+from antcode_gateway.redis_token_bucket import RedisTokenBucketLimiter
 
 
 @dataclass
@@ -198,10 +201,26 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
     """限流拦截器
 
     在 gRPC 层实现请求限流。
+
+    P0(DoS): 限流键必须从**不可伪造**的来源派生,否则匿名调用者(如 auth-exempt
+    的 Register)可以每次请求换一个 ``x-worker-id`` / ``x-forwarded-for`` 头,每次
+    都拿到一个全新的令牌桶,从而彻底绕过 per-key 限流打爆 DB/CPU。因此:
+
+    - 已认证方法: 用 AuthInterceptor 校验并写入 contextvar 的**服务端认证主体**
+      (``get_authenticated_worker_id``),而非客户端声明的 header。
+    - 未认证/匿名方法: 退回到真实传输对端 IP (``context.peer()``);仅当直连对端
+      命中 ``ANTCODE_TRUSTED_PROXIES`` 白名单时才采信 XFF/X-Real-IP(复用 web_api
+      侧同一个 ``extract_client_ip``,取代理链里最右侧的非受信跳)。
+    - 额外叠加一个全局令牌桶上限: 即使攻击者不停变换 key,单一网关的总吞吐仍被封顶。
+
+    限流检查下沉到实际 RPC 调用阶段(而非 intercept_service),因为 ``ServicerContext``
+    只有在 handler 执行时才可用——此时才拿得到 ``context.peer()`` 与 AuthInterceptor
+    写入的认证主体(AuthInterceptor 在外层,其 wrap 的 handler 先于本拦截器 handler
+    运行,contextvar 已就绪)。
     """
 
-    # 元数据键名
-    WORKER_ID_HEADER = "x-worker-id"
+    # 全局桶相对 per-key 桶的容量/速率倍数(与内存版 RateLimiter 的 10x 默认一致)。
+    GLOBAL_MULTIPLIER = 10
 
     # 不需要限流的方法
     SKIP_RATE_LIMIT_METHODS = frozenset(
@@ -217,36 +236,58 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
         rate: float = 100.0,
         capacity: int = 200,
         redis_client: Any | None = None,
+        *,
+        global_rate: float | None = None,
+        global_capacity: int | None = None,
     ):
         """初始化限流拦截器
 
         Args:
             enabled: 是否启用限流
-            rate: 每秒请求数
-            capacity: 令牌桶容量
+            rate: 每 key 每秒请求数
+            capacity: 每 key 令牌桶容量
+            redis_client: 复用的 Redis 客户端(不传则惰性获取)
+            global_rate: 全局每秒请求数(不传默认 rate * GLOBAL_MULTIPLIER)
+            global_capacity: 全局令牌桶容量(不传默认 capacity * GLOBAL_MULTIPLIER)
         """
         self.enabled = enabled
         self._rate = rate
         self._capacity = capacity
         self._redis_client = redis_client
+        self._global_rate = global_rate if global_rate is not None else rate * self.GLOBAL_MULTIPLIER
+        self._global_capacity = (
+            global_capacity if global_capacity is not None else max(1, capacity * self.GLOBAL_MULTIPLIER)
+        )
         self._limiter: RedisTokenBucketLimiter | None = None
+        self._global_limiter: RedisTokenBucketLimiter | None = None
 
-    async def _get_limiter(self) -> RedisTokenBucketLimiter:
-        if self._limiter is not None:
-            return self._limiter
+    async def _ensure_redis(self) -> Any:
         if self._redis_client is None:
             from antcode_core.infrastructure.redis.client import get_redis_client
 
             self._redis_client = await get_redis_client()
+        return self._redis_client
+
+    async def _build_limiter(self, rate: float, capacity: int, suffix: str) -> RedisTokenBucketLimiter:
+        redis_client = await self._ensure_redis()
         from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
-        self._limiter = RedisTokenBucketLimiter(
-            cast(Any, self._redis_client),
-            rate=self._rate,
-            capacity=self._capacity,
-            key_prefix=f"{redis_namespace()}:gateway:rate-limit",
+        return RedisTokenBucketLimiter(
+            cast(Any, redis_client),
+            rate=rate,
+            capacity=capacity,
+            key_prefix=f"{redis_namespace()}:gateway:rate-limit{suffix}",
         )
+
+    async def _get_limiter(self) -> RedisTokenBucketLimiter:
+        if self._limiter is None:
+            self._limiter = await self._build_limiter(self._rate, self._capacity, "")
         return self._limiter
+
+    async def _get_global_limiter(self) -> RedisTokenBucketLimiter:
+        if self._global_limiter is None:
+            self._global_limiter = await self._build_limiter(self._global_rate, self._global_capacity, ":global")
+        return self._global_limiter
 
     async def intercept_service(
         self,
@@ -257,63 +298,164 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
         if not self.enabled:
             return await continuation(handler_call_details)
 
-        # 检查是否跳过限流
         method = handler_call_details.method
         if method in self.SKIP_RATE_LIMIT_METHODS:
             return await continuation(handler_call_details)
 
-        # 获取限流键
-        # P2-#L2: 没有 worker_id 时退回到对端 IP, 而不是所有匿名客户端共用
-        # 一个 "default" 桶 (后者会让单条恶意连接直接打爆全局桶)。
-        metadata = dict(handler_call_details.invocation_metadata)
-        key = metadata.get(self.WORKER_ID_HEADER)
-        if not key:
-            key = self._infer_peer_key(metadata)
+        original = await continuation(handler_call_details)
+        return self._wrap_handler(original, method)
 
-        # 检查限流
+    def _wrap_handler(self, original: grpc.RpcMethodHandler, method: str) -> grpc.RpcMethodHandler:
+        """按 RPC 类型分发到对应的限流包装器（各类型逻辑见 _wrap_* 方法）。"""
+        if original.unary_unary is not None:
+            return self._wrap_unary_unary(original, method)
+        if original.unary_stream is not None:
+            return self._wrap_unary_stream(original, method)
+        if original.stream_unary is not None:
+            return self._wrap_stream_unary(original, method)
+        if original.stream_stream is not None:
+            return self._wrap_stream_stream(original, method)
+        return original
+
+    def _wrap_unary_unary(self, original: grpc.RpcMethodHandler, method: str) -> grpc.RpcMethodHandler:
+        async def handler(request, context):
+            await self._check(context, method)
+            return await original.unary_unary(request, context)
+
+        return grpc.unary_unary_rpc_method_handler(
+            handler,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    def _wrap_unary_stream(self, original: grpc.RpcMethodHandler, method: str) -> grpc.RpcMethodHandler:
+        async def handler(request, context):
+            await self._check(context, method)
+            async for response in original.unary_stream(request, context):
+                yield response
+
+        return grpc.unary_stream_rpc_method_handler(
+            handler,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    def _wrap_stream_unary(self, original: grpc.RpcMethodHandler, method: str) -> grpc.RpcMethodHandler:
+        async def handler(request_iterator, context):
+            await self._check(context, method)
+            metered = self._metered_requests(request_iterator, context, method)
+            return await original.stream_unary(metered, context)
+
+        return grpc.stream_unary_rpc_method_handler(
+            handler,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    def _wrap_stream_stream(self, original: grpc.RpcMethodHandler, method: str) -> grpc.RpcMethodHandler:
+        async def handler(request_iterator, context):
+            await self._check(context, method)
+            metered = self._metered_requests(request_iterator, context, method)
+            async for response in original.stream_stream(metered, context):
+                yield response
+
+        return grpc.stream_stream_rpc_method_handler(
+            handler,
+            request_deserializer=original.request_deserializer,
+            response_serializer=original.response_serializer,
+        )
+
+    async def _metered_requests(self, request_iterator, context, method: str):
+        """P1-GW-05: client-streaming 逐帧计费。
+
+        此前只在建流时收费一次，持有有效凭据的客户端可用单条
+        StreamStatus/StreamLogs/StreamSpiderData/Artifact upload 流持续写
+        Redis/数据库绕过请求桶。现在每帧过一次全局+per-key 桶，超限
+        abort(RESOURCE_EXHAUSTED)，worker 按普通流错误退避重试。
+        """
+        async for request in request_iterator:
+            await self._check(context, method)
+            yield request
+
+    async def _check(self, context: grpc.aio.ServicerContext, method: str) -> None:
+        """全局 + per-key 两级限流,超限则 abort(RESOURCE_EXHAUSTED)。"""
+        metadata = dict(context.invocation_metadata() or ())
+        key = self._resolve_key(metadata, context)
+
+        # 全局上限先行: 即使 key 被不断变换,网关总吞吐仍被封顶。
+        global_result = await (await self._get_global_limiter()).allow("global")
+        if not global_result.allowed:
+            await self._abort(context, global_result, key="global", method=method)
+            return
+
         result = await (await self._get_limiter()).allow(key)
-
         if not result.allowed:
-            logger.warning(f"请求被限流: key={key}, method={method}, retry_after={result.retry_after:.2f}s")
-            return self._create_rate_limited_handler(result)
+            await self._abort(context, result, key=key, method=method)
 
-        # 继续处理
-        return await continuation(handler_call_details)
+    def _resolve_key(self, metadata: dict, context: grpc.aio.ServicerContext) -> str:
+        """派生限流键。
+
+        优先用服务端认证主体(不可伪造);匿名/未认证调用退回真实对端 IP。
+        绝不使用客户端声明的 ``x-worker-id`` header 作为键。
+        """
+        worker_id = get_authenticated_worker_id()
+        if worker_id:
+            return f"worker:{worker_id}"
+        return self._peer_key(metadata, context)
+
+    def _peer_key(self, metadata: dict, context: grpc.aio.ServicerContext) -> str:
+        try:
+            peer = context.peer() or ""
+        except Exception:  # noqa: BLE001 - 拿不到 peer 不应阻断请求,退回共享匿名桶
+            peer = ""
+        direct_ip = self._peer_ip(peer)
+        if not direct_ip:
+            # 非 IP 传输(unix socket 等): 用原始 peer 串,仍不可伪造。
+            return f"peer:{peer}" if peer else "anonymous"
+        try:
+            client_ip = extract_client_ip(
+                direct_ip,
+                str(metadata.get("x-forwarded-for", "") or ""),
+                str(metadata.get("x-real-ip", "") or ""),
+                trusted_proxies=os.getenv("ANTCODE_TRUSTED_PROXIES", ""),
+            )
+        except ValueError:
+            # XFF/X-Real-IP 非法时退回真实对端 IP,绝不因伪造头放行。
+            client_ip = direct_ip
+        return f"ip:{client_ip}"
 
     @staticmethod
-    def _infer_peer_key(metadata: dict) -> str:
-        """没有 worker_id 时退回到对端 IP (x-forwarded-for / x-real-ip / peer header).
+    def _peer_ip(peer: str) -> str:
+        """从 grpc ``context.peer()`` 串解析出对端 IP。
 
-        若什么都拿不到, 退回 "anonymous" -- 仍然比所有匿名共享 "default" 好,
-        因为 anonymous 桶被打爆只影响匿名调用,带 worker_id 的客户端不受影响。
+        形如 ``ipv4:1.2.3.4:5678`` / ``ipv6:[::1]:5678``;其它(unix 等)返回 ""。
         """
-        xff = metadata.get("x-forwarded-for")
-        if xff:
-            # XFF 可能是 "client, proxy1, proxy2", 取第一个
-            return f"ip:{str(xff).split(',', 1)[0].strip()}"
-        real_ip = metadata.get("x-real-ip")
-        if real_ip:
-            return f"ip:{str(real_ip).strip()}"
-        return "anonymous"
+        if peer.startswith("ipv4:"):
+            return peer[5:].rsplit(":", 1)[0]
+        if peer.startswith("ipv6:"):
+            rest = peer[5:]
+            if rest.startswith("["):
+                return rest[1:].split("]", 1)[0]
+            return rest.rsplit(":", 1)[0]
+        return ""
 
-    def _create_rate_limited_handler(
+    async def _abort(
         self,
-        result: RateLimitResult | RedisTokenBucketResult,
-    ) -> grpc.RpcMethodHandler:
-        """创建限流响应处理器"""
-
-        async def rate_limited_handler(request, context):
-            # 设置重试时间
-            context.set_trailing_metadata(
-                [
-                    ("retry-after", str(int(result.retry_after) + 1)),
-                    ("x-ratelimit-remaining", "0"),
-                    ("x-ratelimit-reset", str(int(result.reset_at))),
-                ]
-            )
-            await context.abort(
-                grpc.StatusCode.RESOURCE_EXHAUSTED,
-                f"请求过于频繁，请在 {result.retry_after:.1f} 秒后重试",
-            )
-
-        return grpc.unary_unary_rpc_method_handler(rate_limited_handler)
+        context: grpc.aio.ServicerContext,
+        result: Any,
+        *,
+        key: str,
+        method: str,
+    ) -> None:
+        logger.warning(f"请求被限流: key={key}, method={method}, retry_after={result.retry_after:.2f}s")
+        context.set_trailing_metadata(
+            [
+                ("retry-after", str(int(result.retry_after) + 1)),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", str(int(result.reset_at))),
+            ]
+        )
+        await context.abort(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            f"请求过于频繁，请在 {result.retry_after:.1f} 秒后重试",
+        )

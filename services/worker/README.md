@@ -30,7 +30,9 @@ uv run python -m antcode_worker --name "My-Worker-01" --port 8001
 
 ### 方式三：环境变量配置 (推荐生产环境)
 
-你可以通过环境变量预设配置，无论是 Direct 还是 Gateway 模式：
+你可以通过环境变量预设配置。生产环境仅支持 Gateway；Direct 只用于可信内网、
+单租户测试。生产 Gateway Worker 必须设置 `WORKER_GATEWAY_BACKENDLESS=true`，
+并保证 `DATABASE_URL`、`REDIS_URL`、`WORKER_REDIS_URL` 均为空。
 
 | 变量名 | 描述 | 示例 |
 | :--- | :--- | :--- |
@@ -38,6 +40,7 @@ uv run python -m antcode_worker --name "My-Worker-01" --port 8001
 | `WORKER_TRANSPORT_MODE` | 接入模式 | `gateway` (默认 `gateway`) |
 | `WORKER_GATEWAY_ENDPOINT` | Gateway 地址 | `gateway.example.com:50051` |
 | `WORKER_REDIS_URL` | Redis 地址 (Direct 模式) | `redis://192.168.1.10:6379/0` |
+| `WORKER_CREDENTIAL_STORE` | 凭证存储，裸机默认 `persistent` | `persistent` |
 
 ---
 
@@ -50,6 +53,7 @@ data/worker/
 ├── runtimes/      # Python 虚拟环境 (按项目+环境 hash 隔离)
 ├── runs/          # 任务执行时的临时工作目录
 ├── temp/          # 运行时构建与沙箱临时文件
+├── secrets/       # 原子持久化 Worker 凭证（目录 0700，文件 0600）
 └── identity/      # Worker 身份标识 (UUID)
 ```
 

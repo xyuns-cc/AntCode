@@ -1,119 +1,144 @@
-# AntCode 生产 Compose 骨架 (round6 P0-03: 替代 K8s 决策后的非 K8s 生产画像)
-#
-# 定位:此文件是"生产就绪的最小起点",不是可直接 docker compose up 上线的
-# 交钥匙方案。上线前必须完成 8 个 site-specific 落地(见 infra/docker/README.md
-# 的"生产部署合同"章节)。dev/remote 画像禁止直接改名当生产用。
-#
-# 与 remote 画像的关键差异(强制):
-# - 全 HTTPS(反向代理 TLS 终止;Compose 内部无明文端口对外)
-# - AUTH_COOKIE_SECURE=true (强制 Secure Cookie)
-# - REDIS_ACL_ENABLED=true  (Worker/服务用最小权限 ACL 账号)
-# - ANTCODE_GATEWAY_ALLOW_INSECURE=false (Gateway mTLS 硬开)
-# - WORKER_GATEWAY_TLS=true
-# - Worker Rule 网络默认关(ANTCODE_RULE_ALLOW_NETWORK 由 site 显式打开)
-# - Legacy settle 通道关闭 (ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS 已过去)
-# - 备份 sidecar 已配 (pg_dump → 对象存储/远程盘)
-#
-# Site-specific 落地清单(此文件默认全部空,site 通过 override 或
-# .env.production 填):
-# 1. DATABASE_URL / REDIS_URL 走同一 VPC 内的托管 PG/Redis,或 stateful
-#    volume + 内部 network(pg/redis 服务不 expose 端口)
-# 2. TLS 证书从 secret 或 host bind 挂载,非 emptyDir
-# 3. Ingress: nginx/traefik/caddy 反向代理,http-01/dns-01 自动续签
-# 4. Worker mTLS:每 Worker 独立客户端证书(installer 生成后单独挂)
-# 5. 镜像 tag 用 immutable digest 或语义化版本,不用 latest
-# 6. 备份: pg_dump 定时(cron container/host cron) + 上传对象存储
-# 7. 监控: prometheus scrape /metrics + alertmanager 接入
-# 8. 日志: json-file 轮转已配,site 按需接 filebeat/fluent-bit
-#
-# 参考验证: docker compose -f docker-compose.prod.yml config 检查语法
-
 x-antcode-logging: &antcode-logging
   driver: json-file
   options:
     max-size: "100m"
     max-file: "10"
 
-# 通用生产环境变量(全服务共享)
-x-antcode-prod-env: &antcode-prod-env
-  # === 强制安全开关(不允许 site override 关闭) ===
-  AUTH_COOKIE_SECURE: "true"
+x-backend-environment: &backend-environment
+  DATABASE_URL: ${DATABASE_URL:?production DATABASE_URL is required}
+  REDIS_URL: ${REDIS_URL:?production REDIS_URL is required}
   REDIS_ACL_ENABLED: "true"
-  ANTCODE_GATEWAY_ALLOW_INSECURE: "false"
-  # === 中间件(site 通过 .env.production 提供) ===
-  DATABASE_URL: ${DATABASE_URL:?生产 DATABASE_URL 必须显式配置}
-  REDIS_URL: ${REDIS_URL:?生产 REDIS_URL 必须显式配置}
-  # === Legacy 通道关闭(round6 P1-GW-06: 应用层默认 fail-closed) ===
-  # 应用侧未设该 env 或非法值都是 fail-closed;这里显式设为 1 (已过去时间戳)
-  # 作 defense-in-depth。如果 site 需要滚动升级窗口,临时改为 0 或未来时间戳。
-  ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS: ${ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS:-1}
-  # === 日志级别(生产不 debug) ===
+  AUTH_COOKIE_SECURE: "true"
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
+x-backend-service: &backend-service
+  restart: unless-stopped
+  logging: *antcode-logging
+  read_only: true
+  tmpfs:
+    - /tmp
+  networks:
+    - antcode-internal
+
+x-backend-dependencies: &backend-dependencies
+  migration:
+    condition: service_completed_successfully
+  redis:
+    condition: service_healthy
+
 services:
-  web-api:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.web_api
-    image: ${ANTCODE_IMAGE_REGISTRY:-ghcr.io/antcode}/antcode-web-api:${ANTCODE_IMAGE_TAG:?ANTCODE_IMAGE_TAG 必须显式}
+  postgres:
+    image: ${ANTCODE_POSTGRES_IMAGE_REPOSITORY:?PostgreSQL image repository is required}@sha256:${ANTCODE_POSTGRES_IMAGE_DIGEST:?PostgreSQL image digest is required}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *antcode-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-antcode}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - antcode-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  redis:
+    image: ${ANTCODE_REDIS_IMAGE_REPOSITORY:?Redis image repository is required}@sha256:${ANTCODE_REDIS_IMAGE_DIGEST:?Redis image digest is required}
     restart: unless-stopped
     stop_grace_period: 30s
+    logging: *antcode-logging
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --aclfile
+      - /usr/local/etc/redis/users.acl
+    environment:
+      REDISCLI_AUTH: ${REDIS_HEALTHCHECK_PASSWORD:?Redis healthcheck password is required}
+      REDIS_HEALTHCHECK_USER: ${REDIS_HEALTHCHECK_USER:?Redis healthcheck user is required}
+    volumes:
+      - redis_data:/data
+      - ${ANTCODE_REDIS_ACL_DIR:?writable Redis ACL directory is required}:/usr/local/etc/redis
+    networks:
+      - antcode-internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --user $${REDIS_HEALTHCHECK_USER} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  migration:
+    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    restart: "no"
     logging: *antcode-logging
     read_only: true
     tmpfs:
       - /tmp
-    cpus: 2
-    mem_limit: 2g
-    pids_limit: 2048
-    # 生产不 expose 端口: 反向代理通过内部 network 转发
-    expose:
-      - "8000"
-    env_file:
-      - ../../.env.production
     environment:
-      <<: *antcode-prod-env
-      BIND_HOST: 0.0.0.0
-      SERVER_PORT: "8000"
-      SERVER_RELOAD: "false"
-    volumes:
-      - web_data:/app/data
+      <<: *backend-environment
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
+      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD is required}
+    secrets:
+      - jwt_secret
+    command: ["python", "-m", "scripts.init_db"]
     networks:
       - antcode-internal
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  web-api:
+    <<: *backend-service
+    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    stop_grace_period: 30s
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 2048
+    expose:
+      - "8000"
+    environment:
+      <<: *backend-environment
+      BIND_HOST: 0.0.0.0
+      SERVER_PORT: "8000"
+      SERVER_RELOAD: "false"
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
+      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
+      ANTCODE_TRUSTED_PROXIES: ${ANTCODE_TRUSTED_PROXIES:?trusted reverse proxy CIDR is required}
+    volumes:
+      - web_data:/app/data
+    secrets:
+      - jwt_secret
+    depends_on: *backend-dependencies
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
-
   master:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.master
-    image: ${ANTCODE_IMAGE_REGISTRY:-ghcr.io/antcode}/antcode-master:${ANTCODE_IMAGE_TAG:?}
-    restart: unless-stopped
+    <<: *backend-service
+    image: ${ANTCODE_MASTER_IMAGE_REPOSITORY:?Master image repository is required}@sha256:${ANTCODE_MASTER_IMAGE_DIGEST:?Master image digest is required}
     stop_grace_period: 30s
-    logging: *antcode-logging
-    read_only: true
-    tmpfs:
-      - /tmp
     cpus: 2
     mem_limit: 2g
     pids_limit: 2048
-    env_file:
-      - ../../.env.production
     environment:
-      <<: *antcode-prod-env
+      <<: *backend-environment
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
+      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
     volumes:
       - master_data:/app/data
-    networks:
-      - antcode-internal
-    depends_on:
-      - postgres
-      - redis
+    depends_on: *backend-dependencies
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8101/health/ready"]
       interval: 15s
@@ -122,182 +147,131 @@ services:
       start_period: 30s
 
   gateway:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.gateway
-    image: ${ANTCODE_IMAGE_REGISTRY:-ghcr.io/antcode}/antcode-gateway:${ANTCODE_IMAGE_TAG:?}
-    restart: unless-stopped
+    <<: *backend-service
+    image: ${ANTCODE_GATEWAY_IMAGE_REPOSITORY:?Gateway image repository is required}@sha256:${ANTCODE_GATEWAY_IMAGE_DIGEST:?Gateway image digest is required}
     stop_grace_period: 30s
-    logging: *antcode-logging
     cpus: 2
     mem_limit: 2g
     pids_limit: 2048
     expose:
       - "50051"
-    env_file:
-      - ../../.env.production
+      - "8100"
     environment:
-      <<: *antcode-prod-env
+      <<: *backend-environment
       GRPC_HOST: "0.0.0.0"
       GRPC_PORT: "50051"
-      WORKER_GATEWAY_TLS: "true"
-      GATEWAY_TLS_CERT_PATH: /etc/antcode/tls/server.crt
-      GATEWAY_TLS_KEY_PATH: /etc/antcode/tls/server.key
-      GATEWAY_TLS_CA_PATH: /etc/antcode/tls/ca.crt
+      GRPC_TLS_CERT_PATH: /etc/antcode/tls/server.crt
+      GRPC_TLS_KEY_PATH: /etc/antcode/tls/server.key
+      GRPC_TLS_CA_PATH: /etc/antcode/tls/ca.crt
+      ANTCODE_GATEWAY_ALLOW_INSECURE: "false"
+      ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS: "1"
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
+      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
     volumes:
-      - ${ANTCODE_GATEWAY_TLS_DIR:?生产 Gateway 必须挂载 mTLS 目录}:/etc/antcode/tls:ro
+      - ${ANTCODE_GATEWAY_TLS_DIR:?Gateway mTLS directory is required}:/etc/antcode/tls:ro
       - gateway_data:/app/data
-    networks:
-      - antcode-internal
-    depends_on:
-      - postgres
-      - redis
+    depends_on: *backend-dependencies
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=localhost:50051", "-tls", "-tls-ca-cert=/etc/antcode/tls/ca.crt"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8100/health/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
 
-  # 生产 Worker: SYS_ADMIN 是 bwrap 嵌套 namespace 硬需求
-  # 但必须配合 Rule 网络默认关 + credential mask 扩展 + 独立 Node/Pool
-  # 承接不可信任务时应更进一步 (gVisor/Kata) 或独立主机
   worker:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.worker
-    image: ${ANTCODE_IMAGE_REGISTRY:-ghcr.io/antcode}/antcode-worker:${ANTCODE_IMAGE_TAG:?}
+    image: ${ANTCODE_WORKER_IMAGE_REPOSITORY:?Worker image repository is required}@sha256:${ANTCODE_WORKER_IMAGE_DIGEST:?Worker image digest is required}
     restart: unless-stopped
-    stop_grace_period: 60s  # 长任务给宽松 grace
+    stop_grace_period: 60s
     logging: *antcode-logging
     cpus: 4
     mem_limit: 8g
     pids_limit: 4096
-    # bwrap 嵌套 namespace 硬需求(参见 README.md);上线前必须结合独立 Node
     cap_add:
       - SYS_ADMIN
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
       - systempaths=unconfined
-    env_file:
-      - ../../.env.production
     environment:
-      <<: *antcode-prod-env
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       WORKER_TRANSPORT_MODE: gateway
-      WORKER_GATEWAY_TLS: "true"
-      WORKER_GATEWAY_HOST: ${GATEWAY_HOST:-gateway}
+      WORKER_GATEWAY_BACKENDLESS: "true"
+      WORKER_GATEWAY_HOST: gateway
       WORKER_GATEWAY_PORT: "50051"
-      # Rule 网络默认关: 若 site 需要则显式设 1/true/yes
+      WORKER_GATEWAY_TLS: "true"
+      WORKER_CA_CERT: /etc/antcode/tls/ca.crt
+      WORKER_CLIENT_CERT: /etc/antcode/tls/client.crt
+      WORKER_CLIENT_KEY: /etc/antcode/tls/client.key
+      WORKER_API_BASE_URL: ${ANTCODE_PUBLIC_API_BASE_URL:?public HTTPS API base URL is required}
+      WORKER_API_ALLOW_INSECURE_INTERNAL: "false"
+      ANTCODE_WORKER_KEY: ${ANTCODE_WORKER_KEY:-}
       ANTCODE_RULE_ALLOW_NETWORK: ${ANTCODE_RULE_ALLOW_NETWORK:-0}
       WORKER_SANDBOX_COMMAND: bwrap
     volumes:
-      - ${ANTCODE_WORKER_TLS_DIR:?生产 Worker mTLS 必须显式挂载}:/etc/antcode/tls:ro
+      - ${ANTCODE_WORKER_TLS_DIR:?Worker mTLS directory is required}:/etc/antcode/tls:ro
       - worker_data:/app/data
     networks:
       - antcode-internal
     depends_on:
-      - gateway
+      web-api:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
 
-  # === 反向代理 (site 可换 nginx/traefik/caddy) ===
-  # 骨架只声明 service, site 通过 override 或独立文件补 nginx.conf/traefik 配置
-  reverse-proxy:
-    image: ${ANTCODE_REVERSE_PROXY_IMAGE:-nginx:1.27-alpine}
+  frontend:
+    image: ${ANTCODE_FRONTEND_IMAGE_REPOSITORY:?frontend image repository is required}@sha256:${ANTCODE_FRONTEND_IMAGE_DIGEST:?frontend image digest is required}
     restart: unless-stopped
+    logging: *antcode-logging
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+      - /etc/nginx/conf.d
+    expose:
+      - "8080"
+    environment:
+      WEB_API_UPSTREAM: web-api:8000
+    networks:
+      - antcode-internal
+    depends_on:
+      web-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  reverse-proxy:
+    image: ${ANTCODE_REVERSE_PROXY_IMAGE_REPOSITORY:?reverse proxy image repository is required}@sha256:${ANTCODE_REVERSE_PROXY_IMAGE_DIGEST:?reverse proxy image digest is required}
+    restart: unless-stopped
+    logging: *antcode-logging
     ports:
       - "0.0.0.0:${HTTPS_PORT:-443}:443"
       - "0.0.0.0:${HTTP_REDIRECT_PORT:-80}:80"
     volumes:
-      - ${ANTCODE_REVERSE_PROXY_CONFIG:?反向代理配置必须显式挂载}:/etc/nginx/nginx.conf:ro
-      - ${ANTCODE_TLS_CERTS_DIR:?反向代理 TLS 证书必须显式挂载}:/etc/nginx/certs:ro
+      - ${ANTCODE_REVERSE_PROXY_CONFIG:?reverse proxy config is required}:/etc/nginx/nginx.conf:ro
+      - ${ANTCODE_TLS_CERTS_DIR:?reverse proxy TLS directory is required}:/etc/nginx/certs:ro
     networks:
       - antcode-internal
       - antcode-edge
     depends_on:
-      - web-api
-      - gateway
-    logging: *antcode-logging
-
-  # === PostgreSQL (site 可换托管) ===
-  postgres:
-    image: ${ANTCODE_POSTGRES_IMAGE:-postgres:16-alpine}
-    restart: unless-stopped
-    stop_grace_period: 60s
-    logging: *antcode-logging
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:?}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
-      POSTGRES_DB: ${POSTGRES_DB:-antcode}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - antcode-internal
-    # 生产不 expose (内部 network only)
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # === Redis (site 可换托管/Cluster) ===
-  redis:
-    image: ${ANTCODE_REDIS_IMAGE:-redis:7-alpine}
-    restart: unless-stopped
-    stop_grace_period: 30s
-    logging: *antcode-logging
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --requirepass
-      - ${REDIS_PASSWORD:?生产 Redis 必须启用 requirepass}
-    volumes:
-      - redis_data:/data
-    networks:
-      - antcode-internal
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep -q PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # === 备份 sidecar (骨架, site 补 cron + 上传逻辑) ===
-  # 每日 pg_dump; site 通过 override 补上传目标(S3/OSS/rsync)
-  backup:
-    image: ${ANTCODE_POSTGRES_IMAGE:-postgres:16-alpine}
-    restart: unless-stopped
-    logging: *antcode-logging
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:?}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
-      POSTGRES_DB: ${POSTGRES_DB:-antcode}
-    volumes:
-      - backup_data:/backup
-    networks:
-      - antcode-internal
-    depends_on:
-      - postgres
-    # 骨架命令: 每 24h pg_dump 一次;site 应用 override 补 rclone/aws s3 上传
-    command:
-      - sh
-      - -c
-      - |
-        while true; do
-          PGPASSWORD="$$POSTGRES_PASSWORD" pg_dump \
-            -h "$$POSTGRES_HOST" -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
-            -Fc -f "/backup/antcode-$$(date +%%Y%%m%%dT%%H%%M%%SZ).dump"
-          # TODO(site): 上传到远端对象存储
-          echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) backup done"
-          sleep 86400
-        done
+      frontend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
 
 networks:
-  # 内部网络: 应用 + 中间件 + 反向代理; 不暴露宿主
   antcode-internal:
     driver: bridge
-    internal: false  # 允许 site egress(如 pip/npm 拉包);上线可改 true 强制 egress-proxy
-  # 边缘网络: 反向代理对外暴露 443/80
   antcode-edge:
     driver: bridge
 
@@ -308,4 +282,7 @@ volumes:
   worker_data:
   postgres_data:
   redis_data:
-  backup_data:
+
+secrets:
+  jwt_secret:
+    file: ${ANTCODE_JWT_SECRET_FILE:?host JWT secret file is required}

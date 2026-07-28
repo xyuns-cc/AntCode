@@ -33,7 +33,7 @@ async def _migrate_rows(connection) -> int:
         api_key = row.get("api_key")
         secret_key = row.get("secret_key")
         previous = row.get("api_key_previous")
-        await connection.execute_query(
+        affected, _ = await connection.execute_query(
             'UPDATE "workers" SET "api_key_hash"=$1, "secret_key_hash"=$2, '
             '"secret_key_encrypted"=$3, "api_key_previous_hash"=$4 WHERE "id"=$5',
             [
@@ -44,6 +44,8 @@ async def _migrate_rows(connection) -> int:
                 row["id"],
             ],
         )
+        if int(affected) != 1:
+            raise RuntimeError(f"Worker 凭据迁移更新行数异常: id={row['id']}, affected={affected}")
     return len(rows)
 
 
@@ -56,19 +58,31 @@ async def main() -> None:
     from tortoise.transactions import in_transaction
 
     await init_db(service="web_api")
-    async with in_transaction() as connection:
-        columns = await _plaintext_columns(connection)
-        if not columns:
-            print("Worker 明文凭据列已移除，无需迁移")
-        elif columns != {"api_key", "secret_key", "api_key_previous"}:
-            raise RuntimeError(f"Worker 明文凭据列不完整: {sorted(columns)}")
-        else:
-            migrated = await _migrate_rows(connection)
-            await connection.execute_query(
-                'ALTER TABLE "workers" DROP COLUMN "api_key", DROP COLUMN "secret_key", DROP COLUMN "api_key_previous"'
-            )
-            print(f"已安全迁移 {migrated} 个 Worker 的凭据")
-    await close_db()
+    failure: BaseException | None = None
+    try:
+        async with in_transaction() as connection:
+            columns = await _plaintext_columns(connection)
+            if not columns:
+                print("Worker 明文凭据列已移除，无需迁移")
+            elif columns != {"api_key", "secret_key", "api_key_previous"}:
+                raise RuntimeError(f"Worker 明文凭据列不完整: {sorted(columns)}")
+            else:
+                migrated = await _migrate_rows(connection)
+                await connection.execute_query(
+                    'ALTER TABLE "workers" DROP COLUMN "api_key", DROP COLUMN "secret_key", '
+                    'DROP COLUMN "api_key_previous"'
+                )
+                print(f"已安全迁移 {migrated} 个 Worker 的凭据")
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        try:
+            await close_db()
+        except BaseException as close_failure:
+            if failure is not None:
+                raise BaseExceptionGroup("Worker 凭据迁移与数据库关闭均失败", [failure, close_failure]) from failure
+            raise
 
 
 if __name__ == "__main__":

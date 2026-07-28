@@ -29,39 +29,26 @@ class AlertService:
         self._config_cache = {}
         self._alert_history = []  # 内存中的告警历史
         self._max_history = 1000  # 最大历史记录数
+        self._reload_lock = asyncio.Lock()
 
     async def initialize(self):
         """初始化告警服务"""
         if self._initialized:
             return
-
-        try:
-            # 从数据库加载配置
-            config = await self._load_config_from_db()
-            if config:
-                await self._apply_config(config)
-                self._config_cache = config
-
-            self._initialized = True
-            logger.info("告警服务初始化完成")
-        except Exception as e:
-            logger.error(f"告警服务初始化失败: {e}")
+        await self.reload_config()
+        logger.info("告警服务初始化完成")
 
     async def _load_config_from_db(self):
         """从数据库加载告警配置"""
-        try:
-            from antcode_core.domain.models import SystemConfig
+        from antcode_core.domain.models import SystemConfig
 
-            config = self._default_config()
-            configs = await SystemConfig.filter(category="alert", is_active=True).all()
-            for cfg in configs:
-                parsed = self._parse_config_value(cfg.config_key, cfg.config_value)
-                if parsed is not None:
-                    config[cfg.config_key] = parsed
-            return config
-        except Exception as e:
-            logger.warning(f"从数据库加载告警配置失败: {e}")
-            return {}
+        config = self._default_config()
+        configs = await SystemConfig.filter(category="alert", is_active=True).all()
+        for cfg in configs:
+            parsed = self._parse_config_value(cfg.config_key, cfg.config_value)
+            if parsed is not None:
+                config[cfg.config_key] = parsed
+        return config
 
     @staticmethod
     def _default_config():
@@ -154,10 +141,13 @@ class AlertService:
 
     async def reload_config(self):
         """重新加载配置"""
-        config = await self._load_config_from_db()
-        if config:
+        async with self._reload_lock:
+            config = await self._load_config_from_db()
+            if self._initialized and config == self._config_cache:
+                return
             await self._apply_config(config)
             self._config_cache = config
+            self._initialized = True
             logger.info("告警配置已重新加载")
 
     async def send_alert(self, message, level="ERROR", source="system", extra=None, rate_key=None):
@@ -175,8 +165,9 @@ class AlertService:
         Returns:
             发送结果
         """
-        if not self._initialized:
-            await self.initialize()
+        # 每次发送前读取 PostgreSQL 权威配置；未变化时不会重建 channel。
+        # 该路径不依赖易丢失的跨进程 Pub/Sub 通知。
+        await self.reload_config()
 
         # 格式化消息
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -200,9 +191,10 @@ class AlertService:
 
         # 发送告警。限流键必须排除时间戳/extra（含 created_at 等易变字段），
         # 否则每条消息哈希唯一，同一告警重复轰炸时限流形同虚设。
-        result = alert_manager.send_alert(
+        result = alert_manager.send_alert_auto(
             formatted_message,
             level,
+            self._config_cache["auto_alert_levels"],
             rate_key=rate_key or f"{level}|{source}|{message}",
         )
 

@@ -1,0 +1,261 @@
+/* 紧凑型任务项 */
+.metric-item-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-label-compact {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-label-compact {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-label-compact {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* 迷你任务指示器 - 独立一行显示 */
+.task-indicators-mini {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.indicator-mini {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.indicator-mini.indicator-success {
+  background-color: #52c41a;
+}
+
+.indicator-mini.indicator-warning {
+  background-color: #faad14;
+}
+
+.indicator-mini.indicator-error {
+  background-color: #ff4d4f;
+}
+
+.more-mini {
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+/* 浅色主题 */
+body.light-theme .more-mini {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .more-mini {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* Drawer 中的紧凑Worker卡片样式 */
+.worker-card-drawer {
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  height: 100%;
+}
+
+.worker-card-drawer.ant-card-small > .ant-card-body {
+  padding: 10px;
+}
+
+.worker-card-drawer:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  transform: translateY(-2px);
+}
+
+.worker-card-drawer.worker-running {
+  border-left: 3px solid #52c41a;
+}
+
+.worker-card-drawer.worker-warning {
+  border-left: 3px solid #faad14;
+}
+
+/* 浅色主题警告背景 */
+body.light-theme .worker-card-drawer.worker-warning {
+  background: #fffbe6;
+}
+
+/* 深色主题警告背景 */
+body.dark-theme .worker-card-drawer.worker-warning {
+  background: rgba(250, 173, 20, 0.1);
+}
+
+.worker-card-drawer.worker-error {
+  border-left: 3px solid #ff4d4f;
+}
+
+/* 浅色主题错误背景 */
+body.light-theme .worker-card-drawer.worker-error {
+  background: #fff2f0;
+}
+
+/* 深色主题错误背景 */
+body.dark-theme .worker-card-drawer.worker-error {
+  background: rgba(255, 77, 79, 0.1);
+}
+
+.worker-card-drawer.worker-stopped {
+  border-left: 3px solid #d9d9d9;
+  opacity: 0.7;
+}
+
+.worker-header-drawer {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  gap: 8px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-header-drawer {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-header-drawer {
+  border-bottom: 1px solid #434343;
+}
+
+.worker-header-drawer h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-header-drawer h4 {
+  color: #262626;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-header-drawer h4 {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.worker-header-drawer .worker-version {
+  margin: 2px 0 0 0;
+  font-size: 10px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-header-drawer .worker-version {
+  color: #999;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-header-drawer .worker-version {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.worker-metrics-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metric-item-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.metric-label-drawer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-label-drawer {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-label-drawer {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* Drawer 中的任务指示器 */
+.task-indicators-compact {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 3px;
+}
+
+.task-indicators-compact .indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.task-indicators-compact .indicator.indicator-success {
+  background-color: #52c41a;
+}
+
+.task-indicators-compact .indicator.indicator-warning {
+  background-color: #faad14;
+}
+
+.task-indicators-compact .indicator.indicator-error {
+  background-color: #ff4d4f;
+}
+
+.task-indicators-compact .more-compact {
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+/* 浅色主题 */
+body.light-theme .task-indicators-compact .more-compact {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .task-indicators-compact .more-compact {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.worker-uptime-drawer {
+  margin-top: 4px;
+  padding-top: 6px;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-uptime-drawer {
+  border-top: 1px solid #f0f0f0;
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-uptime-drawer {
+  border-top: 1px solid #434343;
+  color: rgba(255, 255, 255, 0.45);
+}

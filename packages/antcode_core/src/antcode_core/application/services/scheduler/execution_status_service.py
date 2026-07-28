@@ -3,9 +3,10 @@
 from datetime import UTC, datetime
 
 from loguru import logger
-from tortoise.expressions import F, Q
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
+from antcode_core.application.services.scheduler.task_run_counters import task_run_outcome_counts
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -55,11 +56,6 @@ class ExecutionStatusService:
             DispatchStatus.TIMEOUT,
             DispatchStatus.FAILED,
         }
-        self._failure_task_states = (
-            TaskStatus.FAILED,
-            TaskStatus.TIMEOUT,
-            TaskStatus.REJECTED,
-        )
 
     def _ensure_dt(self, status_at):
         if status_at is None:
@@ -364,7 +360,9 @@ class ExecutionStatusService:
             if task is None:
                 return
             latest = await TaskRun.filter(task_id=execution.task_id).using_db(conn).order_by("-id").first()
+            updates = await task_run_outcome_counts(conn, execution.task_id)
             if latest is None or latest.id != execution.id:
+                await Task.filter(id=task.id).using_db(conn).update(**updates)
                 logger.debug(
                     f"跳过 Task 状态同步(非最新 run): task_id={execution.task_id} "
                     f"execution.id={execution.id} latest.id={getattr(latest, 'id', None)}"
@@ -382,13 +380,9 @@ class ExecutionStatusService:
                 )
                 return
 
-            updates: dict = {"status": incoming_status}
+            updates["status"] = incoming_status
             if execution.runtime_status == RuntimeStatus.RUNNING:
                 updates["last_run_time"] = status_at
-            if incoming_status == TaskStatus.SUCCESS and task.status != TaskStatus.SUCCESS:
-                updates["success_count"] = F("success_count") + 1
-            elif incoming_status in self._failure_task_states and task.status not in self._failure_task_states:
-                updates["failure_count"] = F("failure_count") + 1
             await Task.filter(id=task.id).using_db(conn).update(**updates)
 
 

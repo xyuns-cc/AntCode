@@ -35,6 +35,7 @@ import type { Task, TaskExecution, TaskStatus } from '@/types'
 import { formatDateTime, formatDuration, formatStatus, formatTaskType } from '@/utils/format'
 import { describeCronExpression } from '@/utils/cron'
 import showNotification from '@/utils/notification'
+import { isTerminalTaskStatus } from '@/utils/taskStatus'
 
 const TaskDetail: React.FC = () => {
   const navigate = useNavigate()
@@ -102,14 +103,6 @@ const TaskDetail: React.FC = () => {
       }
 
       // 轮询确认状态变化（最多 30s，每 2s 一次）
-      const TERMINAL: ReadonlySet<string> = new Set([
-        'cancelled',
-        'failed',
-        'success',
-        'timeout',
-        'rejected',
-        'skipped',
-      ])
       const stopAt = Date.now() + 30_000
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -126,7 +119,7 @@ const TaskDetail: React.FC = () => {
           continue
         }
         const run = latest.find((e) => e.run_id === runId)
-        if (run && TERMINAL.has(run.status)) {
+        if (run && isTerminalTaskStatus(run.status)) {
           if (run.status === 'cancelled') {
             showNotification('success', '任务已取消')
           } else {

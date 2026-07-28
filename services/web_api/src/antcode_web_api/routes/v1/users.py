@@ -32,6 +32,7 @@ from antcode_web_api.deps import require_role
 from antcode_web_api.response import Messages, success
 from antcode_web_api.response import page as page_response
 from antcode_web_api.routing import promote_static_routes
+from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 router = APIRouter()
 
@@ -97,12 +98,12 @@ async def get_users_list(
             message=Messages.QUERY_SUCCESS,
         )
 
-    except Exception as e:
-        logger.error(f"获取用户列表失败: {e}")
+    except Exception as exc:
+        logger.exception("获取用户列表失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取用户列表失败: {str(e)}",
-        )
+            detail="获取用户列表失败",
+        ) from exc
 
 
 @router.get(
@@ -118,12 +119,12 @@ async def get_simple_user_list(current_admin=Depends(get_current_admin_user)):
     try:
         users = await user_service.get_simple_user_list()
         return success(users, message=Messages.QUERY_SUCCESS)
-    except Exception as e:
-        logger.error(f"获取用户简易列表失败: {e}")
+    except Exception as exc:
+        logger.exception("获取用户简易列表失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取用户简易列表失败: {str(e)}",
-        )
+            detail="获取用户简易列表失败",
+        ) from exc
 
 
 @router.post(
@@ -166,7 +167,8 @@ async def create_user(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
         if "邮箱" in err_msg:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已存在")
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_msg)
+        logger.exception("创建用户发生未识别的数据完整性冲突")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突") from e
 
 
 @router.get("/{user_id}", response_model=BaseResponse, summary="获取用户详情", tags=["用户管理"])
@@ -325,10 +327,12 @@ async def update_user(
         return success(_build_user_response(user), message=Messages.UPDATED_SUCCESS)
     except IntegrityError as e:
         detail = str(e)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="用户名已存在" if "用户名" in detail else ("邮箱已存在" if "邮箱" in detail else detail),
-        )
+        if "用户名" in detail:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在") from e
+        if "邮箱" in detail:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已存在") from e
+        logger.exception("更新用户发生未识别的数据完整性冲突")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突") from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -413,19 +417,33 @@ async def batch_update_status(
     request: dict,
     current_admin: TokenData = Depends(get_current_admin_user),
 ):
-    user_ids = request.get("user_ids", [])
+    user_ids = bounded_distinct_ids(request.get("user_ids"), "user_ids")
     is_active = request.get("is_active")
-    if not user_ids or is_active is None:
+    if is_active is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="参数不完整")
 
-    target_user_ids = await User.filter(public_id__in=user_ids).values_list("id", flat=True)
-    updated = await User.filter(public_id__in=user_ids).update(is_active=bool(is_active))
+    targets = await User.filter(public_id__in=user_ids).only("id", "public_id", "is_admin").all()
+    _ensure_batch_status_permission(targets, current_admin)
+    target_user_ids = [target.id for target in targets]
+    updated = await User.filter(id__in=target_user_ids).update(is_active=bool(is_active))
     if not bool(is_active) and target_user_ids:
         await UserSession.filter(
             user_id__in=target_user_ids,
             revoked_at__isnull=True,
         ).update(revoked_at=datetime.now())
     return success({"updated": updated}, message=Messages.UPDATED_SUCCESS)
+
+
+def _ensure_batch_status_permission(targets: list[User], current_admin: TokenData) -> None:
+    """普通管理员不得批量修改其他管理员账户状态。"""
+    if current_admin.is_super_admin:
+        return
+    protected = [target for target in targets if target.is_admin and target.id != current_admin.user_id]
+    if protected:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有超级管理员可以修改管理员账户状态",
+        )
 
 
 @router.post(
@@ -438,9 +456,7 @@ async def batch_delete_users(
     request: dict,
     current_admin: TokenData = Depends(get_current_super_admin),
 ):
-    user_ids = request.get("user_ids", [])
-    if not user_ids:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户ID列表不能为空")
+    user_ids = bounded_distinct_ids(request.get("user_ids"), "user_ids")
 
     success_count = 0
     failed_ids = []

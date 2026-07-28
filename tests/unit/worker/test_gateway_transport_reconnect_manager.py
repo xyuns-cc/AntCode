@@ -12,6 +12,7 @@ from antcode_worker.transport.gateway.reconnect import (
     ReconnectManager,
     ReconnectState,
 )
+from antcode_worker.transport.gateway.subscriptions import SUBSCRIPTION_NAMES
 from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
 
@@ -70,7 +71,7 @@ async def test_finite_reconnect_failure_unblocks_waiter_immediately():
 
 
 @pytest.mark.asyncio
-async def test_late_reconnect_success_restores_transport_online_state():
+async def test_late_reconnect_waits_for_subscriptions_before_online():
     connect_started = asyncio.Event()
     release_connect = asyncio.Event()
     restored = asyncio.Event()
@@ -102,5 +103,8 @@ async def test_late_reconnect_success_restores_transport_online_state():
     release_connect.set()
     await asyncio.wait_for(restored.wait(), timeout=0.2)
 
+    assert transport.state == WorkerState.RECONNECTING
+    transport._subscription_health = dict.fromkeys(SUBSCRIPTION_NAMES, True)
+    await transport._refresh_subscription_state()
     assert transport.state == WorkerState.ONLINE
     await manager.stop()

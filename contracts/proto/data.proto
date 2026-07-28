@@ -34,7 +34,7 @@ service DataService {
 
   // T6-T3: Rule/Spider scraped items flow. Client-streaming — Scrapy pipeline
   // sends 1..N items per batch, gateway transcodes to Redis
-  // `antcode:spider:data:{run_id}` stream (same wire fields as direct mode).
+  // `{antcode}:spider:<run_id>:data` stream (same wire fields as direct mode).
   // Batch MAY also carry a `meta` heartbeat (items_count / last_item_at) so
   // batch_status_loop / test_service see real-time progress.
   rpc StreamSpiderData(stream SpiderDataBatch) returns (SpiderDataAck);
@@ -48,6 +48,7 @@ message SubscribeRequest {
   string worker_id = 1;
   repeated string capabilities = 2;         // Capability tags this worker can serve
   int32 prefetch = 3;                       // Hint: how many tasks Master may push ahead
+  string lease_id = 4;                      // Current Worker lease generation
   TraceContext trace = 100;
 }
 
@@ -72,6 +73,7 @@ message TaskDispatch {
   string entry_point = 14;                  // Entry script/file
   string run_id = 15;                       // Execution / run identifier
   string receipt_id = 16;                   // Echoed back in AckTask
+  string runtime_env_name = 17;             // Trusted project-bound Worker runtime
 
   TraceContext trace = 100;
 }
@@ -82,6 +84,10 @@ message AckTaskRequest {
   string task_id = 3;
   bool accepted = 4;
   string reason = 5;                        // Rejection reason if !accepted
+  // Generation fence: settlement is only honored while this is the worker's
+  // current lease. Prevents a stale (pre-failover) worker process from
+  // ACK/requeueing tasks that the new generation already owns.
+  string lease_id = 6;
   TraceContext trace = 100;
 }
 
@@ -139,6 +145,13 @@ enum LogType {
 message LogBatch {
   string worker_id = 1;
   repeated LogEntry entries = 2;            // 1..N entries per batch
+  string lease_id = 3;                      // Current Worker lease generation
+  // Stable idempotency key, deterministic for identical batch content.
+  // Master derives the task_logs event_id as "<batch_id>:<entry index>", so a
+  // retransmit after a lost ack (gateway re-XADD or direct re-XADD) maps to
+  // the same event_ids and is deduplicated by the unique index instead of
+  // being persisted twice with fresh sequences.
+  string batch_id = 4;
   TraceContext trace = 100;
 }
 
@@ -160,7 +173,7 @@ message LogAck {
 // A SpiderDataBatch carries 1..N items scraped from a single run, so a
 // gateway-mode Worker can push Scrapy pipeline output back without direct
 // Redis access. Field names on SpiderDataItem are byte-identical to what the
-// direct-mode `AntCodeRedisPipeline` XADDs into `spider:data:{run_id}`; the
+// trusted control plane XADDs into `{namespace}:spider:<run_id>:data`; the
 // gateway just re-encodes into Redis Streams entries.
 
 message SpiderDataBatch {
@@ -169,8 +182,9 @@ message SpiderDataBatch {
   string project_id = 3;
   repeated SpiderDataItem items = 4;
   // Optional heartbeat — reflects the same fields the direct-mode pipeline
-  // HSETs to `spider:meta:{run_id}` every N items (T6-P2-14).
+  // HSETs to `{namespace}:spider:<run_id>:meta` every N items (T6-P2-14).
   SpiderMetaUpdate meta = 5;
+  string lease_id = 6;                       // Current Worker lease generation
   TraceContext trace = 100;
 }
 
@@ -186,8 +200,16 @@ message SpiderDataItem {
 
 message SpiderMetaUpdate {
   string status = 1;                // running / completed / failed (可选)
-  uint64 items_count = 2;
+  optional uint64 items_count = 2;
   string last_item_at = 3;          // ISO 8601
+  string spider_name = 4;
+  string started_at = 5;            // ISO 8601
+  string finished_at = 6;           // ISO 8601
+  optional uint64 pages_count = 7;
+  optional uint64 errors_count = 8;
+  optional double duration_ms = 9;
+  string config = 10;               // JSON object
+  string errors = 11;               // JSON array
 }
 
 message SpiderDataAck {

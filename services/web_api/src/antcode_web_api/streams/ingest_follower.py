@@ -1,40 +1,52 @@
-"""Redis ingest 日志跟随器（原 redis_log_stream_service 的 SSE 版）。
+"""Database-authoritative realtime event follower for Web API SSE clients.
 
-- 实时：所有 run 共享一个全局 ``<namespace>:log:ingest`` Stream 订阅协程
-  （xread 从 ``$`` 只读新消息），解码 LogBatch 后按 ``entry.run_id`` 命中
-  broker 已订阅集合的条目投递（fan-out）。
-- 历史：主路径 PG ``task_logs``；PG 空时回落旧 per-run stream。与原实现
-  不同，历史读取只返回条目列表，由 log_stream_service 编排发送——这样
-  编排层能先注册队列再读快照，用 sequence 阈值过滤重叠，不重不漏。
+- Realtime: each Web API process follows ``{<namespace>}:log:sse-events`` and
+  fans persisted ``log_line`` and ``run_status`` events out to local clients.
+- History: ``IngestLogHistoryReader`` reads PostgreSQL, with legacy per-run
+  streams retained only as a historical compatibility source.
+
+The raw ``log:ingest`` stream is deliberately not read here. Master publishes
+realtime log events only after PostgreSQL persistence assigns authoritative
+sequences, preventing uncommitted lines and ingest-retention races from being
+exposed to clients.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections import defaultdict
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from typing import Any
 
-from antcode_core.infrastructure.redis import (
-    decode_stream_payload,
-    get_redis_client,
-    log_stream_key,
-    redis_namespace,
-)
+from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 from loguru import logger
 
+from antcode_web_api.streams.ingest_cursor import initial_stream_cursors
+from antcode_web_api.streams.ingest_dead_letter import isolate_bad_ingest_frame
+from antcode_web_api.streams.ingest_decoder import decode_value
+from antcode_web_api.streams.ingest_history import IngestLogHistoryReader
 from antcode_web_api.streams.run_stream_broker import run_stream_broker
-from antcode_web_api.streams.sse import build_log_line_message, normalize_sequence
+from antcode_web_api.streams.sse_event_stream import decode_sse_event, sse_event_stream_key
+
+EVENT_RETRY_DELAY_SECONDS = 1.0
+REALTIME_EVENT_TYPES = frozenset({"log_line", "run_status"})
 
 
-def _log_ingest_stream_key(namespace: str | None = None) -> str:
-    """全局日志摄取 Stream key（与 Gateway / Master 同名同效）。"""
-    return f"{redis_namespace(namespace)}:log:ingest"
+@dataclass(frozen=True)
+class _EventReadContext:
+    redis: Any
+    event_key: str
+    cursors: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _EventFrame:
+    stream_key: str
+    message_id: str
+    fields: dict[Any, Any]
 
 
 class IngestLogFollower:
-    """全局 ingest stream 跟随器（refcount 启停）。"""
+    """由应用生命周期常驻运行、按活跃 run 引用分发的 SSE event follower。"""
 
     def __init__(
         self,
@@ -49,169 +61,189 @@ class IngestLogFollower:
         self._lock = asyncio.Lock()
         self._ingest_task: asyncio.Task | None = None
         self._ingest_running = False
+        self._ready_event: asyncio.Event | None = None
+        self._startup_error: Exception | None = None
+        self._last_error: str | None = None
+        self._resume_cursors: dict[str, str] = {}
+        self._history_reader = IngestLogHistoryReader(self._namespace)
 
     async def follow(self, run_id: str) -> None:
         """开始跟随执行日志（多订阅者 ref-count）。"""
         async with self._lock:
             self._follow_counts[run_id] = self._follow_counts.get(run_id, 0) + 1
-        await self._ensure_ingest_task()
+        try:
+            await self._ensure_ingest_task()
+        except BaseException:
+            await self._release_follow_reference(run_id)
+            await self._stop_ingest_task()
+            raise
 
     async def unfollow(self, run_id: str) -> None:
+        await self._release_follow_reference(run_id)
+
+    async def _release_follow_reference(self, run_id: str) -> None:
+        """释放一次跟随引用；生命周期 follower 不随零订阅停止。"""
         async with self._lock:
             count = self._follow_counts.get(run_id, 0) - 1
             if count > 0:
                 self._follow_counts[run_id] = count
             else:
                 self._follow_counts.pop(run_id, None)
-            still_following = bool(self._follow_counts)
 
-        if not still_following:
+    async def start(self) -> None:
+        """应用 lifespan 启动常驻 reader，失败时阻断启动。"""
+        try:
+            await self._ensure_ingest_task()
+        except BaseException:
             await self._stop_ingest_task()
+            raise
 
     async def _ensure_ingest_task(self) -> None:
         async with self._lock:
             if self._ingest_running and self._ingest_task and not self._ingest_task.done():
-                return
-            self._ingest_running = True
-            self._ingest_task = asyncio.create_task(self._ingest_loop())
+                ready_event = self._ready_event
+            else:
+                self._ingest_running = True
+                self._startup_error = None
+                self._ready_event = asyncio.Event()
+                ready_event = self._ready_event
+                self._ingest_task = asyncio.create_task(self._ingest_loop())
+        if ready_event is None:
+            raise RuntimeError("ingest follower 初始化事件缺失")
+        await ready_event.wait()
+        if self._startup_error is not None:
+            raise RuntimeError("ingest follower 初始化失败") from self._startup_error
 
     async def _stop_ingest_task(self) -> None:
         async with self._lock:
-            # 决策与摘取同一临界区：unfollow 算出"无人跟随"到这里之间，
-            # 可能有新 follow 复用了存活任务——重查计数避免误杀新订阅者的任务
-            if self._follow_counts:
-                return
             self._ingest_running = False
             task = self._ingest_task
             self._ingest_task = None
         if task:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            results = await asyncio.gather(task, return_exceptions=True)
+            error = results[0]
+            if isinstance(error, Exception) and not isinstance(error, asyncio.CancelledError):
+                logger.error("停止 ingest follower 时任务异常: {}", error)
 
-    # ------------------------------------------------------------------ #
-    # 历史读取（返回条目列表，由编排层发送）
-    # ------------------------------------------------------------------ #
+    async def shutdown(self) -> None:
+        """应用关闭时停止 follower，不受订阅计数影响。"""
+        async with self._lock:
+            self._follow_counts.clear()
+        await self._stop_ingest_task()
 
-    async def fetch_history(self, run_id: str, limit: int = 10000) -> list[dict[str, Any]]:
-        """历史日志：主路径 PG，PG 空时回落旧 per-run stream。
+    def healthy(self) -> bool:
+        """生命周期 follower 必须已就绪、持续存活且没有读取错误。"""
+        if self._last_error is not None:
+            return False
+        task = self._ingest_task
+        ready = self._ready_event
+        return bool(task and not task.done() and ready and ready.is_set() and self._last_error is None)
 
-        返回归一化条目 ``{log_type, content, timestamp, sequence(int|None), source}``。
-        latest=True：超长日志截断时保留最新窗口（用户关心尾部；若截最旧，
-        前端重连清屏后会把正在看的最新日志替换成最旧 1 万行）。
-        PG 异常不吞（对齐 postgres_log_service 的"DB 故障必须冒泡"契约）——
-        由编排层转成 stream_error 帧，否则故障会伪装成"无历史日志"。
-        """
-        from antcode_core.application.services.logs.postgres_log_service import (
-            postgres_log_service,
-        )
-
-        entries: list[dict[str, Any]] = []
-        pg_entries = await postgres_log_service.list_entries(run_id, limit=limit, latest=True)
-        for entry in pg_entries:
-            ts = ""
-            if entry.timestamp:
-                try:
-                    ts = entry.timestamp.isoformat()
-                except Exception:
-                    ts = str(entry.timestamp)
-            entries.append(
-                {
-                    "log_type": entry.log_type or "stdout",
-                    "content": entry.content or "",
-                    "timestamp": ts,
-                    "sequence": normalize_sequence(entry.sequence),
-                    "source": "pg_history",
-                }
-            )
-
-        if entries:
-            return entries
-
-        try:
-            return await self._fetch_history_from_per_run_stream(run_id)
-        except Exception as e:
-            # 兼容回落路径保持宽容（多数部署 per-run stream 本就为空）
-            logger.warning("per-run stream 历史读取失败 run_id={}: {}", run_id, e)
-            return []
-
-    async def _fetch_history_from_per_run_stream(self, run_id: str) -> list[dict[str, Any]]:
-        """旧 per-run stream 兼容路径（ingest pipeline 还没把日志刷到 PG 时）。"""
-        redis = await get_redis_client()
-        if redis is None:
-            return []
-        stream_key = log_stream_key(run_id, namespace=self._namespace)
-        last_id = "0-0"
-        entries: list[dict[str, Any]] = []
-        while True:
-            result = await redis.xread({stream_key: last_id}, count=self._batch_size)
-            if not result:
-                break
-            _, messages = result[0]
-            if not messages:
-                break
-            for msg_id, fields in messages:
-                last_id = self._decode_value(msg_id)
-                for log_entry in self._decode_batch(fields, run_id_filter=run_id):
-                    log_entry["source"] = "legacy_history"
-                    entries.append(log_entry)
-        return entries
-
-    # ------------------------------------------------------------------ #
-    # 实时跟随
-    # ------------------------------------------------------------------ #
+    @property
+    def history_reader(self) -> IngestLogHistoryReader:
+        return self._history_reader
 
     async def _ingest_loop(self) -> None:
-        """全局 ingest stream 订阅协程（所有订阅者共享）。"""
+        """全局 SSE event stream 订阅协程（所有订阅者共享）。"""
         this_task = asyncio.current_task()
-        redis = await get_redis_client()
-        if redis is None:
-            logger.warning("Redis 不可用，跳过 ingest stream 订阅")
+        try:
+            context = await self._initialize_read_context()
+        except asyncio.CancelledError:
+            self._signal_ready()
+            self._set_not_running(this_task)
+            return
+        except Exception as exc:
+            self._startup_error = exc
+            self._last_error = str(exc)
+            logger.exception("ingest follower 初始化失败: {}", exc)
+            self._signal_ready()
             self._set_not_running(this_task)
             return
 
-        stream_key = _log_ingest_stream_key(self._namespace)
-        # 每次启动固定从 "$" 只读新消息（历史走 PG）。不能跨启停沿用旧位点：
-        # 长时间无订阅者后重启会从数小时前的 ID 回放全局 ingest 积压
-        last_id = "$"
+        self._last_error = None
+        self._signal_ready()
 
         while self._ingest_running:
             try:
-                result = await redis.xread(
-                    {stream_key: last_id},
-                    count=self._batch_size,
-                    block=self._block_ms,
-                )
-                if not result:
-                    continue
-                _, messages = result[0]
-                for msg_id, fields in messages:
-                    last_id = self._decode_value(msg_id)
-                    subscribed = run_stream_broker.subscribed_runs()
-                    if not subscribed:
-                        continue
-                    by_run = self._decode_batch_grouped(fields, subscribed)
-                    for run_id, entries in by_run.items():
-                        for log_entry in entries:
-                            run_stream_broker.publish(
-                                run_id,
-                                build_log_line_message(
-                                    run_id,
-                                    log_type=log_entry.get("log_type") or "stdout",
-                                    content=log_entry.get("content") or "",
-                                    timestamp=log_entry.get("timestamp") or None,
-                                    sequence=log_entry.get("sequence"),
-                                    source="realtime",
-                                ),
-                            )
-
+                await self._read_once(context)
+                self._last_error = None
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"ingest stream 读取失败: {e}")
-                await asyncio.sleep(1.0)
+                self._last_error = str(e)
+                logger.exception("SSE event stream 读取失败: {}", e)
+                await asyncio.sleep(EVENT_RETRY_DELAY_SECONDS)
 
         self._set_not_running(this_task)
+
+    async def _initialize_read_context(self) -> _EventReadContext:
+        redis = await get_redis_client()
+        if redis is None:
+            raise RuntimeError("Redis 客户端不可用")
+        event_key = sse_event_stream_key(self._namespace)
+        cursors = await initial_stream_cursors(
+            redis,
+            event_key=event_key,
+            resume_cursors=self._resume_cursors,
+        )
+        return _EventReadContext(redis=redis, event_key=event_key, cursors=cursors)
+
+    async def _read_once(self, context: _EventReadContext) -> None:
+        result = await context.redis.xread(
+            context.cursors,
+            count=self._batch_size,
+            block=self._block_ms,
+        )
+        for raw_stream_key, messages in result or []:
+            stream_key = decode_value(raw_stream_key)
+            for message_id, fields in messages:
+                frame = _EventFrame(stream_key, decode_value(message_id), fields)
+                await self._process_frame(context, frame)
+
+    async def _process_frame(self, context: _EventReadContext, frame: _EventFrame) -> None:
+        try:
+            if frame.stream_key != context.event_key:
+                raise ValueError(f"SSE follower 收到非事件流帧: {frame.stream_key}")
+            self._publish_message(frame.fields)
+        except Exception as exc:
+            await isolate_bad_ingest_frame(
+                context.redis,
+                namespace=self._namespace,
+                source_stream=frame.stream_key,
+                message_id=frame.message_id,
+                fields=frame.fields,
+                error=exc,
+            )
+            logger.error(
+                "SSE event 坏帧已隔离: stream={} msg_id={} err={}",
+                frame.stream_key,
+                frame.message_id,
+                exc,
+            )
+        if frame.stream_key == context.event_key:
+            context.cursors[context.event_key] = frame.message_id
+            self._resume_cursors[context.event_key] = frame.message_id
+
+    def _signal_ready(self) -> None:
+        if self._ready_event is not None:
+            self._ready_event.set()
+
+    def _publish_message(self, fields: dict[Any, Any]) -> None:
+        subscribed = run_stream_broker.subscribed_runs()
+        if not subscribed:
+            return
+        message = decode_sse_event(fields)
+        event_type = message.get("type")
+        run_id = message.get("run_id")
+        if event_type not in REALTIME_EVENT_TYPES:
+            raise ValueError(f"不支持的 SSE 实时事件类型: {event_type!r}")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("SSE 实时事件缺少有效 run_id")
+        if not isinstance(message.get("data"), dict):
+            raise ValueError("SSE 实时事件缺少 data 对象")
+        if run_id in subscribed:
+            run_stream_broker.publish(run_id, message)
 
     def _set_not_running(self, this_task: asyncio.Task | None) -> None:
         """退出路径只允许"当前在任"的任务清运行标志。
@@ -222,97 +254,6 @@ class IngestLogFollower:
         """
         if self._ingest_task is this_task or self._ingest_task is None:
             self._ingest_running = False
-
-    # ------------------------------------------------------------------ #
-    # 解码工具
-    # ------------------------------------------------------------------ #
-
-    def _decode_batch(self, fields: dict[Any, Any], run_id_filter: str | None = None) -> list[dict[str, Any]]:
-        """解码一个 stream 消息 -> entry 列表。支持 Proto LogBatch 和旧 JSON。"""
-        proto_raw = fields.get(b"p") or fields.get("p")
-        if proto_raw is not None:
-            try:
-                from antcode_contracts import data_pb2
-
-                if isinstance(proto_raw, str):
-                    proto_raw = proto_raw.encode("latin-1")
-                batch = data_pb2.LogBatch()
-                batch.ParseFromString(proto_raw)
-                out: list[dict[str, Any]] = []
-                for entry in batch.entries:
-                    if run_id_filter and entry.run_id != run_id_filter:
-                        continue
-                    out.append(self._proto_entry_to_dict(entry))
-                return out
-            except Exception as e:
-                logger.debug("解码 LogBatch Proto 失败: {}", e)
-
-        # 旧 JSON 路径
-        decoded = decode_stream_payload(fields)
-        msg_run_id = decoded.get("run_id") or ""
-        if run_id_filter and msg_run_id and msg_run_id != run_id_filter:
-            return []
-        return [self._json_entry_to_dict(decoded)]
-
-    def _decode_batch_grouped(self, fields: dict[Any, Any], subscribed: set[str]) -> dict[str, list[dict[str, Any]]]:
-        """ingest stream 专用：批量解码并按 ``run_id`` 分组，仅保留命中 ``subscribed`` 的。"""
-        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-
-        proto_raw = fields.get(b"p") or fields.get("p")
-        if proto_raw is not None:
-            try:
-                from antcode_contracts import data_pb2
-
-                if isinstance(proto_raw, str):
-                    proto_raw = proto_raw.encode("latin-1")
-                batch = data_pb2.LogBatch()
-                batch.ParseFromString(proto_raw)
-                for entry in batch.entries:
-                    if entry.run_id not in subscribed:
-                        continue
-                    grouped[entry.run_id].append(self._proto_entry_to_dict(entry))
-                return grouped
-            except Exception as e:
-                logger.debug("ingest stream 解码 LogBatch 失败: {}", e)
-
-        # 兼容旧 JSON
-        decoded = decode_stream_payload(fields)
-        run_id = decoded.get("run_id") or ""
-        if run_id in subscribed:
-            grouped[run_id].append(self._json_entry_to_dict(decoded))
-        return grouped
-
-    def _proto_entry_to_dict(self, entry: Any) -> dict[str, Any]:
-        from antcode_contracts import data_pb2
-
-        name = data_pb2.LogType.Name(entry.log_type)
-        log_type = name.removeprefix("LOG_TYPE_").lower() if name.startswith("LOG_TYPE_") else name.lower()
-        ts = ""
-        if entry.HasField("timestamp"):
-            seconds = entry.timestamp.seconds + entry.timestamp.nanos / 1e9
-            try:
-                ts = datetime.fromtimestamp(seconds, tz=UTC).isoformat()
-            except Exception:
-                ts = ""
-        return {
-            "log_type": log_type,
-            "content": entry.content or "",
-            "timestamp": ts,
-            "sequence": normalize_sequence(entry.sequence),
-        }
-
-    def _json_entry_to_dict(self, decoded: dict[Any, Any]) -> dict[str, Any]:
-        return {
-            "log_type": self._decode_value(decoded.get("log_type")) or "stdout",
-            "content": self._decode_value(decoded.get("content")),
-            "timestamp": self._decode_value(decoded.get("timestamp")),
-            "sequence": normalize_sequence(self._decode_value(decoded.get("sequence"))),
-        }
-
-    def _decode_value(self, value: Any) -> str:
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value) if value is not None else ""
 
 
 ingest_log_follower = IngestLogFollower()

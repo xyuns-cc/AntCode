@@ -33,6 +33,15 @@ class _Redis:
         self.lease_hash: dict[str, dict[str, str]] = {}
         self.pttl_ms = _LEASE_PTTL_MS
         self.eval_calls: list[tuple] = []
+        self.stream_exists = True
+        self.stream_last_id = "10-0"
+        self.renew_result: int | None = None
+
+    async def exists(self, _key):
+        return int(self.stream_exists)
+
+    async def xinfo_stream(self, _key):
+        return {"last-generated-id": self.stream_last_id}
 
     async def get(self, key):
         return self.values.get(key)
@@ -75,6 +84,8 @@ class _Redis:
         return 1
 
     def _eval_renew(self, owner_key, token):
+        if self.renew_result is not None:
+            return self.renew_result
         return 1 if self.values.get(owner_key) == token else 0
 
     def _eval_takeover(self, keys, argv):

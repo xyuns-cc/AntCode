@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,8 +22,12 @@ from loguru import logger
 def _fix_imports(file_path: Path) -> None:
     """修复生成文件中的绝对导入为相对导入。"""
     content = file_path.read_text(encoding="utf-8")
-    content = content.replace("import common_pb2 as", "from . import common_pb2 as")
-    content = content.replace("import gateway_pb2 as", "from . import gateway_pb2 as")
+    content = re.sub(
+        r"^import ([A-Za-z0-9_]+_pb2) as ",
+        r"from . import \1 as ",
+        content,
+        flags=re.MULTILINE,
+    )
     file_path.write_text(content, encoding="utf-8")
 
 
@@ -58,8 +63,10 @@ def main() -> None:
         logger.error("生成代码失败: {}", result.stderr)
         sys.exit(1)
 
-    for py_file in output_dir.glob("*_pb2*.py"):
-        _fix_imports(py_file)
+    # .py 与 .pyi 都要修复相对导入；此前只匹配 *.py，.pyi 里遗留的顶层
+    # `import common_pb2` 让严格 mypy 直接 import-not-found。
+    for generated in (*output_dir.glob("*_pb2*.py"), *output_dir.glob("*_pb2*.pyi")):
+        _fix_imports(generated)
 
     logger.info("生成完成: {}", [f.name for f in proto_files])
     logger.info("输出目录: {}", output_dir)

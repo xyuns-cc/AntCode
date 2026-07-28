@@ -19,6 +19,11 @@ def test_remote_helper_syntax_is_rejected() -> None:
         git_url_security.validate_git_url("ext::sh -c id")
 
 
+def test_file_git_target_is_rejected_without_dns() -> None:
+    with pytest.raises(ValueError, match="仅支持"):
+        git_url_security.validate_git_url("file:///tmp/e2e-repo")
+
+
 def test_cgnat_shared_address_is_rejected() -> None:
     # 100.64.0.0/10 是 CGNAT/共享地址(含阿里云 metadata 邻域),
     # is_private=False 但绝非公网可路由目标。
@@ -35,6 +40,23 @@ def test_public_git_host_resolves_only_to_public_addresses(monkeypatch) -> None:
 
     assert git_url_security.validate_git_url("https://example.com/repo.git") == "https://example.com/repo.git"
 
+    endpoint = git_url_security.resolve_git_url("https://example.com/repo.git")
+    assert endpoint.curl_resolve_value() == "example.com:443:93.184.216.34"
+
+
+def test_webhook_connection_uses_resolved_address_without_changing_tls_identity(monkeypatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+
+    endpoint = git_url_security.resolve_webhook_url("https://example.com:8443/hooks?id=1")
+
+    assert endpoint.pinned_http_url() == "https://93.184.216.34:8443/hooks?id=1"
+    assert endpoint.host_header() == "example.com:8443"
+    assert endpoint.host == "example.com"
+
 
 def test_dns_rebinding_to_private_address_is_rejected(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -45,3 +67,26 @@ def test_dns_rebinding_to_private_address_is_rejected(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="解析到私网"):
         git_url_security.validate_git_url("https://example.com/repo.git")
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["169.254.169.254", "100.100.100.200", "fd00:ec2::254", "metadata.google.internal"],
+)
+def test_metadata_targets_stay_blocked_when_private_nodes_are_allowed(monkeypatch, host: str) -> None:
+    monkeypatch.setattr(git_url_security.settings, "ALLOW_PRIVATE_NODES", True)
+
+    with pytest.raises(ValueError, match="元数据"):
+        git_url_security.resolve_host_addresses(host)
+
+
+def test_dns_answer_to_metadata_is_always_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(git_url_security.settings, "ALLOW_PRIVATE_NODES", True)
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0))],
+    )
+
+    with pytest.raises(ValueError, match="元数据"):
+        git_url_security.resolve_host_addresses("example.com")

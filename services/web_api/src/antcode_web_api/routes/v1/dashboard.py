@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from antcode_core.application.services.monitoring import system_metrics_service
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
@@ -17,6 +17,7 @@ from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.infrastructure.cache import unified_cache
 from fastapi import APIRouter, Depends, HTTPException, status
 from loguru import logger
+from tortoise.expressions import Subquery
 
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import Messages, success
@@ -111,9 +112,9 @@ async def get_dashboard_summary(current_user=Depends(get_current_user)):
 
         await unified_cache.set(cache_key, data, ttl=_SUMMARY_CACHE_TTL)
         return success(data, message=Messages.QUERY_SUCCESS)
-    except Exception as e:
-        logger.error(f"获取仪表盘摘要失败: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取摘要失败")
+    except Exception as exc:
+        logger.exception("获取仪表盘摘要失败")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取摘要失败") from exc
 
 
 @router.get(
@@ -133,9 +134,9 @@ async def get_system_metrics(current_user=Depends(get_current_user)):
         data = metrics.model_dump()
         await unified_cache.set(_METRICS_CACHE_KEY, data, ttl=_METRICS_CACHE_TTL)
         return success(data, message=Messages.QUERY_SUCCESS)
-    except Exception as e:
-        logger.error(f"获取系统指标失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取指标失败: {str(e)}")
+    except Exception as exc:
+        logger.exception("获取系统指标失败")
+        raise HTTPException(status_code=500, detail="获取指标失败") from exc
 
 
 @router.get("/metrics/cache-info", response_model=BaseResponse[dict], summary="指标缓存信息")
@@ -146,9 +147,9 @@ async def get_metrics_cache_info(current_user=Depends(get_current_user)):
     try:
         cache_info = await system_metrics_service.get_cache_info()
         return success(cache_info, message=Messages.QUERY_SUCCESS)
-    except Exception as e:
-        logger.error(f"获取缓存信息失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取缓存信息失败: {str(e)}")
+    except Exception as exc:
+        logger.exception("获取缓存信息失败")
+        raise HTTPException(status_code=500, detail="获取缓存信息失败") from exc
 
 
 # P2-19: /metrics/refresh 会强制重跑 CPU 采样 + PG/Redis 聚合,属于重路径。
@@ -164,9 +165,9 @@ async def refresh_system_metrics(current_user=Depends(get_current_user)):
     try:
         metrics = await system_metrics_service.get_metrics(force_refresh=True)
         return success(metrics.model_dump(), message="指标已刷新")
-    except Exception as e:
-        logger.error(f"刷新指标失败: {e}")
-        raise HTTPException(status_code=500, detail=f"刷新指标失败: {str(e)}")
+    except Exception as exc:
+        logger.exception("刷新指标失败")
+        raise HTTPException(status_code=500, detail="刷新指标失败") from exc
 
 
 @router.delete("/metrics/cache", response_model=BaseResponse[None], summary="清除指标缓存")
@@ -177,9 +178,9 @@ async def clear_metrics_cache(current_user=Depends(get_current_user)):
     try:
         await system_metrics_service.clear_cache()
         return success(None, message="缓存已清除")
-    except Exception as e:
-        logger.error(f"清除缓存失败: {e}")
-        raise HTTPException(status_code=500, detail=f"清除缓存失败: {str(e)}")
+    except Exception as exc:
+        logger.exception("清除缓存失败")
+        raise HTTPException(status_code=500, detail="清除缓存失败") from exc
 
 
 @router.get("/tasks/hourly-trend", response_model=BaseResponse[list], summary="24小时任务趋势")
@@ -195,39 +196,42 @@ async def get_tasks_hourly_trend(current_user=Depends(get_current_user)):
         cached = await unified_cache.get(cache_key)
         if cached is not None:
             return success(cached, message=Messages.QUERY_SUCCESS)
-        now = datetime.now()
-        # 获取24小时前的时间点
-        start_time = now - timedelta(hours=24)
-
-        # 查询过去24小时所有已完成的任务执行记录
-        run_scope = {} if current_user.is_admin else {"created_by": current_user.user_id}
-        executions = await TaskRun.filter(
-            start_time__gte=start_time,
-            status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED],
-            **run_scope,
-        ).all()
-
-        # 按小时分组统计
-        hourly_data = {}
-        for i in range(24):
-            hour_start = now - timedelta(hours=24 - i)
-            hour_key = hour_start.hour
-            hourly_data[hour_key] = {"hour": hour_key, "tasks": 0, "success": 0, "failed": 0}
-
-        for execution in executions:
-            hour_key = execution.start_time.hour
-            if hour_key in hourly_data:
-                hourly_data[hour_key]["tasks"] += 1
-                if execution.status == TaskStatus.SUCCESS:
-                    hourly_data[hour_key]["success"] += 1
-                elif execution.status == TaskStatus.FAILED:
-                    hourly_data[hour_key]["failed"] += 1
-
-        # 按小时顺序排列（从0点到23点）
-        result = [hourly_data[i] for i in range(24)]
+        current_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        start_time = current_hour - timedelta(hours=23)
+        executions = await _hourly_trend_query(current_user, start_time).all()
+        result = _hourly_trend_buckets(executions, current_hour)
 
         await unified_cache.set(cache_key, result, ttl=_HOURLY_TREND_CACHE_TTL)
         return success(result, message=Messages.QUERY_SUCCESS)
-    except Exception as e:
-        logger.error(f"获取任务趋势失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取任务趋势失败: {str(e)}")
+    except Exception as exc:
+        logger.exception("获取任务趋势失败")
+        raise HTTPException(status_code=500, detail="获取任务趋势失败") from exc
+
+
+def _hourly_trend_query(current_user, start_time: datetime):
+    query = TaskRun.filter(
+        start_time__gte=start_time,
+        status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED],
+    )
+    if current_user.is_admin:
+        return query
+    task_ids = Task.filter(user_id=current_user.user_id).values("id")
+    return query.filter(task_id__in=Subquery(task_ids))
+
+
+def _hourly_trend_buckets(executions, current_hour: datetime) -> list[dict[str, int]]:
+    hours = [current_hour - timedelta(hours=offset) for offset in reversed(range(24))]
+    buckets = {hour: {"hour": hour.hour, "tasks": 0, "success": 0, "failed": 0} for hour in hours}
+    for execution in executions:
+        if execution.start_time is None:
+            continue
+        hour = execution.start_time.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        bucket = buckets.get(hour)
+        if bucket is None:
+            continue
+        bucket["tasks"] += 1
+        if execution.status == TaskStatus.SUCCESS:
+            bucket["success"] += 1
+        elif execution.status == TaskStatus.FAILED:
+            bucket["failed"] += 1
+    return list(buckets.values())

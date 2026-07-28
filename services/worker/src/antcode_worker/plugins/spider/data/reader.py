@@ -9,8 +9,6 @@ from __future__ import annotations
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, cast
 
-from loguru import logger
-
 from antcode_worker.plugins.spider.data.models import (
     SpiderConfig,
     SpiderDataItem,
@@ -55,33 +53,16 @@ class SpiderDataReader:
         Returns:
             (items, last_id) 元组
         """
-        try:
-            stream_key = self._keys.spider_data_stream(run_id)
-            results = await self._redis.xrange(
-                stream_key,
-                min=f"({start_id}" if start_id != "0" else "-",
-                max="+",
-                count=count,
-            )
-
-            items = []
-            last_id = start_id
-
-            for msg_id, data in results:
-                # 解码 bytes
-                decoded = {}
-                for k, v in data.items():
-                    key = k.decode() if isinstance(k, bytes) else k
-                    val = v.decode() if isinstance(v, bytes) else v
-                    decoded[key] = val
-
-                items.append(SpiderDataItem.from_redis_dict(decoded))
-                last_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
-
-            return items, last_id
-        except Exception as e:
-            logger.error(f"读取 Spider 数据失败: {e}")
-            return [], start_id
+        stream_key = self._keys.spider_data_stream(run_id)
+        results = await self._redis.xrange(
+            stream_key,
+            min=f"({start_id}" if start_id != "0" else "-",
+            max="+",
+            count=count,
+        )
+        items = [SpiderDataItem.from_redis_dict(_decode_mapping(data)) for _, data in results]
+        last_id = _decode_value(results[-1][0]) if results else start_id
+        return items, last_id
 
     async def read_all_items(
         self,
@@ -119,24 +100,11 @@ class SpiderDataReader:
         Returns:
             SpiderMeta 或 None
         """
-        try:
-            meta_key = self._keys.spider_meta_key(run_id)
-            data = await cast(Awaitable[dict[Any, Any]], self._redis.hgetall(meta_key))
-
-            if not data:
-                return None
-
-            # 解码 bytes
-            decoded = {}
-            for k, v in data.items():
-                key = k.decode() if isinstance(k, bytes) else k
-                val = v.decode() if isinstance(v, bytes) else v
-                decoded[key] = val
-
-            return SpiderMeta.from_redis_dict(decoded)
-        except Exception as e:
-            logger.error(f"获取 Spider 元数据失败: {e}")
+        meta_key = self._keys.spider_meta_key(run_id)
+        data = await cast(Awaitable[dict[Any, Any]], self._redis.hgetall(meta_key))
+        if not data:
             return None
+        return SpiderMeta.from_redis_dict(_decode_mapping(data))
 
     async def list_runs(
         self,
@@ -159,24 +127,17 @@ class SpiderDataReader:
         Returns:
             run_id 列表（按时间倒序）
         """
-        try:
-            index_key = self._keys.spider_index_key(project_id)
-
-            min_score = start_time if start_time is not None else "-inf"
-            max_score = end_time if end_time is not None else "+inf"
-
-            results = await self._redis.zrevrangebyscore(
-                index_key,
-                max=max_score,
-                min=min_score,
-                start=offset,
-                num=limit,
-            )
-
-            return [r.decode() if isinstance(r, bytes) else r for r in results]
-        except Exception as e:
-            logger.error(f"列出 Spider 运行记录失败: {e}")
-            return []
+        index_key = self._keys.spider_index_key(project_id)
+        min_score = start_time if start_time is not None else "-inf"
+        max_score = end_time if end_time is not None else "+inf"
+        results = await self._redis.zrevrangebyscore(
+            index_key,
+            max=max_score,
+            min=min_score,
+            start=offset,
+            num=limit,
+        )
+        return [_decode_value(result) for result in results]
 
     async def get_config(self, project_id: str) -> SpiderConfig | None:
         """
@@ -188,72 +149,11 @@ class SpiderDataReader:
         Returns:
             SpiderConfig 或 None
         """
-        try:
-            config_key = self._keys.spider_config_key(project_id)
-            data = await cast(Awaitable[dict[Any, Any]], self._redis.hgetall(config_key))
-
-            if not data:
-                return None
-
-            # 解码 bytes
-            decoded = {}
-            for k, v in data.items():
-                key = k.decode() if isinstance(k, bytes) else k
-                val = v.decode() if isinstance(v, bytes) else v
-                decoded[key] = val
-
-            return SpiderConfig.from_redis_dict(decoded)
-        except Exception as e:
-            logger.error(f"获取 Spider 配置失败: {e}")
+        config_key = self._keys.spider_config_key(project_id)
+        data = await cast(Awaitable[dict[Any, Any]], self._redis.hgetall(config_key))
+        if not data:
             return None
-
-    async def set_config(self, config: SpiderConfig) -> bool:
-        """
-        设置项目配置
-
-        Args:
-            config: SpiderConfig 实例
-
-        Returns:
-            是否成功
-        """
-        try:
-            config_key = self._keys.spider_config_key(config.project_id)
-            await cast(
-                Awaitable[Any],
-                self._redis.hset(config_key, mapping=config.to_redis_dict()),
-            )
-            return True
-        except Exception as e:
-            logger.error(f"设置 Spider 配置失败: {e}")
-            return False
-
-    async def delete_run(self, run_id: str, project_id: str) -> bool:
-        """
-        删除运行记录
-
-        Args:
-            run_id: 运行 ID
-            project_id: 项目 ID
-
-        Returns:
-            是否成功
-        """
-        try:
-            pipe = self._redis.pipeline()
-
-            # 删除数据流
-            pipe.delete(self._keys.spider_data_stream(run_id))
-            # 删除元数据
-            pipe.delete(self._keys.spider_meta_key(run_id))
-            # 从索引移除
-            pipe.zrem(self._keys.spider_index_key(project_id), run_id)
-
-            await pipe.execute()
-            return True
-        except Exception as e:
-            logger.error(f"删除 Spider 运行记录失败: {e}")
-            return False
+        return SpiderConfig.from_redis_dict(_decode_mapping(data))
 
     async def get_items_count(self, run_id: str) -> int:
         """
@@ -265,9 +165,13 @@ class SpiderDataReader:
         Returns:
             条目数量
         """
-        try:
-            stream_key = self._keys.spider_data_stream(run_id)
-            return await self._redis.xlen(stream_key)
-        except Exception as e:
-            logger.error(f"获取 Spider 数据数量失败: {e}")
-            return 0
+        stream_key = self._keys.spider_data_stream(run_id)
+        return await self._redis.xlen(stream_key)
+
+
+def _decode_value(value: Any) -> Any:
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def _decode_mapping(data: dict[Any, Any]) -> dict[Any, Any]:
+    return {_decode_value(key): _decode_value(value) for key, value in data.items()}

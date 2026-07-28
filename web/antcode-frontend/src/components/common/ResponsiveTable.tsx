@@ -268,7 +268,9 @@ function ResponsiveTable<T extends object = Record<string, unknown>>({
       emptyText: (
         <Empty
           image={<InboxOutlined style={{ fontSize: 48, color: 'var(--ant-color-text-quaternary)' }} />}
-          imageStyle={{ height: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          styles={{
+            image: { height: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+          }}
           description={<span style={{ color: 'var(--ant-color-text-tertiary)' }}>{emptyDescription}</span>}
         >
           {emptyAction}

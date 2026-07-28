@@ -20,8 +20,11 @@ class _FakeConn:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_runs_chunks_then_artifacts_with_reference_filter():
-    fake_conn = _FakeConn(results=[(7, []), (3, [])])
+async def test_cleanup_deletes_chunks_and_metadata_in_single_atomic_statement():
+    # P1-DB-01: chunks 与 metadata 必须在同一条语句（同一快照的 CTE 候选集）
+    # 里成对删除；两条独立 DELETE 之间提交的新 snapshot 会造成
+    # "有 metadata 无 chunks" 的损坏 artifact。
+    fake_conn = _FakeConn(results=[(1, [{"chunks": 7, "artifacts": 3}])])
 
     @patch("antcode_core.application.services.projects.artifact_cleanup_service.in_transaction")
     async def _run(mock_in_tx):
@@ -38,17 +41,16 @@ async def test_cleanup_runs_chunks_then_artifacts_with_reference_filter():
         assert result.artifacts_deleted == 3
         mock_in_tx.assert_called_once_with("default")
 
-        assert len(fake_conn.calls) == 2
-        chunk_sql, chunk_params = fake_conn.calls[0]
-        artifact_sql, artifact_params = fake_conn.calls[1]
-        assert "DELETE FROM source_artifact_chunks" in chunk_sql
-        assert "DELETE FROM source_artifacts" in artifact_sql
-        assert artifact_params == chunk_params
-        for sql in (chunk_sql, artifact_sql):
-            assert "run_source_snapshots" in sql, "must skip artifacts still referenced"
-            assert "NOT IN" in sql
+        assert len(fake_conn.calls) == 1
+        sql, params = fake_conn.calls[0]
+        assert "WITH doomed AS" in sql
+        assert "DELETE FROM source_artifact_chunks" in sql
+        assert "DELETE FROM source_artifacts" in sql
+        assert "run_source_snapshots" in sql, "must skip artifacts still referenced"
+        assert "NOT IN" in sql
+        assert "FOR UPDATE" in sql
 
-        cutoff = chunk_params[0]
+        cutoff = params[0]
         expected = datetime.now(UTC) - timedelta(days=30)
         assert abs((cutoff - expected).total_seconds()) < 5
 
@@ -57,7 +59,7 @@ async def test_cleanup_runs_chunks_then_artifacts_with_reference_filter():
 
 @pytest.mark.asyncio
 async def test_cleanup_uses_configured_retention_days():
-    fake_conn = _FakeConn(results=[(0, []), (0, [])])
+    fake_conn = _FakeConn(results=[(1, [{"chunks": 0, "artifacts": 0}])])
 
     @patch("antcode_core.application.services.projects.artifact_cleanup_service.in_transaction")
     async def _run(mock_in_tx):

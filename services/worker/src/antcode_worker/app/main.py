@@ -154,6 +154,9 @@ class Application:
             raise
 
     async def _init_database(self) -> None:
+        if self._is_backendless_gateway():
+            logger.info("Backendless Gateway Worker 跳过 PostgreSQL 初始化")
+            return
         from antcode_core.infrastructure.db.tortoise import init_db
 
         await init_db(service="worker")
@@ -169,6 +172,12 @@ class Application:
         await close_db()
         self._database_initialized = False
         logger.info("Worker PostgreSQL 连接已关闭")
+
+    def _is_backendless_gateway(self) -> bool:
+        from antcode_core.common.config import settings
+
+        mode = str(getattr(self.config, "transport_mode", "gateway") or "gateway").lower()
+        return mode == "gateway" and settings.WORKER_GATEWAY_BACKENDLESS
 
     async def run(self) -> None:
         """运行应用"""

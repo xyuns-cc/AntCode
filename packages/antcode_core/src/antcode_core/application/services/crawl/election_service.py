@@ -10,6 +10,11 @@ import contextlib
 
 from loguru import logger
 
+from antcode_core.application.services.crawl.takeover_recovery_service import (
+    CrawlTakeoverRecoveryService,
+    TakeoverRecovery,
+    TakeoverRecoveryReport,
+)
 from antcode_core.infrastructure.redis.client import get_redis_client
 
 # Redis 键名
@@ -37,9 +42,11 @@ class MasterElectionService:
         worker_id: str,
         lock_ttl: int = DEFAULT_LOCK_TTL,
         heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+        *,
         watch_interval: int = DEFAULT_WATCH_INTERVAL,
         redis_client: object | None = None,
         enable_background_tasks: bool = True,
+        takeover_recovery: TakeoverRecovery | None = None,
     ):
         """初始化选举服务
 
@@ -55,6 +62,7 @@ class MasterElectionService:
         self._watch_interval = watch_interval
         self._redis_client = redis_client
         self._enable_background_tasks = enable_background_tasks
+        self._takeover_recovery = takeover_recovery
 
         self._is_leader = False
         self._heartbeat_task: asyncio.Task | None = None
@@ -311,8 +319,7 @@ class MasterElectionService:
                     # 停止 Standby 监听
                     await self._stop_watch()
 
-                    # 执行接管后的恢复任务
-                    await self._on_leader_takeover()
+                    await self._activate_leader()
 
                     return True
                 else:
@@ -356,6 +363,9 @@ class MasterElectionService:
     async def _stop_watch(self):
         """停止 Standby 监听任务"""
         if self._watch_task and not self._watch_task.done():
+            if self._watch_task is asyncio.current_task():
+                self._watch_task = None
+                return
             self._watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._watch_task
@@ -386,22 +396,39 @@ class MasterElectionService:
                 logger.error(f"监听循环异常: {e}")
                 await asyncio.sleep(1)  # 短暂延迟后重试
 
-    async def _on_leader_takeover(self):
+    async def _activate_leader(self) -> TakeoverRecoveryReport:
+        """执行接管恢复；恢复失败不得阻塞 Leader 激活。
+
+        C1: 旧实现在恢复失败时 resign+抛异常，standby 会陷入
+        acquire→恢复失败→resign 的死循环，单个顽固失败的批次就能造成
+        全集群无 Leader。现在恢复异常只记录日志，失败项留待后续重试
+        （PEL reclaim / 下次接管仍会扫描到），Leader 正常激活。
+        """
+        try:
+            return await self._on_leader_takeover()
+        except Exception as exc:  # noqa: BLE001 - 恢复异常不能造成全集群无主
+            logger.error(
+                f"Leader 接管恢复异常（不影响 Leader 激活，失败项留待后续重试）: "
+                f"worker_id={self._worker_id}, 错误: {exc}"
+            )
+            return TakeoverRecoveryReport(failures=(f"未预期恢复异常: {exc}",))
+
+    async def _on_leader_takeover(self) -> TakeoverRecoveryReport:
         """Leader 接管后的恢复任务
 
         需求: 5.5 - 新 Leader 接管时扫描 PEL 中超时任务并恢复调度
         """
         logger.info(f"执行 Leader 接管恢复任务: worker_id={self._worker_id}")
-
-        # TODO: 实现以下恢复任务
-        # 1. 扫描所有项目的 PEL（Pending Entries List）
-        # 2. 识别超时任务
-        # 3. 使用 XCLAIM 转移超时任务
-        # 4. 恢复批次调度
-
-        # 这部分逻辑需要与 CrawlQueueService 集成
-        # 暂时记录日志，后续实现
-        logger.info("Leader 接管恢复任务完成")
+        recovery = self._takeover_recovery or CrawlTakeoverRecoveryService()
+        self._takeover_recovery = recovery
+        report = await recovery.recover()
+        logger.info(
+            "Leader 接管恢复任务完成: "
+            f"projects={report.projects_scanned}, requeued={report.tasks_requeued}, "
+            f"dead_lettered={report.tasks_dead_lettered}, batches={report.batches_recovered}, "
+            f"failures={len(report.failures)}"
+        )
+        return report
 
     # =========================================================================
     # 状态管理
@@ -475,7 +502,9 @@ class MasterElectionService:
         # 尝试成为 Leader
         success = await self.try_become_leader()
 
-        if not success:
+        if success:
+            await self._activate_leader()
+        else:
             # 以 Standby 模式启动
             await self.start_as_standby()
 
@@ -504,9 +533,11 @@ def create_election_service(
     worker_id: str,
     lock_ttl: int = DEFAULT_LOCK_TTL,
     heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+    *,
     watch_interval: int = DEFAULT_WATCH_INTERVAL,
     redis_client: object | None = None,
     enable_background_tasks: bool = True,
+    takeover_recovery: TakeoverRecovery | None = None,
 ) -> MasterElectionService:
     """创建选举服务实例
 
@@ -526,4 +557,5 @@ def create_election_service(
         watch_interval=watch_interval,
         redis_client=redis_client,
         enable_background_tasks=enable_background_tasks,
+        takeover_recovery=takeover_recovery,
     )

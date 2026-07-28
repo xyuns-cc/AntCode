@@ -58,6 +58,7 @@ dev = [
     "mypy>=1.13.0",
     "pip-audit>=2.7.3",
     "pygments>=2.20.0",
+    "setuptools>=83.0.0",  # 修复 PYSEC-2026-3447（grpcio-tools 传递依赖）
 ]
 
 

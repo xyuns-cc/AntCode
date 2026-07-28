@@ -6,60 +6,30 @@ These run against the same Redis container used by the rest of
 - first-time grant produces a fresh ``lease_id`` and marks the worker active
 - renewal with the matching ``current_lease_id`` keeps the ``lease_id`` stable
   but pushes ``expires_at_ms`` forward
-- mismatched ``current_lease_id`` (worker restart) issues a new ``lease_id``
+- an empty or mismatched ``current_lease_id`` cannot replace an active lease
+- an expired lease can be replaced with a fresh generation
 - ``revoke`` removes the active marker
 - ``sweep_expired`` removes leases past their TTL and reports the evicted ids
 
-If Redis on ``localhost:16379`` is unreachable the entire module is skipped —
-the existing transport conftest helper applies the same skip rule, so dev
-machines without docker stay green.
+Redis is a required contract dependency. An unreachable server fails the suite
+instead of silently reducing coverage.
 """
 
 from __future__ import annotations
 
 import asyncio
-
-# NOTE: 直接走 importlib 而不是 ``from antcode_core.application.services
-# .lease_service import ...``：现网 `antcode_core.application.services.__init__`
-# 会主动 import 调度器模块（含一处与 P3 无关的 IndentationError），如果走
-# package 导入会被它带崩。这里只关心 lease_service 单模块，绕开它。
-import importlib.util as _ilu  # noqa: E402
-import pathlib as _pl  # noqa: E402
 import secrets
 
 import pytest
 import pytest_asyncio
+from antcode_core.application.services.lease_service import (
+    Lease,
+    LeaseConflictError,
+    LeasePolicy,
+    LeaseStore,
+)
 
 from tests.contracts.conftest import REDIS_TEST_HOST, REDIS_TEST_PORT, REDIS_TEST_URL, _tcp_reachable
-
-_lease_module_path = (
-    _pl.Path(__file__).resolve().parents[2]
-    / "packages"
-    / "antcode_core"
-    / "src"
-    / "antcode_core"
-    / "application"
-    / "services"
-    / "lease_service.py"
-)
-if not _lease_module_path.is_file():  # pragma: no cover - defensive
-    pytest.skip(f"lease_service.py not found at {_lease_module_path}", allow_module_level=True)
-
-import sys as _sys  # noqa: E402
-
-_module_name = "antcode_lease_service_under_test"
-_spec = _ilu.spec_from_file_location(_module_name, _lease_module_path)
-if _spec is None or _spec.loader is None:  # pragma: no cover - defensive
-    pytest.skip("无法加载 lease_service 模块", allow_module_level=True)
-_module = _ilu.module_from_spec(_spec)
-# 必须先注册到 sys.modules，dataclass 装饰器需要通过 cls.__module__ 反查。
-_sys.modules[_module_name] = _module
-_spec.loader.exec_module(_module)
-
-Lease = _module.Lease  # type: ignore[attr-defined]
-LeasePolicy = _module.LeasePolicy  # type: ignore[attr-defined]
-LeaseStore = _module.LeaseStore  # type: ignore[attr-defined]
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,21 +37,18 @@ pytestmark = pytest.mark.asyncio
 @pytest_asyncio.fixture
 async def redis_client():
     if not _tcp_reachable(REDIS_TEST_HOST, REDIS_TEST_PORT):
-        pytest.skip(
+        pytest.fail(
             f"Redis on {REDIS_TEST_HOST}:{REDIS_TEST_PORT} unreachable; "
             "start it with `docker compose -f tests/contracts/docker-compose.test.yml up -d`"
         )
-    try:
-        import redis.asyncio as aioredis
-    except ImportError:  # pragma: no cover
-        pytest.skip("redis package not installed")
+    import redis.asyncio as aioredis
 
     client = aioredis.from_url(REDIS_TEST_URL, decode_responses=True)
     try:
         await client.ping()
-    except Exception:
+    except Exception as exc:
         await client.aclose()
-        pytest.skip("redis not reachable for lease store tests")
+        pytest.fail(f"Redis not reachable for lease store tests: {exc}")
     try:
         yield client
     finally:
@@ -96,15 +63,16 @@ async def lease_store(redis_client):
     try:
         yield store
     finally:
-        # Scrub everything under this test's namespace.
-        cursor = 0
-        pattern = f"{namespace}:*"
-        while True:
-            cursor, keys = await redis_client.scan(cursor=cursor, match=pattern, count=500)
-            if keys:
-                await redis_client.delete(*keys)
-            if cursor == 0:
-                break
+        # Lease 主记录和索引使用 ``{namespace}`` hash tag；兼容清理旧的
+        # 非 hash-tag 测试键，避免失败用例污染后续测试。
+        for pattern in (f"{{{namespace}}}:*", f"{namespace}:*"):
+            cursor = 0
+            while True:
+                cursor, keys = await redis_client.scan(cursor=cursor, match=pattern, count=500)
+                if keys:
+                    await redis_client.delete(*keys)
+                if cursor == 0:
+                    break
 
 
 async def test_grant_first_time_marks_active(lease_store: LeaseStore, redis_client):
@@ -119,7 +87,8 @@ async def test_grant_first_time_marks_active(lease_store: LeaseStore, redis_clie
     assert await lease_store.is_active(worker_id) is True
 
     # ZSet should also carry this worker at score == expires_at_ms.
-    score = await redis_client.zscore(f"{lease_store.namespace}:lease:expiring", worker_id)
+    expiring_key = f"{{{lease_store.namespace}}}:lease:expiring"
+    score = await redis_client.zscore(expiring_key, worker_id)
     assert score is not None
     assert int(score) == lease.expires_at_ms
 
@@ -139,14 +108,59 @@ async def test_grant_renew_with_matching_lease_id_keeps_id_and_pushes_expiry(
     assert renewed.granted_at_ms >= first.granted_at_ms
 
 
-async def test_grant_mismatched_lease_id_is_treated_as_new(lease_store: LeaseStore):
+@pytest.mark.parametrize("current_lease_id", ["", "stale-lease-id"])
+async def test_grant_rejects_claimant_that_does_not_own_active_lease(
+    lease_store: LeaseStore,
+    redis_client,
+    current_lease_id: str,
+):
     worker_id = f"worker-{secrets.token_hex(3)}"
 
     first = await lease_store.grant(worker_id, current_lease_id="")
-    reissued = await lease_store.grant(worker_id, current_lease_id="stale-lease-id")
+    lease_key = f"{{{lease_store.namespace}}}:lease:data:{worker_id}"
+    expiring_key = f"{{{lease_store.namespace}}}:lease:expiring"
+    with pytest.raises(LeaseConflictError) as caught:
+        await lease_store.grant(
+            worker_id,
+            current_lease_id=current_lease_id,
+            metrics={"claimant": "must-not-persist"},
+        )
 
-    assert reissued.lease_id != first.lease_id, "current_lease_id 不匹配应重新发租"
+    assert caught.value.worker_id == worker_id
+    assert caught.value.current_lease_id == current_lease_id
+    assert await lease_store.get(worker_id) == first
+    assert await redis_client.hget(lease_key, "metrics_json") is None
+    assert int(await redis_client.zscore(expiring_key, worker_id)) == first.expires_at_ms
     assert await lease_store.is_active(worker_id) is True
+
+
+async def test_concurrent_first_grants_have_exactly_one_winner(lease_store: LeaseStore):
+    worker_id = f"worker-{secrets.token_hex(3)}"
+
+    results = await asyncio.gather(
+        lease_store.grant(worker_id, current_lease_id=""),
+        lease_store.grant(worker_id, current_lease_id=""),
+        return_exceptions=True,
+    )
+
+    leases = [result for result in results if isinstance(result, Lease)]
+    conflicts = [result for result in results if isinstance(result, LeaseConflictError)]
+    assert len(leases) == 1
+    assert len(conflicts) == 1
+    assert await lease_store.get(worker_id) == leases[0]
+
+
+async def test_grant_replaces_expired_lease(lease_store: LeaseStore, redis_client):
+    worker_id = f"worker-{secrets.token_hex(3)}"
+    first = await lease_store.grant(worker_id, current_lease_id="")
+    lease_key = f"{{{lease_store.namespace}}}:lease:data:{worker_id}"
+    await redis_client.hset(lease_key, "expires_at_ms", first.granted_at_ms - 1)
+    await asyncio.sleep(0.002)
+
+    replacement = await lease_store.grant(worker_id, current_lease_id="")
+
+    assert replacement.lease_id != first.lease_id
+    assert replacement.expires_at_ms > first.expires_at_ms
 
 
 async def test_revoke_clears_active_set(lease_store: LeaseStore):
@@ -163,6 +177,41 @@ async def test_revoke_clears_active_set(lease_store: LeaseStore):
     # Revoking again is a no-op (returns False) but doesn't error.
     revoked_again = await lease_store.revoke(worker_id, reason="deregister")
     assert revoked_again is False
+
+
+async def test_revoke_with_stale_generation_cannot_delete_replacement(
+    lease_store: LeaseStore,
+    redis_client,
+):
+    worker_id = f"worker-{secrets.token_hex(3)}"
+    first = await lease_store.grant(worker_id, current_lease_id="")
+    lease_key = f"{{{lease_store.namespace}}}:lease:data:{worker_id}"
+    revoked_key = f"{{{lease_store.namespace}}}:lease:revoked:{worker_id}"
+    await redis_client.hset(lease_key, "expires_at_ms", first.granted_at_ms - 1)
+    replacement = await lease_store.grant(worker_id, current_lease_id="")
+
+    revoked = await lease_store.revoke(
+        worker_id,
+        reason="stale-deregister",
+        lease_id=first.lease_id,
+    )
+
+    assert revoked is False
+    assert await lease_store.get(worker_id) == replacement
+    assert await lease_store.is_active(worker_id) is True
+    assert bool(await redis_client.sismember(revoked_key, first.lease_id)) is False
+    assert bool(await redis_client.sismember(revoked_key, replacement.lease_id)) is False
+
+
+async def test_revoke_with_matching_generation_removes_current_lease(lease_store: LeaseStore):
+    worker_id = f"worker-{secrets.token_hex(3)}"
+    lease = await lease_store.grant(worker_id, current_lease_id="")
+
+    revoked = await lease_store.revoke(worker_id, lease_id=lease.lease_id)
+
+    assert revoked is True
+    assert await lease_store.get(worker_id) is None
+    assert await lease_store.is_active(worker_id) is False
 
 
 async def test_sweep_expired_evicts_past_due_leases(lease_store: LeaseStore):
@@ -182,7 +231,7 @@ async def test_sweep_expired_evicts_past_due_leases(lease_store: LeaseStore):
     # so it survives the sweep.
     far_future = lease_alive.expires_at_ms + 10 * lease_store.policy.ttl_ms
     await lease_store._redis.zadd(  # type: ignore[attr-defined]
-        f"{lease_store.namespace}:lease:expiring",
+        f"{{{lease_store.namespace}}}:lease:expiring",
         {w_alive: far_future},
     )
 
@@ -191,7 +240,13 @@ async def test_sweep_expired_evicts_past_due_leases(lease_store: LeaseStore):
         now_ms=max(lease1.expires_at_ms, lease2.expires_at_ms) + 1,
     )
 
-    assert set(evicted) == {w1, w2}
+    # P1-03: sweep_expired now returns list[(worker_id, evicted_lease_id)].
+    evicted_ids = {w for (w, _lid) in evicted}
+    assert evicted_ids == {w1, w2}
+    evicted_map = dict(evicted)
+    # 代际 id 必须非空，且与 grant 返回的 lease_id 一致（否则回调无法代际匹配）
+    assert evicted_map[w1] == lease1.lease_id
+    assert evicted_map[w2] == lease2.lease_id
     assert await lease_store.is_active(w1) is False
     assert await lease_store.is_active(w2) is False
     assert await lease_store.is_active(w_alive) is True
@@ -203,7 +258,8 @@ async def test_grant_persists_metrics_json(lease_store: LeaseStore, redis_client
     metrics = {"cpu": 12.5, "memory": 33.0, "running_tasks": 2}
     await lease_store.grant(worker_id, current_lease_id="", metrics=metrics)
 
-    raw = await redis_client.hget(f"{lease_store.namespace}:lease:{worker_id}", "metrics_json")
+    lease_key = f"{{{lease_store.namespace}}}:lease:data:{worker_id}"
+    raw = await redis_client.hget(lease_key, "metrics_json")
     assert raw, "metrics_json 字段应被写入 Hash"
     # 用最朴素的字符串包含断言，避免依赖 JSON 顺序。
     assert "cpu" in raw and "running_tasks" in raw

@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.errors import PluginError
-from antcode_worker.domain.models import ExecPlan, RunContext, RuntimeHandle, TaskPayload
+from antcode_worker.domain.models import ExecPlan, RunContext, RuntimeHandle, RuntimeSpec, TaskPayload
 from antcode_worker.executor.process import ProcessExecutor
 from antcode_worker.executor.rule_policy import RULE_PLUGIN_ENV_VARS
 from antcode_worker.executor.sandbox import BasicSandbox, SandboxConfig
 from antcode_worker.plugins.registry import PluginRegistry
 from antcode_worker.plugins.rule.plugin import RulePlugin
+from antcode_worker.plugins.spider.plugin import SpiderPlugin
 
 
 @pytest.mark.asyncio
@@ -37,6 +38,38 @@ async def test_rule_plan_contains_only_local_spool_control_env(tmp_path: Path) -
     assert Path(plan.env["ANTCODE_SPIDER_SPOOL_PATH"]).is_file()
     # P0-03: Rule 默认不放行网络,需 ANTCODE_RULE_ALLOW_NETWORK=1 显式开启。
     assert plan.sandbox_config == {"allow_network": False}
+
+
+@pytest.mark.asyncio
+async def test_spider_plan_and_process_expose_only_local_spool_control_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import antcode_worker.plugins.spider.plugin as spider_module
+
+    monkeypatch.setattr(spider_module.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("ANTCODE_SPIDER_REDIS_URL", "redis://host-secret")
+    context = RunContext(
+        run_id="run-spider",
+        task_id="task-1",
+        project_id="project-1",
+        runtime_spec=RuntimeSpec(python_path="python"),
+    )
+    payload = TaskPayload(
+        task_type=TaskType.SPIDER,
+        entry_point="spider.py",
+        project_cwd=str(tmp_path),
+        project_id="project-1",
+    )
+
+    plan = await SpiderPlugin().build_plan(context, payload)
+    plan.plugin_name = "spider"
+    runtime = RuntimeHandle(path=str(tmp_path), runtime_hash="hash", python_executable="python")
+    env = ProcessExecutor()._build_env(plan, runtime)
+
+    assert env["ANTCODE_SPIDER_SINK_MODE"] == "spool"
+    assert Path(env["ANTCODE_SPIDER_SPOOL_PATH"]).is_file()
+    assert not any("REDIS" in key or "GATEWAY" in key or "REPORTER" in key for key in env)
 
 
 @pytest.mark.asyncio

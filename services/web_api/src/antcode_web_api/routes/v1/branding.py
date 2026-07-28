@@ -23,9 +23,9 @@ async def get_public_branding_config():
     try:
         branding = system_config_service.get_branding_config()
         return success(branding, message=Messages.QUERY_SUCCESS)
-    except Exception as e:
-        logger.error(f"获取品牌配置失败: {e}")
+    except Exception as exc:
+        logger.exception("获取品牌配置失败")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取品牌配置失败: {str(e)}",
-        )
+            detail="获取品牌配置失败",
+        ) from exc

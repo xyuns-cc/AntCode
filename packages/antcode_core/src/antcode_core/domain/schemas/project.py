@@ -75,14 +75,40 @@ class ExtractionRule(BaseModel):
     page_type: str | None = Field(None, description="页面类型：list/detail，不指定则继承项目的callback_type")
 
 
+class NextPageSelector(BaseModel):
+    """下一页元素定位器。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["css", "xpath", "text"] = Field(..., description="选择器类型")
+    expr: str = Field(..., min_length=1, description="选择器表达式")
+
+
 class PaginationConfig(BaseModel):
     """分页配置模型"""
 
-    method: str = Field(..., description="分页方法")
-    start_page: int = Field(1, description="起始页码")
-    max_pages: int = Field(10, description="最大页数")
-    next_page_rule: str | None = Field(None, description="下一页规则（点击翻页用）")
-    wait_after_click_ms: int | None = Field(None, description="点击后等待时间（毫秒）")
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal[
+        "none",
+        "url_pattern",
+        "url_param",
+        "click_element",
+        "js_click",
+        "infinite_scroll",
+        "javascript",
+        "ajax",
+    ] = Field(..., description="分页方法")
+    start_page: int = Field(1, ge=0, description="起始页码")
+    max_pages: int = Field(10, ge=1, le=1000, description="最大页数")
+    next_page_rule: str | NextPageSelector | None = Field(None, description="下一页规则（点击翻页用）")
+    wait_after_click_ms: int | None = Field(None, ge=0, le=30000, description="点击后等待时间（毫秒）")
+    url_template: str | None = Field(None, max_length=2000, description="分页 URL 模板")
+    page_param: str | None = Field(None, min_length=1, max_length=100, description="页码查询参数名")
+    scroll_count: int | None = Field(None, ge=1, le=100, description="滚动次数")
+    scroll_wait_ms: int | None = Field(None, ge=0, le=10000, description="每次滚动等待时间")
+    ajax_endpoint: str | None = Field(None, max_length=2000, description="旧版 AJAX 端点")
+    ajax_params: dict[str, Any] | None = Field(None, description="旧版 AJAX 参数")
 
 
 class ProjectCreateRequest(BaseModel):
@@ -240,7 +266,7 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
     extraction_rules: list[ExtractionRule] | None = Field(None, description="提取规则数组")
     pagination_config: PaginationConfig | None = Field(None, description="分页配置")
     max_pages: int = Field(10, ge=1, le=1000, description="最大页数")
-    start_page: int = Field(1, ge=1, description="起始页码")
+    start_page: int = Field(1, ge=0, description="起始页码")
     request_delay: int = Field(1000, ge=0, description="请求间隔(ms)")
     retry_count: int = Field(3, ge=0, le=10, description="重试次数")
     timeout: int = Field(30, ge=1, le=300, description="超时时间(s)")
@@ -401,7 +427,7 @@ class ProjectCreateFormRequest(BaseModel):
     extraction_rules: str | None = Field(None, description="提取规则数组JSON")
     pagination_config: str | None = Field(None, description="分页配置JSON")
     max_pages: int | None = Field(10, ge=1, le=1000, description="最大页数")
-    start_page: int | None = Field(1, ge=1, description="起始页码")
+    start_page: int | None = Field(1, ge=0, description="起始页码")
     request_delay: int | None = Field(1000, ge=0, description="请求间隔(ms)")
     retry_count: int | None = Field(3, ge=0, le=10, description="重试次数")
     timeout: int | None = Field(30, ge=1, le=300, description="超时时间(s)")
@@ -493,7 +519,7 @@ class ProjectRuleUpdateRequest(BaseModel):
     extraction_rules: list[ExtractionRule] | None = Field(None, description="提取规则数组")
     pagination_config: PaginationConfig | None = Field(None, description="分页配置")
     max_pages: int | None = Field(None, ge=1, le=1000, description="最大页数")
-    start_page: int | None = Field(None, ge=1, description="起始页码")
+    start_page: int | None = Field(None, ge=0, description="起始页码")
     request_delay: int | None = Field(None, ge=0, description="请求间隔(ms)")
     retry_count: int | None = Field(None, ge=0, le=10, description="重试次数")
     timeout: int | None = Field(None, ge=1, le=300, description="超时时间(s)")

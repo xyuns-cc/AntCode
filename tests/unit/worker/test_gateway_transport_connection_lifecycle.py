@@ -13,6 +13,7 @@ from antcode_worker.transport.gateway.reconnect import (
     ReconnectManager,
     ReconnectState,
 )
+from antcode_worker.transport.gateway.subscriptions import SUBSCRIPTION_NAMES
 from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
 
@@ -46,11 +47,13 @@ async def test_failed_candidate_connection_preserves_active_connection(monkeypat
     transport = GatewayTransport(gateway_config=GatewayConfig(worker_id="worker-1"))
     transport._channel = active_channel
     transport._connected = True
+    transport._subscription_health = dict.fromkeys(SUBSCRIPTION_NAMES, True)
     transport._create_stubs = MagicMock(return_value=(stub, MagicMock(), MagicMock()))
 
     assert await transport._connect() is False
 
     assert transport._channel is active_channel
+    assert transport._connected is True
     assert transport.is_connected is True
     candidate_channel.close.assert_awaited_once()
     active_channel.close.assert_not_awaited()
@@ -136,12 +139,36 @@ async def test_reconnect_rejects_new_lease_and_self_fences(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reconnect_rejects_expired_lease(monkeypatch):
+async def test_reconnect_trusts_server_lease_despite_local_clock_skew(monkeypatch):
     channel = _channel()
     stub = _control_stub(
         control_pb2.LeaseResponse(
             lease_id="lease-1",
-            expires_at_ms=int(time.time() * 1000) - 1,
+            # 对 Worker 本机时钟看似已过期；Lease RPC 已用 Redis TIME 完成
+            # 权威续租，客户端不得用另一台机器的 wall clock 再次判定。
+            expires_at_ms=1,
+            renew_after_ms=10_000,
+        )
+    )
+    monkeypatch.setattr(grpc.aio, "insecure_channel", MagicMock(return_value=channel))
+    transport = _running_transport("lease-1")
+    transport._create_stubs = MagicMock(return_value=(stub, MagicMock(), MagicMock()))
+
+    assert await transport._connect() is True
+
+    assert transport._lease_id == "lease-1"
+    assert transport._connected is True
+    assert transport.is_connected is False
+    channel.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_rejects_missing_server_expiry(monkeypatch):
+    channel = _channel()
+    stub = _control_stub(
+        control_pb2.LeaseResponse(
+            lease_id="lease-1",
+            expires_at_ms=0,
             renew_after_ms=10_000,
         )
     )

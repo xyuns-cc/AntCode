@@ -60,7 +60,7 @@ export default defineConfig(({ mode }) => {
     },
 
     build: {
-      // 兼容 Chrome 91+/Safari 15+/Edge 91+/Firefox 90+，覆盖 2021 年后大部分主流浏览器
+      // 多标签认证协议要求 BroadcastChannel；Safari 最低支持版本为 15.4。
       target: 'es2020',
       minify: 'terser',
       terserOptions: {

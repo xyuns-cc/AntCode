@@ -6,9 +6,10 @@
 Requirements: 7.1
 """
 
-import contextlib
+import asyncio
 import os
 import socket
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,46 @@ DATA_ROOT = PROJECT_DATA_ROOT / "worker"
 WORKER_CONFIG_FILE = DATA_ROOT / "worker_config.yaml"
 
 _ENV_LOADED = False
+_PRIVATE_CONFIG_MODE = 0o600
+
+
+def _atomic_write_private_config(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, _PRIVATE_CONFIG_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        _set_private_config_permissions(temp_path)
+        os.replace(temp_path, path)
+        _set_private_config_permissions(path)
+        _fsync_config_directory(path.parent)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_config_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _set_private_config_permissions(path: Path) -> None:
+    if os.name != "nt":
+        os.chmod(path, _PRIVATE_CONFIG_MODE)
+        return
+    from antcode_worker.services.credential.private_permissions import set_owner_only_permissions
+
+    set_owner_only_permissions(path, _PRIVATE_CONFIG_MODE)
 
 
 def _load_env_file() -> None:
@@ -97,10 +138,7 @@ def _normalize_path(path_value: str) -> str:
 def _load_env_config() -> dict[str, Any]:
     """读取环境变量配置"""
     env_config: dict[str, Any] = {}
-
-    api_base_url = _get_env_value("WORKER_API_BASE_URL")
-    if api_base_url:
-        env_config["api_base_url"] = api_base_url
+    _load_control_api_env(env_config)
 
     transport_mode = _get_env_value("WORKER_TRANSPORT_MODE")
     if transport_mode:
@@ -114,23 +152,7 @@ def _load_env_config() -> dict[str, Any]:
     if redis_namespace:
         env_config["redis_namespace"] = redis_namespace
 
-    gateway_endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT")
-    if gateway_endpoint:
-        if ":" in gateway_endpoint:
-            endpoint_host, endpoint_port = gateway_endpoint.rsplit(":", 1)
-            env_config["gateway_host"] = endpoint_host
-            with contextlib.suppress(ValueError):
-                env_config["gateway_port"] = int(endpoint_port)
-        else:
-            env_config["gateway_host"] = gateway_endpoint
-
-    gateway_host = _get_env_value("WORKER_GATEWAY_HOST")
-    if gateway_host:
-        env_config["gateway_host"] = gateway_host
-
-    gateway_port = _get_env_int("WORKER_GATEWAY_PORT")
-    if gateway_port is not None:
-        env_config["gateway_port"] = gateway_port
+    env_config.update(_load_gateway_env())
 
     sandbox_mode = _get_env_value("WORKER_SANDBOX_MODE")
     if sandbox_mode:
@@ -182,6 +204,51 @@ def _load_env_config() -> dict[str, Any]:
         env_config["worker_key"] = worker_key
 
     return env_config
+
+
+def _load_gateway_env() -> dict[str, Any]:
+    from antcode_worker.gateway_endpoint import (
+        DEFAULT_GATEWAY_HOST,
+        DEFAULT_GATEWAY_PORT,
+        parse_gateway_address,
+    )
+
+    values: dict[str, Any] = {}
+    endpoint = _get_env_value("WORKER_GATEWAY_ENDPOINT")
+    host = _get_env_value("WORKER_GATEWAY_HOST")
+    raw_port = _get_env_value("WORKER_GATEWAY_PORT")
+    try:
+        port = int(raw_port) if raw_port is not None else None
+    except ValueError as exc:
+        raise ValueError("WORKER_GATEWAY_PORT 必须是整数") from exc
+    if endpoint or host or port is not None:
+        address = parse_gateway_address(
+            endpoint=endpoint or "",
+            host=host or DEFAULT_GATEWAY_HOST,
+            port=port if port is not None else DEFAULT_GATEWAY_PORT,
+        )
+        values.update(gateway_host=address.host, gateway_port=address.port)
+    tls = _get_env_bool("WORKER_GATEWAY_TLS")
+    if tls is not None:
+        values["gateway_tls"] = tls
+    for field_name, env_name in (
+        ("ca_cert", "WORKER_CA_CERT"),
+        ("client_cert", "WORKER_CLIENT_CERT"),
+        ("client_key", "WORKER_CLIENT_KEY"),
+    ):
+        value = _get_env_value(env_name)
+        if value:
+            values[field_name] = value
+    return values
+
+
+def _load_control_api_env(env_config: dict[str, Any]) -> None:
+    api_base_url = _get_env_value("WORKER_API_BASE_URL")
+    if api_base_url:
+        env_config["api_base_url"] = api_base_url
+    allow_insecure = _get_env_bool("WORKER_API_ALLOW_INSECURE_INTERNAL")
+    if allow_insecure is not None:
+        env_config["api_allow_insecure_internal"] = allow_insecure
 
 
 def get_local_ip() -> str:
@@ -268,12 +335,17 @@ class WorkerConfig:
     # Gateway 配置（Gateway 模式）
     gateway_host: str = "localhost"
     gateway_port: int = 50051
+    gateway_tls: bool = False
+    ca_cert: str | None = None
+    client_cert: str | None = None
+    client_key: str | None = None
 
     # 控制平面 API 地址（用于安装 Key 注册）
     api_base_url: str = ""
+    api_allow_insecure_internal: bool = False
 
     # 凭证存储配置
-    credential_store: str = "env"  # 凭证存储类型: env
+    credential_store: str = "persistent"  # 文件优先，环境变量用于容器注入
 
     # 存储配置
     data_dir: str = field(default_factory=lambda: str(DATA_ROOT))
@@ -329,10 +401,15 @@ class WorkerConfig:
             "redis_namespace": self.redis_namespace,
             "gateway_host": self.gateway_host,
             "gateway_port": self.gateway_port,
+            "gateway_tls": self.gateway_tls,
+            "ca_cert": self.ca_cert,
+            "client_cert": self.client_cert,
+            "client_key": self.client_key,
             "sandbox_mode": self.sandbox_mode,
             "sandbox_command": self.sandbox_command,
             "sandbox_network_isolated": self.sandbox_network_isolated,
             "api_base_url": self.api_base_url,
+            "api_allow_insecure_internal": self.api_allow_insecure_internal,
             "credential_store": self.credential_store,
             "data_dir": self.data_dir,
             "flow_control_enabled": self.flow_control_enabled,
@@ -360,7 +437,12 @@ class WorkerConfig:
             "redis_namespace": self.redis_namespace,
             "gateway_host": self.gateway_host,
             "gateway_port": self.gateway_port,
+            "gateway_tls": self.gateway_tls,
+            "ca_cert": self.ca_cert,
+            "client_cert": self.client_cert,
+            "client_key": self.client_key,
             "api_base_url": self.api_base_url,
+            "api_allow_insecure_internal": self.api_allow_insecure_internal,
             "credential_store": self.credential_store,
             "data_dir": self.data_dir,
             "flow_control_enabled": self.flow_control_enabled,
@@ -373,18 +455,15 @@ class WorkerConfig:
         """保存配置到文件（同步版本，用于启动时）"""
         path = path or WORKER_CONFIG_FILE
         config_data = self._get_config_data()
-        os.makedirs(path.parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False)
+        yaml_content = yaml.dump(config_data, allow_unicode=True, default_flow_style=False)
+        _atomic_write_private_config(path, yaml_content)
 
     async def save_to_file_async(self, path: Path | None = None) -> None:
         """保存配置到文件（异步版本，用于运行时更新）"""
         path = path or WORKER_CONFIG_FILE
         config_data = self._get_config_data()
         yaml_content = yaml.dump(config_data, allow_unicode=True, default_flow_style=False)
-        os.makedirs(path.parent, exist_ok=True)
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write(yaml_content)
+        await asyncio.to_thread(_atomic_write_private_config, path, yaml_content)
 
     @classmethod
     def load_from_file(cls, path: Path | None = None) -> "WorkerConfig":

@@ -50,7 +50,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     _add(group, "run-ids", "Comma-separated run IDs with retained logs")
     _add(group, "churn-worker-ids", "Comma-separated externally restarted Worker IDs")
     _add(group, "min-workers", "Minimum accessible Worker count")
-    _add(group, "min-log-lines", "Minimum historical lines required per WebSocket run")
+    _add(group, "min-log-lines", "Minimum historical lines required per SSE run")
     _add(group, "timeout-seconds", "Per-operation timeout")
     _add(group, "backlog-timeout-seconds", "Backlog completion deadline")
     _add(group, "max-p50-ms", "Maximum P50 latency")

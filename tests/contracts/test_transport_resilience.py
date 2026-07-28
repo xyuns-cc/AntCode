@@ -13,6 +13,8 @@ import pytest
 
 pytestmark = pytest.mark.asyncio
 
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 
 async def test_poll_task_timeout_returns_quickly(transport):
     """`poll_task(timeout=T)` must return within roughly T seconds — not
@@ -47,41 +49,45 @@ async def test_stop_with_grace_period_completes(transport):
     assert transport.is_running is False
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Connection-drop / reclaim semantics aren't pinned down yet — the "
-        "two transports differ (Direct uses XAUTOCLAIM, Gateway relies on "
-        "Gateway-side bookkeeping). Revisit once P1 lands."
-    ),
-    strict=False,
-)
-async def test_unacked_task_is_reclaimable_after_disconnect(transport, task_producer, fresh_ids):
-    """Goal of this test (not yet enforceable): if a worker polls a task
-    and then dies without acking, another worker on the same group must
-    eventually be able to poll the same logical task again.
-
-    Today this requires implementation-specific machinery (Direct's
-    PendingTaskReclaimer vs. Gateway-side timeouts) and the timing
-    knobs aren't part of the public contract, so we mark it xfail
-    until P1 clarifies the semantics."""
+async def test_unacked_task_is_reclaimable_after_disconnect(
+    transport,
+    task_producer,
+    *,
+    fresh_ids,
+    contract_probe,
+):
+    """An unacked delivery becomes visible after the production timeout."""
     await task_producer(
         transport,
         {
             "task_id": fresh_ids.task_id,
             "project_id": fresh_ids.project_id,
             "run_id": fresh_ids.run_id,
+            "project_type": "code",
+            "source_bundle_uri": f"pgartifact://{_EMPTY_SHA256}",
+            "source_bundle_sha256": _EMPTY_SHA256,
+            "source_bundle_size": "0",
+            "transfer_method": "source_bundle",
         },
     )
 
     first = await transport.poll_task(timeout=2.0)
     assert first is not None
+    assert first.receipt
 
-    # Simulate a hard disconnect by stopping mid-flight.
     await transport.stop(grace_period=0.1)
+    await contract_probe.advance_unacked_visibility(first.receipt)
 
-    # In a fully-contracted world a sibling consumer would now be able to
-    # reclaim the unacked message. Today that's implementation-specific.
-    raise AssertionError("contract not yet defined — see test docstring")
+    assert await transport.start() is True
+    await contract_probe.trigger_unacked_reclaim()
+
+    redelivered = await transport.poll_task(timeout=2.0)
+    assert redelivered is not None
+    assert redelivered.task_id == fresh_ids.task_id
+    assert redelivered.run_id == fresh_ids.run_id
+    assert redelivered.receipt
+
+    assert await transport.ack_task(redelivered.receipt, accepted=True) is True
 
 
 async def test_state_change_callback_fires(transport, fresh_ids):  # noqa: ARG001

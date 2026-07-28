@@ -416,6 +416,7 @@ def start_worker(
         **config_kwargs,
     )
     worker_config.ensure_directories()
+    worker_config.save_to_file()
 
     # 使用自定义事件循环运行，避免 asyncio.run() 覆盖信号处理
     if sys.platform == "win32":
@@ -489,7 +490,7 @@ def prompt_start_worker(transport_mode: str) -> None:
             init_credential_service,
         )
 
-        store = os.getenv("WORKER_CREDENTIAL_STORE") or "env"
+        store = os.getenv("WORKER_CREDENTIAL_STORE") or "persistent"
         if WORKER_CONFIG_FILE.exists():
             try:
                 with open(WORKER_CONFIG_FILE, encoding="utf-8") as f:
@@ -497,7 +498,7 @@ def prompt_start_worker(transport_mode: str) -> None:
                 store = file_config.get("credential_store", store)
             except Exception as exc:
                 raise RuntimeError(f"读取 Worker 配置失败: {WORKER_CONFIG_FILE}") from exc
-        credential_service = init_credential_service(get_credential_store(store))
+        credential_service = init_credential_service(get_credential_store(store, DATA_ROOT))
         credentials = credential_service.load()
         if credentials and credentials.is_valid():
             logger.info(

@@ -14,10 +14,12 @@ Requirements: 7.2, 11.3
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import cast
+from functools import partial
+from typing import TYPE_CHECKING, cast
 
 from antcode_core.infrastructure.redis import (
     control_stream,
@@ -27,13 +29,43 @@ from antcode_core.infrastructure.redis import (
 )
 from loguru import logger
 
+from antcode_worker.gateway_endpoint import (
+    DEFAULT_GATEWAY_HOST,
+    DEFAULT_GATEWAY_PORT,
+    GatewayAddress,
+)
 from antcode_worker.transport.base import TransportBase
+from antcode_worker.transport.factory_components import (
+    build_direct_control_client as _build_direct_control_client,
+)
+from antcode_worker.transport.factory_components import (
+    build_gateway_transport_config as _build_gateway_transport_config,
+)
+from antcode_worker.transport.factory_components import (
+    check_gateway_capabilities,
+    decode_redis_text,
+    gateway_auth_method,
+    validate_direct_control_url,
+    validate_gateway_security,
+)
+from antcode_worker.transport.factory_components import (
+    resolve_gateway_address as _resolve_gateway_address,
+)
+
+if TYPE_CHECKING:
+    from antcode_worker.transport.gateway import GatewayConfig
+
+
+GATEWAY_AUTH_MTLS = "mtls"
 
 
 class TransportConfigError(Exception):
     """传输层配置错误"""
 
     pass
+
+
+resolve_gateway_address = partial(_resolve_gateway_address, error_type=TransportConfigError)
 
 
 @dataclass
@@ -44,11 +76,18 @@ class DirectConfig:
     redis_password: str | None = None
     redis_namespace: str = redis_namespace()
     consumer_group: str = ""
+    api_base_url: str = ""
+    api_key: str = ""
+    secret_key: str = ""
+    allow_insecure_internal: bool = False
+    reclaimed_queue_capacity: int = 10
 
     def __post_init__(self) -> None:
         self.redis_namespace = redis_namespace(self.redis_namespace)
         if not self.consumer_group:
             self.consumer_group = worker_group(self.redis_namespace)
+        if isinstance(self.reclaimed_queue_capacity, bool) or self.reclaimed_queue_capacity < 1:
+            raise ValueError("reclaimed_queue_capacity 必须是正整数")
 
     @property
     def task_stream_prefix(self) -> str:
@@ -64,8 +103,8 @@ class GatewayConfigSpec:
     """Gateway 模式配置"""
 
     endpoint: str = ""  # host:port
-    host: str = "localhost"
-    port: int = 50051
+    host: str = DEFAULT_GATEWAY_HOST
+    port: int = DEFAULT_GATEWAY_PORT
     tls: bool = False
     ca_cert: str | None = None
     client_cert: str | None = None
@@ -103,17 +142,19 @@ def validate_transport_config(config: TransportConfig) -> None:
         # Direct 模式校验
         if not config.direct.redis_url:
             raise TransportConfigError("Direct 模式必须配置 redis_url\n示例: WORKER_REDIS_URL=redis://10.0.0.10:6379/0")
-
         # 禁止同时配置 gateway（非默认值）
         has_gateway_config = (
             config.gateway.endpoint
-            or (config.gateway.host and config.gateway.host != "localhost")
-            or (config.gateway.port and config.gateway.port != 50051)
+            or (config.gateway.host and config.gateway.host != DEFAULT_GATEWAY_HOST)
+            or (config.gateway.port and config.gateway.port != DEFAULT_GATEWAY_PORT)
         )
         if has_gateway_config:
             raise TransportConfigError(
                 "Direct 模式禁止配置 gateway.endpoint/host\n请移除 WORKER_GATEWAY_HOST 等 Gateway 相关配置"
             )
+        if not all((config.direct.api_base_url, config.direct.api_key, config.direct.secret_key)):
+            raise TransportConfigError("Direct 模式必须配置 Web API 地址和 Worker API/HMAC 凭据")
+        _validate_direct_control_url(config.direct)
 
     elif mode == "gateway":
         # Gateway 模式校验
@@ -128,8 +169,25 @@ def validate_transport_config(config: TransportConfig) -> None:
                 "Gateway 模式禁止配置 redis_url\n请移除 WORKER_REDIS_URL 配置，Gateway 模式下 Worker 不直连 Redis"
             )
 
+        resolve_gateway_address(config.gateway)
+        _validate_gateway_security(config.gateway)
+
     if not config.worker_id:
         raise TransportConfigError("必须配置 worker_id\n示例: WORKER_ID=worker-001，或使用安装 Key 注册生成凭证")
+
+
+def _validate_direct_control_url(config: DirectConfig) -> None:
+    try:
+        validate_direct_control_url(config)
+    except ValueError as exc:
+        raise TransportConfigError(str(exc)) from exc
+
+
+def _validate_gateway_security(config: GatewayConfigSpec) -> None:
+    try:
+        validate_gateway_security(config)
+    except ValueError as exc:
+        raise TransportConfigError(str(exc)) from exc
 
 
 def print_transport_banner(config: TransportConfig) -> None:
@@ -168,9 +226,9 @@ def print_transport_banner(config: TransportConfig) -> None:
         )
 
     elif mode == "gateway":
-        endpoint = config.gateway.endpoint or f"{config.gateway.host}:{config.gateway.port}"
+        endpoint = resolve_gateway_address(config.gateway).target
         tls_status = "ON" if config.gateway.tls else "OFF"
-        auth_method = "mTLS" if config.gateway.client_cert else "API Key"
+        auth_method = "mTLS" if gateway_auth_method(config.gateway) == GATEWAY_AUTH_MTLS else "API Key"
 
         banner_lines.extend(
             [
@@ -202,10 +260,11 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
     检查项：
     - PING Redis
     - XGROUP CREATE（若不存在）
-    - 尝试 XREADGROUP（非阻塞一次）
+    - XINFO GROUPS 只读验证消费者组
     """
     logger.info("执行 Direct 模式自检...")
 
+    redis_client = None
     try:
         # T6-T1: 走统一 factory
         from antcode_core.infrastructure.redis.factory import (
@@ -237,17 +296,13 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
             else:
                 raise
 
-        # 3. 尝试非阻塞读取
-        await redis_client.xreadgroup(
-            groupname=group_name,
-            consumername=worker_id,
-            streams={stream_key: ">"},
-            count=1,
-            block=0,  # 非阻塞
-        )
-        logger.info(f"  OK  XREADGROUP 测试成功: {stream_key}")
-
-        await redis_client.aclose()
+        # XREADGROUP 会领取真实任务；BLOCK 0 对新消息读取还会永久阻塞。
+        # 读取 group 元数据即可验证 stream/group 的可见性，不改变 PEL。
+        groups = await redis_client.xinfo_groups(stream_key)
+        group_names = {decode_redis_text(group.get("name", group.get(b"name", ""))) for group in groups}
+        if group_name not in group_names:
+            raise RuntimeError(f"消费者组自检失败: {group_name}")
+        logger.info(f"  OK  消费者组可读: {group_name}")
 
         logger.info("Direct 模式自检通过")
         return True
@@ -256,6 +311,18 @@ async def preflight_check_direct(config: TransportConfig) -> bool:
         logger.exception("Direct 模式自检失败")
         logger.error("请检查 Redis 连接配置和网络连通性")
         return False
+    finally:
+        if redis_client is not None:
+            await redis_client.aclose()
+
+
+async def _check_gateway_capabilities(channel, config: TransportConfig) -> None:
+    await check_gateway_capabilities(
+        channel,
+        auth_method=gateway_auth_method(config.gateway),
+        api_key=config.gateway.api_key,
+        worker_id=config.worker_id or "",
+    )
 
 
 async def preflight_check_gateway(config: TransportConfig) -> bool:
@@ -265,15 +332,16 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
     检查项：
     - TLS 握手成功（证书/CA）
     - Auth 成功（API key / mTLS）
-    - Register/Hello 交换
+    - 无副作用的协议能力协商
     """
     logger.info("执行 Gateway 模式自检...")
 
+    channel = None
     try:
         import grpc
         from grpc import aio as grpc_aio
 
-        endpoint = config.gateway.endpoint or f"{config.gateway.host}:{config.gateway.port}"
+        endpoint = resolve_gateway_address(config.gateway).target
 
         # 构建 channel options
         options = [
@@ -313,50 +381,12 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
             logger.info("  WARN 使用非 TLS 连接（仅限开发环境）")
 
         # 等待 channel 就绪
-        import asyncio
-
         await asyncio.wait_for(channel.channel_ready(), timeout=10.0)
         logger.info(f"  OK  gRPC 连接成功: {endpoint}")
 
-        # 尝试 Register (新协议：ControlService.Register)
-        try:
-            from antcode_contracts import control_pb2, control_pb2_grpc
-
-            stub = control_pb2_grpc.ControlServiceStub(channel)
-
-            # 构建认证元数据
-            metadata = []
-            if config.gateway.api_key:
-                metadata.append(("x-api-key", config.gateway.api_key))
-            if config.worker_id:
-                metadata.append(("x-worker-id", config.worker_id))
-
-            # 发送 Register 请求
-            request = control_pb2.RegisterRequest(
-                worker_id=config.worker_id or "",
-                api_key=config.gateway.api_key or "",
-            )
-
-            response = await asyncio.wait_for(
-                stub.Register(request, metadata=metadata),
-                timeout=10.0,
-            )
-
-            if response.success:
-                logger.info(
-                    f"  OK  Register 成功: worker_id={response.worker_id} "
-                    f"lease_ttl_ms={getattr(response, 'lease_ttl_ms', 0)} "
-                    f"lease_renew_after_ms={getattr(response, 'lease_renew_after_ms', 0)}"
-                )
-            else:
-                logger.warning(f"  WARN Register 返回失败: {response.error}")
-                # 不阻止启动，可能是首次注册
-
-        except Exception as e:
-            logger.warning(f"  WARN Register 测试跳过: {e}")
-            # 不阻止启动
-
-        await channel.close()
+        # 查询协议能力；不得在 preflight 中创建或轮换 lease。
+        await _check_gateway_capabilities(channel, config)
+        logger.info("  OK  Gateway 协议能力检查通过")
 
         logger.info("Gateway 模式自检通过")
         return True
@@ -369,6 +399,9 @@ async def preflight_check_gateway(config: TransportConfig) -> bool:
         logger.exception("Gateway 模式自检失败")
         logger.error("请检查 Gateway 配置、证书和网络连通性")
         return False
+    finally:
+        if channel is not None:
+            await channel.close()
 
 
 async def create_transport(
@@ -424,21 +457,14 @@ async def create_transport(
             worker_id=config.worker_id,
             namespace=config.direct.redis_namespace,
             consumer_group=config.direct.consumer_group or worker_group(config.direct.redis_namespace),
+            direct_control=build_direct_control_client(config.direct, config.worker_id or ""),
+            reclaimed_queue_capacity=config.direct.reclaimed_queue_capacity,
         )
 
     else:  # gateway
-        from antcode_worker.transport.gateway import GatewayConfig, GatewayTransport
+        from antcode_worker.transport.gateway import GatewayTransport
 
-        gateway_config = GatewayConfig(
-            gateway_host=config.gateway.host,
-            gateway_port=config.gateway.port,
-            use_tls=config.gateway.tls,
-            ca_cert_path=config.gateway.ca_cert,
-            client_cert_path=config.gateway.client_cert,
-            client_key_path=config.gateway.client_key,
-            api_key=config.gateway.api_key,
-            worker_id=config.worker_id,
-        )
+        gateway_config = build_gateway_transport_config(config)
 
         transport = GatewayTransport(gateway_config=gateway_config)
         if config.worker_id:
@@ -447,13 +473,26 @@ async def create_transport(
         return transport
 
 
+def build_gateway_transport_config(config: TransportConfig) -> GatewayConfig:
+    return _build_gateway_transport_config(
+        spec=config.gateway,
+        address=resolve_gateway_address(config.gateway),
+        auth_method=gateway_auth_method(config.gateway),
+        worker_id=config.worker_id or "",
+    )
+
+
+def build_direct_control_client(config: DirectConfig, worker_id: str):
+    return _build_direct_control_client(config, worker_id)
+
+
 def build_transport_config_from_env(
     transport_mode: str | None = None,
     worker_id: str | None = None,
     redis_url: str | None = None,
     gateway_host: str | None = None,
     gateway_port: int | None = None,
-    gateway_tls: bool = False,
+    gateway_tls: bool | None = None,
     api_key: str | None = None,
     ca_cert: str | None = None,
     client_cert: str | None = None,
@@ -484,11 +523,23 @@ def build_transport_config_from_env(
         "WORKER_CONSUMER_GROUP",
         worker_group(config.direct.redis_namespace),
     )
+    config.direct.api_base_url = os.getenv("WORKER_API_BASE_URL", "")
+    config.direct.api_key = api_key or os.getenv("WORKER_API_KEY") or os.getenv("WORKER_CREDENTIAL_API_KEY") or ""
+    config.direct.secret_key = os.getenv("WORKER_CREDENTIAL_SECRET_KEY", "")
+    config.direct.allow_insecure_internal = os.getenv("WORKER_API_ALLOW_INSECURE_INTERNAL", "").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
 
     # Gateway 配置
-    config.gateway.host = gateway_host or os.getenv("WORKER_GATEWAY_HOST") or "localhost"
-    config.gateway.port = gateway_port or int(os.getenv("WORKER_GATEWAY_PORT", "50051"))
-    config.gateway.tls = gateway_tls or os.getenv("WORKER_GATEWAY_TLS", "").lower() in ("true", "1", "yes")
+    config.gateway.endpoint = os.getenv("WORKER_GATEWAY_ENDPOINT") or ""
+    config.gateway.host = gateway_host or os.getenv("WORKER_GATEWAY_HOST") or DEFAULT_GATEWAY_HOST
+    config.gateway.port = (
+        gateway_port if gateway_port is not None else int(os.getenv("WORKER_GATEWAY_PORT", str(DEFAULT_GATEWAY_PORT)))
+    )
+    env_gateway_tls = os.getenv("WORKER_GATEWAY_TLS", "").lower() in ("true", "1", "yes")
+    config.gateway.tls = env_gateway_tls if gateway_tls is None else gateway_tls
     config.gateway.api_key = api_key or os.getenv("WORKER_API_KEY")
     config.gateway.ca_cert = ca_cert or os.getenv("WORKER_CA_CERT")
     config.gateway.client_cert = client_cert or os.getenv("WORKER_CLIENT_CERT")
@@ -502,6 +553,11 @@ __all__ = [
     "TransportConfigError",
     "DirectConfig",
     "GatewayConfigSpec",
+    "GatewayAddress",
+    "resolve_gateway_address",
+    "gateway_auth_method",
+    "build_gateway_transport_config",
+    "build_direct_control_client",
     "validate_transport_config",
     "print_transport_banner",
     "preflight_check_direct",

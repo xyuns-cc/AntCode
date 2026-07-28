@@ -100,9 +100,9 @@ class AlertCheckLoop:
             if public_id in seen_projects:
                 continue
             seen_projects.add(public_id)
+            checked += 1
             try:
                 await crawl_metrics_service.check_alerts(public_id)
-                checked += 1
             except Exception as exc:
                 logger.warning(f"check_alerts 失败: project={public_id} err={exc}")
 

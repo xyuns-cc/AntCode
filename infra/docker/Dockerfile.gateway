@@ -4,8 +4,12 @@
 # 公网 Worker 接入（gRPC/TLS）、认证、限流、日志收集、结果回写
 # =====================================================
 
+ARG UV_VERSION=0.8.17
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 AS uv-bin
+
 # ================== 阶段 1: 构建阶段 ==================
-FROM python:3.11.11-slim AS builder
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5 AS builder
 
 WORKDIR /app
 
@@ -16,16 +20,13 @@ ENV PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖和 uv
+# 安装构建依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
-    curl \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 
-# 设置 uv 路径
-ENV PATH="/root/.local/bin:${PATH}"
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
 
 # 复制 workspace 配置
 COPY pyproject.toml uv.lock ./
@@ -56,17 +57,10 @@ COPY services/gateway/src services/gateway/src/
 # 创建虚拟环境并安装依赖
 RUN uv venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    uv sync --package antcode-gateway && \
-    # P1-21: 装 grpcio-health-checking(不在 pyproject.toml 里),让 server.py
-    # 能注册 grpc.health.v1.Health 服务,healthcheck 走 grpc_health_probe 时
-    # 才能真正拿到 SERVING/NOT_SERVING;否则 probe 会拿到 UNIMPLEMENTED。
-    uv pip install "grpcio-health-checking>=1.60.0"
+    uv sync --frozen --package antcode-gateway
 
 # ================== 阶段 2: 运行时镜像 ==================
-FROM python:3.11.11-slim AS runtime
-# buildx multi-arch 时用 TARGETARCH 拉对应架构的 grpc_health_probe，
-# 否则 arm64 镜像里塞 amd64 二进制 → 运行时 exec format error
-ARG TARGETARCH=amd64
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5 AS runtime
 
 WORKDIR /app
 
@@ -76,15 +70,10 @@ ENV PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}"
 
-# 安装运行时依赖（curl + pgrep 用于 healthcheck；J5: grpc-health-probe 做 RPC 级探测）
+# 安装 HTTP readiness 探测依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    procps \
-    && rm -rf /var/lib/apt/lists/* \
-    && GRPC_HEALTH_PROBE_VERSION=v0.4.24 \
-    && curl -sSL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH}" \
-        -o /usr/local/bin/grpc_health_probe \
-    && chmod +x /usr/local/bin/grpc_health_probe
+    && rm -rf /var/lib/apt/lists/*
 
 # 创建非 root 用户（安全最佳实践）
 RUN groupadd --gid 1000 appgroup && \

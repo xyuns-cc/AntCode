@@ -381,6 +381,21 @@ async def _read_task_import(file):
 _validate_task_dependencies = _tasks_transfer._validate_task_dependencies
 _reject_dependency_cycle = _tasks_transfer._reject_dependency_cycle
 
+# 单段静态路径必须先于 /{task_id} 注册，否则 Starlette 会把 templates、
+# running、stats 等字面量当成 task_id。
+_tasks_transfer.register_transfer_routes(
+    tasks_router,
+    max_import_bytes=MAX_TASK_IMPORT_BYTES,
+    create_task_response=create_task_response,
+    ensure_specified_worker_access=_ensure_specified_worker_access,
+    generate_unique_task_name=_generate_unique_task_name,
+    task_export_payload=_task_export_payload,
+    parse_task_import_payload=_parse_task_import_payload,
+    decode_task_import_bytes=_decode_task_import_bytes,
+)
+_tasks_batch.register_batch_routes(tasks_router)
+_tasks_query.register_query_routes(tasks_router, running_task_hard_cap=RUNNING_TASK_HARD_CAP)
+
 
 @tasks_router.get("/{task_id}", response_model=BaseResponse[TaskResponse])
 async def get_task(task_id, current_user=Depends(get_current_user)):
@@ -521,27 +536,8 @@ async def _raise_if_stop_terminal_conflict(run_id: str, user_id: int) -> None:
     await _tasks_runs._raise_if_stop_terminal_conflict(run_id, user_id)
 
 
-# P2 拆分: 8 个 transfer handler 挂路由 (validate-cron / templates /
-# templates/create / export / import / dependencies GET/PUT / duplicate)
-_tasks_transfer.register_transfer_routes(
-    tasks_router,
-    max_import_bytes=MAX_TASK_IMPORT_BYTES,
-    create_task_response=create_task_response,
-    ensure_specified_worker_access=_ensure_specified_worker_access,
-    generate_unique_task_name=_generate_unique_task_name,
-    task_export_payload=_task_export_payload,
-    parse_task_import_payload=_parse_task_import_payload,
-    decode_task_import_bytes=_decode_task_import_bytes,
-)
-
-# P2 拆分: 2 个 batch handler 挂路由 (batch-delete / batch)
-_tasks_batch.register_batch_routes(tasks_router)
-
 # P2 拆分: 5 个执行控制 handler 挂路由 (pause/resume/trigger/execute/toggle)
 _tasks_execute.register_execute_routes(tasks_router, create_task_response=create_task_response)
-
-# P2 拆分: 5 个查询 handler 挂路由 (running/stats/{id}/runs/schedule-history/stats)
-_tasks_query.register_query_routes(tasks_router, running_task_hard_cap=RUNNING_TASK_HARD_CAP)
 
 # P2 拆分: 3 个 /runs/{run_id}/... handler 挂路由; 传入本模块让 handler 通过
 # tasks_module 引用 monkeypatch 目标符号。

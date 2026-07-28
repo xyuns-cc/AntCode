@@ -41,6 +41,10 @@ TOKEN_EXPIRED_ERROR = HTTPException(
 )
 
 
+def _utcnow_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 class JWTSecretManager:
     """JWT 密钥管理器
 
@@ -134,7 +138,7 @@ class JWTAuth:
         token_type: str,
         extra: dict | None = None,
     ) -> str:
-        expire = datetime.utcnow() + expires_delta
+        expire = _utcnow_naive() + expires_delta
         payload = {
             "user_id": user_id,
             "username": username,
@@ -190,7 +194,7 @@ class JWTAuth:
         并异步 ``await record_refresh_session(user_id, jti, exp)``。
         """
         jti = uuid.uuid4().hex  # 32-char, RFC 7519 §4.1.7
-        expire = datetime.utcnow() + (expires_delta or timedelta(days=self.refresh_expire_days))
+        expire = _utcnow_naive() + (expires_delta or timedelta(days=self.refresh_expire_days))
         payload = {
             "user_id": user_id,
             "username": username,
@@ -300,7 +304,7 @@ class JWTAuth:
         Gateway ``_authenticate_jwt`` 强制要求 ``expected_class="worker"``,
         拒绝任何 Web access token 冒充 Worker。
         """
-        expire = datetime.utcnow() + (expires_delta or timedelta(days=90))
+        expire = _utcnow_naive() + (expires_delta or timedelta(days=90))
         payload = {
             "sub": worker_id,
             "worker_id": worker_id,
@@ -313,6 +317,7 @@ class JWTAuth:
 
 jwt_auth = JWTAuth()
 security = HTTPBearer()
+optional_security = HTTPBearer(auto_error=False)
 
 
 # === 依赖注入函数 ===
@@ -324,16 +329,21 @@ async def get_current_user(credentials=Depends(security)) -> TokenData:
     if not token_data.session_jti:
         raise AUTH_ERROR
 
+    from antcode_core.common.security.session_expiry import session_is_unexpired
     from antcode_core.domain.models.user import User
     from antcode_core.domain.models.user_session import UserSession
 
+    now = datetime.now(UTC)
     session = await UserSession.filter(
         jti=token_data.session_jti,
         user_id=token_data.user_id,
         revoked_at__isnull=True,
+        expires_at__gt=now,
     ).first()
+    if session is None or not session_is_unexpired(session, now=now):
+        raise AUTH_ERROR
     user = await User.get_or_none(id=token_data.user_id)
-    if session is None or user is None or not user.is_active:
+    if user is None or not user.is_active:
         raise AUTH_ERROR
 
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
@@ -380,13 +390,20 @@ async def verify_refresh_token(token: str) -> TokenData:
     # 3) 查服务端 session 状态
     # 延迟 import 避免 auth.py <-> models 循环依赖 (auth 会被 base model
     # 的路径侧引进来)
+    from antcode_core.common.security.session_expiry import session_is_unexpired
     from antcode_core.domain.models.user_session import UserSession
 
-    session = await UserSession.filter(jti=jti).first()
-    if session is None or session.revoked_at is not None or session.user_id != token_data.user_id:
+    now = datetime.now(UTC)
+    session = await UserSession.filter(
+        jti=jti,
+        user_id=token_data.user_id,
+        revoked_at__isnull=True,
+        expires_at__gt=now,
+    ).first()
+    if session is None or not session_is_unexpired(session, now=now):
         logger.info(
             f"P1-09: refresh 拒绝 user={token_data.user_id} jti={jti[:8]}… "
-            f"(session={'missing' if session is None else 'revoked'})"
+            f"(session={'missing' if session is None else 'expired'})"
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -435,14 +452,16 @@ async def rotate_refresh_session(
     from antcode_core.domain.models.user_session import UserSession
 
     async with in_transaction() as connection:
+        now = datetime.now(UTC)
         revoked = (
             await UserSession.filter(
                 user_id=user_id,
                 jti=previous_jti,
                 revoked_at__isnull=True,
+                expires_at__gt=now,
             )
             .using_db(connection)
-            .update(revoked_at=datetime.now(UTC))
+            .update(revoked_at=now)
         )
         if revoked != 1:
             raise AUTH_ERROR
@@ -495,11 +514,11 @@ async def verify_super_admin(user: TokenData) -> bool:
     return user.is_super_admin
 
 
-def get_optional_current_user(credentials=Depends(security)) -> TokenData | None:
-    """获取当前用户（可选，不抛异常）"""
+async def get_optional_current_user(credentials=Depends(optional_security)) -> TokenData | None:
+    """匿名时返回 None；有凭据时复用完整 session/用户实时校验。"""
     if not credentials:
         return None
     try:
-        return jwt_auth.verify_token(credentials.credentials)
+        return await get_current_user(credentials)
     except HTTPException:
         return None

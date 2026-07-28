@@ -287,7 +287,6 @@ class LogStatisticsService:
                 "lines_served": 0,
                 "errors": 0,
                 "unique_users": 0,
-                "websocket_connections": 0,
             }
         )
 

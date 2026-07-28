@@ -48,16 +48,18 @@ class ArtifactCleanupLoop:
                 if not await ensure_leader():
                     await asyncio.sleep(self._leader_poll_interval)
                     continue
-                await artifact_cleanup_service.cleanup_now()
-                # T7-P2-8: 顺便扫一次孤儿 task_executions（迁移 26 删了 FK，
-                # 需要应用层周检兜底），只打指标+日志不自动删。
-                await self._check_orphans()
+                await self._tick()
                 await asyncio.sleep(self._interval_hours * 3600)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("artifact 清理循环异常: {}", exc)
                 await asyncio.sleep(self._leader_poll_interval)
+
+    async def _tick(self) -> None:
+        await artifact_cleanup_service.cleanup_now()
+        # 迁移删除 FK 后顺便检查孤儿，只记录、不自动删除。
+        await self._check_orphans()
 
     async def _check_orphans(self) -> None:
         """T7-P2-8: 孤儿 task_executions 周检。

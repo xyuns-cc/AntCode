@@ -81,7 +81,13 @@ class Settings(BaseSettings):
     # === 服务器配置 ===
     DATABASE_URL: str = Field(default="")
     REDIS_URL: str = Field(default="")
-    REDIS_NAMESPACE: str = Field(default="antcode")
+    WORKER_GATEWAY_BACKENDLESS: bool = Field(default=False)
+    REDIS_NAMESPACE: str = Field(
+        default="antcode",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9:_-]*$",
+    )
     # 是否启用 Redis（关闭时依赖 Redis 的功能会 no-op：批次事件不发布、
     # scheduler_event_loop 空转、WS 日志不接实时流）。默认 true 与代码假设一致；
     # 空 REDIS_URL 场景可设 false 让功能显式降级而不是抛 AttributeError。
@@ -104,9 +110,35 @@ class Settings(BaseSettings):
     FRONTEND_PORT: int = Field(default_factory=_default_frontend_port)
     SERVER_DOMAIN: str = Field(default="localhost")
     ALLOW_PRIVATE_NODES: bool = Field(default=False)
+    PROJECT_TEST_CONNECTION_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=60)
+    PROJECT_TEST_CONNECTION_MAX_RESPONSE_BYTES: int = Field(default=1_048_576, ge=1024, le=16_777_216)
+    GIT_LS_REMOTE_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0, le=300)
+    GIT_CLONE_TIMEOUT_SECONDS: float = Field(default=300.0, gt=0, le=3600)
+    GIT_DNS_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=60)
+    GIT_MAX_COMMAND_OUTPUT_BYTES: int = Field(default=8_388_608, ge=65_536, le=67_108_864)
+    GIT_MAX_TRANSFER_BYTES: int = Field(default=536_870_912, ge=1_048_576, le=8_589_934_592)
+    GIT_MAX_REPOSITORY_BYTES: int = Field(default=536_870_912, ge=1_048_576)
+    GIT_MAX_BLOB_BYTES: int = Field(default=67_108_864, ge=1_048_576)
+    GIT_MAX_OBJECTS: int = Field(default=200_000, ge=1_000)
+    GIT_MAX_REFS: int = Field(default=20_000, ge=100)
+    GIT_SCAN_MAX_FILES: int = Field(default=100_000, ge=1_000)
+    GIT_SCAN_MAX_DIRECTORIES: int = Field(default=20_000, ge=100)
+    GIT_SCAN_MAX_DEPTH: int = Field(default=50, ge=1, le=200)
+    GIT_SCAN_MAX_CANDIDATES: int = Field(default=10_000, ge=1)
+    API_MANAGEMENT_BATCH_MAX_ITEMS: int = Field(default=100, ge=1, le=1000)
+    NODE_PACKAGE_REGISTRY_ALLOWLIST: str = Field(default="https://registry.npmjs.org")
+    NODE_LOCKFILE_MAX_BYTES: int = Field(default=8_388_608, ge=1024, le=67_108_864)
+    NODE_INSTALL_MAX_OUTPUT_BYTES: int = Field(default=2_097_152, ge=65_536, le=16_777_216)
 
     # === 日志配置 ===
     LOG_LEVEL: str = Field(default="INFO")
+    SSE_MAX_CONN_PER_EXECUTION: int = Field(default=100, ge=1)
+    SSE_MAX_TOTAL_CONN: int = Field(default=1000, ge=1)
+    SSE_MAX_CONN_PER_USER: int = Field(default=10, ge=1)
+    SSE_QUEUE_MAX_MESSAGES: int = Field(default=1000, ge=1)
+    SSE_QUEUE_MAX_BYTES: int = Field(default=2_097_152, ge=65_536)
+    SSE_HISTORY_MAX_BYTES: int = Field(default=8_388_608, ge=65_536)
+    SSE_LEASE_TTL_SECONDS: int = Field(default=60, ge=15)
 
     # === 应用信息 ===
     APP_NAME: str = "AntCode"
@@ -212,6 +244,7 @@ class Settings(BaseSettings):
     WORKER_INSTALL_KEY_REPLAY_WINDOW_SECONDS: int = Field(default=60)
     WORKER_INSTALL_KEY_FAIL_THRESHOLD: int = Field(default=5)
     WORKER_INSTALL_KEY_BLOCK_SECONDS: int = Field(default=600)
+    WORKER_REGISTRATION_RECOVERY_SECONDS: int = Field(default=3600, gt=0, le=86400)
     WORKER_INSTALL_SOURCE_URL: str = Field(default="")
     WORKER_INSTALL_SOURCE_REF: str = Field(default="")
     WORKER_INSTALL_GATEWAY_TLS: bool = Field(default=False)
@@ -371,13 +404,6 @@ class Settings(BaseSettings):
     RATE_LIMIT_CALLS: int = 1000
     RATE_LIMIT_PERIOD: int = 60
 
-    # === 实时日志流（SSE）连接上限；沿用 WEBSOCKET_* 命名保持部署面配置兼容 ===
-    WEBSOCKET_MAX_CONN_PER_EXECUTION: int = 200
-    WEBSOCKET_MAX_TOTAL_CONN: int = 20000
-    # 必须在此声明：pydantic extra="ignore" 会静默丢弃未声明的环境变量，
-    # 只靠消费端 getattr 兜底会让运维配置的 per-user 上限永远不生效
-    WEBSOCKET_MAX_CONN_PER_USER: int = 20
-
     model_config = SettingsConfigDict(
         env_file=str(_find_project_root() / ".env"),
         env_file_encoding="utf-8",
@@ -389,13 +415,19 @@ class Settings(BaseSettings):
     def validate_backend_config(self) -> "Settings":
         """Validate mandatory PostgreSQL and Redis infrastructure."""
         database_url = self.DATABASE_URL.strip()
-        if not database_url:
-            raise ValueError("DATABASE_URL 必须设置，且只能使用 PostgreSQL。")
-        _validate_database_url(database_url)
         redis_url = self.REDIS_URL.strip()
-        if not redis_url:
-            raise ValueError("REDIS_URL 必须设置。")
-        _validate_redis_url(redis_url)
+        if self.WORKER_GATEWAY_BACKENDLESS:
+            if self.WORKER_TRANSPORT_MODE != "gateway":
+                raise ValueError("WORKER_GATEWAY_BACKENDLESS 仅允许 Gateway Worker 使用。")
+            if database_url or redis_url:
+                raise ValueError("Gateway Worker 禁止注入 DATABASE_URL 或 REDIS_URL。")
+        else:
+            if not database_url:
+                raise ValueError("DATABASE_URL 必须设置，且只能使用 PostgreSQL。")
+            _validate_database_url(database_url)
+            if not redis_url:
+                raise ValueError("REDIS_URL 必须设置。")
+            _validate_redis_url(redis_url)
         if self.LOGIN_PASSWORD_ENCRYPTION_REQUIRED and not self.LOGIN_PASSWORD_ENCRYPTION_ENABLED:
             raise ValueError("LOGIN_PASSWORD_ENCRYPTION_REQUIRED 需同时启用 LOGIN_PASSWORD_ENCRYPTION_ENABLED")
         return self

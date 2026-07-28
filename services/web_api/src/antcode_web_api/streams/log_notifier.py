@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from antcode_core.application.services.workers.log_notifier import LogRealtimeNotifier
 
-from antcode_web_api.streams.run_stream_broker import run_stream_broker
 from antcode_web_api.streams.sse import build_log_line_message, build_run_status_message
+from antcode_web_api.streams.sse_event_stream import publish_sse_event
 
 
 class SSELogNotifier(LogRealtimeNotifier):
     async def has_connections(self, run_id: str) -> bool:
-        return run_stream_broker.has_subscribers(run_id)
+        # 订阅可能位于另一个 Uvicorn worker，不能用本进程 broker 判定。
+        return True
 
     async def send_log(
         self,
@@ -26,9 +27,9 @@ class SSELogNotifier(LogRealtimeNotifier):
         content: str,
         level: str,
         sequence: int | None = None,
+        storage_id: int,
     ) -> None:
-        run_stream_broker.publish(
-            run_id,
+        await publish_sse_event(
             build_log_line_message(
                 run_id,
                 log_type=log_type,
@@ -36,6 +37,7 @@ class SSELogNotifier(LogRealtimeNotifier):
                 timestamp=None,
                 sequence=sequence,
                 source="task_execution",
+                storage_id=storage_id,
             ),
         )
 
@@ -47,8 +49,7 @@ class SSELogNotifier(LogRealtimeNotifier):
         progress: float | None,
         message: str,
     ) -> None:
-        run_stream_broker.publish(
-            run_id,
+        await publish_sse_event(
             build_run_status_message(
                 run_id=run_id,
                 status=status,

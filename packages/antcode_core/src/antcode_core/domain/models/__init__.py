@@ -104,6 +104,7 @@ from antcode_core.domain.models.system_config import SystemConfig
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_log import TaskLog
 from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.domain.models.task_run_lease_generation import TaskRunLeaseGeneration
 
 # 用户模型
 from antcode_core.domain.models.user import User, UserRole, pwd_context
@@ -164,6 +165,7 @@ __all__ = [
     "Task",
     "TaskLog",
     "TaskRun",
+    "TaskRunLeaseGeneration",
     # 运行时环境模型
     "Runtime",
     "ProjectRuntimeBinding",

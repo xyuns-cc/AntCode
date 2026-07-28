@@ -245,6 +245,7 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             continuation=continuation,
             handler_call_details=handler_call_details,
             authenticated_worker_id=authenticated_worker_id,
+            require_certificate=auth_result.auth_method == "mtls",
         )
 
     async def _intercept_disabled(self, continuation: Callable, details: grpc.HandlerCallDetails) -> Any:
@@ -308,10 +309,11 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             if result.success:
                 return result
 
-        # 3. mTLS: 实际的 CN/SAN 绑定校验在 _wrap_with_mtls_check 里, 拿到
-        # ServicerContext 后从 ``auth_context()`` 取 peer 证书身份, 与
-        # metadata 中的 worker_id 强一致。这里只负责"未提供任何 API Key
-        # / JWT 凭证"的兜底拒绝。
+        # 3. mTLS: intercept 阶段拿不到 ServicerContext，先接受声明的
+        # worker_id 作为待验证主体；实际 handler 必须从 auth_context 取得
+        # 客户端证书，并把 CN/SAN 与该主体强绑定。没有证书不会被放行。
+        if worker_id:
+            return AuthResult(success=True, worker_id=worker_id, auth_method="mtls")
 
         return AuthResult(success=False, error="未提供有效的认证信息")
 
@@ -536,37 +538,71 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         continuation: Callable,
         handler_call_details: grpc.HandlerCallDetails,
         authenticated_worker_id: str,
+        *,
+        require_certificate: bool = False,
     ) -> grpc.RpcMethodHandler:
         """P1-#12: 在 mTLS 链路上,确保 peer 证书 CN/SAN 与 metadata 中的
         worker_id 一致。开发环境(无客户端证书)直接放行,生产环境(挂了
         require_client_auth=True)证书必现,不一致即 PERMISSION_DENIED。
         """
         original = await continuation(handler_call_details)
-        return self._make_mtls_wrapped_handler(original, authenticated_worker_id)
+        return self._make_mtls_wrapped_handler(
+            original,
+            authenticated_worker_id,
+            require_certificate=require_certificate,
+        )
 
     def _make_mtls_wrapped_handler(
         self,
         original: grpc.RpcMethodHandler,
         authenticated_worker_id: str,
+        *,
+        require_certificate: bool = False,
     ) -> grpc.RpcMethodHandler:
         if original.unary_unary is not None:
-            return self._wrap_unary_unary_handler(original, authenticated_worker_id)
+            return self._wrap_unary_unary_handler(
+                original,
+                authenticated_worker_id,
+                require_certificate=require_certificate,
+            )
         if original.unary_stream is not None:
-            return self._wrap_unary_stream_handler(original, authenticated_worker_id)
+            return self._wrap_unary_stream_handler(
+                original,
+                authenticated_worker_id,
+                require_certificate=require_certificate,
+            )
         if original.stream_unary is not None:
-            return self._wrap_stream_unary_handler(original, authenticated_worker_id)
+            return self._wrap_stream_unary_handler(
+                original,
+                authenticated_worker_id,
+                require_certificate=require_certificate,
+            )
         if original.stream_stream is not None:
-            return self._wrap_stream_stream_handler(original, authenticated_worker_id)
+            return self._wrap_stream_stream_handler(
+                original,
+                authenticated_worker_id,
+                require_certificate=require_certificate,
+            )
         return original
 
-    async def _require_mtls_binding(self, context, worker_id: str) -> None:
-        ok, reason = self._check_mtls_binding(context, worker_id)
+    async def _require_mtls_binding(
+        self,
+        context,
+        worker_id: str,
+        *,
+        require_certificate: bool = False,
+    ) -> None:
+        ok, reason = self._check_mtls_binding(
+            context,
+            worker_id,
+            require_certificate=require_certificate,
+        )
         if not ok:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, reason)
 
-    def _wrap_unary_unary_handler(self, original, worker_id: str):
+    def _wrap_unary_unary_handler(self, original, worker_id: str, *, require_certificate: bool = False):
         async def wrapped(request, context):
-            await self._require_mtls_binding(context, worker_id)
+            await self._require_mtls_binding(context, worker_id, require_certificate=require_certificate)
             token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
                 return await original.unary_unary(request, context)
@@ -579,9 +615,9 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             response_serializer=original.response_serializer,
         )
 
-    def _wrap_unary_stream_handler(self, original, worker_id: str):
+    def _wrap_unary_stream_handler(self, original, worker_id: str, *, require_certificate: bool = False):
         async def wrapped(request, context):
-            await self._require_mtls_binding(context, worker_id)
+            await self._require_mtls_binding(context, worker_id, require_certificate=require_certificate)
             token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
                 async for response in original.unary_stream(request, context):
@@ -595,9 +631,9 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             response_serializer=original.response_serializer,
         )
 
-    def _wrap_stream_unary_handler(self, original, worker_id: str):
+    def _wrap_stream_unary_handler(self, original, worker_id: str, *, require_certificate: bool = False):
         async def wrapped(request_iterator, context):
-            await self._require_mtls_binding(context, worker_id)
+            await self._require_mtls_binding(context, worker_id, require_certificate=require_certificate)
             token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
                 return await original.stream_unary(request_iterator, context)
@@ -610,9 +646,9 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             response_serializer=original.response_serializer,
         )
 
-    def _wrap_stream_stream_handler(self, original, worker_id: str):
+    def _wrap_stream_stream_handler(self, original, worker_id: str, *, require_certificate: bool = False):
         async def wrapped(request_iterator, context):
-            await self._require_mtls_binding(context, worker_id)
+            await self._require_mtls_binding(context, worker_id, require_certificate=require_certificate)
             token = _AUTHENTICATED_WORKER_ID.set(worker_id)
             try:
                 async for response in original.stream_stream(request_iterator, context):
@@ -630,6 +666,8 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     def _check_mtls_binding(
         context: grpc.aio.ServicerContext,
         authenticated_worker_id: str,
+        *,
+        require_certificate: bool = False,
     ) -> tuple[bool, str]:
         """从 context.auth_context() 读 peer CN/SAN,和 metadata worker_id 对齐。
 
@@ -640,30 +678,48 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         """
         if not authenticated_worker_id:
             return True, ""
+        identities, read_error = AuthInterceptor._read_peer_identities(context)
+        if read_error:
+            return False, read_error
+        if not identities:
+            if require_certificate:
+                return False, "mTLS 认证未提供客户端证书身份"
+            return True, ""
+        if AuthInterceptor._identity_matches_worker(identities, authenticated_worker_id):
+            return True, ""
+        return False, "mTLS 证书身份与 worker_id 不匹配"
+
+    @staticmethod
+    def _read_peer_identities(context: grpc.aio.ServicerContext) -> tuple[list[str], str]:
         try:
             auth_ctx = context.auth_context() or {}
         except Exception:  # noqa: BLE001 - 不应阻断主流程,但要拒绝
-            return False, "无法读取 mTLS auth_context"
+            return [], "无法读取 mTLS auth_context"
+        return AuthInterceptor._peer_identities(auth_ctx), ""
 
-        identities = AuthInterceptor._peer_identities(auth_ctx)
+    @staticmethod
+    def _identity_matches_worker(identities: list[str], authenticated_worker_id: str) -> bool:
+        """精确匹配证书身份（P2 §4.2：禁止宽松后缀匹配）。
 
-        # 没拿到任何证书身份: 视为未开启 mTLS,放行(开发环境兼容)。
-        if not identities:
-            return True, ""
+        允许的形态：
+        - CN/SAN 完整相等: ``<worker_id>``
+        - 前缀标记整串相等: ``worker:<worker_id>``
+        - URI SAN: 解析后 path 最后一段精确等于 ``<worker_id>``。
+        此前 ``endswith("worker:<id>")`` 会被 ``evilworker:<id>`` 这类
+        拼接身份绕过。
+        """
+        from urllib.parse import urlsplit
 
-        if authenticated_worker_id in identities:
-            return True, ""
-
-        # 也兼容 SAN 里挂了 "worker:<id>" / URI 形式
-        suffixes = {
-            f"worker:{authenticated_worker_id}",
-            f"/{authenticated_worker_id}",
-        }
-        for ident in identities:
-            if any(ident.endswith(s) for s in suffixes):
-                return True, ""
-
-        return False, "mTLS 证书身份与 worker_id 不匹配"
+        for identity in identities:
+            if identity == authenticated_worker_id:
+                return True
+            if identity == f"worker:{authenticated_worker_id}":
+                return True
+            if "://" in identity:
+                segments = [segment for segment in urlsplit(identity).path.split("/") if segment]
+                if segments and segments[-1] == authenticated_worker_id:
+                    return True
+        return False
 
     @staticmethod
     def _peer_identities(auth_context: dict) -> list[str]:

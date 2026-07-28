@@ -13,6 +13,7 @@ type ErrorData = {
 
 type ErrorEnvelope = {
   message?: string
+  detail?: string
   data?: ErrorData | null
 }
 
@@ -69,9 +70,9 @@ export const presentApiError = (error: AxiosError<unknown>): PresentedApiError =
 
   const fallbackTitle = status ? DEFAULT_STATUS_MESSAGES[status] ?? `请求失败 (${status})` : '请求失败'
 
-  if (payload && typeof payload === 'object' && 'message' in payload) {
+  if (payload && typeof payload === 'object' && ('message' in payload || 'detail' in payload)) {
     const envelope = payload as ErrorEnvelope
-    const message = trimText(envelope.message)
+    const message = trimText(envelope.message) || trimText(envelope.detail)
     const errorCode = trimText(envelope.data?.error_code)
     const lines = toLines(envelope.data?.errors)
 
@@ -102,4 +103,3 @@ export const presentApiError = (error: AxiosError<unknown>): PresentedApiError =
   }
   return { title: fallbackTitle }
 }
-

@@ -61,8 +61,10 @@ class SpiderStorageCleanupService:
 
         pipeline = self._redis.pipeline(transaction=False)
         index_key = self._keys.spider_index_key(project_id)
+        index_expiry_key = self._keys.spider_index_expiry_key(project_id)
         for run_id in run_ids:
             pipeline.zrem(index_key, run_id)
+            pipeline.zrem(index_expiry_key, run_id)
         await pipeline.execute()
 
 

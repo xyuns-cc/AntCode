@@ -92,7 +92,14 @@ def _validate_api_base_url(value: str) -> None:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise WorkerInstallerConfigurationError("API_BASE_URL 不允许包含凭证、query 或 fragment")
     if parsed.scheme == "http" and parsed.hostname not in _LOOPBACK_HOSTS:
-        raise WorkerInstallerConfigurationError("远程 Worker 安装必须通过 HTTPS API_BASE_URL")
+        # P2 §4.6: 生产未显式配置 API_BASE_URL 时，public_api_base_url 会由
+        # SERVER_DOMAIN 推导成 HTTP，走到这里必然失败。错误信息必须给出
+        # 根因与修复方式，而不是让"安装必失败"看起来像随机故障。
+        raise WorkerInstallerConfigurationError(
+            f"远程 Worker 安装必须通过 HTTPS API_BASE_URL（当前: {value}）。"
+            "生产部署请显式设置 API_BASE_URL=https://<对外域名>；"
+            "未显式配置时该值由 SERVER_DOMAIN 推导为 HTTP，仅适用于本机开发。"
+        )
 
 
 def _validate_source_url(value: str) -> None:

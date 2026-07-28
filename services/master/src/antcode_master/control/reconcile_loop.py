@@ -17,13 +17,16 @@ P1-#18 改造：原来 ``TaskRun.filter(...).all()`` 一把拉全表再
 
 import asyncio
 import contextlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from antcode_core.domain.models import TaskRun
-from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
+from antcode_core.domain.models.enums import TaskStatus
 from loguru import logger
-from tortoise.expressions import Q
 
+from antcode_master.control.reconcile_repairs import (
+    cleanup_zombie_tasks,
+    repair_inconsistent_states,
+)
 from antcode_master.leader import ensure_leader, get_fencing_token
 
 
@@ -132,6 +135,20 @@ class ReconcileLoop:
         # 4. 清理僵尸任务
         await self._cleanup_zombie_tasks(fencing_token)
 
+        # 4b. 复审 F3-A/F2-A: 创建后未派发的孤儿 run + 卡 busy 的 Task 状态。
+        from antcode_master.control.reconcile_repairs import (
+            repair_stale_task_status,
+            repair_stuck_queued_runs,
+        )
+
+        await repair_stuck_queued_runs()
+        await repair_stale_task_status()
+
+        # 5. P2 §4.3: global control stream 安全裁剪（详见模块注释）。
+        from antcode_master.control.global_stream_retention import trim_global_control_stream
+
+        await trim_global_control_stream()
+
     async def _check_timeout_tasks(self, fencing_token: int):
         """检测超时任务（bulk_update 单条 UPDATE 即可）。
 
@@ -210,107 +227,23 @@ class ReconcileLoop:
             logger.exception("检测超时任务失败")
 
     async def _check_dispatched_no_ack(self, fencing_token: int):
-        """P1-17: 检测"已分发到 Worker 但 Worker 从未上报 RUNNING"的僵尸分发。
+        """P1-17 / P1-FN-06: 委托 dispatch_ack_liveness(见该模块注释)。
 
-        触发场景:``scheduler_loop._record_dispatch_result`` 把 dispatch_status
-        置为 DISPATCHED,``worker.Engine._execute_task`` 内部会主动上报一次
-        status="running" 把 runtime_status 推到 RUNNING。如果 Worker 在
-        "收到任务 → 上报 RUNNING" 之间的窗口崩溃(常见于 bundle 下载
-        阶段被 OOM kill / 节点断电 / kubelet 重启),master 侧就出现:
-
-        - dispatch_status = DISPATCHING 或 DISPATCHED
-        - runtime_status  = NULL / QUEUED / PENDING
-        - dispatch_updated_at 老于 ``DISPATCH_ACK_TIMEOUT_SECONDS``
-
-        旧实现只查 ``TaskStatus.RUNNING`` 完全捞不到,任务永卡 DISPATCHING、
-        不失败也不超时也不补派。这里通过 ``update_dispatch_status(FAILED)``
-        统一收敛终态,由 status_service 的 CAS 保证:
-        (a) 一旦 worker 迟到 RUNNING 上来就命中 dispatch 终态吸收,不会翻转;
-        (b) 迟到的 SUCCESS 也不会复活 —— runtime_status 终态保护。
+        僵尸分发按 ``DISPATCH_ACK_TIMEOUT_SECONDS`` 收敛为 FAILED;绑定
+        Worker 的 Lease 仍存活的 run 跳过并延长观察,避免 result loop 积压
+        时误杀仍在执行的长任务。
         """
-        from antcode_core.application.services.scheduler.execution_status_service import (
-            execution_status_service,
-        )
+        from antcode_master.control.dispatch_ack_liveness import check_dispatched_no_ack
 
-        try:
-            now = datetime.now(UTC)
-            cutoff = now - timedelta(seconds=int(self.DISPATCH_ACK_TIMEOUT_SECONDS))
-
-            # 命中条件:dispatch 侧已发出去(DISPATCHING/DISPATCHED),runtime 侧
-            # 还没进入 RUNNING (NULL / QUEUED / PENDING 都算未 ACK),且超阈值。
-            candidates = (
-                await TaskRun.filter(
-                    Q(
-                        dispatch_status__in=[
-                            DispatchStatus.DISPATCHING,
-                            DispatchStatus.DISPATCHED,
-                        ]
-                    ),
-                    Q(runtime_status__isnull=True) | Q(runtime_status=RuntimeStatus.QUEUED),
-                    Q(dispatch_updated_at__lt=cutoff) | Q(dispatch_updated_at__isnull=True, created_at__lt=cutoff),
-                )
-                .only("id", "run_id", "dispatch_status", "runtime_status", "dispatch_updated_at")
-                .limit(200)
-                .all()
-            )
-            if not candidates:
-                return
-
-            logger.warning(f"P1-17: 发现 {len(candidates)} 个已分发但节点未上报 RUNNING 的僵尸任务")
-            marked = 0
-            for run in candidates:
-                # 走 dispatch_status → FAILED,复用 _derive_overall 把 status 同步为
-                # TaskStatus.FAILED,并由 execution_status_service 触发 Task 计数。
-                ok = await execution_status_service.update_dispatch_status(
-                    run_id=run.run_id,
-                    status=DispatchStatus.FAILED,
-                    status_at=now,
-                    error_message=(
-                        f"节点未在 {self.DISPATCH_ACK_TIMEOUT_SECONDS}s 内上报 RUNNING(worker 可能在收到任务后崩溃)"
-                    ),
-                )
-                if ok:
-                    marked += 1
-            logger.info(f"P1-17: 已标记 {marked}/{len(candidates)} 条僵尸分发为 FAILED")
-        except Exception:
-            logger.exception("P1-17: 检测僵尸分发失败")
+        await check_dispatched_no_ack(self.DISPATCH_ACK_TIMEOUT_SECONDS)
 
     async def _check_inconsistent_states(self, fencing_token: int):
-        """检测状态不一致（拆 2 次 bulk update：有 error 走 FAILED，否则 SUCCESS）。
+        """检测状态不一致并通过统一状态机收敛终态。
 
         Args:
             fencing_token: Fencing Token
         """
-        try:
-            # error_message 为空 → 推断为 SUCCESS
-            success_ids = await TaskRun.filter(
-                status=TaskStatus.RUNNING,
-                end_time__isnull=False,
-                error_message__isnull=True,
-            ).values_list("id", flat=True)
-            success_ids = list(success_ids)
-
-            # error_message 非空 → FAILED
-            failed_ids = await TaskRun.filter(
-                status=TaskStatus.RUNNING,
-                end_time__isnull=False,
-                error_message__not_isnull=True,
-            ).values_list("id", flat=True)
-            failed_ids = list(failed_ids)
-
-            total = len(success_ids) + len(failed_ids)
-            if total == 0:
-                return
-
-            logger.warning(f"发现 {total} 个状态不一致任务")
-            if success_ids:
-                await TaskRun.filter(id__in=success_ids).update(status=TaskStatus.SUCCESS)
-            if failed_ids:
-                await TaskRun.filter(id__in=failed_ids).update(status=TaskStatus.FAILED)
-            logger.info(f"修复 SUCCESS={len(success_ids)} FAILED={len(failed_ids)}")
-
-        except Exception:
-            logger.exception("检测状态不一致失败")
+        await repair_inconsistent_states()
 
     async def _cleanup_zombie_tasks(self, fencing_token: int):
         """清理僵尸任务（bulk_update）。
@@ -318,30 +251,7 @@ class ReconcileLoop:
         Args:
             fencing_token: Fencing Token
         """
-        try:
-            # 查找长时间处于 PENDING 状态的任务
-            now = datetime.now(UTC)
-            zombie_threshold = now - timedelta(hours=24)
-
-            zombie_ids = await TaskRun.filter(
-                status=TaskStatus.PENDING,
-                created_at__lt=zombie_threshold,
-            ).values_list("id", flat=True)
-            zombie_ids = list(zombie_ids)
-
-            if not zombie_ids:
-                return
-
-            logger.warning(f"发现 {len(zombie_ids)} 个僵尸任务")
-            updated = await TaskRun.filter(id__in=zombie_ids).update(
-                status=TaskStatus.FAILED,
-                error_message="任务长时间未调度，已清理",
-                end_time=now,
-            )
-            logger.info(f"已清理 {updated} 个僵尸任务")
-
-        except Exception:
-            logger.exception("清理僵尸任务失败")
+        await cleanup_zombie_tasks()
 
 
 # 全局协调循环实例

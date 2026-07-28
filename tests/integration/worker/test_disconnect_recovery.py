@@ -1,12 +1,4 @@
-"""
-断线恢复集成测试
-
-验证：
-- pending reclaim (XAUTOCLAIM)
-- result idempotency (duplicate report)
-
-Requirements: 14.5
-"""
+"""断线恢复、pending reclaim 与结果幂等集成测试。"""
 
 import asyncio
 import os
@@ -14,13 +6,18 @@ import uuid
 from datetime import datetime
 
 import pytest
+from antcode_contracts import data_pb2
 from antcode_worker.transport.redis.keys import RedisKeys
 from loguru import logger
 
+from tests.integration.worker import direct_transport_support as direct_support
+
 # 集成测试必须显式提供 Redis URL
-REDIS_URL = os.getenv("REDIS_URL")
-pytestmark = pytest.mark.skipif(not REDIS_URL, reason="REDIS_URL is required for worker integration tests")
-REDIS_KEYS = RedisKeys()
+REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
+pytestmark = pytest.mark.skipif(
+    not REDIS_URL,
+    reason="ANTCODE_INTEGRATION_REDIS_URL is required for worker integration tests",
+)
 
 
 @pytest.fixture
@@ -160,6 +157,7 @@ class TestPendingReclaim:
         from antcode_worker.transport.redis.reclaim import (
             PendingTaskReclaimer,
             ReclaimConfig,
+            ensure_consumer_group,
         )
 
         redis_client = aioredis.from_url(
@@ -168,8 +166,10 @@ class TestPendingReclaim:
             decode_responses=True,
         )
 
-        # 使用 namespace 参数而不是 prefix
-        keys = RedisKeys(namespace=unique_stream_prefix)
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        stream_key = keys.task_ready_stream(unique_worker_id)
+        group_name = keys.consumer_group_name()
         config = ReclaimConfig(
             min_idle_time_ms=100,  # 100ms 用于测试
             max_reclaim_count=10,
@@ -184,6 +184,8 @@ class TestPendingReclaim:
         )
 
         try:
+            await ensure_consumer_group(redis_client, stream_key, group_name)
+
             # 验证初始化
             assert reclaimer.is_running is False
             assert reclaimer.stats.total_reclaimed == 0
@@ -195,6 +197,7 @@ class TestPendingReclaim:
             logger.info("[Test] Reclaimer 模块初始化成功")
 
         finally:
+            await redis_client.delete(stream_key)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -296,6 +299,8 @@ class TestResultIdempotency:
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试重复结果上报
@@ -305,26 +310,28 @@ class TestResultIdempotency:
         2. Master 端可以通过 run_id 去重
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
         redis_client = aioredis.from_url(
             REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
+            decode_responses=False,
         )
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
 
             # 创建结果
             result = TaskResult(
@@ -345,29 +352,27 @@ class TestResultIdempotency:
                 logger.info(f"[Test] 第 {i + 1} 次上报成功")
 
             # 验证结果
-            result_key = REDIS_KEYS.task_result_stream()
-            results = await redis_client.xrevrange(result_key, "+", "-", count=100)
+            result_key = keys.task_result_stream()
+            entries = await redis_client.xrevrange(result_key, "+", "-", count=100)
+            results = direct_support.decode_task_statuses(entries)
 
             # 统计该 task_id 的结果数量
-            count = sum(1 for _, data in results if data.get("task_id") == unique_task_id)
+            count = sum(1 for data in results if data.task_id == unique_task_id)
 
             logger.info(f"[Test] 结果记录数: {count}")
             logger.info("[Test] 注意：at-least-once 语义，Master 端需要通过 run_id 去重")
 
             # 验证所有结果数据一致
-            for _, data in results:
-                if data.get("task_id") == unique_task_id:
-                    assert data.get("status") == "success"
-                    assert data.get("exit_code") == "0"
+            for data in results:
+                if data.task_id == unique_task_id:
+                    assert data.status == data_pb2.STATUS_COMPLETED
+                    assert data.exit_code == 0
 
             logger.info("[Test] ✓ 重复结果上报验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -376,6 +381,8 @@ class TestResultIdempotency:
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试不同时间戳的重复上报
@@ -385,26 +392,28 @@ class TestResultIdempotency:
         2. Master 端应该使用最新的结果
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
         redis_client = aioredis.from_url(
             REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
+            decode_responses=False,
         )
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
 
             # 第一次上报
             result1 = TaskResult(
@@ -434,26 +443,23 @@ class TestResultIdempotency:
             await transport.report_result(result2)
 
             # 验证结果
-            result_key = REDIS_KEYS.task_result_stream()
-            results = await redis_client.xrevrange(result_key, "+", "-", count=100)
+            result_key = keys.task_result_stream()
+            entries = await redis_client.xrevrange(result_key, "+", "-", count=100)
+            results = direct_support.decode_task_statuses(entries)
 
-            task_results = [(msg_id, data) for msg_id, data in results if data.get("task_id") == unique_task_id]
+            task_results = [data for data in results if data.task_id == unique_task_id]
 
             assert len(task_results) >= 2
             logger.info(f"[Test] 不同时间戳上报: {len(task_results)} 条记录")
 
             # Master 端应该使用最新的（最后一条）
-            latest_msg_id, latest_data = task_results[0]
-            logger.info(f"[Test] 最新记录: msg_id={latest_msg_id}")
+            assert task_results[0].status == data_pb2.STATUS_COMPLETED
 
             logger.info("[Test] ✓ 不同时间戳重复上报验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
 
@@ -569,7 +575,7 @@ class TestReconnectBehavior:
         logger.info("[Test] ✓ Gateway 重连管理器验证通过")
 
     @pytest.mark.asyncio
-    async def test_transport_reconnect_after_disconnect(self, unique_worker_id):
+    async def test_transport_reconnect_after_disconnect(self, unique_worker_id, direct_transport_factory):
         """
         测试 Transport 断线后重连
 
@@ -577,14 +583,11 @@ class TestReconnectBehavior:
         1. Transport 可以检测断线
         2. 可以重新连接
         """
-        from antcode_worker.transport import RedisTransport
-
-        transport = RedisTransport(redis_url=REDIS_URL, worker_id=unique_worker_id)
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id)
 
         try:
             # 第一次连接
-            started = await transport.start()
-            assert started is True
+            lease_id = await direct_support.activate_direct_transport(transport)
             assert transport.is_connected is True
             logger.info("[Test] 第一次连接成功")
 
@@ -596,13 +599,15 @@ class TestReconnectBehavior:
             # 重新连接
             started = await transport.start()
             assert started is True
+            renewed_lease_id, _, _, revoked = await transport.lease_renew(lease_id)
+            assert renewed_lease_id == lease_id and not revoked
             assert transport.is_connected is True
             logger.info("[Test] 重新连接成功")
 
             logger.info("[Test] ✓ Transport 断线重连验证通过")
 
         finally:
-            await transport.stop()
+            await direct_support.stop_direct_transport(transport)
 
 
 @pytest.mark.integration

@@ -26,7 +26,7 @@ from antcode_core.application.services.scheduler.redispatch_service import (
     redispatch_service,
 )
 from antcode_core.common.config import settings
-from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.enums import DispatchStatus
 from antcode_core.domain.models.task_run import TaskRun
 from loguru import logger
 
@@ -127,6 +127,7 @@ class RedispatchLoop:
             run_id=run_id,
             params=payload.get("params") or {},
             environment_vars=payload.get("environment_vars") or None,
+            runtime_env_name=payload.get("runtime_env_name") or None,
             timeout=int(payload.get("timeout") or 3600),
             project_type=payload.get("project_type") or "code",
         )
@@ -154,6 +155,7 @@ class RedispatchLoop:
             project_id=payload.get("project_id") or "",
             params=payload.get("params") or {},
             environment_vars=payload.get("environment_vars") or None,
+            runtime_env_name=payload.get("runtime_env_name") or None,
             timeout=int(payload.get("timeout") or 3600),
             project_type=payload.get("project_type") or "code",
             attempts=attempts,
@@ -166,15 +168,9 @@ class RedispatchLoop:
     async def _give_up(self, payload: dict[str, Any], *, reason: str) -> None:
         run_id = payload.get("run_id") or ""
         attempts = int(payload.get("attempts") or 0)
-        # 置 TaskRun.FAILED
-        try:
-            await TaskRun.filter(run_id=run_id).update(
-                status=TaskStatus.FAILED,
-                end_time=datetime.now(UTC),
-                error_message=f"补派耗尽 ({attempts}次): {reason}"[:1000],
-            )
-        except Exception as exc:
-            logger.warning(f"补派放弃时置 FAILED 失败 run_id={run_id}: {exc}")
+        if not await self._mark_failed(run_id, attempts, reason):
+            logger.info(f"补派放弃项已由其他路径终结，跳过重复副作用: run_id={run_id}")
+            return
 
         # audit_log
         try:
@@ -209,6 +205,30 @@ class RedispatchLoop:
             logger.debug(f"补派放弃告警发送失败（可忽略）: {exc}")
 
         logger.error(f"补派放弃: run_id={run_id} attempts={attempts} reason={reason!r}")
+
+    @staticmethod
+    async def _mark_failed(run_id: str, attempts: int, reason: str) -> bool:
+        from antcode_core.application.services.scheduler.execution_status_service import (
+            execution_status_service,
+        )
+
+        updated = await execution_status_service.update_dispatch_status(
+            run_id=run_id,
+            status=DispatchStatus.FAILED,
+            status_at=datetime.now(UTC),
+            error_message=f"补派耗尽 ({attempts}次): {reason}"[:1000],
+        )
+        if updated:
+            return True
+        current = await TaskRun.get_or_none(run_id=run_id)
+        if current is not None and current.dispatch_status in {
+            DispatchStatus.ACKED,
+            DispatchStatus.REJECTED,
+            DispatchStatus.TIMEOUT,
+            DispatchStatus.FAILED,
+        }:
+            return False
+        raise RuntimeError(f"补派耗尽状态未持久化: run_id={run_id}")
 
 
 redispatch_loop = RedispatchLoop()

@@ -29,11 +29,43 @@ IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
 
-PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/+=:~\-\[\]\(\),<>!#]*$")
+# P0-01：严格 PEP 508 name[extras] operator version [; markers] 白名单。
+# 之前的正则允许 `pkg@https://…`、`git+https://…`、`https://…tar.gz`、`file:///…` 等
+# direct-reference / VCS / URL / 本地路径，会让 uv pip install 从任意来源拉取并执行
+# sdist 的 setup.py / PEP 517 build backend / VCS post-install hook，等价于以 Worker
+# 主进程 UID 的 RCE 面。
+# 新正则只允许：字母/数字打头 + 后续 [A-Za-z0-9._\-\[\],<>=!~;()*+'" ]。
+# 显式禁止： ':' '/' '@' '#' '$' 反引号 反斜杠 换行 等 URL/scheme/shell 元字符。
+# 满足常见需求：requests、requests==2.31.0、urllib3>=1.26,<2、pkg[extras]==1.0、
+# pkg==1.0; python_version>='3.10'。
+PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\],<>=!~;()*+'\" ]*$")
+
+# P0-01：反模式黑名单，命中任一直接拒绝（比正则更保险）。
+_FORBIDDEN_PACKAGE_SUBSTRINGS = (
+    "://",  # http:// https:// file:// 等 URL scheme
+    "git+",
+    "hg+",
+    "svn+",
+    "bzr+",
+    "@http",
+    "@ftp",
+    "@file",
+    "@git",
+    "@/",  # @/local/path
+    "..",  # 路径穿越
+    "`",  # 命令注入元字符
+    "$",  # shell 变量替换
+    "\\",  # 反斜杠
+    "\x00",
+    "\n",
+    "\r",
+    "\t",
+)
 
 # 环境名白名单：字母/数字/点/下划线/连字符，长度 1-64
 # 严格限制以防止路径遍历攻击 (../.. 等)
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_PYTHON_VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
 
 
 def _validate_env_name(name: str) -> str:
@@ -50,6 +82,13 @@ def _validate_env_name(name: str) -> str:
     if not _ENV_NAME_PATTERN.match(name):
         raise ValueError(f"非法环境名: {name!r}")
     return name
+
+
+def _normalize_python_version(version: str) -> str:
+    normalized = version.strip()
+    if not _PYTHON_VERSION_PATTERN.fullmatch(normalized):
+        raise RuntimeError(f"非法 Python 版本: {version!r}")
+    return normalized
 
 
 @dataclass
@@ -76,20 +115,24 @@ async def _terminate_command_process(process: asyncio.subprocess.Process) -> Non
 
 async def run_command(
     args: list[str],
+    *,
     cwd: str | None = None,
     env: dict | None = None,
     timeout: int = 900,
+    inherit_env: bool = True,
+    max_output_bytes: int = 8 * 1024 * 1024,
 ) -> CommandResult:
     """执行命令。argv[0] 会经 shutil.which 解析（Windows 上匹配 .cmd/.exe/.bat）。"""
+    from antcode_worker.runtime.command_logging import format_command_for_log
     from antcode_worker.runtime.win_exec import resolve_argv
 
-    final_env = os.environ.copy()
+    final_env = os.environ.copy() if inherit_env else {}
     if env:
         final_env.update(env)
 
     # Windows-safe: 把 argv[0] 换成绝对路径（npm→npm.cmd 等）；Unix 也走此逻辑保证一致
     resolved_args = resolve_argv(args)
-    cmd_str = " ".join(resolved_args)
+    cmd_str = format_command_for_log(resolved_args)
     logger.debug(f"执行命令: {cmd_str}")
 
     process: asyncio.subprocess.Process | None = None
@@ -103,7 +146,15 @@ async def run_command(
             start_new_session=not IS_WINDOWS,
         )
 
-        stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        output_budget = [0]
+        stdout_b, stderr_b = await asyncio.wait_for(
+            asyncio.gather(
+                _read_bounded_stream(process.stdout, max_output_bytes, output_budget),
+                _read_bounded_stream(process.stderr, max_output_bytes, output_budget),
+            ),
+            timeout=timeout,
+        )
+        await process.wait()
 
         stdout = stdout_b.decode() if stdout_b else ""
         stderr = stderr_b.decode() if stderr_b else ""
@@ -113,6 +164,10 @@ async def run_command(
         if process is not None:
             await _terminate_command_process(process)
         return CommandResult(exit_code=124, stdout="", stderr=f"命令超时: {cmd_str}")
+    except CommandOutputTooLargeError as exc:
+        if process is not None:
+            await _terminate_command_process(process)
+        return CommandResult(exit_code=125, stdout="", stderr=str(exc))
     except asyncio.CancelledError:
         if process is not None:
             await _terminate_command_process(process)
@@ -121,6 +176,26 @@ async def run_command(
         return CommandResult(exit_code=127, stdout="", stderr=f"命令未找到: {args[0]}")
     except Exception as e:
         return CommandResult(exit_code=-1, stdout="", stderr=str(e))
+
+
+class CommandOutputTooLargeError(RuntimeError):
+    pass
+
+
+async def _read_bounded_stream(
+    stream: asyncio.StreamReader | None,
+    max_output_bytes: int,
+    output_budget: list[int],
+) -> bytes:
+    if stream is None:
+        return b""
+    content = bytearray()
+    while chunk := await stream.read(64 * 1024):
+        output_budget[0] += len(chunk)
+        if output_budget[0] > max_output_bytes:
+            raise CommandOutputTooLargeError(f"命令输出超过上限 {max_output_bytes} 字节")
+        content.extend(chunk)
+    return bytes(content)
 
 
 class UVManager:
@@ -340,6 +415,8 @@ class UVManager:
             created_by: 创建人用户名
         """
         _validate_env_name(env_name)
+        packages_to_install = list(packages or [])
+        self._validate_packages(packages_to_install)
         async with self._env_operation(f"env:{env_name}"):
             venv_path = self._get_venv_path(env_name)
 
@@ -349,7 +426,7 @@ class UVManager:
             if not python_version:
                 raise RuntimeError("python_version 不能为空")
 
-            python_arg = f"python@{python_version}"
+            python_arg = _normalize_python_version(python_version)
             res = await run_command(["uv", "venv", venv_path, "--python", python_arg], timeout=600)
             if res.exit_code != 0:
                 raise RuntimeError(f"创建虚拟环境失败: {res.stderr or res.stdout}")
@@ -369,8 +446,8 @@ class UVManager:
             with open(manifest_path, "w", encoding="utf-8") as f:
                 ujson.dump(manifest, f, ensure_ascii=False, indent=2)
 
-            if packages:
-                await self._install_packages_locked(env_name, packages, upgrade=False)
+            if packages_to_install:
+                await self._install_packages_locked(env_name, packages_to_install, upgrade=False)
 
             await self._update_packages_count(env_name)
 
@@ -431,9 +508,26 @@ class UVManager:
         if not os.path.exists(venv_path):
             raise RuntimeError(f"虚拟环境 {env_name} 不存在")
         python_exe = self._get_python_executable(venv_path)
-        args = ["uv", "pip", "install", "--python", python_exe]
+        # P0-01：强制 wheel-only + 禁用可执行的构建后端。
+        #  --only-binary=:all: 让 uv 只接受 wheel，绝不从 sdist 构建
+        #    → 阻断 setup.py / PEP 517 build backend 的任意代码执行；
+        #  --no-build-isolation 保留（我们本来就不构建）；
+        #  --index-strategy first-index 只从第一个匹配的 index 取（避免污染）；
+        #  额外传 `--` 隔离，防止有人把 `-r requirements.txt` 藏进包名列表。
+        args = [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            python_exe,
+            "--only-binary",
+            ":all:",
+            "--index-strategy",
+            "first-index",
+        ]
         if upgrade:
             args.append("-U")
+        args.append("--")
         args.extend(packages)
         res = await run_command(args, timeout=1800)
         if res.exit_code != 0:
@@ -518,14 +612,34 @@ class UVManager:
             logger.warning(f"更新包数量失败: {e}")
 
     def _validate_packages(self, packages: list[str]) -> None:
-        """校验包名格式，防止注入"""
-        invalid = [
-            package
-            for package in packages
-            if not package or package.startswith("-") or not PACKAGE_PATTERN.match(package)
-        ]
+        """
+        校验包名格式，防止注入与 RCE。
+
+        P0-01：
+        - 严格 PEP 508 白名单 PACKAGE_PATTERN。
+        - 命中任一 _FORBIDDEN_PACKAGE_SUBSTRINGS 直接拒。
+        - 禁止 `-` 开头（uv 参数注入）、`=` `+` `~` 等运算符打头。
+        - 单条最大长度 256 防超长构造。
+        """
+
+        def _is_bad(package: str) -> bool:
+            if not package or not isinstance(package, str):
+                return True
+            if len(package) > 256:
+                return True
+            if package[0] in "-=+~<>!":
+                return True
+            if not PACKAGE_PATTERN.match(package):
+                return True
+            lower = package.lower()
+            for token in _FORBIDDEN_PACKAGE_SUBSTRINGS:
+                if token in lower:
+                    return True
+            return False
+
+        invalid = [p for p in packages if _is_bad(p)]
         if invalid:
-            raise RuntimeError(f"非法包名: {invalid}")
+            raise RuntimeError(f"非法包名（拒绝 URL/VCS/direct-reference/本地路径/shell 元字符）: {invalid}")
 
     def get_platform_info(self) -> dict:
         """获取平台信息（同步版本）"""

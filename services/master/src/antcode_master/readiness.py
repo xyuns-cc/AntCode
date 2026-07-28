@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import cast
 
 from antcode_core.infrastructure.redis import get_redis_client
@@ -23,6 +23,12 @@ class MasterReadinessServer:
         self._port = int(os.getenv("MASTER_READINESS_PORT", "8101"))
         self._server: asyncio.Server | None = None
         self._ready = False
+        # P1-FN-05: 组件注入的额外探针（返回 True=健康）。当前用于
+        # scheduler leader 激活失败检测，避免坏 leader 持续报 healthy。
+        self._extra_probes: list[Callable[[], bool]] = []
+
+    def add_probe(self, probe: Callable[[], bool]) -> None:
+        self._extra_probes.append(probe)
 
     async def start(self) -> None:
         if self._server is not None:
@@ -67,6 +73,14 @@ class MasterReadinessServer:
     async def _dependencies_ready(self) -> bool:
         if not self._ready:
             return False
+        for probe in self._extra_probes:
+            try:
+                if not probe():
+                    logger.warning("Master readiness 组件探针失败: {}", getattr(probe, "__name__", probe))
+                    return False
+            except Exception as exc:
+                logger.warning(f"Master readiness 组件探针异常: {exc}")
+                return False
         try:
             redis = await get_redis_client()
             await cast(Awaitable[bool], redis.ping())

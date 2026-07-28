@@ -15,11 +15,13 @@ worker 归属预检（不绑定）→ fence Lua（代际权威判定）→ ACQUI
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import grpc
 from antcode_contracts import artifact_pb2
+from antcode_core.application.services.workers.log_ingest_generation import (
+    read_log_ingest_cutoff,
+)
 from antcode_core.application.services.workers.run_ownership_fence import (
     OwnershipOutcome,
     claim_run_ownership,
@@ -36,18 +38,16 @@ from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker
-
-MAX_RUN_OWNERSHIP_TTL_MS = 3_900_000
-MAX_RUN_ID_LENGTH = 64
-MAX_LEASE_ID_LENGTH = 64
-
-
-@dataclass(frozen=True)
-class _RunOwnershipIdentity:
-    worker_id: str
-    lease_id: str
-    run_id: str
-    ttl_ms: int | None
+from antcode_gateway.services.run_ownership_contract import (
+    MAX_RUN_OWNERSHIP_TTL_MS,
+    validate_ownership_fields,
+)
+from antcode_gateway.services.run_ownership_contract import (
+    OwnershipBindError as _OwnershipBindError,
+)
+from antcode_gateway.services.run_ownership_contract import (
+    RunOwnershipIdentity as _RunOwnershipIdentity,
+)
 
 
 class RunOwnershipRpcMixin:
@@ -66,8 +66,13 @@ class RunOwnershipRpcMixin:
             return artifact_pb2.RunOwnershipClaimResponse(acquired=False)
         acquired = await self._run_fenced_operation(context, claim_run_ownership, identity)
         # P1-GW-02: 只有 fence 证明当前代际并取得 ownership 后才落 PG 绑定。
-        if acquired and not await self._bind_lease_generation(identity, context):
-            return artifact_pb2.RunOwnershipClaimResponse(acquired=False)
+        if acquired:
+            try:
+                await self._bind_lease_generation(identity)
+            except _OwnershipBindError as exc:
+                await self._run_release_operation(context, identity)
+                await context.abort(exc.code, exc.detail)
+                return artifact_pb2.RunOwnershipClaimResponse(acquired=False)
         return artifact_pb2.RunOwnershipClaimResponse(acquired=acquired)
 
     async def RenewRunOwnership(self, request, context):
@@ -105,7 +110,7 @@ class RunOwnershipRpcMixin:
         worker_id = await require_authenticated_worker(context, request.worker_id)
         if not worker_id:
             return None
-        identity = await self._validate_ownership_fields(request, context, worker_id, require_ttl=require_ttl)
+        identity = await validate_ownership_fields(request, context, worker_id, require_ttl=require_ttl)
         if identity is None:
             return None
         # 入口 Lease 预检仅用于尽早拒绝 + 精确错误信息；真正的代际权威
@@ -119,31 +124,6 @@ class RunOwnershipRpcMixin:
         ):
             return None
         return identity
-
-    @staticmethod
-    async def _validate_ownership_fields(
-        request: Any,
-        context: grpc.aio.ServicerContext,
-        worker_id: str,
-        *,
-        require_ttl: bool,
-    ) -> _RunOwnershipIdentity | None:
-        run_id = str(request.run_id or "")
-        lease_id = str(request.lease_id or "")
-        ttl_ms = int(request.ttl_ms) if require_ttl else None
-        invalid = (
-            not run_id
-            or run_id != run_id.strip()
-            or len(run_id) > MAX_RUN_ID_LENGTH
-            or not lease_id
-            or lease_id != lease_id.strip()
-            or len(lease_id) > MAX_LEASE_ID_LENGTH
-            or (require_ttl and (ttl_ms is None or ttl_ms <= 0 or ttl_ms > MAX_RUN_OWNERSHIP_TTL_MS))
-        )
-        if invalid:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "run ownership 请求字段无效")
-            return None
-        return _RunOwnershipIdentity(worker_id, lease_id, run_id, ttl_ms)
 
     async def _require_current_ownership_lease(
         self,
@@ -193,8 +173,7 @@ class RunOwnershipRpcMixin:
     @staticmethod
     async def _bind_lease_generation(
         identity: _RunOwnershipIdentity,
-        context: grpc.aio.ServicerContext,
-    ) -> bool:
+    ) -> None:
         """fence ACQUIRED 之后把 PG 绑定改到当前代际(允许同 worker 换代)。
 
         P1-GW-04 (round4 修正):lease_gen 必须用 **lease 授予时刻**
@@ -213,31 +192,48 @@ class RunOwnershipRpcMixin:
             if redis is None:
                 raise RuntimeError("Redis unavailable")
             store = LeaseStore(redis, namespace=redis_namespace(), policy=LeasePolicy())
-            lease = await store.get(identity.worker_id, include_expired=True)
+            lease = await store.get(identity.worker_id, include_expired=False)
             if lease is None or lease.lease_id != identity.lease_id:
-                # 从 fence ACQUIRED 到本次 HGET 之间被撤销/换代 → 拒绝 bind
-                await context.abort(
+                raise _OwnershipBindError(
                     grpc.StatusCode.FAILED_PRECONDITION,
                     f"lease 已失效或换代(fence 后被撤销): run_id={identity.run_id}",
                 )
-                return False
             # P1-GW-01 (round6): 优先用 sequence 作 gen(严格单调,同毫秒无碰撞);
             # 存量 lease 无 sequence 字段时 (=0) 回退到 granted_at_ms 保持兼容。
             # sequence 存在时 gen 一定 > 0, granted_at_ms 场景与它不会混用。
             lease_gen = int(lease.sequence) if lease.sequence > 0 else int(lease.granted_at_ms)
+            log_cutoff_id = await read_log_ingest_cutoff(redis, namespace=redis_namespace())
             await bind_worker_run_lease_generation(
                 identity.worker_id,
                 identity.run_id,
                 lease_id=identity.lease_id,
                 lease_gen=lease_gen,
+                log_cutoff_id=log_cutoff_id,
             )
-            return True
+            outcome = await renew_run_ownership(
+                redis,
+                worker_id=identity.worker_id,
+                lease_id=identity.lease_id,
+                run_id=identity.run_id,
+                ttl_ms=int(identity.ttl_ms or 0),
+                namespace=redis_namespace(),
+            )
+            if outcome is not OwnershipOutcome.ACQUIRED:
+                raise _OwnershipBindError(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"lease 在 ownership bind 后已失效或换代: run_id={identity.run_id}",
+                )
+            return
+        except _OwnershipBindError:
+            raise
         except PermissionError as exc:
-            await context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
-        except Exception:
+            raise _OwnershipBindError(grpc.StatusCode.PERMISSION_DENIED, str(exc)) from exc
+        except Exception as exc:
             logger.exception("run ownership Lease 绑定失败: run_id={}", identity.run_id)
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "run ownership lease binding unavailable")
-        return False
+            raise _OwnershipBindError(
+                grpc.StatusCode.UNAVAILABLE,
+                "run ownership lease binding unavailable",
+            ) from exc
 
     @staticmethod
     async def _run_fenced_operation(

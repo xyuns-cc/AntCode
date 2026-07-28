@@ -3,7 +3,17 @@ import { useNavigate } from 'react-router-dom'
 import { isAxiosError } from 'axios'
 // 提示交由全局拦截器与后端 message 处理
 import { authService } from '@/services/auth'
-import { useAuth as useAuthStore } from '@/stores/authStore'
+import { useAuth as useAuthState } from '@/stores/authStore'
+import {
+  broadcastAuthEvent,
+  clearSessionHint,
+  decodeAccessToken,
+  getSessionGeneration,
+} from '@/services/authToken'
+import {
+  ensureSessionRestored,
+  isSessionRestoreSettled,
+} from '@/services/authSessionRestore'
 import { AuthHandler } from '@/utils/authHandler'
 import Logger from '@/utils/logger'
 import type { LoginRequest, UpdateUserRequest } from '@/types'
@@ -19,10 +29,12 @@ const extractErrorMessage = (error: unknown, fallback: string) => {
   return fallback
 }
 
+export { resetSessionRestore } from '@/services/authSessionRestore'
+
 export const useAuth = () => {
   const navigate = useNavigate()
-  const [loading, setLoading] = useState(false)
-  
+  const [loading, setLoading] = useState(() => !isSessionRestoreSettled())
+
   const {
     user,
     isAuthenticated,
@@ -31,13 +43,13 @@ export const useAuth = () => {
     setUser,
     setLoading: setStoreLoading,
     setError,
-    setPermissions: _setPermissions,
+    setPermissions,
     clearUser,
     updateUser: updateStoreUser,
     hasPermission,
     hasAnyPermission,
     hasAllPermissions
-  } = useAuthStore()
+  } = useAuthState()
 
   // 登录
   const login = useCallback(async (credentials: LoginRequest) => {
@@ -45,29 +57,40 @@ export const useAuth = () => {
     setStoreLoading(true)
     setError(null)
 
+    let establishedGeneration: string | null = null
     try {
       const response = await authService.login(credentials)
+      const sessionJti = decodeAccessToken(response.access_token)?.session_jti
+      establishedGeneration = typeof sessionJti === 'string' ? sessionJti : null
+
+      const userPermissions = await authService.getUserPermissions()
+      setPermissions(userPermissions)
       setUser(response.user)
-      
-      // 获取用户权限 - 暂时注释，后端未实现该接口
-      // try {
-      //   const userPermissions = await authService.getUserPermissions()
-      //   setPermissions(userPermissions)
-      // } catch (permError) {
-      //   Logger.warn('获取用户权限失败:', permError)
-      // }
+      broadcastAuthEvent('login', response.user.username)
 
       // 成功提示交由拦截器/后端 message 处理
       return response
     } catch (error: unknown) {
       const errorMessage = extractErrorMessage(error, '登录失败')
+      if (establishedGeneration && getSessionGeneration() === establishedGeneration) {
+        try {
+          await authService.logout()
+        } catch (logoutError: unknown) {
+          const logoutMessage = extractErrorMessage(logoutError, '撤销不完整会话失败')
+          setError(`${errorMessage}；${logoutMessage}`)
+          throw logoutError
+        }
+        clearSessionHint()
+        clearUser()
+        broadcastAuthEvent('logout')
+      }
       setError(errorMessage)
       throw error
     } finally {
       setLoading(false)
       setStoreLoading(false)
     }
-  }, [setUser, setStoreLoading, setError])
+  }, [clearUser, setUser, setStoreLoading, setError, setPermissions])
 
   // 登出
   const logout = useCallback(async () => {
@@ -76,18 +99,19 @@ export const useAuth = () => {
 
     try {
       await authService.logout()
+      clearSessionHint()
       clearUser()
+      broadcastAuthEvent('logout')
       navigate('/login')
     } catch (error: unknown) {
       Logger.warn('登出请求失败:', error)
-      // 即使登出请求失败，也要清除本地状态
-      clearUser()
-      navigate('/login')
+      setError(extractErrorMessage(error, '登出失败'))
+      throw error
     } finally {
       setLoading(false)
       setStoreLoading(false)
     }
-  }, [clearUser, navigate, setStoreLoading])
+  }, [clearUser, navigate, setError, setStoreLoading])
 
   // 获取当前用户信息
   const getCurrentUser = useCallback(async () => {
@@ -97,33 +121,25 @@ export const useAuth = () => {
 
     try {
       const userData = await authService.getCurrentUser()
+      const userPermissions = await authService.getUserPermissions()
+      setPermissions(userPermissions)
       setUser(userData)
-      
-      // 同时获取权限 - 暂时注释，后端未实现该接口
-      // try {
-      //   const userPermissions = await authService.getUserPermissions()
-      //   setPermissions(userPermissions)
-      // } catch (permError) {
-      //   Logger.warn('获取用户权限失败:', permError)
-      // }
 
       return userData
     } catch (error: unknown) {
       const errorMessage = extractErrorMessage(error, '获取用户信息失败')
-      setError(errorMessage)
-      
       // 如果是认证错误，使用统一的认证处理
       if (AuthHandler.isAuthError(error)) {
         clearUser()
         AuthHandler.handleAuthFailure(false) // 不显示消息，因为上面已经设置了错误
       }
-      
+      setError(errorMessage)
       throw error
     } finally {
       setLoading(false)
       setStoreLoading(false)
     }
-  }, [setUser, setStoreLoading, setError, clearUser])
+  }, [setUser, setStoreLoading, setError, setPermissions, clearUser])
 
   // 更新用户信息
   const updateUser = useCallback(async (userData: UpdateUserRequest) => {
@@ -163,57 +179,46 @@ export const useAuth = () => {
     }
   }, [setStoreLoading, setError])
 
-  // 检查登录状态
+  // 手动检查登录状态（强制重新执行会话恢复）
   const checkAuth = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
-      if (authService.isAuthenticated()) {
-        // 从本地存储获取用户信息，不调用API
-        const userInfo = authService.getUserInfo()
-        if (userInfo) {
-          setUser(userInfo)
-        }
-      }
-    } catch (error) {
-      Logger.warn('检查登录状态失败:', error)
-      // 如果本地存储的用户信息有问题，清除认证状态
-      clearUser()
+      await ensureSessionRestored({ force: true })
     } finally {
       setLoading(false)
     }
-  }, [setUser, clearUser, setLoading])
+  }, [setError])
 
   // 刷新Token
   const refreshToken = useCallback(async () => {
     try {
       const response = await authService.refreshToken()
+      const userPermissions = await authService.getUserPermissions()
+      setPermissions(userPermissions)
       setUser(response.user)
       return response
     } catch (error: unknown) {
       Logger.warn('刷新Token失败:', error)
       clearUser()
       AuthHandler.handleAuthFailure()
+      setError(extractErrorMessage(error, '刷新Token失败'))
       throw error
     }
-  }, [setUser, clearUser])
+  }, [setUser, setError, setPermissions, clearUser])
 
-  // 组件挂载时检查登录状态
+  // 组件挂载时确保启动会话恢复已完成（模块级单飞，整个应用只执行一次）
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  // 自动刷新Token
-  useEffect(() => {
-    if (isAuthenticated) {
-      const interval = setInterval(() => {
-        authService.autoRefreshToken()
-      }, 5 * 60 * 1000) // 每5分钟检查一次
-
-      return () => clearInterval(interval)
+    let active = true
+    ensureSessionRestored()
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => {
+      active = false
     }
-
-    return undefined
-  }, [isAuthenticated])
+  }, [])
 
   return {
     // 状态

@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from .api import AntCodeApi
 from .config import LoadSettings
@@ -22,7 +22,7 @@ async def read_sse_history(
     index: int,
 ) -> OperationResult[int]:
     """建立 ticket 鉴权的 SSE 日志流并完整消费历史回放。"""
-    ticket = await _issue_ticket(api, index)
+    ticket = await _issue_ticket(api, run_id, index)
     path = _stream_path(run_id, ticket)
     async with api.stream("GET", path, index) as response:
         response.raise_for_status()
@@ -33,8 +33,12 @@ async def read_sse_history(
     return OperationResult(response.status_code, lines)
 
 
-async def _issue_ticket(api: AntCodeApi, index: int) -> str:
-    payload = await api.require_json("POST", "/logs/stream-ticket", index)
+async def _issue_ticket(api: AntCodeApi, run_id: str, index: int) -> str:
+    payload = await api.require_json(
+        "POST",
+        f"/logs/stream-ticket?{urlencode({'run_id': run_id})}",
+        index,
+    )
     data = payload.get("data")
     ticket = data.get("ticket") if isinstance(data, dict) else None
     if not isinstance(ticket, str) or not ticket:

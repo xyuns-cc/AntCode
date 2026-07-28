@@ -42,12 +42,23 @@ export interface ProjectImportItem {
   description?: string
   tags: string[]
   dependencies?: string[]
-  runtime_scope: 'shared' | 'private'
+  runtime_scope: 'private'
   runtime_kind: 'python'
-  python_version?: string
+  python_version: string
+  worker_id: string
+  execution_strategy: 'fixed'
+  bound_worker_id: string
+}
+
+export type ProjectImportDraft = Omit<
+  ProjectImportItem,
+  'python_version' | 'worker_id' | 'bound_worker_id'
+>
+
+export interface ProjectImportFormValues {
   worker_id?: string
-  execution_strategy: 'auto' | 'fixed' | 'specified' | 'prefer'
-  bound_worker_id?: string
+  python_version?: string
+  projects: Record<string, ProjectImportDraft>
 }
 
 export interface ImportProjectsPayload {

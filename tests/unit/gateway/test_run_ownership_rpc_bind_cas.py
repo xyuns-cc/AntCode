@@ -41,6 +41,23 @@ async def test_claim_binds_pg_generation_only_after_fence_acquired(monkeypatch):
     # 反证:若旧 bug 存在(time.time()*1000),该值应远大于 100 (毫秒时间戳)。
     expected_gen_from_granted_at_ms = 100
     assert call.kwargs["lease_gen"] == expected_gen_from_granted_at_ms
+    assert call.kwargs["log_cutoff_id"] == "10-0"
+
+
+@pytest.mark.asyncio
+async def test_claim_final_fence_stale_releases_token_and_never_returns_acquired(monkeypatch):
+    """PG bind 后 Lease 换代时，最终 fence 必须失败并精确释放旧 token。"""
+    redis = _Redis()
+    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
+    redis.renew_result = -1
+    context = _context()
+
+    response = await _Service().ClaimRunOwnership(_claim(), context)
+
+    assert response.acquired is False
+    bind_generation.assert_awaited_once()
+    assert context.abort.await_args.args[0] == grpc.StatusCode.FAILED_PRECONDITION
+    assert redis.values == {}
 
 
 @pytest.mark.asyncio
@@ -64,11 +81,13 @@ async def test_bind_failure_after_fence_aborts_permission_denied(monkeypatch):
     bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
     bind_generation.side_effect = PermissionError("TaskRun 不存在或不属于当前 Worker")
     context = _context()
+    context.abort.side_effect = RuntimeError("grpc aborted")
 
-    response = await _Service().ClaimRunOwnership(_claim(), context)
+    with pytest.raises(RuntimeError, match="grpc aborted"):
+        await _Service().ClaimRunOwnership(_claim(), context)
 
-    assert response.acquired is False
     assert context.abort.await_args.args[0] == grpc.StatusCode.PERMISSION_DENIED
+    assert redis.values == {}
 
 
 @pytest.mark.asyncio

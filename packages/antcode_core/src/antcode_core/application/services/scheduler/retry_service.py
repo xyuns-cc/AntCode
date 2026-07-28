@@ -31,9 +31,11 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_core.application.services.scheduler.manual_retry_service import execute_manual_retry
+from antcode_core.application.services.scheduler.outbox_service import scheduler_outbox_service
+from antcode_core.application.services.scheduler.retry_statistics import build_retry_stats
 from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import TaskStatus
-from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
 
 
@@ -401,35 +403,17 @@ class RetryService:
         return next_retry_time
 
     async def manual_retry(self, run_id, user_id):
-        """手动重试任务"""
-        execution = await TaskRun.get_or_none(run_id=run_id)
-        if not execution:
-            return {"success": False, "error": "执行记录不存在"}
+        """手动重试通过事务服务创建新 run，历史 run 保持不可变。"""
+        return await execute_manual_retry(
+            run_id,
+            user_id,
+            cancel_pending=self._backend.cancel,
+            enqueue_event=scheduler_outbox_service.enqueue,
+        )
 
-        task = await Task.get_or_none(id=execution.task_id)
-        if not task:
-            return {"success": False, "error": "任务不存在"}
-
-        if execution.status == TaskStatus.RUNNING:
-            return {"success": False, "error": "任务正在执行中"}
-
-        execution.status = TaskStatus.PENDING
-        execution.retry_count += 1
-        execution.error_message = f"手动重试 by user {user_id}"
-        await execution.save()
-
-        from antcode_core.application.services.scheduler import scheduler_service
-
-        await scheduler_service.trigger_task(task.id)
-
-        logger.info(f"任务 {task.name} 已手动触发重试 by user {user_id}")
-
-        return {
-            "success": True,
-            "message": "任务已触发重试",
-            "run_id": run_id,
-            "retry_count": execution.retry_count,
-        }
+    async def cancel_pending(self, run_id: str) -> int:
+        """把待重试意图从 Redis pending 队列移除（配合 DB 清 next_retry_at）。"""
+        return await self._backend.cancel(run_id)
 
     def register_compensation_handler(self, task_type, handler):
         """注册补偿处理器"""
@@ -548,25 +532,7 @@ class RetryService:
     async def get_retry_stats(self, task_id):
         """获取任务重试统计"""
         executions = await TaskRun.filter(task_id=task_id).all()
-
-        total_executions = len(executions)
-        retried_executions = sum(1 for e in executions if e.retry_count > 0)
-        total_retries = sum(e.retry_count for e in executions)
-
-        retry_success = sum(1 for e in executions if e.retry_count > 0 and e.status == TaskStatus.SUCCESS)
-        retry_success_rate = retry_success / retried_executions * 100 if retried_executions > 0 else 0
-
-        return {
-            "task_id": task_id,
-            "total_executions": total_executions,
-            "retried_executions": retried_executions,
-            "total_retries": total_retries,
-            "retry_success_count": retry_success,
-            "retry_success_rate": round(retry_success_rate, 2),
-            "avg_retries_per_execution": (
-                round(total_retries / retried_executions, 2) if retried_executions > 0 else 0
-            ),
-        }
+        return build_retry_stats(task_id, executions)
 
     async def get_pending_retries(self):
         """获取待重试的任务列表(从 Redis ZSet 只读快照)"""

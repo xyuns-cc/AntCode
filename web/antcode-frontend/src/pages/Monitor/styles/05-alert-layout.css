@@ -1,0 +1,57 @@
+/* 告警列表样式 */
+.alerts-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.alerts-card .ant-card-body {
+  padding: 12px;
+}
+
+/* 小尺寸卡片调整 */
+.ant-card-small .ant-card-head {
+  padding: 0 12px;
+  min-height: 36px;
+  font-size: 14px;
+}
+
+.ant-card-small .ant-card-body {
+  padding: 12px;
+}
+
+/* 浅色主题滚动条 */
+body.light-theme .alerts-list::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* 深色主题滚动条 */
+body.dark-theme .alerts-list::-webkit-scrollbar-track {
+  background: #262626;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #434343;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #595959;
+}
+
+.alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+}

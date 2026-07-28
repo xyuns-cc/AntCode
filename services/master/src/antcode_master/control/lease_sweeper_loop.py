@@ -36,7 +36,9 @@ AUDIT_SECURITY_STREAM = "audit:security"
 AUDIT_SECURITY_MAXLEN = 100_000
 
 
-EvictionCallback = Callable[[str], Awaitable[None]]
+# P1-03：回调改为 (worker_id, evicted_lease_id) 双参，让上层校验 Lease 代际。
+# evicted_lease_id 为空字符串时代表"无法代际确认"，回调必须显式失败。
+EvictionCallback = Callable[[str, str], Awaitable[None]]
 
 
 class LeaseSweeperLoop:
@@ -116,6 +118,7 @@ class LeaseSweeperLoop:
 
                 evicted = await self._lease_store.sweep_expired(batch=self._batch)
                 if evicted:
+                    # P1-03：sweep_expired 现在返回 [(worker_id, evicted_lease_id), ...]
                     await self._handle_evictions(evicted)
             except asyncio.CancelledError:
                 break
@@ -127,37 +130,42 @@ class LeaseSweeperLoop:
             except asyncio.CancelledError:
                 break
 
-    async def _handle_evictions(self, worker_ids: list[str]) -> None:
+    async def _handle_evictions(self, evicted: list[tuple[str, str]]) -> None:
         """对每个被剔除的 Worker 触发回调 + 写 audit。
 
         P2-#38：原实现串行 ``for worker_id``，一轮 sweep 在 worker 数
         多时退化为 O(N) × 任务回收耗时，远超 sweep ``interval``。改为
         ``asyncio.gather`` 并发；逐项检查 Exception 不向上抛，保证 audit
         阶段对每个 worker 都能写一条事件。
+
+        P1-03：入参改为 ``[(worker_id, evicted_lease_id), ...]``。回调在
+        写入副作用前重新读取当前 Lease，避免旧代际误杀新 run。
         """
-        if not worker_ids:
+        if not evicted:
             return
+
+        worker_ids = [w for (w, _lid) in evicted]
 
         # 1) 并发回调 — 允许调用方做任务回收等重活。
         if self._on_worker_evicted is not None:
             results = await asyncio.gather(
-                *(self._on_worker_evicted(w) for w in worker_ids),
+                *(self._on_worker_evicted(w, lid) for (w, lid) in evicted),
                 return_exceptions=True,
             )
-            for worker_id, result in zip(worker_ids, results, strict=False):
+            for (worker_id, _lid), result in zip(evicted, results, strict=False):
                 if isinstance(result, BaseException):
                     logger.opt(exception=result).error(f"on_worker_evicted 回调异常: worker_id={worker_id}")
 
         # 2) 并发 audit — 与 gateway 安全审计一致的字段 schema。
         audit_results = await asyncio.gather(
-            *(self._emit_audit(w) for w in worker_ids),
+            *(self._emit_audit(w, lid) for (w, lid) in evicted),
             return_exceptions=True,
         )
         for worker_id, result in zip(worker_ids, audit_results, strict=False):
             if isinstance(result, BaseException):
                 logger.opt(exception=result).error(f"写 worker_evicted audit 失败: worker_id={worker_id}")
 
-    async def _emit_audit(self, worker_id: str) -> None:
+    async def _emit_audit(self, worker_id: str, evicted_lease_id: str = "") -> None:
         if self._audit_stream is None:
             return
         try:
@@ -166,6 +174,7 @@ class LeaseSweeperLoop:
                 {
                     "event_type": "worker_evicted",
                     "worker_id": worker_id,
+                    "lease_id": evicted_lease_id or "",
                     "peer": "",
                     "reason": "lease_expired",
                     "ts": str(int(time.time() * 1000)),

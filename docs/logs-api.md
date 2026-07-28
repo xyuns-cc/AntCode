@@ -240,10 +240,12 @@ curl -X GET "/api/v1/logs/executions/abc123/stderr?level=ERROR" \
 
 **第一步：签发一次性票据**
 
-**POST** `/api/v1/logs/stream-ticket`（需要 `Authorization: Bearer <jwt>`）
+**POST** `/api/v1/logs/stream-ticket?run_id={run_id}`（需要 `Authorization: Bearer <jwt>`）
 
-票据一次性消费、60 秒过期、绑定当前登录会话（登出 / 撤销会话后流会被服务端终止）。
-JWT 永远不出现在流 URL 中。
+签票阶段会验证执行记录、访问权限和当前订阅容量，因此浏览器可从这个普通 JSON 请求
+直接观察 403、404、429，而不依赖无法读取错误响应体的原生 `EventSource`。票据一次性
+消费、60 秒过期，并同时绑定当前登录会话和 `run_id`（登出 / 撤销会话后流会被服务端
+终止）。JWT 永远不出现在流 URL 中。
 
 ```json
 {
@@ -254,7 +256,7 @@ JWT 永远不出现在流 URL 中。
 
 **第二步：建立 SSE 流**
 
-**GET** `/api/v1/logs/runs/{run_id}/stream?ticket=<ticket>`
+**GET** `/api/v1/logs/runs/{run_id}/stream?ticket=<ticket>[&cursor=<last_event_id>]`
 
 响应为 `text/event-stream`。鉴权 / 权限 / 容量问题在流开始前以标准
 HTTP 状态码返回：401（票据无效或已消费）、403（无权访问）、404（执行
@@ -262,13 +264,19 @@ HTTP 状态码返回：401（票据无效或已消费）、403（无权访问）
 
 #### 连接示例
 ```javascript
-const { data } = await fetch('/api/v1/logs/stream-ticket', {
+let lastEventId = '';
+const { data } = await fetch(`/api/v1/logs/stream-ticket?run_id=${encodeURIComponent(runId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${jwt}` },
 }).then(r => r.json());
 
-const es = new EventSource(`/api/v1/logs/runs/${runId}/stream?ticket=${data.ticket}`);
-es.addEventListener('log_line', (event) => {
+const query = new URLSearchParams({ ticket: data.ticket });
+if (lastEventId) query.set('cursor', lastEventId);
+const es = new EventSource(`/api/v1/logs/runs/${encodeURIComponent(runId)}/stream?${query}`);
+es.addEventListener('stream_cursor', (event) => {
+    if (event.lastEventId) lastEventId = event.lastEventId;
+});
+es.addEventListener('log_line', event => {
     const message = JSON.parse(event.data);
     console.log(`[${message.data.timestamp}] ${message.data.level}: ${message.data.content}`);
 });
@@ -279,14 +287,19 @@ es.addEventListener('log_line', (event) => {
 命令行调试：
 
 ```bash
-T=$(curl -s -X POST http://localhost:8000/api/v1/logs/stream-ticket \
+T=$(curl -s -X POST "http://localhost:8000/api/v1/logs/stream-ticket?run_id=$RUN_ID" \
   -H "Authorization: Bearer $JWT" | jq -r .data.ticket)
 curl -N "http://localhost:8000/api/v1/logs/runs/$RUN_ID/stream?ticket=$T"
 ```
 
 #### 事件类型
 
-帧格式 `event: <类型>` + `data: <JSON>`；连接建立后的固定序列：
+帧格式为可选的 `id: <服务端不透明游标>` + `event: <类型>` +
+`data: <JSON>`。当客户端已安全接收到一个日志阶段时，服务端发送
+`stream_cursor` checkpoint，当前游标为该事件的 `MessageEvent.lastEventId`。新游标格式为
+`pg:<storage_id>`；客户端必须把 ID 当作不透明字符串，按到达顺序保存最后一个，
+不得解析、排序或自行合成。旧版 Redis 游标（`<message_id>:<batch_index>`）只用于迁移期
+服务端兼容；客户端不再依赖该格式。连接建立后的固定序列：
 `run_status` → `historical_logs_start` → `log_line`* →
 `historical_logs_end` | `no_historical_logs` → 实时帧。
 
@@ -297,6 +310,7 @@ curl -N "http://localhost:8000/api/v1/logs/runs/$RUN_ID/stream?ticket=$T"
 | `log_line` | 一行日志（历史回放与实时共用） |
 | `historical_logs_end` | 历史回放结束，`sent_lines` 为回放行数 |
 | `no_historical_logs` | 无历史日志，直接进入实时 |
+| `stream_cursor` | 历史 / 断线恢复 / 实时补缺后的 checkpoint；仅更新重连游标，不产生日志 UI |
 | `ping` | 心跳（每 15s，无数据时；可用于客户端探活） |
 | `stream_error` | 服务端业务错误（会话失效 / 消费过慢 / 超过 8h 最大寿命），随后流结束 |
 

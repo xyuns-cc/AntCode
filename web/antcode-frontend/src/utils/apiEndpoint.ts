@@ -49,6 +49,17 @@ export const resolveApiBaseUrl = (config: ApiEndpointConfig): string => {
   const explicitBaseUrl = normalizeApiBaseUrl(config.explicitApiBaseUrl || '')
   if (explicitBaseUrl) return explicitBaseUrl
 
+  // P2-07：生产构建（import.meta.env.PROD）走同源相对路径，让请求经过
+  // 前端 Nginx 的 /api proxy_pass，避免暴露 Web API 8000 端口 + HTTPS 场景下
+  // 混合内容错误。开发模式（dev server）保留旧行为 host:8000 直连。
+  const isProduction =
+    typeof import.meta !== 'undefined'
+    && Boolean((import.meta as unknown as { env?: { PROD?: boolean } }).env?.PROD)
+  if (isProduction) {
+    // 返回空串代表相对路径（api.ts 会拼接 '/api/v1/...'），走当前 origin。
+    return ''
+  }
+
   const serverPort = (config.serverPort || DEFAULT_SERVER_PORT).trim() || DEFAULT_SERVER_PORT
   const protocol = normalizeProtocol(config.protocol)
   const host = formatUrlHost(resolveClientHost(config))

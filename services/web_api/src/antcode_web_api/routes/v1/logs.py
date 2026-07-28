@@ -1,6 +1,6 @@
 """日志管理接口。"""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from antcode_core.application.services.logs.log_security_service import (
@@ -26,6 +26,10 @@ from tortoise.exceptions import DoesNotExist
 from antcode_web_api.response import Messages, success
 
 router = APIRouter()
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _normalize_log_type(log_type: LogType | str | None) -> LogType | None:
@@ -85,7 +89,7 @@ def _line_entries(
     search: str | None,
 ) -> list[LogEntry]:
     level = LogLevel.ERROR if log_type == LogType.STDERR else LogLevel.INFO
-    timestamp = execution.start_time or execution.created_at or datetime.utcnow()
+    timestamp = execution.start_time or execution.created_at or _utcnow_naive()
     return [
         LogEntry(
             id=index,

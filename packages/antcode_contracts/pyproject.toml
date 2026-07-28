@@ -4,7 +4,9 @@ version = "1.0.0"
 description = "AntCode gRPC 契约包 - Proto 生成的 Python 代码"
 requires-python = ">=3.11"
 dependencies = [
-    "grpcio>=1.60.0",
+    # 生成桩由 grpcio-tools 1.76 产出（*_pb2_grpc.py 里 GRPC_GENERATED_VERSION
+    # = '1.76.0'，低于该版本 import 时直接 RuntimeError），下限必须与之对齐。
+    "grpcio>=1.76.0",
     "protobuf>=6.33.5",
 ]
 
@@ -14,3 +16,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/antcode_contracts"]
+# PEP 561：py.typed 与 *.pyi 必须随 wheel 分发，否则安装方 mypy 不认类型信息。
+# hatchling 的 packages 默认已包含包目录下所有文件，这里显式声明防止回归。
+[tool.hatch.build.targets.wheel.force-include]
+"src/antcode_contracts/py.typed" = "antcode_contracts/py.typed"

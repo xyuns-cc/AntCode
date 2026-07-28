@@ -385,8 +385,10 @@ async def _init_distributed_log() -> None:
     try:
         from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
+        from antcode_web_api.streams.ingest_follower import ingest_log_follower
         from antcode_web_api.streams.log_notifier import SSELogNotifier
 
+        await ingest_log_follower.start()
         distributed_log_service.set_notifier(SSELogNotifier())
         await distributed_log_service.start()
         logger.info("分布式日志服务已启动")
@@ -397,10 +399,32 @@ async def _init_distributed_log() -> None:
 
 async def _shutdown_distributed_log() -> None:
     """关闭分布式日志服务"""
-    try:
-        from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
+    from antcode_core.application.services.workers.distributed_log_service import distributed_log_service
 
+    from antcode_web_api.streams.ingest_follower import ingest_log_follower
+    from antcode_web_api.streams.run_stream_broker import run_stream_broker
+
+    errors: list[Exception] = []
+    try:
+        # P2 §4.2: 先释放 SSE 全局容量租约，避免重启窗口内幽灵租约占位。
+        await run_stream_broker.shutdown()
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("SSE broker 关闭失败")
+    try:
+        await ingest_log_follower.shutdown()
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("ingest follower 关闭失败")
+    try:
         distributed_log_service.set_notifier(None)
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("分布式日志 notifier 解绑失败")
+    try:
         await distributed_log_service.stop()
-    except Exception as e:
-        logger.error(f"分布式日志服务关闭失败: {e}")
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("分布式日志 push service 关闭失败")
+    if errors:
+        raise ExceptionGroup("分布式日志服务关闭存在失败步骤", errors)

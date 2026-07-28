@@ -12,7 +12,8 @@ version: "0.1.0"
 # 传输模式: direct (Redis) 或 gateway (Gateway)
 transport_mode: "gateway"
 
-# Direct 模式配置（内网直连 Redis，transport_mode=direct 时必填）
+# Direct 仅用于可信内网、单租户测试，生产必须使用 Gateway。
+# transport_mode=direct 时必填；Gateway Worker 不得持有该凭据。
 redis_url: ""
 
 # Gateway 模式配置（公网通过 Gateway）
@@ -43,5 +44,5 @@ flow_control_capacity: 200             # 令牌桶容量
 # 存储配置
 data_dir: "data/worker"
 
-# 凭证存储: env
-credential_store: "env"
+# 凭证存储: persistent（data/worker/secrets/worker_credentials.json，0600）
+credential_store: "persistent"

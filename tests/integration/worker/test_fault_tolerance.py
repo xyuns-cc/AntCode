@@ -1,28 +1,140 @@
-"""
-故障测试
-
-验证：
-- 22.1 模拟 crash 后 pending reclaim
-- 22.2 模拟重复上报验证幂等
-- 22.3 压测：日志吞吐/并发 slots/redis backpressure
-
-Requirements: 14.5, 5.3, 5.8, 9.5
-"""
+"""Worker 故障恢复、幂等性与负载集成测试。"""
 
 import asyncio
+import hmac
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import unquote, urlsplit
 
 import pytest
+import pytest_asyncio
+from antcode_contracts import data_pb2
+from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 from antcode_worker.transport.redis.keys import RedisKeys
 from loguru import logger
 
+from tests.integration.worker import direct_transport_support as direct_support
+
 # 集成测试必须显式提供 Redis URL
-REDIS_URL = os.getenv("REDIS_URL")
-pytestmark = pytest.mark.skipif(not REDIS_URL, reason="REDIS_URL is required for worker integration tests")
-REDIS_KEYS = RedisKeys()
+REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
+pytestmark = pytest.mark.skipif(
+    not REDIS_URL,
+    reason="ANTCODE_INTEGRATION_REDIS_URL is required for worker integration tests",
+)
+TEST_SOURCE_BUNDLE_SHA256 = "a" * 64
+MASTER_TEST_DATABASE_NAME = "antcode_e2e_test"
+
+
+def _require_master_test_database_url() -> str:
+    database_url = (os.getenv("DATABASE_URL") or "").strip()
+    if not database_url:
+        raise RuntimeError("Master 结果集成测试必须显式设置 DATABASE_URL")
+    parsed = urlsplit(database_url)
+    if parsed.scheme.lower() not in {"postgres", "postgresql"}:
+        raise ValueError("Master 结果集成测试必须使用 PostgreSQL")
+    database = unquote(parsed.path.lstrip("/")).lower()
+    if database != MASTER_TEST_DATABASE_NAME:
+        raise ValueError(f"Master 结果集成测试仅允许数据库 {MASTER_TEST_DATABASE_NAME!r}")
+    return database_url
+
+
+@pytest_asyncio.fixture
+async def master_database():
+    from antcode_core.infrastructure.db.tortoise import get_tortoise_config
+    from tortoise import Tortoise
+
+    _require_master_test_database_url()
+    config = get_tortoise_config(min_connections=1, max_connections=2, service="master")
+    await Tortoise.init(config=config)
+    try:
+        yield
+    finally:
+        await Tortoise.close_connections()
+
+
+@asynccontextmanager
+async def _master_result_environment(
+    redis_client,
+    *,
+    worker_id: str,
+    run_id: str,
+    namespace: str,
+    lease_id: str,
+):
+    from antcode_core.application.services.lease_service import LeaseStore
+    from antcode_core.application.services.task_run_service import TaskRunService
+    from antcode_core.domain.models import TaskRun, Worker
+    from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
+
+    worker = await Worker.create(
+        public_id=worker_id,
+        name=f"master-result-{uuid.uuid4().hex}",
+        host="127.0.0.1",
+        port=8001,
+        status="online",
+    )
+    await TaskRun.create(
+        task_id=int(uuid.uuid4().int % 1_000_000_000),
+        run_id=run_id,
+        worker_id=worker.id,
+        status=TaskStatus.RUNNING,
+        dispatch_status=DispatchStatus.DISPATCHED,
+        runtime_status=RuntimeStatus.RUNNING,
+    )
+    lease_store = LeaseStore(redis_client, namespace=namespace)
+
+    async def validate_lease(declared_worker_id: str, declared_lease_id: str) -> bool:
+        current = await lease_store.get(declared_worker_id)
+        return bool(
+            current
+            and current.expires_at_ms > int(time.time() * 1000)
+            and hmac.compare_digest(current.lease_id, declared_lease_id)
+        )
+
+    try:
+        assert await lease_store.is_current(worker_id, lease_id)
+        yield TaskRunService(validate_lease)
+    finally:
+        await TaskRun.filter(run_id=run_id).delete()
+        await Worker.filter(id=worker.id).delete()
+
+
+def _successful_task_result(*, run_id: str, task_id: str, lease_id: str):
+    from antcode_worker.transport import TaskResult
+
+    return TaskResult(
+        run_id=run_id,
+        task_id=task_id,
+        status="success",
+        exit_code=0,
+        started_at=datetime.now(),
+        finished_at=datetime.now(),
+        duration_ms=1500.0,
+        data={"lease_id": lease_id, "proof": "master-idempotency"},
+    )
+
+
+async def _assert_duplicate_master_processing(transport, *, result, redis_client, keys) -> None:
+    from antcode_core.domain.models import TaskRun
+    from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
+    from antcode_master.ingester.result_loop import ResultLoop
+
+    reports = [await transport.report_result(result) for _ in range(3)]
+    assert reports == [True, True, True]
+    entries = await redis_client.xrange(keys.task_result_stream(), "-", "+")
+    statuses = direct_support.decode_task_statuses(entries)
+    assert len(statuses) == 3, "重复上报未产生预期的 at-least-once 消息"
+    handled = [await ResultLoop()._handle_message(status) for status in statuses]
+    assert handled == [True, True, True]
+    execution = await TaskRun.get(run_id=result.run_id)
+    assert execution.dispatch_status == DispatchStatus.ACKED
+    assert execution.runtime_status == RuntimeStatus.SUCCESS
+    assert execution.status == TaskStatus.SUCCESS
+    assert execution.result_data == {"proof": "master-idempotency"}
+    assert await TaskRun.filter(run_id=result.run_id).count() == 1
 
 
 @pytest.fixture
@@ -41,11 +153,6 @@ def unique_worker_id():
 def unique_stream_prefix():
     """生成唯一 stream 前缀"""
     return f"test:fault:{uuid.uuid4().hex[:8]}:"
-
-
-# =============================================================================
-# 22.1 模拟 crash 后 pending reclaim
-# =============================================================================
 
 
 @pytest.mark.integration
@@ -369,7 +476,8 @@ class TestCrashPendingReclaim:
         )
 
         # 使用自定义 namespace
-        keys = RedisKeys(namespace=unique_stream_prefix)
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
         worker_id = f"dlq-worker-{uuid.uuid4().hex[:4]}"
         stream_key = keys.task_ready_stream(worker_id)
         group_name = keys.consumer_group_name()
@@ -426,26 +534,26 @@ class TestCrashPendingReclaim:
             await reclaimer.reclaim_once()
 
             # 检查死信队列
-            dead_letter_key = f"{stream_key}:dead_letter"
+            dead_letter_key = f"{stream_key}:{{dlq}}:dead_letter"
             dlq_messages = await redis_client.xrange(dead_letter_key, "-", "+", count=10)
 
-            # 验证死信队列
-            for _, data in dlq_messages:
-                if data.get("task_id") == unique_task_id:
-                    assert data.get("important_data") == "should_be_preserved"
-                    assert "_dead_lettered_at" in data
-                    logger.info("[DLQ Test] 任务已移入死信队列")
-                    break
-
-            # 注意：由于投递计数的计算方式，可能需要多次回收才能触发 DLQ
-            # 这里我们验证 reclaimer 的统计
+            matching_messages = [data for _, data in dlq_messages if data.get("task_id") == unique_task_id]
+            assert len(matching_messages) == 1, "目标任务未且仅未进入一次死信队列"
+            dead_letter_data = matching_messages[0]
+            assert dead_letter_data.get("important_data") == "should_be_preserved"
+            assert dead_letter_data.get("_original_stream") == stream_key
+            assert int(dead_letter_data.get("_delivery_count", "0")) > config.max_retries
+            assert "_dead_lettered_at" in dead_letter_data
+            assert reclaimer.stats.total_dead_lettered == 1
+            pending = await redis_client.xpending(stream_key, group_name)
+            assert pending["pending"] == 0, "进入 DLQ 后原消息仍留在 PEL"
             logger.info(f"[DLQ Test] 死信队列统计: {reclaimer.stats.total_dead_lettered}")
             logger.info("[DLQ Test] ✓ 死信队列验证通过")
 
         finally:
             try:
                 await redis_client.delete(stream_key)
-                await redis_client.delete(f"{stream_key}:dead_letter")
+                await redis_client.delete(f"{stream_key}:{{dlq}}:dead_letter")
             except Exception:
                 pass
             await redis_client.aclose()
@@ -465,6 +573,7 @@ class TestCrashPendingReclaim:
         from antcode_worker.transport.redis.reclaim import (
             PendingTaskReclaimer,
             ReclaimConfig,
+            ensure_consumer_group,
         )
 
         redis_client = aioredis.from_url(
@@ -473,7 +582,10 @@ class TestCrashPendingReclaim:
             decode_responses=True,
         )
 
-        keys = RedisKeys(namespace=unique_stream_prefix)
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        stream_key = keys.task_ready_stream(unique_worker_id)
+        group_name = keys.consumer_group_name()
         config = ReclaimConfig(
             min_idle_time_ms=100,
             max_reclaim_count=10,
@@ -488,6 +600,8 @@ class TestCrashPendingReclaim:
         )
 
         try:
+            await ensure_consumer_group(redis_client, stream_key, group_name)
+
             # 验证初始状态
             assert reclaimer.is_running is False
             assert reclaimer.stats.total_reclaimed == 0
@@ -507,12 +621,9 @@ class TestCrashPendingReclaim:
             logger.info("[Reclaimer Integration Test] ✓ Reclaimer 模块集成验证通过")
 
         finally:
+            await reclaimer.stop()
+            await redis_client.delete(stream_key)
             await redis_client.aclose()
-
-
-# =============================================================================
-# 22.2 模拟重复上报验证幂等
-# =============================================================================
 
 
 @pytest.mark.integration
@@ -535,6 +646,8 @@ class TestIdempotentResultReporting:
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试重复结果上报不产生错误
@@ -544,26 +657,25 @@ class TestIdempotentResultReporting:
         2. 不会抛出异常
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
-        redis_client = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
 
             # 创建结果
             result = TaskResult(
@@ -589,11 +701,8 @@ class TestIdempotentResultReporting:
             logger.info("[Idempotent Test] ✓ 重复上报不产生错误验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -602,6 +711,8 @@ class TestIdempotentResultReporting:
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试重复上报的数据一致性
@@ -611,26 +722,25 @@ class TestIdempotentResultReporting:
         2. 关键字段（status, exit_code）保持不变
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
-        redis_client = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
 
             # 创建结果
             result = TaskResult(
@@ -649,113 +759,91 @@ class TestIdempotentResultReporting:
                 await transport.report_result(result)
 
             # 验证所有结果数据一致
-            result_key = REDIS_KEYS.task_result_stream()
+            result_key = keys.task_result_stream()
             results = await redis_client.xrevrange(result_key, "+", "-", count=100)
-
-            task_results = [data for _, data in results if data.get("task_id") == unique_task_id]
+            task_results = [
+                status for status in direct_support.decode_task_statuses(results) if status.task_id == unique_task_id
+            ]
 
             assert len(task_results) >= 1, "未找到结果记录"
 
             # 验证所有结果的关键字段一致
-            for data in task_results:
-                assert data.get("status") == "success"
-                assert data.get("exit_code") == "0"
-                assert "Test completed" in data.get("error_message", "")
+            for status in task_results:
+                assert status.status == data_pb2.STATUS_COMPLETED
+                assert status.exit_code == 0
+                assert "Test completed" in status.error_message
 
             logger.info(f"[Data Consistency Test] 找到 {len(task_results)} 条一致的结果记录")
             logger.info("[Data Consistency Test] ✓ 数据一致性验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
     @pytest.mark.asyncio
-    async def test_master_side_deduplication_simulation(
+    async def test_master_result_loop_handles_duplicate_reports_idempotently(
         self,
-        unique_task_id,
-        unique_worker_id,
-        unique_stream_prefix,
+        master_database,
+        monkeypatch,
+        *,
+        direct_transport_factory,
     ):
         """
-        模拟 Master 端去重逻辑
+        验证 Master 真实结果处理链路的幂等性
 
         验证：
         1. 多次上报产生多条记录（at-least-once）
-        2. Master 可以通过 task_id 去重
-        3. 最终只处理一次
+        2. 每条记录均经过真实 ResultLoop 与 TaskRunService
+        3. PostgreSQL 中只有一条 TaskRun 且终态一致
         """
+        import importlib
+
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig
 
-        redis_client = aioredis.from_url(
+        unique_task_id = f"fault-task-{uuid.uuid4().hex[:8]}"
+        unique_worker_id = f"fault-worker-{uuid.uuid4().hex[:8]}"
+        unique_stream_prefix = f"test:fault:{uuid.uuid4().hex[:8]}:"
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
+        run_id = f"run-{unique_task_id}"
+        config = ServerConfig(redis_url=REDIS_URL, task_stream_prefix=unique_stream_prefix)
+        transport = direct_transport_factory(
             REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
-
-        config = ServerConfig(
-            redis_url=REDIS_URL,
-            task_stream_prefix=unique_stream_prefix,
-        )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
-
-            # 创建结果
-            result = TaskResult(
-                run_id=f"run-{unique_task_id}",
-                task_id=unique_task_id,
-                status="success",
-                exit_code=0,
-                started_at=datetime.now(),
-                finished_at=datetime.now(),
-                duration_ms=1500.0,
-            )
-
-            # 多次上报（模拟断线重连）
-            for _ in range(3):
-                await transport.report_result(result)
-                await asyncio.sleep(0.05)
-
-            # 模拟 Master 端去重逻辑
-            result_key = REDIS_KEYS.task_result_stream()
-            results = await redis_client.xrevrange(result_key, "+", "-", count=100)
-
-            # 按 task_id 分组
-            task_results = {}
-            for msg_id, data in results:
-                tid = data.get("task_id")
-                if tid not in task_results:
-                    task_results[tid] = []
-                task_results[tid].append((msg_id, data))
-
-            # 验证去重后只有一个 task_id
-            assert unique_task_id in task_results
-            duplicates = task_results[unique_task_id]
-            logger.info(f"[Dedup Test] task_id={unique_task_id} 有 {len(duplicates)} 条记录")
-
-            # Master 端应该只处理第一条（或最后一条）
-            # 这里模拟处理第一条
-            first_result = duplicates[0][1]
-            assert first_result.get("status") == "success"
-
-            logger.info("[Dedup Test] ✓ Master 端去重模拟验证通过")
+            lease_id = await direct_support.activate_direct_transport(transport)
+            async with _master_result_environment(
+                redis_client,
+                worker_id=unique_worker_id,
+                run_id=run_id,
+                namespace=namespace,
+                lease_id=lease_id,
+            ) as result_service:
+                result_module = importlib.import_module("antcode_master.ingester.result_loop")
+                monkeypatch.setattr(result_module, "task_run_service", result_service)
+                result = _successful_task_result(
+                    run_id=run_id,
+                    task_id=unique_task_id,
+                    lease_id=lease_id,
+                )
+                await _assert_duplicate_master_processing(
+                    transport,
+                    result=result,
+                    redis_client=redis_client,
+                    keys=keys,
+                )
+                logger.info("[Dedup Test] ✓ Master 真实结果链路幂等验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -764,6 +852,8 @@ class TestIdempotentResultReporting:
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试并发重复上报
@@ -773,26 +863,25 @@ class TestIdempotentResultReporting:
         2. 所有上报都成功
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
-        redis_client = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
 
             # 创建结果
             result = TaskResult(
@@ -815,11 +904,8 @@ class TestIdempotentResultReporting:
             logger.info("[Concurrent Dedup Test] ✓ 并发重复上报验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -828,6 +914,8 @@ class TestIdempotentResultReporting:
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试断线重连后的幂等 ACK
@@ -837,8 +925,10 @@ class TestIdempotentResultReporting:
         2. 重连后重复 ACK 不会产生错误
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig
+        from antcode_worker.transport import ServerConfig
 
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
         redis_client = aioredis.from_url(
             REDIS_URL,
             encoding="utf-8",
@@ -849,22 +939,27 @@ class TestIdempotentResultReporting:
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
-        stream_key = REDIS_KEYS.task_ready_stream(unique_worker_id)
+        stream_key = keys.task_ready_stream(unique_worker_id)
 
         try:
-            await transport.start()
+            lease_id = await direct_support.activate_direct_transport(transport)
 
             # 写入任务并获取 receipt
             task_data = {
                 "task_id": unique_task_id,
                 "project_id": "ack-project",
                 "project_type": "code",
+                "source_bundle_uri": f"pgartifact://{TEST_SOURCE_BUNDLE_SHA256}",
+                "source_bundle_sha256": TEST_SOURCE_BUNDLE_SHA256,
+                "source_bundle_size": "1",
+                "transfer_method": "source_bundle",
             }
             await redis_client.xadd(stream_key, task_data)
             task_msg = await transport.poll_task(timeout=5.0)
@@ -876,20 +971,21 @@ class TestIdempotentResultReporting:
 
             # 模拟断线重连
             await transport.stop()
-            await transport.start()
+            assert await transport.start()
+            renewed_lease_id, _, _, revoked = await transport.lease_renew(lease_id)
+            assert renewed_lease_id == lease_id and not revoked
 
             # 重复 ACK
             success2 = await transport.ack_task(task_msg.receipt, accepted=True)
-            assert success2, "重连后 ACK 失败"
+            assert success2 is False, "重复 ACK 应报告消息已不在 PEL"
+            pending = await redis_client.xpending(stream_key, keys.consumer_group_name())
+            assert pending["pending"] == 0
 
             logger.info("[Idempotent ACK Test] ✓ 断线重连后幂等 ACK 验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                await redis_client.delete(stream_key)
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(stream_key)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -934,11 +1030,6 @@ class TestIdempotentResultReporting:
         logger.info("[Gateway Receipt Test] ✓ Gateway receipt 幂等性验证通过")
 
 
-# =============================================================================
-# 22.3 压测：日志吞吐/并发 slots/redis backpressure
-# =============================================================================
-
-
 @pytest.mark.integration
 class TestLogThroughputStress:
     """
@@ -953,7 +1044,12 @@ class TestLogThroughputStress:
     """
 
     @pytest.mark.asyncio
-    async def test_high_frequency_log_writes(self, unique_worker_id, unique_stream_prefix):
+    async def test_high_frequency_log_writes(
+        self,
+        unique_worker_id,
+        unique_stream_prefix,
+        direct_transport_factory,
+    ):
         """
         测试高频日志写入
 
@@ -962,30 +1058,28 @@ class TestLogThroughputStress:
         2. 不会丢失数据
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig
+        from antcode_worker.transport import ServerConfig
         from antcode_worker.transport.base import LogMessage
 
-        redis_client = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
 
-        config = ServerConfig(
-            redis_url=REDIS_URL,
-            log_stream_prefix=f"{unique_stream_prefix}log:",
-        )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        config = ServerConfig(redis_url=REDIS_URL)
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         run_id = f"stress-exec-{uuid.uuid4().hex[:8]}"
         num_logs = 500
+        log_key = keys.log_ingest_stream()
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
+            assert await transport.claim_run_ownership(run_id, ttl_ms=60_000)
 
             start_time = time.time()
 
@@ -998,14 +1092,16 @@ class TestLogThroughputStress:
                     timestamp=datetime.now(),
                     sequence=i,
                 )
-                await transport.send_log(log)
+                assert await transport.send_log(log) is True
 
             end_time = time.time()
             duration = end_time - start_time
 
             # 验证日志已写入
-            log_key = REDIS_KEYS.log_stream(run_id)
             log_count = await redis_client.xlen(log_key)
+            results = await redis_client.xrange(log_key, "-", "+", count=num_logs)
+            batches = [data_pb2.LogBatch.FromString(fields[PROTO_FIELD]) for _, fields in results]
+            log_entries = [entry for batch in batches for entry in batch.entries]
 
             logger.info(f"[Log Throughput Test] 写入 {num_logs} 条日志")
             logger.info(f"[Log Throughput Test] 耗时: {duration:.2f}s")
@@ -1013,14 +1109,15 @@ class TestLogThroughputStress:
             logger.info(f"[Log Throughput Test] Redis 中记录数: {log_count}")
 
             assert log_count == num_logs, f"日志丢失: 期望 {num_logs}, 实际 {log_count}"
+            assert len(log_entries) == num_logs
+            assert all(entry.run_id == run_id for entry in log_entries)
+            assert {entry.sequence for entry in log_entries} == set(range(num_logs))
             logger.info("[Log Throughput Test] ✓ 高频日志写入验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                await redis_client.delete(log_key)
-            except Exception:
-                pass
+            await transport.release_run_ownership(run_id)
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(log_key)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -1113,7 +1210,7 @@ class TestLogThroughputStress:
         """
         from antcode_worker.domain.enums import LogStream
         from antcode_worker.domain.models import LogEntry
-        from antcode_worker.logs.batch import BatchConfig, BatchSender
+        from antcode_worker.logs.batch import BackpressureState, BatchConfig, BatchSender
 
         # 模拟慢速传输层
         class SlowTransport:
@@ -1151,6 +1248,7 @@ class TestLogThroughputStress:
             await sender.start()
 
             # 快速写入大量日志以触发 backpressure
+            accepted = []
             for i in range(100):
                 entry = LogEntry(
                     run_id=run_id,
@@ -1159,7 +1257,7 @@ class TestLogThroughputStress:
                     stream=LogStream.STDOUT,
                     content=f"Backpressure test {i}",
                 )
-                await sender.write(entry)
+                accepted.append(await sender.write(entry))
 
             # 检查 backpressure 状态
             stats = sender.get_stats()
@@ -1168,9 +1266,12 @@ class TestLogThroughputStress:
             logger.info(f"[Backpressure Test] 丢弃数: {stats['total_dropped']}")
             logger.info(f"[Backpressure Test] 状态变化: {[s.value for s in backpressure_states]}")
 
-            # 验证 backpressure 被触发
-            # 由于队列小且发送慢，应该触发 backpressure
-            assert len(backpressure_states) > 0 or stats["total_dropped"] > 0 or stats["queue_size"] > 0
+            assert backpressure_states == [BackpressureState.WARNING, BackpressureState.CRITICAL]
+            assert stats["backpressure_state"] == BackpressureState.CRITICAL.value
+            assert stats["queue_size"] == 40
+            assert accepted.count(True) == 40
+            assert accepted.count(False) == 60
+            assert stats["total_dropped"] == 60
 
             logger.info("[Backpressure Test] ✓ Backpressure 机制验证通过")
 
@@ -1468,7 +1569,12 @@ class TestRedisBackpressureStress:
         logger.info("[Flow Control Test] ✓ 流量控制器压力测试验证通过")
 
     @pytest.mark.asyncio
-    async def test_transport_reconnect_under_load(self, unique_worker_id, unique_stream_prefix):
+    async def test_transport_reconnect_under_load(
+        self,
+        unique_worker_id,
+        unique_stream_prefix,
+        direct_transport_factory,
+    ):
         """
         测试高负载下的传输层重连
 
@@ -1477,26 +1583,25 @@ class TestRedisBackpressureStress:
         2. 不会丢失数据
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
-        redis_client = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        namespace = unique_stream_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_stream_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            lease_id = await direct_support.activate_direct_transport(transport)
 
             task_prefix = f"reconnect-{unique_worker_id}"
 
@@ -1517,7 +1622,9 @@ class TestRedisBackpressureStress:
             # 模拟断线重连
             await transport.stop()
             await asyncio.sleep(0.1)
-            await transport.start()
+            assert await transport.start()
+            renewed_lease_id, _, _, revoked = await transport.lease_renew(lease_id)
+            assert renewed_lease_id == lease_id and not revoked
 
             # 第二批写入
             batch2_count = 50
@@ -1534,9 +1641,10 @@ class TestRedisBackpressureStress:
                 await transport.report_result(result)
 
             # 验证数据完整性
-            result_key = REDIS_KEYS.task_result_stream()
+            result_key = keys.task_result_stream()
             results = await redis_client.xrevrange(result_key, "+", "-", count=5000)
-            total_count = sum(1 for _, data in results if (data.get("task_id") or "").startswith(task_prefix))
+            statuses = direct_support.decode_task_statuses(results)
+            total_count = sum(1 for status in statuses if status.task_id.startswith(task_prefix))
 
             expected_count = batch1_count + batch2_count
             logger.info(f"[Reconnect Load Test] 期望记录数: {expected_count}")
@@ -1546,9 +1654,6 @@ class TestRedisBackpressureStress:
             logger.info("[Reconnect Load Test] ✓ 高负载下重连验证通过")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()

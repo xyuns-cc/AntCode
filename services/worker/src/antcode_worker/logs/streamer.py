@@ -7,22 +7,21 @@ Requirements: 9.2
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+# P1-SEC-01: 脱敏必须 fail-closed。此前这里捕获导入异常后原样返回日志，
+# 脱敏模块一旦缺失，token/密码会明文进入 ingest stream 与 PG。
+# antcode-core 是 worker 的硬依赖（pyproject 强制），导入失败说明部署已
+# 损坏 —— 直接让 ImportError 传播，进程在模块导入（启动）阶段拒绝运行，
+# 绝不带着失效的脱敏器继续输出日志（仓库原则：禁止静默回退）。
+from antcode_core.common.logging import sanitize_log_message
 from loguru import logger
 
 from antcode_worker.domain.enums import LogStream
 from antcode_worker.domain.models import LogEntry
-
-try:
-    from antcode_core.common.logging import sanitize_log_message
-except Exception:  # pragma: no cover - import safety net
-
-    def sanitize_log_message(message: str) -> str:  # type: ignore[override]
-        return message
 
 
 class LogSink(Protocol):
@@ -313,42 +312,5 @@ class LogStreamer:
         }
 
 
-async def iter_stream(
-    reader: asyncio.StreamReader,
-    stream: LogStream,
-    run_id: str,
-) -> AsyncIterator[LogEntry]:
-    """
-    异步迭代流内容
-
-    Args:
-        reader: 异步流读取器
-        stream: 流类型
-        run_id: 运行 ID
-
-    Yields:
-        LogEntry 对象
-    """
-    seq = 0
-    while True:
-        try:
-            line = await reader.readline()
-            if not line:
-                break
-
-            content = line.decode("utf-8", errors="replace").rstrip("\n\r")
-            if content:
-                yield LogEntry(
-                    run_id=run_id,
-                    stream=stream,
-                    content=content,
-                    seq=seq,
-                    timestamp=datetime.now(),
-                )
-                seq += 1
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"[{run_id}] 迭代流异常: {e}")
-            break
+# P1-SEC-01: 原 ``iter_stream`` 辅助函数已删除 —— 全仓库无调用方（死代码），
+# 且它产出的 LogEntry 不经过 sanitize_log_message，属于潜在的脱敏旁路。

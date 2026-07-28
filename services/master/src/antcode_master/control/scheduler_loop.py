@@ -43,7 +43,7 @@ from tortoise.functions import Avg, Count, Max
 from tortoise.transactions import in_transaction
 
 from antcode_master.control.dispatcher_loop import spider_task_dispatcher
-from antcode_master.control.result_metadata import merge_result_data
+from antcode_master.control.result_data_persistence import merge_dispatch_result_data
 from antcode_master.control.retry_intent_guard import (
     RetryExecutionOptions,
     RetryIntent,
@@ -1117,7 +1117,6 @@ class SchedulerService:
             await self._log_execution(execution, "WARNING", f"派发已中止: {result.get('error')}")
             return None, False
         if not result.get("success"):
-            await self._persist_result_fields(execution, result)
             error_message = result.get("error") or "任务执行失败"
             # P1-FN-07: 消费 update_dispatch_status 返回值——CAS 冲突时跳过 WS/log/retry，避免为终态 run 重复创建 retry run。
             cas_ok = await execution_status_service.update_dispatch_status(
@@ -1134,6 +1133,7 @@ class SchedulerService:
                     f"忽略迟到的 FAILED(dispatch CAS 已被并发终态占据): {error_message}",
                 )
                 return None, False
+            await self._persist_result_fields(run_id, result)
             await self._log_execution(execution, "ERROR", f"任务执行失败: {error_message}")
             await self._push_execution_status(
                 execution,
@@ -1143,9 +1143,7 @@ class SchedulerService:
 
         # success 分支
         if result.get("distributed") and result.get("pending"):
-            if execution:
-                execution.result_data = merge_result_data(execution.result_data, result)
-                await execution.save(update_fields=["result_data"])
+            await self._persist_result_fields(run_id, result)
             # P1-17: 分发成功后必须显式把 dispatch_status 推到 DISPATCHED,
             # 不能只写 result_data。否则:
             # - reconcile_loop 只查 RUNNING/DISPATCHED 都捞不到分发出去但
@@ -1181,17 +1179,14 @@ class SchedulerService:
         )
 
     @staticmethod
-    async def _persist_result_fields(execution, result):
-        """把 result 落到 ``execution.result_data``。
+    async def _persist_result_fields(run_id, result):
+        """在行锁内合并 result，避免陈旧 ORM 对象覆盖 Worker 结果。
 
         迁移 39 (``remove_task_run_log_file_paths``) 已下线 ``TaskRun``
         的 ``log_file_path`` / ``error_log_path`` 字段，任务日志改由
         ``task_logs`` 表承载，此处不再落磁盘路径。
         """
-        if not execution:
-            return
-        execution.result_data = merge_result_data(execution.result_data, result)
-        await execution.save(update_fields=["result_data"])
+        await merge_dispatch_result_data(run_id, result)
 
     async def _handle_failure(self, execution, run_id, error_message, status):
         """异常 / 超时统一收敛：更新 status_service + 写日志。"""
@@ -1276,17 +1271,6 @@ class SchedulerService:
                     "INFO",
                     f"任务已分发到 Worker {target_worker.name}, 远程任务ID: {result.task_id}",
                 )
-
-                execution.result_data = merge_result_data(
-                    execution.result_data,
-                    {
-                        "distributed": True,
-                        "worker_id": target_worker.public_id,
-                        "worker_name": target_worker.name,
-                        "remote_task_id": result.task_id,
-                    },
-                )
-                await execution.save(update_fields=["result_data"])
 
                 return {
                     "success": True,

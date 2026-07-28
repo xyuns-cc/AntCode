@@ -1,15 +1,15 @@
-"""AntCode Redis Pipeline —— items → ``spider:data:{run_id}`` stream。
+"""AntCode Spider Pipeline: items -> local spool or trusted Gateway.
 
 **跨包契约（不可改动）**：
-- stream key = ``{namespace}:spider:data:{run_id}``
+- stream key = ``{{namespace}}:spider:<run_id>:data``
 - 字段名/类型必须与 ``antcode_worker.plugins.spider.data.models
   .SpiderDataItem.to_redis_dict()`` 逐字节一致，否则 web_api
   ``routes/v1/runs.py`` 里的 ``SpiderDataItem.from_redis_dict()`` 会解析失败
-- 元数据 key = ``{namespace}:spider:meta:{run_id}`` （Hash）
-- 索引 key = ``{namespace}:spider:index:{project_id}`` （ZSet，score=timestamp）
+- 元数据 key = ``{{namespace}}:spider:<run_id>:meta`` （Hash）
+- 活动/过期索引 = ``{{namespace}}:spider:index:<project_id>`` / ``...:expiry:<project_id>``
 
 **T6-T3b 拆分**：具体落地逻辑挪到 ``antcode_scrapy.sinks``：
-- ``RedisSpiderDataSink`` = direct 模式，走 Redis 直连（原逻辑）
+- ``RedisSpiderDataSink`` = 已停用的显式报错兼容壳
 - ``GatewaySpiderDataSink`` = gateway 模式，走 ``DataService.StreamSpiderData``
   gRPC 上报，gateway 转 Redis
 

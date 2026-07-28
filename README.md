@@ -121,8 +121,10 @@ docs/                     # 文档
 Docker 部署（infra/docker/）：
 ```bash
 cd infra/docker && cp .env.example .env
-# 编辑 .env
-docker compose -f docker-compose.dev.yml up -d
+# 先启动控制面，在 Web 界面生成一次性 Worker 安装 Key
+docker compose -f docker-compose.dev.yml up -d postgres redis web-api master gateway frontend
+# 把安装 Key 写入 .env 的 ANTCODE_WORKER_KEY 后启动 Worker
+docker compose -f docker-compose.dev.yml up -d worker
 ```
 
 生产部署请优先考虑：

@@ -25,8 +25,6 @@ class RedisKeys:
     WORKER_SLOTS_PREFIX = "worker:slots"
 
     # === Spider 相关 ===
-    SPIDER_DATA_PREFIX = "spider:data"
-    SPIDER_META_PREFIX = "spider:meta"
     SPIDER_INDEX_PREFIX = "spider:index"
     SPIDER_CONFIG_PREFIX = "spider:config"
 
@@ -51,6 +49,9 @@ class RedisKeys:
     def _ns(self, key: str) -> str:
         return f"{self.namespace}:{key}"
 
+    def _slot(self, key: str) -> str:
+        return f"{{{self.namespace}}}:{key}"
+
     # === 命名空间实例方法 ===
     def task_ready_stream(self, worker_id: str) -> str:
         return self._ns(f"{self.TASK_READY_PREFIX}:{worker_id}")
@@ -68,13 +69,25 @@ class RedisKeys:
         return self._ns("workers")
 
     def spider_data_stream(self, run_id: str) -> str:
-        return self._ns(f"{self.SPIDER_DATA_PREFIX}:{run_id}")
+        return self._slot(f"spider:{run_id}:data")
 
     def spider_meta_key(self, run_id: str) -> str:
-        return self._ns(f"{self.SPIDER_META_PREFIX}:{run_id}")
+        return self._slot(f"spider:{run_id}:meta")
+
+    def spider_item_ids_key(self, run_id: str) -> str:
+        return self._slot(f"spider:{run_id}:item-ids")
+
+    def spider_item_order_key(self, run_id: str) -> str:
+        return self._slot(f"spider:{run_id}:item-order")
+
+    def spider_tombstone_key(self, run_id: str) -> str:
+        return self._slot(f"spider:{run_id}:tombstone")
 
     def spider_index_key(self, project_id: str) -> str:
-        return self._ns(f"{self.SPIDER_INDEX_PREFIX}:{project_id}")
+        return self._slot(f"{self.SPIDER_INDEX_PREFIX}:{project_id}")
+
+    def spider_index_expiry_key(self, project_id: str) -> str:
+        return self._slot(f"{self.SPIDER_INDEX_PREFIX}:expiry:{project_id}")
 
     def spider_config_key(self, project_id: str) -> str:
         return self._ns(f"{self.SPIDER_CONFIG_PREFIX}:{project_id}")

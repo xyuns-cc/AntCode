@@ -79,11 +79,11 @@ class TestPluginPriority:
         # 应该是降序排列
         assert priorities == sorted(priorities, reverse=True)
 
-    def test_spider_has_highest_priority(self):
-        """Spider 插件优先级最高"""
+    def test_rule_has_highest_priority(self):
+        """Rule 插件使用最精确的任务类型匹配，因此优先级最高"""
         plugins = self.registry.list_plugins()
-        assert plugins[0]["name"] == "spider"
-        assert plugins[0]["priority"] == 20
+        assert plugins[0]["name"] == "rule"
+        assert plugins[0]["priority"] == 30
 
     def test_render_has_medium_priority(self):
         """Render 插件优先级中等"""
@@ -271,6 +271,7 @@ class TestExecPlanGeneration:
             project_id="project-001",
             timeout_seconds=120,
             memory_limit_mb=512,
+            runtime_spec=RuntimeSpec(python_path="/runtime/bin/python"),
         )
         payload = TaskPayload(
             task_type=TaskType.CODE,
@@ -297,6 +298,7 @@ class TestExecPlanGeneration:
             task_id="task-002",
             project_id="project-002",
             timeout_seconds=300,
+            runtime_spec=RuntimeSpec(python_path="/runtime/bin/python"),
         )
         payload = TaskPayload(
             task_type=TaskType.SPIDER,
@@ -324,6 +326,7 @@ class TestExecPlanGeneration:
             run_id="test-run-003",
             task_id="task-003",
             project_id="project-003",
+            runtime_spec=RuntimeSpec(python_path="/runtime/bin/python"),
         )
         payload = TaskPayload(
             task_type=TaskType.SPIDER,
@@ -460,16 +463,17 @@ class TestEnginePluginIntegration:
 
     def test_engine_does_not_hardcode_plugins(self):
         """Engine 不硬编码任何插件"""
+        import ast
         import inspect
 
         from antcode_worker.engine.engine import Engine
 
         source = inspect.getsource(Engine)
+        referenced_names = {node.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Name)}
 
-        # Engine 源码中不应该直接引用具体的插件类
-        assert "CodePlugin" not in source
-        assert "SpiderPlugin" not in source
-        assert "RenderPlugin" not in source
+        assert "CodePlugin" not in referenced_names
+        assert "SpiderPlugin" not in referenced_names
+        assert "RenderPlugin" not in referenced_names
 
     def test_registry_is_injectable(self):
         """PluginRegistry 是可注入的"""

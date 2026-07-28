@@ -27,6 +27,7 @@ model 本身只声明 event_id 为普通 nullable 列 + 普通索引。
 from __future__ import annotations
 
 from tortoise import fields
+from tortoise.indexes import Index
 from tortoise.models import Model
 
 
@@ -66,11 +67,13 @@ class TaskLog(Model):
     class Meta:
         table = "task_logs"
         table_description = "任务执行日志"
-        # ``list_entries`` 按 (run_id) 过滤，按 (sequence, id) 排序 → 复合索引最快。
+        # ``list_entries`` 按 (run_id) 过滤，按 (sequence, id) 排序。
+        # SSE 历史窗口按数据库写入顺序 (run_id, id) 做稳定 keyset 分页。
         # ``count`` 走 (run_id) 或 (run_id, log_type)。
         # ``_cleanup_postgres_logs`` 走 timestamp（单列索引由 db_index 提供）。
         indexes = [
             ("run_id", "sequence"),
+            Index(fields=("run_id", "id"), name="idx_task_logs_run_id_id"),
             ("run_id", "log_type"),
             ("event_id",),
         ]

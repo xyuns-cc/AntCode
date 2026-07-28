@@ -12,6 +12,7 @@ from antcode_core.common.config import settings
 from antcode_core.common.security.auth import (
     TokenData,
     get_current_user,
+    get_optional_current_user,
     jwt_auth,
     record_refresh_session,
     revoke_refresh_session,
@@ -22,7 +23,7 @@ from antcode_core.common.security.login_crypto import (
     LoginPasswordCryptoError,
     login_password_crypto,
 )
-from antcode_core.domain.models.user import UserRole
+from antcode_core.common.security.permissions import get_role_permissions
 from antcode_core.domain.schemas import (
     AppInfoResponse,
     HealthResponse,
@@ -35,6 +36,7 @@ from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.infrastructure.resilience.health import HealthStatus, health_checker
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from antcode_web_api.middleware.middleware import get_client_ip
@@ -144,7 +146,8 @@ async def get_app_info():
     response_model=BaseResponse[dict[str, Any]],
 )
 async def detailed_health_check(
-    include_details: bool = Query(default=True, description="是否包含详细信息"),
+    include_details: bool = Query(default=False, description="是否包含详细信息（仅管理员）"),
+    current_user: TokenData | None = Depends(get_optional_current_user),
 ) -> JSONResponse:
     """
     详细健康检查端点
@@ -154,6 +157,10 @@ async def detailed_health_check(
     - Redis 连接（如启用）
     - 熔断器状态
     - 系统资源使用
+
+    P2-03：匿名调用只返回 status/version/timestamp/summary；
+    ``include_details=true`` 需管理员，否则同样降级为 summary（不再直接
+    对匿名用户暴露 Worker host/port、熔断器状态、内存磁盘和异常文本）。
     """
     health = await health_checker.check_all()
 
@@ -165,17 +172,18 @@ async def detailed_health_check(
     else:
         status_code = 503  # 服务不可用
 
-    response_data = health.to_dict()
-    response_data["version"] = settings.APP_VERSION
-
-    if not include_details:
-        # 简化响应
+    is_admin = bool(current_user and getattr(current_user, "is_admin", False))
+    # 未登录 or 非管理员 → 强制 summary 视图
+    if not is_admin or not include_details:
         response_data = {
             "status": health.status.value,
             "version": settings.APP_VERSION,
             "timestamp": health.timestamp,
             "summary": health.summary,
         }
+    else:
+        response_data = health.to_dict()
+        response_data["version"] = settings.APP_VERSION
 
     response = success(response_data, message=Messages.QUERY_SUCCESS, code=status_code)
     return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
@@ -221,6 +229,10 @@ async def readiness_check() -> JSONResponse:
         is_ready = await asyncio.wait_for(health_checker.readiness(), timeout=_PROBE_TIMEOUT)
     except TimeoutError:
         is_ready = False
+    if is_ready:
+        from antcode_web_api.streams.ingest_follower import ingest_log_follower
+
+        is_ready = ingest_log_follower.healthy()
 
     status_code = status.HTTP_200_OK if is_ready else status.HTTP_503_SERVICE_UNAVAILABLE
     probe_status = "ready" if is_ready else "not_ready"
@@ -426,7 +438,8 @@ async def refresh_token(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        logger.exception("刷新令牌校验失败")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="refresh token 无效") from exc
 
     user = await user_service.get_user_by_id(token_data.user_id)
     if not user or not user.is_active:
@@ -529,5 +542,24 @@ async def get_permissions(current_user: TokenData = Depends(get_current_user)):
     user = await user_service.get_user_by_id(current_user.user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-    permissions = ["admin"] if user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN) else ["user"]
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    permissions = sorted(permission.value for permission in get_role_permissions(role))
     return success({"permissions": permissions}, message=Messages.QUERY_SUCCESS)
+
+
+@router.get(
+    "/auth/me",
+    response_model=BaseResponse[UserResponse],
+    summary="获取当前用户信息",
+    tags=["认证"],
+)
+async def get_me(current_user: TokenData = Depends(get_current_user)):
+    """
+    P2-15：轻量 /auth/me，让前端能按需刷新 localStorage 里的用户信息
+    （用户名/角色/is_active），避免菜单/角色展示与服务端权威状态长期不一致。
+    只返回展示字段，不涉及权限颁发，仅要求登录用户。
+    """
+    user = await user_service.get_user_by_id(current_user.user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    return success(UserResponse.model_validate(user), message=Messages.QUERY_SUCCESS)
