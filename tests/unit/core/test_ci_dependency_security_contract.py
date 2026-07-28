@@ -270,7 +270,7 @@ def test_windows_security_job_publishes_actionable_failure_annotations() -> None
     annotation_step = _step_command(job, "Annotate Windows artifact test failures")
 
     assert "--junitxml=windows-artifact-results.xml" in test_step
-    assert urlsplit(job["env"]["DATABASE_URL"]).password is None
+    assert urlsplit(job["env"]["DATABASE_URL"]).password == "${{ github.run_id }}"
     assert job["env"]["REDIS_URL"] == "redis://localhost:6379/0"
     assert "windows-artifact-results.xml" in annotation_step
     assert "::error title=Windows artifact test failed:" in annotation_step

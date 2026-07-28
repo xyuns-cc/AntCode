@@ -24,6 +24,7 @@ from tests.contracts.fake_gateway_artifact import FakeArtifactService
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 STREAM_CLOSE_TIMEOUT_SECONDS = 2.0
+RUNTIME_CONTROL_TTL_MS = 30_000
 
 
 def _string_map(value: Any) -> dict[str, str]:
@@ -151,11 +152,14 @@ class FakeGatewayState:
     ) -> str:
         event_id = f"fake:control:{self.worker_id}|{uuid.uuid4().hex}"
         event = control_pb2.ControlEvent(event_id=event_id)
+        observed_at_ms = int(time.time() * 1000)
         event.runtime_control.CopyFrom(
             control_pb2.RuntimeControl(
                 request_id=request_id,
                 action=action,
                 params={"reply_stream": f"gateway:control:reply:{request_id}"},
+                expires_at_ms=observed_at_ms + RUNTIME_CONTROL_TTL_MS,
+                gateway_observed_at_ms=observed_at_ms,
                 action_typed=control_pb2.RuntimeAction(
                     generic=control_pb2.GenericAction(name=action, args=_string_map(payload))
                 ),
@@ -231,6 +235,7 @@ class FakeControlService(control_pb2_grpc.ControlServiceServicer):
             runtime_control_lease_fencing_v1=True,
             runtime_control_deadline_v1=True,
             artifact_transfer_v1=True,
+            runtime_control_authoritative_clock_v1=True,
         )
 
     async def Lease(self, request, context):

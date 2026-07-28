@@ -55,16 +55,18 @@ class CapabilitiesRequest(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class CapabilitiesResponse(_message.Message):
-    __slots__ = ("runtime_control_results_v1", "runtime_control_lease_fencing_v1", "runtime_control_deadline_v1", "artifact_transfer_v1")
+    __slots__ = ("runtime_control_results_v1", "runtime_control_lease_fencing_v1", "runtime_control_deadline_v1", "artifact_transfer_v1", "runtime_control_authoritative_clock_v1")
     RUNTIME_CONTROL_RESULTS_V1_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_CONTROL_LEASE_FENCING_V1_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_CONTROL_DEADLINE_V1_FIELD_NUMBER: _ClassVar[int]
     ARTIFACT_TRANSFER_V1_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_CONTROL_AUTHORITATIVE_CLOCK_V1_FIELD_NUMBER: _ClassVar[int]
     runtime_control_results_v1: bool
     runtime_control_lease_fencing_v1: bool
     runtime_control_deadline_v1: bool
     artifact_transfer_v1: bool
-    def __init__(self, runtime_control_results_v1: bool = ..., runtime_control_lease_fencing_v1: bool = ..., runtime_control_deadline_v1: bool = ..., artifact_transfer_v1: bool = ...) -> None: ...
+    runtime_control_authoritative_clock_v1: bool
+    def __init__(self, runtime_control_results_v1: bool = ..., runtime_control_lease_fencing_v1: bool = ..., runtime_control_deadline_v1: bool = ..., artifact_transfer_v1: bool = ..., runtime_control_authoritative_clock_v1: bool = ...) -> None: ...
 
 class DeregisterRequest(_message.Message):
     __slots__ = ("worker_id", "reason", "lease_id", "trace")
@@ -235,7 +237,7 @@ class ConfigUpdate(_message.Message):
     def __init__(self, config: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class RuntimeControl(_message.Message):
-    __slots__ = ("request_id", "action", "params", "action_typed", "expires_at_ms")
+    __slots__ = ("request_id", "action", "params", "action_typed", "expires_at_ms", "gateway_observed_at_ms")
     class ParamsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -248,12 +250,14 @@ class RuntimeControl(_message.Message):
     PARAMS_FIELD_NUMBER: _ClassVar[int]
     ACTION_TYPED_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    GATEWAY_OBSERVED_AT_MS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     action: str
     params: _containers.ScalarMap[str, str]
     action_typed: RuntimeAction
     expires_at_ms: int
-    def __init__(self, request_id: _Optional[str] = ..., action: _Optional[str] = ..., params: _Optional[_Mapping[str, str]] = ..., action_typed: _Optional[_Union[RuntimeAction, _Mapping]] = ..., expires_at_ms: _Optional[int] = ...) -> None: ...
+    gateway_observed_at_ms: int
+    def __init__(self, request_id: _Optional[str] = ..., action: _Optional[str] = ..., params: _Optional[_Mapping[str, str]] = ..., action_typed: _Optional[_Union[RuntimeAction, _Mapping]] = ..., expires_at_ms: _Optional[int] = ..., gateway_observed_at_ms: _Optional[int] = ...) -> None: ...
 
 class RuntimeAction(_message.Message):
     __slots__ = ("generic",)

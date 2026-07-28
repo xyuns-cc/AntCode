@@ -77,6 +77,7 @@ def test_legacy_worker_upgrade_includes_previous_key_expiry() -> None:
 
 @pytest.mark.asyncio
 async def test_performance_index_failure_is_not_swallowed(monkeypatch) -> None:
+    _set_required_environment(monkeypatch)
     connection = AsyncMock()
     connection.execute_query.side_effect = RuntimeError("index failed")
     monkeypatch.setattr(init_db, "PERFORMANCE_INDEXES", [("broken", "CREATE INDEX broken")])
@@ -92,6 +93,7 @@ async def test_performance_index_failure_is_not_swallowed(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_system_config_failure_is_not_swallowed(monkeypatch) -> None:
+    _set_required_environment(monkeypatch)
     from antcode_core.application.services.system_config.system_config_service import (
         system_config_service,
     )

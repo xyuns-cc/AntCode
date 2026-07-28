@@ -2,6 +2,27 @@ from unittest.mock import AsyncMock
 
 import pytest
 from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
+from redis.exceptions import ResponseError
+
+
+@pytest.mark.asyncio
+async def test_missing_stream_is_already_trimmed():
+    redis = AsyncMock()
+    redis.xinfo_groups.side_effect = ResponseError("no such key")
+
+    trimmed = await trim_acknowledged_stream(redis, "missing-stream")
+
+    assert trimmed == 0
+    redis.xtrim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_xinfo_failures_other_than_missing_stream_are_exposed():
+    redis = AsyncMock()
+    redis.xinfo_groups.side_effect = ResponseError("permission denied")
+
+    with pytest.raises(ResponseError, match="permission denied"):
+        await trim_acknowledged_stream(redis, "stream")
 
 
 @pytest.mark.asyncio

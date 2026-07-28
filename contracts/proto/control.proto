@@ -66,6 +66,7 @@ message CapabilitiesResponse {
   bool runtime_control_lease_fencing_v1 = 2;// Watch/Ack require the current lease generation
   bool runtime_control_deadline_v1 = 3;     // Runtime commands carry an execution deadline
   bool artifact_transfer_v1 = 4;            // Gateway streams source bundles and task artifacts
+  bool runtime_control_authoritative_clock_v1 = 5; // Gateway attaches its Redis TIME observation
 }
 
 // =========================================================================
@@ -197,6 +198,7 @@ message RuntimeControl {
   map<string, string> params = 3;           // Top-level params (e.g. reply_stream)
   RuntimeAction action_typed = 4;           // Typed payload (preferred)
   int64 expires_at_ms = 5;                  // Do not start side effects after this deadline
+  int64 gateway_observed_at_ms = 6;         // Redis TIME observed immediately before Gateway delivery
 }
 
 message RuntimeAction {

@@ -230,7 +230,7 @@ async def test_dispatched_no_ack_skips_round_when_liveness_unavailable(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_reconcile_runs_all_checks_in_order():
+async def test_reconcile_runs_all_checks_in_order(monkeypatch):
     events = []
     loop = ReconcileLoop()
 
@@ -241,7 +241,11 @@ async def test_reconcile_runs_all_checks_in_order():
     loop._check_dispatched_no_ack = lambda _token: record("dispatch")
     loop._check_inconsistent_states = lambda _token: record("inconsistent")
     loop._cleanup_zombie_tasks = lambda _token: record("zombie")
+    monkeypatch.setattr(repairs_module, "repair_stuck_queued_runs", lambda: record("queued"))
+    monkeypatch.setattr(repairs_module, "repair_stale_task_status", lambda: record("stale"))
+    retention_module = importlib.import_module("antcode_master.control.global_stream_retention")
+    monkeypatch.setattr(retention_module, "trim_global_control_stream", lambda: record("trim"))
 
     await loop._reconcile(21)
 
-    assert events == ["timeout", "dispatch", "inconsistent", "zombie"]
+    assert events == ["timeout", "dispatch", "inconsistent", "zombie", "queued", "stale", "trim"]

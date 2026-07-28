@@ -7,7 +7,7 @@ E2E 测试配置和 fixtures
 import asyncio
 import os
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -24,11 +24,18 @@ E2E_TRANSPORT_MODES = frozenset({"direct", "gateway"})
 E2E_WORKER_ID_ENV = "ANTCODE_E2E_WORKER_ID"
 
 
+class SensitiveString(str):
+    """保持字符串行为，但禁止 pytest/对象 repr 暴露敏感值。"""
+
+    def __repr__(self) -> str:
+        return "<redacted>"
+
+
 @dataclass(frozen=True)
 class E2EConfig:
     web_api_url: str
     admin_user: str
-    admin_password: str
+    admin_password: str = field(repr=False)
     worker_id: str
     runtime_python_version: str
     shared_env_name: str
@@ -175,7 +182,7 @@ async def ensure_e2e_admin_credentials(e2e_config: E2EConfig) -> None:
 async def e2e_token(
     e2e_config: E2EConfig,
     ensure_e2e_admin_credentials: None,
-) -> str:
+) -> SensitiveString:
     """Login once per session so E2E respects the production auth limiter."""
     from .helpers import login
 
@@ -183,7 +190,7 @@ async def e2e_token(
         base_url=e2e_config.web_api_url,
         timeout=e2e_config.http_timeout,
     ) as client:
-        return await login(client, e2e_config)
+        return SensitiveString(await login(client, e2e_config))
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

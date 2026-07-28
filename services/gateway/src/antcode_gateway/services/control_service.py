@@ -58,7 +58,7 @@ from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import LeaseHandler
 from antcode_gateway.services.runtime_control_expiry import (
     build_runtime_control_event,
-    settle_expired_runtime_control,
+    prepare_runtime_control_delivery,
 )
 from antcode_gateway.services.runtime_control_recovery import recover_committed_runtime_result
 from antcode_gateway.services.runtime_control_result import (
@@ -281,6 +281,7 @@ class GatewayControlService(ControlServiceServicer):
             runtime_control_lease_fencing_v1=True,
             runtime_control_deadline_v1=True,
             artifact_transfer_v1=True,
+            runtime_control_authoritative_clock_v1=True,
         )
 
     async def _require_current_lease(
@@ -676,16 +677,13 @@ class GatewayControlService(ControlServiceServicer):
             )
             if recovered:
                 return None
-            expired = await self._settle_expired_runtime_control(
+            return await self._prepare_runtime_control_delivery(
                 redis,
                 session,
                 stream_key=stream_key,
                 message_id=message_id,
                 event=event,
             )
-            if expired:
-                return None
-            return event
         logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={message_id}")
         group = _control_group_for_stream(stream_key, session.worker_id)
         try:
@@ -728,7 +726,7 @@ class GatewayControlService(ControlServiceServicer):
         )
         return True
 
-    async def _settle_expired_runtime_control(
+    async def _prepare_runtime_control_delivery(
         self,
         redis,
         session: _ControlWatchSession,
@@ -736,8 +734,8 @@ class GatewayControlService(ControlServiceServicer):
         stream_key: str,
         message_id: str,
         event: control_pb2.ControlEvent,
-    ) -> bool:
-        return await settle_expired_runtime_control(
+    ) -> control_pb2.ControlEvent | None:
+        return await prepare_runtime_control_delivery(
             redis,
             worker_id=session.worker_id,
             stream_key=stream_key,

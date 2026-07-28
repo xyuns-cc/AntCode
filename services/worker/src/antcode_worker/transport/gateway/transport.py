@@ -56,6 +56,7 @@ from antcode_worker.transport.base import (
     TransportMode,
     WorkerState,
 )
+from antcode_worker.transport.gateway.runtime_control_clock import GatewayRuntimeControlClock
 from antcode_worker.transport.gateway.subscriptions import (
     CONTROL_SUBSCRIPTION,
     SUBSCRIPTION_NAMES,
@@ -229,6 +230,7 @@ class GatewayTransport(TransportBase):
         # Lease 状态（替代 SendHeartbeat）
         self._lease_id: str = ""
         self._lease_revoked = False
+        self._runtime_control_clock = GatewayRuntimeControlClock()
 
         # P1-GW-02: Lease 被撤销/换代时的对外回调 (由 engine 注册),让 engine
         # 立即 cancel_all + 唤醒 ownership renew, 而不是等下一个 600s 续租周期。
@@ -520,25 +522,15 @@ class GatewayTransport(TransportBase):
                 receipt=event_id,
             )
         if payload_kind == "runtime_control":
-            rt = decoder.decode_runtime_control(event.runtime_control)
-            # 兼容 engine：payload 顶层放 args，request_id/action 在外层
-            return ControlMessage(
-                control_type="runtime_manage",
-                payload={
-                    "request_id": rt.get("request_id", ""),
-                    "action": rt.get("action", ""),
-                    "expires_at_ms": rt.get("expires_at_ms", 0),
-                    "params": rt.get("params", {}),
-                    "args": rt.get("args", {}),
-                    # 兼容 engine 旧路径继续读 ``payload.get("payload")``
-                    "payload": rt.get("args", {}),
-                },
-                receipt=event_id,
-            )
+            return self._runtime_control_clock.to_message(event, decoder)
         if payload_kind == "ping":
             # ping 不投递给 engine；订阅循环统一负责 ACK。
             return None
         return None
+
+    async def authoritative_now_ms(self) -> int:
+        """使用控制事件携带的 Redis TIME 校准 Gateway Worker 时钟。"""
+        return self._runtime_control_clock.now_ms()
 
     # ==================== TransportBase 实现：任务面 ====================
 
@@ -1378,6 +1370,8 @@ class GatewayTransport(TransportBase):
             raise RuntimeError("Gateway 不支持 runtime_control_deadline_v1，拒绝启动")
         if not response.artifact_transfer_v1:
             raise RuntimeError("Gateway 不支持 artifact_transfer_v1，拒绝启动")
+        if not response.runtime_control_authoritative_clock_v1:
+            raise RuntimeError("Gateway 不支持 runtime_control_authoritative_clock_v1，拒绝启动")
 
     async def _validate_reconnect_lease(self, control_stub: Any) -> str:
         if not self._running:

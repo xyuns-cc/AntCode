@@ -56,17 +56,22 @@ def test_ci_does_not_commit_fixed_database_or_admin_passwords() -> None:
     backend = jobs["backend-test"]
     postgres = backend["services"]["postgres"]
     integration = _step(backend, "Run integration tests")
+    backend_secrets = _step(backend, "Generate backend test secrets")["run"]
     generate = _step(jobs["e2e"], "Generate ephemeral stack secrets")["run"]
 
-    assert postgres["env"]["POSTGRES_HOST_AUTH_METHOD"] == "trust"
-    assert "POSTGRES_PASSWORD" not in postgres["env"]
+    assert postgres["env"]["POSTGRES_PASSWORD"] == "${{ github.run_id }}"
+    assert backend["env"]["PGPASSWORD"] == "${{ github.run_id }}"
     database_urls = (
         backend["env"]["DATABASE_URL"],
         integration["env"]["DATABASE_URL"],
         integration["env"]["TEST_DATABASE_URL"],
+        jobs["windows-artifact-security"]["env"]["DATABASE_URL"],
     )
-    assert all(urlsplit(str(url)).password is None for url in database_urls)
+    assert all(urlsplit(str(url)).password == "${{ github.run_id }}" for url in database_urls)
     assert "env" not in _step(backend, "Prepare integration databases")
+    assert 'jwt_secret="$(openssl rand -hex 32)"' in backend_secrets
+    assert 'encryption_key="$(openssl rand -hex 32)"' in backend_secrets
+    assert 'echo "::add-mask::$secret"' in backend_secrets
     assert 'admin_password="$(openssl rand -base64 24' in generate
     assert 'worker_key="$(openssl rand -hex 32)"' in generate
     assert 'echo "ANTCODE_WORKER_KEY=$worker_key"' in generate

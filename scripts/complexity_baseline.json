@@ -1649,7 +1649,7 @@
       "path": "services/gateway/src/antcode_gateway/services/control_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 906
+      "value": 904
     },
     {
       "path": "services/gateway/src/antcode_gateway/services/data_service.py",
@@ -3065,7 +3065,7 @@
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1681
+      "value": 1675
     },
     {
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
@@ -4776,12 +4776,6 @@
       "function": "test_gateway_config_loads_shared_log_limits_from_env",
       "rule": "PLR2004",
       "value": 2
-    },
-    {
-      "path": "tests/unit/worker/test_gateway_transport_modernization.py",
-      "function": "test_runtime_control_message_preserves_execution_deadline",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "tests/unit/worker/test_gateway_transport_modernization.py",

@@ -7,11 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import ParseResult, parse_qs, urlparse
 
-from dotenv import load_dotenv
 from loguru import logger
-
-# 加载环境变量
-load_dotenv()
 
 POSTGRES_SSL_MODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
 VERIFY_SSL_MODES = frozenset({"verify-ca", "verify-full"})

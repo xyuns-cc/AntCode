@@ -17,7 +17,7 @@ from antcode_core.infrastructure.redis import control_global_stream
 from loguru import logger
 
 
-async def settle_expired_runtime_control(
+async def prepare_runtime_control_delivery(
     redis,
     *,
     worker_id: str,
@@ -26,15 +26,19 @@ async def settle_expired_runtime_control(
     event: control_pb2.ControlEvent,
     group: str,
     trim,
-) -> bool:
-    """已过期的 runtime 指令在中继侧按 Redis TIME 结算丢弃（P1-DR-04）。"""
+) -> control_pb2.ControlEvent | None:
+    """注入 Redis 权威时钟；已过期指令在中继侧结算丢弃。"""
     if event.WhichOneof("payload") != "runtime_control":
-        return False
+        return event
     expires_at_ms = int(event.runtime_control.expires_at_ms or 0)
     if expires_at_ms <= 0:
-        return False
-    if await redis_server_now_ms(redis) < expires_at_ms:
-        return False
+        return event
+    observed_at_ms = await redis_server_now_ms(redis)
+    if observed_at_ms < expires_at_ms:
+        delivered_event = control_pb2.ControlEvent()
+        delivered_event.CopyFrom(event)
+        delivered_event.runtime_control.gateway_observed_at_ms = observed_at_ms
+        return delivered_event
     await redis.xack(stream_key, group, message_id)
     await trim(redis, stream_key, message_id, group=group)
     logger.warning(
@@ -44,7 +48,7 @@ async def settle_expired_runtime_control(
         message_id,
         event.runtime_control.request_id,
     )
-    return True
+    return None
 
 
 def build_runtime_control_event(
@@ -66,10 +70,13 @@ def build_runtime_control_event(
     reply_stream = decoded.get("reply_stream")
     params = {"reply_stream": str(reply_stream)} if reply_stream else {}
     action = str(decoded.get("action", ""))
+    expires_at_ms = int(decoded.get("expires_at_ms") or 0)
+    if expires_at_ms <= 0:
+        raise ValueError("runtime control expires_at_ms 必须大于 0")
     runtime_control = control_pb2.RuntimeControl(
         request_id=str(decoded.get("request_id", "")),
         action=action,
-        expires_at_ms=int(decoded.get("expires_at_ms") or 0),
+        expires_at_ms=expires_at_ms,
         params=params,
         action_typed=control_pb2.RuntimeAction(
             generic=control_pb2.GenericAction(name=action, args=_runtime_control_args(decoded)),
@@ -93,4 +100,7 @@ def _encode_runtime_arg(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
-__all__ = ["build_runtime_control_event", "settle_expired_runtime_control"]
+__all__ = [
+    "build_runtime_control_event",
+    "prepare_runtime_control_delivery",
+]

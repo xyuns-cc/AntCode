@@ -56,6 +56,7 @@ async def test_protocol_check_accepts_runtime_result_capability_without_register
                 runtime_control_lease_fencing_v1=True,
                 runtime_control_deadline_v1=True,
                 artifact_transfer_v1=True,
+                runtime_control_authoritative_clock_v1=True,
             )
         )
     )
@@ -119,6 +120,22 @@ async def test_protocol_check_requires_artifact_transfer():
     transport._control_stub = stub
 
     with pytest.raises(RuntimeError, match="artifact_transfer_v1"):
+        await transport._check_protocol_capabilities()
+
+
+@pytest.mark.asyncio
+async def test_protocol_check_requires_authoritative_runtime_clock():
+    response = control_pb2.CapabilitiesResponse(
+        runtime_control_results_v1=True,
+        runtime_control_lease_fencing_v1=True,
+        runtime_control_deadline_v1=True,
+        artifact_transfer_v1=True,
+        runtime_control_authoritative_clock_v1=False,
+    )
+    transport = GatewayTransport(gateway_config=GatewayConfig(worker_id="worker-1"))
+    transport._control_stub = MagicMock(GetCapabilities=AsyncMock(return_value=response))
+
+    with pytest.raises(RuntimeError, match="runtime_control_authoritative_clock_v1"):
         await transport._check_protocol_capabilities()
 
 
@@ -332,23 +349,6 @@ def test_watch_control_request_carries_current_lease():
 
     assert request.worker_id == "worker-1"
     assert request.lease_id == "lease-1"
-
-
-def test_runtime_control_message_preserves_execution_deadline():
-    transport = GatewayTransport(gateway_config=GatewayConfig(worker_id="worker-1"))
-    event = control_pb2.ControlEvent(
-        event_id="antcode:control:worker-1|1-0",
-        runtime_control=control_pb2.RuntimeControl(
-            request_id="request-1",
-            action="list_envs",
-            expires_at_ms=4_102_444_800_000,
-        ),
-    )
-
-    message = transport._control_event_to_message(event, ControlDecoder)
-
-    assert message is not None
-    assert message.payload["expires_at_ms"] == 4_102_444_800_000
 
 
 @pytest.mark.asyncio

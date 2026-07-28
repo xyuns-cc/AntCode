@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from redis.exceptions import ResponseError
+
 
 def _text(value: Any) -> str:
     if isinstance(value, bytes):
@@ -20,13 +22,22 @@ def _stream_id_key(stream_id: str) -> tuple[int, int]:
     return int(milliseconds), int(sequence)
 
 
+async def _stream_groups(redis: Any, stream_key: str) -> list[dict]:
+    try:
+        return await redis.xinfo_groups(stream_key)
+    except ResponseError as exc:
+        if str(exc) == "no such key":
+            return []
+        raise
+
+
 async def trim_acknowledged_stream(
     redis: Any,
     stream_key: str,
     group_name: str | None = None,
 ) -> int:
     """Trim only entries older than every selected group's safe ACK boundary."""
-    groups = await redis.xinfo_groups(stream_key)
+    groups = await _stream_groups(redis, stream_key)
     selected = []
     for group in groups or []:
         name = _text(_group_field(group, "name"))
