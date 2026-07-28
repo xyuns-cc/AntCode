@@ -19,6 +19,8 @@ SCHEDULER_TEST_PATH = ROOT / "tests/unit/master/test_scheduler_concurrency_stats
 FRONTEND_LOCK_PATH = ROOT / "web/antcode-frontend/package-lock.json"
 FRONTEND_PACKAGE_PATH = ROOT / "web/antcode-frontend/package.json"
 FRONTEND_SOURCE_PATH = ROOT / "web/antcode-frontend/src"
+NPM_AUDIT_GATE_PATH = ROOT / "scripts/check_npm_audit.mjs"
+TRIVY_GATE_COUNT = 4
 
 
 def _workflow() -> dict:
@@ -161,8 +163,23 @@ def test_every_trivy_gate_loads_the_structured_exception() -> None:
         for step in job["steps"]
         if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
     ]
-    assert len(trivy_steps) == 4
+    assert len(trivy_steps) == TRIVY_GATE_COUNT
     assert all(step["with"]["trivyignores"] == ".trivyignore.yaml" for step in trivy_steps)
+
+
+def test_npm_audit_gate_is_precise_fail_closed_and_expires() -> None:
+    job = _workflow()["jobs"]["frontend-security"]
+    collect_step = _step_command(job, "Collect npm audit report")
+    gate_step = _step_command(job, "Block unapproved HIGH/CRITICAL npm findings")
+    gate = NPM_AUDIT_GATE_PATH.read_text(encoding="utf-8")
+
+    assert "npm audit --json --audit-level=high" in collect_step
+    assert "npm-audit-report.json" in collect_step
+    assert "check_npm_audit.mjs" in gate_step
+    assert "GHSA-qwww-vcr4-c8h2" in gate
+    assert 'const EXPIRES_ON = "2026-08-31"' in gate
+    assert 'new Set(["high", "critical"])' in gate
+    assert "auditReportVersion !== 2" in gate
 
 
 def test_click_security_floor_is_pinned() -> None:
@@ -222,6 +239,8 @@ def test_e2e_job_really_runs_and_gates_image_publication() -> None:
     stack_step = _step_command(e2e_job, "Start control plane stack")
     install_key_step = _step_command(e2e_job, "Generate Direct Worker install key")
     worker_step = _step_command(e2e_job, "Start Direct Worker")
+    secret_step = _step_command(e2e_job, "Generate ephemeral stack secrets")
+    diagnostics_step = _step_command(e2e_job, "Dump stack diagnostics on failure")
 
     # E2E 门禁必须真实执行（不是 --collect-only），且跑在 compose 全栈之上
     assert "pytest tests/e2e -q" in run_step
@@ -233,6 +252,9 @@ def test_e2e_job_really_runs_and_gates_image_publication() -> None:
     assert "/workers/generate-install-key" in install_key_step
     assert "::add-mask::" in install_key_step
     assert "docker compose" in worker_step and " worker" in worker_step
+    assert "::add-mask::" in secret_step
+    assert "logs --no-color --tail=300 postgres redis" in diagnostics_step
+    assert "::error title=E2E compose stack failed" in diagnostics_step
     # P1-CI-04: 必须有真实走 Gateway 认证/lease 链路的冒烟步骤。
     gateway_smoke = _step_command(e2e_job, "Run gateway backendless worker smoke")
     assert "WORKER_TRANSPORT_MODE=gateway" in gateway_smoke
@@ -248,5 +270,7 @@ def test_windows_security_job_publishes_actionable_failure_annotations() -> None
     annotation_step = _step_command(job, "Annotate Windows artifact test failures")
 
     assert "--junitxml=windows-artifact-results.xml" in test_step
+    assert "${{ github.run_id }}" in job["env"]["DATABASE_URL"]
+    assert job["env"]["REDIS_URL"] == "redis://localhost:6379/0"
     assert "windows-artifact-results.xml" in annotation_step
     assert "::error title=Windows artifact test failed:" in annotation_step

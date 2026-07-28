@@ -102,7 +102,28 @@ jobs:
             'import asyncio; from scripts.init_db import _generate_schemas; asyncio.run(_generate_schemas())'
 
       - name: Run core unit tests
-        run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/unit/test_*.py tests/unit/core -q
+        run: >-
+          /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest
+          tests/unit/test_*.py tests/unit/core -q --junitxml=backend-core-results.xml
+
+      - name: Annotate backend core test failures
+        if: failure() && hashFiles('backend-core-results.xml') != ''
+        run: |
+          uv run --extra dev python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("backend-core-results.xml").getroot()
+          for case in root.iter("testcase"):
+              failure = case.find("failure")
+              if failure is None:
+                  failure = case.find("error")
+              if failure is None:
+                  continue
+              message = (failure.text or failure.get("message") or "pytest failure").replace("%", "%25")
+              message = message.replace("\r", "%0D").replace("\n", "%0A")
+              title = f"Backend core test failed: {case.get('name', 'unknown')}"
+              print(f"::error title={title}::{message}")
+          PY
 
       - name: Run Web API unit tests
         run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/unit/web_api -q
@@ -169,22 +190,31 @@ jobs:
         run: |
           host_ip="$(hostname -I | awk '{print $1}')"
           pg_password="$(openssl rand -hex 16)"
+          redis_password="$(openssl rand -hex 16)"
+          jwt_secret="$(openssl rand -hex 32)"
+          encryption_key="$(openssl rand -hex 32)"
+          encryption_salt="$(openssl rand -hex 16)"
           admin_password="$(openssl rand -base64 24 | tr -d '\n')Aa1!"
+          worker_key="$(openssl rand -hex 32)"
+          for secret in "$pg_password" "$redis_password" "$jwt_secret" \
+            "$encryption_key" "$encryption_salt" "$admin_password" "$worker_key"; do
+            echo "::add-mask::$secret"
+          done
           {
             echo "HOST_IP=$host_ip"
             echo "E2E_POSTGRES_PASSWORD=$pg_password"
             echo "DEFAULT_ADMIN_PASSWORD=$admin_password"
             # Compose 会在 build/run 阶段解析所有 service；控制面启动后，
             # Generate Direct Worker install key 步骤会用真实一次性 Key 覆盖此值。
-            echo "ANTCODE_WORKER_KEY=$(openssl rand -hex 32)"
+            echo "ANTCODE_WORKER_KEY=$worker_key"
           } >> "$GITHUB_ENV"
           {
             echo "POSTGRES_DB=antcode_e2e_test"
             echo "POSTGRES_PASSWORD=$pg_password"
-            echo "REDIS_PASSWORD=$(openssl rand -hex 16)"
-            echo "JWT_SECRET=$(openssl rand -hex 32)"
-            echo "ENCRYPTION_KEY=$(openssl rand -hex 32)"
-            echo "ENCRYPTION_KEY_SALT=$(openssl rand -hex 16)"
+            echo "REDIS_PASSWORD=$redis_password"
+            echo "JWT_SECRET=$jwt_secret"
+            echo "ENCRYPTION_KEY=$encryption_key"
+            echo "ENCRYPTION_KEY_SALT=$encryption_salt"
             echo "DEFAULT_ADMIN_PASSWORD=$admin_password"
             # E2E 要求显式绑定专用 Worker（tests/e2e/conftest.py 的 fail-closed 校验）
             echo "WORKER_ID=worker-e2e-001"
@@ -431,10 +461,18 @@ jobs:
       - name: Dump stack diagnostics on failure
         if: failure()
         run: |
+          echo "::error title=E2E compose stack failed::See grouped container status and logs below"
+          echo "::group::Compose container status"
           docker compose $COMPOSE_ARGS ps -a || true
-          docker compose $COMPOSE_ARGS logs --tail=300 || true
+          echo "::endgroup::"
+          echo "::group::PostgreSQL and Redis logs"
+          docker compose $COMPOSE_ARGS logs --no-color --tail=300 postgres redis || true
+          echo "::endgroup::"
+          echo "::group::Application stack logs"
+          docker compose $COMPOSE_ARGS logs --no-color --tail=300 web-api master gateway worker frontend || true
           docker logs --tail=300 antcode-worker-gateway-smoke 2>/dev/null || true
           cat "$RUNNER_TEMP/e2e-git-http.log" || true
+          echo "::endgroup::"
 
       - name: Tear down stack
         if: always()
@@ -447,6 +485,9 @@ jobs:
     name: Windows Artifact Security
     runs-on: windows-latest
     timeout-minutes: 10
+    env:
+      DATABASE_URL: postgresql://antcode:ci-${{ github.run_id }}-${{ github.run_attempt }}@localhost:5432/antcode_windows_tests
+      REDIS_URL: redis://localhost:6379/0
 
     steps:
       - name: Checkout repository
@@ -611,9 +652,25 @@ jobs:
         working-directory: web/antcode-frontend
         run: npm ci
 
-      - name: npm audit (HIGH severity blocks)
+      - name: Collect npm audit report
         working-directory: web/antcode-frontend
-        run: npm audit --audit-level=high
+        run: |
+          npm audit --json --audit-level=high > npm-audit-report.json || audit_status=$?
+          test -s npm-audit-report.json
+          if [ "${audit_status:-0}" -gt 1 ]; then
+            exit "$audit_status"
+          fi
+
+      - name: Block unapproved HIGH/CRITICAL npm findings
+        run: node scripts/check_npm_audit.mjs web/antcode-frontend/npm-audit-report.json
+
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-audit-report
+          path: web/antcode-frontend/npm-audit-report.json
+          if-no-files-found: error
 
   # ==================== 前端构建 ====================
   frontend-build:

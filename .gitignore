@@ -78,6 +78,7 @@ dmypy.json
 node_modules/
 web/antcode-frontend/node_modules/
 web/antcode-frontend/dist/
+web/antcode-frontend/npm-audit-report.json
 
 # Lock files that might be user-specific
 .lock
