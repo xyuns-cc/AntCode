@@ -16,8 +16,18 @@ from datetime import datetime
 import pytest
 from loguru import logger
 
-# 从环境变量或默认值获取 Redis URL
-REDIS_URL = os.getenv("REDIS_URL", "redis://[REDACTED]@[REDACTED]:6379/0")
+from tests.integration.worker.direct_transport_support import (
+    activate_direct_transport,
+    read_task_statuses,
+    source_bundle_fields,
+    stop_direct_transport,
+)
+
+REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
+REDIS_REQUIRED = pytest.mark.skipif(
+    not REDIS_URL,
+    reason="ANTCODE_INTEGRATION_REDIS_URL is required for Redis integration tests",
+)
 
 
 @pytest.fixture
@@ -49,11 +59,14 @@ class TestDirectModeTaskDispatch:
     """Direct 模式任务分发测试 - Requirements: 14.2"""
 
     @pytest.mark.asyncio
+    @REDIS_REQUIRED
     async def test_master_dispatch_worker_receive(
         self,
         unique_task_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         测试 Master 分发任务，Worker 接收
@@ -74,16 +87,12 @@ class TestDirectModeTaskDispatch:
         )
 
         config = ServerConfig(redis_url=REDIS_URL)
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
-        )
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id, config)
         keys = RedisKeys()
 
         try:
             # 启动 Transport
-            await transport.start()
+            await activate_direct_transport(transport)
 
             # 确保 consumer group 存在
             stream_key = keys.task_ready_stream(unique_worker_id)
@@ -105,8 +114,7 @@ class TestDirectModeTaskDispatch:
                 "priority": "10",
                 "timeout": "120",
                 "entry_point": "main.py",
-                "download_url": "/tmp/test-project",
-                "file_hash": "abc123def456",
+                **source_bundle_fields("a"),
             }
 
             msg_id = await redis_client.xadd(stream_key, task_data)
@@ -127,7 +135,7 @@ class TestDirectModeTaskDispatch:
             logger.info("Direct 模式任务分发验证通过")
 
         finally:
-            await transport.stop()
+            await stop_direct_transport(transport)
             try:
                 await redis_client.delete(stream_key)
             except Exception:
@@ -213,12 +221,15 @@ class TestDirectModeTaskDispatch:
                 await executor.stop()
 
     @pytest.mark.asyncio
+    @REDIS_REQUIRED
     async def test_direct_mode_full_e2e(
         self,
         unique_task_id,
         unique_execution_id,
         unique_worker_id,
         unique_stream_prefix,
+        *,
+        direct_transport_factory,
     ):
         """
         Direct 模式完整 E2E 测试
@@ -245,11 +256,7 @@ class TestDirectModeTaskDispatch:
         )
 
         config = ServerConfig(redis_url=REDIS_URL)
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
-        )
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id, config)
         keys = RedisKeys()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -265,7 +272,7 @@ class TestDirectModeTaskDispatch:
 
             try:
                 # 1. 启动 Transport
-                await transport.start()
+                await activate_direct_transport(transport)
                 logger.info("Transport 已启动")
 
                 # 确保 consumer group 存在
@@ -288,8 +295,7 @@ class TestDirectModeTaskDispatch:
                     "priority": "5",
                     "timeout": "60",
                     "entry_point": "main.py",
-                    "download_url": tmpdir,
-                    "file_hash": "",
+                    **source_bundle_fields("b"),
                 }
                 await redis_client.xadd(stream_key, task_data)
                 logger.info("任务已分发: {}", unique_task_id)
@@ -350,14 +356,14 @@ class TestDirectModeTaskDispatch:
 
                 # 验证结果已写入 Redis
                 result_key = keys.task_result_stream()
-                results = await redis_client.xrevrange(result_key, "+", "-", count=10)
-                found = any(d.get("task_id") == unique_task_id for _, d in results)
+                statuses = await read_task_statuses(REDIS_URL, result_key, count=10)
+                found = any(status.task_id == unique_task_id for status in statuses)
                 assert found, "结果未写入 Redis"
 
                 logger.info("Direct 模式完整 E2E 验证通过")
 
             finally:
-                await transport.stop()
+                await stop_direct_transport(transport)
                 try:
                     await redis_client.delete(stream_key)
                 except Exception:
@@ -378,31 +384,36 @@ class TestGatewayModeTaskDispatch:
         1. 任务数据可以正确解码
         2. 字段映射正确
         """
+        from antcode_contracts import data_pb2
         from antcode_worker.transport.gateway.codecs import TaskDecoder
 
-        task_data = {
-            "task_id": unique_task_id,
-            "project_id": "gateway-project-001",
-            "project_type": "spider",
-            "priority": 8,
-            "params": {"url": "https://example.com"},
-            "environment": {"API_KEY": "test-key"},
-            "timeout": 1800,
-            "download_url": "https://storage.example.com/project.zip",
-            "file_hash": "sha256:abc123",
-            "entry_point": "spider.py",
-        }
+        digest = "a" * 64
+        dispatch = data_pb2.TaskDispatch(
+            task_id=unique_task_id,
+            project_id="gateway-project-001",
+            project_type="spider",
+            priority=8,
+            params={"url": "https://example.com"},
+            environment={"TASK_LABEL": "integration"},
+            timeout_seconds=1800,
+            source_bundle_uri=f"pgartifact://{digest}",
+            source_bundle_sha256=digest,
+            source_bundle_size=128,
+            entry_point="spider.py",
+        )
 
-        task = TaskDecoder.decode_from_dict(task_data)
+        task = TaskDecoder.decode(dispatch)
 
         assert task.task_id == unique_task_id
         assert task.project_id == "gateway-project-001"
         assert task.project_type == "spider"
         assert task.priority == 8
         assert task.params == {"url": "https://example.com"}
-        assert task.environment == {"API_KEY": "test-key"}
+        assert task.environment == {"TASK_LABEL": "integration"}
         assert task.timeout == 1800
         assert task.entry_point == "spider.py"
+        assert task.source_bundle is not None
+        assert task.source_bundle.sha256 == digest
 
         logger.info("Gateway 任务解码成功: {}", unique_task_id)
 
@@ -415,8 +426,9 @@ class TestGatewayModeTaskDispatch:
         1. 结果可以正确编码
         2. 字段映射正确
         """
+        from antcode_contracts import data_pb2
         from antcode_worker.transport.base import TaskResult
-        from antcode_worker.transport.gateway.codecs import ResultEncoder
+        from antcode_worker.transport.gateway.codecs import TaskStatusEncoder
 
         result = TaskResult(
             run_id=f"run-{unique_task_id}",
@@ -431,39 +443,31 @@ class TestGatewayModeTaskDispatch:
         )
 
         worker_id = "gateway-worker-001"
-        encoded = ResultEncoder.encode_to_dict(result, worker_id)
+        encoded = TaskStatusEncoder.encode(result, worker_id)
 
-        assert encoded["task_id"] == unique_task_id
-        assert encoded["worker_id"] == worker_id
-        assert encoded["status"] == "success"
-        assert encoded["exit_code"] == 0
-        assert encoded["duration_ms"] == 2500
-        assert encoded["data"] == {"items_scraped": 100}
+        assert encoded.task_id == unique_task_id
+        assert encoded.worker_id == worker_id
+        assert encoded.status == data_pb2.STATUS_COMPLETED
+        assert encoded.exit_code == 0
+        assert encoded.duration_ms == 2500
+        assert dict(encoded.data) == {"items_scraped": "100"}
 
         logger.info("Gateway 结果编码成功: {}", unique_task_id)
 
     @pytest.mark.asyncio
-    async def test_gateway_mode_mock_e2e(self, unique_task_id, unique_execution_id):
+    async def test_gateway_codec_executor_flow(self, unique_task_id, unique_execution_id):
         """
-        Gateway 模式模拟 E2E 测试
+        Gateway protobuf codec 与真实执行器集成测试
 
-        由于 Gateway 需要真实的 gRPC 服务器，这里使用模拟流程验证：
-        1. Transport 初始化
-        2. 任务解码
-        3. 执行任务
-        4. 结果编码
-        5. 幂等性缓存
+        验证真实 TaskDispatch 解码、子进程执行与 TaskStatus 编码。
         """
+        from antcode_contracts import data_pb2
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
         from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
         from antcode_worker.transport.base import TaskResult
-        from antcode_worker.transport.gateway.codecs import ResultEncoder, TaskDecoder
-        from antcode_worker.transport.gateway.transport import (
-            GatewayConfig,
-            GatewayTransport,
-        )
+        from antcode_worker.transport.gateway.codecs import TaskDecoder, TaskStatusEncoder
 
         worker_id = f"gateway-worker-{uuid.uuid4().hex[:8]}"
 
@@ -477,32 +481,21 @@ class TestGatewayModeTaskDispatch:
                 f.write("logger = logging.getLogger(__name__)\n")
                 f.write('logger.info("Gateway E2E Test")\n')
 
-            # 1. 创建 Gateway Transport
-            config = GatewayConfig(
-                gateway_host="localhost",
-                gateway_port=50051,
-                use_tls=False,
-                auth_method="api_key",
-                api_key="test-api-key",
-                worker_id=worker_id,
-                enable_receipt_idempotency=True,
+            digest = "b" * 64
+            dispatch = data_pb2.TaskDispatch(
+                task_id=unique_task_id,
+                project_id="gateway-e2e-project",
+                project_type="code",
+                priority=5,
+                timeout_seconds=60,
+                source_bundle_uri=f"pgartifact://{digest}",
+                source_bundle_sha256=digest,
+                source_bundle_size=128,
+                entry_point="main.py",
             )
-            transport = GatewayTransport(gateway_config=config)
-            logger.info("Gateway Transport 已创建: {}", worker_id)
-
-            # 2. 模拟任务数据解码
-            task_data = {
-                "task_id": unique_task_id,
-                "project_id": "gateway-e2e-project",
-                "project_type": "code",
-                "priority": 5,
-                "timeout": 60,
-                "entry_point": "main.py",
-            }
-            task = TaskDecoder.decode_from_dict(task_data)
+            task = TaskDecoder.decode(dispatch)
             logger.info("任务已解码: {}", task.task_id)
 
-            # 3. 执行任务
             executor_config = ExecutorConfig(max_concurrent=2, default_timeout=30)
             executor = ProcessExecutor(executor_config)
             await executor.start()
@@ -526,7 +519,6 @@ class TestGatewayModeTaskDispatch:
             await executor.stop()
             logger.info("执行完成: status={}", exec_result.status)
 
-            # 4. 编码结果
             result = TaskResult(
                 run_id=unique_execution_id,
                 task_id=task.task_id,
@@ -536,19 +528,15 @@ class TestGatewayModeTaskDispatch:
                 finished_at=datetime.now(),
                 duration_ms=exec_result.duration_ms,
             )
-            encoded_result = ResultEncoder.encode_to_dict(result, worker_id)
-            logger.info("结果已编码: status={}", encoded_result["status"])
-
-            # 5. 测试幂等性缓存
-            cache_key = f"result:{unique_task_id}"
-            transport._cache_result(cache_key, True)
-            cached = transport._get_cached_result(cache_key)
-            assert cached is True
-            logger.info("幂等性缓存验证成功")
+            encoded_result = TaskStatusEncoder.encode(result, worker_id)
+            logger.info("结果已编码: status={}", encoded_result.status)
 
             # 验证结果
             assert exec_result.status == RunStatus.SUCCESS
             assert exec_result.exit_code == 0
+            assert encoded_result.task_id == unique_task_id
+            assert encoded_result.worker_id == worker_id
+            assert encoded_result.status == data_pb2.STATUS_COMPLETED
 
             logger.info("Gateway 模式模拟 E2E 验证通过")
 
@@ -669,13 +657,13 @@ class TestTaskExecutionEdgeCases:
                 await executor.stop()
 
     @pytest.mark.asyncio
-    async def test_task_with_environment_variables(self, unique_execution_id):
+    async def test_task_environment_filters_sensitive_values(self, unique_execution_id):
         """
-        测试带环境变量的任务执行
+        测试任务环境变量边界
 
         验证：
-        1. 环境变量正确传递
-        2. 脚本可以读取环境变量
+        1. 普通任务变量正确传递
+        2. 敏感变量不进入用户子进程
         """
         from antcode_worker.domain.enums import LogStream, RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
@@ -690,8 +678,10 @@ class TestTaskExecutionEdgeCases:
                 f.write("import sys\n")
                 f.write('logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)\n')
                 f.write("logger = logging.getLogger(__name__)\n")
+                f.write('label = os.environ.get("TASK_LABEL", "not_set")\n')
                 f.write('api_key = os.environ.get("TEST_API_KEY", "not_set")\n')
                 f.write('secret = os.environ.get("TEST_SECRET", "not_set")\n')
+                f.write('logger.info(f"LABEL={label}")\n')
                 f.write('logger.info(f"API_KEY={api_key}")\n')
                 f.write('logger.info(f"SECRET={secret}")\n')
 
@@ -717,6 +707,7 @@ class TestTaskExecutionEdgeCases:
                     command=script_path,
                     args=[],
                     env={
+                        "TASK_LABEL": "integration-safe",
                         "TEST_API_KEY": "my-api-key-123",
                         "TEST_SECRET": "super-secret-456",
                     },
@@ -729,11 +720,13 @@ class TestTaskExecutionEdgeCases:
 
                 assert result.status == RunStatus.SUCCESS
 
-                # 验证环境变量被正确传递
                 stdout_logs = [entry for entry in logs if entry.stream == LogStream.STDOUT]
                 log_content = " ".join(entry.content for entry in stdout_logs)
-                assert "my-api-key-123" in log_content
-                assert "super-secret-456" in log_content
+                assert "LABEL=integration-safe" in log_content
+                assert "API_KEY=not_set" in log_content
+                assert "SECRET=not_set" in log_content
+                assert "my-api-key-123" not in log_content
+                assert "super-secret-456" not in log_content
 
                 logger.info("环境变量测试通过")
 

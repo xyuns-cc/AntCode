@@ -16,8 +16,11 @@ from antcode_worker.transport.redis.keys import RedisKeys
 from loguru import logger
 
 # 集成测试必须显式提供 Redis URL
-REDIS_URL = os.getenv("REDIS_URL")
-pytestmark = pytest.mark.skipif(not REDIS_URL, reason="REDIS_URL is required for worker integration tests")
+REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
+pytestmark = pytest.mark.skipif(
+    not REDIS_URL,
+    reason="ANTCODE_INTEGRATION_REDIS_URL is required for worker integration tests",
+)
 REDIS_KEYS = RedisKeys()
 
 
@@ -32,7 +35,7 @@ class TestWorkerRegistration:
     """Worker 注册测试 - Requirements: 14.1"""
 
     @pytest.mark.asyncio
-    async def test_worker_presence_via_heartbeat(self, unique_worker_id):
+    async def test_worker_presence_via_heartbeat(self, unique_worker_id, direct_transport_factory):
         """
         测试 Worker 通过心跳发布 presence
 
@@ -42,7 +45,6 @@ class TestWorkerRegistration:
         3. 心跳数据可以被 Master/Web API 观测到
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport
         from antcode_worker.transport.base import HeartbeatMessage
 
         redis_client = aioredis.from_url(
@@ -51,12 +53,15 @@ class TestWorkerRegistration:
             decode_responses=True,
         )
 
-        transport = RedisTransport(redis_url=REDIS_URL, worker_id=unique_worker_id)
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id)
+        hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
 
         try:
             # 启动 Transport
             started = await transport.start()
             assert started, "Transport 启动失败"
+            lease_id, _, _, revoked = await transport.lease_renew("")
+            assert lease_id and not revoked
 
             # 发送心跳（发布 presence）
             heartbeat = HeartbeatMessage(
@@ -74,7 +79,6 @@ class TestWorkerRegistration:
             assert result is True, "心跳发送失败"
 
             # 验证心跳数据已写入 Redis
-            hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
             hb_data = await redis_client.hgetall(hb_key)
 
             assert hb_data is not None, "心跳数据未写入 Redis"
@@ -87,16 +91,13 @@ class TestWorkerRegistration:
             logger.info(f"[Test] 心跳数据: {hb_data}")
 
         finally:
+            await transport.deregister("integration-test-cleanup")
             await transport.stop()
-            # 清理测试数据
-            try:
-                await redis_client.delete(hb_key)
-            except Exception:
-                pass
+            await redis_client.delete(hb_key)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
-    async def test_heartbeat_reporter_initialization(self, unique_worker_id):
+    async def test_heartbeat_reporter_initialization(self, unique_worker_id, direct_transport_factory):
         """
         测试心跳上报器初始化
 
@@ -105,12 +106,13 @@ class TestWorkerRegistration:
         2. 可以设置节点 ID 和配置
         """
         from antcode_worker.heartbeat.reporter import HeartbeatReporter
-        from antcode_worker.transport import RedisTransport
 
-        transport = RedisTransport(redis_url=REDIS_URL, worker_id=unique_worker_id)
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id)
 
         try:
             await transport.start()
+            lease_id, _, _, revoked = await transport.lease_renew("")
+            assert lease_id and not revoked
 
             # 创建心跳上报器
             reporter = HeartbeatReporter(
@@ -129,10 +131,11 @@ class TestWorkerRegistration:
             logger.info(f"[Test] HeartbeatReporter 初始化成功: {unique_worker_id}")
 
         finally:
+            await transport.deregister("integration-test-cleanup")
             await transport.stop()
 
     @pytest.mark.asyncio
-    async def test_heartbeat_reporter_send(self, unique_worker_id):
+    async def test_heartbeat_reporter_send(self, unique_worker_id, direct_transport_factory):
         """
         测试心跳上报器发送心跳
 
@@ -142,7 +145,6 @@ class TestWorkerRegistration:
         """
         import redis.asyncio as aioredis
         from antcode_worker.heartbeat.reporter import HeartbeatReporter
-        from antcode_worker.transport import RedisTransport
 
         redis_client = aioredis.from_url(
             REDIS_URL,
@@ -150,10 +152,13 @@ class TestWorkerRegistration:
             decode_responses=True,
         )
 
-        transport = RedisTransport(redis_url=REDIS_URL, worker_id=unique_worker_id)
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id)
+        hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
 
         try:
             await transport.start()
+            lease_id, _, _, revoked = await transport.lease_renew("")
+            assert lease_id and not revoked
 
             reporter = HeartbeatReporter(
                 transport=transport,
@@ -169,22 +174,19 @@ class TestWorkerRegistration:
             assert reporter.last_heartbeat_time is not None
 
             # 验证 Redis 中的数据
-            hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
             hb_data = await redis_client.hgetall(hb_key)
             assert hb_data.get("status") == "online"
 
             logger.info(f"[Test] HeartbeatReporter 发送成功: last_time={reporter.last_heartbeat_time}")
 
         finally:
+            await transport.deregister("integration-test-cleanup")
             await transport.stop()
-            try:
-                await redis_client.delete(hb_key)
-            except Exception:
-                pass
+            await redis_client.delete(hb_key)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
-    async def test_heartbeat_reporter_loop(self, unique_worker_id):
+    async def test_heartbeat_reporter_loop(self, unique_worker_id, direct_transport_factory):
         """
         测试心跳上报器循环
 
@@ -195,7 +197,6 @@ class TestWorkerRegistration:
         """
         import redis.asyncio as aioredis
         from antcode_worker.heartbeat.reporter import HeartbeatReporter
-        from antcode_worker.transport import RedisTransport
 
         redis_client = aioredis.from_url(
             REDIS_URL,
@@ -203,10 +204,13 @@ class TestWorkerRegistration:
             decode_responses=True,
         )
 
-        transport = RedisTransport(redis_url=REDIS_URL, worker_id=unique_worker_id)
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id)
+        hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
 
         try:
             await transport.start()
+            lease_id, _, _, revoked = await transport.lease_renew("")
+            assert lease_id and not revoked
 
             reporter = HeartbeatReporter(
                 transport=transport,
@@ -224,7 +228,6 @@ class TestWorkerRegistration:
             await reporter.send_heartbeat()
 
             # 验证心跳已发送
-            hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
             hb_data = await redis_client.hgetall(hb_key)
             assert hb_data is not None
             assert len(hb_data) > 0
@@ -236,11 +239,9 @@ class TestWorkerRegistration:
             logger.info("[Test] HeartbeatReporter 循环测试通过")
 
         finally:
+            await transport.deregister("integration-test-cleanup")
             await transport.stop()
-            try:
-                await redis_client.delete(hb_key)
-            except Exception:
-                pass
+            await redis_client.delete(hb_key)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -312,7 +313,7 @@ class TestWorkerRegistration:
             logger.info(f"[Test] Worker 身份持久化成功: {identity1.worker_id}")
 
     @pytest.mark.asyncio
-    async def test_worker_presence_observable_by_master(self, unique_worker_id):
+    async def test_worker_presence_observable_by_master(self, unique_worker_id, direct_transport_factory):
         """
         测试 Worker presence 可被 Master/Web API 观测
 
@@ -322,7 +323,6 @@ class TestWorkerRegistration:
         3. 状态信息完整
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport
         from antcode_worker.transport.base import HeartbeatMessage
 
         redis_client = aioredis.from_url(
@@ -331,10 +331,13 @@ class TestWorkerRegistration:
             decode_responses=True,
         )
 
-        transport = RedisTransport(redis_url=REDIS_URL, worker_id=unique_worker_id)
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id)
+        hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
 
         try:
             await transport.start()
+            lease_id, _, _, revoked = await transport.lease_renew("")
+            assert lease_id and not revoked
 
             # Worker 发布 presence
             heartbeat = HeartbeatMessage(
@@ -351,8 +354,6 @@ class TestWorkerRegistration:
             await transport.send_heartbeat(heartbeat)
 
             # 模拟 Master/Web API 查询 Worker 状态
-            hb_key = REDIS_KEYS.heartbeat_key(unique_worker_id)
-
             # 检查 key 是否存在
             exists = await redis_client.exists(hb_key)
             assert exists == 1, "Worker presence 不可观测"
@@ -371,9 +372,7 @@ class TestWorkerRegistration:
             logger.info(f"[Test] TTL: {ttl}s")
 
         finally:
+            await transport.deregister("integration-test-cleanup")
             await transport.stop()
-            try:
-                await redis_client.delete(hb_key)
-            except Exception:
-                pass
+            await redis_client.delete(hb_key)
             await redis_client.aclose()

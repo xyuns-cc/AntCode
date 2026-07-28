@@ -106,15 +106,7 @@ class SchedulerService:
         project_id = internal_project_id if internal_project_id is not None else task_data.project_id
 
         # 处理 Worker ID
-        from antcode_core.domain.models import Worker
-
-        worker_internal_id = None
-        if specified_worker_id:
-            worker = await Worker.filter(public_id=specified_worker_id).first()
-            if worker:
-                worker_internal_id = worker.id
-            else:
-                raise ValueError("指定执行 Worker 不存在")
+        worker_internal_id = await self._resolve_worker_internal_id(specified_worker_id)
 
         # 1) 先构造 Trigger 校验触发器字段/语法。_create_trigger 只读
         #    schedule_type / cron_expression / interval_seconds / scheduled_time,
@@ -317,53 +309,59 @@ class SchedulerService:
         return task
 
     async def update_task(self, task_id, task_data, user_id):
-        """更新任务（支持 public_id）
-
-        触发器相关字段(cron_expression / interval_seconds / scheduled_time)
-        变化时,必须同步 reschedule 内存中的 Job,否则 DB 已改但 APScheduler
-        还按老的 trigger 触发,DB 和内存不一致。
-        """
-        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
+        """锁定最新任务行，只写 PATCH 请求字段并同步调度控制面。"""
         task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
         if not task:
             return None
-
-        # 更新字段
-        update_data = task_data.model_dump(exclude_unset=True)
-        for field, value in update_data.items():
-            setattr(task, field, value)
-
-        # 触发器字段变更,需要在保存前先试构造一次 Trigger 避免坏 cron 落库
-        trigger_fields = {"cron_expression", "interval_seconds", "scheduled_time"}
-        trigger_changed = bool(trigger_fields & update_data.keys())
-        if trigger_changed:
-            try:
-                self._create_trigger(task)
-            except Exception as e:  # noqa: BLE001
-                raise ValueError(f"任务触发器配置非法: {e}") from e
-
-        if self._control_plane():
-            async with in_transaction("default") as conn:
-                await task.save(using_db=conn)
+        update_data = dict(task_data.model_dump(exclude_unset=True))
+        if "specified_worker_id" in update_data:
+            update_data["specified_worker_id"] = await self._resolve_worker_internal_id(
+                update_data["specified_worker_id"]
+            )
+        trigger_changed = bool({"cron_expression", "interval_seconds", "scheduled_time"} & update_data.keys())
+        control_plane = self._control_plane()
+        async with in_transaction("default") as conn:
+            task = await Task.filter(id=task.id).using_db(conn).select_for_update().first()
+            if task is None:
+                return None
+            for field, value in update_data.items():
+                setattr(task, field, value)
+            if trigger_changed:
+                self._validate_updated_trigger(task)
+            if update_data:
+                await task.save(using_db=conn, update_fields=list(update_data))
+            if control_plane:
                 await self._publish_event("task_changed", task.id, connection=conn)
-            logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
-            return task
-        await task.save()
+        if not control_plane:
+            await self._sync_updated_task(task, update_data, trigger_changed=trigger_changed)
+        logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
+        return task
 
-        # 如果任务状态改变，更新调度器（使用内部 ID）
+    def _validate_updated_trigger(self, task):
+        try:
+            self._create_trigger(task)
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"任务触发器配置非法: {e}") from e
+
+    async def _sync_updated_task(self, task, update_data, *, trigger_changed):
         if "is_active" in update_data:
             if task.is_active:
                 await self.add_task(task)
             else:
                 await self.remove_task(task.id)
         elif trigger_changed and task.is_active and self._scheduler_enabled():
-            # is_active 没变但 trigger 变了 —— 必须 reschedule_job,
-            # 不能只改 DB;否则 APScheduler 还按老 trigger 触发。
             await self.reschedule_task(task)
 
-        logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
-        return task
+    @staticmethod
+    async def _resolve_worker_internal_id(worker_public_id):
+        if not worker_public_id:
+            return None
+        from antcode_core.domain.models import Worker
+
+        worker = await Worker.filter(public_id=worker_public_id).first()
+        if not worker:
+            raise ValueError("指定执行 Worker 不存在")
+        return worker.id
 
     async def reschedule_task(self, task):
         """用新的 trigger 更新 APScheduler 内存中已有的 Job。
@@ -390,14 +388,53 @@ class SchedulerService:
         if not task:
             return False
 
-        if self._scheduler_enabled():
-            await self.remove_task(task.id)
+        from antcode_core.application.services.crawl.spider_storage_cleanup import (
+            SPIDER_WRITABLE_TASK_STATUSES,
+            iter_cleanup_run_batches,
+        )
+        from antcode_core.domain.models import Project
+
+        project = await Project.filter(id=task.project_id).only("public_id").first()
+        if not project:
+            raise RuntimeError("任务关联项目不存在，拒绝删除")
+        project_public_id = project.public_id
 
         async with in_transaction("default") as conn:
+            # P1-DB-04: 活动 run 检查必须在事务内、Task 行锁之后执行。
+            # `_claim_task_run` 创建新 run 前同样 select_for_update Task 行，
+            # 两者串行化后不再有"检查通过 → 新 run 插入 → 被静默删除"窗口。
+            locked = await Task.filter(id=task.id).using_db(conn).select_for_update().only("id").first()
+            if locked is None:
+                return False
+            if await TaskRun.filter(task_id=task.id, status__in=SPIDER_WRITABLE_TASK_STATUSES).using_db(conn).exists():
+                raise ValueError("任务存在未终态执行，请先取消并等待执行结束")
+            from antcode_core.application.services.logs.task_log_run_guard import (
+                delete_run_dependency_rows,
+                purge_task_logs_for_runs,
+            )
+
+            run_rows = await TaskRun.filter(task_id=task.id).using_db(conn).only("run_id").all()
+            run_ids = [r.run_id for r in run_rows if r.run_id]
+            if run_ids:
+                await delete_run_dependency_rows(conn, run_ids)
+                for run_batch in iter_cleanup_run_batches(run_ids):
+                    await scheduler_outbox_service.enqueue(
+                        event_type="spider_storage_cleanup",
+                        aggregate_type="task",
+                        aggregate_id=task.id,
+                        payload={"run_ids": list(run_batch), "project_id": str(project_public_id)},
+                        connection=conn,
+                    )
+
             deleted_count = await TaskRun.filter(task_id=task.id).using_db(conn).delete()
             await task.delete(using_db=conn)
             if self._control_plane():
                 await self._publish_event("task_changed", task.id, connection=conn)
+        # P1-DB-03: TaskRun 删除已提交后，按 run 级 advisory lock 清扫与在途
+        # append_entries 竞态窗口内提交的日志残留（语义见 task_log_run_guard）。
+        await purge_task_logs_for_runs(run_ids)
+        if self._scheduler_enabled():
+            await self.remove_task(task.id)
         if deleted_count > 0:
             logger.info(f"已删除任务 {task.id} 的 {deleted_count} 条执行记录")
 
@@ -649,7 +686,12 @@ class SchedulerService:
         # 创建触发器
         trigger = self._create_trigger(task)
 
-        # 添加作业
+        # 添加作业。P2 §4.4: max_instances 接通任务配置（与 master
+        # scheduler_loop.add_task 同语义）。
+        try:
+            max_instances = max(1, int(getattr(task, "max_instances", 1) or 1))
+        except (TypeError, ValueError):
+            max_instances = 1
         self.scheduler.add_job(
             func=self._execute_task,
             trigger=trigger,
@@ -657,9 +699,10 @@ class SchedulerService:
             name=task.name,
             kwargs={"task_id": task.id},
             replace_existing=True,
+            max_instances=max_instances,
         )
 
-        logger.info(f"任务 {task.name} 已添加到调度器")
+        logger.info(f"任务 {task.name} 已添加到调度器 (max_instances={max_instances})")
 
     async def remove_task(self, task_id):
         """从调度器移除任务"""
@@ -830,7 +873,7 @@ class SchedulerService:
 
             await execution.save()
 
-            # 推送开始状态到WebSocket
+            # 推送开始状态到实时日志流
             await self._push_execution_status(
                 execution,
                 {
@@ -878,7 +921,13 @@ class SchedulerService:
 
                 if project.type == ProjectType.RULE:
                     # 规则项目：提交到调度网关
-                    result = await self._execute_rule_task(task, project, project_detail, execution)
+                    result = await self._execute_rule_task(
+                        task,
+                        project,
+                        project_detail,
+                        execution,
+                        target_worker=target_worker,
+                    )
                 else:
                     # 文件/代码项目：分发到 Worker 节点执行
                     result = await self._execute_distributed_task(task, project, run_id, execution, target_worker)
@@ -932,7 +981,7 @@ class SchedulerService:
                             f"任务执行成功: {result.get('message', '执行完成')}",
                         )
 
-                        # 推送成功状态到WebSocket
+                        # 推送成功状态到实时日志流
                         await self._push_execution_status(
                             execution,
                             {
@@ -956,7 +1005,7 @@ class SchedulerService:
 
                     await self._log_execution(execution, "ERROR", f"任务执行失败: {error_message}")
 
-                    # 推送失败状态到WebSocket
+                    # 推送失败状态到实时日志流
                     await self._push_execution_status(
                         execution,
                         {
@@ -1031,8 +1080,10 @@ class SchedulerService:
             project_type_str = project.type.value if hasattr(project.type, "value") else str(project.type)
             priority = getattr(task, "priority", None)
             environment_vars = dict(task.environment_vars or {})
+            environment_vars.pop("ANTCODE_RUNTIME_ENV", None)
+            runtime_env_name = None
             if getattr(project, "env_location", None) == "worker" and project.worker_env_name:
-                environment_vars["ANTCODE_RUNTIME_ENV"] = project.worker_env_name
+                runtime_env_name = project.worker_env_name
 
             # 解析项目语言（M5+M8）：code / file 项目查各自 info 表的 language，其他默认 python
             language = "python"
@@ -1064,6 +1115,7 @@ class SchedulerService:
                 run_id=run_id,
                 params=params,
                 environment_vars=environment_vars,
+                runtime_env_name=runtime_env_name,
                 timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
                 worker_id=target_worker.public_id,
                 priority=priority,
@@ -1110,6 +1162,7 @@ class SchedulerService:
                         project_id=project.public_id,
                         params=params,
                         environment_vars=environment_vars,
+                        runtime_env_name=runtime_env_name,
                         timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
                         project_type=project_type_str,
                         attempts=0,
@@ -1128,7 +1181,7 @@ class SchedulerService:
             logger.error(f"分布式执行任务失败: {e}")
             return {"success": False, "error": str(e)}
 
-    async def _execute_rule_task(self, task, project, rule_detail, execution):
+    async def _execute_rule_task(self, task, project, rule_detail, execution, *, target_worker):
         """执行规则任务 - 根据配置选择执行器"""
         try:
             if not rule_detail:
@@ -1144,6 +1197,9 @@ class SchedulerService:
                 rule_detail=rule_detail,
                 run_id=execution.run_id,
                 params=params,
+                worker_id=target_worker.public_id,
+                timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
+                priority=getattr(task, "priority", None),
             )
             if not result["success"]:
                 return {"success": False, "error": result.get("message", "提交失败")}

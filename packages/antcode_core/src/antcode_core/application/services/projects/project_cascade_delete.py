@@ -34,6 +34,7 @@ async def delete_project_cascade(project_id) -> dict:
     deleted = {
         "tasks": 0,
         "executions": 0,
+        "lease_generations": 0,
         "task_logs": 0,
         "details": 0,
         "runtime_bindings": 0,
@@ -114,7 +115,7 @@ async def _delete_tasks_and_runs(conn, project_id, deleted: dict) -> tuple[list[
     from antcode_core.application.services.scheduler.outbox_service import (
         scheduler_outbox_service,
     )
-    from antcode_core.domain.models import TaskLog
+    from antcode_core.domain.models import TaskLog, TaskRunLeaseGeneration
 
     project_public_id, task_ids = await _lock_project_and_tasks(conn, project_id)
 
@@ -125,6 +126,7 @@ async def _delete_tasks_and_runs(conn, project_id, deleted: dict) -> tuple[list[
         cleanup_run_ids = [str(run_id) for run_id in run_ids if run_id]
         for run_batch in iter_cleanup_run_batches(cast(list[str], run_ids)):
             deleted["task_logs"] += await TaskLog.filter(run_id__in=list(run_batch)).delete()
+            deleted["lease_generations"] += await TaskRunLeaseGeneration.filter(run_id__in=list(run_batch)).delete()
             await scheduler_outbox_service.enqueue(
                 event_type="spider_storage_cleanup",
                 aggregate_type="project",

@@ -15,6 +15,7 @@ from antcode_core.common.security.permissions import (
 from antcode_core.domain.models import User, UserRole
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from loguru import logger
 
 # HTTP Bearer 认证方案
 security = HTTPBearer()
@@ -47,8 +48,9 @@ async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, 
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"认证失败: {str(e)}")
+    except Exception as exc:
+        logger.exception("认证依赖处理失败")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="认证失败") from exc
 
 
 async def get_current_admin_user(current_user: Annotated[User, Depends(get_current_user)]) -> User:

@@ -38,9 +38,9 @@ async def trim_acknowledged_stream(
     boundaries: list[str] = []
     for name, group in selected:
         pending = await redis.xpending(stream_key, name)
-        pending_count = int(pending.get("pending", 0) or 0)
+        pending_count = int(_group_field(pending, "pending") or 0)
         if pending_count:
-            minimum = pending.get("min")
+            minimum = _group_field(pending, "min")
             if not minimum:
                 return 0
             boundaries.append(_text(minimum))

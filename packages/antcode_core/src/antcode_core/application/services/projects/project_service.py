@@ -646,9 +646,11 @@ class ProjectService:
         """配置 Worker 环境"""
         from antcode_core.application.services.runtime import runtime_control_service
 
-        worker, created_by = await self._authorize_worker(request, user_id)
+        worker, created_by, is_admin = await self._authorize_worker(request, user_id)
         runtime = self._worker_runtime_request(request)
+        self._require_dependency_install_permission(runtime, is_admin)
         runtime["created_by"] = created_by
+        runtime["is_admin"] = is_admin
         await self._resolve_worker_environment(project, runtime, runtime_control_service)
         await self._bind_worker_runtime(project, worker, runtime, conn)
 
@@ -666,7 +668,7 @@ class ProjectService:
             raise HTTPException(status_code=400, detail=f"Worker {worker.name} 当前不在线")
         user_obj = await user_service.get_user_by_id(user_id)
         if user_obj and user_obj.is_admin:
-            return worker, user_obj.username
+            return worker, user_obj.username, True
         allowed = await worker_service.check_user_worker_permission(
             user_id=user_id,
             worker_id=worker.id,
@@ -675,7 +677,16 @@ class ProjectService:
         )
         if not allowed:
             raise HTTPException(status_code=403, detail="无 Worker 访问权限")
-        return worker, user_obj.username if user_obj else str(user_id)
+        return worker, user_obj.username if user_obj else str(user_id), False
+
+    @staticmethod
+    def _require_dependency_install_permission(runtime, is_admin):
+        if runtime["use_existing"] or not runtime["dependencies"] or is_admin:
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅管理员可在项目创建时安装 Worker 依赖；普通用户必须使用无依赖的新环境或现有环境",
+        )
 
     @staticmethod
     def _worker_runtime_request(request):
@@ -709,12 +720,19 @@ class ProjectService:
         result = await runtime_service.get_env(runtime["worker_id"], env_name)
         if not result.get("success") or not result.get("data"):
             raise HTTPException(status_code=400, detail="指定环境不存在或不可用")
-        if runtime["scope"] == RuntimeScope.SHARED and not env_name.startswith("shared-"):
+        env = result["data"]
+        env_scope = env.get("scope")
+        if env_scope not in {RuntimeScope.SHARED.value, RuntimeScope.PRIVATE.value}:
+            raise HTTPException(status_code=500, detail="Worker 返回的运行时作用域无效")
+        if env_scope == RuntimeScope.PRIVATE.value and not runtime["is_admin"]:
+            if env.get("created_by") != runtime["created_by"]:
+                raise HTTPException(status_code=403, detail="无权绑定其他用户的私有运行时环境")
+        if runtime["scope"] == RuntimeScope.SHARED and env_scope != RuntimeScope.SHARED.value:
             raise HTTPException(status_code=400, detail="共享环境必须选择共享运行时")
-        if runtime["scope"] == RuntimeScope.PRIVATE and env_name.startswith("shared-"):
+        if runtime["scope"] == RuntimeScope.PRIVATE and env_scope != RuntimeScope.PRIVATE.value:
             raise HTTPException(status_code=400, detail="私有环境不允许使用共享运行时")
         runtime["env_name"] = env_name
-        runtime["python_version"] = runtime["python_version"] or result["data"].get("python_version")
+        runtime["python_version"] = runtime["python_version"] or env.get("python_version")
 
     @staticmethod
     async def _create_worker_environment(project, runtime, runtime_service):

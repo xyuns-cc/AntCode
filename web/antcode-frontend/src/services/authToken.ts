@@ -37,6 +37,8 @@ export const decodeAccessToken = (token: string): Record<string, unknown> | null
 // 模糊清理误删（该标记由本模块显式管理生命周期）。
 // ---------------------------------------------------------------------------
 const SESSION_HINT_STORAGE_KEY = 'antcode_session_hint'
+const SESSION_GENERATION_STORAGE_KEY = 'antcode_session_generation'
+const SESSION_ACCOUNT_STORAGE_KEY = 'antcode_session_account'
 
 export const setSessionHint = (): void => {
   try {
@@ -62,6 +64,24 @@ export const hasSessionHint = (): boolean => {
   }
 }
 
+export const setSessionGeneration = (sessionJti: string, username?: string): void => {
+  localStorage.setItem(SESSION_GENERATION_STORAGE_KEY, sessionJti)
+  if (username) localStorage.setItem(SESSION_ACCOUNT_STORAGE_KEY, username)
+}
+
+export const getSessionGeneration = (): string | null => {
+  return localStorage.getItem(SESSION_GENERATION_STORAGE_KEY)
+}
+
+export const getSessionAccount = (): string | null => {
+  return localStorage.getItem(SESSION_ACCOUNT_STORAGE_KEY)
+}
+
+export const clearSessionGeneration = (): void => {
+  localStorage.removeItem(SESSION_GENERATION_STORAGE_KEY)
+  localStorage.removeItem(SESSION_ACCOUNT_STORAGE_KEY)
+}
+
 // ---------------------------------------------------------------------------
 // 跨标签页认证事件（登录/登出同步）
 // 首选 BroadcastChannel；不可用时降级为 localStorage storage 事件（只写时间戳
@@ -72,6 +92,7 @@ export type AuthBroadcastType = 'login' | 'logout'
 export interface AuthBroadcastMessage {
   type: AuthBroadcastType
   at: number
+  username?: string
 }
 
 const AUTH_CHANNEL_NAME = 'antcode-auth'
@@ -91,12 +112,13 @@ const getBroadcastChannel = (): BroadcastChannel | null => {
 
 const isAuthBroadcastMessage = (value: unknown): value is AuthBroadcastMessage => {
   if (!value || typeof value !== 'object') return false
-  const type = (value as { type?: unknown }).type
-  return type === 'login' || type === 'logout'
+  const message = value as { type?: unknown; username?: unknown }
+  if (message.type !== 'login' && message.type !== 'logout') return false
+  return message.username === undefined || typeof message.username === 'string'
 }
 
-export const broadcastAuthEvent = (type: AuthBroadcastType): void => {
-  const message: AuthBroadcastMessage = { type, at: Date.now() }
+export const broadcastAuthEvent = (type: AuthBroadcastType, username?: string): void => {
+  const message: AuthBroadcastMessage = { type, at: Date.now(), username }
   try {
     const channel = getBroadcastChannel()
     if (channel) {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from antcode_core.domain.models import ProjectCode, ProjectFile, ProjectRule, SystemConfig
+from antcode_core.domain.models import ProjectCode, ProjectFile, ProjectRule, SystemConfig, Task
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
 
 
@@ -26,6 +26,8 @@ async def main() -> None:
                 ProjectRule,
                 ["headers", "cookies", "proxy_config", "task_config"],
             ),
+            # P1-12：Task.execution_params / environment_vars 也迁移到透明加密。
+            "tasks": await _rewrite(Task, ["execution_params", "environment_vars"]),
         }
         print(counts)
     finally:

@@ -36,6 +36,9 @@ class RedisConnectionPool:
         self._health_check_task: asyncio.Task | None = None
         self._last_health_check = 0.0
         self._health_check_interval = 5.0
+        # P1-DB-06: connect() 互斥。并发重连会各自创建新 client 覆盖旧引用，
+        # 旧 client/pool 与健康任务全部泄漏，短暂故障即可倍增 Redis 连接。
+        self._connect_lock = asyncio.Lock()
 
     @classmethod
     async def get_instance(cls) -> "RedisConnectionPool":
@@ -48,75 +51,65 @@ class RedisConnectionPool:
         return cls._instance
 
     async def connect(self) -> None:
-        """建立 Redis 连接"""
+        """建立 Redis 连接（互斥；重建前先关闭旧 client/pool）。"""
         if self._connected and self.redis_client:
             return
 
         if not settings.REDIS_URL:
             raise RedisConnectionError("REDIS_URL 未配置")
 
-        try:
-            retry = Retry(ExponentialBackoff(cap=1.0, base=0.1), retries=3)
-            pool_kwargs = {
-                "max_connections": 50,
-                "retry_on_timeout": True,
-                "retry": retry,
-                "retry_on_error": [
-                    ConnectionError,
-                    TimeoutError,
-                ],
-                "socket_timeout": 10,
-                "socket_connect_timeout": 10,
-                "socket_keepalive": True,
-                "health_check_interval": 30,
-                "encoding": "utf-8",
-                "decode_responses": False,
-            }
+        async with self._connect_lock:
+            # 等锁期间其它协程可能已完成重连
+            if self._connected and self.redis_client:
+                return
+            await self._close_stale_client()
+            try:
+                # T6-T1: 走统一 factory，standalone/cluster/sentinel 自动分派
+                self.redis_client = create_async_redis_client(
+                    settings.REDIS_URL,
+                    max_connections=50,
+                    decode_responses=False,
+                )
+                # cluster/sentinel 客户端没有暴露 pool，只有 standalone 才存
+                self.pool = getattr(self.redis_client, "connection_pool", None)
 
-            # Linux 特定的 keepalive 选项
-            if platform.system() == "Linux":
-                keepalive_options = {}
-                if hasattr(socket, "TCP_KEEPIDLE"):
-                    keepalive_options[socket.TCP_KEEPIDLE] = 60
-                if hasattr(socket, "TCP_KEEPINTVL"):
-                    keepalive_options[socket.TCP_KEEPINTVL] = 15
-                if hasattr(socket, "TCP_KEEPCNT"):
-                    keepalive_options[socket.TCP_KEEPCNT] = 4
-                if keepalive_options:
-                    pool_kwargs["socket_keepalive_options"] = keepalive_options
+                await cast(Awaitable[bool], self.redis_client.ping())
+                self._connected = True
+                self._last_health_check = time.monotonic()
 
-            # T6-T1: 走统一 factory，standalone/cluster/sentinel 自动分派
-            self.redis_client = create_async_redis_client(
-                settings.REDIS_URL,
-                max_connections=50,
-                decode_responses=False,
-            )
-            # cluster/sentinel 客户端没有暴露 pool，只有 standalone 才存
-            self.pool = getattr(self.redis_client, "connection_pool", None)
+                info = await self.redis_client.info()
+                redis_version = info.get("redis_version", "unknown")
+                logger.info(f"Redis 连接池已初始化 (版本 {redis_version}, 最大连接=50)")
 
-            await cast(Awaitable[bool], self.redis_client.ping())
-            self._connected = True
-            self._last_health_check = time.monotonic()
+                # P1-DB-06: 健康任务幂等启动，重连不再叠加新任务。
+                self._ensure_health_check_task()
 
-            info = await self.redis_client.info()
-            redis_version = info.get("redis_version", "unknown")
-            logger.info(f"Redis 连接池已初始化 (版本 {redis_version}, 最大连接=50)")
+            except redis.AuthenticationError:
+                error_msg = "Redis 认证失败: 密码错误或未配置认证"
+                logger.warning(error_msg)
+                raise RedisConnectionError(error_msg)
+            except redis.ConnectionError:
+                redis_host = settings.REDIS_URL.split("@")[-1] if "@" in settings.REDIS_URL else settings.REDIS_URL
+                error_msg = f"无法连接 Redis ({redis_host}): 请检查 Redis 服务是否启动"
+                logger.warning(error_msg)
+                raise RedisConnectionError(error_msg)
+            except Exception as e:
+                error_msg = f"Redis 连接池初始化失败: {e}"
+                logger.warning(error_msg)
+                raise RedisConnectionError(error_msg)
 
-            await self._start_health_check()
-
-        except redis.AuthenticationError:
-            error_msg = "Redis 认证失败: 密码错误或未配置认证"
-            logger.warning(error_msg)
-            raise RedisConnectionError(error_msg)
-        except redis.ConnectionError:
-            redis_host = settings.REDIS_URL.split("@")[-1] if "@" in settings.REDIS_URL else settings.REDIS_URL
-            error_msg = f"无法连接 Redis ({redis_host}): 请检查 Redis 服务是否启动"
-            logger.warning(error_msg)
-            raise RedisConnectionError(error_msg)
-        except Exception as e:
-            error_msg = f"Redis 连接池初始化失败: {e}"
-            logger.warning(error_msg)
-            raise RedisConnectionError(error_msg)
+    async def _close_stale_client(self) -> None:
+        """重建前释放旧 client/pool，避免连接泄漏（P1-DB-06）。"""
+        stale_client, stale_pool = self.redis_client, self.pool
+        self.redis_client = None
+        self.pool = None
+        self._connected = False
+        if stale_client is not None:
+            with contextlib.suppress(Exception):
+                await stale_client.close()
+        if stale_pool is not None:
+            with contextlib.suppress(Exception):
+                await stale_pool.disconnect()
 
     async def get_client(self) -> redis.Redis:
         """获取 Redis 客户端"""
@@ -173,8 +166,10 @@ class RedisConnectionPool:
         except Exception as e:
             logger.exception(f"关闭 Redis 连接池失败: {e}")
 
-    async def _start_health_check(self) -> None:
-        """启动健康检查任务"""
+    def _ensure_health_check_task(self) -> None:
+        """健康检查任务只存在一个实例（幂等启动）。"""
+        if self._health_check_task is not None and not self._health_check_task.done():
+            return
         self._health_check_task = asyncio.create_task(self._health_check_loop())
 
     async def _health_check_loop(self) -> None:

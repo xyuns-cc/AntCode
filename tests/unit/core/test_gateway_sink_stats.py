@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,30 @@ class _GatewayStub:
         self.metadata = metadata
         self.batches = [batch async for batch in batches]
         return SimpleNamespace(accepted=1, failed=0)
+
+
+class _BlockingGatewayStub:
+    def __init__(self):
+        self.started = asyncio.Event()
+
+    async def StreamSpiderData(self, batches, metadata):
+        del metadata
+        _ = [batch async for batch in batches]
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class _FailingGatewayStub:
+    def __init__(self):
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+
+    async def StreamSpiderData(self, batches, metadata):
+        del metadata
+        _ = [batch async for batch in batches]
+        self.started.set()
+        await self.release.wait()
+        raise RuntimeError("rpc failed")
 
 
 class _Stats:
@@ -47,6 +72,76 @@ async def test_gateway_flush_tracks_unreported_written_count():
     assert await sink._flush() == (True, 1)
     assert await sink.consume_written_count() == 1
     assert await sink.consume_written_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_flush_restores_items_when_send_is_cancelled():
+    sink = GatewaySpiderDataSink(endpoint="gateway:50051")
+    stub = _BlockingGatewayStub()
+    sink._stub = stub
+    sink._batch_items.append(data_pb2.SpiderDataItem(item_id="item-1"))
+    task = asyncio.create_task(sink._flush())
+    await stub.started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [item.item_id for item in sink._batch_items] == ["item-1"]
+    assert await sink.consume_written_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_flush_restores_items_when_cancelled_during_recovery():
+    sink = GatewaySpiderDataSink(endpoint="gateway:50051")
+    stub = _FailingGatewayStub()
+    sink._stub = stub
+    sink._batch_items.append(data_pb2.SpiderDataItem(item_id="item-1"))
+    task = asyncio.create_task(sink._flush())
+    await stub.started.wait()
+    await sink._lock.acquire()
+    stub.release.set()
+    await asyncio.sleep(0)
+    task.cancel()
+    sink._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [item.item_id for item in sink._batch_items] == ["item-1"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_flush_rejects_ack_count_mismatch():
+    sink = GatewaySpiderDataSink(endpoint="gateway:50051")
+    sink._stub = _GatewayStub()
+    sink._stub.StreamSpiderData = _zero_ack
+    sink._batch_items.append(data_pb2.SpiderDataItem(item_id="item-1"))
+
+    assert await sink._flush() == (False, 0)
+    assert [item.item_id for item in sink._batch_items] == ["item-1"]
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "nan", "inf"])
+def test_gateway_flush_interval_must_be_finite_positive(monkeypatch, value):
+    monkeypatch.setenv("ANTCODE_SPIDER_GATEWAY_FLUSH_INTERVAL", value)
+
+    with pytest.raises(ValueError, match="有限正数"):
+        GatewaySpiderDataSink(endpoint="gateway:50051")
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "invalid"])
+def test_gateway_batch_size_must_be_positive(monkeypatch, value):
+    monkeypatch.setenv("ANTCODE_SPIDER_GATEWAY_BATCH_SIZE", value)
+
+    with pytest.raises(ValueError, match="正整数"):
+        GatewaySpiderDataSink(endpoint="gateway:50051")
+
+
+async def _zero_ack(batches, metadata):
+    del metadata
+    _ = [batch async for batch in batches]
+    return SimpleNamespace(accepted=0, failed=0)
 
 
 @pytest.mark.asyncio

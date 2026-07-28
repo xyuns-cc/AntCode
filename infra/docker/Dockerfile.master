@@ -5,8 +5,12 @@
 # 运行调度循环，不处理长连接
 # =====================================================
 
+ARG UV_VERSION=0.8.17
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 AS uv-bin
+
 # ================== 阶段 1: 构建阶段 ==================
-FROM python:3.11.11-slim AS builder
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5 AS builder
 
 WORKDIR /app
 
@@ -17,16 +21,13 @@ ENV PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖和 uv
+# 安装构建依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
-    curl \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 
-# 设置 uv 路径
-ENV PATH="/root/.local/bin:${PATH}"
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
 
 # 复制 workspace 配置
 COPY pyproject.toml uv.lock ./
@@ -58,10 +59,10 @@ COPY services/master/src services/master/src/
 # 创建虚拟环境并安装依赖
 RUN uv venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    uv sync --package antcode-master
+    uv sync --frozen --package antcode-master
 
 # ================== 阶段 2: 运行时镜像 ==================
-FROM python:3.11.11-slim AS runtime
+FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5 AS runtime
 
 WORKDIR /app
 
@@ -74,6 +75,7 @@ ENV PYTHONPATH=/app \
 # 运行时 readiness 工具
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建非 root 用户（安全最佳实践）

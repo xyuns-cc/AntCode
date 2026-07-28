@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from antcode_contracts import data_pb2
+from antcode_worker.artifact_transfer import SourceBundleDownload
 from antcode_worker.domain.models import ArtifactRef, RunContext, RuntimeSpec, TaskPayload
 from antcode_worker.plugins.code.plugin import CodePlugin
 from antcode_worker.projects.fetcher import ArtifactFetcher, ProjectWorkspace
@@ -24,9 +25,9 @@ class _ArtifactStore:
         self._blob = blob
         self.read_hashes: list[str] = []
 
-    async def read_blob_to_file(self, content_hash: str, destination: Path, *, max_bytes: int) -> None:
-        self.read_hashes.append(content_hash)
-        assert len(self._blob) <= max_bytes
+    async def download_source_bundle(self, request: SourceBundleDownload, destination: Path) -> None:
+        self.read_hashes.append(request.content_hash)
+        assert len(self._blob) <= request.max_bytes
         destination.write_bytes(self._blob)
 
 

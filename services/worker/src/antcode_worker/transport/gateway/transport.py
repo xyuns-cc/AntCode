@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +55,14 @@ from antcode_worker.transport.base import (
     TransportBase,
     TransportMode,
     WorkerState,
+)
+from antcode_worker.transport.gateway.subscriptions import (
+    CONTROL_SUBSCRIPTION,
+    SUBSCRIPTION_NAMES,
+    TASK_SUBSCRIPTION,
+    SubscriptionHooks,
+    SubscriptionRetryConfig,
+    SubscriptionRunner,
 )
 
 if TYPE_CHECKING:
@@ -196,7 +203,14 @@ class GatewayTransport(TransportBase):
         # 后台 streaming tasks
         self._task_subscriber: asyncio.Task | None = None
         self._control_subscriber: asyncio.Task | None = None
-
+        self._subscription_health = dict.fromkeys(SUBSCRIPTION_NAMES, False)
+        self._subscription_runner = SubscriptionRunner(
+            SubscriptionRetryConfig(
+                initial_backoff=self._gateway_config.initial_backoff,
+                max_backoff=self._gateway_config.max_backoff,
+                backoff_multiplier=self._gateway_config.backoff_multiplier,
+            )
+        )
         # 幂等性缓存
         self._receipt_cache: dict[str, tuple[float, Any]] = {}
         self._result_cache: dict[str, tuple[float, bool]] = {}
@@ -243,7 +257,11 @@ class GatewayTransport(TransportBase):
 
     @property
     def is_connected(self) -> bool:
-        return self._connected and self._channel is not None
+        return self._connected and self._channel is not None and self._subscriptions_ready
+
+    @property
+    def _subscriptions_ready(self) -> bool:
+        return all(self._subscription_health.values())
 
     # ==================== 生命周期 ====================
 
@@ -258,28 +276,21 @@ class GatewayTransport(TransportBase):
         try:
             await self._init_authenticator()
             await self._init_reconnect_manager()
-
             success = await self._connect()
             if not success:
                 logger.error("Gateway 初始连接失败")
                 await self._cleanup_failed_start()
                 return False
-
-            # 初始化队列
             self._task_inbox = asyncio.Queue(maxsize=self._gateway_config.task_queue_maxsize)
             self._control_inbox = asyncio.Queue(maxsize=self._gateway_config.control_queue_maxsize)
             self._running = True
-
-            # 启动 streaming 后台任务（指数退避重连内置）
-            self._task_subscriber = asyncio.create_task(self._task_subscription_loop())
-            self._control_subscriber = asyncio.create_task(self._control_subscription_loop())
-            await self._set_state(WorkerState.ONLINE)
-
+            if self._lease_id:
+                self._start_subscriptions()
+            await self._refresh_subscription_state()
             logger.info(
                 f"Gateway 传输层已启动: {self._gateway_config.gateway_host}:{self._gateway_config.gateway_port}"
             )
             return True
-
         except Exception:
             logger.exception("Gateway 启动失败")
             await self._cleanup_failed_start()
@@ -341,19 +352,15 @@ class GatewayTransport(TransportBase):
     # ==================== 任务订阅 (StreamTasks) ====================
 
     async def _task_subscription_loop(self) -> None:
-        """长连接订阅 ``DataService.StreamTasks``，把 TaskDispatch 投递到 inbox。
-
-        断开后按指数退避重连，重连失败不阻塞 transport（让 reconnect_manager
-        / _handle_connection_error 接管）。
-        """
+        """长连接订阅 ``DataService.StreamTasks``，把 TaskDispatch 投递到 inbox。"""
         from antcode_worker.transport.gateway.codecs import TaskDecoder
 
-        await self._run_subscription(
-            "StreamTasks",
-            lambda on_open: self._consume_task_stream(TaskDecoder, on_open),
+        await self._subscription_runner.run(
+            TASK_SUBSCRIPTION,
+            self._subscription_hooks(lambda on_open: self._consume_task_stream(TaskDecoder, on_open)),
         )
 
-    async def _consume_task_stream(self, decoder: Any, on_open: Callable[[], None]) -> bool:
+    async def _consume_task_stream(self, decoder: Any, on_open: Callable[[], Awaitable[None]]) -> bool:
         stub = self._data_stub
         if stub is None:
             raise RuntimeError("Gateway DataService stub 未就绪")
@@ -390,12 +397,12 @@ class GatewayTransport(TransportBase):
         """长连接订阅 ``ControlService.WatchControl``，把 ControlEvent 投递到 inbox。"""
         from antcode_worker.transport.gateway.codecs import ControlDecoder
 
-        await self._run_subscription(
-            "WatchControl",
-            lambda on_open: self._consume_control_stream(ControlDecoder, on_open),
+        await self._subscription_runner.run(
+            CONTROL_SUBSCRIPTION,
+            self._subscription_hooks(lambda on_open: self._consume_control_stream(ControlDecoder, on_open)),
         )
 
-    async def _consume_control_stream(self, decoder: Any, on_open: Callable[[], None]) -> bool:
+    async def _consume_control_stream(self, decoder: Any, on_open: Callable[[], Awaitable[None]]) -> bool:
         stub = self._control_stub
         if stub is None:
             raise RuntimeError("Gateway ControlService stub 未就绪")
@@ -423,53 +430,18 @@ class GatewayTransport(TransportBase):
 
     # ==================== 订阅通用循环 ====================
 
-    async def _run_subscription(
-        self,
-        name: str,
-        open_and_consume: Callable[[Callable[[], None]], Awaitable[bool]],
-    ) -> None:
-        """通用订阅循环：StreamTasks / WatchControl 共用的指数退避重连骨架。
-
-        W1: 语义对齐 HEAD —— 流一打开就把退避归零（``on_open`` 回调）。退避策略
-        分三种收尾：
-        - 流内**收到过数据**后的干净 EOF：数据在流动，立即重订阅、不 sleep。
-        - 流**没收到任何数据**的干净 EOF（空 EOF）：加一个**固定 floor**
-          （``initial_backoff``）睡眠、**不指数增长**。既避免 server 端瞬时反复
-          空 EOF 时的忙循环 / 内存暴涨（真实 gRPC 流会阻塞，但异常网关可能秒
-          级反复 EOF），又不像退化实现那样把退避推到 max_backoff(60s) 拖延投递。
-        - ERROR 路径：``_wait_stream_retry`` 指数增长退避。
-        """
-        backoff = self._gateway_config.initial_backoff
-
-        def _reset_backoff() -> None:
-            nonlocal backoff
-            backoff = self._gateway_config.initial_backoff
-
-        while self._running:
-            try:
-                received = await open_and_consume(_reset_backoff)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                if not self._running:
-                    break
-                backoff = await self._wait_stream_retry(name, backoff, e)
-                continue
-            # 干净 EOF：收到过数据则立即重订阅；空 EOF 加固定 floor 防忙循环。
-            if not received and self._running:
-                await asyncio.sleep(self._gateway_config.initial_backoff)
-
     async def _consume_stream(
         self,
         open_stream: Callable[[], Any],
         deliver: Callable[[Any], Awaitable[None]],
-        on_open: Callable[[], None] | None = None,
+        on_open: Callable[[], Awaitable[None]],
     ) -> bool:
         """打开一条 server-stream 并逐条投递，返回是否收到过消息。"""
         stream = open_stream()
-        # 流已建立：退避归零（对齐 HEAD 在 stream OPEN 后 ``backoff = 1.0``）。
-        if on_open is not None:
-            on_open()
+        wait_for_connection = getattr(stream, "wait_for_connection", None)
+        if wait_for_connection is not None:
+            await wait_for_connection()
+        await on_open()
         received = False
         async for item in stream:
             if not self._running:
@@ -478,16 +450,27 @@ class GatewayTransport(TransportBase):
             await deliver(item)
         return received
 
-    async def _wait_stream_retry(
+    def _subscription_hooks(
         self,
-        stream_name: str,
-        backoff: float,
-        error: Exception | None = None,
-    ) -> float:
-        reason = f": {error}" if error is not None else "（正常 EOF）"
-        logger.warning(f"{stream_name} 流结束{reason}，{backoff:.1f}s 后重连")
-        await asyncio.sleep(backoff)
-        return min(self._gateway_config.max_backoff, backoff * 2)
+        consume: Callable[[Callable[[], Awaitable[None]]], Awaitable[bool]],
+    ) -> SubscriptionHooks:
+        return SubscriptionHooks(
+            is_running=lambda: self._running,
+            consume=consume,
+            set_health=self._set_subscription_health,
+        )
+
+    async def _set_subscription_health(self, name: str, healthy: bool) -> None:
+        if name not in self._subscription_health:
+            raise ValueError(f"未知 Gateway 订阅: {name}")
+        self._subscription_health[name] = healthy
+        await self._refresh_subscription_state()
+
+    async def _refresh_subscription_state(self) -> None:
+        if not self._running:
+            return
+        state = WorkerState.ONLINE if self.is_connected else WorkerState.RECONNECTING
+        await self._set_state(state)
 
     async def _handle_non_engine_control(self, event: Any) -> None:
         payload_kind = self._control_payload_kind(event)
@@ -1015,6 +998,7 @@ class GatewayTransport(TransportBase):
                 return ("", 0, 0, True)
             if new_lease_id:
                 self._lease_id = new_lease_id
+                self._start_subscriptions()
             if revoked:
                 logger.warning(f"Lease 被服务端撤销: reason={getattr(response, 'revoke_reason', '')}")
                 self._lease_revoked = True
@@ -1039,6 +1023,12 @@ class GatewayTransport(TransportBase):
             running_tasks=int(metrics.get("running_tasks", 0) or 0),
             max_concurrent_tasks=int(metrics.get("max_concurrent_tasks", 5) or 5),
         )
+
+    def _start_subscriptions(self) -> None:
+        if self._task_subscriber is None or self._task_subscriber.done():
+            self._task_subscriber = asyncio.create_task(self._task_subscription_loop())
+        if self._control_subscriber is None or self._control_subscriber.done():
+            self._control_subscriber = asyncio.create_task(self._control_subscription_loop())
 
     # ==================== TransportBase 实现：控制面 ====================
 
@@ -1237,6 +1227,7 @@ class GatewayTransport(TransportBase):
             "state": self._state.value,
             "running": self._running,
             "connected": self._connected,
+            "subscription_health": dict(self._subscription_health),
             "gateway_host": self._gateway_config.gateway_host,
             "gateway_port": self._gateway_config.gateway_port,
             "use_tls": self._gateway_config.use_tls,
@@ -1297,10 +1288,10 @@ class GatewayTransport(TransportBase):
         await self._reconnect_manager.start()
 
     async def _restore_online_after_reconnect(self) -> None:
-        if not self._running or self._lease_revoked or not self.is_connected:
+        if not self._running or self._lease_revoked:
             return
         self._consecutive_failures = 0
-        await self._set_state(WorkerState.ONLINE)
+        await self._refresh_subscription_state()
 
     async def _connect(self) -> bool:
         target = self._gateway_target()
@@ -1426,7 +1417,10 @@ class GatewayTransport(TransportBase):
         renew_after_ms = int(getattr(response, "renew_after_ms", 0) or 0)
         if bool(getattr(response, "revoked", False)):
             raise _LeaseRevokedError("Gateway 重连 lease 已被撤销")
-        if not lease_id or expires_at_ms <= int(time.time() * 1000):
+        # Lease RPC 已在 Gateway 端用 Redis TIME 完成存活性判定。Worker 与
+        # Gateway 可能存在时钟偏移，不能再用本机 wall clock 否定服务端刚刚
+        # 确认并续租成功的代际；这里只校验响应合同是否完整。
+        if not lease_id or expires_at_ms < 1:
             raise RuntimeError("Gateway 重连未取得有效 lease")
         if renew_after_ms < _MIN_LEASE_RENEW_AFTER_MS:
             raise RuntimeError("Gateway 重连 lease 续租周期无效")
@@ -1440,6 +1434,7 @@ class GatewayTransport(TransportBase):
         self._artifact_stub = connection.artifact_stub
         self._lease_id = connection.lease_id
         self._connected = True
+        self._subscription_health = dict.fromkeys(SUBSCRIPTION_NAMES, False)
         self._auth_failure_count = 0
         return old_channel
 
@@ -1447,6 +1442,7 @@ class GatewayTransport(TransportBase):
         async with self._connect_lock:
             channel = self._channel
             self._connected = False
+            self._subscription_health = dict.fromkeys(SUBSCRIPTION_NAMES, False)
             self._channel = None
             self._control_stub = None
             self._data_stub = None
@@ -1566,8 +1562,8 @@ class GatewayTransport(TransportBase):
                     self._reconnect_manager.notify_disconnected(str(error))
                     success = await self._reconnect_manager.wait_connected(timeout=120.0)
                     if success:
-                        await self._set_state(WorkerState.ONLINE)
                         self._consecutive_failures = 0
+                        await self._refresh_subscription_state()
                     else:
                         await self._set_state(WorkerState.OFFLINE)
                 else:
@@ -1576,8 +1572,8 @@ class GatewayTransport(TransportBase):
                     await asyncio.sleep(backoff)
                     success = await self._connect()
                     if success:
-                        await self._set_state(WorkerState.ONLINE)
                         self._consecutive_failures = 0
+                        await self._refresh_subscription_state()
                     else:
                         await self._set_state(WorkerState.OFFLINE)
             finally:

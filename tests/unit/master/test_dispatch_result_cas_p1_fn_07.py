@@ -44,6 +44,7 @@ async def test_failed_result_with_cas_conflict_returns_none_and_skips_side_effec
         assert scheduler._log_execution.await_args.args[1] == "DEBUG"
         # 没推 WS
         scheduler._push_execution_status.assert_not_awaited()
+        scheduler._persist_result_fields.assert_not_awaited()
     finally:
         sl_mod.execution_status_service.update_dispatch_status = original
 

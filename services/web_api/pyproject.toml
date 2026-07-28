@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     # 核心依赖
     "antcode-core",
+    "antcode-contracts",
 
     # Web 框架
     "fastapi>=0.123.0",
@@ -25,6 +26,7 @@ dependencies = [
 
 [tool.uv.sources]
 antcode-core = { workspace = true }
+antcode-contracts = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Request, Response
+from antcode_core.common.security.auth import TokenData, get_current_admin_user
+from fastapi import APIRouter, Depends, Request, Response
 from loguru import logger
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -93,9 +94,10 @@ async def _collect_workers_online() -> None:
     try:
         from antcode_core.application.services.lease_service import LeaseStore
         from antcode_core.infrastructure.redis.client import get_redis_client
+        from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
         redis = await get_redis_client()
-        store = LeaseStore(redis)
+        store = LeaseStore(redis, namespace=redis_namespace())
         active = await store.list_active()
         WORKERS_ONLINE.set(len(active))
     except Exception as exc:
@@ -117,7 +119,7 @@ router = APIRouter()
 
 
 @router.get("/metrics", include_in_schema=False)
-async def prometheus_metrics() -> Response:
+async def prometheus_metrics(_current_admin: TokenData = Depends(get_current_admin_user)) -> Response:
     """Prometheus scrape 入口。
 
     每次 scrape 时惰性刷新 Gauge，其余 Counter/Histogram 由中间件实时 inc。

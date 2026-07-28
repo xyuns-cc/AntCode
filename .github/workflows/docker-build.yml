@@ -2,41 +2,15 @@ name: Build, Scan and Sign Docker Images
 
 on:
   workflow_call:
-  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/antcode
 
 jobs:
-  verify-ci:
-    name: Verify source CI
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Require successful CI for manual publication
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const runs = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'ci.yml',
-              head_sha: context.sha,
-              status: 'success',
-              per_page: 1,
-            });
-            if (runs.data.total_count === 0) {
-              core.setFailed(`No successful CI run found for ${context.sha}`);
-            }
-
   publish:
     name: Publish ${{ matrix.service }}
-    needs: verify-ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -64,13 +38,23 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag belongs to main history
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/main"
+
+      - name: Set up QEMU
+        # arm64 扫描候选镜像需要在 amd64 runner 上交叉构建
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to container registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -78,51 +62,86 @@ jobs:
 
       - name: Extract immutable image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ github.sha }}
             type=semver,pattern={{version}}
 
-      - name: Build scan candidate
-        uses: docker/build-push-action@v6
+      # 扫描门禁语义：先构建（不 push）将要发布的全部架构，逐架构 trivy 扫描
+      # 通过之后才允许 push manifest —— 保证有 CRITICAL/HIGH 漏洞的标签从不
+      # 可拉取。（此前只在 push 前扫 amd64，arm64 要等 manifest 已发布后补扫，
+      # 存在带病标签可拉取的时间窗。）
+      - name: Build scan candidate (amd64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           load: true
           push: false
           platforms: linux/amd64
-          tags: local/antcode-${{ matrix.service }}:${{ github.sha }}
+          tags: local/antcode-${{ matrix.service }}:${{ github.sha }}-amd64
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      - name: Scan candidate image
-        uses: aquasecurity/trivy-action@0.28.0
+      - name: Build scan candidate (arm64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          image-ref: local/antcode-${{ matrix.service }}:${{ github.sha }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          platforms: linux/arm64
+          tags: local/antcode-${{ matrix.service }}:${{ github.sha }}-arm64
+          cache-from: type=gha,scope=${{ matrix.service }}-arm64
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-arm64
+
+      - name: Scan candidate image (amd64)
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        with:
+          image-ref: local/antcode-${{ matrix.service }}:${{ github.sha }}-amd64
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           exit-code: '1'
           format: table
 
-      - name: Build and push multi-platform image
+      - name: Scan candidate image (arm64)
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        with:
+          image-ref: local/antcode-${{ matrix.service }}:${{ github.sha }}-arm64
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          format: table
+
+      # P1-CI-06: 发布顺序重排为 构建 -> 按 digest 扫描 -> 通过后才打正式标签。
+      # 本步复用两个候选构建的 gha cache 组装 manifest，但只以 push-by-digest
+      # 推送（仓库内仅 digest 可寻址，没有任何 tag）；正式标签在下方 digest
+      # 扫描通过后由 imagetools 指向同一 digest 创建。此前顺序是先推正式标签
+      # 再扫 digest，存在带病标签可拉取的时间窗，且扫描对象与发布对象可能因
+      # 缓存偏差不一致。
+      - name: Build and push by digest (untagged)
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=${{ matrix.service }}
+            type=gha,scope=${{ matrix.service }}-arm64
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
           sbom: true
           provenance: mode=max
 
-      - name: Scan published digest
-        uses: aquasecurity/trivy-action@0.28.0
+      # 对将要发布的确切产物（registry 里的 digest）扫描；此时还没有任何
+      # 正式标签指向它。逐架构的放行门禁是上面 push 前的候选扫描，本步
+      # 额外保证「被打标签的 digest」与「被扫描的 digest」是同一个对象。
+      - name: Scan pushed digest before tagging
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           image-ref: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}@${{ steps.push.outputs.digest }}
           ignore-unfixed: true
@@ -130,8 +149,22 @@ jobs:
           exit-code: '1'
           format: table
 
+      # 扫描通过后才创建正式标签：纯 manifest 指向操作，不重新构建，
+      # 保证标签指向的就是刚被扫描过的 digest。
+      - name: Tag verified digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.8.2
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
 
       - name: Sign published digest
         env:

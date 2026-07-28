@@ -2,14 +2,24 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class _UniqueSeedURLs(BaseModel):
+    @field_validator("seed_urls", check_fields=False)
+    @classmethod
+    def reject_duplicate_seed_urls(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("seed_urls 不允许重复")
+        return value
+
 
 # =============================================================================
 # 请求模型
 # =============================================================================
 
 
-class CrawlBatchCreateRequest(BaseModel):
+class CrawlBatchCreateRequest(_UniqueSeedURLs):
     """创建爬取批次请求"""
 
     project_id: str = Field(..., description="项目公开ID")
@@ -26,7 +36,7 @@ class CrawlBatchCreateRequest(BaseModel):
     max_retries: int = Field(3, ge=0, le=10, description="最大重试次数")
 
 
-class CrawlBatchTestRequest(BaseModel):
+class CrawlBatchTestRequest(_UniqueSeedURLs):
     """测试执行请求"""
 
     project_id: str = Field(..., description="项目公开ID")

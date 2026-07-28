@@ -1,0 +1,231 @@
+/* 大屏模式 */
+.monitor-container.large-screen {
+  padding: 8px;
+}
+
+.monitor-container.large-screen .header-title h1 {
+  font-size: 28px;
+}
+
+.monitor-container.large-screen .stat-card {
+  padding: 8px;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .header-content {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .header-left {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .current-time {
+    font-size: 11px;
+  }
+}
+
+/* 滚动条样式 */
+.alerts-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+/* 浅色主题 */
+body.light-theme .alerts-list::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 3px;
+}
+
+body.light-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* 深色主题 */
+body.dark-theme .alerts-list::-webkit-scrollbar-track {
+  background: #262626;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb {
+  background: #434343;
+  border-radius: 3px;
+}
+
+body.dark-theme .alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #595959;
+}
+
+/* 动画效果 */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.worker-card.worker-warning .worker-header,
+.worker-card.worker-error .worker-header {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.worker-card-compact.worker-warning,
+.worker-card-compact.worker-error {
+  animation: pulse 3s ease-in-out infinite;
+}
+
+/* 表格样式优化 */
+.ant-table-small .ant-table-thead > tr > th {
+  font-weight: 600;
+  font-size: 12px;
+  padding: 8px;
+  background: var(--ant-color-bg-container) !important;
+}
+
+.ant-table-small .ant-table-tbody > tr > td {
+  padding: 8px;
+  font-size: 12px;
+}
+
+/* 表格悬停行 */
+.ant-table-small .ant-table-tbody > tr:hover > td {
+  background: var(--ant-color-fill-quaternary) !important;
+}
+
+/* 固定列背景 */
+.ant-table-small .ant-table-cell-fix-right,
+.ant-table-small .ant-table-cell-fix-left {
+  background: var(--ant-color-bg-container) !important;
+}
+
+.ant-table-small .ant-table-tbody > tr:hover > td.ant-table-cell-fix-right,
+.ant-table-small .ant-table-tbody > tr:hover > td.ant-table-cell-fix-left {
+  background: var(--ant-color-fill-quaternary) !important;
+}
+
+/* 卡片间距调整 */
+.ant-card {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.ant-card-head {
+  border-bottom: 1px solid;
+}
+
+/* 浅色主题 */
+body.light-theme .ant-card-head {
+  border-bottom-color: #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .ant-card-head {
+  border-bottom-color: #434343;
+}
+
+.ant-card-head-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+/* Worker 日志样式 */
+.worker-log-item {
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid;
+}
+
+/* 浅色主题日志样式 */
+body.light-theme .worker-log-item.worker-log-error {
+  border-color: #ffccc7;
+  background: #fff2f0;
+}
+
+body.light-theme .worker-log-item.worker-log-warning {
+  border-color: #ffe7ba;
+  background: #fffbe6;
+}
+
+body.light-theme .worker-log-item.worker-log-success {
+  border-color: #d9f7be;
+  background: #f6ffed;
+}
+
+body.light-theme .worker-log-item.worker-log-info {
+  border-color: #d9d9d9;
+  background: #fafafa;
+}
+
+/* 深色主题日志样式 */
+body.dark-theme .worker-log-item.worker-log-error {
+  border-color: #a61d24;
+  background: rgba(255, 77, 79, 0.1);
+}
+
+body.dark-theme .worker-log-item.worker-log-warning {
+  border-color: #ad6800;
+  background: rgba(250, 173, 20, 0.1);
+}
+
+body.dark-theme .worker-log-item.worker-log-success {
+  border-color: #237804;
+  background: rgba(82, 196, 26, 0.1);
+}
+
+body.dark-theme .worker-log-item.worker-log-info {
+  border-color: #434343;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* 响应式调整 - 移动端 */
+@media (max-width: 768px) {
+  .monitor-header-simple {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .monitor-header-simple .header-left {
+    width: 100%;
+  }
+
+  .mini-stat-card {
+    padding: 10px;
+  }
+
+  .mini-stat-card .stat-icon {
+    font-size: 20px;
+  }
+
+  .mini-stat-card .stat-value {
+    font-size: 16px;
+  }
+
+  .workers-scroll-container {
+    padding-bottom: 8px;
+  }
+
+  .worker-card-compact {
+    min-width: 160px;
+    max-width: 160px;
+  }
+}

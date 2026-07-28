@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
+
+from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.crawl.spider_storage_cleanup import (
     SPIDER_WRITABLE_TASK_STATUSES,
 )
-from antcode_core.domain.models import Project, Task, TaskRun, Worker
+from antcode_core.application.services.workers.log_ingest_generation import parse_stream_id
+from antcode_core.application.services.workers.spider_run_access import (
+    StaleSpiderLeaseError,
+    verify_spider_project_binding,
+)
+from antcode_core.domain.models import TaskRun, TaskRunLeaseGeneration, Worker
 from antcode_core.domain.models.enums import TaskStatus
 
 # Lease ID 契约上限（与 Gateway/Lua 侧一致）。
@@ -29,6 +37,14 @@ _TASK_TERMINAL_STATUSES = frozenset(
         TaskStatus.TIMEOUT,
         TaskStatus.SKIPPED,
         TaskStatus.REJECTED,
+    }
+)
+_TASK_CLAIMABLE_STATUSES = frozenset(
+    {
+        TaskStatus.PENDING,
+        TaskStatus.DISPATCHING,
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
     }
 )
 
@@ -104,68 +120,99 @@ async def bind_worker_run_lease_generation(
     run_id: str,
     *,
     lease_id: str,
-    lease_gen: int | None = None,
+    lease_gen: int,
+    log_cutoff_id: str,
 ) -> None:
-    """fence ACQUIRED 之后把 run 绑定到当前代际（允许同 worker 换代改绑）。
-
-    复审 P1-GW-02: 绑定权威是 run ownership fence Lua（已原子证明
-    lease_id 是该 worker 的现行代际且 ownership 归其所有），本函数只负责
-    把结论落到 PG。因此允许 X→Y 的同 worker 换代改绑——否则切代后 PG
-    永远停在旧代际，新代际全部被拒。跨 worker 仍不可改绑（CAS 带
-    worker_id）。必须在 fence 返回 ACQUIRED 后调用，禁止提前绑定。
-
-    P1-GW-04: 当 lease_gen 传入时(推荐用 fence 时点的 Unix ms),用它做
-    单调 CAS 谓词 (lease_gen IS NULL OR lease_gen <= NEW.lease_gen),防
-    L1 fence ACQUIRED 后暂停 → L2 fence+bind → L1 迟到 bind 把 PG 从 L2
-    覆盖回 L1 的竞态。lease_gen 为 None 时退回原行为(存量兼容);滚动升级
-    完成后 Gateway 应始终传入非 None gen。
-    """
+    """Persist an ownership-fenced generation and close its predecessor."""
     normalized_run = run_id.strip()
     normalized_lease = lease_id.strip()
     if not normalized_run or normalized_run != run_id:
         raise ValueError("run_id 不合法")
     if not normalized_lease or normalized_lease != lease_id or len(normalized_lease) > MAX_LEASE_ID_LENGTH:
         raise ValueError("lease_id 不合法")
-    if lease_gen is not None and lease_gen < 0:
-        raise ValueError("lease_gen 必须非负")
+    if isinstance(lease_gen, bool) or not isinstance(lease_gen, int) or lease_gen < 1:
+        raise ValueError("lease_gen 必须是正整数")
+    parse_stream_id(log_cutoff_id)
 
     resolved = await _resolve_worker(worker)
-
-    # P1-GW-02 (round6): bind 前查 TaskRun 终态,已终态则拒绝 bind。防"L1 完成
-    # 后 ACK 丢失, L2 reclaim + claim + bind → 重复执行副作用"。fence Lua 只
-    # 保证 Redis ownership 单进程,不查 PG 终态; 这里补上 PG 侧的兜底。
-    # (fence + bind 已经原子, 但终态判断放 PG 侧因为 Redis ownership TTL 短,
-    #  终态可能在 Redis owner 已 DEL 后到, PG 是权威)
-    existing = await TaskRun.filter(run_id=normalized_run).only("id", "status", "worker_id").first()
-    if existing is not None and existing.status in _TASK_TERMINAL_STATUSES:
-        raise PermissionError(f"TaskRun 已在终态 {existing.status}, 拒绝 bind (防已完成 run 被重复 claim 执行)")
-
-    if lease_gen is None:
-        # 兼容路径:不做代际单调 CAS(仅当 Gateway 未升级时使用)
-        updated = await TaskRun.filter(run_id=normalized_run, worker_id=resolved.id).update(
+    async with in_transaction("default") as connection:
+        execution = await _lock_claimable_run(normalized_run, resolved.id, connection)
+        _require_monotonic_generation(execution, normalized_lease, lease_gen)
+        await _record_generation_transition(
+            execution=execution,
+            worker_id=resolved.id,
             lease_id=normalized_lease,
+            lease_gen=lease_gen,
+            log_cutoff_id=log_cutoff_id,
+            connection=connection,
         )
-        if updated == 0:
-            raise PermissionError("TaskRun 不存在或不属于当前 Worker")
+        await (
+            TaskRun.filter(id=execution.id)
+            .using_db(connection)
+            .update(
+                lease_id=normalized_lease,
+                lease_gen=lease_gen,
+            )
+        )
+
+
+async def _lock_claimable_run(run_id: str, worker_id: int, connection) -> TaskRun:
+    execution = (
+        await TaskRun.filter(run_id=run_id, worker_id=worker_id).using_db(connection).select_for_update().first()
+    )
+    if execution is None:
+        raise PermissionError("TaskRun 不存在或不属于当前 Worker")
+    if execution.status in _TASK_TERMINAL_STATUSES:
+        raise PermissionError(f"TaskRun 已在终态 {execution.status}, 拒绝 bind")
+    if execution.status not in _TASK_CLAIMABLE_STATUSES:
+        raise PermissionError(f"TaskRun 状态 {execution.status} 不允许 bind")
+    return execution
+
+
+def _require_monotonic_generation(execution: TaskRun, lease_id: str, lease_gen: int) -> None:
+    current_gen = execution.lease_gen
+    if current_gen is None:
         return
+    if execution.lease_id == lease_id:
+        if lease_gen == current_gen:
+            return
+        raise PermissionError(f"TaskRun lease_id 不允许复用为不同代际: run_id={execution.run_id}")
+    if lease_gen <= current_gen:
+        raise PermissionError(f"TaskRun lease_gen 单调 CAS 失败: run_id={execution.run_id}")
 
-    # P1-GW-04: 单调 CAS。Tortoise ORM 的 Q 支持
-    #   Q(lease_gen__isnull=True) | Q(lease_gen__lte=lease_gen)
-    from tortoise.expressions import Q
 
-    updated = await TaskRun.filter(
-        Q(lease_gen__isnull=True) | Q(lease_gen__lte=lease_gen),
-        run_id=normalized_run,
-        worker_id=resolved.id,
-    ).update(lease_id=normalized_lease, lease_gen=lease_gen)
-    if updated == 0:
-        # 分辨"run 不存在" vs "gen CAS 失败"
-        exists = await TaskRun.filter(run_id=normalized_run, worker_id=resolved.id).exists()
-        if not exists:
-            raise PermissionError("TaskRun 不存在或不属于当前 Worker")
-        raise PermissionError(
-            f"TaskRun lease_gen 单调 CAS 失败(有更新代际 bind 在先),拒绝旧代际覆盖: run_id={normalized_run}"
+async def _record_generation_transition(
+    *,
+    execution: TaskRun,
+    worker_id: int,
+    lease_id: str,
+    lease_gen: int,
+    log_cutoff_id: str,
+    connection,
+) -> None:
+    if execution.lease_id and execution.lease_id != lease_id:
+        await TaskRunLeaseGeneration.update_or_create(
+            run_id=execution.run_id,
+            lease_id=execution.lease_id,
+            using_db=connection,
+            defaults={
+                "worker_id": worker_id,
+                "lease_gen": execution.lease_gen,
+                "log_valid_through_id": log_cutoff_id,
+                "closed_at": datetime.now(UTC),
+            },
         )
+    await TaskRunLeaseGeneration.update_or_create(
+        run_id=execution.run_id,
+        lease_id=lease_id,
+        using_db=connection,
+        defaults={
+            "worker_id": worker_id,
+            "lease_gen": lease_gen,
+            "log_valid_through_id": None,
+            "closed_at": None,
+        },
+    )
 
 
 async def require_worker_owns_runs_for_lease(
@@ -197,20 +244,6 @@ async def require_worker_owns_runs_for_lease(
         raise PermissionError("TaskRun lease_id 与当前 Worker 代际不匹配")
 
 
-async def _verify_spider_project_binding(execution, normalized_project_id: str) -> None:
-    # P1-round6 5.2: batch-issued TaskRun 用 task_id=0 占位, 没有关联 Task。
-    # task_id>0 走 Task → project 反向校验; task_id=0 直接查 Project 存在。
-    if execution.task_id and int(execution.task_id) > 0:
-        task = await Task.filter(id=execution.task_id).first()
-        if task is None:
-            raise PermissionError("TaskRun 关联任务不存在")
-        if not await Project.filter(id=task.project_id, public_id=normalized_project_id).exists():
-            raise PermissionError("SpiderData project_id 与 TaskRun 不匹配")
-        return
-    if not await Project.filter(public_id=normalized_project_id).exists():
-        raise PermissionError("SpiderData project_id 不存在")
-
-
 async def require_worker_owns_spider_run(
     worker: Worker | str,
     run_id: str,
@@ -231,8 +264,8 @@ async def require_worker_owns_spider_run(
         raise PermissionError("TaskRun 已进入终态，拒绝继续写入 SpiderData")
     stored_lease_id = execution.lease_id
     if stored_lease_id and stored_lease_id != normalized_lease_id:
-        raise PermissionError("SpiderData lease_id 与 TaskRun 代际不匹配")
-    await _verify_spider_project_binding(execution, normalized_project_id)
+        raise StaleSpiderLeaseError("SpiderData lease_id 与 TaskRun 代际不匹配")
+    await verify_spider_project_binding(execution, normalized_project_id)
     if stored_lease_id is None:
         updated = await TaskRun.filter(
             id=execution.id,

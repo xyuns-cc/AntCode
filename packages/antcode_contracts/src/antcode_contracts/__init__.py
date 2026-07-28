@@ -11,16 +11,19 @@ AntCode Contracts - gRPC 契约包
     - common.proto:  通用消息定义（Timestamp, Metrics, OSInfo, TraceContext, AuditEvent 等）
     - control.proto: ControlService 控制面（Register / Lease / CancelTask / WatchControl）
     - data.proto:    DataService 数据面（StreamTasks / StreamStatus / StreamLogs）
+    - artifact.proto: ArtifactService（source bundle 下载 / task artifact 上传）
 
 使用示例：
-    from antcode_contracts import common_pb2, control_pb2, data_pb2
-    from antcode_contracts import control_pb2_grpc, data_pb2_grpc
+    from antcode_contracts import artifact_pb2, common_pb2, control_pb2, data_pb2
+    from antcode_contracts import artifact_pb2_grpc, control_pb2_grpc, data_pb2_grpc
 """
 
 __version__ = "0.1.0"
 
 # 导出将在 proto 生成后可用
 __all__ = [
+    "artifact_pb2",
+    "artifact_pb2_grpc",
     "common_pb2",
     "common_pb2_grpc",
     "control_pb2",

@@ -6,6 +6,7 @@
 
 from tortoise import fields
 
+from antcode_core.common.security.encrypted_fields import EncryptedJSONField
 from antcode_core.domain.models.base import BaseModel, generate_public_id
 from antcode_core.domain.models.enums import (
     ExecutionStrategy,
@@ -49,8 +50,11 @@ class Task(BaseModel):
     success_count = fields.IntField(default=0)
 
     # 执行参数
-    execution_params: fields.JSONField[dict[str, object] | None] = fields.JSONField(null=True)
-    environment_vars: fields.JSONField[dict[str, str] | None] = fields.JSONField(null=True)
+    # P1-12：execution_params 常含 token/proxy/password；environment_vars 就是 env。
+    # 与 Project.environment_vars / task_config / proxy_config 一样必须走透明加密，
+    # 避免创建/复制/详情接口把明文字段写入 DB 且回给前端。
+    execution_params: fields.JSONField[dict[str, object] | None] = EncryptedJSONField(null=True)
+    environment_vars: fields.JSONField[dict[str, str] | None] = EncryptedJSONField(null=True)
 
     # 时间戳
     created_at = fields.DatetimeField(auto_now_add=True)

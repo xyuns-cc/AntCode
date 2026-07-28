@@ -213,9 +213,10 @@ class TestRedisKeys:
 
         keys = RedisKeys()
 
-        assert keys.spider_data_stream("run-001") == "antcode:spider:data:run-001"
-        assert keys.spider_meta_key("run-001") == "antcode:spider:meta:run-001"
-        assert keys.spider_index_key("proj-001") == "antcode:spider:index:proj-001"
+        assert keys.spider_data_stream("run-001") == "{antcode}:spider:run-001:data"
+        assert keys.spider_meta_key("run-001") == "{antcode}:spider:run-001:meta"
+        assert keys.spider_index_key("proj-001") == "{antcode}:spider:index:proj-001"
+        assert keys.spider_index_expiry_key("proj-001") == "{antcode}:spider:index:expiry:proj-001"
         assert keys.spider_config_key("proj-001") == "antcode:spider:config:proj-001"
 
     def test_custom_namespace(self):
@@ -224,5 +225,5 @@ class TestRedisKeys:
 
         keys = RedisKeys(namespace="myapp")
 
-        assert keys.spider_data_stream("run-001") == "myapp:spider:data:run-001"
-        assert keys.spider_meta_key("run-001") == "myapp:spider:meta:run-001"
+        assert keys.spider_data_stream("run-001") == "{myapp}:spider:run-001:data"
+        assert keys.spider_meta_key("run-001") == "{myapp}:spider:run-001:meta"

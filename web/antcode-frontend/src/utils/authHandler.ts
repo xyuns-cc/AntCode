@@ -2,6 +2,7 @@ import showNotification from '@/utils/notification'
 import { STORAGE_KEYS } from './constants'
 import Logger from './logger'
 import { useAuthStore } from '@/stores/authStore'
+import { clearAccessToken, clearSessionGeneration } from '@/services/authToken'
 
 /**
  * 认证处理工具类
@@ -41,6 +42,8 @@ export class AuthHandler {
   // refresh_token 现在用 sessionStorage 存储，同时也清掉 localStorage 中的历史残留。
   static clearAuthData(): void {
     try {
+      clearAccessToken()
+      clearSessionGeneration()
       localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
       localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
       sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)

@@ -38,6 +38,31 @@ def test_preexec_enabled_returns_callable():
     assert callable(fn)
 
 
+@pytest.mark.skipif(not process_mod.HAS_RESOURCE, reason="resource module unavailable")
+def test_preexec_does_not_apply_rlimits_when_disabled():
+    fn = process_mod._build_preexec_fn(
+        enforce_rlimit=False,
+        cpu_seconds=10,
+        memory_mb=128,
+        max_open_files=64,
+        max_processes=32,
+    )
+    assert fn is not None
+
+    with (
+        patch("antcode_worker.executor.process.os.setsid"),
+        patch.object(process_mod.resource, "setrlimit") as setrlimit,
+    ):
+        fn()
+
+    setrlimit.assert_not_called()
+
+
+def test_bwrap_skips_host_uid_process_limit():
+    assert process_mod._host_max_processes(["/usr/bin/bwrap", "--unshare-user"], 64) == 0
+    assert process_mod._host_max_processes(["/usr/bin/python"], 64) == 64
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
 def test_preexec_handles_unavailable_rlimit_gracefully():
     fn = process_mod._build_preexec_fn(

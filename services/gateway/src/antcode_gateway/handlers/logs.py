@@ -11,7 +11,7 @@ SendLog / SendLogBatch / SendLogChunk 三套 RPC 合并为 ``StreamLogs`` 单一
 **Validates: Requirements 6.6**
 
 存储策略：
-- 实时日志 -> Redis Streams（Proto bytes，供 WebSocket 推送 & Master 摄取）
+- 实时日志 -> Redis Streams（Proto bytes，供 SSE 推送与 Master 摄取）
 - 持久化 -> master log_ingest_loop 消费 Redis 落 PG（``task_logs`` 表）
 """
 
@@ -21,21 +21,15 @@ import time
 from typing import TYPE_CHECKING
 
 from antcode_contracts import data_pb2
+from antcode_core.application.services.workers.log_batch_validation import validate_log_batch
+from antcode_core.application.services.workers.log_ingest_fence import append_fenced_log_batch
+from antcode_core.common.log_limits import LogBatchLimits
 from antcode_core.infrastructure.redis import decode_stream_payload, log_stream_key
-from antcode_core.infrastructure.redis.control_plane import redis_namespace
+from antcode_core.infrastructure.redis.control_plane import log_ingest_stream_key
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
 
-
-def log_ingest_stream_key(namespace: str | None = None) -> str:
-    """全局日志摄取 Stream key。
-
-    与 Master ``_log_ingest_stream_key`` helper 同名同效。本地定义以避免
-    跨包修改 ``control_plane.py``（属于其他 Agent 的范围）。
-    路径：``<namespace>:log:ingest``。
-    """
-    return f"{redis_namespace(namespace)}:log:ingest"
-
+from antcode_gateway.config import gateway_config
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -57,6 +51,12 @@ def _entry_timestamp_seconds(entry: data_pb2.LogEntry) -> float:
     return ts.seconds + ts.nanos / 1e9
 
 
+def _positive_limit(name: str, value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} 必须是正整数")
+    return value
+
+
 class LogHandler:
     """日志处理器
 
@@ -68,6 +68,9 @@ class LogHandler:
         self,
         redis_client=None,
         stream: StreamClient | None = None,
+        *,
+        max_batch_bytes: int | None = None,
+        max_entry_content_bytes: int | None = None,
     ):
         """初始化处理器
 
@@ -77,6 +80,14 @@ class LogHandler:
                 ``ProtoCodec(LogBatch)`` 的实例
         """
         self._redis_client = redis_client
+        self._max_batch_bytes = _positive_limit(
+            "max_batch_bytes",
+            gateway_config.log_max_batch_bytes if max_batch_bytes is None else max_batch_bytes,
+        )
+        self._max_entry_content_bytes = _positive_limit(
+            "max_entry_content_bytes",
+            gateway_config.log_max_entry_content_bytes if max_entry_content_bytes is None else max_entry_content_bytes,
+        )
         # ProtoCodec 仅用于 xadd_typed/xreadgroup_typed；下面 pipeline 路径绕过它
         self._stream = stream or StreamClient(codec=ProtoCodec(data_pb2.LogBatch))
 
@@ -119,6 +130,7 @@ class LogHandler:
         - 单一 stream 让 Master 单 consumer group 全量消费，避免 per-run
           stream key 的水平扩散。
         """
+        self._validate_batch_bytes(batch)
         if not batch.entries:
             return True
 
@@ -131,23 +143,30 @@ class LogHandler:
             logger.error("Redis 不可用,拒绝确认日志接收(fail-closed,worker 保留 outbox)")
             return False
 
-        from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
-
-        stream_key = self._stream_key()
-        pipe = redis.pipeline(transaction=False)
-        pipe.xadd(
-            stream_key,
-            {PROTO_FIELD: batch.SerializeToString()},
-        )
         try:
-            await pipe.execute()
+            await append_fenced_log_batch(
+                redis,
+                batch.SerializeToString(),
+                worker_id=batch.worker_id,
+                lease_id=batch.lease_id,
+                run_ids={entry.run_id for entry in batch.entries},
+            )
         except Exception as exc:
             logger.exception(f"写入日志 ingest stream 失败: {exc}")
-            return False
+            raise
 
         # 日志经 Redis ingest stream 由 master log_ingest_loop 消费落 PG,
         # gateway 端不再做副持久化(旧 log_storage 模块已随重构下线)。
         return True
+
+    def _validate_batch_bytes(self, batch: data_pb2.LogBatch) -> None:
+        validate_log_batch(
+            batch,
+            limits=LogBatchLimits(
+                max_batch_bytes=self._max_batch_bytes,
+                max_entry_content_bytes=self._max_entry_content_bytes,
+            ),
+        )
 
     # =========================================================================
     # 查询/清理 - 维持原接口，给 web_api / 调试用

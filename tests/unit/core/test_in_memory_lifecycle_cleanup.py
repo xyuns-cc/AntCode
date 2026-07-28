@@ -15,21 +15,21 @@ from antcode_worker.runtime.uv_manager import UVManager
 
 @pytest.mark.asyncio
 async def test_distributed_log_terminal_status_releases_hot_state(monkeypatch):
-    service = DistributedLogService()
-    monkeypatch.setattr(postgres_task_log_service, "append_entries", AsyncMock())
+    allocator = SimpleNamespace(allocate=AsyncMock(return_value=[1]))
+    service = DistributedLogService(allocator)
+    monkeypatch.setattr(postgres_task_log_service, "append_entries", AsyncMock(return_value=1))
     monkeypatch.setattr(service, "_update_runtime_status", AsyncMock())
     monkeypatch.setattr(service, "_push_task_status", AsyncMock())
 
     await service.update_task_status("run-1", "success")
 
     assert service._log_cache == {}
-    assert service._sequences == {}
     assert service._task_status == {}
 
 
 @pytest.mark.asyncio
 async def test_distributed_log_push_queue_is_bounded():
-    service = DistributedLogService()
+    service = DistributedLogService(SimpleNamespace(allocate=AsyncMock()))
     service.set_notifier(
         SimpleNamespace(
             send_log=AsyncMock(),

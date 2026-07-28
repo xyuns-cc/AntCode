@@ -9,13 +9,7 @@ Lease 模型用 Redis 上的一组数据结构维护 Worker 的强一致存活�
     - ``granted_at_ms``   — 本次 lease 被发出 / 续租的时间
     - ``metrics_json``    — Worker 上报的 metrics（JSON dict，过渡期可选）
 
-- ``{ns}:lease:expiring`` (ZSet) 全局单 key
-    score = ``expires_at_ms``，member = ``worker_id``。
-    ``sweep_expired`` 用 ``ZRANGEBYSCORE 0 now`` 取出所有过期 lease。
-
-- ``{ns}:lease:active`` (Set) 全局单 key
-    当前持有有效 lease 的 ``worker_id`` 集合，供 web_api 等只读消费方
-    快速回答 "在线 worker 列表"。
+- ``{ns}:lease:expiring`` / ``{ns}:lease:active`` 维护过期索引和在线集合。
 
 设计要点：
 
@@ -175,6 +169,11 @@ else
     -- Redis INCR 是原子的,同毫秒下 L1/L2 会拿到不同 sequence,单调递增。
     final_lease_id = new_lease_id
     final_granted_ms = now_ms
+    -- 提升到 epoch-ms 域后递增，兼容存量 granted_at_ms 代际。
+    local current_sequence = tonumber(redis.call('GET', seq_key) or "0")
+    if current_sequence < now_ms then
+        redis.call('SET', seq_key, tostring(now_ms))
+    end
     final_sequence = redis.call('INCR', seq_key)
     outcome = 'new'
 end

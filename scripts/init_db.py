@@ -1,7 +1,7 @@
 """数据库一键初始化脚本 —— 全新部署首次执行。
 
 流程：
-1. 校验 DATABASE_URL / ENCRYPTION_KEY / JWT_SECRET 环境变量
+1. 校验 DATABASE_URL / ENCRYPTION_KEY / JWT_SECRET(_FILE) 环境变量
 2. Tortoise.generate_schemas() 从 model 定义直接建全部表 + 主键索引
 3. 补建 model 里没声明但性能关键的索引（JSONB 函数索引、复合索引）
 4. 初始化默认系统配置
@@ -37,6 +37,8 @@ sys.path.insert(0, str(ROOT / "services" / "web_api" / "src"))
 
 from dotenv import load_dotenv  # noqa: E402
 from loguru import logger  # noqa: E402
+
+from scripts.init_db_environment import check_environment as _check_env  # noqa: E402
 
 # T7 阶段新加的性能索引 —— 全部 IF NOT EXISTS 幂等
 PERFORMANCE_INDEXES: list[tuple[str, str]] = [
@@ -125,6 +127,10 @@ WORKERS_LEGACY_COLUMNS: list[tuple[str, str]] = [
     (
         "api_key_previous_hash",
         'ALTER TABLE "workers" ADD COLUMN IF NOT EXISTS "api_key_previous_hash" VARCHAR(128) NULL',
+    ),
+    (
+        "api_key_previous_expires_at",
+        'ALTER TABLE "workers" ADD COLUMN IF NOT EXISTS "api_key_previous_expires_at" TIMESTAMPTZ NULL',
     ),
 ]
 
@@ -226,7 +232,6 @@ NEW_FEATURE_COLUMNS: list[tuple[str, str, str]] = [
     ),
 ]
 
-# P1-01: 启动必须存在的核心表清单，缺任何一张 fail-fast 拒绝服务上线。
 REQUIRED_TABLES: list[str] = [
     "users",
     "workers",
@@ -235,6 +240,7 @@ REQUIRED_TABLES: list[str] = [
     "worker_install_keys",
     "scheduled_tasks",
     "task_executions",
+    "task_run_lease_generations",
     "task_logs",
     "projects",
     "project_files",
@@ -257,17 +263,6 @@ REQUIRED_TABLES: list[str] = [
     "user_sessions",
     "scheduler_outbox",
 ]
-
-
-async def _check_env() -> None:
-    required = ["DATABASE_URL", "ENCRYPTION_KEY", "JWT_SECRET"]
-    missing = [k for k in required if not os.environ.get(k, "").strip()]
-    if missing:
-        logger.error(
-            "环境变量缺失: {}。请检查 .env 或环境是否加载。",
-            ", ".join(missing),
-        )
-        sys.exit(1)
 
 
 async def _check_required_tables() -> None:
@@ -328,7 +323,8 @@ async def _upgrade_legacy_schema() -> None:
     覆盖两类"老库跑新代码"的断裂点：
 
     1. **workers 凭证 hash 列**（P1-10）：老库缺 api_key_hash /
-       secret_key_hash / secret_key_encrypted / api_key_previous_hash，
+       secret_key_hash / secret_key_encrypted / api_key_previous_hash /
+       api_key_previous_expires_at，
        认证查询 ``Worker.filter(api_key_hash=...)`` 会直接 UndefinedColumn。
        按列探测补 ALTER + 查询索引。
     2. **project_sources.entry_point**：新 model 已删除该字段，但老库上它

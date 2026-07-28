@@ -44,6 +44,11 @@ class ControlServiceStub(object):
                 request_serializer=control__pb2.DeregisterRequest.SerializeToString,
                 response_deserializer=control__pb2.DeregisterResponse.FromString,
                 _registered_method=True)
+        self.GetCapabilities = channel.unary_unary(
+                '/antcode.v1.ControlService/GetCapabilities',
+                request_serializer=control__pb2.CapabilitiesRequest.SerializeToString,
+                response_deserializer=control__pb2.CapabilitiesResponse.FromString,
+                _registered_method=True)
         self.Lease = channel.unary_unary(
                 '/antcode.v1.ControlService/Lease',
                 request_serializer=control__pb2.LeaseRequest.SerializeToString,
@@ -82,6 +87,12 @@ class ControlServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def Deregister(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCapabilities(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -135,6 +146,11 @@ def add_ControlServiceServicer_to_server(servicer, server):
                     servicer.Deregister,
                     request_deserializer=control__pb2.DeregisterRequest.FromString,
                     response_serializer=control__pb2.DeregisterResponse.SerializeToString,
+            ),
+            'GetCapabilities': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCapabilities,
+                    request_deserializer=control__pb2.CapabilitiesRequest.FromString,
+                    response_serializer=control__pb2.CapabilitiesResponse.SerializeToString,
             ),
             'Lease': grpc.unary_unary_rpc_method_handler(
                     servicer.Lease,
@@ -216,6 +232,33 @@ class ControlService(object):
             '/antcode.v1.ControlService/Deregister',
             control__pb2.DeregisterRequest.SerializeToString,
             control__pb2.DeregisterResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCapabilities(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/antcode.v1.ControlService/GetCapabilities',
+            control__pb2.CapabilitiesRequest.SerializeToString,
+            control__pb2.CapabilitiesResponse.FromString,
             options,
             channel_credentials,
             insecure,

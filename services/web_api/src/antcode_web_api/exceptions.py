@@ -54,7 +54,7 @@ class InvalidFileTypeException(BusinessException):
 class FileTooLargeException(BusinessException):
     def __init__(self, file_size: int, max_size: int):
         super().__init__(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"文件大小 {file_size} 字节超过限制 {max_size} 字节",
             error_code="FILE_TOO_LARGE",
         )

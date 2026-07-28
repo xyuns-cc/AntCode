@@ -7,10 +7,10 @@
 也支持 ``--rule-json`` 内联字符串或 env ``ANTCODE_RULE_JSON``（与旧
 run_rule.py 参数完全兼容，方便切换）。
 
-**约束（对齐旧 run_rule.py）**：
+**约束**：
 - 参数缺失/规则无效必须 exit != 0，禁止静默失败
 - run_id / project_id 通过 env 拿：``ANTCODE_SPIDER_RUN_ID`` 等
-- 退出码语义：抓到 item → 0；无 item 但无严重错误 → 0；有 ERROR 且无 item → 1
+- 退出码语义：仅当至少抓到一条且全部持久化成功时返回 0
 """
 
 from __future__ import annotations
@@ -19,8 +19,29 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True)
+class CrawlOutcome:
+    items: int
+    errors: int
+    written: int
+    xadd_failed: int
+    final_flush_failed: int
+    final_flush_remaining: int
+
+
+def _result_exit_code(outcome: CrawlOutcome) -> int:
+    if outcome.final_flush_failed > 0 or outcome.final_flush_remaining > 0:
+        return 1
+    if outcome.xadd_failed > 0:
+        return 1
+    if outcome.items <= 0:
+        return 1
+    return 0 if outcome.written >= outcome.items else 1
 
 
 def _load_rule(args: argparse.Namespace) -> dict[str, Any]:
@@ -82,26 +103,16 @@ def _run(rule: dict[str, Any]) -> int:
         f"final_flush_remaining={final_flush_remaining}"
     )
 
-    # P1-27: close 阶段 flush 失败或 buffer 剩余数据 → 非零退出
-    if final_flush_failed > 0 or final_flush_remaining > 0:
-        return 1
-    # R1-P1-9: xadd 有失败 → 非零退出
-    if xadd_failed > 0:
-        return 1
-    # items > 0 但一条都没写进 Redis → 假成功场景，非零退出
-    if items > 0 and written == 0:
-        return 1
-    # P1-27: items > written（有条目没被 sink ack）也算失败，
-    # 覆盖 gateway 模式 buffer 里还有条目没送出去的情况
-    if items > 0 and written < items:
-        return 1
-    # 与旧 run_rule.py 语义：有 item 即成功；无 item 且有 ERROR → 失败
-    if items > 0:
-        return 0
-    if errors > 0:
-        return 1
-    # 无 item 也无 error（页面结构变了、CSS 不命中等）不判失败
-    return 0
+    return _result_exit_code(
+        CrawlOutcome(
+            items=items,
+            errors=errors,
+            written=written,
+            xadd_failed=xadd_failed,
+            final_flush_failed=final_flush_failed,
+            final_flush_remaining=final_flush_remaining,
+        )
+    )
 
 
 def main() -> int:

@@ -188,11 +188,11 @@ class ProjectRule(BaseModel):
             "priority": self.priority or 0,
             "dont_filter": self.dont_filter,
             # R1-P1-21: 限速/重试/超时/页数/并发 — Scrapy settings.py 读顶层
-            "request_delay": int(self.request_delay or 1000),  # 毫秒；settings 会 /1000 转秒
-            "retry_count": int(self.retry_count or 3),
+            "request_delay": int(self.request_delay),  # 毫秒；settings 会 /1000 转秒
+            "retry_count": int(self.retry_count),
             "timeout": int(self.timeout or 30),
             "max_pages": int(self.max_pages or 10),
-            "start_page": int(self.start_page or 1),
+            "start_page": int(self.start_page if self.start_page is not None else 1),
         }
         if self.proxy_config:
             data["proxy_config"] = self.proxy_config

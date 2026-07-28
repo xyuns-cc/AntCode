@@ -12,6 +12,8 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_worker.domain.models import ExecResult
+
 
 class RunState(StrEnum):
     """运行状态"""
@@ -45,6 +47,12 @@ class RunInfo:
 
     # 元数据
     data: dict[str, Any] = field(default_factory=dict)
+
+    # 任务执行结束后、结果与源消息全部结算前保留的恢复信息。
+    settlement_result: ExecResult | None = None
+    settlement_active: bool = False
+    result_reported: bool = False
+    pending_receipts: set[str] = field(default_factory=set)
 
 
 class StateManager:
@@ -92,9 +100,88 @@ class StateManager:
                 receipt=receipt,
                 queued_at=datetime.now(),
             )
+            if receipt:
+                info.pending_receipts.add(receipt)
             self._runs[run_id] = info
             logger.debug(f"添加运行: {run_id}")
             return info, True
+
+    async def start_settlement(
+        self,
+        run_id: str,
+        *,
+        task_id: str,
+        receipt: str | None,
+        result: ExecResult,
+    ) -> None:
+        """保存执行结果并占用结算权，供失败后的重投继续结算。"""
+        async with self._lock:
+            info = self._runs.get(run_id)
+            if info is None:
+                info = RunInfo(run_id=run_id, task_id=task_id, receipt=receipt, queued_at=datetime.now())
+                self._runs[run_id] = info
+            if info.settlement_result is not None and info.settlement_result != result:
+                raise RuntimeError(f"运行存在冲突的待结算结果: {run_id}")
+            if receipt:
+                info.pending_receipts.add(receipt)
+                info.receipt = receipt
+            info.settlement_result = result
+            info.settlement_active = True
+
+    async def reserve_settlement_recovery(self, run_id: str, receipt: str | None) -> bool:
+        """登记重投 receipt；待结算且当前无处理者时取得恢复权。"""
+        async with self._lock:
+            info = self._require_run(run_id)
+            if receipt:
+                info.pending_receipts.add(receipt)
+                info.receipt = receipt
+            if info.settlement_result is None or info.settlement_active:
+                return False
+            info.settlement_active = True
+            return True
+
+    async def settlement_snapshot(self, run_id: str) -> tuple[ExecResult, bool, tuple[str, ...]]:
+        """返回不可变的待结算快照。"""
+        async with self._lock:
+            info = self._require_run(run_id)
+            if info.settlement_result is None:
+                raise RuntimeError(f"运行没有待结算结果: {run_id}")
+            return info.settlement_result, info.result_reported, tuple(info.pending_receipts)
+
+    async def mark_result_reported(self, run_id: str) -> None:
+        async with self._lock:
+            self._require_run(run_id).result_reported = True
+
+    async def mark_receipt_acked(self, run_id: str, receipt: str) -> None:
+        async with self._lock:
+            self._require_run(run_id).pending_receipts.discard(receipt)
+
+    async def finish_settlement(self, run_id: str) -> bool:
+        """结果已上报且没有待 ACK receipt 时原子清除运行状态。"""
+        async with self._lock:
+            info = self._require_run(run_id)
+            if not info.result_reported or info.pending_receipts:
+                return False
+            self._runs.pop(run_id)
+            return True
+
+    async def release_settlement(self, run_id: str) -> None:
+        """结算尝试失败后释放本地恢复权，但保留结果与 receipt。"""
+        async with self._lock:
+            info = self._runs.get(run_id)
+            if info is not None:
+                info.settlement_active = False
+
+    async def has_pending_settlement(self, run_id: str) -> bool:
+        async with self._lock:
+            info = self._runs.get(run_id)
+            return info is not None and info.settlement_result is not None
+
+    def _require_run(self, run_id: str) -> RunInfo:
+        info = self._runs.get(run_id)
+        if info is None:
+            raise RuntimeError(f"运行不存在: {run_id}")
+        return info
 
     async def get(self, run_id: str) -> RunInfo | None:
         """获取运行信息"""
@@ -140,7 +227,9 @@ class StateManager:
         """统计活跃运行数"""
         async with self._lock:
             active_states = {RunState.QUEUED, RunState.PREPARING, RunState.RUNNING, RunState.CANCELLING}
-            return sum(1 for r in self._runs.values() if r.state in active_states)
+            return sum(
+                1 for run in self._runs.values() if run.state in active_states or run.settlement_result is not None
+            )
 
     async def get_all(self) -> list[RunInfo]:
         """获取所有运行"""

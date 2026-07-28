@@ -4,7 +4,6 @@ import type {
   LogStreamConnection,
   LogStreamOptions,
 } from './logs'
-import { broadcastAuthEvent } from './authToken'
 import { buildLogStreamUrl } from './logStreamUrl'
 import { MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from './logStreamBackoff'
 import { toStatusUpdate, toStreamLogEntry } from './logStreamMessages'
@@ -167,8 +166,13 @@ export class EventSourceLogConnection implements LogStreamConnection {
   }
 
   private handleStreamError(source: EventSource, generation: number, payload: StreamPayload): void {
-    this.options.onError?.(payload.message ? String(payload.message) : '日志流服务端错误')
     const code = String(payload.code || '')
+    if (code === 'session_revoked') {
+      // 正常 refresh 也会撤销旧 JTI；真撤销由下一次 ticket 请求的 401 执行全局登出。
+      this.restartAfterStreamError(source, generation)
+      return
+    }
+    this.options.onError?.(payload.message ? String(payload.message) : '日志流服务端错误')
     if (code === 'cursor_expired') {
       this.options.onHistoricalLogsUpdate?.({ phase: 'gap' })
       this.lastEventId = ''
@@ -180,19 +184,11 @@ export class EventSourceLogConnection implements LogStreamConnection {
       this.restartAfterStreamError(source, generation)
       return
     }
-    if (code === 'session_revoked' || code === 'access_revoked') {
+    if (code === 'access_revoked') {
       this.closeIfActive(source, generation)
       this.closed = true
       this.options.onStateChange?.('failed')
-      // P1-round6 5.4: SSE 收到 session_revoked 说明后端已撤销当前会话
-      // (改密码 / 管理员 revoke / 长期未活跃)。仅当前标签的 EventSource
-      // 感知不够, 其他标签仍持旧 access token 会继续 401 循环。
-      // 广播 logout 让所有 tab 一起清 state + 跳登录。
-      try {
-        broadcastAuthEvent('logout')
-      } catch {
-        // BroadcastChannel 不可用不阻塞主流程
-      }
+      return
     }
   }
 
@@ -294,7 +290,6 @@ export class EventSourceLogConnection implements LogStreamConnection {
     this.reconnectTimer = null
   }
 }
-
 export const createLogStreamConnection = (
   getTicket: () => Promise<string>,
   options: LogStreamOptions,

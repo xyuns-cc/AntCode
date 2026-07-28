@@ -37,6 +37,7 @@ COMMON_MODULES = {
     "time",
     "security",
 }
+STANDARD_LIBRARY_COMMON_MODULES = {"logging", "time"}
 
 # Forbidden import patterns - services should not import these from src/ or other services
 FORBIDDEN_IMPORT_PREFIXES = [
@@ -114,6 +115,17 @@ def check_import_boundary_violations(service_name: str, service_path: str) -> li
                     )
 
     return violations
+
+
+def is_unqualified_common_import(import_statement: str) -> bool:
+    """Return whether a shared module is imported without an owning package."""
+    shared_modules = COMMON_MODULES - STANDARD_LIBRARY_COMMON_MODULES
+    for module in shared_modules:
+        if import_statement == f"import {module}" or import_statement.startswith(f"import {module}."):
+            return True
+        if import_statement.startswith(f"from {module} import "):
+            return True
+    return False
 
 
 def get_all_service_files() -> list[tuple[str, str, Path]]:
@@ -205,31 +217,31 @@ class TestImportBoundary:
         they import from antcode_core.
         """
 
-        for service_name, service_path in SERVICES.items():
+        violations: list[ImportViolation] = []
+        scanned_files = 0
+
+        for service_path in SERVICES.values():
             python_files = get_all_python_files(service_path)
 
             for file_path in python_files:
                 if "__pycache__" in str(file_path) or "test_" in file_path.name:
                     continue
+                scanned_files += 1
 
                 imports = extract_imports(file_path)
 
                 for line_no, import_stmt in imports:
-                    # Check if importing common module names from wrong sources
-                    for common_mod in COMMON_MODULES:
-                        # If importing a common module, it should be from antcode_core
-                        if f"import {common_mod}" in import_stmt or f".{common_mod}" in import_stmt:
-                            # Allow imports from antcode_core
-                            if "antcode_core" in import_stmt:
-                                continue
-                            # Allow relative imports within the same service
-                            if import_stmt.startswith("from ."):
-                                continue
-                            # Allow standard library imports
-                            if import_stmt in ["import logging", "import time"]:
-                                continue
-                            # Flag potential violations for manual review
-                            # (not all are violations, but worth checking)
+                    if is_unqualified_common_import(import_stmt):
+                        violations.append(
+                            ImportViolation(
+                                file_path=str(file_path),
+                                line_number=line_no,
+                                import_statement=import_stmt,
+                                violation_type="Shared module must be imported from its owning package",
+                            )
+                        )
 
-        # This test passes if no hard violations found
-        assert True
+        assert scanned_files > 0, "No service source files were scanned"
+        assert not violations, "\n".join(
+            f"{item.file_path}:{item.line_number}: {item.import_statement}" for item in violations
+        )

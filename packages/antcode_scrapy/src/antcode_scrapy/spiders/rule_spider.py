@@ -80,11 +80,7 @@ class UniversalRuleSpider(scrapy.Spider):
         # start_page 优先级：URL/template 里的 {N} > pagination_config.start_page > rule.start_page > 1
         # 例：``target_url = ".../page/{5}/"`` → start_page=5
         numeric_start = self._extract_numeric_placeholder_start(rule)
-        self.start_page = (
-            numeric_start
-            if numeric_start is not None
-            else int(self.pagination_cfg.get("start_page") or rule.get("start_page") or 1)
-        )
+        self.start_page = numeric_start if numeric_start is not None else self._configured_start_page(rule)
         self._pages_crawled = 0
         # ``method`` 决定分页策略；旧数据兼容：
         # - 没设 method 但设了 next_page_rule → click_element
@@ -130,10 +126,12 @@ class UniversalRuleSpider(scrapy.Spider):
 
     def _build_request(self, url: str, page_number: int | None = None) -> scrapy.Request:
         engine = str(self.rule.get("engine") or "").lower()
-        meta: dict[str, Any] = {"antcode_page_number": page_number or self.start_page}
+        meta: dict[str, Any] = {
+            "antcode_page_number": self.start_page if page_number is None else page_number,
+        }
         need_page_obj = False
-        # js_click 分页强制走 Playwright（即便 rule.engine 没设 playwright）
-        if self.pagination_method == "js_click":
+        # JS 分页强制走 Playwright（即便 rule.engine 没设 playwright）
+        if self.pagination_method in ("js_click", "infinite_scroll"):
             engine = "playwright"
         if engine in ("playwright", "render"):
             meta["playwright"] = True
@@ -190,7 +188,8 @@ class UniversalRuleSpider(scrapy.Spider):
         self._record_pages_crawled()
         page = response.meta.get("playwright_page")
         response = await self._render_response(response, page)
-        page_number = response.meta.get("antcode_page_number") or self._pages_crawled
+        configured_page = response.meta.get("antcode_page_number")
+        page_number = self._pages_crawled if configured_page is None else configured_page
         yield self._build_item(response, page_number)
 
         if self.pagination_method == "click_element":
@@ -473,6 +472,12 @@ class UniversalRuleSpider(scrapy.Spider):
             if m:
                 return int(m.group(1))
         return None
+
+    def _configured_start_page(self, rule: dict[str, Any]) -> int:
+        configured = self.pagination_cfg.get("start_page")
+        if configured is None:
+            configured = rule.get("start_page")
+        return 1 if configured is None else int(configured)
 
     @staticmethod
     def _to_playwright_selector(sel_type: str, expr: str) -> str:

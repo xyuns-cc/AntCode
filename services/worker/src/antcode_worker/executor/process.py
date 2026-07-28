@@ -48,7 +48,7 @@ from antcode_worker.executor.base import (
     LogSink,
     NoOpLogSink,
 )
-from antcode_worker.executor.rule_policy import is_rule_env_allowed
+from antcode_worker.executor.rule_policy import filter_spider_control_env, is_rule_env_allowed
 
 # C1: 子进程 env 白名单——只透传给 shell / runtime 必需的变量；
 # 其它一律不传给用户代码。防止 WORKER_API_KEY / WORKER_GATEWAY_TOKEN /
@@ -509,13 +509,13 @@ class ProcessExecutor(BaseExecutor):
         existing_path = env.get("PATH") or host_env.get("PATH", "")
         env["PATH"] = os.pathsep.join([venv_bin, existing_path]) if existing_path else venv_bin
 
-        # 3. 任务显式环境变量
         env.update(exec_plan.env)
 
         if exec_plan.plugin_name == "rule":
             env = _filter_rule_application_env(env)
+        elif exec_plan.plugin_name == "spider":
+            env = filter_spider_control_env(env)
 
-        # 4. 二重防线：剔除任何命中黑名单模式的键（含被 exec_plan.env 误传的）
         for key in list(env.keys()):
             if _is_env_forbidden(key, exec_plan.plugin_name):
                 env.pop(key, None)

@@ -60,6 +60,7 @@ ENV NGINX_ENVSUBST_FILTER=WEB_API_UPSTREAM
 RUN mkdir -p /etc/nginx/templates && echo 'server { \
     listen 8080; \
     server_name localhost; \
+    client_max_body_size 100m; \
     root /usr/share/nginx/html; \
     index index.html; \
     add_header Content-Security-Policy "default-src '\''self'\''; script-src '\''self'\''; style-src '\''self'\'' '\''unsafe-inline'\''; img-src '\''self'\'' data: blob:; font-src '\''self'\'' data:; connect-src '\''self'\''; object-src '\''none'\''; base-uri '\''self'\''; frame-ancestors '\''none'\''; form-action '\''self'\''" always; \

@@ -22,11 +22,12 @@ import re
 import time
 from collections.abc import Awaitable
 from datetime import datetime
-from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
+
+    from antcode_worker.transport.redis.direct_control import DirectControlClient
 
 from antcode_contracts import data_pb2
 from antcode_contracts.transcode import encode_task_status
@@ -66,7 +67,11 @@ from antcode_worker.transport.redis.runtime_control import (
     settle_runtime_control_result,
 )
 from antcode_worker.transport.redis.runtime_control_evidence import SettlementEvidenceError
+from antcode_worker.transport.redis.spider_payload import normalize_spider_items
 from antcode_worker.transport.redis.task_settlement import ack_owned_task, requeue_owned_task
+
+DEFAULT_RECLAIMED_QUEUE_CAPACITY = 10
+MILLISECONDS_PER_SECOND = 1_000
 
 
 # P1: Status / LogType / Timestamp 转换全部走 ``antcode_contracts.transcode``
@@ -91,14 +96,18 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         redis_url: str | None = None,
         worker_id: str | None = None,
         config: ServerConfig | None = None,
+        *,
         namespace: str | None = None,
         consumer_group: str | None = None,
         control_group: str | None = None,
+        direct_control: "DirectControlClient | None" = None,
+        reclaimed_queue_capacity: int = DEFAULT_RECLAIMED_QUEUE_CAPACITY,
     ):
         if not redis_url:
             raise ValueError("redis_url 必须显式配置")
         super().__init__(config)
         self._redis_url = redis_url
+        self._direct_control = direct_control
         self._redis: Redis | None = None
         self._worker_id = worker_id
         resolved_namespace = namespace or getattr(self._config, "redis_namespace", None)
@@ -112,10 +121,7 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         self._task_consumer_name = self._consumer_name
         self._control_consumer_name = self._consumer_name
         self._control_group = control_group or self._keys.consumer_group_name("control")
-        self._global_control_group = f"{self._control_group}:{worker_id or 'worker'}"
         self._control_channels = self._build_control_channels()
-        # 控制面 poll 轮转标志：per-worker 与 global 交替优先，防饥饿。
-        self._control_poll_flip = True
         self._control_recovery = PendingControlRecovery(
             self._control_channels,
             legacy_consumer_name=self._consumer_name,
@@ -133,8 +139,10 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         self._poll_backoff_until = 0.0
         # R1-P0-4: 被 reclaimer 认领回来的消息塞在这里，poll_task 会优先消费
         # 队列元素形如 (msg_id, decoded_data)
-        self._reclaimed_queue: asyncio.Queue = asyncio.Queue()
-        # P3：Direct 模式下 Worker 直连 Redis，自带 LeaseStore（共享 redis_client）。
+        if isinstance(reclaimed_queue_capacity, bool) or reclaimed_queue_capacity < 1:
+            raise ValueError("reclaimed_queue_capacity 必须是正整数")
+        self._reclaimed_queue: asyncio.Queue = asyncio.Queue(maxsize=reclaimed_queue_capacity)
+        # LeaseStore 仅用于本地只读 generation guard；所有 Lease 写入走可信控制面。
         self._lease_store: Any = None
         self._lease_id: str = ""
         self._lease_fencing_enabled = False
@@ -167,16 +175,6 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
     @property
     def mode(self) -> TransportMode:
         return TransportMode.DIRECT
-
-    @property
-    def ownership_redis_client(self) -> "Redis | None":
-        """run ownership fence 必须复用本 transport 的 ACL client（P1-DR-01）。"""
-        return self._redis
-
-    @property
-    def ownership_redis_namespace(self) -> str:
-        """run ownership fence 必须复用本 transport 解析出的 namespace（P1-DR-01）。"""
-        return self._keys.namespace
 
     async def start(self) -> bool:
         """启动 Redis 连接"""
@@ -213,11 +211,6 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
 
                 # 控制通道消费者组
                 await ensure_consumer_group(redis, self._keys.control_stream(self._worker_id), self._control_group)
-                await ensure_consumer_group(
-                    redis,
-                    self._keys.control_global_stream(),
-                    self._global_control_group,
-                )
                 self._control_recovery.reset()
                 self._task_recovery.reset()
 
@@ -246,6 +239,7 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
                     current_consumer_name=lambda: self._task_consumer_name,
                     on_reclaimed=self._enqueue_reclaimed,
                     on_delivery_failed=self._task_recovery.reset,
+                    available_capacity=self._reclaimed_queue_available_capacity,
                 )
                 await self._reclaimer.start()
                 await self._deferred_recovery.start()
@@ -289,6 +283,8 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         shutdown_steps.append(self._deferred_recovery.stop())
         if self._redis:
             shutdown_steps.append(self._redis.aclose())
+        if self._direct_control:
+            shutdown_steps.append(self._direct_control.aclose())
         if shutdown_steps:
             await asyncio.gather(*shutdown_steps)
 
@@ -299,34 +295,31 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         logger.info("Redis 传输层已停止")
 
     async def deregister(self, reason: str = "shutdown") -> None:
-        """T7-B3b (P1-6): Direct 模式主动 revoke lease + 删心跳。
-
-        让 master 立即判定 worker 离线，不再等 lease TTL（30s）。
-        Redis 已经 close 时降级为 no-op。
-        """
-        if not self._worker_id or not self._redis:
+        """Ask the trusted control plane to revoke the current Direct lease."""
+        if not self._worker_id or not self._lease_id:
             return
-        try:
-            if self._lease_store is None:
-                raise RuntimeError("Direct lease store 未初始化")
-            revoked = await self._lease_store.revoke(
-                self._worker_id,
-                lease_id=self._lease_id,
-                reason=reason,
-            )
-        except Exception as exc:
-            logger.warning(f"deregister revoke lease 失败: {exc}")
-            return
+        if self._direct_control is None:
+            raise RuntimeError("Direct control client 未配置，无法 deregister")
+        revoked = await self._direct_control.deregister(self._lease_id, reason)
         if not revoked:
             logger.warning("跳过旧 generation deregister: worker_id={}", self._worker_id)
             return
-        try:
-            from antcode_core.infrastructure.redis import worker_heartbeat_key
-
-            await self._redis.delete(worker_heartbeat_key(self._worker_id))
-        except Exception as exc:
-            logger.debug(f"deregister 清心跳 key 失败（可忽略）: {exc}")
         logger.info(f"worker 主动 deregister 完成 (reason={reason})")
+
+    async def claim_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
+        if self._direct_control is None:
+            raise RuntimeError("Direct control client 未配置，无法 claim run ownership")
+        return await self._direct_control.claim_run_ownership(self._lease_id, run_id, ttl_ms)
+
+    async def renew_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
+        if self._direct_control is None:
+            raise RuntimeError("Direct control client 未配置，无法 renew run ownership")
+        return await self._direct_control.renew_run_ownership(self._lease_id, run_id, ttl_ms)
+
+    async def release_run_ownership(self, run_id: str) -> bool:
+        if self._direct_control is None:
+            raise RuntimeError("Direct control client 未配置，无法 release run ownership")
+        return await self._direct_control.release_run_ownership(self._lease_id, run_id)
 
     async def _enqueue_reclaimed(self, msg_id: str, data: dict[str, str]) -> None:
         """R1-P0-4: reclaimer 的 on_reclaimed 回调。
@@ -335,6 +328,9 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         原始 field map（bytes 或 str），走 _decode_data 与正常 poll 一致。
         """
         await self._reclaimed_queue.put((msg_id, data))
+
+    def _reclaimed_queue_available_capacity(self) -> int:
+        return self._reclaimed_queue.maxsize - self._reclaimed_queue.qsize()
 
     async def poll_task(self, timeout: float = 5.0) -> TaskMessage | None:
         """
@@ -737,12 +733,8 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
 
         try:
             await self._require_current_generation()
-            redis = self._redis
-            if redis is None:
-                return False
             batches = self._build_log_batch_protos(logs)
-            write = partial(self._write_log_batches, redis, batches)
-            results = await self._run_with_reconnect("发送批量日志", write)
+            results = await self._report_log_batches(batches)
             await self._require_current_generation()
             return self._log_batch_results_succeeded(results, len(batches))
         except ValueError:
@@ -765,17 +757,13 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
             limits=LogBatchLimits(),
         )
 
-    async def _write_log_batches(
-        self,
-        redis: Any,
-        batches: list[data_pb2.LogBatch],
-    ) -> list[Any]:
-        pipe = redis.pipeline(transaction=False)
-        ingest_key = self._keys.log_ingest_stream()
+    async def _report_log_batches(self, batches: list[data_pb2.LogBatch]) -> list[bool]:
+        if self._direct_control is None:
+            raise RuntimeError("Direct 日志上报缺少可信控制面客户端")
+        results = []
         for batch in batches:
-            # Producer-side MAXLEN can delete entries not yet ACKed by Master.
-            pipe.xadd(ingest_key, {PROTO_FIELD: batch.SerializeToString()})
-        return await pipe.execute(raise_on_error=False)
+            results.append(await self._direct_control.report_log_batch(batch.SerializeToString()))
+        return results
 
     def _log_batch_results_succeeded(self, results: list[Any], expected: int) -> bool:
         if len(results) != expected:
@@ -969,25 +957,14 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
             pending = await self._control_recovery.poll(self._redis, self._control_consumer_name)
             if pending is not None:
                 return await self._decode_control_delivery(*pending)
-            per_worker = (self._control_group, self._keys.control_stream(self._worker_id))
-            global_ = (self._global_control_group, self._keys.control_global_stream())
-            # P2: 每次 poll 轮转两个来源的先后顺序。此前固定 per-worker
-            # 优先，per-worker 持续有消息时 global 事件（全局取消/配置）
-            # 会被无限饿死。
-            order = (per_worker, global_) if self._control_poll_flip else (global_, per_worker)
-            self._control_poll_flip = not self._control_poll_flip
-            half_block_ms = max(1, int(timeout * 500))
-            results = None
-            for group_name, stream_key in order:
-                results = await self._redis.xreadgroup(
-                    groupname=group_name,
-                    consumername=self._control_consumer_name,
-                    streams={stream_key: ">"},
-                    count=1,
-                    block=half_block_ms,
-                )
-                if results:
-                    break
+            stream_key = self._keys.control_stream(self._worker_id)
+            results = await self._redis.xreadgroup(
+                groupname=self._control_group,
+                consumername=self._control_consumer_name,
+                streams={stream_key: ">"},
+                count=1,
+                block=max(1, int(timeout * MILLISECONDS_PER_SECOND)),
+            )
             if not results:
                 return None
 
@@ -1089,11 +1066,7 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
 
     def _build_control_channels(self) -> tuple[ControlChannel, ...]:
         worker_stream = self._keys.control_stream(self._worker_id or "worker")
-        global_stream = self._keys.control_global_stream()
-        return (
-            ControlChannel(worker_stream, self._control_group),
-            ControlChannel(global_stream, self._global_control_group),
-        )
+        return (ControlChannel(worker_stream, self._control_group),)
 
     def _build_control_message(self, stream_key: str, msg_id: str, data: dict[Any, Any]) -> ControlMessage:
         decoded = self._decode_data(data)
@@ -1140,46 +1113,26 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
             source = self._control_source(self._encode_receipt(stream_key, message_id))
             await self._ack_quarantined_control_source(source)
             return None
-        global_stream = self._keys.control_global_stream()
-        if stream_key != global_stream or message.control_type != "runtime_manage":
-            if message.control_type != "runtime_manage":
-                return message
-            source = self._control_source(self._encode_receipt(stream_key, message_id))
-            try:
-                recovered = await recover_runtime_control_settlement(
-                    self._redis,
-                    source=source,
-                    worker_id=self._worker_id or "",
-                    lease_id=self._lease_id,
-                    lease_key=self._lease_store.lease_key(self._worker_id or ""),
-                    namespace=self._keys.namespace,
-                )
-            except SettlementEvidenceError:
-                logger.exception("Direct 运行时控制 settlement 证据损坏，隔离原控制事件")
-                await self._ack_quarantined_control_source(source)
-                return None
-            if not recovered:
-                return message
-            await self._ack_control_source(source)
-            return None
-        logger.error(
-            "拒绝 Direct global runtime_manage: stream={} msg_id={} request_id={}",
-            stream_key,
-            message_id,
-            (message.payload or {}).get("request_id", ""),
-        )
-        await self._ack_rejected_global_runtime(global_stream, message_id)
-        return None
-
-    async def _ack_rejected_global_runtime(self, stream_key: str, message_id: str) -> None:
-        if self._redis is None:
-            raise RuntimeError("Direct Redis 未连接，无法确认 global runtime_manage")
+        if message.control_type != "runtime_manage":
+            return message
+        source = self._control_source(self._encode_receipt(stream_key, message_id))
         try:
-            source = self._control_source(self._encode_receipt(stream_key, message_id))
-            await self._ack_control_source(source)
-        except Exception:
-            self._control_recovery.reset()
-            raise
+            recovered = await recover_runtime_control_settlement(
+                self._redis,
+                source=source,
+                worker_id=self._worker_id or "",
+                lease_id=self._lease_id,
+                lease_key=self._lease_store.lease_key(self._worker_id or ""),
+                namespace=self._keys.namespace,
+            )
+        except SettlementEvidenceError:
+            logger.exception("Direct 运行时控制 settlement 证据损坏，隔离原控制事件")
+            await self._ack_quarantined_control_source(source)
+            return None
+        if not recovered:
+            return message
+        await self._ack_control_source(source)
+        return None
 
     async def _ack_control_source(self, source: ControlSource) -> None:
         if self._redis is None:
@@ -1218,8 +1171,6 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         return ControlSource(channels[stream_key], message_id, self._control_consumer_name)
 
     async def _trim_committed_control(self, channel: ControlChannel) -> None:
-        if channel.stream_key == self._keys.control_global_stream():
-            return
         try:
             await trim_acknowledged_stream(self._redis, channel.stream_key, channel.group)
         except Exception:
@@ -1267,7 +1218,7 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         Returns:
             是否成功
         """
-        if not self._redis or not self._running:
+        if not self._running or self._direct_control is None:
             return False
 
         if not items:
@@ -1275,28 +1226,15 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
 
         try:
             await self._require_current_generation()
-            from antcode_core.spider_write_fence import append_fenced_spider_items
-
-            stream_key = self._keys.spider_data_stream(run_id)
-            payloads = []
-            for item in items:
-                # 支持 SpiderDataItem 对象或普通 dict
-                if hasattr(item, "to_redis_dict"):
-                    data = item.to_redis_dict()
-                else:
-                    data = {k: str(v) if not isinstance(v, str) else v for k, v in item.items()}
-
-                payloads.append(data)
-            await append_fenced_spider_items(
-                self._redis,
-                stream_key,
-                tombstone_key=self._keys.spider_tombstone_key(run_id),
+            project_id, payloads = normalize_spider_items(run_id, items)
+            written = await self._direct_control.report_spider_items(
+                lease_id=self._lease_id,
+                run_id=run_id,
+                project_id=project_id,
                 items=payloads,
-                max_len=self._spider_retention.stream_max_len,
-                ttl_seconds=self._spider_retention.ttl_seconds,
             )
             await self._require_current_generation()
-            return True
+            return written
         except Exception:
             logger.exception("上报爬虫数据失败")
             return False
@@ -1315,77 +1253,31 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         Returns:
             是否成功
         """
-        if not self._redis or not self._running:
+        if not self._running or self._direct_control is None:
             return False
 
         try:
             await self._require_current_generation()
-            from antcode_core.spider_write_fence import (
-                compensate_spider_index,
-                write_fenced_spider_meta,
-            )
-
-            meta_key = self._keys.spider_meta_key(run_id)
-
             # 支持 SpiderMeta 对象或普通 dict
             if hasattr(meta, "to_redis_dict"):
                 data = meta.to_redis_dict()
             else:
                 data = {k: str(v) if not isinstance(v, str) else v for k, v in meta.items()}
 
-            # W4: pipe.execute() 歧义失败（不知 ZADD 是否落盘、且 meta 尚未写）
-            # 时按原语义补偿掉可能的半写 entry —— 默认 added_by_us=True。
-            added_by_us = True
-            try:
-                pipe = self._redis.pipeline(transaction=False)
-                zadd_position = self._queue_spider_index(pipe, run_id, data)
-                results = await pipe.execute()
-                # W4: 捕获 ZADD NX 结果。NX no-op(0) 说明 entry 早已由更早的成功
-                # meta 写建立；此时后续 meta 写瞬时失败【不得】ZREM 掉仍存活的
-                # run（对齐 gateway spider_data.handle_batch 的 added_by_us 契约）。
-                if zadd_position is not None:
-                    added_by_us = len(results) > zadd_position and bool(results[zadd_position])
-                await write_fenced_spider_meta(
-                    self._redis,
-                    meta_key,
-                    tombstone_key=self._keys.spider_tombstone_key(run_id),
-                    fields=data,
-                    ttl_seconds=self._spider_retention.ttl_seconds,
-                )
-            except BaseException as exc:
-                project_id = data.get("project_id")
-                if project_id:
-                    await compensate_spider_index(
-                        self._redis,
-                        self._keys.spider_index_key(project_id),
-                        run_id=run_id,
-                        primary=exc,
-                        added_by_us=added_by_us,
-                    )
-                raise
+            project_id = str(data.get("project_id") or "")
+            if not project_id:
+                raise ValueError("SpiderData meta 缺少 project_id")
+            written = await self._direct_control.update_spider_meta(
+                lease_id=self._lease_id,
+                run_id=run_id,
+                project_id=project_id,
+                meta=data,
+            )
             await self._require_current_generation()
-            return True
+            return written
         except Exception:
             logger.exception("更新爬虫元数据失败")
             return False
-
-    def _queue_spider_index(self, pipe: Any, run_id: str, meta: dict[str, str]) -> int | None:
-        """把 index 写入排进 pipeline，返回 ZADD 结果在 execute() 里的下标；
-        无 project_id 时不排 ZADD，返回 None。"""
-        if not meta.get("project_id"):
-            return None
-        index_key = self._keys.spider_index_key(meta["project_id"])
-        score = datetime.now().timestamp()
-        zadd_position = 0
-        if self._spider_retention.ttl_seconds > 0:
-            pipe.zremrangebyscore(index_key, "-inf", score - self._spider_retention.ttl_seconds)
-            zadd_position = 1
-        pipe.zadd(index_key, {run_id: score}, nx=True)
-        if self._spider_retention.ttl_seconds > 0:
-            pipe.expire(index_key, self._spider_retention.ttl_seconds)
-        else:
-            pipe.persist(index_key)
-        return zadd_position
 
     def get_spider_data_reporter(
         self,
@@ -1406,23 +1298,7 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         Returns:
             RedisDataReporter 实例
         """
-        from antcode_worker.plugins.spider.data import RedisDataReporter
-
-        if self._redis is None:
-            raise RuntimeError("Redis transport 尚未启动")
-        options = {
-            "ttl_seconds": self._spider_retention.ttl_seconds,
-            "stream_max_len": self._spider_retention.stream_max_len,
-            **kwargs,
-        }
-        return RedisDataReporter(
-            redis_client=self._redis,
-            keys=self._keys,
-            run_id=run_id,
-            project_id=project_id,
-            spider_name=spider_name,
-            **options,
-        )
+        raise RuntimeError("Direct Redis Spider reporter 已停用；请通过 Worker transport 的可信控制面上报")
 
     async def reconnect(self) -> bool:
         """重连 Redis。

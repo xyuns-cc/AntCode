@@ -24,7 +24,6 @@ from typing import Any
 
 from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import TaskStatus
-from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
 from loguru import logger
 
@@ -420,37 +419,6 @@ class RetryService:
         )
 
         return next_retry_time
-
-    async def manual_retry(self, run_id, user_id):
-        """手动重试任务"""
-        execution = await TaskRun.get_or_none(run_id=run_id)
-        if not execution:
-            return {"success": False, "error": "执行记录不存在"}
-
-        task = await Task.get_or_none(id=execution.task_id)
-        if not task:
-            return {"success": False, "error": "任务不存在"}
-
-        if execution.status == TaskStatus.RUNNING:
-            return {"success": False, "error": "任务正在执行中"}
-
-        execution.status = TaskStatus.PENDING
-        execution.retry_count += 1
-        execution.error_message = f"手动重试 by user {user_id}"
-        await execution.save()
-
-        from antcode_master.control.scheduler_loop import scheduler_service
-
-        await scheduler_service.trigger_task(task.id)
-
-        logger.info(f"任务 {task.name} 已手动触发重试 by user {user_id}")
-
-        return {
-            "success": True,
-            "message": "任务已触发重试",
-            "run_id": run_id,
-            "retry_count": execution.retry_count,
-        }
 
     def register_compensation_handler(self, task_type, handler):
         """注册补偿处理器"""

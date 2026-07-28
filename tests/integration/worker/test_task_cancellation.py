@@ -14,12 +14,19 @@ import uuid
 from datetime import datetime
 
 import pytest
+from antcode_contracts import data_pb2
+from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
 from antcode_worker.transport.redis.keys import RedisKeys
 from loguru import logger
 
+from tests.integration.worker import direct_transport_support as direct_support
+
 # 集成测试必须显式提供 Redis URL
-REDIS_URL = os.getenv("REDIS_URL")
-pytestmark = pytest.mark.skipif(not REDIS_URL, reason="REDIS_URL is required for worker integration tests")
+REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
+pytestmark = pytest.mark.skipif(
+    not REDIS_URL,
+    reason="ANTCODE_INTEGRATION_REDIS_URL is required for worker integration tests",
+)
 REDIS_KEYS = RedisKeys()
 
 
@@ -119,7 +126,7 @@ class TestTaskCancellation:
         1. 运行中的进程可以被取消
         2. 进程被正确终止
         """
-        from antcode_worker.domain.enums import RunStatus
+        from antcode_worker.domain.enums import ExitReason, RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
         from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
@@ -172,14 +179,14 @@ class TestTaskCancellation:
                 await asyncio.sleep(1.0)
 
                 # 取消执行
-                await executor.cancel(unique_task_id)
+                cancelled = await executor.cancel(unique_task_id)
+                assert cancelled is True, "Executor 未确认取消请求"
 
                 # 等待结果
                 result = await exec_task
 
-                # 验证被取消或超时
-                # 注意：取消可能导致 CANCELLED 或 FAILED 状态
-                assert result.status in (RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.SUCCESS)
+                assert result.status == RunStatus.CANCELLED
+                assert result.exit_reason == ExitReason.CANCELLED
                 logger.info(f"[Test] 进程取消测试: status={result.status}")
 
             finally:
@@ -191,6 +198,8 @@ class TestTaskCancellation:
         unique_run_id,
         unique_task_id,
         unique_worker_id,
+        *,
+        direct_transport_factory,
     ):
         """
         测试取消后上报结果
@@ -200,30 +209,28 @@ class TestTaskCancellation:
         2. 结果正确写入
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport import ServerConfig, TaskResult
 
         unique_prefix = f"test:cancel:{uuid.uuid4().hex[:8]}:"
 
-        redis_client = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        namespace = unique_prefix.rstrip(":")
+        keys = RedisKeys(namespace=namespace)
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=False)
 
         config = ServerConfig(
             redis_url=REDIS_URL,
             task_stream_prefix=unique_prefix,
         )
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
         try:
-            await transport.start()
+            lease_id = await direct_support.activate_direct_transport(transport)
 
-            # 上报取消结果
             result = TaskResult(
                 run_id=unique_run_id,
                 task_id=unique_task_id,
@@ -238,31 +245,35 @@ class TestTaskCancellation:
             success = await transport.report_result(result)
             assert success is True
 
-            # 验证结果
-            result_key = REDIS_KEYS.task_result_stream()
+            result_key = keys.task_result_stream()
             results = await redis_client.xrevrange(result_key, "+", "-", count=10)
 
             found = False
-            for msg_id, data in results:
-                if data.get("task_id") == unique_task_id:
+            for _, fields in results:
+                status = data_pb2.TaskStatus.FromString(fields[PROTO_FIELD])
+                if status.task_id == unique_task_id:
                     found = True
-                    assert data.get("status") == "cancelled"
-                    assert "cancelled by user" in data.get("error_message", "")
+                    assert status.status == data_pb2.STATUS_CANCELLED
+                    assert "cancelled by user" in status.error_message
+                    assert status.data["lease_id"] == lease_id
                     break
 
             assert found, "取消结果未写入"
             logger.info(f"[Test] 取消结果上报成功: {unique_task_id}")
 
         finally:
-            await transport.stop()
-            try:
-                pass
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(keys.task_result_stream())
             await redis_client.aclose()
 
     @pytest.mark.asyncio
-    async def test_cancel_and_ack(self, unique_task_id, unique_worker_id):
+    async def test_cancel_and_ack(
+        self,
+        unique_task_id,
+        unique_worker_id,
+        *,
+        direct_transport_factory,
+    ):
         """
         测试取消后 ACK
 
@@ -271,7 +282,7 @@ class TestTaskCancellation:
         2. ACK 正确写入
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig
+        from antcode_worker.transport import ServerConfig
 
         redis_client = aioredis.from_url(
             REDIS_URL,
@@ -279,23 +290,27 @@ class TestTaskCancellation:
             decode_responses=True,
         )
 
+        namespace = f"test:cancel:{unique_worker_id}"
+        keys = RedisKeys(namespace=namespace)
         config = ServerConfig(redis_url=REDIS_URL)
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
+        transport = direct_transport_factory(
+            REDIS_URL,
+            unique_worker_id,
+            config,
+            namespace=namespace,
         )
 
-        stream_key = REDIS_KEYS.task_ready_stream(unique_worker_id)
+        stream_key = keys.task_ready_stream(unique_worker_id)
 
         try:
-            await transport.start()
+            await direct_support.activate_direct_transport(transport)
 
             # 写入任务并获取 receipt
             task_data = {
                 "task_id": unique_task_id,
                 "project_id": "cancel-project",
                 "project_type": "code",
+                **direct_support.source_bundle_fields("a"),
             }
             await redis_client.xadd(stream_key, task_data)
             task_msg = await transport.poll_task(timeout=5.0)
@@ -306,16 +321,13 @@ class TestTaskCancellation:
             assert success is True
 
             # 验证 pending 已清空
-            pending = await redis_client.xpending(stream_key, REDIS_KEYS.consumer_group_name())
+            pending = await redis_client.xpending(stream_key, keys.consumer_group_name())
             assert pending["pending"] == 0, "ACK 后 pending 未清空"
             logger.info(f"[Test] 取消后 ACK pending 已清空: {unique_task_id}")
 
         finally:
-            await transport.stop()
-            try:
-                await redis_client.delete(stream_key)
-            except Exception:
-                pass
+            await direct_support.stop_direct_transport(transport)
+            await redis_client.delete(stream_key)
             await redis_client.aclose()
 
 

@@ -13,23 +13,62 @@
 | 执行引擎 | 自研 spiderkit（lxml + httpx） | Scrapy 2.16 |
 | JS 渲染 | 未支持 | scrapy-playwright（`rule.engine=playwright`） |
 | TLS/JA3 指纹 | curl_cffi 直接调 | scrapy-impersonate DownloadHandler（`engine=curl_cffi`） |
-| URL 断点续爬 | 不支持 | scrapy-redis（`rule.resume_enabled=true`） |
-| 代理池 | 不支持 | 平台级 Redis ZSET + `AntCodeProxyMiddleware`（`rule.proxy_config.enabled=true`） |
+| URL 断点续爬 | 不支持 | legacy 模式可用 scrapy-redis；安全 spool 模式显式拒绝 |
+| 固定代理 | 不支持 | legacy 模式支持固定 HTTP(S)；安全 spool 模式显式拒绝绕过受控出口 |
 
-## 契约兼容点（**不变**）
+## 退出码语义
 
-- 数据 stream key：`{ns}:spider:data:{run_id}` — 字段与 `SpiderDataItem.to_redis_dict()`
+`antcode_scrapy.crawl` 子进程**仅当至少抓到一条数据且全部持久化成功时
+返回 0**；以下任一情况均返回非 0，Worker 会把该 run 判为 FAILED：
+
+- `item_scraped_count == 0` —— 一条都没抓到（含规则未命中任何元素）
+- Redis `XADD` 失败（`antcode/redis_xadd_failed > 0`）
+- 成功写入条数 < 抓取条数
+- spool 最终 flush 失败或有残留
+
+**运维影响**：旧语义下"合法的空抓取"（页面可达但规则零命中）会算
+成功；现在空结果直接判 FAILED——这是有意的 fail-loud 设计，避免规则
+悄悄失效后长期产出空数据无人察觉。请确保规则至少命中一条数据，
+否则应预期 run 状态为失败。
+
+## 存储契约
+
+- 数据 stream key：`{{ns}}:spider:<run_id>:data` — `{{ns}}` 表示实际 Redis namespace hash tag，字段与 `SpiderDataItem.to_redis_dict()`
   逐字对齐（`AntCodeRedisPipeline` 保证）
-- 元数据 hash：`{ns}:spider:meta:{run_id}`
-- 项目索引 ZSET：`{ns}:spider:index:{project_id}`
-- 环境变量注入：`ANTCODE_SPIDER_RUN_ID / PROJECT_ID / REDIS_URL / REDIS_NAMESPACE`
+- 元数据 hash：`{{ns}}:spider:<run_id>:meta`
+- 项目活动索引 ZSET：`{{ns}}:spider:index:<project_id>`
+- 项目过期索引 ZSET：`{{ns}}:spider:index:expiry:<project_id>`（只含有限 TTL run）
+- Direct/Gateway 幂等索引：`{{ns}}:spider:<run_id>:item-ids|item-order`；digest
+  marker 不随 Stream `MAXLEN` 删除，响应丢失后的重放仍不会重复 `XADD`
+- Rule 子进程只注入：`ANTCODE_SPIDER_RUN_ID / PROJECT_ID / SINK_MODE / SPOOL_PATH`；
+  Worker 主进程读取 spool 后通过已认证 Direct/Gateway transport 上报
 - 规则表达式语法（css/xpath/regex）— parsel 与 spiderkit 的 Selector 语义一致
 
 ## 前端/规则数据零改动
 
 前端已保存的 `extraction_rules`（含 css/xpath/regex）、`pagination_config`、
-`headers/cookies/target_url` 直接兼容。新增字段 `resume_enabled`（BOOL，缺省
-False）用于开启 scrapy-redis 断点续爬。
+`headers/cookies/target_url` 直接兼容。Direct Redis sink 已停用；生产 spool
+模式不会把 Redis URL 交给子进程。`resume_enabled` 仍依赖旧 Redis 调度路径，
+因此 Worker 会在生成 Rule JSON 前明确报错，直到父进程提供
+可跨 Worker 迁移的 checkpoint。不会使用临时 `JOBDIR` 冒充跨进程恢复。
+
+## SpiderData 保留策略
+
+SpiderData 是完整任务结果，默认不设置 Redis Stream `MAXLEN`，也不为
+stream 或 meta 设置 TTL；project index key 本身持久存在，有限 TTL run 通过
+独立 expiry ZSET 按成员清理。Direct/legacy 路径使用
+`ANTCODE_SPIDER_STREAM_MAXLEN` 与 `ANTCODE_SPIDER_META_TTL_SECONDS`，Gateway
+使用 `SPIDER_STREAM_MAXLEN` 与 `SPIDER_META_TTL_SECONDS`。四项默认均为 `0`
+（无限保留）；只有管理员显式配置正整数才启用裁剪或过期，非法值直接报错。
+
+> **升级注意（既有部署）**：旧版本默认 `TTL=86400` 秒（24 小时）、
+> `MAXLEN=10000`。升级后若相关环境变量未设置或为 `0`（`.env.example`
+> 也是 `0/0`），Redis 中的 spider 数据将**无限保留**，仅在显式删除
+> run/task/project 时清理。如需保持旧行为，请显式设置
+> `ANTCODE_SPIDER_META_TTL_SECONDS=86400` 与
+> `ANTCODE_SPIDER_STREAM_MAXLEN=10000`（Gateway 侧对应
+> `SPIDER_META_TTL_SECONDS` / `SPIDER_STREAM_MAXLEN`），否则请关注
+> Redis 内存水位。
 
 ## 引擎选择
 
@@ -39,13 +78,17 @@ False）用于开启 scrapy-redis 断点续爬。
 - `curl_cffi` — scrapy-impersonate（TLS/JA3 指纹伪装）
 - `playwright` — scrapy-playwright（浏览器渲染）
 
-## 代理池架构
+## Rule 代理约束
 
-- Redis ZSET `{ns}:proxy:pool`，member=proxy_url，score=健康分
-- Redis SET `{ns}:proxy:cooldown:{proxy}`，60s TTL 黑名单
-- Scrapy `AntCodeProxyMiddleware` 从池挑代理挂到 `request.meta["proxy"]`，
-  按响应升/降分并写冷却
-- 探活 loop（未来接线到 master `proxy_health_loop`）负责补充与刷新
+- 默认生产 spool 模式强制所有 Scrapy 与 Playwright 流量经过 Worker loopback
+  受控出口代理；`request.meta["proxy"]` 会被安全 middleware 覆盖。
+- `proxy_config.enabled=true` 当前不能安全地与父进程受控出口串联，因此 spool
+  模式由 Worker 在生成 Rule JSON 前明确拒绝，不会把代理凭据交给子进程，
+  也不会退化为直连或下发 Worker Redis URL。
+- legacy 非 spool 模式支持单个固定 HTTP(S) 代理；`proxy_url` 为空、SOCKS、
+  `rotation=true` 或 `proxy_list` 动态代理池都会显式报配置错误。
+- 固定代理的用户名和密码属于当前 Rule 的任务输入；Worker API key、Bearer
+  token、Redis URL 等长期凭据仍不会通过该配置进入 spool 子进程。
 
 ## Playwright 部署
 
@@ -202,4 +245,3 @@ Scrapy stats 里 `antcode/pages_crawled` 反映实际抓取页数。
 - **DOM 结构复杂/依赖属性**：XPath 更精确，如 `//nav//a[@rel='next']`
 - **JS 分页 / 按钮无稳定 class**：`text=下一页` / `text=Next` 直接用可读文字定位
 - **一次性抓 href 而非元素**：结构化 XPath `{"type":"xpath","expr":".../@href"}` 直接给 href
-

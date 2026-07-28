@@ -40,7 +40,7 @@ class UnifiedProjectUpdateRequest(BaseModel):
     data_schema: str | dict[str, Any] | None = Field(None, description="数据结构定义(JSON字符串或对象)")
     pagination_config: str | dict[str, Any] | None = Field(None, description="分页配置(JSON字符串或对象)")
     max_pages: int | None = Field(None, ge=1, le=1000, description="最大页数")
-    start_page: int | None = Field(None, ge=1, description="起始页码")
+    start_page: int | None = Field(None, ge=0, description="起始页码")
     request_delay: int | None = Field(None, ge=0, description="请求间隔(ms)")
     retry_count: int | None = Field(None, ge=0, le=10, description="重试次数")
     timeout: int | None = Field(None, ge=1, le=300, description="超时时间(s)")

@@ -5,7 +5,8 @@
 - engine=playwright/render → 装 scrapy-playwright DownloadHandler + asyncio reactor
 - engine=curl_cffi → 装 scrapy-impersonate（保留旧 spiderkit 的指纹能力）
 
-resume_enabled（S3 加）→ scrapy-redis 调度器，实现断点续爬 + 单爬虫分布式。
+安全 spool 模式不向子进程下发 Redis 凭据，因此依赖 Redis 的跨 Worker resume
+与动态代理池会显式拒绝；legacy 模式仍支持 scrapy-redis resume 和固定代理。
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
         # 关掉 robots.txt：AntCode 已在业务层控制（未来若需要，从 rule.task_config 读）
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS": int(rule.get("concurrent_requests") or 8),
+        "DEPTH_LIMIT": int(rule.get("max_depth") or 0),
         # request_delay 从毫秒转秒（对齐 ProjectRule.request_delay 语义）
-        "DOWNLOAD_DELAY": (int(rule.get("request_delay") or 1000)) / 1000.0,
+        "DOWNLOAD_DELAY": _int_rule_value(rule, "request_delay", 1000) / 1000.0,
         "RANDOMIZE_DOWNLOAD_DELAY": True,
-        "RETRY_TIMES": int(rule.get("retry_count") or 3),
+        "RETRY_TIMES": _int_rule_value(rule, "retry_count", 3),
         "DOWNLOAD_TIMEOUT": int(rule.get("timeout") or 30),
         # LOG_LEVEL → stdout → worker executor 捕获 → log:ingest → task_logs
         "LOG_LEVEL": os.environ.get("ANTCODE_SCRAPY_LOG_LEVEL", "INFO"),
@@ -46,13 +48,16 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
         # 请求指纹 v2.7+ 默认，避免弃用警告
         "REQUEST_FINGERPRINTER_IMPLEMENTATION": "2.7",
     }
+    worker_spool_mode, egress_proxy = _configure_worker_egress(settings)
+    fixed_proxy = _configure_rule_proxy(settings, rule, worker_spool_mode)
+    _configure_resume(settings, rule, worker_spool_mode)
 
     engine = str(rule.get("engine") or "").lower()
     # R1-P1-13 (审查报告): pagination_config.method=js_click / infinite_scroll
     # 需要 Playwright；老实现 rule.engine 若不是 playwright，spider 侧
     # request meta 挂了 playwright=True 但 handler 未装 → playwright_page
     # 为 None，翻页整段跳过静默单页。这里强制把 engine 提升为 playwright。
-    pagination_method = ((rule.get("pagination_config") or {}).get("method") or "").lower()
+    pagination_method = _normalized_pagination_method(rule)
     if pagination_method in ("js_click", "infinite_scroll"):
         if engine not in ("playwright", "render"):
             # 自动提升 engine 到 playwright（用户配了 method=js_click 但没配
@@ -69,7 +74,7 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
                     "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
                 },
                 "PLAYWRIGHT_BROWSER_TYPE": os.environ.get("ANTCODE_PLAYWRIGHT_BROWSER", "chromium"),
-                "PLAYWRIGHT_LAUNCH_OPTIONS": {"headless": True},
+                "PLAYWRIGHT_LAUNCH_OPTIONS": _playwright_launch_options(egress_proxy or fixed_proxy),
                 # 上下文上限：与 worker memory_limit_mb 配合避免爆内存
                 "PLAYWRIGHT_MAX_CONTEXTS": int(os.environ.get("ANTCODE_PLAYWRIGHT_MAX_CONTEXTS", "4")),
                 "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": (int(rule.get("timeout") or 30) * 1000),
@@ -100,44 +105,90 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
                 "该依赖，请在 worker 环境中显式安装或改用 engine=playwright/requests。"
             )
 
-    # S3a: 代理池 — 仅当 rule.proxy_config.enabled=True 时挂载
-    # 中间件自身会读 rule.proxy_config，配置放在 spider.rule 里，不需要把
-    # 具体 proxy 写死到 settings。优先级 750 排在 Scrapy 内置 HttpProxy
-    # (750) 之后但比多数用户中间件早（Scrapy 内置 HttpProxyMiddleware
-    # 也是 750，这里显式设 749 更早）。
-    proxy_cfg = rule.get("proxy_config") or {}
-    if proxy_cfg.get("enabled"):
-        settings["DOWNLOADER_MIDDLEWARES"] = {
-            **settings.get("DOWNLOADER_MIDDLEWARES", {}),
-            "antcode_scrapy.proxy.AntCodeProxyMiddleware": 749,
-        }
-
-    # S3b + R1-P1-12 (审查报告)：scrapy-redis 断点续爬 + 分布式
-    # 老实现 `os.environ["ANTCODE_SPIDER_REDIS_URL"]` 硬索引，env 缺失
-    # KeyError 裸崩；SCHEDULER_PERSIST=True + 固定 project 级 DUPEFILTER_KEY
-    # 无 TTL —— 二次运行同 project 时**所有请求命中 dupefilter，抓 0 页
-    # 假成功**（exit 0）。这里 fail-fast 缺失 env，且给 dupefilter 挂 TTL。
-    if rule.get("resume_enabled"):
-        redis_url = os.environ.get("ANTCODE_SPIDER_REDIS_URL") or ""
-        if not redis_url:
-            raise RuntimeError(
-                "rule.resume_enabled=True 需要 ANTCODE_SPIDER_REDIS_URL，但环境变量为空。请检查 worker 侧 Redis 配置。"
-            )
-        project_id = os.environ.get("ANTCODE_SPIDER_PROJECT_ID", "") or "default"
-        ns = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "") or "antcode"
-        # dupefilter key 带 run_id 后缀（一次 run 内保留、跨 run 不共享）——
-        # scrapy-redis 老实现无 TTL，二次跑同 project 静默 0 items。若真需要
-        # 跨 run 共享，用 rule.dedup_config 走内容级去重。
-        run_id = os.environ.get("ANTCODE_SPIDER_RUN_ID", "") or "0"
-        settings.update(
-            {
-                "SCHEDULER": "scrapy_redis.scheduler.Scheduler",
-                "SCHEDULER_PERSIST": False,  # run 结束清空调度器队列，避免陈旧
-                "DUPEFILTER_CLASS": "scrapy_redis.dupefilter.RFPDupeFilter",
-                "SCHEDULER_QUEUE_KEY": f"{ns}:scrapy:{project_id}:{run_id}:requests",
-                "DUPEFILTER_KEY": f"{ns}:scrapy:{project_id}:{run_id}:dupefilter",
-                "REDIS_URL": redis_url,
-            }
-        )
-
     return settings
+
+
+def _int_rule_value(rule: dict[str, Any], key: str, default: int) -> int:
+    value = rule.get(key)
+    return default if value is None else int(value)
+
+
+def _normalized_pagination_method(rule: dict[str, Any]) -> str:
+    method = str((rule.get("pagination_config") or {}).get("method") or "").lower()
+    return "infinite_scroll" if method in {"javascript", "ajax"} else method
+
+
+def _playwright_launch_options(egress_proxy: str) -> dict[str, Any]:
+    options: dict[str, Any] = {"headless": True}
+    if egress_proxy:
+        # SSRF: Chromium 默认对 loopback(localhost/127.0.0.1/::1)绕过代理直连,
+        # 会让规则页面直接命中 Worker 本机回环服务。``<-loopback>`` 移除该隐式
+        # 绕过,连 loopback 也强制走 Worker 受控出口代理(代理再按 SSRF 策略拒
+        # 绝内网目标)。bypass="" 只做兜底,真正生效的是 --proxy-bypass-list。
+        options["proxy"] = {"server": egress_proxy, "bypass": ""}
+        options["args"] = ["--proxy-bypass-list=<-loopback>"]
+    return options
+
+
+def _configure_worker_egress(settings: dict[str, Any]) -> tuple[bool, str]:
+    spool_mode = os.environ.get("ANTCODE_SPIDER_SINK_MODE", "").strip().lower() == "spool"
+    proxy_url = os.environ.get("ANTCODE_SPIDER_EGRESS_PROXY", "").strip()
+    if not spool_mode:
+        return False, proxy_url
+    if not proxy_url:
+        raise RuntimeError("Rule 缺少 Worker 受控出口代理")
+    settings["DOWNLOADER_MIDDLEWARES"] = {
+        "antcode_scrapy.safe_egress.SafeEgressProxyMiddleware": 749,
+    }
+    return True, proxy_url
+
+
+def _configure_rule_proxy(
+    settings: dict[str, Any],
+    rule: dict[str, Any],
+    worker_spool_mode: bool,
+) -> str:
+    proxy_cfg = rule.get("proxy_config") or {}
+    if not proxy_cfg.get("enabled"):
+        return ""
+    if worker_spool_mode:
+        raise RuntimeError("Rule proxy_config 尚未迁移到 Worker 受控出口，拒绝绕过安全代理")
+    from antcode_scrapy.proxy import resolve_fixed_proxy_url
+
+    proxy_url = resolve_fixed_proxy_url(proxy_cfg)
+    settings["DOWNLOADER_MIDDLEWARES"] = {
+        **settings.get("DOWNLOADER_MIDDLEWARES", {}),
+        "antcode_scrapy.proxy.AntCodeProxyMiddleware": 749,
+    }
+    return proxy_url
+
+
+def _configure_resume(
+    settings: dict[str, Any],
+    rule: dict[str, Any],
+    worker_spool_mode: bool,
+) -> None:
+    if not rule.get("resume_enabled"):
+        return
+    if worker_spool_mode:
+        raise RuntimeError("rule.resume_enabled 尚无 Worker 父进程 checkpoint；拒绝向 Rule 子进程下发 Redis 凭据")
+    _configure_legacy_redis_resume(settings)
+
+
+def _configure_legacy_redis_resume(settings: dict[str, Any]) -> None:
+    redis_url = os.environ.get("ANTCODE_SPIDER_REDIS_URL", "").strip()
+    if not redis_url:
+        raise RuntimeError("legacy rule.resume_enabled 需要 ANTCODE_SPIDER_REDIS_URL")
+    project_id = os.environ.get("ANTCODE_SPIDER_PROJECT_ID", "") or "default"
+    namespace = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "") or "antcode"
+    run_id = os.environ.get("ANTCODE_SPIDER_RUN_ID", "") or "0"
+    settings.update(
+        {
+            "SCHEDULER": "scrapy_redis.scheduler.Scheduler",
+            "SCHEDULER_PERSIST": False,
+            "DUPEFILTER_CLASS": "scrapy_redis.dupefilter.RFPDupeFilter",
+            "SCHEDULER_QUEUE_KEY": f"{namespace}:scrapy:{project_id}:{run_id}:requests",
+            "DUPEFILTER_KEY": f"{namespace}:scrapy:{project_id}:{run_id}:dupefilter",
+            "REDIS_URL": redis_url,
+        }
+    )

@@ -15,8 +15,9 @@ class LogRealtimeNotifier(Protocol):
         content: str,
         level: str,
         sequence: int | None = None,
+        storage_id: int,
     ) -> None:
-        """推送日志内容。sequence 与 PG task_logs 持久化序号一致，供订阅端做历史/实时重叠过滤。"""
+        """推送带 PG 主键的已持久化日志，供订阅端过滤历史/实时重叠。"""
 
     async def send_status(
         self,

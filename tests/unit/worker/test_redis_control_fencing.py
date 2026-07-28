@@ -136,15 +136,11 @@ async def test_stale_generation_deregister_does_not_delete_current_heartbeat():
     redis = AsyncMock()
     transport = _transport(redis)
     transport._lease_id = "stale-lease"
-    transport._lease_store = SimpleNamespace(revoke=AsyncMock(return_value=False))
+    transport._direct_control = SimpleNamespace(deregister=AsyncMock(return_value=False))
 
     await transport.deregister("shutdown")
 
-    transport._lease_store.revoke.assert_awaited_once_with(
-        "worker-1",
-        lease_id="stale-lease",
-        reason="shutdown",
-    )
+    transport._direct_control.deregister.assert_awaited_once_with("stale-lease", "shutdown")
     redis.delete.assert_not_awaited()
 
 

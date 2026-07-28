@@ -21,12 +21,12 @@
 import os
 import shutil
 
-from loguru import logger
-
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
 from antcode_worker.plugins.base import PluginBase
-from antcode_worker.runtime.uv_manager import run_command
+from antcode_worker.runtime.go_execution_policy import build_go_execution_env
+from antcode_worker.runtime.language_cache import inject_language_cache_env
+from antcode_worker.runtime.node_dependency_policy import install_node_dependencies
 
 _PYTHON_EXT = {".py", ".pyw"}
 _NODE_JS_EXT = {".js", ".mjs", ".cjs"}
@@ -107,9 +107,11 @@ class CodePlugin(PluginBase):
         language = self._resolve_language(payload)
         cwd = self._get_project_cwd(payload)
         env = self._build_env(payload)
+        if language == "go":
+            env = build_go_execution_env(cwd, env)
 
         # 执行前依赖装配（幂等，复用缓存）
-        await self._prepare_deps(language, cwd, payload)
+        await self._prepare_deps(language, cwd)
 
         if language == "python":
             command, args = self._python_argv(context, payload)
@@ -191,10 +193,11 @@ class CodePlugin(PluginBase):
     def _node_argv(self, payload: TaskPayload, *, is_typescript: bool) -> tuple[str, list[str]]:
         # TS 优先走 workspace 里的 tsx 二进制（约定 devDep 装 tsx）；否则 fallback node
         if is_typescript:
-            local_tsx = os.path.join(payload.workspace_path or "", "node_modules", ".bin", "tsx")
+            dependency_root = payload.project_cwd or payload.workspace_path or ""
+            local_tsx = os.path.join(dependency_root, "node_modules", ".bin", "tsx")
             if os.path.isfile(local_tsx):
                 return local_tsx, [payload.entry_point, *payload.args]
-            local_tsnode = os.path.join(payload.workspace_path or "", "node_modules", ".bin", "ts-node")
+            local_tsnode = os.path.join(dependency_root, "node_modules", ".bin", "ts-node")
             if os.path.isfile(local_tsnode):
                 return local_tsnode, [payload.entry_point, *payload.args]
             raise RuntimeError("TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）")
@@ -211,53 +214,26 @@ class CodePlugin(PluginBase):
 
     # ---------- 依赖装配 ----------
 
-    async def _prepare_deps(self, language: str, cwd: str, payload: TaskPayload) -> None:
+    async def _prepare_deps(self, language: str, cwd: str) -> None:
         """执行前装依赖；幂等，包管理器自身会跳过已装。
 
         - Python：假设 UV/mise 已装好 venv，此处 skip
         - Node：`package-lock.json` → npm ci；`pnpm-lock.yaml` → pnpm install；
                 `yarn.lock` → yarn install；只有 package.json → npm install
-        - Go：`go.mod` → `go mod download`
+        - Go：prep 阶段（有网络）`go mod download` 预热工作区模块缓存；
+              沙箱内 `go run` 以 GOPROXY=off 离线使用缓存（P2 §4.4：
+              生产沙箱默认 --unshare-net，交给沙箱内解析必然失败）
         - Java：`.jar` 打包型跳过；Maven 项目暂不自动装（需要 mvn dependency:copy-dependencies）
         """
         if language == "python":
             return
         if language in ("node_js", "node_ts"):
-            await self._prepare_node_deps(cwd)
-        elif language == "go":
-            await self._prepare_go_deps(cwd)
+            await install_node_dependencies(cwd)
+        if language == "go":
+            from antcode_worker.runtime.go_execution_policy import install_go_dependencies
+
+            await install_go_dependencies(cwd)
         # java 暂不自动装依赖
-
-    async def _prepare_node_deps(self, cwd: str) -> None:
-        pkg_json = os.path.join(cwd, "package.json")
-        if not os.path.isfile(pkg_json):
-            return
-        # 存在 node_modules 且不带 lockfile 时保守跳过（避免误覆盖）
-        has_node_modules = os.path.isdir(os.path.join(cwd, "node_modules"))
-        if os.path.isfile(os.path.join(cwd, "pnpm-lock.yaml")):
-            cmd = ["pnpm", "install", "--frozen-lockfile", "--prefer-offline"]
-        elif os.path.isfile(os.path.join(cwd, "yarn.lock")):
-            cmd = ["yarn", "install", "--frozen-lockfile", "--prefer-offline"]
-        elif os.path.isfile(os.path.join(cwd, "package-lock.json")):
-            cmd = ["npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"]
-        else:
-            if has_node_modules:
-                logger.debug(f"Node 项目已有 node_modules 且无 lockfile，跳过装依赖: {cwd}")
-                return
-            cmd = ["npm", "install", "--prefer-offline", "--no-audit", "--no-fund"]
-
-        logger.info(f"装 Node 依赖: {' '.join(cmd)} (cwd={cwd})")
-        result = await run_command(cmd, cwd=cwd, timeout=600)
-        if result.exit_code != 0:
-            raise RuntimeError(f"Node 依赖装配失败: {result.stderr or result.stdout}")
-
-    async def _prepare_go_deps(self, cwd: str) -> None:
-        if not os.path.isfile(os.path.join(cwd, "go.mod")):
-            return
-        logger.info(f"下载 Go 模块依赖 (cwd={cwd})")
-        result = await run_command(["go", "mod", "download"], cwd=cwd, timeout=600)
-        if result.exit_code != 0:
-            raise RuntimeError(f"Go 模块下载失败: {result.stderr or result.stdout}")
 
     # ---------- 通用工具 ----------
 
@@ -276,42 +252,8 @@ class CodePlugin(PluginBase):
                 env["PATH"] = os.pathsep.join([local_bin, current_path]) if current_path else local_bin
 
         # 多语言依赖 cache 复用（M7）：所有项目共享一份缓存目录，避免重复下载
-        self._inject_lang_cache_env(env)
+        inject_language_cache_env(env)
         return env
-
-    def _inject_lang_cache_env(self, env: dict[str, str]) -> None:
-        """把语言包管理器的 cache 目录指到 settings.LANG_CACHE_ROOT 下的共享位置。
-
-        对已经显式在 env 里传了对应变量的 caller，保留其值不覆盖。
-        """
-        try:
-            from antcode_core.common.config import settings
-
-            cache_root = getattr(settings, "LANG_CACHE_ROOT", "")
-        except Exception:
-            cache_root = ""
-        if not cache_root:
-            return
-        # 惰性创建各语言子目录
-        node_cache = os.path.join(cache_root, "node")
-        pnpm_store = os.path.join(cache_root, "pnpm-store")
-        go_path = os.path.join(cache_root, "go")
-        go_cache = os.path.join(cache_root, "go-build")
-        m2_repo = os.path.join(cache_root, "m2")
-        for d in (node_cache, pnpm_store, go_path, go_cache, m2_repo):
-            try:
-                os.makedirs(d, exist_ok=True)
-            except OSError:
-                pass
-        env.setdefault("npm_config_cache", node_cache)
-        env.setdefault("PNPM_STORE_PATH", pnpm_store)
-        env.setdefault("GOPATH", go_path)
-        env.setdefault("GOCACHE", go_cache)
-        # Maven 通过 -D 参数指定 local repo；追加而非覆盖用户已有 MAVEN_OPTS
-        maven_opts = env.get("MAVEN_OPTS", os.environ.get("MAVEN_OPTS", ""))
-        if "-Dmaven.repo.local" not in maven_opts:
-            addition = f"-Dmaven.repo.local={m2_repo}"
-            env["MAVEN_OPTS"] = f"{maven_opts} {addition}".strip() if maven_opts else addition
 
     def _get_python_executable(self, context: RunContext) -> str:
         if context.runtime_spec and context.runtime_spec.python_path:

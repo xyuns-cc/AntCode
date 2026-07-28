@@ -7,9 +7,8 @@ ControlService gRPC 服务实现 (P1c + P3)
 
 P3 LeaseStore 已接管租约状态机:
 
-- ``Register`` 沿用旧 ``GatewayServiceImpl.Register`` 的 API Key 验证逻辑;
-  注册成功后立即调 ``LeaseStore.grant`` 发首份租约,返回真实
-  ``lease_ttl_ms`` / ``lease_renew_after_ms``(从 ``LeaseStore.policy``)。
+- ``Register`` 沿用旧 ``GatewayServiceImpl.Register`` 的 API Key 验证逻辑，
+  只返回租约策略；``Lease`` 是唯一创建或续租的入口。
 - ``Lease`` 通过 ``LeaseStore.grant(worker_id, current_lease_id, metrics)``
   发租 / 续租,返回真 lease_id + expires_at_ms。``request.metrics`` 顺便
   写到 ``heartbeat:{worker_id}`` Hash,保留运维 dashboard 可见。
@@ -29,18 +28,23 @@ P3 LeaseStore 已接管租约状态机:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import grpc
 from antcode_contracts import control_pb2
 from antcode_contracts.common_pb2 import Timestamp
 from antcode_contracts.control_pb2_grpc import ControlServiceServicer
+from antcode_core.application.services.lease_service import (
+    LeaseConflictError,
+    LeaseRevokedError,
+)
 from antcode_core.infrastructure.redis import (
     build_cancel_control_payload,
     build_config_update_control_payload,
+    control_global_group,
     control_global_stream,
     control_group,
     control_stream,
@@ -52,6 +56,18 @@ from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import LeaseHandler
+from antcode_gateway.services.runtime_control_expiry import (
+    build_runtime_control_event,
+    settle_expired_runtime_control,
+)
+from antcode_gateway.services.runtime_control_recovery import recover_committed_runtime_result
+from antcode_gateway.services.runtime_control_result import (
+    ControlEventGoneError,
+    is_committed_runtime_result,
+    publish_runtime_control_result,
+    require_pending_owner,
+    validate_control_ack,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from antcode_core.application.services.lease_service import LeaseStore
@@ -69,11 +85,126 @@ CONTROL_POLL_BLOCK_MS = 1_000
 CONTROL_STREAM_MAXLEN = 1_000
 
 
+@dataclass(frozen=True)
+class _ControlChannel:
+    stream_key: str
+    group: str
+
+
+@dataclass(frozen=True)
+class _ControlWatchSession:
+    context: grpc.aio.ServicerContext
+    worker_id: str
+    lease_id: str
+    consumer: str
+    channels: tuple[_ControlChannel, ...]
+
+
+def _stream_messages(result):
+    for raw_stream, messages in result or []:
+        stream_key = raw_stream.decode() if isinstance(raw_stream, bytes) else str(raw_stream)
+        for raw_message_id, data in messages:
+            message_id = raw_message_id.decode() if isinstance(raw_message_id, bytes) else str(raw_message_id)
+            yield stream_key, message_id, data
+
+
+def _parse_control_event_id(event_id: str, worker_id: str) -> tuple[str, str]:
+    if not event_id or "|" not in event_id:
+        raise ValueError("AckControl event_id 格式无效")
+    stream_key, message_id = event_id.split("|", 1)
+    if not stream_key or not message_id:
+        raise ValueError("AckControl event_id 缺失字段")
+    allowed_streams = {control_stream(worker_id), control_global_stream()}
+    if stream_key not in allowed_streams:
+        raise PermissionError("control stream does not belong to authenticated worker")
+    return stream_key, message_id
+
+
+def _control_group_for_stream(stream_key: str, worker_id: str) -> str:
+    if stream_key == control_stream(worker_id):
+        return control_group()
+    if stream_key == control_global_stream():
+        return control_global_group(worker_id)
+    raise PermissionError("control stream does not belong to authenticated worker")
+
+
+async def _settle_control_ack(
+    redis,
+    *,
+    event_id: str,
+    stream_key: str,
+    message_id: str,
+    worker_id: str,
+    group: str,
+    request: control_pb2.AckControlRequest,
+) -> bool:
+    is_runtime = await is_committed_runtime_result(
+        redis,
+        event_id=event_id,
+        worker_id=worker_id,
+        request=request,
+    )
+    if not is_runtime:
+        try:
+            decoded, is_runtime = await validate_control_ack(
+                redis,
+                stream_key=stream_key,
+                message_id=message_id,
+                request=request,
+            )
+            await require_pending_owner(
+                redis,
+                stream_key=stream_key,
+                group=group,
+                message_id=message_id,
+                worker_id=worker_id,
+            )
+        except ControlEventGoneError as exc:
+            # at-least-once 重试撞上已结算/已裁剪的事件：幂等返回，不算协议错误。
+            logger.info(
+                "AckControl 幂等重放（事件已结算）: worker={} stream={} msg_id={} detail={}",
+                worker_id,
+                stream_key,
+                message_id,
+                exc,
+            )
+            return False
+        if is_runtime:
+            await publish_runtime_control_result(
+                redis,
+                event_id=event_id,
+                worker_id=worker_id,
+                message_id=message_id,
+                decoded=decoded,
+                request=request,
+            )
+    acked = await redis.xack(stream_key, group, message_id)
+    return is_runtime or int(acked or 0) > 0
+
+
+async def _trim_settled_control(
+    redis,
+    stream_key: str,
+    message_id: str,
+    *,
+    group: str,
+) -> None:
+    try:
+        selected_group = None if stream_key == control_global_stream() else group
+        await trim_acknowledged_stream(redis, stream_key, selected_group)
+    except Exception:
+        logger.exception(
+            "AckControl 后裁剪失败: stream={} msg_id={}",
+            stream_key,
+            message_id,
+        )
+
+
 class GatewayControlService(ControlServiceServicer):
     """ControlService Gateway 端实现。
 
     P3：可选注入 ``LeaseStore``，接管 Lease 状态机。注入后：
-    - ``Register`` 成功时为 Worker 发首个 lease。
+    - ``Register`` 成功时返回 lease 策略，不修改 lease 状态。
     - ``Lease`` 走 ``LeaseStore.grant`` 真发租 / 续租（含 lease_id 一致性）。
     - ``Deregister`` 调 ``LeaseStore.revoke`` 主动撤销。
     未注入时退化为 P1c 的占位实现，保留旧测试调用方式可用。
@@ -129,22 +260,40 @@ class GatewayControlService(ControlServiceServicer):
                 success=False,
                 error="lease service unavailable",
             )
-        try:
-            await self._lease_store.grant(worker_id, current_lease_id="")
-        except Exception as exc:
-            logger.exception(f"Register 阶段发首个 lease 失败: {exc}")
-            return control_pb2.RegisterResponse(
-                success=False,
-                error="lease grant failed",
-            )
-
         logger.info(f"Worker 注册成功: worker_id={worker_id}")
         return control_pb2.RegisterResponse(
             success=True,
             worker_id=worker_id,
             lease_ttl_ms=self._lease_store.policy.ttl_ms,
             lease_renew_after_ms=self._lease_store.policy.renew_after_ms,
+            runtime_control_results_v1=True,
         )
+
+    async def GetCapabilities(
+        self,
+        request: control_pb2.CapabilitiesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_pb2.CapabilitiesResponse:
+        """Return protocol capabilities without mutating Worker lease state."""
+        await require_authenticated_worker(context, request.worker_id)
+        return control_pb2.CapabilitiesResponse(
+            runtime_control_results_v1=True,
+            runtime_control_lease_fencing_v1=True,
+            runtime_control_deadline_v1=True,
+            artifact_transfer_v1=True,
+        )
+
+    async def _require_current_lease(
+        self,
+        context: grpc.aio.ServicerContext,
+        worker_id: str,
+        lease_id: str,
+    ) -> None:
+        if self._lease_store is None:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
+            return
+        if not lease_id or not await self._lease_store.is_current(worker_id, lease_id):
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "worker lease is not current")
 
     async def _verify_registration(
         self,
@@ -179,12 +328,22 @@ class GatewayControlService(ControlServiceServicer):
         worker_id = await require_authenticated_worker(context, request.worker_id)
         reason = request.reason or "explicit"
         logger.info(f"Worker Deregister: worker_id={worker_id}, reason={reason}")
-        # 主动撤销 lease（让 Master 端立刻看到 worker 下线）。
-        if self._lease_store is not None:
-            try:
-                await self._lease_store.revoke(worker_id, reason=f"deregister:{reason}")
-            except Exception as exc:
-                logger.warning(f"Deregister 撤销 lease 失败: {exc}")
+        if self._lease_store is None:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
+            return control_pb2.DeregisterResponse(success=False, error="lease service unavailable")
+        try:
+            revoked = await self._lease_store.revoke(
+                worker_id,
+                reason=f"deregister:{reason}",
+                lease_id=request.lease_id,
+            )
+        except Exception as exc:
+            logger.exception("Deregister 撤销 lease 失败: {}", exc)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease revoke failed")
+            return control_pb2.DeregisterResponse(success=False, error="lease revoke failed")
+        if not revoked:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "worker lease is not current")
+            return control_pb2.DeregisterResponse(success=False, error="worker lease is not current")
         # 同时清理过渡期心跳 Hash（运维 dashboard 兼容）。
         try:
             redis = await get_redis_client()
@@ -215,53 +374,69 @@ class GatewayControlService(ControlServiceServicer):
                 revoked=True,
                 revoke_reason="worker_id 为空",
             )
-
-        # 把 metrics 同步落 heartbeat:{worker_id} Hash —— 过渡期保留运维 dashboard 视图。
-        metrics_dict: dict | None = None
-        if request.HasField("metrics"):
-            metrics = request.metrics
-            metrics_dict = {
-                "cpu": metrics.cpu,
-                "memory": metrics.memory,
-                "disk": metrics.disk,
-                "running_tasks": metrics.running_tasks,
-                "max_concurrent_tasks": metrics.max_concurrent_tasks,
-            }
-            from antcode_gateway.handlers.heartbeat import LeaseData
-
-            lease_data = LeaseData(
-                worker_id=worker_id,
-                status="online",
-                cpu=metrics.cpu,
-                memory=metrics.memory,
-                disk=metrics.disk,
-                running_tasks=metrics.running_tasks,
-                max_concurrent_tasks=metrics.max_concurrent_tasks,
-            )
-            try:
-                await self._lease_handler.handle(lease_data)
-            except Exception as exc:
-                logger.warning(f"Lease 写 Redis 心跳 Hash 失败: {exc}")
-
         if self._lease_store is None:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
             return control_pb2.LeaseResponse(revoked=True)
+        metrics_dict, lease_data = self._lease_request_metrics(request, worker_id)
         try:
             lease = await self._lease_store.grant(
                 worker_id,
                 current_lease_id=request.current_lease_id or "",
                 metrics=metrics_dict,
             )
+        except (LeaseConflictError, LeaseRevokedError) as exc:
+            logger.warning("Lease 被 fencing: worker_id={} lease_id={}", worker_id, request.current_lease_id)
+            return control_pb2.LeaseResponse(
+                lease_id="",
+                expires_at_ms=0,
+                renew_after_ms=self._lease_store.policy.renew_after_ms,
+                revoked=True,
+                revoke_reason=str(exc),
+            )
         except Exception as exc:
             logger.exception(f"Lease grant 失败: worker_id={worker_id}, exc={exc}")
             await context.abort(grpc.StatusCode.UNAVAILABLE, "lease grant failed")
             return control_pb2.LeaseResponse(revoked=True)
+        await self._persist_lease_heartbeat(lease_data)
         return control_pb2.LeaseResponse(
             lease_id=lease.lease_id,
             expires_at_ms=lease.expires_at_ms,
             renew_after_ms=self._lease_store.policy.renew_after_ms,
             revoked=False,
         )
+
+    @staticmethod
+    def _lease_request_metrics(request: control_pb2.LeaseRequest, worker_id: str) -> tuple[dict | None, Any]:
+        if not request.HasField("metrics"):
+            return None, None
+        from antcode_gateway.handlers.heartbeat import LeaseData
+
+        metrics = request.metrics
+        values = {
+            "cpu": metrics.cpu,
+            "memory": metrics.memory,
+            "disk": metrics.disk,
+            "running_tasks": metrics.running_tasks,
+            "max_concurrent_tasks": metrics.max_concurrent_tasks,
+        }
+        lease_data = LeaseData(
+            worker_id=worker_id,
+            status="online",
+            cpu=metrics.cpu,
+            memory=metrics.memory,
+            disk=metrics.disk,
+            running_tasks=metrics.running_tasks,
+            max_concurrent_tasks=metrics.max_concurrent_tasks,
+        )
+        return values, lease_data
+
+    async def _persist_lease_heartbeat(self, lease_data: Any) -> None:
+        if lease_data is None:
+            return
+        try:
+            await self._lease_handler.handle(lease_data)
+        except Exception as exc:
+            logger.warning(f"Lease 写 Redis 心跳 Hash 失败: {exc}")
 
     # =========================================================================
     # CancelTask / UpdateConfig - 推到 control stream
@@ -356,224 +531,283 @@ class GatewayControlService(ControlServiceServicer):
         if not worker_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空")
             return
-
+        await self._require_current_lease(context, worker_id, request.lease_id)
         redis = await get_redis_client()
         if redis is None:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "redis unavailable")
             return
 
-        group = control_group()
-        streams = [control_stream(worker_id), control_global_stream()]
-        for stream_key in streams:
-            await self._ensure_control_group(redis, stream_key, group)
-
-        consumer = worker_id
+        channels = (
+            _ControlChannel(control_stream(worker_id), control_group()),
+            _ControlChannel(control_global_stream(), control_global_group(worker_id)),
+        )
+        for channel in channels:
+            await self._ensure_control_group(redis, channel.stream_key, channel.group)
+        await context.send_initial_metadata(())
+        session = _ControlWatchSession(
+            context=context,
+            worker_id=worker_id,
+            lease_id=request.lease_id,
+            consumer=worker_id,
+            channels=channels,
+        )
         logger.info(f"WatchControl 已建立: worker_id={worker_id}")
-
-        # P1-16: 先排空该 consumer 的 PEL —— worker 断线重连时,gateway 上一次
-        # XREADGROUP 已经把 cancel/kill/config_update 交付到该 consumer 名下,
-        # 但 worker 掉线之前没来得及回 AckControl,消息挂在 PEL。旧实现只读
-        # ">"(新消息),PEL 里的孤儿事件永远不会重投,直到有另一个 consumer 用
-        # XAUTOCLAIM 抢过来 —— 但 gateway 侧并没有这样的 loop。
-        # 参考 handlers/poll.py:_drain_pending_streams 的做法,重连时先用 "0"
-        # 读一遍自己的 PEL,把未 ack 的消息重新投给 worker,幂等由 worker 侧
-        # (event_id 去重 / 任务级 SET NX) 保证。
-        # 注意:PEL 采用"一次性大批量读 + 立即 yield 完 + 翻转"策略,而不是像
-        # 主循环那样 count=1 轮询;否则未及时 ACK 时会重复读到同一批 PEL 记录,
-        # 无限制 yield 重复事件。
         try:
-            try:
-                pel_result = await redis.xreadgroup(
-                    groupname=group,
-                    consumername=consumer,
-                    streams=dict.fromkeys(streams, "0"),
-                    count=CONTROL_STREAM_MAXLEN,
-                    block=0,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                raise RuntimeError(f"WatchControl PEL 排空失败: worker={worker_id}") from exc
-
-            if pel_result:
-                pel_total = 0
-                for stream_data in pel_result:
-                    stream_key = stream_data[0]
-                    if isinstance(stream_key, bytes):
-                        stream_key = stream_key.decode()
-                    messages = stream_data[1]
-                    for msg_id, data in messages:
-                        if isinstance(msg_id, bytes):
-                            msg_id = msg_id.decode()
-                        pel_total += 1
-                        event = self._build_control_event(
-                            stream_key=stream_key,
-                            msg_id=msg_id,
-                            data=data,
-                        )
-                        if event is None:
-                            # 回归修复(review): 毒消息(载荷解码失败 / 未知
-                            # control_type / 被旧版 MAXLEN 裁剪后残留在 PEL 的
-                            # 幽灵条目,其 data 为 None)必须 ack 丢弃。若像先前
-                            # 那样 raise,WatchControl 流断开 → worker 重连 →
-                            # PEL 排空再次读到同一条毒消息 → 再 raise,该 worker
-                            # (control:global 上则是全部 worker)的控制通道被
-                            # 永久钉死,cancel/kill 永远送不到。
-                            logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={msg_id}")
-                            with contextlib.suppress(Exception):
-                                await redis.xack(stream_key, group, msg_id)
-                            continue
-                        yield event
-                if pel_total:
-                    logger.info(f"WatchControl PEL 排空: worker_id={worker_id} replayed={pel_total}")
-
-            while True:
-                # 客户端取消即退出
-                if context.cancelled():
-                    break
-
-                try:
-                    result = await redis.xreadgroup(
-                        groupname=group,
-                        consumername=consumer,
-                        streams=dict.fromkeys(streams, ">"),
-                        count=1,
-                        block=CONTROL_POLL_BLOCK_MS,
-                    )
-                except asyncio.CancelledError:
-                    break
-                except Exception as exc:
-                    raise RuntimeError("WatchControl xreadgroup 失败") from exc
-
-                if not result:
-                    continue
-
-                for stream_data in result:
-                    stream_key = stream_data[0]
-                    if isinstance(stream_key, bytes):
-                        stream_key = stream_key.decode()
-                    messages = stream_data[1]
-                    for msg_id, data in messages:
-                        if isinstance(msg_id, bytes):
-                            msg_id = msg_id.decode()
-                        event = self._build_control_event(
-                            stream_key=stream_key,
-                            msg_id=msg_id,
-                            data=data,
-                        )
-                        if event is None:
-                            # 回归修复(review): 与 PEL 排空分支同理 —— 此处 raise
-                            # 会把毒消息留在 PEL,worker 重连后在 PEL 排空阶段
-                            # 无限重放,控制通道永久失效。ack 丢弃 + 继续。
-                            logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={msg_id}")
-                            with contextlib.suppress(Exception):
-                                await redis.xack(stream_key, group, msg_id)
-                            continue
-                        yield event
-
+            async for event in self._replay_pending_control(redis, session):
+                yield event
+            async for event in self._stream_new_control(redis, session):
+                yield event
         except asyncio.CancelledError:
             logger.info(f"WatchControl 被取消: worker_id={worker_id}")
             raise
         finally:
             logger.info(f"WatchControl 已断开: worker_id={worker_id}")
 
+    async def _replay_pending_control(
+        self,
+        redis,
+        session: _ControlWatchSession,
+    ) -> AsyncIterator[control_pb2.ControlEvent]:
+        replayed = 0
+        for channel in session.channels:
+            cursor = "0-0"
+            while True:
+                # 租约 fencing 统一收敛在 _decode_control_event（yield 前逐条校验），
+                # 此处不再重复检查，避免每条消息 3 次 Redis 往返。
+                try:
+                    result = await self._read_control_group(
+                        redis,
+                        session=session,
+                        channel=channel,
+                        cursor=cursor,
+                        count=CONTROL_STREAM_MAXLEN,
+                        block=0,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise RuntimeError(f"WatchControl PEL 排空失败: worker={session.worker_id}") from exc
+                messages = list(_stream_messages(result))
+                if not messages:
+                    break
+                for source_stream, message_id, data in messages:
+                    event = await self._decode_control_event(
+                        redis,
+                        session,
+                        stream_key=source_stream,
+                        message_id=message_id,
+                        data=data,
+                    )
+                    if event is not None:
+                        replayed += 1
+                        yield event
+                if len(messages) < CONTROL_STREAM_MAXLEN:
+                    break
+                cursor = messages[-1][1]
+        if replayed:
+            logger.info(f"WatchControl PEL 排空: worker_id={session.worker_id} replayed={replayed}")
+
+    async def _stream_new_control(
+        self,
+        redis,
+        session: _ControlWatchSession,
+    ) -> AsyncIterator[control_pb2.ControlEvent]:
+        block_ms = max(1, CONTROL_POLL_BLOCK_MS // len(session.channels))
+        while not session.context.cancelled():
+            # 每轮一次的廉价存活检查：租约失效时尽快中断空转长轮询。
+            # 逐条消息的 load-bearing fencing 在 _decode_control_event 内完成。
+            await self._require_current_lease(session.context, session.worker_id, session.lease_id)
+            for channel in session.channels:
+                try:
+                    result = await self._read_control_group(
+                        redis,
+                        session=session,
+                        channel=channel,
+                        cursor=">",
+                        count=1,
+                        block=block_ms,
+                    )
+                except asyncio.CancelledError:
+                    # C5：与 _replay_pending_control 一致，重新抛出取消而非吞掉，
+                    # 让外层 WatchControl 的 CancelledError 分支正确触发，保持
+                    # async 取消语义（不被伪装成干净 EOF）。
+                    raise
+                except Exception as exc:
+                    raise RuntimeError("WatchControl xreadgroup 失败") from exc
+                for stream_key, message_id, data in _stream_messages(result):
+                    event = await self._decode_control_event(
+                        redis,
+                        session,
+                        stream_key=stream_key,
+                        message_id=message_id,
+                        data=data,
+                    )
+                    if event is not None:
+                        yield event
+
+    async def _decode_control_event(
+        self,
+        redis,
+        session: _ControlWatchSession,
+        *,
+        stream_key: str,
+        message_id: str,
+        data: dict,
+    ) -> control_pb2.ControlEvent | None:
+        # 唯一的 per-message 租约 fencing 点：读取之后、投递给 Worker 之前。
+        # replay / 新消息两条路径都经过这里，勿在上游循环重复检查。
+        await self._require_current_lease(session.context, session.worker_id, session.lease_id)
+        try:
+            event = self._build_control_event(stream_key=stream_key, msg_id=message_id, data=data)
+        except Exception:
+            logger.exception(
+                "control event 构建失败，按毒消息丢弃: stream={} msg_id={}",
+                stream_key,
+                message_id,
+            )
+            event = None
+        if event is not None:
+            recovered = await self._settle_recovered_control(
+                redis,
+                session,
+                stream_key=stream_key,
+                message_id=message_id,
+                data=data,
+            )
+            if recovered:
+                return None
+            expired = await self._settle_expired_runtime_control(
+                redis,
+                session,
+                stream_key=stream_key,
+                message_id=message_id,
+                event=event,
+            )
+            if expired:
+                return None
+            return event
+        logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={message_id}")
+        group = _control_group_for_stream(stream_key, session.worker_id)
+        try:
+            await redis.xack(stream_key, group, message_id)
+        except Exception:
+            logger.exception(
+                "毒 control event ACK 失败: stream={} msg_id={}",
+                stream_key,
+                message_id,
+            )
+            raise
+        return None
+
+    async def _settle_recovered_control(
+        self,
+        redis,
+        session: _ControlWatchSession,
+        *,
+        stream_key: str,
+        message_id: str,
+        data: dict,
+    ) -> bool:
+        recovered = await recover_committed_runtime_result(
+            redis,
+            event_id=f"{stream_key}|{message_id}",
+            worker_id=session.worker_id,
+            message_id=message_id,
+            raw_event=data,
+        )
+        if not recovered:
+            return False
+        group = _control_group_for_stream(stream_key, session.worker_id)
+        await redis.xack(stream_key, group, message_id)
+        await _trim_settled_control(redis, stream_key, message_id, group=group)
+        logger.info(
+            "恢复已提交的 runtime control: worker={} stream={} msg_id={}",
+            session.worker_id,
+            stream_key,
+            message_id,
+        )
+        return True
+
+    async def _settle_expired_runtime_control(
+        self,
+        redis,
+        session: _ControlWatchSession,
+        *,
+        stream_key: str,
+        message_id: str,
+        event: control_pb2.ControlEvent,
+    ) -> bool:
+        return await settle_expired_runtime_control(
+            redis,
+            worker_id=session.worker_id,
+            stream_key=stream_key,
+            message_id=message_id,
+            event=event,
+            group=_control_group_for_stream(stream_key, session.worker_id),
+            trim=_trim_settled_control,
+        )
+
     def _build_control_event(
         self,
         stream_key: str,
         msg_id: str,
+        *,
         data: dict,
     ) -> control_pb2.ControlEvent | None:
-        """把 Stream 一条消息封装成 ``ControlEvent``。
-
-        P1-16: event_id 使用 ``f"{stream_key}|{msg_id}"`` 可自解释格式。
-        AckControl 直接解析,避免进程内 map 在多 gateway 副本 / 重启后失效。
-        stream_key 形如 ``control:{worker_id}`` / ``control:global``,worker 侧
-        本就知道自己的 worker_id,不构成新的信息泄露。
-        """
+        """Decode one Redis control entry and dispatch to its typed builder."""
         try:
             decoded = decode_stream_payload(data)
         except Exception as exc:
             logger.exception(f"control stream payload 解码失败: {exc}")
             return None
-
         event_id = f"{stream_key}|{msg_id}"
         control_type = decoded.get("control_type", "")
-
-        if control_type in ("cancel", "kill"):
-            return control_pb2.ControlEvent(
-                event_id=event_id,
-                task_cancel=control_pb2.TaskCancel(
-                    task_id=str(decoded.get("task_id", "")),
-                    run_id=str(decoded.get("run_id", "")),
-                    reason=str(decoded.get("reason", "")),
-                ),
-            )
-
-        if control_type == "config_update":
-            config = decoded.get("config") or {}
-            if not isinstance(config, dict):
-                config = {}
-            return control_pb2.ControlEvent(
-                event_id=event_id,
-                config_update=control_pb2.ConfigUpdate(
-                    config={str(k): str(v) for k, v in config.items()},
-                ),
-            )
-
-        if control_type == "runtime_manage":
-            params: dict[str, str] = {}
-            reply_stream = decoded.get("reply_stream")
-            if reply_stream:
-                params["reply_stream"] = str(reply_stream)
-
-            # 把旧 payload_json 折叠成 GenericAction.args（string->string）
-            payload_raw = decoded.get("payload")
-            args: dict[str, str] = {}
-            if isinstance(payload_raw, dict):
-                for k, v in payload_raw.items():
-                    if v is None:
-                        args[str(k)] = ""
-                    elif isinstance(v, (str, int, float, bool)):
-                        args[str(k)] = str(v)
-                    else:
-                        # 嵌套结构降级为 JSON 字符串放进 args
-                        try:
-                            import json
-
-                            args[str(k)] = json.dumps(v, ensure_ascii=False)
-                        except Exception:
-                            args[str(k)] = repr(v)
-
-            runtime_control = control_pb2.RuntimeControl(
-                request_id=str(decoded.get("request_id", "")),
-                action=str(decoded.get("action", "")),
-                params=params,
-                action_typed=control_pb2.RuntimeAction(
-                    generic=control_pb2.GenericAction(
-                        name=str(decoded.get("action", "")),
-                        args=args,
-                    ),
-                ),
-            )
-            return control_pb2.ControlEvent(
-                event_id=event_id,
-                runtime_control=runtime_control,
-            )
-
-        if control_type == "ping":
-            now = time.time()
-            return control_pb2.ControlEvent(
-                event_id=event_id,
-                ping=control_pb2.Ping(
-                    timestamp=Timestamp(
-                        seconds=int(now),
-                        nanos=int((now - int(now)) * 1e9),
-                    ),
-                ),
-            )
-
+        builder = self._control_event_builders().get(control_type)
+        if builder is not None:
+            return builder(event_id=event_id, stream_key=stream_key, msg_id=msg_id, decoded=decoded)
         logger.warning(f"未识别的 control_type: stream={stream_key} msg_id={msg_id} control_type={control_type}")
         return None
+
+    def _control_event_builders(self) -> dict[str, Any]:
+        return {
+            "cancel": self._build_task_cancel_event,
+            "kill": self._build_task_cancel_event,
+            "config_update": self._build_config_update_event,
+            "runtime_manage": self._build_runtime_control_event,
+            "ping": self._build_ping_event,
+        }
+
+    def _build_task_cancel_event(self, *, event_id: str, decoded: dict, **_kwargs) -> control_pb2.ControlEvent:
+        return control_pb2.ControlEvent(
+            event_id=event_id,
+            task_cancel=control_pb2.TaskCancel(
+                task_id=str(decoded.get("task_id", "")),
+                run_id=str(decoded.get("run_id", "")),
+                reason=str(decoded.get("reason", "")),
+            ),
+        )
+
+    def _build_config_update_event(self, *, event_id: str, decoded: dict, **_kwargs) -> control_pb2.ControlEvent:
+        config = decoded.get("config") or {}
+        if not isinstance(config, dict):
+            config = {}
+        return control_pb2.ControlEvent(
+            event_id=event_id,
+            config_update=control_pb2.ConfigUpdate(config={str(k): str(v) for k, v in config.items()}),
+        )
+
+    def _build_runtime_control_event(self, **kwargs) -> control_pb2.ControlEvent | None:
+        return build_runtime_control_event(**kwargs)
+
+    @staticmethod
+    def _build_ping_event(*, event_id: str, **_kwargs) -> control_pb2.ControlEvent:
+        now = time.time()
+        return control_pb2.ControlEvent(
+            event_id=event_id,
+            ping=control_pb2.Ping(
+                timestamp=Timestamp(seconds=int(now), nanos=int((now - int(now)) * 1e9)),
+            ),
+        )
 
     async def AckControl(
         self,
@@ -581,61 +815,79 @@ class GatewayControlService(ControlServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.AckControlResponse:
         worker_id = await require_authenticated_worker(context, request.worker_id)
+        await self._require_current_lease(context, worker_id, request.lease_id)
         event_id = request.event_id
-        if not event_id:
-            return control_pb2.AckControlResponse(received=False)
-
-        # P1-16: event_id 是 f"{stream_key}|{msg_id}" 格式,直接解析,
-        # 无进程内 map -> 多 gateway 副本 / 重启后依然可以 ACK。
-        if "|" not in event_id:
-            logger.warning(f"AckControl 未知格式 event_id: {event_id}")
-            return control_pb2.AckControlResponse(received=False)
-        stream_key, msg_id = event_id.split("|", 1)
-        if not stream_key or not msg_id:
-            logger.warning(f"AckControl event_id 缺失字段: {event_id}")
-            return control_pb2.AckControlResponse(received=False)
-        allowed_streams = {
-            control_stream(worker_id),
-            control_global_stream(),
-        }
-        if stream_key not in allowed_streams:
-            await context.abort(
-                grpc.StatusCode.PERMISSION_DENIED,
-                "control stream does not belong to authenticated worker",
-            )
-            return control_pb2.AckControlResponse(received=False)
-
         try:
+            stream_key, msg_id = _parse_control_event_id(event_id, worker_id)
             redis = await get_redis_client()
             if redis is None:
-                return control_pb2.AckControlResponse(received=False)
-            acked = await redis.xack(stream_key, control_group(), msg_id)
-            received = int(acked or 0) > 0
+                raise RuntimeError("Redis unavailable")
+            group = _control_group_for_stream(stream_key, worker_id)
+            received = await _settle_control_ack(
+                redis,
+                event_id=event_id,
+                stream_key=stream_key,
+                message_id=msg_id,
+                worker_id=worker_id,
+                group=group,
+                request=request,
+            )
             if received:
-                try:
-                    await trim_acknowledged_stream(
-                        redis,
-                        stream_key,
-                        control_group(),
-                    )
-                except Exception:
-                    logger.exception(
-                        "AckControl 后裁剪失败: stream={} msg_id={}",
-                        stream_key,
-                        msg_id,
-                    )
+                await _trim_settled_control(redis, stream_key, msg_id, group=group)
             if not received:
                 logger.warning(f"AckControl 未命中: stream={stream_key} msg_id={msg_id}")
             if not request.success and request.error:
                 logger.warning(f"Worker 上报控制事件执行失败: event_id={event_id} error={request.error}")
             return control_pb2.AckControlResponse(received=received)
+        except PermissionError as exc:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
+            return control_pb2.AckControlResponse(received=False)
+        except LeaseConflictError as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return control_pb2.AckControlResponse(received=False)
+        except ValueError as exc:
+            logger.warning("AckControl 请求无效: worker={} event={} error={}", worker_id, event_id, exc)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            return control_pb2.AckControlResponse(received=False)
         except Exception as exc:
             logger.exception(f"AckControl 异常: {exc}")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "control settlement unavailable")
             return control_pb2.AckControlResponse(received=False)
 
     # =========================================================================
     # 内部工具
     # =========================================================================
+
+    async def _read_control_group(
+        self,
+        redis,
+        *,
+        session: _ControlWatchSession,
+        channel: _ControlChannel,
+        cursor: str,
+        count: int,
+        block: int,
+    ):
+        try:
+            return await redis.xreadgroup(
+                groupname=channel.group,
+                consumername=session.consumer,
+                streams={channel.stream_key: cursor},
+                count=count,
+                block=block,
+            )
+        except Exception as exc:
+            if "NOGROUP" not in str(exc).upper():
+                raise
+            self._initialized_control_groups.discard((channel.stream_key, channel.group))
+            await self._ensure_control_group(redis, channel.stream_key, channel.group)
+            return await redis.xreadgroup(
+                groupname=channel.group,
+                consumername=session.consumer,
+                streams={channel.stream_key: cursor},
+                count=count,
+                block=block,
+            )
 
     async def _ensure_control_group(self, redis, stream_key: str, group: str) -> None:
         key = (stream_key, group)

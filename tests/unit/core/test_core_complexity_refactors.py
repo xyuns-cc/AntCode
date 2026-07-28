@@ -7,8 +7,8 @@ from antcode_core.application.services.crawl.test_service import CrawlTestServic
 from antcode_core.application.services.system_config.system_config_service import (
     SystemConfigService,
 )
-from antcode_core.application.services.workers.worker_heartbeat_service import (
-    WorkerHeartbeatService,
+from antcode_core.application.services.workers.worker_heartbeat_persistence import (
+    build_worker_heartbeat_update,
 )
 from antcode_core.application.services.workers.worker_stats_service import WorkerStatsService
 
@@ -53,19 +53,19 @@ def test_system_config_parser_exposes_parse_error():
 
 
 def test_worker_heartbeat_metrics_merge_without_mutating_input():
-    worker = SimpleNamespace(metrics={"cpu": 10})
     metrics = {"memory": 20}
 
-    heartbeat_metrics = WorkerHeartbeatService._apply_heartbeat_metrics(
-        worker,
-        metrics,
-        {"request_count": 3},
+    update = build_worker_heartbeat_update(
+        heartbeat_at=datetime.now(),
+        status="online",
+        metrics=metrics,
+        spider_stats={"request_count": 3},
+        system_info={},
+        capabilities=None,
     )
 
     assert metrics == {"memory": 20}
-    assert heartbeat_metrics["spider_stats"] == {"request_count": 3}
-    assert worker.metrics == {
-        "cpu": 10,
+    assert update.metrics == {
         "memory": 20,
         "spider_stats": {"request_count": 3},
     }

@@ -52,11 +52,13 @@ class _GapPassBudget:
     frame_bytes: int = 0
 
     def would_exceed(self, frame_size: int) -> bool:
-        """预检:再收一帧是否会超预算(不修改状态,让 caller 先判再决定 yield)。
+        """预检下一帧；首帧可独占本轮，保证 keyset 游标始终向前推进。
 
-        判定采用 `>` 而非 `>=` 使得恰好达到 budget 边界的这一帧仍能通过;
-        第一次真正超过才截断, 与原 (records after → judges) 语义等价。
+        单条日志在写入边界已有独立上限。若首帧编码后大于本轮累计预算，
+        仍发送该帧并在下一帧前截断；否则永远无法越过这一 storage_id。
         """
+        if self.rows == 0:
+            return False
         return (self.rows + 1 > GAP_MAX_LINES_PER_PASS) or (self.frame_bytes + frame_size > GAP_MAX_BYTES_PER_PASS)
 
     def record(self, frame_size: int) -> None:

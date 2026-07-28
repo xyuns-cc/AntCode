@@ -4,8 +4,7 @@ gRPC 服务器模块
 提供 Gateway 端 gRPC 服务器实现，支持：
 - TLS/mTLS 安全连接
 - 认证拦截器
-- 限流拦截器
-- 优雅关闭
+- 限流拦截器和优雅关闭
 """
 
 import asyncio
@@ -19,6 +18,7 @@ from grpc import aio as grpc_aio
 from loguru import logger
 
 from antcode_gateway.config import GatewayConfig, gateway_config
+from antcode_gateway.network import grpc_listen_address
 
 # P1-21: 引入标准 gRPC 健康检查(grpc.health.v1)——Dockerfile 里带的
 # grpc_health_probe 需要服务端真的注册了 HealthServicer 才能拿到
@@ -175,7 +175,7 @@ class GrpcServer:
             logger.error("创建 TLS 凭证失败")
             return 0
         assert self._server is not None
-        listen_addr = f"[::]:{self.config.port}"
+        listen_addr = grpc_listen_address(self.config.host, self.config.port)
         bound_port = self._server.add_secure_port(listen_addr, credentials)
         mode = "mTLS" if self.config.mtls_enabled else "TLS"
         logger.info(f"gRPC 服务器启动于 {listen_addr} ({mode})")
@@ -186,7 +186,7 @@ class GrpcServer:
             logger.error("gRPC 明文端口启动被拒绝：AUTH_ENABLED=true 时凭证会明文传输")
             return 0
         assert self._server is not None
-        listen_addr = f"[::]:{self.config.port}"
+        listen_addr = grpc_listen_address(self.config.host, self.config.port)
         bound_port = self._server.add_insecure_port(listen_addr)
         logger.warning("gRPC 服务器启动于 %s (insecure，仅限本地/测试)", listen_addr)
         return bound_port

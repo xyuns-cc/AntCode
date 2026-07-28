@@ -70,35 +70,38 @@ class ArtifactCleanupService:
                 logger.error("artifact 清理任务异常: {}", exc)
             await asyncio.sleep(self._interval_hours * 3600)
 
+    # P1-13: 只要 run_source_snapshots 里有引用（无论 snapshot 创建时间），
+    # 都不能删对应的 artifact，否则历史 run 的源码快照永久失效。
+    # P1-DB-01: chunks 与 metadata 必须在**同一条语句**里按同一候选集删除。
+    # 此前两条 DELETE 各自求值子查询：中间提交的新 snapshot 会让第一条删了
+    # chunks、第二条保留 metadata —— 留下"有 metadata 无 chunks"的损坏
+    # artifact。CTE 单语句单快照，候选集只计算一次，锁定后成对删除。
+    _CLEANUP_SQL = (
+        "WITH doomed AS ("
+        "  SELECT id FROM source_artifacts "
+        "   WHERE created_at < $1 "
+        "     AND id NOT IN (SELECT DISTINCT artifact_id FROM run_source_snapshots) "
+        "   FOR UPDATE"
+        "), deleted_chunks AS ("
+        "  DELETE FROM source_artifact_chunks "
+        "   WHERE artifact_id IN (SELECT id FROM doomed) RETURNING id"
+        "), deleted_artifacts AS ("
+        "  DELETE FROM source_artifacts "
+        "   WHERE id IN (SELECT id FROM doomed) RETURNING id"
+        ") "
+        "SELECT (SELECT COUNT(*) FROM deleted_chunks) AS chunks, "
+        "       (SELECT COUNT(*) FROM deleted_artifacts) AS artifacts"
+    )
+
     async def _do_cleanup(self) -> ArtifactCleanupResult:
         result = ArtifactCleanupResult()
         cutoff = datetime.now(UTC) - timedelta(days=self._retention_days)
         result.cutoff = cutoff
         async with in_transaction("default") as conn:
-            # P1-13: 删掉 "AND created_at >= $1" — 只要 run_source_snapshots 里有引用,
-            # 不管 snapshot 创建时间早于还是晚于 cutoff,都不能删对应的 artifact,
-            # 否则历史 run 的源码快照会永久失效(读时抛 FileNotFoundError)。
-            chunk_sql = (
-                "DELETE FROM source_artifact_chunks "
-                "WHERE artifact_id IN ("
-                "  SELECT id FROM source_artifacts "
-                "   WHERE created_at < $1 "
-                "     AND id NOT IN ("
-                "       SELECT DISTINCT artifact_id FROM run_source_snapshots"
-                "     )"
-                ")"
-            )
-            chunks_deleted, _ = await conn.execute_query(chunk_sql, [cutoff])
-            artifact_sql = (
-                "DELETE FROM source_artifacts "
-                "WHERE created_at < $1 "
-                "  AND id NOT IN ("
-                "    SELECT DISTINCT artifact_id FROM run_source_snapshots"
-                "  )"
-            )
-            artifacts_deleted, _ = await conn.execute_query(artifact_sql, [cutoff])
-        result.chunks_deleted = int(chunks_deleted or 0)
-        result.artifacts_deleted = int(artifacts_deleted or 0)
+            _, rows = await conn.execute_query(self._CLEANUP_SQL, [cutoff])
+        counts = rows[0] if rows else {}
+        result.chunks_deleted = int(counts.get("chunks") or 0)
+        result.artifacts_deleted = int(counts.get("artifacts") or 0)
         logger.info(
             "artifact 清理完成: cutoff={} artifacts={} chunks={}",
             cutoff.isoformat(),

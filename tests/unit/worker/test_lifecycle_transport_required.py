@@ -27,7 +27,7 @@ async def test_worker_startup_fails_when_transport_cannot_start():
         runtime_manager=runtime_manager,
         executor=None,
         observability_server=None,
-        heartbeat_reporter=None,
+        heartbeat_reporter=SimpleNamespace(),
         engine=None,
     )
 

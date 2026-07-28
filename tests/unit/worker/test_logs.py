@@ -89,6 +89,27 @@ async def test_batch_sender_keeps_failed_batch_queued():
 
 
 @pytest.mark.asyncio
+async def test_batch_sender_does_not_retry_permanent_log_error():
+    transport = ConnectedTransport()
+    transport.send_log_batch.side_effect = ValueError("LogEntry content bytes 超限")
+    sender = BatchSender(
+        run_id="run-1",
+        transport=transport,
+        config=BatchConfig(batch_size=1, max_retries=3),
+    )
+    sender._running = True
+    await sender.write(LogEntry(run_id="run-1", stream=LogStream.STDOUT, content="你", seq=1))
+
+    with pytest.raises(ValueError, match="LogEntry content bytes 超限"):
+        await sender.flush()
+    with pytest.raises(ValueError, match="LogEntry content bytes 超限"):
+        await sender.stop()
+
+    assert transport.send_log_batch.await_count == 1
+    assert sender.queue_size == 1
+
+
+@pytest.mark.asyncio
 async def test_log_manager_stop_exposes_background_dispatch_failure():
     transport = ConnectedTransport(send_log=False)
     manager = LogManager(

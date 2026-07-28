@@ -20,11 +20,16 @@ GRANT ALL PRIVILEGES ON DATABASE "AntCode" TO antcode;
 `.env` 里至少配好：
 
 ```env
+# 不启用 TLS 的本机开发连接
 DATABASE_URL=postgresql://antcode:change-me@127.0.0.1:5432/AntCode
+# 生产 TLS 示例（CA 路径必须对应用进程/容器可见）
+# DATABASE_URL=postgresql://antcode:change-me@db:5432/AntCode?sslmode=verify-full&sslrootcert=/etc/antcode/tls/postgres-ca.crt
 REDIS_URL=redis://:redis-pass@127.0.0.1:6379/0
 ENCRYPTION_KEY=<openssl rand -base64 48>
 ENCRYPTION_KEY_SALT=<openssl rand -hex 16>
+# 二选一：inline 或文件。生产 Compose 使用文件挂载。
 JWT_SECRET=<openssl rand -base64 48>
+# JWT_SECRET_FILE=/run/secrets/jwt_secret
 DEFAULT_ADMIN_USERNAME=admin
 DEFAULT_ADMIN_PASSWORD=<强口令>
 ```
@@ -60,18 +65,23 @@ psql "$DATABASE_URL" -f migrations/models/20260713_add_worker_install_key_allowe
 uv run python scripts/migrate_worker_install_keys.py
 ```
 
-该脚本会执行两步迁移：
+该脚本必须在所有 AntCode Web API、Gateway、Master 与 Worker 进程停止后执行，
+避免旧进程在迁移期间继续读写明文键。它会按以下顺序执行两步迁移：
 
-1. 先把已过期的 `pending` Key 标为 `expired`；再从 Redis meta 恢复仍有效
+1. 先用 `SCAN + TYPE/DUMP/PTTL/RESTORE/DEL` 把 Redis 中旧的
+   `meta/claim/nonce/fail/block` 明文键搬到固定长度哈希键。该流程不使用跨 slot
+   的 `RENAME/RENAMENX`，兼容 Redis Cluster；写目标时会扣除快照后的迁移耗时，
+   保留永久键语义，并且不会延长或复活已经过期的键；
+2. Redis 全部收敛后，把已过期的 `pending` Key 标为 `expired`；再从 Redis meta 恢复仍有效
    Key 的来源限制，仅接受 IP/CIDR，并与 Key 哈希一起在单个数据库事务中
-   写入 PostgreSQL；
-2. 用 `SCAN + RENAMENX` 把 Redis 中旧的 `meta/claim/nonce/fail/block` 明文键
-   改为固定长度哈希键，并保留原 TTL。
+   写入 PostgreSQL。
 
 已是 64 位 SHA-256 且已具备权威来源信息的数据库记录会跳过；已迁移的
 Redis 键也不会再次改名，因此可以安全重跑。数据库迁移失败会整体回滚；
-Redis 迁移遇到目标冲突会显式停止，
-修复冲突后重跑即可。脚本只扫描当前 `REDIS_NAMESPACE`，升级时必须保持它与
+此时 Redis 已完成的搬迁会被保留，重跑时数据库仍能从摘要 meta 键恢复来源。
+若脚本在 Redis `RESTORE` 后、删除源键前中断，重跑会校验两端 DUMP 内容：
+内容相同则按源键剩余 TTL 收敛并删除源键，内容不同则显式报冲突且保留两端，
+不会静默覆盖。修复冲突后重跑即可。脚本只扫描当前 `REDIS_NAMESPACE`，升级时必须保持它与
 旧部署一致。不要在同一数据库或 Redis 上并发执行多个迁移进程。
 
 若某个 pending Key 的 Redis meta 已丢失，或历史来源配置是 hostname，脚本
@@ -84,36 +94,42 @@ Redis 迁移遇到目标冲突会显式停止，
 老库（非全新部署）跑新代码时，`generate_schemas(safe=True)` 只补缺失的**表**、
 不给已存在的表加列。`init_db.py` 的 `_upgrade_legacy_schema` 已能幂等自愈**新增列**
 （task_executions.lease_id / scheduler_outbox.consume_* /
-worker_install_keys.registration_*/recovery_*/allowed_source），启动即补；
+worker_install_keys.registration_*/recovery_*/allowed_source，以及 workers 的
+`api_key_previous_expires_at` 等凭据列），启动即补；
 但**索引与数据回填**仍需按序手工执行下列迁移（升级新版 Web API 前）：
 
 ```bash
-# 1. task_executions 租约列 + 并发建索引（CONCURRENTLY，不在事务内）
+# 1. Worker 凭据 hash、轮换宽限期列与查询索引；随后强制回填并删除明文列
+psql "$DATABASE_URL" -f migrations/models/20260710_secure_worker_credentials.sql
+uv run python scripts/migrate_worker_credentials.py
+# 2. task_executions 租约列 + 并发建索引（CONCURRENTLY，不在事务内）
 psql "$DATABASE_URL" -f migrations/models/20260713_add_task_run_lease_id.sql
-# 2. scheduler_outbox 消费列 + 并发建索引
+# 3. scheduler_outbox 消费列 + 并发建索引
 psql "$DATABASE_URL" -f migrations/models/20260713_add_scheduler_outbox_consumption.sql
-# 3. worker_install_keys.allowed_source（来源限制列）
+# 4. worker_install_keys.allowed_source（来源限制列）
 psql "$DATABASE_URL" -f migrations/models/20260713_add_worker_install_key_allowed_source.sql
-# 4. task_logs SSE 回放游标索引（CONCURRENTLY，不在事务内）
+# 5. task_logs SSE 回放游标索引（CONCURRENTLY，不在事务内）
 psql "$DATABASE_URL" -f migrations/models/20260717_add_task_logs_run_id_id_index.sql
-# 5. worker_install_keys 注册回收列 + 唯一/部分索引
+# 6. worker_install_keys 注册回收列 + 唯一/部分索引
 psql "$DATABASE_URL" -f migrations/models/20260717_add_worker_registration_recovery.sql
-# 6. scheduler_outbox.consume_attempts（消费侧重投计数列，ORM 强依赖；纯加列事务迁移）
+# 7. scheduler_outbox.consume_attempts（消费侧重投计数列，ORM 强依赖；纯加列事务迁移）
 psql "$DATABASE_URL" -f migrations/models/20260720_add_scheduler_outbox_consume_attempts.sql
-# 7. task_executions.lease_gen（P1-GW-04：Lease 代际单调 CAS 列，纯加列事务迁移）
+# 8. task_executions.lease_gen（P1-GW-04：Lease 代际单调 CAS 列，纯加列事务迁移）
 psql "$DATABASE_URL" -f migrations/models/20260722_add_task_run_lease_gen.sql
+# 9. TaskRun Lease 代际历史与日志 backlog cutoff（纯建表事务迁移）
+psql "$DATABASE_URL" -f migrations/models/20260727_add_task_run_lease_generations.sql
 
-# 8. **必须**：回填存量安装 Key 的来源限制与哈希（配合第 3、5 步）
+# 10. **必须**：回填存量安装 Key 的来源限制与哈希（配合第 4、6 步）
 uv run python scripts/migrate_worker_install_keys.py
 ```
 
 要点：
 
-- 第 1、2、4 步含 `CREATE INDEX CONCURRENTLY`，`psql -f` 会在事务块外以
+- 第 2、3、5 步含 `CREATE INDEX CONCURRENTLY`，`psql -f` 会在事务块外以
   autocommit 执行；不要手工包进 `BEGIN/COMMIT`。CONCURRENTLY 中途被打断可能残留
   永久 INVALID 索引，重跑前先按 `pg_index.indisvalid = false` 查出同名索引
   `DROP INDEX CONCURRENTLY` 再重跑（各 SQL 文件头注释已给出查询）。
-- 第 7 步的 `scripts/migrate_worker_install_keys.py` 是 allowed_source 与注册回收列
+- 第 10 步的 `scripts/migrate_worker_install_keys.py` 是 allowed_source 与注册回收列
   的**强制**配套回填脚本：仅加列不回填，存量 Key 缺来源限制会被新运行时拒绝。
   幂等可重跑，细节见上一节「升级旧版 Worker 安装 Key」。
 - 若只跑 `init_db.py` 而不执行上面的 SQL：列会被自愈，`idx_task_logs_run_id_id`
@@ -177,6 +193,9 @@ uv run aerich upgrade
   ```
 - **备份**：至少 `pg_dump` 每日 cron + 保留 7 天。生产强烈建议开 WAL 归档。
 - **连接数**：`.env` 里 `DB_POOL_MAX_WEB_API` / `DB_POOL_MAX_MASTER` / `DB_POOL_MAX_WORKER` 分别控制。默认合计约 60-80 个连接。PG `max_connections` 至少留 2x 冗余。
+- **数据库 TLS**：`sslmode` 只接受 PostgreSQL 标准值；`verify-ca` / `verify-full`
+  必须在同一 `DATABASE_URL` 中显式配置 `sslrootcert`。应用启动时会加载 CA，
+  路径不存在、CA 无法解析、重复参数或互相冲突的组合都会立即失败，不能静默降级。
 - **保留策略**：`task_logs` / `audit_logs` / `worker_events` 由 master 的 `log_cleanup_service` 定期清理，参见 `.env` 里 `TASK_LOG_RETENTION_DAYS` / `AUDIT_LOG_RETENTION_DAYS` / `WORKER_EVENT_RETENTION_DAYS`。
 
 ## 常见问题

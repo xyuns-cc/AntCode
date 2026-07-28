@@ -16,8 +16,13 @@ from datetime import datetime
 import pytest
 from loguru import logger
 
-# 从环境变量或默认值获取 Redis URL
-REDIS_URL = os.getenv("REDIS_URL", "redis://[REDACTED]@[REDACTED]:6379/0")
+from tests.integration.worker import direct_transport_support as direct_support
+
+REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
+REDIS_REQUIRED = pytest.mark.skipif(
+    not REDIS_URL,
+    reason="ANTCODE_INTEGRATION_REDIS_URL is required for Redis integration tests",
+)
 
 
 @pytest.fixture
@@ -43,7 +48,14 @@ class TestDirectModeE2E:
     """Direct 模式 E2E 测试"""
 
     @pytest.mark.asyncio
-    async def test_task_dispatch_and_ack(self, unique_task_id, unique_worker_id):
+    @REDIS_REQUIRED
+    async def test_task_dispatch_and_ack(
+        self,
+        unique_task_id,
+        unique_worker_id,
+        *,
+        direct_transport_factory,
+    ):
         """
         测试任务分发和确认流程
 
@@ -56,28 +68,19 @@ class TestDirectModeE2E:
         from antcode_worker.transport import RedisTransport, ServerConfig
         from antcode_worker.transport.redis.keys import RedisKeys
 
-        # 创建 Redis 客户端用于模拟 Master 分发任务
         redis_client = aioredis.from_url(
             REDIS_URL,
             encoding="utf-8",
             decode_responses=True,
         )
 
-        # 创建 Transport
         config = ServerConfig(redis_url=REDIS_URL)
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
-        )
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id, config)
         keys = RedisKeys()
 
         try:
-            # 启动 Transport
-            started = await transport.start()
-            assert started, "Transport 启动失败"
+            await direct_support.activate_direct_transport(transport)
 
-            # 确保 consumer group 存在
             stream_key = keys.task_ready_stream(unique_worker_id)
             try:
                 await redis_client.xgroup_create(
@@ -98,8 +101,7 @@ class TestDirectModeE2E:
                 "priority": "5",
                 "timeout": "60",
                 "entry_point": "main.py",
-                "download_url": "",
-                "file_hash": "",
+                **direct_support.source_bundle_fields("c"),
             }
 
             msg_id = await redis_client.xadd(stream_key, task_data)
@@ -123,7 +125,7 @@ class TestDirectModeE2E:
             logger.info("[Test] ACK pending 已清空")
 
         finally:
-            await transport.stop()
+            await direct_support.stop_direct_transport(transport)
             # 清理测试数据
             try:
                 await redis_client.delete(stream_key)
@@ -132,18 +134,21 @@ class TestDirectModeE2E:
             await redis_client.aclose()
 
     @pytest.mark.asyncio
-    async def test_result_report_idempotent(
+    @REDIS_REQUIRED
+    async def test_result_report_at_least_once(
         self,
         unique_task_id,
         unique_execution_id,
         unique_worker_id,
+        *,
+        direct_transport_factory,
     ):
         """
-        测试结果上报幂等性
+        测试结果上报的 at-least-once 语义
 
         验证：
         1. 结果可以上报到 Redis
-        2. 多次上报同一结果不会产生重复
+        2. 重试会产生可由 Master 按 run_id 去重的重复帧
         """
         import redis.asyncio as aioredis
         from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
@@ -151,20 +156,15 @@ class TestDirectModeE2E:
 
         redis_client = aioredis.from_url(
             REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
+            decode_responses=False,
         )
 
         config = ServerConfig(redis_url=REDIS_URL)
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
-        )
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id, config)
         keys = RedisKeys()
 
         try:
-            await transport.start()
+            lease_id = await direct_support.activate_direct_transport(transport)
 
             # 创建结果
             result = TaskResult(
@@ -182,7 +182,7 @@ class TestDirectModeE2E:
             success1 = await transport.report_result(result)
             assert success1, "第一次上报失败"
 
-            # 第二次上报（幂等）
+            # 第二次上报（at-least-once 重试）
             success2 = await transport.report_result(result)
             assert success2, "第二次上报失败"
 
@@ -190,15 +190,15 @@ class TestDirectModeE2E:
             result_key = keys.task_result_stream()
             result_messages = await redis_client.xrevrange(result_key, "+", "-", count=100)
 
-            # 统计该 task_id 的结果数量
-            count = sum(1 for _, data in result_messages if data.get("task_id") == unique_task_id)
-            # 注意：当前实现每次都会写入新记录，这是 at-least-once 语义
-            # 真正的幂等需要在 Master 端通过 run_id 去重
-            assert count >= 1, "未找到结果记录"
-            logger.info(f"[Test] 结果记录数: {count}")
+            statuses = direct_support.decode_task_statuses(result_messages)
+            matching = [status for status in statuses if status.task_id == unique_task_id]
+            expected_retry_writes = 2
+            assert len(matching) == expected_retry_writes
+            assert all(status.run_id == unique_execution_id for status in matching)
+            assert all(status.data["lease_id"] == lease_id for status in matching)
 
         finally:
-            await transport.stop()
+            await direct_support.stop_direct_transport(transport)
             await redis_client.aclose()
 
     @pytest.mark.asyncio
@@ -282,11 +282,14 @@ class TestDirectModeE2E:
                 await executor.stop()
 
     @pytest.mark.asyncio
+    @REDIS_REQUIRED
     async def test_full_e2e_flow(
         self,
         unique_task_id,
         unique_execution_id,
         unique_worker_id,
+        *,
+        direct_transport_factory,
     ):
         """
         完整 E2E 流程测试
@@ -317,11 +320,7 @@ class TestDirectModeE2E:
         )
 
         config = ServerConfig(redis_url=REDIS_URL)
-        transport = RedisTransport(
-            redis_url=REDIS_URL,
-            worker_id=unique_worker_id,
-            config=config,
-        )
+        transport = direct_transport_factory(REDIS_URL, unique_worker_id, config)
 
         # 创建临时目录和脚本
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -337,7 +336,7 @@ class TestDirectModeE2E:
 
             try:
                 # 1. 启动 Transport
-                await transport.start()
+                await direct_support.activate_direct_transport(transport)
                 logger.info("[E2E] Transport 已启动")
 
                 # 确保 consumer group 存在
@@ -360,8 +359,7 @@ class TestDirectModeE2E:
                     "priority": "10",
                     "timeout": "60",
                     "entry_point": "main.py",
-                    "download_url": tmpdir,  # 使用临时目录作为项目路径
-                    "file_hash": "",
+                    **direct_support.source_bundle_fields("d"),
                 }
                 await redis_client.xadd(stream_key, task_data)
                 logger.info(f"[E2E] 任务已分发: {unique_task_id}")
@@ -426,7 +424,7 @@ class TestDirectModeE2E:
                 logger.info("[E2E] ✓ 完整 E2E 流程验证通过")
 
             finally:
-                await transport.stop()
+                await direct_support.stop_direct_transport(transport)
                 # 清理测试数据
                 try:
                     await redis_client.delete(stream_key)
@@ -435,6 +433,7 @@ class TestDirectModeE2E:
                 await redis_client.aclose()
 
     @pytest.mark.asyncio
+    @REDIS_REQUIRED
     async def test_receipt_ack_semantics(self, unique_task_id):
         """
         测试 receipt/ack 语义

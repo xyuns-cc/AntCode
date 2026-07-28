@@ -16,3 +16,10 @@ RULE_SANDBOX_ALLOW_NETWORK = "allow_network"
 def is_rule_env_allowed(key: str) -> bool:
     """只允许 Rule 所需的非敏感应用环境变量。"""
     return key in RULE_PLUGIN_ENV_VARS
+
+
+def filter_spider_control_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove control variables that must come from the trusted reporter."""
+    return {
+        key: value for key, value in env.items() if not key.startswith("ANTCODE_SPIDER_") or key in RULE_PLUGIN_ENV_VARS
+    }

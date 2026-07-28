@@ -9,6 +9,15 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from antcode_core.domain.schemas.worker_registration import (
+    WorkerInstallKeyRequest,
+    WorkerInstallKeyResponse,
+    WorkerRegisterByKeyRequest,
+    WorkerRegisterByKeyV2Request,
+    WorkerRegisterByKeyV2Response,
+    WorkerRegistrationAckRequest,
+)
+
 
 class WorkerCapabilities(BaseModel):
     """Worker 能力配置"""
@@ -87,7 +96,7 @@ class WorkerResponse(BaseModel):
     pythonVersion: str = Field("", description="Python 版本")
     machineArch: str = Field("", description="CPU 架构")
 
-    transportMode: str = Field("gateway", description="连接模式: direct/gateway")
+    transportMode: str | None = Field(None, description="连接模式: direct/gateway")
 
     capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
     metrics: WorkerMetrics = Field(default_factory=WorkerMetrics)
@@ -202,43 +211,16 @@ class WorkerRegisterResponse(BaseModel):
     secret_key: str = Field(..., description="密钥")
 
 
-class WorkerInstallKeyRequest(BaseModel):
-    """生成安装 Key 请求"""
-
-    os_type: str = Field(..., description="操作系统类型: linux/macos/windows")
-    allowed_source: str | None = Field(
-        default=None,
-        max_length=255,
-        description="可选来源绑定（IP/CIDR/主机名），为空则首次注册自动绑定",
-    )
-
-
-class WorkerInstallKeyResponse(BaseModel):
-    """安装 Key 响应"""
-
-    key: str = Field(..., description="安装Key")
-    os_type: str = Field(..., description="操作系统类型")
-    allowed_source: str | None = Field(default=None, description="来源绑定")
-    install_command: str = Field(..., description="安装命令")
-    expires_at: datetime = Field(..., description="过期时间")
-
-
-class WorkerRegisterByKeyRequest(BaseModel):
-    """使用 Key 注册 Worker 请求"""
-
-    key: str = Field(..., min_length=1, description="安装Key")
-    name: str = Field(..., min_length=1, max_length=100, description="Worker名称")
-    host: str = Field(..., min_length=1, max_length=255, description="主机地址")
-    port: int = Field(8001, ge=1, le=65535, description="端口")
-    region: str = Field("", max_length=50, description="区域")
-    client_timestamp: int = Field(..., description="客户端时间戳（秒）")
-    client_nonce: str = Field(..., min_length=8, max_length=64, description="客户端随机串")
-
-
 class WorkerRegisterDirectRequest(BaseModel):
     """Direct 模式注册请求"""
 
-    worker_id: str = Field(..., min_length=1, max_length=32, description="Worker ID")
+    worker_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        description="Worker ID",
+    )
     proof: str = Field(..., min_length=1, description="Direct 注册证明")
     name: str = Field("", max_length=100, description="Worker 名称")
     host: str = Field("", max_length=255, description="主机地址")
@@ -285,4 +267,7 @@ __all__ = [
     "WorkerInstallKeyRequest",
     "WorkerInstallKeyResponse",
     "WorkerRegisterByKeyRequest",
+    "WorkerRegisterByKeyV2Request",
+    "WorkerRegisterByKeyV2Response",
+    "WorkerRegistrationAckRequest",
 ]

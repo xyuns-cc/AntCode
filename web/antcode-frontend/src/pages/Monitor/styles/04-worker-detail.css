@@ -1,0 +1,130 @@
+/* 原有Worker卡片样式（用于Worker 详情） */
+
+.worker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-header {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-header {
+  border-bottom: 1px solid #434343;
+}
+
+.worker-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+/* 浅色主题标题 */
+body.light-theme .worker-header h3 {
+  color: rgba(0, 0, 0, 0.88);
+}
+
+/* 深色主题标题 */
+body.dark-theme .worker-header h3 {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.worker-version {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-version {
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-version {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.worker-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-label {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-label {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.task-indicators {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.indicator-success {
+  background-color: #52c41a;
+}
+
+.indicator-warning {
+  background-color: #faad14;
+}
+
+.indicator-error {
+  background-color: #ff4d4f;
+}
+
+.task-indicators .more {
+  font-size: 11px;
+  color: #888;
+  margin-left: 4px;
+}
+
+.worker-uptime {
+  margin-top: 8px;
+  padding-top: 8px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-uptime {
+  border-top: 1px solid #f0f0f0;
+  color: #888;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-uptime {
+  border-top: 1px solid #434343;
+  color: rgba(255, 255, 255, 0.45);
+}

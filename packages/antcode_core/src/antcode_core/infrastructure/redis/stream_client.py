@@ -25,6 +25,29 @@ from antcode_core.infrastructure.redis.client import get_redis_client
 # (约定俗成：Proto 序列化字节统一存到 'p' 字段，便于 worker/gateway 协同)
 PROTO_FIELD = b"p"
 
+_MOVE_PENDING_SCRIPT = """
+local pending = redis.call("XPENDING", KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
+if #pending == 0 then
+    return false
+end
+
+local xadd_args = {KEYS[2]}
+local maxlen = tonumber(ARGV[3])
+if maxlen and maxlen > 0 then
+    table.insert(xadd_args, "MAXLEN")
+    table.insert(xadd_args, "~")
+    table.insert(xadd_args, maxlen)
+end
+table.insert(xadd_args, "*")
+for index = 4, #ARGV do
+    table.insert(xadd_args, ARGV[index])
+end
+
+local new_id = redis.call("XADD", unpack(xadd_args))
+redis.call("XACK", KEYS[1], ARGV[1], ARGV[2])
+return new_id
+"""
+
 T = TypeVar("T")
 
 
@@ -860,6 +883,87 @@ class StreamClient:
             logger.error(f"XAUTOCLAIM 失败: {stream_key}, 错误: {e}")
             raise
 
+    async def move_pending(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        group_name: str,
+        msg_id: str,
+        data: dict,
+        maxlen: int | None = None,
+    ) -> str | None:
+        """写入目标 Stream 并 ACK 源 PEL 消息。
+
+        - 同 key（原地重入队）：单 key 必落同一 slot，走 Lua 原子路径。
+        - 跨 key（如死信迁移）：key 格式无 hash tag（不能改格式，会破坏
+          存量数据），Redis Cluster 下两个 key 可能落不同 slot，2-key
+          EVAL 会 CROSSSLOT。改用非 Lua 序列：先 XADD 目标、再 XACK+XDEL
+          源。at-least-once 语义——中途失败下次恢复会重做，最多产生重复
+          目标条目（死信场景可容忍）。
+        """
+        if not data:
+            raise ValueError("恢复消息数据不能为空")
+        if source_key == destination_key:
+            serialized = self._serialize_fields(data)
+            client = await self._get_client()
+            result = await client.eval(
+                _MOVE_PENDING_SCRIPT,
+                2,
+                source_key,
+                destination_key,
+                group_name,
+                msg_id,
+                maxlen or 0,
+                *serialized,
+            )
+            if not result:
+                return None
+            return result.decode("utf-8") if isinstance(result, bytes) else str(result)
+        return await self._move_pending_cross_key(
+            source_key,
+            destination_key,
+            group_name=group_name,
+            msg_id=msg_id,
+            data=data,
+            maxlen=maxlen,
+        )
+
+    async def _move_pending_cross_key(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        group_name: str,
+        msg_id: str,
+        data: dict,
+        maxlen: int | None = None,
+    ) -> str | None:
+        """集群安全的跨 key 迁移：XADD 目标 → XACK+XDEL 源（非原子）。"""
+        pending = await self.xpending_range(
+            source_key,
+            group_name=group_name,
+            start=msg_id,
+            end=msg_id,
+            count=1,
+        )
+        if not pending:
+            # 消息已不在 PEL（已被其他节点处理），与 Lua 路径语义一致
+            return None
+        new_id = await self.xadd(destination_key, data, maxlen=maxlen)
+        client = await self._get_client()
+        await client.xack(source_key, group_name, msg_id)
+        await client.xdel(source_key, msg_id)
+        return new_id
+
+    @staticmethod
+    def _serialize_fields(data: dict) -> list:
+        serialized: list[str | bytes] = []
+        for key, value in data.items():
+            encoded = value if isinstance(value, (str, bytes)) else to_json(value)
+            serialized.extend((key, encoded))
+        return serialized
+
     # =========================================================================
     # 队列信息查询
     # =========================================================================
@@ -875,6 +979,14 @@ class StreamClient:
         """
         client = await self._get_client()
         return await client.xlen(stream_key)
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        """扫描匹配的 Redis 键并统一解码。"""
+        client = await self._get_client()
+        keys = []
+        async for key in client.scan_iter(match=pattern, count=1000):
+            keys.append(self._decode_text(key))
+        return keys
 
     async def xpending(self, stream_key: str, group_name: str | None = None) -> dict:
         """获取 pending 消息摘要
@@ -892,27 +1004,7 @@ class StreamClient:
         try:
             result = await client.xpending(stream_key, group)
 
-            if not result or result[0] == 0:
-                return {"pending_count": 0, "min_id": None, "max_id": None, "consumers": {}}
-
-            # result 示例: [count, min_id, max_id, [[consumer, count], ...]]
-            consumers = {}
-            if result[3]:
-                for consumer_data in result[3]:
-                    name = consumer_data[0]
-                    if isinstance(name, bytes):
-                        name = name.decode("utf-8")
-                    count = int(consumer_data[1]) if isinstance(consumer_data[1], bytes) else consumer_data[1]
-                    consumers[name] = count
-
-            min_id = result[1]
-            max_id = result[2]
-            if isinstance(min_id, bytes):
-                min_id = min_id.decode("utf-8")
-            if isinstance(max_id, bytes):
-                max_id = max_id.decode("utf-8")
-
-            return {"pending_count": result[0], "min_id": min_id, "max_id": max_id, "consumers": consumers}
+            return self._parse_pending_summary(result)
 
         except Exception as e:
             if "NOGROUP" in str(e):
@@ -951,26 +1043,72 @@ class StreamClient:
 
             result = await client.xpending_range(stream_key, group, start, end, count, **kwargs)
 
-            messages = []
-            for item in result:
-                # item 示例: [msg_id, consumer, idle_time, delivery_count]
-                msg_id = item[0]
-                consumer = item[1]
-                if isinstance(msg_id, bytes):
-                    msg_id = msg_id.decode("utf-8")
-                if isinstance(consumer, bytes):
-                    consumer = consumer.decode("utf-8")
-
-                messages.append(
-                    PendingMessage(msg_id=msg_id, consumer=consumer, idle_time_ms=item[2], delivery_count=item[3])
-                )
-
-            return messages
+            return [self._parse_pending_message(item) for item in result]
 
         except Exception as e:
             if "NOGROUP" in str(e):
                 return []
             raise
+
+    @classmethod
+    def _parse_pending_summary(cls, result) -> dict:
+        if not result:
+            return {"pending_count": 0, "min_id": None, "max_id": None, "consumers": {}}
+        if isinstance(result, dict):
+            pending_value = result.get("pending", result.get("pending_count", 0))
+            pending = int(pending_value or 0)
+            consumers = cls._parse_pending_consumers(result.get("consumers", []))
+            min_id = result.get("min", result.get("min_id"))
+            max_id = result.get("max", result.get("max_id"))
+        else:
+            pending = int(result[0])
+            consumers = cls._parse_pending_consumers(result[3])
+            min_id, max_id = result[1], result[2]
+        return {
+            "pending_count": pending,
+            "min_id": cls._decode_optional_text(min_id),
+            "max_id": cls._decode_optional_text(max_id),
+            "consumers": consumers,
+        }
+
+    @classmethod
+    def _parse_pending_consumers(cls, items) -> dict[str, int]:
+        consumers = {}
+        for item in items or []:
+            if isinstance(item, dict):
+                name, count = item.get("name"), item.get("pending", 0)
+            else:
+                name, count = item[0], item[1]
+            consumers[cls._decode_text(name)] = int(count or 0)
+        return consumers
+
+    @classmethod
+    def _parse_pending_message(cls, item) -> PendingMessage:
+        if isinstance(item, dict):
+            values = (
+                item.get("message_id"),
+                item.get("consumer"),
+                item.get("time_since_delivered", 0),
+                item.get("times_delivered", 0),
+            )
+        else:
+            values = item
+        return PendingMessage(
+            msg_id=cls._decode_text(values[0]),
+            consumer=cls._decode_text(values[1]),
+            idle_time_ms=int(values[2]),
+            delivery_count=int(values[3]),
+        )
+
+    @staticmethod
+    def _decode_text(value) -> str:
+        if value is None:
+            return ""
+        return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+    @classmethod
+    def _decode_optional_text(cls, value) -> str | None:
+        return None if value is None else cls._decode_text(value)
 
     async def xinfo_stream(self, stream_key: str) -> dict:
         """获取 Stream 信息

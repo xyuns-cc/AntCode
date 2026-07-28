@@ -25,9 +25,7 @@ class TestWorkerStartup:
 
     def test_config_import(self):
         """测试配置模块导入"""
-        from antcode_worker.config import (
-            init_worker_config,
-        )
+        from antcode_worker.config import init_worker_config
 
         assert callable(init_worker_config)
 
@@ -48,16 +46,23 @@ class TestWorkerStartup:
         assert config.transport_mode == "direct"
         assert config.max_concurrent_tasks > 0
 
+    def test_dependency_container_initialization_state(self):
+        """容器完成依赖装配后必须可显式标记为已初始化。"""
+        from antcode_worker.app.wiring import Container
+
+        container = Container()
+
+        assert container.is_initialized() is False
+        container.mark_initialized()
+        assert container.is_initialized() is True
+
 
 class TestTransportLayer:
     """传输层测试"""
 
     def test_transport_base_import(self):
         """测试传输层基类导入"""
-        from antcode_worker.transport import (
-            TransportMode,
-            WorkerState,
-        )
+        from antcode_worker.transport import TransportMode, WorkerState
 
         assert TransportMode.DIRECT.value == "direct"
         assert TransportMode.GATEWAY.value == "gateway"
@@ -122,9 +127,7 @@ class TestModuleImports:
 
     def test_heartbeat_module(self):
         """测试心跳模块导入"""
-        from antcode_worker.heartbeat import (
-            CapabilityDetector,
-        )
+        from antcode_worker.heartbeat import CapabilityDetector
 
         detector = CapabilityDetector()
         capabilities = detector.detect_all()
@@ -136,9 +139,7 @@ class TestFlowControl:
 
     def test_flow_control_import(self):
         """测试流量控制模块导入"""
-        from antcode_worker.transport import (
-            FlowControlStrategy,
-        )
+        from antcode_worker.transport import FlowControlStrategy
 
         assert FlowControlStrategy.TOKEN_BUCKET.value == "token_bucket"
         assert FlowControlStrategy.AIMD.value == "aimd"
@@ -305,6 +306,8 @@ class TestTransportAsync:
         gateway_config = GatewayConfig(
             gateway_host="localhost",
             gateway_port=50051,
+            # 预期连不上：缩短 channel_ready 等待，避免默认 10s 连接超时拖慢单测
+            connect_timeout=0.1,
         )
         transport = GatewayTransport(gateway_config=gateway_config)
 

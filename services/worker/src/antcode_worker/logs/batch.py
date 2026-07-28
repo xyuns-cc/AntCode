@@ -105,10 +105,15 @@ class BatchSender:
         # 队列
         self._queue: deque[LogEntry] = deque()
         self._queue_lock = asyncio.Lock()
+        # 复审 D4: 发送失败的批必须**原样**重发。放回队首会与退避期间的
+        # 新日志并批重组 → 切分点变化 → deterministic batch_id 变化 →
+        # 已持久化的行换 event_id 重复入库。
+        self._retry_batch: list[LogEntry] | None = None
 
         # 状态
         self._running = False
         self._backpressure_state = BackpressureState.NORMAL
+        self._terminal_error: ValueError | None = None
 
         # 任务
         self._send_task: asyncio.Task | None = None
@@ -123,8 +128,9 @@ class BatchSender:
 
     @property
     def queue_size(self) -> int:
-        """当前队列大小"""
-        return len(self._queue)
+        """尚未成功送达的条目数（含发送失败待原样重发的批，D4）。"""
+        pending_retry = len(self._retry_batch) if self._retry_batch else 0
+        return len(self._queue) + pending_retry
 
     @property
     def backpressure_state(self) -> BackpressureState:
@@ -159,6 +165,7 @@ class BatchSender:
                 pass
 
         # 发送剩余日志
+        self._raise_terminal_error()
         await self._flush_remaining()
 
         logger.info(f"[{self.run_id}] 批量发送器已停止")
@@ -175,6 +182,7 @@ class BatchSender:
         Returns:
             是否成功入队
         """
+        self._raise_terminal_error()
         if not self._running:
             return False
 
@@ -201,6 +209,7 @@ class BatchSender:
 
     async def flush(self) -> None:
         """刷新队列"""
+        self._raise_terminal_error()
         await self._flush_remaining()
 
     async def _update_backpressure_state(self) -> None:
@@ -250,6 +259,11 @@ class BatchSender:
 
             except asyncio.CancelledError:
                 break
+            except ValueError as exc:
+                self._terminal_error = exc
+                self._running = False
+                logger.error(f"[{self.run_id}] 批量日志包含永久无效输入: {exc}")
+                break
             except Exception as e:
                 logger.error(f"[{self.run_id}] 批量发送循环异常 (退避 {backoff:.1f}s): {e}")
                 try:
@@ -259,34 +273,39 @@ class BatchSender:
                 backoff = min(60.0, backoff * 2)
 
     async def _send_batch(self) -> None:
-        """发送一个批次"""
-        if not self._queue:
-            return
-
-        # 获取批次
-        async with self._queue_lock:
-            batch_size = min(len(self._queue), self._config.batch_size)
-            batch = [self._queue.popleft() for _ in range(batch_size)]
+        """发送一个批次；失败批保留在 ``_retry_batch`` 中原样重发（D4）。"""
+        batch = self._retry_batch
+        if batch is None:
+            if not self._queue:
+                return
+            async with self._queue_lock:
+                batch_size = min(len(self._queue), self._config.batch_size)
+                batch = [self._queue.popleft() for _ in range(batch_size)]
 
         if not batch:
             return
 
         # 使用信号量控制并发
         async with self._batch_semaphore:
-            success = await self._send_batch_with_retry(batch)
+            try:
+                success = await self._send_batch_with_retry(batch)
+            except ValueError as exc:
+                self._terminal_error = exc
+                self._running = False
+                self._total_failed += len(batch)
+                self._retry_batch = batch
+                self._notify_batch_sent(len(batch), False)
+                raise
 
             if success:
+                self._retry_batch = None
                 self._total_sent += len(batch)
                 self._batches_sent += 1
             else:
                 self._total_failed += len(batch)
-                await self._restore_failed_batch(batch)
+                self._retry_batch = batch
 
-            if self._on_batch_sent:
-                try:
-                    self._on_batch_sent(len(batch), success)
-                except Exception:
-                    pass
+            self._notify_batch_sent(len(batch), success)
 
             if not success:
                 raise RuntimeError(f"批量日志发送失败: run_id={self.run_id}, size={len(batch)}")
@@ -309,6 +328,8 @@ class BatchSender:
                 if success:
                     return True
 
+            except ValueError:
+                raise
             except Exception as e:
                 logger.debug(f"[{self.run_id}] 批量发送失败 (attempt {attempt + 1}): {e}")
 
@@ -317,12 +338,6 @@ class BatchSender:
                 await asyncio.sleep(self._config.retry_delay)
 
         return False
-
-    async def _restore_failed_batch(self, batch: list[LogEntry]) -> None:
-        """把发送失败的批次放回队首，避免日志丢失。"""
-        async with self._queue_lock:
-            for entry in reversed(batch):
-                self._queue.appendleft(entry)
 
     def _build_log_message(self, entry: LogEntry) -> Any:
         """构建日志消息"""
@@ -337,16 +352,29 @@ class BatchSender:
         )
 
     async def _flush_remaining(self) -> None:
-        """发送剩余的日志"""
-        while self._queue:
+        """发送剩余的日志（含待重发批）"""
+        self._raise_terminal_error()
+        while self._retry_batch is not None or self._queue:
             await self._send_batch()
+
+    def _notify_batch_sent(self, size: int, success: bool) -> None:
+        if not self._on_batch_sent:
+            return
+        try:
+            self._on_batch_sent(size, success)
+        except Exception:
+            pass
+
+    def _raise_terminal_error(self) -> None:
+        if self._terminal_error is not None:
+            raise self._terminal_error
 
     def get_stats(self) -> dict:
         """获取统计信息"""
         return {
             "run_id": self.run_id,
             "running": self._running,
-            "queue_size": len(self._queue),
+            "queue_size": self.queue_size,
             "max_queue_size": self._config.max_queue_size,
             "backpressure_state": self._backpressure_state.value,
             "total_queued": self._total_queued,

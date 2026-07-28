@@ -1,533 +1,299 @@
-"""
-Redis Pending 任务回收模块
-
-实现 Worker 崩溃/重启后的 pending 任务回收逻辑。
-使用 Redis Streams 的 XAUTOCLAIM 命令实现 at-least-once 语义。
-
-Requirements: 5.3
-"""
-
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
+from loguru import logger
+
 from antcode_worker.transport.redis.keys import RedisKeys
-
-
-@dataclass
-class ReclaimConfig:
-    """回收配置"""
-
-    # R1-P0-4 (审查报告): 原 60s 远小于任务时长 (default timeout 3600s)，
-    # reclaimer 与 poll 用相同 consumer 名 → 自己认领自己 → 正常长任务
-    # 被反复认领 3-4 次后就被 XACK 进死信。改成 1 小时基线，实际使用者
-    # 应该按 max_task_timeout + 冗余 传入 override。
-    min_idle_time_ms: int = 3600_000  # 1 小时
-
-    # 每次回收的最大任务数
-    max_reclaim_count: int = 10
-
-    # 回收检查间隔（秒）
-    check_interval_seconds: float = 30.0
-
-    # 最大重试次数（超过后移入死信队列）
-    max_retries: int = 3
-
-    # 是否启用死信队列
-    enable_dead_letter: bool = True
-
-    # 死信队列保留时间（秒）
-    dead_letter_ttl_seconds: int = 86400 * 7  # 7 天
-
-
-@dataclass
-class ReclaimedTask:
-    """回收的任务"""
-
-    message_id: str  # Redis Stream 消息 ID
-    data: dict[str, str]  # 消息数据
-    idle_time_ms: int  # 空闲时间（毫秒）
-    delivery_count: int  # 投递次数
-    last_delivery_time: datetime | None = None
-
-    @property
-    def is_expired(self) -> bool:
-        """是否已过期（投递次数过多）"""
-        return self.delivery_count > 3  # 默认最大重试 3 次
-
-
-@dataclass
-class ReclaimStats:
-    """回收统计"""
-
-    total_reclaimed: int = 0
-    total_dead_lettered: int = 0
-    last_reclaim_time: datetime | None = None
-    reclaim_errors: int = 0
-
-    # 按 stream 统计
-    stream_stats: dict[str, int] = field(default_factory=dict)
+from antcode_worker.transport.redis.owned_stream_ack import ack_owned_stream_entry
+from antcode_worker.transport.redis.reclaim_admin import (
+    GlobalReclaimer,
+    cleanup_dead_consumers,
+    ensure_consumer_group,
+)
+from antcode_worker.transport.redis.reclaim_generation import GenerationPendingClaimer
+from antcode_worker.transport.redis.reclaim_models import (
+    ReclaimConfig,
+    ReclaimedTask,
+    ReclaimStats,
+    decode_pending_summary,
+)
+from antcode_worker.transport.redis.reclaim_settlement import DeadLetterSettlement
 
 
 class PendingTaskReclaimer:
-    """
-    Pending 任务回收器
-
-    负责回收因 Worker 崩溃/断线而未完成的任务。
-    使用 XAUTOCLAIM 命令自动获取超时的 pending 消息。
-
-    Requirements: 5.3
-    """
+    """Recover task messages owned by an older Worker lease generation."""
 
     def __init__(
         self,
         redis_client: Any,
         worker_id: str,
+        *,
         keys: RedisKeys | None = None,
         config: ReclaimConfig | None = None,
-        on_reclaimed: Any = None,
-    ):
-        """
-        初始化回收器
-
-        Args:
-            redis_client: Redis 异步客户端
-            worker_id: 当前 Worker ID
-            keys: Redis key 生成器
-            config: 回收配置
-            on_reclaimed: 认领到消息后的回调（R1-P0-4）。签名：
-                ``async def on_reclaimed(msg_id: str, data: dict) -> None``
-                transport 层需要在这里把消息重新入 engine 队列，否则认领
-                只是把消息从旧 consumer 移到本 consumer 就再没人处理，PEL
-                空积压。
-        """
+        consumer_group: str | None = None,
+        generation_guard: Callable[[], Awaitable[bool]] | None = None,
+        current_consumer_name: Callable[[], str] | None = None,
+        on_reclaimed: Callable[[str, dict[str, str]], Awaitable[None]] | None = None,
+        on_delivery_failed: Callable[[], None] | None = None,
+        available_capacity: Callable[[], int] | None = None,
+    ) -> None:
         self._redis = redis_client
         self._worker_id = worker_id
         self._keys = keys or RedisKeys()
         self._config = config or ReclaimConfig()
+        self._consumer_group = consumer_group or self._keys.consumer_group_name()
+        self._generation_guard = generation_guard
+        self._consumer_name_provider = current_consumer_name or self._legacy_consumer_name
         self._on_reclaimed = on_reclaimed
+        self._on_delivery_failed = on_delivery_failed
+        self._available_capacity = available_capacity
         self._stats = ReclaimStats()
         self._running = False
         self._reclaim_task: asyncio.Task | None = None
+        self._claimer = GenerationPendingClaimer(
+            redis_client,
+            consumer_group=self._consumer_group,
+            config=self._config,
+            require_current_generation=self._require_current_generation,
+        )
+        self._settlement = DeadLetterSettlement(
+            redis_client,
+            consumer_group=self._consumer_group,
+            config=self._config,
+            require_current_generation=self._require_current_generation,
+            current_consumer_name=self._current_consumer_name,
+        )
 
     @property
     def stats(self) -> ReclaimStats:
-        """获取统计信息"""
         return self._stats
 
     @property
     def is_running(self) -> bool:
-        """是否正在运行"""
         return self._running
 
     async def start(self) -> None:
-        """启动回收器"""
         if self._running:
             return
-
         self._running = True
         self._reclaim_task = asyncio.create_task(self._reclaim_loop())
 
     async def stop(self) -> None:
-        """停止回收器"""
         self._running = False
+        if self._reclaim_task is None:
+            return
+        self._reclaim_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._reclaim_task
+        self._reclaim_task = None
 
-        if self._reclaim_task:
-            self._reclaim_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._reclaim_task
-            self._reclaim_task = None
+    async def reclaim_once(self) -> list[ReclaimedTask]:
+        return await self._do_reclaim()
+
+    async def dead_letter_owned(
+        self,
+        stream_key: str,
+        message_id: str,
+        data: dict[str, str],
+    ) -> None:
+        await self._require_current_generation()
+        pending = await self._claimer.get_entry(stream_key, message_id)
+        if pending.consumer != self._current_consumer_name():
+            raise RuntimeError("拒绝 DLQ 非当前 task consumer 持有的消息")
+        task = ReclaimedTask(
+            message_id=message_id,
+            data=data,
+            idle_time_ms=pending.idle_time_ms,
+            delivery_count=pending.delivery_count,
+            last_delivery_time=_last_delivery_time(pending.idle_time_ms),
+        )
+        await self._move_to_dead_letter(stream_key, task)
+
+    async def get_pending_count(self, stream_key: str | None = None) -> int:
+        stream_key = stream_key or self._keys.task_ready_stream(self._worker_id)
+        result = await self._redis.xpending(stream_key, self._consumer_group)
+        if isinstance(result, dict):
+            return int(result.get("pending", 0) or 0)
+        return int(result[0]) if result else 0
+
+    async def get_pending_summary(self, stream_key: str | None = None) -> dict[str, Any]:
+        stream_key = stream_key or self._keys.task_ready_stream(self._worker_id)
+        result = await self._redis.xpending(stream_key, self._consumer_group)
+        if not result:
+            return {"pending_count": 0, "min_id": None, "max_id": None, "consumers": {}}
+        if isinstance(result, dict):
+            return decode_pending_summary(result)
+        pending_count, min_id, max_id, consumers = result
+        return {
+            "pending_count": pending_count,
+            "min_id": min_id,
+            "max_id": max_id,
+            "consumers": {item[0]: item[1] for item in (consumers or [])},
+        }
 
     async def _reclaim_loop(self) -> None:
-        """回收循环。
-
-        R1-P0-4 (审查报告): 原实现 `await self._do_reclaim()` 丢弃返回值，
-        认领的消息只是从旧 consumer 挂到本 consumer 的 PEL 上，无人处理。
-        修复：拿到 ReclaimedTask 后调用 on_reclaimed 回调把消息再喂给 engine。
-        """
         while self._running:
             try:
                 tasks = await self._do_reclaim()
-                if tasks and self._on_reclaimed is not None:
-                    for task in tasks:
-                        try:
-                            await self._on_reclaimed(task.message_id, task.data)
-                        except Exception:
-                            # 单条重投失败不影响下一条；下一轮会再次认领
-                            self._stats.reclaim_errors += 1
+                await self._deliver_reclaimed(tasks)
             except asyncio.CancelledError:
                 break
             except Exception:
                 self._stats.reclaim_errors += 1
+                logger.exception("Pending task reclaim 循环失败")
+            if _task_is_cancelling():
+                break
+            try:
+                await asyncio.sleep(self._config.check_interval_seconds)
+            except asyncio.CancelledError:
+                break
 
-            await asyncio.sleep(self._config.check_interval_seconds)
+    async def _deliver_reclaimed(self, tasks: list[ReclaimedTask]) -> None:
+        if self._on_reclaimed is None:
+            return
+        for task in tasks:
+            try:
+                await self._require_current_generation()
+                await self._on_reclaimed(task.message_id, task.data)
+            except Exception:
+                self._stats.reclaim_errors += 1
+                if self._on_delivery_failed is not None:
+                    self._on_delivery_failed()
+                logger.exception("Pending task 重投 callback 失败: message_id={}", task.message_id)
 
     async def _do_reclaim(self) -> list[ReclaimedTask]:
-        """
-        执行一次回收
-
-        Returns:
-            回收的任务列表
-        """
-        reclaimed_tasks: list[ReclaimedTask] = []
-
-        # 获取任务 ready stream
+        if not await self._is_current_generation():
+            return []
+        capacity = self._reclaim_capacity()
+        if capacity == 0:
+            return []
         stream_key = self._keys.task_ready_stream(self._worker_id)
-        group_name = self._keys.consumer_group_name()
-        consumer_name = self._keys.consumer_name(self._worker_id)
-
+        consumer_name = self._current_consumer_name()
         try:
-            # 使用 XAUTOCLAIM 回收 pending 任务
-            # XAUTOCLAIM key group consumer min-idle-time start [COUNT count]
-            result = await self._redis.xautoclaim(
+            messages = await self._claimer.find_and_claim(
                 stream_key,
-                group_name,
                 consumer_name,
-                min_idle_time=self._config.min_idle_time_ms,
-                start_id="0-0",
-                count=self._config.max_reclaim_count,
+                max_count=capacity,
             )
-
-            if not result:
-                return reclaimed_tasks
-
-            # 解析结果
-            # result = [next_start_id, [[msg_id, {fields}], ...], [deleted_ids]]
-            next_start_id, messages, deleted_ids = result
-
-            for msg_id, msg_data in messages:
-                # 获取消息的 pending 信息
-                pending_info = await self._get_pending_info(stream_key, group_name, msg_id)
-
-                task = ReclaimedTask(
-                    message_id=msg_id,
-                    data=msg_data,
-                    idle_time_ms=pending_info.get("idle_time_ms", 0),
-                    delivery_count=pending_info.get("delivery_count", 1),
-                    last_delivery_time=pending_info.get("last_delivery_time"),
-                )
-
-                # 检查是否超过最大重试次数
-                if task.delivery_count > self._config.max_retries:
-                    if self._config.enable_dead_letter:
-                        await self._move_to_dead_letter(stream_key, task)
-                        self._stats.total_dead_lettered += 1
-                    else:
-                        # 直接 ACK 丢弃
-                        await self._redis.xack(stream_key, group_name, msg_id)
-                else:
-                    reclaimed_tasks.append(task)
-                    self._stats.total_reclaimed += 1
-
-            # 更新统计
-            self._stats.last_reclaim_time = datetime.now()
-            self._stats.stream_stats[stream_key] = self._stats.stream_stats.get(stream_key, 0) + len(reclaimed_tasks)
-
+            await self._require_current_generation()
+            tasks = await self._classify_claimed(stream_key, messages, consumer_name)
+            self._record_reclaim_stats(stream_key, len(tasks))
+            return tasks
         except Exception:
             self._stats.reclaim_errors += 1
             raise
 
-        return reclaimed_tasks
+    def _reclaim_capacity(self) -> int:
+        if self._available_capacity is None:
+            return self._config.max_reclaim_count
+        available = self._available_capacity()
+        if isinstance(available, bool) or not isinstance(available, int) or available < 0:
+            raise RuntimeError("task reclaim 可用容量必须是非负整数")
+        return min(available, self._config.max_reclaim_count)
 
-    async def _get_pending_info(self, stream_key: str, group_name: str, message_id: str) -> dict[str, Any]:
-        """
-        获取消息的 pending 信息
-
-        Args:
-            stream_key: Stream key
-            group_name: 消费者组名
-            message_id: 消息 ID
-
-        Returns:
-            pending 信息字典
-        """
-        try:
-            # XPENDING key group [IDLE min-idle-time] start end count [consumer]
-            result = await self._redis.xpending_range(
+    async def _classify_claimed(
+        self,
+        stream_key: str,
+        messages: list[tuple[str, dict[str, str]]],
+        expected_consumer: str,
+    ) -> list[ReclaimedTask]:
+        reclaimed: list[ReclaimedTask] = []
+        for message_id, message_data in messages:
+            await self._require_current_generation()
+            task = await self._build_reclaimed_task(
                 stream_key,
-                group_name,
-                min=message_id,
-                max=message_id,
-                count=1,
+                message_id,
+                message_data,
+                expected_consumer=expected_consumer,
             )
+            if task.delivery_count <= self._config.max_retries:
+                reclaimed.append(task)
+                self._stats.total_reclaimed += 1
+            else:
+                await self._discard_exhausted(stream_key, task)
+        return reclaimed
 
-            if result:
-                entry = result[0]
-                if isinstance(entry, dict):
-                    idle_time = int(entry.get("time_since_delivered", 0) or 0)
-                    delivery_count = int(entry.get("times_delivered", 1) or 1)
-                    pending_message_id = entry.get("message_id", message_id)
-                    consumer = entry.get("consumer", "")
-                else:
-                    pending_message_id = entry[0]
-                    consumer = entry[1]
-                    idle_time = int(entry[2])
-                    delivery_count = int(entry[3])
-                return {
-                    "message_id": pending_message_id,
-                    "consumer": consumer,
-                    "idle_time_ms": idle_time,
-                    "delivery_count": delivery_count,
-                    "last_delivery_time": datetime.now() - timedelta(milliseconds=idle_time),
-                }
-        except Exception as exc:
-            raise RuntimeError(f"读取 pending 信息失败: stream={stream_key} message={message_id}") from exc
+    async def _build_reclaimed_task(
+        self,
+        stream_key: str,
+        message_id: str,
+        data: dict[str, str],
+        *,
+        expected_consumer: str,
+    ) -> ReclaimedTask:
+        pending = await self._claimer.get_entry(stream_key, message_id)
+        if pending.message_id != message_id:
+            raise RuntimeError("XCLAIM 后 PEL message_id 校验失败")
+        if pending.consumer != expected_consumer:
+            raise RuntimeError("XCLAIM 后 PEL consumer 校验失败")
+        return ReclaimedTask(
+            message_id=message_id,
+            data=data,
+            idle_time_ms=pending.idle_time_ms,
+            delivery_count=pending.delivery_count,
+            last_delivery_time=_last_delivery_time(pending.idle_time_ms),
+        )
 
-        return {"idle_time_ms": 0, "delivery_count": 1}
+    async def _discard_exhausted(self, stream_key: str, task: ReclaimedTask) -> None:
+        await self._require_current_generation()
+        if self._config.enable_dead_letter:
+            await self._move_to_dead_letter(stream_key, task)
+            self._stats.total_dead_lettered += 1
+            return
+        await self._require_current_generation()
+        acknowledged = await ack_owned_stream_entry(
+            self._redis,
+            stream_key=stream_key,
+            group=self._consumer_group,
+            message_id=task.message_id,
+            consumer_name=self._current_consumer_name(),
+        )
+        await self._settlement.require_acknowledged(stream_key, task.message_id, acknowledged)
 
     async def _move_to_dead_letter(self, source_stream: str, task: ReclaimedTask) -> None:
-        """
-        将任务移入死信队列
+        await self._settlement.settle(source_stream, task)
 
-        Args:
-            source_stream: 源 Stream key
-            task: 要移入的任务
-        """
-        # 死信队列 key
-        dead_letter_key = f"{source_stream}:dead_letter"
+    def _record_reclaim_stats(self, stream_key: str, count: int) -> None:
+        self._stats.last_reclaim_time = datetime.now()
+        self._stats.stream_stats[stream_key] = self._stats.stream_stats.get(stream_key, 0) + count
 
-        # 添加元数据
-        dead_letter_data = dict(task.data)
-        dead_letter_data["_original_stream"] = source_stream
-        dead_letter_data["_original_message_id"] = task.message_id
-        dead_letter_data["_delivery_count"] = str(task.delivery_count)
-        dead_letter_data["_dead_lettered_at"] = datetime.now().isoformat()
-        dead_letter_data["_idle_time_ms"] = str(task.idle_time_ms)
+    def _legacy_consumer_name(self) -> str:
+        return self._keys.consumer_name(self._worker_id)
 
-        # 写入死信队列
-        await self._redis.xadd(
-            dead_letter_key,
-            dead_letter_data,
-            maxlen=10000,  # 限制死信队列大小
-            approximate=True,
-        )
+    def _current_consumer_name(self) -> str:
+        consumer_name = self._consumer_name_provider()
+        if not consumer_name:
+            raise RuntimeError("当前 task consumer name 为空")
+        return consumer_name
 
-        # 设置过期时间
-        await self._redis.expire(dead_letter_key, self._config.dead_letter_ttl_seconds)
-
-        # ACK 原消息
-        group_name = self._keys.consumer_group_name()
-        acknowledged = await self._redis.xack(source_stream, group_name, task.message_id)
-        if int(acknowledged or 0) != 1:
-            raise RuntimeError(f"DLQ 已写入但原消息 ACK 失败: {source_stream}:{task.message_id}")
-
-    async def reclaim_once(self) -> list[ReclaimedTask]:
-        """
-        手动执行一次回收
-
-        Returns:
-            回收的任务列表
-        """
-        return await self._do_reclaim()
-
-    async def get_pending_count(self, stream_key: str | None = None) -> int:
-        """
-        获取 pending 任务数量
-
-        Args:
-            stream_key: Stream key，为 None 时使用默认 key
-
-        Returns:
-            pending 任务数量
-        """
-        if stream_key is None:
-            stream_key = self._keys.task_ready_stream(self._worker_id)
-
-        group_name = self._keys.consumer_group_name()
-
-        try:
-            # XPENDING key group
-            result = await self._redis.xpending(stream_key, group_name)
-            if result:
-                # result = [pending_count, min_id, max_id, [[consumer, count], ...]]
-                return result[0]
-        except Exception:
-            pass
-
-        return 0
-
-    async def get_pending_summary(self, stream_key: str | None = None) -> dict[str, Any]:
-        """
-        获取 pending 任务摘要
-
-        Args:
-            stream_key: Stream key
-
-        Returns:
-            摘要信息
-        """
-        if stream_key is None:
-            stream_key = self._keys.task_ready_stream(self._worker_id)
-
-        group_name = self._keys.consumer_group_name()
-
-        try:
-            result = await self._redis.xpending(stream_key, group_name)
-            if result:
-                pending_count, min_id, max_id, consumers = result
-                return {
-                    "pending_count": pending_count,
-                    "min_id": min_id,
-                    "max_id": max_id,
-                    "consumers": {c[0]: c[1] for c in (consumers or [])},
-                }
-        except Exception:
-            pass
-
-        return {"pending_count": 0, "min_id": None, "max_id": None, "consumers": {}}
-
-
-class GlobalReclaimer:
-    """
-    全局回收器
-
-    用于回收所有 Worker 的 pending 任务（通常由平台作业或专门的回收服务运行）。
-    """
-
-    def __init__(
-        self,
-        redis_client: Any,
-        keys: RedisKeys | None = None,
-        config: ReclaimConfig | None = None,
-    ):
-        """
-        初始化全局回收器
-
-        Args:
-            redis_client: Redis 异步客户端
-            keys: Redis key 生成器
-            config: 回收配置
-        """
-        self._redis = redis_client
-        self._keys = keys or RedisKeys()
-        self._config = config or ReclaimConfig()
-        self._stats = ReclaimStats()
-
-    async def scan_and_reclaim(self) -> dict[str, list[ReclaimedTask]]:
-        """
-        扫描并回收所有 Worker 的 pending 任务
-
-        Returns:
-            按 Worker ID 分组的回收任务
-        """
-        result: dict[str, list[ReclaimedTask]] = {}
-
-        # 获取所有 Worker
-        worker_set_key = self._keys.worker_set()
-        worker_ids = await self._redis.smembers(worker_set_key)
-
-        for worker_id in worker_ids:
-            reclaimer = PendingTaskReclaimer(
-                redis_client=self._redis,
-                worker_id=worker_id,
-                keys=self._keys,
-                config=self._config,
-            )
-
-            tasks = await reclaimer.reclaim_once()
-            if tasks:
-                result[worker_id] = tasks
-
-        return result
-
-    async def get_global_pending_summary(self) -> dict[str, dict[str, Any]]:
-        """
-        获取全局 pending 任务摘要
-
-        Returns:
-            按 Worker ID 分组的摘要信息
-        """
-        result: dict[str, dict[str, Any]] = {}
-
-        worker_set_key = self._keys.worker_set()
-        worker_ids = await self._redis.smembers(worker_set_key)
-
-        for worker_id in worker_ids:
-            reclaimer = PendingTaskReclaimer(
-                redis_client=self._redis,
-                worker_id=worker_id,
-                keys=self._keys,
-                config=self._config,
-            )
-
-            summary = await reclaimer.get_pending_summary()
-            if summary["pending_count"] > 0:
-                result[worker_id] = summary
-
-        return result
-
-
-async def ensure_consumer_group(
-    redis_client: Any,
-    stream_key: str,
-    group_name: str,
-    start_id: str = "0",
-) -> bool:
-    """
-    确保消费者组存在
-
-    Args:
-        redis_client: Redis 客户端
-        stream_key: Stream key
-        group_name: 消费者组名
-        start_id: 起始 ID
-
-    Returns:
-        是否成功创建或已存在
-    """
-    try:
-        # 尝试创建消费者组
-        await redis_client.xgroup_create(
-            stream_key,
-            group_name,
-            id=start_id,
-            mkstream=True,  # 如果 stream 不存在则创建
-        )
-        return True
-    except Exception as e:
-        # 如果组已存在，忽略错误
-        if "BUSYGROUP" in str(e):
+    async def _is_current_generation(self) -> bool:
+        if self._generation_guard is None:
             return True
-        raise
+        return bool(await self._generation_guard())
+
+    async def _require_current_generation(self) -> None:
+        if not await self._is_current_generation():
+            raise RuntimeError("Pending task reclaimer lease generation 已失效")
 
 
-async def cleanup_dead_consumers(
-    redis_client: Any,
-    stream_key: str,
-    group_name: str,
-    max_idle_time_ms: int = 300000,  # 5 分钟
-) -> list[str]:
-    """
-    清理死亡的消费者
+def _last_delivery_time(idle_time_ms: int) -> datetime:
+    return datetime.now() - timedelta(milliseconds=idle_time_ms)
 
-    Args:
-        redis_client: Redis 客户端
-        stream_key: Stream key
-        group_name: 消费者组名
-        max_idle_time_ms: 最大空闲时间（毫秒）
 
-    Returns:
-        被清理的消费者列表
-    """
-    cleaned: list[str] = []
+def _task_is_cancelling() -> bool:
+    task = asyncio.current_task()
+    return task is not None and bool(task.cancelling())
 
-    try:
-        # 获取消费者信息
-        consumers = await redis_client.xinfo_consumers(stream_key, group_name)
 
-        for consumer in consumers:
-            name = consumer.get("name")
-            idle = consumer.get("idle", 0)
-            pending = consumer.get("pending", 0)
-
-            # 如果消费者空闲时间过长且没有 pending 消息，删除它
-            if idle > max_idle_time_ms and pending == 0:
-                await redis_client.xgroup_delconsumer(stream_key, group_name, name)
-                cleaned.append(name)
-
-    except Exception:
-        pass
-
-    return cleaned
+__all__ = [
+    "GlobalReclaimer",
+    "PendingTaskReclaimer",
+    "ReclaimConfig",
+    "ReclaimedTask",
+    "ReclaimStats",
+    "cleanup_dead_consumers",
+    "ensure_consumer_group",
+]

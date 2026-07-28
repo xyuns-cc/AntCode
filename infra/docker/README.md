@@ -2,7 +2,7 @@
 
 ## 目标
 
-使用 `docker-compose.dev.yml` 一键拉起本地联调环境，覆盖：
+使用 `docker-compose.dev.yml` 拉起本地联调环境，覆盖：
 
 - `web_api`（Control Plane）
 - `master`（Schedule Plane）
@@ -15,8 +15,19 @@
 ```bash
 cd infra/docker
 cp .env.example .env
-docker compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml up -d postgres redis web-api master gateway frontend
 ```
+
+登录 Web 界面生成一次性 Worker 安装 Key，写入 `.env` 的
+`ANTCODE_WORKER_KEY` 后再启动执行面：
+
+```bash
+docker compose -f docker-compose.dev.yml up -d worker
+```
+
+Worker 注册完成且凭据已写入 `worker_data` 后，删除 `.env` 中的一次性 Key。
+后续重建会复用持久凭据；若首次注册尚未完成，Compose 会显式拒绝空 Key，
+不会以反复重启伪装为可用环境。
 
 ## 常用命令
 
@@ -137,50 +148,80 @@ Worker 主进程仍使用镜像内非 root 的 `appuser`。不要使用 `privile
 
 未落地这些前提前，**禁止把 dev/remote 画像直接投放到承接不可信任务的生产环境**。
 
-## 生产部署合同 (compose.prod.yml)
+## 生产部署合同 (docker-compose.prod.yml)
 
-round6 P0-03 后 K8s 决策废止，仓库以 `infra/docker/docker-compose.prod.yml`
-作为**非 K8s 生产画像的最小起点**。它不是交钥匙方案；上线前必须完成
-site-specific 落地：
+K8s 路径已废止。非 K8s 生产部署使用
+`infra/docker/docker-compose.prod.yml`，该文件是完整启动依赖图，不再是省略
+frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 
-1. `.env.production` 显式提供 `DATABASE_URL`/`REDIS_URL`/`POSTGRES_*`/
-   `REDIS_PASSWORD`/`JWT_SECRET`/`ANTCODE_ENCRYPTION_KEY` 等生产密钥。
-2. `ANTCODE_GATEWAY_TLS_DIR` 与 `ANTCODE_WORKER_TLS_DIR` 挂载真实 mTLS
-   证书（server + ca + 每 Worker 独立 client 证书）；私钥不能进镜像。
-3. `ANTCODE_REVERSE_PROXY_CONFIG` 指向 site 自建 nginx/traefik/caddy 配置，
-   完成 HTTP→HTTPS 301、`connect-src` CSP、Gateway gRPC 转发。
-4. `ANTCODE_TLS_CERTS_DIR` 挂载反向代理证书；cert-manager/acme.sh 自动续签。
-5. `ANTCODE_IMAGE_REGISTRY` + `ANTCODE_IMAGE_TAG` 用 immutable digest 或语义
-   化版本，禁止 `latest`；镜像必须经 Cosign 签名。
-6. `backup` sidecar 骨架默认写 `/backup` 卷，site 通过 override 补 rclone /
-   aws s3 上传 + 保留策略；`docker-compose.prod.backup.yml` 后续加入。
-7. Prometheus scrape `/metrics` + alertmanager；Loki/ELK 收 json-file 日志。
-8. Worker 承接不可信任务前必须落 gVisor/Kata + 独立宿主/网络域；此文件
-   仍保留 `SYS_ADMIN` 是 bwrap 嵌套 namespace 硬需求，非独立宿主时
-   仅适用于自有代码执行。
+生产变量通过 Compose 的 `--env-file` 只用于插值。Gateway 和 Worker 不读取
+整份环境文件；尤其 Gateway Worker 不会收到 `DATABASE_URL`、`REDIS_URL`、
+`JWT_SECRET` 或应用加密密钥。上线前必须完成以下配置：
 
-`compose.prod.yml` 相对 remote 画像的强制安全差异：
+1. 为每个应用和中间件分别提供 `ANTCODE_*_IMAGE_REPOSITORY` 与
+   `ANTCODE_*_IMAGE_DIGEST`。digest 只填写 64 位十六进制正文；生产 Compose
+   强制拼为 `registry/repository@sha256:<digest>`，不接受 tag，也不在服务器
+   上构建镜像。
+2. 配置 `DATABASE_URL`、`POSTGRES_*`、`REDIS_URL`、`ANTCODE_JWT_SECRET_FILE`、
+   `ENCRYPTION_KEY`、`ENCRYPTION_KEY_SALT` 和首次管理员密码。
+   `ANTCODE_JWT_SECRET_FILE` 是宿主机上不进入仓库的密钥文件；Compose 将其
+   作为只读 Docker secret 挂载到 migration / web-api 的
+   `/run/secrets/jwt_secret`，不会向容器注入 inline `JWT_SECRET`。
+3. 从 `redis/users.acl.example` 在仓库外创建真实 ACL 文件，分别替换管理账号
+   和健康检查账号密码。`REDIS_URL` 必须使用管理账号，
+   `REDIS_HEALTHCHECK_*` 使用 health 账号。`ANTCODE_REDIS_ACL_DIR` 指向一个
+   仓库外、Redis 容器用户可写且包含 `users.acl` 的目录；应用执行
+   `ACL SAVE` 时会在该目录创建临时文件并原子替换 ACL 文件。
+4. `ANTCODE_GATEWAY_TLS_DIR` 挂载 `server.crt/server.key/ca.crt`；
+   `ANTCODE_WORKER_TLS_DIR` 挂载该 Worker 独立的
+   `client.crt/client.key/ca.crt`。私钥不得进入镜像或仓库。
+5. `ANTCODE_REVERSE_PROXY_CONFIG` 和 `ANTCODE_TLS_CERTS_DIR` 提供生产反向
+   代理配置及证书，并把代理容器实际 CIDR 写入 `ANTCODE_TRUSTED_PROXIES`。
+6. 把站点对外 HTTPS API 根地址写入 `ANTCODE_PUBLIC_API_BASE_URL`。首次启动前
+   生成一次性 `ANTCODE_WORKER_KEY`；Worker 通过该 HTTPS 地址注册和 ACK，凭据
+   写入 `worker_data` 后从环境文件删除安装 Key并强制重建 Worker。生产路径不
+   允许用 Compose 内部明文 HTTP 传输安装 Key或永久凭据。
+7. Worker 容器的 `SYS_ADMIN` 仅用于 bubblewrap。执行不可信租户代码时必须
+   使用独立宿主和网络域；默认 `ANTCODE_RULE_ALLOW_NETWORK=0`。
+8. 生产必须另行接入受监控的异机/对象存储备份和恢复演练。本地备份 override
+   默认禁用，不能当成灾备。
 
-- `AUTH_COOKIE_SECURE=true`
-- `REDIS_ACL_ENABLED=true`
-- `ANTCODE_GATEWAY_ALLOW_INSECURE=false` + `WORKER_GATEWAY_TLS=true`
-- `ANTCODE_RULE_ALLOW_NETWORK` 默认 `0`（Rule 断网），site 显式打开
-- `ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS=1`（legacy 通道关闭，
-  round6 P1-GW-06）
-- PG/Redis 不 `ports:` 对外，仅 `expose` 到 `antcode-internal` 网络
-- Web API/Master `read_only: true` 根文件系统 + `/tmp` tmpfs
+启动前先渲染配置；缺少任何必填变量时命令必须失败：
 
-验证：`docker compose -f docker-compose.prod.yml config` 返回渲染 YAML
-且不缺任何 `${?}` 必填变量。
+```bash
+docker compose --env-file .env.production \
+  -f infra/docker/docker-compose.prod.yml config --quiet
+
+docker compose --env-file .env.production \
+  -f infra/docker/docker-compose.prod.yml up -d
+```
+
+`migration` 必须成功退出后 Web API、Master 和 Gateway 才会启动；frontend
+等待 Web API readiness，Worker 等待 Web API 与 Gateway readiness。Gateway
+固定使用 mTLS，Worker 固定为 backendless Gateway transport。
+
+只用于本机短期留存的备份 profile：
+
+```bash
+docker compose --env-file .env.production \
+  -f infra/docker/docker-compose.prod.yml \
+  -f infra/docker/docker-compose.prod.local-backup.yml \
+  --profile local-backup up -d backup-local
+```
+
+该任务直接使用应用的同一个 `DATABASE_URL`。它先写 `.partial`，用
+`pg_restore --list` 验证 custom dump，计算 SHA-256 后再原子改名，并按
+`BACKUP_RETENTION_DAYS`（默认 14 天）清理 dump 和校验和；任一步失败都会使
+容器退出，不会打印虚假成功。它仍没有远端上传和独立恢复监控，因此不满足
+生产灾备要求。
 
 ## 远程验收传输模式
 
-`docker-compose.remote.yml` 固定为 Direct Worker，避免同时注入 Gateway 和
-Redis transport 配置。Gateway 验收必须叠加专用覆盖文件；覆盖文件会清空
-`DATABASE_URL`、`REDIS_URL`、`WORKER_REDIS_URL` 和固定 `WORKER_ID`，再设置
-Gateway endpoint。Gateway Worker 通过受认证、带 Lease fence 的 Gateway 通道
-传输源码包和执行产物，不持有 PostgreSQL 或 Redis 根凭据。基础 Remote Worker
-也不加载项目根 `.env`，防止 JWT、加密密钥等控制面凭据随模式覆盖一并泄露。
+`docker-compose.remote.yml` 与生产数据面一致，固定使用 Gateway backendless
+Worker。Worker 通过受认证、带 Lease fence 的 Gateway 通道传输源码包和执行
+产物，不持有 PostgreSQL 或 Redis 根凭据，也不加载项目根 `.env`，防止 JWT、
+加密密钥等控制面凭据泄漏到执行面。保留的
+`docker-compose.remote.gateway.yml` 只用于兼容旧验收命令，不再承担安全覆盖。
 Gateway 首次注册必须先生成安装 Key，并通过当前 shell 的
 `ANTCODE_WORKER_KEY` 临时注入。注册完成后 `unset ANTCODE_WORKER_KEY` 并重建
 Worker，验证容器环境中不再存在明文 Key，且只依赖 `worker_data` 中持久化的
@@ -203,9 +244,10 @@ docker compose --env-file .env -p antcode-e2e \
 docker compose --env-file .env -p antcode-e2e \
   -f infra/docker/docker-compose.remote.yml up -d
 
+# 已有持久凭据的 Worker 重建时，不再需要一次性安装 Key。
+unset ANTCODE_WORKER_KEY
 docker compose --env-file .env -p antcode-e2e \
-  -f infra/docker/docker-compose.remote.yml \
-  -f infra/docker/docker-compose.remote.gateway.yml up -d --force-recreate worker
+  -f infra/docker/docker-compose.remote.yml up -d --force-recreate worker
 ```
 
 ## 故障排查

@@ -41,7 +41,6 @@ from antcode_worker.transport.base import (
     ControlMessage,
     TaskMessage,
     TransportBase,
-    TransportMode,
 )
 
 if TYPE_CHECKING:
@@ -49,6 +48,7 @@ if TYPE_CHECKING:
     # 这些都是可选依赖，构造时以 ``None`` 兜底。
     from antcode_worker.executor.base import BaseExecutor
     from antcode_worker.runtime.manager import RuntimeManager
+    from antcode_worker.transport.base import TaskResult
 
 
 RUNTIME_RESULT_RETRY_MAX_SECONDS = 30.0
@@ -389,10 +389,13 @@ class Engine:
         if await self._cancel_tombstones.consume(run_id):
             await self._settle_tombstoned_task(run_id, task_msg)
             return False
-        # B2: 本地去重——同一 PEL 消息重投时保持 pending，由原执行路径
-        # 按 receipt 完成 XACK。
+        # B2: 活跃执行只去重；执行已结束的重投取得结算恢复权，绝不重跑业务。
         _, is_new_local = await self._state_manager.add_if_new(run_id, task_msg.task_id, receipt=task_msg.receipt)
         if not is_new_local:
+            recover = await self._state_manager.reserve_settlement_recovery(run_id, task_msg.receipt)
+            if recover:
+                logger.info(f"任务重投进入结算恢复: run_id={run_id} task_id={task_msg.task_id}")
+                return True
             logger.warning(f"跳过重复投递（本地已存在 run）: run_id={run_id} task_id={task_msg.task_id}")
             return False
 
@@ -745,8 +748,7 @@ class Engine:
                 else:
                     set_current_trace(new_trace().traceparent)
 
-                # 执行任务
-                result = await self._execute_task(context, task_msg)
+                result = await self._execute_or_resume_settlement(context, task_msg)
 
                 # 上报结果
                 await self._report_result(context, result)
@@ -771,6 +773,13 @@ class Engine:
             finally:
                 if my_task is not None:
                     self._worker_run_ids.pop(my_task, None)
+
+    async def _execute_or_resume_settlement(self, context: RunContext, task_msg: TaskMessage) -> ExecResult:
+        """重投已有结果时只恢复结算，不再次进入 executor。"""
+        if not await self._state_manager.has_pending_settlement(context.run_id):
+            return await self._execute_task(context, task_msg)
+        result, _, _ = await self._state_manager.settlement_snapshot(context.run_id)
+        return result
 
     async def _handle_forced_cancel(self, context: RunContext, worker_id: int) -> None:
         """P1-26: worker 被 hard cancel 时的清理路径。
@@ -917,7 +926,7 @@ class Engine:
                     log_sink=log_sink,
                 )
 
-            await self._relay_rule_spool(exec_plan, context)
+            await self._relay_spider_spool(exec_plan, context)
             spool_relayed = True
 
             # 收集产物
@@ -993,7 +1002,7 @@ class Engine:
     FORCED_CANCEL_RELAY_WAIT_SECONDS = 5.0
 
     async def _relay_on_forced_cancel(self, exec_plan: ExecPlan, context: RunContext) -> None:
-        relay_task = asyncio.create_task(self._relay_rule_spool(exec_plan, context))
+        relay_task = asyncio.create_task(self._relay_spider_spool(exec_plan, context))
         try:
             await asyncio.shield(relay_task)
         except asyncio.CancelledError:
@@ -1050,19 +1059,19 @@ class Engine:
         if not context.runtime_spec or not context.runtime_spec.env_vars:
             return
         runtime_env = context.runtime_spec.env_vars
-        if exec_plan.plugin_name == "rule":
+        if exec_plan.plugin_name in {"rule", "spider"}:
             reserved = RULE_PLUGIN_ENV_VARS.intersection(runtime_env)
             if reserved:
                 names = ", ".join(sorted(reserved))
-                raise RuntimeError(f"Rule runtime env 不得覆盖 Worker 控制变量: {names}")
+                raise RuntimeError(f"Spider runtime env 不得覆盖 Worker 控制变量: {names}")
         exec_plan.env.update(runtime_env)
 
-    async def _relay_rule_spool(self, exec_plan: ExecPlan, context: RunContext) -> None:
-        if exec_plan.plugin_name != "rule":
-            return
+    async def _relay_spider_spool(self, exec_plan: ExecPlan, context: RunContext) -> None:
         spool_path = exec_plan.env.get("ANTCODE_SPIDER_SPOOL_PATH", "")
         if not spool_path:
-            raise RuntimeError("Rule 执行计划缺少 ANTCODE_SPIDER_SPOOL_PATH")
+            if exec_plan.plugin_name in {"rule", "spider"}:
+                raise RuntimeError("Spider 执行计划缺少 ANTCODE_SPIDER_SPOOL_PATH")
+            return
         await relay_spider_spool(
             spool_path,
             self._transport,
@@ -1100,10 +1109,27 @@ class Engine:
             raise RuntimeError(f"RUNNING 状态持久化失败: run_id={context.run_id}")
 
     async def _report_result(self, context: RunContext, result: ExecResult) -> None:
-        """上报结果（幂等）; P1-GW-05: try/finally 保证任何路径都释放 ownership。"""
+        """保存结果并幂等推进 result -> receipts ACK -> ownership release。"""
+        await self._state_manager.start_settlement(
+            context.run_id,
+            task_id=context.task_id,
+            receipt=context.receipt,
+            result=result,
+        )
+        completed = False
+        try:
+            await self._report_pending_result(context, result)
+            completed = await self._ack_pending_task_receipts(context.run_id)
+        finally:
+            if not completed:
+                await self._state_manager.release_settlement(context.run_id)
+        if completed:
+            await self._release_settled_ownership(context.run_id)
+
+    def _task_result(self, context: RunContext, result: ExecResult) -> TaskResult:
         from antcode_worker.transport.base import TaskResult
 
-        task_result = TaskResult(
+        return TaskResult(
             run_id=context.run_id,
             task_id=context.task_id,
             status=result.status.value,
@@ -1120,31 +1146,38 @@ class Engine:
             },
         )
 
+    async def _report_pending_result(self, context: RunContext, result: ExecResult) -> None:
+        _, reported, _ = await self._state_manager.settlement_snapshot(context.run_id)
+        if reported:
+            return
+        report_ok = await self._settle_with_retry(
+            f"结果上报 run_id={context.run_id}",
+            lambda: self._transport.report_result(self._task_result(context, result)),
+        )
+        if not report_ok:
+            raise RuntimeError(f"结果上报失败: run_id={context.run_id}")
+        await self._state_manager.mark_result_reported(context.run_id)
+        logger.info(f"结果已上报: {context.run_id}")
+
+    async def _ack_pending_task_receipts(self, run_id: str) -> bool:
+        while True:
+            _, _, receipts = await self._state_manager.settlement_snapshot(run_id)
+            for receipt in receipts:
+                acked = await self._settle_with_retry(
+                    f"任务 ACK run_id={run_id}",
+                    lambda receipt=receipt: self._transport.ack_task(receipt, accepted=True),
+                )
+                if not acked:
+                    raise RuntimeError(f"任务 ACK 失败: run_id={run_id}")
+                await self._state_manager.mark_receipt_acked(run_id, receipt)
+            if await self._state_manager.finish_settlement(run_id):
+                return True
+
+    async def _release_settled_ownership(self, run_id: str) -> None:
         try:
-            # 复审 D1: 结算带有界重试;瞬时失败不把 receipt 变成永久孤儿
-            report_ok = await self._settle_with_retry(
-                f"结果上报 run_id={context.run_id}",
-                lambda: self._transport.report_result(task_result),
-            )
-            if report_ok:
-                logger.info(f"结果已上报: {context.run_id}")
-                # V12: 只有 report 成功才 ack,失败靠 PEL XAUTOCLAIM 让其它 worker 重试
-                if context.receipt:
-                    ack_ok = await self._settle_with_retry(
-                        f"任务 ACK run_id={context.run_id}",
-                        lambda: self._transport.ack_task(context.receipt, accepted=True),
-                    )
-                    if not ack_ok:
-                        raise RuntimeError(f"任务 ACK 失败: run_id={context.run_id}")
-                await self._state_manager.remove(context.run_id)
-            else:
-                raise RuntimeError(f"结果上报失败: run_id={context.run_id}")
-        finally:
-            # P1-GW-05: 任何路径都释放 ownership; release 失败只 warn 不覆盖原异常
-            try:
-                await self._release_run_ownership(context.run_id)
-            except Exception as exc:
-                logger.warning("release_run_ownership 失败: run_id={}, err={}", context.run_id, exc)
+            await self._release_run_ownership(run_id)
+        except Exception as exc:
+            logger.warning("release_run_ownership 失败: run_id={}, err={}", run_id, exc)
 
     # 结算重试参数：指数退避 1s→16s，共 5 次尝试（总窗口 ~31s）。
     _SETTLE_MAX_ATTEMPTS = 5
@@ -1382,80 +1415,20 @@ class Engine:
 
     async def _claim_run_ownership(self, run_id: str) -> bool:
         """Claim the run fence through the active transport boundary."""
-        if self._uses_gateway_ownership_rpc():
-            try:
-                return await self._transport.claim_run_ownership(
-                    run_id,
-                    self._RUN_OWNERSHIP_TTL_SECONDS * MILLISECONDS_PER_SECOND,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Gateway ownership claim 失败: run_id={run_id}") from exc
-        return await self._claim_direct_run_ownership(run_id)
-
-    def _direct_ownership_context(self) -> tuple[Any, str]:
-        """Direct 模式 ownership 只用 transport 注入的 ACL client 和 namespace。
-
-        P1-DR-01: 此前重新调用全局 ``get_redis_client()``/``redis_namespace()``，
-        绕开 RedisTransport 按 Worker ACL 注入的 client；自定义
-        ``WORKER_REDIS_NAMESPACE`` 时 key 串线，只配 ``WORKER_REDIS_URL`` 时
-        claim 失败。找不到 client/namespace 直接拒绝，不做静默回退。
-        """
-        client = getattr(self._transport, "ownership_redis_client", None)
-        namespace = getattr(self._transport, "ownership_redis_namespace", None)
-        if client is None or not namespace:
-            raise RuntimeError("Direct transport 未暴露 ownership Redis client/namespace，拒绝 ownership 操作")
-        return client, str(namespace)
-
-    async def _claim_direct_run_ownership(self, run_id: str) -> bool:
-        from antcode_core.application.services.workers.run_ownership_fence import (
-            OwnershipOutcome,
-            claim_run_ownership,
-        )
-
-        redis, namespace = self._direct_ownership_context()
         try:
-            outcome = await claim_run_ownership(
-                redis,
-                worker_id=self._resolve_worker_id(),
-                lease_id=self._resolve_lease_id(),
-                run_id=run_id,
-                ttl_ms=self._RUN_OWNERSHIP_TTL_SECONDS * MILLISECONDS_PER_SECOND,
-                namespace=namespace,
+            return await self._transport.claim_run_ownership(
+                run_id,
+                self._RUN_OWNERSHIP_TTL_SECONDS * MILLISECONDS_PER_SECOND,
             )
         except Exception as exc:
-            raise RuntimeError(f"跨机 ownership claim 失败: run_id={run_id}") from exc
-        if outcome is OwnershipOutcome.LEASE_STALE:
-            # 权威 Lease Hash 已换代：本进程不得再接手任何任务。
-            raise RuntimeError(f"ownership claim 被拒: lease 已被新代际取代 run_id={run_id}")
-        return outcome is OwnershipOutcome.ACQUIRED
+            raise RuntimeError(f"ownership claim 失败: run_id={run_id}, error={exc}") from exc
 
     async def _release_run_ownership(self, run_id: str) -> None:
         """Release the run fence through the active transport boundary."""
-        if self._uses_gateway_ownership_rpc():
-            try:
-                await self._transport.release_run_ownership(run_id)
-                return
-            except Exception as exc:
-                raise RuntimeError(f"Gateway ownership release 失败: run_id={run_id}") from exc
-        await self._release_direct_run_ownership(run_id)
-
-    async def _release_direct_run_ownership(self, run_id: str) -> None:
-        from antcode_core.application.services.workers.run_ownership_fence import release_run_ownership
-
-        redis, namespace = self._direct_ownership_context()
         try:
-            await release_run_ownership(
-                redis,
-                worker_id=self._resolve_worker_id(),
-                lease_id=self._resolve_lease_id(),
-                run_id=run_id,
-                namespace=namespace,
-            )
+            await self._transport.release_run_ownership(run_id)
         except Exception as exc:
-            raise RuntimeError(f"释放跨机归属键失败: run_id={run_id}") from exc
-
-    def _uses_gateway_ownership_rpc(self) -> bool:
-        return getattr(self._transport, "mode", TransportMode.DIRECT) == TransportMode.GATEWAY
+            raise RuntimeError(f"ownership release 失败: run_id={run_id}") from exc
 
     async def _abort_for_ownership_failure(self, reason: str) -> None:
         self._polling = False
@@ -1524,7 +1497,7 @@ class Engine:
         runs = await self._state_manager.get_all()
         active_states = {RunState.RUNNING, RunState.CANCELLING, RunState.PREPARING}
         for info in runs:
-            if info.state not in active_states:
+            if info.state not in active_states and info.settlement_result is None:
                 continue
             await self._renew_one_run_ownership(info.run_id)
 
@@ -1539,29 +1512,7 @@ class Engine:
 
     async def _renew_run_ownership(self, run_id: str) -> bool:
         ttl_ms = self._RUN_OWNERSHIP_TTL_SECONDS * MILLISECONDS_PER_SECOND
-        if self._uses_gateway_ownership_rpc():
-            return await self._transport.renew_run_ownership(run_id, ttl_ms)
-        return await self._renew_direct_run_ownership(run_id, ttl_ms)
-
-    async def _renew_direct_run_ownership(self, run_id: str, ttl_ms: int) -> bool:
-        from antcode_core.application.services.workers.run_ownership_fence import (
-            OwnershipOutcome,
-            renew_run_ownership,
-        )
-
-        redis, namespace = self._direct_ownership_context()
-        outcome = await renew_run_ownership(
-            redis,
-            worker_id=self._resolve_worker_id(),
-            lease_id=self._resolve_lease_id(),
-            run_id=run_id,
-            ttl_ms=ttl_ms,
-            namespace=namespace,
-        )
-        if outcome is OwnershipOutcome.LEASE_STALE:
-            # 整机 lease 已换代：向上抛，让 renew 循环 abort 所有执行。
-            raise RuntimeError(f"ownership renew 被拒: lease 已被新代际取代 run_id={run_id}")
-        return outcome is OwnershipOutcome.ACQUIRED
+        return await self._transport.renew_run_ownership(run_id, ttl_ms)
 
     def _build_payload(self, task_msg: TaskMessage) -> Any:
         """构建任务 payload"""

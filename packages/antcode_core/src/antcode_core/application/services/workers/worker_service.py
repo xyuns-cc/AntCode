@@ -6,6 +6,7 @@
 - worker_stats_service.py: 统计指标
 """
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
@@ -16,6 +17,10 @@ from tortoise.transactions import in_transaction
 from antcode_core.application.services.workers.worker_connection_service import (
     worker_connection_service,
 )
+from antcode_core.application.services.workers.worker_delete_guard import (
+    ACTIVE_RUN_STATUSES,
+    quiesce_worker_for_delete,
+)
 
 # 导入拆分的服务
 from antcode_core.application.services.workers.worker_heartbeat_service import worker_heartbeat_service
@@ -24,6 +29,8 @@ from antcode_core.common.config import settings
 from antcode_core.common.security.api_key import verify_api_key_hash
 from antcode_core.domain.models import Worker, WorkerStatus
 
+WorkerAclRevoker = Callable[[Worker], Awaitable[None]]
+
 
 class WorkerService:
     """Worker 服务类 - 核心 CRUD 操作"""
@@ -31,12 +38,13 @@ class WorkerService:
     # 心跳超时时间（秒）
     HEARTBEAT_TIMEOUT = settings.WORKER_HEARTBEAT_TIMEOUT
 
-    def __init__(self):
+    def __init__(self, acl_revoker: WorkerAclRevoker | None = None):
         """初始化 Worker 服务"""
         # 委托给心跳服务
         self._heartbeat_service = worker_heartbeat_service
         self._connection_service = worker_connection_service
         self._stats_service = worker_stats_service
+        self._acl_revoker = acl_revoker
 
     @staticmethod
     def _normalize_status_filter(status_filter: WorkerStatus | str | None) -> str | None:
@@ -228,11 +236,16 @@ class WorkerService:
 
         P1-20: 级联删除 + Worker.delete() 走同一事务;任一步骤失败则整体回滚,
         Worker 不会残留在"半删"状态。
+        P1-FN-06: 存在未终态执行时拒绝删除 —— 此前会先把这些 run 的
+        worker_id 清空再删 Worker，在途结果因 ``_validate_result_source``
+        要求归属 Worker 存在而被永久拒收。用户须先取消/等待这些 run。
         """
         worker = await self.get_worker_by_id(worker_id)
         if not worker:
             return False
 
+        await quiesce_worker_for_delete(worker)
+        await self._revoke_acl_before_delete(worker)
         # 级联删除所有关联数据（含 Worker 自身），失败即抛出让上层感知
         deleted_counts = await self._cascade_delete_worker_data(worker)
 
@@ -288,7 +301,29 @@ class WorkerService:
         }
 
         try:
-            async with in_transaction():
+            async with in_transaction() as conn:
+                # 复审 D3: 事务内锁 Worker 行并复查活跃 run —— 事务外
+                # 预检与级联之间存在派发窗口（新 run 分配给该 worker 后
+                # 被解绑 → 结果永久拒收）。复查失败整体回滚。
+                locked = await Worker.filter(id=worker_internal_id).using_db(conn).select_for_update().first()
+                if locked is None:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+                active = (
+                    await TaskRun.filter(
+                        worker_id=worker_internal_id,
+                        status__in=list(ACTIVE_RUN_STATUSES),
+                    )
+                    .using_db(conn)
+                    .count()
+                )
+                if active:
+                    # 注意：此时 ACL 可能已撤销（tombstone-first 设计）。
+                    # 拒绝删除保住执行归属；该 worker 需重新签发凭证。
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Worker {worker.name} 在删除期间新增 {active} 个未终态执行，已中止删除",
+                    )
+
                 # 1. 心跳记录
                 deleted["heartbeats"] = await WorkerHeartbeat.filter(worker_id=worker_internal_id).delete()
 
@@ -332,8 +367,13 @@ class WorkerService:
                 deleted["spider_metrics"] = await SpiderMetricsHistory.filter(worker_id=worker_public_id).delete()
                 deleted["events"] = await WorkerEvent.filter(worker_id=worker_public_id).delete()
 
-                # 7. 补漏:安装 Key 记录(used_by_worker 存 public_id)
-                deleted["install_keys"] = await WorkerInstallKey.filter(used_by_worker=worker_public_id).delete()
+                # 7. 补漏:安装 Key 记录(used_by_worker 存 public_id)。
+                # 复审 F4-A: status="expired" 的 Key 豁免删除 —— 它是过期
+                # 注册清理的审计留存与补扫重试线索（acknowledge 依赖它精确
+                # 报"恢复窗口已关闭"）。
+                deleted["install_keys"] = (
+                    await WorkerInstallKey.filter(used_by_worker=worker_public_id).exclude(status="expired").delete()
+                )
 
                 # 8. 最后删 Worker 本体,同事务保证原子
                 await worker.delete()
@@ -342,6 +382,15 @@ class WorkerService:
             raise
 
         return deleted
+
+    async def _revoke_acl_before_delete(self, worker: Worker) -> None:
+        if not settings.REDIS_ACL_ENABLED or not worker.redis_username:
+            return
+        if self._acl_revoker is None:
+            raise RuntimeError("Redis ACL revoker 未配置，拒绝删除 Worker")
+        setattr(worker, "redis_acl_synced_at", None)
+        await worker.save(update_fields=["redis_acl_synced_at"])
+        await self._acl_revoker(worker)
 
     async def batch_delete_workers(self, worker_ids: list) -> dict:
         """批量删除 Worker（级联删除所有关联数据）
@@ -358,13 +407,14 @@ class WorkerService:
             else:
                 str_ids.append(worker_id)
 
-        workers_to_delete = []
+        workers_by_internal_id: dict[int, Worker] = {}
         if int_ids:
             workers_by_id = await Worker.filter(id__in=int_ids).all()
-            workers_to_delete.extend(workers_by_id)
+            workers_by_internal_id.update({worker.id: worker for worker in workers_by_id})
         if str_ids:
             workers_by_public_id = await Worker.filter(public_id__in=str_ids).all()
-            workers_to_delete.extend(workers_by_public_id)
+            workers_by_internal_id.update({worker.id: worker for worker in workers_by_public_id})
+        workers_to_delete = list(workers_by_internal_id.values())
 
         if not workers_to_delete:
             return {
@@ -375,21 +425,24 @@ class WorkerService:
 
         # 逐个原子级联删除:仅统计成功的
         total_deleted: dict = {}
-        succeeded_public_ids: list[str] = []
+        succeeded_identifiers: set[str] = set()
+        succeeded_worker_ids: set[int] = set()
         for worker in workers_to_delete:
             try:
+                # P1-FN-06: 与单删同一保护，未终态执行的 Worker 保留并计入失败。
+                await quiesce_worker_for_delete(worker)
+                await self._revoke_acl_before_delete(worker)
                 deleted = await self._cascade_delete_worker_data(worker)
                 for key, count in deleted.items():
                     total_deleted[key] = total_deleted.get(key, 0) + count
-                succeeded_public_ids.append(worker.public_id)
+                succeeded_identifiers.update((str(worker.id), worker.public_id))
+                succeeded_worker_ids.add(worker.id)
             except Exception as e:
                 # 事务已回滚,Worker 仍在;下次可重试
                 logger.error(f"级联删除 Worker {worker.name} 数据失败,已回滚: {e}")
 
-        success_count = len(succeeded_public_ids)
-        requested = set(str(x) for x in worker_ids)
-        succeeded_set = set(succeeded_public_ids)
-        failed_ids = [x for x in worker_ids if str(x) not in succeeded_set and str(x) in requested]
+        success_count = len(succeeded_worker_ids)
+        failed_ids = [worker_id for worker_id in worker_ids if str(worker_id) not in succeeded_identifiers]
 
         logger.info(f"批量删除 Worker: 成功{success_count}个, 级联删除: {total_deleted}")
 
@@ -683,4 +736,14 @@ class WorkerService:
 
 
 # 创建服务实例
-worker_service = WorkerService()
+async def _revoke_worker_redis_access(worker: Worker) -> None:
+    from antcode_core.common.security.redis_acl import revoke_worker_acl
+    from antcode_core.infrastructure.redis import get_redis_client
+
+    redis = await get_redis_client()
+    if redis is None:
+        raise RuntimeError("Redis client unavailable，无法撤销 Worker ACL")
+    await revoke_worker_acl(redis, worker, clear_credentials=True)
+
+
+worker_service = WorkerService(acl_revoker=_revoke_worker_redis_access)

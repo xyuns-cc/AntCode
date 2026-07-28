@@ -80,7 +80,6 @@ class _TransportBootstrap:
     api_key: str | None
     credentials: Any
     credential_service: Any
-    direct_acl_enabled: bool
 
 
 def create_container(config: Any) -> Container:
@@ -174,6 +173,7 @@ def _create_transport(config: Any) -> Any:
         DirectConfig,
         GatewayConfigSpec,
         TransportConfig,
+        build_direct_control_client,
         build_gateway_transport_config,
     )
 
@@ -196,15 +196,28 @@ def _create_transport(config: Any) -> Any:
                 credentials,
             ),
             redis_namespace=getattr(config, "redis_namespace", "antcode"),
+            api_base_url=_normalize_api_base_url(
+                getattr(config, "api_base_url", ""),
+                bootstrap.gateway_host,
+                allow_insecure_internal=getattr(config, "api_allow_insecure_internal", False),
+            ),
+            api_key=str(getattr(credentials, "api_key", "") or ""),
+            secret_key=str(getattr(credentials, "secret_key", "") or ""),
+            allow_insecure_internal=getattr(config, "api_allow_insecure_internal", False),
+            reclaimed_queue_capacity=max(1, int(getattr(config, "max_concurrent_tasks", 5))) * 2,
         ),
-        gateway=GatewayConfigSpec(
-            host=bootstrap.gateway_host,
-            port=bootstrap.gateway_port,
-            tls=getattr(config, "gateway_tls", False),
-            ca_cert=getattr(config, "ca_cert", None),
-            client_cert=getattr(config, "client_cert", None),
-            client_key=getattr(config, "client_key", None),
-            api_key=bootstrap.api_key,
+        gateway=(
+            GatewayConfigSpec(
+                host=bootstrap.gateway_host,
+                port=bootstrap.gateway_port,
+                tls=getattr(config, "gateway_tls", False),
+                ca_cert=getattr(config, "ca_cert", None),
+                client_cert=getattr(config, "client_cert", None),
+                client_key=getattr(config, "client_key", None),
+                api_key=bootstrap.api_key,
+            )
+            if transport_mode == "gateway"
+            else GatewayConfigSpec()
         ),
     )
 
@@ -233,6 +246,7 @@ def _create_transport(config: Any) -> Any:
             worker_id=worker_id,
             namespace=transport_config.direct.redis_namespace,
             consumer_group=transport_config.direct.consumer_group,
+            direct_control=build_direct_control_client(transport_config.direct, worker_id or ""),
         )
     else:
         from antcode_worker.transport.gateway import GatewayTransport
@@ -256,6 +270,11 @@ def _prepare_transport_bootstrap(config: Any, transport_mode: str) -> _Transport
 
     from antcode_core.common.config import settings
 
+    if transport_mode == "direct" and not settings.REDIS_ACL_ENABLED:
+        from antcode_worker.transport.factory import TransportConfigError
+
+        raise TransportConfigError("Direct 模式必须启用 REDIS_ACL_ENABLED，禁止使用共享 Redis 凭据")
+
     from antcode_worker.services.credential import get_credential_store, init_credential_service
 
     store = get_credential_store(
@@ -267,16 +286,15 @@ def _prepare_transport_bootstrap(config: Any, transport_mode: str) -> _Transport
     from antcode_worker.app.worker_registration import resume_registration_ack
 
     resume_registration_ack(credential_service, credentials)
-    direct_acl_enabled = transport_mode == "direct" and settings.REDIS_ACL_ENABLED
     credentials = _require_control_credentials(
         config,
         credential_service,
         credentials,
-        required=transport_mode == "gateway" or direct_acl_enabled,
+        required=transport_mode in ("gateway", "direct"),
     )
     env_worker_id = os.getenv("WORKER_ID")
     worker_id = env_worker_id or getattr(credentials, "worker_id", None)
-    if direct_acl_enabled and env_worker_id and env_worker_id != credentials.worker_id:
+    if transport_mode == "direct" and env_worker_id and env_worker_id != credentials.worker_id:
         raise RuntimeError("WORKER_ID 与安装 Key 注册身份不匹配")
     gateway_host = getattr(credentials, "gateway_host", "") or getattr(config, "gateway_host", "localhost")
     gateway_port = getattr(credentials, "gateway_port", 0) or getattr(config, "gateway_port", 50051)
@@ -289,7 +307,6 @@ def _prepare_transport_bootstrap(config: Any, transport_mode: str) -> _Transport
         api_key=api_key,
         credentials=credentials,
         credential_service=credential_service,
-        direct_acl_enabled=direct_acl_enabled,
     )
 
 
@@ -312,35 +329,15 @@ def _require_control_credentials(
 
 
 def _prepare_direct_transport(config: Any, bootstrap: _TransportBootstrap) -> tuple[str, Any]:
-    worker_id = bootstrap.worker_id or _create_local_worker_id(config)
+    worker_id = bootstrap.worker_id
     if not worker_id:
-        raise RuntimeError("Direct 模式无法建立稳定 worker_id")
-    if not bootstrap.direct_acl_enabled:
-        _register_direct_worker(config=config, worker_id=worker_id)
-        return worker_id, bootstrap.credentials
+        raise RuntimeError("Direct 模式缺少可信控制面签发的 worker_id")
     credentials = _issue_direct_redis_acl(
         config=config,
         credentials=bootstrap.credentials,
         credential_service=bootstrap.credential_service,
     )
     return credentials.worker_id, credentials
-
-
-def _create_local_worker_id(config: Any) -> str:
-    from antcode_worker.config import DATA_ROOT
-    from antcode_worker.security import init_identity_manager
-
-    data_dir = getattr(config, "data_dir", str(DATA_ROOT))
-    name = getattr(config, "name", "")
-    manager = init_identity_manager(
-        identity_path=Path(data_dir) / "identity" / "worker_identity.yaml",
-        zone=getattr(config, "region", "default"),
-        labels={"name": name} if name else None,
-        version=getattr(config, "version", "0.1.0"),
-        install_signal_handler=False,
-    )
-    logger.info("Direct 模式未配置 worker_id，已生成本地身份: {}", manager.worker_id)
-    return manager.worker_id
 
 
 def _build_authenticated_redis_url(base_url: str, credentials: Any | None) -> str:
@@ -389,15 +386,6 @@ def _should_trust_env_proxy(api_base_url: str) -> bool:
     if host in ("localhost", "127.0.0.1", "::1"):
         return False
     return True
-
-
-def _mask_redis_url(redis_url: str) -> str:
-    if "@" not in redis_url:
-        return redis_url
-    prefix, suffix = redis_url.split("@", 1)
-    if ":" in prefix:
-        prefix = prefix.rsplit(":", 1)[0] + ":***"
-    return f"{prefix}@{suffix}"
 
 
 def _register_by_install_key(
@@ -470,117 +458,6 @@ def _require_success_response(response: Any, *, operation: str) -> dict[str, Any
         message = body.get("message") if isinstance(body, dict) else None
         raise RuntimeError(message or f"{operation}失败")
     return body
-
-
-def _register_direct_worker(
-    config: Any,
-    worker_id: str | None,
-):
-    """Direct 模式注册 Worker 到控制平面（失败抛错）"""
-    import os
-    import platform
-    import secrets
-
-    from antcode_worker.heartbeat.reporter import get_capability_detector
-    from antcode_worker.transport.factory import TransportConfigError
-
-    if not worker_id:
-        raise TransportConfigError("Direct 模式必须配置 worker_id")
-
-    gateway_host = getattr(config, "gateway_host", "localhost")
-    api_base_url = _normalize_api_base_url(
-        getattr(config, "api_base_url", "") or os.getenv("WORKER_API_BASE_URL"),
-        gateway_host,
-        allow_insecure_internal=getattr(config, "api_allow_insecure_internal", False),
-    )
-
-    host = getattr(config, "host", "")
-    if host in ("", "0.0.0.0", "127.0.0.1", "localhost"):
-        from antcode_worker.config import get_local_ip
-
-        host = get_local_ip()
-
-    redis_url = getattr(config, "redis_url", "")
-    if not redis_url:
-        raise TransportConfigError("Direct 模式必须配置 redis_url")
-
-    from antcode_core.infrastructure.redis import direct_register_proof_key
-
-    proof = secrets.token_hex(16)
-    proof_key = direct_register_proof_key(
-        worker_id,
-        namespace=getattr(config, "redis_namespace", None),
-    )
-    try:
-        # T6-T1: 走统一 sync factory，支持 cluster/sentinel URL scheme
-        from antcode_core.infrastructure.redis.factory import (
-            create_sync_redis_client,
-        )
-
-        redis_client = create_sync_redis_client(
-            redis_url,
-            decode_responses=True,
-        )
-        redis_client.set(proof_key, proof, ex=60)
-        logger.info(
-            "Direct 注册证明已写入 Redis: {} ({})",
-            _mask_redis_url(redis_url),
-            proof_key,
-        )
-    except Exception as e:
-        raise TransportConfigError(f"写入 Direct 注册证明失败: {e}") from e
-
-    payload = {
-        "worker_id": worker_id,
-        "proof": proof,
-        "name": getattr(config, "name", "") or worker_id,
-        "host": host,
-        "port": getattr(config, "port", 8001),
-        "region": getattr(config, "region", ""),
-        "version": getattr(config, "version", ""),
-        "os_type": platform.system(),
-        "os_version": platform.release(),
-        "python_version": platform.python_version(),
-        "machine_arch": platform.machine(),
-        "capabilities": get_capability_detector().detect_all(),
-    }
-
-    url = f"{api_base_url}/api/v1/workers/register-direct"
-    logger.info("Direct Worker 注册: {}", url)
-
-    try:
-        import httpx
-
-        trust_env = _should_trust_env_proxy(api_base_url)
-        with httpx.Client(timeout=10.0, trust_env=trust_env) as client:
-            response = client.post(url, json=payload)
-    except Exception as e:
-        logger.error("Direct Worker 注册请求失败: {}", e)
-        raise
-
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
-
-    if response.status_code >= 400:
-        detail = None
-        if isinstance(body, dict):
-            detail = body.get("message") or body.get("detail")
-        if detail == "无效的 Direct 注册证明":
-            detail = "无效的 Direct 注册证明（请确认 Web API 的 REDIS_URL 与 Worker 的 redis_url 指向同一 Redis）"
-        raise RuntimeError(detail or f"Direct Worker 注册失败 (HTTP {response.status_code})")
-
-    if not isinstance(body, dict) or not body.get("success"):
-        message = body.get("message") if isinstance(body, dict) else None
-        raise RuntimeError(message or "Direct Worker 注册失败")
-
-    data = body.get("data") or {}
-    created = data.get("created")
-    if created is True:
-        logger.info("Direct Worker 注册成功: worker_id={}", worker_id)
-    else:
-        logger.info("Direct Worker 已注册: worker_id={}", worker_id)
 
 
 def _create_runtime_manager(config: Any) -> Any:

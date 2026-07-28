@@ -1,4 +1,4 @@
-import common_pb2 as _common_pb2
+from . import common_pb2 as _common_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
@@ -37,19 +37,21 @@ LOG_TYPE_STDERR: LogType
 LOG_TYPE_SYSTEM: LogType
 
 class SubscribeRequest(_message.Message):
-    __slots__ = ("worker_id", "capabilities", "prefetch", "trace")
+    __slots__ = ("worker_id", "capabilities", "prefetch", "lease_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     PREFETCH_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     capabilities: _containers.RepeatedScalarFieldContainer[str]
     prefetch: int
+    lease_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., capabilities: _Optional[_Iterable[str]] = ..., prefetch: _Optional[int] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., capabilities: _Optional[_Iterable[str]] = ..., prefetch: _Optional[int] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class TaskDispatch(_message.Message):
-    __slots__ = ("task_id", "project_id", "project_type", "priority", "params", "environment", "timeout_seconds", "source_bundle_uri", "source_bundle_sha256", "source_bundle_size", "transfer_method", "resolved_revision", "source_subdir", "entry_point", "run_id", "receipt_id", "trace")
+    __slots__ = ("task_id", "project_id", "project_type", "priority", "params", "environment", "timeout_seconds", "source_bundle_uri", "source_bundle_sha256", "source_bundle_size", "transfer_method", "resolved_revision", "source_subdir", "entry_point", "run_id", "receipt_id", "runtime_env_name", "trace")
     class ParamsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -80,6 +82,7 @@ class TaskDispatch(_message.Message):
     ENTRY_POINT_FIELD_NUMBER: _ClassVar[int]
     RUN_ID_FIELD_NUMBER: _ClassVar[int]
     RECEIPT_ID_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_ENV_NAME_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     project_id: str
@@ -97,24 +100,27 @@ class TaskDispatch(_message.Message):
     entry_point: str
     run_id: str
     receipt_id: str
+    runtime_env_name: str
     trace: _common_pb2.TraceContext
-    def __init__(self, task_id: _Optional[str] = ..., project_id: _Optional[str] = ..., project_type: _Optional[str] = ..., priority: _Optional[int] = ..., params: _Optional[_Mapping[str, str]] = ..., environment: _Optional[_Mapping[str, str]] = ..., timeout_seconds: _Optional[int] = ..., source_bundle_uri: _Optional[str] = ..., source_bundle_sha256: _Optional[str] = ..., source_bundle_size: _Optional[int] = ..., transfer_method: _Optional[str] = ..., resolved_revision: _Optional[str] = ..., source_subdir: _Optional[str] = ..., entry_point: _Optional[str] = ..., run_id: _Optional[str] = ..., receipt_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, task_id: _Optional[str] = ..., project_id: _Optional[str] = ..., project_type: _Optional[str] = ..., priority: _Optional[int] = ..., params: _Optional[_Mapping[str, str]] = ..., environment: _Optional[_Mapping[str, str]] = ..., timeout_seconds: _Optional[int] = ..., source_bundle_uri: _Optional[str] = ..., source_bundle_sha256: _Optional[str] = ..., source_bundle_size: _Optional[int] = ..., transfer_method: _Optional[str] = ..., resolved_revision: _Optional[str] = ..., source_subdir: _Optional[str] = ..., entry_point: _Optional[str] = ..., run_id: _Optional[str] = ..., receipt_id: _Optional[str] = ..., runtime_env_name: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class AckTaskRequest(_message.Message):
-    __slots__ = ("worker_id", "receipt_id", "task_id", "accepted", "reason", "trace")
+    __slots__ = ("worker_id", "receipt_id", "task_id", "accepted", "reason", "lease_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     RECEIPT_ID_FIELD_NUMBER: _ClassVar[int]
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     ACCEPTED_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     receipt_id: str
     task_id: str
     accepted: bool
     reason: str
+    lease_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., receipt_id: _Optional[str] = ..., task_id: _Optional[str] = ..., accepted: bool = ..., reason: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., receipt_id: _Optional[str] = ..., task_id: _Optional[str] = ..., accepted: bool = ..., reason: _Optional[str] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class AckTaskResponse(_message.Message):
     __slots__ = ("success", "error")
@@ -164,14 +170,18 @@ class StatusAck(_message.Message):
     def __init__(self, received: _Optional[int] = ...) -> None: ...
 
 class LogBatch(_message.Message):
-    __slots__ = ("worker_id", "entries", "trace")
+    __slots__ = ("worker_id", "entries", "lease_id", "batch_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    BATCH_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     entries: _containers.RepeatedCompositeFieldContainer[LogEntry]
+    lease_id: str
+    batch_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., entries: _Optional[_Iterable[_Union[LogEntry, _Mapping]]] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., entries: _Optional[_Iterable[_Union[LogEntry, _Mapping]]] = ..., lease_id: _Optional[str] = ..., batch_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class LogEntry(_message.Message):
     __slots__ = ("run_id", "log_type", "content", "timestamp", "sequence")
@@ -194,20 +204,22 @@ class LogAck(_message.Message):
     def __init__(self, received: _Optional[int] = ...) -> None: ...
 
 class SpiderDataBatch(_message.Message):
-    __slots__ = ("worker_id", "run_id", "project_id", "items", "meta", "trace")
+    __slots__ = ("worker_id", "run_id", "project_id", "items", "meta", "lease_id", "trace")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     RUN_ID_FIELD_NUMBER: _ClassVar[int]
     PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
     ITEMS_FIELD_NUMBER: _ClassVar[int]
     META_FIELD_NUMBER: _ClassVar[int]
+    LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     run_id: str
     project_id: str
     items: _containers.RepeatedCompositeFieldContainer[SpiderDataItem]
     meta: SpiderMetaUpdate
+    lease_id: str
     trace: _common_pb2.TraceContext
-    def __init__(self, worker_id: _Optional[str] = ..., run_id: _Optional[str] = ..., project_id: _Optional[str] = ..., items: _Optional[_Iterable[_Union[SpiderDataItem, _Mapping]]] = ..., meta: _Optional[_Union[SpiderMetaUpdate, _Mapping]] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_id: _Optional[str] = ..., run_id: _Optional[str] = ..., project_id: _Optional[str] = ..., items: _Optional[_Iterable[_Union[SpiderDataItem, _Mapping]]] = ..., meta: _Optional[_Union[SpiderMetaUpdate, _Mapping]] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class SpiderDataItem(_message.Message):
     __slots__ = ("item_id", "spider_name", "item_type", "data", "url", "timestamp", "sequence")
@@ -228,14 +240,30 @@ class SpiderDataItem(_message.Message):
     def __init__(self, item_id: _Optional[str] = ..., spider_name: _Optional[str] = ..., item_type: _Optional[str] = ..., data: _Optional[bytes] = ..., url: _Optional[str] = ..., timestamp: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
 
 class SpiderMetaUpdate(_message.Message):
-    __slots__ = ("status", "items_count", "last_item_at")
+    __slots__ = ("status", "items_count", "last_item_at", "spider_name", "started_at", "finished_at", "pages_count", "errors_count", "duration_ms", "config", "errors")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     ITEMS_COUNT_FIELD_NUMBER: _ClassVar[int]
     LAST_ITEM_AT_FIELD_NUMBER: _ClassVar[int]
+    SPIDER_NAME_FIELD_NUMBER: _ClassVar[int]
+    STARTED_AT_FIELD_NUMBER: _ClassVar[int]
+    FINISHED_AT_FIELD_NUMBER: _ClassVar[int]
+    PAGES_COUNT_FIELD_NUMBER: _ClassVar[int]
+    ERRORS_COUNT_FIELD_NUMBER: _ClassVar[int]
+    DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_FIELD_NUMBER: _ClassVar[int]
+    ERRORS_FIELD_NUMBER: _ClassVar[int]
     status: str
     items_count: int
     last_item_at: str
-    def __init__(self, status: _Optional[str] = ..., items_count: _Optional[int] = ..., last_item_at: _Optional[str] = ...) -> None: ...
+    spider_name: str
+    started_at: str
+    finished_at: str
+    pages_count: int
+    errors_count: int
+    duration_ms: float
+    config: str
+    errors: str
+    def __init__(self, status: _Optional[str] = ..., items_count: _Optional[int] = ..., last_item_at: _Optional[str] = ..., spider_name: _Optional[str] = ..., started_at: _Optional[str] = ..., finished_at: _Optional[str] = ..., pages_count: _Optional[int] = ..., errors_count: _Optional[int] = ..., duration_ms: _Optional[float] = ..., config: _Optional[str] = ..., errors: _Optional[str] = ...) -> None: ...
 
 class SpiderDataAck(_message.Message):
     __slots__ = ("accepted", "failed")

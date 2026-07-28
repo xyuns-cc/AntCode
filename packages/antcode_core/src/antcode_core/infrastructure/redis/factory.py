@@ -9,6 +9,7 @@ env，代码无感知。
 - `redis://` / `rediss://` → standalone（默认）
 - `redis+cluster://host:port` / `rediss+cluster://` → Redis Cluster
 - `redis+sentinel://<master_name>@host1:26379,host2:26379` → Sentinel
+- `rediss+sentinel://...` → Sentinel 与 master 均启用 TLS
 
 或者用 URL 用默认 scheme 但显式设 `REDIS_MODE=cluster|sentinel|standalone` env。
 env 优先级高于 URL scheme。
@@ -36,7 +37,11 @@ from redis.exceptions import ConnectionError as RedisConnectionExc
 from redis.exceptions import TimeoutError as RedisTimeoutExc
 from redis.retry import Retry as SyncRetry
 
-from antcode_core.infrastructure.redis.sentinel_url import parse_sentinel_url as _parse_sentinel_url
+from antcode_core.infrastructure.redis.sentinel_client import (
+    create_async_sentinel_client,
+    create_sync_sentinel_client,
+)
+from antcode_core.infrastructure.redis.url_security import redact_redis_url
 
 REDIS_MODE_STANDALONE = "standalone"
 REDIS_MODE_CLUSTER = "cluster"
@@ -162,35 +167,18 @@ def create_async_redis_client(
         for k in ("retry", "retry_on_timeout"):
             cluster_kwargs.pop(k, None)
         cluster_client = AsyncRedisCluster.from_url(cluster_url, **cluster_kwargs)
-        logger.debug(f"Redis client 就绪 (mode=cluster, url={cluster_url})")
+        logger.debug("Redis client 就绪 (mode=cluster, url={})", redact_redis_url(cluster_url))
         return cluster_client  # type: ignore[return-value]
 
     if resolved_mode == REDIS_MODE_SENTINEL:
-        from redis.asyncio.sentinel import Sentinel as AsyncSentinel
-
-        master_name, endpoints, extra = _parse_sentinel_url(url)
-        sentinel_kwargs = _build_common_kwargs(
+        common_kwargs = _build_common_kwargs(
             decode_responses=decode_responses,
             max_connections=max_connections,
             **overrides,
         )
-        # Sentinel 构造只接受 socket_timeout / password / db
-        sentinel_ctor_kwargs = {
-            k: sentinel_kwargs[k] for k in ("socket_timeout", "socket_connect_timeout") if k in sentinel_kwargs
-        }
-        sentinel_ctor_kwargs.update(extra)
-        sentinel = AsyncSentinel(endpoints, **sentinel_ctor_kwargs)
-        master_kwargs = {key: extra[key] for key in ("password", "db") if key in extra}
-        master_kwargs["decode_responses"] = decode_responses
-        if max_connections is not None:
-            master_kwargs["max_connections"] = max_connections
-        sentinel_client = sentinel.master_for(
-            master_name,
-            redis_class=async_redis.Redis,
-            **master_kwargs,
-        )
-        logger.debug(f"Redis client 就绪 (mode=sentinel, master={master_name}, endpoints={endpoints})")
-        return sentinel_client
+        client = create_async_sentinel_client(url, common_kwargs=common_kwargs)
+        logger.debug("Redis client 就绪 (mode=sentinel)")
+        return client
 
     # standalone
     standalone_url = _normalize_url_for_client(url, resolved_mode)
@@ -199,9 +187,8 @@ def create_async_redis_client(
         max_connections=max_connections,
         **overrides,
     )
-    pool = async_redis.ConnectionPool.from_url(standalone_url, **pool_kwargs)
-    standalone_client = async_redis.Redis(connection_pool=pool)
-    logger.debug(f"Redis client 就绪 (mode=standalone, url={standalone_url})")
+    standalone_client = async_redis.Redis.from_url(standalone_url, **pool_kwargs)
+    logger.debug("Redis client 就绪 (mode=standalone, url={})", redact_redis_url(standalone_url))
     return standalone_client
 
 
@@ -237,21 +224,13 @@ def create_sync_redis_client(
         return SyncRedisCluster.from_url(cluster_url, **cluster_kwargs)  # type: ignore[return-value]
 
     if resolved_mode == REDIS_MODE_SENTINEL:
-        from redis.sentinel import Sentinel as SyncSentinel
-
-        master_name, endpoints, extra = _parse_sentinel_url(url)
-        ctor_kwargs = {"socket_timeout": 10}
-        ctor_kwargs.update(extra)
-        sentinel = SyncSentinel(endpoints, **ctor_kwargs)
-        master_kwargs = {key: extra[key] for key in ("password", "db") if key in extra}
-        master_kwargs["decode_responses"] = decode_responses
-        if max_connections is not None:
-            master_kwargs["max_connections"] = max_connections
-        return sentinel.master_for(
-            master_name,
-            redis_class=sync_redis.Redis,
-            **master_kwargs,
+        common_kwargs = _build_common_kwargs(
+            decode_responses=decode_responses,
+            max_connections=max_connections,
+            is_async=False,
+            **overrides,
         )
+        return create_sync_sentinel_client(url, common_kwargs=common_kwargs)
 
     standalone_url = _normalize_url_for_client(url, resolved_mode)
     pool_kwargs = _build_common_kwargs(

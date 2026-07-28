@@ -4,15 +4,15 @@ Log contract — `send_log`, `send_log_batch`, `send_log_chunk`.
 
 from __future__ import annotations
 
-import base64
 from datetime import datetime
 
 import pytest
+from antcode_contracts import data_pb2
 
 pytestmark = pytest.mark.asyncio
 
 
-async def test_send_log_single(transport, fresh_ids, redis_admin):
+async def test_send_log_single(transport, fresh_ids, contract_probe):
     from antcode_worker.transport.base import LogMessage
 
     log = LogMessage(
@@ -22,17 +22,23 @@ async def test_send_log_single(transport, fresh_ids, redis_admin):
         timestamp=datetime.now(),
         sequence=1,
     )
+    assert await transport.claim_run_ownership(fresh_ids.run_id, 30_000)
     ok = await transport.send_log(log)
     assert ok is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        length = await redis_admin.xlen(keys.log_stream(fresh_ids.run_id))
-        assert length == 1
+    batches = await contract_probe.log_batches()
+    assert len(batches) == 1
+    assert batches[0].worker_id == fresh_ids.worker_id
+    assert len(batches[0].entries) == 1
+    entry = batches[0].entries[0]
+    assert entry.run_id == fresh_ids.run_id
+    assert entry.log_type == data_pb2.LOG_TYPE_STDOUT
+    assert entry.content == "hello world"
+    assert entry.sequence == 1
 
 
-async def test_send_log_batch_appends_n_entries(transport, fresh_ids, redis_admin):
-    """Sending N logs in one batch must grow the log stream by exactly N."""
+async def test_send_log_batch_writes_one_proto_batch(transport, fresh_ids, contract_probe):
+    """Logs for one run share one protobuf batch on the global ingest stream."""
     from antcode_worker.transport.base import LogMessage
 
     batch = [
@@ -45,13 +51,14 @@ async def test_send_log_batch_appends_n_entries(transport, fresh_ids, redis_admi
         )
         for i in range(5)
     ]
+    assert await transport.claim_run_ownership(fresh_ids.run_id, 30_000)
     ok = await transport.send_log_batch(batch)
     assert ok is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        length = await redis_admin.xlen(keys.log_stream(fresh_ids.run_id))
-        assert length == 5
+    batches = await contract_probe.log_batches()
+    assert len(batches) == 1
+    assert [entry.content for entry in batches[0].entries] == [f"line-{i}" for i in range(5)]
+    assert [entry.sequence for entry in batches[0].entries] == list(range(5))
 
 
 async def test_send_log_batch_empty_is_noop(transport):
@@ -60,9 +67,8 @@ async def test_send_log_batch_empty_is_noop(transport):
     assert ok is True
 
 
-async def test_send_log_chunk_concat_round_trips(transport, fresh_ids, redis_admin):
-    """When you send chunks of bytes, the concatenated payload from the
-    storage stream must be byte-equal to the original."""
+async def test_send_log_chunk_is_deprecated_noop(transport, fresh_ids, contract_probe):
+    """Deprecated binary chunks must not be written to either log stream."""
     payload = b"".join(bytes([i % 256]) for i in range(1024))
     chunks = [payload[i : i + 256] for i in range(0, len(payload), 256)]
 
@@ -79,20 +85,11 @@ async def test_send_log_chunk_concat_round_trips(transport, fresh_ids, redis_adm
         assert ok is True
         offset += len(chunk)
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        entries = await redis_admin.xrange(keys.log_chunk_stream(fresh_ids.run_id), count=1000)
-        assert len(entries) == len(chunks)
-        # Sort by offset just in case implementation reorders.
-        sorted_entries = sorted(entries, key=lambda e: int(e[1]["offset"]))
-        reconstructed = b"".join(base64.b64decode(e[1]["data"]) for e in sorted_entries)
-        assert reconstructed == payload
-        # The final chunk's `is_final` field must be truthy.
-        assert sorted_entries[-1][1]["is_final"].lower() in ("true", "1")
+    assert await contract_probe.no_log_streams(fresh_ids.run_id)
 
 
-async def test_send_log_chunk_marks_intermediate_not_final(transport, fresh_ids, redis_admin):
-    """`is_final=False` chunks must not be flagged as final."""
+async def test_send_log_chunk_intermediate_is_deprecated_noop(transport, fresh_ids, contract_probe):
+    """An intermediate deprecated chunk is acknowledged without persistence."""
     ok = await transport.send_log_chunk(
         run_id=fresh_ids.run_id,
         log_type="stdout",
@@ -102,9 +99,4 @@ async def test_send_log_chunk_marks_intermediate_not_final(transport, fresh_ids,
     )
     assert ok is True
 
-    if redis_admin is not None:
-        keys = transport._test_keys  # type: ignore[attr-defined]
-        entries = await redis_admin.xrange(keys.log_chunk_stream(fresh_ids.run_id), count=10)
-        assert len(entries) == 1
-        _id, fields = entries[0]
-        assert fields["is_final"].lower() in ("false", "0")
+    assert await contract_probe.no_log_streams(fresh_ids.run_id)

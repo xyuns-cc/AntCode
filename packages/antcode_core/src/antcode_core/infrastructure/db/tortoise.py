@@ -1,15 +1,21 @@
 """PostgreSQL-only Tortoise ORM configuration."""
 
 import os
+import ssl
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 from dotenv import load_dotenv
 from loguru import logger
 
 # 加载环境变量
 load_dotenv()
+
+POSTGRES_SSL_MODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
+VERIFY_SSL_MODES = frozenset({"verify-ca", "verify-full"})
+SUPPORTED_SSL_QUERY_OPTIONS = frozenset({"sslmode", "sslrootcert"})
 
 
 def get_database_url() -> str:
@@ -42,13 +48,69 @@ def _parse_db_url(db_url: str) -> dict[str, Any]:
     if missing:
         raise ValueError(f"DATABASE_URL 缺少 {', '.join(missing)}。")
 
-    return {
+    credentials: dict[str, Any] = {
         "host": parsed.hostname,
         "port": port,
         "user": parsed.username,
         "password": parsed.password,
         "database": database,
     }
+    ssl_config = _parse_ssl_config(parsed)
+    if ssl_config is not None:
+        credentials["ssl"] = ssl_config
+    return credentials
+
+
+def _query_value(query: dict[str, list[str]], name: str) -> str | None:
+    values = query.get(name)
+    if values is None:
+        return None
+    if len(values) != 1:
+        raise ValueError(f"DATABASE_URL {name} 只能设置一次。")
+    value = values[0].strip()
+    if not value:
+        raise ValueError(f"DATABASE_URL {name} 不能为空。")
+    return value
+
+
+def _parse_ssl_config(parsed: ParseResult) -> ssl.SSLContext | str | bool | None:
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    unsupported = sorted(name for name in query if name.startswith("ssl") and name not in SUPPORTED_SSL_QUERY_OPTIONS)
+    if unsupported:
+        raise ValueError(f"DATABASE_URL 包含不支持的 TLS 参数: {', '.join(unsupported)}。")
+    ssl_mode = _query_value(query, "sslmode")
+    root_cert = _query_value(query, "sslrootcert")
+    if ssl_mode is None:
+        if root_cert is not None:
+            raise ValueError("DATABASE_URL sslrootcert 必须与 sslmode 一起设置。")
+        return None
+    ssl_mode = ssl_mode.lower()
+    if ssl_mode not in POSTGRES_SSL_MODES:
+        allowed = ", ".join(sorted(POSTGRES_SSL_MODES))
+        raise ValueError(f"DATABASE_URL sslmode 无效，可选值: {allowed}。")
+    if ssl_mode == "disable":
+        if root_cert is not None:
+            raise ValueError("DATABASE_URL sslmode=disable 禁止设置 sslrootcert。")
+        return False
+    if root_cert is None:
+        if ssl_mode in VERIFY_SSL_MODES:
+            raise ValueError(f"DATABASE_URL sslmode={ssl_mode} 必须显式设置 sslrootcert。")
+        return ssl_mode
+    return _create_ssl_context(ssl_mode, root_cert)
+
+
+def _create_ssl_context(ssl_mode: str, root_cert: str) -> ssl.SSLContext:
+    if ssl_mode not in {"require", *VERIFY_SSL_MODES}:
+        raise ValueError(f"DATABASE_URL sslmode={ssl_mode} 不会校验证书，禁止设置 sslrootcert。")
+    cert_path = Path(root_cert).expanduser()
+    if not cert_path.is_file():
+        raise ValueError(f"DATABASE_URL sslrootcert 文件不存在或不是普通文件: {cert_path}")
+    try:
+        context = ssl.create_default_context(cafile=str(cert_path))
+    except (OSError, ssl.SSLError) as exc:
+        raise ValueError(f"DATABASE_URL sslrootcert 无法加载: {cert_path}") from exc
+    context.check_hostname = ssl_mode == "verify-full"
+    return context
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -95,13 +157,7 @@ def get_tortoise_config(
     pool_min, pool_max = _resolve_pool_size(service, min_connections, max_connections)
     connection_config = {
         "engine": "tortoise.backends.asyncpg",
-        "credentials": {
-            "host": creds["host"],
-            "port": creds["port"],
-            "user": creds["user"],
-            "password": creds["password"],
-            "database": creds["database"],
-        },
+        "credentials": creds,
         "minsize": pool_min,
         "maxsize": pool_max,
     }

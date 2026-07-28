@@ -6,10 +6,10 @@
 P1a 改造：Stream 上的消息现在是 Proto bytes（``data_pb2.TaskStatus``），
 通过 ``StreamClient(codec=ProtoCodec(...))`` 自动解码为 typed 对象。
 
-P2-#24 改造：解码失败（payload 损坏 / schema 不匹配 / 重复处理报错）
-的消息现在不再被直接跳过——增加 ``XPENDING`` 检查的 deliver_count 阈值，
-超过 ``MAX_DELIVER_COUNT`` 后 ``XACK`` 并 ``XADD`` 到 dead-letter
-stream ``antcode:dead_letter:result``，避免坏消息无限重投阻塞 group。
+P2-#24 改造：解码失败的消息写入 dead-letter stream
+``antcode:dead_letter:result``。已成功解码的消息只有在处理函数明确返回
+不可接受时才按 deliver_count 进入 DLQ；数据库、Redis、SSE 等依赖异常
+始终保留在 PEL，恢复后继续处理，不能把合法最终结果永久 ACK 掉。
 
 实现采取"直接用底层 redis 客户端做 XPENDING"的策略——``StreamClient``
 当前不暴露 XPENDING；后续如果 StreamClient 增补 ``xpending`` 方法可
@@ -250,9 +250,8 @@ class ResultLoop:
             )
             return False, False
         except Exception:
-            logger.exception("处理结果消息失败: msg_id={}", message.msg_id)
-            if await self._should_dead_letter(message.msg_id):
-                return False, await self._move_to_dlq(message)
+            # 已解码消息的依赖异常保留 PEL，不能按次数误判为 poison。
+            logger.exception("处理结果消息失败，保留 PEL: msg_id={}", message.msg_id)
         return False, False
 
     async def _handle_message(self, task_status: data_pb2.TaskStatus) -> bool:

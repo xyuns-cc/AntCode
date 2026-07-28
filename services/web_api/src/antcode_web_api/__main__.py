@@ -47,6 +47,7 @@ def main():
         "host": settings.BIND_HOST,
         "port": settings.SERVER_PORT,
         "log_config": LOGGING_CONFIG,
+        "timeout_graceful_shutdown": 20,
     }
     if settings.SERVER_WORKERS > 1:
         run_kwargs["workers"] = settings.SERVER_WORKERS

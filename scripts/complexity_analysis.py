@@ -13,19 +13,33 @@ from types import MappingProxyType
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOTS = ("packages", "services", "scripts", "tests")
-SOURCE_SCOPE = tuple(f"{root}/**/*.py" for root in SOURCE_ROOTS)
-RUFF_RULES = ("C901", "PLR0911", "PLR0912", "PLR0915")
+# P2 §4.6: 门禁覆盖仓库硬规则 —— 函数 50(语句, PLR0915)、嵌套 3(PLR1702)、
+# 圈复杂度 10(C901)、位置参数 3、魔法数字(PLR2004, 按函数聚合计数)、
+# 文件 300 行(FILE_LINES, Python + 前端 TS/TSX)。TS 的函数级指标由前端
+# ESLint 承担，此处只做文件级行数。
+FRONTEND_SOURCE_ROOT = "web/antcode-frontend/src"
+SOURCE_SCOPE = (
+    *(f"{root}/**/*.py" for root in SOURCE_ROOTS),
+    f"{FRONTEND_SOURCE_ROOT}/**/*.ts",
+    f"{FRONTEND_SOURCE_ROOT}/**/*.tsx",
+)
+RUFF_RULES = ("C901", "PLR0911", "PLR0912", "PLR0915", "PLR1702", "PLR2004")
 THRESHOLDS = MappingProxyType(
     {
         "C901": 10,
         "PLR0911": 6,
         "PLR0912": 12,
         "PLR0915": 50,
+        "PLR1702": 3,
+        # 每函数魔法数字比较计数；基线冻结存量，新增即失败。
+        "PLR2004": 0,
         "POSITIONAL_ARGS": 3,
+        "FILE_LINES": 300,
     }
 )
 GENERATED_SUFFIXES = ("_pb2.py", "_pb2_grpc.py")
 METRIC_PATTERN = re.compile(r"\((\d+) > \d+\)")
+FRONTEND_SUFFIXES = (".ts", ".tsx")
 
 
 @dataclass(frozen=True, order=True)
@@ -184,12 +198,15 @@ def _ruff_command(executable: str, root: Path, files: Sequence[Path]) -> list[st
         executable,
         "check",
         "--isolated",
+        # 复杂度阈值不允许被函数内联 noqa 指令就地抑制，否则等于自行豁免门禁
+        "--ignore-noqa",
         "--target-version=py311",
         f"--select={','.join(RUFF_RULES)}",
         "--config=lint.mccabe.max-complexity=10",
         "--config=lint.pylint.max-returns=6",
         "--config=lint.pylint.max-branches=12",
         "--config=lint.pylint.max-statements=50",
+        "--config=lint.pylint.max-nested-blocks=3",
         "--output-format=json",
         "--exit-zero",
         *relative_files,
@@ -200,6 +217,8 @@ def _parse_ruff_output(root: Path, output: str) -> tuple[Finding, ...]:
     raw_findings = json.loads(output)
     indexes: dict[Path, FunctionIndex] = {}
     findings: list[Finding] = []
+    # PLR2004 无"(n > m)"度量，按 (path, function) 聚合出现次数作为 value。
+    magic_counts: dict[tuple[str, str], int] = {}
     for raw in raw_findings:
         rule = raw.get("code")
         if rule not in RUFF_RULES:
@@ -207,23 +226,58 @@ def _parse_ruff_output(root: Path, output: str) -> tuple[Finding, ...]:
         path = Path(raw["filename"]).resolve()
         index = indexes.setdefault(path, build_function_index(path))
         function = index.find(raw["location"]["row"])
+        relative = path.relative_to(root).as_posix()
+        if rule == "PLR2004":
+            key = (relative, function.qualified_name)
+            magic_counts[key] = magic_counts.get(key, 0) + 1
+            continue
         match = METRIC_PATTERN.search(raw["message"])
         if match is None:
             raise ValueError(f"Cannot parse Ruff metric: {raw['message']}")
         findings.append(
             Finding(
-                path=path.relative_to(root).as_posix(),
+                path=relative,
                 function=function.qualified_name,
                 rule=rule,
                 value=int(match.group(1)),
             )
         )
+    for (relative, function_name), count in magic_counts.items():
+        findings.append(Finding(path=relative, function=function_name, rule="PLR2004", value=count))
+    return tuple(sorted(findings))
+
+
+def discover_frontend_files(root: Path = ROOT) -> tuple[Path, ...]:
+    frontend_root = root / FRONTEND_SOURCE_ROOT
+    if not frontend_root.is_dir():
+        return ()
+    files = (path for suffix in FRONTEND_SUFFIXES for path in frontend_root.rglob(f"*{suffix}"))
+    return tuple(sorted(path for path in files if "node_modules" not in path.parts))
+
+
+def collect_file_length_findings(root: Path, files: Sequence[Path]) -> tuple[Finding, ...]:
+    findings: list[Finding] = []
+    for path in files:
+        line_count = len(path.read_text(encoding="utf-8").splitlines())
+        if line_count > THRESHOLDS["FILE_LINES"]:
+            findings.append(
+                Finding(
+                    path=path.relative_to(root).as_posix(),
+                    function="-",
+                    rule="FILE_LINES",
+                    value=line_count,
+                )
+            )
     return tuple(sorted(findings))
 
 
 def collect_current_findings(root: Path = ROOT) -> tuple[Finding, ...]:
     files = discover_source_files(root)
-    findings = (*collect_ruff_findings(root, files), *collect_positional_findings(root, files))
+    findings = (
+        *collect_ruff_findings(root, files),
+        *collect_positional_findings(root, files),
+        *collect_file_length_findings(root, (*files, *discover_frontend_files(root))),
+    )
     by_key = {finding.key: finding for finding in findings}
     if len(by_key) != len(findings):
         raise ValueError("Duplicate complexity finding identifiers detected")

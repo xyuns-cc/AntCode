@@ -27,12 +27,30 @@ def test_published_images_are_scanned_attested_and_signed() -> None:
     workflow = _read(".github/workflows/docker-build.yml")
 
     assert "Build scan candidate" in workflow
-    assert "Scan published digest" in workflow
+    # P1-CI-06: 先 push-by-digest（无 tag 不可拉取）→ 扫描该 digest →
+    # 通过后才 imagetools 打正式标签，消除"带病标签可拉取时间窗"。
+    assert "Scan pushed digest before tagging" in workflow
+    assert "push-by-digest=true" in workflow
+    assert "Tag verified digest" in workflow
+    assert workflow.index("Scan pushed digest before tagging") < workflow.index("Tag verified digest")
     assert "@${{ steps.push.outputs.digest }}" in workflow
     assert "sbom: true" in workflow
     assert "provenance: mode=max" in workflow
     assert "cosign sign --yes" in workflow
     assert "type=raw,value=latest" not in workflow
+
+
+def test_publication_only_runs_via_protected_ci_and_uses_full_sha() -> None:
+    publish_workflow = _read(".github/workflows/docker-build.yml")
+    ci_workflow = _read(".github/workflows/ci.yml")
+
+    assert "workflow_call:" in publish_workflow
+    assert "workflow_dispatch:" not in publish_workflow
+    assert "type=raw,value=sha-${{ github.sha }}" in publish_workflow
+    assert "type=sha,prefix=sha-" not in publish_workflow
+    assert "github.event_name == 'push'" in ci_workflow
+    assert "github.ref == 'refs/heads/main'" in ci_workflow
+    assert "startsWith(github.ref, 'refs/tags/v')" in ci_workflow
 
 
 def test_web_api_container_healthchecks_use_readiness() -> None:

@@ -94,8 +94,12 @@ uv run pytest tests/unit/core/
 ### 运行集成测试
 
 ```bash
-# Worker 集成测试
-uv run pytest tests/integration/worker/ -m integration
+# 集成测试需要真实 Redis，以及两个职责隔离的 PostgreSQL 测试数据库。
+export ANTCODE_INTEGRATION_REDIS_URL=redis://127.0.0.1:16379/14
+export TEST_DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_migration_test
+export DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_e2e_test
+
+uv run pytest tests/integration/ -v
 ```
 
 ### 运行边界测试
@@ -107,8 +111,16 @@ uv run pytest tests/boundary/
 ### 运行端到端测试
 
 ```bash
-# 需要先启动基础设施
-docker compose -f infra/docker/docker-compose.dev.yml up -d postgres redis
+# FULL E2E 必须显式绑定专用 PostgreSQL host、库名和 dedicated Worker。
+export ANTCODE_E2E_CONFIRM=FULL
+export DATABASE_URL=postgresql://antcode:password@127.0.0.1:15433/antcode_e2e_test
+export ANTCODE_E2E_DATABASE_HOST=127.0.0.1
+export ANTCODE_E2E_DATABASE_NAME=antcode_e2e_test
+export ANTCODE_E2E_WORKER_ID=worker-e2e-001
+export ANTCODE_E2E_WEB_API_URL=http://192.168.1.250:8000
+export ANTCODE_E2E_EXPECT_TRANSPORT_MODE=direct
+export ANTCODE_E2E_GIT_ROOT=/srv/antcode-e2e-git
+export ANTCODE_E2E_GIT_BASE_URL=http://192.168.1.250:18081
 
 # 运行 E2E 测试
 uv run pytest tests/e2e/ -v
@@ -117,31 +129,22 @@ uv run pytest tests/e2e/ -v
 ### 运行压力测试
 
 ```bash
-# 压力测试默认跳过，需要手动启用
-uv run pytest tests/loadtest/ -v --run-loadtest
+# 外部压测必须显式确认；完整写场景使用 FULL。
+ANTCODE_LOADTEST_CONFIRM=FULL \
+  uv run pytest tests/loadtest/ -v --run-loadtests
 ```
 
 ## 测试配置
 
 ### 环境变量
 
-测试可以通过环境变量配置：
+真实集成测试使用以下环境变量：
 
 ```bash
-# 数据库配置
-TEST_POSTGRES_HOST=localhost
-TEST_POSTGRES_PORT=5432
-TEST_POSTGRES_USER=antcode
-TEST_POSTGRES_PASSWORD=test
-TEST_POSTGRES_DATABASE=antcode_test
-
-# Redis 配置
-TEST_REDIS_HOST=localhost
-TEST_REDIS_PORT=6379
-TEST_REDIS_DB=15
-
-# Git 服务配置
-TEST_GIT_HTTP_URL=http://localhost:3001
+ANTCODE_CONTRACT_REDIS_URL=redis://127.0.0.1:16379/14
+ANTCODE_INTEGRATION_REDIS_URL=redis://127.0.0.1:16379/14
+TEST_DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_migration_test
+DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_e2e_test
 ```
 
 ### pytest 配置
@@ -150,11 +153,17 @@ TEST_GIT_HTTP_URL=http://localhost:3001
 
 ```toml
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-asyncio_mode = "auto"
+asyncio_mode = "strict"
+addopts = "--strict-markers"
+pythonpath = ["."]
+markers = [
+    "integration: 集成测试标记",
+    "e2e: 端到端测试标记",
+    "pbt: 边界/属性测试标记",
+    "transport(mode): 传输合同覆盖模式",
+    "loadtest_scenario: 外部压测场景",
+    "loadtest_write: 会写入数据的压测场景",
+]
 ```
 
 ## 编写测试指南

@@ -26,11 +26,12 @@ from antcode_core.infrastructure.redis import (
     decode_stream_payload,
     redis_namespace,
     task_ready_stream,
-    trim_acknowledged_stream,
     worker_group,
 )
 from antcode_core.observability.tracing import inject_trace
 from loguru import logger
+
+from antcode_gateway.handlers.task_settle import TaskSettlementMixin
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -53,6 +54,7 @@ class TaskInfo:
     resolved_revision: str = ""
     source_subdir: str = ""
     entry_point: str = ""
+    runtime_env_name: str = ""
     params: dict[str, object] = field(default_factory=dict)
     environment: dict[str, object] = field(default_factory=dict)
     receipt_id: str = ""
@@ -107,6 +109,7 @@ def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
         entry_point=task.entry_point,
         run_id=task.run_id,
         receipt_id=task.receipt_id,
+        runtime_env_name=task.runtime_env_name,
     )
     # P1-24: 用 json.dumps 而不是 str(value)，避免嵌套 dict 变 Python repr。
     for key, value in (task.params or {}).items():
@@ -117,15 +120,17 @@ def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
     return dispatch
 
 
-class TaskPollHandler:
+class TaskPollHandler(TaskSettlementMixin):
     """任务轮询处理器
 
     从 Redis Streams ready queues 读取任务。
-    Gateway 不实现调度策略，只负责代理队列读取。
+    Gateway 不实现调度策略，只负责代理队列读取；结算面（ACK/requeue/DLQ
+    的代际 fence）在 ``TaskSettlementMixin``。
     """
 
     READY_QUEUE_PREFIX = f"{redis_namespace()}:task:ready:"
     WORKER_GROUP = worker_group()
+    PENDING_VISIBILITY_TIMEOUT_MS = 30_000
 
     def __init__(self, redis_client=None):
         self._redis_client = redis_client
@@ -164,6 +169,7 @@ class TaskPollHandler:
         self,
         worker_id: str,
         *,
+        lease_id: str,
         max_tasks: int = 1,
         block_ms: int = 5000,
         queues: list[str] | None = None,
@@ -175,11 +181,12 @@ class TaskPollHandler:
         if redis is None:
             raise RuntimeError("Redis 不可用，无法轮询任务")
 
+        consumer = self.generation_consumer(worker_id, lease_id)
         queue_names = queues or [task_ready_stream(worker_id)]
         results = await self._read_streams(
             redis,
             queue_names,
-            worker_id,
+            consumer,
             max_tasks=max_tasks,
             block_ms=block_ms,
         )
@@ -191,7 +198,7 @@ class TaskPollHandler:
         self,
         redis,
         queues: list[str],
-        worker_id: str,
+        consumer: str,
         *,
         max_tasks: int,
         block_ms: int,
@@ -201,12 +208,12 @@ class TaskPollHandler:
         pending = await self._drain_pending_streams(
             redis,
             queues,
-            worker_id,
+            consumer,
             max_tasks=max_tasks,
         )
         live = await redis.xreadgroup(
             groupname=self.WORKER_GROUP,
-            consumername=worker_id,
+            consumername=consumer,
             streams=dict.fromkeys(queues, ">"),
             count=max_tasks,
             block=block_ms,
@@ -222,21 +229,38 @@ class TaskPollHandler:
                 try:
                     task = self._parse_task_data(data, message_id)
                 except Exception as exc:
-                    # 回归修复(review): 毒消息(缺 task_id / JSON 损坏 / 被旧版
-                    # MAXLEN 裁剪后残留在 PEL 的幽灵条目,其 data 为 None)必须
-                    # 逐条 ack 丢弃。若让解析异常向上冒泡:StreamTasks 外层
-                    # catch 后 sleep-重试,而 _drain_pending_streams 每轮都会
-                    # 重读同一条毒消息 → 每轮都 raise → 同批合法任务一并丢弃,
-                    # 该 worker 永久拿不到任何任务。run 级失败由 master
-                    # reconcile._check_dispatched_no_ack 在 180s 内收敛为 FAILED。
+                    # P2-08：毒消息除了 XACK 之外**必须**先写 DLQ，保留原始帧
+                    # 供诊断和后续重放。之前直接 XACK 丢弃 → 损坏帧/协议不兼容/
+                    # schema 变化会永久删除任务，只能靠 master 180s reconcile
+                    # 标 FAILED，运维再也看不到原文。
+                    # 沿用同文件已有 DLQ 常量：antcode:task:dead_letter，
+                    # maxlen=DEAD_LETTER_MAXLEN 保护 stream。
                     logger.warning(
-                        f"丢弃无法解析的任务消息(已 ACK): worker={worker_id} "
-                        f"stream={stream} message_id={message} err={exc}"
+                        f"毒任务消息进 DLQ 并 ACK: worker={worker_id} stream={stream} message_id={message} err={exc}"
                     )
+                    dead_lettered = False
                     try:
-                        await redis.xack(stream, self.WORKER_GROUP, message)
+                        dead_payload = {
+                            self._decode_identifier(k): self._decode_identifier(v) for k, v in (data or {}).items()
+                        }
+                        dead_payload["dead_letter_at"] = datetime.now().isoformat()
+                        dead_payload["dead_letter_reason"] = f"parse_error:{type(exc).__name__}"
+                        dead_payload["origin_stream"] = stream
+                        dead_payload["origin_msg_id"] = message
+                        await redis.xadd(
+                            self._dead_letter_key(stream),
+                            dead_payload,
+                            maxlen=self.DEAD_LETTER_MAXLEN,
+                            approximate=True,
+                        )
+                        dead_lettered = True
                     except Exception:
-                        logger.exception(f"毒消息 ACK 失败: stream={stream} message_id={message}")
+                        logger.exception(f"毒消息写 DLQ 失败: stream={stream} message_id={message}")
+                    if dead_lettered:
+                        try:
+                            await redis.xack(stream, self.WORKER_GROUP, message)
+                        except Exception:
+                            logger.exception(f"毒消息 ACK 失败: stream={stream} message_id={message}")
                     continue
                 task.receipt_id = f"{stream}|{message}"
                 tasks.append(task)
@@ -253,27 +277,39 @@ class TaskPollHandler:
         self,
         redis,
         queues: list[str],
-        worker_id: str,
+        consumer: str,
         *,
         max_tasks: int,
     ) -> list:
-        """B3: 排空 (worker) 每个 stream 上的 PEL 到本次响应，让重连的 worker
-        真正拿到自己之前未 ack 的消息。仅返回不为空的 stream。
+        """认领超过 visibility timeout 的 PEL，避免活跃任务被紧循环重投。
+
+        P1-GW-01: 以代际 consumer 认领。旧代际（或旧布局裸 worker_id
+        consumer）滞留的 entry 会在 visibility timeout 后转移到当前代际
+        consumer 名下，旧代际随后的结算被 Lua 的 consumer 校验拒绝。
         """
-        pel = await redis.xreadgroup(
-            groupname=self.WORKER_GROUP,
-            consumername=worker_id,
-            streams=dict.fromkeys(queues, "0"),
-            count=max_tasks,
-            block=0,
-        )
-        if not pel:
-            return []
-        # 过滤空 messages 的 stream；有则 log 一下方便运维排查
-        result = [(name, msgs) for name, msgs in pel if msgs]
+        result: list[tuple[str, list]] = []
+        remaining = max_tasks
+        for queue in queues:
+            if remaining <= 0:
+                break
+            # Redis < 7.0 只返回 (next_id, messages) 两元组，>= 7.0 追加
+            # deleted_ids 第三项；宽容解包，避免旧版本每次 poll 都抛 ValueError。
+            claimed = await redis.xautoclaim(
+                queue,
+                self.WORKER_GROUP,
+                consumer,
+                self.PENDING_VISIBILITY_TIMEOUT_MS,
+                start_id="0-0",
+                count=remaining,
+            )
+            messages = claimed[1] if len(claimed) > 1 else []
+            if not messages:
+                continue
+            result.append((queue, messages))
+            remaining -= len(messages)
         if result:
             total = sum(len(msgs) for _, msgs in result)
-            logger.info(f"B3 PEL 排空: worker={worker_id} 找到 {total} 条孤儿消息")
+            logger.info(f"B3 PEL visibility reclaim: consumer={consumer} 找到 {total} 条消息")
         return result
 
     def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo:
@@ -295,6 +331,7 @@ class TaskPollHandler:
             resolved_revision=str(decoded.get("resolved_revision", "") or ""),
             source_subdir=str(decoded.get("source_subdir", "") or ""),
             entry_point=str(decoded.get("entry_point", "") or ""),
+            runtime_env_name=str(decoded.get("runtime_env_name", "") or ""),
             params=self._parse_json(decoded.get("params", "{}"), "params"),
             environment=self._parse_json(decoded.get("environment", "{}"), "environment"),
             trace_parent=str(decoded.get("trace_parent", "") or ""),
@@ -319,112 +356,3 @@ class TaskPollHandler:
         if not isinstance(parsed, dict):
             raise ValueError(f"{field_name} 必须是 JSON object")
         return parsed
-
-    async def ack_task(self, worker_id: str, queue: str, message_id: str) -> bool:
-        redis = await self._get_redis_client()
-        if redis is None:
-            return False
-
-        try:
-            acked = await redis.xack(queue, self.WORKER_GROUP, message_id)
-            if int(acked or 0) != 1:
-                return False
-            try:
-                await trim_acknowledged_stream(redis, queue, self.WORKER_GROUP)
-            except Exception:
-                logger.exception(
-                    "任务 ACK 后裁剪失败: worker_id={} queue={}",
-                    worker_id,
-                    queue,
-                )
-            logger.debug(f"任务已确认: worker_id={worker_id}, queue={queue}, message_id={message_id}")
-            return True
-        except Exception as exc:
-            logger.exception(f"确认任务失败: {exc}")
-            return False
-
-    async def ack_receipt(
-        self,
-        receipt_id: str,
-        accepted: bool = True,
-        reason: str = "",
-    ) -> bool:
-        """确认任务（receipt 形式）"""
-        if "|" not in receipt_id:
-            return False
-        queue, message_id = receipt_id.split("|", 1)
-        if accepted:
-            return await self.ack_task("", queue, message_id)
-        return await self._requeue_task(queue, message_id, reason)
-
-    # B7: 与 Direct 模式（redis/transport.py:MAX_REQUEUE_COUNT）对齐；
-    # 超阈值的消息进入死信 stream 而非无限重投。
-    MAX_REQUEUE_COUNT = 5
-    DEAD_LETTER_STREAM_SUFFIX = "task:dead_letter"
-    DEAD_LETTER_MAXLEN = 10000
-
-    async def _requeue_task(self, queue: str, message_id: str, reason: str) -> bool:
-        """拒绝任务并回写 ready stream；超过 ``MAX_REQUEUE_COUNT`` 次进死信。
-
-        注：保留 JSON 帧以兼容 Master 当前的 ``_send_batch_to_queue`` 写入端。
-        待 Master 切换为 ``ProtoCodec(TaskDispatch)`` 派发后，这里需要改为
-        ``xadd {PROTO_FIELD: TaskDispatch.SerializeToString()}``。
-        """
-        redis = await self._get_redis_client()
-        if redis is None:
-            return False
-
-        try:
-            messages = await redis.xrange(queue, min=message_id, max=message_id, count=1)
-            if not messages:
-                return False
-
-            _, data = messages[0]
-            decoded = {
-                (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
-                for k, v in data.items()
-            }
-
-            # B7: 计数 + 死信路径
-            try:
-                requeue_count = int(decoded.get("requeue_count", "0") or "0")
-            except (TypeError, ValueError):
-                requeue_count = 0
-            requeue_count += 1
-
-            now_iso = datetime.now().isoformat()
-            if requeue_count > self.MAX_REQUEUE_COUNT:
-                dead_payload = dict(decoded)
-                dead_payload["requeue_count"] = str(requeue_count)
-                dead_payload["last_requeue_reason"] = reason
-                dead_payload["dead_letter_at"] = now_iso
-                dead_payload["origin_queue"] = queue
-                dead_letter_key = f"antcode:{self.DEAD_LETTER_STREAM_SUFFIX}"
-                try:
-                    await redis.xadd(
-                        dead_letter_key,
-                        dead_payload,
-                        maxlen=self.DEAD_LETTER_MAXLEN,
-                        approximate=True,
-                    )
-                    await redis.xack(queue, self.WORKER_GROUP, message_id)
-                    logger.warning(
-                        f"消息进入死信(超过 {self.MAX_REQUEUE_COUNT} 次 requeue): "
-                        f"queue={queue} msg={message_id} reason={reason}"
-                    )
-                    return True
-                except Exception as dl_exc:
-                    logger.exception(f"死信写入失败: {dl_exc}")
-                    # 死信失败时不 ack，让 PEL/reclaim 兜底
-                    return False
-
-            decoded["requeue_count"] = str(requeue_count)
-            decoded["requeue_reason"] = reason
-            decoded["requeue_at"] = now_iso
-
-            await redis.xadd(queue, decoded)
-            await redis.xack(queue, self.WORKER_GROUP, message_id)
-            return True
-        except Exception as exc:
-            logger.exception(f"重新入队失败: {exc}")
-            return False

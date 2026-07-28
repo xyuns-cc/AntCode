@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 import httpx
 from loguru import logger
 
-from antcode_core.application.services.projects.git_url_security import validate_webhook_url
+from antcode_core.application.services.projects.git_url_security import resolve_webhook_url
 
 
 def _safe_webhook_label(url):
@@ -69,7 +69,7 @@ class MultiWebhookChannel(AlertChannel):
         # system-config 接口直写 DB，这里在真正发起请求前再校验一次，
         # 拒绝 http(s) 以外的协议及本地/私网/云元数据端点。
         try:
-            await asyncio.to_thread(validate_webhook_url, url)
+            await asyncio.to_thread(resolve_webhook_url, url)
         except ValueError as exc:
             logger.error(f"[{self.channel_name}] 拒绝发送告警，Webhook URL 校验失败 [{webhook_name}]: {exc}")
             return False
@@ -97,11 +97,28 @@ class MultiWebhookChannel(AlertChannel):
         verify_ssl = os.getenv("ALERT_VERIFY_SSL", "true").lower() != "false"
 
         try:
-            async with httpx.AsyncClient(verify=verify_ssl, timeout=10.0) as client:
+            endpoint = await asyncio.to_thread(resolve_webhook_url, url)
+        except ValueError as exc:
+            logger.error(f"[{self.channel_name}] 连接前 SSRF 二次校验失败: {exc}")
+            return False
+
+        try:
+            # P1-11：显式 follow_redirects=False，防止服务端 302 到内网/云
+            # metadata 端点绕过初始 URL 校验。
+            async with httpx.AsyncClient(
+                verify=verify_ssl,
+                timeout=10.0,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
                 response = await client.post(
-                    url,
+                    endpoint.pinned_http_url(),
                     json=payload,
-                    headers={"Content-Type": "application/json;charset=utf-8"},
+                    headers={
+                        "Content-Type": "application/json;charset=utf-8",
+                        "Host": endpoint.host_header(),
+                    },
+                    extensions={"sni_hostname": endpoint.host},
                 )
 
             if response.status_code != 200:

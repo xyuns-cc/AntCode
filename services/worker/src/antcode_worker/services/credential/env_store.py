@@ -7,11 +7,15 @@ Requirements: 6.3, 6.4, 6.5, 6.6
 """
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
-from loguru import logger
-
 from antcode_worker.services.credential.base import CredentialStore
+from antcode_worker.services.credential.registration_intent import (
+    RegistrationIntent,
+    RegistrationRequest,
+)
 
 # 环境变量名称前缀
 ENV_PREFIX = "WORKER_CREDENTIAL_"
@@ -23,6 +27,9 @@ CREDENTIAL_ENV_MAPPING = {
     "secret_key": f"{ENV_PREFIX}SECRET_KEY",
     "gateway_host": f"{ENV_PREFIX}GATEWAY_HOST",
     "gateway_port": f"{ENV_PREFIX}GATEWAY_PORT",
+    "redis_username": f"{ENV_PREFIX}REDIS_USERNAME",
+    "redis_password": f"{ENV_PREFIX}REDIS_PASSWORD",
+    "registration_id": f"{ENV_PREFIX}REGISTRATION_ID",
     "registered_at": f"{ENV_PREFIX}REGISTERED_AT",
 }
 
@@ -59,8 +66,28 @@ class EnvCredentialStore(CredentialStore):
             "secret_key": f"{env_prefix}SECRET_KEY",
             "gateway_host": f"{env_prefix}GATEWAY_HOST",
             "gateway_port": f"{env_prefix}GATEWAY_PORT",
+            "redis_username": f"{env_prefix}REDIS_USERNAME",
+            "redis_password": f"{env_prefix}REDIS_PASSWORD",
+            "registration_id": f"{env_prefix}REGISTRATION_ID",
             "registered_at": f"{env_prefix}REGISTERED_AT",
         }
+
+    def ensure_durable_writable(self) -> None:
+        raise RuntimeError("环境变量凭证存储不能耐久保存新签发的 Worker 凭证")
+
+    @contextmanager
+    def registration_session(
+        self,
+        install_key: str | None = None,
+        request: RegistrationRequest | None = None,
+    ) -> Iterator[RegistrationIntent | None]:
+        del request
+        if install_key is not None:
+            raise RuntimeError("环境变量凭证存储不能创建可恢复注册意图")
+        yield None
+
+    def finish_registration(self) -> None:
+        raise RuntimeError("环境变量凭证存储没有可完成的注册意图")
 
     def exists(self) -> bool:
         """
@@ -84,34 +111,16 @@ class EnvCredentialStore(CredentialStore):
 
         Requirements: 6.4
         """
-        try:
-            credentials: dict[str, Any] = {}
-
-            for field, env_name in self._env_mapping.items():
-                value = os.getenv(env_name)
-                if value is not None:
-                    # 处理端口号类型转换
-                    if field == "gateway_port":
-                        try:
-                            credentials[field] = int(value)
-                        except ValueError:
-                            credentials[field] = 0
-                    else:
-                        credentials[field] = value
-
-            # 检查必填字段
-            required_fields = ["worker_id", "api_key", "secret_key"]
-            for field in required_fields:
-                if not credentials.get(field):
-                    logger.debug(f"环境变量凭证缺少必填字段: {field}")
-                    return None
-
-            logger.debug("已从环境变量加载凭证")
-            return credentials
-
-        except Exception as e:
-            logger.error(f"从环境变量加载凭证失败: {e}")
+        credentials: dict[str, Any] = {}
+        for field, env_name in self._env_mapping.items():
+            value = os.getenv(env_name)
+            if value is None:
+                continue
+            credentials[field] = int(value) if field == "gateway_port" else value
+        required_fields = ("worker_id", "api_key", "secret_key")
+        if any(not credentials.get(field) for field in required_fields):
             return None
+        return credentials
 
     async def load_async(self) -> dict[str, Any] | None:
         """
@@ -140,18 +149,8 @@ class EnvCredentialStore(CredentialStore):
 
         Requirements: 6.5
         """
-        try:
-            for field, env_name in self._env_mapping.items():
-                value = credentials.get(field)
-                if value is not None:
-                    os.environ[env_name] = str(value)
-
-            logger.debug("已保存凭证到环境变量")
-            return True
-
-        except Exception as e:
-            logger.error(f"保存凭证到环境变量失败: {e}")
-            return False
+        del credentials
+        raise RuntimeError("环境变量凭证存储是只读来源")
 
     async def save_async(self, credentials: dict[str, Any]) -> bool:
         """
@@ -178,17 +177,9 @@ class EnvCredentialStore(CredentialStore):
 
         Requirements: 6.6
         """
-        try:
-            for env_name in self._env_mapping.values():
-                if env_name in os.environ:
-                    del os.environ[env_name]
-
-            logger.debug("已清除凭证环境变量")
-            return True
-
-        except Exception as e:
-            logger.error(f"清除凭证环境变量失败: {e}")
-            return False
+        for env_name in self._env_mapping.values():
+            os.environ.pop(env_name, None)
+        return True
 
     async def clear_async(self) -> bool:
         """

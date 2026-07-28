@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from antcode_worker.artifact_transfer import SourceBundleDownload
+
 SOURCE_BUNDLE_METHOD = "source_bundle"
 PGARTIFACT_SCHEME = "pgartifact"
 SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -84,10 +86,15 @@ class ArtifactFetcher:
         await asyncio.to_thread(self._prepare_project_dir, project_dir)
         archive_path = project_dir / "source.bundle"
         try:
-            await self._artifact_store.read_blob_to_file(
-                content_hash,
+            await self._artifact_store.download_source_bundle(
+                SourceBundleDownload(
+                    run_id=run_id,
+                    project_id=project_id,
+                    content_hash=content_hash,
+                    size_bytes=source_bundle_size,
+                    max_bytes=MAX_ARCHIVE_BYTES,
+                ),
                 archive_path,
-                max_bytes=MAX_ARCHIVE_BYTES,
             )
             await asyncio.to_thread(
                 self._verify_bundle_file,

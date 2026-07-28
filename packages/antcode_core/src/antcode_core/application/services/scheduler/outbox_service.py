@@ -10,7 +10,7 @@ from typing import Any
 from loguru import logger
 from tortoise.transactions import in_transaction
 
-from antcode_core.application.services.scheduler.outbox_claims import OutboxConsumeClaim, claim_is_active
+from antcode_core.application.services.scheduler.outbox_claims import OutboxConsumeClaim, claim_is_active, replay_filter
 from antcode_core.common.config import settings
 from antcode_core.domain.models.scheduler_outbox import SchedulerOutbox
 from antcode_core.infrastructure.redis.streams import StreamClient
@@ -250,11 +250,11 @@ class SchedulerOutboxService:
         return published
 
     async def _publish_one(self) -> bool:
-        now = datetime.now(UTC)
         async with in_transaction("default") as conn:
+            now = await self._db_now(conn)
             event = await (
                 SchedulerOutbox.filter(
-                    published_at__isnull=True,
+                    replay_filter(now),
                     consumed_at__isnull=True,
                     available_at__lte=now,
                 )

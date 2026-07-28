@@ -1,6 +1,6 @@
 import { BaseService } from './base'
 import apiClient from './api'
-import Logger from '@/utils/logger'
+import { createLogStreamConnection } from './logStreamConnection'
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
 export type LogType = 'stdout' | 'stderr' | 'system' | 'application'
@@ -17,6 +17,7 @@ export interface LogEntry {
   source?: string
   file_path?: string
   line_number?: number
+  sequence?: number
   extra_data?: Record<string, unknown>
 }
 
@@ -87,11 +88,21 @@ export interface LogStreamConnection {
   disconnect: () => void
 }
 
-export type HistoricalLogsPhase = 'loading' | 'loaded' | 'empty'
+export type HistoricalLogsPhase = 'loading' | 'loaded' | 'empty' | 'gap'
 
 export interface HistoricalLogsUpdate {
   phase: HistoricalLogsPhase
   sentLines?: number
+  truncated?: boolean
+}
+
+export interface LogStreamOptions {
+  runId: string
+  onMessage?: (log: LogEntry) => void
+  onError?: (error: unknown) => void
+  onStateChange?: (state: string) => void
+  onStatusUpdate?: (status: { status: string; message?: string; progress?: number }) => void
+  onHistoricalLogsUpdate?: (update: HistoricalLogsUpdate) => void
 }
 
 class LogService extends BaseService {
@@ -183,9 +194,11 @@ class LogService extends BaseService {
    * 原生 EventSource 无法携带 Authorization 头，故用 60s TTL 的一次性票据换取接入；
    * 后端 401 时由 apiClient 响应拦截器统一处理（刷新 token + 重试）。
    */
-  async getStreamTicket(): Promise<string> {
+  async getStreamTicket(runId: string): Promise<string> {
     const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
-      '/api/v1/logs/stream-ticket'
+      '/api/v1/logs/stream-ticket',
+      undefined,
+      { params: { run_id: runId } },
     )
     const body = response.data
     const ticket = body?.data?.ticket ?? body?.ticket
@@ -195,219 +208,12 @@ class LogService extends BaseService {
     return ticket
   }
 
-  connectLogStream(
-    runId?: string,
-    onMessage?: (log: LogEntry) => void,
-    onError?: (error: unknown) => void,
-    onStateChange?: (state: string) => void,
-    onStatusUpdate?: (status: { status: string; message?: string; progress?: number }) => void,
-    onHistoricalLogsUpdate?: (update: HistoricalLogsUpdate) => void
-  ): LogStreamConnection | null {
-    if (!runId) {
-      onError?.('runId is required for log stream connection')
+  connectLogStream(options: LogStreamOptions): LogStreamConnection | null {
+    if (!options.runId) {
+      options.onError?.('runId is required for log stream connection')
       return null
     }
-
-    let source: EventSource | null = null
-    let reconnectAttempts = 0
-    const maxReconnectAttempts = 5
-    let manualClose = false
-    // 探活 watchdog：服务端每 15s 发 ping 事件，45s 无任何事件视为死连接
-    const WATCHDOG_STALE_MS = 45_000
-    const WATCHDOG_CHECK_MS = 15_000
-    let lastEventAt = Date.now()
-    let watchdog: ReturnType<typeof setInterval> | null = null
-
-    const stopWatchdog = () => {
-      if (watchdog) {
-        clearInterval(watchdog)
-        watchdog = null
-      }
-    }
-
-    const teardown = () => {
-      stopWatchdog()
-      source?.close()
-      source = null
-    }
-
-    const scheduleReconnect = () => {
-      if (manualClose) return
-      if (reconnectAttempts >= maxReconnectAttempts) {
-        onStateChange?.('failed')
-        onError?.('日志流连接失败：已达最大重连次数')
-        return
-      }
-      reconnectAttempts += 1
-      const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts - 1), 30000)
-      onStateChange?.('reconnecting')
-      setTimeout(() => {
-        if (manualClose) return
-        void connect()
-      }, delay)
-    }
-
-    const parseData = <T = Record<string, unknown>>(event: MessageEvent): T | null => {
-      try {
-        return JSON.parse(event.data) as T
-      } catch (e) {
-        Logger.error('解析日志 SSE 消息失败:', e)
-        return null
-      }
-    }
-
-    const connect = async () => {
-      try {
-        // ticket 为一次性消费，每次（重）连接都必须先换新 ticket
-        const ticket = await this.getStreamTicket()
-        // ticket 请求在途期间可能已被 disconnect（关闭页面/切换 run），
-        // 此处不复查会产生无人引用的孤儿 EventSource（未消费的 ticket 60s 自然过期）
-        if (manualClose) return
-        const url = `/api/v1/logs/runs/${runId}/stream?ticket=${encodeURIComponent(ticket)}`
-        const es = new EventSource(url)
-        source = es
-        lastEventAt = Date.now()
-
-        const touch = () => {
-          lastEventAt = Date.now()
-        }
-
-        es.onopen = () => {
-          // 注意：不在此处清零 reconnectAttempts——服务端"open 成功后随即
-          // stream_error 关流"的场景（如慢消费者溢出）会让熔断永不生效，
-          // 形成 1s 节奏的无限重连循环。清零移到历史回放完成（连接被证明健康）。
-          touch()
-          onStateChange?.('connected')
-        }
-
-        es.addEventListener('log_line', (event) => {
-          touch()
-          const message = parseData<{
-            timestamp?: string
-            data?: {
-              timestamp?: string
-              level?: string
-              log_type?: string
-              run_id?: string
-              content?: string
-              message?: string
-              source?: string
-              sequence?: number | null
-            }
-          }>(event)
-          const data = message?.data
-          if (!data) return
-
-          const logEntry: LogEntry = {
-            id: `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-            timestamp: data.timestamp || message?.timestamp || new Date().toISOString(),
-            level: (data.level || 'INFO') as LogLevel,
-            log_type: (data.log_type || 'stdout') as LogType,
-            run_id: data.run_id || runId,
-            message: data.content || data.message || '',
-            source: data.source,
-          }
-          onMessage?.(logEntry)
-        })
-
-        es.addEventListener('run_status', (event) => {
-          touch()
-          const message = parseData<{
-            data?: { status?: string; message?: string; progress?: number }
-          }>(event)
-          if (!message?.data?.status) return
-          onStatusUpdate?.({
-            status: message.data.status,
-            message: message.data.message,
-            progress: message.data.progress,
-          })
-        })
-
-        es.addEventListener('historical_logs_start', (event) => {
-          touch()
-          void event
-          onHistoricalLogsUpdate?.({ phase: 'loading' })
-        })
-
-        es.addEventListener('historical_logs_end', (event) => {
-          touch()
-          // 历史回放完整送达 = 连接被证明健康，此时才重置重连熔断计数
-          reconnectAttempts = 0
-          const message = parseData<{ sent_lines?: number }>(event)
-          const sentLines = Number(message?.sent_lines)
-          onHistoricalLogsUpdate?.({
-            phase: 'loaded',
-            sentLines: Number.isFinite(sentLines) ? sentLines : 0,
-          })
-        })
-
-        es.addEventListener('no_historical_logs', (event) => {
-          touch()
-          reconnectAttempts = 0
-          void event
-          onHistoricalLogsUpdate?.({ phase: 'empty', sentLines: 0 })
-        })
-
-        es.addEventListener('ping', () => {
-          // 仅用于保活与 watchdog 刷新，SSE 单向推送无需回 pong
-          touch()
-        })
-
-        // 服务端业务错误（会话失效 / 慢消费者 / 超过最大寿命），与网络层 onerror 区分
-        es.addEventListener('stream_error', (event) => {
-          touch()
-          const message = parseData<{ code?: string; message?: string }>(event)
-          onError?.(message?.message || '日志流服务端错误')
-          if (message?.code === 'session_revoked') {
-            // 会话已失效：重连拿新 ticket 也必然 401，直接终止（登录流程接管）
-            manualClose = true
-            teardown()
-            onStateChange?.('failed')
-            return
-          }
-          // 其余 code（overflow/max_lifetime/limit）：服务端随后结束流，
-          // 触发 onerror 走统一退避重连
-        })
-
-        es.onerror = () => {
-          // 关键：ticket 是一次性的，绝不能让 EventSource 用旧 URL 自动重连
-          //（自动重连必然 401 且无限打后端），统一 close 后自管退避重连
-          teardown()
-          onStateChange?.('disconnected')
-          scheduleReconnect()
-        }
-
-        stopWatchdog()
-        watchdog = setInterval(() => {
-          if (manualClose) {
-            // teardown 而非仅停定时器：若存在竞态漏网的孤儿连接，
-            // 这里是最后的自愈点（≤15s 内关闭）
-            teardown()
-            return
-          }
-          if (Date.now() - lastEventAt > WATCHDOG_STALE_MS) {
-            Logger.warn('日志流超过 45s 无事件，判定为死连接，重连')
-            teardown()
-            onStateChange?.('disconnected')
-            scheduleReconnect()
-          }
-        }, WATCHDOG_CHECK_MS)
-      } catch (error) {
-        // ticket 申请失败等
-        onStateChange?.('error')
-        onError?.(error)
-        scheduleReconnect()
-      }
-    }
-
-    void connect()
-
-    return {
-      disconnect: () => {
-        manualClose = true
-        teardown()
-      },
-    }
+    return createLogStreamConnection(() => this.getStreamTicket(options.runId), options)
   }
 }
 

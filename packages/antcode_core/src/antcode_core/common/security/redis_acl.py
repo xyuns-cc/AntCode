@@ -3,41 +3,16 @@
 给每个 Direct Worker 发一个 ``worker_<public_id>`` 账户，
 通过 ACL 规则限制其只能访问：
 - 自己的 per-worker key（task:ready:<id>、heartbeat:<id> 等）
-- 必要的共享 stream（task:result、log:ingest、控制全局流等）
+- 必要的共享写入 stream（task:result）
 
 防止单 worker 被攻破后横向读写其他 worker 的数据。
 selector 策略表见同目录 ``redis_acl_policy.py``。
 
-残余风险（P1-SEC-02 复核结论；Redis ACL 表达力边界，经 Redis 8 实测
-确认，如实记录、不视为已解决）：
-
-1. ``{ns}:run:owner:*`` 与 ``{ns}:lease:expiring`` / ``{ns}:lease:active``：
-   Redis 7+ 起 Lua 脚本内部的每次 ``redis.call`` 同样按调用用户 ACL 逐
-   命令、逐 key 校验（实测：仅授 ``+eval`` 时脚本内 SET 直接被拒）。
-   因此 run_ownership_fence 的 SET/GET/DEL/PEXPIRE 与 LeaseStore
-   grant/revoke Lua 的 ZADD/ZREM、SADD/SREM 必须以裸命令授予；ACL 无法
-   区分"脚本内调用"与"客户端裸调用"，也没有 zset/set 成员维度。被攻破
-   的 worker 因此可以绕过 fence Lua 直接改写任意 run 的 ownership key、
-   污染共享 lease 索引。另外 P1-DR-02 死主接管要求 takeover Lua 只读
-   （HGET/PTTL）任意 holder 的 ``lease:data:*``：被攻破的 worker 由此可
-   读取他人 lease 元数据（含 lease_id），并结合裸 SET 伪造形如
-   ``victim:victim_lease`` 的 ownership token；lease Hash 的写命令仍只
-   限自己的 ``lease:data:<wid>``。应用层缓解：结算/派发侧始终以权威
-   Lease Hash（按 worker 隔离、mTLS/凭证绑定身份）复核代际，ownership
-   key 与共享索引都不是授权的最终依据。
-2. ``{ns}:spider:{{*}}:data|meta|tombstone`` 与 ``{ns}:spider:index:*``：
-   spider key 以 run_id/project_id 为维度，key 布局中没有 worker 维度，
-   ACL 按 key pattern 无法表达"只许写自己 own 的 run"。被攻破的 worker
-   可写任意 run 的 spider 数据/元数据、增删任意 project 的 index 成员。
-3. ``{ns}:control:global``：共享广播 stream 上按 worker 命名 consumer
-   group（``{ns}-control:<wid>``），ACL 不覆盖 group/consumer 维度；被
-   攻破的 worker 可对他人 group 执行 XREADGROUP/XACK（吞掉他人广播）。
-   worker 自身 ack 走 owned_stream_ack Lua（XPENDING owner 校验）仅防
-   误 ack，不能阻止恶意 ack。
-
-以上 1-3 需要 key 布局或协议改造（如 ownership 结算全部收拢到
-master/gateway 凭证、spider key 引入 worker 维度）才能根除，超出 ACL
-调整范围。
+Lease、run ownership 与 SpiderData 已收拢到可信控制面。Direct Worker 对
+权威 Lease 只有自身 Hash/撤销集合的只读权限，对 Lease 索引、sequence、
+run owner、全部 Spider 存储 key 和共享 global control stream 均无权限。
+广播属于可信控制面的 fan-out 操作：Direct Worker 只消费自己的
+``{ns}:control:{wid}``，不在共享 Stream 上用 consumer group 模拟隔离。
 """
 
 from __future__ import annotations

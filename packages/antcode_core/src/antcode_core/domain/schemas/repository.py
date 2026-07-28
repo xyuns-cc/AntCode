@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from antcode_core.domain.models.enums import ExecutionStrategy, RuntimeKind, RuntimeScope
 
 
 class RepositoryCreateRequest(BaseModel):
@@ -77,18 +79,41 @@ class ProjectImportItem(BaseModel):
     description: str | None = Field(None, max_length=1024)
     tags: list[str] = Field(default_factory=list)
     dependencies: list[str] | None = None
-    runtime_scope: str = Field("shared")
-    runtime_kind: str = Field("python")
-    python_version: str | None = Field(None, max_length=32)
-    worker_id: str | None = Field(None, max_length=32)
-    execution_strategy: str = Field("auto")
-    bound_worker_id: str | None = Field(None, max_length=32)
+    runtime_scope: RuntimeScope = Field(RuntimeScope.PRIVATE)
+    runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON)
+    python_version: str = Field(..., max_length=32, pattern=r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
+    worker_id: str = Field(..., min_length=1, max_length=32)
+    execution_strategy: ExecutionStrategy = Field(ExecutionStrategy.FIXED_WORKER)
+    bound_worker_id: str = Field(..., min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_runtime_contract(self) -> ProjectImportItem:
+        if self.runtime_scope != RuntimeScope.PRIVATE:
+            raise ValueError("仓库导入仅支持新建私有运行时")
+        if self.runtime_kind != RuntimeKind.PYTHON:
+            raise ValueError("仓库导入仅支持 Python 运行时")
+        if self.execution_strategy != ExecutionStrategy.FIXED_WORKER:
+            raise ValueError("仓库导入项目必须固定到运行时所在 Worker")
+        if self.worker_id != self.bound_worker_id:
+            raise ValueError("fixed 策略的运行时 Worker 与绑定 Worker 必须一致")
+        return self
 
 
 class ImportProjectsPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    projects: list[ProjectImportItem] = Field(..., min_length=1)
+    projects: list[ProjectImportItem] = Field(..., min_length=1, max_length=100)
+
+    @field_validator("projects")
+    @classmethod
+    def reject_duplicate_projects(cls, value: list[ProjectImportItem]) -> list[ProjectImportItem]:
+        seen: set[tuple[str, str, str, str]] = set()
+        for item in value:
+            key = (item.repository_id, item.ref, item.subdir, item.name)
+            if key in seen:
+                raise ValueError("projects 包含重复导入项")
+            seen.add(key)
+        return value
 
 
 class ImportProjectsResult(BaseModel):

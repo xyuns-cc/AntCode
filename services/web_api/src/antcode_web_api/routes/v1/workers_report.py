@@ -179,12 +179,17 @@ async def report_task_status(
 
     await require_worker_owns_run(auth_context["worker"], request.run_id)
 
-    await distributed_log_service.update_task_status(
+    updated = await distributed_log_service.update_task_status(
         request.run_id,
         request.status,
         exit_code=request.exit_code,
         error_message=request.error_message,
     )
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务状态更新被拒绝，执行记录状态已变化",
+        )
 
     return success({"updated": True})
 

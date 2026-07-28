@@ -15,7 +15,13 @@ from loguru import logger
 
 from antcode_core.common.config import settings
 from antcode_core.common.serialization import from_json
-from antcode_core.domain.models import Worker, WorkerHeartbeat, WorkerStatus
+from antcode_core.domain.models import Worker, WorkerStatus
+
+from .worker_heartbeat_persistence import (
+    build_redis_heartbeat_update,
+    build_worker_heartbeat_update,
+    persist_worker_heartbeat,
+)
 
 
 class WorkerHeartbeatService:
@@ -217,19 +223,16 @@ class WorkerHeartbeatService:
             return False
 
         hb_time = self._parse_redis_heartbeat_time(worker, data)
-        db_hb = worker.last_heartbeat
-        if db_hb is not None and db_hb.tzinfo is not None:
-            db_hb = db_hb.astimezone().replace(tzinfo=None)
-        if db_hb and hb_time <= db_hb:
+        update = build_redis_heartbeat_update(data, hb_time)
+        persisted = await persist_worker_heartbeat(
+            worker.id,
+            update,
+            require_newer=True,
+            record_history=False,
+        )
+        if not persisted:
             return False
-
-        worker.last_heartbeat = hb_time
-        # P1-33: MAINTENANCE 是运维显式设置的目标态,心跳不能把它打回 ONLINE。
-        # 只在原状态是 OFFLINE/CONNECTING/(旧数据)ONLINE 时才允许 heartbeat 覆盖。
-        if worker.status != WorkerStatus.MAINTENANCE.value:
-            worker.status = WorkerStatus.ONLINE.value
-        self._apply_redis_heartbeat_payload(worker, data)
-        await worker.save()
+        self._sync_cache_on_heartbeat(persisted)
         logger.debug(f"已同步 Redis 心跳到数据库: worker={worker.name}, time={hb_time}")
         return True
 
@@ -251,45 +254,6 @@ class WorkerHeartbeatService:
         if hb_time.tzinfo is not None:
             return hb_time.astimezone().replace(tzinfo=None)
         return hb_time
-
-    def _apply_redis_heartbeat_payload(self, worker: Worker, data: dict) -> None:
-        metrics = self._extract_redis_heartbeat_metrics(data)
-        if metrics:
-            current_metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
-            current_metrics.update(metrics)
-            worker.metrics = current_metrics
-
-        for field_name in (
-            "version",
-            "os_type",
-            "os_version",
-            "python_version",
-            "machine_arch",
-        ):
-            if data.get(field_name):
-                setattr(worker, field_name, data[field_name])
-
-        if data.get("capabilities"):
-            import json
-
-            capabilities = json.loads(data["capabilities"])
-            if not isinstance(capabilities, dict):
-                raise ValueError("Redis 心跳 capabilities 必须是 JSON object")
-            worker.capabilities = capabilities
-
-    def _extract_redis_heartbeat_metrics(self, data: dict) -> dict:
-        metrics = {}
-        if data.get("cpu_percent"):
-            metrics["cpu"] = float(data["cpu_percent"])
-        if data.get("memory_percent"):
-            metrics["memory"] = float(data["memory_percent"])
-        if data.get("disk_percent"):
-            metrics["disk"] = float(data["disk_percent"])
-        if data.get("running_tasks"):
-            metrics["runningTasks"] = int(data["running_tasks"])
-        if data.get("max_concurrent_tasks"):
-            metrics["maxConcurrentTasks"] = int(data["max_concurrent_tasks"])
-        return metrics
 
     async def _check_single_worker(self, worker: Worker, state: dict) -> bool:
         """
@@ -345,9 +309,8 @@ class WorkerHeartbeatService:
         worker = latest or worker
         if worker.status == WorkerStatus.MAINTENANCE.value:
             return
-        worker.status = WorkerStatus.ONLINE.value
-        await worker.save()
-        logger.info(f"节点 {worker.name} 恢复在线")
+        if await self._mark_worker_status(worker, WorkerStatus.ONLINE.value):
+            logger.info(f"节点 {worker.name} 恢复在线")
 
     async def _accept_redis_heartbeat(self, worker, state, old_status, now):
         await self._sync_redis_heartbeat_to_db(worker)
@@ -356,11 +319,9 @@ class WorkerHeartbeatService:
             logger.info(f"节点 {worker.name} 恢复在线（从 Redis 同步）")
 
     async def _accept_refreshed_heartbeat(self, worker, state, old_status, now):
-        if worker.status != WorkerStatus.MAINTENANCE.value:
-            worker.status = WorkerStatus.ONLINE.value
         self._mark_heartbeat_healthy(state, now)
-        await worker.save()
-        if old_status != WorkerStatus.ONLINE and worker.status == WorkerStatus.ONLINE.value:
+        marked_online = await self._mark_worker_status(worker, WorkerStatus.ONLINE.value)
+        if old_status != WorkerStatus.ONLINE and marked_online:
             logger.info(f"节点 {worker.name} 恢复在线")
 
     async def _handle_worker_offline(
@@ -370,7 +331,6 @@ class WorkerHeartbeatService:
         old_status: WorkerStatus | str,
     ):
         """处理 Worker 离线"""
-        worker.status = WorkerStatus.OFFLINE.value
         state["failures"] += 1
 
         # 根据失败次数调整检测间隔
@@ -397,8 +357,27 @@ class WorkerHeartbeatService:
 
         # 状态变化时保存到数据库
         if old_status != WorkerStatus.OFFLINE:
-            await worker.save()
-            logger.warning(f"节点 {worker.name} 离线")
+            if await self._mark_worker_status(worker, WorkerStatus.OFFLINE.value, protect_heartbeat=True):
+                logger.warning(f"节点 {worker.name} 离线")
+
+    @staticmethod
+    async def _mark_worker_status(
+        worker: Worker,
+        target_status: str,
+        *,
+        protect_heartbeat: bool = False,
+    ) -> bool:
+        query = Worker.filter(id=worker.id).exclude(status=WorkerStatus.MAINTENANCE.value)
+        if protect_heartbeat:
+            query = (
+                query.filter(last_heartbeat=worker.last_heartbeat)
+                if worker.last_heartbeat is not None
+                else query.filter(last_heartbeat__isnull=True)
+            )
+        updated = await query.update(status=target_status)
+        if updated:
+            worker.status = target_status
+        return bool(updated)
 
     async def manual_test_worker(self, worker_id: int) -> bool:
         """
@@ -463,8 +442,11 @@ class WorkerHeartbeatService:
                     logger.info(
                         f"节点 {worker.name} 心跳超时 ({time_diff.total_seconds():.0f}秒 > {self.HEARTBEAT_TIMEOUT}秒)，标记为离线"
                     )
-                    worker.status = WorkerStatus.OFFLINE.value
-                    await worker.save()
+                    await self._mark_worker_status(
+                        worker,
+                        WorkerStatus.OFFLINE.value,
+                        protect_heartbeat=True,
+                    )
 
     async def update_heartbeat(
         self,
@@ -526,71 +508,36 @@ class WorkerHeartbeatService:
         capabilities: dict | None = None,
         spider_stats: dict | None = None,
     ) -> bool:
-        """
-        处理节点心跳
-
-        Args:
-            worker: 节点对象
-            status_value: 节点状态
-            metrics: 系统指标
-            version: 节点版本
-            os_type: 操作系统类型
-            os_version: 操作系统版本
-            python_version: Python 版本
-            machine_arch: CPU 架构
-            capabilities: 节点能力
-            spider_stats: 爬虫统计摘要
-        """
-        normalized_status = self._normalize_status_value(status_value)
-        if worker.status != WorkerStatus.MAINTENANCE.value:
-            worker.status = normalized_status
-        worker.last_heartbeat = datetime.now()
-        heartbeat_metrics = self._apply_heartbeat_metrics(worker, metrics, spider_stats)
-        if version:
-            worker.version = version
-        self._apply_system_info(worker, os_type, os_version, python_version, machine_arch)
-        self._apply_capabilities(worker, capabilities)
-        await worker.save()
-        self._sync_cache_on_heartbeat(worker)
-        await WorkerHeartbeat.create(
-            worker_id=worker.id,
-            status=normalized_status,
-            metrics=heartbeat_metrics if heartbeat_metrics else None,
+        """Persist one authenticated Worker heartbeat."""
+        update = build_worker_heartbeat_update(
+            heartbeat_at=datetime.now().astimezone(),
+            status=self._normalize_status_value(status_value),
+            metrics=metrics,
+            spider_stats=spider_stats,
+            system_info={
+                "version": version,
+                "os_type": os_type,
+                "os_version": os_version,
+                "python_version": python_version,
+                "machine_arch": machine_arch,
+            },
+            capabilities=self._validated_capabilities(capabilities),
         )
+        persisted = await persist_worker_heartbeat(worker.id, update)
+        if not persisted:
+            return False
+        self._sync_cache_on_heartbeat(persisted)
         return True
 
-    @staticmethod
-    def _apply_heartbeat_metrics(worker, metrics, spider_stats):
-        heartbeat_metrics = dict(metrics or {})
-        if spider_stats:
-            heartbeat_metrics["spider_stats"] = spider_stats
-        if heartbeat_metrics:
-            current_metrics = dict(worker.metrics) if isinstance(worker.metrics, dict) else {}
-            current_metrics.update(heartbeat_metrics)
-            worker.metrics = current_metrics
-        return heartbeat_metrics
-
-    @staticmethod
-    def _apply_system_info(worker, os_type, os_version, python_version, machine_arch):
-        updates = {
-            "os_type": os_type,
-            "os_version": os_version,
-            "python_version": python_version,
-            "machine_arch": machine_arch,
-        }
-        for field_name, value in updates.items():
-            if value:
-                setattr(worker, field_name, value)
-
-    def _apply_capabilities(self, worker, capabilities):
-        if not capabilities:
-            return
+    def _validated_capabilities(self, capabilities):
+        if capabilities is None:
+            return None
         if not isinstance(capabilities, dict):
             logger.warning(f"capabilities 类型错误: {type(capabilities)}, 值: {capabilities}")
-            return
+            return None
         normalized = self._normalize_capabilities(capabilities)
-        worker.capabilities = normalized
-        logger.info(f"节点 {worker.name} 能力更新: {list(normalized.keys())}")
+        logger.info(f"节点能力更新: {list(normalized.keys())}")
+        return normalized
 
     def _sync_cache_on_heartbeat(self, worker: Worker) -> None:
         """同步心跳到缓存，避免健康检查使用过期节点信息"""

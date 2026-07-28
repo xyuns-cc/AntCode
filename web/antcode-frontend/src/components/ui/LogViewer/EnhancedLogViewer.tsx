@@ -1,964 +1,189 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import {
-  Button,
-  Space,
-  Tag,
-  Input,
-  Select,
-  Row,
-  Col,
-  Dropdown,
-  message,
-  Checkbox,
-  Typography,
-  theme
-} from 'antd'
-import {
-  PlayCircleOutlined,
-  StopOutlined,
-  ClearOutlined,
-  ReloadOutlined,
-  DownloadOutlined,
-  FullscreenOutlined,
-  FullscreenExitOutlined
-} from '@ant-design/icons'
-import { logService, type HistoricalLogsUpdate, type LogStreamConnection } from '@/services/logs'
-import Logger from '@/utils/logger'
-import VirtualLogViewer from './VirtualLogViewer'
+import type { FC, RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { message, theme } from 'antd'
+import EnhancedLogViewerContent, { LogViewerFooter } from './EnhancedLogViewerContent'
+import EnhancedLogViewerFilters from './EnhancedLogViewerFilters'
+import EnhancedLogViewerHeader from './EnhancedLogViewerHeader'
+import EnhancedLogViewerStats from './EnhancedLogViewerStats'
 import styles from './LogViewer.module.css'
+import {
+  DEFAULT_LEVELS,
+  DEFAULT_TYPES,
+  type EnhancedLogViewerProps,
+  type ExportFormat,
+  type FilterState,
+  type LogMessage,
+  type LogStats,
+  type ViewerTheme,
+} from './enhancedLogViewerTypes'
+import { calculateLogStats, createNotice, downloadLogs, filterLogMessages } from './enhancedLogViewerUtils'
+import { useLogMessageBuffer } from './useLogMessageBuffer'
+import { useLogStreamController } from './useLogStreamController'
 
-const { Search } = Input
-const { Option } = Select
-const { Text } = Typography
+const DEFAULTS = {
+  autoConnect: true, enableExport: true, enableSearch: true, enableVirtualization: false,
+  height: 600, maxLines: 1000, showControls: true, showStderr: true, showStdout: true,
+} as const
 
-const DEFAULT_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-const DEFAULT_TYPES = ['stdout', 'stderr']
-
-// 用于生成唯一ID的计数器
-let idCounter = 0
-
-// 生成唯一ID的函数
-const generateUniqueId = (): string => {
-  idCounter += 1
-  return `${Date.now()}-${idCounter}-${Math.random().toString(36).substr(2, 9)}`
+type ViewerBuffer = ReturnType<typeof useLogMessageBuffer>
+type ViewerStream = ReturnType<typeof useLogStreamController>
+type ViewerFilters = ReturnType<typeof useViewerFilters>
+type ViewerConfig = Omit<EnhancedLogViewerProps, keyof typeof DEFAULTS> & {
+  [Key in keyof typeof DEFAULTS]: NonNullable<EnhancedLogViewerProps[Key]>
 }
 
-// 日志消息接口
-interface LogMessage {
-  id: string
-  type: 'stdout' | 'stderr' | 'info' | 'error' | 'warning' | 'success'
-  content: string
-  timestamp: string
-  level?: string
-  source?: string
-  raw?: unknown
-}
-
-// 执行状态更新接口
-interface ExecutionStatusUpdate {
-  status: string
-  message?: string
-  progress?: number
-}
-
-// 组件属性接口
-interface EnhancedLogViewerProps {
-  runId: string
-  height?: number
-  showControls?: boolean
-  autoConnect?: boolean
-  showStdout?: boolean
-  showStderr?: boolean
-  maxLines?: number
-  enableSearch?: boolean
-  enableExport?: boolean
-  enableVirtualization?: boolean
-  onLogUpdate?: (logs: string[]) => void // 新增：日志更新回调
-  onStatusUpdate?: (status: ExecutionStatusUpdate) => void // 新增：状态更新回调
-}
-
-// 日志流连接状态
-type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
-type HistoricalStatus = 'idle' | 'loading' | 'loaded' | 'empty'
-
-const EnhancedLogViewer: React.FC<EnhancedLogViewerProps> = ({
-  runId,
-  height = 600,
-  showControls = true,
-  autoConnect = true,
-  showStdout = true,
-  showStderr = true,
-  maxLines = 1000,
-  enableSearch = true,
-  enableExport = true,
-  enableVirtualization = false,
-  onLogUpdate,
-  onStatusUpdate
-}) => {
-  const { token } = theme.useToken() // 添加主题支持
-
-  // 状态管理
-  const [stream, setStream] = useState<LogStreamConnection | null>(null)
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
-  const [historyStatus, setHistoryStatus] = useState<HistoricalStatus>('idle')
-  const [historySentLines, setHistorySentLines] = useState(0)
-  const [messages, setMessages] = useState<LogMessage[]>([])
-  const [isAutoScroll, setIsAutoScroll] = useState(true)
-  const [isPaused, setIsPaused] = useState(false)
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  
-  // 过滤和搜索状态
+const useViewerFilters = (messages: LogMessage[]) => {
   const [searchText, setSearchText] = useState('')
   const [selectedLevels, setSelectedLevels] = useState<string[]>([...DEFAULT_LEVELS])
   const [selectedTypes, setSelectedTypes] = useState<string[]>([...DEFAULT_TYPES])
-  
-  // 统计信息
-  const [stats, setStats] = useState({
-    total: 0,
-    stdout: 0,
-    stderr: 0,
-    errors: 0,
-    warnings: 0
-  })
-
-  // Refs
-  const logContainerRef = useRef<HTMLDivElement>(null)
-  const mountedRef = useRef(true)
-  // SSE 回调是 connect() 时刻的闭包，读 state 会拿到过期值（stale closure）——
-  // 暂停判定必须走 ref，否则"暂停接收"对已建立的流不生效
-  const isPausedRef = useRef(false)
-  // 暂停期间发生了历史重放（被跳过清屏）→ 恢复接收时需强制重连补齐
-  const pendingResyncRef = useRef(false)
-
-  useEffect(() => {
-    isPausedRef.current = isPaused
-  }, [isPaused])
-
-  // 确保组件挂载时mountedRef为true
-  useEffect(() => {
-    mountedRef.current = true
-
-    return () => {
-      mountedRef.current = false
-    }
-  }, [])
-
-  // 通知父组件日志更新
-  useEffect(() => {
-    if (onLogUpdate && messages.length > 0) {
-      const logContents = messages.map(msg => msg.content)
-      onLogUpdate(logContents)
-    }
-  }, [messages, onLogUpdate])
-
-  // 添加日志消息（isPaused 走 ref：该回调被 SSE 流的闭包长期持有）
-  const addLogMessage = useCallback((logMessage: LogMessage) => {
-    if (!mountedRef.current || isPausedRef.current) {
-      return
-    }
-
-    setMessages(prev => {
-      const newMessages = [...prev, logMessage]
-      // 限制消息数量，避免内存泄漏
-      if (newMessages.length > maxLines) {
-        return newMessages.slice(-Math.floor(maxLines * 0.8))
-      }
-      return newMessages
-    })
-  }, [maxLines])
-
-  // 建立 SSE 日志流连接
-  const connect = useCallback(async () => {
-    if (connectionStatus === 'connected' || connectionStatus === 'connecting') {
-      return
-    }
-    
-    // 如果已有连接，先清理
-    if (stream) {
-      stream.disconnect()
-      setStream(null)
-    }
-
-    try {
-      setConnectionStatus('connecting')
-      setHistoryStatus('idle')
-      setHistorySentLines(0)
-      addLogMessage({
-        id: generateUniqueId(),
-        type: 'info',
-        content: `正在连接到运行ID: ${runId}`,
-        timestamp: new Date().toISOString()
-      })
-
-      // 建立 SSE 日志流连接（内部自管重连与探活）
-      const conn = logService.connectLogStream(
-        runId,
-        (logEntry) => {
-          // 将LogEntry转换为LogMessage格式
-          const logMessage: LogMessage = {
-            id: generateUniqueId(),
-            type: logEntry.log_type as 'stdout' | 'stderr',
-            content: logEntry.message,
-            timestamp: logEntry.timestamp,
-            level: logEntry.level,
-            source: logEntry.source,
-            raw: logEntry
-          }
-          
-          // 根据设置过滤日志类型
-          if ((logMessage.type === 'stdout' && !showStdout) || 
-              (logMessage.type === 'stderr' && !showStderr)) {
-            return
-          }
-          
-          addLogMessage(logMessage)
-        },
-        (error) => {
-          console.error('日志流连接错误:', error)
-          setConnectionStatus('error')
-          addLogMessage({
-            id: generateUniqueId(),
-            type: 'error',
-            content: `[错误] 日志流连接错误: ${error instanceof Error ? error.message : String(error)}`,
-            timestamp: new Date().toISOString()
-          })
-        },
-        (state) => {
-          if (!mountedRef.current) return
-          if (state === 'connected') {
-            setConnectionStatus('connected')
-            addLogMessage({
-              id: generateUniqueId(),
-              type: 'success',
-              content: '[成功] 日志流连接已建立',
-              timestamp: new Date().toISOString()
-            })
-            return
-          }
-          if (state === 'reconnecting') {
-            setConnectionStatus('connecting')
-            addLogMessage({
-              id: generateUniqueId(),
-              type: 'warning',
-              content: '[重连] 日志流连接中...',
-              timestamp: new Date().toISOString()
-            })
-            return
-          }
-          if (state === 'disconnected') {
-            setConnectionStatus('disconnected')
-            return
-          }
-          if (state === 'failed' || state === 'error') {
-            setConnectionStatus('error')
-          }
-        },
-        (statusUpdate) => {
-          // 处理执行状态更新
-          Logger.info('收到执行状态更新:', statusUpdate)
-          
-          // 添加状态变更日志
-          addLogMessage({
-            id: generateUniqueId(),
-            type: 'info',
-            content: `[状态] ${statusUpdate.message || statusUpdate.status}`,
-            timestamp: new Date().toISOString()
-          })
-          
-          // 调用外部回调
-          onStatusUpdate?.(statusUpdate)
-        },
-        (historicalUpdate: HistoricalLogsUpdate) => {
-          if (!mountedRef.current) return
-
-          if (historicalUpdate.phase === 'loading') {
-            setHistoryStatus('loading')
-            setHistorySentLines(0)
-            // 每次（重）连接服务端都会重放全量历史：清空现有 buffer，
-            // 靠"历史重放 + 服务端 sequence 过滤"保证不重不漏，前端无需去重。
-            // 暂停接收期间不清屏（重放行会被 addLogMessage 丢弃，清了就永久空白），
-            // 标记待重同步，恢复接收时强制重连补齐
-            if (isPausedRef.current) {
-              pendingResyncRef.current = true
-              return
-            }
-            setMessages([])
-            addLogMessage({
-              id: generateUniqueId(),
-              type: 'info',
-              content: '[历史] 正在加载历史日志...',
-              timestamp: new Date().toISOString()
-            })
-            return
-          }
-
-          if (historicalUpdate.phase === 'loaded') {
-            const sentLines = historicalUpdate.sentLines || 0
-            setHistoryStatus('loaded')
-            setHistorySentLines(sentLines)
-            addLogMessage({
-              id: generateUniqueId(),
-              type: 'info',
-              content: `[历史] 历史日志加载完成，共 ${sentLines} 行`,
-              timestamp: new Date().toISOString()
-            })
-            return
-          }
-
-          if (historicalUpdate.phase === 'empty') {
-            setHistoryStatus('empty')
-            setHistorySentLines(0)
-            addLogMessage({
-              id: generateUniqueId(),
-              type: 'info',
-              content: '[历史] 无历史日志，已进入实时模式',
-              timestamp: new Date().toISOString()
-            })
-          }
-        }
-      )
-
-      if (conn) {
-        setStream(conn)
-      } else {
-        throw new Error('无法创建日志流连接')
-      }
-
-    } catch (error) {
-      console.error('日志流连接创建失败:', error)
-      setConnectionStatus('error')
-      addLogMessage({
-        id: generateUniqueId(),
-        type: 'error',
-        content: `创建日志流连接失败: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: new Date().toISOString()
-      })
-    }
-  }, [runId, connectionStatus, showStdout, showStderr, addLogMessage, onStatusUpdate, stream])
-
-  // 断开连接
-  const disconnect = useCallback(() => {
-    if (stream) {
-      stream.disconnect()
-      setStream(null)
-    }
-    
-    setConnectionStatus('disconnected')
-    setHistoryStatus('idle')
-    setHistorySentLines(0)
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: '[断开] 手动断开连接',
-      timestamp: new Date().toISOString()
-    })
-  }, [stream, addLogMessage])
-
-  // 清除日志
-  const clearLogs = useCallback(() => {
-    setMessages([])
-    addLogMessage({
-      id: generateUniqueId(),
-      type: 'info',
-      content: '[清除] 日志已清除',
-      timestamp: new Date().toISOString()
-    })
-  }, [addLogMessage])
-
-  const resetBasicFilters = useCallback(() => {
+  const filters = useMemo<FilterState>(() => ({ searchText, selectedLevels, selectedTypes }), [
+    searchText, selectedLevels, selectedTypes,
+  ])
+  const displayedMessages = useMemo(() => filterLogMessages(messages, filters), [messages, filters])
+  const resetFilters = useCallback(() => {
     setSearchText('')
     setSelectedLevels([...DEFAULT_LEVELS])
     setSelectedTypes([...DEFAULT_TYPES])
   }, [])
+  return {
+    displayedMessages, resetFilters, searchText, selectedLevels, selectedTypes,
+    setSearchText, setSelectedLevels, setSelectedTypes,
+  }
+}
 
-  // 基础过滤消息
-  const displayMessages = useMemo(() => {
-    let filtered = messages
+interface ActionOptions {
+  buffer: ViewerBuffer
+  displayedMessages: LogMessage[]
+  isViewTruncated: boolean
+  runId: string
+  stream: ViewerStream
+}
 
-    // 搜索过滤
-    if (searchText) {
-      const search = searchText.toLowerCase()
-      filtered = filtered.filter(msg =>
-        msg.content.toLowerCase().includes(search) ||
-        (msg.source && msg.source.toLowerCase().includes(search))
-      )
-    }
-
-    // 级别过滤
-    if (selectedLevels.length < 5) {
-      filtered = filtered.filter(msg =>
-        !msg.level || selectedLevels.includes(msg.level)
-      )
-    }
-
-    // 类型过滤
-    if (selectedTypes.length < 2) {
-      filtered = filtered.filter(msg => selectedTypes.includes(msg.type))
-    }
-
-    return filtered
-  }, [messages, searchText, selectedLevels, selectedTypes])
-
-  // 导出日志
-  const exportLogs = useCallback(async (format: 'txt' | 'json' | 'csv') => {
-    if (displayMessages.length === 0) {
+const useViewerActions = ({ buffer, displayedMessages, isViewTruncated, runId, stream }: ActionOptions) => {
+  const [isAutoScroll, setIsAutoScroll] = useState(true)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const { addNotice, resetMessages, setPaused } = buffer
+  const { resumeAfterPause } = stream
+  const clearLogs = useCallback(() => {
+    resetMessages()
+    addNotice(createNotice('info', '[清除] 日志已清除'))
+  }, [addNotice, resetMessages])
+  const changePaused = useCallback((paused: boolean) => {
+    setPaused(paused)
+    if (!paused) resumeAfterPause()
+  }, [resumeAfterPause, setPaused])
+  const exportLogs = useCallback((format: ExportFormat) => {
+    if (displayedMessages.length === 0) {
       message.warning('没有日志可导出')
       return
     }
-
-    let content = ''
-    let filename = `logs_${runId}_${new Date().toISOString().split('T')[0]}`
-
-    switch (format) {
-      case 'txt':
-        content = displayMessages.map(msg =>
-          `[${new Date(msg.timestamp).toLocaleString()}] [${msg.type.toUpperCase()}] ${msg.content}`
-        ).join('\n')
-        filename += '.txt'
-        break
-
-      case 'json':
-        content = JSON.stringify(displayMessages, null, 2)
-        filename += '.json'
-        break
-
-      case 'csv': {
-        const headers = 'Timestamp,Type,Level,Source,Content\n'
-        const rows = displayMessages.map(msg =>
-          `"${msg.timestamp}","${msg.type}","${msg.level || ''}","${msg.source || ''}","${msg.content.replace(/"/g, '""')}"`
-        ).join('\n')
-        content = headers + rows
-        filename += '.csv'
-        break
-      }
+    downloadLogs(displayedMessages, runId, format)
+    if (isViewTruncated) {
+      message.warning(`已导出为 ${format.toUpperCase()} 格式，但内容仅含浏览器缓冲的最新日志，完整日志请使用服务端日志下载`)
+      return
     }
-
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-
     message.success(`日志已导出为 ${format.toUpperCase()} 格式`)
-  }, [displayMessages, runId])
+  }, [displayedMessages, isViewTruncated, runId])
+  const toggleFullscreen = useCallback(() => setIsFullscreen((current) => !current), [])
+  return {
+    changePaused, clearLogs, exportLogs, isAutoScroll, isFullscreen,
+    setIsAutoScroll, toggleFullscreen,
+  }
+}
 
-  // 更新统计信息
+interface ViewerEffectOptions {
+  containerRef: RefObject<HTMLDivElement>
+  displayedMessages: LogMessage[]
+  isAutoScroll: boolean
+  isPaused: boolean
+  messages: LogMessage[]
+  onLogUpdate?: (logs: string[]) => void
+}
+
+const useViewerEffects = (options: ViewerEffectOptions) => {
+  const { containerRef, displayedMessages, isAutoScroll, isPaused, messages, onLogUpdate } = options
   useEffect(() => {
-    const newStats = {
-      total: messages.length,
-      stdout: messages.filter(m => m.type === 'stdout').length,
-      stderr: messages.filter(m => m.type === 'stderr').length,
-      errors: messages.filter(m => m.type === 'error' || m.level === 'ERROR').length,
-      warnings: messages.filter(m => m.type === 'warning' || m.level === 'WARNING').length
+    if (onLogUpdate && messages.length > 0) {
+      onLogUpdate(messages.map((item) => item.content))
     }
-    setStats(newStats)
-  }, [messages])
-
-  const statsItems = useMemo(
-    () => [
-      { key: 'total', title: '总计', value: stats.total },
-      { key: 'stdout', title: '正常输出', value: stats.stdout, color: token.colorSuccess },
-      { key: 'stderr', title: '错误输出', value: stats.stderr, color: token.colorError },
-      { key: 'errors', title: '错误', value: stats.errors, color: token.colorError },
-      { key: 'warnings', title: '警告', value: stats.warnings, color: token.colorWarning },
-      { key: 'filtered', title: '已过滤', value: displayMessages.length }
-    ],
-    [
-      stats.total,
-      stats.stdout,
-      stats.stderr,
-      stats.errors,
-      stats.warnings,
-      displayMessages.length,
-      token.colorError,
-      token.colorSuccess,
-      token.colorWarning
-    ]
-  )
-
-  // 自动滚动到底部
+  }, [messages, onLogUpdate])
   useEffect(() => {
-    if (isAutoScroll && !isPaused && logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
-    }
-  }, [displayMessages, isAutoScroll, isPaused])
+    const container = containerRef.current
+    if (!isAutoScroll || isPaused || !container) return
+    container.scrollTop = container.scrollHeight
+  }, [containerRef, displayedMessages, isAutoScroll, isPaused])
+}
 
-  // 自动连接（添加防抖和重复连接保护）
-  useEffect(() => {
-    if (!autoConnect || !runId) return undefined
-    
-    // 只在真正断开时才自动连接，避免重复连接
-    if (connectionStatus === 'disconnected' && !stream) {
-      const timeoutId = setTimeout(() => {
-        connect()
-      }, 500) // 500ms 防抖
-      
-      return () => clearTimeout(timeoutId)
-    }
+interface LayoutProps {
+  actions: ReturnType<typeof useViewerActions>
+  buffer: ViewerBuffer
+  config: ViewerConfig
+  containerRef: RefObject<HTMLDivElement>
+  filters: ViewerFilters
+  stats: LogStats
+  stream: ViewerStream
+  token: ViewerTheme
+}
 
-    return undefined
-  }, [autoConnect, runId, connectionStatus, stream, connect])
-
-  // 组件卸载清理
-  useEffect(() => {
-    return () => {
-      stream?.disconnect()
-    }
-  }, [stream])
-
-  // 渲染日志消息
-  const renderLogMessage = (msg: LogMessage) => {
-    let color = token.colorSuccess
-    let backgroundColor = 'transparent'
-
-    switch (msg.type) {
-      case 'stderr':
-      case 'error':
-        color = token.colorError
-        backgroundColor = `${token.colorError}15`
-        break
-      case 'warning':
-        color = token.colorWarning
-        backgroundColor = `${token.colorWarning}15`
-        break
-      case 'info':
-        color = token.colorPrimary
-        backgroundColor = `${token.colorPrimary}15`
-        break
-      case 'success':
-        color = token.colorSuccess
-        backgroundColor = `${token.colorSuccess}15`
-        break
-      case 'stdout':
-      default:
-        color = token.colorSuccess
-        backgroundColor = 'transparent'
-    }
-
-    return (
-      <div
-        key={msg.id}
-        className={styles.logLine}
-        style={{
-          padding: '4px 8px',
-          margin: '1px 0',
-          fontFamily: 'Monaco, Consolas, "Courier New", monospace',
-          fontSize: '12px',
-          color,
-          backgroundColor,
-          borderLeft: `3px solid ${color}`,
-          wordBreak: 'break-all',
-          whiteSpace: 'pre-wrap'
-        }}
-      >
-        <span style={{ color: token.colorTextTertiary, marginRight: '8px' }}>
-          [{new Date(msg.timestamp).toLocaleTimeString()}]
-        </span>
-        <span style={{ color: token.colorTextSecondary, marginRight: '8px' }}>
-          [{msg.type.toUpperCase()}]
-        </span>
-        {msg.level && (
-          <span style={{ color: token.colorTextSecondary, marginRight: '8px' }}>
-            [{msg.level}]
-          </span>
-        )}
-        {msg.source && (
-          <span style={{ color: token.colorTextSecondary, marginRight: '8px' }}>
-            [{msg.source}]
-          </span>
-        )}
-        <span>{msg.content}</span>
-      </div>
-    )
-  }
-
-  // 获取连接状态颜色
-  const getStatusColor = (): 'success' | 'processing' | 'error' | 'default' => {
-    switch (connectionStatus) {
-      case 'connected': return 'success'
-      case 'connecting': return 'processing'
-      case 'error': return 'error'
-      default: return 'default'
-    }
-  }
-
-  // 获取连接状态文本
-  const getStatusText = () => {
-    switch (connectionStatus) {
-      case 'connected': return '已连接'
-      case 'connecting': return '连接中'
-      case 'error': return '连接错误'
-      default: return '未连接'
-    }
-  }
-
-  const getHistoryStatusColor = (): 'processing' | 'success' | 'default' => {
-    switch (historyStatus) {
-      case 'loading':
-        return 'processing'
-      case 'loaded':
-        return 'success'
-      default:
-        return 'default'
-    }
-  }
-
-  const getHistoryStatusText = () => {
-    switch (historyStatus) {
-      case 'loading':
-        return '历史加载中'
-      case 'loaded':
-        return `历史已加载(${historySentLines})`
-      case 'empty':
-        return '无历史日志'
-      default:
-        return '历史未加载'
-    }
-  }
-
-  // 导出菜单项
-  const exportMenuItems = [
-    {
-      key: 'txt',
-      label: '导出为 TXT',
-      onClick: () => exportLogs('txt')
-    },
-    {
-      key: 'json',
-      label: '导出为 JSON',
-      onClick: () => exportLogs('json')
-    },
-    {
-      key: 'csv',
-      label: '导出为 CSV',
-      onClick: () => exportLogs('csv')
-    }
-  ]
-
-  return (
-    <div className={`${styles.logViewer} ${isFullscreen ? styles.fullscreen : ''}`}>
-      <div style={{ padding: '20px 24px', background: token.colorBgContainer }}>
-        {/* 标题与控制栏 */}
-        <div style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center',
-          marginBottom: 20,
-          flexWrap: 'wrap',
-          gap: 12
-        }}>
-          <Space size="middle">
-            <div style={{ 
-              width: 4, 
-              height: 24, 
-              background: token.colorPrimary,
-              borderRadius: 2
-            }} />
-            <div>
-              <Text strong style={{ fontSize: 16, display: 'block', lineHeight: 1.2 }}>
-                实时日志
-              </Text>
-              <Space size="small" style={{ marginTop: 4 }}>
-                <Tag 
-                  color={getStatusColor()} 
-                  style={{ 
-                    margin: 0,
-                    border: 'none',
-                    fontSize: 12
-                  }}
-                >
-                  {getStatusText()}
-                </Tag>
-                <Tag
-                  color={getHistoryStatusColor()}
-                  style={{
-                    margin: 0,
-                    border: 'none',
-                    fontSize: 12
-                  }}
-                >
-                  {getHistoryStatusText()}
-                </Tag>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  运行ID: {runId.slice(0, 8)}...
-                </Text>
-              </Space>
-            </div>
-          </Space>
-
-          {showControls && (
-            <Space size="small" wrap>
-              {connectionStatus === 'disconnected' ? (
-                <Button
-                  type="primary"
-                  icon={<PlayCircleOutlined />}
-                  onClick={connect}
-                  size="small"
-                >
-                  连接
-                </Button>
-              ) : (
-                <Button
-                  danger
-                  icon={<StopOutlined />}
-                  onClick={disconnect}
-                  size="small"
-                >
-                  断开
-                </Button>
-              )}
-              <Button
-                icon={<ReloadOutlined />}
-                onClick={() => {
-                  disconnect()
-                  setTimeout(connect, 1000)
-                }}
-                size="small"
-              >
-                重连
-              </Button>
-              <Button
-                icon={<ClearOutlined />}
-                onClick={clearLogs}
-                size="small"
-              >
-                清除
-              </Button>
-              {enableExport && (
-                <Dropdown menu={{ items: exportMenuItems }} placement="bottomRight">
-                  <Button
-                    icon={<DownloadOutlined />}
-                    size="small"
-                  >
-                    导出
-                  </Button>
-                </Dropdown>
-              )}
-              <Button
-                icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
-                onClick={() => setIsFullscreen(!isFullscreen)}
-                size="small"
-              />
-            </Space>
-          )}
-        </div>
-
-        {/* 统计信息 - 更紧凑的网格布局 */}
-        <div style={{ 
-          marginBottom: 20,
-          padding: '16px 20px',
-          background: token.colorFillQuaternary,
-          borderRadius: 6,
-          border: `1px solid ${token.colorBorder}`
-        }}>
-          <Row gutter={[16, 16]}>
-            {statsItems.map(item => (
-              <Col key={item.key} xs={12} sm={8} md={4}>
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ 
-                    fontSize: 24, 
-                    fontWeight: 700,
-                    color: item.color || token.colorText,
-                    lineHeight: 1.2,
-                    marginBottom: 4
-                  }}>
-                    {item.value}
-                  </div>
-                  <div style={{ 
-                    fontSize: 12, 
-                    color: token.colorTextTertiary,
-                    fontWeight: 500
-                  }}>
-                    {item.title}
-                  </div>
-                </div>
-              </Col>
-            ))}
-          </Row>
-        </div>
-
-        {/* 过滤控制 - 优化布局 */}
-        <div
-          style={{
-            background: token.colorFillAlter,
-            padding: '18px 20px',
-            borderRadius: 6,
-            border: `1px solid ${token.colorBorder}`,
-            marginBottom: 20
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 16
-            }}
-          >
-            <Text strong style={{ fontSize: 14 }}>快速筛选</Text>
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              onClick={resetBasicFilters}
-              type="text"
-            >
-              重置
-            </Button>
-          </div>
-          <Row gutter={[12, 12]}>
-            <Col xs={24} md={12}>
-              {enableSearch && (
-                <Search
-                  placeholder="搜索日志内容或来源..."
-                  value={searchText}
-                  onChange={(e) => setSearchText(e.target.value)}
-                  onSearch={setSearchText}
-                  allowClear
-                  size="middle"
-                />
-              )}
-            </Col>
-            <Col xs={12} md={6}>
-              <Select
-                mode="multiple"
-                placeholder="日志级别"
-                value={selectedLevels}
-                onChange={setSelectedLevels}
-                style={{ width: '100%' }}
-                size="middle"
-                maxTagCount={1}
-              >
-                <Option value="DEBUG"><Tag color="default" style={{ margin: 0 }}>DEBUG</Tag></Option>
-                <Option value="INFO"><Tag color="blue" style={{ margin: 0 }}>INFO</Tag></Option>
-                <Option value="WARNING"><Tag color="orange" style={{ margin: 0 }}>WARNING</Tag></Option>
-                <Option value="ERROR"><Tag color="red" style={{ margin: 0 }}>ERROR</Tag></Option>
-                <Option value="CRITICAL"><Tag color="magenta" style={{ margin: 0 }}>CRITICAL</Tag></Option>
-              </Select>
-            </Col>
-            <Col xs={12} md={6}>
-              <Select
-                mode="multiple"
-                placeholder="日志类型"
-                value={selectedTypes}
-                onChange={setSelectedTypes}
-                style={{ width: '100%' }}
-                size="middle"
-                maxTagCount={1}
-              >
-                <Option value="stdout"><Tag color="green" style={{ margin: 0 }}>标准输出</Tag></Option>
-                <Option value="stderr"><Tag color="red" style={{ margin: 0 }}>标准错误</Tag></Option>
-              </Select>
-            </Col>
-            <Col xs={24} style={{ marginTop: 4 }}>
-              <Space size="large">
-                <Checkbox 
-                  checked={isAutoScroll} 
-                  onChange={(e) => setIsAutoScroll(e.target.checked)}
-                >
-                  <Text style={{ fontSize: 13 }}>自动滚动</Text>
-                </Checkbox>
-                <Checkbox
-                  checked={isPaused}
-                  onChange={(e) => {
-                    const paused = e.target.checked
-                    setIsPaused(paused)
-                    isPausedRef.current = paused
-                    // 暂停期间发生过重连（历史重放被跳过）：恢复时强制重连，
-                    // 走"清屏+全量重放"补齐暂停窗口内的缺口
-                    if (!paused && pendingResyncRef.current) {
-                      pendingResyncRef.current = false
-                      disconnect()
-                      setTimeout(connect, 1000)
-                    }
-                  }}
-                >
-                  <Text style={{ fontSize: 13 }}>暂停接收</Text>
-                </Checkbox>
-              </Space>
-            </Col>
-          </Row>
-        </div>
-
-        {/* 日志内容 */}
-        {enableVirtualization && displayMessages.length > 100 ? (
-          <VirtualLogViewer
-            messages={displayMessages}
-            height={height}
-            searchable={false}
-            enableAdvancedFilter={false}
-            onClear={clearLogs}
-          />
-        ) : (
-          <div
-            ref={logContainerRef}
-            className={styles.logContainer}
-            style={{
-              height: height,
-              backgroundColor: token.colorBgContainer,
-              color: token.colorText,
-              padding: '12px',
-              borderRadius: 6,
-              overflow: 'auto',
-              fontFamily: 'Monaco, Consolas, "Courier New", monospace',
-              fontSize: '12px',
-              border: `1px solid ${token.colorBorder}`
-            }}
-          >
-            {displayMessages.length === 0 ? (
-              <div style={{
-                color: token.colorTextSecondary,
-                textAlign: 'center',
-                paddingTop: '50px',
-                fontSize: '14px'
-              }}>
-                {connectionStatus === 'disconnected'
-                  ? '点击连接按钮开始查看日志'
-                  : messages.length === 0
-                    ? '等待日志消息...'
-                    : '没有匹配的日志消息'
-                }
-              </div>
-            ) : (
-              displayMessages.map(renderLogMessage)
-            )}
-          </div>
-        )}
-
-        {/* 底部状态栏 - 更简洁 */}
-        <div style={{
-          marginTop: 16,
-          padding: '12px 16px',
-          background: token.colorFillQuaternary,
-          borderRadius: 6,
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 12
-        }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            显示 <Text strong style={{ color: token.colorTextSecondary }}>{displayMessages.length}</Text> / <Text strong style={{ color: token.colorTextSecondary }}>{messages.length}</Text> 条日志
-            {searchText && (
-              <span> （搜索: "{searchText}"）</span>
-            )}
-          </Text>
-          <Space size="small">
-            <Text type="secondary" style={{ fontSize: 12 }}>连接状态:</Text>
-            <Tag 
-              color={getStatusColor()} 
-              style={{ margin: 0, fontSize: 11 }}
-            >
-              {getStatusText()}
-            </Tag>
-          </Space>
-        </div>
-      </div>
+const ViewerLayout: FC<LayoutProps> = ({ actions, buffer, config, containerRef, filters, stats, stream, token }) => (
+  <div className={`${styles.logViewer} ${actions.isFullscreen ? styles.fullscreen : ''}`}>
+    <div style={{ padding: '20px 24px', background: token.colorBgContainer }}>
+      <EnhancedLogViewerHeader
+        {...stream} enableExport={config.enableExport} isFullscreen={actions.isFullscreen}
+        onClear={actions.clearLogs} onConnect={stream.connect} onDisconnect={stream.disconnect}
+        onExport={actions.exportLogs} onReconnect={stream.reconnect} onToggleFullscreen={actions.toggleFullscreen}
+        runId={config.runId} showControls={config.showControls} token={token}
+      />
+      <EnhancedLogViewerStats
+        filteredCount={filters.displayedMessages.length}
+        stats={stats} token={token}
+      />
+      <EnhancedLogViewerFilters
+        enableSearch={config.enableSearch} isAutoScroll={actions.isAutoScroll} isPaused={buffer.isPaused}
+        onAutoScrollChange={actions.setIsAutoScroll} onLevelsChange={filters.setSelectedLevels}
+        onPauseChange={actions.changePaused} onReset={filters.resetFilters} onSearchChange={filters.setSearchText}
+        onTypesChange={filters.setSelectedTypes} searchText={filters.searchText}
+        selectedLevels={filters.selectedLevels} selectedTypes={filters.selectedTypes} token={token}
+      />
+      <EnhancedLogViewerContent
+        allMessageCount={buffer.messages.length} autoScroll={actions.isAutoScroll}
+        connectionStatus={stream.connectionStatus} containerRef={containerRef}
+        enableVirtualization={config.enableVirtualization} height={config.height} maxLines={config.maxLines}
+        messages={filters.displayedMessages} onAutoScrollChange={actions.setIsAutoScroll}
+        onClear={actions.clearLogs} searchText={filters.searchText} token={token}
+      />
+      <LogViewerFooter
+        allMessageCount={buffer.messages.length} connectionStatus={stream.connectionStatus}
+        maxLines={config.maxLines} messages={filters.displayedMessages} searchText={filters.searchText} token={token}
+      />
     </div>
-  )
+  </div>
+)
+
+const EnhancedLogViewer: FC<EnhancedLogViewerProps> = (props) => {
+  const config = { ...DEFAULTS, ...props }
+  const { token } = theme.useToken()
+  const containerRef = useRef<HTMLDivElement>(null)
+  const buffer = useLogMessageBuffer({ maxLines: config.maxLines })
+  const stream = useLogStreamController({
+    autoConnect: config.autoConnect, buffer: buffer.api, onStatusUpdate: config.onStatusUpdate,
+    pendingOverflowCount: buffer.pendingOverflowCount, runId: config.runId,
+    showStderr: config.showStderr, showStdout: config.showStdout,
+  })
+  const filters = useViewerFilters(buffer.messages)
+  const stats = useMemo(() => calculateLogStats(buffer.messages), [buffer.messages])
+  const isViewTruncated = buffer.messages.length >= config.maxLines || stream.history.truncated
+  const actions = useViewerActions({
+    buffer, displayedMessages: filters.displayedMessages, isViewTruncated, runId: config.runId, stream,
+  })
+  useViewerEffects({
+    containerRef, displayedMessages: filters.displayedMessages, isAutoScroll: actions.isAutoScroll,
+    isPaused: buffer.isPaused, messages: buffer.messages, onLogUpdate: config.onLogUpdate,
+  })
+  return <ViewerLayout
+    actions={actions} buffer={buffer} config={config} containerRef={containerRef}
+    filters={filters} stats={stats} stream={stream} token={token}
+  />
 }
 
 export default EnhancedLogViewer

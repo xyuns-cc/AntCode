@@ -11,6 +11,8 @@
 Requirements: 1.2, 1.4, 1.5, 1.6, 1.7, 1.8
 """
 
+from dataclasses import replace
+
 from loguru import logger
 
 from antcode_core.application.services.crawl.backends.base import (
@@ -31,6 +33,17 @@ DEAD_LETTER_SUFFIX = "dead_letter"
 # 默认配置
 DEFAULT_CONSUMER_GROUP = "crawl_workers"
 DEFAULT_STREAM_MAXLEN = 100000
+
+
+def _project_id_from_stream_key(key: str) -> str | None:
+    prefix = f"{STREAM_KEY_PREFIX}:"
+    marker = f":{STREAM_KEY_SUFFIX}:"
+    if not key.startswith(prefix) or marker not in key:
+        return None
+    project_id, _, priority = key[len(prefix) :].rpartition(marker)
+    priorities = (Priority.HIGH, Priority.NORMAL, Priority.LOW)
+    valid_priorities = {value for priority in priorities for value in (str(priority), str(priority.value))}
+    return project_id if project_id and priority in valid_priorities else None
 
 
 def get_stream_key(project_id: str, priority: int) -> str:
@@ -273,8 +286,11 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
                 if pending_info:
                     delivery_count = pending_info[0].delivery_count
 
-                task.retry_count = delivery_count
-
+                # C3: 不再用瞬态 PEL delivery_count 覆盖载荷里的累计
+                # retry_count（requeue 后新消息的 delivery_count 会归零，
+                # 覆盖会让毒任务跨接管永远到不了死信）。载荷值保持
+                # from_dict 解析结果，delivery_count 单独随 ReclaimedTask
+                # 返回，由调用方累加。
                 reclaimed.append(
                     ReclaimedTask(
                         task=task,
@@ -288,6 +304,48 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             logger.info(f"回收超时任务: project={project_id}, count={len(reclaimed)}")
 
         return reclaimed
+
+    async def list_project_ids(self) -> list[str]:
+        """从 Stream 键扫描所有需要恢复的项目。"""
+        pattern = f"{STREAM_KEY_PREFIX}:*:{STREAM_KEY_SUFFIX}:*"
+        keys = await self._stream_client.scan_keys(pattern)
+        project_ids = {_project_id_from_stream_key(key) for key in keys}
+        return sorted(project_id for project_id in project_ids if project_id)
+
+    async def requeue_claimed(self, project_id: str, task: QueueTask) -> str | None:
+        """把已认领消息原子重入同优先级 Stream。"""
+        source_key = get_stream_key(project_id, task.priority)
+        retry_task = replace(task, msg_id="", status="pending")
+        return await self._stream_client.move_pending(
+            source_key,
+            source_key,
+            group_name=self._consumer_group,
+            msg_id=task.msg_id,
+            data=retry_task.to_dict(),
+            maxlen=self._max_stream_len,
+        )
+
+    async def dead_letter_claimed(self, project_id: str, task: QueueTask) -> str | None:
+        """把已认领消息移入项目死信 Stream。
+
+        C2: 源/目标 key 无 hash tag，Redis Cluster 下可能落不同 slot，
+        跨 key 迁移由 ``move_pending`` 走非 Lua 的 XADD→XACK+XDEL 序列
+        （at-least-once，重复死信条目可容忍）。
+        """
+        failed_task = replace(task, msg_id="", status="failed")
+        data = failed_task.to_dict()
+        data.update(
+            original_priority=task.priority,
+            dead_letter_reason="max_retries_exceeded",
+        )
+        return await self._stream_client.move_pending(
+            get_stream_key(project_id, task.priority),
+            get_dead_letter_key(project_id),
+            group_name=self._consumer_group,
+            msg_id=task.msg_id,
+            data=data,
+            maxlen=self._max_stream_len,
+        )
 
     async def stats(self, project_id: str) -> QueueStats:
         """获取队列统计信息

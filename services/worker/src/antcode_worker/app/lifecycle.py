@@ -7,12 +7,15 @@ Requirements: 2.5
 """
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any
 
 from loguru import logger
 
 from antcode_worker.transport.base import WorkerState
+
+MILLISECONDS_PER_SECOND = 1000
 
 
 class Lifecycle:
@@ -43,132 +46,185 @@ class Lifecycle:
         self._shutdown_hooks.insert(0, hook)
 
     async def startup(self, container: Any) -> None:
-        """
-        执行启动流程
-
-        启动顺序：
-        0. mise 检测 + 可选自动安装（保证多语言任务能跑）
-        1. Transport（优先启动）
-        2. RuntimeManager
-        3. Executor
-        4. ObservabilityServer
-        5. HeartbeatReporter
-        6. Engine
-        7. 自定义钩子
-        """
+        """按依赖顺序启动 Worker；任一阶段失败均回滚已启动组件。"""
         logger.info("开始启动 Worker...")
         self._shutdown_event = asyncio.Event()
+        self._validate_startup_dependencies(container)
 
         try:
-            # 0. mise 检测（不阻断：失败也让 Python 项目继续可用）
-            # ensure_mise 内部已把 install 失败降级为 available=False；但网络异常/权限异常
-            # 可能仍抛 RuntimeError（比如 detect_mise 走到 shutil.which 突发 PermissionError），
-            # 兜底 try 保证 Worker 启动流程本身不会被"多语言可选依赖"拉断。
-            try:
-                from antcode_worker.runtime.mise_bootstrap import ensure_mise
-
-                await ensure_mise()
-            except Exception as exc:
-                logger.error("mise 启动检测异常（不阻断 Worker 启动，多语言任务将不可用）: {}", exc)
-
+            await self._check_optional_runtime()
             self._bind_transport_state(container)
-
-            # 启动传输层
-            if container.transport:
-                transport_started = await container.transport.start()
-                if transport_started:
-                    logger.info("传输层已启动")
-                else:
-                    raise RuntimeError("传输层启动失败")
-
-            # 启动运行时管理器
-            if container.runtime_manager:
-                await container.runtime_manager.start()
-                logger.info("运行时管理器已启动")
-
-            # 启动执行器
-            if container.executor:
-                await container.executor.start()
-                logger.info("执行器已启动")
-
-            # 启动可观测性服务器
-            if container.observability_server:
-                host = getattr(container.config, "host", "0.0.0.0")
-                port = getattr(container.config, "port", 8001)
-                await container.observability_server.start(host=host, port=port)
-
-            # P3：首次发租 — 让 Worker 在心跳 loop 起来之前就拿到 lease，
-            # 这样 Master 端能立刻看到 lease:active 集合更新。
-            if container.transport:
-                await self._initial_lease_renew(container)
-
-            # 启动心跳（内部桥接到 lease_renew）
-            if container.heartbeat_reporter:
-                interval = getattr(container.config, "heartbeat_interval", 30)
-                await container.heartbeat_reporter.start(interval=interval)
-                logger.info("心跳上报已启动")
-
-            # 启动引擎
-            if container.engine:
-                await container.engine.start()
-                logger.info("引擎已启动")
-
-            # 设置就绪
-            if container.observability_server:
-                is_ready = True
-                if container.transport:
-                    is_ready = container.transport.is_connected
-                container.observability_server.set_ready(is_ready)
-
-            # 执行自定义启动钩子
-            for hook in self._startup_hooks:
-                result = hook()
-                if asyncio.iscoroutine(result):
-                    await result
-
+            await self._start_base_components(container)
+            await self._start_lease_heartbeat(container)
+            await self._start_component(container.engine, "引擎")
+            self._mark_ready(container)
+            await self._run_startup_hooks()
             self._running = True
             logger.info("Worker 启动完成")
-
         except Exception as e:
             logger.error(f"启动失败: {e}")
-            await self.shutdown(container)
+            await self._rollback_startup(container)
             raise
 
-    async def _initial_lease_renew(self, container: Any) -> None:
+    def _validate_startup_dependencies(self, container: Any) -> None:
+        if getattr(container, "transport", None) is None:
+            raise RuntimeError("Worker 缺少 transport")
+        if getattr(container, "heartbeat_reporter", None) is None:
+            raise RuntimeError("Worker 缺少 heartbeat reporter")
+
+    async def _check_optional_runtime(self) -> None:
+        """mise 是可选能力；检测失败只禁用多语言任务。"""
+        try:
+            from antcode_worker.runtime.mise_bootstrap import ensure_mise
+
+            await ensure_mise()
+        except Exception as exc:
+            logger.error("mise 启动检测异常（不阻断 Worker 启动，多语言任务将不可用）: {}", exc)
+
+    async def _start_base_components(self, container: Any) -> None:
+        await self._start_transport(container.transport)
+        await self._start_component(container.runtime_manager, "运行时管理器")
+        await self._start_component(container.executor, "执行器")
+        await self._start_observability(container)
+
+    async def _start_transport(self, transport: Any) -> None:
+        if not await transport.start():
+            raise RuntimeError("传输层启动失败")
+        logger.info("传输层已启动")
+
+    async def _start_component(self, component: Any, label: str) -> None:
+        if component is None:
+            return
+        await component.start()
+        logger.info(f"{label}已启动")
+
+    async def _start_observability(self, container: Any) -> None:
+        server = container.observability_server
+        if server is None:
+            return
+        host = getattr(container.config, "host", "0.0.0.0")
+        port = getattr(container.config, "port", 8001)
+        await server.start(host=host, port=port)
+
+    async def _start_lease_heartbeat(self, container: Any) -> None:
+        lease_interval = await self._initial_lease_renew(container)
+        configured_interval = getattr(container.config, "heartbeat_interval", 30)
+        interval = min(configured_interval, lease_interval)
+        await container.heartbeat_reporter.start(interval=interval)
+        logger.info("心跳上报已启动")
+
+    def _mark_ready(self, container: Any) -> None:
+        if container.observability_server is None:
+            return
+        container.observability_server.set_ready(container.transport.is_connected)
+
+    async def _run_startup_hooks(self) -> None:
+        for hook in self._startup_hooks:
+            result = hook()
+            if asyncio.iscoroutine(result):
+                await result
+
+    async def _rollback_startup(self, container: Any) -> None:
+        self._running = True
+        await self.shutdown(container, grace_period=0)
+
+    # X3: 初始 lease 获取的重试参数。kill -9 后 supervisor 在旧 lease TTL
+    # （LeasePolicy.ttl_ms，默认 30s）内重启 Worker 时，lease grant Lua 会
+    # 因"未过期的旧 self lease"返回 conflict —— 这不是永久故障，等旧 lease
+    # 自然过期即可自愈。因此启动侧在 TTL + 余量的有界窗口内退避重试，
+    # 避免 Worker 陷入 crash-loop 被有界重启策略打死。
+    INITIAL_LEASE_RETRY_INTERVAL_SECONDS = 2.0
+    INITIAL_LEASE_WAIT_MARGIN_SECONDS = 10.0
+    DEFAULT_LEASE_TTL_SECONDS = 30.0
+
+    async def _initial_lease_renew(self, container: Any) -> int:
         """Worker 启动时主动跑一次 ``transport.lease_renew("")``。
 
-        - Direct 模式直接走 ``LeaseStore.grant``，无副作用。
+        - Direct 模式直接写 ``LeaseStore``，Gateway 模式调用 Lease RPC。
         - Gateway 模式跑 ``ControlService.Lease`` RPC，让 Master 立刻在
           ``lease:active`` 看到 Worker。
-        - 如果返回 ``revoked=True``（极端情况下首发就被撤销）则触发关闭。
-
-        本方法对 ``lease_renew`` 失败做容错：失败时只 warning，不阻塞
-        Worker 启动，后续 HeartbeatReporter loop 会持续重试。
+        - X3: 初始租约失败（conflict / revoked / RPC 失败等）不再一击致命：
+          在旧 lease TTL + 余量的窗口内退避重试，等旧 lease 过期后自动恢复；
+          窗口耗尽仍失败才拒绝启动，保证启动总时长有界。没有租约的 Worker
+          无法通过结果 fencing，继续启动只会制造永远停在 running 的任务。
         """
         transport = container.transport
         if transport is None or not hasattr(transport, "lease_renew"):
-            return
+            raise RuntimeError("Worker transport 不支持 lease_renew")
+
+        deadline = time.monotonic() + self._initial_lease_wait_window_seconds(container)
+        while True:
+            try:
+                return await self._attempt_initial_lease(transport)
+            except Exception as exc:
+                if time.monotonic() + self.INITIAL_LEASE_RETRY_INTERVAL_SECONDS > deadline:
+                    raise RuntimeError(f"Worker 初始 lease 获取失败（重试窗口耗尽）: {exc}") from exc
+                logger.warning("初始 lease 获取失败，等待旧 lease 过期后重试: {}", exc)
+                await asyncio.sleep(self.INITIAL_LEASE_RETRY_INTERVAL_SECONDS)
+
+    def _initial_lease_wait_window_seconds(self, container: Any) -> float:
+        """初始 lease 重试窗口 = 旧 lease TTL + 余量。
+
+        TTL 优先从 Direct transport 的 ``LeaseStore.policy.ttl_ms`` 读；
+        拿不到（如 Gateway 模式，TTL 在 Master 侧）就用默认常量兜底。
+        """
+        ttl_seconds = self.DEFAULT_LEASE_TTL_SECONDS
+        policy = getattr(
+            getattr(getattr(container, "transport", None), "_lease_store", None),
+            "policy",
+            None,
+        )
+        try:
+            ttl_ms = int(getattr(policy, "ttl_ms", 0) or 0)
+        except (TypeError, ValueError):
+            ttl_ms = 0
+        if ttl_ms > 0:
+            ttl_seconds = ttl_ms / MILLISECONDS_PER_SECOND
+        return ttl_seconds + self.INITIAL_LEASE_WAIT_MARGIN_SECONDS
+
+    async def _attempt_initial_lease(self, transport: Any) -> int:
+        """单次初始 lease 获取；任一校验不通过即 raise，由上层决定是否重试。"""
         try:
             lease_id, expires_at_ms, renew_after_ms, revoked = await transport.lease_renew(
                 current_lease_id="",
                 metrics=None,
             )
         except Exception as exc:
-            logger.warning(f"初始 lease_renew 失败（不阻塞启动）: {exc}")
-            return
+            raise RuntimeError("Worker 初始 lease_renew 失败") from exc
 
         if revoked:
-            logger.error("Worker 首次 lease 即被撤销，触发优雅关闭")
-            self.trigger_shutdown()
-            return
+            raise RuntimeError("Worker 初始 lease 已被撤销")
+        if not lease_id:
+            raise RuntimeError("Worker 初始 lease_renew 未返回 lease_id")
+        if expires_at_ms <= 0:
+            raise RuntimeError("Worker 初始 lease 缺少有效过期时间")
+        # P2 §4.3: 不能拿本机 time.time() 与 Redis 绝对过期时间比较——
+        # 时钟偏移会把有效 lease 误判过期（或反之）。Direct 模式用
+        # LeaseStore.is_current（Redis PTTL 权威时钟）复核；Gateway 模式
+        # lease 由 Master 按 Redis TIME 授予，服务端已保证新签 lease 有效。
+        await self._require_lease_current_authoritative(transport, lease_id)
+        if renew_after_ms < MILLISECONDS_PER_SECOND:
+            raise RuntimeError("Worker lease renew_after_ms 必须至少为 1000")
 
-        if lease_id:
-            logger.info(
-                "初始 lease 已获取: lease_id={} expires_at_ms={} renew_after_ms={}",
-                lease_id,
-                expires_at_ms,
-                renew_after_ms,
-            )
+        logger.info(
+            "初始 lease 已获取: expires_at_ms={} renew_after_ms={}",
+            expires_at_ms,
+            renew_after_ms,
+        )
+        return renew_after_ms // MILLISECONDS_PER_SECOND
+
+    @staticmethod
+    async def _require_lease_current_authoritative(transport: Any, lease_id: str) -> None:
+        from antcode_core.application.services.lease_service import LeaseStore
+
+        store = getattr(transport, "_lease_store", None)
+        if not isinstance(store, LeaseStore):
+            # Gateway 模式：lease 由服务端（Master 走 Redis TIME）授予，
+            # 本地没有权威 LeaseStore，可信任新签结果。
+            return
+        worker_id = getattr(transport, "_worker_id", "") or ""
+        if not await store.is_current(worker_id, lease_id):
+            raise RuntimeError("Worker 初始 lease 在权威时钟(Redis PTTL)下无效")
 
     def _bind_transport_state(self, container: Any) -> None:
         """绑定传输层状态变更回调"""
@@ -187,83 +243,62 @@ class Lifecycle:
         container.transport.on_state_change(_on_state_change)
 
     async def shutdown(self, container: Any, grace_period: float = 30.0) -> None:
-        """
-        执行关闭流程
-
-        关闭顺序（与启动相反）：
-        1. 停止接收新任务（Engine.stop_polling）
-        2. 等待运行中任务完成（最长 grace_period）
-        3. 强制终止未完成任务
-        4. 停止心跳
-        5. 停止执行器
-        6. 停止运行时管理器
-        7. 停止可观测性服务器
-        8. 停止传输层
-        6. 自定义钩子
-        """
+        """按启动逆序停止组件并发送关闭信号。"""
         if not self._running:
             return
-
         logger.info(f"开始关闭 Worker (grace_period={grace_period}s)...")
         self._running = False
 
         try:
-            # 执行自定义关闭钩子
-            for hook in self._shutdown_hooks:
-                try:
-                    result = hook()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception as e:
-                    logger.warning(f"关闭钩子执行失败: {e}")
-
-            # 停止引擎（会 drain 任务）
-            if container.engine:
-                await container.engine.stop(grace_period=grace_period)
-                logger.info("引擎已停止")
-
-            # T7-B3b (P1-6): 主动 deregister —— 让 master 立即撤销 lease，
-            # 不再等 TTL（30s）自然过期。在 heartbeat.stop 之前调，保证心跳
-            # 循环还在的时候 revoke 一定能触达（gateway 模式 RPC 走的是同一
-            # 个控制信道；direct 模式走 Redis）。失败仅告警不阻塞后续 stop。
-            if container.transport:
-                try:
-                    await container.transport.deregister("worker_shutdown")
-                except Exception as exc:
-                    logger.warning(f"deregister 失败（不阻塞停机）: {exc}")
-
-            # 停止心跳
-            if container.heartbeat_reporter:
-                await container.heartbeat_reporter.stop()
-                logger.info("心跳上报已停止")
-
-            # 停止执行器
-            if container.executor:
-                await container.executor.stop()
-                logger.info("执行器已停止")
-
-            # 停止运行时管理器
-            if container.runtime_manager:
-                await container.runtime_manager.stop()
-                logger.info("运行时管理器已停止")
-
-            # 停止可观测性服务器
-            if container.observability_server:
-                await container.observability_server.stop()
-                logger.info("可观测性服务已停止")
-
-            # 停止传输层
-            if container.transport:
-                await container.transport.stop(grace_period=5.0)
-                logger.info("传输层已停止")
-
+            await self._run_shutdown_hooks()
+            await self._stop_engine(container.engine, grace_period)
+            await self._deregister_transport(container.transport)
+            await self._stop_component(container.heartbeat_reporter, "心跳上报")
+            await self._stop_component(container.executor, "执行器")
+            await self._stop_component(container.runtime_manager, "运行时管理器")
+            await self._stop_component(container.observability_server, "可观测性服务")
+            await self._stop_transport(container.transport)
             logger.info("Worker 已关闭")
-
         except Exception as e:
             logger.error(f"关闭过程异常: {e}")
         finally:
             if self._shutdown_event:
                 self._shutdown_event.set()
+
+    async def _run_shutdown_hooks(self) -> None:
+        for hook in self._shutdown_hooks:
+            try:
+                result = hook()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.warning(f"关闭钩子执行失败: {e}")
+
+    async def _stop_engine(self, engine: Any, grace_period: float) -> None:
+        if engine is None:
+            return
+        await engine.stop(grace_period=grace_period)
+        logger.info("引擎已停止")
+
+    async def _deregister_transport(self, transport: Any) -> None:
+        if transport is None:
+            return
+        try:
+            await transport.deregister("worker_shutdown")
+        except Exception as exc:
+            logger.warning(f"deregister 失败（不阻塞停机）: {exc}")
+
+    async def _stop_component(self, component: Any, label: str) -> None:
+        if component is None:
+            return
+        await component.stop()
+        logger.info(f"{label}已停止")
+
+    async def _stop_transport(self, transport: Any) -> None:
+        if transport is None:
+            return
+        await transport.stop(grace_period=5.0)
+        logger.info("传输层已停止")
 
     async def wait_for_shutdown(self) -> None:
         """等待关闭信号"""

@@ -1,3 +1,4 @@
+import importlib
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -69,7 +70,13 @@ async def test_get_redis_heartbeat_rejects_invalid_timestamp(monkeypatch):
 @pytest.mark.asyncio
 async def test_sync_redis_heartbeat_exposes_db_save_errors(monkeypatch):
     service = WorkerHeartbeatService()
-    worker = _worker(save=AsyncMock(side_effect=RuntimeError("postgres unavailable")))
+    worker = _worker()
+    heartbeat_module = importlib.import_module("antcode_core.application.services.workers.worker_heartbeat_service")
+    monkeypatch.setattr(
+        heartbeat_module,
+        "persist_worker_heartbeat",
+        AsyncMock(side_effect=RuntimeError("postgres unavailable")),
+    )
     monkeypatch.setattr(
         redis_module,
         "get_redis_client",

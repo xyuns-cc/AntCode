@@ -876,7 +876,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
                     max={100}
                     style={{ width: '100%' }}
                     value={paginationConfig.start_page}
-                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, start_page: value || 1 })}
+                    onChange={(value) => handlePaginationConfigChange({ ...paginationConfig, start_page: value ?? 1 })}
                   />
                 </Form.Item>
               </Col>

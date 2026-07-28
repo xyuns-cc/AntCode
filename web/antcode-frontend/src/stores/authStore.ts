@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
 import type { User } from '@/types'
 
 interface AuthStore {
@@ -9,6 +8,12 @@ interface AuthStore {
   isLoading: boolean
   error: string | null
   permissions: string[]
+  /**
+   * 认证纪元：每次登录/登出（setUser/clearUser）单调递增。
+   * 用于让慢速的后台会话检查在完成时判断期间是否发生过登录/登出，
+   * 避免过期的 401 结果覆盖新建立的会话。
+   */
+  authEpoch: number
 
   // Actions
   setUser: (user: User) => void
@@ -24,23 +29,23 @@ interface AuthStore {
   hasAllPermissions: (permissions: string[]) => boolean
 }
 
-export const useAuthStore = create<AuthStore>()(
-  persist(
-    (set, get) => ({
+export const useAuthStore = create<AuthStore>()((set, get) => ({
       // 初始状态
       user: null,
       isAuthenticated: false,
       isLoading: false,
       error: null,
       permissions: [],
+      authEpoch: 0,
 
       // 设置用户信息
       setUser: (user: User) => {
-        set({
+        set((state) => ({
           user,
           isAuthenticated: true,
-          error: null
-        })
+          error: null,
+          authEpoch: state.authEpoch + 1
+        }))
       },
 
       // 设置加载状态
@@ -60,12 +65,13 @@ export const useAuthStore = create<AuthStore>()(
 
       // 清除用户信息
       clearUser: () => {
-        set({
+        set((state) => ({
           user: null,
           isAuthenticated: false,
           error: null,
-          permissions: []
-        })
+          permissions: [],
+          authEpoch: state.authEpoch + 1
+        }))
       },
 
       // 更新用户信息
@@ -81,34 +87,21 @@ export const useAuthStore = create<AuthStore>()(
       // 检查是否有特定权限
       hasPermission: (permission: string) => {
         const { permissions } = get()
-        return permissions.includes(permission) || permissions.includes('admin')
+        return permissions.includes(permission)
       },
 
       // 检查是否有任意一个权限
       hasAnyPermission: (requiredPermissions: string[]) => {
         const { permissions } = get()
-        return requiredPermissions.some(permission => 
-          permissions.includes(permission) || permissions.includes('admin')
-        )
+        return requiredPermissions.some(permission => permissions.includes(permission))
       },
 
       // 检查是否有所有权限
       hasAllPermissions: (requiredPermissions: string[]) => {
         const { permissions } = get()
-        if (permissions.includes('admin')) return true
         return requiredPermissions.every(permission => permissions.includes(permission))
       }
-    }),
-    {
-      name: 'auth-storage',
-      partialize: (state) => ({
-        user: state.user,
-        isAuthenticated: state.isAuthenticated,
-        permissions: state.permissions
-      }),
-    }
-  )
-)
+    }))
 
 // 选择器函数
 export const selectUser = (state: AuthStore) => state.user

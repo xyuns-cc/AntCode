@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
 
 from antcode_core.common.config import settings
+from antcode_core.infrastructure.redis.runtime_control_keys import (
+    require_runtime_control_request_id,
+    runtime_control_request_id,
+    validate_worker_key_segment,
+)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Redis Stream JSON 包含非标准常量: {value}")
 
 
 def redis_namespace(namespace: str | None = None) -> str:
@@ -31,8 +41,8 @@ def log_stream_key(run_id: str, namespace: str | None = None) -> str:
 
 
 def log_ingest_stream_key(namespace: str | None = None) -> str:
-    """Worker 直连日志落库 stream key。"""
-    return f"{redis_namespace(namespace)}:log:ingest"
+    """日志落库 stream，与 Lease/ownership 共享 Cluster hash slot。"""
+    return f"{{{redis_namespace(namespace)}}}:log:ingest"
 
 
 def log_chunk_stream_key(run_id: str, namespace: str | None = None) -> str:
@@ -73,13 +83,26 @@ def log_ingest_consumer_group(namespace: str | None = None) -> str:
 
 
 def control_global_stream(namespace: str | None = None) -> str:
-    """全局控制通道 stream key。"""
+    """可信 Gateway 使用的共享广播 stream；Direct Worker 不得访问。"""
     return f"{redis_namespace(namespace)}:control:global"
 
 
 def control_reply_stream(request_id: str, namespace: str | None = None) -> str:
     """控制结果回复 stream key。"""
     return f"{redis_namespace(namespace)}:control:reply:{request_id}"
+
+
+def runtime_control_settlement_key(
+    worker_id: str,
+    identity: str,
+    namespace: str | None = None,
+) -> str:
+    """Build a hashed Direct settlement key inside one Worker's ACL scope."""
+    worker_segment = validate_worker_key_segment(worker_id)
+    if not identity:
+        raise ValueError("运行时控制 settlement identity 不能为空")
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"{{{redis_namespace(namespace)}}}:control:settlement:{worker_segment}:{digest}"
 
 
 def worker_heartbeat_key(worker_id: str, namespace: str | None = None) -> str:
@@ -97,9 +120,22 @@ def control_group(namespace: str | None = None) -> str:
     return f"{redis_namespace(namespace)}-control"
 
 
+def control_global_group(worker_id: str, namespace: str | None = None) -> str:
+    """Return the Gateway-owned per-Worker group for global broadcasts."""
+    normalized_worker_id = (worker_id or "").strip()
+    if not normalized_worker_id:
+        raise ValueError("worker_id 不能为空")
+    return f"{control_group(namespace)}:{normalized_worker_id}"
+
+
 def direct_register_proof_key(worker_id: str, namespace: str | None = None) -> str:
     """Worker Direct 注册证明 key。"""
     return f"{redis_namespace(namespace)}:direct:register:{worker_id}"
+
+
+def install_key_redis_digest(value: str) -> str:
+    """固定长度哈希，防止安装 Key 相关 Redis key 泄漏外部输入。"""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def worker_install_key_fail_counter_key(
@@ -108,7 +144,10 @@ def worker_install_key_fail_counter_key(
     namespace: str | None = None,
 ) -> str:
     """安装 Key 失败计数器 key。"""
-    return f"{redis_namespace(namespace)}:worker:install-key:fail:{key}:{source}"
+    return (
+        f"{redis_namespace(namespace)}:worker:install-key:fail:"
+        f"{install_key_redis_digest(key)}:{install_key_redis_digest(source)}"
+    )
 
 
 def worker_install_key_block_key(
@@ -117,12 +156,25 @@ def worker_install_key_block_key(
     namespace: str | None = None,
 ) -> str:
     """安装 Key 来源封禁 key。"""
-    return f"{redis_namespace(namespace)}:worker:install-key:block:{key}:{source}"
+    return (
+        f"{redis_namespace(namespace)}:worker:install-key:block:"
+        f"{install_key_redis_digest(key)}:{install_key_redis_digest(source)}"
+    )
+
+
+def worker_install_source_fail_counter_key(source: str, namespace: str | None = None) -> str:
+    """安装注册来源失败计数器 key。"""
+    return f"{redis_namespace(namespace)}:worker:install-key:source-fail:{install_key_redis_digest(source)}"
+
+
+def worker_install_source_block_key(source: str, namespace: str | None = None) -> str:
+    """安装注册来源封禁 key。"""
+    return f"{redis_namespace(namespace)}:worker:install-key:source-block:{install_key_redis_digest(source)}"
 
 
 def worker_install_key_claim_key(key: str, namespace: str | None = None) -> str:
     """安装 Key 来源声明 key。"""
-    return f"{redis_namespace(namespace)}:worker:install-key:claim:{key}"
+    return f"{redis_namespace(namespace)}:worker:install-key:claim:{install_key_redis_digest(key)}"
 
 
 def worker_install_key_nonce_key(
@@ -131,12 +183,15 @@ def worker_install_key_nonce_key(
     namespace: str | None = None,
 ) -> str:
     """安装 Key 防重放 nonce key。"""
-    return f"{redis_namespace(namespace)}:worker:install-key:nonce:{key}:{request_nonce}"
+    return (
+        f"{redis_namespace(namespace)}:worker:install-key:nonce:"
+        f"{install_key_redis_digest(key)}:{install_key_redis_digest(request_nonce)}"
+    )
 
 
 def worker_install_key_meta_key(key: str, namespace: str | None = None) -> str:
     """安装 Key 元信息 key。"""
-    return f"{redis_namespace(namespace)}:worker:install-key:meta:{key}"
+    return f"{redis_namespace(namespace)}:worker:install-key:meta:{install_key_redis_digest(key)}"
 
 
 def build_cancel_control_payload(run_id: str, reason: str = "", task_id: str | None = None) -> dict[str, str]:
@@ -163,7 +218,9 @@ def build_runtime_manage_control_payload(
     action: str,
     request_id: str,
     reply_stream: str,
+    *,
     payload: Mapping[str, Any] | None = None,
+    expires_at_ms: int,
 ) -> dict[str, str]:
     """构建运行时管理控制指令。"""
     return {
@@ -172,6 +229,7 @@ def build_runtime_manage_control_payload(
         "request_id": request_id,
         "reply_stream": reply_stream,
         "payload": json.dumps(dict(payload or {}), ensure_ascii=False),
+        "expires_at_ms": str(expires_at_ms),
     }
 
 
@@ -187,10 +245,11 @@ def decode_stream_payload(data: Mapping[Any, Any]) -> dict[str, Any]:
         if json_key in decoded and isinstance(decoded[json_key], str):
             raw = decoded[json_key]
             if not raw:
+                # 兼容旧写入端的空字符串字段：跳过而非报错。
                 continue
             try:
-                decoded[json_key] = json.loads(raw)
-            except json.JSONDecodeError as exc:
+                decoded[json_key] = json.loads(raw, parse_constant=_reject_json_constant)
+            except (json.JSONDecodeError, ValueError) as exc:
                 raise ValueError(f"Redis Stream 字段 {json_key} 不是合法 JSON") from exc
 
     return decoded
@@ -207,13 +266,21 @@ __all__ = [
     "log_chunk_stream_pattern",
     "control_stream",
     "control_global_stream",
+    "control_global_group",
     "control_reply_stream",
+    "validate_worker_key_segment",
+    "runtime_control_request_id",
+    "require_runtime_control_request_id",
+    "runtime_control_settlement_key",
     "worker_heartbeat_key",
     "worker_group",
     "control_group",
     "direct_register_proof_key",
+    "install_key_redis_digest",
     "worker_install_key_fail_counter_key",
     "worker_install_key_block_key",
+    "worker_install_source_fail_counter_key",
+    "worker_install_source_block_key",
     "worker_install_key_claim_key",
     "worker_install_key_nonce_key",
     "worker_install_key_meta_key",

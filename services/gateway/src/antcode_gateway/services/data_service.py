@@ -3,28 +3,21 @@ DataService gRPC 服务实现 (P1c)
 
 负责高频数据面：
 
-- ``StreamTasks`` (server-stream)：长连接订阅任务派发；底层从
-  Redis ``task:ready:{worker_id}`` Stream ``XREADGROUP`` 后转码为
-  ``TaskDispatch`` Proto yield 给 Worker。
+- ``StreamTasks``：订阅 Redis ready stream 并转码为 ``TaskDispatch``。
 - ``AckTask``：worker 收到任务后回执 (accept/reject)，对应 XACK 或重新入队。
-- ``StreamStatus`` (client-stream)：worker 把每条 ``TaskStatus`` 推上来，
-  Gateway 用 ``ProtoCodec(TaskStatus)`` 落 task_result_stream（单字段 'p'
-  框架）由 Master ``ResultLoop`` 解码。
-- ``StreamLogs`` (client-stream)：worker 推 ``LogBatch``，Gateway 用
-  Proto bytes 单字段框架落 log:{run_id} stream。
+- ``StreamStatus`` / ``StreamLogs``：校验后写入统一结果与日志 Stream。
 
-所有落 Stream 操作都满足 P1a wire-format 约定：``{PROTO_FIELD: bytes}``。
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
 
 import grpc
 from antcode_contracts import data_pb2
 from antcode_contracts.data_pb2_grpc import DataServiceServicer
+from antcode_core.application.services.workers.log_ingest_fence import LogIngestFenceRejected
 from antcode_core.application.services.workers.run_ownership_service import (
     require_worker_owns_runs,
     require_worker_owns_runs_for_lease,
@@ -41,9 +34,6 @@ from antcode_gateway.handlers import (
 )
 from antcode_gateway.handlers.poll import task_info_to_dispatch
 from antcode_gateway.services.stream_frame_guards import require_bounded_status_frame, require_owned_receipt
-
-if TYPE_CHECKING:  # pragma: no cover
-    pass
 
 # StreamTasks 内部从 ready stream 拉取的阻塞超时（毫秒）。
 # 选小一点避免 server-stream 退出后还卡在 redis 阻塞读上。
@@ -164,9 +154,10 @@ class GatewayDataService(DataServiceServicer):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "worker_id 不能为空")
             return
 
+        await self._require_current_lease(context, worker_id, request.lease_id)
+        await context.send_initial_metadata(())
         prefetch = request.prefetch if request.prefetch > 0 else 1
         logger.info(f"StreamTasks 建立: worker_id={worker_id} prefetch={prefetch}")
-
         try:
             while True:
                 if context.cancelled():
@@ -191,11 +182,7 @@ class GatewayDataService(DataServiceServicer):
                 if not tasks:
                     continue
 
-                # P1-GW-01: XREADGROUP 返回后、下发前必须复检 Lease。阻塞读
-                # 期间代际可能已切换（新进程 L2 已建立），旧流继续下发会打开
-                # 双执行窗口。复检失败即 abort：消息不 yield、不 ACK，留在
-                # PEL 由新代际按 visibility timeout xautoclaim 接管；结算侧
-                # 另有 AckTask lease fence + run ownership Lua fence 兜底。
+                # 阻塞读取后复检 Lease；失败时保留 PEL 给新代际接管。
                 await self._require_current_lease(context, worker_id, request.lease_id)
 
                 for task in tasks:
@@ -208,7 +195,6 @@ class GatewayDataService(DataServiceServicer):
         finally:
             logger.info(f"StreamTasks 已断开: worker_id={worker_id}")
 
-    # =========================================================================
     # AckTask
     # =========================================================================
 
@@ -268,11 +254,7 @@ class GatewayDataService(DataServiceServicer):
                 if not await require_bounded_status_frame(context, task_status):  # P1-SEC-04
                     return data_pb2.StatusAck(received=received)
                 worker_id = await require_authenticated_worker(context, task_status.worker_id)
-                # P1-GW-06: StreamStatus 与 AckTask 对称 —— 也必须校验当前代际 Lease,
-                # 否则被撤销/换代的旧 Worker 仍能上报 RUNNING/终态帧,把新 L2 的状态
-                # 覆盖或伪造。TaskStatus proto 没有 top-level lease_id, Worker 在
-                # engine._report_result / _report_running_start 都把 lease_id 塞到
-                # data map 里, 这里读同一约定字段做代际 fence。
+                # TaskStatus 无顶层 lease_id，沿用 data map 的代际字段。
                 status_lease_id = str(task_status.data.get("lease_id", "") or "").strip()
                 await self._require_current_lease(context, worker_id, status_lease_id)
                 await self._require_run_ownership(context, worker_id, {task_status.run_id})
@@ -331,6 +313,13 @@ class GatewayDataService(DataServiceServicer):
                 )
                 try:
                     ok = await self._logs.handle_log_batch(batch)
+                except LogIngestFenceRejected as exc:
+                    failed += 1
+                    await context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        f"log generation superseded: {exc.reason}",
+                    )
+                    return data_pb2.LogAck(received=received)
                 except ValueError as exc:
                     logger.warning(f"StreamLogs 输入无效: worker_id={batch.worker_id} exc={exc}")
                     failed += 1

@@ -36,8 +36,14 @@ async def get_logs(
     return extract_data(payload) or {}
 
 
-async def issue_stream_ticket(client: httpx.AsyncClient, token: str) -> str:
-    payload = await request_json(client, "POST", "/logs/stream-ticket", token=token)
+async def issue_stream_ticket(client: httpx.AsyncClient, token: str, run_id: str) -> str:
+    payload = await request_json(
+        client,
+        "POST",
+        "/logs/stream-ticket",
+        token=token,
+        params={"run_id": run_id},
+    )
     data = extract_data(payload) or {}
     ticket = data.get("ticket")
     assert ticket, "日志流 ticket 签发失败"
@@ -93,6 +99,34 @@ async def scan_for_target_log(
     raise AssertionError(f"SSE 未收到目标日志 {expected_content!r}: observed_types={observed_types}")
 
 
+async def scan_for_realtime_log_and_status(
+    messages: AsyncIterator[dict[str, Any]],
+    expected_content: str,
+    *,
+    terminal_statuses: frozenset[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Require a realtime log and terminal status on the same SSE connection."""
+    history_complete = False
+    target_log: dict[str, Any] | None = None
+    terminal_status: dict[str, Any] | None = None
+    async for message in messages:
+        message_type = str(message.get("type"))
+        if message_type in HISTORY_END_TYPES:
+            history_complete = True
+            continue
+        data = message.get("data") or {}
+        if history_complete and message_type == "log_line":
+            realtime = data.get("source") in REALTIME_SOURCES
+            if realtime and expected_content in str(data.get("content", "")):
+                target_log = message
+        if history_complete and message_type == "run_status":
+            if str(data.get("status") or "") in terminal_statuses:
+                terminal_status = message
+        if target_log is not None and terminal_status is not None:
+            return target_log, terminal_status
+    raise AssertionError(f"SSE 未同时收到实时日志和终态: content={expected_content!r}")
+
+
 async def _wait_for_stream_log(
     client: httpx.AsyncClient,
     run_id: str,
@@ -102,7 +136,7 @@ async def _wait_for_stream_log(
     timeout: float,
     realtime_only: bool,
 ) -> dict[str, Any]:
-    ticket = await issue_stream_ticket(client, token)
+    ticket = await issue_stream_ticket(client, token, run_id)
     path = build_stream_path(run_id, ticket)
     try:
         async with asyncio.timeout(timeout):
@@ -151,3 +185,27 @@ async def wait_for_realtime_stream_log(
         timeout=timeout,
         realtime_only=True,
     )
+
+
+async def wait_for_realtime_log_and_status(
+    client: httpx.AsyncClient,
+    run_id: str,
+    *,
+    token: str,
+    expected_content: str,
+    terminal_statuses: frozenset[str],
+    timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    ticket = await issue_stream_ticket(client, token, run_id)
+    path = build_stream_path(run_id, ticket)
+    try:
+        async with asyncio.timeout(timeout):
+            async with client.stream("GET", path) as response:
+                response.raise_for_status()
+                return await scan_for_realtime_log_and_status(
+                    parse_sse_messages(response.aiter_lines()),
+                    expected_content,
+                    terminal_statuses=terminal_statuses,
+                )
+    except TimeoutError as exc:
+        raise AssertionError(f"SSE 等待实时日志和终态超时({timeout}s): {expected_content!r}") from exc

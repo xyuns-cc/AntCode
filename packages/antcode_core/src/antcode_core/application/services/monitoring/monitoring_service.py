@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast, overload
 
@@ -23,6 +23,10 @@ from antcode_core.domain.models.monitoring import (
     WorkerPerformanceHistory,
 )
 from antcode_core.infrastructure.redis import get_redis_client
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 @overload
@@ -158,7 +162,7 @@ class MonitoringService:
     async def cleanup_old_data(self, days=None):
         """清理过期的监控数据（批量操作）"""
         keep_days = days if days is not None else self.config.history_keep_days
-        cutoff = datetime.utcnow() - timedelta(days=keep_days)
+        cutoff = _utcnow_naive() - timedelta(days=keep_days)
 
         # 批量删除，并记录删除数量
         perf_deleted = await WorkerPerformanceHistory.filter(timestamp__lt=cutoff).delete()
@@ -304,9 +308,9 @@ class MonitoringService:
             return None
 
         try:
-            dt = datetime.fromtimestamp(float(timestamp))
+            dt = datetime.fromtimestamp(float(timestamp), UTC).replace(tzinfo=None)
         except Exception:
-            dt = datetime.utcnow()
+            dt = _utcnow_naive()
 
         if "event" in data:
             return {
@@ -369,9 +373,9 @@ class MonitoringService:
         if not timestamp:
             return
         try:
-            dt = datetime.fromtimestamp(float(timestamp))
+            dt = datetime.fromtimestamp(float(timestamp), UTC).replace(tzinfo=None)
         except Exception:
-            dt = datetime.utcnow()
+            dt = _utcnow_naive()
 
         if "event" in data:
             await WorkerEvent.create(

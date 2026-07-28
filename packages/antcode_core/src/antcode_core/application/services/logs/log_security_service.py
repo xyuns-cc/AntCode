@@ -246,8 +246,6 @@ class EnhancedErrorHandler:
             logger.warning("检测到文件不存在错误，可能需要检查日志文件路径配置")
         elif error_type == "PermissionError":
             logger.warning("检测到权限错误，可能需要检查文件系统权限")
-        elif error_type == "WebSocketDisconnect":
-            logger.debug("WebSocket连接断开，这是正常现象")
         elif error_type == "asyncio.TimeoutError":
             logger.warning("检测到超时错误，可能需要优化性能或增加超时时间")
 

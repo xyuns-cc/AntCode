@@ -39,6 +39,7 @@ from loguru import logger
 from antcode_web_api.response import Messages, page
 from antcode_web_api.response import success as success_response
 from antcode_web_api.services.crawl_item_stream import iter_batch_items
+from antcode_web_api.utils.csv_security import sanitize_csv_row
 
 router = APIRouter()
 
@@ -694,7 +695,11 @@ async def cleanup_test(
 @router.get(
     "/batches/{batch_id}/items",
     summary="批次维度聚合抓取数据",
-    description="跨批次内所有 run 汇总 spider:data，按 sequence 排序返回",
+    description=(
+        "跨批次内所有 run 汇总 spider:data，按 (run_id 派发顺序, run 内 sequence)"
+        " 复合顺序返回。跨 run 的 sequence 从 1 开始重排，不是全局唯一"
+        " sequence——修正原 '按 sequence 全局排序' 契约（P2-13）。"
+    ),
 )
 async def get_batch_items(
     batch_id: str,
@@ -702,12 +707,22 @@ async def get_batch_items(
     current_user: TokenData = Depends(get_current_user),
 ):
     """P2-28: 补按批次聚合视图。用户之前只能一个 run 一个 run 翻，
-    批次结果没有聚合入口。"""
+    批次结果没有聚合入口。
+
+    P2-13：读端本来就是按"run 派发顺序（TaskRun.id ASC）逐 run 读、每 run 内
+    走各自 Stream 顺序"，这已经是一个稳定的偏序；但每个 run 的 sequence
+    独立从 1 起，不是跨 run 唯一。前端拿去做主键会重复。这里给每条 item
+    补一个跨 run 全局单调 ``global_index``（响应内递增），前端优先用它做主
+    键；``sequence`` 保留为 per-run 序号，语义仍然清晰。
+    """
     await _verify_batch_owner(batch_id, current_user)
     items = []
+    global_index = 0
     async for item in iter_batch_items(batch_id, limit):
+        global_index += 1
         items.append(
             {
+                "global_index": global_index,
                 "sequence": item.sequence,
                 "url": item.url,
                 "timestamp": item.timestamp,
@@ -774,7 +789,7 @@ async def export_batch(
             data_keys = list(payload.keys()) if isinstance(payload, dict) else []
             if columns is None:
                 columns = ["sequence", "url", "timestamp", "run_id"] + data_keys
-                writer.writerow(columns)
+                writer.writerow(sanitize_csv_row(columns))
                 yield buf.getvalue()
                 buf.seek(0)
                 buf.truncate(0)
@@ -785,7 +800,7 @@ async def export_batch(
                 if isinstance(v, (dict, list)):
                     v = _json.dumps(v, ensure_ascii=False)
                 row.append(v if v is not None else "")
-            writer.writerow(row)
+            writer.writerow(sanitize_csv_row(row))
             yield buf.getvalue()
             buf.seek(0)
             buf.truncate(0)

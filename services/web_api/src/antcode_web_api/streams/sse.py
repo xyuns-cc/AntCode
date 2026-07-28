@@ -13,15 +13,32 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from antcode_core.common.realtime_events import (
+    build_run_status_message as build_run_status_message,
+)
 
-def format_sse_event(event: str, data: dict[str, Any] | None = None) -> bytes:
+
+def format_sse_event(
+    event: str,
+    data: dict[str, Any] | None = None,
+    *,
+    event_id: str | None = None,
+) -> bytes:
     """构造一帧 SSE：``event: <type>\\ndata: <json>\\n\\n``。
 
-    ``data`` 单行 JSON 序列化（ensure_ascii=False），不含裸换行，
-    单个 ``data:`` 行即完整帧。
+    ``data`` 单行 JSON 序列化（ensure_ascii=False），不含裸换行。
+    ``event_id`` 仅用于已验证的稳定日志游标。
     """
-    payload = json.dumps(data or {}, ensure_ascii=False, separators=(",", ":"), default=str)
-    return f"event: {event}\ndata: {payload}\n\n".encode()
+    payload = json.dumps(
+        data or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if event_id is not None and ("\r" in event_id or "\n" in event_id):
+        raise ValueError("SSE event_id 不得包含换行")
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {event}\ndata: {payload}\n\n".encode()
 
 
 def _now_iso() -> str:
@@ -36,6 +53,8 @@ def build_log_line_message(
     timestamp: str | None,
     sequence: int | None,
     source: str,
+    event_id: str | None = None,
+    storage_id: int = 0,
 ) -> dict[str, Any]:
     """log_line 消息体（与原 WS 消息结构一致，``data.sequence`` 为新增字段）。"""
     return {
@@ -49,25 +68,8 @@ def build_log_line_message(
             "level": "ERROR" if log_type == "stderr" else "INFO",
             "source": source,
             "sequence": sequence,
-        },
-        "timestamp": _now_iso(),
-    }
-
-
-def build_run_status_message(
-    run_id: str,
-    *,
-    status: str,
-    progress: float | None,
-    message: str,
-) -> dict[str, Any]:
-    return {
-        "type": "run_status",
-        "run_id": run_id,
-        "data": {
-            "status": status,
-            "progress": progress,
-            "message": message,
+            "storage_id": storage_id,
+            **({"event_id": event_id} if event_id else {}),
         },
         "timestamp": _now_iso(),
     }

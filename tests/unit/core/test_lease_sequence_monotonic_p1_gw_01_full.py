@@ -38,13 +38,18 @@ def test_grant_lua_incr_seq_on_new_branch():
     assert "seq_key = KEYS[5]" in src, "Lua 未接受 KEYS[5]=seq_key"
 
 
+def test_grant_lua_seeds_sequence_above_legacy_timestamp_domain():
+    """存量 epoch-ms lease_gen 后的新 sequence 仍必须单调增大。"""
+    src = inspect.getsource(lease_service)
+    assert "current_sequence < now_ms" in src
+    assert "SET', seq_key, tostring(now_ms)" in src
+
+
 def test_grant_lua_preserves_sequence_on_renew():
     """P1-GW-01: Lua renew 分支必须保留 stored_sequence,不能 INCR 前进。"""
     src = inspect.getsource(lease_service)
     assert "stored_sequence" in src, "Lua 未读 stored_sequence,renew 会前进"
-    assert "final_sequence = stored_sequence > 0 and stored_sequence or 0" in src, (
-        "Lua renew 分支未保留原 sequence"
-    )
+    assert "final_sequence = stored_sequence > 0 and stored_sequence or 0" in src, "Lua renew 分支未保留原 sequence"
 
 
 def test_grant_lua_hset_persists_sequence():

@@ -1,0 +1,259 @@
+/* Worker卡片样式 */
+.worker-card {
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  height: 100%;
+}
+
+.worker-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+.worker-card.worker-running {
+  border-left: 4px solid #52c41a;
+}
+
+.worker-card.worker-warning {
+  border-left: 4px solid #faad14;
+  background: #fffbe6;
+}
+
+.worker-card.worker-error {
+  border-left: 4px solid #ff4d4f;
+  background: #fff2f0;
+}
+
+.worker-card.worker-stopped {
+  border-left: 4px solid #d9d9d9;
+  opacity: 0.7;
+}
+
+/* 水平滚动容器 */
+.workers-scroll-container {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 12px;
+  scroll-behavior: smooth;
+}
+
+.workers-scroll-container::-webkit-scrollbar {
+  height: 8px;
+}
+
+/* 浅色主题滚动条 */
+body.light-theme .workers-scroll-container::-webkit-scrollbar-track {
+  background: #f0f0f0;
+  border-radius: 4px;
+}
+
+body.light-theme .workers-scroll-container::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 4px;
+}
+
+body.light-theme .workers-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+
+/* 深色主题滚动条 */
+body.dark-theme .workers-scroll-container::-webkit-scrollbar-track {
+  background: #262626;
+  border-radius: 4px;
+}
+
+body.dark-theme .workers-scroll-container::-webkit-scrollbar-thumb {
+  background: #434343;
+  border-radius: 4px;
+}
+
+body.dark-theme .workers-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: #595959;
+}
+
+/* 紧凑型Worker卡片 */
+.worker-card-compact {
+  min-width: 200px;
+  max-width: 200px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.worker-card-compact .ant-card-body {
+  padding: 12px;
+}
+
+.worker-card-compact:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transform: translateY(-4px);
+}
+
+.worker-card-compact.worker-running {
+  border-left: 3px solid #52c41a;
+}
+
+.worker-card-compact.worker-warning {
+  border-left: 3px solid #faad14;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-card-compact.worker-warning {
+  background: #fffbe6;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-card-compact.worker-warning {
+  background: rgba(250, 173, 20, 0.1);
+}
+
+.worker-card-compact.worker-error {
+  border-left: 3px solid #ff4d4f;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-card-compact.worker-error {
+  background: #fff2f0;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-card-compact.worker-error {
+  background: rgba(255, 77, 79, 0.1);
+}
+
+.worker-card-compact.worker-stopped {
+  border-left: 3px solid #d9d9d9;
+  opacity: 0.7;
+}
+
+.worker-header-compact {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  gap: 8px;
+}
+
+/* 浅色主题 */
+body.light-theme .worker-header-compact {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 深色主题 */
+body.dark-theme .worker-header-compact {
+  border-bottom: 1px solid #434343;
+}
+
+.worker-header-compact h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+/* 浅色主题标题 */
+body.light-theme .worker-header-compact h4 {
+  color: #262626;
+}
+
+/* 深色主题标题 */
+body.dark-theme .worker-header-compact h4 {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.worker-header-compact .worker-version {
+  margin: 2px 0 0 0;
+  font-size: 10px;
+}
+
+/* 浅色主题版本号 */
+body.light-theme .worker-header-compact .worker-version {
+  color: #999;
+}
+
+/* 深色主题版本号 */
+body.dark-theme .worker-header-compact .worker-version {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.worker-metrics-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.metric-value-compact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0; /* 确保flex子元素可以正常收缩 */
+}
+
+.metric-value-compact .ant-progress {
+  flex: 1;
+  margin: 0;
+  min-width: 80px; /* 确保进度条有最小宽度 */
+  line-height: 1;
+}
+
+.metric-value-compact .ant-progress .ant-progress-outer {
+  display: block;
+}
+
+.metric-value-compact .ant-progress .ant-progress-inner {
+  background-color: rgba(0, 0, 0, 0.06);
+  border-radius: 100px;
+  height: 6px !important;
+}
+
+body.dark-theme .metric-value-compact .ant-progress .ant-progress-inner {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.metric-value-compact .ant-progress .ant-progress-bg {
+  border-radius: 100px;
+  height: 6px !important;
+}
+
+.metric-percent {
+  font-size: 11px;
+  font-weight: 500;
+  min-width: 32px;
+  text-align: right;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-percent {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-percent {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.metric-text-compact {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* 浅色主题 */
+body.light-theme .metric-text-compact {
+  color: #666;
+}
+
+/* 深色主题 */
+body.dark-theme .metric-text-compact {
+  color: rgba(255, 255, 255, 0.65);
+}

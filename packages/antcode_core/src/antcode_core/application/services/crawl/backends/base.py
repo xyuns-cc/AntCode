@@ -133,6 +133,21 @@ class CrawlQueueBackend(ABC):
         pass
 
     @abstractmethod
+    async def list_project_ids(self) -> list[str]:
+        """列出当前 Redis 中存在 Crawl Stream 的项目。"""
+        pass
+
+    @abstractmethod
+    async def requeue_claimed(self, project_id: str, task: QueueTask) -> str | None:
+        """原子重新入队并 ACK 已认领的源消息。"""
+        pass
+
+    @abstractmethod
+    async def dead_letter_claimed(self, project_id: str, task: QueueTask) -> str | None:
+        """原子移入死信队列并 ACK 已认领的源消息。"""
+        pass
+
+    @abstractmethod
     async def stats(self, project_id: str) -> QueueStats:
         pass
 

@@ -16,7 +16,7 @@ async def test_historical_log_query_passes_log_type_by_keyword(monkeypatch):
         ]
     )
     monkeypatch.setattr(module.postgres_task_log_service, "list_entries", list_entries)
-    service = module.DistributedLogService()
+    service = module.DistributedLogService(SimpleNamespace(allocate=AsyncMock()))
 
     lines = await service.get_logs("run-001", log_type="stderr", tail=2)
 

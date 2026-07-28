@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 
 from antcode_core.common.logging import sanitize_dict
 from antcode_core.common.security.auth import jwt_auth
+from antcode_core.common.security.network_source import extract_client_ip
 from fastapi import HTTPException, Request, status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,16 +24,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 # ============================================================================
 
 
-def _trusted_proxies() -> set[str]:
-    """返回受信反向代理 IP 列表（来自环境变量 ANTCODE_TRUSTED_PROXIES）。
-
-    每次调用即时读取以方便在 runtime 通过 settings 重载;若需要更高频访问可由
-    调用方自行缓存。空字符串、空白条目都会被剔除。
-    """
-    raw = os.getenv("ANTCODE_TRUSTED_PROXIES", "") or ""
-    return {ip.strip() for ip in raw.split(",") if ip.strip()}
-
-
 def get_client_ip(request: Request) -> str:
     """安全解析客户端 IP。
 
@@ -40,24 +31,18 @@ def get_client_ip(request: Request) -> str:
     时才信任 ``X-Forwarded-For`` / ``X-Real-IP`` 头,否则一律以 socket 对端
     IP 为准,防止任意客户端通过伪造 XFF 头绕过基于 IP 的限流。
     """
-    direct = request.client.host if request.client else ""
+    direct = request.client.host if request.client and request.client.host else ""
     if not direct:
         return "unknown"
-
-    trusted = _trusted_proxies()
-    if direct not in trusted:
-        return direct
-
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        # 取左侧最初一跳的原始客户端 IP
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    real_ip = request.headers.get("X-Real-IP", "")
-    if real_ip:
-        return real_ip.strip()
-    return direct
+    try:
+        return extract_client_ip(
+            direct,
+            request.headers.get("X-Forwarded-For", ""),
+            request.headers.get("X-Real-IP", ""),
+            trusted_proxies=os.getenv("ANTCODE_TRUSTED_PROXIES", ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 def safe_sanitize_body(body: Any) -> Any:
@@ -122,6 +107,7 @@ class AdminPermissionMiddleware(BaseHTTPMiddleware):
 
     EXCLUDED_PATTERNS: ClassVar[list[tuple[Pattern[str], str]]] = [
         (re.compile(r"^/api/v1/users/[^/]+/?$"), "GET"),
+        (re.compile(r"^/api/v1/users/[^/]+/?$"), "PUT"),
     ]
 
     async def dispatch(self, request, call_next):
@@ -133,7 +119,12 @@ class AdminPermissionMiddleware(BaseHTTPMiddleware):
         if is_admin_path:
             is_excluded = any(p.match(path) and method == m for p, m in self.EXCLUDED_PATTERNS)
             if not is_excluded:
-                await self._verify_admin_permission(request)
+                try:
+                    await self._verify_admin_permission(request)
+                except HTTPException as exc:
+                    from antcode_web_api.exceptions import create_error_response
+
+                    return create_error_response(exc.status_code, str(exc.detail))
 
         return await call_next(request)
 
@@ -242,7 +233,7 @@ class BodySizeMiddleware:
                 return
             if declared_size > limit:
                 response = self._error_response(
-                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    status.HTTP_413_CONTENT_TOO_LARGE,
                     "请求体过大",
                     {"limit": limit, "received": declared_size},
                 )
@@ -264,7 +255,7 @@ class BodySizeMiddleware:
             await self.app(scope, limited_receive, send)
         except _RequestBodyTooLarge as exc:
             response = self._error_response(
-                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status.HTTP_413_CONTENT_TOO_LARGE,
                 "请求体过大",
                 {"limit": exc.limit, "received": exc.received},
             )
@@ -292,7 +283,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.period = period
 
     async def dispatch(self, request, call_next):
-        client_ip = self._get_client_ip(request)
+        try:
+            client_ip = self._get_client_ip(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         # 分布式滑动窗口:所有副本落到同一个 Redis key, counter 全局共享。
         from antcode_core.infrastructure.redis.rate_limiter import redis_rate_limiter
