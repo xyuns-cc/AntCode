@@ -48,7 +48,6 @@ REQUIRED_CREDENTIAL_PATTERNS = frozenset(
         "*.tfvars",
     }
 )
-FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{40}:[^:]+:[a-z0-9-]+:[1-9][0-9]*$")
 
 
 def _workflow(path: Path) -> dict:
@@ -142,13 +141,5 @@ def test_test_machine_compose_files_remain_outside_git() -> None:
     assert "!infra/docker/docker-compose.prod.local-backup.yml" in ignore
 
 
-def test_gitleaks_exceptions_are_exact_historical_fingerprints() -> None:
-    entries = [
-        line
-        for line in GITLEAKS_IGNORE_PATH.read_text(encoding="utf-8").splitlines()
-        if line and not line.startswith("#")
-    ]
-
-    assert entries
-    assert len(entries) == len(set(entries))
-    assert all(FINGERPRINT_PATTERN.fullmatch(entry) for entry in entries)
+def test_gitleaks_has_no_repository_exceptions() -> None:
+    assert not GITLEAKS_IGNORE_PATH.exists()
