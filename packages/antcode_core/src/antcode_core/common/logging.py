@@ -280,6 +280,8 @@ def setup_logging(
         level=log_level,
         colorize=True,
         filter=sanitizing_filter,
+        backtrace=False,
+        diagnose=False,
     )
 
     # 文件输出（带脱敏）
@@ -298,6 +300,8 @@ def setup_logging(
             encoding="utf-8",
             enqueue=True,  # 异步写入，提升性能
             filter=sanitizing_filter,
+            backtrace=False,
+            diagnose=False,
         )
 
     logger.info(f"日志初始化完成: level={log_level}, file={should_log_to_file}, sanitize=True")

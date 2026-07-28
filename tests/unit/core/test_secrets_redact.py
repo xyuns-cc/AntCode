@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from antcode_core.common.config import Settings
 from antcode_core.common.logging import (
     DEFAULT_SENSITIVE_KEY_TOKENS,
     sanitize_dict,
     sanitize_log_message,
+    setup_logging,
 )
+from loguru import logger
 
 
 def test_default_sensitive_keys_cover_project_specific_terms():
@@ -42,6 +45,35 @@ def test_sanitize_log_message_strips_db_url_passwords():
     out = sanitize_log_message(msg)
     assert "s3cret" not in out
     assert "***" in out
+
+
+def test_settings_repr_excludes_connection_credentials_and_secrets():
+    marker = "repr-secret-marker"
+    configured = Settings(
+        DATABASE_URL=f"postgresql://user:{marker}@localhost:5432/antcode",
+        REDIS_URL=f"redis://default:{marker}@localhost:6379/0",
+        ENCRYPTION_KEY=marker,
+        ENCRYPTION_KEY_SALT=marker,
+        DEFAULT_ADMIN_PASSWORD=marker,
+    )
+
+    assert marker not in repr(configured)
+
+
+def test_exception_logging_does_not_render_local_variables(capsys):
+    marker = "traceback-local-secret-marker"
+    setup_logging(level="ERROR", log_to_file=False)
+
+    try:
+        sensitive_local = {"DATABASE_URL": f"postgresql://user:{marker}@localhost/db"}
+        raise RuntimeError("expected failure")
+    except RuntimeError:
+        logger.exception("controlled failure")
+
+    assert sensitive_local
+    output = capsys.readouterr().err
+    setup_logging()
+    assert marker not in output
 
 
 def test_task_message_repr_redacts_environment_and_receipt():

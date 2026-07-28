@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     """应用配置类，使用 cached_property 优化重复计算"""
 
     # === 服务器配置 ===
-    DATABASE_URL: str = Field(default="")
-    REDIS_URL: str = Field(default="")
+    DATABASE_URL: str = Field(default="", repr=False)
+    REDIS_URL: str = Field(default="", repr=False)
     WORKER_GATEWAY_BACKENDLESS: bool = Field(default=False)
     REDIS_NAMESPACE: str = Field(
         default="antcode",
@@ -151,25 +151,25 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    JWT_SECRET_FILE: str = Field(default="")
+    JWT_SECRET_FILE: str = Field(default="", repr=False)
     # None 时按 SERVER_DOMAIN 自动判断：本地 HTTP 开发禁用，非本地域名启用。
     AUTH_COOKIE_SECURE: bool | None = Field(default=None)
 
     # === 加密密钥（独立于 JWT Secret）===
-    ENCRYPTION_KEY: str = Field(default="")
-    ENCRYPTION_KEY_SALT: str = Field(default="")
+    ENCRYPTION_KEY: str = Field(default="", repr=False)
+    ENCRYPTION_KEY_SALT: str = Field(default="", repr=False)
     # 显式迁移旧 PBKDF2 密文；完成 rotate 后清空。
-    ENCRYPTION_LEGACY_KDF_SALT: str = Field(default="")
+    ENCRYPTION_LEGACY_KDF_SALT: str = Field(default="", repr=False)
     # T7-P2-5: 密钥轮换。逗号分隔的旧密钥（Fernet 派生前的原文），仅用于解
     # 密老密文。加密永远用当前 ENCRYPTION_KEY。轮换后一段时间可清空。
-    ENCRYPTION_KEYS_LEGACY: str = Field(default="")
+    ENCRYPTION_KEYS_LEGACY: str = Field(default="", repr=False)
     # 仅用于迁移旧 base64(sha256(key)) 密文；完成 rotate 后必须关闭。
     ENCRYPTION_ALLOW_LEGACY_SHA256: bool = Field(default=False)
 
     # === 登录密码加密配置 ===
     LOGIN_PASSWORD_ENCRYPTION_ENABLED: bool = Field(default=True)
     LOGIN_PASSWORD_ENCRYPTION_REQUIRED: bool = Field(default=True)
-    LOGIN_RSA_PRIVATE_KEY_FILE: str = Field(default="")
+    LOGIN_RSA_PRIVATE_KEY_FILE: str = Field(default="", repr=False)
     LOGIN_RSA_PUBLIC_KEY_FILE: str = Field(default="")
     LOGIN_RSA_KEY_ID: str = Field(default="")
     LOGIN_RSA_KEY_SIZE: int = Field(default=2048)
@@ -252,7 +252,7 @@ class Settings(BaseSettings):
 
     # === 默认管理员 ===
     DEFAULT_ADMIN_USERNAME: str = Field(default="admin")
-    DEFAULT_ADMIN_PASSWORD: str = Field(default="")
+    DEFAULT_ADMIN_PASSWORD: str = Field(default="", repr=False)
 
     # === 爬虫数据通道 ===
     CRAWL_BACKEND: str = Field(default="redis")
