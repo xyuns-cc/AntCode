@@ -98,7 +98,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}-arm64
 
       - name: Scan candidate image (amd64)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: local/antcode-${{ matrix.service }}:${{ github.sha }}-amd64
           ignore-unfixed: true
@@ -107,7 +107,7 @@ jobs:
           format: table
 
       - name: Scan candidate image (arm64)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: local/antcode-${{ matrix.service }}:${{ github.sha }}-arm64
           ignore-unfixed: true
@@ -141,7 +141,7 @@ jobs:
       # 正式标签指向它。逐架构的放行门禁是上面 push 前的候选扫描，本步
       # 额外保证「被打标签的 digest」与「被扫描的 digest」是同一个对象。
       - name: Scan pushed digest before tagging
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}@${{ steps.push.outputs.digest }}
           ignore-unfixed: true
