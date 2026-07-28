@@ -31,13 +31,11 @@ htmlcov/
 **/runtime_data/
 /logs/
 *.log
-.env
-.env.*
-!.env.example
 *.pem
 *.key
 *.p12
 *.pfx
+*.pkcs12
 *.jks
 *.keystore
 id_rsa
@@ -45,19 +43,41 @@ id_dsa
 id_ecdsa
 id_ed25519
 *.pub
+.ssh/
+**/.ssh/
 .netrc
 .pypirc
 .npmrc
+.authinfo
+.authinfo.gpg
+.pgpass
+.my.cnf
 credentials.json
 *credentials*.json
 service-account*.json
+auth.json
+.docker/config.json
+**/.docker/config.json
 *.tfstate
 *.tfstate.*
 *.tfvars
 .aws/
+**/.aws/
 .azure/
+**/.azure/
 .config/gcloud/
+**/.config/gcloud/
 .kube/config
+**/.kube/config
+*.kubeconfig
+
+# Environment files (keep audited examples only)
+.env*
+**/.env*
+*.env
+*.env.*
+!.env.example
+!**/.env.example
 
 # Frontend dependencies and generated output
 node_modules/

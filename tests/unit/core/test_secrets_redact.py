@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from antcode_core.common.config import Settings
 from antcode_core.common.logging import (
     DEFAULT_SENSITIVE_KEY_TOKENS,
@@ -40,11 +41,39 @@ def test_sanitize_dict_masks_nested_secrets():
     assert masked["level"] == 1
 
 
-def test_sanitize_log_message_strips_db_url_passwords():
-    msg = "connecting postgres://user:s3cret@db.example.com:5432/main"
+@pytest.mark.parametrize(
+    "scheme",
+    (
+        "postgres",
+        "postgresql",
+        "mysql",
+        "redis",
+        "rediss",
+        "redis+sentinel",
+        "rediss+sentinel",
+        "redis+cluster",
+        "rediss+cluster",
+    ),
+)
+def test_sanitize_log_message_strips_url_passwords(scheme: str):
+    msg = f"connecting {scheme}://user:s3cret@db.example.com:5432/main"
     out = sanitize_log_message(msg)
     assert "s3cret" not in out
     assert "***" in out
+
+
+def test_sanitize_log_message_strips_all_sentinel_password_sources():
+    markers = ("legacy-marker", "sentinel-marker", "master-marker")
+    msg = (
+        "rediss+sentinel://legacy-marker@primary@sentinel.internal:26379/0"
+        "?sentinel_password=sentinel-marker&master_password=master-marker"
+    )
+
+    output = sanitize_log_message(msg)
+
+    assert all(marker not in output for marker in markers)
+    assert "sentinel_password=***" in output
+    assert "master_password=***" in output
 
 
 def test_settings_repr_excludes_connection_credentials_and_secrets():
@@ -74,6 +103,25 @@ def test_exception_logging_does_not_render_local_variables(capsys):
     output = capsys.readouterr().err
     setup_logging()
     assert marker not in output
+
+
+def test_exception_logging_sanitizes_message_and_preserves_stack(capsys):
+    marker = "exception-secret-marker"
+    setup_logging(level="ERROR", log_to_file=False)
+
+    def raise_sensitive_error() -> None:
+        raise RuntimeError(f"password={marker}")
+
+    try:
+        raise_sensitive_error()
+    except RuntimeError:
+        logger.exception("controlled failure")
+
+    output = capsys.readouterr().err
+    setup_logging()
+    assert marker not in output
+    assert "RuntimeError" in output
+    assert "raise_sensitive_error" in output
 
 
 def test_task_message_repr_redacts_environment_and_receipt():

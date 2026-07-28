@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = ROOT / "infra/docker/docker-compose.dev.yml"
 ROOT_DOCKERIGNORE = ROOT / ".dockerignore"
 TEST_DOCKERIGNORE = ROOT / "infra/docker/Dockerfile.test.dockerignore"
+FRONTEND_DOCKERIGNORE = ROOT / "web/antcode-frontend/.dockerignore"
+DOCKERIGNORE_PATHS = (ROOT_DOCKERIGNORE, TEST_DOCKERIGNORE, FRONTEND_DOCKERIGNORE)
 DOCKERFILES = (
     ROOT / "infra/docker/Dockerfile.web_api",
     ROOT / "infra/docker/Dockerfile.master",
@@ -122,6 +124,43 @@ def test_docker_context_excludes_static_analysis_caches():
         dockerignore = _read(dockerignore_path)
         for cache_directory in (".mypy_cache/", ".ruff_cache/", ".hypothesis/"):
             assert cache_directory in dockerignore
+
+
+def test_docker_contexts_exclude_environment_and_credential_files():
+    excluded_paths = (
+        ".env",
+        ".env.production",
+        ".env.production.local",
+        ".envrc",
+        "config.env",
+        "config.env.backup",
+        "nested/.env",
+        "nested/.env.staging",
+        "nested/config.env",
+        "nested/private.key",
+        "nested/credentials.json",
+        "nested/cloud-credentials-prod.json",
+        "nested/service-account-prod.json",
+        "nested/.ssh/id_ed25519",
+        "nested/.aws/credentials",
+        "nested/.azure/accessTokens.json",
+        "nested/.config/gcloud/application_default_credentials.json",
+        "nested/.kube/config",
+        "nested/.docker/config.json",
+        "nested/.pgpass",
+    )
+
+    for dockerignore_path in DOCKERIGNORE_PATHS:
+        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        assert all(ignore_spec.match_file(path) for path in excluded_paths), dockerignore_path
+
+
+def test_docker_contexts_retain_environment_examples():
+    example_paths = (".env.example", "nested/.env.example")
+
+    for dockerignore_path in DOCKERIGNORE_PATHS:
+        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        assert all(not ignore_spec.match_file(path) for path in example_paths), dockerignore_path
 
 
 def test_docker_context_includes_nested_logs_and_data_source_files():

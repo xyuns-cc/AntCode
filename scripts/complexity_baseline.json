@@ -1088,12 +1088,6 @@
       "value": 437
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/common/logging.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 317
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/common/security.py",
       "function": "generate_hmac_signature",
       "rule": "POSITIONAL_ARGS",

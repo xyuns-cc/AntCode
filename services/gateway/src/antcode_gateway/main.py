@@ -13,6 +13,7 @@ from antcode_contracts.artifact_pb2_grpc import add_ArtifactServiceServicer_to_s
 from antcode_contracts.control_pb2_grpc import add_ControlServiceServicer_to_server
 from antcode_contracts.data_pb2_grpc import add_DataServiceServicer_to_server
 from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
+from antcode_core.common.logging import setup_logging
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
 from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
 from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
@@ -164,6 +165,7 @@ class _ShutdownCoordinator:
 
 async def main():
     """主函数"""
+    setup_logging()
     logger.info("Gateway 服务启动")
     await init_db(service="gateway")
     server = get_grpc_server()

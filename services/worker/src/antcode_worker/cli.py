@@ -25,6 +25,7 @@ from antcode_worker.config import (
     WorkerConfig,
     init_worker_config,
 )
+from antcode_worker.config_display import sanitize_config_for_display
 
 
 def clear_screen():
@@ -327,9 +328,8 @@ def print_config(config_format: str = "yaml") -> None:
 
     _log_block("  AntCode Worker - 当前配置\n  " + "=" * 40)
 
-    # 加载配置
     config = WorkerConfig.load_from_file()
-    config_dict = config.to_dict()
+    config_dict = sanitize_config_for_display(config.to_dict())
 
     # 添加路径信息
     config_dict["_paths"] = {
