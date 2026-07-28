@@ -94,6 +94,13 @@ def test_git_and_docker_contexts_ignore_credential_files() -> None:
         assert REQUIRED_CREDENTIAL_PATTERNS <= patterns, path
 
 
+def test_test_machine_compose_files_remain_outside_git() -> None:
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "infra/docker/docker-compose.remote*.yml" in ignore
+    assert "!infra/docker/docker-compose.prod.local-backup.yml" in ignore
+
+
 def test_gitleaks_exceptions_are_exact_historical_fingerprints() -> None:
     entries = [
         line

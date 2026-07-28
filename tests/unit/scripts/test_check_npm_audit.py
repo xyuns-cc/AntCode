@@ -74,6 +74,13 @@ def test_exact_rsc_advisory_and_derived_package_pass(tmp_path: Path) -> None:
     assert "GHSA-qwww-vcr4-c8h2" in result.stdout
 
 
+def test_direct_advisory_on_derived_package_passes(tmp_path: Path) -> None:
+    vulnerabilities = _allowed_vulnerabilities()
+    vulnerabilities["react-router-dom"]["via"] = [_advisory()]
+
+    assert _run(tmp_path, _report(vulnerabilities)).returncode == 0
+
+
 def test_unknown_high_fails(tmp_path: Path) -> None:
     vulnerabilities = _allowed_vulnerabilities()
     vulnerabilities["unknown"] = {
@@ -86,6 +93,7 @@ def test_unknown_high_fails(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "unknown: HIGH" in result.stderr
+    assert "::error title=Unapproved npm audit findings::" in result.stderr
 
 
 def test_extra_advisory_on_allowed_package_fails(tmp_path: Path) -> None:

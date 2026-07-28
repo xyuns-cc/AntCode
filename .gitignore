@@ -157,5 +157,6 @@ web/antcode-frontend/dist/
 
 # Local operator and test-machine artifacts
 infra/docker/docker-compose.*.local-backup.yml
+!infra/docker/docker-compose.prod.local-backup.yml
 infra/docker/docker-compose.remote*.yml
 scripts/cookies.ts

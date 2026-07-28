@@ -1,0 +1,35 @@
+# Optional local-retention backup. It is not a substitute for an independently
+# monitored off-host backup. Enable explicitly with --profile local-backup.
+services:
+  backup-local:
+    profiles: ["local-backup"]
+    image: ${ANTCODE_POSTGRES_IMAGE_REPOSITORY:?PostgreSQL image repository is required}@sha256:${ANTCODE_POSTGRES_IMAGE_DIGEST:?PostgreSQL image digest is required}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?production DATABASE_URL is required}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - backup_data:/backup
+    networks:
+      - antcode-internal
+    command:
+      - sh
+      - -ec
+      - |
+        while true; do
+          target="/backup/antcode-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+          partial="$$target.partial"
+          pg_dump --dbname="$$DATABASE_URL" --format=custom --file="$$partial"
+          pg_restore --list "$$partial" >/dev/null
+          checksum="$$(sha256sum "$$partial" | awk '{print $$1}')"
+          mv "$$partial" "$$target"
+          printf '%s  %s\n' "$$checksum" "$$(basename "$$target")" > "$$target.sha256.partial"
+          mv "$$target.sha256.partial" "$$target.sha256"
+          find /backup -type f \( -name 'antcode-*.dump' -o -name 'antcode-*.dump.sha256' \) \
+            -mtime "+$$BACKUP_RETENTION_DAYS" -delete
+          echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) local backup completed: $$target"
+          sleep 86400
+        done
+
+volumes:
+  backup_data:

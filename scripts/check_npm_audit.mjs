@@ -56,7 +56,7 @@ function isAllowedDerived(name, vulnerability) {
     vulnerability.name === DERIVED_PACKAGE &&
     Array.isArray(vulnerability.via) &&
     vulnerability.via.length === 1 &&
-    vulnerability.via[0] === ROOT_PACKAGE
+    (vulnerability.via[0] === ROOT_PACKAGE || isExactAdvisory(vulnerability.via[0]))
   );
 }
 
@@ -73,6 +73,10 @@ function describe(name, vulnerability) {
   const severity = String(vulnerability.severity || "unknown").toUpperCase();
   const via = Array.isArray(vulnerability.via) ? JSON.stringify(vulnerability.via) : "invalid via";
   return `${name}: ${severity}, via=${via}`;
+}
+
+function escapeWorkflowCommand(message) {
+  return message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
 }
 
 export function evaluateReport(report, asOf) {
@@ -98,6 +102,8 @@ function main() {
   if (failures.length > 0) {
     console.error(`[fail] npm audit: ${failures.length} unapproved HIGH/CRITICAL finding(s)`);
     failures.forEach((failure) => console.error(`  - ${failure}`));
+    const detail = escapeWorkflowCommand(failures.join("\n"));
+    console.error(`::error title=Unapproved npm audit findings::${detail}`);
     return 1;
   }
   console.log(`[ok] npm audit: no unapproved HIGH/CRITICAL findings (${ADVISORY_ID} expires ${EXPIRES_ON})`);

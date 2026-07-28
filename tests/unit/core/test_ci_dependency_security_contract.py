@@ -253,8 +253,7 @@ def test_e2e_job_really_runs_and_gates_image_publication() -> None:
     assert "::add-mask::" in install_key_step
     assert "docker compose" in worker_step and " worker" in worker_step
     assert "::add-mask::" in secret_step
-    assert "logs --no-color --tail=300 postgres redis" in diagnostics_step
-    assert "::error title=E2E compose stack failed" in diagnostics_step
+    assert "annotate_e2e_diagnostics.py" in diagnostics_step
     # P1-CI-04: 必须有真实走 Gateway 认证/lease 链路的冒烟步骤。
     gateway_smoke = _step_command(e2e_job, "Run gateway backendless worker smoke")
     assert "WORKER_TRANSPORT_MODE=gateway" in gateway_smoke

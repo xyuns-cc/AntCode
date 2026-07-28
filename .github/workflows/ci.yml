@@ -460,19 +460,7 @@ jobs:
 
       - name: Dump stack diagnostics on failure
         if: failure()
-        run: |
-          echo "::error title=E2E compose stack failed::See grouped container status and logs below"
-          echo "::group::Compose container status"
-          docker compose $COMPOSE_ARGS ps -a || true
-          echo "::endgroup::"
-          echo "::group::PostgreSQL and Redis logs"
-          docker compose $COMPOSE_ARGS logs --no-color --tail=300 postgres redis || true
-          echo "::endgroup::"
-          echo "::group::Application stack logs"
-          docker compose $COMPOSE_ARGS logs --no-color --tail=300 web-api master gateway worker frontend || true
-          docker logs --tail=300 antcode-worker-gateway-smoke 2>/dev/null || true
-          cat "$RUNNER_TEMP/e2e-git-http.log" || true
-          echo "::endgroup::"
+        run: uv run --extra dev python scripts/annotate_e2e_diagnostics.py
 
       - name: Tear down stack
         if: always()
