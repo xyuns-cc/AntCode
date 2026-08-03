@@ -24,7 +24,7 @@ dependencies = [
     # 任务调度
     "apscheduler>=3.10.0",
     # 缓存
-    "redis==7.1.0",
+    "redis==8.1.0",
     # 日志
     "loguru>=0.7.0",
     # 工具库
