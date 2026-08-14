@@ -156,27 +156,36 @@ Redis、控制面数据卷或服务端密钥，仅通过 mTLS Gateway 和公网 
 `infra/docker/docker-compose.prod.yml`，该文件是完整启动依赖图，不再是省略
 frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 
-**本仓库不再包含任何自动化发布流水线。** 正式镜像必须在受控发布机上人工完成扫描、
-SBOM/provenance、精确 digest 签名和完整发布集合校验后才可推送；上线前的验证入口是
-`infra/docker/verify-production-images.sh`（见下文「部署前镜像验证」），它按
-`COSIGN_SERVICE_CERTIFICATE_IDENTITY` / `COSIGN_RELEASE_CERTIFICATE_IDENTITY`
-校验签名身份，这两个值由**实际执行签名的发布通道**决定，仓库本身不再提供该通道。
-`make docker-buildx` 仅在 `build/docker`（或 `BUILDX_OUTPUT_DIR`）生成本地多架构 OCI
-归档，不登录 registry、不推送镜像，也不能作为生产发布入口；传入旧的
-`BUILDX_REGISTRY`/`BUILDX_TAG` 参数会显式失败，避免旧脚本误报发布成功。
+**本仓库不再包含任何自动化发布流水线，也不再产出 registry 镜像。** 五个应用镜像
+（web-api / master / gateway / worker / frontend）由生产 Compose 自己的 `build:` 段在
+部署机上就地构建：`deploy-production.sh` 先 `docker compose build`，再
+`docker compose pull --ignore-buildable` 拉取仍按 digest pin 的第三方运行时镜像
+（postgres / redis / 反向代理，权威取值见 `release-runtime-images.json`）。
 
-生产 `.env.production` 只保存镜像 digest、端口、资源值和 secret **文件路径**，
+**代价必须认清**：本地构建没有不可变产物，也没有签名与来源证明——cosign 验签链路
+（`verify-production-images.sh` 与 release collection 元数据镜像）已随发布链路一并删除，
+信任边界因此变成**部署机本身与它的源码树**。回滚不能再切回一个旧 digest，只能 revert
+源码后重新构建，回滚窗口要把构建时长算进去。详见 `docs/release-runbook.md` 第 0.4 节。
+
+因此 `ANTCODE_IMAGE_TAG` 必须每次发布唯一，**推荐直接用被部署的 40 位 Git commit**：
+它是把运行中的容器对回一次确定源码构建的唯一线索。复用同一个 tag 会让 `up -d` 认为
+镜像没变而不重建容器，等于发布静默失效。
+
+`make docker-buildx` 仅在 `build/docker`（或 `BUILDX_OUTPUT_DIR`）生成本地多架构 OCI
+归档，不登录 registry、不推送镜像，也不是生产部署入口（生产走 Compose 的 `build:` 段）；
+传入旧的 `BUILDX_REGISTRY`/`BUILDX_TAG` 参数会显式失败，避免旧脚本误报发布成功。
+
+生产 `.env.production` 只保存镜像 tag / digest、端口、资源值和 secret **文件路径**，
 不保存 secret 内容。数据库 URL、Redis URL、PostgreSQL 密码、Redis health 密码、
 JWT 和加密密钥全部通过 Docker secrets 只读挂载。应用镜像的固定入口脚本严格读取
 `*_FILE` 后再启动应用；缺文件、不可读或同时配置 inline 值都会直接失败。
 
-1. 从正式发布任务下载 `release-deployment-descriptor` artifact；该 JSON 绑定 release
-   repository/digest/revision 及 collection 的八个成员镜像。根据它设置
-   `ANTCODE_RELEASE_IMAGE_REPOSITORY`、`ANTCODE_RELEASE_IMAGE_DIGEST`、
-   `ANTCODE_RELEASE_REVISION`，并为每个应用和中间件提供完全相同的
-   `ANTCODE_*_IMAGE_REPOSITORY` 与 digest。生产 Compose 只使用精确 digest，
-   不在服务器构建镜像；部署验证仍会从签名 collection 重新读取 manifest，拒绝被篡改或
-   手工拼错的 descriptor。
+1. 把部署机源码树切到要发布的 revision（`git status --porcelain` 必须为空——工作区脏
+   等于发布了一份无法复现的镜像），并把 `ANTCODE_IMAGE_TAG` 设为该 revision 的 40 位
+   commit。第三方运行时镜像另按 `release-runtime-images.json` 设置
+   `ANTCODE_{POSTGRES,REDIS,REVERSE_PROXY}_IMAGE_REPOSITORY` 与对应 `_IMAGE_DIGEST`
+   （digest 只填 64 位十六进制正文，不带 `sha256:` 前缀）。五个应用镜像没有 digest 变量，
+   它们由 Compose 就地构建。
 2. 在 `.env.production` 显式设置稳定的 `REDIS_NAMESPACE`；它即使在工具 profile
    未启用时也是 Compose 必填插值，必须与运行中服务使用的 namespace 完全一致。
    在仓库外创建 `ANTCODE_DATABASE_URL_FILE`、`ANTCODE_REDIS_URL_FILE`、
@@ -220,17 +229,16 @@ JWT 和加密密钥全部通过 Docker secrets 只读挂载。应用镜像的固
 9. 生产必须另行接入受监控的异机/对象存储备份和恢复演练。本地备份 override
    默认禁用，不能当成灾备。
 
-部署机必须安装 Cosign，并分别把 `COSIGN_SERVICE_CERTIFICATE_IDENTITY`、
-`COSIGN_RELEASE_CERTIFICATE_IDENTITY` 设为服务签名 workflow 与 release collection
-签名 workflow 的精确 OIDC identity。脚本冻结环境文件，验证已签名 collection 的预期 revision、
-严格八镜像清单、五个应用签名及 OCI revision，并逐项比对 Compose 的应用、
-PostgreSQL、Redis 和反向代理引用后才 pull。随后停止 writer、执行 Redis 门禁和
-数据库 migration；任一校验或迁移失败都会中止，全部成功后才启动长期服务：
+部署机必须能完整构建本仓镜像（Docker + 到基础镜像 registry 的网络）。脚本冻结环境文件，
+先 `compose build` 构建五个应用镜像、再 `compose pull --ignore-buildable` 拉取按 digest pin
+的第三方镜像；两步都排在 `stop` 之前，任一步失败时正在跑的控制面一个容器都还没被动过。
+随后停止 writer、执行 Redis 门禁和数据库 migration；任一步失败都会中止，全部成功后才启动
+长期服务：
 
 数据库 migration 固定先执行标准 `scripts.init_db`，再在 writer 仍停止时执行
-`scripts.migrate_worker_install_keys`；两步都使用已验证 collection 中的同一 Web API digest。
+`scripts.migrate_worker_install_keys`；两步都使用本轮构建出的同一个 Web API 镜像 tag。
 
-全域主加密密钥轮换使用独立的显式模式，不会在普通部署中自动执行。该模式会验证发布镜像、停止所有 writer，
+全域主加密密钥轮换使用独立的显式模式，不会在普通部署中自动执行。该模式会构建镜像、停止所有 writer，
 依次执行离线 dry-run、apply 和 primary-only，并在成功后继续保持 writer 停止，供运维删除 legacy keyring：
 
 ```bash
@@ -241,9 +249,7 @@ infra/docker/deploy-production.sh .env.production rotate-encryption-key --confir
 清理后复验，再使用正常部署入口启动。
 
 ```bash
-COSIGN_SERVICE_CERTIFICATE_IDENTITY='https://github.com/OWNER/REPOSITORY/.github/workflows/docker-build.yml@refs/tags/vX.Y.Z' \
-COSIGN_RELEASE_CERTIFICATE_IDENTITY='https://github.com/OWNER/REPOSITORY/.github/workflows/docker-finalize-release.yml@refs/tags/vX.Y.Z' \
-  infra/docker/deploy-production.sh .env.production fresh-deploy
+infra/docker/deploy-production.sh .env.production fresh-deploy
 ```
 
 `fresh-deploy` 只适用于全新 Redis；检测到旧 key、当前 Crawl 数据、未排空执行队列
@@ -300,9 +306,7 @@ infra/docker/bootstrap-admin.sh .env.production
 控制面部署成功后，在每台独立 Worker 主机生成该 Worker 专属安装 Key 文件并运行：
 
 ```bash
-COSIGN_SERVICE_CERTIFICATE_IDENTITY='https://github.com/OWNER/REPOSITORY/.github/workflows/docker-build.yml@refs/tags/vX.Y.Z' \
-COSIGN_RELEASE_CERTIFICATE_IDENTITY='https://github.com/OWNER/REPOSITORY/.github/workflows/docker-finalize-release.yml@refs/tags/vX.Y.Z' \
-  infra/docker/bootstrap-worker.sh .env.production
+infra/docker/bootstrap-worker.sh .env.production
 ```
 
 脚本只在 bootstrap 容器达到 healthy 后才删除该容器，并用同一独立数据卷重建不
@@ -383,13 +387,11 @@ docker compose --env-file .env -p antcode-e2e \
 unset ANTCODE_WORKER_KEY
 ```
 
-需要验证生产传输、安全边界和升级编排时，必须使用本页“生产部署合同”中的精确
-digest、Docker secrets、TLS/mTLS 和 Cosign 配置，并执行真实部署入口：
+需要验证生产传输、安全边界和升级编排时，必须使用本页“生产部署合同”中的镜像 tag /
+第三方 digest、Docker secrets 与 TLS/mTLS 配置，并执行真实部署入口：
 
 ```bash
-COSIGN_SERVICE_CERTIFICATE_IDENTITY='https://github.com/OWNER/REPOSITORY/.github/workflows/docker-build.yml@refs/tags/vX.Y.Z' \
-COSIGN_RELEASE_CERTIFICATE_IDENTITY='https://github.com/OWNER/REPOSITORY/.github/workflows/docker-finalize-release.yml@refs/tags/vX.Y.Z' \
-  infra/docker/deploy-production.sh .env.production fresh-deploy
+infra/docker/deploy-production.sh .env.production fresh-deploy
 ```
 
 该路径使用 `docker-compose.prod.yml`，生产 Worker 继续按前述

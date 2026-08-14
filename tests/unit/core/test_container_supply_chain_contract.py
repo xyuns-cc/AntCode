@@ -145,9 +145,7 @@ def test_test_image_context_includes_tests_and_workspace_readmes():
 def test_test_image_contains_cross_runtime_test_dependencies():
     dockerfile = _read(ROOT / "infra/docker/Dockerfile.test")
 
-    # jq: infra/docker/verify-production-images.sh 与 deploy-production.sh 解析 compose
-    # config 输出全靠它，缺它发布镜像校验在容器里必然失败。
-    for package in ("jq", "nodejs", "postgresql-client"):
+    for package in ("nodejs", "postgresql-client"):
         assert package in dockerfile
 
 

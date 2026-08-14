@@ -8,7 +8,7 @@ httpx 的 ``trust_env`` 同时管两件互不相干的事：代理环境变量�
 错误信息里没有任何线索指向代理策略。
 
 这不是假想场景——本仓自己的生产画像就是这个组合：
-``docker-compose.prod.ci-worker.yml`` 正是用 ``SSL_CERT_FILE`` 把发布 PKI 的 CA
+``docker-compose.prod.e2e-worker.yml`` 正是用 ``SSL_CERT_FILE`` 把发布 PKI 的 CA
 注入 Worker。Docker 画像碰巧躲过了，因为它的 API 地址是带点的主机名；物理机
 Worker 只要把控制面写成 ``https://localhost`` 或单标签内网名（``https://antcode-api``）
 就会 100% 注册失败（真机实测）。

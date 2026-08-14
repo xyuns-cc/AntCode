@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     git \
-    jq \
     nodejs \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*

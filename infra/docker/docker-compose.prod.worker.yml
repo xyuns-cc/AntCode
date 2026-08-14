@@ -6,7 +6,10 @@ x-antcode-logging: &antcode-logging
 
 services:
   worker:
-    image: ${ANTCODE_WORKER_IMAGE_REPOSITORY:?Worker image repository is required}@sha256:${ANTCODE_WORKER_IMAGE_DIGEST:?Worker image digest is required}
+    image: antcode-worker:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.worker
     container_name: ${ANTCODE_WORKER_CONTAINER_NAME:?unique Worker container name is required}
     restart: unless-stopped
     stop_grace_period: 60s

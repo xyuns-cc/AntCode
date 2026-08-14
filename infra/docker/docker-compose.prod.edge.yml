@@ -5,8 +5,13 @@ x-antcode-logging: &antcode-logging
     max-file: "10"
 
 services:
+  # 前端的构建上下文只有 web/antcode-frontend，与后端四个镜像（上下文是仓库根）
+  # 不同；Dockerfile 也住在该目录里，所以这里不能沿用 `context: ../..`。
   frontend:
-    image: ${ANTCODE_FRONTEND_IMAGE_REPOSITORY:?frontend image repository is required}@sha256:${ANTCODE_FRONTEND_IMAGE_DIGEST:?frontend image digest is required}
+    image: antcode-frontend:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
+    build:
+      context: ../../web/antcode-frontend
+      dockerfile: Dockerfile
     restart: unless-stopped
     logging: *antcode-logging
     read_only: true

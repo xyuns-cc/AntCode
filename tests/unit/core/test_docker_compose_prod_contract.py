@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from scripts.release_e2e_environment import RUNTIME_SERVICES
 from tests.unit.core.compose_support import load_compose
 
 PROD_COMPOSE = Path("infra/docker/docker-compose.prod.yml")
@@ -12,12 +13,24 @@ LOCAL_BACKUP_COMPOSE = Path("infra/docker/docker-compose.prod.local-backup.yml")
 ADMIN_BOOTSTRAP_COMPOSE = Path("infra/docker/docker-compose.prod.bootstrap-admin.yml")
 WORKER_BOOTSTRAP_COMPOSE = Path("infra/docker/docker-compose.prod.bootstrap-worker.yml")
 SECRET_ENTRYPOINT = Path("infra/docker/entrypoint.load-secrets.sh")
-VERIFY_IMAGES = Path("infra/docker/verify-production-images.sh")
 DEPLOY_SCRIPT = Path("infra/docker/deploy-production.sh")
 BOOTSTRAP_WORKER = Path("infra/docker/bootstrap-worker.sh")
 RESTORE_SCRIPT = Path("infra/docker/verify-backup-restore.sh")
 RESOURCE_KEYS = {"cpus", "mem_limit", "pids_limit"}
 DEVELOPMENT_COMPOSE_TARGET_COUNT = 3
+IMAGE_TAG_REFERENCE = "${ANTCODE_IMAGE_TAG:?unique application image tag is required}"
+#: 本地构建的五个应用镜像 -> 它们唯一那处 build 定义引用的 Dockerfile。
+BUILT_IMAGES = {
+    "web-api": "infra/docker/Dockerfile.web_api",
+    "master": "infra/docker/Dockerfile.master",
+    "gateway": "infra/docker/Dockerfile.gateway",
+    "worker": "infra/docker/Dockerfile.worker",
+    "frontend": "Dockerfile",
+}
+#: 跑 Web API 镜像但只引用不构建的服务。
+IMAGE_ONLY_SERVICES = ("migration", "crawl-redis-upgrade")
+#: 不构建、仍按 digest pin 的第三方镜像；部署入口只对这三个执行 pull。
+DIGEST_PINNED_SERVICES = RUNTIME_SERVICES
 CORE_SECRET_NAMES = {
     "database_url",
     "redis_url",
@@ -209,29 +222,44 @@ def test_local_backup_is_bounded_atomic_aged_and_recoverable() -> None:
     assert 'timeout "$RESTORE_TIMEOUT_SECONDS" pg_restore' in restore
 
 
-def test_deployment_verifies_exact_signed_digests_before_pull_and_up() -> None:
-    verify = _script(VERIFY_IMAGES)
+def test_deployment_builds_and_pulls_before_stopping_running_services() -> None:
+    """构建与拉取都必须排在 stop 之前：任一步失败时正在跑的控制面还没被动过。"""
     deploy = _script(DEPLOY_SCRIPT)
 
-    assert "@sha256:[0-9a-f]{64}" in verify
-    assert "cosign verify" in verify
-    assert "--certificate-identity" in verify
-    assert "--certificate-oidc-issuer" in verify
-    assert "COSIGN_SERVICE_CERTIFICATE_IDENTITY" in verify
-    assert "COSIGN_RELEASE_CERTIFICATE_IDENTITY" in verify
-    assert deploy.index("verify-production-images.sh") < deploy.index('"${compose[@]}" pull')
-    assert deploy.index('"${compose[@]}" pull') < deploy.index('"${compose[@]}" up')
+    assert deploy.index('"${compose[@]}" build') < deploy.index('"${compose[@]}" pull "${RUNTIME_SERVICES[@]}"')
+    assert deploy.index("build_images") < deploy.index('"${compose[@]}" stop') < deploy.index('"${compose[@]}" up')
     assert "--wait" in deploy
+    # pull 必须点名第三方服务：`--ignore-buildable` 只跳过自身有 build 段的服务，
+    # migration / crawl-redis-upgrade 会被拿去 registry 解析并 403（真机实测）。
+    assert f"readonly RUNTIME_SERVICES=({' '.join(DIGEST_PINNED_SERVICES)})" in deploy
+    assert "verify-production-images.sh" not in deploy
 
 
-def test_production_images_are_site_supplied_exact_references() -> None:
+def test_application_images_are_built_locally_from_repository_dockerfiles() -> None:
+    """五个应用镜像由 Compose 就地构建，按唯一 tag 引用，且每个镜像只有一处 build 定义。"""
     services = _compose()["services"]
-    for service_name, service in services.items():
-        image = service["image"]
+
+    for service_name, dockerfile in BUILT_IMAGES.items():
+        service = services[service_name]
+        assert service["image"] == f"antcode-{service_name}:{IMAGE_TAG_REFERENCE}", service_name
+        build = service["build"]
+        assert build["dockerfile"] == dockerfile, service_name
+        context = (PROD_COMPOSE.parent / build["context"]).resolve()
+        assert (context / dockerfile).is_file(), service_name
+
+
+def test_only_the_five_application_services_carry_a_build_definition() -> None:
+    """同名 tag 只允许一处 build 定义；第三方镜像则锁住"不构建 + 仍按 digest pin"。"""
+    services = _compose()["services"]
+
+    for service_name in IMAGE_ONLY_SERVICES:
+        assert services[service_name]["image"] == services["web-api"]["image"], service_name
+        assert "build" not in services[service_name], service_name
+    for service_name in DIGEST_PINNED_SERVICES:
+        image = services[service_name]["image"]
         assert "_IMAGE_REPOSITORY:?" in image, service_name
-        assert "@sha256:${" in image, service_name
-        assert "_IMAGE_DIGEST:?" in image, service_name
-        assert "build" not in service
+        assert "@sha256:${" in image and "_IMAGE_DIGEST:?" in image, service_name
+        assert "build" not in services[service_name], service_name
 
 
 def test_makefile_docker_targets_select_development_compose() -> None:

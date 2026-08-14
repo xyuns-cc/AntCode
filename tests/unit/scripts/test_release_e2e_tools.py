@@ -16,7 +16,6 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from scripts import (
     prepare_local_release_e2e,
-    prepare_release_e2e,
     release_e2e_environment,
     release_e2e_orchestrator,
     verify_release_transport,
@@ -26,28 +25,14 @@ from scripts.release_e2e_pki import write_worker_identity_certificate
 SERVICES = ("web-api", "master", "gateway", "worker", "frontend")
 RUNTIMES = ("postgres", "redis", "reverse-proxy")
 REVISION = "a" * 40
-IMAGE_PREFIX = "ghcr.io/example/antcode"
+IMAGE_TAG = "gateway-e2e"
+SOURCE_URL = "https://github.com/example/antcode.git"
 EXPECTED_PRIVATE_FILE_MODE = 0o600
+DIGEST_LENGTH = 64
 
 
 def _digest(character: str) -> str:
-    return f"sha256:{character * 64}"
-
-
-def _write_descriptors(root: Path) -> Path:
-    digest_dir = root / "digests"
-    digest_dir.mkdir()
-    for offset, service in enumerate(SERVICES, start=1):
-        index = _digest(str(offset))
-        (digest_dir / f"{service}.digest").write_text(index, encoding="utf-8")
-        descriptor = {
-            "schema_version": 1,
-            "index": index,
-            "amd64": _digest("b"),
-            "arm64": _digest("c"),
-        }
-        (digest_dir / f"{service}.platforms.json").write_text(json.dumps(descriptor), encoding="utf-8")
-    return digest_dir
+    return f"sha256:{character * DIGEST_LENGTH}"
 
 
 def _write_runtime_lock(root: Path) -> Path:
@@ -57,49 +42,49 @@ def _write_runtime_lock(root: Path) -> Path:
     return lock
 
 
-def _args(root: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        output_dir=root / "state",
-        digest_dir=_write_descriptors(root),
-        runtime_lock=_write_runtime_lock(root),
-        image_prefix=IMAGE_PREFIX,
-        revision=REVISION,
-        repository="example/antcode",
-    )
-
-
 def _run_prepare(monkeypatch: pytest.MonkeyPatch, root: Path) -> tuple[Path, Path]:
-    args = _args(root)
-    github_env = root / "github.env"
-    monkeypatch.setenv("GITHUB_ENV", str(github_env))
+    state = root / "state"
+    runner_env = root / "runner.env"
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "prepare_release_e2e",
+            "prepare_local_release_e2e",
             "--output-dir",
-            str(args.output_dir),
-            "--digest-dir",
-            str(args.digest_dir),
+            str(state),
             "--runtime-lock",
-            str(args.runtime_lock),
-            "--image-prefix",
-            args.image_prefix,
-            "--revision",
-            args.revision,
-            "--repository",
-            args.repository,
+            str(_write_runtime_lock(root)),
+            "--image-tag",
+            IMAGE_TAG,
+            "--source-url",
+            SOURCE_URL,
+            "--source-ref",
+            REVISION,
+            "--runner-env",
+            str(runner_env),
+            "--https-port",
+            str(release_e2e_environment.DEFAULT_HTTPS_PORT),
+            "--http-redirect-port",
+            str(release_e2e_environment.DEFAULT_HTTP_REDIRECT_PORT),
+            "--gateway-port",
+            str(release_e2e_environment.DEFAULT_GATEWAY_PUBLIC_PORT),
         ],
     )
-    prepare_release_e2e.main()
-    return args.output_dir, github_env
+    prepare_local_release_e2e.main()
+    return state, runner_env
+
+
+def _environment_values(state: Path) -> dict[str, str]:
+    production_env = (state / "production.env").read_text(encoding="utf-8")
+    return dict(line.split("=", maxsplit=1) for line in production_env.splitlines())
 
 
 def test_prepare_material_is_ephemeral_path_only_and_exports_complete_e2e_env(monkeypatch, tmp_path: Path) -> None:
-    state, github_env = _run_prepare(monkeypatch, tmp_path)
+    state, runner_env = _run_prepare(monkeypatch, tmp_path)
     production_env = (state / "production.env").read_text(encoding="utf-8")
-    exports = github_env.read_text(encoding="utf-8")
+    exports = runner_env.read_text(encoding="utf-8")
 
+    assert stat.S_IMODE(runner_env.stat().st_mode) == EXPECTED_PRIVATE_FILE_MODE
     assert all(state in path.parents for path in state.rglob("*"))
     assert "ANTCODE_E2E_ADMIN_USER=admin" in exports
     assert "ANTCODE_E2E_WEB_API_URL=https://localhost" in exports
@@ -112,12 +97,26 @@ def test_prepare_material_is_ephemeral_path_only_and_exports_complete_e2e_env(mo
         secret = secret_file.read_text(encoding="utf-8")
         if secret:
             assert secret not in production_env
-    images = json.loads((state / "release-images.json").read_text(encoding="utf-8"))
-    assert set(images) == {*SERVICES, *RUNTIMES}
     assert stat.S_IMODE((state / "ca.key").stat().st_mode) == EXPECTED_PRIVATE_FILE_MODE
-    values = dict(line.split("=", maxsplit=1) for line in production_env.splitlines())
+    values = _environment_values(state)
     edge_subnet = ipaddress.ip_network(values["ANTCODE_EDGE_SUBNET"])
     assert ipaddress.ip_address(values["ANTCODE_REVERSE_PROXY_EDGE_IP"]) != next(edge_subnet.hosts())
+
+
+def test_application_images_are_tag_referenced_and_runtimes_stay_digest_pinned(monkeypatch, tmp_path: Path) -> None:
+    """本地构建只放弃自研镜像的 digest 引用；第三方运行时镜像仍必须按 digest pin。"""
+    state, _ = _run_prepare(monkeypatch, tmp_path)
+    images = json.loads((state / "release-images.json").read_text(encoding="utf-8"))
+    values = _environment_values(state)
+
+    assert set(images) == {*SERVICES, *RUNTIMES}
+    assert values["ANTCODE_IMAGE_TAG"] == IMAGE_TAG
+    for service in SERVICES:
+        assert images[service] == f"antcode-{service}:{IMAGE_TAG}"
+        assert f"ANTCODE_{service.replace('-', '_').upper()}_IMAGE_DIGEST" not in values
+    for runtime in RUNTIMES:
+        assert images[runtime].endswith(_digest("d"))
+        assert values[f"ANTCODE_{runtime.replace('-', '_').upper()}_IMAGE_DIGEST"] == "d" * DIGEST_LENGTH
 
 
 def test_release_pki_has_expected_ca_san_eku_and_rotated_worker_identity(monkeypatch, tmp_path: Path) -> None:
@@ -149,16 +148,6 @@ def test_release_pki_has_expected_ca_san_eku_and_rotated_worker_identity(monkeyp
     rotated.verify_directly_issued_by(ca)
 
 
-def test_application_descriptor_set_and_platform_mapping_are_fail_closed(tmp_path: Path) -> None:
-    args = _args(tmp_path)
-    images = prepare_release_e2e._application_images(args)
-    assert set(images) == set(SERVICES)
-
-    (args.digest_dir / "unexpected.digest").write_text(_digest("e"), encoding="utf-8")
-    with pytest.raises(ValueError, match="exact five-service"):
-        prepare_release_e2e._application_images(args)
-
-
 @pytest.mark.parametrize("reference", ["postgres:16", "postgres@sha256:not-hex", f"postgres@{_digest('A')}"])
 def test_runtime_image_lock_rejects_noncanonical_digest(tmp_path: Path, reference: str) -> None:
     lock = _write_runtime_lock(tmp_path)
@@ -167,7 +156,7 @@ def test_runtime_image_lock_rejects_noncanonical_digest(tmp_path: Path, referenc
     lock.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="not digest locked"):
-        prepare_release_e2e._runtime_images(lock)
+        release_e2e_environment.runtime_images(lock)
 
 
 def test_release_orchestrator_exact_image_validation_rejects_mismatch(monkeypatch, tmp_path: Path) -> None:
@@ -187,9 +176,11 @@ def test_release_orchestrator_exact_image_validation_rejects_mismatch(monkeypatc
         release_e2e_orchestrator._validate_exact_images(tmp_path / "production.env", tmp_path)
 
 
-def test_ci_compose_overrides_preserve_production_tls_and_worker_sandbox() -> None:
-    control = yaml.safe_load(Path("infra/docker/docker-compose.prod.ci-control.yml").read_text(encoding="utf-8"))
-    worker_override = yaml.safe_load(Path("infra/docker/docker-compose.prod.ci-worker.yml").read_text(encoding="utf-8"))
+def test_e2e_compose_overrides_preserve_production_tls_and_worker_sandbox() -> None:
+    control = yaml.safe_load(Path("infra/docker/docker-compose.prod.e2e-control.yml").read_text(encoding="utf-8"))
+    worker_override = yaml.safe_load(
+        Path("infra/docker/docker-compose.prod.e2e-worker.yml").read_text(encoding="utf-8")
+    )
     worker = yaml.safe_load(Path("infra/docker/docker-compose.prod.worker.yml").read_text(encoding="utf-8"))[
         "services"
     ]["worker"]
@@ -203,9 +194,9 @@ def test_ci_compose_overrides_preserve_production_tls_and_worker_sandbox() -> No
     assert worker["cap_drop"] == ["ALL"]
 
 
-def test_login_rate_limit_is_relaxed_only_in_the_ci_overlay() -> None:
-    """生产默认 5 次/分钟·IP 会让一轮 E2E 从第 6 次登录起恒 429；放宽只许出现在 CI overlay。"""
-    control = yaml.safe_load(Path("infra/docker/docker-compose.prod.ci-control.yml").read_text(encoding="utf-8"))
+def test_login_rate_limit_is_relaxed_only_in_the_e2e_overlay() -> None:
+    """生产默认 5 次/分钟·IP 会让一轮 E2E 从第 6 次登录起恒 429；放宽只许出现在 E2E overlay。"""
+    control = yaml.safe_load(Path("infra/docker/docker-compose.prod.e2e-control.yml").read_text(encoding="utf-8"))
     relaxed = control["services"]["web-api"]["environment"]
 
     assert int(relaxed["LOGIN_RATE_LIMIT_IP_MAX"]) > Settings().LOGIN_RATE_LIMIT_IP_MAX
@@ -229,26 +220,6 @@ def test_e2e_git_base_url_is_routable_from_both_host_runner_and_containers() -> 
     assert release_e2e_environment.CONTAINER_HOST_ALIAS not in base_url
     assert ipaddress.ip_address(host)
     assert urlsplit(base_url).port == release_e2e_environment.GIT_HTTP_PORT
-
-
-def test_local_image_resolution_is_fail_closed_without_a_unique_repo_digest(monkeypatch) -> None:
-    captured: list[str] = []
-
-    def fake_run(command: list[str], **_: object) -> SimpleNamespace:
-        captured.append(command[3])
-        return SimpleNamespace(stdout=json.dumps(digests))
-
-    monkeypatch.setattr(prepare_local_release_e2e.subprocess, "run", fake_run)
-    digests = [f"antcode-web-api@{_digest('a')}"]
-    assert prepare_local_release_e2e._local_digest_reference("web-api", "gateway-e2e").endswith(_digest("a"))
-    assert captured == ["antcode-web-api:gateway-e2e"]
-
-    digests = []
-    with pytest.raises(RuntimeError, match="RepoDigest"):
-        prepare_local_release_e2e._local_digest_reference("web-api", "gateway-e2e")
-    digests = ["antcode-web-api:gateway-e2e"]
-    with pytest.raises(RuntimeError, match="规范 digest"):
-        prepare_local_release_e2e._local_digest_reference("web-api", "gateway-e2e")
 
 
 def test_security_header_probe_rejects_duplicates_not_just_absence() -> None:

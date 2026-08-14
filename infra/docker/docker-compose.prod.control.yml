@@ -17,6 +17,11 @@ x-backend-environment: &backend-environment
   AUTH_COOKIE_SECURE: "true"
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
+# 五个应用镜像由本仓 Compose 就地构建，没有 registry 产物，也没有签名与不可变
+# digest（取舍见 docs/release-runbook.md「构建与回滚」）。ANTCODE_IMAGE_TAG 必须是
+# 每次发布唯一的标签，用它把"运行中的容器"对回一次确定的源码构建；复用同一个标签
+# 会让 `up -d` 认为镜像没变而不重建容器。第三方运行时镜像（postgres / redis /
+# 反向代理）仍按 digest pin，那部分不可变性没有丢。
 x-backend-service: &backend-service
   restart: unless-stopped
   logging: *antcode-logging
@@ -38,7 +43,10 @@ x-backend-service: &backend-service
 services:
   web-api:
     <<: *backend-service
-    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    image: antcode-web-api:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.web_api
     stop_grace_period: 30s
     cpus: 2
     mem_limit: 2g
@@ -81,7 +89,10 @@ services:
 
   master:
     <<: *backend-service
-    image: ${ANTCODE_MASTER_IMAGE_REPOSITORY:?Master image repository is required}@sha256:${ANTCODE_MASTER_IMAGE_DIGEST:?Master image digest is required}
+    image: antcode-master:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.master
     stop_grace_period: 30s
     cpus: 2
     mem_limit: 2g
@@ -108,7 +119,10 @@ services:
 
   gateway:
     <<: *backend-service
-    image: ${ANTCODE_GATEWAY_IMAGE_REPOSITORY:?Gateway image repository is required}@sha256:${ANTCODE_GATEWAY_IMAGE_DIGEST:?Gateway image digest is required}
+    image: antcode-gateway:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.gateway
     stop_grace_period: 30s
     cpus: 2
     mem_limit: 2g

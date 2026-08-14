@@ -5,7 +5,8 @@
 # 仓库没有自动化发布流水线，这个脚本就是生产画像 E2E 的**唯一**入口：同一套
 # Compose 拓扑（docker-compose.prod*.yml）、同一套 PKI / 密钥生成实现
 # （scripts/release_e2e_environment.py）、同一个编排器
-# （scripts/release_e2e_orchestrator.py），五个应用镜像来自本机构建。
+# （scripts/release_e2e_orchestrator.py），五个应用镜像由 `docker compose build`
+# 就地构建——与 deploy-production.sh 用的是同一份 build 段。
 # 正式发布前必须在受控发布机上跑通它，见 docs/release-runbook.md 第 0 节。
 #
 # 覆盖：生成 mTLS PKI -> 起生产 Gateway 画像 -> 安装 Key 注册 -> 按分配到的
@@ -37,13 +38,13 @@ log() { printf '=== %s\n' "$*"; }
 control_compose() {
   docker compose --env-file "$STATE_DIR/production.env" -p "$CONTROL_PROJECT" \
     -f "$ROOT/infra/docker/docker-compose.prod.yml" \
-    -f "$ROOT/infra/docker/docker-compose.prod.ci-control.yml" "$@"
+    -f "$ROOT/infra/docker/docker-compose.prod.e2e-control.yml" "$@"
 }
 
 worker_compose() {
   docker compose --env-file "$STATE_DIR/production.env" -p "$WORKER_PROJECT" \
     -f "$ROOT/infra/docker/docker-compose.prod.worker.yml" \
-    -f "$ROOT/infra/docker/docker-compose.prod.ci-worker.yml" "$@"
+    -f "$ROOT/infra/docker/docker-compose.prod.e2e-worker.yml" "$@"
 }
 
 teardown() {
@@ -100,24 +101,20 @@ resolve_source_ref() {
 
 build_images() {
   if [ "${ANTCODE_GATEWAY_E2E_SKIP_BUILD:-0}" = "1" ]; then
-    log "[1/6] 跳过构建，复用现有 :$TAG 镜像"
+    log "[2/6] 跳过构建，复用现有 :$TAG 镜像"
     return
   fi
-  log "[1/6] 构建生产画像镜像（本机 containerd 存储，产出 RepoDigest 供 digest pin）"
-  local service
-  for service in web_api master gateway worker; do
-    local name="${service//_/-}"
-    docker build -f "$ROOT/infra/docker/Dockerfile.${service}" \
-      -t "antcode-${name}:${TAG}" "$ROOT" >/dev/null
-    log "  antcode-${name}:${TAG} 就绪"
-  done
-  docker build -f "$ROOT/web/antcode-frontend/Dockerfile" \
-    -t "antcode-frontend:${TAG}" "$ROOT/web/antcode-frontend" >/dev/null
-  log "  antcode-frontend:${TAG} 就绪"
+  # 走生产 Compose 自己的 build 段，而不是另写一份 docker build：E2E 验的镜像与
+  # deploy-production.sh 部署的镜像必须由同一处定义产出，否则两者会悄悄分叉。
+  # control 栈里的 worker 在 co-located-worker profile 后面，compose build 不会碰它；
+  # worker 镜像由 worker 栈构建，两边指向同一个 Dockerfile 与同一个 tag。
+  log "[2/6] 用生产 Compose 的 build 段就地构建五个应用镜像"
+  control_compose build
+  worker_compose build
 }
 
 prepare_environment() {
-  log "[2/6] 生成一次性 mTLS PKI、密钥与生产 Compose 环境"
+  log "[1/6] 生成一次性 mTLS PKI、密钥与生产 Compose 环境"
   mkdir -p "$(dirname "$STATE_DIR")"
   chmod 0755 "$(dirname "$STATE_DIR")"
   uv run --frozen python -m scripts.prepare_local_release_e2e \
@@ -150,8 +147,7 @@ start_stack() {
   log "[4/6] 起生产 Gateway 画像并用安装 Key 注册 Worker（含按 worker_id 重签客户端证书）"
   uv run --frozen python -m scripts.release_e2e_orchestrator \
     --environment "$STATE_DIR/production.env" \
-    --state-dir "$STATE_DIR" \
-    --skip-pull
+    --state-dir "$STATE_DIR"
 }
 
 verify_transport() {
@@ -180,8 +176,10 @@ run_e2e() {
 
 trap teardown EXIT
 preflight
-build_images
+# 构建必须排在环境生成之后：compose build 要读 production.env 才能解析 ANTCODE_IMAGE_TAG
+# 及其余 `${VAR:?}`，先构建的话 compose 直接以缺变量拒绝解析。
 prepare_environment
+build_images
 start_git_source
 start_stack
 verify_transport

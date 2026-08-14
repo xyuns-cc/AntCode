@@ -20,7 +20,7 @@ cp -- "$SOURCE_ENV_FILE" "$ENV_FILE"
 base=(docker compose --env-file "$ENV_FILE" -f "$BASE_COMPOSE")
 bootstrap=("${base[@]}" -f "$BOOTSTRAP_COMPOSE")
 
-"${SCRIPT_DIR}/verify-production-images.sh" "$ENV_FILE" --worker-only
+"${base[@]}" build worker
 
 cleanup() {
     "${bootstrap[@]}" stop worker

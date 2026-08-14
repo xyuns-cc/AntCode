@@ -16,8 +16,8 @@ ENV_FILE="$(mktemp)"
 trap cleanup_env EXIT
 cp -- "$SOURCE_ENV_FILE" "$ENV_FILE"
 
-"${SCRIPT_DIR}/verify-production-images.sh" "$ENV_FILE" --worker-only
-
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-"${compose[@]}" pull worker
+# Worker 镜像本地构建：物理机 Worker 必须持有本仓源码，构建失败即部署中止，
+# 不会去动正在跑的旧容器。
+"${compose[@]}" build worker
 "${compose[@]}" up -d --no-deps --wait --wait-timeout "$WAIT_TIMEOUT" worker

@@ -14,6 +14,7 @@ from typing import cast
 
 import httpx
 
+from scripts.release_e2e_environment import RUNTIME_SERVICES
 from scripts.release_e2e_pki import write_worker_identity_certificate
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import extract_data, get_workers, login, request_json
@@ -42,10 +43,6 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--environment", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
-    # 本机构建的镜像不在任何 registry 上，`compose pull` 必然失败。发布流水线
-    # 走 GHCR，必须保留 pull（确认拉到的就是那份 digest），因此这里是显式开关
-    # 而不是"拉不到就算了"的静默降级。
-    parser.add_argument("--skip-pull", action="store_true")
     return parser.parse_args()
 
 
@@ -57,14 +54,14 @@ def _compose(environment: Path, project: str, *files: str) -> list[str]:
 
 
 def _control(environment: Path, *, admin_bootstrap: bool = False) -> list[str]:
-    files = ["infra/docker/docker-compose.prod.yml", "infra/docker/docker-compose.prod.ci-control.yml"]
+    files = ["infra/docker/docker-compose.prod.yml", "infra/docker/docker-compose.prod.e2e-control.yml"]
     if admin_bootstrap:
         files.append("infra/docker/docker-compose.prod.bootstrap-admin.yml")
     return _compose(environment, CONTROL_PROJECT, *files)
 
 
 def _worker(environment: Path, *, bootstrap: bool = False) -> list[str]:
-    files = ["infra/docker/docker-compose.prod.worker.yml", "infra/docker/docker-compose.prod.ci-worker.yml"]
+    files = ["infra/docker/docker-compose.prod.worker.yml", "infra/docker/docker-compose.prod.e2e-worker.yml"]
     if bootstrap:
         files.append("infra/docker/docker-compose.prod.bootstrap-worker.yml")
     return _compose(environment, WORKER_PROJECT, *files)
@@ -100,10 +97,12 @@ def _validate_exact_images(environment: Path, state_dir: Path) -> None:
         raise RuntimeError("production Worker image mismatch")
 
 
-def _start_control(environment: Path, *, skip_pull: bool) -> None:
+def _start_control(environment: Path) -> None:
     control = _control(environment)
-    if not skip_pull:
-        _run([*control, "pull"])
+    # 只拉按 digest pin 的第三方镜像。不能用 `--ignore-buildable`：它只跳过自身声明了
+    # build 段的服务，migration / crawl-redis-upgrade 引用本地构建的 Web API 镜像却没有
+    # build 段，会被拿去 registry 解析并失败（真机实测 403）。
+    _run([*control, "pull", *RUNTIME_SERVICES])
     _run([*control, "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "redis"])
     _run([*_control(environment, admin_bootstrap=True), "run", "--rm", "--no-deps", "migration"])
     _run([*control, "run", "--rm", "--no-deps", "migration"])
@@ -171,12 +170,10 @@ def _wait_for_persisted_credentials(environment: Path, worker_id: str) -> None:
     raise TimeoutError(f"release E2E Worker credentials were not durably acknowledged: {last_error}")
 
 
-def _bootstrap_worker(environment: Path, state_dir: Path, install_key: str, *, skip_pull: bool) -> None:
+def _bootstrap_worker(environment: Path, state_dir: Path, install_key: str) -> None:
     key_file = state_dir / "secrets/worker_install_key"
     key_file.write_text(install_key, encoding="utf-8")
     key_file.chmod(0o600)
-    if not skip_pull:
-        _run([*_worker(environment), "pull"])
     _run([*_worker(environment, bootstrap=True), "up", "-d", "worker"])
 
 
@@ -202,9 +199,9 @@ async def _main() -> None:
     environment = args.environment.resolve()
     state_dir = args.state_dir.resolve()
     _validate_exact_images(environment, state_dir)
-    _start_control(environment, skip_pull=args.skip_pull)
+    _start_control(environment)
     baseline, install_key = await _create_install_key(state_dir)
-    _bootstrap_worker(environment, state_dir, install_key, skip_pull=args.skip_pull)
+    _bootstrap_worker(environment, state_dir, install_key)
     worker_id = await _wait_for_new_worker(state_dir, baseline)
     _wait_for_persisted_credentials(environment, worker_id)
     _restart_without_install_key(environment, state_dir, worker_id)

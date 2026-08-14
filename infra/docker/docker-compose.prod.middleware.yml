@@ -81,8 +81,17 @@ services:
       retries: 5
       start_period: 30s
 
+  # migration 与 crawl-redis-upgrade 跑的就是 Web API 镜像，只是入口命令不同，因此
+  # 这里**只引用**同一个 tag，不重复声明 build——同名 tag 的构建定义只保留一处（在
+  # docker-compose.prod.control.yml 的 web-api 上），避免同一个 tag 被构建三次。
+  # 两个后果必须记住：
+  #   1) 调用方必须先 build web-api 再 run 它们（deploy-production.sh /
+  #      bootstrap-admin.sh 已固定这个顺序）；
+  #   2) `compose pull` 不能对它们执行，也不能靠 `--ignore-buildable` 兜底——那个开关
+  #      只跳过自身有 build 段的服务，这两个会被拿去 registry 解析并失败。部署入口
+  #      因此点名只拉第三方运行时镜像。
   migration:
-    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    image: antcode-web-api:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
     restart: "no"
     logging: *antcode-logging
     read_only: true
@@ -116,7 +125,7 @@ services:
         condition: service_healthy
 
   crawl-redis-upgrade:
-    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    image: antcode-web-api:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
     profiles: ["crawl-redis-upgrade"]
     restart: "no"
     logging: *antcode-logging

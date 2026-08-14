@@ -14,6 +14,20 @@ cleanup_env() {
     [[ -z "$ENV_FILE" ]] || rm -f "$ENV_FILE"
 }
 
+# 五个应用镜像本地构建，第三方运行时镜像仍按 digest 拉取。两步都在停服之前完成：
+# 构建失败或某个 pin 的 digest 拉不到时，正在跑的控制面一个容器都还没被动过。
+#
+# pull 必须点名这三个服务，不能用 `--ignore-buildable`：那个开关只跳过**自身声明了
+# build 段**的服务，而 migration / crawl-redis-upgrade 跑的是 Web API 镜像却只引用
+# 不构建，于是 compose 会拿 `antcode-web-api:<tag>` 去 registry 找，必然 403
+# （真机实测）。点名的另一个好处是服务改名时 compose 直接报 "no such service"。
+readonly RUNTIME_SERVICES=(postgres redis reverse-proxy)
+
+build_images() {
+    "${compose[@]}" build
+    "${compose[@]}" pull "${RUNTIME_SERVICES[@]}"
+}
+
 [[ -f "$SOURCE_ENV_FILE" ]] || { echo "environment file does not exist" >&2; exit 1; }
 ENV_FILE="$(mktemp)"
 trap cleanup_env EXIT
@@ -51,9 +65,8 @@ if [[ "$UPGRADE_MODE" == "rotate-encryption-key" ]]; then
         printf '%s\n' 'rotate-encryption-key accepts only --confirm-writers-stopped' >&2
         exit 2
     fi
-    "${SCRIPT_DIR}/verify-production-images.sh" "$ENV_FILE"
     compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-    "${compose[@]}" pull
+    build_images
     "${compose[@]}" stop --timeout "$STOP_TIMEOUT" web-api master gateway worker
     "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT" postgres redis
     "${compose[@]}" run --rm --no-deps migration \
@@ -83,10 +96,8 @@ if [[ "$apply_requested" != true && "$preflight_reviewed" == true ]]; then
     exit 2
 fi
 
-"${SCRIPT_DIR}/verify-production-images.sh" "$ENV_FILE"
-
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-"${compose[@]}" pull
+build_images
 "${compose[@]}" stop --timeout "$STOP_TIMEOUT" web-api master gateway worker
 "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT" postgres redis
 "${compose[@]}" run --rm --no-deps crawl-redis-upgrade \

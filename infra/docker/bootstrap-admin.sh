@@ -19,7 +19,9 @@ cp -- "$SOURCE_ENV_FILE" "$ENV_FILE"
 base=(docker compose --env-file "$ENV_FILE" -f "$BASE_COMPOSE")
 bootstrap=("${base[@]}" -f "$BOOTSTRAP_COMPOSE")
 
-"${SCRIPT_DIR}/verify-production-images.sh" "$ENV_FILE"
-"${base[@]}" pull postgres redis migration
+# migration 跑的是 Web API 镜像，它的 build 段挂在 web-api 服务上（一个镜像只有
+# 一处构建定义），所以这里构建 web-api 而不是 migration。
+"${base[@]}" build web-api
+"${base[@]}" pull postgres redis
 "${base[@]}" up -d --wait postgres redis
 "${bootstrap[@]}" run --rm --no-deps migration

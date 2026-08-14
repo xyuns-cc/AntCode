@@ -1,20 +1,28 @@
 """Shared ephemeral material for the production-Compose release E2E gates.
 
-仓库没有自动化发布流水线，唯一入口是 `infra/docker/run-gateway-e2e.sh`（镜像来自
-本机构建）。这里集中收敛 PKI、密钥、网络布局与 Compose 变量：如果将来另接一条
-镜像来源不同的发布通道（例如按 registry digest 拉取），它必须复用本模块，否则
-"测试机验过的画像"与"实际发布的画像"会悄悄分叉。
+仓库没有自动化发布流水线，唯一入口是 `infra/docker/run-gateway-e2e.sh`（五个应用
+镜像由 `docker compose build` 就地构建）。这里集中收敛 PKI、密钥、网络布局与
+Compose 变量：如果将来另接一条镜像来源不同的发布通道（例如按 registry digest
+拉取），它必须复用本模块，否则"测试机验过的画像"与"实际发布的画像"会悄悄分叉。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.release_e2e_pki import write_release_pki
+
+#: 由 Compose 本地构建的五个应用镜像；生产 Compose 里它们只有 tag，没有 digest。
+APP_SERVICES = ("web-api", "master", "gateway", "worker", "frontend")
+#: 第三方运行时镜像，仍按 digest pin——这部分不可变性没有随发布流水线一起消失。
+RUNTIME_SERVICES = ("postgres", "redis", "reverse-proxy")
+IMAGE_NAMESPACE = "antcode"
+IMAGE_PATTERN = re.compile(r"\S+@sha256:[0-9a-f]{64}")
 
 #: frontend / reverse-proxy 的 pin 地址必须落在各自网络的 ``ip_range`` 之外，否则先创建
 #: 的容器会从动态池底部抢走它，首次部署直接 "Address already in use"。
@@ -40,7 +48,7 @@ DEFAULT_HTTP_REDIRECT_PORT = 80
 DEFAULT_UV_VERSION = "0.8.17"
 DEFAULT_POSTGRES_HOST_PORT = 15432
 DEFAULT_REDIS_HOST_PORT = 16379
-#: 容器侧统一用它称呼宿主；`prod.ci-control.yml` / `prod.ci-worker.yml` 里的
+#: 容器侧统一用它称呼宿主；`prod.e2e-control.yml` / `prod.e2e-worker.yml` 里的
 #: `extra_hosts: host-gateway` 负责解析。宿主进程解析不了它（见 host_git_base_url）。
 CONTAINER_HOST_ALIAS = "host.docker.internal"
 #: TEST-NET-1 的 discard 端口：UDP connect 只让内核按路由表挑出源地址，不发任何报文。
@@ -168,9 +176,29 @@ def _path_variables(root: Path) -> dict[str, str]:
     return {name: str(root / relative) for name, relative in paths.items()}
 
 
-def _image_variables(images: dict[str, str]) -> dict[str, str]:
-    variables: dict[str, str] = {}
-    for name, reference in images.items():
+def application_images(tag: str) -> dict[str, str]:
+    """Compose 就地构建的五个镜像引用；它们不在任何 registry 上，只有 tag 可用。"""
+    return {service: f"{IMAGE_NAMESPACE}-{service}:{tag}" for service in APP_SERVICES}
+
+
+def runtime_images(lock_path: Path) -> dict[str, str]:
+    """读取第三方运行时镜像的 digest 锁；schema 或引用不合规一律拒绝。"""
+    payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("runtime image lock has an invalid schema")
+    images: object = payload.get("images")
+    if payload.get("schema_version") != 1 or not isinstance(images, dict) or set(images) != set(RUNTIME_SERVICES):
+        raise ValueError("runtime image lock has an invalid schema")
+    for name in RUNTIME_SERVICES:
+        reference = images[name]
+        if not isinstance(reference, str) or IMAGE_PATTERN.fullmatch(reference) is None:
+            raise ValueError(f"runtime image is not digest locked: {name}")
+    return {name: images[name] for name in RUNTIME_SERVICES}
+
+
+def _image_variables(tag: str, runtime: dict[str, str]) -> dict[str, str]:
+    variables: dict[str, str] = {"ANTCODE_IMAGE_TAG": tag}
+    for name, reference in runtime.items():
         repository, digest = reference.rsplit("@sha256:", 1)
         key = name.upper().replace("-", "_")
         variables[f"ANTCODE_{key}_IMAGE_REPOSITORY"] = repository
@@ -178,7 +206,7 @@ def _image_variables(images: dict[str, str]) -> dict[str, str]:
     return variables
 
 
-def write_environment(settings: ReleaseE2ESettings, images: dict[str, str]) -> dict[str, str]:
+def write_environment(settings: ReleaseE2ESettings, tag: str, runtime: dict[str, str]) -> dict[str, str]:
     """写出一次性 PKI、密钥、Compose 环境与 Git 根目录，返回 runner 侧取值。"""
     root = settings.root
     write_release_pki(root)
@@ -186,10 +214,10 @@ def write_environment(settings: ReleaseE2ESettings, images: dict[str, str]) -> d
     environment = {
         **_static_variables(settings),
         **_path_variables(root),
-        **_image_variables(images),
+        **_image_variables(tag, runtime),
     }
     write(root / "production.env", "".join(f"{name}={value}\n" for name, value in sorted(environment.items())))
-    write(root / "release-images.json", json.dumps(images, sort_keys=True))
+    write(root / "release-images.json", json.dumps({**application_images(tag), **runtime}, sort_keys=True))
     (root / "git").mkdir(mode=GIT_ROOT_MODE)
     return values
 
