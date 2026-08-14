@@ -16,6 +16,11 @@ from antcode_core.application.services.runtime.runtime_control_service import re
 from antcode_core.infrastructure.redis import control_global_stream
 from loguru import logger
 
+from antcode_gateway.services.control_stream_ownership import (
+    ControlPendingEntry,
+    ack_owned_control_entry,
+)
+
 
 async def prepare_runtime_control_delivery(
     redis,
@@ -25,6 +30,8 @@ async def prepare_runtime_control_delivery(
     message_id: str,
     event: control_pb2.ControlEvent,
     group: str,
+    consumer_name: str,
+    lease_id: str,
     trim,
 ) -> control_pb2.ControlEvent | None:
     """注入 Redis 权威时钟；已过期指令在中继侧结算丢弃。"""
@@ -39,7 +46,17 @@ async def prepare_runtime_control_delivery(
         delivered_event.CopyFrom(event)
         delivered_event.runtime_control.gateway_observed_at_ms = observed_at_ms
         return delivered_event
-    await redis.xack(stream_key, group, message_id)
+    await ack_owned_control_entry(
+        redis,
+        ControlPendingEntry(
+            worker_id,
+            lease_id,
+            stream_key,
+            group,
+            message_id,
+            consumer_name,
+        ),
+    )
     await trim(redis, stream_key, message_id, group=group)
     logger.warning(
         "丢弃已过期的 runtime control(中继侧结算): worker={} stream={} msg_id={} request_id={}",

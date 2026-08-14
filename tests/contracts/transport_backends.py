@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pytest
+from antcode_worker.transport.redis.direct_control import DirectLeaseGrant
 
 from tests.contracts.fake_gateway import RunningFakeGateway
 
@@ -17,6 +18,7 @@ REDIS_TEST_URL = os.environ.get(
     "ANTCODE_CONTRACT_REDIS_URL",
     "redis://localhost:16379/14",
 )
+_CONTRACT_TASK_PAYLOAD_SECRET = "contract-task-payload-secret-material-0001"
 
 
 def _redis_endpoint() -> tuple[str, int]:
@@ -42,22 +44,39 @@ class _InProcessDirectControl:
         self,
         current_lease_id: str,
         metrics: dict | None,
-    ) -> tuple[str, int, int, bool]:
+        capabilities: dict[str, str],
+    ) -> DirectLeaseGrant:
+        """与真实 ``DirectControlClient`` 同构：返回带权威 ``ttl_ms`` 的应答。
+
+        撤销分支同样带上 policy 的 ttl/节拍——Worker 侧对两条分支用同一套
+        ``renew_after_ms * 2 < ttl_ms`` 不变量校验，替身少带一个字段就会让
+        续期窗口构造失败，而那是替身的问题不是被测行为。
+        """
+        from antcode_contracts.capabilities import decode_capabilities
         from antcode_core.application.services.lease_service import LeaseRevokedError
 
+        policy = self._leases.policy
         try:
             lease = await self._leases.grant(
                 self._worker_id,
                 current_lease_id=current_lease_id,
                 metrics=metrics,
+                capabilities=decode_capabilities(capabilities),
             )
         except LeaseRevokedError:
-            return "", 0, 0, True
-        return (
-            lease.lease_id,
-            lease.expires_at_ms,
-            self._leases.policy.renew_after_ms,
-            False,
+            return DirectLeaseGrant(
+                lease_id="",
+                expires_at_ms=0,
+                renew_after_ms=policy.renew_after_ms,
+                ttl_ms=policy.ttl_ms,
+                revoked=True,
+            )
+        return DirectLeaseGrant(
+            lease_id=lease.lease_id,
+            expires_at_ms=lease.expires_at_ms,
+            renew_after_ms=policy.renew_after_ms,
+            ttl_ms=policy.ttl_ms,
+            revoked=False,
         )
 
     async def claim_run_ownership(self, lease_id: str, run_id: str, ttl_ms: int) -> bool:
@@ -158,6 +177,7 @@ async def make_redis_transport(ids: Any) -> Any:
             worker_id=ids.worker_id,
             namespace=namespace,
         ),
+        task_payload_secret=_CONTRACT_TASK_PAYLOAD_SECRET,
     )
     transport._test_namespace = namespace  # type: ignore[attr-defined]
     transport._test_keys = keys  # type: ignore[attr-defined]
@@ -174,6 +194,7 @@ async def make_gateway_transport(ids: Any, gateway: RunningFakeGateway) -> Any:
         auth_method="api_key",
         api_key="contract-test-api-key",
         worker_id=ids.worker_id,
+        task_payload_secret=gateway.state.task_payload_secret,
         connect_timeout=2.0,
         call_timeout=2.0,
         enable_reconnect=False,
@@ -222,8 +243,27 @@ async def redis_client(decode_responses: bool = True):
 
 
 async def produce_redis_task(transport: Any, payload: dict[str, Any]) -> str:
+    from antcode_core.common.security.task_payload_envelope import seal_ready_payload
+
     keys = getattr(transport, "_test_keys", None)
     assert keys is not None, "redis transport missing test keys"
+    lease_store = getattr(transport, "_lease_store", None)
+    assert lease_store is not None, "redis transport missing lease store"
+    lease = await lease_store.get(transport._worker_id, include_expired=False)
+    assert lease is not None, "redis transport missing live lease"
+    assert lease.lease_id == transport._lease_id, "redis transport lease generation changed"
+    assert lease.sequence > 0, "redis transport lease sequence is invalid"
+    if "dispatch_lease_id" in payload or "dispatch_lease_gen" in payload:
+        raise ValueError("contract producer assigns the dispatch lease fence")
+    fenced_payload = seal_ready_payload(
+        {
+            **payload,
+            "dispatch_lease_id": lease.lease_id,
+            "dispatch_lease_gen": lease.sequence,
+        },
+        worker_id=transport._worker_id,
+        worker_secret=transport._task_payload_secret,
+    )
     stream = keys.task_ready_stream(transport._worker_id)
     async with redis_client() as client:
-        return await client.xadd(stream, {key: str(value) for key, value in payload.items()})
+        return await client.xadd(stream, {key: str(value) for key, value in fenced_payload.items()})

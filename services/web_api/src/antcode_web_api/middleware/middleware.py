@@ -6,11 +6,9 @@ import os
 import re
 import uuid
 from datetime import datetime
-from re import Pattern
 from typing import Any, ClassVar
 
 from antcode_core.common.logging import sanitize_dict
-from antcode_core.common.security.auth import jwt_auth
 from antcode_core.common.security.network_source import extract_client_ip
 from fastapi import HTTPException, Request, status
 from fastapi.middleware import Middleware
@@ -92,59 +90,6 @@ CACHE_NAMESPACE_MAP: dict[str, dict] = {
         "prefixes": ["metrics:"],
     },
 }
-
-
-class AdminPermissionMiddleware(BaseHTTPMiddleware):
-    """管理员权限验证中间件"""
-
-    # 预编译正则表达式
-    ADMIN_PATTERNS: ClassVar[list[Pattern[str]]] = [
-        re.compile(r"^/api/v1/users/?$"),
-        re.compile(r"^/api/v1/users/[^/]+/?$"),
-        re.compile(r"^/api/v1/users/[^/]+/reset-password/?$"),
-        re.compile(r"^/api/v1/users/cache/?.*$"),
-    ]
-
-    EXCLUDED_PATTERNS: ClassVar[list[tuple[Pattern[str], str]]] = [
-        (re.compile(r"^/api/v1/users/[^/]+/?$"), "GET"),
-        (re.compile(r"^/api/v1/users/[^/]+/?$"), "PUT"),
-    ]
-
-    async def dispatch(self, request, call_next):
-        path = request.url.path
-        method = request.method
-
-        is_admin_path = any(p.match(path) for p in self.ADMIN_PATTERNS)
-
-        if is_admin_path:
-            is_excluded = any(p.match(path) and method == m for p, m in self.EXCLUDED_PATTERNS)
-            if not is_excluded:
-                try:
-                    await self._verify_admin_permission(request)
-                except HTTPException as exc:
-                    from antcode_web_api.exceptions import create_error_response
-
-                    return create_error_response(exc.status_code, str(exc.detail))
-
-        return await call_next(request)
-
-    async def _verify_admin_permission(self, request):
-        """验证管理员权限"""
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少认证信息")
-
-        try:
-            token = auth_header.split(" ", 1)[1]
-            token_data = jwt_auth.verify_token(token)
-
-            if not token_data.is_admin:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning(f"权限验证失败: {e}")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="认证失败")
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -420,10 +365,12 @@ def make_middlewares():
             calls=settings.RATE_LIMIT_CALLS,
             period=settings.RATE_LIMIT_PERIOD,
         ),
-        Middleware(AdminPermissionMiddleware),
         Middleware(CacheInvalidationMiddleware),
     ]
     if prometheus_middleware is not None:
-        # 放最外层：先记时再进业务，让 5xx 也能被采集
-        middleware.append(prometheus_middleware)
+        # Starlette 的 build_middleware_stack() 对列表 reversed() 后逐层包裹,
+        # 因此列表第一项才是最外层。放在 RequestID 之后、BodySize 之前:
+        # 既保留 request_id 可用,又能让被 BodySize(413) / RateLimit(429) 短路的
+        # 请求计入 antcode_http_requests_total——限流打满时指标不能失明。
+        middleware.insert(1, prometheus_middleware)
     return middleware

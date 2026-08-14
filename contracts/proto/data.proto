@@ -57,8 +57,8 @@ message TaskDispatch {
   string project_id = 2;
   string project_type = 3;                  // spider / code / file
   int32 priority = 4;
-  map<string, string> params = 5;           // Task params
-  map<string, string> environment = 6;      // Environment variables
+  map<string, string> params = 5 [deprecated = true];
+  map<string, string> environment = 6 [deprecated = true];
   int32 timeout_seconds = 7;                // Execution timeout
 
   // Source bundle reference. Large objects are NOT streamed through gRPC.
@@ -74,6 +74,13 @@ message TaskDispatch {
   string run_id = 15;                       // Execution / run identifier
   string receipt_id = 16;                   // Echoed back in AckTask
   string runtime_env_name = 17;             // Trusted project-bound Worker runtime
+
+  // Opaque canonical JSON of the encrypted ready-stream frame. It contains
+  // only public dispatch metadata plus sensitive_payload_envelope; Gateway
+  // must not decrypt or populate the deprecated plaintext maps above.
+  // Worker authenticates the public binding and decrypts params/environment
+  // with its registration secret before constructing a TaskMessage.
+  bytes sealed_ready_payload = 18;
 
   TraceContext trace = 100;
 }

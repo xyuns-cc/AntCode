@@ -7,7 +7,7 @@
 - 重试机制
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from loguru import logger
 
@@ -17,7 +17,7 @@ from antcode_core.application.services.crawl.backends import (
     QueueTask,
     get_queue_backend,
 )
-from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
+from antcode_core.application.services.crawl.dedup_service import calculate_url_fingerprint
 from antcode_core.common.exceptions import CrawlError
 from antcode_core.domain.models.crawl import CrawlTaskStatus
 from antcode_core.domain.models.enums import Priority
@@ -173,7 +173,6 @@ class CrawlQueueService(BaseService):
     def __init__(
         self,
         backend: CrawlQueueBackend | None = None,
-        dedup_service: CrawlDedupService | None = None,
         task_timeout_ms: int | None = None,
         max_retries: int | None = None,
     ):
@@ -181,13 +180,11 @@ class CrawlQueueService(BaseService):
 
         Args:
             backend: 队列后端，为 None 时通过工厂方法获取
-            dedup_service: 去重服务，为 None 时使用全局实例
             task_timeout_ms: 任务超时时间（毫秒）
             max_retries: 最大重试次数
         """
         super().__init__()
         self._backend = backend or get_queue_backend()
-        self._dedup_service = dedup_service or crawl_dedup_service
         self._task_timeout_ms = task_timeout_ms or DEFAULT_TASK_TIMEOUT_MS
         self._max_retries = max_retries or DEFAULT_MAX_RETRIES
 
@@ -240,16 +237,6 @@ class CrawlQueueService(BaseService):
 
         Requirements: 2.3, 11.1
         """
-        # 去重检查
-        if not skip_dedup:
-            is_duplicate = await self._dedup_service.exists(project_id, url)
-            if is_duplicate:
-                logger.debug(f"URL 已存在，跳过入队: project={project_id}, url={url[:50]}...")
-                return False, "", True
-
-            # 添加到去重过滤器
-            await self._dedup_service.add(project_id, url)
-
         # 构建任务
         task = QueueTask(
             url=url,
@@ -264,15 +251,25 @@ class CrawlQueueService(BaseService):
         )
 
         # 入队
-        msg_ids = await self._backend.enqueue(project_id, [task], priority)
-
-        if msg_ids:
-            logger.debug(
-                f"URL 入队成功: project={project_id}, priority={priority}, url={url[:50]}..., msg_id={msg_ids[0]}"
+        if skip_dedup:
+            msg_ids = await self._backend.enqueue(project_id, [task], priority)
+            result_id = msg_ids[0] if msg_ids else None
+        else:
+            results = await self._backend.enqueue_unique(
+                project_id,
+                [task],
+                fingerprints=[calculate_url_fingerprint(url)],
+                priority=priority,
             )
-            return True, msg_ids[0], False
+            result_id = results[0]
 
-        return False, "", False
+        if result_id:
+            logger.debug(
+                f"URL 入队成功: project={project_id}, priority={priority}, url={url[:50]}..., msg_id={result_id}"
+            )
+            return True, result_id, False
+
+        return False, "", not skip_dedup
 
     async def enqueue_urls(
         self,
@@ -309,18 +306,9 @@ class CrawlQueueService(BaseService):
 
         result = EnqueueResult(total=len(urls))
 
-        # 去重过滤（使用批量方法避免 N+1 查询）
-        urls_to_enqueue = urls
-        if not skip_dedup:
-            urls_to_enqueue, _, _ = await self._dedup_service.filter_and_add_new_urls(project_id, urls)
-
-        if not urls_to_enqueue:
-            result.duplicate = len(urls)
-            return result
-
         # 构建任务列表
         tasks = []
-        for url in urls_to_enqueue:
+        for url in urls:
             task = QueueTask(
                 url=url,
                 method=method,
@@ -335,10 +323,20 @@ class CrawlQueueService(BaseService):
             tasks.append(task)
 
         # 批量入队
-        msg_ids = await self._backend.enqueue(project_id, tasks, priority)
+        if skip_dedup:
+            msg_ids = await self._backend.enqueue(project_id, tasks, priority)
+            outcomes: list[str | None] = list(msg_ids)
+        else:
+            outcomes = await self._backend.enqueue_unique(
+                project_id,
+                tasks,
+                fingerprints=[calculate_url_fingerprint(url) for url in urls],
+                priority=priority,
+            )
+            msg_ids = [item for item in outcomes if item is not None]
 
         result.enqueued = len(msg_ids)
-        result.duplicate = len(urls) - len(msg_ids)
+        result.duplicate = sum(item is None for item in outcomes)
         result.msg_ids = msg_ids
 
         logger.info(
@@ -399,20 +397,20 @@ class CrawlQueueService(BaseService):
     # 任务确认
     # =========================================================================
 
-    async def ack_task(self, project_id: str, msg_id: str, priority: int | None = None) -> bool:
+    async def ack_task(self, project_id: str, msg_id: str, priority: int) -> bool:
         """确认单个任务完成
 
         Args:
             project_id: 项目 ID
             msg_id: 消息 ID
-            priority: 优先级（可选，后端会在所有队列中查找）
+            priority: 消息所属优先级 Stream
 
         Returns:
             是否确认成功
 
         Requirements: 2.2
         """
-        count = await self._backend.ack(project_id, [msg_id])
+        count = await self._backend.ack(project_id, [msg_id], priority)
 
         if count > 0:
             logger.debug(f"确认任务完成: project={project_id}, msg_id={msg_id}")
@@ -421,13 +419,13 @@ class CrawlQueueService(BaseService):
         logger.warning(f"确认任务失败: project={project_id}, msg_id={msg_id}")
         return False
 
-    async def ack_tasks(self, project_id: str, msg_ids: list, priority: int | None = None) -> int:
+    async def ack_tasks(self, project_id: str, msg_ids: list, priority: int) -> int:
         """批量确认任务完成
 
         Args:
             project_id: 项目 ID
             msg_ids: 消息 ID 列表
-            priority: 优先级（可选）
+            priority: 消息所属优先级 Stream
 
         Returns:
             确认成功的数量
@@ -437,7 +435,7 @@ class CrawlQueueService(BaseService):
         if not msg_ids:
             return 0
 
-        count = await self._backend.ack(project_id, msg_ids)
+        count = await self._backend.ack(project_id, msg_ids, priority)
 
         logger.info(f"批量确认任务完成: project={project_id}, requested={len(msg_ids)}, acked={count}")
 
@@ -460,8 +458,14 @@ class CrawlQueueService(BaseService):
         if not tasks:
             return 0
 
-        msg_ids = [task.msg_id for task in tasks if task.msg_id]
-        return await self._backend.ack(project_id, msg_ids)
+        grouped: dict[int, list[str]] = {}
+        for task in tasks:
+            if task.msg_id:
+                grouped.setdefault(task.priority, []).append(task.msg_id)
+        acknowledged = 0
+        for priority, msg_ids in grouped.items():
+            acknowledged += await self._backend.ack(project_id, msg_ids, priority)
+        return acknowledged
 
     # =========================================================================
     # 超时回收
@@ -504,16 +508,17 @@ class CrawlQueueService(BaseService):
             task.status = CrawlTaskStatus.TIMEOUT
 
             # 检查是否超过最大重试次数
-            if item.delivery_count > self._max_retries:
+            retry_count = item.task.retry_count + max(item.delivery_count - 1, 0)
+            task.retry_count = retry_count
+            if retry_count > self._max_retries:
                 task.status = CrawlTaskStatus.FAILED
                 dead_letter_tasks.append(task)
                 logger.warning(
                     f"任务超过最大重试次数，移入死信队列: "
                     f"project={project_id}, msg_id={task.msg_id}, "
-                    f"url={task.url[:50]}..., retries={item.delivery_count}"
+                    f"url={task.url[:50]}..., retries={retry_count}"
                 )
             else:
-                task.retry_count = item.delivery_count
                 reclaimed_tasks.append(task)
 
         # 处理死信任务
@@ -542,26 +547,20 @@ class CrawlQueueService(BaseService):
 
         Requirements: 11.5
         """
-        # 增加重试计数
-        task.retry_count += 1
-
         # 检查是否超过最大重试次数
         if task.retry_count > self._max_retries:
             queue_task = task.to_queue_task()
             await self._backend.move_to_dead_letter(project_id, [queue_task])
             return False, ""
 
-        # 重新入队（保持原有优先级）
-        queue_task = task.to_queue_task()
-        msg_ids = await self._backend.enqueue(project_id, [queue_task], task.priority)
-
-        if msg_ids:
+        new_msg_id = await self._backend.requeue_claimed(project_id, task.to_queue_task())
+        if new_msg_id:
             logger.debug(
                 f"任务重试入队: project={project_id}, priority={task.priority}, "
                 f"url={task.url[:50]}..., retry_count={task.retry_count}, "
-                f"new_msg_id={msg_ids[0]}"
+                f"new_msg_id={new_msg_id}"
             )
-            return True, msg_ids[0]
+            return True, new_msg_id
 
         return False, ""
 
@@ -738,7 +737,7 @@ class CrawlQueueService(BaseService):
         result = await self.transition_task_status(task, CrawlTaskStatus.SUCCESS)
 
         if result.success and auto_ack and task.msg_id:
-            await self.ack_task(task.project_id, task.msg_id)
+            await self.ack_task(task.project_id, task.msg_id, task.priority)
             logger.debug(f"任务成功并确认: msg_id={task.msg_id}")
 
         return result
@@ -762,22 +761,21 @@ class CrawlQueueService(BaseService):
 
         Requirements: 8.5, 11.5
         """
-        result = await self.transition_task_status(task, CrawlTaskStatus.RETRY)
+        task_to_retry = replace(task, retry_count=task.retry_count + 1)
+        result = await self.transition_task_status(task_to_retry, CrawlTaskStatus.RETRY)
 
         if not result.success:
             return result
 
-        # 检查重试次数
-        if task.retry_count >= self._max_retries:
-            return await self.mark_task_failed(task)
+        if task_to_retry.retry_count > self._max_retries:
+            return await self.mark_task_failed(task_to_retry)
 
         if auto_requeue:
-            success, new_msg_id = await self.retry_task(task.project_id, task)
+            success, new_msg_id = await self.retry_task(task.project_id, task_to_retry)
             if success:
-                if task.msg_id:
-                    await self.ack_task(task.project_id, task.msg_id)
                 logger.debug(
-                    f"任务重试入队: old_msg_id={task.msg_id}, new_msg_id={new_msg_id}, retry_count={task.retry_count}"
+                    f"任务重试入队: old_msg_id={task.msg_id}, "
+                    f"new_msg_id={new_msg_id}, retry_count={task_to_retry.retry_count}"
                 )
             else:
                 result.success = False
@@ -859,11 +857,7 @@ class CrawlQueueService(BaseService):
         """
         if success:
             return await self.complete_task_success(task)
-        else:
-            if task.retry_count < self._max_retries:
-                return await self.mark_task_retry(task)
-            else:
-                return await self.mark_task_failed(task)
+        return await self.mark_task_retry(task)
 
 
 # 全局服务实例

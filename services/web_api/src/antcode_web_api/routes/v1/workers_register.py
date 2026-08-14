@@ -5,9 +5,7 @@ P2 拆分自 workers.py:
 - POST /workers/register (register_worker, 410 shim)
 - POST /workers/heartbeat (worker_heartbeat, HMAC 签名认证)
 
-install_key 相关 (generate_install_key / register_worker_by_key + 5 helper)
-仍留在 workers.py 主文件, 因依赖 install_key 判定链耦合较深且单测直接
-引用多个 helper, 拆分风险与本轮小 commit 收益不匹配。
+install_key 管理和 V2 注册分别由独立模块负责。
 """
 
 from __future__ import annotations
@@ -93,51 +91,21 @@ async def register_direct_worker(request: WorkerRegisterDirectRequest, *, mask_r
 
 
 async def register_worker(request: WorkerRegisterRequest):
-    """已废弃, 保留 410 shim; 统一走 /register-by-key 或 /register-direct。"""
+    """已废弃, 保留 410 shim; 统一走 V2 安装注册或 Direct 证明注册。"""
     _ = request
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
-        detail="该注册方式已下线，请使用 /workers/register-by-key 或 /workers/register-direct",
+        detail="该注册方式已下线，请使用 /workers/register-by-key-v2 或 /workers/register-direct",
     )
 
 
 async def worker_heartbeat(request: WorkerHeartbeatRequest, auth_info: dict):
-    """Worker 心跳上报 (HMAC 签名认证; body 里的 worker_id / api_key 弃用)。"""
-    capabilities_dict = request.capabilities.model_dump() if request.capabilities else None
-
-    # 以 HMAC 验签后的 worker_id 为准, 防明文 api_key 伪造 / body 字段绕过签名
-    signed_worker_id = (auth_info.get("worker_id") or "").strip()
-    if not signed_worker_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名认证身份")
-    if request.worker_id and request.worker_id != signed_worker_id:
-        logger.warning(
-            f"心跳 body worker_id 与 HMAC 签名身份不一致, signed={signed_worker_id}, body={request.worker_id}"
-        )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="worker_id 与签名身份不一致")
-    if request.api_key:
-        logger.warning(
-            f"心跳 body 中携带了弃用的 api_key 字段, worker_id={signed_worker_id};请升级 Worker 端只使用 HMAC 签名头"
-        )
-
-    worker = await worker_service.get_worker_by_id(signed_worker_id)
-    if not worker:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败")
-
-    heartbeat_success = await worker_service.heartbeat(
-        worker_id=signed_worker_id,
-        status_value=request.status,
-        metrics=request.metrics,
-        version=request.version,
-        os_type=request.os_type,
-        os_version=request.os_version,
-        python_version=request.python_version,
-        machine_arch=request.machine_arch,
-        capabilities=capabilities_dict,
-        spider_stats=request.spider_stats,
+    """旧 HMAC 心跳没有 Lease 代际，保留显式 410 升级信号。"""
+    _ = request, auth_info
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="旧 Worker HTTP 心跳协议已下线，请使用 Direct Lease 或 Gateway mTLS 心跳",
     )
-    if not heartbeat_success:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="心跳验证失败")
-    return success({"success": True}, message="心跳成功")
 
 
 def register_register_routes(router, mask_redis_url) -> None:
@@ -164,8 +132,8 @@ def register_register_routes(router, mask_redis_url) -> None:
     @router.post(
         "/heartbeat",
         response_model=BaseResponse[dict],
-        summary="Worker 心跳",
-        description="Worker 定期上报心跳",
+        summary="旧 Worker 心跳（已下线）",
+        description="保留 410 升级信号；当前 Worker 必须使用带 Lease 代际的传输",
     )
     async def _worker_heartbeat(
         request: WorkerHeartbeatRequest,

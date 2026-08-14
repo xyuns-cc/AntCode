@@ -11,7 +11,8 @@ export const toWorkerRuntimeEnvItem = (worker: Worker, env: RuntimeEnv): Extende
   return {
     id: buildWorkerEnvId(worker.id, env.name),
     scope: env.scope,
-    key: env.name,
+    key: env.key || env.name,
+    description: env.description || null,
     version: env.python_version,
     runtime_locator: env.path,
     created_by_username: env.created_by || null,

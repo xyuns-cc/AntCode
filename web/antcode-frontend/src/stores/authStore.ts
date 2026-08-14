@@ -7,6 +7,13 @@ interface AuthStore {
   isAuthenticated: boolean
   isLoading: boolean
   error: string | null
+  /**
+   * 后端 `GET /api/v1/auth/permissions` 返回的角色派生权限集合（权威来源）。
+   * 当前仅作为会话有效性的 fail-closed 探针留存：拉取失败即中断登录/会话恢复。
+   * 界面级鉴权的唯一真相源是 `user.is_admin` / `user.role`
+   * （见 AdminRoute / SuperAdminRoute），不要在组件里改用本字段做细粒度判断，
+   * 除非后端先给路由挂上 `require_permission` 依赖。
+   */
   permissions: string[]
   /**
    * 认证纪元：每次登录/登出（setUser/clearUser）单调递增。
@@ -22,11 +29,6 @@ interface AuthStore {
   setPermissions: (permissions: string[]) => void
   clearUser: () => void
   updateUser: (updates: Partial<User>) => void
-  
-  // 权限检查
-  hasPermission: (permission: string) => boolean
-  hasAnyPermission: (permissions: string[]) => boolean
-  hasAllPermissions: (permissions: string[]) => boolean
 }
 
 export const useAuthStore = create<AuthStore>()((set, get) => ({
@@ -82,33 +84,8 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
             user: { ...user, ...updates }
           })
         }
-      },
-
-      // 检查是否有特定权限
-      hasPermission: (permission: string) => {
-        const { permissions } = get()
-        return permissions.includes(permission)
-      },
-
-      // 检查是否有任意一个权限
-      hasAnyPermission: (requiredPermissions: string[]) => {
-        const { permissions } = get()
-        return requiredPermissions.some(permission => permissions.includes(permission))
-      },
-
-      // 检查是否有所有权限
-      hasAllPermissions: (requiredPermissions: string[]) => {
-        const { permissions } = get()
-        return requiredPermissions.every(permission => permissions.includes(permission))
       }
     }))
-
-// 选择器函数
-export const selectUser = (state: AuthStore) => state.user
-export const selectIsAuthenticated = (state: AuthStore) => state.isAuthenticated
-export const selectIsLoading = (state: AuthStore) => state.isLoading
-export const selectError = (state: AuthStore) => state.error
-export const selectPermissions = (state: AuthStore) => state.permissions
 
 // Hook 函数
 export const useAuth = () => {
@@ -124,10 +101,7 @@ export const useAuth = () => {
     setError: store.setError,
     setPermissions: store.setPermissions,
     clearUser: store.clearUser,
-    updateUser: store.updateUser,
-    hasPermission: store.hasPermission,
-    hasAnyPermission: store.hasAnyPermission,
-    hasAllPermissions: store.hasAllPermissions
+    updateUser: store.updateUser
   }
 }
 

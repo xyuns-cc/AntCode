@@ -10,7 +10,7 @@ interface ElementSize {
  * 用于需要根据父容器尺寸动态计算子元素布局的场景，例如表格 scroll.y。
  */
 export function useElementSize<T extends HTMLElement = HTMLDivElement>(): [
-  React.RefObject<T>,
+  React.RefObject<T | null>,
   ElementSize,
 ] {
   const ref = useRef<T>(null)

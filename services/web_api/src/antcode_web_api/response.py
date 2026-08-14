@@ -140,6 +140,9 @@ class ProjectResponseBuilder:
             created_by=created_by_public_id,
             created_by_username=str(getattr(project, "created_by_username", "") or ""),
             star_count=project.star_count,
+            env_location=project.env_location,
+            worker_id=project.worker_id,
+            worker_env_name=project.worker_env_name,
             file_info=getattr(project, "file_info", None),
             rule_info=getattr(project, "rule_info", None),
             code_info=getattr(project, "code_info", None),
@@ -206,12 +209,20 @@ class TaskResponseBuilder:
             cron_expression=task.cron_expression,
             interval_seconds=task.interval_seconds,
             scheduled_time=task.scheduled_time,
+            max_instances=task.max_instances,
+            timeout_seconds=task.timeout_seconds,
+            retry_count=task.retry_count,
+            retry_delay=task.retry_delay,
+            execution_params=task.execution_params,
+            environment_vars=task.environment_vars,
             last_run_time=task.last_run_time,
             next_run_time=task.next_run_time,
             created_at=task.created_at,
             updated_at=task.updated_at,
             created_by=created_by_public_id,
             created_by_username=getattr(task, "created_by_username", None),
+            success_count=task.success_count,
+            failure_count=task.failure_count,
             execution_strategy=execution_strategy,
             specified_worker_id=str(specified_worker_id) if specified_worker_id else None,
             specified_worker_name=getattr(task, "specified_worker_name", None),
@@ -227,7 +238,8 @@ class TaskResponseBuilder:
     @staticmethod
     def build_list(tasks):
         """批量构建任务列表响应"""
-        return [TaskResponseBuilder.build_detail(t) for t in tasks]
+        sensitive_fields = {"execution_params": None, "environment_vars": None}
+        return [TaskResponseBuilder.build_detail(task).model_copy(update=sensitive_fields) for task in tasks]
 
 
 class ExecutionResponseBuilder:

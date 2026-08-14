@@ -5,8 +5,13 @@ import json
 
 import httpx
 import pytest
-from antcode_core.common.security import generate_hmac_signature
-from antcode_worker.transport.redis.direct_control import DirectControlClient
+from antcode_core.common.security import (
+    WORKER_HTTP_SIGNATURE_HEADER,
+    WORKER_HTTP_SIGNATURE_VERSION,
+    generate_hmac_signature,
+)
+from antcode_worker.transport.base import GenerationLostError
+from antcode_worker.transport.redis.direct_control import DirectControlClient, DirectLeaseGrant
 
 
 def _client(handler) -> tuple[DirectControlClient, httpx.AsyncClient]:
@@ -46,12 +51,26 @@ def test_internal_plain_http_requires_explicit_opt_in() -> None:
 async def test_lease_request_signs_the_exact_operation_payload() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert payload == {"operation": "lease", "current_lease_id": "lease-1", "metrics": {"cpu": 10.0}}
+        assert payload == {
+            "operation": "lease",
+            "current_lease_id": "lease-1",
+            "metrics": {"cpu": 10.0},
+            "capabilities": {"task_types": '["code"]'},
+        }
         timestamp = int(request.headers["X-Timestamp"])
         nonce = request.headers["X-Nonce"]
-        expected = generate_hmac_signature(payload, "secret-key", timestamp, nonce)["X-Signature"]
+        expected = generate_hmac_signature(
+            request.content,
+            "secret-key",
+            method=request.method,
+            path=request.url.path,
+            timestamp=timestamp,
+            nonce=nonce,
+        )["X-Signature"]
         assert request.headers["X-Signature"] == expected
+        assert request.headers[WORKER_HTTP_SIGNATURE_HEADER] == WORKER_HTTP_SIGNATURE_VERSION
         assert request.headers["Authorization"] == "Bearer api-key"
+        assert request.headers["Content-Type"] == "application/json"
         return httpx.Response(
             200,
             json={
@@ -60,6 +79,7 @@ async def test_lease_request_signs_the_exact_operation_payload() -> None:
                     "lease_id": "lease-1",
                     "expires_at_ms": 100,
                     "renew_after_ms": 10,
+                    "ttl_ms": 30,
                     "revoked": False,
                 },
             },
@@ -67,10 +87,16 @@ async def test_lease_request_signs_the_exact_operation_payload() -> None:
 
     client, http = _client(handler)
     try:
-        result = await client.lease_renew("lease-1", {"cpu": 10.0})
+        result = await client.lease_renew("lease-1", {"cpu": 10.0}, {"task_types": '["code"]'})
     finally:
         await http.aclose()
-    assert result == ("lease-1", 100, 10, False)
+    assert result == DirectLeaseGrant(
+        lease_id="lease-1",
+        expires_at_ms=100,
+        renew_after_ms=10,
+        ttl_ms=30,
+        revoked=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -101,7 +127,7 @@ async def test_http_failure_is_explicit() -> None:
 
     client, http = _client(handler)
     try:
-        with pytest.raises(RuntimeError, match="superseded"):
+        with pytest.raises(GenerationLostError, match="generation"):
             await client.claim_run_ownership("lease-1", "run-1", 1000)
     finally:
         await http.aclose()
@@ -149,7 +175,14 @@ async def test_log_batches_use_authenticated_control_plane_operation() -> None:
         assert base64.b64decode(payload["payload_base64"], validate=True) == raw_payload
         timestamp = int(request.headers["X-Timestamp"])
         nonce = request.headers["X-Nonce"]
-        expected = generate_hmac_signature(payload, "secret-key", timestamp, nonce)["X-Signature"]
+        expected = generate_hmac_signature(
+            request.content,
+            "secret-key",
+            method=request.method,
+            path=request.url.path,
+            timestamp=timestamp,
+            nonce=nonce,
+        )["X-Signature"]
         assert request.headers["X-Signature"] == expected
         return httpx.Response(200, json={"success": True, "data": {"written": True}})
 

@@ -8,9 +8,6 @@ dependencies = [
     "antcode-core",
     "antcode-contracts",
 
-    # 异步支持
-    "asyncio>=3.4.3",
-
     # 工具库
     "ujson>=5.13.0",
 ]

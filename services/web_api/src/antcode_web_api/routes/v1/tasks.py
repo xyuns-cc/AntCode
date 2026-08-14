@@ -59,11 +59,14 @@ from antcode_web_api.routes.v1 import tasks_runs as _tasks_runs
 # export / import / dependencies GET/PUT / duplicate) + 4 helper + 3 schema
 # + 1 常量 移至 tasks_transfer.py。顶层 re-export schema 与 TASK_TEMPLATES。
 from antcode_web_api.routes.v1 import tasks_transfer as _tasks_transfer
+from antcode_web_api.routes.v1 import tasks_update as _tasks_update
 from antcode_web_api.routes.v1.runtime_access import ensure_worker_use_access
+from antcode_web_api.routes.v1.settlement_http import DELETE_ERRORS, deletion_http_exception
 from antcode_web_api.routes.v1.task_cancel import (  # noqa: F401
     cancel_latest_task_run,
     is_unassigned_task_run,
     mark_task_run_cancelled,
+    record_task_cancel_request,
     stop_unassigned_task_run,
 )
 
@@ -412,20 +415,17 @@ async def get_task(task_id, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="获取任务失败")
 
 
-@tasks_router.put("/{task_id}", response_model=BaseResponse[TaskResponse])
 async def update_task(task_id, task_data: TaskUpdate, current_user=Depends(get_current_user)):
-    try:
-        await _ensure_specified_worker_access(task_data, current_user)
-        task = await scheduler_service.update_task(task_id, task_data, current_user.user_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+    return await _tasks_update.update_task(
+        task_id,
+        task_data,
+        current_user,
+        ensure_worker_access=_ensure_specified_worker_access,
+        create_task_response=create_task_response,
+    )
 
-        return success_response(create_task_response(task), message=Messages.UPDATED_SUCCESS)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新任务失败: {e}")
-        raise HTTPException(status_code=500, detail="更新任务失败")
+
+tasks_router.put("/{task_id}", response_model=BaseResponse[TaskResponse])(update_task)
 
 
 @tasks_router.delete("/{task_id}", response_model=BaseResponse)
@@ -434,18 +434,16 @@ async def delete_task(task_id, current_user=Depends(get_current_user)):
         deleted = await scheduler_service.delete_task(task_id, current_user.user_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Task not found")
-
         return success_response(None, message=Messages.DELETED_SUCCESS)
     except HTTPException:
         raise
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DELETE_ERRORS as exc:
+        raise deletion_http_exception(exc) from exc
     except Exception as e:
         logger.error(f"删除任务失败: {e}")
         raise HTTPException(status_code=500, detail="删除任务失败")
 
 
-# P2 拆分: batch-delete + batch 2 个 handler + _operate_task helper 移至
 # tasks_batch.py, 通过 register_batch_routes 挂路由。顶层 shim 保留原名。
 async def batch_delete_tasks(request: dict, current_user=None):
     return await _tasks_batch.batch_delete_tasks(request, current_user)
@@ -483,10 +481,6 @@ async def toggle_task(task_id: str, request, current_user=None):
 
 # helper / 常量 module-alias 供测试与其它模块继续引用
 _acquire_trigger_dedup_lock = _tasks_execute._acquire_trigger_dedup_lock
-_latest_run_pk = _tasks_execute._latest_run_pk
-_resolve_new_run_id = _tasks_execute._resolve_new_run_id
-_NEW_RUN_POLL_ATTEMPTS = _tasks_execute._NEW_RUN_POLL_ATTEMPTS
-_NEW_RUN_POLL_INTERVAL_SECONDS = _tasks_execute._NEW_RUN_POLL_INTERVAL_SECONDS
 
 
 async def duplicate_task(task_id: str, request, current_user=None):

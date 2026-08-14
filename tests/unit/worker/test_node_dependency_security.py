@@ -5,7 +5,8 @@ import sys
 import pytest
 from antcode_worker.runtime import node_dependency_policy as policy
 from antcode_worker.runtime.command_logging import format_command_for_log
-from antcode_worker.runtime.uv_manager import CommandResult, run_command
+from antcode_worker.runtime.dependency_process import DependencyCommandResult, DependencyLimits
+from antcode_worker.runtime.uv_manager import run_command
 
 
 def _package_json(root, dependencies=None):
@@ -81,22 +82,45 @@ def test_command_log_redacts_registry_and_index_values():
 async def test_node_install_disables_scripts_and_drops_worker_environment(monkeypatch, tmp_path):
     _package_json(tmp_path)
     _package_lock(tmp_path)
+    (tmp_path / ".antcode-deps" / "npm-cache").mkdir(parents=True)
     captured = {}
 
     async def fake_run(command, **kwargs):
         captured["command"] = command
         captured.update(kwargs)
-        return CommandResult(0, "", "")
+        return DependencyCommandResult(0, "", "")
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://secret")
-    monkeypatch.setattr(policy, "run_command", fake_run)
-    await policy.install_node_dependencies(str(tmp_path))
+    monkeypatch.setattr(policy, "run_dependency_command", fake_run)
+    limits = DependencyLimits(timeout_seconds=60, cpu_seconds=30, memory_mb=256)
+    await policy.install_node_dependencies(str(tmp_path), limits=limits)
 
     assert "--ignore-scripts" in captured["command"]
+    assert "--offline" in captured["command"]
     assert "--registry" in captured["command"]
-    assert captured["inherit_env"] is False
+    assert captured["limits"] == limits
     assert "DATABASE_URL" not in captured["env"]
     assert captured["env"]["npm_config_userconfig"] == os.devnull
+
+
+@pytest.mark.asyncio
+async def test_node_install_requires_workspace_offline_cache(tmp_path):
+    _package_json(tmp_path)
+    _package_lock(tmp_path)
+    limits = DependencyLimits(timeout_seconds=60, cpu_seconds=30, memory_mb=256)
+
+    with pytest.raises(RuntimeError, match="缺少离线缓存"):
+        await policy.install_node_dependencies(str(tmp_path), limits=limits)
+
+
+@pytest.mark.asyncio
+async def test_node_install_requires_lockfile_for_declared_dependencies(tmp_path):
+    _package_json(tmp_path)
+    (tmp_path / ".antcode-deps" / "npm-cache").mkdir(parents=True)
+    limits = DependencyLimits(timeout_seconds=60, cpu_seconds=30, memory_mb=256)
+
+    with pytest.raises(RuntimeError, match="必须提供 lockfile"):
+        await policy.install_node_dependencies(str(tmp_path), limits=limits)
 
 
 @pytest.mark.asyncio

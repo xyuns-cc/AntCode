@@ -207,7 +207,7 @@ async def test_defer_task_does_not_send_reject_ack_to_gateway():
             worker_id="worker-1",
         ),
     )
-    receipt = "antcode:task:ready:worker-1|1-0"
+    receipt = "{antcode}:task:ready:worker-1|1-0"
     transport._receipt_cache[receipt] = (0.0, "task-1")
     transport._data_stub = MagicMock()
 

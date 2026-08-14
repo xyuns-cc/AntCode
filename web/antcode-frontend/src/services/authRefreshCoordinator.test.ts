@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useAuthStore } from '@/stores/authStore'
+import type { User } from '@/types'
 
 const mocks = vi.hoisted(() => ({
   decodeAccessToken: vi.fn(),
@@ -32,7 +34,18 @@ import {
   AuthAccountChangedError,
   coordinateSessionRefresh,
   replacementForStaleToken,
+  synchronizeAccessToken,
 } from './authRefreshCoordinator'
+
+const alice: User = {
+  id: 'user-alice',
+  username: 'alice',
+  is_active: true,
+  is_admin: false,
+  role: 'user',
+  created_at: '2026-07-30T00:00:00Z',
+  updated_at: '2026-07-30T00:00:00Z',
+}
 
 describe('cross-tab refresh coordination', () => {
   beforeEach(() => {
@@ -44,6 +57,34 @@ describe('cross-tab refresh coordination', () => {
     mocks.getSessionAccount.mockReturnValue('alice')
     mocks.getSessionGeneration.mockReturnValue('session-current')
     mocks.requestPeerAccessToken.mockResolvedValue(null)
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      permissions: [],
+      error: null,
+    })
+  })
+
+  it('clears the old account state before publishing a different account token', () => {
+    useAuthStore.setState({
+      user: alice,
+      isAuthenticated: true,
+      permissions: ['alice:read'],
+    })
+    mocks.decodeAccessToken.mockReturnValue({
+      username: 'bob',
+      session_jti: 'session-bob',
+    })
+    mocks.publishAccessToken.mockImplementationOnce(() => {
+      expect(useAuthStore.getState().user).toBeNull()
+      expect(useAuthStore.getState().permissions).toEqual([])
+    })
+
+    synchronizeAccessToken('bob-token')
+
+    expect(useAuthStore.getState().user).toBeNull()
+    expect(useAuthStore.getState().permissions).toEqual([])
+    expect(mocks.publishAccessToken).toHaveBeenCalledWith('bob-token')
   })
 
   it('reuses a token refreshed by another tab while waiting for the global lock', async () => {

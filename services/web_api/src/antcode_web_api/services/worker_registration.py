@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from ipaddress import ip_address, ip_network
 
 from antcode_core.common.config import settings
 from antcode_core.common.security.api_key import hash_api_key, store_api_key, store_secret_key
@@ -18,10 +15,17 @@ from antcode_core.common.security.worker_registration import (
     derive_worker_credentials,
     hash_recovery_secret,
 )
-from antcode_core.domain.models import Worker, WorkerInstallKey
+from antcode_core.domain.models import Worker, WorkerInstallKey, WorkerStatus
 from antcode_core.domain.schemas.worker import WorkerRegisterByKeyV2Request
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
+
+from antcode_web_api.services.worker_registration_validation import (
+    as_utc,
+    digest_matches,
+    registration_request_hash,
+    source_matches,
+)
 
 
 class RegistrationError(RuntimeError):
@@ -42,6 +46,9 @@ class RegistrationForbidden(RegistrationError):
 
 class RegistrationNotFound(RegistrationError):
     pass
+
+
+RegistrationLeaseEnabler = Callable[[str], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -85,7 +92,12 @@ async def register_or_recover(
         raise RegistrationConflict("Worker 名称或 registration_id 已存在") from exc
 
 
-async def acknowledge_registration(worker_id: str, registration_id: str) -> datetime:
+async def acknowledge_registration(
+    worker_id: str,
+    registration_id: str,
+    *,
+    lease_enabler: RegistrationLeaseEnabler,
+) -> datetime:
     install_key = await WorkerInstallKey.get_or_none(registration_id=registration_id)
     if install_key is None:
         raise RegistrationNotFound("注册确认记录不存在")
@@ -94,7 +106,9 @@ async def acknowledge_registration(worker_id: str, registration_id: str) -> date
     if install_key.used_by_worker != worker_id:
         raise RegistrationForbidden("注册确认身份不匹配")
     if install_key.registration_acknowledged_at is not None:
-        return _as_utc(install_key.registration_acknowledged_at)
+        acknowledged_at = as_utc(install_key.registration_acknowledged_at)
+        await lease_enabler(worker_id)
+        return acknowledged_at
     acknowledged_at = datetime.now(UTC)
     updated = await WorkerInstallKey.filter(
         registration_id=registration_id,
@@ -107,23 +121,14 @@ async def acknowledge_registration(worker_id: str, registration_id: str) -> date
         recovery_expires_at=None,
     )
     if updated == 1:
+        await lease_enabler(worker_id)
         return acknowledged_at
     refreshed = await WorkerInstallKey.get_or_none(registration_id=registration_id)
     if refreshed is None or refreshed.registration_acknowledged_at is None:
         raise RegistrationConflict("注册确认并发更新失败")
-    return _as_utc(refreshed.registration_acknowledged_at)
-
-
-def registration_request_hash(request: WorkerRegisterByKeyV2Request) -> str:
-    payload = {
-        "host": request.host,
-        "name": request.name,
-        "port": request.port,
-        "region": request.region,
-        "transport_mode": request.transport_mode,
-    }
-    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    acknowledged_at = as_utc(refreshed.registration_acknowledged_at)
+    await lease_enabler(worker_id)
+    return acknowledged_at
 
 
 async def _create_registration(
@@ -189,7 +194,14 @@ async def _recover_registration(
     credentials = _derive_credentials(context, install_key)
     if not _worker_credentials_match(worker, credentials):
         raise RegistrationConflict("恢复凭据与 Worker 当前身份不一致")
-    recovery_expires_at = _as_utc(install_key.recovery_expires_at)
+    # 恢复注册就是重新引导：Worker 进程刚起来、还没有 Lease，也就还没有心跳。
+    # Lease 资格白名单是 {connecting, online}，若把它留在 offline，它永远拿不到
+    # 首个 Lease。回到 connecting 同时刷新 updated_at，为心跳监控的引导窗口
+    # （worker_heartbeat_service._is_bootstrapping）提供锚点。
+    if worker.status != WorkerStatus.CONNECTING.value:
+        worker.status = WorkerStatus.CONNECTING.value
+        await worker.save(update_fields=["status", "updated_at"])
+    recovery_expires_at = as_utc(install_key.recovery_expires_at)
     return _result(
         context,
         worker.public_id,
@@ -204,15 +216,15 @@ def _validate_recovery(context: RegistrationContext, install_key: WorkerInstallK
         raise RegistrationConflict("Worker 注册已确认，恢复窗口已关闭")
     if install_key.registration_id != context.request.registration_id:
         raise RegistrationConflict("registration_id 与已消费安装 Key 不匹配")
-    if not _digest_matches(install_key.recovery_secret_hash, context.recovery_secret_hash):
+    if not digest_matches(install_key.recovery_secret_hash, context.recovery_secret_hash):
         raise RegistrationForbidden("恢复秘密无效")
-    if not _digest_matches(install_key.registration_request_hash, context.request_hash):
+    if not digest_matches(install_key.registration_request_hash, context.request_hash):
         raise RegistrationConflict("恢复请求与首次注册参数不一致")
     if install_key.credential_derivation_version != CREDENTIAL_DERIVATION_VERSION:
         raise RegistrationConflict("凭据派生版本不匹配")
-    if not _source_matches(context.request_source, install_key.allowed_source or ""):
+    if not source_matches(context.request_source, install_key.allowed_source or ""):
         raise RegistrationForbidden("恢复请求来源不匹配")
-    if install_key.recovery_expires_at is None or datetime.now(UTC) >= _as_utc(install_key.recovery_expires_at):
+    if install_key.recovery_expires_at is None or datetime.now(UTC) >= as_utc(install_key.recovery_expires_at):
         raise RegistrationExpired("Worker 注册恢复窗口已过期")
 
 
@@ -278,29 +290,11 @@ def _result(
 
 
 def _worker_credentials_match(worker: Worker, credentials: DerivedWorkerCredentials) -> bool:
-    return _digest_matches(worker.api_key_hash, hash_api_key(credentials.api_key)) and _digest_matches(
+    return digest_matches(worker.api_key_hash, hash_api_key(credentials.api_key)) and digest_matches(
         worker.secret_key_hash,
         hash_api_key(credentials.secret_key),
     )
 
 
 def _pending_key_unexpired(install_key: WorkerInstallKey) -> bool:
-    return datetime.now(UTC) < _as_utc(install_key.expires_at)
-
-
-def _source_matches(source: str, rule: str) -> bool:
-    try:
-        source_address = ip_address(source)
-        if "/" not in rule:
-            return source_address == ip_address(rule)
-        return source_address in ip_network(rule, strict=False)
-    except ValueError:
-        return False
-
-
-def _digest_matches(stored: str | None, expected: str) -> bool:
-    return bool(stored) and hmac.compare_digest(stored or "", expected)
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return datetime.now(UTC) < as_utc(install_key.expires_at)

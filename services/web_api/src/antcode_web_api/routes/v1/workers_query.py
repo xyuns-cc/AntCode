@@ -78,10 +78,7 @@ async def get_render_capable_workers(
     query = Worker.filter(status=WorkerStatus.ONLINE.value)
     if region:
         query = query.filter(region=region)
-    query = query.filter(
-        Q(capabilities__contains={"task_types": ["render"]})
-        | Q(capabilities__contains={"playwright": {"enabled": True}})
-    )
+    query = query.filter(Q(capabilities__contains={"playwright": {"enabled": True}}))
     total = await query.count()
     offset = (page - 1) * size
     workers = await query.offset(offset).limit(size)

@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 
 import pytest
+from antcode_contracts.wire_contract import WORKER_WIRE_CONTRACT_VERSION, require_supported_wire_contract
 from antcode_worker.transport.redis.keys import RedisKeys
 from loguru import logger
 
@@ -258,14 +259,12 @@ class TestWorkerRegistration:
         detector = CapabilityDetector()
         capabilities = detector.detect_all()
 
-        # 验证返回结构
-        assert isinstance(capabilities, dict)
-        assert "curl_cffi" in capabilities
-
-        # 验证每个能力的结构
-        for name, cap in capabilities.items():
-            assert isinstance(cap, dict)
-            assert "enabled" in cap
+        # 值类型按语义分两类：探测出来的可选依赖是 {"enabled": bool}；wire_contract 是
+        # Worker 自报的整数契约版本（控制面签发 Lease 前逐次比对），不套 enabled 信封。
+        # require_supported_wire_contract 同时校验键名与取值，替代逐项 isinstance。
+        assert capabilities["curl_cffi"].keys() == {"enabled"}
+        assert isinstance(capabilities["curl_cffi"]["enabled"], bool)
+        assert require_supported_wire_contract(capabilities) == WORKER_WIRE_CONTRACT_VERSION
 
         logger.info(f"[Test] 节点能力检测: {capabilities}")
 

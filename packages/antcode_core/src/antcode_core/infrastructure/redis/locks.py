@@ -1,11 +1,4 @@
-"""Redis 分布式锁
-
-提供分布式锁实现，支持：
-- 基本锁（acquire/release）
-- 可重入锁
-- Fencing Token（防止旧 leader 写入）
-- 自动续期
-"""
+"""Redis 分布式锁、自动续租与 fencing token。"""
 
 import asyncio
 import time
@@ -14,7 +7,7 @@ import uuid
 from loguru import logger
 from redis.asyncio import Redis
 
-from antcode_core.common.config import settings
+from antcode_core.common.settings_ref import current_settings
 from antcode_core.infrastructure.redis.client import get_redis_client
 
 
@@ -22,18 +15,16 @@ def _ns_prefix() -> str:
     """P1-a14: 从配置读 REDIS_NAMESPACE,生产选主锁与 fencing token 都必须带此前缀,
     否则多套部署共用同一 Redis DB 时会互相争主 / 抢 token,单调不变式被打破。
     """
-    ns = (settings.REDIS_NAMESPACE or "antcode").strip().strip(":")
+    ns = (current_settings().REDIS_NAMESPACE or "antcode").strip().strip(":")
     return ns or "antcode"
 
 
-class DistributedLock:
-    """Redis 分布式锁
+class LeaderLockContendedError(RuntimeError):
+    """Leader 锁正被其他实例持有。"""
 
-    使用 SET NX EX 实现的分布式锁，支持：
-    - 自动过期
-    - 安全释放（只释放自己持有的锁）
-    - 可选的自动续期
-    """
+
+class DistributedLock:
+    """基于 SET NX EX、带所有权校验和可选自动续租的分布式锁。"""
 
     def __init__(
         self,
@@ -42,17 +33,8 @@ class DistributedLock:
         auto_renew: bool = False,
         renew_interval: float | None = None,
     ):
-        """初始化分布式锁
-
-        Args:
-            key: 锁的 Key
-            ttl_seconds: 锁的过期时间（秒）
-            auto_renew: 是否自动续期
-            renew_interval: 续期间隔（秒），默认为 ttl 的 1/3
-        """
-        # P1-a14: 加 <namespace>:lock:<key> 前缀。避免两套不同 REDIS_NAMESPACE 的
-        # 部署共享同一 Redis DB 时抢同一把 leader 锁。若 key 已经带命名空间前缀
-        # (如已经手动传入 "antcode:lock:xxx")就不再重复。
+        """初始化锁；续租间隔默认是 TTL 的三分之一。"""
+        # 每个部署使用独立命名空间；已规范化的 key 不重复加前缀。
         _ns = _ns_prefix()
         if key.startswith(f"{_ns}:"):
             self.key = key if key.startswith(f"{_ns}:lock:") else f"{_ns}:lock:{key[len(_ns) + 1 :]}"
@@ -73,15 +55,7 @@ class DistributedLock:
         return self._redis
 
     async def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-        """获取锁
-
-        Args:
-            blocking: 是否阻塞等待
-            timeout: 阻塞超时时间（秒）
-
-        Returns:
-            是否成功获取锁
-        """
+        """获取锁；blocking=False 时只尝试一次。"""
         client = await self._get_client()
         self._token = str(uuid.uuid4())
 
@@ -120,11 +94,7 @@ class DistributedLock:
             await asyncio.sleep(0.1)
 
     async def release(self) -> bool:
-        """释放锁
-
-        Returns:
-            是否成功释放
-        """
+        """释放锁；返回是否成功释放。"""
         if not self._token:
             return False
 
@@ -158,14 +128,7 @@ class DistributedLock:
             raise
 
     async def extend(self, additional_seconds: int | None = None) -> bool:
-        """延长锁的过期时间
-
-        Args:
-            additional_seconds: 额外的秒数，默认使用初始 TTL
-
-        Returns:
-            是否成功延长
-        """
+        """延长锁的过期时间；``additional_seconds`` 默认使用初始 TTL，返回是否成功延长。"""
         if not self._token:
             return False
 
@@ -196,9 +159,15 @@ class DistributedLock:
 
     def _stop_renew_task(self) -> None:
         """停止自动续期任务"""
-        if self._renew_task is not None:
-            self._renew_task.cancel()
-            self._renew_task = None
+        task = self._renew_task
+        self._renew_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def abandon(self) -> None:
+        """撤销本地锁所有权并停止续租，不对 Redis 做写操作。"""
+        self._token = None
+        self._stop_renew_task()
 
     async def _renew_loop(self) -> None:
         """续期循环。
@@ -210,8 +179,8 @@ class DistributedLock:
         ``LeaderElection.is_leader`` 立即通过 ``lock.is_locked`` 感知失租,
         不允许静默继续持有。
         """
-        while True:
-            try:
+        try:
+            while True:
                 await asyncio.sleep(self.renew_interval)
 
                 if not self._token:
@@ -223,13 +192,15 @@ class DistributedLock:
                     # 或 key 已消失 → 锁不再归我,主动放弃 + 抛给 LeaderElection。
                     self._token = None
                     raise RuntimeError(f"锁续期失败，锁可能已丢失: {self.key}")
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"锁续期异常: {self.key}, 错误: {e}")
-                self._token = None
-                raise
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"锁续期异常: {self.key}, 错误: {e}")
+            self._token = None
+            raise
+        finally:
+            if self._renew_task is asyncio.current_task():
+                self._renew_task = None
 
     async def __aenter__(self):
         """异步上下文管理器入口"""
@@ -257,10 +228,12 @@ class DistributedLock:
         """去 Redis 权威校验当前 leader 锁仍归本实例（token 匹配）。
 
         使用 Lua 脚本一次原子 GET+比较，避免 GET 后 key 被换、决策已错的
-        窗口。Redis 不可达时保守返回 False（宁可让出 leader 也不双写）。
+        窗口。校验不匹配或 Redis 不可达时立即撤销本地所有权并停止续租；
+        Redis 异常继续向调用方传播，不能伪装成普通的锁竞争。
         """
         if not self._token:
             return False
+        token = self._token
         try:
             client = await self._get_client()
             script = """
@@ -271,11 +244,16 @@ class DistributedLock:
                 return 0
             end
             """
-            result = await client.eval(script, 1, self.key, self._token)
-            return bool(result)
+            result = await client.eval(script, 1, self.key, token)
         except Exception as exc:
-            logger.warning(f"leader 锁权威校验失败(保守返回 False): {self.key} - {exc}")
-            return False
+            self.abandon()
+            logger.error(f"leader 锁权威校验异常，已停止续租: {self.key} - {exc}")
+            raise
+
+        owned = bool(result)
+        if not owned:
+            self.abandon()
+        return owned
 
 
 class FencingTokenManager:
@@ -284,17 +262,26 @@ class FencingTokenManager:
     用于防止旧 leader 的写入覆盖新 leader 的决策。
     每次获取 leader 锁时生成单调递增的 token。
 
-    P1-a14: TOKEN_KEY 从类属性硬编码改为实例属性,构造时按 REDIS_NAMESPACE 拼前缀。
-    否则两套不同 namespace 但共用 Redis DB 的部署会共享同一 token 计数器,
-    "新 leader token 必然大于旧" 的单调不变式被打破,过期写会被误接受。
+    P1-a14: TOKEN_KEY 按 REDIS_NAMESPACE 拼前缀。否则两套不同 namespace 但共用
+    Redis DB 的部署会共享同一 token 计数器,"新 leader token 必然大于旧" 的单调
+    不变式被打破,过期写会被误接受。key 用属性而非 ``__init__`` 计算: 本模块的
+    全局单例在 import 期构造,构造时读配置等于把控制面配置绑进导入链。
     """
 
     def __init__(self, token_name: str = "master"):
         self._redis: Redis | None = None
         self._current_token: int | None = None
-        # 生成带 namespace 的 token key: <namespace>:fencing:token:<name>
-        _ns = _ns_prefix()
-        self.TOKEN_KEY = f"{_ns}:fencing:token:{token_name}"
+        self._token_name = token_name
+
+    @property
+    def TOKEN_KEY(self) -> str:
+        """``<namespace>:fencing:token:<name>``。"""
+        return f"{_ns_prefix()}:fencing:token:{self._token_name}"
+
+    @property
+    def DISPATCH_TOKEN_KEY(self) -> str:
+        """派发 mirror key,与 ready stream 共享 Cluster slot。"""
+        return f"{{{_ns_prefix()}}}:fencing:dispatch:{self._token_name}"
 
     async def _get_client(self):
         """获取 Redis 客户端"""
@@ -310,8 +297,11 @@ class FencingTokenManager:
         """
         client = await self._get_client()
 
-        # 使用 INCR 确保单调递增
+        # Mirror 与旧计数器在 Redis Cluster 的不同 slot，不能放进同一 Lua。
+        # 先失效 mirror，保证后续 INCR/SET 任一步失败时旧任期都不能继续 XADD。
+        await client.delete(self.DISPATCH_TOKEN_KEY)
         token = await client.incr(self.TOKEN_KEY)
+        await client.set(self.DISPATCH_TOKEN_KEY, token)
         self._current_token = token
 
         logger.info(f"获取 fencing token: {token}")
@@ -398,9 +388,14 @@ async def acquire_leader_lock(
 
     acquired = await lock.acquire(blocking=False)
     if not acquired:
-        raise RuntimeError(f"无法获取 leader 锁: {lock_key}")
+        raise LeaderLockContendedError(f"无法获取 leader 锁: {lock_key}")
 
-    # 获取新的 fencing token
-    token = await fencing_token_manager.acquire_token()
+    try:
+        token = await fencing_token_manager.acquire_token()
+    except BaseException:
+        # SET NX 已成功而 INCR 失败时必须撤销续租并补偿删除锁，否则会留下
+        # 没有 fencing token、却持续续租的半完成 Leader 任期。
+        await lock.release()
+        raise
 
     return lock, token

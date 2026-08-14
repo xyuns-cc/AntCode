@@ -1,17 +1,8 @@
-"""
-Worker Engine 单元测试
-
-测试任务引擎核心功能：
-- 引擎启动/停止
-- 任务调度
-- 状态管理
-- 取消任务
-"""
+"""Worker Engine 核心功能单元测试。"""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import antcode_worker.engine.engine as engine_module
 import pytest
 from antcode_worker.domain.enums import RunStatus
 from antcode_worker.domain.models import ExecResult, RunContext, SourceBundle, TaskPayload
@@ -237,6 +228,7 @@ class TestEngine:
         # P1-DR-04: 运行时控制 deadline 判定改用 transport 权威时钟。
         transport.authoritative_now_ms = AsyncMock(return_value=1_000)
         transport._lease_id = "lease-test"
+        transport._worker_id = "worker-test"
         return transport
 
     @pytest.fixture
@@ -279,6 +271,7 @@ class TestEngine:
 
         # 手动添加任务到状态管理器
         await engine.state_manager.add("run-001", "task-001")
+        await engine.scheduler.enqueue("run-001", object())
 
         # 单元测试不连接外部 Redis；归属键释放行为由专项测试覆盖。
         with patch.object(engine, "_release_run_ownership", AsyncMock()):
@@ -345,6 +338,7 @@ class TestEngine:
         context.run_id = "run-1"
         context.project_id = "proj-1"
         context.labels = {}
+        await engine.state_manager.add("run-1", "task-1")
 
         result = await engine._execute_task(context, task_msg)
 
@@ -509,18 +503,19 @@ class TestEngine:
         action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_runtime_control_missing_request_id_ack_failure_does_not_raise(
+    async def test_runtime_control_missing_request_id_ack_failure_is_exposed(
         self,
         mock_transport,
         mock_executor,
     ):
-        """W4：畸形事件的 ACK 是 best-effort，失败不 raise（等重投后再试）。"""
+        """畸形事件 ACK 失败必须暴露，事件保留到下一次重投。"""
         mock_transport.send_control_result = AsyncMock(return_value=True)
         mock_transport.ack_control = AsyncMock(side_effect=RuntimeError("ack down"))
         engine = Engine(transport=mock_transport, executor=mock_executor)
         control = MagicMock(payload={"action": "noop"}, receipt="receipt-1")
 
-        await engine._handle_runtime_control(control)
+        with pytest.raises(RuntimeError, match="ack down"):
+            await engine._handle_runtime_control(control)
 
         mock_transport.ack_control.assert_awaited_once_with("receipt-1")
         mock_transport.send_control_result.assert_not_awaited()

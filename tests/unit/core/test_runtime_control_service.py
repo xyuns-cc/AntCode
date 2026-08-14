@@ -4,6 +4,7 @@ import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from antcode_contracts.runtime_metadata import RUNTIME_DESCRIPTION_MAX_BYTES
 
 module = importlib.import_module("antcode_core.application.services.runtime.runtime_control_service")
 RuntimeControlService = module.RuntimeControlService
@@ -120,3 +121,57 @@ async def test_runtime_response_rejects_non_boolean_success(monkeypatch):
 
     with pytest.raises(RuntimeError, match="success 字段无效"):
         await RuntimeControlService().send_command("worker-1", "get_env")
+
+
+@pytest.mark.asyncio
+async def test_create_env_transports_stable_owner_user_id() -> None:
+    service = RuntimeControlService()
+    service.send_command = AsyncMock(return_value={"success": True})
+
+    await service.create_env(
+        "worker-1",
+        "private-env",
+        "3.11",
+        packages=[],
+        created_by="alice",
+        owner_user_id="7",
+    )
+
+    service.send_command.assert_awaited_once_with(
+        "worker-1",
+        "create_env",
+        {
+            "env_name": "private-env",
+            "python_version": "3.11",
+            "packages": [],
+            "created_by": "alice",
+            "owner_user_id": "7",
+        },
+        timeout=600,
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_env_rejects_oversized_metadata_before_redis_write() -> None:
+    service = RuntimeControlService()
+    service.send_command = AsyncMock()
+
+    with pytest.raises(ValueError, match="description UTF-8"):
+        await service.update_env(
+            "worker-1",
+            "private-env",
+            description="界" * (RUNTIME_DESCRIPTION_MAX_BYTES // 3 + 1),
+        )
+
+    service.send_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_env_rejects_invalid_owner_before_redis_write() -> None:
+    service = RuntimeControlService()
+    service.send_command = AsyncMock()
+
+    with pytest.raises(ValueError, match="owner_user_id"):
+        await service.create_env("worker-1", "private-env", "3.11", owner_user_id="not-an-id")
+
+    service.send_command.assert_not_awaited()

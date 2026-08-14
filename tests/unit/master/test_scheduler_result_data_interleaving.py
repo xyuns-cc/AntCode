@@ -32,6 +32,7 @@ async def test_worker_result_committed_before_dispatch_return_is_preserved(
         task_id=1,
         run_id=run_id,
         status=TaskStatus.DISPATCHING,
+        scheduler_fencing_token=7,
         result_data={"retry_source_run_id": "source-run"},
     )
     stale_execution = await TaskRun.get(run_id=run_id)
@@ -57,7 +58,6 @@ async def test_worker_result_committed_before_dispatch_return_is_preserved(
     )
     service = scheduler_loop.SchedulerService()
     service._log_execution = AsyncMock()
-    service._push_execution_status = AsyncMock()
 
     result = await service._execute_distributed_task(
         SimpleNamespace(

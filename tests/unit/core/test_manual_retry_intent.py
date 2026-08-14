@@ -56,6 +56,7 @@ def _task():
 def _patch_transaction(monkeypatch, events):
     transaction = _Transaction(events)
     monkeypatch.setattr(manual_module, "in_transaction", lambda _name: transaction)
+    monkeypatch.setattr(retry_module, "get_manual_retry_event", AsyncMock(return_value=None))
     return transaction
 
 
@@ -80,7 +81,10 @@ async def test_manual_retry_atomically_consumes_automatic_intent(monkeypatch):
 
     async def enqueue(**kwargs):
         assert kwargs["event_type"] == "task_trigger"
-        assert kwargs["aggregate_id"] == 1
+        assert kwargs["aggregate_type"] == "manual_retry"
+        assert kwargs["aggregate_id"] == "source-run"
+        assert kwargs["payload"] == {"task_id": "1", "manual_retry_source_run_id": "source-run"}
+        assert kwargs["public_id"] == manual_module.manual_retry_outbox_id("source-run")
         assert kwargs["connection"] is transaction.connection
         events.append("enqueue_trigger")
 
@@ -141,13 +145,35 @@ async def test_manual_retry_without_automatic_intent_enqueues_once(monkeypatch):
     assert result["auto_intent_consumed"] is False
     enqueue.assert_awaited_once_with(
         event_type="task_trigger",
-        aggregate_type="task",
-        aggregate_id=1,
-        payload={"task_id": "1"},
+        aggregate_type="manual_retry",
+        aggregate_id="source-run",
+        payload={"task_id": "1", "manual_retry_source_run_id": "source-run"},
         connection=transaction.connection,
+        public_id=manual_module.manual_retry_outbox_id("source-run"),
     )
     service._backend.cancel.assert_not_awaited()
     assert events == ["begin", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_manual_retry_returns_existing_request(monkeypatch):
+    events: list[str] = []
+    transaction = _patch_transaction(monkeypatch, events)
+    monkeypatch.setattr(manual_module.TaskRun, "filter", MagicMock(return_value=_Query(first=_execution())))
+    monkeypatch.setattr(manual_module.Task, "filter", MagicMock(return_value=_Query(first=_task())))
+    get_event = AsyncMock(return_value=SimpleNamespace(public_id="existing"))
+    monkeypatch.setattr(retry_module, "get_manual_retry_event", get_event)
+    service = retry_module.RetryService()
+    service._backend.cancel = AsyncMock()
+    monkeypatch.setattr(outbox_module.scheduler_outbox_service, "enqueue", AsyncMock())
+
+    result = await service.manual_retry("source-run", user_id=7)
+
+    assert result["success"] is True
+    assert result["already_requested"] is True
+    get_event.assert_awaited_once_with(manual_module.manual_retry_outbox_id("source-run"), transaction.connection)
+    service._backend.cancel.assert_not_awaited()
+    outbox_module.scheduler_outbox_service.enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -5,42 +5,37 @@
 Requirements: 3.2, 3.4, 3.5, 3.6, 3.7
 """
 
-import time
-from typing import Any
-
 from loguru import logger
 
+from antcode_core.application.services.crawl.backends import redis_keys as crawl_keys
 from antcode_core.application.services.crawl.backends.progress_backend import ProgressStore
-from antcode_core.common.serialization import from_json, to_json
+from antcode_core.application.services.crawl.backends.redis_progress_codec import (
+    decode_hash,
+    mapping_args,
+)
+from antcode_core.application.services.crawl.backends.redis_progress_scripts import (
+    FENCE_AND_CLEAR,
+    INCREMENT_ACTIVE_HASH,
+    LIST_ACTIVE_WORKERS,
+    REGISTER_WORKER,
+    REPLACE_ACTIVE_HASH,
+    UPDATE_ACTIVE_HASH,
+)
 from antcode_core.infrastructure.redis.client import get_redis_client
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
-# Redis 键前缀
-KEY_PREFIX = "rule"
-PROGRESS_SUFFIX = "progress"
-CHECKPOINT_SUFFIX = "checkpoint"
-WORKERS_SUFFIX = "workers"
-
-# 默认配置
 DEFAULT_WORKER_TTL = 60
+INCREMENT_SCRIPT_RESULT_SIZE = 2
 
 
 class RedisProgressStore(ProgressStore):
-    """Redis 进度存储实现
-
-    使用 Redis Hash 存储进度数据，支持：
-    - 进度数据的获取和设置
-    - Worker 活跃状态注册和 TTL 过期检测
-    - 检查点保存和加载
-
-    适用于分布式生产环境。
-
-    Requirements: 3.2, 3.4, 3.5, 3.6, 3.7
-    """
+    """Redis Hash-based Crawl progress, checkpoint, and worker registry."""
 
     def __init__(
         self,
         redis_client=None,
         default_worker_ttl: int = DEFAULT_WORKER_TTL,
+        namespace: str | None = None,
     ):
         """初始化 Redis 进度存储
 
@@ -50,6 +45,7 @@ class RedisProgressStore(ProgressStore):
         """
         self._redis = redis_client
         self._default_worker_ttl = default_worker_ttl
+        self._namespace = redis_namespace(namespace)
 
     async def _get_client(self):
         """获取 Redis 客户端"""
@@ -59,36 +55,42 @@ class RedisProgressStore(ProgressStore):
 
     def _get_progress_key(self, project_id: str, batch_id: str) -> str:
         """获取进度 Redis 键"""
-        return f"{KEY_PREFIX}:{project_id}:{PROGRESS_SUFFIX}:{batch_id}"
+        return crawl_keys.crawl_progress_key(project_id, batch_id, self._namespace)
 
     def _get_checkpoint_key(self, project_id: str, batch_id: str) -> str:
         """获取检查点 Redis 键"""
-        return f"{KEY_PREFIX}:{project_id}:{CHECKPOINT_SUFFIX}:{batch_id}"
+        return crawl_keys.crawl_checkpoint_key(project_id, batch_id, self._namespace)
 
     def _get_workers_key(self, project_id: str, batch_id: str) -> str:
         """获取 Worker 注册 Redis 键"""
-        return f"{KEY_PREFIX}:{project_id}:{WORKERS_SUFFIX}:{batch_id}"
+        return crawl_keys.crawl_workers_key(project_id, batch_id, self._namespace)
 
-    def _decode_hash(self, data: dict) -> dict[str, Any]:
-        """解码 Redis Hash 数据"""
-        if not data:
-            return {}
+    def _get_cancel_fence_key(self, project_id: str, batch_id: str) -> str:
+        return crawl_keys.crawl_cancel_fence_key(project_id, batch_id, self._namespace)
 
-        decoded = {}
-        for k, v in data.items():
-            key_str = k.decode("utf-8") if isinstance(k, bytes) else k
-            value_str = v.decode("utf-8") if isinstance(v, bytes) else v
-            try:
-                decoded[key_str] = from_json(value_str)
-            except Exception:
-                decoded[key_str] = value_str
-        return decoded
+    async def _write_hash(
+        self,
+        script: str,
+        *,
+        project_id: str,
+        batch_id: str,
+        data: dict,
+    ) -> bool:
+        client = await self._get_client()
+        result = await client.eval(
+            script,
+            2,
+            self._get_progress_key(project_id, batch_id),
+            self._get_cancel_fence_key(project_id, batch_id),
+            *mapping_args(data),
+        )
+        return bool(result)
 
     async def get_progress(
         self,
         project_id: str,
         batch_id: str,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, object] | None:
         """获取批次进度"""
         client = await self._get_client()
         key = self._get_progress_key(project_id, batch_id)
@@ -97,13 +99,13 @@ class RedisProgressStore(ProgressStore):
         if not data:
             return None
 
-        return self._decode_hash(data)
+        return decode_hash(data)
 
     async def set_progress(
         self,
         project_id: str,
         batch_id: str,
-        data: dict[str, Any],
+        data: dict,
     ) -> bool:
         """设置批次进度。
 
@@ -111,38 +113,28 @@ class RedisProgressStore(ProgressStore):
         中间可能看到空 hash，UI 展示进度归零。改成用 pipeline 事务
         （MULTI/EXEC）把 DEL + HSET 打包，保证原子可见性。
         """
-        client = await self._get_client()
-        key = self._get_progress_key(project_id, batch_id)
-
-        if not data:
-            # 空数据只删就够了
-            await client.delete(key)
-            return True
-
-        mapping = {k: to_json(v) for k, v in data.items()}
-        # Redis MULTI/EXEC 保证原子；redis-py async 支持 pipeline(transaction=True)
-        async with client.pipeline(transaction=True) as pipe:
-            pipe.delete(key)
-            pipe.hset(key, mapping=mapping)
-            await pipe.execute()
-
-        return True
+        return await self._write_hash(
+            REPLACE_ACTIVE_HASH,
+            project_id=project_id,
+            batch_id=batch_id,
+            data=data,
+        )
 
     async def update_progress(
         self,
         project_id: str,
         batch_id: str,
-        updates: dict[str, Any],
+        updates: dict,
     ) -> bool:
         """增量更新批次进度"""
-        client = await self._get_client()
-        key = self._get_progress_key(project_id, batch_id)
-
-        if updates:
-            mapping = {k: to_json(v) for k, v in updates.items()}
-            await client.hset(key, mapping=mapping)
-
-        return True
+        if not updates:
+            return True
+        return await self._write_hash(
+            UPDATE_ACTIVE_HASH,
+            project_id=project_id,
+            batch_id=batch_id,
+            data=updates,
+        )
 
     async def increment_progress(
         self,
@@ -153,28 +145,19 @@ class RedisProgressStore(ProgressStore):
     ) -> int:
         """原子增加进度字段值"""
         client = await self._get_client()
-        key = self._get_progress_key(project_id, batch_id)
-
-        # 使用 Lua 脚本实现原子操作
-        lua_script = """
-        local key = KEYS[1]
-        local field = ARGV[1]
-        local amount = tonumber(ARGV[2])
-
-        local current = redis.call('HGET', key, field)
-        if current then
-            current = tonumber(current) or 0
-        else
-            current = 0
-        end
-
-        local new_value = current + amount
-        redis.call('HSET', key, field, tostring(new_value))
-        return new_value
-        """
-
-        result = await client.eval(lua_script, 1, key, field, str(amount))
-        return int(result)
+        result = await client.eval(
+            INCREMENT_ACTIVE_HASH,
+            2,
+            self._get_progress_key(project_id, batch_id),
+            self._get_cancel_fence_key(project_id, batch_id),
+            field,
+            amount,
+        )
+        if not isinstance(result, (list, tuple)) or len(result) != INCREMENT_SCRIPT_RESULT_SIZE:
+            raise RuntimeError("Crawl 进度递增脚本响应无效")
+        if int(result[0]) != 1:
+            raise RuntimeError("Crawl 批次已取消，拒绝迟到进度写入")
+        return int(result[1])
 
     async def register_worker(
         self,
@@ -187,14 +170,18 @@ class RedisProgressStore(ProgressStore):
         client = await self._get_client()
         key = self._get_workers_key(project_id, batch_id)
 
-        # 存储时间戳和 TTL
-        now = time.time()
-        value = f"{now}:{ttl}"
-        await client.hset(key, worker_id, value)
+        result = await client.eval(
+            REGISTER_WORKER,
+            2,
+            key,
+            self._get_cancel_fence_key(project_id, batch_id),
+            worker_id,
+            ttl * 1000,
+        )
 
         logger.debug(f"注册 Worker: project={project_id}, batch={batch_id}, worker={worker_id}")
 
-        return True
+        return bool(result)
 
     async def get_active_workers(
         self,
@@ -205,41 +192,8 @@ class RedisProgressStore(ProgressStore):
         client = await self._get_client()
         key = self._get_workers_key(project_id, batch_id)
 
-        workers = await client.hgetall(key)
-        if not workers:
-            return []
-
-        now = time.time()
-        active = []
-        expired = []
-
-        for worker_id, value in workers.items():
-            worker_str = worker_id.decode("utf-8") if isinstance(worker_id, bytes) else worker_id
-            value_str = value.decode("utf-8") if isinstance(value, bytes) else value
-
-            try:
-                # 解析时间戳和 TTL，格式: "timestamp:ttl"
-                parts = value_str.split(":")
-                if len(parts) != 2:
-                    # 格式错误，标记为过期
-                    expired.append(worker_str)
-                    continue
-
-                timestamp = float(parts[0])
-                ttl = int(parts[1])
-
-                if now - timestamp < ttl:
-                    active.append(worker_str)
-                else:
-                    expired.append(worker_str)
-            except (ValueError, TypeError):
-                expired.append(worker_str)
-
-        # 清理过期 Worker
-        if expired:
-            await client.hdel(key, *expired)
-
-        return active
+        workers = await client.eval(LIST_ACTIVE_WORKERS, 1, key)
+        return [item.decode("utf-8") if isinstance(item, bytes) else str(item) for item in workers]
 
     async def unregister_worker(
         self,
@@ -251,7 +205,7 @@ class RedisProgressStore(ProgressStore):
         client = await self._get_client()
         key = self._get_workers_key(project_id, batch_id)
 
-        result = await client.hdel(key, worker_id)
+        result = await client.zrem(key, worker_id)
 
         logger.debug(f"注销 Worker: project={project_id}, batch={batch_id}, worker={worker_id}")
 
@@ -261,29 +215,28 @@ class RedisProgressStore(ProgressStore):
         self,
         project_id: str,
         batch_id: str,
-        checkpoint_data: dict[str, Any],
+        checkpoint_data: dict[str, object],
     ) -> bool:
-        """保存检查点"""
+        """原子替换检查点，读端不会观察到中间空值。"""
         client = await self._get_client()
         key = self._get_checkpoint_key(project_id, batch_id)
-
-        # 先删除旧数据
-        await client.delete(key)
-
-        # 设置新数据
-        if checkpoint_data:
-            mapping = {k: to_json(v) for k, v in checkpoint_data.items()}
-            await client.hset(key, mapping=mapping)
+        result = await client.eval(
+            REPLACE_ACTIVE_HASH,
+            2,
+            key,
+            self._get_cancel_fence_key(project_id, batch_id),
+            *mapping_args(checkpoint_data),
+        )
 
         logger.info(f"保存检查点: project={project_id}, batch={batch_id}")
 
-        return True
+        return bool(result)
 
     async def load_checkpoint(
         self,
         project_id: str,
         batch_id: str,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, object] | None:
         """加载检查点"""
         client = await self._get_client()
         key = self._get_checkpoint_key(project_id, batch_id)
@@ -294,7 +247,7 @@ class RedisProgressStore(ProgressStore):
 
         logger.info(f"加载检查点: project={project_id}, batch={batch_id}")
 
-        return self._decode_hash(data)
+        return decode_hash(data)
 
     async def delete_checkpoint(
         self,
@@ -310,6 +263,20 @@ class RedisProgressStore(ProgressStore):
         logger.info(f"删除检查点: project={project_id}, batch={batch_id}")
 
         return bool(result)
+
+    async def fence_and_clear(self, project_id: str, batch_id: str) -> bool:
+        """设置取消 fence，并在同一 slot 内原子删除全部临时状态。"""
+        client = await self._get_client()
+        result = await client.eval(
+            FENCE_AND_CLEAR,
+            4,
+            self._get_progress_key(project_id, batch_id),
+            self._get_checkpoint_key(project_id, batch_id),
+            self._get_workers_key(project_id, batch_id),
+            self._get_cancel_fence_key(project_id, batch_id),
+        )
+        logger.info(f"取消批次进度已 fence 并清除: project={project_id}, batch={batch_id}")
+        return int(result) >= 0
 
     async def clear(
         self,

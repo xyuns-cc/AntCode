@@ -44,6 +44,9 @@ def build_settings(rule: dict[str, Any]) -> dict[str, Any]:
             "antcode_scrapy.pipelines.dedup_pipeline.AntCodeDedupPipeline": 200,
             "antcode_scrapy.pipelines.redis_pipeline.AntCodeRedisPipeline": 300,
         },
+        "EXTENSIONS": {
+            "antcode_scrapy.stats_export.SpiderStatsExporter": 500,
+        },
         "DOWNLOADER_MIDDLEWARES": {},
         # 请求指纹 v2.7+ 默认，避免弃用警告
         "REQUEST_FINGERPRINTER_IMPLEMENTATION": "2.7",

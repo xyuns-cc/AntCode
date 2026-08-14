@@ -110,17 +110,15 @@ class RedisKeys:
         任务就绪队列 Stream key
 
         用于平台向 Worker 分发任务。
-        如果指定 worker_id，则为该 Worker 专属队列。
-
         Args:
-            worker_id: Worker ID，为 None 时返回全局队列
+            worker_id: Worker ID；构造阶段为空时返回同 slot 的占位 key。
 
         Returns:
-            Stream key，如 "antcode:task:ready" 或 "antcode:task:ready:{worker_id}"
+            带 ``{namespace}`` hash tag 的 ready Stream key。
         """
         if worker_id:
             return shared_task_ready_stream(worker_id, namespace=self._namespace)
-        return f"{self._namespace}:task:ready"
+        return f"{{{self._namespace}}}:task:ready"
 
     def task_pending_stream(self, worker_id: str) -> str:
         """
@@ -234,7 +232,7 @@ class RedisKeys:
             worker_id: Worker ID
 
         Returns:
-            Hash key，如 "antcode:heartbeat:{worker_id}"
+            Hash key，如 "{antcode}:heartbeat:{worker_id}"
         """
         return shared_worker_heartbeat_key(worker_id, namespace=self._namespace)
 

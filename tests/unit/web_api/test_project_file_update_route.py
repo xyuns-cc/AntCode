@@ -35,6 +35,7 @@ async def test_update_file_config_blank_json_fields_are_cleared():
     ):
         await route.update_file_config(
             "proj-001",
+            language="go",
             entry_point=None,
             runtime_config="   ",
             environment_vars="",
@@ -42,5 +43,6 @@ async def test_update_file_config_blank_json_fields_are_cleared():
         )
 
     request = update_file_config.await_args.args[1]
+    assert request.language == "go"
     assert request.runtime_config == {}
     assert request.environment_vars == {}

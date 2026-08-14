@@ -1,42 +1,30 @@
-import json
+"""Worker 凭据层：签名校验、nonce 消费与分布式限流键的推导。
+
+HTTP 边界层（``verify_request``）的用例见 ``test_worker_auth_request_guard``；
+两边共用的请求/签名搭建见 ``worker_auth_support``。
+"""
+
 import time
 
 import pytest
-from antcode_core.common.security import generate_hmac_signature
+from antcode_core.common.security import WORKER_HTTP_SIGNATURE_HEADER, generate_hmac_signature
 from antcode_core.common.security.worker_auth import (
     RATE_LIMIT_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS,
+    SOURCE_RATE_LIMIT_REQUESTS,
+    SOURCE_RATE_LIMIT_WINDOW_SECONDS,
     WorkerAuthVerifier,
 )
-from fastapi import HTTPException
-from starlette.requests import Request
 
-HTTP_UNAUTHORIZED = 401
-
-
-class _RateLimiter:
-    def __init__(self, allowed: bool = True) -> None:
-        self.allowed = allowed
-        self.calls: list[tuple[str, int, int]] = []
-
-    async def is_allowed(self, identifier: str, limit: int, period: int) -> bool:
-        self.calls.append((identifier, limit, period))
-        return self.allowed
-
-
-def _request(headers: dict[str, str], payload: dict) -> Request:
-    body = json.dumps(payload).encode()
-    sent = False
-
-    async def receive():
-        nonlocal sent
-        if sent:
-            return {"type": "http.request", "body": b"", "more_body": False}
-        sent = True
-        return {"type": "http.request", "body": body, "more_body": False}
-
-    raw_headers = [(name.lower().encode(), value.encode()) for name, value in headers.items()]
-    return Request({"type": "http", "method": "POST", "path": "/", "headers": raw_headers}, receive)
+from tests.unit.core.worker_auth_support import (
+    CLIENT_IP,
+    SHARED_SECRET,
+    SIGNED_PATH,
+    WORKER_ID,
+    RateLimiterSpy,
+    body_bytes,
+    load_shared_secret,
+)
 
 
 @pytest.mark.asyncio
@@ -44,95 +32,97 @@ async def test_signature_uses_shared_secret_and_nonce_services() -> None:
     claimed: list[tuple[str, str]] = []
 
     async def load_secret(worker_id: str) -> str | None:
-        return "shared-secret" if worker_id == "worker-1" else None
+        return SHARED_SECRET if worker_id == WORKER_ID else None
 
     async def claim_nonce(worker_id: str, nonce: str) -> bool:
         claimed.append((worker_id, nonce))
         return True
 
-    verifier = WorkerAuthVerifier(load_secret, claim_nonce, _RateLimiter())
+    verifier = WorkerAuthVerifier(load_secret, claim_nonce, RateLimiterSpy())
     timestamp = int(time.time())
     payload = {"run_id": "run-1"}
-    signature = generate_hmac_signature(payload, "shared-secret", timestamp, "nonce-1")["X-Signature"]
+    signature_headers = generate_hmac_signature(
+        body_bytes(payload),
+        SHARED_SECRET,
+        method="POST",
+        path=SIGNED_PATH,
+        timestamp=timestamp,
+        nonce="nonce-1",
+    )
 
-    assert await verifier.verify_signature_async("worker-1", payload, timestamp, "nonce-1", signature)
-    assert claimed == [("worker-1", "nonce-1")]
+    assert await verifier.verify_signature_async(
+        WORKER_ID,
+        method="POST",
+        path=SIGNED_PATH,
+        body=body_bytes(payload),
+        timestamp=timestamp,
+        nonce="nonce-1",
+        signature=signature_headers["X-Signature"],
+        version=signature_headers[WORKER_HTTP_SIGNATURE_HEADER],
+    )
+    assert claimed == [(WORKER_ID, "nonce-1")]
 
 
 @pytest.mark.asyncio
 async def test_invalid_signature_does_not_consume_nonce() -> None:
     claimed = False
 
-    async def load_secret(_worker_id: str) -> str | None:
-        return "shared-secret"
-
     async def claim_nonce(_worker_id: str, _nonce: str) -> bool:
         nonlocal claimed
         claimed = True
         return True
 
-    verifier = WorkerAuthVerifier(load_secret, claim_nonce, _RateLimiter())
+    verifier = WorkerAuthVerifier(load_shared_secret, claim_nonce, RateLimiterSpy())
 
-    assert not await verifier.verify_signature_async("worker-1", {}, int(time.time()), "nonce-1", "invalid")
+    assert not await verifier.verify_signature_async(
+        WORKER_ID,
+        method="POST",
+        path=SIGNED_PATH,
+        body=body_bytes({}),
+        timestamp=int(time.time()),
+        nonce="nonce-1",
+        signature="invalid",
+        version="2",
+    )
     assert claimed is False
 
 
 @pytest.mark.asyncio
 async def test_replayed_nonce_is_rejected() -> None:
-    async def load_secret(_worker_id: str) -> str | None:
-        return "shared-secret"
-
     async def reject_nonce(_worker_id: str, _nonce: str) -> bool:
         return False
 
-    verifier = WorkerAuthVerifier(load_secret, reject_nonce, _RateLimiter())
+    verifier = WorkerAuthVerifier(load_shared_secret, reject_nonce, RateLimiterSpy())
     timestamp = int(time.time())
-    signature = generate_hmac_signature({}, "shared-secret", timestamp, "nonce-1")["X-Signature"]
-
-    assert not await verifier.verify_signature_async("worker-1", {}, timestamp, "nonce-1", signature)
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_uses_worker_scoped_distributed_key() -> None:
-    limiter = _RateLimiter()
-    verifier = WorkerAuthVerifier(rate_limiter=limiter)
-
-    assert await verifier.check_rate_limit("worker-1")
-    assert limiter.calls == [("worker-auth:worker-1", RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)]
-
-
-@pytest.mark.asyncio
-async def test_invalid_signature_does_not_consume_worker_rate_limit() -> None:
-    async def load_secret(_worker_id: str) -> str | None:
-        return "shared-secret"
-
-    limiter = _RateLimiter()
-    verifier = WorkerAuthVerifier(load_secret, rate_limiter=limiter)
-    request = _request(
-        {
-            "X-Worker-ID": "worker-1",
-            "X-Timestamp": str(int(time.time())),
-            "X-Nonce": "nonce-1",
-            "X-Signature": "invalid",
-        },
-        {},
+    headers = generate_hmac_signature(
+        body_bytes({}),
+        SHARED_SECRET,
+        method="POST",
+        path=SIGNED_PATH,
+        timestamp=timestamp,
+        nonce="nonce-1",
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        await verifier.verify_request(request)
-
-    assert exc_info.value.status_code == HTTP_UNAUTHORIZED
-    assert limiter.calls == []
+    assert not await verifier.verify_signature_async(
+        WORKER_ID,
+        method="POST",
+        path=SIGNED_PATH,
+        body=body_bytes({}),
+        timestamp=timestamp,
+        nonce="nonce-1",
+        signature=headers["X-Signature"],
+        version=headers[WORKER_HTTP_SIGNATURE_HEADER],
+    )
 
 
 @pytest.mark.asyncio
-async def test_unsigned_request_does_not_consume_claimed_worker_rate_limit() -> None:
-    limiter = _RateLimiter()
+async def test_rate_limit_uses_source_and_worker_scoped_distributed_keys() -> None:
+    limiter = RateLimiterSpy()
     verifier = WorkerAuthVerifier(rate_limiter=limiter)
-    request = _request({"X-Worker-ID": "worker-1"}, {})
 
-    with pytest.raises(HTTPException) as exc_info:
-        await verifier.verify_request(request)
-
-    assert exc_info.value.status_code == HTTP_UNAUTHORIZED
-    assert limiter.calls == []
+    assert await verifier.check_rate_limit(WORKER_ID, CLIENT_IP)
+    # 来源桶不含 worker_id，攻击者换 X-Worker-ID 换不到新桶；Worker 桶再绑定来源。
+    assert limiter.calls == [
+        (f"worker-auth:source:{CLIENT_IP}", SOURCE_RATE_LIMIT_REQUESTS, SOURCE_RATE_LIMIT_WINDOW_SECONDS),
+        (f"worker-auth:worker:{WORKER_ID}:{CLIENT_IP}", RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS),
+    ]

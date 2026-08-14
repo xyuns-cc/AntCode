@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -19,9 +20,10 @@ class _RegistrationClient:
     def __exit__(self, *_args) -> None:
         return None
 
-    def post(self, url, *, json, headers=None):
+    def post(self, url, *, content, headers=None):
+        payload = json.loads(content)
         if url.endswith("register-by-key-v2"):
-            return self._registration_response(json)
+            return self._registration_response(payload)
         assert headers and headers["X-Signature"]
         return httpx.Response(200, json={"success": True, "data": {}})
 
@@ -46,12 +48,20 @@ class _RegistrationClient:
         )
 
 
-def test_restart_recovers_from_durable_intent_without_external_install_key(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("empty_environment", [False, True])
+def test_restart_recovers_from_durable_intent_without_external_install_key(
+    monkeypatch,
+    tmp_path,
+    empty_environment: bool,
+) -> None:
     config = _worker_config()
     service = CredentialService(PersistentCredentialStore(tmp_path))
     _RegistrationClient.payloads = []
     monkeypatch.setattr(httpx, "Client", _RegistrationClient)
-    monkeypatch.delenv("ANTCODE_WORKER_KEY", raising=False)
+    if empty_environment:
+        monkeypatch.setenv("ANTCODE_WORKER_KEY", "")
+    else:
+        monkeypatch.delenv("ANTCODE_WORKER_KEY", raising=False)
 
     with pytest.raises(httpx.ReadTimeout, match="response lost"):
         wiring._register_by_install_key(config, service)

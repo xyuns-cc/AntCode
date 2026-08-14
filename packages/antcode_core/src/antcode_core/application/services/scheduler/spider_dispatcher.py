@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from loguru import logger
 
+from antcode_core.application.services.scheduler.rule_dispatch_constraints import (
+    resolve_rule_dispatch_constraints,
+)
 from antcode_core.application.services.workers.worker_dispatcher import worker_task_dispatcher
 
 DEFAULT_TASK_TIMEOUT_SECONDS = 3600
@@ -37,6 +40,7 @@ class SpiderTaskDispatcher:
         if not isinstance(kwargs_dict, dict):
             kwargs_dict = {}
         serialized_rule = self._serialize_rule_detail(rule_detail)
+        constraints = resolve_rule_dispatch_constraints(rule_detail, serialized_rule)
         kwargs_dict["rule_detail"] = serialized_rule
         outer_params["kwargs"] = kwargs_dict
         runtime_env_name = self._runtime_env_name(project)
@@ -48,9 +52,10 @@ class SpiderTaskDispatcher:
             runtime_env_name=runtime_env_name,
             project_type="rule",
             worker_id=worker_id,
+            region=constraints.region,
             timeout=timeout,
             priority=priority,
-            require_render=self._requires_render(serialized_rule),
+            require_render=constraints.require_render,
         )
 
         if result.success:
@@ -72,38 +77,6 @@ class SpiderTaskDispatcher:
                 "worker_name": result.worker_name,
             }
 
-    async def submit_batch_tasks(
-        self,
-        project,
-        rule_details,
-        run_id,
-        params=None,
-        worker_id=None,
-    ):
-        """批量提交任务到工作节点"""
-        tasks = []
-        runtime_env_name = self._runtime_env_name(project)
-        for i, rule_detail in enumerate(rule_details):
-            outer_params: dict = dict(params or {})
-            kwargs_dict = outer_params.get("kwargs")
-            if not isinstance(kwargs_dict, dict):
-                kwargs_dict = {}
-            kwargs_dict["rule_detail"] = self._serialize_rule_detail(rule_detail)
-            outer_params["kwargs"] = kwargs_dict
-            task_item = {
-                "task_id": f"{run_id}-{i}",
-                "project_id": project.public_id,
-                "project_type": "rule",
-                "params": outer_params,
-                "runtime_env_name": runtime_env_name or "",
-            }
-            tasks.append(task_item)
-
-        return await worker_task_dispatcher.dispatch_batch(
-            tasks=tasks,
-            worker_id=worker_id,
-        )
-
     @staticmethod
     def _runtime_env_name(project) -> str | None:
         if getattr(project, "env_location", None) != "worker":
@@ -116,18 +89,6 @@ class SpiderTaskDispatcher:
         if not callable(serializer):
             raise TypeError("规则项目详情必须实现 to_dispatch_dict()")
         return serializer()
-
-    @staticmethod
-    def _requires_render(rule: dict) -> bool:
-        engine = str(rule.get("engine") or "").lower()
-        pagination = rule.get("pagination_config") or {}
-        method = str(pagination.get("method") or "").lower()
-        return engine in {"playwright", "render"} or method in {
-            "js_click",
-            "infinite_scroll",
-            "javascript",
-            "ajax",
-        }
 
 
 spider_task_dispatcher = SpiderTaskDispatcher()

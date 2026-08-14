@@ -13,7 +13,7 @@ on:
       - develop
 
 env:
-  NODE_VERSION: "22.13.0"
+  NODE_VERSION: "22.22.0"
   UV_VERSION: "0.8.17"
 
 jobs:
@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -36,6 +38,11 @@ jobs:
         # ruff 位于 [project.optional-dependencies].dev，必须安装 dev extra。
         # --frozen：严格按 uv.lock 安装，禁止 CI 里隐式改写解析结果。
         run: uv sync --all-packages --extra dev --frozen
+
+      - name: Verify generated protocol artifacts
+        run: |
+          uv run python scripts/generate_proto.py
+          git diff --exit-code -- contracts/proto packages/antcode_contracts/src/antcode_contracts
 
       - name: Run ruff check
         run: uv run ruff check .
@@ -81,6 +88,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -143,8 +152,8 @@ jobs:
       - name: Run Gateway and Master unit tests
         run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/unit/gateway tests/unit/master -q
 
-      - name: Run Worker and script unit tests
-        run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/unit/worker tests/unit/scripts -q
+      - name: Run Worker, script, and Scrapy unit tests
+        run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/unit/worker tests/unit/scripts tests/unit/scrapy -q
 
       - name: Run boundary tests
         run: /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 uv run --extra dev pytest tests/boundary -q
@@ -183,6 +192,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -208,14 +219,17 @@ jobs:
           encryption_salt="$(openssl rand -hex 16)"
           admin_password="$(openssl rand -base64 24 | tr -d '\n')Aa1!"
           worker_key="$(openssl rand -hex 32)"
+          e2e_redis_url="redis://:${redis_password}@127.0.0.1:6379/0"
           for secret in "$pg_password" "$redis_password" "$jwt_secret" \
-            "$encryption_key" "$encryption_salt" "$admin_password" "$worker_key"; do
+            "$encryption_key" "$encryption_salt" "$admin_password" "$worker_key" "$e2e_redis_url"; do
             echo "::add-mask::$secret"
           done
           {
             echo "HOST_IP=$host_ip"
             echo "E2E_POSTGRES_PASSWORD=$pg_password"
             echo "DEFAULT_ADMIN_PASSWORD=$admin_password"
+            echo "ANTCODE_E2E_REDIS_URL=$e2e_redis_url"
+            echo "ANTCODE_E2E_REDIS_NAMESPACE=antcode"
             # Compose 会在 build/run 阶段解析所有 service；控制面启动后，
             # Generate Direct Worker install key 步骤会用真实一次性 Key 覆盖此值。
             echo "ANTCODE_WORKER_KEY=$worker_key"
@@ -224,6 +238,10 @@ jobs:
             echo "POSTGRES_DB=antcode_e2e_test"
             echo "POSTGRES_PASSWORD=$pg_password"
             echo "REDIS_PASSWORD=$redis_password"
+            # dev compose 用 ${REDIS_NAMESPACE:?} 做 fail-closed 校验，缺它会让
+            # `docker compose build` 直接失败。注意与上面的 ANTCODE_E2E_REDIS_NAMESPACE
+            # 是两个变量：后者给 pytest 连 Redis 用，这个给容器内运行时用。
+            echo "REDIS_NAMESPACE=antcode"
             echo "JWT_SECRET=$jwt_secret"
             echo "ENCRYPTION_KEY=$encryption_key"
             echo "ENCRYPTION_KEY_SALT=$encryption_salt"
@@ -236,6 +254,10 @@ jobs:
             # SOURCE_URL 只会拼进安装命令文本，冒烟不真正拉取该仓库。
             echo "WORKER_INSTALL_SOURCE_URL=https://github.com/antcode/antcode.git"
             echo "WORKER_INSTALL_SOURCE_REF=${GITHUB_SHA}"
+            # load_worker_install_config 对该项是硬性要求（默认 False 会让端点恒 503）。
+            # dev compose 只在 prod.control 里设过它，e2e 走 dev compose 必须显式补上，
+            # 否则 "Generate Direct Worker install key" 步骤拿不到 Key、Worker 起不来。
+            echo "WORKER_INSTALL_GATEWAY_TLS=true"
           } > .env
 
       - name: Build stack images
@@ -312,9 +334,8 @@ jobs:
       - name: Run E2E tests
         env:
           ANTCODE_E2E_CONFIRM: FULL
-          DATABASE_URL: postgresql://antcode:${{ env.E2E_POSTGRES_PASSWORD }}@127.0.0.1:5432/antcode_e2e_test
-          ANTCODE_E2E_DATABASE_HOST: 127.0.0.1
-          ANTCODE_E2E_DATABASE_NAME: antcode_e2e_test
+          ANTCODE_E2E_ADMIN_USER: admin
+          ANTCODE_E2E_ADMIN_PASSWORD: ${{ env.DEFAULT_ADMIN_PASSWORD }}
           ANTCODE_E2E_WORKER_ID: worker-e2e-001
           ANTCODE_E2E_WEB_API_URL: http://127.0.0.1:8000
           ANTCODE_E2E_EXPECT_TRANSPORT_MODE: direct
@@ -492,6 +513,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -544,6 +567,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -556,7 +581,7 @@ jobs:
       - name: Run bandit security scan
         run: |
           rm -f bandit-report.json
-          uv run bandit -r packages/ services/ \
+          uv run bandit -r packages/ services/ scripts/ \
             --severity-level high --confidence-level high \
             --exit-zero -f json -o bandit-report.json
           test -s bandit-report.json
@@ -608,6 +633,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -640,6 +667,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -680,6 +709,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

@@ -101,6 +101,7 @@ async def test_authorized_project_environment_creation_keeps_expected_packages(
         )
 
     assert create_env.await_args.kwargs["packages"] == dependencies
+    assert create_env.await_args.kwargs["owner_user_id"] == "10"
     project.save.assert_awaited_once()
 
 
@@ -114,6 +115,7 @@ async def test_project_cannot_bind_another_users_private_runtime() -> None:
             "name": "private-existing",
             "scope": "private",
             "created_by": "other-user",
+            "owner_user_id": "11",
             "python_version": "3.11",
         },
     }
@@ -134,6 +136,36 @@ async def test_project_cannot_bind_another_users_private_runtime() -> None:
 
 
 @pytest.mark.asyncio
+async def test_project_private_runtime_owner_survives_username_change() -> None:
+    service = ProjectService()
+    project = _project()
+    worker = SimpleNamespace(id=7, name="worker-security-test")
+    env = {
+        "success": True,
+        "data": {
+            "name": "private-existing",
+            "scope": "private",
+            "created_by": "old-username",
+            "owner_user_id": "10",
+            "python_version": "3.11",
+        },
+    }
+
+    with (
+        patch.object(service, "_authorize_worker", AsyncMock(return_value=(worker, "new-username", False))),
+        patch.object(runtime_control_service, "get_env", AsyncMock(return_value=env)),
+    ):
+        await service._setup_worker_environment(
+            project,
+            _existing_request(),
+            user_id=10,
+            conn=object(),
+        )
+
+    assert project.worker_env_name == "private-existing"
+
+
+@pytest.mark.asyncio
 async def test_admin_can_bind_existing_private_runtime() -> None:
     service = ProjectService()
     project = _project()
@@ -144,6 +176,7 @@ async def test_admin_can_bind_existing_private_runtime() -> None:
             "name": "private-existing",
             "scope": "private",
             "created_by": "other-user",
+            "owner_user_id": "99",
             "python_version": "3.11",
         },
     }

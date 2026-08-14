@@ -5,7 +5,10 @@
 需求: 1.1, 1.2, 1.3, 1.4, 1.5, 6.4, 9.1, 9.2, 12.1, 12.3, 12.4
 """
 
+import asyncio
+
 from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.crawl.batch_counts import count_batches
 from antcode_core.application.services.crawl.batch_service import crawl_batch_service
 from antcode_core.application.services.crawl.metrics_service import crawl_metrics_service
 from antcode_core.application.services.crawl.progress_service import crawl_progress_service
@@ -33,13 +36,12 @@ from antcode_core.domain.schemas.crawl import (
     TestStatusResponse,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from antcode_web_api.response import Messages, page
 from antcode_web_api.response import success as success_response
+from antcode_web_api.services.crawl_batch_export import build_batch_export_response
 from antcode_web_api.services.crawl_item_stream import iter_batch_items
-from antcode_web_api.utils.csv_security import sanitize_csv_row
 
 router = APIRouter()
 
@@ -736,80 +738,16 @@ async def get_batch_items(
 @router.get(
     "/batches/{batch_id}/export",
     summary="导出批次抓取数据",
-    description="按 format 导出 JSON 或 CSV；数据流式返回，避免一次性加载大批",
+    description=("按 format 流式导出完整 JSON 或 CSV；CSV 使用稳定 data JSON 列保留异构 payload 的全部字段"),
 )
 async def export_batch(
     batch_id: str,
     format: str = Query("json", pattern="^(json|csv)$"),
-    limit: int = Query(10000, ge=1, le=100000),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """P2-28: 数据导出（CSV/JSON），流式响应。"""
-    import csv as _csv
-    import io as _io
-    import json as _json
-
+    """流式导出批次的完整 CSV/JSON 数据集。"""
     await _verify_batch_owner(batch_id, current_user)
-
-    if format == "json":
-
-        async def _json_stream():
-            yield '{"batch_id": "' + batch_id + '", "items": ['
-            first = True
-            async for item in iter_batch_items(batch_id, limit):
-                if not first:
-                    yield ","
-                first = False
-                yield _json.dumps(
-                    {
-                        "sequence": item.sequence,
-                        "url": item.url,
-                        "timestamp": item.timestamp,
-                        "run_id": item.run_id,
-                        "data": item.payload,
-                    },
-                    ensure_ascii=False,
-                )
-            yield "]}"
-
-        return StreamingResponse(
-            _json_stream(),
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.json"'},
-        )
-
-    # CSV：字段先看第一条 item 决定列头
-    async def _csv_stream():
-        # 先取一条来确定列头
-        columns: list[str] | None = None
-        buf = _io.StringIO()
-        writer = _csv.writer(buf)
-        async for item in iter_batch_items(batch_id, limit):
-            payload = item.payload
-            data_keys = list(payload.keys()) if isinstance(payload, dict) else []
-            if columns is None:
-                columns = ["sequence", "url", "timestamp", "run_id"] + data_keys
-                writer.writerow(sanitize_csv_row(columns))
-                yield buf.getvalue()
-                buf.seek(0)
-                buf.truncate(0)
-            row = [item.sequence, item.url, item.timestamp, item.run_id]
-            for k in columns[4:]:
-                v = payload.get(k) if isinstance(payload, dict) else ""
-                # 复合值 JSON 序列化
-                if isinstance(v, (dict, list)):
-                    v = _json.dumps(v, ensure_ascii=False)
-                row.append(v if v is not None else "")
-            writer.writerow(sanitize_csv_row(row))
-            yield buf.getvalue()
-            buf.seek(0)
-            buf.truncate(0)
-
-    return StreamingResponse(
-        _csv_stream(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="batch-{batch_id[:8]}.csv"'},
-    )
+    return build_batch_export_response(batch_id, format, iter_batch_items)
 
 
 # =============================================================================
@@ -838,14 +776,10 @@ async def get_system_metrics(
         # 使用 metrics_service 收集系统指标
         system_metrics = await crawl_metrics_service.collect_system_metrics(project_id)
 
-        # 获取批次统计
-        batches, total_batches = await crawl_batch_service.list_batches(
-            project_id=project_id,
-            page=1,
-            size=1000,
+        total_batches, running_batches = await asyncio.gather(
+            count_batches(project_id),
+            count_batches(project_id, "running"),
         )
-
-        running_batches = sum(1 for b in batches if b.status == "running")
 
         response = CrawlMetricsResponse(
             stream_length=system_metrics.total_stream_length,

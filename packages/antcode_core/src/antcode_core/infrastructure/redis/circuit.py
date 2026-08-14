@@ -12,8 +12,8 @@ from contextlib import asynccontextmanager
 from redis.exceptions import ConnectionError as RedisConnError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
+from antcode_core.common.settings_ref import current_settings
 from antcode_core.infrastructure.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerConfig,
@@ -26,6 +26,7 @@ _TRIPPING_EXCEPTIONS = {RedisConnError, RedisTimeoutError, RedisConnectionError}
 
 def get_redis_circuit_breaker() -> CircuitBreaker:
     """获取（或创建）Redis 熔断器单例，配置从 Settings 拉取。"""
+    settings = current_settings()
     existing = CircuitBreaker.get(_BREAKER_NAME)
     if existing is not None:
         return existing
@@ -45,7 +46,7 @@ async def redis_breaker_guard() -> AsyncIterator[CircuitBreaker | None]:
     - 否则进入熔断器：OPEN 状态会立刻 raise ``CircuitOpenError``，
       抛出的连接异常会计入失败统计
     """
-    if not settings.REDIS_CIRCUIT_BREAKER_ENABLED:
+    if not current_settings().REDIS_CIRCUIT_BREAKER_ENABLED:
         yield None
         return
     breaker = get_redis_circuit_breaker()

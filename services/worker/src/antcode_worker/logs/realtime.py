@@ -216,7 +216,7 @@ class RealtimeSender:
             try:
                 self._on_send_failure(entry, last_error)
             except Exception:
-                pass
+                logger.exception("[{}] 实时日志失败回调异常 seq={}", self.run_id, entry.seq)
 
         return False
 

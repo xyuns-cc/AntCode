@@ -3,6 +3,9 @@ import { BaseService } from './base'
 
 export type RuntimeScope = 'private' | 'shared'
 
+export const RUNTIME_KEY_MAX_BYTES = 128
+export const RUNTIME_DESCRIPTION_MAX_BYTES = 1024
+
 export interface RuntimeEnv {
   name: string
   path: string
@@ -12,6 +15,8 @@ export interface RuntimeEnv {
   created_by?: string
   packages_count?: number
   scope?: RuntimeScope
+  key?: string | null
+  description?: string | null
 }
 
 export interface RuntimePackage {
@@ -24,6 +29,19 @@ const requireRuntimeScope = (env: RuntimeEnv): RuntimeScope => {
     return env.scope
   }
   throw new Error(`运行时环境 ${env.name} 缺少 scope`)
+}
+
+const utf8Length = (value: string): number => new TextEncoder().encode(value).length
+
+const requireMetadataBytes = (value: string | undefined, limit: number, field: string): void => {
+  if (value !== undefined && utf8Length(value) > limit) {
+    throw new Error(`${field} UTF-8 长度不能超过 ${limit} 字节`)
+  }
+}
+
+export const validateRuntimeMetadata = (payload: { key?: string; description?: string }): void => {
+  requireMetadataBytes(payload.key, RUNTIME_KEY_MAX_BYTES, '环境标识')
+  requireMetadataBytes(payload.description, RUNTIME_DESCRIPTION_MAX_BYTES, '环境描述')
 }
 
 class RuntimeService extends BaseService {
@@ -72,6 +90,7 @@ class RuntimeService extends BaseService {
   }
 
   async updateEnv(workerId: string, envName: string, payload: { key?: string; description?: string }, config?: AxiosRequestConfig): Promise<RuntimeEnv> {
+    validateRuntimeMetadata(payload)
     return await this.patch<RuntimeEnv>(
       `${this.base(workerId)}/runtimes/${encodeURIComponent(envName)}`,
       payload,

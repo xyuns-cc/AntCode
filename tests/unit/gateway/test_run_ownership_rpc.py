@@ -127,17 +127,14 @@ def _claim(**overrides):
     return artifact_pb2.RunOwnershipClaimRequest(**values)
 
 
-def _install(monkeypatch, redis: _Redis) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
-    # P1-GW-02 新契约：claim 预检只验 worker 归属（owns_runs），fence
-    # ACQUIRED 之后才落 PG 绑定（bind_generation）；renew/release 要求已绑定
-    # 代际（owns_runs_for_lease）。
+def _install(monkeypatch, redis: _Redis) -> tuple[AsyncMock, AsyncMock]:
+    # TaskRun 在 ready publish 前已绑定派发 Lease；所有 ownership 操作都必须
+    # 精确匹配该代际。fence ACQUIRED 后 bind_generation 只记录日志边界。
     bind_generation = AsyncMock()
-    owns_runs = AsyncMock()
     owns_runs_for_lease = AsyncMock()
     monkeypatch.setattr(module, "get_redis_client", AsyncMock(return_value=redis))
     monkeypatch.setattr(module, "require_authenticated_worker", AsyncMock(side_effect=lambda _ctx, worker: worker))
     monkeypatch.setattr(module, "bind_worker_run_lease_generation", bind_generation)
-    monkeypatch.setattr(module, "require_worker_owns_runs", owns_runs)
     monkeypatch.setattr(module, "require_worker_owns_runs_for_lease", owns_runs_for_lease)
     monkeypatch.setattr(fence, "redis_namespace", lambda ns=None: ns or "tenant-a")
     # P1-GW-04 修正后 _bind_lease_generation 会通过 LeaseStore.get() 拿
@@ -152,7 +149,7 @@ def _install(monkeypatch, redis: _Redis) -> tuple[AsyncMock, AsyncMock, AsyncMoc
         "granted_at_ms": "100",
         "expires_at_ms": "999999999",
     }
-    return bind_generation, owns_runs, owns_runs_for_lease
+    return bind_generation, owns_runs_for_lease
 
 
 @pytest.mark.asyncio
@@ -175,7 +172,7 @@ async def test_claim_with_superseded_lease_aborts_failed_precondition(monkeypatc
     # RPC 必须 abort FAILED_PRECONDITION，绝不允许旧代际写 ownership。
     # P1-GW-02: 此时 PG 绑定绝不能发生（fence 未 ACQUIRED）。
     redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, _owns = _install(monkeypatch, redis)
     service = _Service()
     context = _context()
 
@@ -260,7 +257,7 @@ async def test_renew_and_release_require_matching_token_and_release_is_idempoten
 @pytest.mark.asyncio
 async def test_stale_lease_is_rejected_before_taskrun_and_redis(monkeypatch):
     redis = _Redis()
-    bind_generation, owns_runs, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, owns_runs = _install(monkeypatch, redis)
     context = _context()
 
     response = await _Service(current=False).ClaimRunOwnership(_claim(), context)
@@ -275,7 +272,7 @@ async def test_stale_lease_is_rejected_before_taskrun_and_redis(monkeypatch):
 @pytest.mark.asyncio
 async def test_foreign_taskrun_is_rejected_before_redis(monkeypatch):
     redis = _Redis()
-    bind_generation, owns_runs, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, owns_runs = _install(monkeypatch, redis)
     owns_runs.side_effect = PermissionError("foreign run")
     context = _context()
 

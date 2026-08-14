@@ -19,6 +19,13 @@ from antcode_web_api.routes.v1.runtime_access import (
     ensure_worker_admin_access,
     fetch_accessible_runtime,
 )
+from antcode_web_api.routes.v1.runtime_audit import (
+    audit_package_install,
+    audit_package_uninstall,
+    audit_runtime_create,
+    audit_runtime_delete,
+    audit_runtime_update,
+)
 from antcode_web_api.routes.v1.runtime_models import (
     CreateEnvRequest,
     EnvUpdateRequest,
@@ -100,9 +107,12 @@ async def create_env(
         python_version=python_version,
         packages=payload.packages,
         created_by=created_by,
+        owner_user_id=str(current_user_id),
     )
     if not result.get("success"):
         _raise_runtime_failure("创建环境", result)
+
+    await audit_runtime_create(worker_id, env_name, current_user)
 
     return success_response(
         {
@@ -157,6 +167,7 @@ async def update_env_detail(
     )
     if not result.get("success"):
         _raise_runtime_failure("更新环境", result)
+    await audit_runtime_update(worker_id, env_name, current_user)
     return success_response(result.get("data") or {})
 
 
@@ -171,13 +182,14 @@ async def delete_env(
     current_user=Depends(get_current_user),
 ):
     """删除运行时环境（P0-01：影响所有用户任务 → 管理员）"""
-    _ = current_user
     _validate_env_name(env_name)
     await ensure_worker_admin_access(worker_id, current_user_id)
 
     result = await runtime_control_service.delete_env(worker_id, env_name)
     if not result.get("success"):
         _raise_runtime_failure("删除环境", result)
+
+    await audit_runtime_delete(worker_id, env_name, current_user)
 
     return success_response({"deleted": True})
 
@@ -217,7 +229,6 @@ async def install_packages(
     current_user=Depends(get_current_user),
 ):
     """安装依赖（P0-01：uv pip install 可执行 sdist/PEP517 build backend/VCS hook 在 Worker 主 UID 下 → 管理员）"""
-    _ = current_user
     _validate_env_name(env_name)
     await ensure_worker_admin_access(worker_id, current_user_id)
     if not payload.packages:
@@ -228,6 +239,8 @@ async def install_packages(
     )
     if not result.get("success"):
         _raise_runtime_failure("安装依赖", result)
+
+    await audit_package_install(worker_id, env_name, current_user)
 
     return success_response(result.get("data") or {})
 
@@ -244,7 +257,6 @@ async def uninstall_packages(
     current_user=Depends(get_current_user),
 ):
     """卸载依赖（P0-01：依赖管理面 → 管理员）"""
-    _ = current_user
     _validate_env_name(env_name)
     await ensure_worker_admin_access(worker_id, current_user_id)
     if not payload.packages:
@@ -253,6 +265,8 @@ async def uninstall_packages(
     result = await runtime_control_service.uninstall_packages(worker_id, env_name, payload.packages)
     if not result.get("success"):
         _raise_runtime_failure("卸载依赖", result)
+
+    await audit_package_uninstall(worker_id, env_name, current_user)
 
     return success_response(result.get("data") or {})
 

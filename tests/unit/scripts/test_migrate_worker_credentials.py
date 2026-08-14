@@ -10,6 +10,8 @@ from cryptography.fernet import Fernet
 
 from scripts import migrate_worker_credentials as migration
 
+EXPECTED_PLAINTEXT_SCHEMA_QUERIES = 3
+
 
 class _Connection:
     def __init__(
@@ -23,20 +25,30 @@ class _Connection:
         self.rows = rows or []
         self.update_affected = update_affected
         self.updates: list[list[object]] = []
+        self.update_sql: list[str] = []
+        self.locked = False
         self.altered = False
+        self.query_count = 0
 
     async def execute_query_dict(self, sql: str):
         if "information_schema.columns" in sql:
+            self.query_count += 1
+            if self.altered:
+                return []
             return [{"column_name": column} for column in self.columns]
-        if 'FROM "workers"' in sql:
+        if 'FROM public."workers"' in sql:
             return [dict(row) for row in self.rows]
         raise AssertionError(f"unexpected query: {sql}")
 
     async def execute_query(self, sql: str, params: list[object] | None = None):
-        if sql.startswith('UPDATE "workers"'):
+        if sql.startswith('LOCK TABLE public."workers"'):
+            self.locked = True
+            return 0, []
+        if sql.startswith('UPDATE public."workers"'):
+            self.update_sql.append(sql)
             self.updates.append(params or [])
             return self.update_affected, []
-        if sql.startswith('ALTER TABLE "workers"'):
+        if sql.startswith('ALTER TABLE public."workers"'):
             self.altered = True
             return 0, []
         raise AssertionError(f"unexpected query: {sql}")
@@ -73,6 +85,15 @@ async def test_plaintext_column_detection_returns_exact_schema_set() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transactional_migration_is_idempotent_when_plaintext_columns_are_absent() -> None:
+    connection = _Connection(set())
+
+    assert await migration.migrate_worker_credentials(connection) == 0
+    assert connection.locked is False
+    assert connection.altered is False
+
+
+@pytest.mark.asyncio
 async def test_migrate_rows_hashes_and_encrypts_real_credentials(monkeypatch) -> None:
     _configure_encryption(monkeypatch)
     connection = _Connection(
@@ -97,6 +118,25 @@ async def test_migrate_rows_hashes_and_encrypts_real_credentials(monkeypatch) ->
     assert secret_box.decrypt(str(current[2])) == "hmac-secret"
     assert current[3:] == [hash_api_key("api-old"), 7]
     assert connection.updates[1] == [None, None, None, None, 8]
+    assert connection.locked is True
+
+
+@pytest.mark.asyncio
+async def test_migrate_rows_never_replaces_new_credentials_with_null(monkeypatch) -> None:
+    _configure_encryption(monkeypatch)
+    connection = _Connection(
+        set(),
+        [{"id": 8, "api_key": None, "secret_key": None, "api_key_previous": None}],
+    )
+
+    await migration._migrate_rows(connection)
+
+    sql = connection.update_sql[0]
+    assert 'COALESCE("api_key_hash", $1)' in sql
+    assert 'COALESCE("secret_key_hash", $2)' in sql
+    assert 'COALESCE("secret_key_encrypted", $3)' in sql
+    assert 'COALESCE("api_key_previous_hash", $4)' in sql
+    assert connection.updates == [[None, None, None, None, 8]]
 
 
 @pytest.mark.asyncio
@@ -133,6 +173,17 @@ async def test_incomplete_plaintext_schema_is_rejected(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_transactional_migration_rejects_incomplete_plaintext_schema() -> None:
+    connection = _Connection({"api_key", "secret_key"})
+
+    with pytest.raises(RuntimeError, match="明文凭据列不完整"):
+        await migration.migrate_worker_credentials(connection)
+
+    assert connection.locked is False
+    assert connection.altered is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("affected", [0, 2])
 async def test_unexpected_update_count_aborts_before_drop(monkeypatch, affected: int) -> None:
     _configure_encryption(monkeypatch)
@@ -161,6 +212,7 @@ async def test_main_migrates_rows_then_drops_plaintext_columns(monkeypatch, caps
     assert events == [("init", "web_api"), "close"]
     assert len(connection.updates) == 1
     assert connection.altered is True
+    assert connection.query_count == EXPECTED_PLAINTEXT_SCHEMA_QUERIES
     assert "已安全迁移 1 个 Worker 的凭据" in capsys.readouterr().out
 
 

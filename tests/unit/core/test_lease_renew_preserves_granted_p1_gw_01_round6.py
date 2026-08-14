@@ -21,30 +21,24 @@ granted_at_ms 在 renew 时前进。攻击场景:
 
 from __future__ import annotations
 
-import inspect
-
-from antcode_core.application.services import lease_service
+from antcode_core.application.services.lease_scripts import GRANT_LUA
 
 
 def test_grant_lua_preserves_granted_at_ms_on_renew():
     """P1-GW-01:renew 分支 Lua 源码必须保留 stored_granted,不能重写 now_ms。"""
-    module_source = inspect.getsource(lease_service)
-
     # renew 分支必须存在 stored_granted 变量读取
-    assert "stored_granted" in module_source, "grant Lua 未读取 stored granted_at_ms,renew 会重写导致 gen 前进"
+    assert "stored_granted" in GRANT_LUA, "grant Lua 未读取 stored granted_at_ms,renew 会重写导致 gen 前进"
     # renew 分支必须走 `final_granted_ms = stored_granted` 分支
-    assert "stored_granted > 0 and stored_granted or now_ms" in module_source, (
+    assert "stored_granted > 0 and stored_granted or now_ms" in GRANT_LUA, (
         "renew 分支未保留原 granted_at_ms(应 stored_granted > 0 时用原值)"
     )
     # HSET 必须用 final_granted_ms 而不是 now_ms
-    assert "'granted_at_ms', tostring(final_granted_ms)" in module_source, (
+    assert "'granted_at_ms', tostring(final_granted_ms)" in GRANT_LUA, (
         "HSET granted_at_ms 未走 final_granted_ms,renew 时会用 now_ms 覆盖"
     )
 
 
 def test_grant_lua_new_lease_uses_now_ms():
     """P1-GW-01 反面:首次或过期后新 grant 仍用 now_ms 作 granted_at_ms。"""
-    module_source = inspect.getsource(lease_service)
-
     # new 分支必须显式 `final_granted_ms = now_ms`
-    assert "final_granted_ms = now_ms" in module_source, "新 lease grant 分支未用 now_ms,可能拿到 stale 或未初始化值"
+    assert "final_granted_ms = now_ms" in GRANT_LUA, "新 lease grant 分支未用 now_ms,可能拿到 stale 或未初始化值"

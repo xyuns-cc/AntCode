@@ -15,6 +15,7 @@ from antcode_worker.domain.models import LogEntry
 from antcode_worker.logs.batch import BackpressureState, BatchConfig, BatchSender
 from antcode_worker.logs.realtime import RealtimeConfig, RealtimeSender
 from antcode_worker.logs.streamer import LogStreamer
+from antcode_worker.transport.generation import raise_if_generation_lost
 
 MAX_DISPATCH_QUEUE_SIZE = 1000
 
@@ -152,6 +153,7 @@ class LogManager:
         try:
             batch_queued = await self._batch.write(entry)
         except Exception as exc:
+            raise_if_generation_lost(exc)
             raise RuntimeError(f"批量日志入队异常: run_id={self.run_id}") from exc
 
         if not batch_queued:
@@ -180,6 +182,7 @@ class LogManager:
     def _raise_dispatch_error(self) -> None:
         error = self._dispatch_errors[0]
         self._dispatch_errors.clear()
+        raise_if_generation_lost(error)
         raise RuntimeError(f"日志分发失败: {error}") from error
 
     def _should_drop(self, entry: LogEntry) -> bool:

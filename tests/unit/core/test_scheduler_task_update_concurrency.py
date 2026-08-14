@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.enums import ScheduleType, TaskStatus
 from antcode_core.domain.schemas.task import TaskUpdateRequest
 
 scheduler_module = importlib.import_module("antcode_core.application.services.scheduler.scheduler_service")
@@ -55,13 +55,10 @@ def _configure_locked_task(monkeypatch, task):
     return transaction, query, filters
 
 
-def _configure_service(monkeypatch, *, control_plane: bool):
+def _configure_service(monkeypatch, *, publish: AsyncMock | None = None):
+    """控制面服务只有 outbox 一条出口，默认把它挡掉以隔离被测语义。"""
     service = scheduler_module.scheduler_service
-    monkeypatch.setattr(service, "_control_plane", lambda: control_plane)
-    monkeypatch.setattr(service, "_scheduler_enabled", lambda: not control_plane)
-    monkeypatch.setattr(service, "add_task", AsyncMock())
-    monkeypatch.setattr(service, "remove_task", AsyncMock())
-    monkeypatch.setattr(service, "reschedule_task", AsyncMock())
+    monkeypatch.setattr(service, "_publish_event", publish if publish is not None else AsyncMock())
     return service
 
 
@@ -87,7 +84,7 @@ async def test_patch_locks_fresh_row_and_updates_only_requested_fields(monkeypat
         "get_by_id_or_public_id",
         AsyncMock(return_value=stale),
     )
-    service = _configure_service(monkeypatch, control_plane=False)
+    service = _configure_service(monkeypatch)
 
     result = await service.update_task("task-public", TaskUpdateRequest(name="after"), user_id=7)
 
@@ -106,9 +103,18 @@ async def test_patch_locks_fresh_row_and_updates_only_requested_fields(monkeypat
 
 @pytest.mark.asyncio
 async def test_trigger_validation_uses_locked_row_before_save(monkeypatch) -> None:
-    fresh = SimpleNamespace(id=3, name="task", cron_expression="old", save=AsyncMock())
+    fresh = SimpleNamespace(
+        id=3,
+        name="task",
+        schedule_type=ScheduleType.CRON,
+        cron_expression="old",
+        interval_seconds=None,
+        scheduled_time=None,
+        next_run_time=None,
+        save=AsyncMock(),
+    )
     transaction, _, _ = _configure_locked_task(monkeypatch, fresh)
-    service = _configure_service(monkeypatch, control_plane=False)
+    service = _configure_service(monkeypatch)
     validate = Mock(side_effect=ValueError("bad trigger"))
     monkeypatch.setattr(service, "_create_trigger", validate)
     monkeypatch.setattr(
@@ -140,9 +146,8 @@ async def test_control_plane_outbox_is_written_inside_update_transaction(monkeyp
 
     fresh = SimpleNamespace(id=5, name="before", save=AsyncMock())
     transaction, _, _ = _configure_locked_task(monkeypatch, fresh)
-    service = _configure_service(monkeypatch, control_plane=True)
     publish = AsyncMock(side_effect=assert_in_transaction)
-    monkeypatch.setattr(service, "_publish_event", publish)
+    service = _configure_service(monkeypatch, publish=publish)
     monkeypatch.setattr(
         scheduler_module.QueryHelper,
         "get_by_id_or_public_id",
@@ -154,22 +159,21 @@ async def test_control_plane_outbox_is_written_inside_update_transaction(monkeyp
     assert result is fresh
     fresh.save.assert_awaited_once_with(using_db=transaction.connection, update_fields=["name"])
     publish.assert_awaited_once_with("task_changed", 5, connection=transaction.connection)
-    service.add_task.assert_not_awaited()
-    service.remove_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_local_scheduler_sync_runs_only_after_update_commit(monkeypatch) -> None:
+async def test_is_active_toggle_publishes_inside_the_same_transaction(monkeypatch) -> None:
+    """is_active 变更同样只走 outbox：core 侧不再有本地调度器同步分支。"""
     transaction = TransactionProbe()
 
-    async def remove_after_commit(task_id):
-        assert transaction.active is False
-        assert task_id == TASK_ID
+    async def assert_in_transaction(*_args, **kwargs):
+        assert transaction.active is True
+        assert kwargs["connection"] is transaction.connection
 
     fresh = SimpleNamespace(id=TASK_ID, name="task", is_active=True, save=AsyncMock())
     transaction, _, _ = _configure_locked_task(monkeypatch, fresh)
-    service = _configure_service(monkeypatch, control_plane=False)
-    service.remove_task.side_effect = remove_after_commit
+    publish = AsyncMock(side_effect=assert_in_transaction)
+    service = _configure_service(monkeypatch, publish=publish)
     monkeypatch.setattr(
         scheduler_module.QueryHelper,
         "get_by_id_or_public_id",
@@ -181,4 +185,4 @@ async def test_local_scheduler_sync_runs_only_after_update_commit(monkeypatch) -
     assert result is fresh
     assert fresh.is_active is False
     fresh.save.assert_awaited_once_with(using_db=transaction.connection, update_fields=["is_active"])
-    service.remove_task.assert_awaited_once_with(TASK_ID)
+    publish.assert_awaited_once_with("task_changed", TASK_ID, connection=transaction.connection)

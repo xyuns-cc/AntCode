@@ -36,6 +36,7 @@ import {
 import { workerService } from '@/services/workers'
 import { useAuthStore } from '@/stores/authStore'
 import showNotification from '@/utils/notification'
+import type { WorkerResourceInfo } from '@/types'
 
 const { Text } = Typography
 
@@ -44,27 +45,8 @@ interface WorkerResourceManagementProps {
   workerName?: string
 }
 
-interface ResourceData {
-  limits: {
-    max_concurrent_tasks: number
-    task_memory_limit_mb: number
-    task_cpu_time_limit_sec: number
-    task_timeout?: number
-  }
-  auto_adjustment: boolean
-  resource_stats: {
-    cpu_percent: number
-    memory_percent: number
-    disk_percent: number
-    memory_used_mb: number
-    memory_total_mb: number
-    disk_used_gb: number
-    disk_total_gb: number
-    running_tasks: number
-    queued_tasks: number
-    uptime_seconds: number
-  }
-}
+// 组件不再自带一份结构副本：那份副本是 limits.task_timeout（后端从不返回）的来源。
+type ResourceData = WorkerResourceInfo
 
 const getErrorMessage = (err: unknown, fallback: string): string =>
   err instanceof Error ? err.message : fallback
@@ -310,17 +292,14 @@ const WorkerResourceManagement: React.FC<WorkerResourceManagementProps> = ({ wor
           {/* 当前生效配置 */}
           <Card size="small" style={{ background: token.colorFillQuaternary, marginBottom: 16 }}>
             <Row gutter={16}>
-              <Col span={6}>
+              <Col span={8}>
                 <Statistic title="最大并发" value={limits.max_concurrent_tasks} suffix="个" valueStyle={{ fontSize: 16 }} />
               </Col>
-              <Col span={6}>
+              <Col span={8}>
                 <Statistic title="内存限制" value={limits.task_memory_limit_mb} suffix="MB" valueStyle={{ fontSize: 16 }} />
               </Col>
-              <Col span={6}>
+              <Col span={8}>
                 <Statistic title="CPU 时限" value={limits.task_cpu_time_limit_sec} suffix="秒" valueStyle={{ fontSize: 16 }} />
-              </Col>
-              <Col span={6}>
-                <Statistic title="任务超时" value={limits.task_timeout} suffix="秒" valueStyle={{ fontSize: 16 }} />
               </Col>
             </Row>
           </Card>

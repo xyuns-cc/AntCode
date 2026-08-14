@@ -28,7 +28,7 @@ SENSITIVE_PATTERNS = [
     (re.compile(r"\bak_[A-Za-z0-9_\-]{8,}"), "ak_***"),
     (
         re.compile(
-            r'(api[_-]?key|secret[_-]?key|access[_-]?key)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{8,})["\']?',
+            r'(api[_-]?key|secret(?:[_-]?key)?|access[_-]?key)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{8,})["\']?',
             re.IGNORECASE,
         ),
         r"\1=***REDACTED***",
@@ -42,10 +42,14 @@ SENSITIVE_PATTERNS = [
     ),
     (
         re.compile(
-            r'(token|jwt)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{20,})["\']?',
+            r'(token|jwt|session(?:[_-]?(?:id|key|secret))?)["\']?\s*[:=]\s*["\']?([^"\'\s,}&#;]{8,})["\']?',
             re.IGNORECASE,
         ),
         r"\1=***REDACTED***",
+    ),
+    (
+        re.compile(r"((?:Cookie|Set-Cookie)\s*:\s*)[^\r\n]+", re.IGNORECASE),
+        r"\1***REDACTED***",
     ),
     (
         re.compile(
@@ -72,7 +76,13 @@ SENSITIVE_PATTERNS = [
         re.compile(r"([?&][^=&#\s]*(?:password|passwd|pwd)=)[^&#\s]+", re.IGNORECASE),
         r"\1***",
     ),
-    (re.compile(r"([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)"), r"***@\2"),
+    (
+        re.compile(
+            r"(?<![a-zA-Z0-9_.+-])([a-zA-Z0-9_.+-]{1,254})@"
+            r"([a-zA-Z0-9-]{1,63}(?:\.[a-zA-Z0-9-]{1,63})+)"
+        ),
+        r"***@\2",
+    ),
 ]
 
 DEFAULT_SENSITIVE_KEY_TOKENS: frozenset[str] = frozenset(

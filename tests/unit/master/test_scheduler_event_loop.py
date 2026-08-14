@@ -8,9 +8,20 @@ from antcode_core.application.services.crawl.batch_dispatcher_service import (
     crawl_batch_dispatcher_service,
 )
 from antcode_core.application.services.scheduler.outbox_service import OutboxConsumeClaim
-from antcode_master.control.scheduler_event_loop import OutboxClaimBusy, SchedulerEventLoop
+from antcode_master.control import scheduler_event_handlers, scheduler_loop, task_change_handler
+from antcode_master.control.scheduler_authority import SchedulerAuthorityLost
+from antcode_master.control.scheduler_event_loop import (
+    LeaderAuthorityLost,
+    OutboxClaimBusy,
+    SchedulerEventLoop,
+)
 
 scheduler_event_module = importlib.import_module("antcode_master.control.scheduler_event_loop")
+
+
+@pytest.fixture(autouse=True)
+def _leader_authority(monkeypatch):
+    monkeypatch.setattr(scheduler_event_module, "ensure_leader", AsyncMock(return_value=True))
 
 
 class _FakeDurableInbox:
@@ -118,12 +129,38 @@ async def test_consumed_duplicate_is_acked_without_reexecuting_business(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_leader_loss_releases_claim_before_outbox_completion(monkeypatch):
+    inbox = _FakeDurableInbox()
+    monkeypatch.setattr(scheduler_event_module, "scheduler_outbox_service", inbox)
+    monkeypatch.setattr(scheduler_event_module, "ensure_leader", AsyncMock(return_value=False))
+    loop = SchedulerEventLoop()
+    loop._dispatch_with_claim_heartbeat = AsyncMock()
+
+    with pytest.raises(LeaderAuthorityLost):
+        await loop._handle_message(_event())
+
+    assert inbox.releases == 1
+    assert inbox.completions == 0
+
+
+@pytest.mark.asyncio
+async def test_scheduler_authority_loss_keeps_pel_without_poison_counting() -> None:
+    loop = SchedulerEventLoop()
+    loop._handle_message = AsyncMock(side_effect=SchedulerAuthorityLost("stale"))
+    loop._handle_processing_failure = AsyncMock()
+    message = SimpleNamespace(msg_id="1-0", data={"event": "task_trigger"})
+
+    assert await loop._process_message(message) is False
+    loop._handle_processing_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_spider_cleanup_event_deletes_all_run_storage(monkeypatch):
     pipeline = MagicMock()
     pipeline.execute = AsyncMock(return_value=[])
     redis = MagicMock()
     redis.pipeline.return_value = pipeline
-    monkeypatch.setattr(scheduler_event_module, "get_redis_client", AsyncMock(return_value=redis))
+    monkeypatch.setattr(scheduler_event_handlers, "get_redis_client", AsyncMock(return_value=redis))
     loop = SchedulerEventLoop()
 
     await loop._dispatch_message(
@@ -147,6 +184,64 @@ async def test_spider_cleanup_event_deletes_all_run_storage(monkeypatch):
         call("{antcode}:spider:index:expiry:project-1", "run-1"),
     ]
     assert pipeline.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_crawl_project_cleanup_event_runs_idempotent_primitive(monkeypatch):
+    from antcode_core.application.services.crawl import project_redis_cleanup
+
+    cleanup = AsyncMock(
+        return_value=SimpleNamespace(
+            project_id="project-1",
+            batch_count=2,
+            project_keys_deleted=5,
+            cancel_fences_retained=2,
+        )
+    )
+    monkeypatch.setattr(project_redis_cleanup.crawl_project_redis_cleanup, "cleanup", cleanup)
+
+    await SchedulerEventLoop()._dispatch_message(
+        {
+            "event": "crawl_project_cleanup",
+            "project_id": "project-1",
+            "batch_ids": ["batch-1", "batch-2"],
+        }
+    )
+
+    request = cleanup.await_args.args[0]
+    assert request.project_id == "project-1"
+    assert request.batch_ids == ("batch-1", "batch-2")
+
+
+@pytest.mark.asyncio
+async def test_crawl_project_cleanup_failure_stays_retryable(monkeypatch):
+    from antcode_core.application.services.crawl import project_redis_cleanup
+
+    cleanup = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+    monkeypatch.setattr(project_redis_cleanup.crawl_project_redis_cleanup, "cleanup", cleanup)
+
+    with pytest.raises(RuntimeError, match="redis unavailable"):
+        await SchedulerEventLoop()._dispatch_message(
+            {
+                "event": "crawl_project_cleanup",
+                "project_id": "project-1",
+                "batch_ids": ["batch-1"],
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_deleted_task_event_cleans_retry_queue_before_ack(monkeypatch):
+    cleanup = AsyncMock(return_value=2)
+    remove_task = AsyncMock()
+    monkeypatch.setattr(task_change_handler.Task, "get_or_none", AsyncMock(return_value=None))
+    monkeypatch.setattr(task_change_handler, "cleanup_deleted_task_retries", cleanup)
+    monkeypatch.setattr(scheduler_loop.scheduler_service, "remove_task", remove_task)
+
+    await SchedulerEventLoop()._dispatch_message({"event": "task_changed", "task_id": "7"})
+
+    cleanup.assert_awaited_once_with(7)
+    remove_task.assert_awaited_once_with(7)
 
 
 @pytest.mark.asyncio

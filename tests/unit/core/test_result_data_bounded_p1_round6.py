@@ -24,6 +24,7 @@ from antcode_core.application.services.task_run_service import (
     _MAX_RESULT_DATA_BYTES,
     TaskRunService,
     _apply_bounded_result_data,
+    _ResultMetadata,
 )
 
 
@@ -69,13 +70,15 @@ def test_build_result_updates_rejects_result_over_budget():
     with pytest.raises(ResultMetadataRejected, match="超过上限"):
         service._build_result_updates(
             execution,
-            start_dt=None,
-            finish_dt=None,
-            duration_ms=None,
-            exit_code=0,
-            error_message=None,
-            output=None,
-            data={"blob": big, "lease_id": "L-1"},
+            _ResultMetadata(
+                started_at=None,
+                finished_at=None,
+                duration_ms=None,
+                exit_code=0,
+                error_message=None,
+                output=None,
+                data={"blob": big, "lease_id": "L-1"},
+            ),
         )
 
 

@@ -89,9 +89,27 @@ COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /
 COPY --chown=appuser:appgroup services/web_api/src/antcode_web_api /app/services/web_api/src/antcode_web_api
 COPY --chown=appuser:appgroup \
     scripts/__init__.py \
+    scripts/crawl_redis_upgrade_contract.py \
+    scripts/crawl_redis_upgrade_execution.py \
+    scripts/crawl_redis_upgrade_migration.py \
+    scripts/crawl_redis_upgrade_scan.py \
+    scripts/encrypt_sensitive_data.py \
     scripts/init_db.py \
+    scripts/init_db_current_schema.py \
     scripts/init_db_environment.py \
+    scripts/init_db_indexes.py \
+    scripts/init_db_legacy_schema.py \
+    scripts/init_db_schema_contracts.py \
+    scripts/init_db_schema_upgrades.py \
+    scripts/init_db_schema_validation.py \
+    scripts/migrate_worker_credentials.py \
+    scripts/migrate_worker_install_keys.py \
+    scripts/migrate_crawl_redis.py \
+    scripts/rotate_encryption_key.py \
+    scripts/rotate_worker_hmac_encryption_key.py \
     /app/scripts/
+COPY --chown=appuser:appgroup migrations/models /app/migrations/models
+COPY --chmod=0555 infra/docker/entrypoint.load-secrets.sh /usr/local/bin/antcode-load-secrets
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
@@ -113,4 +131,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -fsS http://localhost:8000/api/v1/health/ready >/dev/null || exit 1
 
 # 启动命令（走包内 __main__.py，与 Makefile / 本地开发保持一致）
+ENTRYPOINT ["/usr/local/bin/antcode-load-secrets"]
 CMD ["python", "-m", "antcode_web_api"]

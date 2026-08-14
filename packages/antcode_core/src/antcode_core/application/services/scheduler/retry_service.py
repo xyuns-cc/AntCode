@@ -14,10 +14,6 @@ Master 重启 / Leader 切换会永久丢失重试(retry 实际是 at-most-once)
   ``RETRY_PROCESSING_TIMEOUT_SEC``(默认 60s)的条目 requeue 回 ZSet,防止
   claim 后崩溃导致的补派丢失。
 - Master 重启/切主:ZSet 数据还在 Redis,新的 Leader 直接从 Redis 拿。
-
-对外 API (``schedule_retry`` / ``manual_retry`` / ``get_pending_retries`` /
-``get_retry_stats`` / ``register_compensation_handler`` / ``start`` /
-``stop``) 保持不变。
 """
 
 from __future__ import annotations
@@ -30,11 +26,14 @@ from enum import StrEnum
 from typing import Any
 
 from loguru import logger
+from redis.exceptions import NoScriptError
 
+from antcode_core.application.services.scheduler.manual_retry_outbox import get_manual_retry_event
 from antcode_core.application.services.scheduler.manual_retry_service import execute_manual_retry
 from antcode_core.application.services.scheduler.outbox_service import scheduler_outbox_service
 from antcode_core.application.services.scheduler.retry_statistics import build_retry_stats
 from antcode_core.common.config import settings
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
 
@@ -126,14 +125,12 @@ class _RetryQueueBackend:
         self._claim_sha: str | None = None
         self._script_lock = asyncio.Lock()
 
-    # ------- Redis keys -------
     def pending_key(self) -> str:
         return f"{self._namespace}:retry:pending"
 
     def processing_key(self) -> str:
         return f"{self._namespace}:retry:processing"
 
-    # ------- helpers -------
     @staticmethod
     def _encode(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -196,21 +193,19 @@ class _RetryQueueBackend:
                 str(limit),
                 str(now_ms),
             )
-        except Exception as exc:
-            if "NOSCRIPT" in str(exc):
-                logger.warning("retry claim 脚本未在 Redis 缓存中,回退 EVAL")
-                self._claim_sha = None
-                raw_list = await redis.eval(
-                    _RETRY_CLAIM_LUA,
-                    2,
-                    self.pending_key(),
-                    self.processing_key(),
-                    str(now_ms),
-                    str(limit),
-                    str(now_ms),
-                )
-            else:
-                raise
+        except NoScriptError:
+            # 必须捕获类型：redis-py 已剥掉 "NOSCRIPT" 错误码前缀，按子串判断永不成立。
+            logger.warning("retry claim 脚本未在 Redis 缓存中,回退 EVAL")
+            self._claim_sha = None
+            raw_list = await redis.eval(
+                _RETRY_CLAIM_LUA,
+                2,
+                self.pending_key(),
+                self.processing_key(),
+                str(now_ms),
+                str(limit),
+                str(now_ms),
+            )
         out: list[dict[str, Any]] = []
         for raw in raw_list or []:
             item = self._decode(raw)
@@ -381,7 +376,9 @@ class RetryService:
         execution.retry_count = current_retry + 1
         execution.status = TaskStatus.PENDING
         execution.next_retry_at = next_retry_time
-        execution.error_message = f"重试 {execution.retry_count}/{config.max_retries}: {error}"
+        execution.error_message = normalize_persisted_error_message(
+            f"重试 {execution.retry_count}/{config.max_retries}: {error}"
+        )
         await execution.save()
 
         task.failure_count += 1
@@ -409,6 +406,7 @@ class RetryService:
             user_id,
             cancel_pending=self._backend.cancel,
             enqueue_event=scheduler_outbox_service.enqueue,
+            get_event=get_manual_retry_event,
         )
 
     async def cancel_pending(self, run_id: str) -> int:
@@ -429,7 +427,7 @@ class RetryService:
 
             execution.status = TaskStatus.FAILED
             execution.end_time = datetime.now(UTC)
-            execution.error_message = f"重试耗尽: {error}"
+            execution.error_message = normalize_persisted_error_message(f"重试耗尽: {error}")
             await execution.save()
 
             task_type = str(task.task_type.value) if task.task_type else "default"
@@ -535,24 +533,12 @@ class RetryService:
         return build_retry_stats(task_id, executions)
 
     async def get_pending_retries(self):
-        """获取待重试的任务列表(从 Redis ZSet 只读快照)"""
-        try:
-            snapshot = await self._backend.peek_all()
-        except Exception as exc:
-            logger.warning(f"peek pending retries 失败: {exc}")
-            return []
+        """从 PostgreSQL 权威 durable intent 获取待重试列表。"""
+        from antcode_core.application.services.scheduler.retry_pending_query import (
+            list_durable_pending_retries,
+        )
 
-        pending = []
-        for item in snapshot:
-            pending.append(
-                {
-                    "task_id": item.get("task_id"),
-                    "run_id": item.get("run_id"),
-                    "retry_time": item.get("retry_time"),
-                    "retry_count": item.get("retry_count"),
-                }
-            )
-        return pending
+        return await list_durable_pending_retries()
 
 
 retry_service = RetryService()

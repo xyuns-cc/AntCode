@@ -1,12 +1,6 @@
-"""日志批量持久化服务。
+"""为 Master ``LogIngestLoop`` 提供 PostgreSQL 日志批量持久化。
 
-为 Master ``LogIngestLoop`` 提供批量 ``append_entries`` API，避免上游
-逐条调用 ``task_log_service.write_log`` 导致的 I/O 风暴。
-
-schema 由 ORM model ``antcode_core.domain.models.task_log.TaskLog`` 定义，
-新部署走 ``scripts/init_db.py`` 的 ``Tortoise.generate_schemas`` 建表；
-``event_id`` 的部分唯一索引（``WHERE event_id IS NOT NULL``）由
-``PERFORMANCE_INDEXES`` 显式补建。本服务只做 CRUD，不再懒加载 DDL。
+表由 ORM model 和初始化脚本管理，本服务仅负责 CRUD。
 
 - **签名稳定**：``append_entries(entries: Sequence[PostgresLogEntry])``。
 - **失败可重试**：所有 CRUD 失败一律显式抛 ``Exception``，绝不吞异常返
@@ -40,6 +34,8 @@ from antcode_core.application.services.logs.task_log_run_guard import (
     missing_task_run_ids,
     run_commit_lock_key,
 )
+from antcode_core.common.log_limits import DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES
+from antcode_core.common.log_sanitization import sanitize_log_message
 
 # task_logs 读路径的统一列清单（单一事实来源），SELECT 字符串与 ORM
 # ``.values(*...)`` 均由此派生，各查询模块不得再各自复制。
@@ -91,13 +87,20 @@ class PostgresLogService:
         for entry in entries:
             if not entry.run_id:
                 continue
+            content = sanitize_log_message(entry.content or "")
+            content_bytes = len(content.encode("utf-8"))
+            if content_bytes > DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES:
+                raise ValueError(
+                    "task_logs 单条 content 超过共享持久化上限: "
+                    f"{content_bytes} > {DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES} bytes"
+                )
             ts = entry.timestamp or datetime.now(tz=UTC)
             rows.append(
                 [
                     entry.event_id,
                     entry.run_id,
                     entry.log_type or "stdout",
-                    entry.content or "",
+                    content,
                     int(entry.sequence or 0),
                     ts,
                     entry.level or "INFO",
@@ -109,11 +112,8 @@ class PostgresLogService:
 
         from tortoise.transactions import in_transaction
 
-        # P15: task_logs 上是**部分唯一索引** ``idx_task_logs_event_id_unique
-        # WHERE event_id IS NOT NULL``（迁移 27_add_audit_log_indexes 加的）。
-        # PG 的 ``ON CONFLICT (column)`` 推断要求索引断言与 INSERT 的行
-        # 谓词完全匹配，否则报 ``InvalidColumnReferenceError: no unique or
-        # exclusion constraint matching``。加显式 WHERE 让推断命中部分索引。
+        # task_logs.event_id 使用 WHERE event_id IS NOT NULL 的部分唯一索引；
+        # ON CONFLICT 必须带相同谓词，才能让 PostgreSQL 正确推断该索引。
         # 此前每一批日志都 raise → 消息进 pending 反复 reclaim → task_logs
         # 表持续为空 → UI 日志页永远无历史内容。
         sql = (

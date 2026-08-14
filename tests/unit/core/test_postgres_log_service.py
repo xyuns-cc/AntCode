@@ -5,6 +5,7 @@ from antcode_core.application.services.logs.postgres_log_service import (
     PostgresLogEntry,
     PostgresLogService,
 )
+from antcode_core.common.log_limits import DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES
 
 
 class _TxConnection:
@@ -68,6 +69,24 @@ async def test_append_entries_includes_event_id_for_deduplication(monkeypatch):
     from antcode_core.application.services.logs.postgres_log_service import run_commit_lock_key
 
     assert lock_params == [run_commit_lock_key("run-1")]
+
+
+@pytest.mark.asyncio
+async def test_append_entries_rejects_oversized_content_before_database(monkeypatch):
+    service = PostgresLogService()
+    entry = PostgresLogEntry(
+        run_id="run-1",
+        log_type="stdout",
+        content="x" * (DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES + 1),
+    )
+
+    def transaction(_name):
+        pytest.fail("超限日志不应进入数据库事务")
+
+    monkeypatch.setattr("tortoise.transactions.in_transaction", transaction)
+
+    with pytest.raises(ValueError, match="超过共享持久化上限"):
+        await service.append_entries([entry])
 
 
 @pytest.mark.asyncio

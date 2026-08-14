@@ -33,7 +33,6 @@ const columns: ColumnsType<MonitorTask> = [
     title: '内存', dataIndex: 'memory', key: 'memory', width: 60,
     render: (memory: number | string) => typeof memory === 'number' ? `${memory}%` : memory,
   },
-  { title: '运行时长', dataIndex: 'duration', key: 'duration', width: 90 },
   { title: '操作', key: 'action', width: 70, fixed: 'right', render: () => <Button type="link" size="small">详情</Button> },
 ]
 

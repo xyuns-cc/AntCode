@@ -54,7 +54,7 @@ help:
 	@echo "  make docker-up    - 启动 dev Compose"
 	@echo "  make docker-down  - 停止 dev Compose"
 	@echo "  make docker-build - 构建 dev Compose 镜像"
-	@echo "  make docker-buildx- amd64 + arm64 多架构构建并推送"
+	@echo "  make docker-buildx - amd64 + arm64 多架构本地 OCI 构建"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 清 pycache / ruff cache / coverage 等"
@@ -159,12 +159,16 @@ docker-build:
 	@echo "构建 Docker 镜像..."
 	@docker compose -f infra/docker/docker-compose.dev.yml build
 
-# 构建并推送多架构镜像，需显式提供 registry 和不可变 tag。
+# 构建本地多架构 OCI 归档。正式发布只能由受保护的 CI 工作流执行。
 docker-buildx:
-	@: "$${BUILDX_REGISTRY:?BUILDX_REGISTRY must be set}"
-	@: "$${BUILDX_TAG:?BUILDX_TAG must be set}"
-	@test "$${BUILDX_TAG}" != "latest" || { echo "BUILDX_TAG must be immutable, not latest"; exit 2; }
-	@for spec in \
+	@if [ -n "$${BUILDX_REGISTRY:-}" ] || [ -n "$${BUILDX_TAG:-}" ]; then \
+		echo "docker-buildx does not publish; remove BUILDX_REGISTRY/BUILDX_TAG and use the verified CI release workflow"; \
+		exit 2; \
+	fi
+	@echo "构建本地多架构 OCI 归档；正式发布仅允许 .github/workflows/ci.yml"
+	@output_dir="$${BUILDX_OUTPUT_DIR:-build/docker}"; \
+		mkdir -p "$$output_dir"; \
+		for spec in \
 		"web-api|.|infra/docker/Dockerfile.web_api" \
 		"master|.|infra/docker/Dockerfile.master" \
 		"gateway|.|infra/docker/Dockerfile.gateway" \
@@ -174,10 +178,11 @@ docker-buildx:
 		context="$${rest%%|*}"; dockerfile="$${rest#*|}"; \
 		docker buildx build --platform linux/amd64,linux/arm64 \
 			-f "$$dockerfile" \
-			-t "$${BUILDX_REGISTRY}/antcode-$$svc:$${BUILDX_TAG}" \
-			--push "$$context" || exit 1; \
+			-t "antcode-$$svc:local" \
+			--output "type=oci,dest=$$output_dir/antcode-$$svc.oci.tar" \
+			"$$context" || exit 1; \
 	done
-	@echo "多架构镜像已推送到 $${BUILDX_REGISTRY}，tag=$${BUILDX_TAG}"
+	@echo "本地多架构 OCI 归档构建完成：$${BUILDX_OUTPUT_DIR:-build/docker}"
 
 # =============================================================================
 # 清理

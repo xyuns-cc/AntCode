@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from scripts.annotate_e2e_diagnostics import _escape, _load_secrets, _redact, _run
+from scripts.annotate_e2e_diagnostics import SECRET_NAMES, _escape, _load_secrets, _redact, _run
 
 
 def test_load_and_redact_only_secret_fields(tmp_path: Path, monkeypatch) -> None:
+    for name in SECRET_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ANTCODE_WORKER_KEY", "worker-sensitive")
     env_file = tmp_path / ".env"
     env_file.write_text(

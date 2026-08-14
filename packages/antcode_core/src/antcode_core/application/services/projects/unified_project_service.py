@@ -7,7 +7,20 @@ from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.transactions import in_transaction
 
-from antcode_core.domain.models import Project, ProjectCode, ProjectFile, ProjectRule, ProjectType
+from antcode_core.domain.models import (
+    ExecutionStrategy,
+    Project,
+    ProjectCode,
+    ProjectFile,
+    ProjectRule,
+    ProjectType,
+    User,
+    UserWorkerPermission,
+    Worker,
+    WorkerPermission,
+)
+
+MISSING_DETAIL_MESSAGE = "项目详细配置不存在"
 
 
 class UnifiedProjectService:
@@ -72,7 +85,7 @@ class UnifiedProjectService:
                 basic_fields = request.get_basic_fields()
                 if basic_fields:
                     basic_fields["updated_by"] = user_id
-                    await self._resolve_bound_worker(basic_fields)
+                    await self._resolve_execution_binding(basic_fields, project, connection)
                     await project.update_from_dict(basic_fields)
                     await project.save(using_db=connection)
                     logger.info(f"更新项目基本信息: {project_id}, 字段: {list(basic_fields.keys())}")
@@ -96,23 +109,38 @@ class UnifiedProjectService:
             )
 
     @staticmethod
-    async def _resolve_bound_worker(basic_fields):
-        if "bound_worker_id" not in basic_fields:
+    async def _resolve_execution_binding(basic_fields, project, connection):
+        if not {"execution_strategy", "bound_worker_id"}.intersection(basic_fields):
             return
-        bound_worker_id = basic_fields["bound_worker_id"]
+        strategy = ExecutionStrategy(basic_fields.get("execution_strategy", project.execution_strategy))
+        submitted = "bound_worker_id" in basic_fields
+        bound_worker_id = basic_fields.get("bound_worker_id", project.bound_worker_id)
+        if strategy == ExecutionStrategy.AUTO_SELECT:
+            basic_fields["bound_worker_id"] = None
+            return
         if not bound_worker_id:
+            if strategy == ExecutionStrategy.FIXED_WORKER:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="fixed 策略必须绑定 Worker")
             basic_fields["bound_worker_id"] = None
             return
-        from antcode_core.domain.models import Worker
-
-        worker = await Worker.get_or_none(public_id=str(bound_worker_id))
-        if worker:
-            basic_fields["bound_worker_id"] = worker.id
-            return
-        try:
-            basic_fields["bound_worker_id"] = int(bound_worker_id)
-        except (ValueError, TypeError):
-            basic_fields["bound_worker_id"] = None
+        filters = {"public_id": str(bound_worker_id)} if submitted else {"id": bound_worker_id}
+        worker = await Worker.filter(**filters).using_db(connection).first()
+        if not worker:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="绑定的 Worker 不存在")
+        is_admin = await User.filter(id=project.user_id, is_admin=True).using_db(connection).exists()
+        authorized = (
+            is_admin
+            or await UserWorkerPermission.filter(
+                user_id=project.user_id,
+                worker_id=worker.id,
+                permission=WorkerPermission.USE.value,
+            )
+            .using_db(connection)
+            .exists()
+        )
+        if not authorized:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权使用绑定的 Worker")
+        basic_fields["bound_worker_id"] = worker.id
 
     async def _update_type_config(self, project, request, connection):
         handlers = {
@@ -144,8 +172,7 @@ class UnifiedProjectService:
         rule_detail = await ProjectRule.filter(project_id=project_id).using_db(connection).first()
 
         if not rule_detail:
-            logger.warning(f"规则项目 {project_id} 的详细配置不存在，跳过规则字段更新")
-            return
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=MISSING_DETAIL_MESSAGE)
 
         # 更新规则配置
         await rule_detail.update_from_dict(rule_fields)
@@ -162,8 +189,7 @@ class UnifiedProjectService:
         file_detail = await ProjectFile.filter(project_id=project_id).using_db(connection).first()
 
         if not file_detail:
-            logger.warning(f"文件项目 {project_id} 的详细配置不存在，跳过文件字段更新")
-            return
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=MISSING_DETAIL_MESSAGE)
 
         # 更新文件配置
         await file_detail.update_from_dict(file_fields)
@@ -180,8 +206,7 @@ class UnifiedProjectService:
         code_detail = await ProjectCode.filter(project_id=project_id).using_db(connection).first()
 
         if not code_detail:
-            logger.warning(f"代码项目 {project_id} 的详细配置不存在，跳过代码字段更新")
-            return
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=MISSING_DETAIL_MESSAGE)
 
         # 更新代码配置
         await code_detail.update_from_dict(code_fields)

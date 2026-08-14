@@ -7,6 +7,7 @@ from antcode_core.application.services.workers.worker_heartbeat_service import (
     WorkerHeartbeatService,
 )
 from antcode_core.domain.models import Worker, WorkerStatus
+from antcode_core.domain.models.worker_install_key import WorkerInstallKey
 from tortoise import Tortoise
 
 INITIAL_ACL_REVISION = 1
@@ -19,7 +20,12 @@ UPDATED_MEMORY_MB = 512
 async def database(tmp_path):
     await Tortoise.init(
         db_url=f"sqlite://{tmp_path / 'worker-heartbeat.sqlite3'}",
-        modules={"models": ["antcode_core.domain.models.worker"]},
+        modules={
+            "models": [
+                "antcode_core.domain.models.worker",
+                "antcode_core.domain.models.worker_install_key",
+            ]
+        },
         use_tz=True,
         timezone="UTC",
     )
@@ -80,3 +86,66 @@ async def test_offline_cas_does_not_override_a_newer_heartbeat():
 
     assert updated is False
     assert (await Worker.get(id=worker.id)).status == WorkerStatus.ONLINE.value
+
+
+@pytest.mark.asyncio
+async def test_incremental_cache_discovers_worker_before_full_refresh_ttl():
+    service = WorkerHeartbeatService()
+    await service.init_heartbeat_cache()
+    worker = await Worker.create(name="worker-new", host="127.0.0.1")
+
+    await service.refresh_worker_cache()
+
+    assert service._worker_cache[worker.id].name == "worker-new"
+    assert service._worker_states[worker.id]["next_check"] is not None
+
+
+@pytest.mark.asyncio
+async def test_v2_registration_heartbeat_stays_connecting_until_acknowledged():
+    worker = await Worker.create(
+        name="worker-awaiting-ack",
+        host="127.0.0.1",
+        status=WorkerStatus.CONNECTING.value,
+    )
+    install_key = await WorkerInstallKey.create(
+        key="a" * 64,
+        status="used",
+        os_type="linux",
+        created_by=1,
+        used_by_worker=worker.public_id,
+        registration_id="b" * 32,
+        expires_at=datetime.now(UTC),
+    )
+    service = WorkerHeartbeatService()
+
+    assert await service.heartbeat(worker, status_value=WorkerStatus.ONLINE.value)
+    persisted = await Worker.get(id=worker.id)
+    assert persisted.status == WorkerStatus.CONNECTING.value
+    assert persisted.last_heartbeat is not None
+
+    await WorkerInstallKey.filter(id=install_key.id).update(registration_acknowledged_at=datetime.now(UTC))
+    assert await service.heartbeat(persisted, status_value=WorkerStatus.ONLINE.value)
+    assert (await Worker.get(id=worker.id)).status == WorkerStatus.ONLINE.value
+
+
+@pytest.mark.asyncio
+async def test_health_check_cannot_promote_unacknowledged_v2_worker():
+    worker = await Worker.create(
+        name="worker-health-awaiting-ack",
+        host="127.0.0.1",
+        status=WorkerStatus.CONNECTING.value,
+    )
+    await WorkerInstallKey.create(
+        key="c" * 64,
+        status="used",
+        os_type="linux",
+        created_by=1,
+        used_by_worker=worker.public_id,
+        registration_id="d" * 32,
+        expires_at=datetime.now(UTC),
+    )
+
+    updated = await WorkerHeartbeatService._mark_worker_status(worker, WorkerStatus.ONLINE.value)
+
+    assert updated is False
+    assert (await Worker.get(id=worker.id)).status == WorkerStatus.CONNECTING.value

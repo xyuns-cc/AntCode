@@ -12,7 +12,7 @@ Lease、run ownership 与 SpiderData 已收拢到可信控制面。Direct Worker
 权威 Lease 只有自身 Hash/撤销集合的只读权限，对 Lease 索引、sequence、
 run owner、全部 Spider 存储 key 和共享 global control stream 均无权限。
 广播属于可信控制面的 fan-out 操作：Direct Worker 只消费自己的
-``{ns}:control:{wid}``，不在共享 Stream 上用 consumer group 模拟隔离。
+``{{{ns}}}:control:{wid}``，不在共享 Stream 上用 consumer group 模拟隔离。
 """
 
 from __future__ import annotations

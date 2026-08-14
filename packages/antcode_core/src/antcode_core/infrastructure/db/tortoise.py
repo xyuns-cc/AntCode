@@ -4,14 +4,16 @@ import os
 import ssl
 from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
-from urllib.parse import ParseResult, parse_qs, urlparse
+from urllib.parse import ParseResult, parse_qs, unquote, urlparse
 
 from loguru import logger
 
 POSTGRES_SSL_MODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
 VERIFY_SSL_MODES = frozenset({"verify-ca", "verify-full"})
 SUPPORTED_SSL_QUERY_OPTIONS = frozenset({"sslmode", "sslrootcert"})
+TRUSTED_SERVER_SETTINGS = MappingProxyType({"search_path": "public"})
 
 
 def get_database_url() -> str:
@@ -27,7 +29,7 @@ def get_database_url() -> str:
 def _parse_db_url(db_url: str) -> dict[str, Any]:
     """解析数据库 URL"""
     parsed = urlparse(db_url)
-    database = parsed.path.lstrip("/").split("?")[0]
+    database = unquote(parsed.path.lstrip("/"))
     try:
         port = parsed.port
     except ValueError as exc:
@@ -36,8 +38,8 @@ def _parse_db_url(db_url: str) -> dict[str, Any]:
     required_parts = {
         "host": parsed.hostname,
         "port": port,
-        "user": parsed.username,
-        "password": parsed.password,
+        "user": unquote(parsed.username) if parsed.username is not None else None,
+        "password": unquote(parsed.password) if parsed.password is not None else None,
         "database": database,
     }
     missing = [name for name, value in required_parts.items() if value in (None, "")]
@@ -47,9 +49,10 @@ def _parse_db_url(db_url: str) -> dict[str, Any]:
     credentials: dict[str, Any] = {
         "host": parsed.hostname,
         "port": port,
-        "user": parsed.username,
-        "password": parsed.password,
+        "user": required_parts["user"],
+        "password": required_parts["password"],
         "database": database,
+        "server_settings": TRUSTED_SERVER_SETTINGS.copy(),
     }
     ssl_config = _parse_ssl_config(parsed)
     if ssl_config is not None:

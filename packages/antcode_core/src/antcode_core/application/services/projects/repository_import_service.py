@@ -7,6 +7,10 @@ from typing import Any
 
 from tortoise.transactions import in_transaction
 
+from antcode_core.application.services.projects.runtime_rollback import (
+    RuntimeReservation,
+    RuntimeRollback,
+)
 from antcode_core.application.services.projects.source_bundle_paths import (
     normalize_source_subdir,
     string_list,
@@ -25,39 +29,6 @@ class ImportContext:
     connection: Any
     user_id: int
     created_by: str
-
-
-@dataclass(frozen=True)
-class RuntimeReservation:
-    worker_id: str
-    env_name: str
-
-
-class RuntimeRollback:
-    """Tracks external environments that must follow the database transaction."""
-
-    def __init__(self, runtime_service: RuntimeControlService) -> None:
-        self._runtime_service = runtime_service
-        self._reservations: list[RuntimeReservation] = []
-
-    def register(self, reservation: RuntimeReservation) -> None:
-        self._reservations.append(reservation)
-
-    async def compensate(self, primary: BaseException) -> None:
-        failures: list[BaseException] = []
-        for reservation in reversed(self._reservations):
-            try:
-                result = await self._runtime_service.delete_env(
-                    reservation.worker_id,
-                    reservation.env_name,
-                )
-                if not result.get("success"):
-                    error = str(result.get("error") or "未知错误")
-                    raise RuntimeError(f"删除运行时 {reservation.env_name} 失败: {error}")
-            except BaseException as exc:
-                failures.append(exc)
-        if failures:
-            raise BaseExceptionGroup("仓库导入失败且运行时回滚未完成", [primary, *failures]) from primary
 
 
 class RepositoryProjectImporter:
@@ -176,6 +147,7 @@ class RepositoryProjectImporter:
             python_version=item.python_version,
             packages=item.dependencies or [],
             created_by=context.created_by,
+            owner_user_id=str(context.user_id),
         )
         if not result.get("success"):
             error = str(result.get("error") or "未知错误")

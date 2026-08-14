@@ -6,7 +6,6 @@ import asyncio
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 from antcode_core.application.services.projects.git_credential_service import (
@@ -48,24 +47,22 @@ from antcode_core.application.services.projects.source_bundle_paths import (
 from antcode_core.application.services.projects.source_bundle_paths import (
     validate_bundle_paths as _validate_bundle_paths,
 )
+from antcode_core.application.services.projects.source_bundle_revision import (
+    parse_ls_remote_output as _parse_ls_remote_output,
+)
+from antcode_core.application.services.projects.source_bundle_revision import (
+    select_revision as _select_revision,
+)
+from antcode_core.application.services.projects.source_bundle_singleflight import (
+    MAX_BUNDLE_ARCHIVE_BYTES,
+    SOURCE_BUNDLE_MEDIA_TYPE,
+    AsyncSingleFlight,
+    SourceBundle,
+    bundle_request_key,
+)
 from antcode_core.common.config import settings
 from antcode_core.common.runtime_paths import ensure_runtime_dir
 from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
-
-SOURCE_BUNDLE_MEDIA_TYPE = "application/vnd.antcode.source-bundle+tar-gzip"
-
-
-MAX_BUNDLE_ARCHIVE_BYTES = 100 * 1024 * 1024
-
-
-@dataclass(frozen=True)
-class SourceBundle:
-    uri: str
-    sha256: str
-    size_bytes: int
-    entry_point: str
-    resolved_revision: str
-    artifact_id: int
 
 
 class SourceBundleService:
@@ -73,6 +70,7 @@ class SourceBundleService:
 
     def __init__(self, artifact_store: PostgresArtifactStore | None = None) -> None:
         self._artifact_store = artifact_store or PostgresArtifactStore()
+        self._builds = AsyncSingleFlight[str, SourceBundle]()
 
     async def create_git_source_bundle(
         self,
@@ -83,6 +81,14 @@ class SourceBundleService:
     ) -> SourceBundle:
         del project_public_id
         _require_git_source(source_config)
+        key = bundle_request_key(source_config, entry_point)
+        return await self._builds.run(key, lambda: self._create_git_source_bundle(source_config, entry_point))
+
+    async def _create_git_source_bundle(
+        self,
+        source_config: dict[str, object],
+        entry_point: str | None,
+    ) -> SourceBundle:
         auth_config = await git_credential_service.build_auth_config(
             str(source_config["url"]),
             _optional_str(source_config.get("credential_id")),
@@ -182,45 +188,6 @@ def _resolve_git_revision(
     if not entries:
         raise ValueError("无法解析 Git 引用版本")
     return _select_revision(entries, ref)
-
-
-def _parse_ls_remote_output(output: str) -> list[tuple[str, str]]:
-    """把 ``git ls-remote`` 输出解析成 (sha, refname) 列表。"""
-    entries: list[tuple[str, str]] = []
-    for line in output.strip().splitlines():
-        parts = line.split(maxsplit=1)
-        if len(parts) != 2:
-            continue
-        entries.append((parts[0].strip(), parts[1].strip()))
-    return entries
-
-
-def _select_revision(entries: list[tuple[str, str]], ref: str) -> str:
-    """从 ls-remote 结果中确定性地选出目标 commit。
-
-    必须与 ``_clone_repo`` 的 ``--branch <ref>`` 语义保持一致：同名
-    branch/tag 并存时 git clone 会解析成 branch，因此这里优先精确匹配
-    ``refs/heads/<ref>``；其次 ``refs/tags/<ref>``（annotated tag 取
-    ``^{}`` 剥离后的 commit）。否则会解析出 clone 拿不到的 tag commit，
-    导致 checkout 失败或 "检出版本不一致" 报错。
-    """
-    by_ref = {refname: sha for sha, refname in entries}
-    branch_sha = by_ref.get(f"refs/heads/{ref}")
-    if branch_sha:
-        return branch_sha
-    tag_ref = f"refs/tags/{ref}"
-    tag_sha = by_ref.get(tag_ref)
-    if tag_sha:
-        # ``git clone --no-tags --branch <tag>`` 在无同名 branch 时会
-        # 直接以 detached HEAD 检出该 tag 的 commit，因此返回剥离后的
-        # commit 与后续 checkout / rev-parse 校验一致。
-        return by_ref.get(f"{tag_ref}^{{}}") or tag_sha
-    # 其他形态（HEAD、完整 ref 路径、SHA 前缀等）：保留原有行为，
-    # 优先 ^{} 剥离行（annotated tag → commit），否则取最后一行。
-    dereferenced = [sha for sha, refname in entries if refname.endswith("^{}")]
-    if dereferenced:
-        return dereferenced[-1]
-    return entries[-1][0]
 
 
 def _clone_repo(

@@ -2,7 +2,7 @@ import type { ChartData } from 'chart.js'
 import { formatTimeLabel } from '../data'
 import type {
   ClusterHistory,
-  MonitorTask,
+  MonitorTaskCounts,
   PerformancePeriod,
   WorkerDisplayData,
   WorkerHistoryPoint,
@@ -37,7 +37,7 @@ export const createTrendData = (
   history: ClusterHistory | null,
   metric: 'cpu' | 'memory',
   period: PerformancePeriod,
-  current: ClusterMetrics,
+  current: ClusterMetrics
 ): ChartData<'line'> => {
   if (!history || history.timestamps.length === 0) {
     return createCurrentTrendData(metric, current)
@@ -59,7 +59,7 @@ const createTrendDataset = (
   data: number[],
   borderColor: string,
   backgroundColor: string,
-  dashed: boolean,
+  dashed: boolean
 ) => ({
   label,
   data,
@@ -75,11 +75,12 @@ const createTrendDataset = (
 
 const createCurrentTrendData = (
   metric: 'cpu' | 'memory',
-  current: ClusterMetrics,
+  current: ClusterMetrics
 ): ChartData<'line'> => {
-  const values = metric === 'cpu'
-    ? [current.avgCpu, current.maxCpu, current.minCpu]
-    : [current.avgMem, current.maxMem, current.minMem]
+  const values =
+    metric === 'cpu'
+      ? [current.avgCpu, current.maxCpu, current.minCpu]
+      : [current.avgMem, current.maxMem, current.minMem]
   const primary = metric === 'cpu' ? '#1890ff' : '#722ed1'
   return {
     labels: ['当前'],
@@ -87,9 +88,12 @@ const createCurrentTrendData = (
       label,
       data: [values[index]],
       borderColor: [primary, '#ff7875', '#95de64'][index],
-      backgroundColor: index === 0
-        ? metric === 'cpu' ? 'rgba(24, 144, 255, 0.1)' : 'rgba(114, 46, 209, 0.1)'
-        : undefined,
+      backgroundColor:
+        index === 0
+          ? metric === 'cpu'
+            ? 'rgba(24, 144, 255, 0.1)'
+            : 'rgba(114, 46, 209, 0.1)'
+          : undefined,
       borderWidth: index === 0 ? 3 : 2,
       pointRadius: 5,
     })),
@@ -98,7 +102,7 @@ const createCurrentTrendData = (
 
 export const createWorkerDetailData = (
   worker: WorkerDisplayData | null,
-  history: WorkerHistoryPoint[],
+  history: WorkerHistoryPoint[]
 ): ChartData<'line'> | null => {
   if (!worker) return null
   const hasHistory = history.length > 0
@@ -111,8 +115,18 @@ export const createWorkerDetailData = (
   return {
     labels,
     datasets: [
-      createWorkerDataset('CPU', hasHistory ? history.map((point) => point.cpu) : [worker.cpu], '#1890ff', hasHistory),
-      createWorkerDataset('内存', hasHistory ? history.map((point) => point.memory) : [worker.memory], '#52c41a', hasHistory),
+      createWorkerDataset(
+        'CPU',
+        hasHistory ? history.map((point) => point.cpu) : [worker.cpu],
+        '#1890ff',
+        hasHistory
+      ),
+      createWorkerDataset(
+        '内存',
+        hasHistory ? history.map((point) => point.memory) : [worker.memory],
+        '#52c41a',
+        hasHistory
+      ),
     ],
   }
 }
@@ -121,7 +135,7 @@ const createWorkerDataset = (
   label: string,
   data: number[],
   color: string,
-  hasHistory: boolean,
+  hasHistory: boolean
 ) => ({
   label,
   data,
@@ -134,28 +148,36 @@ const createWorkerDataset = (
   pointHoverRadius: hasHistory ? 6 : undefined,
 })
 
-export const createTaskStatsData = (tasks: MonitorTask[]): ChartData<'bar'> => {
-  const count = (status: MonitorTask['status']) => tasks.filter((task) => task.status === status).length
+export const createTaskStatsData = (counts: MonitorTaskCounts): ChartData<'bar'> => {
   return {
     labels: ['成功', '失败', '运行中', '待执行'],
-    datasets: [{
-      label: '任务数量',
-      data: [count('success'), count('failed'), count('running'), count('pending')],
-      backgroundColor: ['#52c41a', '#ff4d4f', '#1890ff', '#faad14'],
-    }],
+    datasets: [
+      {
+        label: '任务数量',
+        data: [counts.success, counts.failed, counts.running, counts.pending],
+        backgroundColor: ['#52c41a', '#ff4d4f', '#1890ff', '#faad14'],
+      },
+    ],
   }
 }
 
 export const createDiskUsageData = (workers: WorkerDisplayData[]): ChartData<'bar'> => {
   if (workers.length === 0) {
-    return { labels: ['暂无数据'], datasets: [{ label: '磁盘使用率', data: [0], backgroundColor: ['#d9d9d9'] }] }
+    return {
+      labels: ['暂无数据'],
+      datasets: [{ label: '磁盘使用率', data: [0], backgroundColor: ['#d9d9d9'] }],
+    }
   }
   return {
     labels: workers.map((worker) => worker.name),
-    datasets: [{
-      label: '磁盘使用率 (%)',
-      data: workers.map((worker) => worker.disk),
-      backgroundColor: workers.map((worker) => worker.disk > 80 ? '#ff4d4f' : worker.disk > 60 ? '#faad14' : '#722ed1'),
-    }],
+    datasets: [
+      {
+        label: '磁盘使用率 (%)',
+        data: workers.map((worker) => worker.disk),
+        backgroundColor: workers.map((worker) =>
+          worker.disk > 80 ? '#ff4d4f' : worker.disk > 60 ? '#faad14' : '#722ed1'
+        ),
+      },
+    ],
   }
 }

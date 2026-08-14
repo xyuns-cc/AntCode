@@ -33,6 +33,7 @@ export interface PaginationState {
 export interface UserListQuery {
   page: number
   size: number
+  search?: string
   sortField: SortField
   sortOrder: SortOrder
 }

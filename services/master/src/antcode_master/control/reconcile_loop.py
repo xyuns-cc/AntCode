@@ -20,13 +20,16 @@ import contextlib
 from datetime import UTC, datetime
 
 from antcode_core.domain.models import TaskRun
-from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.enums import RuntimeStatus, TaskStatus
 from loguru import logger
 
+from antcode_master.control.reconcile_failure_settlement import settle_runtime_failure_snapshot
 from antcode_master.control.reconcile_repairs import (
     cleanup_zombie_tasks,
     repair_inconsistent_states,
 )
+from antcode_master.control.retry_intent_delivery import RetryIntentDeliveryError
+from antcode_master.control.scheduler_authority import SchedulerAuthorityLost
 from antcode_master.leader import ensure_leader, get_fencing_token
 
 
@@ -141,8 +144,8 @@ class ReconcileLoop:
             repair_stuck_queued_runs,
         )
 
-        await repair_stuck_queued_runs()
-        await repair_stale_task_status()
+        await repair_stuck_queued_runs(fencing_token)
+        await repair_stale_task_status(fencing_token)
 
         # 5. P2 §4.3: global control stream 安全裁剪（详见模块注释）。
         from antcode_master.control.global_stream_retention import trim_global_control_stream
@@ -150,79 +153,38 @@ class ReconcileLoop:
         await trim_global_control_stream()
 
     async def _check_timeout_tasks(self, fencing_token: int):
-        """检测超时任务（bulk_update 单条 UPDATE 即可）。
-
-        Args:
-            fencing_token: Fencing Token
-        """
+        """Settle runs that exceeded their per-task runtime timeout."""
         try:
-            # R1-P1-2 (审查报告): 原实现 (a) 用全局 300s 阈值一刀切，正常
-            # 派发默认 timeout 3600 的爬虫会被误杀；(b) bulk update 绕过
-            # 状态机，只写 status 不写 runtime_status，同 P1-1 机制迟到
-            # SUCCESS 可翻回。
-            # 修复策略：只对确实超过 per-run timeout 的记录标 TIMEOUT，
-            # 且走 execution_status_service.update_runtime_status 让终态
-            # 保护生效。R1-P2-23 同时兜住 start_time 为 NULL 的记录
-            # （改用 last_heartbeat / created_at 兜底）。
-            from antcode_core.application.services.scheduler.execution_status_service import (
-                execution_status_service,
-            )
-            from antcode_core.domain.models.enums import RuntimeStatus
-
             now = datetime.now(UTC)
-            # 拉活跃 RUNNING 记录：per-run 判定
-            candidates = (
-                await TaskRun.filter(status=TaskStatus.RUNNING)
-                .only(
-                    "id",
-                    "run_id",
-                    "start_time",
-                    "last_heartbeat",
-                    "created_at",
-                    "task_id",
-                )
-                .all()
-            )
-
+            candidates = await _load_timeout_candidates()
             if not candidates:
                 return
-
-            # 尝试拿到 per-task timeout；缺失时回退到全局阈值
-            timeout_map: dict[int, int] = {}
-            task_ids = [c.task_id for c in candidates if c.task_id]
-            if task_ids:
-                from antcode_core.domain.models import Task
-
-                for t in await Task.filter(id__in=task_ids).only("id", "timeout_seconds").all():
-                    timeout_map[t.id] = int(getattr(t, "timeout_seconds", 0) or 0)
-
-            to_mark: list[TaskRun] = []
-            fallback_threshold = int(self.timeout_threshold or 300)
-            for run in candidates:
-                # 优先按 start_time；R1-P2-23: NULL 时用 last_heartbeat 或 created_at 兜底
-                anchor = run.start_time or run.last_heartbeat or run.created_at
-                if not anchor:
-                    continue
-                per_run_to = timeout_map.get(run.task_id, 0) or fallback_threshold
-                elapsed = (now - anchor).total_seconds()
-                if elapsed > per_run_to:
-                    to_mark.append(run)
-
+            timeout_map = await _load_task_timeouts(candidates)
+            fallback = int(self.timeout_threshold or 300)
+            to_mark = _expired_runs(
+                candidates,
+                timeout_map,
+                fallback_threshold=fallback,
+                now=now,
+            )
             if not to_mark:
                 return
             logger.warning(f"发现 {len(to_mark)} 个超时任务，走状态机 CAS")
             marked = 0
             for run in to_mark:
-                ok = await execution_status_service.update_runtime_status(
-                    run_id=run.run_id,
-                    status=RuntimeStatus.TIMEOUT,
-                    status_at=now,
+                ok = await settle_runtime_failure_snapshot(
+                    run,
+                    fencing_token,
+                    terminal_status=RuntimeStatus.TIMEOUT,
                     error_message="任务执行超时（超过 per-run timeout）",
+                    status_at=now,
                 )
                 if ok:
                     marked += 1
             logger.info(f"已标记 {marked}/{len(to_mark)} 个任务为 TIMEOUT")
 
+        except (SchedulerAuthorityLost, RetryIntentDeliveryError):
+            raise
         except Exception:
             logger.exception("检测超时任务失败")
 
@@ -235,7 +197,7 @@ class ReconcileLoop:
         """
         from antcode_master.control.dispatch_ack_liveness import check_dispatched_no_ack
 
-        await check_dispatched_no_ack(self.DISPATCH_ACK_TIMEOUT_SECONDS)
+        await check_dispatched_no_ack(self.DISPATCH_ACK_TIMEOUT_SECONDS, fencing_token)
 
     async def _check_inconsistent_states(self, fencing_token: int):
         """检测状态不一致并通过统一状态机收敛终态。
@@ -243,7 +205,7 @@ class ReconcileLoop:
         Args:
             fencing_token: Fencing Token
         """
-        await repair_inconsistent_states()
+        await repair_inconsistent_states(fencing_token)
 
     async def _cleanup_zombie_tasks(self, fencing_token: int):
         """清理僵尸任务（bulk_update）。
@@ -251,8 +213,56 @@ class ReconcileLoop:
         Args:
             fencing_token: Fencing Token
         """
-        await cleanup_zombie_tasks()
+        await cleanup_zombie_tasks(fencing_token)
 
 
 # 全局协调循环实例
 reconcile_loop = ReconcileLoop()
+
+
+async def _load_timeout_candidates() -> list[TaskRun]:
+    return (
+        await TaskRun.filter(status=TaskStatus.RUNNING)
+        .only(
+            "id",
+            "run_id",
+            "start_time",
+            "last_heartbeat",
+            "created_at",
+            "task_id",
+            "scheduler_fencing_token",
+            "dispatch_status",
+            "runtime_status",
+            "worker_id",
+            "lease_id",
+        )
+        .all()
+    )
+
+
+async def _load_task_timeouts(candidates: list[TaskRun]) -> dict[int, int]:
+    from antcode_core.domain.models import Task
+
+    task_ids = [run.task_id for run in candidates if run.task_id]
+    if not task_ids:
+        return {}
+    tasks = await Task.filter(id__in=task_ids).only("id", "timeout_seconds").all()
+    return {task.id: int(task.timeout_seconds or 0) for task in tasks}
+
+
+def _expired_runs(
+    candidates: list[TaskRun],
+    timeout_map: dict[int, int],
+    *,
+    fallback_threshold: int,
+    now: datetime,
+) -> list[TaskRun]:
+    expired = []
+    for run in candidates:
+        anchor = run.start_time or run.last_heartbeat or run.created_at
+        if anchor is None:
+            continue
+        timeout = timeout_map.get(run.task_id, 0) or fallback_threshold
+        if (now - anchor).total_seconds() > timeout:
+            expired.append(run)
+    return expired

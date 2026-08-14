@@ -52,6 +52,7 @@ class TestDirectModeE2E:
     async def test_task_dispatch_and_ack(
         self,
         unique_task_id,
+        unique_execution_id,
         unique_worker_id,
         *,
         direct_transport_factory,
@@ -93,9 +94,9 @@ class TestDirectModeE2E:
                 # Group 可能已存在
                 pass
 
-            # 模拟 Master 分发任务
             task_data = {
                 "task_id": unique_task_id,
+                "run_id": unique_execution_id,
                 "project_id": "test-project-001",
                 "project_type": "code",
                 "priority": "5",
@@ -104,17 +105,15 @@ class TestDirectModeE2E:
                 **direct_support.source_bundle_fields("c"),
             }
 
-            msg_id = await redis_client.xadd(stream_key, task_data)
+            msg_id = await direct_support.publish_ready_task(redis_client, transport, task_data)
             assert msg_id, "任务写入失败"
             logger.info(f"[Test] 任务已分发: {unique_task_id}, msg_id={msg_id}")
 
-            # Worker 拉取任务
             task = await transport.poll_task(timeout=5.0)
             assert task is not None, "未能拉取到任务"
             assert task.task_id == unique_task_id, f"任务 ID 不匹配: {task.task_id}"
             logger.info(f"[Test] 任务已拉取: {task.task_id}")
 
-            # Worker ACK 任务
             ack_result = await transport.ack_task(task.receipt, accepted=True)
             assert ack_result, "ACK 失败"
             logger.info(f"[Test] 任务已 ACK: {task.task_id}")
@@ -215,8 +214,8 @@ class TestDirectModeE2E:
 
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import CallbackLogSink, ExecutorConfig
+        from antcode_worker.executor.process import ProcessExecutor
 
         # 创建临时目录和脚本
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -306,8 +305,8 @@ class TestDirectModeE2E:
         import redis.asyncio as aioredis
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
+        from antcode_worker.executor.process import ProcessExecutor
         from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
         from antcode_worker.transport.redis.keys import RedisKeys
 
@@ -354,6 +353,7 @@ class TestDirectModeE2E:
                 # 2. 模拟 Master 分发任务
                 task_data = {
                     "task_id": unique_task_id,
+                    "run_id": unique_execution_id,
                     "project_id": "e2e-test-project",
                     "project_type": "code",
                     "priority": "10",
@@ -361,7 +361,7 @@ class TestDirectModeE2E:
                     "entry_point": "main.py",
                     **direct_support.source_bundle_fields("d"),
                 }
-                await redis_client.xadd(stream_key, task_data)
+                await direct_support.publish_ready_task(redis_client, transport, task_data)
                 logger.info(f"[E2E] 任务已分发: {unique_task_id}")
 
                 # 3. Worker 拉取任务

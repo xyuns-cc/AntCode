@@ -13,11 +13,22 @@ _worker_to_response 由 register_permission_routes 时从主 workers.py 注入,
 
 from __future__ import annotations
 
+from typing import Never
+
 from antcode_core.application.services.workers import worker_service
+from antcode_core.application.services.workers.worker_permission_service import (
+    WorkerPermissionTargetNotFound,
+    worker_permission_service,
+)
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User, Worker
 from antcode_core.domain.schemas.worker import WorkerListResponse
-from fastapi import Body, Depends, HTTPException, status
+from antcode_core.domain.schemas.worker_permission import (
+    Identifier,
+    WorkerPermissionAssignRequest,
+    WorkerPermissionBatchAssignRequest,
+)
+from fastapi import Depends, HTTPException, status
 from tortoise.expressions import Q
 
 from antcode_web_api.response import BaseResponse, success
@@ -38,6 +49,46 @@ async def _require_worker(worker_id: str) -> Worker:
     return worker
 
 
+async def _resolve_user(identifier: Identifier, *, numeric_string_is_id: bool = False) -> User:
+    if isinstance(identifier, int):
+        user = await User.filter(id=identifier).only("id", "public_id", "is_admin").first()
+    else:
+        user = await User.filter(public_id=identifier).only("id", "public_id", "is_admin").first()
+        if user is None and numeric_string_is_id and identifier.isdigit():
+            user = await User.filter(id=int(identifier)).only("id", "public_id", "is_admin").first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    return user
+
+
+async def _resolve_workers(identifiers: list[Identifier]) -> list[int]:
+    bounded_distinct_ids(identifiers, "worker_ids")
+    int_ids = [value for value in identifiers if isinstance(value, int)]
+    public_ids = [value for value in identifiers if isinstance(value, str)]
+    conditions = Q(id__in=int_ids) if int_ids else Q(public_id__in=public_ids)
+    if int_ids and public_ids:
+        conditions |= Q(public_id__in=public_ids)
+    workers = await Worker.filter(conditions).only("id", "public_id").all()
+    matched: dict[int | str, int] = {worker.id: worker.id for worker in workers}
+    matched.update({worker.public_id: worker.id for worker in workers})
+    missing = [str(identifier) for identifier in identifiers if identifier not in matched]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Worker 不存在: {', '.join(missing)}",
+        )
+    resolved = [matched[identifier] for identifier in identifiers]
+    if len(set(resolved)) != len(resolved):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="worker_ids 指向重复 Worker")
+    return resolved
+
+
+def _raise_permission_http_error(exc: ValueError) -> Never:
+    if isinstance(exc, WorkerPermissionTargetNotFound):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 async def get_my_available_workers(current_user: TokenData, worker_to_response):
     user = await User.get_or_none(id=current_user.user_id)
     is_admin = user.is_admin if user else False
@@ -49,86 +100,57 @@ async def get_my_available_workers(current_user: TokenData, worker_to_response):
 async def get_worker_users(worker_id: str, current_user: TokenData):
     await _require_admin(current_user)
     worker = await _require_worker(worker_id)
-    users = await worker_service.get_worker_users(worker.id)
+    users = await worker_permission_service.get_worker_users(worker.id)
     return success(users)
 
 
-async def assign_worker_permission(worker_id: str, request: dict, current_user: TokenData):
+async def assign_worker_permission(
+    worker_id: str,
+    request: WorkerPermissionAssignRequest,
+    current_user: TokenData,
+):
     await _require_admin(current_user)
     worker = await _require_worker(worker_id)
-
-    user_id = request.get("user_id")
-    permission = request.get("permission", "use")
-    note = request.get("note")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户ID不能为空")
-    # 支持 public_id 或内部 id
-    if isinstance(user_id, str):
-        user = await User.filter(public_id=user_id).first()
-        if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-        user_id = user.id
-
-    await worker_service.assign_worker_to_user(
-        worker_id=worker.id,
-        user_id=user_id,
-        permission=permission,
-        assigned_by=current_user.user_id,
-        note=note,
-    )
+    user = await _resolve_user(request.user_id)
+    try:
+        await worker_permission_service.assign(
+            worker_id=worker.id,
+            user_id=user.id,
+            permission=request.permission,
+            assigned_by=current_user.user_id,
+            note=request.note,
+        )
+    except ValueError as exc:
+        _raise_permission_http_error(exc)
     return success({"assigned": True}, message="权限分配成功")
 
 
 async def revoke_worker_permission(worker_id: str, user_id: str, current_user: TokenData):
     await _require_admin(current_user)
     worker = await _require_worker(worker_id)
-
-    # 支持 public_id 或内部 id
+    user = await _resolve_user(user_id, numeric_string_is_id=True)
     try:
-        internal_user_id = int(user_id)
-    except ValueError:
-        user = await User.filter(public_id=user_id).first()
-        if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-        internal_user_id = user.id
-
-    revoked = await worker_service.revoke_worker_from_user(worker.id, internal_user_id)
+        revoked = await worker_permission_service.revoke(worker_id=worker.id, user_id=user.id)
+    except ValueError as exc:
+        _raise_permission_http_error(exc)
     if revoked:
         return success({"revoked": True}, message="权限撤销成功")
     return success({"revoked": False}, message="该用户没有此 Worker 权限")
 
 
-async def batch_assign_workers(request: dict, current_user: TokenData):
+async def batch_assign_workers(request: WorkerPermissionBatchAssignRequest, current_user: TokenData):
     await _require_admin(current_user)
-
-    user_id = request.get("user_id")
-    worker_ids = bounded_distinct_ids(request.get("worker_ids"), "worker_ids")
-    permission = request.get("permission", "use")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户ID不能为空")
-
-    # 支持 public_id 与内部 ID 混合查询, 单次 Worker.filter(Q|Q) 避免 N+1
-    int_ids: list[int] = []
-    str_ids: list[str] = []
-    for wid in worker_ids:
-        if isinstance(wid, int) or (isinstance(wid, str) and wid.isdigit()):
-            int_ids.append(int(wid) if isinstance(wid, str) else wid)
-        else:
-            str_ids.append(wid)
-    conditions = Q()
-    if int_ids:
-        conditions |= Q(id__in=int_ids)
-    if str_ids:
-        conditions |= Q(public_id__in=str_ids)
-    workers_matched = await Worker.filter(conditions).only("id").all() if (int_ids or str_ids) else []
-    internal_ids = [w.id for w in workers_matched]
-
-    result = await worker_service.batch_assign_workers(
-        user_id=user_id,
-        worker_ids=internal_ids,
-        permission=permission,
-        assigned_by=current_user.user_id,
-    )
+    user = await _resolve_user(request.user_id)
+    worker_ids = await _resolve_workers(request.worker_ids)
+    try:
+        result = await worker_permission_service.batch_assign(
+            user_id=user.id,
+            worker_ids=worker_ids,
+            permission=request.permission,
+            assigned_by=current_user.user_id,
+        )
+    except ValueError as exc:
+        _raise_permission_http_error(exc)
     return success(result, message=f"成功分配 {result['success']} 个 Worker 权限")
 
 
@@ -159,7 +181,7 @@ def register_permission_routes(router, worker_to_response) -> None:
     )
     async def _assign_worker_permission(
         worker_id: str,
-        request: dict = Body(...),
+        request: WorkerPermissionAssignRequest,
         current_user: TokenData = Depends(get_current_user),
     ):
         return await assign_worker_permission(worker_id, request, current_user)
@@ -184,7 +206,7 @@ def register_permission_routes(router, worker_to_response) -> None:
         description="批量给用户分配多个 Worker 权限（管理员）",
     )
     async def _batch_assign_workers(
-        request: dict = Body(...),
+        request: WorkerPermissionBatchAssignRequest,
         current_user: TokenData = Depends(get_current_user),
     ):
         return await batch_assign_workers(request, current_user)

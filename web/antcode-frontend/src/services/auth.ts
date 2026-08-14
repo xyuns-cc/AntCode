@@ -12,7 +12,6 @@ import {
   setSessionHint,
 } from './authToken'
 import { AuthHandler } from '@/utils/authHandler'
-import { API_BASE_URL, STORAGE_KEYS } from '@/utils/constants'
 import { useAuthStore } from '@/stores/authStore'
 import { encryptLoginPassword } from '@/utils/loginEncryption'
 import Logger from '@/utils/logger'
@@ -47,10 +46,6 @@ class AuthService {
     }
 
     const response = await requestSessionLogin<ApiResponse<BackendLoginResponse>>(loginPayload)
-
-    const allowedSource = this.resolveClientEndpoint(API_BASE_URL)
-
-    localStorage.setItem(STORAGE_KEYS.INSTALL_KEY_ALLOWED_SOURCE, allowedSource)
 
     const payload = response.data.data
     const user = payload.user
@@ -158,7 +153,7 @@ class AuthService {
     return useAuthStore.getState().user
   }
 
-  // 获取用户权限
+  // 获取用户权限：唯一权威来源是后端接口，access_token 里不携带 permissions 声明。
   async getUserPermissions(): Promise<string[]> {
     const response = await apiClient.get<ApiResponse<{ permissions: string[] }>>(
       '/api/v1/auth/permissions'
@@ -168,38 +163,6 @@ class AuthService {
       throw new Error('服务端未返回用户权限')
     }
     return permissions
-  }
-
-  // 检查用户是否有特定权限
-  hasPermission(permission: string, userPermissions?: string[]): boolean {
-    const permissions = userPermissions || this.getCachedPermissions()
-    return permissions.includes(permission)
-  }
-
-  // 获取缓存的权限（从 token 中解析）
-  private getCachedPermissions(): string[] {
-    const token = TokenManager.getAccessToken()
-    if (!token) return []
-
-    const payload = TokenManager.getTokenPayload(token)
-    return payload?.permissions || []
-  }
-
-  private resolveClientEndpoint(baseUrl: string): string {
-    try {
-      const parsed = new URL(baseUrl)
-      const host = parsed.hostname
-      if (host) {
-        return host
-      }
-    } catch {
-      // ignore
-    }
-
-    if (typeof window !== 'undefined' && window.location?.hostname) {
-      return window.location.hostname
-    }
-    return 'unknown'
   }
 
   // 自动刷新 token

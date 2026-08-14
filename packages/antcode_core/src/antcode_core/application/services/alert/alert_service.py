@@ -18,6 +18,11 @@ from antcode_core.application.services.alert.alert_channels import (
     WeComAlertChannel,
 )
 from antcode_core.application.services.alert.alert_manager import alert_manager
+from antcode_core.application.services.alert.test_delivery import (
+    TestAlertDelivery,
+    deliver_test_alert,
+    summarize_test_results,
+)
 from antcode_core.common.serialization import from_json
 
 
@@ -233,48 +238,18 @@ class AlertService:
             },
         )
 
-    async def send_test_alert(self, channel="all", timeout: float = 15.0):
+    async def send_test_alert(
+        self,
+        channel: str = "all",
+        *,
+        message: str = "",
+        timeout: float = 15.0,
+    ):
         """发送测试告警（带超时保护）"""
         if not self._initialized:
             await self.initialize()
-
-        enabled_channels = alert_manager.get_enabled_channels()
-        if not enabled_channels:
-            logger.warning("测试告警失败: 没有配置任何告警渠道")
-            return {
-                "success": False,
-                "message": "没有配置任何告警渠道，请先添加飞书/钉钉/企业微信 Webhook 或邮件配置",
-                "result": {"enabled_channels": []},
-            }
-
-        message = f"这是一条测试告警消息 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-        try:
-            tasks = [self._send_test_to_channel(ch, message) for ch in enabled_channels]
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-            success_count, fail_count, errors = self._summarize_test_results(results)
-            if success_count > 0:
-                return self._successful_test_result(enabled_channels, success_count, fail_count, errors)
-            logger.error(f"测试告警全部失败: {errors}")
-            return self._failed_test_result(enabled_channels, fail_count, errors)
-
-        except TimeoutError:
-            logger.error(f"测试告警超时 ({timeout}s)")
-            return {
-                "success": False,
-                "message": f"发送超时 ({timeout}s)，请检查网络连接",
-                "result": {"error": "timeout"},
-            }
-        except Exception as e:
-            logger.error(f"测试告警异常: {e}")
-            return {
-                "success": False,
-                "message": f"发送异常: {e}",
-                "result": {"error": str(e)},
-            }
+        request = TestAlertDelivery(channel=channel, message=message, timeout=timeout)
+        return await deliver_test_alert(request, self._send_test_to_channel)
 
     async def _send_test_to_channel(self, channel_name, message):
         channel_obj = alert_manager._channels.get(channel_name)
@@ -291,46 +266,7 @@ class AlertService:
         logger.warning(f"测试告警发送失败: {channel_name}")
         return channel_name, False, "发送失败"
 
-    @staticmethod
-    def _summarize_test_results(results):
-        successes = 0
-        errors = []
-        for result in results:
-            if isinstance(result, BaseException):
-                errors.append(str(result))
-                continue
-            channel_name, success, error = result
-            if success:
-                successes += 1
-            else:
-                errors.append(f"{channel_name}: {error}")
-        return successes, len(results) - successes, errors
-
-    @staticmethod
-    def _successful_test_result(channels, success_count, fail_count, errors):
-        return {
-            "success": True,
-            "message": f"测试告警已发送: 成功 {success_count}, 失败 {fail_count}",
-            "result": {
-                "enabled_channels": channels,
-                "success_count": success_count,
-                "fail_count": fail_count,
-                "errors": errors or None,
-            },
-        }
-
-    @staticmethod
-    def _failed_test_result(channels, fail_count, errors):
-        return {
-            "success": False,
-            "message": f"测试告警发送失败: {'; '.join(errors)}",
-            "result": {
-                "enabled_channels": channels,
-                "success_count": 0,
-                "fail_count": fail_count,
-                "errors": errors,
-            },
-        }
+    _summarize_test_results = staticmethod(summarize_test_results)
 
     def _add_history(self, record):
         """添加告警历史"""

@@ -26,7 +26,19 @@ class WorkerInstallKeyResponse(BaseModel):
     expires_at: datetime
 
 
-class WorkerRegisterByKeyRequest(BaseModel):
+class WorkerInstallKeyListItem(BaseModel):
+    id: str
+    os_type: str
+    status: Literal["pending", "used", "expired", "revoked"]
+    allowed_source: str | None = None
+    used_by_worker: str | None = None
+    created_at: datetime
+    expires_at: datetime
+    used_at: datetime | None = None
+    registration_acknowledged_at: datetime | None = None
+
+
+class _WorkerRegisterByKeyBase(BaseModel):
     key: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=100)
     host: str = Field(..., min_length=1, max_length=255)
@@ -37,7 +49,7 @@ class WorkerRegisterByKeyRequest(BaseModel):
     client_nonce: str = Field(..., min_length=8, max_length=64)
 
 
-class WorkerRegisterByKeyV2Request(WorkerRegisterByKeyRequest):
+class WorkerRegisterByKeyV2Request(_WorkerRegisterByKeyBase):
     registration_id: str = Field(..., min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
     recovery_secret: SecretStr = Field(..., min_length=64, max_length=64)
 
@@ -71,7 +83,7 @@ class WorkerRegistrationAckRequest(BaseModel):
 __all__ = [
     "WorkerInstallKeyRequest",
     "WorkerInstallKeyResponse",
-    "WorkerRegisterByKeyRequest",
+    "WorkerInstallKeyListItem",
     "WorkerRegisterByKeyV2Request",
     "WorkerRegisterByKeyV2Response",
     "WorkerRegistrationAckRequest",

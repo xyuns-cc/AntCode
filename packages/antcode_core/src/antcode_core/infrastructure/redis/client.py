@@ -18,8 +18,8 @@ from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError, TimeoutError
 
-from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
+from antcode_core.common.settings_ref import current_settings
 from antcode_core.infrastructure.redis.factory import create_async_redis_client
 
 
@@ -36,8 +36,7 @@ class RedisConnectionPool:
         self._health_check_task: asyncio.Task | None = None
         self._last_health_check = 0.0
         self._health_check_interval = 5.0
-        # P1-DB-06: connect() 互斥。并发重连会各自创建新 client 覆盖旧引用，
-        # 旧 client/pool 与健康任务全部泄漏，短暂故障即可倍增 Redis 连接。
+        # P1-DB-06: connect() 互斥。并发重连各自创建新 client 覆盖旧引用，旧 client/pool 与健康任务全部泄漏。
         self._connect_lock = asyncio.Lock()
 
     @classmethod
@@ -52,6 +51,7 @@ class RedisConnectionPool:
 
     async def connect(self) -> None:
         """建立 Redis 连接（互斥；重建前先关闭旧 client/pool）。"""
+        settings = current_settings()
         if self._connected and self.redis_client:
             return
 
@@ -304,7 +304,7 @@ def _make_client(
     T6-T1: 走统一 factory，standalone/cluster/sentinel 自动分派。
     集群模式下 max_connections 是每节点独立池上限。
     """
-    redis_url = url or settings.REDIS_URL
+    redis_url = url or current_settings().REDIS_URL
     if not redis_url:
         raise RedisConnectionError("REDIS_URL 未配置")
 

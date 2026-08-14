@@ -7,7 +7,6 @@ import sys
 
 from loguru import logger
 
-from antcode_core.common.config import settings
 from antcode_core.common.log_sanitization import (
     DEFAULT_SENSITIVE_KEY_TOKENS,
     SENSITIVE_PATTERNS,
@@ -15,6 +14,7 @@ from antcode_core.common.log_sanitization import (
     sanitize_dict,
     sanitize_log_message,
 )
+from antcode_core.common.settings_ref import current_settings
 
 CONSOLE_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
@@ -44,6 +44,7 @@ def setup_logging(
     log_file_path: str | None = None,
 ) -> None:
     """初始化禁用局部变量诊断且统一脱敏的日志 sink。"""
+    settings = current_settings()
     logger.remove()
     log_level = level or settings.LOG_LEVEL
     should_log_to_file = log_to_file if log_to_file is not None else settings.LOG_TO_FILE

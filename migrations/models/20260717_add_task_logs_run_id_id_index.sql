@@ -9,4 +9,4 @@
 --     WHERE i.indisvalid = false AND c.relname = 'idx_task_logs_run_id_id';
 --   DROP INDEX CONCURRENTLY IF EXISTS "idx_task_logs_run_id_id";
 CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_task_logs_run_id_id"
-    ON "task_logs" ("run_id", "id");
+    ON public."task_logs" ("run_id", "id");

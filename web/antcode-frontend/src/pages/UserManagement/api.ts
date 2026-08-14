@@ -19,6 +19,7 @@ export const userManagementApi = {
       params: {
         page: query.page,
         size: query.size,
+        search: query.search || undefined,
         sort_by: query.sortField ?? undefined,
         sort_order: query.sortField ? query.sortOrder : undefined,
       },
@@ -54,14 +55,19 @@ export const userManagementApi = {
   },
 
   async resetPassword(userId: string, password: string): Promise<void> {
-    const response = await apiClient.put<ApiResponse<null>>(`/api/v1/users/${userId}/reset-password`, {
-      new_password: password,
-    })
+    const response = await apiClient.put<ApiResponse<null>>(
+      `/api/v1/users/${userId}/reset-password`,
+      {
+        new_password: password,
+      }
+    )
     requireSuccess(response.data)
   },
 
   async revokeSessions(userId: string): Promise<SessionRevokeResult> {
-    const response = await apiClient.post<ApiResponse<SessionRevokeResult>>(`/api/v1/users/${userId}/kick`)
+    const response = await apiClient.post<ApiResponse<SessionRevokeResult>>(
+      `/api/v1/users/${userId}/kick`
+    )
     return requireSuccess(response.data)
   },
 

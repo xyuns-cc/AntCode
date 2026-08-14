@@ -14,6 +14,10 @@ def _future_expiry() -> int:
 
 
 def _container(transport, heartbeat_reporter=None, *, heartbeat_interval=30):
+    # 续期循环终止必须能触发进程级停机，因此 lifecycle 会把 engine 的致命错误
+    # 通道注册给 reporter。桩必须提供这两个成员，否则测试会掩盖接线缺失。
+    if heartbeat_reporter is not None and not hasattr(heartbeat_reporter, "set_fatal_error_handler"):
+        heartbeat_reporter.set_fatal_error_handler = MagicMock()
     return SimpleNamespace(
         transport=transport,
         config=SimpleNamespace(heartbeat_interval=heartbeat_interval),
@@ -21,7 +25,11 @@ def _container(transport, heartbeat_reporter=None, *, heartbeat_interval=30):
         executor=None,
         observability_server=None,
         heartbeat_reporter=heartbeat_reporter,
-        engine=None,
+        engine=SimpleNamespace(
+            start=AsyncMock(),
+            stop=AsyncMock(),
+            record_fatal_error=MagicMock(),
+        ),
     )
 
 
@@ -185,3 +193,17 @@ async def test_missing_heartbeat_reporter_fails_before_transport_start():
         await Lifecycle().startup(_container(transport))
 
     transport.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_initial_lease_failure_carries_the_control_plane_reason():
+    """控制面的拒发理由必须原样出现在 Worker 自己的错误里。
+
+    崩溃重启的容器只会被看它自己的日志；把 cause 吞成一句"lease_renew 失败"，
+    等于让 fail-closed 退化成"起不来但说不出为什么"。
+    """
+    reason = "Worker 线协议契约版本过旧: v1（控制面要求 >= v2）…请把它升级到与控制面相同的版本"
+    transport = SimpleNamespace(lease_renew=AsyncMock(side_effect=RuntimeError(reason)))
+
+    with pytest.raises(RuntimeError, match="契约版本过旧"):
+        await Lifecycle()._attempt_initial_lease(transport)

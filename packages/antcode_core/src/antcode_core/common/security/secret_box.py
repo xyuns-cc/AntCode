@@ -27,7 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 
-from cryptography.fernet import Fernet, MultiFernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
@@ -59,6 +59,19 @@ class SecretBox:
         """
         return self._multi().rotate(ciphertext.encode("utf-8")).decode("utf-8")
 
+    def decrypt_primary(self, ciphertext: str) -> str:
+        """仅使用当前主密钥解密，用于轮换完成后的独立验证。"""
+        return self._primary().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+
+    def needs_rotation(self, ciphertext: str) -> bool:
+        """确认密文可由 keyring 解开，并判断它是否仍依赖旧密钥。"""
+        self.decrypt(ciphertext)
+        try:
+            self.decrypt_primary(ciphertext)
+        except InvalidToken:
+            return True
+        return False
+
     # ------------------------------------------------------------------
 
     def _derive_fernet_key(self, key_material: str, salt: str) -> bytes:
@@ -68,7 +81,7 @@ class SecretBox:
             decoded = base64.urlsafe_b64decode(key_material.encode("utf-8"))
             if len(decoded) == 32:
                 return key_material.encode("utf-8")
-        except Exception:
+        except (ValueError, TypeError):
             pass
         if len(key_material.encode("utf-8")) < 32:
             raise RuntimeError("ENCRYPTION_KEY 必须至少包含 32 字节高熵材料")
@@ -87,6 +100,13 @@ class SecretBox:
         digest = hashlib.sha256(key_material.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest)
 
+    def _primary(self) -> Fernet:
+        primary = (settings.ENCRYPTION_KEY or "").strip()
+        salt = (getattr(settings, "ENCRYPTION_KEY_SALT", "") or "").strip()
+        if not primary:
+            raise RuntimeError("ENCRYPTION_KEY 未配置。请设置至少 32 字节的高熵密钥")
+        return Fernet(self._derive_fernet_key(primary, salt))
+
     def _multi(self) -> MultiFernet:
         primary = (settings.ENCRYPTION_KEY or "").strip()
         legacy = (getattr(settings, "ENCRYPTION_KEYS_LEGACY", "") or "").strip()
@@ -101,7 +121,7 @@ class SecretBox:
         if not primary:
             raise RuntimeError("ENCRYPTION_KEY 未配置。请设置至少 32 字节的高熵密钥")
 
-        fernets: list[Fernet] = [Fernet(self._derive_fernet_key(primary, salt))]
+        fernets: list[Fernet] = [self._primary()]
         if legacy_kdf_salt and legacy_kdf_salt != salt:
             fernets.append(Fernet(self._derive_fernet_key(primary, legacy_kdf_salt)))
         if allow_legacy_sha256:

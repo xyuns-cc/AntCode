@@ -1,4 +1,4 @@
-"""批量任务取消：control 投递成功才可写终态；CAS 结果必须逐 run 如实上报（P1-FN-01）。"""
+"""批量任务取消：已分配 run 由 Worker 落终态，未分配 run 使用 CAS。"""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,6 +12,7 @@ from antcode_web_api.routes.v1 import task_cancel
 def task(monkeypatch):
     resolved = SimpleNamespace(id=7)
     monkeypatch.setattr(task_cancel.scheduler_service, "get_task_by_id", AsyncMock(return_value=resolved))
+    monkeypatch.setattr(task_cancel, "record_task_cancel_request", AsyncMock(return_value=True))
     return resolved
 
 
@@ -34,7 +35,7 @@ async def test_assigned_run_is_not_cancelled_when_control_fails(monkeypatch, tas
 
 
 @pytest.mark.asyncio
-async def test_assigned_run_is_cancelled_after_control_succeeds(monkeypatch, task):
+async def test_assigned_run_waits_for_worker_result_after_control_succeeds(monkeypatch, task):
     execution = _execution(worker_id=9)
     mark_cancelled = AsyncMock(return_value=True)
     monkeypatch.setattr(task_cancel, "latest_cancellable_run", AsyncMock(return_value=execution))
@@ -44,7 +45,7 @@ async def test_assigned_run_is_cancelled_after_control_succeeds(monkeypatch, tas
     result = await task_cancel.cancel_latest_task_run("task-1", user_id=3)
 
     assert result is True
-    mark_cancelled.assert_awaited_once_with("run-1", 3)
+    mark_cancelled.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -99,19 +100,18 @@ async def test_unassigned_cas_miss_falls_back_to_refreshed_execution(monkeypatch
 
     assert result is True
     send_cancel.assert_awaited_once_with(refreshed, 3)
-    mark_cancelled.assert_awaited_once_with("run-1", 3)
+    mark_cancelled.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_cas_miss_with_terminal_state_reports_conflict(monkeypatch, task):
-    """P1-FN-01 回归：runtime CAS 未生效且 run 已进入其它终态 → 上报冲突（False），
-    不得谎报取消成功。"""
-    execution = _execution(worker_id=9)
+async def test_unassigned_cas_miss_with_terminal_state_reports_conflict(monkeypatch, task):
+    """无 Worker 的 CAS 未生效且 run 已进入其它终态时必须报告冲突。"""
+    execution = _execution(worker_id=None, status=TaskStatus.QUEUED)
     final = SimpleNamespace(run_id="run-1", status=TaskStatus.SUCCESS)
     monkeypatch.setattr(task_cancel, "latest_cancellable_run", AsyncMock(return_value=execution))
-    monkeypatch.setattr(task_cancel, "try_send_task_cancel", AsyncMock(return_value=True))
+    monkeypatch.setattr(task_cancel, "stop_unassigned_task_run", AsyncMock(return_value=False))
+    monkeypatch.setattr(task_cancel.TaskRun, "get_or_none", AsyncMock(side_effect=[execution, final]))
     monkeypatch.setattr(task_cancel, "mark_task_run_cancelled", AsyncMock(return_value=False))
-    monkeypatch.setattr(task_cancel.TaskRun, "get_or_none", AsyncMock(return_value=final))
 
     result = await task_cancel.cancel_latest_task_run("task-1", user_id=3)
 
@@ -119,13 +119,13 @@ async def test_cas_miss_with_terminal_state_reports_conflict(monkeypatch, task):
 
 
 @pytest.mark.asyncio
-async def test_cas_miss_with_cancelled_state_is_idempotent_success(monkeypatch, task):
-    execution = _execution(worker_id=9)
+async def test_unassigned_cas_miss_with_cancelled_state_is_idempotent_success(monkeypatch, task):
+    execution = _execution(worker_id=None, status=TaskStatus.QUEUED)
     final = SimpleNamespace(run_id="run-1", status=TaskStatus.CANCELLED)
     monkeypatch.setattr(task_cancel, "latest_cancellable_run", AsyncMock(return_value=execution))
-    monkeypatch.setattr(task_cancel, "try_send_task_cancel", AsyncMock(return_value=True))
+    monkeypatch.setattr(task_cancel, "stop_unassigned_task_run", AsyncMock(return_value=False))
+    monkeypatch.setattr(task_cancel.TaskRun, "get_or_none", AsyncMock(side_effect=[execution, final]))
     monkeypatch.setattr(task_cancel, "mark_task_run_cancelled", AsyncMock(return_value=False))
-    monkeypatch.setattr(task_cancel.TaskRun, "get_or_none", AsyncMock(return_value=final))
 
     result = await task_cancel.cancel_latest_task_run("task-1", user_id=3)
 

@@ -49,7 +49,11 @@ async def test_stream_status_rejects_missing_lease_id():
     wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
 
     # 缺 data["lease_id"]
-    message = data_pb2.TaskStatus(worker_id="worker-a", run_id="r-1")
+    message = data_pb2.TaskStatus(
+        worker_id="worker-a",
+        run_id="r-1",
+        status=data_pb2.STATUS_RUNNING,
+    )
 
     with pytest.raises(_AbortCalled):
         await wrapped.stream_unary(_single(message), _context())
@@ -73,7 +77,12 @@ async def test_stream_status_rejects_stale_lease():
     original = grpc.stream_unary_rpc_method_handler(service.StreamStatus)
     wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
 
-    message = data_pb2.TaskStatus(worker_id="worker-a", run_id="r-1", data={"lease_id": "lease-stale"})
+    message = data_pb2.TaskStatus(
+        worker_id="worker-a",
+        run_id="r-1",
+        status=data_pb2.STATUS_RUNNING,
+        data={"lease_id": "lease-stale"},
+    )
 
     with pytest.raises(_AbortCalled):
         await wrapped.stream_unary(_single(message), _context())
@@ -97,7 +106,12 @@ async def test_stream_status_passes_when_lease_current():
     original = grpc.stream_unary_rpc_method_handler(service.StreamStatus)
     wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
 
-    message = data_pb2.TaskStatus(worker_id="worker-a", run_id="r-1", data={"lease_id": "lease-cur"})
+    message = data_pb2.TaskStatus(
+        worker_id="worker-a",
+        run_id="r-1",
+        status=data_pb2.STATUS_RUNNING,
+        data={"lease_id": "lease-cur"},
+    )
 
     await wrapped.stream_unary(_single(message), _context())
 

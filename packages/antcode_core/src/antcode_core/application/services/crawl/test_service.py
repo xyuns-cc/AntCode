@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 from antcode_core.application.services.base import BaseService
+from antcode_core.application.services.crawl.backends.redis_keys import crawl_test_result_key
 from antcode_core.application.services.crawl.batch_service import CrawlBatchService, crawl_batch_service
 from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
 from antcode_core.application.services.crawl.progress_service import (
@@ -34,11 +35,10 @@ DEFAULT_TEST_MAX_DEPTH = 2
 DEFAULT_TEST_MAX_PAGES = 10
 DEFAULT_TEST_TIMEOUT = 60  # 测试超时时间（秒）
 DEFAULT_TEST_CONCURRENCY = 5
-TEST_RESULT_KEY_PREFIX = "crawl:test:result:"
 
 
 def _test_result_key(batch_id: str) -> str:
-    return f"{TEST_RESULT_KEY_PREFIX}{batch_id}"
+    return crawl_test_result_key(batch_id)
 
 
 @dataclass
@@ -471,8 +471,8 @@ class CrawlTestService(BaseService):
     async def _load_stream_samples(self, batch_id):
         from tortoise import Tortoise
 
+        from antcode_core.infrastructure.redis import RedisKeys, redis_namespace
         from antcode_core.infrastructure.redis.client import get_redis_client
-        from antcode_core.infrastructure.redis.keys import RedisKeys
 
         conn = Tortoise.get_connection("default")
         matched = await conn.execute_query_dict(
@@ -483,7 +483,7 @@ class CrawlTestService(BaseService):
             return []
         return await self._collect_stream_samples(
             await get_redis_client(),
-            RedisKeys(),
+            RedisKeys(redis_namespace()),
             matched,
         )
 

@@ -9,10 +9,8 @@
 
 **语义**：
 - ``check_ip_rate(ip)``：每 IP 每分钟 5 次
-- ``check_user_rate(username)``：每用户名每 15 分钟 10 次
-- ``is_account_locked(username)``：查看当前是否处于锁定期
-- ``record_failure(username)``：写失败计数；超阈值触发锁定
-- ``clear_failures(username)``：登录成功后清计数
+- ``check_user_rate(username, client_scope)``：每来源、每用户名限流
+- 失败计数和临时锁同样绑定客户端来源，单一远程来源不能锁死整个账户
 """
 
 from __future__ import annotations
@@ -29,12 +27,16 @@ _FAIL_KEY_PREFIX = "login:fail:"
 _LOCK_KEY_PREFIX = "login:lock:"
 
 
-def _fail_key(username: str) -> str:
-    return f"{_FAIL_KEY_PREFIX}{username.lower()}"
+def _scoped_key(prefix: str, username: str, client_scope: str) -> str:
+    return f"{prefix}{username.lower()}:{client_scope.lower()}"
 
 
-def _lock_key(username: str) -> str:
-    return f"{_LOCK_KEY_PREFIX}{username.lower()}"
+def _fail_key(username: str, client_scope: str) -> str:
+    return _scoped_key(_FAIL_KEY_PREFIX, username, client_scope)
+
+
+def _lock_key(username: str, client_scope: str) -> str:
+    return _scoped_key(_LOCK_KEY_PREFIX, username, client_scope)
 
 
 async def check_ip_rate(ip: str) -> bool:
@@ -58,11 +60,11 @@ async def check_ip_rate(ip: str) -> bool:
     )
 
 
-async def check_user_rate(username: str) -> bool:
-    """True = 通过；False = 该用户名已被限流。"""
+async def check_user_rate(username: str, client_scope: str) -> bool:
+    """True = 通过；False = 该来源对该用户名已被限流。"""
     if not username:
         return True
-    identifier = f"login:user:{username.lower()}"
+    identifier = f"login:user:{username.lower()}:{client_scope.lower()}"
     return await redis_rate_limiter.is_allowed(
         identifier,
         limit=settings.LOGIN_RATE_LIMIT_USER_MAX,
@@ -70,29 +72,29 @@ async def check_user_rate(username: str) -> bool:
     )
 
 
-async def is_account_locked(username: str) -> tuple[bool, int]:
+async def is_account_locked(username: str, client_scope: str) -> tuple[bool, int]:
     """返回 (锁定中?, 剩余秒数)。"""
     if not username:
         return False, 0
     redis = await get_redis_client()
-    ttl = await redis.ttl(_lock_key(username))
+    ttl = await redis.ttl(_lock_key(username, client_scope))
     if ttl and ttl > 0:
         return True, int(ttl)
     return False, 0
 
 
-async def record_failure(username: str) -> tuple[int, bool]:
+async def record_failure(username: str, client_scope: str) -> tuple[int, bool]:
     """登录失败计数 +1；返回 (当前失败次数, 是否触发新锁定)。"""
     if not username:
         return 0, False
     redis = await get_redis_client()
-    key = _fail_key(username)
+    key = _fail_key(username, client_scope)
     count = int(await redis.incr(key) or 0)
     if count == 1:
         await redis.expire(key, settings.LOGIN_LOCKOUT_DURATION_SEC)
     newly_locked = False
     if count >= settings.LOGIN_LOCKOUT_FAILURES:
-        lock_key = _lock_key(username)
+        lock_key = _lock_key(username, client_scope)
         existed = await redis.exists(lock_key)
         await redis.set(lock_key, int(time.time()), ex=settings.LOGIN_LOCKOUT_DURATION_SEC)
         newly_locked = not existed
@@ -104,12 +106,12 @@ async def record_failure(username: str) -> tuple[int, bool]:
     return count, newly_locked
 
 
-async def clear_failures(username: str) -> None:
+async def clear_failures(username: str, client_scope: str) -> None:
     """登录成功后清失败计数（不清锁定 —— 锁定期内成功也不解锁）。"""
     if not username:
         return
     redis = await get_redis_client()
-    await redis.delete(_fail_key(username))
+    await redis.delete(_fail_key(username, client_scope))
 
 
 __all__ = [

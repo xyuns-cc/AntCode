@@ -1,0 +1,189 @@
+name: Finalize Atomic Release Collection
+
+on:
+  workflow_call:
+
+env:
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/antcode
+
+jobs:
+  finalize:
+    name: Sign and tag release collection
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to container registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+      - name: Download gated digest descriptors
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-digest-*
+          path: release-digests
+          merge-multiple: true
+      - name: Verify signed service digest set
+        env:
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/docker-build.yml@${{ github.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/docker-build.yml
+        run: |
+          set -euo pipefail
+          services=(web-api master gateway worker frontend)
+          test "$(find release-digests -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 10
+          for service in "${services[@]}"; do
+            test -f "release-digests/${service}.platforms.json"
+            digest="$(cat "release-digests/${service}.digest")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            image="${IMAGE_PREFIX}-${service}@${digest}"
+            cosign verify --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image" >/dev/null
+            gh attestation verify "oci://${image}" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+          done
+      - name: Create complete release manifest
+        run: |
+          set -euo pipefail
+          runtime=infra/docker/release-runtime-images.json
+          jq -e '.schema_version == 1 and (.images | keys == ["postgres", "redis", "reverse-proxy"])' "$runtime" >/dev/null
+          jq -n \
+            --arg revision "$GITHUB_SHA" \
+            --arg image_prefix "$IMAGE_PREFIX" \
+            --arg web_api "$(cat release-digests/web-api.digest)" \
+            --arg master "$(cat release-digests/master.digest)" \
+            --arg gateway "$(cat release-digests/gateway.digest)" \
+            --arg worker "$(cat release-digests/worker.digest)" \
+            --arg frontend "$(cat release-digests/frontend.digest)" \
+            --arg postgres "$(jq -er '.images.postgres' "$runtime")" \
+            --arg redis "$(jq -er '.images.redis' "$runtime")" \
+            --arg reverse_proxy "$(jq -er '.images["reverse-proxy"]' "$runtime")" \
+            '{schema_version: 2, revision: $revision, images: {
+              "web-api": ($image_prefix + "-web-api@" + $web_api),
+              master: ($image_prefix + "-master@" + $master),
+              gateway: ($image_prefix + "-gateway@" + $gateway),
+              worker: ($image_prefix + "-worker@" + $worker),
+              frontend: ($image_prefix + "-frontend@" + $frontend),
+              postgres: $postgres, redis: $redis, "reverse-proxy": $reverse_proxy
+            }}' > release-manifest.json
+          mkdir release-context
+          cp release-manifest.json release-context/release-manifest.json
+          printf '%s\n' 'FROM scratch' 'COPY release-manifest.json /release-manifest.json' > release-context/Dockerfile
+      - name: Build release collection by digest
+        id: release
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: release-context
+          file: release-context/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=AntCode release collection
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-release,push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+      - name: Scan release collection digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_PREFIX }}-release@${{ steps.release.outputs.digest }}
+          scanners: vuln,secret
+          ignore-unfixed: false
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          trivyignores: .trivyignore.yaml
+          format: table
+      - name: Attest release collection provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}-release
+          subject-digest: ${{ steps.release.outputs.digest }}
+          push-to-registry: true
+      - name: Sign release collection digest
+        env:
+          DIGEST: ${{ steps.release.outputs.digest }}
+        run: cosign sign --yes "${IMAGE_PREFIX}-release@${DIGEST}"
+      - name: Verify release collection signature and provenance attestation
+        env:
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/docker-finalize-release.yml@${{ github.ref }}
+          DIGEST: ${{ steps.release.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/docker-finalize-release.yml
+        run: |
+          image="${IMAGE_PREFIX}-release@${DIGEST}"
+          cosign verify --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image" >/dev/null
+          gh attestation verify "oci://${image}" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+      - name: Publish deployment descriptor
+        env:
+          DIGEST: ${{ steps.release.outputs.digest }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg release_repository "${IMAGE_PREFIX}-release" \
+            --arg release_digest "$DIGEST" \
+            --arg revision "$GITHUB_SHA" \
+            --slurpfile manifest release-manifest.json \
+            '{schema_version: 1, release: {
+              repository: $release_repository,
+              digest: $release_digest,
+              revision: $revision
+            }, images: $manifest[0].images}' > release-deployment.json
+          {
+            echo '## AntCode release deployment descriptor'
+            echo
+            echo "- Repository: ${IMAGE_PREFIX}-release"
+            echo "- Digest: ${DIGEST}"
+            echo "- Revision: ${GITHUB_SHA}"
+            echo '- Artifact: release-deployment-descriptor'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload deployment descriptor
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-deployment-descriptor
+          path: release-deployment.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Create single formal release tag
+        env:
+          DIGEST: ${{ steps.release.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+            release_tag="${GITHUB_REF_NAME#v}"
+          else
+            release_tag="sha-${GITHUB_SHA}"
+          fi
+          tag_ref="${IMAGE_PREFIX}-release:${release_tag}"
+          inspect_error="$(mktemp)"
+          if existing_digest="$(docker buildx imagetools inspect --raw "$tag_ref" 2>"$inspect_error" \
+            | sha256sum | awk '{print "sha256:" $1}')"; then
+            [[ "$existing_digest" == "$DIGEST" ]] || {
+              echo "formal release tag already points to a different digest" >&2
+              exit 1
+            }
+            exit 0
+          fi
+          if ! grep -Eqi 'manifest unknown|name unknown|not found' "$inspect_error"; then
+            cat "$inspect_error" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$tag_ref" "${IMAGE_PREFIX}-release@${DIGEST}"
+          tagged_digest="$(docker buildx imagetools inspect --raw "$tag_ref" | sha256sum \
+            | awk '{print "sha256:" $1}')"
+          [[ "$tagged_digest" == "$DIGEST" ]]

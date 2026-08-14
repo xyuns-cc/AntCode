@@ -12,7 +12,7 @@ import {
   CopyrightOutlined,
   GithubOutlined,
 } from '@ant-design/icons'
-import { useNavigate, useLocation, Outlet } from 'react-router-dom'
+import { useNavigate, useLocation, Outlet } from 'react-router'
 import ErrorBoundary from '@/components/common/ErrorBoundary'
 import { useAuth } from '@/hooks/useAuth'
 import ThemeToggle from '@/components/common/ThemeToggle'

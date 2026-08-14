@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
-import { Form, Select, Space, Tag, Tooltip, Alert, Typography, Spin } from 'antd'
+import { Form, Select, Space, Switch, Tag, Tooltip, Alert, Typography, Spin } from 'antd'
 import {
   GlobalOutlined,
   CloudServerOutlined,
@@ -18,10 +18,7 @@ interface RegionWorkerSelectorProps {
     region?: string
     require_render?: boolean
   }
-  onChange?: (value: {
-    region?: string
-    require_render?: boolean
-  }) => void
+  onChange?: (value: { region?: string; require_render?: boolean }) => void
   disabled?: boolean
   /** 是否需要浏览器渲染能力，会影响可选 worker（一般来自 CrawlEngine === 'browser'） */
   requireRender?: boolean
@@ -37,10 +34,12 @@ interface RegionInfo {
 const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
   value = {},
   onChange,
-  disabled = false
+  disabled = false,
+  requireRender = false,
 }) => {
   const [loading, setLoading] = useState(false)
   const [regions, setRegions] = useState<RegionInfo[]>([])
+  const [availableWorkerCount, setAvailableWorkerCount] = useState(0)
 
   // 加载 Worker 列表并统计区域信息
   useEffect(() => {
@@ -51,22 +50,24 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
 
         // 统计区域信息
         const regionMap = new Map<string, RegionInfo>()
-        
+        setAvailableWorkerCount(workerList.filter((worker) => worker.status === 'online').length)
+
         workerList.forEach((worker) => {
-          const region = worker.region || '默认区域'
-          
+          const region = worker.region?.trim()
+          if (!region) return
+
           if (!regionMap.has(region)) {
             regionMap.set(region, {
               region,
               workerCount: 0,
               onlineCount: 0,
-              avgScore: 0
+              avgScore: 0,
             })
           }
-          
+
           const info = regionMap.get(region)!
           info.workerCount++
-          
+
           if (worker.status === 'online') {
             info.onlineCount++
 
@@ -81,13 +82,15 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
           }
         })
 
-        setRegions(Array.from(regionMap.values()).sort((a, b) => {
-          // 优先按在线 Worker 数排序，其次按负载分数
-          if (b.onlineCount !== a.onlineCount) {
-            return b.onlineCount - a.onlineCount
-          }
-          return a.avgScore - b.avgScore
-        }))
+        setRegions(
+          Array.from(regionMap.values()).sort((a, b) => {
+            // 优先按在线 Worker 数排序，其次按负载分数
+            if (b.onlineCount !== a.onlineCount) {
+              return b.onlineCount - a.onlineCount
+            }
+            return a.avgScore - b.avgScore
+          })
+        )
       } catch (error) {
         Logger.error('加载 Worker 列表失败:', error)
       } finally {
@@ -100,13 +103,17 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
   const handleRegionChange = (region: string | undefined) => {
     onChange?.({
       ...value,
-      region: region || undefined
+      region: region || undefined,
     })
   }
 
+  const handleRenderChange = (require_render: boolean) => {
+    onChange?.({ ...value, require_render })
+  }
+
   // 获取当前选中区域的信息
-  const selectedRegion = regions.find(r => r.region === value.region)
-  const hasAvailableWorkers = regions.some(r => r.onlineCount > 0)
+  const selectedRegion = regions.find((r) => r.region === value.region)
+  const hasAvailableWorkers = availableWorkerCount > 0
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -142,26 +149,20 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
               </Text>
             </Space>
           </Select.Option>
-          
-          {regions.map(region => {
+
+          {regions.map((region) => {
             const available = region.onlineCount
             const isDisabled = available === 0
-            
+
             return (
-              <Select.Option 
-                key={region.region} 
-                value={region.region}
-                disabled={isDisabled}
-              >
+              <Select.Option key={region.region} value={region.region} disabled={isDisabled}>
                 <Space style={{ width: '100%', justifyContent: 'space-between' }}>
                   <Space>
                     <CloudServerOutlined />
                     <span>{region.region}</span>
                   </Space>
                   <Space>
-                    <Tag color={available > 0 ? 'green' : 'default'}>
-                      {available} 可用
-                    </Tag>
+                    <Tag color={available > 0 ? 'green' : 'default'}>{available} 可用</Tag>
                     {region.avgScore > 0 && (
                       <Text type="secondary" style={{ fontSize: 11 }}>
                         负载: {region.avgScore.toFixed(0)}%
@@ -173,6 +174,14 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
             )
           })}
         </Select>
+      </Form.Item>
+
+      <Form.Item label="浏览器渲染能力" style={{ marginBottom: 0 }}>
+        <Switch
+          checked={requireRender || Boolean(value.require_render)}
+          disabled={disabled || requireRender}
+          onChange={handleRenderChange}
+        />
       </Form.Item>
 
       {/* 区域信息提示 */}
@@ -195,11 +204,7 @@ const RegionWorkerSelector: React.FC<RegionWorkerSelectorProps> = ({
 
       {/* 无可用 Worker 警告 */}
       {!loading && !hasAvailableWorkers && (
-        <Alert
-          type="warning"
-          showIcon
-          message="当前没有在线 Worker，任务可能无法执行"
-        />
+        <Alert type="warning" showIcon message="当前没有在线 Worker，任务可能无法执行" />
       )}
     </div>
   )

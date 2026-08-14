@@ -18,7 +18,7 @@ async def test_pg_failure_uses_available_redis_logs(monkeypatch):
     service, _ = _service()
     monkeypatch.setattr(
         log_module.postgres_log_service,
-        "list_entries",
+        "latest_snapshot_id",
         AsyncMock(side_effect=RuntimeError("postgres unavailable")),
     )
     monkeypatch.setattr(service, "_get_redis_stream_logs", AsyncMock(return_value=("cached output", "")))
@@ -33,7 +33,7 @@ async def test_pg_failure_without_fallback_is_exposed(monkeypatch):
     service, _ = _service()
     monkeypatch.setattr(
         log_module.postgres_log_service,
-        "list_entries",
+        "latest_snapshot_id",
         AsyncMock(side_effect=RuntimeError("postgres unavailable")),
     )
     monkeypatch.setattr(service, "_get_redis_stream_logs", AsyncMock(return_value=("", "")))
@@ -47,7 +47,7 @@ async def test_read_log_exposes_postgres_failure(monkeypatch):
     service, _ = _service()
     monkeypatch.setattr(
         log_module.postgres_log_service,
-        "list_entries",
+        "latest_snapshot_id",
         AsyncMock(side_effect=RuntimeError("postgres unavailable")),
     )
 
@@ -66,6 +66,20 @@ async def test_write_log_uses_allocated_positive_sequence(monkeypatch):
     allocate.assert_awaited_once_with("run-1", "stdout", 1)
     entry = append.await_args.args[0][0]
     assert entry.sequence == 41
+    assert entry.level == "INFO"
+
+
+@pytest.mark.asyncio
+async def test_write_log_persists_stderr_as_error(monkeypatch):
+    service, _ = _service([42])
+    append = AsyncMock(return_value=1)
+    monkeypatch.setattr(log_module.postgres_log_service, "append_entries", append)
+
+    await service.write_log("run-1", "stderr", "failure")
+
+    entry = append.await_args.args[0][0]
+    assert entry.log_type == "stderr"
+    assert entry.level == "ERROR"
 
 
 @pytest.mark.asyncio

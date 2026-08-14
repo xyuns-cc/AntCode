@@ -2,7 +2,6 @@
 
 from datetime import datetime
 
-from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.users.user_service import user_service
 from antcode_core.common.security.auth import (
     TokenData,
@@ -12,25 +11,32 @@ from antcode_core.common.security.auth import (
     verify_super_admin,
 )
 from antcode_core.domain.models import User, UserRole, UserSession
-from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas import (
     BaseResponse,
     PaginationResponse,
     UserAdminPasswordUpdateRequest,
+    UserBatchStatusRequest,
     UserCreateRequest,
+    UserListQueryParams,
     UserPasswordUpdateRequest,
     UserResponse,
     UserUpdateRequest,
 )
 from antcode_core.domain.schemas.common import PaginationInfo
 from antcode_core.domain.schemas.user import AdminUserRoleUpdateRequest
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from tortoise.exceptions import IntegrityError
 
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import Messages, success
 from antcode_web_api.response import page as page_response
+from antcode_web_api.routes.v1.committed_resource_audit import (
+    audit_user_created,
+    audit_user_deleted,
+    audit_user_role_changed,
+    audit_user_updated,
+)
 from antcode_web_api.routing import promote_static_routes
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
@@ -66,24 +72,20 @@ def _build_user_response(user) -> UserResponse:
     tags=["用户管理"],
 )
 async def get_users_list(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    is_active: bool = Query(None),
-    is_admin: bool = Query(None),
-    sort_by: str = Query(None),
-    sort_order: str = Query(None),
+    query_params: UserListQueryParams = Depends(),
     current_admin=Depends(get_current_admin_user),
 ):
     """获取用户列表（仅管理员可访问，带缓存优化）"""
 
     try:
         result = await user_service.get_users_list(
-            page=page,
-            size=size,
-            is_active=is_active,
-            is_admin=is_admin,
-            sort_by=sort_by,
-            sort_order=sort_order,
+            page=query_params.page,
+            size=query_params.size,
+            search=query_params.search,
+            is_active=query_params.is_active,
+            is_admin=query_params.is_admin,
+            sort_by=query_params.sort_by,
+            sort_order=query_params.sort_order,
         )
 
         pag = result["pagination"]
@@ -145,21 +147,7 @@ async def create_user(
     admin_user = await user_service.get_user_by_id(current_admin.user_id)
     try:
         user = await user_service.create_user(request)
-        # 记录审计日志
-        await audit_service.log_user_action(
-            action=AuditAction.USER_CREATE,
-            operator_username=admin_user.username,
-            target_user_id=user.id,
-            target_username=user.username,
-            operator_id=admin_user.id,
-            ip_address=http_request.client.host if http_request.client else None,
-            new_value={
-                "username": user.username,
-                "email": user.email,
-                "is_admin": user.is_admin,
-            },
-            description=f"创建用户: {user.username}",
-        )
+        await audit_user_created(http_request, admin_user, user)
         return success(_build_user_response(user), message=Messages.CREATED_SUCCESS, code=201)
     except IntegrityError as e:
         err_msg = str(e)
@@ -169,6 +157,8 @@ async def create_user(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已存在")
         logger.exception("创建用户发生未识别的数据完整性冲突")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突") from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
 
 @router.get("/{user_id}", response_model=BaseResponse, summary="获取用户详情", tags=["用户管理"])
@@ -235,16 +225,12 @@ async def set_user_role(
     await target.save(update_fields=["role", "is_admin"])
     await user_service._invalidate_user_cache(target.id)
 
-    await audit_service.log_user_action(
-        action=AuditAction.USER_UPDATE,
-        operator_username=_admin.username,
-        target_user_id=target.id,
-        target_username=target.username,
-        operator_id=_admin.id,
-        ip_address=http_request.client.host if http_request.client else None,
-        old_value={"role": old_role_enum.value, "is_admin": old_is_admin},
-        new_value={"role": target.role.value, "is_admin": target.is_admin},
-        description=(f"修改用户角色: {target.username} {old_role_enum.value} -> {target.role.value}"),
+    await audit_user_role_changed(
+        http_request,
+        _admin,
+        target,
+        old_role=old_role_enum.value,
+        old_is_admin=old_is_admin,
     )
     return success(_build_user_response(target), message="角色已更新")
 
@@ -312,15 +298,13 @@ async def update_user(
         if username_changed:
             description = f"更新用户信息: {old_snapshot['username']} -> {new_snapshot['username']}"
 
-        await audit_service.log_user_action(
-            action=AuditAction.USER_UPDATE,
+        await audit_user_updated(
+            http_request,
+            current_user_obj,
+            user,
             operator_username=operator_username,
-            target_user_id=user.id,
-            target_username=user.username,
-            operator_id=current_user_obj.id,
-            ip_address=http_request.client.host if http_request.client else None,
-            old_value=old_snapshot,
-            new_value=new_snapshot,
+            old_snapshot=old_snapshot,
+            new_snapshot=new_snapshot,
             description=description,
         )
 
@@ -403,7 +387,11 @@ async def reset_user_password(
     current_admin: TokenData = Depends(get_current_super_admin),
 ):
     """重置用户密码（仅超级管理员）"""
-    await user_service.reset_user_password(user_id, request.new_password)
+    try:
+        await user_service.reset_user_password(user_id, request.new_password)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if str(exc) == "用户不存在" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     return success(None, message="密码重置成功")
 
 
@@ -414,19 +402,16 @@ async def reset_user_password(
     tags=["用户管理"],
 )
 async def batch_update_status(
-    request: dict,
+    request: UserBatchStatusRequest,
     current_admin: TokenData = Depends(get_current_admin_user),
 ):
-    user_ids = bounded_distinct_ids(request.get("user_ids"), "user_ids")
-    is_active = request.get("is_active")
-    if is_active is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="参数不完整")
+    user_ids = bounded_distinct_ids(request.user_ids, "user_ids")
 
     targets = await User.filter(public_id__in=user_ids).only("id", "public_id", "is_admin").all()
     _ensure_batch_status_permission(targets, current_admin)
     target_user_ids = [target.id for target in targets]
-    updated = await User.filter(id__in=target_user_ids).update(is_active=bool(is_active))
-    if not bool(is_active) and target_user_ids:
+    updated = await User.filter(id__in=target_user_ids).update(is_active=request.is_active)
+    if not request.is_active and target_user_ids:
         await UserSession.filter(
             user_id__in=target_user_ids,
             revoked_at__isnull=True,
@@ -484,17 +469,8 @@ async def delete_user(
     target_user = await user_service.get_user_by_public_id(user_id)
     try:
         await user_service.delete_user(user_id, current_admin.user_id)
-        # 记录审计日志
         if target_user:
-            await audit_service.log_user_action(
-                action=AuditAction.USER_DELETE,
-                operator_username=admin_user.username,
-                target_user_id=target_user.id,
-                target_username=target_user.username,
-                operator_id=admin_user.id,
-                ip_address=http_request.client.host if http_request.client else None,
-                description=f"删除用户: {target_user.username}",
-            )
+            await audit_user_deleted(http_request, admin_user, target_user)
         return success(None, message=Messages.DELETED_SUCCESS)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

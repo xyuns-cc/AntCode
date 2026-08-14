@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "packages" / "antcode_core" / "src"))
 
+PLAINTEXT_COLUMNS = frozenset({"api_key", "secret_key", "api_key_previous"})
+
 
 async def _plaintext_columns(connection) -> set[str]:
     rows = await connection.execute_query_dict(
@@ -26,16 +28,22 @@ async def _migrate_rows(connection) -> int:
     from antcode_core.common.security.api_key import hash_api_key
     from antcode_core.common.security.secret_box import secret_box
 
+    # 阻止旧版本在扫描后、DROP 明文列前插入或轮换凭据；普通认证读取不受影响。
+    await connection.execute_query('LOCK TABLE public."workers" IN SHARE ROW EXCLUSIVE MODE')
     rows = await connection.execute_query_dict(
-        'SELECT "id", "api_key", "secret_key", "api_key_previous" FROM "workers"'
+        'SELECT "id", "api_key", "secret_key", "api_key_previous" FROM public."workers"'
     )
     for row in rows:
         api_key = row.get("api_key")
         secret_key = row.get("secret_key")
         previous = row.get("api_key_previous")
         affected, _ = await connection.execute_query(
-            'UPDATE "workers" SET "api_key_hash"=$1, "secret_key_hash"=$2, '
-            '"secret_key_encrypted"=$3, "api_key_previous_hash"=$4 WHERE "id"=$5',
+            'UPDATE public."workers" SET '
+            '"api_key_hash"=COALESCE("api_key_hash", $1), '
+            '"secret_key_hash"=COALESCE("secret_key_hash", $2), '
+            '"secret_key_encrypted"=COALESCE("secret_key_encrypted", $3), '
+            '"api_key_previous_hash"=COALESCE("api_key_previous_hash", $4) '
+            'WHERE "id"=$5',
             [
                 hash_api_key(api_key) if api_key else None,
                 hash_api_key(secret_key) if secret_key else None,
@@ -47,6 +55,23 @@ async def _migrate_rows(connection) -> int:
         if int(affected) != 1:
             raise RuntimeError(f"Worker 凭据迁移更新行数异常: id={row['id']}, affected={affected}")
     return len(rows)
+
+
+async def migrate_worker_credentials(connection) -> int:
+    """Migrate and remove a complete legacy plaintext credential schema."""
+    columns = await _plaintext_columns(connection)
+    if not columns:
+        return 0
+    if columns != PLAINTEXT_COLUMNS:
+        raise RuntimeError(f"Worker 明文凭据列不完整: {sorted(columns)}")
+    migrated = await _migrate_rows(connection)
+    await connection.execute_query(
+        'ALTER TABLE public."workers" DROP COLUMN "api_key", DROP COLUMN "secret_key", DROP COLUMN "api_key_previous"'
+    )
+    remaining = await _plaintext_columns(connection)
+    if remaining:
+        raise RuntimeError(f"Worker 明文凭据列删除后仍存在: {sorted(remaining)}")
+    return migrated
 
 
 async def main() -> None:
@@ -61,17 +86,11 @@ async def main() -> None:
     failure: BaseException | None = None
     try:
         async with in_transaction() as connection:
-            columns = await _plaintext_columns(connection)
-            if not columns:
+            had_plaintext = bool(await _plaintext_columns(connection))
+            migrated = await migrate_worker_credentials(connection)
+            if not had_plaintext:
                 print("Worker 明文凭据列已移除，无需迁移")
-            elif columns != {"api_key", "secret_key", "api_key_previous"}:
-                raise RuntimeError(f"Worker 明文凭据列不完整: {sorted(columns)}")
             else:
-                migrated = await _migrate_rows(connection)
-                await connection.execute_query(
-                    'ALTER TABLE "workers" DROP COLUMN "api_key", DROP COLUMN "secret_key", '
-                    'DROP COLUMN "api_key_previous"'
-                )
                 print(f"已安全迁移 {migrated} 个 Worker 的凭据")
     except BaseException as exc:
         failure = exc

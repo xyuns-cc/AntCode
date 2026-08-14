@@ -2,7 +2,6 @@
 
 import asyncio
 import html
-import os
 import smtplib
 import ssl
 from email.header import Header
@@ -12,20 +11,10 @@ from email.mime.text import MIMEText
 from loguru import logger
 
 from antcode_core.application.services.alert.alert_channels.base import AlertChannel
-
-
-def _make_ssl_context() -> ssl.SSLContext:
-    """构建 SMTP TLS 上下文。
-
-    Python 的 smtplib 默认使用不校验证书的 ``ssl._create_stdlib_context()``，
-    存在中间人窃取 SMTP 凭据/告警内容的风险。这里默认启用证书校验，
-    与 Webhook 渠道一致，可通过 ``ALERT_VERIFY_SSL=false`` 显式关闭。
-    """
-    context = ssl.create_default_context()
-    if os.getenv("ALERT_VERIFY_SSL", "true").lower() == "false":
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    return context
+from antcode_core.application.services.alert.smtp_delivery import (
+    SMTPDeliveryConfig,
+    deliver_smtp_message,
+)
 
 
 def _clean_header(value: str) -> str:
@@ -120,48 +109,69 @@ class EmailAlertChannel(AlertChannel):
 """
         return subject, html_body
 
-    async def _send_email(self, recipient_email: str, recipient_name: str, subject: str, html_body: str) -> bool:
+    def _delivery_config(self) -> SMTPDeliveryConfig:
+        return SMTPDeliveryConfig(
+            host=self.smtp_host,
+            port=self.smtp_port,
+            username=self.smtp_user,
+            password=self.smtp_password,
+            use_ssl=self.smtp_ssl,
+        )
+
+    def _build_message(
+        self,
+        *,
+        recipient_email: str,
+        recipient_name: str,
+        subject: str,
+        html_body: str,
+    ) -> tuple[str, str]:
+        recipient_email = _clean_header(recipient_email)
+        recipient_name = _clean_header(recipient_name)
+        sender_name = _clean_header(self.sender_name)
+        smtp_user = _clean_header(self.smtp_user)
+        message = MIMEMultipart("alternative")
+        message["Subject"] = str(Header(subject, "utf-8"))
+        message["From"] = f"{sender_name} <{smtp_user}>"
+        message["To"] = f"{recipient_name} <{recipient_email}>" if recipient_name else recipient_email
+        message.attach(MIMEText(html_body, "html", "utf-8"))
+        return recipient_email, message.as_string()
+
+    async def _send_email(
+        self,
+        *,
+        recipient_email: str,
+        recipient_name: str,
+        subject: str,
+        html_body: str,
+    ) -> bool:
         """发送单封邮件"""
         try:
-            # 头部字段统一清理 CR/LF，防止收件人/发件人名注入额外邮件头
-            recipient_email = _clean_header(recipient_email)
-            recipient_name = _clean_header(recipient_name)
-            sender_name = _clean_header(self.sender_name)
-            smtp_user = _clean_header(self.smtp_user)
-
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = str(Header(subject, "utf-8"))
-            msg["From"] = f"{sender_name} <{smtp_user}>"
-            msg["To"] = f"{recipient_name} <{recipient_email}>" if recipient_name else recipient_email
-
-            # 添加HTML内容
-            html_part = MIMEText(html_body, "html", "utf-8")
-            msg.attach(html_part)
-
-            # 发送邮件（默认校验 TLS 证书，见 _make_ssl_context）
-            context = _make_ssl_context()
-            server: smtplib.SMTP
-            if self.smtp_ssl:
-                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10, context=context)
-            else:
-                server = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10)
-                server.starttls(context=context)
-
-            server.login(self.smtp_user, self.smtp_password)
-            server.sendmail(self.smtp_user, [recipient_email], msg.as_string())
-            server.quit()
-
-            logger.debug(f"邮件告警发送成功: {recipient_email}")
+            recipient_email, message = self._build_message(
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                subject=subject,
+                html_body=html_body,
+            )
+            await asyncio.to_thread(
+                deliver_smtp_message,
+                self._delivery_config(),
+                recipient_email=recipient_email,
+                message=message,
+            )
+            logger.debug("邮件告警发送成功: {}", recipient_email)
             return True
-
-        except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"邮件认证失败: {e}")
+        except ValueError as exc:
+            logger.error("拒绝连接 SMTP 目标: {}", exc)
             return False
-        except smtplib.SMTPException as e:
-            logger.error(f"邮件发送失败: {e}")
+        except smtplib.SMTPAuthenticationError as exc:
+            logger.error("邮件认证失败: {}", exc)
             return False
-        except Exception as e:
-            logger.error(f"邮件发送异常: {e}")
+        except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+            logger.error("邮件发送失败: {}", exc)
+            return False
+        except Exception:
+            logger.exception("邮件发送发生未预期异常")
             return False
 
     async def _send_single_alert_with_retry(self, recipient: dict, subject: str, html_body: str) -> bool:
@@ -174,10 +184,10 @@ class EmailAlertChannel(AlertChannel):
                     await asyncio.sleep(self.retry_delay * (2 ** (attempt - 1)))
 
                 success = await self._send_email(
-                    recipient.get("email", ""),
-                    recipient.get("name", ""),
-                    subject,
-                    html_body,
+                    recipient_email=recipient.get("email", ""),
+                    recipient_name=recipient.get("name", ""),
+                    subject=subject,
+                    html_body=html_body,
                 )
                 if success:
                     return True

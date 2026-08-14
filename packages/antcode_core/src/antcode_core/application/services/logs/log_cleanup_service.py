@@ -22,6 +22,8 @@ class CleanupResult:
     postgres_rows_deleted: int = 0
     audit_rows_deleted: int = 0
     worker_event_rows_deleted: int = 0
+    worker_heartbeat_rows_deleted: int = 0
+    scheduler_outbox_rows_deleted: int = 0
     user_session_rows_deleted: int = 0
     redis_streams_checked: int = 0
     redis_streams_trimmed: int = 0
@@ -40,6 +42,8 @@ class LogCleanupService:
         # T7-B2a: audit_logs / worker_events 保留期
         self._audit_retention_days = getattr(settings, "AUDIT_LOG_RETENTION_DAYS", 90)
         self._worker_event_retention_days = getattr(settings, "WORKER_EVENT_RETENTION_DAYS", 30)
+        self._worker_heartbeat_retention_days = settings.WORKER_HEARTBEAT_RETENTION_DAYS
+        self._scheduler_outbox_retention_days = settings.SCHEDULER_OUTBOX_RETENTION_DAYS
         # P1-09: user_sessions 里 expires_at 已过期的行对认证毫无作用
         # (verify_refresh_token 先做 JWT exp 校验就会拒绝), 只在这里保留
         # 一段时间供登录设备审计, 之后批式清掉, 防止表无限增长。
@@ -93,6 +97,17 @@ class LogCleanupService:
             time_column="created_at",
             retention_days=self._worker_event_retention_days,
         )
+        result.worker_heartbeat_rows_deleted = await self._cleanup_table(
+            table="worker_heartbeats",
+            time_column="timestamp",
+            retention_days=self._worker_heartbeat_retention_days,
+        )
+        result.scheduler_outbox_rows_deleted = await self._cleanup_table(
+            table="scheduler_outbox",
+            time_column="consumed_at",
+            retention_days=self._scheduler_outbox_retention_days,
+            require_non_null=True,
+        )
         # P1-09: 清理过期超过保留期的 refresh session 行 (expires_at 有索引)。
         # 只删 "expires_at < now - retention" 的行, 未过期的 revoked 行保留,
         # 不影响 verify_refresh_token / revoke_all_sessions 语义。
@@ -103,11 +118,14 @@ class LogCleanupService:
         )
         await self._cleanup_redis_streams(result)
         logger.info(
-            "日志清理完成: pg_task_logs={}, audit_logs={}, worker_events={}, user_sessions={}, "
+            "日志清理完成: pg_task_logs={}, audit_logs={}, worker_events={}, worker_heartbeats={}, "
+            "scheduler_outbox={}, user_sessions={}, "
             "redis_checked={}, trimmed={}, expired={}",
             result.postgres_rows_deleted,
             result.audit_rows_deleted,
             result.worker_event_rows_deleted,
+            result.worker_heartbeat_rows_deleted,
+            result.scheduler_outbox_rows_deleted,
             result.user_session_rows_deleted,
             result.redis_streams_checked,
             result.redis_streams_trimmed,
@@ -130,6 +148,7 @@ class LogCleanupService:
         table: str,
         time_column: str,
         retention_days: int,
+        require_non_null: bool = False,
     ) -> int:
         """按 `time_column < cutoff` 批式删过期行。
 
@@ -142,10 +161,11 @@ class LogCleanupService:
         conn = connections.get("default")
         total = 0
         while True:
+            null_guard = f'"{time_column}" IS NOT NULL AND ' if require_non_null else ""
             query = (
                 f'DELETE FROM "{table}" '
                 f"WHERE id IN ("
-                f'  SELECT id FROM "{table}" WHERE "{time_column}" < $1 '
+                f'  SELECT id FROM "{table}" WHERE {null_guard}"{time_column}" < $1 '
                 f"  ORDER BY id LIMIT {int(self._batch_limit)}"
                 f")"
             )

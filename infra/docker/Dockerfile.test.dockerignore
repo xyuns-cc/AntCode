@@ -2,9 +2,17 @@
 .git/
 .idea/
 .vscode/
+.agents/
+.claude/
+.codex/
+.kiro/
 .serena/
 .cursor/
+.continue/
+.windsurf/
 .DS_Store
+._*
+**/._*
 
 # Python caches and build outputs
 __pycache__/

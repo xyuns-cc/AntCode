@@ -5,14 +5,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from antcode_core.domain.models.enums import TaskStatus
-from antcode_web_api.routes.v1 import alert, monitoring, project, runs, tasks
+from antcode_web_api.routes.v1 import alert_config_store, monitoring, project, runs, tasks
 from fastapi import HTTPException
 
 
 def test_alert_config_parser_preserves_json_default_on_invalid_value():
     config = {"email_config": {"smtp_host": "old"}}
 
-    parsed = alert._apply_alert_config(config, "email_config", "not-json")
+    parsed = alert_config_store._apply_alert_config(config, "email_config", "not-json")
 
     assert parsed == {"email_config": {}}
     assert config == {"email_config": {"smtp_host": "old"}}

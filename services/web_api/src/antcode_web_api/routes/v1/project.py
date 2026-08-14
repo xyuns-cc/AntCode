@@ -8,7 +8,6 @@ import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, TypedDict
 
-from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.projects.project_service import project_service
 from antcode_core.application.services.projects.project_source_service import (
     project_source_service,
@@ -23,10 +22,9 @@ from antcode_core.common.utils.api_optimizer import (
     monitor_performance,
     optimize_large_response,
 )
-from antcode_core.domain.models import Task, TaskRun, User
-from antcode_core.domain.models.audit_log import AuditAction
+from antcode_core.domain.models import Task, TaskRun
 from antcode_core.domain.models.enums import ProjectStatus, ProjectType
-from antcode_core.domain.models.project import Project, ProjectCode, ProjectFile, ProjectRule
+from antcode_core.domain.models.project import Project
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.project import (
     CodeInfo,
@@ -41,6 +39,7 @@ from antcode_core.domain.schemas.project import (
     ProjectListResponse,
     ProjectResponse,
     ProjectRuleCreateRequest,
+    ProjectRuleUpdateRequest,
     TaskJsonRequest,
 )
 from antcode_core.domain.schemas.project_source import ProjectSourcePayload, ProjectSourceResponse
@@ -57,7 +56,8 @@ from fastapi import (
 )
 from fastapi.responses import Response
 from loguru import logger
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+from tortoise.exceptions import IntegrityError
 
 from antcode_web_api.exceptions import ProjectNotFoundException
 from antcode_web_api.response import (
@@ -71,8 +71,17 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
+from antcode_web_api.routes.v1.committed_resource_audit import (
+    audit_project_created,
+    audit_project_deleted,
+)
+from antcode_web_api.routes.v1.project_cache_scope import (
+    project_authorization_cache_scope,
+)
+from antcode_web_api.routes.v1.project_duplicate import duplicate_project_record
 from antcode_web_api.routes.v1.project_export_executions import bound_execution_export_payloads
 from antcode_web_api.routes.v1.project_export_logs import load_export_task_logs
+from antcode_web_api.routes.v1.settlement_http import DELETE_ERRORS, UNAVAILABLE_ERRORS, deletion_http_exception
 from antcode_web_api.services.project_connection import (
     ProjectConnectionError,
     ProjectConnectionResponseTooLargeError,
@@ -107,7 +116,8 @@ def create_project_response(project: Project) -> ProjectResponse:
 
 
 class ProjectDuplicateRequest(BaseModel):
-    name: str | None = None
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str | None = Field(None, min_length=3, max_length=255)
 
 
 class ProjectExportRequest(BaseModel):
@@ -132,10 +142,12 @@ class ProjectValidateRequest(BaseModel):
 
 
 async def _generate_unique_project_name(base_name: str) -> str:
-    name = base_name
+    bounded_base = base_name[:255]
+    name = bounded_base
     idx = 1
     while await Project.filter(name=name).exists():
-        name = f"{base_name}-{idx}"
+        suffix = f"-{idx}"
+        name = f"{bounded_base[: 255 - len(suffix)]}{suffix}"
         idx += 1
     return name
 
@@ -270,12 +282,14 @@ def _base_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, 
         "existing_env_name": form_data.existing_env_name,
         "env_name": form_data.env_name,
         "env_description": form_data.env_description,
+        "region": form_data.region,
     }
 
 
 def _project_type_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
     if form_data.type == ProjectType.FILE:
         return {
+            "language": form_data.language,
             "entry_point": form_data.entry_point,
             "runtime_config": form_data.runtime_config,
             "environment_vars": form_data.environment_vars,
@@ -300,6 +314,8 @@ def _rule_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, 
         raise HTTPException(status_code=400, detail="规则项目必须提供extraction_rules")
     return {
         "engine": form_data.engine,
+        "region": form_data.region,
+        "require_render": form_data.require_render,
         "target_url": form_data.target_url,
         "url_pattern": form_data.url_pattern,
         "request_method": form_data.request_method,
@@ -325,16 +341,7 @@ def _rule_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, 
 
 
 async def _audit_project_creation(http_request: Request, current_user: Any, project: Project) -> None:
-    user = await user_service.get_user_by_id(current_user.user_id)
-    await audit_service.log_project_action(
-        action=AuditAction.PROJECT_CREATE,
-        username=user.username if user else "unknown",
-        project_id=project.id,
-        project_name=project.name,
-        user_id=current_user.user_id,
-        ip_address=http_request.client.host if http_request.client else None,
-        description=f"创建项目: {project.name} (类型: {project.type})",
-    )
+    await audit_project_created(http_request, current_user, project)
 
 
 @project_router.get(
@@ -343,7 +350,11 @@ async def _audit_project_creation(http_request: Request, current_user: Any, proj
     summary="获取项目列表",
     description="获取当前用户的项目列表，支持分页和筛选",
 )
-@fast_response(cache_ttl=120, namespace="project:list")
+@fast_response(
+    cache_ttl=120,
+    namespace="project:list",
+    key_prefix_fn=project_authorization_cache_scope,
+)
 @monitor_performance(slow_threshold=0.5)
 @optimize_large_response(chunk_size=50)
 async def get_projects_list(
@@ -352,14 +363,13 @@ async def get_projects_list(
     current_user=Depends(get_current_user),
 ):
     """获取项目列表"""
-    is_admin = await user_service.is_admin(current_user.user_id)
+    is_admin = current_user.is_admin
     user_filter = None if is_admin else current_user_id
     if is_admin and query_params.created_by is not None:
-        try:
-            user_filter = int(query_params.created_by)
-        except (ValueError, TypeError):
-            user = await User.filter(public_id=query_params.created_by).first()
-            user_filter = user.id if user else None
+        user = await user_service.get_user_by_public_id(query_params.created_by)
+        if user is None:
+            return page_response(items=[], total=0, page=query_params.page, size=query_params.size)
+        user_filter = user.id
 
     projects, total = await project_service.get_projects_list(
         page=query_params.page,
@@ -749,12 +759,11 @@ def _write_project_export_rows(writer: Any, project_payload: object) -> None:
     response_model=BaseResponse[ProjectResponse],
     summary="获取项目详情",
 )
-@fast_response(
-    cache_ttl=120,
-    namespace="project:detail",
-    key_prefix_fn=lambda args, kwargs: str(kwargs.get("project_id", args[0] if args else "")),
-)
-async def get_project_detail(project_id: str, current_user_id: int = Depends(get_current_user_id)):
+async def get_project_detail(
+    project_id: str,
+    current_user_id: int = Depends(get_current_user_id),
+    current_user=Depends(get_current_user),
+):
     """获取项目详情"""
     project = await project_service.get_project_by_id(project_id, current_user_id)
     if not project:
@@ -819,15 +828,18 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
         if detail := await relation_service.get_project_file_detail(project.id):
             source = await project_source_service.get_response(project.id)
             response_data.file_info = FileInfo(
+                language=detail.language,
                 entry_point=detail.entry_point,
-                runtime_config={},
-                environment_vars={},
+                runtime_config=detail.runtime_config or {},
+                environment_vars=detail.environment_vars or {},
                 **_source_response_fields(source),
             )
     elif project.type == ProjectType.RULE:
         if detail := await relation_service.get_project_rule_detail(project.id):
             response_data.rule_info = {
                 "engine": detail.engine,
+                "region": detail.region,
+                "require_render": detail.require_render,
                 "target_url": detail.target_url,
                 "url_pattern": detail.url_pattern,
                 "callback_type": detail.callback_type,
@@ -842,10 +854,11 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
                 "timeout": detail.timeout,
                 "priority": getattr(detail, "priority", 0),
                 "dont_filter": getattr(detail, "dont_filter", False),
-                "headers": None,
-                "cookies": None,
-                "proxy_config": None,
-                "task_config": None,
+                "headers": detail.headers,
+                "cookies": detail.cookies,
+                "proxy_config": detail.proxy_config,
+                "anti_spider": detail.anti_spider,
+                "task_config": detail.task_config,
                 # S10: 详情页展示这两个字段
                 "resume_enabled": bool(getattr(detail, "resume_enabled", False) or False),
                 "dedup_config": getattr(detail, "dedup_config", None),
@@ -855,8 +868,8 @@ async def _attach_project_detail_info(response_data: ProjectResponse, project):
         response_data.code_info = CodeInfo(
             language=detail.language,
             entry_point=detail.entry_point,
-            runtime_config={},
-            environment_vars={},
+            runtime_config=detail.runtime_config or {},
+            environment_vars=detail.environment_vars or {},
             documentation=detail.documentation,
             **_source_response_fields(source),
         )
@@ -914,98 +927,16 @@ async def duplicate_project(
     base_name = payload.name or f"{project.name}-copy"
     name = await _generate_unique_project_name(base_name)
 
-    async with in_transaction():
-        new_project = await _create_duplicate_project(project, name, current_user_id)
-        await _duplicate_project_detail(project, new_project)
+    async with in_transaction() as connection:
+        try:
+            new_project = await duplicate_project_record(project, name, user_id=current_user_id, connection=connection)
+        except IntegrityError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="项目名称已存在") from exc
 
+    await project_service._attach_project_creator(new_project)
     response_data = create_project_response(new_project)
     await _attach_project_detail_info(response_data, new_project)
     return success_response(response_data, message=Messages.CREATED_SUCCESS)
-
-
-async def _create_duplicate_project(project: Project, name: str, user_id: int) -> Project:
-    return await Project.create(
-        name=name,
-        description=project.description,
-        type=project.type,
-        status=project.status,
-        tags=project.tags or [],
-        dependencies=project.dependencies,
-        env_location=project.env_location,
-        worker_id=project.worker_id,
-        worker_env_name=project.worker_env_name,
-        python_version=project.python_version,
-        runtime_scope=project.runtime_scope,
-        runtime_kind=project.runtime_kind,
-        runtime_locator=project.runtime_locator,
-        current_runtime_id=project.current_runtime_id,
-        runtime_worker_id=project.runtime_worker_id,
-        execution_strategy=project.execution_strategy,
-        bound_worker_id=project.bound_worker_id,
-        user_id=user_id,
-        updated_by=user_id,
-    )
-
-
-async def _duplicate_project_detail(source: Project, target: Project) -> None:
-    if source.type == ProjectType.FILE:
-        detail = await relation_service.get_project_file_detail(source.id)
-        if detail:
-            await _duplicate_file_detail(detail, target.id)
-    elif source.type == ProjectType.RULE:
-        detail = await relation_service.get_project_rule_detail(source.id)
-        if detail:
-            await _duplicate_rule_detail(detail, target.id)
-    elif source.type == ProjectType.CODE:
-        detail = await relation_service.get_project_code_detail(source.id)
-        if detail:
-            await _duplicate_code_detail(detail, target.id)
-
-
-async def _duplicate_file_detail(detail: Any, project_id: int) -> None:
-    await ProjectFile.create(
-        project_id=project_id,
-        language=detail.language,
-        entry_point=detail.entry_point,
-        runtime_config=detail.runtime_config,
-        environment_vars=detail.environment_vars,
-    )
-
-
-async def _duplicate_rule_detail(detail: Any, project_id: int) -> None:
-    await ProjectRule.create(
-        project_id=project_id,
-        engine=detail.engine,
-        target_url=detail.target_url,
-        url_pattern=detail.url_pattern,
-        callback_type=detail.callback_type,
-        request_method=detail.request_method,
-        extraction_rules=detail.extraction_rules,
-        data_schema=detail.data_schema,
-        pagination_config=detail.pagination_config,
-        max_pages=detail.max_pages,
-        start_page=detail.start_page,
-        request_delay=detail.request_delay,
-        retry_count=detail.retry_count,
-        timeout=detail.timeout,
-        priority=getattr(detail, "priority", 0),
-        dont_filter=getattr(detail, "dont_filter", False),
-        headers=detail.headers,
-        cookies=detail.cookies,
-        proxy_config=detail.proxy_config,
-        anti_spider=detail.anti_spider,
-        task_config=getattr(detail, "task_config", None),
-    )
-
-
-async def _duplicate_code_detail(detail: Any, project_id: int) -> None:
-    await ProjectCode.create(
-        project_id=project_id,
-        language=detail.language,
-        entry_point=detail.entry_point,
-        runtime_config=detail.runtime_config,
-        environment_vars=detail.environment_vars,
-    )
 
 
 @project_router.post(
@@ -1117,28 +1048,20 @@ async def delete_project(
     current_user_id=Depends(get_current_user_id),
     current_user=Depends(get_current_user),
 ):
-    # 获取项目信息用于审计
     project = await project_service.get_project_by_id(project_id, current_user_id)
     project_name = project.name if project else project_id
-
     # 删除项目
     try:
         deleted = await project_service.delete_project(project_id, current_user_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DELETE_ERRORS as exc:
+        raise deletion_http_exception(exc) from exc
     if not deleted:
         raise ProjectNotFoundException(project_id)
-
-    # 记录审计日志
-    user = await user_service.get_user_by_id(current_user.user_id)
-    await audit_service.log_project_action(
-        action=AuditAction.PROJECT_DELETE,
-        username=user.username if user else "unknown",
-        project_id=project.id if project else 0,
+    await audit_project_deleted(
+        http_request,
+        current_user,
+        project=project,
         project_name=project_name,
-        user_id=current_user.user_id,
-        ip_address=http_request.client.host if http_request.client else None,
-        description=f"删除项目: {project_name}",
     )
 
     return success_response(None, message=Messages.DELETED_SUCCESS)
@@ -1151,7 +1074,6 @@ async def delete_project(
     description="批量删除多个项目（不可逆操作）",
     response_description="返回批量删除操作结果",
 )
-@fast_response(background_execution=True)  # 后台执行
 @monitor_performance(slow_threshold=2.0)  # 监控超过2秒的批量操作
 async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_current_user_id)):
     """批量删除项目"""
@@ -1176,6 +1098,8 @@ async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_c
             else:
                 failed_count += 1
                 failed_projects.append(project_id)
+        except UNAVAILABLE_ERRORS as exc:
+            raise deletion_http_exception(exc) from exc
         except Exception:
             failed_count += 1
             failed_projects.append(project_id)
@@ -1237,26 +1161,22 @@ async def generate_task_json(project_id, current_user_id=Depends(get_current_use
     description="更新规则项目的详细配置",
     response_description="返回更新后的项目信息",
 )
-async def update_rule_config(project_id, request, current_user_id=Depends(get_current_user_id)):
+async def update_rule_config(project_id: str, request: ProjectRuleUpdateRequest, current_user_id=Depends(get_current_user_id)):  # fmt: skip
     """更新规则项目配置"""
-
-    # 获取项目详情
     project = await project_service.get_project_by_id(project_id, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
 
-    # 检查项目类型
     if project.type != ProjectType.RULE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="只有规则项目才能更新规则配置",
         )
 
-    # 更新规则配置
     updated_project = await project_service.update_rule_config(project_id, request, current_user_id)
 
-    # 构建响应数据
     response_data = create_project_response(updated_project)
+    await _attach_project_detail_info(response_data, updated_project)
 
     return success_response(response_data, message=Messages.UPDATED_SUCCESS)
 
@@ -1269,13 +1189,11 @@ async def update_code_config(
 ):
     """更新代码项目配置"""
     try:
-        # 更新代码配置
         updated_project = await project_service.update_code_config(project_id, request, current_user_id)
 
         if not updated_project:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在或无权限访问")
 
-        # 构建响应数据
         response_data = create_project_response(updated_project)
         await _attach_project_detail_info(response_data, updated_project)
 
@@ -1299,6 +1217,8 @@ async def update_code_config(
 )
 async def update_file_config(
     project_id: str,
+    *,
+    language=Form(None),
     entry_point=Form(None),
     runtime_config=Form(None),
     environment_vars=Form(None),
@@ -1318,8 +1238,9 @@ async def update_file_config(
                 detail="只有文件项目才能更新文件配置",
             )
 
-        # 构建更新请求 —— schema (extra="forbid") 只接受这 3 个字段
+        # 构建更新请求 —— schema (extra="forbid") 只接受声明字段
         request = ProjectFileUpdateRequest(
+            language=language,
             entry_point=entry_point,
             runtime_config=runtime_config,
             environment_vars=environment_vars,

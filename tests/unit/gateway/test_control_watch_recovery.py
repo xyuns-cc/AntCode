@@ -15,6 +15,7 @@ from antcode_core.infrastructure.redis import (
 )
 from antcode_gateway.services import control_service as control_service_module
 from antcode_gateway.services import runtime_control_expiry
+from antcode_gateway.services.control_event_builders import build_control_event
 from antcode_gateway.services.control_service import (
     CONTROL_STREAM_MAXLEN,
     GatewayControlService,
@@ -63,8 +64,8 @@ async def test_pending_control_recovery_pages_past_stream_maxlen():
         context=context,
         worker_id="worker-1",
         lease_id="lease-1",
-        consumer="worker-1",
-        channels=(_ControlChannel("antcode:control:worker-1", "antcode-control"),),
+        consumer="worker-1:lease-1",
+        channels=(_ControlChannel(control_stream("worker-1"), "antcode-control"),),
     )
 
     events = [event async for event in service._replay_pending_control(redis, session)]
@@ -77,9 +78,10 @@ async def test_pending_control_recovery_pages_past_stream_maxlen():
 
 @pytest.mark.asyncio
 async def test_stream_new_control_reraises_cancellation():
-    # C5 回归：xreadgroup 被取消时应向上重新抛出 CancelledError，而非吞成
-    # 干净 EOF——与 _replay_pending_control 一致，保持 async 取消语义。
+    # C5 回归：取消时应向上抛出 CancelledError，而非吞成干净 EOF。
     class CancellingRedis:
+        eval = AsyncMock(return_value=("0-0", []))
+
         async def xreadgroup(self, **_kwargs):
             raise asyncio.CancelledError
 
@@ -89,7 +91,7 @@ async def test_stream_new_control_reraises_cancellation():
         context=MagicMock(cancelled=MagicMock(return_value=False)),
         worker_id="worker-1",
         lease_id="lease-1",
-        consumer="worker-1",
+        consumer="worker-1:lease-1",
         channels=(_ControlChannel(control_stream("worker-1"), control_group()),),
     )
 
@@ -107,7 +109,7 @@ async def test_global_pending_replay_uses_worker_broadcast_group():
         context=MagicMock(),
         worker_id="worker-1",
         lease_id="lease-1",
-        consumer="worker-1",
+        consumer="worker-1:lease-1",
         channels=(_ControlChannel(control_global_stream(), control_global_group("worker-1")),),
     )
 
@@ -127,7 +129,7 @@ async def test_control_read_recreates_group_after_redis_group_loss():
         context=MagicMock(),
         worker_id="worker-1",
         lease_id="lease-1",
-        consumer="worker-1",
+        consumer="worker-1:lease-1",
         channels=(channel,),
     )
 
@@ -159,7 +161,8 @@ async def test_fenced_lease_is_returned_as_protocol_response(monkeypatch, failur
         policy=SimpleNamespace(ttl_ms=30_000, renew_after_ms=10_000),
         grant=AsyncMock(side_effect=failure),
     )
-    service = GatewayControlService(lease_handler=lease_handler, lease_store=lease_store)
+    authorizer = AsyncMock(return_value=SimpleNamespace(allowed=True))
+    service = GatewayControlService(lease_handler, lease_store, lease_authorizer=authorizer)
     context = MagicMock(abort=AsyncMock())
     monkeypatch.setattr(
         control_service_module,
@@ -181,10 +184,8 @@ async def test_fenced_lease_is_returned_as_protocol_response(monkeypatch, failur
 
 
 def test_runtime_control_event_preserves_execution_deadline():
-    service = GatewayControlService(lease_store=MagicMock())
-
-    event = service._build_control_event(
-        stream_key="antcode:control:worker-1",
+    event = build_control_event(
+        stream_key=control_stream("worker-1"),
         msg_id="1-0",
         data={
             "control_type": "runtime_manage",
@@ -202,21 +203,21 @@ def test_runtime_control_event_preserves_execution_deadline():
 
 @pytest.mark.asyncio
 async def test_invalid_runtime_deadline_is_acked_as_poison():
-    redis = MagicMock(xack=AsyncMock(return_value=1))
+    redis = MagicMock(eval=AsyncMock(return_value=b"acked"))
     lease_store = MagicMock(is_current=AsyncMock(return_value=True))
     service = GatewayControlService(lease_store=lease_store)
     session = _ControlWatchSession(
         context=MagicMock(),
         worker_id="worker-1",
         lease_id="lease-1",
-        consumer="worker-1",
-        channels=(_ControlChannel("antcode:control:worker-1", "antcode-control"),),
+        consumer="worker-1:lease-1",
+        channels=(_ControlChannel(control_stream("worker-1"), "antcode-control"),),
     )
 
     event = await service._decode_control_event(
         redis,
         session,
-        stream_key="antcode:control:worker-1",
+        stream_key=control_stream("worker-1"),
         message_id="2-0",
         data={
             "control_type": "runtime_manage",
@@ -229,12 +230,12 @@ async def test_invalid_runtime_deadline_is_acked_as_poison():
     )
 
     assert event is None
-    redis.xack.assert_awaited_once_with("antcode:control:worker-1", "antcode-control", "2-0")
+    assert redis.eval.await_args.args[6] == "worker-1:lease-1"
 
 
 @pytest.mark.asyncio
 async def test_global_runtime_control_is_logged_and_acked_by_worker_group(monkeypatch):
-    redis = MagicMock(xack=AsyncMock(return_value=1))
+    redis = MagicMock(eval=AsyncMock(return_value=b"acked"))
     lease_store = MagicMock(is_current=AsyncMock(return_value=True))
     service = GatewayControlService(lease_store=lease_store)
     session = _broadcast_session("worker-1")
@@ -263,16 +264,13 @@ async def test_global_runtime_control_is_logged_and_acked_by_worker_group(monkey
         "3-0",
         "request-global",
     )
-    redis.xack.assert_awaited_once_with(
-        control_global_stream(),
-        control_global_group("worker-1"),
-        "3-0",
-    )
+    assert redis.eval.await_args.args[6] == "worker-1:lease-worker-1"
 
 
 class BroadcastRedis:
     def __init__(self) -> None:
         self.delivered_groups: set[str] = set()
+        self.eval = AsyncMock(return_value=("0-0", []))
 
     async def xreadgroup(self, *, groupname, streams, **_kwargs):
         stream_key = next(iter(streams))
@@ -287,7 +285,7 @@ def _broadcast_session(worker_id: str) -> _ControlWatchSession:
         context=MagicMock(cancelled=MagicMock(return_value=False)),
         worker_id=worker_id,
         lease_id=f"lease-{worker_id}",
-        consumer=worker_id,
+        consumer=f"{worker_id}:lease-{worker_id}",
         channels=(
             _ControlChannel(control_stream(worker_id), control_group()),
             _ControlChannel(control_global_stream(), control_global_group(worker_id)),

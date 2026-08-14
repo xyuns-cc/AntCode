@@ -1,5 +1,5 @@
 import type React from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate } from 'react-router'
 import { Result, Button, theme } from 'antd'
 import { TeamOutlined } from '@ant-design/icons'
 import { useAuth } from '@/hooks/useAuth'

@@ -34,7 +34,7 @@ async def test_rule_pagination_is_dispatched_once_as_pending_base_run(monkeypatc
         SimpleNamespace(id=1, name="task", execution_params={}, timeout_seconds=45, priority=7),
         SimpleNamespace(public_id="project-1"),
         _rule_detail(),
-        SimpleNamespace(run_id="run-1"),
+        SimpleNamespace(run_id="run-1", scheduler_fencing_token=7, result_data={}),
         target_worker=SimpleNamespace(public_id="worker-1"),
     )
 
@@ -63,7 +63,7 @@ async def test_rule_dispatch_failure_is_exposed(monkeypatch):
         SimpleNamespace(id=1, name="task", execution_params={}, timeout_seconds=45, priority=7),
         SimpleNamespace(public_id="project-1"),
         _rule_detail(),
-        SimpleNamespace(run_id="run-1"),
+        SimpleNamespace(run_id="run-1", scheduler_fencing_token=7, result_data={}),
         target_worker=SimpleNamespace(public_id="worker-1"),
     )
 
@@ -75,7 +75,6 @@ async def test_rule_dispatch_failure_is_exposed(monkeypatch):
 async def test_pending_rule_dispatch_does_not_write_runtime_success(monkeypatch):
     service = scheduler_loop.SchedulerService()
     service._log_execution = AsyncMock()
-    service._push_execution_status = AsyncMock()
     service._persist_result_fields = AsyncMock()
     update_dispatch = AsyncMock(return_value=True)
     update_runtime = AsyncMock(return_value=True)

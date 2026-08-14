@@ -6,11 +6,9 @@ P1-GW-04 修复：claim/renew 不再依赖 RPC 入口的 check-then-act 校验�
 lease_id 已不是当前代际，返回 LEASE_STALE 并 abort，不可能再创建或
 续期 ownership 阻塞新代际（L2）。
 
-复审 P1-GW-02: PG 的 ``TaskRun.lease_id`` 绑定顺序修正为 **fence 先行**。
-此前先绑定 PG 再跑 fence：切代命中 LEASE_STALE 时 PG 已停在旧代际，
-新代际（绑定 CAS 只允许 NULL→X）被永久拒绝。现在 claim 流程是：
-worker 归属预检（不绑定）→ fence Lua（代际权威判定）→ ACQUIRED 后
-才把 PG 改绑到当前代际（允许同 worker 换代改绑）。
+    TaskRun 在 ready publish 前已绑定派发 Lease。claim 必须精确匹配该代际，
+    再执行 Redis ownership fence；这样新代际不能接管旧 ready 消息。fence
+    成功后只记录同一代际的日志边界，不允许在 claim 阶段改写派发归属。
 """
 
 from __future__ import annotations
@@ -30,7 +28,6 @@ from antcode_core.application.services.workers.run_ownership_fence import (
 )
 from antcode_core.application.services.workers.run_ownership_service import (
     bind_worker_run_lease_generation,
-    require_worker_owns_runs,
     require_worker_owns_runs_for_lease,
 )
 from antcode_core.infrastructure.redis import get_redis_client
@@ -60,12 +57,11 @@ class RunOwnershipRpcMixin:
             request,
             context,
             require_ttl=True,
-            require_lease_binding=False,
         )
         if identity is None:
             return artifact_pb2.RunOwnershipClaimResponse(acquired=False)
         acquired = await self._run_fenced_operation(context, claim_run_ownership, identity)
-        # P1-GW-02: 只有 fence 证明当前代际并取得 ownership 后才落 PG 绑定。
+        # fence 成功后记录该派发代际的日志接收边界。
         if acquired:
             try:
                 await self._bind_lease_generation(identity)
@@ -80,7 +76,6 @@ class RunOwnershipRpcMixin:
             request,
             context,
             require_ttl=True,
-            require_lease_binding=True,
         )
         if identity is None:
             return artifact_pb2.RunOwnershipRenewResponse(renewed=False)
@@ -88,11 +83,16 @@ class RunOwnershipRpcMixin:
         return artifact_pb2.RunOwnershipRenewResponse(renewed=renewed)
 
     async def ReleaseRunOwnership(self, request, context):
+        # 结果持久化后 TaskRun 可被清理，但 Worker 仍需完成最后的 ownership
+        # 释放。底层 Lua 仅删除精确匹配 worker_id:lease_id 的 token，因此
+        # release 不依赖 PG 行或当前 Lease 存在；claim/renew 仍保留两项严格
+        # 校验。这样旧代际只能清理自己的精确 token，不能删除新代际 ownership。
         identity = await self._authorize_ownership_request(
             request,
             context,
             require_ttl=False,
-            require_lease_binding=True,
+            require_current_lease=False,
+            require_task_run=False,
         )
         if identity is None:
             return artifact_pb2.RunOwnershipReleaseResponse(released=False)
@@ -105,7 +105,8 @@ class RunOwnershipRpcMixin:
         context: grpc.aio.ServicerContext,
         *,
         require_ttl: bool,
-        require_lease_binding: bool,
+        require_current_lease: bool = True,
+        require_task_run: bool = True,
     ) -> _RunOwnershipIdentity | None:
         worker_id = await require_authenticated_worker(context, request.worker_id)
         if not worker_id:
@@ -115,13 +116,9 @@ class RunOwnershipRpcMixin:
             return None
         # 入口 Lease 预检仅用于尽早拒绝 + 精确错误信息；真正的代际权威
         # 判定在 fence Lua 内与写入原子完成（见 _run_fenced_operation）。
-        if not await self._require_current_ownership_lease(identity, context):
+        if require_current_lease and not await self._require_current_ownership_lease(identity, context):
             return None
-        if not await self._require_task_run_ownership(
-            identity,
-            context,
-            require_lease_binding=require_lease_binding,
-        ):
+        if require_task_run and not await self._require_task_run_ownership(identity, context):
             return None
         return identity
 
@@ -145,21 +142,13 @@ class RunOwnershipRpcMixin:
     async def _require_task_run_ownership(
         identity: _RunOwnershipIdentity,
         context: grpc.aio.ServicerContext,
-        *,
-        require_lease_binding: bool,
     ) -> bool:
         try:
-            if require_lease_binding:
-                # renew/release：run 必须已绑定到请求代际（claim 时落库）。
-                await require_worker_owns_runs_for_lease(
-                    identity.worker_id,
-                    [identity.run_id],
-                    lease_id=identity.lease_id,
-                )
-            else:
-                # claim 预检只验 worker 归属，**不绑定**：绑定必须等 fence
-                # 证明代际后进行（P1-GW-02）。
-                await require_worker_owns_runs(identity.worker_id, [identity.run_id])
+            await require_worker_owns_runs_for_lease(
+                identity.worker_id,
+                [identity.run_id],
+                lease_id=identity.lease_id,
+            )
             return True
         except ValueError as exc:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
@@ -174,7 +163,7 @@ class RunOwnershipRpcMixin:
     async def _bind_lease_generation(
         identity: _RunOwnershipIdentity,
     ) -> None:
-        """fence ACQUIRED 之后把 PG 绑定改到当前代际(允许同 worker 换代)。
+        """fence ACQUIRED 后确认并记录已派发的同一 PG Lease 代际。
 
         P1-GW-04 (round4 修正):lease_gen 必须用 **lease 授予时刻**
         (Redis Hash granted_at_ms),不能用 fence 后 bind 时的 time.time()。
@@ -185,13 +174,13 @@ class RunOwnershipRpcMixin:
         正确:用 granted_at_ms 作为 gen(L1 lease 更早授予,granted<L2),CAS
         `stored(200) <= NEW(100)`? false → 拒绝 L1 迟到覆盖 ✓。
         """
-        from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
+        from antcode_core.application.services.lease_service import LeaseStore, wire_lease_policy
 
         try:
             redis = await get_redis_client()
             if redis is None:
                 raise RuntimeError("Redis unavailable")
-            store = LeaseStore(redis, namespace=redis_namespace(), policy=LeasePolicy())
+            store = LeaseStore(redis, namespace=redis_namespace(), policy=wire_lease_policy())
             lease = await store.get(identity.worker_id, include_expired=False)
             if lease is None or lease.lease_id != identity.lease_id:
                 raise _OwnershipBindError(

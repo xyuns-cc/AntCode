@@ -1,10 +1,4 @@
-"""任务持久化与恢复服务
-
-提供任务检查点持久化和故障恢复功能:
-- TaskCheckpoint: 任务检查点数据结构
-- TaskPersistenceService: 检查点持久化服务
-- TaskRecoveryService: 任务恢复服务
-"""
+"""任务检查点持久化与中断扫描。"""
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -13,6 +7,16 @@ from enum import StrEnum
 from antcode_core.infrastructure.cache import unified_cache
 from loguru import logger
 
+from antcode_master.task_recovery_leases import load_active_lease_ids
+
+
+class CheckpointPersistenceError(RuntimeError):
+    """检查点持久化失败。
+
+    写库/写缓存任何一环失败都必须抛出：调用方一旦以为"进度已保存"，
+    崩溃后就会按不存在的进度做恢复决策。
+    """
+
 
 class CheckpointState(StrEnum):
     """检查点状态"""
@@ -20,6 +24,9 @@ class CheckpointState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     CHECKPOINTED = "checkpointed"
+    # 存库的进度数据无法解析：既不是"有进度"也不是"没进度"，必须单列一档，
+    # 否则损坏数据会被当成有效进度，任务实际从 0 重跑却无人知情。
+    CORRUPTED = "corrupted"
     FAILED = "failed"
     RECOVERED = "recovered"
 
@@ -72,109 +79,117 @@ class TaskPersistenceService:
     MAX_RETRY_ON_RECOVERY = 3
     INTERRUPTED_THRESHOLD_MINUTES = 2
     HEARTBEAT_INTERVAL_SECONDS = 30
+    RECOVERY_PAGE_SIZE = 100
 
     async def save_checkpoint(self, checkpoint):
-        """保存任务检查点"""
-        try:
-            checkpoint.last_checkpoint_at = datetime.now()
-            await self._save_to_db(checkpoint)
+        """保存任务检查点；任一存储失败立即抛错，绝不告诉调用方"已保存"。"""
+        checkpoint.last_checkpoint_at = datetime.now()
+        await self._save_to_db(checkpoint)
 
-            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{checkpoint.run_id}"
-            await unified_cache.set(cache_key, checkpoint.to_dict(), ttl=self.CHECKPOINT_CACHE_TTL)
+        cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{checkpoint.run_id}"
+        await unified_cache.set(cache_key, checkpoint.to_dict(), ttl=self.CHECKPOINT_CACHE_TTL)
 
-            logger.debug(f"检查点已保存: run_id={checkpoint.run_id}, progress={checkpoint.progress:.1%}")
-            return True
-
-        except Exception as e:
-            logger.error(f"保存检查点失败: {e}")
-            return False
+        logger.debug(f"检查点已保存: run_id={checkpoint.run_id}, progress={checkpoint.progress:.1%}")
 
     async def _save_to_db(self, checkpoint):
-        """保存检查点到数据库"""
+        """保存检查点到数据库；run 不存在说明进度无处落盘，必须报错"""
         from antcode_core.domain.models import TaskRun
 
-        try:
-            execution = await TaskRun.get_or_none(run_id=checkpoint.run_id)
-            if execution:
-                result_data = execution.result_data or {}
-                result_data["checkpoint"] = checkpoint.to_dict()
-                execution.result_data = result_data
-                await execution.save(update_fields=["result_data"])
-        except Exception as e:
-            logger.warning(f"保存检查点到数据库失败: {e}")
+        execution = await TaskRun.get_or_none(run_id=checkpoint.run_id)
+        if execution is None:
+            raise CheckpointPersistenceError(f"检查点对应的执行记录不存在: run_id={checkpoint.run_id}")
+        result_data = dict(execution.result_data or {})
+        result_data["checkpoint"] = checkpoint.to_dict()
+        execution.result_data = result_data
+        await execution.save(update_fields=["result_data"])
 
     async def get_checkpoint(self, run_id):
-        """获取任务检查点"""
+        """获取任务检查点；返回 None 只表示确实没有检查点，读库失败会抛出"""
+        cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{run_id}"
         try:
-            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{run_id}"
             data = await unified_cache.get(cache_key)
+        except Exception as e:
+            # 缓存只是加速层，数据库才是权威来源；这里显式告警后继续读库。
+            logger.warning(f"从缓存读取检查点失败，回落数据库: run_id={run_id}, error={e}")
+        else:
             if data:
                 return TaskCheckpoint.from_dict(data)
-        except Exception as e:
-            logger.debug(f"从缓存读取检查点失败: {e}")
 
-        try:
-            from antcode_core.domain.models import TaskRun
-
-            execution = await TaskRun.get_or_none(run_id=run_id)
-            if execution and execution.result_data:
-                checkpoint_data = execution.result_data.get("checkpoint")
-                if checkpoint_data:
-                    return TaskCheckpoint.from_dict(checkpoint_data)
-        except Exception as e:
-            logger.warning(f"从数据库读取检查点失败: {e}")
-
-        return None
-
-    async def delete_checkpoint(self, run_id):
-        """删除任务检查点"""
-        try:
-            cache_key = f"{self.CHECKPOINT_CACHE_PREFIX}{run_id}"
-            await unified_cache.delete(cache_key)
-        except Exception as e:
-            logger.debug(f"删除缓存检查点失败: {e}")
-
-    async def update_heartbeat(self, run_id):
-        """更新任务心跳"""
         from antcode_core.domain.models import TaskRun
 
-        try:
-            updated = await TaskRun.filter(run_id=run_id).update(last_heartbeat=datetime.now())
-            return updated > 0
-        except Exception as e:
-            logger.debug(f"更新心跳失败: {e}")
-            return False
+        execution = await TaskRun.get_or_none(run_id=run_id)
+        checkpoint_data = (execution.result_data or {}).get("checkpoint") if execution else None
+        return TaskCheckpoint.from_dict(checkpoint_data) if checkpoint_data else None
+
+    async def delete_checkpoint(self, run_id):
+        """删除任务检查点：缓存与数据库权威副本都要清，失败必须抛出。
+
+        只清缓存是不够的——``_save_to_db`` 把进度写在 ``TaskRun.result_data``
+        里，``get_checkpoint`` 缓存未命中时会回落数据库。残留的 DB 副本会让
+        已判死的 run 在下一轮恢复里被旧进度"复活"。
+        """
+        from antcode_core.domain.models import TaskRun
+
+        await unified_cache.delete(f"{self.CHECKPOINT_CACHE_PREFIX}{run_id}")
+        execution = await TaskRun.get_or_none(run_id=run_id)
+        if execution is None or not (execution.result_data or {}).get("checkpoint"):
+            return
+        result_data = dict(execution.result_data or {})
+        result_data.pop("checkpoint", None)
+        execution.result_data = result_data
+        await execution.save(update_fields=["result_data"])
 
     async def get_interrupted_tasks(self):
-        """获取所有被中断的任务; P1-FN-13: 非预期异常向上抛让 startup fatal。"""
+        """使用稳定 keyset 分页获取全部被中断任务。"""
         from antcode_core.domain.models import Task, TaskRun, Worker
         from antcode_core.domain.models.enums import TaskStatus
-        from tortoise.expressions import Q
 
         cutoff = datetime.now() - timedelta(minutes=self.INTERRUPTED_THRESHOLD_MINUTES)
-        interrupted_executions = (
-            await TaskRun.filter(status=TaskStatus.RUNNING)
-            .filter(Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff))
-            .limit(100)
-        )
-        if not interrupted_executions:
+        page = await self._load_interrupted_page(TaskRun, TaskStatus, cutoff, after_id=0)
+        if not page:
             return []
-        active_worker_ids = await self._get_active_worker_ids()
-        if active_worker_ids is None:
-            # P1-FN-13: Lease store 不可达 → 保守跳过本轮判死(非致命,下轮再判)
-            logger.warning(
-                "Lease store 不可达,本轮 get_interrupted_tasks 保守跳过 (candidate={} 条待判)",
-                len(interrupted_executions),
+        active_lease_ids = await load_active_lease_ids()
+        if active_lease_ids is None:
+            logger.warning("Lease store 不可达,本轮 get_interrupted_tasks 保守跳过")
+            return []
+        checkpoints = []
+        while page:
+            checkpoints.extend(
+                await self._checkpoints_for_page(
+                    page,
+                    active_lease_ids,
+                    Task=Task,
+                    TaskRun=TaskRun,
+                    Worker=Worker,
+                    TaskStatus=TaskStatus,
+                )
             )
-            return []
-        worker_pub_map = await self._load_worker_public_ids(interrupted_executions, Worker)
-        task_map = await self._load_tasks_by_id(interrupted_executions, Task)
-        await self._cleanup_orphan_runs(interrupted_executions, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
+            if len(page) < self.RECOVERY_PAGE_SIZE:
+                break
+            page = await self._load_interrupted_page(TaskRun, TaskStatus, cutoff, after_id=page[-1].id)
+        return checkpoints
+
+    async def _checkpoints_for_page(self, page, active_lease_ids, *, Task, TaskRun, Worker, TaskStatus):
+        worker_pub_map = await self._load_worker_public_ids(page, Worker)
+        task_map = await self._load_tasks_by_id(page, Task)
+        await self._cleanup_orphan_runs(page, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
         return self._build_recovery_checkpoints(
-            interrupted_executions,
+            page,
             task_map,
             worker_pub_map=worker_pub_map,
-            active_worker_ids=active_worker_ids,
+            active_lease_ids=active_lease_ids,
+        )
+
+    @classmethod
+    async def _load_interrupted_page(cls, TaskRun, TaskStatus, cutoff, *, after_id: int):
+        from tortoise.expressions import Q
+
+        stale = Q(last_heartbeat__lt=cutoff) | Q(last_heartbeat__isnull=True, start_time__lt=cutoff)
+        return await (
+            TaskRun.filter(status=TaskStatus.RUNNING, id__gt=after_id)
+            .filter(stale)
+            .order_by("id")
+            .limit(cls.RECOVERY_PAGE_SIZE)
         )
 
     @staticmethod
@@ -203,219 +218,74 @@ class TaskPersistenceService:
         logger.info(f"已清理 {len(orphan_executions)} 条孤立的执行记录（任务已删除）")
 
     @classmethod
-    def _build_recovery_checkpoints(cls, interrupted_executions, task_map, *, worker_pub_map, active_worker_ids):
+    def _build_recovery_checkpoints(cls, interrupted_executions, task_map, *, worker_pub_map, active_lease_ids):
         checkpoints = []
         for execution in interrupted_executions:
             task = task_map.get(execution.task_id)
             if not task:
                 continue
-            # B6: worker 仍持有 lease → 视为存活,跳过恢复(避免双跑)
             pub_id = worker_pub_map.get(execution.worker_id) if execution.worker_id else None
-            if pub_id and pub_id in active_worker_ids:
-                logger.debug(f"跳过恢复（worker lease 仍活跃）: run_id={execution.run_id} worker={pub_id}")
+            if cls._run_lease_is_active(execution, pub_id, active_lease_ids):
+                logger.debug(f"跳过恢复（run lease 代际仍活跃）: run_id={execution.run_id} worker={pub_id}")
                 continue
             checkpoints.append(cls._checkpoint_for_execution(execution, task))
         return checkpoints
 
     @staticmethod
-    def _checkpoint_for_execution(execution, task):
-        checkpoint = None
-        if execution.result_data and execution.result_data.get("checkpoint"):
-            try:
-                checkpoint = TaskCheckpoint.from_dict(execution.result_data["checkpoint"])
-                checkpoint.state = CheckpointState.CHECKPOINTED
-            except Exception:
-                pass
-        if not checkpoint:
-            checkpoint = TaskCheckpoint(
-                run_id=execution.run_id,
-                task_id=execution.task_id,
-                task_public_id=task.public_id,
-                state=CheckpointState.CHECKPOINTED,
-                progress=0.0,
-                started_at=execution.start_time,
+    def _run_lease_is_active(execution, worker_public_id, active_lease_ids) -> bool:
+        current_lease_id = active_lease_ids.get(worker_public_id) if worker_public_id else None
+        if current_lease_id is None:
+            return False
+        if execution.lease_id:
+            return execution.lease_id == current_lease_id
+        logger.warning(
+            "RUNNING run 缺少 lease_id，无法精确判代际，保守跳过恢复: run_id={} worker={}",
+            execution.run_id,
+            worker_public_id,
+        )
+        return True
+
+    @classmethod
+    def _checkpoint_for_execution(cls, execution, task):
+        """把中断的执行转成恢复用检查点，进度是否可信必须如实标记"""
+        stored = (execution.result_data or {}).get("checkpoint")
+        if not stored:
+            # 从未存过进度：状态保持 PENDING，恢复方据此知道这是从头执行
+            return cls._progressless_checkpoint(execution, task, state=CheckpointState.PENDING)
+
+        try:
+            checkpoint = TaskCheckpoint.from_dict(stored)
+        except Exception as e:
+            # 损坏的进度不能伪装成有效检查点：标 CORRUPTED 并写明原因，
+            # 否则任务实际从 0 重跑（非幂等任务被完整重放）却无任何线索。
+            logger.error(f"检查点数据损坏，无有效进度可续: run_id={execution.run_id}, error={e}")
+            return cls._progressless_checkpoint(
+                execution,
+                task,
+                state=CheckpointState.CORRUPTED,
+                error_message=f"检查点数据损坏，无法续跑: {e}",
             )
+
+        checkpoint.state = CheckpointState.CHECKPOINTED
         return checkpoint
 
-    async def _get_active_worker_ids(self) -> set[str] | None:
-        """B6/P1-FN-13: 返回 set()=成功；None=Redis 不可达（保守：上层跳过判死轮次，不把空集当"没有活跃 worker"从而误判死所有 RUNNING run）。"""
-        try:
-            from antcode_core.application.services.lease_service import (
-                LeasePolicy,
-                LeaseStore,
-            )
-            from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
-
-            redis = await get_redis_client()
-            if redis is None:
-                logger.warning("Lease store 不可达(Redis client None),跳过本轮判死")
-                return None
-            store = LeaseStore(redis, namespace=redis_namespace(), policy=LeasePolicy())
-            return set(await store.list_active())
-        except Exception as exc:
-            logger.warning("读取 active leases 失败(保守跳过判死): {}", exc)
-            return None
-
-    async def update_progress(self, run_id, progress, checkpoint_data=None):
-        """更新任务进度"""
-        try:
-            checkpoint = await self.get_checkpoint(run_id)
-            if checkpoint:
-                checkpoint.progress = min(1.0, max(0.0, progress))
-                if checkpoint_data:
-                    checkpoint.checkpoint_data.update(checkpoint_data)
-                await self.save_checkpoint(checkpoint)
-        except Exception as e:
-            logger.debug(f"更新进度失败: {e}")
+    @staticmethod
+    def _progressless_checkpoint(execution, task, *, state, error_message=None):
+        """构造一个明确不含进度的检查点"""
+        return TaskCheckpoint(
+            run_id=execution.run_id,
+            task_id=execution.task_id,
+            task_public_id=task.public_id,
+            state=state,
+            progress=0.0,
+            started_at=execution.start_time,
+            error_message=error_message,
+        )
 
 
-class TaskRecoveryService:
-    """任务恢复服务"""
+def __getattr__(name: str):
+    if name in {"TaskRecoveryService", "task_recovery_service"}:
+        from antcode_master import task_recovery
 
-    def __init__(self):
-        self.persistence = TaskPersistenceService()
-        self._recovering = False
-
-    async def recover_on_startup(self):
-        """Master 启动时恢复中断的任务
-
-        P1-round6 5.2 (leader gate): standby Master 也会跑 startup 恢复,
-        触发对同一批 run 的重复副作用(cancel/republish)。加 leader gate:
-        非 leader 直接跳过, 返回统计零占位。当前 leader 在 __main__.py 已
-        try_become_leader,只有获得 leader 的 Master 会真正恢复;后台
-        _health_check_loop 提升后, 下一次启动/触发路径会重新落到 leader。
-        """
-        # 惰性导入避免测试 harness 无 Master 二进制场景
-        try:
-            from antcode_master.leader import leader_election  # noqa: PLC0415
-
-            if not leader_election.is_leader:
-                logger.info("非 Leader Master, 跳过启动恢复 (由当前 leader 执行)")
-                return {"recovered": 0, "failed": 0, "skipped": 0}
-        except ImportError:
-            # 无 leader 模块(如纯 core 单测环境)时保留原行为
-            pass
-
-        if self._recovering:
-            logger.warning("恢复任务已在进行中")
-            return {"recovered": 0, "failed": 0, "skipped": 0}
-
-        self._recovering = True
-        stats = {"recovered": 0, "failed": 0, "skipped": 0}
-
-        try:
-            logger.info("开始检查需要恢复的任务...")
-
-            interrupted = await self.persistence.get_interrupted_tasks()
-            logger.info(f"发现 {len(interrupted)} 个中断的任务")
-
-            for checkpoint in interrupted:
-                try:
-                    if checkpoint.retry_count >= TaskPersistenceService.MAX_RETRY_ON_RECOVERY:
-                        logger.warning(
-                            f"任务 {checkpoint.run_id} 重试次数过多 ({checkpoint.retry_count}次)，标记为失败"
-                        )
-                        await self._mark_task_failed(checkpoint, "任务恢复失败，重试次数超限")
-                        stats["failed"] += 1
-                        continue
-
-                    success = await self._recover_task(checkpoint)
-                    if success:
-                        stats["recovered"] += 1
-                    else:
-                        stats["skipped"] += 1
-
-                except Exception as e:
-                    logger.error(f"恢复任务 {checkpoint.run_id} 异常: {e}")
-                    stats["failed"] += 1
-
-            logger.info(f"任务恢复完成: 成功 {stats['recovered']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
-
-        finally:
-            self._recovering = False
-
-        return stats
-
-    async def _recover_task(self, checkpoint):
-        """恢复单个任务"""
-        try:
-            from antcode_core.domain.models import Task, TaskRun
-            from antcode_core.domain.models.enums import TaskStatus
-
-            task = await Task.get_or_none(id=checkpoint.task_id)
-            if not task:
-                logger.warning(f"任务不存在: task_id={checkpoint.task_id}")
-                return False
-
-            checkpoint.state = CheckpointState.RECOVERED
-            checkpoint.retry_count += 1
-            await self.persistence.save_checkpoint(checkpoint)
-
-            await TaskRun.filter(run_id=checkpoint.run_id).update(
-                status=TaskStatus.FAILED,
-                error_message="任务中断，已重新调度",
-                end_time=datetime.now(),
-            )
-
-            resume_data = None
-            if checkpoint.checkpoint_data or checkpoint.progress > 0:
-                resume_data = {
-                    "_resume": True,
-                    "_checkpoint": checkpoint.checkpoint_data,
-                    "_progress": checkpoint.progress,
-                    "_last_log_offset": checkpoint.last_log_offset,
-                    "_previous_run_id": checkpoint.run_id,
-                }
-
-            if resume_data:
-                execution_params = task.execution_params or {}
-                execution_params.update(resume_data)
-                task.execution_params = execution_params
-                await task.save(update_fields=["execution_params"])
-                logger.debug(f"已注入断点续传数据到任务 {task.public_id}")
-
-            from antcode_master.control.scheduler_loop import scheduler_service
-
-            await scheduler_service.trigger_task(task.id)
-
-            logger.info(
-                f"任务已恢复调度: run_id={checkpoint.run_id}, "
-                f"进度={checkpoint.progress:.1%}, 重试次数={checkpoint.retry_count}, "
-                f"断点续传={'是' if resume_data else '否'}"
-            )
-
-            return True
-
-        except Exception as e:
-            logger.error(f"恢复任务失败: {e}")
-            return False
-
-    async def _mark_task_failed(self, checkpoint, error_message):
-        """标记任务为失败"""
-        try:
-            from antcode_core.domain.models import TaskRun
-            from antcode_core.domain.models.enums import TaskStatus
-
-            await TaskRun.filter(run_id=checkpoint.run_id).update(
-                status=TaskStatus.FAILED,
-                error_message=error_message,
-                end_time=datetime.now(),
-            )
-
-            await self.persistence.delete_checkpoint(checkpoint.run_id)
-
-        except Exception as e:
-            logger.error(f"标记任务失败异常: {e}")
-
-    async def recover_single_task(self, run_id):
-        """手动恢复单个任务"""
-        checkpoint = await self.persistence.get_checkpoint(run_id)
-        if not checkpoint:
-            logger.warning(f"未找到检查点: {run_id}")
-            return False
-
-        return await self._recover_task(checkpoint)
-
-
-task_persistence_service = TaskPersistenceService()
-task_recovery_service = TaskRecoveryService()
+        return getattr(task_recovery, name)
+    raise AttributeError(name)

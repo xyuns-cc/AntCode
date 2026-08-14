@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from loguru import logger
 
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.audit_log import AuditAction, AuditLog
 
 
@@ -49,6 +50,7 @@ class AuditService:
             创建的审计日志记录
         """
         try:
+            normalized_error = normalize_persisted_error_message(error_message)
             audit_log = await AuditLog.create(
                 action=action,
                 resource_type=resource_type,
@@ -62,7 +64,7 @@ class AuditService:
                 old_value=old_value,
                 new_value=new_value,
                 success=success,
-                error_message=error_message,
+                error_message=normalized_error,
             )
 
             # 记录到日志文件
@@ -70,7 +72,7 @@ class AuditService:
             if resource_name:
                 log_msg += f" | {resource_name}"
             if not success:
-                log_msg += f" | 失败: {error_message}"
+                log_msg += f" | 失败: {normalized_error}"
 
             logger.info(log_msg)
 
@@ -202,8 +204,6 @@ class AuditService:
             new_value={"value": str(new_value)} if new_value else None,
             description=f"修改配置: {config_key}",
         )
-
-    # ========== 查询方法 ==========
 
     async def get_logs(
         self,
@@ -382,5 +382,4 @@ class AuditService:
         return deleted
 
 
-# 全局实例
 audit_service = AuditService()

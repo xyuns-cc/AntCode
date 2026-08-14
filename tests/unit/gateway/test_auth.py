@@ -203,6 +203,43 @@ class TestAuthInterceptor:
             assert result.auth_method == "jwt"
 
     @pytest.mark.asyncio
+    async def test_invalid_api_key_with_worker_id_does_not_fall_back_to_mtls(self, interceptor):
+        with patch.object(interceptor, "_authenticate_api_key", new_callable=AsyncMock) as mock_api_key:
+            mock_api_key.return_value = AuthResult(success=False, error="无效的 API Key")
+
+            result = await interceptor._authenticate(
+                {
+                    "x-api-key": "invalid",
+                    "x-worker-id": "worker-001",
+                }
+            )
+
+        assert result.success is False
+        assert result.error == "无效的 API Key"
+        assert result.auth_method is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_explicit_credentials_do_not_fall_back_to_mtls(self, interceptor):
+        with (
+            patch.object(interceptor, "_authenticate_api_key", new_callable=AsyncMock) as mock_api_key,
+            patch.object(interceptor, "_authenticate_jwt", new_callable=AsyncMock) as mock_jwt,
+        ):
+            mock_api_key.return_value = AuthResult(success=False, error="无效的 API Key")
+            mock_jwt.return_value = AuthResult(success=False, error="无效的 JWT token")
+
+            result = await interceptor._authenticate(
+                {
+                    "x-api-key": "invalid",
+                    "x-worker-id": "worker-001",
+                    "authorization": "Bearer invalid",
+                }
+            )
+
+        assert result.success is False
+        assert result.error == "无效的 JWT token"
+        assert result.auth_method is None
+
+    @pytest.mark.asyncio
     async def test_authenticate_no_credentials(self, interceptor):
         """无认证信息时失败"""
         result = await interceptor._authenticate({})
@@ -215,51 +252,3 @@ class TestAuthInterceptor:
         original = grpc.unary_stream_rpc_method_handler(AsyncMock())
         handler = interceptor._make_reject_method_handler(original, "测试错误")
         assert handler.unary_stream is not None
-
-
-class TestAuthInterceptorIntegration:
-    """认证拦截器集成测试"""
-
-    @pytest.mark.asyncio
-    async def test_full_auth_flow_success(self):
-        """完整认证流程 - 成功"""
-        interceptor = AuthInterceptor(
-            enabled=True,
-            api_key_validator=lambda key, worker_id: key == "test-api-key" and worker_id == "worker-001",
-        )
-
-        original = grpc.unary_unary_rpc_method_handler(AsyncMock())
-        continuation = AsyncMock(return_value=original)
-        handler_details = MagicMock()
-        handler_details.method = "/antcode.v1.GatewayService/SendHeartbeat"
-        handler_details.invocation_metadata = [
-            ("x-api-key", "test-api-key"),
-            ("x-worker-id", "worker-001"),
-        ]
-
-        result = await interceptor.intercept_service(continuation, handler_details)
-
-        assert result.unary_unary is not None
-        continuation.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_full_auth_flow_failure(self):
-        """完整认证流程 - 失败"""
-        interceptor = AuthInterceptor(
-            enabled=True,
-            api_key_validator=lambda _key, _worker_id: False,
-        )
-
-        original = grpc.unary_unary_rpc_method_handler(AsyncMock())
-        continuation = AsyncMock(return_value=original)
-        handler_details = MagicMock()
-        handler_details.method = "/antcode.v1.GatewayService/SendHeartbeat"
-        handler_details.invocation_metadata = [
-            ("x-api-key", "invalid_key"),
-        ]
-
-        result = await interceptor.intercept_service(continuation, handler_details)
-
-        # continuation 只用于获取原 RPC 形态，业务 handler 不会被执行。
-        continuation.assert_called_once_with(handler_details)
-        assert result.unary_unary is not None

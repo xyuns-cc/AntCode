@@ -5,9 +5,7 @@ import os
 import sys
 from datetime import UTC, datetime, timedelta
 
-import asyncpg
 import pytest
-import pytest_asyncio
 
 from .migration_cases import MIGRATION_CASES
 from .migration_support import (
@@ -16,20 +14,20 @@ from .migration_support import (
     AsyncpgTortoiseConnection,
     MetadataRedis,
     MigrationCase,
+    MigrationExecutionError,
     SchemaExpectation,
     apply_migration,
     apply_migrations,
-    assert_safe_database_name,
     column_comment,
     column_names,
     index_names,
     relation_exists,
     require_test_database_url,
-    reset_public_schema,
-    rollback_failed_migration,
 )
 
 CONFIGURED_TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
+EXPECTED_INSTALL_KEY_MIGRATION_COUNT = 2
+EXPECTED_REDUNDANT_PUBLIC_ID_UNIQUE_INDEX_COUNT = 2
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -72,20 +70,6 @@ def test_migration_inventory_covers_every_sql_file() -> None:
     assert case_names == discovered_names
 
 
-@pytest_asyncio.fixture
-async def pg_connection():
-    database_url = require_test_database_url(CONFIGURED_TEST_DATABASE_URL)
-    connection = await asyncpg.connect(database_url)
-    actual_database = str(await connection.fetchval("SELECT current_database()"))
-    assert_safe_database_name(actual_database)
-    await reset_public_schema(connection)
-    try:
-        yield connection
-    finally:
-        await reset_public_schema(connection)
-        await connection.close()
-
-
 @pytest.mark.asyncio
 async def test_fresh_database_init_creates_current_schema(pg_connection, monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_URL", CONFIGURED_TEST_DATABASE_URL)
@@ -93,12 +77,22 @@ async def test_fresh_database_init_creates_current_schema(pg_connection, monkeyp
 
     tortoise_module._cached_config.cache_clear()
     await init_db_script._generate_schemas()
+    await init_db_script._upgrade_legacy_schema()
+    await init_db_script._align_database_integrity()
+    await init_db_script._create_performance_indexes()
+    await init_db_script._validate_schema_contracts()
 
     assert {"consumed_at", "consume_owner", "consume_started_at"}.issubset(
         await column_names(pg_connection, "scheduler_outbox")
     )
     assert "lease_id" in await column_names(pg_connection, "task_executions")
+    assert "scheduler_fencing_token" in await column_names(pg_connection, "task_executions")
+    assert "idx_task_executions_scheduler_fencing_token" in await index_names(pg_connection, "task_executions")
+    assert await relation_exists(pg_connection, "scheduler_authority")
     assert "allowed_source" in await column_names(pg_connection, "worker_install_keys")
+    assert await pg_connection.fetchval(
+        "SELECT convalidated FROM pg_constraint WHERE conname = 'fk_scheduled_tasks_project_id'"
+    )
 
     await pg_connection.execute("CREATE TABLE migration_test_sentinel (value TEXT NOT NULL)")
     await pg_connection.execute("INSERT INTO migration_test_sentinel VALUES ('preserved')")
@@ -127,12 +121,42 @@ async def test_legacy_schema_upgrade_is_idempotent_and_preserves_data(pg_connect
 async def test_failed_sql_migration_rolls_back_schema_and_preserves_data(pg_connection, case: MigrationCase) -> None:
     await pg_connection.execute(case.failure.setup_sql)
 
-    with pytest.raises(asyncpg.PostgresError):
+    with pytest.raises(MigrationExecutionError):
         await apply_migration(pg_connection, case.name)
-    await rollback_failed_migration(pg_connection)
 
     assert await pg_connection.fetchval(case.failure.marker_query) == case.failure.marker_value
     await _assert_failure_state(pg_connection, case)
+
+
+@pytest.mark.asyncio
+async def test_database_integrity_migration_widens_user_id_and_drops_only_redundant_index(pg_connection) -> None:
+    await pg_connection.execute(
+        """
+        CREATE TABLE audit_logs (id BIGINT PRIMARY KEY, user_id INTEGER NULL);
+        CREATE TABLE redundant_public_ids (
+            id BIGINT PRIMARY KEY, public_id VARCHAR(32) NOT NULL UNIQUE
+        );
+        CREATE INDEX idx_redundant_public_ids_public_id
+            ON redundant_public_ids (public_id);
+        """
+    )
+
+    await apply_migration(pg_connection, "20260731_align_database_integrity.sql")
+
+    user_id_type = await pg_connection.fetchval(
+        """
+        SELECT udt_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'user_id'
+        """
+    )
+    assert user_id_type == "int8"
+    assert not await relation_exists(pg_connection, "idx_redundant_public_ids_public_id")
+    assert (
+        await pg_connection.fetchval(
+            "SELECT COUNT(*) FROM pg_index WHERE indrelid = 'public.redundant_public_ids'::regclass AND indisunique"
+        )
+        == EXPECTED_REDUNDANT_PUBLIC_ID_UNIQUE_INDEX_COUNT
+    )
 
 
 @pytest.mark.asyncio
@@ -161,7 +185,7 @@ async def test_install_key_data_migration_rolls_back_then_retries_idempotently(p
 
     redis.values["antcode:worker:install-key:meta:ACTIVE-PLAINTEXT"] = '{"allowed_source":"10.2.3.4/24"}'
     async with pg_connection.transaction():
-        assert await _migrate_rows(adapter, redis, "antcode") == 2
+        assert await _migrate_rows(adapter, redis, "antcode") == EXPECTED_INSTALL_KEY_MIGRATION_COUNT
     async with pg_connection.transaction():
         assert await _migrate_rows(adapter, redis, "antcode") == 0
     rows = await pg_connection.fetch("SELECT key, status, allowed_source FROM worker_install_keys ORDER BY id")

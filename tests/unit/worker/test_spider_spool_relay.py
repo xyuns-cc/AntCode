@@ -14,6 +14,7 @@ from antcode_worker.domain.enums import RunStatus
 from antcode_worker.domain.models import ExecPlan, ExecResult, RunContext, RuntimeHandle
 from antcode_worker.engine.engine import Engine
 from antcode_worker.engine.spider_spool import relay_spider_spool
+from antcode_worker.executor.base import ExecutorConfig
 from antcode_worker.transport.base import TaskMessage
 
 
@@ -162,6 +163,7 @@ def _engine_fixture(path: Path, status: RunStatus, relay_ok: bool) -> tuple[Engi
     transport._lease_id = "lease-1"
     executor = MagicMock()
     executor.run = AsyncMock(return_value=ExecResult(run_id="run-1", status=status))
+    executor.config = ExecutorConfig()
     registry = MagicMock()
     registry.build_plan = AsyncMock(
         return_value=ExecPlan(

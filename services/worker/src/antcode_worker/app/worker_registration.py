@@ -9,9 +9,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from antcode_core.common.utils.worker_request import build_worker_signed_headers
+from antcode_core.common.utils.worker_request import (
+    HTTP_POST_METHOD,
+    build_worker_signed_headers,
+    encode_worker_json_body,
+    request_path_from_url,
+)
 from loguru import logger
 
+from antcode_worker.app.http_trust import certificate_authority
 from antcode_worker.services.credential import WorkerCredentials
 from antcode_worker.services.credential.registration_intent import (
     RegistrationIntent,
@@ -23,7 +29,7 @@ _REGISTRATION_PROTOCOL_VERSION = 2
 
 
 def register_by_install_key(config: Any, credential_service: Any) -> WorkerCredentials | None:
-    worker_key = getattr(config, "worker_key", "") or os.getenv("ANTCODE_WORKER_KEY")
+    worker_key = getattr(config, "worker_key", "") or os.getenv("ANTCODE_WORKER_KEY") or None
     credential_service.ensure_durable_writable()
     request = _registration_request(config) if worker_key else None
     with credential_service.registration_session(worker_key, request) as intent:
@@ -111,7 +117,7 @@ def _send_registration(intent: RegistrationIntent) -> WorkerCredentials:
         "recovery_secret": intent.recovery_secret,
     }
     url = f"{request.api_base_url}/api/v1/workers/register-by-key-v2"
-    response = _post_json(url, payload)
+    response = _post_json(url, encode_worker_json_body(payload))
     data = _require_success_response(response, operation="安装 Key V2 注册")
     _validate_registration_response(data, intent.registration_id)
     return WorkerCredentials(
@@ -132,21 +138,30 @@ def _ack_and_finish(
     if credentials.registration_id != intent.registration_id:
         raise RuntimeError("本地凭据与待确认注册意图不匹配")
     payload = {"registration_id": intent.registration_id}
+    body = encode_worker_json_body(payload)
+    url = f"{intent.request.api_base_url}/api/v1/workers/{credentials.worker_id}/registration-ack"
     headers = build_worker_signed_headers(
         SimpleNamespace(public_id=credentials.worker_id),
         api_key=credentials.api_key,
         secret_key=credentials.secret_key,
-        payload=payload,
+        method=HTTP_POST_METHOD,
+        path=request_path_from_url(url),
+        body=body,
     )
-    url = f"{intent.request.api_base_url}/api/v1/workers/{credentials.worker_id}/registration-ack"
-    response = _post_json(url, payload, headers=headers)
+    response = _post_json(url, body, headers=headers)
     _require_success_response(response, operation="Worker 注册 ACK")
     credential_service.finish_registration()
 
 
-def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str] | None = None) -> httpx.Response:
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS, trust_env=_should_trust_env_proxy(url)) as client:
-        return client.post(url, json=payload, headers=headers)
+def _post_json(url: str, body: bytes, *, headers: dict[str, str] | None = None) -> httpx.Response:
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    client = httpx.Client(
+        timeout=_HTTP_TIMEOUT_SECONDS,
+        trust_env=_should_trust_env_proxy(url),
+        verify=certificate_authority(),
+    )
+    with client:
+        return client.post(url, content=body, headers=request_headers)
 
 
 def _require_success_response(response: httpx.Response, *, operation: str) -> dict[str, Any]:

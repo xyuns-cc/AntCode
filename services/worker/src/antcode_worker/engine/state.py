@@ -55,6 +55,17 @@ class RunInfo:
     pending_receipts: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class CancelRequest:
+    """Snapshot captured while atomically marking a run for cancellation."""
+
+    run_id: str
+    task_id: str
+    state: RunState
+    receipt: str | None
+    queued_at: datetime | None
+
+
 class StateManager:
     """
     状态管理器
@@ -188,6 +199,30 @@ class StateManager:
         async with self._lock:
             return self._runs.get(run_id)
 
+    async def request_cancel(self, run_id: str) -> CancelRequest | None:
+        """Atomically mark a non-terminal run and return an immutable snapshot."""
+        async with self._lock:
+            info = self._runs.get(run_id)
+            if info is None:
+                return None
+            if info.state not in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
+                info.data["cancel_requested"] = True
+            return CancelRequest(
+                run_id=info.run_id,
+                task_id=info.task_id,
+                state=info.state,
+                receipt=info.receipt,
+                queued_at=info.queued_at,
+            )
+
+    async def transition_if_not_cancel_requested(self, run_id: str, new_state: RunState) -> bool:
+        """Transition only while the run has no concurrent cancellation request."""
+        async with self._lock:
+            info = self._runs.get(run_id)
+            if info is None or info.data.get("cancel_requested"):
+                return False
+            return self._transition_locked(info, new_state)
+
     async def transition(self, run_id: str, new_state: RunState) -> bool:
         """状态转换"""
         async with self._lock:
@@ -195,23 +230,21 @@ class StateManager:
             if not info:
                 logger.warning(f"运行不存在: {run_id}")
                 return False
+            return self._transition_locked(info, new_state)
 
-            valid_next = self.VALID_TRANSITIONS.get(info.state, set())
-            if new_state not in valid_next:
-                logger.warning(f"无效状态转换: {info.state} -> {new_state}")
-                return False
-
-            old_state = info.state
-            info.state = new_state
-
-            # 更新时间戳
-            if new_state == RunState.RUNNING:
-                info.started_at = datetime.now()
-            elif new_state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
-                info.finished_at = datetime.now()
-
-            logger.debug(f"状态转换: {run_id} {old_state} -> {new_state}")
-            return True
+    def _transition_locked(self, info: RunInfo, new_state: RunState) -> bool:
+        valid_next = self.VALID_TRANSITIONS.get(info.state, set())
+        if new_state not in valid_next:
+            logger.warning(f"无效状态转换: {info.state} -> {new_state}")
+            return False
+        old_state = info.state
+        info.state = new_state
+        if new_state == RunState.RUNNING:
+            info.started_at = datetime.now()
+        elif new_state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
+            info.finished_at = datetime.now()
+        logger.debug(f"状态转换: {info.run_id} {old_state} -> {new_state}")
+        return True
 
     async def remove(self, run_id: str) -> RunInfo | None:
         """移除运行"""

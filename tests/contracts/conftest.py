@@ -119,6 +119,7 @@ async def _gateway_transport_context(ids: FreshIds) -> AsyncIterator[Any]:
     async with run_fake_gateway(
         ids.worker_id,
         visibility_timeout_ms=TaskPollHandler.PENDING_VISIBILITY_TIMEOUT_MS,
+        task_payload_secret="contract-task-payload-secret-material-0001",
     ) as gateway:
         transport = await make_gateway_transport(ids, gateway)
         started = await transport.start()

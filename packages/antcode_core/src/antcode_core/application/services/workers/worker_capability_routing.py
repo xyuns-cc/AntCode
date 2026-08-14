@@ -6,9 +6,14 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+from antcode_contracts.capabilities import validate_capabilities
 from loguru import logger
 
-from antcode_core.application.services.lease_capability_snapshot import read_live_capability_snapshots
+from antcode_core.application.services.lease_capability_snapshot import (
+    LeaseCapabilitySnapshot,
+    read_live_capability_snapshots,
+)
+from antcode_core.application.services.lease_serialization import serialize_lease_value
 from antcode_core.infrastructure.redis import get_redis_client
 
 DEFAULT_EXECUTION_TASK_TYPE = "code"
@@ -41,9 +46,6 @@ def supports_task_types(capabilities: object, required: str | frozenset[str]) ->
 def has_render_capability(capabilities: object) -> bool:
     if not isinstance(capabilities, dict):
         return False
-    task_types = capabilities.get("task_types")
-    if isinstance(task_types, list) and "render" in task_types:
-        return True
     playwright = capabilities.get("playwright")
     return bool(isinstance(playwright, dict) and playwright.get("enabled"))
 
@@ -85,15 +87,7 @@ def _resolved_capabilities(worker: Any, snapshots: dict[str, str]) -> dict[str, 
 
 
 def _validate_routing_capabilities(capabilities: object) -> dict[str, Any]:
-    if not isinstance(capabilities, dict):
-        raise ValueError("capabilities must be an object")
-    task_types = capabilities.get("task_types")
-    if task_types is not None and (
-        not isinstance(task_types, list)
-        or not all(isinstance(task_type, str) and task_type for task_type in task_types)
-    ):
-        raise ValueError("task_types must be a list of non-empty strings")
-    return capabilities
+    return validate_capabilities(capabilities)
 
 
 async def require_worker_current_requirements(
@@ -101,13 +95,23 @@ async def require_worker_current_requirements(
     *,
     require_render: bool,
     required: str | frozenset[str] | None,
-) -> None:
-    capabilities = (await resolve_capability_map([worker], authoritative=True))[worker.id]
+) -> LeaseCapabilitySnapshot:
+    redis = await get_redis_client()
+    snapshots = await read_live_capability_snapshots(redis, [worker.public_id])
+    snapshot = snapshots[worker.public_id]
+    if not snapshot.lease_id or not snapshot.capabilities_json:
+        raise WorkerCapabilityChangedError("Worker Lease 或能力快照已失效")
+    capabilities = _resolved_capabilities(worker, {worker.public_id: snapshot.capabilities_json})
+    if str(worker.transport_mode or "").lower() != "gateway":
+        expected = serialize_lease_value(capabilities, preserve_empty=True)
+        if expected != snapshot.capabilities_json:
+            raise WorkerCapabilityChangedError("Direct Worker Lease 能力快照已变化")
     supported = (not require_render or has_render_capability(capabilities)) and (
         not required or supports_task_types(capabilities, required)
     )
     if not supported:
         raise WorkerCapabilityChangedError("Worker 能力或 Lease 在入队前已变化")
+    return snapshot
 
 
 def capability_requirement_label(required: str | frozenset[str]) -> str:
@@ -123,4 +127,5 @@ __all__ = [
     "resolve_selection_capabilities",
     "supports_task_types",
     "require_worker_current_requirements",
+    "WorkerCapabilityChangedError",
 ]

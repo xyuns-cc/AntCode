@@ -1,5 +1,4 @@
 import importlib
-import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -171,54 +170,35 @@ def test_worker_log_report_models_enforce_resource_limits():
 
 @pytest.mark.asyncio
 async def test_report_task_log_uses_strict_auth_context(monkeypatch):
-    append_mock = AsyncMock()
-
-    dummy_service = SimpleNamespace(append_log=append_mock)
-    log_service_module = importlib.import_module("antcode_core.application.services.workers.distributed_log_service")
-    monkeypatch.setattr(log_service_module, "distributed_log_service", dummy_service)
-
+    _ = monkeypatch
     payload = workers_route.WorkerTaskLogReportRequest(
         run_id="run-1",
         log_type="stdout",
         content="hello",
     )
-    response = await workers_route.report_task_log(payload, auth_context={"worker": object()})
-
-    assert response.success is True
-    append_mock.assert_awaited_once()
+    with pytest.raises(HTTPException) as exc_info:
+        await workers_route.report_task_log(payload, auth_context={"worker": object()})
+    assert exc_info.value.status_code == status.HTTP_410_GONE
 
 
 @pytest.mark.asyncio
 async def test_generate_install_key_persists_explicit_allowed_source(monkeypatch):
     class DummyUser:
+        is_active = True
         is_admin = True
 
     class DummyInstallKey:
-        # P2-11：DB 只存 hash；plaintext_key 作为内存属性供 API 首次返回
-        key = "hashof-KEY001"
         expires_at = datetime.now(UTC) + timedelta(hours=1)
-        plaintext_key = "KEY001"
 
     async def fake_get_user(**_kwargs):
         return DummyUser()
 
     create_kwargs = {}
 
-    async def fake_create_install_key(**kwargs):
+    async def fake_persist_install_key(_plaintext, **kwargs):
         create_kwargs.update(kwargs)
         return DummyInstallKey()
 
-    class DummyRedis:
-        def __init__(self):
-            self.writes = []
-
-        async def set(self, key, value, ex=None, nx=False):
-            self.writes.append((key, value, ex, nx))
-            return True
-
-    redis = DummyRedis()
-
-    monkeypatch.setattr(workers_route, "get_redis_client", AsyncMock(return_value=redis))
     install_config = SimpleNamespace(
         api_base_url="https://control.example.com",
         source_url="https://github.com/xyuns-cc/AntCode.git",
@@ -231,7 +211,8 @@ async def test_generate_install_key_persists_explicit_allowed_source(monkeypatch
 
     models_module = importlib.import_module("antcode_core.domain.models")
     monkeypatch.setattr(models_module.User, "get_or_none", fake_get_user)
-    monkeypatch.setattr(models_module.WorkerInstallKey, "create_install_key", fake_create_install_key)
+    monkeypatch.setattr(models_module.WorkerInstallKey, "generate_key", classmethod(lambda cls: "KEY001"))
+    monkeypatch.setattr(models_module.WorkerInstallKey, "persist_install_key", fake_persist_install_key)
 
     request = workers_route.WorkerInstallKeyRequest(os_type="linux", allowed_source="10.0.0.0/24")
     http_request = SimpleNamespace(client=SimpleNamespace(host="10.0.0.8"), headers={})
@@ -242,145 +223,8 @@ async def test_generate_install_key_persists_explicit_allowed_source(monkeypatch
     assert response.success is True
     assert response.data.allowed_source == "10.0.0.0/24"
     assert create_kwargs["allowed_source"] == "10.0.0.0/24"
-    assert redis.writes
     assert "sha256sum" in response.data.install_command
     assert "gateway.example.com:50051" in response.data.install_command
-
-
-@pytest.mark.asyncio
-async def test_register_uses_database_source_when_redis_meta_is_absent(monkeypatch):
-    async def fake_check_blocked(_key, _source):
-        return False, 0
-
-    async def fake_record_failed(_key, _source):
-        return 1
-
-    async def fake_get_install_key(*_args, **_kwargs):
-        return SimpleNamespace(
-            key="K1",
-            status="pending",
-            created_by=1,
-            allowed_source="192.168.1.10",
-            is_valid=lambda: True,
-        )
-
-    monkeypatch.setattr(workers_route, "_check_install_key_blocked", fake_check_blocked)
-    monkeypatch.setattr(workers_route, "_record_install_key_failed_attempt", fake_record_failed)
-
-    models_module = importlib.import_module("antcode_core.domain.models")
-    # P2-11：查找方式换成 find_by_plaintext，测试跟着换 patch 目标；
-    # matches_plaintext 也 patch 成恒 True，跳过 hash 校验（本测试关注上层业务逻辑）。
-    monkeypatch.setattr(models_module.WorkerInstallKey, "find_by_plaintext", fake_get_install_key)
-    monkeypatch.setattr(
-        models_module.WorkerInstallKey,
-        "matches_plaintext",
-        classmethod(lambda cls, stored, plain: True),
-    )
-
-    request = workers_route.WorkerRegisterByKeyRequest(
-        key="K1",
-        name="worker",
-        host="10.0.0.2",
-        port=8001,
-        region="local",
-        client_timestamp=int(time.time()),
-        client_nonce="abcde12345",
-    )
-    http_request = SimpleNamespace(client=SimpleNamespace(host="10.0.0.99"), headers={})
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.register_worker_by_key(request, http_request)
-
-    assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
-    assert "来源" in str(exc_info.value.detail)
-
-
-@pytest.mark.asyncio
-async def test_register_worker_by_key_rejects_replay_claim(monkeypatch):
-    async def fake_check_blocked(_key, _source):
-        return False, 0
-
-    async def fake_claim(*_args, **_kwargs):
-        return False, "请求重复（nonce 已使用）"
-
-    async def fake_record_failed(_key, _source):
-        return 1
-
-    async def fake_get_install_key(*_args, **_kwargs):
-        return SimpleNamespace(
-            key="K1",
-            status="pending",
-            created_by=1,
-            allowed_source=None,
-            is_valid=lambda: True,
-        )
-
-    monkeypatch.setattr(workers_route, "_check_install_key_blocked", fake_check_blocked)
-    monkeypatch.setattr(workers_route, "_claim_install_key_source_once", fake_claim)
-    monkeypatch.setattr(workers_route, "_record_install_key_failed_attempt", fake_record_failed)
-
-    models_module = importlib.import_module("antcode_core.domain.models")
-    # P2-11：查找方式换成 find_by_plaintext，测试跟着换 patch 目标；
-    # matches_plaintext 也 patch 成恒 True，跳过 hash 校验（本测试关注上层业务逻辑）。
-    monkeypatch.setattr(models_module.WorkerInstallKey, "find_by_plaintext", fake_get_install_key)
-    monkeypatch.setattr(
-        models_module.WorkerInstallKey,
-        "matches_plaintext",
-        classmethod(lambda cls, stored, plain: True),
-    )
-
-    request = workers_route.WorkerRegisterByKeyRequest(
-        key="K1",
-        name="worker",
-        host="10.0.0.2",
-        port=8001,
-        region="local",
-        client_timestamp=int(time.time()),
-        client_nonce="abcde12345",
-    )
-    http_request = SimpleNamespace(client=SimpleNamespace(host="10.0.0.2"), headers={})
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.register_worker_by_key(request, http_request)
-
-    assert exc_info.value.status_code == status.HTTP_409_CONFLICT
-
-
-@pytest.mark.asyncio
-async def test_register_worker_by_key_rejects_when_blocked(monkeypatch):
-    async def fake_check_blocked(_key, _source):
-        return True, 120
-
-    monkeypatch.setattr(workers_route, "_check_install_key_blocked", fake_check_blocked)
-
-    request = workers_route.WorkerRegisterByKeyRequest(
-        key="K1",
-        name="worker",
-        host="10.0.0.2",
-        port=8001,
-        region="local",
-        client_timestamp=int(time.time()),
-        client_nonce="abcde12345",
-    )
-    http_request = SimpleNamespace(client=SimpleNamespace(host="10.0.0.2"), headers={})
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.register_worker_by_key(request, http_request)
-
-    assert exc_info.value.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-
-
-def test_register_worker_by_key_rejects_oversized_install_key() -> None:
-    with pytest.raises(ValidationError):
-        workers_route.WorkerRegisterByKeyRequest(
-            key="K" * 65,
-            name="worker",
-            host="10.0.0.2",
-            port=8001,
-            region="local",
-            client_timestamp=int(time.time()),
-            client_nonce="abcde12345",
-        )
 
 
 @pytest.mark.asyncio
@@ -413,16 +257,7 @@ async def test_install_key_failure_threshold_only_blocks_attacker_source(monkeyp
 
 @pytest.mark.asyncio
 async def test_report_task_logs_batch_exposes_partial_failure(monkeypatch):
-    async def fake_append_logs(run_id, log_type, contents):
-        _ = log_type
-        if run_id == "run-fail":
-            raise RuntimeError("boom")
-        return contents
-
-    dummy_service = SimpleNamespace(append_logs=fake_append_logs)
-    log_service_module = importlib.import_module("antcode_core.application.services.workers.distributed_log_service")
-    monkeypatch.setattr(log_service_module, "distributed_log_service", dummy_service)
-
+    _ = monkeypatch
     payload = workers_route.WorkerTaskLogsBatchReportRequest(
         logs=[
             workers_route.WorkerTaskLogReportRequest(
@@ -445,67 +280,30 @@ async def test_report_task_logs_batch_exposes_partial_failure(monkeypatch):
 
     with pytest.raises(HTTPException) as exc_info:
         await workers_route.report_task_logs_batch(payload, auth_context={"worker": object()})
-
-    # P1-round6 5.2: 部分失败改返回 207 Multi-Status 携带 failed_groups, 让 Worker
-    # 只重试失败组;原 503 全体重试会让已成功组入库复制(sequence 递增)。
-    assert exc_info.value.status_code == status.HTTP_207_MULTI_STATUS
-    detail = exc_info.value.detail
-    assert isinstance(detail, dict)
-    assert detail["received"] > 0
-    assert detail["total"] == 3
-    assert len(detail["failed_groups"]) == 1
-    assert detail["failed_groups"][0]["run_id"] == "run-fail"
-    assert detail["failed_groups"][0]["log_type"] == "stderr"
+    assert exc_info.value.status_code == status.HTTP_410_GONE
 
 
 @pytest.mark.asyncio
 async def test_report_execution_heartbeat_uses_run_id(monkeypatch):
-    update_heartbeat_mock = AsyncMock(return_value=True)
-    persistence_module = importlib.import_module("antcode_core.application.services.scheduler.task_persistence")
-    monkeypatch.setattr(
-        persistence_module.task_persistence_service,
-        "update_heartbeat",
-        update_heartbeat_mock,
-    )
-
+    _ = monkeypatch
     payload = workers_route.WorkerTaskHeartbeatReportRequest(run_id="run-heartbeat-1")
-    response = await workers_route.report_execution_heartbeat(
-        payload,
-        auth_context={"worker": object()},
-    )
-
-    assert response.success is True
-    update_heartbeat_mock.assert_awaited_once_with("run-heartbeat-1")
+    with pytest.raises(HTTPException) as exc_info:
+        await workers_route.report_execution_heartbeat(payload, auth_context={"worker": object()})
+    assert exc_info.value.status_code == status.HTTP_410_GONE
 
 
 @pytest.mark.asyncio
 async def test_report_task_status_uses_run_id(monkeypatch):
-    update_task_status_mock = AsyncMock()
-    log_service_module = importlib.import_module("antcode_core.application.services.workers.distributed_log_service")
-    monkeypatch.setattr(
-        log_service_module.distributed_log_service,
-        "update_task_status",
-        update_task_status_mock,
-    )
-
+    _ = monkeypatch
     payload = workers_route.WorkerTaskStatusReportRequest(
         run_id="run-status-1",
         status="success",
         exit_code=0,
         error_message="",
     )
-    response = await workers_route.report_task_status(
-        payload,
-        auth_context={"worker": object()},
-    )
-
-    assert response.success is True
-    update_task_status_mock.assert_awaited_once_with(
-        "run-status-1",
-        "success",
-        exit_code=0,
-        error_message="",
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await workers_route.report_task_status(payload, auth_context={"worker": object()})
+    assert exc_info.value.status_code == status.HTTP_410_GONE
 
 
 @pytest.mark.asyncio

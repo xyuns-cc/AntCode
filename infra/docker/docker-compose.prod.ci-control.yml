@@ -1,0 +1,44 @@
+# 仅供 CI / 发布 E2E：把中间件暴露给宿主上的测试进程。
+#
+# 生产的 antcode-control 是 internal:true——Docker 对 internal 网络**静默忽略**端口发布
+# （容器 HostConfig.PortBindings 有值，NetworkSettings.Ports 却是 null，宿主上根本没有
+# 监听）。只写 ports 拿不到任何端口，tests/e2e 里依赖 ANTCODE_E2E_REDIS_URL 的用例
+# 会以 "Connect call failed 127.0.0.1:16379" 失败（真机实测）。所以这里必须额外把
+# postgres/redis 接到一个非 internal 的 CI 专用网络上，端口发布才会真正生效。
+# 该网络只在本 overlay 存在，生产入口（docker-compose.prod.yml）不引用。
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:15432:5432"
+    networks:
+      antcode-control: {}
+      antcode-ci-access: {}
+
+  redis:
+    ports:
+      - "127.0.0.1:16379:6379"
+    networks:
+      antcode-control: {}
+      antcode-ci-access: {}
+
+  # 一轮 `pytest tests/e2e` 会用同一个 admin 账号、从同一个宿主 IP 连续登录十几次，
+  # 而生产默认是 5 次/分钟·IP + 10 次/15 分钟·用户（config.py 的 LOGIN_RATE_LIMIT_*），
+  # 按生产默认跑必然在第 6 次登录起恒定 429，整轮 E2E 直接失败（真机实测）。
+  # 放宽只发生在这个 CI/E2E 专用 overlay 里：生产入口 docker-compose.prod.yml 不引用
+  # 本文件，产品默认值一个字都没动，因此不存在"为了跑通把安全边界调松"的问题。
+  web-api:
+    environment:
+      LOGIN_RATE_LIMIT_IP_MAX: "1000"
+      LOGIN_RATE_LIMIT_IP_PERIOD: "60"
+      LOGIN_RATE_LIMIT_USER_MAX: "1000"
+      LOGIN_RATE_LIMIT_USER_PERIOD: "60"
+
+  master:
+    environment:
+      ALLOW_PRIVATE_NODES: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  antcode-ci-access:
+    driver: bridge

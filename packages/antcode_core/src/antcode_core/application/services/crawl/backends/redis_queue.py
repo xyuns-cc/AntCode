@@ -11,67 +11,34 @@
 Requirements: 1.2, 1.4, 1.5, 1.6, 1.7, 1.8
 """
 
-from dataclasses import replace
-
 from loguru import logger
 
+from antcode_core.application.services.crawl.backends import redis_keys as crawl_keys
 from antcode_core.application.services.crawl.backends.base import (
     CrawlQueueBackend,
-    QueueMetrics,
-    QueueStats,
+    QueueProjectDiscovery,
     QueueTask,
-    ReclaimedTask,
+)
+from antcode_core.application.services.crawl.backends.redis_queue_metrics import RedisQueueMetricsMixin
+from antcode_core.application.services.crawl.backends.redis_queue_recovery import (
+    CrawlQueueLocation,
+    RedisQueueRecoveryMixin,
 )
 from antcode_core.domain.models.enums import Priority
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 from antcode_core.infrastructure.redis.stream_client import StreamClient
-
-# Redis 键前缀和后缀
-STREAM_KEY_PREFIX = "rule"
-STREAM_KEY_SUFFIX = "stream"
-DEAD_LETTER_SUFFIX = "dead_letter"
 
 # 默认配置
 DEFAULT_CONSUMER_GROUP = "crawl_workers"
 DEFAULT_STREAM_MAXLEN = 100000
 
 
-def _project_id_from_stream_key(key: str) -> str | None:
-    prefix = f"{STREAM_KEY_PREFIX}:"
-    marker = f":{STREAM_KEY_SUFFIX}:"
-    if not key.startswith(prefix) or marker not in key:
-        return None
-    project_id, _, priority = key[len(prefix) :].rpartition(marker)
-    priorities = (Priority.HIGH, Priority.NORMAL, Priority.LOW)
-    valid_priorities = {value for priority in priorities for value in (str(priority), str(priority.value))}
-    return project_id if project_id and priority in valid_priorities else None
+_project_id_from_stream_key = crawl_keys.crawl_project_id_from_stream_key
+get_stream_key = crawl_keys.crawl_stream_key
+get_dead_letter_key = crawl_keys.crawl_dead_letter_key
 
 
-def get_stream_key(project_id: str, priority: int) -> str:
-    """获取指定优先级的 Stream 键名
-
-    Args:
-        project_id: 项目 ID
-        priority: 优先级 (0=高, 5=普通, 9=低)
-
-    Returns:
-        Redis 键名，格式: rule:{project_id}:stream:{priority}
-    """
-    return f"{STREAM_KEY_PREFIX}:{project_id}:{STREAM_KEY_SUFFIX}:{priority}"
-
-
-def get_dead_letter_key(project_id: str) -> str:
-    """获取死信队列的 Redis 键名
-
-    Args:
-        project_id: 项目 ID
-
-    Returns:
-        Redis 键名，格式: rule:{project_id}:dead_letter
-    """
-    return f"{STREAM_KEY_PREFIX}:{project_id}:{DEAD_LETTER_SUFFIX}"
-
-
-def get_all_priority_keys(project_id: str) -> list:
+def get_all_priority_keys(project_id: str, namespace: str | None = None) -> list[str]:
     """获取所有优先级的 Stream 键名（按优先级排序）
 
     Args:
@@ -81,13 +48,13 @@ def get_all_priority_keys(project_id: str) -> list:
         Stream 键名列表，按优先级从高到低排序
     """
     return [
-        get_stream_key(project_id, Priority.HIGH),
-        get_stream_key(project_id, Priority.NORMAL),
-        get_stream_key(project_id, Priority.LOW),
+        get_stream_key(project_id, Priority.HIGH, namespace),
+        get_stream_key(project_id, Priority.NORMAL, namespace),
+        get_stream_key(project_id, Priority.LOW, namespace),
     ]
 
 
-class RedisCrawlQueueBackend(CrawlQueueBackend):
+class RedisCrawlQueueBackend(RedisQueueRecoveryMixin, RedisQueueMetricsMixin, CrawlQueueBackend):
     """Redis 队列后端实现
 
     基于 Redis Streams 实现高性能分布式队列：
@@ -104,6 +71,8 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         stream_client: StreamClient | None = None,
         consumer_group: str = DEFAULT_CONSUMER_GROUP,
         max_stream_len: int = DEFAULT_STREAM_MAXLEN,
+        *,
+        namespace: str | None = None,
     ):
         """初始化 Redis 队列后端
 
@@ -115,6 +84,20 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         self._stream_client = stream_client or StreamClient()
         self._consumer_group = consumer_group
         self._max_stream_len = max_stream_len
+        self._namespace = redis_namespace(namespace)
+        self._reclaim_cursors: dict[str, str] = {}
+
+    def _stream_key(self, project_id: str, priority: int) -> str:
+        return get_stream_key(project_id, priority, self._namespace)
+
+    def _dead_letter_key(self, project_id: str) -> str:
+        return get_dead_letter_key(project_id, self._namespace)
+
+    def _dedup_key(self, project_id: str) -> str:
+        return crawl_keys.crawl_dedup_key(project_id, self._namespace)
+
+    def _deleted_fence_key(self, project_id: str) -> str:
+        return crawl_keys.crawl_project_deleted_key(project_id, self._namespace)
 
     async def enqueue(
         self,
@@ -129,7 +112,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         if not tasks:
             return []
 
-        stream_key = get_stream_key(project_id, priority)
+        stream_key = self._stream_key(project_id, priority)
 
         # 构建消息数据
         messages = []
@@ -139,10 +122,10 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             messages.append(task.to_dict())
 
         # 批量入队
-        msg_ids = await self._stream_client.xadd_batch(
+        msg_ids = await self._stream_client.xadd_batch_active(
             stream_key,
             messages,
-            maxlen=self._max_stream_len,
+            deleted_fence_key=self._deleted_fence_key(project_id),
         )
 
         # 更新任务的 msg_id
@@ -153,6 +136,32 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             logger.debug(f"入队成功: project={project_id}, priority={priority}, count={len(msg_ids)}")
 
         return msg_ids
+
+    async def enqueue_unique(
+        self,
+        project_id: str,
+        tasks: list[QueueTask],
+        *,
+        fingerprints: list[str],
+        priority: int = 5,
+    ) -> list[str | None]:
+        if len(tasks) != len(fingerprints):
+            raise ValueError("tasks 与 fingerprints 数量不一致")
+        stream_key = self._stream_key(project_id, priority)
+        dedup_key = self._dedup_key(project_id)
+        results: list[str | None] = []
+        for task, fingerprint in zip(tasks, fingerprints, strict=True):
+            data = {**task.to_dict(), "priority": priority, "project_id": project_id}
+            results.append(
+                await self._stream_client.xadd_unique(
+                    stream_key,
+                    dedup_key,
+                    deleted_fence_key=self._deleted_fence_key(project_id),
+                    fingerprint=fingerprint,
+                    data=data,
+                )
+            )
+        return results
 
     async def dequeue(
         self,
@@ -175,10 +184,14 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
             if remaining <= 0:
                 break
 
-            stream_key = get_stream_key(project_id, priority)
+            stream_key = self._stream_key(project_id, priority)
 
             # 确保消费者组存在
-            await self._stream_client.ensure_group(stream_key, self._consumer_group)
+            await self._stream_client.ensure_active_group(
+                stream_key,
+                self._consumer_group,
+                deleted_fence_key=self._deleted_fence_key(project_id),
+            )
 
             # 从队列读取
             # 只在最低优先级队列使用阻塞等待
@@ -190,11 +203,21 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
                 consumer_name=consumer,
                 count=remaining,
                 block_ms=block,
+                active_fence_key=self._deleted_fence_key(project_id),
             )
 
             # 转换为 QueueTask
             for msg in messages:
-                task = QueueTask.from_dict(msg.data, msg.msg_id)
+                try:
+                    task = QueueTask.from_dict(msg.data, msg.msg_id)
+                except (TypeError, ValueError) as exc:
+                    await self._dead_letter_invalid(
+                        CrawlQueueLocation(project_id, priority, stream_key),
+                        msg_id=msg.msg_id,
+                        data=msg.data,
+                        error=exc,
+                    )
+                    continue
                 task.priority = priority
                 task.project_id = project_id
                 tasks.append(task)
@@ -210,6 +233,7 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         self,
         project_id: str,
         msg_ids: list[str],
+        priority: int,
     ) -> int:
         """确认任务完成
 
@@ -218,294 +242,40 @@ class RedisCrawlQueueBackend(CrawlQueueBackend):
         if not msg_ids:
             return 0
 
-        total_acked = 0
-
-        # 需要在所有优先级队列中尝试确认
-        for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-            stream_key = get_stream_key(project_id, priority)
-
-            count = await self._stream_client.xack(
-                stream_key,
-                msg_ids,
-                group_name=self._consumer_group,
-            )
-            total_acked += count
+        stream_key = self._stream_key(project_id, priority)
+        await self._stream_client.ensure_active_group(
+            stream_key,
+            self._consumer_group,
+            deleted_fence_key=self._deleted_fence_key(project_id),
+        )
+        total_acked = await self._stream_client.xack_delete(
+            stream_key,
+            msg_ids,
+            group_name=self._consumer_group,
+        )
 
         if total_acked:
             logger.debug(f"确认成功: project={project_id}, acked={total_acked}")
 
         return total_acked
 
-    async def reclaim(
-        self,
-        project_id: str,
-        min_idle_ms: int = 300000,
-        count: int = 100,
-    ) -> list[ReclaimedTask]:
-        """回收超时任务
-
-        Requirements: 1.7
-        """
-        reclaimed = []
-        remaining = count
-
-        for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-            if remaining <= 0:
-                break
-
-            stream_key = get_stream_key(project_id, priority)
-
-            # 使用 XAUTOCLAIM 自动转移超时任务
-            next_id, messages, deleted_ids = await self._stream_client.xautoclaim(
-                stream_key,
-                group_name=self._consumer_group,
-                consumer_name="reclaimer",
-                min_idle_time_ms=min_idle_ms,
-                count=remaining,
-            )
-
-            if deleted_ids:
-                logger.debug(f"发现已删除消息: project={project_id}, priority={priority}, deleted={len(deleted_ids)}")
-
-            # 获取每个消息的 delivery_count
-            for msg in messages:
-                task = QueueTask.from_dict(msg.data, msg.msg_id)
-                task.priority = priority
-                task.project_id = project_id
-
-                # 获取 delivery_count
-                pending_info = await self._stream_client.xpending_range(
-                    stream_key,
-                    group_name=self._consumer_group,
-                    start=msg.msg_id,
-                    end=msg.msg_id,
-                    count=1,
-                )
-
-                delivery_count = 1
-                if pending_info:
-                    delivery_count = pending_info[0].delivery_count
-
-                # C3: 不再用瞬态 PEL delivery_count 覆盖载荷里的累计
-                # retry_count（requeue 后新消息的 delivery_count 会归零，
-                # 覆盖会让毒任务跨接管永远到不了死信）。载荷值保持
-                # from_dict 解析结果，delivery_count 单独随 ReclaimedTask
-                # 返回，由调用方累加。
-                reclaimed.append(
-                    ReclaimedTask(
-                        task=task,
-                        delivery_count=delivery_count,
-                    )
-                )
-
-            remaining -= len(messages)
-
-        if reclaimed:
-            logger.info(f"回收超时任务: project={project_id}, count={len(reclaimed)}")
-
-        return reclaimed
-
     async def list_project_ids(self) -> list[str]:
         """从 Stream 键扫描所有需要恢复的项目。"""
-        pattern = f"{STREAM_KEY_PREFIX}:*:{STREAM_KEY_SUFFIX}:*"
+        discovery = await self.discover_projects()
+        if discovery.failures:
+            raise RuntimeError("; ".join(discovery.failures))
+        return list(discovery.project_ids)
+
+    async def discover_projects(self) -> QueueProjectDiscovery:
+        """逐项目隔离删除 fence，避免一个残留 Stream 阻断全局恢复。"""
+        pattern = crawl_keys.crawl_stream_pattern(self._namespace)
         keys = await self._stream_client.scan_keys(pattern)
-        project_ids = {_project_id_from_stream_key(key) for key in keys}
-        return sorted(project_id for project_id in project_ids if project_id)
-
-    async def requeue_claimed(self, project_id: str, task: QueueTask) -> str | None:
-        """把已认领消息原子重入同优先级 Stream。"""
-        source_key = get_stream_key(project_id, task.priority)
-        retry_task = replace(task, msg_id="", status="pending")
-        return await self._stream_client.move_pending(
-            source_key,
-            source_key,
-            group_name=self._consumer_group,
-            msg_id=task.msg_id,
-            data=retry_task.to_dict(),
-            maxlen=self._max_stream_len,
-        )
-
-    async def dead_letter_claimed(self, project_id: str, task: QueueTask) -> str | None:
-        """把已认领消息移入项目死信 Stream。
-
-        C2: 源/目标 key 无 hash tag，Redis Cluster 下可能落不同 slot，
-        跨 key 迁移由 ``move_pending`` 走非 Lua 的 XADD→XACK+XDEL 序列
-        （at-least-once，重复死信条目可容忍）。
-        """
-        failed_task = replace(task, msg_id="", status="failed")
-        data = failed_task.to_dict()
-        data.update(
-            original_priority=task.priority,
-            dead_letter_reason="max_retries_exceeded",
-        )
-        return await self._stream_client.move_pending(
-            get_stream_key(project_id, task.priority),
-            get_dead_letter_key(project_id),
-            group_name=self._consumer_group,
-            msg_id=task.msg_id,
-            data=data,
-            maxlen=self._max_stream_len,
-        )
-
-    async def stats(self, project_id: str) -> QueueStats:
-        """获取队列统计信息
-
-        Requirements: 1.8
-        """
-        pending = 0
-        processing = 0
-
-        for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-            stream_key = get_stream_key(project_id, priority)
-
-            # 队列长度
-            length = await self._stream_client.xlen(stream_key)
-            pending += length
-
-            # 处理中数量
-            pending_info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
-            processing += pending_info.get("pending_count", 0)
-
-        dead_letter = await self.get_dead_letter_count(project_id)
-
-        return QueueStats(
-            pending=pending,
-            processing=processing,
-            total=pending + processing,
-            dead_letter=dead_letter,
-        )
-
-    async def get_queue_metrics(
-        self,
-        project_id: str,
-        priority: int,
-    ) -> QueueMetrics:
-        """获取单个优先级队列指标"""
-        stream_key = get_stream_key(project_id, priority)
-        stream_length = await self._stream_client.xlen(stream_key)
-        pending_info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
-
-        return QueueMetrics(
-            queue_length=stream_length,
-            pending_count=pending_info.get("pending_count", 0),
-            consumers=pending_info.get("consumers", {}),
-        )
-
-    async def ensure_queues(self, project_id: str) -> bool:
-        """确保项目队列存在"""
-        try:
-            for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-                stream_key = get_stream_key(project_id, priority)
-                await self._stream_client.ensure_group(stream_key, self._consumer_group)
-
-            # 确保死信队列存在
-            dead_letter_key = get_dead_letter_key(project_id)
-            await self._stream_client.ensure_group(dead_letter_key, self._consumer_group)
-
-            logger.debug(f"确保队列存在: project={project_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"确保队列存在失败: project={project_id}, 错误: {e}")
-            raise
-
-    async def clear_queues(self, project_id: str) -> bool:
-        """清空项目队列"""
-        try:
-            for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-                stream_key = get_stream_key(project_id, priority)
-                await self._stream_client.delete_stream(stream_key)
-
-            # 清空死信队列
-            dead_letter_key = get_dead_letter_key(project_id)
-            await self._stream_client.delete_stream(dead_letter_key)
-
-            logger.info(f"清空队列: project={project_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"清空队列失败: project={project_id}, 错误: {e}")
-            return False
-
-    async def get_queue_length(
-        self,
-        project_id: str,
-        priority: int | None = None,
-    ) -> int:
-        """获取队列长度"""
-        if priority is not None:
-            stream_key = get_stream_key(project_id, priority)
-            return await self._stream_client.xlen(stream_key)
-
-        total = 0
-        for p in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-            stream_key = get_stream_key(project_id, p)
-            total += await self._stream_client.xlen(stream_key)
-        return total
-
-    async def get_pending_count(
-        self,
-        project_id: str,
-        priority: int | None = None,
-    ) -> int:
-        """获取处理中消息数量"""
-        if priority is not None:
-            stream_key = get_stream_key(project_id, priority)
-            info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
-            return info.get("pending_count", 0)
-
-        total = 0
-        for p in [Priority.HIGH, Priority.NORMAL, Priority.LOW]:
-            stream_key = get_stream_key(project_id, p)
-            info = await self._stream_client.xpending(stream_key, group_name=self._consumer_group)
-            total += info.get("pending_count", 0)
-        return total
-
-    async def move_to_dead_letter(
-        self,
-        project_id: str,
-        tasks: list[QueueTask],
-    ) -> int:
-        """将任务移入死信队列"""
-        if not tasks:
-            return 0
-
-        dead_letter_key = get_dead_letter_key(project_id)
-
-        # 构建死信消息
-        messages = []
-        msg_ids_by_priority: dict[int, list[str]] = {}
-
-        for task in tasks:
-            task.status = "failed"
-            data = task.to_dict()
-            data["original_priority"] = task.priority
-            data["dead_letter_reason"] = "max_retries_exceeded"
-            messages.append(data)
-
-            # 按优先级分组 msg_id
-            if task.priority not in msg_ids_by_priority:
-                msg_ids_by_priority[task.priority] = []
-            if task.msg_id:
-                msg_ids_by_priority[task.priority].append(task.msg_id)
-
-        # 添加到死信队列
-        await self._stream_client.xadd_batch(dead_letter_key, messages)
-
-        # 确认原消息
-        for priority, msg_ids in msg_ids_by_priority.items():
-            if msg_ids:
-                stream_key = get_stream_key(project_id, priority)
-                await self._stream_client.xack(
-                    stream_key,
-                    msg_ids,
-                    group_name=self._consumer_group,
-                )
-
-        logger.info(f"移入死信队列: project={project_id}, count={len(tasks)}")
-        return len(tasks)
-
-    async def get_dead_letter_count(self, project_id: str) -> int:
-        """获取死信队列消息数量"""
-        dead_letter_key = get_dead_letter_key(project_id)
-        return await self._stream_client.xlen(dead_letter_key)
+        project_ids = {_project_id_from_stream_key(key, self._namespace) for key in keys}
+        active_projects: list[str] = []
+        failures: list[str] = []
+        for project_id in sorted(item for item in project_ids if item):
+            if await self._stream_client.exists(self._deleted_fence_key(project_id)):
+                failures.append(f"已删除 Crawl 项目仍存在 Stream: project={project_id}")
+                continue
+            active_projects.append(project_id)
+        return QueueProjectDiscovery(tuple(active_projects), tuple(failures))

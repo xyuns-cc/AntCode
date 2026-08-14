@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -7,6 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 SECURITY_PATH = ROOT / ".github" / "workflows" / "security-scan.yml"
+WORKFLOW_PATHS = tuple((ROOT / ".github" / "workflows").glob("*.yml"))
 GITLEAKS_IGNORE_PATH = ROOT / ".gitleaksignore"
 IGNORE_PATHS = (
     ROOT / ".gitignore",
@@ -87,6 +89,19 @@ def test_security_workflow_explicitly_scans_current_tree_secrets() -> None:
     assert set(trivy["with"]["scanners"].split(",")) == {"vuln", "secret"}
 
 
+def test_all_workflow_checkouts_disable_credential_persistence() -> None:
+    checkout_steps = [
+        step
+        for path in WORKFLOW_PATHS
+        for job in _workflow(path)["jobs"].values()
+        for step in job.get("steps", ())
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+
+    assert checkout_steps
+    assert all(step.get("with", {}).get("persist-credentials") is False for step in checkout_steps)
+
+
 def test_ci_does_not_commit_fixed_database_or_admin_passwords() -> None:
     jobs = _workflow(CI_PATH)["jobs"]
     backend = jobs["backend-test"]
@@ -139,6 +154,17 @@ def test_test_machine_compose_files_remain_outside_git() -> None:
 
     assert "infra/docker/docker-compose.remote*.yml" in ignore
     assert "!infra/docker/docker-compose.prod.local-backup.yml" in ignore
+
+
+def test_gitignore_does_not_hide_nested_source_lib_directories() -> None:
+    probe = "web/antcode-frontend/src/lib/round10-ignore-probe.ts"
+    result = subprocess.run(
+        ["git", "check-ignore", "--quiet", "--no-index", probe],
+        cwd=ROOT,
+        check=False,
+    )
+
+    assert result.returncode == 1
 
 
 def test_gitleaks_has_no_repository_exceptions() -> None:

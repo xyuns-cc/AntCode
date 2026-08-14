@@ -6,8 +6,8 @@ CASCADE_DELETE = Path("packages/antcode_core/src/antcode_core/application/servic
 
 def test_project_cascade_deletes_run_logs_before_executions() -> None:
     source = CASCADE_DELETE.read_text(encoding="utf-8")
-    log_delete = "TaskLog.filter(run_id__in=list(run_batch)).delete()"
-    execution_delete = "TaskRun.filter(task_id__in=list(task_ids)).delete()"
+    log_delete = "TaskLog.filter(run_id__in=list(run_batch)).using_db(conn).delete()"
+    execution_delete = "TaskRun.filter(task_id__in=list(task_ids)).using_db(conn).delete()"
 
     assert log_delete in source
     assert execution_delete in source
@@ -16,8 +16,8 @@ def test_project_cascade_deletes_run_logs_before_executions() -> None:
 
 def test_project_cascade_deletes_lease_history_before_executions() -> None:
     source = CASCADE_DELETE.read_text(encoding="utf-8")
-    history_delete = "TaskRunLeaseGeneration.filter(run_id__in=list(run_batch)).delete()"
-    execution_delete = "TaskRun.filter(task_id__in=list(task_ids)).delete()"
+    history_delete = "TaskRunLeaseGeneration.filter(run_id__in=list(run_batch)).using_db(conn).delete()"
+    execution_delete = "TaskRun.filter(task_id__in=list(task_ids)).using_db(conn).delete()"
 
     assert history_delete in source
     assert source.index(history_delete) < source.index(execution_delete)
@@ -32,7 +32,7 @@ def test_obsolete_non_transactional_task_cascade_is_removed() -> None:
 def test_project_cascade_enqueues_spider_storage_cleanup_before_run_delete() -> None:
     source = CASCADE_DELETE.read_text(encoding="utf-8")
     cleanup_event = 'event_type="spider_storage_cleanup"'
-    execution_delete = "TaskRun.filter(task_id__in=list(task_ids)).delete()"
+    execution_delete = "TaskRun.filter(task_id__in=list(task_ids)).using_db(conn).delete()"
 
     assert cleanup_event in source
     assert source.index(cleanup_event) < source.index(execution_delete)
@@ -57,6 +57,17 @@ def test_project_cascade_purges_task_logs_with_run_commit_locks_after_commit() -
     与在途 append_entries 串行化。"""
     source = CASCADE_DELETE.read_text(encoding="utf-8")
 
-    assert "purge_task_logs_for_runs(cleanup_run_ids)" in source
+    assert "purge_task_logs_for_runs(run_ids)" in source
     # 清扫发生在事务块之后（TaskRun 已不存在，后续 append 会被锁内校验拒绝）
-    assert source.index("_delete_project_relations(") < source.index("purge_task_logs_for_runs(cleanup_run_ids)")
+    post_commit_call = "await _run_post_commit_cleanup("
+    assert source.index("_delete_project_relations(") < source.index(post_commit_call)
+
+
+def test_project_cascade_persists_crawl_cleanup_before_database_delete() -> None:
+    source = CASCADE_DELETE.read_text(encoding="utf-8")
+    cleanup_event = 'event_type="crawl_project_cleanup"'
+    batch_delete = "CrawlBatch.filter(project_id=project_id).using_db(conn).delete()"
+
+    assert cleanup_event in source
+    assert source.index("_capture_crawl_batch_ids(") < source.index("_delete_project_relations(")
+    assert source.index(cleanup_event) < source.index(batch_delete)

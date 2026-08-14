@@ -94,18 +94,17 @@ def create_container(config: Any) -> Container:
     """
     container = Container(config=config)
 
-    # T6-T4a: plugin_registry 提前创建，供 register-direct 上报 capabilities.task_types。
-    # 原顺序里 transport 内部 register-direct 时 registry 还没构建，无法读能力。
+    # T6-T4a: registry 提前创建，否则 transport 内 register-direct 时读不到能力
     plugin_registry = _create_plugin_registry(config)
     container.register("plugin_registry", plugin_registry)
     from antcode_worker.app.capabilities import detect_plugin_capabilities
 
     capabilities = detect_plugin_capabilities(plugin_registry)
 
-    # 1. 创建传输层
+    # 1. 传输层。两种模式都必须注入启动能力快照，否则控制面拿到空能力、
+    # Lease 快照与真实插件集不一致（Direct 侧续租被判 capabilities_changed）。
     transport = _create_transport(config)
-    if hasattr(transport, "set_capabilities"):
-        transport.set_capabilities(capabilities)
+    transport.set_capabilities(capabilities)
     container.register("transport", transport)
 
     # 2. 创建运行时管理器
@@ -135,7 +134,9 @@ def create_container(config: Any) -> Container:
     container.register("artifact_manager", artifact_manager)
 
     # 9. 创建引擎（依赖其他组件）
-    engine = _create_engine(
+    from antcode_worker.app.engine_wiring import create_engine
+
+    engine = create_engine(
         config=config,
         transport=transport,
         runtime_manager=runtime_manager,
@@ -144,7 +145,9 @@ def create_container(config: Any) -> Container:
         log_manager=log_manager,
         project_fetcher=project_fetcher,
         artifact_manager=artifact_manager,
-        tombstone_redis=_create_tombstone_redis(config),
+        metrics_collector=metrics_collector,
+        heartbeat_reporter=heartbeat_reporter,
+        tombstone_redis=_create_tombstone_redis(transport),
     )
     container.register("engine", engine)
 
@@ -212,14 +215,14 @@ def _create_transport(config: Any) -> Any:
                 client_cert=getattr(config, "client_cert", None),
                 client_key=getattr(config, "client_key", None),
                 api_key=bootstrap.api_key,
+                secret_key=str(getattr(credentials, "secret_key", "") or ""),
             )
             if transport_mode == "gateway"
             else GatewayConfigSpec()
         ),
     )
 
-    # 使用工厂创建传输层（同步包装）
-    # 注意：自检需要异步，这里先跳过，在 lifecycle 中执行
+    # 工厂创建传输层（同步包装）；自检需异步，放到 lifecycle 执行
     from antcode_worker.transport.factory import (
         TransportConfigError,
         print_transport_banner,
@@ -244,20 +247,16 @@ def _create_transport(config: Any) -> Any:
             namespace=transport_config.direct.redis_namespace,
             consumer_group=transport_config.direct.consumer_group,
             direct_control=build_direct_control_client(transport_config.direct, worker_id or ""),
+            task_payload_secret=transport_config.direct.secret_key,
         )
     else:
         from antcode_worker.transport.gateway import GatewayTransport
 
-        # P2-20: worker_id 必须在 GatewayConfig 构造时就写入,后续
-        # deregister() 会读 ``_gateway_config.worker_id`` 来发 Deregister RPC。
-        # ``set_credentials`` 只是二次兜底(比如 api_key 后置注入的场景),
-        # 真正的 single source of truth 是构造参数里的 ``worker_id``。
+        # P2-20: worker_id 必须在构造时写入——deregister() 读的是它；set_credentials 只是兜底
         gateway_config = build_gateway_transport_config(transport_config)
         transport = GatewayTransport(gateway_config=gateway_config)
         if worker_id:
-            # 显式再走一次 set_credentials,让 ``_gateway_config.worker_id``
-            # 一定与 wiring 拿到的 worker_id 保持一致(防御式,即使上面
-            # dataclass 构造有默认值覆盖也能纠正)。
+            # 再走一次 set_credentials，确保与 wiring 拿到的 worker_id 一致
             transport.set_credentials(worker_id=worker_id)
         return transport
 
@@ -415,7 +414,14 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
     from types import SimpleNamespace
 
     import httpx
-    from antcode_core.common.utils.worker_request import build_worker_signed_headers
+    from antcode_core.common.utils.worker_request import (
+        HTTP_POST_METHOD,
+        build_worker_signed_headers,
+        encode_worker_json_body,
+        request_path_from_url,
+    )
+
+    from antcode_worker.app.http_trust import certificate_authority
 
     api_base_url = _normalize_api_base_url(
         getattr(config, "api_base_url", ""),
@@ -423,16 +429,24 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
         allow_insecure_internal=getattr(config, "api_allow_insecure_internal", False),
     )
     url = f"{api_base_url}/api/v1/workers/{credentials.worker_id}/redis-acl/issue"
+    request_body = encode_worker_json_body({})
     headers = build_worker_signed_headers(
         SimpleNamespace(public_id=credentials.worker_id),
         api_key=credentials.api_key,
         secret_key=credentials.secret_key,
-        payload={},
+        method=HTTP_POST_METHOD,
+        path=request_path_from_url(url),
+        body=request_body,
     )
-    with httpx.Client(timeout=15.0, trust_env=_should_trust_env_proxy(api_base_url)) as client:
-        response = client.post(url, json={}, headers=headers)
-    body = _require_success_response(response, operation="Direct Redis ACL 签发")
-    data = body.get("data") or {}
+    client = httpx.Client(
+        timeout=15.0,
+        trust_env=_should_trust_env_proxy(api_base_url),
+        verify=certificate_authority(),
+    )
+    with client:
+        response = client.post(url, content=request_body, headers=headers)
+    response_body = _require_success_response(response, operation="Direct Redis ACL 签发")
+    data = response_body.get("data") or {}
     username = str(data.get("redis_username") or "")
     password = str(data.get("redis_password") or "")
     if not username or not password:
@@ -482,19 +496,16 @@ def _create_runtime_manager(config: Any) -> Any:
 def _create_executor(config: Any) -> Any:
     """创建执行器。
 
-    P0-a5: 按 config.sandbox_mode 分派 ProcessExecutor(默认,兼容) 或
-    SandboxExecutor(生产推荐)。之前 wiring 硬编码 ProcessExecutor,导致
+    按 config.sandbox_mode 分派 SandboxExecutor。之前 wiring 硬编码 ProcessExecutor,导致
     SandboxExecutor 虽定义但从不被使用。
     """
     import os
     import shlex
     import shutil
 
-    from antcode_worker.executor import (
-        ExecutorConfig,
-        SandboxConfig,
-        SandboxExecutor,
-    )
+    from antcode_worker.executor.base import ExecutorConfig
+    from antcode_worker.executor.sandbox import SandboxConfig, SandboxExecutor
+    from antcode_worker.rule_egress_limits import limits_from_config
 
     max_concurrent = getattr(config, "max_concurrent_tasks", 5)
     default_timeout = getattr(config, "task_timeout", 3600)
@@ -512,11 +523,14 @@ def _create_executor(config: Any) -> Any:
         enforce_rlimit=enforce_rlimit,
         default_max_open_files=max_open_files,
         default_max_processes=max_processes,
+        rule_egress_limits=limits_from_config(config),
     )
 
     sandbox_mode = str(getattr(config, "sandbox_mode", "sandbox") or "sandbox").strip().lower()
     if sandbox_mode == "sandbox":
-        # 解析可选的外接沙箱命令(如 firejail / bwrap)
+        network_isolated = bool(getattr(config, "sandbox_network_isolated", True))
+        if not network_isolated:
+            raise RuntimeError("WORKER_SANDBOX_NETWORK_ISOLATED=false 已禁用：用户任务必须使用独立 network namespace")
         sandbox_command_str = str(getattr(config, "sandbox_command", "") or "").strip()
         sandbox_command_list: list[str] | None = None
         if not sandbox_command_str:
@@ -535,10 +549,9 @@ def _create_executor(config: Any) -> Any:
             raise RuntimeError(f"沙箱工具不可用: {sandbox_command_list[0]}")
         sandbox_command_list[0] = os.path.abspath(resolved_sandbox_bin)
 
-        sandbox_config = SandboxConfig(
-            enabled=True,
-            network_isolated=bool(getattr(config, "sandbox_network_isolated", False)),
-            fs_isolated=True,
+        sandbox_config = SandboxConfig.for_worker(
+            config,
+            network_isolated=network_isolated,
             sandbox_command=sandbox_command_list,
         )
         logger.info(
@@ -615,86 +628,18 @@ def _create_heartbeat_reporter(config: Any, transport: Any, metrics_collector: A
     )
 
 
-def _create_tombstone_redis(config: Any) -> Any:
-    # P1-SM-03 (round6): async Redis for CancelTombstones; None = 降级纯内存
-    redis_url = getattr(config, "redis_url", "")
+def _create_tombstone_redis(transport: Any) -> Any:
+    """CancelTombstones 的 Redis 客户端，复用 transport 已认证的连接串。
+
+    不能用 ``config.redis_url``：那不含运行时签发的 per-worker ACL 凭据，查询必然
+    "Authentication required"，取消墓碑会退化成单进程内存、跨进程取消语义静默失效。
+    Gateway 模式无连接串返回 None 属设计内；建连失败直接抛出，不再吞异常。"""
+    redis_url = str(getattr(transport, "_redis_url", "") or "")
     if not redis_url:
         return None
-    try:
-        from antcode_core.infrastructure.redis.factory import create_async_redis_client
+    from antcode_core.infrastructure.redis.factory import create_async_redis_client
 
-        return create_async_redis_client(redis_url, decode_responses=True)
-    except Exception as exc:  # noqa: BLE001 - 备份可选,不阻塞 Worker
-        logger.warning("cancel tombstones Redis client 创建失败,降级纯内存: {}", exc)
-        return None
-
-
-def _create_engine(
-    config: Any,
-    transport: Any,
-    runtime_manager: Any,
-    executor: Any,
-    plugin_registry: Any,
-    log_manager: Any,
-    project_fetcher: Any,
-    artifact_manager: Any,
-    *,
-    tombstone_redis: Any = None,
-) -> Any:
-    """创建引擎"""
-    from antcode_worker.engine.engine import Engine
-
-    max_concurrent = getattr(config, "max_concurrent_tasks", 5)
-    flow_controller = _create_flow_controller(config)
-
-    engine = Engine(
-        transport=transport,
-        executor=executor,
-        flow_controller=flow_controller,
-        runtime_manager=runtime_manager,
-        plugin_registry=plugin_registry,
-        log_manager_factory=log_manager,
-        project_fetcher=project_fetcher,
-        artifact_manager=artifact_manager,
-        max_concurrent=max_concurrent,
-        memory_limit_mb=getattr(config, "task_memory_limit_mb", 0),
-        cpu_limit_seconds=getattr(config, "task_cpu_time_limit_sec", 0),
-        tombstone_redis=tombstone_redis,
-        tombstone_namespace=getattr(config, "redis_namespace", "antcode"),
-    )
-
-    # 绑定指标采集器
-    from antcode_worker.heartbeat.system_metrics import get_metrics_collector
-
-    collector = get_metrics_collector()
-    if collector:
-        collector.set_state_manager(engine.state_manager)
-        collector.set_scheduler(engine.scheduler)
-
-    return engine
-
-
-def _create_flow_controller(config: Any) -> Any:
-    """创建流控控制器"""
-    from antcode_worker.transport.flow_control import (
-        FlowControlConfig,
-        FlowControlStrategy,
-        create_flow_controller,
-    )
-
-    enabled = getattr(config, "flow_control_enabled", False)
-    if not enabled:
-        return None
-
-    strategy_value = getattr(config, "flow_control_strategy", "token_bucket")
-    strategy = FlowControlStrategy(strategy_value)
-
-    flow_config = FlowControlConfig(
-        strategy=strategy,
-        bucket_capacity=getattr(config, "flow_control_capacity", 200),
-        refill_rate=getattr(config, "flow_control_rate", 100.0),
-    )
-    return create_flow_controller(strategy, flow_config)
+    return create_async_redis_client(redis_url, decode_responses=True)
 
 
 def _create_artifact_transfer_store(config: Any, transport: Any) -> Any:

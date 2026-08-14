@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from antcode_contracts import data_pb2
+from antcode_core.common.security.task_payload_envelope import seal_ready_payload
 from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
-from antcode_worker.transport.base import HeartbeatMessage, LogMessage
+from antcode_worker.transport.base import GenerationLostError, HeartbeatMessage, LogMessage
 from antcode_worker.transport.redis.transport import RedisTransport
 from redis.cluster import key_slot
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -17,6 +18,7 @@ redis_transport_module = sys.modules[RedisTransport.__module__]
 _RUNTIME_REQUEST_ID = f"worker-1:{'a' * 32}"
 _RUNTIME_REPLY_STREAM = f"antcode:control:reply:{_RUNTIME_REQUEST_ID}"
 _FOREIGN_RUNTIME_REQUEST_ID = f"worker-2:{'b' * 32}"
+_WORKER_PAYLOAD_SECRET = "direct-modernization-secret-material-00001"
 
 
 class _FakePipeline:
@@ -75,7 +77,7 @@ class _RuntimePipeline(_FakePipeline):
 
 
 class _RuntimeControlRedis:
-    def __init__(self, *, stream="antcode:control:worker-1", source_fields=None):
+    def __init__(self, *, stream="{antcode}:control:worker-1", source_fields=None):
         self.stream = stream
         self.message_id = "2-0"
         self.source_fields = source_fields or {
@@ -203,15 +205,29 @@ def _runtime_transport(redis, *, namespace="antcode", lease_store=None):
 def _source_fields() -> dict[str, str]:
     digest = "a" * 64
     return {
+        "dispatch_lease_id": "lease-1",
+        "dispatch_lease_gen": "7",
         "source_bundle_uri": f"pgartifact://{digest}",
         "source_bundle_sha256": digest,
         "source_bundle_size": "1",
     }
 
 
+def _sealed_task_frame(payload: dict[str, object]) -> dict[str, object]:
+    return seal_ready_payload(
+        payload,
+        worker_id="worker-1",
+        worker_secret=_WORKER_PAYLOAD_SECRET,
+    )
+
+
 @pytest.mark.asyncio
 async def test_poll_task_exposes_redis_errors():
-    transport = RedisTransport(redis_url="redis://localhost:6379/0", worker_id="worker-1")
+    transport = RedisTransport(
+        redis_url="redis://localhost:6379/0",
+        worker_id="worker-1",
+        task_payload_secret=_WORKER_PAYLOAD_SECRET,
+    )
     transport._running = True
 
     fake_redis = AsyncMock()
@@ -239,7 +255,7 @@ async def test_poll_control_exposes_redis_errors():
 async def test_poll_control_drains_own_consumer_pel_before_new_events():
     transport = RedisTransport(redis_url="redis://localhost:6379/0", worker_id="worker-1")
     transport._running = True
-    worker_stream = "antcode:control:worker-1"
+    worker_stream = "{antcode}:control:worker-1"
     fake_redis = AsyncMock()
     fake_redis.xreadgroup.side_effect = [
         [(worker_stream, [("1-0", {"control_type": "cancel"}), ("2-0", {"control_type": "kill"})])],
@@ -276,7 +292,7 @@ def test_direct_control_channels_exclude_shared_global_stream():
     transport = RedisTransport(redis_url="redis://localhost:6379/0", worker_id="worker-1")
 
     assert [(channel.stream_key, channel.group) for channel in transport._control_channels] == [
-        ("antcode:control:worker-1", "antcode-control")
+        ("{antcode}:control:worker-1", "antcode-control")
     ]
 
 
@@ -290,7 +306,7 @@ async def test_send_control_result_recovers_lost_ack_without_reexecution(monkeyp
         "request_id": _RUNTIME_REQUEST_ID,
         "reply_stream": _RUNTIME_REPLY_STREAM,
         "success": True,
-        "receipt": "antcode:control:worker-1|2-0",
+        "receipt": "{antcode}:control:worker-1|2-0",
         "data": {"value": 1},
     }
 
@@ -322,7 +338,7 @@ async def test_new_generation_recovers_commit_before_xack_with_fencing(monkeypat
         _RUNTIME_REQUEST_ID,
         _RUNTIME_REPLY_STREAM,
         True,
-        receipt="antcode:control:worker-1|2-0",
+        receipt="{antcode}:control:worker-1|2-0",
         data={"value": 1},
     )
     assert committed is False
@@ -339,7 +355,7 @@ async def test_new_generation_recovers_commit_before_xack_with_fencing(monkeypat
     new_transport = _runtime_transport(redis, lease_store=lease_store)
     new_transport._lease_id = "lease-2"
     message = await new_transport._decode_control_delivery(
-        "antcode:control:worker-1",
+        "{antcode}:control:worker-1",
         "2-0",
         redis.source_fields,
     )
@@ -367,7 +383,7 @@ async def test_runtime_recovery_quarantines_corrupt_evidence_without_head_of_lin
         _RUNTIME_REQUEST_ID,
         _RUNTIME_REPLY_STREAM,
         True,
-        receipt="antcode:control:worker-1|2-0",
+        receipt="{antcode}:control:worker-1|2-0",
         data={"value": 1},
     )
     assert committed is False
@@ -378,7 +394,7 @@ async def test_runtime_recovery_quarantines_corrupt_evidence_without_head_of_lin
         redis.replies[_RUNTIME_REPLY_STREAM][1]["data"] = '{"value":2}'
 
     recovered = await transport._decode_control_delivery(
-        "antcode:control:worker-1",
+        "{antcode}:control:worker-1",
         "2-0",
         redis.source_fields,
     )
@@ -399,7 +415,7 @@ async def test_runtime_marker_commit_rechecks_lease_inside_redis_lua():
         _RUNTIME_REQUEST_ID,
         _RUNTIME_REPLY_STREAM,
         True,
-        receipt="antcode:control:worker-1|2-0",
+        receipt="{antcode}:control:worker-1|2-0",
         data={"value": 1},
     )
 
@@ -418,7 +434,7 @@ async def test_send_control_result_keeps_first_committed_result_on_conflicting_r
         "request_id": _RUNTIME_REQUEST_ID,
         "reply_stream": _RUNTIME_REPLY_STREAM,
         "success": True,
-        "receipt": "antcode:control:worker-1|2-0",
+        "receipt": "{antcode}:control:worker-1|2-0",
     }
 
     assert await transport.send_control_result(**common, data={"value": 1}) is True
@@ -439,7 +455,7 @@ async def test_send_control_result_requires_pending_owner_before_first_commit():
         _RUNTIME_REQUEST_ID,
         _RUNTIME_REPLY_STREAM,
         True,
-        receipt="antcode:control:worker-1|2-0",
+        receipt="{antcode}:control:worker-1|2-0",
         data=None,
     )
 
@@ -464,7 +480,7 @@ async def test_send_control_result_rejects_foreign_worker_request_scope_before_r
         _FOREIGN_RUNTIME_REQUEST_ID,
         foreign_reply,
         True,
-        receipt="antcode:control:worker-1|2-0",
+        receipt="{antcode}:control:worker-1|2-0",
         data=None,
     )
 
@@ -481,7 +497,7 @@ async def test_send_control_result_rejects_foreign_worker_request_scope_before_r
         (
             {"control_type": "cancel", "request_id": _RUNTIME_REQUEST_ID, "reply_stream": _RUNTIME_REPLY_STREAM},
             _RUNTIME_REPLY_STREAM,
-            "antcode:control:worker-1|2-0",
+            "{antcode}:control:worker-1|2-0",
         ),
         (
             {
@@ -490,7 +506,7 @@ async def test_send_control_result_rejects_foreign_worker_request_scope_before_r
                 "reply_stream": _RUNTIME_REPLY_STREAM,
             },
             _RUNTIME_REPLY_STREAM,
-            "antcode:control:worker-1|2-0",
+            "{antcode}:control:worker-1|2-0",
         ),
         (
             {
@@ -499,7 +515,7 @@ async def test_send_control_result_rejects_foreign_worker_request_scope_before_r
                 "reply_stream": "antcode:control:reply:forged",
             },
             _RUNTIME_REPLY_STREAM,
-            "antcode:control:worker-1|2-0",
+            "{antcode}:control:worker-1|2-0",
         ),
         (
             {
@@ -508,7 +524,7 @@ async def test_send_control_result_rejects_foreign_worker_request_scope_before_r
                 "reply_stream": _RUNTIME_REPLY_STREAM,
             },
             _RUNTIME_REPLY_STREAM,
-            "antcode:task:ready:worker-1|2-0",
+            "{antcode}:task:ready:worker-1|2-0",
         ),
     ],
 )
@@ -546,7 +562,7 @@ async def test_send_control_result_enforces_strict_json_and_size_limits(data, er
         _RUNTIME_REQUEST_ID,
         _RUNTIME_REPLY_STREAM,
         True,
-        receipt="antcode:control:worker-1|2-0",
+        receipt="{antcode}:control:worker-1|2-0",
         data=data,
         error=error,
     )
@@ -577,59 +593,32 @@ async def test_send_control_result_rejects_global_runtime_receipt(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poll_task_only_accepts_run_id_and_ignores_legacy_execution_id():
-    transport = RedisTransport(redis_url="redis://localhost:6379/0", worker_id="worker-1")
-    transport._running = True
-
-    fake_redis = AsyncMock()
-    fake_redis.xreadgroup.return_value = [
-        (
-            "antcode:task:ready:worker-1",
-            [
-                (
-                    "1-0",
-                    {
-                        "task_id": "task-1",
-                        "project_id": "proj-1",
-                        "execution_id": "legacy-run",
-                        **_source_fields(),
-                    },
-                )
-            ],
-        )
-    ]
-    transport._redis = fake_redis
-
-    task = await transport.poll_task(timeout=0.1)
-
-    assert task is not None
-    assert task.task_id == "task-1"
-    assert task.run_id == ""
-
-
-@pytest.mark.asyncio
 async def test_poll_task_dead_letters_legacy_project_path_frame():
-    # P1-DR-02: 坏帧（含废弃 project_path）不能再反复重投堵塞当前代际
-    # PEL —— 当前 consumer 直接 DLQ + ACK，poll 返回 None 继续处理后续任务。
-    transport = RedisTransport(redis_url="redis://localhost:6379/0", worker_id="worker-1")
+    # 含废弃 project_path 的坏帧必须 DLQ + ACK，不能堵塞 PEL。
+    transport = RedisTransport(
+        redis_url="redis://localhost:6379/0",
+        worker_id="worker-1",
+        task_payload_secret=_WORKER_PAYLOAD_SECRET,
+    )
     transport._running = True
+    transport._lease_id = "lease-1"
     transport._require_current_generation = AsyncMock()
 
     fake_redis = AsyncMock()
     fake_redis.xreadgroup.return_value = [
         (
-            "antcode:task:ready:worker-1",
+            "{antcode}:task:ready:worker-1",
             [
                 (
                     "1-0",
-                    {
-                        "task_id": "task-1",
-                        "project_id": "proj-1",
-                        "project_path": "/tmp/legacy",
-                        "source_bundle_uri": "pgartifact://" + "a" * 64,
-                        "source_bundle_sha256": "a" * 64,
-                        "source_bundle_size": "1",
-                    },
+                    _sealed_task_frame(
+                        {
+                            "task_id": "task-1",
+                            "project_id": "proj-1",
+                            "project_path": "/tmp/legacy",
+                            **_source_fields(),
+                        }
+                    ),
                 )
             ],
         )
@@ -640,7 +629,7 @@ async def test_poll_task_dead_letters_legacy_project_path_frame():
     assert await transport.poll_task(timeout=0.1) is None
 
     call = transport._reclaimer.dead_letter_owned.await_args
-    assert call.args[0] == "antcode:task:ready:worker-1"
+    assert call.args[0] == "{antcode}:task:ready:worker-1"
     assert call.args[1] == "1-0"
     payload = call.args[2]
     assert payload["project_path"] == "/tmp/legacy"
@@ -655,7 +644,7 @@ async def test_poll_control_only_accepts_run_id_and_ignores_legacy_execution_id(
     fake_redis = AsyncMock()
     fake_redis.xreadgroup.return_value = [
         (
-            "antcode:control:worker-1",
+            "{antcode}:control:worker-1",
             [("2-0", {"control_type": "cancel", "task_id": "task-1", "execution_id": "legacy-run"})],
         )
     ]
@@ -678,7 +667,7 @@ async def test_ack_task_returns_false_when_xack_acknowledges_no_messages():
     fake_redis.eval.return_value = 0
     transport._redis = fake_redis
 
-    receipt = "antcode:task:ready:worker-1|1-0"
+    receipt = "{antcode}:task:ready:worker-1|1-0"
 
     assert await transport.ack_task(receipt, accepted=True) is False
     assert receipt not in transport._receipt_cache
@@ -691,14 +680,14 @@ async def test_ack_task_atomically_requires_owned_worker_receipt():
     fake_redis = AsyncMock()
     fake_redis.eval.return_value = 1
     transport._redis = fake_redis
-    receipt = "antcode:task:ready:worker-1|1-0"
-    transport._receipt_cache[receipt] = ("antcode:task:ready:worker-1", "1-0", {})
+    receipt = "{antcode}:task:ready:worker-1|1-0"
+    transport._receipt_cache[receipt] = ("{antcode}:task:ready:worker-1", "1-0", {})
 
     assert await transport.ack_task(receipt, accepted=True) is True
 
     args = fake_redis.eval.await_args.args
     assert args[1] == 2
-    assert args[2] == "antcode:task:ready:worker-1"
+    assert args[2] == "{antcode}:task:ready:worker-1"
     assert ":ack:" in args[3]
     assert key_slot(args[2].encode()) == key_slot(args[3].encode())
     assert args[6] == transport._task_consumer_name
@@ -710,8 +699,8 @@ async def test_ack_task_rejects_foreign_stream_even_if_receipt_is_cached():
     transport._running = True
     fake_redis = AsyncMock()
     transport._redis = fake_redis
-    receipt = "antcode:task:ready:worker-2|1-0"
-    transport._receipt_cache[receipt] = ("antcode:task:ready:worker-2", "1-0", {})
+    receipt = "{antcode}:task:ready:worker-2|1-0"
+    transport._receipt_cache[receipt] = ("{antcode}:task:ready:worker-2", "1-0", {})
 
     assert await transport.ack_task(receipt, accepted=True) is False
     fake_redis.eval.assert_not_awaited()
@@ -725,14 +714,14 @@ async def test_requeue_task_uses_atomic_same_slot_idempotent_settlement():
     fake_redis.time.return_value = (1_000, 0)
     fake_redis.eval.return_value = [1, "2-0"]
     transport._redis = fake_redis
-    receipt = "antcode:task:ready:worker-1|1-0"
-    transport._receipt_cache[receipt] = ("antcode:task:ready:worker-1", "1-0", {"task_id": "task-1"})
+    receipt = "{antcode}:task:ready:worker-1|1-0"
+    transport._receipt_cache[receipt] = ("{antcode}:task:ready:worker-1", "1-0", {"task_id": "task-1"})
 
     assert await transport.requeue_task(receipt, reason="busy") is True
 
     args = fake_redis.eval.await_args.args
     assert args[1] == 2
-    assert args[2] == "antcode:task:ready:worker-1"
+    assert args[2] == "{antcode}:task:ready:worker-1"
     assert ":requeue:" in args[3]
     assert key_slot(args[2].encode()) == key_slot(args[3].encode())
     assert receipt not in transport._receipt_cache
@@ -747,8 +736,8 @@ async def test_requeue_task_recovers_lost_lua_response_without_duplicate(monkeyp
     fake_redis.eval.side_effect = [RedisConnectionError("response lost"), [0, "2-0"]]
     transport._redis = fake_redis
     monkeypatch.setattr(transport, "reconnect", AsyncMock(return_value=True))
-    receipt = "antcode:task:ready:worker-1|1-0"
-    transport._receipt_cache[receipt] = ("antcode:task:ready:worker-1", "1-0", {"task_id": "task-1"})
+    receipt = "{antcode}:task:ready:worker-1|1-0"
+    transport._receipt_cache[receipt] = ("{antcode}:task:ready:worker-1", "1-0", {"task_id": "task-1"})
 
     assert await transport.requeue_task(receipt, reason="busy") is True
     assert fake_redis.eval.await_count == 2
@@ -767,9 +756,9 @@ async def test_requeue_task_treats_non_numeric_requeue_count_as_zero():
     fake_redis.time.return_value = (1_000, 0)
     fake_redis.eval.return_value = [1, "2-0"]
     transport._redis = fake_redis
-    receipt = "antcode:task:ready:worker-1|1-0"
+    receipt = "{antcode}:task:ready:worker-1|1-0"
     transport._receipt_cache[receipt] = (
-        "antcode:task:ready:worker-1",
+        "{antcode}:task:ready:worker-1",
         "1-0",
         {"task_id": "task-1", "requeue_count": "not-a-number"},
     )
@@ -784,16 +773,15 @@ async def test_requeue_task_treats_non_numeric_requeue_count_as_zero():
 
 @pytest.mark.asyncio
 async def test_requeue_task_over_threshold_settles_into_dead_letter():
-    """X1 回归补充：计数可解析时超过阈值必须走统一 DLQ 而不是继续 requeue。"""
     transport = RedisTransport(redis_url="redis://localhost:6379/0", worker_id="worker-1")
     transport._running = True
     fake_redis = AsyncMock()
     transport._redis = fake_redis
     dead_letter_owned = AsyncMock()
     transport._reclaimer = MagicMock(dead_letter_owned=dead_letter_owned)
-    receipt = "antcode:task:ready:worker-1|1-0"
+    receipt = "{antcode}:task:ready:worker-1|1-0"
     transport._receipt_cache[receipt] = (
-        "antcode:task:ready:worker-1",
+        "{antcode}:task:ready:worker-1",
         "1-0",
         {"task_id": "task-1", "requeue_count": str(transport.MAX_REQUEUE_COUNT)},
     )
@@ -812,8 +800,8 @@ async def test_defer_task_keeps_original_message_pending_without_requeue():
     fake_redis = AsyncMock()
     transport._redis = fake_redis
     await transport._deferred_recovery.start()
-    receipt = "antcode:task:ready:worker-1|1-0"
-    transport._receipt_cache[receipt] = ("antcode:task:ready:worker-1", "1-0", {})
+    receipt = "{antcode}:task:ready:worker-1|1-0"
+    transport._receipt_cache[receipt] = ("{antcode}:task:ready:worker-1", "1-0", {})
 
     assert await transport.defer_task(receipt, reason="ownership_contention run_id=run-1") is True
     await transport._deferred_recovery.stop()
@@ -832,7 +820,7 @@ async def test_ack_control_returns_false_when_xack_acknowledges_no_messages():
     fake_redis.eval.return_value = 0
     transport._redis = fake_redis
 
-    assert await transport.ack_control("antcode:control:worker-1|2-0") is False
+    assert await transport.ack_control("{antcode}:control:worker-1|2-0") is False
 
 
 def test_decode_data_rejects_invalid_utf8_bytes():
@@ -928,8 +916,8 @@ async def test_send_log_batch_reports_generation_loss_after_control_acceptance()
     transport._lease_store.is_current = AsyncMock(side_effect=[True, False])
     transport._redis = MagicMock()
     log = LogMessage(run_id="run-1", log_type="stdout", content="line", sequence=1)
-
-    assert await transport.send_log_batch([log]) is False
+    with pytest.raises(GenerationLostError):
+        await transport.send_log_batch([log])
     control.report_log_batch.assert_awaited_once()
 
 
@@ -1043,8 +1031,8 @@ async def test_start_log_redacts_redis_password(monkeypatch):
     assert transport._control_recovery.complete is False
     assert reclaimer_kwargs["consumer_group"] == "custom-workers"
     assert [call.args[1:] for call in ensure_group.await_args_list] == [
-        ("antcode:task:ready:worker-1", "custom-workers"),
-        ("antcode:control:worker-1", "antcode-control"),
+        ("{antcode}:task:ready:worker-1", "custom-workers"),
+        ("{antcode}:control:worker-1", "antcode-control"),
     ]
 
     joined = "\n".join(info_messages)

@@ -96,6 +96,7 @@ async def test_reconnect_reuses_same_lease(monkeypatch):
             lease_id="lease-1",
             expires_at_ms=int(time.time() * 1000) + 30_000,
             renew_after_ms=10_000,
+            ttl_ms=30_000,
         )
     )
     monkeypatch.setattr(grpc.aio, "insecure_channel", MagicMock(return_value=channel))
@@ -123,6 +124,7 @@ async def test_reconnect_rejects_new_lease_and_self_fences(monkeypatch):
             lease_id="lease-2",
             expires_at_ms=int(time.time() * 1000) + 30_000,
             renew_after_ms=10_000,
+            ttl_ms=30_000,
         )
     )
     monkeypatch.setattr(grpc.aio, "insecure_channel", MagicMock(return_value=channel))
@@ -150,6 +152,7 @@ async def test_reconnect_trusts_server_lease_despite_local_clock_skew(monkeypatc
             # 权威续租，客户端不得用另一台机器的 wall clock 再次判定。
             expires_at_ms=1,
             renew_after_ms=10_000,
+            ttl_ms=30_000,
         )
     )
     monkeypatch.setattr(grpc.aio, "insecure_channel", MagicMock(return_value=channel))
@@ -172,6 +175,7 @@ async def test_reconnect_rejects_missing_server_expiry(monkeypatch):
             lease_id="lease-1",
             expires_at_ms=0,
             renew_after_ms=10_000,
+            ttl_ms=30_000,
         )
     )
     monkeypatch.setattr(grpc.aio, "insecure_channel", MagicMock(return_value=channel))

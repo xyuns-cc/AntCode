@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from antcode_core.application.services.projects.source_bundle_paths import (
     normalize_relative_path,
     normalize_source_subdir,
@@ -14,8 +16,36 @@ from antcode_core.domain.models.enums import ProjectType
 class ProjectSourceService:
     """Reads and writes project source bindings."""
 
-    async def get_source(self, project_id: int) -> ProjectSource | None:
-        return await ProjectSource.get_or_none(project_id=project_id)
+    async def get_source(self, project_id: int, connection: Any | None = None) -> ProjectSource | None:
+        query = ProjectSource.filter(project_id=project_id)
+        if connection is not None:
+            query = query.using_db(connection)
+        return await query.first()
+
+    async def copy_source(
+        self,
+        *,
+        source_project_id: int,
+        target_project_id: int,
+        connection: Any,
+    ) -> ProjectSource:
+        source = await ProjectSource.filter(project_id=source_project_id).using_db(connection).first()
+        if source is None:
+            raise ValueError("源项目缺少 project_sources 配置")
+        repository = (
+            await GitRepository.filter(id=source.repository_id).using_db(connection).select_for_update().first()
+        )
+        if repository is None:
+            raise ValueError("源项目关联的 Git 仓库不存在")
+        return await ProjectSource.create(
+            project_id=target_project_id,
+            repository_id=source.repository_id,
+            ref=source.ref,
+            subdir=source.subdir,
+            include_paths=list(source.include_paths or []),
+            resolved_commit=source.resolved_commit,
+            using_db=connection,
+        )
 
     async def upsert_source(
         self,
@@ -25,28 +55,63 @@ class ProjectSourceService:
         ref: str,
         subdir: str,
         include_paths: list[str] | None = None,
+        connection: Any | None = None,
     ) -> ProjectSource:
         normalized_ref, normalized_subdir, normalized_includes = self._source_values(
             ref,
             subdir,
             include_paths,
         )
-        source = await ProjectSource.get_or_none(project_id=project_id)
+        if connection is None:
+            source = await ProjectSource.get_or_none(project_id=project_id)
+        else:
+            source = await ProjectSource.filter(project_id=project_id).using_db(connection).first()
         if source is None:
-            return await ProjectSource.create(
+            return await self._create_source(
                 project_id=project_id,
                 repository_id=repository_id,
                 ref=normalized_ref,
                 subdir=normalized_subdir,
                 include_paths=normalized_includes,
+                connection=connection,
             )
         source.repository_id = repository_id
         source.ref = normalized_ref
         source.subdir = normalized_subdir
         source.include_paths = normalized_includes
         source.resolved_commit = None
-        await source.save()
+        if connection is None:
+            await source.save()
+        else:
+            await source.save(using_db=connection)
         return source
+
+    @staticmethod
+    async def _create_source(
+        *,
+        project_id: int,
+        repository_id: int,
+        ref: str,
+        subdir: str,
+        include_paths: list[str],
+        connection: Any | None,
+    ) -> ProjectSource:
+        if connection is None:
+            return await ProjectSource.create(
+                project_id=project_id,
+                repository_id=repository_id,
+                ref=ref,
+                subdir=subdir,
+                include_paths=include_paths,
+            )
+        return await ProjectSource.create(
+            project_id=project_id,
+            repository_id=repository_id,
+            ref=ref,
+            subdir=subdir,
+            include_paths=include_paths,
+            using_db=connection,
+        )
 
     async def get_transfer_info(self, project_id: int) -> dict[str, object]:
         source = await self.get_source(project_id)
@@ -71,15 +136,25 @@ class ProjectSourceService:
         return self._response(project, repository, source)
 
     async def update_from_payload(self, project_id: int, payload, owner_user_id: int):
-        repository = await self._get_enabled_repository(payload.repository_id, owner_user_id)
-        source = await self.upsert_source(
-            project_id=project_id,
-            repository_id=repository.id,
-            ref=payload.ref,
-            subdir=payload.subdir,
-            include_paths=payload.include_paths,
-        )
-        project = await Project.get(id=project_id)
+        from tortoise.transactions import in_transaction
+
+        async with in_transaction("default") as connection:
+            project = await Project.filter(id=project_id).using_db(connection).select_for_update().first()
+            if project is None:
+                raise ValueError("项目不存在")
+            repository = await self._get_enabled_repository(
+                payload.repository_id,
+                owner_user_id,
+                connection=connection,
+            )
+            source = await self.upsert_source(
+                project_id=project_id,
+                repository_id=repository.id,
+                ref=payload.ref,
+                subdir=payload.subdir,
+                include_paths=payload.include_paths,
+                connection=connection,
+            )
         return self._response(project, repository, source)
 
     async def import_projects(self, user_id: int, items: list) -> list[str]:
@@ -96,10 +171,13 @@ class ProjectSourceService:
         self,
         repository_public_id: str,
         owner_user_id: int | None = None,
+        connection: Any | None = None,
     ) -> GitRepository:
         query = GitRepository.filter(public_id=repository_public_id, enabled=True)
         if owner_user_id is not None:
             query = query.filter(owner_user_id=owner_user_id)
+        if connection is not None:
+            query = query.using_db(connection).select_for_update()
         repository = await query.first()
         if repository is None:
             raise ValueError("Git 仓库不存在或不可用")

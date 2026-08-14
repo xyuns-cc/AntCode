@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import grpc
 import pytest
 from antcode_contracts import control_pb2
+from antcode_core.infrastructure.redis import control_global_stream, control_stream
 from antcode_gateway.services import control_service as control_service_module
 from antcode_gateway.services.control_service import GatewayControlService
 from antcode_gateway.services.runtime_control_settlement_store import settlement_key
@@ -45,13 +46,13 @@ class RuntimeResultRedis:
         *,
         request_id: str = "request-1",
         control_type: str = "runtime_manage",
-        source: str = "antcode:control:worker-1",
+        source: str = control_stream("worker-1"),
     ) -> None:
         self.operations: list[str] = []
         self.ack_requests: list[tuple[str, str, str]] = []
         self.pending_groups: list[str] = []
         self.values: dict[str, str] = {}
-        self.pending_owner = "worker-1"
+        self.pending_owner = "worker-1:lease-1"
         self.current_lease_id = "lease-1"
         self.ack_count = 1
         self.entries: dict[tuple[str, str], dict] = {
@@ -67,7 +68,9 @@ class RuntimeResultRedis:
         return self.values.get(key)
 
     async def eval(self, *_args):
-        _, _, _, marker_key, lease_id, marker, fingerprint, _ = _args
+        if "XPENDING" in _args[0]:
+            return b"acked" if await self.xack(_args[2], _args[4], _args[5]) else b"gone"
+        _, _, _, marker_key, _, lease_id, marker, fingerprint, _, _ = _args
         self.operations.append("set")
         if self.current_lease_id != lease_id:
             return [-2, ""]
@@ -114,7 +117,7 @@ def _context() -> MagicMock:
 def _request(**overrides) -> control_pb2.AckControlRequest:
     values = {
         "worker_id": "worker-1",
-        "event_id": "antcode:control:worker-1|1-0",
+        "event_id": f"{control_stream('worker-1')}|1-0",
         "success": True,
         "request_id": "request-1",
         "data_json": '{"中文":[true,null],"envs":["shared-py312"]}',
@@ -184,7 +187,7 @@ async def test_plain_control_ack_only_xacks(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_global_control_ack_uses_worker_group_and_all_group_trim(monkeypatch):
-    source = "antcode:control:global"
+    source = control_global_stream()
     redis = RuntimeResultRedis(control_type="cancel", source=source)
     _install(monkeypatch, redis)
     request = _request(
@@ -203,7 +206,7 @@ async def test_global_control_ack_uses_worker_group_and_all_group_trim(monkeypat
 
 @pytest.mark.asyncio
 async def test_global_runtime_control_cannot_be_settled_directly(monkeypatch):
-    source = "antcode:control:global"
+    source = control_global_stream()
     redis = RuntimeResultRedis(source=source)
     _install(monkeypatch, redis)
     request = _request(event_id=f"{source}|1-0")
@@ -288,15 +291,12 @@ async def test_reply_written_before_marker_is_recovered_without_duplicate(monkey
 
 @pytest.mark.asyncio
 async def test_duplicate_plain_ack_after_trim_is_idempotent_without_abort(monkeypatch):
-    """G1 回归：结算后 stream entry 被裁剪，重复 ACK 幂等返回 received=False，
-    不得映射为 gRPC INVALID_ARGUMENT（否则 at-least-once 重试被记为连接错误）。"""
     redis = RuntimeResultRedis(control_type="cancel")
     _install(monkeypatch, redis)
     service = _service()
     request = _request(request_id="", data_json="")
     first = await service.AckControl(request, _context())
 
-    # 模拟结算完成后的状态：entry 已裁剪、PEL 已清空
     redis.entries.clear()
     redis.pending_owner = None
     redis.ack_count = 0
@@ -310,8 +310,7 @@ async def test_duplicate_plain_ack_after_trim_is_idempotent_without_abort(monkey
 
 @pytest.mark.asyncio
 async def test_ack_gone_from_pel_but_entry_present_is_idempotent_without_abort(monkeypatch):
-    """G1 回归：entry 尚在 stream 但已不在本 Worker PEL（已 ACK 未裁剪）时，
-    同样按良性重放处理。"""
+    """Entry still in stream but gone from PEL is an idempotent replay."""
     redis = RuntimeResultRedis(control_type="cancel")
     redis.pending_owner = None
     _install(monkeypatch, redis)
@@ -325,8 +324,7 @@ async def test_ack_gone_from_pel_but_entry_present_is_idempotent_without_abort(m
 
 
 @pytest.mark.asyncio
-async def test_foreign_pending_owner_still_aborts_invalid_argument(monkeypatch):
-    """G1 边界：PEL 里 entry 归属其他 Worker 属于真实归属违规，保持硬错误。"""
+async def test_foreign_pending_owner_aborts_failed_precondition(monkeypatch):
     redis = RuntimeResultRedis(control_type="cancel")
     redis.pending_owner = "worker-2"
     _install(monkeypatch, redis)
@@ -336,7 +334,7 @@ async def test_foreign_pending_owner_still_aborts_invalid_argument(monkeypatch):
 
     assert response.received is False
     context.abort.assert_awaited_once()
-    assert context.abort.await_args.args[0] is grpc.StatusCode.INVALID_ARGUMENT
+    assert context.abort.await_args.args[0] is grpc.StatusCode.FAILED_PRECONDITION
     assert "xack" not in redis.operations
 
 

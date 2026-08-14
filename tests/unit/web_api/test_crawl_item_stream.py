@@ -71,6 +71,30 @@ async def test_reader_pages_without_collecting_entire_stream(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unlimited_reader_pages_all_runs(monkeypatch):
+    import antcode_web_api.services.crawl_item_stream as stream_module
+
+    monkeypatch.setattr(stream_module, "PAGE_SIZE", 2)
+    redis = FakeRedis(
+        {
+            "{ac}:spider:run-1:data:-": [_entry("1-0", 1), _entry("2-0", 2)],
+            "{ac}:spider:run-1:data:(2-0": [_entry("3-0", 3)],
+            "{ac}:spider:run-2:data:-": [_entry("1-0", 4)],
+        }
+    )
+    reader = CrawlBatchItemReader(redis, FakeConnection(), RedisKeys("ac"))
+
+    items = [item async for item in reader.iter_items("batch-1", limit=None)]
+
+    assert [(item.run_id, item.sequence) for item in items] == [
+        ("run-1", 1),
+        ("run-1", 2),
+        ("run-1", 3),
+        ("run-2", 4),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_items_do_not_starve_later_entries():
     # P1-15 回归：重复 item_id 被跳过时不得消耗读取预算，否则同 run
     # 后面的未见条目会在总量未达 limit 时被静默丢弃。
@@ -143,6 +167,28 @@ async def test_all_duplicate_run_stops_scanning_at_budget(monkeypatch):
     # 深层游标 (3-0 / (4-0 从未被拉取（否则会翻遍整条 Stream）。
     run2_cursors = [cursor for (name, cursor, _count) in redis.calls if name == "{ac}:spider:run-2:data"]
     assert run2_cursors == ["-", "(1-0", "(2-0"]
+
+
+@pytest.mark.asyncio
+async def test_unlimited_reader_does_not_apply_duplicate_scan_budget(monkeypatch):
+    import antcode_web_api.services.crawl_item_stream as stream_module
+
+    monkeypatch.setattr(stream_module, "PAGE_SIZE", 1)
+    monkeypatch.setattr(stream_module, "MIN_DUP_SCAN_BUDGET", 2)
+    redis = FakeRedis(
+        {
+            "{ac}:spider:run-1:data:-": [_entry("1-0", 1, item_id="a")],
+            "{ac}:spider:run-2:data:-": [_entry("1-0", 1, item_id="a")],
+            "{ac}:spider:run-2:data:(1-0": [_entry("2-0", 2, item_id="a")],
+            "{ac}:spider:run-2:data:(2-0": [_entry("3-0", 3, item_id="a")],
+            "{ac}:spider:run-2:data:(3-0": [_entry("4-0", 4, item_id="b")],
+        }
+    )
+    reader = CrawlBatchItemReader(redis, FakeConnection(), RedisKeys("ac"))
+
+    items = [item async for item in reader.iter_items("batch-1", limit=None)]
+
+    assert [(item.run_id, item.item_id) for item in items] == [("run-1", "a"), ("run-2", "b")]
 
 
 @pytest.mark.asyncio

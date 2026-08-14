@@ -1,15 +1,9 @@
-"""
-执行器基类
-
-定义任务执行的抽象接口和通用功能。
-
-Requirements: 7.1
-"""
+"""任务执行器抽象接口和通用功能。"""
 
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -23,6 +17,8 @@ from antcode_worker.domain.models import (
     LogEntry,
     RuntimeHandle,
 )
+from antcode_worker.executor.concurrency import ExecutionAdmission, ResizableConcurrencyGate
+from antcode_worker.rule_egress_limits import RuleEgressLimits
 
 
 class LogSink(Protocol):
@@ -68,6 +64,7 @@ class ExecutorConfig:
     # 上限——保护"失控爬虫把日志/artifact 写满磁盘"的 DoS 场景；正常
     # 项目（rule/code）单文件产物远不到 1GB。运维可通过 config 调整。
     default_max_file_size_mb: int = 1024
+    rule_egress_limits: RuleEgressLimits = field(default_factory=RuleEgressLimits)
 
     # 输出限制
     max_output_lines: int = 100000
@@ -121,8 +118,7 @@ class BaseExecutor(ABC):
         """
         self.config = config or ExecutorConfig()
 
-        # 并发控制
-        self._semaphore = asyncio.Semaphore(self.config.max_concurrent)
+        self._concurrency_gate = ResizableConcurrencyGate(self.config.max_concurrent)
 
         # 运行中的任务 {run_id: task_info}
         self._running_tasks: dict[str, Any] = {}
@@ -140,6 +136,8 @@ class BaseExecutor(ABC):
         exec_plan: ExecPlan,
         runtime_handle: RuntimeHandle,
         log_sink: LogSink | None = None,
+        *,
+        admission: ExecutionAdmission | None = None,
     ) -> ExecResult:
         """
         执行任务
@@ -166,6 +164,11 @@ class BaseExecutor(ABC):
         self._running = True
         logger.info(f"{self.__class__.__name__} 已启动 (并发: {self.config.max_concurrent})")
 
+    async def resize_concurrency(self, max_concurrent: int) -> None:
+        """Apply a live limit without cancelling executions already in progress."""
+        await self._concurrency_gate.resize(max_concurrent)
+        self.config.max_concurrent = max_concurrent
+
     async def stop(self, grace_period: float = 10.0) -> None:
         """
         停止执行器
@@ -188,12 +191,7 @@ class BaseExecutor(ABC):
         logger.info(f"{self.__class__.__name__} 已停止")
 
     def has_task(self, run_id: str) -> bool:
-        """P1-GW-05 (round6): 判 run_id 是否在 executor 内。
-
-        engine.cancel 用来区分 executor.cancel=False 的两种语义:
-        - has_task=True + cancel=False → kill 真失败(状态回滚 + 上抛)
-        - has_task=False + cancel=False → 自然结束/未注册(继续结算)
-        """
+        """判断 run_id 是否仍由 executor 跟踪。"""
         return run_id in self._running_tasks
 
     async def cancel(self, run_id: str) -> bool:
@@ -204,20 +202,16 @@ class BaseExecutor(ABC):
             run_id: 运行 ID
 
         Returns:
-            是否成功取消
+            ``False`` 仅表示任务不存在；真实取消失败直接抛出异常。
         """
         async with self._lock:
             task_info = self._running_tasks.get(run_id)
             if not task_info:
                 return False
 
-        try:
-            await self._do_cancel(run_id, task_info)
-            logger.info(f"任务已取消: {run_id}")
-            return True
-        except Exception as e:
-            logger.error(f"取消任务失败: {run_id}, error={e}")
-            return False
+        await self._do_cancel(run_id, task_info)
+        logger.info(f"任务已取消: {run_id}")
+        return True
 
     @abstractmethod
     async def _do_cancel(self, run_id: str, task_info: Any) -> None:

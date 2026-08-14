@@ -19,11 +19,9 @@ register_crud_routes 注入避免循环 import。契约 (URL / DI / 返回) 与�
 
 from __future__ import annotations
 
-from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import UserRole
-from antcode_core.domain.models.audit_log import AuditAction
 from antcode_core.domain.schemas.worker import (
     WorkerCreateRequest,
     WorkerListResponse,
@@ -35,6 +33,10 @@ from fastapi import Body, Depends, HTTPException, Query, Request, status
 
 from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
+from antcode_web_api.routes.v1.committed_resource_audit import (
+    audit_worker_created,
+    audit_worker_deleted,
+)
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 
@@ -68,21 +70,8 @@ async def create_worker(
     *,
     worker_to_response,
 ):
-    from antcode_core.application.services.users.user_service import user_service
-
     worker = await worker_service.create_worker(request, current_user.user_id)
-
-    user = await user_service.get_user_by_id(current_user.user_id)
-    await audit_service.log(
-        action=AuditAction.WORKER_CREATE,
-        resource_type="worker",
-        username=user.username if user else "unknown",
-        resource_id=worker.public_id,
-        resource_name=worker.name,
-        user_id=current_user.user_id,
-        ip_address=http_request.client.host if http_request.client else None,
-        description=f"创建 Worker: {worker.name}",
-    )
+    await audit_worker_created(http_request, current_user, worker)
     return success(worker_to_response(worker), message="Worker 创建成功")
 
 
@@ -114,8 +103,6 @@ async def update_worker(worker_id: str, request: WorkerUpdateRequest, *, worker_
 
 
 async def delete_worker(worker_id: str, http_request: Request, current_user: TokenData):
-    from antcode_core.application.services.users.user_service import user_service
-
     worker = await worker_service.get_worker_by_id(worker_id)
     worker_name = worker.name if worker else worker_id
 
@@ -123,16 +110,11 @@ async def delete_worker(worker_id: str, http_request: Request, current_user: Tok
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
-    user = await user_service.get_user_by_id(current_user.user_id)
-    await audit_service.log(
-        action=AuditAction.WORKER_DELETE,
-        resource_type="worker",
-        username=user.username if user else "unknown",
-        resource_id=worker_id,
-        resource_name=worker_name,
-        user_id=current_user.user_id,
-        ip_address=http_request.client.host if http_request.client else None,
-        description=f"删除 Worker: {worker_name}",
+    await audit_worker_deleted(
+        http_request,
+        current_user,
+        worker_id=worker_id,
+        worker_name=worker_name,
     )
     return success({"deleted": True}, message="Worker 删除成功")
 

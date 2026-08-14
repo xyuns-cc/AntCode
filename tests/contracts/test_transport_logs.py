@@ -1,5 +1,5 @@
 """
-Log contract — `send_log`, `send_log_batch`, `send_log_chunk`.
+Log contract — `send_log` and `send_log_batch`.
 """
 
 from __future__ import annotations
@@ -65,38 +65,3 @@ async def test_send_log_batch_empty_is_noop(transport):
     """Passing an empty list must succeed without raising."""
     ok = await transport.send_log_batch([])
     assert ok is True
-
-
-async def test_send_log_chunk_is_deprecated_noop(transport, fresh_ids, contract_probe):
-    """Deprecated binary chunks must not be written to either log stream."""
-    payload = b"".join(bytes([i % 256]) for i in range(1024))
-    chunks = [payload[i : i + 256] for i in range(0, len(payload), 256)]
-
-    offset = 0
-    for idx, chunk in enumerate(chunks):
-        is_final = idx == len(chunks) - 1
-        ok = await transport.send_log_chunk(
-            run_id=fresh_ids.run_id,
-            log_type="stdout",
-            data=chunk,
-            offset=offset,
-            is_final=is_final,
-        )
-        assert ok is True
-        offset += len(chunk)
-
-    assert await contract_probe.no_log_streams(fresh_ids.run_id)
-
-
-async def test_send_log_chunk_intermediate_is_deprecated_noop(transport, fresh_ids, contract_probe):
-    """An intermediate deprecated chunk is acknowledged without persistence."""
-    ok = await transport.send_log_chunk(
-        run_id=fresh_ids.run_id,
-        log_type="stdout",
-        data=b"intermediate",
-        offset=0,
-        is_final=False,
-    )
-    assert ok is True
-
-    assert await contract_probe.no_log_streams(fresh_ids.run_id)

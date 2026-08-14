@@ -8,15 +8,21 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
 
+from antcode_core.application.services.result_status_contract import (
+    ResultStatusContractError,
+    validate_result_timing,
+)
 from antcode_core.application.services.scheduler.execution_status_service import (
     execution_status_service,
 )
 from antcode_core.application.services.task_result_commit import (
+    ResultCommitOutcome,
     ResultCommitRequest,
     ResultMetadataRejected,
     TaskResultCommitter,
@@ -26,6 +32,17 @@ from antcode_core.domain.models.task_run import TaskRun
 
 # P1-round6 5.3: result_data 单 run 总字节 hard cap, 同 result_metadata 常量
 _MAX_RESULT_DATA_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultMetadata:
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: float | None
+    exit_code: int | None
+    error_message: str | None
+    output: str | None
+    data: dict[str, Any] | None
 
 
 def _apply_bounded_result_data(current: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
@@ -49,6 +66,9 @@ class TaskRunService:
 
     STATUS_MAPPING = {
         "queued": RuntimeStatus.QUEUED,
+        # Proto STATUS_PENDING 的 canonical 值是 pending；持久层没有独立
+        # PENDING runtime 状态，按“已进入 Worker 等待队列”归一为 QUEUED。
+        "pending": RuntimeStatus.QUEUED,
         "running": RuntimeStatus.RUNNING,
         "success": RuntimeStatus.SUCCESS,
         "succeeded": RuntimeStatus.SUCCESS,
@@ -88,14 +108,62 @@ class TaskRunService:
         data: dict[str, Any] | None = None,
         worker_id: str | None = None,
     ) -> bool:
-        """更新执行结果"""
+        """Compatibility API returning only whether the result was accepted."""
+        outcome = await self.update_result_outcome(
+            run_id=run_id,
+            status=status,
+            exit_code=exit_code,
+            error_message=error_message,
+            output=output,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            data=data,
+            worker_id=worker_id,
+        )
+        return outcome.accepted
+
+    async def update_result_outcome(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        exit_code: int | None = None,
+        error_message: str | None = None,
+        output: str | None = None,
+        started_at: datetime | str | None = None,
+        finished_at: datetime | str | None = None,
+        duration_ms: float | str | None = None,
+        data: dict[str, Any] | None = None,
+        worker_id: str | None = None,
+    ) -> ResultCommitOutcome:
+        """Update a result and return its transaction-authoritative status."""
         runtime_status = self._normalize_status(status)
         if not runtime_status:
             logger.warning(f"无法识别的运行状态: {status}")
-            return False
-        start_dt = self._parse_dt(started_at)
-        finish_dt = self._parse_dt(finished_at)
+            return ResultCommitOutcome(False, str(run_id), None)
+        try:
+            timing = validate_result_timing(
+                runtime_status,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_ms=duration_ms,
+            )
+        except ResultStatusContractError as exc:
+            logger.warning("结果状态合同校验失败: run_id={} error={}", run_id, exc)
+            return ResultCommitOutcome(False, str(run_id), None)
+        start_dt = timing.started_at
+        finish_dt = timing.finished_at
         status_at = finish_dt or start_dt or datetime.now(UTC)
+        metadata = _ResultMetadata(
+            started_at=start_dt,
+            finished_at=finish_dt,
+            duration_ms=timing.duration_ms,
+            exit_code=exit_code,
+            error_message=error_message,
+            output=output,
+            data=data,
+        )
         request = ResultCommitRequest(
             run_id=str(run_id),
             worker_id=str(worker_id or ""),
@@ -104,52 +172,61 @@ class TaskRunService:
             status_at=status_at,
             exit_code=exit_code,
             error_message=error_message,
-            metadata_builder=lambda execution: self._build_result_updates(
-                execution,
-                start_dt,
-                finish_dt,
-                duration_ms,
-                exit_code,
-                error_message,
-                output,
-                data,
-            ),
+            metadata_builder=lambda execution: self._build_result_updates(execution, metadata),
         )
-        return await TaskResultCommitter(self._lease_validator).commit(request)
+        return await TaskResultCommitter(self._lease_validator).commit_outcome(request)
 
     def _build_result_updates(
         self,
         execution: TaskRun,
-        start_dt: datetime | None,
-        finish_dt: datetime | None,
-        duration_ms: float | str | None,
-        exit_code: int | None,
-        error_message: str | None,
-        output: str | None,
-        data: dict[str, Any] | None,
+        metadata: _ResultMetadata,
     ) -> dict[str, Any]:
         updates: dict[str, Any] = {}
-        if start_dt and not execution.start_time:
-            updates["start_time"] = start_dt
-        if finish_dt:
-            updates["end_time"] = finish_dt
-        if duration_ms and not execution.duration_seconds:
-            updates["duration_seconds"] = self._to_float(duration_ms) / 1000.0
-        if exit_code is not None:
-            updates["exit_code"] = exit_code
-        if error_message:
-            updates["error_message"] = error_message
+        if metadata.started_at and not execution.start_time:
+            updates["start_time"] = metadata.started_at
+        if metadata.finished_at and not execution.end_time:
+            updates["end_time"] = metadata.finished_at
+        duration_seconds = self._result_duration_seconds(
+            execution,
+            start_dt=metadata.started_at,
+            finish_dt=metadata.finished_at,
+            duration_ms=metadata.duration_ms,
+        )
+        if duration_seconds is not None:
+            updates["duration_seconds"] = duration_seconds
+        if metadata.exit_code is not None:
+            updates["exit_code"] = metadata.exit_code
+        if metadata.error_message:
+            updates["error_message"] = metadata.error_message
         result_data = dict(execution.result_data or {})
         result_data.pop("lease_id", None)
         candidate_update: dict[str, Any] = {}
-        if output:
-            candidate_update["output"] = output
-        if data:
-            candidate_update.update({key: value for key, value in data.items() if key != "lease_id"})
+        if metadata.output:
+            candidate_update["output"] = metadata.output
+        if metadata.data:
+            candidate_update.update({key: value for key, value in metadata.data.items() if key != "lease_id"})
         result_data = _apply_bounded_result_data(result_data, candidate_update)
         if result_data:
             updates["result_data"] = result_data
         return updates
+
+    @staticmethod
+    def _result_duration_seconds(
+        execution: TaskRun,
+        *,
+        start_dt: datetime | None,
+        finish_dt: datetime | None,
+        duration_ms: float | None,
+    ) -> float | None:
+        if execution.duration_seconds is not None:
+            return None
+        effective_start = getattr(execution, "start_time", None) or start_dt
+        effective_finish = getattr(execution, "end_time", None) or finish_dt
+        if effective_start is not None and effective_finish is not None:
+            return (effective_finish - effective_start).total_seconds()
+        if duration_ms is None:
+            return None
+        return duration_ms / 1000.0
 
     async def update_status(
         self,
@@ -211,12 +288,6 @@ class TaskRunService:
             return parsed
         except Exception:
             return None
-
-    def _to_float(self, value: float | str) -> float:
-        try:
-            return float(value)
-        except Exception:
-            return 0.0
 
 
 task_run_service = TaskRunService()

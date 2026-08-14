@@ -1,7 +1,7 @@
 """系统配置相关Schema"""
 
 from datetime import datetime
-from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -41,19 +41,28 @@ class SystemConfigResponse(SystemConfigBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SystemConfigBatchItem(BaseModel):
+    """A strictly validated system configuration batch item."""
+
+    config_key: str = Field(min_length=1, max_length=100)
+    config_value: str
+    category: str = Field(default="general", min_length=1, max_length=50)
+    description: str | None = None
+    value_type: Literal["string", "int", "float", "bool", "json"] = "string"
+    is_active: bool = True
+
+
 class SystemConfigBatchUpdate(BaseModel):
     """批量更新配置Schema"""
 
-    configs: list[dict[str, Any]] = Field(..., min_length=1, max_length=100, description="配置列表")
+    configs: list[SystemConfigBatchItem] = Field(..., min_length=1, max_length=100, description="配置列表")
 
     @field_validator("configs")
     @classmethod
-    def reject_duplicate_config_keys(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def reject_duplicate_config_keys(cls, value: list[SystemConfigBatchItem]) -> list[SystemConfigBatchItem]:
         seen: set[str] = set()
         for item in value:
-            key = str(item.get("config_key", "")).strip()
-            if not key:
-                raise ValueError("批量配置项必须包含 config_key")
+            key = item.config_key.strip()
             if key in seen:
                 raise ValueError(f"批量配置项包含重复 config_key: {key}")
             seen.add(key)

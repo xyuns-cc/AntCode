@@ -23,6 +23,7 @@ def _gateway_config(**overrides: Any) -> TransportConfig:
         "host": "configured.example.com",
         "port": 50051,
         "api_key": "worker-key",
+        "secret_key": "gateway-payload-secret-material-0001",
         **overrides,
     }
     return TransportConfig(
@@ -136,6 +137,14 @@ def test_api_key_runtime_config_uses_api_key_authentication():
 
     assert runtime_config.auth_method == "api_key"
     assert runtime_config.api_key == "worker-key"
+    assert runtime_config.task_payload_secret == "gateway-payload-secret-material-0001"
+
+
+def test_gateway_payload_secret_required():
+    config = _gateway_config(secret_key="")
+
+    with pytest.raises(TransportConfigError, match="secret_key"):
+        validate_transport_config(config)
 
 
 def test_factory_env_endpoint_is_preserved_for_runtime_resolution():
@@ -145,6 +154,7 @@ def test_factory_env_endpoint_is_preserved_for_runtime_resolution():
             "WORKER_GATEWAY_ENDPOINT": "endpoint.example.com:5443",
             "WORKER_GATEWAY_HOST": "ignored.example.com",
             "WORKER_GATEWAY_PORT": "50052",
+            "WORKER_CREDENTIAL_SECRET_KEY": "gateway-env-payload-secret-material-0001",
         },
         clear=True,
     ):
@@ -152,6 +162,7 @@ def test_factory_env_endpoint_is_preserved_for_runtime_resolution():
 
     runtime_config = build_gateway_transport_config(config)
     assert runtime_config.gateway_host == "endpoint.example.com"
+    assert runtime_config.task_payload_secret == "gateway-env-payload-secret-material-0001"
     assert runtime_config.gateway_port == 5443
 
 

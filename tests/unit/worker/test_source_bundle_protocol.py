@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import tarfile
 import zipfile
 from dataclasses import fields
 from hashlib import sha256
@@ -10,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from antcode_contracts import data_pb2
+from antcode_core.common.security.task_payload_envelope import seal_ready_payload
 from antcode_worker.artifact_transfer import SourceBundleDownload
 from antcode_worker.domain.models import ArtifactRef, RunContext, RuntimeSpec, TaskPayload
 from antcode_worker.plugins.code.plugin import CodePlugin
@@ -43,6 +46,16 @@ def _repo_bundle_blob() -> bytes:
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("libs/common/helpers.py", "VALUE = 1\n")
         archive.writestr("spiders/news/main.py", "print('ok')\n")
+    return buffer.getvalue()
+
+
+def _tar_symlink_blob() -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        member = tarfile.TarInfo("project/escape")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "/etc/passwd"
+        archive.addfile(member)
     return buffer.getvalue()
 
 
@@ -110,18 +123,44 @@ def test_redis_artifact_decoder_rejects_local_path():
         )
 
 
+def _gateway_dispatch(**updates):
+    payload = {
+        "task_id": "task-1",
+        "project_id": "proj-1",
+        "run_id": "run-1",
+        "project_type": "code",
+        "timeout": 30,
+        "params": {},
+        "environment": {},
+        **updates,
+    }
+    sealed = seal_ready_payload(
+        payload,
+        worker_id="worker-1",
+        worker_secret="gateway-source-bundle-secret-material-0001",
+    )
+    return data_pb2.TaskDispatch(
+        task_id="task-1",
+        sealed_ready_payload=json.dumps(sealed, separators=(",", ":"), sort_keys=True).encode(),
+    )
+
+
 def test_gateway_task_decoder_requires_pgartifact_source_bundle():
     with pytest.raises(CodecError, match="pgartifact"):
-        TaskDecoder.decode(data_pb2.TaskDispatch(task_id="task-1", project_id="proj-1"))
+        TaskDecoder.decode(
+            _gateway_dispatch(),
+            worker_id="worker-1",
+            worker_secret="gateway-source-bundle-secret-material-0001",
+        )
 
     with pytest.raises(CodecError, match="pgartifact"):
         TaskDecoder.decode(
-            data_pb2.TaskDispatch(
-                task_id="task-1",
-                project_id="proj-1",
+            _gateway_dispatch(
                 source_bundle_uri="git+https://example.com/repo.git",
                 source_bundle_sha256="a" * 64,
-            )
+            ),
+            worker_id="worker-1",
+            worker_secret="gateway-source-bundle-secret-material-0001",
         )
 
 
@@ -164,6 +203,26 @@ async def test_artifact_fetcher_reads_pgartifact_blob_and_verifies_sha256(tmp_pa
     assert store.read_hashes == [digest]
     assert Path(workspace.bundle_root, "spiders/news/main.py").read_text() == "print('ok')\n"
     assert not (tmp_path / "runs" / "index.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_artifact_fetcher_rejects_internal_symlink(tmp_path):
+    blob = _tar_symlink_blob()
+    digest = sha256(blob).hexdigest()
+    fetcher = ArtifactFetcher(
+        workspace=ProjectWorkspace(root_dir=str(tmp_path / "runs")),
+        artifact_store=_ArtifactStore(blob),
+    )
+
+    with pytest.raises(ValueError, match="不安全的压缩路径"):
+        await fetcher.fetch(
+            run_id="run-1",
+            project_id="proj-1",
+            source_bundle_uri=f"pgartifact://{digest}",
+            source_bundle_sha256=digest,
+            source_bundle_size=len(blob),
+            source_subdir="project",
+        )
 
 
 @pytest.mark.asyncio

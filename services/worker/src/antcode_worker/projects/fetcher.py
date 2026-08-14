@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from antcode_worker.artifact_transfer import SourceBundleDownload
+from antcode_worker.projects.workspace_gc import cleanup_stale_workspaces, remove_run_workspace
 
 SOURCE_BUNDLE_METHOD = "source_bundle"
 PGARTIFACT_SCHEME = "pgartifact"
@@ -41,13 +42,14 @@ class ProjectWorkspace:
     def __init__(self, root_dir: str):
         self._root_dir = Path(root_dir)
         self._root_dir.mkdir(parents=True, exist_ok=True)
+        cleanup_stale_workspaces(self._root_dir)
 
     def project_dir(self, run_id: str, project_id: str, sha256: str) -> Path:
         return self._root_dir / _safe_slug(run_id) / _safe_slug(project_id) / sha256
 
     async def cleanup(self, run_id: str) -> None:
         run_dir = self._root_dir / _safe_slug(run_id)
-        await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
+        await asyncio.to_thread(remove_run_workspace, self._root_dir, run_dir.name)
 
 
 @dataclass(frozen=True)

@@ -232,6 +232,15 @@ class ProgressStore(ABC):
         """
         pass
 
+    @abstractmethod
+    async def fence_and_clear(
+        self,
+        project_id: str,
+        batch_id: str,
+    ) -> bool:
+        """阻止迟到写入并原子清除取消批次的临时进度。"""
+        pass
+
 
 # 后端实例缓存
 _progress_store_instance: ProgressStore | None = None

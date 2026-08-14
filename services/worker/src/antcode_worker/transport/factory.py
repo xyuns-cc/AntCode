@@ -110,6 +110,7 @@ class GatewayConfigSpec:
     client_cert: str | None = None
     client_key: str | None = None
     api_key: str | None = None
+    secret_key: str = ""
 
 
 @dataclass
@@ -123,16 +124,7 @@ class TransportConfig:
 
 
 def validate_transport_config(config: TransportConfig) -> None:
-    """
-    强制校验传输层配置
-
-    规则：
-    - mode=direct：必须有 redis_url；禁止出现 gateway.endpoint
-    - mode=gateway：必须有 gateway.host；禁止出现 redis_url
-
-    Raises:
-        TransportConfigError: 配置不合法
-    """
+    """Validate the selected transport mode and its required credentials."""
     mode = config.mode.lower()
 
     if mode not in ("direct", "gateway"):
@@ -162,7 +154,6 @@ def validate_transport_config(config: TransportConfig) -> None:
             raise TransportConfigError(
                 "Gateway 模式必须配置 gateway.host 或 gateway.endpoint\n示例: WORKER_GATEWAY_HOST=gateway.example.com"
             )
-
         # Gateway Worker 不应拥有任何 Redis 凭证，包括 localhost 地址。
         if config.direct.redis_url:
             raise TransportConfigError(
@@ -174,6 +165,12 @@ def validate_transport_config(config: TransportConfig) -> None:
 
     if not config.worker_id:
         raise TransportConfigError("必须配置 worker_id\n示例: WORKER_ID=worker-001，或使用安装 Key 注册生成凭证")
+    _require_gateway_payload_secret(mode, config.gateway)
+
+
+def _require_gateway_payload_secret(mode: str, config: GatewayConfigSpec) -> None:
+    if mode == "gateway" and not config.secret_key:
+        raise TransportConfigError("Gateway 模式必须配置 Worker 注册 secret_key 以解密任务 payload")
 
 
 def _validate_direct_control_url(config: DirectConfig) -> None:
@@ -430,11 +427,9 @@ async def create_transport(
     if not skip_validation:
         validate_transport_config(config)
 
-    # 2. 打印 Banner
     print_transport_banner(config)
 
     mode = config.mode.lower()
-
     # 3. 启动自检
     if not skip_preflight:
         if mode == "direct":
@@ -448,7 +443,6 @@ async def create_transport(
                 sys.exit(1)
             raise TransportConfigError("传输层自检失败")
 
-    # 4. 创建传输层实例
     if mode == "direct":
         from antcode_worker.transport.redis import RedisTransport
 
@@ -458,6 +452,7 @@ async def create_transport(
             namespace=config.direct.redis_namespace,
             consumer_group=config.direct.consumer_group or worker_group(config.direct.redis_namespace),
             direct_control=build_direct_control_client(config.direct, config.worker_id or ""),
+            task_payload_secret=config.direct.secret_key,
             reclaimed_queue_capacity=config.direct.reclaimed_queue_capacity,
         )
 
@@ -541,6 +536,7 @@ def build_transport_config_from_env(
     env_gateway_tls = os.getenv("WORKER_GATEWAY_TLS", "").lower() in ("true", "1", "yes")
     config.gateway.tls = env_gateway_tls if gateway_tls is None else gateway_tls
     config.gateway.api_key = api_key or os.getenv("WORKER_API_KEY")
+    config.gateway.secret_key = os.getenv("WORKER_CREDENTIAL_SECRET_KEY", "")
     config.gateway.ca_cert = ca_cert or os.getenv("WORKER_CA_CERT")
     config.gateway.client_cert = client_cert or os.getenv("WORKER_CLIENT_CERT")
     config.gateway.client_key = client_key or os.getenv("WORKER_CLIENT_KEY")

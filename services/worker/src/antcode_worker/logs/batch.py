@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from loguru import logger
 
 from antcode_worker.domain.models import LogEntry
+from antcode_worker.transport.base import GenerationLostError
 
 
 class TransportProtocol(Protocol):
@@ -64,19 +65,7 @@ class BatchConfig:
 
 
 class BatchSender:
-    """
-    批量日志发送器
-
-    将日志条目批量发送以提高效率。
-
-    功能：
-    - 批量发送
-    - 队列管理
-    - Backpressure 控制
-    - 失败重试
-
-    Requirements: 9.5
-    """
+    """批量、重试并按 backpressure 状态发送日志条目。"""
 
     def __init__(
         self,
@@ -86,16 +75,7 @@ class BatchSender:
         on_backpressure: Callable[[BackpressureState], None] | None = None,
         on_batch_sent: Callable[[int, bool], None] | None = None,
     ):
-        """
-        初始化批量发送器
-
-        Args:
-            run_id: 运行 ID
-            transport: 传输层实例
-            config: 批量配置
-            on_backpressure: Backpressure 状态变更回调
-            on_batch_sent: 批次发送完成回调
-        """
+        """初始化批量发送器。"""
         self.run_id = run_id
         self._transport = transport
         self._config = config or BatchConfig()
@@ -113,7 +93,7 @@ class BatchSender:
         # 状态
         self._running = False
         self._backpressure_state = BackpressureState.NORMAL
-        self._terminal_error: ValueError | None = None
+        self._terminal_error: Exception | None = None
 
         # 任务
         self._send_task: asyncio.Task | None = None
@@ -235,7 +215,7 @@ class BatchSender:
                 try:
                     self._on_backpressure(new_state)
                 except Exception:
-                    pass
+                    logger.exception("[{}] backpressure 回调失败 state={}", self.run_id, new_state.value)
 
     async def _send_loop(self) -> None:
         """发送循环
@@ -259,10 +239,10 @@ class BatchSender:
 
             except asyncio.CancelledError:
                 break
-            except ValueError as exc:
+            except (ValueError, GenerationLostError) as exc:
                 self._terminal_error = exc
                 self._running = False
-                logger.error(f"[{self.run_id}] 批量日志包含永久无效输入: {exc}")
+                logger.error("[{}] 批量日志发送永久终止: {}", self.run_id, exc)
                 break
             except Exception as e:
                 logger.error(f"[{self.run_id}] 批量发送循环异常 (退避 {backoff:.1f}s): {e}")
@@ -330,6 +310,8 @@ class BatchSender:
 
             except ValueError:
                 raise
+            except GenerationLostError:
+                raise
             except Exception as e:
                 logger.debug(f"[{self.run_id}] 批量发送失败 (attempt {attempt + 1}): {e}")
 
@@ -363,7 +345,7 @@ class BatchSender:
         try:
             self._on_batch_sent(size, success)
         except Exception:
-            pass
+            logger.exception("[{}] 批量日志发送结果回调失败 size={} success={}", self.run_id, size, success)
 
     def _raise_terminal_error(self) -> None:
         if self._terminal_error is not None:

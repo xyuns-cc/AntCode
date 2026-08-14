@@ -50,7 +50,6 @@ const Monitor = () => {
       <WorkerDetailDrawer
         worker={monitor.selectedWorker}
         tasks={monitor.tasks}
-        logs={monitor.view.workerLogs}
         chartRef={monitor.chartRef}
         chartData={monitor.view.workerData}
         chartOptions={monitor.view.workerOptions}

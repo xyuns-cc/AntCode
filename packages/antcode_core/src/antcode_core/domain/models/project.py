@@ -26,7 +26,7 @@ class Project(BaseModel):
     表示一个爬虫项目。
     """
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     name = fields.CharField(max_length=255, unique=True)
     description = fields.TextField(null=True)
     type = fields.CharEnumField(ProjectType)
@@ -89,7 +89,6 @@ class Project(BaseModel):
             ("user_id", "status"),
             ("status", "created_at"),
             ("status", "updated_at"),
-            ("public_id",),
             ("execution_strategy",),
             ("bound_worker_id",),
             ("runtime_worker_id",),
@@ -99,7 +98,7 @@ class Project(BaseModel):
 class ProjectFile(BaseModel):
     """Git 文件项目详情。"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     project_id = fields.BigIntField(unique=True)
 
     # M8：文件项目也支持非 Python 语言（如 Node/Go/Java 单文件脚本或 jar）
@@ -114,19 +113,20 @@ class ProjectFile(BaseModel):
         indexes = [
             ("project_id",),
             ("language",),
-            ("public_id",),
         ]
 
 
 class ProjectRule(BaseModel):
     """规则项目详情"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     project_id = fields.BigIntField(unique=True)
 
     engine = fields.CharEnumField(CrawlEngine, default=CrawlEngine.REQUESTS)
     target_url = fields.CharField(max_length=2000)
     url_pattern = fields.CharField(max_length=500, null=True)
+    region = fields.CharField(max_length=50, null=True)
+    require_render = fields.BooleanField(default=False)
     callback_type = fields.CharEnumField(CallbackType, default=CallbackType.LIST)
     request_method = fields.CharEnumField(RequestMethod, default=RequestMethod.GET)
 
@@ -164,7 +164,6 @@ class ProjectRule(BaseModel):
             ("project_id",),
             ("engine",),
             ("callback_type",),
-            ("public_id",),
         ]
 
     def to_dispatch_dict(self) -> dict[str, object]:
@@ -223,7 +222,7 @@ class ProjectRule(BaseModel):
 class ProjectCode(BaseModel):
     """代码项目详情"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     project_id = fields.BigIntField(unique=True)
 
     language = fields.CharField(max_length=50, default="python")
@@ -240,7 +239,6 @@ class ProjectCode(BaseModel):
         indexes = [
             ("project_id",),
             ("language",),
-            ("public_id",),
         ]
 
 

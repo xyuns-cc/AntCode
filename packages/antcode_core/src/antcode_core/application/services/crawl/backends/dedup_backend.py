@@ -1,8 +1,19 @@
 """Redis 去重存储后端抽象基类。"""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from antcode_core.application.services.crawl.backends.base import _redis_backend_required
+
+
+@dataclass(frozen=True)
+class DedupStoreCapabilities:
+    storage: str
+    exact: bool
+    bounded: bool
+    capacity_limit: int | None
+    retention: str
+    memory_growth: str
 
 
 class DedupStore(ABC):
@@ -102,22 +113,8 @@ class DedupStore(ABC):
         pass
 
     @abstractmethod
-    async def ensure_store(
-        self,
-        project_id: str,
-        capacity: int = 1000000,
-        error_rate: float = 0.001,
-    ) -> bool:
-        """确保去重存储存在
-
-        Args:
-            project_id: 项目 ID
-            capacity: 预期容量
-            error_rate: 误判率（仅 Bloom Filter 实现使用）
-
-        Returns:
-            是否成功
-        """
+    async def get_capabilities(self, project_id: str) -> DedupStoreCapabilities:
+        """Return effective storage and lifecycle limits for one project."""
         pass
 
 

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { isAxiosError } from 'axios'
 // 提示交由全局拦截器与后端 message 处理
 import { authService } from '@/services/auth'
@@ -8,8 +8,10 @@ import {
   broadcastAuthEvent,
   clearSessionHint,
   decodeAccessToken,
+  getAccessToken,
   getSessionGeneration,
 } from '@/services/authToken'
+import { AuthAccountChangedError } from '@/services/authRefreshCoordinator'
 import {
   ensureSessionRestored,
   isSessionRestoreSettled,
@@ -29,6 +31,14 @@ const extractErrorMessage = (error: unknown, fallback: string) => {
   return fallback
 }
 
+const isCurrentLoginSession = (sessionJti: string, username: string): boolean => {
+  if (getSessionGeneration() !== sessionJti) return false
+  const token = getAccessToken()
+  if (!token) return false
+  const identity = decodeAccessToken(token)
+  return identity?.session_jti === sessionJti && identity.username === username
+}
+
 export { resetSessionRestore } from '@/services/authSessionRestore'
 
 export const useAuth = () => {
@@ -45,10 +55,7 @@ export const useAuth = () => {
     setError,
     setPermissions,
     clearUser,
-    updateUser: updateStoreUser,
-    hasPermission,
-    hasAnyPermission,
-    hasAllPermissions
+    updateUser: updateStoreUser
   } = useAuthState()
 
   // 登录
@@ -60,10 +67,17 @@ export const useAuth = () => {
     let establishedGeneration: string | null = null
     try {
       const response = await authService.login(credentials)
-      const sessionJti = decodeAccessToken(response.access_token)?.session_jti
+      const identity = decodeAccessToken(response.access_token)
+      const sessionJti = identity?.session_jti
       establishedGeneration = typeof sessionJti === 'string' ? sessionJti : null
+      if (!establishedGeneration || identity?.username !== response.user.username) {
+        throw new Error('登录响应中的会话身份不一致')
+      }
 
       const userPermissions = await authService.getUserPermissions()
+      if (!isCurrentLoginSession(establishedGeneration, response.user.username)) {
+        throw new AuthAccountChangedError()
+      }
       setPermissions(userPermissions)
       setUser(response.user)
       broadcastAuthEvent('login', response.user.username)
@@ -72,7 +86,10 @@ export const useAuth = () => {
       return response
     } catch (error: unknown) {
       const errorMessage = extractErrorMessage(error, '登录失败')
-      if (establishedGeneration && getSessionGeneration() === establishedGeneration) {
+      const ownsEstablishedSession = Boolean(
+        establishedGeneration && getSessionGeneration() === establishedGeneration,
+      )
+      if (ownsEstablishedSession) {
         try {
           await authService.logout()
         } catch (logoutError: unknown) {
@@ -84,7 +101,7 @@ export const useAuth = () => {
         clearUser()
         broadcastAuthEvent('logout')
       }
-      setError(errorMessage)
+      if (!establishedGeneration || ownsEstablishedSession) setError(errorMessage)
       throw error
     } finally {
       setLoading(false)
@@ -236,12 +253,7 @@ export const useAuth = () => {
     changePassword,
     checkAuth,
     refreshToken,
-    clearUser,
-
-    // 权限检查
-    hasPermission,
-    hasAnyPermission,
-    hasAllPermissions
+    clearUser
   }
 }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -109,21 +110,23 @@ async def _delete_spider_storage(run_ids: Sequence[str], project_id: str) -> Non
     from antcode_core.application.services.crawl.spider_storage_cleanup import (
         SpiderStorageCleanupService,
     )
-    from antcode_core.common.config import settings
-    from antcode_core.infrastructure.redis import get_redis_client
     from antcode_core.infrastructure.redis.keys import RedisKeys
+    from redis.asyncio import Redis
 
-    redis = await get_redis_client()
-    if redis is None:
-        raise RuntimeError("E2E Spider 数据清理失败: Redis client unavailable")
-    keys = RedisKeys(namespace=settings.REDIS_NAMESPACE)
-    await SpiderStorageCleanupService(redis, keys).delete_runs(run_ids, project_id)
-    await _assert_spider_storage_deleted(
-        redis,
-        keys,
-        run_ids=run_ids,
-        project_id=project_id,
-    )
+    redis_url = os.environ["ANTCODE_E2E_REDIS_URL"]
+    namespace = os.environ["ANTCODE_E2E_REDIS_NAMESPACE"]
+    redis = Redis.from_url(redis_url, decode_responses=True)
+    try:
+        keys = RedisKeys(namespace=namespace)
+        await SpiderStorageCleanupService(redis, keys).delete_runs(run_ids, project_id)
+        await _assert_spider_storage_deleted(
+            redis,
+            keys,
+            run_ids=run_ids,
+            project_id=project_id,
+        )
+    finally:
+        await redis.aclose()
 
 
 async def _assert_spider_storage_deleted(

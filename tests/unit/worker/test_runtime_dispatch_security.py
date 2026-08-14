@@ -5,10 +5,12 @@ from antcode_core.application.services.workers.worker_dispatcher import (
     BatchDispatchResult,
     WorkerTaskDispatcher,
 )
+from antcode_core.common.security.task_payload_envelope import seal_ready_payload
 from antcode_gateway.handlers.poll import TaskPollHandler, task_info_to_dispatch
-from antcode_worker.engine.engine import Engine
-from antcode_worker.transport.gateway.codecs import TaskDecoder
+from antcode_worker.transport.gateway.codecs import CodecError, TaskDecoder
 from antcode_worker.transport.redis.transport import RedisTransport
+
+WORKER_SECRET = "gateway-runtime-security-secret-material-0001"
 
 
 @pytest.mark.asyncio
@@ -29,24 +31,26 @@ async def test_dispatch_uses_trusted_runtime_field_and_strips_reserved_env(monke
     assert task["environment"] == {"SAFE": "value"}
 
 
-def test_gateway_runtime_field_round_trip_is_separate_from_environment() -> None:
+def test_gateway_rejects_reserved_runtime_environment_override() -> None:
     handler = TaskPollHandler(redis_client=None)
-    task_info = handler._parse_task_data(
+    sealed = seal_ready_payload(
         {
             "task_id": "task-1",
             "project_id": "project-1",
+            "run_id": "run-1",
             "project_type": "rule",
             "runtime_env_name": "trusted-runtime",
             "environment": {"ANTCODE_RUNTIME_ENV": "attacker-private", "SAFE": "value"},
         },
-        "1-0",
+        worker_id="worker-1",
+        worker_secret=WORKER_SECRET,
     )
+    task_info = handler._parse_task_data(sealed, "1-0")
 
-    message = TaskDecoder.decode(task_info_to_dispatch(task_info))
-    payload = Engine.__new__(Engine)._build_payload(message)
-
-    assert message.runtime_env_name == "trusted-runtime"
-    assert payload.env_vars == {"SAFE": "value"}
+    dispatch = task_info_to_dispatch(task_info)
+    assert not dispatch.params
+    with pytest.raises(CodecError, match="ANTCODE_RUNTIME_ENV"):
+        TaskDecoder.decode(dispatch, worker_id="worker-1", worker_secret=WORKER_SECRET)
 
 
 def test_direct_redis_transport_preserves_trusted_runtime_field() -> None:
@@ -58,6 +62,7 @@ def test_direct_redis_transport_preserves_trusted_runtime_field() -> None:
         {
             "task_id": "task-1",
             "project_id": "project-1",
+            "run_id": "run-1",
             "project_type": "rule",
             "runtime_env_name": "trusted-runtime",
         },

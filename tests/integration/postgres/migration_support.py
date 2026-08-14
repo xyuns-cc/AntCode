@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MIGRATIONS_DIR = REPO_ROOT / "migrations/models"
@@ -45,6 +46,10 @@ class MigrationCase:
     failure: FailureExpectation
 
 
+class MigrationExecutionError(RuntimeError):
+    """Raised when the production-equivalent psql migration command fails."""
+
+
 def require_test_database_url(value: str | None = None) -> str:
     """Return an explicitly configured URL only when its database is test-only."""
     url = value if value is not None else os.getenv("TEST_DATABASE_URL")
@@ -76,17 +81,49 @@ async def reset_public_schema(connection) -> None:
 
 async def apply_migrations(connection) -> None:
     for path in MIGRATION_PATHS:
-        await connection.execute(path.read_text(encoding="utf-8"))
+        await _apply_with_psql(path)
 
 
 async def apply_migration(connection, name: str) -> None:
-    path = MIGRATION_PATH_BY_NAME[name]
-    await connection.execute(path.read_text(encoding="utf-8"))
+    del connection
+    await _apply_with_psql(MIGRATION_PATH_BY_NAME[name])
 
 
-async def rollback_failed_migration(connection) -> None:
-    if connection.is_in_transaction():
-        await connection.execute("ROLLBACK")
+async def _apply_with_psql(path: Path) -> None:
+    database_url = require_test_database_url()
+    process = await asyncio.create_subprocess_exec(
+        "psql",
+        "-X",
+        "--no-psqlrc",
+        "--set=ON_ERROR_STOP=1",
+        f"--file={path}",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+        env=_psql_environment(database_url),
+    )
+    _, stderr = await process.communicate()
+    if process.returncode:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        raise MigrationExecutionError(f"迁移 {path.name} 执行失败: {detail}")
+
+
+def _psql_environment(database_url: str) -> dict[str, str]:
+    parsed = urlsplit(database_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    environment = os.environ.copy()
+    environment.update(
+        PGHOST=parsed.hostname or "",
+        PGPORT=str(parsed.port or 5432),
+        PGDATABASE=unquote(parsed.path.lstrip("/")),
+        PGUSER=unquote(parsed.username or ""),
+        PGPASSWORD=unquote(parsed.password or ""),
+        PGCONNECT_TIMEOUT="5",
+    )
+    if sslmode := query.get("sslmode"):
+        environment["PGSSLMODE"] = sslmode
+    if sslrootcert := query.get("sslrootcert"):
+        environment["PGSSLROOTCERT"] = sslrootcert
+    return environment
 
 
 async def column_names(connection, table: str) -> set[str]:

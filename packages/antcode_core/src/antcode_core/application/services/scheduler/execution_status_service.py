@@ -7,6 +7,7 @@ from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.scheduler.task_run_counters import task_run_outcome_counts
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -170,7 +171,6 @@ class ExecutionStatusService:
         ):
             return False
 
-        # 组装 UPDATE 字段（不走 fetch → 修改 → save 的 read-check-save）
         updates = {
             "dispatch_status": new_status,
             "dispatch_updated_at": status_at,
@@ -178,7 +178,7 @@ class ExecutionStatusService:
         if worker_id:
             updates["worker_id"] = worker_id
         if error_message:
-            updates["error_message"] = error_message
+            updates["error_message"] = normalize_persisted_error_message(error_message)
 
         # P1-17 review: 这里必须用"失败终态"子集而不是 _dispatch_terminal ——
         # ACKED 虽是 dispatch 吸收态，但语义是"worker 已接单、任务刚开始跑"。
@@ -270,7 +270,7 @@ class ExecutionStatusService:
         if exit_code is not None:
             updates["exit_code"] = exit_code
         if error_message:
-            updates["error_message"] = error_message
+            updates["error_message"] = normalize_persisted_error_message(error_message)
 
         start_time = execution.start_time
         if new_status == RuntimeStatus.RUNNING and not execution.start_time:

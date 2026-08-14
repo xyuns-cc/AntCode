@@ -8,7 +8,7 @@ from typing import Any
 
 from tortoise import fields
 
-from antcode_core.domain.models.base import BaseModel, generate_public_id
+from antcode_core.domain.models.base import BaseModel
 
 
 class WorkerProject(BaseModel):
@@ -16,8 +16,6 @@ class WorkerProject(BaseModel):
 
     追踪项目版本与分发状态。
     """
-
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
 
     worker_id = fields.BigIntField(db_index=True, description="Worker ID")
     project_id = fields.BigIntField(db_index=True, description="项目ID")
@@ -55,7 +53,6 @@ class WorkerProject(BaseModel):
             ("status",),
             ("synced_at",),
             ("last_used_at",),
-            ("public_id",),
         ]
 
     def __str__(self):
@@ -67,8 +64,6 @@ class WorkerProjectFile(BaseModel):
 
     文件级增量同步。
     """
-
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
 
     worker_project_id = fields.BigIntField(db_index=True, description="项目绑定ID")
 
@@ -86,7 +81,6 @@ class WorkerProjectFile(BaseModel):
             ("worker_project_id",),
             ("file_path",),
             ("file_hash",),
-            ("public_id",),
         ]
 
     def __str__(self):

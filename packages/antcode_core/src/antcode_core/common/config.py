@@ -6,10 +6,17 @@
 import os
 from functools import cached_property
 from pathlib import Path
-from urllib.parse import urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from antcode_core.common.backend_urls import (
+    BackendUrls,
+    validate_control_plane_backends,
+    validate_direct_worker_backends,
+    validate_gateway_worker_backends,
+)
+from antcode_core.common.log_limits import MAX_SSE_LOG_MESSAGE_BYTES
 
 
 def _default_frontend_port() -> int:
@@ -43,38 +50,6 @@ def _find_project_root() -> Path:
     return current.parent.parent.parent.parent.parent.parent
 
 
-def _validate_database_url(value: str) -> None:
-    parsed = urlparse(value)
-    if parsed.scheme not in {"postgres", "postgresql"}:
-        raise ValueError("DATABASE_URL 只能使用 PostgreSQL 连接串。")
-    if not parsed.hostname:
-        raise ValueError("DATABASE_URL 缺少 host。")
-    if not parsed.username:
-        raise ValueError("DATABASE_URL 缺少 user。")
-    if not parsed.password:
-        raise ValueError("DATABASE_URL 缺少 password。")
-    if not parsed.path.strip("/"):
-        raise ValueError("DATABASE_URL 缺少 database。")
-
-
-def _validate_redis_url(value: str) -> None:
-    parsed = urlparse(value)
-    # T6-T1: 支持集群 (`redis+cluster://`) 与哨兵 (`redis+sentinel://`)。
-    # scheme 决定 create_async_redis_client 走哪条路径。
-    allowed_schemes = {
-        "redis",
-        "rediss",
-        "redis+cluster",
-        "rediss+cluster",
-        "redis+sentinel",
-        "rediss+sentinel",
-    }
-    if parsed.scheme not in allowed_schemes:
-        raise ValueError(f"REDIS_URL scheme 不支持: {parsed.scheme!r}，仅允许 {sorted(allowed_schemes)}")
-    if not parsed.hostname:
-        raise ValueError("REDIS_URL 缺少 host。")
-
-
 class Settings(BaseSettings):
     """应用配置类，使用 cached_property 优化重复计算"""
 
@@ -82,15 +57,13 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(default="", repr=False)
     REDIS_URL: str = Field(default="", repr=False)
     WORKER_GATEWAY_BACKENDLESS: bool = Field(default=False)
+    WORKER_DIRECT_SCOPED_REDIS: bool = Field(default=False)
     REDIS_NAMESPACE: str = Field(
         default="antcode",
         min_length=1,
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9:_-]*$",
     )
-    # 是否启用 Redis（关闭时依赖 Redis 的功能会 no-op：批次事件不发布、
-    # scheduler_event_loop 空转、WS 日志不接实时流）。默认 true 与代码假设一致；
-    # 空 REDIS_URL 场景可设 false 让功能显式降级而不是抛 AttributeError。
     # T6-T1: Redis 部署形态。默认 auto 让 factory 从 URL scheme 判断
     # （redis+cluster / redis+sentinel）；也可显式覆盖为 standalone / cluster
     # / sentinel。用于 URL scheme 是标准 redis:// 但实际背后是集群/哨兵的
@@ -136,7 +109,7 @@ class Settings(BaseSettings):
     SSE_MAX_TOTAL_CONN: int = Field(default=1000, ge=1)
     SSE_MAX_CONN_PER_USER: int = Field(default=10, ge=1)
     SSE_QUEUE_MAX_MESSAGES: int = Field(default=1000, ge=1)
-    SSE_QUEUE_MAX_BYTES: int = Field(default=2_097_152, ge=65_536)
+    SSE_QUEUE_MAX_BYTES: int = Field(default=2_097_152, gt=MAX_SSE_LOG_MESSAGE_BYTES)
     SSE_HISTORY_MAX_BYTES: int = Field(default=8_388_608, ge=65_536)
     SSE_LEASE_TTL_SECONDS: int = Field(default=60, ge=15)
 
@@ -234,7 +207,7 @@ class Settings(BaseSettings):
 
     # === Master URL 配置 ===
     GATEWAY_HOST: str = Field(default="localhost")
-    GATEWAY_PORT: int = Field(default=50051)
+    GATEWAY_PORT: int = Field(default=50051, ge=1, le=65535)
     WORKER_TRANSPORT_MODE: str = Field(default="gateway")
     WORKER_HEARTBEAT_TIMEOUT: int = Field(default=60)
     WORKER_HEARTBEAT_INTERVAL_ONLINE: int = Field(default=3)
@@ -249,7 +222,7 @@ class Settings(BaseSettings):
     WORKER_INSTALL_SOURCE_REF: str = Field(default="")
     WORKER_INSTALL_GATEWAY_TLS: bool = Field(default=False)
     WORKER_INSTALL_UV_VERSION: str = Field(default="0.8.17")
-
+    WORKER_INSTALL_CONFIG_REQUIRED: bool = Field(default=False)
     # === 默认管理员 ===
     DEFAULT_ADMIN_USERNAME: str = Field(default="admin")
     DEFAULT_ADMIN_PASSWORD: str = Field(default="", repr=False)
@@ -286,10 +259,11 @@ class Settings(BaseSettings):
     TASK_LOG_RETENTION_DAYS: int = 30
     TASK_LOG_MAX_SIZE: int = 100 * 1024 * 1024
     ARTIFACT_RETENTION_DAYS: int = 30
-    # T7-B2a (P0-2): audit_logs / worker_events 之前无保留策略——线性增长
-    # 拖慢 audit 查询与 VACUUM。默认 90 / 30 天，运维可覆盖。
+    # 历史表保留期，避免线性增长拖慢查询和 VACUUM。
     AUDIT_LOG_RETENTION_DAYS: int = 90
     WORKER_EVENT_RETENTION_DAYS: int = 30
+    WORKER_HEARTBEAT_RETENTION_DAYS: int = 30
+    SCHEDULER_OUTBOX_RETENTION_DAYS: int = 30
     # 单次批式 DELETE 上限，防止长事务锁表；一轮 cleanup 内多次循环直到删完
     LOG_CLEANUP_BATCH_LIMIT: int = 5000
     # T7-B3a (P1-1): 派发失败自动补派参数
@@ -414,20 +388,17 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_backend_config(self) -> "Settings":
         """Validate mandatory PostgreSQL and Redis infrastructure."""
-        database_url = self.DATABASE_URL.strip()
-        redis_url = self.REDIS_URL.strip()
+        urls = BackendUrls(
+            transport_mode=self.WORKER_TRANSPORT_MODE,
+            database_url=self.DATABASE_URL.strip(),
+            redis_url=self.REDIS_URL.strip(),
+        )
         if self.WORKER_GATEWAY_BACKENDLESS:
-            if self.WORKER_TRANSPORT_MODE != "gateway":
-                raise ValueError("WORKER_GATEWAY_BACKENDLESS 仅允许 Gateway Worker 使用。")
-            if database_url or redis_url:
-                raise ValueError("Gateway Worker 禁止注入 DATABASE_URL 或 REDIS_URL。")
+            validate_gateway_worker_backends(urls)
+        elif self.WORKER_DIRECT_SCOPED_REDIS:
+            validate_direct_worker_backends(urls)
         else:
-            if not database_url:
-                raise ValueError("DATABASE_URL 必须设置，且只能使用 PostgreSQL。")
-            _validate_database_url(database_url)
-            if not redis_url:
-                raise ValueError("REDIS_URL 必须设置。")
-            _validate_redis_url(redis_url)
+            validate_control_plane_backends(urls)
         if self.LOGIN_PASSWORD_ENCRYPTION_REQUIRED and not self.LOGIN_PASSWORD_ENCRYPTION_ENABLED:
             raise ValueError("LOGIN_PASSWORD_ENCRYPTION_REQUIRED 需同时启用 LOGIN_PASSWORD_ENCRYPTION_ENABLED")
         return self

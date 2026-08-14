@@ -22,7 +22,7 @@ class Task(BaseModel):
     表示一个计划任务定义，包含调度配置和执行参数。
     """
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     name = fields.CharField(max_length=255, unique=True)
     description = fields.TextField(null=True)
 
@@ -80,7 +80,6 @@ class Task(BaseModel):
             ("status",),
             ("is_active",),
             ("user_id",),
-            ("project_id",),
             ("created_at",),
             ("next_run_time",),
             ("task_type",),
@@ -89,7 +88,6 @@ class Task(BaseModel):
             ("user_id", "status"),
             ("project_id", "status"),
             ("task_type", "status"),
-            ("public_id",),
             ("execution_strategy",),
             ("specified_worker_id",),
         ]

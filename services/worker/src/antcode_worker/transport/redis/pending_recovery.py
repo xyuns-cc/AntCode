@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 DEFAULT_RECOVERY_PAGE_SIZE = 64
+
+# PEL 里同时含"已投递但尚未 ACK 的在途消息"。恢复路径若不过滤，会把在途消息
+# 再投递一次，两条投递各自走到 ACK，第二次必然落在"条目不在 PEL"上并抛错。
+InFlightPredicate = Callable[[str, str], bool]
+
+
+def _never_in_flight(stream_key: str, message_id: str) -> bool:
+    return False
 
 
 class PendingMessageRecovery:
@@ -17,12 +26,14 @@ class PendingMessageRecovery:
         group_name: str,
         *,
         page_size: int = DEFAULT_RECOVERY_PAGE_SIZE,
+        is_in_flight: InFlightPredicate = _never_in_flight,
     ) -> None:
         if page_size < 1:
             raise ValueError("PEL recovery page_size 必须大于 0")
         self._stream_key = stream_key
         self._group_name = group_name
         self._page_size = page_size
+        self._is_in_flight = is_in_flight
         self.reset()
 
     @property
@@ -50,18 +61,29 @@ class PendingMessageRecovery:
             self._complete = True
             return None
         self._cursor = _text(messages[-1][0])
-        self._buffer.extend((_text(message_id), fields) for message_id, fields in messages)
-        return self._buffer.popleft()
+        self._buffer.extend(
+            (_text(message_id), fields)
+            for message_id, fields in messages
+            if not self._is_in_flight(self._stream_key, _text(message_id))
+        )
+        return self._buffer.popleft() if self._buffer else None
 
 
 class PendingChannelRecovery:
     """Drain multiple stream/group channels for one logical consumer."""
 
-    def __init__(self, channels: tuple[Any, ...], *, page_size: int = DEFAULT_RECOVERY_PAGE_SIZE) -> None:
+    def __init__(
+        self,
+        channels: tuple[Any, ...],
+        *,
+        page_size: int = DEFAULT_RECOVERY_PAGE_SIZE,
+        is_in_flight: InFlightPredicate = _never_in_flight,
+    ) -> None:
         if page_size < 1:
             raise ValueError("PEL recovery page_size 必须大于 0")
         self._channels = channels
         self._page_size = page_size
+        self._is_in_flight = is_in_flight
         self.reset()
 
     @property
@@ -90,8 +112,13 @@ class PendingChannelRecovery:
                 self._cursor = "0-0"
                 continue
             self._cursor = _text(messages[-1][0])
-            self._buffer.extend((channel.stream_key, _text(message_id), fields) for message_id, fields in messages)
-            return self._buffer.popleft()
+            self._buffer.extend(
+                (channel.stream_key, _text(message_id), fields)
+                for message_id, fields in messages
+                if not self._is_in_flight(channel.stream_key, _text(message_id))
+            )
+            if self._buffer:
+                return self._buffer.popleft()
         return None
 
 

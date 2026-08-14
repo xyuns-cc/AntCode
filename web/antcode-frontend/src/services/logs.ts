@@ -1,6 +1,6 @@
 import { BaseService } from './base'
 import apiClient from './api'
-import { createLogStreamConnection } from './logStreamConnection'
+import { createLogStreamConnection } from './logStreamFactory'
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
 export type LogType = 'stdout' | 'stderr' | 'system' | 'application'
@@ -47,13 +47,14 @@ export interface UnifiedLogParams {
   level?: LogLevel
   lines?: number
   search?: string
+  page?: number
+  size?: number
 }
 
 export interface LogQueryParams {
   run_id?: string
   log_type?: 'stdout' | 'stderr'
   level?: LogLevel
-  lines?: number
   search?: string
   page?: number
   size?: number
@@ -112,15 +113,19 @@ class LogService extends BaseService {
 
   async getUnifiedLogs(params: UnifiedLogParams): Promise<UnifiedLogResponse> {
     const queryParams: Record<string, string | number> = {
-      format: params.format || 'structured'
+      format: params.format || 'structured',
     }
 
     if (params.log_type) queryParams.log_type = params.log_type
     if (params.level) queryParams.level = params.level
     if (params.lines) queryParams.lines = Math.min(Math.max(params.lines, 1), 10000)
     if (params.search) queryParams.search = params.search
+    if (params.page) queryParams.page = Math.max(params.page, 1)
+    if (params.size) queryParams.size = Math.min(Math.max(params.size, 1), 32)
 
-    return await this.get<UnifiedLogResponse>(`/logs/runs/${params.run_id}`, { params: queryParams })
+    return await this.get<UnifiedLogResponse>(`/logs/runs/${params.run_id}`, {
+      params: queryParams,
+    })
   }
 
   async getRunLogs(runId: string, params?: LogQueryParams): Promise<LogListResponse> {
@@ -129,8 +134,9 @@ class LogService extends BaseService {
       format: 'structured',
       log_type: params?.log_type,
       level: params?.level,
-      lines: params?.lines,
       search: params?.search,
+      page: params?.page,
+      size: params?.size,
     })
 
     if (!unified.structured_data) {
@@ -198,7 +204,7 @@ class LogService extends BaseService {
     const response = await apiClient.post<{ data?: { ticket?: string }; ticket?: string }>(
       '/api/v1/logs/stream-ticket',
       undefined,
-      { params: { run_id: runId } },
+      { params: { run_id: runId } }
     )
     const body = response.data
     const ticket = body?.data?.ticket ?? body?.ticket

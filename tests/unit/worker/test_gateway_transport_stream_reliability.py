@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import grpc
 import pytest
 from antcode_contracts import control_pb2
+from antcode_worker.transport.base import TaskResult
 from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
 
@@ -17,6 +18,14 @@ class FailedPreconditionError(RuntimeError):
 class UnauthenticatedError(RuntimeError):
     def code(self):
         return grpc.StatusCode.UNAUTHENTICATED
+
+
+class PermissionDeniedError(RuntimeError):
+    def code(self):
+        return grpc.StatusCode.PERMISSION_DENIED
+
+    def details(self):
+        return "TaskRun missing"
 
 
 def _channel() -> MagicMock:
@@ -42,6 +51,21 @@ async def test_stale_lease_rejection_keeps_control_result_retryable():
 
     assert sent is False
     transport._handle_connection_error.assert_awaited_once_with(error)
+
+
+@pytest.mark.asyncio
+async def test_permanent_status_rejection_does_not_reconnect_healthy_channel():
+    error = PermissionDeniedError("TaskRun missing")
+    transport = GatewayTransport(gateway_config=GatewayConfig(worker_id="worker-1"))
+    transport._running = True
+    transport._data_stub = MagicMock(StreamStatus=AsyncMock(side_effect=error))
+    transport._handle_connection_error = AsyncMock()
+
+    reported = await transport.report_result(TaskResult(run_id="run-1", task_id="run-1", status="cancelled"))
+
+    assert reported is False
+    assert transport._consecutive_failures == 0
+    transport._handle_connection_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -158,8 +182,8 @@ async def test_server_stream_with_data_resubscribes_immediately(monkeypatch, str
 
         return one_item_stream()
 
-    # deliver 里 decode 会失败并把异常塞进 inbox，但 received=True 的语义不变。
     if stream_kind == "task":
+        transport._deliver_task_dispatch = AsyncMock()
         transport._data_stub = MagicMock(StreamTasks=MagicMock(side_effect=open_stream))
         loop = transport._task_subscription_loop
     else:

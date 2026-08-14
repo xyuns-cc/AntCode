@@ -7,6 +7,8 @@ from typing import Any
 
 from antcode_core.application.services.lease_service import LEASE_RECORD_RETENTION_MS, LeaseStore
 
+CAPABILITY_SNAPSHOT_BATCH_SIZE = 128
+
 _READ_LIVE_CAPABILITIES_LUA = """
 local snapshots = {}
 local retention_ms = tonumber(ARGV[1])
@@ -17,8 +19,11 @@ for index = 1, #KEYS, 2 do
     local pttl_ms = redis.call('PTTL', lease_key)
     local current = lease_id and pttl_ms > retention_ms
         and redis.call('SISMEMBER', revoked_key, lease_id) == 0
+    local lease_gen = tonumber(redis.call('HGET', lease_key, 'sequence') or '0')
+    current = current and lease_gen > 0
     table.insert(snapshots, current and lease_id or '')
     table.insert(snapshots, current and (redis.call('HGET', lease_key, 'capabilities_json') or '') or '')
+    table.insert(snapshots, current and tostring(lease_gen) or '')
 end
 return snapshots
 """
@@ -28,6 +33,7 @@ return snapshots
 class LeaseCapabilitySnapshot:
     lease_id: str
     capabilities_json: str
+    lease_gen: int
 
 
 async def read_live_capability_snapshots(
@@ -37,13 +43,20 @@ async def read_live_capability_snapshots(
     if not worker_ids:
         return {}
     store = LeaseStore(redis)
+    snapshots: dict[str, LeaseCapabilitySnapshot] = {}
+    for offset in range(0, len(worker_ids), CAPABILITY_SNAPSHOT_BATCH_SIZE):
+        batch = worker_ids[offset : offset + CAPABILITY_SNAPSHOT_BATCH_SIZE]
+        snapshots.update(await _read_snapshot_batch(redis, store, batch))
+    return snapshots
+
+
+async def _read_snapshot_batch(
+    redis: Any,
+    store: LeaseStore,
+    worker_ids: list[str],
+) -> dict[str, LeaseCapabilitySnapshot]:
     keys = _snapshot_keys(store, worker_ids)
-    values = await redis.eval(
-        _READ_LIVE_CAPABILITIES_LUA,
-        len(keys),
-        *keys,
-        str(LEASE_RECORD_RETENTION_MS),
-    )
+    values = await redis.eval(_READ_LIVE_CAPABILITIES_LUA, len(keys), *keys, str(LEASE_RECORD_RETENTION_MS))
     return _decode_snapshots(worker_ids, values)
 
 
@@ -51,24 +64,20 @@ def _snapshot_keys(store: LeaseStore, worker_ids: list[str]) -> list[str]:
     keys: list[str] = []
     for worker_id in worker_ids:
         keys.append(store.lease_key(worker_id))
-        keys.append(
-            store.REVOKED_SET_TEMPLATE.format(
-                ns=store.namespace,
-                worker_id=worker_id,
-            )
-        )
+        keys.append(store.REVOKED_SET_TEMPLATE.format(ns=store.namespace, worker_id=worker_id))
     return keys
 
 
 def _decode_snapshots(worker_ids: list[str], values: list[Any]) -> dict[str, LeaseCapabilitySnapshot]:
-    expected = len(worker_ids) * 2
+    expected = len(worker_ids) * 3
     if len(values) != expected:
         raise RuntimeError("Lease capability snapshot response has an invalid shape")
     result: dict[str, LeaseCapabilitySnapshot] = {}
     for index, worker_id in enumerate(worker_ids):
-        lease_id = _text(values[index * 2])
-        capabilities = _text(values[index * 2 + 1])
-        result[worker_id] = LeaseCapabilitySnapshot(lease_id, capabilities)
+        lease_id = _text(values[index * 3])
+        capabilities = _text(values[index * 3 + 1])
+        lease_gen = int(_text(values[index * 3 + 2]) or 0)
+        result[worker_id] = LeaseCapabilitySnapshot(lease_id, capabilities, lease_gen)
     return result
 
 
@@ -78,4 +87,8 @@ def _text(value: Any) -> str:
     return str(value or "")
 
 
-__all__ = ["LeaseCapabilitySnapshot", "read_live_capability_snapshots"]
+__all__ = [
+    "CAPABILITY_SNAPSHOT_BATCH_SIZE",
+    "LeaseCapabilitySnapshot",
+    "read_live_capability_snapshots",
+]

@@ -1,35 +1,21 @@
 import pytest
+from antcode_core.application.services.crawl.backends.redis_dedup import RedisDedupStore
 from antcode_core.application.services.scheduler.outbox_service import scheduler_outbox_service
-from antcode_core.application.services.scheduler.redis_queue import RedisQueueBackend
 from antcode_core.application.services.scheduler.scheduler_service import SchedulerService
-from antcode_core.infrastructure.redis.bloom_client import BloomFilterClient
 from antcode_core.infrastructure.redis.locks import DistributedLock, FencingTokenManager
 from antcode_core.infrastructure.redis.rate_limiter import RedisRateLimiter
-from antcode_core.infrastructure.redis.stream_client import StreamClient as LegacyStreamClient
-from antcode_core.infrastructure.redis.streams import StreamClient
+from antcode_core.infrastructure.redis.stream_client import StreamClient
 
 
-class _BloomUnavailableRedis:
-    set_calls = 0
+class _DedupRedis:
+    def __init__(self, error=None):
+        self.error = error
+        self.commands = []
 
-    async def execute_command(self, *_args):
-        raise RuntimeError("unknown command 'BF.INFO'")
-
-    async def sadd(self, *_args):
-        self.set_calls += 1
-        return 1
-
-
-class _BloomAddFailureRedis:
-    set_calls = 0
-
-    async def execute_command(self, command, *_args):
-        if command == "BF.INFO":
-            raise RuntimeError("not found")
-        raise RuntimeError("bf.add failed")
-
-    async def sadd(self, *_args):
-        self.set_calls += 1
+    async def eval(self, *_args):
+        if self.error:
+            raise self.error
+        self.commands.append("eval_sadd")
         return 1
 
 
@@ -50,6 +36,19 @@ class _BrokenStreamRedis:
         raise RuntimeError("redis stream failure")
 
 
+class _PendingSummaryRedis:
+    async def ping(self):
+        return True
+
+    async def xpending(self, *_args):
+        return {
+            "pending": 1,
+            "min": b"1-0",
+            "max": b"1-0",
+            "consumers": [{"name": b"worker-a", "pending": 1}],
+        }
+
+
 class _BrokenLockRedis:
     async def eval(self, *_args):
         raise RuntimeError("redis lock failure")
@@ -61,50 +60,56 @@ class _MissingTokenRedis:
 
 
 @pytest.mark.asyncio
-async def test_bloom_client_requires_redisbloom_module():
-    redis = _BloomUnavailableRedis()
-    client = BloomFilterClient(redis)
+async def test_crawl_dedup_uses_standard_redis_set():
+    redis = _DedupRedis()
+    store = RedisDedupStore(redis, namespace="test")
 
-    with pytest.raises(RuntimeError, match="RedisBloom"):
-        await client.bf_add("dedup", "item-1")
-
-    assert redis.set_calls == 0
+    assert await store.add("project", "item-1") is True
+    assert redis.commands == ["eval_sadd"]
 
 
 @pytest.mark.asyncio
-async def test_bloom_operation_failure_is_not_downgraded_to_set():
-    redis = _BloomAddFailureRedis()
-    client = BloomFilterClient(redis)
+async def test_crawl_dedup_failure_is_exposed():
+    store = RedisDedupStore(_DedupRedis(RuntimeError("redis set failed")))
 
-    with pytest.raises(RuntimeError, match="bf.add failed"):
-        await client.bf_add("dedup", "item-1")
-
-    assert redis.set_calls == 0
+    with pytest.raises(RuntimeError, match="redis set failed"):
+        await store.add("project", "item-1")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_type", [StreamClient, LegacyStreamClient])
-async def test_xautoclaim_failure_is_exposed(client_type):
-    client = client_type(_BrokenStreamRedis())
+async def test_xautoclaim_failure_is_exposed():
+    client = StreamClient(_BrokenStreamRedis())
 
     with pytest.raises(RuntimeError, match="redis stream failure"):
-        await client.xautoclaim("task-stream")
+        await client.xautoclaim("task-stream", "task-workers")
 
 
 @pytest.mark.asyncio
-async def test_legacy_stream_xreadgroup_multi_failure_is_exposed():
-    client = LegacyStreamClient(_BrokenStreamRedis())
+async def test_stream_xreadgroup_multi_failure_is_exposed():
+    client = StreamClient(_BrokenStreamRedis())
 
     with pytest.raises(RuntimeError, match="redis stream read failure"):
-        await client.xreadgroup_multi(["task-stream"])
+        await client.xreadgroup_multi(["task-stream"], "task-workers")
 
 
 @pytest.mark.asyncio
-async def test_legacy_stream_xclaim_failure_is_exposed():
-    client = LegacyStreamClient(_BrokenStreamRedis())
+async def test_stream_xclaim_failure_is_exposed():
+    client = StreamClient(_BrokenStreamRedis())
 
     with pytest.raises(RuntimeError, match="redis stream claim failure"):
-        await client.xclaim("task-stream", ["1-0"])
+        await client.xclaim("task-stream", ["1-0"], "task-workers")
+
+
+@pytest.mark.asyncio
+async def test_xpending_accepts_current_redis_dict_shape():
+    summary = await StreamClient(_PendingSummaryRedis()).xpending("task-stream", "task-workers")
+
+    assert summary == {
+        "pending_count": 1,
+        "min_id": "1-0",
+        "max_id": "1-0",
+        "consumers": {"worker-a": 1},
+    }
 
 
 @pytest.mark.asyncio
@@ -156,33 +161,10 @@ async def test_scheduler_event_publish_failure_is_exposed(monkeypatch):
         raise RuntimeError("outbox failed")
 
     service = SchedulerService()
-    monkeypatch.setattr(service, "_control_plane", lambda: True)
     monkeypatch.setattr(scheduler_outbox_service, "enqueue", fail_enqueue)
 
     with pytest.raises(RuntimeError, match="outbox failed"):
         await service._publish_event("task_changed", 1)
-
-
-def test_redis_queue_contains_failure_is_exposed(monkeypatch):
-    async def fail_contains(_task_id):
-        raise RuntimeError("contains failed")
-
-    queue = RedisQueueBackend("redis://127.0.0.1:6379/0")
-    monkeypatch.setattr(queue, "_contains_async", fail_contains)
-
-    with pytest.raises(RuntimeError, match="contains failed"):
-        queue.contains("task-1")
-
-
-def test_redis_queue_size_failure_is_exposed(monkeypatch):
-    async def fail_size():
-        raise RuntimeError("size failed")
-
-    queue = RedisQueueBackend("redis://127.0.0.1:6379/0")
-    monkeypatch.setattr(queue, "_size_async", fail_size)
-
-    with pytest.raises(RuntimeError, match="size failed"):
-        queue.size()
 
 
 @pytest.mark.asyncio

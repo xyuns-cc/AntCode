@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from antcode_core.common.config import settings
-from antcode_core.infrastructure.redis.streams import StreamClient
+from antcode_core.infrastructure.redis.stream_client import StreamClient
 
 
 async def publish_scheduler_event(event: str, **payload: Any) -> str:

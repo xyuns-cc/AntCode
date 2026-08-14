@@ -1,0 +1,138 @@
+"""In-memory Redis fake for Crawl Redis upgrade tool tests."""
+
+from __future__ import annotations
+
+import fnmatch
+from typing import Any
+
+
+class UpgradeRedisFake:
+    def __init__(self) -> None:
+        self.hashes: dict[str, dict[Any, Any]] = {}
+        self.sets: dict[str, set[Any]] = {}
+        self.streams: dict[str, list[tuple[str, dict[Any, Any]]]] = {}
+        self.zsets: dict[str, list[tuple[Any, float]]] = {}
+        self.groups: dict[str, list[dict[Any, Any]]] = {}
+        self.pending: dict[tuple[str, str], int] = {}
+        self.explicit_types: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.deleted: list[str] = []
+        self.restored: list[tuple[str, int, bytes, bool]] = []
+        self.persisted: list[str] = []
+        self.closed = False
+
+    def keys(self) -> set[str]:
+        return {*self.hashes, *self.sets, *self.streams, *self.zsets, *self.explicit_types}
+
+    async def ping(self) -> bool:
+        return True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    async def scan_iter(self, *, match: str, count: int):
+        del count
+        for key in sorted(self.keys()):
+            if fnmatch.fnmatchcase(key, match):
+                yield key.encode()
+
+    async def type(self, key: str) -> bytes:
+        return self._type(key).encode()
+
+    def _type(self, key: str) -> str:
+        if key in self.explicit_types:
+            return self.explicit_types[key]
+        if key in self.hashes:
+            return "hash"
+        if key in self.sets:
+            return "set"
+        if key in self.streams:
+            return "stream"
+        if key in self.zsets:
+            return "zset"
+        return "none"
+
+    async def hlen(self, key: str) -> int:
+        return len(self.hashes.get(key, {}))
+
+    async def scard(self, key: str) -> int:
+        return len(self.sets.get(key, set()))
+
+    async def pttl(self, key: str) -> int:
+        return self.ttls.get(key, -1 if key in self.keys() else -2)
+
+    async def hgetall(self, key: str) -> dict[Any, Any]:
+        return dict(self.hashes.get(key, {}))
+
+    async def xlen(self, key: str) -> int:
+        return len(self.streams.get(key, []))
+
+    async def xinfo_groups(self, key: str) -> list[dict[Any, Any]]:
+        return list(self.groups.get(key, []))
+
+    async def xpending(self, key: str, group: str) -> dict[str, int]:
+        return {"pending": self.pending.get((key, group), 0)}
+
+    async def xrange(self, key: str, *, min: str, max: str, count: int):
+        del max
+        values = self.streams.get(key, [])
+        if min.startswith("("):
+            values = [item for item in values if _stream_id(item[0]) > _stream_id(min[1:])]
+        return values[:count]
+
+    async def zcard(self, key: str) -> int:
+        return len(self.zsets.get(key, []))
+
+    async def zscan_iter(self, key: str, *, count: int):
+        del count
+        for item in self.zsets.get(key, []):
+            yield item
+
+    async def hscan_iter(self, key: str, *, count: int):
+        del count
+        for item in self.hashes.get(key, {}).items():
+            yield item
+
+    async def sscan_iter(self, key: str, *, count: int):
+        del count
+        for member in sorted(self.sets.get(key, set())):
+            yield member
+
+    async def sadd(self, key: str, *members: Any) -> int:
+        target = self.sets.setdefault(key, set())
+        before = len(target)
+        target.update(members)
+        return len(target) - before
+
+    async def sismember(self, key: str, member: Any) -> bool:
+        return member in self.sets.get(key, set())
+
+    async def dump(self, key: str) -> bytes | None:
+        return f"hash:{key}".encode() if key in self.hashes else None
+
+    async def restore(self, key: str, ttl_ms: int, payload: bytes, *, replace: bool) -> None:
+        source = payload.decode().removeprefix("hash:")
+        if key in self.keys() and not replace:
+            raise RuntimeError("BUSYKEY")
+        self.hashes[key] = dict(self.hashes[source])
+        self.restored.append((key, ttl_ms, payload, replace))
+
+    async def persist(self, key: str) -> int:
+        self.persisted.append(key)
+        return int(self.ttls.pop(key, None) is not None)
+
+    async def delete(self, key: str) -> int:
+        existed = key in self.keys()
+        self.hashes.pop(key, None)
+        self.sets.pop(key, None)
+        self.streams.pop(key, None)
+        self.zsets.pop(key, None)
+        self.explicit_types.pop(key, None)
+        if existed:
+            self.deleted.append(key)
+        return int(existed)
+
+
+def _stream_id(value: str) -> tuple[int, int]:
+    milliseconds, sequence = value.split("-", 1)
+    return int(milliseconds), int(sequence)

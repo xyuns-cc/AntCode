@@ -1,6 +1,6 @@
 import type { AxiosError } from 'axios'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Task, TaskExecution, Worker } from '@/types'
+import type { ClusterSpiderStats, Task, TaskExecution, Worker } from '@/types'
 import { presentApiError } from '@/utils/apiErrorPresentation'
 
 const apiMocks = vi.hoisted(() => ({
@@ -50,7 +50,10 @@ const worker: Worker = {
 }
 
 describe('frontend API contracts', () => {
-  beforeEach(() => apiMocks.get.mockReset())
+  beforeEach(() => {
+    apiMocks.get.mockReset()
+    apiMocks.post.mockReset()
+  })
 
   it('maps the task pagination envelope without losing list fields', async () => {
     apiMocks.get.mockResolvedValue({
@@ -83,18 +86,41 @@ describe('frontend API contracts', () => {
     })
   })
 
-  it('uses the legacy run endpoint only when the new endpoint returns 404', async () => {
-    apiMocks.get
-      .mockRejectedValueOnce({ response: { status: 404 } })
-      .mockResolvedValueOnce({ data: { data: execution } })
+  it('uses the Worker resource update response returned by the backend', async () => {
+    const result = { updated: { max_concurrent_tasks: '8' }, synced: true }
+    apiMocks.post.mockResolvedValue({ data: { data: result } })
 
-    await expect(taskService.getTaskRun('run-1')).resolves.toEqual(execution)
-    expect(apiMocks.get).toHaveBeenNthCalledWith(1, '/api/v1/runs/run-1')
-    expect(apiMocks.get).toHaveBeenNthCalledWith(2, '/api/v1/tasks/runs/run-1')
+    await expect(
+      workerService.updateWorkerResources('worker-1', { max_concurrent_tasks: 8 })
+    ).resolves.toEqual(result)
+    expect(apiMocks.post).toHaveBeenCalledWith(
+      '/api/v1/workers/worker-1/resources',
+      { max_concurrent_tasks: 8 },
+      undefined
+    )
   })
 
-  it('does not hide non-404 failures behind the legacy endpoint', async () => {
-    const error = { kind: 'service-unavailable', response: { status: 503 } }
+  it('unwraps the complete Worker returned by status refresh', async () => {
+    const refreshedWorker = { ...worker, transportMode: null }
+    apiMocks.post.mockResolvedValue({ data: { data: refreshedWorker } })
+
+    await expect(workerService.refreshWorkerStatus('worker-1')).resolves.toEqual(refreshedWorker)
+  })
+
+  it('does not expose the permanently retired credential recovery endpoint', () => {
+    expect(workerService).not.toHaveProperty('getWorkerCredentials')
+  })
+
+  it('loads a run only from the canonical endpoint', async () => {
+    apiMocks.get.mockResolvedValueOnce({ data: { data: execution } })
+
+    await expect(taskService.getTaskRun('run-1')).resolves.toEqual(execution)
+    expect(apiMocks.get).toHaveBeenCalledOnce()
+    expect(apiMocks.get).toHaveBeenCalledWith('/api/v1/runs/run-1')
+  })
+
+  it.each([404, 503])('preserves a run lookup %s error without a fallback request', async (status) => {
+    const error = { kind: 'request-failed', response: { status } }
     apiMocks.get.mockImplementationOnce(async () => {
       throw error
     })
@@ -108,6 +134,31 @@ describe('frontend API contracts', () => {
 
     expect(caught).toEqual(error)
     expect(apiMocks.get).toHaveBeenCalledOnce()
+    expect(apiMocks.get).toHaveBeenCalledWith('/api/v1/runs/run-1')
+  })
+
+  it('unwraps the complete flat cluster spider statistics contract', async () => {
+    const stats: ClusterSpiderStats = {
+      totalRequests: 150,
+      totalResponses: 130,
+      totalItemsScraped: 15,
+      totalErrors: 20,
+      avgLatencyMs: 176.92,
+      clusterRequestsPerMinute: 30,
+      statusCodes: { '200': 110, '500': 20 },
+      domainStats: [{
+        domain: 'example.com',
+        reqs: 100,
+        successRate: 84,
+        latency: 140,
+        status: 'Critical',
+      }],
+      workerCount: 3,
+    }
+    apiMocks.get.mockResolvedValueOnce({ data: { data: stats } })
+
+    await expect(workerService.getClusterSpiderStats()).resolves.toEqual(stats)
+    expect(apiMocks.get).toHaveBeenCalledWith('/api/v1/workers/stats/spider', undefined)
   })
 
   it.each([

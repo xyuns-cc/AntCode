@@ -9,7 +9,7 @@
 -- `lease_gen IS NULL OR lease_gen <= NEW.lease_gen` 确保只允许更晚 gen
 -- 覆盖更早 gen。旧代际 L1 用较小 gen 迟到时 CAS 失败，PG 保留 L2 状态。
 --
--- 单阶段纯加列迁移，可整体回滚。与 20260720 同一防护模式。
+-- 列变更在短事务中完成；热表索引必须在事务外并发创建。
 BEGIN;
 
 DO $$
@@ -31,8 +31,9 @@ END $$;
 ALTER TABLE "task_executions"
     ADD COLUMN IF NOT EXISTS "lease_gen" BIGINT NULL;
 
--- 索引仅用于观测/回填统计，非 CAS 强需求。
-CREATE INDEX IF NOT EXISTS "idx_task_executions_lease_gen"
-    ON "task_executions" ("lease_gen");
-
 COMMIT;
+
+-- CREATE INDEX CONCURRENTLY 不能位于 BEGIN/COMMIT。若构建中断留下
+-- INVALID 同名索引，先 DROP INDEX CONCURRENTLY 后重跑本文件。
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_task_executions_lease_gen"
+    ON "task_executions" ("lease_gen");

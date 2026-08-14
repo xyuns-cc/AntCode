@@ -291,7 +291,6 @@ export type JwtTokenPayload = {
   iat?: number
   user_id?: number | string
   username?: string
-  permissions?: string[]
   [key: string]: unknown
 }
 

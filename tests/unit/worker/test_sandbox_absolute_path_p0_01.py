@@ -15,6 +15,7 @@ PATH 解析可执行文件,workspace 里的伪造 bwrap 会在真隔离建立前
 from __future__ import annotations
 
 import os
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,11 +28,13 @@ from antcode_worker.executor.sandbox import (
 )
 
 
-def _make_runtime_handle(tmp_path):
+def _make_runtime_handle(runtimes_root):
+    runtime_path = runtimes_root / "runtime"
+    runtime_path.mkdir(exist_ok=True)
     return RuntimeHandle(
-        path=str(tmp_path / "runtime"),
+        path=str(runtime_path),
         runtime_hash="test-hash-p0-01",
-        python_executable="/usr/bin/python3",
+        python_executable=sys.executable,
     )
 
 
@@ -51,14 +54,29 @@ def test_wrap_command_rejects_relative_non_bwrap_sandbox_command():
         sandbox.wrap_command(["/bin/true"], {"work_dir": "/tmp/work"})
 
 
-def test_wrap_command_accepts_absolute_sandbox_command():
+def test_wrap_command_accepts_absolute_sandbox_command(tmp_path):
     """P0-01:绝对路径正常放行。"""
-    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], fs_isolated=True))
+    data_root = tmp_path / "data"
+    runtimes_root = tmp_path / "runtimes"
+    work_dir = data_root / "runs" / "sources" / "test-run" / "project"
+    work_dir.mkdir(parents=True)
+    runtimes_root.mkdir()
+    sandbox = BasicSandbox(
+        SandboxConfig(
+            sandbox_command=["/usr/bin/bwrap"],
+            fs_isolated=True,
+            data_dir=str(data_root),
+            runtimes_dir=str(runtimes_root),
+        )
+    )
 
-    wrapped = sandbox.wrap_command(["/bin/true"], {"work_dir": "/tmp/work", "plugin_name": "rule"})
+    wrapped = sandbox.wrap_command(
+        [sys.executable],
+        {"work_dir": str(work_dir), "plugin_name": "code", "run_id": "test-run"},
+    )
 
     assert wrapped[0] == "/usr/bin/bwrap"
-    assert "/bin/true" in wrapped
+    assert sys.executable in wrapped
 
 
 def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
@@ -72,13 +90,22 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
     worker_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     monkeypatch.setenv("PATH", worker_path)
 
+    data_root = tmp_path / "data"
+    runtimes_root = tmp_path / "runtimes"
+    data_root.mkdir()
+    runtimes_root.mkdir()
     executor = SandboxExecutor(
         config=ExecutorConfig(),
-        sandbox_config=SandboxConfig(sandbox_command=["/usr/bin/bwrap"], fs_isolated=True),
+        sandbox_config=SandboxConfig(
+            sandbox_command=["/usr/bin/bwrap"],
+            fs_isolated=True,
+            data_dir=str(data_root),
+            runtimes_dir=str(runtimes_root),
+        ),
     )
 
     exec_plan = ExecPlan(
-        command="/bin/true",
+        command=sys.executable,
         args=[],
         env={
             "PATH": "/tmp/evil:/usr/bin",  # 攻击注入
@@ -91,8 +118,11 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
         plugin_name="rule",
         enforce_rlimit=False,  # 避免 macOS 上 prlimit 不可用
     )
-    runtime_handle = _make_runtime_handle(tmp_path)
-    context = {"work_dir": str(tmp_path / "work"), "plugin_name": "rule"}
+    runtime_handle = _make_runtime_handle(runtimes_root)
+    context = {
+        "work_dir": str(data_root / "runs" / "sources" / "test-run-p0-01" / "project"),
+        "plugin_name": "rule",
+    }
     os.makedirs(context["work_dir"], exist_ok=True)
 
     sandboxed_plan = executor._create_sandboxed_plan(exec_plan, runtime_handle, context)
@@ -108,8 +138,10 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
     assert "BASH_ENV" not in sandboxed_plan.env
     assert "ENV" not in sandboxed_plan.env
 
-    # PYTHONPATH 被强制为 runtime.path,不是任务的 /tmp/evil/py
-    assert sandboxed_plan.env.get("PYTHONPATH") == runtime_handle.path
+    # PYTHONPATH 由 Worker 权威构造：首项必须是 runtime.path，后续仅含受信内建包源码根。
+    python_path = sandboxed_plan.env.get("PYTHONPATH", "").split(os.pathsep)
+    assert python_path[0] == runtime_handle.path
+    assert "/tmp/evil/py" not in python_path
     assert sandboxed_plan.env.get("VIRTUAL_ENV") == runtime_handle.path
 
     # sandbox_command[0] 是绝对路径,任务 PATH 无法改变解析结果
@@ -121,21 +153,33 @@ def test_filter_env_still_allows_benign_task_env(tmp_path, monkeypatch):
     """P0-01 反面:剥离攻击向量,但白名单内的其他任务 env(如 LANG)不受影响。"""
     monkeypatch.setenv("PATH", "/usr/bin")
 
+    data_root = tmp_path / "data"
+    runtimes_root = tmp_path / "runtimes"
+    data_root.mkdir()
+    runtimes_root.mkdir()
     executor = SandboxExecutor(
         config=ExecutorConfig(),
-        sandbox_config=SandboxConfig(sandbox_command=["/usr/bin/bwrap"], fs_isolated=True),
+        sandbox_config=SandboxConfig(
+            sandbox_command=["/usr/bin/bwrap"],
+            fs_isolated=True,
+            data_dir=str(data_root),
+            runtimes_dir=str(runtimes_root),
+        ),
     )
 
     exec_plan = ExecPlan(
-        command="/bin/true",
+        command=sys.executable,
         args=[],
         env={"LANG": "en_US.UTF-8", "GOFLAGS": "-mod=mod"},
         run_id="test-run-benign",
         plugin_name="code",
         enforce_rlimit=False,
     )
-    runtime_handle = _make_runtime_handle(tmp_path)
-    context = {"work_dir": str(tmp_path / "work"), "plugin_name": "code"}
+    runtime_handle = _make_runtime_handle(runtimes_root)
+    context = {
+        "work_dir": str(data_root / "runs" / "sources" / "test-run-benign" / "project"),
+        "plugin_name": "code",
+    }
     os.makedirs(context["work_dir"], exist_ok=True)
 
     sandboxed_plan = executor._create_sandboxed_plan(exec_plan, runtime_handle, context)

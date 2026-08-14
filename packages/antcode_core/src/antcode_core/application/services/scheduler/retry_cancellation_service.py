@@ -18,7 +18,11 @@ class RetryIntentNotPendingError(RuntimeError):
 async def cancel_retry_intent(run_id: str, *, user_id: int) -> None:
     async with in_transaction("default") as connection:
         execution = await TaskRun.filter(run_id=run_id).using_db(connection).select_for_update().first()
-        if execution is None or execution.next_retry_at is None:
+        if execution is None:
+            raise RetryIntentNotPendingError("该执行没有待重试计划")
+        if execution.next_retry_at is None:
+            if _was_already_cancelled(execution):
+                return
             raise RetryIntentNotPendingError("该执行没有待重试计划")
         changes = build_retry_cancellation_changes(execution, user_id=user_id)
         updated = await TaskRun.filter(id=execution.id).using_db(connection).update(**changes)
@@ -45,6 +49,11 @@ def build_retry_cancellation_changes(execution: Any, *, user_id: int) -> dict[st
             error_message=execution.error_message or f"重试已取消 by user {user_id}",
         )
     return changes
+
+
+def _was_already_cancelled(execution: Any) -> bool:
+    result_data = execution.result_data if isinstance(execution.result_data, dict) else {}
+    return isinstance(result_data.get("retry_cancellation"), dict)
 
 
 __all__ = [

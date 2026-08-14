@@ -3,6 +3,8 @@
 基于 Redis 实现 URL 去重。
 """
 
+from dataclasses import asdict
+
 from loguru import logger
 
 from antcode_core.application.services.base import BaseService
@@ -37,10 +39,6 @@ class CrawlDedupService(BaseService):
     - 自动计算 URL 指纹
     """
 
-    # 默认配置
-    DEFAULT_CAPACITY = 1000000  # 默认容量 100 万
-    DEFAULT_ERROR_RATE = 0.001  # 默认误判率 0.1%
-
     def __init__(self, dedup_store: DedupStore | None = None):
         """初始化去重服务
 
@@ -56,27 +54,6 @@ class CrawlDedupService(BaseService):
         if self._dedup_store is None:
             self._dedup_store = get_dedup_store()
         return self._dedup_store
-
-    async def ensure_filter(
-        self,
-        project_id: str,
-        capacity: int | None = None,
-        error_rate: float | None = None,
-    ) -> bool:
-        """确保项目的去重存储存在
-
-        Args:
-            project_id: 项目 ID
-            capacity: 预期容量，默认 100 万
-            error_rate: 误判率，默认 0.1%
-
-        Returns:
-            是否成功
-        """
-        capacity = capacity or self.DEFAULT_CAPACITY
-        error_rate = error_rate or self.DEFAULT_ERROR_RATE
-
-        return await self.dedup_store.ensure_store(project_id, capacity, error_rate)
 
     async def exists(self, project_id: str, url: str) -> bool:
         """检查 URL 是否已存在
@@ -247,30 +224,10 @@ class CrawlDedupService(BaseService):
     async def clear_filter(
         self,
         project_id: str,
-        capacity: int | None = None,
-        error_rate: float | None = None,
     ) -> bool:
-        """清空并重建去重存储
-
-        Args:
-            project_id: 项目 ID
-            capacity: 新容量
-            error_rate: 新误判率
-
-        Returns:
-            是否成功
-        """
-        # 先清空
-        await self.dedup_store.clear(project_id)
-
-        # 重新确保存储存在
-        capacity = capacity or self.DEFAULT_CAPACITY
-        error_rate = error_rate or self.DEFAULT_ERROR_RATE
-
-        result = await self.dedup_store.ensure_store(project_id, capacity, error_rate)
-
-        logger.info(f"清空去重存储: project={project_id}, capacity={capacity}, error_rate={error_rate}")
-
+        """清空项目精确去重集合。"""
+        result = await self.dedup_store.clear(project_id)
+        logger.info(f"清空去重存储: project={project_id}")
         return result
 
     async def delete_filter(self, project_id: str) -> bool:
@@ -305,15 +262,12 @@ class CrawlDedupService(BaseService):
         Returns:
             存储信息字典
         """
-        # 检查后端是否支持 get_filter_info
-        if hasattr(self.dedup_store, "get_filter_info"):
-            return await self.dedup_store.get_filter_info(project_id)
-
-        # 内存后端返回基本信息
         size = await self.dedup_store.size(project_id)
         return {
             "project_id": project_id,
+            "size": size,
             "num_items": size,
+            **asdict(await self.dedup_store.get_capabilities(project_id)),
         }
 
 

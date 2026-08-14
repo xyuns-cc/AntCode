@@ -109,12 +109,12 @@ class CrawlTakeoverRecoveryService:
 
     async def _recover_queues(self) -> tuple[list[_ProjectReport], tuple[str, ...]]:
         try:
-            project_ids = await self._backend.list_project_ids()
+            discovery = await self._backend.discover_projects()
         except Exception as exc:  # noqa: BLE001 - 汇总后显式抛出
             return [], (f"队列项目扫描失败: {exc}",)
         reports: list[_ProjectReport] = []
-        failures: list[str] = []
-        for project_id in project_ids:
+        failures = list(discovery.failures)
+        for project_id in discovery.project_ids:
             report = await self._recover_project(project_id)
             reports.append(report)
             failures.extend(report.failures)
@@ -136,7 +136,10 @@ class CrawlTakeoverRecoveryService:
             except Exception as exc:  # noqa: BLE001 - 保留其他项目恢复机会
                 return _ProjectReport(requeued, dead_lettered, failures=(f"项目 {project_id} 扫描失败: {exc}",))
             if not items:
-                return _ProjectReport(requeued, dead_lettered, pending_not_timed_out=before)
+                after = await self._backend.get_pending_count(project_id)
+                if after < before:
+                    continue
+                return _ProjectReport(requeued, dead_lettered, pending_not_timed_out=after)
             moved = await self._move_items(project_id, items)
             requeued += moved.requeued
             dead_lettered += moved.dead_lettered
@@ -196,7 +199,8 @@ def _task_with_cumulative_retries(item: ReclaimedTask) -> QueueTask:
     如果用瞬态 delivery_count 覆盖载荷累计值，毒任务跨接管永远到不了
     死信。这里把累计值持久化回载荷，供下次接管继续累加并做死信判定。
     """
-    return replace(item.task, retry_count=item.task.retry_count + item.delivery_count)
+    retries_in_generation = max(item.delivery_count - 1, 0)
+    return replace(item.task, retry_count=item.task.retry_count + retries_in_generation)
 
 
 async def _load_running_batch_ids() -> list[str]:

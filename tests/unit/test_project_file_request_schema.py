@@ -5,7 +5,9 @@ def test_file_create_blank_json_fields_become_empty_dicts():
     request = ProjectFileCreateRequest(
         name="Demo File",
         type="file",
+        worker_id="worker-1",
         runtime_scope="shared",
+        python_version="3.12.11",
         repository_id="repo-001",
         subdir="spiders/news",
         entry_point="main.py",

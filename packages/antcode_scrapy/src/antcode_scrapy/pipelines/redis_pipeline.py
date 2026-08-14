@@ -291,16 +291,10 @@ class AntCodeRedisPipeline:
         if not close_ok or remaining > 0:
             # P1-27: 最终 flush 失败——补一次 xadd_failed，让 crawl.py 里
             # ``if xadd_failed > 0: return 1`` 生效。
-            try:
-                stats.inc_value("antcode/redis_xadd_failed")
-            except Exception:
-                pass
+            stats.inc_value("antcode/redis_xadd_failed")
             # 新增标记供 CLI 直接感知 close 阶段失败
-            try:
-                stats.set_value("antcode/final_flush_failed", 1)
-                stats.set_value("antcode/final_flush_remaining", int(remaining))
-            except Exception:
-                pass
+            stats.set_value("antcode/final_flush_failed", 1)
+            stats.set_value("antcode/final_flush_remaining", int(remaining))
 
         final_xadd_failed = int(stats.get_value("antcode/redis_xadd_failed", 0))
         final_written = int(stats.get_value("antcode/redis_items_written", 0))

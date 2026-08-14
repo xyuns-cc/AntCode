@@ -4,12 +4,23 @@
 用户账户的数据模型定义。
 """
 
+import secrets
 from enum import StrEnum
 
 import bcrypt
 from tortoise import fields
 
 from antcode_core.domain.models.base import BaseModel, generate_public_id
+
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
+def password_byte_length(password: str) -> int:
+    return len(password.encode("utf-8"))
+
+
+def password_fits_bcrypt(password: str) -> bool:
+    return password_byte_length(password) <= BCRYPT_MAX_PASSWORD_BYTES
 
 
 class UserRole(StrEnum):
@@ -24,10 +35,14 @@ class BcryptPasswordContext:
     """基于 bcrypt 的密码上下文。"""
 
     def hash(self, password: str) -> str:
+        if password_byte_length(password) > BCRYPT_MAX_PASSWORD_BYTES:
+            raise ValueError("密码 UTF-8 编码不能超过 72 字节")
         hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
         return hashed.decode("utf-8")
 
     def verify(self, password: str, password_hash: str) -> bool:
+        if password_byte_length(password) > BCRYPT_MAX_PASSWORD_BYTES:
+            return False
         try:
             return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
         except (TypeError, ValueError):
@@ -35,6 +50,12 @@ class BcryptPasswordContext:
 
 
 pwd_context = BcryptPasswordContext()
+_DUMMY_PASSWORD_HASH = pwd_context.hash(secrets.token_urlsafe(32))
+
+
+def consume_dummy_password_check(password: str) -> None:
+    """为不存在的用户执行等成本校验，收敛用户名计时侧信道。"""
+    pwd_context.verify(password, _DUMMY_PASSWORD_HASH)
 
 
 class User(BaseModel):
@@ -43,7 +64,7 @@ class User(BaseModel):
     表示系统用户账户。
     """
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     username = fields.CharField(max_length=50, unique=True)
     password_hash = fields.CharField(max_length=128)
     email = fields.CharField(max_length=100, null=True)
@@ -63,7 +84,6 @@ class User(BaseModel):
             ("is_admin",),
             ("last_login_at",),
             ("is_active", "is_admin"),
-            ("public_id",),
         ]
 
     def set_password(self, password: str) -> None:
@@ -100,5 +120,9 @@ class User(BaseModel):
 __all__ = [
     "User",
     "UserRole",
+    "BCRYPT_MAX_PASSWORD_BYTES",
+    "consume_dummy_password_check",
+    "password_byte_length",
+    "password_fits_bcrypt",
     "pwd_context",
 ]

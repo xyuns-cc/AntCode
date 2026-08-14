@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -15,6 +16,8 @@ from antcode_web_api.services.worker_registration import (
     register_or_recover,
 )
 from tortoise import Tortoise
+
+EXPECTED_ACK_ENABLE_CALLS = 2
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -34,6 +37,11 @@ async def database(tmp_path, monkeypatch):
         timezone="UTC",
     )
     await Tortoise.generate_schemas()
+    connection = Tortoise.get_connection("default")
+    await connection.execute_query(
+        "CREATE UNIQUE INDEX idx_worker_install_keys_registration_id_unique "
+        "ON worker_install_keys (registration_id) WHERE registration_id IS NOT NULL"
+    )
     yield
     await Tortoise.close_connections()
     await Tortoise._reset_apps()
@@ -100,15 +108,49 @@ async def test_v2_registration_ack_is_idempotent_and_closes_recovery() -> None:
     request = _request()
     created = await register_or_recover(request, install_key, "127.0.0.1")
 
-    first_ack = await acknowledge_registration(created.worker_id, request.registration_id)
-    repeated_ack = await acknowledge_registration(created.worker_id, request.registration_id)
+    lease_enabler = AsyncMock(return_value=True)
+    first_ack = await acknowledge_registration(
+        created.worker_id,
+        request.registration_id,
+        lease_enabler=lease_enabler,
+    )
+    repeated_ack = await acknowledge_registration(
+        created.worker_id,
+        request.registration_id,
+        lease_enabler=lease_enabler,
+    )
 
     assert repeated_ack == first_ack
+    assert lease_enabler.await_count == EXPECTED_ACK_ENABLE_CALLS
     persisted_key = await WorkerInstallKey.get(id=install_key.id)
     assert persisted_key.recovery_secret_hash is None
     assert persisted_key.recovery_expires_at is None
     with pytest.raises(RegistrationConflict, match="恢复窗口已关闭"):
         await register_or_recover(request, persisted_key, "127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_v2_registration_ack_retry_recovers_after_fence_enable_failure() -> None:
+    install_key = await _pending_key()
+    request = _request()
+    created = await register_or_recover(request, install_key, "127.0.0.1")
+    lease_enabler = AsyncMock(side_effect=[RuntimeError("redis unavailable"), True])
+
+    with pytest.raises(RuntimeError, match="redis unavailable"):
+        await acknowledge_registration(
+            created.worker_id,
+            request.registration_id,
+            lease_enabler=lease_enabler,
+        )
+    acknowledged_at = await acknowledge_registration(
+        created.worker_id,
+        request.registration_id,
+        lease_enabler=lease_enabler,
+    )
+
+    assert acknowledged_at == (await WorkerInstallKey.get(id=install_key.id)).registration_acknowledged_at
+    expected_attempts = 2
+    assert lease_enabler.await_count == expected_attempts
 
 
 @pytest.mark.asyncio
@@ -214,10 +256,10 @@ async def test_v2_registration_rejects_duplicate_registration_id_across_keys() -
 @pytest.mark.asyncio
 async def test_v2_registration_ack_rejects_missing_or_wrong_worker() -> None:
     with pytest.raises(RegistrationNotFound, match="不存在"):
-        await acknowledge_registration("worker-missing", "f" * 32)
+        await acknowledge_registration("worker-missing", "f" * 32, lease_enabler=AsyncMock())
 
     install_key = await _pending_key()
     request = _request()
     await register_or_recover(request, install_key, "127.0.0.1")
     with pytest.raises(RegistrationForbidden, match="身份不匹配"):
-        await acknowledge_registration("worker-other", request.registration_id)
+        await acknowledge_registration("worker-other", request.registration_id, lease_enabler=AsyncMock())

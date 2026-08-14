@@ -78,6 +78,44 @@ async def test_access_token_resolves_active_server_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_old_admin_token_resolves_live_demoted_role(monkeypatch):
+    session_jti = "jti-demoted-admin"
+    token = jwt_auth.create_access_token(
+        7,
+        "admin-before-demotion",
+        is_admin=True,
+        role=UserRole.ADMIN.value,
+        session_jti=session_jti,
+    )
+
+    class SessionQuery:
+        async def first(self):
+            return SimpleNamespace(
+                user_id=7,
+                revoked_at=None,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+    async def get_user(**_kwargs):
+        return SimpleNamespace(
+            username="demoted-user",
+            is_admin=False,
+            is_active=True,
+            role=UserRole.USER,
+        )
+
+    monkeypatch.setattr(UserSession, "filter", lambda **_kwargs: SessionQuery())
+    monkeypatch.setattr(User, "get_or_none", get_user)
+
+    result = await get_current_user(SimpleNamespace(credentials=token))
+
+    assert result.username == "demoted-user"
+    assert result.role == UserRole.USER.value
+    assert result.is_admin is False
+    assert result.session_jti == session_jti
+
+
+@pytest.mark.asyncio
 async def test_access_token_rejects_shortened_server_session(monkeypatch):
     token = jwt_auth.create_access_token(7, "user", session_jti="jti-expired")
     captured: dict = {}

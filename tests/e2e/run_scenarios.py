@@ -100,7 +100,7 @@ async def _cleanup_created(
         )
     for path in paths:
         try:
-            await request_json(client, "DELETE", path, token=token)
+            await _delete_when_no_longer_in_use(client, token, path)
         except Exception as exc:
             errors.append(exc)
     try:
@@ -108,6 +108,31 @@ async def _cleanup_created(
     except Exception as exc:
         errors.append(exc)
     return errors
+
+
+CLEANUP_CONFLICT_ATTEMPTS = 30
+CLEANUP_CONFLICT_INTERVAL_SECONDS = 2.0
+
+
+async def _delete_when_no_longer_in_use(client: httpx.AsyncClient, token: str, path: str) -> None:
+    """删除资源，遇 409 就退避重试。
+
+    "运行中的任务/项目不可删" 是产品的正确行为，而用例读完日志时任务往往还没
+    落终态。清理阶段直接 DELETE 会拿到 409 并把整条用例判失败——失败的是拆卸而
+    不是被测行为。这里等它进入可删状态，超时仍冲突才抛出。
+    """
+    last_error: Exception | None = None
+    for _ in range(CLEANUP_CONFLICT_ATTEMPTS):
+        try:
+            await request_json(client, "DELETE", path, token=token)
+            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != httpx.codes.CONFLICT:
+                raise
+            last_error = exc
+            await asyncio.sleep(CLEANUP_CONFLICT_INTERVAL_SECONDS)
+    if last_error is not None:
+        raise last_error
 
 
 @asynccontextmanager

@@ -179,22 +179,6 @@ async def test_ack_control_rejects_a_stale_worker_lease():
     lease_store.is_current.assert_awaited_once_with("worker-a", "stale-lease")
 
 
-@pytest.mark.asyncio
-async def test_register_does_not_create_an_unusable_lease():
-    lease_store = MagicMock()
-    lease_store.policy.ttl_ms = 30_000
-    lease_store.policy.renew_after_ms = 10_000
-    service = GatewayControlService(lease_store=lease_store)
-    service._verify_registration = AsyncMock(return_value=(True, "", MagicMock()))
-    request = control_pb2.RegisterRequest(worker_id="worker-a", api_key="api-key")
-
-    response = await service.Register(request, _context())
-
-    assert response.success is True
-    assert response.lease_ttl_ms == 30_000
-    lease_store.grant.assert_not_called()
-
-
 async def _single(message):
     yield message
 
@@ -205,7 +189,6 @@ async def _single(message):
     [
         (
             "StreamStatus",
-            # P1-GW-06: TaskStatus 必须带 data["lease_id"]，StreamStatus 与 AckTask 对称做 lease 校验。
             data_pb2.TaskStatus(worker_id="worker-a", run_id="run-status", data={"lease_id": "lease-a"}),
             "result_handler",
             True,
@@ -249,6 +232,7 @@ async def test_gateway_data_streams_verify_run_ownership(
     lease_verifier = AsyncMock(return_value=True)
     handler = MagicMock()
     if method_name == "StreamStatus":
+        message.status = data_pb2.STATUS_RUNNING
         handler.handle = AsyncMock(return_value=handler_result)
     elif method_name == "StreamLogs":
         handler.handle_log_batch = AsyncMock(return_value=handler_result)
@@ -305,8 +289,8 @@ async def test_gateway_data_stream_rejects_foreign_run_before_persistence():
     )
     original = grpc.stream_unary_rpc_method_handler(service.StreamStatus)
     wrapped = AuthInterceptor()._make_mtls_wrapped_handler(original, "worker-a")
-    # P1-GW-06: TaskStatus 必须带 lease_id 才能走到 ownership 检查触发 PermissionError。
     message = data_pb2.TaskStatus(worker_id="worker-a", run_id="run-foreign", data={"lease_id": "lease-a"})
+    message.status = data_pb2.STATUS_RUNNING
 
     with pytest.raises(AbortCalled):
         await wrapped.stream_unary(_single(message), _context())

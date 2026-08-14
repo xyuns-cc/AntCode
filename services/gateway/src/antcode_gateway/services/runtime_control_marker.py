@@ -7,6 +7,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from antcode_core.common.error_messages import normalize_persisted_error_message
+
+MAX_CONTROL_ERROR_BYTES = 16 * 1024
+
 
 @dataclass(frozen=True)
 class SettlementEvidence:
@@ -62,7 +66,7 @@ def build_settlement_evidence(
         lease_id=request.lease_id,
         success=bool(request.success),
         data_json=canonical_data_json,
-        error=request.error or "",
+        error=normalize_persisted_error_message(request.error, max_bytes=MAX_CONTROL_ERROR_BYTES) or "",
         fingerprint=fingerprint,
     )
 

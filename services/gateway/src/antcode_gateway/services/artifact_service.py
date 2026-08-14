@@ -10,10 +10,10 @@ import aiofiles  # type: ignore[import-untyped]
 import grpc
 from antcode_contracts import artifact_pb2
 from antcode_contracts.artifact_pb2_grpc import ArtifactServiceServicer
-from antcode_core.application.services.crawl.spider_storage_cleanup import SPIDER_WRITABLE_TASK_STATUSES
 from antcode_core.application.services.workers.run_ownership_service import (
     require_worker_owns_runs_for_lease,
 )
+from antcode_core.domain.models.task_status_sets import SPIDER_WRITABLE_TASK_STATUSES
 from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker

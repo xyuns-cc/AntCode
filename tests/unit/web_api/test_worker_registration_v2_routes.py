@@ -61,3 +61,20 @@ async def test_registration_ack_rejects_path_identity_mismatch() -> None:
         await worker_install.acknowledge_worker_registration("worker-1", request, auth_context)
 
     assert getattr(exc_info.value, "status_code", None) == 403
+
+
+@pytest.mark.asyncio
+async def test_registration_ack_enables_registration_fence(monkeypatch) -> None:
+    request = WorkerRegistrationAckRequest(registration_id="a" * 32)
+    auth_context = {"worker": SimpleNamespace(public_id="worker-1")}
+    acknowledged_at = datetime.now(UTC)
+    acknowledge = AsyncMock(return_value=acknowledged_at)
+    enable = AsyncMock(return_value=True)
+    monkeypatch.setattr(worker_install, "acknowledge_registration", acknowledge)
+    monkeypatch.setattr(worker_install, "_enable_registration_lease", enable)
+
+    response = await worker_install.acknowledge_worker_registration("worker-1", request, auth_context)
+
+    assert response.success is True
+    lease_enabler = acknowledge.await_args.kwargs["lease_enabler"]
+    assert lease_enabler is enable

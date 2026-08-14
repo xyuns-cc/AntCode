@@ -50,28 +50,20 @@ import {
 import PageContainer from '@/components/common/PageContainer'
 import FilterBar from '@/components/common/FilterBar'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
+import WorkerInstallKeyModals from '@/components/workers/WorkerInstallKeyModals'
 import WorkerResourceManagement from '@/components/workers/WorkerResourceManagement'
 import WorkerSpiderStats from '@/components/workers/WorkerSpiderStats'
 import { useWorkerStore } from '@/stores/workerStore'
 import { workerService } from '@/services/workers'
+import type { WorkerUserPermission } from '@/services/workerServiceContracts'
 import { userService } from '@/services/users'
 import type { Worker, WorkerStatus } from '@/types'
 import { formatDateTime } from '@/utils/format'
 import showNotification from '@/utils/notification'
-import { STORAGE_KEYS } from '@/utils/constants'
-
-// Worker用户权限类型
-interface WorkerUserPermission {
-  user_id: string
-  username: string
-  permission: string
-  assigned_at: string
-  note?: string
-}
 
 const { Search } = Input
 const { Option } = Select
-const { Text, Paragraph } = Typography
+const { Text } = Typography
 
 // Worker 状态配置
 const statusConfig: Record<WorkerStatus, { color: string; text: string; badge: 'success' | 'error' | 'warning' | 'processing' }> = {
@@ -117,14 +109,8 @@ const Workers: React.FC = () => {
   const [editModalVisible, setEditModalVisible] = useState(false)
   const [detailModalVisible, setDetailModalVisible] = useState(false)
   const [selectedWorker, setSelectedWorker] = useState<Worker | null>(null)
-  const [installKeyModalVisible, setInstallKeyModalVisible] = useState(false)
-  const [installKeyData, setInstallKeyData] = useState<{
-    key: string
-    os_type: string
-    allowed_source?: string
-    install_command: string
-    expires_at: string
-  } | null>(null)
+  // 待生成的安装 Key：选定 OS 后由弹窗组件收集来源绑定并调用接口
+  const [pendingOsType, setPendingOsType] = useState<string | null>(null)
   const [form] = Form.useForm()
 
   // 权限管理
@@ -249,17 +235,27 @@ const Workers: React.FC = () => {
       cancelText: '取消',
       onOk: async () => {
         let successCount = 0
+        const failures: string[] = []
         for (const id of selectedRowKeys) {
           try {
             await workerService.deleteWorker(id as string)
             removeWorker(id as string)
             successCount++
-          } catch {
-            // 继续删除其他
+          } catch (error: unknown) {
+            const err = error as { message?: string }
+            failures.push(`${id as string}: ${err.message || '未知错误'}`)
           }
         }
         setSelectedRowKeys([])
-        showNotification('success', `成功删除 ${successCount} 个Worker`)
+        if (failures.length === 0) {
+          showNotification('success', `成功删除 ${successCount} 个Worker`)
+          return
+        }
+        const level = successCount > 0 ? 'warning' : 'error'
+        const title = successCount > 0
+          ? `删除完成：成功 ${successCount} 个，失败 ${failures.length} 个`
+          : `删除失败：${failures.length} 个Worker 均未删除`
+        showNotification(level, title, failures.join('\n'))
       }
     })
   }
@@ -281,21 +277,7 @@ const Workers: React.FC = () => {
     }
   }, [refreshWorkers])
 
-  // 生成安装 Key 并复制到剪贴板
-  const handleGenerateKey = async (osType: string) => {
-    try {
-      const allowedSource = localStorage.getItem(STORAGE_KEYS.INSTALL_KEY_ALLOWED_SOURCE) || undefined
-      const result = await workerService.generateInstallKey(osType, allowedSource)
-      setInstallKeyData(result)
-      setInstallKeyModalVisible(true)
-      await navigator.clipboard.writeText(result.key)
-      showNotification('success', `${osType.toUpperCase()} 安装 Key 已复制到剪贴板`)
-    } catch (error: unknown) {
-      const err = error as { message?: string }
-      showNotification('error', err.message || '生成安装 Key 失败')
-    }
-  }
-
+  const closeGenerateKeyModal = useCallback(() => setPendingOsType(null), [])
 
   // 进入 Worker
   const handleEnterWorker = useCallback((worker: Worker) => {
@@ -337,9 +319,9 @@ const Workers: React.FC = () => {
       setWorkerUsers(users)
 
       // 获取所有用户列表（用于添加权限）- 只获取非管理员用户
-      const allUsersData = await userService.getUserList({ page: 1, size: 100 })
+      const allUsersData = await userService.getAllUsers()
       // 过滤掉管理员用户，管理员默认拥有全部Worker 权限
-      const regularUsers = allUsersData.users.filter(u => !u.is_admin)
+      const regularUsers = allUsersData.filter(u => !u.is_admin)
       setAllUsers(regularUsers.map(u => ({ id: u.id, username: u.username })))
     } catch (error: unknown) {
       const err = error as { message?: string }
@@ -678,7 +660,7 @@ const Workers: React.FC = () => {
                     { key: 'macos', label: 'macOS', icon: <AppleOutlined /> },
                     { key: 'windows', label: 'Windows', icon: <WindowsOutlined /> },
                   ],
-                  onClick: ({ key }) => handleGenerateKey(key),
+                  onClick: ({ key }) => setPendingOsType(key),
                 }}
                 trigger={['hover']}
               >
@@ -989,81 +971,8 @@ const Workers: React.FC = () => {
         )}
       </Modal>
 
-      {/* 安装 Key 弹窗 */}
-      <Modal
-        title={
-          <Space>
-            <LinkOutlined />
-            Worker 安装 Key
-          </Space>
-        }
-        open={installKeyModalVisible}
-        onCancel={() => setInstallKeyModalVisible(false)}
-        footer={
-          <Space>
-            <Button
-              onClick={async () => {
-                if (!installKeyData?.install_command) return
-                try {
-                  await navigator.clipboard.writeText(installKeyData.install_command)
-                  showNotification('success', '安装命令已复制到剪贴板')
-                } catch (error: unknown) {
-                  const err = error as { message?: string }
-                  showNotification('error', err.message || '复制安装命令失败')
-                }
-              }}
-              disabled={!installKeyData?.install_command}
-            >
-              复制安装命令
-            </Button>
-            <Button type="primary" onClick={() => setInstallKeyModalVisible(false)}>
-              关闭
-            </Button>
-          </Space>
-        }
-        width={720}
-      >
-        {installKeyData && (
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Alert
-              type="info"
-              showIcon
-              message="Gateway 首次连接需要安装 Key"
-              description="Direct 模式无需安装 Key，会自动生成并持久化 worker_id。"
-            />
-            <Descriptions
-              column={1}
-              bordered
-              size="small"
-              labelStyle={{ width: 140, whiteSpace: 'nowrap' }}
-            >
-              <Descriptions.Item label="操作系统">
-                {installKeyData.os_type?.toUpperCase?.() || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="来源绑定">
-                {installKeyData.allowed_source || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="有效期">
-                {installKeyData.expires_at ? formatDateTime(installKeyData.expires_at) : '-'}
-              </Descriptions.Item>
-            </Descriptions>
-            <div>
-              <Text type="secondary">安装 Key</Text>
-              <Paragraph copyable={{ text: installKeyData.key }} style={{ marginBottom: 0 }}>
-                <Text code style={{ wordBreak: 'break-all' }}>{installKeyData.key}</Text>
-              </Paragraph>
-            </div>
-            <div>
-              <Text type="secondary">安装命令</Text>
-              <Paragraph copyable={{ text: installKeyData.install_command }} style={{ marginBottom: 0 }}>
-                <Text code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                  {installKeyData.install_command}
-                </Text>
-              </Paragraph>
-            </div>
-          </Space>
-        )}
-      </Modal>
+      {/* 安装 Key 弹窗：来源绑定收集 + 一次性凭据展示 */}
+      <WorkerInstallKeyModals osType={pendingOsType} onClose={closeGenerateKeyModal} />
 
       {/* 权限管理弹窗 */}
       <Modal

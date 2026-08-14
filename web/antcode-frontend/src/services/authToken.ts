@@ -37,8 +37,25 @@ export const decodeAccessToken = (token: string): Record<string, unknown> | null
 // 模糊清理误删（该标记由本模块显式管理生命周期）。
 // ---------------------------------------------------------------------------
 const SESSION_HINT_STORAGE_KEY = 'antcode_session_hint'
-const SESSION_GENERATION_STORAGE_KEY = 'antcode_session_generation'
-const SESSION_ACCOUNT_STORAGE_KEY = 'antcode_session_account'
+const SESSION_IDENTITY_STORAGE_KEY = 'antcode_session_identity'
+
+type SessionIdentity = {
+  sessionJti: string
+  username: string | null
+}
+
+const readSessionIdentity = (): SessionIdentity | null => {
+  const raw = localStorage.getItem(SESSION_IDENTITY_STORAGE_KEY)
+  if (!raw) return null
+  try {
+    const value = JSON.parse(raw) as Partial<SessionIdentity>
+    if (typeof value.sessionJti !== 'string') return null
+    if (value.username !== null && typeof value.username !== 'string') return null
+    return { sessionJti: value.sessionJti, username: value.username ?? null }
+  } catch {
+    return null
+  }
+}
 
 export const setSessionHint = (): void => {
   try {
@@ -65,21 +82,20 @@ export const hasSessionHint = (): boolean => {
 }
 
 export const setSessionGeneration = (sessionJti: string, username?: string): void => {
-  localStorage.setItem(SESSION_GENERATION_STORAGE_KEY, sessionJti)
-  if (username) localStorage.setItem(SESSION_ACCOUNT_STORAGE_KEY, username)
+  const identity: SessionIdentity = { sessionJti, username: username ?? null }
+  localStorage.setItem(SESSION_IDENTITY_STORAGE_KEY, JSON.stringify(identity))
 }
 
 export const getSessionGeneration = (): string | null => {
-  return localStorage.getItem(SESSION_GENERATION_STORAGE_KEY)
+  return readSessionIdentity()?.sessionJti ?? null
 }
 
 export const getSessionAccount = (): string | null => {
-  return localStorage.getItem(SESSION_ACCOUNT_STORAGE_KEY)
+  return readSessionIdentity()?.username ?? null
 }
 
 export const clearSessionGeneration = (): void => {
-  localStorage.removeItem(SESSION_GENERATION_STORAGE_KEY)
-  localStorage.removeItem(SESSION_ACCOUNT_STORAGE_KEY)
+  localStorage.removeItem(SESSION_IDENTITY_STORAGE_KEY)
 }
 
 // ---------------------------------------------------------------------------

@@ -97,3 +97,62 @@ async def test_publish_task_logs_purge_events_payload_shape():
     payload = enqueue_mock.await_args.kwargs["payload"]
     assert payload["project_id"] == "7"
     assert payload["run_ids"] == ["run-a", "run-b"]
+
+
+@pytest.mark.asyncio
+async def test_publish_crawl_project_cleanup_event_preserves_public_ids():
+    from antcode_core.application.services.projects.project_cascade_delete import (
+        _publish_crawl_project_cleanup_event,
+    )
+
+    enqueue_mock = AsyncMock()
+    with patch(
+        "antcode_core.application.services.scheduler.outbox_service.scheduler_outbox_service.enqueue",
+        enqueue_mock,
+    ):
+        conn = MagicMock()
+        await _publish_crawl_project_cleanup_event(
+            conn=conn,
+            project_id=7,
+            project_public_id="project-public",
+            batch_ids=("batch-a", "batch-b"),
+        )
+
+    kwargs = enqueue_mock.await_args.kwargs
+    assert kwargs == {
+        "event_type": "crawl_project_cleanup",
+        "aggregate_type": "project",
+        "aggregate_id": 7,
+        "payload": {
+            "project_id": "project-public",
+            "batch_ids": ["batch-a", "batch-b"],
+        },
+        "connection": conn,
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_commit_crawl_failure_is_marked_for_durable_retry():
+    from antcode_core.application.services.projects.project_cascade_delete import (
+        _run_post_commit_cleanup,
+    )
+
+    deleted = {"task_logs": 0, "crawl_redis_cleanup_deferred": 0}
+    with (
+        patch(
+            "antcode_core.application.services.crawl.project_redis_cleanup.crawl_project_redis_cleanup.cleanup",
+            AsyncMock(side_effect=RuntimeError("redis unavailable")),
+        ),
+        patch(
+            "antcode_core.application.services.logs.task_log_run_guard.purge_task_logs_for_runs",
+            AsyncMock(return_value=2),
+        ),
+    ):
+        await _run_post_commit_cleanup(
+            project_public_id="project-public",
+            batch_ids=("batch-a",),
+            run_ids=["run-a"],
+            deleted=deleted,
+        )
+
+    assert deleted == {"task_logs": 2, "crawl_redis_cleanup_deferred": 1}

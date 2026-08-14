@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   clearAccessToken,
@@ -14,12 +15,14 @@ import {
 } from './authSessionChannel'
 
 const futureToken = (username = 'alice'): string => {
-  const payload = btoa(JSON.stringify({
-    exp: Math.floor(Date.now() / 1000) + 3600,
-    username,
-    token_type: 'access',
-    session_jti: `session-${username}`,
-  }))
+  const payload = btoa(
+    JSON.stringify({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      username,
+      token_type: 'access',
+      session_jti: `session-${username}`,
+    })
+  )
   return `header.${payload}.signature`
 }
 
@@ -189,15 +192,13 @@ describe('auth session channel', () => {
     vi.stubGlobal('BroadcastChannel', undefined)
 
     await expect(withCrossTabRefreshLock(async () => 'unsafe')).rejects.toThrow(
-      '无法安全同步多标签会话',
+      '无法安全同步多标签会话'
     )
   })
 
-  it('fails explicitly when native Web Locks are unavailable', async () => {
+  it('uses the IndexedDB lock when native Web Locks are unavailable', async () => {
     vi.stubGlobal('navigator', {})
 
-    await expect(withCrossTabRefreshLock(async () => 'unsafe')).rejects.toThrow(
-      '无法安全协调多标签会话刷新',
-    )
+    await expect(withCrossTabRefreshLock(async () => 'safe')).resolves.toBe('safe')
   })
 })

@@ -15,7 +15,8 @@ export interface UseTasksParams {
 }
 
 const buildTaskParams = (params: UseTasksParams): TaskListParams => {
-  const { page, size, project_id, status, schedule_type, search, specified_worker_id, worker_id } = params
+  const { page, size, project_id, status, schedule_type, search, specified_worker_id, worker_id } =
+    params
   return {
     page,
     size,
@@ -24,7 +25,7 @@ const buildTaskParams = (params: UseTasksParams): TaskListParams => {
     schedule_type,
     search,
     specified_worker_id,
-    worker_id
+    worker_id,
   }
 }
 
@@ -33,19 +34,16 @@ export const useTasksQuery = (params: UseTasksParams, enabled: boolean) => {
     queryKey: ['tasks', params],
     queryFn: () => taskService.getTasks(buildTaskParams(params)),
     placeholderData: (previous) => previous,
-    enabled
+    enabled,
   })
 }
 
-export const useProjectsQuery = (
-  workerId?: string,
-  enabled: boolean = true,
-) => {
-  return useQuery<{ items: Project[]; page: number; size: number; total: number; pages: number }>({
+export const useProjectsQuery = (workerId?: string, enabled: boolean = true) => {
+  return useQuery<Project[]>({
     queryKey: ['projects', 'options', workerId || 'all'],
-    queryFn: () => projectService.getProjects({ page: 1, size: 200, worker_id: workerId }),
+    queryFn: () => projectService.getAllProjects({ worker_id: workerId }),
     staleTime: 60_000,
-    enabled
+    enabled,
   })
 }
 
@@ -56,17 +54,17 @@ export const useTaskMutations = () => {
 
   const triggerTask = useMutation({
     mutationFn: (taskId: string) => taskService.triggerTask(taskId),
-    onSuccess: () => invalidateTasks()
+    onSuccess: () => invalidateTasks(),
   })
 
   const deleteTask = useMutation({
     mutationFn: (taskId: string) => taskService.deleteTask(taskId),
-    onSuccess: () => invalidateTasks()
+    onSuccess: () => invalidateTasks(),
   })
 
   const batchDelete = useMutation({
     mutationFn: (ids: string[]) => taskService.batchDeleteTasks(ids),
-    onSuccess: () => invalidateTasks()
+    onSuccess: () => invalidateTasks(),
   })
 
   return { triggerTask, deleteTask, batchDelete }

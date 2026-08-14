@@ -20,10 +20,12 @@ dependencies = [
     "loguru>=0.7.0",
     # T6-T3b: gateway 模式的 spider data sink 走 gRPC 直连 gateway
     "grpcio>=1.60",
+    "antcode-core",
     "antcode-contracts",
 ]
 
 [tool.uv.sources]
+antcode-core = { workspace = true }
 antcode-contracts = { workspace = true }
 
 [project.optional-dependencies]

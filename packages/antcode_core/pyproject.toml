@@ -4,6 +4,8 @@ version = "1.0.0"
 description = "AntCode 共享核心包：通用配置、基础设施适配、领域模型"
 requires-python = ">=3.11"
 dependencies = [
+    # 共享 protobuf 日志/任务传输契约
+    "antcode-contracts>=1.0.0",
     # 数据库
     "tortoise-orm>=0.21.0",
     "asyncpg>=0.29.0",
@@ -14,7 +16,8 @@ dependencies = [
     # 身份认证
     "pyjwt>=2.13.0",
     "passlib[bcrypt]>=1.7.4",
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
+    "filelock>=3.20.0",
     # 缓存
     "redis>=5.0.0",
     # 日志
@@ -28,6 +31,7 @@ dependencies = [
     "lz4>=4.3.0",
     # HTTP 客户端（alert channel / http_client 用）
     "httpx[http2]>=0.28.1",
+    "h2>=4.4.1",
     # 系统监控（monitoring/system_metrics_service 用 psutil）
     "psutil>=5.9.0",
     # 定时任务调度（scheduler_service 用 apscheduler）

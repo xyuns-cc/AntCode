@@ -128,11 +128,6 @@ class CrawlService extends BaseService {
     return this.post<CrawlBatchSummary>(`/batches/${batchId}/cancel`, {})
   }
 
-  // 删除
-  async deleteBatch(batchId: string): Promise<void> {
-    return this.delete<void>(`/batches/${batchId}`)
-  }
-
   // 进度
   async getProgress(batchId: string): Promise<CrawlBatchProgress> {
     return this.get<CrawlBatchProgress>(`/batches/${batchId}/progress`)
@@ -154,8 +149,8 @@ class CrawlService extends BaseService {
   // P2-15: 保留只为兼容旧调用点，新代码请用 exportBatch()。
   // window.open(exportBatchUrl(...)) 会绕过 axios 拦截器，Authorization
   // 头不会带上 → 服务端 401。
-  exportBatchUrl(batchId: string, format: 'json' | 'csv', limit = 10000): string {
-    return `/api/v1/crawl/batches/${batchId}/export?format=${format}&limit=${limit}`
+  exportBatchUrl(batchId: string, format: 'json' | 'csv'): string {
+    return `/api/v1/crawl/batches/${batchId}/export?format=${format}`
   }
 
   /**
@@ -166,16 +161,13 @@ class CrawlService extends BaseService {
    * 这里改成 responseType: 'blob' 走鉴权拿字节流，再合成 <a download>
    * 触发下载。
    */
-  async exportBatch(
-    batchId: string,
-    format: 'json' | 'csv',
-    limit = 10000
-  ): Promise<void> {
+  async exportBatch(batchId: string, format: 'json' | 'csv'): Promise<void> {
     // BaseService.downloadFile 已经封装了 blob 请求 + content-disposition
     // 解析 + <a> 触发；这里直接复用，避免各页面再手写一遍下载胶水。
     await this.downloadFile(
-      `/batches/${batchId}/export?format=${format}&limit=${limit}`,
-      `crawl-batch-${batchId}.${format}`
+      `/batches/${batchId}/export?format=${format}`,
+      `crawl-batch-${batchId}.${format}`,
+      { timeout: 0 }
     )
   }
 }

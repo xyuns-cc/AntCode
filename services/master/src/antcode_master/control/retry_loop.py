@@ -9,8 +9,7 @@ Master 重启 / Leader 切换会永久丢失重试(retry 实际是 at-most-once)
 ``HDEL`` processing;崩溃时下轮 tick 由 ``sweep_stalled`` 恢复。
 
 ``scheduler_loop._schedule_retry`` 先在 TaskRun 上原子创建 durable intent，
-再通过 ``schedule_intent`` 投递 Redis；retry loop 真正创建新 TaskRun 后才
-清理数据库 intent 并 ACK processing entry。
+再投递 Redis；创建新 TaskRun 后才清理数据库 intent 并 ACK processing entry。
 """
 
 from __future__ import annotations
@@ -23,9 +22,18 @@ from enum import StrEnum
 from typing import Any
 
 from antcode_core.common.config import settings
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
 from loguru import logger
+from redis.exceptions import NoScriptError
+
+from antcode_master.control.retry_db_recovery import recover_retry_intents, terminate_durable_intent
+from antcode_master.control.retry_intent_guard import (
+    RetryIntent,
+    RetryIntentInvalidError,
+    RetryTargetInvalidError,
+)
 
 
 class RetryStrategy(StrEnum):
@@ -75,22 +83,28 @@ class RetryConfig:
         ]
 
 
-# G3: 单条 claimed intent 的最大处理尝试次数(含首次)。持续失败的 payload
-# 超过该次数后不再 requeue —— 记录完整 payload 并丢弃,避免 poison intent
-# 以 ~5s 周期 claim→raise→requeue 无限循环。
-MAX_CLAIM_ATTEMPTS = 5
+INFRASTRUCTURE_REQUEUE_DELAY_SECONDS = 5
 
 
-# P1-FN-10: task 合法 busy 时抛此异常，requeue 但不计入 MAX_CLAIM_ATTEMPTS，避免 busy → 被误判 poison 丢弃。
 class RetryClaimBusyError(RuntimeError):
     """Retry intent 无法立即消费(target task busy),需 requeue 但不算失败。"""
 
     pass
 
 
-# ---------------------------------------------------------------------------
+def _parse_retry_intent(item: dict[str, Any], source_run_id: str) -> RetryIntent:
+    try:
+        task_id = int(item["task_id"])
+        retry_count = int(item["retry_count"])
+        retry_time = datetime.fromisoformat(str(item["retry_time"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RetryIntentInvalidError(f"retry payload 字段非法: run_id={source_run_id}") from exc
+    if task_id <= 0 or retry_count <= 0 or retry_time.tzinfo is None:
+        raise RetryIntentInvalidError(f"retry payload 值非法: run_id={source_run_id}")
+    return RetryIntent(task_id, source_run_id, retry_count, retry_time)
+
+
 # Lua: 原子 claim —— ZRANGEBYSCORE + ZREM + HSET processing 一步完成
-# ---------------------------------------------------------------------------
 # KEYS[1] = pending ZSet, KEYS[2] = processing Hash
 # ARGV[1] = now_ms, ARGV[2] = limit, ARGV[3] = claim_ms(processing value)
 _RETRY_CLAIM_LUA = """
@@ -189,21 +203,19 @@ class _RetryQueueBackend:
                 str(limit),
                 str(now_ms),
             )
-        except Exception as exc:
-            if "NOSCRIPT" in str(exc):
-                logger.warning("retry claim 脚本未在 Redis 缓存中,回退 EVAL")
-                self._claim_sha = None
-                raw_list = await redis.eval(
-                    _RETRY_CLAIM_LUA,
-                    2,
-                    self.pending_key(),
-                    self.processing_key(),
-                    str(now_ms),
-                    str(limit),
-                    str(now_ms),
-                )
-            else:
-                raise
+        except NoScriptError:
+            # 必须捕获类型：redis-py 已剥掉 "NOSCRIPT" 错误码前缀，按子串判断永不成立。
+            logger.warning("retry claim 脚本未在 Redis 缓存中,回退 EVAL")
+            self._claim_sha = None
+            raw_list = await redis.eval(
+                _RETRY_CLAIM_LUA,
+                2,
+                self.pending_key(),
+                self.processing_key(),
+                str(now_ms),
+                str(limit),
+                str(now_ms),
+            )
         out: list[dict[str, Any]] = []
         for raw in raw_list or []:
             # V4: 单条 payload 解码失败(损坏/注入的非 dict / 非法 JSON)不能
@@ -233,9 +245,7 @@ class _RetryQueueBackend:
     async def incr_attempts(self, run_id: str) -> int:
         """V3: 以 run_id 为键持久化 claim 处理失败次数,独立于 payload 字节。
 
-        ``_recover_from_db`` 用 ``schedule()`` 重新注入的 payload 不含 attempts,
-        但计数活在这个 hash 里,不会被重置 —— MAX_CLAIM_ATTEMPTS 因此能正常
-        触顶,poison intent 不再以 ~5s 周期无限 claim→raise→requeue。
+        计数仅用于告警和诊断；基础设施故障不会据此删除 durable intent。
         """
         redis = await self._get_redis()
         return int(await redis.hincrby(self.attempts_key(), run_id, 1))
@@ -307,6 +317,29 @@ class _RetryQueueBackend:
             out.append(item)
         return out
 
+    async def cancel_task(self, task_id: int) -> int:
+        """Remove pending entries for a deleted task; in-flight claims self-fence on PostgreSQL."""
+        redis = await self._get_redis()
+        raw_members = await redis.zrange(self.pending_key(), 0, -1)
+        matches: list[tuple[bytes | str, str]] = []
+        for raw in raw_members or []:
+            try:
+                item = self._decode(raw)
+                raw_task_id = item.get("task_id")
+                if raw_task_id is not None and int(raw_task_id) == task_id:
+                    matches.append((raw, str(item.get("run_id") or "")))
+            except (TypeError, ValueError):
+                continue
+        if not matches:
+            return 0
+        pipeline = redis.pipeline(transaction=True)
+        pipeline.zrem(self.pending_key(), *(raw for raw, _run_id in matches))
+        run_ids = [run_id for _raw, run_id in matches if run_id]
+        if run_ids:
+            pipeline.hdel(self.attempts_key(), *run_ids)
+        results = await pipeline.execute()
+        return int(results[0] or 0)
+
 
 class RetryService:
     """任务重试服务"""
@@ -326,6 +359,9 @@ class RetryService:
             retry_time=intent.retry_time,
             retry_count=intent.retry_count,
         )
+
+    async def cancel_task(self, task_id: int) -> int:
+        return await self._backend.cancel_task(task_id)
 
     async def start(self):
         """启动重试服务"""
@@ -399,7 +435,9 @@ class RetryService:
 
         execution.retry_count = current_retry + 1
         execution.status = TaskStatus.PENDING
-        execution.error_message = f"重试 {execution.retry_count}/{config.max_retries}: {error}"
+        execution.error_message = normalize_persisted_error_message(
+            f"重试 {execution.retry_count}/{config.max_retries}: {error}"
+        )
         await execution.save()
 
         task.failure_count += 1
@@ -434,7 +472,7 @@ class RetryService:
 
             execution.status = TaskStatus.FAILED
             execution.end_time = datetime.now(UTC)
-            execution.error_message = f"重试耗尽: {error}"
+            execution.error_message = normalize_persisted_error_message(f"重试耗尽: {error}")
             await execution.save()
 
             task_type = str(task.task_type.value) if task.task_type else "default"
@@ -476,7 +514,7 @@ class RetryService:
     async def _run_loop(self):
         """从 Redis ZSet 原子 claim 到期任务并 trigger。
 
-        #15: 入口加 leader 闸口 —— 双 Master 场景下,非 Leader 不能 trigger。
+        双 Master 场景下，非 Leader 不能 trigger。
         P1-18: 每轮 sweep_stalled 恢复崩溃遗留 -> claim_due -> trigger -> ack。
         Master 重启 / 切主后 ZSet 数据仍在 Redis,新 Leader 直接接管。
         """
@@ -526,27 +564,18 @@ class RetryService:
     async def _handle_claimed_item(self, item: dict[str, Any]) -> str | None:
         """处理单条 claimed intent。
 
-        G3: 原实现对任何异常都无条件 requeue(delay 5s),永久无效的 intent
-        (例如 ``_validate_retry_source`` 判定 source 不存在/已失效)会以
-        ~5s 周期无限循环。现在:
-
-        * ``RetryIntentInvalidError``(永久无效)→ 立即记录完整 payload 并丢弃;
-        * 其它异常 → 按 run_id 累计 attempts,超过 ``MAX_CLAIM_ATTEMPTS`` 后
-          记录完整 payload 并丢弃。
-
-        V3: attempts 计数以 run_id 为键持久化在 Redis hash(见
-        ``_RetryQueueBackend.incr_attempts``),独立于 payload 字节 ——
-        ``_recover_from_db`` 用 ``schedule()`` 重新注入(不带 attempts)也无法
-        把计数清零,避免 poison intent 复现 ~5s 循环并重复入队。达上限丢弃时
-        额外清 DB ``next_retry_at``(``_abandon_durable_intent``),阻止恢复
-        循环再注入。
+        永久无效的业务 intent 会终结；数据库、Redis、任期等瞬态依赖异常
+        只累计诊断次数并重排，绝不清除 PostgreSQL durable intent。
         """
-        from antcode_master.control.retry_intent_guard import RetryIntentInvalidError
-
         raw_payload = str(item.get("__raw_payload") or "")
         source_run_id = str(item.get("run_id") or "")
         try:
             return await self._process_claimed_intent(item)
+        except RetryTargetInvalidError as exc:
+            logger.error(f"retry target 永久不可用,终止 intent: payload={raw_payload} exc={exc}")
+            await terminate_durable_intent(source_run_id)
+            await self._discard_claimed(raw_payload, source_run_id)
+            return None
         except RetryIntentInvalidError as exc:
             logger.error(f"retry intent 永久无效,直接丢弃: payload={raw_payload} exc={exc}")
             await self._discard_claimed(raw_payload, source_run_id)
@@ -561,22 +590,17 @@ class RetryService:
             return None
         except Exception as exc:
             attempts = await self._incr_claimed_attempts(source_run_id)
-            if attempts >= MAX_CLAIM_ATTEMPTS:
-                logger.error(f"创建 retry run 连续失败 {attempts} 次,放弃并丢弃: payload={raw_payload} exc={exc}")
-                await self._discard_claimed(raw_payload, source_run_id)
-                await self._abandon_durable_intent(source_run_id)
-                return None
             logger.error(
-                f"创建 retry run 失败({attempts}/{MAX_CLAIM_ATTEMPTS}),requeue: task_id={item.get('task_id')} exc={exc}"
+                f"创建 retry run 瞬态失败(第 {attempts} 次),保留 durable intent 并 requeue: "
+                f"task_id={item.get('task_id')} exc={exc}"
             )
-            await self._backend.requeue(raw_payload, delay_seconds=5)
+            await self._backend.requeue(raw_payload, delay_seconds=INFRASTRUCTURE_REQUEUE_DELAY_SECONDS)
             return None
 
     async def _incr_claimed_attempts(self, source_run_id: str) -> int:
-        """按 run_id 自增 claim 失败计数;无 source run_id 的坏 payload 无法
-        重试,直接判定到顶让上层丢弃。"""
+        """按 source run 记录连续基础设施失败次数。"""
         if not source_run_id:
-            return MAX_CLAIM_ATTEMPTS
+            raise RetryIntentInvalidError("retry payload 缺少 source run_id")
         return await self._backend.incr_attempts(source_run_id)
 
     async def _discard_claimed(self, raw_payload: str, source_run_id: str = "") -> None:
@@ -593,49 +617,15 @@ class RetryService:
             except Exception as exc:
                 logger.warning(f"丢弃 retry payload 时清理 attempts 计数失败: run_id={source_run_id} exc={exc}")
 
-    async def _abandon_durable_intent(self, source_run_id: str) -> None:
-        """达 MAX_CLAIM_ATTEMPTS 丢弃 poison intent 时清 DB ``next_retry_at``,
-        阻止 ``_recover_from_db`` 每轮 sweep 再把它注入 pending 形成 poison 循环。
-
-        P1-FN-04: 等待重试的 run（PENDING）同时显式收敛为 FAILED —— 用户
-        必须能从 run 状态看到自动重试已放弃，而不是 run 永远停在 PENDING。
-        """
-        if not source_run_id:
-            return
-        try:
-            finalized = await TaskRun.filter(
-                run_id=source_run_id,
-                next_retry_at__not_isnull=True,
-                status=TaskStatus.PENDING,
-            ).update(
-                next_retry_at=None,
-                status=TaskStatus.FAILED,
-                end_time=datetime.now(UTC),
-                error_message=f"自动重试已放弃: 连续 {MAX_CLAIM_ATTEMPTS} 次创建重试 run 失败",
-            )
-            if not finalized:
-                # run 状态已被其它路径推进（取消/新结果）：只清 intent 标记。
-                await TaskRun.filter(
-                    run_id=source_run_id,
-                    next_retry_at__not_isnull=True,
-                ).update(next_retry_at=None)
-        except Exception as exc:
-            logger.warning(f"清理 poison retry intent 的 DB 标记失败: run_id={source_run_id} exc={exc}")
-
     async def _process_claimed_intent(self, item: dict[str, Any]) -> str:
         """创建 retry run、清理 durable intent，最后 ACK Redis claim。"""
-        from antcode_master.control.scheduler_loop import RetryIntent, scheduler_service
+        from antcode_master.control.scheduler_loop import scheduler_service
 
         raw_payload = str(item.get("__raw_payload") or "")
         source_run_id = str(item.get("run_id") or "")
         if not raw_payload or not source_run_id:
-            raise RuntimeError("retry payload 缺少 raw payload 或 source run_id")
-        intent = RetryIntent(
-            task_id=int(item["task_id"]),
-            source_run_id=source_run_id,
-            retry_count=int(item["retry_count"]),
-            retry_time=datetime.fromisoformat(str(item["retry_time"])),
-        )
+            raise RetryIntentInvalidError("retry payload 缺少 raw payload 或 source run_id")
+        intent = _parse_retry_intent(item, source_run_id)
         new_run_id = await scheduler_service.trigger_retry_intent(intent)
         await self._clear_durable_intent(source_run_id)
         await self._backend.ack(raw_payload)
@@ -649,34 +639,12 @@ class RetryService:
             source = await TaskRun.get_or_none(run_id=source_run_id)
             if source is not None and source.next_retry_at is not None:
                 raise RuntimeError(f"durable retry intent 清理失败: run_id={source_run_id}")
-        # V3: 成功创建 retry run 后重置该 run 的 attempts 计数(仅在成功/清理时
-        # 归零,保证真正的瞬态错误仍能继续累计并最终触顶 MAX_CLAIM_ATTEMPTS)。
+        # 成功消费后清除仅用于诊断的连续失败计数。
         await self._backend.clear_attempts(source_run_id)
 
     async def _recover_from_db(self) -> int:
-        """Rebuild Redis retry entries from durable TaskRun intent."""
-        pending = (
-            await TaskRun.filter(
-                next_retry_at__not_isnull=True,
-            )
-            .only("task_id", "run_id", "retry_count", "next_retry_at")
-            .limit(500)
-        )
-        recovered = 0
-        for execution in pending:
-            retry_time = execution.next_retry_at
-            if retry_time is None:
-                continue
-            await self._backend.schedule(
-                task_id=execution.task_id,
-                run_id=execution.run_id,
-                retry_time=retry_time,
-                retry_count=execution.retry_count,
-            )
-            recovered += 1
-        if recovered:
-            logger.info(f"从 TaskRun 恢复 retry 意图: {recovered} 条")
-        return recovered
+        """Rebuild every durable intent using stable keyset pagination."""
+        return await recover_retry_intents(self._backend)
 
     def _get_task_retry_config(self, task):
         """获取任务的重试配置"""
@@ -710,24 +678,12 @@ class RetryService:
         }
 
     async def get_pending_retries(self):
-        """获取待重试的任务列表(Redis ZSet 只读快照)"""
-        try:
-            snapshot = await self._backend.peek_all()
-        except Exception as exc:
-            logger.warning(f"peek pending retries 失败: {exc}")
-            return []
+        """从 PostgreSQL 权威 durable intent 获取待重试列表。"""
+        from antcode_core.application.services.scheduler.retry_pending_query import (
+            list_durable_pending_retries,
+        )
 
-        pending = []
-        for item in snapshot:
-            pending.append(
-                {
-                    "task_id": item.get("task_id"),
-                    "run_id": item.get("run_id"),
-                    "retry_time": item.get("retry_time"),
-                    "retry_count": item.get("retry_count"),
-                }
-            )
-        return pending
+        return await list_durable_pending_retries()
 
 
 retry_service = RetryService()

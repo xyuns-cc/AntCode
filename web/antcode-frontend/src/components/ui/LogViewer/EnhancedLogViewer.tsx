@@ -92,7 +92,7 @@ const useViewerActions = ({ buffer, displayedMessages, isViewTruncated, runId, s
 }
 
 interface ViewerEffectOptions {
-  containerRef: RefObject<HTMLDivElement>
+  containerRef: RefObject<HTMLDivElement | null>
   displayedMessages: LogMessage[]
   isAutoScroll: boolean
   isPaused: boolean
@@ -118,7 +118,7 @@ interface LayoutProps {
   actions: ReturnType<typeof useViewerActions>
   buffer: ViewerBuffer
   config: ViewerConfig
-  containerRef: RefObject<HTMLDivElement>
+  containerRef: RefObject<HTMLDivElement | null>
   filters: ViewerFilters
   stats: LogStats
   stream: ViewerStream

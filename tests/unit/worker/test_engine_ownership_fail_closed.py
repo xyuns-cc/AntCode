@@ -67,7 +67,7 @@ async def test_ownership_contention_defers_without_ack_or_requeue():
         task_id="task-1",
         project_id="project-1",
         run_id="run-1",
-        receipt="antcode:task:ready:worker-1|1-0",
+        receipt="{antcode}:task:ready:worker-1|1-0",
     )
 
     async def poll_once(*_args, **_kwargs):

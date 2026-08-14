@@ -22,7 +22,7 @@ from typing import Any
 
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
-from antcode_worker.executor.rule_policy import RULE_SANDBOX_ALLOW_NETWORK
+from antcode_worker.executor.rule_policy import RULE_SANDBOX_ALLOW_NETWORK, SPIDER_STATS_PATH_ENV
 from antcode_worker.plugins.base import PluginBase
 
 
@@ -71,6 +71,7 @@ class RulePlugin(PluginBase):
             raise
 
         spool_path = self._create_spool(rule_dir, context.run_id)
+        stats_path = os.path.join(rule_dir, "spider-stats.json")
         args = [
             "-m",
             "antcode_scrapy.crawl",
@@ -83,21 +84,15 @@ class RulePlugin(PluginBase):
             "ANTCODE_SPIDER_PROJECT_ID": payload.project_id or "",
             "ANTCODE_SPIDER_SINK_MODE": "spool",
             "ANTCODE_SPIDER_SPOOL_PATH": spool_path,
+            SPIDER_STATS_PATH_ENV: stats_path,
         }
 
         cwd = payload.project_cwd or payload.workspace_path or rule_dir
 
-        # P0-03: Rule 插件默认不放行网络。历史上恒 True 因为爬虫要访问
-        # target_url,但那把整个宿主网络暴露给用户提供的规则(headers/cookies
-        # 可含内部凭据、target_url 可指向内部地址),对于不可信租户是横向移动向量。
-        # 现在改为需显式 ANTCODE_RULE_ALLOW_NETWORK=1 才放行;生产环境应结合
-        # K8s NetworkPolicy / egress proxy 而非依赖 Worker 全放行。
-        allow_network = os.getenv("ANTCODE_RULE_ALLOW_NETWORK", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
+        if os.getenv("ANTCODE_RULE_ALLOW_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}:
+            raise RuntimeError(
+                "ANTCODE_RULE_ALLOW_NETWORK 已禁用：Rule 必须通过 network namespace 内的受限 egress bridge"
+            )
 
         return ExecPlan(
             command=python_exe,
@@ -108,7 +103,7 @@ class RulePlugin(PluginBase):
             memory_limit_mb=context.memory_limit_mb,
             cpu_limit_seconds=context.cpu_limit_seconds,
             artifact_patterns=list(payload.artifact_patterns),
-            sandbox_config={RULE_SANDBOX_ALLOW_NETWORK: allow_network},
+            sandbox_config={RULE_SANDBOX_ALLOW_NETWORK: False},
         )
 
     # ---------- helpers ----------

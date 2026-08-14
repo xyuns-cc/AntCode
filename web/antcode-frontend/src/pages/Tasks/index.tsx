@@ -24,16 +24,21 @@ import {
   CloudServerOutlined,
   DesktopOutlined
 } from '@ant-design/icons'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router'
 import { useWorkerStore } from '@/stores/workerStore'
 import type { Task, TaskStatus, ScheduleType } from '@/types'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime, formatStatus, TASK_STATUS_PRESENTATION } from '@/utils/format'
+import type { StatusPresentation } from '@/utils/format'
 import useAuth from '@/hooks/useAuth'
 import { debounce } from '@/utils/helpers'
 import { useProjectsQuery, useTasksQuery, useTaskMutations } from '@/hooks/api/useTasks'
 
 const { Search } = Input
 const { Option } = Select
+
+// 状态筛选项直接由展示映射派生：后端 TaskStatus 增删一个取值，
+// Record<TaskStatus> 的编译期全覆盖就会把下拉框一起带上，不需要再手抄一份。
+const TASK_STATUS_OPTIONS = Object.entries(TASK_STATUS_PRESENTATION) as [TaskStatus, StatusPresentation][]
 
 const Tasks: React.FC = memo(() => {
   const navigate = useNavigate()
@@ -82,7 +87,7 @@ const Tasks: React.FC = memo(() => {
   const loading = tasksQuery.isLoading || tasksQuery.isFetching
   const tasks = tasksQuery.data?.items || []
   const total = tasksQuery.data?.total || 0
-  const projects = projectsQuery.data?.items || []
+  const projects = projectsQuery.data || []
   const requestError = tasksQuery.error as Error | null
 
   const handleRefresh = () => {
@@ -249,21 +254,10 @@ const Tasks: React.FC = memo(() => {
     })
   }
 
-  // 获取任务状态标签
+  // 获取任务状态标签。展示映射只有 utils/format.ts 一份（Record<TaskStatus> 强制全覆盖），
+  // 这里再抄一份是本轮 rejected 在两个渲染器同时缺失的直接原因。
   const getStatusTag = (status: TaskStatus) => {
-    const statusMap: Record<string, { color: string; text: string; icon?: React.ReactNode }> = {
-      pending: { color: 'default', text: '等待调度' },
-      dispatching: { color: 'processing', text: '分配 Worker 中' },
-      queued: { color: 'cyan', text: '排队中' },
-      running: { color: 'processing', text: '执行中' },
-      success: { color: 'success', text: '成功' },
-      failed: { color: 'error', text: '失败' },
-      cancelled: { color: 'warning', text: '已取消' },
-      timeout: { color: 'error', text: '超时' },
-      paused: { color: 'warning', text: '已暂停' },
-      skipped: { color: 'default', text: '已跳过' }
-    }
-    const config = statusMap[status] || { color: 'default', text: status }
+    const config = formatStatus(status)
     return <Tag color={config.color}>{config.text}</Tag>
   }
 
@@ -350,11 +344,9 @@ const Tasks: React.FC = memo(() => {
               value={statusFilter}
               onChange={handleStatusFilterChange}
             >
-              <Option value="pending">等待中</Option>
-              <Option value="running">运行中</Option>
-              <Option value="success">成功</Option>
-              <Option value="failed">失败</Option>
-              <Option value="cancelled">已取消</Option>
+              {TASK_STATUS_OPTIONS.map(([value, presentation]) => (
+                <Option key={value} value={value}>{presentation.text}</Option>
+              ))}
             </Select>
             <Select
               placeholder="调度类型"

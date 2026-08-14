@@ -46,7 +46,13 @@ def can_access_runtime(env: dict, current_user: TokenData) -> bool:
     scope = env.get("scope")
     if scope == "shared":
         return True
-    return scope == "private" and env.get("created_by") == current_user.username
+    return scope == "private" and _is_runtime_owner(env, current_user.user_id)
+
+
+def _is_runtime_owner(env: dict, user_id: int) -> bool:
+    """仅用不可复用用户主键授权；旧 username 清单对普通用户 fail-closed。"""
+    owner_user_id = env.get("owner_user_id")
+    return owner_user_id is not None and str(owner_user_id) == str(user_id)
 
 
 def ensure_runtime_access(env: dict, current_user: TokenData) -> None:
@@ -60,7 +66,7 @@ def ensure_runtime_mutation_access(env: dict, current_user: TokenData) -> None:
     scope = env.get("scope")
     if scope == "shared" and current_user.is_admin:
         return
-    if scope == "private" and env.get("created_by") == current_user.username:
+    if scope == "private" and _is_runtime_owner(env, current_user.user_id):
         return
     raise HTTPException(status_code=403, detail="无权修改该运行时环境")
 

@@ -190,11 +190,13 @@ export class BaseService {
    */
   protected async downloadFile(
     url: string,
-    filename?: string
+    filename?: string,
+    config?: AxiosRequestConfig
   ): Promise<void> {
     try {
       const fullUrl = this.getFullUrl(url)
       const response = await apiClient.get(fullUrl, {
+        ...config,
         responseType: 'blob',
       })
 

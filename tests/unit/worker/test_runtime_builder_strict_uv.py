@@ -80,6 +80,17 @@ async def test_uv_manager_passes_uv_python_version_selector(tmp_path, monkeypatc
     monkeypatch.setattr("antcode_worker.runtime.uv_manager.run_command", fake_run_command)
     monkeypatch.setattr(manager, "_update_packages_count", skip_package_count)
 
-    await manager.create_env("shared-py311", python_version="3.11")
+    created = await manager.create_env(
+        "shared-py311",
+        python_version="3.11",
+        created_by="alice",
+        owner_user_id="7",
+    )
 
     assert calls[0] == ["uv", "venv", str(tmp_path / "venvs" / "shared-py311"), "--python", "3.11"]
+    assert created["created_by"] == "alice"
+    assert created["owner_user_id"] == "7"
+    assert created["scope"] == "shared"
+    assert created["key"] is None
+    assert created["description"] is None
+    assert (await manager.list_envs())[0]["owner_user_id"] == "7"

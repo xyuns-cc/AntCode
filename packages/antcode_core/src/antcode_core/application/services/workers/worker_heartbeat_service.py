@@ -6,15 +6,20 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Awaitable
 from datetime import datetime, timedelta
 from typing import cast
 
 from loguru import logger
 
+from antcode_core.application.services.workers.worker_capability_normalization import normalize_capabilities
+from antcode_core.application.services.workers.worker_liveness import (
+    heartbeat_is_fresh,
+    is_within_bootstrap_window,
+    naive_datetime,
+)
+from antcode_core.application.services.workers.worker_registration_gate import has_unacknowledged_v2_registration
 from antcode_core.common.config import settings
-from antcode_core.common.serialization import from_json
 from antcode_core.domain.models import Worker, WorkerStatus
 
 from .worker_heartbeat_persistence import (
@@ -44,6 +49,7 @@ class WorkerHeartbeatService:
 
         # 缓存更新时间
         self._cache_updated_at: datetime | None = None
+        self._max_seen_worker_id = 0
 
         # 缓存有效期（秒）
         self._cache_ttl = 300  # 5分钟
@@ -75,15 +81,10 @@ class WorkerHeartbeatService:
 
             self._worker_cache.clear()
             self._worker_states.clear()
+            self._max_seen_worker_id = 0
 
             for worker in workers:
-                self._worker_cache[worker.id] = worker
-                self._worker_states[worker.id] = {
-                    "failures": 0,
-                    "next_check": now,  # 立即检测
-                    "suspended": False,
-                    "last_connect_attempt": None,
-                }
+                self._upsert_cached_worker(worker, now)
 
             self._cache_updated_at = now
             logger.info(f"心跳检测缓存已初始化，共 {len(workers)} 个节点")
@@ -94,37 +95,41 @@ class WorkerHeartbeatService:
         """刷新节点缓存（如果过期）"""
         now = datetime.now()
 
-        # 如果缓存不存在或已过期，重新加载
-        if force or (not self._cache_updated_at or (now - self._cache_updated_at).total_seconds() > self._cache_ttl):
-            workers = await Worker.all()
+        cache_expired = not self._cache_updated_at or (now - self._cache_updated_at).total_seconds() > self._cache_ttl
+        if force or cache_expired:
+            await self._refresh_all_workers(now)
+            return
+        await self._discover_new_workers(now)
 
-            # 更新现有节点，添加新节点
-            for worker in workers:
-                if worker.id not in self._worker_cache:
-                    # 新节点
-                    self._worker_cache[worker.id] = worker
-                    self._worker_states[worker.id] = {
-                        "failures": 0,
-                        "next_check": now,
-                        "suspended": False,
-                        "last_connect_attempt": None,
-                    }
-                else:
-                    # 更新现有节点
-                    self._worker_cache[worker.id] = worker
-                    if "last_connect_attempt" not in self._worker_states[worker.id]:
-                        self._worker_states[worker.id]["last_connect_attempt"] = None
+    async def _refresh_all_workers(self, now: datetime) -> None:
+        workers = await Worker.all()
+        current_ids = {worker.id for worker in workers}
+        for worker in workers:
+            self._upsert_cached_worker(worker, now)
+        for worker_id in set(self._worker_cache) - current_ids:
+            del self._worker_cache[worker_id]
+            self._worker_states.pop(worker_id, None)
+        self._cache_updated_at = now
 
-            # 移除已删除的节点
-            cached_ids = set(self._worker_cache.keys())
-            current_ids = {n.id for n in workers}
-            deleted_ids = cached_ids - current_ids
+    async def _discover_new_workers(self, now: datetime) -> None:
+        workers = await Worker.filter(id__gt=self._max_seen_worker_id).all()
+        for worker in workers:
+            self._upsert_cached_worker(worker, now)
 
-            for worker_id in deleted_ids:
-                del self._worker_cache[worker_id]
-                del self._worker_states[worker_id]
+    def _upsert_cached_worker(self, worker: Worker, now: datetime) -> None:
+        self._worker_cache[worker.id] = worker
+        self._max_seen_worker_id = max(self._max_seen_worker_id, worker.id)
+        state = self._worker_states.setdefault(worker.id, self._new_worker_state(now))
+        state.setdefault("last_connect_attempt", None)
 
-            self._cache_updated_at = now
+    @staticmethod
+    def _new_worker_state(now: datetime) -> dict:
+        return {
+            "failures": 0,
+            "next_check": now,
+            "suspended": False,
+            "last_connect_attempt": None,
+        }
 
     async def smart_health_check(self) -> dict:
         """
@@ -228,7 +233,7 @@ class WorkerHeartbeatService:
             worker.id,
             update,
             require_newer=True,
-            record_history=False,
+            record_history=True,
         )
         if not persisted:
             return False
@@ -267,39 +272,30 @@ class WorkerHeartbeatService:
         """
         old_status = worker.status
         now = datetime.now()
-        last_hb = self._naive_datetime(worker.last_heartbeat)
-        if self._heartbeat_is_fresh(last_hb, now):
+        last_hb = naive_datetime(worker.last_heartbeat)
+        if heartbeat_is_fresh(last_hb, now, self.HEARTBEAT_TIMEOUT):
             await self._accept_database_heartbeat(worker, state, old_status, now, last_hb)
             return True
 
         redis_hb = await self._get_redis_heartbeat(worker)
-        if self._heartbeat_is_fresh(self._naive_datetime(redis_hb), now):
+        if heartbeat_is_fresh(naive_datetime(redis_hb), now, self.HEARTBEAT_TIMEOUT):
             await self._accept_redis_heartbeat(worker, state, old_status, now)
             return True
 
         latest = await self._refresh_worker_from_db(worker.id)
-        if latest and self._heartbeat_is_fresh(self._naive_datetime(latest.last_heartbeat), now):
+        if latest and heartbeat_is_fresh(naive_datetime(latest.last_heartbeat), now, self.HEARTBEAT_TIMEOUT):
             await self._accept_refreshed_heartbeat(latest, state, old_status, now)
             return True
         worker = latest or worker
         await self._handle_worker_offline(worker, state, old_status)
         return False
 
-    @staticmethod
-    def _naive_datetime(value):
-        if value is not None and value.tzinfo is not None:
-            return value.astimezone().replace(tzinfo=None)
-        return value
-
-    def _heartbeat_is_fresh(self, heartbeat, now):
-        return bool(heartbeat and (now - heartbeat).total_seconds() <= self.HEARTBEAT_TIMEOUT)
-
     def _mark_heartbeat_healthy(self, state, now):
         state["failures"] = 0
         state["next_check"] = now + timedelta(seconds=self.HEARTBEAT_INTERVAL_ONLINE)
 
     async def _accept_database_heartbeat(self, worker, state, old_status, now, last_hb):
-        redis_hb = self._naive_datetime(await self._get_redis_heartbeat(worker))
+        redis_hb = naive_datetime(await self._get_redis_heartbeat(worker))
         if redis_hb is not None and redis_hb > last_hb:
             await self._sync_redis_heartbeat_to_db(worker)
         self._mark_heartbeat_healthy(state, now)
@@ -357,6 +353,10 @@ class WorkerHeartbeatService:
 
         # 状态变化时保存到数据库
         if old_status != WorkerStatus.OFFLINE:
+            # 引导窗口内不降级，否则新 Worker 永远拿不到首个 Lease（闭环死锁）。
+            if is_within_bootstrap_window(worker, old_status, self.HEARTBEAT_TIMEOUT):
+                logger.debug(f"节点 {worker.name} 处于首租约引导窗口，暂不降级为离线")
+                return
             if await self._mark_worker_status(worker, WorkerStatus.OFFLINE.value, protect_heartbeat=True):
                 logger.warning(f"节点 {worker.name} 离线")
 
@@ -367,6 +367,11 @@ class WorkerHeartbeatService:
         *,
         protect_heartbeat: bool = False,
     ) -> bool:
+        pending_ack = target_status == WorkerStatus.ONLINE.value and await has_unacknowledged_v2_registration(
+            worker.public_id
+        )
+        if pending_ack:
+            return False
         query = Worker.filter(id=worker.id).exclude(status=WorkerStatus.MAINTENANCE.value)
         if protect_heartbeat:
             query = (
@@ -535,9 +540,14 @@ class WorkerHeartbeatService:
         if not isinstance(capabilities, dict):
             logger.warning(f"capabilities 类型错误: {type(capabilities)}, 值: {capabilities}")
             return None
-        normalized = self._normalize_capabilities(capabilities)
+        normalized = normalize_capabilities(capabilities)
         logger.info(f"节点能力更新: {list(normalized.keys())}")
         return normalized
+
+    @staticmethod
+    def _normalize_capabilities(capabilities: dict) -> dict:
+        """Compatibility entry point for callers that normalize heartbeat data."""
+        return normalize_capabilities(capabilities)
 
     def _sync_cache_on_heartbeat(self, worker: Worker) -> None:
         """同步心跳到缓存，避免健康检查使用过期节点信息"""
@@ -558,19 +568,6 @@ class WorkerHeartbeatService:
             return None
         self._worker_cache[worker_id] = latest
         return latest
-
-    def _normalize_capabilities(self, capabilities: dict) -> dict:
-        normalized: dict = {}
-        for key, value in capabilities.items():
-            if isinstance(value, str):
-                raw = value.strip()
-                if raw.startswith("{") or raw.startswith("["):
-                    with contextlib.suppress(Exception):
-                        value = from_json(raw)
-                elif raw.lower() in {"true", "false"}:
-                    value = raw.lower() == "true"
-            normalized[key] = value
-        return normalized
 
 
 # 创建服务实例

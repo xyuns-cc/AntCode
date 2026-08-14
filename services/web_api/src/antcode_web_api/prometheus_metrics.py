@@ -40,6 +40,7 @@ from prometheus_client import (
 )
 
 REGISTRY = CollectorRegistry(auto_describe=True)
+UNMATCHED_ROUTE_LABEL = "<unmatched>"
 
 HTTP_REQUESTS = Counter(
     "antcode_http_requests_total",
@@ -61,6 +62,13 @@ TASK_RUNS = Counter(
     "antcode_task_runs_total",
     "TaskRun 终态计数（由业务代码显式 inc）",
     ["status"],
+    registry=REGISTRY,
+)
+
+AUDIT_WRITE_FAILURES = Counter(
+    "antcode_audit_write_failures_total",
+    "业务操作提交后的审计写入失败总数",
+    ["operation"],
     registry=REGISTRY,
 )
 
@@ -86,7 +94,9 @@ def _normalize_path(request: Request) -> str:
     route = request.scope.get("route")
     if route is not None and getattr(route, "path", None):
         return str(route.path)
-    return request.url.path
+    # 404/405 requests have no matched route. Never label them with the raw,
+    # user-controlled path because that creates an unbounded time-series set.
+    return UNMATCHED_ROUTE_LABEL
 
 
 async def _collect_workers_online() -> None:
@@ -183,6 +193,7 @@ __all__ = [
     "router",
     "inc_task_run",
     "TASK_RUNS",
+    "AUDIT_WRITE_FAILURES",
     "HTTP_REQUESTS",
     "HTTP_REQUEST_DURATION",
 ]

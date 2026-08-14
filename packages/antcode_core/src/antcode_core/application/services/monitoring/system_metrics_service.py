@@ -14,6 +14,22 @@ from antcode_core.common.config import settings
 from antcode_core.domain.schemas.task import SystemMetricsResponse
 from antcode_core.infrastructure.cache.cache import metrics_cache
 
+# psutil.cpu_percent 需要一段阻塞采样窗口才能给出真实占用；
+# 短窗口偶发返回 NaN，此时用更长的窗口重采一次。
+CPU_SAMPLE_SECONDS = 0.5
+CPU_RESAMPLE_SECONDS = 1.0
+# 百分比满量程：既是裁剪上限，也是比率换算系数。
+PERCENT_FULL = 100.0
+PERCENT_DECIMALS = 2
+
+
+class MetricsCollectionError(RuntimeError):
+    """系统指标采集失败。
+
+    采集链路任意一环失败都必须抛出本异常：调用方必须能区分"采集不到"与
+    "真的是 0"。用零值冒充采集结果会让监控在最该告警的时刻呈现完美健康。
+    """
+
 
 @dataclass
 class SystemMetrics:
@@ -70,38 +86,33 @@ class SystemMetricsService:
         return not math.isnan(numeric) and not math.isinf(numeric)
 
     @staticmethod
-    def _normalize_percent(value, default=0.0):
+    def _normalize_percent(value):
+        """裁剪到 [0, 100] 并保留两位小数；非有限数值一律视为采集失败。"""
         try:
             numeric = float(value)
-        except (TypeError, ValueError):
-            return round(default, 2)
+        except (TypeError, ValueError) as exc:
+            raise MetricsCollectionError(f"百分比指标不是数值: {value!r}") from exc
 
         if math.isnan(numeric) or math.isinf(numeric):
-            numeric = default
+            raise MetricsCollectionError(f"百分比指标不是有限值: {numeric!r}")
 
-        numeric = max(0.0, min(100.0, numeric))
-        return round(numeric, 2)
+        return round(max(0.0, min(PERCENT_FULL, numeric)), PERCENT_DECIMALS)
 
     async def _collect_cpu_metrics(self):
+        """采集 CPU 占用与核心数。
+
+        核心数缺失时必须抛错：cpu_cores=0 会让下游"每核占用"之类的换算除零。
+        """
         await asyncio.to_thread(psutil.cpu_percent, None)
-        cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 0.5)
-        if not self._is_valid_percent(cpu_percent_sample):
-            cpu_percent_sample = await asyncio.to_thread(psutil.cpu_percent, 1.0)
-        cpu_percent = self._normalize_percent(cpu_percent_sample)
-        cpu_cores = await asyncio.to_thread(psutil.cpu_count, True) or 0
+        sample = await asyncio.to_thread(psutil.cpu_percent, CPU_SAMPLE_SECONDS)
+        if not self._is_valid_percent(sample):
+            sample = await asyncio.to_thread(psutil.cpu_percent, CPU_RESAMPLE_SECONDS)
 
-        if cpu_percent <= 0.0:
-            try:
-                load_avg = await asyncio.to_thread(psutil.getloadavg)
-                if load_avg:
-                    cpu_percent = self._normalize_percent(
-                        (load_avg[0] / max(cpu_cores or 1, 1)) * 100.0,
-                        default=cpu_percent,
-                    )
-            except (AttributeError, OSError):
-                pass
+        cpu_cores = await asyncio.to_thread(psutil.cpu_count, True)
+        if not cpu_cores:
+            raise MetricsCollectionError("psutil 未返回可用的 CPU 核心数")
 
-        return cpu_percent, cpu_cores
+        return self._normalize_percent(sample), int(cpu_cores)
 
     async def _collect_memory_metrics(self):
         vm = await asyncio.to_thread(psutil.virtual_memory)
@@ -128,52 +139,35 @@ class SystemMetricsService:
         return await TaskRun.filter(status=TaskStatus.RUNNING).count()
 
     async def _collect_uptime_seconds(self):
-        try:
-            current_time, boot_time = await asyncio.gather(
-                asyncio.to_thread(time.time),
-                asyncio.to_thread(psutil.boot_time),
-            )
-            return int(current_time - boot_time)
-        except Exception:
-            return 0
+        boot_time = await asyncio.to_thread(psutil.boot_time)
+        return int(time.time() - boot_time)
 
     async def _collect_queue_size(self):
         """收集待执行任务队列大小（pending 状态的任务数）"""
-        try:
-            from antcode_core.domain.models.enums import TaskStatus
-            from antcode_core.domain.models.task import Task
+        from antcode_core.domain.models.enums import TaskStatus
+        from antcode_core.domain.models.task import Task
 
-            return await Task.filter(status=TaskStatus.PENDING, is_active=True).count()
-        except Exception:
-            return 0
+        return await Task.filter(status=TaskStatus.PENDING, is_active=True).count()
 
     async def _collect_success_rate(self):
-        """收集今日任务成功率"""
-        try:
-            from datetime import datetime
+        """收集今日任务成功率；今日无已完成执行时 0.0 是真实语义而非兜底值。"""
+        from antcode_core.domain.models.enums import TaskStatus
+        from antcode_core.domain.models.task_run import TaskRun
 
-            from antcode_core.domain.models.enums import TaskStatus
-            from antcode_core.domain.models.task_run import TaskRun
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-            # 获取今日开始时间
-            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-            # 查询今日所有已完成的执行记录（成功或失败）
-            total_today = await TaskRun.filter(
-                start_time__gte=today_start, status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED]
-            ).count()
-
-            if total_today == 0:
-                return 0.0
-
-            # 查询今日成功的执行记录
-            success_today = await TaskRun.filter(start_time__gte=today_start, status=TaskStatus.SUCCESS).count()
-
-            return round((success_today / total_today) * 100, 2)
-        except Exception:
+        # 今日所有已完成的执行记录（成功或失败）
+        total_today = await TaskRun.filter(
+            start_time__gte=today_start, status__in=[TaskStatus.SUCCESS, TaskStatus.FAILED]
+        ).count()
+        if total_today == 0:
             return 0.0
 
+        success_today = await TaskRun.filter(start_time__gte=today_start, status=TaskStatus.SUCCESS).count()
+        return round(success_today / total_today * PERCENT_FULL, PERCENT_DECIMALS)
+
     async def _collect_metrics(self):
+        """并行采集全部指标；任一环失败立即抛错，绝不返回零值伪装成健康数据。"""
         try:
             (
                 (cpu_percent, cpu_cores),
@@ -192,62 +186,39 @@ class SystemMetricsService:
                 self._collect_queue_size(),
                 self._collect_success_rate(),
             )
-
-            return SystemMetrics(
-                cpu_percent=round(cpu_percent, 2),
-                cpu_cores=cpu_cores,
-                memory_percent=round(memory_metrics["percent"], 2),
-                memory_total=memory_metrics["total"],
-                memory_used=memory_metrics["used"],
-                memory_available=memory_metrics["available"],
-                disk_percent=round(disk_metrics["percent"], 2),  # 统一使用 disk_percent
-                disk_total=disk_metrics["total"],
-                disk_used=disk_metrics["used"],
-                disk_free=disk_metrics["free"],
-                active_tasks=active_tasks,
-                uptime_seconds=uptime_seconds,
-                collected_at=datetime.now(),
-                queue_size=queue_size,
-                success_rate=success_rate,
-            )
         except Exception as e:
             logger.error(f"收集指标失败: {e}")
-            return SystemMetrics(
-                cpu_percent=0.0,
-                cpu_cores=0,
-                memory_percent=0.0,
-                memory_total=0,
-                memory_used=0,
-                memory_available=0,
-                disk_percent=0.0,  # 统一使用 disk_percent
-                disk_total=0,
-                disk_used=0,
-                disk_free=0,
-                active_tasks=0,
-                uptime_seconds=0,
-                collected_at=datetime.now(),
-                queue_size=0,
-                success_rate=0.0,
-            )
+            raise MetricsCollectionError(f"系统指标采集失败: {e}") from e
+
+        return SystemMetrics(
+            cpu_percent=cpu_percent,
+            cpu_cores=cpu_cores,
+            memory_percent=memory_metrics["percent"],
+            memory_total=memory_metrics["total"],
+            memory_used=memory_metrics["used"],
+            memory_available=memory_metrics["available"],
+            disk_percent=disk_metrics["percent"],  # 统一使用 disk_percent
+            disk_total=disk_metrics["total"],
+            disk_used=disk_metrics["used"],
+            disk_free=disk_metrics["free"],
+            active_tasks=active_tasks,
+            uptime_seconds=uptime_seconds,
+            collected_at=datetime.now(),
+            queue_size=queue_size,
+            success_rate=success_rate,
+        )
 
     async def get_metrics(self, force_refresh=False):
+        """返回系统指标；采集失败时抛 MetricsCollectionError，不写缓存也不返回旧值。"""
         if not force_refresh:
-            try:
-                cached_metrics = await metrics_cache.get(self.CACHE_KEY)
-                if cached_metrics:
-                    logger.debug("指标缓存命中")
-                    return SystemMetrics(**cached_metrics).to_response()
-            except Exception as e:
-                logger.warning(f"指标缓存读取失败: {e}")
+            cached_metrics = await metrics_cache.get(self.CACHE_KEY)
+            if cached_metrics:
+                logger.debug("指标缓存命中")
+                return SystemMetrics(**cached_metrics).to_response()
 
         logger.debug("正在收集系统指标")
         metrics = await self._collect_metrics()
-
-        try:
-            await metrics_cache.set(self.CACHE_KEY, asdict(metrics))
-        except Exception as e:
-            logger.warning(f"指标缓存写入失败: {e}")
-
+        await metrics_cache.set(self.CACHE_KEY, asdict(metrics))
         return metrics.to_response()
 
     async def start_background_update(self, update_interval=None):
@@ -267,6 +238,8 @@ class SystemMetricsService:
                     logger.info("指标后台更新已停止")
                     break
                 except Exception as e:
+                    # 采集失败不写缓存：旧值会随 TTL 自然过期，
+                    # 之后的读请求会重新采集并把失败抛给调用方。
                     logger.error(f"后台指标更新失败: {e}")
                     await asyncio.sleep(update_interval)
 
@@ -280,39 +253,19 @@ class SystemMetricsService:
             self._update_task = None
 
     async def clear_cache(self):
-        try:
-            await metrics_cache.clear_prefix("metrics:")
-            logger.info("指标缓存已清除")
-        except Exception as e:
-            logger.error(f"清除指标缓存失败: {e}")
-            raise
+        await metrics_cache.clear_prefix("metrics:")
+        logger.info("指标缓存已清除")
 
     async def get_cache_info(self):
-        try:
-            cache_stats = await metrics_cache.get_stats()
-
-            try:
-                cached_metrics = await metrics_cache.get(self.CACHE_KEY)
-                cache_valid = cached_metrics is not None
-            except Exception as e:
-                logger.warning(f"缓存有效性检查失败: {e}")
-                cache_valid = False
-
-            return {
-                **cache_stats,
-                "cache_valid": cache_valid,
-                "background_update_running": self._update_task and not self._update_task.done(),
-                "cache_key": self.CACHE_KEY,
-            }
-        except Exception as e:
-            logger.error(f"获取缓存信息失败: {e}")
-            return {
-                "name": "metrics",
-                "cache_valid": False,
-                "background_update_running": self._update_task and not self._update_task.done(),
-                "cache_key": self.CACHE_KEY,
-                "error": str(e),
-            }
+        """返回缓存统计；查询失败直接抛错，不返回 cache_valid=False 的伪造结果。"""
+        cache_stats = await metrics_cache.get_stats()
+        cached_metrics = await metrics_cache.get(self.CACHE_KEY)
+        return {
+            **cache_stats,
+            "cache_valid": cached_metrics is not None,
+            "background_update_running": bool(self._update_task and not self._update_task.done()),
+            "cache_key": self.CACHE_KEY,
+        }
 
 
 system_metrics_service = SystemMetricsService()

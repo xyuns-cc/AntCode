@@ -7,9 +7,6 @@
 P1c 改造：保留 ready stream 的 JSON 帧（写入端 Master 当前仍是 JSON 派发），
 gateway 在 yield 给 Worker 前转码为 Proto，避免端到端的 JSON 暴露。
 
-待 Master 切换为 Proto bytes 派发后，``_parse_task_data`` 可以替换为
-``StreamClient(codec=ProtoCodec(data_pb2.TaskDispatch))`` 路径。
-
 **Validates: Requirements 6.5**
 """
 
@@ -17,107 +14,26 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Any
 
-from antcode_contracts import data_pb2
+from antcode_core.application.services.ready_dispatch_generation import require_dispatch_generation
+from antcode_core.common.security.task_payload_diagnostics import redact_persisted_task_frame
+from antcode_core.common.security.task_payload_envelope import ENVELOPE_FIELD
 from antcode_core.infrastructure.redis import (
-    decode_stream_payload,
     redis_namespace,
     task_ready_stream,
     worker_group,
 )
-from antcode_core.observability.tracing import inject_trace
 from loguru import logger
 
+from antcode_gateway.handlers.task_dispatch_codec import (
+    TaskInfo,
+)
+from antcode_gateway.handlers.task_dispatch_codec import (
+    task_info_to_dispatch as task_info_to_dispatch,
+)
 from antcode_gateway.handlers.task_settle import TaskSettlementMixin
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
-
-
-@dataclass
-class TaskInfo:
-    """与当前 ready stream 契约一致的任务信息。"""
-
-    task_id: str
-    project_id: str
-    run_id: str = ""
-    project_type: str = "spider"
-    priority: int = 0
-    timeout: int = 3600
-    source_bundle_uri: str = ""
-    source_bundle_sha256: str = ""
-    source_bundle_size: int = 0
-    transfer_method: str = ""
-    resolved_revision: str = ""
-    source_subdir: str = ""
-    entry_point: str = ""
-    runtime_env_name: str = ""
-    params: dict[str, object] = field(default_factory=dict)
-    environment: dict[str, object] = field(default_factory=dict)
-    receipt_id: str = ""
-    trace_parent: str = ""
-
-
-def _pb_scalar_for(value: object) -> str:
-    """P1-24: 把嵌套 params/environment 值序列化成字符串。
-
-    ``TaskDispatch.params`` / ``.environment`` proto 是 ``map<string,string>``,
-    非字符串值必须先编码。旧实现 ``str(value)`` 对 dict/list 会得到 Python
-    ``repr``（``"{'a': 1}"``），worker 侧 ``json.loads`` 会抛。改用 ``json.dumps``
-    保证 round-trip 安全。
-    """
-    if value is None:
-        scalar = ""
-    elif isinstance(value, str):
-        scalar = value
-    elif isinstance(value, (bytes, bytearray)):
-        scalar = value.decode("utf-8", errors="replace")
-    elif isinstance(value, bool):
-        scalar = "true" if value else "false"
-    elif isinstance(value, (int, float)):
-        scalar = str(value)
-    else:
-        try:
-            scalar = json.dumps(value, ensure_ascii=False)
-        except (TypeError, ValueError):
-            scalar = str(value)
-    return scalar
-
-
-def task_info_to_dispatch(task: TaskInfo) -> data_pb2.TaskDispatch:
-    """把内部 ``TaskInfo`` 转码为 Proto ``TaskDispatch`` 供 Worker 消费。"""
-    src_uri = task.source_bundle_uri or ""
-    src_sha = task.source_bundle_sha256 or ""
-    src_size = int(task.source_bundle_size or 0)
-    transfer_method = task.transfer_method or ("source_bundle" if src_uri else "")
-
-    dispatch = data_pb2.TaskDispatch(
-        task_id=task.task_id,
-        project_id=task.project_id,
-        project_type=task.project_type,
-        priority=int(task.priority),
-        timeout_seconds=int(task.timeout),
-        source_bundle_uri=src_uri,
-        source_bundle_sha256=src_sha,
-        source_bundle_size=src_size,
-        transfer_method=transfer_method,
-        resolved_revision=task.resolved_revision or "",
-        source_subdir=task.source_subdir or "",
-        entry_point=task.entry_point,
-        run_id=task.run_id,
-        receipt_id=task.receipt_id,
-        runtime_env_name=task.runtime_env_name,
-    )
-    # P1-24: 用 json.dumps 而不是 str(value)，避免嵌套 dict 变 Python repr。
-    for key, value in (task.params or {}).items():
-        dispatch.params[str(key)] = _pb_scalar_for(value)
-    for key, value in (task.environment or {}).items():
-        dispatch.environment[str(key)] = _pb_scalar_for(value)
-    inject_trace(dispatch, traceparent=getattr(task, "trace_parent", "") or "")
-    return dispatch
 
 
 class TaskPollHandler(TaskSettlementMixin):
@@ -128,7 +44,7 @@ class TaskPollHandler(TaskSettlementMixin):
     的代际 fence）在 ``TaskSettlementMixin``。
     """
 
-    READY_QUEUE_PREFIX = f"{redis_namespace()}:task:ready:"
+    READY_QUEUE_PREFIX = f"{{{redis_namespace()}}}:task:ready:"
     WORKER_GROUP = worker_group()
     PENDING_VISIBILITY_TIMEOUT_MS = 30_000
 
@@ -190,7 +106,7 @@ class TaskPollHandler(TaskSettlementMixin):
             max_tasks=max_tasks,
             block_ms=block_ms,
         )
-        tasks = await self._tasks_from_results(redis, results, worker_id)
+        tasks = await self._tasks_from_results(redis, results, worker_id, lease_id=lease_id)
         logger.info(f"Worker {worker_id} 获取了 {len(tasks)} 个任务")
         return tasks
 
@@ -220,14 +136,16 @@ class TaskPollHandler(TaskSettlementMixin):
         )
         return [*pending, *(live or [])]
 
-    async def _tasks_from_results(self, redis, results: list, worker_id: str) -> list[TaskInfo]:
+    async def _tasks_from_results(self, redis, results: list, worker_id: str, *, lease_id: str) -> list[TaskInfo]:
         tasks = []
         for stream_name, messages in results:
             stream = self._decode_identifier(stream_name)
             for message_id, data in messages:
                 message = self._decode_identifier(message_id)
                 try:
-                    task = self._parse_task_data(data, message_id)
+                    decoded = self._decode_ready_frame(data)
+                    require_dispatch_generation(decoded, lease_id)
+                    task = self._parse_task_data(decoded, message_id)
                 except Exception as exc:
                     # P2-08：毒消息除了 XACK 之外**必须**先写 DLQ，保留原始帧
                     # 供诊断和后续重放。之前直接 XACK 丢弃 → 损坏帧/协议不兼容/
@@ -240,9 +158,9 @@ class TaskPollHandler(TaskSettlementMixin):
                     )
                     dead_lettered = False
                     try:
-                        dead_payload = {
-                            self._decode_identifier(k): self._decode_identifier(v) for k, v in (data or {}).items()
-                        }
+                        dead_payload = redact_persisted_task_frame(
+                            {self._decode_identifier(k): self._decode_identifier(v) for k, v in (data or {}).items()}
+                        )
                         dead_payload["dead_letter_at"] = datetime.now().isoformat()
                         dead_payload["dead_letter_reason"] = f"parse_error:{type(exc).__name__}"
                         dead_payload["origin_stream"] = stream
@@ -313,7 +231,13 @@ class TaskPollHandler(TaskSettlementMixin):
         return result
 
     def _parse_task_data(self, data: dict, message_id: object) -> TaskInfo:
-        decoded = decode_stream_payload(data)
+        decoded = self._decode_ready_frame(data)
+        leaked = sorted({"params", "environment"}.intersection(decoded))
+        if leaked:
+            raise ValueError(f"ready payload 包含禁止的明文字段: {','.join(leaked)}")
+        envelope = decoded.get(ENVELOPE_FIELD)
+        if not isinstance(envelope, str) or not envelope:
+            raise ValueError("ready payload 缺少敏感字段密文 envelope")
         task_id = decoded.get("task_id")
         if not task_id:
             raise ValueError(f"任务数据缺少 task_id: {message_id}")
@@ -332,27 +256,26 @@ class TaskPollHandler(TaskSettlementMixin):
             source_subdir=str(decoded.get("source_subdir", "") or ""),
             entry_point=str(decoded.get("entry_point", "") or ""),
             runtime_env_name=str(decoded.get("runtime_env_name", "") or ""),
-            params=self._parse_json(decoded.get("params", "{}"), "params"),
-            environment=self._parse_json(decoded.get("environment", "{}"), "environment"),
+            sealed_ready_payload=self._encode_ready_frame(decoded),
             trace_parent=str(decoded.get("trace_parent", "") or ""),
         )
 
     @staticmethod
-    def _parse_json(value: object, field_name: str) -> dict[str, object]:
-        if not value:
-            return {}
-        if isinstance(value, dict):
-            return dict(value)
-        if isinstance(value, (bytes, bytearray)):
-            raw = value.decode("utf-8")
-        elif isinstance(value, str):
-            raw = value
-        else:
-            raise ValueError(f"{field_name} 必须是 JSON object")
+    def _decode_ready_frame(data: dict) -> dict[str, Any]:
+        return {
+            TaskPollHandler._decode_identifier(key): (value.decode("utf-8") if isinstance(value, bytes) else value)
+            for key, value in data.items()
+        }
+
+    @staticmethod
+    def _encode_ready_frame(payload: dict[str, Any]) -> bytes:
         try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{field_name} 不是有效 JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError(f"{field_name} 必须是 JSON object")
-        return parsed
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ready payload 不是可序列化对象") from exc
+        return encoded.encode("utf-8")

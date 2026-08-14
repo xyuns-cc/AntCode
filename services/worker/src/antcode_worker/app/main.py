@@ -18,6 +18,8 @@ from loguru import logger
 from antcode_worker.app.lifecycle import Lifecycle
 from antcode_worker.app.wiring import Container, create_container
 
+SHUTDOWN_TIMEOUT_MARGIN_SECONDS = 5.0
+
 
 class GracefulShutdown:
     """优雅关闭管理器
@@ -104,7 +106,7 @@ class GracefulShutdown:
         if self._force_exit_handle or not self._loop or not self._loop.is_running():
             return
 
-        delay = self._grace_period + 5
+        delay = self._grace_period + SHUTDOWN_TIMEOUT_MARGIN_SECONDS
         self._force_exit_handle = self._loop.call_later(
             delay,
             lambda: self._force_exit(signum),
@@ -191,25 +193,64 @@ class Application:
         await self.lifecycle.startup(self.container)
         self._log_status()
 
-        # 等待关闭信号
-        await self._graceful.wait()
+        fatal_error = await self._wait_for_stop_reason()
 
         # 执行关闭
-        await self._shutdown_with_timeout()
+        try:
+            await self._shutdown_with_timeout()
+        except Exception as shutdown_error:
+            if fatal_error is None:
+                raise
+            raise BaseExceptionGroup(
+                "Engine fatal error 后的 Worker 关闭失败",
+                [fatal_error, shutdown_error],
+            ) from shutdown_error
+        if fatal_error is not None:
+            raise fatal_error
+
+    async def _wait_for_stop_reason(self) -> BaseException | None:
+        """同时监听运维信号与 Engine fatal error。"""
+        if not self.container or not self.container.engine:
+            await self._graceful.wait()
+            return None
+        shutdown_task = asyncio.create_task(self._graceful.wait())
+        fatal_task = asyncio.create_task(self.container.engine.wait_for_fatal_error())
+        done, pending = await asyncio.wait(
+            {shutdown_task, fatal_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if fatal_task not in done:
+            return None
+        fatal_error = fatal_task.result()
+        logger.opt(exception=fatal_error).critical("Engine fatal error，Worker 进入进程级 self-fence")
+        return fatal_error
 
     async def _shutdown_with_timeout(self) -> None:
         """带超时的关闭流程"""
         grace_period = getattr(self.config, "grace_period", 30.0)
-
+        timeout_seconds = grace_period + SHUTDOWN_TIMEOUT_MARGIN_SECONDS
+        failures: list[Exception] = []
         try:
-            async with asyncio.timeout(grace_period + 5):
+            async with asyncio.timeout(timeout_seconds):
                 if self.container:
                     await self.lifecycle.shutdown(self.container, grace_period)
-        except TimeoutError:
-            logger.warning(f"关闭超时 ({grace_period + 5}s)，部分资源可能未正确释放")
-        finally:
+        except Exception as exc:
+            logger.opt(exception=exc).error("Worker 组件关闭失败")
+            failures.append(exc)
+        try:
             await self._close_database()
+        except Exception as exc:
+            logger.opt(exception=exc).error("Worker PostgreSQL 连接关闭失败")
+            failures.append(exc)
+        finally:
             self._graceful.cancel_force_exit()
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup("Worker 应用关闭失败", failures)
 
     def _log_status(self) -> None:
         """输出运行状态"""

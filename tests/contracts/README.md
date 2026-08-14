@@ -53,7 +53,7 @@ Redis 契约覆盖。
 | `conftest.py` | 参数化 fixture + sys.path 注入 + cleanup |
 | `test_transport_lifecycle.py` | `start` / `stop` / `state` / `is_running` |
 | `test_transport_task_flow.py`  | `poll_task` / `ack_task` / `requeue_task` / `report_result` |
-| `test_transport_logs.py`       | `send_log` / `send_log_batch` / `send_log_chunk` |
+| `test_transport_logs.py`       | `send_log` / `send_log_batch` |
 | `test_transport_control.py`    | `poll_control` / `ack_control` / `send_control_result` |
 | `test_transport_heartbeat.py`  | `send_heartbeat` |
 | `test_transport_resilience.py` | 重连、空轮询、退避 |

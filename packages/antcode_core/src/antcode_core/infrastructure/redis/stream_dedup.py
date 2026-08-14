@@ -23,7 +23,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from antcode_core.infrastructure.redis.streams import StreamClient
+    from antcode_core.infrastructure.redis.stream_client import StreamClient
 
 # XADD 响应丢失后的有界查重窗口。派发写入发生在查重前的毫秒级窗口内，
 # 尾部扫描该常量条数足以覆盖并发写入间隙，同时避免全量扫描。

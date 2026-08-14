@@ -33,6 +33,19 @@ class HeartbeatData:
     disk: float = 0.0
     running_tasks: int = 0
     max_concurrent_tasks: int = 1
+    task_count: int = 0
+    project_count: int = 0
+    env_count: int = 0
+    queued_tasks: int = 0
+    cpu_cores: int = 0
+    memory_total_bytes: int = 0
+    memory_used_bytes: int = 0
+    memory_available_bytes: int = 0
+    disk_total_bytes: int = 0
+    disk_used_bytes: int = 0
+    disk_free_bytes: int = 0
+    uptime_seconds: int = 0
+    spider_stats: dict[str, Any] | None = None
     version: str = ""
     os_type: str = ""
     os_version: str = ""
@@ -118,6 +131,18 @@ class HeartbeatHandler:
                 "disk_percent": str(heartbeat.disk),
                 "running_tasks": str(heartbeat.running_tasks),
                 "max_concurrent_tasks": str(heartbeat.max_concurrent_tasks),
+                "task_count": str(heartbeat.task_count),
+                "project_count": str(heartbeat.project_count),
+                "env_count": str(heartbeat.env_count),
+                "queued_tasks": str(heartbeat.queued_tasks),
+                "cpu_cores": str(heartbeat.cpu_cores),
+                "memory_total_bytes": str(heartbeat.memory_total_bytes),
+                "memory_used_bytes": str(heartbeat.memory_used_bytes),
+                "memory_available_bytes": str(heartbeat.memory_available_bytes),
+                "disk_total_bytes": str(heartbeat.disk_total_bytes),
+                "disk_used_bytes": str(heartbeat.disk_used_bytes),
+                "disk_free_bytes": str(heartbeat.disk_free_bytes),
+                "uptime_seconds": str(heartbeat.uptime_seconds),
                 "version": heartbeat.version,
                 "os_type": heartbeat.os_type,
                 "os_version": heartbeat.os_version,
@@ -128,9 +153,13 @@ class HeartbeatHandler:
             import json
 
             status_data["capabilities"] = json.dumps(heartbeat.capabilities, ensure_ascii=False)
+            if heartbeat.spider_stats is not None:
+                status_data["spider_stats"] = json.dumps(heartbeat.spider_stats, ensure_ascii=False)
 
             pipe = redis.pipeline(transaction=False)
             pipe.hset(heartbeat_key, mapping=status_data)
+            if heartbeat.spider_stats is None:
+                pipe.hdel(heartbeat_key, "spider_stats")
             pipe.expire(heartbeat_key, self.HEARTBEAT_TTL)
             await pipe.execute()
 

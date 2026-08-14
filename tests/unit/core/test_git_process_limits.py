@@ -1,5 +1,7 @@
+import concurrent.futures
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,18 +62,44 @@ def test_external_transfer_failure_terminates_process_immediately(tmp_path):
     assert time.monotonic() - started < 2
 
 
-def test_dns_resolver_pool_is_fixed_and_saturates_explicitly():
+def test_dns_resolver_pool_is_fixed_and_queues_within_timeout():
     def slow_resolver(url):
         time.sleep(0.05)
         return url
 
-    for _ in range(limits_module._DNS_RESOLVER_WORKERS):
-        with pytest.raises(TimeoutError):
-            limits_module.resolve_with_timeout(slow_resolver, "example.com", 0.001)
-    with pytest.raises(RuntimeError, match="已饱和"):
-        limits_module.resolve_with_timeout(slow_resolver, "example.com", 0.001)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as callers:
+        futures = [
+            callers.submit(limits_module.resolve_with_timeout, slow_resolver, f"host-{index}", 1) for index in range(3)
+        ]
+
+    assert [future.result() for future in futures] == ["host-0", "host-1", "host-2"]
     assert limits_module._DNS_EXECUTOR._max_workers == limits_module._DNS_RESOLVER_WORKERS
-    time.sleep(0.06)
+
+
+def test_dns_resolver_capacity_wait_is_bounded_by_request_timeout():
+    callers_ready = threading.Barrier(limits_module._DNS_RESOLVER_WORKERS + 1)
+    release = threading.Event()
+
+    def blocked_resolver(url):
+        callers_ready.wait()
+        release.wait()
+        return url
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=limits_module._DNS_RESOLVER_WORKERS) as callers:
+        active = [
+            callers.submit(limits_module.resolve_with_timeout, blocked_resolver, f"host-{index}", 1)
+            for index in range(limits_module._DNS_RESOLVER_WORKERS)
+        ]
+        callers_ready.wait()
+        try:
+            with pytest.raises(TimeoutError, match="等待执行池"):
+                limits_module.resolve_with_timeout(blocked_resolver, "queued-host", 0.01)
+        finally:
+            release.set()
+
+    assert [future.result() for future in active] == [
+        f"host-{index}" for index in range(limits_module._DNS_RESOLVER_WORKERS)
+    ]
 
 
 def test_clone_is_shallow_and_checks_out_resolved_revision(monkeypatch, tmp_path):

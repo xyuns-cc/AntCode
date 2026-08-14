@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from antcode_core.application.services.lease_service import LeasePolicy
+from antcode_core.application.services.lease_service import wire_lease_policy
 
 from antcode_worker.transport.redis.pending_recovery import (
     DEFAULT_RECOVERY_PAGE_SIZE,
@@ -20,7 +23,8 @@ from antcode_worker.transport.redis.runtime_control_models import ControlChannel
 # = 7500ms) 作为下限,既保证新代际能在合理时间内接手真正僵死的 PEL,又
 # 避免抢占仍在正常处理中的消息。reclaim_generation 内部还会按 consumer name
 # 二次过滤,只处理"非当前代际"consumer 的 entries,这里的 idle 门槛是叠加防线。
-_LEGACY_CLAIM_MIN_IDLE_MS = max(LeasePolicy().ttl_ms // 4, 1000)
+_LEGACY_CLAIM_MIN_IDLE_MS = max(wire_lease_policy().ttl_ms // 4, 1000)
+_CONTROL_RECOVERY_INTERVAL_SECONDS = _LEGACY_CLAIM_MIN_IDLE_MS / 1000
 
 
 class PendingControlRecovery(PendingChannelRecovery):
@@ -31,14 +35,31 @@ class PendingControlRecovery(PendingChannelRecovery):
         channels: tuple[ControlChannel, ...],
         *,
         legacy_consumer_name: str,
+        require_current_generation: Callable[[], Awaitable[None]],
         page_size: int = DEFAULT_RECOVERY_PAGE_SIZE,
+        recovery_interval_seconds: float = _CONTROL_RECOVERY_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        is_in_flight: Any = None,
     ) -> None:
+        if (
+            isinstance(recovery_interval_seconds, bool)
+            or not isinstance(recovery_interval_seconds, (int, float))
+            or not math.isfinite(recovery_interval_seconds)
+            or recovery_interval_seconds <= 0
+        ):
+            raise ValueError("control PEL recovery_interval_seconds 必须大于 0")
         self._legacy_consumer_name = legacy_consumer_name
-        self._old_generations_claimed = False
-        super().__init__(channels, page_size=page_size)
+        self._require_current_generation = require_current_generation
+        self._recovery_interval_seconds = recovery_interval_seconds
+        self._monotonic = monotonic
+        self._next_recovery_at = 0.0
+        if is_in_flight is None:
+            super().__init__(channels, page_size=page_size)
+        else:
+            super().__init__(channels, page_size=page_size, is_in_flight=is_in_flight)
 
     def reset(self) -> None:
-        self._old_generations_claimed = False
+        self._next_recovery_at = 0.0
         super().reset()
 
     async def poll(
@@ -46,9 +67,11 @@ class PendingControlRecovery(PendingChannelRecovery):
         redis: Any,
         consumer_name: str,
     ) -> tuple[str, str, dict[Any, Any]] | None:
-        if not self._old_generations_claimed and consumer_name != self._legacy_consumer_name:
+        now = self._monotonic()
+        if consumer_name != self._legacy_consumer_name and now >= self._next_recovery_at:
             await self._claim_old_generations(redis, consumer_name)
-            self._old_generations_claimed = True
+            PendingChannelRecovery.reset(self)
+            self._next_recovery_at = now + self._recovery_interval_seconds
         return await super().poll(redis, consumer_name)
 
     async def _claim_old_generations(self, redis: Any, consumer_name: str) -> None:
@@ -62,11 +85,7 @@ class PendingControlRecovery(PendingChannelRecovery):
                 redis,
                 consumer_group=channel.group,
                 config=config,
-                require_current_generation=_generation_already_checked,
+                require_current_generation=self._require_current_generation,
             )
             while await claimer.find_and_claim(channel.stream_key, consumer_name):
                 pass
-
-
-async def _generation_already_checked() -> None:
-    return None

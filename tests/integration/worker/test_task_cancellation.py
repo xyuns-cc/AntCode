@@ -128,8 +128,8 @@ class TestTaskCancellation:
         """
         from antcode_worker.domain.enums import ExitReason, RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
+        from antcode_worker.executor.process import ProcessExecutor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建长时间运行的脚本
@@ -269,6 +269,7 @@ class TestTaskCancellation:
     @pytest.mark.asyncio
     async def test_cancel_and_ack(
         self,
+        unique_run_id,
         unique_task_id,
         unique_worker_id,
         *,
@@ -305,18 +306,17 @@ class TestTaskCancellation:
         try:
             await direct_support.activate_direct_transport(transport)
 
-            # 写入任务并获取 receipt
             task_data = {
                 "task_id": unique_task_id,
+                "run_id": unique_run_id,
                 "project_id": "cancel-project",
                 "project_type": "code",
                 **direct_support.source_bundle_fields("a"),
             }
-            await redis_client.xadd(stream_key, task_data)
+            await direct_support.publish_ready_task(redis_client, transport, task_data)
             task_msg = await transport.poll_task(timeout=5.0)
             assert task_msg is not None, "未能拉取到任务"
 
-            # ACK 取消的任务（使用 receipt）
             success = await transport.ack_task(task_msg.receipt, accepted=True, reason="cancelled")
             assert success is True
 

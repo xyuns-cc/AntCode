@@ -6,8 +6,10 @@ import json
 import uuid
 from typing import Any
 
+from antcode_contracts.runtime_metadata import validate_runtime_creator, validate_runtime_metadata
 from loguru import logger
 
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.infrastructure.redis import (
     build_runtime_manage_control_payload,
     control_reply_stream,
@@ -27,7 +29,7 @@ def _decode_runtime_response(decoded: dict[str, Any]) -> dict[str, Any]:
     success_value = str(decoded.get("success", "")).lower()
     if success_value not in {"true", "false"}:
         raise RuntimeError("运行时控制响应 success 字段无效")
-    error = str(decoded.get("error") or "")
+    error = normalize_persisted_error_message(decoded.get("error")) or ""
     if len(error.encode("utf-8")) > MAX_RUNTIME_ERROR_BYTES:
         raise RuntimeError("运行时控制响应 error 超过 16 KiB 上限")
     if "data" not in decoded:
@@ -138,13 +140,14 @@ class RuntimeControlService:
         key: str | None = None,
         description: str | None = None,
     ) -> dict[str, Any]:
+        normalized_key, normalized_description = validate_runtime_metadata(key, description)
         return await self.send_command(
             worker_id,
             "update_env",
             {
                 "env_name": env_name,
-                "key": key,
-                "description": description,
+                "key": normalized_key,
+                "description": normalized_description,
             },
         )
 
@@ -153,9 +156,12 @@ class RuntimeControlService:
         worker_id: str,
         env_name: str,
         python_version: str | None = None,
+        *,
         packages: list[str] | None = None,
         created_by: str | None = None,
+        owner_user_id: str | None = None,
     ) -> dict[str, Any]:
+        normalized_creator, normalized_owner = validate_runtime_creator(created_by, owner_user_id)
         return await self.send_command(
             worker_id,
             "create_env",
@@ -163,7 +169,8 @@ class RuntimeControlService:
                 "env_name": env_name,
                 "python_version": python_version,
                 "packages": packages or [],
-                "created_by": created_by or "",
+                "created_by": normalized_creator or "",
+                "owner_user_id": normalized_owner or "",
             },
             timeout=600,
         )

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 
 from antcode_core.application.services.monitoring import monitoring_service
+from antcode_core.application.services.monitoring.history_query import WorkerHistoryPageQuery
 from antcode_core.application.services.workers.worker_service import worker_service
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User, UserRole, Worker
@@ -19,10 +20,28 @@ from antcode_core.domain.schemas.monitoring import (
     WorkerSummary,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from antcode_web_api.deps import require_role
 
 router = APIRouter()
+
+DEFAULT_HISTORY_WINDOW = timedelta(hours=24)
+MAX_HISTORY_WINDOW = timedelta(days=30)
+DEFAULT_HISTORY_PAGE_SIZE = 200
+MAX_HISTORY_PAGE_SIZE = 1000
+
+
+class WorkerHistoryHttpQuery(BaseModel):
+    """Validated HTTP query contract for archived Worker metrics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metric_type: str = Field("performance", pattern="^(performance|spider)$")
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    page: int = Field(1, ge=1)
+    size: int = Field(DEFAULT_HISTORY_PAGE_SIZE, ge=1, le=MAX_HISTORY_PAGE_SIZE)
 
 
 async def _ensure_authenticated_user(current_user: TokenData) -> User:
@@ -128,6 +147,16 @@ def _require_timezone(dt: datetime, field: str) -> datetime:
     return dt
 
 
+def _history_window(start_time: datetime | None, end_time: datetime | None) -> tuple[datetime, datetime]:
+    resolved_end = _require_timezone(end_time or datetime.now(UTC), "end_time")
+    resolved_start = _require_timezone(start_time or resolved_end - DEFAULT_HISTORY_WINDOW, "start_time")
+    if resolved_start >= resolved_end:
+        raise HTTPException(status_code=400, detail="开始时间必须早于结束时间")
+    if resolved_end - resolved_start > MAX_HISTORY_WINDOW:
+        raise HTTPException(status_code=400, detail="历史数据查询跨度不能超过 30 天")
+    return resolved_start.astimezone(UTC), resolved_end.astimezone(UTC)
+
+
 @router.get(
     "/workers/{worker_id}/history",
     response_model=WorkerHistoryQueryResponse,
@@ -135,33 +164,29 @@ def _require_timezone(dt: datetime, field: str) -> datetime:
 )
 async def get_worker_history(
     worker_id: str,
-    metric_type: str = Query("performance", pattern="^(performance|spider)$"),
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
+    query: Annotated[WorkerHistoryHttpQuery, Query()],
     current_user: TokenData = Depends(get_current_user),
 ):
     await _ensure_worker_access(worker_id, current_user)
-    if end_time is None:
-        end_time = datetime.now(UTC)
-    if start_time is None:
-        start_time = end_time - timedelta(hours=24)
-
-    start_time = _require_timezone(start_time, "start_time")
-    end_time = _require_timezone(end_time, "end_time")
-
-    if start_time >= end_time:
-        raise HTTPException(status_code=400, detail="开始时间必须早于结束时间")
-
-    start_time_utc = start_time.astimezone(UTC)
-    end_time_utc = end_time.astimezone(UTC)
-
-    records = await monitoring_service.get_worker_history(worker_id, start_time_utc, end_time_utc, metric_type)
-    if not records:
-        return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=[], count=0)
-
+    start_time_utc, end_time_utc = _history_window(query.start_time, query.end_time)
+    history_query = WorkerHistoryPageQuery(
+        start_time=start_time_utc,
+        end_time=end_time_utc,
+        metric_type=query.metric_type,
+        page=query.page,
+        size=query.size,
+    )
+    records, total = await monitoring_service.get_worker_history(worker_id, history_query)
     items = [_worker_history_item(record) for record in records]
-
-    return WorkerHistoryQueryResponse(worker_id=worker_id, metric_type=metric_type, data=items, count=len(items))
+    return WorkerHistoryQueryResponse(
+        worker_id=worker_id,
+        metric_type=query.metric_type,
+        data=items,
+        count=len(items),
+        total=total,
+        page=query.page,
+        size=query.size,
+    )
 
 
 def _worker_history_item(record: dict[str, Any]) -> WorkerHistoryItem:

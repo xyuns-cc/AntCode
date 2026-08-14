@@ -30,7 +30,7 @@ async def test_direct_preflight_inspects_group_without_claiming_tasks(monkeypatc
 
     assert await preflight_check_direct(config) is True
 
-    redis.xinfo_groups.assert_awaited_once_with("antcode:task:ready:worker-001")
+    redis.xinfo_groups.assert_awaited_once_with("{antcode}:task:ready:worker-001")
     redis.xreadgroup.assert_not_called()
     redis.aclose.assert_awaited_once()
 

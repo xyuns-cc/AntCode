@@ -25,6 +25,7 @@ async def test_dispatch_aborts_when_cas_lost_to_cancel(monkeypatch):
     service._log_execution = AsyncMock()
     status_service = _FenceStatusService(claim_result=False)
     monkeypatch.setattr(scheduler_loop, "execution_status_service", status_service)
+    monkeypatch.setattr(scheduler_loop, "claim_dispatch", AsyncMock(return_value=False))
 
     from antcode_master.dispatch import selector
 
@@ -35,7 +36,7 @@ async def test_dispatch_aborts_when_cas_lost_to_cancel(monkeypatch):
         SimpleNamespace(id=1, name="task"),
         SimpleNamespace(type="code"),
         None,
-        SimpleNamespace(run_id="run-cancelled"),
+        SimpleNamespace(run_id="run-cancelled", scheduler_fencing_token=7),
         "run-cancelled",
         datetime.now(UTC),
     )
@@ -43,8 +44,8 @@ async def test_dispatch_aborts_when_cas_lost_to_cancel(monkeypatch):
     assert result["success"] is False
     assert result["aborted"] is True
     resolve.assert_not_awaited()
-    # 只发生了一次 DISPATCHING claim 尝试
-    assert len(status_service.dispatch_updates) == 1
+    # DISPATCHING claim 已收敛到带 authority 行锁的专用 CAS。
+    assert status_service.dispatch_updates == []
 
 
 @pytest.mark.asyncio
@@ -75,6 +76,7 @@ async def test_dispatch_proceeds_when_cas_won(monkeypatch):
     service._execute_distributed_task = AsyncMock(return_value={"success": True, "distributed": True, "pending": True})
     status_service = _FenceStatusService(claim_result=True)
     monkeypatch.setattr(scheduler_loop, "execution_status_service", status_service)
+    monkeypatch.setattr(scheduler_loop, "claim_dispatch", AsyncMock(return_value=True))
 
     from antcode_master.dispatch import selector
 
@@ -86,7 +88,7 @@ async def test_dispatch_proceeds_when_cas_won(monkeypatch):
         SimpleNamespace(id=1, name="task"),
         SimpleNamespace(type="code"),
         None,
-        SimpleNamespace(run_id="run-live"),
+        SimpleNamespace(run_id="run-live", scheduler_fencing_token=7),
         "run-live",
         datetime.now(UTC),
     )

@@ -56,6 +56,11 @@ services:
         fi
         chown redis:redis "$${acl_file}"
         chmod 600 "$${acl_file}"
+        # ACL SAVE 是原子写：先在同目录建临时文件再 rename，因此 redis 需要对
+        # **目录**有写权限。只 chown 文件的话，ACL SAVE 恒报
+        # "Opening temp ACL file for ACL SAVE: Permission denied"，
+        # master 启动时签发 Worker ACL 直接失败、容器永远 unhealthy。
+        chown redis:redis "$${acl_file%/*}"
         exec /usr/local/bin/docker-entrypoint.sh \
           redis-server --appendonly yes --aclfile "$${acl_file}"
     environment:
@@ -74,6 +79,62 @@ services:
       retries: 3
 
   # ================== 应用服务 ==================
+
+  # 数据库结构初始化/升级必须先于所有数据库消费者完成。
+  migration:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.web_api
+    image: antcode-web-api:dev
+    container_name: antcode-migration
+    restart: "no"
+    logging: *antcode-logging
+    env_file:
+      - path: ./.env
+        required: false
+      - path: ../../.env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
+      - REDIS_ACL_ENABLED=true
+    command: ["python", "-m", "scripts.init_db"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - antcode-network
+
+  # 显式运维工具，不随常驻服务自动启动。先停写，再用 docker compose run 调用。
+  crawl-redis-upgrade:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.web_api
+    image: antcode-web-api:dev
+    profiles: ["crawl-redis-upgrade"]
+    restart: "no"
+    logging: *antcode-logging
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 256
+    tmpfs:
+      - /tmp
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
+      REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE must be set and non-empty}
+    command: ["python", "-m", "scripts.migrate_crawl_redis"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - antcode-network
 
   # Web API 服务 (Control Plane)
   web-api:
@@ -110,6 +171,8 @@ services:
     volumes:
       - web_data:/app/data
     depends_on:
+      migration:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -147,6 +210,8 @@ services:
       - REDIS_ACL_ENABLED=true
       - MASTER_ID=${MASTER_ID:-master-1}
     depends_on:
+      migration:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -190,6 +255,8 @@ services:
       # 生产严禁：明文端口 + AUTH_ENABLED = 凭证挂到公网。
       - ANTCODE_GATEWAY_ALLOW_INSECURE=true
     depends_on:
+      migration:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -219,18 +286,48 @@ services:
     cpus: 4
     mem_limit: 4g
     pids_limit: 2048
-    # bubblewrap 需要在 Docker 内创建嵌套 user/mount/pid namespace。
-    # Worker 主进程仍以镜像内 appuser 运行；不要改成 privileged 或 root。
-    cap_add:
-      - SYS_ADMIN
+    # 沙箱 fail-closed 的宿主前提，必须显式声明（详细推导见
+    # docker-compose.prod.worker.yml 同名字段）：preexec_fn 对每个任务子进程
+    # setrlimit(RLIMIT_NOFILE, 2048)，宿主 dockerd 默认 nofile hard < 2048 时
+    # 直接抛 "current limit exceeds maximum limit"，Worker 拒绝执行任何任务。
+    # 65536 = 2048 硬性下限 + Worker 父进程自身的 fd 余量。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    read_only: true
+    cap_drop:
+      - ALL
+    # bwrap 的非特权 user namespace 在 Docker 下需要三项放宽，缺任何一项
+    # 任务都会 100% 失败（真机实测：默认画像下每个任务都以
+    # "bwrap: No permissions to create new namespace" 退出）：
+    #   1) seccomp：Docker 内置 profile 在无 CAP_SYS_ADMIN 时禁止 clone/unshare
+    #      带 CLONE_NEWUSER。这里用的是**定制 profile**（内置 profile 仅放行
+    #      namespace 相关调用），不是 unconfined，其余系统调用过滤全部保留。
+    #   2) apparmor：docker-default 直接 deny mount，bwrap 连 / 都改不成 slave。
+    #   3) systempaths：Docker 对 /proc 的屏蔽挂载会让 userns 内挂 procfs 失败。
+    # 仍然保留的硬边界：cap_drop ALL、no-new-privileges、只读根、非 root 运行。
+    # 改动这三行前请先在目标宿主跑通真实任务，否则等于静默关掉整个执行面。
     security_opt:
-      - seccomp=unconfined
+      - no-new-privileges:true
+      - seccomp:./seccomp/worker-userns.json
       - apparmor=unconfined
       - systempaths=unconfined
+    shm_size: 1g
+    tmpfs:
+      - /tmp:exec,uid=1000,gid=1000,mode=1777
+      - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700
     environment:
       - REDIS_ACL_ENABLED=true
       - ANTCODE_WORKER_KEY=${ANTCODE_WORKER_KEY:?generate a one-time Worker install key first}
       - WORKER_TRANSPORT_MODE=direct
+      # Direct 模式的产物平面是 PostgresArtifactTransferStore（app/wiring.py::
+      # _create_artifact_transfer_store），源码包下载与产物上传都直连 PG blob
+      # 存储，所以 DATABASE_URL 是必需的——而 Redis 侧相反，Worker 只能拿
+      # WORKER_REDIS_URL 那个独立最小权限 ACL 账号，绝不给控制面 REDIS_URL。
+      # 该非对称边界由 WORKER_DIRECT_SCOPED_REDIS 在 Settings 里 fail-closed 校验。
+      - WORKER_DIRECT_SCOPED_REDIS=true
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
       - WORKER_NAME=${WORKER_NAME:-worker-1}
       # 容器内观测端口固定 8001（Dockerfile.worker HEALTHCHECK 假设 8001）
       - WORKER_PORT=8001
@@ -246,10 +343,21 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      # 产物平面直连 PG，依赖显式化（web-api 已隐含 migration 完成，此处只补直连事实）
+      postgres:
+        condition: service_healthy
       web-api:
         condition: service_healthy
     networks:
       - antcode-network
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:8001/health/ready >/dev/null || { kill -TERM 1; exit 1; }
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
 
   # ================== 前端服务 ==================
 

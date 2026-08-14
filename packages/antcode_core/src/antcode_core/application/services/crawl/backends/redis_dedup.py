@@ -1,68 +1,87 @@
-"""Redis 去重存储实现
-
-基于 Redis Bloom Filter 实现的去重存储，支持高效的大规模 URL 去重。
-
-Requirements: 2.2, 2.4, 2.5, 2.6, 2.7
-"""
+"""基于标准 Redis Set 的精确 URL 去重存储。"""
 
 from loguru import logger
 
-from antcode_core.application.services.crawl.backends.dedup_backend import DedupStore
-from antcode_core.infrastructure.redis.bloom_client import BloomFilterClient
+from antcode_core.application.services.crawl.backends.dedup_backend import (
+    DedupStore,
+    DedupStoreCapabilities,
+)
+from antcode_core.application.services.crawl.backends.redis_keys import (
+    crawl_dedup_key,
+    crawl_project_deleted_key,
+)
+from antcode_core.infrastructure.redis.client import get_redis_client
+from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
-# Redis 键前缀
-DEDUP_KEY_PREFIX = "rule"
-DEDUP_KEY_SUFFIX = "dedup"
+_ADD_ACTIVE = """
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return redis.error_reply('CRAWL_PROJECT_DELETED')
+end
+return redis.call('SADD', KEYS[1], ARGV[1])
+"""
+
+_ADD_MANY_ACTIVE = """
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return redis.error_reply('CRAWL_PROJECT_DELETED')
+end
+local results = {}
+for index = 1, #ARGV do
+    table.insert(results, redis.call('SADD', KEYS[1], ARGV[index]))
+end
+return results
+"""
 
 
-def get_dedup_key(project_id: str) -> str:
+def get_dedup_key(project_id: str, namespace: str | None = None) -> str:
     """获取去重过滤器的 Redis 键名
 
     Args:
         project_id: 项目 ID
 
     Returns:
-        Redis 键名，格式: rule:{project_id}:dedup
+        带 namespace 与项目 hash tag 的 Redis 键名
     """
-    return f"{DEDUP_KEY_PREFIX}:{project_id}:{DEDUP_KEY_SUFFIX}"
+    return crawl_dedup_key(project_id, namespace)
 
 
 class RedisDedupStore(DedupStore):
-    """Redis Bloom Filter 去重存储实现
+    """精确去重，不依赖生产 Compose 未提供的 RedisBloom 模块。"""
 
-    基于 Redis Bloom Filter 实现，支持：
-    - 高效的大规模去重（百万级）
-    - 可配置的误判率
-    - 自动扩展
-
-    注意：需要 Redis 安装 RedisBloom 模块，模块缺失时直接失败。
-
-    Requirements: 2.2, 2.4, 2.5, 2.6, 2.7
-    """
-
-    # 默认配置
-    DEFAULT_CAPACITY = 1000000  # 默认容量 100 万
-    DEFAULT_ERROR_RATE = 0.001  # 默认误判率 0.1%
-
-    def __init__(self, bloom_client: BloomFilterClient | None = None):
+    def __init__(
+        self,
+        redis_client=None,
+        namespace: str | None = None,
+    ):
         """初始化 Redis 去重存储
 
         Args:
-            bloom_client: Bloom Filter 客户端，为 None 时自动创建
+            redis_client: Redis 客户端，为 None 时自动创建
         """
-        self._bloom_client = bloom_client or BloomFilterClient()
+        self._redis = redis_client
+        self._namespace = redis_namespace(namespace)
+
+    async def _get_client(self):
+        if self._redis is None:
+            self._redis = await get_redis_client()
+        return self._redis
+
+    def _key(self, project_id: str) -> str:
+        return get_dedup_key(project_id, self._namespace)
+
+    def _deleted_fence_key(self, project_id: str) -> str:
+        return crawl_project_deleted_key(project_id, self._namespace)
 
     async def exists(self, project_id: str, fingerprint: str) -> bool:
         """检查指纹是否存在
 
         Requirements: 2.4
         """
-        key = get_dedup_key(project_id)
-        result = await self._bloom_client.bf_exists(key, fingerprint)
+        key = self._key(project_id)
+        result = await (await self._get_client()).sismember(key, fingerprint)
 
         logger.debug(f"检查去重: project={project_id}, fingerprint={fingerprint[:8]}..., exists={result}")
 
-        return result
+        return bool(result)
 
     async def add(self, project_id: str, fingerprint: str) -> bool:
         """添加指纹
@@ -72,13 +91,19 @@ class RedisDedupStore(DedupStore):
 
         Requirements: 2.5
         """
-        key = get_dedup_key(project_id)
-        result = await self._bloom_client.bf_add(key, fingerprint)
+        key = self._key(project_id)
+        result = await (await self._get_client()).eval(
+            _ADD_ACTIVE,
+            2,
+            key,
+            self._deleted_fence_key(project_id),
+            fingerprint,
+        )
 
         if result:
             logger.debug(f"添加去重: project={project_id}, fingerprint={fingerprint[:8]}...")
 
-        return result
+        return bool(result)
 
     async def add_many(self, project_id: str, fingerprints: list[str]) -> list[bool]:
         """批量添加指纹
@@ -91,100 +116,62 @@ class RedisDedupStore(DedupStore):
         if not fingerprints:
             return []
 
-        key = get_dedup_key(project_id)
-        results = await self._bloom_client.bf_madd(key, fingerprints)
+        key = self._key(project_id)
+        client = await self._get_client()
+        results = await client.eval(
+            _ADD_MANY_ACTIVE,
+            2,
+            key,
+            self._deleted_fence_key(project_id),
+            *fingerprints,
+        )
 
         added_count = sum(1 for r in results if r)
         logger.debug(f"批量添加去重: project={project_id}, total={len(fingerprints)}, added={added_count}")
 
-        return results
+        return [bool(result) for result in results]
 
     async def exists_many(self, project_id: str, fingerprints: list[str]) -> list[bool]:
         """批量检查指纹是否存在"""
         if not fingerprints:
             return []
 
-        key = get_dedup_key(project_id)
-        results = await self._bloom_client.bf_mexists(key, fingerprints)
+        key = self._key(project_id)
+        client = await self._get_client()
+        async with client.pipeline(transaction=True) as pipeline:
+            for fingerprint in fingerprints:
+                pipeline.sismember(key, fingerprint)
+            results = await pipeline.execute()
 
         exists_count = sum(1 for r in results if r)
         logger.debug(f"批量检查去重: project={project_id}, total={len(fingerprints)}, exists={exists_count}")
 
-        return results
+        return [bool(result) for result in results]
 
     async def size(self, project_id: str) -> int:
         """获取去重集合大小
 
         Requirements: 2.7
         """
-        key = get_dedup_key(project_id)
-        return await self._bloom_client.get_item_count(key)
+        key = self._key(project_id)
+        return int(await (await self._get_client()).scard(key))
 
     async def clear(self, project_id: str) -> bool:
         """清空去重集合"""
-        key = get_dedup_key(project_id)
-        result = await self._bloom_client.delete_filter(key)
+        key = self._key(project_id)
+        result = await (await self._get_client()).delete(key)
 
         logger.info(f"清空去重存储: project={project_id}")
 
-        return result
+        return bool(result)
 
-    async def ensure_store(
-        self,
-        project_id: str,
-        capacity: int = 1000000,
-        error_rate: float = 0.001,
-    ) -> bool:
-        """确保去重存储存在"""
-        key = get_dedup_key(project_id)
-        capacity = capacity or self.DEFAULT_CAPACITY
-        error_rate = error_rate or self.DEFAULT_ERROR_RATE
-
-        return await self._bloom_client.ensure_filter(key, capacity, error_rate)
-
-    async def get_filter_info(self, project_id: str) -> dict:
-        """获取去重过滤器信息
-
-        Args:
-            project_id: 项目 ID
-
-        Returns:
-            过滤器信息字典
-        """
-        key = get_dedup_key(project_id)
-        info = await self._bloom_client.bf_info(key)
-
-        return {
-            "project_id": project_id,
-            "capacity": info.capacity,
-            "size": info.size,
-            "num_items": info.num_items_inserted,
-            "num_filters": info.num_filters,
-            "expansion_rate": info.expansion_rate,
-        }
-
-    async def recreate_store(
-        self,
-        project_id: str,
-        capacity: int | None = None,
-        error_rate: float | None = None,
-    ) -> bool:
-        """清空并重建去重存储
-
-        Args:
-            project_id: 项目 ID
-            capacity: 新容量
-            error_rate: 新误判率
-
-        Returns:
-            是否成功
-        """
-        key = get_dedup_key(project_id)
-        capacity = capacity or self.DEFAULT_CAPACITY
-        error_rate = error_rate or self.DEFAULT_ERROR_RATE
-
-        result = await self._bloom_client.clear_filter(key, capacity, error_rate)
-
-        logger.info(f"重建去重存储: project={project_id}, capacity={capacity}, error_rate={error_rate}")
-
-        return result
+    async def get_capabilities(self, project_id: str) -> DedupStoreCapabilities:
+        del project_id
+        return DedupStoreCapabilities(
+            storage="redis_set",
+            exact=True,
+            bounded=False,
+            capacity_limit=None,
+            retention="until_project_cleanup",
+            memory_growth="linear_in_unique_fingerprints",
+        )

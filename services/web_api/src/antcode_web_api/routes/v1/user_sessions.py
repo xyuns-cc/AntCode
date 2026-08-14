@@ -7,6 +7,7 @@ from antcode_core.domain.models import UserRole
 from antcode_core.domain.models.audit_log import AuditAction
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from antcode_web_api.committed_audit import record_committed_audit
 from antcode_web_api.response import success
 
 router = APIRouter()
@@ -39,15 +40,18 @@ async def revoke_user_sessions(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前管理员不存在")
 
     revoked = await user_service.revoke_all_sessions(target.id)
-    await audit_service.log_user_action(
-        action=AuditAction.LOGOUT,
-        operator_username=admin.username,
-        target_user_id=target.id,
-        target_username=target.username,
-        operator_id=admin.id,
-        ip_address=request.client.host if request.client else None,
-        new_value={"revoked_sessions": revoked},
-        description=f"强制用户下线: {target.username}",
+    await record_committed_audit(
+        "user_sessions_revoke",
+        lambda: audit_service.log_user_action(
+            action=AuditAction.LOGOUT,
+            operator_username=admin.username,
+            target_user_id=target.id,
+            target_username=target.username,
+            operator_id=admin.id,
+            ip_address=request.client.host if request.client else None,
+            new_value={"revoked_sessions": revoked},
+            description=f"强制用户下线: {target.username}",
+        ),
     )
     return success({"revoked_sessions": revoked}, message=f"已撤销 {revoked} 个活跃会话")
 

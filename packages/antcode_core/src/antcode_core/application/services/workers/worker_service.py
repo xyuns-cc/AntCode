@@ -7,13 +7,15 @@
 """
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from loguru import logger
 from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
+from antcode_core.application.services.workers.provisional_worker_cleanup import (
+    mark_expired_provisional_worker_maintenance,
+)
 from antcode_core.application.services.workers.worker_connection_service import (
     worker_connection_service,
 )
@@ -21,30 +23,46 @@ from antcode_core.application.services.workers.worker_delete_guard import (
     ACTIVE_RUN_STATUSES,
     quiesce_worker_for_delete,
 )
-
-# 导入拆分的服务
 from antcode_core.application.services.workers.worker_heartbeat_service import worker_heartbeat_service
+from antcode_core.application.services.workers.worker_identity_retirement import (
+    clear_worker_credentials,
+    persist_cleared_worker_credentials,
+)
+from antcode_core.application.services.workers.worker_lease_lifecycle import reconnectable_fence_reasons
+from antcode_core.application.services.workers.worker_service_facade import WorkerServiceFacade
+from antcode_core.application.services.workers.worker_service_lifecycle_wiring import (
+    disable_worker_lease,
+    enable_worker_lease,
+)
 from antcode_core.application.services.workers.worker_stats_service import worker_stats_service
 from antcode_core.common.config import settings
-from antcode_core.common.security.api_key import verify_api_key_hash
 from antcode_core.domain.models import Worker, WorkerStatus
+from antcode_core.domain.models.enums import WorkerPermission
 
 WorkerAclRevoker = Callable[[Worker], Awaitable[None]]
+WorkerLeaseDisabler = Callable[[str, str], Awaitable[bool]]
+WorkerLeaseEnabler = Callable[[str, tuple[str, ...]], Awaitable[bool]]
 
 
-class WorkerService:
+class WorkerService(WorkerServiceFacade):
     """Worker 服务类 - 核心 CRUD 操作"""
 
-    # 心跳超时时间（秒）
     HEARTBEAT_TIMEOUT = settings.WORKER_HEARTBEAT_TIMEOUT
 
-    def __init__(self, acl_revoker: WorkerAclRevoker | None = None):
-        """初始化 Worker 服务"""
-        # 委托给心跳服务
+    def __init__(
+        self,
+        acl_revoker: WorkerAclRevoker | None = None,
+        *,
+        lease_disabler: WorkerLeaseDisabler | None = None,
+        lease_enabler: WorkerLeaseEnabler | None = None,
+    ):
+        """初始化 Worker 服务。"""
         self._heartbeat_service = worker_heartbeat_service
         self._connection_service = worker_connection_service
         self._stats_service = worker_stats_service
         self._acl_revoker = acl_revoker
+        self._lease_disabler = lease_disabler
+        self._lease_enabler = lease_enabler
 
     @staticmethod
     def _normalize_status_filter(status_filter: WorkerStatus | str | None) -> str | None:
@@ -62,49 +80,7 @@ class WorkerService:
                 raise HTTPException(status_code=400, detail="无效的状态过滤值") from exc
         return None
 
-    # ==================== 委托方法 ====================
-
-    async def init_heartbeat_cache(self):
-        """初始化心跳检测缓存"""
-        await self._heartbeat_service.init_heartbeat_cache()
-
-    async def refresh_worker_cache(self):
-        """刷新 Worker 缓存"""
-        await self._heartbeat_service.refresh_worker_cache()
-
-    async def init_worker_secrets(self):
-        """初始化 Worker 密钥"""
-        await self._connection_service.init_worker_secrets()
-
-    async def register_direct_worker(self, request):
-        """Direct Worker 注册（使用 worker_id 作为 public_id）"""
-        return await self._connection_service.register_direct_worker(request)
-
-    async def smart_health_check(self):
-        """智能心跳检测"""
-        return await self._heartbeat_service.smart_health_check()
-
-    async def check_all_workers_health(self):
-        """检查所有 Worker 健康状态"""
-        return await self._heartbeat_service.check_all_workers_health()
-
-    async def manual_test_worker(self, worker_id: int) -> bool:
-        """手动测试 Worker"""
-        return await self._heartbeat_service.manual_test_worker(worker_id)
-
-    async def get_aggregate_stats(self):
-        """获取聚合统计"""
-        return await self._stats_service.get_aggregate_stats()
-
-    async def get_metrics_history(self, worker_id: int, hours: int = 24):
-        """获取历史指标"""
-        return await self._stats_service.get_metrics_history(worker_id, hours)
-
-    async def get_cluster_metrics_history(self, hours: int = 24):
-        """获取集群历史指标"""
-        return await self._stats_service.get_cluster_metrics_history(hours)
-
-    # ==================== 核心 CRUD 操作 ====================
+    # 运行时委托由 WorkerServiceFacade 提供。
 
     async def get_workers(
         self,
@@ -143,30 +119,6 @@ class WorkerService:
 
         return workers, total
 
-    async def get_all_workers(self):
-        """获取所有 Worker（不分页）"""
-        workers = await Worker.all().order_by("-created_at")
-        await self._heartbeat_service.check_offline_workers(workers)
-        return workers
-
-    async def get_worker_by_id(self, worker_id) -> Worker | None:
-        """根据ID获取 Worker"""
-        # 尝试作为 public_id
-        worker = await Worker.filter(public_id=str(worker_id)).first()
-        if worker:
-            return worker
-
-        # 尝试作为内部 ID
-        try:
-            internal_id = int(worker_id)
-            return await Worker.filter(id=internal_id).first()
-        except (ValueError, TypeError):
-            return None
-
-    async def get_worker_by_public_id(self, public_id: str) -> Worker | None:
-        """根据 public_id 获取 Worker"""
-        return await Worker.filter(public_id=public_id).first()
-
     async def create_worker(self, request, user_id: int | None = None) -> Worker:
         """创建 Worker"""
         # 检查名称是否已存在
@@ -202,7 +154,10 @@ class WorkerService:
         if not worker:
             return None
 
-        update_data = request.dict(exclude_unset=True)
+        update_data = request.model_dump(exclude_unset=True)
+
+        target_status = self._validated_update_status(update_data)
+        previous_status = str(worker.status)
 
         # 检查名称唯一性
         if "name" in update_data and update_data["name"] != worker.name:
@@ -225,11 +180,41 @@ class WorkerService:
                     detail="该地址已被其他 Worker 使用",
                 )
 
+        if target_status in (WorkerStatus.OFFLINE.value, WorkerStatus.MAINTENANCE.value):
+            await self._disable_worker_lease(worker, f"status:{target_status}")
+        if target_status in (WorkerStatus.CONNECTING.value, WorkerStatus.ONLINE.value):
+            await self._enable_worker_lease(worker, previous_status=previous_status)
         await worker.update_from_dict(update_data)
         await worker.save()
 
         logger.info(f"Worker 更新成功: {worker.name}")
         return worker
+
+    @staticmethod
+    def _validated_update_status(update_data: dict) -> str | None:
+        if "status" not in update_data:
+            return None
+        try:
+            normalized = WorkerStatus(str(update_data["status"]).strip().lower()).value
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Worker 状态无效") from exc
+        update_data["status"] = normalized
+        return normalized
+
+    async def _retire_worker_identity(self, worker: Worker, reason: str) -> None:
+        await self._disable_worker_lease(worker, reason)
+        clear_worker_credentials(worker)
+
+    async def _disable_worker_lease(self, worker: Worker, reason: str) -> bool:
+        if self._lease_disabler is None:
+            raise RuntimeError("Worker lease lifecycle disabler is not configured")
+        return await self._lease_disabler(worker.public_id, reason)
+
+    async def _enable_worker_lease(self, worker: Worker, *, previous_status: str) -> bool:
+        if self._lease_enabler is None:
+            raise RuntimeError("Worker lease lifecycle enabler is not configured")
+        expected_reasons = reconnectable_fence_reasons(previous_status)
+        return await self._lease_enabler(worker.public_id, expected_reasons)
 
     async def delete_worker(self, worker_id) -> bool:
         """删除 Worker（级联删除所有关联数据）
@@ -245,11 +230,27 @@ class WorkerService:
             return False
 
         await quiesce_worker_for_delete(worker)
+        await self._retire_worker_identity(worker, "delete")
+        await persist_cleared_worker_credentials(worker)
         await self._revoke_acl_before_delete(worker)
         # 级联删除所有关联数据（含 Worker 自身），失败即抛出让上层感知
         deleted_counts = await self._cascade_delete_worker_data(worker)
 
         logger.info(f"Worker 删除成功: {worker.name}, 级联删除: {deleted_counts}")
+        return True
+
+    async def delete_expired_provisional_worker(self, worker_id, run_settler) -> bool:
+        """封禁身份、结算执行，再删除已过期且未确认的临时 Worker。"""
+        worker = await self.get_worker_by_id(worker_id)
+        if not worker:
+            return False
+        await mark_expired_provisional_worker_maintenance(worker)
+        await self._retire_worker_identity(worker, "registration-expired")
+        await persist_cleared_worker_credentials(worker)
+        await self._revoke_acl_before_delete(worker)
+        await run_settler(worker.id)
+        deleted_counts = await self._cascade_delete_worker_data(worker)
+        logger.info("过期临时 Worker 删除成功: {}, 级联删除: {}", worker.name, deleted_counts)
         return True
 
     async def _cascade_delete_worker_data(self, worker: Worker) -> dict:
@@ -431,6 +432,8 @@ class WorkerService:
             try:
                 # P1-FN-06: 与单删同一保护，未终态执行的 Worker 保留并计入失败。
                 await quiesce_worker_for_delete(worker)
+                await self._retire_worker_identity(worker, "batch-delete")
+                await persist_cleared_worker_credentials(worker)
                 await self._revoke_acl_before_delete(worker)
                 deleted = await self._cascade_delete_worker_data(worker)
                 for key, count in deleted.items():
@@ -454,30 +457,13 @@ class WorkerService:
 
     # ==================== 连接相关（委托） ====================
 
-    async def register_worker(self, request):
-        """Worker 自注册"""
-        return await self._connection_service.register_worker(request)
-
     async def disconnect_worker(self, worker_id) -> bool:
         """断开 Worker 连接"""
         worker = await self.get_worker_by_id(worker_id)
         if not worker:
             return False
+        await self._disable_worker_lease(worker, "disconnect")
         return await self._connection_service.disconnect_worker(worker)
-
-    async def test_connection(self, worker_id):
-        """测试 Worker 连接"""
-        worker = await self.get_worker_by_id(worker_id)
-        if not worker:
-            return {"success": False, "error": "Worker 不存在"}
-        return await self._connection_service.test_connection(worker)
-
-    async def refresh_worker_status(self, worker_id):
-        """刷新 Worker 状态"""
-        worker = await self.get_worker_by_id(worker_id)
-        if not worker:
-            return None
-        return await self._connection_service.refresh_worker_status(worker)
 
     # ==================== 心跳相关（委托） ====================
 
@@ -515,151 +501,39 @@ class WorkerService:
             spider_stats=spider_stats,
         )
 
-    async def verify_api_key(self, worker: Worker, api_key: str) -> bool:
-        """验证 Worker 的 API Key"""
-        if not worker or not api_key:
-            return False
-        if worker.api_key_hash and verify_api_key_hash(api_key, worker.api_key_hash):
-            return True
-        if not worker.api_key_previous_hash or not verify_api_key_hash(api_key, worker.api_key_previous_hash):
-            return False
-        expires_at = worker.api_key_previous_expires_at
-        if expires_at is None:
-            return False
-        normalized_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
-        return normalized_expiry > datetime.now(UTC)
-
     # ==================== Worker 权限管理 ====================
 
-    async def get_user_workers(self, user_id: int, is_admin: bool = False):
+    async def get_user_workers(
+        self,
+        user_id: int,
+        is_admin: bool = False,
+        *,
+        required_permission: str = "view",
+    ):
         """获取用户可访问的 Worker 列表"""
         from antcode_core.domain.models import UserWorkerPermission
 
         if is_admin:
             return await Worker.all().order_by("-created_at")
 
-        permissions = await UserWorkerPermission.filter(user_id=user_id).all()
+        if required_permission == "view":
+            permissions = await UserWorkerPermission.filter(
+                user_id=user_id,
+                permission__in=(WorkerPermission.VIEW.value, WorkerPermission.USE.value),
+            ).all()
+        elif required_permission == "use":
+            permissions = await UserWorkerPermission.filter(
+                user_id=user_id,
+                permission=WorkerPermission.USE.value,
+            ).all()
+        else:
+            raise ValueError("Worker 权限仅支持 view 或 use")
         worker_ids = [p.worker_id for p in permissions]
 
         if not worker_ids:
             return []
 
         return await Worker.filter(id__in=worker_ids).order_by("-created_at")
-
-    async def assign_worker_to_user(
-        self,
-        worker_id: int,
-        user_id: int,
-        permission: str = "use",
-        assigned_by: int | None = None,
-        note: str | None = None,
-    ) -> bool:
-        """给用户分配 Worker 权限"""
-        from antcode_core.domain.models import User, UserWorkerPermission
-
-        # 检查用户是否是管理员
-        user = await User.filter(id=user_id).first()
-        if user and user.is_admin:
-            raise HTTPException(status_code=400, detail="管理员默认拥有全部 Worker 权限，无需分配")
-
-        # 检查 Worker 是否存在
-        worker = await Worker.filter(id=worker_id).first()
-        if not worker:
-            raise HTTPException(status_code=404, detail="Worker 不存在")
-
-        # 检查是否已有权限
-        existing = await UserWorkerPermission.filter(user_id=user_id, worker_id=worker_id).first()
-
-        if existing:
-            existing.permission = permission
-            existing.assigned_by = assigned_by
-            existing.note = note
-            await existing.save()
-            logger.info(f"更新用户 {user_id} 的 Worker {worker.name} 权限: {permission}")
-        else:
-            await UserWorkerPermission.create(
-                user_id=user_id,
-                worker_id=worker_id,
-                permission=permission,
-                assigned_by=assigned_by,
-                note=note,
-            )
-            logger.info(f"分配 Worker {worker.name} 给用户 {user_id}, 权限: {permission}")
-
-        return True
-
-    async def revoke_worker_from_user(self, worker_id: int, user_id: int) -> bool:
-        """撤销用户的 Worker 权限"""
-        from antcode_core.domain.models import UserWorkerPermission
-
-        deleted = await UserWorkerPermission.filter(user_id=user_id, worker_id=worker_id).delete()
-
-        if deleted:
-            logger.info(f"撤销用户 {user_id} 的 Worker {worker_id} 权限")
-
-        return deleted > 0
-
-    async def get_worker_users(self, worker_id: int) -> list[dict]:
-        """获取 Worker 的授权用户列表"""
-        from antcode_core.domain.models import User, UserWorkerPermission
-
-        permissions = await UserWorkerPermission.filter(worker_id=worker_id).all()
-
-        if not permissions:
-            return []
-
-        user_ids = [perm.user_id for perm in permissions]
-        users = await User.filter(id__in=user_ids, is_admin=False).all()
-        user_map = {u.id: u for u in users}
-
-        result = []
-        for perm in permissions:
-            user = user_map.get(perm.user_id)
-            if user:
-                result.append(
-                    {
-                        "user_id": user.public_id,
-                        "username": user.username,
-                        "permission": perm.permission,
-                        "assigned_at": perm.assigned_at.isoformat() if perm.assigned_at else None,
-                        "note": perm.note,
-                    }
-                )
-
-        return result
-
-    async def get_user_worker_permissions(self, user_id: int) -> list[dict]:
-        """获取用户的所有 Worker 权限"""
-        from antcode_core.domain.models import UserWorkerPermission
-
-        permissions = await UserWorkerPermission.filter(user_id=user_id).all()
-
-        if not permissions:
-            return []
-
-        # 批量查询所有关联的 Worker，避免 N+1 查询
-        worker_ids = [perm.worker_id for perm in permissions]
-        workers = await Worker.filter(id__in=worker_ids).all()
-        worker_map = {w.id: w for w in workers}
-
-        result = []
-        for perm in permissions:
-            worker = worker_map.get(perm.worker_id)
-            if worker:
-                result.append(
-                    {
-                        "worker_id": worker.id,
-                        "worker_name": worker.name,
-                        "worker_host": worker.host,
-                        "worker_port": worker.port,
-                        "worker_status": worker.status,
-                        "permission": perm.permission,
-                        "assigned_at": perm.assigned_at.isoformat() if perm.assigned_at else None,
-                        "note": perm.note,
-                    }
-                )
-
-        return result
 
     async def check_user_worker_permission(
         self,
@@ -680,62 +554,13 @@ class WorkerService:
             return False
 
         if required_permission == "view":
-            return perm.permission in ["view", "use"]
-        elif required_permission == "use":
-            return perm.permission == "use"
+            return perm.permission in {WorkerPermission.VIEW.value, WorkerPermission.USE.value}
+        if required_permission == "use":
+            return perm.permission == WorkerPermission.USE.value
 
         return False
 
-    async def batch_assign_workers(
-        self,
-        user_id: int,
-        worker_ids: list[int],
-        permission: str = "use",
-        assigned_by: int | None = None,
-    ) -> dict:
-        """批量分配 Worker 权限给用户"""
-        from antcode_core.domain.models import UserWorkerPermission
 
-        existing_perms = await UserWorkerPermission.filter(user_id=user_id, worker_id__in=worker_ids).values_list(
-            "worker_id", flat=True
-        )
-
-        existing_worker_ids = set(existing_perms)
-
-        new_permissions = []
-        for worker_id in worker_ids:
-            if worker_id not in existing_worker_ids:
-                new_permissions.append(
-                    UserWorkerPermission(
-                        user_id=user_id,
-                        worker_id=worker_id,
-                        permission=permission,
-                        assigned_by=assigned_by,
-                        assigned_at=datetime.now(),
-                    )
-                )
-
-        if new_permissions:
-            await UserWorkerPermission.bulk_create(new_permissions)
-
-        logger.info(f"批量分配 Worker 权限: 用户{user_id}, 新增{len(new_permissions)}个")
-
-        return {
-            "success": len(new_permissions),
-            "failed": 0,
-            "skipped": len(existing_worker_ids),
-        }
-
-    async def batch_revoke_workers(self, user_id: int, worker_ids: list[int]) -> dict:
-        """批量撤销用户的 Worker 权限"""
-        from antcode_core.domain.models import UserWorkerPermission
-
-        deleted = await UserWorkerPermission.filter(user_id=user_id, worker_id__in=worker_ids).delete()
-
-        return {"revoked": deleted}
-
-
-# 创建服务实例
 async def _revoke_worker_redis_access(worker: Worker) -> None:
     from antcode_core.common.security.redis_acl import revoke_worker_acl
     from antcode_core.infrastructure.redis import get_redis_client
@@ -746,4 +571,8 @@ async def _revoke_worker_redis_access(worker: Worker) -> None:
     await revoke_worker_acl(redis, worker, clear_credentials=True)
 
 
-worker_service = WorkerService(acl_revoker=_revoke_worker_redis_access)
+worker_service = WorkerService(
+    acl_revoker=_revoke_worker_redis_access,
+    lease_disabler=disable_worker_lease,
+    lease_enabler=enable_worker_lease,
+)

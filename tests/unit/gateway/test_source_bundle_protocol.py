@@ -1,7 +1,10 @@
 """Gateway source bundle 协议测试。"""
 
 from antcode_contracts import data_pb2
+from antcode_core.common.security.task_payload_envelope import seal_ready_payload
 from antcode_gateway.handlers.poll import TaskPollHandler
+
+WORKER_SECRET = "gateway-source-protocol-secret-material-0001"
 
 
 def test_task_dispatch_proto_removed_legacy_fields():
@@ -17,6 +20,7 @@ def test_task_dispatch_proto_removed_legacy_fields():
         "entry_point",
         "resolved_revision",
         "source_subdir",
+        "sealed_ready_payload",
     }.issubset(field_names)
 
 
@@ -24,19 +28,23 @@ def test_parse_task_data_reads_only_source_bundle_fields():
     handler = TaskPollHandler(redis_client=None)
 
     task = handler._parse_task_data(
-        data={
-            "task_id": "task-1",
-            "project_id": "proj-1",
-            "download_url": "https://example.com/old.zip",
-            "file_hash": "legacy",
-            "source_bundle_uri": "pgartifact://" + "a" * 64,
-            "source_bundle_sha256": "a" * 64,
-            "source_bundle_size": "123",
-            "transfer_method": "source_bundle",
-            "entry_point": "main.py",
-            "resolved_revision": "rev-1",
-            "source_subdir": "spiders/news",
-        },
+        data=seal_ready_payload(
+            {
+                "task_id": "task-1",
+                "project_id": "proj-1",
+                "download_url": "https://example.com/old.zip",
+                "file_hash": "legacy",
+                "source_bundle_uri": "pgartifact://" + "a" * 64,
+                "source_bundle_sha256": "a" * 64,
+                "source_bundle_size": "123",
+                "transfer_method": "source_bundle",
+                "entry_point": "main.py",
+                "resolved_revision": "rev-1",
+                "source_subdir": "spiders/news",
+            },
+            worker_id="worker-1",
+            worker_secret=WORKER_SECRET,
+        ),
         message_id="1-0",
     )
 

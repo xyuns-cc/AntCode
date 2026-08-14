@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from antcode_contracts import control_pb2
+from antcode_core.infrastructure.redis import control_stream
 from antcode_gateway.services import control_service
 from antcode_gateway.services.control_service import (
     GatewayControlService,
@@ -42,7 +43,7 @@ async def test_runtime_control_delivery_carries_gateway_redis_time() -> None:
     event = await service._decode_control_event(
         redis,
         session,
-        stream_key="antcode:control:worker-1",
+        stream_key=control_stream("worker-1"),
         message_id="1-0",
         data=_runtime_event_data(),
     )
@@ -56,8 +57,8 @@ def _session() -> _ControlWatchSession:
         context=MagicMock(),
         worker_id="worker-1",
         lease_id="lease-1",
-        consumer="worker-1",
-        channels=(_ControlChannel("antcode:control:worker-1", "antcode-control"),),
+        consumer="worker-1:lease-1",
+        channels=(_ControlChannel(control_stream("worker-1"), "antcode-control"),),
     )
 
 

@@ -10,7 +10,7 @@ engine._control_loop 之前:
 1. control cancel 缺 target: 记录 warn + ACK(否则 poison PEL 无限重投)
 2. cancel 返回 False(终态): 记录 info + ACK(终态幂等)
 3. cancel 抛异常: NOT ACK, PEL 保留供 reclaim
-4. executor.cancel 返回 False: engine.cancel warn + 状态仍推到 CANCELLING(可能已自然结束)
+4. executor.cancel 真实失败: engine.cancel 抛错，control 不 ACK
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from antcode_worker.domain.errors import CancellationError
 from antcode_worker.engine.engine import Engine
 from antcode_worker.engine.state import RunState
 
@@ -100,6 +101,19 @@ async def test_control_cancel_terminal_state_returns_false_and_still_acks():
 
 
 @pytest.mark.asyncio
+async def test_control_ack_false_is_not_silently_accepted():
+    engine, transport = _make_engine_and_transport()
+    engine.cancel = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    transport.ack_control.return_value = False
+    control = _FakeControl(control_type="cancel", receipt="pel-ack-failed", run_id="r-1")
+
+    with pytest.raises(RuntimeError, match="ACK 失败"):
+        await engine._dispatch_control(control)
+
+    transport.ack_control.assert_awaited_once_with("pel-ack-failed")
+
+
+@pytest.mark.asyncio
 async def test_control_cancel_raises_does_not_ack():
     """P1-FN-04 关键:cancel 抛异常 → 不 ACK(PEL 保留给 reclaim 重投)。"""
     engine, transport = _make_engine_and_transport()
@@ -150,8 +164,8 @@ async def test_engine_cancel_running_with_executor_missing_returns_true_with_war
 
 
 @pytest.mark.asyncio
-async def test_engine_cancel_kill_failure_returns_false_p1_gw_05_round6():
-    """P1-GW-05 (round6):is_running=True + cancel=False = kill 真失败,engine.cancel 返 False。
+async def test_engine_cancel_kill_failure_raises_p1_gw_05_round6():
+    """P1-GW-05:is_running=True + cancel=False = kill 真失败并显式抛错。
 
     审查:cancel/kill 失败可能仍报告成功 → 旧子进程与 L2 接管者双执行。
     修:executor 内仍有 run 但 cancel 返回 False,视为 kill 真失败,不能
@@ -169,7 +183,23 @@ async def test_engine_cancel_kill_failure_returns_false_p1_gw_05_round6():
     engine._executor.has_task = MagicMock(return_value=True)  # 未消失
     engine._executor.cancel = AsyncMock(return_value=False)  # kill 失败
 
-    result = await engine.cancel("r-1", reason="test-kill-fail")
+    with pytest.raises(CancellationError, match="未能终止"):
+        await engine.cancel("r-1", reason="test-kill-fail")
 
-    # 关键:必须返 False, 不能欺骗上游"取消成功"
-    assert result is False, "P1-GW-05: kill 失败必须返 False, 不能假装取消成功"
+
+@pytest.mark.asyncio
+async def test_control_cancel_kill_failure_does_not_ack():
+    """运行中 kill 失败必须保留 control receipt，不能 ACK 虚假成功。"""
+    engine, transport = _make_engine_and_transport()
+    await engine._state_manager.add("r-1", task_id="t-1")
+    await engine._state_manager.transition("r-1", RunState.QUEUED)
+    await engine._state_manager.transition("r-1", RunState.PREPARING)
+    await engine._state_manager.transition("r-1", RunState.RUNNING)
+    engine._executor.has_task = MagicMock(return_value=True)
+    engine._executor.cancel = AsyncMock(return_value=False)
+    control = _FakeControl(control_type="kill", receipt="pel-kill", run_id="r-1")
+
+    with pytest.raises(CancellationError, match="未能终止"):
+        await engine._dispatch_control(control)
+
+    transport.ack_control.assert_not_awaited()

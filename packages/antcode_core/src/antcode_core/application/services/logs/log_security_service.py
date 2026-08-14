@@ -14,6 +14,9 @@ from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
 
+PERMISSION_CACHE_TTL_SECONDS = 300
+MAX_LOG_REQUESTS_PER_MINUTE = 60
+
 
 class LogPermissionError(Exception):
     """日志权限错误"""
@@ -27,19 +30,31 @@ class LogSecurityService:
     def __init__(self):
         # 权限缓存，避免频繁数据库查询
         self._permission_cache = {}
-        self._cache_ttl = 300  # 5分钟缓存
+        self._cache_ttl = PERMISSION_CACHE_TTL_SECONDS
 
         # 访问频率限制
         self._access_limits = {}
-        self._max_requests_per_minute = 60
+        self._max_requests_per_minute = MAX_LOG_REQUESTS_PER_MINUTE
 
-    def _generate_cache_key(self, user_id, run_id):
+    @staticmethod
+    def _authorization_scope(user) -> str:
+        role = getattr(user, "role", "user")
+        role_value = role.value if hasattr(role, "value") else str(role)
+        return f"{role_value}:{int(bool(getattr(user, 'is_admin', False)))}"
+
+    def _generate_cache_key(self, user, run_id, operation):
         """生成缓存键"""
-        return f"perm:{user_id}:{run_id}"
+        scope = self._authorization_scope(user)
+        return f"perm:{user.user_id}:{scope}:{operation}:{run_id}"
 
     def _is_cache_valid(self, cache_entry):
         """检查缓存是否有效"""
         return time.time() - cache_entry.get("timestamp", 0) < self._cache_ttl
+
+    def _purge_expired_permissions(self) -> None:
+        expired_keys = [key for key, entry in self._permission_cache.items() if not self._is_cache_valid(entry)]
+        for key in expired_keys:
+            self._permission_cache.pop(key, None)
 
     async def verify_log_access_permission(self, user, run_id, operation="read"):
         """
@@ -61,7 +76,7 @@ class LogSecurityService:
             if not self._check_rate_limit(user.user_id):
                 raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="访问频率过高，请稍后再试")
 
-            cache_key = self._generate_cache_key(user.user_id, run_id)
+            cache_key = self._generate_cache_key(user, run_id, operation)
             cached_execution = self._get_cached_permission(cache_key)
             if cached_execution is not None:
                 return cached_execution
@@ -78,13 +93,16 @@ class LogSecurityService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="执行记录不存在")
         except LogPermissionError:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问此执行记录")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"权限验证异常: {e}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="权限验证失败")
 
     def _get_cached_permission(self, cache_key):
+        self._purge_expired_permissions()
         cache_entry = self._permission_cache.get(cache_key)
-        if not cache_entry or not self._is_cache_valid(cache_entry):
+        if not cache_entry:
             return None
         if not cache_entry.get("has_permission"):
             raise LogPermissionError("无权访问此执行记录")
@@ -111,6 +129,7 @@ class LogSecurityService:
         raise LogPermissionError("无权访问此执行记录")
 
     def _cache_permission(self, cache_key, execution):
+        self._purge_expired_permissions()
         self._permission_cache[cache_key] = {
             "has_permission": True,
             "execution": execution,
@@ -162,9 +181,11 @@ class LogSecurityService:
     def clear_permission_cache(self, user_id=None, run_id=None):
         """清理权限缓存"""
         if user_id and run_id:
-            # 清理特定缓存
-            cache_key = self._generate_cache_key(user_id, run_id)
-            self._permission_cache.pop(cache_key, None)
+            prefix = f"perm:{user_id}:"
+            suffix = f":{run_id}"
+            keys_to_remove = [key for key in self._permission_cache if key.startswith(prefix) and key.endswith(suffix)]
+            for key in keys_to_remove:
+                self._permission_cache.pop(key, None)
         elif user_id:
             # 清理用户相关缓存
             keys_to_remove = [key for key in self._permission_cache.keys() if key.startswith(f"perm:{user_id}:")]

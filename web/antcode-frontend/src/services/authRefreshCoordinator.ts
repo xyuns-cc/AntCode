@@ -13,6 +13,7 @@ import {
   requestPeerAccessToken,
   withCrossTabRefreshLock,
 } from './authSessionChannel'
+import { useAuthStore } from '@/stores/authStore'
 
 const hasChanged = (candidate: string | null, previous: string | null): candidate is string => {
   return Boolean(candidate && candidate !== previous)
@@ -52,8 +53,10 @@ const installToken = (token: string): void => {
   if (!sessionJti) throw new Error('access token 缺少 session_jti')
   const username = tokenUsername(token)
   if (!username) throw new Error('access token 缺少 username')
-  setAccessToken(token)
   setSessionGeneration(sessionJti, username)
+  setAccessToken(token)
+  const store = useAuthStore.getState()
+  if (store.user && store.user.username !== username) store.clearUser()
   setSessionHint()
   publishAccessToken(token)
 }

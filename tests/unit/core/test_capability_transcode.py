@@ -2,7 +2,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from antcode_contracts.capabilities import MAX_CAPABILITY_VALUE_BYTES
+from antcode_contracts.capabilities import MAX_CAPABILITY_VALUE_BYTES, validate_capabilities
 from antcode_contracts.transcode import decode_capabilities, encode_capabilities
 
 
@@ -25,6 +25,16 @@ def test_capability_wire_rejects_oversized_values() -> None:
 
     with pytest.raises(ValueError, match="size limit"):
         encode_capabilities({"oversized": oversized})
+
+
+def test_capability_validation_enforces_utf8_wire_size() -> None:
+    exact_limit = "x" * (MAX_CAPABILITY_VALUE_BYTES - 2)
+    oversized = "界" * ((MAX_CAPABILITY_VALUE_BYTES - 2) // 3 + 1)
+
+    assert validate_capabilities({"exact": exact_limit}) == {"exact": exact_limit}
+
+    with pytest.raises(ValueError, match="size limit"):
+        validate_capabilities({"oversized": oversized})
 
 
 @pytest.mark.parametrize("task_types", ["code", [""], [1]])

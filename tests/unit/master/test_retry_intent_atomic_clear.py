@@ -48,10 +48,12 @@ async def test_retry_count_is_bound_to_source_intent(monkeypatch):
     monkeypatch.setattr(scheduler_loop.Task, "filter", MagicMock(return_value=task_query))
     monkeypatch.setattr(scheduler_loop.TaskRun, "filter", MagicMock(return_value=intent_query))
     monkeypatch.setattr(scheduler_loop.TaskRun, "create", create)
+    monkeypatch.setattr(scheduler_loop, "require_scheduler_authority", AsyncMock())
     service = scheduler_loop.SchedulerService()
     service._validate_retry_source = AsyncMock()
+    service._count_active_runs = AsyncMock(return_value=0)
 
-    await service._claim_task_run(1, "retry-run", _options())
+    await service._claim_task_run(1, "retry-run", _options(), scheduler_fencing_token=7)
 
     service._validate_retry_source.assert_awaited_once()
     assert create.await_args.kwargs["retry_count"] == _INTENT_RETRY_COUNT
@@ -96,10 +98,12 @@ async def test_retry_intent_cleared_inside_run_creation_transaction(monkeypatch)
     monkeypatch.setattr(scheduler_loop.Task, "filter", MagicMock(return_value=task_query))
     monkeypatch.setattr(scheduler_loop.TaskRun, "filter", MagicMock(return_value=intent_query))
     monkeypatch.setattr(scheduler_loop.TaskRun, "create", AsyncMock(side_effect=record_create))
+    monkeypatch.setattr(scheduler_loop, "require_scheduler_authority", AsyncMock())
     service = scheduler_loop.SchedulerService()
     service._validate_retry_source = AsyncMock()
+    service._count_active_runs = AsyncMock(return_value=0)
 
-    await service._claim_task_run(1, "retry-run", _options())
+    await service._claim_task_run(1, "retry-run", _options(), scheduler_fencing_token=7)
 
     assert events == ["begin", "clear_intent", "create_run", "commit"]
 

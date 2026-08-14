@@ -5,6 +5,7 @@ import {
   setAccessToken,
   setSessionHint,
 } from './authToken'
+import { withCrossTabLock } from './authCrossTabLock'
 
 const AUTH_SESSION_CHANNEL = 'antcode-auth-session'
 const AUTH_REFRESH_LOCK = 'antcode-auth-refresh'
@@ -28,11 +29,13 @@ let channel: BroadcastChannel | null = null
 
 const isLiveToken = (token: string): boolean => {
   const payload = decodeAccessToken(token)
-  return payload?.token_type === 'access'
-    && typeof payload.username === 'string'
-    && typeof payload.session_jti === 'string'
-    && typeof payload.exp === 'number'
-    && payload.exp * 1000 > Date.now()
+  return (
+    payload?.token_type === 'access' &&
+    typeof payload.username === 'string' &&
+    typeof payload.session_jti === 'string' &&
+    typeof payload.exp === 'number' &&
+    payload.exp * 1000 > Date.now()
+  )
 }
 
 const tokenSessionJti = (token: string): string | null => {
@@ -50,16 +53,20 @@ const isSessionMessage = (value: unknown): value is SessionMessage => {
     username?: unknown
   }
   if (message.type === 'token_request') {
-    return typeof message.requestId === 'string'
-      && typeof message.sessionJti === 'string'
-      && (message.username === undefined || typeof message.username === 'string')
+    return (
+      typeof message.requestId === 'string' &&
+      typeof message.sessionJti === 'string' &&
+      (message.username === undefined || typeof message.username === 'string')
+    )
   }
   if (message.type === 'token_update') {
     return typeof message.token === 'string' && typeof message.sessionJti === 'string'
   }
-  return message.type === 'token_response'
-    && typeof message.requestId === 'string'
-    && typeof message.token === 'string'
+  return (
+    message.type === 'token_response' &&
+    typeof message.requestId === 'string' &&
+    typeof message.token === 'string'
+  )
 }
 
 const tokenMatchesRequest = (token: string, pending: PendingRequest): boolean => {
@@ -90,17 +97,21 @@ const handleSessionMessage = (message: SessionMessage): void => {
     return
   }
   if (message.type === 'token_update') {
-    if (message.sessionJti === getSessionGeneration()
-      && tokenSessionJti(message.token) === message.sessionJti) {
+    if (
+      message.sessionJti === getSessionGeneration() &&
+      tokenSessionJti(message.token) === message.sessionJti
+    ) {
       acceptToken(message.token, true)
     }
     return
   }
   const pending = pendingRequests.get(message.requestId)
-  if (pending
-    && pending.sessionJti === getSessionGeneration()
-    && tokenMatchesRequest(message.token, pending)
-    && acceptToken(message.token, true)) {
+  if (
+    pending &&
+    pending.sessionJti === getSessionGeneration() &&
+    tokenMatchesRequest(message.token, pending) &&
+    acceptToken(message.token, true)
+  ) {
     pending.finish(message.token)
   }
 }
@@ -141,7 +152,11 @@ export const requestPeerAccessToken = (request: PeerTokenRequest): Promise<strin
       resolve(token)
     }
     pendingRequests.set(requestId, { finish, ...request })
-    activeChannel.postMessage({ type: 'token_request', requestId, ...request } satisfies SessionMessage)
+    activeChannel.postMessage({
+      type: 'token_request',
+      requestId,
+      ...request,
+    } satisfies SessionMessage)
     setTimeout(() => finish(null), PEER_RESPONSE_WAIT_MS)
   })
 }
@@ -150,10 +165,7 @@ export const withCrossTabRefreshLock = async <T>(action: () => Promise<T>): Prom
   if (typeof BroadcastChannel === 'undefined') {
     throw new Error('当前浏览器不支持 BroadcastChannel，无法安全同步多标签会话')
   }
-  if (typeof navigator === 'undefined' || !navigator.locks) {
-    throw new Error('当前浏览器不支持 Web Locks，无法安全协调多标签会话刷新')
-  }
-  return navigator.locks.request(AUTH_REFRESH_LOCK, action)
+  return withCrossTabLock(AUTH_REFRESH_LOCK, action)
 }
 
 export const subscribeAccessTokenUpdates = (listener: (token: string) => void): (() => void) => {

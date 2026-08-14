@@ -1,0 +1,10 @@
+services:
+  worker:
+    environment:
+      ANTCODE_WORKER_KEY_FILE: /run/secrets/worker_install_key
+    secrets:
+      - worker_install_key
+
+secrets:
+  worker_install_key:
+    file: ${ANTCODE_WORKER_INSTALL_KEY_FILE:?one-time Worker install key file is required}

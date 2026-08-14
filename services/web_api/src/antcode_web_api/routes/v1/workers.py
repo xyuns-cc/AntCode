@@ -81,13 +81,10 @@ from antcode_web_api.routes.v1.workers_dispatch import (  # noqa: F401
 from antcode_web_api.routes.v1.workers_install_key import (  # noqa: F401
     WorkerInstallKeyRequest,
     WorkerInstallKeyResponse,
-    WorkerRegisterByKeyRequest,
     _check_install_key_blocked,
     _claim_install_key_source_once,
     _clear_install_key_fail_counter,
-    _create_worker_from_install_key,
     _extract_request_source,
-    _InstallKeyClaimConflict,
     _is_registration_acknowledged,
     _is_source_match,
     _record_install_key_failed_attempt,
@@ -129,8 +126,7 @@ router = APIRouter()
 # 顶部通过 re-export 保留 workers_route.X 兼容 (_extract_request_source /
 # _is_source_match / _check_install_key_blocked / _record_install_key_failed_attempt
 # / _clear_install_key_fail_counter / _claim_install_key_source_once /
-# _create_worker_from_install_key / _is_registration_acknowledged /
-# _InstallKeyClaimConflict)。
+# _is_registration_acknowledged)。
 
 
 async def _verify_worker_credential_headers(
@@ -395,8 +391,6 @@ async def refresh_worker_status(worker_id, current_user=None):
 # ====== Worker 权限管理 API（需要管理员权限）======
 
 
-# P2 拆分: 5 个权限管理 handler 移至 workers_permission.py, 通过
-# register_permission_routes 挂 @router; 顶层 shim 保留原名让测试引用可继续。
 async def get_my_available_workers(current_user):
     return await _workers_permission.get_my_available_workers(current_user, _worker_to_response)
 
@@ -405,7 +399,9 @@ async def get_worker_users(worker_id: str, current_user):
     return await _workers_permission.get_worker_users(worker_id, current_user)
 
 
-async def assign_worker_permission(worker_id: str, request: dict, current_user):
+async def assign_worker_permission(
+    worker_id: str, request: _workers_permission.WorkerPermissionAssignRequest, current_user
+):
     return await _workers_permission.assign_worker_permission(worker_id, request, current_user)
 
 
@@ -413,7 +409,7 @@ async def revoke_worker_permission(worker_id: str, user_id: str, current_user):
     return await _workers_permission.revoke_worker_permission(worker_id, user_id, current_user)
 
 
-async def batch_assign_workers(request: dict, current_user):
+async def batch_assign_workers(request: _workers_permission.WorkerPermissionBatchAssignRequest, current_user):
     return await _workers_permission.batch_assign_workers(request, current_user)
 
 
@@ -441,14 +437,9 @@ async def register_worker(request):
     return await _workers_register.register_worker(request)
 
 
-# P2 拆分: generate_install_key / register_worker_by_key 移至 workers_install_key.py,
-# 顶层 shim 保留原名让 workers_route.generate_install_key(...) 测试引用不变。
+# P2 拆分: generate_install_key 移至 workers_install_key.py。
 async def generate_install_key(request, http_request, current_user):
     return await _workers_install_key.generate_install_key(request, http_request, current_user)
-
-
-async def register_worker_by_key(request, http_request):
-    return await _workers_install_key.register_worker_by_key(request, http_request)
 
 
 # P2 拆分: worker_heartbeat 移至 workers_register.py

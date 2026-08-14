@@ -7,9 +7,6 @@ from datetime import UTC, datetime
 
 from tortoise.transactions import in_transaction
 
-from antcode_core.application.services.crawl.spider_storage_cleanup import (
-    SPIDER_WRITABLE_TASK_STATUSES,
-)
 from antcode_core.application.services.workers.log_ingest_generation import parse_stream_id
 from antcode_core.application.services.workers.spider_run_access import (
     StaleSpiderLeaseError,
@@ -17,6 +14,7 @@ from antcode_core.application.services.workers.spider_run_access import (
 )
 from antcode_core.domain.models import TaskRun, TaskRunLeaseGeneration, Worker
 from antcode_core.domain.models.enums import TaskStatus
+from antcode_core.domain.models.task_status_sets import SPIDER_WRITABLE_TASK_STATUSES
 
 # Lease ID 契约上限（与 Gateway/Lua 侧一致）。
 MAX_LEASE_ID_LENGTH = 64

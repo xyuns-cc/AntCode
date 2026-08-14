@@ -56,3 +56,23 @@ def test_legacy_fixed_salt_requires_explicit_migration_setting(monkeypatch):
 
     monkeypatch.setattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "antcode-fernet-v1")
     assert SecretBox().decrypt(ciphertext) == "secret"
+
+
+def test_primary_only_verification_detects_and_rotates_legacy_key(monkeypatch):
+    primary = Fernet.generate_key().decode("ascii")
+    legacy = Fernet.generate_key().decode("ascii")
+    ciphertext = Fernet(legacy.encode("ascii")).encrypt(b"secret").decode("ascii")
+    monkeypatch.setattr(settings, "ENCRYPTION_KEY", primary)
+    monkeypatch.setattr(settings, "ENCRYPTION_KEY_SALT", "")
+    monkeypatch.setattr(settings, "ENCRYPTION_KEYS_LEGACY", legacy)
+    monkeypatch.setattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "")
+    monkeypatch.setattr(settings, "ENCRYPTION_ALLOW_LEGACY_SHA256", False)
+    box = SecretBox()
+
+    assert box.needs_rotation(ciphertext) is True
+    with pytest.raises(InvalidToken):
+        box.decrypt_primary(ciphertext)
+
+    rotated = box.rotate(ciphertext)
+    assert box.decrypt_primary(rotated) == "secret"
+    assert box.needs_rotation(rotated) is False

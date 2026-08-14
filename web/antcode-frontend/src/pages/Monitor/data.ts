@@ -4,7 +4,6 @@ import type {
   MonitorStats,
   PerformancePeriod,
   WorkerDisplayData,
-  WorkerLog,
   WorkerOs,
 } from './types'
 
@@ -121,37 +120,6 @@ const addUsageAlert = (
     })
   }
 }
-
-export const createWorkerLogs = (workers: WorkerDisplayData[], time: string): WorkerLog[] => {
-  const logs: WorkerLog[] = []
-  workers.forEach((worker) => {
-    if (worker.status === 'running') {
-      logs.push(createLog(worker, 'success', '系统健康检查通过', time, 'health'))
-    }
-    if (worker.cpu > 70) {
-      logs.push(createLog(worker, worker.cpu > 85 ? 'error' : 'warning', `CPU使用率 ${worker.cpu}%`, time, 'cpu-log'))
-    }
-    if (worker.memory > 70) {
-      const type = worker.memory > 85 ? 'error' : 'warning'
-      logs.push(createLog(worker, type, `内存使用率 ${worker.memory}%`, time, 'mem-log'))
-    }
-    if (worker.status === 'stopped') {
-      logs.push(createLog(worker, 'error', 'Worker 离线，请检查网络连接', time, 'offline-log'))
-    }
-    if (worker.tasks > 0) {
-      logs.push(createLog(worker, 'info', `当前运行 ${worker.tasks} 个任务`, time, 'task-log'))
-    }
-  })
-  return logs
-}
-
-const createLog = (
-  worker: WorkerDisplayData,
-  type: WorkerLog['type'],
-  message: string,
-  time: string,
-  prefix: string,
-): WorkerLog => ({ id: `${prefix}-${worker.id}`, worker: worker.name, type, message, time })
 
 export const calculateMonitorStats = (workers: WorkerDisplayData[]): MonitorStats => {
   const warningCount = workers.filter((worker) => worker.status === 'warning').length

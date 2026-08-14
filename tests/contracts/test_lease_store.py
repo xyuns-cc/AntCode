@@ -25,54 +25,17 @@ import pytest_asyncio
 from antcode_core.application.services.lease_service import (
     Lease,
     LeaseConflictError,
-    LeasePolicy,
+    LeaseIneligibleError,
     LeaseStore,
 )
 
-from tests.contracts.conftest import REDIS_TEST_HOST, REDIS_TEST_PORT, REDIS_TEST_URL, _tcp_reachable
+from tests.contracts.lease_fixtures import lease_store_fixture, redis_client_fixture
 
 pytestmark = pytest.mark.asyncio
 
 
-@pytest_asyncio.fixture
-async def redis_client():
-    if not _tcp_reachable(REDIS_TEST_HOST, REDIS_TEST_PORT):
-        pytest.fail(
-            f"Redis on {REDIS_TEST_HOST}:{REDIS_TEST_PORT} unreachable; "
-            "start it with `docker compose -f tests/contracts/docker-compose.test.yml up -d`"
-        )
-    import redis.asyncio as aioredis
-
-    client = aioredis.from_url(REDIS_TEST_URL, decode_responses=True)
-    try:
-        await client.ping()
-    except Exception as exc:
-        await client.aclose()
-        pytest.fail(f"Redis not reachable for lease store tests: {exc}")
-    try:
-        yield client
-    finally:
-        await client.aclose()
-
-
-@pytest_asyncio.fixture
-async def lease_store(redis_client):
-    namespace = f"antcode-test-{secrets.token_hex(4)}"
-    policy = LeasePolicy(ttl_ms=2_000, renew_after_ms=500)
-    store = LeaseStore(redis_client, namespace=namespace, policy=policy)
-    try:
-        yield store
-    finally:
-        # Lease 主记录和索引使用 ``{namespace}`` hash tag；兼容清理旧的
-        # 非 hash-tag 测试键，避免失败用例污染后续测试。
-        for pattern in (f"{{{namespace}}}:*", f"{namespace}:*"):
-            cursor = 0
-            while True:
-                cursor, keys = await redis_client.scan(cursor=cursor, match=pattern, count=500)
-                if keys:
-                    await redis_client.delete(*keys)
-                if cursor == 0:
-                    break
+redis_client = pytest_asyncio.fixture(redis_client_fixture)
+lease_store = pytest_asyncio.fixture(lease_store_fixture)
 
 
 async def test_grant_first_time_marks_active(lease_store: LeaseStore, redis_client):
@@ -177,6 +140,32 @@ async def test_revoke_clears_active_set(lease_store: LeaseStore):
     # Revoking again is a no-op (returns False) but doesn't error.
     revoked_again = await lease_store.revoke(worker_id, reason="deregister")
     assert revoked_again is False
+
+
+async def test_disable_worker_atomically_fences_and_clears_active_state(
+    lease_store: LeaseStore,
+    redis_client,
+):
+    worker_id = f"worker-{secrets.token_hex(3)}"
+    lease = await lease_store.grant(worker_id)
+    heartbeat_key = f"{{{lease_store.namespace}}}:heartbeat:{worker_id}"
+    await redis_client.hset(heartbeat_key, mapping={"timestamp": "now"})
+
+    disabled = await lease_store.disable_worker(
+        worker_id,
+        reason="maintenance",
+        heartbeat_key=heartbeat_key,
+    )
+
+    assert disabled is True
+    assert await lease_store.get(worker_id) is None
+    assert await lease_store.is_active(worker_id) is False
+    assert await redis_client.exists(heartbeat_key) == 0
+    assert await redis_client.get(lease_store.lifecycle_key(worker_id)) == "maintenance"
+    revoked_key = f"{{{lease_store.namespace}}}:lease:revoked:{worker_id}"
+    assert await redis_client.sismember(revoked_key, lease.lease_id)
+    with pytest.raises(LeaseIneligibleError):
+        await lease_store.grant(worker_id)
 
 
 async def test_revoke_with_stale_generation_cannot_delete_replacement(

@@ -4,6 +4,7 @@ from typing import Any
 
 from tortoise import fields
 
+from antcode_core.common.error_message_field import PersistedErrorMessageField
 from antcode_core.domain.models.base import BaseModel
 
 
@@ -20,7 +21,7 @@ class SchedulerOutbox(BaseModel):
     consume_attempts = fields.IntField(default=0)
     available_at = fields.DatetimeField()
     published_at = fields.DatetimeField(null=True)
-    last_error = fields.TextField(null=True)
+    last_error = PersistedErrorMessageField(null=True)
     consumed_at = fields.DatetimeField(null=True)
     consume_owner = fields.CharField(max_length=128, null=True)
     consume_started_at = fields.DatetimeField(null=True)

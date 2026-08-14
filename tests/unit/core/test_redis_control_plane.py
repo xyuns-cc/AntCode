@@ -27,7 +27,6 @@ from antcode_core.infrastructure.redis import (
     worker_install_key_block_key,
     worker_install_key_claim_key,
     worker_install_key_fail_counter_key,
-    worker_install_key_meta_key,
     worker_install_key_nonce_key,
     worker_install_source_block_key,
     worker_install_source_fail_counter_key,
@@ -35,13 +34,13 @@ from antcode_core.infrastructure.redis import (
 
 
 def test_control_plane_keys_use_default_namespace():
-    assert task_ready_stream("worker-1") == "antcode:task:ready:worker-1"
+    assert task_ready_stream("worker-1") == "{antcode}:task:ready:worker-1"
     assert task_result_stream() == "antcode:task:result"
-    assert control_stream("worker-1") == "antcode:control:worker-1"
-    assert control_global_stream() == "antcode:control:global"
+    assert control_stream("worker-1") == "{antcode}:control:worker-1"
+    assert control_global_stream() == "{antcode}:control:global"
     assert control_global_group("worker-1") == "antcode-control:worker-1"
     assert control_reply_stream("req-1") == "antcode:control:reply:req-1"
-    assert worker_heartbeat_key("worker-1") == "antcode:heartbeat:worker-1"
+    assert worker_heartbeat_key("worker-1") == "{antcode}:heartbeat:worker-1"
     assert worker_group() == "antcode-workers"
     assert control_group() == "antcode-control"
 
@@ -87,7 +86,6 @@ def test_control_plane_worker_security_keys_use_namespace():
     assert worker_install_key_nonce_key("K1", nonce_value) == (
         f"antcode:worker:install-key:nonce:{key_digest}:{nonce_digest}"
     )
-    assert worker_install_key_meta_key("K1") == f"antcode:worker:install-key:meta:{key_digest}"
     assert worker_install_source_fail_counter_key("10.0.0.1") == (
         f"antcode:worker:install-key:source-fail:{source_digest}"
     )
@@ -98,7 +96,6 @@ def test_control_plane_worker_security_keys_use_namespace():
         worker_install_key_block_key("K1", "10.0.0.1"),
         worker_install_key_claim_key("K1"),
         worker_install_key_nonce_key("K1", nonce_value),
-        worker_install_key_meta_key("K1"),
     )
     assert all("K1" not in redis_key for redis_key in install_keys)
     assert all("10.0.0.1" not in redis_key for redis_key in install_keys)

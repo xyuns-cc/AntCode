@@ -4,11 +4,14 @@ from typing import Any, cast
 
 import pytest
 import redis.asyncio as aioredis
+from antcode_worker.transport.redis.direct_control import DirectLeaseGrant
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError, TimeoutError
 
 _ORIGINAL_FROM_URL = aioredis.from_url
+_INTEGRATION_CAPABILITIES = {"task_types": ["code"]}
+_DIRECT_TASK_PAYLOAD_SECRET = "integration-direct-task-payload-secret-0001"
 
 
 class _InProcessLeaseControl:
@@ -26,13 +29,28 @@ class _InProcessLeaseControl:
         self,
         current_lease_id: str,
         metrics: dict | None,
-    ) -> tuple[str, int, int, bool]:
+        capabilities: dict[str, str],
+    ) -> DirectLeaseGrant:
+        """与真实 ``DirectControlClient`` 同构：必须带服务端权威 ``ttl_ms``。
+
+        能力快照同样只认 Worker 随请求带上来的那一份，控制面不代填。
+        """
+        from antcode_contracts.capabilities import decode_capabilities
+
         lease = await self._leases.grant(
             self._worker_id,
             current_lease_id=current_lease_id,
             metrics=metrics,
+            capabilities=decode_capabilities(capabilities),
         )
-        return lease.lease_id, lease.expires_at_ms, self._leases.policy.renew_after_ms, False
+        policy = self._leases.policy
+        return DirectLeaseGrant(
+            lease_id=lease.lease_id,
+            expires_at_ms=lease.expires_at_ms,
+            renew_after_ms=policy.renew_after_ms,
+            ttl_ms=policy.ttl_ms,
+            revoked=False,
+        )
 
     async def deregister(self, lease_id: str, reason: str) -> bool:
         return await self._leases.revoke(self._worker_id, reason=reason, lease_id=lease_id)
@@ -143,12 +161,15 @@ def direct_transport_factory():
         control = cast(
             DirectControlClient, _InProcessLeaseControl(control_redis, worker_id=worker_id, namespace=namespace)
         )
-        return RedisTransport(
+        transport = RedisTransport(
             redis_url=redis_url,
             worker_id=worker_id,
             config=config,
             namespace=namespace,
             direct_control=control,
+            task_payload_secret=_DIRECT_TASK_PAYLOAD_SECRET,
         )
+        transport.set_capabilities(_INTEGRATION_CAPABILITIES)
+        return transport
 
     return build

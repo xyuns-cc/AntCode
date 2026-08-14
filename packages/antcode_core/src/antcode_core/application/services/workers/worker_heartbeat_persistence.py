@@ -9,6 +9,9 @@ from typing import Any
 
 from tortoise.transactions import in_transaction
 
+from antcode_core.application.services.workers.worker_registration_gate import (
+    has_unacknowledged_v2_registration,
+)
 from antcode_core.domain.models import Worker, WorkerHeartbeat, WorkerStatus
 
 
@@ -57,10 +60,14 @@ def build_redis_heartbeat_update(data: dict[str, Any], heartbeat_at: datetime) -
 def _redis_capabilities(raw: Any) -> dict[str, Any] | None:
     if not raw:
         return None
-    capabilities = json.loads(raw)
-    if not isinstance(capabilities, dict):
-        raise ValueError("Redis 心跳 capabilities 必须是 JSON object")
-    return capabilities
+    return _redis_json_object(raw, "capabilities")
+
+
+def _redis_json_object(raw: Any, field_name: str) -> dict[str, Any]:
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError(f"Redis 心跳 {field_name} 必须是 JSON object")
+    return value
 
 
 def _redis_metrics(data: dict[str, Any]) -> dict[str, Any]:
@@ -70,12 +77,27 @@ def _redis_metrics(data: dict[str, Any]) -> dict[str, Any]:
         "disk_percent": ("disk", float),
         "running_tasks": ("runningTasks", int),
         "max_concurrent_tasks": ("maxConcurrentTasks", int),
+        "task_count": ("taskCount", int),
+        "project_count": ("projectCount", int),
+        "env_count": ("envCount", int),
+        "queued_tasks": ("queuedTasks", int),
+        "cpu_cores": ("cpuCores", int),
+        "memory_total_bytes": ("memoryTotal", int),
+        "memory_used_bytes": ("memoryUsed", int),
+        "memory_available_bytes": ("memoryAvailable", int),
+        "disk_total_bytes": ("diskTotal", int),
+        "disk_used_bytes": ("diskUsed", int),
+        "disk_free_bytes": ("diskFree", int),
+        "uptime_seconds": ("uptime", int),
     }
-    return {
+    metrics = {
         target: converter(data[source])
         for source, (target, converter) in mappings.items()
         if data.get(source) not in (None, "")
     }
+    if data.get("spider_stats"):
+        metrics["spider_stats"] = _redis_json_object(data["spider_stats"], "spider_stats")
+    return metrics
 
 
 async def persist_worker_heartbeat(
@@ -90,12 +112,16 @@ async def persist_worker_heartbeat(
         worker = await Worker.filter(id=worker_id).using_db(connection).select_for_update().first()
         if not worker or (require_newer and not _is_newer(worker.last_heartbeat, update.heartbeat_at)):
             return None
-        update_fields = _apply_update(worker, update)
+        allow_online = not await has_unacknowledged_v2_registration(
+            worker.public_id,
+            connection=connection,
+        )
+        update_fields = _apply_update(worker, update, allow_online=allow_online)
         await worker.save(using_db=connection, update_fields=update_fields)
         if record_history:
             await WorkerHeartbeat.create(
                 worker_id=worker.id,
-                status=update.status,
+                status=worker.status,
                 metrics=update.metrics or None,
                 using_db=connection,
             )
@@ -112,10 +138,16 @@ def _is_newer(current: datetime | None, incoming: datetime) -> bool:
     return incoming > current
 
 
-def _apply_update(worker: Worker, update: WorkerHeartbeatUpdate) -> list[str]:
+def _apply_update(
+    worker: Worker,
+    update: WorkerHeartbeatUpdate,
+    *,
+    allow_online: bool,
+) -> list[str]:
     update_fields = ["last_heartbeat"]
     worker.last_heartbeat = update.heartbeat_at
-    if worker.status != WorkerStatus.MAINTENANCE.value:
+    online_blocked = update.status == WorkerStatus.ONLINE.value and not allow_online
+    if worker.status != WorkerStatus.MAINTENANCE.value and not online_blocked:
         worker.status = update.status
         update_fields.append("status")
     if update.metrics:

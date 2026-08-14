@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from antcode_core.common.utils.json_parser import JSONParser
-from antcode_core.domain.models.enums import CallbackType, CrawlEngine, ProjectStatus, RequestMethod
+from antcode_core.domain.models.enums import CallbackType, CrawlEngine, ExecutionStrategy, ProjectStatus, RequestMethod
 from antcode_core.domain.schemas.project import ExtractionRule
 
 
@@ -27,11 +27,20 @@ class UnifiedProjectUpdateRequest(BaseModel):
     dependencies: list[str] | None = Field(None, description="Python依赖包")
 
     # ======= 执行策略字段 =======
-    execution_strategy: str | None = Field(None, description="执行策略：fixed/auto/prefer/specified")
+    execution_strategy: ExecutionStrategy | None = Field(None, description="执行策略：fixed/auto/prefer/specified")
     bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID")
+
+    @field_validator("execution_strategy")
+    @classmethod
+    def validate_project_execution_strategy(cls, value):
+        if value == ExecutionStrategy.SPECIFIED:
+            raise ValueError("specified 仅允许在任务级指定 Worker")
+        return value
 
     # ======= 规则项目字段 (type=rule时使用) =======
     engine: CrawlEngine | None = Field(None, description="采集引擎")
+    region: str | None = Field(None, max_length=50, description="执行区域")
+    require_render: bool | None = Field(None, description="是否要求 Worker 具备浏览器渲染能力")
     target_url: str | None = Field(None, max_length=2000, description="目标URL")
     url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     callback_type: CallbackType | None = Field(None, description="回调类型")
@@ -198,12 +207,14 @@ class UnifiedProjectUpdateRequest(BaseModel):
             "execution_strategy",
             "bound_worker_id",
         ]
-        return {k: v for k, v in self.dict(exclude_unset=True).items() if k in basic_fields}
+        return {k: v for k, v in self.model_dump(exclude_unset=True).items() if k in basic_fields}
 
     def get_rule_fields(self):
         """获取规则项目字段"""
         rule_fields = [
             "engine",
+            "region",
+            "require_render",
             "target_url",
             "url_pattern",
             "callback_type",
@@ -227,20 +238,18 @@ class UnifiedProjectUpdateRequest(BaseModel):
             "resume_enabled",
             "dedup_config",
         ]
-        return {k: v for k, v in self.dict(exclude_unset=True).items() if k in rule_fields}
+        return {k: v for k, v in self.model_dump(exclude_unset=True).items() if k in rule_fields}
 
     def get_file_fields(self):
         """获取文件项目字段"""
-        file_fields = ["entry_point", "runtime_config", "environment_vars"]
-        return {k: v for k, v in self.dict(exclude_unset=True).items() if k in file_fields}
+        file_fields = ["language", "entry_point", "runtime_config", "environment_vars"]
+        return {k: v for k, v in self.model_dump(exclude_unset=True).items() if k in file_fields}
 
     def get_code_fields(self):
         """获取代码项目字段"""
-        code_fields = [
-            "language",
-            "code_entry_point",
-            "documentation",
-            "runtime_config",
-            "environment_vars",
-        ]
-        return {k: v for k, v in self.dict(exclude_unset=True).items() if k in code_fields}
+        values = self.model_dump(exclude_unset=True)
+        code_fields = {"language", "documentation", "runtime_config", "environment_vars"}
+        result = {key: value for key, value in values.items() if key in code_fields}
+        if "code_entry_point" in values:
+            result["entry_point"] = values["code_entry_point"]
+        return result

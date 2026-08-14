@@ -54,13 +54,13 @@ class RedisKeys:
 
     # === 命名空间实例方法 ===
     def task_ready_stream(self, worker_id: str) -> str:
-        return self._ns(f"{self.TASK_READY_PREFIX}:{worker_id}")
+        return self._slot(f"{self.TASK_READY_PREFIX}:{worker_id}")
 
     def task_result_stream(self) -> str:
         return self._ns(self.TASK_RESULT_PREFIX)
 
     def heartbeat_key(self, worker_id: str) -> str:
-        return self._ns(f"{self.WORKER_HEARTBEAT_PREFIX}:{worker_id}")
+        return self._slot(f"{self.WORKER_HEARTBEAT_PREFIX}:{worker_id}")
 
     def log_stream_key(self, run_id: str) -> str:
         return self._ns(f"{self.LOG_STREAM_PREFIX}:{run_id}")

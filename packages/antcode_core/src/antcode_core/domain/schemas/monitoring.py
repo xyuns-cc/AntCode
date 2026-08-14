@@ -98,3 +98,6 @@ class WorkerHistoryQueryResponse(BaseModel):
     metric_type: str
     data: list[WorkerHistoryItem]
     count: int
+    total: int
+    page: int
+    size: int

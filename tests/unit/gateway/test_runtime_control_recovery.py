@@ -7,6 +7,7 @@ import grpc
 import pytest
 from antcode_contracts import control_pb2
 from antcode_core.infrastructure.redis import control_group, control_reply_stream, control_stream
+from antcode_gateway.services import control_ack_settlement
 from antcode_gateway.services import control_service as control_service_module
 from antcode_gateway.services.control_service import (
     GatewayControlService,
@@ -19,6 +20,8 @@ from antcode_gateway.services.runtime_control_result import (
 )
 from antcode_gateway.services.runtime_control_settlement_store import settlement_key
 from redis.exceptions import ResponseError
+
+from tests.unit.gateway.control_ack_test_support import ack_via_redis_xack
 
 
 class _Pipeline:
@@ -67,6 +70,8 @@ class RecoveryRedis:
         self.ack_requests: list[tuple[str, str, str]] = []
         self.fail_next_ack = False
         self.current_lease_id = "lease-old"
+        self.lease_ttl_ms = 60_000
+        self.revoked_lease_ids: set[str] = set()
         self.read_count = 0
 
     async def get(self, key):
@@ -82,9 +87,9 @@ class RecoveryRedis:
         return True
 
     async def eval(self, *_args):
-        _, _, _, marker_key, lease_id, marker, fingerprint, ttl_ms = _args
+        _, _, _, marker_key, _, lease_id, marker, fingerprint, ttl_ms, retention_ms = _args
         self.operations.append("set")
-        if self.current_lease_id != lease_id:
+        if lease_id in self.revoked_lease_ids or self.current_lease_id != lease_id or self.lease_ttl_ms <= retention_ms:
             return [-2, ""]
         stored = self.values.get(marker_key)
         if stored is not None and stored not in {marker, fingerprint}:
@@ -100,7 +105,7 @@ class RecoveryRedis:
 
     async def xpending_range(self, stream, group, *, min, max, count, consumername=None):
         self.operations.append("xpending")
-        return [{"message_id": min, "consumer": "worker-1"}]
+        return [{"message_id": min, "consumer": "worker-1:lease-old"}]
 
     async def xreadgroup(self, *, groupname, consumername, streams, **_kwargs):
         self.read_count += 1
@@ -149,7 +154,7 @@ def _session() -> _ControlWatchSession:
         context=MagicMock(),
         worker_id="worker-1",
         lease_id="lease-new",
-        consumer="worker-1",
+        consumer="worker-1:lease-new",
         channels=(_ControlChannel(control_stream("worker-1"), control_group()),),
     )
 
@@ -158,6 +163,8 @@ def _install(monkeypatch, redis: RecoveryRedis) -> None:
     monkeypatch.setattr(control_service_module, "get_redis_client", AsyncMock(return_value=redis))
     monkeypatch.setattr(control_service_module, "require_authenticated_worker", AsyncMock(return_value="worker-1"))
     monkeypatch.setattr(control_service_module, "trim_acknowledged_stream", AsyncMock())
+    monkeypatch.setattr(control_service_module, "ack_owned_control_entry", ack_via_redis_xack)
+    monkeypatch.setattr(control_ack_settlement, "ack_owned_control_entry", ack_via_redis_xack)
 
 
 async def _commit_before_lost_ack(monkeypatch) -> RecoveryRedis:

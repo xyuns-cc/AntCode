@@ -16,7 +16,7 @@ orphan 不进入 stream; XDEL 失败仅 warn (master 侧 fence 已够), 不阻�
 本测试锁死:
 1. XADD 前 lease 有效 → xadd 成功
 2. XADD 后 lease 无效 → xdel(result_key, msg_id) 被调用
-3. return False (engine 不 XACK, 消息在源 ready-stream 保留待 reclaim)
+3. 抛出 GenerationLostError，让 Engine 立即 self-fence
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from antcode_worker.transport.base import TaskResult
+from antcode_worker.transport.base import GenerationLostError, TaskResult
 from antcode_worker.transport.redis.transport import RedisTransport
 
 
@@ -38,6 +38,7 @@ async def test_report_result_xdel_orphan_on_post_check_lease_lost():
     transport._worker_id = "w-1"
     transport._lease_id = "lease-A"
     transport._lease_fencing_enabled = True
+    transport._generation_lost = False
     transport._receipt_cache = {}
 
     # keys
@@ -71,9 +72,9 @@ async def test_report_result_xdel_orphan_on_post_check_lease_lost():
         data={},
     )
 
-    ok = await transport.report_result(result)
+    with pytest.raises(GenerationLostError):
+        await transport.report_result(result)
 
-    assert ok is False, "post-check 失败必须返回 False, 让 engine 保留 receipt"
     transport._redis.xadd.assert_awaited_once()
     # 关键: xdel 被调用清 orphan
     transport._redis.xdel.assert_awaited_once_with("antcode:task:result", b"1730000000000-0")
@@ -88,6 +89,7 @@ async def test_report_result_xdel_failure_does_not_mask_generation_lost():
     transport._worker_id = "w-1"
     transport._lease_id = "lease-A"
     transport._lease_fencing_enabled = True
+    transport._generation_lost = False
     transport._receipt_cache = {}
 
     transport._keys = MagicMock()
@@ -118,9 +120,9 @@ async def test_report_result_xdel_failure_does_not_mask_generation_lost():
         data={},
     )
 
-    ok = await transport.report_result(result)
+    with pytest.raises(GenerationLostError):
+        await transport.report_result(result)
 
-    assert ok is False
     # XDEL 尝试过
     transport._redis.xdel.assert_awaited_once()
 
@@ -134,6 +136,7 @@ async def test_report_result_no_xdel_when_generation_stable():
     transport._worker_id = "w-1"
     transport._lease_id = "lease-A"
     transport._lease_fencing_enabled = True
+    transport._generation_lost = False
     transport._receipt_cache = {}
 
     transport._keys = MagicMock()

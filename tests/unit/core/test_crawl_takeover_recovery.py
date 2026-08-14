@@ -6,21 +6,17 @@ from typing import cast
 import pytest
 from antcode_core.application.services.crawl.backends import (
     CrawlQueueBackend,
+    QueueProjectDiscovery,
     QueueTask,
     ReclaimedTask,
-)
-from antcode_core.application.services.crawl.election_service import (
-    MASTER_LOCK_KEY,
-    MasterElectionService,
 )
 from antcode_core.application.services.crawl.takeover_recovery_service import (
     CrawlTakeoverRecoveryService,
     TakeoverRecoveryConfig,
-    TakeoverRecoveryError,
-    TakeoverRecoveryReport,
 )
 from antcode_core.domain.models.enums import Priority
-from antcode_core.infrastructure.redis.stream_client import StreamClient
+from antcode_core.infrastructure.redis.pending_summary import parse_pending_summary
+from antcode_core.infrastructure.redis.stream_records import parse_pending_message
 
 
 class _FakeQueueBackend:
@@ -28,9 +24,13 @@ class _FakeQueueBackend:
         self.pending = pending
         self.failed_projects: set[str] = set()
         self.failed_messages: set[str] = set()
+        self.discovery_failures: tuple[str, ...] = ()
 
     async def list_project_ids(self) -> list[str]:
         return sorted(self.pending)
+
+    async def discover_projects(self) -> QueueProjectDiscovery:
+        return QueueProjectDiscovery(tuple(sorted(self.pending)), self.discovery_failures)
 
     async def get_pending_count(self, project_id: str, priority=None) -> int:
         return len(self.pending[project_id])
@@ -55,42 +55,6 @@ class _FakeQueueBackend:
             return None
         items.remove(match)
         return f"new-{task.msg_id}"
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self.holder: bytes | None = None
-
-    async def get(self, key: str) -> bytes | None:
-        assert key == MASTER_LOCK_KEY
-        return self.holder
-
-    async def set(self, key: str, value: str, **_kwargs) -> bool:
-        assert key == MASTER_LOCK_KEY
-        if self.holder is not None:
-            return False
-        self.holder = value.encode()
-        return True
-
-    async def eval(self, *args) -> int:
-        _, _, key, worker_id, *_ = args
-        if key == MASTER_LOCK_KEY and self.holder == worker_id.encode():
-            self.holder = None
-            return 1
-        return 0
-
-
-class _RecoveryStub:
-    def __init__(self, report: TakeoverRecoveryReport | None = None) -> None:
-        self.report = report or TakeoverRecoveryReport()
-        self.error: TakeoverRecoveryError | None = None
-        self.calls = 0
-
-    async def recover(self) -> TakeoverRecoveryReport:
-        self.calls += 1
-        if self.error:
-            raise self.error
-        return self.report
 
 
 def _reclaimed(msg_id: str, *, delivery_count: int = 1) -> ReclaimedTask:
@@ -125,7 +89,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_takeover_recovery_requeues_dead_letters_and_is_idempotent() -> None:
-    backend = _FakeQueueBackend({"project-a": [_reclaimed("retry"), _reclaimed("dead", delivery_count=4)]})
+    backend = _FakeQueueBackend({"project-a": [_reclaimed("retry"), _reclaimed("dead", delivery_count=5)]})
     service = _service(backend)
 
     first = await service.recover()
@@ -168,45 +132,19 @@ async def test_takeover_recovery_exposes_partial_failures_after_other_work() -> 
 
 
 @pytest.mark.asyncio
-async def test_initial_leader_activation_runs_recovery() -> None:
-    redis = _FakeRedis()
-    recovery = _RecoveryStub(TakeoverRecoveryReport(projects_scanned=1))
-    election = MasterElectionService(
-        "master-a",
-        redis_client=redis,
-        enable_background_tasks=False,
-        takeover_recovery=recovery,
-    )
+async def test_takeover_recovers_active_project_when_fenced_residual_is_reported() -> None:
+    backend = _FakeQueueBackend({"active": [_reclaimed("ok")]})
+    backend.discovery_failures = ("已删除 Crawl 项目仍存在 Stream: project=deleted",)
 
-    await election.start()
+    report = await _service(backend).recover()
 
-    assert recovery.calls == 1
-    assert await election.is_leader() is True
-
-
-@pytest.mark.asyncio
-async def test_takeover_recovery_failure_does_not_block_leadership() -> None:
-    """C1: 恢复失败（甚至抛异常）不得导致 resign——否则单个顽固失败的
-    批次会让集群陷入 acquire→恢复失败→resign 的无主循环。"""
-    redis = _FakeRedis()
-    recovery = _RecoveryStub()
-    recovery.error = TakeoverRecoveryError(TakeoverRecoveryReport(failures=("project-a recovery failed",)))
-    election = MasterElectionService(
-        "master-b",
-        redis_client=redis,
-        enable_background_tasks=False,
-        takeover_recovery=recovery,
-    )
-
-    assert await election.watch_leader() is True
-
-    assert recovery.calls == 1
-    assert redis.holder == b"master-b"
-    assert await election.is_leader() is True
+    assert report.projects_scanned == 1
+    assert report.tasks_requeued == 1
+    assert report.failures == backend.discovery_failures
 
 
 def test_pending_parsers_support_current_redis_dict_shape() -> None:
-    summary = StreamClient._parse_pending_summary(
+    summary = parse_pending_summary(
         {
             "pending": 1,
             "min": b"1-0",
@@ -214,7 +152,7 @@ def test_pending_parsers_support_current_redis_dict_shape() -> None:
             "consumers": [{"name": b"worker-a", "pending": 1}],
         }
     )
-    message = StreamClient._parse_pending_message(
+    message = parse_pending_message(
         {
             "message_id": b"1-0",
             "consumer": b"worker-a",

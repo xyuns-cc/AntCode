@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 import shlex
 from dataclasses import dataclass
@@ -15,6 +16,12 @@ _INSTALL_ASSET_PACKAGE = "antcode_web_api.install_assets"
 _INSTALL_SCRIPTS = {"linux": "install_worker.sh", "macos": "install_worker.sh", "windows": "install_worker.ps1"}
 _PINNED_GIT_REF = re.compile(r"^[0-9a-fA-F]{40}$")
 _PINNED_TOOL_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){2}$")
+_MIN_TCP_PORT = 1
+_MAX_TCP_PORT = 65535
+_DNS_HOST = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -54,13 +61,18 @@ def load_worker_install_config(settings: Settings) -> WorkerInstallConfig:
     api_base_url = settings.public_api_base_url
     source_url = settings.WORKER_INSTALL_SOURCE_URL.strip()
     source_ref = settings.WORKER_INSTALL_SOURCE_REF.strip()
-    _validate_api_base_url(api_base_url)
+    _validate_api_base_url(
+        api_base_url,
+        require_https=settings.WORKER_INSTALL_CONFIG_REQUIRED,
+    )
     _validate_source_url(source_url)
     if not _PINNED_GIT_REF.fullmatch(source_ref):
         raise WorkerInstallerConfigurationError("WORKER_INSTALL_SOURCE_REF 必须是完整的 40 位 Git commit")
     uv_version = settings.WORKER_INSTALL_UV_VERSION.strip()
     if not _PINNED_TOOL_VERSION.fullmatch(uv_version):
         raise WorkerInstallerConfigurationError("WORKER_INSTALL_UV_VERSION 必须是固定的三段版本号")
+    if not settings.WORKER_INSTALL_GATEWAY_TLS:
+        raise WorkerInstallerConfigurationError("WORKER_INSTALL_GATEWAY_TLS 必须启用")
     return WorkerInstallConfig(
         api_base_url=api_base_url,
         source_url=source_url,
@@ -69,6 +81,12 @@ def load_worker_install_config(settings: Settings) -> WorkerInstallConfig:
         gateway_tls=settings.WORKER_INSTALL_GATEWAY_TLS,
         uv_version=uv_version,
     )
+
+
+def validate_required_worker_install_config(settings: Settings) -> None:
+    """生产画像在启动期强制验证安装分发合同。"""
+    if settings.WORKER_INSTALL_CONFIG_REQUIRED:
+        load_worker_install_config(settings)
 
 
 def build_worker_install_command(
@@ -85,13 +103,13 @@ def build_worker_install_command(
     return _build_unix_command(request.install_key, script_url, digest, config)
 
 
-def _validate_api_base_url(value: str) -> None:
+def _validate_api_base_url(value: str, *, require_https: bool) -> None:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise WorkerInstallerConfigurationError("API_BASE_URL 必须是有效的 HTTP(S) 地址")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise WorkerInstallerConfigurationError("API_BASE_URL 不允许包含凭证、query 或 fragment")
-    if parsed.scheme == "http" and parsed.hostname not in _LOOPBACK_HOSTS:
+    if parsed.scheme == "http" and (require_https or parsed.hostname not in _LOOPBACK_HOSTS):
         # P2 §4.6: 生产未显式配置 API_BASE_URL 时，public_api_base_url 会由
         # SERVER_DOMAIN 推导成 HTTP，走到这里必然失败。错误信息必须给出
         # 根因与修复方式，而不是让"安装必失败"看起来像随机故障。
@@ -112,10 +130,24 @@ def _validate_source_url(value: str) -> None:
 
 def _gateway_endpoint(settings: Settings) -> str:
     host = settings.GATEWAY_HOST.strip()
-    if not host or "://" in host or any(char.isspace() for char in host):
+    unbracketed_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    if not _is_valid_gateway_host(unbracketed_host):
         raise WorkerInstallerConfigurationError("GATEWAY_HOST 必须是有效的主机名或 IP")
-    normalized_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return f"{normalized_host}:{settings.GATEWAY_PORT}"
+    port = settings.GATEWAY_PORT
+    if isinstance(port, bool) or not isinstance(port, int) or not _MIN_TCP_PORT <= port <= _MAX_TCP_PORT:
+        raise WorkerInstallerConfigurationError("GATEWAY_PORT 必须是 1 到 65535 的整数")
+    normalized_host = f"[{unbracketed_host}]" if ":" in unbracketed_host else unbracketed_host
+    return f"{normalized_host}:{port}"
+
+
+def _is_valid_gateway_host(host: str) -> bool:
+    if not host or any(char.isspace() for char in host):
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return bool(_DNS_HOST.fullmatch(host))
 
 
 def _public_script_name(asset_name: str) -> str:

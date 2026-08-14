@@ -1,4 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 REPO_ROOT = Path(__file__).parents[3]
 
@@ -177,13 +180,11 @@ def test_removed_migration_compatibility_scripts_and_cli_are_absent():
 
 
 def test_worker_flow_control_rejects_invalid_strategy_without_fallback():
-    source = _read("services/worker/src/antcode_worker/app/wiring.py")
-    function_source = source[source.index("def _create_flow_controller") :]
-    function_source = function_source.split("\ndef _create_project_fetcher", 1)[0]
+    from antcode_worker.app.engine_wiring import _create_flow_controller
 
-    assert "except ValueError:" not in function_source
-    assert "strategy = FlowControlStrategy.TOKEN_BUCKET" not in function_source
-    assert "FlowControlStrategy(strategy_value)" in function_source
+    config = SimpleNamespace(flow_control_enabled=True, flow_control_strategy="unsupported")
+    with pytest.raises(ValueError):
+        _create_flow_controller(config)
 
 
 def test_aerich_migration_tooling_is_removed():
@@ -238,9 +239,9 @@ def test_frontend_data_loading_does_not_degrade_to_empty_data():
     assert offenders == []
 
     project_list_source = _read("web/antcode-frontend/src/pages/Projects/ProjectList.tsx")
-    fetch_projects_source = project_list_source[project_list_source.index("const fetchAllProjects") :]
+    fetch_projects_source = project_list_source[project_list_source.index("const fetchProjects") :]
     fetch_projects_source = fetch_projects_source.split(
-        "\n  // 前端筛选和分页逻辑",
+        "\n  // 同步分页信息到 store",
         1,
     )[0]
 

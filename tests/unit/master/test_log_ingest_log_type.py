@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from antcode_contracts import data_pb2
 from antcode_master.ingester.log_ingest_loop import LogIngestLoop
+from antcode_master.ingester.log_ingest_message import build_log_entries
 
 loop_module = importlib.import_module("antcode_master.ingester.log_ingest_loop")
 
@@ -56,3 +57,23 @@ async def test_unknown_log_type_enum_is_dead_lettered_not_pel_poisoned(monkeypat
     assert await loop._process_message(message) is True
     loop._dead_letter_invalid_batch.assert_awaited_once()
     append.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stderr_log_is_persisted_with_error_level():
+    batch = data_pb2.LogBatch(
+        worker_id="worker-1",
+        entries=[
+            data_pb2.LogEntry(
+                run_id="run-1",
+                log_type=data_pb2.LogType.LOG_TYPE_STDERR,
+                content="failure",
+            )
+        ],
+    )
+    allocator = SimpleNamespace(allocate=AsyncMock(return_value=[1]))
+
+    entries = await build_log_entries(batch, "9-0", allocator)
+
+    assert entries[0].log_type == "stderr"
+    assert entries[0].level == "ERROR"

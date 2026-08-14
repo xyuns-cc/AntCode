@@ -16,6 +16,8 @@ from fastapi import FastAPI
 from loguru import logger
 from tortoise import Tortoise
 
+from antcode_web_api.services.worker_installer import validate_required_worker_install_config
+
 # 关闭单步超时（秒）：任何 shutdown 子任务卡住不应阻塞进程退出
 _SHUTDOWN_STEP_TIMEOUT = 10.0
 
@@ -64,38 +66,42 @@ async def init_services() -> None:
     logger.info(f"初始化 {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info("=" * 50)
 
-    logger.info("[1/11] 初始化数据库")
+    # 生产画像必须在数据库连接前暴露安装分发配置错误。
+    logger.info("[1/12] 校验 Worker 安装分发配置")
+    validate_required_worker_install_config(settings)
+
+    logger.info("[2/12] 初始化数据库")
     await _init_db()
 
-    logger.info("[2/11] 初始化运行目录")
+    logger.info("[3/12] 初始化运行目录")
     await _init_runtime_dirs()
 
-    logger.info("[3/11] 创建默认管理员")
+    logger.info("[4/12] 创建默认管理员")
     await _create_default_admin()
 
-    logger.info("[4/11] 初始化系统配置")
+    logger.info("[5/12] 初始化系统配置")
     await _init_system_config()
     await _init_alert_service()
 
-    logger.info("[5/11] 初始化 Worker 认证")
+    logger.info("[6/12] 初始化 Worker 认证")
     await _init_worker_auth()
 
-    logger.info("[6/11] 初始化Redis")
+    logger.info("[7/12] 初始化Redis")
     await _init_redis()
 
-    logger.info("[7/11] 启动内存监控")
+    logger.info("[8/12] 启动内存监控")
     await _setup_memory_monitoring()
 
-    logger.info("[8/11] 初始化指标缓存")
+    logger.info("[9/12] 初始化指标缓存")
     await _init_metrics_cache()
 
-    logger.info("[9/11] 启动日志清理")
+    logger.info("[10/12] 启动日志清理")
     await _init_log_cleanup()
 
-    logger.info("[10/11] 启动分布式日志")
+    logger.info("[11/12] 启动分布式日志")
     await _init_distributed_log()
 
-    logger.info("[11/11] 启动 HTTP 客户端")
+    logger.info("[12/12] 启动 HTTP 客户端")
     await http_client.start()
 
     logger.info("=" * 50)
@@ -131,9 +137,7 @@ async def shutdown_services() -> None:
     logger.info("应用程序已停止")
 
 
-# ============================================================================
 # 数据库初始化
-# ============================================================================
 
 
 async def _init_db() -> None:
@@ -163,9 +167,7 @@ async def _init_db() -> None:
             raise
 
 
-# ============================================================================
 # 运行目录初始化
-# ============================================================================
 
 
 async def _init_runtime_dirs() -> None:
@@ -184,9 +186,7 @@ async def _init_runtime_dirs() -> None:
         raise
 
 
-# ============================================================================
 # 管理员用户初始化
-# ============================================================================
 
 
 async def _create_default_admin() -> None:

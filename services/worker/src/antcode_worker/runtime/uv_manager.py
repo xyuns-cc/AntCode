@@ -22,7 +22,15 @@ from datetime import datetime
 from pathlib import Path
 
 import ujson
+from antcode_contracts.runtime_metadata import validate_runtime_creator, validate_runtime_metadata
 from loguru import logger
+
+from antcode_worker.runtime.manifest import (
+    load_runtime_manifest,
+    runtime_manifest_creator,
+    runtime_manifest_metadata,
+    write_runtime_manifest,
+)
 
 # 操作系统检测
 IS_WINDOWS = platform.system() == "Windows"
@@ -299,13 +307,9 @@ class UVManager:
                 continue
 
             manifest_path = os.path.join(venv_path, "manifest.json")
-            manifest = {}
-            if os.path.exists(manifest_path):
-                try:
-                    with open(manifest_path, encoding="utf-8") as f:
-                        manifest = ujson.load(f)
-                except ValueError as exc:
-                    raise RuntimeError(f"运行时清单文件无效: {manifest_path}") from exc
+            manifest = load_runtime_manifest(manifest_path)
+            key, description = runtime_manifest_metadata(manifest)
+            created_by, owner_user_id = runtime_manifest_creator(manifest)
 
             version = manifest.get("python_version", "unknown")
             if version == "unknown":
@@ -315,8 +319,7 @@ class UVManager:
                     manifest["python_version"] = version
                     manifest.setdefault("created_at", datetime.now().isoformat())
                     manifest.setdefault("name", name)
-                    with open(manifest_path, "w", encoding="utf-8") as f:
-                        ujson.dump(manifest, f, ensure_ascii=False, indent=2)
+                    write_runtime_manifest(manifest_path, manifest)
 
             scope_value = "shared" if name.startswith("shared-") else "private"
 
@@ -330,10 +333,11 @@ class UVManager:
                     "python_version": version,
                     "python_executable": python_exe,
                     "created_at": manifest.get("created_at"),
-                    "created_by": manifest.get("created_by"),
+                    "created_by": created_by,
+                    "owner_user_id": owner_user_id,
                     "packages_count": manifest.get("packages_count", 0),
-                    "key": manifest.get("key"),
-                    "description": manifest.get("description"),
+                    "key": key,
+                    "description": description,
                     "scope": scope_value,
                 }
             )
@@ -354,19 +358,16 @@ class UVManager:
     ) -> dict:
         """更新虚拟环境元数据（manifest）"""
         _validate_env_name(env_name)
+        normalized_key, normalized_desc = validate_runtime_metadata(key, description)
         async with self._env_operation(f"env:{env_name}"):
             venv_path = self._get_venv_path(env_name)
             if not os.path.exists(venv_path):
                 raise RuntimeError(f"虚拟环境 {env_name} 不存在")
 
             manifest_path = os.path.join(venv_path, "manifest.json")
-            manifest: dict = {}
-            if os.path.exists(manifest_path):
-                try:
-                    with open(manifest_path, encoding="utf-8") as f:
-                        manifest = ujson.load(f)
-                except Exception:
-                    manifest = {}
+            manifest = load_runtime_manifest(manifest_path)
+            runtime_manifest_metadata(manifest)
+            runtime_manifest_creator(manifest)
 
             manifest.setdefault("name", env_name)
             manifest.setdefault("created_at", datetime.now().isoformat())
@@ -374,7 +375,6 @@ class UVManager:
             if key is None:
                 manifest.pop("key", None)
             else:
-                normalized_key = key.strip()
                 if normalized_key:
                     manifest["key"] = normalized_key
                 else:
@@ -383,14 +383,12 @@ class UVManager:
             if description is None:
                 manifest.pop("description", None)
             else:
-                normalized_desc = description.strip()
                 if normalized_desc:
                     manifest["description"] = normalized_desc
                 else:
                     manifest.pop("description", None)
 
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                ujson.dump(manifest, f, ensure_ascii=False, indent=2)
+            write_runtime_manifest(manifest_path, manifest)
 
             env_data = await self.get_env(env_name)
             if not env_data:
@@ -402,19 +400,14 @@ class UVManager:
         self,
         env_name: str,
         python_version: str | None = None,
+        *,
         packages: list[str] | None = None,
         created_by: str | None = None,
+        owner_user_id: str | None = None,
     ) -> dict:
-        """
-        创建虚拟环境
-
-        Args:
-            env_name: 环境名称
-            python_version: Python版本（如 "3.12"），为空则使用当前Python
-            packages: 要安装的包列表
-            created_by: 创建人用户名
-        """
+        """创建虚拟环境；created_by 仅展示，owner_user_id 是授权主键。"""
         _validate_env_name(env_name)
+        normalized_creator, normalized_owner = validate_runtime_creator(created_by, owner_user_id)
         packages_to_install = list(packages or [])
         self._validate_packages(packages_to_install)
         async with self._env_operation(f"env:{env_name}"):
@@ -439,20 +432,21 @@ class UVManager:
                 "name": env_name,
                 "python_version": actual_version,
                 "created_at": datetime.now().isoformat(),
-                "created_by": created_by,
+                "created_by": normalized_creator,
+                "owner_user_id": normalized_owner,
                 "packages_count": 0,
             }
             manifest_path = os.path.join(venv_path, "manifest.json")
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                ujson.dump(manifest, f, ensure_ascii=False, indent=2)
+            write_runtime_manifest(manifest_path, manifest)
 
             if packages_to_install:
                 await self._install_packages_locked(env_name, packages_to_install, upgrade=False)
 
             await self._update_packages_count(env_name)
 
-            with open(manifest_path, encoding="utf-8") as f:
-                manifest = ujson.load(f)
+            manifest = load_runtime_manifest(manifest_path, required=True)
+            key, description = runtime_manifest_metadata(manifest)
+            persisted_creator, persisted_owner = runtime_manifest_creator(manifest)
 
             logger.info(f"虚拟环境创建成功: {env_name} (Python {actual_version})")
 
@@ -462,8 +456,12 @@ class UVManager:
                 "python_version": actual_version,
                 "python_executable": python_exe,
                 "created_at": manifest["created_at"],
-                "created_by": manifest.get("created_by"),
+                "created_by": persisted_creator,
+                "owner_user_id": persisted_owner,
                 "packages_count": manifest.get("packages_count", 0),
+                "key": key,
+                "description": description,
+                "scope": "shared" if env_name.startswith("shared-") else "private",
             }
 
     async def delete_env(self, env_name: str) -> bool:
@@ -598,16 +596,11 @@ class UVManager:
 
         try:
             packages = await self.list_packages(env_name)
-
-            manifest = {}
-            if os.path.exists(manifest_path):
-                with open(manifest_path, encoding="utf-8") as f:
-                    manifest = ujson.load(f)
-
+            manifest = load_runtime_manifest(manifest_path)
+            runtime_manifest_metadata(manifest)
+            runtime_manifest_creator(manifest)
             manifest["packages_count"] = len(packages)
-
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                ujson.dump(manifest, f, ensure_ascii=False, indent=2)
+            write_runtime_manifest(manifest_path, manifest)
         except Exception as e:
             logger.warning(f"更新包数量失败: {e}")
 

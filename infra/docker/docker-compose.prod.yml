@@ -1,288 +1,124 @@
-x-antcode-logging: &antcode-logging
-  driver: json-file
-  options:
-    max-size: "100m"
-    max-file: "10"
-
-x-backend-environment: &backend-environment
-  DATABASE_URL: ${DATABASE_URL:?production DATABASE_URL is required}
-  REDIS_URL: ${REDIS_URL:?production REDIS_URL is required}
-  REDIS_ACL_ENABLED: "true"
-  AUTH_COOKIE_SECURE: "true"
-  LOG_LEVEL: ${LOG_LEVEL:-INFO}
-
-x-backend-service: &backend-service
-  restart: unless-stopped
-  logging: *antcode-logging
-  read_only: true
-  tmpfs:
-    - /tmp
-  networks:
-    - antcode-internal
-
-x-backend-dependencies: &backend-dependencies
-  migration:
-    condition: service_completed_successfully
-  redis:
-    condition: service_healthy
-
 services:
   postgres:
-    image: ${ANTCODE_POSTGRES_IMAGE_REPOSITORY:?PostgreSQL image repository is required}@sha256:${ANTCODE_POSTGRES_IMAGE_DIGEST:?PostgreSQL image digest is required}
-    restart: unless-stopped
-    stop_grace_period: 60s
-    logging: *antcode-logging
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-antcode}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - antcode-internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    extends:
+      file: docker-compose.prod.middleware.yml
+      service: postgres
   redis:
-    image: ${ANTCODE_REDIS_IMAGE_REPOSITORY:?Redis image repository is required}@sha256:${ANTCODE_REDIS_IMAGE_DIGEST:?Redis image digest is required}
-    restart: unless-stopped
-    stop_grace_period: 30s
-    logging: *antcode-logging
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --aclfile
-      - /usr/local/etc/redis/users.acl
-    environment:
-      REDISCLI_AUTH: ${REDIS_HEALTHCHECK_PASSWORD:?Redis healthcheck password is required}
-      REDIS_HEALTHCHECK_USER: ${REDIS_HEALTHCHECK_USER:?Redis healthcheck user is required}
-    volumes:
-      - redis_data:/data
-      - ${ANTCODE_REDIS_ACL_DIR:?writable Redis ACL directory is required}:/usr/local/etc/redis
-    networks:
-      - antcode-internal
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli --user $${REDIS_HEALTHCHECK_USER} ping | grep -q PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    extends:
+      file: docker-compose.prod.middleware.yml
+      service: redis
   migration:
-    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
-    restart: "no"
-    logging: *antcode-logging
-    read_only: true
-    tmpfs:
-      - /tmp
-    environment:
-      <<: *backend-environment
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
-      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
-      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
-      JWT_SECRET_FILE: /run/secrets/jwt_secret
-      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
-      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD is required}
-    secrets:
-      - jwt_secret
-    command: ["python", "-m", "scripts.init_db"]
-    networks:
-      - antcode-internal
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    extends:
+      file: docker-compose.prod.middleware.yml
+      service: migration
+  crawl-redis-upgrade:
+    extends:
+      file: docker-compose.prod.middleware.yml
+      service: crawl-redis-upgrade
   web-api:
-    <<: *backend-service
-    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
-    stop_grace_period: 30s
-    cpus: 2
-    mem_limit: 2g
-    pids_limit: 2048
-    expose:
-      - "8000"
-    environment:
-      <<: *backend-environment
-      BIND_HOST: 0.0.0.0
-      SERVER_PORT: "8000"
-      SERVER_RELOAD: "false"
-      JWT_SECRET_FILE: /run/secrets/jwt_secret
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
-      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
-      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
-      ANTCODE_TRUSTED_PROXIES: ${ANTCODE_TRUSTED_PROXIES:?trusted reverse proxy CIDR is required}
-    volumes:
-      - web_data:/app/data
-    secrets:
-      - jwt_secret
-    depends_on: *backend-dependencies
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+    extends:
+      file: docker-compose.prod.control.yml
+      service: web-api
   master:
-    <<: *backend-service
-    image: ${ANTCODE_MASTER_IMAGE_REPOSITORY:?Master image repository is required}@sha256:${ANTCODE_MASTER_IMAGE_DIGEST:?Master image digest is required}
-    stop_grace_period: 30s
-    cpus: 2
-    mem_limit: 2g
-    pids_limit: 2048
-    environment:
-      <<: *backend-environment
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
-      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
-      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
-    volumes:
-      - master_data:/app/data
-    depends_on: *backend-dependencies
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8101/health/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
+    extends:
+      file: docker-compose.prod.control.yml
+      service: master
   gateway:
-    <<: *backend-service
-    image: ${ANTCODE_GATEWAY_IMAGE_REPOSITORY:?Gateway image repository is required}@sha256:${ANTCODE_GATEWAY_IMAGE_DIGEST:?Gateway image digest is required}
-    stop_grace_period: 30s
-    cpus: 2
-    mem_limit: 2g
-    pids_limit: 2048
-    expose:
-      - "50051"
-      - "8100"
-    environment:
-      <<: *backend-environment
-      GRPC_HOST: "0.0.0.0"
-      GRPC_PORT: "50051"
-      GRPC_TLS_CERT_PATH: /etc/antcode/tls/server.crt
-      GRPC_TLS_KEY_PATH: /etc/antcode/tls/server.key
-      GRPC_TLS_CA_PATH: /etc/antcode/tls/ca.crt
-      ANTCODE_GATEWAY_ALLOW_INSECURE: "false"
-      ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS: "1"
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
-      ENCRYPTION_KEY_SALT: ${ENCRYPTION_KEY_SALT:?ENCRYPTION_KEY_SALT is required}
-      ENCRYPTION_KEYS_LEGACY: ${ENCRYPTION_KEYS_LEGACY:-}
-    volumes:
-      - ${ANTCODE_GATEWAY_TLS_DIR:?Gateway mTLS directory is required}:/etc/antcode/tls:ro
-      - gateway_data:/app/data
-    depends_on: *backend-dependencies
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8100/health/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
+    extends:
+      file: docker-compose.prod.control.yml
+      service: gateway
   worker:
-    image: ${ANTCODE_WORKER_IMAGE_REPOSITORY:?Worker image repository is required}@sha256:${ANTCODE_WORKER_IMAGE_DIGEST:?Worker image digest is required}
-    restart: unless-stopped
-    stop_grace_period: 60s
-    logging: *antcode-logging
-    cpus: 4
-    mem_limit: 8g
-    pids_limit: 4096
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
-      - systempaths=unconfined
+    extends:
+      file: docker-compose.prod.worker.yml
+      service: worker
+    profiles: ["co-located-worker"]
+    # 同机 Worker 不出公网：走 antcode-execution 的内嵌 DNS 直连 gateway 容器。
+    # 主机名与端口必须一起覆盖——基线文件里的 WORKER_GATEWAY_PORT 是
+    # ANTCODE_GATEWAY_PUBLIC_PORT（宿主发布端口），容器内 gateway 恒定监听
+    # GRPC_PORT=50051（docker-compose.prod.control.yml），两者不等时同机 Worker
+    # 会去敲一个网络内根本没有监听的端口。
+    # WORKER_GATEWAY_TLS 保持 true，因此 Gateway 服务端证书的 SAN 必须包含
+    # DNS:gateway（docs/release-runbook.md 第 5.4 节）。
     environment:
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      WORKER_TRANSPORT_MODE: gateway
-      WORKER_GATEWAY_BACKENDLESS: "true"
       WORKER_GATEWAY_HOST: gateway
       WORKER_GATEWAY_PORT: "50051"
-      WORKER_GATEWAY_TLS: "true"
-      WORKER_CA_CERT: /etc/antcode/tls/ca.crt
-      WORKER_CLIENT_CERT: /etc/antcode/tls/client.crt
-      WORKER_CLIENT_KEY: /etc/antcode/tls/client.key
-      WORKER_API_BASE_URL: ${ANTCODE_PUBLIC_API_BASE_URL:?public HTTPS API base URL is required}
-      WORKER_API_ALLOW_INSECURE_INTERNAL: "false"
-      ANTCODE_WORKER_KEY: ${ANTCODE_WORKER_KEY:-}
-      ANTCODE_RULE_ALLOW_NETWORK: ${ANTCODE_RULE_ALLOW_NETWORK:-0}
-      WORKER_SANDBOX_COMMAND: bwrap
-    volumes:
-      - ${ANTCODE_WORKER_TLS_DIR:?Worker mTLS directory is required}:/etc/antcode/tls:ro
-      - worker_data:/app/data
     networks:
-      - antcode-internal
+      - antcode-execution
     depends_on:
       web-api:
         condition: service_healthy
       gateway:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 45s
-
   frontend:
-    image: ${ANTCODE_FRONTEND_IMAGE_REPOSITORY:?frontend image repository is required}@sha256:${ANTCODE_FRONTEND_IMAGE_DIGEST:?frontend image digest is required}
-    restart: unless-stopped
-    logging: *antcode-logging
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /var/cache/nginx
-      - /var/run
-      - /etc/nginx/conf.d
-    expose:
-      - "8080"
+    extends:
+      file: docker-compose.prod.edge.yml
+      service: frontend
     environment:
       WEB_API_UPSTREAM: web-api:8000
+      TRUSTED_EDGE_PROXY_IP: ${ANTCODE_REVERSE_PROXY_EDGE_IP:?exact reverse proxy edge-network IP is required}
     networks:
-      - antcode-internal
-    depends_on:
-      web-api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
+      antcode-control:
+        ipv4_address: ${ANTCODE_FRONTEND_CONTROL_IP:?exact frontend control-network IP is required}
+      antcode-edge: {}
   reverse-proxy:
-    image: ${ANTCODE_REVERSE_PROXY_IMAGE_REPOSITORY:?reverse proxy image repository is required}@sha256:${ANTCODE_REVERSE_PROXY_IMAGE_DIGEST:?reverse proxy image digest is required}
-    restart: unless-stopped
-    logging: *antcode-logging
-    ports:
-      - "0.0.0.0:${HTTPS_PORT:-443}:443"
-      - "0.0.0.0:${HTTP_REDIRECT_PORT:-80}:80"
-    volumes:
-      - ${ANTCODE_REVERSE_PROXY_CONFIG:?reverse proxy config is required}:/etc/nginx/nginx.conf:ro
-      - ${ANTCODE_TLS_CERTS_DIR:?reverse proxy TLS directory is required}:/etc/nginx/certs:ro
+    extends:
+      file: docker-compose.prod.edge.yml
+      service: reverse-proxy
     networks:
-      - antcode-internal
-      - antcode-edge
-    depends_on:
-      frontend:
-        condition: service_healthy
-      gateway:
-        condition: service_healthy
+      antcode-edge:
+        ipv4_address: ${ANTCODE_REVERSE_PROXY_EDGE_IP:?exact reverse proxy edge-network IP is required}
 
+# frontend 与 reverse-proxy 各自 pin 死一个 IP，因为 Web API 只信任 frontend 的精确
+# control IP、frontend 只信任 reverse-proxy 的精确 edge IP。但 Docker 的动态 IPAM 从网
+# 段低位开始分配，且**不知道**同项目里还有别的容器 pin 了地址：postgres/redis 先于
+# frontend 创建（deploy-production.sh:58 先起中间件），必然抢走网段第一个可用地址，
+# 也就是 pin 给 frontend 的那个——首次部署 100% 以
+# "failed to set up container networking: Address already in use" 失败（真机实测）。
+# edge 网同理：frontend 先于 reverse-proxy 创建，会抢走 pin 给 reverse-proxy 的地址。
+# ip_range 把动态池限死在网段的一个子区间，pin 的地址落在池外就不再是"祈祷没人先抢"
+# 的隐式依赖，而是声明式契约（tests/unit/core/test_docker_compose_prod_contract.py 锁住）。
 networks:
-  antcode-internal:
+  antcode-control:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${ANTCODE_CONTROL_SUBNET:?dedicated control-network subnet is required}
+          ip_range: ${ANTCODE_CONTROL_DYNAMIC_RANGE:?control-network dynamic range excluding the pinned frontend IP is required}
+  antcode-service-egress:
+    driver: bridge
+  antcode-execution:
     driver: bridge
   antcode-edge:
     driver: bridge
+    ipam:
+      config:
+        - subnet: ${ANTCODE_EDGE_SUBNET:?dedicated edge-network subnet is required}
+          ip_range: ${ANTCODE_EDGE_DYNAMIC_RANGE:?edge-network dynamic range excluding the pinned reverse proxy IP is required}
 
 volumes:
   web_data:
   master_data:
   gateway_data:
   worker_data:
+    name: ${ANTCODE_WORKER_DATA_VOLUME:?unique Worker data volume is required}
   postgres_data:
   redis_data:
 
 secrets:
+  database_url:
+    file: ${ANTCODE_DATABASE_URL_FILE:?host DATABASE_URL secret file is required}
+  redis_url:
+    file: ${ANTCODE_REDIS_URL_FILE:?host REDIS_URL secret file is required}
+  encryption_key:
+    file: ${ANTCODE_ENCRYPTION_KEY_FILE:?host encryption key secret file is required}
+  encryption_key_salt:
+    file: ${ANTCODE_ENCRYPTION_KEY_SALT_FILE:?host encryption key salt secret file is required}
+  encryption_keys_legacy:
+    file: ${ANTCODE_ENCRYPTION_KEYS_LEGACY_FILE:?host legacy encryption keys file is required}
   jwt_secret:
     file: ${ANTCODE_JWT_SECRET_FILE:?host JWT secret file is required}
+  postgres_password:
+    file: ${ANTCODE_POSTGRES_PASSWORD_FILE:?host PostgreSQL password file is required}
+  redis_healthcheck_password:
+    file: ${ANTCODE_REDIS_HEALTHCHECK_PASSWORD_FILE:?host Redis healthcheck password file is required}

@@ -1,7 +1,8 @@
 import type { FC } from 'react'
 import { Button, Checkbox, Col, Input, Row, Select, Space, Tag, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
-import { DEFAULT_LEVELS, DEFAULT_TYPES, type FilterState, type ViewerTheme } from './enhancedLogViewerTypes'
+import { DEFAULT_LEVELS, DEFAULT_TYPES, LOG_TYPE_LABELS, type FilterState, type ViewerTheme } from './enhancedLogViewerTypes'
+import { getTypeInfo } from './logFilterUtils'
 
 const { Search } = Input
 const { Text } = Typography
@@ -53,12 +54,11 @@ const TypeSelect: FC<Pick<FilterProps, 'selectedTypes' | 'onTypesChange'>> = (pr
     size="middle"
     maxTagCount={1}
   >
-    <Select.Option value={DEFAULT_TYPES[0]}>
-      <Tag color="green" style={{ margin: 0 }}>标准输出</Tag>
-    </Select.Option>
-    <Select.Option value={DEFAULT_TYPES[1]}>
-      <Tag color="red" style={{ margin: 0 }}>标准错误</Tag>
-    </Select.Option>
+    {DEFAULT_TYPES.map((type) => (
+      <Select.Option key={type} value={type}>
+        <Tag color={getTypeInfo(type).color} style={{ margin: 0 }}>{LOG_TYPE_LABELS[type]}</Tag>
+      </Select.Option>
+    ))}
   </Select>
 )
 

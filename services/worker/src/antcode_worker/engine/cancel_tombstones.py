@@ -8,7 +8,14 @@ Round6 P1-SM-03 (5.2 状态机): 加 Redis 持久化备份层, 防 Worker 重启
 丢失 fence, task 消息重投时被误执行。
 - record: 内存写 + Redis SET(EX 600s)
 - consume: 内存查, miss 则查 Redis GETDEL (原子, 幂等)
-- Redis 无 client 时降级纯内存(单元测试兼容)
+- Redis 无 client 时降级纯内存(Gateway 模式无 Redis 凭据 / 单元测试兼容)
+
+键布局按 ``{ns}`` 命名空间 + ``{wid}`` Worker 维度收敛, 与最小权限 Redis
+ACL selector 对齐(见 ``redis_acl_policy.ACL_SELECTOR_SPECS``)。无 Worker
+维度的共享 ``cancel:tombstone:*`` 写面会让任一 Worker GETDEL 掉其他 Worker
+的 fence——取消过的 run 会被照常执行, 与 spider data / run ownership 的
+既有顾虑同类, 因此不做共享授权。fence 的实际跨进程场景是同一 worker_id
+重启后重投(ready stream 与 control stream 都是 per-worker), 该场景完整保留。
 """
 
 from __future__ import annotations
@@ -16,10 +23,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from antcode_core.infrastructure.redis import cancel_tombstone_key, validate_worker_key_segment
 from loguru import logger
 
 CANCEL_TOMBSTONE_TTL_SECONDS = 600.0
-_REDIS_KEY_PREFIX = "cancel:tombstone:"
 
 
 class CancelTombstones:
@@ -30,16 +37,22 @@ class CancelTombstones:
         ttl_seconds: float = CANCEL_TOMBSTONE_TTL_SECONDS,
         *,
         redis_client: Any = None,
-        namespace: str = "antcode",
+        namespace: str | None = None,
+        worker_id: str = "",
     ) -> None:
         self._ttl_seconds = ttl_seconds
         self._entries: dict[str, float] = {}
-        # P1-SM-03 (round6): Redis 备份, 无 client 时降级纯内存(测试兼容)
+        # P1-SM-03 (round6): Redis 备份, 无 client 时纯内存(Gateway/单测)
         self._redis = redis_client
         self._namespace = namespace
+        # 键必须落进本 Worker 的 ACL 面; worker_id 缺失或非法时立即失败,
+        # 不静默退化成跨 Worker 共享的 tombstone 键
+        if redis_client is not None:
+            validate_worker_key_segment(worker_id)
+        self._worker_id = worker_id
 
     def _redis_key(self, run_id: str) -> str:
-        return f"{{{self._namespace}}}:{_REDIS_KEY_PREFIX}{run_id}"
+        return cancel_tombstone_key(self._worker_id, run_id, namespace=self._namespace)
 
     async def record(self, run_id: str, reason: str) -> None:
         now = asyncio.get_event_loop().time()

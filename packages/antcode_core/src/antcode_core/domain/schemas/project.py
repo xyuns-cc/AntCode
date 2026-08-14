@@ -6,7 +6,8 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from antcode_contracts.runtime_metadata import RUNTIME_DESCRIPTION_MAX_LENGTH, RUNTIME_KEY_MAX_LENGTH
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from antcode_core.common.utils.json_parser import JSONParser
 from antcode_core.domain.models.enums import (
@@ -18,6 +19,8 @@ from antcode_core.domain.models.enums import (
     RuntimeKind,
     RuntimeScope,
 )
+
+_MIN_PYTHON_VERSION_LENGTH = 3
 
 
 def _normalize_runtime_scope(value):
@@ -122,28 +125,26 @@ class ProjectCreateRequest(BaseModel):
     tags: list[str] | None = Field(None, description="项目标签")
     dependencies: list[str] | None = Field(None, description="Python依赖包")
 
-    # ========== 环境配置 ==========
     env_location: str = Field(default="worker", description="环境位置")
     worker_id: str | None = Field(None, description="Worker 节点 ID")
 
-    # 环境作用域：private / shared
     runtime_scope: RuntimeScope = Field(..., description="运行时作用域：shared/private")
     runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型：python/java/go")
 
-    # 使用现有环境 or 创建新环境
     use_existing_env: bool = Field(default=False, description="是否使用现有环境")
     existing_env_name: str | None = Field(None, description="现有环境名称（节点环境）或标识（本地共享环境）")
     env_name: str | None = Field(None, max_length=100, description="新建运行环境名称")
-    env_description: str | None = Field(None, max_length=500, description="运行环境描述")
+    env_description: str | None = Field(None, max_length=RUNTIME_DESCRIPTION_MAX_LENGTH, description="运行环境描述")
 
-    # 创建新环境时的配置
     python_version: str | None = Field(None, min_length=3, max_length=20, description="Python版本")
-    shared_runtime_key: str | None = Field(None, description="共享运行时标识（可选），默认为版本目录")
+    shared_runtime_key: str | None = Field(
+        None,
+        max_length=RUNTIME_KEY_MAX_LENGTH,
+        description="共享运行时标识（可选），默认为版本目录",
+    )
 
-    # ========== 区域配置 ==========
-    region: str | None = Field(None, description="执行区域，系统自动选择该区域内负载最低的节点")
+    region: str | None = Field(None, max_length=50, description="执行区域，系统自动选择该区域内负载最低的节点")
 
-    # ========== 执行策略配置 ==========
     execution_strategy: str | None = Field("auto", description="执行策略：fixed/auto/specified/prefer")
     bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID（用于 fixed/prefer 策略）")
 
@@ -187,40 +188,21 @@ class ProjectCreateRequest(BaseModel):
             return JSONParser.parse_list(v, "dependencies")
         return v
 
-    @field_validator("worker_id")
-    @classmethod
-    def validate_worker_id(cls, v, info):
-        """验证 Worker ID"""
-        if not v:
+    @model_validator(mode="after")
+    def validate_runtime_binding(self):
+        """规则项目按能力调度；文件/代码项目必须绑定有效 Worker 运行时。"""
+        if self.type in {ProjectType.RULE, ProjectType.RULE.value}:
+            return self
+        if not self.worker_id:
             raise ValueError("必须指定 worker_id")
-        return v
-
-    @field_validator("existing_env_name")
-    @classmethod
-    def validate_existing_env(cls, v, info):
-        """验证现有环境名称"""
-        use_existing = info.data.get("use_existing_env")
-        if use_existing and not v:
+        if self.use_existing_env and not self.existing_env_name:
             raise ValueError("使用现有环境时必须指定 existing_env_name")
-        return v
-
-    @field_validator("python_version")
-    @classmethod
-    def validate_python_version(cls, v, info):
-        """验证Python版本"""
-        use_existing = info.data.get("use_existing_env")
-        runtime_scope = info.data.get("runtime_scope")
-
-        # 如果是创建新环境，必须指定版本
-        if not use_existing and not v:
+        if not self.use_existing_env and not self.python_version:
             raise ValueError("创建新环境时必须指定 python_version")
-
-        # 私有环境必须指定有效版本
-        if runtime_scope == RuntimeScope.PRIVATE and not use_existing:
-            if not v or not isinstance(v, str) or len(v) < 3:
+        if self.runtime_scope == RuntimeScope.PRIVATE and not self.use_existing_env:
+            if not isinstance(self.python_version, str) or len(self.python_version) < _MIN_PYTHON_VERSION_LENGTH:
                 raise ValueError("私有环境必须提供有效的 Python 版本")
-
-        return v
+        return self
 
 
 class ProjectFileCreateRequest(ProjectCreateRequest):
@@ -258,7 +240,9 @@ class ProjectFileCreateRequest(ProjectCreateRequest):
 class ProjectRuleCreateRequest(ProjectCreateRequest):
     """规则项目创建请求"""
 
+    runtime_scope: RuntimeScope = Field(RuntimeScope.SHARED, description="规则项目不绑定 Worker 运行时")
     engine: CrawlEngine = Field(CrawlEngine.REQUESTS, description="采集引擎")
+    require_render: bool = Field(False, description="是否要求 Worker 具备浏览器渲染能力")
     target_url: str = Field(..., max_length=2000, description="目标URL")
     url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     request_method: RequestMethod = Field(RequestMethod.GET, description="请求方法")
@@ -278,7 +262,6 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
     proxy_config: dict[str, Any] | None = Field(None, description="代理配置")
     anti_spider: dict[str, Any] | None = Field(None, description="反爬虫配置")
     task_config: dict[str, Any] | None = Field(None, description="任务配置")
-    # S10 (Scrapy 迁移收尾)
     resume_enabled: bool | None = Field(None, description="scrapy-redis 断点续爬 + 分布式")
     dedup_config: dict[str, Any] | None = Field(None, description="内容级去重（fields/scope/ttl_days/on_hit）")
 
@@ -294,7 +277,6 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
                 raise ValueError("extraction_rules JSON格式错误")
 
             try:
-                # 转换为ExtractionRule对象列表
                 return [ExtractionRule(**rule) if isinstance(rule, dict) else rule for rule in parsed]
             except Exception as e:
                 raise ValueError(f"extraction_rules 对象转换错误: {str(e)}")
@@ -369,10 +351,8 @@ class ProjectUpdateRequest(BaseModel):
     tags: list[str] | None = Field(None, description="项目标签")
     dependencies: list[str] | None = Field(None, description="Python依赖包")
 
-    # 区域配置
-    region: str | None = Field(None, description="执行区域")
+    region: str | None = Field(None, max_length=50, description="执行区域")
 
-    # 执行策略配置
     execution_strategy: str | None = Field(None, description="执行策略：fixed/auto/specified/prefer")
     bound_worker_id: str | None = Field(None, description="绑定的执行 Worker ID")
 
@@ -400,7 +380,9 @@ class ProjectCreateFormRequest(BaseModel):
     runtime_scope: RuntimeScope = Field(..., description="运行时作用域：shared/private")
     runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型：python/java/go")
     python_version: str | None = Field(None, max_length=20, description="Python版本（私有环境必填）")
-    shared_runtime_key: str | None = Field(None, description="共享运行时标识（可选）")
+    shared_runtime_key: str | None = Field(
+        None, max_length=RUNTIME_KEY_MAX_LENGTH, description="共享运行时标识（可选）"
+    )
 
     # Worker 环境参数
     env_location: str | None = Field("worker", description="环境位置：worker（Worker 执行）")
@@ -408,7 +390,7 @@ class ProjectCreateFormRequest(BaseModel):
     use_existing_env: bool | None = Field(False, description="是否使用现有环境")
     existing_env_name: str | None = Field(None, description="现有环境名称")
     env_name: str | None = Field(None, description="新环境名称")
-    env_description: str | None = Field(None, description="环境描述")
+    env_description: str | None = Field(None, max_length=RUNTIME_DESCRIPTION_MAX_LENGTH, description="环境描述")
 
     # 文件项目参数
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
@@ -416,7 +398,8 @@ class ProjectCreateFormRequest(BaseModel):
     environment_vars: str | None = Field(None, description="环境变量JSON")
 
     # 区域配置
-    region: str | None = Field(None, description="执行区域")
+    region: str | None = Field(None, max_length=50, description="执行区域")
+    require_render: bool = Field(False, description="是否要求 Worker 具备浏览器渲染能力")
 
     # 规则项目参数
     engine: CrawlEngine | None = Field(CrawlEngine.REQUESTS, description="采集引擎")
@@ -512,6 +495,8 @@ class ProjectRuleUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     engine: CrawlEngine | None = Field(None, description="采集引擎")
+    region: str | None = Field(None, max_length=50, description="执行区域")
+    require_render: bool | None = Field(None, description="是否要求 Worker 具备浏览器渲染能力")
     target_url: str | None = Field(None, max_length=2000, description="目标URL")
     url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     callback_type: CallbackType | None = Field(None, description="回调类型")
@@ -531,7 +516,6 @@ class ProjectRuleUpdateRequest(BaseModel):
     proxy_config: dict[str, Any] | None = Field(None, description="代理配置")
     anti_spider: dict[str, Any] | None = Field(None, description="反爬虫配置")
     task_config: dict[str, Any] | None = Field(None, description="任务配置")
-    # S3b / S5
     resume_enabled: bool | None = Field(None, description="scrapy-redis 断点续爬 + 分布式")
     dedup_config: dict[str, Any] | None = Field(None, description="内容级去重（fields/scope/ttl_days/on_hit）")
 
@@ -542,6 +526,7 @@ class ProjectRuleUpdateRequest(BaseModel):
         "proxy_config",
         "anti_spider",
         "task_config",
+        "dedup_config",
         mode="before",
     )
     @classmethod
@@ -566,6 +551,7 @@ class ProjectFileUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    language: str | None = Field(None, max_length=50, description="执行语言")
     entry_point: str | None = Field(None, max_length=255, description="入口文件路径")
     runtime_config: str | dict[str, Any] | None = Field(None, description="运行时配置")
     environment_vars: str | dict[str, Any] | None = Field(None, description="环境变量")
@@ -586,6 +572,7 @@ class ProjectFileUpdateRequest(BaseModel):
 class FileInfo(BaseModel):
     """Git 文件项目信息"""
 
+    language: str = Field("python", description="执行语言")
     entry_point: str = Field("", description="入口文件")
     runtime_config: dict[str, Any] = Field(default_factory=dict, description="运行时配置")
     environment_vars: dict[str, Any] = Field(default_factory=dict, description="环境变量")
@@ -621,6 +608,9 @@ class ProjectResponse(BaseModel):
     created_by_username: str | None = Field(None, description="创建者用户名")
     star_count: int = Field(0, description="收藏次数")
     # 运行环境
+    env_location: str | None = Field(None, description="运行环境位置")
+    worker_id: str | None = Field(None, description="运行环境 Worker ID")
+    worker_env_name: str | None = Field(None, description="Worker 环境名称")
     python_version: str | None = Field(None, description="绑定的Python版本")
     runtime_scope: RuntimeScope | None = Field(None, description="运行时作用域")
     runtime_kind: RuntimeKind | None = Field(None, description="运行时类型")

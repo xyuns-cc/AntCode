@@ -1,36 +1,29 @@
 """用户服务"""
 
-import contextlib
 import re
 from datetime import UTC, datetime
 
 from loguru import logger
 from tortoise.exceptions import IntegrityError
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
+from antcode_core.application.services.users.user_cascade_delete import (
+    cascade_delete_user_data,
+)
 from antcode_core.common.hash_utils import calculate_content_hash
-from antcode_core.domain.models.user import User
+from antcode_core.domain.models.user import User, consume_dummy_password_check, password_fits_bcrypt
 from antcode_core.domain.schemas.common import PaginationInfo
 from antcode_core.domain.schemas.user import UserResponse, UserSimpleResponse
 from antcode_core.infrastructure.cache import user_cache
 
 
 def validate_password_strength(password):
-    """
-    验证密码强度
-
-    要求:
-    - 最少 8 个字符
-    - 至少包含一个大写字母
-    - 至少包含一个小写字母
-    - 至少包含一个数字
-    - 至少包含一个特殊字符
-
-    Returns:
-        (is_valid, error_message)
-    """
-    if len(password) < 8:
-        return False, "密码长度至少为 8 个字符"
+    """验证密码长度、bcrypt 字节预算和字符组成。"""
+    too_short = len(password) < 8
+    if too_short or not password_fits_bcrypt(password):
+        message = "密码长度至少为 8 个字符" if too_short else "密码 UTF-8 编码不能超过 72 字节"
+        return False, message
 
     if not re.search(r"[A-Z]", password):
         return False, "密码必须包含至少一个大写字母"
@@ -80,9 +73,21 @@ class UserService:
 
         return cached
 
-    def _generate_cache_key(self, page, size, is_active=None, is_admin=None, sort_by=None, sort_order=None):
+    def _generate_cache_key(
+        self,
+        *,
+        page,
+        size,
+        search=None,
+        is_active=None,
+        is_admin=None,
+        sort_by=None,
+        sort_order=None,
+    ):
         """生成缓存键"""
         parts = [f"p{page}", f"s{size}"]
+        if search:
+            parts.append(f"search{search}")
         if is_active is not None:
             parts.append(f"a{is_active}")
         if is_admin is not None:
@@ -97,6 +102,7 @@ class UserService:
         try:
             user = await User.get_or_none(username=username)
             if not user:
+                consume_dummy_password_check(password)
                 logger.debug(f"用户不存在: {username}")
                 return None
 
@@ -109,7 +115,7 @@ class UserService:
 
         except Exception as e:
             logger.error(f"认证失败: {e}")
-            return None
+            raise
 
     async def create_user(self, request):
         try:
@@ -192,33 +198,39 @@ class UserService:
         return is_admin
 
     async def update_last_login(self, user_id):
-        try:
-            await User.filter(id=user_id).update(last_login_at=datetime.now())
-            logger.debug(f"更新最后登录时间: user_id={user_id}")
-        except Exception as e:
-            logger.error(f"更新最后登录时间失败: {e}")
+        await User.filter(id=user_id).update(last_login_at=datetime.now())
+        logger.debug(f"更新最后登录时间: user_id={user_id}")
 
     async def get_users_list(
         self,
+        *,
         page=1,
         size=20,
+        search=None,
         is_active=None,
         is_admin=None,
         sort_by=None,
         sort_order=None,
     ):
         """获取用户列表（带缓存）"""
-        cache_key = self._generate_cache_key(page, size, is_active, is_admin, sort_by, sort_order)
+        normalized_search = search.strip() if search else None
+        cache_key = self._generate_cache_key(
+            page=page,
+            size=size,
+            search=normalized_search,
+            is_active=is_active,
+            is_admin=is_admin,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
 
-        # 尝试缓存
-        try:
-            if cached := await user_cache.get(cache_key):
-                return self._normalize_cached_user_list(cached)
-        except Exception:
-            pass
+        if cached := await user_cache.get(cache_key):
+            return self._normalize_cached_user_list(cached)
 
         # 构建查询
         query = User.all()
+        if normalized_search:
+            query = query.filter(Q(public_id__icontains=normalized_search) | Q(username__icontains=normalized_search))
         if is_active is not None:
             query = query.filter(is_active=is_active)
         if is_admin is not None:
@@ -266,8 +278,7 @@ class UserService:
             "pagination": PaginationInfo(page=page, size=size, total=total, pages=pages),
         }
 
-        with contextlib.suppress(Exception):
-            await user_cache.set(cache_key, result)
+        await user_cache.set(cache_key, result)
 
         return result
 
@@ -275,17 +286,13 @@ class UserService:
         """获取简易用户列表（带缓存）"""
         cache_key = "user:list:simple"
 
-        try:
-            if cached := await user_cache.get(cache_key):
-                return cached
-        except Exception:
-            pass
+        if cached := await user_cache.get(cache_key):
+            return cached
 
         users = await User.all().order_by("username")
         result = [UserSimpleResponse(id=u.public_id, username=u.username).model_dump() for u in users]
 
-        with contextlib.suppress(Exception):
-            await user_cache.set(cache_key, result)
+        await user_cache.set(cache_key, result)
 
         return result
 
@@ -511,36 +518,11 @@ class UserService:
         单个 `in_transaction()` 事务保证:权限/凭证/User 主体全部成功或
         全部回滚。审计日志(AuditLog.user_id 可空)刻意保留以维持追溯链。
         """
-        from antcode_core.domain.models import (
-            GitCredential,
-            UserSession,
-            UserWorkerPermission,
-        )
-
-        deleted = {
-            "worker_permissions": 0,
-            "git_credentials": 0,
-            "user_sessions": 0,
-        }
-
         try:
-            async with in_transaction():
-                # 1. Worker 权限
-                deleted["worker_permissions"] = await UserWorkerPermission.filter(user_id=user.id).delete()
-
-                # 2. Git 凭证(GitCredential.owner_user_id 明确归属单个用户,可安全删)
-                deleted["git_credentials"] = await GitCredential.filter(owner_user_id=user.id).delete()
-
-                # 3. 服务端会话
-                deleted["user_sessions"] = await UserSession.filter(user_id=user.id).delete()
-
-                # 4. User 本体
-                await user.delete()
+            return await cascade_delete_user_data(user)
         except Exception as e:
             logger.error(f"级联删除用户数据失败(事务已回滚): {e}")
             raise
-
-        return deleted
 
     async def _invalidate_user_cache(self, user_id=None):
         try:

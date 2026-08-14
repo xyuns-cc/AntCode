@@ -2,71 +2,58 @@
 
 from __future__ import annotations
 
-import os
-import shutil
+import re
 from pathlib import Path
 
-from antcode_worker.runtime.uv_manager import run_command
+from antcode_worker.runtime.dependency_process import DependencyLimits
 
 _CACHE_ROOT = ".antcode-go-cache"
-_GO_MOD_DOWNLOAD_TIMEOUT_SECONDS = 600
-_GO_INSTALL_ENV_KEYS = ("PATH", "HOME", "GOPROXY", "GONOSUMDB", "GONOSUMCHECK", "GOSUMDB", "GOPRIVATE")
+_EXTERNAL_DIRECTIVE_PATTERN = re.compile(r"^(?:require|replace)\b")
 
 
 def build_go_execution_env(cwd: str, env: dict[str, str]) -> dict[str, str]:
     """Return a copy whose Go caches stay inside the current run workspace.
 
-    P2 §4.4: 沙箱内 ``go run`` 默认 ``--unshare-net``，模块缓存必须在执行
-    前由 ``install_go_dependencies`` 预热；这里强制 ``GOPROXY=off``，缺依赖
-    时立即显式失败，而不是在无网沙箱里等网络超时。
+    沙箱内 ``go run`` 默认 ``--unshare-net``。外部模块必须随源码提交
+    ``vendor``；这里强制 ``GOPROXY=off``，缺依赖时立即显式失败。
     """
     if not (Path(cwd) / "go.mod").is_file():
         return dict(env)
     cache_root = Path(cwd) / _CACHE_ROOT
+    vendor_mode = (Path(cwd) / "vendor").is_dir()
     return {
         **env,
         "GOCACHE": str(cache_root / "build"),
         "GOMODCACHE": str(cache_root / "modules"),
         "GOENV": "off",
+        "GOWORK": "off",
         "GOTOOLCHAIN": "local",
         "GOPROXY": "off",
-        "GOFLAGS": "-mod=mod",
+        "GOFLAGS": "-mod=vendor" if vendor_mode else "-mod=mod",
     }
 
 
-async def install_go_dependencies(cwd: str) -> None:
-    """执行前（带网络的 prep 阶段）预取 Go 模块到工作区缓存。
-
-    P2 §4.4: 此前 Go 依赖被交给沙箱内的 ``go run`` 解析，而生产沙箱默认
-    ``--unshare-net`` —— 未 vendor 的正常 Go 项目稳定失败。与 Node 依赖
-    装配同阶段执行 ``go mod download``，失败显式抛错。
-    """
+async def install_go_dependencies(cwd: str, *, limits: DependencyLimits) -> None:
+    """Require external modules to be vendored before sandbox execution."""
+    del limits
     root = Path(cwd)
     if not (root / "go.mod").is_file():
         return
+    if (root / "go.work").exists():
+        raise RuntimeError("Go 安全执行不支持 go.work；请提交单模块 source bundle")
     if (root / "vendor").is_dir():
-        # vendor 模式无需模块缓存，go 会自动使用 vendor 目录。
         return
-    go_exe = shutil.which("go")
-    if go_exe is None:
-        raise RuntimeError("Go 项目依赖预取失败: 找不到 go 可执行文件")
-    cache_root = root / _CACHE_ROOT
-    install_env = {key: os.environ[key] for key in _GO_INSTALL_ENV_KEYS if key in os.environ}
-    install_env.update(
-        GOCACHE=str(cache_root / "build"),
-        GOMODCACHE=str(cache_root / "modules"),
-        GOENV="off",
-        GOTOOLCHAIN="local",
-    )
-    result = await run_command(
-        [go_exe, "mod", "download"],
-        cwd=cwd,
-        env=install_env,
-        timeout=_GO_MOD_DOWNLOAD_TIMEOUT_SECONDS,
-        inherit_env=False,
-    )
-    if result.exit_code != 0:
-        raise RuntimeError(f"Go 依赖预取失败: {result.stderr or result.stdout}")
+    content = (root / "go.mod").read_text(encoding="utf-8")
+    if _has_external_directive(content):
+        raise RuntimeError("Go 外部依赖必须提交 vendor 目录；Worker 禁止沙箱外下载模块")
+
+
+def _has_external_directive(content: str) -> bool:
+    for raw_line in content.splitlines():
+        line = raw_line.split("//", maxsplit=1)[0].strip()
+        if _EXTERNAL_DIRECTIVE_PATTERN.match(line):
+            return True
+    return False
 
 
 __all__ = ["build_go_execution_env", "install_go_dependencies"]

@@ -67,7 +67,7 @@ async def _assert_task_settlement_acl(
     worker_id: str,
     suffix: str,
 ) -> tuple[str, str]:
-    stream = f"antcode:task:ready:{worker_id}"
+    stream = f"{{antcode}}:task:ready:{worker_id}"
     group = f"antcode-workers-acl-{suffix}"
     consumer = f"worker:{worker_id}"
     source_id = await admin.xadd(stream, {"task_id": "task-1"})
@@ -159,7 +159,7 @@ async def _exercise_worker_acl(
     other_heartbeat_key: str,
     other_lease_key: str,
 ) -> _AclArtifacts:
-    heartbeat_key = f"antcode:heartbeat:{worker_id}"
+    heartbeat_key = f"{{antcode}}:heartbeat:{worker_id}"
     proof_key = f"antcode:direct:register:{worker_id}"
     assert await client.hset(heartbeat_key, mapping={"status": "online"}) == 1
     assert await client.expire(heartbeat_key, 60)
@@ -196,13 +196,13 @@ async def _cleanup_acl_test(
     artifacts: _AclArtifacts | None,
 ) -> None:
     cleanup_keys = [
-        f"antcode:heartbeat:{worker_id}",
+        f"{{antcode}}:heartbeat:{worker_id}",
         other_heartbeat_key,
         f"{{antcode}}:lease:data:{worker_id}",
         f"{{antcode}}:lease:revoked:{worker_id}",
         other_lease_key,
         f"antcode:direct:register:{worker_id}",
-        f"antcode:task:ready:{worker_id}",
+        f"{{antcode}}:task:ready:{worker_id}",
     ]
     if artifacts is not None:
         cleanup_keys.extend(artifacts.settlement_keys)
@@ -221,7 +221,7 @@ async def _cleanup_acl_test(
 async def test_worker_acl_rotation_and_key_isolation_on_real_redis() -> None:
     worker_id = f"acl-live-{uuid.uuid4().hex[:20]}"
     username = f"worker_{worker_id}"
-    other_key = f"antcode:heartbeat:other-{uuid.uuid4().hex}"
+    other_key = f"{{antcode}}:heartbeat:other-{uuid.uuid4().hex}"
     other_lease_key = f"{{antcode}}:lease:data:other-{uuid.uuid4().hex}"
     admin = aioredis.from_url(REDIS_URL, decode_responses=True)
     artifacts: _AclArtifacts | None = None

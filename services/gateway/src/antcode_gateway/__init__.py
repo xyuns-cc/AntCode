@@ -12,19 +12,14 @@ gRPC 网关服务，负责：
 职责边界：
 - 不实现复杂调度策略（只代理队列 + 写状态/日志/结果）
 - 不处理业务 CRUD
+
+包根**不再**转出 AuthInterceptor / RateLimitInterceptor / GrpcServer：既没有调用方
+（全部走子模块导入），又会制造导入环 —— ``auth`` 依赖 ``auth_credentials`` 等兄弟
+模块，导入兄弟模块会先执行本文件，而此时 ``antcode_gateway.auth`` 还没执行完，
+``from antcode_gateway.auth import AuthInterceptor`` 必然 ImportError。
+请直接从子模块导入。
 """
 
 __version__ = "0.1.0"
 
-from antcode_gateway.auth import AuthInterceptor
-from antcode_gateway.rate_limit import RateLimiter, RateLimitInterceptor
-from antcode_gateway.server import GrpcServer, get_grpc_server
-
-__all__ = [
-    "__version__",
-    "GrpcServer",
-    "get_grpc_server",
-    "AuthInterceptor",
-    "RateLimiter",
-    "RateLimitInterceptor",
-]
+__all__ = ["__version__"]

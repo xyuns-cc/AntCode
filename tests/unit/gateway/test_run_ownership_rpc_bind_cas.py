@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import grpc
 import pytest
+from antcode_contracts import artifact_pb2
 
 from tests.unit.gateway.test_run_ownership_rpc import (
     MAX_RUN_OWNERSHIP_TTL_MS,
@@ -27,7 +28,7 @@ from tests.unit.gateway.test_run_ownership_rpc import (
 async def test_claim_binds_pg_generation_only_after_fence_acquired(monkeypatch):
     """P1-GW-02/04: fence ACQUIRED → PG bind 带 lease_gen 单调 CAS。"""
     redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, _owns = _install(monkeypatch, redis)
 
     response = await _Service().ClaimRunOwnership(_claim(), _context())
 
@@ -48,7 +49,7 @@ async def test_claim_binds_pg_generation_only_after_fence_acquired(monkeypatch):
 async def test_claim_final_fence_stale_releases_token_and_never_returns_acquired(monkeypatch):
     """PG bind 后 Lease 换代时，最终 fence 必须失败并精确释放旧 token。"""
     redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, _owns = _install(monkeypatch, redis)
     redis.renew_result = -1
     context = _context()
 
@@ -64,7 +65,7 @@ async def test_claim_final_fence_stale_releases_token_and_never_returns_acquired
 async def test_claim_held_by_other_does_not_bind_pg(monkeypatch):
     """未取得 ownership 就绝不改绑 PG(另一存活 worker 正持有该 run)。"""
     redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, _owns = _install(monkeypatch, redis)
     redis.values["{tenant-a}:run:owner:run-1"] = "worker-2:lease-x"
     redis.lease[fence._lease_key("worker-2", None)] = "lease-x"
 
@@ -78,7 +79,7 @@ async def test_claim_held_by_other_does_not_bind_pg(monkeypatch):
 async def test_bind_failure_after_fence_aborts_permission_denied(monkeypatch):
     """fence 后 run 已不属于该 worker(并发改派): abort 且不返回 acquired。"""
     redis = _Redis()
-    bind_generation, _owns, _owns_lease = _install(monkeypatch, redis)
+    bind_generation, _owns = _install(monkeypatch, redis)
     bind_generation.side_effect = PermissionError("TaskRun 不存在或不属于当前 Worker")
     context = _context()
     context.abort.side_effect = RuntimeError("grpc aborted")
@@ -104,3 +105,60 @@ async def test_invalid_ttl_is_rejected_before_lease_and_redis(monkeypatch):
     assert context.abort.await_args.args[0] == grpc.StatusCode.INVALID_ARGUMENT
     service._lease_verifier.assert_not_awaited()
     assert redis.eval_calls == []
+
+
+@pytest.mark.asyncio
+async def test_release_succeeds_after_taskrun_row_is_deleted(monkeypatch):
+    redis = _Redis()
+    _bind, owns_runs = _install(monkeypatch, redis)
+    redis.values["{tenant-a}:run:owner:run-1"] = "worker-1:lease-1"
+    owns_runs.side_effect = PermissionError("TaskRun missing")
+    request = artifact_pb2.RunOwnershipReleaseRequest(
+        worker_id="worker-1",
+        lease_id="lease-1",
+        run_id="run-1",
+    )
+
+    response = await _Service().ReleaseRunOwnership(request, _context())
+
+    assert response.released is True
+    owns_runs.assert_not_awaited()
+    assert redis.values == {}
+
+
+@pytest.mark.asyncio
+async def test_stale_lease_can_release_its_exact_ownership_token(monkeypatch):
+    redis = _Redis()
+    _bind, owns_runs = _install(monkeypatch, redis)
+    redis.values["{tenant-a}:run:owner:run-1"] = "worker-1:lease-1"
+    request = artifact_pb2.RunOwnershipReleaseRequest(
+        worker_id="worker-1",
+        lease_id="lease-1",
+        run_id="run-1",
+    )
+    service = _Service(current=False)
+
+    response = await service.ReleaseRunOwnership(request, _context())
+
+    assert response.released is True
+    service._lease_verifier.assert_not_awaited()
+    owns_runs.assert_not_awaited()
+    assert redis.values == {}
+
+
+@pytest.mark.asyncio
+async def test_release_cannot_delete_foreign_ownership_token(monkeypatch):
+    redis = _Redis()
+    _bind, owns_runs = _install(monkeypatch, redis)
+    redis.values["{tenant-a}:run:owner:run-1"] = "worker-2:lease-2"
+    request = artifact_pb2.RunOwnershipReleaseRequest(
+        worker_id="worker-1",
+        lease_id="lease-1",
+        run_id="run-1",
+    )
+
+    response = await _Service().ReleaseRunOwnership(request, _context())
+
+    assert response.released is False
+    owns_runs.assert_not_awaited()
+    assert redis.values["{tenant-a}:run:owner:run-1"] == "worker-2:lease-2"

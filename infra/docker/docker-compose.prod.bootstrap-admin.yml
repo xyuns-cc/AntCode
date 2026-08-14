@@ -1,0 +1,10 @@
+services:
+  migration:
+    environment:
+      DEFAULT_ADMIN_PASSWORD_FILE: /run/secrets/default_admin_password
+    secrets:
+      - default_admin_password
+
+secrets:
+  default_admin_password:
+    file: ${ANTCODE_DEFAULT_ADMIN_PASSWORD_FILE:?one-time admin password file is required}

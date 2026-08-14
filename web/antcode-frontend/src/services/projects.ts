@@ -1,5 +1,10 @@
 import { BaseService } from './base'
 import apiClient, { unwrapResponse } from './api'
+import {
+  buildRuleConfigPayload,
+  createFileConfigFormData,
+  createProjectFormData,
+} from './projectPayloads'
 import type { AxiosRequestConfig } from 'axios'
 import Logger from '@/utils/logger'
 import type {
@@ -13,47 +18,48 @@ import type {
   ProjectUpdateRequest,
   ProjectListParams,
   ProjectStats,
-  ProjectExportConfig
+  ProjectExportConfig,
 } from '@/types'
+
+const PROJECT_OPTION_PAGE_SIZE = 500
+
+interface ProjectPage {
+  items: Project[]
+  page: number
+  size: number
+  total: number
+  pages: number
+}
+
+function assertProjectPage(result: ProjectPage, requestedPage: number): void {
+  if (result.page !== requestedPage) {
+    throw new Error(`项目分页页码不一致: requested=${requestedPage}, received=${result.page}`)
+  }
+  if (result.size <= 0) {
+    throw new Error(`项目分页 size 非法: ${result.size}`)
+  }
+  if (result.total < 0 || result.pages < 0) {
+    throw new Error(`项目分页元数据非法: total=${result.total}, pages=${result.pages}`)
+  }
+  const expectedPages = Math.ceil(result.total / result.size)
+  if (result.pages !== expectedPages) {
+    throw new Error(`项目分页页数不一致: expected=${expectedPages}, received=${result.pages}`)
+  }
+}
+
+function appendDistinctProjects(target: Project[], seenIds: Set<string>, items: Project[]): void {
+  items.forEach((project) => {
+    if (seenIds.has(project.id)) {
+      throw new Error(`项目分页包含重复项目: ${project.id}`)
+    }
+    seenIds.add(project.id)
+    target.push(project)
+  })
+}
 
 class ProjectService extends BaseService {
   constructor() {
     super('/api/v1/projects')
-  }
-
-  private appendRepositorySourceFields(formData: FormData, data: ProjectCreateRequest): void {
-    if (data.repository_id) {
-      formData.append('repository_id', data.repository_id)
-    }
-    if (data.ref) {
-      formData.append('ref', data.ref)
-    }
-    if (data.subdir) {
-      formData.append('subdir', data.subdir)
-    }
-    if (data.include_paths !== undefined) {
-      const value = Array.isArray(data.include_paths)
-        ? JSON.stringify(data.include_paths)
-        : data.include_paths
-      formData.append('include_paths', value)
-    }
-  }
-
-  private appendJsonField(
-    formData: FormData,
-    field: string,
-    value: string | object | undefined,
-    emptyObjectWhenBlank = false,
-  ): void {
-    if (value === undefined) {
-      return
-    }
-    if (typeof value === 'string') {
-      const normalized = value.trim()
-      formData.append(field, !normalized && emptyObjectWhenBlank ? '{}' : value)
-      return
-    }
-    formData.append(field, JSON.stringify(value))
   }
 
   // 获取项目列表
@@ -63,7 +69,7 @@ class ProjectService extends BaseService {
   ): Promise<{ items: Project[]; page: number; size: number; total: number; pages: number }> {
     const response = await apiClient.get<PaginationResponse<Project>>('/api/v1/projects', {
       ...config,
-      params: { ...(params ?? {}), ...(config?.params ?? {}) }
+      params: { ...(params ?? {}), ...(config?.params ?? {}) },
     })
 
     const { items, pagination } = response.data.data
@@ -73,7 +79,39 @@ class ProjectService extends BaseService {
       page: pagination.page,
       size: pagination.size,
       total: pagination.total,
-      pages: pagination.pages
+      pages: pagination.pages,
+    }
+  }
+
+  async getAllProjects(
+    filters: Omit<ProjectListParams, 'page' | 'size'> = {},
+    config?: AxiosRequestConfig
+  ): Promise<Project[]> {
+    const projects: Project[] = []
+    const seenIds = new Set<string>()
+    let page = 1
+    while (true) {
+      const result = await this.getProjects(
+        { ...filters, page, size: PROJECT_OPTION_PAGE_SIZE },
+        config
+      )
+      assertProjectPage(result, page)
+      appendDistinctProjects(projects, seenIds, result.items)
+      if (projects.length === result.total) return projects
+      if (projects.length > result.total) {
+        throw new Error(
+          `项目分页条目超过声明总数: received=${projects.length}, total=${result.total}`
+        )
+      }
+      if (result.items.length === 0) {
+        throw new Error(`项目分页响应提前结束: received=${projects.length}, total=${result.total}`)
+      }
+      if (page >= result.pages) {
+        throw new Error(
+          `项目分页页数不足: page=${page}, pages=${result.pages}, total=${result.total}`
+        )
+      }
+      page += 1
     }
   }
 
@@ -84,134 +122,7 @@ class ProjectService extends BaseService {
 
   // 创建项目
   async createProject(data: ProjectCreateRequest): Promise<Project> {
-    const formData = new FormData()
-
-    // 添加基本字段
-    formData.append('name', data.name)
-    formData.append('type', data.type)
-    if (data.description) {
-      formData.append('description', data.description)
-    }
-    if (data.tags) {
-      formData.append('tags', Array.isArray(data.tags) ? data.tags.join(',') : data.tags)
-    }
-
-    // 环境必填字段
-    formData.append('runtime_scope', data.runtime_scope)
-    formData.append('python_version', data.python_version)
-    if (data.shared_runtime_key) {
-      formData.append('shared_runtime_key', data.shared_runtime_key)
-    }
-    // 环境配置参数
-    if (data.env_location) {
-      formData.append('env_location', data.env_location)
-    }
-    if (data.worker_id) {
-      formData.append('worker_id', data.worker_id)
-    }
-    if (data.use_existing_env !== undefined) {
-      formData.append('use_existing_env', String(data.use_existing_env))
-    }
-    if (data.existing_env_name) {
-      formData.append('existing_env_name', data.existing_env_name)
-    }
-    if (data.env_name) {
-      formData.append('env_name', data.env_name)
-    }
-    if (data.env_description) {
-      formData.append('env_description', data.env_description)
-    }
-
-    // 根据项目类型添加特定字段
-    if (data.type === 'file') {
-      this.appendRepositorySourceFields(formData, data)
-      if (data.entry_point) {
-        formData.append('entry_point', data.entry_point)
-      }
-      this.appendJsonField(formData, 'runtime_config', data.runtime_config, true)
-      this.appendJsonField(formData, 'environment_vars', data.environment_vars, true)
-      if (data.dependencies) { formData.append('dependencies', JSON.stringify(data.dependencies)) }
-    } else if (data.type === 'rule') {
-      this.appendRuleFields(formData, data)
-    } else if (data.type === 'code') {
-      this.appendRepositorySourceFields(formData, data)
-      if (data.language) {
-        formData.append('language', data.language)
-      }
-      if (data.code_entry_point) {
-        formData.append('code_entry_point', data.code_entry_point)
-        formData.append('entry_point', data.code_entry_point)
-      }
-      if (data.documentation) {
-        formData.append('documentation', data.documentation)
-      }
-      if (data.dependencies) { formData.append('dependencies', JSON.stringify(data.dependencies)) }
-    }
-
-    return this.uploadFile<Project>('', formData)
-  }
-
-  // 辅助方法：添加规则项目字段到 FormData
-  private appendRuleFields(formData: FormData, data: Partial<ProjectCreateRequest | ProjectUpdateRequest>): void {
-    if (data.target_url) {
-      formData.append('target_url', data.target_url)
-    }
-    if (data.url_pattern) {
-      formData.append('url_pattern', data.url_pattern)
-    }
-    if (data.engine) {
-      formData.append('engine', data.engine)
-    }
-    if (data.request_delay !== undefined) {
-      formData.append('request_delay', data.request_delay.toString())
-    }
-    if (data.extraction_rules) {
-      formData.append('extraction_rules', data.extraction_rules)
-    }
-    if (data.pagination_config) {
-      formData.append('pagination_config', data.pagination_config)
-    }
-    if (data.request_method) {
-      formData.append('request_method', data.request_method)
-    }
-    if (data.headers) {
-      formData.append('headers', JSON.stringify(data.headers))
-    }
-    if (data.cookies) {
-      formData.append('cookies', JSON.stringify(data.cookies))
-    }
-    if (data.callback_type) {
-      formData.append('callback_type', data.callback_type)
-    }
-    if (data.priority !== undefined) {
-      formData.append('priority', data.priority.toString())
-    }
-    this.appendJsonField(formData, 'proxy_config', data.proxy_config)
-    this.appendJsonField(formData, 'anti_spider', data.anti_spider)
-    this.appendJsonField(formData, 'task_config', data.task_config)
-    this.appendJsonField(formData, 'data_schema', data.data_schema)
-    // S10 (Scrapy 迁移收尾): dedup_config 走 JSON 字段，resume_enabled 走 bool 字符串
-    this.appendJsonField(formData, 'dedup_config', data.dedup_config)
-    const resumeVal = data.resume_enabled
-    if (resumeVal !== undefined && resumeVal !== null) {
-      formData.append('resume_enabled', String(Boolean(resumeVal)))
-    }
-    if (data.retry_count !== undefined) {
-      formData.append('retry_count', data.retry_count.toString())
-    }
-    if (data.timeout !== undefined) {
-      formData.append('timeout', data.timeout.toString())
-    }
-    if (data.dont_filter !== undefined) {
-      formData.append('dont_filter', data.dont_filter.toString())
-    }
-    if (data.dependencies) { formData.append('dependencies', JSON.stringify(data.dependencies)) }
-    // P1-round6 5.4: region 是 rule 项目的调度约束(bound_region), 之前只在
-    // 类型里声明但从未 append 到 FormData, 后端拿到空 region → 任意 worker
-    // 都能派;需要在此显式落盘, 与 target_url / execution_strategy 同层。
-    if (data.region) {
-      formData.append('region', data.region)
-    }
+    return this.uploadFile<Project>('', createProjectFormData(data))
   }
 
   // 更新项目
@@ -221,107 +132,7 @@ class ProjectService extends BaseService {
 
   // 更新规则项目配置
   async updateRuleConfig(id: string, data: Partial<ProjectUpdateRequest>): Promise<Project> {
-    const payload: Record<string, unknown> = {}
-    const allowedFields = [
-      'engine',
-      'target_url',
-      'url_pattern',
-      'callback_type',
-      'request_method',
-      'extraction_rules',
-      'pagination_config',
-      'max_pages',
-      'start_page',
-      'request_delay',
-      'priority',
-      'dont_filter',
-      'headers',
-      'cookies',
-      'proxy_config',
-      'anti_spider',
-      'task_config',
-      'data_schema',
-      'retry_count',
-      'timeout',
-      // S10 (Scrapy 迁移收尾): 前端提交但后端没接过的两个字段
-      'resume_enabled',
-      'dedup_config'
-    ]
-    allowedFields.forEach((field) => {
-      const value = data[field as keyof ProjectUpdateRequest]
-      if (value !== undefined) {
-        payload[field] = value
-      }
-    })
-
-    const parseJson = (value: unknown, field: string) => {
-      if (value === undefined || value === null) return value
-      if (typeof value !== 'string') return value
-      if (!value.trim()) return undefined
-      try {
-        return JSON.parse(value)
-      } catch {
-        throw new Error(`${field} JSON解析失败`)
-      }
-    }
-
-    if (payload.extraction_rules !== undefined) {
-      const parsed = parseJson(payload.extraction_rules, 'extraction_rules')
-      if (!Array.isArray(parsed)) {
-        throw new Error('extraction_rules 必须是数组')
-      }
-      payload.extraction_rules = parsed
-    }
-
-    if (payload.pagination_config !== undefined) {
-      const parsed = parseJson(payload.pagination_config, 'pagination_config')
-      if (parsed && typeof parsed !== 'object') {
-        throw new Error('pagination_config 必须是对象')
-      }
-      payload.pagination_config = parsed
-    }
-
-    if (payload.headers !== undefined) {
-      payload.headers = parseJson(payload.headers, 'headers')
-    }
-
-    if (payload.cookies !== undefined) {
-      payload.cookies = parseJson(payload.cookies, 'cookies')
-    }
-
-    if (payload.task_config !== undefined) {
-      payload.task_config = parseJson(payload.task_config, 'task_config')
-    }
-
-    if (payload.proxy_config !== undefined) {
-      payload.proxy_config = parseJson(payload.proxy_config, 'proxy_config')
-    }
-
-    if (payload.anti_spider !== undefined) {
-      payload.anti_spider = parseJson(payload.anti_spider, 'anti_spider')
-    }
-
-    if (payload.data_schema !== undefined) {
-      payload.data_schema = parseJson(payload.data_schema, 'data_schema')
-    }
-
-    const numberFields = ['max_pages', 'start_page', 'request_delay', 'priority', 'retry_count', 'timeout']
-    numberFields.forEach((field) => {
-      const value = payload[field]
-      if (typeof value === 'string') {
-        const parsed = Number(value)
-        if (Number.isNaN(parsed)) {
-          throw new Error(`${field} 必须是数字`)
-        }
-        payload[field] = parsed
-      }
-    })
-
-    if (typeof payload.dont_filter === 'string') {
-      payload.dont_filter = payload.dont_filter === 'true'
-    }
-
-    return this.put<Project>(`/${id}/rule-config`, payload)
+    return this.put<Project>(`/${id}/rule-config`, buildRuleConfigPayload(data))
   }
 
   // 更新代码项目配置
@@ -339,19 +150,11 @@ class ProjectService extends BaseService {
 
   // 更新文件项目配置
   async updateFileConfig(id: string, data: ProjectFileConfigUpdateRequest): Promise<Project> {
-    const formData = new FormData()
-
-    if (data.entry_point) {
-      formData.append('entry_point', data.entry_point as string)
-    }
-    this.appendJsonField(formData, 'runtime_config', data.runtime_config, true)
-    this.appendJsonField(formData, 'environment_vars', data.environment_vars, true)
-
-    const response = await apiClient.put(`${this.basePath}/${id}/file-config`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
+    const response = await apiClient.put(
+      `${this.basePath}/${id}/file-config`,
+      createFileConfigFormData(data),
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    )
     return unwrapResponse<Project>(response)
   }
 
@@ -397,51 +200,26 @@ class ProjectService extends BaseService {
 
   // 导出项目
   async exportProject(id: string, config: ProjectExportConfig): Promise<Blob> {
-    const response = await apiClient.post(
-      `/api/v1/projects/${id}/export`,
-      config,
-      {
-        responseType: 'blob',
-      }
-    )
+    const response = await apiClient.post(`/api/v1/projects/${id}/export`, config, {
+      responseType: 'blob',
+    })
     return response.data
   }
 
-  // Round6 P1-FE (5.4): 文件上传导入功能已下线; 后端 /api/v1/projects/import
-  // 固定返回 410 Gone。改为客户端预先抛清晰错误, 引导用户走仓库导入(
-  // repositoryProjectImportService.importFromRepository) 替代方案, 避免 410
-  // 混乱错误 + 无谓的文件上传。
-  async importProject(_params: {
-    file: File
-    name?: string
-    description?: string
-    entry_point?: string
-    runtime_scope: string
-    worker_id?: string
-    use_existing_env?: boolean
-    existing_env_name?: string
-    python_version?: string
-    shared_runtime_key?: string
-    env_name?: string
-    env_description?: string
-    overwrite_existing?: boolean
-    runtime_config?: string
-    environment_vars?: string
-  }): Promise<unknown> {
-    throw new Error(
-      '文件上传导入已下线, 请通过"仓库导入"从 Git 仓库导入项目。' +
-      ' (POST /api/v1/repositories/import-from-repository)'
-    )
-  }
-
   // 验证项目配置
-  async validateProject(data: ProjectCreateRequest): Promise<{ valid: boolean; errors?: string[] }> {
+  async validateProject(
+    data: ProjectCreateRequest
+  ): Promise<{ valid: boolean; errors?: string[] }> {
     return this.post<{ valid: boolean; errors?: string[] }>('/validate', data)
   }
 
   // 测试项目连接（规则项目）
-  async testProjectConnection(id: string): Promise<{ success: boolean; message: string; data?: Record<string, unknown> }> {
-    return this.post<{ success: boolean; message: string; data?: Record<string, unknown> }>(`/${id}/test-connection`)
+  async testProjectConnection(
+    id: string
+  ): Promise<{ success: boolean; message: string; data?: Record<string, unknown> }> {
+    return this.post<{ success: boolean; message: string; data?: Record<string, unknown> }>(
+      `/${id}/test-connection`
+    )
   }
 
   // 获取项目依赖
@@ -470,7 +248,6 @@ class ProjectService extends BaseService {
     const result = await this.get<{ projects: Project[] }>('/search', { params })
     return result.projects
   }
-
 }
 
 export const projectService = new ProjectService()

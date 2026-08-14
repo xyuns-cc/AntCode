@@ -32,7 +32,7 @@ const useEntryAnimation = (isNew: boolean): boolean => {
 
 const useRowMeasurement = (
   message: LogMessage,
-  details: { onHeightChange: LogRowProps['onHeightChange']; rowRef: React.RefObject<HTMLDivElement> },
+  details: { onHeightChange: LogRowProps['onHeightChange']; rowRef: React.RefObject<HTMLDivElement | null> },
 ) => {
   const lastHeight = useRef(0)
   const reportHeight = useCallback((element: HTMLElement) => {

@@ -120,9 +120,6 @@ class CrawlBatchService(BaseService):
             name: 批次名称
             seed_urls: 种子 URL 列表
             user_id: 创建者 ID
-            description: 批次描述
-            max_depth: 最大爬取深度
-            max_pages: 最大爬取页面数
             max_concurrency: 最大并发数
             request_delay: 请求间隔（秒）
             timeout: 请求超时（秒）
@@ -134,27 +131,26 @@ class CrawlBatchService(BaseService):
 
         需求: 1.1 - 用户提交创建批次请求时创建新批次并返回批次 ID
         """
-        # 获取项目内部 ID
-        project = await self._get_project_by_public_id(project_id)
-        if not project:
-            raise ValueError(f"项目 {project_id} 不存在")
-
-        # 创建批次记录
-        batch = await CrawlBatch.create(
-            project_id=project.id,
-            name=name,
-            description=description,
-            seed_urls=seed_urls,
-            max_depth=max_depth,
-            max_pages=max_pages,
-            max_concurrency=max_concurrency,
-            request_delay=request_delay,
-            timeout=timeout,
-            max_retries=max_retries,
-            status=BatchStatus.PENDING,
-            is_test=is_test,
-            user_id=user_id,
-        )
+        async with in_transaction("default") as conn:
+            project = await Project.filter(public_id=project_id).using_db(conn).select_for_update().only("id").first()
+            if project is None:
+                raise ValueError(f"项目 {project_id} 不存在")
+            batch = await CrawlBatch.create(
+                project_id=project.id,
+                name=name,
+                description=description,
+                seed_urls=seed_urls,
+                max_depth=max_depth,
+                max_pages=max_pages,
+                max_concurrency=max_concurrency,
+                request_delay=request_delay,
+                timeout=timeout,
+                max_retries=max_retries,
+                status=BatchStatus.PENDING,
+                is_test=is_test,
+                user_id=user_id,
+                using_db=conn,
+            )
 
         logger.info(
             f"创建批次: batch_id={batch.public_id}, project={project_id}, "
@@ -676,18 +672,22 @@ class CrawlBatchService(BaseService):
         cleanup: bool,
         project_public_id: str,
     ) -> CrawlBatch:
-        # 检查状态转换是否有效
-        self._validate_state_transition(batch, BatchStatus.CANCELLED)
+        if batch.status == BatchStatus.CANCELLED.value:
+            if cleanup:
+                await self._progress_service.cancel_progress(project_public_id, batch.public_id)
+            return batch
 
-        if cleanup:
-            await self._progress_service.clear_progress(
-                project_id=project_public_id,
-                batch_id=batch.public_id,
-            )
+        self._validate_state_transition(batch, BatchStatus.CANCELLED)
 
         batch.status = BatchStatus.CANCELLED
         batch.completed_at = datetime.now()
         await self._save_batch_with_event(batch, "batch_cancelled")
+
+        if cleanup:
+            await self._progress_service.cancel_progress(
+                project_id=project_public_id,
+                batch_id=batch.public_id,
+            )
 
         logger.info(f"取消批次: batch_id={batch.public_id}, cleanup={cleanup}")
 

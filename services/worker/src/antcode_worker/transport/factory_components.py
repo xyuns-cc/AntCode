@@ -119,6 +119,7 @@ def build_gateway_transport_config(
         auth_method=auth_method,
         api_key=spec.api_key,
         worker_id=worker_id,
+        task_payload_secret=spec.secret_key,
     )
 
 

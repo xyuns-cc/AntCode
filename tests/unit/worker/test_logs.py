@@ -12,6 +12,7 @@ from antcode_worker.logs.batch import (
 )
 from antcode_worker.logs.manager import MAX_DISPATCH_QUEUE_SIZE, LogManager, LogManagerConfig
 from antcode_worker.logs.realtime import RealtimeConfig
+from antcode_worker.transport.base import GenerationLostError
 
 
 class TestBatchConfig:
@@ -107,6 +108,24 @@ async def test_batch_sender_does_not_retry_permanent_log_error():
 
     assert transport.send_log_batch.await_count == 1
     assert sender.queue_size == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_sender_does_not_retry_or_wrap_generation_loss():
+    transport = ConnectedTransport()
+    transport.send_log_batch.side_effect = GenerationLostError("superseded")
+    sender = BatchSender(
+        run_id="run-1",
+        transport=transport,
+        config=BatchConfig(batch_size=1, max_retries=3),
+    )
+    sender._running = True
+    await sender.write(LogEntry(run_id="run-1", stream=LogStream.STDOUT, content="line", seq=1))
+
+    with pytest.raises(GenerationLostError, match="superseded"):
+        await sender.flush()
+
+    transport.send_log_batch.assert_awaited_once()
 
 
 @pytest.mark.asyncio

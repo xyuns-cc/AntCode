@@ -135,7 +135,11 @@ async def _assert_rbac(client: httpx.AsyncClient, user: ProvisionedUser) -> None
         headers=headers,
         json={"role": "super_admin", "is_admin": True},
     )
-    assert escalation.status_code == 400, escalation.text
+    # 校验失败统一 422：这是 validation_exception_handler 的全局约定，且被
+    # test_exception_responses.py::test_validation_exception_handler_matches_openapi_422_contract
+    # 锁成 OpenAPI 契约。本用例真正要断言的安全性质不变——提权被拒，且精确
+    # 报出 role / is_admin 两个越权字段。
+    assert escalation.status_code == 422, escalation.text
     errors = escalation.json()["data"]["errors"]
     assert {error["field"] for error in errors} == {"body.role", "body.is_admin"}
     me = extract_data(await request_json(client, "GET", "/auth/me", token=token))

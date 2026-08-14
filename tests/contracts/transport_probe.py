@@ -7,6 +7,7 @@ from typing import Any
 
 from antcode_contracts import data_pb2
 
+from tests.contracts.fake_gateway import RUNTIME_CONTROL_TTL_MS
 from tests.contracts.proto_stream import read_proto_stream
 from tests.contracts.transport_backends import REDIS_TEST_URL
 
@@ -153,6 +154,9 @@ class ContractProbe:
         reply_stream = self.reply_stream(request_id)
         keys = self._transport._test_keys
         stream = keys.control_stream(self._transport._worker_id)
+        from antcode_core.application.services.runtime.runtime_control_service import redis_server_now_ms
+
+        expires_at_ms = await redis_server_now_ms(self._redis) + RUNTIME_CONTROL_TTL_MS
         return await self._redis.xadd(
             stream,
             {
@@ -161,6 +165,7 @@ class ContractProbe:
                 "action": action,
                 "payload": json.dumps(payload, ensure_ascii=False),
                 "reply_stream": reply_stream,
+                "expires_at_ms": str(expires_at_ms),
             },
         )
 

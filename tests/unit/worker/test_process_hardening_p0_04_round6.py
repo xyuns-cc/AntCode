@@ -14,18 +14,48 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 
 import pytest
+from antcode_worker.executor.output_stream import OutputByteBudget, OutputReadOptions, read_output_stream
 from antcode_worker.executor.process import ProcessExecutor
 
+_MAX_OUTPUT_LINES = 10
+_MAX_OUTPUT_BYTES = 1024
 
-def test_stream_output_calls_sanitize_log_message():
-    """P0-04:_stream_output 里必须调用 sanitize_log_message 处理 content。"""
+
+@pytest.mark.asyncio
+async def test_stream_output_calls_sanitize_log_message():
+    """P0-04:ProcessExecutor 委托的输出读取链必须脱敏 content。"""
     source = inspect.getsource(ProcessExecutor._stream_output)
-    assert "sanitize_log_message" in source, "_stream_output 未走脱敏器,子进程可原样写 token"
-    # content 应在传给 LogEntry 前被脱敏
-    assert "content = sanitize_log_message" in source or "sanitize_log_message(content)" in source
+    assert "read_output_stream" in source, "_stream_output 未走受控输出读取器"
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"password=secret-value\n")
+    reader.feed_eof()
+    sink = _RecordingSink()
+    options = OutputReadOptions(
+        run_id="run-1",
+        stream_type="stdout",
+        max_lines=_MAX_OUTPUT_LINES,
+        log_sink=sink,
+        seq_counter={"stdout": 0},
+        byte_budget=OutputByteBudget(_MAX_OUTPUT_BYTES),
+    )
+
+    await read_output_stream(reader, options)
+
+    assert sink.entries
+    assert "secret-value" not in sink.entries[0].content
+
+
+class _RecordingSink:
+    def __init__(self) -> None:
+        self.entries = []
+
+    async def write(self, entry) -> None:
+        self.entries.append(entry)
 
 
 def test_execute_logs_command_via_sanitizer():

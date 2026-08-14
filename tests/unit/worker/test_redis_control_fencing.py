@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from antcode_contracts import data_pb2
+from antcode_core.infrastructure.redis import control_stream
 from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
-from antcode_worker.transport.base import TaskResult
+from antcode_worker.transport.base import GenerationLostError, TaskResult
 from antcode_worker.transport.redis.codecs import CodecError, JsonCodec
 from antcode_worker.transport.redis.runtime_control import (
     ControlChannel,
@@ -23,13 +24,16 @@ from antcode_worker.transport.redis.runtime_control_evidence import (
 )
 from antcode_worker.transport.redis.transport import RedisTransport
 
+_WORKER_CONTROL_STREAM = control_stream("worker-1")
+
 
 @pytest.mark.asyncio
 async def test_control_recovery_claims_old_lease_consumer_before_draining_current_pel():
-    channel = ControlChannel("antcode:control:worker-1", "antcode-control")
+    channel = ControlChannel(_WORKER_CONTROL_STREAM, "antcode-control")
     recovery = PendingControlRecovery(
         (channel,),
         legacy_consumer_name="worker-1",
+        require_current_generation=AsyncMock(),
         page_size=2,
     )
     redis = AsyncMock()
@@ -97,16 +101,15 @@ async def test_stale_generation_cannot_submit_task_or_control_results():
     _enable_fencing(transport, current=False)
 
     task_result = SimpleNamespace()
-    assert await transport.report_result(task_result) is False
-    assert (
+    with pytest.raises(GenerationLostError):
+        await transport.report_result(task_result)
+    with pytest.raises(GenerationLostError):
         await transport.send_control_result(
             "worker-1:" + "a" * 32,
             "antcode:control:reply:worker-1:" + "a" * 32,
             True,
-            receipt="antcode:control:worker-1|1-0",
+            receipt=f"{_WORKER_CONTROL_STREAM}|1-0",
         )
-        is False
-    )
 
     redis.xadd.assert_not_awaited()
     redis.xrange.assert_not_awaited()
@@ -123,7 +126,8 @@ async def test_task_result_embeds_lease_and_reports_generation_loss_after_xadd()
     transport._lease_fencing_enabled = True
     result = TaskResult(run_id="run-1", task_id="task-1", status="success", data={})
 
-    assert await transport.report_result(result) is False
+    with pytest.raises(GenerationLostError):
+        await transport.report_result(result)
 
     fields = redis.xadd.await_args.args[1]
     status = data_pb2.TaskStatus.FromString(fields[PROTO_FIELD])
@@ -161,7 +165,7 @@ async def test_ack_control_rejects_foreign_pel_owner_and_rewinds_recovery():
     transport = _transport(redis)
     transport._control_recovery._channel_index = len(transport._control_channels)
 
-    assert await transport.ack_control("antcode:control:worker-1|1-0") is False
+    assert await transport.ack_control(f"{_WORKER_CONTROL_STREAM}|1-0") is False
 
     assert transport._control_recovery.complete is False
     redis.eval.assert_awaited_once()
@@ -174,7 +178,7 @@ async def test_ack_control_failure_rewinds_pel_for_same_process_retry(monkeypatc
     transport = _transport(redis)
     transport._control_recovery._channel_index = len(transport._control_channels)
 
-    assert await transport.ack_control("antcode:control:worker-1|1-0") is False
+    assert await transport.ack_control(f"{_WORKER_CONTROL_STREAM}|1-0") is False
     assert transport._control_recovery.complete is False
 
 

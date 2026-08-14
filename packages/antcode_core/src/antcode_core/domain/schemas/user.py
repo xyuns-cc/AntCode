@@ -5,8 +5,19 @@
 """
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class UserLoginRequest(BaseModel):
@@ -120,6 +131,27 @@ class UserAdminPasswordUpdateRequest(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 
+class UserBatchStatusRequest(BaseModel):
+    """批量启停请求；状态只接受 JSON boolean，避免字符串真值歧义。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_ids: list[StrictStr | StrictInt]
+    is_active: StrictBool
+
+
+class UserListQueryParams(BaseModel):
+    """管理员用户列表的服务端筛选和分页参数。"""
+
+    page: int = Field(default=1, ge=1)
+    size: int = Field(default=20, ge=1, le=100)
+    search: str | None = Field(default=None, max_length=100)
+    is_active: bool | None = None
+    is_admin: bool | None = None
+    sort_by: Literal["id", "username", "created_at"] | None = None
+    sort_order: Literal["asc", "desc"] | None = None
+
+
 class UserResponse(BaseModel):
     """用户响应"""
 
@@ -194,6 +226,8 @@ __all__ = [
     "UserRoleUpdateRequest",
     "UserPasswordUpdateRequest",
     "UserAdminPasswordUpdateRequest",
+    "UserBatchStatusRequest",
+    "UserListQueryParams",
     "UserResponse",
     "UserSimpleResponse",
     "UserListResponse",

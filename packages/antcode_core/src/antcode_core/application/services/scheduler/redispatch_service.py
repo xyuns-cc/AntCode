@@ -43,28 +43,25 @@ from collections.abc import Awaitable
 from typing import Any, cast
 
 from loguru import logger
+from redis.exceptions import NoScriptError
 
+from antcode_core.application.services.scheduler.redispatch_claim import REDISPATCH_CLAIM_LUA
+from antcode_core.application.services.scheduler.redispatch_payload import (
+    decode_claimed_payload,
+    validate_redispatch_payload,
+)
 from antcode_core.common.config import settings
+from antcode_core.common.security.task_payload_envelope import seal_redispatch_payload
 from antcode_core.infrastructure.redis.client import get_redis_client
+
 
 # ---------------------------------------------------------------------------
 # Lua: 原子 claim —— ZRANGEBYSCORE + ZREM + HSET processing 一步完成
 # ---------------------------------------------------------------------------
 # KEYS[1] = pending ZSet, KEYS[2] = processing Hash
 # ARGV[1] = now_ms, ARGV[2] = limit, ARGV[3] = claim_ms(processing value)
-_REDISPATCH_CLAIM_LUA = """
-local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
-if #due == 0 then return {} end
-redis.call('ZREM', KEYS[1], unpack(due))
-for i, payload in ipairs(due) do
-    redis.call('HSET', KEYS[2], payload, ARGV[3])
-end
-return due
-"""
-
-
 class RedispatchService:
-    """派发失败任务的持久化补派队列。"""
+    """Crawl batch 派发失败任务的持久化补派队列。"""
 
     #: 单条任务最多补派次数（含首次派发）；超阈值触发放弃回调
     DEFAULT_MAX_ATTEMPTS = 5
@@ -73,6 +70,7 @@ class RedispatchService:
     DEFAULT_MAX_DELAY = 300
     #: processing hash 里 claim 超过 N 秒还没 ack 视为崩溃,下轮 sweep 恢复
     DEFAULT_PROCESSING_TIMEOUT_SEC = 120
+    DEAD_LETTER_MAXLEN = 10_000
 
     def __init__(self) -> None:
         self._namespace = settings.REDIS_NAMESPACE
@@ -92,10 +90,13 @@ class RedispatchService:
     # -----------------------------------------------------------------
 
     def _key(self) -> str:
-        return f"{self._namespace}:task:redispatch"
+        return f"{{{self._namespace}}}:task:redispatch"
 
     def _processing_key(self) -> str:
-        return f"{self._namespace}:task:redispatch:processing"
+        return f"{{{self._namespace}}}:task:redispatch:processing"
+
+    def _dead_letter_key(self) -> str:
+        return f"{{{self._namespace}}}:task:redispatch:dead-letter"
 
     def next_delay_seconds(self, attempts: int) -> int:
         """指数退避：base * 2^attempts,capped。"""
@@ -112,7 +113,7 @@ class RedispatchService:
             return
         async with self._script_lock:
             if self._claim_sha is None:
-                self._claim_sha = await redis.script_load(_REDISPATCH_CLAIM_LUA)
+                self._claim_sha = await redis.script_load(REDISPATCH_CLAIM_LUA)
 
     # -----------------------------------------------------------------
 
@@ -127,6 +128,8 @@ class RedispatchService:
         runtime_env_name: str | None = None,
         timeout: int = 3600,
         project_type: str = "code",
+        region: str | None = None,
+        require_render: bool = False,
         attempts: int = 0,
         reason: str = "",
     ) -> bool:
@@ -141,7 +144,7 @@ class RedispatchService:
             return False
 
         redis = await get_redis_client()
-        payload = json.dumps(
+        clear_payload = validate_redispatch_payload(
             {
                 "run_id": run_id,
                 "task_id": task_id,
@@ -151,10 +154,15 @@ class RedispatchService:
                 "runtime_env_name": runtime_env_name or "",
                 "timeout": int(timeout),
                 "project_type": project_type,
+                "region": region,
+                "require_render": bool(require_render),
                 "attempts": int(attempts),
                 "reason": reason,
                 "enqueued_at_ms": int(time.time() * 1000),
-            },
+            }
+        )
+        payload = json.dumps(
+            seal_redispatch_payload(clear_payload),
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -194,48 +202,37 @@ class RedispatchService:
                     str(now_ms),
                 ),
             )
-        except Exception as exc:
-            if "NOSCRIPT" in str(exc):
-                logger.warning("redispatch claim 脚本未在 Redis 缓存中,回退 EVAL")
-                self._claim_sha = None
-                raw_list = await cast(
-                    Awaitable[list[bytes | str]],
-                    redis.eval(
-                        _REDISPATCH_CLAIM_LUA,
-                        2,
-                        self._key(),
-                        self._processing_key(),
-                        str(now_ms),
-                        str(limit),
-                        str(now_ms),
-                    ),
-                )
-            else:
-                raise
+        except NoScriptError:
+            # 必须捕获类型：redis-py 已剥掉 "NOSCRIPT" 错误码前缀，按子串判断永不成立。
+            logger.warning("redispatch claim 脚本未在 Redis 缓存中,回退 EVAL")
+            self._claim_sha = None
+            raw_list = await cast(
+                Awaitable[list[bytes | str]],
+                redis.eval(
+                    REDISPATCH_CLAIM_LUA,
+                    2,
+                    self._key(),
+                    self._processing_key(),
+                    str(now_ms),
+                    str(limit),
+                    str(now_ms),
+                ),
+            )
         out: list[dict[str, Any]] = []
         for m in raw_list or []:
             raw_str = m.decode("utf-8") if isinstance(m, bytes) else m
-            item = json.loads(raw_str)
-            if not isinstance(item, dict):
-                raise ValueError("redispatch payload 必须是 JSON object")
+            item = await decode_claimed_payload(
+                redis,
+                raw_str,
+                processing_key=self._processing_key(),
+                dead_letter_key=self._dead_letter_key(),
+                dead_letter_maxlen=self.DEAD_LETTER_MAXLEN,
+            )
+            if item is None:
+                continue
             item["__raw_payload"] = raw_str
             out.append(item)
         return out
-
-    # 向后兼容: pop_due 保留但走原子 claim + auto-ack;调用方若不再需要
-    # ack 语义(processing 追踪)可继续用,但会丢失崩溃恢复保护。
-    # 新调用请优先使用 ``claim_due`` + ``ack`` / ``requeue``。
-    async def pop_due(self, limit: int = 50) -> list[dict[str, Any]]:
-        """兼容旧签名:等价于 ``claim_due`` 后立即 ack 所有条目。
-
-        新代码请改用 ``claim_due`` + ``ack``/``requeue``,以获得崩溃恢复保护。
-        """
-        due = await self.claim_due(limit=limit)
-        for item in due:
-            raw = item.pop("__raw_payload", None)
-            if raw:
-                await self.ack(raw)
-        return due
 
     async def ack(self, raw_payload: str) -> None:
         """处理成功 -> 从 processing hash 移除。"""
@@ -269,14 +266,10 @@ class RedispatchService:
         redis = await get_redis_client()
         now_ms = int(time.time() * 1000)
         threshold_ms = now_ms - self._processing_timeout_sec * 1000
-        try:
-            entries = await cast(
-                Awaitable[dict[bytes | str, bytes | str]],
-                redis.hgetall(self._processing_key()),
-            )
-        except Exception as exc:
-            logger.warning(f"redispatch sweep hgetall 失败: {exc}")
-            return 0
+        entries = await cast(
+            Awaitable[dict[bytes | str, bytes | str]],
+            redis.hgetall(self._processing_key()),
+        )
         if not entries:
             return 0
         requeued = 0

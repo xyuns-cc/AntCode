@@ -1,10 +1,22 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
 import { Modal, Form, Input, Tag, Space, Typography, App } from 'antd'
-import { runtimeService } from '@/services/runtimes'
+import {
+  RUNTIME_DESCRIPTION_MAX_BYTES,
+  RUNTIME_KEY_MAX_BYTES,
+  runtimeService,
+  validateRuntimeMetadata,
+} from '@/services/runtimes'
 import type { EditRuntimeEnvModalProps } from '../types'
 
 const { Text } = Typography
+
+const metadataByteRule = (field: 'key' | 'description') => ({
+  validator: (_rule: unknown, value?: string) => {
+    validateRuntimeMetadata({ [field]: value })
+    return Promise.resolve()
+  },
+})
 
 const EditRuntimeEnvModal: React.FC<EditRuntimeEnvModalProps> = ({
   open,
@@ -20,7 +32,7 @@ const EditRuntimeEnvModal: React.FC<EditRuntimeEnvModalProps> = ({
     if (open && env) {
       form.setFieldsValue({
         key: env.key || '',
-        description: '',
+        description: env.description || '',
       })
     }
   }, [open, env, form])
@@ -61,11 +73,17 @@ const EditRuntimeEnvModal: React.FC<EditRuntimeEnvModalProps> = ({
         <Form.Item
           label="环境标识"
           name="key"
-          help="环境的别名或标识"
+          help={`环境的别名或标识，最多 ${RUNTIME_KEY_MAX_BYTES} UTF-8 字节`}
+          rules={[metadataByteRule('key')]}
         >
           <Input placeholder="输入标识，留空则清除标识" allowClear />
         </Form.Item>
-        <Form.Item label="描述" name="description" help="环境描述信息">
+        <Form.Item
+          label="描述"
+          name="description"
+          help={`环境描述信息，最多 ${RUNTIME_DESCRIPTION_MAX_BYTES} UTF-8 字节`}
+          rules={[metadataByteRule('description')]}
+        >
           <Input.TextArea placeholder="输入环境描述" rows={3} allowClear />
         </Form.Item>
         {env && (

@@ -1,7 +1,4 @@
-"""调度事件循环
-
-从 Redis Streams 消费调度事件并驱动 Master 调度器更新。
-"""
+"""从 Redis Streams 消费调度事件并驱动 Master 调度器更新。"""
 
 from __future__ import annotations
 
@@ -17,12 +14,18 @@ from antcode_core.application.services.scheduler.outbox_service import (
     scheduler_outbox_service,
 )
 from antcode_core.common.config import settings
-from antcode_core.common.utils.serialization import to_json
+from antcode_core.common.serialization import to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
+from antcode_core.infrastructure.redis.stream_client import StreamClient, StreamMessage
 from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
-from antcode_core.infrastructure.redis.streams import StreamClient
 from loguru import logger
+
+from antcode_master.control.scheduler_authority import SchedulerAuthorityLost
+from antcode_master.control.scheduler_event_handlers import dispatch_special_event
+from antcode_master.control.scheduler_task_events import dispatch_task_event
+from antcode_master.control.trigger_idempotency import TriggerDeferred
+from antcode_master.leader import ensure_leader
 
 
 # P1-19: 死信队列 stream key。达阈值的事件先写这里再 ACK；写失败不 ACK。
@@ -39,13 +42,14 @@ class OutboxClaimBusy(RuntimeError):
     """另一个 Master 正在处理同一 outbox_id；消息必须保留 PEL。"""
 
 
+class LeaderAuthorityLost(RuntimeError):
+    """当前 Master 已失去 Redis 权威 Leader 身份。"""
+
+
 class SchedulerEventLoop:
     """调度事件循环"""
 
-    # R1-P0-3 (审查报告)：失败事件不 ACK 永不重读，PEL 无限膨胀；且原
-    # consumer 名带 os.getpid() 重启即变，旧 PEL 永远读不回。
     # - 死信阈值 = 一条消息最多被投递多少次仍处理失败，之后 ACK 进死信
-    # - pending_check 周期 = 主循环空闲时读自己 PEL 兜底重试
     # - autoclaim min_idle = 认领其他 consumer 悬挂消息的阈值
     DLQ_DELIVERY_THRESHOLD = 5
     PENDING_CHECK_INTERVAL = 30.0
@@ -53,10 +57,7 @@ class SchedulerEventLoop:
 
     def __init__(
         self,
-        # P2-06: block_ms 从 3000 下调到 1000 —— XREADGROUP 处于 block 时
-        # asyncio.CancelledError 需等 Redis 端 block 到期才返回，多个 loop
-        # gather 停机时 block 越长 shutdown 拖延越严重。1s 已足够摊薄空转
-        # 频次；关停时最坏多等 1s。
+        # 1s Redis block 限制取消时的最坏停机延迟。
         block_ms: int = 1000,
         batch_size: int = 50,
         idle_sleep: float = 1.0,
@@ -68,13 +69,10 @@ class SchedulerEventLoop:
         self._task: asyncio.Task | None = None
         self._stream = settings.scheduler_event_stream
         self._group = settings.SCHEDULER_EVENT_GROUP
-        # R1-P0-3: 固定 consumer 名（hostname+pid 已能区分多副本；重启后 pid
-        # 会变，靠 XAUTOCLAIM 认领旧 PEL）
         self._consumer = f"{socket.gethostname()}-{os.getpid()}"
         self._stream_client = StreamClient()
-        # T6-T2: delivery counter 走 XPENDING 权威源；_deliveries 已废弃。
-        self._deliveries: dict[str, int] = {}
         self._last_pending_check = 0.0
+        self._autoclaim_cursor = "0-0"
 
     async def start(self) -> None:
         """启动事件循环"""
@@ -98,118 +96,116 @@ class SchedulerEventLoop:
         logger.info("调度事件循环已停止")
 
     async def _run_loop(self) -> None:
-        """事件循环主逻辑。
-
-        R1-P0-3: 补上 pending 重读 + XAUTOCLAIM + 失败重试计数进死信，
-        堵住"master crash 或事件处理抛错后批次事件永久丢失"这条链。
-        """
-        import time as _time
-
+        """仅由 Redis 权威 Leader 消费调度事件。"""
         while self._running:
             try:
-                # T6-T2: 去掉 leader gate —— scheduler_event 也走 consumer
-                # group（虽然生产者只有 leader，消费端可以多实例分担）。
-                # PEL deliver_count 走 XPENDING 权威源（下方 _handle_message
-                # 里读），不再依赖进程内 _deliveries 本地计数。
-
-                await self._stream_client.ensure_group(self._stream, self._group)
-
-                messages = await self._stream_client.xreadgroup(
-                    stream_key=self._stream,
-                    group_name=self._group,
-                    consumer_name=self._consumer,
-                    count=self.batch_size,
-                    block_ms=self.block_ms,
-                )
-
-                # 无新消息：读 pending + XAUTOCLAIM 认领旧 consumer PEL
-                if not messages:
-                    now = _time.time()
-                    if now - self._last_pending_check >= self.PENDING_CHECK_INTERVAL:
-                        self._last_pending_check = now
-                        try:
-                            messages = await self._stream_client.xreadgroup(
-                                stream_key=self._stream,
-                                group_name=self._group,
-                                consumer_name=self._consumer,
-                                count=self.batch_size,
-                                block_ms=1,
-                                read_pending=True,
-                            )
-                        except TypeError:
-                            # 兼容旧签名（不支持 read_pending 参数）
-                            messages = []
-                        if not messages:
-                            try:
-                                next_id = "0-0"
-                                claimed_total = 0
-                                for _ in range(3):
-                                    next_id, claimed, _ = await self._stream_client.xautoclaim(
-                                        self._stream,
-                                        group_name=self._group,
-                                        consumer_name=self._consumer,
-                                        min_idle_time_ms=self.AUTOCLAIM_MIN_IDLE_MS,
-                                        start_id=next_id,
-                                        count=self.batch_size,
-                                    )
-                                    claimed_total += len(claimed)
-                                    if not next_id or next_id == "0-0" or len(claimed) < self.batch_size:
-                                        break
-                                if claimed_total:
-                                    logger.warning(
-                                        "scheduler_event_loop XAUTOCLAIM 认领旧 PEL {} 条",
-                                        claimed_total,
-                                    )
-                            except Exception as exc:
-                                logger.debug(f"XAUTOCLAIM 失败: {exc}")
-                    if not messages:
-                        await asyncio.sleep(self.idle_sleep)
-                        continue
-
-                ack_ids: list[str] = []
-                for message in messages:
-                    try:
-                        await self._handle_message(message.data)
-                        ack_ids.append(message.msg_id)
-                    except OutboxClaimBusy:
-                        logger.debug(
-                            "outbox claim 正由其他 Master 持有，保留 PEL: msg_id={}",
-                            message.msg_id,
-                        )
-                    except Exception as e:
-                        # R1-P0-3: 失败不 ACK 会永远卡在 PEL；累计投递次数
-                        # 超阈值后 ACK 进死信，避免 PEL 无限膨胀。
-                        # T6-T2: 计数改用 XPENDING deliver_count（Redis 权威源），
-                        # 不再走进程内 _deliveries dict —— 多 master 分片后本地
-                        # 计数会漂，同一条消息被两个实例累加导致误进死信。
-                        try:
-                            count = await self._xpending_deliver_count(message.msg_id)
-                        except Exception as pend_exc:
-                            logger.debug(f"XPENDING 查询失败，退回 1: {pend_exc}")
-                            count = 1
-                        if count >= self.DLQ_DELIVERY_THRESHOLD:
-                            if await self._dead_letter_failed_message(message, e, count):
-                                ack_ids.append(message.msg_id)
-                        else:
-                            logger.warning(f"处理调度事件失败 (第 {count} 次): msg_id={message.msg_id} err={e}")
-
-                if ack_ids:
-                    await self._stream_client.xack(self._stream, ack_ids, self._group)
-                    try:
-                        client = await self._stream_client._get_client()
-                        await trim_acknowledged_stream(
-                            client,
-                            self._stream,
-                            self._group,
-                        )
-                    except Exception:
-                        logger.exception("调度事件 Stream ACK 后裁剪失败")
-
+                await self._run_iteration()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"调度事件循环异常: {e}")
                 await asyncio.sleep(self.idle_sleep)
+
+    async def _run_iteration(self) -> None:
+        if not await ensure_leader():
+            await asyncio.sleep(self.idle_sleep)
+            return
+        await self._stream_client.ensure_group(self._stream, self._group)
+        messages = await self._read_messages()
+        if not messages:
+            await asyncio.sleep(self.idle_sleep)
+            return
+        await self._process_messages(messages)
+
+    async def _read_messages(self) -> list[StreamMessage]:
+        if time.monotonic() - self._last_pending_check >= self.PENDING_CHECK_INTERVAL:
+            messages = await self._recover_pending_messages()
+            self._last_pending_check = time.monotonic()
+            if messages:
+                return messages
+        return await self._stream_client.xreadgroup(
+            stream_key=self._stream,
+            group_name=self._group,
+            consumer_name=self._consumer,
+            count=self.batch_size,
+            block_ms=self.block_ms,
+        )
+
+    async def _recover_pending_messages(self) -> list[StreamMessage]:
+        own_pending = await self._stream_client.xreadgroup(
+            stream_key=self._stream,
+            group_name=self._group,
+            consumer_name=self._consumer,
+            count=self.batch_size,
+            block_ms=1,
+            read_pending=True,
+        )
+        next_id, claimed, _deleted = await self._stream_client.xautoclaim(
+            self._stream,
+            group_name=self._group,
+            consumer_name=self._consumer,
+            min_idle_time_ms=self.AUTOCLAIM_MIN_IDLE_MS,
+            start_id=self._autoclaim_cursor,
+            count=self.batch_size,
+        )
+        self._autoclaim_cursor = next_id or "0-0"
+        if claimed:
+            logger.warning("scheduler_event_loop XAUTOCLAIM 认领旧 PEL {} 条", len(claimed))
+        by_id = {message.msg_id: message for message in own_pending}
+        by_id.update({message.msg_id: message for message in claimed})
+        return list(by_id.values())
+
+    async def _process_messages(self, messages: list[StreamMessage]) -> None:
+        ack_ids: list[str] = []
+        for message in messages:
+            if not await ensure_leader():
+                return
+            should_ack = await self._process_message(message)
+            if not await ensure_leader():
+                return
+            if should_ack:
+                ack_ids.append(message.msg_id)
+        if not ack_ids or not await ensure_leader():
+            return
+        await self._ack_messages(ack_ids)
+
+    async def _process_message(self, message: StreamMessage) -> bool:
+        try:
+            await self._handle_message(message.data)
+            return True
+        except OutboxClaimBusy:
+            logger.debug(
+                "outbox claim 正由其他 Master 持有，保留 PEL: msg_id={}",
+                message.msg_id,
+            )
+            return False
+        except TriggerDeferred as exc:
+            logger.info("task_trigger 暂不可接纳，保留 PEL: msg_id={} err={}", message.msg_id, exc)
+            return False
+        except (LeaderAuthorityLost, SchedulerAuthorityLost):
+            logger.warning("处理期间失去调度 authority，保留 PEL: msg_id={}", message.msg_id)
+            return False
+        except Exception as exc:
+            return await self._handle_processing_failure(message, exc)
+
+    async def _handle_processing_failure(self, message: StreamMessage, error: Exception) -> bool:
+        try:
+            count = await self._xpending_deliver_count(message.msg_id)
+        except Exception as exc:
+            logger.warning("XPENDING 查询失败，保留 PEL: msg_id={} err={}", message.msg_id, exc)
+            return False
+        if count >= self.DLQ_DELIVERY_THRESHOLD:
+            return await self._dead_letter_failed_message(message, error, count)
+        logger.warning("处理调度事件失败 (第 {} 次): msg_id={} err={}", count, message.msg_id, error)
+        return False
+
+    async def _ack_messages(self, ack_ids: list[str]) -> None:
+        await self._stream_client.xack(self._stream, ack_ids, self._group)
+        try:
+            client = await self._stream_client._get_client()
+            await trim_acknowledged_stream(client, self._stream, self._group)
+        except Exception:
+            logger.exception("调度事件 Stream ACK 后裁剪失败")
 
     async def _write_to_dlq(
         self,
@@ -322,6 +318,8 @@ class SchedulerEventLoop:
 
         try:
             await self._dispatch_with_claim_heartbeat(data, outbox_id)
+            if not await ensure_leader():
+                raise LeaderAuthorityLost(outbox_id)
             await scheduler_outbox_service.complete_consumption(outbox_id, self._consumer)
         except BaseException:
             await scheduler_outbox_service.release_consumption(outbox_id, self._consumer)
@@ -351,6 +349,8 @@ class SchedulerEventLoop:
     async def _heartbeat_outbox_claim(self, outbox_id: str) -> None:
         while True:
             await asyncio.sleep(_OUTBOX_HEARTBEAT_SECONDS)
+            if not await ensure_leader():
+                raise LeaderAuthorityLost(outbox_id)
             await scheduler_outbox_service.heartbeat_consumption(outbox_id, self._consumer)
 
     async def _dispatch_message(self, data: dict) -> None:
@@ -358,93 +358,11 @@ class SchedulerEventLoop:
 
         event_type = str(data.get("event", ""))
 
-        if await self._dispatch_special_event(data, event_type):
+        if await dispatch_special_event(data, event_type):
             return
-
-        task_id_raw = data.get("task_id")
-        if not task_id_raw:
-            logger.warning(f"调度事件缺少 task_id 且非 batch_* 事件: {event_type}")
+        if await dispatch_task_event(data, event_type):
             return
-
-        try:
-            task_id = int(task_id_raw)
-        except (TypeError, ValueError):
-            logger.warning(f"调度事件 task_id 无效: {task_id_raw}")
-            return
-
-        from antcode_core.domain.models.task import Task
-
-        from antcode_master.control.scheduler_loop import scheduler_service
-
-        if event_type == "task_trigger":
-            # P1-DB-01: at-least-once 消费；outbox_id 作幂等键折叠重放。
-            await scheduler_service.trigger_task(task_id, idempotency_key=str(data.get("outbox_id") or "") or None)
-            return
-
-        if event_type != "task_changed":
-            logger.warning(f"未知调度事件类型: {event_type}")
-            return
-
-        task = await Task.get_or_none(id=task_id)
-        if not task or not task.is_active:
-            await scheduler_service.remove_task(task_id)
-            return
-
-        await scheduler_service.add_task(task)
-
-    async def _dispatch_special_event(self, data: dict, event_type: str) -> bool:
-        if event_type == "spider_storage_cleanup":
-            await self._cleanup_spider_storage(data)
-            return True
-        if event_type == "task_logs_purge":
-            await self._purge_task_logs(data)
-            return True
-        if not event_type.startswith("batch_"):
-            return False
-        batch_id = data.get("batch_id")
-        if not batch_id:
-            raise ValueError(f"批次事件缺 batch_id: {event_type}")
-        from antcode_core.application.services.crawl.batch_dispatcher_service import (
-            crawl_batch_dispatcher_service,
-        )
-
-        await crawl_batch_dispatcher_service.handle_batch_event(event_type, str(batch_id))
-        return True
-
-    @staticmethod
-    async def _cleanup_spider_storage(data: dict) -> None:
-        from antcode_core.application.services.crawl.spider_storage_cleanup import (
-            SpiderStorageCleanupService,
-        )
-        from antcode_core.infrastructure.redis.keys import RedisKeys
-
-        run_ids = data.get("run_ids")
-        project_id = str(data.get("project_id") or "")
-        if not isinstance(run_ids, list) or not all(isinstance(run_id, str) for run_id in run_ids):
-            raise ValueError("spider_storage_cleanup run_ids 格式非法")
-        redis = await get_redis_client()
-        cleaner = SpiderStorageCleanupService(redis, RedisKeys(namespace=redis_namespace()))
-        await cleaner.delete_runs(run_ids, project_id)
-
-    @staticmethod
-    async def _purge_task_logs(data: dict) -> None:
-        """P1-round6 5.2 durable cleanup: delete_project_cascade 事务后同步
-        purge_task_logs_for_runs 若崩溃, logs 变孤儿。改由 outbox 事件驱动:
-        事务内 enqueue task_logs_purge, 消费失败自动 requeue, 达上限进 DLQ。
-        purge_task_logs_for_runs 走 advisory lock 与 late writer 串行化, 天然
-        幂等 (在锁内校验 TaskRun 已删除, 重复消费只是重复 DELETE 无匹配行)。
-        """
-        from antcode_core.application.services.logs.task_log_run_guard import (
-            purge_task_logs_for_runs,
-        )
-
-        run_ids = data.get("run_ids")
-        if not isinstance(run_ids, list) or not all(isinstance(rid, str) for rid in run_ids):
-            raise ValueError("task_logs_purge run_ids 格式非法")
-        if not run_ids:
-            return
-        deleted = await purge_task_logs_for_runs(run_ids)
-        logger.info("outbox 驱动 task_logs_purge 完成: run_batch={} deleted={}", len(run_ids), deleted)
+        logger.warning(f"未知调度事件类型: {event_type}")
 
 
 scheduler_event_loop = SchedulerEventLoop()

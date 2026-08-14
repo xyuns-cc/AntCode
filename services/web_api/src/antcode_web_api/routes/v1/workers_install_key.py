@@ -1,8 +1,9 @@
-"""Worker install-key 相关接口 (generate / register-by-key / redis-acl issue)。
+"""Worker install-key 管理与 Redis ACL 签发接口。
 
-P2 拆分自 workers.py: 3 个 handler + 8 个 helper + 1 个 exception:
+P2 拆分自 workers.py:
 - POST /workers/generate-install-key (generate_install_key)
-- POST /workers/register-by-key (register_worker_by_key)
+- GET /workers/install-keys (list_install_keys)
+- DELETE /workers/install-keys/{key_id} (revoke_install_key)
 - POST /workers/{worker_id}/redis-acl/issue (issue_worker_redis_acl)
 
 install_key 判定链 (source 提取 / 失败计数 / 来源封禁 / 事务消费) helper
@@ -21,7 +22,6 @@ report handler 与本模块 redis-acl 签发接口共用), 通过
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from ipaddress import ip_address, ip_network
@@ -33,15 +33,12 @@ from antcode_core.domain.models import WorkerInstallKey
 from antcode_core.domain.schemas.worker import (
     WorkerInstallKeyRequest,
     WorkerInstallKeyResponse,
-    WorkerRegisterByKeyRequest,
-    WorkerRegisterResponse,
 )
 from antcode_core.infrastructure.redis import (
     install_key_redis_digest,
     worker_install_key_block_key,
     worker_install_key_claim_key,
     worker_install_key_fail_counter_key,
-    worker_install_key_meta_key,
     worker_install_key_nonce_key,
     worker_install_source_block_key,
     worker_install_source_fail_counter_key,
@@ -50,11 +47,10 @@ from fastapi import Depends, HTTPException, Request, status
 from loguru import logger
 
 from antcode_web_api.response import BaseResponse, success
-from antcode_web_api.services.worker_installer import (
-    WorkerInstallCommandRequest,
-    WorkerInstallerConfigurationError,
-    build_worker_install_command,
-)
+from antcode_web_api.routes.v1 import workers_install_key_admin
+
+INSTALL_KEY_DEFAULT_PAGE_SIZE = 20
+INSTALL_KEY_MAX_PAGE_SIZE = 100
 
 
 def _workers_module():
@@ -224,58 +220,6 @@ async def _claim_install_key_source_once(
     return True, "ok"
 
 
-class _InstallKeyClaimConflict(Exception):
-    """安装 Key 在事务内已被其他请求消费或已经过期。"""
-
-
-async def _create_worker_from_install_key(request, install_key, request_source: str):
-    """在单个数据库事务中消费安装 Key 并创建 Worker。"""
-    import secrets
-
-    from antcode_core.domain.models import Worker, WorkerInstallKey
-    from tortoise.transactions import in_transaction
-
-    placeholder_public_id = f"pending:{secrets.token_hex(8)}"
-    api_key = secrets.token_hex(16)
-    secret_key = secrets.token_hex(32)
-
-    async with in_transaction("default") as connection:
-        claimed = await WorkerInstallKey.cas_claim_pending(
-            request.key,
-            placeholder_public_id,
-            allowed_source=(install_key.allowed_source or request_source),
-            using_db=connection,
-        )
-        if not claimed:
-            raise _InstallKeyClaimConflict
-
-        worker = Worker(
-            name=request.name,
-            host=request.host,
-            port=request.port,
-            region=request.region or "",
-            status="connecting",
-            created_by=install_key.created_by,
-            transport_mode=request.transport_mode,
-        )
-        # 走 workers namespace lookup 让测试 patch_object(workers_route, "store_api_key") 命中
-        _workers = _workers_module()
-        _workers.store_api_key(worker, api_key)
-        _workers.store_secret_key(worker, secret_key)
-        await worker.save(using_db=connection)
-
-        updated = await WorkerInstallKey.finalize_claim(
-            request.key,
-            placeholder_public_id,
-            worker.public_id,
-            using_db=connection,
-        )
-        if updated != 1:
-            raise RuntimeError("安装 Key 真实 Worker ID 回写失败，事务已回滚")
-
-    return worker, api_key, secret_key
-
-
 async def _is_registration_acknowledged(worker_id: str) -> bool:
     return await WorkerInstallKey.filter(
         status="used",
@@ -289,170 +233,20 @@ async def generate_install_key(
     http_request: Request,
     current_user: TokenData,
 ):
-    """生成 Worker 安装 Key
-
-    生成一次性安装命令，复制到目标机器执行即可完成 Worker 注册。
-    类似 nezha 探针的工作模式。
-    """
-    from antcode_core.domain.models import User, WorkerInstallKey
-
-    _workers = _workers_module()
-
-    _ = http_request
-
-    # 检查管理员权限
-    user = await User.get_or_none(id=current_user.user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-
-    # 验证操作系统类型
-    os_type = request.os_type.lower()
-    if os_type not in ("linux", "macos", "windows"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="操作系统类型必须是 linux、macos 或 windows",
-        )
-
-    allowed_source = (request.allowed_source or "").strip()
-
-    try:
-        install_config = _workers.load_worker_install_config(settings)
-    except WorkerInstallerConfigurationError as exc:
-        logger.exception("Worker 安装分发配置无效")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Worker 安装分发未正确配置",
-        ) from exc
-
-    # 创建安装 Key
-    install_key = await WorkerInstallKey.create_install_key(
-        os_type=os_type,
-        created_by=current_user.user_id,
-        allowed_source=allowed_source or None,
-    )
-    # P2-11：明文只在生成时返回给用户一次，DB 只存 hash。
-    plaintext_key: str = getattr(install_key, "plaintext_key", "")
-    if not plaintext_key:
-        raise HTTPException(status_code=500, detail="生成安装 Key 失败：明文缺失")
-
-    redis = await _workers.get_redis_client()
-    # 用明文构造 meta_key，与查询侧一致（客户端上报的也是明文）
-    meta_key = worker_install_key_meta_key(plaintext_key)
-    now_ts = int(time.time())
-    ttl_seconds = max(int(install_key.expires_at.timestamp()) - now_ts, 1)
-    meta_payload = {
-        "allowed_source": allowed_source,
-        "created_at": now_ts,
-    }
-    await redis.set(meta_key, json.dumps(meta_payload), ex=ttl_seconds)
-
-    install_command = build_worker_install_command(
-        WorkerInstallCommandRequest(os_type=os_type, install_key=plaintext_key),
-        install_config,
-    )
-
-    return success(
-        WorkerInstallKeyResponse(
-            key=plaintext_key,
-            os_type=os_type,
-            allowed_source=allowed_source or None,
-            install_command=install_command,
-            expires_at=install_key.expires_at,
-        ),
-        message="安装命令已生成，请复制到目标机器执行",
+    return await workers_install_key_admin.generate_install_key(
+        request,
+        http_request,
+        current_user,
+        workers_module=_workers_module(),
     )
 
 
-async def register_worker_by_key(
-    request: WorkerRegisterByKeyRequest,
-    http_request: Request,
-):
-    """Worker 使用安装 Key 注册
+async def list_install_keys(page_number: int, page_size: int, current_user: TokenData):
+    return await workers_install_key_admin.list_install_keys(page_number, page_size, current_user)
 
-    Worker 启动时通过环境变量获取 Key，调用此接口完成注册。
-    """
-    from antcode_core.domain.models import WorkerInstallKey
 
-    _workers = _workers_module()
-
-    if not request.client_nonce or len(request.client_nonce.strip()) < 8:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 client_nonce")
-
-    request_source = _workers._extract_request_source(http_request)
-
-    is_blocked, block_ttl = await _workers._check_install_key_blocked(request.key, request_source)
-    if is_blocked:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"注册尝试过于频繁，请 {block_ttl} 秒后重试",
-        )
-
-    # 查找并验证 Key
-    # P2-11：DB 只存 SHA-256(明文)，查找时对明文再 hash 后按 hash 查询；
-    # 应用层再补一次恒定时间比对（用 hash 值），仍保留旁路侧防护。
-    install_key = await WorkerInstallKey.find_by_plaintext(request.key)
-    if install_key and not WorkerInstallKey.matches_plaintext(install_key.key, request.key):
-        # 极端情况下:ORM 命中但常量时间比对不一致(理论上不会发生),按未命中处理。
-        install_key = None
-    if not install_key:
-        await _workers._record_install_key_failed_attempt(request.key, request_source)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="安装 Key 不存在")
-
-    if not install_key.is_valid():
-        await _workers._record_install_key_failed_attempt(request.key, request_source)
-        if install_key.status == "used":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="此安装 Key 已被使用",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="安装 Key 已过期",
-        )
-
-    allowed_source = (install_key.allowed_source or "").strip()
-    if allowed_source and not _workers._is_source_match(request_source, allowed_source):
-        await _workers._record_install_key_failed_attempt(request.key, request_source)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="来源不在安装 Key 允许范围内",
-        )
-
-    claim_ok, claim_message = await _workers._claim_install_key_source_once(
-        key=request.key,
-        source=request_source,
-        request_timestamp=request.client_timestamp,
-        request_nonce=request.client_nonce,
-    )
-    if not claim_ok:
-        await _workers._record_install_key_failed_attempt(request.key, request_source)
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=claim_message)
-
-    try:
-        worker, api_key, secret_key = await _workers._create_worker_from_install_key(
-            request,
-            install_key,
-            request_source,
-        )
-    except _workers._InstallKeyClaimConflict:
-        await _workers._record_install_key_failed_attempt(request.key, request_source)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="此安装 Key 已被使用或已过期（并发消费）",
-        )
-
-    await _workers._clear_install_key_fail_counter(request.key, request_source)
-
-    logger.info(f"Worker 通过安装 Key 注册成功: {worker.name} ({worker.public_id})")
-
-    return success(
-        WorkerRegisterResponse(
-            worker_id=worker.public_id,
-            api_key=api_key,
-            secret_key=secret_key,
-        ),
-        message="Worker 注册成功",
-    )
+async def revoke_install_key(key_id: str, current_user: TokenData):
+    return await workers_install_key_admin.revoke_install_key(key_id, current_user)
 
 
 async def issue_worker_redis_acl(worker_id: str, auth_context: dict):
@@ -491,7 +285,7 @@ async def issue_worker_redis_acl(worker_id: str, auth_context: dict):
 
 
 def register_install_key_routes(router, verify_worker_credential_headers) -> None:
-    """挂载 install_key 3 handler; verify_worker_credential_headers 由 workers.py 注入。"""
+    """挂载 install_key 管理与 ACL 签发接口。"""
 
     @router.post(
         "/{worker_id}/redis-acl/issue",
@@ -517,32 +311,37 @@ def register_install_key_routes(router, verify_worker_credential_headers) -> Non
     ):
         return await generate_install_key(request, http_request, current_user)
 
-    @router.post(
-        "/register-by-key",
-        response_model=BaseResponse[WorkerRegisterResponse],
-        summary="使用 Key 注册 Worker",
-        description="Worker 使用安装 Key 进行注册（无需认证）",
-    )
-    async def _register_worker_by_key(request: WorkerRegisterByKeyRequest, http_request: Request):
-        return await register_worker_by_key(request, http_request)
+    @router.get("/install-keys")
+    async def _list_install_keys(
+        page_number: int = 1,
+        page_size: int = INSTALL_KEY_DEFAULT_PAGE_SIZE,
+        current_user: TokenData = Depends(get_current_user),
+    ):
+        if page_number < 1 or page_size < 1 or page_size > INSTALL_KEY_MAX_PAGE_SIZE:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="分页参数无效")
+        return await list_install_keys(page_number, page_size, current_user)
+
+    @router.delete("/install-keys/{key_id}")
+    async def _revoke_install_key(
+        key_id: str,
+        current_user: TokenData = Depends(get_current_user),
+    ):
+        return await revoke_install_key(key_id, current_user)
 
 
 __all__ = [
     "WorkerInstallKeyRequest",
     "WorkerInstallKeyResponse",
-    "WorkerRegisterByKeyRequest",
-    "WorkerRegisterResponse",
-    "_InstallKeyClaimConflict",
     "_check_install_key_blocked",
     "_claim_install_key_source_once",
     "_clear_install_key_fail_counter",
-    "_create_worker_from_install_key",
     "_extract_request_source",
     "_is_registration_acknowledged",
     "_is_source_match",
     "_record_install_key_failed_attempt",
     "generate_install_key",
     "issue_worker_redis_acl",
+    "list_install_keys",
     "register_install_key_routes",
-    "register_worker_by_key",
+    "revoke_install_key",
 ]

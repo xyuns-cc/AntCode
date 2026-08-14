@@ -24,11 +24,20 @@ def _validate_capability_names(capabilities: Mapping[Any, Any]) -> None:
         raise ValueError("capability names must be non-empty strings within the size limit")
 
 
-def _require_standard_json(value: object) -> None:
+def _encode_capability_value(value: object) -> str:
     try:
-        json.dumps(value, ensure_ascii=False, allow_nan=False)
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("capability value must be finite standard JSON") from exc
+    if len(encoded.encode("utf-8")) > MAX_CAPABILITY_VALUE_BYTES:
+        raise ValueError("capability value exceeds the size limit")
+    return encoded
 
 
 def validate_capabilities(capabilities: object) -> dict[str, Any]:
@@ -44,7 +53,7 @@ def validate_capabilities(capabilities: object) -> dict[str, Any]:
     ):
         raise ValueError("task_types capability is invalid")
     for value in capabilities.values():
-        _require_standard_json(value)
+        _encode_capability_value(value)
     return capabilities
 
 
@@ -52,13 +61,7 @@ def encode_capabilities(capabilities: object) -> dict[str, str]:
     if capabilities is None:
         return {}
     validated = validate_capabilities(capabilities)
-    encoded = {
-        name: json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
-        for name, value in validated.items()
-    }
-    if any(len(value.encode("utf-8")) > MAX_CAPABILITY_VALUE_BYTES for value in encoded.values()):
-        raise ValueError("capability value exceeds the size limit")
-    return encoded
+    return {name: _encode_capability_value(value) for name, value in validated.items()}
 
 
 def decode_capabilities(encoded: Mapping[str, str]) -> dict[str, Any]:

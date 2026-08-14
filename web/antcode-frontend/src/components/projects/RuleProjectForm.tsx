@@ -164,7 +164,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
   onDataChange,
   onSubmit,
   loading: _loading = false,
-  isEdit: _isEdit = false,
+  isEdit = false,
   onValidationChange,
   onRef
 }) => {
@@ -347,9 +347,9 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
         pagination_config: JSON.stringify(currentPaginationConfig),
         proxy_config: shouldPersistProxyConfig ? JSON.stringify(proxyConfig) : undefined,
         anti_spider: shouldPersistAntiSpider ? JSON.stringify(antiSpiderConfig) : undefined,
-        // S5 / S3b：只在实际启用时下发
+        // 编辑时显式保存关闭状态，避免后端保留旧值。
         dedup_config: shouldPersistDedup ? JSON.stringify(dedupConfig) : undefined,
-        resume_enabled: resumeEnabled ? true : undefined,
+        resume_enabled: isEdit || resumeEnabled ? resumeEnabled : undefined,
       }
     },
     [
@@ -357,6 +357,7 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       callbackType,
       detailRules,
       initialData,
+      isEdit,
       listRules,
       paginationConfig,
       proxyConfig,
@@ -509,9 +510,6 @@ const RuleProjectForm: React.FC<RuleProjectFormProps> = ({
       paginationConfig: newPaginationConfig
     })
   }
-
-
-
   const tabItems = [
     {
       key: 'basic',

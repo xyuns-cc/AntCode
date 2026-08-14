@@ -5,6 +5,7 @@ import { FileIcon } from '@/utils/fileIcons'
 import type { ProjectCreateRequest } from '@/types'
 import { repositoryService } from '@/services/repositories'
 import type { GitRepository } from '@/types/repository'
+import showNotification from '@/utils/notification'
 
 const { Title, Text } = Typography
 const { TextArea } = Input
@@ -15,7 +16,7 @@ const LANGUAGE_OPTIONS = [
   { value: 'javascript', label: 'JavaScript', extension: '.js', color: '#f7df1e' },
   { value: 'typescript', label: 'TypeScript', extension: '.ts', color: '#3178c6' },
   { value: 'java', label: 'Java', extension: '.java', color: '#b07219' },
-  { value: 'go', label: 'Go', extension: '.go', color: '#00add8' }
+  { value: 'go', label: 'Go', extension: '.go', color: '#00add8' },
 ]
 
 interface CodeProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags'> {
@@ -34,12 +35,18 @@ interface CodeProjectFormProps {
 
 const normalizeTags = (tags?: string | string[]): string[] => {
   if (Array.isArray(tags)) return tags
-  return (tags || '').split(',').map((tag) => tag.trim()).filter(Boolean)
+  return (tags || '')
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
 }
 
 const normalizeList = (value?: string[] | string): string[] => {
   if (Array.isArray(value)) return value
-  return (value || '').split(',').map((item) => item.trim()).filter(Boolean)
+  return (value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
@@ -47,7 +54,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   onDataChange,
   onSubmit,
   onValidationChange,
-  onRef
+  onRef,
 }) => {
   const [form] = Form.useForm<ProjectCreateRequest>()
   const [dependencies, setDependencies] = useState<string[]>(initialData.dependencies || [])
@@ -75,19 +82,27 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
   }, [isValid, onValidationChange])
 
   useEffect(() => {
-    repositoryService.list().then(setRepositories)
+    repositoryService
+      .list()
+      .then(setRepositories)
+      .catch((error: Error) => {
+        showNotification('error', '加载代码仓库失败', error.message)
+      })
   }, [])
 
   useEffect(() => {
     onRef?.({ submit: () => form.submit() })
   }, [form, onRef])
 
-  const emitDataChange = useCallback((values: ProjectCreateRequest, deps = dependencies) => {
-    onDataChange?.({
-      ...values,
-      dependencies: deps
-    })
-  }, [dependencies, onDataChange])
+  const emitDataChange = useCallback(
+    (values: ProjectCreateRequest, deps = dependencies) => {
+      onDataChange?.({
+        ...values,
+        dependencies: deps,
+      })
+    },
+    [dependencies, onDataChange]
+  )
 
   const handleAddDependency = () => {
     const dependency = newDependency.trim()
@@ -110,13 +125,13 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
       type: 'code',
       include_paths: normalizeList(values.include_paths),
       dependencies,
-      tags: normalizeTags(values.tags)
+      tags: normalizeTags(values.tags),
     })
   }
 
   const initialValues = {
     ...initialData,
-    language: initialData.language || 'python'
+    language: initialData.language || 'python',
   }
 
   return (
@@ -139,12 +154,20 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
         <Card title="基本信息" size="small" style={{ marginBottom: 16 }}>
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item name="name" label="项目名称" rules={[{ required: true, message: '请输入项目名称' }]}>
+              <Form.Item
+                name="name"
+                label="项目名称"
+                rules={[{ required: true, message: '请输入项目名称' }]}
+              >
                 <Input placeholder="请输入项目名称" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="language" label="编程语言" rules={[{ required: true, message: '请选择编程语言' }]}>
+              <Form.Item
+                name="language"
+                label="编程语言"
+                rules={[{ required: true, message: '请选择编程语言' }]}
+              >
                 <Select showSearch placeholder="选择编程语言" optionFilterProp="children">
                   {LANGUAGE_OPTIONS.map((option) => (
                     <Option key={option.value} value={option.value}>
@@ -169,13 +192,19 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
         </Card>
 
         <Card title="Git 来源" size="small" style={{ marginBottom: 16 }}>
-          <Form.Item name="repository_id" label="代码仓库" rules={[{ required: true, message: '请选择代码仓库' }]}>
+          <Form.Item
+            name="repository_id"
+            label="代码仓库"
+            rules={[{ required: true, message: '请选择代码仓库' }]}
+          >
             <Select showSearch placeholder="选择已管理仓库" optionFilterProp="label">
               {repositories.map((repository) => (
                 <Option key={repository.id} value={repository.id} label={repository.name}>
                   <Space direction="vertical" size={0}>
                     <span>{repository.name}</span>
-                    <Text type="secondary" style={{ fontSize: 12 }}>{repository.url}</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {repository.url}
+                    </Text>
                   </Space>
                 </Option>
               ))}
@@ -189,7 +218,11 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="subdir" label="项目子目录" rules={[{ required: true, message: '请输入仓库内项目子目录' }]}>
+              <Form.Item
+                name="subdir"
+                label="项目子目录"
+                rules={[{ required: true, message: '请输入仓库内项目子目录' }]}
+              >
                 <Input placeholder="spiders/news" />
               </Form.Item>
             </Col>
@@ -217,19 +250,34 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
               onChange={(event) => setNewDependency(event.target.value)}
               onPressEnter={handleAddDependency}
             />
-            <Button type="primary" icon={<PlusOutlined />} onClick={handleAddDependency} disabled={!newDependency.trim()}>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={handleAddDependency}
+              disabled={!newDependency.trim()}
+            >
               添加
             </Button>
           </Space.Compact>
 
           {dependencies.map((dependency) => (
-            <Tag key={dependency} closable onClose={() => handleRemoveDependency(dependency)} style={{ marginBottom: 8 }}>
+            <Tag
+              key={dependency}
+              closable
+              onClose={() => handleRemoveDependency(dependency)}
+              style={{ marginBottom: 8 }}
+            >
               {dependency}
             </Tag>
           ))}
 
           <Form.Item name="documentation" label="代码文档" style={{ marginTop: 12 }}>
-            <TextArea rows={8} placeholder="请添加代码的使用说明、API文档等..." maxLength={2000} showCount />
+            <TextArea
+              rows={8}
+              placeholder="请添加代码的使用说明、API文档等..."
+              maxLength={2000}
+              showCount
+            />
           </Form.Item>
         </Card>
       </Form>

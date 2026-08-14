@@ -8,10 +8,11 @@ from antcode_master.ingester.worker_registration_cleanup_loop import WorkerRegis
 async def test_registration_cleanup_tick_calls_service(monkeypatch) -> None:
     calls = 0
 
-    async def cleanup_expired():
+    async def cleanup_expired(*, run_settler):
+        assert callable(run_settler)
         nonlocal calls
         calls += 1
-        return SimpleNamespace(expired_registrations=0, deleted_workers=0)
+        return SimpleNamespace(expired_registrations=0, deleted_workers=0, expired_pending_keys=0)
 
     monkeypatch.setattr(
         "antcode_master.ingester.worker_registration_cleanup_loop.registration_cleanup_service.cleanup_expired",

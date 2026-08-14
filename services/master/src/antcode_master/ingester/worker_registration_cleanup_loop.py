@@ -10,6 +10,9 @@ from antcode_core.application.services.workers.registration_cleanup_service impo
 )
 from loguru import logger
 
+from antcode_master.control.provisional_worker_cleanup import (
+    settle_expired_provisional_worker_runs,
+)
 from antcode_master.leader import ensure_leader
 
 REGISTRATION_CLEANUP_INTERVAL_SECONDS = 60.0
@@ -49,12 +52,15 @@ class WorkerRegistrationCleanupLoop:
             await asyncio.sleep(self._interval_seconds)
 
     async def _tick(self) -> None:
-        result = await registration_cleanup_service.cleanup_expired()
-        if result.expired_registrations:
+        result = await registration_cleanup_service.cleanup_expired(
+            run_settler=settle_expired_provisional_worker_runs,
+        )
+        if result.expired_registrations or result.expired_pending_keys:
             logger.info(
-                "Worker 注册清理完成: registrations={} workers={}",
+                "Worker 注册清理完成: registrations={} workers={} pending_keys={}",
                 result.expired_registrations,
                 result.deleted_workers,
+                result.expired_pending_keys,
             )
 
 

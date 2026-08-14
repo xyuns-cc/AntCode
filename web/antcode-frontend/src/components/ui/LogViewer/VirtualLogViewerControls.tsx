@@ -9,7 +9,7 @@ import type { VirtualizedListRef, VirtualLogStats } from './virtualLogTypes'
 const { Search } = Input
 
 interface HeaderProps {
-  listRef: RefObject<VirtualizedListRef>
+  listRef: RefObject<VirtualizedListRef | null>
   onClear?: () => void
   showFiltered: boolean
   stats: VirtualLogStats

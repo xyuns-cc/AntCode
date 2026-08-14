@@ -13,6 +13,7 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_worker.app.shutdown import shutdown_components
 from antcode_worker.transport.base import WorkerState
 
 MILLISECONDS_PER_SECOND = 1000
@@ -110,6 +111,9 @@ class Lifecycle:
         lease_interval = await self._initial_lease_renew(container)
         configured_interval = getattr(container.config, "heartbeat_interval", 30)
         interval = min(configured_interval, lease_interval)
+        # 续期循环终止 = 租约不再续，必须让整个 Worker 停机；否则本进程会带着
+        # 已失效的租约继续执行 run，而 master 已把同一个 run 补派给别人。
+        container.heartbeat_reporter.set_fatal_error_handler(container.engine.record_fatal_error)
         await container.heartbeat_reporter.start(interval=interval)
         logger.info("心跳上报已启动")
 
@@ -190,7 +194,9 @@ class Lifecycle:
                 metrics=None,
             )
         except Exception as exc:
-            raise RuntimeError("Worker 初始 lease_renew 失败") from exc
+            # 必须带上原因：重试日志只打这条消息的文本，吞掉 cause 就等于让
+            # 崩溃重启的容器说不出自己为什么起不来（如控制面回的"契约版本过旧，请升级"）。
+            raise RuntimeError(f"Worker 初始 lease_renew 失败: {exc}") from exc
 
         if revoked:
             raise RuntimeError("Worker 初始 lease 已被撤销")
@@ -250,55 +256,11 @@ class Lifecycle:
         self._running = False
 
         try:
-            await self._run_shutdown_hooks()
-            await self._stop_engine(container.engine, grace_period)
-            await self._deregister_transport(container.transport)
-            await self._stop_component(container.heartbeat_reporter, "心跳上报")
-            await self._stop_component(container.executor, "执行器")
-            await self._stop_component(container.runtime_manager, "运行时管理器")
-            await self._stop_component(container.observability_server, "可观测性服务")
-            await self._stop_transport(container.transport)
+            await shutdown_components(container, grace_period, self._shutdown_hooks)
             logger.info("Worker 已关闭")
-        except Exception as e:
-            logger.error(f"关闭过程异常: {e}")
         finally:
             if self._shutdown_event:
                 self._shutdown_event.set()
-
-    async def _run_shutdown_hooks(self) -> None:
-        for hook in self._shutdown_hooks:
-            try:
-                result = hook()
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as e:
-                logger.warning(f"关闭钩子执行失败: {e}")
-
-    async def _stop_engine(self, engine: Any, grace_period: float) -> None:
-        if engine is None:
-            return
-        await engine.stop(grace_period=grace_period)
-        logger.info("引擎已停止")
-
-    async def _deregister_transport(self, transport: Any) -> None:
-        if transport is None:
-            return
-        try:
-            await transport.deregister("worker_shutdown")
-        except Exception as exc:
-            logger.warning(f"deregister 失败（不阻塞停机）: {exc}")
-
-    async def _stop_component(self, component: Any, label: str) -> None:
-        if component is None:
-            return
-        await component.stop()
-        logger.info(f"{label}已停止")
-
-    async def _stop_transport(self, transport: Any) -> None:
-        if transport is None:
-            return
-        await transport.stop(grace_period=5.0)
-        logger.info("传输层已停止")
 
     async def wait_for_shutdown(self) -> None:
         """等待关闭信号"""

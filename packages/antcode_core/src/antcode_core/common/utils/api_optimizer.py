@@ -238,11 +238,8 @@ def fast_response(
             prefix_parts = [namespace] if namespace else []
 
             if key_prefix_fn:
-                try:
-                    if sub := key_prefix_fn(args, kwargs):
-                        prefix_parts.append(str(sub))
-                except Exception:
-                    pass
+                if sub := key_prefix_fn(args, kwargs):
+                    prefix_parts.append(str(sub))
 
             cache_key = ":".join(prefix_parts + [raw_key]) if prefix_parts else raw_key
 

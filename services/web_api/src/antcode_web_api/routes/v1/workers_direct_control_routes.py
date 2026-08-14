@@ -28,8 +28,8 @@ def register_direct_control_routes(router, verify_worker_credential_headers) -> 
         request: DirectLeaseRequest,
         auth_context: dict = Depends(verify_worker_credential_headers),
     ):
-        _authenticated_worker(worker_id, auth_context)
-        return await _grant_direct_lease(worker_id, request)
+        worker = _authenticated_worker(worker_id, auth_context)
+        return await _grant_direct_lease(worker, request)
 
     @router.post("/{worker_id}/direct-control/run-ownership/claim")
     async def claim_direct_run_ownership(

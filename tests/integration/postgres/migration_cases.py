@@ -1,9 +1,16 @@
 """Executable legacy-schema cases for every hand-written PostgreSQL migration."""
 
+from .migration_cancel_cases import TASK_RUN_CANCEL_REQUEST
 from .migration_generation_cases import TASK_RUN_LEASE, TASK_RUN_LEASE_GEN, TASK_RUN_LEASE_GENERATIONS
 from .migration_index_cases import TASK_LOG_STORAGE_INDEX
+from .migration_integrity_cases import DATABASE_INTEGRITY
 from .migration_outbox_cases import SCHEDULER_OUTBOX
+from .migration_project_rule_cases import PROJECT_RULE_DISPATCH_CONSTRAINTS
+from .migration_project_source_sharing_cases import PROJECT_SOURCE_SHARING
+from .migration_scheduler_cases import SCHEDULER_AUTHORITY
 from .migration_support import FailureExpectation, MigrationCase, SchemaExpectation
+from .migration_task_project_fk_cases import TASK_PROJECT_FOREIGN_KEY
+from .migration_worker_credential_cases import WORKER_CREDENTIALS
 
 TASK_LOGS = MigrationCase(
     name="20260710_add_task_logs.sql",
@@ -83,44 +90,6 @@ USER_SESSIONS = MigrationCase(
             "idx_user_sessions_expires_at",
             "idx_user_sessions_user_revoked",
         ),
-    ),
-)
-
-WORKER_CREDENTIALS = MigrationCase(
-    name="20260710_secure_worker_credentials.sql",
-    setup_sql="""
-        CREATE TABLE workers (id BIGINT PRIMARY KEY, api_key TEXT, secret_key TEXT, marker TEXT NOT NULL);
-        INSERT INTO workers VALUES (1, 'legacy-api', 'legacy-secret', 'preserved');
-    """,
-    seed_after_first_sql="",
-    marker_query="SELECT marker FROM workers WHERE id = 1",
-    marker_value="preserved",
-    schema=SchemaExpectation(
-        table="workers",
-        columns=(
-            "api_key_hash",
-            "secret_key_hash",
-            "secret_key_encrypted",
-            "api_key_previous_hash",
-            "api_key_previous_expires_at",
-        ),
-        indexes=("idx_workers_api_key_hash", "idx_workers_api_key_previous_hash"),
-    ),
-    failure=FailureExpectation(
-        setup_sql="""
-            CREATE TABLE workers (id BIGINT PRIMARY KEY, api_key_hash JSON, marker TEXT NOT NULL);
-            INSERT INTO workers VALUES (1, '{}', 'preserved');
-        """,
-        marker_query="SELECT marker FROM workers WHERE id = 1",
-        marker_value="preserved",
-        present_columns=("id", "api_key_hash", "marker"),
-        absent_columns=(
-            "secret_key_hash",
-            "secret_key_encrypted",
-            "api_key_previous_hash",
-            "api_key_previous_expires_at",
-        ),
-        absent_indexes=("idx_workers_api_key_hash", "idx_workers_api_key_previous_hash"),
     ),
 )
 
@@ -282,4 +251,10 @@ MIGRATION_CASES = (
     OUTBOX_CONSUME_ATTEMPTS,
     TASK_RUN_LEASE_GEN,
     TASK_RUN_LEASE_GENERATIONS,
+    SCHEDULER_AUTHORITY,
+    TASK_RUN_CANCEL_REQUEST,
+    DATABASE_INTEGRITY,
+    PROJECT_RULE_DISPATCH_CONSTRAINTS,
+    TASK_PROJECT_FOREIGN_KEY,
+    PROJECT_SOURCE_SHARING,
 )

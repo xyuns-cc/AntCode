@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import socket
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,11 +13,19 @@ from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.errors import PluginError
 from antcode_worker.domain.models import ExecPlan, RunContext, RuntimeHandle, RuntimeSpec, TaskPayload
 from antcode_worker.executor.process import ProcessExecutor
-from antcode_worker.executor.rule_policy import RULE_PLUGIN_ENV_VARS
+from antcode_worker.executor.rule_policy import (
+    RULE_EGRESS_CONNECTION_LIMIT_CONFIG,
+    RULE_EGRESS_DURATION_CONFIG,
+    RULE_EGRESS_SOCKET_CONFIG,
+    RULE_PLUGIN_ENV_VARS,
+    SPIDER_STATS_PATH_ENV,
+)
 from antcode_worker.executor.sandbox import BasicSandbox, SandboxConfig
 from antcode_worker.plugins.registry import PluginRegistry
 from antcode_worker.plugins.rule.plugin import RulePlugin
 from antcode_worker.plugins.spider.plugin import SpiderPlugin
+
+_MIN_READ_ONLY_BINDS = 2
 
 
 @pytest.mark.asyncio
@@ -135,13 +147,14 @@ def test_rule_process_env_drops_host_and_plan_credentials(monkeypatch, tmp_path:
 
     env = ProcessExecutor()._build_env(plan, runtime)
 
-    assert (RULE_PLUGIN_ENV_VARS - {"ANTCODE_SPIDER_EGRESS_PROXY"}).issubset(env)
+    optional = {"ANTCODE_SPIDER_EGRESS_PROXY", SPIDER_STATS_PATH_ENV}
+    assert (RULE_PLUGIN_ENV_VARS - optional).issubset(env)
     assert not any("REDIS" in key or "TOKEN" in key or "API_KEY" in key for key in env)
     assert "ANTCODE_WORKER_ID" not in env
 
 
 @pytest.mark.asyncio
-async def test_only_trusted_rule_plan_can_bypass_network_namespace(tmp_path: Path) -> None:
+async def test_rule_cannot_request_shared_network_namespace(tmp_path: Path) -> None:
     sandbox = BasicSandbox(
         SandboxConfig(
             network_isolated=True,
@@ -149,64 +162,139 @@ async def test_only_trusted_rule_plan_can_bypass_network_namespace(tmp_path: Pat
         )
     )
     rule = ExecPlan(command="python", plugin_name="rule", sandbox_config={"allow_network": True})
-    code = ExecPlan(command="python", plugin_name="code", sandbox_config={"allow_network": True})
 
-    rule_context = await sandbox.prepare(rule, str(tmp_path))
-    code_context = await sandbox.prepare(code, str(tmp_path))
-
-    assert "--unshare-net" not in sandbox.wrap_command(["python"], rule_context)
-    assert "--unshare-net" in sandbox.wrap_command(["python"], code_context)
+    with pytest.raises(RuntimeError, match="禁止共享"):
+        await sandbox.prepare(rule, str(tmp_path))
 
 
 @pytest.mark.asyncio
-async def test_bwrap_recreates_tmp_workdir_before_bind() -> None:
-    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"]))
-    work_dir = Path("/tmp/antcode-rule/run-1")
-    plan = ExecPlan(command="python", plugin_name="rule", sandbox_config={"allow_network": True})
+async def test_rule_namespace_exposes_only_read_only_unix_bridge(monkeypatch, tmp_path: Path) -> None:
+    rule_root = Path(tempfile.gettempdir()) / "antcode-rule"
+    rule_root.mkdir(mode=0o700, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="bridge-run-", dir=rule_root) as private_dir:
+        work_dir = Path(private_dir)
+        run_id = work_dir.name
+        work_dir.chmod(0o700)
+        bridge_dir = work_dir / ".e-private"
+        bridge_dir.mkdir(mode=0o700)
+        socket_path = bridge_dir / "p.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        try:
+            # 默认根是 gitignored 的 data/worker/runtimes，冷检出上必被 fail-closed
+            runtimes_root = tmp_path / "worker-data" / "runtimes"
+            runtimes_root.mkdir(parents=True)
+            config = SandboxConfig(
+                network_isolated=False,
+                sandbox_command=["/usr/bin/bwrap"],
+                data_dir=str(runtimes_root.parent),
+                runtimes_dir=str(runtimes_root),
+            )
+            sandbox = BasicSandbox(config)
+            plan = ExecPlan(
+                command="python",
+                run_id=run_id,
+                plugin_name="rule",
+                sandbox_config={
+                    RULE_EGRESS_SOCKET_CONFIG: str(socket_path),
+                    RULE_EGRESS_CONNECTION_LIMIT_CONFIG: 4,
+                },
+            )
+
+            context = await sandbox.prepare(plan, str(work_dir))
+            context["payload_max_processes"] = plan.sandbox_config[RULE_EGRESS_CONNECTION_LIMIT_CONFIG]
+            context[RULE_EGRESS_DURATION_CONFIG] = 60
+            monkeypatch.setattr(
+                "antcode_worker.executor.sandbox_provider.shutil.which",
+                lambda _name: "/usr/bin/prlimit",
+            )
+            command = sandbox.wrap_command([sys.executable, "crawl.py"], context)
+
+            assert "--unshare-net" in command
+            assert command.count("--ro-bind") >= _MIN_READ_ONLY_BINDS
+            work_bind = next(
+                index
+                for index, value in enumerate(command)
+                if value == "--bind" and command[index + 1] == str(work_dir.resolve())
+            )
+            bridge_bind = next(
+                index
+                for index, value in enumerate(command)
+                if value == "--ro-bind" and command[index + 1] == str(socket_path.parent)
+            )
+            assert bridge_bind > work_bind
+            assert command[bridge_bind + 2] == str(socket_path.parent)
+            assert "antcode_worker.executor.rule_network_relay" in command
+            assert command.count(str(socket_path)) == 1
+            assert "--max-connections" in command
+            assert str(plan.sandbox_config[RULE_EGRESS_CONNECTION_LIMIT_CONFIG]) in command
+        finally:
+            listener.close()
+
+
+@pytest.mark.asyncio
+async def test_bwrap_recreates_tmp_workdir_before_bind(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    work_dir = data_root / "runs" / "sources" / "run-1" / "project"
+    work_dir.mkdir(parents=True)
+    (data_root / "runtimes").mkdir()
+    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
+    plan = ExecPlan(command=sys.executable, run_id="run-1", plugin_name="code")
 
     context = await sandbox.prepare(plan, str(work_dir))
-    command = sandbox.wrap_command(["python"], context)
+    command = sandbox.wrap_command([sys.executable], context)
 
     bind_index = command.index("--bind")
     assert command.index(str(work_dir.parent)) < bind_index
-    assert command.index(str(work_dir)) < bind_index
+    assert command[bind_index + 1 : bind_index + 3] == [str(work_dir), str(work_dir)]
 
 
 def test_bwrap_applies_process_limit_inside_namespace(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        "antcode_worker.executor.sandbox.shutil.which",
+        "antcode_worker.executor.sandbox_provider.shutil.which",
         lambda executable: f"/usr/bin/{executable}",
     )
-    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"]))
+    data_root = tmp_path / "data"
+    work_dir = data_root / "runs" / "sources" / "run-1" / "project"
+    work_dir.mkdir(parents=True)
+    (data_root / "runtimes").mkdir()
+    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
     context = {
-        "work_dir": str(tmp_path),
+        "work_dir": str(work_dir),
+        "run_id": "run-1",
         "allow_network": False,
         "payload_max_processes": 64,
     }
 
-    wrapped = sandbox.wrap_command(["/usr/bin/python", "main.py"], context)
+    wrapped = sandbox.wrap_command([sys.executable, "main.py"], context)
     separator = wrapped.index("--")
 
     assert wrapped[separator + 1 :] == [
         "/usr/bin/prlimit",
         "--nproc=64:64",
         "--",
-        "/usr/bin/python",
+        sys.executable,
         "main.py",
     ]
 
 
 def test_bwrap_requires_prlimit_for_process_limit(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        "antcode_worker.executor.sandbox.shutil.which",
+        "antcode_worker.executor.sandbox_provider.shutil.which",
         lambda executable: None,
     )
-    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"]))
+    data_root = tmp_path / "data"
+    work_dir = data_root / "runs" / "sources" / "run-1" / "project"
+    work_dir.mkdir(parents=True)
+    (data_root / "runtimes").mkdir()
+    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
     context = {
-        "work_dir": str(tmp_path),
+        "work_dir": str(work_dir),
+        "run_id": "run-1",
         "allow_network": False,
         "payload_max_processes": 64,
     }
 
     with pytest.raises(RuntimeError, match="prlimit"):
-        sandbox.wrap_command(["/usr/bin/python", "main.py"], context)
+        sandbox.wrap_command([sys.executable, "main.py"], context)

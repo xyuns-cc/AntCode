@@ -85,3 +85,40 @@ async def test_sync_redis_heartbeat_exposes_db_save_errors(monkeypatch):
 
     with pytest.raises(RuntimeError, match="postgres unavailable"):
         await service._sync_redis_heartbeat_to_db(worker)
+
+
+@pytest.mark.asyncio
+async def test_gateway_redis_metrics_reach_postgres_persistence(monkeypatch):
+    service = WorkerHeartbeatService()
+    worker = _worker()
+    heartbeat_module = importlib.import_module("antcode_core.application.services.workers.worker_heartbeat_service")
+    persist = AsyncMock(return_value=worker)
+    monkeypatch.setattr(heartbeat_module, "persist_worker_heartbeat", persist)
+    monkeypatch.setattr(
+        redis_module,
+        "get_redis_client",
+        AsyncMock(
+            return_value=FakeRedis(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "task_count": "7",
+                    "project_count": "3",
+                    "env_count": "2",
+                    "memory_total_bytes": "1048576",
+                    "spider_stats": '{"request_count":5,"status_codes":{"200":5}}',
+                }
+            )
+        ),
+    )
+
+    assert await service._sync_redis_heartbeat_to_db(worker) is True
+
+    update = persist.await_args.args[1]
+    assert update.metrics == {
+        "taskCount": 7,
+        "projectCount": 3,
+        "envCount": 2,
+        "memoryTotal": 1_048_576,
+        "spider_stats": {"request_count": 5, "status_codes": {"200": 5}},
+    }
+    assert persist.await_args.kwargs["record_history"] is True

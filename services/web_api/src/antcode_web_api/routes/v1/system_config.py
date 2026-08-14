@@ -6,13 +6,14 @@ from antcode_core.domain.schemas import BaseResponse
 from antcode_core.domain.schemas.system_config import (
     SystemConfigBatchUpdate,
     SystemConfigCreate,
-    SystemConfigResponse,
     SystemConfigUpdate,
 )
 from fastapi import APIRouter, Depends, HTTPException, status
 from loguru import logger
 
 from antcode_web_api.response import Messages, success
+from antcode_web_api.routes.v1.system_config_audit import audit_config_change
+from antcode_web_api.routes.v1.system_config_response import redacted_system_config
 
 router = APIRouter()
 
@@ -29,7 +30,7 @@ async def get_all_configs(category: str | None = None, current_admin=Depends(get
 
     try:
         configs = await system_config_service.get_all_configs(category)
-        config_list = [SystemConfigResponse.model_validate(config) for config in configs]
+        config_list = [redacted_system_config(config) for config in configs]
         return success(config_list, message=Messages.QUERY_SUCCESS)
 
     except Exception as exc:
@@ -80,7 +81,7 @@ async def get_config(config_key: str, current_admin=Depends(get_current_super_ad
                 detail=f"配置键 {config_key} 不存在",
             )
 
-        config_data = SystemConfigResponse.model_validate(config)
+        config_data = redacted_system_config(config)
         return success(config_data, message=Messages.QUERY_SUCCESS)
 
     except HTTPException:
@@ -106,8 +107,14 @@ async def create_config(config_data: SystemConfigCreate, current_admin=Depends(g
 
     try:
         config = await system_config_service.create_config(config_data, modified_by=current_admin.username)
+        await audit_config_change(
+            current_admin,
+            operation="system_config_create",
+            config_keys=[config_data.config_key],
+            description=f"创建系统配置: {config_data.config_key}",
+        )
 
-        response_data = SystemConfigResponse.model_validate(config)
+        response_data = redacted_system_config(config)
         return success(response_data, message=Messages.CREATED_SUCCESS, code=201)
 
     except ValueError as e:
@@ -136,8 +143,14 @@ async def update_config(
 
     try:
         config = await system_config_service.update_config(config_key, config_data, modified_by=current_admin.username)
+        await audit_config_change(
+            current_admin,
+            operation="system_config_update",
+            config_keys=[config_key],
+            description=f"更新系统配置: {config_key}",
+        )
 
-        response_data = SystemConfigResponse.model_validate(config)
+        response_data = redacted_system_config(config)
         return success(response_data, message=Messages.UPDATED_SUCCESS)
 
     except ValueError as e:
@@ -163,6 +176,14 @@ async def batch_update_configs(batch_data: SystemConfigBatchUpdate, current_admi
     try:
         updated_count = await system_config_service.batch_update_configs(
             batch_data.configs, modified_by=current_admin.username
+        )
+        config_keys = [item.config_key for item in batch_data.configs]
+        await audit_config_change(
+            current_admin,
+            operation="system_config_batch_update",
+            config_keys=config_keys,
+            description="批量更新系统配置",
+            updated_count=updated_count,
         )
 
         return success(
@@ -196,6 +217,12 @@ async def delete_config(config_key: str, current_admin=Depends(get_current_super
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"配置键 {config_key} 不存在",
             )
+        await audit_config_change(
+            current_admin,
+            operation="system_config_delete",
+            config_keys=[config_key],
+            description=f"删除系统配置: {config_key}",
+        )
 
         return success(None, message=Messages.DELETED_SUCCESS)
 
@@ -221,6 +248,12 @@ async def reload_configs(current_admin=Depends(get_current_super_admin)):
 
     try:
         await system_config_service.reload_config_cache()
+        await audit_config_change(
+            current_admin,
+            operation="system_config_reload",
+            config_keys=[],
+            description="重新加载系统配置缓存",
+        )
         return success(None, message="配置已重新加载")
 
     except Exception as exc:
@@ -243,6 +276,12 @@ async def initialize_default_configs(current_admin=Depends(get_current_super_adm
 
     try:
         await system_config_service.initialize_default_configs()
+        await audit_config_change(
+            current_admin,
+            operation="system_config_initialize",
+            config_keys=[],
+            description="初始化默认系统配置",
+        )
         return success(None, message="默认配置已初始化")
 
     except Exception as exc:

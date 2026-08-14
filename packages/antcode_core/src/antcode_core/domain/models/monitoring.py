@@ -6,13 +6,14 @@
 
 from tortoise import fields
 
+from antcode_core.common.error_message_field import PersistedErrorMessageField
 from antcode_core.domain.models.base import BaseModel, generate_public_id
 
 
 class WorkerPerformanceHistory(BaseModel):
     """Worker 系统性能历史记录（按分钟聚合）"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     worker_id = fields.CharField(
         max_length=100,
         db_index=True,
@@ -33,13 +34,13 @@ class WorkerPerformanceHistory(BaseModel):
 
     class Meta:
         table = "worker_performance_history"
-        indexes = [("worker_id", "timestamp"), ("public_id",)]
+        indexes = [("worker_id", "timestamp")]
 
 
 class SpiderMetricsHistory(BaseModel):
     """爬虫业务指标历史记录（按分钟聚合）"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     worker_id = fields.CharField(
         max_length=100,
         db_index=True,
@@ -67,20 +68,20 @@ class SpiderMetricsHistory(BaseModel):
 
     class Meta:
         table = "spider_metrics_history"
-        indexes = [("worker_id", "timestamp"), ("public_id",)]
+        indexes = [("worker_id", "timestamp")]
 
 
 class WorkerEvent(BaseModel):
     """Worker 事件日志"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     worker_id = fields.CharField(
         max_length=100,
         db_index=True,
         description="Worker 标识",
     )
     event_type = fields.CharField(max_length=50, db_index=True, description="事件类型")
-    event_message = fields.TextField(null=True)
+    event_message = PersistedErrorMessageField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True, db_index=True)
 
     class Meta:
@@ -88,7 +89,6 @@ class WorkerEvent(BaseModel):
         indexes = [
             ("worker_id", "created_at"),
             ("event_type", "created_at"),
-            ("public_id",),
         ]
 
 

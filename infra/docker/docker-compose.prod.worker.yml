@@ -1,0 +1,88 @@
+x-antcode-logging: &antcode-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "10"
+
+services:
+  worker:
+    image: ${ANTCODE_WORKER_IMAGE_REPOSITORY:?Worker image repository is required}@sha256:${ANTCODE_WORKER_IMAGE_DIGEST:?Worker image digest is required}
+    container_name: ${ANTCODE_WORKER_CONTAINER_NAME:?unique Worker container name is required}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *antcode-logging
+    read_only: true
+    cap_drop:
+      - ALL
+    # bwrap 的非特权 user namespace 在 Docker 下需要三项放宽，缺任何一项
+    # 任务都会 100% 失败（真机实测：默认画像下每个任务都以
+    # "bwrap: No permissions to create new namespace" 退出）：
+    #   1) seccomp：Docker 内置 profile 在无 CAP_SYS_ADMIN 时禁止 clone/unshare
+    #      带 CLONE_NEWUSER。这里用的是**定制 profile**（内置 profile 仅放行
+    #      namespace 相关调用），不是 unconfined，其余系统调用过滤全部保留。
+    #   2) apparmor：docker-default 直接 deny mount，bwrap 连 / 都改不成 slave。
+    #   3) systempaths：Docker 对 /proc 的屏蔽挂载会让 userns 内挂 procfs 失败。
+    # 仍然保留的硬边界：cap_drop ALL、no-new-privileges、只读根、非 root 运行。
+    # 改动这三行前请先在目标宿主跑通真实任务，否则等于静默关掉整个执行面。
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp/worker-userns.json
+      - apparmor=unconfined
+      - systempaths=unconfined
+    cpus: ${ANTCODE_WORKER_CPUS:-4}
+    mem_limit: ${ANTCODE_WORKER_MEMORY:-8g}
+    pids_limit: ${ANTCODE_WORKER_PIDS_LIMIT:-4096}
+    shm_size: ${ANTCODE_WORKER_SHM_SIZE:-1g}
+    # 沙箱 fail-closed 的宿主前提，必须显式声明，不能继承宿主 dockerd 默认值。
+    # executor/process_limits.py 在 preexec_fn 里对每个任务子进程执行
+    # setrlimit(RLIMIT_NOFILE, 2048)（值来自 ExecutorConfig.default_max_open_files，
+    # 无 env 覆盖），任一 rlimit 设置失败即拒绝启动子进程。容器不声明 ulimits 时
+    # nofile 完全继承宿主 dockerd：只要宿主 hard limit < 2048，setrlimit 立刻抛
+    # "current limit exceeds maximum limit"，Worker 将拒绝执行任何任务——且代码
+    # 无法自证这个依赖。这里 pin 死，把隐式宿主依赖变成声明式契约
+    # （tests/unit/core/test_docker_compose_prod_contract.py 锁住该不变量）。
+    # 取值 65536：硬性下限是 2048（子进程），其上的余量留给 Worker 父进程本身
+    # （gateway 长连接 + 并发任务的 stdout/stderr 管道 + Playwright/Chromium fd）；
+    # 仍远低于内核 fs.nr_open 默认上限 1048576，docker 侧一定设得进去。
+    # 不 pin nproc：生产走 bwrap，host_max_processes() 对 bwrap 返回 0，RLIMIT_NPROC
+    # 改由 sandbox_provider 的 `prlimit --nproc=64:64` 施加——那是"只降不升"，不存在
+    # 超过宿主 hard limit 的失败面；容器级进程总数已由上面的 pids_limit(cgroup) 兜底。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    tmpfs:
+      - /tmp:exec,uid=1000,gid=1000,mode=1777
+      - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WORKER_NAME: ${ANTCODE_WORKER_NAME:?unique Worker name is required}
+      WORKER_TRANSPORT_MODE: gateway
+      WORKER_GATEWAY_BACKENDLESS: "true"
+      WORKER_GATEWAY_HOST: ${ANTCODE_GATEWAY_HOST:?mTLS Gateway host is required}
+      WORKER_GATEWAY_PORT: ${ANTCODE_GATEWAY_PUBLIC_PORT:-50051}
+      WORKER_GATEWAY_TLS: "true"
+      WORKER_CA_CERT: /etc/antcode/tls/ca.crt
+      WORKER_CLIENT_CERT: /etc/antcode/tls/client.crt
+      WORKER_CLIENT_KEY: /etc/antcode/tls/client.key
+      WORKER_API_BASE_URL: ${ANTCODE_PUBLIC_API_BASE_URL:?public HTTPS API base URL is required}
+      WORKER_API_ALLOW_INSECURE_INTERNAL: "false"
+      ANTCODE_RULE_ALLOW_NETWORK: ${ANTCODE_RULE_ALLOW_NETWORK:-0}
+      WORKER_SANDBOX_MODE: sandbox
+      WORKER_SANDBOX_COMMAND: bwrap
+      WORKER_SANDBOX_NETWORK_ISOLATED: "true"
+    volumes:
+      - ${ANTCODE_WORKER_TLS_DIR:?unique Worker mTLS directory is required}:/etc/antcode/tls:ro
+      - worker_data:/app/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:8001/health/ready >/dev/null || { kill -TERM 1; exit 1; }
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+volumes:
+  worker_data:
+    name: ${ANTCODE_WORKER_DATA_VOLUME:?unique Worker data volume is required}

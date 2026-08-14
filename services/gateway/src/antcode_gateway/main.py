@@ -12,7 +12,11 @@ import sys
 from antcode_contracts.artifact_pb2_grpc import add_ArtifactServiceServicer_to_server
 from antcode_contracts.control_pb2_grpc import add_ControlServiceServicer_to_server
 from antcode_contracts.data_pb2_grpc import add_DataServiceServicer_to_server
-from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
+from antcode_core.application.services.lease_service import LeaseStore, wire_lease_policy
+from antcode_core.application.services.workers.worker_lease_authority import (
+    get_worker_lease_eligibility,
+    reconcile_worker_lease_lifecycle_fences,
+)
 from antcode_core.common.logging import setup_logging
 from antcode_core.infrastructure.db.tortoise import close_db, init_db
 from antcode_core.infrastructure.postgres.artifact_store import PostgresArtifactStore
@@ -23,30 +27,44 @@ from loguru import logger
 from antcode_gateway.auth import AuthInterceptor
 from antcode_gateway.config import gateway_config
 from antcode_gateway.rate_limit import RateLimitInterceptor
+from antcode_gateway.security_audit import SecurityAuditor
 from antcode_gateway.server import get_grpc_server
 from antcode_gateway.services import GatewayArtifactService, GatewayControlService, GatewayDataService
 
 
-def _configure_interceptors(server) -> None:
+def _build_rate_limiter() -> RateLimitInterceptor | None:
+    if not gateway_config.rate_limit_enabled:
+        logger.info("RateLimitInterceptor 已禁用")
+        return None
+    logger.info("RateLimitInterceptor 已启用")
+    return RateLimitInterceptor(
+        enabled=True,
+        rate=gateway_config.rate_limit_rate,
+        capacity=gateway_config.rate_limit_capacity,
+    )
+
+
+def _configure_interceptors(server, audit_stream: StreamClient) -> None:
+    """装配拦截器：Auth 在外层，RateLimit 在内层。
+
+    顺序不可颠倒。``RateLimitInterceptor._resolve_key`` 依赖 AuthInterceptor 包装
+    的 handler 写入的认证主体 contextvar；若把限流挪到最外层，所有已认证请求都会
+    退化成按来源 IP 共桶，同一 NAT 出口后的多个 worker 会互相误伤。
+
+    P0-B10: 认证失败的请求由 AuthInterceptor 在最外层短路，不会流经限流拦截器，
+    因此把限流器实例注入 AuthInterceptor，由它对拒绝 handler 显式调用
+    ``wrap_unauthenticated``，让无凭据的调用也受同一套令牌桶约束。
+    """
+    rate_limiter = _build_rate_limiter()
     if gateway_config.auth_enabled:
-        audit_stream = StreamClient()
-        server.add_interceptor(AuthInterceptor(enabled=True, audit_stream=audit_stream))
+        server.add_interceptor(AuthInterceptor(enabled=True, audit_stream=audit_stream, rate_limiter=rate_limiter))
         logger.info("AuthInterceptor 已启用（含安全审计 Stream）")
     else:
-        server.add_interceptor(AuthInterceptor(enabled=False))
+        server.add_interceptor(AuthInterceptor(enabled=False, rate_limiter=rate_limiter))
         logger.info("AuthInterceptor 已禁用")
 
-    if gateway_config.rate_limit_enabled:
-        server.add_interceptor(
-            RateLimitInterceptor(
-                enabled=True,
-                rate=gateway_config.rate_limit_rate,
-                capacity=gateway_config.rate_limit_capacity,
-            )
-        )
-        logger.info("RateLimitInterceptor 已启用")
-    else:
-        logger.info("RateLimitInterceptor 已禁用")
+    if rate_limiter is not None:
+        server.add_interceptor(rate_limiter)
 
 
 async def _create_lease_store() -> LeaseStore:
@@ -56,7 +74,7 @@ async def _create_lease_store() -> LeaseStore:
     lease_store = LeaseStore(
         redis_client=redis_client,
         namespace=redis_namespace(),
-        policy=LeasePolicy(),
+        policy=wire_lease_policy(),
     )
     logger.info(
         "LeaseStore 已构建: namespace={} ttl_ms={} renew_after_ms={}",
@@ -67,12 +85,15 @@ async def _create_lease_store() -> LeaseStore:
     return lease_store
 
 
-def _register_services(server, lease_store: LeaseStore, redis_client) -> None:
+def _register_services(server, lease_store: LeaseStore, redis_client, *, audit_stream=None) -> None:
     logger.info("注册 gRPC 服务")
-    server.add_servicer(
-        GatewayControlService(lease_store=lease_store),
-        add_ControlServiceServicer_to_server,
+    control_service = GatewayControlService(
+        lease_store=lease_store,
+        lease_authorizer=get_worker_lease_eligibility,
     )
+    # Register 是 auth-exempt 的匿名入口，拦截器不介入，只能由它自己写安全审计。
+    control_service.bind_security_auditor(SecurityAuditor(audit_stream))
+    server.add_servicer(control_service, add_ControlServiceServicer_to_server)
     server.add_servicer(
         GatewayDataService(lease_verifier=lease_store.is_current),
         add_DataServiceServicer_to_server,
@@ -169,7 +190,9 @@ async def main():
     logger.info("Gateway 服务启动")
     await init_db(service="gateway")
     server = get_grpc_server()
-    _configure_interceptors(server)
+    # 认证拦截器与 Register handler 共用同一条安全审计 Stream。
+    audit_stream = StreamClient()
+    _configure_interceptors(server, audit_stream)
     try:
         lease_store = await _create_lease_store()
     except Exception as exc:
@@ -177,7 +200,11 @@ async def main():
         await close_db()
         raise
     redis_client = await get_redis_client()
-    _register_services(server, lease_store, redis_client)
+    if redis_client is None:
+        await close_db()
+        raise RuntimeError("Redis client unavailable")
+    await reconcile_worker_lease_lifecycle_fences(lease_store)
+    _register_services(server, lease_store, redis_client, audit_stream=audit_stream)
     if not await server.start():
         logger.error("Gateway gRPC 服务器启动失败，触发退出")
         await _close_db_with_timeout(5, "退出前 close_db 失败,忽略")

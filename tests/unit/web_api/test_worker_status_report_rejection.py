@@ -39,4 +39,5 @@ async def test_http_status_report_exposes_rejected_business_update(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await workers_route.report_task_status(request, auth_context={"worker": object()})
 
-    assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+    assert exc_info.value.status_code == status.HTTP_410_GONE
+    update.assert_not_awaited()

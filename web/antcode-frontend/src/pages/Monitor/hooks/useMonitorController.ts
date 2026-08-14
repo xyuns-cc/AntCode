@@ -17,11 +17,18 @@ export const useMonitorController = () => {
   const [performancePeriod, setPerformancePeriod] = useState<PerformancePeriod>('24h')
   const chartRef = useRef<Chart<'line'> | null>(null)
   const { loading, workers, lastChecked, refresh } = useWorkers()
-  const tasks = useTasks(workers)
+  const { tasks, counts: taskCounts } = useTasks(workers)
   const { clusterHistory, workerHistory } = useMetricHistory(performancePeriod, selectedWorker)
   const view = useMonitorViewData({
-    token, workers, tasks, lastChecked, period: performancePeriod,
-    selectedWorker, clusterHistory, workerHistory,
+    token,
+    workers,
+    tasks,
+    taskCounts,
+    lastChecked,
+    period: performancePeriod,
+    selectedWorker,
+    clusterHistory,
+    workerHistory,
   })
 
   const handleRefresh = () => {
@@ -30,9 +37,21 @@ export const useMonitorController = () => {
   }
 
   return {
-    currentTime, loading, workers, lastChecked, tasks, view, chartRef,
-    showAllWorkers, showAllAlerts, selectedWorker, performancePeriod,
-    setShowAllWorkers, setShowAllAlerts, setSelectedWorker, setPerformancePeriod,
+    currentTime,
+    loading,
+    workers,
+    lastChecked,
+    tasks,
+    view,
+    chartRef,
+    showAllWorkers,
+    showAllAlerts,
+    selectedWorker,
+    performancePeriod,
+    setShowAllWorkers,
+    setShowAllAlerts,
+    setSelectedWorker,
+    setPerformancePeriod,
     handleRefresh,
   }
 }

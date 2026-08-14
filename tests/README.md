@@ -111,16 +111,19 @@ uv run pytest tests/boundary/
 ### 运行端到端测试
 
 ```bash
-# FULL E2E 必须显式绑定专用 PostgreSQL host、库名和 dedicated Worker。
+# FULL E2E 只通过公开 API 验证预先 bootstrap 的管理员，不接收数据库凭据，
+# 也不会创建、提权或重置管理员。远程环境必须使用 HTTPS。
 export ANTCODE_E2E_CONFIRM=FULL
-export DATABASE_URL=postgresql://antcode:password@127.0.0.1:15433/antcode_e2e_test
-export ANTCODE_E2E_DATABASE_HOST=127.0.0.1
-export ANTCODE_E2E_DATABASE_NAME=antcode_e2e_test
 export ANTCODE_E2E_WORKER_ID=worker-e2e-001
-export ANTCODE_E2E_WEB_API_URL=http://192.168.1.250:8000
+export ANTCODE_E2E_ADMIN_USER=admin
+export ANTCODE_E2E_ADMIN_PASSWORD='<bootstrap 时使用的一次性管理员口令>'
+export ANTCODE_E2E_WEB_API_URL=https://antcode-test.example.com
 export ANTCODE_E2E_EXPECT_TRANSPORT_MODE=direct
 export ANTCODE_E2E_GIT_ROOT=/srv/antcode-e2e-git
 export ANTCODE_E2E_GIT_BASE_URL=http://192.168.1.250:18081
+# Spider 数据场景只用专用 Redis 连接做严格清理；不会加载 DATABASE_URL。
+export ANTCODE_E2E_REDIS_URL='<专用 E2E Redis URL>'
+export ANTCODE_E2E_REDIS_NAMESPACE=antcode
 
 # 运行 E2E 测试
 uv run pytest tests/e2e/ -v

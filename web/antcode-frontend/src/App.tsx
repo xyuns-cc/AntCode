@@ -1,5 +1,5 @@
 import type React from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router'
 import { App as AntApp, ConfigProvider, FloatButton, Spin } from 'antd'
 import { VerticalAlignTopOutlined } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
@@ -87,7 +87,7 @@ export const AppRoutes: React.FC = () => (
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
-        <Route path="workers" element={<Workers />} />
+        <Route path="workers" element={<AdminRoute><Workers /></AdminRoute>} />
         <Route path="projects/*" element={<Projects />} />
         <Route path="repositories" element={<Repositories />} />
         <Route path="envs" element={<Envs />} />

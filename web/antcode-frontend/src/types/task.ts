@@ -39,9 +39,9 @@ export interface Task {
 
   // 调度配置
   schedule_type: ScheduleType
-  cron_expression?: string
-  interval_seconds?: number
-  scheduled_time?: string
+  cron_expression?: string | null
+  interval_seconds?: number | null
+  scheduled_time?: string | null
 
   // 执行配置（部分接口可能不返回，保持可选）
   max_instances?: number
@@ -54,27 +54,27 @@ export interface Task {
   // 状态信息
   status: TaskStatus
   is_active: boolean
-  last_run_time?: string
-  next_run_time?: string
+  last_run_time?: string | null
+  next_run_time?: string | null
   failure_count?: number
   success_count?: number
 
   // 执行策略配置
   execution_strategy?: ExecutionStrategy | null
-  specified_worker_id?: string
-  specified_worker_name?: string
+  specified_worker_id?: string | null
+  specified_worker_name?: string | null
 
   // 项目执行配置（继承自项目）
-  project_execution_strategy?: ExecutionStrategy
-  project_bound_worker_id?: string
-  project_bound_worker_name?: string
+  project_execution_strategy?: ExecutionStrategy | null
+  project_bound_worker_id?: string | null
+  project_bound_worker_name?: string | null
 
   // 时间戳
   created_at: string
   updated_at: string
   user_id?: string
   created_by: string
-  created_by_username?: string
+  created_by_username?: string | null
 
   // 关联数据
   project?: Project

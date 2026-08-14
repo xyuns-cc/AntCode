@@ -73,3 +73,21 @@ describe('toStreamLogEntry 未知类型降级', () => {
     expect(entry!.id).toBe('run-9:stdout:2')
   })
 })
+
+describe('isValidStreamPayload recovery_complete', () => {
+  it.each([0, 1, 42])('接受非负安全整数 %s', (recoveredLines) => {
+    expect(isValidStreamPayload('recovery_complete', {
+      type: 'recovery_complete', recovered_lines: recoveredLines,
+    })).toBe(true)
+  })
+
+  it.each([
+    { type: 'recovery_complete' },
+    { type: 'recovery_complete', recovered_lines: -1 },
+    { type: 'recovery_complete', recovered_lines: 1.5 },
+    { type: 'recovery_complete', recovered_lines: '1' },
+    { type: 'recovery_complete', recovered_lines: Number.MAX_SAFE_INTEGER + 1 },
+  ])('拒绝非法恢复行数 %#', (payload) => {
+    expect(isValidStreamPayload('recovery_complete', payload)).toBe(false)
+  })
+})

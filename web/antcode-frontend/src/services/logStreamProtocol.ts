@@ -32,6 +32,7 @@ export const isValidStreamPayload = (type: string, payload: StreamPayload): bool
   if (type === 'run_status') return validRunStatus(payload)
   if (type === 'historical_logs_end') return validHistoryEnd(payload)
   if (type === 'no_historical_logs') return validNoHistory(payload)
+  if (type === 'recovery_complete') return nonNegativeInteger(payload.recovered_lines)
   if (type === 'stream_error') return typeof payload.code === 'string' && typeof payload.message === 'string'
   // stream_cursor 的游标在 SSE lastEventId 中，是不透明字符串，数据体不做结构断言。
   return type === 'historical_logs_start' || type === 'ping' || type === 'stream_cursor'

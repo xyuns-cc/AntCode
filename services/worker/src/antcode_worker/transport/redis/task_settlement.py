@@ -11,6 +11,7 @@ from typing import Any
 from redis.cluster import key_slot
 
 REQUEUE_SETTLEMENT_TTL_SECONDS = 7 * 24 * 60 * 60
+REQUEUE_MARKER_CORRUPT = -4
 
 _ACK_OWNED_TASK_LUA = """
 local marker = redis.call('GET', KEYS[2])
@@ -42,15 +43,15 @@ if marker then
     if string.sub(marker, 1, 64) ~= ARGV[4] then
         return {-1, ''}
     end
-    local existing_id = string.sub(marker, 66)
-    local existing = redis.call('XRANGE', KEYS[1], existing_id, existing_id, 'COUNT', 1)
-    if #existing > 0 then
-        redis.call('EXPIREAT', KEYS[2], ARGV[5])
-        return {0, existing_id}
+    if string.sub(marker, 65, 65) ~= ':' or string.len(marker) <= 65 then
+        return {-4, ''}
     end
-    local rebuilt_id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 6))
-    redis.call('SET', KEYS[2], ARGV[4] .. ':' .. rebuilt_id, 'EXAT', ARGV[5])
-    return {1, rebuilt_id}
+    local existing_id = string.sub(marker, 66)
+    if not string.match(existing_id, '^%d+%-%d+$') then
+        return {-4, ''}
+    end
+    redis.call('EXPIREAT', KEYS[2], ARGV[5])
+    return {0, existing_id}
 end
 
 local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
@@ -128,6 +129,8 @@ async def requeue_owned_task(
         raise RuntimeError("Direct task requeue 原消息不在 PEL")
     if status == -3:
         raise RuntimeError("Direct task requeue PEL owner 已变更")
+    if status == REQUEUE_MARKER_CORRUPT:
+        raise RuntimeError("Direct task requeue settlement marker 损坏")
     if not new_id:
         raise RuntimeError("Direct task requeue 未返回新消息 ID")
     return new_id

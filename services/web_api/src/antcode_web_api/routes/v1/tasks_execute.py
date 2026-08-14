@@ -7,10 +7,9 @@ P2 拆分自 tasks.py: 5 个 handler + 3 helper + 2 schema:
 - POST /tasks/{task_id}/execute (execute_task)
 - PATCH /tasks/{task_id}/toggle (toggle_task)
 
-契约 (URL / DI / 返回) 与旧实现一致。trigger/execute 通过共享
-_acquire_trigger_dedup_lock + _latest_run_pk / _resolve_new_run_id 触发
-去重 & 返回新 run_id。create_task_response 由 register_execute_routes
-注入避免循环 import。
+契约 (URL / DI / 返回) 与旧实现一致。trigger/execute 通过共享去重锁触发，
+并直接返回 Outbox 推导出的确定性 run_id。create_task_response 由
+register_execute_routes 注入避免循环 import。
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from typing import Any
 
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.common.security.auth import get_current_user
-from antcode_core.domain.models import TaskRun
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.task import TaskResponse
 from antcode_core.domain.schemas.task import TaskUpdateRequest as TaskUpdate
@@ -42,11 +40,6 @@ class TaskToggleRequest(BaseModel):
     enabled: bool
 
 
-# 触发后等待新 run 落库的轮询参数：Master 经事件/调度异步建 run。
-_NEW_RUN_POLL_ATTEMPTS = 10
-_NEW_RUN_POLL_INTERVAL_SECONDS = 0.2
-
-
 async def _acquire_trigger_dedup_lock(task_id: str, user_id: int) -> bool:
     """5s 内禁止同一用户重复触发同一任务
 
@@ -63,34 +56,6 @@ async def _acquire_trigger_dedup_lock(task_id: str, user_id: int) -> bool:
     except Exception as exc:
         logger.exception("触发去重锁获取失败")
         raise HTTPException(status_code=503, detail="任务触发去重服务不可用") from exc
-
-
-async def _latest_run_pk(task_id_or_public: str, user_id: int) -> tuple[int | None, int | None]:
-    """返回 (task内部id, 触发前最新 run 主键)；任务不可见时 (None, None)。"""
-    task = await scheduler_service.get_task_by_id(task_id_or_public, user_id)
-    if not task:
-        return None, None
-    latest = await TaskRun.filter(task_id=task.id).order_by("-id").only("id").first()
-    return task.id, (latest.id if latest else 0)
-
-
-async def _resolve_new_run_id(internal_task_id: int | None, baseline_pk: int | None) -> str | None:
-    """P2 §4.4: 只返回触发**之后**新建的 run_id。
-
-    此前直接查 latest，Master 尚未建新 run 时会把上一次执行的 run_id
-    返回给前端订阅。现在以触发前主键为基线短暂轮询；窗口内没有新 run
-    则返回 None（前端可稍后从任务详情拿）。
-    """
-    if internal_task_id is None or baseline_pk is None:
-        return None
-    import asyncio as _asyncio
-
-    for _ in range(_NEW_RUN_POLL_ATTEMPTS):
-        latest = await TaskRun.filter(task_id=internal_task_id).order_by("-id").only("id", "run_id").first()
-        if latest and latest.id > baseline_pk:
-            return latest.run_id
-        await _asyncio.sleep(_NEW_RUN_POLL_INTERVAL_SECONDS)
-    return None
 
 
 async def pause_task(task_id, current_user):
@@ -133,13 +98,10 @@ async def trigger_task(task_id, current_user):
         if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
             raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
 
-        internal_task_id, baseline_pk = await _latest_run_pk(str(task_id), current_user.user_id)
-        triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
-        if not triggered:
+        trigger_result = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
+        if not trigger_result:
             raise HTTPException(status_code=404, detail="Task not found")
-
-        # 调度器异步创建 TaskRun；只等待并返回触发后新建的 run_id
-        run_id = await _resolve_new_run_id(internal_task_id, baseline_pk)
+        run_id = trigger_result if isinstance(trigger_result, str) else None
 
         return success_response(
             {"task_id": str(task_id), "run_id": run_id, "triggered": True},
@@ -166,12 +128,10 @@ async def execute_task(task_id: str, request: TaskExecuteRequest, current_user):
         if not await _acquire_trigger_dedup_lock(str(task_id), current_user.user_id):
             raise HTTPException(status_code=409, detail="请勿连续触发同一任务")
 
-        internal_task_id, baseline_pk = await _latest_run_pk(str(task_id), current_user.user_id)
-        triggered = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
-        if not triggered:
+        trigger_result = await scheduler_service.trigger_task_by_user(task_id, current_user.user_id)
+        if not trigger_result:
             raise HTTPException(status_code=404, detail="Task not found")
-
-        run_id = await _resolve_new_run_id(internal_task_id, baseline_pk)
+        run_id = trigger_result if isinstance(trigger_result, str) else None
         return success_response(
             {"task_id": task_id, "run_id": run_id, "triggered": True},
             message="任务已触发",

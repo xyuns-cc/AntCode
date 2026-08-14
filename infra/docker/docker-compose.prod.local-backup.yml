@@ -5,31 +5,63 @@ services:
     profiles: ["local-backup"]
     image: ${ANTCODE_POSTGRES_IMAGE_REPOSITORY:?PostgreSQL image repository is required}@sha256:${ANTCODE_POSTGRES_IMAGE_DIGEST:?PostgreSQL image digest is required}
     restart: unless-stopped
+    read_only: true
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 512
+    tmpfs:
+      - /tmp
     environment:
-      DATABASE_URL: ${DATABASE_URL:?production DATABASE_URL is required}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_TIMEOUT_SECONDS: ${BACKUP_TIMEOUT_SECONDS:-3600}
+      BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-90000}
+    secrets:
+      - database_url
     volumes:
       - backup_data:/backup
     networks:
-      - antcode-internal
+      - antcode-control
+    depends_on:
+      postgres:
+        condition: service_healthy
     command:
       - sh
       - -ec
       - |
+        partial=""
+        checksum_partial=""
+        cleanup() {
+          rm -f "$${partial:-/backup/.no-partial}" "$${checksum_partial:-/backup/.no-checksum-partial}"
+        }
+        trap cleanup EXIT INT TERM HUP
+        find /backup -type f -name '*.partial' -delete
+        database_url="$$(cat /run/secrets/database_url)"
         while true; do
           target="/backup/antcode-$$(date -u +%Y%m%dT%H%M%SZ).dump"
           partial="$$target.partial"
-          pg_dump --dbname="$$DATABASE_URL" --format=custom --file="$$partial"
-          pg_restore --list "$$partial" >/dev/null
+          checksum_partial="$$target.sha256.partial"
+          timeout "$${BACKUP_TIMEOUT_SECONDS}" pg_dump \
+            --dbname="$$database_url" --format=custom --file="$$partial"
+          timeout "$${BACKUP_TIMEOUT_SECONDS}" pg_restore --list "$$partial" >/dev/null
           checksum="$$(sha256sum "$$partial" | awk '{print $$1}')"
           mv "$$partial" "$$target"
-          printf '%s  %s\n' "$$checksum" "$$(basename "$$target")" > "$$target.sha256.partial"
-          mv "$$target.sha256.partial" "$$target.sha256"
+          printf '%s  %s\n' "$$checksum" "$$(basename "$$target")" > "$$checksum_partial"
+          mv "$$checksum_partial" "$$target.sha256"
+          date -u +%s > /backup/.last-success.partial
+          mv /backup/.last-success.partial /backup/.last-success
           find /backup -type f \( -name 'antcode-*.dump' -o -name 'antcode-*.dump.sha256' \) \
-            -mtime "+$$BACKUP_RETENTION_DAYS" -delete
+            -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
           echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) local backup completed: $$target"
           sleep 86400
         done
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -s /backup/.last-success && last="$$(cat /backup/.last-success)" && now="$$(date -u +%s)" && test "$$((now - last))" -le "$${BACKUP_MAX_AGE_SECONDS}" || { kill -TERM 1; exit 1; }
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: ${BACKUP_HEALTH_START_PERIOD:-2h}
 
 volumes:
   backup_data:

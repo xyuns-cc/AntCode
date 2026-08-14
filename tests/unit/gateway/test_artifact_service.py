@@ -6,8 +6,6 @@ from unittest.mock import AsyncMock, call
 import grpc
 import pytest
 from antcode_contracts import artifact_pb2, artifact_pb2_grpc
-from antcode_gateway.grpc_rejection import make_rate_limit_rejection
-from antcode_gateway.rate_limit import RateLimitResult
 from antcode_gateway.services.artifact_transfer import ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_BYTES
 
 from tests.unit.gateway.artifact_service_helpers import (
@@ -180,18 +178,3 @@ async def test_upload_rejects_declared_size_over_100_mib():
 
     assert context.abort.await_args.args[0] == grpc.StatusCode.RESOURCE_EXHAUSTED
     assert store.writes == []
-
-
-@pytest.mark.parametrize(
-    ("original", "attribute"),
-    [
-        (grpc.unary_stream_rpc_method_handler(AsyncMock()), "unary_stream"),
-        (grpc.stream_unary_rpc_method_handler(AsyncMock()), "stream_unary"),
-    ],
-)
-def test_rate_limit_rejection_preserves_streaming_cardinality(original, attribute):
-    result = RateLimitResult(allowed=False, retry_after=1.0, reset_at=2.0)
-
-    rejected = make_rate_limit_rejection(original, result)
-
-    assert getattr(rejected, attribute) is not None

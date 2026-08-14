@@ -1,5 +1,5 @@
 import type React from 'react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { User } from '@/types'
@@ -146,6 +146,37 @@ describe('useAuth login settlement', () => {
     expect(serviceMocks.logout).not.toHaveBeenCalled()
     expect(getSessionGeneration()).toBe('session-newer')
     expect(useAuthStore.getState().user).toEqual(existingUser)
+  })
+
+  it('does not commit an older login after another account changes the generation', async () => {
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const replacementToken = accessToken(replacementUser.username)
+    serviceMocks.login.mockImplementation(async () => {
+      setAccessToken(replacementToken)
+      setSessionGeneration(`session-${replacementUser.username}`, replacementUser.username)
+      return {
+        access_token: replacementToken,
+        token_type: 'bearer',
+        expires_in: 3600,
+        user: replacementUser,
+      }
+    })
+    serviceMocks.getUserPermissions.mockImplementation(async () => {
+      setAccessToken(accessToken('newer-account'))
+      setSessionGeneration('session-newer-account', 'newer-account')
+      return ['replacement:read']
+    })
+
+    await expect(act(() => result.current.login({
+      username: replacementUser.username,
+      password: 'password',
+    }))).rejects.toThrow('认证账号已切换')
+
+    expect(serviceMocks.logout).not.toHaveBeenCalled()
+    expect(useAuthStore.getState().user).toEqual(existingUser)
+    expect(useAuthStore.getState().permissions).toEqual([])
+    expect(useAuthStore.getState().error).toBeNull()
   })
 
   it('does not clear another tab session after invalid login credentials', async () => {

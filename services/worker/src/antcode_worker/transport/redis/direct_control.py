@@ -3,14 +3,37 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from antcode_core.common.utils.worker_request import build_worker_signed_headers
+from antcode_core.common.utils.worker_request import (
+    HTTP_POST_METHOD,
+    build_worker_signed_headers,
+    encode_worker_json_body,
+    request_path_from_url,
+)
+
+from antcode_worker.transport.base import GenerationLostError
 
 CONTROL_REQUEST_TIMEOUT_SECONDS = 15.0
 HTTP_ERROR_STATUS = 400
+
+
+@dataclass(frozen=True)
+class DirectLeaseGrant:
+    """Direct 控制面一次 Lease 签发/续租的完整应答。
+
+    ``ttl_ms`` 与 Gateway 的 ``LeaseResponse.ttl_ms`` 同源同义：服务端权威
+    TTL，Worker 用它校验 ``renew_after_ms * 2 < ttl_ms``。
+    """
+
+    lease_id: str
+    expires_at_ms: int
+    renew_after_ms: int
+    ttl_ms: int
+    revoked: bool
 
 
 class DirectControlClient:
@@ -43,14 +66,27 @@ class DirectControlClient:
     def _new_client() -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=CONTROL_REQUEST_TIMEOUT_SECONDS)
 
-    async def lease_renew(self, current_lease_id: str, metrics: dict | None) -> tuple[str, int, int, bool]:
-        payload = {"operation": "lease", "current_lease_id": current_lease_id, "metrics": metrics}
+    async def lease_renew(
+        self,
+        current_lease_id: str,
+        metrics: dict | None,
+        capabilities: dict[str, str],
+    ) -> DirectLeaseGrant:
+        payload = {
+            "operation": "lease",
+            "current_lease_id": current_lease_id,
+            "metrics": metrics,
+            "capabilities": capabilities,
+        }
         data = await self._post("lease", payload)
-        return (
-            self._required_string(data, "lease_id", allow_empty=bool(data.get("revoked"))),
-            self._required_int(data, "expires_at_ms"),
-            self._required_int(data, "renew_after_ms"),
-            self._required_bool(data, "revoked"),
+        return DirectLeaseGrant(
+            lease_id=self._required_string(data, "lease_id", allow_empty=bool(data.get("revoked"))),
+            expires_at_ms=self._required_int(data, "expires_at_ms"),
+            renew_after_ms=self._required_int(data, "renew_after_ms"),
+            # 缺 ttl_ms 直接判协议不合法：Direct 控制面与本 Worker 同版本发布，
+            # 缺字段只可能是签发路径漏填，静默放过等于让双执行守卫失效。
+            ttl_ms=self._required_int(data, "ttl_ms"),
+            revoked=self._required_bool(data, "revoked"),
         )
 
     async def claim_run_ownership(self, lease_id: str, run_id: str, ttl_ms: int) -> bool:
@@ -144,19 +180,24 @@ class DirectControlClient:
     async def _post(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self._client is None or (self._owns_client and self._client.is_closed):
             self._client = self._new_client()
+        url = f"{self._base_url}/api/v1/workers/{self._worker_id}/direct-control/{operation}"
+        body = encode_worker_json_body(payload)
         worker = SimpleNamespace(public_id=self._worker_id)
         headers = build_worker_signed_headers(
             worker,
             api_key=self._api_key,
             secret_key=self._secret_key,
-            payload=payload,
+            method=HTTP_POST_METHOD,
+            path=request_path_from_url(url),
+            body=body,
         )
-        url = f"{self._base_url}/api/v1/workers/{self._worker_id}/direct-control/{operation}"
-        response = await self._client.post(url, json=payload, headers=headers)
+        response = await self._client.post(url, content=body, headers=headers)
         return self._response_data(response, operation)
 
     @staticmethod
     def _response_data(response: httpx.Response, operation: str) -> dict[str, Any]:
+        if response.status_code == httpx.codes.PRECONDITION_FAILED:
+            raise GenerationLostError(f"Direct control {operation} 的 Lease generation 已失效")
         try:
             body = response.json()
         except ValueError as exc:
@@ -190,4 +231,4 @@ class DirectControlClient:
         return value
 
 
-__all__ = ["DirectControlClient"]
+__all__ = ["DirectControlClient", "DirectLeaseGrant"]

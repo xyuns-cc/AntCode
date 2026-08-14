@@ -51,7 +51,7 @@ class SubscribeRequest(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., capabilities: _Optional[_Iterable[str]] = ..., prefetch: _Optional[int] = ..., lease_id: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class TaskDispatch(_message.Message):
-    __slots__ = ("task_id", "project_id", "project_type", "priority", "params", "environment", "timeout_seconds", "source_bundle_uri", "source_bundle_sha256", "source_bundle_size", "transfer_method", "resolved_revision", "source_subdir", "entry_point", "run_id", "receipt_id", "runtime_env_name", "trace")
+    __slots__ = ("task_id", "project_id", "project_type", "priority", "params", "environment", "timeout_seconds", "source_bundle_uri", "source_bundle_sha256", "source_bundle_size", "transfer_method", "resolved_revision", "source_subdir", "entry_point", "run_id", "receipt_id", "runtime_env_name", "sealed_ready_payload", "trace")
     class ParamsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -83,6 +83,7 @@ class TaskDispatch(_message.Message):
     RUN_ID_FIELD_NUMBER: _ClassVar[int]
     RECEIPT_ID_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_ENV_NAME_FIELD_NUMBER: _ClassVar[int]
+    SEALED_READY_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     project_id: str
@@ -101,8 +102,9 @@ class TaskDispatch(_message.Message):
     run_id: str
     receipt_id: str
     runtime_env_name: str
+    sealed_ready_payload: bytes
     trace: _common_pb2.TraceContext
-    def __init__(self, task_id: _Optional[str] = ..., project_id: _Optional[str] = ..., project_type: _Optional[str] = ..., priority: _Optional[int] = ..., params: _Optional[_Mapping[str, str]] = ..., environment: _Optional[_Mapping[str, str]] = ..., timeout_seconds: _Optional[int] = ..., source_bundle_uri: _Optional[str] = ..., source_bundle_sha256: _Optional[str] = ..., source_bundle_size: _Optional[int] = ..., transfer_method: _Optional[str] = ..., resolved_revision: _Optional[str] = ..., source_subdir: _Optional[str] = ..., entry_point: _Optional[str] = ..., run_id: _Optional[str] = ..., receipt_id: _Optional[str] = ..., runtime_env_name: _Optional[str] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
+    def __init__(self, task_id: _Optional[str] = ..., project_id: _Optional[str] = ..., project_type: _Optional[str] = ..., priority: _Optional[int] = ..., params: _Optional[_Mapping[str, str]] = ..., environment: _Optional[_Mapping[str, str]] = ..., timeout_seconds: _Optional[int] = ..., source_bundle_uri: _Optional[str] = ..., source_bundle_sha256: _Optional[str] = ..., source_bundle_size: _Optional[int] = ..., transfer_method: _Optional[str] = ..., resolved_revision: _Optional[str] = ..., source_subdir: _Optional[str] = ..., entry_point: _Optional[str] = ..., run_id: _Optional[str] = ..., receipt_id: _Optional[str] = ..., runtime_env_name: _Optional[str] = ..., sealed_ready_payload: _Optional[bytes] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class AckTaskRequest(_message.Message):
     __slots__ = ("worker_id", "receipt_id", "task_id", "accepted", "reason", "lease_id", "trace")

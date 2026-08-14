@@ -29,7 +29,8 @@ export const createNotice = (type: LogMessageType, content: string): LogMessage 
 
 export const toLogMessage = (entry: LogEntry): LogMessage => ({
   id: entry.id || createUniqueId(),
-  type: entry.log_type as LogMessageType,
+  // 无强制转换：LogMessageType 由后端 LogType 派生，赋值不成立就是编译错误。
+  type: entry.log_type,
   content: entry.message,
   timestamp: entry.timestamp,
   level: entry.level,

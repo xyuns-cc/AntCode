@@ -9,6 +9,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from antcode_contracts.runtime_metadata import RUNTIME_DESCRIPTION_MAX_BYTES
 from antcode_worker.engine.engine import Engine
 
 FUTURE_RUNTIME_DEADLINE_MS = 4_102_444_800_000
@@ -135,6 +136,37 @@ async def test_runtime_control_retries_result_without_reexecuting_action(
     action.assert_awaited_once()
     assert mock_transport.send_control_result.await_count == RESULT_SEND_ATTEMPTS
     sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.asyncio
+async def test_runtime_update_rejects_oversized_metadata_before_uv_manager(
+    mock_transport,
+    mock_executor,
+    monkeypatch,
+):
+    mock_transport.send_control_result = AsyncMock(return_value=True)
+    update = AsyncMock()
+    monkeypatch.setattr("antcode_worker.runtime.uv_manager.uv_manager.update_env", update)
+    engine = Engine(transport=mock_transport, executor=mock_executor)
+    control = MagicMock(
+        payload={
+            "action": "update_env",
+            "request_id": "req-oversized",
+            "expires_at_ms": FUTURE_RUNTIME_DEADLINE_MS,
+            "payload": {
+                "env_name": "private-test",
+                "description": "界" * (RUNTIME_DESCRIPTION_MAX_BYTES // 3 + 1),
+            },
+        },
+        receipt="receipt-oversized",
+    )
+
+    await engine._handle_runtime_control(control)
+
+    update.assert_not_awaited()
+    settlement = mock_transport.send_control_result.await_args.kwargs
+    assert settlement["success"] is False
+    assert "description UTF-8" in settlement["error"]
 
 
 @pytest.mark.asyncio

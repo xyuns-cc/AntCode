@@ -30,6 +30,7 @@ export interface SpiderItemsResponse {
   items: SpiderItem[]
   last_id: string
   count: number
+  has_more: boolean
 }
 
 class RunsService extends BaseService {
@@ -46,7 +47,7 @@ class RunsService extends BaseService {
   /** O2: 列出该 run 由 SpiderDataReporter 写入的抓取数据条目。 */
   async listSpiderItems(
     runId: string,
-    params?: { startId?: string; count?: number },
+    params?: { startId?: string; count?: number }
   ): Promise<SpiderItemsResponse> {
     const query: Record<string, string | number> = {}
     if (params?.startId) query.start_id = params.startId
@@ -60,7 +61,7 @@ class RunsService extends BaseService {
    */
   async downloadArtifact(runId: string, artifactName: string): Promise<void> {
     const url = `/api/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(
-      artifactName,
+      artifactName
     )}/download`
     const response = await apiClient.get(url, { responseType: 'blob' })
     const blob = response.data as Blob

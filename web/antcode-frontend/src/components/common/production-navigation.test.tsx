@@ -1,4 +1,4 @@
-import { MemoryRouter, useLocation } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router'
 import { render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { User } from '@/types'
@@ -9,7 +9,7 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({ isAuthenticated: true, loading: false }),
 }))
 vi.mock('@/components/common/Layout', async () => {
-  const { Outlet } = await import('react-router-dom')
+  const { Outlet } = await import('react-router')
   return { default: () => <Outlet /> }
 })
 vi.mock('@/components/common/AppInitializer', () => ({ default: () => null }))

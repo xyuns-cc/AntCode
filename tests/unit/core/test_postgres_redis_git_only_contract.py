@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 from antcode_core.application.services.crawl.backends import base as crawl_queue_backend
 from antcode_core.application.services.crawl.backends import dedup_backend, progress_backend
-from antcode_core.application.services.scheduler import queue_backend
 from antcode_core.domain.schemas.project import (
     FileInfo,
     ProjectCodeCreateRequest,
@@ -28,15 +27,8 @@ MYSQL_ONLY_TOKENS = (
 )
 
 
-@pytest.mark.parametrize("env_name", ["QUEUE_BACKEND", "CRAWL_BACKEND"])
-def test_memory_queue_backends_are_rejected(monkeypatch, env_name):
-    monkeypatch.setenv(env_name, "memory")
-    if env_name == "QUEUE_BACKEND":
-        queue_backend.reset_queue_backend()
-        with pytest.raises(ValueError, match="Redis"):
-            queue_backend.get_queue_backend()
-        return
-
+def test_crawl_memory_queue_backend_is_rejected(monkeypatch):
+    monkeypatch.setenv("CRAWL_BACKEND", "memory")
     crawl_queue_backend.reset_queue_backend()
     with pytest.raises(ValueError, match="Redis"):
         crawl_queue_backend.get_queue_backend()
@@ -102,7 +94,9 @@ def test_sql_migrations_are_postgresql_only_and_idempotent():
     for path in migrations:
         content = path.read_text(encoding="utf-8")
         assert not any(token in content for token in MYSQL_ONLY_TOKENS)
-        assert "IF NOT EXISTS" in content or "IF EXISTS" in content
+        has_exists_guard = "IF NOT EXISTS" in content or "IF EXISTS" in content
+        has_catalog_guard = "DO $$" in content and "pg_constraint" in content
+        assert has_exists_guard or has_catalog_guard
 
 
 def test_current_master_control_modules_replace_legacy_loops_package():

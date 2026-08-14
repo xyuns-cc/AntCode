@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-import ipaddress
-import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
+
+from antcode_contracts.network_security import (
+    is_metadata_target,
+    is_non_public_address,
+)
+from antcode_contracts.network_security import (
+    resolve_host_addresses as resolve_network_host_addresses,
+)
 
 from antcode_core.common.config import settings
 
@@ -22,15 +28,6 @@ BLOCKED_GIT_HOSTS = frozenset(
         "::1",
     }
 )
-METADATA_HOSTS = frozenset(
-    {
-        "169.254.169.254",
-        "100.100.100.200",
-        "fd00:ec2::254",
-        "metadata.google.internal",
-    }
-)
-
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ssh": 22}
 
 
@@ -69,28 +66,11 @@ class ResolvedURL:
 
 
 def _is_private_ip(host: str) -> bool:
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
-        return True
-    # 兜底: 任何非全局可路由地址一律拒绝, 覆盖 CGNAT/共享地址空间
-    # (100.64.0.0/10, 含阿里云 metadata 邻域 100.100.100.0/24)、
-    # benchmarking(198.18.0.0/15) 等 is_private=False 的内网向量。
-    return not address.is_global
+    return is_non_public_address(host)
 
 
 def _is_metadata_target(host: str) -> bool:
-    normalized = (host or "").strip().lower().rstrip(".")
-    if normalized in METADATA_HOSTS:
-        return True
-    try:
-        address = ipaddress.ip_address(normalized)
-    except ValueError:
-        return False
-    mapped = getattr(address, "ipv4_mapped", None)
-    return mapped is not None and str(mapped) in METADATA_HOSTS
+    return is_metadata_target(host)
 
 
 def _extract_host(url: str) -> str:
@@ -102,22 +82,18 @@ def _extract_host(url: str) -> str:
         raise ValueError("Git URL 主机格式无效") from exc
 
 
+def _reject_embedded_credentials(url: str) -> None:
+    if url.lower().startswith("git@"):
+        return
+    parsed = urlsplit(url)
+    if parsed.password is not None:
+        raise ValueError("Git URL 不允许包含内嵌密码或访问令牌")
+    if parsed.scheme.lower() in {"http", "https"} and parsed.username is not None:
+        raise ValueError("HTTP(S) Git URL 不允许包含内嵌用户名或访问令牌")
+
+
 def _resolve_host(host: str, *, require_public: bool) -> tuple[str, ...]:
-    try:
-        addresses = {str(item[4][0]) for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError(f"Git 主机无法解析: {host!r}") from exc
-    if not addresses:
-        raise ValueError(f"Git 主机没有可用地址: {host!r}")
-    metadata = sorted(address for address in addresses if _is_metadata_target(address))
-    if metadata:
-        resolved = ", ".join(metadata)
-        raise ValueError(f"目标主机解析到云元数据端点: {host!r} -> {resolved}")
-    blocked = sorted(address for address in addresses if require_public and _is_private_ip(address))
-    if blocked:
-        resolved = ", ".join(blocked)
-        raise ValueError(f"Git URL 解析到私网/回环/保留地址: {host!r} -> {resolved}")
-    return tuple(sorted(addresses, key=lambda item: (":" in item, item)))
+    return resolve_network_host_addresses(host, allow_private=not require_public)
 
 
 def resolve_host_addresses(host: str) -> tuple[str, ...]:
@@ -160,6 +136,7 @@ def resolve_git_url(url: object) -> ResolvedURL:
     """Validate and resolve a Git URL for connection-time DNS pinning."""
     stripped = _validate_syntax(url)
     host = _extract_host(stripped).lower()
+    _reject_embedded_credentials(stripped)
     if not host:
         raise ValueError("Git URL 缺少主机")
     if _is_metadata_target(host):

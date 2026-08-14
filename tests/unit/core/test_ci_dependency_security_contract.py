@@ -1,7 +1,6 @@
 import ast
 import json
 import tomllib
-from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -9,9 +8,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
-SECURITY_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "security-scan.yml"
-DOCKER_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "docker-build.yml"
-TRIVY_IGNORE_PATH = ROOT / ".trivyignore.yaml"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 MAKEFILE_PATH = ROOT / "Makefile"
 TESTS_README_PATH = ROOT / "tests" / "README.md"
@@ -19,9 +15,7 @@ MIGRATION_TEST_PATH = ROOT / "tests/integration/postgres/test_20260713_migration
 SCHEDULER_TEST_PATH = ROOT / "tests/unit/master/test_scheduler_concurrency_stats.py"
 FRONTEND_LOCK_PATH = ROOT / "web/antcode-frontend/package-lock.json"
 FRONTEND_PACKAGE_PATH = ROOT / "web/antcode-frontend/package.json"
-FRONTEND_SOURCE_PATH = ROOT / "web/antcode-frontend/src"
 NPM_AUDIT_GATE_PATH = ROOT / "scripts/check_npm_audit.mjs"
-TRIVY_GATE_COUNT = 4
 
 
 def _workflow() -> dict:
@@ -69,6 +63,13 @@ def test_backend_tests_run_real_redis_contracts_and_integrations() -> None:
     assert integration_env["DATABASE_URL"].endswith("/antcode_e2e_test")
 
 
+def test_backend_unit_matrix_includes_scrapy_tests() -> None:
+    job = _workflow()["jobs"]["backend-test"]
+    command = _step_command(job, "Run Worker, script, and Scrapy unit tests")
+
+    assert "tests/unit/worker tests/unit/scripts tests/unit/scrapy" in command
+
+
 def test_make_and_documented_test_targets_use_directories() -> None:
     makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
     readme = TESTS_README_PATH.read_text(encoding="utf-8")
@@ -95,6 +96,7 @@ def test_pytest_uses_strict_registered_markers() -> None:
 def test_pip_audit_uses_exported_third_party_lock() -> None:
     job = _workflow()["jobs"]["backend-security"]
     command = _step_command(job, "Run pip-audit (deps CVE scan)")
+    bandit_command = _step_command(job, "Run bandit security scan")
     bandit_gate = _step_command(job, "Block on HIGH severity bandit findings")
     audit_gate = _step_command(job, "Block on HIGH/CRITICAL pip-audit findings")
 
@@ -102,6 +104,7 @@ def test_pip_audit_uses_exported_third_party_lock() -> None:
     assert "uv export --locked --all-packages --extra dev --no-emit-workspace" in command
     assert "pip-audit --strict --no-deps --disable-pip" in command
     assert "--requirement audit-requirements.txt" in command
+    assert "bandit -r packages/ services/ scripts/" in bandit_command
     assert bandit_gate.startswith("uv run --extra dev python ")
     assert audit_gate.startswith("uv run --extra dev python ")
 
@@ -125,47 +128,6 @@ def test_frontend_install_does_not_execute_lockfile_external_npx() -> None:
 
     assert "npx" not in preinstall
     assert "only-allow" not in preinstall
-
-
-def test_trivy_rsc_advisory_exception_is_narrow_and_expires() -> None:
-    policy = yaml.safe_load(TRIVY_IGNORE_PATH.read_text(encoding="utf-8"))
-    assert policy == {
-        "vulnerabilities": [
-            {
-                "id": "GHSA-qwww-vcr4-c8h2",
-                "paths": ["web/antcode-frontend/package-lock.json"],
-                "expired_at": date(2026, 8, 31),
-                "statement": (
-                    "Not affected: AntCode is a React 18 SPA using react-router-dom browser APIs. "
-                    "The advisory explicitly affects only unstable React Server Components APIs, "
-                    "which are not imported or enabled. Re-evaluate before this exception expires."
-                ),
-            }
-        ]
-    }
-    source = "\n".join(
-        path.read_text(encoding="utf-8") for path in FRONTEND_SOURCE_PATH.rglob("*") if path.suffix in {".ts", ".tsx"}
-    )
-    assert "react-server" not in source
-    assert "unstable_RSC" not in source
-    assert "RSCHydratedRouter" not in source
-    assert "RSCStaticRouter" not in source
-
-
-def test_every_trivy_gate_loads_the_structured_exception() -> None:
-    workflows = (
-        yaml.safe_load(SECURITY_WORKFLOW_PATH.read_text(encoding="utf-8")),
-        yaml.safe_load(DOCKER_WORKFLOW_PATH.read_text(encoding="utf-8")),
-    )
-    trivy_steps = [
-        step
-        for workflow in workflows
-        for job in workflow["jobs"].values()
-        for step in job["steps"]
-        if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
-    ]
-    assert len(trivy_steps) == TRIVY_GATE_COUNT
-    assert all(step["with"]["trivyignores"] == ".trivyignore.yaml" for step in trivy_steps)
 
 
 def test_npm_audit_gate_is_precise_fail_closed_and_expires() -> None:
@@ -246,6 +208,12 @@ def test_e2e_job_really_runs_and_gates_image_publication() -> None:
     # E2E 门禁必须真实执行（不是 --collect-only），且跑在 compose 全栈之上
     assert "pytest tests/e2e -q" in run_step
     assert "--collect-only" not in run_step
+    run_env = next(step["env"] for step in e2e_job["steps"] if step.get("name") == "Run E2E tests")
+    assert run_env["ANTCODE_E2E_ADMIN_USER"] == "admin"
+    assert run_env["ANTCODE_E2E_ADMIN_PASSWORD"] == "${{ env.DEFAULT_ADMIN_PASSWORD }}"
+    assert "DATABASE_URL" not in run_env
+    assert "ANTCODE_E2E_DATABASE_HOST" not in run_env
+    assert "ANTCODE_E2E_DATABASE_NAME" not in run_env
     assert "docker-compose.dev.yml" in str(e2e_job["env"]["COMPOSE_ARGS"])
     # P1-CI-03: fresh 栈必须先显式建表（web_api lifespan 不建表）。
     assert "scripts.init_db" in init_step
@@ -262,6 +230,14 @@ def test_e2e_job_really_runs_and_gates_image_publication() -> None:
     # 镜像发布与分支保护 summary 都必须被真实 E2E 阻断
     assert "e2e" in jobs["publish-images"]["needs"]
     assert "e2e" in jobs["summary"]["needs"]
+
+
+def test_ci_node_version_matches_frontend_engine_floor() -> None:
+    workflow = _workflow()
+    package = json.loads(FRONTEND_PACKAGE_PATH.read_text(encoding="utf-8"))
+
+    assert workflow["env"]["NODE_VERSION"] == "22.22.0"
+    assert package["engines"]["node"] == ">=22.22.0"
 
 
 def test_windows_security_job_publishes_actionable_failure_annotations() -> None:

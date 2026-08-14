@@ -13,6 +13,7 @@ from tortoise.transactions import in_transaction
 from antcode_core.application.services.scheduler.execution_status_service import (
     execution_status_service,
 )
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
 from antcode_core.domain.models.worker import Worker
@@ -53,7 +54,7 @@ _TASK_STATUS_BY_RUNTIME = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResultCommitRequest:
     run_id: str
     worker_id: str
@@ -65,10 +66,20 @@ class ResultCommitRequest:
     metadata_builder: MetadataBuilder
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class ResultCommitOutcome:
+    """Authoritative result of the ownership-fenced row transaction."""
+
+    accepted: bool
+    run_id: str
+    runtime_status: RuntimeStatus | None
+
+
+@dataclass(frozen=True, slots=True)
 class _UpdateDecision:
     accepted: bool
     updates: dict[str, Any]
+    runtime_status: RuntimeStatus | None
 
 
 class ResultMetadataRejected(ValueError):
@@ -82,16 +93,20 @@ class TaskResultCommitter:
         self._lease_validator = lease_validator
 
     async def commit(self, request: ResultCommitRequest) -> bool:
+        """Compatibility wrapper for callers that only need acceptance."""
+        return (await self.commit_outcome(request)).accepted
+
+    async def commit_outcome(self, request: ResultCommitRequest) -> ResultCommitOutcome:
         if not self._valid_identity(request):
-            return False
+            return _rejected_outcome(request.run_id)
         lease_is_current = await self._is_current(request)
-        committed = await self._commit_locked(request, lease_is_current)
-        if not committed:
-            return False
-        execution = await TaskRun.get_or_none(run_id=request.run_id)
+        outcome = await self._commit_locked(request, lease_is_current)
+        if not outcome.accepted:
+            return outcome
+        execution = await TaskRun.get_or_none(run_id=outcome.run_id)
         if execution is not None:
             await execution_status_service._sync_task_status(execution, request.status_at)
-        return True
+        return outcome
 
     def _valid_identity(self, request: ResultCommitRequest) -> bool:
         if not request.worker_id or request.worker_id != request.worker_id.strip():
@@ -113,31 +128,37 @@ class TaskResultCommitter:
         assert self._lease_validator is not None
         return await self._lease_validator(request.worker_id, request.lease_id)
 
-    async def _commit_locked(self, request: ResultCommitRequest, lease_is_current: bool) -> bool:
+    async def _commit_locked(
+        self,
+        request: ResultCommitRequest,
+        lease_is_current: bool,
+    ) -> ResultCommitOutcome:
         async with in_transaction("default") as connection:
             execution = await self._locked_execution(request.run_id, connection)
             if execution is None:
                 logger.warning("执行记录不存在: {}", request.run_id)
-                return False
+                return _rejected_outcome(request.run_id)
             if not await self._matches_worker(execution, request.worker_id, connection):
                 logger.warning("拒绝非归属 Worker 结果: run_id={} worker_id={}", request.run_id, request.worker_id)
-                return False
+                return _rejected_outcome(execution.run_id)
             if execution.lease_id != request.lease_id:
                 logger.warning("拒绝非绑定代际结果: run_id={} lease_id={}", request.run_id, request.lease_id)
-                return False
+                return _rejected_outcome(execution.run_id)
             if not lease_is_current and request.runtime_status not in _RUNTIME_TERMINAL:
                 logger.warning("拒绝已过期代际的非终态结果: run_id={}", request.run_id)
-                return False
+                return _rejected_outcome(execution.run_id)
             decision = _result_update_decision(execution, request)
             if not decision.accepted:
-                return False
+                return _rejected_outcome(execution.run_id)
             if decision.updates:
-                await (
+                updated = await (
                     TaskRun.filter(id=execution.id, lease_id=request.lease_id)
                     .using_db(connection)
                     .update(**decision.updates)
                 )
-            return True
+                if updated != 1:
+                    raise RuntimeError(f"结果提交行锁不变量被破坏: run_id={execution.run_id}")
+            return ResultCommitOutcome(True, execution.run_id, decision.runtime_status)
 
     @staticmethod
     async def _locked_execution(run_id: str, connection: Any) -> TaskRun | None:
@@ -157,25 +178,41 @@ class TaskResultCommitter:
 def _result_update_decision(execution: TaskRun, request: ResultCommitRequest) -> _UpdateDecision:
     progress = request.runtime_status in _PROGRESS_STATUSES
     if _dispatch_blocks_result(execution):
-        return _UpdateDecision(accepted=progress, updates={})
-    if execution.runtime_status in _RUNTIME_TERMINAL and execution.runtime_status != request.runtime_status:
-        return _UpdateDecision(accepted=progress, updates={})
-    if _is_stale_runtime_transition(execution, request):
-        return _UpdateDecision(accepted=progress or execution.runtime_status == request.runtime_status, updates={})
-    effective_request = request
-    try:
-        updates = request.metadata_builder(execution)
-    except ResultMetadataRejected as exc:
-        logger.warning("结果 metadata 被拒绝: run_id={} error={}", request.run_id, exc)
-        effective_request = replace(
-            request,
-            runtime_status=RuntimeStatus.FAILED,
-            error_message=str(exc),
-        )
-        updates = {}
+        return _UpdateDecision(progress, {}, execution.runtime_status)
+    effective_request, updates = _normalize_result_metadata(execution, request)
+    progress = effective_request.runtime_status in _PROGRESS_STATUSES
+    current = execution.runtime_status
+    if current in _RUNTIME_TERMINAL and current != effective_request.runtime_status:
+        return _UpdateDecision(progress, {}, current)
+    if _is_stale_runtime_transition(execution, effective_request):
+        accepted = progress or current == effective_request.runtime_status
+        return _UpdateDecision(accepted, {}, current)
     _apply_dispatch_update(execution, effective_request, updates)
     _apply_runtime_update(execution, effective_request, updates)
-    return _UpdateDecision(accepted=True, updates=updates)
+    runtime_status = updates.get("runtime_status", current)
+    return _UpdateDecision(True, updates, runtime_status)
+
+
+def _normalize_result_metadata(
+    execution: TaskRun,
+    request: ResultCommitRequest,
+) -> tuple[ResultCommitRequest, dict[str, Any]]:
+    try:
+        return request, request.metadata_builder(execution)
+    except ResultMetadataRejected as exc:
+        logger.warning("结果 metadata 被拒绝: run_id={} error={}", request.run_id, exc)
+        return (
+            replace(
+                request,
+                runtime_status=RuntimeStatus.FAILED,
+                error_message=str(exc),
+            ),
+            {},
+        )
+
+
+def _rejected_outcome(run_id: str) -> ResultCommitOutcome:
+    return ResultCommitOutcome(False, str(run_id), None)
 
 
 def _dispatch_blocks_result(execution: TaskRun) -> bool:
@@ -219,7 +256,7 @@ def _apply_runtime_update(execution: TaskRun, request: ResultCommitRequest, upda
     if request.exit_code is not None:
         updates["exit_code"] = request.exit_code
     if request.error_message:
-        updates["error_message"] = request.error_message
+        updates["error_message"] = normalize_persisted_error_message(request.error_message)
     if request.runtime_status == RuntimeStatus.RUNNING and not execution.start_time:
         updates["start_time"] = request.status_at
     if request.runtime_status not in _RUNTIME_TERMINAL:
@@ -232,4 +269,9 @@ def _apply_runtime_update(execution: TaskRun, request: ResultCommitRequest, upda
         updates.setdefault("duration_seconds", (end_time - start_time).total_seconds())
 
 
-__all__ = ["ResultCommitRequest", "ResultMetadataRejected", "TaskResultCommitter"]
+__all__ = [
+    "ResultCommitOutcome",
+    "ResultCommitRequest",
+    "ResultMetadataRejected",
+    "TaskResultCommitter",
+]

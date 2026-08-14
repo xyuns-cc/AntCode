@@ -12,12 +12,35 @@ import contextlib
 import platform
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any
 
 from loguru import logger
+
+# CapabilityDetector 现居 capability_detector.py；此处显式再导出，
+# 因为 app/capabilities.py 与既有测试仍按 heartbeat.reporter 路径导入。
+from antcode_worker.heartbeat.capability_detector import (
+    CapabilityDetector as CapabilityDetector,
+)
+from antcode_worker.heartbeat.capability_detector import get_capability_detector
+from antcode_worker.heartbeat.lease_timing import (
+    DEFAULT_RENEW_AFTER_MS,
+    MILLISECONDS_PER_SECOND,
+    HeartbeatClock,
+    LeaseRenewalWindow,
+    LeaseRenewalWindowError,
+    adopt_server_window,
+    reconnect_delay_seconds,
+)
+from antcode_worker.heartbeat.renewal_supervision import classify_loop_termination, report_fatal_termination
+from antcode_worker.heartbeat.reporter_models import Heartbeat, Metrics, OSInfo, SpiderStats
+from antcode_worker.heartbeat.reporter_protocols import MetricsCollectorProtocol as MetricsCollectorProtocol
+from antcode_worker.heartbeat.reporter_protocols import TransportProtocol as TransportProtocol
+from antcode_worker.transport.generation import raise_if_generation_lost
+
+MIB_IN_BYTES = 1024 * 1024
+GIB_IN_BYTES = 1024 * MIB_IN_BYTES
 
 
 class HeartbeatState(StrEnum):
@@ -30,202 +53,25 @@ class HeartbeatState(StrEnum):
     STOPPED = "stopped"  # 已停止
 
 
-class TransportProtocol(Protocol):
-    """传输层协议"""
-
-    @property
-    def is_connected(self) -> bool:
-        """是否已连接"""
-        ...
-
-    async def send_heartbeat(self, heartbeat: Any) -> bool:
-        """发送心跳"""
-        ...
-
-    async def reconnect(self) -> bool:
-        """重连"""
-        ...
-
-
-class MetricsCollectorProtocol(Protocol):
-    """指标收集器协议"""
-
-    def get_metrics(self) -> dict:
-        """获取系统指标"""
-        ...
-
-    def get_os_info(self) -> dict:
-        """获取操作系统信息"""
-        ...
-
-    def get_spider_stats(self) -> dict | None:
-        """获取爬虫统计"""
-        ...
-
-    def update_heartbeat_ts(self, ts: float | None = None) -> None:
-        """更新心跳时间戳"""
-        ...
-
-    def increment_reconnect_count(self) -> None:
-        """增加重连计数"""
-        ...
-
-    def reset_reconnect_count(self) -> None:
-        """重置重连计数"""
-        ...
-
-
-@dataclass
-class OSInfo:
-    """操作系统信息"""
-
-    os_type: str = ""
-    os_version: str = ""
-    python_version: str = ""
-    machine_arch: str = ""
-
-
-@dataclass
-class SpiderStats:
-    """爬虫统计"""
-
-    request_count: int = 0
-    response_count: int = 0
-    item_scraped_count: int = 0
-    error_count: int = 0
-    avg_latency_ms: float = 0.0
-    requests_per_minute: float = 0.0
-    status_codes: dict = field(default_factory=dict)
-
-
-@dataclass
-class Metrics:
-    """系统指标"""
-
-    cpu: float = 0.0
-    memory: float = 0.0
-    disk: float = 0.0
-    running_tasks: int = 0
-    max_concurrent_tasks: int = 5
-    task_count: int = 0
-    project_count: int = 0
-    env_count: int = 0
-    spider_stats: SpiderStats | None = None
-
-
-@dataclass
-class Heartbeat:
-    """心跳数据"""
-
-    worker_id: str
-    status: str
-    metrics: Metrics
-    os_info: OSInfo
-    timestamp: datetime
-    name: str = ""
-    host: str = ""
-    port: int = 0
-    region: str = ""
-    capabilities: dict = field(default_factory=dict)
-    version: str = ""
-
-
-class CapabilityDetector:
-    """
-    Worker能力检测器
-
-    检测本地环境的可选能力并上报给主控。
-    """
-
-    def __init__(self):
-        self._cached_capabilities: dict | None = None
-
-    def detect_all(
-        self,
-        force_refresh: bool = False,
-        task_types: list[str] | None = None,
-    ) -> dict:
-        """检测所有能力。
-
-        Args:
-            force_refresh: 忽略缓存重新检测。
-            task_types: T6-T4a: 当前 worker 注册的 plugin 名列表（"code"/
-                "rule"/"spider"/"render" 等），供 master dispatcher 按
-                能力路由，避免把 rule 派到关掉 RulePlugin 的 worker。
-                None 表示保持原缓存值不动。
-        """
-        if self._cached_capabilities and not force_refresh and task_types is None:
-            return self._cached_capabilities
-
-        capabilities = self._cached_capabilities or {}
-        # 首次或强制刷新时才检测底层依赖
-        if not capabilities or force_refresh:
-            capabilities = {"curl_cffi": self._detect_curl_cffi()}
-
-        # T6-T4a: task_types 覆盖式更新（每次 register 都传最新的）
-        if task_types is not None:
-            capabilities["task_types"] = list(task_types)
-
-        self._cached_capabilities = capabilities
-        logger.debug(f"Worker能力检测完成: {self._summarize(capabilities)}")
-        return capabilities
-
-    def _summarize(self, capabilities: dict) -> str:
-        """生成能力摘要"""
-        enabled = []
-        for name, cap in capabilities.items():
-            # T6-T4a: task_types 是 list[str]，其他是 {"enabled": bool}
-            if name == "task_types":
-                if cap:
-                    enabled.append(f"tasks=[{','.join(cap)}]")
-                continue
-            if isinstance(cap, dict) and cap.get("enabled"):
-                enabled.append(name)
-        return ", ".join(enabled) if enabled else "无额外能力"
-
-    def _detect_curl_cffi(self) -> dict:
-        """检测 curl_cffi 能力"""
-        result = {"enabled": False}
-
-        try:
-            from curl_cffi import requests as curl_requests  # noqa: F401
-
-            result["enabled"] = True
-        except ImportError:
-            pass
-
-        return result
-
-
-# 全局能力检测器实例
-_capability_detector: CapabilityDetector | None = None
-
-
-def get_capability_detector() -> CapabilityDetector:
-    """获取全局能力检测器"""
-    global _capability_detector
-    if _capability_detector is None:
-        _capability_detector = CapabilityDetector()
-    return _capability_detector
-
-
 class HeartbeatReporter:
     """
     心跳上报器
 
-    定期发送心跳维护与 Gateway/Redis 的连接状态。
-    支持连续失败触发重连和降级模式。
+    心跳同时是 lease 续期信号：节拍由服务端 ``renew_after_ms`` 驱动，
+    并强制维持 ``interval < TTL/2``。连续失败只影响"下次重连尝试"的时间点，
+    不允许拖慢续期节拍（B6）。
 
     Requirements: 10.1, 10.3
     """
 
-    MIN_INTERVAL = 1
-    MAX_INTERVAL = 60
-    DEFAULT_INTERVAL = 30
+    DEFAULT_INTERVAL = DEFAULT_RENEW_AFTER_MS // MILLISECONDS_PER_SECOND
     MAX_CONSECUTIVE_FAILURES = 5
-    DEGRADED_INTERVAL = 60  # 降级模式下的心跳间隔
+    # 续期失败后收紧节拍，在 TTL 内多抢几次续期机会。
+    FAILURE_RETRY_INTERVAL_SECONDS = 1.0
+    # 循环自身异常（非续期失败）后的重试间隔，同样必须远小于 TTL。
+    LOOP_ERROR_RETRY_SECONDS = 1.0
     RECONNECT_BACKOFF_BASE = 2.0  # 重连退避基数
-    RECONNECT_BACKOFF_MAX = 300.0  # 最大重连退避时间（秒）
+    RECONNECT_BACKOFF_MAX = 300.0  # 最大重连退避时间（秒），只推迟重连
 
     def __init__(
         self,
@@ -238,11 +84,15 @@ class HeartbeatReporter:
         host: str = "",
         port: int = 0,
         region: str = "",
+        *,
+        renewal_window: LeaseRenewalWindow | None = None,
+        clock: HeartbeatClock | None = None,
     ):
         self._transport = transport
         self._worker_id = worker_id
-        self._interval = self.DEFAULT_INTERVAL
-        self._base_interval = self.DEFAULT_INTERVAL
+        self._renewal_window = renewal_window or LeaseRenewalWindow()
+        self._clock = clock or HeartbeatClock()
+        self._next_reconnect_at = 0.0
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_heartbeat_time: float | None = None
@@ -258,6 +108,7 @@ class HeartbeatReporter:
         self._region = region
         self._on_disconnect: Callable[[], Any] | None = None
         self._on_reconnect: Callable[[], Any] | None = None
+        self._fatal_error_handler: Callable[[BaseException], Any] | None = None
 
         # 重连相关
         self._reconnect_attempts = 0
@@ -275,9 +126,14 @@ class HeartbeatReporter:
         return self._last_heartbeat_time
 
     @property
-    def interval(self) -> int:
-        """心跳间隔"""
-        return self._interval
+    def interval(self) -> float:
+        """当前续期节拍（秒），由服务端 renew_after_ms 驱动"""
+        return self._renewal_window.interval_seconds
+
+    @property
+    def renewal_window(self) -> LeaseRenewalWindow:
+        """当前租约续期时序快照"""
+        return self._renewal_window
 
     @property
     def consecutive_failures(self) -> int:
@@ -306,43 +162,75 @@ class HeartbeatReporter:
         """设置指标收集器"""
         self._metrics_collector = collector
 
+    def set_max_concurrent_tasks(self, max_concurrent_tasks: int) -> None:
+        """Keep fallback heartbeat capacity aligned with live Engine config."""
+        if isinstance(max_concurrent_tasks, bool) or max_concurrent_tasks < 1:
+            raise ValueError("max_concurrent_tasks 必须是正整数")
+        self._max_concurrent_tasks = max_concurrent_tasks
+
     def update_worker_id(self, worker_id: str) -> None:
         """更新 Worker ID"""
         old_id = self._worker_id
         self._worker_id = worker_id
         logger.info(f"心跳上报器 worker_id 已更新: {old_id} -> {worker_id}")
 
-    async def start(self, interval: int = 30) -> None:
-        """启动心跳上报"""
+    async def start(self, interval: int = DEFAULT_INTERVAL) -> None:
+        """启动心跳（lease 续期）循环。
+
+        ``interval`` 必须来自服务端协商的 ``renew_after_ms``；违反
+        ``interval < TTL/2`` 时直接抛错，不做静默 clamp（clamp 会让 Worker
+        以为租约还在，而 master 已经把 run 补派出去）。
+        """
         if self._running:
             return
 
-        self._base_interval = max(self.MIN_INTERVAL, min(interval, self.MAX_INTERVAL))
-        self._interval = self._base_interval
+        self.apply_lease_renew_after_ms(interval * MILLISECONDS_PER_SECOND)
+        # 启动前 lifecycle 已跑过一次 lease_renew，传输层已握有服务端权威时序；
+        # 不立刻采纳的话，第一拍的续期超时（TTL/2）仍按本地引导 TTL 计算。
+        self._adopt_server_lease_cadence()
         self._running = True
         self._state = HeartbeatState.RUNNING
         self._task = asyncio.create_task(self._loop())
-        logger.info(f"心跳上报已启动: interval={self._interval}s")
+        self._task.add_done_callback(self._on_loop_finished)
+        logger.info(f"心跳上报已启动: interval={self._renewal_window.interval_seconds}s")
+
+    def set_fatal_error_handler(self, handler: Callable[[BaseException], Any]) -> None:
+        """注册续期循环终止时的进程级停机通道，理由见 ``renewal_supervision``。"""
+        self._fatal_error_handler = handler
+
+    def _on_loop_finished(self, task: asyncio.Task) -> None:
+        """续期循环终止即视为致命：先让状态说真话，再上报。"""
+        if self._task is not task:
+            return  # stop() 已接管并置空，属正常停止路径
+        self._running = False
+        self._state = HeartbeatState.STOPPED
+        error = classify_loop_termination(task)
+        if error is not None:
+            report_fatal_termination(error, self._fatal_error_handler)
+
+    def apply_lease_renew_after_ms(self, renew_after_ms: int) -> None:
+        """只调节拍、沿用当前 TTL；仅用于启动引导（租约尚未签发）。
+
+        租约签发后由 ``adopt_server_window`` 用服务端权威 TTL 重建窗口。
+        """
+        self._install_window(self._renewal_window.with_renew_after_ms(renew_after_ms))
+
+    def _install_window(self, window: LeaseRenewalWindow) -> None:
+        if window == self._renewal_window:
+            return
+        self._renewal_window = window
+        logger.info(f"lease 续期时序已更新: ttl_ms={window.ttl_ms} renew_after_ms={window.renew_after_ms}")
 
     async def stop(self) -> None:
         """停止心跳上报"""
         self._running = False
         self._state = HeartbeatState.STOPPED
-
-        # 取消心跳任务
-        if self._task and not self._task.done():
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+        tasks = (("心跳", self._task), ("重连", self._reconnect_task))
         self._task = None
-
-        # 取消重连任务
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._reconnect_task
         self._reconnect_task = None
-
+        failures = await _stop_reporter_tasks(tasks)
+        if failures:
+            raise ExceptionGroup("心跳上报停止失败", failures)
         logger.info("心跳上报已停止")
 
     async def send_heartbeat(self) -> bool:
@@ -352,7 +240,7 @@ class HeartbeatReporter:
             return False
 
         try:
-            heartbeat = self._build_heartbeat()
+            heartbeat = await self._build_heartbeat()
             start = time.time()
 
             success = await self._transport.send_heartbeat(heartbeat)
@@ -363,7 +251,7 @@ class HeartbeatReporter:
                 self._last_heartbeat_time = time.time()
                 self._consecutive_failures = 0
                 self._reconnect_attempts = 0
-                self._adjust_interval(True)
+                self._next_reconnect_at = 0.0
 
                 # 更新指标收集器
                 if self._metrics_collector:
@@ -384,40 +272,79 @@ class HeartbeatReporter:
                 self._record_heartbeat_failure("心跳发送失败")
                 return False
 
-        except Exception as e:
-            self._record_heartbeat_failure(f"心跳发送异常: {e}")
+        except Exception as exc:
+            raise_if_generation_lost(exc)
+            self._record_heartbeat_failure(f"心跳发送异常: {exc}")
             return False
 
     def _record_heartbeat_failure(self, reason: str) -> None:
         self._consecutive_failures += 1
-        self._adjust_interval(False)
         logger.warning(f"{reason}: consecutive={self._consecutive_failures}")
 
     async def _loop(self) -> None:
-        """心跳循环"""
+        """lease 续期主循环：任何失败路径都不得让节拍慢于 TTL。"""
         while self._running:
             try:
-                await self.send_heartbeat()
-
-                # 检查是否需要触发重连
-                if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
-                    await self._handle_consecutive_failures()
-
-                # 根据状态选择间隔
-                current_interval = self._get_current_interval()
-                await asyncio.sleep(current_interval)
-
+                await self._run_renewal_cycle()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"心跳循环异常: {e}")
-                await asyncio.sleep(5)
+            except LeaseRenewalWindowError:
+                # 服务端下发了会掉租约的节拍：炸穿主循环让故障可见。
+                # 吞掉它等于 Worker 以为自己还持有租约，而 master 已把 run 补派出去。
+                raise
+            except Exception as exc:
+                raise_if_generation_lost(exc)
+                logger.error(f"心跳循环异常: {exc}")
+                await self._clock.sleep(self.LOOP_ERROR_RETRY_SECONDS)
 
-    def _get_current_interval(self) -> int:
-        """获取当前心跳间隔"""
-        if self._state == HeartbeatState.DEGRADED:
-            return self.DEGRADED_INTERVAL
-        return self._interval
+    async def _run_renewal_cycle(self) -> None:
+        """一个续期周期：尝试续期 → 采纳服务端节拍 → 按需后台重连 → 等待下一拍。"""
+        renewed = await self._attempt_renewal()
+        self._adopt_server_lease_cadence()
+        if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+            self._schedule_reconnect()
+        await self._clock.sleep(self._next_delay_seconds(renewed))
+
+    def _adopt_server_lease_cadence(self) -> None:
+        """采纳服务端权威时序；越界或缺 TTL 由 ``adopt_server_window`` 显式抛错。"""
+        window = adopt_server_window(self._transport)
+        if window is not None:
+            self._install_window(window)
+
+    async def _attempt_renewal(self) -> bool:
+        """单次续期尝试，超过 TTL/2 视为失败。
+
+        有界的单次尝试 + 严格小于 TTL/2 的等待 ⇒ 相邻两次尝试间隔 < TTL。
+        """
+        try:
+            return await asyncio.wait_for(
+                self.send_heartbeat(),
+                timeout=self._renewal_window.max_attempt_gap_seconds,
+            )
+        except TimeoutError:
+            self._record_heartbeat_failure("心跳续期超时")
+            return False
+
+    def _next_delay_seconds(self, renewed: bool) -> float:
+        """下一次续期尝试前的等待时长；降级/重连状态一律不放慢节拍。"""
+        interval = self._renewal_window.interval_seconds
+        if renewed:
+            return interval
+        return min(self.FAILURE_RETRY_INTERVAL_SECONDS, interval)
+
+    def _schedule_reconnect(self) -> None:
+        """把重连（含指数退避）放到后台任务，主循环只负责按拍续期。"""
+        task = self._reconnect_task
+        if task is not None and not task.done():
+            return
+        if task is not None:
+            self._reconnect_task = None
+            failure = task.exception()
+            if failure is not None:
+                raise failure
+        if self._clock.monotonic() < self._next_reconnect_at:
+            return
+        self._reconnect_task = asyncio.create_task(self._handle_consecutive_failures())
 
     async def _handle_consecutive_failures(self) -> None:
         """处理连续失败"""
@@ -447,77 +374,55 @@ class HeartbeatReporter:
         self._consecutive_failures = 0
 
     async def _attempt_reconnect(self) -> bool:
-        """
-        尝试重连
+        """尝试重连。
 
-        使用指数退避策略。
+        指数退避只推迟*下一次*重连尝试（``_next_reconnect_at``），
+        不再 ``sleep`` 在调用栈里——那会把 lease 续期一起堵死。
 
         Returns:
             是否重连成功
         """
         self._state = HeartbeatState.RECONNECTING
         self._reconnect_attempts += 1
-
-        # 计算退避时间
-        backoff = min(
-            self.RECONNECT_BACKOFF_BASE**self._reconnect_attempts,
+        backoff = reconnect_delay_seconds(
+            self._reconnect_attempts,
+            self.RECONNECT_BACKOFF_BASE,
             self.RECONNECT_BACKOFF_MAX,
         )
+        self._next_reconnect_at = self._clock.monotonic() + backoff
+        logger.info(f"尝试重连 (attempt={self._reconnect_attempts}, 下次退避={backoff:.1f}s)")
 
-        logger.info(f"尝试重连 (attempt={self._reconnect_attempts}, backoff={backoff:.1f}s)")
-
-        # 等待退避时间
-        await asyncio.sleep(backoff)
-
-        if not self._running:
-            return False
-
-        # 尝试重连
         try:
-            if hasattr(self._transport, "reconnect"):
-                success = await self._transport.reconnect()
-            else:
-                # 如果传输层没有 reconnect 方法，检查连接状态
-                success = self._transport.is_connected
-
-            if success:
-                logger.info(f"重连成功 (attempts={self._reconnect_attempts})")
-                self._state = HeartbeatState.RUNNING
-                self._reconnect_attempts = 0
-                self._last_reconnect_time = time.time()
-
-                # 触发重连成功回调
-                if self._on_reconnect:
-                    try:
-                        result = self._on_reconnect()
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception as e:
-                        logger.error(f"重连成功回调异常: {e}")
-
-                return True
-            else:
-                logger.warning(f"重连失败 (attempts={self._reconnect_attempts})")
-                self._state = HeartbeatState.DEGRADED
-                return False
-
+            success = await self._transport.reconnect()
         except Exception as e:
             logger.error(f"重连异常: {e}")
             self._state = HeartbeatState.DEGRADED
             return False
 
-    def _adjust_interval(self, success: bool) -> None:
-        """调整心跳间隔"""
-        old = self._interval
-        if success:
-            self._interval = self._base_interval
-        else:
-            self._interval = self.MIN_INTERVAL
+        if not success:
+            logger.warning(f"重连失败 (attempts={self._reconnect_attempts})")
+            self._state = HeartbeatState.DEGRADED
+            return False
+        return await self._finish_reconnect()
 
-        if self._interval != old:
-            logger.debug(f"心跳间隔调整: {old}s -> {self._interval}s")
+    async def _finish_reconnect(self) -> bool:
+        """重连成功后的状态复位与回调。"""
+        logger.info(f"重连成功 (attempts={self._reconnect_attempts})")
+        self._state = HeartbeatState.RUNNING
+        self._reconnect_attempts = 0
+        self._next_reconnect_at = 0.0
+        self._last_reconnect_time = time.time()
 
-    def _build_heartbeat(self) -> Heartbeat:
+        if self._on_reconnect:
+            try:
+                result = self._on_reconnect()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error(f"重连成功回调异常: {e}")
+        return True
+
+    async def _build_heartbeat(self) -> Heartbeat:
         """构建心跳数据"""
         return Heartbeat(
             worker_id=self._worker_id,
@@ -526,50 +431,60 @@ class HeartbeatReporter:
             port=self._port,
             region=self._region,
             status="online",
-            metrics=self._get_metrics(),
+            metrics=await self._get_metrics(),
             os_info=self._get_os_info(),
             timestamp=datetime.now(),
             capabilities=self._get_capabilities(),
             version=self._version,
         )
 
-    def _get_metrics(self) -> Metrics:
+    async def _get_metrics(self) -> Metrics:
         """获取系统指标"""
-        try:
-            if self._metrics_collector:
-                m = self._metrics_collector.get_metrics()
-                spider_stats = None
-
-                stats = self._metrics_collector.get_spider_stats()
-                if stats:
-                    spider_stats = SpiderStats(
-                        request_count=stats.get("request_count", 0),
-                        response_count=stats.get("response_count", 0),
-                        item_scraped_count=stats.get("item_scraped_count", 0),
-                        error_count=stats.get("error_count", 0),
-                        avg_latency_ms=stats.get("avg_latency_ms", 0.0),
-                        requests_per_minute=stats.get("requests_per_minute", 0.0),
-                        status_codes=stats.get("status_codes", {}),
-                    )
-
-                return Metrics(
-                    cpu=round(max(0.0, min(100.0, m.get("cpu", 0.0))), 1),
-                    memory=round(max(0.0, min(100.0, m.get("memory", 0.0))), 1),
-                    disk=round(max(0.0, min(100.0, m.get("disk", 0.0))), 1),
-                    running_tasks=m.get("runningTasks", 0),
-                    max_concurrent_tasks=m.get("maxConcurrentTasks", self._max_concurrent_tasks),
-                    task_count=m.get("taskCount", 0),
-                    project_count=m.get("projectCount", 0),
-                    env_count=m.get("envCount", 0),
-                    spider_stats=spider_stats,
-                )
-
-            # 默认指标
+        if not self._metrics_collector:
             return Metrics(max_concurrent_tasks=self._max_concurrent_tasks)
+        collected = await self._metrics_collector.collect(use_cache=False)
+        worker = collected.worker
+        return Metrics(
+            cpu=self._bounded_percent(collected.cpu.percent),
+            memory=self._bounded_percent(collected.memory.percent),
+            disk=self._bounded_percent(collected.disk.percent),
+            running_tasks=worker.running_slots,
+            max_concurrent_tasks=worker.max_slots or self._max_concurrent_tasks,
+            task_count=worker.total_tasks_executed,
+            project_count=worker.project_count,
+            env_count=worker.env_count,
+            queued_tasks=worker.queue_depth,
+            cpu_cores=collected.cpu.count,
+            memory_total_bytes=int(collected.memory.total_mb * MIB_IN_BYTES),
+            memory_used_bytes=int(collected.memory.used_mb * MIB_IN_BYTES),
+            memory_available_bytes=int(collected.memory.available_mb * MIB_IN_BYTES),
+            disk_total_bytes=int(collected.disk.total_gb * GIB_IN_BYTES),
+            disk_used_bytes=int(collected.disk.used_gb * GIB_IN_BYTES),
+            disk_free_bytes=int(collected.disk.free_gb * GIB_IN_BYTES),
+            uptime_seconds=worker.uptime_seconds,
+            spider_stats=self._get_spider_stats(),
+        )
 
-        except Exception as e:
-            logger.warning(f"获取指标失败: {e}")
-            return Metrics(max_concurrent_tasks=self._max_concurrent_tasks)
+    def _get_spider_stats(self) -> SpiderStats | None:
+        if not self._metrics_collector:
+            return None
+        stats = self._metrics_collector.get_spider_stats()
+        if not stats:
+            return None
+        return SpiderStats(
+            request_count=stats.get("request_count", 0),
+            response_count=stats.get("response_count", 0),
+            item_scraped_count=stats.get("item_scraped_count", 0),
+            error_count=stats.get("error_count", 0),
+            avg_latency_ms=stats.get("avg_latency_ms", 0.0),
+            requests_per_minute=stats.get("requests_per_minute", 0.0),
+            status_codes=stats.get("status_codes", {}),
+            domain_stats=stats.get("domain_stats", []),
+        )
+
+    @staticmethod
+    def _bounded_percent(value: float) -> float:
+        return round(max(0.0, min(100.0, value)), 1)
 
     def _get_os_info(self) -> OSInfo:
         """获取操作系统信息"""
@@ -591,15 +506,31 @@ class HeartbeatReporter:
 
     def _get_capabilities(self) -> dict:
         """获取Worker能力"""
-        try:
-            detector = get_capability_detector()
-            return detector.detect_all()
-        except Exception:
-            return {}
+        detector = get_capability_detector()
+        return detector.detect_all()
 
 
 # 全局实例
 _heartbeat_reporter: HeartbeatReporter | None = None
+
+
+async def _stop_reporter_tasks(
+    tasks: tuple[tuple[str, asyncio.Task | None], ...],
+) -> list[Exception]:
+    failures: list[Exception] = []
+    for label, task in tasks:
+        if task is None:
+            continue
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            continue
+        except Exception as exc:
+            logger.opt(exception=exc).error("{} task 停止失败", label)
+            failures.append(exc)
+    return failures
 
 
 def get_heartbeat_reporter() -> HeartbeatReporter | None:

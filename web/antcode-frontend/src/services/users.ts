@@ -8,8 +8,10 @@ import apiClient from './api'
 import type { AxiosRequestConfig } from 'axios'
 import type { PaginationResponse, User } from '@/types'
 
+const USER_LIST_PAGE_SIZE = 100
+
 export interface SimpleUser {
-  id: string  // public_id
+  id: string // public_id
   username: string
 }
 
@@ -44,6 +46,20 @@ class UserService extends BaseService {
 
     const { items, pagination } = response.data.data
     return { users: items, total: pagination.total }
+  }
+
+  async getAllUsers(filters: Omit<UserListParams, 'page' | 'size'> = {}): Promise<User[]> {
+    const users: User[] = []
+    let page = 1
+    while (true) {
+      const result = await this.getUserList({ ...filters, page, size: USER_LIST_PAGE_SIZE })
+      users.push(...result.users)
+      if (users.length >= result.total) return users
+      if (result.users.length === 0) {
+        throw new Error(`用户分页响应提前结束: received=${users.length}, total=${result.total}`)
+      }
+      page += 1
+    }
   }
 
   /**

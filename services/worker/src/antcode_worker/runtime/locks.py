@@ -16,6 +16,8 @@ from datetime import datetime
 
 from loguru import logger
 
+FILE_LOCK_POLL_INTERVAL_SECONDS = 0.5
+
 
 @dataclass
 class LockInfo:
@@ -25,6 +27,7 @@ class LockInfo:
     acquired_at: datetime
     holder_id: str
     timeout: float
+    timed_out: bool = False
 
 
 @dataclass
@@ -108,22 +111,13 @@ class RuntimeLock:
 
         for runtime_hash, info in self._lock_info.items():
             elapsed = (now - info.acquired_at).total_seconds()
-            if elapsed > info.timeout:
+            if elapsed > info.timeout and not info.timed_out:
                 expired.append(runtime_hash)
 
         for runtime_hash in expired:
-            logger.warning(f"锁超时，强制释放: {runtime_hash}")
-            await self._force_release(runtime_hash)
+            logger.warning(f"运行时锁持有超时: {runtime_hash}")
+            self._lock_info[runtime_hash].timed_out = True
             self._stats.total_timeouts += 1
-
-    async def _force_release(self, runtime_hash: str) -> None:
-        """强制释放锁"""
-        if runtime_hash in self._lock_info:
-            del self._lock_info[runtime_hash]
-            self._stats.current_held -= 1
-
-        # 注意：asyncio.Lock 不支持强制释放
-        # 这里只清理元数据，实际的 Lock 对象会在下次获取时重建
 
     def _checkout_lock(self, runtime_hash: str) -> asyncio.Lock:
         """获取锁并登记当前持有者或等待者。"""
@@ -146,6 +140,7 @@ class RuntimeLock:
         runtime_hash: str,
         holder_id: str = "",
         timeout: float | None = None,
+        *,
         wait: bool = True,
     ) -> bool:
         """
@@ -161,9 +156,9 @@ class RuntimeLock:
             是否成功获取锁
         """
         lock = self._checkout_lock(runtime_hash)
-        timeout = timeout or self._default_timeout
+        timeout = self._default_timeout if timeout is None else timeout
 
-        if wait:
+        if wait and timeout > 0:
             try:
                 # 使用 wait_for 实现超时
                 await asyncio.wait_for(lock.acquire(), timeout=timeout)
@@ -249,6 +244,8 @@ class RuntimeLock:
         runtime_hash: str,
         holder_id: str = "",
         timeout: float | None = None,
+        *,
+        wait: bool = True,
     ) -> AsyncGenerator[bool, None]:
         """
         锁上下文管理器
@@ -261,13 +258,8 @@ class RuntimeLock:
         Yields:
             是否成功获取锁
 
-        Example:
-            async with lock_manager.lock("abc123") as acquired:
-                if acquired:
-                    # 执行构建
-                    pass
         """
-        acquired = await self.acquire(runtime_hash, holder_id, timeout)
+        acquired = await self.acquire(runtime_hash, holder_id, timeout, wait=wait)
         try:
             yield acquired
         finally:
@@ -328,14 +320,10 @@ class FileLock:
             是否成功获取锁
         """
         lock_file = self._get_lock_file(runtime_hash)
-        timeout = timeout or self._default_timeout
+        timeout = self._default_timeout if timeout is None else timeout
         start_time = time.time()
 
         while True:
-            # 检查是否超时
-            if time.time() - start_time > timeout:
-                return False
-
             # 尝试创建锁文件
             try:
                 # 使用 O_CREAT | O_EXCL 确保原子性
@@ -364,8 +352,12 @@ class FileLock:
                     except OSError:
                         pass
 
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    return False
+
                 # 等待后重试
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(min(FILE_LOCK_POLL_INTERVAL_SECONDS, timeout - elapsed))
 
             except OSError as e:
                 logger.error(f"获取文件锁失败: {e}")

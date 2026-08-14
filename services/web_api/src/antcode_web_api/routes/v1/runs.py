@@ -1,4 +1,9 @@
-"""任务运行接口"""
+"""任务运行接口。
+
+已分配运行只记录取消请求并通知 Worker。
+最终状态必须来自 Worker 的真实结算结果。
+取消请求持久化必须先于控制事件发送。
+"""
 
 import json
 import os
@@ -23,6 +28,14 @@ from starlette.background import BackgroundTask
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
+from antcode_web_api.routes.v1 import run_cancel_support as _cancel_support
+from antcode_web_api.services.run_spider_items import (
+    decode_spider_items as _decode_spider_items,
+)
+from antcode_web_api.services.run_spider_items import read_spider_stream as _read_spider_stream
+
+_cancel_success = _cancel_support.cancel_success
+_record_assigned_cancel_request = _cancel_support.record_assigned_cancel_request
 
 runs_router = APIRouter()
 _CANCELLABLE_STATUSES = (
@@ -66,20 +79,25 @@ async def cancel_run(run_id: str, current_user: TokenData = Depends(get_current_
             return _cancel_success(run_id, remote_cancelled=False)
         execution = await _get_execution(run_id, current_user.user_id)
 
-    cancelled = await _send_worker_cancel(execution, current_user.user_id)
-    if execution.worker_id and not cancelled:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="取消指令发送失败，请稍后重试",
-        )
+    if execution.worker_id:
+        if not await _record_assigned_cancel_request(execution.run_id, current_user.user_id):
+            await _raise_if_terminal_conflict(run_id, current_user.user_id)
+            return _cancel_success(run_id, remote_cancelled=False)
+        cancelled = await _send_worker_cancel(execution, current_user.user_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="取消指令发送失败，请稍后重试",
+            )
+        return _cancel_success(run_id, remote_cancelled=True)
 
     # P1-FN-02: 状态机 CAS 结果必须被尊重 —— 完成结果抢先落终态时不能
     # 对外谎报 cancelled。
     marked = await _mark_execution_cancelled(execution.run_id, current_user.user_id)
     if not marked:
         await _raise_if_terminal_conflict(run_id, current_user.user_id)
-    logger.info(f"执行已取消: {run_id}, 远程取消={cancelled}, 状态标记={marked}")
-    return _cancel_success(run_id, remote_cancelled=cancelled)
+    logger.info(f"执行已取消: {run_id}, 远程取消=False, 状态标记={marked}")
+    return _cancel_success(run_id, remote_cancelled=False)
 
 
 async def _get_execution(run_id: str, user_id: int) -> TaskRun:
@@ -130,14 +148,7 @@ async def _raise_if_terminal_conflict(run_id: str, user_id: int) -> None:
 
 
 async def _send_worker_cancel(execution: TaskRun, user_id: int) -> bool:
-    if not execution.worker_id:
-        return False
-    try:
-        await _write_worker_cancel_event(execution, user_id)
-        return True
-    except Exception:
-        logger.exception("发送取消指令失败: run_id={} worker_id={}", execution.run_id, execution.worker_id)
-        return False
+    return await _cancel_support.send_worker_cancel(execution, user_id, _write_worker_cancel_event)
 
 
 async def _write_worker_cancel_event(execution: TaskRun, user_id: int) -> None:
@@ -164,13 +175,6 @@ async def _mark_execution_cancelled(run_id: str, user_id: int) -> bool:
             status_at=datetime.now(UTC),
             error_message=f"用户取消 (user_id={user_id})",
         )
-    )
-
-
-def _cancel_success(run_id: str, *, remote_cancelled: bool) -> BaseResponse[dict]:
-    return success_response(
-        {"run_id": run_id, "status": "cancelled", "remote_cancelled": remote_cancelled},
-        message="任务已取消",
     )
 
 
@@ -329,61 +333,17 @@ async def list_spider_items(
     if not execution:
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
     try:
-        raw = await _read_spider_stream(run_id, start_id, count)
+        raw = await _read_spider_stream(run_id, start_id, count + 1)
     except Exception as exc:
         logger.exception(f"读取 spider items 失败: run_id={run_id}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="抓取数据存储暂不可用",
         ) from exc
-    items, last_id = _decode_spider_items(raw, start_id)
-    data = {"items": items, "last_id": last_id, "count": len(items)}
+    has_more = len(raw) > count
+    items, last_id = _decode_spider_items(raw[:count], start_id)
+    data = {"items": items, "last_id": last_id, "count": len(items), "has_more": has_more}
     return success_response(data, message=Messages.QUERY_SUCCESS)
-
-
-async def _read_spider_stream(run_id: str, start_id: str, count: int) -> list[Any]:
-    """读取失败向上抛出，由路由返回 503，不能伪装成空结果。"""
-    from antcode_core.common.config import settings as _settings
-    from antcode_core.infrastructure.redis import get_redis_client
-    from antcode_core.infrastructure.redis.keys import RedisKeys
-
-    redis = await get_redis_client()
-    if redis is None:
-        raise RuntimeError("Redis client unavailable")
-    keys = RedisKeys(namespace=_settings.REDIS_NAMESPACE)
-    stream_key = keys.spider_data_stream(run_id)
-    min_id = f"({start_id}" if start_id and start_id != "0" else "-"
-    raw = await redis.xrange(stream_key, min=min_id, max="+", count=count)
-    return list(raw or [])
-
-
-def _decode_spider_items(raw: list[Any], start_id: str) -> tuple[list[dict[str, Any]], str]:
-    items: list[dict[str, Any]] = []
-    last_id: str = start_id
-    for msg_id, fields in raw or []:
-        decoded_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
-        last_id = decoded_id
-        row = {"_id": decoded_id, **_decode_spider_fields(fields)}
-        items.append(row)
-    return items, last_id
-
-
-def _decode_spider_fields(fields: dict[Any, Any] | None) -> dict[str, Any]:
-    decoded: dict[str, Any] = {}
-    for raw_key, raw_value in (fields or {}).items():
-        key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
-        value = raw_value.decode() if isinstance(raw_value, bytes) else raw_value
-        decoded[key] = _decode_spider_value(key, value)
-    return decoded
-
-
-def _decode_spider_value(key: str, value: Any) -> Any:
-    if key != "data" or not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return value
 
 
 router = runs_router

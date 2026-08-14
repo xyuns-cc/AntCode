@@ -83,7 +83,9 @@ export class EventSourceLogConnection implements LogStreamConnection {
     })
     const source = new EventSource(url)
     this.source = source
-    this.historyComplete = Boolean(this.lastEventId)
+    // 带 cursor 的连接先回放恢复日志；这些 log_line 不能证明实时阶段健康。
+    // 初始历史结束帧、恢复完成帧或实时 ping 才可以解除恢复态并重置重连熔断计数。
+    this.historyComplete = false
     this.touch()
     source.onopen = () => {
       if (!this.isActive(source, generation)) return
@@ -121,6 +123,10 @@ export class EventSourceLogConnection implements LogStreamConnection {
       this.options.onHistoricalLogsUpdate?.({
         phase: 'empty', sentLines: 0, truncated: payload.truncated === true,
       })
+    })
+    this.listen(source, generation, 'recovery_complete', () => {
+      this.historyComplete = true
+      this.markConnectionHealthy()
     })
     this.listen(source, generation, 'stream_cursor', () => undefined)
     this.listen(source, generation, 'ping', () => this.markConnectionHealthy())
@@ -289,12 +295,4 @@ export class EventSourceLogConnection implements LogStreamConnection {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
   }
-}
-export const createLogStreamConnection = (
-  getTicket: () => Promise<string>,
-  options: LogStreamOptions,
-): LogStreamConnection => {
-  const connection = new EventSourceLogConnection(getTicket, options)
-  connection.start()
-  return connection
 }

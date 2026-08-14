@@ -1,0 +1,6 @@
+services:
+  release-collection:
+    image: ${ANTCODE_RELEASE_IMAGE_REPOSITORY:?release collection repository is required}@sha256:${ANTCODE_RELEASE_IMAGE_DIGEST:?release collection digest is required}
+    profiles: ["release-metadata"]
+    labels:
+      io.antcode.release.revision: ${ANTCODE_RELEASE_REVISION:?exact 40-character release revision is required}

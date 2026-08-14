@@ -4,6 +4,7 @@
 运行时环境相关的请求和响应模式。
 """
 
+from antcode_contracts.runtime_metadata import RUNTIME_KEY_MAX_LENGTH
 from pydantic import BaseModel, Field, field_validator
 
 from antcode_core.domain.models.enums import RuntimeKind, RuntimeScope
@@ -54,7 +55,7 @@ class CreateRuntimeRequest(BaseModel):
     version: str = Field(..., description="运行时版本，如 3.11.9")
     runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型")
     runtime_scope: RuntimeScope = Field(..., description="运行时环境作用域：shared/private")
-    shared_runtime_key: str = Field("", description="共享运行时标识（可选）")
+    shared_runtime_key: str = Field("", max_length=RUNTIME_KEY_MAX_LENGTH, description="共享运行时标识（可选）")
     create_if_missing: bool = Field(True, description="不存在则创建")
 
     @field_validator("runtime_scope", mode="before")
@@ -73,7 +74,7 @@ class CreateSharedRuntimeRequest(BaseModel):
 
     version: str = Field(..., description="运行时版本，如 3.11.9")
     runtime_kind: RuntimeKind = Field(RuntimeKind.PYTHON, description="运行时类型")
-    shared_runtime_key: str = Field("", description="共享运行时标识（可选）")
+    shared_runtime_key: str = Field("", max_length=RUNTIME_KEY_MAX_LENGTH, description="共享运行时标识（可选）")
 
 
 class RuntimeListItem(BaseModel):

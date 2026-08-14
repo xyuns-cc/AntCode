@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from antcode_core.common.security.worker_auth import WorkerAuthVerifier
-from antcode_core.common.utils.worker_request import build_worker_signed_headers
+from antcode_core.common.utils.worker_request import (
+    HTTP_POST_METHOD,
+    build_worker_signed_headers,
+    encode_worker_json_body,
+)
 from antcode_web_api.routes.v1 import workers_direct_control, workers_direct_spider
 from antcode_web_api.routes.v1 import workers_direct_control_routes as direct_routes
 from antcode_web_api.routes.v1.workers_direct_models import DirectSpiderItemsRequest, DirectSpiderMetaRequest
@@ -262,17 +266,33 @@ def test_spider_route_enforces_hmac_api_key_and_path_worker_binding(monkeypatch)
     app.include_router(router)
     client = TestClient(app)
     payload = _items_request().model_dump()
-    headers = build_worker_signed_headers(worker, api_key="api-key", secret_key="secret", payload=payload)
-
-    valid = client.post("/workers/worker-1/direct-control/spider-items", json=payload, headers=headers)
-    mismatch = client.post("/workers/worker-2/direct-control/spider-items", json=payload, headers=headers)
-    invalid_headers = {**headers, "X-Signature": "invalid"}
-    invalid = client.post(
-        "/workers/worker-1/direct-control/spider-items",
-        json=payload,
-        headers=invalid_headers,
+    body = encode_worker_json_body(payload)
+    valid_path = "/workers/worker-1/direct-control/spider-items"
+    mismatch_path = "/workers/worker-2/direct-control/spider-items"
+    headers = build_worker_signed_headers(
+        worker,
+        api_key="api-key",
+        secret_key="secret",
+        method=HTTP_POST_METHOD,
+        path=valid_path,
+        body=body,
+    )
+    identity_mismatch_headers = build_worker_signed_headers(
+        worker,
+        api_key="api-key",
+        secret_key="secret",
+        method=HTTP_POST_METHOD,
+        path=mismatch_path,
+        body=body,
     )
 
+    valid = client.post(valid_path, content=body, headers=headers)
+    endpoint_replay = client.post(mismatch_path, content=body, headers=headers)
+    identity_mismatch = client.post(mismatch_path, content=body, headers=identity_mismatch_headers)
+    invalid_headers = {**headers, "X-Signature": "invalid"}
+    invalid = client.post(valid_path, content=body, headers=invalid_headers)
+
     assert valid.status_code == HTTP_OK
-    assert mismatch.status_code == HTTP_FORBIDDEN
+    assert endpoint_replay.status_code == HTTP_UNAUTHORIZED
+    assert identity_mismatch.status_code == HTTP_FORBIDDEN
     assert invalid.status_code == HTTP_UNAUTHORIZED

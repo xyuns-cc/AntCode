@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x63ommon.proto\x12\nantcode.v1\"+\n\tTimestamp\x12\x0f\n\x07seconds\x18\x01 \x01(\x03\x12\r\n\x05nanos\x18\x02 \x01(\x05\"7\n\x0cTraceContext\x12\x13\n\x0btraceparent\x18\x01 \x01(\t\x12\x12\n\ntracestate\x18\x02 \x01(\t\"\xa4\x02\n\x12SpiderStatsSummary\x12\x15\n\rrequest_count\x18\x01 \x01(\x03\x12\x16\n\x0eresponse_count\x18\x02 \x01(\x03\x12\x1a\n\x12item_scraped_count\x18\x03 \x01(\x03\x12\x13\n\x0b\x65rror_count\x18\x04 \x01(\x03\x12\x16\n\x0e\x61vg_latency_ms\x18\x05 \x01(\x01\x12\x1b\n\x13requests_per_minute\x18\x06 \x01(\x01\x12\x45\n\x0cstatus_codes\x18\x07 \x03(\x0b\x32/.antcode.v1.SpiderStatsSummary.StatusCodesEntry\x1a\x32\n\x10StatusCodesEntry\x12\x0b\n\x03key\x18\x01 \x01(\x05\x12\r\n\x05value\x18\x02 \x01(\x03:\x02\x38\x01\"\xdd\x01\n\x07Metrics\x12\x0b\n\x03\x63pu\x18\x01 \x01(\x02\x12\x0e\n\x06memory\x18\x02 \x01(\x02\x12\x0c\n\x04\x64isk\x18\x03 \x01(\x02\x12\x15\n\rrunning_tasks\x18\x04 \x01(\x05\x12\x1c\n\x14max_concurrent_tasks\x18\x05 \x01(\x05\x12\x12\n\ntask_count\x18\x06 \x01(\x05\x12\x15\n\rproject_count\x18\x07 \x01(\x05\x12\x11\n\tenv_count\x18\x08 \x01(\x05\x12\x34\n\x0cspider_stats\x18\n \x01(\x0b\x32\x1e.antcode.v1.SpiderStatsSummary\"[\n\x06OSInfo\x12\x0f\n\x07os_type\x18\x01 \x01(\t\x12\x12\n\nos_version\x18\x02 \x01(\t\x12\x16\n\x0epython_version\x18\x03 \x01(\t\x12\x14\n\x0cmachine_arch\x18\x04 \x01(\t\"\xd4\x01\n\nAuditEvent\x12\x12\n\nevent_type\x18\x01 \x01(\t\x12\x11\n\tworker_id\x18\x02 \x01(\t\x12\x0c\n\x04peer\x18\x03 \x01(\t\x12\x0e\n\x06reason\x18\x04 \x01(\t\x12!\n\x02ts\x18\x05 \x01(\x0b\x32\x15.antcode.v1.Timestamp\x12\x30\n\x05\x65xtra\x18\x06 \x03(\x0b\x32!.antcode.v1.AuditEvent.ExtraEntry\x1a,\n\nExtraEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x63ommon.proto\x12\nantcode.v1\"+\n\tTimestamp\x12\x0f\n\x07seconds\x18\x01 \x01(\x03\x12\r\n\x05nanos\x18\x02 \x01(\x05\"7\n\x0cTraceContext\x12\x13\n\x0btraceparent\x18\x01 \x01(\t\x12\x12\n\ntracestate\x18\x02 \x01(\t\"\xd9\x02\n\x12SpiderStatsSummary\x12\x15\n\rrequest_count\x18\x01 \x01(\x03\x12\x16\n\x0eresponse_count\x18\x02 \x01(\x03\x12\x1a\n\x12item_scraped_count\x18\x03 \x01(\x03\x12\x13\n\x0b\x65rror_count\x18\x04 \x01(\x03\x12\x16\n\x0e\x61vg_latency_ms\x18\x05 \x01(\x01\x12\x1b\n\x13requests_per_minute\x18\x06 \x01(\x01\x12\x45\n\x0cstatus_codes\x18\x07 \x03(\x0b\x32/.antcode.v1.SpiderStatsSummary.StatusCodesEntry\x12\x33\n\x0c\x64omain_stats\x18\x08 \x03(\x0b\x32\x1d.antcode.v1.SpiderDomainStats\x1a\x32\n\x10StatusCodesEntry\x12\x0b\n\x03key\x18\x01 \x01(\x05\x12\r\n\x05value\x18\x02 \x01(\x03:\x02\x38\x01\"h\n\x11SpiderDomainStats\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\x12\x15\n\rrequest_count\x18\x02 \x01(\x03\x12\x14\n\x0csuccess_rate\x18\x03 \x01(\x01\x12\x16\n\x0e\x61vg_latency_ms\x18\x04 \x01(\x01\"\xc7\x03\n\x07Metrics\x12\x0b\n\x03\x63pu\x18\x01 \x01(\x02\x12\x0e\n\x06memory\x18\x02 \x01(\x02\x12\x0c\n\x04\x64isk\x18\x03 \x01(\x02\x12\x15\n\rrunning_tasks\x18\x04 \x01(\x05\x12\x1c\n\x14max_concurrent_tasks\x18\x05 \x01(\x05\x12\x12\n\ntask_count\x18\x06 \x01(\x05\x12\x15\n\rproject_count\x18\x07 \x01(\x05\x12\x11\n\tenv_count\x18\x08 \x01(\x05\x12\x34\n\x0cspider_stats\x18\n \x01(\x0b\x32\x1e.antcode.v1.SpiderStatsSummary\x12\x1a\n\x12memory_total_bytes\x18\x0b \x01(\x04\x12\x19\n\x11memory_used_bytes\x18\x0c \x01(\x04\x12\x1e\n\x16memory_available_bytes\x18\r \x01(\x04\x12\x18\n\x10\x64isk_total_bytes\x18\x0e \x01(\x04\x12\x17\n\x0f\x64isk_used_bytes\x18\x0f \x01(\x04\x12\x17\n\x0f\x64isk_free_bytes\x18\x10 \x01(\x04\x12\x11\n\tcpu_cores\x18\x11 \x01(\r\x12\x16\n\x0euptime_seconds\x18\x12 \x01(\x04\x12\x14\n\x0cqueued_tasks\x18\x13 \x01(\x05J\x04\x08\t\x10\n\"[\n\x06OSInfo\x12\x0f\n\x07os_type\x18\x01 \x01(\t\x12\x12\n\nos_version\x18\x02 \x01(\t\x12\x16\n\x0epython_version\x18\x03 \x01(\t\x12\x14\n\x0cmachine_arch\x18\x04 \x01(\t\"\xd4\x01\n\nAuditEvent\x12\x12\n\nevent_type\x18\x01 \x01(\t\x12\x11\n\tworker_id\x18\x02 \x01(\t\x12\x0c\n\x04peer\x18\x03 \x01(\t\x12\x0e\n\x06reason\x18\x04 \x01(\t\x12!\n\x02ts\x18\x05 \x01(\x0b\x32\x15.antcode.v1.Timestamp\x12\x30\n\x05\x65xtra\x18\x06 \x03(\x0b\x32!.antcode.v1.AuditEvent.ExtraEntry\x1a,\n\nExtraEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -40,15 +40,17 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_TRACECONTEXT']._serialized_start=73
   _globals['_TRACECONTEXT']._serialized_end=128
   _globals['_SPIDERSTATSSUMMARY']._serialized_start=131
-  _globals['_SPIDERSTATSSUMMARY']._serialized_end=423
-  _globals['_SPIDERSTATSSUMMARY_STATUSCODESENTRY']._serialized_start=373
-  _globals['_SPIDERSTATSSUMMARY_STATUSCODESENTRY']._serialized_end=423
-  _globals['_METRICS']._serialized_start=426
-  _globals['_METRICS']._serialized_end=647
-  _globals['_OSINFO']._serialized_start=649
-  _globals['_OSINFO']._serialized_end=740
-  _globals['_AUDITEVENT']._serialized_start=743
-  _globals['_AUDITEVENT']._serialized_end=955
-  _globals['_AUDITEVENT_EXTRAENTRY']._serialized_start=911
-  _globals['_AUDITEVENT_EXTRAENTRY']._serialized_end=955
+  _globals['_SPIDERSTATSSUMMARY']._serialized_end=476
+  _globals['_SPIDERSTATSSUMMARY_STATUSCODESENTRY']._serialized_start=426
+  _globals['_SPIDERSTATSSUMMARY_STATUSCODESENTRY']._serialized_end=476
+  _globals['_SPIDERDOMAINSTATS']._serialized_start=478
+  _globals['_SPIDERDOMAINSTATS']._serialized_end=582
+  _globals['_METRICS']._serialized_start=585
+  _globals['_METRICS']._serialized_end=1040
+  _globals['_OSINFO']._serialized_start=1042
+  _globals['_OSINFO']._serialized_end=1133
+  _globals['_AUDITEVENT']._serialized_start=1136
+  _globals['_AUDITEVENT']._serialized_end=1348
+  _globals['_AUDITEVENT_EXTRAENTRY']._serialized_start=1304
+  _globals['_AUDITEVENT_EXTRAENTRY']._serialized_end=1348
 # @@protoc_insertion_point(module_scope)

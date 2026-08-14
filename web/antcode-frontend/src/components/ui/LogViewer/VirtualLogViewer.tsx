@@ -35,7 +35,7 @@ const useAdvancedFilter = (messages: LogMessage[]) => {
 
 interface ModeResetOptions {
   filterMode: string
-  listRef: RefObject<VirtualizedListRef>
+  listRef: RefObject<VirtualizedListRef | null>
   messages: LogMessage[]
   resetResult: (result: SearchFilterResult) => void
   setSearchText: (value: string) => void
@@ -60,7 +60,7 @@ interface LayoutProps {
   >> & VirtualLogViewerProps
   filteredMessages: LogMessage[]
   displayOptions: ReturnType<typeof displayOptionsFromFilter>
-  listRef: RefObject<VirtualizedListRef>
+  listRef: RefObject<VirtualizedListRef | null>
   searchText: string
   setSearchText: (value: string) => void
   stats: SearchFilterResult['stats']

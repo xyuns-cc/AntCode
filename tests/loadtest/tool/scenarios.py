@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from .api import AntCodeApi
+from .api import AntCodeApi, pace_housekeeping_request
 from .config import LoadSettings
 from .metrics import LoadReport
 
@@ -110,7 +110,10 @@ async def wait_for_successful_runs(
 
 
 async def _read_latest_runs(api: AntCodeApi, task_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
-    results = await asyncio.gather(*(api.task_runs(task_id, index) for index, task_id in enumerate(task_ids)))
+    results = []
+    for index, task_id in enumerate(task_ids):
+        await pace_housekeeping_request(index)
+        results.append(await api.task_runs(task_id, index))
     latest_runs: dict[str, dict[str, Any]] = {}
     for task_id, runs in zip(task_ids, results, strict=True):
         if runs and isinstance(runs[0].get("status"), str):

@@ -93,7 +93,23 @@ def test_worker_image_preinstalls_default_python_runtime():
 def test_web_api_image_contains_database_initializer():
     dockerfile = _read(ROOT / "infra/docker/Dockerfile.web_api")
 
-    for path in ("scripts/__init__.py", "scripts/init_db.py", "scripts/init_db_environment.py"):
+    for path in (
+        "scripts/__init__.py",
+        "scripts/encrypt_sensitive_data.py",
+        "scripts/init_db.py",
+        "scripts/init_db_current_schema.py",
+        "scripts/init_db_environment.py",
+        "scripts/init_db_indexes.py",
+        "scripts/init_db_legacy_schema.py",
+        "scripts/init_db_schema_contracts.py",
+        "scripts/init_db_schema_upgrades.py",
+        "scripts/init_db_schema_validation.py",
+        "scripts/migrate_worker_credentials.py",
+        "scripts/migrate_worker_install_keys.py",
+        "scripts/rotate_encryption_key.py",
+        "scripts/rotate_worker_hmac_encryption_key.py",
+        "migrations/models",
+    ):
         assert path in dockerfile
     assert "/app/scripts/" in dockerfile
 
@@ -103,6 +119,15 @@ def test_web_api_runtime_contains_git_for_repository_scan():
     runtime = dockerfile.split(" AS runtime", maxsplit=1)[1]
 
     assert re.search(r"apt-get install[^&]*\bgit\b", runtime, re.DOTALL)
+
+
+def test_application_images_use_strict_docker_secret_entrypoint():
+    application_dockerfiles = DOCKERFILES[:4]
+
+    for path in application_dockerfiles:
+        dockerfile = _read(path)
+        assert "entrypoint.load-secrets.sh /usr/local/bin/antcode-load-secrets" in dockerfile
+        assert 'ENTRYPOINT ["/usr/local/bin/antcode-load-secrets"]' in dockerfile
 
 
 def test_test_image_context_includes_tests_and_workspace_readmes():
@@ -117,6 +142,15 @@ def test_test_image_context_includes_tests_and_workspace_readmes():
         ".dockerignore",
     )
     assert all(not ignore_spec.match_file(path) for path in required_files)
+
+
+def test_test_image_contains_cross_runtime_test_dependencies():
+    dockerfile = _read(ROOT / "infra/docker/Dockerfile.test")
+
+    # jq: tests/contracts/test_release_supply_chain.py 真跑 workflow 里抽出的 jq 过滤器，
+    # 缺它整条发布供应链契约在容器里必然 FileNotFoundError。
+    for package in ("jq", "nodejs", "postgresql-client"):
+        assert package in dockerfile
 
 
 def test_docker_context_excludes_static_analysis_caches():
@@ -161,6 +195,28 @@ def test_docker_contexts_retain_environment_examples():
     for dockerignore_path in DOCKERIGNORE_PATHS:
         ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
         assert all(not ignore_spec.match_file(path) for path in example_paths), dockerignore_path
+
+
+def test_docker_contexts_exclude_local_agent_configuration():
+    agent_directories = (".agents", ".claude", ".codex", ".kiro", ".serena", ".cursor", ".continue", ".windsurf")
+    excluded_paths = tuple(
+        path
+        for directory in agent_directories
+        for path in (f"{directory}/settings.json", f"nested/{directory}/private.json")
+    )
+
+    for dockerignore_path in DOCKERIGNORE_PATHS:
+        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        assert all(ignore_spec.match_file(path) for path in excluded_paths), dockerignore_path
+
+
+def test_git_and_docker_contexts_exclude_appledouble_metadata():
+    metadata_paths = ("._source.py", "nested/deep/._source.py")
+    ignore_paths = (ROOT / ".gitignore", *DOCKERIGNORE_PATHS)
+
+    for ignore_path in ignore_paths:
+        ignore_spec = GitIgnoreSpec.from_lines(_read(ignore_path).splitlines())
+        assert all(ignore_spec.match_file(path) for path in metadata_paths), ignore_path
 
 
 def test_docker_context_includes_nested_logs_and_data_source_files():

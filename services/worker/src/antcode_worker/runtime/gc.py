@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -89,7 +89,9 @@ class RuntimeGC:
         self,
         venvs_dir: str,
         policy: GCPolicy | None = None,
+        *,
         in_use_check: Callable[[str], bool] | None = None,
+        cleanup_handler: Callable[[str], Awaitable[bool]] | None = None,
     ):
         """
         初始化垃圾回收器
@@ -99,6 +101,7 @@ class RuntimeGC:
             policy: 清理策略
             in_use_check: 判断某 runtime_hash 是否正在被任务持有；返回 True 时 GC 跳过。
                           由 RuntimeManager 注入以避免在任务运行中被 rmtree 抢走目录。
+            cleanup_handler: 在外部并发锁内执行删除的异步回调。
         """
         self.venvs_dir = venvs_dir
         self.policy = policy or GCPolicy()
@@ -107,6 +110,7 @@ class RuntimeGC:
         self._task: asyncio.Task | None = None
         self._on_gc_complete: Callable[[GCStats], None] | None = None
         self._in_use_check = in_use_check
+        self._cleanup_handler = cleanup_handler
 
     def set_in_use_check(self, check: Callable[[str], bool] | None) -> None:
         """允许延迟绑定 in_use_check（RuntimeManager 构造顺序）。"""
@@ -214,61 +218,59 @@ class RuntimeGC:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_managed_runtime(name: str, manifest: dict[str, Any] | None) -> bool:
+        """仅回收 RuntimeBuilder 创建的哈希环境，命名环境由 UVManager 管理。"""
+        return manifest is not None and manifest.get("runtime_hash") == name
+
     async def _collect_runtimes(self) -> list[RuntimeInfo]:
         """收集所有运行时信息"""
-        runtimes: list[RuntimeInfo] = []
-
         if not os.path.exists(self.venvs_dir):
-            return runtimes
+            return []
 
+        runtimes: list[RuntimeInfo] = []
         for name in os.listdir(self.venvs_dir):
-            venv_path = os.path.join(self.venvs_dir, name)
-            if not os.path.isdir(venv_path):
-                continue
-
-            # 检查是否是有效的虚拟环境
-            python_exe = os.path.join(venv_path, "bin", "python")
-            if os.name == "nt":
-                python_exe = os.path.join(venv_path, "Scripts", "python.exe")
-
-            if not os.path.exists(python_exe):
-                continue
-
-            # 加载清单
-            manifest = self._load_manifest(venv_path)
-
-            # 解析时间
-            created_at = None
-            last_used_at = None
-
-            if manifest:
-                if manifest.get("created_at"):
-                    with contextlib.suppress(Exception):
-                        created_at = datetime.fromisoformat(manifest["created_at"])
-                if manifest.get("last_used"):
-                    with contextlib.suppress(Exception):
-                        last_used_at = datetime.fromisoformat(manifest["last_used"])
-
-            # 如果没有时间信息，使用文件修改时间
-            if not created_at:
-                with contextlib.suppress(Exception):
-                    created_at = datetime.fromtimestamp(os.path.getctime(venv_path))
-
-            if not last_used_at:
-                with contextlib.suppress(Exception):
-                    last_used_at = datetime.fromtimestamp(os.path.getmtime(venv_path))
-
-            runtimes.append(
-                RuntimeInfo(
-                    runtime_hash=name,
-                    path=venv_path,
-                    size_bytes=await self._get_dir_size(venv_path),
-                    created_at=created_at,
-                    last_used_at=last_used_at,
-                )
-            )
+            if runtime := await self._collect_runtime(name):
+                runtimes.append(runtime)
 
         return runtimes
+
+    async def _collect_runtime(self, name: str) -> RuntimeInfo | None:
+        venv_path = os.path.join(self.venvs_dir, name)
+        if not os.path.isdir(venv_path):
+            return None
+        python_exe = os.path.join(
+            venv_path,
+            "Scripts" if os.name == "nt" else "bin",
+            "python.exe" if os.name == "nt" else "python",
+        )
+        if not os.path.exists(python_exe):
+            return None
+        manifest = self._load_manifest(venv_path)
+        if manifest is None or not self._is_managed_runtime(name, manifest):
+            return None
+        return RuntimeInfo(
+            runtime_hash=name,
+            path=venv_path,
+            size_bytes=await self._get_dir_size(venv_path),
+            created_at=self._runtime_timestamp(venv_path, manifest, key="created_at", fallback=os.path.getctime),
+            last_used_at=self._runtime_timestamp(venv_path, manifest, key="last_used", fallback=os.path.getmtime),
+        )
+
+    @staticmethod
+    def _runtime_timestamp(
+        path: str,
+        manifest: dict[str, Any],
+        *,
+        key: str,
+        fallback: Callable[[str], float],
+    ) -> datetime | None:
+        if value := manifest.get(key):
+            with contextlib.suppress(ValueError, TypeError):
+                return datetime.fromisoformat(value)
+        with contextlib.suppress(OSError):
+            return datetime.fromtimestamp(fallback(path))
+        return None
 
     async def _apply_ttl_policy(
         self,
@@ -386,15 +388,7 @@ class RuntimeGC:
             return 0
 
     async def _clean_runtime(self, runtime: RuntimeInfo) -> bool:
-        """
-        清理单个运行时
-
-        Args:
-            runtime: 运行时信息
-
-        Returns:
-            是否成功清理
-        """
+        """清理单个运行时。"""
         # in-use 保护：如果 RuntimeManager 报告该 runtime 仍在被任务持有，跳过。
         # 少数场景（如策略强制）可通过 RuntimeManager.remove(force=True) 绕过。
         if self._in_use_check is not None:
@@ -407,6 +401,8 @@ class RuntimeGC:
                 logger.warning("in_use_check 异常，保守跳过 {}: {}", runtime.runtime_hash, exc)
                 return False
         try:
+            if self._cleanup_handler is not None:
+                return await self._cleanup_handler(runtime.runtime_hash)
             # G1: 走线程池，避免 rmtree 卡事件循环
             await asyncio.to_thread(shutil.rmtree, runtime.path)
             logger.info(f"已清理运行时: {runtime.runtime_hash}")
@@ -477,24 +473,24 @@ class RuntimeGC:
         return result
 
     async def clean_by_hash(self, runtime_hash: str) -> bool:
-        """
-        按哈希清理指定运行时
-
-        Args:
-            runtime_hash: 运行时哈希
-
-        Returns:
-            是否成功清理
-        """
+        """按哈希清理指定运行时。"""
         venv_path = os.path.join(self.venvs_dir, runtime_hash)
 
         if not os.path.exists(venv_path):
             return False
 
+        manifest = self._load_manifest(venv_path)
+        if not self._is_managed_runtime(runtime_hash, manifest):
+            return False
+
         try:
             size = await self._get_dir_size(venv_path)
-            # G1: rmtree 也走线程池；一个 node_modules 秒级删。
-            await asyncio.to_thread(shutil.rmtree, venv_path)
+            if self._cleanup_handler is not None:
+                if not await self._cleanup_handler(runtime_hash):
+                    return False
+            else:
+                # G1: rmtree 也走线程池；一个 node_modules 秒级删。
+                await asyncio.to_thread(shutil.rmtree, venv_path)
 
             self._stats.total_cleaned += 1
             self._stats.total_bytes_freed += size

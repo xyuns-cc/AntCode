@@ -1,0 +1,7 @@
+services:
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      SSL_CERT_FILE: /etc/antcode/tls/ca.crt
+

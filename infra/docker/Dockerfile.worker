@@ -146,8 +146,13 @@ COPY --chown=appuser:appgroup packages/antcode_core/src/antcode_core /app/packag
 COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /app/packages/antcode_contracts/src/antcode_contracts
 COPY --chown=appuser:appgroup packages/antcode_scrapy/src/antcode_scrapy /app/packages/antcode_scrapy/src/antcode_scrapy
 COPY --chown=appuser:appgroup services/worker/src/antcode_worker /app/services/worker/src/antcode_worker
+COPY --chmod=0555 infra/docker/entrypoint.load-secrets.sh /usr/local/bin/antcode-load-secrets
 
-# 创建数据目录并设置权限
+# 创建数据目录并设置权限。
+# toolchains/ 与 worker/ 并列而不是嵌在 worker/ 里面：executor/sandbox_executables.py
+# 把 config.data_dir（= /app/data/worker）当作"其它租户的数据"，任何解析到该目录
+# 内部的可执行文件都会被 bwrap 挂载前拒绝（"任务可执行文件指向未授权 Worker 数据"）。
+# 解释器必须落在 data_root 之外、又在同一个 worker_data 卷内才能既可写又可信。
 RUN mkdir -p \
     /app/data/worker/runtimes \
     /app/data/worker/runs \
@@ -155,6 +160,9 @@ RUN mkdir -p \
     /app/data/worker/identity \
     /app/data/worker/temp/runtime-build \
     /app/data/worker/temp/sandbox \
+    /app/data/toolchains/uv-python \
+    /app/data/toolchains/mise \
+    /app/data/toolchains/mise-state \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/.venv \
     && chmod -R 755 /app/data \
@@ -163,12 +171,20 @@ RUN mkdir -p \
 # uv 与 mise 已安装到 /usr/local/bin，appuser 直接复用经过固定和校验的二进制。
 USER appuser
 ENV PATH="/home/appuser/.local/bin:${PATH}"
+# 生产 Worker 以 read_only 根文件系统运行，$HOME 不可写。uv/mise 默认把语言
+# 运行时装进 $HOME/.local/share/{uv/python,mise}，于是除镜像预装的那一个版本外，
+# 任何 python_version 都会以 "os error 30（Read-only file system）" 失败——tmpfs
+# 只盖了 /tmp 与 ~/.cache，盖不到这里；直接给 ~/.local/share 挂 tmpfs 又会把预装
+# 解释器一起遮掉。因此改把安装根指到 worker_data 卷上：可写、跨重启保留，且新卷
+# 首次创建时 Docker 会用镜像里的内容播种，预装的解释器照样在。
+ENV UV_PYTHON_INSTALL_DIR=/app/data/toolchains/uv-python \
+    MISE_DATA_DIR=/app/data/toolchains/mise \
+    MISE_STATE_DIR=/app/data/toolchains/mise-state
 # E2E 与默认代码项目使用 Python 3.12。构建时预装固定补丁版本，避免首次
 # 创建环境依赖运行中容器的外网 DNS；其他显式版本仍由 uv 按请求安装。
 RUN uv python install "${DEFAULT_RUNTIME_PYTHON}" && \
     uv python find "${DEFAULT_RUNTIME_PYTHON}" >/dev/null
 # 镜像已预装 mise，禁止 worker 启动时再执行网络安装脚本。
-ENV ANTCODE_MISE_AUTO_INSTALL=false
 ENV WORKER_SANDBOX_MODE=sandbox \
     WORKER_SANDBOX_COMMAND=bwrap \
     WORKER_SANDBOX_NETWORK_ISOLATED=true
@@ -182,4 +198,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
 
 # 启动命令：跳过交互式 menu，直接进 run 子命令。
 # 具体 --transport / --name 由 compose environment 覆盖（走 WORKER_NAME / WORKER_TRANSPORT_MODE）
+ENTRYPOINT ["/usr/local/bin/antcode-load-secrets"]
 CMD ["python", "-m", "antcode_worker", "run"]

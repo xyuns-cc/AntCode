@@ -14,13 +14,10 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+from antcode_core.application.services.crawl.backends import redis_keys as crawl_keys
 from antcode_core.common.serialization import from_json, to_json
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import worker_heartbeat_key
-
-# Redis 键名前缀
-WORKER_REGISTRY_KEY = "workers:registry"  # Hash: worker_id -> worker_info
-WORKER_BATCH_PREFIX = "worker:batch:"  # Set: batch_id -> worker_ids
 
 # 默认配置
 DEFAULT_HEARTBEAT_TTL = 300  # 心跳过期时间（秒）
@@ -154,7 +151,7 @@ class WorkerRegistryService:
 
             # 序列化并存储到 Hash
             worker_data = to_json(worker_info.to_dict())
-            await redis.hset(WORKER_REGISTRY_KEY, worker_id, worker_data)
+            await redis.hset(crawl_keys.crawl_worker_registry_key(), worker_id, worker_data)
 
             # 设置心跳键（带过期时间）
             heartbeat_key = worker_heartbeat_key(worker_id)
@@ -162,7 +159,7 @@ class WorkerRegistryService:
 
             # 如果有批次 ID，添加到批次的 Worker 集合
             if batch_id:
-                batch_workers_key = f"{WORKER_BATCH_PREFIX}{batch_id}"
+                batch_workers_key = crawl_keys.crawl_batch_workers_key(batch_id)
                 await redis.sadd(batch_workers_key, worker_id)
 
             logger.info(f"Worker 注册成功: worker_id={worker_id}, batch_id={batch_id}")
@@ -189,7 +186,7 @@ class WorkerRegistryService:
             worker_info = await self.get_worker(worker_id)
 
             # 从注册表删除
-            await redis.hdel(WORKER_REGISTRY_KEY, worker_id)
+            await redis.hdel(crawl_keys.crawl_worker_registry_key(), worker_id)
 
             # 删除心跳键
             heartbeat_key = worker_heartbeat_key(worker_id)
@@ -197,7 +194,7 @@ class WorkerRegistryService:
 
             # 从批次的 Worker 集合中移除
             if worker_info and worker_info.batch_id:
-                batch_workers_key = f"{WORKER_BATCH_PREFIX}{worker_info.batch_id}"
+                batch_workers_key = crawl_keys.crawl_batch_workers_key(worker_info.batch_id)
                 await redis.srem(batch_workers_key, worker_id)
 
             logger.info(f"Worker 注销成功: worker_id={worker_id}")
@@ -259,7 +256,7 @@ class WorkerRegistryService:
 
             # 序列化并存储
             worker_data = to_json(worker_info.to_dict())
-            await redis.hset(WORKER_REGISTRY_KEY, worker_id, worker_data)
+            await redis.hset(crawl_keys.crawl_worker_registry_key(), worker_id, worker_data)
 
             # 更新心跳键
             heartbeat_key = worker_heartbeat_key(worker_id)
@@ -269,12 +266,12 @@ class WorkerRegistryService:
             if old_batch_id != batch_id:
                 # 从旧批次移除
                 if old_batch_id:
-                    old_batch_key = f"{WORKER_BATCH_PREFIX}{old_batch_id}"
+                    old_batch_key = crawl_keys.crawl_batch_workers_key(old_batch_id)
                     await redis.srem(old_batch_key, worker_id)
 
                 # 添加到新批次
                 if batch_id:
-                    new_batch_key = f"{WORKER_BATCH_PREFIX}{batch_id}"
+                    new_batch_key = crawl_keys.crawl_batch_workers_key(batch_id)
                     await redis.sadd(new_batch_key, worker_id)
 
             logger.debug(f"Worker 心跳更新: worker_id={worker_id}, batch_id={batch_id}, active_tasks={active_tasks}")
@@ -301,7 +298,7 @@ class WorkerRegistryService:
         try:
             redis = await self._get_redis()
 
-            worker_data = await redis.hget(WORKER_REGISTRY_KEY, worker_id)
+            worker_data = await redis.hget(crawl_keys.crawl_worker_registry_key(), worker_id)
 
             if not worker_data:
                 return None
@@ -322,7 +319,7 @@ class WorkerRegistryService:
         try:
             redis = await self._get_redis()
 
-            all_data = await redis.hgetall(WORKER_REGISTRY_KEY)
+            all_data = await redis.hgetall(crawl_keys.crawl_worker_registry_key())
 
             workers = []
             for _worker_id, worker_data in all_data.items():
@@ -359,7 +356,7 @@ class WorkerRegistryService:
         try:
             redis = await self._get_redis()
 
-            batch_workers_key = f"{WORKER_BATCH_PREFIX}{batch_id}"
+            batch_workers_key = crawl_keys.crawl_batch_workers_key(batch_id)
             worker_ids = await redis.smembers(batch_workers_key)
 
             workers = []
@@ -428,7 +425,7 @@ class WorkerRegistryService:
                     worker.status = "offline"
 
                     worker_data = to_json(worker.to_dict())
-                    await redis.hset(WORKER_REGISTRY_KEY, worker.worker_id, worker_data)
+                    await redis.hset(crawl_keys.crawl_worker_registry_key(), worker.worker_id, worker_data)
 
                     offline_workers.append(worker.worker_id)
 

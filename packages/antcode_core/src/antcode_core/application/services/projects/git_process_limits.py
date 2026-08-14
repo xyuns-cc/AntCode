@@ -167,12 +167,14 @@ def _read_output(file_obj, max_bytes: int) -> str:
 
 
 def resolve_with_timeout(resolver: Callable[[str], object], url: str, timeout_seconds: float):
-    if not _DNS_CAPACITY.acquire(blocking=False):
-        raise RuntimeError("DNS 解析执行池已饱和")
+    deadline = time.monotonic() + timeout_seconds
+    if not _DNS_CAPACITY.acquire(timeout=timeout_seconds):
+        raise TimeoutError(f"DNS 解析等待执行池超过上限 {timeout_seconds:g} 秒")
     future = _DNS_EXECUTOR.submit(resolver, url)
     future.add_done_callback(lambda _: _DNS_CAPACITY.release())
     try:
-        result = future.result(timeout=timeout_seconds)
+        remaining_seconds = max(0.0, deadline - time.monotonic())
+        result = future.result(timeout=remaining_seconds)
     except concurrent.futures.TimeoutError as exc:
         future.cancel()
         raise TimeoutError(f"DNS 解析超过上限 {timeout_seconds:g} 秒") from exc

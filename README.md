@@ -5,7 +5,7 @@
 
 **分布式任务调度与执行平台，专为规则爬虫、脚本任务、文件处理场景打造。**
 
-控制面与执行面解耦：Master 负责调度和状态收敛，Worker 负责隔离执行，Web API 负责用户入口，Gateway 负责跨网络接入。全链路可观测（Prometheus + WS 实时日志），支持内网直连 Redis 和公网 gRPC Gateway 两种传输模式。
+控制面与执行面解耦：Master 负责调度和状态收敛，Worker 负责隔离执行，Web API 负责用户入口，Gateway 负责跨网络接入。全链路可观测（Prometheus + SSE 实时日志），支持内网直连 Redis 和公网 gRPC Gateway 两种传输模式。
 
 ---
 
@@ -26,7 +26,9 @@ uv sync --all-packages --extra dev
 
 # 2. 复制配置模板并填关键项
 cp .env.example .env
-# 至少改这几个：DATABASE_URL / REDIS_URL / ENCRYPTION_KEY / JWT_SECRET / DEFAULT_ADMIN_PASSWORD
+# 至少改这几个：DATABASE_URL / REDIS_URL / ENCRYPTION_KEY / ENCRYPTION_KEY_SALT / JWT_SECRET / DEFAULT_ADMIN_PASSWORD
+# ENCRYPTION_KEY_SALT 每部署唯一、至少 16 字节（openssl rand -hex 16）。
+# 除非 ENCRYPTION_KEY 恰好是 44 字符的 Fernet 原生 key，否则缺它会在首次加密 Worker 凭据时直接报错。
 
 # 3. 一键初始化数据库（建表 + 建索引 + 建默认管理员）
 uv run python scripts/init_db.py
@@ -58,7 +60,9 @@ make dev-web     # 起前端
 ## 架构一句话
 
 - **web_api** — 用户入口 REST + SSE 实时日志流，落 PG，走 Redis 分布式限流
-- **master** — 调度 + 状态收敛：8 个后台 loop（scheduler / result / log_ingest / reconcile / crawl_batch_status / alert_check / artifact_cleanup / redispatch），leader 抢主，可分片 3 个 loop 到多实例
+- **master** — 调度 + 状态收敛：13 个后台 loop，leader 抢主，其中 2 个 stream ingest loop 可分片到多实例
+  - control 组（7）：scheduler / scheduler_event / scheduler_outbox / reconcile / retry / lease_sweeper / redispatch
+  - ingester 组（6）：result / log_ingest / artifact_cleanup / crawl_batch_status / alert_check / worker_registration_cleanup
 - **worker** — 任务执行：插件化（code / spider / render / rule），沙箱 rlimit（CPU/RAM/FSIZE），支持 Direct（Redis Streams）和 Gateway（gRPC）双传输
 - **gateway** — 跨网络接入：worker 走 gRPC 到 gateway，gateway 落 Redis，master 消费
 
@@ -67,11 +71,13 @@ make dev-web     # 起前端
 ## 核心能力
 
 - **调度**：一次性 / 周期性 / Cron / 依赖链
-- **规则爬虫**：Scrapy 2.16 引擎，5 种翻页策略，XPath/CSS/正则抽取，内容级去重（跨 run 持久化），代理池 + curl_cffi + Playwright + scrapy-redis 断点续爬
+- **规则爬虫**：Scrapy 2.16 引擎，5 种翻页策略（url_pattern / url_param / click_element / js_click / infinite_scroll），XPath/CSS/正则抽取，Playwright 渲染
+  - **当前不支持**（安全 spool 模式不向 Rule 子进程下发 Redis / 代理凭据，env 白名单见 `services/worker/src/antcode_worker/executor/rule_policy.py`）：内容级跨 run 去重（`dedup_config` 配了也会被跳过并打 warning）、代理池（`proxy_config.enabled=true` 直接校验失败）、scrapy-redis 断点续爬（`resume_enabled=true` 直接校验失败）
+  - `engine=curl_cffi`（TLS/JA3 指纹伪装）**需自行安装**：`scrapy-impersonate` 不在 pyproject 依赖里，Worker 环境未 `pip install scrapy-impersonate` 时会显式报错而非静默降级
 - **可观测**：Prometheus `/metrics` 端点（HTTP QPS / 延迟 / worker 在线数 / 补派队列），SSE 实时日志，全链路 trace_id
 - **可靠性**：at-least-once（XAUTOCLAIM + PEL 回收 + 跨机 SET NX 去重）、派发失败自动补派（指数退避）、优雅停机（SIGTERM + drain + deregister）
 - **多租户与安全**：JWT + 项目所有权校验、登录专项限流 + 账户锁定、密钥轮换（MultiFernet）、审计日志保留策略
-- **扩展性**：Redis standalone / cluster / sentinel 无感切换、master 多实例水平扩容、worker capability 路由（code-only worker / rule-only worker）
+- **扩展性**：Redis standalone / cluster / sentinel 无感切换、master 多实例水平扩容、worker capability 路由（`WORKER_ENABLE_RULE_PLUGIN=false` 部署 code-only worker；Code/Spider/Render 插件无条件注册，**当前没有 rule-only worker 开关**）
 
 ## 目录
 
@@ -127,12 +133,15 @@ docker compose -f docker-compose.dev.yml up -d postgres redis web-api master gat
 docker compose -f docker-compose.dev.yml up -d worker
 ```
 
-生产部署请优先考虑：
-1. HTTPS（nginx / Caddy 收口）
-2. PG 每日备份 + Redis AOF
-3. 强 `ENCRYPTION_KEY` 和 `JWT_SECRET`（`openssl rand -base64 48`），并设置每部署唯一的 `ENCRYPTION_KEY_SALT`（`openssl rand -hex 16`）
-4. 挂 Prometheus + Grafana 抓 `/metrics`
-5. 参考 [`docs/mtls-deployment.md`](docs/mtls-deployment.md) 配 Gateway mTLS
+生产环境不使用 K8s，也不能直接复用开发 Compose。控制面必须使用精确 digest、
+Docker secrets、TLS/mTLS 和 Cosign 验签，并通过唯一部署入口执行：
+
+```bash
+infra/docker/deploy-production.sh .env.production fresh-deploy
+```
+
+既有环境升级、独立 Worker、管理员 bootstrap、备份恢复和完整前置条件见
+[`infra/docker/README.md`](infra/docker/README.md)。
 
 ## 版本
 

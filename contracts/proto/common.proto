@@ -30,6 +30,14 @@ message SpiderStatsSummary {
   double avg_latency_ms = 5;            // Average request latency in milliseconds
   double requests_per_minute = 6;       // Request throughput rate
   map<int32, int64> status_codes = 7;   // HTTP status code distribution (status_code -> count)
+  repeated SpiderDomainStats domain_stats = 8; // Per-domain health and latency
+}
+
+message SpiderDomainStats {
+  string domain = 1;
+  int64 request_count = 2;
+  double success_rate = 3;
+  double avg_latency_ms = 4;
 }
 
 // System metrics reported by Workers (carried on LeaseRequest)
@@ -43,8 +51,24 @@ message Metrics {
   int32 project_count = 7;          // Total projects on the worker
   int32 env_count = 8;              // Total environments on the worker
 
+  // Field 9 is a hole left by an earlier edit (8 jumps straight to 10). Pin it
+  // down: a Worker built before the hole appeared would decode whatever gets
+  // slotted into 9 with the old semantics. This is the only such hole in
+  // contracts/proto - the remaining `[deprecated = true]` numbers are still
+  // populated on the wire and therefore cannot be reserved yet.
+  reserved 9;
+
   // Spider statistics summary (Requirements: 8.2)
   SpiderStatsSummary spider_stats = 10;
+  uint64 memory_total_bytes = 11;
+  uint64 memory_used_bytes = 12;
+  uint64 memory_available_bytes = 13;
+  uint64 disk_total_bytes = 14;
+  uint64 disk_used_bytes = 15;
+  uint64 disk_free_bytes = 16;
+  uint32 cpu_cores = 17;
+  uint64 uptime_seconds = 18;
+  int32 queued_tasks = 19;
 }
 
 // Operating system information from Workers

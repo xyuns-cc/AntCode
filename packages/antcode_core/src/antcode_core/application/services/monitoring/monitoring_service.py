@@ -1,7 +1,4 @@
-"""监控数据服务模块
-
-提供从 Redis 流归档到数据库并提供查询能力的监控服务。
-"""
+"""提供从 Redis 流归档到数据库并提供查询能力的监控服务。"""
 
 from __future__ import annotations
 
@@ -16,6 +13,7 @@ from loguru import logger
 from tortoise.expressions import Q
 
 from antcode_core.common.config import settings
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.common.serialization import from_json
 from antcode_core.domain.models.monitoring import (
     SpiderMetricsHistory,
@@ -23,6 +21,8 @@ from antcode_core.domain.models.monitoring import (
     WorkerPerformanceHistory,
 )
 from antcode_core.infrastructure.redis import get_redis_client
+
+from .history_query import WorkerHistoryPageQuery
 
 
 def _utcnow_naive() -> datetime:
@@ -207,8 +207,8 @@ class MonitoringService:
                 payload = from_json(value)
                 payload["timestamp"] = score
                 data.append(payload)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise ValueError(f"Worker 实时监控帧损坏: worker_id={worker_id}") from exc
         data.sort(key=lambda item: item["timestamp"])
         return data
 
@@ -242,34 +242,20 @@ class MonitoringService:
 
     async def get_worker_history(
         self,
-        worker_id,
-        start_time,
-        end_time,
-        metric_type="performance",
-    ):
-        """查询数据库中的历史数据。"""
-        if metric_type == "performance":
-            queryset = (
-                WorkerPerformanceHistory.filter(
-                    Q(worker_id=worker_id),
-                    Q(timestamp__gte=start_time),
-                    Q(timestamp__lte=end_time),
-                )
-                .order_by("timestamp")
-                .values()
-            )
-        else:
-            queryset = (
-                SpiderMetricsHistory.filter(
-                    Q(worker_id=worker_id),
-                    Q(timestamp__gte=start_time),
-                    Q(timestamp__lte=end_time),
-                )
-                .order_by("timestamp")
-                .values()
-            )
-
-        return [dict(record) for record in await queryset]
+        worker_id: str,
+        query: WorkerHistoryPageQuery,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """查询一页数据库历史数据，并返回筛选范围内总数。"""
+        model = WorkerPerformanceHistory if query.metric_type == "performance" else SpiderMetricsHistory
+        queryset = model.filter(
+            Q(worker_id=worker_id),
+            Q(timestamp__gte=query.start_time),
+            Q(timestamp__lte=query.end_time),
+        )
+        total = await queryset.count()
+        records = await queryset.order_by("-timestamp").offset((query.page - 1) * query.size).limit(query.size).values()
+        records.reverse()
+        return [dict(record) for record in records], total
 
     def _parse_stream_payload(self, payload):
         try:
@@ -328,7 +314,7 @@ class MonitoringService:
         return WorkerEvent(
             worker_id=data.get("worker_id"),
             event_type=data.get("event"),
-            event_message=data.get("reason"),
+            event_message=normalize_persisted_error_message(data.get("reason")),
             created_at=timestamp,
         )
 
@@ -381,7 +367,7 @@ class MonitoringService:
             await WorkerEvent.create(
                 worker_id=data.get("worker_id"),
                 event_type=data.get("event"),
-                event_message=data.get("reason"),
+                event_message=normalize_persisted_error_message(data.get("reason")),
                 created_at=dt,
             )
             return

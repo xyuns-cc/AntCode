@@ -9,10 +9,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from antcode_core.domain.models.enums import WorkerStatus
 from antcode_core.domain.schemas.worker_registration import (
+    WorkerInstallKeyListItem,
     WorkerInstallKeyRequest,
     WorkerInstallKeyResponse,
-    WorkerRegisterByKeyRequest,
     WorkerRegisterByKeyV2Request,
     WorkerRegisterByKeyV2Response,
     WorkerRegistrationAckRequest,
@@ -40,17 +41,18 @@ class WorkerMetrics(BaseModel):
     disk: float = Field(default=0, ge=0, le=100, description="磁盘使用率")
     taskCount: int = Field(default=0, ge=0, description="任务总数")
     runningTasks: int = Field(default=0, ge=0, description="运行中任务数")
+    queuedTasks: int = Field(default=0, ge=0, description="排队任务数")
     maxConcurrentTasks: int = Field(default=5, ge=1, description="最大并发任务数")
     projectCount: int = Field(default=0, ge=0, description="项目总数")
     envCount: int = Field(default=0, ge=0, description="环境总数")
     uptime: int = Field(default=0, ge=0, description="运行时间（秒）")
-    cpuCores: int = Field(default=0, description="CPU 核心数")
-    memoryTotal: int = Field(default=0, description="总内存 (bytes)")
-    memoryUsed: int = Field(default=0, description="已用内存 (bytes)")
-    memoryAvailable: int = Field(default=0, description="可用内存 (bytes)")
-    diskTotal: int = Field(default=0, description="总磁盘 (bytes)")
-    diskUsed: int = Field(default=0, description="已用磁盘 (bytes)")
-    diskFree: int = Field(default=0, description="可用磁盘 (bytes)")
+    cpuCores: int = Field(default=0, ge=0, description="CPU 核心数")
+    memoryTotal: int = Field(default=0, ge=0, description="总内存 (bytes)")
+    memoryUsed: int = Field(default=0, ge=0, description="已用内存 (bytes)")
+    memoryAvailable: int = Field(default=0, ge=0, description="可用内存 (bytes)")
+    diskTotal: int = Field(default=0, ge=0, description="总磁盘 (bytes)")
+    diskUsed: int = Field(default=0, ge=0, description="已用磁盘 (bytes)")
+    diskFree: int = Field(default=0, ge=0, description="可用磁盘 (bytes)")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -75,7 +77,7 @@ class WorkerUpdateRequest(BaseModel):
     region: str = Field("", max_length=50, description="区域")
     description: str = Field("", max_length=500, description="描述")
     tags: list[str] = Field(default_factory=list, description="标签")
-    status: str = Field("", description="状态")
+    status: WorkerStatus | None = Field(None, description="状态")
 
 
 class WorkerResponse(BaseModel):
@@ -266,7 +268,7 @@ __all__ = [
     "WorkerRegisterDirectResponse",
     "WorkerInstallKeyRequest",
     "WorkerInstallKeyResponse",
-    "WorkerRegisterByKeyRequest",
+    "WorkerInstallKeyListItem",
     "WorkerRegisterByKeyV2Request",
     "WorkerRegisterByKeyV2Response",
     "WorkerRegistrationAckRequest",

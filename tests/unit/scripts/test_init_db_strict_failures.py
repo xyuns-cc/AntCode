@@ -1,8 +1,10 @@
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from scripts import init_db
+from scripts.init_db_schema_contracts import INDEX_CONTRACTS
 
 
 def _set_required_environment(monkeypatch) -> None:
@@ -75,20 +77,203 @@ def test_legacy_worker_upgrade_includes_previous_key_expiry() -> None:
     assert "TIMESTAMPTZ NULL" in columns["api_key_previous_expires_at"]
 
 
+def test_legacy_worker_upgrade_and_schema_contract_include_redis_acl_columns() -> None:
+    from scripts.init_db_schema_contracts import COLUMN_CONTRACTS
+
+    expected = {
+        "redis_username",
+        "redis_password_encrypted",
+        "redis_acl_revision",
+        "redis_acl_synced_at",
+    }
+    legacy_columns = {name for name, _ddl in init_db.WORKERS_LEGACY_COLUMNS}
+    contract_columns = {item.name for item in COLUMN_CONTRACTS if item.table == "workers"}
+    assert expected.issubset(legacy_columns)
+    assert expected.issubset(contract_columns)
+
+
+def test_legacy_upgrade_includes_cancel_columns_and_required_indexes() -> None:
+    columns = {(table, column): ddl for table, column, ddl in init_db.NEW_FEATURE_COLUMNS}
+    indexes = dict(init_db.PERFORMANCE_INDEXES)
+
+    assert "TIMESTAMPTZ NULL" in columns[("task_executions", "cancel_requested_at")]
+    assert "BIGINT NULL" in columns[("task_executions", "cancel_requested_by")]
+    assert "CONCURRENTLY" in indexes["idx_task_executions_cancel_requested_at"]
+    assert "UNIQUE INDEX CONCURRENTLY" in indexes["idx_worker_install_keys_registration_id_unique"]
+    assert "VARCHAR(50) NULL" in columns[("project_rules", "region")]
+    assert "BOOLEAN NOT NULL DEFAULT FALSE" in columns[("project_rules", "require_render")]
+    assert "CONCURRENTLY" in indexes["idx_project_rules_region"]
+    assert "CONCURRENTLY" in indexes["idx_scheduled_tasks_project_id"]
+
+
+def test_standard_init_removes_legacy_project_source_uniqueness() -> None:
+    source = Path("scripts/init_db_legacy_schema.py").read_text(encoding="utf-8")
+
+    assert "await _allow_shared_project_sources(connection)" in source
+    assert "DROP CONSTRAINT" in source
+    assert "DROP INDEX CONCURRENTLY" in source
+    contracts = {contract.name: contract for contract in INDEX_CONTRACTS}
+    assert contracts["idx_project_sources_repository_subdir"].keys == ("repository_id", "subdir")
+    indexes = dict(init_db.PERFORMANCE_INDEXES)
+    assert "CONCURRENTLY" in indexes["idx_project_sources_repository_subdir"]
+
+
+@pytest.mark.asyncio
+async def test_standard_init_drops_exact_standalone_project_source_unique_index() -> None:
+    from scripts.init_db_legacy_schema import _allow_shared_project_sources
+
+    connection = AsyncMock()
+    connection.execute_query_dict.side_effect = [
+        [],
+        [{"index_name": "idx_project_sources_repository_subdir"}],
+    ]
+
+    await _allow_shared_project_sources(connection)
+
+    catalog_query = connection.execute_query_dict.await_args_list[1].args[0]
+    assert "index_row.indisvalid" in catalog_query
+    assert "index_row.indisready" in catalog_query
+    assert "access_method.amname = 'btree'" in catalog_query
+    assert connection.execute_query.await_args.args[0] == (
+        'DROP INDEX CONCURRENTLY IF EXISTS public."idx_project_sources_repository_subdir"'
+    )
+
+
+def test_standard_init_includes_sensitive_data_migration() -> None:
+    source = Path("scripts/init_db.py").read_text(encoding="utf-8")
+
+    assert "antcode_data_migrations" in init_db.REQUIRED_TABLES
+    assert "await _migrate_worker_credentials()" in source
+    assert "await encrypt_sensitive_data()" in source
+    assert source.index("await _migrate_worker_credentials()") < source.index("await encrypt_sensitive_data()")
+    assert source.index("await encrypt_sensitive_data()") < source.index("await _check_required_tables()")
+
+
+@pytest.mark.asyncio
+async def test_standard_init_runs_worker_credential_migration_in_upgrade_order(monkeypatch) -> None:
+    from scripts import encrypt_sensitive_data, migrate_worker_credentials
+
+    events: list[str] = []
+
+    def step(name: str):
+        async def run() -> None:
+            events.append(name)
+
+        return run
+
+    monkeypatch.setattr(init_db, "load_dotenv", lambda **_kwargs: None)
+    monkeypatch.setattr(init_db, "_check_env", step("environment"))
+    for name in (
+        "_generate_schemas",
+        "_upgrade_legacy_schema",
+        "_align_database_integrity",
+        "_check_required_tables",
+        "_create_performance_indexes",
+        "_validate_schema_contracts",
+        "_init_system_config",
+        "_create_admin",
+    ):
+        monkeypatch.setattr(init_db, name, step(name))
+    monkeypatch.setattr(migrate_worker_credentials, "main", step("worker_credentials"))
+    monkeypatch.setattr(encrypt_sensitive_data, "main", step("sensitive_data"))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://antcode:secret@localhost:5432/antcode")
+
+    await init_db.main()
+
+    assert events == [
+        "environment",
+        "_generate_schemas",
+        "_upgrade_legacy_schema",
+        "_align_database_integrity",
+        "worker_credentials",
+        "sensitive_data",
+        "_check_required_tables",
+        "_create_performance_indexes",
+        "_validate_schema_contracts",
+        "_init_system_config",
+        "_create_admin",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_credential_failure_stops_standard_initialization(monkeypatch) -> None:
+    from scripts import migrate_worker_credentials
+
+    failure = RuntimeError("credential migration failed")
+    monkeypatch.setattr(migrate_worker_credentials, "main", AsyncMock(side_effect=failure))
+
+    with pytest.raises(RuntimeError, match="credential migration failed"):
+        await init_db._migrate_worker_credentials()
+
+
+def test_worker_project_models_are_registered_and_required() -> None:
+    from antcode_core.domain.models import WorkerProject, WorkerProjectFile
+
+    assert WorkerProject._meta.db_table == "worker_projects"
+    assert WorkerProjectFile._meta.db_table == "worker_project_files"
+    assert {"worker_projects", "worker_project_files"}.issubset(init_db.REQUIRED_TABLES)
+
+
+def test_public_ids_use_only_the_unique_index() -> None:
+    from antcode_core.domain.models import GitCredential, GitRepository, Project, TaskRun, User
+
+    for model in (GitCredential, GitRepository, Project, TaskRun, User):
+        field = model._meta.fields_map["public_id"]
+        assert field.unique is True
+        assert field.index is False
+
+
+def test_lease_generation_migration_requires_generated_primary_key() -> None:
+    source = Path("migrations/models/20260727_add_task_run_lease_generations.sql").read_text(encoding="utf-8")
+
+    assert "primary_key_columns IS DISTINCT FROM ARRAY['id']" in source
+    assert "identity_generation" in source
+    assert "default_sequence_oids[1] IS DISTINCT FROM to_regclass(owned_sequence)" in source
+    assert "id_default IS DISTINCT FROM format(" in source
+
+
+def test_database_integrity_migration_is_concurrent_and_catalog_guarded() -> None:
+    source = Path("migrations/models/20260731_align_database_integrity.sql").read_text(encoding="utf-8")
+
+    assert "ALTER COLUMN user_id TYPE BIGINT" in source
+    assert "DROP INDEX CONCURRENTLY" in source
+    assert "NOT candidate.indisunique" in source
+    assert "keeper.indisunique" in source
+    assert "constraint_row.conindid" in source
+    assert "candidate.indpred IS NULL" in source
+    assert "candidate.indnatts = 1" in source
+    assert "NOT candidate.indisclustered" in source
+    assert "keeper_constraint.contype = 'u'" in source
+
+
+def test_task_project_migration_adds_validated_restrict_foreign_key() -> None:
+    source = Path("migrations/models/20260811_add_task_project_foreign_key.sql").read_text(encoding="utf-8")
+
+    assert "ALTER TABLE public.scheduled_tasks" in source
+    assert "FOREIGN KEY (project_id) REFERENCES public.projects(id)" in source
+    assert "ON DELETE RESTRICT NOT VALID" in source
+    assert "VALIDATE CONSTRAINT fk_scheduled_tasks_project_id" in source
+    assert "WHERE project_id IS NULL" in source
+    assert "ALTER COLUMN project_id SET NOT NULL" in source
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scheduled_tasks_project_id" in source
+    assert "index_row.indnkeyatts = 1" in source
+    assert "index_row.indnatts = 1" in source
+
+
 @pytest.mark.asyncio
 async def test_performance_index_failure_is_not_swallowed(monkeypatch) -> None:
     _set_required_environment(monkeypatch)
     connection = AsyncMock()
     connection.execute_query.side_effect = RuntimeError("index failed")
     monkeypatch.setattr(init_db, "PERFORMANCE_INDEXES", [("broken", "CREATE INDEX broken")])
-    monkeypatch.setattr(
-        "antcode_core.infrastructure.db.tortoise.init_db",
-        AsyncMock(),
-    )
+    monkeypatch.setattr("antcode_core.infrastructure.db.tortoise.init_db", AsyncMock())
+    close_db = AsyncMock()
+    monkeypatch.setattr("antcode_core.infrastructure.db.tortoise.close_db", close_db)
     monkeypatch.setattr("tortoise.connections.get", lambda _name: connection)
 
     with pytest.raises(RuntimeError, match="index failed"):
         await init_db._create_performance_indexes()
+    close_db.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -98,12 +283,12 @@ async def test_system_config_failure_is_not_swallowed(monkeypatch) -> None:
         system_config_service,
     )
 
-    monkeypatch.setattr(
-        "antcode_core.infrastructure.db.tortoise.init_db",
-        AsyncMock(),
-    )
+    monkeypatch.setattr("antcode_core.infrastructure.db.tortoise.init_db", AsyncMock())
+    close_db = AsyncMock()
+    monkeypatch.setattr("antcode_core.infrastructure.db.tortoise.close_db", close_db)
     initialize = AsyncMock(side_effect=RuntimeError("config failed"))
     monkeypatch.setattr(system_config_service, "initialize_default_configs", initialize)
 
     with pytest.raises(RuntimeError, match="config failed"):
         await init_db._init_system_config()
+    close_db.assert_awaited_once()

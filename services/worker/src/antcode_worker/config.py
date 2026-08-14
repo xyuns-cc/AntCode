@@ -139,71 +139,60 @@ def _load_env_config() -> dict[str, Any]:
     """读取环境变量配置"""
     env_config: dict[str, Any] = {}
     _load_control_api_env(env_config)
+    _load_transport_env(env_config)
+    _load_sandbox_env(env_config)
+    _load_identity_env(env_config)
+    _load_capacity_env(env_config)
+    return env_config
 
-    transport_mode = _get_env_value("WORKER_TRANSPORT_MODE")
-    if transport_mode:
-        env_config["transport_mode"] = transport_mode
 
-    redis_url = _get_env_value("WORKER_REDIS_URL")
-    if redis_url:
-        env_config["redis_url"] = redis_url
-
-    redis_namespace = _get_env_value("WORKER_REDIS_NAMESPACE")
-    if redis_namespace:
-        env_config["redis_namespace"] = redis_namespace
-
+def _load_transport_env(env_config: dict[str, Any]) -> None:
+    _copy_env_value(env_config, "transport_mode", "WORKER_TRANSPORT_MODE")
+    _copy_env_value(env_config, "redis_url", "WORKER_REDIS_URL")
+    _copy_env_value(env_config, "redis_namespace", "WORKER_REDIS_NAMESPACE")
     env_config.update(_load_gateway_env())
 
-    sandbox_mode = _get_env_value("WORKER_SANDBOX_MODE")
-    if sandbox_mode:
-        env_config["sandbox_mode"] = sandbox_mode
 
-    sandbox_command = _get_env_value("WORKER_SANDBOX_COMMAND")
-    if sandbox_command:
-        env_config["sandbox_command"] = sandbox_command
+def _load_sandbox_env(env_config: dict[str, Any]) -> None:
+    _copy_env_value(env_config, "sandbox_mode", "WORKER_SANDBOX_MODE")
+    _copy_env_value(env_config, "sandbox_command", "WORKER_SANDBOX_COMMAND")
+    _copy_env_bool(env_config, "sandbox_network_isolated", "WORKER_SANDBOX_NETWORK_ISOLATED")
 
-    sandbox_network_isolated = _get_env_bool("WORKER_SANDBOX_NETWORK_ISOLATED")
-    if sandbox_network_isolated is not None:
-        env_config["sandbox_network_isolated"] = sandbox_network_isolated
 
-    name = _get_env_value("WORKER_NAME")
-    if name:
-        env_config["name"] = name
+def _load_identity_env(env_config: dict[str, Any]) -> None:
+    _copy_env_value(env_config, "name", "WORKER_NAME")
+    _copy_env_value(env_config, "host", "WORKER_HOST")
+    _copy_env_int(env_config, "port", "WORKER_PORT")
+    _copy_env_value(env_config, "region", "WORKER_REGION")
+    _copy_env_value(env_config, "data_dir", "WORKER_DATA_DIR")
+    _copy_env_value(env_config, "credential_store", "WORKER_CREDENTIAL_STORE")
+    _copy_env_value(env_config, "worker_key", "ANTCODE_WORKER_KEY")
 
-    host = _get_env_value("WORKER_HOST")
-    if host:
-        env_config["host"] = host
 
-    port = _get_env_int("WORKER_PORT")
-    if port is not None:
-        env_config["port"] = port
+def _load_capacity_env(env_config: dict[str, Any]) -> None:
+    _copy_env_int(env_config, "heartbeat_interval", "WORKER_HEARTBEAT_INTERVAL")
+    _copy_env_int(env_config, "max_concurrent_tasks", "WORKER_MAX_CONCURRENT_TASKS")
+    from antcode_worker.rule_egress_limits import load_rule_egress_env
 
-    region = _get_env_value("WORKER_REGION")
-    if region:
-        env_config["region"] = region
+    env_config.update(load_rule_egress_env(_get_env_int))
 
-    heartbeat_interval = _get_env_int("WORKER_HEARTBEAT_INTERVAL")
-    if heartbeat_interval is not None:
-        env_config["heartbeat_interval"] = heartbeat_interval
 
-    max_concurrent = _get_env_int("WORKER_MAX_CONCURRENT_TASKS")
-    if max_concurrent is not None:
-        env_config["max_concurrent_tasks"] = max_concurrent
+def _copy_env_value(target: dict[str, Any], field: str, env_name: str) -> None:
+    value = _get_env_value(env_name)
+    if value:
+        target[field] = value
 
-    data_dir = _get_env_value("WORKER_DATA_DIR")
-    if data_dir:
-        env_config["data_dir"] = data_dir
 
-    credential_store = _get_env_value("WORKER_CREDENTIAL_STORE")
-    if credential_store:
-        env_config["credential_store"] = credential_store
+def _copy_env_int(target: dict[str, Any], field: str, env_name: str) -> None:
+    value = _get_env_int(env_name)
+    if value is not None:
+        target[field] = value
 
-    # Worker 安装 Key（用于快速注册）
-    worker_key = _get_env_value("ANTCODE_WORKER_KEY")
-    if worker_key:
-        env_config["worker_key"] = worker_key
 
-    return env_config
+def _copy_env_bool(target: dict[str, Any], field: str, env_name: str) -> None:
+    value = _get_env_bool(env_name)
+    if value is not None:
+        target[field] = value
 
 
 def _load_gateway_env() -> dict[str, Any]:
@@ -299,25 +288,18 @@ class WorkerConfig:
     sandbox_max_open_files: int = 2048  # RLIMIT_NOFILE
     sandbox_max_processes: int = 64  # RLIMIT_NPROC（防 fork 炸弹）
 
-    # P0-a5: 沙箱执行器模式。审查报告认定"生产执行链没有真正沙箱,用户任务
-    # 可接管 Worker 身份"是 P0(SandboxExecutor 定义了但 wiring 未接入)。
-    #   - "process": 直接 ProcessExecutor,仅 rlimit + env 白名单。默认值,兼容旧行为。
-    #                **子进程与 Worker 主进程同 UID + 同网络 namespace + 共享 FS
-    #                视图**,不是真隔离。仅内网 dev / 受信租户可用。
-    #   - "sandbox": SandboxExecutor + BasicSandbox,除 rlimit 外还做:
-    #                * env 严格白名单(默认只透传 PATH/HOME/PYTHONPATH/LANG 等)
-    #                * SECRET/PASSWORD/TOKEN/API_KEY/CREDENTIAL/PRIVATE 关键词二次过滤
-    #                * 强制 fs_isolated 独立工作目录 + cleanup_on_exit
-    #                * 可选:配合 sandbox_command 外接 firejail / bubblewrap
-    #                  实现真正的进程/网络/文件系统 namespace 隔离
-    # 生产强烈建议 "sandbox" 并配 sandbox_command=["firejail","--private","--net=none"]
-    # 或独立容器/VM(通过 K8s per-task pod 之类)。
+    # Rule 任务的 Worker 父进程出站代理硬预算。
+    rule_egress_max_connections: int = 32
+    rule_egress_max_bytes: int = 1024 * 1024 * 1024
+    rule_egress_max_duration_seconds: int = 3600
+
+    # 生产任务必须使用 SandboxExecutor。"process" 仅允许受信的本地开发，
+    # 不提供租户级进程、网络或文件系统隔离。
     sandbox_mode: str = "sandbox"
-    # 外接沙箱命令前缀(空列表 = 不外接)。示例:
-    #   ["firejail","--private","--net=none"] 或 ["bwrap","--unshare-all","--ro-bind","/","/"]
-    # 值由 env WORKER_SANDBOX_COMMAND 提供,用 shlex 兼容格式;wiring 层解析。
+    # 当前唯一受支持的启动器是 bwrap；wiring 会解析为绝对路径，执行器会拒绝
+    # firejail、任意命令前缀和缺失启动器，避免配置漂移静默绕过隔离。
     sandbox_command: str = "bwrap"
-    # 沙箱是否启用网络隔离(需要 sandbox_command 支持,如 firejail --net=none)
+    # bwrap 网络 namespace 隔离；Rule 任务只通过受限的 Worker 代理出站。
     sandbox_network_isolated: bool = True
 
     # 传输模式配置

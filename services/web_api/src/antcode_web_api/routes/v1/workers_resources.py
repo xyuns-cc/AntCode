@@ -9,6 +9,8 @@ P2 拆分自 workers.py:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings
 from antcode_core.common.security.auth import TokenData, get_current_user
@@ -27,6 +29,21 @@ from antcode_web_api.response import BaseResponse, success
 _MAX_CONCURRENT_MIN, _MAX_CONCURRENT_MAX = 1, 20
 _MEMORY_LIMIT_MIN_MB, _MEMORY_LIMIT_MAX_MB = 256, 8192
 _CPU_LIMIT_MIN_SEC, _CPU_LIMIT_MAX_SEC = 60, 3600
+BYTES_PER_MIB = 1024 * 1024
+BYTES_PER_GIB = 1024 * BYTES_PER_MIB
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityMetric:
+    byte_field: str
+    legacy_field: str
+    divisor: int
+
+
+MEMORY_USED = CapacityMetric("memoryUsed", "memory_used_mb", BYTES_PER_MIB)
+MEMORY_TOTAL = CapacityMetric("memoryTotal", "memory_total_mb", BYTES_PER_MIB)
+DISK_USED = CapacityMetric("diskUsed", "disk_used_gb", BYTES_PER_GIB)
+DISK_TOTAL = CapacityMetric("diskTotal", "disk_total_gb", BYTES_PER_GIB)
 
 
 async def _require_admin(current_user: TokenData) -> User:
@@ -52,6 +69,12 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _capacity_value(resources: dict, metric: CapacityMetric) -> float:
+    if resources.get(metric.byte_field) not in (None, ""):
+        return round(_to_float(resources[metric.byte_field]) / metric.divisor, 1)
+    return _to_float(resources.get(metric.legacy_field, 0))
+
+
 async def get_worker_resources(worker_id: str, current_user: TokenData):
     await _require_admin(current_user)
     worker = await worker_service.get_worker_by_id(worker_id)
@@ -73,10 +96,10 @@ async def get_worker_resources(worker_id: str, current_user: TokenData):
                 "cpu_percent": round(_to_float(resources.get("cpu", resources.get("cpu_percent", 0))), 1),
                 "memory_percent": round(_to_float(resources.get("memory", resources.get("memory_percent", 0))), 1),
                 "disk_percent": round(_to_float(resources.get("disk", resources.get("disk_percent", 0))), 1),
-                "memory_used_mb": resources.get("memoryUsed", resources.get("memory_used_mb", 0)),
-                "memory_total_mb": resources.get("memoryTotal", resources.get("memory_total_mb", 0)),
-                "disk_used_gb": resources.get("diskUsed", resources.get("disk_used_gb", 0)),
-                "disk_total_gb": resources.get("diskTotal", resources.get("disk_total_gb", 0)),
+                "memory_used_mb": _capacity_value(resources, MEMORY_USED),
+                "memory_total_mb": _capacity_value(resources, MEMORY_TOTAL),
+                "disk_used_gb": _capacity_value(resources, DISK_USED),
+                "disk_total_gb": _capacity_value(resources, DISK_TOTAL),
                 "running_tasks": resources.get("runningTasks", resources.get("running_tasks", 0)),
                 "queued_tasks": resources.get("queuedTasks", resources.get("queued_tasks", 0)),
                 "uptime_seconds": resources.get("uptime", resources.get("uptime_seconds", 0)),

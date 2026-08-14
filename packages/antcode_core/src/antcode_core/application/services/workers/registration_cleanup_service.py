@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -11,31 +12,52 @@ from tortoise.transactions import in_transaction
 from antcode_core.domain.models import WorkerInstallKey
 
 REGISTRATION_CLEANUP_BATCH_SIZE = 100
+ProvisionalRunSettler = Callable[[int], Awaitable[int]]
 
 
 @dataclass(frozen=True)
 class RegistrationCleanupResult:
     expired_registrations: int = 0
     deleted_workers: int = 0
+    expired_pending_keys: int = 0
 
 
 class RegistrationCleanupService:
-    async def cleanup_expired(self) -> RegistrationCleanupResult:
+    async def cleanup_expired(self, *, run_settler: ProvisionalRunSettler) -> RegistrationCleanupResult:
+        """Expire registration state, then retire its provisional Worker.
+
+        The injected settler is deliberately mandatory: only Master can prove the
+        current scheduler epoch before terminally settling active TaskRun rows.
+        """
         now = datetime.now(UTC)
         expired_registrations = 0
         deleted_workers = 0
         while True:
-            batch = await self._cleanup_batch(now)
+            batch = await self._cleanup_batch(now, run_settler)
             expired_registrations += batch.expired_registrations
             deleted_workers += batch.deleted_workers
             if batch.expired_registrations < REGISTRATION_CLEANUP_BATCH_SIZE:
                 break
         # 复审 F4-A: 上一轮 "标 expired 后、删 Worker 前" 崩溃或删除失败的
         # 遗留 —— expired 且未确认但仍绑着存活 Worker 的记录，每轮补扫重试。
-        deleted_workers += await self._retry_orphaned_expired_workers()
-        return RegistrationCleanupResult(expired_registrations, deleted_workers)
+        deleted_workers += await self._retry_orphaned_expired_workers(run_settler)
+        expired_pending_keys = await self._expire_pending_keys(now)
+        return RegistrationCleanupResult(expired_registrations, deleted_workers, expired_pending_keys)
 
-    async def _cleanup_batch(self, now: datetime) -> RegistrationCleanupResult:
+    @staticmethod
+    async def _expire_pending_keys(now: datetime) -> int:
+        expired = 0
+        while True:
+            batch_size = await WorkerInstallKey.expire_pending(now, limit=REGISTRATION_CLEANUP_BATCH_SIZE)
+            expired += batch_size
+            if batch_size < REGISTRATION_CLEANUP_BATCH_SIZE:
+                return expired
+
+    async def _cleanup_batch(
+        self,
+        now: datetime,
+        run_settler: ProvisionalRunSettler,
+    ) -> RegistrationCleanupResult:
         async with in_transaction("default") as connection:
             registrations = await self._expired_registrations(now, connection)
             if not registrations:
@@ -61,10 +83,10 @@ class RegistrationCleanupService:
         # 复审 F4-A: 保留 used_by_worker 绑定 —— 它是崩溃/删除失败后补扫
         # 重试的唯一线索；worker_service 级联删除对 status="expired" 的
         # 安装 Key 做了豁免（审计留存 + acknowledge 精确报"恢复窗口已关闭"）。
-        deleted = await self._delete_workers_via_service(worker_ids)
+        deleted = await self._delete_workers_via_service(worker_ids, run_settler)
         return RegistrationCleanupResult(expired, deleted)
 
-    async def _retry_orphaned_expired_workers(self) -> int:
+    async def _retry_orphaned_expired_workers(self, run_settler: ProvisionalRunSettler) -> int:
         from antcode_core.domain.models import Worker
 
         orphaned = (
@@ -83,20 +105,24 @@ class RegistrationCleanupService:
         for key in orphaned:
             worker_exists = await Worker.filter(public_id=key.used_by_worker).exists()
             if worker_exists:
-                deleted += await self._delete_workers_via_service([key.used_by_worker])
+                deleted += await self._delete_workers_via_service([key.used_by_worker], run_settler)
                 continue
             # Worker 已删净：解除绑定，让补扫清单收敛（Key 仍以 expired 留存）。
             await WorkerInstallKey.filter(id=key.id).update(used_by_worker=None)
         return deleted
 
     @staticmethod
-    async def _delete_workers_via_service(worker_ids: list[str]) -> int:
+    async def _delete_workers_via_service(
+        worker_ids: list[str],
+        run_settler: ProvisionalRunSettler,
+    ) -> int:
         """P1-DB-05: 过期注册的 Worker 必须走完整撤销链删除。
 
-        此前直接批量 ``Worker.delete``，绕过 ``worker_service.delete_worker``
+        此前直接批量 ``Worker.delete``，绕过 ``worker_service``
         的 Redis ACL revoke、心跳/权限/runtime/项目任务归属级联 —— 未 ACK
-        Worker 的 ACL 凭证与逻辑关系会永久残留。逐个失败只记录，留待下轮
-        清理重试（install key 已标 expired，不会重复放行注册）。
+        Worker 的 ACL 凭证与逻辑关系会永久残留。临时 Worker 的活跃 run
+        必须由 Master 当前调度任期显式结算，随后才进入通用级联删除；逐个
+        失败只记录，留待下轮重试。
         """
         if not worker_ids:
             return 0
@@ -107,7 +133,7 @@ class RegistrationCleanupService:
         deleted = 0
         for worker_public_id in worker_ids:
             try:
-                if await worker_service.delete_worker(worker_public_id):
+                if await worker_service.delete_expired_provisional_worker(worker_public_id, run_settler):
                     deleted += 1
             except Exception:
                 logger.exception("过期注册 Worker 完整撤销失败(下轮重试): worker={}", worker_public_id)

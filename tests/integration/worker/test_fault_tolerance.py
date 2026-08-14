@@ -80,6 +80,7 @@ async def _master_result_environment(
         task_id=int(uuid.uuid4().int % 1_000_000_000),
         run_id=run_id,
         worker_id=worker.id,
+        lease_id=lease_id,
         status=TaskStatus.RUNNING,
         dispatch_status=DispatchStatus.DISPATCHED,
         runtime_status=RuntimeStatus.RUNNING,
@@ -475,15 +476,14 @@ class TestCrashPendingReclaim:
             decode_responses=True,
         )
 
-        # 使用自定义 namespace
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
         worker_id = f"dlq-worker-{uuid.uuid4().hex[:4]}"
         stream_key = keys.task_ready_stream(worker_id)
+        dead_letter_key = f"{stream_key}:{{dlq}}:dead_letter"
         group_name = keys.consumer_group_name()
 
         try:
-            # 创建 stream 和 consumer group
             await redis_client.xgroup_create(
                 stream_key,
                 group_name,
@@ -491,7 +491,6 @@ class TestCrashPendingReclaim:
                 mkstream=True,
             )
 
-            # 添加任务
             await redis_client.xadd(
                 stream_key,
                 {
@@ -508,13 +507,6 @@ class TestCrashPendingReclaim:
                 enable_dead_letter=True,
             )
 
-            reclaimer = PendingTaskReclaimer(
-                redis_client=redis_client,
-                worker_id=worker_id,
-                keys=keys,
-                config=config,
-            )
-
             # 第一次读取（模拟第一次失败）
             consumer1 = f"consumer-1-{uuid.uuid4().hex[:4]}"
             await redis_client.xreadgroup(
@@ -526,15 +518,22 @@ class TestCrashPendingReclaim:
             )
             await asyncio.sleep(0.05)
 
-            # 第一次回收（投递计数变为 2）
+            current_consumer = f"consumer-2-{uuid.uuid4().hex[:4]}"
+            reclaimer = PendingTaskReclaimer(
+                redis_client=redis_client,
+                worker_id=worker_id,
+                keys=keys,
+                config=config,
+                current_consumer_name=lambda: current_consumer,
+            )
+
+            # 第一代接管后崩溃，下一代再次接管并超过重试阈值。
             await reclaimer.reclaim_once()
             await asyncio.sleep(0.05)
-
-            # 第二次回收（应该移入死信队列）
+            current_consumer = f"consumer-3-{uuid.uuid4().hex[:4]}"
             await reclaimer.reclaim_once()
 
             # 检查死信队列
-            dead_letter_key = f"{stream_key}:{{dlq}}:dead_letter"
             dlq_messages = await redis_client.xrange(dead_letter_key, "-", "+", count=10)
 
             matching_messages = [data for _, data in dlq_messages if data.get("task_id") == unique_task_id]
@@ -553,7 +552,7 @@ class TestCrashPendingReclaim:
         finally:
             try:
                 await redis_client.delete(stream_key)
-                await redis_client.delete(f"{stream_key}:{{dlq}}:dead_letter")
+                await redis_client.delete(dead_letter_key)
             except Exception:
                 pass
             await redis_client.aclose()
@@ -791,7 +790,6 @@ class TestIdempotentResultReporting:
     ):
         """
         验证 Master 真实结果处理链路的幂等性
-
         验证：
         1. 多次上报产生多条记录（at-least-once）
         2. 每条记录均经过真实 ResultLoop 与 TaskRunService
@@ -954,6 +952,7 @@ class TestIdempotentResultReporting:
             # 写入任务并获取 receipt
             task_data = {
                 "task_id": unique_task_id,
+                "run_id": f"run-{unique_task_id}",
                 "project_id": "ack-project",
                 "project_type": "code",
                 "source_bundle_uri": f"pgartifact://{TEST_SOURCE_BUNDLE_SHA256}",
@@ -961,7 +960,7 @@ class TestIdempotentResultReporting:
                 "source_bundle_size": "1",
                 "transfer_method": "source_bundle",
             }
-            await redis_client.xadd(stream_key, task_data)
+            await direct_support.publish_ready_task(redis_client, transport, task_data)
             task_msg = await transport.poll_task(timeout=5.0)
             assert task_msg is not None, "未能拉取到任务"
 

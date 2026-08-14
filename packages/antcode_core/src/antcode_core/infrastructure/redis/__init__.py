@@ -4,7 +4,7 @@ Redis 模块
 Redis 客户端与工具：
 - client: Redis 连接池管理
 - keys: Key 命名规范
-- streams: Redis Streams 封装（XADD/XREADGROUP/XACK/XAUTOCLAIM）
+- stream_client: Redis Streams 封装（XADD/XREADGROUP/XACK/XAUTOCLAIM）
 - locks: 分布式锁（compare-and-renew + fencing token）
 """
 
@@ -21,6 +21,7 @@ from antcode_core.infrastructure.redis.control_plane import (
     build_cancel_control_payload,
     build_config_update_control_payload,
     build_runtime_manage_control_payload,
+    cancel_tombstone_key,
     control_global_group,
     control_global_stream,
     control_group,
@@ -46,7 +47,6 @@ from antcode_core.infrastructure.redis.control_plane import (
     worker_install_key_block_key,
     worker_install_key_claim_key,
     worker_install_key_fail_counter_key,
-    worker_install_key_meta_key,
     worker_install_key_nonce_key,
     worker_install_source_block_key,
     worker_install_source_fail_counter_key,
@@ -59,8 +59,8 @@ from antcode_core.infrastructure.redis.locks import (
     fencing_token_manager,
 )
 from antcode_core.infrastructure.redis.rate_limiter import RedisRateLimiter, redis_rate_limiter
+from antcode_core.infrastructure.redis.stream_client import StreamAckError, StreamClient, StreamMessage
 from antcode_core.infrastructure.redis.stream_retention import trim_acknowledged_stream
-from antcode_core.infrastructure.redis.streams import StreamClient
 
 __all__ = [
     "RedisConnectionPool",
@@ -71,7 +71,9 @@ __all__ = [
     "HOT_POOL_DEFAULT",
     "COLD_POOL_DEFAULT",
     "RedisKeys",
+    "StreamAckError",
     "StreamClient",
+    "StreamMessage",
     "DistributedLock",
     "FencingTokenManager",
     "fencing_token_manager",
@@ -94,6 +96,7 @@ __all__ = [
     "runtime_control_request_id",
     "require_runtime_control_request_id",
     "runtime_control_settlement_key",
+    "cancel_tombstone_key",
     "worker_heartbeat_key",
     "worker_group",
     "control_group",
@@ -103,7 +106,6 @@ __all__ = [
     "worker_install_key_block_key",
     "worker_install_key_claim_key",
     "worker_install_key_nonce_key",
-    "worker_install_key_meta_key",
     "worker_install_source_fail_counter_key",
     "worker_install_source_block_key",
     "build_cancel_control_payload",

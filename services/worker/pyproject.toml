@@ -20,9 +20,10 @@ dependencies = [
     "pydantic-settings>=2.14.2,<3",
 
     # HTTP 客户端
-    "aiohttp>=3.9.0",
+    "aiohttp>=3.14.3",
     # P7: RuleSpider/SpiderClient 默认开启 http2=True，httpx 需要 h2 extra
     "httpx[socks,http2]>=0.28.0",
+    "h2>=4.4.1",
 
     # 爬虫能力：curl_cffi 保留供 worker heartbeat capabilities 探测；
     # lxml/cssselect S4 后不再直接使用（Scrapy 通过 antcode_scrapy 传递）。
@@ -34,6 +35,8 @@ dependencies = [
     # 日志与配置
     "loguru>=0.7.0",
     "PyYAML>=6.0",
+    "Jinja2>=3.1.6",
+    "Mako>=1.3.10",
 
     # 序列化
     "ujson>=5.13.0",

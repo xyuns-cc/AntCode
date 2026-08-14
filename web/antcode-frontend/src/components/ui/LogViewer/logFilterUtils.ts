@@ -1,4 +1,4 @@
-import type { LogMessage } from './enhancedLogViewerTypes'
+import { LOG_TYPE_LABELS, type LogMessage, type LogMessageType } from './enhancedLogViewerTypes'
 import type { LogFilter, LogFilterEvaluation, LogFilterOptions } from './logSearchTypes'
 
 export const DEFAULT_LOG_FILTER: Readonly<LogFilter> = {
@@ -99,16 +99,23 @@ export const applyLogFilter = (messages: LogMessage[], filter: LogFilter): LogFi
   }
 }
 
-const TYPE_INFO: Record<string, { color: string; text: string }> = {
-  stdout: { color: 'green', text: '标准输出' },
-  stderr: { color: 'red', text: '标准错误' },
+// Record<LogMessageType, …>：后端 LogType 或本地通知类型增删一个取值，
+// 这里漏了就是编译错误，而不是安静地退化成大写英文标签。
+const TYPE_INFO: Record<LogMessageType, { color: string; text: string }> = {
+  stdout: { color: 'green', text: LOG_TYPE_LABELS.stdout },
+  stderr: { color: 'red', text: LOG_TYPE_LABELS.stderr },
+  system: { color: 'purple', text: LOG_TYPE_LABELS.system },
+  application: { color: 'cyan', text: LOG_TYPE_LABELS.application },
   error: { color: 'red', text: '错误' },
   warning: { color: 'orange', text: '警告' },
   info: { color: 'blue', text: '信息' },
   success: { color: 'green', text: '成功' },
 }
 
-export const getTypeInfo = (type: string) => TYPE_INFO[type] ?? { color: 'default', text: type.toUpperCase() }
+// collectFilterOptions 会把消息里出现过的 type 原样收集成 string，
+// 所以入参保持 string；已知取值一律走上面的全覆盖表。
+export const getTypeInfo = (type: string) =>
+  TYPE_INFO[type as LogMessageType] ?? { color: 'default', text: type.toUpperCase() }
 
 const LEVEL_COLORS: Record<string, string> = {
   DEBUG: 'default',

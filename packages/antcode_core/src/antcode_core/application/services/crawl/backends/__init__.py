@@ -3,6 +3,7 @@
 from antcode_core.application.services.crawl.backends.base import (
     CrawlQueueBackend,
     QueueMetrics,
+    QueueProjectDiscovery,
     QueueStats,
     QueueTask,
     ReclaimedTask,
@@ -40,6 +41,7 @@ __all__ = [
     "QueueStats",
     "QueueMetrics",
     "QueueTask",
+    "QueueProjectDiscovery",
     "ReclaimedTask",
     # 队列工厂方法
     "get_queue_backend",

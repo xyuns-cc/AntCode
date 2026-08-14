@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.infrastructure.redis import (
     control_reply_stream,
     require_runtime_control_request_id,
@@ -59,6 +60,11 @@ def validate_result(
         raise ValueError("Direct 运行时控制 error 超过 16 KiB 上限")
 
 
+def normalize_control_error(error: object | None) -> str:
+    """与 Gateway 对齐：控制错误在进入 Redis 证据前先脱敏和限长。"""
+    return normalize_persisted_error_message(error, max_bytes=MAX_CONTROL_ERROR_BYTES) or ""
+
+
 def validate_source(
     decoded: dict[str, Any],
     result: RuntimeControlResult,
@@ -83,7 +89,7 @@ def reply_payload(
         "request_id": result.request_id,
         "success": str(bool(result.success)).lower(),
         "data": data_json,
-        "error": result.error or "",
+        "error": normalize_control_error(result.error),
         "lease_id": lease_id,
         "settlement": fingerprint,
     }
@@ -145,7 +151,7 @@ def validate_committed_reply(
             reply_stream=reply_stream,
             success=success_value == "true",
             data=stored["data"],
-            error=_text(stored["error"]),
+            error=normalize_control_error(_text(stored["error"])),
         )
         data_json = canonical_result_data(result.data)
         validate_result(result, data_json, reply_stream)
@@ -182,6 +188,30 @@ def runtime_source_identity(
     return request_id, expected_reply
 
 
+def validate_runtime_request(
+    decoded: dict[str, Any],
+    worker_id: str,
+    *,
+    namespace: str,
+) -> None:
+    """Reject permanently malformed runtime-control input before execution."""
+    runtime_source_identity(decoded, worker_id, namespace=namespace)
+    action = decoded.get("action")
+    if not isinstance(action, str) or not action.strip():
+        raise ValueError("Direct 运行时控制 action 非法")
+    for field in ("args", "payload", "params"):
+        if field in decoded and not isinstance(decoded[field], dict):
+            raise ValueError(f"Direct 运行时控制 {field} 必须是 object")
+    expires_at_ms = decoded.get("expires_at_ms")
+    if isinstance(expires_at_ms, bool) or not isinstance(expires_at_ms, (int, str)):
+        raise ValueError("Direct 运行时控制 expires_at_ms 非法")
+    try:
+        if int(expires_at_ms) <= 0:
+            raise ValueError("Direct 运行时控制 expires_at_ms 必须大于 0")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Direct 运行时控制 expires_at_ms 非法") from exc
+
+
 def settlement_fingerprint(
     *,
     source: ControlSource,
@@ -193,7 +223,7 @@ def settlement_fingerprint(
     value = json.dumps(
         {
             "data": json.loads(data_json),
-            "error": result.error or "",
+            "error": normalize_control_error(result.error),
             "message_id": source.message_id,
             "lease_id": lease_id,
             "request_id": result.request_id,

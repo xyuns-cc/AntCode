@@ -22,6 +22,7 @@ from antcode_core.application.services.projects.source_bundle_service import (
     _clone_repo,
     _resolve_git_revision,
 )
+from antcode_core.application.services.users.user_ownership_lock import lock_user
 from antcode_core.common.config import settings
 from antcode_core.common.runtime_paths import ensure_runtime_dir
 from antcode_core.domain.models import GitRepository, ProjectSource
@@ -44,13 +45,16 @@ class RepositoryService:
 
     async def create_for_user(self, user_id: int, payload) -> GitRepository:
         await git_credential_service.ensure_accessible(payload.credential_id, user_id)
-        return await GitRepository.create(
-            name=payload.name.strip(),
-            url=payload.url.strip(),
-            default_ref=payload.default_ref.strip() or "main",
-            credential_id=payload.credential_id,
-            owner_user_id=user_id,
-        )
+        async with in_transaction("default") as connection:
+            await lock_user(connection, user_id, active_only=True)
+            return await GitRepository.create(
+                name=payload.name.strip(),
+                url=payload.url.strip(),
+                default_ref=payload.default_ref.strip() or "main",
+                credential_id=payload.credential_id,
+                owner_user_id=user_id,
+                using_db=connection,
+            )
 
     async def update_for_user(self, repository_id: str, user_id: int, payload) -> GitRepository | None:
         repository = await self.get_for_user(repository_id, user_id)
@@ -128,7 +132,9 @@ class RepositoryService:
     ) -> None:
         repository.last_scan_status = status
         repository.last_scan_result = result
-        repository.last_scan_error = error
+        from antcode_core.common.error_messages import normalize_persisted_error_message
+
+        repository.last_scan_error = normalize_persisted_error_message(error)
         repository.last_scanned_at = datetime.now()
         await repository.save()
 

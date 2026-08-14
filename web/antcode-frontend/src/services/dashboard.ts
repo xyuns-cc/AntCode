@@ -1,5 +1,5 @@
 import { BaseService } from './base'
-import type { Project, Task } from '@/types'
+import type { Task } from '@/types'
 
 interface DashboardMetricsPayload {
   active_tasks?: number
@@ -91,110 +91,9 @@ export interface HourlyTrendItem {
   failed: number
 }
 
-export interface ProjectCount {
-  total: number
-  by_status: {
-    active: number
-    inactive: number
-    archived: number
-  }
-  by_type: {
-    file: number
-    rule: number
-    code: number
-  }
-}
-
-export interface TaskSummary {
-  total: number
-  active: number
-  running: number
-  by_status: {
-    pending: number
-    running: number
-    success: number
-    failed: number
-    paused: number
-  }
-}
-
 class DashboardService extends BaseService {
   constructor() {
     super('/api/v1')
-  }
-
-  // 获取项目统计
-  async getProjectStats(): Promise<ProjectCount> {
-    const data = await this.get<{ items: Project[]; pagination: { total: number; page: number; size: number; pages: number } }>('/projects', {
-      params: { page: 1, size: 1000 }
-    })
-
-    const { items: projects, pagination } = data
-    const total = pagination.total
-
-    const byStatus = projects.reduce<ProjectCount['by_status']>((acc, project) => {
-      const status = project.status.toLowerCase() as keyof ProjectCount['by_status']
-      if (!(status in acc)) {
-        throw new Error(`未知项目状态: ${project.status}`)
-      }
-      acc[status] += 1
-      return acc
-    }, { active: 0, inactive: 0, archived: 0 })
-
-    const byType = projects.reduce<ProjectCount['by_type']>((acc, project) => {
-      const type = project.type.toLowerCase() as keyof ProjectCount['by_type']
-      if (!(type in acc)) {
-        throw new Error(`未知项目类型: ${project.type}`)
-      }
-      acc[type] += 1
-      return acc
-    }, { file: 0, rule: 0, code: 0 })
-
-    return {
-      total,
-      by_status: byStatus,
-      by_type: byType
-    }
-  }
-
-  // 获取任务统计（对齐后端 /tasks 返回的 PaginationResponse 结构）
-  async getTaskStats(): Promise<TaskSummary> {
-    const data = await this.get<{ items: Task[]; pagination: { total: number; page: number; size: number; pages: number } }>('/tasks', {
-      params: { page: 1, size: 1000 }
-    })
-
-    const { items: list, pagination } = data
-    const total = pagination.total
-
-    const active = list.filter((task: Task) => task.is_active).length
-    const running = list.filter((task: Task) => task.status === 'running').length
-
-    const byStatus = list.reduce<TaskSummary['by_status']>((acc, task) => {
-      const status = task.status.toString().toLowerCase()
-      switch (status) {
-        case 'pending':
-          acc.pending += 1
-          break
-        case 'running':
-          acc.running += 1
-          break
-        case 'success':
-          acc.success += 1
-          break
-        case 'failed':
-          acc.failed += 1
-          break
-        case 'paused':
-        case 'cancelled':
-          acc.paused += 1
-          break
-        default:
-          throw new Error(`未知任务状态: ${task.status}`)
-      }
-      return acc
-    }, { pending: 0, running: 0, success: 0, failed: 0, paused: 0 })
-
-    return { total, active, running, by_status: byStatus }
   }
 
   // 获取系统指标
@@ -241,14 +140,9 @@ class DashboardService extends BaseService {
     return await this.get<Task[]>('/tasks/running')
   }
 
-  // 获取完整的仪表板统计数据
-  // P2-22: 允许外层传入已经拿到的 metrics,避免重复触发 /dashboard/metrics
-  // (Dashboard 页面本身也需要 metrics,不传参会打两次同样的请求)。
+  // 摘要对所有登录用户可用；管理员系统指标是可选增强，不能阻断摘要。
   async getDashboardStats(metrics?: SystemMetrics): Promise<DashboardStats> {
-    const [summary, systemMetrics] = await Promise.all([
-      this.get<DashboardSummaryPayload>('/dashboard/summary'),
-      metrics ? Promise.resolve(metrics) : this.getSystemMetrics()
-    ])
+    const summary = await this.get<DashboardSummaryPayload>('/dashboard/summary')
 
     return {
       projects: {
@@ -264,11 +158,11 @@ class DashboardService extends BaseService {
         failed: summary.tasks?.by_status?.failed ?? 0,
       },
       system: {
-        status: this.calculateSystemStatus(systemMetrics),
-        uptime: systemMetrics.uptime,
-        memory_usage: systemMetrics.memory_usage?.percent,
-        cpu_usage: systemMetrics.cpu_usage?.percent,
-        disk_usage: systemMetrics.disk_usage?.percent,
+        status: metrics ? this.calculateSystemStatus(metrics) : 'normal',
+        uptime: metrics?.uptime ?? 0,
+        memory_usage: metrics?.memory_usage?.percent,
+        cpu_usage: metrics?.cpu_usage?.percent,
+        disk_usage: metrics?.disk_usage?.percent,
       },
     }
   }

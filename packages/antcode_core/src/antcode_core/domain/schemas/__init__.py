@@ -45,7 +45,9 @@ from antcode_core.domain.schemas.task import (
 from antcode_core.domain.schemas.user import (
     LoginPublicKeyResponse,
     UserAdminPasswordUpdateRequest,
+    UserBatchStatusRequest,
     UserCreateRequest,
+    UserListQueryParams,
     UserListResponse,
     UserLoginRequest,
     UserLoginResponse,
@@ -88,6 +90,8 @@ __all__ = [
     "UserUpdateRequest",
     "UserPasswordUpdateRequest",
     "UserAdminPasswordUpdateRequest",
+    "UserBatchStatusRequest",
+    "UserListQueryParams",
     "UserResponse",
     "UserSimpleResponse",
     "UserListResponse",

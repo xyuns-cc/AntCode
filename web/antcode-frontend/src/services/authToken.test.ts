@@ -1,6 +1,12 @@
 // P1-round6 5.4: decodeAccessToken 必须处理 base64url + UTF-8 且异常路径吞错。
-import { describe, expect, it } from 'vitest'
-import { decodeAccessToken } from './authToken'
+import { beforeEach, describe, expect, it } from 'vitest'
+import {
+  clearSessionGeneration,
+  decodeAccessToken,
+  getSessionAccount,
+  getSessionGeneration,
+  setSessionGeneration,
+} from './authToken'
 
 function b64url(obj: unknown): string {
   const json = JSON.stringify(obj)
@@ -39,5 +45,26 @@ describe('decodeAccessToken (P1-round6 5.4)', () => {
     expect(decodeAccessToken('not-a-jwt')).toBeNull()
     expect(decodeAccessToken('header.$$invalid$$.sig')).toBeNull()
     expect(decodeAccessToken('')).toBeNull()
+  })
+})
+
+describe('session identity storage', () => {
+  beforeEach(() => clearSessionGeneration())
+
+  it('stores generation and account as one atomic record', () => {
+    setSessionGeneration('session-alice', 'alice')
+
+    expect(getSessionGeneration()).toBe('session-alice')
+    expect(getSessionAccount()).toBe('alice')
+    expect(localStorage.getItem('antcode_session_identity')).toBe(
+      JSON.stringify({ sessionJti: 'session-alice', username: 'alice' }),
+    )
+  })
+
+  it('rejects a partial or malformed identity record', () => {
+    localStorage.setItem('antcode_session_identity', JSON.stringify({ username: 'alice' }))
+
+    expect(getSessionGeneration()).toBeNull()
+    expect(getSessionAccount()).toBeNull()
   })
 })

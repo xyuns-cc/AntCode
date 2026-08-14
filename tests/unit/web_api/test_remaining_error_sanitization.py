@@ -159,6 +159,7 @@ async def test_stop_task_hides_worker_transport_error(monkeypatch) -> None:
     )
     monkeypatch.setattr(tasks, "_get_stoppable_execution", AsyncMock(return_value=execution))
     monkeypatch.setattr(tasks, "is_unassigned_task_run", MagicMock(return_value=False))
+    monkeypatch.setattr(tasks, "record_task_cancel_request", AsyncMock(return_value=True))
     monkeypatch.setattr(
         tasks,
         "_try_send_stop_event_with_reason",

@@ -30,11 +30,15 @@ from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus
 from loguru import logger
 from tortoise.expressions import Q
 
+from antcode_master.control.reconcile_failure_settlement import settle_dispatch_failure_snapshot
+from antcode_master.control.retry_intent_delivery import RetryIntentDeliveryError
+from antcode_master.control.scheduler_authority import SchedulerAuthorityLost
+
 # 单轮扫描的候选 run 上限（与原 reconcile 行为一致）。
 NO_ACK_SCAN_LIMIT = 200
 
 
-async def check_dispatched_no_ack(timeout_seconds: int) -> None:
+async def check_dispatched_no_ack(timeout_seconds: int, authority_token: int) -> None:
     """按 ``timeout_seconds`` 判定僵尸分发；Worker Lease 存活的 run 延长观察。
 
     P1-FN-11: 活性证据从"Worker 级"升级到"(worker_id, lease_id) 代际级"。
@@ -43,34 +47,46 @@ async def check_dispatched_no_ack(timeout_seconds: int) -> None:
     """
     try:
         now = datetime.now(UTC)
-        candidates = await _load_no_ack_candidates(now - timedelta(seconds=int(timeout_seconds)))
-        if not candidates:
-            return
-
-        try:
-            alive_lease_by_worker = await load_alive_lease_by_worker(
-                {run.worker_id for run in candidates if run.worker_id}
-            )
-        except Exception:
-            logger.exception("P1-FN-11: 读取 Worker Lease 活性失败,本轮跳过僵尸分发判死")
-            return
-
-        logger.warning(f"P1-17: 发现 {len(candidates)} 个已分发但节点未上报 RUNNING 的候选僵尸任务")
-        marked, skipped_alive = await _converge_dead_candidates(
-            candidates,
-            alive_lease_by_worker=alive_lease_by_worker,
+        marked, scanned, skipped_alive = await _scan_no_ack_candidates(
+            cutoff=now - timedelta(seconds=int(timeout_seconds)),
+            authority_token=authority_token,
             now=now,
             timeout_seconds=timeout_seconds,
         )
         logger.info(
-            f"P1-17: 已标记 {marked}/{len(candidates)} 条僵尸分发为 FAILED"
+            f"P1-17: 已标记 {marked}/{scanned} 条僵尸分发为 FAILED"
             f" (P1-FN-11: {skipped_alive} 条因 Worker 代际匹配的 Lease 存活延长观察)"
         )
+    except (SchedulerAuthorityLost, RetryIntentDeliveryError):
+        raise
     except Exception:
         logger.exception("P1-17: 检测僵尸分发失败")
 
 
-async def _load_no_ack_candidates(cutoff: datetime) -> list[TaskRun]:
+async def _scan_no_ack_candidates(*, cutoff, authority_token, now, timeout_seconds):
+    cursor = 0
+    totals = [0, 0, 0]
+    while True:
+        candidates = await _load_no_ack_candidates(cutoff, after_id=cursor)
+        if not candidates:
+            return tuple(totals)
+        alive = await load_alive_lease_by_worker({run.worker_id for run in candidates if run.worker_id})
+        marked, skipped = await _converge_dead_candidates(
+            candidates,
+            authority_token=authority_token,
+            alive_lease_by_worker=alive,
+            now=now,
+            timeout_seconds=timeout_seconds,
+        )
+        totals[0] += marked
+        totals[1] += len(candidates)
+        totals[2] += skipped
+        cursor = candidates[-1].id
+        if len(candidates) < NO_ACK_SCAN_LIMIT:
+            return tuple(totals)
+
+
+async def _load_no_ack_candidates(cutoff: datetime, *, after_id: int) -> list[TaskRun]:
     """dispatch 已发出、runtime 未进入 RUNNING、超阈值的候选 run。"""
     return (
         await TaskRun.filter(
@@ -83,7 +99,18 @@ async def _load_no_ack_candidates(cutoff: datetime) -> list[TaskRun]:
             Q(runtime_status__isnull=True) | Q(runtime_status=RuntimeStatus.QUEUED),
             Q(dispatch_updated_at__lt=cutoff) | Q(dispatch_updated_at__isnull=True, created_at__lt=cutoff),
         )
-        .only("id", "run_id", "worker_id", "lease_id", "dispatch_status", "runtime_status", "dispatch_updated_at")
+        .filter(id__gt=after_id)
+        .order_by("id")
+        .only(
+            "id",
+            "run_id",
+            "worker_id",
+            "lease_id",
+            "dispatch_status",
+            "runtime_status",
+            "dispatch_updated_at",
+            "scheduler_fencing_token",
+        )
         .limit(NO_ACK_SCAN_LIMIT)
         .all()
     )
@@ -92,14 +119,11 @@ async def _load_no_ack_candidates(cutoff: datetime) -> list[TaskRun]:
 async def _converge_dead_candidates(
     candidates: list[TaskRun],
     *,
+    authority_token: int,
     alive_lease_by_worker: dict[int, str],
     now: datetime,
     timeout_seconds: int,
 ) -> tuple[int, int]:
-    from antcode_core.application.services.scheduler.execution_status_service import (
-        execution_status_service,
-    )
-
     marked = 0
     skipped_alive = 0
     for run in candidates:
@@ -120,11 +144,11 @@ async def _converge_dead_candidates(
                 if alive_lease is not None:
                     skipped_alive += 1
                     continue
-        ok = await execution_status_service.update_dispatch_status(
-            run_id=run.run_id,
-            status=DispatchStatus.FAILED,
-            status_at=now,
+        ok = await settle_dispatch_failure_snapshot(
+            run,
+            authority_token,
             error_message=(f"节点未在 {timeout_seconds}s 内上报 RUNNING(worker 可能在收到任务后崩溃)"),
+            status_at=now,
         )
         if ok:
             marked += 1

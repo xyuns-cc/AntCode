@@ -70,7 +70,7 @@ class CrawlTaskStatus:
 class CrawlBatch(BaseModel):
     """爬取批次模型"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     project_id = fields.BigIntField(db_index=True, description="关联项目ID")
     name = fields.CharField(max_length=255, description="批次名称")
     description = fields.TextField(null=True, description="批次描述")

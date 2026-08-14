@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_TYPES, LOG_TYPE_LABELS } from './enhancedLogViewerTypes'
 import type { FilterState, LogMessage } from './enhancedLogViewerTypes'
 import {
   calculateLogStats,
@@ -21,7 +22,7 @@ const log = (overrides: Partial<LogMessage> = {}): LogMessage => ({
 const filters = (overrides: Partial<FilterState> = {}): FilterState => ({
   searchText: '',
   selectedLevels: ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-  selectedTypes: ['stdout', 'stderr'],
+  selectedTypes: [...DEFAULT_TYPES],
   ...overrides,
 })
 
@@ -37,6 +38,22 @@ describe('enhancedLogViewerUtils', () => {
     expect(filterLogMessages(messages, filters({ searchText: 'needle', selectedLevels: ['ERROR'] })))
       .toEqual([messages[2]])
     expect(filterLogMessages(messages, filters({ selectedTypes: ['stderr'] }))).toEqual([messages[1]])
+  })
+
+  it('默认类型集合覆盖后端全部 LogType，收窄过滤器不会永久丢行', () => {
+    // DEFAULT_TYPES 曾只有 stdout/stderr：system/application 在"过滤生效"时被整行丢弃，
+    // 而类型选择器里没有任何能把它们选回来的选项 —— 丢掉的行不可恢复。
+    expect([...DEFAULT_TYPES].sort()).toEqual(Object.keys(LOG_TYPE_LABELS).sort())
+
+    const messages = [
+      log({ id: 'log-1', type: 'stdout' }),
+      log({ id: 'log-2', type: 'system' }),
+      log({ id: 'log-3', type: 'application' }),
+    ]
+
+    expect(filterLogMessages(messages, filters())).toEqual(messages)
+    expect(filterLogMessages(messages, filters({ selectedTypes: ['system', 'application'] })))
+      .toEqual([messages[1], messages[2]])
   })
 
   it('单次 reduce 计算各类统计且每条错误只计一次', () => {

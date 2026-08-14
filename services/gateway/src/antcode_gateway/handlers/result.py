@@ -17,6 +17,7 @@ from typing import cast
 
 from antcode_contracts import data_pb2
 from antcode_contracts.common_pb2 import Timestamp
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.infrastructure.redis import task_result_stream
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
@@ -83,6 +84,7 @@ class ResultHandler:
     async def handle(self, task_status: data_pb2.TaskStatus) -> bool:
         """以 Proto bytes 写入 result stream。"""
         try:
+            task_status.error_message = normalize_persisted_error_message(task_status.error_message) or ""
             await self._stream.xadd_typed(self._result_stream, task_status)
             logger.info(
                 "结果已写入 stream: run_id={} task_id={} status={}",
@@ -113,7 +115,7 @@ class ResultHandler:
             task_id=task_id or run_id,
             status=_to_status_enum(status),
             exit_code=int(exit_code) if exit_code is not None else 0,
-            error_message=error_message or "",
+            error_message=normalize_persisted_error_message(error_message) or "",
         )
         ts = _to_timestamp(timestamp or datetime.now(UTC))
         if ts is not None:

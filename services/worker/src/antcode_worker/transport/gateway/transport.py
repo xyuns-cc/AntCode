@@ -38,7 +38,16 @@ from antcode_worker.transport.base import (
     TransportMode,
     WorkerState,
 )
+from antcode_worker.transport.gateway.heartbeat_metrics import (
+    build_metrics_proto,
+    heartbeat_metrics_dict,
+)
 from antcode_worker.transport.gateway.runtime_control_clock import GatewayRuntimeControlClock
+from antcode_worker.transport.gateway.status_error_policy import (
+    GatewayStatusErrorPolicy,
+    is_lease_fence_error,
+    is_permanent_control_result_error,
+)
 from antcode_worker.transport.gateway.subscriptions import (
     CONTROL_SUBSCRIPTION,
     SUBSCRIPTION_NAMES,
@@ -47,6 +56,7 @@ from antcode_worker.transport.gateway.subscriptions import (
     SubscriptionRetryConfig,
     SubscriptionRunner,
 )
+from antcode_worker.transport.lease_cadence import MIN_LEASE_RENEW_AFTER_MS, MIN_LEASE_TTL_MS, read_lease_fields
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -55,20 +65,6 @@ if TYPE_CHECKING:
 
     from antcode_worker.transport.gateway.auth import GatewayAuthenticator
     from antcode_worker.transport.gateway.reconnect import ReconnectManager
-
-
-def _is_permanent_control_result_error(error: Exception) -> bool:
-    import grpc
-
-    code = error.code() if hasattr(error, "code") else None
-    return code in {
-        grpc.StatusCode.INVALID_ARGUMENT,
-        grpc.StatusCode.PERMISSION_DENIED,
-        grpc.StatusCode.UNIMPLEMENTED,
-    }
-
-
-_MIN_LEASE_RENEW_AFTER_MS = 1_000
 
 
 @dataclass(frozen=True)
@@ -87,8 +83,6 @@ class _LeaseRevokedError(RuntimeError):
 # P2-#36: 用一个独立 sentinel 对象代替每秒 wait_for(timeout=1.0) 轮询。
 # ``stop()`` 显式把 sentinel 放进 outbox，``_gen()`` 一识别就立刻 return,
 # 客户端流随之关闭。和 ``None`` 区分开以免和合法消息混淆。
-
-
 @dataclass
 class GatewayConfig:
     """Gateway 传输层配置"""
@@ -140,6 +134,7 @@ class GatewayConfig:
     auth_method: str = "api_key"  # api_key, mtls
     api_key: str | None = None
     worker_id: str | None = None
+    task_payload_secret: str = ""
 
     # Streaming 配置
     task_prefetch: int = 1
@@ -154,8 +149,14 @@ class GatewayConfig:
     # 额外选项
     extra_options: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        LogBatchLimits(
+            max_batch_bytes=self.log_max_batch_bytes,
+            max_entry_content_bytes=self.log_max_entry_content_bytes,
+        )
 
-class GatewayTransport(TransportBase):
+
+class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
     """Gateway 传输层实现（P1b：ControlService + DataService 双 stub）"""
 
     def __init__(
@@ -213,6 +214,8 @@ class GatewayTransport(TransportBase):
         # Lease 状态（替代 SendHeartbeat）
         self._lease_id: str = ""
         self._lease_revoked = False
+        self._lease_revocation_lock = asyncio.Lock()
+        self._lease_revocation_started = False
         self._runtime_control_clock = GatewayRuntimeControlClock()
 
         # P1-GW-02: Lease 被撤销/换代时的对外回调 (由 engine 注册),让 engine
@@ -360,7 +363,11 @@ class GatewayTransport(TransportBase):
 
     async def _deliver_task_dispatch(self, dispatch: Any, decoder: Any) -> None:
         try:
-            task = decoder.decode(dispatch)
+            task = decoder.decode(
+                dispatch,
+                worker_id=self._gateway_config.worker_id or "",
+                worker_secret=self._gateway_config.task_payload_secret,
+            )
             inbound_traceparent = extract_traceparent(dispatch)
             if inbound_traceparent:
                 task.traceparent = inbound_traceparent  # type: ignore[attr-defined]
@@ -373,8 +380,16 @@ class GatewayTransport(TransportBase):
                 await self._task_inbox.put(task)
         except Exception as exc:
             logger.exception("StreamTasks 投递失败")
-            if self._task_inbox is not None:
-                await self._task_inbox.put(exc)
+            receipt_value = getattr(dispatch, "receipt_id", "") or ""
+            task_id_value = getattr(dispatch, "task_id", "") or ""
+            receipt = receipt_value if isinstance(receipt_value, str) else ""
+            task_id = task_id_value if isinstance(task_id_value, str) else ""
+            if not receipt:
+                raise
+            self._receipt_cache[receipt] = (datetime.now().timestamp(), task_id)
+            rejected = await self.ack_task(receipt, accepted=False, reason="invalid task dispatch")
+            if not rejected:
+                raise RuntimeError(f"坏任务投递拒绝失败: receipt={receipt}") from exc
 
     # ==================== 控制订阅 (WatchControl) ====================
 
@@ -443,6 +458,7 @@ class GatewayTransport(TransportBase):
             is_running=lambda: self._running,
             consume=consume,
             set_health=self._set_subscription_health,
+            revoke_lease=self._abort_lease_revocation,
         )
 
     async def _set_subscription_health(self, name: str, healthy: bool) -> None:
@@ -680,11 +696,7 @@ class GatewayTransport(TransportBase):
                 self._consecutive_failures += 1
                 return False
             except Exception as exc:
-                # gRPC 错误(UNAVAILABLE / abort) 都归到重试路径, 不缓存 True。
-                self._consecutive_failures += 1
-                logger.warning(f"report_result StreamStatus 失败: task_id={result.task_id} exc={exc}")
-                await self._handle_connection_error(exc)
-                return False
+                return await self._handle_status_report_error(result, exc)
 
             received = int(getattr(ack, "received", 0) or 0)
             if received < 1:
@@ -859,29 +871,6 @@ class GatewayTransport(TransportBase):
             logger.exception("日志批次持久化失败")
             return False
 
-    async def send_log_chunk(
-        self,
-        run_id: str,
-        log_type: str,
-        data: bytes,
-        offset: int,
-        is_final: bool = False,
-    ) -> bool:
-        """发送日志分片 — 已弃用，no-op。
-
-        之前会把 ``[CHUNK] offset=N <base64>`` 拼成 LogBatch content 推到
-        日志流，违反 Stream 单字段语义且会撑大 LogEntry。大块二进制现在
-        应该走 ``source_bundle`` / ``pgartifact`` 通道；本方法保留签名只为
-        兼容调用方，不再产生网络流量。
-        """
-        size = len(data) if data else 0
-        logger.warning(
-            "send_log_chunk 已弃用,大块二进制应走 source_bundle/pgartifact: "
-            f"run_id={run_id} log_type={log_type} offset={offset} "
-            f"size={size} is_final={is_final}"
-        )
-        return True
-
     # ==================== TransportBase 实现：心跳/Lease ====================
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
@@ -912,22 +901,7 @@ class GatewayTransport(TransportBase):
 
     def _heartbeat_to_metrics_dict(self, heartbeat: HeartbeatMessage) -> dict:
         """``HeartbeatMessage`` → ``LeaseRequest.metrics`` 等价 dict。"""
-        metrics = getattr(heartbeat, "metrics", None)
-        if metrics is not None:
-            return {
-                "cpu": getattr(metrics, "cpu", 0.0),
-                "memory": getattr(metrics, "memory", 0.0),
-                "disk": getattr(metrics, "disk", 0.0),
-                "running_tasks": getattr(metrics, "running_tasks", 0),
-                "max_concurrent_tasks": getattr(metrics, "max_concurrent_tasks", 5),
-            }
-        return {
-            "cpu": getattr(heartbeat, "cpu_percent", 0.0),
-            "memory": getattr(heartbeat, "memory_percent", 0.0),
-            "disk": getattr(heartbeat, "disk_percent", 0.0),
-            "running_tasks": getattr(heartbeat, "running_tasks", 0),
-            "max_concurrent_tasks": getattr(heartbeat, "max_concurrent_tasks", 5),
-        }
+        return heartbeat_metrics_dict(heartbeat)
 
     async def lease_renew(
         self,
@@ -951,7 +925,7 @@ class GatewayTransport(TransportBase):
         try:
             from antcode_contracts import control_pb2
 
-            metrics_msg = self._build_metrics_proto(metrics or {})
+            metrics_msg = build_metrics_proto(metrics or {})
             request = control_pb2.LeaseRequest(
                 worker_id=worker_id,
                 current_lease_id=current_lease_id or "",
@@ -966,43 +940,31 @@ class GatewayTransport(TransportBase):
                 timeout=self._gateway_config.call_timeout,
             )
 
-            new_lease_id = getattr(response, "lease_id", "") or ""
-            expires_at_ms = int(getattr(response, "expires_at_ms", 0) or 0)
-            renew_after_ms = int(getattr(response, "renew_after_ms", 0) or 0)
-            revoked = bool(getattr(response, "revoked", False))
+            lease = read_lease_fields(response)
+            # 权威 TTL 与节拍成对缓存；校验与显式失败在 HeartbeatReporter 侧，
+            # 因为本方法的宽 except 会把这里抛出的错吞成一次"续期失败"。
+            self.adopt_server_lease_window(lease.ttl_ms, lease.renew_after_ms)
 
             # P1-GW-03: 换代=旧代际已死；按撤销永久停机 fail-closed。
-            if new_lease_id and self._lease_id and new_lease_id != self._lease_id:
-                logger.error(f"Lease 代际切换被拒绝: old={self._lease_id} new={new_lease_id}，本进程按撤销停机")
+            if lease.lease_id and self._lease_id and lease.lease_id != self._lease_id:
+                logger.error(f"Lease 代际切换被拒绝: old={self._lease_id} new={lease.lease_id}，本进程按撤销停机")
                 await self._abort_lease_revocation()
                 return ("", 0, 0, True)
-            if new_lease_id:
-                self._lease_id = new_lease_id
-                self._start_subscriptions()
-            if revoked:
+            if lease.revoked:
                 logger.warning(f"Lease 被服务端撤销: reason={getattr(response, 'revoke_reason', '')}")
-                self._lease_revoked = True
-                await self._abort_lease_revocation()
-            else:
-                self._consecutive_failures = 0
-            return (new_lease_id, expires_at_ms, renew_after_ms, revoked)
+                if self._lease_id:
+                    await self._abort_lease_revocation()
+                return ("", lease.expires_at_ms, lease.renew_after_ms, True)
+            if lease.lease_id:
+                self._lease_id = lease.lease_id
+                self._start_subscriptions()
+            self._consecutive_failures = 0
+            return (lease.lease_id, lease.expires_at_ms, lease.renew_after_ms, lease.revoked)
         except Exception as exc:
             self._consecutive_failures += 1
             logger.exception("lease_renew RPC 失败")
             await self._handle_connection_error(exc)
             return ("", 0, 0, False)
-
-    def _build_metrics_proto(self, metrics: dict):
-        """``dict`` → ``common_pb2.Metrics``。缺失字段用 0 兜底。"""
-        from antcode_contracts import common_pb2
-
-        return common_pb2.Metrics(
-            cpu=float(metrics.get("cpu", 0.0) or 0.0),
-            memory=float(metrics.get("memory", 0.0) or 0.0),
-            disk=float(metrics.get("disk", 0.0) or 0.0),
-            running_tasks=int(metrics.get("running_tasks", 0) or 0),
-            max_concurrent_tasks=int(metrics.get("max_concurrent_tasks", 5) or 5),
-        )
 
     def _start_subscriptions(self) -> None:
         if self._task_subscriber is None or self._task_subscriber.done():
@@ -1104,12 +1066,13 @@ class GatewayTransport(TransportBase):
         决定（见 ``ack_control`` / ``send_control_result`` 内注释）。
         """
         from antcode_contracts import control_pb2
+        from antcode_core.common.error_messages import normalize_persisted_error_message
 
         request = control_pb2.AckControlRequest(
             worker_id=self._gateway_config.worker_id or "",
             event_id=receipt,
             success=bool(success),
-            error=error or "",
+            error=normalize_persisted_error_message(error, max_bytes=16 * 1024) or "",
             request_id=request_id or "",
             data_json=data_json or "",
             lease_id=self._lease_id,
@@ -1181,7 +1144,7 @@ class GatewayTransport(TransportBase):
             # 有意保留的行为差异（相对 ack_control）：结果结算失败要计
             # _consecutive_failures 并甄别永久错误——永久拒绝直接上抛，
             # 让 engine 停止重试同一结算。
-            if _is_permanent_control_result_error(e):
+            if is_permanent_control_result_error(e):
                 raise RuntimeError(f"Gateway 永久拒绝运行时控制结果: {e}") from e
             self._consecutive_failures += 1
             logger.exception("回传控制结果失败")
@@ -1400,19 +1363,21 @@ class GatewayTransport(TransportBase):
 
     @staticmethod
     def _require_valid_lease_response(response: Any) -> str:
-        lease_id = getattr(response, "lease_id", "") or ""
-        expires_at_ms = int(getattr(response, "expires_at_ms", 0) or 0)
-        renew_after_ms = int(getattr(response, "renew_after_ms", 0) or 0)
-        if bool(getattr(response, "revoked", False)):
+        lease = read_lease_fields(response)
+        if lease.revoked:
             raise _LeaseRevokedError("Gateway 重连 lease 已被撤销")
         # Lease RPC 已在 Gateway 端用 Redis TIME 完成存活性判定。Worker 与
         # Gateway 可能存在时钟偏移，不能再用本机 wall clock 否定服务端刚刚
         # 确认并续租成功的代际；这里只校验响应合同是否完整。
-        if not lease_id or expires_at_ms < 1:
+        if not lease.lease_id or lease.expires_at_ms < 1:
             raise RuntimeError("Gateway 重连未取得有效 lease")
-        if renew_after_ms < _MIN_LEASE_RENEW_AFTER_MS:
+        if lease.renew_after_ms < MIN_LEASE_RENEW_AFTER_MS:
             raise RuntimeError("Gateway 重连 lease 续租周期无效")
-        return lease_id
+        # 权威 TTL 必须随 lease 下发：缺了它 Worker 只能按本地默认值校验
+        # renew*2 < ttl，服务端收紧 TTL 时守卫会静默通过（双执行）。
+        if lease.ttl_ms < MIN_LEASE_TTL_MS:
+            raise RuntimeError("Gateway 重连 lease 缺少权威 ttl_ms")
+        return lease.lease_id
 
     def _install_connection(self, connection: _GatewayConnection) -> Any:
         old_channel = self._channel
@@ -1517,6 +1482,10 @@ class GatewayTransport(TransportBase):
 
     async def _handle_connection_error(self, error: Exception) -> None:
         """处理连接错误（保留原 P0 实现的认证退避 + 重连管理逻辑）。"""
+        if is_lease_fence_error(error):
+            logger.error("Gateway 拒绝已失效的 Worker Lease，本进程立即 self-fence")
+            await self._abort_lease_revocation()
+            return
         if self._is_auth_error(error):
             self._auth_failure_count += 1
             if self._auth_failure_count >= self._max_auth_failures:
@@ -1600,15 +1569,19 @@ class GatewayTransport(TransportBase):
         self._lease_revoked_callback = callback
 
     async def _abort_lease_revocation(self) -> None:
-        self._lease_revoked = True
-        # P1-GW-02: 顺序关键——先 callback 让 engine cancel_all 再 halt transport（halt 清 lease_id/channel 后残余上报失败也不再有副作用）。
-        callback = self._lease_revoked_callback
-        if callback is not None:
+        async with self._lease_revocation_lock:
+            if self._lease_revocation_started:
+                return
+            self._lease_revocation_started = True
+            self._lease_revoked = True
+            self._stopping = True
+            self._running = False
+            callback = self._lease_revoked_callback
             try:
-                await callback("gateway-revoke")
-            except Exception as exc:
-                logger.warning("lease-revoked callback 异常: {}", exc)
-        await self._halt_transport()
+                if callback is not None:
+                    await callback("gateway-revoke")
+            finally:
+                await self._halt_transport()
 
     async def _halt_transport(self) -> None:
         self._stopping = True

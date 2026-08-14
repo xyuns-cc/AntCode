@@ -1,19 +1,16 @@
-"""mise 检测 + 可选自动安装。
+"""mise 检测。
 
 Worker 在启动阶段调用 `ensure_mise()`：
 - 存在 → 记录路径 + 版本，PATH 注入
-- 不存在且 `ANTCODE_MISE_AUTO_INSTALL=true`（默认 false）→ Linux/macOS 走
-  官方 curl 脚本安装到 ~/.local/bin；Windows 只提示
-- 不存在且自动安装关闭 → 记录警告但不阻断（Python 项目走系统 python 仍可用）
+- 不存在 → 记录警告但不阻断 Python 项目；多语言任务会明确失败
 
-自动安装遵循「不静默失败」原则：网络/权限失败会显式 log error + 抛异常，
-调用方按需决定是否阻断启动（默认不阻断）。
+mise 只能由固定版本、校验摘要的镜像或主机安装流程提供。Worker 运行期绝不下载并
+执行远程安装脚本。
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import shutil
 import sys
@@ -21,9 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
-
-MISE_INSTALL_URL = "https://mise.run"
-MISE_INSTALL_TIMEOUT = 120  # 秒
 
 
 @dataclass(frozen=True)
@@ -87,47 +81,6 @@ async def detect_mise() -> MiseStatus:
     return MiseStatus(available=False, reason="未在 PATH 或常见位置找到 mise")
 
 
-def _auto_install_enabled() -> bool:
-    # C4/M2: 默认 false — curl|sh MITM 面 & 离线部署失败面比自动装带来的便利
-    # 更大。生产走镜像内置（Dockerfile.worker），裸机首次可临时置 true。
-    val = os.environ.get("ANTCODE_MISE_AUTO_INSTALL", "false").strip().lower()
-    return val in ("1", "true", "yes", "on")
-
-
-async def _install_mise_unix() -> MiseStatus:
-    """在 Linux/macOS 上运行官方 install script。"""
-    logger.warning("mise 未安装，尝试自动安装（curl {}）...", MISE_INSTALL_URL)
-    # 使用 sh -c 组合 curl + sh，避免 pipe 语法在 subprocess 中的复杂性
-    cmd = ["sh", "-c", f"curl -fsSL {MISE_INSTALL_URL} | sh"]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=MISE_INSTALL_TIMEOUT)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        # kill 后必须等待，否则会留下 zombie 进程占 fd/内存
-        with contextlib.suppress(Exception):
-            await proc.wait()
-        raise RuntimeError(f"mise 自动安装超过 {MISE_INSTALL_TIMEOUT}s 未完成") from None
-
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"mise 自动安装失败 (exit={proc.returncode}): {(stderr_b or b'').decode(errors='ignore').strip()[:500]}"
-        )
-    stdout = (stdout_b or b"").decode(errors="ignore")
-    logger.info(f"mise 安装脚本输出:\n{stdout[:500]}")
-
-    # 复检
-    status = await detect_mise()
-    if not status.available:
-        raise RuntimeError("mise 安装脚本执行完成但仍无法检测到，可能需要重新登录 shell")
-    return status
-
-
 def _prepend_path(mise_path: str) -> None:
     """把 mise 所在目录加到当前进程 PATH 前缀，保证 subprocess 能找到它。"""
     parent = str(Path(mise_path).resolve().parent)
@@ -152,26 +105,8 @@ async def ensure_mise() -> MiseStatus:
         _prepend_path(status.path)
         return status
 
-    if not _auto_install_enabled():
-        logger.warning(
-            "mise 未安装，且 ANTCODE_MISE_AUTO_INSTALL=false 已禁用自动安装。"
-            "多语言（Node/Go/Java）任务将失败；仅系统 python 可用。"
-        )
-        return status
-
-    if sys.platform == "win32":
-        logger.warning(
-            "mise 未安装。Windows 请手动安装：`winget install jdx.mise` 或 "
-            "从 https://mise.jdx.dev/ 下载 binary 到 PATH。当前进程跳过自动安装。"
-        )
-        return status
-
-    try:
-        installed = await _install_mise_unix()
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"mise 自动安装失败，多语言任务将不可用: {exc}")
-        return MiseStatus(available=False, reason=str(exc))
-
-    logger.info(f"mise 自动安装成功: {installed.path} ({installed.version})")
-    _prepend_path(installed.path)
-    return installed
+    logger.warning(
+        "mise 未安装；运行期自动下载已禁用。请通过固定版本和摘要校验的主机/镜像流程安装。"
+        "多语言（Node/Go/Java）任务将失败；仅系统 Python 可用。"
+    )
+    return status

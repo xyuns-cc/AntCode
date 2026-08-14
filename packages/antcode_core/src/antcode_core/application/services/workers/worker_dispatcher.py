@@ -5,7 +5,6 @@
 """
 
 import asyncio
-import contextlib
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,16 +12,21 @@ from typing import Any, cast
 
 from loguru import logger
 
+from antcode_core.application.services import lease_fenced_ready_publish as ready_publish
+from antcode_core.application.services.lease_capability_snapshot import LeaseCapabilitySnapshot
 from antcode_core.application.services.workers.worker_capability_routing import (
     capability_requirement_label,
     has_render_capability,
     require_worker_current_requirements,
     required_execution_task_types,
-    resolve_capability_map,
     resolve_selection_capabilities,
     supports_task_types,
 )
+from antcode_core.application.services.workers.worker_dispatch_failure import failed_batch_dispatch
 from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
+from antcode_core.application.services.workers.worker_registration_gate import filter_registration_ready_workers
+from antcode_core.application.services.workers.worker_selection import select_dispatch_worker
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
 from antcode_core.observability.tracing import get_current_trace
@@ -208,7 +212,6 @@ class WorkerLoadBalancer:
         else:
             latency_score = min(100, max(0, 25 * math.log10(latency / 10)))
 
-        # 成功率评分（从 metrics 中获取，如果有的话）
         success_rate = metrics.get("successRate", 100)  # 默认100%成功率
         # 成功率越高，分数越低
         success_score = 100 - success_rate
@@ -299,6 +302,8 @@ class WorkerLoadBalancer:
                 query = query.filter(region=region)
             workers = await query.all()
 
+        workers = await filter_registration_ready_workers(workers)
+
         if not workers:
             logger.warning("无可用节点")
             return None
@@ -307,7 +312,7 @@ class WorkerLoadBalancer:
 
         filtered_workers = []
         for worker in workers:
-            if exclude_workers and worker.id in exclude_workers:
+            if (exclude_workers and worker.id in exclude_workers) or (region and worker.region != region):
                 continue
 
             if tags:
@@ -375,10 +380,8 @@ class WorkerLoadBalancer:
 
         scored_workers.sort(key=lambda x: x[1])
 
-        best_worker = scored_workers[0][0]
-        logger.info(f"选中节点 [{best_worker.name}] 评分:{scored_workers[0][1]}")
-
-        return best_worker
+        logger.info(f"选中节点 [{scored_workers[0][0].name}] 评分:{scored_workers[0][1]}")
+        return scored_workers[0][0]
 
     def _has_render_capability(self, worker):
         """检查节点是否有渲染能力"""
@@ -439,14 +442,7 @@ class WorkerLoadBalancer:
 
 
 class WorkerTaskDispatcher:
-    """任务分发器 - 支持批量任务和优先级调度
-
-    支持可选的 TaskQueueBackend 集成：
-    - 当 QUEUE_BACKEND=memory 或未设置时，使用内存队列
-    - 当 QUEUE_BACKEND=redis 时，使用 Redis 队列（支持多 Master 共享）
-
-    Requirements: 3.1-3.6, 4.1-4.7
-    """
+    """任务分发器 - 支持批量任务和优先级调度。"""
 
     # 项目类型到优先级的默认映射
     DEFAULT_PRIORITY_MAP = {
@@ -458,181 +454,6 @@ class WorkerTaskDispatcher:
     def __init__(self):
         self.load_balancer = WorkerLoadBalancer()
         self._pending_tasks = {}
-
-        # TaskQueueBackend 实例（延迟初始化）
-        self._queue_backend = None
-        self._queue_initialized = False
-
-    async def init_queue_backend(self):
-        """
-        初始化任务队列后端
-
-        根据 QUEUE_BACKEND 环境变量选择实现：
-        - "memory" 或未设置: 使用 MemoryQueueBackend
-        - "redis": 使用 RedisQueueBackend
-
-        Requirements: 3.1, 3.2, 3.3
-        """
-        if self._queue_initialized:
-            return
-
-        try:
-            # 延迟导入避免循环依赖
-            from antcode_core.application.services.scheduler.queue_backend import (
-                get_queue_backend,
-                get_queue_backend_type,
-            )
-
-            self._queue_backend = get_queue_backend()
-            await self._queue_backend.start()
-            self._queue_initialized = True
-
-            backend_type = get_queue_backend_type()
-            logger.info(f"任务队列后端已初始化: {backend_type}")
-        except Exception:
-            logger.exception("初始化任务队列后端失败")
-            raise
-
-    async def shutdown_queue_backend(self):
-        """
-        关闭任务队列后端
-        """
-        if self._queue_backend and self._queue_initialized:
-            await self._queue_backend.stop()
-            self._queue_initialized = False
-            logger.info("任务队列后端已关闭")
-
-    def get_queue_backend(self):
-        """
-        获取任务队列后端实例
-
-        Returns:
-            TaskQueueBackend 实例，未初始化时返回 None
-        """
-        return self._queue_backend if self._queue_initialized else None
-
-    async def get_master_queue_status(self):
-        """
-        获取 Master 端任务队列状态
-
-        Requirements: 3.1
-        """
-        if not self._queue_backend or not self._queue_initialized:
-            return {
-                "backend_type": "none",
-                "initialized": False,
-                "queue_depth": 0,
-            }
-
-        # 延迟导入避免循环依赖
-        from antcode_core.application.services.scheduler.queue_backend import get_queue_backend_type
-
-        status = await self._queue_backend.get_status()
-        status["backend_type"] = get_queue_backend_type()
-        status["initialized"] = True
-        return status
-
-    async def enqueue_task(
-        self,
-        task_id,
-        project_id,
-        priority,
-        data,
-        project_type="code",
-    ):
-        """
-        将任务入队到 Master 端队列
-
-        Args:
-            task_id: 任务唯一标识
-            project_id: 项目ID
-            priority: 优先级（数值越小优先级越高）
-            data: 任务数据
-            project_type: 项目类型
-
-        Returns:
-            是否成功入队
-
-        Requirements: 3.5
-        """
-        if not self._queue_backend or not self._queue_initialized:
-            logger.warning("任务队列后端未初始化，无法入队")
-            return False
-
-        return await self._queue_backend.enqueue(
-            task_id=task_id,
-            project_id=project_id,
-            priority=priority,
-            data=data,
-            project_type=project_type,
-        )
-
-    async def dequeue_task(self, timeout=None):
-        """
-        从 Master 端队列出队任务
-
-        Args:
-            timeout: 超时时间（秒）
-
-        Returns:
-            任务数据或 None
-
-        Requirements: 3.6
-        """
-        if not self._queue_backend or not self._queue_initialized:
-            return None
-
-        return await self._queue_backend.dequeue(timeout=timeout)
-
-    async def cancel_task_in_queue(self, task_id):
-        """
-        取消 Master 端队列中的任务
-
-        Args:
-            task_id: 任务唯一标识
-
-        Returns:
-            是否成功取消
-
-        Requirements: 4.6
-        """
-        if not self._queue_backend or not self._queue_initialized:
-            return False
-
-        return await self._queue_backend.cancel(task_id)
-
-    async def update_task_priority_in_queue(self, task_id, new_priority):
-        """
-        更新 Master 端队列中任务的优先级
-
-        Args:
-            task_id: 任务唯一标识
-            new_priority: 新优先级
-
-        Returns:
-            是否成功更新
-
-        Requirements: 4.7
-        """
-        if not self._queue_backend or not self._queue_initialized:
-            return False
-
-        return await self._queue_backend.update_priority(task_id, new_priority)
-
-    def task_in_queue(self, task_id):
-        """
-        检查任务是否在 Master 端队列中
-
-        Args:
-            task_id: 任务唯一标识
-
-        Returns:
-            是否存在
-        """
-        if not self._queue_backend or not self._queue_initialized:
-            return False
-
-        return self._queue_backend.contains(task_id)
 
     async def dispatch_task(
         self,
@@ -660,6 +481,7 @@ class WorkerTaskDispatcher:
         environment.pop(RUNTIME_ENV_KEY, None)
         task_item = {
             "task_id": run_id,
+            "run_id": run_id,
             "project_id": project_id,
             "project_type": project_type,
             "priority": priority,
@@ -807,7 +629,7 @@ class WorkerTaskDispatcher:
                     task_copy["resolved_revision"] = info.get("resolved_revision", "")
                 enriched_tasks.append(task_copy)
 
-            await self._revalidate_and_bind(
+            lease_snapshot = await self._revalidate_and_bind(
                 enriched_tasks,
                 worker,
                 require_render=require_render,
@@ -819,6 +641,7 @@ class WorkerTaskDispatcher:
                 worker=worker,
                 tasks=enriched_tasks,
                 batch_id=batch_id or str(uuid.uuid4()),
+                lease_snapshot=lease_snapshot,
             )
 
             return BatchDispatchResult(
@@ -836,29 +659,33 @@ class WorkerTaskDispatcher:
             )
 
         except Exception as e:
-            logger.exception(f"批量任务分发失败 [{worker.name}]")
-            return BatchDispatchResult(
-                success=False,
-                error=str(e),
-                worker_id=worker.public_id,
-                worker_name=worker.name,
-            )
+            return failed_batch_dispatch(worker, e, BatchDispatchResult)
 
-    async def _bind_task_runs_to_worker(self, tasks: list[dict], worker_id: int) -> int:
+    async def _bind_task_runs_to_worker(
+        self,
+        tasks: list[dict],
+        worker_id: int,
+        snapshot: LeaseCapabilitySnapshot,
+    ) -> int:
         """P1-FN-03/04: 委托 dispatch_bind_guard(Worker 行锁 + 可派发状态 CAS)。"""
+        from antcode_core.application.services.workers.dispatch_authorization import (
+            require_task_run_worker_use_access,
+        )
         from antcode_core.application.services.workers.dispatch_bind_guard import (
             bind_task_runs_to_worker,
         )
 
-        return await bind_task_runs_to_worker(tasks, worker_id)
+        await require_task_run_worker_use_access(tasks, worker_id)
+        return await bind_task_runs_to_worker(tasks, worker_id, snapshot)
 
-    async def _revalidate_and_bind(self, tasks, worker, *, require_render, required) -> int:
-        await require_worker_current_requirements(
+    async def _revalidate_and_bind(self, tasks, worker, *, require_render, required) -> LeaseCapabilitySnapshot:
+        snapshot = await require_worker_current_requirements(
             worker,
             require_render=require_render,
             required=required,
         )
-        return await self._bind_task_runs_to_worker(tasks, worker.id)
+        await self._bind_task_runs_to_worker(tasks, worker.id, snapshot)
+        return snapshot
 
     async def _ensure_worker_connected(self, worker):
         """确保节点在线（依赖心跳状态）"""
@@ -886,53 +713,15 @@ class WorkerTaskDispatcher:
         require_render=False,
         require_task_type: str | frozenset[str] | None = None,
     ):
-        """
-        选择目标节点
-
-        参数:
-        - require_render: 是否需要渲染能力
-        - require_task_type: T6-T4b: 要求 worker 声明支持此 task_type
-        """
-        if worker_id:
-            worker = await Worker.filter(public_id=worker_id).first()
-            if not worker:
-                with contextlib.suppress(ValueError):
-                    worker = await Worker.filter(id=int(worker_id)).first()
-
-            if not worker:
-                logger.warning(f"Worker 不存在: {worker_id}")
-                return None
-
-            if worker.status != WorkerStatus.ONLINE:
-                logger.warning(f"节点离线: {worker.name}")
-                return None
-
-            capability_map = await resolve_capability_map(
-                [worker],
-                authoritative=bool(require_render or require_task_type),
-            )
-            worker_capabilities = capability_map[worker.id]
-
-            # 检查指定 Worker 是否满足渲染要求
-            if require_render and not has_render_capability(worker_capabilities):
-                logger.warning(f"指定 Worker [{worker.name}] 无渲染能力")
-                return None
-            # T6-T4b: 指定 worker 也要满足 capability 声明
-            if require_task_type and not supports_task_types(worker_capabilities, require_task_type):
-                logger.warning(f"指定 Worker [{worker.name}] 不支持 task_type={require_task_type!r}")
-                return None
-
-            return worker
-        else:
-            return await self.load_balancer.select_best_worker(
-                region=region,
-                tags=tags,
-                require_render=require_render,
-                require_task_type=require_task_type,
-            )
-
-    # A2/迁移38：旧的 _sync_projects_to_worker* 走 worker_project_sync（表已删）
-    # 已被 SourceBundleDispatchService 取代（见 dispatch_task 主流程）；此处不再保留兼容 shim。
+        """Select an explicit Worker or delegate to constrained AUTO selection."""
+        return await select_dispatch_worker(
+            self.load_balancer,
+            worker_id=worker_id,
+            region=region,
+            tags=tags,
+            require_render=require_render,
+            require_task_type=require_task_type,
+        )
 
     # U3 / #16: ready stream 上限,防止 Worker 长时间挂掉时 stream 无限增长。
     # 用 ~10k entries(近似裁剪)。
@@ -948,31 +737,13 @@ class WorkerTaskDispatcher:
     READY_STREAM_MAXLEN = 10000
     READY_STREAM_PENDING_ALERT_THRESHOLD = 8000
 
-    async def _send_batch_to_queue(self, worker, tasks, batch_id):
-        """写入 Redis Stream 分发批量任务
-
-        P1-#6: 把调度入口（scheduler_loop._execute_task_internal）通过
-        ``set_current_trace`` 绑定的 W3C ``traceparent`` 写到每条 ready
-        stream message 上，Worker poll 拿到后即可复用同一个 trace_id，
-        在 Worker 端的 logger / Redis 写入串成完整端到端链路。
-
-        U3: 在 XADD 之前主动 ``XGROUP CREATE ... MKSTREAM`` consumer group,
-        ``start_id="0"`` —— 这样 Worker 起得晚也能拿到历史消息(默认 "$"
-        只读到新写入,起得晚的 worker 会丢任务)。``BUSYGROUP`` 异常吞掉
-        视作幂等。
-
-        #16: 给 ready stream 加 ``maxlen`` 近似裁剪,防止 Worker 离线时
-        stream 无限增长把 Redis 撑爆。
-
-        P1-19: 裁剪策略从"XADD MAXLEN=N"改成"XADD 后按 group 最小
-        未 ACK msg_id 做 XTRIM MINID",避免离线积压超阈值时静默删掉
-        未消费的任务(参见 ``_trim_ready_stream``)。
-        """
+    async def _send_batch_to_queue(self, worker, tasks, batch_id, *, lease_snapshot: LeaseCapabilitySnapshot):
+        """Fence the selected Lease generation and publish one ready batch."""
         # E5: consumer group 名带 namespace 前缀，与 worker 侧对齐
         from antcode_core.infrastructure.redis.control_plane import (
             worker_consumer_group,
         )
-        from antcode_core.infrastructure.redis.streams import StreamClient
+        from antcode_core.infrastructure.redis.stream_client import StreamClient
 
         stream = StreamClient()
         stream_key = task_ready_stream(worker.public_id)
@@ -1025,10 +796,19 @@ class WorkerTaskDispatcher:
                 }
             )
 
+        # B12: 不在 scheduler_dispatch_epoch() 内直接抛错，禁止无 Master 栅栏派发。
+        scheduler_epoch = ready_publish.require_scheduler_dispatch_epoch()
         try:
-            # P1-19: 不再传 maxlen——旧行为会在每条 XADD 上加 MAXLEN ~N,
-            # 撞到未 ACK 消息也照删。裁剪改到写入后的 _trim_ready_stream。
-            await stream.xadd_batch(stream_key, messages)
+            redis = await stream._get_client()
+            await ready_publish.publish_ready_batch(
+                redis,
+                worker_id=worker.public_id,
+                snapshot=lease_snapshot,
+                messages=messages,
+                scheduler_fencing_token=scheduler_epoch,
+            )
+        except ready_publish.LeaseDispatchFenceError:
+            raise
         except Exception as e:
             logger.exception("任务写入 Redis 失败")
             # P1-FN-02: 服务端已提交但响应丢失时,直接判失败会触发上游创建
@@ -1105,10 +885,6 @@ class WorkerTaskDispatcher:
         logger.warning("当前架构不支持取消节点队列任务")
         return False
 
-    # sync_project_to_worker：迁移 38 已下线；仅 dispatcher 内部引用（现已删除），
-    # 对外无调用点。派发流程改由 SourceBundleDispatchService 提供 content-hash
-    # 幂等 bundle 元信息，worker 端按 sha256 决定是否需要下载。
-
     async def get_task_status_from_worker(self, worker, task_id):
         """从节点获取任务状态"""
         try:
@@ -1127,7 +903,7 @@ class WorkerTaskDispatcher:
                 "start_time": execution.start_time.isoformat() if execution.start_time else None,
                 "end_time": execution.end_time.isoformat() if execution.end_time else None,
                 "exit_code": execution.exit_code,
-                "error_message": execution.error_message,
+                "error_message": normalize_persisted_error_message(execution.error_message),
             }
         except Exception:
             logger.exception("获取任务状态失败")

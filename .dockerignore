@@ -24,12 +24,22 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.agents/
+.claude/
+.codex/
+.kiro/
+.serena/
+.cursor/
+.continue/
+.windsurf/
 *.swp
 *.swo
 *~
 
 # 操作系统
 .DS_Store
+._*
+**/._*
 Thumbs.db
 
 # 测试
@@ -131,8 +141,6 @@ node_modules/
 !services/**/README.md
 
 # 其他
-/.serena/
-/.cursor/
 *.backup
 /demo.py
 /dummy_task.py

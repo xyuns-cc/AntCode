@@ -9,11 +9,13 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from filelock import FileLock
 from loguru import logger
 
 from antcode_core.common.config import settings
 
 LOGIN_ENCRYPTION_ALGORITHM = "RSA-OAEP-256"
+LOGIN_KEY_LOCK_TIMEOUT_SECONDS = 30
 
 
 class LoginPasswordCryptoError(ValueError):
@@ -134,14 +136,31 @@ class LoginPasswordCrypto:
         try:
             key_bytes = path.read_bytes()
         except FileNotFoundError:
-            logger.info(f"登录私钥不存在,首次生成: {path}")
-            private_key = self._generate_private_key()
-            self._persist_private_key_atomic(path, private_key)
-            self._persist_public_key_atomic(self._resolve_public_key_path(), private_key.public_key())
-            return private_key
+            return self._initialize_private_key(path)
         except OSError as exc:
             raise RuntimeError(f"登录私钥读取失败,拒绝重新生成覆盖(可能是共享卷抖动/权限问题): {path}, {exc}") from exc
 
+        return self._deserialize_private_key(path, key_bytes)
+
+    def _initialize_private_key(self, path: Path) -> rsa.RSAPrivateKey:
+        """在跨进程文件锁内再次检查并初始化唯一私钥。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with FileLock(str(lock_path), timeout=LOGIN_KEY_LOCK_TIMEOUT_SECONDS):
+            try:
+                key_bytes = path.read_bytes()
+            except FileNotFoundError:
+                logger.info(f"登录私钥不存在,首次生成: {path}")
+                private_key = self._generate_private_key()
+                self._persist_private_key_atomic(path, private_key)
+                self._persist_public_key_atomic(self._resolve_public_key_path(), private_key.public_key())
+                return private_key
+            except OSError as exc:
+                raise RuntimeError(f"登录私钥读取失败: {path}, {exc}") from exc
+            return self._deserialize_private_key(path, key_bytes)
+
+    @staticmethod
+    def _deserialize_private_key(path: Path, key_bytes: bytes) -> rsa.RSAPrivateKey:
         try:
             loaded_key = serialization.load_pem_private_key(key_bytes, password=None)
             if not isinstance(loaded_key, rsa.RSAPrivateKey):

@@ -184,8 +184,8 @@ class GatewayDataService(DataServiceServicer):
 
                 # 阻塞读取后复检 Lease；失败时保留 PEL 给新代际接管。
                 await self._require_current_lease(context, worker_id, request.lease_id)
-
                 for task in tasks:
+                    await self._require_current_lease(context, worker_id, request.lease_id)
                     dispatch = task_info_to_dispatch(task)
                     yield dispatch
 

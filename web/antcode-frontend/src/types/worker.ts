@@ -7,22 +7,23 @@ export type WorkerStatus = 'online' | 'offline' | 'maintenance' | 'connecting'
 
 // Worker 指标
 export interface WorkerMetrics {
-  cpu: number                 // CPU 使用率 (%)
-  memory: number              // 内存使用率 (%)
-  disk: number                // 磁盘使用率 (%)
+  cpu: number // CPU 使用率 (%)
+  memory: number // 内存使用率 (%)
+  disk: number // 磁盘使用率 (%)
   taskCount: number
   runningTasks: number
+  queuedTasks?: number
   projectCount: number
   envCount: number
-  uptime: number              // 运行时间（秒）
+  uptime: number // 运行时间（秒）
   // 详细资源信息
-  cpuCores?: number           // CPU 核心数
-  memoryTotal?: number        // 总内存 (bytes)
-  memoryUsed?: number         // 已用内存 (bytes)
-  memoryAvailable?: number    // 可用内存 (bytes)
-  diskTotal?: number          // 总磁盘 (bytes)
-  diskUsed?: number           // 已用磁盘 (bytes)
-  diskFree?: number           // 可用磁盘 (bytes)
+  cpuCores?: number // CPU 核心数
+  memoryTotal?: number // 总内存 (bytes)
+  memoryUsed?: number // 已用内存 (bytes)
+  memoryAvailable?: number // 可用内存 (bytes)
+  diskTotal?: number // 总磁盘 (bytes)
+  diskUsed?: number // 已用磁盘 (bytes)
+  diskFree?: number // 可用磁盘 (bytes)
 }
 
 // Worker 能力
@@ -44,15 +45,15 @@ export interface Worker {
   tags?: string[]
   description?: string
   metrics?: WorkerMetrics
-  capabilities?: WorkerCapabilities  // Worker 能力
+  capabilities?: WorkerCapabilities // Worker 能力
   version?: string
   // 操作系统信息
-  osType?: string           // 操作系统类型: Windows/Linux/Darwin
-  osVersion?: string        // 操作系统版本
-  pythonVersion?: string    // Python 版本
-  machineArch?: string      // CPU 架构: x86_64/arm64
+  osType?: string // 操作系统类型: Windows/Linux/Darwin
+  osVersion?: string // 操作系统版本
+  pythonVersion?: string // Python 版本
+  machineArch?: string // CPU 架构: x86_64/arm64
   // 连接模式
-  transportMode?: 'direct' | 'gateway'  // 连接模式: direct/gateway
+  transportMode?: 'direct' | 'gateway' | null // 连接模式: direct/gateway
   lastHeartbeat?: string
   createdAt: string
   updatedAt?: string
@@ -125,12 +126,12 @@ export interface WithWorkerInfo {
 
 // Worker 上下文
 export interface WorkerContextValue {
-  currentWorker: Worker | undefined       // undefined 表示"全部 Worker"
+  currentWorker: Worker | undefined // undefined 表示"全部 Worker"
   workers: Worker[]
   loading: boolean
   setCurrentWorker: (worker: Worker | undefined) => void
   refreshWorkers: () => Promise<void>
-  isGlobalView: boolean          // 是否为全局视图
+  isGlobalView: boolean // 是否为全局视图
 }
 
 // 本地存储的 Worker 偏好
@@ -139,12 +140,14 @@ export interface WorkerPreference {
   viewMode: 'global' | 'single'
 }
 
-// Worker 资源限制
+// Worker 资源限制。
+// 这三项就是 GET /api/v1/workers/{id}/resources 的 limits 全集
+// （services/web_api/.../routes/v1/workers_resources.py 的 get_worker_resources），
+// 也是 POST 侧仅有的三个可校验字段。不要在这里加后端不返回的字段。
 export interface WorkerResourceLimits {
-  max_concurrent_tasks: number      // 最大并发任务数
-  task_memory_limit_mb: number      // 单任务内存限制 (MB)
-  task_cpu_time_limit_sec: number   // 单任务CPU时间限制 (秒)
-  task_timeout?: number             // 任务超时时间 (秒)
+  max_concurrent_tasks: number // 最大并发任务数
+  task_memory_limit_mb: number // 单任务内存限制 (MB)
+  task_cpu_time_limit_sec: number // 单任务CPU时间限制 (秒)
 }
 
 // Worker 资源统计
@@ -170,20 +173,20 @@ export interface WorkerResourceInfo {
 
 // Worker 资源更新请求
 export interface WorkerResourceUpdateRequest {
-  max_concurrent_tasks?: number     // 1-20
-  task_memory_limit_mb?: number     // 256-8192
-  task_cpu_time_limit_sec?: number  // 60-3600
+  max_concurrent_tasks?: number // 1-20
+  task_memory_limit_mb?: number // 256-8192
+  task_cpu_time_limit_sec?: number // 60-3600
   auto_resource_limit?: boolean
 }
 
 // 爬虫统计摘要
 export interface SpiderStatsSummary {
-  requestCount: number              // 请求总数
-  responseCount: number             // 响应总数
-  itemScrapedCount: number          // 抓取数据项数
-  errorCount: number                // 错误总数
-  avgLatencyMs: number              // 平均延迟(毫秒)
-  requestsPerMinute: number         // 每分钟请求数
+  requestCount: number // 请求总数
+  responseCount: number // 响应总数
+  itemScrapedCount: number // 抓取数据项数
+  errorCount: number // 错误总数
+  avgLatencyMs: number // 平均延迟(毫秒)
+  requestsPerMinute: number // 每分钟请求数
   statusCodes: Record<string, number> // 状态码分布
 }
 
@@ -203,8 +206,9 @@ export interface ClusterSpiderStats {
   totalItemsScraped: number
   totalErrors: number
   avgLatencyMs: number
-  domainStats?: DomainStats[]
+  domainStats: DomainStats[]
   clusterRequestsPerMinute: number
+  // 查询时处于 online 状态的 Worker 总数，包括尚未上报爬虫指标的 Worker。
   workerCount: number
   statusCodes: Record<string, number>
 }

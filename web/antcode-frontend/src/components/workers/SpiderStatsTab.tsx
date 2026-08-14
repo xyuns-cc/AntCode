@@ -16,7 +16,6 @@ import {
   SyncOutlined,
   GlobalOutlined,
   CloudServerOutlined,
-  FilterOutlined,
   DownloadOutlined,
   UploadOutlined,
   BarChartOutlined,
@@ -130,8 +129,6 @@ const MetricCard: React.FC<{
   )
 })
 
-import type { DomainStats } from '@/types'
-
 const SpiderStatsTab: React.FC<SpiderStatsTabProps> = memo(({ refreshKey }) => {
   const { token } = theme.useToken()
   const [loading, setLoading] = useState(true)
@@ -146,10 +143,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const isFirstLoad = useRef(true)
 
-  // 实时趋势数据
-  // P1-round6 5.4: 移除 itemRate 合成字段(此前 = reqRate * 0.7 硬编码, 与
-  // 后端真实数据无关, 不能作为监控依据)。后端未提供 itemsPerMinute 时,
-  // 图上不再画伪造线,只展示 reqRate/latency 两条真实曲线。
+  // 轮询趋势只保留后端提供的完成任务请求窗口和平均延迟。
   const [realtimeTrend, setRealtimeTrend] = useState<Array<{
     time: string
     reqRate: number
@@ -173,7 +167,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       setWorkers(workerList.filter((worker) => worker.status === 'online'))
       setLastUpdate(new Date())
 
-      // 更新实时趋势（追加新数据点）
+      // 更新轮询趋势（追加新数据点）
       const now = new Date()
       const timeStr = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       setRealtimeTrend(prev => {
@@ -239,9 +233,6 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       })
   }, [selectedWorkerId, historyHours])
 
-  const successRate = stats && stats.totalResponses > 0
-    ? ((stats.totalResponses - stats.totalErrors) / stats.totalResponses * 100) : 0
-
   // 状态码环形图数据
   const statusCodeData = useMemo(() => {
     if (!stats?.statusCodes || Object.keys(stats.statusCodes).length === 0) return null
@@ -270,7 +261,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
     return {
       labels: realtimeTrend.map(p => p.time),
       datasets: [
-        { label: '请求数/分钟', data: realtimeTrend.map(p => p.reqRate), borderColor: '#667eea', backgroundColor: 'rgba(102, 126, 234, 0.15)', fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2 },
+        { label: '最近完成请求量', data: realtimeTrend.map(p => p.reqRate), borderColor: '#667eea', backgroundColor: 'rgba(102, 126, 234, 0.15)', fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2 },
       ]
     }
   }, [realtimeTrend])
@@ -322,15 +313,22 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
     { title: '请求数', dataIndex: 'reqs', key: 'reqs', align: 'right' as const, render: (val: number) => <Text code>{formatNumber(val)}</Text> },
     { title: '成功率', dataIndex: 'successRate', key: 'successRate', align: 'right' as const, render: (val: number) => (
       <Flex align="center" justify="flex-end" gap={8}>
-        <Text style={{ color: val > 95 ? token.colorSuccess : val > 90 ? token.colorWarning : token.colorError }}>{val}%</Text>
-        {val > 90 ? <CheckCircleOutlined style={{ color: token.colorSuccess }} /> : <WarningOutlined style={{ color: token.colorError }} />}
+        <Text style={{ color: val >= 95 ? token.colorSuccess : val >= 90 ? token.colorWarning : token.colorError }}>{val}%</Text>
+        {val >= 95 ? <CheckCircleOutlined style={{ color: token.colorSuccess }} /> : <WarningOutlined style={{ color: val >= 90 ? token.colorWarning : token.colorError }} />}
       </Flex>
     )},
-    { title: '平均延迟', dataIndex: 'latency', key: 'latency', align: 'right' as const, render: (val: number) => <Text code>{val} ms</Text> },
-    { title: 'RPM', key: 'rpm', align: 'right' as const, render: (_: unknown, record: DomainStats) => <Text code>{(record.reqs / 60).toFixed(1)}</Text> }
+    { title: '平均延迟', dataIndex: 'latency', key: 'latency', align: 'right' as const, render: (val: number) => <Text code>{val} ms</Text> }
   ]
 
-  const errorRate = stats && stats.totalResponses > 0 ? (stats.totalErrors / stats.totalResponses * 100).toFixed(1) : '0.0'
+  const responseCount = Object.values(stats?.statusCodes ?? {}).reduce((sum, count) => sum + count, 0)
+  const successCount = Object.entries(stats?.statusCodes ?? {})
+    .filter(([code]) => code.startsWith('2'))
+    .reduce((sum, [, count]) => sum + count, 0)
+  const errorCount = Object.entries(stats?.statusCodes ?? {})
+    .filter(([code]) => code.startsWith('4') || code.startsWith('5'))
+    .reduce((sum, [, count]) => sum + count, 0)
+  const httpSuccessRate = responseCount ? successCount / responseCount * 100 : 0
+  const httpErrorRate = responseCount ? errorCount / responseCount * 100 : 0
 
   return (
     <Skeleton loading={loading} active paragraph={{ rows: 12 }}>
@@ -338,8 +336,6 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       <Flex justify="space-between" align="center" style={{ marginBottom: 16 }}>
         <Space>
           <Badge status="success" />
-          <Text type="secondary">Cluster: <Text style={{ color: token.colorPrimary }}>prod-spider-01</Text></Text>
-          <Text type="secondary">|</Text>
           <Text type="secondary">{stats?.workerCount || 0} Worker 在线</Text>
         </Space>
         <Space>
@@ -348,15 +344,10 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
         </Space>
       </Flex>
 
-      {/* 核心指标卡片
-        P1-round6 5.4: 移除 (a) 硬编码 trend 数值(合成不能作为真实趋势)、
-        (b) "每分钟抓取数据" = req*0.7 假数据(后端未提供)、(c) P99 = latency*2.5
-        与 (d) Retries = errors*1.5 合成 subValue。真实无来源的字段改为 "—",
-        避免用户误认为是真实监控。
-      */}
+      {/* 核心指标卡片只展示后端提供的真实数据。 */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={12} md={6}><MetricCard title="每分钟请求 (RPM)" value={stats?.clusterRequestsPerMinute?.toFixed(0) || 0} icon={<ThunderboltOutlined />} accentColor="#667eea" /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="每分钟抓取数据" value="—" icon={<DatabaseOutlined />} accentColor="#52c41a" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="最近完成请求量 (60秒)" value={stats?.clusterRequestsPerMinute?.toFixed(0) || 0} icon={<ThunderboltOutlined />} accentColor="#667eea" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="抓取数据总数" value={stats?.totalItemsScraped || 0} icon={<DatabaseOutlined />} accentColor="#52c41a" /></Col>
         <Col xs={12} sm={12} md={6}><MetricCard title="平均响应延迟" value={stats?.avgLatencyMs?.toFixed(0) || 0} suffix="ms" icon={<FieldTimeOutlined />} accentColor="#faad14" /></Col>
         <Col xs={12} sm={12} md={6}><MetricCard title="异常 & 错误" value={stats?.totalErrors || 0} icon={<WarningOutlined />} accentColor="#ff4d4f" /></Col>
       </Row>
@@ -364,7 +355,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       {/* 流量趋势 + 状态码分布 */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={24} lg={16}>
-          <Card title={<Flex align="center" gap={6}><LineChartOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>实时流量 & 抓取趋势</span></Flex>} extra={<Space><Badge color="#667eea" text="请求数" /><Badge color="#52c41a" text="数据项" /></Space>} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
+          <Card title={<Flex align="center" gap={6}><LineChartOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>最近完成请求量趋势</span></Flex>} extra={<Badge color="#667eea" text="60 秒窗口" />} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
             <div style={{ height: 280 }}>{trafficTrendData ? <Line data={trafficTrendData} options={areaChartOptions} /> : <Empty description="暂无数据" />}</div>
           </Card>
         </Col>
@@ -372,8 +363,8 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
           <Card title={<Flex align="center" gap={6}><PieChartOutlined style={{ color: '#722ed1' }} /><span style={{ fontSize: 14 }}>HTTP 状态码分布</span></Flex>} extra={<Tooltip title={`${lastUpdate.toLocaleTimeString()} 更新`}><Button type="text" size="small" icon={<SyncOutlined spin={refreshing} />}>{stats?.workerCount || 0} Worker</Button></Tooltip>} style={{ borderRadius: 12, height: '100%' }} styles={{ body: { padding: '12px 16px' } }}>
             <div style={{ height: 180 }}>{statusCodeData ? <Doughnut data={statusCodeData} options={doughnutOptions} /> : <Empty description="暂无数据" />}</div>
             <Row gutter={8} style={{ marginTop: 12 }}>
-              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Error (4xx/5xx)</Text><Text strong style={{ color: token.colorError, fontSize: 12 }}>{errorRate}%</Text></div></Col>
-              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Success (2xx)</Text><Text strong style={{ color: token.colorSuccess, fontSize: 12 }}>{successRate.toFixed(1)}%</Text></div></Col>
+              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Error (4xx/5xx)</Text><Text strong style={{ color: token.colorError, fontSize: 12 }}>{httpErrorRate.toFixed(1)}%</Text></div></Col>
+              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Success (2xx)</Text><Text strong style={{ color: token.colorSuccess, fontSize: 12 }}>{httpSuccessRate.toFixed(1)}%</Text></div></Col>
             </Row>
           </Card>
         </Col>
@@ -404,14 +395,14 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
           </Card>
         </Col>
         <Col xs={24} lg={16}>
-          <Card title={<Flex align="center" gap={6}><BarChartOutlined style={{ color: '#faad14' }} /><span style={{ fontSize: 14 }}>最近响应延迟趋势 (ms)</span></Flex>} extra={<Tag>Past 5 minutes</Tag>} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
+          <Card title={<Flex align="center" gap={6}><BarChartOutlined style={{ color: '#faad14' }} /><span style={{ fontSize: 14 }}>最近响应延迟趋势 (ms)</span></Flex>} extra={<Tag>最近 20 个采样点</Tag>} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
             <div style={{ height: 200 }}>{latencyTrendData ? <Bar data={latencyTrendData} options={barChartOptions} /> : <Empty description="暂无数据" />}</div>
           </Card>
         </Col>
       </Row>
 
       {/* 域名监控表格 */}
-      <Card title={<Flex align="center" gap={6}><GlobalOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>域名监控详情 (Domain Stats)</span></Flex>} extra={<Button type="text" icon={<FilterOutlined />}>Filter</Button>} style={{ borderRadius: 12, marginBottom: 16 }}>
+      <Card title={<Flex align="center" gap={6}><GlobalOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>域名监控详情 (Domain Stats)</span></Flex>} style={{ borderRadius: 12, marginBottom: 16 }}>
         {stats?.domainStats && stats.domainStats.length > 0 ? (
           <Table dataSource={stats.domainStats} columns={domainColumns} rowKey="domain" pagination={false} size="small" />
         ) : (
@@ -427,7 +418,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
           ) : selectedWorkerId ? (
             historyData.length > 0 ? (
               <Line data={{
-                labels: historyData.map(p => { const d = new Date(p.timestamp); return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` }),
+                labels: historyData.map(p => p.timestamp.slice(11, 16)),
                 datasets: [
                   { label: '请求数', data: historyData.map(p => p.requestCount), borderColor: '#667eea', backgroundColor: 'rgba(102, 126, 234, 0.15)', fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2 },
                   { label: '响应数', data: historyData.map(p => p.responseCount), borderColor: '#52c41a', backgroundColor: 'transparent', tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2, borderDash: [4, 4] },

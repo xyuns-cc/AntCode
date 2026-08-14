@@ -1,14 +1,6 @@
 export type WorkerDisplayStatus = 'running' | 'warning' | 'error' | 'stopped'
 export type WorkerOs =
-  | 'windows'
-  | 'ubuntu'
-  | 'debian'
-  | 'centos'
-  | 'redhat'
-  | 'alpine'
-  | 'fedora'
-  | 'macos'
-  | 'linux'
+  'windows' | 'ubuntu' | 'debian' | 'centos' | 'redhat' | 'alpine' | 'fedora' | 'macos' | 'linux'
 
 export interface WorkerDisplayData {
   id: string
@@ -49,15 +41,13 @@ export interface MonitorTask {
   status: 'running' | 'success' | 'failed' | 'pending'
   cpu: number | string
   memory: number | string
-  duration: string
 }
 
-export interface WorkerLog {
-  id: string
-  worker: string
-  type: 'error' | 'warning' | 'info' | 'success'
-  message: string
-  time: string
+export interface MonitorTaskCounts {
+  success: number
+  failed: number
+  running: number
+  pending: number
 }
 
 export interface ClusterHistory {

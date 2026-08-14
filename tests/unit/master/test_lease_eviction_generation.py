@@ -5,12 +5,39 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 from antcode_core.application.services.lease_service import Lease
 from antcode_core.domain.models import TaskRun, Worker
+from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus
 
-master_main = importlib.import_module("antcode_master.__main__")
+master_main = importlib.import_module("antcode_master.control.worker_eviction")
+AUTHORITY_TOKEN = 17
+
+
+@pytest.fixture(autouse=True)
+def _fenced_eviction_dependencies(monkeypatch):
+    monkeypatch.setattr(
+        master_main,
+        "require_fencing_token",
+        AsyncMock(return_value=AUTHORITY_TOKEN),
+    )
+    monkeypatch.setattr(
+        master_main,
+        "execute_with_scheduler_authority",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        master_main,
+        "settle_runtime_failure_snapshot",
+        AsyncMock(return_value=True),
+    )
 
 
 def _make_task_query(tasks):
     """构造可链式 filter/only/all 的 TaskRun 查询 mock。"""
+    for index, task in enumerate(tasks, start=1):
+        task.id = index
+        task.scheduler_fencing_token = 11
+        task.dispatch_status = DispatchStatus.ACKED
+        task.runtime_status = RuntimeStatus.RUNNING
+        task.worker_id = 1
     task_query = MagicMock()
     task_query.filter.return_value = task_query
     task_query.only.return_value = task_query
@@ -34,7 +61,7 @@ async def test_late_l1_eviction_cannot_affect_worker_after_l2_grant(monkeypatch)
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", MagicMock(return_value=task_query))
 
-    await master_main._on_worker_evicted("worker-1", "lease-l1")
+    await master_main.on_worker_evicted("worker-1", "lease-l1")
 
     lease_store.get.assert_awaited_once_with("worker-1", include_expired=False)
     worker.save.assert_not_awaited()
@@ -56,7 +83,7 @@ async def test_l2_granted_while_eviction_is_preparing_blocks_all_writes(monkeypa
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", MagicMock(return_value=task_query))
 
-    await master_main._on_worker_evicted("worker-1", "lease-l1")
+    await master_main.on_worker_evicted("worker-1", "lease-l1")
 
     assert lease_store.get.await_args_list == [call("worker-1", include_expired=False)]
     assert worker.status == "online"
@@ -77,20 +104,16 @@ async def test_superseded_eviction_only_selects_evicted_generation_runs(monkeypa
     worker_query = SimpleNamespace(first=AsyncMock(return_value=worker))
     task = SimpleNamespace(run_id="run-l1", lease_id="lease-l1")
     task_query = _make_task_query([task])
-    status_update = AsyncMock(return_value=True)
     monkeypatch.setattr(master_main, "_lease_store", lease_store)
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", MagicMock(return_value=task_query))
-    monkeypatch.setattr(
-        "antcode_core.application.services.scheduler.execution_status_service.execution_status_service.update_runtime_status",
-        status_update,
-    )
 
-    await master_main._on_worker_evicted("worker-1", "lease-l1")
+    await master_main.on_worker_evicted("worker-1", "lease-l1")
 
     assert task_query.filter.call_args.kwargs == {"lease_id": "lease-l1"}
-    assert status_update.await_args.kwargs["expected_lease_id"] == "lease-l1"
-    worker.save.assert_not_awaited()
+    settlement = master_main.settle_runtime_failure_snapshot
+    assert settlement.await_args.args[:2] == (task, AUTHORITY_TOKEN)
+    master_main.execute_with_scheduler_authority.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -105,16 +128,11 @@ async def test_l1_eviction_selects_l1_and_null_lease_task_runs(monkeypatch):
     task_null = SimpleNamespace(run_id="run-null", lease_id=None)
     task_query = _make_task_query([task_l1, task_null])
     task_filter = MagicMock(return_value=task_query)
-    status_update = AsyncMock(return_value=True)
     monkeypatch.setattr(master_main, "_lease_store", lease_store)
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", task_filter)
-    monkeypatch.setattr(
-        "antcode_core.application.services.scheduler.execution_status_service.execution_status_service.update_runtime_status",
-        status_update,
-    )
 
-    await master_main._on_worker_evicted("worker-1", "lease-l1")
+    await master_main.on_worker_evicted("worker-1", "lease-l1")
 
     # 首层 filter 不做 lease 过滤，lease 条件在二层 Q 里
     assert "lease_id" not in task_filter.call_args.kwargs
@@ -123,12 +141,11 @@ async def test_l1_eviction_selects_l1_and_null_lease_task_runs(monkeypatch):
     child_filters = [child.filters for child in lease_q.children]
     assert {"lease_id": "lease-l1"} in child_filters
     assert {"lease_id__isnull": True} in child_filters
-    # 逐 run 用自身代际做 fencing；NULL lease 的 run 传 None
-    expected = {
-        kwargs["run_id"]: kwargs["expected_lease_id"] for kwargs in (c.kwargs for c in status_update.await_args_list)
-    }
+    # 逐 run 传完整快照；统一 settlement 对 NULL lease 生成 IS NULL CAS。
+    settlement = master_main.settle_runtime_failure_snapshot
+    expected = {call_.args[0].run_id: call_.args[0].lease_id for call_ in settlement.await_args_list}
     assert expected == {"run-l1": "lease-l1", "run-null": None}
-    worker.save.assert_awaited_once()
+    master_main.execute_with_scheduler_authority.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -151,24 +168,20 @@ async def test_l2_regranted_before_failover_skips_null_lease_runs(monkeypatch):
     task_null = SimpleNamespace(run_id="run-null", lease_id=None)
     task_query = _make_task_query([task_l1, task_null])
     task_filter = MagicMock(return_value=task_query)
-    status_update = AsyncMock(return_value=True)
     monkeypatch.setattr(master_main, "_lease_store", lease_store)
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", task_filter)
-    monkeypatch.setattr(
-        "antcode_core.application.services.scheduler.execution_status_service.execution_status_service.update_runtime_status",
-        status_update,
-    )
 
-    await master_main._on_worker_evicted("worker-1", "lease-l1")
+    await master_main.on_worker_evicted("worker-1", "lease-l1")
 
     # 只有绑定 L1 的 run 被回收；NULL-lease run 因 worker 已在 L2 回归被跳过。
-    evicted = {c.kwargs["run_id"] for c in status_update.await_args_list}
+    settlement = master_main.settle_runtime_failure_snapshot
+    evicted = {c.args[0].run_id for c in settlement.await_args_list}
     assert evicted == {"run-l1"}
-    assert status_update.await_count == 1
+    assert settlement.await_count == 1
     # worker 实际存活（持有 L2），不得被下线。
     assert worker.status == "online"
-    worker.save.assert_not_awaited()
+    master_main.execute_with_scheduler_authority.assert_not_awaited()
     # 复核确实又读了一次 lease store（贴近 UPDATE 的二次 get）。
     assert lease_store.get.await_count == 2
 
@@ -184,23 +197,17 @@ async def test_eviction_without_generation_still_evicts_dead_worker(monkeypatch)
     task_null = SimpleNamespace(run_id="run-null", lease_id=None)
     task_query = _make_task_query([task_bound, task_null])
     task_filter = MagicMock(return_value=task_query)
-    status_update = AsyncMock(return_value=True)
     monkeypatch.setattr(master_main, "_lease_store", lease_store)
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", task_filter)
-    monkeypatch.setattr(
-        "antcode_core.application.services.scheduler.execution_status_service.execution_status_service.update_runtime_status",
-        status_update,
-    )
 
-    await master_main._on_worker_evicted("worker-1", "")
+    await master_main.on_worker_evicted("worker-1", "")
 
     # 代际未知且无有效 lease：不做 lease 过滤，全部 RUNNING run 回收
     assert "lease_id" not in task_filter.call_args.kwargs
     task_query.filter.assert_not_called()
-    assert worker.status == "offline"
-    worker.save.assert_awaited_once()
-    assert status_update.await_count == 2
+    master_main.execute_with_scheduler_authority.assert_awaited_once()
+    assert master_main.settle_runtime_failure_snapshot.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -216,17 +223,12 @@ async def test_eviction_without_generation_skips_when_current_lease_valid(monkey
     worker = SimpleNamespace(id=1, status="online", save=AsyncMock())
     worker_query = SimpleNamespace(first=AsyncMock(return_value=worker))
     task_filter = MagicMock()
-    status_update = AsyncMock(return_value=True)
     monkeypatch.setattr(master_main, "_lease_store", lease_store)
     monkeypatch.setattr(Worker, "filter", MagicMock(return_value=worker_query))
     monkeypatch.setattr(TaskRun, "filter", task_filter)
-    monkeypatch.setattr(
-        "antcode_core.application.services.scheduler.execution_status_service.execution_status_service.update_runtime_status",
-        status_update,
-    )
 
-    await master_main._on_worker_evicted("worker-1", "")
+    await master_main.on_worker_evicted("worker-1", "")
 
     task_filter.assert_not_called()
-    worker.save.assert_not_awaited()
-    status_update.assert_not_awaited()
+    master_main.execute_with_scheduler_authority.assert_not_awaited()
+    master_main.settle_runtime_failure_snapshot.assert_not_awaited()

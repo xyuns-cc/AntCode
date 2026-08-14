@@ -1,7 +1,6 @@
 """中间件基础设施模块"""
 
 from antcode_web_api.middleware.middleware import (
-    AdminPermissionMiddleware,
     CacheInvalidationMiddleware,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
@@ -9,7 +8,6 @@ from antcode_web_api.middleware.middleware import (
 )
 
 __all__ = [
-    "AdminPermissionMiddleware",
     "SecurityHeadersMiddleware",
     "RateLimitMiddleware",
     "CacheInvalidationMiddleware",

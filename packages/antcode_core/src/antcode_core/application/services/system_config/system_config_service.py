@@ -6,6 +6,7 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_core.application.services.system_config.batch_update import batch_update_system_configs
 from antcode_core.common.config import settings
 from antcode_core.common.serialization import from_json
 from antcode_core.domain.models.system_config import SystemConfig
@@ -147,40 +148,8 @@ class SystemConfigService:
 
     async def batch_update_configs(self, configs, modified_by):
         """批量更新配置"""
-        updated_count = 0
-
-        for config_item in configs:
-            config_key = config_item.get("config_key")
-            if not config_key:
-                continue
-
-            try:
-                config = await SystemConfig.filter(config_key=config_key).first()
-                if config:
-                    # 更新现有配置
-                    config.config_value = config_item.get("config_value", config.config_value)
-                    config.is_active = config_item.get("is_active", config.is_active)
-                    config.modified_by = modified_by
-                    await config.save()
-                else:
-                    # 创建新配置
-                    await SystemConfig.create(
-                        config_key=config_key,
-                        config_value=config_item.get("config_value", ""),
-                        category=config_item.get("category", "general"),
-                        description=config_item.get("description"),
-                        value_type=config_item.get("value_type", "string"),
-                        is_active=config_item.get("is_active", True),
-                        modified_by=modified_by,
-                    )
-                updated_count += 1
-            except Exception as e:
-                logger.error(f"批量更新配置失败 {config_key}: {e}")
-                continue
-
-        # 热加载配置
+        updated_count = await batch_update_system_configs(configs, modified_by)
         await self.reload_config_cache()
-
         logger.info(f"批量更新 {updated_count} 个配置 by {modified_by}")
         return updated_count
 

@@ -7,6 +7,7 @@
 from tortoise import fields
 from tortoise.models import Model
 
+from antcode_core.common.error_message_field import PersistedErrorMessageField
 from antcode_core.domain.models.enums import AuditAction
 
 
@@ -25,7 +26,7 @@ class AuditLog(Model):
     resource_name = fields.CharField(max_length=200, null=True, description="资源名称")
 
     # 操作者信息
-    user_id = fields.IntField(null=True, description="用户ID")
+    user_id = fields.BigIntField(null=True, description="用户ID")
     username = fields.CharField(max_length=100, description="用户名")
     ip_address = fields.CharField(max_length=50, null=True, description="IP地址")
     user_agent = fields.CharField(max_length=500, null=True, description="User-Agent")
@@ -37,7 +38,7 @@ class AuditLog(Model):
 
     # 结果
     success = fields.BooleanField(default=True, description="是否成功")
-    error_message = fields.TextField(null=True, description="错误信息")
+    error_message = PersistedErrorMessageField(null=True, description="错误信息")
 
     # 时间戳
     created_at = fields.DatetimeField(auto_now_add=True, description="创建时间")

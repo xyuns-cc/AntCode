@@ -1,13 +1,7 @@
 import type React from 'react'
 import { useMemo } from 'react'
 import { Row, Col, Typography, theme } from 'antd'
-import {
-  FileOutlined,
-  SettingOutlined,
-  CodeOutlined,
-  RobotOutlined,
-  CheckCircleFilled
-} from '@ant-design/icons'
+import { FileOutlined, SettingOutlined, CodeOutlined, CheckCircleFilled } from '@ant-design/icons'
 import { useThemeContext } from '@/contexts/ThemeContext'
 import type { ProjectType } from '@/types'
 
@@ -18,52 +12,46 @@ interface ProjectTypeSelectorProps {
   onSelect: (type: ProjectType) => void
 }
 
-const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
-  selectedType,
-  onSelect
-}) => {
+const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({ selectedType, onSelect }) => {
   const { isDark } = useThemeContext()
   const { token } = theme.useToken()
 
-  const projectTypes = useMemo(() => [
-    {
-      type: 'file' as ProjectType,
-      title: '文件项目',
-      description: '从 Git 仓库运行文件项目',
-      icon: FileOutlined,
-      color: token.colorInfo,
-      features: ['指定仓库入口文件', '自动解析项目依赖']
-    },
-    {
-      type: 'rule' as ProjectType,
-      title: '规则项目',
-      description: '配置网页采集规则',
-      icon: SettingOutlined,
-      color: token.colorSuccess,
-      features: ['可视化规则配置', '支持列表页和详情页']
-    },
-    {
-      type: 'code' as ProjectType,
-      title: '代码项目',
-      description: '从 Git 仓库运行自定义代码',
-      icon: CodeOutlined,
-      color: token.purple || '#722ed1',
-      features: ['指定入口文件', '快速部署执行']
-    },
-    {
-      type: 'agent' as ProjectType,
-      title: '智能代理',
-      description: 'AI 驱动的智能浏览器采集',
-      icon: RobotOutlined,
-      color: token.colorWarning,
-      features: ['自然语言描述任务', 'AI 自动执行采集']
-    }
-  ], [token])
+  const projectTypes = useMemo(
+    () => [
+      {
+        type: 'file' as ProjectType,
+        title: '文件项目',
+        description: '从 Git 仓库运行文件项目',
+        icon: FileOutlined,
+        color: token.colorInfo,
+        features: ['指定仓库入口文件', '自动解析项目依赖'],
+      },
+      {
+        type: 'rule' as ProjectType,
+        title: '规则项目',
+        description: '配置网页采集规则',
+        icon: SettingOutlined,
+        color: token.colorSuccess,
+        features: ['可视化规则配置', '支持列表页和详情页'],
+      },
+      {
+        type: 'code' as ProjectType,
+        title: '代码项目',
+        description: '从 Git 仓库运行自定义代码',
+        icon: CodeOutlined,
+        color: token.purple || '#722ed1',
+        features: ['指定入口文件', '快速部署执行'],
+      },
+    ],
+    [token]
+  )
 
   return (
     <div style={{ padding: '8px 0' }}>
       <div style={{ textAlign: 'center', marginBottom: 20 }}>
-        <Title level={4} style={{ marginBottom: 4 }}>选择项目类型</Title>
+        <Title level={4} style={{ marginBottom: 4 }}>
+          选择项目类型
+        </Title>
         <Text type="secondary" style={{ fontSize: 13 }}>
           选择适合您需求的项目类型
         </Text>
@@ -84,14 +72,16 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                   borderRadius: 12,
                   border: `2px solid ${isSelected ? item.color : token.colorBorderSecondary}`,
                   background: isSelected
-                    ? (isDark ? `${item.color}15` : `${item.color}08`)
+                    ? isDark
+                      ? `${item.color}15`
+                      : `${item.color}08`
                     : token.colorBgContainer,
                   cursor: 'pointer',
                   transition: 'all 0.2s ease',
                   minHeight: 100,
                   display: 'flex',
                   alignItems: 'flex-start',
-                  gap: 14
+                  gap: 14,
                 }}
                 onMouseEnter={(e) => {
                   if (!isSelected) {
@@ -116,31 +106,33 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                       top: 10,
                       right: 10,
                       fontSize: 16,
-                      color: item.color
+                      color: item.color,
                     }}
                   />
                 )}
 
                 {/* 左侧：图标和标题 */}
-                <div style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  flexShrink: 0,
-                  width: 70
-                }}>
-                  <div style={{
-                    width: 44,
-                    height: 44,
-                    borderRadius: 10,
-                    backgroundColor: isSelected
-                      ? `${item.color}20`
-                      : token.colorFillSecondary,
+                <div
+                  style={{
                     display: 'flex',
+                    flexDirection: 'column',
                     alignItems: 'center',
-                    justifyContent: 'center',
-                    marginBottom: 8
-                  }}>
+                    flexShrink: 0,
+                    width: 70,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 10,
+                      backgroundColor: isSelected ? `${item.color}20` : token.colorFillSecondary,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginBottom: 8,
+                    }}
+                  >
                     <IconComponent style={{ fontSize: 22, color: item.color }} />
                   </div>
                   <Text
@@ -148,7 +140,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                     style={{
                       fontSize: 13,
                       color: isSelected ? item.color : token.colorText,
-                      textAlign: 'center'
+                      textAlign: 'center',
                     }}
                   >
                     {item.title}
@@ -171,7 +163,7 @@ const ProjectTypeSelector: React.FC<ProjectTypeSelectorProps> = ({
                         style={{
                           fontSize: 11,
                           color: token.colorTextTertiary,
-                          lineHeight: 1.5
+                          lineHeight: 1.5,
                         }}
                       >
                         • {feature}

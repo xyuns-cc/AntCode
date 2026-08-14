@@ -24,7 +24,6 @@ class ProjectSource(BaseModel):
 
     class Meta:
         table = "project_sources"
-        unique_together = (("repository_id", "subdir"),)
         indexes = [
             ("project_id",),
             ("repository_id", "subdir"),

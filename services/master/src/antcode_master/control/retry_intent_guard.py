@@ -45,14 +45,18 @@ class RetryIntentInvalidError(RuntimeError):
     """
 
 
+class RetryTargetInvalidError(RetryIntentInvalidError):
+    """Retry target task no longer exists or is inactive."""
+
+
 async def validate_retry_source(conn, task_id: int, options: RetryExecutionOptions) -> None:
     """source 行锁下校验 durable intent 仍有效；无效时抛 RetryIntentInvalidError。"""
     source = await TaskRun.filter(run_id=options.source_run_id).using_db(conn).select_for_update().first()
     if source is None or source.task_id != task_id:
         raise RetryIntentInvalidError(f"retry source 无效: run_id={options.source_run_id}")
-    # P1-FN-01: 用户取消待重试后 source 会被置 CANCELLED（且清
-    # next_retry_at）；两个条件都显式校验，防止任何一条路径漏清。
-    if source.status == TaskStatus.CANCELLED:
+    # 取消请求是先于 Worker 终态持久化的命令事实；即使失败结果与请求
+    # 并发到达，已请求取消的 source 也不得生成新的执行。
+    if source.cancel_requested_at is not None or source.status == TaskStatus.CANCELLED:
         raise RetryIntentInvalidError(f"retry source 已被取消: run_id={options.source_run_id}")
     if source.next_retry_at is None or source.retry_count != options.retry_count:
         raise RetryIntentInvalidError(f"retry intent 已失效: run_id={options.source_run_id}")
@@ -78,6 +82,7 @@ __all__ = [
     "RetryExecutionOptions",
     "RetryIntent",
     "RetryIntentInvalidError",
+    "RetryTargetInvalidError",
     "consume_retry_intent",
     "validate_retry_source",
 ]

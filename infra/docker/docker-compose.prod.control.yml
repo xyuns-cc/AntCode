@@ -1,0 +1,146 @@
+x-antcode-logging: &antcode-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "10"
+
+x-backend-environment: &backend-environment
+  DATABASE_URL_FILE: /run/secrets/database_url
+  REDIS_URL_FILE: /run/secrets/redis_url
+  ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+  ENCRYPTION_KEY_SALT_FILE: /run/secrets/encryption_key_salt
+  ENCRYPTION_KEYS_LEGACY_FILE: /run/secrets/encryption_keys_legacy
+  ENCRYPTION_LEGACY_KDF_SALT: ${ENCRYPTION_LEGACY_KDF_SALT:-}
+  ENCRYPTION_ALLOW_LEGACY_SHA256: ${ENCRYPTION_ALLOW_LEGACY_SHA256:-false}
+  REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE is required}
+  REDIS_ACL_ENABLED: "true"
+  AUTH_COOKIE_SECURE: "true"
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-backend-service: &backend-service
+  restart: unless-stopped
+  logging: *antcode-logging
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp
+  networks:
+    - antcode-control
+  depends_on:
+    migration:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+
+services:
+  web-api:
+    <<: *backend-service
+    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    stop_grace_period: 30s
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 2048
+    expose:
+      - "8000"
+    environment:
+      <<: *backend-environment
+      BIND_HOST: 0.0.0.0
+      SERVER_PORT: "8000"
+      SERVER_RELOAD: "false"
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      API_BASE_URL: ${ANTCODE_PUBLIC_API_BASE_URL:?public HTTPS API base URL is required}
+      GATEWAY_HOST: ${ANTCODE_GATEWAY_HOST:?public mTLS Gateway host is required}
+      GATEWAY_PORT: ${ANTCODE_GATEWAY_PUBLIC_PORT:?public mTLS Gateway port is required}
+      WORKER_INSTALL_CONFIG_REQUIRED: "true"
+      WORKER_INSTALL_SOURCE_URL: ${ANTCODE_WORKER_INSTALL_SOURCE_URL:?Worker install HTTPS Git source is required}
+      WORKER_INSTALL_SOURCE_REF: ${ANTCODE_WORKER_INSTALL_SOURCE_REF:?Worker install 40-character Git commit is required}
+      WORKER_INSTALL_GATEWAY_TLS: "true"
+      WORKER_INSTALL_UV_VERSION: ${ANTCODE_WORKER_INSTALL_UV_VERSION:?pinned Worker install uv version is required}
+      ANTCODE_TRUSTED_PROXIES: ${ANTCODE_FRONTEND_CONTROL_IP:?exact frontend control-network IP is required}
+    secrets:
+      - database_url
+      - redis_url
+      - encryption_key
+      - encryption_key_salt
+      - encryption_keys_legacy
+      - jwt_secret
+    volumes:
+      - web_data:/app/data
+    networks:
+      - antcode-control
+      - antcode-service-egress
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/health/ready >/dev/null || { kill -TERM 1; exit 1; }"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  master:
+    <<: *backend-service
+    image: ${ANTCODE_MASTER_IMAGE_REPOSITORY:?Master image repository is required}@sha256:${ANTCODE_MASTER_IMAGE_DIGEST:?Master image digest is required}
+    stop_grace_period: 30s
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 2048
+    environment:
+      <<: *backend-environment
+    secrets:
+      - database_url
+      - redis_url
+      - encryption_key
+      - encryption_key_salt
+      - encryption_keys_legacy
+    volumes:
+      - master_data:/app/data
+    networks:
+      - antcode-control
+      - antcode-service-egress
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8101/health/ready >/dev/null || { kill -TERM 1; exit 1; }"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  gateway:
+    <<: *backend-service
+    image: ${ANTCODE_GATEWAY_IMAGE_REPOSITORY:?Gateway image repository is required}@sha256:${ANTCODE_GATEWAY_IMAGE_DIGEST:?Gateway image digest is required}
+    stop_grace_period: 30s
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 2048
+    ports:
+      - "${ANTCODE_GATEWAY_BIND_ADDRESS:?Gateway bind address is required}:${ANTCODE_GATEWAY_PUBLIC_PORT:-50051}:50051"
+    expose:
+      - "8100"
+    environment:
+      <<: *backend-environment
+      GRPC_HOST: "0.0.0.0"
+      GRPC_PORT: "50051"
+      GRPC_TLS_CERT_PATH: /etc/antcode/tls/server.crt
+      GRPC_TLS_KEY_PATH: /etc/antcode/tls/server.key
+      GRPC_TLS_CA_PATH: /etc/antcode/tls/ca.crt
+      ANTCODE_GATEWAY_ALLOW_INSECURE: "false"
+      ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS: "1"
+    secrets:
+      - database_url
+      - redis_url
+      - encryption_key
+      - encryption_key_salt
+      - encryption_keys_legacy
+    volumes:
+      - ${ANTCODE_GATEWAY_TLS_DIR:?Gateway mTLS directory is required}:/etc/antcode/tls:ro
+      - gateway_data:/app/data
+    networks:
+      - antcode-control
+      - antcode-execution
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health/ready >/dev/null || { kill -TERM 1; exit 1; }"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

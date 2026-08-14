@@ -14,7 +14,7 @@ import {
   MinusCircleFilled,
   LoadingOutlined
 } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useWorkerStore } from '@/stores/workerStore'
 import type { Worker, WorkerStatus } from '@/types'
 import type { GlobalToken } from 'antd/es/theme/interface'

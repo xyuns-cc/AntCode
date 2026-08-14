@@ -5,6 +5,12 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from antcode_contracts.runtime_metadata import (
+    RUNTIME_DESCRIPTION_MAX_LENGTH,
+    RUNTIME_KEY_MAX_LENGTH,
+    validate_runtime_description,
+    validate_runtime_key,
+)
 from antcode_core.domain.models.enums import RuntimeScope
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -38,8 +44,18 @@ class PackageRequest(_PackageListModel):
 
 
 class EnvUpdateRequest(BaseModel):
-    key: str | None = None
-    description: str | None = None
+    key: str | None = Field(default=None, max_length=RUNTIME_KEY_MAX_LENGTH)
+    description: str | None = Field(default=None, max_length=RUNTIME_DESCRIPTION_MAX_LENGTH)
+
+    @field_validator("key")
+    @classmethod
+    def validate_key_bytes(cls, value: str | None) -> str | None:
+        return validate_runtime_key(value)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description_bytes(cls, value: str | None) -> str | None:
+        return validate_runtime_description(value)
 
 
 def resolve_env_name(scope: str, python_version: str, env_name: str | None) -> str:

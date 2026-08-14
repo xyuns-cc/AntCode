@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import PageContainer from '@/components/common/PageContainer'
 import {
   Card,
@@ -15,7 +15,7 @@ import {
   Tooltip,
   Progress,
   Typography,
-  theme
+  theme,
 } from 'antd'
 import showNotification from '@/utils/notification'
 import {
@@ -25,18 +25,19 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ClockCircleOutlined,
-  ThunderboltOutlined
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import EnhancedLogViewer from '@/components/ui/LogViewer/EnhancedLogViewer'
 import CopyableTooltip from '@/components/common/CopyableTooltip'
 import { taskService } from '@/services/tasks'
-import { runsService, type RunArtifact, type SpiderItem } from '@/services/runs'
+import { runsService, type RunArtifact } from '@/services/runs'
 import type { Task, TaskExecution } from '@/types'
 import { formatDateTime, formatDuration } from '@/utils/format'
 import Logger from '@/utils/logger'
 import { isTerminalTaskStatus } from '@/utils/taskStatus'
 import { DownloadOutlined, FileOutlined } from '@ant-design/icons'
 import { List } from 'antd'
+import { SpiderItemsCard } from './components/SpiderItemsCard'
 
 const { Title, Text } = Typography
 
@@ -62,11 +63,6 @@ const ExecutionLogs: React.FC = () => {
   // P1-round6 5.4: 失败必须区别于"确实无数据",UI 展示"加载失败"而非空。
   const [artifactsError, setArtifactsError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
-
-  // O2 抓取数据：从 /api/v1/runs/{run_id}/spider-items 拉分页
-  const [spiderItems, setSpiderItems] = useState<SpiderItem[]>([])
-  const [spiderItemsLoading, setSpiderItemsLoading] = useState(false)
-  const [spiderItemsError, setSpiderItemsError] = useState<string | null>(null)
 
   // 加载任务信息
   const loadTask = useCallback(async () => {
@@ -161,42 +157,24 @@ const ExecutionLogs: React.FC = () => {
         setDownloading(null)
       }
     },
-    [runId],
+    [runId]
   )
-
-  // O2: 拉抓取数据；执行终态时再刷一次
-  const loadSpiderItems = useCallback(async () => {
-    if (!runId) return
-    setSpiderItemsLoading(true)
-    try {
-      const resp = await runsService.listSpiderItems(runId, { count: 200 })
-      setSpiderItems(resp.items || [])
-      setSpiderItemsError(null)
-    } catch (err) {
-      Logger.warn('获取抓取数据失败', err)
-      setSpiderItems([])
-      setSpiderItemsError(err instanceof Error ? err.message : '获取抓取数据失败')
-    } finally {
-      setSpiderItemsLoading(false)
-    }
-  }, [runId])
 
   // 初始加载
   useEffect(() => {
     const init = async () => {
       setLoading(true)
-      await Promise.all([loadTask(), loadExecution(), loadArtifacts(), loadSpiderItems()])
+      await Promise.all([loadTask(), loadExecution(), loadArtifacts()])
     }
     init()
-  }, [loadTask, loadExecution, loadArtifacts, loadSpiderItems])
+  }, [loadTask, loadExecution, loadArtifacts])
 
-  // 执行进入终态时刷新产物列表和抓取数据（写库有延迟）
+  // 执行进入终态时刷新产物列表（写库有延迟）
   useEffect(() => {
     if (execution && isTerminalTaskStatus(execution.status)) {
       loadArtifacts()
-      loadSpiderItems()
     }
-  }, [execution, loadArtifacts, loadSpiderItems])
+  }, [execution, loadArtifacts])
 
   // 自动刷新（如果任务正在运行）
   useEffect(() => {
@@ -251,7 +229,7 @@ const ExecutionLogs: React.FC = () => {
     const base = {
       tagColor: 'default' as 'default' | 'success' | 'error' | 'processing' | 'warning',
       text: execution ? execution.status?.toUpperCase() || '未知状态' : '等待执行',
-      icon: <InfoCircleOutlined style={{ color: token.colorInfo }} />
+      icon: <InfoCircleOutlined style={{ color: token.colorInfo }} />,
     }
 
     if (!execution) {
@@ -263,24 +241,24 @@ const ExecutionLogs: React.FC = () => {
         return {
           tagColor: 'success' as const,
           text: '执行成功',
-          icon: <CheckCircleOutlined style={{ color: token.colorSuccess }} />
+          icon: <CheckCircleOutlined style={{ color: token.colorSuccess }} />,
         }
       case 'failed':
         return {
           tagColor: 'error' as const,
           text: '执行失败',
-          icon: <CloseCircleOutlined style={{ color: token.colorError }} />
+          icon: <CloseCircleOutlined style={{ color: token.colorError }} />,
         }
       case 'running':
         return {
           tagColor: 'processing' as const,
           text: '运行中',
-          icon: <ClockCircleOutlined style={{ color: token.colorWarning }} spin />
+          icon: <ClockCircleOutlined style={{ color: token.colorWarning }} spin />,
         }
       default:
         return {
           ...base,
-          text: execution.status?.toUpperCase() || '未知状态'
+          text: execution.status?.toUpperCase() || '未知状态',
         }
     }
   }, [execution, token.colorError, token.colorInfo, token.colorSuccess, token.colorWarning])
@@ -318,50 +296,48 @@ const ExecutionLogs: React.FC = () => {
     () =>
       execution
         ? [
-          {
-            key: 'runId',
-            label: '运行ID',
-            value: (
-              <CopyableTooltip text={execution.run_id}>
-                <code style={{ cursor: 'pointer' }}>
-                  {execution.run_id}
-                </code>
-              </CopyableTooltip>
-            )
-          },
-          {
-            key: 'startTime',
-            label: '开始时间',
-            value: formatDateTime(execution.start_time)
-          },
-          {
-            key: 'endTime',
-            label: '结束时间',
-            value: endTimeDisplay
-          },
-          {
-            key: 'duration',
-            label: '持续时间',
-            value: durationDisplay
-          },
-          {
-            key: 'exitCode',
-            label: '退出码',
-            value:
-              execution.exit_code !== null && execution.exit_code !== undefined ? (
-                <Tag color={execution.exit_code === 0 ? 'success' : 'error'}>
-                  {execution.exit_code}
-                </Tag>
-              ) : (
-                '-'
-              )
-          },
-          {
-            key: 'taskId',
-            label: '任务ID',
-            value: taskId ? `#${taskId}` : '-'
-          }
-        ]
+            {
+              key: 'runId',
+              label: '运行ID',
+              value: (
+                <CopyableTooltip text={execution.run_id}>
+                  <code style={{ cursor: 'pointer' }}>{execution.run_id}</code>
+                </CopyableTooltip>
+              ),
+            },
+            {
+              key: 'startTime',
+              label: '开始时间',
+              value: formatDateTime(execution.start_time),
+            },
+            {
+              key: 'endTime',
+              label: '结束时间',
+              value: endTimeDisplay,
+            },
+            {
+              key: 'duration',
+              label: '持续时间',
+              value: durationDisplay,
+            },
+            {
+              key: 'exitCode',
+              label: '退出码',
+              value:
+                execution.exit_code !== null && execution.exit_code !== undefined ? (
+                  <Tag color={execution.exit_code === 0 ? 'success' : 'error'}>
+                    {execution.exit_code}
+                  </Tag>
+                ) : (
+                  '-'
+                ),
+            },
+            {
+              key: 'taskId',
+              label: '任务ID',
+              value: taskId ? `#${taskId}` : '-',
+            },
+          ]
         : [],
     [durationDisplay, endTimeDisplay, execution, taskId]
   )
@@ -369,11 +345,13 @@ const ExecutionLogs: React.FC = () => {
   // 如果正在加载
   if (loading) {
     return (
-      <div style={{
-        padding: '24px',
-        maxWidth: '1800px',
-        margin: '0 auto'
-      }}>
+      <div
+        style={{
+          padding: '24px',
+          maxWidth: '1800px',
+          margin: '0 auto',
+        }}
+      >
         <Card>
           <Skeleton active paragraph={{ rows: 10 }} />
         </Card>
@@ -387,14 +365,13 @@ const ExecutionLogs: React.FC = () => {
       <div style={{ padding: '24px' }}>
         <Card>
           <div style={{ textAlign: 'center', padding: '40px' }}>
-            <CloseCircleOutlined style={{ fontSize: 48, color: token.colorError, marginBottom: 16 }} />
+            <CloseCircleOutlined
+              style={{ fontSize: 48, color: token.colorError, marginBottom: 16 }}
+            />
             <h3>加载失败</h3>
             <p style={{ color: token.colorTextSecondary, marginBottom: 24 }}>{error}</p>
             <Space>
-              <Button
-                icon={<ArrowLeftOutlined />}
-                onClick={() => navigate(`/tasks/${taskId}`)}
-              >
+              <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(`/tasks/${taskId}`)}>
                 返回任务详情
               </Button>
               <Button
@@ -425,7 +402,7 @@ const ExecutionLogs: React.FC = () => {
           background: token.colorBgContainer,
           borderRadius: '8px',
           boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02)',
-          border: `1px solid ${token.colorBorderSecondary}`
+          border: `1px solid ${token.colorBorderSecondary}`,
         }}
       >
         <Row justify="space-between" align="middle" gutter={[16, 12]}>
@@ -438,14 +415,16 @@ const ExecutionLogs: React.FC = () => {
               >
                 返回
               </Button>
-              <div style={{
-                borderLeft: `2px solid ${token.colorBorderSecondary}`,
-                paddingLeft: 16,
-                height: 36,
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center'
-              }}>
+              <div
+                style={{
+                  borderLeft: `2px solid ${token.colorBorderSecondary}`,
+                  paddingLeft: 16,
+                  height: 36,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                }}
+              >
                 <Title level={5} style={{ margin: 0, lineHeight: 1.2 }}>
                   执行日志
                 </Title>
@@ -463,7 +442,7 @@ const ExecutionLogs: React.FC = () => {
                   display: 'flex',
                   alignItems: 'center',
                   gap: 6,
-                  border: 'none'
+                  border: 'none',
                 }}
               >
                 {statusMeta.text}
@@ -505,21 +484,25 @@ const ExecutionLogs: React.FC = () => {
             background: token.colorBgContainer,
             borderRadius: '8px',
             boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02)',
-            border: `1px solid ${token.colorBorderSecondary}`
+            border: `1px solid ${token.colorBorderSecondary}`,
           }}
         >
           {/* 标题区域 */}
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 20,
-            paddingBottom: 16,
-            borderBottom: `1px solid ${token.colorBorderSecondary}`
-          }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 20,
+              paddingBottom: 16,
+              borderBottom: `1px solid ${token.colorBorderSecondary}`,
+            }}
+          >
             <Space>
               <ThunderboltOutlined style={{ fontSize: 18, color: token.colorPrimary }} />
-              <Text strong style={{ fontSize: 16 }}>执行详情</Text>
+              <Text strong style={{ fontSize: 16 }}>
+                执行详情
+              </Text>
             </Space>
             {execution.status === 'running' && executionProgress !== null && (
               <Tooltip title={`预估进度 ${executionProgress}%`} placement="topLeft">
@@ -528,9 +511,7 @@ const ExecutionLogs: React.FC = () => {
                   percent={executionProgress}
                   width={44}
                   format={(percent) => (
-                    <span style={{ fontSize: 12, fontWeight: 600 }}>
-                      {percent}%
-                    </span>
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{percent}%</span>
                   )}
                 />
               </Tooltip>
@@ -539,11 +520,15 @@ const ExecutionLogs: React.FC = () => {
 
           {/* 信息网格 */}
           <Row gutter={[20, 20]}>
-            {overviewItems.map(item => {
+            {overviewItems.map((item) => {
               const valueContent =
-                typeof item.value === 'string' || typeof item.value === 'number'
-                  ? <Text strong style={{ fontSize: 15 }}>{item.value}</Text>
-                  : item.value
+                typeof item.value === 'string' || typeof item.value === 'number' ? (
+                  <Text strong style={{ fontSize: 15 }}>
+                    {item.value}
+                  </Text>
+                ) : (
+                  item.value
+                )
 
               return (
                 <Col key={item.key} xs={24} sm={12} lg={8}>
@@ -555,7 +540,7 @@ const ExecutionLogs: React.FC = () => {
                       border: `1px solid ${token.colorBorder}`,
                       transition: 'all 0.2s',
                       cursor: 'default',
-                      height: '100%'
+                      height: '100%',
                     }}
                     onMouseEnter={(e) => {
                       e.currentTarget.style.background = token.colorFillTertiary
@@ -566,20 +551,24 @@ const ExecutionLogs: React.FC = () => {
                       e.currentTarget.style.borderColor = token.colorBorder
                     }}
                   >
-                    <div style={{
-                      fontSize: 12,
-                      color: token.colorTextSecondary,
-                      marginBottom: 8,
-                      fontWeight: 500
-                    }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: token.colorTextSecondary,
+                        marginBottom: 8,
+                        fontWeight: 500,
+                      }}
+                    >
                       {item.label}
                     </div>
-                    <div style={{
-                      fontSize: 15,
-                      fontWeight: 600,
-                      color: token.colorText,
-                      lineHeight: 1.4
-                    }}>
+                    <div
+                      style={{
+                        fontSize: 15,
+                        fontWeight: 600,
+                        color: token.colorText,
+                        lineHeight: 1.4,
+                      }}
+                    >
                       {valueContent}
                     </div>
                   </div>
@@ -592,13 +581,15 @@ const ExecutionLogs: React.FC = () => {
 
       {/* 日志查看器 */}
       {runId ? (
-        <div style={{
-          background: token.colorBgContainer,
-          borderRadius: '8px',
-          overflow: 'hidden',
-          boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02)',
-          border: `1px solid ${token.colorBorderSecondary}`
-        }}>
+        <div
+          style={{
+            background: token.colorBgContainer,
+            borderRadius: '8px',
+            overflow: 'hidden',
+            boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02)',
+            border: `1px solid ${token.colorBorderSecondary}`,
+          }}
+        >
           <EnhancedLogViewer
             key={runId}
             runId={runId}
@@ -615,10 +606,14 @@ const ExecutionLogs: React.FC = () => {
               // 收到状态更新时，更新执行状态
               Logger.info('收到执行状态更新', statusUpdate)
               if (execution && statusUpdate.status) {
-                setExecution(prev => prev ? {
-                  ...prev,
-                  status: statusUpdate.status as TaskExecution['status']
-                } : null)
+                setExecution((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        status: statusUpdate.status as TaskExecution['status'],
+                      }
+                    : null
+                )
               }
               // 如果任务完成，刷新完整的执行信息
               if (isTerminalTaskStatus(statusUpdate.status)) {
@@ -629,106 +624,18 @@ const ExecutionLogs: React.FC = () => {
         </div>
       ) : (
         <Card>
-          <div style={{
-            padding: '80px 40px',
-            textAlign: 'center'
-          }}>
-            <Empty
-              description="运行ID不存在"
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-            />
+          <div
+            style={{
+              padding: '80px 40px',
+              textAlign: 'center',
+            }}
+          >
+            <Empty description="运行ID不存在" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           </div>
         </Card>
       )}
 
-      {/* O2: 爬虫抓取数据区 —— 执行有 SpiderDataReporter 时展示 items */}
-      {runId && (
-        <Card
-          title={
-            <Space>
-              <FileOutlined />
-              <span>抓取数据</span>
-              {spiderItems.length > 0 && (
-                <Tag color="green">{spiderItems.length}</Tag>
-              )}
-            </Space>
-          }
-          style={{ marginTop: 16 }}
-          extra={
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              onClick={loadSpiderItems}
-              loading={spiderItemsLoading}
-            >
-              刷新
-            </Button>
-          }
-        >
-          {spiderItemsError && spiderItems.length === 0 ? (
-            <Alert
-              type="error"
-              showIcon
-              message="抓取数据加载失败"
-              description={spiderItemsError}
-            />
-          ) : spiderItems.length === 0 ? (
-            <Empty
-              description={
-                spiderItemsLoading
-                  ? '加载中...'
-                  : '该执行没有抓取数据（或规则爬虫未启用 SpiderDataReporter）'
-              }
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-            />
-          ) : (
-            <List
-              size="small"
-              itemLayout="vertical"
-              dataSource={spiderItems}
-              pagination={
-                spiderItems.length > 20
-                  ? { pageSize: 20, size: 'small', showSizeChanger: false }
-                  : false
-              }
-              renderItem={(item, idx) => (
-                <List.Item key={item._id || idx}>
-                  <List.Item.Meta
-                    title={
-                      <Space>
-                        <Text code style={{ fontSize: 12 }}>#{idx + 1}</Text>
-                        {item.spider_name && (
-                          <Tag color="blue">{item.spider_name}</Tag>
-                        )}
-                        {item._id && (
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            {item._id}
-                          </Text>
-                        )}
-                      </Space>
-                    }
-                  />
-                  <pre
-                    style={{
-                      background: token.colorBgLayout,
-                      padding: 8,
-                      borderRadius: 4,
-                      fontSize: 12,
-                      maxHeight: 200,
-                      overflow: 'auto',
-                      margin: 0,
-                    }}
-                  >
-                    {typeof item.data === 'string'
-                      ? item.data
-                      : JSON.stringify(item.data ?? {}, null, 2)}
-                  </pre>
-                </List.Item>
-              )}
-            />
-          )}
-        </Card>
-      )}
+      {runId && <SpiderItemsCard runId={runId} status={execution?.status} />}
 
       {/* L2: 产物区 —— 执行有产物时展示，允许下载。执行时段可能为空。 */}
       {runId && (
@@ -737,9 +644,7 @@ const ExecutionLogs: React.FC = () => {
             <Space>
               <FileOutlined />
               <span>执行产物</span>
-              {artifacts.length > 0 && (
-                <Tag color="blue">{artifacts.length}</Tag>
-              )}
+              {artifacts.length > 0 && <Tag color="blue">{artifacts.length}</Tag>}
             </Space>
           }
           style={{ marginTop: 16 }}
@@ -755,18 +660,11 @@ const ExecutionLogs: React.FC = () => {
           }
         >
           {artifactsError && artifacts.length === 0 ? (
-            <Alert
-              type="error"
-              showIcon
-              message="产物列表加载失败"
-              description={artifactsError}
-            />
+            <Alert type="error" showIcon message="产物列表加载失败" description={artifactsError} />
           ) : artifacts.length === 0 ? (
             <Empty
               description={
-                artifactsLoading
-                  ? '加载中...'
-                  : '该执行没有产物（或任务未收集 artifact_patterns）'
+                artifactsLoading ? '加载中...' : '该执行没有产物（或任务未收集 artifact_patterns）'
               }
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />

@@ -10,6 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.enums import (
     DispatchStatus,
     ExecutionStrategy,
@@ -100,6 +101,7 @@ class TaskUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=3, max_length=255)
     description: str | None = Field(default=None, max_length=500)
     is_active: bool | None = None
+    schedule_type: ScheduleType | None = None
     # 对齐 DB 列 max_length=100,防止超长 cron 触发 asyncpg 截断 500(P1-29)。
     cron_expression: str | None = Field(default=None, max_length=100)
     interval_seconds: int | None = Field(default=None, gt=0)
@@ -137,33 +139,41 @@ class TaskResponse(BaseModel):
 
     id: str = Field(description="任务公开ID")
     name: str
-    description: str = ""
+    description: str | None = None
     project_id: str = Field(description="关联项目公开ID")
     task_type: TaskType
     schedule_type: ScheduleType
     is_active: bool
     status: TaskStatus
-    cron_expression: str = ""
-    interval_seconds: int = 0
-    scheduled_time: str = ""
-    last_run_time: str = ""
-    next_run_time: str = ""
+    cron_expression: str | None = None
+    interval_seconds: int | None = None
+    scheduled_time: datetime | None = None
+    max_instances: int = 1
+    timeout_seconds: int = 3600
+    retry_count: int = 3
+    retry_delay: int = 60
+    execution_params: dict[str, Any] | None = None
+    environment_vars: dict[str, str] | None = None
+    last_run_time: datetime | None = None
+    next_run_time: datetime | None = None
     created_at: datetime
     updated_at: datetime
     created_by: str = Field(description="创建者公开ID")
-    created_by_username: str = Field("", description="创建者用户名")
+    created_by_username: str | None = Field(None, description="创建者用户名")
+    success_count: int = Field(0, description="成功执行次数")
+    failure_count: int = Field(0, description="失败执行次数")
 
-    execution_strategy: str = Field("", description="执行策略")
-    specified_worker_id: str = Field("", description="指定执行 Worker ID")
-    specified_worker_name: str = Field("", description="指定执行 Worker 名称")
-    project_execution_strategy: str = Field("", description="项目执行策略")
-    project_bound_worker_id: str = Field("", description="项目绑定 Worker ID")
-    project_bound_worker_name: str = Field("", description="项目绑定 Worker 名称")
+    execution_strategy: str | None = Field(None, description="执行策略")
+    specified_worker_id: str | None = Field(None, description="指定执行 Worker ID")
+    specified_worker_name: str | None = Field(None, description="指定执行 Worker 名称")
+    project_execution_strategy: str | None = Field(None, description="项目执行策略")
+    project_bound_worker_id: str | None = Field(None, description="项目绑定 Worker ID")
+    project_bound_worker_name: str | None = Field(None, description="项目绑定 Worker 名称")
 
-    runtime_kind: str = Field("", description="运行时类型")
-    runtime_scope: str = Field("", description="运行时作用域")
-    python_version: str = Field("", description="Python 版本")
-    runtime_locator: str = Field("", description="运行时定位符")
+    runtime_kind: str | None = Field(None, description="运行时类型")
+    runtime_scope: str | None = Field(None, description="运行时作用域")
+    python_version: str | None = Field(None, description="Python 版本")
+    runtime_locator: str | None = Field(None, description="运行时定位符")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -191,11 +201,12 @@ class TaskRunResponse(BaseModel):
     runtime_status: str = ""
     dispatch_updated_at: str = ""
     runtime_updated_at: str = ""
-    exit_code: int = 0
+    exit_code: int | None = None
     error_message: str = ""
     result_data: dict[str, Any] = Field(default_factory=dict)
     stdout: str = ""
     stderr: str = ""
+    retry_count: int = 0
     worker_id: str = ""
 
     model_config = ConfigDict(from_attributes=True)
@@ -215,11 +226,12 @@ class TaskRunResponse(BaseModel):
             runtime_status=obj.runtime_status.value if obj.runtime_status else "",
             dispatch_updated_at=obj.dispatch_updated_at.isoformat() if obj.dispatch_updated_at else "",
             runtime_updated_at=obj.runtime_updated_at.isoformat() if obj.runtime_updated_at else "",
-            exit_code=obj.exit_code or 0,
-            error_message=obj.error_message or "",
+            exit_code=obj.exit_code,
+            error_message=normalize_persisted_error_message(obj.error_message) or "",
             result_data=obj.result_data or {},
             stdout=getattr(obj, "stdout", "") or "",
             stderr=getattr(obj, "stderr", "") or "",
+            retry_count=obj.retry_count,
             worker_id=str(obj.worker_public_id) if getattr(obj, "worker_public_id", None) else "",
         )
 

@@ -30,6 +30,17 @@ def test_tortoise_config_uses_asyncpg(monkeypatch):
     assert config["connections"]["default"]["engine"] == "tortoise.backends.asyncpg"
 
 
+def test_tortoise_config_pins_public_search_path(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://antcode:secret@127.0.0.1:5432/antcode",
+    )
+
+    credentials = tortoise.get_tortoise_config()["connections"]["default"]["credentials"]
+
+    assert credentials["server_settings"] == {"search_path": "public"}
+
+
 def test_tortoise_config_preserves_required_tls_mode(monkeypatch):
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -39,6 +50,19 @@ def test_tortoise_config_preserves_required_tls_mode(monkeypatch):
     credentials = tortoise.get_tortoise_config()["connections"]["default"]["credentials"]
 
     assert credentials["ssl"] == "require"
+
+
+def test_tortoise_config_decodes_percent_encoded_credentials_and_database(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://service%40tenant:p%40ss%3Aword@127.0.0.1:5432/antcode%20prod",
+    )
+
+    credentials = tortoise.get_tortoise_config()["connections"]["default"]["credentials"]
+
+    assert credentials["user"] == "service@tenant"
+    assert credentials["password"] == "p@ss:word"
+    assert credentials["database"] == "antcode prod"
 
 
 def test_tortoise_config_loads_root_cert_for_verify_full(monkeypatch, tmp_path):
@@ -144,6 +168,49 @@ def test_backendless_mode_rejects_direct_worker():
             REDIS_URL="",
             WORKER_TRANSPORT_MODE="direct",
             WORKER_GATEWAY_BACKENDLESS=True,
+        )
+
+
+def test_direct_worker_keeps_postgres_and_drops_control_plane_redis():
+    """Direct Worker 的后端边界是非对称的：要 PG（产物平面），不要控制面 Redis。"""
+    settings = Settings(
+        DATABASE_URL="postgresql://antcode:secret@127.0.0.1:5432/antcode",
+        REDIS_URL="",
+        WORKER_TRANSPORT_MODE="direct",
+        WORKER_DIRECT_SCOPED_REDIS=True,
+    )
+
+    assert settings.WORKER_DIRECT_SCOPED_REDIS is True
+
+
+def test_direct_worker_rejects_control_plane_redis_url():
+    with pytest.raises(ValueError, match="只能使用 WORKER_REDIS_URL"):
+        Settings(
+            DATABASE_URL="postgresql://antcode:secret@127.0.0.1:5432/antcode",
+            REDIS_URL="redis://127.0.0.1:6379/0",
+            WORKER_TRANSPORT_MODE="direct",
+            WORKER_DIRECT_SCOPED_REDIS=True,
+        )
+
+
+def test_direct_worker_still_requires_database_url():
+    """产物平面直连 PG，缺 DATABASE_URL 必须启动即失败，而不是取源码时才炸。"""
+    with pytest.raises(ValueError, match="DATABASE_URL 必须设置"):
+        Settings(
+            DATABASE_URL="",
+            REDIS_URL="",
+            WORKER_TRANSPORT_MODE="direct",
+            WORKER_DIRECT_SCOPED_REDIS=True,
+        )
+
+
+def test_scoped_redis_mode_rejects_gateway_worker():
+    with pytest.raises(ValueError, match="仅允许 Direct Worker"):
+        Settings(
+            DATABASE_URL="postgresql://antcode:secret@127.0.0.1:5432/antcode",
+            REDIS_URL="",
+            WORKER_TRANSPORT_MODE="gateway",
+            WORKER_DIRECT_SCOPED_REDIS=True,
         )
 
 

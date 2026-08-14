@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import pytest
+from antcode_core.application.services.lease_capability_snapshot import LeaseCapabilitySnapshot
+from antcode_core.application.services.lease_fenced_ready_publish import publish_ready_batch
 from antcode_core.application.services.lease_service import LeaseStore
 from antcode_worker.transport.redis.runtime_control_store import (
     create_or_validate_marker,
     persist_reply_once,
 )
 from redis.exceptions import NoPermissionError, ResponseError
+
+# B12: publish_ready_batch 的 Master 代际是必传参数。本用例断言的是 Worker ACL
+# 拒绝写 ready stream，代际取任意合法正整数即可，不影响被断言的失败原因。
+DISPATCH_EPOCH = 19
 
 
 async def assert_worker_lease_access(
@@ -19,9 +25,13 @@ async def assert_worker_lease_access(
     other_lease_key: str,
 ) -> tuple[str, str]:
     admin_store = LeaseStore(admin, namespace="antcode")
-    lease = await admin_store.grant(worker_id)
+    capabilities = {"task_types": ["code"]}
+    lease = await admin_store.grant(worker_id, capabilities=capabilities)
     lease_store = LeaseStore(client, namespace="antcode")
     assert await lease_store.is_current(worker_id, lease.lease_id)
+    capabilities_json = await admin.hget(admin_store.lease_key(worker_id), "capabilities_json")
+    snapshot = LeaseCapabilitySnapshot(lease.lease_id, capabilities_json, lease.sequence)
+    await _assert_ready_publish_denied(client, worker_id, snapshot)
     marker_key, reply_key = await _write_runtime_settlement(
         client,
         worker_id=worker_id,
@@ -39,6 +49,23 @@ async def assert_worker_lease_access(
     with pytest.raises(NoPermissionError):
         await client.hset(other_lease_key, mapping={"lease_id": "forbidden"})
     return marker_key, reply_key
+
+
+async def _assert_ready_publish_denied(
+    client,
+    worker_id: str,
+    snapshot: LeaseCapabilitySnapshot,
+) -> None:
+    with pytest.raises(ResponseError, match=r"ACL failure in script|No permissions to access a key"):
+        await publish_ready_batch(
+            client,
+            worker_id=worker_id,
+            snapshot=snapshot,
+            messages=[{"task_id": "forged-task"}],
+            scheduler_fencing_token=DISPATCH_EPOCH,
+            namespace="antcode",
+            worker_secret="redis-acl-ready-payload-secret-material-0001",
+        )
 
 
 async def _write_runtime_settlement(

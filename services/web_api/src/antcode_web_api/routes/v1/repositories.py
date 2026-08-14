@@ -9,6 +9,7 @@ from antcode_core.application.services.projects.repository_service import (
     RepositoryDeleteStatus,
     repository_service,
 )
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.common.security.auth import get_current_user_id
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.repository import (
@@ -23,6 +24,7 @@ from antcode_core.domain.schemas.repository import (
 )
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
 from antcode_web_api.routes.v1.runtime_access import (
     ensure_worker_access,
@@ -44,7 +46,11 @@ async def create_repository(
     current_user_id: int = Depends(get_current_user_id),
 ):
     repository = await repository_service.create_for_user(current_user_id, payload)
-    return success_response(_repository_response(repository))
+    return success_response(
+        _repository_response(repository),
+        message=Messages.CREATED_SUCCESS,
+        code=status.HTTP_201_CREATED,
+    )
 
 
 @router.put("/{repository_id}", response_model=BaseResponse[RepositoryResponse])
@@ -117,7 +123,11 @@ async def import_projects_from_repository(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return success_response(ImportProjectsResult(created=created))
+    return success_response(
+        ImportProjectsResult(created=created),
+        message=Messages.CREATED_SUCCESS,
+        code=status.HTTP_201_CREATED,
+    )
 
 
 async def _authorize_import_workers(items, user_id: int) -> None:
@@ -147,7 +157,7 @@ def _repository_response(repository) -> RepositoryResponse:
         credential_id=repository.credential_id,
         enabled=repository.enabled,
         last_scan_status=repository.last_scan_status,
-        last_scan_error=repository.last_scan_error,
+        last_scan_error=normalize_persisted_error_message(repository.last_scan_error),
         last_scan_result=repository.last_scan_result,
         last_scanned_at=repository.last_scanned_at,
         created_at=repository.created_at,

@@ -24,6 +24,7 @@ import shutil
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
 from antcode_worker.plugins.base import PluginBase
+from antcode_worker.runtime.dependency_process import DependencyLimits
 from antcode_worker.runtime.go_execution_policy import build_go_execution_env
 from antcode_worker.runtime.language_cache import inject_language_cache_env
 from antcode_worker.runtime.node_dependency_policy import install_node_dependencies
@@ -111,7 +112,11 @@ class CodePlugin(PluginBase):
             env = build_go_execution_env(cwd, env)
 
         # 执行前依赖装配（幂等，复用缓存）
-        await self._prepare_deps(language, cwd)
+        await self._prepare_deps(
+            language=language,
+            cwd=cwd,
+            limits=DependencyLimits.from_context(context),
+        )
 
         if language == "python":
             command, args = self._python_argv(context, payload)
@@ -214,25 +219,28 @@ class CodePlugin(PluginBase):
 
     # ---------- 依赖装配 ----------
 
-    async def _prepare_deps(self, language: str, cwd: str) -> None:
+    async def _prepare_deps(
+        self,
+        *,
+        language: str,
+        cwd: str,
+        limits: DependencyLimits,
+    ) -> None:
         """执行前装依赖；幂等，包管理器自身会跳过已装。
 
         - Python：假设 UV/mise 已装好 venv，此处 skip
-        - Node：`package-lock.json` → npm ci；`pnpm-lock.yaml` → pnpm install；
-                `yarn.lock` → yarn install；只有 package.json → npm install
-        - Go：prep 阶段（有网络）`go mod download` 预热工作区模块缓存；
-              沙箱内 `go run` 以 GOPROXY=off 离线使用缓存（P2 §4.4：
-              生产沙箱默认 --unshare-net，交给沙箱内解析必然失败）
+        - Node：在无网络 bwrap 内从 source bundle 的离线缓存安装
+        - Go：外部模块必须提交 vendor，沙箱内始终 GOPROXY=off
         - Java：`.jar` 打包型跳过；Maven 项目暂不自动装（需要 mvn dependency:copy-dependencies）
         """
         if language == "python":
             return
         if language in ("node_js", "node_ts"):
-            await install_node_dependencies(cwd)
+            await install_node_dependencies(cwd, limits=limits)
         if language == "go":
             from antcode_worker.runtime.go_execution_policy import install_go_dependencies
 
-            await install_go_dependencies(cwd)
+            await install_go_dependencies(cwd, limits=limits)
         # java 暂不自动装依赖
 
     # ---------- 通用工具 ----------

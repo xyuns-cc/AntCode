@@ -9,6 +9,7 @@ from antcode_core.application.services.scheduler.retry_configuration_service imp
     apply_retry_configuration,
 )
 from antcode_core.application.services.scheduler.retry_service import retry_service
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User, UserRole
 from antcode_core.domain.schemas.common import BaseResponse
@@ -288,7 +289,7 @@ async def get_retry_history(
             "retry_count": e.retry_count,
             "start_time": e.start_time.isoformat() if e.start_time else None,
             "end_time": e.end_time.isoformat() if e.end_time else None,
-            "error_message": e.error_message,
+            "error_message": normalize_persisted_error_message(e.error_message),
         }
         for e in executions
     ]

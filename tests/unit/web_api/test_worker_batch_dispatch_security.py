@@ -85,7 +85,7 @@ async def test_batch_dispatch_rejects_foreign_run_before_dispatch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_batch_dispatch_passes_verified_scope_to_dispatcher(monkeypatch):
+async def test_batch_dispatch_passes_verified_scope_to_dispatcher(monkeypatch, active_scheduler_authority):
     services_module = importlib.import_module("antcode_core.application.services.workers")
     _patch_owned_project_and_task(monkeypatch, run_task_id=7)
     dispatch = AsyncMock(return_value=BatchDispatchResult(success=True))
@@ -147,7 +147,7 @@ async def test_batch_dispatch_rejects_non_dispatchable_run_with_conflict(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_batch_dispatch_allows_redispatch_of_dispatch_failed_run(monkeypatch):
+async def test_batch_dispatch_allows_redispatch_of_dispatch_failed_run(monkeypatch, active_scheduler_authority):
     """派发层判 FAILED 且 runtime 从未启动、未被取消的 run 允许显式重派。"""
     services_module = importlib.import_module("antcode_core.application.services.workers")
     run = _make_run(7, run_status=TaskStatus.FAILED, dispatch_status=DispatchStatus.FAILED, runtime_status=None)

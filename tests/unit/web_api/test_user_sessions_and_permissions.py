@@ -5,6 +5,7 @@ import pytest
 from antcode_core.common.security.auth import get_current_super_admin
 from antcode_core.common.security.permissions import Permission
 from antcode_core.domain.models import UserRole
+from antcode_core.domain.schemas.user import UserBatchStatusRequest
 from antcode_web_api.routes.v1 import base, user_sessions, users
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -88,7 +89,7 @@ async def test_admin_cannot_batch_change_super_admin_status(monkeypatch, is_acti
 
     with pytest.raises(HTTPException) as exc_info:
         await users.batch_update_status(
-            {"user_ids": ["root-2"], "is_active": is_active},
+            UserBatchStatusRequest(user_ids=["root-2"], is_active=is_active),
             current_admin=SimpleNamespace(user_id=1, is_super_admin=False),
         )
 

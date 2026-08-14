@@ -1,18 +1,22 @@
-"""
-系统指标采集器
-
-采集 CPU/memory/disk/network 以及 Worker 特定指标（running slots, queue depth）。
-
-Requirements: 10.2, 10.4
-"""
+"""Collect host and Worker execution metrics."""
 
 import asyncio
 import platform
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from loguru import logger
+
+from antcode_worker.heartbeat.metric_models import (
+    CPUMetrics,
+    DiskMetrics,
+    MemoryMetrics,
+    NetworkMetrics,
+    SystemMetrics,
+    WorkerMetrics,
+)
+from antcode_worker.heartbeat.spider_stats import SpiderStatsCollectorMixin
 
 try:
     import psutil
@@ -28,147 +32,14 @@ if TYPE_CHECKING:
     from antcode_worker.engine.state import StateManager
 
 
-class EngineMetricsProvider(Protocol):
-    """引擎指标提供者协议"""
-
-    async def get_running_count(self) -> int:
-        """获取正在运行的任务数"""
-        ...
-
-    async def get_queue_depth(self) -> int:
-        """获取队列深度"""
-        ...
-
-
-@dataclass
-class CPUMetrics:
-    """CPU 指标"""
-
-    percent: float = 0.0  # CPU 使用率 (0-100)
-    count: int = 0  # CPU 核心数
-    load_avg_1m: float = 0.0  # 1 分钟负载
-    load_avg_5m: float = 0.0  # 5 分钟负载
-    load_avg_15m: float = 0.0  # 15 分钟负载
-
-
-@dataclass
-class MemoryMetrics:
-    """内存指标"""
-
-    percent: float = 0.0  # 内存使用率 (0-100)
-    total_mb: float = 0.0  # 总内存 (MB)
-    available_mb: float = 0.0  # 可用内存 (MB)
-    used_mb: float = 0.0  # 已用内存 (MB)
-
-
-@dataclass
-class DiskMetrics:
-    """磁盘指标"""
-
-    percent: float = 0.0  # 磁盘使用率 (0-100)
-    total_gb: float = 0.0  # 总容量 (GB)
-    free_gb: float = 0.0  # 可用容量 (GB)
-    used_gb: float = 0.0  # 已用容量 (GB)
-
-
-@dataclass
-class NetworkMetrics:
-    """网络指标"""
-
-    bytes_sent: int = 0  # 发送字节数
-    bytes_recv: int = 0  # 接收字节数
-    packets_sent: int = 0  # 发送包数
-    packets_recv: int = 0  # 接收包数
-    bytes_sent_rate: float = 0.0  # 发送速率 (bytes/s)
-    bytes_recv_rate: float = 0.0  # 接收速率 (bytes/s)
-
-
-@dataclass
-class WorkerMetrics:
-    """Worker 特定指标"""
-
-    running_slots: int = 0  # 正在运行的任务槽位
-    max_slots: int = 0  # 最大任务槽位
-    queue_depth: int = 0  # 队列深度
-    total_tasks_executed: int = 0  # 总执行任务数
-    last_heartbeat_ts: float = 0.0  # 上次心跳时间戳
-    reconnect_count: int = 0  # 重连次数
-
-
-@dataclass
-class SystemMetrics:
-    """系统指标汇总"""
-
-    cpu: CPUMetrics = field(default_factory=CPUMetrics)
-    memory: MemoryMetrics = field(default_factory=MemoryMetrics)
-    disk: DiskMetrics = field(default_factory=DiskMetrics)
-    network: NetworkMetrics = field(default_factory=NetworkMetrics)
-    worker: WorkerMetrics = field(default_factory=WorkerMetrics)
-    timestamp: float = field(default_factory=time.time)
-
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典"""
-        return {
-            "cpu": {
-                "percent": self.cpu.percent,
-                "count": self.cpu.count,
-                "load_avg_1m": self.cpu.load_avg_1m,
-                "load_avg_5m": self.cpu.load_avg_5m,
-                "load_avg_15m": self.cpu.load_avg_15m,
-            },
-            "memory": {
-                "percent": self.memory.percent,
-                "total_mb": self.memory.total_mb,
-                "available_mb": self.memory.available_mb,
-                "used_mb": self.memory.used_mb,
-            },
-            "disk": {
-                "percent": self.disk.percent,
-                "total_gb": self.disk.total_gb,
-                "free_gb": self.disk.free_gb,
-                "used_gb": self.disk.used_gb,
-            },
-            "network": {
-                "bytes_sent": self.network.bytes_sent,
-                "bytes_recv": self.network.bytes_recv,
-                "packets_sent": self.network.packets_sent,
-                "packets_recv": self.network.packets_recv,
-                "bytes_sent_rate": self.network.bytes_sent_rate,
-                "bytes_recv_rate": self.network.bytes_recv_rate,
-            },
-            "worker": {
-                "running_slots": self.worker.running_slots,
-                "max_slots": self.worker.max_slots,
-                "queue_depth": self.worker.queue_depth,
-                "total_tasks_executed": self.worker.total_tasks_executed,
-                "last_heartbeat_ts": self.worker.last_heartbeat_ts,
-                "reconnect_count": self.worker.reconnect_count,
-            },
-            "timestamp": self.timestamp,
-        }
-
-
-class SystemMetricsCollector:
-    """
-    系统指标采集器
-
-    采集 CPU/memory/disk/network 以及 Worker 特定指标。
-
-    Requirements: 10.2, 10.4
-    """
+class SystemMetricsCollector(SpiderStatsCollectorMixin):
+    """Collect CPU, memory, disk, network, and execution metrics."""
 
     def __init__(
         self,
         disk_path: str = "/",
         max_slots: int = 5,
     ):
-        """
-        初始化采集器
-
-        Args:
-            disk_path: 磁盘监控路径
-            max_slots: 最大任务槽位
-        """
         self._disk_path = disk_path
         self._max_slots = max_slots
 
@@ -177,8 +48,11 @@ class SystemMetricsCollector:
 
         # Worker 指标
         self._total_tasks_executed = 0
+        self._executed_project_ids: set[str] = set()
         self._last_heartbeat_ts = 0.0
         self._reconnect_count = 0
+        self._started_at = time.monotonic()
+        self._env_count_provider: Callable[[], int] | None = None
 
         # 引擎指标提供者
         self._state_manager: StateManager | None = None
@@ -200,10 +74,17 @@ class SystemMetricsCollector:
     def set_max_slots(self, max_slots: int) -> None:
         """设置最大任务槽位"""
         self._max_slots = max_slots
+        self._cached_metrics = None
+        self._last_collect_time = 0.0
 
-    def increment_tasks_executed(self) -> None:
-        """增加已执行任务计数"""
+    def set_env_count_provider(self, provider: Callable[[], int]) -> None:
+        self._env_count_provider = provider
+
+    def record_task_executed(self, project_id: str) -> None:
+        """Record one real execution and its non-empty project identity."""
         self._total_tasks_executed += 1
+        if project_id:
+            self._executed_project_ids.add(project_id)
 
     def update_heartbeat_ts(self, ts: float | None = None) -> None:
         """更新心跳时间戳"""
@@ -347,8 +228,12 @@ class SystemMetricsCollector:
 
         metrics.max_slots = self._max_slots
         metrics.total_tasks_executed = self._total_tasks_executed
+        metrics.project_count = len(self._executed_project_ids)
         metrics.last_heartbeat_ts = self._last_heartbeat_ts
         metrics.reconnect_count = self._reconnect_count
+        metrics.uptime_seconds = max(int(time.monotonic() - self._started_at), 0)
+        if self._env_count_provider is not None:
+            metrics.env_count = await asyncio.to_thread(self._env_count_provider)
 
         # 从状态管理器获取运行中任务数
         if self._state_manager:
@@ -366,47 +251,6 @@ class SystemMetricsCollector:
 
         return metrics
 
-    def get_metrics(self) -> dict[str, Any]:
-        """
-        获取指标（同步接口，用于心跳）
-
-        Returns:
-            指标字典
-        """
-        if not HAS_PSUTIL:
-            return {
-                "cpu": 0.0,
-                "memory": 0.0,
-                "disk": 0.0,
-                "runningTasks": 0,
-                "maxConcurrentTasks": self._max_slots,
-                "taskCount": self._total_tasks_executed,
-            }
-
-        try:
-            cpu = psutil.cpu_percent(interval=None)
-            mem = psutil.virtual_memory()
-            disk = psutil.disk_usage(self._disk_path)
-
-            return {
-                "cpu": round(cpu, 1),
-                "memory": round(mem.percent, 1),
-                "disk": round(disk.percent, 1),
-                "runningTasks": 0,  # 需要异步获取
-                "maxConcurrentTasks": self._max_slots,
-                "taskCount": self._total_tasks_executed,
-            }
-        except Exception as e:
-            logger.debug(f"获取指标失败: {e}")
-            return {
-                "cpu": 0.0,
-                "memory": 0.0,
-                "disk": 0.0,
-                "runningTasks": 0,
-                "maxConcurrentTasks": self._max_slots,
-                "taskCount": self._total_tasks_executed,
-            }
-
     def get_os_info(self) -> dict[str, str]:
         """
         获取操作系统信息
@@ -420,16 +264,6 @@ class SystemMetricsCollector:
             "python_version": platform.python_version(),
             "machine_arch": platform.machine(),
         }
-
-    def get_spider_stats(self) -> dict | None:
-        """
-        获取爬虫统计（占位）
-
-        Returns:
-            爬虫统计或 None
-        """
-        # 爬虫统计由 spider plugin 提供
-        return None
 
 
 # 全局实例
@@ -445,16 +279,7 @@ def init_metrics_collector(
     disk_path: str = "/",
     max_slots: int = 5,
 ) -> SystemMetricsCollector:
-    """
-    初始化全局指标采集器
-
-    Args:
-        disk_path: 磁盘监控路径
-        max_slots: 最大任务槽位
-
-    Returns:
-        指标采集器实例
-    """
+    """Initialize the process-wide metrics collector."""
     global _metrics_collector
     _metrics_collector = SystemMetricsCollector(
         disk_path=disk_path,

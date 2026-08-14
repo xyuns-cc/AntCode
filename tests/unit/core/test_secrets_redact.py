@@ -76,6 +76,36 @@ def test_sanitize_log_message_strips_all_sentinel_password_sources():
     assert "master_password=***" in output
 
 
+def test_sanitize_log_message_masks_plain_secret_assignment():
+    marker = "super-secret-456"
+
+    output = sanitize_log_message(f"SECRET={marker}")
+
+    assert marker not in output
+    assert output == "SECRET=***REDACTED***"
+
+
+@pytest.mark.parametrize(
+    "message, marker",
+    (
+        ("Cookie: session_id=session-marker-123; theme=dark", "session-marker-123"),
+        ("Set-Cookie: sid=session-cookie-456; HttpOnly", "session-cookie-456"),
+        ("session_secret=session-secret-789", "session-secret-789"),
+    ),
+)
+def test_sanitize_log_message_masks_cookie_and_session_credentials(message: str, marker: str):
+    output = sanitize_log_message(message)
+
+    assert marker not in output
+    assert "***REDACTED***" in output
+
+
+def test_sanitize_log_message_handles_large_plain_text_without_email_backtracking():
+    message = "x" * (256 * 1024)
+
+    assert sanitize_log_message(message) == message
+
+
 def test_settings_repr_excludes_connection_credentials_and_secrets():
     marker = "repr-secret-marker"
     configured = Settings(

@@ -1,12 +1,27 @@
 """任务调度服务 - 所有任务通过 Worker 节点执行
 
 P2-#33：原文件 28+ 处 inline import（``from antcode_core...``）；这些
-模块本身不会与 scheduler_loop 形成循环依赖（``Worker / Task / TaskRun /
+模块本身不会与 scheduler_loop 形成循环依赖（``Task / TaskRun /
 execution_status_service`` 都安全），统一提到顶部，减少调用路径热点。
+
+本模块只承担 Master 进程内的调度职责；面向 Web 的读模型（带 ``user_id``
+权限校验与分页 DTO 组装）由 core 的 ``scheduler_service`` 提供，此处不再
+保留同名副本。
 
 P1-#16：``_execute_task_internal`` 原 334 行，吃光阅读预算。拆成 4 个
 私有方法 + ``_track_execution`` ``contextmanager`` 把 ``currently_running``
 计数收敛，避免提前 ``return`` 时漏减（P2-#35）。
+
+实时状态帧的边界：``run_status`` 实时帧只有一个发布者——
+``ingester/run_status_publisher``，且只由 Worker 结果回传
+（``ingester/result_loop``）触发。调度面（本模块 /
+``scheduler_failure_wiring`` / ``retry_dispatch_recovery``）**不发布**实时帧，
+因此派发开始、派发成功、派发失败、派发超时都不会产生推送帧；前端看到这些
+状态靠 web_api SSE 存活连接里 PG 权威的状态兜底
+（``streams/log_stream_active._terminal_status_frame``）。这里曾有一个
+``_push_execution_status`` 空桩让三处调用点"看起来推送了状态"，已删除，
+不要再加回来：现有 ``run_status`` 帧只承载 ``status/progress/message``，
+装不下调度面想推的 worker_id / distributed / task_name 等字段。
 """
 
 import asyncio
@@ -14,7 +29,9 @@ import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.lease_fenced_ready_publish import (
+    SchedulerDispatchFenceError,
+)
 from antcode_core.application.services.logs.task_log_service import task_log_service
 from antcode_core.application.services.monitoring import monitoring_service
 from antcode_core.application.services.projects.relation_service import relation_service
@@ -22,11 +39,8 @@ from antcode_core.application.services.scheduler.execution_status_service import
     execution_status_service,
 )
 from antcode_core.common.config import settings
-from antcode_core.domain.models import Worker
 from antcode_core.domain.models.enums import (
     DispatchStatus,
-    ProjectType,
-    ScheduleType,
     TaskStatus,
 )
 from antcode_core.domain.models.task import Task
@@ -38,23 +52,60 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
-from tortoise.expressions import Q
-from tortoise.functions import Avg, Count, Max
 from tortoise.transactions import in_transaction
 
 from antcode_master.control.dispatcher_loop import spider_task_dispatcher
+from antcode_master.control.durable_schedule import (
+    ONE_TIME_SCHEDULE_TYPES,
+    DurableScheduleRunner,
+    create_task_trigger,
+)
+from antcode_master.control.execution_claim import (
+    ExecutionClaimDependencies,
+    ExecutionClaimRequest,
+    claim_task_run,
+)
+from antcode_master.control.execution_parameters import (
+    RecoveryExecutionOptions,
+    effective_execution_params,
+)
+from antcode_master.control.recovery_execution import (
+    lock_interrupted_source,
+    transition_interrupted_source,
+)
 from antcode_master.control.result_data_persistence import merge_dispatch_result_data
+from antcode_master.control.retry_decision_history import retry_was_decided
+from antcode_master.control.retry_dispatch_recovery import (
+    count_active_runs,
+    is_recoverable_retry_run,
+    resume_retry_run,
+    run_prepared_execution,
+    task_max_instances,
+    validate_existing_retry_run,
+)
 from antcode_master.control.retry_intent_guard import (
     RetryExecutionOptions,
     RetryIntent,
+    RetryTargetInvalidError,
     consume_retry_intent,
     validate_retry_source,
 )
+from antcode_master.control.scheduler_authority import (
+    SchedulerAuthorityLost,
+    activate_scheduler_authority,
+    claim_dispatch,
+    dispatch_with_scheduler_epoch,
+    require_scheduler_authority,
+)
+from antcode_master.control.scheduler_dispatch import dispatch_prepared_run
 
 # retry intent 数据结构与同事务校验/消费原语迁至 retry_intent_guard
 # (P1-FN-05);这里 re-export 维持既有 import 路径(retry_loop / tests)。
-from antcode_master.control.trigger_idempotency import schedule_idempotent_trigger
-from antcode_master.leader import ensure_leader
+from antcode_master.control.trigger_idempotency import (
+    execute_idempotent_trigger,
+    resume_idempotent_trigger,
+)
+from antcode_master.leader import ensure_leader, require_fencing_token
 
 RETRY_RUN_NAMESPACE = uuid.UUID("cb99efbb-cc79-4aaf-a3db-6d3beaa98d7f")
 
@@ -74,8 +125,6 @@ class SchedulerService:
                 "misfire_grace_time": 30,  # 错过执行的宽限时间（秒）
             },
         )
-        self.running_tasks = {}
-
         # 并发控制 - 限制同时执行的任务数量
         self.concurrency_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TASKS)
         self.task_execution_stats = {
@@ -90,6 +139,7 @@ class SchedulerService:
         # P1-FN-05: leader 激活失败标志（readiness 探针读取）与坏任务清单。
         self._activation_failed = False
         self._task_load_failures: list[int] = []
+        self._durable_schedule = DurableScheduleRunner(self)
 
     @property
     def activation_failed(self) -> bool:
@@ -138,9 +188,13 @@ class SchedulerService:
     async def _activate_scheduler(self) -> None:
         """成为 leader 时启动 APScheduler + 装载 jobs（幂等）。"""
         try:
+            token = await require_fencing_token()
+            await activate_scheduler_authority(token)
             if not self.scheduler.running:
                 self.scheduler.start()
             await self._load_active_tasks()
+            self._durable_schedule.install_job()
+            await self._durable_schedule.recover_due()
             await self._add_monitoring_jobs()
             await self._add_worker_heartbeat_job()
             self._scheduler_ready = True
@@ -174,467 +228,6 @@ class SchedulerService:
             logger.info("已放弃 Leader，调度器进入 standby")
         except Exception:
             logger.exception("停用调度器失败")
-
-    async def create_task(self, task_data, project_type, user_id, internal_project_id=None, specified_worker_id=None):
-        """创建调度任务"""
-        try:
-            # 使用传入的内部 project_id，或从 task_data 中获取
-            project_id = internal_project_id if internal_project_id is not None else task_data.project_id
-
-            # 处理 Worker ID
-            worker_internal_id = None
-            if specified_worker_id:
-                worker = await Worker.filter(public_id=specified_worker_id).first()
-                if worker:
-                    worker_internal_id = worker.id
-                else:
-                    raise ValueError("指定执行 Worker 不存在")
-
-            # 创建任务
-            task = await Task.create(
-                **task_data.model_dump(exclude={"project_id"}),
-                project_id=project_id,
-                task_type=project_type,
-                user_id=user_id,
-                specified_worker_id=worker_internal_id,
-            )
-
-            # 添加到调度器
-            if task.is_active:
-                await self.add_task(task)
-
-            logger.info(f"任务创建成功: {task.name} (ID: {task.id})")
-            return task
-
-        except Exception:
-            logger.exception("创建任务失败")
-            raise
-
-    async def get_user_tasks(self, user_id, status=None, is_active=None, page=1, size=20, specified_worker_id=None):
-        """获取用户任务列表（优化版本）"""
-        try:
-            # 如果user_id为None，表示管理员查看所有任务
-            query = Task.all() if user_id is None else Task.filter(user_id=user_id)
-
-            if status is not None:
-                query = query.filter(status=status)
-            if is_active is not None:
-                query = query.filter(is_active=is_active)
-
-            # Worker 筛选
-            if specified_worker_id:
-                worker = await Worker.filter(public_id=specified_worker_id).first()
-                if worker:
-                    query = query.filter(specified_worker_id=worker.id)
-                else:
-                    raise ValueError("指定执行 Worker 不存在")
-
-            total = await query.count()
-            offset = (page - 1) * size
-            tasks = await query.order_by("-created_at").offset(offset).limit(size)
-
-            # 批量获取创建者用户名和 public_id
-            user_ids = list({t.user_id for t in tasks if t.user_id})
-            users_map = await QueryHelper.batch_get_user_info(user_ids)
-
-            # 批量获取项目的 public_id
-            project_ids = list({t.project_id for t in tasks if t.project_id})
-            projects_map = await QueryHelper.batch_get_project_public_ids(project_ids)
-
-            # 批量获取指定 Worker 的 public_id 和名称
-            worker_ids = list({t.specified_worker_id for t in tasks if t.specified_worker_id})
-            workers_map = await QueryHelper.batch_get_worker_info(worker_ids)
-
-            # 为任务添加创建者、项目和 Worker 信息
-            for task in tasks:
-                user_info = users_map.get(task.user_id, {})
-                task.created_by_username = user_info.get("username")
-                task.created_by_public_id = user_info.get("public_id")
-                task.project_public_id = projects_map.get(task.project_id)
-                worker_info = workers_map.get(task.specified_worker_id, {})
-                task.specified_worker_name = worker_info.get("name")
-                task.specified_worker_public_id = worker_info.get("public_id")
-
-            return {
-                "tasks": tasks,
-                "total": total,
-                "page": page,
-                "size": size,
-                "pages": (total + size - 1) // size,
-            }
-        except Exception:
-            logger.exception("获取用户任务列表失败")
-            raise
-
-    async def get_task_by_id(self, task_id, user_id):
-        """根据ID获取任务（支持 public_id 和内部 id）"""
-        from antcode_core.domain.models import Project
-
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return None
-
-            # 获取创建者信息
-            users_map = await QueryHelper.batch_get_user_info([task.user_id] if task.user_id else [])
-            user_info = users_map.get(task.user_id, {})
-            task.created_by_username = user_info.get("username")
-            task.created_by_public_id = user_info.get("public_id")
-
-            # 获取项目的 public_id 和执行策略配置
-            project = await Project.get_or_none(id=task.project_id)
-            task.project_public_id = project.public_id if project else None
-
-            # 填充项目执行策略信息
-            if project:
-                task.project_execution_strategy = project.execution_strategy
-                task.project_bound_worker_id = project.bound_worker_id
-                # 获取项目绑定 Worker 名称
-                if project.bound_worker_id:
-                    bound_worker = await Worker.get_or_none(id=project.bound_worker_id)
-                    task.project_bound_worker_name = bound_worker.name if bound_worker else None
-                    task.project_bound_worker_public_id = bound_worker.public_id if bound_worker else None
-                else:
-                    task.project_bound_worker_name = None
-                    task.project_bound_worker_public_id = None
-
-            # 填充任务指定 Worker 名称
-            if task.specified_worker_id:
-                specified_worker = await Worker.get_or_none(id=task.specified_worker_id)
-                task.specified_worker_name = specified_worker.name if specified_worker else None
-                task.specified_worker_public_id = specified_worker.public_id if specified_worker else None
-            else:
-                task.specified_worker_name = None
-                task.specified_worker_public_id = None
-
-            return task
-        except Exception:
-            logger.exception("获取任务失败")
-            raise
-
-    async def update_task(self, task_id, task_data, user_id):
-        """更新任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return None
-
-            # 更新字段
-            update_data = task_data.model_dump(exclude_unset=True)
-            for field, value in update_data.items():
-                setattr(task, field, value)
-
-            await task.save()
-
-            # 如果任务状态改变，更新调度器（使用内部 ID）
-            if "is_active" in update_data:
-                if task.is_active:
-                    await self.add_task(task)
-                else:
-                    await self.remove_task(task.id)
-
-            logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
-            return task
-
-        except Exception:
-            logger.exception("更新任务失败")
-            raise
-
-    async def delete_task(self, task_id, user_id):
-        """删除任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return False
-
-            # 从调度器移除（使用内部 ID）
-            await self.remove_task(task.id)
-
-            # 级联删除执行记录
-            deleted_count = await TaskRun.filter(task_id=task.id).delete()
-            if deleted_count > 0:
-                logger.info(f"已删除任务 {task.id} 的 {deleted_count} 条执行记录")
-
-            # 删除数据库记录
-            await task.delete()
-
-            logger.info(f"任务删除成功: {task.name} (ID: {task.id})")
-            return True
-
-        except Exception:
-            logger.exception("删除任务失败")
-            raise
-
-    async def get_task_executions(
-        self,
-        task_id,
-        user_id,
-        status=None,
-        start_date=None,
-        end_date=None,
-        page=1,
-        size=20,
-    ):
-        """获取任务执行记录（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                raise ValueError("任务不存在或无权访问")
-
-            # 使用内部 ID 查询执行记录
-            query = TaskRun.filter(task_id=task.id)
-
-            if status is not None:
-                query = query.filter(status=status)
-            if start_date:
-                query = query.filter(start_time__gte=start_date)
-            if end_date:
-                query = query.filter(start_time__lte=end_date)
-
-            total = await query.count()
-            offset = (page - 1) * size
-            executions = await query.offset(offset).limit(size).order_by("-start_time")
-
-            # 为每个执行记录添加任务的 public_id
-            for execution in executions:
-                execution.task_public_id = task.public_id
-
-            worker_ids = list({e.worker_id for e in executions if e.worker_id})
-            workers_map = await QueryHelper.batch_get_worker_info(worker_ids)
-            for execution in executions:
-                worker_info = workers_map.get(execution.worker_id, {})
-                execution.worker_public_id = worker_info.get("public_id")
-
-            return {
-                "executions": executions,
-                "total": total,
-                "page": page,
-                "size": size,
-                "pages": (total + size - 1) // size,
-            }
-        except Exception:
-            logger.exception("获取任务执行记录失败")
-            raise
-
-    async def get_execution_by_id(self, run_id):
-        """根据ID获取执行记录"""
-        try:
-            return await TaskRun.get_or_none(run_id=run_id)
-        except Exception:
-            logger.exception("获取执行记录失败")
-            raise
-
-    async def get_task_stats(self, task_id, user_id):
-        """获取任务统计信息（支持 public_id）
-
-        P1-#18：原实现 ``.all()`` 拉表后 in-memory ``sum(1 for ...)``，
-        N 大时拖慢响应。改为 Tortoise ``annotate(Count/Avg/Max)`` 单次
-        SQL 聚合 + 1 次查询最后一条 ``TaskRun``。
-        """
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return None
-
-            # 单次聚合 SQL：count + 各 status 计数 + 平均时长 + 最近 start_time
-            agg = (
-                await TaskRun.filter(task_id=task.id)
-                .annotate(
-                    total=Count("id"),
-                    success_count=Count("id", _filter=Q(status=TaskStatus.SUCCESS)),
-                    failed_count=Count("id", _filter=Q(status=TaskStatus.FAILED)),
-                    running_count=Count("id", _filter=Q(status=TaskStatus.RUNNING)),
-                    avg_duration=Avg("duration_seconds"),
-                    last_start_time=Max("start_time"),
-                )
-                .first()
-                .values(
-                    "total",
-                    "success_count",
-                    "failed_count",
-                    "running_count",
-                    "avg_duration",
-                    "last_start_time",
-                )
-            )
-
-            total = (agg or {}).get("total") or 0
-            if total == 0:
-                return {
-                    "task_id": task_id,
-                    "total_executions": 0,
-                    "success_count": 0,
-                    "failed_count": 0,
-                    "running_count": 0,
-                    "success_rate": 0.0,
-                    "avg_duration": 0.0,
-                    "last_execution": None,
-                }
-
-            success_count = agg.get("success_count") or 0
-            failed_count = agg.get("failed_count") or 0
-            running_count = agg.get("running_count") or 0
-            avg_duration = float(agg.get("avg_duration") or 0.0)
-            last_start_time = agg.get("last_start_time")
-
-            # 取最近一条 TaskRun 拼 last_execution（单次小查询，索引命中）
-            last_execution_payload = None
-            if last_start_time:
-                last_run = await TaskRun.filter(task_id=task.id, start_time=last_start_time).first()
-                if last_run:
-                    last_execution_payload = {
-                        "run_id": last_run.run_id,
-                        "status": last_run.status,
-                        "start_time": last_run.start_time,
-                        "end_time": last_run.end_time,
-                    }
-
-            return {
-                "task_id": task_id,
-                "total_executions": total,
-                "success_count": success_count,
-                "failed_count": failed_count,
-                "running_count": running_count,
-                "success_rate": success_count / total * 100,
-                "avg_duration": avg_duration,
-                "last_execution": last_execution_payload,
-            }
-        except Exception:
-            logger.exception("获取任务统计失败")
-            raise
-
-    async def verify_admin_permission(self, user_id):
-        """验证管理员权限"""
-        try:
-            return await QueryHelper.is_admin(user_id)
-        except Exception:
-            logger.exception("验证管理员权限失败")
-            return False
-
-    async def get_user_task_ids(self, user_id):
-        """获取用户所有任务ID列表"""
-        try:
-            tasks = await Task.filter(user_id=user_id).all()
-            return [task.id for task in tasks]
-        except Exception:
-            logger.exception("获取用户任务ID失败")
-            return []
-
-    async def get_task_executions_by_task_ids(self, task_ids):
-        """根据任务ID列表获取所有执行记录"""
-        try:
-            if not task_ids:
-                return []
-            return await TaskRun.filter(task_id__in=task_ids).all()
-        except Exception:
-            logger.exception("获取任务执行记录失败")
-            return []
-
-    async def pause_task_by_user(self, task_id, user_id):
-        """暂停用户任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return False
-
-            try:
-                await self.pause_task(task.id)  # 使用内部 ID
-            except ValueError:
-                return False
-            return True
-        except Exception:
-            logger.exception("暂停任务失败")
-            raise
-
-    async def resume_task_by_user(self, task_id, user_id):
-        """恢复用户任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return False
-
-            try:
-                await self.resume_task(task.id)  # 使用内部 ID
-            except ValueError:
-                return False
-            return True
-        except Exception:
-            logger.exception("恢复任务失败")
-            raise
-
-    async def trigger_task_by_user(self, task_id, user_id):
-        """立即触发用户任务（支持 public_id）"""
-        try:
-            # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
-            task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
-
-            if not task:
-                return False
-
-            await self.trigger_task(task.id)  # 使用内部 ID
-            return True
-        except Exception:
-            logger.exception("触发任务失败")
-            raise
-
-    async def get_execution_with_permission(self, run_id, user_id):
-        """获取执行记录（带权限验证，支持 public_id 和 run_id UUID）"""
-        try:
-            # 支持多种查询方式
-            execution = None
-
-            run_id_str = str(run_id)
-
-            # 先尝试作为 run_id
-            execution = await TaskRun.get_or_none(run_id=run_id_str)
-
-            # 如果没找到，尝试作为 public_id
-            if not execution and len(run_id_str) <= 32:
-                execution = await TaskRun.get_or_none(public_id=run_id_str)
-
-            if not execution:
-                return None
-
-            # 检查用户是否为管理员
-            is_admin = await QueryHelper.is_admin(user_id)
-
-            if is_admin:
-                # 管理员可以查看所有执行记录
-                # 添加任务的 public_id
-                task = await Task.get_or_none(id=execution.task_id)
-                execution.task_public_id = task.public_id if task else None
-                if execution.worker_id:
-                    worker = await Worker.get_or_none(id=execution.worker_id)
-                    execution.worker_public_id = worker.public_id if worker else None
-                return execution
-            else:
-                # 普通用户只能查看自己任务的执行记录
-                task = await Task.get_or_none(id=execution.task_id, user_id=user_id)
-                if not task:
-                    return None
-
-                execution.task_public_id = task.public_id
-                if execution.worker_id:
-                    worker = await Worker.get_or_none(id=execution.worker_id)
-                    execution.worker_public_id = worker.public_id if worker else None
-                return execution
-        except Exception:
-            logger.exception("获取执行记录失败")
-            raise
 
     async def shutdown(self):
         """关闭调度器 + 停 K3 watcher。"""
@@ -679,6 +272,9 @@ class SchedulerService:
     async def add_task(self, task):
         """添加任务到调度器"""
         try:
+            if task.schedule_type in ONE_TIME_SCHEDULE_TYPES:
+                await self._durable_schedule.register(task)
+                return
             # 创建触发器
             trigger = self._create_trigger(task)
 
@@ -702,11 +298,7 @@ class SchedulerService:
 
     @staticmethod
     def _task_max_instances(task) -> int:
-        try:
-            value = int(getattr(task, "max_instances", 1) or 1)
-        except (TypeError, ValueError):
-            value = 1
-        return max(1, value)
+        return task_max_instances(task)
 
     async def remove_task(self, task_id):
         """从调度器移除任务"""
@@ -757,16 +349,27 @@ class SchedulerService:
             logger.exception("恢复任务失败")
             raise
 
-    async def trigger_task(self, task_id, idempotency_key: str | None = None):
+    async def trigger_task(
+        self,
+        task_id,
+        idempotency_key: str | None = None,
+        *,
+        recovery_options: RecoveryExecutionOptions | None = None,
+    ):
         """立即触发任务。P1-DB-01: 带 ``idempotency_key``（= outbox_id）时
         走确定性 run_id/job id 路径（``trigger_idempotency``），重放折叠到
         同一 run；无 key 的进程内直调路径保持旧行为。"""
         try:
             if idempotency_key:
-                await schedule_idempotent_trigger(
-                    self.scheduler, self._execute_task, task_id, idempotency_key=idempotency_key
+                return await execute_idempotent_trigger(
+                    self._execute_task,
+                    self._resume_idempotent_trigger,
+                    task_id,
+                    idempotency_key=idempotency_key,
+                    recovery_options=recovery_options,
                 )
-                return
+            if recovery_options is not None:
+                raise ValueError("恢复执行必须使用 idempotency_key")
             # 检查任务是否存在于调度器中
             job = self.scheduler.get_job(str(task_id))
             if job:
@@ -800,13 +403,16 @@ class SchedulerService:
 
         P1-FN-10: task busy(concurrent instance 已达上限)时 raise
         RetryClaimBusyError 而不是通用 RuntimeError,让 retry_loop 能识别
-        "合法 busy"并 requeue 不计入 MAX_CLAIM_ATTEMPTS —— 避免配置允许
-        重试的任务因为 upstream 一直忙就被 poison 判死丢失 retry intent。
+        "合法 busy"并使用更长延迟重排。
         """
         run_id = str(uuid.uuid5(RETRY_RUN_NAMESPACE, f"{intent.source_run_id}:{intent.retry_count}"))
         existing = await TaskRun.get_or_none(run_id=run_id)
         if existing is not None:
-            return run_id
+            validate_existing_retry_run(existing, intent)
+            if not is_recoverable_retry_run(existing):
+                return run_id
+            async with self.concurrency_semaphore:
+                return await self._resume_retry_run(intent, existing)
         options = RetryExecutionOptions(
             source_run_id=intent.source_run_id,
             retry_count=intent.retry_count,
@@ -821,24 +427,32 @@ class SchedulerService:
             raise RetryClaimBusyError(f"retry run 未创建(可能 task busy): source_run_id={intent.source_run_id}")
         return created_run_id
 
+    async def _resume_retry_run(self, intent: RetryIntent, execution) -> str:
+        return await resume_retry_run(self, intent, execution)
+
     def _create_trigger(self, task):
         """创建触发器"""
-        if task.schedule_type == ScheduleType.CRON:
-            return CronTrigger.from_crontab(task.cron_expression)
-        elif task.schedule_type == ScheduleType.INTERVAL:
-            return IntervalTrigger(seconds=task.interval_seconds)
-        elif task.schedule_type == ScheduleType.DATE:
-            return DateTrigger(run_date=task.scheduled_time)
-        elif task.schedule_type == ScheduleType.ONCE:
-            return DateTrigger(run_date=task.scheduled_time or datetime.now())
-        else:
-            raise ValueError(f"不支持的调度类型: {task.schedule_type}")
+        return create_task_trigger(task)
 
-    async def _execute_task(self, task_id, fixed_run_id: str | None = None):
+    async def _execute_task(
+        self,
+        task_id,
+        *,
+        fixed_run_id: str | None = None,
+        scheduler_fencing_token: int | None = None,
+        recovery_options: RecoveryExecutionOptions | None = None,
+    ):
         """执行任务的核心方法（带并发控制）"""
-        # 使用信号量控制并发数
         async with self.concurrency_semaphore:
-            await self._execute_task_internal(task_id, fixed_run_id=fixed_run_id)
+            return await self._execute_task_internal(
+                task_id,
+                fixed_run_id=fixed_run_id,
+                scheduler_fencing_token=scheduler_fencing_token,
+                recovery_options=recovery_options,
+            )
+
+    async def _resume_idempotent_trigger(self, task_id: int, execution) -> str:
+        return await resume_idempotent_trigger(self, task_id, execution)
 
     @contextlib.contextmanager
     def _track_execution(self):
@@ -861,6 +475,8 @@ class SchedulerService:
         retry_options: RetryExecutionOptions | None = None,
         *,
         fixed_run_id: str | None = None,
+        scheduler_fencing_token: int | None = None,
+        recovery_options: RecoveryExecutionOptions | None = None,
     ) -> str | None:
         """执行任务的内部实现（瘦壳）。
 
@@ -870,9 +486,7 @@ class SchedulerService:
         U1: 入口加 leader 闸口 —— 过去 leader 失效后 APScheduler 仍可能
         触发已排好的 job,这里直接放弃,避免两个 Master 同时跑同一个任务。
         """
-        if not await ensure_leader():
-            logger.warning(f"非 Leader,放弃任务执行: task_id={task_id}(可能 leader 在 in-flight 期间发生切换)")
-            return None
+        token = scheduler_fencing_token if scheduler_fencing_token is not None else await require_fencing_token()
 
         run_id = retry_options.run_id if retry_options is not None else (fixed_run_id or str(uuid.uuid4()))
 
@@ -882,75 +496,47 @@ class SchedulerService:
         logger.debug(f"调度入口绑定 trace: task_id={task_id} run_id={run_id} traceparent={trace_ids.traceparent}")
 
         with self._track_execution():
-            return await self._run_one_execution(task_id, run_id, retry_options)
+            return await self._run_one_execution(
+                task_id,
+                run_id,
+                retry_options,
+                scheduler_fencing_token=token,
+                recovery_options=recovery_options,
+            )
 
     async def _run_one_execution(
         self,
         task_id,
         run_id,
         retry_options: RetryExecutionOptions | None = None,
+        *,
+        scheduler_fencing_token: int | None = None,
+        recovery_options: RecoveryExecutionOptions | None = None,
     ) -> str | None:
-        """单次执行的主调度：准备 → 分发 → 处理结果 / 异常 → 收尾。"""
-        task = None
-        execution = None
-        result = None
-        result_success = None
-        distributed_pending = False
+        """Prepare a new run, then execute the shared dispatch pipeline."""
+        token = scheduler_fencing_token if scheduler_fencing_token is not None else await require_fencing_token()
+        prepared = await self._prepare_execution(
+            task_id,
+            run_id,
+            retry_options,
+            scheduler_fencing_token=token,
+            recovery_options=recovery_options,
+        )
+        if prepared is None:
+            return None
+        return await self._run_prepared_execution(task_id, prepared)
 
-        try:
-            prepared = await self._prepare_execution(task_id, run_id, retry_options)
-            if prepared is None:
-                return None
-
-            task, project, project_detail, execution, now = prepared
-
-            # 推送开始 + 写日志
-            await self._push_execution_status(
-                execution,
-                {
-                    "status": "RUNNING",
-                    "message": "任务开始执行",
-                    "task_name": task.name,
-                    "start_time": now.isoformat(),
-                },
-            )
-            await self._log_execution(execution, "INFO", f"开始执行任务: {task.name}")
-
-            # 分发并拿结果
-            result = await self._dispatch_and_run(task, project, project_detail, execution, run_id, now)
-
-            # 处理结果
-            if result:
-                result_success, distributed_pending = await self._record_dispatch_result(execution, run_id, result)
-
-                if result_success is False and task and execution and task.retry_count > 0:
-                    if execution.retry_count < task.retry_count:
-                        await self._schedule_retry(task, execution)
-
-        except TimeoutError:
-            await self._handle_failure(execution, run_id, "任务执行超时", status=TaskStatus.TIMEOUT)
-
-        except Exception as e:
-            logger.exception(f"执行任务失败: task_id={task_id} run_id={run_id}")
-            if execution is None:
-                raise
-            await self._handle_failure(execution, run_id, str(e), status=TaskStatus.FAILED)
-
-        finally:
-            await self._finalize_stats(
-                task=task,
-                task_id=task_id,
-                run_id=run_id,
-                result_success=result_success,
-                distributed_pending=distributed_pending,
-            )
-        return execution.run_id if execution is not None else None
+    async def _run_prepared_execution(self, task_id, prepared) -> str:
+        return await run_prepared_execution(self, task_id, prepared)
 
     async def _prepare_execution(
         self,
         task_id,
         run_id,
         retry_options: RetryExecutionOptions | None = None,
+        *,
+        scheduler_fencing_token: int | None = None,
+        recovery_options: RecoveryExecutionOptions | None = None,
     ):
         """加载 task/project，做幂等校验，新建 TaskRun。
 
@@ -959,13 +545,24 @@ class SchedulerService:
         task_info = await relation_service.get_task_with_project(task_id)
         if not task_info:
             logger.error(f"任务 {task_id} 不存在")
+            if retry_options is not None:
+                async with in_transaction("default") as conn:
+                    await self._validate_retry_source(conn, task_id, retry_options)
+                raise RetryTargetInvalidError(f"retry target task 不存在: task_id={task_id}")
             return None
 
         task = task_info["task"]
         project = task_info["project"]
         project_detail = task_info["project_detail"]
 
-        claimed = await self._claim_task_run(task.id, run_id, retry_options)
+        token = scheduler_fencing_token if scheduler_fencing_token is not None else await require_fencing_token()
+        claimed = await self._claim_task_run(
+            task.id,
+            run_id,
+            retry_options,
+            scheduler_fencing_token=token,
+            recovery_options=recovery_options,
+        )
         if claimed is None:
             return None
         task, execution = claimed
@@ -974,12 +571,6 @@ class SchedulerService:
         logger.info(f"开始执行任务 {task.name} (当前并发: {current_running}/{settings.MAX_CONCURRENT_TASKS})")
 
         now = datetime.now(UTC)
-        self.running_tasks[run_id] = {
-            "task_id": task_id,
-            "task_name": task.name,
-            "start_time": now,
-        }
-
         return task, project, project_detail, execution, now
 
     async def _claim_task_run(
@@ -987,68 +578,32 @@ class SchedulerService:
         task_id: int,
         run_id: str,
         retry_options: RetryExecutionOptions | None = None,
+        *,
+        scheduler_fencing_token: int | None = None,
+        recovery_options: RecoveryExecutionOptions | None = None,
     ):
         """Atomically claim an idle Task and create its TaskRun."""
-        busy_statuses = (
-            TaskStatus.RUNNING,
-            TaskStatus.DISPATCHING,
-            TaskStatus.QUEUED,
+        request = ExecutionClaimRequest(
+            task_id=task_id,
+            run_id=run_id,
+            retry_options=retry_options,
+            recovery_options=recovery_options,
+            scheduler_fencing_token=scheduler_fencing_token,
         )
-        async with in_transaction("default") as conn:
-            if retry_options is not None:
-                await self._validate_retry_source(conn, task_id, retry_options)
-            task = await Task.filter(id=task_id).using_db(conn).select_for_update().first()
-            if task is None:
-                return None
-            if not task.is_active:
-                logger.warning(f"任务 {task.name} 未激活，跳过执行")
-                return None
-            if task.status in busy_statuses:
-                # P2 §4.4: max_instances 支持 —— busy 状态下按活跃 run 数判定，
-                # 允许配置了并发实例的任务在旧 run 未结束时再次执行。
-                # max_instances<=1 保持原语义（busy 即跳过），不做额外查询。
-                allowed = self._task_max_instances(task)
-                if allowed <= 1:
-                    logger.warning(f"任务 {task.name} 正在执行中 (状态: {task.status})，跳过重复触发")
-                    return None
-                active_runs = (
-                    await TaskRun.filter(
-                        task_id=task.id,
-                        status__in=list(busy_statuses) + [TaskStatus.PENDING],
-                    )
-                    .using_db(conn)
-                    .count()
-                )
-                if active_runs >= allowed:
-                    logger.warning(f"任务 {task.name} 活跃实例已达上限 ({active_runs}/{allowed})，跳过重复触发")
-                    return None
-            updated = (
-                await Task.filter(id=task.id)
-                .using_db(conn)
-                .update(
-                    status=TaskStatus.QUEUED,
-                )
-            )
-            if updated != 1:
-                return None
-            retry_count = retry_options.retry_count if retry_options is not None else 0
-            result_data = None
-            if retry_options is not None:
-                result_data = {"retry_source_run_id": retry_options.source_run_id}
-                await self._consume_retry_intent(conn, retry_options)
-            execution = await TaskRun.create(
-                run_id=run_id,
-                task_id=task.id,
-                status=TaskStatus.QUEUED,
-                dispatch_status=DispatchStatus.PENDING,
-                runtime_status=None,
-                start_time=None,
-                retry_count=retry_count,
-                result_data=result_data,
-                using_db=conn,
-            )
-            task.status = TaskStatus.QUEUED
-            return task, execution
+        dependencies = ExecutionClaimDependencies(
+            task_model=Task,
+            task_run_model=TaskRun,
+            transaction_factory=in_transaction,
+            require_fencing_token=require_fencing_token,
+            require_scheduler_authority=require_scheduler_authority,
+            lock_interrupted_source=lock_interrupted_source,
+            transition_interrupted_source=transition_interrupted_source,
+        )
+        return await claim_task_run(self, request, dependencies)
+
+    @staticmethod
+    async def _count_active_runs(conn, task_id: int) -> int:
+        return await count_active_runs(conn, task_id)
 
     @staticmethod
     async def _consume_retry_intent(conn, options: RetryExecutionOptions) -> None:
@@ -1060,51 +615,8 @@ class SchedulerService:
 
     async def _dispatch_and_run(self, task, project, project_detail, execution, run_id, now):
         """选 worker → 提交 → 拿单次执行 result dict。失败返回 dict。"""
-        from antcode_core.common.exceptions import WorkerUnavailableError
-
-        from antcode_master.dispatch.selector import execution_resolver
-
-        try:
-            # P1-FN-01: PENDING→DISPATCHING CAS 作为取消对派发的 fence；失败即中止派发以防已取消 run 被投递。
-            claimed = await execution_status_service.update_dispatch_status(
-                run_id=run_id,
-                status=DispatchStatus.DISPATCHING,
-                status_at=now,
-            )
-            if not claimed:
-                logger.warning(f"派发前 CAS 失败(run 已被取消/推进)，中止派发: run_id={run_id}")
-                await self._log_execution(execution, "WARNING", "派发被中止: 执行已被取消或状态已变更")
-                return {"success": False, "aborted": True, "error": "派发前置 CAS 失败: 执行已被取消或状态已变更"}
-            await self._log_execution(execution, "INFO", "正在分配执行节点...")
-
-            target_worker, strategy = await execution_resolver.resolve_execution_worker(task, project)
-
-            await self._log_execution(
-                execution,
-                "INFO",
-                f"执行策略: {strategy}, 目标 Worker: {target_worker.name}",
-            )
-
-            await execution_status_service.update_dispatch_status(
-                run_id=run_id,
-                status=DispatchStatus.DISPATCHING,
-                status_at=datetime.now(UTC),
-                worker_id=target_worker.id,
-            )
-
-            if project.type == ProjectType.RULE:
-                return await self._execute_rule_task(
-                    task,
-                    project,
-                    project_detail,
-                    execution,
-                    target_worker=target_worker,
-                )
-            return await self._execute_distributed_task(task, project, run_id, execution, target_worker)
-
-        except WorkerUnavailableError as e:
-            await self._log_execution(execution, "ERROR", f"节点不可用: {e.message}")
-            return {"success": False, "error": e.message}
+        context = task, project, project_detail, execution, run_id, now, claim_dispatch
+        return await dispatch_prepared_run(self, context)
 
     async def _record_dispatch_result(self, execution, run_id, result):
         """把 ``result`` dict 落库 + 推 WS + 更新 status_service。
@@ -1117,29 +629,7 @@ class SchedulerService:
             await self._log_execution(execution, "WARNING", f"派发已中止: {result.get('error')}")
             return None, False
         if not result.get("success"):
-            error_message = result.get("error") or "任务执行失败"
-            # P1-FN-07: 消费 update_dispatch_status 返回值——CAS 冲突时跳过 WS/log/retry，避免为终态 run 重复创建 retry run。
-            cas_ok = await execution_status_service.update_dispatch_status(
-                run_id=run_id,
-                status=DispatchStatus.FAILED,
-                status_at=status_at,
-                error_message=error_message,
-            )
-            if not cas_ok:
-                # 并发方已推到终态,本次 FAILED 不写日志/WS/retry
-                await self._log_execution(
-                    execution,
-                    "DEBUG",
-                    f"忽略迟到的 FAILED(dispatch CAS 已被并发终态占据): {error_message}",
-                )
-                return None, False
-            await self._persist_result_fields(run_id, result)
-            await self._log_execution(execution, "ERROR", f"任务执行失败: {error_message}")
-            await self._push_execution_status(
-                execution,
-                {"status": "FAILED", "message": "任务执行失败", "error": error_message},
-            )
-            return False, False
+            raise RuntimeError("派发失败必须通过 failure_settlement 原子结算")
 
         # success 分支
         if result.get("distributed") and result.get("pending"):
@@ -1162,16 +652,6 @@ class SchedulerService:
                 "INFO",
                 f"任务已分发，等待节点执行: {result.get('message', '')}",
             )
-            await self._push_execution_status(
-                execution,
-                {
-                    "status": "RUNNING",
-                    "message": "任务已分发到节点，等待执行结果",
-                    "distributed": True,
-                    "worker_id": result.get("worker_id"),
-                    "worker_name": result.get("worker_name"),
-                },
-            )
             return None, True
 
         raise RuntimeError(
@@ -1188,40 +668,12 @@ class SchedulerService:
         """
         await merge_dispatch_result_data(run_id, result)
 
-    async def _handle_failure(self, execution, run_id, error_message, status):
-        """异常 / 超时统一收敛：更新 status_service + 写日志。"""
-        if execution is None:
-            return
-
-        now = datetime.now(UTC)
-        if status == TaskStatus.TIMEOUT:
-            target_dispatch = DispatchStatus.TIMEOUT
-            log_text = "任务执行超时"
-        else:
-            target_dispatch = DispatchStatus.FAILED
-            log_text = f"任务执行异常: {error_message}"
-
-        await execution_status_service.update_dispatch_status(
-            run_id=run_id,
-            status=target_dispatch,
-            status_at=now,
-            error_message=error_message,
-        )
-        await self._log_execution(execution, "ERROR", log_text)
-
-    async def _finalize_stats(self, task, task_id, run_id, result_success, distributed_pending):
-        """统计 success/failure，清理 running_tasks，更新 next_run_time。"""
+    async def _finalize_stats(self, task, task_id, result_success, distributed_pending):
+        """统计 success/failure，更新 next_run_time。"""
         if result_success is True:
             self.task_execution_stats["success_count"] += 1
         elif result_success is False and not distributed_pending:
             self.task_execution_stats["failed_count"] += 1
-
-        # L1: 无条件驱逐 running_tasks 条目。分布式分发(distributed_pending)
-        # 的结果经 ingester 回流,永不经过 SchedulerService 收尾 —— 若这里仍
-        # 保留条目,leader 进程生命周期内 running_tasks 会无界增长。该字典仅在
-        # 本 scheduler 内部读取(get_running_tasks 无外部调用方),分布式 run 的
-        # 生命周期由 ingester 拥有,派发交接完成后即可安全驱逐。
-        self.running_tasks.pop(run_id, None)
 
         if task:
             next_run_time = self._get_next_run_time(task_id)
@@ -1253,10 +705,12 @@ class SchedulerService:
             if getattr(project, "env_location", None) == "worker" and project.worker_env_name:
                 runtime_env_name = project.worker_env_name
 
-            result = await worker_task_dispatcher.dispatch_task(
+            result = await dispatch_with_scheduler_epoch(
+                int(execution.scheduler_fencing_token),
+                worker_task_dispatcher.dispatch_task,
                 project_id=project.public_id,
                 run_id=run_id,
-                params=task.execution_params,
+                params=effective_execution_params(task.execution_params, execution.result_data),
                 environment_vars=environment_vars,
                 runtime_env_name=runtime_env_name,
                 timeout=task.timeout_seconds or settings.TASK_EXECUTION_TIMEOUT,
@@ -1287,6 +741,8 @@ class SchedulerService:
                     "error": result.error or "任务分发失败",
                 }
 
+        except (SchedulerAuthorityLost, SchedulerDispatchFenceError):
+            raise
         except Exception as e:
             logger.exception("分布式执行任务失败")
             return {"success": False, "error": str(e)}
@@ -1297,10 +753,12 @@ class SchedulerService:
             if not rule_detail:
                 return {"success": False, "error": "规则项目详情不存在"}
 
-            params = dict(task.execution_params or {})
+            params = effective_execution_params(task.execution_params, execution.result_data)
             params["scheduled_task_id"] = task.id
             params["scheduled_task_name"] = task.name
-            result = await spider_task_dispatcher.submit_rule_task(
+            result = await dispatch_with_scheduler_epoch(
+                int(execution.scheduler_fencing_token),
+                spider_task_dispatcher.submit_rule_task,
                 project=project,
                 rule_detail=rule_detail,
                 run_id=execution.run_id,
@@ -1329,6 +787,8 @@ class SchedulerService:
                 "worker_name": result.get("worker_name"),
             }
 
+        except (SchedulerAuthorityLost, SchedulerDispatchFenceError):
+            raise
         except Exception as e:
             logger.exception("执行规则任务失败")
             return {"success": False, "error": str(e)}
@@ -1351,17 +811,25 @@ class SchedulerService:
         )
 
     async def _claim_retry_intent(self, task, execution) -> RetryIntent | None:
-        """在 TaskRun 行锁内幂等创建一次 retry intent。"""
-        retry_delay = int(task.retry_delay or settings.TASK_RETRY_DELAY)
+        """按 Task -> source TaskRun 的统一锁顺序创建一次 retry intent。"""
         async with in_transaction("default") as conn:
+            locked_task = await Task.filter(id=task.id).using_db(conn).select_for_update().first()
+            if locked_task is None or int(locked_task.retry_count or 0) <= 0:
+                return None
             current = await TaskRun.filter(run_id=execution.run_id).using_db(conn).select_for_update().first()
             if current is None:
                 raise RuntimeError(f"retry source 不存在: run_id={execution.run_id}")
+            if current.cancel_requested_at is not None:
+                logger.info("run 已请求取消,不创建 retry intent: run_id={}", current.run_id)
+                return None
             if current.next_retry_at is not None:
                 return RetryIntent(task.id, current.run_id, current.retry_count, current.next_retry_at)
-            if int(current.retry_count or 0) >= int(task.retry_count or 0):
+            if retry_was_decided(current):
+                return None
+            if int(current.retry_count or 0) >= int(locked_task.retry_count or 0):
                 return None
             retry_count = int(current.retry_count or 0) + 1
+            retry_delay = int(locked_task.retry_delay or settings.TASK_RETRY_DELAY)
             retry_time = datetime.now(UTC) + timedelta(seconds=retry_delay)
             result_data = dict(current.result_data or {})
             result_data["retry_intent"] = {
@@ -1383,7 +851,7 @@ class SchedulerService:
         execution.retry_count = retry_count
         execution.result_data = result_data
         execution.next_retry_at = retry_time
-        return RetryIntent(task.id, current.run_id, retry_count, retry_time)
+        return RetryIntent(locked_task.id, current.run_id, retry_count, retry_time)
 
     async def _log_execution(self, execution, level, message):
         """记录执行日志到 ``task_logs`` 表（迁移 39 后不再落磁盘）。"""
@@ -1392,32 +860,12 @@ class SchedulerService:
         log_type = "stderr" if level.upper() in ("ERROR", "CRITICAL") else "stdout"
         await task_log_service.write_log(execution.run_id, log_type, f"[{level}] {message}")
 
-    async def _push_execution_status(self, execution, status_data):
-        """推送执行状态（预留接口）"""
-        pass
-
     def _get_next_run_time(self, task_id):
         """获取下次运行时间"""
         job = self.scheduler.get_job(str(task_id))
         if job and job.next_run_time:
             return job.next_run_time
         return None
-
-    def get_running_tasks(self):
-        """获取运行中的任务"""
-        return list(self.running_tasks.values())
-
-    def get_execution_stats(self):
-        """获取任务执行统计信息"""
-        return {
-            **self.task_execution_stats,
-            "success_rate": (
-                self.task_execution_stats["success_count"] / max(1, self.task_execution_stats["total_executed"])
-            )
-            * 100,
-            "max_concurrent_tasks": settings.MAX_CONCURRENT_TASKS,
-            "available_slots": settings.MAX_CONCURRENT_TASKS - self.task_execution_stats["currently_running"],
-        }
 
     async def _add_monitoring_jobs(self):
         """注册监控数据处理任务"""

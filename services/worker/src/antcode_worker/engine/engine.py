@@ -1,10 +1,4 @@
-"""
-引擎核心
-
-实现任务生命周期管理：poll -> schedule -> execute -> report
-
-Requirements: 4.1, 4.5, 4.6, 4.7, 4.8
-"""
+"""Worker 任务生命周期引擎：poll -> schedule -> execute -> report。"""
 
 from __future__ import annotations
 
@@ -17,8 +11,11 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from antcode_contracts.runtime_metadata import validate_runtime_creator, validate_runtime_metadata
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.observability.tracing import (
     child_span,
     new_trace,
@@ -28,12 +25,33 @@ from antcode_core.observability.tracing import (
 from loguru import logger
 
 from antcode_worker.domain.enums import ExitReason, RunStatus
+from antcode_worker.domain.errors import CancellationError
 from antcode_worker.domain.models import ExecPlan, ExecResult, RunContext
 from antcode_worker.engine.cancel_tombstones import CancelTombstones
+from antcode_worker.engine.cancellation import cancel_queued_run, cancel_started_run
+from antcode_worker.engine.capacity_update import apply_capacity_limits
+from antcode_worker.engine.config_update import (
+    parse_engine_config_update,
+    resolve_adaptive_update,
+)
+from antcode_worker.engine.execution_admission import execute_with_admission, execution_egress
+from antcode_worker.engine.execution_completion import complete_execution
+from antcode_worker.engine.execution_failure import handle_execution_failure
+from antcode_worker.engine.fatal_error import FatalErrorMixin
+from antcode_worker.engine.metrics_recorders import WorkerMetricsRecorderMixin
+from antcode_worker.engine.ownership_fence import (
+    FatalErrorSignal,
+    OwnershipFenceError,
+    abort_for_ownership_failure,
+    cancel_executor_run,
+    run_with_generation_fence,
+)
 from antcode_worker.engine.policies import Policies, default_policies
-from antcode_worker.engine.rule_egress import rule_egress_plan
+from antcode_worker.engine.poll_delivery_recovery import handle_poll_failure
+from antcode_worker.engine.preparation_tasks import PreparationCancelledError, PreparationTaskRegistry
 from antcode_worker.engine.runtime_control_guard import _require_live_runtime_control
 from antcode_worker.engine.scheduler import Scheduler
+from antcode_worker.engine.shutdown import stop_engine
 from antcode_worker.engine.spider_spool import relay_spider_spool
 from antcode_worker.engine.state import RunState, StateManager
 from antcode_worker.executor.rule_policy import RULE_PLUGIN_ENV_VARS
@@ -42,14 +60,12 @@ from antcode_worker.transport.base import (
     TaskMessage,
     TransportBase,
 )
+from antcode_worker.transport.generation import raise_if_generation_lost
 
 if TYPE_CHECKING:
-    # 仅类型注解使用的依赖：避免运行时 import 引入循环 / 重负载。
-    # 这些都是可选依赖，构造时以 ``None`` 兜底。
     from antcode_worker.executor.base import BaseExecutor
     from antcode_worker.runtime.manager import RuntimeManager
     from antcode_worker.transport.base import TaskResult
-
 
 RUNTIME_RESULT_RETRY_MAX_SECONDS = 30.0
 MILLISECONDS_PER_SECOND = 1_000
@@ -119,7 +135,7 @@ def _arg_list(args: dict, key: str, default: list | None = None) -> list:
     return [value]
 
 
-class Engine:
+class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
     """
     引擎核心
 
@@ -143,8 +159,10 @@ class Engine:
         memory_limit_mb: int = 0,
         cpu_limit_seconds: int = 0,
         *,
-        tombstone_redis: Any = None,
-        tombstone_namespace: str = "antcode",
+        cancel_tombstones: CancelTombstones | None = None,
+        auto_resource_limit: bool = False,
+        adaptive_limits_provider: Callable[[], dict[str, int]] | None = None,
+        capacity_observer: Callable[[int], None] | None = None,
     ):
         # P2-#31: ``transport`` 与 ``executor`` 是核心依赖，按抽象基类标注；
         # 其他 manager / registry 仍保留 Any，因为它们的接口尚未稳定
@@ -160,17 +178,23 @@ class Engine:
         self._artifact_manager = artifact_manager
         self._policies = policies or default_policies()
         self._max_concurrent = max_concurrent
+        self._auto_resource_limit = auto_resource_limit
+        self._adaptive_limits_provider = adaptive_limits_provider
+        self._capacity_observer = capacity_observer
 
         self._scheduler = Scheduler(max_queue_size=max_concurrent * 2)
         self._state_manager = StateManager()
-        # FN-01(c) + P1-SM-03 (round6): 可选 Redis 备份防重启丢 fence
-        self._cancel_tombstones = CancelTombstones(redis_client=tombstone_redis, namespace=tombstone_namespace)
+        # FN-01(c) + P1-SM-03 (round6): tombstone 键要带 ns/wid 维度才能落进本
+        # Worker 的最小权限 ACL 面，故由 wiring 注入，引擎不自行拼装 Redis 键
+        self._cancel_tombstones = cancel_tombstones or CancelTombstones()
 
         self._running = False
         self._polling = False
         self._poll_task: asyncio.Task | None = None
         self._control_task: asyncio.Task | None = None
         self._worker_tasks: list[asyncio.Task] = []
+        self._worker_shrink_tasks: set[asyncio.Task] = set()
+        self._next_worker_id = 0
         self._runtime_control_semaphore = asyncio.Semaphore(1)
         # P2-#37: bounded set 防止 ``_handle_runtime_control`` 派出的 task
         # 被 GC 回收（asyncio.create_task 返回值丢弃会触发警告，长任务可能
@@ -190,6 +214,8 @@ class Engine:
         self._worker_id_cache: str | None = None
         self._ownership_renewal_task: asyncio.Task | None = None
         self._ownership_renew_wakeup: asyncio.Event | None = None  # P1-GW-02
+        self._fatal_error_signal = FatalErrorSignal()
+        self._ownership_fenced = False
 
         # P1-26: 优雅缩容用的 drain 集合。_resize_workers 缩容时不直接
         # cancel worker task(会让 ProcessExecutor 的子进程孤儿化, master 侧
@@ -203,6 +229,7 @@ class Engine:
         # W2: relay 未能在硬性时限内退出的 run，跳过其 rule tmp rmtree，
         # 避免 _cleanup_rule_tmp 与仍在读 spool 的 relay 竞态。
         self._deferred_rule_tmp_cleanup: set[str] = set()
+        self._preparation_tasks = PreparationTaskRegistry()
 
     @property
     def scheduler(self) -> Scheduler:
@@ -217,97 +244,42 @@ class Engine:
         if self._running:
             return
 
+        resolved = self._resolve_worker_id()
+        logger.debug(f"engine 已解析 worker_id: {resolved}")
+        register = getattr(self._transport, "set_lease_revoked_callback", None)
+        if callable(register):
+            register(self._on_transport_lease_revoked)
         self._running = True
         self._polling = True
+        self._ownership_fenced = False
+        self._fatal_error_signal.reset()
 
-        # 启动调度器
         await self._scheduler.start()
 
         # 启动轮询任务
         self._poll_task = asyncio.create_task(self._poll_loop())
 
         # 启动控制通道轮询
-        self._control_task = asyncio.create_task(self._control_loop())
+        self._control_task = asyncio.create_task(run_with_generation_fence(self, self._control_loop))
 
-        # 启动工作协程
-        for i in range(self._max_concurrent):
-            task = asyncio.create_task(self._worker_loop(i))
-            self._worker_tasks.append(task)
+        for _ in range(self._max_concurrent):
+            self._worker_tasks.append(self._create_worker_task())
 
         # P1-15: 后台续租跨机归属键,避免长跑任务 TTL 到期被重投另一台
         self._ownership_renewal_task = asyncio.create_task(self._renew_run_ownership_loop())
 
-        # P1-GW-02: transport revoke → engine 立即 cancel_all + 唤醒 renew loop
-        register = getattr(self._transport, "set_lease_revoked_callback", None)
-        if callable(register):
-            register(self._on_transport_lease_revoked)
-
-        # P1-15: 启动时尝试解析 worker_id, 让配置错误在拉到第一条任务前
-        # 就暴露出来。测试里 transport 是 MagicMock,resolve 会命中 fallback
-        # RuntimeError, 这里只 warn 不 raise, 让单测的 start/stop 用例仍可
-        # 通过; 真正跑到 _claim_run_ownership 时会 raise 拒绝静默继续。
-        try:
-            resolved = self._resolve_worker_id()
-            logger.debug(f"engine 已解析 worker_id: {resolved}")
-        except RuntimeError as exc:
-            logger.warning(f"engine 启动时无法解析 worker_id, 首个任务到达时将 raise: {exc}")
-
         logger.info(f"引擎已启动 (workers={self._max_concurrent})")
 
     async def stop(self, grace_period: float = 30.0) -> None:
-        """
-        停止引擎
-
-        1. 停止接收新任务
-        2. 等待运行中任务完成
-        3. 强制终止未完成任务
-        """
-        if not self._running:
-            return
-
-        logger.info("开始停止引擎...")
-
-        # 停止轮询
-        self._polling = False
-
-        # 取消轮询任务
-        if self._poll_task:
-            self._poll_task.cancel()
-        if self._control_task:
-            self._control_task.cancel()
-        # P1-15: 停掉后台续租循环,避免关机中还在写归属键
-        if self._ownership_renewal_task:
-            self._ownership_renewal_task.cancel()
-
-        # 等待运行中任务完成
-        active_count = await self._state_manager.count_active()
-        if active_count > 0:
-            logger.info(f"等待 {active_count} 个任务完成 (最长 {grace_period}s)...")
-            try:
-                await asyncio.wait_for(
-                    self._drain_tasks(),
-                    timeout=grace_period,
-                )
-            except TimeoutError:
-                logger.warning("等待超时，强制终止任务")
-                await self._force_terminate()
-
-        await self._drain_runtime_controls(grace_period)
-
-        # 停止工作协程
-        self._running = False
-        for task in self._worker_tasks:
-            task.cancel()
-
-        # 停止调度器
-        await self._scheduler.stop()
-
-        logger.info("引擎已停止")
+        """停止 intake，等待 Engine 所有协程完成清理后返回。"""
+        await stop_engine(self, grace_period)
 
     async def _poll_loop(self) -> None:
         """任务轮询循环"""
         while self._polling:
             flow_acquired = False
+            uncommitted_receipt: str | None = None
+            admitted_run_id: str | None = None
             try:
                 if not self._transport or not self._transport.is_connected:
                     await asyncio.sleep(0.5)
@@ -331,6 +303,7 @@ class Engine:
 
                 if task_msg is None:
                     continue
+                uncommitted_receipt = getattr(task_msg, "receipt", None)
 
                 # 创建运行上下文
                 labels = {}
@@ -351,7 +324,9 @@ class Engine:
                 )
 
                 if not await self._admit_polled_task(run_id, task_msg):
+                    uncommitted_receipt = None
                     continue
+                admitted_run_id = run_id
 
                 # 入队
                 await self._scheduler.enqueue(
@@ -359,25 +334,21 @@ class Engine:
                     data=(context, task_msg),
                     priority=task_msg.priority,
                 )
+                uncommitted_receipt = None
 
                 logger.info(f"任务入队: {run_id}")
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                from antcode_worker.transport.base import GenerationLostError
-
-                if isinstance(exc, GenerationLostError):
-                    # 复审 D2: 代际已被取代 —— 立即 abort 全部执行，
-                    # 把旧代际僵尸进程的双执行窗口从 ownership 续租
-                    # tick(~600s) 压缩到单次 poll。
-                    logger.error("Lease generation 已被新代际取代，立即中止本进程全部执行")
-                    await self._abort_for_ownership_failure("lease generation superseded")
+                stop_polling = await handle_poll_failure(
+                    engine=self,
+                    error=exc,
+                    receipt=uncommitted_receipt,
+                    admitted_run_id=admitted_run_id,
+                )
+                if stop_polling:
                     break
-                if self._flow_controller:
-                    self._flow_controller.on_failure()
-                logger.exception("轮询异常")
-                await asyncio.sleep(1)
             finally:
                 if self._flow_controller and flow_acquired:
                     await self._flow_controller.release()
@@ -432,7 +403,8 @@ class Engine:
                 await self._dispatch_control(control)
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
+                raise_if_generation_lost(exc)
                 logger.exception("控制通道异常")
                 await asyncio.sleep(1)
 
@@ -446,10 +418,14 @@ class Engine:
             self._schedule_runtime_control(control)
             return
         if control.receipt:
-            await self._transport.ack_control(control.receipt)
+            await self._require_control_ack(control.receipt)
+
+    async def _require_control_ack(self, receipt: str) -> None:
+        if not await self._transport.ack_control(receipt):
+            raise RuntimeError(f"控制事件 ACK 失败: receipt={receipt}")
 
     async def _invoke_cancel_control(self, control: ControlMessage) -> None:
-        """P1-FN-04: 缺 target 只 log; cancel False 仍 ACK; 异常跳外层不 ACK。"""
+        """执行幂等取消；真实执行器失败由异常阻止 control ACK。"""
         target = control.run_id or control.task_id
         if not target:
             logger.warning("cancel/kill control 缺 target: type={}", control.control_type)
@@ -465,7 +441,8 @@ class Engine:
         if receipt in self._runtime_control_tasks:
             logger.warning("忽略重复的运行时控制投递: receipt={}", receipt)
             return False
-        task = asyncio.create_task(self._handle_runtime_control(control))
+        operation = run_with_generation_fence(self, lambda: self._handle_runtime_control(control))
+        task = asyncio.create_task(operation)
         self._inflight_controls.add(task)
         self._runtime_control_tasks[receipt] = task
         self._runtime_control_receipts[task] = receipt
@@ -496,6 +473,7 @@ class Engine:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+        raise TimeoutError(f"运行时控制停止等待超时: pending={len(pending)}")
 
     # ------------------------------------------------------------------
     # RuntimeControl action handlers
@@ -530,10 +508,14 @@ class Engine:
         env_name = _arg_str(data, "env_name")
         if not env_name:
             raise RuntimeError("env_name 不能为空")
+        key, description = validate_runtime_metadata(
+            _arg_str(data, "key"),
+            _arg_str(data, "description"),
+        )
         return await uv_manager.update_env(
             env_name=env_name,
-            key=_arg_str(data, "key"),
-            description=_arg_str(data, "description"),
+            key=key,
+            description=description,
         )
 
     async def _action_create_env(self, data: dict) -> Any:
@@ -542,11 +524,16 @@ class Engine:
         env_name = _arg_str(data, "env_name")
         if not env_name:
             raise RuntimeError("env_name 不能为空")
+        created_by, owner_user_id = validate_runtime_creator(
+            _arg_str(data, "created_by") or None,
+            _arg_str(data, "owner_user_id") or None,
+        )
         return await uv_manager.create_env(
             env_name=env_name,
             python_version=_arg_str(data, "python_version"),
             packages=_arg_list(data, "packages"),
-            created_by=_arg_str(data, "created_by") or None,
+            created_by=created_by,
+            owner_user_id=owner_user_id,
         )
 
     async def _action_delete_env(self, data: dict) -> Any:
@@ -635,20 +622,17 @@ class Engine:
             # （_schedule_runtime_control 已前置拦截，这里是兜底防御）。
             raise RuntimeError("运行时控制事件缺少 receipt")
         if not request_id:
-            # W4: 有 receipt 但缺 request_id 的畸形事件必须就地 ACK 丢弃。
-            # 之前直接 raise 会让事件永不 settlement —— Direct 模式被
-            # PendingControlRecovery、Gateway 模式被 WatchControl PEL 重放
-            # 无限重投同一条坏消息。ACK 失败也不 raise（best-effort），
-            # 重投后会再次走到这里重试 ACK。
+            # 有 receipt 但缺 request_id 的畸形事件必须就地 ACK 丢弃。
             logger.warning(
                 "丢弃缺少 request_id 的运行时控制事件: action={} receipt={}",
                 action,
                 control.receipt,
             )
             try:
-                await self._transport.ack_control(control.receipt)
+                await self._require_control_ack(control.receipt)
             except Exception:
                 logger.exception("畸形运行时控制事件 ACK 失败，等待重投后重试")
+                raise
             return
         # 新协议优先用 typed args；旧路径 fallback 到 payload 嵌套 dict
         data = payload.get("args") or payload.get("payload") or {}
@@ -667,8 +651,9 @@ class Engine:
                 _require_live_runtime_control(payload, await self._transport.authoritative_now_ms())
                 result_data = await handler(self, data)
         except Exception as e:
+            raise_if_generation_lost(e)
             success = False
-            error_message = str(e)
+            error_message = normalize_persisted_error_message(e) or ""
             # P2: ``except Exception`` 块统一用 logger.exception 保留堆栈，
             # 避免错误被静默吞掉只剩 ``str(e)``。
             logger.exception(f"runtime action 失败: action={action} req={request_id}")
@@ -768,7 +753,8 @@ class Engine:
                 if active_context is not None:
                     await self._handle_forced_cancel(active_context, worker_id)
                 break
-            except Exception:
+            except Exception as exc:
+                raise_if_generation_lost(exc)
                 logger.exception(f"Worker-{worker_id} 异常")
             finally:
                 if my_task is not None:
@@ -777,7 +763,10 @@ class Engine:
     async def _execute_or_resume_settlement(self, context: RunContext, task_msg: TaskMessage) -> ExecResult:
         """重投已有结果时只恢复结算，不再次进入 executor。"""
         if not await self._state_manager.has_pending_settlement(context.run_id):
-            return await self._execute_task(context, task_msg)
+            try:
+                return await self._execute_task(context, task_msg)
+            finally:
+                self._record_task_completed(context.project_id)
         result, _, _ = await self._state_manager.settlement_snapshot(context.run_id)
         return result
 
@@ -792,24 +781,18 @@ class Engine:
         """
         run_id = context.run_id
         logger.warning(f"Worker-{worker_id} 被强制取消, 清理在途任务: run_id={run_id}")
-        # 1) kill 子进程
-        try:
-            if self._executor is not None:
-                await self._executor.cancel(run_id)
-        except Exception:
-            logger.exception(f"强制取消时 executor.cancel 失败: run_id={run_id}")
-        # 2) 上报 CANCELLED 终态 + ACK PEL
-        try:
-            relay_error = self._forced_cancel_relay_errors.pop(run_id, "")
-            result = self._build_forced_cancel_result(run_id, relay_error)
-            await self._report_result_by_info(
-                run_id=run_id,
-                task_id=context.task_id,
-                receipt=context.receipt,
-                result=result,
-            )
-        except Exception:
-            logger.exception(f"强制取消时上报终态失败: run_id={run_id}")
+        await cancel_executor_run(self._executor, run_id, "worker forced cancellation")
+        if self._ownership_fenced:
+            logger.error("ownership 已丢失，跳过旧 owner 结果上报与 ACK: run_id={}", run_id)
+            return
+        relay_error = self._forced_cancel_relay_errors.pop(run_id, "")
+        result = self._build_forced_cancel_result(run_id, relay_error)
+        await self._report_result_by_info(
+            run_id=run_id,
+            task_id=context.task_id,
+            receipt=context.receipt,
+            result=result,
+        )
 
     def _build_forced_cancel_result(self, run_id: str, relay_error: str) -> ExecResult:
         now = datetime.now()
@@ -839,7 +822,11 @@ class Engine:
 
         try:
             # 转换状态
-            await self._state_manager.transition(run_id, RunState.PREPARING)
+            if not await self._state_manager.transition(run_id, RunState.PREPARING):
+                raise RuntimeError(f"任务无法进入 PREPARING 状态: run_id={run_id}")
+
+            if await self._is_cancel_requested(run_id):
+                return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
             # P1-17: worker 收到任务后必须主动上报一次 status=RUNNING。
             # 底层复用 transport.report_result 的 task:result Stream 通道,
@@ -852,7 +839,10 @@ class Engine:
             # + runtime_status=NULL,任务永卡在 DISPATCHING 不失败也不补派。
             # RUNNING 未持久化时不得启动用户进程，否则 reconcile 可能把仍在
             # 执行的任务判失败并补派，形成双跑。
-            await self._report_running_start(context, started_at)
+            await self._run_preparation_step(
+                run_id,
+                lambda: self._report_running_start(context, started_at),
+            )
 
             # 生成任务 payload
             payload = self._build_payload(task_msg)
@@ -864,30 +854,39 @@ class Engine:
             if source_bundle is not None and not self._project_fetcher:
                 raise RuntimeError("source_bundle 任务必须配置 project_fetcher")
             if self._project_fetcher and source_bundle is not None:
-                workspace = await self._project_fetcher.fetch(
-                    run_id=run_id,
-                    project_id=context.project_id,
-                    source_bundle_uri=source_bundle.uri,
-                    source_bundle_sha256=source_bundle.sha256,
-                    source_bundle_size=source_bundle.size or 0,
-                    entry_point=payload.entry_point,
-                    source_subdir=getattr(source_bundle, "source_subdir", None)
-                    or getattr(task_msg, "source_subdir", "")
-                    or "",
+                workspace = await self._run_preparation_step(
+                    run_id,
+                    lambda: self._project_fetcher.fetch(
+                        run_id=run_id,
+                        project_id=context.project_id,
+                        source_bundle_uri=source_bundle.uri,
+                        source_bundle_sha256=source_bundle.sha256,
+                        source_bundle_size=source_bundle.size or 0,
+                        entry_point=payload.entry_point,
+                        source_subdir=getattr(source_bundle, "source_subdir", None)
+                        or getattr(task_msg, "source_subdir", "")
+                        or "",
+                    ),
                 )
                 # V5: SpiderPlugin / 其它插件读 workspace_path / project_cwd
                 payload.workspace_path = workspace.bundle_root or ""
                 payload.project_cwd = workspace.project_cwd or workspace.bundle_root or ""
 
             # 准备运行时环境
-            runtime_handle = await self._prepare_runtime(context)
+            runtime_handle = await self._run_preparation_step(
+                run_id,
+                lambda: self._prepare_runtime(context),
+            )
 
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
             # 通过插件生成执行计划
             if self._plugin_registry:
-                exec_plan = await self._plugin_registry.build_plan(context, payload)
+                exec_plan = await self._run_preparation_step(
+                    run_id,
+                    lambda: self._plugin_registry.build_plan(context, payload),
+                )
             else:
                 exec_plan = self._build_fallback_plan(context, payload, runtime_handle)
 
@@ -908,68 +907,49 @@ class Engine:
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
-            # 转换状态
-            await self._state_manager.transition(run_id, RunState.RUNNING)
-
             # 准备日志管理器
             log_sink = None
             if self._log_manager_factory:
                 log_manager = self._log_manager_factory.create(run_id)
-                await log_manager.start()
+                await self._run_preparation_step(run_id, log_manager.start)
                 log_sink = log_manager
 
+            # PREPARING -> RUNNING 与 cancel_requested 在同一把状态锁下判定。
+            # 该转换紧邻 executor.run，避免取消看到 RUNNING 时执行器尚未进入
+            # 可取消的 launch/marker 注册阶段。
+            if not await self._state_manager.transition_if_not_cancel_requested(run_id, RunState.RUNNING):
+                return self._build_cancelled_result(run_id, started_at, "任务已取消")
+
             # 执行
-            with rule_egress_plan(exec_plan) as execution_plan:
-                exec_result = await self._executor.run(
+            with execution_egress(self, exec_plan) as execution_plan:
+                exec_result = await execute_with_admission(
+                    self,
                     execution_plan,
-                    runtime_handle,
+                    runtime_handle=runtime_handle,
                     log_sink=log_sink,
                 )
-
             await self._relay_spider_spool(exec_plan, context)
             spool_relayed = True
-
-            # 收集产物
-            if self._artifact_manager and exec_plan.artifact_patterns:
-                collection = await self._artifact_manager.collect_artifacts(
-                    work_dir=exec_plan.cwd or runtime_handle.path,
-                    patterns=exec_plan.artifact_patterns,
-                    run_id=run_id,
-                )
-                for artifact in collection.artifacts:
-                    stored = await self._artifact_manager.store_artifact(artifact, run_id)
-                    exec_result.artifacts.append(stored)
-
-            # 日志已由 LogManager 流式持久化到 PostgreSQL，执行结束前仅需 flush。
-            if log_manager:
-                await log_manager.flush()
-
-            # 转换状态
-            if exec_result.status == RunStatus.SUCCESS:
-                await self._state_manager.transition(run_id, RunState.COMPLETED)
-            elif exec_result.status == RunStatus.CANCELLED:
-                info = await self._state_manager.get(run_id)
-                if info and info.state != RunState.CANCELLED:
-                    await self._state_manager.transition(run_id, RunState.CANCELLED)
-            else:
-                await self._state_manager.transition(run_id, RunState.FAILED)
-
+            exec_result = await complete_execution(
+                self,
+                exec_plan,
+                exec_result,
+                context=context,
+                runtime_handle=runtime_handle,
+                log_manager=log_manager,
+            )
             return exec_result
 
         except asyncio.CancelledError:
             if exec_plan is not None and not spool_relayed:
                 await self._relay_on_forced_cancel(exec_plan, context)
             raise
-        except Exception as e:
-            logger.exception(f"执行失败: {run_id}")
-            await self._state_manager.transition(run_id, RunState.FAILED)
-            return ExecResult(
+        except Exception as error:
+            return await handle_execution_failure(
+                engine=self,
                 run_id=run_id,
-                status=RunStatus.FAILED,
-                exit_reason=ExitReason.ERROR,
-                error_message=str(e),
                 started_at=started_at,
-                finished_at=datetime.now(),
+                error=error,
             )
         finally:
             # R1-P1-6 (审查报告): 隔离 log_manager.stop 异常。老实现里
@@ -981,9 +961,13 @@ class Engine:
                 try:
                     await log_manager.stop()
                 except Exception as exc:
+                    raise_if_generation_lost(exc)
                     logger.warning(f"log_manager.stop 失败但不影响结果上报: {exc}")
             if runtime_handle and self._runtime_manager:
-                await self._runtime_manager.release(runtime_handle)
+                try:
+                    await self._runtime_manager.release(runtime_handle)
+                except Exception:
+                    logger.exception(f"释放 runtime handle 失败: run_id={run_id}")
             # V3: 清理 fetched workspace,避免无限堆积
             if self._project_fetcher is not None:
                 try:
@@ -1049,7 +1033,6 @@ class Engine:
                 # 收尾期间本协程又被取消：重发取消并继续有界等待。
                 relay_task.cancel()
         if relay_task.done() and not relay_task.cancelled():
-            # 消费 relay 的终态异常，避免 "exception was never retrieved"。
             with contextlib.suppress(Exception):
                 relay_task.exception()
         return relay_task.done()
@@ -1058,12 +1041,15 @@ class Engine:
     def _apply_runtime_env(exec_plan: ExecPlan, context: RunContext) -> None:
         if not context.runtime_spec or not context.runtime_spec.env_vars:
             return
+        from antcode_worker.transport.task_message_validation import validate_task_environment
+
         runtime_env = context.runtime_spec.env_vars
         if exec_plan.plugin_name in {"rule", "spider"}:
             reserved = RULE_PLUGIN_ENV_VARS.intersection(runtime_env)
             if reserved:
                 names = ", ".join(sorted(reserved))
                 raise RuntimeError(f"Spider runtime env 不得覆盖 Worker 控制变量: {names}")
+        runtime_env = validate_task_environment(runtime_env)
         exec_plan.env.update(runtime_env)
 
     async def _relay_spider_spool(self, exec_plan: ExecPlan, context: RunContext) -> None:
@@ -1072,6 +1058,7 @@ class Engine:
             if exec_plan.plugin_name in {"rule", "spider"}:
                 raise RuntimeError("Spider 执行计划缺少 ANTCODE_SPIDER_SPOOL_PATH")
             return
+        self._record_spider_stats(exec_plan.env)
         await relay_spider_spool(
             spool_path,
             self._transport,
@@ -1134,7 +1121,7 @@ class Engine:
             task_id=context.task_id,
             status=result.status.value,
             exit_code=result.exit_code or 0,
-            error_message=result.error_message or "",
+            error_message=normalize_persisted_error_message(result.error_message) or "",
             started_at=result.started_at,
             finished_at=result.finished_at,
             duration_ms=result.duration_ms,
@@ -1177,6 +1164,7 @@ class Engine:
         try:
             await self._release_run_ownership(run_id)
         except Exception as exc:
+            raise_if_generation_lost(exc)
             logger.warning("release_run_ownership 失败: run_id={}, err={}", run_id, exc)
 
     # 结算重试参数：指数退避 1s→16s，共 5 次尝试（总窗口 ~31s）。
@@ -1192,6 +1180,7 @@ class Engine:
                     return True
                 failure: str | None = "returned False"
             except Exception as exc:
+                raise_if_generation_lost(exc)
                 if attempt >= self._SETTLE_MAX_ATTEMPTS:
                     raise
                 failure = f"{type(exc).__name__}: {exc}"
@@ -1264,6 +1253,16 @@ class Engine:
             return False
         return bool(info.data.get("cancel_requested"))
 
+    async def _run_preparation_step(
+        self,
+        run_id: str,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Run one preparation operation that cancel() can stop and await."""
+        if await self._is_cancel_requested(run_id):
+            raise PreparationCancelledError(run_id)
+        return await self._preparation_tasks.run(run_id, operation)
+
     async def _settle_tombstoned_task(self, run_id: str, task_msg: Any) -> None:
         """tombstone 命中：按 CANCELLED 结算并 ACK，任务不进入本地队列。"""
         logger.info(f"任务到达前已被取消(tombstone 命中)，直接结算: run_id={run_id}")
@@ -1273,56 +1272,22 @@ class Engine:
 
     async def cancel(self, run_id: str, reason: str = "") -> bool:
         """取消任务"""
-        info = await self._state_manager.get(run_id)
-        if not info:
+        request = await self._state_manager.request_cancel(run_id)
+        if request is None:
             # FN-01(c): run 尚未到达本地——记 tombstone 并放行 control ACK；
             # 任务消息随后到达时在 poll 准入被拦截。
             await self._cancel_tombstones.record(run_id, reason)
             return True
 
-        if info.state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
+        if request.state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
             return False
 
-        # 如果在队列中，直接移除
-        if info.state == RunState.QUEUED:
-            await self._scheduler.remove(run_id)
-            await self._state_manager.transition(run_id, RunState.CANCELLED)
-            await self._report_result_by_info(
-                run_id=info.run_id,
-                task_id=info.task_id,
-                receipt=info.receipt,
-                result=self._build_cancelled_result(info.run_id, info.queued_at or datetime.now(), reason),
-            )
+        if request.state == RunState.QUEUED:
+            await cancel_queued_run(self, request, reason)
             logger.info(f"任务已取消: {run_id}, reason={reason}")
             return True
 
-        info.data["cancel_requested"] = True
-
-        if info.state == RunState.RUNNING:
-            await self._state_manager.transition(run_id, RunState.CANCELLING)
-            if self._executor:
-                # P1-GW-05 (round6): 区分 executor.cancel=False 的两种语义:
-                # 1) executor 内已无 run (自然结束/未注册) - 视为成功,继续结算
-                # 2) _terminate_process 抛异常(kill 失败/SIGKILL 后仍活),
-                #    base.cancel catch 后 log.error 返回 False - 必须传播到
-                #    control cancel 报告,不能假装取消成功让 L2 接管者双执行。
-                # 目前 base.cancel 混合两种 False, 无法区分; 保守做法: 若
-                # process_info 仍存在(cancel 前后 not found 都不算真失败),
-                # 视 False 为 "kill 失败" fatal 语义,让 control cancel 感知。
-                task_present_before = self._executor.has_task(run_id)
-                executor_cancelled = await self._executor.cancel(run_id)
-                if not executor_cancelled:
-                    if task_present_before:
-                        # kill 真失败: 状态回滚 CANCELLING → RUNNING, cancel 报 False
-                        # 让 control cancel 走 PEL 重投, master reconcile 重试
-                        logger.error(
-                            "P1-GW-05: executor.cancel 失败 (可能 kill 未生效), 不报告取消成功: run_id={}",
-                            run_id,
-                        )
-                        return False
-                    logger.warning("executor.cancel 未找到 run(已自然结束): run_id={}", run_id)
-        elif info.state == RunState.PREPARING:
-            await self._state_manager.transition(run_id, RunState.CANCELLED)
+        await cancel_started_run(self, request, reason)
 
         logger.info(f"任务已取消: {run_id}, reason={reason}")
         return True
@@ -1337,10 +1302,7 @@ class Engine:
 
     async def _force_terminate(self) -> None:
         """强制终止所有任务"""
-        runs = await self._state_manager.get_all()
-        for run in runs:
-            if run.state in (RunState.RUNNING, RunState.CANCELLING):
-                await self.cancel(run.run_id, reason="force_terminate")
+        await self.cancel_all(reason="force_terminate")
 
     def get_stats(self) -> dict:
         """获取统计信息"""
@@ -1421,6 +1383,7 @@ class Engine:
                 self._RUN_OWNERSHIP_TTL_SECONDS * MILLISECONDS_PER_SECOND,
             )
         except Exception as exc:
+            raise_if_generation_lost(exc)
             raise RuntimeError(f"ownership claim 失败: run_id={run_id}, error={exc}") from exc
 
     async def _release_run_ownership(self, run_id: str) -> None:
@@ -1428,15 +1391,11 @@ class Engine:
         try:
             await self._transport.release_run_ownership(run_id)
         except Exception as exc:
+            raise_if_generation_lost(exc)
             raise RuntimeError(f"ownership release 失败: run_id={run_id}") from exc
 
     async def _abort_for_ownership_failure(self, reason: str) -> None:
-        self._polling = False
-        runs = await self._state_manager.get_all()
-        for info in runs:
-            if info.state in (RunState.RUNNING, RunState.CANCELLING, RunState.PREPARING):
-                await self.cancel(info.run_id, reason=reason)
-        self._running = False
+        await abort_for_ownership_failure(self, reason)
 
     async def _renew_run_ownership_loop(self) -> None:
         """Renew active run fences; P1-GW-02 wakeup 可提前触发一次 renew。"""
@@ -1461,17 +1420,12 @@ class Engine:
             except Exception as exc:
                 logger.exception("ownership 续租循环异常")
                 await self._abort_for_ownership_failure(str(exc))
-                raise
 
     async def _on_transport_lease_revoked(self, reason: str = "lease-revoked") -> None:
-        """P1-GW-02 回调: transport 撤销 → 唤醒 renew + cancel_all 兜底。"""
-        logger.warning("transport 报告 Lease 被撤销 (reason={}), 触发 engine cancel_all", reason)
+        """transport 撤销后立即进入进程级 self-fence。"""
+        logger.error("transport 报告 Lease 被撤销 (reason={}), 触发 self-fence", reason)
         self.request_ownership_renew_now()
-        try:
-            cancelled = await self.cancel_all(reason=f"lease-revoked: {reason}")
-            logger.warning("engine cancel_all 完成: {} run 被取消", cancelled)
-        except Exception as exc:
-            logger.exception("engine cancel_all 异常: {}", exc)
+        await self._abort_for_ownership_failure(f"lease-revoked: {reason}")
 
     def request_ownership_renew_now(self) -> None:
         """P1-GW-02: 请求立即 renew(loop 未启动时 no-op)。"""
@@ -1483,6 +1437,7 @@ class Engine:
         runs = await self._state_manager.get_all()
         cancellable = {RunState.RUNNING, RunState.CANCELLING, RunState.PREPARING, RunState.QUEUED}
         cancelled = 0
+        failures: list[BaseException] = []
         for info in runs:
             if info.state not in cancellable:
                 continue
@@ -1490,7 +1445,11 @@ class Engine:
                 if await self.cancel(info.run_id, reason=reason or "engine.cancel_all"):
                     cancelled += 1
             except Exception as exc:
-                logger.warning("cancel_all: cancel {} 失败: {}", info.run_id, exc)
+                logger.opt(exception=exc).error("cancel_all: cancel {} 失败", info.run_id)
+                failures.append(exc)
+        if failures:
+            failed = ", ".join(str(error) for error in failures)
+            raise CancellationError(f"cancel_all 未能终止全部任务: {failed}", reason=reason)
         return cancelled
 
     async def _renew_active_run_ownership(self) -> None:
@@ -1505,10 +1464,9 @@ class Engine:
         try:
             renewed = await self._renew_run_ownership(run_id)
         except Exception as exc:
-            await self.cancel(run_id, reason="run ownership 续租失败")
             raise RuntimeError(f"ownership 续租失败: run_id={run_id}") from exc
         if not renewed:
-            await self.cancel(run_id, reason="run ownership 已丢失")
+            raise OwnershipFenceError(f"ownership 已丢失: run_id={run_id}")
 
     async def _renew_run_ownership(self, run_id: str) -> bool:
         ttl_ms = self._RUN_OWNERSHIP_TTL_SECONDS * MILLISECONDS_PER_SECOND
@@ -1545,10 +1503,12 @@ class Engine:
         elif isinstance(params, list):
             args = params
 
-        env_vars = getattr(task_msg, "environment", {}) or {}
-        if isinstance(env_vars, dict) and "ANTCODE_RUNTIME_ENV" in env_vars:
-            env_vars = dict(env_vars)
-            env_vars.pop("ANTCODE_RUNTIME_ENV", None)
+        from antcode_worker.transport.task_message_validation import validate_task_environment
+
+        raw_env = getattr(task_msg, "environment", {}) or {}
+        if not isinstance(raw_env, dict):
+            raise TypeError("environment 必须是对象")
+        env_vars = validate_task_environment(raw_env)
 
         return TaskPayload(
             task_type=task_type,
@@ -1562,29 +1522,18 @@ class Engine:
 
     async def apply_config_update(self, config: dict[str, Any]) -> None:
         """应用资源配置更新"""
-        max_concurrent = config.get("max_concurrent_tasks")
-        memory_limit_mb = config.get("task_memory_limit_mb")
-        cpu_limit_seconds = config.get("task_cpu_time_limit_sec")
-
-        if max_concurrent is not None:
-            try:
-                new_max = int(max_concurrent)
-                if new_max > 0 and new_max != self._max_concurrent:
-                    await self._resize_workers(new_max)
-            except Exception:
-                logger.warning(f"无效的 max_concurrent_tasks: {max_concurrent}")
-
-        if memory_limit_mb is not None:
-            try:
-                self._policies.resource.memory_limit_mb = int(memory_limit_mb)
-            except Exception:
-                logger.warning(f"无效的 task_memory_limit_mb: {memory_limit_mb}")
-
-        if cpu_limit_seconds is not None:
-            try:
-                self._policies.resource.cpu_limit_seconds = int(cpu_limit_seconds)
-            except Exception:
-                logger.warning(f"无效的 task_cpu_time_limit_sec: {cpu_limit_seconds}")
+        update = resolve_adaptive_update(
+            parse_engine_config_update(config),
+            self._adaptive_limits_provider,
+        )
+        if update.max_concurrent_tasks is not None and update.max_concurrent_tasks != self._max_concurrent:
+            await self._resize_workers(update.max_concurrent_tasks)
+        if update.task_memory_limit_mb is not None:
+            self._policies.resource.memory_limit_mb = update.task_memory_limit_mb
+        if update.task_cpu_time_limit_sec is not None:
+            self._policies.resource.cpu_limit_seconds = update.task_cpu_time_limit_sec
+        if update.auto_resource_limit is not None:
+            self._auto_resource_limit = update.auto_resource_limit
 
     # P1-26: 缩容 grace period(秒) —— worker 收到 drain 标记后, 最多等
     # 这么久让在途任务跑完; 超时才走 self.cancel(kill 子进程 + 上报
@@ -1611,22 +1560,60 @@ class Engine:
         if diff == 0:
             return
 
+        await apply_capacity_limits(
+            self._scheduler,
+            self._executor,
+            self._capacity_observer,
+            previous=self._max_concurrent,
+            target=new_max,
+        )
         self._max_concurrent = new_max
         self._policies.resource.max_concurrent = new_max
-        await self._scheduler.update_max_size(new_max * 2)
 
         if not self._running:
             return
 
         if diff > 0:
             for _ in range(diff):
-                worker_id = len(self._worker_tasks)
-                task = asyncio.create_task(self._worker_loop(worker_id))
-                self._worker_tasks.append(task)
+                self._worker_tasks.append(self._create_worker_task())
         else:
-            await self._shrink_workers(-diff)
+            self._schedule_worker_shrink(-diff)
 
-    async def _shrink_workers(self, drain_count: int) -> None:
+    def _create_worker_task(self) -> asyncio.Task:
+        worker_id = self._next_worker_id
+        self._next_worker_id += 1
+        operation = run_with_generation_fence(self, partial(self._worker_loop, worker_id))
+        return asyncio.create_task(operation)
+
+    def _schedule_worker_shrink(self, drain_count: int) -> None:
+        draining = self._take_workers_for_drain(drain_count)
+        if not draining:
+            return
+        task = asyncio.create_task(self._shrink_workers(draining))
+        self._worker_shrink_tasks.add(task)
+        task.add_done_callback(self._worker_shrink_done)
+
+    def _take_workers_for_drain(self, drain_count: int) -> list[asyncio.Task]:
+        draining: list[asyncio.Task] = []
+        for _ in range(max(0, drain_count)):
+            if not self._worker_tasks:
+                break
+            task = self._worker_tasks.pop()
+            self._draining_worker_tasks.add(task)
+            draining.append(task)
+        return draining
+
+    def _worker_shrink_done(self, task: asyncio.Task) -> None:
+        self._worker_shrink_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        logger.opt(exception=error).critical("后台 worker 缩容失败")
+        self._fatal_error_signal.record(RuntimeError(f"后台 worker 缩容失败: {error}"))
+
+    async def _shrink_workers(self, draining: list[asyncio.Task]) -> None:
         """P1-26: 三段式优雅缩容。
 
         阶段 1 (drain): 把要退的 worker task 塞进 _draining_worker_tasks,
@@ -1640,15 +1627,6 @@ class Engine:
         阶段 3 (force):   还挂着就 task.cancel(), _worker_loop 的
                           CancelledError 分支兜底 kill + 上报。
         """
-        if drain_count <= 0:
-            return
-        draining: list[asyncio.Task] = []
-        for _ in range(drain_count):
-            if not self._worker_tasks:
-                break
-            task = self._worker_tasks.pop()
-            self._draining_worker_tasks.add(task)
-            draining.append(task)
         if not draining:
             return
         logger.info(f"P1-26: 优雅缩容 {len(draining)} 个 worker (drain 阶段开始)")
@@ -1666,14 +1644,7 @@ class Engine:
         )
         # 阶段 2: 只取消归属于待退出 worker task 的 run，不能误伤保留
         # worker 上的在途任务。
-        for task in pending:
-            run_id = self._worker_run_ids.get(task)
-            if not run_id:
-                continue
-            try:
-                await self.cancel(run_id, reason="worker shrink")
-            except Exception:
-                logger.exception(f"P1-26: shrink cancel 失败: run_id={run_id}")
+        failures = await self._cancel_draining_runs(pending)
 
         _, still_pending = await asyncio.wait(pending, timeout=self._SHRINK_CANCEL_TIMEOUT_SECONDS)
         if still_pending:
@@ -1682,12 +1653,26 @@ class Engine:
             logger.warning(f"P1-26: {len(still_pending)} 个 worker cancel 超时, 强制 cancel")
             for task in still_pending:
                 task.cancel()
-            for task in still_pending:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            results = await asyncio.gather(*still_pending, return_exceptions=True)
+            failures.extend(result for result in results if isinstance(result, Exception))
         for task in draining:
             self._draining_worker_tasks.discard(task)
+        if failures:
+            raise ExceptionGroup("worker 缩容取消失败", failures)
         logger.info("P1-26: 缩容完成")
+
+    async def _cancel_draining_runs(self, pending: set[asyncio.Task]) -> list[Exception]:
+        failures: list[Exception] = []
+        for task in pending:
+            run_id = self._worker_run_ids.get(task)
+            if not run_id:
+                continue
+            try:
+                await self.cancel(run_id, reason="worker shrink")
+            except Exception as exc:
+                logger.opt(exception=exc).error("P1-26: shrink cancel 失败: run_id={}", run_id)
+                failures.append(exc)
+        return failures
 
     async def _prepare_runtime(self, context: RunContext) -> Any:
         """准备运行时句柄"""
@@ -1718,18 +1703,17 @@ class Engine:
         from antcode_worker.runtime.spec import RuntimeSpec as RuntimeSpecV2
 
         domain_spec = context.runtime_spec
-        spec = RuntimeSpecV2()
-        if domain_spec is not None:
-            spec = RuntimeSpecV2(
-                python_spec=PythonSpec(
-                    version=domain_spec.python_version,
-                    path=domain_spec.python_path,
-                ),
-                lock_source=LockSource(requirements=list(domain_spec.requirements)),
-                constraints=list(domain_spec.constraints),
-                extras=list(domain_spec.extras),
-                env_vars=dict(domain_spec.env_vars),
-            )
+        if domain_spec is None:
+            from antcode_worker.engine.unbound_runtime import worker_python_runtime_handle
+
+            return worker_python_runtime_handle()
+        spec = RuntimeSpecV2(
+            python_spec=PythonSpec(version=domain_spec.python_version, path=domain_spec.python_path),
+            lock_source=LockSource(requirements=list(domain_spec.requirements)),
+            constraints=list(domain_spec.constraints),
+            extras=list(domain_spec.extras),
+            env_vars=dict(domain_spec.env_vars),
+        )
         return await self._runtime_manager.prepare(spec)
 
     def _build_fallback_plan(self, context: RunContext, payload: Any, runtime_handle: Any) -> Any:

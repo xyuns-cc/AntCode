@@ -1,19 +1,17 @@
-"""Idempotent Redis cleanup for deleted Spider task runs."""
+"""Idempotent Redis cleanup for deleted Spider task runs.
+
+本模块只依赖 Redis key 规范，刻意不导入 ORM 模型或控制面配置：
+项目级联删除的清理路径要能在没有 DATABASE_URL 的进程里导入。
+按状态过滤的常量见 ``antcode_core.domain.models.task_status_sets``。
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
 
-from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.infrastructure.redis.keys import RedisKeys
 
-SPIDER_WRITABLE_TASK_STATUSES = (
-    TaskStatus.PENDING,
-    TaskStatus.DISPATCHING,
-    TaskStatus.QUEUED,
-    TaskStatus.RUNNING,
-)
 _DELETE_BATCH_SIZE = 200
 SPIDER_CLEANUP_EVENT_RUN_LIMIT = 200
 
@@ -70,7 +68,6 @@ class SpiderStorageCleanupService:
 
 __all__ = [
     "SPIDER_CLEANUP_EVENT_RUN_LIMIT",
-    "SPIDER_WRITABLE_TASK_STATUSES",
     "SpiderStorageCleanupService",
     "iter_cleanup_run_batches",
 ]

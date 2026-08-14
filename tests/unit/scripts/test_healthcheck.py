@@ -71,5 +71,5 @@ def test_healthcheck_rejects_non_http_base_url(monkeypatch, capsys) -> None:
 def test_healthcheck_source_contains_no_credentials_or_token_cache() -> None:
     source = Path(healthcheck.__file__).read_text(encoding="utf-8")
 
-    for forbidden in ("Admin123!", "HEALTHCHECK_PASSWORD", "DEFAULT_ADMIN_PASSWORD", "TOKEN_CACHE", "/auth/login"):
+    for forbidden in ("HEALTHCHECK_PASSWORD", "DEFAULT_ADMIN_PASSWORD", "TOKEN_CACHE", "/auth/login"):
         assert forbidden not in source

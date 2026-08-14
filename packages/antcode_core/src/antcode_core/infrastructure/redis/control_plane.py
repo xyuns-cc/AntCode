@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from antcode_core.common.config import settings
+from antcode_core.common.settings_ref import current_settings
 from antcode_core.infrastructure.redis.runtime_control_keys import (
     require_runtime_control_request_id,
     runtime_control_request_id,
@@ -21,13 +21,18 @@ def _reject_json_constant(value: str) -> None:
 
 def redis_namespace(namespace: str | None = None) -> str:
     """获取 Redis 命名空间。"""
-    value = (namespace or settings.REDIS_NAMESPACE or "antcode").strip()
+    value = (namespace or current_settings().REDIS_NAMESPACE or "antcode").strip()
     return value or "antcode"
 
 
 def task_ready_stream(worker_id: str, namespace: str | None = None) -> str:
-    """任务 ready stream key。"""
-    return f"{redis_namespace(namespace)}:task:ready:{worker_id}"
+    """任务 ready stream key，与权威 Lease 共享 Redis Cluster slot。"""
+    return f"{{{redis_namespace(namespace)}}}:task:ready:{worker_id}"
+
+
+def scheduler_dispatch_fencing_key(namespace: str | None = None) -> str:
+    """Current Master epoch in the ready-stream Redis Cluster slot."""
+    return f"{{{redis_namespace(namespace)}}}:fencing:dispatch:master"
 
 
 def task_result_stream(namespace: str | None = None) -> str:
@@ -61,8 +66,8 @@ def log_chunk_stream_pattern(namespace: str | None = None) -> str:
 
 
 def control_stream(worker_id: str, namespace: str | None = None) -> str:
-    """控制通道 stream key。"""
-    return f"{redis_namespace(namespace)}:control:{worker_id}"
+    """控制通道 stream key，与权威 Lease 共享 Redis Cluster slot。"""
+    return f"{{{redis_namespace(namespace)}}}:control:{worker_id}"
 
 
 # E5: consumer group 命名带 namespace，避免 REDIS_NAMESPACE 改动后
@@ -84,7 +89,7 @@ def log_ingest_consumer_group(namespace: str | None = None) -> str:
 
 def control_global_stream(namespace: str | None = None) -> str:
     """可信 Gateway 使用的共享广播 stream；Direct Worker 不得访问。"""
-    return f"{redis_namespace(namespace)}:control:global"
+    return f"{{{redis_namespace(namespace)}}}:control:global"
 
 
 def control_reply_stream(request_id: str, namespace: str | None = None) -> str:
@@ -105,9 +110,17 @@ def runtime_control_settlement_key(
     return f"{{{redis_namespace(namespace)}}}:control:settlement:{worker_segment}:{digest}"
 
 
+def cancel_tombstone_key(worker_id: str, run_id: str, namespace: str | None = None) -> str:
+    """Build a cancel tombstone key inside one Worker's ACL scope."""
+    worker_segment = validate_worker_key_segment(worker_id)
+    if not run_id:
+        raise ValueError("取消墓碑 run_id 不能为空")
+    return f"{{{redis_namespace(namespace)}}}:cancel:tombstone:{worker_segment}:{run_id}"
+
+
 def worker_heartbeat_key(worker_id: str, namespace: str | None = None) -> str:
-    """Worker 心跳 key。"""
-    return f"{redis_namespace(namespace)}:heartbeat:{worker_id}"
+    """Worker 心跳 key，与权威 Lease 共享 Redis Cluster slot。"""
+    return f"{{{redis_namespace(namespace)}}}:heartbeat:{worker_id}"
 
 
 def worker_group(namespace: str | None = None) -> str:
@@ -189,11 +202,6 @@ def worker_install_key_nonce_key(
     )
 
 
-def worker_install_key_meta_key(key: str, namespace: str | None = None) -> str:
-    """安装 Key 元信息 key。"""
-    return f"{redis_namespace(namespace)}:worker:install-key:meta:{install_key_redis_digest(key)}"
-
-
 def build_cancel_control_payload(run_id: str, reason: str = "", task_id: str | None = None) -> dict[str, str]:
     """构建取消任务控制指令。"""
     payload = {
@@ -257,6 +265,7 @@ def decode_stream_payload(data: Mapping[Any, Any]) -> dict[str, Any]:
 
 __all__ = [
     "redis_namespace",
+    "scheduler_dispatch_fencing_key",
     "task_ready_stream",
     "task_result_stream",
     "log_stream_key",
@@ -272,6 +281,7 @@ __all__ = [
     "runtime_control_request_id",
     "require_runtime_control_request_id",
     "runtime_control_settlement_key",
+    "cancel_tombstone_key",
     "worker_heartbeat_key",
     "worker_group",
     "control_group",
@@ -283,7 +293,6 @@ __all__ = [
     "worker_install_source_block_key",
     "worker_install_key_claim_key",
     "worker_install_key_nonce_key",
-    "worker_install_key_meta_key",
     "build_cancel_control_payload",
     "build_config_update_control_payload",
     "build_runtime_manage_control_payload",

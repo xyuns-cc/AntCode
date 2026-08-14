@@ -55,14 +55,16 @@ async def test_task_dispatch_throughput(load_settings: LoadSettings) -> None:
 
         try:
             report = await run_load("task-dispatch", load_settings.stage, trigger)
+            all_triggered = report.summary.failed == 0 and _all_triggered(report.values)
+            if all_triggered:
+                completion_seconds = await wait_for_successful_runs(
+                    api,
+                    task_ids,
+                    load_settings.backlog_timeout_seconds,
+                    expected_worker_id=worker_id,
+                )
             assert_report(report, load_settings.thresholds, HTTP_OK)
-            assert _all_triggered(report.values)
-            completion_seconds = await wait_for_successful_runs(
-                api,
-                task_ids,
-                load_settings.backlog_timeout_seconds,
-                expected_worker_id=worker_id,
-            )
+            assert all_triggered
         finally:
             await api.delete_tasks(task_ids)
     emit_report(
@@ -90,13 +92,16 @@ async def test_backlog_recovery(load_settings: LoadSettings) -> None:
 
         try:
             report = await run_load("backlog-trigger", stage, trigger)
+            all_triggered = report.summary.failed == 0 and _all_triggered(report.values)
+            if all_triggered:
+                recovery_seconds = await wait_for_successful_runs(
+                    api,
+                    task_ids,
+                    load_settings.backlog_timeout_seconds,
+                    expected_worker_id=worker_id,
+                )
             assert_report(report, load_settings.thresholds, HTTP_OK)
-            recovery_seconds = await wait_for_successful_runs(
-                api,
-                task_ids,
-                load_settings.backlog_timeout_seconds,
-                expected_worker_id=worker_id,
-            )
+            assert all_triggered
         finally:
             await api.delete_tasks(task_ids)
     emit_report(

@@ -184,6 +184,13 @@ class WorkerStatus(StrEnum):
     CONNECTING = "connecting"
 
 
+class WorkerPermission(StrEnum):
+    """用户对 Worker 的授权级别。"""
+
+    VIEW = "view"
+    USE = "use"
+
+
 # ========== 审计日志相关枚举 ==========
 
 
@@ -213,6 +220,7 @@ class AuditAction(StrEnum):
     TASK_DELETE = "task_delete"
     TASK_EXECUTE = "task_execute"
     TASK_STOP = "task_stop"
+    REDISPATCH_GIVE_UP = "redispatch_give_up"
 
     # Worker 相关
     WORKER_CREATE = "worker_create"
@@ -277,6 +285,7 @@ __all__ = [
     "RuntimeLocation",
     # Worker 节点相关
     "WorkerStatus",
+    "WorkerPermission",
     # 审计日志相关
     "AuditAction",
     # 爬取批次相关

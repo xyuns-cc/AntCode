@@ -12,8 +12,6 @@ P3 LeaseStore 已接管租约状态机:
 - ``Lease`` 通过 ``LeaseStore.grant(worker_id, current_lease_id, metrics)``
   发租 / 续租,返回真 lease_id + expires_at_ms。``request.metrics`` 顺便
   写到 ``heartbeat:{worker_id}`` Hash,保留运维 dashboard 可见。
-- 若构造时未注入 LeaseStore(例如 Redis 不可用),退化为 P1c 阶段的
-  ``lease-{worker_id}-{ts}`` 占位实现,保留兼容。
 - ``CancelTask`` / ``UpdateConfig`` 把控制指令 xadd 到对应
   ``control:{worker_id}`` Stream（payload 与 control_plane helpers 对齐），
   由 ``WatchControl`` 消费推送。
@@ -28,18 +26,24 @@ P3 LeaseStore 已接管租约状态机:
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, NoReturn
 
 import grpc
 from antcode_contracts import control_pb2
-from antcode_contracts.common_pb2 import Timestamp
 from antcode_contracts.control_pb2_grpc import ControlServiceServicer
+from antcode_contracts.wire_contract import WorkerWireContractError
 from antcode_core.application.services.lease_service import (
     LeaseConflictError,
+    LeaseIneligibleError,
     LeaseRevokedError,
+    wire_lease_policy,
+)
+from antcode_core.application.services.workers.worker_lease_issuance import (
+    WorkerLeaseGrantRequest,
+    WorkerLeaseRejected,
+    grant_authorized_worker_lease,
 )
 from antcode_core.infrastructure.redis import (
     build_cancel_control_payload,
@@ -48,7 +52,6 @@ from antcode_core.infrastructure.redis import (
     control_global_stream,
     control_group,
     control_stream,
-    decode_stream_payload,
     get_redis_client,
     trim_acknowledged_stream,
 )
@@ -56,34 +59,42 @@ from loguru import logger
 
 from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import LeaseHandler
-from antcode_gateway.services.lease_heartbeat import decode_lease_heartbeat, persist_legacy_heartbeat
-from antcode_gateway.services.runtime_control_expiry import (
-    build_runtime_control_event,
-    prepare_runtime_control_delivery,
+from antcode_gateway.security_audit import SecurityAuditor
+from antcode_gateway.services.control_ack_settlement import settle_control_ack as _settle_control_ack
+from antcode_gateway.services.control_event_builders import build_control_event
+from antcode_gateway.services.control_stream_ownership import (
+    ControlPendingEntry,
+    ControlPendingOwnerError,
+    ack_owned_control_entry,
+    control_consumer_name,
+    recover_stale_control_entries,
+    stream_recovered_control_entries,
 )
+from antcode_gateway.services.lease_heartbeat import (
+    decode_lease_heartbeat,
+    granted_lease_response,
+    persist_legacy_heartbeat,
+    revoked_lease_response,
+)
+from antcode_gateway.services.registration_gate import audit_registration_rejection, registration_validation_error
+from antcode_gateway.services.runtime_control_expiry import prepare_runtime_control_delivery
 from antcode_gateway.services.runtime_control_recovery import recover_committed_runtime_result
-from antcode_gateway.services.runtime_control_result import (
-    ControlEventGoneError,
-    is_committed_runtime_result,
-    publish_runtime_control_result,
-    require_pending_owner,
-    validate_control_ack,
-)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from antcode_core.application.services.lease_service import LeaseStore
-    from antcode_core.domain.models import Worker
-
-# 兜底常量 —— 仅在未注入 LeaseStore 时使用（保持旧调用方兼容）。
-# 真正的 TTL / renew_after 由 ``LeaseStore.policy`` 决定。
-DEFAULT_LEASE_TTL_MS = 30_000
-DEFAULT_LEASE_RENEW_AFTER_MS = 10_000
+    from antcode_core.application.services.workers.worker_lease_authority import WorkerLeaseAuthorizer
 
 # WatchControl 内部轮询间隔（block 毫秒）
 CONTROL_POLL_BLOCK_MS = 1_000
 
 # P1-#8: control:{worker_id} stream 的近似最大长度,避免无界增长。
 CONTROL_STREAM_MAXLEN = 1_000
+
+
+async def _abort(context: grpc.aio.ServicerContext, code: grpc.StatusCode, details: str) -> NoReturn:
+    """终止 RPC。``abort`` 必然抛异常；它一旦返回就说明 gRPC 契约被破坏，绝不能伪造响应顶上。"""
+    await context.abort(code, details)
+    raise RuntimeError("gRPC context.abort returned unexpectedly")
 
 
 @dataclass(frozen=True)
@@ -129,60 +140,6 @@ def _control_group_for_stream(stream_key: str, worker_id: str) -> str:
     raise PermissionError("control stream does not belong to authenticated worker")
 
 
-async def _settle_control_ack(
-    redis,
-    *,
-    event_id: str,
-    stream_key: str,
-    message_id: str,
-    worker_id: str,
-    group: str,
-    request: control_pb2.AckControlRequest,
-) -> bool:
-    is_runtime = await is_committed_runtime_result(
-        redis,
-        event_id=event_id,
-        worker_id=worker_id,
-        request=request,
-    )
-    if not is_runtime:
-        try:
-            decoded, is_runtime = await validate_control_ack(
-                redis,
-                stream_key=stream_key,
-                message_id=message_id,
-                request=request,
-            )
-            await require_pending_owner(
-                redis,
-                stream_key=stream_key,
-                group=group,
-                message_id=message_id,
-                worker_id=worker_id,
-            )
-        except ControlEventGoneError as exc:
-            # at-least-once 重试撞上已结算/已裁剪的事件：幂等返回，不算协议错误。
-            logger.info(
-                "AckControl 幂等重放（事件已结算）: worker={} stream={} msg_id={} detail={}",
-                worker_id,
-                stream_key,
-                message_id,
-                exc,
-            )
-            return False
-        if is_runtime:
-            await publish_runtime_control_result(
-                redis,
-                event_id=event_id,
-                worker_id=worker_id,
-                message_id=message_id,
-                decoded=decoded,
-                request=request,
-            )
-    acked = await redis.xack(stream_key, group, message_id)
-    return is_runtime or int(acked or 0) > 0
-
-
 async def _trim_settled_control(
     redis,
     stream_key: str,
@@ -208,23 +165,26 @@ class GatewayControlService(ControlServiceServicer):
     - ``Register`` 成功时返回 lease 策略，不修改 lease 状态。
     - ``Lease`` 走 ``LeaseStore.grant`` 真发租 / 续租（含 lease_id 一致性）。
     - ``Deregister`` 调 ``LeaseStore.revoke`` 主动撤销。
-    未注入时退化为 P1c 的占位实现，保留旧测试调用方式可用。
+    未注入时 Register / Lease / Deregister 一律 UNAVAILABLE，没有占位实现。
     """
 
     def __init__(
         self,
         lease_handler: LeaseHandler | None = None,
         lease_store: LeaseStore | None = None,
+        *,
+        lease_authorizer: WorkerLeaseAuthorizer | None = None,
     ):
         self._lease_handler = lease_handler or LeaseHandler()
         self._lease_store = lease_store
+        self._lease_authorizer = lease_authorizer
+        # 默认 no-op；生产由 main 在装配阶段 bind_security_auditor 接上真实 Stream。
+        self._security_auditor = SecurityAuditor()
         self._control_group_lock = asyncio.Lock()
         self._initialized_control_groups: set[tuple[str, str]] = set()
-        # P1-16: event_id 使用可自解释格式 f"{stream_key}|{msg_id}",AckControl
-        # 直接反解析。原方案的进程内 _event_id_map 在多 gateway 副本 / 单副本重启
-        # 后会丢失映射,导致 AckControl 恒返回 received=False,control 事件被
-        # 无限重投。stream_key 本身是 control:{worker_id} / control:global,
-        # worker 侧本就知道自己的 worker_id,不构成新的信息泄露。
+        # P1-16: event_id 用自解释的 f"{stream_key}|{msg_id}",AckControl 直接反解析。
+        # 进程内映射会在多副本 / 重启后丢失,使 AckControl 恒 received=False 而无限重投;
+        # stream_key 只含 worker 自知的 worker_id,不构成新的信息泄露。
         if lease_store is not None:
             logger.info(
                 "ControlService 已初始化（LeaseStore 已注入: ttl_ms={}, renew_after_ms={}）",
@@ -232,11 +192,11 @@ class GatewayControlService(ControlServiceServicer):
                 lease_store.policy.renew_after_ms,
             )
         else:
-            logger.info("ControlService 已初始化（LeaseStore 未注入，使用占位 Lease）")
+            logger.info("ControlService 已初始化（LeaseStore 未注入：Register / Lease 一律 UNAVAILABLE）")
 
-    # =========================================================================
-    # Register / Deregister
-    # =========================================================================
+    def bind_security_auditor(self, auditor: SecurityAuditor) -> None:
+        """接入安全审计 Stream（由 main 装配）。Register 免认证，爆破只有这里看得见。"""
+        self._security_auditor = auditor
 
     async def Register(
         self,
@@ -248,19 +208,14 @@ class GatewayControlService(ControlServiceServicer):
         logger.info(f"收到 ControlService.Register 请求: worker_id={worker_id}")
 
         if not api_key:
-            return control_pb2.RegisterResponse(success=False, error="缺少 API Key")
+            return await self._reject_registration(context, worker_id, "缺少 API Key")
 
-        is_valid, error_msg, _worker = await self._verify_registration(api_key=api_key, worker_id=worker_id)
-        if not is_valid:
-            logger.warning(f"Register 验证失败: worker_id={worker_id}, error={error_msg}")
-            return control_pb2.RegisterResponse(success=False, error=error_msg)
+        if error_msg := await registration_validation_error(api_key, worker_id):
+            return await self._reject_registration(context, worker_id, error_msg)
 
         if self._lease_store is None:
             logger.error("Register 拒绝: LeaseStore 未就绪")
-            return control_pb2.RegisterResponse(
-                success=False,
-                error="lease service unavailable",
-            )
+            return control_pb2.RegisterResponse(success=False, error="lease service unavailable")
         logger.info(f"Worker 注册成功: worker_id={worker_id}")
         return control_pb2.RegisterResponse(
             success=True,
@@ -269,6 +224,14 @@ class GatewayControlService(ControlServiceServicer):
             lease_renew_after_ms=self._lease_store.policy.renew_after_ms,
             runtime_control_results_v1=True,
         )
+
+    async def _reject_registration(
+        self, context: grpc.aio.ServicerContext, worker_id: str, error: str
+    ) -> control_pb2.RegisterResponse:
+        """记录并返回一次 Register 拒绝（含 audit:security 事件）。"""
+        peer = str(context.peer() or "")
+        await audit_registration_rejection(self._security_auditor, worker_id, peer=peer, error=error)
+        return control_pb2.RegisterResponse(success=False, error=error)
 
     async def GetCapabilities(
         self,
@@ -297,31 +260,6 @@ class GatewayControlService(ControlServiceServicer):
             return
         if not lease_id or not await self._lease_store.is_current(worker_id, lease_id):
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "worker lease is not current")
-
-    async def _verify_registration(
-        self,
-        api_key: str,
-        worker_id: str,
-    ) -> tuple[bool, str, Worker | None]:
-        """与旧 GatewayServiceImpl 行为一致的注册校验。"""
-        try:
-            from antcode_core.common.security.api_key import verify_api_key
-            from antcode_core.domain.models import Worker
-
-            if not await verify_api_key(api_key, worker_id or None):
-                return False, "无效的 API Key", None
-            worker = await Worker.filter(public_id=worker_id).first()
-            if worker is None:
-                return False, "Worker 不存在", None
-            if worker_id and worker.public_id and worker_id != worker.public_id:
-                return False, "Worker ID 不匹配", None
-            return True, "", worker
-        except ImportError:
-            logger.exception("antcode_core.domain.models 不可用，无法验证注册 API Key")
-            return False, "Worker/API Key 验证服务不可用", None
-        except Exception as exc:
-            logger.exception(f"验证注册请求异常: {exc}")
-            return False, f"验证失败: {exc}", None
 
     async def Deregister(
         self,
@@ -367,52 +305,44 @@ class GatewayControlService(ControlServiceServicer):
         request: control_pb2.LeaseRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_pb2.LeaseResponse:
-        """发租或续租：P3 走 LeaseStore，未注入时退回占位。"""
+        """Issue or renew only after authoritative lifecycle checks."""
         worker_id = await require_authenticated_worker(context, request.worker_id)
         if not worker_id:
-            return control_pb2.LeaseResponse(
-                lease_id="",
-                expires_at_ms=0,
-                renew_after_ms=DEFAULT_LEASE_RENEW_AFTER_MS,
-                revoked=True,
-                revoke_reason="worker_id 为空",
-            )
+            # LeaseStore 未注入时也必须下发权威时序，走共享工厂（这里曾是第 10 份硬写的 TTL/renew 副本）。
+            return revoked_lease_response(wire_lease_policy(), "worker_id 为空")
         if self._lease_store is None:
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
-            return control_pb2.LeaseResponse(revoked=True)
+            await _abort(context, grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
+        if self._lease_authorizer is None:
+            await _abort(context, grpc.StatusCode.UNAVAILABLE, "lease authority unavailable")
         try:
             heartbeat = decode_lease_heartbeat(request, worker_id)
         except ValueError:
-            logger.warning("Lease capabilities 非法: worker_id={}", worker_id)
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid worker capabilities")
-            raise RuntimeError("gRPC context.abort returned unexpectedly")
+            logger.warning("Lease metrics 或 capabilities 非法: worker_id={}", worker_id)
+            await _abort(context, grpc.StatusCode.INVALID_ARGUMENT, "invalid worker metrics or capabilities")
         try:
-            lease = await self._lease_store.grant(
-                worker_id,
-                current_lease_id=request.current_lease_id or "",
-                metrics=heartbeat.metrics,
-                capabilities=heartbeat.capabilities,
+            lease = await grant_authorized_worker_lease(
+                self._lease_store,
+                self._lease_authorizer,
+                WorkerLeaseGrantRequest(
+                    worker_id=worker_id,
+                    current_lease_id=request.current_lease_id or "",
+                    metrics=heartbeat.metrics,
+                    capabilities=heartbeat.capabilities,
+                ),
             )
-        except (LeaseConflictError, LeaseRevokedError) as exc:
+        except WorkerWireContractError as exc:
+            # 线协议错配必须比 fencing 更响：运维看到的是"Worker 在线但零产出"，
+            # 只有把版本要求写进日志与 revoke_reason 才排得出来。
+            logger.error("Lease 拒发（Worker 线协议版本不兼容）: worker_id={} reason={}", worker_id, exc)
+            return revoked_lease_response(self._lease_store.policy, str(exc))
+        except (LeaseConflictError, LeaseIneligibleError, LeaseRevokedError, WorkerLeaseRejected) as exc:
             logger.warning("Lease 被 fencing: worker_id={} lease_id={}", worker_id, request.current_lease_id)
-            return control_pb2.LeaseResponse(
-                lease_id="",
-                expires_at_ms=0,
-                renew_after_ms=self._lease_store.policy.renew_after_ms,
-                revoked=True,
-                revoke_reason=str(exc),
-            )
+            return revoked_lease_response(self._lease_store.policy, str(exc))
         except Exception as exc:
             logger.exception(f"Lease grant 失败: worker_id={worker_id}, exc={exc}")
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "lease grant failed")
-            return control_pb2.LeaseResponse(revoked=True)
+            await _abort(context, grpc.StatusCode.UNAVAILABLE, "lease grant failed")
         await persist_legacy_heartbeat(self._lease_handler, heartbeat.heartbeat)
-        return control_pb2.LeaseResponse(
-            lease_id=lease.lease_id,
-            expires_at_ms=lease.expires_at_ms,
-            renew_after_ms=self._lease_store.policy.renew_after_ms,
-            revoked=False,
-        )
+        return granted_lease_response(lease, self._lease_store.policy)
 
     # =========================================================================
     # CancelTask / UpdateConfig - 推到 control stream
@@ -519,20 +449,42 @@ class GatewayControlService(ControlServiceServicer):
         )
         for channel in channels:
             await self._ensure_control_group(redis, channel.stream_key, channel.group)
-        await context.send_initial_metadata(())
+        consumer = control_consumer_name(worker_id, request.lease_id)
         session = _ControlWatchSession(
             context=context,
             worker_id=worker_id,
             lease_id=request.lease_id,
-            consumer=worker_id,
+            consumer=consumer,
             channels=channels,
         )
+        try:
+            claimed = await recover_stale_control_entries(
+                redis,
+                channels=channels,
+                worker_id=worker_id,
+                lease_id=request.lease_id,
+            )
+        except LeaseConflictError as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return
+        await self._require_current_lease(context, worker_id, request.lease_id)
+        await context.send_initial_metadata(())
+        if claimed:
+            logger.info(
+                "WatchControl 已接管旧代际 PEL: worker_id={} consumer={} claimed={}",
+                worker_id,
+                consumer,
+                len(claimed),
+            )
         logger.info(f"WatchControl 已建立: worker_id={worker_id}")
         try:
             async for event in self._replay_pending_control(redis, session):
                 yield event
             async for event in self._stream_new_control(redis, session):
                 yield event
+        except LeaseConflictError as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return
         except asyncio.CancelledError:
             logger.info(f"WatchControl 被取消: worker_id={worker_id}")
             raise
@@ -590,8 +542,9 @@ class GatewayControlService(ControlServiceServicer):
     ) -> AsyncIterator[control_pb2.ControlEvent]:
         block_ms = max(1, CONTROL_POLL_BLOCK_MS // len(session.channels))
         while not session.context.cancelled():
-            # 每轮一次的廉价存活检查：租约失效时尽快中断空转长轮询。
-            # 逐条消息的 load-bearing fencing 在 _decode_control_event 内完成。
+            async for event in stream_recovered_control_entries(redis, session, self._decode_control_event):
+                yield event
+            # 每轮一次的廉价存活检查（逐条 fencing 在 _decode_control_event 内）。
             await self._require_current_lease(session.context, session.worker_id, session.lease_id)
             for channel in session.channels:
                 try:
@@ -604,9 +557,8 @@ class GatewayControlService(ControlServiceServicer):
                         block=block_ms,
                     )
                 except asyncio.CancelledError:
-                    # C5：与 _replay_pending_control 一致，重新抛出取消而非吞掉，
-                    # 让外层 WatchControl 的 CancelledError 分支正确触发，保持
-                    # async 取消语义（不被伪装成干净 EOF）。
+                    # C5：与 _replay_pending_control 一致重抛取消，让外层 WatchControl 的
+                    # CancelledError 分支正确触发，别把取消伪装成干净 EOF。
                     raise
                 except Exception as exc:
                     raise RuntimeError("WatchControl xreadgroup 失败") from exc
@@ -630,11 +582,10 @@ class GatewayControlService(ControlServiceServicer):
         message_id: str,
         data: dict,
     ) -> control_pb2.ControlEvent | None:
-        # 唯一的 per-message 租约 fencing 点：读取之后、投递给 Worker 之前。
-        # replay / 新消息两条路径都经过这里，勿在上游循环重复检查。
+        # 唯一的 per-message 租约 fencing 点（replay 与新消息都经过，勿在上游重复检查）。
         await self._require_current_lease(session.context, session.worker_id, session.lease_id)
         try:
-            event = self._build_control_event(stream_key=stream_key, msg_id=message_id, data=data)
+            event = build_control_event(stream_key=stream_key, msg_id=message_id, data=data)
         except Exception:
             logger.exception(
                 "control event 构建失败，按毒消息丢弃: stream={} msg_id={}",
@@ -662,7 +613,17 @@ class GatewayControlService(ControlServiceServicer):
         logger.warning(f"丢弃无法解析的 control event(已 ACK): stream={stream_key} msg_id={message_id}")
         group = _control_group_for_stream(stream_key, session.worker_id)
         try:
-            await redis.xack(stream_key, group, message_id)
+            await ack_owned_control_entry(
+                redis,
+                ControlPendingEntry(
+                    session.worker_id,
+                    session.lease_id,
+                    stream_key,
+                    group,
+                    message_id,
+                    session.consumer,
+                ),
+            )
         except Exception:
             logger.exception(
                 "毒 control event ACK 失败: stream={} msg_id={}",
@@ -691,7 +652,17 @@ class GatewayControlService(ControlServiceServicer):
         if not recovered:
             return False
         group = _control_group_for_stream(stream_key, session.worker_id)
-        await redis.xack(stream_key, group, message_id)
+        await ack_owned_control_entry(
+            redis,
+            ControlPendingEntry(
+                session.worker_id,
+                session.lease_id,
+                stream_key,
+                group,
+                message_id,
+                session.consumer,
+            ),
+        )
         await _trim_settled_control(redis, stream_key, message_id, group=group)
         logger.info(
             "恢复已提交的 runtime control: worker={} stream={} msg_id={}",
@@ -717,69 +688,9 @@ class GatewayControlService(ControlServiceServicer):
             message_id=message_id,
             event=event,
             group=_control_group_for_stream(stream_key, session.worker_id),
+            consumer_name=session.consumer,
+            lease_id=session.lease_id,
             trim=_trim_settled_control,
-        )
-
-    def _build_control_event(
-        self,
-        stream_key: str,
-        msg_id: str,
-        *,
-        data: dict,
-    ) -> control_pb2.ControlEvent | None:
-        """Decode one Redis control entry and dispatch to its typed builder."""
-        try:
-            decoded = decode_stream_payload(data)
-        except Exception as exc:
-            logger.exception(f"control stream payload 解码失败: {exc}")
-            return None
-        event_id = f"{stream_key}|{msg_id}"
-        control_type = decoded.get("control_type", "")
-        builder = self._control_event_builders().get(control_type)
-        if builder is not None:
-            return builder(event_id=event_id, stream_key=stream_key, msg_id=msg_id, decoded=decoded)
-        logger.warning(f"未识别的 control_type: stream={stream_key} msg_id={msg_id} control_type={control_type}")
-        return None
-
-    def _control_event_builders(self) -> dict[str, Any]:
-        return {
-            "cancel": self._build_task_cancel_event,
-            "kill": self._build_task_cancel_event,
-            "config_update": self._build_config_update_event,
-            "runtime_manage": self._build_runtime_control_event,
-            "ping": self._build_ping_event,
-        }
-
-    def _build_task_cancel_event(self, *, event_id: str, decoded: dict, **_kwargs) -> control_pb2.ControlEvent:
-        return control_pb2.ControlEvent(
-            event_id=event_id,
-            task_cancel=control_pb2.TaskCancel(
-                task_id=str(decoded.get("task_id", "")),
-                run_id=str(decoded.get("run_id", "")),
-                reason=str(decoded.get("reason", "")),
-            ),
-        )
-
-    def _build_config_update_event(self, *, event_id: str, decoded: dict, **_kwargs) -> control_pb2.ControlEvent:
-        config = decoded.get("config") or {}
-        if not isinstance(config, dict):
-            config = {}
-        return control_pb2.ControlEvent(
-            event_id=event_id,
-            config_update=control_pb2.ConfigUpdate(config={str(k): str(v) for k, v in config.items()}),
-        )
-
-    def _build_runtime_control_event(self, **kwargs) -> control_pb2.ControlEvent | None:
-        return build_runtime_control_event(**kwargs)
-
-    @staticmethod
-    def _build_ping_event(*, event_id: str, **_kwargs) -> control_pb2.ControlEvent:
-        now = time.time()
-        return control_pb2.ControlEvent(
-            event_id=event_id,
-            ping=control_pb2.Ping(
-                timestamp=Timestamp(seconds=int(now), nanos=int((now - int(now)) * 1e9)),
-            ),
         )
 
     async def AckControl(
@@ -816,6 +727,9 @@ class GatewayControlService(ControlServiceServicer):
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
             return control_pb2.AckControlResponse(received=False)
         except LeaseConflictError as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return control_pb2.AckControlResponse(received=False)
+        except ControlPendingOwnerError as exc:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
             return control_pb2.AckControlResponse(received=False)
         except ValueError as exc:

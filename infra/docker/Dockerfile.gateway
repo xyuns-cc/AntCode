@@ -86,6 +86,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --chown=appuser:appgroup packages/antcode_core/src/antcode_core /app/packages/antcode_core/src/antcode_core
 COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /app/packages/antcode_contracts/src/antcode_contracts
 COPY --chown=appuser:appgroup services/gateway/src/antcode_gateway /app/services/gateway/src/antcode_gateway
+COPY --chmod=0555 infra/docker/entrypoint.load-secrets.sh /usr/local/bin/antcode-load-secrets
 
 # 创建数据目录并设置权限
 RUN mkdir -p \
@@ -115,4 +116,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
     CMD curl -fsS http://localhost:8100/health/ready >/dev/null || exit 1
 
 # 启动命令
+ENTRYPOINT ["/usr/local/bin/antcode-load-secrets"]
 CMD ["python", "-m", "antcode_gateway.main"]

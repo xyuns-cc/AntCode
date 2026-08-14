@@ -158,7 +158,7 @@ class TestTransportConfigValidation:
             direct=DirectConfig(),
             gateway=GatewayConfigSpec(host="gateway.example.com", port=50051),
         )
-
+        config.gateway.secret_key = "gateway-payload-secret-material-0001"
         validate_transport_config(config)
 
     def test_gateway_mode_forbids_localhost_redis_url(self):

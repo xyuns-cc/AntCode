@@ -133,21 +133,9 @@ class TaskService extends BaseService {
   }
 
   // 获取任务执行详情
-  // 优先调用新 alias /api/v1/runs/{run_id}，404 时回退到 /api/v1/tasks/runs/{run_id}
   async getTaskRun(runId: string): Promise<TaskExecution> {
-    try {
-      const response = await apiClient.get<ApiResponse<TaskExecution>>(`/api/v1/runs/${runId}`)
-      return response.data.data
-    } catch (error) {
-      const axiosError = error as AxiosError
-      if (axiosError?.response?.status === 404) {
-        const fallback = await apiClient.get<ApiResponse<TaskExecution>>(
-          `/api/v1/tasks/runs/${runId}`
-        )
-        return fallback.data.data
-      }
-      throw error
-    }
+    const response = await apiClient.get<ApiResponse<TaskExecution>>(`/api/v1/runs/${runId}`)
+    return response.data.data
   }
 }
 

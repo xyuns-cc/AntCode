@@ -24,5 +24,5 @@ def test_task_logs_storage_order_index_is_online_and_consistent():
     assert index.fields == ["run_id", "id"]
     for sql in (migration, init_sql):
         assert 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_task_logs_run_id_id"' in sql
-        assert 'ON "task_logs" ("run_id", "id")' in sql
+        assert 'ON public."task_logs" ("run_id", "id")' in sql
     assert "BEGIN" not in migration

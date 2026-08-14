@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from antcode_worker.engine.engine import Engine
+from antcode_worker.engine.ownership_fence import OwnershipFenceError
 from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
 
@@ -91,7 +92,7 @@ async def test_abort_lease_revocation_invokes_callback_before_halt():
 
 @pytest.mark.asyncio
 async def test_abort_lease_revocation_survives_callback_exception():
-    """P1-GW-02:回调异常不能阻止 halt(否则失去撤销效果)。"""
+    """P1-GW-02:回调异常不能阻止 halt，且必须向调用方显式传播。"""
     transport = GatewayTransport(gateway_config=GatewayConfig(worker_id="w1"))
 
     async def bad_cb(reason: str) -> None:
@@ -103,8 +104,8 @@ async def test_abort_lease_revocation_survives_callback_exception():
     transport._cancel_background_tasks = AsyncMock()
     transport._set_state = AsyncMock()
 
-    # 不 raise, halt 仍执行
-    await transport._abort_lease_revocation()
+    with pytest.raises(RuntimeError, match="engine 已挂"):
+        await transport._abort_lease_revocation()
 
     assert transport._lease_revoked is True
     transport._disconnect.assert_awaited_once()
@@ -168,22 +169,18 @@ async def test_engine_cancel_all_cancels_active_runs():
 
 
 @pytest.mark.asyncio
-async def test_engine_on_transport_lease_revoked_triggers_cancel_all_and_wakeup():
-    """P1-GW-02 端到端:transport 回调 → engine cancel_all + wakeup。"""
+async def test_engine_on_transport_lease_revoked_triggers_self_fence_and_wakeup():
+    """transport 撤销后停止 intake，并向应用暴露 fatal self-fence。"""
     engine, _ = _make_engine_with_mock_transport()
     engine._ownership_renew_wakeup = asyncio.Event()
 
-    called = {"cancel_all": False}
+    engine._running = True
+    engine._polling = True
+    with pytest.raises(OwnershipFenceError, match="gateway-revoke"):
+        await engine._on_transport_lease_revoked("gateway-revoke")
 
-    async def fake_cancel_all(reason: str = "") -> int:
-        called["cancel_all"] = True
-        called["reason"] = reason
-        return 3
-
-    engine.cancel_all = fake_cancel_all  # type: ignore[assignment]
-
-    await engine._on_transport_lease_revoked("gateway-revoke")
-
-    assert called["cancel_all"] is True
-    assert "gateway-revoke" in called["reason"]
     assert engine._ownership_renew_wakeup.is_set()
+    assert engine._running is False
+    assert engine._polling is False
+    assert engine._ownership_fenced is True
+    assert isinstance(await engine.wait_for_fatal_error(), OwnershipFenceError)

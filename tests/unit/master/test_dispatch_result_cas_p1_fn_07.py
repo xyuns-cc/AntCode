@@ -12,22 +12,23 @@ WS/触发 retry。上游 caller 见 None 就跳过下一步。
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+FENCING_TOKEN = 7
+
 
 @pytest.mark.asyncio
-async def test_failed_result_with_cas_conflict_returns_none_and_skips_side_effects():
-    """P1-FN-07 关键:CAS 拒绝时不写 log/不推 WS/不触发 retry。"""
+async def test_failed_result_rejects_legacy_non_atomic_path():
+    """失败结果不得绕过 failure settlement 分步写终态和 retry。"""
     from antcode_master.control.scheduler_loop import SchedulerService
 
     scheduler = object.__new__(SchedulerService)
     scheduler._persist_result_fields = AsyncMock()
     scheduler._log_execution = AsyncMock()
-    scheduler._push_execution_status = AsyncMock()
 
-    # 模拟 update_dispatch_status 返回 False (并发已推终态)
     from antcode_master.control import scheduler_loop as sl_mod
 
     original = sl_mod.execution_status_service.update_dispatch_status
@@ -35,47 +36,44 @@ async def test_failed_result_with_cas_conflict_returns_none_and_skips_side_effec
     try:
         execution = MagicMock()
         result = {"success": False, "error": "worker gone"}
-        outcome = await scheduler._record_dispatch_result(execution, "run-1", result)
+        with pytest.raises(RuntimeError, match="failure_settlement"):
+            await scheduler._record_dispatch_result(execution, "run-1", result)
 
-        # 返回 (None, False) 表示忽略本次结算
-        assert outcome == (None, False)
-        # 没有 ERROR 日志,只有 DEBUG(表明被跳过)
-        assert scheduler._log_execution.await_count == 1
-        assert scheduler._log_execution.await_args.args[1] == "DEBUG"
-        # 没推 WS
-        scheduler._push_execution_status.assert_not_awaited()
+        sl_mod.execution_status_service.update_dispatch_status.assert_not_awaited()
+        scheduler._log_execution.assert_not_awaited()
         scheduler._persist_result_fields.assert_not_awaited()
     finally:
         sl_mod.execution_status_service.update_dispatch_status = original
 
 
 @pytest.mark.asyncio
-async def test_failed_result_with_cas_success_still_writes_log_and_ws():
-    """P1-FN-07:CAS 成功时(True)仍按原路径 log + WS + 返回 (False, False)。"""
+async def test_failed_result_uses_atomic_settlement_before_side_effects(monkeypatch):
+    """权威入口原子持久化失败与 retry fact，再写任务日志。"""
+    from antcode_master.control import scheduler_failure_wiring
+    from antcode_master.control.failure_settlement import FailureSettlementResult
     from antcode_master.control.scheduler_loop import SchedulerService
 
     scheduler = object.__new__(SchedulerService)
-    scheduler._persist_result_fields = AsyncMock()
     scheduler._log_execution = AsyncMock()
-    scheduler._push_execution_status = AsyncMock()
+    settle = AsyncMock(return_value=FailureSettlementResult(settled=True))
+    deliver = AsyncMock()
+    monkeypatch.setattr(scheduler_failure_wiring, "settle_failure", settle)
+    monkeypatch.setattr(scheduler_failure_wiring, "deliver_retry_intent", deliver)
+    execution = SimpleNamespace(run_id="run-1", scheduler_fencing_token=FENCING_TOKEN)
 
-    from antcode_master.control import scheduler_loop as sl_mod
+    outcome = await scheduler_failure_wiring.record_dispatch_outcome(
+        scheduler,
+        execution=execution,
+        result={"success": False, "error": "worker gone"},
+    )
 
-    original = sl_mod.execution_status_service.update_dispatch_status
-    sl_mod.execution_status_service.update_dispatch_status = AsyncMock(return_value=True)
-    try:
-        execution = MagicMock()
-        result = {"success": False, "error": "worker gone"}
-        outcome = await scheduler._record_dispatch_result(execution, "run-1", result)
-
-        # 常规失败路径:返回 (False, False)
-        assert outcome == (False, False)
-        # ERROR 日志 + WS 均写入
-        assert scheduler._log_execution.await_count == 1
-        assert scheduler._log_execution.await_args.args[1] == "ERROR"
-        scheduler._push_execution_status.assert_awaited_once()
-    finally:
-        sl_mod.execution_status_service.update_dispatch_status = original
+    assert outcome == (False, False)
+    request = settle.await_args.args[0]
+    assert request.run_id == "run-1"
+    assert request.authority_token == FENCING_TOKEN
+    assert request.expected_scheduler_fencing_token == FENCING_TOKEN
+    deliver.assert_awaited_once_with(None)
+    assert scheduler._log_execution.await_args.args[1] == "ERROR"
 
 
 @pytest.mark.asyncio

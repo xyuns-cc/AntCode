@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
+from antcode_core.application.services.workers.run_settlement_guard import RunSettlementGuardUnavailable
 from antcode_core.common.security.auth import get_current_user
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.task import (
@@ -75,6 +76,8 @@ async def batch_delete_tasks(request: dict, current_user):
             else:
                 failed_count += 1
                 failed_ids.append(task_id)
+        except RunSettlementGuardUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as e:
             logger.warning(f"删除任务 {task_id} 失败: {e}")
             failed_count += 1
@@ -105,6 +108,8 @@ async def batch_operate_tasks(request: TaskBatchRequest, current_user):
                 success_ids.append(task_id)
             else:
                 failed_ids.append(task_id)
+        except RunSettlementGuardUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception:
             failed_ids.append(task_id)
 

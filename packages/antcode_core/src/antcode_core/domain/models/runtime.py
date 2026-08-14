@@ -13,7 +13,7 @@ class Runtime(BaseModel):
     语言特有字段通过 runtime_details 扩展。
     """
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     runtime_kind = fields.CharEnumField(RuntimeKind, default=RuntimeKind.PYTHON)
     scope = fields.CharEnumField(RuntimeScope)
     key = fields.CharField(max_length=100, null=True)
@@ -41,7 +41,6 @@ class Runtime(BaseModel):
             ("created_at",),
             ("created_by",),
             ("runtime_kind", "scope", "version"),
-            ("public_id",),
             ("worker_id",),
             ("worker_id", "scope"),
         ]
@@ -50,7 +49,7 @@ class Runtime(BaseModel):
 class ProjectRuntimeBinding(BaseModel):
     """项目与运行时环境绑定"""
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     project_id = fields.BigIntField()
     runtime_id = fields.BigIntField(db_index=True, description="关联的运行时 ID")
     is_current = fields.BooleanField(default=True)
@@ -64,7 +63,6 @@ class ProjectRuntimeBinding(BaseModel):
             ("runtime_id", "is_current"),
             ("created_at",),
             ("created_by",),
-            ("public_id",),
         ]
 
 

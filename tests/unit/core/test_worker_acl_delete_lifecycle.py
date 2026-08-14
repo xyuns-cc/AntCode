@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from antcode_core.application.services.workers.worker_service import (
@@ -39,9 +39,14 @@ async def test_revoke_failure_preserves_worker_credentials() -> None:
 @pytest.mark.asyncio
 async def test_worker_delete_stops_before_database_when_acl_revoke_fails(monkeypatch) -> None:
     revoker = AsyncMock(side_effect=RuntimeError("Redis unavailable"))
-    service = WorkerService(acl_revoker=revoker)
+    service = WorkerService(acl_revoker=revoker, lease_disabler=AsyncMock(return_value=True))
     worker = SimpleNamespace(
         public_id="worker-1",
+        api_key_hash="api-hash",
+        api_key_previous_hash=None,
+        api_key_previous_expires_at=None,
+        secret_key_hash="secret-hash",
+        secret_key_encrypted="encrypted-secret",
         redis_username="worker_worker-1",
         redis_acl_synced_at="timestamp",
         save=AsyncMock(),
@@ -61,7 +66,7 @@ async def test_worker_delete_stops_before_database_when_acl_revoke_fails(monkeyp
 
     revoker.assert_awaited_once_with(worker)
     assert worker.redis_acl_synced_at is None
-    worker.save.assert_awaited_once_with(update_fields=["redis_acl_synced_at"])
+    assert worker.save.await_args_list[-1] == call(update_fields=["redis_acl_synced_at"])
     service._cascade_delete_worker_data.assert_not_awaited()
 
 
@@ -87,9 +92,14 @@ async def test_database_delete_failure_does_not_restore_revoked_credentials(monk
         worker.redis_password_encrypted = None
         await worker.save(update_fields=["redis_username", "redis_password_encrypted"])
 
-    service = WorkerService(acl_revoker=clear_credentials)
+    service = WorkerService(acl_revoker=clear_credentials, lease_disabler=AsyncMock(return_value=True))
     worker = SimpleNamespace(
         public_id="worker-1",
+        api_key_hash="api-hash",
+        api_key_previous_hash=None,
+        api_key_previous_expires_at=None,
+        secret_key_hash="secret-hash",
+        secret_key_encrypted="encrypted-secret",
         redis_username="worker_worker-1",
         redis_password_encrypted="encrypted",
         redis_acl_synced_at="timestamp",
@@ -156,11 +166,32 @@ async def test_startup_sync_completes_pending_revocation(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_batch_delete_mixed_ids_reports_only_missing_workers(monkeypatch) -> None:
-    first = SimpleNamespace(id=7, public_id="worker-7", name="first", redis_username=None)
-    second = SimpleNamespace(id=8, public_id="worker-8", name="second", redis_username=None)
+    credential_fields = {
+        "api_key_hash": None,
+        "api_key_previous_hash": None,
+        "api_key_previous_expires_at": None,
+        "secret_key_hash": None,
+        "secret_key_encrypted": None,
+    }
+    first = SimpleNamespace(
+        id=7,
+        public_id="worker-7",
+        name="first",
+        redis_username=None,
+        save=AsyncMock(),
+        **credential_fields,
+    )
+    second = SimpleNamespace(
+        id=8,
+        public_id="worker-8",
+        name="second",
+        redis_username=None,
+        save=AsyncMock(),
+        **credential_fields,
+    )
     id_query = MagicMock(all=AsyncMock(return_value=[first]))
     public_query = MagicMock(all=AsyncMock(return_value=[second]))
-    service = WorkerService()
+    service = WorkerService(lease_disabler=AsyncMock(return_value=True))
     service._cascade_delete_worker_data = AsyncMock(return_value={})
     monkeypatch.setattr(config_module.settings, "REDIS_ACL_ENABLED", True)
 

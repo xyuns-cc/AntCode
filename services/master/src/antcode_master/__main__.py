@@ -13,12 +13,11 @@ AntCode Master 主入口
 """
 
 import asyncio
-import signal
 import sys
 from collections.abc import Awaitable
 from typing import cast
 
-from antcode_core.application.services.lease_service import LeasePolicy, LeaseStore
+from antcode_core.application.services.lease_service import LeaseStore, wire_lease_policy
 from antcode_core.application.services.scheduler.outbox_service import (
     scheduler_outbox_service,
 )
@@ -39,6 +38,7 @@ from antcode_master.control.redispatch_loop import redispatch_loop
 from antcode_master.control.retry_loop import retry_service
 from antcode_master.control.scheduler_event_loop import scheduler_event_loop
 from antcode_master.control.scheduler_loop import scheduler_service
+from antcode_master.control.worker_eviction import configure_lease_store, on_worker_evicted
 from antcode_master.ingester.alert_check_loop import alert_check_loop
 from antcode_master.ingester.artifact_cleanup_loop import artifact_cleanup_loop
 from antcode_master.ingester.crawl_batch_status_loop import crawl_batch_status_loop
@@ -46,129 +46,12 @@ from antcode_master.ingester.log_ingest_loop import log_ingest_loop
 from antcode_master.ingester.result_loop import result_loop
 from antcode_master.ingester.worker_registration_cleanup_loop import worker_registration_cleanup_loop
 from antcode_master.leader import leader_election
+from antcode_master.process_signals import install_stop_signal_handlers
 from antcode_master.readiness import master_readiness
 
 # P3:LeaseStore + LeaseSweeperLoop 单例持有,便于 stop_master 关闭
 _lease_store: LeaseStore | None = None
 _lease_sweeper: LeaseSweeperLoop | None = None
-
-
-async def _on_worker_evicted(worker_id: str, evicted_lease_id: str = "") -> None:
-    """只回收绑定被淘汰 Lease 的 TaskRun；新代际不受影响。
-
-    ``evicted_lease_id`` 为空（lease Hash 已被 PEXPIRE 提前清掉，sweeper
-    停摆超过 retention 窗口时必然发生）时不能放弃 eviction：仍按"代际
-    未知"路径下线 Worker 并回收其 RUNNING TaskRun，否则死 Worker 会永远
-    ONLINE、RUNNING run 只能等 reconcile 慢超时兜底。
-    """
-    await _apply_worker_eviction(worker_id, evicted_lease_id)
-
-
-async def _eviction_was_superseded(worker_id: str, evicted_lease_id: str) -> bool:
-    """当前 Worker 是否已持有**另一份有效**（未逻辑过期）的 lease。
-
-    只有 ``current.lease_id`` 非空、与被淘汰代际不同、且未过期时才算被
-    取代；过期残留记录（retention 窗口内的 Hash）或同代际残留不算。
-    """
-    if _lease_store is None:
-        raise RuntimeError("LeaseStore 尚未初始化，拒绝执行 eviction 副作用")
-    current = await _lease_store.get(worker_id, include_expired=False)
-    if current is None or not current.lease_id:
-        return False
-    if evicted_lease_id and current.lease_id == evicted_lease_id:
-        return False
-    logger.info(
-        "忽略旧 Lease eviction（worker 已持有新代际有效 lease）: worker_id={}",
-        worker_id,
-    )
-    return True
-
-
-async def _apply_worker_eviction(worker_id: str, evicted_lease_id: str) -> None:
-    from datetime import UTC, datetime
-
-    from antcode_core.application.services.scheduler.execution_status_service import (
-        execution_status_service,
-    )
-    from antcode_core.domain.models import TaskRun, Worker
-    from antcode_core.domain.models.enums import RuntimeStatus, TaskStatus, WorkerStatus
-    from tortoise.expressions import Q
-
-    worker = await Worker.filter(public_id=worker_id).first()
-    if worker is None:
-        return
-    superseded = await _eviction_was_superseded(worker_id, evicted_lease_id)
-    if superseded and not evicted_lease_id:
-        # 代际未知且 worker 已持有新的有效 lease：没有任何可安全 fencing 的
-        # TaskRun 集合，整体跳过，交由新代际的 eviction / reconcile 处理。
-        logger.info(
-            "跳过代际未知的 eviction（worker 已持有有效 lease）: worker_id={}",
-            worker_id,
-        )
-        return
-    query = TaskRun.filter(worker_id=worker.id, status=TaskStatus.RUNNING)
-    if superseded:
-        # worker 已换新代际：只回收明确绑定被淘汰代际的 run；lease_id 为
-        # NULL 的 run 无法区分新旧代际，不动。
-        query = query.filter(lease_id=evicted_lease_id)
-    elif evicted_lease_id:
-        # lease_id 懒绑定 / report-task 可先把 run 翻成 RUNNING 而 lease_id
-        # 仍为 NULL——这类 run 同样属于失联 worker，必须一起回收；绑定其它
-        # （更新）代际的 run 仍然排除。
-        query = query.filter(Q(lease_id=evicted_lease_id) | Q(lease_id__isnull=True))
-    # else: 代际未知且 worker 无任何有效 lease → 该 worker 全部 RUNNING run
-    # 都已失联，不做 lease 过滤。
-    running = await query.only("id", "run_id", "lease_id").all()
-
-    # V1 over-eviction 竞态防护：``superseded`` 由本次 eviction 早先的**单次**
-    # ``_lease_store.get()`` 决定。在 "L1 过期 → sweep 剔除 → worker 又以新代际
-    # L2 回归" 的窗口里,该判定可能停在 L2 grant 之前(superseded=False),于是上面
-    # 把 lease_id 为 NULL 的 RUNNING run 也纳入了回收集——而这些 run 可能正由已在
-    # L2 下复活的存活 worker 执行,误标 FAILED 会造成重复/冲突完成。
-    #
-    # 仅在 "非 superseded + 已知代际"(即把 NULL-lease run 纳入回收)的分支里,贴近
-    # UPDATE 再复核一次 lease store:若 worker 此刻已持有另一份有效代际,说明它确实
-    # 回来了,跳过 NULL-lease run(交由 reconcile 超时或下一次 L2 sweep eviction
-    # 兜底),把 TOCTOU 窗口收敛到接近零。绑定被淘汰代际的 run 属于已死代际,始终
-    # 无条件回收。
-    skip_null_lease = False
-    if not superseded and evicted_lease_id and any(not t.lease_id for t in running):
-        if await _eviction_was_superseded(worker_id, evicted_lease_id):
-            skip_null_lease = True
-            logger.info(
-                "失效前复核发现 worker 已以新代际回归,跳过 NULL-lease run 回收: worker_id={}",
-                worker_id,
-            )
-
-    # worker 已在新代际下复活(skip_null_lease)时不应被下线——与 superseded 分支一致。
-    if not superseded and not skip_null_lease and worker.status == WorkerStatus.ONLINE.value:
-        worker.status = WorkerStatus.OFFLINE.value
-        await worker.save(update_fields=["status"])
-    now = datetime.now(UTC)
-    failed = 0
-    skipped = 0
-    for task in running:
-        if skip_null_lease and not task.lease_id:
-            # worker 已在 L2 回归,这条 NULL-lease run 可能仍存活,不做 fencing。
-            skipped += 1
-            continue
-        ok = await execution_status_service.update_runtime_status(
-            run_id=task.run_id,
-            status=RuntimeStatus.FAILED,
-            status_at=now,
-            error_message="Worker 失联（lease expired）",
-            # 逐 run 用其自身代际做 fencing；lease_id 为 NULL 的 run 无代际
-            # 可比（传 None 跳过 lease 比对），仍受 runtime 状态 CAS 保护。
-            expected_lease_id=task.lease_id or None,
-        )
-        failed += int(ok)
-    logger.info(
-        "Lease 失租回收完成: worker_id={} marked_failed={}/{} skipped_null={}",
-        worker_id,
-        failed,
-        len(running),
-        skipped,
-    )
 
 
 # 可选的 cold Redis client（P5.2）。当前 control 组的 loop 默认仍走 StreamClient
@@ -187,11 +70,12 @@ async def _start_control_group() -> None:
         redis_client = await get_redis_client()
         # 显式传 namespace：sweeper 必须与 gateway/worker 落在同一 keyspace，
         # 否则非默认 REDIS_NAMESPACE 部署时会扫到空集，死 worker 永不剔除。
-        _lease_store = LeaseStore(redis_client, namespace=redis_namespace(), policy=LeasePolicy())
+        _lease_store = LeaseStore(redis_client, namespace=redis_namespace(), policy=wire_lease_policy())
+    configure_lease_store(_lease_store)
     if _lease_sweeper is None:
         _lease_sweeper = LeaseSweeperLoop(
             lease_store=_lease_store,
-            on_worker_evicted=_on_worker_evicted,
+            on_worker_evicted=on_worker_evicted,
         )
 
     await asyncio.gather(
@@ -393,31 +277,7 @@ async def main() -> None:
     # DB_POOL_MAX_MASTER 配置将静默失效。
     await init_db(service="master")
 
-    loop = asyncio.get_event_loop()
-    stop_event = asyncio.Event()
-    stopping = False
-
-    def signal_handler() -> None:
-        nonlocal stopping
-        if stopping:
-            return
-        stopping = True
-        logger.info("收到停止信号")
-        stop_event.set()
-
-    # P2-14: SIGTERM/SIGINT 都注册了 handler,K8s 优雅关停时 stop_event.set()
-    # 会触发 stop_master() drain(停 loop + step_down leader + 关连接池)。
-    # Windows 上 asyncio 不支持 add_signal_handler，改用 signal.signal。
-    if sys.platform == "win32":
-
-        def _win_handler(signum, frame):  # noqa: ARG001
-            loop.call_soon_threadsafe(signal_handler)
-
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, _win_handler)
-    else:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, signal_handler)
+    stop_event = install_stop_signal_handlers()
 
     try:
         await start_master()

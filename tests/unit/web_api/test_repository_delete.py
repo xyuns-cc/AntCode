@@ -1,9 +1,12 @@
+from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from antcode_core.application.services.projects.repository_service import RepositoryDeleteStatus
+from antcode_core.domain.schemas.repository import RepositoryCreateRequest
 from antcode_web_api.routes.v1 import repositories
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 
 
 @pytest.mark.asyncio
@@ -34,3 +37,31 @@ async def test_delete_repository_returns_success(monkeypatch) -> None:
 
     assert response.success is True
     delete.assert_awaited_once_with("repo-1", 7)
+
+
+@pytest.mark.asyncio
+async def test_create_repository_matches_http_and_business_created_status(monkeypatch) -> None:
+    now = datetime(2026, 7, 30)
+    repository = SimpleNamespace(
+        public_id="repo-1",
+        name="source",
+        url="https://example.test/source.git",
+        default_ref="main",
+        credential_id=None,
+        enabled=True,
+        last_scan_status=None,
+        last_scan_error=None,
+        last_scan_result=None,
+        last_scanned_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    create = AsyncMock(return_value=repository)
+    monkeypatch.setattr(repositories.repository_service, "create_for_user", create)
+    payload = RepositoryCreateRequest(name="source", url=repository.url)
+
+    response = await repositories.create_repository(payload, current_user_id=7)
+
+    assert response.code == status.HTTP_201_CREATED
+    assert response.data.id == "repo-1"
+    create.assert_awaited_once_with(7, payload)

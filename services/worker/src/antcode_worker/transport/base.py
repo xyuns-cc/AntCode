@@ -18,6 +18,10 @@ from typing import Any
 
 from antcode_worker.domain.models import SourceBundle
 
+# 代际错误与续期节拍各自独立成模块；此处显式再导出，保持既有导入路径不变。
+from antcode_worker.transport.generation import GenerationLostError as GenerationLostError
+from antcode_worker.transport.lease_cadence import ServerLeaseCadence
+
 
 class TransportMode(StrEnum):
     """传输模式枚举"""
@@ -139,12 +143,6 @@ class HeartbeatMessage:
     timestamp: datetime | None = None
 
 
-class GenerationLostError(RuntimeError):
-    """本进程的 Lease generation 已被新代际取代（复审 D2）。engine 捕获后
-    必须立即 abort 所有执行，而不是当普通轮询异常退避重试——否则旧代际
-    僵尸进程最长可与新代际并行到下一次 ownership 续租 tick（~600s）。"""
-
-
 @dataclass
 class LogMessage:
     """日志消息"""
@@ -168,7 +166,7 @@ class ControlMessage:
     receipt: str | None = None
 
 
-class TransportBase(ABC):
+class TransportBase(ServerLeaseCadence, ABC):
     """
     传输层抽象基类
 
@@ -357,30 +355,6 @@ class TransportBase(ABC):
         """
         pass
 
-    @abstractmethod
-    async def send_log_chunk(
-        self,
-        run_id: str,
-        log_type: str,
-        data: bytes,
-        offset: int,
-        is_final: bool = False,
-    ) -> bool:
-        """
-        发送日志分片（存储通道）
-
-        Args:
-            run_id: 运行 ID
-            log_type: 日志类型 (stdout/stderr)
-            data: 日志数据
-            offset: 偏移量
-            is_final: 是否最后一片
-
-        Returns:
-            是否成功
-        """
-        pass
-
     # ==================== 心跳 / Lease 操作 ====================
 
     @abstractmethod
@@ -396,7 +370,8 @@ class TransportBase(ABC):
                 await transport.lease_renew(current_lease_id, metrics)
 
         ``send_heartbeat`` 的返回 ``bool`` 仅表示 RPC 是否成功，**不携带
-        lease_id / 过期时间**。需要 lease 元数据请用 ``lease_renew``。
+        lease_id / 过期时间**。需要 lease 元数据请用 ``lease_renew``；
+        服务端下发的租约时序走只读属性 ``lease_ttl_ms`` / ``lease_renew_after_ms``。
 
         Args:
             heartbeat: 心跳消息

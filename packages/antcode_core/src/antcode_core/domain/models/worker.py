@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from tortoise import fields
+from tortoise.indexes import Index
 
 from antcode_core.domain.models.base import BaseModel
 from antcode_core.domain.models.enums import WorkerStatus
@@ -81,7 +82,6 @@ class Worker(BaseModel):
     api_key_hash = fields.CharField(
         max_length=128,
         null=True,
-        db_index=True,
         description="SHA256(api_key) hex",
     )
     secret_key_hash = fields.CharField(
@@ -101,7 +101,6 @@ class Worker(BaseModel):
         api_key_previous_hash = fields.CharField(
             max_length=128,
             null=True,
-            db_index=True,
             description="P1-10: SHA256(api_key_previous) hex",
         )
         api_key_previous_expires_at = fields.DatetimeField(null=True)
@@ -125,11 +124,16 @@ class Worker(BaseModel):
 
     class Meta:
         table = "workers"
+        # 认证热路径 ``verify_api_key`` 每次调用都按哈希列查询，缺索引会顺序扫描
+        # 整张 workers 表。索引名与 ``migrations/models/*.sql`` 及
+        # ``scripts/init_db_current_schema.py`` 保持一致，避免两套真源各建一份。
         indexes = [
             ("name",),
             ("host", "port"),
             ("status",),
             ("region",),
+            Index(fields=("api_key_hash",), name="idx_workers_api_key_hash"),
+            Index(fields=("api_key_previous_hash",), name="idx_workers_api_key_previous_hash"),
         ]
 
 

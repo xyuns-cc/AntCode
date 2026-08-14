@@ -61,7 +61,7 @@ async def test_ensure_worker_acl_sends_setuser_with_correct_username_and_keys():
     assert args[1] == "SETUSER"
     assert args[2] == "worker_w-1"
     flat = " ".join(args)
-    assert "%RW~antcode:task:ready:w-1" in flat
+    assert "%RW~{antcode}:task:ready:w-1" in flat
     assert "(+xadd %W~antcode:task:result)" in args
     assert "log:ingest" not in flat
     assert "%RW~antcode:control:reply:w-1:*" in flat
@@ -69,6 +69,8 @@ async def test_ensure_worker_acl_sends_setuser_with_correct_username_and_keys():
     assert "spider" not in flat
     assert "%RW~{antcode}:lease:data:w-1" in flat
     assert "%R~{antcode}:lease:revoked:w-1" in flat
+    assert "%R~{antcode}:lease:lifecycle:w-1" in flat
+    assert "%RW~{antcode}:heartbeat:w-1" in flat
     assert "~{antcode}:lease:expiring" not in flat
     assert "~{antcode}:lease:active" not in flat
     assert "control:global" not in flat

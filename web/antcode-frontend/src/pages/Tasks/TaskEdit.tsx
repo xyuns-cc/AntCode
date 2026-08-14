@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import PageContainer from '@/components/common/PageContainer'
 import {
   Card,
@@ -13,25 +13,39 @@ import {
   Col,
   Switch,
   InputNumber,
-  DatePicker,
   Skeleton,
   Typography,
-  message
+  message,
 } from 'antd'
-import {
-  ArrowLeftOutlined,
-  SaveOutlined
-} from '@ant-design/icons'
+import { ArrowLeftOutlined, SaveOutlined } from '@ant-design/icons'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
 import Logger from '@/utils/logger'
-import type { Task, Project, TaskUpdateRequest, ScheduleType } from '@/types'
+import type { Task, Project, TaskUpdateRequest } from '@/types'
 import useAuth from '@/hooks/useAuth'
 import dayjs from 'dayjs'
+import {
+  buildTaskScheduleUpdate,
+  TASK_SCHEDULE_OPTIONS,
+  type TaskScheduleFormValues,
+} from './taskScheduleUpdate'
+import TaskScheduleField from './components/TaskScheduleField'
 
 const { Title } = Typography
 const { Option } = Select
 const { TextArea } = Input
+
+interface TaskEditFormValues extends TaskScheduleFormValues {
+  name: string
+  description?: string
+  max_instances: number
+  timeout_seconds: number
+  retry_count: number
+  retry_delay: number
+  is_active: boolean
+  execution_params?: string
+  environment_vars?: string
+}
 
 const TaskEdit: React.FC = () => {
   Logger.log('TaskEdit组件渲染')
@@ -45,7 +59,18 @@ const TaskEdit: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
-  Logger.log('TaskEdit - id:', id, 'isAuthenticated:', isAuthenticated, 'authLoading:', authLoading, 'task:', task, 'loading:', loading)
+  Logger.log(
+    'TaskEdit - id:',
+    id,
+    'isAuthenticated:',
+    isAuthenticated,
+    'authLoading:',
+    authLoading,
+    'task:',
+    task,
+    'loading:',
+    loading
+  )
 
   // 加载任务详情
   const loadTask = useCallback(async () => {
@@ -65,13 +90,17 @@ const TaskEdit: React.FC = () => {
         cron_expression: taskData.cron_expression,
         interval_seconds: taskData.interval_seconds,
         scheduled_time: taskData.scheduled_time ? dayjs(taskData.scheduled_time) : null,
-        max_instances: taskData.max_instances || 1,
-        timeout_seconds: taskData.timeout_seconds || 3600,
-        retry_count: taskData.retry_count || 3,
-        retry_delay: taskData.retry_delay || 60,
+        max_instances: taskData.max_instances ?? 1,
+        timeout_seconds: taskData.timeout_seconds ?? 3600,
+        retry_count: taskData.retry_count ?? 3,
+        retry_delay: taskData.retry_delay ?? 60,
         is_active: taskData.is_active,
-        execution_params: taskData.execution_params ? JSON.stringify(taskData.execution_params, null, 2) : '',
-        environment_vars: taskData.environment_vars ? JSON.stringify(taskData.environment_vars, null, 2) : ''
+        execution_params: taskData.execution_params
+          ? JSON.stringify(taskData.execution_params, null, 2)
+          : '',
+        environment_vars: taskData.environment_vars
+          ? JSON.stringify(taskData.environment_vars, null, 2)
+          : '',
       })
     } catch {
       // 错误提示由拦截器统一处理
@@ -84,9 +113,9 @@ const TaskEdit: React.FC = () => {
   // 加载项目列表
   const loadProjects = useCallback(async () => {
     try {
-      const response = await projectService.getProjects({ page: 1, size: 100 })
-      Logger.log('TaskEdit - 项目API响应:', response)
-      setProjects(response.items || [])
+      const items = await projectService.getAllProjects()
+      Logger.log('TaskEdit - 项目API响应:', items)
+      setProjects(items)
     } catch {
       Logger.error('加载项目列表失败')
       message.error('加载项目列表失败')
@@ -94,7 +123,7 @@ const TaskEdit: React.FC = () => {
   }, [])
 
   // 处理表单提交
-  const handleSubmit = async (values: { name: string; description?: string; schedule_type: ScheduleType; cron_expression?: string; interval_seconds?: number; scheduled_time?: { toISOString: () => string }; max_instances: number; timeout_seconds: number; retry_count: number; retry_delay: number; is_active: boolean; execution_params?: string; environment_vars?: string }) => {
+  const handleSubmit = async (values: TaskEditFormValues) => {
     if (!id || !task) return
 
     setSubmitting(true)
@@ -140,17 +169,14 @@ const TaskEdit: React.FC = () => {
       const updateData: TaskUpdateRequest = {
         name: values.name,
         description: values.description,
-        schedule_type: values.schedule_type,
-        cron_expression: values.cron_expression,
-        interval_seconds: values.interval_seconds,
-        scheduled_time: values.scheduled_time?.toISOString(),
+        ...buildTaskScheduleUpdate(values),
         max_instances: values.max_instances,
         timeout_seconds: values.timeout_seconds,
         retry_count: values.retry_count,
         retry_delay: values.retry_delay,
         is_active: values.is_active,
         execution_params: executionParams,
-        environment_vars: environmentVars
+        environment_vars: environmentVars,
       }
 
       await taskService.updateTask(id, updateData)
@@ -229,9 +255,7 @@ const TaskEdit: React.FC = () => {
         }
         extra={
           <Space>
-            <Button onClick={() => navigate(`/tasks/${id}`)}>
-              取消
-            </Button>
+            <Button onClick={() => navigate(`/tasks/${id}`)}>取消</Button>
             <Button
               type="primary"
               icon={<SaveOutlined />}
@@ -243,11 +267,7 @@ const TaskEdit: React.FC = () => {
           </Space>
         }
       >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={handleSubmit}
-        >
+        <Form form={form} layout="vertical" onFinish={handleSubmit}>
           <Row gutter={24}>
             <Col span={12}>
               <Form.Item
@@ -255,7 +275,7 @@ const TaskEdit: React.FC = () => {
                 name="name"
                 rules={[
                   { required: true, message: '请输入任务名称' },
-                  { min: 3, max: 255, message: '任务名称长度为3-255个字符' }
+                  { min: 3, max: 255, message: '任务名称长度为3-255个字符' },
                 ]}
               >
                 <Input placeholder="请输入任务名称" />
@@ -268,7 +288,7 @@ const TaskEdit: React.FC = () => {
                 rules={[{ required: true, message: '请选择关联项目' }]}
               >
                 <Select placeholder="请选择项目" disabled>
-                  {projects.map(project => (
+                  {projects.map((project) => (
                     <Option key={project.id} value={project.id}>
                       {project.name} ({project.type})
                     </Option>
@@ -278,10 +298,7 @@ const TaskEdit: React.FC = () => {
             </Col>
           </Row>
 
-          <Form.Item
-            label="任务描述"
-            name="description"
-          >
+          <Form.Item label="任务描述" name="description">
             <TextArea rows={3} placeholder="请输入任务描述" />
           </Form.Item>
 
@@ -293,9 +310,11 @@ const TaskEdit: React.FC = () => {
                 rules={[{ required: true, message: '请选择调度类型' }]}
               >
                 <Select placeholder="请选择调度类型">
-                  <Option value="once">一次性</Option>
-                  <Option value="interval">间隔执行</Option>
-                  <Option value="cron">Cron表达式</Option>
+                  {TASK_SCHEDULE_OPTIONS.map((option) => (
+                    <Option key={option.value} value={option.value}>
+                      {option.label}
+                    </Option>
+                  ))}
                 </Select>
               </Form.Item>
             </Col>
@@ -339,85 +358,23 @@ const TaskEdit: React.FC = () => {
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item
-                label="启用状态"
-                name="is_active"
-                valuePropName="checked"
-              >
+              <Form.Item label="启用状态" name="is_active" valuePropName="checked">
                 <Switch checkedChildren="启用" unCheckedChildren="禁用" />
               </Form.Item>
             </Col>
           </Row>
 
-          {/* 根据调度类型显示不同的配置 */}
-          <Form.Item shouldUpdate={(prevValues, currentValues) => prevValues.schedule_type !== currentValues.schedule_type}>
-            {({ getFieldValue }) => {
-              const scheduleType = getFieldValue('schedule_type')
-
-              if (scheduleType === 'interval') {
-                return (
-                  <Form.Item
-                    label="执行间隔(秒)"
-                    name="interval_seconds"
-                    rules={[{ required: true, message: '请输入执行间隔' }]}
-                  >
-                    <InputNumber min={60} max={86400} style={{ width: '100%' }} />
-                  </Form.Item>
-                )
-              }
-
-              if (scheduleType === 'cron') {
-                return (
-                  <Form.Item
-                    label="Cron表达式"
-                    name="cron_expression"
-                    rules={[{ required: true, message: '请输入Cron表达式' }]}
-                  >
-                    <Input placeholder="例如: 0 0 * * *" />
-                  </Form.Item>
-                )
-              }
-
-              if (scheduleType === 'once') {
-                return (
-                  <Form.Item
-                    label="执行时间"
-                    name="scheduled_time"
-                  >
-                    <DatePicker
-                      showTime
-                      style={{ width: '100%' }}
-                      placeholder="请选择执行时间"
-                    />
-                  </Form.Item>
-                )
-              }
-
-              return null
-            }}
-          </Form.Item>
+          <TaskScheduleField />
 
           <Row gutter={24}>
             <Col span={12}>
-              <Form.Item
-                label="执行参数 (JSON格式)"
-                name="execution_params"
-              >
-                <TextArea
-                  rows={6}
-                  placeholder='{"key": "value"}'
-                />
+              <Form.Item label="执行参数 (JSON格式)" name="execution_params">
+                <TextArea rows={6} placeholder='{"key": "value"}' />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item
-                label="环境变量 (JSON格式)"
-                name="environment_vars"
-              >
-                <TextArea
-                  rows={6}
-                  placeholder='{"ENV_VAR": "value"}'
-                />
+              <Form.Item label="环境变量 (JSON格式)" name="environment_vars">
+                <TextArea rows={6} placeholder='{"ENV_VAR": "value"}' />
               </Form.Item>
             </Col>
           </Row>

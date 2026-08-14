@@ -13,10 +13,10 @@ import {
   DatePicker,
   Divider,
   Alert,
-  Tag
+  Tag,
 } from 'antd'
 import { ArrowLeftOutlined, SaveOutlined, CloudServerOutlined } from '@ant-design/icons'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
 import { workerService } from '@/services/workers'
@@ -26,7 +26,10 @@ import { validateCronExpression } from '@/utils/cron'
 const { Option, OptGroup } = Select
 const { TextArea } = Input
 
-interface TaskCreateFormValues extends Omit<TaskCreateRequest, 'execution_params' | 'environment_vars' | 'scheduled_time'> {
+interface TaskCreateFormValues extends Omit<
+  TaskCreateRequest,
+  'execution_params' | 'environment_vars' | 'scheduled_time'
+> {
   execution_params?: string
   environment_vars?: string
   scheduled_time?: { toISOString: () => string }
@@ -47,9 +50,9 @@ const TaskCreate: React.FC = () => {
   // 加载项目列表
   const loadProjects = useCallback(async () => {
     try {
-      const response = await projectService.getProjects({ page: 1, size: 100 })
-      setProjects(response.items)
-      
+      const items = await projectService.getAllProjects()
+      setProjects(items)
+
       // 如果URL中有项目ID，设置为默认值
       if (projectIdFromUrl) {
         form.setFieldValue('project_id', projectIdFromUrl)
@@ -137,11 +140,7 @@ const TaskCreate: React.FC = () => {
       <Card
         title={
           <Space>
-            <Button
-              type="text"
-              icon={<ArrowLeftOutlined />}
-              onClick={() => navigate('/tasks')}
-            >
+            <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/tasks')}>
               返回
             </Button>
             <span>创建任务</span>
@@ -158,7 +157,7 @@ const TaskCreate: React.FC = () => {
             timeout_seconds: 3600,
             retry_count: 3,
             retry_delay: 60,
-            is_active: true
+            is_active: true,
           }}
         >
           <Row gutter={24}>
@@ -168,7 +167,7 @@ const TaskCreate: React.FC = () => {
                 name="name"
                 rules={[
                   { required: true, message: '请输入任务名称' },
-                  { min: 3, max: 255, message: '任务名称长度为3-255个字符' }
+                  { min: 3, max: 255, message: '任务名称长度为3-255个字符' },
                 ]}
               >
                 <Input placeholder="请输入任务名称" />
@@ -181,7 +180,7 @@ const TaskCreate: React.FC = () => {
                 rules={[{ required: true, message: '请选择关联项目' }]}
               >
                 <Select placeholder="请选择项目">
-                  {projects.map(project => (
+                  {projects.map((project) => (
                     <Option key={project.id} value={project.id}>
                       {project.name} ({project.type})
                     </Option>
@@ -191,16 +190,8 @@ const TaskCreate: React.FC = () => {
             </Col>
           </Row>
 
-          <Form.Item
-            label="任务描述"
-            name="description"
-          >
-            <TextArea
-              rows={3}
-              placeholder="请输入任务描述（可选）"
-              maxLength={500}
-              showCount
-            />
+          <Form.Item label="任务描述" name="description">
+            <TextArea rows={3} placeholder="请输入任务描述（可选）" maxLength={500} showCount />
           </Form.Item>
 
           <Divider>调度配置</Divider>
@@ -227,38 +218,30 @@ const TaskCreate: React.FC = () => {
                   name="scheduled_time"
                   rules={[{ required: true, message: '请选择执行时间' }]}
                 >
-                  <DatePicker
-                    showTime
-                    placeholder="请选择执行时间"
-                    style={{ width: '100%' }}
-                  />
+                  <DatePicker showTime placeholder="请选择执行时间" style={{ width: '100%' }} />
                 </Form.Item>
               )}
-              
+
               {scheduleType === 'interval' && (
                 <Form.Item
                   label="间隔时间（秒）"
                   name="interval_seconds"
                   rules={[
                     { required: true, message: '请输入间隔时间' },
-                    { type: 'number', min: 1, message: '间隔时间必须大于0' }
+                    { type: 'number', min: 1, message: '间隔时间必须大于0' },
                   ]}
                 >
-                  <InputNumber
-                    placeholder="请输入间隔秒数"
-                    style={{ width: '100%' }}
-                    min={1}
-                  />
+                  <InputNumber placeholder="请输入间隔秒数" style={{ width: '100%' }} min={1} />
                 </Form.Item>
               )}
-              
+
               {scheduleType === 'cron' && (
                 <Form.Item
                   label="Cron表达式"
                   name="cron_expression"
                   rules={[
                     { required: true, message: '请输入Cron表达式' },
-                    { validator: validateCron }
+                    { validator: validateCron },
                   ]}
                   extra="格式: 分 时 日 月 周，例如: 0 12 * * * (每天 12 点执行)"
                 >
@@ -339,35 +322,44 @@ const TaskCreate: React.FC = () => {
                       rules={[{ required: true, message: '请选择 Worker' }]}
                     >
                       <Select placeholder="请选择 Worker" showSearch optionFilterProp="children">
-                        {workers.filter(w => w.status === 'online').length > 0 && (
+                        {workers.filter((w) => w.status === 'online').length > 0 && (
                           <OptGroup label="在线 Worker">
-                            {workers.filter(w => w.status === 'online').map(worker => (
-                              <Option key={worker.id} value={worker.id}>
-                                <Space>
-                                  <CloudServerOutlined style={{ color: '#13c2c2' }} />
-                                  <span>{worker.name}</span>
-                                  {worker.region && <Tag color="blue" style={{ marginLeft: 4 }}>{worker.region}</Tag>}
-                                  {worker.metrics && (
-                                    <span style={{ color: '#999', fontSize: 12 }}>
-                                      (CPU: {worker.metrics.cpu.toFixed(0)}% / 内存: {worker.metrics.memory.toFixed(0)}%)
-                                    </span>
-                                  )}
-                                </Space>
-                              </Option>
-                            ))}
+                            {workers
+                              .filter((w) => w.status === 'online')
+                              .map((worker) => (
+                                <Option key={worker.id} value={worker.id}>
+                                  <Space>
+                                    <CloudServerOutlined style={{ color: '#13c2c2' }} />
+                                    <span>{worker.name}</span>
+                                    {worker.region && (
+                                      <Tag color="blue" style={{ marginLeft: 4 }}>
+                                        {worker.region}
+                                      </Tag>
+                                    )}
+                                    {worker.metrics && (
+                                      <span style={{ color: '#999', fontSize: 12 }}>
+                                        (CPU: {worker.metrics.cpu.toFixed(0)}% / 内存:{' '}
+                                        {worker.metrics.memory.toFixed(0)}%)
+                                      </span>
+                                    )}
+                                  </Space>
+                                </Option>
+                              ))}
                           </OptGroup>
                         )}
-                        {workers.filter(w => w.status !== 'online').length > 0 && (
+                        {workers.filter((w) => w.status !== 'online').length > 0 && (
                           <OptGroup label="离线 Worker">
-                            {workers.filter(w => w.status !== 'online').map(worker => (
-                              <Option key={worker.id} value={worker.id} disabled>
-                                <Space>
-                                  <CloudServerOutlined style={{ color: '#ff4d4f' }} />
-                                  <span style={{ color: '#999' }}>{worker.name}</span>
-                                  <Tag color="error">离线</Tag>
-                                </Space>
-                              </Option>
-                            ))}
+                            {workers
+                              .filter((w) => w.status !== 'online')
+                              .map((worker) => (
+                                <Option key={worker.id} value={worker.id} disabled>
+                                  <Space>
+                                    <CloudServerOutlined style={{ color: '#ff4d4f' }} />
+                                    <span style={{ color: '#999' }}>{worker.name}</span>
+                                    <Tag color="error">离线</Tag>
+                                  </Space>
+                                </Option>
+                              ))}
                           </OptGroup>
                         )}
                       </Select>
@@ -382,7 +374,7 @@ const TaskCreate: React.FC = () => {
                 name="max_instances"
                 rules={[
                   { required: true, message: '请输入最大并发数' },
-                  { type: 'number', min: 1, max: 10, message: '并发数范围1-10' }
+                  { type: 'number', min: 1, max: 10, message: '并发数范围1-10' },
                 ]}
               >
                 <InputNumber min={1} max={10} style={{ width: '100%' }} />
@@ -394,7 +386,7 @@ const TaskCreate: React.FC = () => {
                 name="timeout_seconds"
                 rules={[
                   { required: true, message: '请输入超时时间' },
-                  { type: 'number', min: 1, message: '超时时间必须大于0' }
+                  { type: 'number', min: 1, message: '超时时间必须大于0' },
                 ]}
               >
                 <InputNumber min={1} style={{ width: '100%' }} />
@@ -406,7 +398,7 @@ const TaskCreate: React.FC = () => {
                 name="retry_count"
                 rules={[
                   { required: true, message: '请输入重试次数' },
-                  { type: 'number', min: 0, max: 10, message: '重试次数范围0-10' }
+                  { type: 'number', min: 0, max: 10, message: '重试次数范围0-10' },
                 ]}
               >
                 <InputNumber min={0} max={10} style={{ width: '100%' }} />
@@ -418,7 +410,7 @@ const TaskCreate: React.FC = () => {
                 name="retry_delay"
                 rules={[
                   { required: true, message: '请输入重试延迟' },
-                  { type: 'number', min: 1, message: '重试延迟必须大于0' }
+                  { type: 'number', min: 1, message: '重试延迟必须大于0' },
                 ]}
               >
                 <InputNumber min={1} style={{ width: '100%' }} />
@@ -433,10 +425,7 @@ const TaskCreate: React.FC = () => {
                 name="execution_params"
                 rules={[{ validator: validateJSON }]}
               >
-                <TextArea
-                  rows={4}
-                  placeholder='{"key": "value"}'
-                />
+                <TextArea rows={4} placeholder='{"key": "value"}' />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -445,35 +434,21 @@ const TaskCreate: React.FC = () => {
                 name="environment_vars"
                 rules={[{ validator: validateJSON }]}
               >
-                <TextArea
-                  rows={4}
-                  placeholder='{"ENV_VAR": "value"}'
-                />
+                <TextArea rows={4} placeholder='{"ENV_VAR": "value"}' />
               </Form.Item>
             </Col>
           </Row>
 
-          <Form.Item
-            label="启用任务"
-            name="is_active"
-            valuePropName="checked"
-          >
+          <Form.Item label="启用任务" name="is_active" valuePropName="checked">
             <Switch />
           </Form.Item>
 
           <Form.Item>
             <Space>
-              <Button
-                type="primary"
-                htmlType="submit"
-                loading={loading}
-                icon={<SaveOutlined />}
-              >
+              <Button type="primary" htmlType="submit" loading={loading} icon={<SaveOutlined />}>
                 创建任务
               </Button>
-              <Button onClick={() => navigate('/tasks')}>
-                取消
-              </Button>
+              <Button onClick={() => navigate('/tasks')}>取消</Button>
             </Space>
           </Form.Item>
         </Form>

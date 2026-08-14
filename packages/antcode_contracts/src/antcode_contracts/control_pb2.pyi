@@ -112,18 +112,20 @@ class LeaseRequest(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., current_lease_id: _Optional[str] = ..., metrics: _Optional[_Union[_common_pb2.Metrics, _Mapping]] = ..., capabilities: _Optional[_Mapping[str, str]] = ..., trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...) -> None: ...
 
 class LeaseResponse(_message.Message):
-    __slots__ = ("lease_id", "expires_at_ms", "renew_after_ms", "revoked", "revoke_reason")
+    __slots__ = ("lease_id", "expires_at_ms", "renew_after_ms", "revoked", "revoke_reason", "ttl_ms")
     LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
     RENEW_AFTER_MS_FIELD_NUMBER: _ClassVar[int]
     REVOKED_FIELD_NUMBER: _ClassVar[int]
     REVOKE_REASON_FIELD_NUMBER: _ClassVar[int]
+    TTL_MS_FIELD_NUMBER: _ClassVar[int]
     lease_id: str
     expires_at_ms: int
     renew_after_ms: int
     revoked: bool
     revoke_reason: str
-    def __init__(self, lease_id: _Optional[str] = ..., expires_at_ms: _Optional[int] = ..., renew_after_ms: _Optional[int] = ..., revoked: bool = ..., revoke_reason: _Optional[str] = ...) -> None: ...
+    ttl_ms: int
+    def __init__(self, lease_id: _Optional[str] = ..., expires_at_ms: _Optional[int] = ..., renew_after_ms: _Optional[int] = ..., revoked: bool = ..., revoke_reason: _Optional[str] = ..., ttl_ms: _Optional[int] = ...) -> None: ...
 
 class CancelTaskRequest(_message.Message):
     __slots__ = ("worker_id", "task_id", "run_id", "reason", "trace")

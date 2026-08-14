@@ -81,17 +81,11 @@ const Dashboard: React.FC = memo(() => {
     }
     
     try {
-      // P2-22: /dashboard/metrics 之前会被打两次(getSystemMetrics 一次,
-      // getDashboardStats 内部又拉一次)。这里只发一次,把结果同时喂给
-      // getDashboardStats 和外层 systemMetrics state,保证并行度不下降。
-      //
-      // P1-round6 5.4: /dashboard/metrics 是 admin-only, 普通用户拿 403 会
-      // 让 Promise.all 整体 reject → 整页数据都不提交并周期性重试。改用
-      // allSettled 允许分项失败: 每块数据独立决定 set/skip, 只有全部失败
-      // 才置 loadError。
+      // 摘要和管理员专属系统指标必须独立发起；普通用户的 metrics 403
+      // 不能阻断其项目和任务统计。
       const metricsPromise = dashboardService.getSystemMetrics()
       const [statsResult, metricsResult, workersResult, spiderResult, trendResult] = await Promise.allSettled([
-        metricsPromise.then((m) => dashboardService.getDashboardStats(m)),
+        dashboardService.getDashboardStats(),
         metricsPromise,
         workerService.getAggregateStats(),
         workerService.getClusterSpiderStats(),
@@ -447,7 +441,7 @@ const Dashboard: React.FC = memo(() => {
                     <Col xs={24} sm={12} lg={6}>
                       <Flex vertical>
                         <Text type="secondary" style={{ fontSize: 13, marginBottom: 4 }}>
-                          <ThunderboltOutlined style={{ marginRight: 4 }} />今日请求总数
+                          <ThunderboltOutlined style={{ marginRight: 4 }} />请求总数
                         </Text>
                         <span style={{ fontSize: 28, fontWeight: 700 }}>
                           {formatNumber(spiderStats?.totalRequests ?? 0)}

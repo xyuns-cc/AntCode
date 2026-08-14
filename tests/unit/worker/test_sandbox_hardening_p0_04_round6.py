@@ -7,16 +7,20 @@
 
 本测试锁死:
 1. 任何非 bwrap basename 的绝对沙箱命令一律 raise
-2. credential mask 覆盖 Worker mTLS + 身份目录(即使当前路径不存在,check
-   源码字符串确保 candidate 清单里有)
+2. bwrap 从空根视图按白名单挂载，不再暴露 Worker 数据根
 """
 
 from __future__ import annotations
 
-import inspect
+import sys
+from pathlib import Path
 
 import pytest
 from antcode_worker.executor.sandbox import BasicSandbox, SandboxConfig
+
+
+def _host_mounts(args: list[str]) -> set[str]:
+    return {args[index + 1] for index, value in enumerate(args[:-2]) if value in {"--ro-bind", "--bind"}}
 
 
 @pytest.mark.parametrize(
@@ -36,17 +40,31 @@ def test_non_bwrap_sandbox_command_rejected(sandbox_bin):
         sandbox.wrap_command(["python", "test.py"], {})
 
 
-def test_credential_mask_covers_worker_identity_and_mtls():
-    """P0-04:credential mask 覆盖 Worker mTLS 私钥挂载点与身份目录。
+def test_worker_root_and_sibling_runtime_are_absent_from_mounts(tmp_path: Path) -> None:
+    data_root = tmp_path / "worker"
+    work_dir = data_root / "runs" / "sources" / "run-current" / "project"
+    current_runtime = data_root / "runtimes" / "current"
+    sibling_runtime = data_root / "runtimes" / "other-tenant"
+    sensitive_dirs = tuple(data_root / name for name in ("secrets", "identity", "runs", "temp"))
+    for directory in (work_dir, current_runtime, sibling_runtime, *sensitive_dirs):
+        directory.mkdir(parents=True, exist_ok=True)
+    config_file = data_root / "worker_config.yaml"
+    config_file.write_text("transport_mode: gateway\n", encoding="utf-8")
 
-    这些路径可能在 CI 上不存在(is_dir 过滤会跳过),因此检查源码里 candidate
-    清单包含这些路径 —— 只要清单里有,一旦运行时目录存在就会被 tmpfs 掩掉。
-    """
-    source = inspect.getsource(BasicSandbox._credential_mask_dirs)
-    for expected in (
-        "/etc/antcode/tls",  # Gateway/Web API mTLS 私钥
-        "/etc/antcode",  # Worker YAML 配置 + Direct Redis URL
-        "/app/data/worker",  # Worker identity 存储
-        "/var/lib/antcode",  # 备用挂载点
-    ):
-        assert expected in source, f"credential mask 应覆盖 {expected} 但未在 candidates 里"
+    sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
+    args = sandbox.wrap_command(
+        [sys.executable],
+        {
+            "work_dir": str(work_dir),
+            "run_id": "run-current",
+            "runtime_path": str(current_runtime),
+        },
+    )
+
+    assert not any(args[index : index + 3] == ["--ro-bind", "/", "/"] for index in range(len(args) - 2))
+    mounted_sources = _host_mounts(args)
+    assert str(current_runtime.resolve()) in mounted_sources
+    assert str(data_root.resolve()) not in mounted_sources
+    assert str(sibling_runtime.resolve()) not in mounted_sources
+    assert str(config_file.resolve()) not in mounted_sources
+    assert all(str(path.resolve()) not in mounted_sources for path in sensitive_dirs)

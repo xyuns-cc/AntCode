@@ -4,9 +4,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from antcode_core.application.services.lease_capability_snapshot import LeaseCapabilitySnapshot
+from antcode_core.application.services.lease_fenced_ready_publish import (
+    LeaseDispatchFenceError,
+    scheduler_dispatch_epoch,
+)
+from antcode_core.application.services.workers import worker_dispatcher as dispatcher_module
 from antcode_core.application.services.workers.worker_dispatcher import WorkerTaskDispatcher
+from antcode_core.infrastructure.redis import stream_client as stream_client_module
 from antcode_core.infrastructure.redis import stream_dedup
-from antcode_core.infrastructure.redis import streams as streams_module
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -87,17 +93,11 @@ class _FakeStream:
     async def xgroup_create(self, *_args, **_kwargs):
         return True
 
-    async def xadd_batch(self, _stream_key, messages):
-        self.messages = messages
-        if self._xadd_error is not None:
-            raise self._xadd_error
-        return ["1-1"]
-
     async def xpending(self, *_args, **_kwargs):
         return {"pending_count": 0}
 
     async def _get_client(self):
-        raise RuntimeError("no redis in test")
+        return object()
 
 
 def _worker():
@@ -109,7 +109,23 @@ def _task(run_id: str = "run-1") -> dict:
 
 
 def _patch_stream(monkeypatch, fake: _FakeStream):
-    monkeypatch.setattr(streams_module, "StreamClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(stream_client_module, "StreamClient", lambda *args, **kwargs: fake)
+
+    async def publish(_redis, *, messages, **_kwargs):
+        fake.messages = messages
+        if fake._xadd_error is not None:
+            raise fake._xadd_error
+        return ["1-1"]
+
+    monkeypatch.setattr(dispatcher_module.ready_publish, "publish_ready_batch", publish)
+
+
+def _snapshot() -> LeaseCapabilitySnapshot:
+    return LeaseCapabilitySnapshot("lease-7", '{"task_types":["code"]}', 7)
+
+
+# B12: 派发必须在已验证的 Master 代际内进行，否则 _send_batch_to_queue 直接抛错。
+DISPATCH_EPOCH = 19
 
 
 @pytest.mark.asyncio
@@ -118,7 +134,10 @@ async def test_send_batch_carries_deterministic_dispatch_id(monkeypatch):
     _patch_stream(monkeypatch, fake)
     dispatcher = WorkerTaskDispatcher()
 
-    result = await dispatcher._send_batch_to_queue(worker=_worker(), tasks=[_task("run-42")], batch_id="b1")
+    with scheduler_dispatch_epoch(DISPATCH_EPOCH):
+        result = await dispatcher._send_batch_to_queue(
+            worker=_worker(), tasks=[_task("run-42")], batch_id="b1", lease_snapshot=_snapshot()
+        )
 
     assert result["success"] is True
     assert fake.messages[0]["dispatch_id"] == "run-42"
@@ -132,7 +151,10 @@ async def test_lost_response_with_committed_write_is_treated_as_success(monkeypa
     monkeypatch.setattr(stream_dedup, "find_recent_field_values", AsyncMock(return_value={"run-42"}))
     dispatcher = WorkerTaskDispatcher()
 
-    result = await dispatcher._send_batch_to_queue(worker=_worker(), tasks=[_task("run-42")], batch_id="b1")
+    with scheduler_dispatch_epoch(DISPATCH_EPOCH):
+        result = await dispatcher._send_batch_to_queue(
+            worker=_worker(), tasks=[_task("run-42")], batch_id="b1", lease_snapshot=_snapshot()
+        )
 
     assert result["success"] is True
 
@@ -145,6 +167,27 @@ async def test_lost_response_with_confirmed_absence_fails(monkeypatch):
     monkeypatch.setattr(stream_dedup, "find_recent_field_values", AsyncMock(return_value=set()))
     dispatcher = WorkerTaskDispatcher()
 
-    result = await dispatcher._send_batch_to_queue(worker=_worker(), tasks=[_task("run-42")], batch_id="b1")
+    with scheduler_dispatch_epoch(DISPATCH_EPOCH):
+        result = await dispatcher._send_batch_to_queue(
+            worker=_worker(), tasks=[_task("run-42")], batch_id="b1", lease_snapshot=_snapshot()
+        )
 
     assert result["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_lease_fence_failure_never_uses_commit_dedup(monkeypatch):
+    fake = _FakeStream(xadd_error=LeaseDispatchFenceError("lease_changed"))
+    _patch_stream(monkeypatch, fake)
+    find = AsyncMock(side_effect=AssertionError("Lease fence failure must not use stream dedup"))
+    monkeypatch.setattr(stream_dedup, "find_recent_field_values", find)
+
+    with scheduler_dispatch_epoch(DISPATCH_EPOCH), pytest.raises(LeaseDispatchFenceError, match="lease_changed"):
+        await WorkerTaskDispatcher()._send_batch_to_queue(
+            worker=_worker(),
+            tasks=[_task("run-42")],
+            batch_id="b1",
+            lease_snapshot=_snapshot(),
+        )
+
+    find.assert_not_awaited()

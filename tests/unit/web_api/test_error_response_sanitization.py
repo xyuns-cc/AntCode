@@ -34,6 +34,7 @@ async def test_auth_dependency_hides_internal_error(monkeypatch) -> None:
 async def test_cancel_run_hides_worker_transport_error(monkeypatch) -> None:
     execution = SimpleNamespace(run_id="run-1", worker_id=7)
     monkeypatch.setattr(runs, "_get_cancellable_execution", AsyncMock(return_value=execution))
+    monkeypatch.setattr(runs, "_record_assigned_cancel_request", AsyncMock(return_value=True))
     monkeypatch.setattr(runs, "_write_worker_cancel_event", AsyncMock(side_effect=RuntimeError(_INTERNAL_ERROR)))
 
     with pytest.raises(HTTPException) as exc_info:
@@ -116,7 +117,7 @@ async def test_direct_registration_hides_redis_connection_error(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_dispatch_failure_hides_dispatcher_error(monkeypatch) -> None:
+async def test_dispatch_failure_hides_dispatcher_error(monkeypatch, active_scheduler_authority) -> None:
     services_module = importlib.import_module("antcode_core.application.services.workers")
     project_module = importlib.import_module("antcode_core.application.services.projects.project_service")
     project = SimpleNamespace(id=9, env_location=None, worker_env_name=None)
@@ -142,7 +143,7 @@ async def test_dispatch_failure_hides_dispatcher_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_batch_dispatch_failure_hides_dispatcher_error(monkeypatch) -> None:
+async def test_batch_dispatch_failure_hides_dispatcher_error(monkeypatch, active_scheduler_authority) -> None:
     services_module = importlib.import_module("antcode_core.application.services.workers")
     guard_module = importlib.import_module("antcode_web_api.routes.v1.worker_dispatch_guard")
     monkeypatch.setattr(workers, "_resolve_dispatch_worker", AsyncMock(return_value=None))

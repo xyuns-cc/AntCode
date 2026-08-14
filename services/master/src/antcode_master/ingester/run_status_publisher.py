@@ -4,6 +4,7 @@ from antcode_core.application.services.workers.distributed_log_status import (
     display_status_message,
     status_progress,
 )
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.common.realtime_events import build_run_status_message
 from antcode_core.domain.models.task_run import TaskRun
 from antcode_core.infrastructure.redis.sse_event_stream import publish_sse_event
@@ -17,7 +18,7 @@ async def publish_persisted_run_status(run_id: str) -> None:
     status = execution.status.value
     status_data = {
         "status": status,
-        "error_message": execution.error_message,
+        "error_message": normalize_persisted_error_message(execution.error_message),
     }
     await publish_sse_event(
         build_run_status_message(

@@ -1,8 +1,19 @@
 """TaskPollHandler 现代化行为测试。"""
 
 import pytest
+from antcode_core.common.security.task_payload_envelope import seal_ready_payload
 from antcode_core.infrastructure.redis import task_ready_stream
-from antcode_gateway.handlers.poll import TaskPollHandler
+from antcode_gateway.handlers.poll import TaskPollHandler, task_info_to_dispatch
+
+WORKER_SECRET = "gateway-poll-test-secret-material-000001"
+
+
+def _handler(redis_client=None) -> TaskPollHandler:
+    return TaskPollHandler(redis_client=redis_client)
+
+
+def _sealed(payload: dict[str, object]) -> dict[str, object]:
+    return seal_ready_payload(payload, worker_id="worker-1", worker_secret=WORKER_SECRET)
 
 
 class _FakeRedis:
@@ -22,11 +33,15 @@ class _FakeRedis:
                     [
                         (
                             "1-0",
-                            {
-                                "task_id": "task-1",
-                                "project_id": "proj-1",
-                                "execution_id": "legacy-run",
-                            },
+                            _sealed(
+                                {
+                                    "task_id": "task-1",
+                                    "project_id": "proj-1",
+                                    "run_id": "run-1",
+                                    "dispatch_lease_id": "lease-1",
+                                    "dispatch_lease_gen": "1",
+                                }
+                            ),
                         )
                     ],
                 )
@@ -108,7 +123,7 @@ class _PoisonRedis:
 @pytest.mark.asyncio
 async def test_consumer_group_init_cached_between_polls():
     redis = _FakeRedis()
-    handler = TaskPollHandler(redis_client=redis)
+    handler = _handler(redis)
 
     await handler.handle(worker_id="worker-1", lease_id="lease-1", max_tasks=1, block_ms=1)
     await handler.handle(worker_id="worker-1", lease_id="lease-1", max_tasks=1, block_ms=1)
@@ -120,11 +135,7 @@ async def test_consumer_group_init_cached_between_polls():
 def test_parse_task_data_ignores_legacy_execution_id():
     handler = TaskPollHandler(redis_client=None)
     task = handler._parse_task_data(
-        data={
-            "task_id": "task-1",
-            "project_id": "proj-1",
-            "execution_id": "legacy-run",
-        },
+        data=_sealed({"task_id": "task-1", "project_id": "proj-1", "execution_id": "legacy-run"}),
         message_id="1-0",
     )
 
@@ -132,48 +143,38 @@ def test_parse_task_data_ignores_legacy_execution_id():
     assert task.run_id == ""
 
 
-def test_parse_task_data_keeps_dict_params_environment():
+def test_parse_task_data_keeps_sensitive_fields_opaque():
     handler = TaskPollHandler(redis_client=None)
     task = handler._parse_task_data(
-        data={
-            "task_id": "task-2",
-            "project_id": "proj-2",
-            "params": {"depth": 3},
-            "environment": {"A": "B"},
-        },
+        data=_sealed(
+            {
+                "task_id": "task-2",
+                "project_id": "proj-2",
+                "params": {"token": "gateway-must-not-see-this"},
+                "environment": {"API_KEY": "gateway-must-not-see-this-either"},
+            }
+        ),
         message_id="2-0",
     )
 
-    assert task is not None
-    assert task.params == {"depth": 3}
-    assert task.environment == {"A": "B"}
+    dispatch = task_info_to_dispatch(task)
+    assert not dispatch.params
+    assert not dispatch.environment
+    assert b"gateway-must-not-see-this" not in dispatch.sealed_ready_payload
 
 
-def test_parse_task_data_rejects_invalid_params_json():
+@pytest.mark.parametrize("field", ["params", "environment"])
+def test_parse_task_data_rejects_plaintext_sensitive_fields(field: str):
     handler = TaskPollHandler(redis_client=None)
 
-    with pytest.raises(ValueError, match="params"):
+    with pytest.raises(ValueError, match="明文字段"):
         handler._parse_task_data(
             data={
                 "task_id": "task-3",
                 "project_id": "proj-3",
-                "params": "{invalid",
+                field: '{"secret":"forbidden"}',
             },
             message_id="3-0",
-        )
-
-
-def test_parse_task_data_rejects_invalid_environment_json():
-    handler = TaskPollHandler(redis_client=None)
-
-    with pytest.raises(ValueError, match="environment"):
-        handler._parse_task_data(
-            data={
-                "task_id": "task-4",
-                "project_id": "proj-4",
-                "environment": "{invalid",
-            },
-            message_id="4-0",
         )
 
 
@@ -233,7 +234,7 @@ async def test_poison_task_is_acked_only_after_dlq_succeeds():
     results = [(stream, [("1-0", {"project_id": "project-without-task"})])]
     redis = _PoisonRedis(dlq_fails=False)
 
-    tasks = await TaskPollHandler()._tasks_from_results(redis, results, "worker-1")
+    tasks = await _handler()._tasks_from_results(redis, results, "worker-1", lease_id="lease-1")
 
     assert tasks == []
     assert len(redis.dead_letters) == 1
@@ -246,7 +247,7 @@ async def test_poison_task_stays_pending_when_dlq_fails():
     results = [(stream, [("1-0", {"project_id": "project-without-task"})])]
     redis = _PoisonRedis(dlq_fails=True)
 
-    tasks = await TaskPollHandler()._tasks_from_results(redis, results, "worker-1")
+    tasks = await _handler()._tasks_from_results(redis, results, "worker-1", lease_id="lease-1")
 
     assert tasks == []
     assert redis.acked == []

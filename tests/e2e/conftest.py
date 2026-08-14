@@ -8,7 +8,7 @@ import asyncio
 import os
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -16,12 +16,13 @@ import pytest_asyncio
 
 E2E_CONFIRM_ENV = "ANTCODE_E2E_CONFIRM"
 E2E_FULL_CONFIRMATION = "FULL"
-E2E_DATABASE_NAME = "antcode_e2e_test"
-E2E_DATABASE_HOST_ENV = "ANTCODE_E2E_DATABASE_HOST"
-E2E_DATABASE_NAME_ENV = "ANTCODE_E2E_DATABASE_NAME"
+E2E_WEB_API_URL_ENV = "ANTCODE_E2E_WEB_API_URL"
+E2E_ADMIN_USER_ENV = "ANTCODE_E2E_ADMIN_USER"
+E2E_ADMIN_PASSWORD_ENV = "ANTCODE_E2E_ADMIN_PASSWORD"
 E2E_TRANSPORT_MODE_ENV = "ANTCODE_E2E_EXPECT_TRANSPORT_MODE"
 E2E_TRANSPORT_MODES = frozenset({"direct", "gateway"})
 E2E_WORKER_ID_ENV = "ANTCODE_E2E_WORKER_ID"
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class SensitiveString(str):
@@ -59,15 +60,17 @@ def _required_env(name: str) -> str:
     return value
 
 
-def _database_identity(database_url: str) -> tuple[str, str]:
-    parsed = urlsplit(database_url)
-    if parsed.scheme.lower() not in {"postgres", "postgresql"}:
-        raise ValueError("E2E DATABASE_URL 必须使用 PostgreSQL")
-    host = (parsed.hostname or "").strip().lower()
-    if not host:
-        raise ValueError("E2E DATABASE_URL 必须包含数据库 host")
-    database = unquote(parsed.path.lstrip("/")).strip().lower()
-    return host, database
+def _validate_e2e_web_api_url(value: str) -> str:
+    parsed = urlsplit(value)
+    is_https = parsed.scheme.lower() == "https"
+    is_loopback_http = parsed.scheme.lower() == "http" and parsed.hostname in LOOPBACK_HOSTS
+    if not parsed.hostname or not (is_https or is_loopback_http):
+        raise ValueError(f"{E2E_WEB_API_URL_ENV} 必须使用 HTTPS；仅本机回环 CI 允许显式 HTTP")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError(f"{E2E_WEB_API_URL_ENV} 不允许包含凭证、query 或 fragment")
+    if parsed.path not in {"", "/"}:
+        raise ValueError(f"{E2E_WEB_API_URL_ENV} 只能配置 HTTPS origin，不能包含路径")
+    return value.rstrip("/")
 
 
 def require_e2e_authorization() -> str:
@@ -75,17 +78,7 @@ def require_e2e_authorization() -> str:
     if confirmation != E2E_FULL_CONFIRMATION:
         raise RuntimeError(f"运行 E2E 必须显式设置 {E2E_CONFIRM_ENV}={E2E_FULL_CONFIRMATION}")
     require_e2e_worker_id()
-    database_url = _required_env("DATABASE_URL")
-    expected_host = _required_env(E2E_DATABASE_HOST_ENV).lower()
-    expected_database = _required_env(E2E_DATABASE_NAME_ENV).lower()
-    if expected_database != E2E_DATABASE_NAME:
-        raise ValueError(f"{E2E_DATABASE_NAME_ENV} 必须绑定专用数据库 {E2E_DATABASE_NAME!r}")
-    actual_host, actual_database = _database_identity(database_url)
-    if actual_host != expected_host:
-        raise ValueError(f"E2E 数据库 host 绑定不匹配: expected={expected_host!r}, actual={actual_host!r}")
-    if actual_database != expected_database:
-        raise ValueError(f"E2E 数据库名称绑定不匹配: expected={expected_database!r}, actual={actual_database!r}")
-    return database_url
+    return _validate_e2e_web_api_url(_required_env(E2E_WEB_API_URL_ENV))
 
 
 def require_e2e_transport_mode() -> str:
@@ -113,7 +106,7 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
 
 @pytest.fixture(scope="session")
 def e2e_config() -> E2EConfig:
-    web_api_url = _env("ANTCODE_E2E_WEB_API_URL", "http://127.0.0.1:8000")
+    web_api_url = require_e2e_authorization()
     runtime_python_version = _env("ANTCODE_E2E_RUNTIME_PYTHON", "3.12")
     shared_env_name = _env(
         "ANTCODE_E2E_SHARED_ENV",
@@ -122,8 +115,8 @@ def e2e_config() -> E2EConfig:
 
     return E2EConfig(
         web_api_url=web_api_url,
-        admin_user=_env("ANTCODE_E2E_ADMIN_USER", "admin"),
-        admin_password=_env("ANTCODE_E2E_ADMIN_PASSWORD", "Admin123!"),
+        admin_user=_required_env(E2E_ADMIN_USER_ENV),
+        admin_password=_required_env(E2E_ADMIN_PASSWORD_ENV),
         worker_id=require_e2e_worker_id(),
         runtime_python_version=runtime_python_version,
         shared_env_name=shared_env_name,
@@ -138,52 +131,9 @@ requires_postgres = pytest.mark.e2e
 requires_redis = pytest.mark.e2e
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def ensure_e2e_admin_credentials(e2e_config: E2EConfig) -> None:
-    """确保 E2E 使用的管理员账号可用且口令一致。"""
-    require_e2e_authorization()
-
-    from antcode_core.domain.models.user import User, UserRole
-    from antcode_core.infrastructure.db.tortoise import get_default_tortoise_config
-    from tortoise import Tortoise
-
-    await Tortoise.init(config=get_default_tortoise_config())
-    try:
-        admin_user = await User.filter(username=e2e_config.admin_user).first()
-        if admin_user is None:
-            admin_user = User(
-                username=e2e_config.admin_user,
-                email="admin@example.com",
-                is_active=True,
-                role=UserRole.SUPER_ADMIN,
-            )
-            admin_user.set_password(e2e_config.admin_password)
-            await admin_user.save()
-            return
-
-        update_fields: list[str] = []
-        if not admin_user.verify_password(e2e_config.admin_password):
-            admin_user.set_password(e2e_config.admin_password)
-            update_fields.append("password_hash")
-        if admin_user.role != UserRole.SUPER_ADMIN or not admin_user.is_admin:
-            admin_user.role = UserRole.SUPER_ADMIN
-            admin_user.is_admin = True
-            update_fields.extend(["role", "is_admin"])
-        if not admin_user.is_active:
-            admin_user.is_active = True
-            update_fields.append("is_active")
-        if update_fields:
-            await admin_user.save(update_fields=list(dict.fromkeys(update_fields)))
-    finally:
-        await Tortoise.close_connections()
-
-
 @pytest_asyncio.fixture(scope="session")
-async def e2e_token(
-    e2e_config: E2EConfig,
-    ensure_e2e_admin_credentials: None,
-) -> SensitiveString:
-    """Login once per session so E2E respects the production auth limiter."""
+async def e2e_token(e2e_config: E2EConfig) -> SensitiveString:
+    """只通过 HTTPS 登录预先 bootstrap 的管理员，不直接修改数据库。"""
     from .helpers import login
 
     async with httpx.AsyncClient(

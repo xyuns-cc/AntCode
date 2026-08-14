@@ -1,12 +1,15 @@
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from antcode_core.application.services.lease_service import (
+    _DISABLE_WORKER_LUA,
     _GRANT_LUA,
     _SWEEP_DELETE_LUA,
     LEASE_RECORD_RETENTION_MS,
     LeaseConflictError,
+    LeaseIneligibleError,
+    LeaseRevokedError,
     LeaseStore,
 )
 
@@ -25,6 +28,22 @@ def test_public_lease_key_matches_the_authoritative_key_format() -> None:
     assert store.lease_key("worker-a") == "{tenant}:lease:data:worker-a"
 
 
+def test_disable_worker_keys_share_one_cluster_slot() -> None:
+    from redis.cluster import key_slot
+
+    store = LeaseStore(MagicMock(), namespace="tenant")
+    keys = [
+        store.lease_key("worker-a"),
+        "{tenant}:lease:revoked:worker-a",
+        "{tenant}:lease:expiring",
+        "{tenant}:lease:active",
+        store.lifecycle_key("worker-a"),
+        "{tenant}:heartbeat:worker-a",
+    ]
+
+    assert len({key_slot(key.encode()) for key in keys}) == 1
+
+
 @pytest.mark.asyncio
 async def test_grant_updates_primary_record_and_indexes_in_one_script():
     redis = MagicMock()
@@ -41,6 +60,7 @@ async def test_grant_updates_primary_record_and_indexes_in_one_script():
         "{tenant}:lease:expiring",
         "{tenant}:lease:active",
         "{tenant}:lease:sequence",  # P1-GW-01 (round6): 全局 seq 计数器
+        "{tenant}:lease:lifecycle:worker-a",
     ]
     args = store._evalsha_grant.await_args.args[1]
     assert args[3:] == ["30000", "5000", "", ""]
@@ -67,13 +87,15 @@ async def test_grant_atomically_persists_capabilities_with_lease():
 
 
 @pytest.mark.asyncio
-async def test_grant_explicit_empty_capabilities_clear_the_previous_snapshot():
+async def test_grant_capability_change_requires_a_new_lease_generation():
     store = LeaseStore(MagicMock(), namespace="tenant")
-    store._evalsha_grant = AsyncMock(return_value=["lease-id", "2000", "1000", "renewed", "7"])
+    store._evalsha_grant = AsyncMock(return_value=["", "", "", "capabilities_changed"])
 
-    await store.grant("worker-a", current_lease_id="lease-id", capabilities={})
+    with pytest.raises(LeaseRevokedError, match="新代际"):
+        await store.grant("worker-a", current_lease_id="lease-id", capabilities={})
 
     assert store._evalsha_grant.await_args.args[1][-1] == "{}"
+    assert "capabilities_json ~= (redis.call('HGET', lease_key, 'capabilities_json') or '')" in _GRANT_LUA
 
 
 def test_grant_lua_uses_redis_time_and_physical_ttl_as_authority() -> None:
@@ -82,6 +104,11 @@ def test_grant_lua_uses_redis_time_and_physical_ttl_as_authority() -> None:
     assert "local expires_at_ms = now_ms + ttl_ms" in _GRANT_LUA
     assert "redis.call('ZADD', expiring_key, expires_at_ms, worker_id)" in _GRANT_LUA
     assert "local now_ms" not in "\n".join(line for line in _GRANT_LUA.splitlines() if "ARGV" in line)
+
+
+def test_new_lease_generation_clears_retained_metrics_when_no_snapshot_is_sent() -> None:
+    assert "elseif outcome == 'new' then" in _GRANT_LUA
+    assert "redis.call('HDEL', lease_key, 'metrics_json')" in _GRANT_LUA
 
 
 @pytest.mark.asyncio
@@ -107,6 +134,17 @@ async def test_grant_rejects_unknown_script_outcome():
 
 
 @pytest.mark.asyncio
+async def test_grant_maps_lifecycle_fence_to_ineligible_error():
+    store = LeaseStore(MagicMock(), namespace="tenant")
+    store._evalsha_grant = AsyncMock(return_value=["", "", "", "ineligible"])
+
+    with pytest.raises(LeaseIneligibleError):
+        await store.grant("worker-a")
+
+    assert "redis.call('EXISTS', lifecycle_key)" in _GRANT_LUA
+
+
+@pytest.mark.asyncio
 async def test_revoke_updates_primary_record_and_indexes_in_one_script():
     redis = MagicMock()
     store = LeaseStore(redis, namespace="tenant")
@@ -121,6 +159,30 @@ async def test_revoke_updates_primary_record_and_indexes_in_one_script():
     ]
     assert store._evalsha_revoke.await_args.args[1][1] == "lease-id"
     redis.pipeline.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_disable_worker_atomically_fences_revoke_and_heartbeat_cleanup():
+    store = LeaseStore(MagicMock(), namespace="tenant")
+    store._evalsha_disable_worker = AsyncMock(return_value=1)
+
+    disabled = await store.disable_worker(
+        "worker-a",
+        reason="maintenance",
+        heartbeat_key="{tenant}:heartbeat:worker-a",
+    )
+
+    assert disabled is True
+    assert store._evalsha_disable_worker.await_args.args[0] == [
+        "{tenant}:lease:data:worker-a",
+        "{tenant}:lease:revoked:worker-a",
+        "{tenant}:lease:expiring",
+        "{tenant}:lease:active",
+        "{tenant}:lease:lifecycle:worker-a",
+        "{tenant}:heartbeat:worker-a",
+    ]
+    assert "redis.call('SET', lifecycle_key, reason)" in _DISABLE_WORKER_LUA
+    assert "redis.call('DEL', lease_key, heartbeat_key)" in _DISABLE_WORKER_LUA
 
 
 def test_sweep_lua_returns_the_persisted_lease_id():
@@ -145,15 +207,17 @@ async def test_is_current_requires_exact_generation_and_positive_redis_ttl(
 ) -> None:
     redis = MagicMock()
     pipeline = MagicMock()
-    # P1-DR-02: is_current 现在多一步 sismember revoked check(未 revoke → 0)
-    pipeline.execute = AsyncMock(return_value=[0, case.exists, case.stored_lease_id, case.pttl_ms])
+    pipeline.execute = AsyncMock(return_value=[0, 0, case.exists, case.stored_lease_id, case.pttl_ms])
     redis.pipeline.return_value = pipeline
     store = LeaseStore(redis, namespace="tenant")
 
     assert await store.is_current("worker-a", "lease-1") is case.expected
     redis.pipeline.assert_called_once_with(transaction=True)
     pipeline.sismember.assert_called_once_with("{tenant}:lease:revoked:worker-a", "lease-1")
-    pipeline.exists.assert_called_once_with("{tenant}:lease:data:worker-a")
+    assert pipeline.exists.call_args_list == [
+        call("{tenant}:lease:lifecycle:worker-a"),
+        call("{tenant}:lease:data:worker-a"),
+    ]
     pipeline.hget.assert_called_once_with("{tenant}:lease:data:worker-a", "lease_id")
     pipeline.pttl.assert_called_once_with("{tenant}:lease:data:worker-a")
 
@@ -164,7 +228,18 @@ async def test_is_current_returns_false_when_lease_in_revoked_set() -> None:
     redis = MagicMock()
     pipeline = MagicMock()
     # sismember=1(在 revoked set 里),其余字段无关紧要
-    pipeline.execute = AsyncMock(return_value=[1, 1, b"lease-1", LEASE_RECORD_RETENTION_MS + 10_000])
+    pipeline.execute = AsyncMock(return_value=[1, 0, 1, b"lease-1", LEASE_RECORD_RETENTION_MS + 10_000])
+    redis.pipeline.return_value = pipeline
+    store = LeaseStore(redis, namespace="tenant")
+
+    assert await store.is_current("worker-a", "lease-1") is False
+
+
+@pytest.mark.asyncio
+async def test_is_current_returns_false_when_lifecycle_fence_exists() -> None:
+    redis = MagicMock()
+    pipeline = MagicMock()
+    pipeline.execute = AsyncMock(return_value=[0, 1, 1, b"lease-1", LEASE_RECORD_RETENTION_MS + 10_000])
     redis.pipeline.return_value = pipeline
     store = LeaseStore(redis, namespace="tenant")
 

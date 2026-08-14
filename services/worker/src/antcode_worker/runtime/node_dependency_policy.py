@@ -14,7 +14,7 @@ from antcode_core.common.config import settings
 from loguru import logger
 from yaml.events import AliasEvent, CollectionEndEvent, CollectionStartEvent  # type: ignore[import-untyped]
 
-from antcode_worker.runtime.uv_manager import run_command
+from antcode_worker.runtime.dependency_process import DependencyLimits, run_dependency_command
 
 _PACKAGE_NAME_PATTERN = re.compile(r"^(?:@[a-z0-9._-]+/)?[a-z0-9._-]+$", re.IGNORECASE)
 _PACKAGE_SPEC_PATTERN = re.compile(r"^[A-Za-z0-9*^~<>=| ._-]+$")
@@ -41,47 +41,66 @@ _FORBIDDEN_SOURCE_PREFIXES = (
 _NODE_INSTALL_ENV_KEYS = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
 _MAX_LOCKFILE_NODES = 200_000
 _MAX_LOCKFILE_DEPTH = 100
+_OFFLINE_CACHE_ROOT = ".antcode-deps"
+_NPM_CACHE_DIR = "npm-cache"
+_PNPM_STORE_DIR = "pnpm-store"
 
 
-async def install_node_dependencies(cwd: str) -> None:
+async def install_node_dependencies(cwd: str, *, limits: DependencyLimits) -> None:
     root = Path(cwd)
     if not (root / "package.json").is_file():
         return
     registry = validate_node_dependency_metadata(cwd)
     command = _node_install_command(root, registry)
     if command is None:
-        logger.debug("Node 项目已有 node_modules 且无 lockfile，跳过装依赖: {}", cwd)
+        logger.debug("Node 项目无需离线依赖装配: {}", cwd)
         return
     install_env = {key: os.environ[key] for key in _NODE_INSTALL_ENV_KEYS if key in os.environ}
     install_env.update(
         HOME=cwd,
         npm_config_ignore_scripts="true",
+        npm_config_offline="true",
         npm_config_userconfig=os.devnull,
         npm_config_registry=registry,
     )
-    result = await run_command(
+    result = await run_dependency_command(
         command,
         cwd=cwd,
         env=install_env,
-        timeout=600,
-        inherit_env=False,
-        max_output_bytes=settings.NODE_INSTALL_MAX_OUTPUT_BYTES,
+        limits=limits,
     )
     if result.exit_code != 0:
         raise RuntimeError(f"Node 依赖装配失败: {result.stderr or result.stdout}")
 
 
 def _node_install_command(root: Path, registry: str) -> list[str] | None:
-    common = ["--prefer-offline", "--ignore-scripts", "--registry", registry]
+    if (root / "node_modules").is_dir() or not _has_declared_dependencies(root):
+        return None
+    common = ["--offline", "--ignore-scripts", "--registry", registry]
     if (root / "pnpm-lock.yaml").is_file():
-        return ["pnpm", "install", "--frozen-lockfile", *common]
+        store = _require_offline_cache(root, _PNPM_STORE_DIR)
+        return ["pnpm", "install", "--frozen-lockfile", "--store-dir", str(store), *common]
     if (root / "yarn.lock").is_file():
         raise RuntimeError("安全模式不支持自动安装 yarn.lock")
     if (root / "package-lock.json").is_file():
-        return ["npm", "ci", "--no-audit", "--no-fund", *common]
-    if (root / "node_modules").is_dir():
-        return None
-    return ["npm", "install", "--no-audit", "--no-fund", *common]
+        cache = _require_offline_cache(root, _NPM_CACHE_DIR)
+        return ["npm", "ci", "--cache", str(cache), "--no-audit", "--no-fund", *common]
+    raise RuntimeError("Node 外部依赖必须提供 lockfile 和 .antcode-deps 离线缓存")
+
+
+def _has_declared_dependencies(root: Path) -> bool:
+    package_data = _load_json(root / "package.json")
+    return any(bool(package_data.get(section)) for section in _DEPENDENCY_SECTIONS)
+
+
+def _require_offline_cache(root: Path, directory: str) -> Path:
+    cache = root / _OFFLINE_CACHE_ROOT / directory
+    if not cache.is_dir():
+        raise RuntimeError(f"Node 外部依赖缺少离线缓存: {_OFFLINE_CACHE_ROOT}/{directory}")
+    resolved = cache.resolve()
+    if os.path.commonpath([str(root.resolve()), str(resolved)]) != str(root.resolve()):
+        raise RuntimeError("Node 离线缓存路径越出项目工作区")
+    return resolved
 
 
 def validate_node_dependency_metadata(cwd: str) -> str:

@@ -18,9 +18,14 @@ from loguru import logger
 
 from tests.integration.worker.direct_transport_support import (
     activate_direct_transport,
+    publish_ready_task,
     read_task_statuses,
     source_bundle_fields,
     stop_direct_transport,
+)
+from tests.integration.worker.gateway_dispatch_support import (
+    decode_gateway_dispatch,
+    make_gateway_dispatch,
 )
 
 REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL")
@@ -66,6 +71,7 @@ class TestDirectModeTaskDispatch:
         unique_worker_id,
         unique_stream_prefix,
         *,
+        unique_execution_id,
         direct_transport_factory,
     ):
         """
@@ -91,7 +97,6 @@ class TestDirectModeTaskDispatch:
         keys = RedisKeys()
 
         try:
-            # 启动 Transport
             await activate_direct_transport(transport)
 
             # 确保 consumer group 存在
@@ -106,9 +111,9 @@ class TestDirectModeTaskDispatch:
             except Exception:
                 pass
 
-            # 模拟 Master 分发任务
             task_data = {
                 "task_id": unique_task_id,
+                "run_id": unique_execution_id,
                 "project_id": "test-project-001",
                 "project_type": "code",
                 "priority": "10",
@@ -117,11 +122,10 @@ class TestDirectModeTaskDispatch:
                 **source_bundle_fields("a"),
             }
 
-            msg_id = await redis_client.xadd(stream_key, task_data)
+            msg_id = await publish_ready_task(redis_client, transport, task_data)
             assert msg_id, "任务写入失败"
             logger.info("Master 分发任务: {} msg_id={}", unique_task_id, msg_id)
 
-            # Worker 拉取任务
             task = await transport.poll_task(timeout=5.0)
             assert task is not None, "Worker 未能拉取到任务"
             assert task.task_id == unique_task_id
@@ -154,8 +158,8 @@ class TestDirectModeTaskDispatch:
         """
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import CallbackLogSink, ExecutorConfig
+        from antcode_worker.executor.process import ProcessExecutor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建测试脚本
@@ -244,8 +248,8 @@ class TestDirectModeTaskDispatch:
         import redis.asyncio as aioredis
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
+        from antcode_worker.executor.process import ProcessExecutor
         from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
         from antcode_worker.transport.redis.keys import RedisKeys
 
@@ -287,9 +291,9 @@ class TestDirectModeTaskDispatch:
                 except Exception:
                     pass
 
-                # 2. Master 分发任务
                 task_data = {
                     "task_id": unique_task_id,
+                    "run_id": unique_execution_id,
                     "project_id": "e2e-project",
                     "project_type": "code",
                     "priority": "5",
@@ -297,7 +301,7 @@ class TestDirectModeTaskDispatch:
                     "entry_point": "main.py",
                     **source_bundle_fields("b"),
                 }
-                await redis_client.xadd(stream_key, task_data)
+                await publish_ready_task(redis_client, transport, task_data)
                 logger.info("任务已分发: {}", unique_task_id)
 
                 # 3. Worker 拉取任务
@@ -377,32 +381,25 @@ class TestGatewayModeTaskDispatch:
 
     @pytest.mark.asyncio
     async def test_gateway_transport_task_decode(self, unique_task_id):
-        """
-        测试 Gateway 模式任务解码
-
-        验证：
-        1. 任务数据可以正确解码
-        2. 字段映射正确
-        """
-        from antcode_contracts import data_pb2
-        from antcode_worker.transport.gateway.codecs import TaskDecoder
-
+        """验证 Gateway 密文任务解码和字段映射。"""
+        worker_id = "gateway-worker-001"
         digest = "a" * 64
-        dispatch = data_pb2.TaskDispatch(
+        dispatch = make_gateway_dispatch(
+            worker_id=worker_id,
             task_id=unique_task_id,
+            run_id=unique_task_id,
             project_id="gateway-project-001",
             project_type="spider",
             priority=8,
             params={"url": "https://example.com"},
             environment={"TASK_LABEL": "integration"},
-            timeout_seconds=1800,
+            timeout=1800,
             source_bundle_uri=f"pgartifact://{digest}",
             source_bundle_sha256=digest,
             source_bundle_size=128,
             entry_point="spider.py",
         )
-
-        task = TaskDecoder.decode(dispatch)
+        task = decode_gateway_dispatch(dispatch, worker_id=worker_id)
 
         assert task.task_id == unique_task_id
         assert task.project_id == "gateway-project-001"
@@ -456,18 +453,14 @@ class TestGatewayModeTaskDispatch:
 
     @pytest.mark.asyncio
     async def test_gateway_codec_executor_flow(self, unique_task_id, unique_execution_id):
-        """
-        Gateway protobuf codec 与真实执行器集成测试
-
-        验证真实 TaskDispatch 解码、子进程执行与 TaskStatus 编码。
-        """
+        """验证密文 TaskDispatch 解码、子进程执行与状态编码。"""
         from antcode_contracts import data_pb2
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
+        from antcode_worker.executor.process import ProcessExecutor
         from antcode_worker.transport.base import TaskResult
-        from antcode_worker.transport.gateway.codecs import TaskDecoder, TaskStatusEncoder
+        from antcode_worker.transport.gateway.codecs import TaskStatusEncoder
 
         worker_id = f"gateway-worker-{uuid.uuid4().hex[:8]}"
 
@@ -482,18 +475,22 @@ class TestGatewayModeTaskDispatch:
                 f.write('logger.info("Gateway E2E Test")\n')
 
             digest = "b" * 64
-            dispatch = data_pb2.TaskDispatch(
+            dispatch = make_gateway_dispatch(
+                worker_id=worker_id,
                 task_id=unique_task_id,
+                run_id=unique_task_id,
                 project_id="gateway-e2e-project",
                 project_type="code",
                 priority=5,
-                timeout_seconds=60,
+                params={},
+                environment={},
+                timeout=60,
                 source_bundle_uri=f"pgartifact://{digest}",
                 source_bundle_sha256=digest,
                 source_bundle_size=128,
                 entry_point="main.py",
             )
-            task = TaskDecoder.decode(dispatch)
+            task = decode_gateway_dispatch(dispatch, worker_id=worker_id)
             logger.info("任务已解码: {}", task.task_id)
 
             executor_config = ExecutorConfig(max_concurrent=2, default_timeout=30)
@@ -556,8 +553,8 @@ class TestTaskExecutionEdgeCases:
         """
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
+        from antcode_worker.executor.process import ProcessExecutor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建会超时的脚本
@@ -612,8 +609,8 @@ class TestTaskExecutionEdgeCases:
         """
         from antcode_worker.domain.enums import RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
+        from antcode_worker.executor.process import ProcessExecutor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建会失败的脚本
@@ -657,18 +654,18 @@ class TestTaskExecutionEdgeCases:
                 await executor.stop()
 
     @pytest.mark.asyncio
-    async def test_task_environment_filters_sensitive_values(self, unique_execution_id):
+    async def test_task_environment_passes_and_redacts_sensitive_values(self, unique_execution_id):
         """
         测试任务环境变量边界
 
         验证：
         1. 普通任务变量正确传递
-        2. 敏感变量不进入用户子进程
+        2. 自定义敏感变量进入用户子进程，但输出日志中的值必须脱敏
         """
         from antcode_worker.domain.enums import LogStream, RunStatus
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
-        from antcode_worker.executor import ProcessExecutor
         from antcode_worker.executor.base import CallbackLogSink, ExecutorConfig
+        from antcode_worker.executor.process import ProcessExecutor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             script_path = os.path.join(tmpdir, "env_script.py")
@@ -723,8 +720,8 @@ class TestTaskExecutionEdgeCases:
                 stdout_logs = [entry for entry in logs if entry.stream == LogStream.STDOUT]
                 log_content = " ".join(entry.content for entry in stdout_logs)
                 assert "LABEL=integration-safe" in log_content
-                assert "API_KEY=not_set" in log_content
-                assert "SECRET=not_set" in log_content
+                assert "API_KEY=***REDACTED***" in log_content
+                assert "SECRET=***REDACTED***" in log_content
                 assert "my-api-key-123" not in log_content
                 assert "super-secret-456" not in log_content
 

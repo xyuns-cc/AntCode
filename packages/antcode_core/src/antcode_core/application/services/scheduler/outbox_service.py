@@ -12,19 +12,17 @@ from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.scheduler.outbox_claims import OutboxConsumeClaim, claim_is_active, replay_filter
 from antcode_core.common.config import settings
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.scheduler_outbox import SchedulerOutbox
-from antcode_core.infrastructure.redis.streams import StreamClient
+from antcode_core.infrastructure.redis.stream_client import StreamClient
 
 OUTBOX_POLL_SECONDS = 1.0
 OUTBOX_BATCH_SIZE = 50
 OUTBOX_MAX_BACKOFF_SECONDS = 300
 OUTBOX_CONSUME_CLAIM_TIMEOUT_SECONDS = 60
 OUTBOX_CONSUME_REQUEUE_SECONDS = 30
-# L3: 消费侧重投次数上限。达到后终止(标记 consumed),不再让事件重新可发布,
-# 防止永久失败的 outbox 事件每 ~30s 无限 republish→重复副作用→再写一份 DLQ。
+# 消费侧达到重投上限后终止事件，防止永久失败事件无限发布和重复副作用。
 OUTBOX_CONSUME_MAX_ATTEMPTS = 5
-
-# P1-round6 5.2: 终止性标记前缀, 区分"真正业务消费"与"重试耗尽放弃"。
 # 达上限时 consumed_at 仍写(防重投), last_error 前缀让运维和统计可识别。
 # 查询终止事件: SchedulerOutbox.filter(last_error__startswith=OUTBOX_TERMINATED_PREFIX)
 OUTBOX_TERMINATED_PREFIX = "[TERMINATED_MAX_RETRIES] "
@@ -45,24 +43,21 @@ class SchedulerOutboxService:
         aggregate_id: str | int,
         payload: dict[str, Any],
         connection: Any | None = None,
+        *,
+        public_id: str | None = None,
     ) -> SchedulerOutbox:
-        available_at = datetime.now(UTC)
-        if connection is None:
-            return await SchedulerOutbox.create(
-                event_type=event_type,
-                aggregate_type=aggregate_type,
-                aggregate_id=str(aggregate_id),
-                payload=dict(payload),
-                available_at=available_at,
-            )
-        return await SchedulerOutbox.create(
-            event_type=event_type,
-            aggregate_type=aggregate_type,
-            aggregate_id=str(aggregate_id),
-            payload=dict(payload),
-            available_at=available_at,
-            using_db=connection,
-        )
+        fields: dict[str, Any] = {
+            "event_type": event_type,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": str(aggregate_id),
+            "payload": dict(payload),
+            "available_at": datetime.now(UTC),
+        }
+        if public_id is not None:
+            fields["public_id"] = public_id
+        if connection is not None:
+            fields["using_db"] = connection
+        return await SchedulerOutbox.create(**fields)
 
     async def start(self) -> None:
         if self._running:
@@ -175,6 +170,7 @@ class SchedulerOutboxService:
         复审 P1-DB-01: 另一消费者持有活跃 claim 时绝不改写该行——按"已由
         接管者处理"返回 True；接管者崩溃的兜底是 claim 超时 + PEL 重投。
         """
+        safe_reason = normalize_persisted_error_message(reason) or ""
         async with in_transaction("default") as conn:
             now = await self._db_now(conn)
             event = (
@@ -197,7 +193,7 @@ class SchedulerOutboxService:
             if consume_attempts >= OUTBOX_CONSUME_MAX_ATTEMPTS:
                 # P1-round6 5.2: 达上限写 consumed_at 防重投, 但 last_error 加
                 # OUTBOX_TERMINATED_PREFIX 让运维可识别"重试耗尽"与"业务成功"。
-                marked_reason = f"{OUTBOX_TERMINATED_PREFIX}{reason}"[:2000]
+                marked_reason = normalize_persisted_error_message(f"{OUTBOX_TERMINATED_PREFIX}{safe_reason}")
                 updated = (
                     await SchedulerOutbox.filter(id=event.id)
                     .using_db(conn)
@@ -220,7 +216,7 @@ class SchedulerOutboxService:
                         available_at=now + timedelta(seconds=OUTBOX_CONSUME_REQUEUE_SECONDS),
                         consume_owner=None,
                         consume_started_at=None,
-                        last_error=reason[:2000],
+                        last_error=safe_reason,
                     )
                 )
                 terminal = False
@@ -290,13 +286,14 @@ class SchedulerOutboxService:
     async def _defer(self, event: SchedulerOutbox, exc: Exception, conn: Any) -> None:
         attempts = int(event.attempts or 0) + 1
         delay = min(2 ** min(attempts, 8), OUTBOX_MAX_BACKOFF_SECONDS)
+        safe_error = normalize_persisted_error_message(exc)
         await (
             SchedulerOutbox.filter(id=event.id)
             .using_db(conn)
             .update(
                 attempts=attempts,
                 available_at=datetime.now(UTC) + timedelta(seconds=delay),
-                last_error=str(exc)[:2000],
+                last_error=safe_error,
             )
         )
         logger.warning(

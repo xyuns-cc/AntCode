@@ -91,7 +91,11 @@ class PendingTaskReclaimer:
         self._reclaim_task = None
 
     async def reclaim_once(self) -> list[ReclaimedTask]:
-        return await self._do_reclaim()
+        try:
+            return await self._do_reclaim()
+        except Exception:
+            self._stats.reclaim_errors += 1
+            raise
 
     async def dead_letter_owned(
         self,
@@ -172,19 +176,15 @@ class PendingTaskReclaimer:
             return []
         stream_key = self._keys.task_ready_stream(self._worker_id)
         consumer_name = self._current_consumer_name()
-        try:
-            messages = await self._claimer.find_and_claim(
-                stream_key,
-                consumer_name,
-                max_count=capacity,
-            )
-            await self._require_current_generation()
-            tasks = await self._classify_claimed(stream_key, messages, consumer_name)
-            self._record_reclaim_stats(stream_key, len(tasks))
-            return tasks
-        except Exception:
-            self._stats.reclaim_errors += 1
-            raise
+        messages = await self._claimer.find_and_claim(
+            stream_key,
+            consumer_name,
+            max_count=capacity,
+        )
+        await self._require_current_generation()
+        tasks = await self._classify_claimed(stream_key, messages, consumer_name)
+        self._record_reclaim_stats(stream_key, len(tasks))
+        return tasks
 
     def _reclaim_capacity(self) -> int:
         if self._available_capacity is None:
@@ -209,7 +209,8 @@ class PendingTaskReclaimer:
                 message_data,
                 expected_consumer=expected_consumer,
             )
-            if task.delivery_count <= self._config.max_retries:
+            retry_count = task.delivery_count - 1
+            if retry_count <= self._config.max_retries:
                 reclaimed.append(task)
                 self._stats.total_reclaimed += 1
             else:

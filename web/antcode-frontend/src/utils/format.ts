@@ -1,5 +1,39 @@
 // 格式化工具函数
 
+import type { TaskStatus, TaskType } from '@/types/task'
+
+export interface StatusPresentation {
+  text: string
+  color: string
+}
+
+/**
+ * 任务状态展示。类型是 `Record<TaskStatus, …>` 而不是 `Record<string, …>`：
+ * 后端 TaskStatus 新增取值时，前端联合类型一更新，这里漏了 case 就是编译错误，
+ * 而不是安静地退化成显示原始英文枚举值（rejected 曾以这种方式漏了两处）。
+ */
+export const TASK_STATUS_PRESENTATION: Record<TaskStatus, StatusPresentation> = {
+  pending: { text: '等待调度', color: 'default' },
+  dispatching: { text: '分配 Worker 中', color: 'processing' },
+  queued: { text: '排队中', color: 'cyan' },
+  running: { text: '执行中', color: 'processing' },
+  success: { text: '成功', color: 'success' },
+  failed: { text: '失败', color: 'error' },
+  cancelled: { text: '已取消', color: 'warning' },
+  timeout: { text: '超时', color: 'error' },
+  paused: { text: '已暂停', color: 'warning' },
+  rejected: { text: '节点拒绝', color: 'error' },
+  skipped: { text: '已跳过', color: 'default' },
+}
+
+/** 任务类型展示，同样按后端 TaskType 全覆盖。 */
+export const TASK_TYPE_PRESENTATION: Record<TaskType, StatusPresentation> = {
+  file: { text: '文件任务', color: 'geekblue' },
+  code: { text: '代码任务', color: 'blue' },
+  rule: { text: '规则任务', color: 'green' },
+  spider: { text: '爬虫任务', color: 'purple' },
+}
+
 /**
  * 格式化日期时间
  */
@@ -167,19 +201,9 @@ export function parseJSON<T = unknown>(jsonString: string): T | null {
 /**
  * 格式化状态文本
  */
-export function formatStatus(status: string): { text: string; color: string } {
-  const statusMap: Record<string, { text: string; color: string }> = {
-    // 任务执行状态
-    pending: { text: '等待调度', color: 'default' },
-    dispatching: { text: '分配 Worker 中', color: 'processing' },
-    queued: { text: '排队中', color: 'cyan' },
-    running: { text: '执行中', color: 'processing' },
-    success: { text: '成功', color: 'success' },
-    failed: { text: '失败', color: 'error' },
-    cancelled: { text: '已取消', color: 'warning' },
-    timeout: { text: '超时', color: 'error' },
-    paused: { text: '已暂停', color: 'warning' },
-    skipped: { text: '已跳过', color: 'default' },
+export function formatStatus(status: string): StatusPresentation {
+  const statusMap: Record<string, StatusPresentation> = {
+    ...TASK_STATUS_PRESENTATION,
     // 通用状态
     active: { text: '活跃', color: 'success' },
     inactive: { text: '非活跃', color: 'default' },
@@ -188,7 +212,7 @@ export function formatStatus(status: string): { text: string; color: string } {
     offline: { text: '离线', color: 'default' },
     maintenance: { text: '维护中', color: 'warning' }
   }
-  
+
   return statusMap[status] || { text: status, color: 'default' }
 }
 
@@ -209,13 +233,8 @@ export function formatPriority(priority: string): { text: string; color: string 
 /**
  * 格式化任务类型
  */
-export function formatTaskType(type: string): { text: string; color: string } {
-  const typeMap: Record<string, { text: string; color: string }> = {
-    code: { text: '代码任务', color: 'blue' },
-    rule: { text: '规则任务', color: 'green' },
-    manual: { text: '手动任务', color: 'default' },
-    scheduled: { text: '定时任务', color: 'purple' }
-  }
-  
+export function formatTaskType(type: string): StatusPresentation {
+  const typeMap: Record<string, StatusPresentation> = TASK_TYPE_PRESENTATION
+
   return typeMap[type] || { text: type, color: 'default' }
 }

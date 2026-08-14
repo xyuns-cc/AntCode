@@ -61,12 +61,12 @@ from antcode_web_api.streams.run_stream_broker import (
 from antcode_web_api.streams.sse import (
     build_stream_error_message,
     format_sse_event,
+    recovery_complete_frame,
 )
 
 PING_INTERVAL_SECONDS = 15.0
 GAP_CHECK_INTERVAL_SECONDS = 5.0
-# 实时帧持续到达（broker 健康）或已见终态时，缺口扫描退避到该间隔，
-# 避免每连接每 5s 一次 MAX(id)/COUNT 扫描随并发观看者线性放大 PG 负载。
+# broker 健康或已见终态时退避缺口扫描，避免 MAX(id)/COUNT 负载随并发观看者线性放大。
 GAP_CHECK_BACKOFF_INTERVAL_SECONDS = 30.0
 SESSION_RECHECK_INTERVAL_SECONDS = 60.0
 MAX_STREAM_LIFETIME_SECONDS = 8 * 3600
@@ -207,6 +207,7 @@ class LogStreamService:
         replay_state.advance_storage_watermark(window.snapshot_id)
         if window.snapshot_id > window.start_id:
             yield stream_cursor_frame(window.snapshot_id), False
+        yield recovery_complete_frame(replay.sent_lines), False
 
     @staticmethod
     def _bounded_recovery(
@@ -296,12 +297,11 @@ def _execution_status(execution: TaskRun) -> str:
 
 
 log_stream_service = LogStreamService()
-
 __all__ = [
     "GAP_CHECK_BACKOFF_INTERVAL_SECONDS",
     "GAP_CHECK_INTERVAL_SECONDS",
     "HISTORY_LIMIT",
     "MAX_STREAM_LIFETIME_SECONDS",
 ]
-__all__ += ["PING_INTERVAL_SECONDS", "SESSION_RECHECK_INTERVAL_SECONDS"]
-__all__ += ["LogStreamService", "build_current_status_message", "log_stream_service", "verify_execution_access"]
+__all__ += ["PING_INTERVAL_SECONDS", "SESSION_RECHECK_INTERVAL_SECONDS", "LogStreamService"]
+__all__ += ["build_current_status_message", "log_stream_service", "verify_execution_access"]

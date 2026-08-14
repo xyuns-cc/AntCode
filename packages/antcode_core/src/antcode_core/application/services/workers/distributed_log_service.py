@@ -27,12 +27,11 @@ from antcode_core.application.services.workers.distributed_log_status import (
     status_progress,
 )
 from antcode_core.application.services.workers.log_notifier import LogRealtimeNotifier
+from antcode_core.common.error_messages import normalize_persisted_error_message
 
 MAX_CACHE_LINES = 1000
 MAX_PUSH_QUEUE_LINES = 1000
 LOG_TYPES = ("stdout", "stderr")
-
-# Hot run state is evicted lazily so terminal updates from other processes do not leak it.
 CACHE_TTL_SECONDS = 6 * 60 * 60
 SWEEP_INTERVAL_SECONDS = 60.0
 
@@ -107,6 +106,7 @@ class DistributedLogService:
         status_at: datetime | None = None,
     ) -> bool:
         status_at = status_at or datetime.now(UTC)
+        error_message = normalize_persisted_error_message(error_message)
         updated = await self._update_runtime_status(
             run_id,
             status,

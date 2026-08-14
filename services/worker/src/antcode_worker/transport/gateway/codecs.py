@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from antcode_contracts.transcode import (
@@ -31,6 +32,8 @@ from antcode_contracts.transcode import (
     encode_task_status,
     proto_timestamp_to_datetime,
 )
+from antcode_core.common.error_messages import normalize_persisted_error_message
+from antcode_core.common.security.task_payload_envelope import open_ready_payload
 from loguru import logger
 
 from antcode_worker.domain.models import SourceBundle
@@ -40,32 +43,29 @@ from antcode_worker.transport.base import (
     TaskMessage,
     TaskResult,
 )
+from antcode_worker.transport.gateway.heartbeat_metrics import (
+    build_metrics_proto,
+    heartbeat_metrics_dict,
+)
+from antcode_worker.transport.task_message_validation import validate_task_message_payload
 
-# P1: 之前 codecs.py 自己维护了一份字符串-枚举映射 + Timestamp 双向转换，
-# 与 redis/transport.py 完全重复。现在统一从 ``antcode_contracts.transcode``
-# 导入,见包内 transcode.py 注释中的别名收敛清单。
 
-
-def _maybe_json(value: Any) -> Any:
-    """P1-24 对称解码：还原 gateway ``_pb_scalar_for`` 用 ``json.dumps``
-    编码进 ``TaskDispatch.params``（``map<string,string>``）的嵌套结构。
-
-    只还原以 ``{`` / ``[`` 开头且能成功 parse 的 JSON object/array ——
-    与 direct 模式（``redis/transport.py::_decode_data`` 对 params 整体
-    ``json.loads``）拿到的嵌套 dict/list 对齐。
-
-    bool/int/float 被 ``_pb_scalar_for`` stringify 成 ``"true"`` / ``"123"``
-    后，与「原本就是字符串」不可区分（``_pb_scalar_for`` 对 str 透传），
-    还原会破坏合法字符串参数，因此一律保持字符串，由消费方按需 coerce。
-    现有消费方（``engine._build_payload`` 的 args/kwargs/artifact_patterns
-    isinstance 检查、``RulePlugin._extract_rule``）只依赖 dict/list 的还原。
-    """
-    if isinstance(value, str) and value[:1] in ("{", "["):
-        try:
-            return json.loads(value)
-        except (ValueError, TypeError):
-            return value
-    return value
+def _open_gateway_payload(dispatch: Any, *, worker_id: str, worker_secret: str) -> dict[str, Any]:
+    if getattr(dispatch, "params", None) or getattr(dispatch, "environment", None):
+        raise ValueError("Gateway TaskDispatch 禁止携带明文 params/environment")
+    raw = getattr(dispatch, "sealed_ready_payload", None)
+    if not isinstance(raw, bytes) or not raw:
+        raise ValueError("Gateway TaskDispatch 缺少 sealed_ready_payload")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Gateway sealed_ready_payload 不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Gateway sealed_ready_payload 必须是对象")
+    restored = open_ready_payload(payload, worker_id=worker_id, worker_secret=worker_secret)
+    if getattr(dispatch, "task_id", "") != restored.get("task_id"):
+        raise ValueError("Gateway TaskDispatch task_id 与密文绑定不一致")
+    return restored
 
 
 # ---------------------------------------------------------------------------
@@ -75,41 +75,29 @@ class TaskDecoder:
     """``data_pb2.TaskDispatch`` → ``TaskMessage``。"""
 
     @staticmethod
-    def decode(dispatch: Any) -> TaskMessage:
+    def decode(dispatch: Any, *, worker_id: str, worker_secret: str) -> TaskMessage:
         try:
-            # P1-24: params 值可能是 gateway 端 json.dumps 过的嵌套结构
-            # （如 rule 任务的 params["kwargs"] = '{"rule_detail": {...}}'），
-            # 必须还原成 dict/list，否则 engine._build_payload 的
-            # isinstance(dict/list) 检查全部落空，RulePlugin 拿不到 rule_detail。
-            params = {
-                str(key): _maybe_json(value) for key, value in dict(getattr(dispatch, "params", {}) or {}).items()
-            }
-            # environment 刻意**不**做 _maybe_json：env 值最终要进子进程
-            # environ，必须是字符串；且 JSON 字符串形态的 env 值（如内嵌
-            # 配置）在 direct 模式下同样以字符串到达，这里解码会造成两种
-            # 传输模式行为分叉。
-            environment = dict(getattr(dispatch, "environment", {}) or {})
-
-            # 大对象走 source_bundle；engine._prepare_workspace 依赖
-            # task_msg.source_bundle 触发 project_fetcher。缺失 → workspace_path
-            # 空 → CodePlugin 找不到 project_cwd 直接抛 ValueError。
-            project_type = getattr(dispatch, "project_type", "") or "code"
-            source_bundle = TaskDecoder._decode_source_bundle(dispatch, project_type)
+            payload = _open_gateway_payload(
+                dispatch,
+                worker_id=worker_id,
+                worker_secret=worker_secret,
+            )
+            fields = validate_task_message_payload(payload, allow_integer_strings=True)
+            source_bundle = TaskDecoder._decode_source_bundle(payload, fields.project_type)
 
             return TaskMessage(
-                task_id=getattr(dispatch, "task_id", "") or "",
-                project_id=getattr(dispatch, "project_id", "") or "",
-                project_type=project_type,
-                priority=int(getattr(dispatch, "priority", 0) or 0),
-                params=params,
-                environment=environment,
-                # 新 proto 字段名是 timeout_seconds
-                timeout=int(getattr(dispatch, "timeout_seconds", 0) or 3600),
+                task_id=fields.task_id,
+                project_id=fields.project_id,
+                project_type=fields.project_type,
+                priority=fields.priority,
+                params=fields.params,
+                environment=fields.environment,
+                timeout=fields.timeout,
                 source_bundle=source_bundle,
-                source_subdir=getattr(dispatch, "source_subdir", "") or "",
-                entry_point=getattr(dispatch, "entry_point", "") or "",
-                runtime_env_name=getattr(dispatch, "runtime_env_name", "") or "",
-                run_id=getattr(dispatch, "run_id", "") or "",
+                source_subdir=fields.source_subdir,
+                entry_point=fields.entry_point,
+                runtime_env_name=fields.runtime_env_name,
+                run_id=fields.run_id,
                 receipt=getattr(dispatch, "receipt_id", "") or None,
             )
         except Exception as e:
@@ -117,9 +105,9 @@ class TaskDecoder:
             raise CodecError(f"解码任务消息失败: {e}") from e
 
     @staticmethod
-    def _decode_source_bundle(dispatch: Any, project_type: str = "") -> SourceBundle | None:
-        uri = getattr(dispatch, "source_bundle_uri", "") or ""
-        digest = getattr(dispatch, "source_bundle_sha256", "") or ""
+    def _decode_source_bundle(payload: Mapping[str, Any], project_type: str = "") -> SourceBundle | None:
+        uri = payload.get("source_bundle_uri", "") or ""
+        digest = payload.get("source_bundle_sha256", "") or ""
         if not uri and str(project_type).lower() == "rule":
             # rule 任务没有源码 bundle：master 派发时按 project_type 跳过
             # bundle 构建（worker_dispatcher.dispatch_batch O1-followup），
@@ -135,11 +123,11 @@ class TaskDecoder:
         return SourceBundle(
             uri=uri,
             sha256=digest,
-            size=int(getattr(dispatch, "source_bundle_size", 0) or 0),
-            transfer_method=(getattr(dispatch, "transfer_method", "") or "source_bundle"),
-            entry_point=getattr(dispatch, "entry_point", "") or "",
-            resolved_revision=getattr(dispatch, "resolved_revision", "") or "",
-            source_subdir=getattr(dispatch, "source_subdir", "") or "",
+            size=int(payload.get("source_bundle_size", 0) or 0),
+            transfer_method=(payload.get("transfer_method", "") or "source_bundle"),
+            entry_point=str(payload.get("entry_point", "") or ""),
+            resolved_revision=str(payload.get("resolved_revision", "") or ""),
+            source_subdir=str(payload.get("source_subdir", "") or ""),
         )
 
 
@@ -161,7 +149,7 @@ class TaskStatusEncoder:
             worker_id=worker_id or "",
             status=result.status,
             exit_code=int(result.exit_code or 0),
-            error_message=result.error_message or "",
+            error_message=normalize_persisted_error_message(result.error_message) or "",
             started_at=result.started_at,
             finished_at=result.finished_at,
             duration_ms=int(result.duration_ms or 0),
@@ -216,29 +204,9 @@ class HeartbeatEncoder:
         worker_id: str,
         current_lease_id: str = "",
     ) -> Any:
-        from antcode_contracts import common_pb2, control_pb2
+        from antcode_contracts import control_pb2
 
-        metrics_obj = getattr(heartbeat, "metrics", None)
-        if metrics_obj is not None:
-            cpu = float(getattr(metrics_obj, "cpu", 0.0) or 0.0)
-            memory = float(getattr(metrics_obj, "memory", 0.0) or 0.0)
-            disk = float(getattr(metrics_obj, "disk", 0.0) or 0.0)
-            running_tasks = int(getattr(metrics_obj, "running_tasks", 0) or 0)
-            max_concurrent = int(getattr(metrics_obj, "max_concurrent_tasks", 0) or 0)
-        else:
-            cpu = float(getattr(heartbeat, "cpu_percent", 0.0) or 0.0)
-            memory = float(getattr(heartbeat, "memory_percent", 0.0) or 0.0)
-            disk = float(getattr(heartbeat, "disk_percent", 0.0) or 0.0)
-            running_tasks = int(getattr(heartbeat, "running_tasks", 0) or 0)
-            max_concurrent = int(getattr(heartbeat, "max_concurrent_tasks", 0) or 0)
-
-        metrics = common_pb2.Metrics(
-            cpu=cpu,
-            memory=memory,
-            disk=disk,
-            running_tasks=running_tasks,
-            max_concurrent_tasks=max_concurrent,
-        )
+        metrics = build_metrics_proto(heartbeat_metrics_dict(heartbeat))
 
         return control_pb2.LeaseRequest(
             worker_id=worker_id or "",

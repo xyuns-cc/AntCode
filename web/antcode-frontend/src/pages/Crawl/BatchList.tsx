@@ -1,25 +1,11 @@
-/**
- * 爬取批次列表页 (R1-P2-28)
+/** 爬取批次列表页 (R1-P2-28)
  *
  * 之前前端完全没有批次管理入口——18 个后端端点全套存在但用户看不到。
  * 这里提供最小闭环：列表 / 创建 / 状态切换 / 查看聚合数据 / 导出。
  */
 import type React from 'react'
 import { useEffect, useState, useCallback } from 'react'
-import {
-  App,
-  Button,
-  Card,
-  Space,
-  Table,
-  Tag,
-  Popconfirm,
-  Modal,
-  Form,
-  Input,
-  InputNumber,
-  Typography,
-} from 'antd'
+import { App, Button, Card, Space, Table, Tag, Popconfirm, Form, Typography } from 'antd'
 import {
   PlusOutlined,
   PlayCircleOutlined,
@@ -28,11 +14,12 @@ import {
   DownloadOutlined,
   UnorderedListOutlined,
   StopOutlined,
-  DeleteOutlined,
 } from '@ant-design/icons'
 import PageContainer from '@/components/common/PageContainer'
 import { crawlService, type CrawlBatchSummary } from '@/services/crawl'
 import Logger from '@/utils/logger'
+import CrawlBatchCreateModal from './CrawlBatchCreateModal'
+import CrawlBatchItemsModal from './CrawlBatchItemsModal'
 
 const { Text } = Typography
 
@@ -62,7 +49,11 @@ const BatchListPage: React.FC = () => {
   const [page, setPage] = useState(1)
   const [size, setSize] = useState(20)
   const [createOpen, setCreateOpen] = useState(false)
-  const [itemsModal, setItemsModal] = useState<{ open: boolean; batch?: CrawlBatchSummary; items?: unknown[] }>({ open: false })
+  const [itemsModal, setItemsModal] = useState<{
+    open: boolean
+    batch?: CrawlBatchSummary
+    items?: unknown[]
+  }>({ open: false })
   const [form] = Form.useForm()
 
   const refresh = useCallback(async () => {
@@ -85,15 +76,14 @@ const BatchListPage: React.FC = () => {
   }, [refresh])
 
   const doAction = async (
-    action: 'start' | 'pause' | 'resume' | 'cancel' | 'delete',
+    action: 'start' | 'pause' | 'resume' | 'cancel',
     batch: CrawlBatchSummary
   ) => {
     try {
       if (action === 'start') await crawlService.startBatch(batch.id)
       else if (action === 'pause') await crawlService.pauseBatch(batch.id)
       else if (action === 'resume') await crawlService.resumeBatch(batch.id)
-      else if (action === 'cancel') await crawlService.cancelBatch(batch.id)
-      else await crawlService.deleteBatch(batch.id)
+      else await crawlService.cancelBatch(batch.id)
       message.success('操作成功')
       refresh()
     } catch (e) {
@@ -191,31 +181,53 @@ const BatchListPage: React.FC = () => {
         const isRunning = r.status === 'running'
         const isPaused = r.status === 'paused'
         const canStart = r.status === 'pending'
-        const isTerminal = ['completed', 'failed', 'cancelled'].includes(r.status)
         return (
           <Space wrap size="small">
             {canStart && (
-              <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => doAction('start', r)}>启动</Button>
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={() => doAction('start', r)}
+              >
+                启动
+              </Button>
             )}
             {isRunning && (
-              <Button size="small" icon={<PauseCircleOutlined />} onClick={() => doAction('pause', r)}>暂停</Button>
+              <Button
+                size="small"
+                icon={<PauseCircleOutlined />}
+                onClick={() => doAction('pause', r)}
+              >
+                暂停
+              </Button>
             )}
             {isPaused && (
-              <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => doAction('resume', r)}>恢复</Button>
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={() => doAction('resume', r)}
+              >
+                恢复
+              </Button>
             )}
             {(isRunning || isPaused) && (
               <Popconfirm title="确认取消？" onConfirm={() => doAction('cancel', r)}>
-                <Button size="small" danger icon={<StopOutlined />}>取消</Button>
+                <Button size="small" danger icon={<StopOutlined />}>
+                  取消
+                </Button>
               </Popconfirm>
             )}
-            <Button size="small" icon={<UnorderedListOutlined />} onClick={() => openItems(r)}>数据</Button>
-            <Button size="small" icon={<DownloadOutlined />} onClick={() => download(r, 'json')}>JSON</Button>
-            <Button size="small" icon={<DownloadOutlined />} onClick={() => download(r, 'csv')}>CSV</Button>
-            {isTerminal && (
-              <Popconfirm title="删除批次？" onConfirm={() => doAction('delete', r)}>
-                <Button size="small" danger icon={<DeleteOutlined />} />
-              </Popconfirm>
-            )}
+            <Button size="small" icon={<UnorderedListOutlined />} onClick={() => openItems(r)}>
+              数据
+            </Button>
+            <Button size="small" icon={<DownloadOutlined />} onClick={() => download(r, 'json')}>
+              JSON
+            </Button>
+            <Button size="small" icon={<DownloadOutlined />} onClick={() => download(r, 'csv')}>
+              CSV
+            </Button>
           </Space>
         )
       },
@@ -234,8 +246,17 @@ const BatchListPage: React.FC = () => {
       }
       toolbar={
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading} size="small">刷新</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)} size="small">新建批次</Button>
+          <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading} size="small">
+            刷新
+          </Button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => setCreateOpen(true)}
+            size="small"
+          >
+            新建批次
+          </Button>
         </Space>
       }
     >
@@ -257,71 +278,20 @@ const BatchListPage: React.FC = () => {
         />
       </Card>
 
-      {/* 创建批次 */}
-      <Modal
-        title="新建爬取批次"
+      <CrawlBatchCreateModal
         open={createOpen}
-        onCancel={() => setCreateOpen(false)}
-        onOk={submitCreate}
-        okText="创建"
-        cancelText="取消"
-        destroyOnHidden
-      >
-        <Form form={form} layout="vertical" autoComplete="off">
-          <Form.Item label="项目 ID" name="project_id" rules={[{ required: true, message: '必填' }]}>
-            <Input placeholder="项目 public_id" />
-          </Form.Item>
-          <Form.Item label="批次名称" name="name" rules={[{ required: true, message: '必填' }]}>
-            <Input placeholder="例如 电商-每日-01" />
-          </Form.Item>
-          <Form.Item label="种子 URL（一行一个）" name="seed_urls" rules={[{ required: true, message: '至少一个' }]}>
-            <Input.TextArea rows={4} placeholder="https://example.com/list/1\nhttps://example.com/list/2" />
-          </Form.Item>
-          <Form.Item label="描述（可选）" name="description">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-          <Space>
-            <Form.Item label="最大深度" name="max_depth" initialValue={1}>
-              <InputNumber min={1} max={10} />
-            </Form.Item>
-            <Form.Item label="最大页数" name="max_pages" initialValue={100}>
-              <InputNumber min={1} max={100000} />
-            </Form.Item>
-            <Form.Item label="并发" name="max_concurrency" initialValue={4}>
-              <InputNumber min={1} max={64} />
-            </Form.Item>
-          </Space>
-        </Form>
-      </Modal>
+        form={form}
+        onClose={() => setCreateOpen(false)}
+        onSubmit={submitCreate}
+      />
 
-      {/* 抓取数据快速预览 */}
-      <Modal
-        title={`抓取数据 - ${itemsModal.batch?.name || ''}`}
+      <CrawlBatchItemsModal
         open={itemsModal.open}
-        onCancel={() => setItemsModal({ open: false })}
-        footer={
-          itemsModal.batch ? (
-            <Space>
-              <Button icon={<DownloadOutlined />} onClick={() => download(itemsModal.batch!, 'json')}>
-                下载 JSON
-              </Button>
-              <Button icon={<DownloadOutlined />} onClick={() => download(itemsModal.batch!, 'csv')}>
-                下载 CSV
-              </Button>
-              <Button onClick={() => setItemsModal({ open: false })}>关闭</Button>
-            </Space>
-          ) : null
-        }
-        width={900}
-        destroyOnHidden
-      >
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          展示前 100 条；完整数据请点下载。
-        </Text>
-        <pre style={{ maxHeight: 480, overflow: 'auto', background: 'rgba(0,0,0,0.02)', padding: 12, marginTop: 8 }}>
-          {JSON.stringify(itemsModal.items || [], null, 2)}
-        </pre>
-      </Modal>
+        batch={itemsModal.batch}
+        items={itemsModal.items}
+        onClose={() => setItemsModal({ open: false })}
+        onDownload={download}
+      />
     </PageContainer>
   )
 }

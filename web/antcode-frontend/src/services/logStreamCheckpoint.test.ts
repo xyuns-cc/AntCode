@@ -94,4 +94,59 @@ describe('logService SSE checkpoint', () => {
     expect(states).toContain('failed')
     expect(FakeEventSource.instances).toHaveLength(6)
   })
+
+  it('恢复日志后 recovery_overflow 仍累计计数并熔断', async () => {
+    const states: string[] = []
+    logService.connectLogStream({ runId: 'run-1', onStateChange: (state) => states.push(state) })
+    await flushConnect()
+
+    const first = FakeEventSource.instances[0]
+    first.emit('log_line', { type: 'log_line', data: { content: 'seed cursor' } }, 'pg:1')
+    first.onerror?.()
+    await vi.advanceTimersByTimeAsync(35_000)
+
+    for (let round = 0; round < 5; round++) {
+      const source = FakeEventSource.instances[FakeEventSource.instances.length - 1]
+      source.emit('run_status', { type: 'run_status', data: { status: 'running' } })
+      source.emit('log_line', { type: 'log_line', data: { content: `recovered-${round}` } }, `pg:${round + 2}`)
+      source.emit('stream_error', {
+        type: 'stream_error', code: 'recovery_overflow', message: '恢复窗口仍有剩余日志',
+      })
+      await vi.advanceTimersByTimeAsync(35_000)
+    }
+
+    expect(states).toContain('failed')
+    expect(FakeEventSource.instances).toHaveLength(6)
+  })
+
+  it('recovery_complete 立即恢复完整的五次重连预算', async () => {
+    const states: string[] = []
+    const connection = logService.connectLogStream({
+      runId: 'run-1', onStateChange: (state) => states.push(state),
+    })
+    await flushConnect()
+
+    for (let round = 0; round < 3; round++) {
+      FakeEventSource.instances.at(-1)!.onerror?.()
+      await vi.advanceTimersByTimeAsync(35_000)
+    }
+
+    const recovered = FakeEventSource.instances.at(-1)!
+    recovered.emit('recovery_complete', {
+      type: 'recovery_complete', recovered_lines: 0,
+    })
+    const instanceCountAfterRecovery = FakeEventSource.instances.length
+
+    for (let round = 0; round < 5; round++) {
+      FakeEventSource.instances.at(-1)!.onerror?.()
+      expect(states.at(-1)).toBe('reconnecting')
+      await vi.advanceTimersByTimeAsync(35_000)
+    }
+    expect(FakeEventSource.instances).toHaveLength(instanceCountAfterRecovery + 5)
+
+    FakeEventSource.instances.at(-1)!.onerror?.()
+    expect(states.at(-1)).toBe('failed')
+    expect(FakeEventSource.instances).toHaveLength(instanceCountAfterRecovery + 5)
+    connection?.disconnect()
+  })
 })

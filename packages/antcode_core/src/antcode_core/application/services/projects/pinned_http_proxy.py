@@ -11,19 +11,28 @@ from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit, urlunsplit
 
+from antcode_contracts.network_security import (
+    resolve_host_addresses as resolve_network_host_addresses,
+)
+
 from antcode_core.application.services.projects.git_transfer_quota import (
+    DurationBudget,
     GitNetworkLimitExceeded,
     TransferBudget,
     relay_bidirectional,
     send_accounted,
 )
-from antcode_core.application.services.projects.git_url_security import (
-    resolve_host_addresses,
+from antcode_core.common.bounded_threading_server import (
+    BoundedThreadingMixIn,
+    stop_bounded_server,
 )
 
 MAX_PROXY_HEADER_BYTES = 64 * 1024
 PROXY_CONNECT_TIMEOUT_SECONDS = 15
 PROXY_IO_TIMEOUT_SECONDS = 60
+DEFAULT_PROXY_MAX_CONNECTIONS = 64
+_PROXY_SHUTDOWN_TIMEOUT_SECONDS = PROXY_CONNECT_TIMEOUT_SECONDS + 1
+_SERVICE_UNAVAILABLE_RESPONSE = b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
 
 
 @dataclass(frozen=True)
@@ -33,17 +42,40 @@ class PinnedProxyTarget:
     address: str
 
 
+@dataclass(frozen=True)
+class _ProxyServerConfig:
+    budget: TransferBudget | None
+    max_connections: int
+    duration_budget: DurationBudget | None
+
+
 TargetResolver = Callable[[str, str], PinnedProxyTarget]
 
 
-class _PinnedProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
+def resolve_host_addresses(host: str) -> tuple[str, ...]:
+    """Resolve Rule egress targets without inheriting the Git private-node policy."""
+    return resolve_network_host_addresses(host, allow_private=False)
 
-    def __init__(self, resolver: TargetResolver, budget: TransferBudget | None) -> None:
+
+class _PinnedProxyServer(BoundedThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    request_thread_name = "antcode-pinned-http-connection"
+
+    def __init__(
+        self,
+        resolver: TargetResolver,
+        config: _ProxyServerConfig,
+    ) -> None:
         self.resolve_target = resolver
-        self.transfer_budget = budget
+        self.transfer_budget = config.budget
+        self.duration_budget = config.duration_budget
+        self.configure_connection_limit(config.max_connections)
         super().__init__(("127.0.0.1", 0), _PinnedProxyHandler)
+
+    def _reject_capacity_exceeded(self, request: socket.socket | tuple[bytes, socket.socket]) -> None:
+        request_socket = request[1] if isinstance(request, tuple) else request
+        with contextlib.suppress(OSError):
+            request_socket.sendall(_SERVICE_UNAVAILABLE_RESPONSE)
 
 
 class _PinnedProxyHandler(socketserver.BaseRequestHandler):
@@ -66,7 +98,12 @@ class _PinnedProxyHandler(socketserver.BaseRequestHandler):
                 else:
                     request = _origin_request(header, raw_target, target_config) + trailing
                     send_accounted(upstream, request, server.transfer_budget)
-                relay_bidirectional(client, upstream, budget=server.transfer_budget)
+                relay_bidirectional(
+                    client,
+                    upstream,
+                    budget=server.transfer_budget,
+                    duration_budget=server.duration_budget,
+                )
             except GitNetworkLimitExceeded:
                 return
 
@@ -148,12 +185,14 @@ def pinned_http_proxy(
     target: PinnedProxyTarget,
     *,
     budget: TransferBudget | None = None,
+    max_connections: int = DEFAULT_PROXY_MAX_CONNECTIONS,
 ) -> Iterator[str]:
     def resolve(method: str, raw_target: str) -> PinnedProxyTarget:
         _assert_allowed_target(method, raw_target, target)
         return target
 
-    with _run_proxy(resolve, budget) as proxy_url:
+    config = _ProxyServerConfig(budget, max_connections, None)
+    with _run_proxy(resolve, config) as proxy_url:
         try:
             yield proxy_url
         finally:
@@ -162,7 +201,12 @@ def pinned_http_proxy(
 
 
 @contextlib.contextmanager
-def restricted_http_proxy() -> Iterator[str]:
+def restricted_http_proxy(
+    *,
+    budget: TransferBudget,
+    max_connections: int = DEFAULT_PROXY_MAX_CONNECTIONS,
+    duration_budget: DurationBudget,
+) -> Iterator[str]:
     """Proxy HTTP(S) only to addresses validated as publicly routable."""
 
     def resolve(method: str, raw_target: str) -> PinnedProxyTarget:
@@ -170,22 +214,38 @@ def restricted_http_proxy() -> Iterator[str]:
         addresses = resolve_host_addresses(host)
         return PinnedProxyTarget(host=host, port=port, address=addresses[0])
 
-    with _run_proxy(resolve, None) as proxy_url:
-        yield proxy_url
+    config = _ProxyServerConfig(budget, max_connections, duration_budget)
+    with _run_proxy(resolve, config) as proxy_url:
+        try:
+            yield proxy_url
+        finally:
+            _raise_proxy_budget_failure(budget, duration_budget)
+
+
+def _raise_proxy_budget_failure(budget: TransferBudget, duration_budget: DurationBudget) -> None:
+    budget_failure = budget.failure()
+    if budget_failure is not None:
+        raise budget_failure
+    duration_budget.raise_if_exceeded()
 
 
 @contextlib.contextmanager
-def _run_proxy(resolver: TargetResolver, budget: TransferBudget | None) -> Iterator[str]:
-    server = _PinnedProxyServer(resolver, budget)
-    thread = threading.Thread(target=server.serve_forever, name="antcode-pinned-http-proxy", daemon=True)
-    thread.start()
-    host, port = cast(tuple[str, int], server.server_address)
+def _run_proxy(
+    resolver: TargetResolver,
+    config: _ProxyServerConfig,
+) -> Iterator[str]:
+    server = _PinnedProxyServer(resolver, config)
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.05},
+        name="antcode-pinned-http-proxy",
+    )
     try:
+        thread.start()
+        host, port = cast(tuple[str, int], server.server_address)
         yield f"http://{host}:{port}"
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=PROXY_CONNECT_TIMEOUT_SECONDS)
+        stop_bounded_server(server, thread, timeout=_PROXY_SHUTDOWN_TIMEOUT_SECONDS)
 
 
 __all__ = ["PinnedProxyTarget", "pinned_http_proxy", "restricted_http_proxy"]

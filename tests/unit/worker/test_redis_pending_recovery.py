@@ -3,24 +3,32 @@
 from unittest.mock import AsyncMock
 
 import pytest
+from antcode_core.common.security.task_payload_envelope import seal_ready_payload
 from antcode_worker.transport.redis.pending_recovery import PendingMessageRecovery
 from antcode_worker.transport.redis.reclaim import PendingTaskReclaimer, ReclaimConfig
 from antcode_worker.transport.redis.transport import RedisTransport
 
 AVAILABLE_CAPACITY = 2
 RECLAIMED_QUEUE_CAPACITY = 3
+WORKER_SECRET = "direct-pending-recovery-secret-material-0001"
 
 
-def _task_fields(task_id: str) -> dict[str, str]:
+def _task_fields(task_id: str) -> dict[str, object]:
     digest = "a" * 64
-    return {
-        "task_id": task_id,
-        "project_id": "project-1",
-        "run_id": f"run-{task_id}",
-        "source_bundle_uri": f"pgartifact://{digest}",
-        "source_bundle_sha256": digest,
-        "source_bundle_size": "1",
-    }
+    return seal_ready_payload(
+        {
+            "task_id": task_id,
+            "project_id": "project-1",
+            "run_id": f"run-{task_id}",
+            "dispatch_lease_id": "lease-1",
+            "dispatch_lease_gen": "7",
+            "source_bundle_uri": f"pgartifact://{digest}",
+            "source_bundle_sha256": digest,
+            "source_bundle_size": "1",
+        },
+        worker_id="worker-1",
+        worker_secret=WORKER_SECRET,
+    )
 
 
 @pytest.mark.asyncio
@@ -46,12 +54,17 @@ async def test_pending_message_recovery_pages_until_consumer_pel_is_empty():
 
 @pytest.mark.asyncio
 async def test_transport_recovers_own_task_pel_immediately_after_restart():
-    stream = "antcode:task:ready:worker-1"
+    stream = "{antcode}:task:ready:worker-1"
     redis = AsyncMock()
     redis.xreadgroup.return_value = [(stream, [("7-0", _task_fields("task-7"))])]
-    transport = RedisTransport(redis_url="redis://localhost/0", worker_id="worker-1")
+    transport = RedisTransport(
+        redis_url="redis://localhost/0",
+        worker_id="worker-1",
+        task_payload_secret=WORKER_SECRET,
+    )
     transport._redis = redis
     transport._running = True
+    transport._lease_id = "lease-1"
 
     task = await transport.poll_task(timeout=0.1)
 

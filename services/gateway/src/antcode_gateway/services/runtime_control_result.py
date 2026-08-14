@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.infrastructure.redis import (
     control_global_stream,
     control_reply_stream,
@@ -13,6 +14,7 @@ from antcode_core.infrastructure.redis import (
 )
 from redis.exceptions import ResponseError
 
+from antcode_gateway.services.control_stream_ownership import ControlPendingOwnerError
 from antcode_gateway.services.runtime_control_marker import (
     build_settlement_evidence,
 )
@@ -35,8 +37,7 @@ _CONTROL_TYPES = {"cancel", "kill", "config_update", "ping", "runtime_manage"}
 class ControlEventGoneError(Exception):
     """控制事件已从 Stream / PEL 消失（通常是 ACK 已生效后的幂等重放）。
 
-    与 ``ValueError``（协议 / 归属违规 → INVALID_ARGUMENT）区分：
-    at-least-once 重试撞上已结算并被裁剪的事件属于良性重复，
+    与协议 / 归属违规区分：at-least-once 重试撞上已结算并被裁剪的事件属于良性重复，
     调用方应返回 ``received=False`` + OK 状态，而不是 gRPC 错误。
     """
 
@@ -123,14 +124,9 @@ async def require_pending_owner(
     stream_key: str,
     group: str,
     message_id: str,
-    worker_id: str,
+    consumer_name: str,
 ) -> None:
-    """Require the authenticated worker to own this exact pending event.
-
-    不带 consumer 过滤查询 PEL，用于区分两种情形：
-    - 条目已不在 PEL（已 ACK / 已裁剪）→ ``ControlEventGoneError``（良性幂等重放）；
-    - 条目在 PEL 但归属其他 consumer → ``ValueError``（真实归属违规）。
-    """
+    """Require the authenticated lease generation to own this pending event."""
     pending = await redis.xpending_range(
         stream_key,
         group,
@@ -142,9 +138,9 @@ async def require_pending_owner(
         raise ControlEventGoneError("控制事件已不在待确认队列（可能已确认）")
     item = pending[0]
     if _text(item.get("message_id")) != message_id:
-        raise ValueError("控制事件 PEL 归属校验失败")
-    if _text(item.get("consumer")) != worker_id:
-        raise ValueError("控制事件不属于当前 Worker 的待确认队列")
+        raise ControlPendingOwnerError("控制事件 PEL 归属校验失败")
+    if _text(item.get("consumer")) != consumer_name:
+        raise ControlPendingOwnerError("控制事件不属于当前 Worker 租约代际的待确认队列")
 
 
 async def publish_runtime_control_result(
@@ -248,7 +244,7 @@ def _reply_payload(request: Any, fingerprint: str) -> dict[str, str]:
         "request_id": request.request_id,
         "success": str(bool(request.success)).lower(),
         "data": _canonical_data_json(request.data_json),
-        "error": request.error or "",
+        "error": _safe_control_error(request.error),
         "settlement": fingerprint,
     }
 
@@ -287,7 +283,7 @@ def _settlement_fingerprint(event_id: str, worker_id: str, request: Any) -> str:
     canonical = json.dumps(
         {
             "data": json.loads(_canonical_data_json(request.data_json)),
-            "error": request.error or "",
+            "error": _safe_control_error(request.error),
             "event_id": event_id,
             "lease_id": request.lease_id,
             "request_id": request.request_id,
@@ -306,6 +302,10 @@ def _validate_result_bounds(request: Any) -> None:
         raise ValueError("运行时结果 data_json 超过 1 MiB 上限")
     if len((request.error or "").encode("utf-8")) > MAX_CONTROL_ERROR_BYTES:
         raise ValueError("运行时结果 error 超过 16 KiB 上限")
+
+
+def _safe_control_error(error: object | None) -> str:
+    return normalize_persisted_error_message(error, max_bytes=MAX_CONTROL_ERROR_BYTES) or ""
 
 
 def _text(value: Any) -> str:

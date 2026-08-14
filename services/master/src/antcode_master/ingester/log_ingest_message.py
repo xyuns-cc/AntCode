@@ -9,6 +9,7 @@ from typing import Any
 from antcode_contracts import data_pb2
 from antcode_core.application.services.logs.log_sequence_allocator import LogSequenceAllocator
 from antcode_core.application.services.logs.postgres_log_service import PostgresLogEntry
+from antcode_core.common.log_sanitization import sanitize_log_message
 
 DLQ_MAX_ENTRIES = 10_000
 DLQ_RAW_FIELD_MAX_CHARS = 2_048
@@ -109,13 +110,15 @@ def _to_postgres_entry(
     log_type: str,
     sequence: int,
 ) -> PostgresLogEntry:
+    level = "ERROR" if log_type == "stderr" else "INFO"
     return PostgresLogEntry(
         run_id=entry.run_id,
         log_type=log_type,
-        content=entry.content or "",
+        content=sanitize_log_message(entry.content or ""),
         timestamp=_ts_to_datetime(entry.timestamp),
         sequence=sequence,
         worker_id=worker_id or "",
+        level=level,
         event_id=(f"{msg_id}:{index}" if msg_id else None),
     )
 
@@ -139,7 +142,7 @@ async def dead_letter_bad_frame(
     entry: dict[str, str] = {
         "origin_stream": source_stream,
         "origin_msg_id": str(getattr(message, "msg_id", "")),
-        "decode_error": str(getattr(message, "decode_error", "")),
+        "decode_error": sanitize_log_message(str(getattr(message, "decode_error", ""))),
         "dead_letter_at": datetime.now(UTC).isoformat(),
     }
     raw = getattr(message, "raw_fields", None)
@@ -157,7 +160,7 @@ def _serialize_raw_fields(raw: dict[Any, Any]) -> dict[str, str]:
         text_value = (
             value[:DLQ_RAW_FIELD_MAX_CHARS].decode("utf-8", errors="ignore") if isinstance(value, bytes) else str(value)
         )
-        result[f"raw_{text_key}"] = text_value[:DLQ_RAW_FIELD_MAX_CHARS]
+        result[f"raw_{text_key}"] = sanitize_log_message(text_value[:DLQ_RAW_FIELD_MAX_CHARS])
     return result
 
 
@@ -173,7 +176,7 @@ async def dead_letter_invalid_batch(
     entry = {
         "origin_stream": source_stream,
         "origin_msg_id": str(message.msg_id),
-        "decode_error": str(error),
+        "decode_error": sanitize_log_message(str(error)),
         "worker_id": str(batch.worker_id or ""),
         "entry_count": str(len(batch.entries)),
         "dead_letter_at": datetime.now(UTC).isoformat(),

@@ -162,6 +162,17 @@ async def detailed_health_check(
     ``include_details=true`` 需管理员，否则同样降级为 summary（不再直接
     对匿名用户暴露 Worker host/port、熔断器状态、内存磁盘和异常文本）。
     """
+    is_admin = bool(current_user and getattr(current_user, "is_admin", False))
+    if not is_admin or not include_details:
+        response_data = {
+            "status": HealthStatus.HEALTHY.value,
+            "version": settings.APP_VERSION,
+            "timestamp": datetime.now().isoformat(),
+            "summary": {"healthy": 1, "degraded": 0, "unhealthy": 0},
+        }
+        response = success(response_data, message=Messages.QUERY_SUCCESS)
+        return JSONResponse(content=response.model_dump(mode="json"), status_code=status.HTTP_200_OK)
+
     health = await health_checker.check_all()
 
     # 根据状态返回不同的 HTTP 状态码
@@ -172,18 +183,8 @@ async def detailed_health_check(
     else:
         status_code = 503  # 服务不可用
 
-    is_admin = bool(current_user and getattr(current_user, "is_admin", False))
-    # 未登录 or 非管理员 → 强制 summary 视图
-    if not is_admin or not include_details:
-        response_data = {
-            "status": health.status.value,
-            "version": settings.APP_VERSION,
-            "timestamp": health.timestamp,
-            "summary": health.summary,
-        }
-    else:
-        response_data = health.to_dict()
-        response_data["version"] = settings.APP_VERSION
+    response_data = health.to_dict()
+    response_data["version"] = settings.APP_VERSION
 
     response = success(response_data, message=Messages.QUERY_SUCCESS, code=status_code)
     return JSONResponse(content=response.model_dump(mode="json"), status_code=status_code)
@@ -254,9 +255,9 @@ async def login(request: UserLoginRequest, http_request: Request, response: Resp
     #   一个用户失败几次就把整个入口打爆。get_client_ip 只在 socket 对端命中
     #   ANTCODE_TRUSTED_PROXIES 白名单时才采信转发头,防止外部伪造。
     ip_address = get_client_ip(http_request) if http_request.client else None
-    # get_client_ip 兜底会返回 "unknown"——限流键要求 falsy 才跳过,归一为 None
     if ip_address == "unknown":
         ip_address = None
+    client_scope = ip_address or "unknown"
     user_agent = http_request.headers.get("user-agent")
 
     # T7-B4a (P1-2): 登录专项限流 + 账户锁定
@@ -280,7 +281,7 @@ async def login(request: UserLoginRequest, http_request: Request, response: Resp
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="登录尝试过于频繁，请稍后再试",
         )
-    if request.username and not await check_user_rate(request.username):
+    if request.username and not await check_user_rate(request.username, client_scope):
         await audit_service.log_login(
             username=request.username,
             ip_address=ip_address,
@@ -292,7 +293,7 @@ async def login(request: UserLoginRequest, http_request: Request, response: Resp
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="该账户登录尝试过于频繁，请稍后再试",
         )
-    locked, remain = await is_account_locked(request.username)
+    locked, remain = await is_account_locked(request.username, client_scope)
     if locked:
         await audit_service.log_login(
             username=request.username,
@@ -325,7 +326,7 @@ async def login(request: UserLoginRequest, http_request: Request, response: Resp
 
     if not user:
         # T7-B4a: 记登录失败 + 累加计数（可能触发新锁定）
-        failures, newly_locked = await record_failure(request.username)
+        failures, newly_locked = await record_failure(request.username, client_scope)
         err_msg = "用户名或密码错误"
         if newly_locked:
             err_msg += f"（连续失败 {failures} 次，账户已被锁定 "
@@ -355,8 +356,7 @@ async def login(request: UserLoginRequest, http_request: Request, response: Resp
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已禁用")
 
-    # 记录登录成功 + T7-B4a: 清失败计数
-    await clear_failures(user.username)
+    await clear_failures(user.username, client_scope)
     await audit_service.log_login(
         username=user.username,
         user_id=user.id,

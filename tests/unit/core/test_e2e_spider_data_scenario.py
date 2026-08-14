@@ -48,6 +48,9 @@ class FakeRedis:
         self.zscore_checked = (key, member)
         return None
 
+    async def aclose(self) -> None:
+        self.closed = True
+
 
 def test_rule_project_form_builds_minimal_real_crawler_config() -> None:
     config = SimpleNamespace(runtime_python_version="3.12", shared_env_name="shared-py312")
@@ -100,9 +103,11 @@ async def test_list_spider_items_rejects_invalid_api_shape(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_spider_storage_cleanup_deletes_stream_meta_and_index(monkeypatch) -> None:
     redis = FakeRedis()
+    monkeypatch.setenv("ANTCODE_E2E_REDIS_URL", "redis://127.0.0.1:6379/15")
+    monkeypatch.setenv("ANTCODE_E2E_REDIS_NAMESPACE", "antcode-e2e-test")
     monkeypatch.setattr(
-        "antcode_core.infrastructure.redis.get_redis_client",
-        AsyncMock(return_value=redis),
+        "redis.asyncio.Redis.from_url",
+        lambda *_args, **_kwargs: redis,
     )
 
     await _delete_spider_storage(["run-1"], "project-1")
@@ -114,3 +119,4 @@ async def test_spider_storage_cleanup_deletes_stream_meta_and_index(monkeypatch)
     assert any(key.endswith("spider:run-1:tombstone") for key in redis.tombstones)
     assert any(key.endswith("spider:index:project-1") for key, _ in redis.zremmed)
     assert len(redis.checked_keys) == 4
+    assert redis.closed is True

@@ -1,6 +1,6 @@
 import type React from 'react'
 import { memo } from 'react'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route } from 'react-router'
 import ProjectList from './ProjectList'
 import ProjectDetail from './ProjectDetail'
 

@@ -1,4 +1,4 @@
-import type { WorkerDisplayStatus, WorkerOs, WorkerLog } from './types'
+import type { WorkerDisplayStatus, WorkerOs } from './types'
 
 export const getStatusColor = (status: string): string => {
   if (status === 'running' || status === 'success') return 'success'
@@ -34,23 +34,6 @@ export const getOsName = (os: WorkerOs): string => {
     linux: 'Linux',
   }
   return labels[os]
-}
-
-export const getLogTypeColor = (type: WorkerLog['type']): string => {
-  if (type === 'error') return 'error'
-  if (type === 'warning') return 'warning'
-  if (type === 'success') return 'success'
-  return 'default'
-}
-
-export const getLogTypeText = (type: WorkerLog['type']): string => {
-  const labels: Record<WorkerLog['type'], string> = {
-    error: '错误',
-    warning: '警告',
-    info: '信息',
-    success: '成功',
-  }
-  return labels[type]
 }
 
 export const getSystemStatus = (status: WorkerDisplayStatus | 'normal') => {

@@ -8,6 +8,7 @@ import selectors
 import socket
 import socketserver
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import cast
@@ -18,19 +19,57 @@ RELAY_POLL_SECONDS = 0.1
 
 
 class GitNetworkLimitExceeded(ValueError):
-    """Raised after pinned transports exhaust their shared workflow quota."""
+    """Raised after a pinned transport exhausts its shared byte quota."""
 
-    def __init__(self, max_bytes: int) -> None:
-        super().__init__(f"Git 网络传输超过上限 {max_bytes} 字节")
+    def __init__(self, max_bytes: int, label: str = "Git 网络传输") -> None:
+        self.label = label
+        super().__init__(f"{label}超过上限 {max_bytes} 字节")
+
+
+class NetworkDurationLimitExceeded(TimeoutError):
+    """Raised after a pinned transport exhausts its wall-clock budget."""
+
+    def __init__(self, max_duration_seconds: float, label: str = "网络传输") -> None:
+        self.label = label
+        super().__init__(f"{label}超过总时长上限 {max_duration_seconds:g} 秒")
+
+
+class DurationBudget:
+    """Share one monotonic deadline across every connection in an operation."""
+
+    def __init__(self, max_duration_seconds: float, *, label: str = "网络传输") -> None:
+        if max_duration_seconds <= 0:
+            raise ValueError("网络传输总时长上限必须为正数")
+        self.max_duration_seconds = max_duration_seconds
+        self.label = label
+        self._deadline = time.monotonic() + max_duration_seconds
+        self._exceeded = threading.Event()
+
+    @property
+    def exceeded(self) -> bool:
+        return self._exceeded.is_set()
+
+    def remaining_seconds(self) -> float:
+        remaining = self._deadline - time.monotonic()
+        if remaining > 0 and not self.exceeded:
+            return remaining
+        self._exceeded.set()
+        raise NetworkDurationLimitExceeded(self.max_duration_seconds, self.label)
+
+    def raise_if_exceeded(self) -> None:
+        if self.exceeded or time.monotonic() >= self._deadline:
+            self._exceeded.set()
+            raise NetworkDurationLimitExceeded(self.max_duration_seconds, self.label)
 
 
 class TransferBudget:
     """Atomically account bytes relayed across every connection in a workflow."""
 
-    def __init__(self, max_bytes: int) -> None:
+    def __init__(self, max_bytes: int, *, label: str = "Git 网络传输") -> None:
         if max_bytes <= 0:
             raise ValueError("Git 网络传输上限必须为正整数")
         self.max_bytes = max_bytes
+        self.label = label
         self._used_bytes = 0
         self._exceeded = threading.Event()
         self._lock = threading.Lock()
@@ -53,12 +92,12 @@ class TransferBudget:
         with self._lock:
             if self._exceeded.is_set() or self._used_bytes + size > self.max_bytes:
                 self._exceeded.set()
-                raise GitNetworkLimitExceeded(self.max_bytes)
+                raise GitNetworkLimitExceeded(self.max_bytes, self.label)
             self._used_bytes += size
 
     def failure(self) -> Exception | None:
         if self.exceeded:
-            return GitNetworkLimitExceeded(self.max_bytes)
+            return GitNetworkLimitExceeded(self.max_bytes, self.label)
         return None
 
     def raise_if_exceeded(self) -> None:
@@ -72,13 +111,15 @@ def relay_bidirectional(
     right: socket.socket,
     *,
     budget: TransferBudget | None,
+    duration_budget: DurationBudget | None = None,
 ) -> None:
     selector = selectors.DefaultSelector()
     selector.register(left, selectors.EVENT_READ, right)
     selector.register(right, selectors.EVENT_READ, left)
     with selector:
         while selector.get_map() and not (budget and budget.exceeded):
-            events = selector.select(RELAY_POLL_SECONDS)
+            remaining = duration_budget.remaining_seconds() if duration_budget is not None else RELAY_POLL_SECONDS
+            events = selector.select(min(RELAY_POLL_SECONDS, remaining))
             for key, _event_mask in events:
                 _relay_once(
                     selector,
@@ -196,7 +237,9 @@ def pinned_tcp_relay(
 
 
 __all__ = [
+    "DurationBudget",
     "GitNetworkLimitExceeded",
+    "NetworkDurationLimitExceeded",
     "RelayEndpoint",
     "TransferBudget",
     "pinned_tcp_relay",

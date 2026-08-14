@@ -7,7 +7,6 @@ Worker 安装 Key 模型
 import hashlib
 import hmac
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 from tortoise import fields
 
@@ -15,9 +14,10 @@ from antcode_core.common.security.network_source import normalize_ip_or_cidr
 from antcode_core.domain.models.base import BaseModel
 
 INSTALL_KEY_TTL_HOURS = 24
-
-if TYPE_CHECKING:
-    from tortoise.backends.base.client import BaseDBAsyncClient
+INSTALL_KEY_STATUS_PENDING = "pending"
+INSTALL_KEY_STATUS_USED = "used"
+INSTALL_KEY_STATUS_EXPIRED = "expired"
+INSTALL_KEY_STATUS_REVOKED = "revoked"
 
 
 def _hash_install_key(plaintext: str) -> str:
@@ -39,8 +39,8 @@ class WorkerInstallKey(BaseModel):
     # 唯一安装 Key 哈希（SHA-256 hex）
     key = fields.CharField(max_length=64, unique=True, description="安装Key")
 
-    # 状态: pending(待使用), used(已使用), expired(已过期)
-    status = fields.CharField(max_length=20, default="pending", description="状态")
+    # 状态: pending(待使用), used(已使用), expired(已过期), revoked(已撤销)
+    status = fields.CharField(max_length=20, default=INSTALL_KEY_STATUS_PENDING, description="状态")
 
     # 操作系统类型: linux, macos, windows
     os_type = fields.CharField(max_length=20, description="操作系统类型")
@@ -48,7 +48,7 @@ class WorkerInstallKey(BaseModel):
     # 创建者用户 ID
     created_by = fields.BigIntField(description="创建者用户ID")
 
-    # 注册来源限制；PostgreSQL 是权威存储，Redis meta 仅作缓存。
+    # 注册来源限制；PostgreSQL 是唯一权威存储。
     allowed_source = fields.CharField(max_length=64, null=True, description="允许的注册 IP/CIDR")
 
     # 使用此 Key 注册的 Worker public_id
@@ -58,7 +58,7 @@ class WorkerInstallKey(BaseModel):
     used_at = fields.DatetimeField(null=True, description="使用时间")
 
     # V2 可恢复注册：只保存高熵恢复秘密的哈希，不保存可逆 API Key。
-    registration_id = fields.CharField(max_length=32, null=True, unique=True)
+    registration_id = fields.CharField(max_length=32, null=True)
     recovery_secret_hash = fields.CharField(max_length=64, null=True)
     registration_request_hash = fields.CharField(max_length=64, null=True)
     credential_derivation_version = fields.SmallIntField(null=True)
@@ -82,27 +82,17 @@ class WorkerInstallKey(BaseModel):
         return secrets.token_hex(16).upper()
 
     @classmethod
-    async def create_install_key(
+    async def persist_install_key(
         cls,
+        plaintext: str,
         os_type: str,
         created_by: int,
         *,
         allowed_source: str | None = None,
     ) -> "WorkerInstallKey":
-        """创建新的安装 Key
-
-        P2-11：DB 只存 SHA-256(明文) 到 ``key`` 列；明文以 ``plaintext_key``
-        属性挂在返回实例上（不持久化，仅供 API 首次返回给用户）。
-
-        Args:
-            os_type: 操作系统类型 (linux/macos/windows)
-            created_by: 创建者用户 ID
-            allowed_source: 可选注册来源 IP/CIDR
-
-        Returns:
-            WorkerInstallKey 实例（含内存属性 ``plaintext_key``）
-        """
-        plaintext = cls.generate_key()
+        """持久化调用方已经生成、且仅能返回一次的安装 Key 明文。"""
+        if not plaintext:
+            raise ValueError("安装 Key 明文不能为空")
         expires_at = datetime.now(UTC) + timedelta(hours=INSTALL_KEY_TTL_HOURS)
         normalized_source = normalize_ip_or_cidr(allowed_source)
 
@@ -112,10 +102,8 @@ class WorkerInstallKey(BaseModel):
             created_by=created_by,
             allowed_source=normalized_source,
             expires_at=expires_at,
-            status="pending",
+            status=INSTALL_KEY_STATUS_PENDING,
         )
-        # 只在返回值上挂明文，不写 DB
-        instance.plaintext_key = plaintext  # type: ignore[attr-defined]
         return instance
 
     @classmethod
@@ -146,7 +134,7 @@ class WorkerInstallKey(BaseModel):
         ``TypeError``,绕过这条校验。这里统一把 naive 视作 UTC
         再比较,确保时区一致(P2-#L11)。
         """
-        if self.status != "pending":
+        if self.status != INSTALL_KEY_STATUS_PENDING:
             return False
         now = datetime.now(UTC)
         expires_at = self.expires_at
@@ -155,63 +143,40 @@ class WorkerInstallKey(BaseModel):
         return now < expires_at
 
     @classmethod
-    async def cas_claim_pending(
-        cls,
-        plaintext_key: str,
-        worker_public_id: str,
-        *,
-        allowed_source: str,
-        using_db: "BaseDBAsyncClient | None" = None,
-    ) -> bool:
-        """P1-10 + P2-11：按 SHA-256(明文) 原子占用一次性 Key。
-
-        DB 层 CAS：只有 status='pending' 且未过期才能被 UPDATE 成 'used'；
-        并发同来源的两条请求最多一条能占用成功，另一条 update rows 为 0。
-        调用方必须把本方法、Worker 创建和 ``finalize_claim`` 放在同一事务。
-
-        Returns:
-            True: 本调用成功占用了 Key（唯一赢家）。
-            False: Key 已被其他并发请求消费，本调用应放弃。
-        """
-        now = datetime.now(UTC)
-        normalized_source = normalize_ip_or_cidr(allowed_source)
-        if normalized_source is None:
-            raise ValueError("消费安装 Key 时必须提供注册来源 IP/CIDR")
-        updated = (
-            await cls.filter(
-                key=cls.hash_plaintext(plaintext_key),
-                status="pending",
-                expires_at__gt=now,
-            )
-            .using_db(using_db)
-            .update(
-                status="used",
-                used_by_worker=worker_public_id,
-                used_at=now,
-                allowed_source=normalized_source,
-            )
+    async def expire_pending(cls, now: datetime, *, limit: int) -> int:
+        """分批把已经超过有效期的未使用 Key 收敛为 expired。"""
+        expired_ids = await (
+            cls.filter(status=INSTALL_KEY_STATUS_PENDING, expires_at__lte=now)
+            .order_by("id")
+            .limit(limit)
+            .values_list("id", flat=True)
         )
-        return bool(updated)
+        if not expired_ids:
+            return 0
+        return await cls.filter(
+            id__in=list(expired_ids),
+            status=INSTALL_KEY_STATUS_PENDING,
+            expires_at__lte=now,
+        ).update(status=INSTALL_KEY_STATUS_EXPIRED)
 
     @classmethod
-    async def finalize_claim(
-        cls,
-        plaintext_key: str,
-        placeholder_public_id: str,
-        worker_public_id: str,
-        *,
-        using_db: "BaseDBAsyncClient",
-    ) -> int:
-        """把事务内占位 Worker ID 原子替换成真实 public_id。"""
-        return await (
-            cls.filter(
-                key=cls.hash_plaintext(plaintext_key),
-                status="used",
-                used_by_worker=placeholder_public_id,
-            )
-            .using_db(using_db)
-            .update(used_by_worker=worker_public_id)
-        )
+    async def revoke_pending(cls, public_id: str) -> str | None:
+        """撤销一个未使用 Key；返回当前状态，记录不存在时返回 None。"""
+        now = datetime.now(UTC)
+        await cls.filter(
+            public_id=public_id,
+            status=INSTALL_KEY_STATUS_PENDING,
+            expires_at__lte=now,
+        ).update(status=INSTALL_KEY_STATUS_EXPIRED)
+        updated = await cls.filter(
+            public_id=public_id,
+            status=INSTALL_KEY_STATUS_PENDING,
+            expires_at__gt=now,
+        ).update(status=INSTALL_KEY_STATUS_REVOKED)
+        if updated == 1:
+            return INSTALL_KEY_STATUS_REVOKED
+        record = await cls.filter(public_id=public_id).only("status").first()
+        return str(record.status) if record is not None else None
 
     class Meta:
         table = "worker_install_keys"
@@ -222,4 +187,10 @@ class WorkerInstallKey(BaseModel):
         ]
 
 
-__all__ = ["WorkerInstallKey"]
+__all__ = [
+    "INSTALL_KEY_STATUS_EXPIRED",
+    "INSTALL_KEY_STATUS_PENDING",
+    "INSTALL_KEY_STATUS_REVOKED",
+    "INSTALL_KEY_STATUS_USED",
+    "WorkerInstallKey",
+]

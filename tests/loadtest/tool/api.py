@@ -10,6 +10,7 @@ from .runner import OperationResult
 
 API_PREFIX = "/api/v1"
 TASK_DELETE_BATCH_SIZE = 100
+HOUSEKEEPING_INTERVAL_SECONDS = 0.1
 
 
 class AntCodeApi:
@@ -101,7 +102,10 @@ class AntCodeApi:
     async def _verify_tasks_deleted(self, task_ids: list[str]) -> None:
         for offset in range(0, len(task_ids), TASK_DELETE_BATCH_SIZE):
             batch = task_ids[offset : offset + TASK_DELETE_BATCH_SIZE]
-            statuses = await asyncio.gather(*(self._task_status(task_id) for task_id in batch))
+            statuses: list[int] = []
+            for index, task_id in enumerate(batch):
+                await pace_housekeeping_request(index)
+                statuses.append(await self._task_status(task_id))
             remaining = [task_id for task_id, status in zip(batch, statuses, strict=True) if status != 404]
             if remaining:
                 raise RuntimeError(f"load-test cleanup left tasks accessible: {remaining}")
@@ -146,3 +150,9 @@ def _public_id(payload: dict[str, Any], path: str) -> str:
     if not isinstance(public_id, str) or not public_id:
         raise ValueError(f"{path} response has no public id")
     return public_id
+
+
+async def pace_housekeeping_request(index: int) -> None:
+    """Keep post-load API verification below the default global rate limit."""
+    if index > 0:
+        await asyncio.sleep(HOUSEKEEPING_INTERVAL_SECONDS)

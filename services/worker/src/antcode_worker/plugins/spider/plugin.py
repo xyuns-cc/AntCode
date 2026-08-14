@@ -1,12 +1,17 @@
 """爬虫任务插件。"""
 
+import json
 import os
 import tempfile
 from typing import Any
 
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
+from antcode_worker.executor.rule_policy import SPIDER_STATS_PATH_ENV
 from antcode_worker.plugins.base import PluginBase
+
+SPIDER_STATS_EXTENSION = "antcode_scrapy.stats_export.SpiderStatsExporter"
+SPIDER_STATS_EXTENSION_PRIORITY = 500
 
 
 class SpiderPlugin(PluginBase):
@@ -73,6 +78,7 @@ class SpiderPlugin(PluginBase):
                 "ANTCODE_SPIDER_PROJECT_ID": payload.project_id or context.project_id,
                 "ANTCODE_SPIDER_SINK_MODE": "spool",
                 "ANTCODE_SPIDER_SPOOL_PATH": spool_path,
+                SPIDER_STATS_PATH_ENV: os.path.join(run_dir, "spider-stats.json"),
             }
         )
 
@@ -81,7 +87,7 @@ class SpiderPlugin(PluginBase):
         config = {
             "framework": payload.kwargs.get("framework", "script"),
             "spider_name": payload.kwargs.get("spider_name"),
-            "settings": payload.kwargs.get("settings", {}),
+            "settings": dict(payload.kwargs.get("settings", {})),
             "output_format": payload.kwargs.get("output_format", "json"),
             "output_file": payload.kwargs.get("output_file"),
             "log_level": payload.kwargs.get("log_level", "INFO"),
@@ -116,8 +122,17 @@ class SpiderPlugin(PluginBase):
         if config.get("download_delay"):
             settings["DOWNLOAD_DELAY"] = config["download_delay"]
 
+        extensions = settings.get("EXTENSIONS", {})
+        if not isinstance(extensions, dict):
+            raise ValueError("Scrapy EXTENSIONS 必须是对象")
+        settings["EXTENSIONS"] = {
+            **extensions,
+            SPIDER_STATS_EXTENSION: SPIDER_STATS_EXTENSION_PRIORITY,
+        }
+
         for key, value in settings.items():
-            args.extend(["-s", f"{key}={value}"])
+            encoded = json.dumps(value) if isinstance(value, (dict, list)) else value
+            args.extend(["-s", f"{key}={encoded}"])
 
         # 额外参数
         args.extend(payload.args)

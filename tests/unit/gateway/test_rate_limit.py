@@ -3,23 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 import grpc
 import pytest
 from antcode_gateway import rate_limit as rl
-from antcode_gateway.rate_limit import RateLimiter, RateLimitInterceptor, TokenBucketLimiter
+from antcode_gateway.rate_limit import RateLimitInterceptor
 from antcode_gateway.redis_token_bucket import RedisTokenBucketResult
-
-
-def test_token_bucket_denies_when_empty():
-    limiter = TokenBucketLimiter(rate=0.0, capacity=1)
-    first = limiter.allow("worker-1")
-    second = limiter.allow("worker-1")
-    assert first.allowed is True
-    assert second.allowed is False
-
-
-def test_rate_limiter_blocks_when_global_empty():
-    limiter = RateLimiter(global_rate=0.0, global_capacity=0, per_worker_rate=1.0, per_worker_capacity=1)
-    result = limiter.allow("worker-1")
-    assert result.allowed is False
-
 
 # ---------------------------------------------------------------------------
 # RateLimitInterceptor: key 派生必须来自不可伪造的来源(真实对端 / 认证主体) +

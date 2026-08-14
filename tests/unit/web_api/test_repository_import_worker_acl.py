@@ -13,7 +13,7 @@ from antcode_core.common.exceptions import WorkerUnavailableError
 from antcode_core.domain.models.enums import ExecutionStrategy
 from antcode_core.domain.schemas.repository import ImportProjectsPayload, ProjectImportItem
 from antcode_web_api.routes.v1 import repositories
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from pydantic import ValidationError
 
 
@@ -59,6 +59,7 @@ async def test_regular_user_can_import_with_authorized_worker(monkeypatch) -> No
 
     authorize.assert_awaited_once_with("worker-1", 7)
     import_projects.assert_awaited_once()
+    assert response.code == status.HTTP_201_CREATED
     assert response.data.created == ["project-1"]
 
 
@@ -187,6 +188,7 @@ async def test_import_runtime_is_created_on_bound_worker(monkeypatch) -> None:
         python_version="3.11",
         packages=[],
         created_by="alice",
+        owner_user_id="7",
     )
 
 

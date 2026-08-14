@@ -86,7 +86,7 @@ jobs:
           scan-type: fs
           scanners: vuln,secret
           scan-ref: .
-          ignore-unfixed: true
+          ignore-unfixed: false
           severity: CRITICAL,HIGH
           exit-code: '1'
           trivyignores: .trivyignore.yaml

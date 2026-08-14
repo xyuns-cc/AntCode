@@ -5,6 +5,7 @@
   的网络层 error 事件——前端 ``onerror`` 只管重连，``stream_error`` 只管展示；
 - 新增 ``ping`` 心跳事件（原生 EventSource 看不到 SSE 注释行，心跳必须是
   真实事件，前端才能做探活 watchdog）。
+- 断线窗口完整回放后发 ``recovery_complete``，与溢出中断明确区分。
 """
 
 from __future__ import annotations
@@ -89,6 +90,22 @@ def build_stream_error_message(message: str, *, code: str) -> dict[str, Any]:
     - limit: 订阅容量竞态兜底
     """
     return {"type": "stream_error", "code": code, "message": message, "timestamp": _now_iso()}
+
+
+def build_recovery_complete_message(recovered_lines: int) -> dict[str, Any]:
+    """在进入实时阶段前标记游标恢复窗口已完整回放。"""
+    if recovered_lines < 0:
+        raise ValueError("恢复日志行数不得为负数")
+    return {
+        "type": "recovery_complete",
+        "recovered_lines": recovered_lines,
+        "timestamp": _now_iso(),
+    }
+
+
+def recovery_complete_frame(recovered_lines: int) -> bytes:
+    message = build_recovery_complete_message(recovered_lines)
+    return format_sse_event("recovery_complete", message)
 
 
 def build_history_complete_message(sent: int, *, truncated: bool = False) -> dict[str, Any]:

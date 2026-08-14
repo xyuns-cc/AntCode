@@ -53,10 +53,15 @@ export interface AlertRetryConfig {
 
 // 告警配置请求
 export interface AlertConfigRequest {
-  channels?: AlertChannelConfig
+  channels?: {
+    feishu_webhooks?: WebhookConfig[]
+    dingtalk_webhooks?: WebhookConfig[]
+    wecom_webhooks?: WebhookConfig[]
+    email_config?: Partial<EmailConfig>
+  }
   auto_alert_levels?: string[]
-  rate_limit?: AlertRateLimitConfig
-  retry?: AlertRetryConfig
+  rate_limit?: Partial<AlertRateLimitConfig>
+  retry?: Partial<AlertRetryConfig>
 }
 
 // 告警配置响应

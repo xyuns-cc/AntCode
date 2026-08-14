@@ -9,7 +9,6 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8
 """
 
 import time
-from dataclasses import dataclass, field
 from datetime import datetime
 
 from loguru import logger
@@ -19,89 +18,18 @@ from antcode_core.application.services.crawl.backends.progress_backend import (
     ProgressStore,
     get_progress_store,
 )
+from antcode_core.application.services.crawl.progress_lifecycle import CrawlProgressLifecycleMixin
+from antcode_core.application.services.crawl.progress_models import BatchProgress, Checkpoint
+
+__all__ = ["BatchProgress", "Checkpoint", "CrawlProgressService", "crawl_progress_service"]
 
 DEFAULT_CHECKPOINT_INTERVAL = 60
 DEFAULT_SPEED_WINDOW = 60
 DEFAULT_WORKER_TIMEOUT = 120
+MIN_SPEED_SAMPLES = 2
 
 
-@dataclass
-class BatchProgress:
-    """批次进度数据类"""
-
-    batch_id: str = ""
-    project_id: str = ""
-    total_urls: int = 0
-    pending_urls: int = 0
-    completed_urls: int = 0
-    failed_urls: int = 0
-    active_workers: int = 0
-    speed_per_minute: float = 0.0
-    last_updated: str = ""
-    started_at: str = ""
-    _completed_history: list = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "batch_id": self.batch_id,
-            "project_id": self.project_id,
-            "total_urls": self.total_urls,
-            "pending_urls": self.pending_urls,
-            "completed_urls": self.completed_urls,
-            "failed_urls": self.failed_urls,
-            "active_workers": self.active_workers,
-            "speed_per_minute": self.speed_per_minute,
-            "last_updated": self.last_updated,
-            "started_at": self.started_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "BatchProgress":
-        return cls(
-            batch_id=data.get("batch_id", ""),
-            project_id=data.get("project_id", ""),
-            total_urls=int(data.get("total_urls", 0)),
-            pending_urls=int(data.get("pending_urls", 0)),
-            completed_urls=int(data.get("completed_urls", 0)),
-            failed_urls=int(data.get("failed_urls", 0)),
-            active_workers=int(data.get("active_workers", 0)),
-            speed_per_minute=float(data.get("speed_per_minute", 0.0)),
-            last_updated=data.get("last_updated", ""),
-            started_at=data.get("started_at", ""),
-        )
-
-
-@dataclass
-class Checkpoint:
-    """检查点数据类"""
-
-    batch_id: str = ""
-    project_id: str = ""
-    progress: dict = field(default_factory=dict)
-    queue_state: dict = field(default_factory=dict)
-    created_at: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "batch_id": self.batch_id,
-            "project_id": self.project_id,
-            "progress": self.progress,
-            "queue_state": self.queue_state,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "Checkpoint":
-        return cls(
-            batch_id=data.get("batch_id", ""),
-            project_id=data.get("project_id", ""),
-            progress=data.get("progress", {}),
-            queue_state=data.get("queue_state", {}),
-            created_at=data.get("created_at", ""),
-        )
-
-
-class CrawlProgressService(BaseService):
+class CrawlProgressService(BaseService, CrawlProgressLifecycleMixin):
     """批次进度服务"""
 
     def __init__(
@@ -144,7 +72,10 @@ class CrawlProgressService(BaseService):
             last_updated=now,
             started_at=now,
         )
-        await backend.set_progress(project_id, batch_id, progress.to_dict())
+        self._require_active_write(
+            await backend.set_progress(project_id, batch_id, progress.to_dict()),
+            operation="初始化进度",
+        )
         logger.info(f"初始化批次进度: project={project_id}, batch={batch_id}, total_urls={total_urls}")
         return progress
 
@@ -179,7 +110,10 @@ class CrawlProgressService(BaseService):
             "speed_per_minute": speed,
             "last_updated": now,
         }
-        await backend.update_progress(project_id, batch_id, updates)
+        self._require_active_write(
+            await backend.update_progress(project_id, batch_id, updates),
+            operation="更新进度",
+        )
         progress = BatchProgress(
             batch_id=batch_id,
             project_id=project_id,
@@ -207,6 +141,7 @@ class CrawlProgressService(BaseService):
         completed_urls: int,
         failed_urls: int,
         pending_urls: int,
+        active_workers: int = 0,
     ) -> None:
         """接缝修复（R2 seam-5）：用权威值（DB run 状态聚合）覆写进度计数。
 
@@ -223,7 +158,7 @@ class CrawlProgressService(BaseService):
         batch_key = f"{project_id}:{batch_id}"
         await self._update_speed_history(batch_key, completed_urls)
         speed = await self._calculate_speed(batch_key)
-        await backend.update_progress(
+        updated = await backend.update_progress(
             project_id,
             batch_id,
             {
@@ -235,16 +170,22 @@ class CrawlProgressService(BaseService):
                 "pending_urls": int(pending_urls),
                 "completed_urls": int(completed_urls),
                 "failed_urls": int(failed_urls),
+                "active_workers": int(active_workers),
                 "speed_per_minute": speed,
                 "last_updated": datetime.now().isoformat(),
             },
         )
+        if not updated:
+            raise RuntimeError("Crawl 批次已取消，权威进度写入被 fence 拒绝")
 
     async def increment_total_urls(self, project_id: str, batch_id: str, count: int) -> int:
         backend = self._get_backend()
         new_total = await backend.increment_progress(project_id, batch_id, "total_urls", count)
         await backend.increment_progress(project_id, batch_id, "pending_urls", count)
-        await backend.update_progress(project_id, batch_id, {"last_updated": datetime.now().isoformat()})
+        self._require_active_write(
+            await backend.update_progress(project_id, batch_id, {"last_updated": datetime.now().isoformat()}),
+            operation="更新进度时间",
+        )
         logger.debug(f"增加 URL 数: project={project_id}, batch={batch_id}, count={count}, new_total={new_total}")
         return new_total
 
@@ -261,7 +202,7 @@ class CrawlProgressService(BaseService):
         if batch_key not in self._speed_history:
             return 0.0
         history = self._speed_history[batch_key]
-        if len(history) < 2:
+        if len(history) < MIN_SPEED_SAMPLES:
             return 0.0
         oldest = history[0]
         newest = history[-1]
@@ -277,8 +218,6 @@ class CrawlProgressService(BaseService):
         data = await backend.get_progress(project_id, batch_id)
         if not data:
             return None
-        active_workers = len(await backend.get_active_workers(project_id, batch_id))
-        data["active_workers"] = active_workers
         return BatchProgress.from_dict(data)
 
     async def get_progress_summary(self, project_id: str, batch_id: str) -> dict:
@@ -301,93 +240,10 @@ class CrawlProgressService(BaseService):
             "last_updated": progress.last_updated,
         }
 
-    async def save_checkpoint(
-        self,
-        project_id: str,
-        batch_id: str,
-        queue_state: dict | None = None,
-    ) -> Checkpoint:
-        backend = self._get_backend()
-        progress = await self.get_progress(project_id, batch_id)
-        progress_dict = progress.to_dict() if progress else {}
-        now = datetime.now().isoformat()
-        checkpoint = Checkpoint(
-            batch_id=batch_id,
-            project_id=project_id,
-            progress=progress_dict,
-            queue_state=queue_state or {},
-            created_at=now,
-        )
-        await backend.save_checkpoint(project_id, batch_id, checkpoint.to_dict())
-        batch_key = f"{project_id}:{batch_id}"
-        self._last_checkpoint_time[batch_key] = time.time()
-        logger.info(f"保存检查点: project={project_id}, batch={batch_id}")
-        return checkpoint
-
-    async def load_checkpoint(self, project_id: str, batch_id: str) -> Checkpoint | None:
-        backend = self._get_backend()
-        data = await backend.load_checkpoint(project_id, batch_id)
-        if not data:
-            return None
-        logger.info(f"加载检查点: project={project_id}, batch={batch_id}")
-        return Checkpoint.from_dict(data)
-
-    async def restore_from_checkpoint(self, project_id: str, batch_id: str) -> BatchProgress | None:
-        backend = self._get_backend()
-        checkpoint = await self.load_checkpoint(project_id, batch_id)
-        if not checkpoint:
-            return None
-        progress_data = checkpoint.progress
-        if progress_data:
-            await backend.set_progress(project_id, batch_id, progress_data)
-        logger.info(f"从检查点恢复进度: project={project_id}, batch={batch_id}")
-        return await self.get_progress(project_id, batch_id)
-
-    async def _maybe_save_checkpoint(self, project_id: str, batch_id: str, progress: BatchProgress):
-        batch_key = f"{project_id}:{batch_id}"
-        now = time.time()
-        last_time = self._last_checkpoint_time.get(batch_key, 0)
-        if now - last_time >= self._checkpoint_interval:
-            await self.save_checkpoint(project_id, batch_id)
-
-    async def delete_checkpoint(self, project_id: str, batch_id: str) -> bool:
-        backend = self._get_backend()
-        result = await backend.delete_checkpoint(project_id, batch_id)
-        logger.info(f"删除检查点: project={project_id}, batch={batch_id}")
-        return result
-
-    async def register_worker(self, project_id: str, batch_id: str, worker_id: str) -> bool:
-        backend = self._get_backend()
-        result = await backend.register_worker(project_id, batch_id, worker_id, self._worker_timeout)
-        logger.debug(f"注册 Worker: project={project_id}, batch={batch_id}, worker={worker_id}")
-        return result
-
-    async def update_worker_heartbeat(self, project_id: str, batch_id: str, worker_id: str) -> bool:
-        return await self.register_worker(project_id, batch_id, worker_id)
-
-    async def get_active_worker_count(self, project_id: str, batch_id: str) -> int:
-        backend = self._get_backend()
-        workers = await backend.get_active_workers(project_id, batch_id)
-        return len(workers)
-
-    async def get_active_workers(self, project_id: str, batch_id: str) -> list:
-        backend = self._get_backend()
-        return await backend.get_active_workers(project_id, batch_id)
-
-    async def unregister_worker(self, project_id: str, batch_id: str, worker_id: str) -> bool:
-        backend = self._get_backend()
-        result = await backend.unregister_worker(project_id, batch_id, worker_id)
-        logger.debug(f"注销 Worker: project={project_id}, batch={batch_id}, worker={worker_id}")
-        return result
-
-    async def clear_progress(self, project_id: str, batch_id: str) -> bool:
-        backend = self._get_backend()
-        result = await backend.clear(project_id, batch_id)
-        batch_key = f"{project_id}:{batch_id}"
-        self._speed_history.pop(batch_key, None)
-        self._last_checkpoint_time.pop(batch_key, None)
-        logger.info(f"清除批次进度数据: project={project_id}, batch={batch_id}")
-        return result
+    @staticmethod
+    def _require_active_write(updated: bool, *, operation: str) -> None:
+        if not updated:
+            raise RuntimeError(f"Crawl 批次已取消，{operation}被 fence 拒绝")
 
 
 crawl_progress_service = CrawlProgressService()

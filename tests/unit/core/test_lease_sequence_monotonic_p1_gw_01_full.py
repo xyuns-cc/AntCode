@@ -22,6 +22,7 @@ from __future__ import annotations
 import inspect
 
 from antcode_core.application.services import lease_service
+from antcode_core.application.services.lease_scripts import GRANT_LUA
 from antcode_core.application.services.lease_service import Lease
 
 
@@ -33,36 +34,33 @@ def test_lease_dataclass_has_sequence_field():
 
 def test_grant_lua_incr_seq_on_new_branch():
     """P1-GW-01: Lua new 分支必须 INCR seq_key 拿严格单调值。"""
-    src = inspect.getsource(lease_service)
-    assert "INCR', seq_key" in src, "Lua new 分支未 INCR seq_key,同毫秒 grant 会碰撞"
-    assert "seq_key = KEYS[5]" in src, "Lua 未接受 KEYS[5]=seq_key"
+    assert "INCR', seq_key" in GRANT_LUA, "Lua new 分支未 INCR seq_key,同毫秒 grant 会碰撞"
+    assert "active_key, seq_key, lifecycle_key = KEYS[4], KEYS[5], KEYS[6]" in GRANT_LUA, "Lua 未接受 KEYS[5]=seq_key"
 
 
 def test_grant_lua_seeds_sequence_above_legacy_timestamp_domain():
     """存量 epoch-ms lease_gen 后的新 sequence 仍必须单调增大。"""
-    src = inspect.getsource(lease_service)
-    assert "current_sequence < now_ms" in src
-    assert "SET', seq_key, tostring(now_ms)" in src
+    assert "current_sequence < now_ms" in GRANT_LUA
+    assert "SET', seq_key, tostring(now_ms)" in GRANT_LUA
 
 
 def test_grant_lua_preserves_sequence_on_renew():
     """P1-GW-01: Lua renew 分支必须保留 stored_sequence,不能 INCR 前进。"""
-    src = inspect.getsource(lease_service)
-    assert "stored_sequence" in src, "Lua 未读 stored_sequence,renew 会前进"
-    assert "final_sequence = stored_sequence > 0 and stored_sequence or 0" in src, "Lua renew 分支未保留原 sequence"
+    assert "stored_sequence" in GRANT_LUA, "Lua 未读 stored_sequence,renew 会前进"
+    assert "final_sequence = stored_sequence > 0 and stored_sequence or 0" in GRANT_LUA, (
+        "Lua renew 分支未保留原 sequence"
+    )
 
 
 def test_grant_lua_hset_persists_sequence():
     """P1-GW-01: HSET 必须存 sequence 字段,get() 才能读到。"""
-    src = inspect.getsource(lease_service)
-    assert "'sequence', tostring(final_sequence)" in src, "HSET 未持久化 sequence"
+    assert "'sequence', tostring(final_sequence)" in GRANT_LUA, "HSET 未持久化 sequence"
 
 
 def test_grant_returns_sequence():
     """P1-GW-01: Lua 返回值第 5 项是 sequence,grant() 解包到 Lease.sequence。"""
-    src = inspect.getsource(lease_service)
-    assert "tostring(final_sequence)" in src, "Lua 返回未包含 sequence"
-    assert "sequence=final_sequence" in src, "grant() 未把 sequence 装进 Lease"
+    assert "tostring(final_sequence)" in GRANT_LUA, "Lua 返回未包含 sequence"
+    assert "sequence=final_sequence" in inspect.getsource(lease_service), "grant() 未把 sequence 装进 Lease"
 
 
 def test_seq_key_shares_slot_with_lease_keys():

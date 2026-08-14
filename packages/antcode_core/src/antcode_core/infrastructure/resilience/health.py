@@ -323,16 +323,13 @@ class HealthChecker:
         try:
             import psutil
 
-            # 内存使用
-            memory = psutil.virtual_memory()
+            memory, disk, cpu_percent = await asyncio.gather(
+                asyncio.to_thread(psutil.virtual_memory),
+                asyncio.to_thread(psutil.disk_usage, "/"),
+                asyncio.to_thread(psutil.cpu_percent, 0.1),
+            )
             memory_percent = memory.percent
-
-            # 磁盘使用
-            disk = psutil.disk_usage("/")
             disk_percent = disk.percent
-
-            # CPU 使用
-            cpu_percent = psutil.cpu_percent(interval=0.1)
 
             # 判断状态
             if memory_percent > 90 or disk_percent > 90:

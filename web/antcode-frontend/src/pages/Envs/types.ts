@@ -8,6 +8,7 @@ export interface ExtendedRuntimeEnvItem {
   id: string
   scope: RuntimeScope
   key: string
+  description?: string | null
   version: string
   runtime_locator: string
   created_by?: string | null

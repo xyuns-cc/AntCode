@@ -10,7 +10,7 @@
 本测试锁死:
 1. 默认(不设 ANTCODE_RULE_ALLOW_NETWORK)时,build_plan 返回的 sandbox_config
    RULE_SANDBOX_ALLOW_NETWORK=False
-2. 设为 "1"/"true"/"yes"/"on" 显式开启后为 True
+2. 旧的 "1"/"true"/"yes"/"on" 共享网络开关被显式拒绝
 3. 设为其他值(空/0/false/random)时仍为 False
 """
 
@@ -60,15 +60,14 @@ async def test_rule_network_disabled_by_default(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "Yes", "on", "ON"])
-async def test_rule_network_enabled_by_explicit_truthy(tmp_path, monkeypatch, value):
-    """P0-03:显式 truthy 值放行。"""
+async def test_unsafe_rule_network_override_is_rejected(tmp_path, monkeypatch, value):
+    """共享 Worker network namespace 会绕过受限代理，必须拒绝。"""
     monkeypatch.setenv("ANTCODE_RULE_ALLOW_NETWORK", value)
 
     plugin = RulePlugin()
     context, payload = _make_context_and_payload(tmp_path)
-    plan = await plugin.build_plan(context, payload)
-
-    assert plan.sandbox_config.get(RULE_SANDBOX_ALLOW_NETWORK) is True
+    with pytest.raises(RuntimeError, match="已禁用"):
+        await plugin.build_plan(context, payload)
 
 
 @pytest.mark.asyncio
@@ -84,19 +83,16 @@ async def test_rule_network_stays_off_for_non_truthy(tmp_path, monkeypatch, valu
     assert plan.sandbox_config.get(RULE_SANDBOX_ALLOW_NETWORK) is False
 
 
-def test_credential_mask_includes_k8s_and_docker_secret_paths():
-    """P0-03:credential mask 覆盖 K8s SA token + docker/podman secrets 挂载点。
-
-    这些路径在 K8s Pod 内被自动挂载,如果不 tmpfs 掩掉,用户载荷可通过
-    --ro-bind / / 直接读到 ServiceAccount token。测试通过检查候选清单结构。
-    """
-    # 直接读取源代码看 candidates 里是否包含新增路径
+def test_filesystem_allowlist_never_mentions_secret_mounts():
+    """空根白名单不需要枚举凭据路径，未知 Secret mount 默认不可见。"""
     import inspect
 
-    from antcode_worker.executor.sandbox import BasicSandbox
+    from antcode_worker.executor.sandbox_mounts import sandbox_filesystem_args
 
-    source = inspect.getsource(BasicSandbox._credential_mask_dirs)
-    assert "/run/secrets" in source
-    assert "/var/run/secrets/kubernetes.io" in source
-    assert "/etc/kubernetes" in source
-    assert "/var/lib/kubelet" in source
+    module = inspect.getmodule(sandbox_filesystem_args)
+    assert module is not None
+    source = inspect.getsource(module)
+    assert '"--ro-bind", "/", "/"' not in source
+    assert "/run/secrets" not in source
+    assert "/etc/kubernetes" not in source
+    assert "/var/lib/kubelet" not in source

@@ -14,7 +14,6 @@ class GitCredential(BaseModel):
         max_length=32,
         unique=True,
         default=generate_public_id,
-        db_index=True,
     )
     name = fields.CharField(max_length=100)
     auth_type = fields.CharField(max_length=20)
@@ -31,7 +30,6 @@ class GitCredential(BaseModel):
     class Meta:
         table = "git_credentials"
         indexes = [
-            ("public_id",),
             ("owner_user_id",),
             ("owner_user_id", "host_scope"),
             ("owner_user_id", "name"),

@@ -21,8 +21,8 @@ from antcode_contracts import (
 )
 
 from tests.contracts.fake_gateway_artifact import FakeArtifactService
+from tests.contracts.fake_gateway_tasks import build_task_dispatch
 
-_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 STREAM_CLOSE_TIMEOUT_SECONDS = 2.0
 RUNTIME_CONTROL_TTL_MS = 30_000
 
@@ -52,6 +52,7 @@ class FakeGatewayState:
     """Observable state shared by the fake services and test probes."""
 
     worker_id: str
+    task_payload_secret: str
     visibility_timeout_ms: int
     task_queue: asyncio.Queue[data_pb2.TaskDispatch] = field(default_factory=asyncio.Queue)
     control_queue: asyncio.Queue[control_pb2.ControlEvent] = field(default_factory=asyncio.Queue)
@@ -80,26 +81,12 @@ class FakeGatewayState:
         return f"fake:task:{self.worker_id}|{uuid.uuid4().hex}"
 
     async def enqueue_task(self, payload: dict[str, Any]) -> str:
-        digest = str(payload.get("source_bundle_sha256") or _EMPTY_SHA256)
         receipt_id = self._receipt_id()
-        dispatch = data_pb2.TaskDispatch(
-            task_id=str(payload.get("task_id", "")),
-            project_id=str(payload.get("project_id", "")),
-            project_type=str(payload.get("project_type", "code")),
-            priority=int(payload.get("priority", 0) or 0),
-            params=_string_map(payload.get("params")),
-            environment=_string_map(payload.get("environment")),
-            timeout_seconds=int(payload.get("timeout_seconds", payload.get("timeout", 3600)) or 3600),
-            source_bundle_uri=str(payload.get("source_bundle_uri") or f"pgartifact://{digest}"),
-            source_bundle_sha256=digest,
-            source_bundle_size=int(payload.get("source_bundle_size", 0) or 0),
-            transfer_method=str(payload.get("transfer_method", "source_bundle")),
-            resolved_revision=str(payload.get("resolved_revision", "contract-test")),
-            source_subdir=str(payload.get("source_subdir", "")),
-            entry_point=str(payload.get("entry_point", "")),
-            run_id=str(payload.get("run_id", "")),
+        dispatch = build_task_dispatch(
+            payload,
+            worker_id=self.worker_id,
+            worker_secret=self.task_payload_secret,
             receipt_id=receipt_id,
-            runtime_env_name=str(payload.get("runtime_env_name", "")),
         )
         await self.task_queue.put(dispatch)
         return receipt_id
@@ -246,6 +233,7 @@ class FakeControlService(control_pb2_grpc.ControlServiceServicer):
             lease_id=lease_id,
             expires_at_ms=int(time.time() * 1000) + 30_000,
             renew_after_ms=10_000,
+            ttl_ms=30_000,
         )
 
     async def WatchControl(
@@ -273,9 +261,12 @@ class RunningFakeGateway:
 async def run_fake_gateway(
     worker_id: str,
     visibility_timeout_ms: int,
+    *,
+    task_payload_secret: str,
 ) -> AsyncIterator[RunningFakeGateway]:
     state = FakeGatewayState(
         worker_id=worker_id,
+        task_payload_secret=task_payload_secret,
         visibility_timeout_ms=visibility_timeout_ms,
     )
     server = grpc.aio.server()

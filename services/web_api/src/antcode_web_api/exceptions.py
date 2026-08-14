@@ -6,6 +6,7 @@ Web API 异常模块
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from antcode_core.domain.schemas.common import ErrorData, ErrorDetail, ErrorResponse
@@ -131,6 +132,8 @@ def create_error_response(
     message: str,
     errors: list[dict[str, Any]] | list[ErrorDetail] | None = None,
     error_code: str | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     """创建统一的错误响应"""
     error_details: list[ErrorDetail] = []
@@ -157,7 +160,7 @@ def create_error_response(
         data=error_data,
     )
     content = resp.model_dump(mode="json")
-    return JSONResponse(status_code=status_code, content=content)
+    return JSONResponse(status_code=status_code, content=content, headers=headers)
 
 
 def _validation_errors_from_detail(detail: Any) -> list[dict[str, str]]:
@@ -208,6 +211,7 @@ async def http_exception_handler(
         status_code=exc.status_code,
         message=_http_error_message(exc.detail),
         errors=_validation_errors_from_detail(exc.detail),
+        headers=exc.headers,
     )
 
 
@@ -225,7 +229,7 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
             }
         )
     return create_error_response(
-        status_code=status.HTTP_400_BAD_REQUEST,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         message="请求参数验证失败",
         errors=errors,
     )

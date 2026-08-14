@@ -104,6 +104,12 @@ message LeaseResponse {
   int32 renew_after_ms = 3;                 // Recommended renewal interval
   bool revoked = 4;                         // True if Master forced lease revocation
   string revoke_reason = 5;                 // Human-readable revoke reason
+  // Authoritative lease lifetime the server just granted. The Worker validates
+  // `renew_after_ms * 2 < ttl_ms` against THIS value; without it the Worker has
+  // to assume a local LeasePolicy default and the guard silently passes when the
+  // server shortens the TTL (expired lease between two renewals -> double run).
+  // 0 means "not sent" and the Worker must fail loudly, never fall back locally.
+  int32 ttl_ms = 6;
 }
 
 // =========================================================================

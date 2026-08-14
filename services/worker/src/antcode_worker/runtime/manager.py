@@ -21,6 +21,8 @@ from antcode_worker.runtime.hash import compute_runtime_hash
 from antcode_worker.runtime.locks import RuntimeLock
 from antcode_worker.runtime.spec import RuntimeSpec
 
+REMOVE_LOCK_TIMEOUT_SECONDS = 10.0
+
 
 @dataclass
 class RuntimeManagerConfig:
@@ -85,17 +87,14 @@ class RuntimeManager:
         )
 
         self._lock = RuntimeLock(default_timeout=config.lock_timeout)
+        self._usage_count: dict[str, int] = {}
 
         self._gc = RuntimeGC(
             venvs_dir=config.venvs_dir,
             policy=config.gc_policy or GCPolicy(auto_gc=config.auto_gc),
+            in_use_check=self._is_runtime_in_use,
+            cleanup_handler=self._remove_gc_candidate,
         )
-
-        # 运行时使用计数
-        self._usage_count: dict[str, int] = {}
-
-        # 让 GC 能查询 in-use 状态；防止 GC 在任务运行中 rmtree
-        self._gc.set_in_use_check(self._is_runtime_in_use)
 
         # 运行状态
         self._running = False
@@ -160,7 +159,8 @@ class RuntimeManager:
         # 获取锁
         async with self._lock.lock(
             runtime_hash,
-            timeout=self.config.lock_timeout if wait_for_lock else 0,
+            timeout=self.config.lock_timeout,
+            wait=wait_for_lock,
         ) as acquired:
             if not acquired:
                 raise RuntimeError(f"无法获取运行时锁: {runtime_hash}")
@@ -215,35 +215,34 @@ class RuntimeManager:
         return self._usage_count.get(runtime_hash, 0) > 0
 
     async def remove(self, runtime_hash: str, force: bool = False) -> bool:
-        """
-        删除运行时
-
-        Args:
-            runtime_hash: 运行时哈希
-            force: 是否强制删除（即使正在使用）
-
-        Returns:
-            是否成功删除
-        """
-        # 检查是否正在使用
-        if not force and self._usage_count.get(runtime_hash, 0) > 0:
-            logger.warning(f"运行时正在使用，无法删除: {runtime_hash}")
-            return False
-
+        """删除运行时；非强制删除会在锁内确认没有活跃使用者。"""
         # 获取锁
-        async with self._lock.lock(runtime_hash, timeout=10) as acquired:
+        async with self._lock.lock(runtime_hash, timeout=REMOVE_LOCK_TIMEOUT_SECONDS) as acquired:
             if not acquired:
                 logger.warning(f"无法获取锁，删除失败: {runtime_hash}")
                 return False
+            return await self._remove_locked(runtime_hash, force=force)
 
-            # 删除运行时
-            success = await self._builder.remove(runtime_hash)
+    async def _remove_gc_candidate(self, runtime_hash: str) -> bool:
+        """在构建锁内重新确认空闲状态并执行 GC 删除。"""
+        async with self._lock.lock(
+            runtime_hash,
+            timeout=self.config.lock_timeout,
+            wait=False,
+        ) as acquired:
+            if not acquired:
+                logger.info(f"运行时正在构建，GC 跳过: {runtime_hash}")
+                return False
+            return await self._remove_locked(runtime_hash, force=False)
 
-            if success:
-                # 清理使用计数
-                self._usage_count.pop(runtime_hash, None)
-
-            return success
+    async def _remove_locked(self, runtime_hash: str, *, force: bool) -> bool:
+        if not force and self._is_runtime_in_use(runtime_hash):
+            logger.warning(f"运行时正在使用，无法删除: {runtime_hash}")
+            return False
+        success = await self._builder.remove(runtime_hash)
+        if success:
+            self._usage_count.pop(runtime_hash, None)
+        return success
 
     async def list_runtimes(self) -> list[dict[str, Any]]:
         """

@@ -1,8 +1,7 @@
 """T7-B3a (P1-1): 派发失败补派 loop（leader-only）。
 
-覆盖两条链路的补派：
-- `scheduler_service._execute_task_internal` 派发失败 → 入队
-- `batch_dispatcher_service._dispatch_single_url_run` 派发失败 → 入队
+仅覆盖 `batch_dispatcher_service._dispatch_single_url` 的 Crawl batch 派发失败。
+Scheduler-owned TaskRun 需要 leader epoch/authority fencing，禁止进入此队列。
 
 本 loop 每 10s tick 一次,从 ``{ns}:task:redispatch`` ZSet 拿到期任务,逐个
 调 ``worker_task_dispatcher.dispatch_task`` 重派：
@@ -19,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,11 +26,13 @@ from antcode_core.application.services.scheduler.redispatch_service import (
     redispatch_service,
 )
 from antcode_core.common.config import settings
-from antcode_core.domain.models.enums import DispatchStatus
+from antcode_core.common.error_messages import normalize_persisted_error_message
+from antcode_core.domain.models.enums import AuditAction, DispatchStatus
 from antcode_core.domain.models.task_run import TaskRun
 from loguru import logger
 
-from antcode_master.leader import ensure_leader
+from antcode_master.control.scheduler_authority import dispatch_with_scheduler_epoch
+from antcode_master.leader import ensure_leader, require_fencing_token
 
 
 class RedispatchLoop:
@@ -112,25 +114,20 @@ class RedispatchLoop:
 
         终结状态包括:派发成功、已 re-enqueue 新 payload、已放弃。
         """
-        from antcode_core.application.services.workers.worker_dispatcher import (
-            worker_task_dispatcher,
-        )
-
         run_id = payload.get("run_id") or ""
         project_id = payload.get("project_id") or ""
         if not run_id or not project_id:
-            logger.warning(f"补派 payload 缺关键字段,丢弃: {payload}")
+            raw_payload = str(payload.get("__raw_payload") or "")
+            payload_digest = hashlib.sha256(raw_payload.encode()).hexdigest()
+            logger.warning(
+                "补派 payload 缺关键字段,丢弃: run_id={} project_id={} digest={}",
+                run_id,
+                project_id,
+                payload_digest,
+            )
             return True
 
-        result = await worker_task_dispatcher.dispatch_task(
-            project_id=project_id,
-            run_id=run_id,
-            params=payload.get("params") or {},
-            environment_vars=payload.get("environment_vars") or None,
-            runtime_env_name=payload.get("runtime_env_name") or None,
-            timeout=int(payload.get("timeout") or 3600),
-            project_type=payload.get("project_type") or "code",
-        )
+        result = await self._redispatch(payload, project_id=project_id, run_id=run_id)
 
         if getattr(result, "success", False):
             logger.info(
@@ -147,6 +144,36 @@ class RedispatchLoop:
         )
         return True
 
+    @staticmethod
+    async def _redispatch(payload: dict[str, Any], *, project_id: str, run_id: str) -> Any:
+        """在本进程的 Leader 代际下重派一条补派项。
+
+        B12: 补派同样必须带 Master 代际。本 loop 只在 leader 任期内 tick
+        (``_run_loop`` 已 ensure_leader)，所以直接用自己的 Leader token，不
+        回读 ``scheduler_authority`` —— 该 token 正是 ``_activate_scheduler``
+        写进权威表的那一个；``require_fencing_token`` 还会重做一次 Redis 权威
+        校验，丢主时直接抛错，补派项由外层 ``requeue_raw`` 下一轮重来。
+        不用 ``TaskRun.scheduler_fencing_token``：补派主要覆盖 crawl batch 的
+        run（该字段为 NULL），而 run 上残留的旧代际在切主后已经失效。
+        """
+        from antcode_core.application.services.workers.worker_dispatcher import (
+            worker_task_dispatcher,
+        )
+
+        return await dispatch_with_scheduler_epoch(
+            await require_fencing_token(),
+            worker_task_dispatcher.dispatch_task,
+            project_id=project_id,
+            run_id=run_id,
+            params=payload.get("params") or {},
+            environment_vars=payload.get("environment_vars") or None,
+            runtime_env_name=payload.get("runtime_env_name") or None,
+            timeout=int(payload.get("timeout") or 3600),
+            project_type=payload.get("project_type") or "code",
+            region=payload.get("region") or None,
+            require_render=bool(payload.get("require_render", False)),
+        )
+
     async def _reenqueue_or_give_up(self, payload: dict[str, Any], *, reason: str) -> None:
         attempts = int(payload.get("attempts") or 0) + 1
         enqueued = await redispatch_service.enqueue(
@@ -158,36 +185,23 @@ class RedispatchLoop:
             runtime_env_name=payload.get("runtime_env_name") or None,
             timeout=int(payload.get("timeout") or 3600),
             project_type=payload.get("project_type") or "code",
+            region=payload.get("region") or None,
+            require_render=bool(payload.get("require_render", False)),
             attempts=attempts,
             reason=reason,
         )
         if not enqueued:
             # 超阈值放弃：置 FAILED + audit + 告警
-            await self._give_up(payload, reason=reason)
+            await self._give_up(payload, reason=reason, attempts=attempts)
 
-    async def _give_up(self, payload: dict[str, Any], *, reason: str) -> None:
+    async def _give_up(self, payload: dict[str, Any], *, reason: str, attempts: int) -> None:
         run_id = payload.get("run_id") or ""
-        attempts = int(payload.get("attempts") or 0)
+        safe_reason = normalize_persisted_error_message(reason) or "dispatch failed"
         if not await self._mark_failed(run_id, attempts, reason):
             logger.info(f"补派放弃项已由其他路径终结，跳过重复副作用: run_id={run_id}")
             return
 
-        # audit_log
-        try:
-            from antcode_core.domain.models.audit_log import AuditLog
-
-            await AuditLog.create(
-                action="redispatch_gave_up",
-                resource_type="task_run",
-                resource_id=run_id,
-                details={
-                    "attempts": attempts,
-                    "reason": reason,
-                    "project_id": payload.get("project_id"),
-                },
-            )
-        except Exception as exc:
-            logger.warning(f"补派放弃写 audit 失败 run_id={run_id}: {exc}")
+        await self._write_give_up_audit(payload, reason=reason, attempts=attempts)
 
         # 告警
         try:
@@ -196,7 +210,7 @@ class RedispatchLoop:
             await alert_service.send_alert(
                 message=(
                     f"派发补派耗尽: run_id={run_id} project_id={payload.get('project_id')} "
-                    f"attempts={attempts} 最后错误: {reason}"
+                    f"attempts={attempts} 最后错误: {safe_reason}"
                 ),
                 level="ERROR",
                 source="redispatch",
@@ -204,7 +218,37 @@ class RedispatchLoop:
         except Exception as exc:
             logger.debug(f"补派放弃告警发送失败（可忽略）: {exc}")
 
-        logger.error(f"补派放弃: run_id={run_id} attempts={attempts} reason={reason!r}")
+        logger.error(f"补派放弃: run_id={run_id} attempts={attempts} reason={safe_reason!r}")
+
+    @staticmethod
+    async def _write_give_up_audit(payload: dict[str, Any], *, reason: str, attempts: int) -> None:
+        from antcode_core.domain.models.audit_log import AuditLog
+        from tortoise.transactions import in_transaction
+
+        run_id = str(payload.get("run_id") or "")
+        safe_reason = normalize_persisted_error_message(reason)
+        async with in_transaction("default") as connection:
+            locked_run = await TaskRun.filter(run_id=run_id).using_db(connection).select_for_update().first()
+            if locked_run is None:
+                raise RuntimeError(f"补派耗尽审计缺少 TaskRun: run_id={run_id}")
+            audit_query = AuditLog.filter(
+                action=AuditAction.REDISPATCH_GIVE_UP,
+                resource_type="task_run",
+                resource_id=run_id,
+            ).using_db(connection)
+            if await audit_query.exists():
+                return
+            await AuditLog.create(
+                action=AuditAction.REDISPATCH_GIVE_UP,
+                resource_type="task_run",
+                resource_id=run_id,
+                username="system",
+                description=f"派发补派耗尽: attempts={attempts}",
+                new_value={"attempts": attempts, "project_id": payload.get("project_id")},
+                success=False,
+                error_message=safe_reason,
+                using_db=connection,
+            )
 
     @staticmethod
     async def _mark_failed(run_id: str, attempts: int, reason: str) -> bool:
@@ -212,20 +256,23 @@ class RedispatchLoop:
             execution_status_service,
         )
 
+        failure_message = f"补派耗尽 ({attempts}次): {reason}"
         updated = await execution_status_service.update_dispatch_status(
             run_id=run_id,
             status=DispatchStatus.FAILED,
             status_at=datetime.now(UTC),
-            error_message=f"补派耗尽 ({attempts}次): {reason}"[:1000],
+            error_message=failure_message,
         )
         if updated:
             return True
         current = await TaskRun.get_or_none(run_id=run_id)
+        if current is not None and current.dispatch_status is DispatchStatus.FAILED:
+            expected_message = normalize_persisted_error_message(failure_message)
+            return current.error_message == expected_message
         if current is not None and current.dispatch_status in {
             DispatchStatus.ACKED,
             DispatchStatus.REJECTED,
             DispatchStatus.TIMEOUT,
-            DispatchStatus.FAILED,
         }:
             return False
         raise RuntimeError(f"补派耗尽状态未持久化: run_id={run_id}")

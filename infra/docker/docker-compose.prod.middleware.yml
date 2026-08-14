@@ -1,0 +1,143 @@
+x-antcode-logging: &antcode-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "10"
+
+x-backend-environment: &backend-environment
+  DATABASE_URL_FILE: /run/secrets/database_url
+  REDIS_URL_FILE: /run/secrets/redis_url
+  ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+  ENCRYPTION_KEY_SALT_FILE: /run/secrets/encryption_key_salt
+  ENCRYPTION_KEYS_LEGACY_FILE: /run/secrets/encryption_keys_legacy
+  ENCRYPTION_LEGACY_KDF_SALT: ${ENCRYPTION_LEGACY_KDF_SALT:-}
+  ENCRYPTION_ALLOW_LEGACY_SHA256: ${ENCRYPTION_ALLOW_LEGACY_SHA256:-false}
+  REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE is required}
+  REDIS_ACL_ENABLED: "true"
+  AUTH_COOKIE_SECURE: "true"
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: ${ANTCODE_POSTGRES_IMAGE_REPOSITORY:?PostgreSQL image repository is required}@sha256:${ANTCODE_POSTGRES_IMAGE_DIGEST:?PostgreSQL image digest is required}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *antcode-logging
+    cpus: 4
+    mem_limit: 8g
+    pids_limit: 2048
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: ${POSTGRES_DB:-antcode}
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - antcode-control
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" >/dev/null || { kill -TERM 1; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: ${ANTCODE_REDIS_IMAGE_REPOSITORY:?Redis image repository is required}@sha256:${ANTCODE_REDIS_IMAGE_DIGEST:?Redis image digest is required}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *antcode-logging
+    cpus: 2
+    mem_limit: 4g
+    pids_limit: 512
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${ANTCODE_REDIS_MAXMEMORY:-3gb}
+      - --maxmemory-policy
+      - noeviction
+      - --aclfile
+      - /usr/local/etc/redis/users.acl
+    environment:
+      REDIS_HEALTHCHECK_USER: ${REDIS_HEALTHCHECK_USER:?Redis healthcheck user is required}
+    secrets:
+      - redis_healthcheck_password
+    volumes:
+      - redis_data:/data
+      - ${ANTCODE_REDIS_ACL_DIR:?writable Redis ACL directory is required}:/usr/local/etc/redis
+    networks:
+      - antcode-control
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$(cat /run/secrets/redis_healthcheck_password)" redis-cli --user "$${REDIS_HEALTHCHECK_USER}" ping | grep -q PONG || { kill -TERM 1; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  migration:
+    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    restart: "no"
+    logging: *antcode-logging
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 1024
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *backend-environment
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+    secrets:
+      - database_url
+      - redis_url
+      - encryption_key
+      - encryption_key_salt
+      - encryption_keys_legacy
+      - jwt_secret
+    command: ["python", "-m", "scripts.init_db"]
+    networks:
+      - antcode-control
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  crawl-redis-upgrade:
+    image: ${ANTCODE_WEB_API_IMAGE_REPOSITORY:?Web API image repository is required}@sha256:${ANTCODE_WEB_API_IMAGE_DIGEST:?Web API image digest is required}
+    profiles: ["crawl-redis-upgrade"]
+    restart: "no"
+    logging: *antcode-logging
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 256
+    tmpfs:
+      - /tmp
+    environment:
+      REDIS_URL_FILE: /run/secrets/redis_url
+      REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE is required}
+    secrets:
+      - redis_url
+    command: ["python", "-m", "scripts.migrate_crawl_redis"]
+    networks:
+      - antcode-control
+    depends_on:
+      redis:
+        condition: service_healthy

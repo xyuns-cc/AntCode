@@ -13,6 +13,8 @@ build/
 
 # OS
 .DS_Store
+._*
+**/._*
 
 # Environment (keep .env.example)
 .env*
@@ -89,6 +91,12 @@ coverage/
 Dockerfile*
 docker-compose*.yml
 
-# Claude/Kiro config
+# Local agent configuration
+.agents/
 .claude/
+.codex/
 .kiro/
+.serena/
+.cursor/
+.continue/
+.windsurf/

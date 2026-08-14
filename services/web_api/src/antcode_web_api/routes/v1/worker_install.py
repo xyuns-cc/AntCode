@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from antcode_core.application.services.lease_service import LeaseStore
+from antcode_core.application.services.workers.worker_lease_lifecycle import WorkerLeaseLifecycleFence
 from antcode_core.common.security.worker_auth import verify_worker_request_with_signature
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.worker import (
@@ -9,6 +11,7 @@ from antcode_core.domain.schemas.worker import (
     WorkerRegisterByKeyV2Response,
     WorkerRegistrationAckRequest,
 )
+from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from loguru import logger
 
@@ -101,7 +104,11 @@ async def acknowledge_worker_registration(
     if worker.public_id != worker_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Worker 身份与路径不匹配")
     try:
-        acknowledged_at = await acknowledge_registration(worker_id, request.registration_id)
+        acknowledged_at = await acknowledge_registration(
+            worker_id,
+            request.registration_id,
+            lease_enabler=_enable_registration_lease,
+        )
     except RegistrationNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RegistrationForbidden as exc:
@@ -112,6 +119,14 @@ async def acknowledge_worker_registration(
         {"registration_id": request.registration_id, "acknowledged_at": acknowledged_at.isoformat()},
         message="Worker 注册已确认",
     )
+
+
+async def _enable_registration_lease(worker_id: str) -> bool:
+    redis = await get_redis_client()
+    if redis is None:
+        raise RuntimeError("Redis client unavailable for Worker registration ACK")
+    store = LeaseStore(redis, namespace=redis_namespace())
+    return await WorkerLeaseLifecycleFence(redis, store).enable_registration(worker_id)
 
 
 async def _validate_install_key(

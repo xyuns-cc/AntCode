@@ -170,6 +170,7 @@ def test_install_config_rejects_missing_or_mutable_source_ref() -> None:
         WORKER_INSTALL_SOURCE_URL="https://github.com/xyuns-cc/AntCode.git",
         WORKER_INSTALL_SOURCE_REF="main",
         WORKER_INSTALL_GATEWAY_TLS=True,
+        WORKER_INSTALL_CONFIG_REQUIRED=False,
         WORKER_INSTALL_UV_VERSION="0.8.17",
         GATEWAY_HOST="gateway.example.com",
         GATEWAY_PORT=50051,
@@ -184,6 +185,7 @@ def test_install_config_rejects_cleartext_remote_api() -> None:
         WORKER_INSTALL_SOURCE_URL="https://github.com/xyuns-cc/AntCode.git",
         WORKER_INSTALL_SOURCE_REF=PINNED_REF,
         WORKER_INSTALL_GATEWAY_TLS=False,
+        WORKER_INSTALL_CONFIG_REQUIRED=False,
         WORKER_INSTALL_UV_VERSION="0.8.17",
         GATEWAY_HOST="gateway.example.com",
         GATEWAY_PORT=50051,
@@ -192,11 +194,57 @@ def test_install_config_rejects_cleartext_remote_api() -> None:
         load_worker_install_config(settings)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"WORKER_INSTALL_GATEWAY_TLS": False}, "WORKER_INSTALL_GATEWAY_TLS"),
+        ({"GATEWAY_HOST": "gateway.example.com/path"}, "GATEWAY_HOST"),
+        ({"GATEWAY_PORT": 0}, "GATEWAY_PORT"),
+        ({"GATEWAY_PORT": 65536}, "GATEWAY_PORT"),
+    ],
+)
+def test_install_config_rejects_insecure_or_invalid_gateway(overrides, error: str) -> None:
+    values = {
+        "public_api_base_url": "https://control.example.com",
+        "WORKER_INSTALL_SOURCE_URL": "https://github.com/xyuns-cc/AntCode.git",
+        "WORKER_INSTALL_SOURCE_REF": PINNED_REF,
+        "WORKER_INSTALL_GATEWAY_TLS": True,
+        "WORKER_INSTALL_CONFIG_REQUIRED": False,
+        "WORKER_INSTALL_UV_VERSION": "0.8.17",
+        "GATEWAY_HOST": "gateway.example.com",
+        "GATEWAY_PORT": 50051,
+    }
+    values.update(overrides)
+
+    with pytest.raises(WorkerInstallerConfigurationError, match=error):
+        load_worker_install_config(SimpleNamespace(**values))
+
+
+def test_required_install_config_rejects_loopback_http_api() -> None:
+    settings = SimpleNamespace(
+        public_api_base_url="http://127.0.0.1:8000",
+        WORKER_INSTALL_SOURCE_URL="https://github.com/xyuns-cc/AntCode.git",
+        WORKER_INSTALL_SOURCE_REF=PINNED_REF,
+        WORKER_INSTALL_GATEWAY_TLS=True,
+        WORKER_INSTALL_CONFIG_REQUIRED=True,
+        WORKER_INSTALL_UV_VERSION="0.8.17",
+        GATEWAY_HOST="gateway.example.com",
+        GATEWAY_PORT=50051,
+    )
+
+    with pytest.raises(WorkerInstallerConfigurationError, match="HTTPS API_BASE_URL"):
+        load_worker_install_config(settings)
+
+
 @pytest.mark.asyncio
 async def test_generate_key_fails_before_persisting_when_distribution_is_unconfigured(monkeypatch) -> None:
-    monkeypatch.setattr(User, "get_or_none", AsyncMock(return_value=SimpleNamespace(is_admin=True)))
+    monkeypatch.setattr(
+        User,
+        "get_or_none",
+        AsyncMock(return_value=SimpleNamespace(is_active=True, is_admin=True)),
+    )
     create_key = AsyncMock()
-    monkeypatch.setattr(WorkerInstallKey, "create_install_key", create_key)
+    monkeypatch.setattr(WorkerInstallKey, "persist_install_key", create_key)
     error = WorkerInstallerConfigurationError("WORKER_INSTALL_SOURCE_URL 缺失")
 
     def fail_config(_settings):

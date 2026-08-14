@@ -183,8 +183,7 @@ class AntCodeDedupPipeline:
             try:
                 await self._redis.expire(key, self._ttl_seconds)
             except Exception as exc:
-                # TTL 续期失败不影响本次 item，只是可能提前过期，忽略即可
-                logger.debug(f"dedup EXPIRE 失败 (忽略): {exc}")
+                raise RuntimeError(f"dedup TTL 续期失败: key={key}") from exc
 
         return item
 
@@ -195,16 +194,10 @@ class AntCodeDedupPipeline:
             f"AntCodeDedupPipeline 结束: checked={self._checked_count} "
             f"hit={self._hit_count} new={self._checked_count - self._hit_count}"
         )
-        try:
-            spider.crawler.stats.set_value("antcode/dedup_checked", self._checked_count)
-            spider.crawler.stats.set_value("antcode/dedup_hit", self._hit_count)
-        except Exception:
-            pass
+        spider.crawler.stats.set_value("antcode/dedup_checked", self._checked_count)
+        spider.crawler.stats.set_value("antcode/dedup_hit", self._hit_count)
         if self._redis is not None:
-            try:
-                await self._redis.aclose()
-            except Exception:
-                pass
+            await self._redis.aclose()
 
     # ------------------------------------------------------------------
     # 内部

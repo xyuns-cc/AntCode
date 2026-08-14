@@ -11,6 +11,7 @@ from pathlib import Path
 from antcode_core.common.log_limits import (
     DEFAULT_LOG_MAX_BATCH_BYTES,
     DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
+    LogBatchLimits,
     positive_env_int,
 )
 
@@ -124,6 +125,12 @@ class GatewayConfig:
 
     # Redis 配置（用于 Streams 读取）
     redis_url: str = field(default_factory=lambda: _required_env("REDIS_URL"))
+
+    def __post_init__(self) -> None:
+        LogBatchLimits(
+            max_batch_bytes=self.log_max_batch_bytes,
+            max_entry_content_bytes=self.log_max_entry_content_bytes,
+        )
 
     @property
     def server_options(self) -> list[tuple]:

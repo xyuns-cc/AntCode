@@ -8,6 +8,7 @@ from typing import Any
 
 from tortoise import fields
 
+from antcode_core.common.error_message_field import PersistedErrorMessageField
 from antcode_core.domain.models.base import BaseModel, generate_public_id
 from antcode_core.domain.models.enums import (
     DispatchStatus,
@@ -22,11 +23,15 @@ class TaskRun(BaseModel):
     表示一次任务执行的完整记录，包含分发状态、运行状态和执行结果。
     """
 
-    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id, db_index=True)
+    public_id = fields.CharField(max_length=32, unique=True, default=generate_public_id)
     task_id = fields.BigIntField()
 
     # 执行标识
     run_id = fields.CharField(max_length=64, unique=True)
+    scheduler_fencing_token = fields.BigIntField(
+        null=True,
+        description="创建或接管该 run 的 Master 调度任期 token",
+    )
 
     # 时间信息
     start_time = fields.DatetimeField(null=True)
@@ -39,10 +44,18 @@ class TaskRun(BaseModel):
     status = fields.CharEnumField(TaskStatus)
     dispatch_updated_at = fields.DatetimeField(null=True)
     runtime_updated_at = fields.DatetimeField(null=True)
+    cancel_requested_at = fields.DatetimeField(
+        null=True,
+        description="已分配执行的取消请求时间；终态仍由 Worker 结果写入",
+    )
+    cancel_requested_by = fields.BigIntField(
+        null=True,
+        description="取消请求用户 ID；系统取消为空",
+    )
 
     # 执行结果
     exit_code = fields.IntField(null=True)
-    error_message = fields.TextField(null=True)
+    error_message = PersistedErrorMessageField(null=True)
     retry_count = fields.IntField(default=0)
 
     result_data: fields.JSONField[dict[str, Any] | None] = fields.JSONField(null=True)
@@ -93,7 +106,6 @@ class TaskRun(BaseModel):
             ("task_id", "status"),
             ("task_id", "start_time"),
             ("status", "start_time"),
-            ("public_id",),
             ("worker_id",),
             ("lease_id",),
             ("worker_id", "lease_id", "status"),

@@ -78,7 +78,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: {
-            core: ['react', 'react-dom', 'react-router-dom', 'zustand', 'immer'],
+            core: ['react', 'react-dom', 'react-router', 'zustand', 'immer'],
             antd: ['antd'],
             icons: ['@ant-design/icons'],
             charts: ['chart.js', 'react-chartjs-2', 'chartjs-plugin-zoom'],
@@ -113,7 +113,7 @@ export default defineConfig(({ mode }) => {
       include: [
         'react',
         'react-dom',
-        'react-router-dom',
+        'react-router',
         'antd',
         '@ant-design/icons',
         'axios',

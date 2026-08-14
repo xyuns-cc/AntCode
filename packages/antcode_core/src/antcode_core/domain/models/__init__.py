@@ -68,6 +68,7 @@ from antcode_core.domain.models.enums import (
     TaskStatus,
     TaskType,
     # Worker 节点相关
+    WorkerPermission,
     WorkerStatus,
 )
 from antcode_core.domain.models.git_credential import GitCredential
@@ -95,6 +96,7 @@ from antcode_core.domain.models.runtime import (
     ProjectRuntimeBinding,
     Runtime,
 )
+from antcode_core.domain.models.scheduler_authority import SchedulerAuthority
 from antcode_core.domain.models.scheduler_outbox import SchedulerOutbox
 
 # 系统配置模型
@@ -121,6 +123,7 @@ from antcode_core.domain.models.worker import (
 
 # Worker 安装 Key 模型
 from antcode_core.domain.models.worker_install_key import WorkerInstallKey
+from antcode_core.domain.models.worker_project import WorkerProject, WorkerProjectFile
 
 __all__ = [
     # 基础模型
@@ -144,11 +147,13 @@ __all__ = [
     "ExecutionStrategy",
     "RuntimeScope",
     "RuntimeLocation",
+    "WorkerPermission",
     "WorkerStatus",
     "AuditAction",
     "BatchStatus",
     "Priority",
     "SchedulerOutbox",
+    "SchedulerAuthority",
     # 用户模型
     "User",
     "UserRole",
@@ -175,6 +180,9 @@ __all__ = [
     "UserWorkerPermission",
     # Worker 安装 Key 模型
     "WorkerInstallKey",
+    # Worker 项目同步模型
+    "WorkerProject",
+    "WorkerProjectFile",
     # 爬取批次模型
     "CrawlBatch",
     "CrawlTaskStatus",

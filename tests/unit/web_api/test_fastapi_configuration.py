@@ -24,4 +24,6 @@ def test_default_error_responses_are_registered():
 
     assert "401" in responses
     assert "403" in responses
+    assert "422" in responses
+    assert responses["422"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/ErrorResponse"}
     assert "500" in responses

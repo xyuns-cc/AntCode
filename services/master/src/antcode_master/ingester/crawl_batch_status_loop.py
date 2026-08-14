@@ -132,18 +132,11 @@ class CrawlBatchStatusLoop:
         return {row.id: row.public_id for row in rows}
 
     async def _fetch_batch_stats(self, batch_ids: list[str]) -> dict[str, dict[str, int]]:
-        """一次拉出所有 batch 的 run 状态计数。
-
-        Returns:
-            ``{batch_id: {total, success, failed, cancelled, active}}``
-            没有任何 run 的 batch 不会出现在结果里（原 matched=[] 分支照旧
-            走空批次超时兜底）。
-        """
+        """一次拉出所有 batch 的 run 状态计数；无 run 的 batch 不返回。"""
         if not batch_ids:
             return {}
         from tortoise import connections
 
-        # `= ANY($1)` 让 asyncpg 用数组参数，效率高于 IN 展开
         sql = f"""
             SELECT
                 result_data->>'crawl_batch_id' AS batch_id,
@@ -151,7 +144,10 @@ class CrawlBatchStatusLoop:
                 COUNT(*) FILTER (WHERE status = '{_SUCCESS_STR}') AS success,
                 COUNT(*) FILTER (WHERE status IN {_FAILED_LIKE_STR}) AS failed,
                 COUNT(*) FILTER (WHERE status = '{_CANCELLED_STR}') AS cancelled,
-                COUNT(*) FILTER (WHERE status NOT IN {_TERMINAL_STR}) AS active
+                COUNT(*) FILTER (WHERE status NOT IN {_TERMINAL_STR}) AS active,
+                COUNT(DISTINCT worker_id) FILTER (
+                    WHERE status NOT IN {_TERMINAL_STR} AND worker_id IS NOT NULL
+                ) AS active_workers
             FROM task_executions
             WHERE result_data->>'crawl_batch_id' = ANY($1)
             GROUP BY result_data->>'crawl_batch_id'
@@ -169,6 +165,7 @@ class CrawlBatchStatusLoop:
                 "failed": int(row.get("failed", 0)),
                 "cancelled": int(row.get("cancelled", 0)),
                 "active": int(row.get("active", 0)),
+                "active_workers": int(row.get("active_workers", 0)),
             }
         return out
 
@@ -296,6 +293,7 @@ class CrawlBatchStatusLoop:
             completed_urls=completed,
             failed_urls=failed,
             pending_urls=pending,
+            active_workers=stat.get("active_workers", 0),
         )
 
     async def _cas_terminate(

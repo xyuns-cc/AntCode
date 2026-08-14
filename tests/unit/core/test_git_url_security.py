@@ -24,6 +24,34 @@ def test_file_git_target_is_rejected_without_dns() -> None:
         git_url_security.validate_git_url("file:///tmp/e2e-repo")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:token@example.com/repo.git",
+        "https://token@example.com/repo.git",
+        "ssh://git:password@example.com/repo.git",
+    ],
+)
+def test_embedded_git_credentials_are_rejected_without_dns(monkeypatch, url: str) -> None:
+    def unexpected_dns(*_args, **_kwargs):
+        pytest.fail("credential-bearing URL must be rejected before DNS resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unexpected_dns)
+
+    with pytest.raises(ValueError, match="访问令牌|密码"):
+        git_url_security.validate_git_url(url)
+
+
+def test_ssh_username_without_password_remains_supported(monkeypatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+
+    assert git_url_security.validate_git_url("ssh://git@example.com/repo.git") == "ssh://git@example.com/repo.git"
+
+
 def test_cgnat_shared_address_is_rejected() -> None:
     # 100.64.0.0/10 是 CGNAT/共享地址(含阿里云 metadata 邻域),
     # is_private=False 但绝非公网可路由目标。

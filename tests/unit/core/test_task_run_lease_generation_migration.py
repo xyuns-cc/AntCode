@@ -17,15 +17,18 @@ def test_generation_cutoff_column_fits_maximum_redis_stream_id() -> None:
     assert f"log_valid_through_id VARCHAR({MAX_STREAM_ID_LENGTH}) NULL" in migration
 
 
-def test_generation_migration_is_atomic_and_rejects_incompatible_table() -> None:
+def test_generation_schema_is_atomic_and_index_is_created_online() -> None:
     migration = MIGRATION.read_text(encoding="utf-8")
 
     assert migration.startswith("BEGIN;")
-    assert migration.rstrip().endswith("COMMIT;")
+    commit_position = migration.index("COMMIT;")
+    index_position = migration.index("CREATE INDEX CONCURRENTLY")
+    assert commit_position < index_position
     assert "required_columns <> 8 OR invalid_columns > 0" in migration
     assert "RAISE EXCEPTION" in migration
     assert "pg_get_constraintdef" in migration
-    assert "pg_get_indexdef" in migration
+    assert "index_row.indisready" in migration
+    assert "table_class.relname = 'task_run_lease_generations'" in migration
 
 
 def test_generation_table_is_required_and_documented_for_upgrade() -> None:
