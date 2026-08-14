@@ -52,8 +52,8 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=6.0.0",
     "hypothesis>=6.100.0",
-    # 静态检查 & 安全扫描：CI (.github/workflows/ci.yml) 里 `uv run ruff/mypy/bandit/pip-audit`
-    # 直接依赖这里；缺任何一个,uv sync --dev 就装不上,PR 到 lint step 才炸。
+    # 静态检查 & 安全扫描：`make check` / `make audit-python` 里 `uv run ruff/mypy/bandit/pip-audit`
+    # 直接依赖这里；缺任何一个,uv sync --dev 就装不上,门禁跑到一半才炸。
     "ruff>=0.7.0",
     "bandit>=1.8.0",
     "mypy>=1.13.0",

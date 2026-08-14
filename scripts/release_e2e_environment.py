@@ -1,9 +1,9 @@
 """Shared ephemeral material for the production-Compose release E2E gates.
 
-CI（`docker-release-e2e.yml`，镜像来自 GHCR release digest）与本地/测试机
-（`infra/docker/run-gateway-e2e.sh`，镜像来自本机构建）共用同一套 PKI、密钥、
-网络布局与 Compose 变量，只有镜像来源与运行端口不同。两条路径必须共享这里的
-实现，否则"测试机验过的画像"与"发布流水线跑的画像"会悄悄分叉。
+仓库没有自动化发布流水线，唯一入口是 `infra/docker/run-gateway-e2e.sh`（镜像来自
+本机构建）。这里集中收敛 PKI、密钥、网络布局与 Compose 变量：如果将来另接一条
+镜像来源不同的发布通道（例如按 registry digest 拉取），它必须复用本模块，否则
+"测试机验过的画像"与"实际发布的画像"会悄悄分叉。
 """
 
 from __future__ import annotations

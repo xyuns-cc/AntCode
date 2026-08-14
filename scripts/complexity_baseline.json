@@ -2906,12 +2906,6 @@
       "value": 1
     },
     {
-      "path": "tests/unit/core/test_ci_dependency_security_contract.py",
-      "function": "test_frontend_lock_uses_only_official_npm_registry",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "tests/unit/core/test_core_complexity_refactors.py",
       "function": "test_alert_config_parsers_preserve_supported_types",
       "rule": "PLR2004",

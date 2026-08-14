@@ -99,12 +99,11 @@ def test_default_check_requires_improvement_to_tighten_baseline(tmp_path, monkey
 def test_complexity_gate_configuration_is_wired_without_directory_bypass():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     per_file_ignores = pyproject["tool"]["ruff"]["lint"]["per-file-ignores"]
 
     assert all("C901" not in ignored for ignored in per_file_ignores.values())
-    assert "make complexity" in workflow
     assert "complexity:\n\tuv run python -m scripts.check_complexity" in makefile
+    assert "check: lint format-check complexity type-check" in makefile
 
 
 def test_committed_baseline_is_exact_and_auditable():

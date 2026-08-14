@@ -1,14 +1,7 @@
-import re
 import subprocess
 from pathlib import Path
-from urllib.parse import urlsplit
-
-import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
-SECURITY_PATH = ROOT / ".github" / "workflows" / "security-scan.yml"
-WORKFLOW_PATHS = tuple((ROOT / ".github" / "workflows").glob("*.yml"))
 GITLEAKS_IGNORE_PATH = ROOT / ".gitleaksignore"
 IGNORE_PATHS = (
     ROOT / ".gitignore",
@@ -50,93 +43,6 @@ REQUIRED_CREDENTIAL_PATTERNS = frozenset(
         "*.tfvars",
     }
 )
-
-
-def _workflow(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _step(job: dict, name: str) -> dict:
-    return next(step for step in job["steps"] if step.get("name") == name)
-
-
-def test_security_workflow_scans_git_history_with_pinned_gitleaks() -> None:
-    job = _workflow(SECURITY_PATH)["jobs"]["gitleaks"]
-    checkout = _step(job, "Checkout full repository history")
-    scanner = _step(job, "Scan committed secrets")
-
-    assert checkout["with"]["fetch-depth"] == 0
-    assert checkout["with"]["persist-credentials"] is False
-    action, revision = scanner["uses"].split("@", maxsplit=1)
-    assert action == "gitleaks/gitleaks-action"
-    assert re.fullmatch(r"[0-9a-f]{40}", revision)
-    assert scanner["env"]["GITLEAKS_VERSION"] == "8.24.3"
-    assert scanner["env"]["GITLEAKS_ENABLE_UPLOAD_ARTIFACT"] == "false"
-
-
-def test_security_workflow_explicitly_scans_current_tree_secrets() -> None:
-    jobs = _workflow(SECURITY_PATH)["jobs"]
-    checkout_steps = [
-        step
-        for job in jobs.values()
-        for step in job["steps"]
-        if str(step.get("uses", "")).startswith("actions/checkout@")
-    ]
-    trivy = _step(jobs["trivy-fs"], "Run Trivy filesystem scan")
-
-    assert checkout_steps
-    assert all(step["with"]["persist-credentials"] is False for step in checkout_steps)
-    assert set(trivy["with"]["scanners"].split(",")) == {"vuln", "secret"}
-
-
-def test_all_workflow_checkouts_disable_credential_persistence() -> None:
-    checkout_steps = [
-        step
-        for path in WORKFLOW_PATHS
-        for job in _workflow(path)["jobs"].values()
-        for step in job.get("steps", ())
-        if str(step.get("uses", "")).startswith("actions/checkout@")
-    ]
-
-    assert checkout_steps
-    assert all(step.get("with", {}).get("persist-credentials") is False for step in checkout_steps)
-
-
-def test_ci_does_not_commit_fixed_database_or_admin_passwords() -> None:
-    jobs = _workflow(CI_PATH)["jobs"]
-    backend = jobs["backend-test"]
-    postgres = backend["services"]["postgres"]
-    integration = _step(backend, "Run integration tests")
-    backend_secrets = _step(backend, "Generate backend test secrets")["run"]
-    generate = _step(jobs["e2e"], "Generate ephemeral stack secrets")["run"]
-
-    assert postgres["env"]["POSTGRES_PASSWORD"] == "${{ github.run_id }}"
-    assert backend["env"]["PGPASSWORD"] == "${{ github.run_id }}"
-    database_urls = (
-        backend["env"]["DATABASE_URL"],
-        integration["env"]["DATABASE_URL"],
-        integration["env"]["TEST_DATABASE_URL"],
-        jobs["windows-artifact-security"]["env"]["DATABASE_URL"],
-    )
-    assert all(urlsplit(str(url)).password == "${{ github.run_id }}" for url in database_urls)
-    assert "env" not in _step(backend, "Prepare integration databases")
-    assert 'jwt_secret="$(openssl rand -hex 32)"' in backend_secrets
-    assert 'encryption_key="$(openssl rand -hex 32)"' in backend_secrets
-    assert 'echo "::add-mask::$secret"' in backend_secrets
-    assert 'admin_password="$(openssl rand -base64 24' in generate
-    assert 'worker_key="$(openssl rand -hex 32)"' in generate
-    assert 'echo "ANTCODE_WORKER_KEY=$worker_key"' in generate
-    for variable in (
-        "pg_password",
-        "redis_password",
-        "jwt_secret",
-        "encryption_key",
-        "encryption_salt",
-        "admin_password",
-        "worker_key",
-    ):
-        assert f'"${variable}"' in generate
-    assert 'echo "::add-mask::$secret"' in generate
 
 
 def test_git_and_docker_contexts_ignore_credential_files() -> None:

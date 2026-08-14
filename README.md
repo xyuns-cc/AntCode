@@ -1,8 +1,5 @@
 # AntCode
 
-[![CI](https://github.com/xyuns-cc/AntCode/actions/workflows/ci.yml/badge.svg)](https://github.com/xyuns-cc/AntCode/actions/workflows/ci.yml)
-[![Docker Build](https://github.com/xyuns-cc/AntCode/actions/workflows/docker-build.yml/badge.svg)](https://github.com/xyuns-cc/AntCode/actions/workflows/docker-build.yml)
-
 **分布式任务调度与执行平台，专为规则爬虫、脚本任务、文件处理场景打造。**
 
 控制面与执行面解耦：Master 负责调度和状态收敛，Worker 负责隔离执行，Web API 负责用户入口，Gateway 负责跨网络接入。全链路可观测（Prometheus + SSE 实时日志），支持内网直连 Redis 和公网 gRPC Gateway 两种传输模式。

@@ -156,9 +156,12 @@ Redis、控制面数据卷或服务端密钥，仅通过 mTLS Gateway 和公网 
 `infra/docker/docker-compose.prod.yml`，该文件是完整启动依赖图，不再是省略
 frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 
-正式镜像只能由受保护的 `.github/workflows/ci.yml` 调用发布工作流，在扫描、
-SBOM/provenance、精确 digest 签名和完整发布集合校验全部通过后发布。`make
-docker-buildx` 仅在 `build/docker`（或 `BUILDX_OUTPUT_DIR`）生成本地多架构 OCI
+**本仓库不再包含任何自动化发布流水线。** 正式镜像必须在受控发布机上人工完成扫描、
+SBOM/provenance、精确 digest 签名和完整发布集合校验后才可推送；上线前的验证入口是
+`infra/docker/verify-production-images.sh`（见下文「部署前镜像验证」），它按
+`COSIGN_SERVICE_CERTIFICATE_IDENTITY` / `COSIGN_RELEASE_CERTIFICATE_IDENTITY`
+校验签名身份，这两个值由**实际执行签名的发布通道**决定，仓库本身不再提供该通道。
+`make docker-buildx` 仅在 `build/docker`（或 `BUILDX_OUTPUT_DIR`）生成本地多架构 OCI
 归档，不登录 registry、不推送镜像，也不能作为生产发布入口；传入旧的
 `BUILDX_REGISTRY`/`BUILDX_TAG` 参数会显式失败，避免旧脚本误报发布成功。
 

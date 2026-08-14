@@ -34,10 +34,3 @@ def test_master_does_not_install_asyncio_backport() -> None:
 
     assert not any(value.lower().startswith("asyncio") for value in dependencies)
     assert '\nname = "asyncio"\n' not in lock_text
-
-
-def test_ci_rejects_stale_generated_protocol_artifacts() -> None:
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-
-    assert "uv run python scripts/generate_proto.py" in workflow
-    assert "git diff --exit-code -- contracts/proto packages/antcode_contracts/src/antcode_contracts" in workflow

@@ -2,10 +2,11 @@
 #
 # 生产 Gateway 画像的可重复 E2E。
 #
-# 与 `docker-release-e2e.yml`（发布流水线）跑的是同一套 Compose 拓扑、同一套
-# PKI / 密钥生成实现（scripts/release_e2e_environment.py）、同一个编排器
-# （scripts/release_e2e_orchestrator.py），唯一差别是五个应用镜像来自本机构建
-# 而不是 GHCR 上的 release digest artifacts——测试机拿不到那份产物。
+# 仓库没有自动化发布流水线，这个脚本就是生产画像 E2E 的**唯一**入口：同一套
+# Compose 拓扑（docker-compose.prod*.yml）、同一套 PKI / 密钥生成实现
+# （scripts/release_e2e_environment.py）、同一个编排器
+# （scripts/release_e2e_orchestrator.py），五个应用镜像来自本机构建。
+# 正式发布前必须在受控发布机上跑通它，见 docs/release-runbook.md 第 0 节。
 #
 # 覆盖：生成 mTLS PKI -> 起生产 Gateway 画像 -> 安装 Key 注册 -> 按分配到的
 # worker_id 重签客户端证书 -> mTLS 连 Gateway -> 初始 Lease -> 心跳 -> 控制台

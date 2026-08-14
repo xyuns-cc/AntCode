@@ -17,8 +17,6 @@ DOCKERFILES = (
     ROOT / "infra/docker/Dockerfile.test",
     ROOT / "web/antcode-frontend/Dockerfile",
 )
-WORKFLOWS = tuple((ROOT / ".github/workflows").glob("*.yml"))
-ACTION_SHA_PATTERN = re.compile(r"^[^\s@]+@[0-9a-f]{40}$")
 CURL_PIPE_SHELL_PATTERN = re.compile(r"curl[^\n]*\|\s*(?:ba)?sh\b")
 UV_VERSION = "0.8.17"
 UV_IMAGE_DIGEST = "e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1"
@@ -147,8 +145,8 @@ def test_test_image_context_includes_tests_and_workspace_readmes():
 def test_test_image_contains_cross_runtime_test_dependencies():
     dockerfile = _read(ROOT / "infra/docker/Dockerfile.test")
 
-    # jq: tests/contracts/test_release_supply_chain.py 真跑 workflow 里抽出的 jq 过滤器，
-    # 缺它整条发布供应链契约在容器里必然 FileNotFoundError。
+    # jq: infra/docker/verify-production-images.sh 与 deploy-production.sh 解析 compose
+    # config 输出全靠它，缺它发布镜像校验在容器里必然失败。
     for package in ("jq", "nodejs", "postgresql-client"):
         assert package in dockerfile
 
@@ -271,17 +269,6 @@ def test_gateway_health_dependency_is_declared_not_installed_ad_hoc():
     assert "grpc-health-probe/releases/download" not in dockerfile
 
 
-def test_external_actions_and_runner_versions_are_pinned():
-    for path in WORKFLOWS:
-        workflow = _read(path)
-        assert "ubuntu-latest" not in workflow
-        assert 'version: "latest"' not in workflow
-        for line in workflow.splitlines():
-            stripped = line.strip()
-            if not stripped.startswith("uses: "):
-                continue
-            reference = stripped.removeprefix("uses: ").split(" #", maxsplit=1)[0]
-            assert reference.startswith("./") or ACTION_SHA_PATTERN.fullmatch(reference), (
-                path,
-                reference,
-            )
+def test_web_api_container_healthchecks_use_readiness():
+    assert "/api/v1/health/ready" in _read(ROOT / "infra/docker/Dockerfile.web_api")
+    assert "/api/v1/health/ready" in _read(COMPOSE_PATH)

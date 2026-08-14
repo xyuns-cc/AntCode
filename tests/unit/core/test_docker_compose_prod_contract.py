@@ -234,14 +234,6 @@ def test_production_images_are_site_supplied_exact_references() -> None:
         assert "build" not in service
 
 
-def test_release_tags_must_belong_to_main_history() -> None:
-    workflow = Path(".github/workflows/docker-build.yml").read_text(encoding="utf-8")
-
-    assert "fetch-depth: 0" in workflow
-    assert "git merge-base --is-ancestor" in workflow
-    assert '"refs/remotes/origin/main"' in workflow
-
-
 def test_makefile_docker_targets_select_development_compose() -> None:
     makefile = Path("Makefile").read_text(encoding="utf-8")
     expected = "docker compose -f infra/docker/docker-compose.dev.yml"
@@ -257,7 +249,6 @@ def test_makefile_buildx_creates_only_local_oci_archives() -> None:
     assert "--platform linux/amd64,linux/arm64" in buildx
     assert "BUILDX_OUTPUT_DIR" in buildx
     assert '--output "type=oci,dest=' in buildx
-    assert ".github/workflows/ci.yml" in buildx
     assert "--push" not in makefile
     assert "docker push" not in makefile
     assert "imagetools create" not in makefile
