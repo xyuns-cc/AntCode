@@ -17,26 +17,19 @@ import {
 } from 'antd'
 import { ArrowLeftOutlined, SaveOutlined, CloudServerOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router'
-import { taskService } from '@/services/tasks'
+import { useCreateTask } from '@/hooks/api/useTasks'
 import { projectService } from '@/services/projects'
 import { workerService } from '@/services/workers'
-import type { TaskCreateRequest, ScheduleType, Project, Worker } from '@/types'
+import type { ScheduleType, Project, Worker } from '@/types'
 import { validateCronExpression } from '@/utils/cron'
+import { buildTaskCreateRequest, type TaskCreateFormValues } from './taskCreateRequest'
 
 const { Option, OptGroup } = Select
 const { TextArea } = Input
 
-interface TaskCreateFormValues extends Omit<
-  TaskCreateRequest,
-  'execution_params' | 'environment_vars' | 'scheduled_time'
-> {
-  execution_params?: string
-  environment_vars?: string
-  scheduled_time?: { toISOString: () => string }
-}
-
 const TaskCreate: React.FC = () => {
   const navigate = useNavigate()
+  const { mutateAsync: createTask } = useCreateTask()
   const [searchParams] = useSearchParams()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
@@ -81,30 +74,7 @@ const TaskCreate: React.FC = () => {
   const handleSubmit = async (values: TaskCreateFormValues) => {
     setLoading(true)
     try {
-      const executionStrategy = values.execution_strategy || undefined
-      const specifiedWorkerId =
-        executionStrategy === 'specified' ? values.specified_worker_id : undefined
-
-      const taskData: TaskCreateRequest = {
-        name: values.name,
-        description: values.description,
-        project_id: values.project_id,
-        schedule_type: values.schedule_type,
-        cron_expression: values.cron_expression,
-        interval_seconds: values.interval_seconds,
-        scheduled_time: values.scheduled_time?.toISOString(),
-        max_instances: values.max_instances || 1,
-        timeout_seconds: values.timeout_seconds || 3600,
-        retry_count: values.retry_count || 3,
-        retry_delay: values.retry_delay || 60,
-        execution_params: values.execution_params ? JSON.parse(values.execution_params) : undefined,
-        environment_vars: values.environment_vars ? JSON.parse(values.environment_vars) : undefined,
-        is_active: values.is_active !== false,
-        execution_strategy: executionStrategy,
-        specified_worker_id: specifiedWorkerId,
-      }
-
-      await taskService.createTask(taskData)
+      await createTask(buildTaskCreateRequest(values))
       navigate('/tasks')
     } catch {
       // 错误提示由拦截器统一处理

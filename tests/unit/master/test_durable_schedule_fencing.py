@@ -86,7 +86,7 @@ async def test_due_scan_recovers_dates_far_beyond_misfire_grace(scheduler_databa
 
 
 @pytest.mark.asyncio
-async def test_due_task_is_deactivated_only_after_run_is_durable(scheduler_database, monkeypatch) -> None:
+async def test_one_time_schedule_closes_only_after_its_run_is_settled(scheduler_database, monkeypatch) -> None:
     await _authority(2)
     task = await _task(scheduled_time=datetime.now(UTC) - timedelta(minutes=5))
     run_id = scheduled_run_id(task)
@@ -104,6 +104,11 @@ async def test_due_task_is_deactivated_only_after_run_is_durable(scheduler_datab
 
     monkeypatch.setattr(service, "_execute_task", create_run)
     await service._durable_schedule.execute_task(task, 2)
+    # run 还在飞行中：槽位不能关闭，否则该 run 失败后的重试会被判目标无效丢弃。
+    assert (await Task.get(id=task.id)).is_active is True
+
+    await TaskRun.filter(run_id=run_id).update(status=TaskStatus.SUCCESS, dispatch_status=DispatchStatus.DISPATCHED)
+    await service._durable_schedule.execute_task(await Task.get(id=task.id), 2)
 
     persisted = await Task.get(id=task.id)
     assert persisted.is_active is False
@@ -144,7 +149,7 @@ async def test_new_leader_takes_over_committed_pre_dispatch_run(scheduler_databa
 
     run = await TaskRun.get(run_id=run_id)
     assert run.scheduler_fencing_token == TAKEOVER_TOKEN
-    assert (await Task.get(id=task.id)).is_active is False
+    assert (await Task.get(id=task.id)).is_active is True
     resume.assert_awaited_once()
 
 

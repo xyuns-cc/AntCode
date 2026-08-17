@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from antcode_core.application.services.scheduler.trigger_identity import (
+    ONE_TIME_SCHEDULE_TYPES,
+    SCHEDULED_RUN_NAMESPACE,
+    scheduled_fire_time,
+    scheduled_run_id,
+)
 from antcode_core.domain.models.enums import DispatchStatus, ScheduleType, TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -16,7 +21,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 from tortoise.expressions import Q
 
-from antcode_master.control.retry_dispatch_recovery import resume_existing_run
+from antcode_master.control.retry_dispatch_recovery import (
+    ACTIVE_RUN_STATUSES,
+    resume_existing_run,
+)
 from antcode_master.control.scheduler_authority import (
     SchedulerAuthorityLost,
     complete_one_time_schedule,
@@ -24,26 +32,10 @@ from antcode_master.control.scheduler_authority import (
 )
 from antcode_master.leader import require_fencing_token
 
-SCHEDULED_RUN_NAMESPACE = uuid.UUID("db1e5b15-55e5-4d4e-94f4-a90c1a44ea9a")
 DUE_TASK_BATCH_SIZE = 100
-ONE_TIME_SCHEDULE_TYPES = (ScheduleType.DATE, ScheduleType.ONCE)
 RECOVERABLE_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.DISPATCHING)
 DURABLE_SCHEDULE_JOB_ID = "__durable_one_time_schedule__"
 DURABLE_SCHEDULE_INTERVAL_SECONDS = 30
-
-
-def scheduled_fire_time(task: Task) -> datetime:
-    fire_time = task.scheduled_time or task.created_at
-    if fire_time is None:
-        raise ValueError(f"一次性任务缺少持久时间锚点: task_id={task.id}")
-    if fire_time.tzinfo is None:
-        return fire_time.replace(tzinfo=UTC)
-    return fire_time.astimezone(UTC)
-
-
-def scheduled_run_id(task: Task) -> str:
-    fire_time = scheduled_fire_time(task).isoformat(timespec="microseconds")
-    return str(uuid.uuid5(SCHEDULED_RUN_NAMESPACE, f"{task.id}:{fire_time}"))
 
 
 def is_recoverable_scheduled_run(execution) -> bool:
@@ -64,6 +56,17 @@ def create_task_trigger(task: Task):
     if task.schedule_type == ScheduleType.ONCE:
         return DateTrigger(run_date=task.scheduled_time or datetime.now())
     raise ValueError(f"不支持的调度类型: {task.schedule_type}")
+
+
+async def one_time_schedule_is_fulfilled(task_id: int) -> bool:
+    """一次性调度是否已彻底兑现：既无活跃 run，也无待兑现的重试意图。
+
+    调度槽位在此之前不得关闭 —— 关闭即 ``is_active=False``，而 retry claim
+    以 ``is_active`` 判定目标有效性，提前关闭会让首次执行失败后的重试全部
+    被判为 ``RetryTargetInvalidError`` 直接丢弃。
+    """
+    unfulfilled = Q(status__in=list(ACTIVE_RUN_STATUSES)) | Q(next_retry_at__isnull=False)
+    return not await TaskRun.filter(unfulfilled, task_id=task_id).exists()
 
 
 async def load_due_tasks_page(now: datetime, after_id: int = 0) -> list[Task]:
@@ -146,35 +149,43 @@ class DurableScheduleRunner:
         return failures
 
     async def execute_task(self, task: Task, token: int) -> None:
+        """把一次性任务的调度槽位推进一步。
+
+        槽位身份是 ``scheduled_run_id``，手动触发（``trigger_idempotency``）
+        取的是同一个身份，因此"槽位已被占用"对两条派发路径都可见：先到者建
+        run，后到者只能观察，绝不会各建一个 run 把任务跑两次。
+        """
         run_id = scheduled_run_id(task)
         execution = await TaskRun.get_or_none(run_id=run_id)
-        accepted = await self._accept(task, execution, token)
-        if accepted is not None:
+        if execution is None or is_recoverable_scheduled_run(execution):
+            await self._accept(task, execution, run_id=run_id, token=token)
+            return
+        if await one_time_schedule_is_fulfilled(task.id):
             await complete_one_time_schedule(task.id, run_id, token)
 
-    async def _accept(self, task: Task, execution: Any, token: int) -> str | None:
-        run_id = scheduled_run_id(task)
+    async def _accept(self, task: Task, execution: Any, *, run_id: str, token: int) -> None:
         if execution is None:
-            return await self._service._execute_task(
+            await self._service._execute_task(
                 task.id,
                 fixed_run_id=run_id,
                 scheduler_fencing_token=token,
             )
-        if not is_recoverable_scheduled_run(execution):
-            return run_id
+            return
         owned = await take_over_pre_dispatch_run(run_id, token)
         if owned is None:
             raise RuntimeError(f"一次性 run 无法接管: run_id={run_id}")
-        return await resume_existing_run(self._service, task.id, owned)
+        await resume_existing_run(self._service, task.id, owned)
 
 
 __all__ = [
     "DUE_TASK_BATCH_SIZE",
-    "DurableScheduleRunner",
     "ONE_TIME_SCHEDULE_TYPES",
+    "SCHEDULED_RUN_NAMESPACE",
+    "DurableScheduleRunner",
     "create_task_trigger",
     "is_recoverable_scheduled_run",
     "load_due_tasks_page",
+    "one_time_schedule_is_fulfilled",
     "scheduled_fire_time",
     "scheduled_run_id",
 ]

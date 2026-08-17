@@ -18,6 +18,7 @@ import {
   message,
 } from 'antd'
 import { ArrowLeftOutlined, SaveOutlined } from '@ant-design/icons'
+import { useUpdateTask } from '@/hooks/api/useTasks'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
 import Logger from '@/utils/logger'
@@ -30,6 +31,7 @@ import {
   type TaskScheduleFormValues,
 } from './taskScheduleUpdate'
 import TaskScheduleField from './components/TaskScheduleField'
+import { parseExecutionParams, parseEnvironmentVars } from './taskJsonFields'
 
 const { Title } = Typography
 const { Option } = Select
@@ -52,6 +54,7 @@ const TaskEdit: React.FC = () => {
 
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { mutateAsync: updateTask } = useUpdateTask()
   const { isAuthenticated, loading: authLoading } = useAuth()
   const [form] = Form.useForm()
   const [task, setTask] = useState<Task | null>(null)
@@ -128,42 +131,16 @@ const TaskEdit: React.FC = () => {
 
     setSubmitting(true)
     try {
-      let executionParams: Record<string, unknown> | undefined
-      if (values.execution_params) {
-        try {
-          const parsed = JSON.parse(values.execution_params) as unknown
-          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            message.error('执行参数必须是 JSON 对象')
-            return
-          }
-          executionParams = parsed as Record<string, unknown>
-        } catch {
-          message.error('执行参数 JSON 格式错误')
-          return
-        }
+      const executionParams = parseExecutionParams(values.execution_params)
+      if (!executionParams.ok) {
+        message.error(executionParams.error)
+        return
       }
 
-      let environmentVars: Record<string, string> | undefined
-      if (values.environment_vars) {
-        try {
-          const parsed = JSON.parse(values.environment_vars) as unknown
-          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            message.error('环境变量必须是 JSON 对象')
-            return
-          }
-          const map: Record<string, string> = {}
-          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-            if (typeof v !== 'string') {
-              message.error(`环境变量 ${k} 的值必须是字符串`)
-              return
-            }
-            map[k] = v
-          }
-          environmentVars = map
-        } catch {
-          message.error('环境变量 JSON 格式错误')
-          return
-        }
+      const environmentVars = parseEnvironmentVars(values.environment_vars)
+      if (!environmentVars.ok) {
+        message.error(environmentVars.error)
+        return
       }
 
       const updateData: TaskUpdateRequest = {
@@ -175,11 +152,11 @@ const TaskEdit: React.FC = () => {
         retry_count: values.retry_count,
         retry_delay: values.retry_delay,
         is_active: values.is_active,
-        execution_params: executionParams,
-        environment_vars: environmentVars,
+        execution_params: executionParams.value,
+        environment_vars: environmentVars.value,
       }
 
-      await taskService.updateTask(id, updateData)
+      await updateTask({ id, payload: updateData })
       navigate(`/tasks/${id}`)
     } catch {
       // 通知由拦截器统一处理

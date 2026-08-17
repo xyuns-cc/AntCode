@@ -4187,7 +4187,7 @@
       "path": "web/antcode-frontend/src/pages/Tasks/TaskCreate.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 460
+      "value": 430
     },
     {
       "path": "web/antcode-frontend/src/pages/Tasks/TaskDetail.tsx",
@@ -4199,7 +4199,7 @@
       "path": "web/antcode-frontend/src/pages/Tasks/TaskEdit.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 387
+      "value": 364
     },
     {
       "path": "web/antcode-frontend/src/pages/Tasks/index.tsx",

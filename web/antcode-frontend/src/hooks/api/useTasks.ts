@@ -1,7 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
-import type { TaskListParams, TaskListResponse, Project } from '@/types'
+import type {
+  TaskListParams,
+  TaskListResponse,
+  Project,
+  TaskCreateRequest,
+  TaskUpdateRequest,
+} from '@/types'
 
 export interface UseTasksParams {
   page: number
@@ -47,10 +53,34 @@ export const useProjectsQuery = (workerId?: string, enabled: boolean = true) => 
   })
 }
 
-export const useTaskMutations = () => {
+/**
+ * 任务列表查询继承全局 staleTime(30s)。任何写操作后都必须失效 ['tasks']，
+ * 否则 30s 内跳回列表会直接命中旧缓存，新建/修改的结果看不见（真机复现）。
+ */
+const useInvalidateTasks = () => {
   const queryClient = useQueryClient()
+  return () => queryClient.invalidateQueries({ queryKey: ['tasks'] })
+}
 
-  const invalidateTasks = () => queryClient.invalidateQueries({ queryKey: ['tasks'] })
+export const useCreateTask = () => {
+  const invalidateTasks = useInvalidateTasks()
+  return useMutation({
+    mutationFn: (payload: TaskCreateRequest) => taskService.createTask(payload),
+    onSuccess: () => invalidateTasks(),
+  })
+}
+
+export const useUpdateTask = () => {
+  const invalidateTasks = useInvalidateTasks()
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: TaskUpdateRequest }) =>
+      taskService.updateTask(id, payload),
+    onSuccess: () => invalidateTasks(),
+  })
+}
+
+export const useTaskMutations = () => {
+  const invalidateTasks = useInvalidateTasks()
 
   const triggerTask = useMutation({
     mutationFn: (taskId: string) => taskService.triggerTask(taskId),

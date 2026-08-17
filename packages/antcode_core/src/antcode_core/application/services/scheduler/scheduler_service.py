@@ -23,7 +23,7 @@ from antcode_core.application.services.scheduler.schedule_update import (
     TRIGGER_CONFIG_FIELDS,
     normalize_trigger_update,
 )
-from antcode_core.application.services.scheduler.trigger_identity import trigger_run_id
+from antcode_core.application.services.scheduler.trigger_identity import dispatch_run_id
 from antcode_core.domain.models.enums import (
     ProjectType,
     ScheduleType,
@@ -487,7 +487,6 @@ class SchedulerService:
 
     async def pause_task_by_user(self, task_id, user_id):
         """暂停用户任务（支持 public_id）"""
-        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
         task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
@@ -498,7 +497,6 @@ class SchedulerService:
 
     async def resume_task_by_user(self, task_id, user_id):
         """恢复用户任务（支持 public_id）"""
-        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
         task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
 
         if not task:
@@ -509,7 +507,6 @@ class SchedulerService:
 
     async def trigger_task_by_user(self, task_id, user_id):
         """立即触发用户任务（支持 public_id）"""
-        # 使用 QueryHelper 获取任务（自动处理 ID/public_id 和权限检查）
         task = await QueryHelper.get_by_id_or_public_id(Task, task_id, user_id=user_id, check_admin=True)
         if not task:
             return False
@@ -583,10 +580,13 @@ class SchedulerService:
         logger.info(f"任务 {task_id} 已恢复")
 
     async def trigger_task(self, task_id):
-        """立即触发任务：run_id 由 outbox 事件 public_id 派生，保证幂等。"""
+        """立即触发任务：run_id 走 ``dispatch_run_id``，与 Master 派发侧同一身份。"""
+        task = await Task.get_or_none(id=task_id)
+        if task is None:
+            raise ValueError(f"触发目标任务不存在: task_id={task_id}")
         event = await self._publish_event("task_trigger", task_id)
         logger.info(f"任务 {task_id} 已触发 (事件)")
-        return trigger_run_id(task_id, event.public_id)
+        return dispatch_run_id(task, event.public_id)
 
     def _create_trigger(self, task):
         """构造 Trigger 用于校验调度配置（本进程不会真的挂 Job）。"""
