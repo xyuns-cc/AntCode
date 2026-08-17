@@ -121,6 +121,7 @@ def _copy_execution_contract(
         args=command[1:],
         env=environment,
         cwd=request.context.get("work_dir", plan.cwd),
+        workspace_root=plan.workspace_root,
         run_id=plan.run_id,
         timeout_seconds=plan.timeout_seconds,
         grace_period_seconds=plan.grace_period_seconds,

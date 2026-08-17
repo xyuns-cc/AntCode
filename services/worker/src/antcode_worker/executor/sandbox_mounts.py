@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from antcode_worker.executor.sandbox_executables import executable_mount_roots
-from antcode_worker.executor.sandbox_scope import validate_workspace_scope
+from antcode_worker.executor.sandbox_scope import validate_bundle_root_scope, validate_workspace_scope
 
 _SYSTEM_ROOTS = (Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"), Path("/lib64"))
 _SAFE_ETC_DIRS = (Path("/etc/ssl/certs"), Path("/etc/ca-certificates"), Path("/etc/fonts"))
@@ -45,6 +45,9 @@ class SandboxFilesystemRequest:
     run_id: str | None = None
     runtime_dir: Path | None = None
     runtime_executable: Path | None = None
+    # source bundle 解包根目录；include_paths 共享目录是 work_dir 的兄弟节点，
+    # 只 bind work_dir 会让它们在沙箱里彻底不存在。
+    bundle_root: Path | None = None
 
 
 def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...]:
@@ -65,6 +68,7 @@ def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...
         data_root=data_root,
         runtimes_root=runtimes_root,
     )
+    bundle_root = _optional_bundle_root(request, work_dir=work_dir, data_root=data_root)
     executable = _resolve_executable(request.payload_executable)
     runtime_executable = _optional_executable(request.runtime_executable)
 
@@ -86,8 +90,25 @@ def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...
         _append_read_only(args, path, mounted=mounted)
     for path in _trusted_application_paths(request.plugin_name):
         _append_read_only(args, path, mounted=mounted)
+    if bundle_root is not None:
+        # 顺序有意义：先把整个 bundle 挂成只读，再用可写 bind 覆盖项目子目录，
+        # 于是共享依赖只读、任务产物仍只能写进 work_dir。
+        _append_read_only(args, bundle_root, mounted=mounted)
     _append_writable(args, work_dir)
     return tuple(args)
+
+
+def _optional_bundle_root(
+    request: SandboxFilesystemRequest,
+    *,
+    work_dir: Path,
+    data_root: Path,
+) -> Path | None:
+    if request.bundle_root is None:
+        return None
+    bundle_root = _required_directory(request.bundle_root, label="source bundle 根目录")
+    validate_bundle_root_scope(bundle_root, work_dir=work_dir, data_root=data_root, run_id=request.run_id)
+    return bundle_root
 
 
 def _private_namespace_args() -> list[str]:

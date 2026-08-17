@@ -122,10 +122,8 @@ class TaskPayload:
     # 环境变量（运行时注入）
     env_vars: dict[str, str] = field(default_factory=dict)
 
-    # 输入数据
+    # 输入数据 / 产物配置
     inputs: dict[str, Any] = field(default_factory=dict)
-
-    # 产物配置
     artifact_patterns: list[str] = field(default_factory=list)  # 产物匹配模式
 
 
@@ -152,6 +150,8 @@ class ExecPlan:
     # 环境
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None  # 工作目录
+    # source bundle 解包根目录（cwd 的上级）。沙箱按它暴露 include_paths 共享目录。
+    workspace_root: str | None = None
 
     # 超时
     timeout_seconds: int = 3600

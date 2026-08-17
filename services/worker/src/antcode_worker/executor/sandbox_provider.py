@@ -80,6 +80,7 @@ class BasicSandbox(SandboxProvider):
             "cleanup_dirs": [],
             "plugin_name": exec_plan.plugin_name,
             "run_id": exec_plan.run_id,
+            "workspace_root": exec_plan.workspace_root,
             "rule_egress_socket": rule_bridge_socket(exec_plan),
         }
         if self.config.fs_isolated and not self.config.sandbox_command:
@@ -155,6 +156,7 @@ class BasicSandbox(SandboxProvider):
                 run_id=self._context_string(context, "run_id"),
                 runtime_dir=self._context_path(context, "runtime_path"),
                 runtime_executable=self._context_path(context, "runtime_executable"),
+                bundle_root=self._context_path(context, "workspace_root"),
             )
         )
 

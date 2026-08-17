@@ -828,17 +828,13 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
-            # P1-17: worker 收到任务后必须主动上报一次 status=RUNNING。
-            # 底层复用 transport.report_result 的 task:result Stream 通道,
-            # master.result_loop → task_run_service.update_result 会把
-            # dispatch_status → ACKED, runtime_status → RUNNING(见
-            # STATUS_MAPPING["running"]),同时终态保护不会翻转已终态记录。
-            #
-            # 不上报的话:worker 在准备 runtime / 下载 bundle / 起子进程
-            # 之间任一阶段崩溃,master 侧永远只看到 dispatch_status=DISPATCHED
-            # + runtime_status=NULL,任务永卡在 DISPATCHING 不失败也不补派。
-            # RUNNING 未持久化时不得启动用户进程，否则 reconcile 可能把仍在
-            # 执行的任务判失败并补派，形成双跑。
+            # P1-17: worker 收到任务后必须先主动上报一次 status=RUNNING，复用
+            # transport.report_result 的 task:result Stream 通道；master.result_loop →
+            # task_run_service.update_result 把 dispatch_status → ACKED、runtime_status →
+            # RUNNING(见 STATUS_MAPPING["running"])，终态保护不会翻转已终态记录。不上报则
+            # 准备阶段任一步崩溃后 master 只见 DISPATCHED + runtime_status=NULL，任务永卡
+            # DISPATCHING 不失败也不补派；RUNNING 未持久化就起用户进程还会被 reconcile 判
+            # 失败并补派，形成双跑。
             await self._run_preparation_step(
                 run_id,
                 lambda: self._report_running_start(context, started_at),
@@ -873,10 +869,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                 payload.project_cwd = workspace.project_cwd or workspace.bundle_root or ""
 
             # 准备运行时环境
-            runtime_handle = await self._run_preparation_step(
-                run_id,
-                lambda: self._prepare_runtime(context),
-            )
+            runtime_handle = await self._run_preparation_step(run_id, lambda: self._prepare_runtime(context))
 
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
@@ -890,7 +883,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             else:
                 exec_plan = self._build_fallback_plan(context, payload, runtime_handle)
 
-            exec_plan.run_id = run_id
+            self._stamp_plan_scope(exec_plan, payload, run_id)
 
             # 注入运行时环境变量
             self._apply_runtime_env(exec_plan, context)
@@ -1715,6 +1708,13 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             env_vars=dict(domain_spec.env_vars),
         )
         return await self._runtime_manager.prepare(spec)
+
+    @staticmethod
+    def _stamp_plan_scope(exec_plan: ExecPlan, payload: Any, run_id: str) -> None:
+        """把 run 归属与 source bundle 解包根目录钉到插件产出的执行计划上。"""
+        # include_paths 共享目录落在 bundle 根下、cwd 的兄弟位置，沙箱要挂载它必须知道解包根。
+        exec_plan.run_id = run_id
+        exec_plan.workspace_root = payload.workspace_path or None
 
     def _build_fallback_plan(self, context: RunContext, payload: Any, runtime_handle: Any) -> Any:
         """无插件时的兜底执行计划"""

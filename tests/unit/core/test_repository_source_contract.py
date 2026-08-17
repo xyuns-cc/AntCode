@@ -96,6 +96,18 @@ def test_project_source_subdir_must_be_explicit(subdir):
         path_module.normalize_source_subdir(subdir)
 
 
+@pytest.mark.parametrize("absolute", ["/etc", "/etc/passwd", "//etc", "\\\\etc", " /etc "])
+def test_absolute_paths_are_rejected_instead_of_silently_relativized(absolute):
+    """`strip("/")` 曾把 "/etc" 静默改写成仓库内的 "etc"，绝对路径必须显式报错。"""
+    with pytest.raises(ValueError, match="必须是相对路径"):
+        path_module.normalize_relative_path(absolute, field_name="include_paths")
+
+
+def test_include_paths_reject_absolute_entries():
+    with pytest.raises(ValueError, match="必须是相对路径"):
+        path_module.string_list(["libs/common", "/etc"])
+
+
 def test_repository_scan_detects_candidate_subdirectories(tmp_path):
     repo = tmp_path / "repo"
     (repo / "libs" / "common").mkdir(parents=True)

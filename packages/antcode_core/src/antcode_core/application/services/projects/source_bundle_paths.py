@@ -132,14 +132,16 @@ def list_tar_names(content: bytes) -> list[str]:
 
 
 def normalize_relative_path(path: str | None, *, field_name: str = "路径") -> str:
-    normalized = (path or "").strip().replace("\\", "/").strip("/")
+    trimmed = (path or "").strip().replace("\\", "/")
+    # 绝对路径必须在 strip("/") 之前判：先剥前导斜杠会把 "/etc" 静默改写成仓库内的 "etc"。
+    if trimmed.startswith("/") or Path(trimmed).is_absolute():
+        raise ValueError(f"{field_name}必须是相对路径")
+    normalized = trimmed.strip("/")
     if not normalized or normalized == ".":
         raise ValueError(f"{field_name}不能为空")
     parts = normalized.split("/")
     if ".." in parts or ".git" in parts:
         raise ValueError(f"{field_name}不合法")
-    if Path(normalized).is_absolute():
-        raise ValueError(f"{field_name}必须是相对路径")
     return normalized
 
 
