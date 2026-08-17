@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Web框架
     "fastapi>=0.123.7",
-    "uvicorn[standard]==0.38.0",
+    "uvicorn[standard]==0.52.3",
     "click>=8.3.3",  # 修复 PYSEC-2026-2132 / CVE-2026-7246
     "python-multipart>=0.0.31",
     "starlette>=1.0.1",
