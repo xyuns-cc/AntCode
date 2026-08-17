@@ -1,0 +1,175 @@
+{
+  "description": "POST /api/v1/projects 的 multipart 线格式契约（前后端唯一真源）。",
+  "why": [
+    "两侧此前各自声明编码方式且没有可测绑定：前端把 include_paths 整体 JSON.stringify 成一个表单值，",
+    "后端把它声明为 list[str] 交给 Starlette 按重复键收集，于是 [] 被存成 ['[]']、['libs'] 被存成 ['[\"libs\"]']，",
+    "source bundle 随后对着名为 [] 的目录 resolve_existing_dir 直接 FileNotFoundError——UI 建的每个 Git 项目都跑不了任务。",
+    "编码规则：标量字段一个表单条目；list[str] 字段每个元素一个同名表单条目（HTML 表单的原生列表语义）；",
+    "dependencies/tags 等在后端声明为 str 的字段仍走各自的 JSON / 逗号分隔编码，由 parsed_form 锁定。"
+  ],
+  "consumers": [
+    "web/antcode-frontend/src/services/projectPayloads.contract.test.ts —— 断言 createProjectFormData 产出 form_entries",
+    "tests/unit/web_api/test_project_create_form_wire_contract.py —— 用 form_entries 真发 multipart 请求并断言解析结果"
+  ],
+  "cases": [
+    {
+      "name": "code_project_without_shared_paths",
+      "comment": "UI 默认流程：共享目录留空。include_paths 必须一个表单条目都不出现。",
+      "request": {
+        "name": "wire-contract-code",
+        "type": "code",
+        "description": "git code project",
+        "tags": ["demo", "wire"],
+        "runtime_scope": "private",
+        "python_version": "3.12",
+        "env_location": "worker",
+        "worker_id": "worker-001",
+        "use_existing_env": true,
+        "existing_env_name": "shared-py312",
+        "repository_id": "repo-001",
+        "ref": "main",
+        "subdir": "spiders/news",
+        "include_paths": [],
+        "language": "python",
+        "code_entry_point": "main.py",
+        "documentation": "readme",
+        "dependencies": ["requests"]
+      },
+      "form_entries": [
+        ["name", "wire-contract-code"],
+        ["type", "code"],
+        ["description", "git code project"],
+        ["tags", "demo,wire"],
+        ["runtime_scope", "private"],
+        ["python_version", "3.12"],
+        ["env_location", "worker"],
+        ["worker_id", "worker-001"],
+        ["use_existing_env", "true"],
+        ["existing_env_name", "shared-py312"],
+        ["repository_id", "repo-001"],
+        ["ref", "main"],
+        ["subdir", "spiders/news"],
+        ["language", "python"],
+        ["code_entry_point", "main.py"],
+        ["entry_point", "main.py"],
+        ["documentation", "readme"],
+        ["dependencies", "[\"requests\"]"]
+      ],
+      "parsed_form": {
+        "include_paths": [],
+        "tags": "demo,wire",
+        "dependencies": "[\"requests\"]"
+      },
+      "parsed_create_request": {
+        "include_paths": [],
+        "tags": ["demo", "wire"],
+        "dependencies": ["requests"],
+        "entry_point": "main.py"
+      }
+    },
+    {
+      "name": "code_project_with_shared_paths",
+      "comment": "共享目录非空：每个路径各占一个同名表单条目，顺序保持不变。",
+      "request": {
+        "name": "wire-contract-code-shared",
+        "type": "code",
+        "tags": [],
+        "runtime_scope": "private",
+        "python_version": "3.12",
+        "env_location": "worker",
+        "worker_id": "worker-001",
+        "use_existing_env": false,
+        "env_name": "project-demo",
+        "repository_id": "repo-001",
+        "ref": "release/v1",
+        "subdir": "spiders/news",
+        "include_paths": ["libs/common", "libs/utils"],
+        "language": "python",
+        "code_entry_point": "main.py",
+        "dependencies": []
+      },
+      "form_entries": [
+        ["name", "wire-contract-code-shared"],
+        ["type", "code"],
+        ["tags", ""],
+        ["runtime_scope", "private"],
+        ["python_version", "3.12"],
+        ["env_location", "worker"],
+        ["worker_id", "worker-001"],
+        ["use_existing_env", "false"],
+        ["env_name", "project-demo"],
+        ["repository_id", "repo-001"],
+        ["ref", "release/v1"],
+        ["subdir", "spiders/news"],
+        ["include_paths", "libs/common"],
+        ["include_paths", "libs/utils"],
+        ["language", "python"],
+        ["code_entry_point", "main.py"],
+        ["entry_point", "main.py"],
+        ["dependencies", "[]"]
+      ],
+      "parsed_form": {
+        "include_paths": ["libs/common", "libs/utils"],
+        "tags": "",
+        "dependencies": "[]"
+      },
+      "parsed_create_request": {
+        "include_paths": ["libs/common", "libs/utils"],
+        "tags": [],
+        "dependencies": [],
+        "entry_point": "main.py"
+      }
+    },
+    {
+      "name": "file_project_with_shared_paths",
+      "comment": "文件项目走同一条 appendRepositorySourceFields，编码规则必须完全一致。",
+      "request": {
+        "name": "wire-contract-file",
+        "type": "file",
+        "runtime_scope": "private",
+        "python_version": "3.12",
+        "env_location": "worker",
+        "worker_id": "worker-001",
+        "use_existing_env": false,
+        "repository_id": "repo-002",
+        "ref": "main",
+        "subdir": "jobs/etl",
+        "include_paths": ["libs/common"],
+        "language": "python",
+        "entry_point": "main.py",
+        "runtime_config": { "timeout": 30 },
+        "environment_vars": { "MODE": "test" },
+        "dependencies": ["httpx"]
+      },
+      "form_entries": [
+        ["name", "wire-contract-file"],
+        ["type", "file"],
+        ["runtime_scope", "private"],
+        ["python_version", "3.12"],
+        ["env_location", "worker"],
+        ["worker_id", "worker-001"],
+        ["use_existing_env", "false"],
+        ["repository_id", "repo-002"],
+        ["ref", "main"],
+        ["subdir", "jobs/etl"],
+        ["include_paths", "libs/common"],
+        ["language", "python"],
+        ["entry_point", "main.py"],
+        ["runtime_config", "{\"timeout\":30}"],
+        ["environment_vars", "{\"MODE\":\"test\"}"],
+        ["dependencies", "[\"httpx\"]"]
+      ],
+      "parsed_form": {
+        "include_paths": ["libs/common"],
+        "tags": null,
+        "dependencies": "[\"httpx\"]"
+      },
+      "parsed_create_request": {
+        "include_paths": ["libs/common"],
+        "tags": [],
+        "dependencies": ["httpx"],
+        "entry_point": "main.py"
+      }
+    }
+  ]
+}

@@ -164,6 +164,18 @@ export const useProjectCreateClose = (options: CloseOptions) =>
     })
   }, [options])
 
+/** 创建成功后的收尾：无条件复位并关闭。
+ *
+ * 不能复用 `useProjectCreateClose`——那是「用户主动关闭」路径，会因为表单有值而弹
+ * 「放弃创建？」确认框；提交成功时没有任何东西需要放弃，用户不点确认就永远不复位，
+ * 再次打开抽屉会停在第 2 步并保留上一次的全部输入。
+ */
+export const useProjectCreateComplete = (reset: () => void, onClose: () => void) =>
+  useCallback(() => {
+    reset()
+    onClose()
+  }, [onClose, reset])
+
 interface SubmissionOptions {
   projectType: ProjectType | null
   envConfig: EnvironmentConfig | null

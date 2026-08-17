@@ -88,6 +88,14 @@ def test_project_models_have_no_storage_fallback_switch():
 
 
 def test_sql_migrations_are_postgresql_only_and_idempotent():
+    """每个迁移都必须自带「重复执行安全」的证明，形式取决于它改的是结构还是数据。
+
+    - DDL：``IF (NOT) EXISTS`` 或 pg_catalog 存在性判定。
+    - 纯数据修复：``DO $$`` 块 + ``GET DIAGNOSTICS`` 计数 + ``RAISE EXCEPTION`` 守卫。
+      三者合起来才构成证明——守卫保证脚本成功返回时库里已不存在待修形态，
+      于是二次执行必然零命中；缺了计数就是无账可查的盲改，缺了守卫就会把修不动的
+      残留静默留在库里，等到运行期才炸。
+    """
     migrations = sorted(MIGRATIONS_DIR.glob("*.sql"))
     assert migrations
 
@@ -96,7 +104,8 @@ def test_sql_migrations_are_postgresql_only_and_idempotent():
         assert not any(token in content for token in MYSQL_ONLY_TOKENS)
         has_exists_guard = "IF NOT EXISTS" in content or "IF EXISTS" in content
         has_catalog_guard = "DO $$" in content and "pg_constraint" in content
-        assert has_exists_guard or has_catalog_guard
+        has_data_repair_guard = all(token in content for token in ("DO $$", "GET DIAGNOSTICS", "RAISE EXCEPTION"))
+        assert has_exists_guard or has_catalog_guard or has_data_repair_guard, path
 
 
 def test_current_master_control_modules_replace_legacy_loops_package():

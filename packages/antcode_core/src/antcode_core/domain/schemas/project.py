@@ -59,16 +59,6 @@ def _parse_project_dict_field(value, field_name):
     return value
 
 
-def _parse_project_list_field(value, field_name):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        if not value.strip():
-            return []
-        return JSONParser.parse_list(value, field_name) or []
-    return value
-
-
 class ExtractionRule(BaseModel):
     """提取规则模型"""
 
@@ -231,11 +221,6 @@ class ProjectFileCreateRequest(ProjectCreateRequest):
         """解析环境变量"""
         return _parse_project_dict_field(v, "environment_vars")
 
-    @field_validator("include_paths", mode="before")
-    @classmethod
-    def parse_include_paths(cls, v):
-        return _parse_project_list_field(v, "include_paths")
-
 
 class ProjectRuleCreateRequest(ProjectCreateRequest):
     """规则项目创建请求"""
@@ -334,11 +319,6 @@ class ProjectCodeCreateRequest(ProjectCreateRequest):
     subdir: str = Field(..., max_length=500, description="项目子目录")
     include_paths: list[str] = Field(default_factory=list, description="显式共享路径")
 
-    @field_validator("include_paths", mode="before")
-    @classmethod
-    def parse_include_paths(cls, v):
-        return _parse_project_list_field(v, "include_paths")
-
 
 class ProjectUpdateRequest(BaseModel):
     """项目更新请求"""
@@ -433,12 +413,10 @@ class ProjectCreateFormRequest(BaseModel):
     repository_id: str | None = Field(None, max_length=32, description="Git 仓库 ID")
     ref: str | None = Field(None, max_length=255, description="Git 引用")
     subdir: str | None = Field(None, max_length=500, description="项目子目录")
+    # 唯一的 list 型表单字段：客户端必须按重复同名键逐条发送，禁止再声明 JSON 字符串
+    # 兜底解析——那正是 ['[]'] 这一批脏数据的来源。线格式见
+    # contracts/http/project_create_form.json。
     include_paths: list[str] = Field(default_factory=list, description="显式共享路径")
-
-    @field_validator("include_paths", mode="before")
-    @classmethod
-    def parse_include_paths(cls, v):
-        return _parse_project_list_field(v, "include_paths")
 
     @field_validator("runtime_scope", mode="before")
     @classmethod

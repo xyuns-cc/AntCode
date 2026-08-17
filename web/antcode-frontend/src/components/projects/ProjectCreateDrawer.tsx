@@ -6,6 +6,7 @@ import type { ProjectFormState } from './ProjectCreateDrawerContent'
 import { ProjectCreateBody, ProjectCreateFooter } from './ProjectCreateDrawerContent'
 import {
   useProjectCreateClose,
+  useProjectCreateComplete,
   useProjectCreateFields,
   useProjectCreateSubmission,
   useProjectFormStates,
@@ -74,9 +75,10 @@ const ProjectCreateDrawer: React.FC<ProjectCreateDrawerProps> = memo((props) => 
   const showWorkerError = useCallback(() => message.error('加载 Worker 列表失败'), [message])
   const workerList = useWorkerList(props.open, showWorkerError)
   const handleClose = useProjectCreateClose({ ...fields, onClose: props.onClose })
+  const handleComplete = useProjectCreateComplete(fields.reset, props.onClose)
   const handleSubmit = useProjectCreateSubmission({
     ...fields,
-    onComplete: handleClose,
+    onComplete: handleComplete,
     onSuccess: props.onSuccess,
   })
   return (

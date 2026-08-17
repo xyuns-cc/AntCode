@@ -929,7 +929,7 @@
       "path": "packages/antcode_core/src/antcode_core/domain/schemas/project.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 645
+      "value": 623
     },
     {
       "path": "packages/antcode_core/src/antcode_core/domain/schemas/worker_registration.py",

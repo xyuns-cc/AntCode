@@ -9,7 +9,7 @@ from typing import Any, Generic, TypeVar
 
 from loguru import logger
 
-from antcode_core.common.serialization import from_json
+from antcode_core.common.serialization import try_from_json
 from antcode_core.infrastructure.redis.stream_codec import StreamCodec
 
 T = TypeVar("T")
@@ -71,17 +71,20 @@ def decode_text(value: Any) -> str:
 
 
 def decode_message_data(raw_data: Any) -> dict:
-    """解码消息字段 dict（每字段独立 JSON 反序列化，失败保留原字符串）。"""
+    """解码消息字段 dict（每字段独立探测 JSON，非 JSON 字段保留原字符串）。
+
+    Stream 字段天然双模：结构化字段写成 JSON，标量字段原样写入
+    （``worker-001`` / ISO 时间戳 / 空串 / ``True``）。这里必须用探测式的
+    ``try_from_json``——早先直接调 ``from_json`` 让这条被文档化的预期分支每次
+    任务下发都打 2~4 条 ERROR，噪声随吞吐线性增长并淹没真实反序列化故障。
+    """
     data: dict = {}
     if not isinstance(raw_data, dict):
         return data
     for k, v in raw_data.items():
-        key = decode_text(k)
         value = v.decode("utf-8") if isinstance(v, bytes) else v
-        try:
-            data[key] = from_json(value)
-        except Exception:  # noqa: BLE001 - 非 JSON 字段回退为原值是预期路径
-            data[key] = value
+        matched, parsed = try_from_json(value)
+        data[decode_text(k)] = parsed if matched else value
     return data
 
 

@@ -30,7 +30,8 @@ export interface ProjectCreateRequest {
   repository_id?: string
   ref?: string
   subdir?: string
-  include_paths?: string[] | string
+  // 只接受数组：表单编码按元素逐条 append，字符串会被整条当成一个路径。
+  include_paths?: string[]
   entry_point?: string
   runtime_config?: string | RuntimeConfig
   environment_vars?: string | EnvironmentVars

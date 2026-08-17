@@ -98,11 +98,11 @@ function appendRepositorySourceFields(formData: FormData, data: ProjectCreateReq
   if (data.repository_id) formData.append('repository_id', data.repository_id)
   if (data.ref) formData.append('ref', data.ref)
   if (data.subdir) formData.append('subdir', data.subdir)
-  if (data.include_paths === undefined) return
-  const value = Array.isArray(data.include_paths)
-    ? JSON.stringify(data.include_paths)
-    : data.include_paths
-  formData.append('include_paths', value)
+  // include_paths 是后端唯一的 list[str] 表单字段，Starlette 按「重复同名键」收集列表，
+  // 所以每个路径必须各占一个表单条目。整体 JSON.stringify 会被收成含单个字面量
+  // 元素的列表（[] -> ['[]']），后端随后对着名为 "[]" 的目录打包源码而必然失败。
+  // 线格式由 contracts/http/project_create_form.json 单点定义，两侧各有测试绑定。
+  for (const path of data.include_paths ?? []) formData.append('include_paths', path)
 }
 
 function appendBaseFields(formData: FormData, data: ProjectCreateRequest): void {

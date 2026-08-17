@@ -88,6 +88,28 @@ class Serializer:
             raise SerializationError(f"无法反序列化 JSON: {e}") from e
 
     @staticmethod
+    def try_from_json(data):
+        """
+        探测字符串是否为 JSON，命中才反序列化
+
+        与 ``from_json`` 的分工：``from_json`` 用于"这里必须是 JSON"的场景，
+        解析失败是故障，照常记 ERROR 并抛 ``SerializationError``；本方法用于
+        载荷格式本身就双模的场景（Redis Stream 字段：一部分写成 JSON，
+        另一部分是裸标量如 ``worker-001`` / ISO 时间戳 / 空串），"不是 JSON"
+        是被文档化的预期结果，既不算故障也不该记日志。
+
+        Args:
+            data: 待探测的 JSON 字符串或字节
+
+        Returns:
+            (True, 反序列化结果) 或 (False, None)
+        """
+        try:
+            return True, ujson.loads(data)
+        except (ValueError, TypeError):
+            return False, None
+
+    @staticmethod
     def to_msgpack(obj):
         """
         将对象序列化为 MessagePack 二进制数据
@@ -153,6 +175,11 @@ def to_json(obj, ensure_ascii=False, sort_keys=False, indent=0, default=None):
 def from_json(data):
     """便捷的 JSON 反序列化函数"""
     return Serializer.from_json(data)
+
+
+def try_from_json(data):
+    """便捷的 JSON 探测函数，返回 (是否命中, 反序列化结果)"""
+    return Serializer.try_from_json(data)
 
 
 def to_msgpack(obj):

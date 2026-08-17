@@ -72,6 +72,13 @@ async def test_form_dependency_returns_validated_model():
 
 
 def test_create_form_accepts_repository_source_fields():
+    """include_paths 必须以列表送入——它在 Form 路径下由 Starlette 按重复键收集。
+
+    这里原先传的是 `'["libs/common"]'`，那是直接构造模型时才存在、经 Form 永远不可
+    达的 str 分支；正因为测的是这条假路径，前端把整段 JSON 塞进一个表单值导致的
+    `['[]']` 脏数据一直没被拦住。真实线格式的端到端绑定见
+    tests/unit/web_api/test_project_create_form_wire_contract.py。
+    """
     form = ProjectCreateFormRequest(
         name="File Demo",
         type="file",
@@ -80,7 +87,7 @@ def test_create_form_accepts_repository_source_fields():
         repository_id="repo-001",
         ref="main",
         subdir="spiders/news",
-        include_paths='["libs/common"]',
+        include_paths=["libs/common"],
         entry_point="main.py",
     )
 

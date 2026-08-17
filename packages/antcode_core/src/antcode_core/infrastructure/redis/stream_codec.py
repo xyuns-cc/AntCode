@@ -9,7 +9,7 @@
 
 from typing import Generic, Protocol, TypeVar
 
-from antcode_core.common.serialization import from_json, to_json
+from antcode_core.common.serialization import to_json, try_from_json
 
 # Proto 序列化字节统一存到 'p' 字段，便于 worker/gateway 协同
 PROTO_FIELD = b"p"
@@ -79,14 +79,12 @@ class JsonCodec:
                     out[key] = v
                     continue
             if isinstance(v, str):
-                # 尝试 JSON 反序列化；任何反序列化错误回退到原字符串
-                # (使用宽 try 是因为 ``from_json`` 可能抛 SerializationError /
-                # JSONDecodeError / ValueError / TypeError 等多种异常)
-                try:
-                    out[key] = from_json(v)
+                # 字段双模（JSON / 裸标量），"不是 JSON"是预期结果而非故障：
+                # 用探测式 try_from_json，避免 from_json 为每个标量字段打 ERROR。
+                matched, parsed = try_from_json(v)
+                if matched:
+                    out[key] = parsed
                     continue
-                except Exception:  # noqa: BLE001 - 反序列化回退是预期路径
-                    pass
             out[key] = v
         return out
 
