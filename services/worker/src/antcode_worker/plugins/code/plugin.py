@@ -246,13 +246,10 @@ class CodePlugin(PluginBase):
     # ---------- 通用工具 ----------
 
     def _build_env(self, payload: TaskPayload) -> dict[str, str]:
+        # PYTHONPATH 不在这里写：executor.python_path 是唯一权威构造者，它按
+        # ExecPlan.workspace_root 补 bundle 根，插件写的同名值只会被原样盖掉。
         env = dict(payload.env_vars)
         if payload.workspace_path:
-            pythonpath = env.get("PYTHONPATH", "")
-            if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
-            else:
-                env["PYTHONPATH"] = payload.workspace_path
             # Node 项目：把 workspace/node_modules/.bin 塞到 PATH 前缀
             local_bin = os.path.join(payload.workspace_path, "node_modules", ".bin")
             if os.path.isdir(local_bin):

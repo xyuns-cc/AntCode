@@ -249,7 +249,13 @@ async def test_artifact_fetcher_returns_project_cwd_and_bundle_root(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_code_plugin_runs_from_project_cwd_with_bundle_pythonpath():
+async def test_code_plugin_runs_from_project_cwd_and_leaves_pythonpath_to_the_executor():
+    """插件只负责 cwd；PYTHONPATH 归 executor.python_path 独占。
+
+    插件写的 PYTHONPATH 会被 ProcessExecutor._build_env 原样盖掉，断言它等于
+    断言一个到不了子进程的中间值。子进程侧的真实契约见
+    tests/unit/worker/test_child_process_pythonpath.py。
+    """
     plugin = CodePlugin()
     payload = TaskPayload(
         entry_point="main.py",
@@ -266,7 +272,7 @@ async def test_code_plugin_runs_from_project_cwd_with_bundle_pythonpath():
     plan = await plugin.build_plan(context=context, payload=payload)
 
     assert plan.cwd == "/data/workers/w1/runs/r1/bundle/spiders/news"
-    assert plan.env["PYTHONPATH"].split(":")[0] == "/data/workers/w1/runs/r1/bundle"
+    assert "PYTHONPATH" not in plan.env
 
 
 @pytest.mark.asyncio

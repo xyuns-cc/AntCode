@@ -138,7 +138,9 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
     assert "BASH_ENV" not in sandboxed_plan.env
     assert "ENV" not in sandboxed_plan.env
 
-    # PYTHONPATH 由 Worker 权威构造：首项必须是 runtime.path，后续仅含受信内建包源码根。
+    # PYTHONPATH 由 Worker 权威构造：首项必须是 runtime.path，后续只有受信内建包源码根
+    # 与本 run 的 bundle 根（本例无 bundle）。子进程侧的同一不变量见
+    # test_child_process_pythonpath.py::test_task_injected_pythonpath_never_reaches_the_child。
     python_path = sandboxed_plan.env.get("PYTHONPATH", "").split(os.pathsep)
     assert python_path[0] == runtime_handle.path
     assert "/tmp/evil/py" not in python_path

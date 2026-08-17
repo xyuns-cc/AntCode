@@ -145,14 +145,8 @@ class RenderPlugin(PluginBase):
             template_dir,
         ]
 
-        # 环境变量
+        # 环境变量（PYTHONPATH 由 executor.python_path 唯一权威构造，见 code/plugin.py 注释）
         env = dict(payload.env_vars)
-        if payload.workspace_path:
-            pythonpath = env.get("PYTHONPATH", "")
-            if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
-            else:
-                env["PYTHONPATH"] = payload.workspace_path
 
         # context_data 走 env，保留 repr 语义（json.dumps 已足够安全，env 值不进
         # subprocess argv 也不进 shell）。
@@ -186,14 +180,8 @@ class RenderPlugin(PluginBase):
         args = [payload.entry_point]
         args.extend(payload.args)
 
-        # 环境变量
+        # 环境变量（PYTHONPATH 由 executor.python_path 唯一权威构造，见 code/plugin.py 注释）
         env = dict(payload.env_vars)
-        if payload.workspace_path:
-            pythonpath = env.get("PYTHONPATH", "")
-            if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
-            else:
-                env["PYTHONPATH"] = payload.workspace_path
 
         # 渲染特定环境变量
         if config.get("output_file"):

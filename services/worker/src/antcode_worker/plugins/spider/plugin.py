@@ -137,14 +137,8 @@ class SpiderPlugin(PluginBase):
         # 额外参数
         args.extend(payload.args)
 
-        # 环境变量
+        # 环境变量（PYTHONPATH 由 executor.python_path 唯一权威构造，见 code/plugin.py 注释）
         env = dict(payload.env_vars)
-        if payload.workspace_path:
-            pythonpath = env.get("PYTHONPATH", "")
-            if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
-            else:
-                env["PYTHONPATH"] = payload.workspace_path
 
         cwd = self._get_project_cwd(payload)
 
@@ -175,14 +169,8 @@ class SpiderPlugin(PluginBase):
         args = [payload.entry_point]
         args.extend(payload.args)
 
-        # 环境变量
+        # 环境变量（PYTHONPATH 由 executor.python_path 唯一权威构造，见 code/plugin.py 注释）
         env = dict(payload.env_vars)
-        if payload.workspace_path:
-            pythonpath = env.get("PYTHONPATH", "")
-            if pythonpath:
-                env["PYTHONPATH"] = os.pathsep.join([payload.workspace_path, pythonpath])
-            else:
-                env["PYTHONPATH"] = payload.workspace_path
 
         # 爬虫特定环境变量
         env["SPIDER_LOG_LEVEL"] = config.get("log_level", "INFO")

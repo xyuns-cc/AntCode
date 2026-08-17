@@ -35,12 +35,12 @@ from antcode_worker.executor.concurrency import ExecutionAdmission
 from antcode_worker.executor.output_stream import OutputByteBudget, OutputReadOptions, read_output_stream
 from antcode_worker.executor.process_limits import SandboxLimits, build_preexec_fn, host_max_processes
 from antcode_worker.executor.process_signals import signal_process_group
+from antcode_worker.executor.python_path import authoritative_python_path
 from antcode_worker.executor.resource_sampler import ProcessTreeUsage, sample_process_tree
 from antcode_worker.executor.rule_policy import filter_spider_control_env, is_rule_env_allowed
 
 # C1: 子进程 env 白名单——只透传 shell/runtime 必需变量，其余一律不给用户代码，
 # 防止 WORKER_API_KEY / GATEWAY_TOKEN / REDIS_PASSWORD / CREDENTIAL_SECRET_KEY 泄漏。
-#
 # 允许的 host 环境变量前缀（前缀匹配，例如 LANG*、LC_*）
 _ENV_HOST_ALLOWED_EXACT = frozenset(
     {
@@ -81,8 +81,7 @@ _ENV_HOST_ALLOWED_PREFIX = (
 _ENV_DENY_PATTERNS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE_KEY")
 _PROCESS_HIJACK_ENV = frozenset({"BASH_ENV", "ENV", "PYTHONHOME"})
 _PROCESS_HIJACK_PREFIXES = ("LD_", "DYLD_")
-# P1-round6 5.3: asyncio.subprocess.PIPE 默认 64 KiB, 与业务合同允许 1 MiB
-# 单行冲突; 提到 1 MiB 与合同对齐, 超限行由 read_stream 的 drop 兜底。
+# P1-round6 5.3: PIPE 默认 64 KiB 与合同允许的 1 MiB 单行冲突; 提到 1 MiB 对齐合同, 超限行由 read_stream 的 drop 兜底。
 _STREAM_READER_LIMIT_BYTES = 1024 * 1024
 
 
@@ -455,7 +454,8 @@ class ProcessExecutor(BaseExecutor):
         1. 只从 host env 透传 ``_ENV_HOST_ALLOWED_EXACT/PREFIX`` 允许的键。
         2. 合并项目显式配置的 ``exec_plan.env``。
         3. 拒绝动态加载器与 shell 启动文件劫持变量。
-        4. 最后由 Worker 权威写入 PATH / VIRTUAL_ENV / PYTHONPATH。
+        4. 最后由 Worker 权威写入 PATH / VIRTUAL_ENV / PYTHONPATH——这里是子进程
+           启动前的最后一个写者，任何上游算出的同名值都以这里为准。
         """
         host_env = os.environ
 
@@ -478,7 +478,7 @@ class ProcessExecutor(BaseExecutor):
         venv_bin = os.path.join(runtime_handle.path, bin_dir)
         host_path = host_env.get("PATH", "")
         env["PATH"] = os.pathsep.join([venv_bin, host_path]) if host_path else venv_bin
-        env["PYTHONPATH"] = runtime_handle.path
+        env["PYTHONPATH"] = authoritative_python_path(exec_plan, runtime_handle.path)
         env["VIRTUAL_ENV"] = runtime_handle.path
 
         return env

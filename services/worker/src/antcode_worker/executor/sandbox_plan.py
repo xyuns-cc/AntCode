@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from antcode_worker.domain.models import ExecPlan, RuntimeHandle
 from antcode_worker.engine.unbound_runtime import WORKER_PYTHON_RUNTIME_HASH
 from antcode_worker.executor.base import ExecutorConfig
+from antcode_worker.executor.python_path import authoritative_python_path
 from antcode_worker.executor.sandbox_cancellation import payload_process_limit
 from antcode_worker.executor.sandbox_mounts import private_home
 from antcode_worker.executor.sandbox_provider import SandboxProvider
@@ -17,7 +17,6 @@ from antcode_worker.executor.sandbox_provider import SandboxProvider
 _PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
 _DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _HIJACK_ENV_KEYS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV")
-_INTERNAL_PYTHON_PLUGINS = frozenset({"render", "rule", "spider"})
 
 
 @dataclass(frozen=True)
@@ -80,7 +79,9 @@ def _sandbox_environment(
     environment = sandbox.filter_env(host_environment, env_context)
     runtime_path = request.runtime_handle.path
     environment.update(
-        PYTHONPATH=_authoritative_python_path(request, runtime_path),
+        # 与 ProcessExecutor._build_env 共用同一构造函数：进程层是最终权威，
+        # 两处各写一份会像历史缺陷那样让长值被短值静默盖掉。
+        PYTHONPATH=authoritative_python_path(request.exec_plan, runtime_path),
         VIRTUAL_ENV=runtime_path,
         HOME=private_home(),
         PATH=os.environ.get("PATH", _DEFAULT_PATH),
@@ -88,25 +89,6 @@ def _sandbox_environment(
     for key in _HIJACK_ENV_KEYS:
         environment.pop(key, None)
     return environment
-
-
-def _authoritative_python_path(request: SandboxPlanRequest, runtime_path: str) -> str:
-    if request.exec_plan.plugin_name not in _INTERNAL_PYTHON_PLUGINS:
-        return runtime_path
-    source_roots = _trusted_python_source_roots()
-    return os.pathsep.join((runtime_path, *source_roots))
-
-
-def _trusted_python_source_roots() -> tuple[str, ...]:
-    roots: list[str] = []
-    for package_name in ("antcode_worker", "antcode_scrapy", "antcode_core", "antcode_contracts"):
-        package = __import__(package_name)
-        package_file = package.__file__
-        if not package_file:
-            raise RuntimeError(f"沙箱内建包缺少文件路径: {package_name}")
-        package_dir = Path(package_file).resolve(strict=True).parent
-        roots.append(str(package_dir.parent))
-    return tuple(dict.fromkeys(roots))
 
 
 def _copy_execution_contract(

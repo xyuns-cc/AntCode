@@ -45,6 +45,18 @@ def test_process_executor_keeps_explicit_task_secrets_only(monkeypatch, tmp_path
     assert "LD_PRELOAD" not in env
 
 
+def test_process_executor_path_injection_never_reaches_the_child(tmp_path: Path):
+    """P0-01 的 PATH 不变量同样要在真实边界上验：沙箱层那份会被这里重算。"""
+    plan = _plan()
+    plan.env["PATH"] = "/tmp/evil"
+    runtime = _runtime(tmp_path)
+
+    path_entries = ProcessExecutor()._build_env(plan, runtime)["PATH"].split(os.pathsep)
+
+    assert path_entries[0] == os.path.join(runtime.path, "bin")
+    assert "/tmp/evil" not in path_entries
+
+
 def test_sandbox_executor_keeps_explicit_task_secrets_only(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("WORKER_API_KEY", "host-secret")
     monkeypatch.setenv("PATH", "/usr/bin")
@@ -75,6 +87,8 @@ def test_sandbox_executor_keeps_explicit_task_secrets_only(monkeypatch, tmp_path
 
 
 def test_internal_plugin_receives_worker_source_path(tmp_path: Path):
+    """沙箱层的计划契约。子进程实际拿到什么见 test_child_process_pythonpath.py——
+    这里的值会被 ProcessExecutor._build_env 重算，单看本测试不构成子进程证据。"""
     plan = _plan()
     plan.plugin_name = "spider"
     data_root = tmp_path / "data"
