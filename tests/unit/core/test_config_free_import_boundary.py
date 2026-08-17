@@ -7,7 +7,12 @@
 
 - Rule 沙箱里以 PID 1 启动的 ``antcode_worker.executor.rule_network_relay``
   —— ``ProcessExecutor._build_env`` 按 C1 allowlist 刻意不传 secrets；
-- e2e / 级联删除只连 Redis 的 Spider 存储清理。
+- e2e / 级联删除只连 Redis 的 Spider 存储清理；
+- 生产 compose 的 ``crawl-redis-upgrade`` 服务（``docker-compose.prod.middleware.yml``）
+  按最小权限**只挂 Redis secret**，却要跑 ``scripts.check_ready_streams``（runbook §4.1
+  的排空门禁）与 ``scripts.migrate_crawl_redis``（``deploy-production.sh`` 的必经步骤）。
+  这两条曾经通过 ``common.security`` 聚合包间接拖进 ``settings``，导致 fresh-deploy 与
+  existing-upgrade **两种模式都在该步骤崩溃**——真机实测出来的，不是理论风险。
 
 这些用例锁住该边界：谁把 ``settings`` 拉回模块作用域，谁在这里挂。
 """
@@ -26,6 +31,9 @@ CONFIG_FREE_MODULES = (
     "antcode_core.infrastructure.redis.keys",
     "antcode_core.infrastructure.redis.control_plane",
     "antcode_core.common.logging",
+    "antcode_core.common.task_payload_contract",
+    "scripts.check_ready_streams",
+    "scripts.migrate_crawl_redis",
 )
 RELAY_MODULE = "antcode_worker.executor.rule_network_relay"
 _SUBPROCESS_TIMEOUT_SECONDS = 120

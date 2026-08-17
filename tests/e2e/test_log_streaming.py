@@ -9,7 +9,7 @@ import pytest
 
 from .conftest import requires_postgres, requires_redis
 from .helpers import get_worker, trigger_task
-from .log_client import get_logs, wait_for_realtime_log_and_status
+from .log_client import get_logs, wait_for_raw_log_content, wait_for_realtime_log_and_status
 from .run_scenarios import RunScenario, provision_scenario, trigger_and_wait, wait_for_status
 
 REALTIME_LOG_DELAY_SECONDS = 10.0
@@ -38,9 +38,15 @@ async def test_log_api_raw_and_structured(e2e_config, e2e_token):
             run_id = run["run_id"]
             log_token = resources.source.expected_log_token
 
-            raw_logs = await get_logs(client, e2e_token, run_id, log_format="raw")
-            raw_content = raw_logs.get("raw_content", "")
-            assert log_token in raw_content
+            # run 判 success 不蕴含 Worker stdout 已可查（见 log_client 的窗口说明），
+            # 这里显式等到它成立；等不到就带原文失败。
+            await wait_for_raw_log_content(
+                client,
+                run_id,
+                token=e2e_token,
+                expected_content=log_token,
+                interval=e2e_config.poll_interval,
+            )
 
             structured_logs = await get_logs(client, e2e_token, run_id, log_format="structured")
             items = (structured_logs.get("structured_data") or {}).get("items", [])

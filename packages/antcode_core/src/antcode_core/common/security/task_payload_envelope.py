@@ -14,9 +14,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from antcode_core.common.security.secret_box import secret_box
+from antcode_core.common.task_payload_contract import ENVELOPE_FIELD, ENVELOPE_VERSION
 
-ENVELOPE_FIELD = "sensitive_payload_envelope"
-ENVELOPE_VERSION = 2
 _CONTROL_KIND = "control"
 _WORKER_KIND = "worker"
 _CONTROL_ALGORITHM = "secretbox-fernet"

@@ -161,8 +161,10 @@ class TestObservabilityServer:
     @pytest.mark.asyncio
     async def test_server_start_stop(self, server):
         """服务器应能启动和停止"""
-        # 使用不常用的端口避免冲突
-        await server.start(host="127.0.0.1", port=18081)
+        # 18081 是 e2e Git HTTP 源的固定端口（scripts/release_e2e_environment.py:42、
+        # infra/docker/run-gateway-e2e.sh:31）。本套件与 e2e 常在同一台机器上先后跑，
+        # 撞上还没拆的 e2e 栈会稳定 EADDRINUSE，所以这里避开它。
+        await server.start(host="127.0.0.1", port=18091)
 
         # 验证服务器已启动
         assert server._runner is not None

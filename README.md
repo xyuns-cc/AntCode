@@ -132,7 +132,7 @@ docker compose -f docker-compose.dev.yml up -d worker
 
 生产环境不使用 K8s，也不能直接复用开发 Compose。五个应用镜像由生产 Compose 的
 `build:` 段在部署机就地构建（没有 registry 产物，也没有签名——代价见
-`docs/release-runbook.md` 第 0.4 节），第三方运行时镜像仍按 digest pin；控制面必须
+`docs/release-runbook.md` 第 0.5 节），第三方运行时镜像仍按 digest pin；控制面必须
 使用 Docker secrets 与 TLS/mTLS，并通过唯一部署入口执行：
 
 ```bash

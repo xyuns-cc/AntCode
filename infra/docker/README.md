@@ -165,7 +165,7 @@ frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 **代价必须认清**：本地构建没有不可变产物，也没有签名与来源证明——cosign 验签链路
 （`verify-production-images.sh` 与 release collection 元数据镜像）已随发布链路一并删除，
 信任边界因此变成**部署机本身与它的源码树**。回滚不能再切回一个旧 digest，只能 revert
-源码后重新构建，回滚窗口要把构建时长算进去。详见 `docs/release-runbook.md` 第 0.4 节。
+源码后重新构建，回滚窗口要把构建时长算进去。详见 `docs/release-runbook.md` 第 0.5 节。
 
 因此 `ANTCODE_IMAGE_TAG` 必须每次发布唯一，**推荐直接用被部署的 40 位 Git commit**：
 它是把运行中的容器对回一次确定源码构建的唯一线索。复用同一个 tag 会让 `up -d` 认为

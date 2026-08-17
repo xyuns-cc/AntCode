@@ -4,7 +4,7 @@
 # =============================================================================
 
 .PHONY: help install sync lint lint-fix format format-check complexity complexity-baseline-update type-check check \
-        test test-cov test-unit test-int \
+        test test-cov test-unit test-contracts test-int \
         proto proto-check clean init-db \
         audit-python audit-npm audit \
         web-type-check web-lint web-test web-build web-check \
@@ -46,10 +46,11 @@ help:
 	@echo "  make check        - lint + format-check + complexity + type-check"
 	@echo ""
 	@echo "测试:"
-	@echo "  make test         - 全量 pytest"
+	@echo "  make test         - 无外部依赖的套件（unit + boundary，见 testpaths）"
 	@echo "  make test-cov     - 带覆盖率报告"
 	@echo "  make test-unit    - 只跑单元"
-	@echo "  make test-int     - 只跑集成"
+	@echo "  make test-contracts - 只跑传输契约（需真 Redis）"
+	@echo "  make test-int     - 只跑集成（需真 PostgreSQL + Redis）"
 	@echo ""
 	@echo "安全扫描:"
 	@echo "  make audit-python - bandit + pip-audit，HIGH/CRITICAL 阻断"
@@ -165,9 +166,14 @@ audit-python:
 		if [ "$$scan_status" -gt 1 ]; then exit "$$scan_status"; fi
 	uv run --extra dev python scripts/fail_on_high_vulns.py pip-audit-report.json --tool pip-audit
 
+# registry 必须点名官方源：常见的国内镜像（registry.npmmirror.com 等）没有实现 audit 接口，
+# 返回的报告缺 auditReportVersion，门禁只会报「malformed」而永远验不到真实漏洞。
+# 换句话说，跟着本机 npm config 走就等于没跑这条门禁。
+NPM_AUDIT_REGISTRY := https://registry.npmjs.org
+
 audit-npm:
 	@cd web/antcode-frontend && \
-		npm audit --json --audit-level=high > npm-audit-report.json || audit_status=$$?; \
+		npm audit --json --audit-level=high --registry=$(NPM_AUDIT_REGISTRY) > npm-audit-report.json || audit_status=$$?; \
 		test -s npm-audit-report.json; \
 		if [ "$${audit_status:-0}" -gt 1 ]; then exit "$${audit_status}"; fi
 	node scripts/check_npm_audit.mjs web/antcode-frontend/npm-audit-report.json
@@ -194,14 +200,23 @@ web-check: web-type-check web-lint web-test web-build
 # =============================================================================
 # 发布门禁
 # =============================================================================
-# 提交与发布前的完整本地门禁。容器镜像扫描（gitleaks / hadolint / trivy）需要外部
-# 工具，命令见 docs/release-runbook.md「本地质量与安全门禁」。
+# 提交与发布前的完整本地门禁：生成物同步、lint、格式、复杂度、类型、后端测试
+# （tests/unit + tests/boundary）、Python 与 npm 依赖审计、前端四件套。
+#
+# 它**不覆盖**下面两类，二者都不是可选项，只是跑不在开发机上：
+#   1. 需要真实中间件/容器的测试：make test-contracts / make test-int /
+#      infra/docker/run-gateway-e2e.sh 与 tests/e2e 的 run_e2e.sh
+#   2. 需要外部工具镜像的扫描：gitleaks / hadolint / trivy
+# 完整清单与执行环境见 docs/release-runbook.md 第 0 节。
 release-gate: proto-check check test audit web-check
-	@echo "本地发布门禁全绿"
+	@echo "本地发布门禁全绿；需要中间件/容器的门禁另见 docs/release-runbook.md §0.3 与 §0.4"
 
 # =============================================================================
 # 测试
 # =============================================================================
+# 范围由 pyproject.toml 的 testpaths 单点定义（tests/unit + tests/boundary），
+# 即「不依赖外部中间件即可跑完」的那部分。需要真实依赖的三套（contracts / integration /
+# e2e）有各自的 target，不在 release-gate 里，必须另行在有中间件或容器的环境执行。
 test:
 	uv run pytest
 
@@ -210,6 +225,10 @@ test-cov:
 
 test-unit:
 	uv run pytest tests/unit -v
+
+test-contracts:
+	@: "$${ANTCODE_CONTRACT_REDIS_URL:?ANTCODE_CONTRACT_REDIS_URL must be set}"
+	uv run pytest tests/contracts -v
 
 test-int:
 	@: "$${ANTCODE_INTEGRATION_REDIS_URL:?ANTCODE_INTEGRATION_REDIS_URL must be set}"

@@ -23,6 +23,18 @@ cleanup_env() {
 # （真机实测）。点名的另一个好处是服务改名时 compose 直接报 "no such service"。
 readonly RUNTIME_SERVICES=(postgres redis reverse-proxy)
 
+# 停服集合必须与依赖图一致：边缘两层的 healthcheck 是**穿透式链路探针**
+# （`docker-compose.prod.edge.yml:52-61,94-103`，frontend 打 web-api、reverse-proxy 打
+# frontend），所以只要控制面被停，它们必然转 unhealthy。留着不停有两个真机实测后果：
+#   1) 收尾的 `up -d --wait` 会撞上一个**早已 unhealthy**的 reverse-proxy —— compose 的
+#      `--wait` 对 unhealthy 是快速失败，不等它恢复，于是整条 existing-upgrade --apply
+#      在最后一步退出 1，而栈其实几十秒后自愈；
+#   2) frontend 在 edge 网上是动态地址，被重建后 reverse-proxy 得靠 `resolver valid=10s`
+#      重新解析（`nginx.prod.conf:19-25`），中间必然有一段解析失败窗口。
+# 本来就是停机窗口，边缘一并停掉即可：`up -d --wait` 会按 depends_on 依次
+# web-api → frontend → reverse-proxy 重新拉起，每层都带自己的 start_period。
+readonly STOPPED_SERVICES=(reverse-proxy frontend web-api master gateway worker)
+
 build_images() {
     "${compose[@]}" build
     "${compose[@]}" pull "${RUNTIME_SERVICES[@]}"
@@ -67,7 +79,7 @@ if [[ "$UPGRADE_MODE" == "rotate-encryption-key" ]]; then
     fi
     compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
     build_images
-    "${compose[@]}" stop --timeout "$STOP_TIMEOUT" web-api master gateway worker
+    "${compose[@]}" stop --timeout "$STOP_TIMEOUT" "${STOPPED_SERVICES[@]}"
     "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT" postgres redis
     "${compose[@]}" run --rm --no-deps migration \
         python -m scripts.rotate_encryption_key --confirm-writers-stopped
@@ -98,7 +110,7 @@ fi
 
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 build_images
-"${compose[@]}" stop --timeout "$STOP_TIMEOUT" web-api master gateway worker
+"${compose[@]}" stop --timeout "$STOP_TIMEOUT" "${STOPPED_SERVICES[@]}"
 "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT" postgres redis
 "${compose[@]}" run --rm --no-deps crawl-redis-upgrade \
     python -m scripts.migrate_crawl_redis \

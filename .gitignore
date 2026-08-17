@@ -82,6 +82,12 @@ web/antcode-frontend/node_modules/
 web/antcode-frontend/dist/
 web/antcode-frontend/npm-audit-report.json
 
+# `make audit-python` 的报告产物落在仓库根，且每次跑都会重写。
+# 不忽略的话一次 `git add -A` 就会把扫描快照裹进提交。
+/bandit-report.json
+/pip-audit-report.json
+/audit-requirements.txt
+
 # Lock files that might be user-specific
 .lock
 

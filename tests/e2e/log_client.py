@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlencode
@@ -13,6 +14,15 @@ import httpx
 from .helpers import API_PREFIX, extract_data, request_json
 
 DEFAULT_STREAM_TIMEOUT_SECONDS = 15.0
+# run 进入终态与 Worker stdout 可从日志 API 查到之间存在固有异步窗口，两段都排在
+# 结果上报之后：Worker 侧 streamer 每 0.5s 刷一次缓冲
+# （services/worker/src/antcode_worker/logging/streamer.py），master 侧
+# log_ingest_loop 以 1s block 消费 Stream
+# （services/master/src/antcode_master/ingester/log_ingest_loop.py）。
+# 所以"终态即日志可查"不是系统提供的保证，查询侧必须显式等到它成立，
+# 超时后连原文一起失败——零等待断言的是一个并不存在的 happens-before。
+DEFAULT_QUERY_TIMEOUT_SECONDS = 30.0
+DEFAULT_QUERY_INTERVAL_SECONDS = 0.5
 HISTORY_END_TYPES = frozenset({"historical_logs_end", "no_historical_logs"})
 # 实时帧的两个来源：Redis ingest 路径（direct/gateway worker）source='realtime'，
 # Worker HTTP 上报路径（distributed_log_service → SSELogNotifier）source='task_execution'
@@ -34,6 +44,27 @@ async def get_logs(
         params={"format": log_format},
     )
     return extract_data(payload) or {}
+
+
+async def wait_for_raw_log_content(
+    client: httpx.AsyncClient,
+    run_id: str,
+    *,
+    token: str,
+    expected_content: str,
+    timeout: float = DEFAULT_QUERY_TIMEOUT_SECONDS,
+    interval: float = DEFAULT_QUERY_INTERVAL_SECONDS,
+) -> str:
+    """轮询 raw 日志直到 Worker stdout 落库；超时即带最后一次原文失败。"""
+    deadline = time.monotonic() + timeout
+    content = ""
+    while time.monotonic() < deadline:
+        payload = await get_logs(client, token, run_id, log_format="raw")
+        content = str(payload.get("raw_content", ""))
+        if expected_content in content:
+            return content
+        await asyncio.sleep(interval)
+    raise AssertionError(f"raw 日志在 {timeout}s 内始终不含 {expected_content!r}: {content!r}")
 
 
 async def issue_stream_ticket(client: httpx.AsyncClient, token: str, run_id: str) -> str:
