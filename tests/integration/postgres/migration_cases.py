@@ -1,7 +1,9 @@
 """Executable legacy-schema cases for every hand-written PostgreSQL migration."""
 
+from .migration_bound_worker_cases import PROJECT_BOUND_WORKER
 from .migration_cancel_cases import TASK_RUN_CANCEL_REQUEST
 from .migration_generation_cases import TASK_RUN_LEASE, TASK_RUN_LEASE_GEN, TASK_RUN_LEASE_GENERATIONS
+from .migration_include_paths_cases import PROJECT_SOURCE_INCLUDE_PATHS
 from .migration_index_cases import TASK_LOG_STORAGE_INDEX
 from .migration_integrity_cases import DATABASE_INTEGRITY
 from .migration_outbox_cases import SCHEDULER_OUTBOX
@@ -257,4 +259,6 @@ MIGRATION_CASES = (
     PROJECT_RULE_DISPATCH_CONSTRAINTS,
     TASK_PROJECT_FOREIGN_KEY,
     PROJECT_SOURCE_SHARING,
+    PROJECT_SOURCE_INCLUDE_PATHS,
+    PROJECT_BOUND_WORKER,
 )
