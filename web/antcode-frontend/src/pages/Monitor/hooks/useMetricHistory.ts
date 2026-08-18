@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { message } from 'antd'
+import { globalMessage } from '@/hooks/useMessage'
 import { workerService } from '@/services/workers'
 import { getPerformancePeriodHours } from '../data'
 import type {
@@ -26,7 +26,7 @@ export const useMetricHistory = (
       ))
     } catch (error) {
       console.error('加载集群历史指标失败:', error)
-      message.error(error instanceof Error ? error.message : '加载集群历史指标失败')
+      globalMessage.error(error instanceof Error ? error.message : '加载集群历史指标失败')
     }
   }, [performancePeriod])
 
@@ -35,7 +35,7 @@ export const useMetricHistory = (
       setWorkerHistory(await workerService.getWorkerMetricsHistory(workerId, 720))
     } catch (error) {
       console.error('加载Worker历史指标失败:', error)
-      message.error(error instanceof Error ? error.message : '加载Worker历史指标失败')
+      globalMessage.error(error instanceof Error ? error.message : '加载Worker历史指标失败')
     }
   }, [])
 

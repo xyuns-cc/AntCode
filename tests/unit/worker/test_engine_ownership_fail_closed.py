@@ -3,12 +3,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from antcode_worker.engine.engine import MILLISECONDS_PER_SECOND, Engine
+from antcode_worker.engine.released_ownership import ReleasedOwnershipLedger
 from antcode_worker.transport.base import TaskMessage
 
 
 def _engine(transport=None) -> Engine:
     engine = Engine.__new__(Engine)
     engine._worker_id_cache = None
+    engine._released_ownership = ReleasedOwnershipLedger()
     engine._transport = transport or SimpleNamespace(
         _worker_id="worker-1",
         _lease_id="lease-7",

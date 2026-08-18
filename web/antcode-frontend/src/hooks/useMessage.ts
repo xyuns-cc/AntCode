@@ -1,4 +1,4 @@
-import type { MessageInstance } from 'antd/es/message/interface'
+import type { ArgsProps as MessageArgsProps, MessageInstance } from 'antd/es/message/interface'
 import type { NotificationInstance } from 'antd/es/notification/interface'
 import type { ModalStaticFunctions } from 'antd/es/modal/confirm'
 import type { ReactNode } from 'react'
@@ -18,18 +18,31 @@ export const setMessageInstances = (
   modalInstance = modal
 }
 
+type MessageType = 'success' | 'error' | 'warning' | 'info' | 'loading'
+
+/** 默认停留秒数；loading 用 0 表示「不自动关闭」。 */
+const MESSAGE_DURATION_SECONDS: Record<MessageType, number> = {
+  success: 3,
+  error: 5,
+  warning: 4,
+  info: 3,
+  loading: 0,
+}
+
+/** 与 antd 实例方法一致，同时接受纯文本和完整参数对象（后者可带 JSX content）。 */
+const emitMessage = (type: MessageType, content: string | MessageArgsProps, duration?: number) => {
+  const fallback = duration ?? MESSAGE_DURATION_SECONDS[type]
+  const props = typeof content === 'string' ? { content } : content
+  return messageInstance?.[type]({ duration: fallback, ...props })
+}
+
 /** Global message API */
 export const globalMessage = {
-  success: (content: string, duration?: number) => 
-    messageInstance?.success({ content, duration: duration ?? 3 }),
-  error: (content: string, duration?: number) => 
-    messageInstance?.error({ content, duration: duration ?? 5 }),
-  warning: (content: string, duration?: number) => 
-    messageInstance?.warning({ content, duration: duration ?? 4 }),
-  info: (content: string, duration?: number) => 
-    messageInstance?.info({ content, duration: duration ?? 3 }),
-  loading: (content: string, duration?: number) => 
-    messageInstance?.loading({ content, duration: duration ?? 0 }),
+  success: (content: string | MessageArgsProps, duration?: number) => emitMessage('success', content, duration),
+  error: (content: string | MessageArgsProps, duration?: number) => emitMessage('error', content, duration),
+  warning: (content: string | MessageArgsProps, duration?: number) => emitMessage('warning', content, duration),
+  info: (content: string | MessageArgsProps, duration?: number) => emitMessage('info', content, duration),
+  loading: (content: string | MessageArgsProps, duration?: number) => emitMessage('loading', content, duration),
   destroy: () => messageInstance?.destroy(),
 }
 

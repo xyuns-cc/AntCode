@@ -39,6 +39,34 @@ export default tseslint.config([
           caughtErrorsIgnorePattern: '^_',
         },
       ],
+      // React 19 移除了 ReactDOM.render，而 antd v5 的静态方法内部正是用它渲染。
+      // 于是 `Modal.confirm()` / `message.success()` 这类调用在运行时是**静默空操作**：
+      // 不弹窗、不提示、不进 console、不发请求，浏览器侧完全看不出来。改用
+      // `App.useApp()` 的实例，或 `@/hooks/useMessage` 里桥接好的
+      // globalMessage / globalNotification / globalModal / showNotification。
+      // `message` / `notification` 只有静态用法，直接禁掉这两个具名导入；
+      // `Modal` 还要用作 JSX 组件不能禁，改为只拦它的静态方法调用——`App.useApp()`
+      // 解构出来的是小写 `modal`，不会误伤。
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'antd',
+              importNames: ['message', 'notification'],
+              message: 'antd 静态 message/notification 在 React 19 下是空操作，请用 @/hooks/useMessage 或 App.useApp()',
+            },
+          ],
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "CallExpression[callee.object.name='Modal'][callee.property.name=/^(confirm|info|success|error|warning|warn)$/]",
+          message: 'antd 静态 Modal.confirm 在 React 19 下是空操作，请改用 globalModal 或 App.useApp().modal',
+        },
+      ],
       'no-console': ['warn', { allow: ['warn', 'error'] }],
       'prefer-const': 'warn',
       'no-useless-escape': 'warn',

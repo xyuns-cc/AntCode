@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react'
-import { Modal } from 'antd'
+import { globalModal } from '@/hooks/useMessage'
 import type { EnvironmentConfig } from '@/components/runtimes/EnvSelector'
 import { projectService } from '@/services/projects'
 import { workerService } from '@/services/workers'
@@ -151,7 +151,7 @@ export const useProjectCreateClose = (options: CloseOptions) =>
       options.onClose()
       return
     }
-    Modal.confirm({
+    globalModal.confirm({
       title: '放弃创建？',
       content: '当前表单已有填写内容，关闭后将丢失。是否继续？',
       okText: '放弃',

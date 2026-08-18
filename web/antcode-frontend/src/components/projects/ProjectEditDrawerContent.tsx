@@ -4,6 +4,7 @@ import { SaveOutlined } from '@ant-design/icons'
 import type { Project, ProjectType } from '@/types'
 import CodeProjectForm from './CodeProjectForm'
 import FileProjectForm from './FileProjectForm'
+import ProjectRuntimeBinding from './ProjectRuntimeBinding'
 import RegionWorkerSelector from './RegionWorkerSelector'
 import RuleProjectForm from './RuleProjectForm'
 import type { ProjectFormController, RuleDispatchConfig } from './ProjectCreateDrawerContent'
@@ -58,8 +59,12 @@ export const ProjectEditContent: React.FC<ProjectEditContentProps> = ({
       </>
     )
   }
-  if (project.type === 'code') return <CodeProjectForm {...commonProps} />
-  return <FileProjectForm {...commonProps} />
+  return (
+    <>
+      <ProjectRuntimeBinding project={project} />
+      {project.type === 'code' ? <CodeProjectForm {...commonProps} /> : <FileProjectForm {...commonProps} />}
+    </>
+  )
 }
 
 interface ProjectEditFooterProps {

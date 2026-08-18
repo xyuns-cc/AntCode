@@ -7,6 +7,7 @@ import antcode_core.infrastructure.redis as redis_module
 import pytest
 from antcode_contracts import artifact_pb2
 from antcode_worker.engine.engine import Engine
+from antcode_worker.engine.released_ownership import ReleasedOwnershipLedger
 from antcode_worker.transport.base import TransportMode
 from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
@@ -20,6 +21,7 @@ def _gateway_engine() -> tuple[Engine, SimpleNamespace]:
     )
     engine = Engine.__new__(Engine)
     engine._transport = transport
+    engine._released_ownership = ReleasedOwnershipLedger()
     return engine, transport
 
 

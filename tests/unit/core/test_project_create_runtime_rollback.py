@@ -128,7 +128,7 @@ async def test_runtime_binding_failure_compensates_created_runtime(monkeypatch) 
     monkeypatch.setattr(
         service,
         "_authorize_worker",
-        AsyncMock(return_value=(SimpleNamespace(name="worker"), "alice", True)),
+        AsyncMock(return_value=(SimpleNamespace(id=1, name="worker", public_id="worker-1"), "alice", True)),
     )
 
     with pytest.raises(HTTPException, match="runtime binding failed"):
@@ -151,7 +151,7 @@ async def test_rejected_runtime_creation_is_not_compensated(monkeypatch) -> None
     monkeypatch.setattr(
         service,
         "_authorize_worker",
-        AsyncMock(return_value=(SimpleNamespace(name="worker"), "alice", True)),
+        AsyncMock(return_value=(SimpleNamespace(id=1, name="worker", public_id="worker-1"), "alice", True)),
     )
 
     with pytest.raises(HTTPException, match="already exists"):
@@ -174,7 +174,7 @@ async def test_commit_and_runtime_compensation_failures_are_both_exposed(monkeyp
     monkeypatch.setattr(
         service,
         "_authorize_worker",
-        AsyncMock(return_value=(SimpleNamespace(name="worker"), "alice", True)),
+        AsyncMock(return_value=(SimpleNamespace(id=1, name="worker", public_id="worker-1"), "alice", True)),
     )
 
     with pytest.raises(BaseExceptionGroup) as exc_info:
@@ -211,7 +211,7 @@ async def test_existing_runtime_is_never_deleted_when_commit_fails(monkeypatch) 
     monkeypatch.setattr(
         service,
         "_authorize_worker",
-        AsyncMock(return_value=(SimpleNamespace(name="worker"), "alice", False)),
+        AsyncMock(return_value=(SimpleNamespace(id=1, name="worker", public_id="worker-1"), "alice", False)),
     )
 
     with pytest.raises(HTTPException, match="commit failed"):

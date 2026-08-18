@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { message, theme } from 'antd'
+import { theme } from 'antd'
+import { globalMessage } from '@/hooks/useMessage'
 import type { Chart } from 'chart.js'
 import type { PerformancePeriod, WorkerDisplayData } from '../types'
 import { useCurrentTime } from './useCurrentTime'
@@ -33,7 +34,7 @@ export const useMonitorController = () => {
 
   const handleRefresh = () => {
     refresh(true)
-    message.success('数据刷新成功')
+    globalMessage.success('数据刷新成功')
   }
 
   return {

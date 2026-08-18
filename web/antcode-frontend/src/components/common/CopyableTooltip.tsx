@@ -1,5 +1,6 @@
 import React from 'react'
-import { Tooltip, Button, message } from 'antd'
+import { Tooltip, Button } from 'antd'
+import { globalMessage } from '@/hooks/useMessage'
 import { CopyOutlined } from '@ant-design/icons'
 import type { TooltipProps } from 'antd'
 
@@ -23,7 +24,7 @@ const CopyableTooltip: React.FC<CopyableTooltipProps> = React.memo(({
     e.preventDefault()
     try {
       await navigator.clipboard.writeText(text)
-      message.success('已复制到剪贴板')
+      globalMessage.success('已复制到剪贴板')
     } catch (_error) {
       // 降级方案：使用传统方法
       const textArea = document.createElement('textarea')
@@ -34,9 +35,9 @@ const CopyableTooltip: React.FC<CopyableTooltipProps> = React.memo(({
       textArea.select()
       try {
         document.execCommand('copy')
-        message.success('已复制到剪贴板')
+        globalMessage.success('已复制到剪贴板')
       } catch (_err) {
-        message.error('复制失败')
+        globalMessage.error('复制失败')
       }
       document.body.removeChild(textArea)
     }

@@ -20,7 +20,6 @@ import {
   Statistic,
   Modal,
   InputNumber,
-  message
 } from 'antd'
 import PageContainer from '@/components/common/PageContainer'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
@@ -36,6 +35,7 @@ import {
   CloseCircleOutlined
 } from '@ant-design/icons'
 import { useAuthStore } from '@/stores/authStore'
+import { globalMessage } from '@/hooks/useMessage'
 import {
   getAuditLogs,
   getAuditStats,
@@ -124,7 +124,7 @@ const AuditLog: React.FC = () => {
       setTotal(data.total)
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : '未知错误'
-      message.error(`加载审计日志失败: ${errorMessage}`)
+      globalMessage.error(`加载审计日志失败: ${errorMessage}`)
     } finally {
       setLoading(false)
     }
@@ -197,13 +197,13 @@ const AuditLog: React.FC = () => {
     setCleanupLoading(true)
     try {
       const result = await cleanupAuditLogs(cleanupDays)
-      message.success(`已清理 ${result.deleted} 条旧日志`)
+      globalMessage.success(`已清理 ${result.deleted} 条旧日志`)
       setCleanupVisible(false)
       loadAuditLogs()
       loadStats()
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : '未知错误'
-      message.error(`清理失败: ${errorMessage}`)
+      globalMessage.error(`清理失败: ${errorMessage}`)
     } finally {
       setCleanupLoading(false)
     }

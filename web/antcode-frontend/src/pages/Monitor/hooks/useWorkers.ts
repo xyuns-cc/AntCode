@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { message } from 'antd'
+import { globalMessage } from '@/hooks/useMessage'
 import { workerService } from '@/services/workers'
 import { transformWorker } from '../data'
 import type { WorkerDisplayData } from '../types'
@@ -23,7 +23,7 @@ export const useWorkers = () => {
       setLastChecked('刚刚')
     } catch (error) {
       console.error('加载Worker 数据失败:', error)
-      if (showLoading) message.error('加载Worker 数据失败')
+      if (showLoading) globalMessage.error('加载Worker 数据失败')
     } finally {
       if (showLoading) setLoading(false)
     }

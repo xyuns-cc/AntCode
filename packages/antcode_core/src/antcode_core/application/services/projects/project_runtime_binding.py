@@ -183,6 +183,17 @@ class ProjectRuntimeBindingMixin:
 
     @staticmethod
     async def _bind_worker_runtime(project, worker, runtime, *, conn) -> None:
+        """把项目钉到运行时所在的 Worker 上。
+
+        运行时是该 Worker 文件系统上的一个真实 venv，别的节点没有它，所以
+        「环境在哪个节点」同时就是「任务必须派到哪个节点」——两者不是可以各自
+        取值的独立配置。因此这里必须同时写运行时位置(worker_id, public_id)与
+        调度绑定(bound_worker_id, 内部 id)；只写前者会让默认的 prefer 策略
+        (execution_resolver._resolve_prefer_bound 只读 bound_worker_id)恒定
+        落回按负载自动选节点，集群一有第二个 Worker 就 100% 派错。
+        repository_import_service._create_project 一直是这么写的（两列同时写），
+        它那条路因此从来没坏过；这里补齐同样的语义。
+        """
         project.env_location = "worker"
         project.worker_id = runtime["worker_id"]
         project.worker_env_name = runtime["env_name"]
@@ -191,6 +202,7 @@ class ProjectRuntimeBindingMixin:
         project.runtime_kind = runtime["kind"]
         project.runtime_locator = None
         project.current_runtime_id = None
+        project.bound_worker_id = worker.id
         await project.save(using_db=conn)
         logger.info(f"项目 {project.name} 绑定 Worker 运行时: {worker.name}/{runtime['env_name']}")
 

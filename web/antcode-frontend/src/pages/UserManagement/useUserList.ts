@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
-import { message } from 'antd'
+import { globalMessage } from '@/hooks/useMessage'
 import { getErrorMessage } from '@/utils/helpers'
 import { userManagementApi } from './api'
 import type { UserListQuery } from './types'
@@ -47,7 +47,7 @@ export const useUserList = (enabled: boolean) => {
       } catch (error) {
         if (generation !== requestGeneration.current) return
         dispatch({ type: 'loading', value: false })
-        message.error(getErrorMessage(error))
+        globalMessage.error(getErrorMessage(error))
       }
     },
     [enabled]

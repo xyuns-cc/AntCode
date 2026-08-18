@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
-import { Button, Input, Modal, Result, Space } from 'antd'
+import { Button, Input, Result, Space } from 'antd'
+import { globalModal } from '@/hooks/useMessage'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TeamOutlined } from '@ant-design/icons'
 import PageContainer from '@/components/common/PageContainer'
 import FilterBar from '@/components/common/FilterBar'
@@ -60,7 +61,7 @@ const UserManagement = () => {
   if (!currentUser?.is_admin) return <Result status="403" title="权限不足" subTitle="只有管理员才能访问用户管理页面" />
 
   const batchTargets = list.state.users.filter((user) => list.state.selectedRowKeys.includes(user.id))
-  const confirmBatchDelete = () => Modal.confirm({
+  const confirmBatchDelete = () => globalModal.confirm({
     title: '确认批量删除', content: `确定删除选中的 ${batchTargets.length} 个用户？`, okText: '确认删除', okType: 'danger', cancelText: '取消',
     onOk: () => actions.batchDelete(batchTargets),
   })

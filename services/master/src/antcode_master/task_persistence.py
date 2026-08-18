@@ -7,6 +7,7 @@ from enum import StrEnum
 from antcode_core.infrastructure.cache import unified_cache
 from loguru import logger
 
+from antcode_master.run_recovery_cleanup import cleanup_unrecoverable_runs
 from antcode_master.task_recovery_leases import load_active_lease_ids
 
 
@@ -172,7 +173,7 @@ class TaskPersistenceService:
     async def _checkpoints_for_page(self, page, active_lease_ids, *, Task, TaskRun, Worker, TaskStatus):
         worker_pub_map = await self._load_worker_public_ids(page, Worker)
         task_map = await self._load_tasks_by_id(page, Task)
-        await self._cleanup_orphan_runs(page, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
+        await cleanup_unrecoverable_runs(page, task_map, TaskRun=TaskRun, TaskStatus=TaskStatus)
         return self._build_recovery_checkpoints(
             page,
             task_map,
@@ -203,19 +204,6 @@ class TaskPersistenceService:
         task_ids = [e.task_id for e in interrupted_executions]
         tasks = await Task.filter(id__in=task_ids)
         return {t.id: t for t in tasks}
-
-    @staticmethod
-    async def _cleanup_orphan_runs(interrupted_executions, task_map, *, TaskRun, TaskStatus) -> None:
-        orphan_executions = [e for e in interrupted_executions if e.task_id not in task_map]
-        if not orphan_executions:
-            return
-        orphan_ids = [e.run_id for e in orphan_executions]
-        await TaskRun.filter(run_id__in=orphan_ids).update(
-            status=TaskStatus.FAILED,
-            error_message="任务已被删除",
-            end_time=datetime.now(),
-        )
-        logger.info(f"已清理 {len(orphan_executions)} 条孤立的执行记录（任务已删除）")
 
     @classmethod
     def _build_recovery_checkpoints(cls, interrupted_executions, task_map, *, worker_pub_map, active_lease_ids):

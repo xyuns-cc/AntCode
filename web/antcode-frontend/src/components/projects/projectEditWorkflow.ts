@@ -1,4 +1,4 @@
-import { Modal } from 'antd'
+import { globalModal } from '@/hooks/useMessage'
 import { projectService } from '@/services/projects'
 import type {
   Project,
@@ -131,7 +131,7 @@ export const buildProjectUpdateSteps = (
 const confirmContinue = (step: ProjectUpdateStep, error: unknown): Promise<boolean> => {
   const message = error instanceof Error ? error.message : '未知错误'
   return new Promise((resolve) => {
-    Modal.confirm({
+    globalModal.confirm({
       title: `${step.name}保存失败`,
       content: `${step.name}保存失败：${message}。是否继续后续步骤？`,
       okText: '继续',

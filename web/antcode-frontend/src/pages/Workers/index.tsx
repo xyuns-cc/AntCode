@@ -25,7 +25,6 @@ import {
   Tabs,
   Dropdown,
   theme,
-  message
 } from 'antd'
 import {
   DeleteOutlined,
@@ -54,6 +53,7 @@ import WorkerInstallKeyModals from '@/components/workers/WorkerInstallKeyModals'
 import WorkerResourceManagement from '@/components/workers/WorkerResourceManagement'
 import WorkerSpiderStats from '@/components/workers/WorkerSpiderStats'
 import { useWorkerStore } from '@/stores/workerStore'
+import { globalMessage, globalModal } from '@/hooks/useMessage'
 import { workerService } from '@/services/workers'
 import type { WorkerUserPermission } from '@/services/workerServiceContracts'
 import { userService } from '@/services/users'
@@ -227,7 +227,7 @@ const Workers: React.FC = () => {
   const handleBatchDelete = () => {
     if (selectedRowKeys.length === 0) return
 
-    Modal.confirm({
+    globalModal.confirm({
       title: '确认批量删除',
       content: `确定要删除选中的 ${selectedRowKeys.length} 个Worker吗？此操作不可恢复。`,
       okText: '确认删除',
@@ -356,7 +356,7 @@ const Workers: React.FC = () => {
   const handleRevokePermission = async (userId: string, username: string) => {
     if (!selectedWorker) return
 
-    Modal.confirm({
+    globalModal.confirm({
       title: '撤销权限',
       content: `确定要撤销用户 "${username}" 对此Worker的访问权限吗？`,
       okText: '撤销',
@@ -425,7 +425,7 @@ const Workers: React.FC = () => {
                   onClick={(e) => {
                     e.stopPropagation()
                     navigator.clipboard.writeText(address)
-                    message.success('地址已复制')
+                    globalMessage.success('地址已复制')
                   }}
                 />
               </Space>

@@ -10,7 +10,6 @@ import {
   Space,
   Alert,
   Skeleton,
-  message,
 } from 'antd'
 import {
   SettingOutlined,
@@ -23,6 +22,7 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons'
 import PageContainer from '@/components/common/PageContainer'
+import { globalMessage } from '@/hooks/useMessage'
 import { systemConfigService } from '@/services/systemConfig'
 import type {
   TaskResourceConfig,
@@ -110,7 +110,7 @@ const SystemConfig: React.FC = () => {
     try {
       const response = await systemConfigService.reloadConfigs()
       if (response.code === 200) {
-        message.success({
+        globalMessage.success({
           content: (
             <div>
               <div>✅ 配置已重新加载，大部分配置立即生效</div>

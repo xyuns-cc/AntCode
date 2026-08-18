@@ -1,6 +1,7 @@
 import type { FC, RefObject } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { message, theme } from 'antd'
+import { theme } from 'antd'
+import { globalMessage } from '@/hooks/useMessage'
 import EnhancedLogViewerContent, { LogViewerFooter } from './EnhancedLogViewerContent'
 import EnhancedLogViewerFilters from './EnhancedLogViewerFilters'
 import EnhancedLogViewerHeader from './EnhancedLogViewerHeader'
@@ -74,15 +75,15 @@ const useViewerActions = ({ buffer, displayedMessages, isViewTruncated, runId, s
   }, [resumeAfterPause, setPaused])
   const exportLogs = useCallback((format: ExportFormat) => {
     if (displayedMessages.length === 0) {
-      message.warning('没有日志可导出')
+      globalMessage.warning('没有日志可导出')
       return
     }
     downloadLogs(displayedMessages, runId, format)
     if (isViewTruncated) {
-      message.warning(`已导出为 ${format.toUpperCase()} 格式，但内容仅含浏览器缓冲的最新日志，完整日志请使用服务端日志下载`)
+      globalMessage.warning(`已导出为 ${format.toUpperCase()} 格式，但内容仅含浏览器缓冲的最新日志，完整日志请使用服务端日志下载`)
       return
     }
-    message.success(`日志已导出为 ${format.toUpperCase()} 格式`)
+    globalMessage.success(`日志已导出为 ${format.toUpperCase()} 格式`)
   }, [displayedMessages, isViewTruncated, runId])
   const toggleFullscreen = useCallback(() => setIsFullscreen((current) => !current), [])
   return {

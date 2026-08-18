@@ -15,10 +15,10 @@ import {
   InputNumber,
   Skeleton,
   Typography,
-  message,
 } from 'antd'
 import { ArrowLeftOutlined, SaveOutlined } from '@ant-design/icons'
 import { useUpdateTask } from '@/hooks/api/useTasks'
+import { globalMessage } from '@/hooks/useMessage'
 import { taskService } from '@/services/tasks'
 import { projectService } from '@/services/projects'
 import Logger from '@/utils/logger'
@@ -121,7 +121,7 @@ const TaskEdit: React.FC = () => {
       setProjects(items)
     } catch {
       Logger.error('加载项目列表失败')
-      message.error('加载项目列表失败')
+      globalMessage.error('加载项目列表失败')
     }
   }, [])
 
@@ -133,13 +133,13 @@ const TaskEdit: React.FC = () => {
     try {
       const executionParams = parseExecutionParams(values.execution_params)
       if (!executionParams.ok) {
-        message.error(executionParams.error)
+        globalMessage.error(executionParams.error)
         return
       }
 
       const environmentVars = parseEnvironmentVars(values.environment_vars)
       if (!environmentVars.ok) {
-        message.error(environmentVars.error)
+        globalMessage.error(environmentVars.error)
         return
       }
 

@@ -9,7 +9,6 @@ import {
   Tooltip,
   Popconfirm,
   Alert,
-  Modal
 } from 'antd'
 import showNotification from '@/utils/notification'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
@@ -26,6 +25,7 @@ import {
 } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router'
 import { useWorkerStore } from '@/stores/workerStore'
+import { globalModal } from '@/hooks/useMessage'
 import type { Task, TaskStatus, ScheduleType } from '@/types'
 import { formatDateTime, formatStatus, TASK_STATUS_PRESENTATION } from '@/utils/format'
 import type { StatusPresentation } from '@/utils/format'
@@ -231,7 +231,7 @@ const Tasks: React.FC = memo(() => {
       return
     }
 
-    Modal.confirm({
+    globalModal.confirm({
       title: '确认批量删除',
       content: `确定要删除选中的 ${selectedRowKeys.length} 个任务吗？此操作不可恢复。`,
       okText: '确认删除',
