@@ -5,13 +5,13 @@
 """
 
 from tortoise import fields
-from tortoise.models import Model
 
 from antcode_core.common.error_message_field import PersistedErrorMessageField
+from antcode_core.domain.models.base import StrictFieldsModel
 from antcode_core.domain.models.enums import AuditAction
 
 
-class AuditLog(Model):
+class AuditLog(StrictFieldsModel):
     """审计日志
 
     记录系统中的重要操作，用于安全审计和问题追踪。

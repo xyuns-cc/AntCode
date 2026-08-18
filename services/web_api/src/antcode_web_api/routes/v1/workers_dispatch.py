@@ -160,14 +160,14 @@ async def dispatch_task_to_worker(
     task_obj = await _get_dispatch_task(project_id, request.get("task_id"), project)
 
     run_id = str(uuid.uuid4())
+    # TaskRun 没有 project_id / created_by 列：项目与所有者都由 task_obj 反查
+    # (dispatch_authorization 同路径)。这两个 kwarg 原先被 Tortoise 静默丢弃。
     task_run = await TaskRun.create(
         run_id=run_id,
         public_id=run_id.replace("-", ""),
         task_id=task_obj.id,
-        project_id=project.id,
         status="pending",
         dispatch_status="pending",
-        created_by=current_user.user_id,
         created_at=datetime.now(UTC),
     )
 

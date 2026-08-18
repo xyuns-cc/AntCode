@@ -43,6 +43,7 @@ from antcode_core.domain.models.enums import (
     TaskStatus,
 )
 from antcode_core.domain.models.project import ProjectRule
+from antcode_core.domain.models.task_run import TASK_ID_ABSENT
 
 DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS = 3600
 
@@ -234,8 +235,7 @@ class CrawlBatchDispatcherService:
         - 但 dispatch **失败且补派入队也失败**时，改为 **删除刚建的 TaskRun**
           （旧实现是 UPDATE status=FAILED），这样 ``_already_dispatched_urls``
           不会再把这个 URL 当"已派发"，下次 ``batch_resumed`` 能重试。
-        - 外层 Exception 同理：清理孤儿 TaskRun，异常继续向上抛让 ingest
-          loop 走 PEL 重投。
+        - 外层 Exception 同理：清理孤儿 TaskRun，异常向上抛走 PEL 重投。
         """
         # 组装 rule dict（覆盖 target_url 为本次 URL）
         rule_dict = rule.to_dispatch_dict()
@@ -251,9 +251,12 @@ class CrawlBatchDispatcherService:
             if existing is not None and not is_recoverable_dispatch(existing):
                 return True
             if existing is None:
+                # 所有者由 result_data.crawl_batch_id 反查 CrawlBatch.user_id 得到
+                # （dispatch_authorization / spider_run_access 同一契约）。批次 run
+                # 没有 Task 行，TASK_ID_ABSENT 是这个契约的显式标记。
                 await TaskRun.create(
                     run_id=run_id,
-                    task_id=0,
+                    task_id=TASK_ID_ABSENT,
                     status=TaskStatus.PENDING,
                     dispatch_status=DispatchStatus.PENDING,
                     start_time=None,
@@ -261,21 +264,18 @@ class CrawlBatchDispatcherService:
                         "crawl_batch_id": batch.public_id,
                         "seed_url": url,
                     },
-                    created_by=batch.user_id,
                 )
             task_run_prepared = True
 
             # 派发
             from antcode_core.application.services.workers import worker_task_dispatcher
 
-            # R1-P0-1 (审查报告): worker engine._build_task_payload 里
-            # ``kwargs = params.get("kwargs", {}) if isinstance(params.get("kwargs", {}), dict) else params``
-            # 当 params.kwargs 缺失时三元取空 dict 而非兜底整个 params，
-            # RulePlugin.validate 就报"缺少 target_url/extraction_rules"。
-            # 与 spider_dispatcher.py 的 P16 修复对齐——rule_detail 必须
-            # 塞在 ``params.kwargs`` 里。crawl_batch_id 保留顶层供审计追溯。
-            # batch.timeout 是单次 HTTP DOWNLOAD_TIMEOUT，不能复用成整个爬虫
-            # 进程的任务超时。批次默认请求超时 30 秒，但总任务通常远超 30 秒。
+            # R1-P0-1 (审查报告): worker engine._build_task_payload 在 params.kwargs
+            # 缺失时三元取空 dict 而非兜底整个 params，RulePlugin.validate 就报
+            # "缺少 target_url/extraction_rules"。与 spider_dispatcher.py 的 P16 修复
+            # 对齐——rule_detail 必须塞在 ``params.kwargs`` 里；crawl_batch_id 保留顶层
+            # 供审计追溯。batch.timeout 只是单次 HTTP DOWNLOAD_TIMEOUT（默认 30 秒），
+            # 不能复用成整个爬虫进程的任务超时，后者通常远大于它。
             task_timeout = DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,

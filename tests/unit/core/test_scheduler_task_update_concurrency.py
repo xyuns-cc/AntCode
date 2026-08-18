@@ -62,6 +62,17 @@ def _configure_service(monkeypatch, *, publish: AsyncMock | None = None):
     return service
 
 
+def _configure_projection(monkeypatch, service):
+    """提交后 update_task 回读带投影的任务；本文件只测写入语义，回读用哨兵替身。
+
+    回读本身的真实契约（必须带 project_public_id）由
+    tests/unit/core/test_task_update_response_projection.py 覆盖。
+    """
+    projected = SimpleNamespace(id=None, name="projected")
+    monkeypatch.setattr(service, "get_task_by_id", AsyncMock(return_value=projected))
+    return projected
+
+
 @pytest.mark.asyncio
 async def test_patch_locks_fresh_row_and_updates_only_requested_fields(monkeypatch) -> None:
     stale = SimpleNamespace(id=9, status=TaskStatus.PENDING, is_active=True, failure_count=0)
@@ -85,10 +96,12 @@ async def test_patch_locks_fresh_row_and_updates_only_requested_fields(monkeypat
         AsyncMock(return_value=stale),
     )
     service = _configure_service(monkeypatch)
+    projected = _configure_projection(monkeypatch, service)
 
     result = await service.update_task("task-public", TaskUpdateRequest(name="after"), user_id=7)
 
-    assert result is fresh
+    assert result is projected
+    service.get_task_by_id.assert_awaited_once_with(9, 7)
     assert (fresh.name, fresh.status, fresh.is_active, fresh.failure_count) == (
         "after",
         TaskStatus.RUNNING,
@@ -148,6 +161,7 @@ async def test_control_plane_outbox_is_written_inside_update_transaction(monkeyp
     transaction, _, _ = _configure_locked_task(monkeypatch, fresh)
     publish = AsyncMock(side_effect=assert_in_transaction)
     service = _configure_service(monkeypatch, publish=publish)
+    projected = _configure_projection(monkeypatch, service)
     monkeypatch.setattr(
         scheduler_module.QueryHelper,
         "get_by_id_or_public_id",
@@ -156,7 +170,7 @@ async def test_control_plane_outbox_is_written_inside_update_transaction(monkeyp
 
     result = await service.update_task("task-public", TaskUpdateRequest(name="after"), user_id=7)
 
-    assert result is fresh
+    assert result is projected
     fresh.save.assert_awaited_once_with(using_db=transaction.connection, update_fields=["name"])
     publish.assert_awaited_once_with("task_changed", 5, connection=transaction.connection)
 
@@ -174,6 +188,7 @@ async def test_is_active_toggle_publishes_inside_the_same_transaction(monkeypatc
     transaction, _, _ = _configure_locked_task(monkeypatch, fresh)
     publish = AsyncMock(side_effect=assert_in_transaction)
     service = _configure_service(monkeypatch, publish=publish)
+    projected = _configure_projection(monkeypatch, service)
     monkeypatch.setattr(
         scheduler_module.QueryHelper,
         "get_by_id_or_public_id",
@@ -182,7 +197,7 @@ async def test_is_active_toggle_publishes_inside_the_same_transaction(monkeypatc
 
     result = await service.update_task("task-public", TaskUpdateRequest(is_active=False), user_id=7)
 
-    assert result is fresh
+    assert result is projected
     assert fresh.is_active is False
     fresh.save.assert_awaited_once_with(using_db=transaction.connection, update_fields=["is_active"])
     publish.assert_awaited_once_with("task_changed", TASK_ID, connection=transaction.connection)

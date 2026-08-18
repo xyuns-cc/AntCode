@@ -22,12 +22,27 @@ async def update_task(
     ensure_worker_access: Callable[[Any, Any], Awaitable[None]],
     create_task_response: Callable[[Any], Any],
 ):
+    """更新任务。
+
+    ``ValueError -> 400`` 只覆盖写入阶段：那里 ValueError 确实只由入参校验
+    （触发器配置、Worker 不存在）抛出。响应组装阶段留在 try 之外——它抛
+    ValueError 表示查询投影缺字段，是服务端缺陷，必须以 5xx 暴露而不是被
+    归类成"参数非法"返回 400（那正是"写入已生效却报失败"的来源）。
+    """
+    task = await _write_task_update(task_id, task_data, current_user, ensure_worker_access=ensure_worker_access)
+    return success_response(create_task_response(task), message=Messages.UPDATED_SUCCESS)
+
+
+async def _write_task_update(
+    task_id: str,
+    task_data: TaskUpdateRequest,
+    current_user: Any,
+    *,
+    ensure_worker_access: Callable[[Any, Any], Awaitable[None]],
+):
     try:
         await ensure_worker_access(task_data, current_user)
         task = await scheduler_service.update_task(task_id, task_data, current_user.user_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        return success_response(create_task_response(task), message=Messages.UPDATED_SUCCESS)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -36,6 +51,9 @@ async def update_task(
     except Exception as exc:
         logger.error(f"更新任务失败: {exc}")
         raise HTTPException(status_code=500, detail="更新任务失败") from exc
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
 
 
 __all__ = ["update_task"]

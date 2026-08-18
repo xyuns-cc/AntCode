@@ -28,10 +28,11 @@ from __future__ import annotations
 
 from tortoise import fields
 from tortoise.indexes import Index
-from tortoise.models import Model
+
+from antcode_core.domain.models.base import StrictFieldsModel
 
 
-class TaskLog(Model):
+class TaskLog(StrictFieldsModel):
     """任务执行日志行（一次任务运行会产生 N 行）。"""
 
     id = fields.BigIntField(primary_key=True)

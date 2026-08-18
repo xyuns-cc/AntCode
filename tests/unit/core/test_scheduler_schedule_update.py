@@ -8,6 +8,7 @@ from antcode_core.domain.schemas.task import TaskUpdateRequest
 
 from tests.unit.core.test_scheduler_task_update_concurrency import (
     _configure_locked_task,
+    _configure_projection,
     _configure_service,
     scheduler_module,
 )
@@ -30,6 +31,7 @@ async def test_schedule_type_change_revalidates_and_reschedules(monkeypatch) -> 
     )
     _configure_locked_task(monkeypatch, fresh)
     service = _configure_service(monkeypatch)
+    projected = _configure_projection(monkeypatch, service)
     create_trigger = Mock(return_value=object())
     monkeypatch.setattr(service, "_create_trigger", create_trigger)
     monkeypatch.setattr(
@@ -47,7 +49,7 @@ async def test_schedule_type_change_revalidates_and_reschedules(monkeypatch) -> 
         user_id=7,
     )
 
-    assert result is fresh
+    assert result is projected
     assert fresh.schedule_type == ScheduleType.INTERVAL
     assert fresh.cron_expression is None
     assert fresh.interval_seconds == UPDATED_INTERVAL_SECONDS

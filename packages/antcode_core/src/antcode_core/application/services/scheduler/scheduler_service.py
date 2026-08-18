@@ -85,9 +85,7 @@ class SchedulerService:
 
         # P2: 补齐响应组装依赖的外键 public_id/username 快照,避免
         # TaskResponseBuilder 里 _resolve_public_id 抛"响应对象缺少 project_public_id"。
-        from antcode_core.application.services.users.user_service import (
-            user_service,
-        )
+        from antcode_core.application.services.users.user_service import user_service
         from antcode_core.domain.models import Project
 
         project = await Project.get_or_none(id=project_id)
@@ -277,7 +275,9 @@ class SchedulerService:
                 await task.save(using_db=conn, update_fields=list(update_data))
             await self._publish_event("task_changed", task.id, connection=conn)
         logger.info(f"任务更新成功: {task.name} (ID: {task.id})")
-        return task
+        # 事务内锁到的是裸 ORM 行，缺 project_public_id 等投影字段，直接交给
+        # TaskResponseBuilder 会抛 ValueError。回读让 PUT 响应与 GET 详情同构。
+        return await self.get_task_by_id(task.id, user_id)
 
     def _validate_updated_trigger(self, task):
         try:

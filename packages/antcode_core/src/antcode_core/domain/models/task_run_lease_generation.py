@@ -2,12 +2,12 @@
 
 from tortoise import fields
 from tortoise.indexes import Index
-from tortoise.models import Model
 
 from antcode_core.common.redis_stream_id import MAX_STREAM_ID_LENGTH
+from antcode_core.domain.models.base import StrictFieldsModel
 
 
-class TaskRunLeaseGeneration(Model):
+class TaskRunLeaseGeneration(StrictFieldsModel):
     id = fields.BigIntField(primary_key=True)
     run_id = fields.CharField(max_length=64)
     worker_id = fields.BigIntField()

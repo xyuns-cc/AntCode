@@ -16,6 +16,11 @@ from antcode_core.domain.models.enums import (
     TaskStatus,
 )
 
+# 爬取批次派发的 run 不挂在任何 Task 行下，task_id 用该标记值表示"无关联 Task"。
+# 这类 run 的项目与所有者统一由 result_data["crawl_batch_id"] 反查 CrawlBatch 得到，
+# 见 workers/spider_run_access.py 与 workers/dispatch_authorization.py。
+TASK_ID_ABSENT = 0
+
 
 class TaskRun(BaseModel):
     """任务执行实例模型
@@ -116,5 +121,6 @@ class TaskRun(BaseModel):
 
 
 __all__ = [
+    "TASK_ID_ABSENT",
     "TaskRun",
 ]

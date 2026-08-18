@@ -18,10 +18,12 @@ migration(或在开发环境走 ``scripts/init_db.py`` 的
 - ``expires_at`` index: 后续可加定时清理过期记录的 job
 """
 
-from tortoise import fields, models
+from tortoise import fields
+
+from antcode_core.domain.models.base import StrictFieldsModel
 
 
-class UserSession(models.Model):
+class UserSession(StrictFieldsModel):
     """用户会话记录(refresh token jti)
 
     P1-09: refresh token 从纯 JWT 升级为 JWT + 服务端 jti 记录, 支持:
