@@ -19,7 +19,7 @@ from antcode_core.domain.schemas.task import (
 from antcode_core.domain.schemas.task import (
     TaskUpdateRequest as TaskUpdate,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
 from tortoise.exceptions import IntegrityError
 
@@ -34,32 +34,27 @@ from antcode_web_api.response import (
     success as success_response,
 )
 
-# P2 拆分: batch-delete + batch 2 个 handler + _operate_task helper +
-# TaskBatchRequest schema 移至 tasks_batch.py。顶层 re-export schema。
+# P2 拆分: batch handler + _operate_task + TaskBatchRequest 移至 tasks_batch.py，顶层 re-export schema。
 from antcode_web_api.routes.v1 import tasks_batch as _tasks_batch
 
-# P2 拆分: pause/resume/trigger/execute/toggle 5 个 handler + 3 helper +
-# 2 schema (TaskExecuteRequest / TaskToggleRequest) 移至 tasks_execute.py。
+# P2 拆分: pause/resume/trigger/execute/toggle 的 handler / helper / schema 移至 tasks_execute.py。
 # 顶层 re-export schema 让测试 import tasks.TaskExecuteRequest 继续可命中。
 from antcode_web_api.routes.v1 import tasks_execute as _tasks_execute
 
-# P2 拆分: /running, /stats, /{task_id}/runs, /{task_id}/schedule-history,
-# /{task_id}/stats 5 个查询 handler + 6 个 helper 移至 tasks_query.py; 通过
-# register_query_routes 挂路由; 顶层 shim 让 tests 直接引用继续可命中。
+# P2 拆分: /running、/stats、/{task_id}/runs、/schedule-history 等查询 handler 移至 tasks_query.py;
+# 通过 register_query_routes 挂路由; 顶层 shim 让 tests 直接引用继续可命中。
 from antcode_web_api.routes.v1 import tasks_query as _tasks_query
 
-# P2 拆分: /runs/{run_id}/stop, /runs/{run_id}/logs, /runs/{run_id}/logs/download
-# 3 个 handler + 4 个 helper 移至 tasks_runs.py; 通过 register_runs_routes 挂路由,
-# 顶层 shim 保留 tasks._get_stoppable_execution / stop_task_execution 等测试引用。
-# 同时 re-export task_cancel 的 4 个符号让 tests monkeypatch tasks.is_unassigned_task_run
-# 等继续生效 (stop_task_execution 通过 tasks_module lookup)。
+# P2 拆分: /runs/{run_id} 的 stop/logs/logs-download 移至 tasks_runs.py，经 register_runs_routes 挂路由;
+# 顶层 shim 保留 tasks._get_stoppable_execution / stop_task_execution 等测试引用，并 re-export
+# task_cancel 的 4 个符号，让 tests monkeypatch tasks.is_unassigned_task_run 继续生效。
 from antcode_web_api.routes.v1 import tasks_runs as _tasks_runs
 
-# P2 拆分: 8 个 handler (validate-cron / templates / templates/create /
-# export / import / dependencies GET/PUT / duplicate) + 4 helper + 3 schema
-# + 1 常量 移至 tasks_transfer.py。顶层 re-export schema 与 TASK_TEMPLATES。
+# P2 拆分: validate-cron / templates / export / import / dependencies / duplicate 等 8 个 handler
+# 与配套 helper、schema、常量移至 tasks_transfer.py。顶层 re-export schema 与 TASK_TEMPLATES。
 from antcode_web_api.routes.v1 import tasks_transfer as _tasks_transfer
 from antcode_web_api.routes.v1 import tasks_update as _tasks_update
+from antcode_web_api.routes.v1.mutation_audit import audit_task_created, audit_task_deleted
 from antcode_web_api.routes.v1.runtime_access import ensure_worker_use_access
 from antcode_web_api.routes.v1.settlement_http import DELETE_ERRORS, deletion_http_exception
 from antcode_web_api.routes.v1.task_cancel import (  # noqa: F401
@@ -80,20 +75,16 @@ def create_task_response(task) -> TaskResponse:
     return TaskResponseBuilder.build_detail(task)
 
 
-# TaskExecuteRequest / TaskToggleRequest 定义已移至 tasks_execute.py; 顶层 re-export
-# 保证 tests / 其它模块 import tasks.TaskExecuteRequest 继续可命中。
+# 下面三组 schema / 常量的定义已随 handler 拆到各自模块（tasks_execute /
+# tasks_batch / tasks_transfer）; 顶层 re-export 保证 tests 与其它模块
+# import tasks.TaskExecuteRequest 等继续可命中。
 TaskExecuteRequest = _tasks_execute.TaskExecuteRequest
 TaskToggleRequest = _tasks_execute.TaskToggleRequest
 
 
-# TaskBatchRequest 定义已移至 tasks_batch.py; 顶层 re-export 保证
-# tests import tasks.TaskBatchRequest 继续可命中。
 TaskBatchRequest = _tasks_batch.TaskBatchRequest
 
 
-# TaskDuplicateRequest / TaskDependencyUpdateRequest / CronValidateRequest / TASK_TEMPLATES
-# 定义已移至 tasks_transfer.py; 顶层 re-export 保证测试引用 tasks.CronValidateRequest 等
-# 继续可命中。
 TaskDuplicateRequest = _tasks_transfer.TaskDuplicateRequest
 TaskDependencyUpdateRequest = _tasks_transfer.TaskDependencyUpdateRequest
 CronValidateRequest = _tasks_transfer.CronValidateRequest
@@ -170,7 +161,7 @@ async def _ensure_specified_worker_access(task_data: TaskCreate | TaskUpdate, cu
 
 
 @tasks_router.post("", response_model=BaseResponse[TaskResponse])
-async def create_task(task_data: TaskCreate, current_user=Depends(get_current_user)):
+async def create_task(task_data: TaskCreate, current_user=Depends(get_current_user), *, http_request: Request):
     # 验证项目权限
     if not await relation_service.validate_project_user(task_data.project_id, current_user.user_id):
         raise HTTPException(
@@ -196,7 +187,7 @@ async def create_task(task_data: TaskCreate, current_user=Depends(get_current_us
             internal_project_id=project.id,  # 传递内部 id
             specified_worker_id=specified_worker_id,
         )
-
+        await audit_task_created(http_request, current_user, task)
         return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
     except HTTPException:
         raise
@@ -415,11 +406,12 @@ async def get_task(task_id, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="获取任务失败")
 
 
-async def update_task(task_id, task_data: TaskUpdate, current_user=Depends(get_current_user)):
+async def update_task(task_id, task_data: TaskUpdate, current_user=Depends(get_current_user), *, http_request: Request):
     return await _tasks_update.update_task(
         task_id,
         task_data,
         current_user,
+        http_request=http_request,
         ensure_worker_access=_ensure_specified_worker_access,
         create_task_response=create_task_response,
     )
@@ -429,11 +421,19 @@ tasks_router.put("/{task_id}", response_model=BaseResponse[TaskResponse])(update
 
 
 @tasks_router.delete("/{task_id}", response_model=BaseResponse)
-async def delete_task(task_id, current_user=Depends(get_current_user)):
+async def delete_task(task_id, current_user=Depends(get_current_user), *, http_request: Request):
     try:
+        # 先读名字：删除后就再也拿不到，审计里只留 public_id 等于没有可读线索。
+        doomed = await scheduler_service.get_task_by_id(task_id, current_user.user_id)
         deleted = await scheduler_service.delete_task(task_id, current_user.user_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Task not found")
+        await audit_task_deleted(
+            http_request,
+            current_user,
+            task_id=str(task_id),
+            task_name=doomed.name if doomed else str(task_id),
+        )
         return success_response(None, message=Messages.DELETED_SUCCESS)
     except HTTPException:
         raise
@@ -456,9 +456,8 @@ async def batch_operate_tasks(request, current_user=None):
 _operate_task = _tasks_batch._operate_task
 
 
-# P2 拆分: pause/resume/trigger/execute/toggle 5 个 handler + 3 helper +
-# 2 schema 移至 tasks_execute.py, 通过 register_execute_routes 挂路由。
-# 顶层保留 shim 让 tests / 其它模块 import 继续可命中。
+# P2 拆分: pause/resume/trigger/execute/toggle 的 handler / helper / schema 移至
+# tasks_execute.py，经 register_execute_routes 挂路由；顶层保留 shim 供测试引用。
 async def pause_task(task_id, current_user=None):
     return await _tasks_execute.pause_task(task_id, current_user)
 
@@ -467,16 +466,17 @@ async def resume_task(task_id, current_user=None):
     return await _tasks_execute.resume_task(task_id, current_user)
 
 
-async def trigger_task(task_id, current_user=None):
-    return await _tasks_execute.trigger_task(task_id, current_user)
+async def trigger_task(task_id, current_user=None, *, http_request):
+    return await _tasks_execute.trigger_task(task_id, current_user, http_request=http_request)
 
 
-async def execute_task(task_id: str, request, current_user=None):
-    return await _tasks_execute.execute_task(task_id, request, current_user)
+async def execute_task(task_id: str, request, current_user=None, *, http_request):
+    return await _tasks_execute.execute_task(task_id, request, current_user, http_request=http_request)
 
 
-async def toggle_task(task_id: str, request, current_user=None):
-    return await _tasks_execute.toggle_task(task_id, request, current_user, create_task_response=create_task_response)
+async def toggle_task(task_id: str, request, current_user=None, *, http_request):
+    kwargs = {"http_request": http_request, "create_task_response": create_task_response}
+    return await _tasks_execute.toggle_task(task_id, request, current_user, **kwargs)
 
 
 # helper / 常量 module-alias 供测试与其它模块继续引用
@@ -498,12 +498,12 @@ _duplicate_worker_id = _tasks_transfer._duplicate_worker_id
 _duplicate_task_data = _tasks_transfer._duplicate_task_data
 
 
-# P2 拆分: stop_task_execution / get_task_execution_logs / download_task_execution_logs
-# + 4 helper 移至 tasks_runs.py, 通过 register_runs_routes 挂路由。顶层 shim 保留
-# tasks._get_stoppable_execution 等测试引用可继续可命中; stop_task_execution 通过
-# tasks_module=sys.modules[__name__] lookup 让 monkeypatch(tasks, ...) 生效。
-async def stop_task_execution(run_id: str, current_user=None):
-    return await _tasks_runs.stop_task_execution(run_id, current_user, tasks_module=_sys.modules[__name__])
+# P2 拆分: /runs/{run_id} 的 stop/logs/download + 4 helper 移至 tasks_runs.py，经
+# register_runs_routes 挂路由；顶层 shim 保留 tasks._get_stoppable_execution 等测试
+# 引用，stop 经 tasks_module=sys.modules[__name__] 让 monkeypatch(tasks, ...) 生效。
+async def stop_task_execution(run_id: str, current_user=None, *, http_request):
+    module = _sys.modules[__name__]
+    return await _tasks_runs.stop_task_execution(run_id, current_user, http_request=http_request, tasks_module=module)
 
 
 async def get_task_execution_logs(run_id: str, page: int = 1, size: int = 200, current_user=None):

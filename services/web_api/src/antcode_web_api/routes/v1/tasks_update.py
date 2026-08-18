@@ -12,6 +12,7 @@ from loguru import logger
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
+from antcode_web_api.routes.v1.mutation_audit import audit_task_updated
 
 
 async def update_task(
@@ -19,6 +20,7 @@ async def update_task(
     task_data: TaskUpdateRequest,
     current_user: Any,
     *,
+    http_request: Any,
     ensure_worker_access: Callable[[Any, Any], Awaitable[None]],
     create_task_response: Callable[[Any], Any],
 ):
@@ -28,8 +30,12 @@ async def update_task(
     （触发器配置、Worker 不存在）抛出。响应组装阶段留在 try 之外——它抛
     ValueError 表示查询投影缺字段，是服务端缺陷，必须以 5xx 暴露而不是被
     归类成"参数非法"返回 400（那正是"写入已生效却报失败"的来源）。
+
+    审计紧跟写入之后、响应组装之前：写入已提交就必须留痕，不能因为随后的
+    投影失败把这条记录一起丢掉。
     """
     task = await _write_task_update(task_id, task_data, current_user, ensure_worker_access=ensure_worker_access)
+    await audit_task_updated(http_request, current_user, task, changed_fields=sorted(task_data.model_fields_set))
     return success_response(create_task_response(task), message=Messages.UPDATED_SUCCESS)
 
 

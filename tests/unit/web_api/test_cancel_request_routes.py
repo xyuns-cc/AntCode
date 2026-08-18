@@ -44,7 +44,7 @@ async def test_cancel_run_records_request_before_control_and_reports_honestly(mo
 
 
 @pytest.mark.asyncio
-async def test_stop_route_waits_for_worker_terminal_result(monkeypatch) -> None:
+async def test_stop_route_waits_for_worker_terminal_result(monkeypatch, http_request) -> None:
     record = AsyncMock(return_value=True)
     mark_terminal = AsyncMock()
     monkeypatch.setattr(tasks_runs, "_get_stoppable_execution", AsyncMock(return_value=_assigned_execution()))
@@ -52,7 +52,7 @@ async def test_stop_route_waits_for_worker_terminal_result(monkeypatch) -> None:
     monkeypatch.setattr(tasks_runs, "_try_send_stop_event_with_reason", AsyncMock(return_value=(True, None)))
     monkeypatch.setattr(tasks_runs, "mark_task_run_cancelled", mark_terminal)
 
-    response = await tasks_runs.stop_task_execution("run-1", SimpleNamespace(user_id=3))
+    response = await tasks_runs.stop_task_execution("run-1", SimpleNamespace(user_id=3), http_request=http_request)
 
     assert response.data["status"] == "cancel_requested"
     assert response.data["remote_cancelled"] is True

@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from urllib.parse import urlsplit
 
 from antcode_contracts.network_security import (
     HostResolutionUnavailable,
+    is_metadata_target,
+    is_non_public_address,
     resolve_host_addresses,
 )
 from scrapy.exceptions import IgnoreRequest
+
+logger = logging.getLogger(__name__)
+
+_REJECT_PREFIX = "Rule 请求 URL 被出网安全策略拒绝"
+_EGRESS_POLICY_HINT = (
+    "规则爬虫只允许访问公网 HTTP(S) 目标；要抓内网站点需由管理员在能访问该网段的 "
+    "Worker 上另行开通，改目标 URL 无法绕过。"
+)
 
 
 class SafeEgressProxyMiddleware:
@@ -33,17 +44,52 @@ class SafeEgressProxyMiddleware:
         return None
 
 
+def _loggable_url(url: str) -> str:
+    """只回显调用方自己写的 scheme/host/path，丢掉 userinfo 与 query。"""
+    try:
+        parsed = urlsplit(url)
+    except (TypeError, ValueError):
+        return "<无法解析的 URL>"
+    if not parsed.hostname:
+        return f"{parsed.scheme}:<缺少主机>"
+    return f"{parsed.scheme}://{parsed.hostname}{parsed.path}"
+
+
+def _restricted_target_reason(hostname: str) -> str:
+    """给出可区分的拒绝类别，但**绝不回显解析结果**。
+
+    把 hostname 解析到的地址回显给调用方，等于把规则项目变成探测内网的
+    地址预言机；类别足以指导整改，地址只对攻击者有价值。
+    """
+    if is_metadata_target(hostname):
+        return "目标主机是云元数据端点"
+    if is_non_public_address(hostname):
+        return "目标主机是回环 / 私网 / 保留地址"
+    return "目标主机名解析到受限地址"
+
+
+def _reject(url: str, reason: str) -> IgnoreRequest:
+    """让拒绝理由离开 Worker 进程。
+
+    Scrapy 对 ``IgnoreRequest`` 刻意不记日志：中间件自己不打，理由就从生成到
+    丢弃从未出现在任何地方，用户只看到"退出码: 1"，与"选择器没匹配到"和
+    "站点不可达"完全无法区分。这条 error 走 stderr 进 task_logs。
+    """
+    logger.error("%s: url=%s 原因=%s。%s", _REJECT_PREFIX, _loggable_url(url), reason, _EGRESS_POLICY_HINT)
+    return IgnoreRequest(f"{_REJECT_PREFIX}: {reason}")
+
+
 def _validate_request_url(url: str) -> None:
     try:
         parsed = urlsplit(url)
     except (TypeError, ValueError) as exc:
-        raise IgnoreRequest("Rule 请求 URL 格式无效") from exc
+        raise _reject(url, "URL 格式无效") from exc
     if parsed.scheme.lower() not in {"http", "https"}:
-        raise IgnoreRequest("Rule 仅允许访问 HTTP(S) URL")
+        raise _reject(url, "仅允许 HTTP(S) URL")
     if not parsed.hostname:
-        raise IgnoreRequest("Rule 请求 URL 缺少主机")
+        raise _reject(url, "URL 缺少主机")
     if parsed.username or parsed.password:
-        raise IgnoreRequest("Rule 请求 URL 不允许包含用户凭证")
+        raise _reject(url, "URL 不允许包含用户凭证")
     # SSRF fail-closed: 拒绝回环/私网/链路本地/云元数据目标。复用 Git/webhook
     # 同款纯解析器，但 Rule 子进程始终传 allow_private=False，不继承应用层
     # ALLOW_PRIVATE_NODES。playwright 引擎下 Chromium 对 loopback
@@ -64,9 +110,11 @@ def _validate_request_url(url: str) -> None:
         # 该 proxy 由 engine.rule_egress.rule_egress_plan 对所有 rule 计划无条件
         # 启用,与 sandbox_mode 无关,因此没有绕过它的出口。此处继续判定只会把全部
         # 外部域名误杀成 IgnoreRequest。
+        # 判定移交是正常路径，沙箱里每个外部请求都会走到，只记 debug 免得刷屏。
+        logger.debug("Rule 沙箱内无 DNS，目标主机判定移交 Worker 侧受限代理: url=%s", _loggable_url(url))
         return
     except ValueError as exc:
-        raise IgnoreRequest(f"Rule 请求 URL 指向受限网络地址: {exc}") from exc
+        raise _reject(url, _restricted_target_reason(parsed.hostname)) from exc
 
 
 __all__ = ["SafeEgressProxyMiddleware"]

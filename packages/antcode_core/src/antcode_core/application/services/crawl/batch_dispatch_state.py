@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import uuid
+from enum import StrEnum
 
 from antcode_core.domain.models import TaskRun
 from antcode_core.domain.models.enums import DispatchStatus, TaskStatus
 
 _RUN_NAMESPACE = uuid.UUID("f431119c-e8f1-4778-afef-b70f680bf90c")
+
+
+class SeedDispatchOutcome(StrEnum):
+    """单个 seed URL 的派发结果。
+
+    四态而不是 bool：``REDISPATCH_ENQUEUED`` 与 ``DISPATCHED`` 都让事件可以
+    ACK，但它**不是**"已派发"——把两者合成一个 True 正是日志打出
+    ``dispatched=1 failed=0`` 却 100% 派发失败的来源。
+    """
+
+    DISPATCHED = "dispatched"
+    ALREADY_DISPATCHED = "already_dispatched"
+    REDISPATCH_ENQUEUED = "redispatch_enqueued"
+    FAILED = "failed"
 
 
 def crawl_batch_run_id(batch_id: str, seed_url: str) -> str:
@@ -40,6 +55,7 @@ async def mark_redispatch_enqueued(run_id: str) -> None:
 
 
 __all__ = [
+    "SeedDispatchOutcome",
     "crawl_batch_run_id",
     "is_recoverable_dispatch",
     "mark_dispatch_succeeded",

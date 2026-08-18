@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from antcode_core.application.services.users.user_online_status import is_user_online
 from antcode_core.application.services.users.user_service import user_service
 from antcode_core.common.security.auth import (
     TokenData,
@@ -37,19 +38,15 @@ from antcode_web_api.routes.v1.committed_resource_audit import (
     audit_user_role_changed,
     audit_user_updated,
 )
+from antcode_web_api.routes.v1.mutation_audit import audit_password_changed
 from antcode_web_api.routing import promote_static_routes
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 router = APIRouter()
 
 
-def _build_user_response(user) -> UserResponse:
-    """构建用户响应"""
-    is_online = False
-    if user.last_login_at:
-        now = datetime.now(user.last_login_at.tzinfo) if user.last_login_at.tzinfo else datetime.now()
-        is_online = (now - user.last_login_at).total_seconds() <= user_service.ONLINE_WINDOW_SECONDS
-
+async def _build_user_response(user) -> UserResponse:
+    """构建用户响应；在线与否只认 user_sessions，不认 last_login_at 窗口。"""
     return UserResponse(
         id=user.public_id,
         username=user.username,
@@ -60,7 +57,7 @@ def _build_user_response(user) -> UserResponse:
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,
-        is_online=is_online,
+        is_online=await is_user_online(user.id),
     )
 
 
@@ -148,7 +145,7 @@ async def create_user(
     try:
         user = await user_service.create_user(request)
         await audit_user_created(http_request, admin_user, user)
-        return success(_build_user_response(user), message=Messages.CREATED_SUCCESS, code=201)
+        return success(await _build_user_response(user), message=Messages.CREATED_SUCCESS, code=201)
     except IntegrityError as e:
         err_msg = str(e)
         if "用户名" in err_msg:
@@ -173,7 +170,7 @@ async def get_user_detail(user_id: str, current_user: TokenData = Depends(get_cu
     if not current_user_obj.is_admin and current_user_obj.id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
 
-    return success(_build_user_response(user), message=Messages.QUERY_SUCCESS)
+    return success(await _build_user_response(user), message=Messages.QUERY_SUCCESS)
 
 
 @router.post(
@@ -190,9 +187,8 @@ async def set_user_role(
 ):
     """仅 SUPER_ADMIN 调用；专用于角色变更，自动同步 is_admin。
 
-    强制要求 ``old_role`` + ``new_role`` 显式传参，路由层校验 ``old_role`` 与
-    DB 当前 role 一致（防 stale UI），并在审计日志里同时留下 old/new 快照，
-    使任何提权/降权动作都留痕。
+    强制显式传 ``old_role`` + ``new_role``，路由层校验 ``old_role`` 与 DB 现值一致
+    （防 stale UI），审计里留 old/new 快照，使任何提权/降权动作都留痕。
     """
     target = await user_service.get_user_by_public_id(user_id)
     if not target:
@@ -232,7 +228,7 @@ async def set_user_role(
         old_role=old_role_enum.value,
         old_is_admin=old_is_admin,
     )
-    return success(_build_user_response(target), message="角色已更新")
+    return success(await _build_user_response(target), message="角色已更新")
 
 
 @router.put("/{user_id}", response_model=BaseResponse, summary="更新用户信息", tags=["用户管理"])
@@ -245,12 +241,9 @@ async def update_user(
     """更新用户资料（用户名 / 邮箱 / 启用状态）。
 
     安全约束：
-    - Schema 已经通过 ``extra="forbid"`` 拒绝 ``role``/``is_admin``/``password``
-      等权限或凭证字段——请求里带这些字段会直接被 Pydantic 以 422 拦截。
-    - 普通 ``admin`` **不能**修改其他 admin/super_admin 的资料，只有 super_admin
-      才能修改管理员账户（普通 admin 仅能改自己 + 改普通用户）。
-    - 角色变更请走 ``POST /users/{id}/role``，密码变更请走
-      ``POST /users/change-password`` 或 ``PUT /users/{id}/reset-password``。
+    - Schema 的 ``extra="forbid"`` 会以 422 拒绝 ``role``/``is_admin``/``password``。
+    - 普通 ``admin`` 不能修改其他 admin/super_admin 的资料，只有 super_admin 才行。
+    - 角色变更走 ``POST /users/{id}/role``，密码变更走 change-password / reset-password。
     """
     current_user_obj = await user_service.get_user_by_id(current_user.user_id)
     if not current_user_obj:
@@ -264,8 +257,7 @@ async def update_user(
     if not current_user_obj.is_admin and not is_self:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
 
-    # 关键防线：admin 不能横向修改其他 admin/super_admin 的资料，只有 super_admin 才行。
-    # 这堵住了「admin 通过通用更新接口踩点管理员账号」的场景。
+    # 关键防线：堵住「admin 通过通用更新接口横向踩点其它管理员账号」的场景。
     if not is_self and target_user.is_admin and not await verify_super_admin(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -308,7 +300,7 @@ async def update_user(
             description=description,
         )
 
-        return success(_build_user_response(user), message=Messages.UPDATED_SUCCESS)
+        return success(await _build_user_response(user), message=Messages.UPDATED_SUCCESS)
     except IntegrityError as e:
         detail = str(e)
         if "用户名" in detail:
@@ -331,12 +323,13 @@ async def update_user_password(
     user_id: str,
     request: UserPasswordUpdateRequest,
     current_user: TokenData = Depends(get_current_user),
+    *,
+    http_request: Request,
 ):
     """修改用户密码。
 
-    该端点**仅允许用户改自己的密码**，并强制校验当前密码。管理员/超管
-    重置他人密码请走 ``PUT /users/{id}/reset-password``（需 super_admin），
-    以此避免「普通 admin 拿着任意 old_password 就能改超管密码」的提权路径。
+    仅允许用户改自己的密码并强制校验当前密码；管理员重置他人密码走
+    ``PUT /users/{id}/reset-password``（需 super_admin），避免提权路径。
     """
     target_user = await user_service.get_user_by_public_id(user_id)
     if not target_user:
@@ -348,6 +341,7 @@ async def update_user_password(
         )
     try:
         await user_service.update_user_password(user_id, request, current_user.user_id)
+        await audit_password_changed(http_request, current_user, target=target_user, reset_by_admin=False)
         return success(None, message="密码修改成功")
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
@@ -364,10 +358,13 @@ async def update_user_password(
 async def change_password(
     request: UserPasswordUpdateRequest,
     current_user: TokenData = Depends(get_current_user),
+    *,
+    http_request: Request,
 ):
     """修改当前用户密码"""
     try:
-        await user_service.update_user_password(current_user.user_id, request, current_user.user_id)
+        target = await user_service.update_user_password(current_user.user_id, request, current_user.user_id)
+        await audit_password_changed(http_request, current_user, target=target, reset_by_admin=False)
         return success(None, message="密码修改成功")
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
@@ -385,13 +382,16 @@ async def reset_user_password(
     user_id: str,
     request: UserAdminPasswordUpdateRequest,
     current_admin: TokenData = Depends(get_current_super_admin),
+    *,
+    http_request: Request,
 ):
     """重置用户密码（仅超级管理员）"""
     try:
-        await user_service.reset_user_password(user_id, request.new_password)
+        target = await user_service.reset_user_password(user_id, request.new_password)
     except ValueError as exc:
         status_code = status.HTTP_404_NOT_FOUND if str(exc) == "用户不存在" else status.HTTP_400_BAD_REQUEST
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    await audit_password_changed(http_request, current_admin, target=target, reset_by_admin=True)
     return success(None, message="密码重置成功")
 
 

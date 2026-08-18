@@ -19,7 +19,7 @@ from antcode_core.common.log_limits import MEBIBYTE
 from antcode_core.common.security.auth import get_current_user
 from antcode_core.domain.models import TaskRun
 from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
@@ -30,6 +30,7 @@ from antcode_web_api.response import (
 from antcode_web_api.response import (
     success as success_response,
 )
+from antcode_web_api.routes.v1.mutation_audit import audit_task_stopped
 from antcode_web_api.routes.v1.task_cancel import (
     CANCEL_TERMINAL_CONFLICT_STATUSES,
     CANCELLABLE_TASK_STATUSES,
@@ -85,16 +86,22 @@ async def _raise_if_stop_terminal_conflict(run_id: str, user_id: int) -> None:
         )
 
 
-async def stop_task_execution(run_id: str, current_user, *, tasks_module=None) -> BaseResponse[dict]:
-    """停止任务执行
+async def stop_task_execution(run_id: str, current_user, *, http_request, tasks_module=None) -> BaseResponse[dict]:
+    """停止任务执行；只有真的受理了停止才留审计。
 
-    T5: 对未被 dispatch 出去的执行（PENDING/QUEUED 且 worker_id 为空）使用 CAS
-    UPDATE 直接置为 CANCELLED，避免 read-modify-write 之间的竞态：若 UPDATE
-    实际命中 0 行，说明已被分发，改走 worker 控制平面。
+    停止是人为干预正在跑的东西，必须能追溯到人。审计放在受理之后：中途抛
+    400/409/503 表示没停成，不该在审计里留下"已停止"。
+    """
+    response = await _perform_task_stop(run_id, current_user, tasks_module=tasks_module)
+    await audit_task_stopped(http_request, current_user, run_id=run_id)
+    return response
 
-    ``tasks_module`` 由主 tasks.py 传入 (sys.modules[__name__]), handler 内
-    通过 ``tasks_module.<name>`` lookup 关键函数, 让测试 monkeypatch
-    ``tasks.is_unassigned_task_run`` 等能生效。
+
+async def _perform_task_stop(run_id: str, current_user, *, tasks_module=None) -> BaseResponse[dict]:
+    """T5: 未派发的执行（PENDING/QUEUED 且 worker_id 为空）用 CAS UPDATE 直接置
+    CANCELLED，避免 read-modify-write 竞态；命中 0 行说明已分发，改走 worker
+    控制平面。``tasks_module`` 由主 tasks.py 传入，handler 内经
+    ``tasks_module.<name>`` lookup 让测试 monkeypatch 生效。
     """
     tm = tasks_module
     get_stoppable = tm._get_stoppable_execution if tm else _get_stoppable_execution
@@ -205,14 +212,19 @@ def register_runs_routes(router, tasks_module) -> None:
     """
 
     @router.post("/runs/{run_id}/stop", response_model=BaseResponse[dict])
-    async def _stop_task_execution(run_id: str, current_user=Depends(get_current_user)):
+    async def _stop_task_execution(run_id: str, current_user=Depends(get_current_user), *, http_request: Request):
         """停止任务执行
 
         T5: 对未被 dispatch 出去的执行（PENDING/QUEUED 且 worker_id 为空）使用 CAS
         UPDATE 直接置为 CANCELLED，避免 read-modify-write 之间的竞态：若 UPDATE
         实际命中 0 行，说明已被分发，改走 worker 控制平面。
         """
-        return await stop_task_execution(run_id, current_user, tasks_module=tasks_module)
+        return await stop_task_execution(
+            run_id,
+            current_user,
+            http_request=http_request,
+            tasks_module=tasks_module,
+        )
 
     @router.get("/runs/{run_id}/logs", response_model=PaginationResponse[dict])
     async def _get_task_execution_logs(

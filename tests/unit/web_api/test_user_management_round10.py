@@ -47,10 +47,11 @@ async def test_create_user_maps_weak_password_to_bad_request(monkeypatch) -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("message", "expected_status"),
+    "case",
     [("用户不存在", status.HTTP_404_NOT_FOUND), ("密码强度不足", status.HTTP_400_BAD_REQUEST)],
 )
-async def test_reset_password_maps_user_errors(monkeypatch, message: str, expected_status: int) -> None:
+async def test_reset_password_maps_user_errors(monkeypatch, http_request, case) -> None:
+    message, expected_status = case
     monkeypatch.setattr(users.user_service, "reset_user_password", AsyncMock(side_effect=ValueError(message)))
 
     with pytest.raises(HTTPException) as exc_info:
@@ -58,6 +59,7 @@ async def test_reset_password_maps_user_errors(monkeypatch, message: str, expect
             "missing-user",
             UserAdminPasswordUpdateRequest(new_password="Strong#123"),
             current_admin=SimpleNamespace(user_id=1),
+            http_request=http_request,
         )
 
     assert exc_info.value.status_code == expected_status

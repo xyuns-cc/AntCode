@@ -12,17 +12,19 @@ from fastapi import HTTPException, status
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error", "expected_status"),
+    "case",
     [
         (RunSettlementPendingError("执行仍在结算"), 409),
         (RunSettlementGuardUnavailable("执行结算状态服务不可用"), 503),
     ],
 )
-async def test_task_delete_maps_settlement_errors(monkeypatch, error, expected_status) -> None:
+async def test_task_delete_maps_settlement_errors(monkeypatch, http_request, case) -> None:
+    error, expected_status = case
+    monkeypatch.setattr(tasks.scheduler_service, "get_task_by_id", AsyncMock(return_value=None))
     monkeypatch.setattr(tasks.scheduler_service, "delete_task", AsyncMock(side_effect=error))
 
     with pytest.raises(HTTPException) as exc_info:
-        await tasks.delete_task("task-1", SimpleNamespace(user_id=1))
+        await tasks.delete_task("task-1", SimpleNamespace(user_id=1), http_request=http_request)
 
     assert exc_info.value.status_code == expected_status
 

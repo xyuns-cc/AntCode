@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import antcode_core.application.services.crawl.batch_dispatcher_service as dispatcher_module
 import pytest
+from antcode_core.application.services.crawl.batch_dispatch_state import SeedDispatchOutcome
 from antcode_core.application.services.crawl.batch_dispatcher_service import (
     CrawlBatchDispatcherService,
 )
@@ -45,7 +46,10 @@ async def test_failed_batch_dispatch_persists_inferred_constraints(monkeypatch):
     monkeypatch.setattr(workers_module.worker_task_dispatcher, "dispatch_task", dispatch)
     monkeypatch.setattr(redispatch_module.redispatch_service, "enqueue", enqueue)
 
-    assert await service._dispatch_single_url(batch, project, rule, "https://a.test") is True
+    # 直派失败 + 入补派队列成功：结果是 REDISPATCH_ENQUEUED，不是"已派发"。
+    outcome = await service._dispatch_single_url(batch, project, rule, "https://a.test")
+
+    assert outcome is SeedDispatchOutcome.REDISPATCH_ENQUEUED
     assert dispatch.await_args.kwargs["region"] == "cn-east"
     assert dispatch.await_args.kwargs["require_render"] is True
     assert enqueue.await_args.kwargs["region"] == "cn-east"

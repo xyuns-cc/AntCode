@@ -11,6 +11,7 @@ from tortoise.transactions import in_transaction
 from antcode_core.application.services.users.user_cascade_delete import (
     cascade_delete_user_data,
 )
+from antcode_core.application.services.users.user_online_status import apply_online_status
 from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.domain.models.user import User, consume_dummy_password_check, password_fits_bcrypt
 from antcode_core.domain.schemas.common import PaginationInfo
@@ -45,15 +46,6 @@ class UserService:
 
     # 允许排序的字段
     ALLOWED_SORT_FIELDS = {"id", "username", "created_at"}
-    ONLINE_WINDOW_SECONDS = 900
-
-    @staticmethod
-    def _is_user_online(last_login_at: datetime | None) -> bool:
-        if not last_login_at:
-            return False
-
-        now = datetime.now(last_login_at.tzinfo) if last_login_at.tzinfo else datetime.now()
-        return (now - last_login_at).total_seconds() <= UserService.ONLINE_WINDOW_SECONDS
 
     def _normalize_cached_user_list(self, cached):
         """修复历史缓存字段缺失问题（updated_at）"""
@@ -212,7 +204,11 @@ class UserService:
         sort_by=None,
         sort_order=None,
     ):
-        """获取用户列表（带缓存）"""
+        """获取用户列表（带缓存）。
+
+        ``is_online`` 一律在缓存之外由 ``apply_online_status`` 现算：它是会话态，
+        缓存进去就会出现"人已踢下线、刷新仍显示在线"。
+        """
         normalized_search = search.strip() if search else None
         cache_key = self._generate_cache_key(
             page=page,
@@ -225,7 +221,7 @@ class UserService:
         )
 
         if cached := await user_cache.get(cache_key):
-            return self._normalize_cached_user_list(cached)
+            return await apply_online_status(self._normalize_cached_user_list(cached))
 
         # 构建查询
         query = User.all()
@@ -262,7 +258,6 @@ class UserService:
                     created_at=created_at,
                     updated_at=updated_at,
                     last_login_at=u.last_login_at,
-                    is_online=self._is_user_online(u.last_login_at),
                 )
             )
 
@@ -280,7 +275,7 @@ class UserService:
 
         await user_cache.set(cache_key, result)
 
-        return result
+        return await apply_online_status(result)
 
     async def get_simple_user_list(self):
         """获取简易用户列表（带缓存）"""
@@ -337,8 +332,8 @@ class UserService:
         logger.info(f"用户已更新: {user.username}")
         return user
 
-    async def update_user_password(self, user_id, request, current_user_id):
-        """更新用户密码（支持 public_id 和内部 id）"""
+    async def update_user_password(self, user_id, request, current_user_id) -> User:
+        """更新用户密码（支持 public_id 和内部 id）；返回被改密的用户供审计取名。"""
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -359,12 +354,15 @@ class UserService:
 
         user.set_password(request.new_password)
         await user.save()
+        # 改密即撤销全部会话：旧 refresh token 立刻失效，用户列表的"在线"
+        # 也随之翻成离线（在线判定读的正是 user_sessions.revoked_at）。
         await self.revoke_all_sessions(user.id)
 
         logger.info(f"密码已更新: {user.username}")
+        return user
 
-    async def reset_user_password(self, user_id, new_password):
-        """重置用户密码（支持 public_id 和内部 id）"""
+    async def reset_user_password(self, user_id, new_password) -> User:
+        """重置用户密码（支持 public_id 和内部 id）；返回被重置的用户供审计取名。"""
         user = await self.get_user_by_public_id(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -376,9 +374,11 @@ class UserService:
 
         user.set_password(new_password)
         await user.save()
+        # 同 update_user_password：重置后旧会话全部作废，在线状态随之翻转。
         await self.revoke_all_sessions(user.id)
 
         logger.info(f"密码已重置: {user.username}")
+        return user
 
     async def delete_user(self, user_id, current_user_id):
         """删除用户（支持 public_id 和内部 id，级联删除关联数据）

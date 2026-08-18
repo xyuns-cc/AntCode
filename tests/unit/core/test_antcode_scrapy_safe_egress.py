@@ -58,7 +58,7 @@ def test_safe_egress_rejects_non_http_urls(url: str) -> None:
     middleware = SafeEgressProxyMiddleware("http://127.0.0.1:32001")
     request = SimpleNamespace(url=url, meta={})
 
-    with pytest.raises(IgnoreRequest, match="HTTP"):
+    with pytest.raises(IgnoreRequest, match="仅允许 HTTP"):
         middleware.process_request(request, None)
 
 
@@ -78,7 +78,7 @@ def test_safe_egress_rejects_private_dns_answer(monkeypatch) -> None:
     )
     middleware = SafeEgressProxyMiddleware("http://127.0.0.1:32001")
 
-    with pytest.raises(IgnoreRequest, match="受限网络地址"):
+    with pytest.raises(IgnoreRequest, match="出网安全策略拒绝"):
         middleware.process_request(SimpleNamespace(url="https://example.com/", meta={}), None)
 
 
@@ -95,7 +95,7 @@ def test_safe_egress_rejects_hosts_file_loopback_without_dns(monkeypatch) -> Non
     )
     middleware = SafeEgressProxyMiddleware("http://127.0.0.1:32001")
 
-    with pytest.raises(IgnoreRequest, match="受限网络地址"):
+    with pytest.raises(IgnoreRequest, match="出网安全策略拒绝"):
         middleware.process_request(SimpleNamespace(url="http://localhost/", meta={}), None)
 
 
@@ -104,7 +104,7 @@ def test_safe_egress_rejects_metadata_host_even_without_dns(monkeypatch) -> None
     monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror)
     middleware = SafeEgressProxyMiddleware("http://127.0.0.1:32001")
 
-    with pytest.raises(IgnoreRequest, match="受限网络地址"):
+    with pytest.raises(IgnoreRequest, match="出网安全策略拒绝"):
         middleware.process_request(
             SimpleNamespace(url="http://metadata.google.internal/", meta={}),
             None,
@@ -117,7 +117,7 @@ def test_safe_egress_rejects_ip_literals_even_without_dns(monkeypatch, url: str)
     monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror)
     middleware = SafeEgressProxyMiddleware("http://127.0.0.1:32001")
 
-    with pytest.raises(IgnoreRequest, match="受限网络地址"):
+    with pytest.raises(IgnoreRequest, match="出网安全策略拒绝"):
         middleware.process_request(SimpleNamespace(url=url, meta={}), None)
 
 

@@ -1,13 +1,12 @@
 import type React from 'react'
 import { useState, useEffect, memo, useCallback } from 'react'
-import { Layout as AntLayout, Menu, Avatar, Dropdown, Button, Badge, Flex, Typography, theme } from 'antd'
+import { Layout as AntLayout, Menu, Avatar, Dropdown, Button, Flex, Typography, theme } from 'antd'
 import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   UserOutlined,
   LogoutOutlined,
   SettingOutlined,
-  BellOutlined,
   ClockCircleOutlined,
   CopyrightOutlined,
   GithubOutlined,
@@ -106,9 +105,6 @@ const Layout: React.FC = () => {
             </Flex>
             <Flex align="center" gap={12}>
               <ThemeToggle />
-              <Badge count={0} size="small">
-                <Button type="text" icon={<BellOutlined />} className={styles.headerButton} />
-              </Badge>
               <Dropdown menu={{ items: userMenuItems }} placement="bottomRight" arrow={{ pointAtCenter: true }}>
                 <Flex align="center" gap={8} className={styles.userInfo}>
                   <Avatar size={32} icon={<UserOutlined />} style={{ backgroundColor: token.colorPrimary, cursor: 'pointer' }} />

@@ -10,7 +10,7 @@ BAD_REQUEST = 400
 
 
 @pytest.mark.asyncio
-async def test_task_update_maps_schedule_validation_error_to_bad_request(monkeypatch) -> None:
+async def test_task_update_maps_schedule_validation_error_to_bad_request(monkeypatch, http_request) -> None:
     validation_error = ValueError("DATE 调度必须提供 scheduled_time")
     monkeypatch.setattr(tasks, "_ensure_specified_worker_access", AsyncMock())
     monkeypatch.setattr(
@@ -24,6 +24,7 @@ async def test_task_update_maps_schedule_validation_error_to_bad_request(monkeyp
             "task-public",
             TaskUpdateRequest(name="updated-task"),
             SimpleNamespace(user_id=7),
+            http_request=http_request,
         )
 
     assert captured.value.status_code == BAD_REQUEST
@@ -31,7 +32,7 @@ async def test_task_update_maps_schedule_validation_error_to_bad_request(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_response_projection_failure_is_not_reported_as_bad_request(monkeypatch) -> None:
+async def test_response_projection_failure_is_not_reported_as_bad_request(monkeypatch, http_request) -> None:
     """写入已提交后响应组装失败，不能再被当成"参数非法"返回 400。
 
     这正是走查里"PUT 返回 400 但 DB 改动已生效"的误分类来源：
@@ -46,4 +47,5 @@ async def test_response_projection_failure_is_not_reported_as_bad_request(monkey
             "task-public",
             TaskUpdateRequest(name="updated-task"),
             SimpleNamespace(user_id=7),
+            http_request=http_request,
         )

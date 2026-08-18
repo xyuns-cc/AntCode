@@ -132,7 +132,7 @@ async def test_runtime_access_worker_error_is_sanitized(monkeypatch) -> None:
         _CreateTaskFailureCase(RuntimeError(_INTERNAL_ERROR), status.HTTP_500_INTERNAL_SERVER_ERROR, "创建任务失败"),
     ],
 )
-async def test_create_task_hides_service_error(monkeypatch, case: _CreateTaskFailureCase) -> None:
+async def test_create_task_hides_service_error(monkeypatch, case: _CreateTaskFailureCase, http_request) -> None:
     task_data = SimpleNamespace(project_id="project-1", model_fields_set=set(), specified_worker_id=None)
     project = SimpleNamespace(id=9, type="code")
     monkeypatch.setattr(tasks.relation_service, "validate_project_user", AsyncMock(return_value=True))
@@ -144,14 +144,14 @@ async def test_create_task_hides_service_error(monkeypatch, case: _CreateTaskFai
     monkeypatch.setattr(tasks.scheduler_service, "create_task", AsyncMock(side_effect=case.failure))
 
     with pytest.raises(HTTPException) as exc_info:
-        await tasks.create_task(task_data, SimpleNamespace(user_id=7))
+        await tasks.create_task(task_data, SimpleNamespace(user_id=7), http_request=http_request)
 
     assert exc_info.value.status_code == case.expected_status
     assert exc_info.value.detail == case.expected_detail
 
 
 @pytest.mark.asyncio
-async def test_stop_task_hides_worker_transport_error(monkeypatch) -> None:
+async def test_stop_task_hides_worker_transport_error(monkeypatch, http_request) -> None:
     execution = SimpleNamespace(
         run_id="run-1",
         worker_id=3,
@@ -167,7 +167,7 @@ async def test_stop_task_hides_worker_transport_error(monkeypatch) -> None:
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await tasks.stop_task_execution("run-1", SimpleNamespace(user_id=7))
+        await tasks.stop_task_execution("run-1", SimpleNamespace(user_id=7), http_request=http_request)
 
     assert exc_info.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     assert exc_info.value.detail == "取消指令发送失败，请重试"

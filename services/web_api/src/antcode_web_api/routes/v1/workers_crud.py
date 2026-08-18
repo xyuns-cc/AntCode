@@ -1,21 +1,5 @@
-"""Worker CRUD 接口 (list / create / detail / update / delete / test / refresh)。
-
-P2 拆分自 workers.py: 10 个 CRUD handler:
-- GET /workers (get_workers)
-- POST /workers (create_worker)
-- GET /workers/{worker_id} (get_worker)
-- PUT /workers/{worker_id} (update_worker)
-- DELETE /workers/{worker_id} (delete_worker)
-- POST /workers/batch-delete (batch_delete_workers)
-- POST /workers/{worker_id}/test (test_worker_connection)
-- POST /workers/{worker_id}/refresh (refresh_worker_status)
-- GET /workers/{worker_id}/credentials (get_worker_credentials, 410 shim)
-- POST /workers/{worker_id}/disconnect (disconnect_worker)
-
-_worker_to_response / _require_worker_access / _list_accessible_workers 由
-register_crud_routes 注入避免循环 import。契约 (URL / DI / 返回) 与旧实现
-一致。审计日志沿用 audit_service.log。
-"""
+"""Worker CRUD handler（P2 从 workers.py 拆出）。_worker_to_response 等依赖由
+register_crud_routes 注入以避免循环 import；契约（URL / DI / 返回）与旧实现一致。"""
 
 from __future__ import annotations
 
@@ -37,6 +21,7 @@ from antcode_web_api.routes.v1.committed_resource_audit import (
     audit_worker_created,
     audit_worker_deleted,
 )
+from antcode_web_api.routes.v1.mutation_audit import audit_worker_updated
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 
@@ -95,10 +80,18 @@ async def get_worker(worker_id: str, current_user: TokenData, *, require_worker_
     return success(worker_to_response(worker))
 
 
-async def update_worker(worker_id: str, request: WorkerUpdateRequest, *, worker_to_response):
+async def update_worker(
+    worker_id: str,
+    request: WorkerUpdateRequest,
+    *,
+    http_request: Request,
+    current_user: TokenData,
+    worker_to_response,
+):
     worker = await worker_service.update_worker(worker_id, request)
     if not worker:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
+    await audit_worker_updated(http_request, current_user, worker, changed_fields=sorted(request.model_fields_set))
     return success(worker_to_response(worker), message="Worker 更新成功")
 
 
@@ -235,9 +228,16 @@ def register_crud_routes(router, *, worker_to_response, require_worker_access, l
         worker_id: str,
         request: WorkerUpdateRequest,
         current_user: TokenData = Depends(get_current_user),
+        *,
+        http_request: Request,
     ):
-        _ = current_user
-        return await update_worker(worker_id, request, worker_to_response=worker_to_response)
+        return await update_worker(
+            worker_id,
+            request,
+            http_request=http_request,
+            current_user=current_user,
+            worker_to_response=worker_to_response,
+        )
 
     @router.delete(
         "/{worker_id}",

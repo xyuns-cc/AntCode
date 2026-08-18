@@ -12,6 +12,7 @@ import type { WorkerAggregateStats, ClusterSpiderStats } from '@/types'
 import SpiderStatsTab from '@/components/workers/SpiderStatsTab'
 import StatCard from '@/components/common/StatCard'
 import PageContainer from '@/components/common/PageContainer'
+import { successRateView } from '@/utils/spiderSuccessRate'
 
 const MonitorTab = React.lazy(() => import('@/pages/Monitor'))
 const { Title, Text } = Typography
@@ -70,6 +71,7 @@ const Dashboard: React.FC = memo(() => {
   const cpuPercent = normalizePercent(systemMetrics?.cpu_usage?.percent)
   const memoryPercent = normalizePercent(systemMetrics?.memory_usage?.percent)
   const diskPercent = normalizePercent(systemMetrics?.disk_usage?.percent)
+  const spiderSuccess = successRateView(spiderStats, token)
 
   // 无感刷新：后台静默获取数据
   const loadDashboardData = useCallback(async (silent = false) => {
@@ -381,11 +383,9 @@ const Dashboard: React.FC = memo(() => {
                         </div>
                         {/* X轴时间标签 */}
                         <Flex justify="space-between" style={{ padding: '0 2px', marginTop: 4 }}>
-                          <Text type="secondary" style={{ fontSize: 10 }}>00:00</Text>
-                          <Text type="secondary" style={{ fontSize: 10 }}>06:00</Text>
-                          <Text type="secondary" style={{ fontSize: 10 }}>12:00</Text>
-                          <Text type="secondary" style={{ fontSize: 10 }}>18:00</Text>
-                          <Text type="secondary" style={{ fontSize: 10 }}>24:00</Text>
+                          {['00:00', '06:00', '12:00', '18:00', '24:00'].map((label) => (
+                            <Text key={label} type="secondary" style={{ fontSize: 10 }}>{label}</Text>
+                          ))}
                         </Flex>
                         <Text type="secondary" style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}>
                           过去 24 小时任务处理趋势（单位：任务数/小时）
@@ -458,22 +458,22 @@ const Dashboard: React.FC = memo(() => {
                         </Text>
                         <Flex align="baseline" gap={8}>
                           <span style={{ fontSize: 28, fontWeight: 700 }}>
-                            {spiderStats?.totalResponses ? (((spiderStats.totalResponses - spiderStats.totalErrors) / spiderStats.totalResponses) * 100).toFixed(1) : '0'}%
+                            {spiderSuccess.text}
                           </span>
                           <span style={{
                             fontSize: 11,
                             padding: '2px 6px',
                             borderRadius: 4,
-                            background: `${token.colorSuccess}20`,
-                            color: token.colorSuccess
+                            background: `${spiderSuccess.color}20`,
+                            color: spiderSuccess.color
                           }}>
-                            良好
+                            {spiderSuccess.label}
                           </span>
                         </Flex>
                         <Progress
-                          percent={spiderStats?.totalResponses ? Math.round(((spiderStats.totalResponses - spiderStats.totalErrors) / spiderStats.totalResponses) * 100) : 0}
+                          percent={spiderSuccess.percent}
                           showInfo={false}
-                          strokeColor={token.colorSuccess}
+                          strokeColor={spiderSuccess.color}
                           size="small"
                           style={{ marginTop: 8 }}
                         />

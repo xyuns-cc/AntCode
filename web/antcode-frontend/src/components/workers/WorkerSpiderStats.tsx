@@ -16,6 +16,7 @@ import {
 import { workerService } from '@/services/workers'
 import type { SpiderStatsSummary } from '@/types'
 import Logger from '@/utils/logger'
+import { successRateView } from '@/utils/spiderSuccessRate'
 
 const { Text } = Typography
 
@@ -75,10 +76,11 @@ const WorkerSpiderStats: React.FC<WorkerSpiderStatsProps> = memo(({ workerId, wo
     )
   }
 
-  // 计算成功率
-  const successRate = stats && stats.responseCount > 0
-    ? ((stats.responseCount - stats.errorCount) / stats.responseCount * 100).toFixed(1)
-    : '0.0'
+  // 成功率与仪表盘同源：2xx/3xx 响应数 ÷ 请求总数，没有请求时显示"暂无数据"
+  const successRate = successRateView(
+    stats ? { totalRequests: stats.requestCount, statusCodes: stats.statusCodes } : null,
+    token
+  )
 
   // 状态码分布
   const statusCodeEntries = stats?.statusCodes
@@ -168,10 +170,10 @@ const WorkerSpiderStats: React.FC<WorkerSpiderStatsProps> = memo(({ workerId, wo
                 <Text type="secondary">成功率</Text>
                 <Progress
                   type="circle"
-                  percent={Number(successRate)}
+                  percent={successRate.percent}
                   size={80}
-                  strokeColor={Number(successRate) >= 95 ? token.colorSuccess : Number(successRate) >= 80 ? token.colorWarning : token.colorError}
-                  format={(percent) => `${percent}%`}
+                  strokeColor={successRate.color}
+                  format={() => successRate.text}
                 />
               </Flex>
             </Col>

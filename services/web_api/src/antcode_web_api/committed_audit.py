@@ -24,4 +24,9 @@ async def record_committed_audit(operation: str, audit_write: AuditWrite) -> boo
     return True
 
 
-__all__ = ["record_committed_audit"]
+def client_ip(request: Any) -> str | None:
+    """取调用方 IP；ASGI scope 没有 client 时（内部调用）返回 None。"""
+    return request.client.host if request.client else None
+
+
+__all__ = ["client_ip", "record_committed_audit"]

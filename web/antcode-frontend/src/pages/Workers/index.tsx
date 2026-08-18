@@ -260,20 +260,20 @@ const Workers: React.FC = () => {
     })
   }
 
-  // 测试连接
+  // 心跳检测：后端 test_connection 只读 worker.last_heartbeat，不向 Worker 发任何请求，
   const handleTestConnection = useCallback(async (workerId: string) => {
     try {
+      // 返回的 latency 是心跳年龄而非往返延迟——叫"延迟"会被当成网络故障。
       const result = await workerService.testConnection(workerId)
       if (result.success) {
-        showNotification('success', `连接成功，延迟: ${result.latency}ms`)
-        // 刷新Worker 列表以更新状态
+        showNotification('success', `Worker 存活（心跳 ${(result.latency / 1000).toFixed(1)}s 前）`)
         refreshWorkers()
       } else {
-        showNotification('error', result.error || '连接失败')
+        showNotification('error', result.error || '心跳检测失败')
       }
     } catch (error: unknown) {
       const err = error as { message?: string }
-      showNotification('error', err.message || '测试连接失败')
+      showNotification('error', err.message || '心跳检测失败')
     }
   }, [refreshWorkers])
 
@@ -541,7 +541,7 @@ const Workers: React.FC = () => {
             icon={<ApiOutlined />}
             onClick={() => handleTestConnection(record.id)}
           >
-            连接
+            心跳检测
           </Button>
           <Button
             type="link"

@@ -35,7 +35,7 @@ async def test_specified_worker_acl_checks_only_non_empty_explicit_bindings(monk
 
 
 @pytest.mark.asyncio
-async def test_task_create_preserves_worker_acl_forbidden(monkeypatch) -> None:
+async def test_task_create_preserves_worker_acl_forbidden(monkeypatch, http_request) -> None:
     monkeypatch.setattr(tasks.relation_service, "validate_project_user", AsyncMock(return_value=True))
     monkeypatch.setattr(
         tasks.relation_service,
@@ -51,14 +51,14 @@ async def test_task_create_preserves_worker_acl_forbidden(monkeypatch) -> None:
     monkeypatch.setattr(tasks.scheduler_service, "create_task", create_task)
 
     with pytest.raises(HTTPException) as exc_info:
-        await tasks.create_task(_task_create("worker-foreign"), SimpleNamespace(user_id=7))
+        await tasks.create_task(_task_create("worker-foreign"), SimpleNamespace(user_id=7), http_request=http_request)
 
     assert exc_info.value.status_code == 403
     create_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_task_update_rejects_worker_before_scheduler_mutation(monkeypatch) -> None:
+async def test_task_update_rejects_worker_before_scheduler_mutation(monkeypatch, http_request) -> None:
     monkeypatch.setattr(
         tasks,
         "ensure_worker_use_access",
@@ -72,6 +72,7 @@ async def test_task_update_rejects_worker_before_scheduler_mutation(monkeypatch)
             "task-1",
             TaskUpdateRequest(specified_worker_id="worker-foreign"),
             SimpleNamespace(user_id=7),
+            http_request=http_request,
         )
 
     assert exc_info.value.status_code == 403

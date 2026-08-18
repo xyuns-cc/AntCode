@@ -75,6 +75,7 @@ from antcode_web_api.routes.v1.committed_resource_audit import (
     audit_project_created,
     audit_project_deleted,
 )
+from antcode_web_api.routes.v1.mutation_audit import audit_project_updated
 from antcode_web_api.routes.v1.project_cache_scope import (
     project_authorization_cache_scope,
 )
@@ -608,18 +609,14 @@ async def export_project_config(
             current_user_id=current_user_id,
             is_admin=is_admin,
         )
-        # P1-round6 5.3: 200 条 execution 的 result_data/stdout/stderr/error_message
-        # 之前不受预算约束, 峰值可达数 GB 内存。走 8 MiB 独立预算,超预算的
-        # execution 保留元数据但把可膨胀字段替换成 truncated 标记, 顶层
-        # executions_truncated 显式暴露。
+        # P1-round6 5.3: 200 条 execution 的可膨胀字段走 8 MiB 独立预算，超预算的
+        # execution 保留元数据并替换成 truncated 标记，顶层 executions_truncated 显式暴露。
         exec_dicts = [e.model_dump(mode="json") if hasattr(e, "model_dump") else dict(e) for e in executions]
         exec_truncated = bound_execution_export_payloads(exec_dicts)
         payload["executions"] = exec_dicts
         payload["executions_truncated"] = exec_truncated
-        # P2 §4.4: include_logs 此前只导出 execution 元数据；现在附带
-        # TaskLog（每 run 截取最新 N 行，超限在条目里显式标记）。
-        # P1-SEC-03: 叠加全局字节预算，防止 200 run × 200 行 × ~1MiB/行
-        # 撑爆内存；预算耗尽即停止读库，顶层 truncated 标记显式暴露截断。
+        # P2 §4.4 + P1-SEC-03: include_logs 附带 TaskLog（每 run 截取最新 N 行），
+        # 并叠加全局字节预算；预算耗尽即停止读库，顶层 truncated 标记显式暴露截断。
         task_logs, logs_truncated = await load_export_task_logs(run_ids)
         payload["task_logs"] = task_logs
         payload["task_logs_truncated"] = logs_truncated
@@ -892,12 +889,15 @@ async def update_project(
     project_id: str,
     request: UnifiedProjectUpdateRequest,
     current_user_id: int = Depends(get_current_user_id),
+    *,
+    http_request: Request,
+    current_user=Depends(get_current_user),
 ):
     """统一更新项目"""
     project = await unified_project_service.update_project_unified(project_id, request, current_user_id)
     if not project:
         raise ProjectNotFoundException(project_id)
-
+    await audit_project_updated(http_request, current_user, project, changed_fields=sorted(request.model_fields_set))
     response_data = create_project_response(project)
     await _attach_project_detail_info(response_data, project)
     return success_response(response_data, message=Messages.UPDATED_SUCCESS)

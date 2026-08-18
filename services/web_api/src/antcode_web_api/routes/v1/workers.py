@@ -90,10 +90,9 @@ from antcode_web_api.routes.v1.workers_install_key import (  # noqa: F401
     _record_install_key_failed_attempt,
 )
 
-# P2 拆分: Worker 上报接口的 schema + handler + 常量集中在 workers_report.py,
-# 主 workers.py 只保留 re-export 与底部 register_report_routes 注册, 让
-# 测试的 workers_route.WorkerTaskLogReportRequest / workers_route.report_task_log
-# 等引用继续可命中。noqa: F401 显式保留 re-export 防 ruff 误删。
+# P2 拆分: Worker 上报接口的 schema + handler + 常量集中在 workers_report.py, 主
+# workers.py 只保留 re-export 与底部 register_report_routes 注册, 让测试的
+# workers_route.report_task_log 等引用继续可命中 (noqa: F401 防 ruff 误删)。
 from antcode_web_api.routes.v1.workers_report import (  # noqa: F401
     MAX_LOG_BATCH_ENTRIES,
     MAX_LOG_LINE_CHARS,
@@ -122,11 +121,8 @@ router = APIRouter()
 
 
 # P2 拆分: dispatch schema + 常量已移至 workers_dispatch.py, 顶部已 re-export。
-# P2 拆分: install_key 相关 8 helper + 1 exception 移至 workers_install_key.py,
-# 顶部通过 re-export 保留 workers_route.X 兼容 (_extract_request_source /
-# _is_source_match / _check_install_key_blocked / _record_install_key_failed_attempt
-# / _clear_install_key_fail_counter / _claim_install_key_source_once /
-# _is_registration_acknowledged)。
+# install_key 相关 8 helper + 1 exception 移至 workers_install_key.py, 顶部通过
+# re-export 保留 workers_route._extract_request_source 等旧名的兼容引用。
 
 
 async def _verify_worker_credential_headers(
@@ -237,10 +233,9 @@ async def _require_run_access(run_id: str, current_user: TokenData) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
 
-# P2 拆分: _resolve_dispatch_worker 已移至 workers_dispatch.py, 但顶层保留 shim
-# 让测试 `monkeypatch.setattr(workers, "_resolve_dispatch_worker", ...)` 可命中,
-# dispatch handler 通过传参使用 workers._resolve_dispatch_worker 而不是模块内
-# 部函数, 保证 monkeypatch 生效。
+# P2 拆分: _resolve_dispatch_worker 已移至 workers_dispatch.py, 顶层保留 shim 让测试
+# `monkeypatch.setattr(workers, "_resolve_dispatch_worker", ...)` 可命中: dispatch
+# handler 通过传参使用 workers._resolve_dispatch_worker 而非模块内部函数。
 async def _resolve_dispatch_worker(
     requested_worker_id: str | None,
     current_user: TokenData,
@@ -364,9 +359,14 @@ async def get_worker(worker_id, current_user):
     )
 
 
-async def update_worker(worker_id, request, current_user=None):
-    _ = current_user
-    return await _workers_crud.update_worker(worker_id, request, worker_to_response=_worker_to_response)
+async def update_worker(worker_id, request, *, http_request, current_user):
+    return await _workers_crud.update_worker(
+        worker_id,
+        request,
+        http_request=http_request,
+        current_user=current_user,
+        worker_to_response=_worker_to_response,
+    )
 
 
 async def delete_worker(worker_id, http_request, current_user):

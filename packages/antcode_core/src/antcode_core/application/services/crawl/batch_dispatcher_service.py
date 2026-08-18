@@ -3,16 +3,14 @@
 F: master 端接收 ``batch_started`` / ``batch_paused`` / ``batch_resumed``
 / ``batch_cancelled`` 事件，把批次里的 seed URLs 逐个派发为 rule 任务。
 
-架构决策：每个 seed URL 作为独立 rule 任务，复用 Worker 调度链路。
-- **关联通过 TaskRun.result_data["crawl_batch_id"]**：查批次任务时按此字段
-  过滤（结合 Task 的 name/tags 也够用）。不改 model schema。
-- 状态推导（RUNNING → COMPLETED/FAILED）由独立 loop 定期扫，一期先不实现，
-  batch 保持 RUNNING 状态，由用户手动取消或所有 seed 完成后手动关闭。
-
+架构决策：每个 seed URL 作为独立 rule 任务，复用 Worker 调度链路；关联走
+``TaskRun.result_data["crawl_batch_id"]``，不改 model schema。批次状态推导
+（RUNNING → COMPLETED/FAILED）尚未实现，由用户手动取消或关闭。
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -23,6 +21,7 @@ from antcode_core.application.services.crawl.batch_aggregate_lock import (
 )
 from antcode_core.application.services.crawl.batch_cancel_control import send_batch_run_cancel
 from antcode_core.application.services.crawl.batch_dispatch_state import (
+    SeedDispatchOutcome,
     crawl_batch_run_id,
     is_recoverable_dispatch,
     mark_dispatch_succeeded,
@@ -113,19 +112,33 @@ class CrawlBatchDispatcherService:
         # B12: 批次派发不持有 Leader 身份，代际回读权威表并整批共用一个；
         # 读不到活跃 Master 权威时整个事件失败，保留 PEL 由 reclaim 重投。
         async with active_scheduler_dispatch_epoch():
-            dispatched, failed = await self._dispatch_pending_urls(batch, project, rule, urls=pending_urls)
-        logger.info(
-            f"batch 派发完成: batch_id={batch_id} dispatched={dispatched} failed={failed} total={len(pending_urls)}"
-        )
+            tally = await self._dispatch_pending_urls(batch, project, rule, urls=pending_urls)
+        self._log_dispatch_tally(batch_id, tally, total=len(pending_urls))
         # 任一 seed 既未直派成功、也未获得 durable redispatch intent 时，
         # batch_started 都不能 ACK。成功 seed 已有 TaskRun，重投时会被
         # _already_dispatched_urls 跳过；失败 seed 会在下一轮单独重试。
+        failed = tally[SeedDispatchOutcome.FAILED]
         if failed > 0:
             raise RuntimeError(
                 f"batch 派发存在未持久化失败: batch_id={batch_id} failed={failed} "
-                f"dispatched={dispatched} "
+                f"dispatched={tally[SeedDispatchOutcome.DISPATCHED]} "
                 f"total={len(pending_urls)} —— 事件将保留 PEL 由 reclaim 重投"
             )
+
+    @staticmethod
+    def _log_dispatch_tally(batch_id: str, tally: Counter[SeedDispatchOutcome], *, total: int) -> None:
+        """日志口径必须与真实结果一致：入补派队列不能算成 dispatched。
+
+        只要有 seed 没能直派成功（无论是进了补派队列还是彻底失败），这行就
+        必须是 WARNING —— 运维扫日志时"这批派发正常"与否不该靠自己算差值。
+        """
+        counts = " ".join(f"{outcome.value}={tally[outcome]}" for outcome in SeedDispatchOutcome)
+        summary = f"batch 派发结束: batch_id={batch_id} total={total} {counts}"
+        degraded = tally[SeedDispatchOutcome.REDISPATCH_ENQUEUED] + tally[SeedDispatchOutcome.FAILED]
+        if degraded:
+            logger.warning(summary)
+            return
+        logger.info(summary)
 
     async def _dispatch_pending_urls(
         self,
@@ -134,16 +147,12 @@ class CrawlBatchDispatcherService:
         rule: ProjectRule,
         *,
         urls: list[str],
-    ) -> tuple[int, int]:
-        """在调用方已打开的 Master 代际下逐个派发 URL，返回 (成功数, 失败数)。"""
-        dispatched = 0
-        failed = 0
+    ) -> Counter[SeedDispatchOutcome]:
+        """在调用方已打开的 Master 代际下逐个派发 URL，按结果分类计数。"""
+        tally: Counter[SeedDispatchOutcome] = Counter()
         for url in urls:
-            if await self._dispatch_single_url(batch, project, rule, url):
-                dispatched += 1
-            else:
-                failed += 1
-        return dispatched, failed
+            tally[await self._dispatch_single_url(batch, project, rule, url)] += 1
+        return tally
 
     async def _on_batch_resumed(self, batch_id: str) -> None:
         # 恢复 = 派发剩余未完成/未派发的 URL；用同一逻辑
@@ -158,17 +167,13 @@ class CrawlBatchDispatcherService:
     async def _on_batch_cancelled(self, batch_id: str) -> None:
         """取消：把该 batch 已派发但未终态的 TaskRun 置 CANCELLED。
 
-        R1-P1-1 (审查报告): 原实现直接 ``filter().update(status=CANCELLED)``——
-        (a) 无状态条件 CAS，已终态的记录也会被覆盖；
-        (b) 只写 status 不写 runtime_status，而
-            ``execution_status_service._should_update`` 的终态吸收保护完全基于
-            runtime_status；迟到的 SUCCESS 报告会**穿过闸门**把状态翻回。
-        改走 ``execution_status_service.update_runtime_status``：它带条件 CAS +
-        同步写 status/runtime_status/timestamps，能守住终态。
+        R1-P1-1 (审查报告): 走 ``execution_status_service.update_runtime_status``
+        而不是裸 ``filter().update()``——后者既无状态条件 CAS，又只写 status 不写
+        runtime_status，而终态吸收保护完全基于 runtime_status，迟到的 SUCCESS 会
+        穿过闸门把状态翻回。
 
-        Round 10: ``handle_batch_event`` 已按 batch aggregate 持有 PostgreSQL
-        advisory lock。start/resume 与 cancel 不再并发产生 run，因此锁内
-        读取一次权威 active snapshot 并全部取消，不使用有限轮询上限。
+        Round 10: ``handle_batch_event`` 已持有 batch aggregate 的 advisory lock，
+        锁内读一次 active snapshot 全部取消即可，不需要有限轮询上限。
         """
         now = datetime.now(UTC)
         cancelled = 0
@@ -226,7 +231,7 @@ class CrawlBatchDispatcherService:
         project: Project,
         rule: ProjectRule,
         url: str,
-    ) -> bool:
+    ) -> SeedDispatchOutcome:
         """把单个 URL 作为一个 rule 任务派发。TaskRun.result_data 存 batch_id 用于关联。
 
         P1-14 (审查报告): 派发流程做了 URL 幂等清理：
@@ -249,7 +254,7 @@ class CrawlBatchDispatcherService:
         try:
             existing = await TaskRun.get_or_none(run_id=run_id)
             if existing is not None and not is_recoverable_dispatch(existing):
-                return True
+                return SeedDispatchOutcome.ALREADY_DISPATCHED
             if existing is None:
                 # 所有者由 result_data.crawl_batch_id 反查 CrawlBatch.user_id 得到
                 # （dispatch_authorization / spider_run_access 同一契约）。批次 run
@@ -270,12 +275,9 @@ class CrawlBatchDispatcherService:
             # 派发
             from antcode_core.application.services.workers import worker_task_dispatcher
 
-            # R1-P0-1 (审查报告): worker engine._build_task_payload 在 params.kwargs
-            # 缺失时三元取空 dict 而非兜底整个 params，RulePlugin.validate 就报
-            # "缺少 target_url/extraction_rules"。与 spider_dispatcher.py 的 P16 修复
-            # 对齐——rule_detail 必须塞在 ``params.kwargs`` 里；crawl_batch_id 保留顶层
-            # 供审计追溯。batch.timeout 只是单次 HTTP DOWNLOAD_TIMEOUT（默认 30 秒），
-            # 不能复用成整个爬虫进程的任务超时，后者通常远大于它。
+            # R1-P0-1 (审查报告): rule_detail 必须塞在 ``params.kwargs`` 里，否则 worker
+            # engine._build_task_payload 会取到空 dict 而报"缺少 target_url"；crawl_batch_id
+            # 保留顶层供审计追溯。batch.timeout 是单次 HTTP 超时，不能当整进程任务超时。
             task_timeout = DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,
@@ -321,25 +323,23 @@ class CrawlBatchDispatcherService:
                     enqueued = False
 
                 if not enqueued:
-                    # P1-14: 补派也不可用 → 删除刚建的 TaskRun 占位，让
-                    # ``_already_dispatched_urls`` 不再把这个 URL 视为已派发。
-                    # 下次 batch_resumed 能重派；避免旧实现里 FAILED 占位
-                    # 使 URL 永久跳过的"重放死锁"。
+                    # P1-14: 补派也不可用 → 删掉刚建的 TaskRun 占位，让 URL 不再被
+                    # ``_already_dispatched_urls`` 视为已派发，下次 resume 还能重派。
                     await self._delete_task_run(run_id)
-                    return False
+                    return SeedDispatchOutcome.FAILED
                 # 已入补派队列：run 仍处于 PENDING/DISPATCHING，等 loop 重试
                 dispatch_durable = True
                 await mark_redispatch_enqueued(run_id)
-                return True
+                return SeedDispatchOutcome.REDISPATCH_ENQUEUED
             dispatch_durable = True
             await mark_dispatch_succeeded(run_id)
-            return True
+            return SeedDispatchOutcome.DISPATCHED
         except Exception as exc:
             logger.exception(f"batch URL 派发异常: batch_id={batch.public_id} url={url} err={exc}")
             # P1-14: 出异常且已建 TaskRun 时清孤儿，让 URL 可重派
             if task_run_prepared and not dispatch_durable:
                 await self._delete_task_run(run_id)
-            return False
+            return SeedDispatchOutcome.FAILED
 
     async def _delete_task_run(self, run_id: str) -> None:
         """删除派发失败留下的 TaskRun 占位；存储错误必须上抛重投。"""

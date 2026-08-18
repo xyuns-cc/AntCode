@@ -7,11 +7,8 @@ from antcode_core.application.services.audit import audit_service
 from antcode_core.application.services.users.user_service import user_service
 from antcode_core.domain.models.audit_log import AuditAction
 
+from antcode_web_api.committed_audit import client_ip as _client_ip
 from antcode_web_api.committed_audit import record_committed_audit
-
-
-def _client_ip(request: Any) -> str | None:
-    return request.client.host if request.client else None
 
 
 async def _record_with_username(

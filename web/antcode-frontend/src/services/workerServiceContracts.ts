@@ -4,7 +4,10 @@ export type WorkerPermission = 'view' | 'use'
 
 export interface WorkerConnectionTestResult {
   success: boolean
-  latency?: number
+  // 后端 WorkerTestConnectionResponse 的 latency 有默认值 0 且随 response_model
+  // 一定序列化出来，因此这里是必填。语义是**最后一次心跳距今的毫秒数**，
+  // 不是往返延迟——后端只读 last_heartbeat，不向 Worker 发请求。
+  latency: number
   error?: string
 }
 

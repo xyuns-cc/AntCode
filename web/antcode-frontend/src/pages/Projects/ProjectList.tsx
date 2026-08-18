@@ -39,6 +39,7 @@ import Logger from '@/utils/logger'
 import type { Project, ProjectListParams, ProjectType } from '@/types'
 import type { ColumnsType } from 'antd/es/table'
 import { initialUIState, uiReducer } from './projectListUiState'
+import ProjectDeleteWarning from './ProjectDeleteWarning'
 
 const { Search } = Input
 const { Option } = Select
@@ -284,7 +285,6 @@ const ProjectList: React.FC = () => {
     }
   }
 
-  // 删除单个项目
   const handleDelete = useCallback(
     (project: Project) => {
       dispatch({ type: 'SHOW_DELETE_MODAL', payload: project })
@@ -787,7 +787,7 @@ const ProjectList: React.FC = () => {
         cancelText="取消"
         okType="danger"
       >
-        <p>确定要删除项目 "{uiState.currentDeleteProject?.name}" 吗？此操作不可恢复。</p>
+        <ProjectDeleteWarning project={uiState.currentDeleteProject} />
       </Modal>
 
       {/* 批量删除确认Modal */}

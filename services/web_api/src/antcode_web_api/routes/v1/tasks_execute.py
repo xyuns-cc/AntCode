@@ -21,7 +21,7 @@ from antcode_core.common.security.auth import get_current_user
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.task import TaskResponse
 from antcode_core.domain.schemas.task import TaskUpdateRequest as TaskUpdate
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel
 
@@ -29,6 +29,7 @@ from antcode_web_api.response import Messages
 from antcode_web_api.response import (
     success as success_response,
 )
+from antcode_web_api.routes.v1.mutation_audit import audit_task_executed, audit_task_updated
 
 
 class TaskExecuteRequest(BaseModel):
@@ -88,7 +89,7 @@ async def resume_task(task_id, current_user):
         raise HTTPException(status_code=500, detail="恢复任务失败")
 
 
-async def trigger_task(task_id, current_user):
+async def trigger_task(task_id, current_user, *, http_request):
     """立即触发任务
 
     - T15: Redis 锁去重，5s 内同 task_id+user 只允许触发一次
@@ -102,7 +103,7 @@ async def trigger_task(task_id, current_user):
         if not trigger_result:
             raise HTTPException(status_code=404, detail="Task not found")
         run_id = trigger_result if isinstance(trigger_result, str) else None
-
+        await audit_task_executed(http_request, current_user, task_id=str(task_id), run_id=run_id)
         return success_response(
             {"task_id": str(task_id), "run_id": run_id, "triggered": True},
             message="任务已触发",
@@ -114,7 +115,7 @@ async def trigger_task(task_id, current_user):
         raise HTTPException(status_code=500, detail="触发任务失败")
 
 
-async def execute_task(task_id: str, request: TaskExecuteRequest, current_user):
+async def execute_task(task_id: str, request: TaskExecuteRequest, current_user, *, http_request):
     """执行任务（触发立即执行）"""
     try:
         # P2 §4.4: execute 覆盖参数此前被静默忽略 —— 用户以为带覆盖执行，
@@ -132,6 +133,7 @@ async def execute_task(task_id: str, request: TaskExecuteRequest, current_user):
         if not trigger_result:
             raise HTTPException(status_code=404, detail="Task not found")
         run_id = trigger_result if isinstance(trigger_result, str) else None
+        await audit_task_executed(http_request, current_user, task_id=task_id, run_id=run_id)
         return success_response(
             {"task_id": task_id, "run_id": run_id, "triggered": True},
             message="任务已触发",
@@ -143,12 +145,13 @@ async def execute_task(task_id: str, request: TaskExecuteRequest, current_user):
         raise HTTPException(status_code=500, detail="执行任务失败")
 
 
-async def toggle_task(task_id: str, request: TaskToggleRequest, current_user, *, create_task_response):
-    """启用/禁用任务"""
+async def toggle_task(task_id: str, request: TaskToggleRequest, current_user, *, http_request, create_task_response):
+    """启用/禁用任务。它写的是 is_active，属于任务更新，同样要留痕。"""
     try:
         task = await scheduler_service.update_task(task_id, TaskUpdate(is_active=request.enabled), current_user.user_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        await audit_task_updated(http_request, current_user, task, changed_fields=["is_active"])
         return success_response(create_task_response(task), message=Messages.UPDATED_SUCCESS)
     except HTTPException:
         raise
@@ -171,27 +174,41 @@ def register_execute_routes(router, *, create_task_response) -> None:
         return await resume_task(task_id, current_user)
 
     @router.post("/{task_id}/trigger", response_model=BaseResponse[dict])
-    async def _trigger_task(task_id, current_user=Depends(get_current_user)):
+    async def _trigger_task(task_id, current_user=Depends(get_current_user), *, http_request: Request):
         """立即触发任务
 
         - T15: Redis 锁去重，5s 内同 task_id+user 只允许触发一次
         - S6: 返回最新一次执行的 run_id，便于前端立即订阅日志
         """
-        return await trigger_task(task_id, current_user)
+        return await trigger_task(task_id, current_user, http_request=http_request)
 
     @router.post("/{task_id}/execute", response_model=BaseResponse[dict])
     async def _execute_task(
         task_id: str,
         request: TaskExecuteRequest,
         current_user=Depends(get_current_user),
+        *,
+        http_request: Request,
     ):
         """执行任务（触发立即执行）"""
-        return await execute_task(task_id, request, current_user)
+        return await execute_task(task_id, request, current_user, http_request=http_request)
 
     @router.patch("/{task_id}/toggle", response_model=BaseResponse[TaskResponse])
-    async def _toggle_task(task_id: str, request: TaskToggleRequest, current_user=Depends(get_current_user)):
+    async def _toggle_task(
+        task_id: str,
+        request: TaskToggleRequest,
+        current_user=Depends(get_current_user),
+        *,
+        http_request: Request,
+    ):
         """启用/禁用任务"""
-        return await toggle_task(task_id, request, current_user, create_task_response=create_task_response)
+        return await toggle_task(
+            task_id,
+            request,
+            current_user,
+            http_request=http_request,
+            create_task_response=create_task_response,
+        )
 
 
 __all__ = [
