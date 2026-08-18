@@ -152,6 +152,12 @@ class ReconcileLoop:
 
         await trim_global_control_stream()
 
+        # 6. 取消已下发但归属 Worker 代际已消失的 run（详见 cancel_settlement 模块注释）。
+        #    放在最后：活性证据不可得时它会抛出，不应连累前面几步的收敛。
+        from antcode_master.control.cancel_settlement import settle_abandoned_cancellations
+
+        await settle_abandoned_cancellations(fencing_token)
+
     async def _check_timeout_tasks(self, fencing_token: int):
         """Settle runs that exceeded their per-task runtime timeout."""
         try:

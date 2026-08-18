@@ -237,7 +237,18 @@ async def test_reconcile_runs_all_checks_in_order(monkeypatch):
     monkeypatch.setattr(repairs_module, "repair_stale_task_status", lambda _token: record("stale"))
     retention_module = importlib.import_module("antcode_master.control.global_stream_retention")
     monkeypatch.setattr(retention_module, "trim_global_control_stream", lambda: record("trim"))
+    cancel_module = importlib.import_module("antcode_master.control.cancel_settlement")
+    monkeypatch.setattr(cancel_module, "settle_abandoned_cancellations", lambda _token: record("abandoned-cancel"))
 
     await loop._reconcile(21)
 
-    assert events == ["timeout", "dispatch", "inconsistent", "zombie", "queued", "stale", "trim"]
+    assert events == [
+        "timeout",
+        "dispatch",
+        "inconsistent",
+        "zombie",
+        "queued",
+        "stale",
+        "trim",
+        "abandoned-cancel",
+    ]

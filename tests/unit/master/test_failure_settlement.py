@@ -5,7 +5,7 @@ import pytest_asyncio
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, ScheduleType, TaskStatus, TaskType
 from antcode_core.domain.models.scheduler_authority import SchedulerAuthority
 from antcode_core.domain.models.task import Task
-from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.domain.models.task_run import TASK_ID_ABSENT, TaskRun
 from antcode_master.control.failure_settlement import (
     ANY_OWNERSHIP,
     FailurePlane,
@@ -231,6 +231,50 @@ async def test_cancel_requested_run_is_not_settled_or_retried(settlement_databas
     assert persisted.dispatch_status == DispatchStatus.DISPATCHING
     assert persisted.next_retry_at is None
     assert persisted.result_data is None
+
+
+@pytest.mark.asyncio
+async def test_task_less_batch_run_is_settled_without_retry_intent(settlement_database) -> None:
+    """批次 run 的 ``task_id`` 是 ``TASK_ID_ABSENT`` 哨兵，``scheduled_tasks`` 里没有对应行。
+
+    此前"取不到 Task 就返回未结算"让 no-ack / 超时 / 失租 / 僵尸等全部 reaper 对
+    批次 run 永久无效，run 卡非终态并让 Worker 永远删不掉。
+    """
+    run = await TaskRun.create(
+        task_id=TASK_ID_ABSENT,
+        run_id="batch-taskless",
+        scheduler_fencing_token=TOKEN,
+        dispatch_status=DispatchStatus.DISPATCHED,
+        runtime_status=None,
+        status=TaskStatus.QUEUED,
+        retry_count=0,
+        result_data={"crawl_batch_id": "batch-1"},
+    )
+
+    result = await settle_failure(_request(run))
+
+    persisted = await TaskRun.get(id=run.id)
+    assert result.settled is True
+    # 无 Task ⇒ 无任务级重试策略，不得伪造带假 task_id 的 RetryIntent。
+    assert result.intent is None
+    assert persisted.dispatch_status == DispatchStatus.FAILED
+    assert persisted.status == TaskStatus.FAILED
+    assert persisted.next_retry_at is None
+    assert "retry_intent" not in persisted.result_data
+    assert persisted.result_data["crawl_batch_id"] == "batch-1"
+
+
+@pytest.mark.asyncio
+async def test_orphan_run_with_real_task_id_is_still_rejected(settlement_database) -> None:
+    """真丢了 Task 行的孤儿 run 仍不结算：哨兵豁免不得退化成"任务不存在就当没有"。"""
+    task = await _task()
+    run = await _run(task, run_id="orphan-run")
+    await Task.filter(id=task.id).delete()
+
+    result = await settle_failure(_request(run))
+
+    assert result.settled is False
+    assert (await TaskRun.get(id=run.id)).dispatch_status == DispatchStatus.DISPATCHING
 
 
 @pytest.mark.asyncio

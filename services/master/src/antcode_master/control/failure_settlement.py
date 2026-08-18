@@ -14,7 +14,7 @@ from antcode_core.common.config import settings
 from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from antcode_core.domain.models.task import Task
-from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.domain.models.task_run import TASK_ID_ABSENT, TaskRun
 from tortoise.transactions import in_transaction
 
 from antcode_master.control.result_metadata import merge_result_data
@@ -77,13 +77,7 @@ class _RetryDecision:
 _DISPATCH_FAILURES = frozenset({DispatchStatus.REJECTED, DispatchStatus.TIMEOUT, DispatchStatus.FAILED})
 _RUNTIME_FAILURES = frozenset({RuntimeStatus.FAILED, RuntimeStatus.TIMEOUT})
 _RUNTIME_TERMINALS = frozenset(
-    {
-        RuntimeStatus.SUCCESS,
-        RuntimeStatus.FAILED,
-        RuntimeStatus.CANCELLED,
-        RuntimeStatus.TIMEOUT,
-        RuntimeStatus.SKIPPED,
-    }
+    {RuntimeStatus.SUCCESS, RuntimeStatus.FAILED, RuntimeStatus.CANCELLED, RuntimeStatus.TIMEOUT, RuntimeStatus.SKIPPED}
 )
 _TASK_TERMINALS = frozenset(
     {
@@ -100,10 +94,7 @@ _DISPATCH_TO_TASK = {
     DispatchStatus.TIMEOUT: TaskStatus.TIMEOUT,
     DispatchStatus.FAILED: TaskStatus.FAILED,
 }
-_RUNTIME_TO_TASK = {
-    RuntimeStatus.FAILED: TaskStatus.FAILED,
-    RuntimeStatus.TIMEOUT: TaskStatus.TIMEOUT,
-}
+_RUNTIME_TO_TASK = {RuntimeStatus.FAILED: TaskStatus.FAILED, RuntimeStatus.TIMEOUT: TaskStatus.TIMEOUT}
 
 
 def _validate_request(request: FailureSettlementRequest) -> None:
@@ -132,8 +123,8 @@ async def settle_failure(request: FailureSettlementRequest) -> FailureSettlement
         hint = await TaskRun.filter(run_id=request.run_id).using_db(connection).only("task_id").first()
         if hint is None:
             return FailureSettlementResult(False)
-        task = await Task.filter(id=hint.task_id).using_db(connection).select_for_update().first()
-        if task is None:
+        task = await _lock_owning_task(connection, hint.task_id)
+        if task is None and hint.task_id != TASK_ID_ABSENT:
             return FailureSettlementResult(False)
         run = await TaskRun.filter(run_id=request.run_id).using_db(connection).select_for_update().first()
         if run is None or not _matches_request(task, run, request):
@@ -147,10 +138,20 @@ async def settle_failure(request: FailureSettlementRequest) -> FailureSettlement
         return FailureSettlementResult(True, decision.intent)
 
 
-def _matches_request(task: Task, run: TaskRun, request: FailureSettlementRequest) -> bool:
+async def _lock_owning_task(connection: Any, task_id: int) -> Task | None:
+    """锁住 run 归属的 Task。批次 run 以 ``TASK_ID_ABSENT`` 哨兵创建，``scheduled_tasks`` 里
+    永远没有对应行；把"取不到 Task"一律当 settle 失败，会让 no-ack / 超时 / 失租 / 僵尸等
+    全部 reaper 对批次 run 永久无效——run 卡非终态且无人能收敛，Worker 因此永远删不掉。
+    """
+    if task_id == TASK_ID_ABSENT:
+        return None
+    return await Task.filter(id=task_id).using_db(connection).select_for_update().first()
+
+
+def _matches_request(task: Task | None, run: TaskRun, request: FailureSettlementRequest) -> bool:
     return all(
         (
-            run.task_id == task.id,
+            run.task_id == (TASK_ID_ABSENT if task is None else task.id),
             run.scheduler_fencing_token == request.expected_scheduler_fencing_token,
             run.cancel_requested_at is None,
             run.status not in _TASK_TERMINALS,
@@ -182,9 +183,12 @@ def _plane_is_terminal(run: TaskRun, plane: FailurePlane) -> bool:
     return run.runtime_status in _RUNTIME_TERMINALS or run.dispatch_status in _DISPATCH_FAILURES
 
 
-def _decide_retry(task: Task, run: TaskRun, request: FailureSettlementRequest) -> _RetryDecision:
+def _decide_retry(task: Task | None, run: TaskRun, request: FailureSettlementRequest) -> _RetryDecision:
     result_data = _merge_checked(run.result_data, request.result_update)
     retry_count = int(run.retry_count or 0)
+    # 无 Task ⇒ 无任务级重试策略；补派归 redispatch_service，RetryIntent 也需真实 task_id。
+    if task is None:
+        return _RetryDecision(None, retry_count, None, result_data)
     retry_limit = int(task.retry_count or 0)
     if not task.is_active or retry_limit <= 0 or retry_count > retry_limit:
         return _RetryDecision(None, retry_count, None, result_data)
@@ -275,7 +279,9 @@ async def _cas_update(
     return await TaskRun.filter(**filters).using_db(connection).update(**updates)
 
 
-async def _sync_task(connection: Any, *, task: Task, run_id: int, status: TaskStatus) -> None:
+async def _sync_task(connection: Any, *, task: Task | None, run_id: int, status: TaskStatus) -> None:
+    if task is None:
+        return
     counts: dict[str, Any] = await task_run_outcome_counts(connection, task.id)
     latest = await TaskRun.filter(task_id=task.id).using_db(connection).order_by("-id").only("id").first()
     if latest is not None and latest.id == run_id:

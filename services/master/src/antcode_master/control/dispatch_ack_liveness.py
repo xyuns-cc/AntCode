@@ -127,23 +127,9 @@ async def _converge_dead_candidates(
     marked = 0
     skipped_alive = 0
     for run in candidates:
-        # P1-FN-11: 代际级活性判定。
-        # - run.lease_id 已绑定:必须精确匹配当前 Worker 的活代际 lease_id
-        # - run.lease_id 未绑定(dispatch 后 Worker 尚未 claim):回退到 Worker
-        #   级活性(有任何活代际就跳过),保留原语义
-        if run.worker_id:
-            alive_lease = alive_lease_by_worker.get(run.worker_id)
-            if run.lease_id:
-                # 已绑定:只有当前活代际与绑定代际一致才视为存活
-                if alive_lease == run.lease_id:
-                    skipped_alive += 1
-                    continue
-                # 换代/失效:该 run 已被剥夺归属,可判死
-            else:
-                # 未绑定:仍按"Worker 有任何活代际"作为存活证据
-                if alive_lease is not None:
-                    skipped_alive += 1
-                    continue
+        if owning_generation_is_alive(run, alive_lease_by_worker):
+            skipped_alive += 1
+            continue
         ok = await settle_dispatch_failure_snapshot(
             run,
             authority_token,
@@ -153,6 +139,26 @@ async def _converge_dead_candidates(
         if ok:
             marked += 1
     return marked, skipped_alive
+
+
+def owning_generation_is_alive(run: TaskRun, alive_lease_by_worker: dict[int, str]) -> bool:
+    """P1-FN-11: 持有该 run 的 (worker_id, lease_id) 代际是否仍可能推进它。
+
+    - 未绑定 Worker：没有代际可言，不构成存活证据。
+    - 已绑定 lease_id：只有当前活代际与之精确一致才算存活；换代后旧 run 已
+      被剥夺归属（其结果由新代际的 XAUTOCLAIM 接管或彻底消失）。
+    - 未绑定 lease_id（dispatch 后 Worker 尚未 claim）：回退到 Worker 级活性，
+      有任何活代际就算存活。
+
+    这是全仓"该 run 是否还可能推进"的唯一判据，僵尸分发与取消悬挂共用，
+    避免两处各写一份互相漂移的活性定义。
+    """
+    if not run.worker_id:
+        return False
+    alive_lease = alive_lease_by_worker.get(run.worker_id)
+    if run.lease_id:
+        return alive_lease == run.lease_id
+    return alive_lease is not None
 
 
 async def load_alive_lease_by_worker(worker_internal_ids: set[int]) -> dict[int, str]:
@@ -182,19 +188,9 @@ async def load_alive_lease_by_worker(worker_internal_ids: set[int]) -> dict[int,
     return alive
 
 
-async def load_alive_worker_ids(worker_internal_ids: set[int]) -> set[int]:
-    """兼容旧调用点(_converge_dead_candidates 已切到 load_alive_lease_by_worker)。
-
-    保留原返回类型 set[int] 供未升级的 caller 使用;新代码请用
-    load_alive_lease_by_worker 拿到 lease_id 做代际级判定。
-    """
-    lease_map = await load_alive_lease_by_worker(worker_internal_ids)
-    return set(lease_map.keys())
-
-
 __all__ = [
     "NO_ACK_SCAN_LIMIT",
     "check_dispatched_no_ack",
     "load_alive_lease_by_worker",
-    "load_alive_worker_ids",
+    "owning_generation_is_alive",
 ]
