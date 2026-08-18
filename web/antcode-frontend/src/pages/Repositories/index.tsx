@@ -113,13 +113,13 @@ const Repositories: React.FC = () => {
     setScanResult(result)
     const selected = result.candidates.map(item => item.subdir)
     setSelectedSubdirs(selected)
-    importForm.setFieldsValue(buildImportDefaults(result, activeRepository, selected))
+    importForm.setFieldsValue(buildImportDefaults(result, selected))
   }
 
   const importProjects = async () => {
-    if (!scanResult) return
+    if (!scanResult || !activeRepository) return
     const values = await importForm.validateFields()
-    const projects = buildImportProjects(values, selectedSubdirs)
+    const projects = buildImportProjects(values, selectedSubdirs, scanResult, activeRepository)
     await repositoryProjectImportService.importFromRepository({ projects })
     message.success(`已导入 ${projects.length} 个项目`)
     setScanOpen(false)
@@ -164,8 +164,8 @@ const Repositories: React.FC = () => {
         onImport={importProjects}
         onSelectionChange={(next) => {
           setSelectedSubdirs(next)
-          if (scanResult && activeRepository) {
-            importForm.setFieldsValue(buildImportDefaults(scanResult, activeRepository, next))
+          if (scanResult) {
+            importForm.setFieldsValue(buildImportDefaults(scanResult, next))
           }
         }}
       />

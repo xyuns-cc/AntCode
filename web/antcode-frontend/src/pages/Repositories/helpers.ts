@@ -1,6 +1,6 @@
 import type {
   GitRepository,
-  ProjectImportDraft,
+  ProjectImportEditable,
   ProjectImportFormValues,
   ProjectImportItem,
   RepositoryCandidate,
@@ -9,26 +9,21 @@ import type {
 
 const PYTHON_VERSION_PATTERN = /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/
 
+// 表单里只注册了 name / include_paths 两个 Form.Item（见 ScanImportDrawer
+// 的 buildCandidateColumns），因此 antd 的 validateFields() 只会回传这两项。
+// 其余字段（repository_id / ref / subdir / entry_point 等）不是用户可编辑的，
+// 必须由扫描结果重建 —— 之前塞进表单 store 再指望 validateFields() 带回来，
+// 结果被 antd 原样丢弃，请求缺 repository_id 被后端 422 挡下。
 export const buildImportDefaults = (
   result: RepositoryScanResult,
-  repository: GitRepository,
   selected: string[],
-) => {
-  const projects: Record<string, ProjectImportDraft> = {}
+): Pick<ProjectImportFormValues, 'projects'> => {
+  const projects: Record<string, ProjectImportEditable> = {}
   result.candidates.forEach(candidate => {
     if (!selected.includes(candidate.subdir)) return
     projects[candidate.subdir] = {
-      repository_id: repository.id,
-      ref: result.ref,
-      subdir: candidate.subdir,
-      entry_point: candidate.entry_point,
       include_paths: [],
       name: candidate.subdir.split('/').join('-'),
-      description: '',
-      tags: [],
-      runtime_scope: 'private',
-      runtime_kind: 'python',
-      execution_strategy: 'fixed',
     }
   })
   return { projects }
@@ -37,6 +32,8 @@ export const buildImportDefaults = (
 export const buildImportProjects = (
   values: ProjectImportFormValues,
   selected: string[],
+  result: RepositoryScanResult,
+  repository: GitRepository,
 ): ProjectImportItem[] => {
   const workerId = values.worker_id?.trim()
   const pythonVersion = values.python_version?.trim()
@@ -45,10 +42,21 @@ export const buildImportProjects = (
     throw new Error('仓库导入必须指定有效的 Python 版本')
   }
   return selected.map(subdir => {
-    const project = values.projects[subdir]
+    const candidate = result.candidates.find(item => item.subdir === subdir)
+    if (!candidate) throw new Error(`扫描结果中缺少子目录: ${subdir}`)
+    const project = values.projects?.[subdir]
     if (!project) throw new Error(`缺少项目导入配置: ${subdir}`)
+    const name = project.name?.trim()
+    if (!name) throw new Error(`缺少项目名称: ${subdir}`)
     return {
-      ...project,
+      repository_id: repository.id,
+      ref: result.ref,
+      subdir: candidate.subdir,
+      entry_point: candidate.entry_point,
+      include_paths: project.include_paths ?? [],
+      name,
+      description: '',
+      tags: [],
       runtime_scope: 'private',
       runtime_kind: 'python',
       python_version: pythonVersion,

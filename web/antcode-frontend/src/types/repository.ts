@@ -50,15 +50,19 @@ export interface ProjectImportItem {
   bound_worker_id: string
 }
 
-export type ProjectImportDraft = Omit<
-  ProjectImportItem,
-  'python_version' | 'worker_id' | 'bound_worker_id'
->
+// 扫描导入表单里真正注册了 Form.Item 的字段只有这两个（ScanImportDrawer
+// 的 buildCandidateColumns）。antd 的 validateFields() 只回传已注册字段，
+// 所以表单值类型必须与注册项一一对应，不能声明成整份 ProjectImportItem，
+// 否则类型系统会为"表单能带回全部字段"这一错误假设背书。
+export interface ProjectImportEditable {
+  name: string
+  include_paths: string[]
+}
 
 export interface ProjectImportFormValues {
   worker_id?: string
   python_version?: string
-  projects: Record<string, ProjectImportDraft>
+  projects: Record<string, ProjectImportEditable>
 }
 
 export interface ImportProjectsPayload {
