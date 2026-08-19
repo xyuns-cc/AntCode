@@ -141,8 +141,8 @@ def test_co_located_worker_targets_the_in_network_gateway_endpoint() -> None:
 
     基线 WORKER_GATEWAY_PORT 是宿主发布端口 ANTCODE_GATEWAY_PUBLIC_PORT，而容器内
     gateway 恒定监听 GRPC_PORT=50051；只改主机名会让同机 Worker 敲一个网络内没有
-    监听的端口。TLS 保持开启，因此 Gateway 证书必须含 DNS:gateway
-    （docs/release-runbook.md 第 5.4 节）。
+    监听的端口。TLS 保持开启，因此 Gateway 服务端证书的 SAN 必须同时含公网 FQDN
+    与 DNS:gateway，这条前提写在 compose 的 worker 段注释里，签发证书时必须照做。
     """
     worker = _compose()["services"]["worker"]
     environment = worker["environment"]
@@ -151,4 +151,4 @@ def test_co_located_worker_targets_the_in_network_gateway_endpoint() -> None:
     assert environment["WORKER_GATEWAY_HOST"] == "gateway"
     assert environment["WORKER_GATEWAY_PORT"] == "50051"
     assert environment["WORKER_GATEWAY_TLS"] == "true"
-    assert "DNS:gateway" in Path("docs/release-runbook.md").read_text(encoding="utf-8")
+    assert "DNS:gateway" in PROD_COMPOSE.read_text(encoding="utf-8")

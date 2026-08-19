@@ -63,8 +63,6 @@ make dev-web     # 起前端
 - **worker** — 任务执行：插件化（code / spider / render / rule），沙箱 rlimit（CPU/RAM/FSIZE），支持 Direct（Redis Streams）和 Gateway（gRPC）双传输
 - **gateway** — 跨网络接入：worker 走 gRPC 到 gateway，gateway 落 Redis，master 消费
 
-详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
-
 ## 核心能力
 
 - **调度**：一次性 / 周期性 / Cron / 依赖链
@@ -94,28 +92,16 @@ web/antcode-frontend/     # React + Antd 前端
 scripts/                  # init_db.py 等
 migrations/               # 首版无迁移，详见 migrations/models/README.md
 infra/docker/             # Docker 部署模板
-docs/                     # 文档
 ```
 
-## 文档
+运行手册、API 参考与部署细则不在本仓库维护。各目录的 README 与 `.env.example`
+的逐条注释是唯一的仓内说明来源：
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 系统架构和数据流
-- [`docs/database-setup.md`](docs/database-setup.md) — 数据库初始化
-- [`docs/worker-transport.md`](docs/worker-transport.md) — Direct vs Gateway 模式
-- [`docs/redis-cluster.md`](docs/redis-cluster.md) — Redis 单机/集群/哨兵配置
-- [`docs/master-scaling.md`](docs/master-scaling.md) — Master 多实例部署
-- [`docs/worker-capabilities.md`](docs/worker-capabilities.md) — Worker 能力路由
-- [`docs/mtls-deployment.md`](docs/mtls-deployment.md) — Gateway mTLS 部署
-- [`docs/scheduler-api.md`](docs/scheduler-api.md) — 调度器 API 参考
-- [`docs/project-api.md`](docs/project-api.md) — 项目 API 参考
-- [`docs/user-api.md`](docs/user-api.md) — 用户 / 认证 API 参考
-- [`docs/logs-api.md`](docs/logs-api.md) — 日志 API 参考
-- [`docs/system-config.md`](docs/system-config.md) — 系统配置
-- [`docs/resilience.md`](docs/resilience.md) — 熔断 / 重试 / 补派
-- [`docs/scrapy-migration.md`](docs/scrapy-migration.md) — Scrapy 引擎迁移说明
-- [`docs/node-env-management.md`](docs/node-env-management.md) — 多语言运行时管理
-
-全部索引见 [`docs/README.md`](docs/README.md)。
+- [`infra/docker/README.md`](infra/docker/README.md) — 生产/开发 Compose 部署、升级、备份恢复
+- [`migrations/models/README.md`](migrations/models/README.md) — 建表与迁移脚本约定
+- [`services/worker/README.md`](services/worker/README.md) — Worker Direct / Gateway 传输模式
+- [`tests/README.md`](tests/README.md) — 各测试套件的依赖与执行方式
+- [`.env.example`](.env.example) / [`infra/docker/.env.example`](infra/docker/.env.example) — 全部配置项含义
 
 ## 部署
 
@@ -131,9 +117,9 @@ docker compose -f docker-compose.dev.yml up -d worker
 ```
 
 生产环境不使用 K8s，也不能直接复用开发 Compose。五个应用镜像由生产 Compose 的
-`build:` 段在部署机就地构建（没有 registry 产物，也没有签名——代价见
-`docs/release-runbook.md` 第 0.5 节），第三方运行时镜像仍按 digest pin；控制面必须
-使用 Docker secrets 与 TLS/mTLS，并通过唯一部署入口执行：
+`build:` 段在部署机就地构建：没有 registry 产物，也没有镜像签名，因此回滚只能靠
+「切回旧源码再重新构建」，回滚窗口必须把构建时长算进去。第三方运行时镜像仍按
+digest pin；控制面必须使用 Docker secrets 与 TLS/mTLS，并通过唯一部署入口执行：
 
 ```bash
 infra/docker/deploy-production.sh .env.production fresh-deploy

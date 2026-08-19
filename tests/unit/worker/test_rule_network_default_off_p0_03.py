@@ -1,6 +1,6 @@
 """P0-03 回归：Rule 插件默认不放行网络,需 ANTCODE_RULE_ALLOW_NETWORK 显式开启。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P0-03:
+缺陷 P0-03：
 `services/worker/src/antcode_worker/plugins/rule/plugin.py` 之前
 `sandbox_config={RULE_SANDBOX_ALLOW_NETWORK: True}` 恒真,让 Rule 任务
 恒执行不带 --unshare-net 的 bwrap,与宿主共享网络 namespace。结合 SYS_ADMIN

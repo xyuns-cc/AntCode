@@ -134,7 +134,6 @@ node_modules/
 .dockerignore
 
 # 文档
-/docs/
 *.md
 !README.md
 !packages/**/README.md

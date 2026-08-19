@@ -37,8 +37,9 @@ services:
     # ANTCODE_GATEWAY_PUBLIC_PORT（宿主发布端口），容器内 gateway 恒定监听
     # GRPC_PORT=50051（docker-compose.prod.control.yml），两者不等时同机 Worker
     # 会去敲一个网络内根本没有监听的端口。
-    # WORKER_GATEWAY_TLS 保持 true，因此 Gateway 服务端证书的 SAN 必须包含
-    # DNS:gateway（docs/release-runbook.md 第 5.4 节）。
+    # WORKER_GATEWAY_TLS 保持 true，因此 Gateway 服务端证书的 SAN 必须同时包含
+    # 公网 FQDN 与 DNS:gateway——只签公网 FQDN 时同机 Worker 每次握手都会因为
+    # 主机名不匹配而失败。
     environment:
       WORKER_GATEWAY_HOST: gateway
       WORKER_GATEWAY_PORT: "50051"

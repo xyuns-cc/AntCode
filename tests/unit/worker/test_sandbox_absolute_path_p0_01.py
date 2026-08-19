@@ -1,6 +1,6 @@
 """P0-01 回归：Worker 沙箱启动命令必须使用绝对路径 + 任务 env 不得污染 PATH。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P0-01:
+缺陷 P0-01：
 wiring 用 shutil.which 校验 bwrap 但存储相对命令名,sandbox.wrap_command
 和 process.py 都会让 asyncio.create_subprocess_exec 用 exec_plan.env 里的
 PATH 解析可执行文件,workspace 里的伪造 bwrap 会在真隔离建立前以 Worker

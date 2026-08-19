@@ -207,9 +207,8 @@ web-check: web-type-check web-lint web-test web-build
 #   1. 需要真实中间件/容器的测试：make test-contracts / make test-int /
 #      infra/docker/run-gateway-e2e.sh 与 tests/e2e 的 run_e2e.sh
 #   2. 需要外部工具镜像的扫描：gitleaks / hadolint / trivy
-# 完整清单与执行环境见 docs/release-runbook.md 第 0 节。
 release-gate: proto-check check test audit web-check
-	@echo "本地发布门禁全绿；需要中间件/容器的门禁另见 docs/release-runbook.md §0.3 与 §0.4"
+	@echo "本地发布门禁全绿；仍需在具备中间件/容器的环境执行 make test-contracts、make test-int、infra/docker/run-gateway-e2e.sh 与 tests/e2e/run_e2e.sh"
 
 # =============================================================================
 # 测试

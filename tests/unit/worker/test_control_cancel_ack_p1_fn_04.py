@@ -1,6 +1,6 @@
 """P1-FN-04 回归:control cancel 的 False/异常路径要正确处理 ACK。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-FN-04:
+缺陷 P1-FN-04：
 engine._control_loop 之前:
 - 丢弃 Engine.cancel() 返回值
 - 丢弃 executor.cancel() 返回值

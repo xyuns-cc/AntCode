@@ -1,6 +1,6 @@
 """Worker 结算完成后释放 run ownership。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-GW-05:
+缺陷 P1-GW-05：
 _report_result 只在成功路径调 _release_run_ownership;失败路径 raise
 RuntimeError 但不释放,ownership 键留在 Redis 至 TTL(≈65 分钟)才自动
 过期。这段时间 L2 通过 XAUTOCLAIM 拿到 PEL 后 claim_run_ownership 会

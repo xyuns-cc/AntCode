@@ -2,7 +2,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN_DIRS = [
-    REPO_ROOT / "docs",
     REPO_ROOT / "infra",
     REPO_ROOT / "packages",
     REPO_ROOT / "services",

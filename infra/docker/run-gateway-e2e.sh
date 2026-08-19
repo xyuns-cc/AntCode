@@ -7,7 +7,7 @@
 # （scripts/release_e2e_environment.py）、同一个编排器
 # （scripts/release_e2e_orchestrator.py），五个应用镜像由 `docker compose build`
 # 就地构建——与 deploy-production.sh 用的是同一份 build 段。
-# 正式发布前必须在受控发布机上跑通它，见 docs/release-runbook.md 第 0 节。
+# 正式发布前必须在受控发布机（有 Docker 与中间件）上跑通它；make release-gate 不覆盖。
 #
 # 覆盖：生成 mTLS PKI -> 起生产 Gateway 画像 -> 安装 Key 注册 -> 按分配到的
 # worker_id 重签客户端证书 -> mTLS 连 Gateway -> 初始 Lease -> 心跳 -> 控制台

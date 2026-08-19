@@ -136,7 +136,6 @@ def test_test_image_context_includes_tests_and_workspace_readmes():
         "packages/antcode_core/README.md",
         "services/worker/README.md",
         "web/antcode-frontend/Dockerfile",
-        "docs/database-setup.md",
         ".dockerignore",
     )
     assert all(not ignore_spec.match_file(path) for path in required_files)
@@ -227,7 +226,7 @@ def test_docker_context_includes_nested_logs_and_data_source_files():
 def test_runtime_directories_are_ignored_only_at_context_root():
     rules = set(_read(ROOT_DOCKERIGNORE).splitlines())
 
-    for directory in ("data", "logs", "web", "docker", "docs"):
+    for directory in ("data", "logs", "web", "docker"):
         assert f"/{directory}/" in rules
         assert f"{directory}/" not in rules
 

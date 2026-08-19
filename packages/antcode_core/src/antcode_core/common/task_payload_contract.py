@@ -9,8 +9,9 @@
 `common/__init__.py` 已经写明本包不做聚合再导出，因此本模块可以在没有任何控制面
 配置的进程里安全导入。边界由 `tests/unit/core/test_config_free_import_boundary.py` 锁住。
 
-字段名与版本是 ready / redispatch 帧的一部分，改动等同于改线协议
-（见 `docs/release-runbook.md` 第 2 节 W2）。
+字段名与版本是 ready / redispatch 帧的一部分，改动等同于改线协议：滚动升级期间新旧
+两侧同时在读写同一批 Redis 帧，改名或改版本号会让未升级的一侧解不开信封，任务
+`params` / `environment` 静默变空。要改必须先双写、等存量帧排空，再摘掉旧字段。
 """
 
 from __future__ import annotations

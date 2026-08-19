@@ -9,7 +9,8 @@ uv run python scripts/init_db.py
 ```
 
 会用 `Tortoise.generate_schemas(safe=True)` 从 model 直接建表，然后补建
-几个性能关键的索引，并创建默认管理员。见 [`docs/database-setup.md`](../../docs/database-setup.md)。
+几个性能关键的索引，并创建默认管理员。所需环境变量与建表清单分别见
+`scripts/init_db_environment.py` 与 `scripts/init_db.py` 的 `REQUIRED_TABLES`。
 
 ## 后续 schema 变更
 

@@ -1,6 +1,6 @@
 """P1-FN-07 回归:_record_dispatch_result 消费 update_dispatch_status CAS 返回值。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-FN-07:
+缺陷 P1-FN-07：
 scheduler_loop._record_dispatch_result FAILED 分支之前忽略 update_dispatch_status
 的返回值。若 CAS 谓词被并发路径(retry_loop/reconcile/其他 worker)推到
 终态而拒绝,本次 FAILED update 会 no-op,但 caller 仍会走 log/WS/retry

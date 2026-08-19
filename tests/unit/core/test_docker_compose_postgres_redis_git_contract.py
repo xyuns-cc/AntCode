@@ -11,19 +11,16 @@ DOCKER_README_PATH = Path("infra/docker/README.md")
 # 捕获：否则 "$ROOT/" 只截到 "ROOT/"，得到一条既不存在、也不是笔误的假路径，
 # 让本文件的存在性断言对所有 shell 脚本恒假。
 COMPOSE_REFERENCE = re.compile(r"(?:[A-Za-z0-9_.${}-]+/)*docker-compose[A-Za-z0-9_.-]*\.ya?ml")
-DOCUMENTATION_ROOTS = (Path("docs"), Path("infra/docker"), Path("migrations"), Path("tests/contracts"))
-HISTORICAL_REVIEW_MARKERS = ("review", "审查报告")
-
-
-def _is_historical_review(path: Path) -> bool:
-    return path.parts[0] == "docs" and any(marker in path.stem for marker in HISTORICAL_REVIEW_MARKERS)
+DOCUMENTATION_ROOTS = (Path("infra/docker"), Path("migrations"), Path("tests/contracts"))
+# 运维文本源集合的非空下界。运维说明收敛到各目录 README 时源集合缩小过一次；没有这
+# 个下界，再有一次收敛把 README 也扫空时，存在性断言会静默变成恒真的空转。
+MINIMUM_COMPOSE_REFERENCES = 20
 
 
 def _active_operational_sources() -> tuple[Path, ...]:
     documentation = (path for root in DOCUMENTATION_ROOTS for path in root.rglob("*.md"))
     scripts = (*Path("infra/docker").glob("*.sh"), *Path("scripts").glob("*.sh"))
-    sources = (Path("README.md"), Path("Makefile"), *documentation, *scripts)
-    return tuple(path for path in sources if not _is_historical_review(path))
+    return (Path("README.md"), Path("Makefile"), *documentation, *scripts)
 
 
 def _strip_shell_variable_prefix(reference: str) -> str:
@@ -98,11 +95,14 @@ def test_dev_startup_requires_successful_migration():
 
 
 def test_active_operations_only_reference_existing_compose_files() -> None:
+    scanned = 0
     for source in _active_operational_sources():
         content = source.read_text(encoding="utf-8")
         for reference in COMPOSE_REFERENCE.findall(content):
+            scanned += 1
             candidates = _compose_reference_candidates(source, reference)
             assert any(path.is_file() for path in candidates), f"{source}: missing Compose file {reference}"
+    assert scanned >= MINIMUM_COMPOSE_REFERENCES, f"只扫到 {scanned} 条 Compose 引用，运维文本源集合已失效"
 
 
 def test_compose_reference_scan_covers_shell_variable_paths() -> None:

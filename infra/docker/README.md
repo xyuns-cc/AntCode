@@ -165,7 +165,7 @@ frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 **代价必须认清**：本地构建没有不可变产物，也没有签名与来源证明——cosign 验签链路
 （`verify-production-images.sh` 与 release collection 元数据镜像）已随发布链路一并删除，
 信任边界因此变成**部署机本身与它的源码树**。回滚不能再切回一个旧 digest，只能 revert
-源码后重新构建，回滚窗口要把构建时长算进去。详见 `docs/release-runbook.md` 第 0.5 节。
+源码后重新构建，回滚窗口要把构建时长算进去。
 
 因此 `ANTCODE_IMAGE_TAG` 必须每次发布唯一，**推荐直接用被部署的 40 位 Git commit**：
 它是把运行中的容器对回一次确定源码构建的唯一线索。复用同一个 tag 会让 `up -d` 认为
@@ -245,8 +245,8 @@ JWT 和加密密钥全部通过 Docker secrets 只读挂载。应用镜像的固
 infra/docker/deploy-production.sh .env.production rotate-encryption-key --confirm-writers-stopped
 ```
 
-命令成功不自动删除 secret file，也不自动重启长期服务；必须按 `docs/database-setup.md` 完成 legacy secret 撤销和
-清理后复验，再使用正常部署入口启动。
+命令成功不自动删除 secret file，也不自动重启长期服务；必须先确认新密钥已生效，再撤销并
+删除 legacy secret file，复验后使用正常部署入口启动。
 
 ```bash
 infra/docker/deploy-production.sh .env.production fresh-deploy
@@ -282,8 +282,7 @@ infra/docker/deploy-production.sh .env.production existing-upgrade \
 迁移若找不到 pending Key 的 Redis 来源元数据也会明确失败，不会把来源限制降级为空。
 独立 Worker 不属于控制面 Compose，
 脚本无法替运维方停止或证明其状态；`--confirm-writers-stopped` 是对所有外部 writer
-也已停机的明确确认。完整 Redis 数据合同和阻断项见
-`docs/crawl-redis-upgrade.md`。
+也已停机的明确确认。
 
 所有长期服务都设置 CPU、内存、PID、只读根和日志轮转边界；Redis 使用
 `maxmemory` + `noeviction`。readiness 失败会向 PID 1 发 TERM，让

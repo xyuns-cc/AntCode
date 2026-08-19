@@ -16,7 +16,6 @@ Worker 是 AntCode 的"手脚"，负责实际执行用户提交的任务。它�
 ## 🧭 两种部署方式
 
 Worker 官方支持 **Docker** 与 **物理机（宿主进程）**，两种方式都能跑 Direct 与 Gateway。
-完整矩阵、宿主前提与安全姿态差异见 [`docs/worker-transport.md`](../../docs/worker-transport.md)。
 一句话结论：**Docker 为了让 bwrap 能建沙箱，必须先放宽 seccomp / AppArmor / systempaths
 三项容器级限制；物理机不需要任何放宽，隔离严格更强**，所以不可信 / 多租户生产任务默认
 走物理机或独立 VM，Docker 路径用于可信内网与验收环境。

@@ -6,7 +6,6 @@ from antcode_core.domain.models import TaskRunLeaseGeneration
 from scripts.init_db import REQUIRED_TABLES
 
 MIGRATION = Path("migrations/models/20260727_add_task_run_lease_generations.sql")
-DATABASE_SETUP = Path("docs/database-setup.md")
 
 
 def test_generation_cutoff_column_fits_maximum_redis_stream_id() -> None:
@@ -31,8 +30,5 @@ def test_generation_schema_is_atomic_and_index_is_created_online() -> None:
     assert "table_class.relname = 'task_run_lease_generations'" in migration
 
 
-def test_generation_table_is_required_and_documented_for_upgrade() -> None:
-    docs = DATABASE_SETUP.read_text(encoding="utf-8")
-
+def test_generation_table_is_required_by_the_schema_validator() -> None:
     assert "task_run_lease_generations" in REQUIRED_TABLES
-    assert "20260727_add_task_run_lease_generations.sql" in docs

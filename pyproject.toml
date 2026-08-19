@@ -129,9 +129,9 @@ pythonpath = ["."]
 # 中间件的套件。不声明 testpaths 时它会从仓库根收集，后果有二：一是连 `tests/e2e` 一起收，
 # 而 e2e 需要完整容器栈，在开发机上必失败；二是会走进运行期产物目录 `data/`，Worker 跑过
 # 之后 `data/worker/egress` 是 0300，收集阶段直接 PermissionError 中断。
-# 其余套件各自需要真实依赖，必须显式给路径、在具备依赖的环境里单独执行，清单见
-# docs/release-runbook.md §0.3：tests/contracts（真 Redis）、tests/integration（真
-# PostgreSQL）、tests/e2e（完整容器栈）、tests/loadtest（--run-loadtests）。
+# 其余套件各自需要真实依赖，必须显式给路径、在具备依赖的环境里单独执行：
+# tests/contracts（真 Redis）、tests/integration（真 PostgreSQL）、tests/e2e（完整
+# 容器栈）、tests/loadtest（--run-loadtests）。
 testpaths = ["tests/unit", "tests/boundary"]
 filterwarnings = [
     # 忽略 passlib 库中的 crypt 模块弃用警告（第三方库问题，Python 3.13 前无法解决）

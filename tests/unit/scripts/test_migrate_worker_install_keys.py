@@ -283,17 +283,14 @@ async def test_existing_target_with_different_payload_fails_without_deleting_eit
     assert redis.deleted == []
 
 
-def test_database_upgrade_docs_require_install_key_migration() -> None:
-    docs = Path("docs/database-setup.md").read_text(encoding="utf-8")
+def test_install_key_migration_moves_redis_keys_before_opening_the_db_transaction() -> None:
     script = Path("scripts/migrate_worker_install_keys.py").read_text(encoding="utf-8")
     migration = Path("migrations/models/20260713_add_worker_install_key_allowed_source.sql").read_text(encoding="utf-8")
 
-    assert "uv run python scripts/migrate_worker_install_keys.py" in docs
-    assert "20260713_add_worker_install_key_allowed_source.sql" in docs
     assert 'ADD COLUMN IF NOT EXISTS "allowed_source" VARCHAR(64)' in migration
     assert 'async with in_transaction("default")' in script
-    assert "TYPE/DUMP/PTTL/RESTORE/DEL" in docs
-    assert "不使用跨 slot" in docs
+    # Redis 搬迁必须先于 DB 事务：反过来会让 DB 事务在 Redis 搬迁失败时已经提交，
+    # 留下一批列已加、但来源元数据仍在旧 key 下的 pending 安装 Key。
     assert script.index("redis_migrated = await _migrate_redis_keys(redis_client, namespace)") < script.index(
         'async with in_transaction("default")'
     )

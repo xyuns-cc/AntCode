@@ -4,7 +4,6 @@ from tests.unit.core.test_docker_compose_prod_contract import _compose, _script
 
 DEPLOY_SCRIPT = Path("infra/docker/deploy-production.sh")
 WEB_API_DOCKERFILE = Path("infra/docker/Dockerfile.web_api")
-CRAWL_UPGRADE_DOC = Path("docs/crawl-redis-upgrade.md")
 DEV_COMPOSE = Path("infra/docker/docker-compose.dev.yml")
 
 
@@ -67,16 +66,13 @@ def test_deploy_script_keeps_existing_writers_stopped_until_reviewed_apply() -> 
     assert deploy.index(upgrade_run) < deploy.rindex("up -d --wait --wait-timeout")
 
 
-def test_crawl_redis_docs_use_candidate_profile_for_production() -> None:
+def test_crawl_redis_deployment_readme_documents_the_guarded_entrypoint() -> None:
     deployment = _script(Path("infra/docker/README.md"))
-    upgrade = _script(CRAWL_UPGRADE_DOC)
 
-    for document in (deployment, upgrade):
-        assert "deploy-production.sh .env.production fresh-deploy" in document
-        assert "--confirm-writers-stopped" in document
-        assert "--apply" in document
-        assert "--preflight-reviewed" in document
-        assert "writer" in document
-    assert "crawl-redis-upgrade` profile" in upgrade
+    assert "deploy-production.sh .env.production fresh-deploy" in deployment
+    assert "--confirm-writers-stopped" in deployment
+    assert "--apply" in deployment
+    assert "--preflight-reviewed" in deployment
+    assert "writer" in deployment
     docker_environment = _script(Path("infra/docker/.env.example"))
     assert "REDIS_NAMESPACE=antcode" in docker_environment

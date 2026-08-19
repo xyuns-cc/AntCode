@@ -1,6 +1,6 @@
 """P1-FN-13 回归:Lease store 不可达时 recovery 保守跳过判死。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-FN-13:
+缺陷 P1-FN-13：
 原 _get_active_worker_ids 在 Redis 挂时返回 set() 而非 None,
 调用点 `if pub_id in active_worker_ids` 会把空集当"没有活跃 worker",
 于是把全部超心跳的 RUNNING run 判死重跑,与真实执行 worker 双跑。

@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[3]
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 MAKEFILE_PATH = ROOT / "Makefile"
 GITIGNORE_PATH = ROOT / ".gitignore"
-RUNBOOK_PATH = ROOT / "docs/release-runbook.md"
 
 LOCAL_TEST_PATHS = ["tests/unit", "tests/boundary"]
 EXTERNAL_DEPENDENCY_SUITES = ("tests/contracts", "tests/integration", "tests/e2e", "tests/loadtest")
@@ -72,9 +71,3 @@ def test_audit_reports_are_never_committed() -> None:
     ignored = GITIGNORE_PATH.read_text(encoding="utf-8").splitlines()
     for artifact in AUDIT_ARTIFACTS:
         assert artifact in ignored
-
-
-def test_runbook_documents_the_suites_release_gate_cannot_run() -> None:
-    runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
-    for suite in EXTERNAL_DEPENDENCY_SUITES:
-        assert suite in runbook

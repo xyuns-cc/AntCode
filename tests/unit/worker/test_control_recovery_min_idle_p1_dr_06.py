@@ -1,6 +1,6 @@
 """P1-DR-06 回归:control_recovery 使用 min_idle=LEASE_TTL/4 避免抢占新代际消息。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-DR-06:
+缺陷 P1-DR-06：
 control_recovery 之前 min_idle_time_ms=0,新代际启动时立即认领旧代际全部
 PEL entries,包括刚投递到旧代际(idle < 1s)的正常消息。两个 Worker 前后
 重启形成 ping-pong 反复 XCLAIM,取消/配置控制活锁或饥饿。

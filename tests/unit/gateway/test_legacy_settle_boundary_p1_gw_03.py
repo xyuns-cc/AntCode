@@ -1,6 +1,6 @@
 """P1-GW-03 回归:Gateway 结算 Lua 的 legacy consumer 边界。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-GW-03:
+缺陷 P1-GW-03：
 task_settle.py 的 Ack/Requeue Lua legacy 分支(pending[1][2] ~= legacy)
 接受"任何"裸 worker_id consumer 结算,没有时间界限。旧代际 Worker 或
 攻击者只需构造裸 worker_id 名义就能滑过 lease fence。

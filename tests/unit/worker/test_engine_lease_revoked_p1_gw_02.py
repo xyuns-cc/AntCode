@@ -1,6 +1,6 @@
 """P1-GW-02 回归:Lease 被撤销时 transport 立即通知 engine cancel_all + 唤醒 renew。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-GW-02:
+缺陷 P1-GW-02：
 _abort_lease_revocation 之前只 halt transport(取消 bg tasks + disconnect),
 不通知 engine, engine 需等到 _renew_run_ownership_loop 下一个 600s 周期
 才做一次 renew, 命中 LEASE_STALE 后才 cancel; 中间最坏 10 分钟内旧代际

@@ -55,9 +55,9 @@
 
 ### 数据库
 
-- **无 aerich 迁移链**：v1.0.0 一次性建表。见 [`docs/database-setup.md`](docs/database-setup.md)。
+- **无 aerich 迁移链**：v1.0.0 一次性建表。
 - 一键初始化：`uv run python scripts/init_db.py`
-- 后续 schema 变更走手写 SQL 补丁或引入 aerich（详见 database-setup.md）
+- 后续 schema 变更走手写 SQL 补丁或引入 aerich（见 [`migrations/models/README.md`](migrations/models/README.md)）
 
 ### 部署
 
@@ -75,7 +75,6 @@
 ### 参与开发
 
 - 源码结构见 README "目录" 节
-- 提 issue / PR 前请先跑 `make test`（如果有）或至少确保 `init_db.py` + 三服务能起来
-- 文档改动同步更新 `docs/README.md` 索引
+- 提 issue / PR 前请先跑 `make release-gate`，或至少确保 `init_db.py` + 三服务能起来
 
 [1.0.0]: https://github.com/xyuns-cc/AntCode/releases/tag/v1.0.0

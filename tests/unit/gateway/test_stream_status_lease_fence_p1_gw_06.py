@@ -1,6 +1,6 @@
 """P1-GW-06 回归：StreamStatus 必须在处理状态前执行 Lease fence。
 
-审查文档 docs/code-review-2026-07-22-round3-review.md 的 P1-GW-06:
+缺陷 P1-GW-06：
 - data_service.StreamStatus 之前只 _require_run_ownership,不 _require_current_lease,
   被撤销/换代的旧 L1 仍能上报 RUNNING/终态帧,把 L2 的实际进度覆盖或伪造。
 StreamStatus 与 AckTask 对称，读取 task_status.data["lease_id"] 后调用

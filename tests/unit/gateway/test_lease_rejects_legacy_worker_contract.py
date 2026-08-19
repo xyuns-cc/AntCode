@@ -1,6 +1,6 @@
 """混跑门禁：旧 Worker 契约 + 新 Gateway 必须响亮失败，而不是静默零产出。
 
-未加门禁前的真实行为（证据见 ``docs/release-runbook.md`` 第 3 节）：旧 Worker 照样
+未加门禁前的真实行为（滚动升级实测）：旧 Worker 照样
 拿到 Lease，Gateway 随后把心跳写进 ``{ns}:heartbeat:{id}``，控制台显示在线健康，而
 它执行的任务 ``params`` / ``environment`` 全空。本文件把这条路彻底堵死。
 """
