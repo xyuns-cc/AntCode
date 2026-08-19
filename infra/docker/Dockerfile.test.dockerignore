@@ -3,19 +3,22 @@
 # data/worker/egress 后 EACCES 失败。门禁见 test_container_supply_chain_contract.py。
 
 # Repository metadata and local tooling
+# 本 context **包含 web/**（测试镜像要跑前端相关断言），而 Dockerfile.test 用的是
+# `COPY . /app`——整棵 context 直接落进最终镜像层。裸 `.claude/` 只锚定 context 根，
+# 开发机上的 web/antcode-frontend/.claude/settings.local.json 就是这样进镜像的。
+# 这类目录一律用 `**/` 前缀。
 .git/
-.idea/
-.vscode/
-.agents/
-.claude/
-.codex/
-.kiro/
-.serena/
-.cursor/
-.continue/
-.windsurf/
-.DS_Store
-._*
+**/.idea/
+**/.vscode/
+**/.agents/
+**/.claude/
+**/.codex/
+**/.kiro/
+**/.serena/
+**/.cursor/
+**/.continue/
+**/.windsurf/
+**/.DS_Store
 **/._*
 
 # Python caches and build outputs
@@ -43,61 +46,61 @@ htmlcov/
 **/runtime_data/
 /logs/
 *.log
-*.pem
-*.key
-*.p12
-*.pfx
-*.pkcs12
-*.jks
-*.keystore
-*.der
-*.ovpn
-id_rsa
-id_dsa
-id_ecdsa
-id_ed25519
-*.pub
-.ssh/
+# 凭据类模式**每条都必须带 `**/` 前缀**：dockerignore 锚定 context 根、`*` 不跨越 `/`，
+# 裸 `*.key` 只管根目录那一层。凭据多半是未被 git 跟踪的本地文件，所以"仓库里没有
+# 敏感文件"不构成缓解——要防的是构建机工作区里的那一份。
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.pkcs12
+**/*.jks
+**/*.keystore
+**/*.der
+**/*.ovpn
+**/id_rsa
+**/id_dsa
+**/id_ecdsa
+**/id_ed25519
+**/*.pub
 **/.ssh/
-.netrc
-.pypirc
-.npmrc
-.authinfo
-.authinfo.gpg
-.pgpass
-.my.cnf
-.git-credentials
-.vault-token
-pip.conf
-pip.ini
-credentials.json
-*credentials*.json
-service-account*.json
-secrets.yaml
-secrets.yml
-secrets.json
-secret*.json
-auth.json
-.docker/config.json
+**/.netrc
+**/.pypirc
+**/.npmrc
+# 仓库里唯一被跟踪的 .npmrc 只含 engine-strict 等构建开关，不含 token；保留它以维持
+# "被跟踪文件不缺席测试 context"。反选不带通配符，不影响目录剪枝。
+!web/antcode-frontend/.npmrc
+**/.authinfo
+**/.authinfo.gpg
+**/.pgpass
+**/.my.cnf
+**/.git-credentials
+**/.vault-token
+**/pip.conf
+**/pip.ini
+**/credentials.json
+**/*credentials*.json
+**/service-account*.json
+**/secrets.yaml
+**/secrets.yml
+**/secrets.json
+**/secret*.json
+**/auth.json
 **/.docker/config.json
-*.tfstate
-*.tfstate.*
-*.tfvars
-.aws/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
 **/.aws/
-.azure/
 **/.azure/
-.config/gcloud/
 **/.config/gcloud/
-.kube/config
 **/.kube/config
-*.kubeconfig
+**/*.kubeconfig
 
 # Environment files (keep audited examples only)
-.env*
+# 反选必须排在排除之后：dockerignore 由最后一条命中的规则定胜负。
 **/.env*
-*.env
-*.env.*
+**/*.env
+**/*.env.*
 !.env.example
 !infra/docker/.env.example
 

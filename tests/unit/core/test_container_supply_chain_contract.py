@@ -4,6 +4,8 @@ from pathlib import Path
 
 from pathspec import GitIgnoreSpec
 
+from tests.unit.core.dockerignore_support import DockerIgnoreSpec
+
 ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = ROOT / "infra/docker/docker-compose.dev.yml"
 ROOT_DOCKERIGNORE = ROOT / ".dockerignore"
@@ -144,7 +146,7 @@ def test_application_images_use_strict_docker_secret_entrypoint():
 
 
 def test_test_image_context_includes_tests_and_workspace_readmes():
-    ignore_spec = GitIgnoreSpec.from_lines(_read(TEST_DOCKERIGNORE).splitlines())
+    ignore_spec = DockerIgnoreSpec.from_lines(_read(TEST_DOCKERIGNORE).splitlines())
 
     required_files = (
         "tests/e2e/conftest.py",
@@ -170,7 +172,8 @@ def test_docker_context_excludes_static_analysis_caches():
             assert cache_directory in dockerignore
 
 
-def test_docker_contexts_exclude_environment_and_credential_files():
+def test_docker_contexts_exclude_root_level_environment_and_credential_files():
+    # 嵌套深度的同类判据在 test_dockerignore_semantics.py（那里才是语义正确的匹配器）。
     excluded_paths = (
         ".env",
         ".env.production",
@@ -178,24 +181,19 @@ def test_docker_contexts_exclude_environment_and_credential_files():
         ".envrc",
         "config.env",
         "config.env.backup",
-        "nested/.env",
-        "nested/.env.staging",
-        "nested/config.env",
-        "nested/private.key",
-        "nested/credentials.json",
-        "nested/cloud-credentials-prod.json",
-        "nested/service-account-prod.json",
-        "nested/.ssh/id_ed25519",
-        "nested/.aws/credentials",
-        "nested/.azure/accessTokens.json",
-        "nested/.config/gcloud/application_default_credentials.json",
-        "nested/.kube/config",
-        "nested/.docker/config.json",
-        "nested/.pgpass",
+        "private.key",
+        "credentials.json",
+        ".pgpass",
+        ".ssh/id_ed25519",
+        ".aws/credentials",
+        ".azure/accessTokens.json",
+        ".config/gcloud/application_default_credentials.json",
+        ".kube/config",
+        ".docker/config.json",
     )
 
     for dockerignore_path in DOCKERIGNORE_PATHS:
-        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        ignore_spec = DockerIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
         assert all(ignore_spec.match_file(path) for path in excluded_paths), dockerignore_path
 
 
@@ -212,35 +210,26 @@ def test_docker_contexts_retain_environment_examples():
     )
 
     for dockerignore_path in (ROOT_DOCKERIGNORE, TEST_DOCKERIGNORE):
-        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        ignore_spec = DockerIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
         assert all(not ignore_spec.match_file(path) for path in present), dockerignore_path
 
 
-def test_docker_contexts_exclude_local_agent_configuration():
-    agent_directories = (".agents", ".claude", ".codex", ".kiro", ".serena", ".cursor", ".continue", ".windsurf")
-    excluded_paths = tuple(
-        path
-        for directory in agent_directories
-        for path in (f"{directory}/settings.json", f"nested/{directory}/private.json")
-    )
+def test_git_and_docker_contexts_exclude_appledouble_metadata():
+    # 两种 ignore 文件语义不同，必须各用各的匹配器：gitignore 无斜杠模式天然在任意深度
+    # 生效，dockerignore 则要靠 `**/` 前缀。
+    metadata_paths = ("._source.py", "nested/deep/._source.py")
+
+    git_spec = GitIgnoreSpec.from_lines(_read(ROOT / ".gitignore").splitlines())
+    assert all(git_spec.match_file(path) for path in metadata_paths)
 
     for dockerignore_path in DOCKERIGNORE_PATHS:
-        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
-        assert all(ignore_spec.match_file(path) for path in excluded_paths), dockerignore_path
-
-
-def test_git_and_docker_contexts_exclude_appledouble_metadata():
-    metadata_paths = ("._source.py", "nested/deep/._source.py")
-    ignore_paths = (ROOT / ".gitignore", *DOCKERIGNORE_PATHS)
-
-    for ignore_path in ignore_paths:
-        ignore_spec = GitIgnoreSpec.from_lines(_read(ignore_path).splitlines())
-        assert all(ignore_spec.match_file(path) for path in metadata_paths), ignore_path
+        ignore_spec = DockerIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        assert all(ignore_spec.match_file(path) for path in metadata_paths), dockerignore_path
 
 
 def test_docker_context_includes_nested_logs_and_data_source_files():
     for dockerignore_path in (ROOT_DOCKERIGNORE, TEST_DOCKERIGNORE):
-        ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
+        ignore_spec = DockerIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
         for source_file in DOCKER_CONTEXT_SOURCE_FILES:
             relative_path = source_file.relative_to(ROOT).as_posix()
             assert source_file.is_file(), relative_path

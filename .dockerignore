@@ -27,24 +27,23 @@ env/
 ENV/
 .python-version
 
-# IDE
-.vscode/
-.idea/
-.agents/
-.claude/
-.codex/
-.kiro/
-.serena/
-.cursor/
-.continue/
-.windsurf/
-*.swp
-*.swo
-*~
+# IDE 与本地 agent 配置（其中常有 API key / MCP 凭据，且几乎都不被 git 跟踪）
+**/.vscode/
+**/.idea/
+**/.agents/
+**/.claude/
+**/.codex/
+**/.kiro/
+**/.serena/
+**/.cursor/
+**/.continue/
+**/.windsurf/
+**/*.swp
+**/*.swo
+**/*~
 
 # 操作系统
-.DS_Store
-._*
+**/.DS_Store
 **/._*
 Thumbs.db
 
@@ -66,63 +65,61 @@ htmlcov/
 *.log
 /logs/
 
-# 密钥文件（在 data/ 目录下，通过 volume 挂载）
+# 密钥与凭据。**每条都必须带 `**/` 前缀**：dockerignore 不是 gitignore，模式锚定
+# context 根且 `*` 不跨越 `/`，所以裸 `*.key` 只命中根目录那一层，nested/private.key
+# 照进 context。而凭据恰恰多半躺在**未被 git 跟踪**的子目录里——开发机上的
+# web/antcode-frontend/.claude/ 就是实证，`git ls-files` 干净并不能说明 context 干净。
+# `**/X` 同时覆盖根与任意深度（Go 的 `**/foo` 特例也命中裸 `foo`），故不再保留无前缀行。
+# 这些是排除模式而非反选，不影响本文件顶部所述的 BuildKit 目录剪枝。
 /data/.jwt_secret
-*.pem
-*.key
-*.p12
-*.pfx
-*.pkcs12
-*.jks
-*.keystore
-*.der
-*.ovpn
-id_rsa
-id_dsa
-id_ecdsa
-id_ed25519
-*.pub
-.ssh/
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.pkcs12
+**/*.jks
+**/*.keystore
+**/*.der
+**/*.ovpn
+**/id_rsa
+**/id_dsa
+**/id_ecdsa
+**/id_ed25519
+**/*.pub
 **/.ssh/
-.netrc
-.pypirc
-.npmrc
-.authinfo
-.authinfo.gpg
-.pgpass
-.my.cnf
-.git-credentials
-.vault-token
-pip.conf
-pip.ini
-credentials.json
-*credentials*.json
-service-account*.json
-secrets.yaml
-secrets.yml
-secrets.json
-secret*.json
-auth.json
-.docker/config.json
+**/.netrc
+**/.pypirc
+**/.npmrc
+**/.authinfo
+**/.authinfo.gpg
+**/.pgpass
+**/.my.cnf
+**/.git-credentials
+**/.vault-token
+**/pip.conf
+**/pip.ini
+**/credentials.json
+**/*credentials*.json
+**/service-account*.json
+**/secrets.yaml
+**/secrets.yml
+**/secrets.json
+**/secret*.json
+**/auth.json
 **/.docker/config.json
-*.tfstate
-*.tfstate.*
-*.tfvars
-.aws/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
 **/.aws/
-.azure/
 **/.azure/
-.config/gcloud/
 **/.config/gcloud/
-.kube/config
 **/.kube/config
-*.kubeconfig
+**/*.kubeconfig
 
-# 环境配置
-.env*
+# 环境配置（反选必须排在排除之后：dockerignore 由最后一条命中的规则定胜负）
 **/.env*
-*.env
-*.env.*
+**/*.env
+**/*.env.*
 !.env.example
 !infra/docker/.env.example
 

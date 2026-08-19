@@ -1,58 +1,26 @@
 import subprocess
 from pathlib import Path
 
+from pathspec import GitIgnoreSpec
+
+from tests.unit.core.dockerignore_support import CREDENTIAL_PROBE_PATHS
+
 ROOT = Path(__file__).resolve().parents[3]
 GITLEAKS_IGNORE_PATH = ROOT / ".gitleaksignore"
-IGNORE_PATHS = (
-    ROOT / ".gitignore",
-    ROOT / ".dockerignore",
-    ROOT / "infra" / "docker" / "Dockerfile.test.dockerignore",
-    ROOT / "web" / "antcode-frontend" / ".dockerignore",
-)
-REQUIRED_CREDENTIAL_PATTERNS = frozenset(
-    {
-        "*.der",
-        "*.kubeconfig",
-        "*.ovpn",
-        "*.pem",
-        "*.key",
-        "*.pkcs12",
-        "**/.aws/",
-        "**/.azure/",
-        "**/.config/gcloud/",
-        "**/.docker/config.json",
-        "**/.kube/config",
-        "**/.ssh/",
-        ".authinfo",
-        ".git-credentials",
-        ".my.cnf",
-        ".netrc",
-        ".pypirc",
-        ".pgpass",
-        ".npmrc",
-        ".vault-token",
-        "*credentials*.json",
-        "auth.json",
-        "pip.conf",
-        "pip.ini",
-        "secret*.json",
-        "secrets.yaml",
-        "secrets.yml",
-        "service-account*.json",
-        "*.tfstate",
-        "*.tfvars",
-    }
-)
 
 
-def test_git_and_docker_contexts_ignore_credential_files() -> None:
-    for path in IGNORE_PATHS:
-        patterns = {
-            line.strip()
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        }
-        assert REQUIRED_CREDENTIAL_PATTERNS <= patterns, path
+def test_gitignore_ignores_credential_files_at_every_depth() -> None:
+    """判据是**行为**不是字面量。
+
+    这里原先断言的是"这些模式字符串必须逐字出现在四份 ignore 文件里"，既证明不了任何
+    路径真的被排除，又把 dockerignore 锁死在根锚定的坏形态上（`*.key` 只管 context 根）。
+    改成对代表性路径求值；dockerignore 侧的同类判据在 test_dockerignore_semantics.py，
+    那里用的是 Docker 语义的匹配器，不与本用例重复。
+    """
+    spec = GitIgnoreSpec.from_lines((ROOT / ".gitignore").read_text(encoding="utf-8").splitlines())
+
+    leaked = [path for path in CREDENTIAL_PROBE_PATHS if not spec.match_file(path)]
+    assert not leaked, f".gitignore 未挡住凭据：{leaked}"
 
 
 def test_test_machine_compose_files_remain_outside_git() -> None:
