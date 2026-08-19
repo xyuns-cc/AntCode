@@ -127,5 +127,7 @@ def resolve_execution_language(declared: object, entry_point: object) -> Executi
         return derived_language
     resolved = declared_language or derived_language
     if resolved is None:
-        raise ExecutionLanguageError(f"入口文件 {entry_point!r} 没有可识别的后缀，项目也没有声明执行语言，无法确定运行时")
+        raise ExecutionLanguageError(
+            f"入口文件 {entry_point!r} 没有可识别的后缀，项目也没有声明执行语言，无法确定运行时"
+        )
     return resolved

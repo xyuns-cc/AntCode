@@ -40,9 +40,7 @@ async def test_transfer_info_carries_language_from_project_detail():
         patch.object(
             service,
             "_get_repository",
-            AsyncMock(
-                return_value=SimpleNamespace(id=11, url="https://example.com/r.git", credential_id=None)
-            ),
+            AsyncMock(return_value=SimpleNamespace(id=11, url="https://example.com/r.git", credential_id=None)),
         ),
         patch.object(service, "_get_source_detail", AsyncMock(return_value=_detail("cmd/main.go", "go"))),
     ):
@@ -60,9 +58,7 @@ async def test_transfer_info_rejects_language_contradicting_entry_point():
         patch.object(
             service,
             "_get_repository",
-            AsyncMock(
-                return_value=SimpleNamespace(id=11, url="https://example.com/r.git", credential_id=None)
-            ),
+            AsyncMock(return_value=SimpleNamespace(id=11, url="https://example.com/r.git", credential_id=None)),
         ),
         patch.object(service, "_get_source_detail", AsyncMock(return_value=_detail("main.py", "java"))),
     ):
