@@ -65,7 +65,7 @@ async def test_duplicate_trigger_releases_concurrency_once(monkeypatch, module_p
 
     monkeypatch.setattr(module.relation_service, "get_task_with_project", _running_task)
     monkeypatch.setattr(module, "Task", _FakeTaskModel)
-    monkeypatch.setattr(service, "_get_next_run_time", lambda _task_id: None)
+    monkeypatch.setattr(module, "persist_next_run_time", AsyncMock())
     if hasattr(service, "_count_active_runs"):
         monkeypatch.setattr(service, "_count_active_runs", AsyncMock(return_value=1))
     if hasattr(module, "ensure_leader"):

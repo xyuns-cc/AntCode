@@ -12,6 +12,7 @@ from antcode_core.application.services.scheduler.trigger_identity import (
     scheduled_fire_time,
     scheduled_run_id,
 )
+from antcode_core.common.config import settings
 from antcode_core.domain.models.enums import DispatchStatus, ScheduleType, TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -45,14 +46,23 @@ def is_recoverable_scheduled_run(execution) -> bool:
 
 
 def create_task_trigger(task: Task):
+    """按 ``SCHEDULER_TIMEZONE`` 构造触发器。
+
+    APScheduler 只在 ``add_job`` 自己构造 trigger 时才套用 scheduler 的默认
+    时区；传入已构造好的 trigger 对象时，trigger 保留自身时区，而
+    ``CronTrigger.from_crontab()`` 不带 ``timezone`` 会退到**系统本地时区**
+    （容器里没设 TZ，即 UTC）。结果是 ``SCHEDULER_TIMEZONE=Asia/Shanghai``
+    对 cron 完全失效：``0 3 * * *`` 实际在 03:00 UTC / 北京时间 11:00 触发。
+    """
+    timezone = settings.SCHEDULER_TIMEZONE
     if task.schedule_type == ScheduleType.CRON:
-        return CronTrigger.from_crontab(task.cron_expression)
+        return CronTrigger.from_crontab(task.cron_expression, timezone=timezone)
     if task.schedule_type == ScheduleType.INTERVAL:
-        return IntervalTrigger(seconds=task.interval_seconds)
+        return IntervalTrigger(seconds=task.interval_seconds, timezone=timezone)
     if task.schedule_type == ScheduleType.DATE:
-        return DateTrigger(run_date=task.scheduled_time)
+        return DateTrigger(run_date=task.scheduled_time, timezone=timezone)
     if task.schedule_type == ScheduleType.ONCE:
-        return DateTrigger(run_date=task.scheduled_time or datetime.now())
+        return DateTrigger(run_date=task.scheduled_time or datetime.now(UTC), timezone=timezone)
     raise ValueError(f"不支持的调度类型: {task.schedule_type}")
 
 

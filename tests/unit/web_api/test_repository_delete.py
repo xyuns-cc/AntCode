@@ -1,3 +1,4 @@
+import socket
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -41,11 +42,17 @@ async def test_delete_repository_returns_success(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_create_repository_matches_http_and_business_created_status(monkeypatch) -> None:
+    # 建仓现在会在边界校验 Git URL（含 DNS pinning），固定解析到公网地址。
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
     now = datetime(2026, 7, 30)
     repository = SimpleNamespace(
         public_id="repo-1",
         name="source",
-        url="https://example.test/source.git",
+        url="https://example.com/source.git",
         default_ref="main",
         credential_id=None,
         enabled=True,

@@ -98,6 +98,7 @@ from antcode_master.control.scheduler_authority import (
     require_scheduler_authority,
 )
 from antcode_master.control.scheduler_dispatch import dispatch_prepared_run
+from antcode_master.control.scheduler_next_run import persist_next_run_time
 
 # retry intent 数据结构与同事务校验/消费原语迁至 retry_intent_guard
 # (P1-FN-05);这里 re-export 维持既有 import 路径(retry_loop / tests)。
@@ -290,6 +291,7 @@ class SchedulerService:
                 max_instances=self._task_max_instances(task),
             )
 
+            await persist_next_run_time(self.scheduler, task.id)
             logger.info(f"任务 {task.name} 已添加到调度器 (max_instances={self._task_max_instances(task)})")
 
         except Exception:
@@ -676,8 +678,7 @@ class SchedulerService:
             self.task_execution_stats["failed_count"] += 1
 
         if task:
-            next_run_time = self._get_next_run_time(task_id)
-            await Task.filter(id=task.id).update(next_run_time=next_run_time)
+            await persist_next_run_time(self.scheduler, task.id)
 
         current_running = self.task_execution_stats["currently_running"]
         logger.info(f"任务执行完成 (当前并发: {current_running}/{settings.MAX_CONCURRENT_TASKS})")
@@ -859,13 +860,6 @@ class SchedulerService:
             return
         log_type = "stderr" if level.upper() in ("ERROR", "CRITICAL") else "stdout"
         await task_log_service.write_log(execution.run_id, log_type, f"[{level}] {message}")
-
-    def _get_next_run_time(self, task_id):
-        """获取下次运行时间"""
-        job = self.scheduler.get_job(str(task_id))
-        if job and job.next_run_time:
-            return job.next_run_time
-        return None
 
     async def _add_monitoring_jobs(self):
         """注册监控数据处理任务"""

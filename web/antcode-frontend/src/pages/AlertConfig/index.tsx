@@ -49,6 +49,7 @@ import type {
   EmailRecipient
 } from '@/services/alert'
 import showNotification from '@/utils/notification'
+import { notifyActionFailure, validateWebhookUrl } from './formSupport'
 import styles from './AlertConfig.module.css'
 
 const { Option } = Select
@@ -125,8 +126,7 @@ const AlertConfig: React.FC = memo(() => {
         retry_delay: data.retry.retry_delay
       })
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '加载告警配置失败', errMsg)
+      notifyActionFailure(error, '加载告警配置失败')
     } finally {
       setLoading(false)
     }
@@ -139,8 +139,7 @@ const AlertConfig: React.FC = memo(() => {
       const data = await alertService.getHistory({ limit: 100 })
       setHistory(data.items)
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '加载告警历史失败', errMsg)
+      notifyActionFailure(error, '加载告警历史失败')
     } finally {
       setHistoryLoading(false)
     }
@@ -153,8 +152,7 @@ const AlertConfig: React.FC = memo(() => {
       const data = await alertService.getStats()
       setStats(data)
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '加载告警统计失败', errMsg)
+      notifyActionFailure(error, '加载告警统计失败')
     } finally {
       setStatsLoading(false)
     }
@@ -193,8 +191,7 @@ const AlertConfig: React.FC = memo(() => {
       showNotification('success', '告警配置已保存')
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '保存配置失败', errMsg)
+      notifyActionFailure(error, '保存配置失败')
     }
   }
 
@@ -235,8 +232,7 @@ const AlertConfig: React.FC = memo(() => {
       webhookForm.resetFields()
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '操作失败', errMsg)
+      notifyActionFailure(error, '操作失败')
     }
   }
 
@@ -259,8 +255,7 @@ const AlertConfig: React.FC = memo(() => {
       showNotification('success', 'Webhook 已删除')
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '删除失败', errMsg)
+      notifyActionFailure(error, '删除失败')
     }
   }
 
@@ -276,8 +271,7 @@ const AlertConfig: React.FC = memo(() => {
       }
       loadHistory()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '测试失败', errMsg)
+      notifyActionFailure(error, '测试失败')
     } finally {
       setTestLoading(null)
     }
@@ -290,8 +284,7 @@ const AlertConfig: React.FC = memo(() => {
       showNotification('success', '告警配置已重新加载')
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '重新加载失败', errMsg)
+      notifyActionFailure(error, '重新加载失败')
     }
   }
 
@@ -356,8 +349,7 @@ const AlertConfig: React.FC = memo(() => {
       setEmailModalVisible(false)
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '保存失败', errMsg)
+      notifyActionFailure(error, '保存失败')
     }
   }
 
@@ -413,8 +405,7 @@ const AlertConfig: React.FC = memo(() => {
       recipientForm.resetFields()
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '操作失败', errMsg)
+      notifyActionFailure(error, '操作失败')
     }
   }
 
@@ -439,8 +430,7 @@ const AlertConfig: React.FC = memo(() => {
       showNotification('success', '收件人已删除')
       loadConfig()
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : '未知错误'
-      showNotification('error', '删除失败', errMsg)
+      notifyActionFailure(error, '删除失败')
     }
   }
 
@@ -980,7 +970,7 @@ const AlertConfig: React.FC = memo(() => {
             name="url"
             rules={[
               { required: true, message: '请输入 Webhook URL' },
-              { type: 'url', message: '请输入有效的 URL' }
+              { validator: validateWebhookUrl }
             ]}
           >
             <Input placeholder="https://..." />

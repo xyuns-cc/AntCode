@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+from antcode_core.application.services.projects.git_url_security import validate_git_url
 from antcode_core.application.services.projects.project_source_service import (
     project_source_service,
 )
@@ -35,6 +38,20 @@ from antcode_web_api.routes.v1.runtime_access import (
 router = APIRouter()
 
 
+async def _validated_git_url(url: str) -> str:
+    """在写入边界校验 Git URL。
+
+    ``validate_git_url`` 会做 DNS 解析（阻塞），放进线程池。此前建仓/改仓
+    完全不校验 URL，``file:///etc/passwd`` 之类能以 201 落库，直到 scan 阶段
+    才在 ``resolve_git_url`` 抛 ``ValueError`` 逃逸成 500「服务器内部错误」，
+    用户拿不到任何可操作信息。
+    """
+    try:
+        return await asyncio.to_thread(validate_git_url, url)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+
 @router.get("", response_model=BaseResponse[list[RepositoryResponse]])
 async def list_repositories(current_user_id: int = Depends(get_current_user_id)):
     repositories = await repository_service.list_for_user(current_user_id)
@@ -46,7 +63,8 @@ async def create_repository(
     payload: RepositoryCreateRequest,
     current_user_id: int = Depends(get_current_user_id),
 ):
-    repository = await repository_service.create_for_user(current_user_id, payload)
+    validated = payload.model_copy(update={"url": await _validated_git_url(payload.url)})
+    repository = await repository_service.create_for_user(current_user_id, validated)
     return success_response(
         _repository_response(repository),
         message=Messages.CREATED_SUCCESS,
@@ -60,6 +78,8 @@ async def update_repository(
     payload: RepositoryUpdateRequest,
     current_user_id: int = Depends(get_current_user_id),
 ):
+    if payload.url is not None:
+        payload = payload.model_copy(update={"url": await _validated_git_url(payload.url)})
     repository = await repository_service.update_for_user(repository_id, current_user_id, payload)
     if repository is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Git 仓库不存在")
