@@ -13,6 +13,8 @@ from loguru import logger
 from tortoise import Tortoise
 
 READ_TIMEOUT_SECONDS = 2.0
+LIVENESS_PATH = "/health/live"
+READINESS_PATH = "/health/ready"
 
 
 class MasterReadinessServer:
@@ -60,8 +62,7 @@ class MasterReadinessServer:
                 timeout=READ_TIMEOUT_SECONDS,
             )
             path = self._request_path(request)
-            ready = path == "/health/ready" and await self._dependencies_ready()
-            writer.write(self._response(ready))
+            writer.write(self._response(await self._path_healthy(path)))
             await writer.drain()
         except Exception as exc:
             logger.warning(f"Master readiness 请求失败: {exc}")
@@ -69,6 +70,18 @@ class MasterReadinessServer:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+
+    async def _path_healthy(self, path: str) -> bool:
+        """存活与就绪分开回答。
+
+        ``/health/live`` 只看事件循环还转不转、探针服务还在不在监听——那是"只有
+        重启能修"的故障。Redis / Postgres 不可达和 leader 激活失败都**不**算：前者
+        重启 Master 也修不好，只会让整个控制面跟着中间件一起抖；后者每轮 leader
+        poll 会自己重试。它们只降 ``/health/ready``，用来挡流量、挡部署放行。
+        """
+        if path == LIVENESS_PATH:
+            return self._ready
+        return path == READINESS_PATH and await self._dependencies_ready()
 
     async def _dependencies_ready(self) -> bool:
         if not self._ready:

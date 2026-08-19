@@ -38,11 +38,20 @@ class HealthChecker:
 
     def __init__(self):
         self._checks: dict[str, Callable[[], HealthResult]] = {}
+        self._liveness_checks: dict[str, Callable[[], HealthResult]] = {}
         self._ready = False
 
-    def register(self, name: str, check: Callable[[], HealthResult]) -> None:
-        """注册健康检查"""
+    def register(self, name: str, check: Callable[[], HealthResult], *, liveness: bool = False) -> None:
+        """注册健康检查。
+
+        ``liveness=True`` 表示这项失败等价于"进程坏了、只有重启能修"，因此同时
+        进入存活探针；默认只进就绪探针，也就是只回答"现在能不能接新活"。
+        把"忙 / 依赖暂时不可达"这类就绪信号放进存活探针会让容器被误杀，
+        见 tests/unit/worker/test_liveness_only_restarts_on_unrecoverable_fault.py。
+        """
         self._checks[name] = check
+        if liveness:
+            self._liveness_checks[name] = check
 
     def set_ready(self, ready: bool) -> None:
         """设置就绪状态"""
@@ -52,9 +61,16 @@ class HealthChecker:
         """
         存活探针
 
-        检查进程是否存活，失败会触发重启。
+        只跑注册为 liveness 的检查；失败意味着容器该被重启。
         """
-        # 基本存活检查
+        for name, check in self._liveness_checks.items():
+            result = check()
+            if result.status == HealthStatus.UNHEALTHY:
+                return HealthResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"{name}: {result.message}",
+                    details={name: result.status.value},
+                )
         return HealthResult(
             status=HealthStatus.HEALTHY,
             message="alive",

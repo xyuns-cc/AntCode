@@ -208,7 +208,6 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-antcode}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}@postgres:5432/${POSTGRES_DB:-antcode}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
       - REDIS_ACL_ENABLED=true
-      - MASTER_ID=${MASTER_ID:-master-1}
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -340,6 +339,7 @@ services:
       - WORKER_API_ALLOW_INSECURE_INTERNAL=true
     volumes:
       - worker_data:/app/data
+      - ./healthcheck.sh:/usr/local/bin/antcode-healthcheck:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -350,10 +350,15 @@ services:
         condition: service_healthy
     networks:
       - antcode-network
+    # 与生产同构：只有 /health/live（引擎停 / 传输被永久 halt）连续失败才重启，
+    # /health/ready 只决定 health 状态。详见 docker-compose.prod.worker.yml。
     healthcheck:
       test:
         - CMD-SHELL
-        - curl -fsS http://127.0.0.1:8001/health/ready >/dev/null || { kill -TERM 1; exit 1; }
+        - >-
+          /usr/local/bin/antcode-healthcheck 6 60
+          'curl -fsS --max-time 4 http://127.0.0.1:8001/health/live >/dev/null'
+          && curl -fsS --max-time 4 http://127.0.0.1:8001/health/ready >/dev/null
       interval: 15s
       timeout: 10s
       retries: 6

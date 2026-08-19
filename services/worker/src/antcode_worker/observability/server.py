@@ -196,6 +196,6 @@ class ObservabilityServer:
         """设置就绪状态"""
         self._health_checker.set_ready(ready)
 
-    def register_health_check(self, name: str, check: Any) -> None:
-        """注册健康检查"""
-        self._health_checker.register(name, check)
+    def register_health_check(self, name: str, check: Any, *, liveness: bool = False) -> None:
+        """注册健康检查（``liveness=True`` 时同时进入存活探针）"""
+        self._health_checker.register(name, check, liveness=liveness)

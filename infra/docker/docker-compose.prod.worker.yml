@@ -54,6 +54,8 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    # /tmp 还承载 healthcheck 包装器的连续失败计数与 grace 起点：它必须是 tmpfs，
+    # 每次容器启动都是空的，计数与宽限期才会按"本次容器生命周期"重新起算。
     tmpfs:
       - /tmp:exec,uid=1000,gid=1000,mode=1777
       - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700
@@ -77,12 +79,23 @@ services:
     volumes:
       - ${ANTCODE_WORKER_TLS_DIR:?unique Worker mTLS directory is required}:/etc/antcode/tls:ro
       - worker_data:/app/data
+      - ./healthcheck.sh:/usr/local/bin/antcode-healthcheck:ro
+    # 存活与就绪分开：/health/live 只在"重启才能修"的故障上失败（引擎停、传输被
+    # 永久 halt），只有它连续失败才交给包装器 kill PID 1；/health/ready 额外反映
+    # "现在能不能接新活"，只决定 health 状态（供 depends_on / up --wait），永不重启。
+    # 曾经这里直接探 /health/ready 并内联 `|| kill -TERM 1`：压满的 Worker 被自己
+    # 杀掉，多节点下级联丢 30%~50% 的 run（见 git log 的 f47c837）。
+    # 包装器的两个数字必须与下面的 retries / start_period 一致，由
+    # tests/unit/core/test_docker_compose_healthcheck_contract.py 锁住。
     healthcheck:
       test:
         - CMD-SHELL
-        - curl -fsS http://127.0.0.1:8001/health/ready >/dev/null || { kill -TERM 1; exit 1; }
+        - >-
+          /usr/local/bin/antcode-healthcheck 3 45
+          'curl -fsS --max-time 4 http://127.0.0.1:8001/health/live >/dev/null'
+          && curl -fsS --max-time 4 http://127.0.0.1:8001/health/ready >/dev/null
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 45s
 

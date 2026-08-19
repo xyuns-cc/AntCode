@@ -30,6 +30,8 @@ x-backend-service: &backend-service
     - ALL
   security_opt:
     - no-new-privileges:true
+  # /tmp 还承载 healthcheck 包装器的连续失败计数与 grace 起点：它必须是 tmpfs，
+  # 每次容器启动都是空的，计数与宽限期才会按"本次容器生命周期"重新起算。
   tmpfs:
     - /tmp
   networks:
@@ -77,13 +79,19 @@ services:
       - jwt_secret
     volumes:
       - web_data:/app/data
+      - ./healthcheck.sh:/usr/local/bin/antcode-healthcheck:ro
     networks:
       - antcode-control
       - antcode-service-egress
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/health/ready >/dev/null || { kill -TERM 1; exit 1; }"]
+      test:
+        - CMD-SHELL
+        - >-
+          /usr/local/bin/antcode-healthcheck 3 30
+          'curl -fsS --max-time 4 http://127.0.0.1:8000/api/v1/health/live >/dev/null'
+          && curl -fsS --max-time 4 http://127.0.0.1:8000/api/v1/health/ready >/dev/null
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 30s
 
@@ -107,13 +115,19 @@ services:
       - encryption_keys_legacy
     volumes:
       - master_data:/app/data
+      - ./healthcheck.sh:/usr/local/bin/antcode-healthcheck:ro
     networks:
       - antcode-control
       - antcode-service-egress
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8101/health/ready >/dev/null || { kill -TERM 1; exit 1; }"]
+      test:
+        - CMD-SHELL
+        - >-
+          /usr/local/bin/antcode-healthcheck 3 30
+          'curl -fsS --max-time 4 http://127.0.0.1:8101/health/live >/dev/null'
+          && curl -fsS --max-time 4 http://127.0.0.1:8101/health/ready >/dev/null
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 30s
 
@@ -149,12 +163,22 @@ services:
     volumes:
       - ${ANTCODE_GATEWAY_TLS_DIR:?Gateway mTLS directory is required}:/etc/antcode/tls:ro
       - gateway_data:/app/data
+      - ./healthcheck.sh:/usr/local/bin/antcode-healthcheck:ro
     networks:
       - antcode-control
       - antcode-execution
+    # Gateway 没有独立的 live 端点，但 /health/ready 的响应体按组件分列
+    # （server.py::_readiness_response）：`"grpc":"ok"` 就是"gRPC server 还在 listen"，
+    # 也就是这个进程唯一"重启才能修"的故障面。Redis / DB 不可达只让整体转 503，
+    # 那是依赖暂态——重启 Gateway 修不好它，只会把所有 Worker 一起踢下线。
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health/ready >/dev/null || { kill -TERM 1; exit 1; }"]
+      test:
+        - CMD-SHELL
+        - >-
+          /usr/local/bin/antcode-healthcheck 3 30
+          "curl -s --max-time 4 http://127.0.0.1:8100/health/ready | grep -q '\"grpc\":\"ok\"'"
+          && curl -fsS --max-time 4 http://127.0.0.1:8100/health/ready >/dev/null
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 30s

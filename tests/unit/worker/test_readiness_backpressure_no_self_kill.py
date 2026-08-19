@@ -1,7 +1,7 @@
 """压满的 Worker 不得把自己判成不健康。
 
 多节点压测实测的故障链（真机复现，非推演）：
-  队列打满 -> slots_check 返回 DEGRADED -> readiness() 只认全 HEALTHY -> /health/ready 503
+  队列打满 -> 引擎检查返回 DEGRADED -> readiness() 只认全 HEALTHY -> /health/ready 503
   -> worker compose 的 `curl -fsS /health/ready || { kill -TERM 1; }` 把 PID 1 杀掉
   -> Worker 重启换 lease 代 -> 在途 ready 消息因代际不匹配进 DLQ
   -> 这些 run 永远不上报 RUNNING，180s 后被判 "节点未在 180s 内上报 RUNNING"。
@@ -29,7 +29,7 @@ def _server(*, queue_size: int, running: bool = True, connected: bool = True):
             "max_concurrent": MAX_CONCURRENT,
         }
     )
-    transport = SimpleNamespace(is_connected=connected)
+    transport = SimpleNamespace(is_connected=connected, is_running=True)
     server = _create_observability_server(None, transport, engine)
     # 启动完成后 lifecycle 会置就绪；不置的话 readiness 直接短路成 "not ready"，
     # 就测不到下面的各项检查了。
@@ -46,7 +46,7 @@ def test_full_queue_stays_ready_so_busy_worker_is_not_killed():
     result = _readiness(_server(queue_size=FULL_QUEUE))
 
     assert result.status == HealthStatus.HEALTHY, result.details
-    assert result.details["slots"] == HealthStatus.HEALTHY.value
+    assert result.details["engine"] == HealthStatus.HEALTHY.value
 
 
 def test_queue_beyond_nominal_capacity_stays_ready():
@@ -61,7 +61,7 @@ def test_stopped_engine_is_unhealthy():
     result = _readiness(_server(queue_size=0, running=False))
 
     assert result.status == HealthStatus.UNHEALTHY
-    assert result.details["slots"] == HealthStatus.UNHEALTHY.value
+    assert result.details["engine"] == HealthStatus.UNHEALTHY.value
 
 
 def test_offline_transport_is_unhealthy():

@@ -194,14 +194,14 @@ def test_all_production_services_have_resource_boundaries() -> None:
     assert "--maxmemory" in redis_command
 
 
-def test_runtime_healthchecks_terminate_pid_one_for_restart_policy() -> None:
+def test_runtime_healthchecks_delegate_restarts_to_the_shared_wrapper() -> None:
     services = _compose()["services"]
 
     for service_name, service in services.items():
         if service_name in {"migration", "crawl-redis-upgrade"}:
             continue
         healthcheck = " ".join(service["healthcheck"]["test"])
-        assert "kill -TERM 1" in healthcheck, service_name
+        assert healthcheck.split()[1] == "/usr/local/bin/antcode-healthcheck", service_name
         assert service["restart"] == "unless-stopped"
 
 

@@ -19,6 +19,7 @@ services:
       - database_url
     volumes:
       - backup_data:/backup
+      - ./healthcheck.sh:/usr/local/bin/antcode-healthcheck:ro
     networks:
       - antcode-control
     depends_on:
@@ -54,14 +55,21 @@ services:
           echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) local backup completed: $$target"
           sleep 86400
         done
+    # 这里的"重启"是重试机制：备份循环卡住/落后时重启容器会立刻重跑一次 pg_dump。
+    # 以前 kill 内联在 test 里，第一次探测（t=5m）就杀，start_period 的 2 小时和
+    # retries: 3 都是死配置——任何 pg_dump 超过 5 分钟的库都永远备份不完，
+    # 每 5 分钟被 SIGTERM 打断一次。现在两者都真正生效。
     healthcheck:
       test:
         - CMD-SHELL
-        - test -s /backup/.last-success && last="$$(cat /backup/.last-success)" && now="$$(date -u +%s)" && test "$$((now - last))" -le "$${BACKUP_MAX_AGE_SECONDS}" || { kill -TERM 1; exit 1; }
+        - >-
+          /usr/local/bin/antcode-healthcheck 3 ${BACKUP_HEALTH_START_PERIOD_SECONDS:-7200}
+          'test -s /backup/.last-success && last="$$(cat /backup/.last-success)"
+          && now="$$(date -u +%s)" && test "$$((now - last))" -le "$${BACKUP_MAX_AGE_SECONDS}"'
       interval: 5m
       timeout: 10s
       retries: 3
-      start_period: ${BACKUP_HEALTH_START_PERIOD:-2h}
+      start_period: ${BACKUP_HEALTH_START_PERIOD_SECONDS:-7200}s
 
 volumes:
   backup_data:

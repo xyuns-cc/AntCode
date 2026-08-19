@@ -11,7 +11,7 @@ EXPECTED_FRONTEND_XFF_DIRECTIVES = 2
 DOCKER_EMBEDDED_DNS = "resolver 127.0.0.11 valid=10s ipv6=off;"
 UPSTREAM_BLOCK = re.compile(r"^\s*upstream\s+\S+\s*\{", re.MULTILINE)
 PROXY_TARGET = re.compile(r"proxy_pass\s+http://([^;\s]+)")
-LOCAL_RESTART_PROBE = "kill -TERM 1"
+LOCAL_RESTART_PROBE = "/usr/local/bin/antcode-healthcheck"
 
 
 def _compose(path: Path = PROD_COMPOSE) -> dict:
@@ -99,7 +99,7 @@ def test_edge_health_checks_probe_the_real_upstream_chain() -> None:
 
     frontend 的 `index.html` 与 reverse-proxy 的 `return 204` 都不碰上游，
     `up -d --wait` 因此会为一个 /api 全 502 的栈宣告部署成功。上游探针必须存在，
-    但**不能**触发 `kill -TERM 1`：那会把后端故障放大成边缘重启循环。
+    但**不能**进包装器的重启判据：那会把后端故障放大成边缘重启循环。
     """
     services = _compose()["services"]
     edge = PROXY_CONFIG.read_text(encoding="utf-8")

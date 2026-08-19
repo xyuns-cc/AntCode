@@ -692,15 +692,15 @@ def _create_observability_server(config: Any, transport: Any, engine: Any) -> An
             return HealthResult(status=HealthStatus.HEALTHY, message="transport ok")
         return HealthResult(status=HealthStatus.UNHEALTHY, message="transport offline")
 
-    def slots_check():
-        # 队列满是背压不是故障：满队列曾返回 DEGRADED -> readiness 503 ->
-        # compose healthcheck 的 `|| kill -TERM 1` 把压满的 Worker 自杀掉（见回归测试）。
+    def engine_check():
+        # 只有"重启才能修"的故障才配进存活探针：引擎停了、传输被永久 halt（lease 撤销/
+        # 认证中止）。断线重连是无限重试的暂态、队列满是背压，都不该重启（见回归测试）。
         stats = engine.get_stats()
-        if not stats.get("running", False):
-            return HealthResult(status=HealthStatus.UNHEALTHY, message="engine stopped")
-        return HealthResult(status=HealthStatus.HEALTHY, message="slots ok")
+        if stats.get("running", False) and transport.is_running:
+            return HealthResult(status=HealthStatus.HEALTHY, message="engine ok")
+        return HealthResult(status=HealthStatus.UNHEALTHY, message="engine or transport halted")
 
     server.register_health_check("transport", transport_check)
-    server.register_health_check("slots", slots_check)
+    server.register_health_check("engine", engine_check, liveness=True)
 
     return server

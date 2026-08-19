@@ -285,8 +285,32 @@ infra/docker/deploy-production.sh .env.production existing-upgrade \
 也已停机的明确确认。
 
 所有长期服务都设置 CPU、内存、PID、只读根和日志轮转边界；Redis 使用
-`maxmemory` + `noeviction`。readiness 失败会向 PID 1 发 TERM，让
-`restart: unless-stopped` 在运行期实际自愈，而不是永久停留在 unhealthy。
+`maxmemory` + `noeviction`。
+
+Compose（非 Swarm）不会因为容器 unhealthy 做任何事，`restart:` 只对 PID 1 退出
+生效，所以自愈靠探针主动向 PID 1 发 TERM。这件事统一由 `infra/docker/healthcheck.sh`
+完成，各服务以只读方式把它挂到 `/usr/local/bin/antcode-healthcheck`：
+
+```
+antcode-healthcheck <max_failures> <grace_seconds> <存活探针>  [&& <就绪探针>]
+```
+
+- **存活探针**（包装器的第三个参数）只包含“重启才能修”的故障：Worker 的引擎停了
+  或传输被永久 halt、Master 的事件循环没了、Gateway 的 gRPC 端口没在 listen、
+  nginx 自身起不来。它连续失败 `max_failures` 次**并且**过了 `grace_seconds`
+  才 `kill -TERM 1`。
+- **就绪探针**（`&&` 之后那一段）回答“现在能不能接新活”，包含依赖可达性与背压。
+  它只影响容器的 health 状态，供 `depends_on: service_healthy` 与 `up -d --wait`
+  使用，**永远不会**触发重启。
+- 两个参数必须与该服务 healthcheck 的 `retries` 与 `start_period` 逐字一致，
+  由 `tests/unit/core/test_docker_compose_healthcheck_contract.py` 锁住。
+- 连续失败计数写在 `/tmp`，因此每个用它的服务都必须把 `/tmp` 挂成 tmpfs：容器
+  重启后计数与宽限期要重新起算。
+
+历史上 `kill -TERM 1` 直接内联在 `test:` 里（`<probe> || { kill -TERM 1; exit 1; }`），
+第一次失败就已经杀掉 PID 1，于是 `retries` 与 `start_period` 全部失效；探的又是
+readiness，结果是“忙”和“Redis 抖了一下”被判成“进程坏了”。真机压测里压满的 Worker
+因此自杀，多节点级联丢 30%~50% 的 run。改这两处配置前请先读上面的语义。
 
 ### 一次性管理员与 Worker bootstrap
 
@@ -328,8 +352,9 @@ docker compose --env-file .env.production \
 
 该任务从 Docker secret 读取数据库 URL。启动时删除残留 `.partial`；每次 dump 和
 结构校验都有硬超时，失败 trap 清理临时文件；成功后原子发布 dump、SHA-256 和
-`.last-success`。healthcheck 按 `BACKUP_MAX_AGE_SECONDS` 检查最近成功时间，过期会
-退出并重启。CPU、内存、PID 和只读根边界与主栈一致。
+`.last-success`。healthcheck 按 `BACKUP_MAX_AGE_SECONDS` 检查最近成功时间，连续
+`retries` 次过期且超过 `BACKUP_HEALTH_START_PERIOD_SECONDS`（默认 7200，首次备份的
+宽限期）后重启容器，重启会立刻重跑一次 dump。CPU、内存、PID 和只读根边界与主栈一致。
 
 本地备份不是异机灾备。至少每次发布和每个备份策略周期都要新建一个名称严格匹配
 `antcode_restore_test_*` 或 `antcode_restore_ci_*` 的隔离数据库，再运行恢复演练。脚本
