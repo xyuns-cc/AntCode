@@ -1,3 +1,9 @@
+# 反选（!）模式一律不得带 * [ ] ? ^ 通配符：BuildKit 的 fsutil 只要发现任何一条带
+# 通配符的反选，就把整棵目录树的剪枝优化关掉，转而递归进入每个被排除目录去找可能的
+# 再包含项——包括 /data/。Rule 沙箱把 data/worker/egress 按设计建成 0300（不可读），
+# 于是 opendir 直接 EACCES，构建在传输 context 阶段就失败。
+# 详见 tests/unit/core/test_container_supply_chain_contract.py 的反选门禁用例。
+
 # Git
 .git/
 .gitignore
@@ -51,9 +57,6 @@ Thumbs.db
 .coverage.*
 htmlcov/
 .tox/
-/tests/
-!/tests/
-!/tests/**
 
 # 数据目录（运行时生成，通过 volume 挂载）
 /data/
@@ -121,7 +124,7 @@ auth.json
 *.env
 *.env.*
 !.env.example
-!**/.env.example
+!infra/docker/.env.example
 
 # 前端（后端镜像不需要）
 /web/
@@ -133,11 +136,10 @@ node_modules/
 /docker-compose*.yml
 .dockerignore
 
-# 文档
-*.md
-!README.md
-!packages/**/README.md
-!services/**/README.md
+# 文档（只排根目录这两份；README 必须留在 context 里——三个包的 pyproject 声明了
+# readme = "README.md"，五个生产镜像的 builder 阶段都显式 COPY 它们）
+/AGENTS.md
+/CHANGELOG.md
 
 # 其他
 *.backup

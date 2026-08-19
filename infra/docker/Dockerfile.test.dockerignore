@@ -1,3 +1,7 @@
+# 反选（!）模式一律不得带 * [ ] ? ^ 通配符：带通配符的反选会关掉 BuildKit fsutil 的
+# 目录剪枝，构建端被迫递归进入 /data/，撞上 Rule 沙箱按设计建成 0300 的
+# data/worker/egress 后 EACCES 失败。门禁见 test_container_supply_chain_contract.py。
+
 # Repository metadata and local tooling
 .git/
 .idea/
@@ -95,7 +99,7 @@ auth.json
 *.env
 *.env.*
 !.env.example
-!**/.env.example
+!infra/docker/.env.example
 
 # Frontend dependencies and generated output
 node_modules/

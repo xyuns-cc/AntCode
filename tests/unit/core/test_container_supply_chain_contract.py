@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -26,8 +27,22 @@ DOCKER_CONTEXT_SOURCE_FILES = (
 )
 
 
+#: 扫 .env.example 时跳过的重目录（含 0300 不可读的 data/worker/egress）。
+SCAN_PRUNED_DIRS = frozenset({".git", ".venv", "node_modules", "data", "dist", "__pycache__"})
+
+
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _env_example_paths() -> list[str]:
+    """列出仓库里真实存在的 .env.example（相对 context 根）。"""
+    found: list[str] = []
+    for parent, directories, files in os.walk(ROOT):
+        directories[:] = [name for name in directories if name not in SCAN_PRUNED_DIRS]
+        if ".env.example" in files:
+            found.append((Path(parent) / ".env.example").relative_to(ROOT).as_posix())
+    return sorted(found)
 
 
 def test_compose_requires_non_empty_data_store_passwords():
@@ -185,11 +200,20 @@ def test_docker_contexts_exclude_environment_and_credential_files():
 
 
 def test_docker_contexts_retain_environment_examples():
-    example_paths = (".env.example", "nested/.env.example")
+    # 反选模式不再写 `!**/.env.example`：带通配符的反选会关掉 BuildKit 的目录剪枝
+    # （见 test_dockerignore_context_pruning），改成逐条精确路径。判据也随之改成仓库里
+    # **真实存在**的 .env.example 清单——新增一份却忘了补 .dockerignore，用例立刻变红，
+    # 而不是被 "nested/.env.example" 这类合成路径蒙混过去。不走 git：这套用例本身要能在
+    # antcode-test 镜像里跑，而镜像 context 不含 .git。
+    present = _env_example_paths()
+    assert present, "仓库里没有任何 .env.example，用例失去判据"
+    assert not [path for path in present if path.startswith("web/antcode-frontend/")], (
+        "前端 context 新增了 .env.example，需在 web/antcode-frontend/.dockerignore 补一条精确反选"
+    )
 
-    for dockerignore_path in DOCKERIGNORE_PATHS:
+    for dockerignore_path in (ROOT_DOCKERIGNORE, TEST_DOCKERIGNORE):
         ignore_spec = GitIgnoreSpec.from_lines(_read(dockerignore_path).splitlines())
-        assert all(not ignore_spec.match_file(path) for path in example_paths), dockerignore_path
+        assert all(not ignore_spec.match_file(path) for path in present), dockerignore_path
 
 
 def test_docker_contexts_exclude_local_agent_configuration():

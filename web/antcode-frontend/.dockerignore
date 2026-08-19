@@ -17,12 +17,13 @@ build/
 **/._*
 
 # Environment (keep .env.example)
+# 反选不带通配符：带通配符的反选会关掉 BuildKit fsutil 的目录剪枝，逼构建端递归遍历
+# 每一个被排除目录。门禁见 tests/unit/core/test_container_supply_chain_contract.py。
 .env*
 **/.env*
 *.env
 *.env.*
 !.env.example
-!**/.env.example
 
 # Credentials and private key material
 *.pem
