@@ -37,7 +37,9 @@ def test_language_runtime_versions_are_pinned_to_exact_patch() -> None:
     for language, (arg_name, shape) in REQUIRED_RUNTIMES.items():
         version = args.get(arg_name)
         assert version is not None, f"{language} 运行时版本未在 Dockerfile 声明（缺 ARG {arg_name}）"
-        assert shape.match(version), f"{language} 运行时版本 {version!r} 不是确定补丁版本，同一份 Dockerfile 会构出不同镜像"
+        assert shape.match(version), (
+            f"{language} 运行时版本 {version!r} 不是确定补丁版本，同一份 Dockerfile 会构出不同镜像"
+        )
 
 
 def test_image_installs_every_promised_language_runtime() -> None:
