@@ -10,6 +10,7 @@ from antcode_core.application.services.projects.project_source_service import (
 )
 from antcode_core.application.services.projects.repository_service import (
     RepositoryDeleteStatus,
+    RepositoryScanError,
     repository_service,
 )
 from antcode_core.common.error_messages import normalize_persisted_error_message
@@ -105,11 +106,14 @@ async def scan_repository(
     payload: RepositoryScanRequest,
     current_user_id: int = Depends(get_current_user_id),
 ):
-    repository, candidates = await repository_service.scan_for_user(
-        repository_id,
-        current_user_id,
-        payload.ref,
-    )
+    try:
+        repository, candidates = await repository_service.scan_for_user(
+            repository_id,
+            current_user_id,
+            payload.ref,
+        )
+    except RepositoryScanError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     if repository is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Git 仓库不存在")
     return success_response(

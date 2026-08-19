@@ -47,30 +47,37 @@ export const createTrendData = (
   return {
     labels: history.timestamps.map((timestamp) => formatTimeLabel(timestamp, period)),
     datasets: [
-      createTrendDataset('平均', history[metric].avg, color, background, false),
-      createTrendDataset('最大', history[metric].max, '#ff7875', 'transparent', true),
-      createTrendDataset('最小', history[metric].min, '#95de64', 'transparent', true),
+      createTrendDataset({ label: '平均', data: history[metric].avg, borderColor: color, backgroundColor: background, dashed: false }),
+      createTrendDataset({ label: '最大', data: history[metric].max, borderColor: '#ff7875', backgroundColor: 'transparent', dashed: true }),
+      createTrendDataset({ label: '最小', data: history[metric].min, borderColor: '#95de64', backgroundColor: 'transparent', dashed: true }),
     ],
   }
 }
 
-const createTrendDataset = (
-  label: string,
-  data: number[],
-  borderColor: string,
-  backgroundColor: string,
+interface TrendDatasetSpec {
+  label: string
+  data: number[]
+  borderColor: string
+  backgroundColor: string
   dashed: boolean
-) => ({
-  label,
-  data,
-  borderColor,
-  backgroundColor,
+}
+
+// 单点折线没有线段可画，pointRadius: 0 会让整张图彻底空白（有轴、有图例、
+// 没有任何数据痕迹），看起来和"接口没返回数据"一模一样。30d 按天聚合，
+// 集群跑了不到两天时后端就只给一个点 —— 那是有数据，必须画出来。
+const SINGLE_POINT_RADIUS = 5
+
+const createTrendDataset = (spec: TrendDatasetSpec) => ({
+  label: spec.label,
+  data: spec.data,
+  borderColor: spec.borderColor,
+  backgroundColor: spec.backgroundColor,
   tension: 0.4,
-  fill: !dashed,
-  borderWidth: dashed ? 2 : 3,
-  borderDash: dashed ? [8, 4] : undefined,
-  pointRadius: 0,
-  pointHoverRadius: dashed ? 5 : 6,
+  fill: !spec.dashed,
+  borderWidth: spec.dashed ? 2 : 3,
+  borderDash: spec.dashed ? [8, 4] : undefined,
+  pointRadius: spec.data.length === 1 ? SINGLE_POINT_RADIUS : 0,
+  pointHoverRadius: spec.dashed ? 5 : 6,
 })
 
 const createCurrentTrendData = (

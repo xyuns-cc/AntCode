@@ -17,6 +17,10 @@ interface Props {
   scanResult: RepositoryScanResult | null
   selectedSubdirs: string[]
   form: ReturnType<typeof Form.useForm>[0]
+  // 本次扫描用的 ref。与仓库的 default_ref 是两件事：这个只随请求走一次，
+  // 服务端不落库（repository_service.scan_for_user 只把它传给 _scan_repository）。
+  scanRef: string
+  onScanRefChange: (ref: string) => void
   onClose: () => void
   onScan: () => void
   onImport: () => void
@@ -82,12 +86,33 @@ const RuntimeFields = ({ form, workers, loading, error }: {
   </>
 )
 
+const ScanRefField = ({ repository, scanRef, onChange, onScan }: {
+  repository: GitRepository | null
+  scanRef: string
+  onChange: (ref: string) => void
+  onScan: () => void
+}) => (
+  <Space.Compact style={{ width: 420 }}>
+    <Input
+      value={scanRef}
+      onChange={event => onChange(event.target.value)}
+      onPressEnter={onScan}
+      addonBefore="本次扫描引用"
+      placeholder={repository?.default_ref}
+      aria-label="本次扫描引用"
+    />
+    <Button icon={<FileSearchOutlined />} onClick={onScan}>扫描仓库</Button>
+  </Space.Compact>
+)
+
 const ScanImportDrawer: React.FC<Props> = ({
   open,
   repository,
   scanResult,
   selectedSubdirs,
   form,
+  scanRef,
+  onScanRefChange,
   onClose,
   onScan,
   onImport,
@@ -99,8 +124,16 @@ const ScanImportDrawer: React.FC<Props> = ({
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Space style={{ justifyContent: 'space-between', width: '100%' }}>
           <Text strong>{repository?.name}</Text>
-          <Button icon={<FileSearchOutlined />} onClick={onScan}>扫描仓库</Button>
+          <ScanRefField
+            repository={repository}
+            scanRef={scanRef}
+            onChange={onScanRefChange}
+            onScan={onScan}
+          />
         </Space>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          仅本次扫描生效，不会改动仓库的默认引用（{repository?.default_ref}）。要改默认值请用列表里的「编辑」。
+        </Text>
         {scanResult && (
           <Form layout="vertical" form={form}>
             <RuntimeFields form={form} workers={workers} loading={loading} error={error} />

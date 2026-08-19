@@ -30,6 +30,14 @@ const mapOsType = (osType?: string): WorkerOs => {
   return 'linux'
 }
 
+// Worker 上报的使用率是 float，直接插进文案会出现「磁盘使用率85.9000015258789%」
+// 这种二进制浮点残渣。只格式化文案，不动 worker.cpu/memory/disk 本身——阈值判定
+// 和图表条形都读原值，提前取整会挪动 getDisplayStatus 的边界。
+const USAGE_DECIMALS = 1
+
+export const formatUsagePercent = (value: number): string =>
+  `${Number.parseFloat(value.toFixed(USAGE_DECIMALS))}`
+
 const getDisplayStatus = (worker: Worker): WorkerDisplayData['status'] => {
   if (worker.status === 'maintenance' || worker.status === 'connecting') return 'warning'
   if (worker.status !== 'online') return 'stopped'
@@ -73,7 +81,7 @@ export const createAlerts = (workers: WorkerDisplayData[], time: string): Monito
         id: `disk-${worker.id}`,
         type: 'warning',
         title: '磁盘空间不足',
-        message: `${worker.name} Worker磁盘使用率${worker.disk}%`,
+        message: `${worker.name} Worker磁盘使用率${formatUsagePercent(worker.disk)}%`,
         time,
         worker: worker.name,
       })
@@ -105,7 +113,7 @@ const addUsageAlert = (
       id: `${field === 'cpu' ? 'cpu' : 'mem'}-${worker.id}`,
       type: 'error',
       title: `${label}${label === '内存' ? '资源不足' : '使用率过高'}`,
-      message: `${worker.name} Worker${label}使用率超过85%，当前${value}%`,
+      message: `${worker.name} Worker${label}使用率超过85%，当前${formatUsagePercent(value)}%`,
       time,
       worker: worker.name,
     })
@@ -114,7 +122,7 @@ const addUsageAlert = (
       id: `${field === 'cpu' ? 'cpu-warn' : 'mem-warn'}-${worker.id}`,
       type: 'warning',
       title: `${label}使用率较高`,
-      message: `${worker.name} Worker${label}使用率${value}%，建议关注`,
+      message: `${worker.name} Worker${label}使用率${formatUsagePercent(value)}%，建议关注`,
       time,
       worker: worker.name,
     })

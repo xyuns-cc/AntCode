@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 from datetime import datetime
 from enum import StrEnum
@@ -32,6 +33,19 @@ class RepositoryDeleteStatus(StrEnum):
     DELETED = "deleted"
     IN_USE = "in_use"
     NOT_FOUND = "not_found"
+
+
+class RepositoryScanError(Exception):
+    """扫描失败的原因出在仓库配置本身，用户可以自己改。
+
+    ``ValueError`` 来自 ``_resolve_git_revision``（ref 不存在、URL 非法、ref 数超限），
+    ``SubprocessError`` 来自 git 子进程（远端不可达、鉴权失败、超时）。这两类必须把
+    原因回给用户；此前它们直接逃逸成 500「服务器内部错误」，用户填错分支名只会看到
+    一句和自己的输入毫无关系的话。其余异常（真缺陷）继续逃逸，不伪装成用户输入错误。
+    """
+
+
+_SCAN_CONFIG_ERRORS = (ValueError, subprocess.SubprocessError)
 
 
 class RepositoryService:
@@ -99,7 +113,10 @@ class RepositoryService:
             repository.url = payload.url.strip()
         if payload.default_ref is not None:
             repository.default_ref = payload.default_ref.strip() or "main"
-        if payload.credential_id is not None:
+        # credential_id 用 model_fields_set 而非 ``is not None`` 判定：``null`` 是
+        # "解绑凭证"这个合法意图，按 ``is not None`` 会与"没传该字段"混为一谈，
+        # 前端把凭证清空后请求照样 200，凭证却还挂着——一个静默失败。
+        if "credential_id" in payload.model_fields_set:
             await git_credential_service.ensure_accessible(payload.credential_id, user_id)
             repository.credential_id = payload.credential_id
         if payload.enabled is not None:
@@ -117,11 +134,14 @@ class RepositoryService:
                 ref,
                 auth_config,
             )
-            await self._record_scan(repository, "success", candidates, None)
-            return candidates
         except Exception as exc:
             await self._record_scan(repository, "failed", [], str(exc))
+            if isinstance(exc, _SCAN_CONFIG_ERRORS):
+                # 复用刚落库的脱敏消息，保证接口报错与列表里的 last_scan_error 一字不差
+                raise RepositoryScanError(repository.last_scan_error or str(exc)) from exc
             raise
+        await self._record_scan(repository, "success", candidates, None)
+        return candidates
 
     async def _record_scan(
         self,

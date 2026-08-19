@@ -109,6 +109,8 @@ describe('scan import drawer form round-trip', () => {
           scanResult={scanResult}
           selectedSubdirs={['spiders/news']}
           form={form}
+          scanRef="main"
+          onScanRefChange={() => {}}
           onClose={() => {}}
           onScan={() => {}}
           onImport={() => {}}

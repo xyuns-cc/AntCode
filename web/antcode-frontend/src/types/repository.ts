@@ -32,6 +32,14 @@ export interface RepositoryCreatePayload {
   credential_id?: string
 }
 
+// PUT /repositories/{id} 的 RepositoryUpdateRequest 每个字段都是可选的，
+// 未传的字段服务端不动（domain/schemas/repository.py::RepositoryUpdateRequest）。
+// credential_id 必须能显式传 null 才解得开"已选凭证"，Partial 的 undefined 会被
+// model_config extra=forbid 之外的 exclude_unset 语义当成"没传"。
+export type RepositoryUpdatePayload = Omit<Partial<RepositoryCreatePayload>, 'credential_id'> & {
+  credential_id?: string | null
+}
+
 export interface ProjectImportItem {
   repository_id: string
   ref: string

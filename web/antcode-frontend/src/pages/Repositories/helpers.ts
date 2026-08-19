@@ -4,10 +4,37 @@ import type {
   ProjectImportFormValues,
   ProjectImportItem,
   RepositoryCandidate,
+  RepositoryCreatePayload,
   RepositoryScanResult,
+  RepositoryUpdatePayload,
 } from '@/types/repository'
 
 const PYTHON_VERSION_PATTERN = /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/
+
+export interface RepositoryFormValues {
+  name: string
+  url: string
+  default_ref: string
+  credential_id?: string
+}
+
+export const buildRepositoryCreatePayload = (
+  values: RepositoryFormValues,
+): RepositoryCreatePayload => ({
+  name: values.name.trim(),
+  url: values.url.trim(),
+  default_ref: values.default_ref.trim(),
+  credential_id: values.credential_id,
+})
+
+export const buildRepositoryUpdatePayload = (
+  values: RepositoryFormValues,
+): RepositoryUpdatePayload => ({
+  ...buildRepositoryCreatePayload(values),
+  // 清空 antd Select 拿到的是 undefined，而 JSON.stringify 会整条丢掉 undefined
+  // 字段，后端只能看到"没传 credential_id"→ 保持原值，解绑意图被静默吃掉。
+  credential_id: values.credential_id ?? null,
+})
 
 // 表单里只注册了 name / include_paths 两个 Form.Item（见 ScanImportDrawer
 // 的 buildCandidateColumns），因此 antd 的 validateFields() 只会回传这两项。

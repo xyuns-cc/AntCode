@@ -1,115 +1,105 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, Button, Form, Space, Tag, Typography } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
-import {
-  BranchesOutlined,
-  FileSearchOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons'
+import { App, Button, Form, Space } from 'antd'
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import PageContainer from '@/components/common/PageContainer'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import { repositoryProjectImportService, repositoryService } from '@/services/repositories'
 import type { GitRepository, RepositoryScanResult } from '@/types/repository'
-import { formatDate } from '@/utils/format'
-import CreateRepositoryDrawer from './components/CreateRepositoryDrawer'
+import RepositoryFormDrawer from './components/RepositoryFormDrawer'
 import ScanImportDrawer from './components/ScanImportDrawer'
-import { buildImportDefaults, buildImportProjects } from './helpers'
+import { buildRepositoryColumns } from './components/repositoryColumns'
+import {
+  buildImportDefaults,
+  buildImportProjects,
+  buildRepositoryCreatePayload,
+  buildRepositoryUpdatePayload,
+} from './helpers'
+import type { RepositoryFormValues } from './helpers'
 
-const { Text } = Typography
+const TABLE_MIN_WIDTH = 900
 
 const Repositories: React.FC = () => {
   const { message } = App.useApp()
   const [repositories, setRepositories] = useState<GitRepository[]>([])
   const [loading, setLoading] = useState(false)
-  const [createOpen, setCreateOpen] = useState(false)
+  const [formOpen, setFormOpen] = useState(false)
+  const [editing, setEditing] = useState<GitRepository | null>(null)
   const [scanOpen, setScanOpen] = useState(false)
   const [activeRepository, setActiveRepository] = useState<GitRepository | null>(null)
+  const [scanRef, setScanRef] = useState('')
   const [scanResult, setScanResult] = useState<RepositoryScanResult | null>(null)
   const [selectedSubdirs, setSelectedSubdirs] = useState<string[]>([])
   const [form] = Form.useForm()
   const [importForm] = Form.useForm()
 
-  const loadRepositories = async () => {
+  const loadRepositories = useCallback(async () => {
     setLoading(true)
     try {
       setRepositories(await repositoryService.list())
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     loadRepositories()
-  }, [])
+  }, [loadRepositories])
 
   const openScan = useCallback((repository: GitRepository) => {
     setActiveRepository(repository)
+    // 预填默认引用：多数扫描就是照默认来，改了也只影响这一次请求。
+    setScanRef(repository.default_ref)
     setScanResult(null)
     setSelectedSubdirs([])
     importForm.resetFields()
     setScanOpen(true)
   }, [importForm])
 
-  const columns = useMemo<ColumnsType<GitRepository>>(() => [
-    {
-      title: '仓库',
-      dataIndex: 'name',
-      width: 180,
-      render: (name: string, record) => (
-        <Space direction="vertical" size={0}>
-          <Text strong>{name}</Text>
-          <Text code ellipsis style={{ maxWidth: 420 }}>{record.url}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: '默认引用',
-      dataIndex: 'default_ref',
-      width: 120,
-      render: (ref: string) => <Tag icon={<BranchesOutlined />}>{ref}</Tag>,
-    },
-    {
-      title: '扫描状态',
-      dataIndex: 'last_scan_status',
-      width: 120,
-      render: (status: string | null) => (
-        <Tag color={status === 'failed' ? 'red' : status === 'success' ? 'green' : 'default'}>
-          {status || '-'}
-        </Tag>
-      ),
-    },
-    {
-      title: '扫描时间',
-      dataIndex: 'last_scanned_at',
-      width: 180,
-      render: (value?: string | null) => value ? formatDate(value) : '-',
-    },
-    {
-      title: '操作',
-      key: 'actions',
-      fixed: 'right',
-      width: 140,
-      render: (_, record) => (
-        <Button type="link" size="small" icon={<FileSearchOutlined />} onClick={() => openScan(record)}>
-          扫描导入
-        </Button>
-      ),
-    },
-  ], [openScan])
+  const openEdit = useCallback((repository: GitRepository) => {
+    setEditing(repository)
+    setFormOpen(true)
+  }, [])
 
-  const createRepository = async () => {
-    const values = await form.validateFields()
-    await repositoryService.create(values)
-    setCreateOpen(false)
+  const openCreate = useCallback(() => {
+    setEditing(null)
+    setFormOpen(true)
+  }, [])
+
+  const removeRepository = useCallback(async (repository: GitRepository) => {
+    try {
+      await repositoryService.remove(repository.id)
+      message.success(`已删除仓库 ${repository.name}`)
+    } catch {
+      // 报错文案由 axios 拦截器统一弹出（后端 409「Git 仓库仍被项目引用」原样透出），
+      // 这里不重复提示。但 rejection 必须在此消化：antd ActionButton 收到 onConfirm 的
+      // rejection 后是 `return Promise.reject(e)`，不接就变成控制台里的 unhandled rejection。
+    }
+    // 成功要刷新；失败也要刷新 —— 服务端拒绝就说明它的状态和这份列表已经不一致了。
+    await loadRepositories()
+  }, [loadRepositories, message])
+
+  const columns = useMemo(
+    () => buildRepositoryColumns({ onScan: openScan, onEdit: openEdit, onDelete: removeRepository }),
+    [openScan, openEdit, removeRepository],
+  )
+
+  const submitRepository = async () => {
+    const values = (await form.validateFields()) as RepositoryFormValues
+    if (editing) {
+      await repositoryService.update(editing.id, buildRepositoryUpdatePayload(values))
+      message.success(`已更新仓库 ${values.name.trim()}`)
+    } else {
+      await repositoryService.create(buildRepositoryCreatePayload(values))
+    }
+    setFormOpen(false)
     form.resetFields()
     await loadRepositories()
   }
 
   const scanRepository = async () => {
     if (!activeRepository) return
-    const result = await repositoryService.scan(activeRepository.id, activeRepository.default_ref)
+    const result = await repositoryService.scan(activeRepository.id, scanRef.trim() || undefined)
     setScanResult(result)
     const selected = result.candidates.map(item => item.subdir)
     setSelectedSubdirs(selected)
@@ -131,7 +121,7 @@ const Repositories: React.FC = () => {
       extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={loadRepositories} loading={loading}>刷新</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
             新增仓库
           </Button>
         </Space>
@@ -143,15 +133,16 @@ const Repositories: React.FC = () => {
         columns={columns}
         dataSource={repositories}
         loading={loading}
-        minWidth={900}
+        minWidth={TABLE_MIN_WIDTH}
         showIndex={false}
         pagination={{}}
       />
-      <CreateRepositoryDrawer
-        open={createOpen}
+      <RepositoryFormDrawer
+        open={formOpen}
+        editing={editing}
         form={form}
-        onClose={() => setCreateOpen(false)}
-        onSubmit={createRepository}
+        onClose={() => setFormOpen(false)}
+        onSubmit={submitRepository}
       />
       <ScanImportDrawer
         open={scanOpen}
@@ -159,6 +150,8 @@ const Repositories: React.FC = () => {
         scanResult={scanResult}
         selectedSubdirs={selectedSubdirs}
         form={importForm}
+        scanRef={scanRef}
+        onScanRefChange={setScanRef}
         onClose={() => setScanOpen(false)}
         onScan={scanRepository}
         onImport={importProjects}
