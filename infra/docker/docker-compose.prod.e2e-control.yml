@@ -26,8 +26,19 @@ services:
   # 按生产默认跑必然在第 6 次登录起恒定 429，整轮 E2E 直接失败（真机实测）。
   # 放宽只发生在这个 CI/E2E 专用 overlay 里：生产入口 docker-compose.prod.yml 不引用
   # 本文件，产品默认值一个字都没动，因此不存在"为了跑通把安全边界调松"的问题。
+  # ALLOW_PRIVATE_NODES 必须同时给 web-api，不能只给 master：E2E 的 Git 源是宿主上
+  # 的一次性静态服务，地址是宿主出口私网 IP（run-gateway-e2e.sh 的 [3/6]）。建仓/改仓
+  # 从 20260819 起在**写入边界**复用 git_url_security.validate_git_url，而该函数按
+  # settings.ALLOW_PRIVATE_NODES 拒绝私网/回环目标——这段校验跑在 web-api 进程里。
+  # 只给 master 开的话，POST /api/v1/repositories 恒定 422「禁止指向本地、私网…」，
+  # 整轮 tests/e2e 全部卡在 create_code_project（真机实测：12 failed，无一例外）。
+  # 注意别顺手加 ANTCODE_GIT_ALLOW_HTTP：那个开关属于 git_credential_service 的
+  # 凭证 host_scope 校验，validate_git_url 的 ALLOWED_GIT_SCHEMES 本来就含 http://，
+  # 加了是不生效的死配置。
+  # 放宽只发生在这个 CI/E2E overlay；生产入口 docker-compose.prod.yml 不引用本文件。
   web-api:
     environment:
+      ALLOW_PRIVATE_NODES: "true"
       LOGIN_RATE_LIMIT_IP_MAX: "1000"
       LOGIN_RATE_LIMIT_IP_PERIOD: "60"
       LOGIN_RATE_LIMIT_USER_MAX: "1000"
