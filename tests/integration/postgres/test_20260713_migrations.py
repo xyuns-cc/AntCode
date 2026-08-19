@@ -9,7 +9,6 @@ import pytest
 
 from .migration_cases import MIGRATION_CASES
 from .migration_support import (
-    MIGRATION_PATHS,
     REPO_ROOT,
     AsyncpgTortoiseConnection,
     MetadataRedis,
@@ -63,11 +62,8 @@ def test_configured_database_url_passes_guard_or_fails_loudly() -> None:
         require_test_database_url(CONFIGURED_TEST_DATABASE_URL)
 
 
-def test_migration_inventory_covers_every_sql_file() -> None:
-    discovered_names = tuple(path.name for path in MIGRATION_PATHS)
-    case_names = tuple(case.name for case in MIGRATION_CASES)
-
-    assert case_names == discovered_names
+# 清单完整性判据本身不碰数据库，已搬到 tests/unit/core/test_postgres_refactor_migration_format.py，
+# 那里才在 release-gate 的 `make test` 范围内。
 
 
 @pytest.mark.asyncio

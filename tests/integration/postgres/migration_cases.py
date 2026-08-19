@@ -9,6 +9,7 @@ from .migration_integrity_cases import DATABASE_INTEGRITY
 from .migration_outbox_cases import SCHEDULER_OUTBOX
 from .migration_project_rule_cases import PROJECT_RULE_DISPATCH_CONSTRAINTS
 from .migration_project_source_sharing_cases import PROJECT_SOURCE_SHARING
+from .migration_runtime_worker_cases import PROJECT_RUNTIME_WORKER_ID
 from .migration_scheduler_cases import SCHEDULER_AUTHORITY
 from .migration_support import FailureExpectation, MigrationCase, SchemaExpectation
 from .migration_task_project_fk_cases import TASK_PROJECT_FOREIGN_KEY
@@ -261,4 +262,5 @@ MIGRATION_CASES = (
     PROJECT_SOURCE_SHARING,
     PROJECT_SOURCE_INCLUDE_PATHS,
     PROJECT_BOUND_WORKER,
+    PROJECT_RUNTIME_WORKER_ID,
 )
