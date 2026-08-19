@@ -13,6 +13,8 @@ from .metrics import LoadReport
 FUTURE_SCHEDULE = "2099-01-01T00:00:00+00:00"
 SETUP_CONCURRENCY = 10
 POLL_INTERVAL_SECONDS = 1.0
+# 只要大于 1 就能暴露重复派发；取 5 是为了在报错里看清到底多出了几条。
+RUN_HISTORY_PAGE_SIZE = 5
 TERMINAL_STATUSES = frozenset({"success", "failed", "cancelled", "timeout", "rejected", "skipped"})
 SUCCESS_STATUS = "success"
 
@@ -110,15 +112,27 @@ async def wait_for_successful_runs(
 
 
 async def _read_latest_runs(api: AntCodeApi, task_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
-    results = []
+    """读取每个 task 的 run 历史页，先判重复派发，再取最新一条。
+
+    只读 ``size=1`` 会让"同一个 task 被派发成两个 run 执行两次"完全不可见——
+    最新那条照样 success，断言照样通过。调度平台的核心正确性正是这一条，
+    因此这里读一整页并对 ``retry_count=0`` 的负载任务要求"恰好一个 run"。
+    """
+    runs_by_task: dict[str, list[dict[str, Any]]] = {}
     for index, task_id in enumerate(task_ids):
         await pace_housekeeping_request(index)
-        results.append(await api.task_runs(task_id, index))
-    latest_runs: dict[str, dict[str, Any]] = {}
-    for task_id, runs in zip(task_ids, results, strict=True):
-        if runs and isinstance(runs[0].get("status"), str):
-            latest_runs[task_id] = runs[0]
-    return latest_runs
+        runs_by_task[task_id] = await api.task_runs(task_id, index, size=RUN_HISTORY_PAGE_SIZE)
+    reject_duplicate_runs(runs_by_task)
+    return {
+        task_id: runs[0] for task_id, runs in runs_by_task.items() if runs and isinstance(runs[0].get("status"), str)
+    }
+
+
+def reject_duplicate_runs(runs_by_task: dict[str, list[dict[str, Any]]]) -> None:
+    """负载任务都以 ``retry_count=0`` 创建，多于一个 run 只能来自重复派发。"""
+    duplicated = {task_id: len(runs) for task_id, runs in runs_by_task.items() if len(runs) > 1}
+    if duplicated:
+        raise AssertionError(f"tasks were dispatched more than once (duplicate execution): {duplicated}")
 
 
 def worker_list_value(value: Any) -> tuple[int, tuple[str, ...]]:

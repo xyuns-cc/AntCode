@@ -87,7 +87,7 @@ class _RunApi:
     def __init__(self, runs: dict[str, dict[str, Any]]) -> None:
         self.runs = runs
 
-    async def task_runs(self, task_id: str, _index: int = 0) -> list[dict[str, Any]]:
+    async def task_runs(self, task_id: str, _index: int = 0, *, size: int = 1) -> list[dict[str, Any]]:
         return [self.runs[task_id]]
 
 

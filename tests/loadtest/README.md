@@ -1,7 +1,7 @@
 # AntCode guarded load tests
 
 These tests are inert by default. `pytest tests/loadtest` runs only local guard and
-metrics checks; the nine external scenarios are deselected.
+metrics checks; the ten external scenarios are deselected.
 
 ## Safety contract
 
@@ -64,6 +64,16 @@ not increase the per-user limit.
 
 - `task-submission`, `task-dispatch`, and `backlog-trigger` exercise real task
   creation, scheduling, Worker execution, terminal-state recovery, and cleanup.
+- `trigger-dedup` aims every virtual user at one task. `task-dispatch`
+  deliberately triggers each task once to avoid the dedup lock, so without this
+  scenario the most common production race — the same task triggered
+  concurrently — is never exercised. It requires every accepted trigger to
+  return the same run ID, and only `200` / `409` to be observed.
+- Dispatch correctness is asserted, not just throughput: every scenario that
+  waits for runs reads a page of run history and fails if a `retry_count=0`
+  task produced more than one run. Reading only the latest run cannot see a
+  duplicate dispatch, because the newest of the two duplicates is also
+  `success`.
 - `sse-log-history`, `http-log-readers`, and `log-archive-download` are
   retained-log read workloads. They do not generate realtime log ingest traffic.
 - `worker-inventory`, `worker-heartbeat`, and `worker-churn` load and observe the

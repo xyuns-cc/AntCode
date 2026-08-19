@@ -11,6 +11,7 @@ from .runner import OperationResult
 API_PREFIX = "/api/v1"
 TASK_DELETE_BATCH_SIZE = 100
 HOUSEKEEPING_INTERVAL_SECONDS = 0.1
+DEFAULT_RUN_PAGE_SIZE = 1
 
 
 class AntCodeApi:
@@ -114,8 +115,10 @@ class AntCodeApi:
         response = await self._client.get(f"{API_PREFIX}/tasks/{task_id}", headers=self.headers(0))
         return response.status_code
 
-    async def task_runs(self, task_id: str, index: int = 0) -> list[dict[str, Any]]:
-        payload = await self.require_json("GET", f"/tasks/{task_id}/runs?page=1&size=1", index)
+    async def task_runs(
+        self, task_id: str, index: int = 0, *, size: int = DEFAULT_RUN_PAGE_SIZE
+    ) -> list[dict[str, Any]]:
+        payload = await self.require_json("GET", f"/tasks/{task_id}/runs?page=1&size={size}", index)
         data = _data(payload, "/tasks/{task_id}/runs")
         items = data.get("items")
         if not isinstance(items, list):

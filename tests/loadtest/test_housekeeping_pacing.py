@@ -11,7 +11,7 @@ TASK_IDS = ("task-1", "task-2", "task-3")
 
 
 class _RunApi:
-    async def task_runs(self, task_id: str, _index: int = 0) -> list[dict[str, str]]:
+    async def task_runs(self, task_id: str, _index: int = 0, *, size: int = 1) -> list[dict[str, str]]:
         return [{"status": "success", "worker_id": "worker-1", "task_id": task_id}]
 
 
