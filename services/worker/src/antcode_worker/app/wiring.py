@@ -693,11 +693,11 @@ def _create_observability_server(config: Any, transport: Any, engine: Any) -> An
         return HealthResult(status=HealthStatus.UNHEALTHY, message="transport offline")
 
     def slots_check():
+        # 队列满是背压不是故障：满队列曾返回 DEGRADED -> readiness 503 ->
+        # compose healthcheck 的 `|| kill -TERM 1` 把压满的 Worker 自杀掉（见回归测试）。
         stats = engine.get_stats()
         if not stats.get("running", False):
             return HealthResult(status=HealthStatus.UNHEALTHY, message="engine stopped")
-        if stats.get("queue_size", 0) >= stats.get("max_concurrent", 1) * 2:
-            return HealthResult(status=HealthStatus.DEGRADED, message="queue full")
         return HealthResult(status=HealthStatus.HEALTHY, message="slots ok")
 
     server.register_health_check("transport", transport_check)
