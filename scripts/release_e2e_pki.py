@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import secrets
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,6 +18,9 @@ CONTAINER_FILE_MODE = 0o444
 CERTIFICATE_LIFETIME_DAYS = 2
 RSA_KEY_SIZE = 2048
 MAX_COMMON_NAME_LENGTH = 64
+#: 每个 Worker 必须有独立的 mTLS 目录：客户端证书的 CN 就是它自己的 worker_id，
+#: 多个 Worker 共用一个目录等于共用一张身份证书，CN 绑定会立刻把后来的全部拒掉。
+DEFAULT_WORKER_TLS_DIR = "worker-tls"
 
 
 def _write(path: Path, value: str, mode: int) -> None:
@@ -130,11 +134,11 @@ def _write_leaf(
     _write(root / directory / names[1], _pem_cert(cert), CONTAINER_FILE_MODE)
 
 
-def write_release_pki(root: Path) -> None:
+def write_release_pki(root: Path, *, worker_directories: Sequence[str] = (DEFAULT_WORKER_TLS_DIR,)) -> None:
     ca_key, ca_cert = _create_ca()
     _write(root / "ca.key", _pem_key(ca_key), PRIVATE_FILE_MODE)
     _write(root / "public-ca.crt", _pem_cert(ca_cert), CONTAINER_FILE_MODE)
-    for directory in ("gateway-tls", "worker-tls"):
+    for directory in ("gateway-tls", *worker_directories):
         _write(root / directory / "ca.crt", _pem_cert(ca_cert), CONTAINER_FILE_MODE)
     _write_leaf(
         root,
@@ -150,16 +154,22 @@ def write_release_pki(root: Path) -> None:
         common_name="public-api",
         client=False,
     )
-    write_worker_identity_certificate(root, "release-bootstrap")
+    for directory in worker_directories:
+        write_worker_identity_certificate(root, "release-bootstrap", directory=directory)
 
 
-def write_worker_identity_certificate(root: Path, worker_id: str) -> None:
+def write_worker_identity_certificate(
+    root: Path,
+    worker_id: str,
+    *,
+    directory: str = DEFAULT_WORKER_TLS_DIR,
+) -> None:
     identity = worker_id.strip()
     if not identity or len(identity) > MAX_COMMON_NAME_LENGTH or not identity.isprintable():
         raise ValueError("invalid Worker certificate identity")
     _write_leaf(
         root,
-        "worker-tls",
+        directory,
         ("client.key", "client.crt"),
         common_name=identity,
         client=True,

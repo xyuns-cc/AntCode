@@ -13,6 +13,8 @@ import httpx
 HTTP_TIMEOUT_SECONDS = 15.0
 GRPC_TIMEOUT_SECONDS = 10.0
 HTTP_PERMANENT_REDIRECT_STATUS = 308
+#: 合成冒充身份的后缀；与证书 CN 只差这一段，用来证明绑定不是前缀/后缀宽松匹配。
+IMPOSTOR_SUFFIX = "-impostor"
 #: 每个安全头必须**恰好**出现一次。web_api 中间件、frontend nginx 与公网反代三层
 #: 都会设这组头，nginx 的 add_header 只追加不覆盖，直接透传会让客户端收到三份
 #: （真机实测）。RFC 7034 §2.1 明确多值 X-Frame-Options 无效、浏览器可直接忽略整条头，
@@ -34,6 +36,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--gateway-port", type=int, default=15051)
     parser.add_argument("--https-origin", default="https://localhost")
     parser.add_argument("--http-origin", default="http://localhost")
+    parser.add_argument("--worker-id", required=True, help="--client-cert 的 CN，即该证书的合法主体")
+    parser.add_argument("--peer-worker-id", default="", help="另一个已注册 Worker 的 ID；多 Worker 拓扑下必给")
     return parser.parse_args()
 
 
@@ -121,11 +125,55 @@ def _verify_mtls(args: argparse.Namespace) -> None:
         raise RuntimeError("Gateway rejected the trusted Worker client certificate")
 
 
+def _capabilities_status(args: argparse.Namespace, claimed_worker_id: str) -> grpc.StatusCode | None:
+    """用本地客户端证书连 Gateway，声明 ``claimed_worker_id``，返回失败状态码（成功为 None）。
+
+    mTLS 链路上 Worker **不带 api_key**（transport/factory_components.gateway_auth_method：
+    有客户端证书就走 mtls），x-worker-id 只是客户端的自我声明，唯一的身份凭据就是
+    证书本身。所以"证书 CN 与声明主体是否强绑定"就是这条链路的全部认证强度。
+    GetCapabilities 是无副作用且必经认证的 RPC（不在 AUTH_EXEMPT_METHODS 白名单里）。
+    """
+    from antcode_contracts import control_pb2, control_pb2_grpc
+
+    target = f"{args.gateway_host}:{args.gateway_port}"
+    channel = grpc.secure_channel(target, _channel_credentials(args, with_client=True))
+    try:
+        stub = control_pb2_grpc.ControlServiceStub(channel)
+        stub.GetCapabilities(
+            control_pb2.CapabilitiesRequest(worker_id=claimed_worker_id),
+            metadata=(("x-worker-id", claimed_worker_id),),
+            timeout=GRPC_TIMEOUT_SECONDS,
+        )
+        return None
+    except grpc.RpcError as error:
+        return error.code()
+    finally:
+        channel.close()
+
+
+def _verify_certificate_identity_binding(args: argparse.Namespace) -> None:
+    """CA 签发的合法证书不得冒充**别的** Worker——否则任何一台 Worker 都能顶替全部同伴。
+
+    合成身份恒验（证明绑定生效），另有真实同伴 ID 时再验一次真实冒充：只验合成 ID
+    可能被"该 Worker 不存在"这类前置校验挡下，从而掩盖 CN 绑定本身是否真的生效。
+    """
+    own = _capabilities_status(args, args.worker_id)
+    if own is not None:
+        raise RuntimeError(f"Gateway rejected a Worker presenting its own certificate identity: {own}")
+    for claimed in (f"{args.worker_id}{IMPOSTOR_SUFFIX}", args.peer_worker_id):
+        if not claimed or claimed == args.worker_id:
+            continue
+        status = _capabilities_status(args, claimed)
+        if status != grpc.StatusCode.PERMISSION_DENIED:
+            raise RuntimeError(f"Gateway let certificate CN={args.worker_id} act as {claimed}: status={status}")
+
+
 def main() -> None:
     args = _arguments()
     _verify_https(args)
     _verify_tls_versions(args)
     _verify_mtls(args)
+    _verify_certificate_identity_binding(args)
 
 
 if __name__ == "__main__":

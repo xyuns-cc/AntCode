@@ -15,7 +15,7 @@ import socket
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.release_e2e_pki import write_release_pki
+from scripts.release_e2e_pki import DEFAULT_WORKER_TLS_DIR, write_release_pki
 
 #: 由 Compose 本地构建的五个应用镜像；生产 Compose 里它们只有 tag，没有 digest。
 APP_SERVICES = ("web-api", "master", "gateway", "worker", "frontend")
@@ -35,6 +35,8 @@ NETWORK_LAYOUT = {
     "ANTCODE_REVERSE_PROXY_EDGE_IP": "172.30.40.66",
 }
 
+#: 编排层读取的机群描述（slug + Worker 数量），与 Compose 变量面分开存放。
+FLEET_FILE = "fleet.json"
 FILE_MODE = 0o600
 REDIS_ACL_FILE_MODE = 0o666
 REDIS_ACL_DIR_MODE = 0o777
@@ -67,6 +69,7 @@ class ReleaseE2ESettings:
     https_port: int = DEFAULT_HTTPS_PORT
     http_redirect_port: int = DEFAULT_HTTP_REDIRECT_PORT
     uv_version: str = DEFAULT_UV_VERSION
+    worker_count: int = 1
 
     @property
     def public_api_origin(self) -> str:
@@ -115,7 +118,6 @@ def _secret_values(root: Path) -> dict[str, str]:
         "encryption_keys_legacy": "",
         "jwt_secret": secrets.token_urlsafe(SALT_TOKEN_BYTES * 3),
         "default_admin_password": admin_password,
-        "worker_install_key": "pending",
     }
     for name, value in values.items():
         write(root / "secrets" / name, value)
@@ -130,9 +132,31 @@ def _secret_values(root: Path) -> dict[str, str]:
     return values
 
 
+def worker_tls_directory(index: int) -> str:
+    return DEFAULT_WORKER_TLS_DIR if index == 0 else f"{DEFAULT_WORKER_TLS_DIR}-{index}"
+
+
+def worker_variables(root: Path, slug: str, index: int) -> dict[str, str]:
+    """第 ``index`` 个 Worker 的独占变量。
+
+    容器名 / 数据卷 / mTLS 目录 / 安装 Key 文件必须逐个 Worker 独立：Compose 把它们
+    全部参数化了，多 Worker 就是同一份 Compose 起多个 project + 换这一组变量。
+    index 0 不加后缀，单 Worker 拓扑的命名与既有部署完全一致。
+    """
+    suffix = "" if index == 0 else f"-{index}"
+    return {
+        "ANTCODE_WORKER_NAME": f"{slug}-worker{suffix}",
+        "ANTCODE_WORKER_CONTAINER_NAME": f"antcode-{slug}-worker{suffix}",
+        "ANTCODE_WORKER_DATA_VOLUME": f"antcode-{slug}-worker{suffix}-data",
+        "ANTCODE_WORKER_TLS_DIR": str(root / worker_tls_directory(index)),
+        "ANTCODE_WORKER_INSTALL_KEY_FILE": str(root / f"secrets/worker_install_key{suffix}"),
+    }
+
+
 def _static_variables(settings: ReleaseE2ESettings) -> dict[str, str]:
     slug = settings.worker_slug
     return {
+        **worker_variables(settings.root, slug, 0),
         "POSTGRES_DB": "antcode_e2e_test",
         "POSTGRES_USER": "antcode",
         "REDIS_HEALTHCHECK_USER": "health",
@@ -146,9 +170,6 @@ def _static_variables(settings: ReleaseE2ESettings) -> dict[str, str]:
         "ANTCODE_WORKER_INSTALL_UV_VERSION": settings.uv_version,
         **NETWORK_LAYOUT,
         "ANTCODE_TRUSTED_PROXIES": NETWORK_LAYOUT["ANTCODE_FRONTEND_CONTROL_IP"],
-        "ANTCODE_WORKER_NAME": f"{slug}-worker",
-        "ANTCODE_WORKER_CONTAINER_NAME": f"antcode-{slug}-worker",
-        "ANTCODE_WORKER_DATA_VOLUME": f"antcode-{slug}-worker-data",
         "ANTCODE_WORKER_MEMORY": "4g",
         "ANTCODE_REDIS_MAXMEMORY": "256mb",
         "HTTPS_PORT": str(settings.https_port),
@@ -167,10 +188,8 @@ def _path_variables(root: Path) -> dict[str, str]:
         "ANTCODE_ENCRYPTION_KEYS_LEGACY_FILE": "secrets/encryption_keys_legacy",
         "ANTCODE_JWT_SECRET_FILE": "secrets/jwt_secret",
         "ANTCODE_DEFAULT_ADMIN_PASSWORD_FILE": "secrets/default_admin_password",
-        "ANTCODE_WORKER_INSTALL_KEY_FILE": "secrets/worker_install_key",
         "ANTCODE_REDIS_ACL_DIR": "redis",
         "ANTCODE_GATEWAY_TLS_DIR": "gateway-tls",
-        "ANTCODE_WORKER_TLS_DIR": "worker-tls",
         "ANTCODE_TLS_CERTS_DIR": "public-tls",
     }
     return {name: str(root / relative) for name, relative in paths.items()}
@@ -206,11 +225,32 @@ def _image_variables(tag: str, runtime: dict[str, str]) -> dict[str, str]:
     return variables
 
 
+def worker_env_file(index: int) -> str:
+    return f"worker-{index}.env"
+
+
+def _write_worker_files(root: Path, slug: str, indexes: range) -> None:
+    """每个 Worker 的安装 Key 占位文件与 env 片段。
+
+    安装 Key 是一次性凭据，每个 Worker 各拿一把；Compose 的 ``secrets: file:`` 在解析
+    阶段就要求文件存在，所以先占位，编排器注册前再写入真实的 Key。env 片段供 shell
+    侧 `set -a; . worker-N.env` 使用——shell 环境优先级高于 ``--env-file``，这样命名
+    规则只由 ``worker_variables`` 一处定义，清理脚本不会与编排器分叉。
+    """
+    for index in indexes:
+        variables = worker_variables(root, slug, index)
+        write(Path(variables["ANTCODE_WORKER_INSTALL_KEY_FILE"]), "pending")
+        content = "".join(f"{name}={value}\n" for name, value in sorted(variables.items()))
+        write(root / worker_env_file(index), content)
+
+
 def write_environment(settings: ReleaseE2ESettings, tag: str, runtime: dict[str, str]) -> dict[str, str]:
     """写出一次性 PKI、密钥、Compose 环境与 Git 根目录，返回 runner 侧取值。"""
     root = settings.root
-    write_release_pki(root)
+    indexes = range(settings.worker_count)
+    write_release_pki(root, worker_directories=[worker_tls_directory(index) for index in indexes])
     values = _secret_values(root)
+    _write_worker_files(root, settings.worker_slug, indexes)
     environment = {
         **_static_variables(settings),
         **_path_variables(root),
@@ -218,6 +258,9 @@ def write_environment(settings: ReleaseE2ESettings, tag: str, runtime: dict[str,
     }
     write(root / "production.env", "".join(f"{name}={value}\n" for name, value in sorted(environment.items())))
     write(root / "release-images.json", json.dumps({**application_images(tag), **runtime}, sort_keys=True))
+    # 机群规模只属于编排层，不进 production.env——那是 Compose 的变量面，不该混入
+    # 部署拓扑元数据。编排器从这里取唯一事实来源。
+    write(root / FLEET_FILE, json.dumps({"slug": settings.worker_slug, "count": settings.worker_count}))
     (root / "git").mkdir(mode=GIT_ROOT_MODE)
     return values
 

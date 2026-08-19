@@ -42,7 +42,7 @@ def _write_runtime_lock(root: Path) -> Path:
     return lock
 
 
-def _run_prepare(monkeypatch: pytest.MonkeyPatch, root: Path) -> tuple[Path, Path]:
+def _run_prepare(monkeypatch: pytest.MonkeyPatch, root: Path, workers: int = 1) -> tuple[Path, Path]:
     state = root / "state"
     runner_env = root / "runner.env"
     monkeypatch.setattr(
@@ -68,6 +68,8 @@ def _run_prepare(monkeypatch: pytest.MonkeyPatch, root: Path) -> tuple[Path, Pat
             str(release_e2e_environment.DEFAULT_HTTP_REDIRECT_PORT),
             "--gateway-port",
             str(release_e2e_environment.DEFAULT_GATEWAY_PUBLIC_PORT),
+            "--workers",
+            str(workers),
         ],
     )
     prepare_local_release_e2e.main()
@@ -101,6 +103,23 @@ def test_prepare_material_is_ephemeral_path_only_and_exports_complete_e2e_env(mo
     values = _environment_values(state)
     edge_subnet = ipaddress.ip_network(values["ANTCODE_EDGE_SUBNET"])
     assert ipaddress.ip_address(values["ANTCODE_REVERSE_PROXY_EDGE_IP"]) != next(edge_subnet.hosts())
+
+
+def test_prepare_lays_out_one_install_key_tls_dir_and_env_file_per_worker(monkeypatch, tmp_path: Path) -> None:
+    """安装 Key 一次性消费、客户端证书 CN 即 worker_id，两者都必须逐 Worker 独立。"""
+    workers = 3
+    state, _ = _run_prepare(monkeypatch, tmp_path, workers=workers)
+    fleet = json.loads((state / release_e2e_environment.FLEET_FILE).read_text(encoding="utf-8"))
+
+    assert fleet["count"] == workers
+    key_files = set()
+    for index in range(workers):
+        variables = release_e2e_environment.worker_variables(state, fleet["slug"], index)
+        key_files.add(variables["ANTCODE_WORKER_INSTALL_KEY_FILE"])
+        assert Path(variables["ANTCODE_WORKER_INSTALL_KEY_FILE"]).exists()
+        assert (Path(variables["ANTCODE_WORKER_TLS_DIR"]) / "client.crt").exists()
+        assert (state / release_e2e_environment.worker_env_file(index)).exists()
+    assert len(key_files) == workers
 
 
 def test_application_images_are_tag_referenced_and_runtimes_stay_digest_pinned(monkeypatch, tmp_path: Path) -> None:
