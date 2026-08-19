@@ -27,9 +27,9 @@ from datetime import UTC, datetime
 from antcode_core.application.services.scheduler.execution_status_service import (
     execution_status_service,
 )
-from antcode_core.application.services.workers.worker_delete_guard import ACTIVE_RUN_STATUSES
 from antcode_core.domain.models import TaskRun
 from antcode_core.domain.models.enums import RuntimeStatus
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 from loguru import logger
 
 from antcode_master.control.dispatch_ack_liveness import (
@@ -70,14 +70,14 @@ async def settle_abandoned_cancellations(authority_token: int) -> None:
 async def _load_cancelled_candidates(*, after_id: int) -> list[TaskRun]:
     """已记录取消请求、已绑定 Worker、仍处于非终态的 run。
 
-    状态集合复用 ``ACTIVE_RUN_STATUSES`` —— 删除守卫拦的就是这一组，
+    状态集合复用 ``TASK_RUN_ACTIVE_STATUSES`` —— 删除守卫拦的就是这一组，
     收敛范围与阻塞范围必须是同一个定义。
     """
     return (
         await TaskRun.filter(
             cancel_requested_at__isnull=False,
             worker_id__isnull=False,
-            status__in=list(ACTIVE_RUN_STATUSES),
+            status__in=list(TASK_RUN_ACTIVE_STATUSES),
             id__gt=after_id,
         )
         .order_by("id")

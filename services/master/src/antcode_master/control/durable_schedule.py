@@ -15,16 +15,14 @@ from antcode_core.application.services.scheduler.trigger_identity import (
 from antcode_core.domain.models.enums import DispatchStatus, ScheduleType, TaskStatus
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 from tortoise.expressions import Q
 
-from antcode_master.control.retry_dispatch_recovery import (
-    ACTIVE_RUN_STATUSES,
-    resume_existing_run,
-)
+from antcode_master.control.retry_dispatch_recovery import resume_existing_run
 from antcode_master.control.scheduler_authority import (
     SchedulerAuthorityLost,
     complete_one_time_schedule,
@@ -65,7 +63,7 @@ async def one_time_schedule_is_fulfilled(task_id: int) -> bool:
     以 ``is_active`` 判定目标有效性，提前关闭会让首次执行失败后的重试全部
     被判为 ``RetryTargetInvalidError`` 直接丢弃。
     """
-    unfulfilled = Q(status__in=list(ACTIVE_RUN_STATUSES)) | Q(next_retry_at__isnull=False)
+    unfulfilled = Q(status__in=list(TASK_RUN_ACTIVE_STATUSES)) | Q(next_retry_at__isnull=False)
     return not await TaskRun.filter(unfulfilled, task_id=task_id).exists()
 
 

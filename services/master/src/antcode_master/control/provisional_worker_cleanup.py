@@ -11,10 +11,10 @@ from antcode_core.application.services.workers.run_ownership_fence import (
     release_run_ownership,
     run_owner_key,
 )
-from antcode_core.application.services.workers.worker_delete_guard import ACTIVE_RUN_STATUSES
 from antcode_core.domain.models import Task, TaskRun, Worker
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from antcode_core.domain.models.task_run import TASK_ID_ABSENT
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 from tortoise.transactions import in_transaction
 
@@ -52,7 +52,7 @@ async def _load_active_task_ids(connection: Any, worker_internal_id: int) -> lis
     """
     values = cast(
         list[int],
-        await TaskRun.filter(worker_id=worker_internal_id, status__in=list(ACTIVE_RUN_STATUSES))
+        await TaskRun.filter(worker_id=worker_internal_id, status__in=list(TASK_RUN_ACTIVE_STATUSES))
         .using_db(connection)
         .values_list("task_id", flat=True),
     )
@@ -61,7 +61,7 @@ async def _load_active_task_ids(connection: Any, worker_internal_id: int) -> lis
 
 async def _load_active_runs(connection: Any, worker_internal_id: int) -> list[TaskRun]:
     return await (
-        TaskRun.filter(worker_id=worker_internal_id, status__in=list(ACTIVE_RUN_STATUSES))
+        TaskRun.filter(worker_id=worker_internal_id, status__in=list(TASK_RUN_ACTIVE_STATUSES))
         .using_db(connection)
         .select_for_update()
         .order_by("id")
@@ -92,7 +92,7 @@ async def _settle_run(connection: Any, run: TaskRun, now: datetime) -> None:
     if run.start_time is not None:
         updates["duration_seconds"] = max(0.0, (now - run.start_time).total_seconds())
     updated = await (
-        TaskRun.filter(id=run.id, worker_id=run.worker_id, status__in=list(ACTIVE_RUN_STATUSES))
+        TaskRun.filter(id=run.id, worker_id=run.worker_id, status__in=list(TASK_RUN_ACTIVE_STATUSES))
         .using_db(connection)
         .update(**updates)
     )

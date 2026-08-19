@@ -20,7 +20,6 @@ from antcode_core.application.services.workers.worker_connection_service import 
     worker_connection_service,
 )
 from antcode_core.application.services.workers.worker_delete_guard import (
-    ACTIVE_RUN_STATUSES,
     quiesce_worker_for_delete,
 )
 from antcode_core.application.services.workers.worker_heartbeat_service import worker_heartbeat_service
@@ -38,6 +37,7 @@ from antcode_core.application.services.workers.worker_stats_service import worke
 from antcode_core.common.config import settings
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.domain.models.enums import WorkerPermission
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 
 WorkerAclRevoker = Callable[[Worker], Awaitable[None]]
 WorkerLeaseDisabler = Callable[[str, str], Awaitable[bool]]
@@ -312,7 +312,7 @@ class WorkerService(WorkerServiceFacade):
                 active = (
                     await TaskRun.filter(
                         worker_id=worker_internal_id,
-                        status__in=list(ACTIVE_RUN_STATUSES),
+                        status__in=list(TASK_RUN_ACTIVE_STATUSES),
                     )
                     .using_db(conn)
                     .count()

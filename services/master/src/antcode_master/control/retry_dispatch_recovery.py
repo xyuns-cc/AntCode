@@ -13,6 +13,7 @@ from antcode_core.application.services.scheduler.execution_status_service import
 )
 from antcode_core.domain.models.enums import DispatchStatus, TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 from antcode_core.observability.tracing import new_trace, set_current_trace
 from loguru import logger
 
@@ -35,12 +36,6 @@ from antcode_master.control.scheduler_failure_wiring import (
 )
 from antcode_master.leader import require_fencing_token
 
-ACTIVE_RUN_STATUSES = (
-    TaskStatus.PENDING,
-    TaskStatus.QUEUED,
-    TaskStatus.DISPATCHING,
-    TaskStatus.RUNNING,
-)
 RECOVERABLE_RETRY_RUN_STATUSES = (TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.DISPATCHING)
 
 
@@ -212,7 +207,7 @@ async def _finalize_execution(service, context) -> None:
 
 
 async def count_active_runs(conn, task_id: int) -> int:
-    return await TaskRun.filter(task_id=task_id, status__in=list(ACTIVE_RUN_STATUSES)).using_db(conn).count()
+    return await TaskRun.filter(task_id=task_id, status__in=list(TASK_RUN_ACTIVE_STATUSES)).using_db(conn).count()
 
 
 __all__ = [

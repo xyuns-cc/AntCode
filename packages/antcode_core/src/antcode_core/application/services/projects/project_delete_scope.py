@@ -16,13 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from antcode_core.application.services.run_ownership import batch_id_of_run
-from antcode_core.application.services.workers.run_settlement_guard import (
-    TASK_RUN_ACTIVE_STATUSES,
-)
 from antcode_core.domain.models.crawl import CrawlBatch
 from antcode_core.domain.models.project import Project
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TASK_ID_ABSENT, TaskRun
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 
 ACTIVE_RUN_REJECTION = "项目存在未终态执行，请先取消并等待执行结束"
 

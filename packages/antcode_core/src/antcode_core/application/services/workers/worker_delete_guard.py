@@ -4,8 +4,7 @@ from fastapi import HTTPException, status
 from tortoise.transactions import in_transaction
 
 from antcode_core.domain.models import TaskRun, Worker, WorkerStatus
-
-ACTIVE_RUN_STATUSES = ("pending", "dispatching", "queued", "running")
+from antcode_core.domain.models.task_status_sets import TASK_RUN_ACTIVE_STATUSES
 
 
 async def quiesce_worker_for_delete(worker: Worker) -> None:
@@ -14,7 +13,11 @@ async def quiesce_worker_for_delete(worker: Worker) -> None:
         locked = await Worker.filter(id=worker.id).using_db(connection).select_for_update().first()
         if locked is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
-        active = await TaskRun.filter(worker_id=worker.id, status__in=ACTIVE_RUN_STATUSES).using_db(connection).count()
+        active = (
+            await TaskRun.filter(worker_id=worker.id, status__in=list(TASK_RUN_ACTIVE_STATUSES))
+            .using_db(connection)
+            .count()
+        )
         if active:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -24,4 +27,4 @@ async def quiesce_worker_for_delete(worker: Worker) -> None:
     worker.status = WorkerStatus.MAINTENANCE
 
 
-__all__ = ["ACTIVE_RUN_STATUSES", "quiesce_worker_for_delete"]
+__all__ = ["quiesce_worker_for_delete"]
