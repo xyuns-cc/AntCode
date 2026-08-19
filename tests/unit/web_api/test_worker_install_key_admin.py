@@ -143,7 +143,7 @@ async def test_generate_rejects_non_ip_allowed_source(monkeypatch, bad_source: s
     assert await WorkerInstallKey.all().count() == 0
 
 
-@pytest.mark.parametrize("good_source", ["10.0.0.5", "10.0.0.0/24", "192.168.1.250", "::1"])
+@pytest.mark.parametrize("good_source", ["10.0.0.5", "10.0.0.0/24", "192.168.1.10", "::1"])
 @pytest.mark.asyncio
 async def test_generate_accepts_ip_and_cidr_allowed_source(monkeypatch, good_source: str) -> None:
     response = await _generate(monkeypatch, good_source)

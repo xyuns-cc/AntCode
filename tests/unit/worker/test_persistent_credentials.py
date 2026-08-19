@@ -55,7 +55,7 @@ def _registration_request() -> RegistrationRequest:
     "url",
     [
         "http://control.example.com:8000",
-        "http://192.168.1.250:8000",
+        "http://192.168.1.10:8000",
         "control.example.com:8000",
     ],
 )

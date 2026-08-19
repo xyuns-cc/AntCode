@@ -120,7 +120,7 @@ export ANTCODE_E2E_ADMIN_PASSWORD='<bootstrap 时使用的一次性管理员口�
 export ANTCODE_E2E_WEB_API_URL=https://antcode-test.example.com
 export ANTCODE_E2E_EXPECT_TRANSPORT_MODE=direct
 export ANTCODE_E2E_GIT_ROOT=/srv/antcode-e2e-git
-export ANTCODE_E2E_GIT_BASE_URL=http://192.168.1.250:18081
+export ANTCODE_E2E_GIT_BASE_URL=http://git.antcode-test.example.com:18081
 # Spider 数据场景只用专用 Redis 连接做严格清理；不会加载 DATABASE_URL。
 export ANTCODE_E2E_REDIS_URL='<专用 E2E Redis URL>'
 export ANTCODE_E2E_REDIS_NAMESPACE=antcode
