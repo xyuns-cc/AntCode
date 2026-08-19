@@ -6,6 +6,10 @@ from antcode_core.application.services.scheduler import task_project_integrity
 
 SCHEDULER_SERVICE = Path("packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py")
 PROJECT_DELETE = Path("packages/antcode_core/src/antcode_core/application/services/projects/project_cascade_delete.py")
+# 删除侧的父行锁与在途执行判定住在 project_delete_scope
+PROJECT_DELETE_SCOPE = Path(
+    "packages/antcode_core/src/antcode_core/application/services/projects/project_delete_scope.py"
+)
 
 
 def _project_query(result):
@@ -45,6 +49,9 @@ async def test_task_creation_rejects_deleted_parent_project(monkeypatch) -> None
 def test_task_create_and_project_delete_share_parent_row_lock() -> None:
     create_source = SCHEDULER_SERVICE.read_text(encoding="utf-8")
     delete_source = PROJECT_DELETE.read_text(encoding="utf-8")
+    scope_source = PROJECT_DELETE_SCOPE.read_text(encoding="utf-8")
 
     assert create_source.index("lock_task_project(conn, project_id)") < create_source.index("Task.create(")
-    assert "Project.filter(id=project_id).using_db(conn).select_for_update()" in delete_source
+    assert "Project.filter(id=project_id).using_db(conn).select_for_update()" in scope_source
+    # 级联删除必须经由 lock_project_scope 拿到这把锁，不能绕开自己查
+    assert "lock_project_scope(conn, project_id)" in delete_source

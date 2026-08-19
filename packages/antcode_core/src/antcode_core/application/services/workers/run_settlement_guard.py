@@ -48,6 +48,10 @@ TASK_RUN_TERMINAL_STATUSES = frozenset(
         TaskStatus.REJECTED,
     }
 )
+# 终态的补集，按枚举全集派生而非另手写一份，避免新增状态时两处漂移。
+# 正向 ``status__in`` 让 ``(task_id, status)`` 复合索引可走范围扫描；
+# ``exclude(terminal)`` 在哨兵 task_id 上会退化成扫全部批次 run。
+TASK_RUN_ACTIVE_STATUSES = frozenset(TaskStatus) - TASK_RUN_TERMINAL_STATUSES
 
 
 class RunSettlementPendingError(ValueError):
@@ -169,6 +173,7 @@ async def load_deletable_run_ids(connection: Any, task_ids: Iterable[int]) -> li
 __all__ = [
     "OWNERSHIP_TOKEN_UNREADABLE",
     "SETTLEMENT_STORE_UNAVAILABLE",
+    "TASK_RUN_ACTIVE_STATUSES",
     "TASK_RUN_TERMINAL_STATUSES",
     "GenerationProbe",
     "RunSettlementGuardUnavailable",

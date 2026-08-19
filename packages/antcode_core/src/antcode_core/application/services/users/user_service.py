@@ -386,15 +386,11 @@ class UserService:
         P1-20 修复要点:
         - 事务化:权限/凭证清理 + user.delete() 走同一 `in_transaction()`,
           任一步骤失败整体回滚,避免出现"权限清了、user 还在"的半状态。
-        - **拒绝策略**:如果用户名下仍有项目(user_id 引用),拒绝删除并
-          提示先移交资源。选择这个策略而不是"转移到系统用户"是因为:
-            1) 项目里存在 Git 凭证、私钥引用等敏感上下文,静默改归属会
-               让审计链路断裂;
-            2) 代码库当前**没有** SYSTEM_USER 常量或哨兵用户概念,强行
-               引入等于新增一个隐式全局对象;
-            3) 已有 "不能删除自己" 的显式拒绝分支,风格上一致。
-          需要"强制清理"时,业务侧应先调用现有的 delete_project_cascade
-          逐个把项目处理掉,再来删用户。
+        - **拒绝策略**:名下仍有资源(user_id 引用)就拒绝删除并提示先移交。不选
+          "转移到系统用户"是因为:1) 项目含 Git 凭证等敏感上下文,静默改归属会断
+          审计链;2) 代码库没有 SYSTEM_USER 哨兵概念,强行引入等于新增隐式全局对
+          象;3) 与已有"不能删除自己"的显式拒绝分支一致。需要"强制清理"时,业务
+          侧应先调用 delete_project_cascade 逐个处理掉项目,再来删用户。
         """
         user = await self.get_user_by_public_id(user_id)
         if not user:
@@ -407,8 +403,11 @@ class UserService:
         if not current_user.is_admin:
             raise PermissionError("仅管理员可删除用户")
 
-        # 拒绝策略:名下仍有项目/任务时不允许删,要求先移交或删除资源
-        from antcode_core.domain.models import Project
+        # 拒绝策略:名下仍有项目/任务/爬取批次时不允许删,要求先移交或删除资源。
+        # 批次必须单独查:管理员可在他人项目下建批次(crawl.py::_verify_project_access
+        # 放行管理员),CrawlBatch.user_id 因此可以 != Project.user_id;只查项目和任务
+        # 会放过"只拥有批次"的用户,批次留下查不到人的悬空 user_id。
+        from antcode_core.domain.models import CrawlBatch, Project
         from antcode_core.domain.models.task import Task
 
         project_count = await Project.filter(user_id=user.id).count()
@@ -417,6 +416,9 @@ class UserService:
         task_count = await Task.filter(user_id=user.id).count()
         if task_count > 0:
             raise ValueError(f"该用户名下仍有 {task_count} 个任务,请先移交或删除后再删除用户")
+        batch_count = await CrawlBatch.filter(user_id=user.id).count()
+        if batch_count > 0:
+            raise ValueError(f"该用户名下仍有 {batch_count} 个爬取批次,请先移交或删除后再删除用户")
 
         # 级联删除用户关联数据(单事务原子)
         deleted_counts = await self._cascade_delete_user_data(user)
@@ -428,11 +430,9 @@ class UserService:
     async def revoke_all_sessions(self, user_id: int) -> int:
         """P1-09: 一键撤销该用户所有活跃 refresh session。
 
-        触发场景: 改密、离职、检测到异常登录、admin 强制登出。
-        实现: 把 ``UserSession.revoked_at`` 从 NULL 改为 now(); 已 revoke
-        的记录不动 (幂等), 避免二次撤销把审计时间戳覆盖成新值。
-
-        返回被撤销的 session 数 (供调用方回显 "已登出 N 个设备")。
+        触发场景: 改密、离职、检测到异常登录、admin 强制登出。实现: 把
+        ``UserSession.revoked_at`` 从 NULL 改为 now(); 已 revoke 的记录不动
+        (幂等), 避免二次撤销把审计时间戳覆盖成新值。返回被撤销的 session 数。
         """
         from datetime import datetime
 
@@ -450,27 +450,21 @@ class UserService:
     ) -> bool:
         """P1-09: 软删除用户, 可选把关联资源转移给接收人。
 
-        为什么不物理删:
-        - Task/Project.user_id 是 BigIntField 裸引用, 没有 ON DELETE 约束;
-          物理删除会留 dangling 引用, 前端页面加载时 join 空导致 500。
-        - 审计链路要求保留 "谁做过什么" 的原始 user_id, 物理删会断链。
+        为什么不物理删: user_id 是 BigIntField 裸引用, 没有 ON DELETE 约束, 物理删
+        会留 dangling 引用 (前端 join 空导致 500); 且审计链路要求保留原始 user_id。
 
-        流程:
-        1. 若指定 ``reassign_to_user_id``, 把 Task / Project 的 ``user_id``
-           批量改成接收人 (常见于把离职员工资产转 admin 池);
-        2. 撤销该用户所有 refresh session, 防止残留 token 继续用;
-        3. 把 ``is_active=False`` + username 后缀化 (释放用户名给新账号) 完成
-           软删除。
+        流程: 1) 若指定 ``reassign_to_user_id``, 把 Task / Project / CrawlBatch
+        的 ``user_id`` 批量改成接收人 (离职员工资产转 admin 池); 2) 撤销其所有
+        refresh session; 3) ``is_active=False`` + username 后缀化完成软删除。
 
-        与 ``delete_user`` 的区别:
-        - ``delete_user`` 走 "有资源就拒绝" 严格路径, 需要业务侧显式清理;
-        - 本方法是 "带转移的强制下线" 路径, 用于离职流程等批处理场景。
+        与 ``delete_user`` 的区别: 后者走 "有资源就拒绝" 严格路径, 需业务侧显式清
+        理; 本方法是 "带转移的强制下线", 用于离职流程等批处理场景。
 
         返回 True = 已处理; False = 用户不存在。
         """
         from datetime import datetime
 
-        from antcode_core.domain.models import Project, User
+        from antcode_core.domain.models import CrawlBatch, Project, User
         from antcode_core.domain.models.task import Task
         from antcode_core.domain.models.user_session import UserSession
 
@@ -487,6 +481,12 @@ class UserService:
                     raise ValueError(f"接收人 user_id={reassign_to_user_id} 不存在或已停用")
                 reassigned_counts["tasks"] = await Task.filter(user_id=user_id).update(user_id=reassign_to_user_id)
                 reassigned_counts["projects"] = await Project.filter(user_id=user_id).update(
+                    user_id=reassign_to_user_id
+                )
+                # CrawlBatch.user_id 必须跟着走: 批次 run 的所有者正是从这里解析的
+                # (run_ownership.resolve_run_owner_id)。不迁移则批次连同其 run 挂在已停
+                # 用账号下, 接收人一律无权, 成为无主数据。
+                reassigned_counts["crawl_batches"] = await CrawlBatch.filter(user_id=user_id).update(
                     user_id=reassign_to_user_id
                 )
                 # Worker 归属: 当前 Worker 模型没有直接 owner 字段

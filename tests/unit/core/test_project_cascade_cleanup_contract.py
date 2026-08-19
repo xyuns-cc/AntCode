@@ -69,5 +69,6 @@ def test_project_cascade_persists_crawl_cleanup_before_database_delete() -> None
     batch_delete = "CrawlBatch.filter(project_id=project_id).using_db(conn).delete()"
 
     assert cleanup_event in source
-    assert source.index("_capture_crawl_batch_ids(") < source.index("_delete_project_relations(")
+    # 批次 id 在 lock_project_scope 里连同项目锁一并捕获，必须早于关联表删除
+    assert source.index("lock_project_scope(conn, project_id)") < source.index("_delete_project_relations(")
     assert source.index(cleanup_event) < source.index(batch_delete)

@@ -13,6 +13,14 @@ P1-FN-07: 批量删 Task 时为每个被删 task 发布 task_changed outbox 事�
 
 P1-DB-03: 事务提交后按 run 级 advisory lock 串行化清扫日志残留
 （``task_log_run_guard.purge_task_logs_for_runs``）。
+
+作用域锁定与"是否还有在途执行"的判定见 ``project_delete_scope``：两族 run
+（计划任务 run / 爬取批次 run）都会被检查，任一在途即拒绝删除。
+
+**已知残留**：批次 run 的 ``TaskRun`` 行不随项目删除被清掉。它们的批次身份埋在
+``result_data`` JSON 里且无表达式索引，按项目批量删只能扫遍哨兵族全表——那会在
+持有 Project/Task/CrawlBatch 行锁的事务里拖住调度器。根治需先给
+``task_executions`` 加一列带索引的 ``crawl_batch_id``，属独立的 schema 变更。
 """
 
 from typing import cast
@@ -20,6 +28,10 @@ from typing import cast
 from loguru import logger
 from tortoise.transactions import in_transaction
 
+from antcode_core.application.services.projects.project_delete_scope import (
+    ProjectDeleteScope,
+    lock_project_scope,
+)
 from antcode_core.domain.models.project import Project, ProjectCode, ProjectFile, ProjectRule
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -44,21 +56,21 @@ async def delete_project_cascade(project_id) -> dict:
 
     try:
         async with in_transaction() as conn:
-            project_public_id, task_ids, cleanup_run_ids = await _delete_tasks_and_runs(conn, project_id, deleted)
-            batch_ids = await _capture_crawl_batch_ids(conn, project_id)
-            await _publish_task_changed_events(conn, task_ids)
+            scope = await lock_project_scope(conn, project_id)
+            cleanup_run_ids = await _delete_tasks_and_runs(conn, scope, deleted)
+            await _publish_task_changed_events(conn, list(scope.task_ids))
             await _publish_crawl_project_cleanup_event(
                 conn=conn,
                 project_id=project_id,
-                project_public_id=project_public_id,
-                batch_ids=batch_ids,
+                project_public_id=scope.project_public_id,
+                batch_ids=scope.batch_ids,
             )
             await _delete_project_relations(conn, project_id, deleted)
             await _publish_task_logs_purge_events(conn, project_id, cleanup_run_ids)
 
         await _run_post_commit_cleanup(
-            project_public_id=project_public_id,
-            batch_ids=batch_ids,
+            project_public_id=scope.project_public_id,
+            batch_ids=scope.batch_ids,
             run_ids=cleanup_run_ids,
             deleted=deleted,
         )
@@ -69,38 +81,12 @@ async def delete_project_cascade(project_id) -> dict:
         raise
 
 
-async def _lock_project_and_tasks(conn, project_id) -> tuple[str, list[int]]:
-    """P1-DB-04: 项目/任务锁定与活动 run 检查必须在事务内完成。
+async def _delete_tasks_and_runs(conn, scope: ProjectDeleteScope, deleted: dict) -> list[str]:
+    """锁定校验后删除任务/执行记录/事务内日志。
 
-    此前检查在事务外，与 scheduler ``_claim_task_run``（同样
-    select_for_update Task 行）之间存在窗口：检查通过后新 TaskRun 被创建，
-    随后被本级联静默删除。现在先锁 Task 行，并发创建要么先提交（下方检查
-    看到并 abort），要么阻塞到删除提交后发现 Task 已消失而放弃。
+    仅覆盖计划任务 run。批次 run 的 ``crawl_batch_id`` 埋在无索引的 JSON 里，
+    按项目批量删需要先做 schema 变更（见模块文档），此处不做全表扫描。
     """
-    from antcode_core.application.services.workers.run_settlement_guard import (
-        TASK_RUN_TERMINAL_STATUSES,
-    )
-
-    project = await Project.filter(id=project_id).using_db(conn).select_for_update().only("id", "public_id").first()
-    if not project:
-        raise ValueError("项目不存在")
-    locked_tasks = (
-        await Task.filter(project_id=project_id).using_db(conn).order_by("id").select_for_update().only("id").all()
-    )
-    task_ids = [task.id for task in locked_tasks]
-    if (
-        task_ids
-        and await TaskRun.filter(task_id__in=list(task_ids))
-        .exclude(status__in=list(TASK_RUN_TERMINAL_STATUSES))
-        .using_db(conn)
-        .exists()
-    ):
-        raise ValueError("项目存在未终态执行，请先取消并等待执行结束")
-    return project.public_id, task_ids
-
-
-async def _delete_tasks_and_runs(conn, project_id, deleted: dict) -> tuple[str, list[int], list[str]]:
-    """锁定校验后删除任务/执行记录/事务内日志。"""
     from antcode_core.application.services.crawl.spider_storage_cleanup import (
         iter_cleanup_run_batches,
     )
@@ -109,7 +95,8 @@ async def _delete_tasks_and_runs(conn, project_id, deleted: dict) -> tuple[str, 
     )
     from antcode_core.domain.models import TaskLog, TaskRunLeaseGeneration
 
-    project_public_id, task_ids = await _lock_project_and_tasks(conn, project_id)
+    project_id = scope.project_id
+    task_ids = list(scope.task_ids)
 
     # 1. 任务 → 执行记录(先删 child 避免悬挂)
     cleanup_run_ids: list[str] = []
@@ -130,28 +117,14 @@ async def _delete_tasks_and_runs(conn, project_id, deleted: dict) -> tuple[str, 
                 event_type="spider_storage_cleanup",
                 aggregate_type="project",
                 aggregate_id=project_id,
-                payload={"run_ids": list(run_batch), "project_id": str(project_public_id)},
+                payload={"run_ids": list(run_batch), "project_id": scope.project_public_id},
                 connection=conn,
             )
         deleted["executions"] = await TaskRun.filter(task_id__in=list(task_ids)).using_db(conn).delete()
 
     # 2. 任务本体
     deleted["tasks"] = await Task.filter(project_id=project_id).using_db(conn).delete()
-    return str(project_public_id), task_ids, cleanup_run_ids
-
-
-async def _capture_crawl_batch_ids(conn, project_id) -> tuple[str, ...]:
-    """在项目锁仍由当前事务持有时捕获全部 Crawl 批次。"""
-    from antcode_core.domain.models.crawl import CrawlBatch
-
-    batch_ids = (
-        await CrawlBatch.filter(project_id=project_id)
-        .using_db(conn)
-        .order_by("id")
-        .select_for_update()
-        .values_list("public_id", flat=True)
-    )
-    return tuple(str(batch_id) for batch_id in batch_ids)
+    return cleanup_run_ids
 
 
 async def _publish_crawl_project_cleanup_event(

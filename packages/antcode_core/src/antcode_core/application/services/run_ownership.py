@@ -29,14 +29,19 @@ async def resolve_run_owner_id(run: Any) -> int | None:
     if int(run.task_id) != TASK_ID_ABSENT:
         task = await Task.filter(id=run.task_id).only("id", "user_id").first()
         return None if task is None else int(task.user_id)
-    batch_id = _batch_id_of(run)
+    batch_id = batch_id_of_run(run)
     if batch_id is None:
         return None
     batch = await CrawlBatch.filter(public_id=batch_id).only("id", "user_id").first()
     return None if batch is None else int(batch.user_id)
 
 
-def _batch_id_of(run: Any) -> str | None:
+def batch_id_of_run(run: Any) -> str | None:
+    """取批次 run 的 ``crawl_batch_id``；非批次 run 或取不到合法值返回 ``None``。
+
+    批次身份的**唯一**提取口。除所有者解析外，级联删除的"项目是否还有在途批次
+    run"判定也走这里，避免同一件事出现第二份写法。
+    """
     result_data = run.result_data
     batch_id = result_data.get("crawl_batch_id") if isinstance(result_data, dict) else None
     if not isinstance(batch_id, str) or not batch_id.strip():
@@ -44,4 +49,4 @@ def _batch_id_of(run: Any) -> str | None:
     return batch_id
 
 
-__all__ = ["resolve_run_owner_id"]
+__all__ = ["batch_id_of_run", "resolve_run_owner_id"]
