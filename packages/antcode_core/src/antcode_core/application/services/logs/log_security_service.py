@@ -10,6 +10,7 @@ from loguru import logger
 from tortoise.exceptions import DoesNotExist
 
 from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.run_ownership import resolve_run_owner_id
 from antcode_core.common.hash_utils import calculate_content_hash
 from antcode_core.domain.models.task import Task
 from antcode_core.domain.models.task_run import TaskRun
@@ -82,9 +83,13 @@ class LogSecurityService:
                 return cached_execution
 
             execution = await self._find_execution(run_id)
-            task = await Task.get(id=execution.task_id)
-            await self._verify_owner_or_admin(user.user_id, task, cache_key)
-            await self._verify_operation_permission(user, execution, task, operation)
+            # 所有者按 run 类型解析：批次 run 没有 Task 行，按 Task 查会 DoesNotExist → 404，
+            # 连管理员都看不到批次 run 的日志。解析不出所有者（真孤儿）照旧按 404 拒绝。
+            owner_id = await resolve_run_owner_id(execution)
+            if owner_id is None:
+                raise DoesNotExist("执行记录不存在")
+            await self._verify_owner_or_admin(user.user_id, owner_id, cache_key)
+            await self._verify_operation_permission(user, execution, owner_id, operation)
             self._cache_permission(cache_key, execution)
             logger.debug(f"用户 {user.user_id} 访问执行记录 {run_id} 权限验证通过")
             return execution
@@ -118,8 +123,8 @@ class LogSecurityService:
             raise DoesNotExist("执行记录不存在")
         return execution
 
-    async def _verify_owner_or_admin(self, user_id, task, cache_key):
-        if task.user_id == user_id or await QueryHelper.is_admin(user_id):
+    async def _verify_owner_or_admin(self, user_id, owner_id, cache_key):
+        if owner_id == user_id or await QueryHelper.is_admin(user_id):
             return
         self._permission_cache[cache_key] = {
             "has_permission": False,
@@ -136,7 +141,7 @@ class LogSecurityService:
             "timestamp": time.time(),
         }
 
-    async def _verify_operation_permission(self, user, execution, task, operation):
+    async def _verify_operation_permission(self, user, execution, owner_id, operation):
         """验证操作权限"""
 
         # 读取权限：任务所有者或管理员
@@ -145,13 +150,13 @@ class LogSecurityService:
 
         # 写入权限：仅任务所有者
         elif operation == "write":
-            if task.user_id != user.user_id:
+            if owner_id != user.user_id:
                 raise LogPermissionError("仅任务所有者可以写入日志")
 
         # 删除权限：任务所有者或管理员
         elif operation == "delete":
             is_admin = await QueryHelper.is_admin(user.user_id)
-            if task.user_id != user.user_id and not is_admin:
+            if owner_id != user.user_id and not is_admin:
                 raise LogPermissionError("仅任务所有者或管理员可以删除日志")
 
         else:

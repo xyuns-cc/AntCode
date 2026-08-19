@@ -14,6 +14,7 @@ from antcode_core.application.services.workers.run_ownership_fence import (
 from antcode_core.application.services.workers.worker_delete_guard import ACTIVE_RUN_STATUSES
 from antcode_core.domain.models import Task, TaskRun, Worker
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
+from antcode_core.domain.models.task_run import TASK_ID_ABSENT
 from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 from tortoise.transactions import in_transaction
 
@@ -45,13 +46,17 @@ async def settle_expired_provisional_worker_runs(worker_internal_id: int) -> int
 
 
 async def _load_active_task_ids(connection: Any, worker_internal_id: int) -> list[int]:
+    """只返回真实 Task id。爬取批次 run 的 ``task_id`` 是 ``TASK_ID_ABSENT`` 哨兵，
+    ``scheduled_tasks`` 里永远没有对应行；把它带进 ``_lock_tasks`` 会必然触发"关联任务缺失"
+    而抛错，让持有活跃批次 run 的临时 Worker 永远清理不掉、因此永远删不掉。
+    """
     values = cast(
         list[int],
         await TaskRun.filter(worker_id=worker_internal_id, status__in=list(ACTIVE_RUN_STATUSES))
         .using_db(connection)
         .values_list("task_id", flat=True),
     )
-    return sorted(set(values))
+    return sorted({task_id for task_id in values if task_id != TASK_ID_ABSENT})
 
 
 async def _load_active_runs(connection: Any, worker_internal_id: int) -> list[TaskRun]:
@@ -96,8 +101,11 @@ async def _settle_run(connection: Any, run: TaskRun, now: datetime) -> None:
 
 
 async def _sync_tasks(connection: Any, runs: list[TaskRun]) -> None:
+    """批次 run 没有 Task 载体，其状态由 crawl_batch_status_loop 从 run 侧聚合，此处跳过：
+    按哨兵 0 去 ``task_run_outcome_counts`` 会把所有批次 run 当成同一个伪任务统计。
+    """
     settled_ids = {run.id for run in runs}
-    for task_id in sorted({run.task_id for run in runs}):
+    for task_id in sorted({run.task_id for run in runs if run.task_id != TASK_ID_ABSENT}):
         updates: dict[str, Any] = await task_run_outcome_counts(connection, task_id)
         latest = await TaskRun.filter(task_id=task_id).using_db(connection).order_by("-id").only("id").first()
         if latest is not None and latest.id in settled_ids:

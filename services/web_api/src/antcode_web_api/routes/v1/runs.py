@@ -108,13 +108,14 @@ async def _get_execution(run_id: str, user_id: int) -> TaskRun:
 
 
 async def _get_cancellable_execution(run_id: str, user_id: int) -> TaskRun:
-    from antcode_core.domain.models.task import Task
+    # 判据是"能解析出真实所有者"而非"存在 Task 行"：批次 run 的 task_id 是哨兵，按 Task 判必然 404；真孤儿照旧拒绝。
+    from antcode_core.application.services.run_ownership import resolve_run_owner_id
 
     execution = await _get_execution(run_id, user_id)
     if execution.status not in _CANCELLABLE_STATUSES:
         raise HTTPException(status_code=400, detail=f"任务状态为 {execution.status.value}，无法取消")
-    if not await Task.get_or_none(id=execution.task_id):
-        raise HTTPException(status_code=404, detail="关联任务不存在")
+    if await resolve_run_owner_id(execution) is None:
+        raise HTTPException(status_code=404, detail="关联任务或批次不存在")
     return execution
 
 
@@ -186,7 +187,6 @@ async def stop_run_alias(run_id: str, current_user: TokenData = Depends(get_curr
 
 # ---------------------------------------------------------------------------
 # L2: 产物链闭环
-#
 # worker 收集产物 → 写 PG blob → refs 塞进 TaskResult.data["artifacts"] →
 # proto TaskStatus.data (map<string,string>, 非字符串走 json.dumps) →
 # master result_loop → TaskRun.result_data["artifacts"] (JSON 字符串)。

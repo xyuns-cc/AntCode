@@ -188,7 +188,7 @@ async def test_artifact_orphan_query_failure_is_recorded(monkeypatch):
     logs = _LogRecorder()
 
     class FailingConnection:
-        async def execute_query(self, _sql):
+        async def execute_query(self, _sql, _params=None):
             raise RuntimeError("postgres down")
 
     connections = SimpleNamespace(get=lambda _name: FailingConnection())

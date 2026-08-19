@@ -551,7 +551,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 606
+      "value": 596
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",

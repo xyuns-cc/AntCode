@@ -8,6 +8,7 @@ import contextlib
 from antcode_core.application.services.projects.artifact_cleanup_service import (
     artifact_cleanup_service,
 )
+from antcode_core.domain.models.task_run import TASK_ID_ABSENT
 from loguru import logger
 
 from antcode_master.leader import ensure_leader
@@ -73,10 +74,13 @@ class ArtifactCleanupLoop:
             from tortoise import connections
 
             conn = connections.get("default")
+            # 爬取批次 run 的 task_id 是 TASK_ID_ABSENT 哨兵，本就没有 scheduled_tasks 行，
+            # 不排除它会把每条批次 run 都报成孤儿，让这个告警永久为真、失去指示意义。
             _, rows = await conn.execute_query(
                 'SELECT COUNT(*) AS n FROM "task_executions" te '
-                "WHERE te.task_id IS NOT NULL "
-                'AND NOT EXISTS (SELECT 1 FROM "scheduled_tasks" st WHERE st.id = te.task_id)'
+                "WHERE te.task_id IS NOT NULL AND te.task_id <> $1 "
+                'AND NOT EXISTS (SELECT 1 FROM "scheduled_tasks" st WHERE st.id = te.task_id)',
+                [TASK_ID_ABSENT],
             )
             n = int(rows[0]["n"]) if rows else 0
             if n > 0:

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
-from antcode_core.application.services.projects.relation_service import relation_service
+from antcode_core.application.services.run_ownership import resolve_run_owner_id
 from antcode_core.domain.models import User, UserSession
 from antcode_core.domain.models.task_run import TaskRun
 from fastapi import HTTPException
@@ -25,15 +25,14 @@ STATUS_MESSAGES = MappingProxyType(
 
 
 async def verify_execution_access(run_id: str, user: User) -> TaskRun:
-    """Fixed-cost lookup without distinguishing a missing run from a foreign run."""
+    """Answer a missing run and a foreign run identically, after resolving real ownership.
+
+    所有者按 run 类型解析：批次 run 没有 Task 行（``task_id`` 是哨兵），只查 Task 会让
+    批次所有者看不到自己 run 的日志流。解析不出所有者一律按无权拒绝。
+    """
     execution = await TaskRun.get_or_none(run_id=run_id)
-    task_id = execution.task_id if execution is not None else 0
-    task = await relation_service.get_task_by_id(task_id)
-    if execution is None:
-        raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
-    if user.is_admin:
-        return execution
-    if task is None or task.user_id != user.id:
+    owner_id = await resolve_run_owner_id(execution) if execution is not None else None
+    if execution is None or (not user.is_admin and owner_id != user.id):
         raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
     return execution
 
@@ -82,13 +81,11 @@ async def execution_access_still_valid(run_id: str, user_id: int) -> bool:
     if user is None or not getattr(user, "is_active", True):
         return False
     execution = await TaskRun.get_or_none(run_id=run_id)
-    task_id = execution.task_id if execution is not None else 0
-    task = await relation_service.get_task_by_id(task_id)
     if execution is None:
         return False
     if user.is_admin:
         return True
-    return task is not None and task.user_id == user.id
+    return await resolve_run_owner_id(execution) == user.id
 
 
 def session_not_expired(session: UserSession) -> bool:

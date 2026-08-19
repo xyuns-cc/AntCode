@@ -15,6 +15,7 @@ from loguru import logger
 from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.base import QueryHelper
+from antcode_core.application.services.run_ownership import resolve_run_owner_id
 from antcode_core.application.services.scheduler import task_project_integrity
 from antcode_core.application.services.scheduler.outbox_service import (
     scheduler_outbox_service,
@@ -531,33 +532,22 @@ class SchedulerService:
         if not execution:
             return None
 
-        # 检查用户是否为管理员
-        is_admin = await QueryHelper.is_admin(user_id)
-
-        if is_admin:
-            # 管理员可以查看所有执行记录
-            # 添加任务的 public_id
-            task = await Task.get_or_none(id=execution.task_id)
-            execution.task_public_id = task.public_id if task else None
-            if execution.worker_id:
-                from antcode_core.domain.models import Worker
-
-                worker = await Worker.get_or_none(id=execution.worker_id)
-                execution.worker_public_id = worker.public_id if worker else None
-            return execution
-        else:
-            # 普通用户只能查看自己任务的执行记录
-            task = await Task.get_or_none(id=execution.task_id, user_id=user_id)
-            if not task:
+        # 普通用户只能看自己的 run。所有者必须按 run 类型解析：计划任务 run 走 Task，
+        # 爬取批次 run 没有 Task 行、走 CrawlBatch（见 run_ownership）。只查 Task 会让
+        # 用户对自己的批次 run 一律 404。管理员看全部，但仍要解析出 public_id。
+        if not await QueryHelper.is_admin(user_id):
+            owner_id = await resolve_run_owner_id(execution)
+            if owner_id is None or owner_id != user_id:
                 return None
 
-            execution.task_public_id = task.public_id
-            if execution.worker_id:
-                from antcode_core.domain.models import Worker
+        task = await Task.get_or_none(id=execution.task_id)
+        execution.task_public_id = task.public_id if task else None
+        if execution.worker_id:
+            from antcode_core.domain.models import Worker
 
-                worker = await Worker.get_or_none(id=execution.worker_id)
-                execution.worker_public_id = worker.public_id if worker else None
-            return execution
+            worker = await Worker.get_or_none(id=execution.worker_id)
+            execution.worker_public_id = worker.public_id if worker else None
+        return execution
 
     async def pause_task(self, task_id):
         """暂停任务：落库为 PAUSED 并通知 Master 摘掉 Job。"""

@@ -2,6 +2,7 @@
 
 import sys as _sys
 
+from antcode_core.application.services.run_ownership import resolve_run_owner_id
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings  # noqa: F401  # 供测试 monkeypatch workers_route.settings 使用
 from antcode_core.common.security.api_key import store_api_key, store_secret_key  # noqa: F401
@@ -9,7 +10,7 @@ from antcode_core.common.security.auth import TokenData
 from antcode_core.common.security.worker_auth import (
     verify_worker_request_with_signature,
 )
-from antcode_core.domain.models import (
+from antcode_core.domain.models import (  # noqa: F401  # Task 供测试 monkeypatch workers_route.Task 使用
     Task,
     TaskRun,
     User,
@@ -31,9 +32,8 @@ from antcode_core.domain.schemas.worker import (  # noqa: F401
 )
 
 # get_redis_client 顶层 re-export: 部分单元测试通过
-# `monkeypatch.setattr(workers_route, "get_redis_client", ...)` 补丁 workers 模块
-# 属性, install_key handler / helper 在 workers_install_key.py 里通过延迟
-# `_workers_module().get_redis_client(...)` 命中此绑定, 补丁才能生效。
+# `monkeypatch.setattr(workers_route, "get_redis_client", ...)` 补丁 workers 模块属性,
+# install_key handler / helper 经延迟 `_workers_module().get_redis_client(...)` 命中此绑定。
 from antcode_core.infrastructure.redis import get_redis_client  # noqa: F401
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from tortoise.expressions import Q
@@ -224,18 +224,18 @@ async def _list_accessible_workers(
 
 
 async def _require_run_access(run_id: str, current_user: TokenData) -> None:
+    # 所有者按 run 类型解析：批次 run 没有 Task 行，只查 Task 会锁死批次所有者。
     user = await _request_user(current_user)
     if user.is_admin:
         return
     execution = await TaskRun.filter(Q(run_id=run_id) | Q(public_id=run_id)).first()
-    task = await Task.get_or_none(id=execution.task_id) if execution else None
-    if task is None or task.user_id != user.id:
+    owner_id = await resolve_run_owner_id(execution) if execution else None
+    if owner_id is None or owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
 
 # P2 拆分: _resolve_dispatch_worker 已移至 workers_dispatch.py, 顶层保留 shim 让测试
-# `monkeypatch.setattr(workers, "_resolve_dispatch_worker", ...)` 可命中: dispatch
-# handler 通过传参使用 workers._resolve_dispatch_worker 而非模块内部函数。
+# `monkeypatch.setattr(workers, "_resolve_dispatch_worker", ...)` 可命中: dispatch handler 通过传参使用它而非模块内部函数。
 async def _resolve_dispatch_worker(
     requested_worker_id: str | None,
     current_user: TokenData,
