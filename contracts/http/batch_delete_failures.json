@@ -1,0 +1,35 @@
+{
+  "description": "批量删除 / 批量操作响应体的失败字段契约（前后端唯一真源）。",
+  "why": [
+    "三个批量入口过去把 RunSettlementPendingError 这类域内拒绝一并吞进 except Exception，只回一串 id：",
+    "运维只看到「某几个失败了」，不知道该去取消哪条在途执行——同一时刻单条删除返回的却是点名在线 Worker 的 409 文案。",
+    "修法是新增 failures[{id, reason}] 承载逐项原因，legacy_failed_ids_key 指向的旧字段原样保留，",
+    "因此这是纯增量变更：只读旧字段的调用方一个字节都不用改。",
+    "把字段名写进契约是为了让『后端改名 / 前端改读法』必有一侧变红，而不是双方各自绿着不通。"
+  ],
+  "consumers": [
+    "tests/unit/web_api/test_batch_failure_reasons.py —— 打真实路由，断言响应体键集与本文件一致",
+    "web/antcode-frontend/src/services/batchOutcome.test.ts —— 按本文件造响应，断言 service 透传且提示文案用得上"
+  ],
+  "failure_item_keys": ["id", "reason"],
+  "endpoints": [
+    {
+      "name": "tasks_batch_delete",
+      "path": "/tasks/batch-delete",
+      "legacy_failed_ids_key": "failed_ids",
+      "data_keys": ["success_count", "failed_count", "failed_ids", "failures"]
+    },
+    {
+      "name": "tasks_batch_operate",
+      "path": "/tasks/batch",
+      "legacy_failed_ids_key": "failed_ids",
+      "data_keys": ["success_count", "failed_count", "failed_ids", "failures", "success_ids"]
+    },
+    {
+      "name": "projects_batch_delete",
+      "path": "/projects/batch-delete",
+      "legacy_failed_ids_key": "failed_projects",
+      "data_keys": ["total", "success_count", "failed_count", "failed_projects", "failures"]
+    }
+  ]
+}

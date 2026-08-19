@@ -4,8 +4,11 @@ P2 拆分自 tasks.py: 2 个 handler + 1 helper + 1 schema:
 - POST /tasks/batch-delete (batch_delete_tasks)
 - POST /tasks/batch (batch_operate_tasks)
 
-契约 (URL / DI / 返回) 与旧实现一致。TaskBatchRequest 顶层在 tasks.py
-re-export, 保证 tests import tasks.TaskBatchRequest 继续可命中。
+URL / DI 与旧实现一致；返回体在原有字段之上**增量**加了 failures（逐项失败
+原因，见 settlement_http 与 contracts/http/batch_delete_failures.json），旧的
+success_count / failed_count / failed_ids / success_ids 一个都没动。
+TaskBatchRequest 顶层在 tasks.py re-export, 保证 tests import
+tasks.TaskBatchRequest 继续可命中。
 """
 
 from __future__ import annotations
@@ -13,22 +16,34 @@ from __future__ import annotations
 from typing import Any
 
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
-from antcode_core.application.services.workers.run_settlement_guard import RunSettlementGuardUnavailable
 from antcode_core.common.security.auth import get_current_user
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.task import (
     TaskUpdateRequest as TaskUpdate,
 )
 from fastapi import Depends, HTTPException
-from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import (
     success as success_response,
 )
+from antcode_web_api.routes.v1.settlement_http import BatchReasons, collect_batch_outcome
 from antcode_web_api.routes.v1.task_cancel import cancel_latest_task_run
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
+
+# 逐项失败原因。批量删除最常见的拒绝是"该任务还有未终态执行"，
+# 单条删除会在 409 里点名在线 Worker，批量入口必须给出同样的线索。
+DELETE_REASONS = BatchReasons(
+    action="删除任务",
+    missing="任务不存在或无权删除",
+    unexpected="删除任务失败",
+)
+OPERATE_REASONS = BatchReasons(
+    action="批量操作任务",
+    missing="操作未生效：任务不存在、无权访问，或当前状态不允许该操作",
+    unexpected="操作任务失败",
+)
 
 
 class TaskBatchRequest(BaseModel):
@@ -63,32 +78,15 @@ async def _operate_task(task_id: str, action: str, user_id: int) -> bool:
 async def batch_delete_tasks(request: dict, current_user):
     """批量删除任务"""
     task_ids = bounded_distinct_ids(request.get("task_ids"), "task_ids")
-
-    success_count = 0
-    failed_count = 0
-    failed_ids = []
-
-    for task_id in task_ids:
-        try:
-            deleted = await scheduler_service.delete_task(task_id, current_user.user_id)
-            if deleted:
-                success_count += 1
-            else:
-                failed_count += 1
-                failed_ids.append(task_id)
-        except RunSettlementGuardUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as e:
-            logger.warning(f"删除任务 {task_id} 失败: {e}")
-            failed_count += 1
-            failed_ids.append(task_id)
-
+    outcome = await collect_batch_outcome(
+        task_ids,
+        lambda task_id: scheduler_service.delete_task(task_id, current_user.user_id),
+        DELETE_REASONS,
+    )
+    success_count = len(outcome.success_ids)
+    failed_count = len(outcome.failures)
     return success_response(
-        {
-            "success_count": success_count,
-            "failed_count": failed_count,
-            "failed_ids": failed_ids,
-        },
+        outcome.fields("failed_ids"),
         message=f"成功删除 {success_count} 个任务" + (f"，{failed_count} 个失败" if failed_count > 0 else ""),
     )
 
@@ -98,28 +96,13 @@ async def batch_operate_tasks(request: TaskBatchRequest, current_user):
     if not request.task_ids:
         raise HTTPException(status_code=400, detail="task_ids不能为空")
 
-    success_ids: list[str] = []
-    failed_ids: list[str] = []
-
-    for task_id in request.task_ids:
-        try:
-            succeeded = await _operate_task(task_id, request.action, current_user.user_id)
-            if succeeded:
-                success_ids.append(task_id)
-            else:
-                failed_ids.append(task_id)
-        except RunSettlementGuardUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception:
-            failed_ids.append(task_id)
-
+    outcome = await collect_batch_outcome(
+        request.task_ids,
+        lambda task_id: _operate_task(task_id, request.action, current_user.user_id),
+        OPERATE_REASONS,
+    )
     return success_response(
-        {
-            "success_count": len(success_ids),
-            "failed_count": len(failed_ids),
-            "success_ids": success_ids,
-            "failed_ids": failed_ids,
-        },
+        {**outcome.fields("failed_ids"), "success_ids": list(outcome.success_ids)},
         message=Messages.OPERATION_SUCCESS,
     )
 

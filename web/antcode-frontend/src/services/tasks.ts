@@ -4,6 +4,7 @@
 import type { AxiosError } from 'axios'
 import { BaseService } from './base'
 import apiClient from './api'
+import type { BatchFailure } from './batchOutcome'
 import type {
   Task,
   TaskExecution,
@@ -14,6 +15,13 @@ import type {
   ApiResponse,
   PaginationResponse,
 } from '@/types'
+
+export interface BatchDeleteTasksResult {
+  success_count: number
+  failed_count: number
+  failed_ids: string[]
+  failures: BatchFailure[]
+}
 
 // triggerTask 返回的载荷（后端现已返回 task_id/run_id/triggered）
 export interface TriggerTaskResponse {
@@ -62,17 +70,10 @@ class TaskService extends BaseService {
     await this.delete(`/${id}`)
   }
 
-  // 批量删除任务
-  async batchDeleteTasks(ids: string[]): Promise<{
-    success_count: number
-    failed_count: number
-    failed_ids: string[]
-  }> {
-    return this.post<{
-      success_count: number
-      failed_count: number
-      failed_ids: string[]
-    }>('/batch-delete', { task_ids: ids })
+  // 批量删除任务。failures 逐项给出失败原因（如"仍由在线 Worker X 持有"），
+  // failed_ids 是它的 id 投影，保留给只读 id 的旧调用方。
+  async batchDeleteTasks(ids: string[]): Promise<BatchDeleteTasksResult> {
+    return this.post<BatchDeleteTasksResult>('/batch-delete', { task_ids: ids })
   }
 
   // 立即触发任务（保留 message 给页面展示）

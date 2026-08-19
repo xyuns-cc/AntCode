@@ -82,7 +82,12 @@ from antcode_web_api.routes.v1.project_cache_scope import (
 from antcode_web_api.routes.v1.project_duplicate import duplicate_project_record
 from antcode_web_api.routes.v1.project_export_executions import bound_execution_export_payloads
 from antcode_web_api.routes.v1.project_export_logs import load_export_task_logs
-from antcode_web_api.routes.v1.settlement_http import DELETE_ERRORS, UNAVAILABLE_ERRORS, deletion_http_exception
+from antcode_web_api.routes.v1.settlement_http import (
+    DELETE_ERRORS,
+    BatchReasons,
+    collect_batch_outcome,
+    deletion_http_exception,
+)
 from antcode_web_api.services.project_connection import (
     ProjectConnectionError,
     ProjectConnectionResponseTooLargeError,
@@ -99,6 +104,14 @@ project_router = APIRouter()
 
 # 批量删除单次上限，避免单个请求占满后台执行资源。
 BATCH_DELETE_MAX_PROJECTS = 100
+
+# 批量删除的逐项失败原因。项目删除最常见的拒绝是"项目下还有在途执行"
+# （含爬取批次 run），只回一串 id 等于没告诉运维该去取消哪一个。
+PROJECT_DELETE_REASONS = BatchReasons(
+    action="删除项目",
+    missing="项目不存在或无权删除",
+    unexpected="删除项目失败",
+)
 
 
 class SourceResponseFields(TypedDict):
@@ -1086,30 +1099,17 @@ async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_c
             detail=f"批量删除单次上限 {BATCH_DELETE_MAX_PROJECTS} 个项目, 当前 {len(project_ids)} 个",
         )
 
-    success_count = 0
-    failed_count = 0
-    failed_projects = []
+    # 逐项执行：单个项目被拒不该连坐整批。拒绝原因随 result_data["failures"]
+    # 逐条带出，旧的 failed_projects 字段原样保留，调用方读哪一个都不会断。
+    outcome = await collect_batch_outcome(
+        project_ids,
+        lambda project_id: project_service.delete_project(project_id, current_user_id),
+        PROJECT_DELETE_REASONS,
+    )
+    success_count = len(outcome.success_ids)
+    failed_count = len(outcome.failures)
 
-    for project_id in project_ids:
-        try:
-            success = await project_service.delete_project(project_id, current_user_id)
-            if success:
-                success_count += 1
-            else:
-                failed_count += 1
-                failed_projects.append(project_id)
-        except UNAVAILABLE_ERRORS as exc:
-            raise deletion_http_exception(exc) from exc
-        except Exception:
-            failed_count += 1
-            failed_projects.append(project_id)
-
-    result_data = {
-        "total": len(project_ids),
-        "success_count": success_count,
-        "failed_count": failed_count,
-        "failed_projects": failed_projects,
-    }
+    result_data = {"total": len(project_ids), **outcome.fields("failed_projects")}
 
     if failed_count == 0:
         message = f"成功删除 {success_count} 个项目"

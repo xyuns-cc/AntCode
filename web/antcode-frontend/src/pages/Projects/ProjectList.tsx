@@ -25,6 +25,7 @@ import { useNavigate } from 'react-router'
 import { useProjects } from '@/stores/projectStore'
 import { useWorkerStore } from '@/stores/workerStore'
 import { projectService } from '@/services/projects'
+import { describeBatchFailures } from '@/services/batchOutcome'
 import { formatDate } from '@/utils/format'
 import {
   getProjectTypeText,
@@ -371,14 +372,13 @@ const ProjectList: React.FC = () => {
 
       // 服务端返回的成功/失败计数必须如实反馈，全部失败时不能表现为静默成功
       const { success_count: successCount, failed_count: failedCount } = result
+      const detail = describeBatchFailures(result.failures)
       if (failedCount === 0) {
         message.success(`成功删除 ${successCount} 个项目`)
       } else if (successCount === 0) {
-        message.error(`删除失败：${failedCount} 个项目均未删除（${result.failed_projects.join(', ')}）`)
+        message.error(`删除失败：${failedCount} 个项目均未删除（${detail}）`)
       } else {
-        message.warning(
-          `部分成功：${successCount} 个已删除，${failedCount} 个失败（${result.failed_projects.join(', ')}）`
-        )
+        message.warning(`部分成功：${successCount} 个已删除，${failedCount} 个失败（${detail}）`)
       }
     } catch (error) {
       Logger.error('批量删除项目失败:', error)

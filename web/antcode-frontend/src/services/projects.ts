@@ -6,6 +6,7 @@ import {
   createProjectFormData,
 } from './projectPayloads'
 import type { AxiosRequestConfig } from 'axios'
+import type { BatchFailure } from './batchOutcome'
 import Logger from '@/utils/logger'
 import type {
   PaginationResponse,
@@ -22,6 +23,14 @@ import type {
 } from '@/types'
 
 const PROJECT_OPTION_PAGE_SIZE = 500
+
+export interface BatchDeleteProjectsResult {
+  total: number
+  success_count: number
+  failed_count: number
+  failed_projects: string[]
+  failures: BatchFailure[]
+}
 
 interface ProjectPage {
   items: Project[]
@@ -168,20 +177,11 @@ class ProjectService extends BaseService {
     }
   }
 
-  // 批量删除项目
-  async batchDeleteProjects(ids: string[]): Promise<{
-    total: number
-    success_count: number
-    failed_count: number
-    failed_projects: string[]
-  }> {
+  // 批量删除项目。failures 逐项给出失败原因（多为"项目存在未终态执行"），
+  // failed_projects 是它的 id 投影，保留给只读 id 的旧调用方。
+  async batchDeleteProjects(ids: string[]): Promise<BatchDeleteProjectsResult> {
     try {
-      return await this.post<{
-        total: number
-        success_count: number
-        failed_count: number
-        failed_projects: string[]
-      }>('/batch-delete', { project_ids: ids })
+      return await this.post<BatchDeleteProjectsResult>('/batch-delete', { project_ids: ids })
     } catch (error) {
       Logger.error('批量删除项目失败:', error)
       throw error

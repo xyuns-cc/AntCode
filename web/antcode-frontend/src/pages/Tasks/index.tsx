@@ -31,6 +31,7 @@ import { formatDateTime, formatStatus, TASK_STATUS_PRESENTATION } from '@/utils/
 import type { StatusPresentation } from '@/utils/format'
 import useAuth from '@/hooks/useAuth'
 import { debounce } from '@/utils/helpers'
+import { describeBatchFailures } from '@/services/batchOutcome'
 import { useProjectsQuery, useTasksQuery, useTaskMutations } from '@/hooks/api/useTasks'
 
 const { Search } = Input
@@ -245,7 +246,7 @@ const Tasks: React.FC = memo(() => {
             setSelectedRowKeys([])
           }
           if (result.failed_count > 0) {
-            showNotification('warning', `${result.failed_count} 个任务删除失败`)
+            showNotification('warning', `删除失败：${describeBatchFailures(result.failures)}`)
           }
         } catch (_error: unknown) {
           showNotification('error', '批量删除失败，请稍后重试')
@@ -254,8 +255,7 @@ const Tasks: React.FC = memo(() => {
     })
   }
 
-  // 获取任务状态标签。展示映射只有 utils/format.ts 一份（Record<TaskStatus> 强制全覆盖），
-  // 这里再抄一份是本轮 rejected 在两个渲染器同时缺失的直接原因。
+  // 状态展示映射只有 utils/format.ts 一份（Record<TaskStatus> 强制全覆盖）；再抄一份就是 rejected 两处同时缺失的根因。
   const getStatusTag = (status: TaskStatus) => {
     const config = formatStatus(status)
     return <Tag color={config.color}>{config.text}</Tag>
