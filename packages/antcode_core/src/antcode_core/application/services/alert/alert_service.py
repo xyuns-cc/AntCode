@@ -11,11 +11,14 @@ from typing import Any
 
 from loguru import logger
 
-from antcode_core.application.services.alert.alert_channels import (
-    DingtalkAlertChannel,
-    EmailAlertChannel,
-    FeishuAlertChannel,
-    WeComAlertChannel,
+from antcode_core.application.services.alert.alert_channel_setup import apply_alert_config
+from antcode_core.application.services.alert.alert_config_broadcast import (
+    publish_alert_config_invalidation,
+    start_alert_config_subscriber,
+)
+from antcode_core.application.services.alert.alert_history import (
+    DEFAULT_HISTORY_LIMIT,
+    AlertHistory,
 )
 from antcode_core.application.services.alert.alert_manager import alert_manager
 from antcode_core.application.services.alert.test_delivery import (
@@ -25,19 +28,30 @@ from antcode_core.application.services.alert.test_delivery import (
 )
 from antcode_core.common.serialization import from_json
 
+_UNKNOWN_LEVEL = "UNKNOWN"
+_UNKNOWN_SOURCE = "unknown"
+
 
 class AlertService:
     """告警服务 - 管理告警配置和发送"""
 
     def __init__(self):
         self._initialized = False
+        self._subscribed = False
         self._config_cache = {}
-        self._alert_history = []  # 内存中的告警历史
-        self._max_history = 1000  # 最大历史记录数
+        self._history = AlertHistory()
         self._reload_lock = asyncio.Lock()
 
     async def initialize(self):
-        """初始化告警服务"""
+        """初始化告警服务。
+
+        订阅跨进程失效通道放在这里、而不是各服务的启动脚本里：SERVER_WORKERS>1
+        时每个 uvicorn worker 都是独立进程、各持一份 alert_manager 单例，任何一个
+        进程漏订阅就会一直用旧渠道回答请求。收拢到一处才不会有人忘了接。
+        """
+        if not self._subscribed:
+            await self.start_invalidation_subscriber()
+            self._subscribed = True
         if self._initialized:
             return
         await self.reload_config()
@@ -100,60 +114,33 @@ class AlertService:
 
     async def _apply_config(self, config):
         """应用告警配置"""
-        alert_manager.configure_async()
-        alert_manager.configure_rate_limit(
-            enabled=config.get("rate_limit_enabled", True),
-            window=config.get("rate_limit_window", 60),
-            max_count=config.get("rate_limit_max_count", 3),
-        )
-        for channel_name in alert_manager.get_available_channels():
-            alert_manager.remove_channel(channel_name)
-        channel_specs = (
-            ("feishu_webhooks", FeishuAlertChannel),
-            ("dingtalk_webhooks", DingtalkAlertChannel),
-            ("wecom_webhooks", WeComAlertChannel),
-        )
-        channel_counts = {}
-        for key, channel_type in channel_specs:
-            values = config.get(key, [])
-            channel_counts[key] = len(values)
-            self._configure_channel(channel_type, values, config)
-        email_config = config.get("email_config", {})
-        email_recipients = self._configure_email_channel(email_config, config)
-        logger.info(
-            f"告警配置已应用: 飞书={channel_counts['feishu_webhooks']}, "
-            f"钉钉={channel_counts['dingtalk_webhooks']}, "
-            f"企微={channel_counts['wecom_webhooks']}, 邮件={email_recipients}"
-        )
+        apply_alert_config(config)
 
-    @staticmethod
-    def _configure_channel(channel_type, values, config):
-        if not values:
-            return
-        channel = channel_type(values)
-        channel.configure_retry(
-            config.get("retry_enabled", True),
-            config.get("max_retries", 3),
-            config.get("retry_delay", 1.0),
-        )
-        alert_manager.add_channel(channel, enabled=True)
+    async def reload_config(self, notify: bool = False):
+        """重新加载配置。
 
-    def _configure_email_channel(self, email_config, config):
-        if not email_config or not email_config.get("smtp_host"):
-            return 0
-        self._configure_channel(EmailAlertChannel, email_config, config)
-        return len(email_config.get("recipients", []))
-
-    async def reload_config(self):
-        """重新加载配置"""
+        ``notify=True`` 只由写入方（PUT /alert/config、POST /alert/reload）传，
+        且**无条件**广播：本进程可能已经在 send_alert 路径上提前重载过，若按
+        "本进程有变化才广播"就会漏掉对兄弟 worker 进程的通知。订阅端回调走
+        默认的 ``notify=False``，否则通知会被打回去形成回环。
+        """
         async with self._reload_lock:
-            config = await self._load_config_from_db()
-            if self._initialized and config == self._config_cache:
-                return
-            await self._apply_config(config)
-            self._config_cache = config
-            self._initialized = True
-            logger.info("告警配置已重新加载")
+            await self._reload_from_db()
+        if notify:
+            await publish_alert_config_invalidation()
+
+    async def _reload_from_db(self):
+        config = await self._load_config_from_db()
+        if self._initialized and config == self._config_cache:
+            return
+        await self._apply_config(config)
+        self._config_cache = config
+        self._initialized = True
+        logger.info("告警配置已重新加载")
+
+    async def start_invalidation_subscriber(self):
+        """订阅跨进程配置失效。每个进程（含每个 uvicorn worker）启动时调一次。"""
+        await start_alert_config_subscriber(self.reload_config)
 
     async def send_alert(self, message, level="ERROR", source="system", extra=None, rate_key=None):
         """
@@ -183,7 +170,7 @@ class AlertService:
             formatted_message += f" | {extra_str}"
 
         # 记录历史
-        self._add_history(
+        self._history.add(
             {
                 "timestamp": timestamp,
                 "level": level,
@@ -203,9 +190,9 @@ class AlertService:
             rate_key=rate_key or f"{level}|{source}|{message}",
         )
 
-        # 更新历史状态
-        if self._alert_history:
-            self._alert_history[-1]["status"] = result.get("status", "unknown")
+        # 直接取 status（而非 .get 兜个 "unknown"）：投递结果契约要求每条返回都
+        # 带 status，少了就该在测试里炸出来，不该退化成一个查不出源头的历史值。
+        self._history.mark_last_status(result["status"])
 
         return result
 
@@ -246,8 +233,10 @@ class AlertService:
         timeout: float = 15.0,
     ):
         """发送测试告警（带超时保护）"""
-        if not self._initialized:
-            await self.initialize()
+        # 以 PostgreSQL 为准重建渠道，而不是只在未初始化时懒加载：多进程下本进程
+        # 可能没处理过配置写入，沿用进程内旧渠道会让同一次点击在"已投递"和
+        # "没有配置任何告警渠道"之间随机跳（实测 10 次 4 跳）。
+        await self.reload_config()
         request = TestAlertDelivery(channel=channel, message=message, timeout=timeout)
         return await deliver_test_alert(request, self._send_test_to_channel)
 
@@ -268,23 +257,9 @@ class AlertService:
 
     _summarize_test_results = staticmethod(summarize_test_results)
 
-    def _add_history(self, record):
-        """添加告警历史"""
-        self._alert_history.append(record)
-        if len(self._alert_history) > self._max_history:
-            self._alert_history.pop(0)
-
-    def get_history(self, limit=50, level=None, source=None):
+    def get_history(self, limit=DEFAULT_HISTORY_LIMIT, level=None, source=None):
         """获取告警历史"""
-        history = self._alert_history.copy()
-
-        if level:
-            history = [h for h in history if h.get("level") == level]
-        if source:
-            history = [h for h in history if h.get("source") == source]
-
-        # 返回最新的记录
-        return list(reversed(history[-limit:]))
+        return self._history.recent(limit=limit, level=level, source=source)
 
     def get_config(self):
         """获取当前配置"""
@@ -297,24 +272,10 @@ class AlertService:
 
     def get_stats(self):
         """获取告警统计"""
-        history = self._alert_history
-
-        # 按级别统计
-        level_counts: dict[str, int] = {}
-        for h in history:
-            level = h.get("level", "UNKNOWN")
-            level_counts[level] = level_counts.get(level, 0) + 1
-
-        # 按来源统计
-        source_counts: dict[str, int] = {}
-        for h in history:
-            source = h.get("source", "unknown")
-            source_counts[source] = source_counts.get(source, 0) + 1
-
         return {
-            "total_alerts": len(history),
-            "by_level": level_counts,
-            "by_source": source_counts,
+            "total_alerts": len(self._history),
+            "by_level": self._history.counts_by("level", unknown=_UNKNOWN_LEVEL),
+            "by_source": self._history.counts_by("source", unknown=_UNKNOWN_SOURCE),
             "enabled_channels": alert_manager.get_enabled_channels(),
             "rate_limit_stats": alert_manager.get_rate_limit_stats(),
         }

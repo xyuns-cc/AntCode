@@ -7,6 +7,12 @@ from datetime import datetime
 
 from loguru import logger
 
+from antcode_core.application.services.alert.alert_delivery_status import (
+    ERROR_CHANNEL_DISABLED,
+    ERROR_NO_CHANNELS,
+    ERROR_SEND_FAILED,
+    ERROR_SEND_TIMEOUT,
+)
 from antcode_core.application.services.alert.alert_manager import alert_manager
 
 ChannelResult = tuple[str, bool, str | None]
@@ -50,10 +56,18 @@ async def _send_selected(
         results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
     except TimeoutError:
         logger.error(f"测试告警超时 ({timeout}s)")
-        return {"success": False, "message": f"发送超时 ({timeout}s)，请检查网络连接", "result": {"error": "timeout"}}
+        return {
+            "success": False,
+            "message": f"发送超时 ({timeout}s)，请检查网络连接",
+            "result": {"error": "timeout", "error_code": ERROR_SEND_TIMEOUT},
+        }
     except Exception as exc:
         logger.error(f"测试告警异常: {exc}")
-        return {"success": False, "message": f"发送异常: {exc}", "result": {"error": str(exc)}}
+        return {
+            "success": False,
+            "message": f"发送异常: {exc}",
+            "result": {"error": str(exc), "error_code": ERROR_SEND_FAILED},
+        }
     return _result_from_channel_results(channels, results)
 
 
@@ -89,7 +103,10 @@ def _result_from_channel_results(channels: list[str], results) -> dict:
     return {
         "success": False,
         "message": f"测试告警发送失败: {'; '.join(errors)}",
-        "result": _result_details(channels, 0, fail_count=fail_count, errors=errors),
+        "result": {
+            **_result_details(channels, 0, fail_count=fail_count, errors=errors),
+            "error_code": ERROR_SEND_FAILED,
+        },
     }
 
 
@@ -119,10 +136,12 @@ def _default_message() -> str:
 
 
 def _no_channels_result() -> dict:
+    # error_code 是给调用方/前端判定用的稳定契约；中文 message 只给人看，
+    # 任何程序判断都不许去匹配它。
     return {
         "success": False,
         "message": "没有配置任何告警渠道，请先添加飞书/钉钉/企业微信 Webhook 或邮件配置",
-        "result": {"enabled_channels": []},
+        "result": {"enabled_channels": [], "error_code": ERROR_NO_CHANNELS},
     }
 
 
@@ -130,7 +149,7 @@ def _disabled_channel_result(channel: str, enabled_channels: list[str]) -> dict:
     return {
         "success": False,
         "message": f"告警渠道未启用: {channel}",
-        "result": {"enabled_channels": enabled_channels},
+        "result": {"enabled_channels": enabled_channels, "error_code": ERROR_CHANNEL_DISABLED},
     }
 
 

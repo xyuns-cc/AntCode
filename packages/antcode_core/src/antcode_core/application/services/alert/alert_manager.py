@@ -7,6 +7,15 @@ from threading import Lock, Thread
 
 from loguru import logger
 
+from antcode_core.application.services.alert.alert_delivery_status import (
+    STATUS_ENQUEUE_FAILED,
+    STATUS_NO_CHANNELS,
+    STATUS_NOT_READY,
+    STATUS_RATE_LIMITED,
+    STATUS_SHUTTING_DOWN,
+    delivered,
+    undelivered,
+)
 from antcode_core.common.hash_utils import calculate_content_hash
 
 
@@ -136,42 +145,28 @@ class AlertManager:
         if channel_name in self._enabled_channels:
             self._enabled_channels.remove(channel_name)
 
-    def send_alert(self, message, level="INFO", rate_key=None):
-        """发送告警（手动触发）"""
-        if self._shutting_down:
-            return {"status": "shutting_down"}
-
-        if not self._check_rate_limit(message, level, rate_key):
-            return {"rate_limited": True}
-
-        if not self._enabled_channels:
-            return {}
-
-        if not self._async_enabled or not self._loop:
-            logger.warning("告警异步发送未就绪")
-            return {"status": "not_ready"}
-
-        try:
-            future = asyncio.run_coroutine_threadsafe(self._send_async(message, level, force=True), self._loop)
-            self._track_pending(future)
-            return {"status": "queued"}
-        except Exception as e:
-            logger.error(f"告警加入队列失败: {e}")
-            return {"status": "error"}
-
     def send_alert_auto(self, message, level, default_levels, rate_key=None):
-        """发送告警（自动触发）"""
+        """发送告警（自动触发）。
+
+        每条返回都带 ``status``；未投递的还带结构化 ``error_code``。告警是最不该
+        静默失败的东西，任何"没送出去"都必须留下可判定的证据。
+        """
         if self._shutting_down:
-            return {"status": "shutting_down"}
+            return undelivered(STATUS_SHUTTING_DOWN)
 
         if not self._check_rate_limit(message, level, rate_key):
-            return {"rate_limited": True}
+            return undelivered(STATUS_RATE_LIMITED)
 
         if not self._enabled_channels:
-            return {}
+            # 这里曾经 `return {}`：一条真实告警被无声吞掉，调用方与运维都看不到。
+            # 不抛异常是因为告警多在异常处理路径上触发，抛出会把主流程一起带走；
+            # fail-closed 在这里的含义是"必须可观测"，而不是"打断业务"。
+            logger.error(f"告警未投递：没有启用任何告警渠道 | {message}")
+            return undelivered(STATUS_NO_CHANNELS)
 
         if not self._async_enabled or not self._loop:
-            return {"status": "not_ready"}
+            logger.error(f"告警未投递：异步发送未就绪 | {message}")
+            return undelivered(STATUS_NOT_READY)
 
         try:
             future = asyncio.run_coroutine_threadsafe(
@@ -179,10 +174,10 @@ class AlertManager:
                 self._loop,
             )
             self._track_pending(future)
-            return {"status": "queued"}
+            return delivered()
         except Exception as e:
-            logger.error(f"告警加入队列失败: {e}")
-            return {"status": "error"}
+            logger.error(f"告警加入队列失败: {e} | {message}")
+            return undelivered(STATUS_ENQUEUE_FAILED)
 
     def _track_pending(self, future):
         """记录待完成任务，顺带清理已完成的（否则长期运行无界增长）"""

@@ -110,7 +110,9 @@ async def update_alert_config(
         await _save_rate_limit_config(request.rate_limit, username)
     if request.retry:
         await _save_retry_config(request.retry, username)
-    await alert_service.reload_config()
+    # notify=True：本进程之外还有别的 uvicorn worker（SERVER_WORKERS>1），
+    # 不广播的话它们会一直用旧渠道回答 /config 与 /test。
+    await alert_service.reload_config(notify=True)
     await record_committed_audit(
         "alert_config_update",
         lambda: audit_service.log(
@@ -150,7 +152,7 @@ async def _save_retry_config(config, username: str) -> None:
 )
 async def reload_alert_config(_admin: User = Depends(_REQUIRE_ADMIN)):
     """重新加载告警配置"""
-    await alert_service.reload_config()
+    await alert_service.reload_config(notify=True)
 
     return success({"reloaded": True}, message="告警配置已重新加载")
 

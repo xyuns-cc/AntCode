@@ -6,10 +6,17 @@ from antcode_core.application.services.alert.alert_manager import alert_manager
 from antcode_core.application.services.alert.alert_service import AlertService
 
 
+def _service_with_stubbed_db() -> AlertService:
+    """send_test_alert 现在以 DB 为准重建渠道（多进程下不能信进程内旧状态）。"""
+    service = AlertService()
+    service._load_config_from_db = AsyncMock(return_value=AlertService._default_config())
+    service._apply_config = AsyncMock()
+    return service
+
+
 @pytest.mark.asyncio
 async def test_test_alert_targets_only_requested_channel_and_uses_custom_message(monkeypatch) -> None:
-    service = AlertService()
-    service._initialized = True
+    service = _service_with_stubbed_db()
     send = AsyncMock(return_value=("feishu", True, None))
     monkeypatch.setattr(alert_manager, "get_enabled_channels", lambda: ["feishu", "email"])
     monkeypatch.setattr(service, "_send_test_to_channel", send)
@@ -23,8 +30,7 @@ async def test_test_alert_targets_only_requested_channel_and_uses_custom_message
 
 @pytest.mark.asyncio
 async def test_test_alert_rejects_disabled_requested_channel(monkeypatch) -> None:
-    service = AlertService()
-    service._initialized = True
+    service = _service_with_stubbed_db()
     send = AsyncMock()
     monkeypatch.setattr(alert_manager, "get_enabled_channels", lambda: ["email"])
     monkeypatch.setattr(service, "_send_test_to_channel", send)

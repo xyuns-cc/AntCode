@@ -39,12 +39,6 @@
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_manager.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 305
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_manager.py",
       "function": "AlertManager._send_async",
       "rule": "POSITIONAL_ARGS",
       "value": 4
@@ -54,12 +48,6 @@
       "function": "AlertManager.send_alert_auto",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 324
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_service.py",
