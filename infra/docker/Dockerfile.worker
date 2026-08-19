@@ -7,6 +7,15 @@
 ARG UV_VERSION=0.8.17
 ARG MISE_VERSION=2025.2.7
 ARG DEFAULT_RUNTIME_PYTHON=3.12.11
+# 前端项目表单对外提供 Python/JavaScript/TypeScript/Java/Go 五种执行语言，
+# CodePlugin 按 entry_point 后缀路由到 node / java / go。这些二进制必须在构建期
+# 落进镜像：任务沙箱 --unshare-net，目标部署又在内网，运行期没有任何下载通道。
+# 全部锁到确定补丁版本，浮动大版本会让同一份 Dockerfile 构出行为不同的镜像。
+ARG DEFAULT_RUNTIME_NODE=22.23.2
+ARG DEFAULT_RUNTIME_GO=1.26.6
+# 只装 JRE：CodePlugin 的 Java 执行形态仅有 `java -jar <jar>`，没有任何编译路径
+# （Maven 依赖装配也未实现），换成 JDK 只是白白多背 ~150MB。
+ARG DEFAULT_RUNTIME_JAVA=temurin-jre-21.0.9+10.0.LTS
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 AS uv-bin
 
@@ -68,6 +77,9 @@ FROM python:3.11.11-slim@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491f
 ARG TARGETARCH
 ARG MISE_VERSION
 ARG DEFAULT_RUNTIME_PYTHON
+ARG DEFAULT_RUNTIME_NODE
+ARG DEFAULT_RUNTIME_GO
+ARG DEFAULT_RUNTIME_JAVA
 ARG MISE_SHA256_AMD64=92be0433432ecd579de77d3ba90fb61f1845d68be0602bc623cd0ff8a11892e3
 ARG MISE_SHA256_ARM64=9d4e52b81490975d533e0d4535bb7307b5fa7f4605bf6636954c58084904dbe0
 
@@ -115,6 +127,23 @@ RUN set -eu; \
     install -m 0755 "/tmp/${mise_asset}" /usr/local/bin/mise; \
     rm "/tmp/${mise_asset}"
 
+# 多语言运行时装在镜像里的 /opt，**不能**装在 /app/data 下：/app/data 是 worker_data
+# 命名卷的挂载点，Docker 只在卷首次创建时用镜像内容播种，已有部署换新镜像后卷里仍是
+# 旧内容——装在那里的运行时升级后会凭空消失，且没有任何报错。
+ENV MISE_DATA_DIR=/opt/antcode-mise
+RUN set -eu; \
+    MISE_STATE_DIR=/tmp/mise-state MISE_CACHE_DIR=/tmp/mise-cache \
+      mise install \
+        "node@${DEFAULT_RUNTIME_NODE}" \
+        "go@${DEFAULT_RUNTIME_GO}" \
+        "java@${DEFAULT_RUNTIME_JAVA}"; \
+    rm -rf /tmp/mise-state /tmp/mise-cache; \
+    chmod -R a+rX "${MISE_DATA_DIR}"
+# 必须指向精确版本的安装目录，不能用 mise shims：shims 是指向 mise 自身的软链，
+# 而 executor/sandbox_executables.py 从可执行文件反推挂载根时要求 <root>/bin/<exe>
+# 布局，shims 会被判成"安装根未列入可信范围"而直接拒绝执行任务。
+ENV PATH="${MISE_DATA_DIR}/installs/node/${DEFAULT_RUNTIME_NODE}/bin:${MISE_DATA_DIR}/installs/go/${DEFAULT_RUNTIME_GO}/bin:${MISE_DATA_DIR}/installs/java/${DEFAULT_RUNTIME_JAVA}/bin:${PATH}"
+
 # 创建非 root 用户（安全最佳实践）
 RUN groupadd --gid 1000 appgroup && \
     useradd --uid 1000 --gid appgroup --shell /bin/bash --create-home appuser
@@ -161,7 +190,6 @@ RUN mkdir -p \
     /app/data/worker/temp/runtime-build \
     /app/data/worker/temp/sandbox \
     /app/data/toolchains/uv-python \
-    /app/data/toolchains/mise \
     /app/data/toolchains/mise-state \
     && chown -R appuser:appgroup /app/data \
     && chown -R appuser:appgroup /app/.venv \
@@ -171,14 +199,14 @@ RUN mkdir -p \
 # uv 与 mise 已安装到 /usr/local/bin，appuser 直接复用经过固定和校验的二进制。
 USER appuser
 ENV PATH="/home/appuser/.local/bin:${PATH}"
-# 生产 Worker 以 read_only 根文件系统运行，$HOME 不可写。uv/mise 默认把语言
-# 运行时装进 $HOME/.local/share/{uv/python,mise}，于是除镜像预装的那一个版本外，
-# 任何 python_version 都会以 "os error 30（Read-only file system）" 失败——tmpfs
-# 只盖了 /tmp 与 ~/.cache，盖不到这里；直接给 ~/.local/share 挂 tmpfs 又会把预装
-# 解释器一起遮掉。因此改把安装根指到 worker_data 卷上：可写、跨重启保留，且新卷
-# 首次创建时 Docker 会用镜像里的内容播种，预装的解释器照样在。
+# 生产 Worker 以 read_only 根文件系统运行，$HOME 不可写。uv 默认把解释器装进
+# $HOME/.local/share/uv/python，于是除镜像预装的那一个版本外，任何 python_version
+# 都会以 "os error 30（Read-only file system）" 失败——tmpfs 只盖了 /tmp 与
+# ~/.cache，盖不到这里；直接给 ~/.local/share 挂 tmpfs 又会把预装解释器一起遮掉。
+# 因此 uv 的安装根指到 worker_data 卷上：可写、跨重启保留。Python 是唯一有运行期
+# 按需安装需求的语言（项目可指定 python_version），mise 管的 Node/Go/Java 没有这种
+# 需求，其 MISE_DATA_DIR 固定在镜像内的 /opt（见上），不受卷播种语义影响。
 ENV UV_PYTHON_INSTALL_DIR=/app/data/toolchains/uv-python \
-    MISE_DATA_DIR=/app/data/toolchains/mise \
     MISE_STATE_DIR=/app/data/toolchains/mise-state
 # E2E 与默认代码项目使用 Python 3.12。构建时预装固定补丁版本，避免首次
 # 创建环境依赖运行中容器的外网 DNS；其他显式版本仍由 uv 按请求安装。

@@ -25,7 +25,13 @@ NGINX_WRITABLE_PATHS = {
 }
 # executor/sandbox_provider.py 用 config.data_dir 当 sandbox 的 data_root。
 WORKER_DATA_ROOT = PurePosixPath("/app/data/worker")
-TOOLCHAIN_INSTALL_ENVS = ("UV_PYTHON_INSTALL_DIR", "MISE_DATA_DIR", "MISE_STATE_DIR")
+# 运行期真的会往里写：项目可指定 python_version，uv 按需装解释器；mise 记状态。
+WRITABLE_TOOLCHAIN_ENVS = ("UV_PYTHON_INSTALL_DIR", "MISE_STATE_DIR")
+# 构建期写死在镜像里：Node/Go/Java 没有运行期按需安装的路径（沙箱 --unshare-net，
+# 内网也无出网通道），装在卷上反而有害——Docker 只在卷首次创建时用镜像内容播种，
+# 已有部署升级镜像后卷里仍是旧内容，预装的运行时会静默消失。
+IMAGE_BAKED_TOOLCHAIN_ENVS = ("MISE_DATA_DIR",)
+TOOLCHAIN_INSTALL_ENVS = (*WRITABLE_TOOLCHAIN_ENVS, *IMAGE_BAKED_TOOLCHAIN_ENVS)
 MOUNT_TARGET = re.compile(r":(/[^:]+)")
 
 
@@ -79,7 +85,7 @@ def _writable_roots(service: dict) -> tuple[PurePosixPath, ...]:
 
 
 def test_worker_language_toolchain_roots_are_writable_and_sandbox_trusted() -> None:
-    """read_only 的 Worker 必须把 uv/mise 的安装根指到可写卷，且避开 sandbox 的 data_root。
+    """read_only 的 Worker 必须把运行期会写的安装根指到可写卷，且避开 sandbox 的 data_root。
 
     默认根在 $HOME/.local/share 下，只读根文件系统里除镜像预装的那个解释器外，任何
     python_version 都会以 "os error 30（Read-only file system）" 失败；tmpfs 只盖了
@@ -88,11 +94,31 @@ def test_worker_language_toolchain_roots_are_writable_and_sandbox_trusted() -> N
     """
     worker = _compose()["services"]["worker"]
     writable = _writable_roots(worker)
+    roots = _toolchain_install_roots()
 
     assert worker["read_only"] is True
-    for name, root in _toolchain_install_roots().items():
+    for name in WRITABLE_TOOLCHAIN_ENVS:
+        root = roots[name]
         assert any(root.is_relative_to(mount) for mount in writable), f"{name}={root} 落在只读根文件系统上"
+    for name, root in roots.items():
         assert not root.is_relative_to(WORKER_DATA_ROOT), f"{name}={root} 会被 sandbox 当作跨租户数据拒绝"
+
+
+def test_worker_image_baked_toolchain_roots_stay_off_the_data_volume() -> None:
+    """预装的语言运行时必须留在镜像层里。
+
+    挂载点上的内容只在卷首次创建时被镜像播种：已有部署换新镜像时卷原样保留，
+    装在挂载点下的 Node/Go/Java 会在升级后凭空消失，且不产生任何错误——任务只会
+    以"可执行文件不存在"失败。运行期补装也不成立（沙箱 --unshare-net，内网无出网）。
+    """
+    worker = _compose()["services"]["worker"]
+    mounts = _writable_roots(worker)
+    roots = _toolchain_install_roots()
+
+    for name in IMAGE_BAKED_TOOLCHAIN_ENVS:
+        root = roots[name]
+        colliding = [mount for mount in mounts if root.is_relative_to(mount)]
+        assert not colliding, f"{name}={root} 落在挂载点 {colliding} 下，升级镜像后预装运行时会静默丢失"
 
 
 def _declared_example_names() -> set[str]:

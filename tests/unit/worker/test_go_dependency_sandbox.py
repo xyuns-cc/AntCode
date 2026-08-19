@@ -28,7 +28,15 @@ async def test_go_external_dependencies_require_vendor(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_go_vendor_project_runs_offline(tmp_path: Path) -> None:
+async def test_go_vendor_project_runs_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 计划构建要求 go 真的在 PATH 上（缺运行时是 fail-closed 的，不再退回裸命令名），
+    # 而开发机/CI 未必装 Go；这里放一个占位可执行文件，只为让路径解析有解。
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    go_stub = stub_bin / "go"
+    go_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    go_stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(stub_bin))
     (tmp_path / "go.mod").write_text(
         "module example.test/app\n\ngo 1.22\n\nrequire example.test/lib v1.0.0\n",
         encoding="utf-8",
@@ -44,6 +52,7 @@ async def test_go_vendor_project_runs_offline(tmp_path: Path) -> None:
     )
     plan = await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
 
+    assert plan.command == str(go_stub)
     assert plan.args[:2] == ["run", "main.go"]
     assert plan.env["GOMODCACHE"].startswith(str(tmp_path))
     assert plan.env["GOCACHE"].startswith(str(tmp_path))

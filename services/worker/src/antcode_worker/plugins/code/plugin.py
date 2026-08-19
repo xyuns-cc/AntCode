@@ -6,7 +6,8 @@
 - .ts / .mts / .cts   → Node.js（要求 workspace 里 devDep 装了 tsx/ts-node，或已 build 好）
 - .jar                → Java（java -jar）
 - .go                 → Go（go run，需要 workspace 有 go.mod）
-- 无后缀或其它        → Python（向后兼容）
+- 无后缀              → Python（向后兼容旧调度）
+- 其它后缀            → 拒绝执行（用 Python 去跑 .rb/.rs 只会得到看不懂的语法错误）
 
 依赖装配假设：
 - Python：由 UV/mise 层准备好 venv，context.runtime_spec.python_path 指向解释器
@@ -14,12 +15,12 @@
 - Java：`.jar` 已含依赖或 workspace 有 lib/*.jar
 - Go：workspace 有 go.mod（go run 会自动下载模块到 GOPATH）
 
-命令构造统一走 mise：`mise exec node@X -- node <entry>` 让语言版本可控。
-本 PoC 版本假设系统/mise 全局已装对应语言，运行时不再显式指定版本。
+Node/Go/Java 的语言二进制由镜像构建期预装并写进 PATH（见
+``infra/docker/Dockerfile.worker`` 与 ``runtime.language_runtime``），这里只解析
+绝对路径；缺失直接抛错，不退化成裸命令名，也不退化成别的执行方式。
 """
 
 import os
-import shutil
 
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
@@ -27,6 +28,12 @@ from antcode_worker.plugins.base import PluginBase
 from antcode_worker.runtime.dependency_process import DependencyLimits
 from antcode_worker.runtime.go_execution_policy import build_go_execution_env
 from antcode_worker.runtime.language_cache import inject_language_cache_env
+from antcode_worker.runtime.language_runtime import (
+    GO_RUNTIME,
+    JAVA_RUNTIME,
+    NODE_RUNTIME,
+    require_language_executable,
+)
 from antcode_worker.runtime.node_dependency_policy import install_node_dependencies
 
 _PYTHON_EXT = {".py", ".pyw"}
@@ -34,6 +41,8 @@ _NODE_JS_EXT = {".js", ".mjs", ".cjs"}
 _NODE_TS_EXT = {".ts", ".mts", ".cts"}
 _JAVA_EXT = {".jar"}
 _GO_EXT = {".go"}
+# 顺序即优先级：tsx 是当前主流 runner，ts-node 作为老项目的既有约定保留。
+_TYPESCRIPT_RUNNERS = ("tsx", "ts-node")
 
 
 class CodePlugin(PluginBase):
@@ -103,8 +112,8 @@ class CodePlugin(PluginBase):
         context: RunContext,
         payload: TaskPayload,
     ) -> ExecPlan:
-        # 优先看显式 language（由 scheduler 从 project.code_info.language 传入），
-        # 否则按 entry_point 后缀自动识别。
+        # 优先看显式 language（只来自 Task.execution_params.kwargs；项目上存的
+        # project.*_info.language 目前不进派发参数，实际路由靠 entry_point 后缀）。
         language = self._resolve_language(payload)
         cwd = self._get_project_cwd(payload)
         env = self._build_env(payload)
@@ -129,8 +138,7 @@ class CodePlugin(PluginBase):
         elif language == "go":
             command, args = self._go_argv(payload)
         else:
-            # 未识别的后缀降级为 Python（历史行为兼容）
-            command, args = self._python_argv(context, payload)
+            raise RuntimeError(f"无法识别的入口文件类型，拒绝执行: {payload.entry_point}")
 
         return ExecPlan(
             command=command,
@@ -196,25 +204,25 @@ class CodePlugin(PluginBase):
         return python_exe, args
 
     def _node_argv(self, payload: TaskPayload, *, is_typescript: bool) -> tuple[str, list[str]]:
-        # TS 优先走 workspace 里的 tsx 二进制（约定 devDep 装 tsx）；否则 fallback node
         if is_typescript:
-            dependency_root = payload.project_cwd or payload.workspace_path or ""
-            local_tsx = os.path.join(dependency_root, "node_modules", ".bin", "tsx")
-            if os.path.isfile(local_tsx):
-                return local_tsx, [payload.entry_point, *payload.args]
-            local_tsnode = os.path.join(dependency_root, "node_modules", ".bin", "ts-node")
-            if os.path.isfile(local_tsnode):
-                return local_tsnode, [payload.entry_point, *payload.args]
-            raise RuntimeError("TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）")
-        node_exe = shutil.which("node") or "node"
-        return node_exe, [payload.entry_point, *payload.args]
+            return self._typescript_argv(payload)
+        return require_language_executable(NODE_RUNTIME), [payload.entry_point, *payload.args]
+
+    def _typescript_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
+        """TS 入口由 workspace 自带的 TS runner 执行（约定 devDep 装 tsx 或 ts-node）。"""
+        dependency_root = payload.project_cwd or payload.workspace_path or ""
+        for runner in _TYPESCRIPT_RUNNERS:
+            local_runner = os.path.join(dependency_root, "node_modules", ".bin", runner)
+            if os.path.isfile(local_runner):
+                return local_runner, [payload.entry_point, *payload.args]
+        raise RuntimeError("TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）")
 
     def _java_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
-        java_exe = shutil.which("java") or "java"
+        java_exe = require_language_executable(JAVA_RUNTIME)
         return java_exe, ["-jar", payload.entry_point, *payload.args]
 
     def _go_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
-        go_exe = shutil.which("go") or "go"
+        go_exe = require_language_executable(GO_RUNTIME)
         return go_exe, ["run", payload.entry_point, *payload.args]
 
     # ---------- 依赖装配 ----------
