@@ -779,7 +779,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 578
+      "value": 574
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",

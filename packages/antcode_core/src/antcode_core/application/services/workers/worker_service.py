@@ -260,7 +260,7 @@ class WorkerService(WorkerServiceFacade):
         - 全部子表操作 + Worker 自身 delete 放在同一 `in_transaction()` 内,
           任一步骤异常会回滚,不会出现 "子表半删 / Worker 残留" 的状态。
         - 补齐此前遗漏的关联字段:
-          * Project.bound_worker_id / runtime_worker_id (BigInt) → 解绑
+          * Project.bound_worker_id (BigInt) → 解绑
           * Project.worker_id (CharField, 存 public_id) → 解绑
           * WorkerInstallKey.used_by_worker (public_id) → 删除历史 Key
         - 未加真实 FK 之前,这些字段是"逻辑外键";
@@ -297,7 +297,6 @@ class WorkerService(WorkerServiceFacade):
             "events": 0,
             "install_keys": 0,
             "projects_unbound": 0,
-            "projects_runtime_unbound": 0,
             "projects_worker_id_unbound": 0,
         }
 
@@ -343,9 +342,6 @@ class WorkerService(WorkerServiceFacade):
                 # 4. 解绑项目上指向本 Worker 的字段(不删项目,项目归用户所有)
                 deleted["projects_unbound"] = await Project.filter(bound_worker_id=worker_internal_id).update(
                     bound_worker_id=None
-                )
-                deleted["projects_runtime_unbound"] = await Project.filter(runtime_worker_id=worker_internal_id).update(
-                    runtime_worker_id=None
                 )
                 # Project.worker_id 是 CharField(存 public_id)
                 deleted["projects_worker_id_unbound"] = await Project.filter(worker_id=worker_public_id).update(

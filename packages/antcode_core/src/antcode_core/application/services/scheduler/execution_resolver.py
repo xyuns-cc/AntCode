@@ -132,8 +132,9 @@ class ExecutionResolver:
                 str(project.bound_worker_id),
             )
 
-        runtime_worker_id = getattr(project, "worker_id", None)
-        if runtime_worker_id and worker.public_id != runtime_worker_id:
+        # Project.worker_id 是 CharField，存 Worker.public_id（不是内部整型 id）
+        runtime_worker_public_id = getattr(project, "worker_id", None)
+        if runtime_worker_public_id and worker.public_id != runtime_worker_public_id:
             raise WorkerUnavailableError(
                 "固定 Worker 与项目运行时 Worker 不一致",
                 str(worker.id),

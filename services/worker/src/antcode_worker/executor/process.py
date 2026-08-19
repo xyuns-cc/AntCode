@@ -32,6 +32,7 @@ from antcode_worker.executor.base import (
     NoOpLogSink,
 )
 from antcode_worker.executor.concurrency import ExecutionAdmission
+from antcode_worker.executor.exec_path import authoritative_path
 from antcode_worker.executor.output_stream import OutputByteBudget, OutputReadOptions, read_output_stream
 from antcode_worker.executor.process_limits import SandboxLimits, build_preexec_fn, host_max_processes
 from antcode_worker.executor.process_signals import signal_process_group
@@ -455,7 +456,9 @@ class ProcessExecutor(BaseExecutor):
         2. 合并项目显式配置的 ``exec_plan.env``。
         3. 拒绝动态加载器与 shell 启动文件劫持变量。
         4. 最后由 Worker 权威写入 PATH / VIRTUAL_ENV / PYTHONPATH——这里是子进程
-           启动前的最后一个写者，任何上游算出的同名值都以这里为准。
+           启动前的最后一个写者，任何上游算出的同名值都以这里为准。PATH 与
+           PYTHONPATH 的拼装分别交给 ``exec_path`` / ``python_path``，沙箱层共用
+           同一实现，避免两层各算一份后长值被短值静默盖掉。
         """
         host_env = os.environ
 
@@ -474,10 +477,7 @@ class ProcessExecutor(BaseExecutor):
             if _is_env_forbidden(key, exec_plan.plugin_name, task_env_keys):
                 env.pop(key, None)
 
-        bin_dir = "Scripts" if os.name == "nt" else "bin"
-        venv_bin = os.path.join(runtime_handle.path, bin_dir)
-        host_path = host_env.get("PATH", "")
-        env["PATH"] = os.pathsep.join([venv_bin, host_path]) if host_path else venv_bin
+        env["PATH"] = authoritative_path(exec_plan.cwd, runtime_handle.path)
         env["PYTHONPATH"] = authoritative_python_path(exec_plan, runtime_handle.path)
         env["VIRTUAL_ENV"] = runtime_handle.path
 

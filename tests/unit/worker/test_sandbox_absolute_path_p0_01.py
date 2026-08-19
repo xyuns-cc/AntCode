@@ -8,7 +8,7 @@ PATH 解析可执行文件,workspace 里的伪造 bwrap 会在真隔离建立前
 
 本测试锁死三条不变量:
 1. BasicSandbox.wrap_command 拒绝非绝对路径的 sandbox_command[0]
-2. exec_plan.env 里的 PATH 不会污染沙箱化 ExecPlan 的最终 env(强制走 os.environ)
+2. exec_plan.env 里的 PATH 不会污染沙箱化 ExecPlan 的最终 env(强制走 exec_path 重算)
 3. exec_plan.env 里的 LD_PRELOAD / LD_LIBRARY_PATH / BASH_ENV 一律剥离
 """
 
@@ -84,7 +84,7 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
 
     如果这条测试失败,意味着攻击者可通过任务环境把 PATH 指向自己 workspace,
     让 asyncio.create_subprocess_exec 解析相对命令时命中恶意程序。修复后
-    _create_sandboxed_plan 会用 os.environ.PATH 强制覆盖 filtered_env["PATH"]。
+    _create_sandboxed_plan 走 executor.exec_path 重算 PATH,任务写的那份整条丢弃。
     """
     # 模拟 Worker 启动时的真实 PATH(不包含 /tmp/evil)
     worker_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -127,9 +127,15 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
 
     sandboxed_plan = executor._create_sandboxed_plan(exec_plan, runtime_handle, context)
 
-    # PATH 必须是 Worker 权威值,不能是任务注入的 /tmp/evil
-    assert sandboxed_plan.env.get("PATH") == worker_path
-    assert "/tmp/evil" not in sandboxed_plan.env.get("PATH", "")
+    # PATH 由 Worker 权威构造：首项必须是 runtime 的 bin（P0-01 不变量：任务目录
+    # 遮蔽不了受信运行时），其后是 Worker 启动时的 PATH；任务注入的 /tmp/evil 一律不在。
+    # 这里刻意不再断言"整串等于 worker_path"——那是被进程层重算前的中间值。
+    # 子进程侧的同一不变量见
+    # test_child_process_exec_path.py::test_task_injected_path_never_reaches_the_child。
+    path_entries = sandboxed_plan.env.get("PATH", "").split(os.pathsep)
+    assert path_entries[0] == os.path.join(runtime_handle.path, "bin")
+    assert path_entries[1:] == worker_path.split(os.pathsep)
+    assert "/tmp/evil" not in path_entries
 
     # LD_* / BASH_ENV / ENV 全部剥离
     assert "LD_PRELOAD" not in sandboxed_plan.env

@@ -44,7 +44,6 @@ async def _create_duplicate_project(
         runtime_kind=project.runtime_kind,
         runtime_locator=project.runtime_locator,
         current_runtime_id=project.current_runtime_id,
-        runtime_worker_id=project.runtime_worker_id,
         execution_strategy=project.execution_strategy,
         bound_worker_id=project.bound_worker_id,
         user_id=user_id,

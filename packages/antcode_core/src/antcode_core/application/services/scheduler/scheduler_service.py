@@ -156,7 +156,7 @@ class SchedulerService:
                 raise ValueError("指定 Worker 不存在")
 
             related_project_ids = await Project.filter(
-                Q(worker_id=worker.public_id) | Q(bound_worker_id=worker.id) | Q(runtime_worker_id=worker.id)
+                Q(worker_id=worker.public_id) | Q(bound_worker_id=worker.id)
             ).values_list("id", flat=True)
 
             worker_query = Q(specified_worker_id=worker.id)

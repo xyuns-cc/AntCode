@@ -9,13 +9,13 @@ from typing import Any
 from antcode_worker.domain.models import ExecPlan, RuntimeHandle
 from antcode_worker.engine.unbound_runtime import WORKER_PYTHON_RUNTIME_HASH
 from antcode_worker.executor.base import ExecutorConfig
+from antcode_worker.executor.exec_path import authoritative_path
 from antcode_worker.executor.python_path import authoritative_python_path
 from antcode_worker.executor.sandbox_cancellation import payload_process_limit
 from antcode_worker.executor.sandbox_mounts import private_home
 from antcode_worker.executor.sandbox_provider import SandboxProvider
 
 _PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
-_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _HIJACK_ENV_KEYS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV")
 
 
@@ -36,8 +36,11 @@ def create_sandboxed_plan(
     """Wrap the command, filter its environment, and preserve execution limits."""
     sandbox_context = _sandbox_context(config, request)
     command = sandbox.wrap_command(_payload_command(request), sandbox_context)
-    environment = _sandbox_environment(sandbox, request, sandbox_context)
-    return _copy_execution_contract(request, command=command, environment=environment)
+    # 沙箱化计划的 cwd 只算一次：PATH 里的 node_modules/.bin 必须按子进程真正的
+    # 工作目录推导，与 _copy_execution_contract 写进计划的那个 cwd 是同一个值。
+    work_dir = request.context.get("work_dir", request.exec_plan.cwd)
+    environment = _sandbox_environment(sandbox, request, sandbox_context, work_dir=work_dir)
+    return _copy_execution_contract(request, command=command, environment=environment, work_dir=work_dir)
 
 
 def _payload_command(request: SandboxPlanRequest) -> list[str]:
@@ -72,6 +75,8 @@ def _sandbox_environment(
     sandbox: SandboxProvider,
     request: SandboxPlanRequest,
     sandbox_context: dict[str, Any],
+    *,
+    work_dir: str | None,
 ) -> dict[str, str]:
     host_environment = os.environ.copy()
     host_environment.update(request.exec_plan.env)
@@ -84,7 +89,7 @@ def _sandbox_environment(
         PYTHONPATH=authoritative_python_path(request.exec_plan, runtime_path),
         VIRTUAL_ENV=runtime_path,
         HOME=private_home(),
-        PATH=os.environ.get("PATH", _DEFAULT_PATH),
+        PATH=authoritative_path(work_dir, runtime_path),
     )
     for key in _HIJACK_ENV_KEYS:
         environment.pop(key, None)
@@ -96,13 +101,14 @@ def _copy_execution_contract(
     *,
     command: list[str],
     environment: dict[str, str],
+    work_dir: str | None,
 ) -> ExecPlan:
     plan = request.exec_plan
     return ExecPlan(
         command=command[0],
         args=command[1:],
         env=environment,
-        cwd=request.context.get("work_dir", plan.cwd),
+        cwd=work_dir,
         workspace_root=plan.workspace_root,
         run_id=plan.run_id,
         timeout_seconds=plan.timeout_seconds,

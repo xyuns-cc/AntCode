@@ -44,11 +44,6 @@ class Project(BaseModel):
     runtime_kind = fields.CharEnumField(RuntimeKind, null=True)
     runtime_locator = fields.CharField(max_length=500, null=True)
     current_runtime_id = fields.BigIntField(null=True)
-    runtime_worker_id = fields.BigIntField(
-        null=True,
-        db_index=True,
-        description="环境所在 Worker 节点内部 ID",
-    )
 
     # ========== 执行策略相关字段 ==========
     execution_strategy = fields.CharEnumField(
@@ -91,7 +86,6 @@ class Project(BaseModel):
             ("status", "updated_at"),
             ("execution_strategy",),
             ("bound_worker_id",),
-            ("runtime_worker_id",),
         ]
 
 

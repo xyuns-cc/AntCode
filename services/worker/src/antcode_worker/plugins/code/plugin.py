@@ -246,16 +246,11 @@ class CodePlugin(PluginBase):
     # ---------- 通用工具 ----------
 
     def _build_env(self, payload: TaskPayload) -> dict[str, str]:
-        # PYTHONPATH 不在这里写：executor.python_path 是唯一权威构造者，它按
-        # ExecPlan.workspace_root 补 bundle 根，插件写的同名值只会被原样盖掉。
+        # PATH / PYTHONPATH 都不在这里写：executor.exec_path / executor.python_path 是
+        # 唯一权威构造者，插件写的同名值只会被沙箱层与进程层原样盖掉。Node 的
+        # node_modules/.bin 由 exec_path 从 ExecPlan.cwd 推导——那里才在依赖装配
+        # 之后，而本方法恒早于 _prepare_deps，检查 node_modules 必然落空。
         env = dict(payload.env_vars)
-        if payload.workspace_path:
-            # Node 项目：把 workspace/node_modules/.bin 塞到 PATH 前缀
-            local_bin = os.path.join(payload.workspace_path, "node_modules", ".bin")
-            if os.path.isdir(local_bin):
-                current_path = env.get("PATH", os.environ.get("PATH", ""))
-                env["PATH"] = os.pathsep.join([local_bin, current_path]) if current_path else local_bin
-
         # 多语言依赖 cache 复用（M7）：所有项目共享一份缓存目录，避免重复下载
         inject_language_cache_env(env)
         return env

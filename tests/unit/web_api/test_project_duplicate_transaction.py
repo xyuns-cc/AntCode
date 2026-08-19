@@ -90,7 +90,6 @@ async def test_duplicate_project_row_uses_transaction_connection() -> None:
         runtime_kind="python",
         runtime_locator="env",
         current_runtime_id=1,
-        runtime_worker_id=2,
         execution_strategy="fixed",
         bound_worker_id=2,
     )
