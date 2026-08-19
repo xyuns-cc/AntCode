@@ -138,8 +138,13 @@ async def claim_run_ownership(
     )
 
 
-def _parse_holder_token(raw: Any) -> tuple[str, str] | None:
-    """owner key 的 value（``worker:lease``）→ ``(完整 token, holder lease_id)``。"""
+def parse_ownership_token(raw: Any) -> tuple[str, str] | None:
+    """owner key 的 value（``worker:lease``）→ ``(worker_id, lease_id)``。
+
+    按最后一个 ``:`` 切分，因此 ``ownership_token(*parse_ownership_token(v))``
+    与原值逐字相等（worker_id 含 ``:`` 时也成立）。无法解析返回 ``None``，
+    由调用方决定如何处理——本函数不猜测。
+    """
     holder = raw.decode() if isinstance(raw, bytes) else raw
     if not holder:
         return None
@@ -149,7 +154,7 @@ def _parse_holder_token(raw: Any) -> tuple[str, str] | None:
     holder_worker, holder_lease = token.rsplit(":", 1)
     if not holder_worker or not holder_lease:
         return None
-    return token, holder_lease
+    return holder_worker, holder_lease
 
 
 async def _attempt_dead_holder_takeover(
@@ -163,7 +168,7 @@ async def _attempt_dead_holder_takeover(
 ) -> OwnershipOutcome:
     owner_key = run_owner_key(run_id, namespace)
     raw = await cast("Awaitable[Any]", redis.get(owner_key))
-    parsed = _parse_holder_token(raw)
+    parsed = parse_ownership_token(raw)
     if parsed is None:
         # holder 已消失（TTL 到期/释放）：直接重试普通 claim。
         return await _run_fenced_script(
@@ -175,8 +180,8 @@ async def _attempt_dead_holder_takeover(
             ttl_ms=ttl_ms,
             namespace=namespace,
         )
-    holder_token, holder_lease_id = parsed
-    holder_worker_id = holder_token.rsplit(":", 1)[0]
+    holder_worker_id, holder_lease_id = parsed
+    holder_token = ownership_token(holder_worker_id, holder_lease_id)
     result = await cast(
         "Awaitable[Any]",
         redis.eval(
@@ -243,6 +248,7 @@ __all__ = [
     "OwnershipOutcome",
     "claim_run_ownership",
     "ownership_token",
+    "parse_ownership_token",
     "release_run_ownership",
     "renew_run_ownership",
     "run_owner_key",

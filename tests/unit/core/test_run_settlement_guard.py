@@ -1,13 +1,66 @@
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from antcode_core.application.services.lease_service import LeaseStore
 from antcode_core.application.services.workers import run_settlement_guard as guard
+from antcode_core.application.services.workers.run_ownership_fence import (
+    ownership_token,
+    run_owner_key,
+)
 
 EXPECTED_KEY_COUNT = 2
 TEST_BATCH_SIZE = 2
 EXPECTED_MGET_CALLS = 2
+EXPECTED_ORPHAN_RUNS = 3
+
+
+class FakeOwnershipRedis:
+    """按 owner key 真实索引的 ownership 存储（只实现 guard 用到的 mget）。
+
+    任何可能删除 ownership 的调用都被记录下来，用于证明"放行死代际"没有
+    顺手拆掉围栏——guard 只允许读，不允许写。
+    """
+
+    def __init__(self, owners: dict[str, str]) -> None:
+        self._owners = dict(owners)
+        self.writes: list[str] = []
+
+    async def mget(self, keys: list[str]) -> list[Any]:
+        return [self._owners.get(key) for key in keys]
+
+    async def delete(self, *keys: str) -> int:
+        self.writes.append("delete")
+        return 0
+
+    async def unlink(self, *keys: str) -> int:
+        self.writes.append("unlink")
+        return 0
+
+    async def eval(self, *args: Any) -> int:
+        self.writes.append("eval")
+        return 0
+
+
+class RecordingProbe:
+    """代际活性判据的替身（生产实现是 ``LeaseStore.is_current``）。"""
+
+    def __init__(self, live_generations: set[tuple[str, str]]) -> None:
+        self._live = set(live_generations)
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, worker_id: str, lease_id: str) -> bool:
+        self.calls.append((worker_id, lease_id))
+        return (worker_id, lease_id) in self._live
+
+
+def owner_map(bindings: dict[str, tuple[str, str]]) -> dict[str, str]:
+    return {
+        run_owner_key(run_id): ownership_token(worker_id, lease_id)
+        for run_id, (worker_id, lease_id) in bindings.items()
+    }
 
 
 @pytest.mark.asyncio
@@ -21,12 +74,93 @@ async def test_empty_run_set_does_not_connect_to_redis(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_existing_owner_rejects_delete() -> None:
-    redis = AsyncMock()
-    redis.mget.return_value = [None, b"worker-1:lease-1"]
+async def test_live_generation_owner_rejects_delete_and_names_the_holder() -> None:
+    redis = FakeOwnershipRedis(owner_map({"run-2": ("worker-1", "lease-1")}))
+    probe = RecordingProbe({("worker-1", "lease-1")})
 
-    with pytest.raises(guard.RunSettlementPendingError, match="仍在结算"):
-        await guard.ensure_runs_settled(["run-1", "run-2"], redis_client=redis)
+    with pytest.raises(guard.RunSettlementPendingError) as exc_info:
+        await guard.ensure_runs_settled(
+            ["run-1", "run-2"],
+            redis_client=redis,
+            generation_probe=probe,
+        )
+
+    detail = str(exc_info.value)
+    assert "run-2" in detail
+    assert "worker-1" in detail
+    assert probe.calls == [("worker-1", "lease-1")]
+
+
+@pytest.mark.asyncio
+async def test_dead_generation_owner_no_longer_blocks_delete() -> None:
+    """SIGKILL 后的残留 ownership 不再把删除挡满 ~65 分钟的 TTL。"""
+    redis = FakeOwnershipRedis(owner_map({"run-1": ("worker-1", "lease-dead")}))
+    probe = RecordingProbe({("worker-1", "lease-new")})
+
+    await guard.ensure_runs_settled(["run-1"], redis_client=redis, generation_probe=probe)
+
+    assert probe.calls == [("worker-1", "lease-dead")]
+
+
+@pytest.mark.asyncio
+async def test_dead_generation_owner_key_is_never_released() -> None:
+    """放行不等于拆围栏：guard 只读 ownership，绝不删除它。"""
+    redis = FakeOwnershipRedis(owner_map({"run-1": ("worker-1", "lease-dead")}))
+
+    await guard.ensure_runs_settled(
+        ["run-1"],
+        redis_client=redis,
+        generation_probe=RecordingProbe(set()),
+    )
+
+    assert redis.writes == []
+
+
+@pytest.mark.asyncio
+async def test_liveness_probe_failure_fails_closed_as_unavailable() -> None:
+    """活性证据不可得时既不放行也不谎称在结算，直接暴露为不可用。"""
+    redis = FakeOwnershipRedis(owner_map({"run-1": ("worker-1", "lease-1")}))
+
+    async def exploding_probe(worker_id: str, lease_id: str) -> bool:
+        raise RuntimeError("lease store down: redis://secret@host")
+
+    with pytest.raises(guard.RunSettlementGuardUnavailable, match="状态服务不可用") as exc_info:
+        await guard.ensure_runs_settled(
+            ["run-1"],
+            redis_client=redis,
+            generation_probe=exploding_probe,
+        )
+
+    assert "secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_unparseable_owner_token_fails_closed() -> None:
+    redis = FakeOwnershipRedis({run_owner_key("run-1"): "no-separator"})
+    probe = RecordingProbe(set())
+
+    with pytest.raises(guard.RunSettlementGuardUnavailable, match="状态服务不可用"):
+        await guard.ensure_runs_settled(["run-1"], redis_client=redis, generation_probe=probe)
+
+    assert probe.calls == []
+
+
+@pytest.mark.asyncio
+async def test_same_dead_generation_is_probed_once_for_all_its_runs() -> None:
+    bindings = {f"run-{index}": ("worker-1", "lease-dead") for index in range(EXPECTED_ORPHAN_RUNS)}
+    redis = FakeOwnershipRedis(owner_map(bindings))
+    probe = RecordingProbe(set())
+
+    await guard.ensure_runs_settled(list(bindings), redis_client=redis, generation_probe=probe)
+
+    assert probe.calls == [("worker-1", "lease-dead")]
+
+
+def test_default_probe_is_the_authoritative_lease_predicate() -> None:
+    """判据必须是围栏 Lua 自称对齐的那一个，不允许另起一份更松的活性定义。"""
+    probe = guard._lease_generation_probe(object())
+
+    assert probe.__func__ is LeaseStore.is_current
 
 
 @pytest.mark.asyncio
