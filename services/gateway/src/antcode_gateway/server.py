@@ -11,6 +11,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from concurrent import futures
+from pathlib import Path
 from typing import Any, cast
 
 import grpc
@@ -19,6 +20,7 @@ from loguru import logger
 
 from antcode_gateway.config import GatewayConfig, gateway_config
 from antcode_gateway.network import grpc_listen_address
+from antcode_gateway.tls_material import TlsMaterialPaths, create_reloadable_server_credentials
 
 # P1-21: 引入标准 gRPC 健康检查(grpc.health.v1)——Dockerfile 里带的
 # grpc_health_probe 需要服务端真的注册了 HealthServicer 才能拿到
@@ -209,45 +211,30 @@ class GrpcServer:
         self._started = False
         self._health_servicer = None
 
+    def _tls_material_paths(self) -> TlsMaterialPaths:
+        cert_path = self.config.tls_cert_path
+        key_path = self.config.tls_key_path
+        if not cert_path or not key_path:
+            raise ValueError("TLS 已启用但证书或私钥路径缺失")
+        ca_path = self.config.tls_ca_path
+        if self.config.mtls_enabled and not ca_path:
+            raise ValueError("mTLS 已启用但 CA 证书路径缺失")
+        return TlsMaterialPaths(
+            certificate=Path(cert_path),
+            private_key=Path(key_path),
+            client_ca=Path(ca_path) if self.config.mtls_enabled and ca_path else None,
+        )
+
     def _create_server_credentials(self) -> grpc.ServerCredentials | None:
-        """创建服务器 TLS 凭证
+        """创建服务器 TLS 凭证（随磁盘热更新，见 ``tls_material``）
 
         Returns:
             服务器凭证，失败返回 None
         """
         try:
-            cert_path = self.config.tls_cert_path
-            key_path = self.config.tls_key_path
-            if not cert_path or not key_path:
-                raise ValueError("TLS 已启用但证书或私钥路径缺失")
-
-            # 读取证书和密钥
-            with open(cert_path, "rb") as f:
-                cert = f.read()
-            with open(key_path, "rb") as f:
-                key = f.read()
-
-            if self.config.mtls_enabled:
-                # mTLS 模式：需要客户端证书
-                ca_path = self.config.tls_ca_path
-                if not ca_path:
-                    raise ValueError("mTLS 已启用但 CA 证书路径缺失")
-                with open(ca_path, "rb") as f:
-                    ca_cert = f.read()
-
-                credentials = grpc.ssl_server_credentials(
-                    [(key, cert)],
-                    root_certificates=ca_cert,
-                    require_client_auth=True,
-                )
-                logger.debug("已创建 mTLS 服务器凭证")
-            else:
-                # 单向 TLS 模式
-                credentials = grpc.ssl_server_credentials([(key, cert)])
-                logger.debug("已创建 TLS 服务器凭证")
-
+            credentials = create_reloadable_server_credentials(self._tls_material_paths())
+            logger.debug("已创建可热更新的 {} 服务器凭证", "mTLS" if self.config.mtls_enabled else "TLS")
             return credentials
-
         except FileNotFoundError as e:
             logger.error(f"TLS 证书文件不存在: {e}")
             return None

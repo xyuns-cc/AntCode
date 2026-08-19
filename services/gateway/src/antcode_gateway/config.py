@@ -159,6 +159,14 @@ class GatewayConfig:
             # 保活/心跳仍由 keepalive_time_ms / keepalive_timeout_ms 处理。
             # max_connection_age_ms 不显式设置, 沿用 grpc 默认 INT_MAX
             # (禁用主动老化), 避免把 worker↔gateway 的长连接周期性砍断。
+            #
+            # 长连接不老化 ⇒ 证书材料的变化只对**新连接**生效
+            # (``tls_material.create_reloadable_server_credentials``)。
+            # 切断在途会话不靠连接老化, 靠控制面的 Worker 生命周期围栏:
+            # ``lease_service.disable_worker`` 装 Redis fence,
+            # ``LeaseStore.is_current`` 在每条数据面消息上校验, 停用即时生效。
+            # 想靠 max_connection_age_ms 做"定期强制重新握手"之前, 先确认
+            # 上面这条路径为什么不够 —— 它比周期性砍长连接便宜得多。
             ("grpc.max_connection_idle_ms", 300_000),
         ]
 
