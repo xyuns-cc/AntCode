@@ -29,6 +29,7 @@ _TRANSFER_INFO = {
         "include_paths": ["libs/common"],
     },
     "entry_point": "main.py",
+    "language": "python",
 }
 
 _SNAPSHOT_PATH = "antcode_core.application.services.workers.source_bundle_dispatch_service.RunSourceSnapshot"

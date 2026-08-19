@@ -152,11 +152,17 @@ class ExecutionStrategy(StrEnum):
 
 
 class RuntimeKind(StrEnum):
-    """运行时类型"""
+    """可被项目绑定的运行时类型。
+
+    只有 python 一种：运行时是 Worker 上按 python_version 现装的 venv
+    (RuntimeControlService.create_env 的入参就只有 python_version)，而
+    Node/Go/Java 是镜像构建期预装进 PATH 的固定工具链，没有任何"按项目创建"
+    的路径。曾经存在的 JAVA / GO 成员没有任何写入方，只是给 project.language
+    之外又留了一个可分叉的语言真源；执行语言现由
+    ``antcode_contracts.execution_language`` 单独承载。
+    """
 
     PYTHON = "python"
-    JAVA = "java"
-    GO = "go"
 
 
 class RuntimeScope(StrEnum):

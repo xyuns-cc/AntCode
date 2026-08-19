@@ -14,6 +14,10 @@ from loguru import logger
 
 from antcode_core.application.services import lease_fenced_ready_publish as ready_publish
 from antcode_core.application.services.lease_capability_snapshot import LeaseCapabilitySnapshot
+from antcode_core.application.services.workers.dispatch_task_enrichment import (
+    RUNTIME_ENV_KEY,
+    enrich_dispatch_tasks,
+)
 from antcode_core.application.services.workers.worker_capability_routing import (
     capability_requirement_label,
     has_render_capability,
@@ -30,8 +34,6 @@ from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models import Worker, WorkerStatus
 from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
 from antcode_core.observability.tracing import get_current_trace
-
-RUNTIME_ENV_KEY = "ANTCODE_RUNTIME_ENV"
 
 
 def _group_run_ids_by_project(tasks: list[dict]) -> dict[str, list[str]]:
@@ -444,16 +446,8 @@ class WorkerLoadBalancer:
 class WorkerTaskDispatcher:
     """任务分发器 - 支持批量任务和优先级调度。"""
 
-    # 项目类型到优先级的默认映射
-    DEFAULT_PRIORITY_MAP = {
-        "rule": 1,  # 高优先级
-        "code": 2,  # 普通优先级
-        "file": 2,  # 普通优先级
-    }
-
     def __init__(self):
         self.load_balancer = WorkerLoadBalancer()
-        self._pending_tasks = {}
 
     async def dispatch_task(
         self,
@@ -611,23 +605,7 @@ class WorkerTaskDispatcher:
                     reason = failed_items[0].get("reason") if failed_items else "项目同步失败"
                     return BatchDispatchResult(success=False, error=reason, sync_results=sync_results)
 
-            enriched_tasks = []
-            for task in tasks:
-                task_copy = dict(task)
-                environment = dict(task_copy.get("environment") or {})
-                environment.pop(RUNTIME_ENV_KEY, None)
-                task_copy["environment"] = environment
-                run_id = task.get("run_id") or task.get("task_id")
-                if run_id and run_id in run_download_info:
-                    info = run_download_info[run_id]
-                    task_copy["source_bundle_uri"] = info.get("source_bundle_uri", "")
-                    task_copy["source_bundle_sha256"] = info.get("source_bundle_sha256", "")
-                    task_copy["source_bundle_size"] = info.get("source_bundle_size", 0)
-                    task_copy["source_subdir"] = info.get("source_subdir", "")
-                    task_copy["transfer_method"] = info.get("transfer_method", "source_bundle")
-                    task_copy["entry_point"] = info.get("entry_point") or task.get("entry_point", "")
-                    task_copy["resolved_revision"] = info.get("resolved_revision", "")
-                enriched_tasks.append(task_copy)
+            enriched_tasks = enrich_dispatch_tasks(tasks, run_download_info)
 
             lease_snapshot = await self._revalidate_and_bind(
                 enriched_tasks,

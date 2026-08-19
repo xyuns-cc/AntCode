@@ -120,6 +120,26 @@ async def test_import_commit_failure_compensates_created_runtime(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_import_rejects_non_python_entry_point_before_writing_a_contradictory_row(monkeypatch) -> None:
+    """导入路径只建 python 运行时，却把 ProjectCode.language 写死成 python。
+
+    不在这里拦住 main.go，存下的详情行就是自相矛盾的：派发时才被执行语言契约拒掉，
+    错误离用户的导入操作太远，而且那一行永远跑不起来。
+    """
+    transaction = _Transaction()
+    runtime = SimpleNamespace(create_env=AsyncMock(), delete_env=AsyncMock())
+    service = _service(runtime)
+    _patch_database(monkeypatch, service, transaction=transaction, projects=[_project(1)])
+    item = _item("first")
+    item.entry_point = "cmd/main.go"
+
+    with pytest.raises(ValueError, match="仅支持 Python 入口"):
+        await service.import_projects(7, [item])
+
+    import_module.ProjectCode.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_import_exposes_primary_and_compensation_failures(monkeypatch) -> None:
     transaction = _Transaction()
     runtime = SimpleNamespace(

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from antcode_contracts.execution_language import ExecutionLanguage
 from antcode_core.application.services.projects.project_source_service import ProjectSourceService
 
 
@@ -29,7 +30,11 @@ async def test_project_source_builds_git_source_config_from_repository():
             "_get_repository",
             AsyncMock(return_value=repository),
         ),
-        patch.object(service, "_get_entry_point", AsyncMock(return_value="main.py")),
+        patch.object(
+            service,
+            "_get_execution_binding",
+            AsyncMock(return_value=("main.py", ExecutionLanguage.PYTHON)),
+        ),
     ):
         result = await service.get_transfer_info(22)
 
@@ -45,6 +50,7 @@ async def test_project_source_builds_git_source_config_from_repository():
             "credential_id": "cred-1",
         },
         "entry_point": "main.py",
+        "language": "python",
     }
 
 

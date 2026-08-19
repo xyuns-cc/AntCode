@@ -69,6 +69,7 @@ async def test_dispatch_service_builds_source_bundle_dispatch_info():
                     "subdir": "spiders/news",
                 },
                 "entry_point": "main.py",
+                "language": "python",
             },
         )
 
@@ -80,6 +81,7 @@ async def test_dispatch_service_builds_source_bundle_dispatch_info():
         "source_subdir": "spiders/news",
         "entry_point": "main.py",
         "resolved_revision": "a" * 40,
+        "language": "python",
     }
     assert bundle_service.calls[0]["project_public_id"] == "proj-1"
 
@@ -127,6 +129,7 @@ def _transfer_info():
             "subdir": "new/subdir",
         },
         "entry_point": "main.py",
+        "language": "python",
     }
 
 
@@ -233,8 +236,8 @@ async def test_dispatcher_enriches_same_project_tasks_by_run(monkeypatch):
             return_value=(
                 {"synced": ["proj-1"], "skipped": [], "failed": []},
                 {
-                    "run-1": {"source_bundle_sha256": "sha-1"},
-                    "run-2": {"source_bundle_sha256": "sha-2"},
+                    "run-1": {"source_bundle_sha256": "sha-1", "language": "python"},
+                    "run-2": {"source_bundle_sha256": "sha-2", "language": "python"},
                 },
             )
         )

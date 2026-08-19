@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from antcode_contracts.execution_language import (
+    ExecutionLanguage,
+    ExecutionLanguageError,
+    resolve_execution_language,
+)
+
 from antcode_core.application.services.projects.source_bundle_paths import (
     normalize_relative_path,
     normalize_source_subdir,
@@ -120,11 +126,12 @@ class ProjectSourceService:
         repository = await self._get_repository(source.repository_id)
         if repository is None:
             raise ValueError("项目关联的 Git 仓库不存在")
-        entry_point = await self._get_entry_point(project_id)
+        entry_point, language = await self._get_execution_binding(project_id)
         return {
             "transfer_method": "source_bundle",
             "source": self._build_source_config(repository, source),
             "entry_point": entry_point,
+            "language": language.value,
         }
 
     async def get_response(self, project_id: int):
@@ -195,7 +202,26 @@ class ProjectSourceService:
             string_list(include_paths or []),
         )
 
-    async def _get_entry_point(self, project_id: int) -> str:
+    async def _get_execution_binding(self, project_id: int) -> tuple[str, ExecutionLanguage]:
+        """入口文件与执行语言必须同时确定：两者矛盾的项目在派发准备阶段就失败。
+
+        放在这里而不是放到 Worker，是因为这一步跑在 Master 构建 source bundle
+        之前——矛盾的项目根本不会产出可派发的任务，用户在 run 的失败原因里直接
+        看到该改哪个字段，而不是拿到一份用错解释器的执行日志。
+        """
+        detail = await self._get_source_detail(project_id)
+        entry_point = getattr(detail, "entry_point", None)
+        if not entry_point:
+            raise ValueError("项目缺少入口文件配置")
+        normalized_entry = normalize_relative_path(entry_point, field_name="入口文件")
+        try:
+            language = resolve_execution_language(getattr(detail, "language", None), normalized_entry)
+        except ExecutionLanguageError as exc:
+            raise ValueError(str(exc)) from exc
+        return normalized_entry, language
+
+    @staticmethod
+    async def _get_source_detail(project_id: int) -> ProjectCode | ProjectFile | None:
         project = await Project.get_or_none(id=project_id)
         if project is None:
             raise ValueError("项目不存在")
@@ -206,11 +232,7 @@ class ProjectSourceService:
             model = ProjectFile
         else:
             raise ValueError("只有 Git 文件或代码项目支持源码包")
-        detail = await model.get_or_none(project_id=project_id)
-        entry_point = getattr(detail, "entry_point", None)
-        if not entry_point:
-            raise ValueError("项目缺少入口文件配置")
-        return normalize_relative_path(entry_point, field_name="入口文件")
+        return await model.get_or_none(project_id=project_id)
 
     def _build_source_config(self, repository, source) -> dict[str, object]:
         config: dict[str, object] = {

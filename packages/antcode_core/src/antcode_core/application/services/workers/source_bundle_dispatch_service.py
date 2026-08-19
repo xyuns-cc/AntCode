@@ -94,6 +94,12 @@ class SourceBundleDispatchService:
         source = transfer_info.get("source")
         if not isinstance(source, dict):
             raise ValueError("source_bundle 缺少 Git 来源配置")
+        # language 取派发那一刻的项目详情，不进 RunSourceSnapshot：快照冻结的是源码，
+        # 不是项目配置。它与快照里的 entry_point 不同步时由 Worker 侧的
+        # execution_language 契约显式拒绝，不在这里替用户消解。
+        language = str(transfer_info.get("language") or "")
+        if not language:
+            raise ValueError("项目传输信息缺少执行语言")
         unique_run_ids = list(dict.fromkeys(run_ids))
         if not unique_run_ids or any(not run_id for run_id in unique_run_ids):
             raise ValueError("run_id 不能为空，无法记录源码快照")
@@ -101,8 +107,29 @@ class SourceBundleDispatchService:
             project_internal_id,
             unique_run_ids,
         )
-        if not missing_run_ids:
-            return dispatch_info
+        if missing_run_ids:
+            await self._add_new_run_dispatch_info(
+                dispatch_info,
+                missing_run_ids,
+                project_public_id=project_public_id,
+                project_internal_id=project_internal_id,
+                source=source,
+                transfer_info=transfer_info,
+            )
+        for info in dispatch_info.values():
+            info["language"] = language
+        return dispatch_info
+
+    async def _add_new_run_dispatch_info(
+        self,
+        dispatch_info: dict[str, dict[str, object]],
+        missing_run_ids: list[str],
+        *,
+        project_public_id: str,
+        project_internal_id: int,
+        source: dict,
+        transfer_info: dict,
+    ) -> None:
         bundle = await self._bundle_service.create_git_source_bundle(
             project_public_id=project_public_id,
             source_config=source,
@@ -123,7 +150,6 @@ class SourceBundleDispatchService:
                 run_id=run_id,
                 project_id=project_internal_id,
             )
-        return dispatch_info
 
     async def _load_existing_dispatch_info(
         self,

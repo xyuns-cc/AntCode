@@ -653,7 +653,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 932
+      "value": 910
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
@@ -695,19 +695,13 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "C901",
-      "value": 17
+      "value": 15
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "PLR0912",
-      "value": 16
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher.dispatch_batch",
-      "rule": "PLR0915",
-      "value": 54
+      "value": 14
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
@@ -929,7 +923,7 @@
       "path": "packages/antcode_core/src/antcode_core/domain/schemas/project.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 623
+      "value": 617
     },
     {
       "path": "packages/antcode_core/src/antcode_core/domain/schemas/worker_registration.py",
@@ -1974,12 +1968,6 @@
       "function": "-",
       "rule": "FILE_LINES",
       "value": 316
-    },
-    {
-      "path": "services/worker/src/antcode_worker/plugins/code/plugin.py",
-      "function": "CodePlugin._detect_language",
-      "rule": "PLR0911",
-      "value": 7
     },
     {
       "path": "services/worker/src/antcode_worker/plugins/code/plugin.py",

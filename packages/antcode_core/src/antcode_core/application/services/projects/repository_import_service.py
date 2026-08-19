@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from antcode_contracts.execution_language import (
+    ExecutionLanguage,
+    ExecutionLanguageError,
+    language_from_entry_point,
+)
 from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.projects.runtime_rollback import (
@@ -110,9 +115,11 @@ class RepositoryProjectImporter:
 
     @staticmethod
     async def _create_project_code(context: ImportContext, item: Any, project_id: int) -> None:
+        # 写死 python 是有依据的，不是默认值：_validate_import_items 已确认入口
+        # 不是别的语言，且这条路只创建 python 运行时。
         await ProjectCode.create(
             project_id=project_id,
-            language="python",
+            language=ExecutionLanguage.PYTHON.value,
             entry_point=item.entry_point,
             runtime_config=item.runtime_config,
             using_db=context.connection,
@@ -163,12 +170,25 @@ class RepositoryProjectImporter:
         return user.username if user else str(user_id)
 
     @staticmethod
+    def _require_python_entry_point(entry_point: Any) -> None:
+        """入口后缀必须是 Python（或无后缀）：这条路只会建 python 运行时。
+
+        不拦住的话，导入 ``main.go`` 会存下 language=python 的自相矛盾详情行，
+        派发时才被执行语言契约拒掉，错误离用户操作太远。
+        """
+        try:
+            derived = language_from_entry_point(entry_point or "")
+        except ExecutionLanguageError as exc:
+            raise ValueError(f"仓库导入的入口文件不受支持: {exc}") from exc
+        if derived is not None and derived is not ExecutionLanguage.PYTHON:
+            raise ValueError(f"仓库导入仅支持 Python 入口，收到 {derived.value} 入口 {entry_point!r}")
+
+    @staticmethod
     def _validate_import_items(items: list[Any]) -> None:
         for item in items:
             if not getattr(item, "worker_id", None) or not getattr(item, "python_version", None):
                 raise ValueError("仓库导入必须指定 Worker 和 Python 版本")
-            if getattr(item, "runtime_kind", RuntimeKind.PYTHON) != RuntimeKind.PYTHON:
-                raise ValueError("仓库导入仅支持 Python 运行时")
+            RepositoryProjectImporter._require_python_entry_point(getattr(item, "entry_point", ""))
             if getattr(item, "runtime_scope", None) != RuntimeScope.PRIVATE:
                 raise ValueError("仓库导入仅支持新建私有运行时")
             if ExecutionStrategy(item.execution_strategy) != ExecutionStrategy.FIXED_WORKER:

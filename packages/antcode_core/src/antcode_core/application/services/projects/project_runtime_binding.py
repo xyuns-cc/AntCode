@@ -93,9 +93,8 @@ class ProjectRuntimeBindingMixin:
 
     @staticmethod
     def _worker_runtime_request(request):
+        # RuntimeKind 只有 python 一个成员，非法值在 pydantic 边界就被拒，这里不再复查。
         runtime_kind = getattr(request, "runtime_kind", RuntimeKind.PYTHON)
-        if runtime_kind != RuntimeKind.PYTHON:
-            raise HTTPException(status_code=400, detail="当前仅支持 python 运行时")
         dependencies = getattr(request, "dependencies", None)
         return {
             "worker_id": request.worker_id,

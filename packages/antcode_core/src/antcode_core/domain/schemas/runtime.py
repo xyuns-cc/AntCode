@@ -27,14 +27,8 @@ def _normalize_runtime_kind(value):
     """规范化运行时类型"""
     if isinstance(value, RuntimeKind):
         return value
-    if isinstance(value, str):
-        raw = value.strip().lower()
-        if raw == "python":
-            return RuntimeKind.PYTHON
-        if raw == "java":
-            return RuntimeKind.JAVA
-        if raw == "go":
-            return RuntimeKind.GO
+    if isinstance(value, str) and value.strip().lower() == "python":
+        return RuntimeKind.PYTHON
     return value
 
 

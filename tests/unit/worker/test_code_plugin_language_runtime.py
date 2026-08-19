@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 import pytest
+from antcode_contracts.execution_language import ExecutionLanguageError
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import RunContext, RuntimeSpec, TaskPayload
 from antcode_worker.plugins.code.plugin import CodePlugin
@@ -86,5 +87,5 @@ async def test_unrecognized_entry_extension_is_rejected_not_run_as_python(tmp_pa
         runtime_spec=RuntimeSpec(python_path="/opt/antcode/runtime/bin/python"),
     )
 
-    with pytest.raises(RuntimeError, match="无法识别的入口文件类型"):
+    with pytest.raises(ExecutionLanguageError, match="不属于任何受支持的执行语言"):
         await CodePlugin().build_plan(context, _payload("main.rb", workspace))

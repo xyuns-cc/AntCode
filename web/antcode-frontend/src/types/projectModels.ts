@@ -72,7 +72,7 @@ export interface Project {
   worker_env_name?: string
   python_version?: string
   runtime_scope?: 'shared' | 'private'
-  runtime_kind?: 'python' | 'java' | 'go'
+  runtime_kind?: 'python'
   runtime_locator?: string
   dependencies?: string[]
   execution_strategy?: ExecutionStrategy

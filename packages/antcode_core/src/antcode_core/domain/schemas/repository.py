@@ -90,8 +90,6 @@ class ProjectImportItem(BaseModel):
     def validate_runtime_contract(self) -> ProjectImportItem:
         if self.runtime_scope != RuntimeScope.PRIVATE:
             raise ValueError("仓库导入仅支持新建私有运行时")
-        if self.runtime_kind != RuntimeKind.PYTHON:
-            raise ValueError("仓库导入仅支持 Python 运行时")
         if self.execution_strategy != ExecutionStrategy.FIXED_WORKER:
             raise ValueError("仓库导入项目必须固定到运行时所在 Worker")
         if self.worker_id != self.bound_worker_id:

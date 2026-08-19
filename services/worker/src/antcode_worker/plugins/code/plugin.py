@@ -1,13 +1,14 @@
 """代码执行插件（多语言 + 依赖自动装配）。
 
-按 entry_point 后缀自动选择语言运行时：
-- .py / .pyw          → Python（走现有 uv/mise venv 的 python 可执行）
-- .js / .mjs / .cjs   → Node.js（用系统/mise 的 node）
-- .ts / .mts / .cts   → Node.js（要求 workspace 里 devDep 装了 tsx/ts-node，或已 build 好）
-- .jar                → Java（java -jar）
-- .go                 → Go（go run，需要 workspace 有 go.mod）
-- 无后缀              → Python（向后兼容旧调度）
-- 其它后缀            → 拒绝执行（用 Python 去跑 .rb/.rs 只会得到看不懂的语法错误）
+语言判定不在这里做，统一走 ``antcode_contracts.execution_language``：项目声明的
+language（Master 随 ``params.kwargs.language`` 下发）与 entry_point 后缀两个信号
+合并，矛盾即拒绝执行。这里只负责把判定结果翻译成 argv：
+
+- python      → runtime_spec.python_path（uv/mise venv 的解释器）
+- javascript  → 镜像预装的 node
+- typescript  → workspace devDep 里的 tsx / ts-node
+- java        → java -jar
+- go          → go run（需要 workspace 有 go.mod）
 
 依赖装配假设：
 - Python：由 UV/mise 层准备好 venv，context.runtime_spec.python_path 指向解释器
@@ -21,6 +22,12 @@ Node/Go/Java 的语言二进制由镜像构建期预装并写进 PATH（见
 """
 
 import os
+
+from antcode_contracts.execution_language import (
+    ExecutionLanguage,
+    ExecutionLanguageError,
+    resolve_execution_language,
+)
 
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
@@ -36,13 +43,9 @@ from antcode_worker.runtime.language_runtime import (
 )
 from antcode_worker.runtime.node_dependency_policy import install_node_dependencies
 
-_PYTHON_EXT = {".py", ".pyw"}
-_NODE_JS_EXT = {".js", ".mjs", ".cjs"}
-_NODE_TS_EXT = {".ts", ".mts", ".cts"}
-_JAVA_EXT = {".jar"}
-_GO_EXT = {".go"}
 # 顺序即优先级：tsx 是当前主流 runner，ts-node 作为老项目的既有约定保留。
 _TYPESCRIPT_RUNNERS = ("tsx", "ts-node")
+_NODE_LANGUAGES = (ExecutionLanguage.JAVASCRIPT, ExecutionLanguage.TYPESCRIPT)
 
 
 class CodePlugin(PluginBase):
@@ -73,12 +76,10 @@ class CodePlugin(PluginBase):
             errors.append(ep_error)
             return errors
 
-        language = self._detect_language(payload.entry_point)
-        if language == "python":
-            # 沿用旧校验：Python 项目需要 runtime_spec.python_path
-            pass  # 由 build_plan 时校验
-        elif language == "unknown":
-            errors.append(f"无法识别的入口文件类型: {payload.entry_point}")
+        try:
+            self._resolve_language(payload)
+        except ExecutionLanguageError as exc:
+            errors.append(str(exc))
         return errors
 
     def _validate_entry_point(self, payload: TaskPayload) -> str | None:
@@ -112,12 +113,10 @@ class CodePlugin(PluginBase):
         context: RunContext,
         payload: TaskPayload,
     ) -> ExecPlan:
-        # 优先看显式 language（只来自 Task.execution_params.kwargs；项目上存的
-        # project.*_info.language 目前不进派发参数，实际路由靠 entry_point 后缀）。
         language = self._resolve_language(payload)
         cwd = self._get_project_cwd(payload)
         env = self._build_env(payload)
-        if language == "go":
+        if language is ExecutionLanguage.GO:
             env = build_go_execution_env(cwd, env)
 
         # 执行前依赖装配（幂等，复用缓存）
@@ -126,19 +125,7 @@ class CodePlugin(PluginBase):
             cwd=cwd,
             limits=DependencyLimits.from_context(context),
         )
-
-        if language == "python":
-            command, args = self._python_argv(context, payload)
-        elif language == "node_js":
-            command, args = self._node_argv(payload, is_typescript=False)
-        elif language == "node_ts":
-            command, args = self._node_argv(payload, is_typescript=True)
-        elif language == "java":
-            command, args = self._java_argv(payload)
-        elif language == "go":
-            command, args = self._go_argv(payload)
-        else:
-            raise RuntimeError(f"无法识别的入口文件类型，拒绝执行: {payload.entry_point}")
+        command, args = self._build_argv(language, context, payload)
 
         return ExecPlan(
             command=command,
@@ -153,50 +140,34 @@ class CodePlugin(PluginBase):
 
     # ---------- 语言识别 ----------
 
-    # project.code_info.language 到内部标识的映射
-    _LANGUAGE_ALIAS: dict[str, str] = {
-        "python": "python",
-        "py": "python",
-        "javascript": "node_js",
-        "js": "node_js",
-        "node": "node_js",
-        "nodejs": "node_js",
-        "typescript": "node_ts",
-        "ts": "node_ts",
-        "java": "java",
-        "go": "go",
-        "golang": "go",
-    }
+    @staticmethod
+    def _resolve_language(payload: TaskPayload) -> ExecutionLanguage:
+        """合并 Master 下发的 language 与快照 entry_point；矛盾即 ExecutionLanguageError。
 
-    def _resolve_language(self, payload: TaskPayload) -> str:
-        """显式 kwargs.language 优先，否则按 entry_point 后缀识别。"""
-        explicit = payload.kwargs.get("language") if isinstance(payload.kwargs, dict) else None
-        if isinstance(explicit, str) and explicit.strip():
-            mapped = self._LANGUAGE_ALIAS.get(explicit.strip().lower())
-            if mapped:
-                # TypeScript 用户可能配 entry .js/.mjs；不强制降级
-                # Java entry 不是 .jar 时也仍走 java 分支
-                return mapped
-        return self._detect_language(payload.entry_point)
-
-    def _detect_language(self, entry_point: str) -> str:
-        _, ext = os.path.splitext(entry_point.lower())
-        if ext in _PYTHON_EXT:
-            return "python"
-        if ext in _NODE_JS_EXT:
-            return "node_js"
-        if ext in _NODE_TS_EXT:
-            return "node_ts"
-        if ext in _JAVA_EXT:
-            return "java"
-        if ext in _GO_EXT:
-            return "go"
-        if not ext:
-            # 无后缀默认 Python（兼容旧调度）
-            return "python"
-        return "unknown"
+        两者来源不同步是设计内的：entry_point 取自 run 首次派发时冻结的源码快照，
+        language 取自派发那一刻的项目详情。用户改了入口却没改语言（或反之）时，
+        这里必须让 run 显式失败，而不是替他挑一个。
+        """
+        kwargs = payload.kwargs if isinstance(payload.kwargs, dict) else {}
+        return resolve_execution_language(kwargs.get("language"), payload.entry_point)
 
     # ---------- 各语言 argv 构造 ----------
+
+    def _build_argv(
+        self,
+        language: ExecutionLanguage,
+        context: RunContext,
+        payload: TaskPayload,
+    ) -> tuple[str, list[str]]:
+        if language is ExecutionLanguage.PYTHON:
+            return self._python_argv(context, payload)
+        if language in _NODE_LANGUAGES:
+            return self._node_argv(payload, is_typescript=language is ExecutionLanguage.TYPESCRIPT)
+        if language is ExecutionLanguage.JAVA:
+            return self._java_argv(payload)
+        if language is ExecutionLanguage.GO:
+            return self._go_argv(payload)
+        raise RuntimeError(f"CodePlugin 没有 {language.value} 的执行方式实现")
 
     def _python_argv(self, context: RunContext, payload: TaskPayload) -> tuple[str, list[str]]:
         python_exe = self._get_python_executable(context)
@@ -230,7 +201,7 @@ class CodePlugin(PluginBase):
     async def _prepare_deps(
         self,
         *,
-        language: str,
+        language: ExecutionLanguage,
         cwd: str,
         limits: DependencyLimits,
     ) -> None:
@@ -241,15 +212,13 @@ class CodePlugin(PluginBase):
         - Go：外部模块必须提交 vendor，沙箱内始终 GOPROXY=off
         - Java：`.jar` 打包型跳过；Maven 项目暂不自动装（需要 mvn dependency:copy-dependencies）
         """
-        if language == "python":
-            return
-        if language in ("node_js", "node_ts"):
+        if language in _NODE_LANGUAGES:
             await install_node_dependencies(cwd, limits=limits)
-        if language == "go":
+        if language is ExecutionLanguage.GO:
             from antcode_worker.runtime.go_execution_policy import install_go_dependencies
 
             await install_go_dependencies(cwd, limits=limits)
-        # java 暂不自动装依赖
+        # python / java 无需在此装依赖
 
     # ---------- 通用工具 ----------
 
