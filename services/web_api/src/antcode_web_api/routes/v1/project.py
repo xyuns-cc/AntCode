@@ -75,7 +75,7 @@ from antcode_web_api.routes.v1.committed_resource_audit import (
     audit_project_created,
     audit_project_deleted,
 )
-from antcode_web_api.routes.v1.mutation_audit import audit_project_updated
+from antcode_web_api.routes.v1.mutation_audit import AuditedResource, audit_data_exported, audit_project_updated
 from antcode_web_api.routes.v1.project_cache_scope import (
     project_authorization_cache_scope,
 )
@@ -105,8 +105,7 @@ project_router = APIRouter()
 # 批量删除单次上限，避免单个请求占满后台执行资源。
 BATCH_DELETE_MAX_PROJECTS = 100
 
-# 批量删除的逐项失败原因。项目删除最常见的拒绝是"项目下还有在途执行"
-# （含爬取批次 run），只回一串 id 等于没告诉运维该去取消哪一个。
+# 批量删除的逐项失败原因。项目删除最常见的拒绝是"项目下还有在途执行" （含爬取批次 run），只回一串 id 等于没告诉运维该去取消哪一个。
 PROJECT_DELETE_REASONS = BatchReasons(
     action="删除项目",
     missing="项目不存在或无权删除",
@@ -584,6 +583,8 @@ async def export_project_config(
     request: ProjectExportRequest,
     current_user_id=Depends(get_current_user_id),
     current_user=Depends(get_current_user),
+    *,
+    http_request: Request,
 ):
     """导出项目配置"""
     project = await project_service.get_project_by_id(project_id, current_user_id)
@@ -613,9 +614,7 @@ async def export_project_config(
         payload["tasks"] = task_items
 
     if include_logs and task_items:
-        # P1-SEC-01: 执行结果必须沿用与任务相同的 owner 过滤。此前按项目
-        # 重新加载全部执行并导出 result_data/stdout/stderr —— 同项目多用户
-        # 场景下会读取其他用户任务的执行结果。
+        # P1-SEC-01: 执行结果必须沿用与任务相同的 owner 过滤。此前按项目重新加载全部执行并 导出 result_data/stdout/stderr —— 同项目多用户场景下会读取其他用户任务的执行结果。
         executions, run_ids = await _load_export_executions(
             project,
             request.date_range,
@@ -628,8 +627,7 @@ async def export_project_config(
         exec_truncated = bound_execution_export_payloads(exec_dicts)
         payload["executions"] = exec_dicts
         payload["executions_truncated"] = exec_truncated
-        # P2 §4.4 + P1-SEC-03: include_logs 附带 TaskLog（每 run 截取最新 N 行），
-        # 并叠加全局字节预算；预算耗尽即停止读库，顶层 truncated 标记显式暴露截断。
+        # P2 §4.4 + P1-SEC-03: include_logs 附带 TaskLog（每 run 截取最新 N 行）， 并叠加全局字节预算；预算耗尽即停止读库，顶层 truncated 标记显式暴露截断。
         task_logs, logs_truncated = await load_export_task_logs(run_ids)
         payload["task_logs"] = task_logs
         payload["task_logs_truncated"] = logs_truncated
@@ -644,8 +642,11 @@ async def export_project_config(
     )
 
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    # P1-SEC-03: 直接返回 Response，不再 encode + BytesIO 造两份完整副本，
-    # 峰值内存保持在预算量级。
+    # 只记范围不记内容：include_logs 的 payload 里是 executions 的 result_data/stdout/stderr 与 TaskLog。
+    exported = AuditedResource(resource_type="project", resource_name=project.name, resource_id=project.public_id)
+    scope = {"format": fmt, "include_tasks": include_tasks, "include_logs": include_logs, "task_count": len(task_items)}
+    await audit_data_exported(http_request, current_user, exported, scope=scope)
+    # P1-SEC-03: 直接返回 Response，不再 encode + BytesIO 造两份完整副本， 峰值内存保持在预算量级。
     return Response(content=content, media_type=media_type, headers=headers)
 
 
@@ -1099,8 +1100,7 @@ async def batch_delete_projects(request=Body(...), current_user_id=Depends(get_c
             detail=f"批量删除单次上限 {BATCH_DELETE_MAX_PROJECTS} 个项目, 当前 {len(project_ids)} 个",
         )
 
-    # 逐项执行：单个项目被拒不该连坐整批。拒绝原因随 result_data["failures"]
-    # 逐条带出，旧的 failed_projects 字段原样保留，调用方读哪一个都不会断。
+    # 逐项执行：单个项目被拒不该连坐整批。拒绝原因随 result_data["failures"] 逐条带出，旧的 failed_projects 字段原样保留，调用方读哪一个都不会断。
     outcome = await collect_batch_outcome(
         project_ids,
         lambda project_id: project_service.delete_project(project_id, current_user_id),

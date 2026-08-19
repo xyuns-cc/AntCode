@@ -20,10 +20,11 @@ from antcode_core.infrastructure.redis import (
     control_stream,
     get_redis_client,
 )
-from fastapi import Body, Depends, HTTPException, status
+from fastapi import Body, Depends, HTTPException, Request, status
 from loguru import logger
 
 from antcode_web_api.response import BaseResponse, success
+from antcode_web_api.routes.v1.mutation_audit import audit_worker_resources_updated
 
 # 参数验证范围
 _MAX_CONCURRENT_MIN, _MAX_CONCURRENT_MAX = 1, 20
@@ -152,7 +153,7 @@ def _validate_resource_params(request: dict) -> tuple[dict, dict]:
     return redis_params, db_params
 
 
-async def update_worker_resources(worker_id: str, request: dict, current_user: TokenData):
+async def update_worker_resources(worker_id: str, request: dict, current_user: TokenData, *, http_request: Request):
     user = await _require_super_admin(current_user)
     worker = await worker_service.get_worker_by_id(worker_id)
     if not worker:
@@ -160,6 +161,8 @@ async def update_worker_resources(worker_id: str, request: dict, current_user: T
 
     config_params, db_params = _validate_resource_params(request)
 
+    # 先快照旧限额：worker.resource_limits 是原地 update，落库后就再也取不到调整前的值。
+    previous_limits = dict(worker.resource_limits or {})
     if worker.resource_limits is None:
         worker.resource_limits = {}
     worker.resource_limits.update(db_params)
@@ -181,6 +184,13 @@ async def update_worker_resources(worker_id: str, request: dict, current_user: T
         logger.warning(f"发送配置更新失败: {e}")
 
     logger.info(f"超级管理员 {user.username} 调整了 Worker {worker_id} 的资源限制: {config_params}")
+    await audit_worker_resources_updated(
+        http_request,
+        current_user,
+        worker,
+        old_value=previous_limits,
+        new_value={"limits": dict(db_params), "synced": synced},
+    )
 
     return success({"updated": config_params, "synced": synced}, message="资源限制已更新")
 
@@ -205,8 +215,10 @@ def register_resources_routes(router) -> None:
         worker_id: str,
         request: dict = Body(...),
         current_user: TokenData = Depends(get_current_user),
+        *,
+        http_request: Request,
     ):
-        return await update_worker_resources(worker_id, request, current_user)
+        return await update_worker_resources(worker_id, request, current_user, http_request=http_request)
 
 
 __all__ = [

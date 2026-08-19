@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
 from antcode_core.domain.models.audit_log import AuditAction, AuditLog
 from antcode_core.domain.schemas.task import TaskUpdateRequest
 from antcode_core.domain.schemas.user import UserAdminPasswordUpdateRequest
@@ -22,23 +21,9 @@ from antcode_web_api.routes.v1 import tasks as task_routes
 from antcode_web_api.routes.v1 import tasks_execute, tasks_runs, workers_crud
 from antcode_web_api.routes.v1 import users as user_routes
 from fastapi import HTTPException
-from tortoise import Tortoise
 
 OPERATOR = SimpleNamespace(user_id=7, username="ops")
 OPERATOR_IP = "127.0.0.1"
-
-
-@pytest_asyncio.fixture
-async def audit_table():
-    await Tortoise.init(
-        db_url="sqlite://:memory:",
-        modules={"models": ["antcode_core.domain.models"]},
-    )
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 async def _only_log(action: AuditAction) -> AuditLog:

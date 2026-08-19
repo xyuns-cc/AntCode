@@ -331,20 +331,18 @@ async def create_task_from_template(template_id: str, request: dict, current_use
     )
 
 
-async def export_task_config(task_id: str, format: str = "json", current_user=None):
+async def export_task_config(task_id: str, format: str = "json", current_user=None, *, http_request):
     return await _tasks_transfer.export_task_config(
-        task_id,
-        format,
-        current_user,
-        task_export_payload=_task_export_payload,
+        task_id, format, current_user, http_request=http_request, task_export_payload=_task_export_payload
     )
 
 
-async def import_task_config(file, project_id: str | None = None, current_user=None):
+async def import_task_config(file, project_id: str | None = None, current_user=None, *, http_request):
     return await _tasks_transfer.import_task_config(
         file,
         project_id,
         current_user,
+        http_request=http_request,
         max_import_bytes=MAX_TASK_IMPORT_BYTES,
         create_task_response=create_task_response,
         ensure_specified_worker_access=_ensure_specified_worker_access,

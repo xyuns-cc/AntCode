@@ -13,8 +13,11 @@ from antcode_core.common.exceptions import WorkerUnavailableError
 from antcode_core.domain.models.enums import ExecutionStrategy
 from antcode_core.domain.schemas.repository import ImportProjectsPayload, ProjectImportItem
 from antcode_web_api.routes.v1 import repositories
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
 from pydantic import ValidationError
+
+OPERATOR = SimpleNamespace(user_id=7, username="ops")
+HTTP_REQUEST = Request({"type": "http", "client": ("127.0.0.1", 1234)})
 
 
 def _payload(*, dependencies: list[str] | None = None) -> ImportProjectsPayload:
@@ -42,20 +45,24 @@ async def test_regular_user_cannot_import_with_unauthorized_worker(monkeypatch) 
     monkeypatch.setattr(repositories.project_source_service, "import_projects", import_projects)
 
     with pytest.raises(HTTPException) as exc_info:
-        await repositories.import_projects_from_repository(_payload(), current_user_id=7)
+        await repositories.import_projects_from_repository(
+            _payload(), current_user_id=7, current_user=OPERATOR, http_request=HTTP_REQUEST
+        )
 
     assert exc_info.value.status_code == 403
     import_projects.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_regular_user_can_import_with_authorized_worker(monkeypatch) -> None:
+async def test_regular_user_can_import_with_authorized_worker(audit_table, monkeypatch) -> None:
     authorize = AsyncMock(return_value=SimpleNamespace(public_id="worker-1"))
     monkeypatch.setattr(repositories, "ensure_worker_access", authorize)
     import_projects = AsyncMock(return_value=["project-1"])
     monkeypatch.setattr(repositories.project_source_service, "import_projects", import_projects)
 
-    response = await repositories.import_projects_from_repository(_payload(), current_user_id=7)
+    response = await repositories.import_projects_from_repository(
+        _payload(), current_user_id=7, current_user=OPERATOR, http_request=HTTP_REQUEST
+    )
 
     authorize.assert_awaited_once_with("worker-1", 7)
     import_projects.assert_awaited_once()
@@ -64,7 +71,7 @@ async def test_regular_user_can_import_with_authorized_worker(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_admin_can_import_project_with_runtime_dependencies(monkeypatch) -> None:
+async def test_admin_can_import_project_with_runtime_dependencies(audit_table, monkeypatch) -> None:
     authorize = AsyncMock(return_value=SimpleNamespace(public_id="worker-1"))
     monkeypatch.setattr(repositories, "ensure_worker_admin_access", authorize)
     import_projects = AsyncMock(return_value=["project-1"])
@@ -73,6 +80,8 @@ async def test_admin_can_import_project_with_runtime_dependencies(monkeypatch) -
     response = await repositories.import_projects_from_repository(
         _payload(dependencies=["requests==2.32.0"]),
         current_user_id=1,
+        current_user=OPERATOR,
+        http_request=HTTP_REQUEST,
     )
 
     authorize.assert_awaited_once_with("worker-1", 1)

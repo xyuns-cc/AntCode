@@ -8,6 +8,7 @@ from antcode_core.domain.models.enums import ExecutionStrategy, ScheduleType
 from antcode_core.domain.schemas.task import TaskCreateRequest
 from antcode_web_api.routes.v1 import project as project_routes
 from antcode_web_api.routes.v1 import tasks as task_routes
+from fastapi import Request
 
 
 def _sensitive_task():
@@ -57,9 +58,9 @@ async def test_task_and_project_exports_omit_decrypted_runtime_secrets() -> None
 
 
 @pytest.mark.asyncio
-async def test_admin_export_of_other_users_task_stays_secret_free(monkeypatch) -> None:
+async def test_admin_export_of_other_users_task_stays_secret_free(audit_table, monkeypatch) -> None:
     task = _sensitive_task()
-    project = SimpleNamespace(id=1, public_id="project-1")
+    project = SimpleNamespace(id=1, public_id="project-1", name="exportable-project")
     get_task = AsyncMock(return_value=task)
     monkeypatch.setattr(task_routes.scheduler_service, "get_task_by_id", get_task)
     monkeypatch.setattr(Project, "get_or_none", AsyncMock(return_value=project))
@@ -67,7 +68,8 @@ async def test_admin_export_of_other_users_task_stays_secret_free(monkeypatch) -
     response = await task_routes.export_task_config(
         "task-other-user",
         format="json",
-        current_user=SimpleNamespace(user_id=99, is_admin=True),
+        current_user=SimpleNamespace(user_id=99, username="admin", is_admin=True),
+        http_request=Request({"type": "http", "client": ("127.0.0.1", 1234)}),
     )
     body = b"".join([chunk async for chunk in response.body_iterator])
     exported = json.loads(body)

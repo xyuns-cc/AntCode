@@ -35,20 +35,19 @@ from antcode_core.domain.schemas.crawl import (
     SystemMetricsInfo,
     TestStatusResponse,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
 
 from antcode_web_api.response import Messages, page
 from antcode_web_api.response import success as success_response
+from antcode_web_api.routes.v1.mutation_audit import AuditedResource, audit_data_exported
 from antcode_web_api.services.crawl_batch_export import build_batch_export_response
 from antcode_web_api.services.crawl_item_stream import iter_batch_items
 
 router = APIRouter()
 
 
-# =============================================================================
-# 权限校验辅助
-# =============================================================================
+# ===== 权限校验辅助 =====
 
 
 async def _verify_batch_owner(batch_id: str, current_user: TokenData) -> CrawlBatch:
@@ -84,9 +83,7 @@ async def _verify_project_access(project_public_id: str, current_user: TokenData
     return project
 
 
-# =============================================================================
-# 辅助函数
-# =============================================================================
+# ===== 辅助函数 =====
 
 
 async def _build_batch_response(
@@ -123,9 +120,7 @@ async def _build_batch_response(
     )
 
 
-# =============================================================================
-# 批次管理 API
-# =============================================================================
+# ===== 批次管理 API =====
 
 
 @router.post(
@@ -407,9 +402,7 @@ async def cancel_batch(
         )
 
 
-# =============================================================================
-# 进度查询 API
-# =============================================================================
+# ===== 进度查询 API =====
 
 
 @router.get(
@@ -476,9 +469,7 @@ async def get_batch_progress(
         )
 
 
-# =============================================================================
-# 测试执行 API
-# =============================================================================
+# ===== 测试执行 API =====
 
 
 @router.post(
@@ -689,9 +680,7 @@ async def cleanup_test(
         )
 
 
-# =============================================================================
-# R1-P2-28: 批次维度数据聚合 + 导出（产品闭环）
-# =============================================================================
+# ===== R1-P2-28: 批次维度数据聚合 + 导出（产品闭环） =====
 
 
 @router.get(
@@ -744,15 +733,18 @@ async def export_batch(
     batch_id: str,
     format: str = Query("json", pattern="^(json|csv)$"),
     current_user: TokenData = Depends(get_current_user),
+    *,
+    http_request: Request,
 ):
     """流式导出批次的完整 CSV/JSON 数据集。"""
-    await _verify_batch_owner(batch_id, current_user)
+    batch = await _verify_batch_owner(batch_id, current_user)
+    # 响应体是惰性流，这条记的是"导出已受理"而非"已传输完成"；取数权限此刻已过，追责要的正是人、IP 与批次。
+    exported = AuditedResource(resource_type="crawl_batch", resource_name=batch.name, resource_id=batch.public_id)
+    await audit_data_exported(http_request, current_user, exported, scope={"format": format})
     return build_batch_export_response(batch_id, format, iter_batch_items)
 
 
-# =============================================================================
-# 监控指标 API
-# =============================================================================
+# ===== 监控指标 API =====
 
 
 @router.get(

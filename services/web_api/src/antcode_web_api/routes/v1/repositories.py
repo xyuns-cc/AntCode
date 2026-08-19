@@ -10,7 +10,7 @@ from antcode_core.application.services.projects.repository_service import (
     repository_service,
 )
 from antcode_core.common.error_messages import normalize_persisted_error_message
-from antcode_core.common.security.auth import get_current_user_id
+from antcode_core.common.security.auth import TokenData, get_current_user, get_current_user_id
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.repository import (
     ImportProjectsPayload,
@@ -22,10 +22,11 @@ from antcode_core.domain.schemas.repository import (
     RepositoryScanResponse,
     RepositoryUpdateRequest,
 )
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from antcode_web_api.response import Messages
 from antcode_web_api.response import success as success_response
+from antcode_web_api.routes.v1.mutation_audit import AuditedResource, audit_data_imported
 from antcode_web_api.routes.v1.runtime_access import (
     ensure_worker_access,
     ensure_worker_admin_access,
@@ -108,6 +109,9 @@ async def scan_repository(
 async def import_projects_from_repository(
     payload: ImportProjectsPayload,
     current_user_id: int = Depends(get_current_user_id),
+    current_user: TokenData = Depends(get_current_user),
+    *,
+    http_request: Request,
 ):
     """O4: 从 Git 仓库批量导入项目。
 
@@ -123,6 +127,15 @@ async def import_projects_from_repository(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await audit_data_imported(
+        http_request,
+        current_user,
+        AuditedResource(resource_type="project", resource_name=f"{len(created)} 个项目"),
+        scope={
+            "repository_ids": sorted({item.repository_id for item in payload.projects}),
+            "created_project_ids": created,
+        },
+    )
     return success_response(
         ImportProjectsResult(created=created),
         message=Messages.CREATED_SUCCESS,

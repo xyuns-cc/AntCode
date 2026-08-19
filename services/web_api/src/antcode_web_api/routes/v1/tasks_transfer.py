@@ -1,20 +1,9 @@
 """任务导入 / 导出 / 复制 / 模板 / 依赖 / Cron 校验接口。
 
-P2 拆分自 tasks.py: 8 个 handler + 5 helper + 3 schema + 1 常量:
-- POST /tasks/validate-cron (validate_cron_expression)
-- GET  /tasks/templates (list_task_templates)
-- POST /tasks/templates/{template_id}/create (create_task_from_template)
-- GET  /tasks/{task_id}/export (export_task_config)
-- POST /tasks/import (import_task_config)
-- GET  /tasks/{task_id}/dependencies (get_task_dependencies)
-- PUT  /tasks/{task_id}/dependencies (update_task_dependencies)
-- POST /tasks/{task_id}/duplicate (duplicate_task)
-
-契约 (URL / DI / 返回) 与旧实现一致。create_task_response /
-_ensure_specified_worker_access / _generate_unique_task_name /
-_task_export_payload / _parse_task_import_payload /
-_decode_task_import_bytes 由 register_transfer_routes 时注入避免循环
-import。
+P2 拆分自 tasks.py 的 8 个 handler + 5 helper + 3 schema + 1 常量：validate-cron、
+templates、templates/{id}/create、{id}/export、import、{id}/dependencies(GET/PUT)、
+{id}/duplicate。契约 (URL / DI / 返回) 与旧实现一致；create_task_response 等 6 个
+helper 由 register_transfer_routes 注入以避免循环 import。
 """
 
 from __future__ import annotations
@@ -32,14 +21,13 @@ from antcode_core.domain.models.enums import ProjectType
 from antcode_core.domain.schemas.common import BaseResponse
 from antcode_core.domain.schemas.task import TaskCreateRequest as TaskCreate
 from antcode_core.domain.schemas.task import TaskResponse
-from fastapi import Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from antcode_web_api.response import Messages, TaskResponseBuilder
-from antcode_web_api.response import (
-    success as success_response,
-)
+from antcode_web_api.response import success as success_response
+from antcode_web_api.routes.v1.mutation_audit import AuditedResource, audit_data_exported, audit_data_imported
 from antcode_web_api.utils.yaml_export import yaml_dump as _yaml_dump
 
 
@@ -127,6 +115,7 @@ async def export_task_config(
     format: str,
     current_user,
     *,
+    http_request,
     task_export_payload,
 ):
     """导出任务配置"""
@@ -137,6 +126,9 @@ async def export_task_config(
     project = await Project.get_or_none(id=task.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    exported = AuditedResource(resource_type="task", resource_name=task.name, resource_id=task.public_id)
+    await audit_data_exported(http_request, current_user, exported, scope={"format": format, "project": project.name})
 
     payload = {
         "version": 1,
@@ -181,6 +173,7 @@ async def import_task_config(
     project_id: str | None,
     current_user,
     *,
+    http_request,
     max_import_bytes: int,
     create_task_response,
     ensure_specified_worker_access,
@@ -220,6 +213,9 @@ async def import_task_config(
         internal_project_id=project.id,
         specified_worker_id=getattr(task_data, "specified_worker_id", None),
     )
+    imported = AuditedResource(resource_type="task", resource_name=task.name, resource_id=task.public_id)
+    scope = {"source_filename": file.filename, "project": project.name}
+    await audit_data_imported(http_request, current_user, imported, scope=scope)
     return success_response(create_task_response(task), message=Messages.CREATED_SUCCESS)
 
 
@@ -453,13 +449,12 @@ def register_transfer_routes(
         task_id: str,
         format: str = Query("json", pattern="^(json|yaml)$"),
         current_user=Depends(get_current_user),
+        *,
+        http_request: Request,
     ):
         """导出任务配置"""
         return await export_task_config(
-            task_id,
-            format,
-            current_user,
-            task_export_payload=task_export_payload,
+            task_id, format, current_user, http_request=http_request, task_export_payload=task_export_payload
         )
 
     @router.post("/import", response_model=BaseResponse[TaskResponse])
@@ -467,12 +462,15 @@ def register_transfer_routes(
         file: UploadFile = File(...),
         project_id: str | None = Form(None),
         current_user=Depends(get_current_user),
+        *,
+        http_request: Request,
     ):
         """导入任务配置"""
         return await import_task_config(
             file,
             project_id,
             current_user,
+            http_request=http_request,
             max_import_bytes=max_import_bytes,
             create_task_response=create_task_response,
             ensure_specified_worker_access=ensure_specified_worker_access,

@@ -1091,7 +1091,7 @@
       "path": "services/gateway/src/antcode_gateway/server.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 484
+      "value": 471
     },
     {
       "path": "services/gateway/src/antcode_gateway/server.py",
@@ -1349,7 +1349,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1050
+      "value": 1042
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
@@ -1487,7 +1487,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 544
+      "value": 542
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks.py",
@@ -1511,7 +1511,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks_transfer.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 534
+      "value": 532
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",

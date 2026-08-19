@@ -552,8 +552,8 @@ async def get_worker_resources(worker_id: str, current_user):
     return await _workers_resources.get_worker_resources(worker_id, current_user)
 
 
-async def update_worker_resources(worker_id: str, request: dict, current_user):
-    return await _workers_resources.update_worker_resources(worker_id, request, current_user)
+async def update_worker_resources(worker_id: str, request: dict, current_user, *, http_request):
+    return await _workers_resources.update_worker_resources(worker_id, request, current_user, http_request=http_request)
 
 
 # P2 拆分: 3 个 spider stats 查询接口移至 workers_spider.py, 通过

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -100,10 +101,10 @@ def test_create_form_accepts_repository_source_fields():
 def test_project_route_does_not_copy_project_file_source_mirrors():
     source = Path(project_route.__file__).read_text(encoding="utf-8")
 
-    assert "source_url" not in source
-    assert "source_subdir" not in source
-    assert "source_revision" not in source
-    assert "source_name" not in source
+    # 按完整标识符匹配：裸子串会被 ``resource_name`` 这类无关名字误伤，
+    # 判据要的是"这几个镜像字段作为标识符出现过"。
+    for mirror_field in ("source_url", "source_subdir", "source_revision", "source_name"):
+        assert re.search(rf"\b{mirror_field}\b", source) is None, mirror_field
 
 
 def test_project_route_has_no_legacy_source_contract():
