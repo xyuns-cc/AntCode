@@ -165,6 +165,16 @@ class ProcessInfo:
     memory_peak_mb: float = 0
 
 
+def _limit_breach_result(process_info: ProcessInfo) -> tuple[RunStatus, ExitReason, str] | None:
+    """已采样的峰值是否越过 CPU/内存上限；未越过返回 None。"""
+    exec_plan = process_info.exec_plan
+    if exec_plan.cpu_limit_seconds > 0 and process_info.cpu_time_seconds > exec_plan.cpu_limit_seconds:
+        return RunStatus.FAILED, ExitReason.CPU_LIMIT, "CPU 时间超限"
+    if exec_plan.memory_limit_mb > 0 and process_info.memory_peak_mb > exec_plan.memory_limit_mb:
+        return RunStatus.FAILED, ExitReason.OOM, "内存超限"
+    return None
+
+
 class ProcessExecutor(BaseExecutor):
     """
     进程执行器
@@ -684,16 +694,7 @@ class ProcessExecutor(BaseExecutor):
         return 5.0
 
     def _determine_result(self, exit_code: int, process_info: ProcessInfo) -> tuple[RunStatus, ExitReason, str | None]:
-        """
-        确定执行结果
-
-        Args:
-            exit_code: 退出码
-            process_info: 进程信息
-
-        Returns:
-            (status, exit_reason, error_message)
-        """
+        """把退出码与已采样的资源用量翻译成 (status, exit_reason, error_message)。"""
         if process_info.cancelled:
             return RunStatus.CANCELLED, ExitReason.CANCELLED, "任务被取消"
 
@@ -707,16 +708,15 @@ class ProcessExecutor(BaseExecutor):
                 f"执行超时 ({process_info.exec_plan.timeout_seconds}s)",
             )
 
+        # 超限判定必须排在"被信号杀死"之前：内存上限主要由 _monitor_resources
+        # 主动 SIGKILL 进程树来兑现（RLIMIT_DATA 不覆盖 MAP_SHARED 与 tmpfs），
+        # 退出码恒为 -9，先匹配 KILLED 会把"内存超限"抹成笼统的"进程被终止"。
+        breach = _limit_breach_result(process_info)
+        if breach is not None:
+            return breach
+
         if exit_code in (-signal.SIGTERM, -signal.SIGKILL, -15, -9):
             return RunStatus.KILLED, ExitReason.KILLED, "进程被终止"
-
-        # 检查是否因资源限制被终止
-        exec_plan = process_info.exec_plan
-        if exec_plan.cpu_limit_seconds > 0 and process_info.cpu_time_seconds > exec_plan.cpu_limit_seconds:
-            return RunStatus.FAILED, ExitReason.CPU_LIMIT, "CPU 时间超限"
-
-        if exec_plan.memory_limit_mb > 0 and process_info.memory_peak_mb > exec_plan.memory_limit_mb:
-            return RunStatus.FAILED, ExitReason.OOM, "内存超限"
 
         return RunStatus.FAILED, ExitReason.ERROR, f"退出码: {exit_code}"
 

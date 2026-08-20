@@ -1852,12 +1852,6 @@
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "ProcessExecutor._determine_result",
-      "rule": "PLR0911",
-      "value": 7
-    },
-    {
-      "path": "services/worker/src/antcode_worker/executor/process.py",
-      "function": "ProcessExecutor._determine_result",
       "rule": "PLR2004",
       "value": 1
     },

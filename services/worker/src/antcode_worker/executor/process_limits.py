@@ -24,6 +24,27 @@ except ImportError:
 _BWRAP_EXECUTABLE = "bwrap"
 _BYTES_PER_MIB = 1024 * 1024
 
+# 内存上限映射到 RLIMIT_DATA 而不是 RLIMIT_AS。
+#
+# RLIMIT_AS 限的是**虚拟地址空间**，而现代运行时会 PROT_NONE 预留远超实际用量的
+# 地址区间（预留不占物理页）：JVM 光 compressed class space 就保留 1GiB，tsx 的
+# V8 WASM 要 32~64GB。按"预留量"收费的结果是——真机实测，同一 bwrap 画像下同一个
+# 用例：Java 在 RLIMIT_AS 2808MB（31GB/8 核机器的自适应默认值）起不来 JVM，
+# RLIMIT_DATA 128MB 就能跑；TypeScript 在 RLIMIT_AS 32768MB 仍 OOM、要 65536MB
+# 才过，而 task_memory_limit_mb 的 API 上限只有 8192MB，即抬上限根本无解，
+# RLIMIT_DATA 256MB 直接通过。
+#
+# RLIMIT_DATA 自 Linux 4.7 起覆盖 brk 与私有可写映射，PROT_NONE 预留不计入，
+# 因此收的是"真的会写下去的内存"。
+#
+# 语义代价（必须知情）：MAP_SHARED 匿名映射与 tmpfs 页不计入 RLIMIT_DATA，
+# 而 RLIMIT_AS 会计入。这部分改由两层真 RSS 的边界兜底——ProcessExecutor
+# 的进程树 RSS 监控（超限直接杀进程组）与容器级 cgroup mem_limit。
+# 容器内 /sys/fs/cgroup 是只读挂载且 cgroup.subtree_control 为空，
+# 在现有安全画像（cap_drop ALL / no-new-privileges / 非 root）下无法为每个任务
+# 创建 cgroup，所以"每任务 RSS 硬限额"没有内核级实现，只有上述监控级实现。
+_MEMORY_RLIMIT_NAME = "RLIMIT_DATA"
+
 # B8: Windows 上 ProcessExecutor 根本无法工作，必须显式拒绝而不是假装沙箱生效。
 _WINDOWS_UNSUPPORTED_REASON = (
     "ProcessExecutor 依赖 POSIX 原语：subprocess 在 Windows 上直接拒绝 preexec_fn"
@@ -53,8 +74,11 @@ class SandboxLimits:
     file_size_mb: int
 
     def describe(self) -> str:
+        # 点名内存用的是哪一项 rlimit：它决定了"限住的是什么"（可写数据段而非
+        # 虚拟地址空间），排障时不写清楚会把人引向错误的量级判断。
         return (
-            f"enforce_rlimit={self.enforce_rlimit}, cpu={self.cpu_seconds}s, mem={self.memory_mb}MB, "
+            f"enforce_rlimit={self.enforce_rlimit}, cpu={self.cpu_seconds}s, "
+            f"mem={self.memory_mb}MB({_MEMORY_RLIMIT_NAME}), "
             f"nofile={self.max_open_files}, nproc={self.max_processes}, fsize={self.file_size_mb}MB, "
             f"platform={sys.platform}"
         )
@@ -70,7 +94,7 @@ class SandboxLimits:
             return ()
         candidates = (
             ("RLIMIT_CPU", self.cpu_seconds),
-            ("RLIMIT_AS", self.memory_mb * _BYTES_PER_MIB),
+            (_MEMORY_RLIMIT_NAME, self.memory_mb * _BYTES_PER_MIB),
             ("RLIMIT_NOFILE", self.max_open_files),
             ("RLIMIT_NPROC", self.max_processes),
             ("RLIMIT_FSIZE", self.file_size_mb * _BYTES_PER_MIB),
@@ -104,8 +128,8 @@ def apply_rlimit(request: RlimitRequest) -> None:
     """在子进程内施加单项 rlimit；失败直接抛出（fail-closed）。
 
     ``preflight_rlimit_support`` 已保证 ``resource`` 与该常量存在，因此这里
-    只可能因内核拒绝而失败（例如 macOS 的 RLIMIT_AS 恒返回 EINVAL）——那正是
-    必须让子进程起不来的情况。
+    只可能因内核拒绝而失败（例如 macOS 上 RLIMIT_DATA / RLIMIT_AS 同样拒绝下调，
+    抛 "current limit exceeds maximum limit"）——那正是必须让子进程起不来的情况。
     """
     limit_kind = getattr(resource, request.limit_name)
     resource.setrlimit(limit_kind, (request.limit_value, request.limit_value))

@@ -22,7 +22,12 @@ def build_dependency_preexec(*, cpu_seconds: int, memory_mb: int) -> Callable[[]
     def apply_limits() -> None:
         os.setsid()
         _set_limit(resource.RLIMIT_CPU, cpu_seconds)
-        _set_limit(resource.RLIMIT_AS, memory_mb * 1024 * 1024)
+        # 与任务子进程同源的理由（见 executor/process_limits.py）：装依赖跑的是
+        # npm/node，V8 预留的虚拟地址空间远超实际用量。真机实测，同一个
+        # `npm install --offline`：RLIMIT_AS 512MB（DEPENDENCY_MEMORY_MB 默认值）
+        # 下 node 直接 "Fatal process out of memory" 核心转储，RLIMIT_DATA 512MB
+        # 下正常跑完。限可写数据段而不是地址空间。
+        _set_limit(resource.RLIMIT_DATA, memory_mb * 1024 * 1024)
         _set_limit(resource.RLIMIT_NOFILE, DEPENDENCY_MAX_OPEN_FILES)
         _set_limit(resource.RLIMIT_FSIZE, DEPENDENCY_MAX_FILE_MB * 1024 * 1024)
 

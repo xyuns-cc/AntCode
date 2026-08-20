@@ -277,7 +277,7 @@ class WorkerConfig:
     max_concurrent_tasks: int = 0  # 最大并发任务数（0=自动计算）
     task_timeout: int = 3600  # 任务默认超时时间（秒）
     task_cpu_time_limit_sec: int = 0  # 单任务 CPU 时间上限（秒，0=自动）
-    task_memory_limit_mb: int = 0  # 单任务内存上限（MB，0=自动）
+    task_memory_limit_mb: int = 0  # 单任务可写内存上限（MB，0=自动；语义见 executor/process_limits.py）
     auto_resource_limit: bool = True  # 是否启用自适应资源限制
 
     # 沙箱硬限制（POSIX rlimit；非 POSIX 平台自动跳过）

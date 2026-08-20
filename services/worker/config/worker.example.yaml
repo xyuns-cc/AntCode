@@ -32,7 +32,12 @@ heartbeat_timeout: 60         # 心跳超时（秒）
 max_concurrent_tasks: 0       # 最大并发（0=自动计算）
 task_timeout: 3600            # 默认超时（秒）
 task_cpu_time_limit_sec: 0    # CPU 时间限制（0=自动）
-task_memory_limit_mb: 0       # 内存限制（0=自动）
+# 单任务内存限制（0=自动）。两层含义，别按"虚拟内存上限"理解：
+#   1) RLIMIT_DATA 硬限——限可写数据段（brk + 私有可写映射），JVM/V8 的
+#      PROT_NONE 地址预留不计入，所以这里填的是"真的会写下去的内存"；
+#   2) 进程树 RSS 监控——按真实 RSS 采样，超限直接杀掉整棵进程树。
+# MAP_SHARED 与 tmpfs 页只受 (2) 与容器级 mem_limit 约束，不受 (1) 约束。
+task_memory_limit_mb: 0
 auto_resource_limit: true     # 启用自适应资源限制
 
 # 流控配置（可选）
