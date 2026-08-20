@@ -13,6 +13,7 @@ from .migration_runtime_worker_cases import PROJECT_RUNTIME_WORKER_ID
 from .migration_scheduler_cases import SCHEDULER_AUTHORITY
 from .migration_support import FailureExpectation, MigrationCase, SchemaExpectation
 from .migration_task_project_fk_cases import TASK_PROJECT_FOREIGN_KEY
+from .migration_task_run_resource_cases import TASK_RUN_RESOURCE_USAGE
 from .migration_worker_credential_cases import WORKER_CREDENTIALS
 
 TASK_LOGS = MigrationCase(
@@ -263,4 +264,5 @@ MIGRATION_CASES = (
     PROJECT_SOURCE_INCLUDE_PATHS,
     PROJECT_BOUND_WORKER,
     PROJECT_RUNTIME_WORKER_ID,
+    TASK_RUN_RESOURCE_USAGE,
 )

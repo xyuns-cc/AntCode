@@ -65,10 +65,6 @@ class TaskRun(BaseModel):
 
     result_data: fields.JSONField[dict[str, Any] | None] = fields.JSONField(null=True)
 
-    # 资源使用
-    cpu_usage = fields.FloatField(null=True)
-    memory_usage = fields.BigIntField(null=True)
-
     # 心跳时间 - 用于检测任务是否中断
     last_heartbeat = fields.DatetimeField(null=True, description="最后心跳时间")
     next_retry_at = fields.DatetimeField(null=True, description="下次重试时间")
