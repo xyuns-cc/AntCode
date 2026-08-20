@@ -7,6 +7,7 @@ from antcode_core.application.services.projects.runtime_rollback import (
     RuntimeReservation,
     RuntimeRollback,
 )
+from antcode_core.application.services.runtime.runtime_control_failures import runtime_control_failure
 from antcode_core.application.services.runtime.runtime_control_service import (
     RuntimeControlService,
     runtime_control_service,
@@ -163,8 +164,7 @@ class ProjectRuntimeBindingMixin:
             owner_user_id=runtime["owner_user_id"],
         )
         if not result.get("success"):
-            detail = result.get("error") or "未知错误"
-            raise HTTPException(status_code=500, detail=f"创建运行时失败: {detail}")
+            raise runtime_control_failure("创建运行时", result)
         if rollback is not None:
             rollback.register(RuntimeReservation(runtime["worker_id"], runtime["env_name"]))
 

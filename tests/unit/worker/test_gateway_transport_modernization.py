@@ -399,7 +399,7 @@ async def test_send_control_result_degrades_unserializable_data_without_connecti
     request = stub.AckControl.await_args.args[0]
     assert request.success is False
     assert "结果序列化失败" in request.error
-    assert request.data_json == "null"
+    # 降级回包的 data 形态由 test_runtime_control_failure_codes 锁定（失败必须带结构化码）。
 
 
 @pytest.mark.asyncio

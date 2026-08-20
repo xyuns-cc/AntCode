@@ -1763,7 +1763,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1732
+      "value": 1730
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
@@ -2033,7 +2033,7 @@
       "path": "services/worker/src/antcode_worker/runtime/uv_manager.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 669
+      "value": 666
     },
     {
       "path": "services/worker/src/antcode_worker/runtime/uv_manager.py",

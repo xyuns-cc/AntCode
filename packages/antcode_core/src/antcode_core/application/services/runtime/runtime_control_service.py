@@ -6,6 +6,11 @@ import json
 import uuid
 from typing import Any
 
+from antcode_contracts.runtime_control_errors import (
+    RUNTIME_CONTROL_EMPTY_REPLY,
+    RUNTIME_CONTROL_TIMEOUT,
+    require_runtime_control_error_code,
+)
 from antcode_contracts.runtime_metadata import validate_runtime_creator, validate_runtime_metadata
 from loguru import logger
 
@@ -42,7 +47,15 @@ def _decode_runtime_response(decoded: dict[str, Any]) -> dict[str, Any]:
     serialized = json.dumps(data_obj, ensure_ascii=False, allow_nan=False)
     if len(serialized.encode("utf-8")) > MAX_RUNTIME_RESULT_BYTES:
         raise RuntimeError("运行时控制响应 data 超过 1 MiB 上限")
-    return {"success": success_value == "true", "error": error, "data": data_obj}
+    if success_value == "true":
+        return {"success": True, "error": error, "data": data_obj}
+    # 失败必须带结构化错误码：中文 error 文案只给人看，判定失败归属只认码。
+    return {
+        "success": False,
+        "error": error,
+        "data": data_obj,
+        "error_code": require_runtime_control_error_code(data_obj),
+    }
 
 
 async def write_control_event(
@@ -113,11 +126,12 @@ class RuntimeControlService:
                 "success": False,
                 "error": "运行时控制超时",
                 "data": None,
+                "error_code": RUNTIME_CONTROL_TIMEOUT,
             }
 
         _, messages = result[0]
         if not messages:
-            return {"success": False, "error": "控制响应为空", "data": None}
+            return {"success": False, "error": "控制响应为空", "data": None, "error_code": RUNTIME_CONTROL_EMPTY_REPLY}
 
         msg_id, raw = messages[0]
         _ = msg_id

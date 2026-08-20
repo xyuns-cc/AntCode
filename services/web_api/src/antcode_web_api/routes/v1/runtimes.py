@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Never
 
-from antcode_core.application.services.runtime import runtime_control_service
+from antcode_contracts.runtime_control_errors import RUNTIME_CONTROL_CALLER_FAULT_CODES
+from antcode_core.application.services.runtime import runtime_control_failure, runtime_control_service
 from antcode_core.common.security.auth import get_current_user, get_current_user_id
 from antcode_core.domain.schemas.common import BaseResponse
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -42,8 +43,11 @@ _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def _raise_runtime_failure(operation: str, result: dict[str, Any]) -> Never:
-    logger.error("Worker 运行时操作失败: operation={}, error={}", operation, result.get("error"))
-    raise HTTPException(status_code=500, detail=f"{operation}失败")
+    failure = runtime_control_failure(operation, result)
+    # 调用方过错（如显式指定重名环境）按 ERROR 打会淹没真正需要人介入的告警。
+    log = logger.info if failure.error_code in RUNTIME_CONTROL_CALLER_FAULT_CODES else logger.error
+    log("Worker 运行时操作失败: operation={}, code={}", operation, failure.error_code)
+    raise failure
 
 
 def _validate_env_name(env_name: str) -> str:

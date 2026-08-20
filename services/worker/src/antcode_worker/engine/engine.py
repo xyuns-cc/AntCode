@@ -47,7 +47,7 @@ from antcode_worker.engine.policies import Policies, default_policies
 from antcode_worker.engine.poll_delivery_recovery import handle_poll_failure
 from antcode_worker.engine.preparation_tasks import PreparationCancelledError, PreparationTaskRegistry
 from antcode_worker.engine.released_ownership import ReleasedOwnershipLedger
-from antcode_worker.engine.runtime_control_guard import _require_live_runtime_control
+from antcode_worker.engine.runtime_control_guard import _require_live_runtime_control, runtime_action_failure
 from antcode_worker.engine.scheduler import Scheduler
 from antcode_worker.engine.shutdown import stop_engine
 from antcode_worker.engine.spider_spool import relay_spider_spool
@@ -647,9 +647,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             raise_if_generation_lost(e)
             success = False
             error_message = normalize_persisted_error_message(e) or ""
-            # P2: ``except Exception`` 块统一用 logger.exception 保留堆栈，
-            # 避免错误被静默吞掉只剩 ``str(e)``。
-            logger.exception(f"runtime action 失败: action={action} req={request_id}")
+            result_data = runtime_action_failure(e, action=action, request_id=request_id)
 
         # CancelledError 会在到达这里前向上传播，事件保持未 settlement。
         reply_stream = payload.get("reply_stream", "") or payload.get("params", {}).get("reply_stream", "")
@@ -658,7 +656,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             reply_stream=reply_stream,
             success=success,
             receipt=control.receipt,
-            data=result_data if success else None,
+            data=result_data,
             error=error_message,
         )
         await self._commit_runtime_control_result(result)

@@ -29,6 +29,9 @@ from antcode_core.application.services.workers.worker_lease_issuance import (
 # origin/main(HEAD) 的 Worker 上报的能力快照形态：没有 wire_contract 这个键。
 LEGACY_WORKER_CAPABILITIES = {"curl_cffi": {"enabled": True}, "task_types": ["code", "spider"]}
 FUTURE_CONTRACT_VERSION = WORKER_WIRE_CONTRACT_VERSION + 1
+#: 运行时控制失败回包还不带结构化 error_code 的那一版；控制面现在对缺码 fail-closed，
+#: 放它进来的后果是每一次运行时管理失败都退化成一句"回包损坏"。
+CODELESS_RUNTIME_FAILURE_CONTRACT_VERSION = 2
 
 
 def _store() -> MagicMock:
@@ -70,6 +73,12 @@ def test_non_integer_contract_version_is_rejected(declared: object) -> None:
 
 def test_current_contract_is_accepted() -> None:
     assert require_supported_wire_contract(wire_contract_capability()) == WORKER_WIRE_CONTRACT_VERSION
+
+
+def test_worker_without_structured_runtime_failure_codes_is_rejected() -> None:
+    """本轮 wire 断裂：失败回包必须带 error_code，上一版 Worker 拿不到 Lease。"""
+    with pytest.raises(WorkerWireContractError, match="过旧"):
+        require_supported_wire_contract({WIRE_CONTRACT_CAPABILITY: CODELESS_RUNTIME_FAILURE_CONTRACT_VERSION})
 
 
 @pytest.mark.asyncio

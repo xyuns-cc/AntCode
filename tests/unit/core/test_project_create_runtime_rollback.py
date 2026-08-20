@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from antcode_contracts.runtime_control_errors import RUNTIME_ENV_ALREADY_EXISTS
 from antcode_core.application.services.projects import project_service as project_module
 from antcode_core.application.services.projects.project_service import ProjectService
 from antcode_core.domain.models.enums import ProjectType, RuntimeKind, RuntimeScope
@@ -140,7 +141,13 @@ async def test_runtime_binding_failure_compensates_created_runtime(monkeypatch) 
 @pytest.mark.asyncio
 async def test_rejected_runtime_creation_is_not_compensated(monkeypatch) -> None:
     runtime = SimpleNamespace(
-        create_env=AsyncMock(return_value={"success": False, "error": "already exists"}),
+        create_env=AsyncMock(
+            return_value={
+                "success": False,
+                "error": "already exists",
+                "error_code": RUNTIME_ENV_ALREADY_EXISTS,
+            }
+        ),
         delete_env=AsyncMock(),
     )
     service = ProjectService(runtime)

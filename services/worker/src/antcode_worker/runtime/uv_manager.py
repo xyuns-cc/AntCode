@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 import ujson
+from antcode_contracts.runtime_control_errors import RuntimeEnvAlreadyExistsError
 from antcode_contracts.runtime_metadata import validate_runtime_creator, validate_runtime_metadata
 from loguru import logger
 
@@ -372,21 +373,15 @@ class UVManager:
             manifest.setdefault("name", env_name)
             manifest.setdefault("created_at", datetime.now().isoformat())
 
-            if key is None:
+            if key is None or not normalized_key:
                 manifest.pop("key", None)
             else:
-                if normalized_key:
-                    manifest["key"] = normalized_key
-                else:
-                    manifest.pop("key", None)
+                manifest["key"] = normalized_key
 
-            if description is None:
+            if description is None or not normalized_desc:
                 manifest.pop("description", None)
             else:
-                if normalized_desc:
-                    manifest["description"] = normalized_desc
-                else:
-                    manifest.pop("description", None)
+                manifest["description"] = normalized_desc
 
             write_runtime_manifest(manifest_path, manifest)
 
@@ -414,7 +409,9 @@ class UVManager:
             venv_path = self._get_venv_path(env_name)
 
             if os.path.exists(venv_path):
-                raise RuntimeError(f"虚拟环境 {env_name} 已存在")
+                # 调用方显式指定了一个已被占用的名字，不是本机故障：带码抛出，
+                # 让控制面能判成 409 而不是把它混进服务端 500 与 ERROR 告警。
+                raise RuntimeEnvAlreadyExistsError(f"虚拟环境 {env_name} 已存在")
 
             if not python_version:
                 raise RuntimeError("python_version 不能为空")

@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from antcode_contracts.runtime_control_errors import runtime_control_failure_data
 from antcode_contracts.transcode import encode_capabilities
 from antcode_core.common.log_limits import (
     DEFAULT_LOG_MAX_BATCH_BYTES,
@@ -1122,15 +1123,14 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         # json.dumps 抛 TypeError/ValueError，这是本地永久性错误——若混进
         # 下面的网络异常分支会被计入 _consecutive_failures（3 次即拆掉健康
         # 连接触发重连），且 engine 拿同一个不可序列化 payload 无限重试。
-        # 降级为失败结果照常结算原控制事件，让事件得到 ACK。
+        # 降级为失败结果照常结算原控制事件，让事件得到 ACK；失败回包必须带结构化错误码（控制面对缺码 fail-closed）。
         try:
             data_json = json.dumps(data, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
             logger.warning(f"控制结果序列化失败，降级为失败结算: request_id={request_id} exc={exc}")
-            note = f"结果序列化失败: {exc}"
-            error = f"{error}; {note}" if error else note
+            error = f"{error}; 结果序列化失败: {exc}" if error else f"结果序列化失败: {exc}"
             success = False
-            data_json = "null"
+            data_json = json.dumps(runtime_control_failure_data(exc), ensure_ascii=False)
 
         try:
             return await self._ack_control_rpc(

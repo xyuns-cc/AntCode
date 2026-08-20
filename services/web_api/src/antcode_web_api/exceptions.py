@@ -211,6 +211,9 @@ async def http_exception_handler(
         status_code=exc.status_code,
         message=_http_error_message(exc.detail),
         errors=_validation_errors_from_detail(exc.detail),
+        # 与 business_exception_handler 对齐：非 web_api 层（如 antcode_core 的
+        # RuntimeControlFailure）抛出的 HTTPException 也能把结构化码带到响应体。
+        error_code=getattr(exc, "error_code", None),
         headers=exc.headers,
     )
 

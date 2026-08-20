@@ -36,11 +36,14 @@ WIRE_CONTRACT_CAPABILITY = "wire_contract"
 #: 认识这个键，"缺失"本身就是可判定的版本信息，不是需要容错的缺陷。
 LEGACY_WIRE_CONTRACT_VERSION = 1
 
-#: 本次发布的契约版本：hash-tag ready key + 密文 ready 帧 + HMAC v2 + Lease ttl_ms。
-WORKER_WIRE_CONTRACT_VERSION = 2
+#: 本次发布的契约版本：hash-tag ready key + 密文 ready 帧 + HMAC v2 + Lease ttl_ms
+#: (v2)，外加运行时控制失败回包的 ``data`` 必须携带结构化 ``error_code`` (v3)。
+#: v3 断裂的形态与上面同类：v2 Worker 失败时回 ``data=null``，控制面按缺码
+#: fail-closed，任何一次运行时管理失败都会退化成一句"回包损坏"，而不是真实原因。
+WORKER_WIRE_CONTRACT_VERSION = 3
 
 #: 控制面接受的最低 Worker 契约版本。
-MIN_SUPPORTED_WORKER_WIRE_CONTRACT = 2
+MIN_SUPPORTED_WORKER_WIRE_CONTRACT = 3
 
 
 class WorkerWireContractError(RuntimeError):

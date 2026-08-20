@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from antcode_contracts.runtime_control_errors import RUNTIME_CONTROL_UNCLASSIFIED
 from antcode_core.domain.models.enums import TaskStatus
 from antcode_web_api.routes.v1 import base, branding, dashboard, project, runtime_access, runtimes, system_config, tasks
 from fastapi import HTTPException, status
@@ -93,7 +94,13 @@ async def test_runtime_worker_error_is_sanitized(monkeypatch) -> None:
     monkeypatch.setattr(
         runtimes.runtime_control_service,
         "list_envs",
-        AsyncMock(return_value={"success": False, "error": _INTERNAL_ERROR}),
+        AsyncMock(
+            return_value={
+                "success": False,
+                "error": _INTERNAL_ERROR,
+                "error_code": RUNTIME_CONTROL_UNCLASSIFIED,
+            }
+        ),
     )
 
     with pytest.raises(HTTPException) as exc_info:
