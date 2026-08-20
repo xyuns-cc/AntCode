@@ -24,7 +24,7 @@ LOG_SERVICE = FRONTEND_SRC / "services/logs.ts"
 LOG_VIEWER_TYPES = FRONTEND_SRC / "components/ui/LogViewer/enhancedLogViewerTypes.ts"
 CODE_PROJECT_FORM = FRONTEND_SRC / "components/projects/CodeProjectForm.tsx"
 STRING_UNION_MEMBER = re.compile(r"'([^']*)'")
-LANGUAGE_OPTION = re.compile(r"\{\s*value:\s*'([^']+)',\s*label:\s*'[^']*',\s*extension:\s*'([^']+)'")
+LANGUAGE_OPTION = re.compile(r"\{\s*value:\s*'([^']+)',\s*label:\s*'[^']*',\s*suffix:\s*'([^']+)'")
 
 BOUND_ENUMS = (
     (TASK_TYPES, "TaskStatus", TaskStatus),
