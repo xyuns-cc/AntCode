@@ -47,6 +47,16 @@ def _fake_executable(bin_dir: Path, name: str) -> Path:
     return path
 
 
+def _typescript_workspace(tmp_path: Path) -> Path:
+    """带 tsx runner 的 workspace（runner 就是一个 shebang 指向 node 的脚本）。"""
+    workspace = tmp_path / "workspace"
+    runner = workspace / "node_modules" / ".bin" / "tsx"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    runner.chmod(0o755)
+    return workspace
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", [("main.js", "node"), ("app.jar", "java"), ("main.go", "go")])
 async def test_missing_language_runtime_fails_the_plan(
@@ -73,6 +83,34 @@ async def test_node_command_is_the_resolved_absolute_path(tmp_path: Path, runtim
 
     assert plan.command == str(node)
     assert os.path.isabs(plan.command)
+
+
+@pytest.mark.asyncio
+async def test_typescript_without_node_fails_closed_like_the_other_languages(
+    tmp_path: Path,
+    runtime_free_path: Path,
+) -> None:
+    """TS 曾是唯一不解析 node 的分支：runner 在就直接交出去，镜像缺 node 也照样出计划。"""
+    del runtime_free_path
+    workspace = _typescript_workspace(tmp_path)
+
+    with pytest.raises(LanguageRuntimeMissingError, match="node"):
+        await CodePlugin().build_plan(_RUN_CONTEXT, _payload("main.ts", workspace))
+
+
+@pytest.mark.asyncio
+async def test_typescript_runs_the_workspace_runner_through_node(
+    tmp_path: Path,
+    runtime_free_path: Path,
+) -> None:
+    """argv[0] 必须是 node 本身；runner 降级成第一个参数（沙箱据 argv[0] 决定挂哪个安装根）。"""
+    workspace = _typescript_workspace(tmp_path)
+    node = _fake_executable(runtime_free_path, "node")
+
+    plan = await CodePlugin().build_plan(_RUN_CONTEXT, _payload("main.ts", workspace))
+
+    assert plan.command == str(node)
+    assert plan.args == [str(workspace / "node_modules" / ".bin" / "tsx"), "main.ts"]
 
 
 @pytest.mark.asyncio

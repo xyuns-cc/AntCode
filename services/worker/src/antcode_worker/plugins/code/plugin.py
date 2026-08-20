@@ -6,7 +6,7 @@ language（Master 随 ``params.kwargs.language`` 下发）与 entry_point 后缀
 
 - python      → runtime_spec.python_path（uv/mise venv 的解释器）
 - javascript  → 镜像预装的 node
-- typescript  → workspace devDep 里的 tsx / ts-node
+- typescript  → 镜像预装的 node + workspace devDep 里的 tsx / ts-node
 - java        → java -jar
 - go          → go run（需要 workspace 有 go.mod）
 
@@ -180,12 +180,22 @@ class CodePlugin(PluginBase):
         return require_language_executable(NODE_RUNTIME), [payload.entry_point, *payload.args]
 
     def _typescript_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
-        """TS 入口由 workspace 自带的 TS runner 执行（约定 devDep 装 tsx 或 ts-node）。"""
+        """TS 入口由镜像的 node 去跑 workspace 自带的 TS runner（约定 devDep 装 tsx 或 ts-node）。
+
+        argv[0] 必须是 node 而不是 ``node_modules/.bin/<runner>``：沙箱是从 payload
+        可执行文件反推要挂载的安装根的（``sandbox_executables.executable_mount_roots``），
+        而 runner 位于 work_dir 内，会被判定成"已经可见"直接跳过，于是镜像里 node 的
+        mise 安装根一个都不进 namespace。runner 的 ``#!/usr/bin/env node`` shebang
+        随即在沙箱内解析失败，任务以 ``env: 'node': No such file or directory``（127）
+        收场——又一次把交付缺陷伪装成任务自身的错误。把 node 摆到 argv[0]，它的安装根
+        才会被挂进去，runner 自身派生的 node 子进程也才有 PATH 可用。
+        """
         dependency_root = payload.project_cwd or payload.workspace_path or ""
         for runner in _TYPESCRIPT_RUNNERS:
             local_runner = os.path.join(dependency_root, "node_modules", ".bin", runner)
             if os.path.isfile(local_runner):
-                return local_runner, [payload.entry_point, *payload.args]
+                node_exe = require_language_executable(NODE_RUNTIME)
+                return node_exe, [local_runner, payload.entry_point, *payload.args]
         raise RuntimeError("TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）")
 
     def _java_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:

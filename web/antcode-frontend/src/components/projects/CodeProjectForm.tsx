@@ -15,7 +15,10 @@ const LANGUAGE_OPTIONS = [
   { value: 'python', label: 'Python', extension: '.py', color: '#3776ab' },
   { value: 'javascript', label: 'JavaScript', extension: '.js', color: '#f7df1e' },
   { value: 'typescript', label: 'TypeScript', extension: '.ts', color: '#3178c6' },
-  { value: 'java', label: 'Java', extension: '.java', color: '#b07219' },
+  // Java 标 .jar 而不是 .java：执行语言契约（antcode_contracts.execution_language）
+  // 只认 .jar，CodePlugin 的 Java 形态仅有 `java -jar`，镜像装的也是 JRE（无 javac）。
+  // 标 .java 会让用户以为可以交源码，直到派发才被拒。
+  { value: 'java', label: 'Java', extension: '.jar', color: '#b07219' },
   { value: 'go', label: 'Go', extension: '.go', color: '#00add8' },
 ]
 
@@ -235,10 +238,10 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
           <Form.Item
             name="code_entry_point"
             label="入口文件"
-            tooltip="指定项目子目录内的入口脚本，如 main.py"
+            tooltip="指定项目子目录内的入口文件；后缀决定运行时（.py/.js/.ts/.jar/.go）。Java 只接受预编译 jar"
             rules={[{ required: true, message: '请输入入口文件' }]}
           >
-            <Input placeholder="例如: main.py" />
+            <Input placeholder="例如: main.py / index.js / app.jar / main.go" />
           </Form.Item>
         </Card>
 

@@ -13,6 +13,7 @@
 import re
 from pathlib import Path
 
+from antcode_contracts.execution_language import ExecutionLanguage, resolve_execution_language
 from antcode_core.domain.models.enums import ExecutionStrategy, ScheduleType, TaskStatus, TaskType
 from antcode_core.domain.schemas.logs import LogLevel, LogType
 
@@ -21,7 +22,9 @@ TASK_TYPES = FRONTEND_SRC / "types/task.ts"
 PROJECT_MODELS = FRONTEND_SRC / "types/projectModels.ts"
 LOG_SERVICE = FRONTEND_SRC / "services/logs.ts"
 LOG_VIEWER_TYPES = FRONTEND_SRC / "components/ui/LogViewer/enhancedLogViewerTypes.ts"
+CODE_PROJECT_FORM = FRONTEND_SRC / "components/projects/CodeProjectForm.tsx"
 STRING_UNION_MEMBER = re.compile(r"'([^']*)'")
+LANGUAGE_OPTION = re.compile(r"\{\s*value:\s*'([^']+)',\s*label:\s*'[^']*',\s*extension:\s*'([^']+)'")
 
 BOUND_ENUMS = (
     (TASK_TYPES, "TaskStatus", TaskStatus),
@@ -46,6 +49,21 @@ def _string_union(source: Path, alias: str) -> set[str]:
 def test_frontend_string_unions_match_the_backend_enums() -> None:
     for source, alias, enum in BOUND_ENUMS:
         assert _string_union(source, alias) == {member.value for member in enum}, f"{source}:{alias}"
+
+
+def test_project_form_language_options_are_accepted_by_the_execution_contract() -> None:
+    """界面给出的每组 (执行语言, 入口后缀) 都必须真能走通派发链路。
+
+    Java 的 extension 曾标 `.java`：CodePlugin 的 Java 形态只有 `java -jar`，Worker
+    镜像装的也是 JRE（全机无 javac），执行语言契约因此只收 `.jar`。用户照着界面交
+    源码，要等到派发准备阶段才被拒——界面承诺了一个产品根本没有的编译能力。
+    """
+    options = LANGUAGE_OPTION.findall(CODE_PROJECT_FORM.read_text(encoding="utf-8"))
+
+    assert len(options) == len(ExecutionLanguage), f"语言选项数与执行语言枚举不一致: {options}"
+    for value, extension in options:
+        resolved = resolve_execution_language(value, f"entry{extension}")
+        assert resolved.value == value, f"界面 {value} 标的后缀 {extension} 指向 {resolved.value}"
 
 
 def test_log_viewer_message_type_is_derived_from_the_backend_log_type() -> None:
