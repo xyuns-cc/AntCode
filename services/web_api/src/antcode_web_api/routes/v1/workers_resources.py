@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from antcode_core.application.services.workers import worker_service
-from antcode_core.common.config import settings
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User
 from antcode_core.infrastructure.redis import (
@@ -46,6 +45,10 @@ MEMORY_TOTAL = CapacityMetric("memoryTotal", "memory_total_mb", BYTES_PER_MIB)
 DISK_USED = CapacityMetric("diskUsed", "disk_used_gb", BYTES_PER_GIB)
 DISK_TOTAL = CapacityMetric("diskTotal", "disk_total_gb", BYTES_PER_GIB)
 
+LIMIT_FIELDS = ("max_concurrent_tasks", "task_memory_limit_mb", "task_cpu_time_limit_sec")
+# Worker 心跳上报生效并发时用的驼峰键，以及 worker_metrics 归一化前的下划线别名。
+_EFFECTIVE_CONCURRENCY_KEYS = ("maxConcurrentTasks", "max_concurrent_tasks")
+
 
 async def _require_admin(current_user: TokenData) -> User:
     user = await User.get_or_none(id=current_user.user_id)
@@ -76,6 +79,38 @@ def _capacity_value(resources: dict, metric: CapacityMetric) -> float:
     return _to_float(resources.get(metric.legacy_field, 0))
 
 
+def _effective_concurrency(resources: dict) -> int | None:
+    for key in _EFFECTIVE_CONCURRENCY_KEYS:
+        value = resources.get(key)
+        # bool 是 int 的子类，但 True 不是并发数。
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def _effective_limits(resources: dict) -> dict[str, int | None]:
+    """生效限额只有执行面知道，控制面推导不出来。
+
+    Worker 的限额由它自己的 cgroup 预算算出，并在启动与 config_update 时按预算
+    重算收敛（services/worker/src/antcode_worker/adaptive_limits.py）。web-api 的
+    settings 是控制面自己的配置，与某台 Worker 的生效值没有因果关系——拿它兜底
+    等于编造一个 API 并不知道的数字，且真机上恒偏大（10 vs 4、600s vs 480s）。
+    所以这里只认心跳上报过的真值，其余如实为 None。
+    """
+    return {
+        "max_concurrent_tasks": _effective_concurrency(resources),
+        # contracts/proto/common.proto 的 Metrics 只有 max_concurrent_tasks，
+        # 这两项 Worker 从未上报，控制面无从得知生效值。
+        "task_memory_limit_mb": None,
+        "task_cpu_time_limit_sec": None,
+    }
+
+
+def _configured_limits(limits: dict) -> dict[str, int | None]:
+    """控制面下发过的值。下发成功不等于生效，Worker 可能已按预算收敛或拒绝。"""
+    return {name: limits.get(name) for name in LIMIT_FIELDS}
+
+
 async def get_worker_resources(worker_id: str, current_user: TokenData):
     await _require_admin(current_user)
     worker = await worker_service.get_worker_by_id(worker_id)
@@ -87,11 +122,8 @@ async def get_worker_resources(worker_id: str, current_user: TokenData):
 
     return success(
         {
-            "limits": {
-                "max_concurrent_tasks": limits.get("max_concurrent_tasks", settings.MAX_CONCURRENT_TASKS),
-                "task_memory_limit_mb": limits.get("task_memory_limit_mb", settings.TASK_MEMORY_LIMIT_MB),
-                "task_cpu_time_limit_sec": limits.get("task_cpu_time_limit_sec", settings.TASK_CPU_TIME_LIMIT_SEC),
-            },
+            "limits": _effective_limits(resources),
+            "configured_limits": _configured_limits(limits),
             "auto_adjustment": limits.get("auto_resource_limit", True),
             "resource_stats": {
                 "cpu_percent": round(_to_float(resources.get("cpu", resources.get("cpu_percent", 0))), 1),
@@ -192,7 +224,10 @@ async def update_worker_resources(worker_id: str, request: dict, current_user: T
         new_value={"limits": dict(db_params), "synced": synced},
     )
 
-    return success({"updated": config_params, "synced": synced}, message="资源限制已更新")
+    # 不说"已更新": 控制面下发的是**请求**。Worker 按自己的 cgroup 预算校验，
+    # 超卖时会重算收敛（auto）或直接拒绝（手动），真机上就出现过 API 返回 200
+    # 而 Worker 侧抛 ResourceBudgetError 的组合。生效值以下一次心跳为准。
+    return success({"updated": config_params, "synced": synced}, message="资源限制已下发，生效值以 Worker 上报为准")
 
 
 def register_resources_routes(router) -> None:

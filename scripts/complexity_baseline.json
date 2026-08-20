@@ -4088,12 +4088,6 @@
       "value": 436
     },
     {
-      "path": "web/antcode-frontend/src/components/workers/WorkerResourceManagement.tsx",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 328
-    },
-    {
       "path": "web/antcode-frontend/src/pages/AlertConfig/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",

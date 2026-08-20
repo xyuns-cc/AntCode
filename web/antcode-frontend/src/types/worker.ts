@@ -144,10 +144,15 @@ export interface WorkerPreference {
 // 这三项就是 GET /api/v1/workers/{id}/resources 的 limits 全集
 // （services/web_api/.../routes/v1/workers_resources.py 的 get_worker_resources），
 // 也是 POST 侧仅有的三个可校验字段。不要在这里加后端不返回的字段。
+//
+// null 是有意义的取值，不是"还没加载"：后端只在执行面（Worker 心跳）真的上报过
+// 该项时才给数字，否则如实为 null。心跳契约目前只带 max_concurrent_tasks，所以
+// 另两项在 limits(生效值) 里恒为 null。渲染必须走 formatLimit 显示占位符，
+// 直接塞给 antd Statistic 会把 null 打成字面量 "null"。
 export interface WorkerResourceLimits {
-  max_concurrent_tasks: number // 最大并发任务数
-  task_memory_limit_mb: number // 单任务内存限制 (MB)
-  task_cpu_time_limit_sec: number // 单任务CPU时间限制 (秒)
+  max_concurrent_tasks: number | null // 最大并发任务数
+  task_memory_limit_mb: number | null // 单任务内存限制 (MB)
+  task_cpu_time_limit_sec: number | null // 单任务CPU时间限制 (秒)
 }
 
 // Worker 资源统计
@@ -164,9 +169,14 @@ export interface WorkerResourceStats {
   uptime_seconds: number
 }
 
-// Worker 资源信息
+// Worker 资源信息。
+// limits 与 configured_limits 是两件不同的事，不能互相顶替：
+//   limits            = 执行面**生效**值（Worker 心跳上报，未上报为 null）
+//   configured_limits = 控制面**下发过**的值（DB，未下发为 null）
+// 两者不一致就是"设了但没生效"——Worker 会按 cgroup 预算重算收敛或拒绝。
 export interface WorkerResourceInfo {
   limits: WorkerResourceLimits
+  configured_limits: WorkerResourceLimits
   auto_adjustment: boolean
   resource_stats: WorkerResourceStats
 }

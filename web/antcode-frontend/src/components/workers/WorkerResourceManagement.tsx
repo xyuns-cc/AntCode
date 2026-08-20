@@ -4,29 +4,8 @@
  */
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
+import { Card, Form, Button, Space, Row, Col, Progress, Alert, Tooltip, Spin, Flex, Typography, theme } from 'antd'
 import {
-  Card,
-  Form,
-  InputNumber,
-  Switch,
-  Button,
-  Space,
-  Statistic,
-  Row,
-  Col,
-  Progress,
-  Alert,
-  Tooltip,
-  Spin,
-  Flex,
-  Typography,
-  theme
-} from 'antd'
-import {
-  ThunderboltOutlined,
-  DatabaseOutlined,
-  ClockCircleOutlined,
-  SyncOutlined,
   SaveOutlined,
   ReloadOutlined,
   InfoCircleOutlined,
@@ -37,6 +16,8 @@ import { workerService } from '@/services/workers'
 import { useAuthStore } from '@/stores/authStore'
 import showNotification from '@/utils/notification'
 import type { WorkerResourceInfo } from '@/types'
+import WorkerResourceLimitsCard from './WorkerResourceLimitsCard'
+import WorkerResourceLimitsFields from './WorkerResourceLimitsFields'
 
 const { Text } = Typography
 
@@ -70,10 +51,13 @@ const WorkerResourceManagement: React.FC<WorkerResourceManagementProps> = ({ wor
     try {
       const data = await workerService.getWorkerResources(workerId)
       setResourceData(data)
+      // 表单是"要下发什么"，先取控制面已下发值；没下发过就退到执行面生效值，
+      // 两边都没有就留空，让人显式填——不拿任何一个默认值把空当成现状。
       form.setFieldsValue({
-        max_concurrent_tasks: data.limits.max_concurrent_tasks,
-        task_memory_limit_mb: data.limits.task_memory_limit_mb,
-        task_cpu_time_limit_sec: data.limits.task_cpu_time_limit_sec,
+        max_concurrent_tasks: data.configured_limits.max_concurrent_tasks ?? data.limits.max_concurrent_tasks ?? undefined,
+        task_memory_limit_mb: data.configured_limits.task_memory_limit_mb ?? data.limits.task_memory_limit_mb ?? undefined,
+        task_cpu_time_limit_sec:
+          data.configured_limits.task_cpu_time_limit_sec ?? data.limits.task_cpu_time_limit_sec ?? undefined,
         auto_resource_limit: data.auto_adjustment
       })
     } catch (err: unknown) {
@@ -97,13 +81,20 @@ const WorkerResourceManagement: React.FC<WorkerResourceManagementProps> = ({ wor
     try {
       const values = await form.validateFields()
       setSaving(true)
-      await workerService.updateWorkerResources(workerId, {
+      const result = await workerService.updateWorkerResources(workerId, {
         max_concurrent_tasks: values.max_concurrent_tasks,
         task_memory_limit_mb: values.task_memory_limit_mb,
         task_cpu_time_limit_sec: values.task_cpu_time_limit_sec,
         auto_resource_limit: values.auto_resource_limit
       })
-      showNotification('success', '资源配置已更新')
+      // 不说"已更新"：这里下发的是请求。Worker 按自身内存预算校验，超卖时会重算
+      // 收敛或直接拒绝，生效值以它上报的为准（对照下方"生效/已配置"两行）。
+      // synced=false 表示控制事件根本没写进去，那连"下发"都没发生，不能报成功。
+      if (result.synced) {
+        showNotification('success', '资源配置已下发，生效值以 Worker 上报为准')
+      } else {
+        showNotification('warning', '配置已入库，但未能下发到 Worker，当前生效值不变')
+      }
       loadResources()
     } catch (err: unknown) {
       showNotification('error', getErrorMessage(err, '保存失败'))
@@ -145,7 +136,7 @@ const WorkerResourceManagement: React.FC<WorkerResourceManagementProps> = ({ wor
 
   if (!resourceData) return null
 
-  const { limits, resource_stats } = resourceData
+  const { limits, configured_limits, resource_stats } = resourceData
   const cpuPercent = resource_stats?.cpu_percent ?? 0
   const memoryPercent = resource_stats?.memory_percent ?? 0
   const memoryTotalMb = resource_stats?.memory_total_mb ?? 0
@@ -227,82 +218,9 @@ const WorkerResourceManagement: React.FC<WorkerResourceManagementProps> = ({ wor
         }
       >
         <Form form={form} layout="vertical" disabled={!isSuperAdmin}>
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                name="max_concurrent_tasks"
-                label={
-                  <Space size={4}>
-                    <ThunderboltOutlined />
-                    最大并发任务数
-                  </Space>
-                }
-                rules={[{ required: true }, { type: 'number', min: 1, max: 20 }]}
-              >
-                <InputNumber min={1} max={20} style={{ width: '100%' }} addonAfter="个" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="task_memory_limit_mb"
-                label={
-                  <Space size={4}>
-                    <DatabaseOutlined />
-                    单任务内存限制
-                  </Space>
-                }
-                rules={[{ required: true }, { type: 'number', min: 256, max: 8192 }]}
-              >
-                <InputNumber min={256} max={8192} step={256} style={{ width: '100%' }} addonAfter="MB" />
-              </Form.Item>
-            </Col>
-          </Row>
+          <WorkerResourceLimitsFields />
 
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                name="task_cpu_time_limit_sec"
-                label={
-                  <Space size={4}>
-                    <ClockCircleOutlined />
-                    单任务 CPU 时间限制
-                  </Space>
-                }
-                rules={[{ required: true }, { type: 'number', min: 60, max: 3600 }]}
-              >
-                <InputNumber min={60} max={3600} step={60} style={{ width: '100%' }} addonAfter="秒" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="auto_resource_limit"
-                label={
-                  <Space size={4}>
-                    <SyncOutlined />
-                    自适应资源限制
-                  </Space>
-                }
-                valuePropName="checked"
-              >
-                <Switch checkedChildren="启用" unCheckedChildren="禁用" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          {/* 当前生效配置 */}
-          <Card size="small" style={{ background: token.colorFillQuaternary, marginBottom: 16 }}>
-            <Row gutter={16}>
-              <Col span={8}>
-                <Statistic title="最大并发" value={limits.max_concurrent_tasks} suffix="个" valueStyle={{ fontSize: 16 }} />
-              </Col>
-              <Col span={8}>
-                <Statistic title="内存限制" value={limits.task_memory_limit_mb} suffix="MB" valueStyle={{ fontSize: 16 }} />
-              </Col>
-              <Col span={8}>
-                <Statistic title="CPU 时限" value={limits.task_cpu_time_limit_sec} suffix="秒" valueStyle={{ fontSize: 16 }} />
-              </Col>
-            </Row>
-          </Card>
+          <WorkerResourceLimitsCard limits={limits} configuredLimits={configured_limits} />
 
           {isSuperAdmin ? (
             <Flex justify="flex-end" gap={8}>
