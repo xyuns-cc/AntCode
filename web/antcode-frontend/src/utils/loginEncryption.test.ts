@@ -96,6 +96,53 @@ describe('multi-password encryption', () => {
     }
   })
 
+  it('keeps the whole batch decryptable by the key it reports, even if the server rotates mid-batch', async () => {
+    // 上一条只断言 get 被调了一次——那是模块级公钥缓存的性质，不是"整批共用一把钥匙"
+    // 的性质：任何绕开缓存、逐个口令取公钥的实现，在冷缓存下也会被 Promise.all 合并
+    // 成一次请求，照样绿。这里让服务端每次返回不同的 key_id / 不同的密钥对：
+    // 只要有任何一个口令是用另一把公钥加密的，服务端拿 result.keyId 对应的私钥就解
+    // 不开——正是"改密随机失败"的真实故障形态。
+    const keyA = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const keyB = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const privateKeys: Record<string, typeof keyA.privateKey> = {
+      'key-A': keyA.privateKey,
+      'key-B': keyB.privateKey,
+    }
+    const envelope = (id: string, pair: typeof keyA) => ({
+      data: {
+        data: {
+          algorithm: 'RSA-OAEP-256',
+          key_id: id,
+          public_key: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+        },
+      },
+    })
+    mocks.get
+      .mockResolvedValueOnce(envelope('key-A', keyA))
+      .mockResolvedValueOnce(envelope('key-B', keyB))
+
+    const originalCrypto = window.crypto
+    Object.defineProperty(window, 'crypto', {
+      configurable: true,
+      value: { getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) },
+    })
+
+    try {
+      const result = await encryptPasswords(['old-secret', 'new-secret'])
+      const privateKey = privateKeys[result.keyId]
+      expect(privateKey).toBeDefined()
+
+      const decrypt = (value: string) => privateDecrypt({
+        key: privateKey,
+        oaepHash: 'sha256',
+        padding: constants.RSA_PKCS1_OAEP_PADDING,
+      }, Buffer.from(value, 'base64')).toString('utf8')
+      expect(result.encrypted.map(decrypt)).toEqual(['old-secret', 'new-secret'])
+    } finally {
+      Object.defineProperty(window, 'crypto', { configurable: true, value: originalCrypto })
+    }
+  })
+
   it('refuses to encrypt an empty password instead of sending an empty cipher', async () => {
     await expect(encryptPasswords(['ok', ''])).rejects.toThrow('密码不能为空')
   })
