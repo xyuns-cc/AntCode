@@ -118,17 +118,51 @@ class AdminUserRoleUpdateRequest(BaseModel):
 UserRoleUpdateRequest = AdminUserRoleUpdateRequest
 
 
-class UserPasswordUpdateRequest(BaseModel):
-    """用户密码更新请求"""
+class PasswordEnvelopeFields(BaseModel):
+    """口令密文随行的算法与密钥标识，字段名与登录请求保持一致。
 
-    old_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=8)
+    改密与登录提交的是同一类机密，客户端复用同一个 ``/auth/public-key``
+    公钥，因此这里不另起一套字段名。
+    """
+
+    encryption: str | None = Field(default=None, max_length=50)
+    key_id: str | None = Field(default=None, max_length=64)
 
 
-class UserAdminPasswordUpdateRequest(BaseModel):
+class UserPasswordUpdateRequest(PasswordEnvelopeFields):
+    """用户密码更新请求。
+
+    明文字段保留为可选，是为了让 ``LOGIN_PASSWORD_ENCRYPTION_REQUIRED=false``
+    的部署仍能提交明文；是否放行由该开关在服务端判定，schema 不做策略。
+    ``new_password`` 的 8 位下限只对明文有意义——密文长度是 RSA 块长，
+    强度校验在解密后由 ``validate_password_strength`` 统一执行。
+    """
+
+    old_password: str | None = Field(default=None, min_length=1)
+    new_password: str | None = Field(default=None, min_length=8)
+    encrypted_old_password: str | None = Field(default=None, min_length=1)
+    encrypted_new_password: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_password_presence(self) -> "UserPasswordUpdateRequest":
+        if not self.old_password and not self.encrypted_old_password:
+            raise ValueError("old_password 或 encrypted_old_password 至少需要一个")
+        if not self.new_password and not self.encrypted_new_password:
+            raise ValueError("new_password 或 encrypted_new_password 至少需要一个")
+        return self
+
+
+class UserAdminPasswordUpdateRequest(PasswordEnvelopeFields):
     """管理员重置密码请求"""
 
-    new_password: str = Field(..., min_length=8)
+    new_password: str | None = Field(default=None, min_length=8)
+    encrypted_new_password: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_password_presence(self) -> "UserAdminPasswordUpdateRequest":
+        if not self.new_password and not self.encrypted_new_password:
+            raise ValueError("new_password 或 encrypted_new_password 至少需要一个")
+        return self
 
 
 class UserBatchStatusRequest(BaseModel):

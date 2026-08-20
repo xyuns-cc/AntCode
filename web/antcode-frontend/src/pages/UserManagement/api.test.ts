@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), encryptPasswords: vi.fn(),
+}))
 vi.mock('@/services/api', () => ({ default: mocks }))
+vi.mock('@/utils/loginEncryption', () => ({ encryptPasswords: mocks.encryptPasswords }))
 
 import { userManagementApi } from './api'
 
@@ -11,6 +14,23 @@ describe('userManagementApi', () => {
     mocks.post.mockResolvedValue(response)
     mocks.put.mockResolvedValue(response)
     mocks.get.mockResolvedValue(response)
+    mocks.encryptPasswords.mockResolvedValue({
+      encrypted: ['cipher-new'],
+      algorithm: 'RSA-OAEP-256',
+      keyId: 'key-1',
+    })
+  })
+
+  it('never puts the reset password on the wire in clear text', async () => {
+    await userManagementApi.resetPassword('user-2', 'Strong#123')
+
+    expect(mocks.encryptPasswords).toHaveBeenCalledWith(['Strong#123'])
+    expect(mocks.put).toHaveBeenCalledWith('/api/v1/users/user-2/reset-password', {
+      encrypted_new_password: 'cipher-new',
+      encryption: 'RSA-OAEP-256',
+      key_id: 'key-1',
+    })
+    expect(JSON.stringify(mocks.put.mock.calls[0][1])).not.toContain('Strong#123')
   })
 
   it('uses the real session revocation endpoint', async () => {

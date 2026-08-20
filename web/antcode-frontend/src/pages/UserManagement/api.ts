@@ -1,4 +1,5 @@
 import apiClient from '@/services/api'
+import { encryptPasswords } from '@/utils/loginEncryption'
 import type { ApiResponse, PaginationResponse, User } from '@/types'
 import type { UserCreateValues, UserEditValues, UserListQuery } from './types'
 
@@ -55,10 +56,13 @@ export const userManagementApi = {
   },
 
   async resetPassword(userId: string, password: string): Promise<void> {
+    const { encrypted, algorithm, keyId } = await encryptPasswords([password])
     const response = await apiClient.put<ApiResponse<null>>(
       `/api/v1/users/${userId}/reset-password`,
       {
-        new_password: password,
+        encrypted_new_password: encrypted[0],
+        encryption: algorithm,
+        key_id: keyId,
       }
     )
     requireSuccess(response.data)

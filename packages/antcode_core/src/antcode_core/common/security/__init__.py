@@ -42,6 +42,7 @@ from antcode_core.common.security.login_crypto import (
     LoginPasswordCrypto,
     LoginPasswordCryptoError,
     login_password_crypto,
+    resolve_transmitted_password,
 )
 from antcode_core.common.security.permissions import (
     Permission,
@@ -88,4 +89,5 @@ __all__ = [
     "LoginPasswordCrypto",
     "LoginPasswordCryptoError",
     "login_password_crypto",
+    "resolve_transmitted_password",
 ]

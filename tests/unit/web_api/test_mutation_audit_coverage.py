@@ -12,18 +12,33 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from antcode_core.common.config import settings
 from antcode_core.domain.models.audit_log import AuditAction, AuditLog
 from antcode_core.domain.schemas.task import TaskUpdateRequest
-from antcode_core.domain.schemas.user import UserAdminPasswordUpdateRequest
+from antcode_core.domain.schemas.user import (
+    UserAdminPasswordUpdateRequest,
+    UserPasswordUpdateRequest,
+)
 from antcode_core.domain.schemas.worker import WorkerUpdateRequest
 from antcode_web_api.routes.v1 import project as project_routes
 from antcode_web_api.routes.v1 import tasks as task_routes
 from antcode_web_api.routes.v1 import tasks_execute, tasks_runs, workers_crud
-from antcode_web_api.routes.v1 import users as user_routes
+from antcode_web_api.routes.v1 import users_password as user_routes
 from fastapi import HTTPException
 
 OPERATOR = SimpleNamespace(user_id=7, username="ops")
 OPERATOR_IP = "127.0.0.1"
+PLAINTEXT_CHANGE = UserPasswordUpdateRequest(old_password="Old#12345", new_password="Strong#123")
+
+
+@pytest.fixture
+def plaintext_password_allowed(monkeypatch):
+    """本文件验证的是"审计有没有落行"，不是口令怎么过线。
+
+    改密接口默认要求密文提交，这里显式放行明文，免得审计用例被传输策略连坐——
+    否则策略一改，这批用例会以"审计没落行"的假象变红。
+    """
+    monkeypatch.setattr(settings, "LOGIN_PASSWORD_ENCRYPTION_REQUIRED", False)
 
 
 async def _only_log(action: AuditAction) -> AuditLog:
@@ -134,11 +149,13 @@ async def test_worker_update_writes_audit(audit_table, http_request, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_self_password_change_writes_audit(audit_table, http_request, monkeypatch) -> None:
+async def test_self_password_change_writes_audit(
+    audit_table, http_request, monkeypatch, *, plaintext_password_allowed
+) -> None:
     target = SimpleNamespace(id=7, username="ops")
     monkeypatch.setattr(user_routes.user_service, "update_user_password", AsyncMock(return_value=target))
 
-    await user_routes.change_password(SimpleNamespace(), OPERATOR, http_request=http_request)
+    await user_routes.change_password(PLAINTEXT_CHANGE, OPERATOR, http_request=http_request)
 
     row = await _only_log(AuditAction.PASSWORD_CHANGE)
     assert row.resource_type == "user"
@@ -149,7 +166,9 @@ async def test_self_password_change_writes_audit(audit_table, http_request, monk
 
 
 @pytest.mark.asyncio
-async def test_admin_password_reset_writes_audit(audit_table, http_request, monkeypatch) -> None:
+async def test_admin_password_reset_writes_audit(
+    audit_table, http_request, monkeypatch, *, plaintext_password_allowed
+) -> None:
     target = SimpleNamespace(id=42, username="uiw4tester")
     monkeypatch.setattr(user_routes.user_service, "reset_user_password", AsyncMock(return_value=target))
 
@@ -167,12 +186,14 @@ async def test_admin_password_reset_writes_audit(audit_table, http_request, monk
 
 
 @pytest.mark.asyncio
-async def test_own_password_endpoint_writes_audit(audit_table, http_request, monkeypatch) -> None:
+async def test_own_password_endpoint_writes_audit(
+    audit_table, http_request, monkeypatch, *, plaintext_password_allowed
+) -> None:
     target = SimpleNamespace(id=7, username="ops")
     monkeypatch.setattr(user_routes.user_service, "get_user_by_public_id", AsyncMock(return_value=target))
     monkeypatch.setattr(user_routes.user_service, "update_user_password", AsyncMock(return_value=target))
 
-    await user_routes.update_user_password("self-public", SimpleNamespace(), OPERATOR, http_request=http_request)
+    await user_routes.update_user_password("self-public", PLAINTEXT_CHANGE, OPERATOR, http_request=http_request)
 
     row = await _only_log(AuditAction.PASSWORD_CHANGE)
     assert row.resource_id == "7"

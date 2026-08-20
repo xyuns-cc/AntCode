@@ -231,3 +231,28 @@ class LoginPasswordCrypto:
 
 
 login_password_crypto = LoginPasswordCrypto()
+
+
+def resolve_transmitted_password(
+    *,
+    plaintext: str | None,
+    encrypted: str | None,
+    algorithm: str | None = None,
+    key_id: str | None = None,
+) -> str:
+    """把"明文或密文"二选一的口令字段收敛成明文，并在此集中执行传输加密策略。
+
+    为什么不只服务登录：登录、改密、管理员重置密码提交的是同一类机密——用户
+    口令。此前只有登录走公钥加密，改密/重置直接收明文 JSON，同一类机密两个
+    端点两种待遇。``LOGIN_PASSWORD_ENCRYPTION_REQUIRED``"口令不得明文过线"
+    的意图对三者完全一致，所以策略必须同源，而不是各写一份。
+    """
+    if encrypted:
+        if not settings.LOGIN_PASSWORD_ENCRYPTION_ENABLED:
+            raise LoginPasswordCryptoError("密码加密未启用")
+        return login_password_crypto.decrypt_password(encrypted, algorithm=algorithm, key_id=key_id)
+    if settings.LOGIN_PASSWORD_ENCRYPTION_REQUIRED:
+        raise LoginPasswordCryptoError("密码必须加密传输")
+    if not plaintext:
+        raise LoginPasswordCryptoError("密码不能为空")
+    return plaintext

@@ -90,22 +90,9 @@ class UserService extends BaseService {
     return this.delete(`/${id}`)
   }
 
-  /**
-   * 重置用户密码
-   */
-  async resetPassword(id: string, newPassword: string): Promise<void> {
-    return this.put(`/${id}/reset-password`, { new_password: newPassword })
-  }
-
-  /**
-   * 修改密码
-   */
-  async changePassword(oldPassword: string, newPassword: string): Promise<void> {
-    return this.post('/change-password', {
-      old_password: oldPassword,
-      new_password: newPassword,
-    })
-  }
+  // 这里曾有 resetPassword / changePassword 两个方法，零调用方：改密走
+  // authService.changePassword，重置走 pages/UserManagement/api.ts。留着就是
+  // 一组同名双实现——两个方法打两个不同端点，且不会随加密改造一起被更新。
 
   /**
    * 批量操作

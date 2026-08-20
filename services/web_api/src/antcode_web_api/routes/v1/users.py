@@ -15,11 +15,9 @@ from antcode_core.domain.models import User, UserRole, UserSession
 from antcode_core.domain.schemas import (
     BaseResponse,
     PaginationResponse,
-    UserAdminPasswordUpdateRequest,
     UserBatchStatusRequest,
     UserCreateRequest,
     UserListQueryParams,
-    UserPasswordUpdateRequest,
     UserResponse,
     UserUpdateRequest,
 )
@@ -38,7 +36,6 @@ from antcode_web_api.routes.v1.committed_resource_audit import (
     audit_user_role_changed,
     audit_user_updated,
 )
-from antcode_web_api.routes.v1.mutation_audit import audit_password_changed
 from antcode_web_api.routing import promote_static_routes
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
@@ -311,88 +308,6 @@ async def update_user(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突") from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-
-@router.put(
-    "/{user_id}/password",
-    response_model=BaseResponse,
-    summary="修改用户密码（需当前密码，仅本人）",
-    tags=["用户管理"],
-)
-async def update_user_password(
-    user_id: str,
-    request: UserPasswordUpdateRequest,
-    current_user: TokenData = Depends(get_current_user),
-    *,
-    http_request: Request,
-):
-    """修改用户密码。
-
-    仅允许用户改自己的密码并强制校验当前密码；管理员重置他人密码走
-    ``PUT /users/{id}/reset-password``（需 super_admin），避免提权路径。
-    """
-    target_user = await user_service.get_user_by_public_id(user_id)
-    if not target_user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-    if target_user.id != current_user.user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="仅可修改自己的密码；如需重置他人密码请使用 reset-password 接口",
-        )
-    try:
-        await user_service.update_user_password(user_id, request, current_user.user_id)
-        await audit_password_changed(http_request, current_user, target=target_user, reset_by_admin=False)
-        return success(None, message="密码修改成功")
-    except PermissionError as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-
-@router.post(
-    "/change-password",
-    response_model=BaseResponse,
-    summary="修改当前用户密码",
-    tags=["用户管理"],
-)
-async def change_password(
-    request: UserPasswordUpdateRequest,
-    current_user: TokenData = Depends(get_current_user),
-    *,
-    http_request: Request,
-):
-    """修改当前用户密码"""
-    try:
-        target = await user_service.update_user_password(current_user.user_id, request, current_user.user_id)
-        await audit_password_changed(http_request, current_user, target=target, reset_by_admin=False)
-        return success(None, message="密码修改成功")
-    except PermissionError as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-
-@router.put(
-    "/{user_id}/reset-password",
-    response_model=BaseResponse,
-    summary="重置用户密码",
-    tags=["用户管理"],
-)
-async def reset_user_password(
-    user_id: str,
-    request: UserAdminPasswordUpdateRequest,
-    current_admin: TokenData = Depends(get_current_super_admin),
-    *,
-    http_request: Request,
-):
-    """重置用户密码（仅超级管理员）"""
-    try:
-        target = await user_service.reset_user_password(user_id, request.new_password)
-    except ValueError as exc:
-        status_code = status.HTTP_404_NOT_FOUND if str(exc) == "用户不存在" else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    await audit_password_changed(http_request, current_admin, target=target, reset_by_admin=True)
-    return success(None, message="密码重置成功")
 
 
 @router.post(

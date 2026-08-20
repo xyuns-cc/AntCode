@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from antcode_core.common.config import settings
 from antcode_core.domain.schemas.common import PaginationInfo
 from antcode_core.domain.schemas.user import (
     UserAdminPasswordUpdateRequest,
@@ -9,7 +10,7 @@ from antcode_core.domain.schemas.user import (
     UserCreateRequest,
     UserListQueryParams,
 )
-from antcode_web_api.routes.v1 import users
+from antcode_web_api.routes.v1 import users, users_password
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 
@@ -52,10 +53,12 @@ async def test_create_user_maps_weak_password_to_bad_request(monkeypatch) -> Non
 )
 async def test_reset_password_maps_user_errors(monkeypatch, http_request, case) -> None:
     message, expected_status = case
-    monkeypatch.setattr(users.user_service, "reset_user_password", AsyncMock(side_effect=ValueError(message)))
+    # 本例验证的是 service 错误到 HTTP 状态码的映射，不是传输加密策略。
+    monkeypatch.setattr(settings, "LOGIN_PASSWORD_ENCRYPTION_REQUIRED", False)
+    monkeypatch.setattr(users_password.user_service, "reset_user_password", AsyncMock(side_effect=ValueError(message)))
 
     with pytest.raises(HTTPException) as exc_info:
-        await users.reset_user_password(
+        await users_password.reset_user_password(
             "missing-user",
             UserAdminPasswordUpdateRequest(new_password="Strong#123"),
             current_admin=SimpleNamespace(user_id=1),

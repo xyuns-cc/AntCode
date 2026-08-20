@@ -13,7 +13,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from antcode_core.common.log_sanitization import sanitize_log_message
+
 _POLL_INTERVAL_SECONDS = 0.1
+# git 把结论写在 stderr 末尾（前面多是 Cloning into/Receiving objects 进度噪音），
+# 所以截断保留尾部。上限远小于 GIT_MAX_COMMAND_OUTPUT_BYTES：那是防内存爆的传输闸，
+# 不是给人读的错误消息长度。
+_STDERR_DETAIL_MAX_CHARS = 2000
 _DNS_RESOLVER_WORKERS = 2
 _DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=_DNS_RESOLVER_WORKERS,
@@ -21,6 +27,28 @@ _DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 _DNS_CAPACITY = threading.BoundedSemaphore(_DNS_RESOLVER_WORKERS)
 FailureProbe = Callable[[], Exception | None]
+
+
+class BoundedGitCommandError(subprocess.CalledProcessError):
+    """git 失败异常，``str()`` 里带上 git 自己的诊断。
+
+    为什么需要它：``CalledProcessError.__str__`` 只有 "Command '[...]' returned
+    non-zero exit status 128."，git 真正说明问题的那句话全在 ``stderr`` 属性里，
+    没有任何调用方读。结果是"远端不可达"/"分支不存在"/"认证被拒"三种完全不同、
+    用户处置方式也完全不同的失败，对外长得一模一样。
+
+    为什么必须脱敏：git 的报错会把 remote URL 原样回显
+    （``fatal: Authentication failed for 'https://x:ghp_xxx@host/r.git'``），
+    而这条消息会同时进 HTTP 响应体和 ``git_repositories.last_scan_error`` 列。
+    不在这里过滤等于把凭证写进库并展示给前端。
+    """
+
+    def __str__(self) -> str:
+        summary = super().__str__()
+        detail = str(self.stderr or "").strip()
+        if not detail:
+            return sanitize_log_message(summary)
+        return sanitize_log_message(f"{summary}\n{detail[-_STDERR_DETAIL_MAX_CHARS:]}")
 
 
 @dataclass(frozen=True)
@@ -65,7 +93,7 @@ def run_bounded_git_command(
         stderr = _read_output(stderr_file, limits.max_output_bytes)
     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if process.returncode:
-        raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+        raise BoundedGitCommandError(process.returncode, command, stdout, stderr)
     return result
 
 
@@ -213,6 +241,7 @@ def _parse_count_objects(output: str) -> dict[str, int]:
 
 
 __all__ = [
+    "BoundedGitCommandError",
     "GitCommandLimits",
     "resolve_with_timeout",
     "run_bounded_git_command",

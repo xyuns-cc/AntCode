@@ -22,6 +22,7 @@ from antcode_core.common.security.auth import (
 from antcode_core.common.security.login_crypto import (
     LoginPasswordCryptoError,
     login_password_crypto,
+    resolve_transmitted_password,
 )
 from antcode_core.common.security.permissions import get_role_permissions
 from antcode_core.domain.schemas import (
@@ -307,20 +308,15 @@ async def login(request: UserLoginRequest, http_request: Request, response: Resp
             detail=f"账户已锁定，请 {remain} 秒后再试",
         )
 
-    password = request.password
-    if request.encrypted_password:
-        if not settings.LOGIN_PASSWORD_ENCRYPTION_ENABLED:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="登录加密未启用")
-        try:
-            password = login_password_crypto.decrypt_password(
-                request.encrypted_password,
-                algorithm=request.encryption,
-                key_id=request.key_id,
-            )
-        except LoginPasswordCryptoError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    elif settings.LOGIN_PASSWORD_ENCRYPTION_REQUIRED:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="密码必须加密传输")
+    try:
+        password = resolve_transmitted_password(
+            plaintext=request.password,
+            encrypted=request.encrypted_password,
+            algorithm=request.encryption,
+            key_id=request.key_id,
+        )
+    except LoginPasswordCryptoError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     user = await user_service.authenticate_user(request.username, password)
 

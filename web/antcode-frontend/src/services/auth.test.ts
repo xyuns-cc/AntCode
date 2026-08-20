@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   getSessionGeneration: vi.fn(),
   isTokenExpired: vi.fn(),
   encryptLoginPassword: vi.fn(),
+  encryptPasswords: vi.fn(),
   requestSessionLogin: vi.fn(),
   requestSessionLogout: vi.fn(),
   setTokens: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock('./api', () => ({
 
 vi.mock('@/utils/loginEncryption', () => ({
   encryptLoginPassword: mocks.encryptLoginPassword,
+  encryptPasswords: mocks.encryptPasswords,
 }))
 
 import { authService } from './auth'
@@ -152,15 +154,32 @@ describe('authService.changePassword', () => {
   beforeEach(() => {
     useAuthStore.setState({ user, isAuthenticated: true })
     mocks.put.mockResolvedValue({ data: { data: null } })
+    mocks.encryptPasswords.mockResolvedValue({
+      encrypted: ['cipher-old', 'cipher-new'],
+      algorithm: 'RSA-OAEP-256',
+      keyId: 'key-1',
+    })
+  })
+
+  it('never puts the two passwords on the wire in clear text', async () => {
+    await authService.changePassword('old-password', 'new-password')
+
+    // 登录早就走公钥加密，改密此前发的是明文 JSON —— 同一类机密两种待遇。
+    expect(mocks.encryptPasswords).toHaveBeenCalledWith(['old-password', 'new-password'])
+    expect(mocks.put).toHaveBeenCalledWith('/api/v1/users/user-1/password', {
+      encrypted_old_password: 'cipher-old',
+      encrypted_new_password: 'cipher-new',
+      encryption: 'RSA-OAEP-256',
+      key_id: 'key-1',
+    })
+    const body = JSON.stringify(mocks.put.mock.calls[0][1])
+    expect(body).not.toContain('old-password')
+    expect(body).not.toContain('new-password')
   })
 
   it('explicitly terminates the current tab after the backend revokes all sessions', async () => {
     await authService.changePassword('old-password', 'new-password')
 
-    expect(mocks.put).toHaveBeenCalledWith('/api/v1/users/user-1/password', {
-      old_password: 'old-password',
-      new_password: 'new-password',
-    })
     expect(mocks.clearSessionHint).toHaveBeenCalledOnce()
     expect(mocks.authFailure).toHaveBeenCalledWith(false)
     expect(mocks.broadcastAuthEvent).toHaveBeenCalledWith('logout')

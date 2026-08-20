@@ -1,3 +1,5 @@
+// 口令传输加密。登录、改密、管理员重置密码提交的是同一类机密，共用同一个
+// /auth/public-key 公钥与同一套字段名——改密此前直接发明文 JSON，是漏做不是权衡。
 import apiClient, { unwrapResponse } from '@/services/api'
 import type { ApiResponse, LoginPublicKeyResponse } from '@/types'
 
@@ -87,30 +89,50 @@ const getLoginPublicKey = async (): Promise<CachedKey> => {
   }
 }
 
+const encryptOne = async (
+  password: string,
+  payload: LoginPublicKeyResponse,
+  cryptoKey: CryptoKey | null,
+): Promise<string> => (
+  cryptoKey
+    ? arrayBufferToBase64(await window.crypto.subtle.encrypt(
+      { name: 'RSA-OAEP' },
+      cryptoKey,
+      new TextEncoder().encode(password),
+    ))
+    : encryptWithForge(password, payload.public_key)
+)
+
+/**
+ * 一次取一次公钥，加密一组口令。
+ *
+ * 改密要同时送 old/new 两个口令，它们必须用同一把公钥、报同一个 key_id：
+ * 分两次调用会在密钥轮换的窗口里拿到两个 key_id，服务端只认一个。
+ */
+export const encryptPasswords = async (passwords: string[]): Promise<{
+  encrypted: string[]
+  algorithm: string
+  keyId: string
+}> => {
+  if (passwords.some((password) => !password)) {
+    throw new Error('密码不能为空')
+  }
+
+  const { payload, cryptoKey } = await getLoginPublicKey()
+  const encrypted = await Promise.all(
+    passwords.map((password) => encryptOne(password, payload, cryptoKey)),
+  )
+
+  return { encrypted, algorithm: payload.algorithm, keyId: payload.key_id }
+}
+
 export const encryptLoginPassword = async (password: string): Promise<{
   encryptedPassword: string
   algorithm: string
   keyId: string
 }> => {
-  const trimmed = password ?? ''
-  if (!trimmed) {
-    throw new Error('密码不能为空')
-  }
-
-  const { payload, cryptoKey } = await getLoginPublicKey()
-  const encryptedPassword = cryptoKey
-    ? arrayBufferToBase64(await window.crypto.subtle.encrypt(
-      { name: 'RSA-OAEP' },
-      cryptoKey,
-      new TextEncoder().encode(trimmed),
-    ))
-    : await encryptWithForge(trimmed, payload.public_key)
-
-  return {
-    encryptedPassword,
-    algorithm: payload.algorithm,
-    keyId: payload.key_id,
-  }
+  const { encrypted, algorithm, keyId } = await encryptPasswords([password ?? ''])
+  return { encryptedPassword: encrypted[0], algorithm, keyId }
 }
 
 export const clearLoginPublicKeyCache = () => {

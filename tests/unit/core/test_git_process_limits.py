@@ -141,3 +141,63 @@ def test_repository_metadata_object_quota_is_explicit(tmp_path):
 
     with pytest.raises(ValueError, match="对象数超过上限"):
         limits_module.validate_repository_metadata(tmp_path, runner, max_objects=10, max_refs=5)
+
+
+_STDERR_ENV = "FAKE_GIT_STDERR"
+# stderr 内容经环境变量喂给子进程，**绝不能**出现在 argv 里：argv 会被
+# ``CalledProcessError.__str__`` 原样打进第一行，断言就会在"stderr 根本没被
+# 读取"的情况下照样通过——这类用例摘掉修复也不变红，等于没测。
+_EMIT_STDERR = [
+    sys.executable,
+    "-c",
+    f"import os, sys; sys.stderr.write(os.environ[{_STDERR_ENV!r}]); raise SystemExit(128)",
+]
+
+
+def test_git_failure_message_carries_git_own_diagnostic(tmp_path):
+    """走查实测：远端不可达时用户拿到的是一句纯退出码，和自己填的 URL 毫无关系。
+
+    git 的诊断此前只躺在 ``stderr`` 属性里，``str(exc)`` 从不读它。
+    """
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        limits_module.run_bounded_git_command(
+            _EMIT_STDERR,
+            cwd=tmp_path,
+            env={_STDERR_ENV: "fatal: unable to access: Could not resolve host: nope.invalid\n"},
+            limits=_limits(),
+        )
+
+    assert "Could not resolve host: nope.invalid" in str(exc_info.value)
+
+
+def test_git_failure_message_redacts_credentials_from_stderr_and_argv(tmp_path):
+    """git 会把带 token 的 remote URL 原样回显，这条消息要进库还要进 HTTP 响应。"""
+    secret = "ghp_abcd1234EFGH5678"
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        limits_module.run_bounded_git_command(
+            [*_EMIT_STDERR, f"https://oauth2:{secret}@example.test/r.git"],
+            cwd=tmp_path,
+            env={_STDERR_ENV: f"fatal: Authentication failed for 'https://oauth2:{secret}@example.test/r.git/'\n"},
+            limits=_limits(),
+        )
+
+    message = str(exc_info.value)
+    # 凭证在 stderr 和 argv 里各出现一次，两处都不许漏出来。
+    assert secret not in message
+    assert "Authentication failed" in message
+
+
+def test_git_failure_message_is_bounded_and_keeps_the_tail(tmp_path):
+    """stderr 上限是 8MB 的传输闸，不是给人读的长度；结论在末尾，截断保留尾部。"""
+    noise = "Receiving objects: 1% \n" * 500
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        limits_module.run_bounded_git_command(
+            _EMIT_STDERR,
+            cwd=tmp_path,
+            env={_STDERR_ENV: f"{noise}fatal: the real reason\n"},
+            limits=_limits(max_output_bytes=65536),
+        )
+
+    message = str(exc_info.value)
+    assert "fatal: the real reason" in message
+    assert len(message) < len(noise)

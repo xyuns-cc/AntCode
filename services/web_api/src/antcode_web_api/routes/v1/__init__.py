@@ -19,6 +19,7 @@ from antcode_web_api.routes.v1.system_config import router as system_config_rout
 from antcode_web_api.routes.v1.tasks import tasks_router
 from antcode_web_api.routes.v1.user_sessions import router as user_sessions_router
 from antcode_web_api.routes.v1.users import router as users_router
+from antcode_web_api.routes.v1.users_password import router as users_password_router
 from antcode_web_api.routes.v1.worker_install import router as worker_install_router
 from antcode_web_api.routes.v1.workers import workers_router
 
@@ -27,6 +28,9 @@ v1_router = APIRouter()
 v1_router.include_router(base_router, tags=["基础"])
 v1_router.include_router(branding_router, prefix="/branding", tags=["基础"])
 v1_router.include_router(user_sessions_router, prefix="/users", tags=["用户管理"])
+# 改密路由必须排在 users_router 之前：``/change-password`` 是静态段，
+# 落在参数路由 ``/{user_id}`` 之后会被遮蔽成 404。
+v1_router.include_router(users_password_router, prefix="/users", tags=["用户管理"])
 v1_router.include_router(users_router, prefix="/users", tags=["用户管理"])
 v1_router.include_router(project_router, prefix="/projects", tags=["项目管理"])
 v1_router.include_router(repositories_router, prefix="/repositories", tags=["Git 仓库"])

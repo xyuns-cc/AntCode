@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import pytest
 import pytest_asyncio
+from antcode_core.application.services.projects.git_process_limits import BoundedGitCommandError
 from antcode_core.application.services.projects.repository_service import (
     RepositoryScanError,
     RepositoryService,
@@ -67,6 +68,34 @@ async def test_scan_reports_repository_config_failures_as_scan_error(monkeypatch
     # 接口报错与列表里的 last_scan_error 必须是同一句话，否则用户看到两套说辞。
     assert str(exc_info.value) == repository.last_scan_error
     assert str(failure) in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_scan_error_tells_the_user_what_git_actually_said(monkeypatch, repository) -> None:
+    """422 不再是一句裸退出码。
+
+    走查实测（2026-08-20）：远端不可达时接口回的是
+    ``Command '[...]' returned non-zero exit status 128.``——不 500 了，
+    但用户还是不知道是 URL 打错、分支不存在，还是凭证过期。
+    """
+    secret = "ghp_abcd1234EFGH5678"
+    failure = BoundedGitCommandError(
+        128,
+        ["git", "ls-remote", "--refs", f"https://oauth2:{secret}@example.test/r.git"],
+        "",
+        f"fatal: unable to access 'https://oauth2:{secret}@example.test/r.git/': Could not resolve host: example.test\n",
+    )
+    monkeypatch.setattr(RepositoryService, "_clone_and_scan", _failing_clone(failure))
+
+    with pytest.raises(RepositoryScanError) as exc_info:
+        await RepositoryService().scan_for_user(repository.public_id, OWNER_USER_ID, "main")
+
+    await repository.refresh_from_db()
+    message = str(exc_info.value)
+    assert "Could not resolve host: example.test" in message
+    # 这条消息同时进 HTTP 响应体和 last_scan_error 列，凭证一处都不许漏。
+    assert secret not in message
+    assert secret not in (repository.last_scan_error or "")
 
 
 @pytest.mark.asyncio
