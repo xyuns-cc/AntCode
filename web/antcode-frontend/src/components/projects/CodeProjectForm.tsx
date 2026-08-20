@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Card, Col, Form, Input, Row, Select, Space, Tag, Typography } from 'antd'
 import { CodeOutlined, PlusOutlined } from '@ant-design/icons'
-import { FileIcon } from '@/utils/fileIcons'
+import { FileIcon, type KnownFileSuffix } from '@/utils/fileIcons'
 import type { ProjectCreateRequest } from '@/types'
 import { repositoryService } from '@/services/repositories'
 import type { GitRepository } from '@/types/repository'
@@ -11,15 +11,24 @@ const { Title, Text } = Typography
 const { TextArea } = Input
 const { Option } = Select
 
-const LANGUAGE_OPTIONS = [
-  { value: 'python', label: 'Python', extension: '.py', color: '#3776ab' },
-  { value: 'javascript', label: 'JavaScript', extension: '.js', color: '#f7df1e' },
-  { value: 'typescript', label: 'TypeScript', extension: '.ts', color: '#3178c6' },
+interface LanguageOption {
+  value: string
+  label: string
+  // 标成 KnownFileSuffix 而非 string：这一列的唯一消费方是 FileIcon 的后缀表，
+  // 写错形状（裸 'py'）会在 type-check 阶段失败，不会再退化成静默的灰图标。
+  suffix: KnownFileSuffix
+  color: string
+}
+
+const LANGUAGE_OPTIONS: readonly LanguageOption[] = [
+  { value: 'python', label: 'Python', suffix: '.py', color: '#3776ab' },
+  { value: 'javascript', label: 'JavaScript', suffix: '.js', color: '#f7df1e' },
+  { value: 'typescript', label: 'TypeScript', suffix: '.ts', color: '#3178c6' },
   // Java 标 .jar 而不是 .java：执行语言契约（antcode_contracts.execution_language）
   // 只认 .jar，CodePlugin 的 Java 形态仅有 `java -jar`，镜像装的也是 JRE（无 javac）。
   // 标 .java 会让用户以为可以交源码，直到派发才被拒。
-  { value: 'java', label: 'Java', extension: '.jar', color: '#b07219' },
-  { value: 'go', label: 'Go', extension: '.go', color: '#00add8' },
+  { value: 'java', label: 'Java', suffix: '.jar', color: '#b07219' },
+  { value: 'go', label: 'Go', suffix: '.go', color: '#00add8' },
 ]
 
 interface CodeProjectFormInitialData extends Omit<Partial<ProjectCreateRequest>, 'tags'> {
@@ -175,7 +184,7 @@ const CodeProjectForm: React.FC<CodeProjectFormProps> = ({
                   {LANGUAGE_OPTIONS.map((option) => (
                     <Option key={option.value} value={option.value}>
                       <Space>
-                        <FileIcon extension={option.extension} size={16} />
+                        <FileIcon suffix={option.suffix} />
                         <span style={{ color: option.color }}>{option.label}</span>
                       </Space>
                     </Option>

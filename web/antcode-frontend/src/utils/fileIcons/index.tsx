@@ -1,30 +1,92 @@
-/* eslint-disable react-refresh/only-export-components */
 import type React from 'react'
 
-import { DEFAULT_ICON_SIZE } from './iconBase'
-import {
-  ConfigIcon,
-  CssIcon,
-  HtmlIcon,
-  ImageIcon,
-  JsonIcon,
-  MarkdownIcon,
-} from './documentIcons'
+import { DEFAULT_ICON_SIZE, type IconGlyph } from './iconBase'
+import { ConfigIcon, CssIcon, HtmlIcon, ImageIcon, JsonIcon, MarkdownIcon } from './documentIcons'
 import { GoIcon, JavaIcon, JavaScriptIcon, PythonIcon, TypeScriptIcon } from './languageIcons'
 import { DefaultFileIcon, FolderIcon } from './structuralIcons'
 
-// 文件图标组件，使用SVG实现类似Material Icons的效果
+// 键一律带前导点，与 antcode_contracts.execution_language._ENTRY_POINT_SUFFIXES、
+// 入口文件提示语（.py/.js/.ts/.jar/.go）和 Node 的 path.extname() 是同一种形状。
+// 全仓只有这一张后缀表，且既不在这里剥点也不在调用方剥点：一旦允许两种写法，
+// 就又多出一个可分叉的真源，而分叉的代价是静默的——落到兜底图标不会报任何错。
+//
+// .java 和 .jar 都给 Java 图标：图标回答"这个文件长什么样"，
+// 执行契约只收 .jar 回答的是"这个文件能不能跑"，是两个不同的问题。
+const ICON_BY_SUFFIX = {
+  '.py': PythonIcon,
+  '.pyw': PythonIcon,
+  '.pyc': PythonIcon,
+  '.js': JavaScriptIcon,
+  '.jsx': JavaScriptIcon,
+  '.mjs': JavaScriptIcon,
+  '.cjs': JavaScriptIcon,
+  '.ts': TypeScriptIcon,
+  '.tsx': TypeScriptIcon,
+  '.mts': TypeScriptIcon,
+  '.cts': TypeScriptIcon,
+  '.java': JavaIcon,
+  '.jar': JavaIcon,
+  '.go': GoIcon,
+  '.json': JsonIcon,
+  '.jsonc': JsonIcon,
+  '.md': MarkdownIcon,
+  '.markdown': MarkdownIcon,
+  '.mdown': MarkdownIcon,
+  '.css': CssIcon,
+  '.scss': CssIcon,
+  '.sass': CssIcon,
+  '.less': CssIcon,
+  '.html': HtmlIcon,
+  '.htm': HtmlIcon,
+  '.xhtml': HtmlIcon,
+  '.yml': ConfigIcon,
+  '.yaml': ConfigIcon,
+  '.xml': ConfigIcon,
+  '.toml': ConfigIcon,
+  '.ini': ConfigIcon,
+  '.cfg': ConfigIcon,
+  '.conf': ConfigIcon,
+  '.png': ImageIcon,
+  '.jpg': ImageIcon,
+  '.jpeg': ImageIcon,
+  '.gif': ImageIcon,
+  '.webp': ImageIcon,
+  '.svg': ImageIcon,
+  '.ico': ImageIcon,
+  '.bmp': ImageIcon,
+} satisfies Record<string, IconGlyph>
+
+/**
+ * 图标表收录的后缀。语言下拉这类**固定集合**必须用它标注自己的后缀字段，
+ * 写成裸后缀（'py'）或未收录的值都会在 type-check 阶段失败，而不是退化成灰图标。
+ */
+export type KnownFileSuffix = keyof typeof ICON_BY_SUFFIX
+
 interface FileIconProps {
-  extension: string
+  /** 带前导点的文件后缀，如 `.py`；取自 path.extname() 或 KnownFileSuffix 常量。 */
+  suffix: string
   fileName?: string
   isDirectory?: boolean
   size?: number
   className?: string
 }
 
-// 主要的文件图标组件
+// 无扩展名但有约定俗成含义的文件；只在后缀查不到时才轮到它们。
+const iconByFileName = (fileName: string): IconGlyph | undefined => {
+  if (fileName.includes('dockerfile')) {
+    return ConfigIcon
+  }
+  if (fileName.includes('readme') || fileName.includes('license')) {
+    return MarkdownIcon
+  }
+  return undefined
+}
+
+const iconBySuffix = (suffix: string): IconGlyph | undefined =>
+  Object.hasOwn(ICON_BY_SUFFIX, suffix) ? ICON_BY_SUFFIX[suffix as KnownFileSuffix] : undefined
+
 export const FileIcon: React.FC<FileIconProps> = ({
-  extension,
+  suffix,
   fileName = '',
   isDirectory = false,
   size = DEFAULT_ICON_SIZE,
@@ -34,112 +96,13 @@ export const FileIcon: React.FC<FileIconProps> = ({
     return <FolderIcon size={size} className={className} />
   }
 
-  const ext = extension.toLowerCase()
-  const fullName = fileName.toLowerCase()
+  const Glyph = iconBySuffix(suffix.toLowerCase()) ?? iconByFileName(fileName.toLowerCase())
 
-  // 根据文件扩展名返回对应图标
-  switch (ext) {
-    case 'py':
-    case 'pyw':
-    case 'pyc':
-      return <PythonIcon size={size} className={className} />
-
-    case 'js':
-    case 'jsx':
-    case 'mjs':
-      return <JavaScriptIcon size={size} className={className} />
-
-    case 'ts':
-    case 'tsx':
-      return <TypeScriptIcon size={size} className={className} />
-
-    case 'java':
-      return <JavaIcon size={size} className={className} />
-
-    case 'go':
-      return <GoIcon size={size} className={className} />
-
-    case 'json':
-    case 'jsonc':
-      return <JsonIcon size={size} className={className} />
-
-    case 'md':
-    case 'markdown':
-    case 'mdown':
-      return <MarkdownIcon size={size} className={className} />
-
-    case 'css':
-    case 'scss':
-    case 'sass':
-    case 'less':
-      return <CssIcon size={size} className={className} />
-
-    case 'html':
-    case 'htm':
-    case 'xhtml':
-      return <HtmlIcon size={size} className={className} />
-
-    case 'yml':
-    case 'yaml':
-    case 'xml':
-    case 'toml':
-    case 'ini':
-    case 'cfg':
-    case 'conf':
-      return <ConfigIcon size={size} className={className} />
-
-    case 'png':
-    case 'jpg':
-    case 'jpeg':
-    case 'gif':
-    case 'webp':
-    case 'svg':
-    case 'ico':
-    case 'bmp':
-      return <ImageIcon size={size} className={className} />
-
-    default:
-      // 特殊文件名处理
-      if (fullName.includes('dockerfile') || fullName === 'dockerfile') {
-        return <ConfigIcon size={size} className={className} />
-      }
-      if (fullName.includes('readme') || fullName.includes('license')) {
-        return <MarkdownIcon size={size} className={className} />
-      }
-
-      return <DefaultFileIcon size={size} className={className} />
+  // 兜底图标只服务于开放输入——任意仓库文件的后缀本就无法穷举，此时通用文件图标
+  // 是正确渲染而非掩盖问题。固定集合走 KnownFileSuffix 在编译期挡下，不会再悄悄
+  // 落到这里：五种语言图标此前整体失效数月无人察觉，正是因为它们落进了这一支。
+  if (Glyph === undefined) {
+    return <DefaultFileIcon size={size} className={className} />
   }
+  return <Glyph size={size} className={className} />
 }
-
-// 获取文件类型颜色（用于文本显示等）
-export const getFileTypeColor = (extension: string): string => {
-  const ext = extension.toLowerCase()
-
-  const colorMap: Record<string, string> = {
-    py: '#3776ab',
-    js: '#f7df1e',
-    jsx: '#f7df1e',
-    ts: '#3178c6',
-    tsx: '#3178c6',
-    java: '#ed8b00',
-    go: '#00add8',
-    json: '#ffa726',
-    md: '#2196f3',
-    css: '#1976d2',
-    scss: '#c6538c',
-    sass: '#c6538c',
-    html: '#e65100',
-    xml: '#757575',
-    yml: '#757575',
-    yaml: '#757575',
-    png: '#4caf50',
-    jpg: '#4caf50',
-    jpeg: '#4caf50',
-    gif: '#4caf50',
-    svg: '#4caf50',
-  }
-
-  return colorMap[ext] || '#90a4ae'
-}
-
-export default FileIcon
