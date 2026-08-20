@@ -36,10 +36,20 @@ from antcode_web_api.routes.v1.committed_resource_audit import (
     audit_user_role_changed,
     audit_user_updated,
 )
+from antcode_web_api.routes.v1.password_transport import resolve_created_user
 from antcode_web_api.routing import promote_static_routes
 from antcode_web_api.utils.batch_inputs import bounded_distinct_ids
 
 router = APIRouter()
+
+
+def _user_write_conflict(exc: IntegrityError, action: str) -> HTTPException:
+    """唯一约束冲突映射成 409；未识别的冲突只落日志，不把 DB 细节回传给客户端。"""
+    for field in ("用户名", "邮箱"):
+        if field in str(exc):
+            return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{field}已存在")
+    logger.exception(f"{action}用户发生未识别的数据完整性冲突")
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突")
 
 
 async def _build_user_response(user) -> UserResponse:
@@ -139,18 +149,14 @@ async def create_user(
     if request.is_admin and not await verify_super_admin(current_admin):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有超级管理员可以创建管理员")
     admin_user = await user_service.get_user_by_id(current_admin.user_id)
+    # 先过传输加密策略再落库：与登录/改密/重置同一个入口，初始口令同样不得明文过线。
+    resolved = resolve_created_user(request)
     try:
-        user = await user_service.create_user(request)
+        user = await user_service.create_user(resolved)
         await audit_user_created(http_request, admin_user, user)
         return success(await _build_user_response(user), message=Messages.CREATED_SUCCESS, code=201)
     except IntegrityError as e:
-        err_msg = str(e)
-        if "用户名" in err_msg:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
-        if "邮箱" in err_msg:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已存在")
-        logger.exception("创建用户发生未识别的数据完整性冲突")
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突") from e
+        raise _user_write_conflict(e, "创建") from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
@@ -299,13 +305,7 @@ async def update_user(
 
         return success(await _build_user_response(user), message=Messages.UPDATED_SUCCESS)
     except IntegrityError as e:
-        detail = str(e)
-        if "用户名" in detail:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在") from e
-        if "邮箱" in detail:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已存在") from e
-        logger.exception("更新用户发生未识别的数据完整性冲突")
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户数据冲突") from e
+        raise _user_write_conflict(e, "更新") from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 

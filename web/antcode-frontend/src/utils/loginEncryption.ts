@@ -138,3 +138,29 @@ export const encryptLoginPassword = async (password: string): Promise<{
 export const clearLoginPublicKeyCache = () => {
   cachedKey = null
 }
+
+// 与后端 login_crypto.STALE_LOGIN_KEY_MESSAGE 对齐；后端有用例钉住那段文案。
+const STALE_KEY_MARKER = '登录密钥已过期'
+
+const isStaleLoginKeyError = (error: unknown): boolean => {
+  const message = (error as { response?: { data?: { message?: unknown } } })?.response?.data?.message
+  return typeof message === 'string' && message.includes(STALE_KEY_MARKER)
+}
+
+/**
+ * 提交口令密文；服务端报「登录密钥已过期」时丢弃缓存的公钥。
+ *
+ * 密钥轮换后缓存不清，用户就会拿同一把过期公钥反复撞同一个 400，不整页刷新
+ * 出不去——而改密/建号发生在设置页与用户管理页，那里根本没有"登录页面"可刷。
+ *
+ * 这里刻意**不重试**：静默重试会把一个明确错误变成不可解释的卡顿。错误照常
+ * 抛给调用方展示，只是下一次提交会重新取公钥，用户再点一次就能成功。
+ */
+export const withStaleKeyRecovery = async <T>(submit: () => Promise<T>): Promise<T> => {
+  try {
+    return await submit()
+  } catch (error) {
+    if (isStaleLoginKeyError(error)) clearLoginPublicKeyCache()
+    throw error
+  }
+}

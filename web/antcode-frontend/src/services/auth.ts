@@ -13,7 +13,7 @@ import {
 } from './authToken'
 import { AuthHandler } from '@/utils/authHandler'
 import { useAuthStore } from '@/stores/authStore'
-import { encryptLoginPassword, encryptPasswords } from '@/utils/loginEncryption'
+import { encryptLoginPassword, encryptPasswords, withStaleKeyRecovery } from '@/utils/loginEncryption'
 import Logger from '@/utils/logger'
 import type {
   LoginRequest,
@@ -45,7 +45,9 @@ class AuthService {
       key_id: encrypted.keyId,
     }
 
-    const response = await requestSessionLogin<ApiResponse<BackendLoginResponse>>(loginPayload)
+    const response = await withStaleKeyRecovery(
+      () => requestSessionLogin<ApiResponse<BackendLoginResponse>>(loginPayload)
+    )
 
     const payload = response.data.data
     const user = payload.user
@@ -101,12 +103,12 @@ class AuthService {
     // 两个口令一起加密：必须共用同一个 key_id，服务端只认一个。
     const { encrypted, algorithm, keyId } = await encryptPasswords([currentPassword, newPassword])
 
-    await apiClient.put(`/api/v1/users/${userInfo.id}/password`, {
+    await withStaleKeyRecovery(() => apiClient.put(`/api/v1/users/${userInfo.id}/password`, {
       encrypted_old_password: encrypted[0],
       encrypted_new_password: encrypted[1],
       encryption: algorithm,
       key_id: keyId,
-    })
+    }))
     // 后端在改密成功时撤销该用户全部会话，当前 refresh cookie 也已失效。
     // 不再尝试刷新一个必然失败的会话，而是明确清理当前页并通知其他标签。
     clearSessionHint()

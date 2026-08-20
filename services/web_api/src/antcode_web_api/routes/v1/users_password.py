@@ -12,39 +12,19 @@ from antcode_core.common.security.auth import (
     get_current_super_admin,
     get_current_user,
 )
-from antcode_core.common.security.login_crypto import (
-    LoginPasswordCryptoError,
-    resolve_transmitted_password,
-)
 from antcode_core.domain.schemas import (
     BaseResponse,
     UserAdminPasswordUpdateRequest,
     UserPasswordUpdateRequest,
 )
-from antcode_core.domain.schemas.user import PasswordEnvelopeFields
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from antcode_web_api.response import success
 from antcode_web_api.routes.v1.mutation_audit import audit_password_changed
+from antcode_web_api.routes.v1.password_transport import decrypt_transmitted
 from antcode_web_api.routing import promote_static_routes
 
 router = APIRouter()
-
-
-def _decrypt(encrypted: str | None, plaintext: str | None, envelope: PasswordEnvelopeFields) -> str:
-    """把一个口令字段收敛成明文；密文格式/策略错误一律 400。
-
-    与登录同一个异常类型和同一个状态码，避免两个端点对同一种错误给出两套说辞。
-    """
-    try:
-        return resolve_transmitted_password(
-            plaintext=plaintext,
-            encrypted=encrypted,
-            algorithm=envelope.encryption,
-            key_id=envelope.key_id,
-        )
-    except LoginPasswordCryptoError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 def _resolved(request: UserPasswordUpdateRequest) -> UserPasswordUpdateRequest:
@@ -57,8 +37,8 @@ def _resolved(request: UserPasswordUpdateRequest) -> UserPasswordUpdateRequest:
     """
     return request.model_copy(
         update={
-            "old_password": _decrypt(request.encrypted_old_password, request.old_password, request),
-            "new_password": _decrypt(request.encrypted_new_password, request.new_password, request),
+            "old_password": decrypt_transmitted(request.encrypted_old_password, request.old_password, request),
+            "new_password": decrypt_transmitted(request.encrypted_new_password, request.new_password, request),
         }
     )
 
@@ -136,7 +116,7 @@ async def reset_user_password(
     http_request: Request,
 ):
     """重置用户密码（仅超级管理员）"""
-    new_password = _decrypt(request.encrypted_new_password, request.new_password, request)
+    new_password = decrypt_transmitted(request.encrypted_new_password, request.new_password, request)
     try:
         target = await user_service.reset_user_password(user_id, new_password)
     except ValueError as exc:

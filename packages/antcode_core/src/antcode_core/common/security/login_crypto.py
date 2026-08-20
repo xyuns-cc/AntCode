@@ -16,6 +16,11 @@ from antcode_core.common.config import settings
 
 LOGIN_ENCRYPTION_ALGORITHM = "RSA-OAEP-256"
 LOGIN_KEY_LOCK_TIMEOUT_SECONDS = 30
+# 前端靠这段文案识别"该丢掉缓存的公钥了"（utils/loginEncryption.ts 的 STALE_KEY_MARKER），
+# 所以它是跨端契约，不是随手写的提示；tests/unit/web_api 有用例钉住，改这里会红。
+# 不说"刷新登录页面"：改密与建号都可能发生在设置页/用户管理页，那里没有"登录页面"
+# 可刷；前端收到本错误会丢弃缓存公钥，用户再提交一次即可。
+STALE_LOGIN_KEY_MESSAGE = "登录密钥已过期，请重试"
 
 
 class LoginPasswordCryptoError(ValueError):
@@ -49,7 +54,7 @@ class LoginPasswordCrypto:
         if algorithm and algorithm != LOGIN_ENCRYPTION_ALGORITHM:
             raise LoginPasswordCryptoError("不支持的加密算法")
         if key_id and key_id != self._get_key_id():
-            raise LoginPasswordCryptoError("密钥已过期，请刷新登录页面")
+            raise LoginPasswordCryptoError(STALE_LOGIN_KEY_MESSAGE)
 
         try:
             cipher_bytes = base64.b64decode(encrypted_password)

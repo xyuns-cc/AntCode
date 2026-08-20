@@ -55,11 +55,30 @@ def _validate_role_admin_consistency(is_admin: bool | None, role: str | None) ->
         raise ValueError("is_admin 与 role 不一致：is_admin 必须 = (role in {admin, super_admin})")
 
 
-class UserCreateRequest(BaseModel):
-    """用户创建请求"""
+class PasswordEnvelopeFields(BaseModel):
+    """口令密文随行的算法与密钥标识，字段名与登录请求保持一致。
+
+    改密与登录提交的是同一类机密，客户端复用同一个 ``/auth/public-key``
+    公钥，因此这里不另起一套字段名。
+    """
+
+    encryption: str | None = Field(default=None, max_length=50)
+    key_id: str | None = Field(default=None, max_length=64)
+
+
+class UserCreateRequest(PasswordEnvelopeFields):
+    """用户创建请求。
+
+    管理员建号时设的初始口令与登录/改密/重置是同一类机密，所以走同一套传输
+    形态：明文字段可选，是否放行由 ``LOGIN_PASSWORD_ENCRYPTION_REQUIRED``
+    在服务端判定，schema 不做策略。``password`` 的 8 位下限只对明文有意义
+    ——密文长度是 RSA 块长，强度校验在解密后由 ``validate_password_strength``
+    在 service 层统一执行。
+    """
 
     username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
+    password: str | None = Field(default=None, min_length=8)
+    encrypted_password: str | None = Field(default=None, min_length=1)
     email: str | None = Field(None, max_length=100)
     is_active: bool = Field(default=True)
     is_admin: bool = Field(default=False)
@@ -67,6 +86,8 @@ class UserCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_role_consistency(self) -> "UserCreateRequest":
+        if not self.password and not self.encrypted_password:
+            raise ValueError("password 或 encrypted_password 至少需要一个")
         _validate_role_value(self.role)
         _validate_role_admin_consistency(self.is_admin, self.role)
         return self
@@ -116,17 +137,6 @@ class AdminUserRoleUpdateRequest(BaseModel):
 
 # 兼容旧命名，避免下游引用突然断裂；新代码请直接用 AdminUserRoleUpdateRequest
 UserRoleUpdateRequest = AdminUserRoleUpdateRequest
-
-
-class PasswordEnvelopeFields(BaseModel):
-    """口令密文随行的算法与密钥标识，字段名与登录请求保持一致。
-
-    改密与登录提交的是同一类机密，客户端复用同一个 ``/auth/public-key``
-    公钥，因此这里不另起一套字段名。
-    """
-
-    encryption: str | None = Field(default=None, max_length=50)
-    key_id: str | None = Field(default=None, max_length=64)
 
 
 class UserPasswordUpdateRequest(PasswordEnvelopeFields):

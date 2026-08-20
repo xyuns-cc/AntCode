@@ -8,7 +8,6 @@ RSA-OAEP-256 公钥加密。同一类机密两个端点两种待遇——git 史
 
 from __future__ import annotations
 
-import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -20,45 +19,12 @@ from antcode_core.domain.schemas.user import (
     UserPasswordUpdateRequest,
 )
 from antcode_web_api.routes.v1 import users_password
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import HTTPException, status
 
 OPERATOR = SimpleNamespace(user_id=7, username="ops")
 TARGET = SimpleNamespace(id=7, username="ops")
 NEW_PASSWORD = "Strong#12345"
 OLD_PASSWORD = "Old#12345"
-
-
-@pytest.fixture(scope="module")
-def login_key(tmp_path_factory):
-    """独立密钥，避免污染仓库 data_dir 下的真实登录私钥。"""
-    key_dir = tmp_path_factory.mktemp("login-keys")
-    crypto = login_crypto.LoginPasswordCrypto()
-    crypto._resolve_private_key_path = lambda: key_dir / "private.pem"  # noqa: SLF001
-    crypto._resolve_public_key_path = lambda: key_dir / "public.pem"  # noqa: SLF001
-    return crypto
-
-
-@pytest.fixture
-def crypto(monkeypatch, login_key):
-    monkeypatch.setattr(login_crypto, "login_password_crypto", login_key)
-    monkeypatch.setattr(settings, "LOGIN_PASSWORD_ENCRYPTION_ENABLED", True)
-    monkeypatch.setattr(settings, "LOGIN_PASSWORD_ENCRYPTION_REQUIRED", True)
-    return login_key
-
-
-def _encrypt(crypto, plaintext: str) -> str:
-    public_key = crypto._get_private_key().public_key()  # noqa: SLF001
-    cipher = public_key.encrypt(
-        plaintext.encode("utf-8"),
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
-    return base64.b64encode(cipher).decode("ascii")
 
 
 @pytest.fixture
@@ -83,7 +49,9 @@ def captured_service(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_change_password_rejects_plaintext_by_default(crypto, http_request, captured_service) -> None:
+async def test_change_password_rejects_plaintext_by_default(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
     """默认策略下明文改密必须被拒——这正是登录早就在做的事。"""
     with pytest.raises(HTTPException) as exc_info:
         await users_password.change_password(
@@ -98,11 +66,13 @@ async def test_change_password_rejects_plaintext_by_default(crypto, http_request
 
 
 @pytest.mark.asyncio
-async def test_change_password_decrypts_envelope_to_plaintext(crypto, http_request, captured_service) -> None:
+async def test_change_password_decrypts_envelope_to_plaintext(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
     await users_password.change_password(
         UserPasswordUpdateRequest(
-            encrypted_old_password=_encrypt(crypto, OLD_PASSWORD),
-            encrypted_new_password=_encrypt(crypto, NEW_PASSWORD),
+            encrypted_old_password=encrypt_password(OLD_PASSWORD),
+            encrypted_new_password=encrypt_password(NEW_PASSWORD),
             encryption=login_crypto.LOGIN_ENCRYPTION_ALGORITHM,
             key_id=crypto.public_key_payload()["key_id"],
         ),
@@ -116,13 +86,15 @@ async def test_change_password_decrypts_envelope_to_plaintext(crypto, http_reque
 
 
 @pytest.mark.asyncio
-async def test_own_password_endpoint_decrypts_envelope(crypto, http_request, captured_service) -> None:
+async def test_own_password_endpoint_decrypts_envelope(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
     """走查抓到的正是这条路由：前端 authService.changePassword 打的是它。"""
     await users_password.update_user_password(
         "self-public",
         UserPasswordUpdateRequest(
-            encrypted_old_password=_encrypt(crypto, OLD_PASSWORD),
-            encrypted_new_password=_encrypt(crypto, NEW_PASSWORD),
+            encrypted_old_password=encrypt_password(OLD_PASSWORD),
+            encrypted_new_password=encrypt_password(NEW_PASSWORD),
             encryption=login_crypto.LOGIN_ENCRYPTION_ALGORITHM,
             key_id=crypto.public_key_payload()["key_id"],
         ),
@@ -136,11 +108,13 @@ async def test_own_password_endpoint_decrypts_envelope(crypto, http_request, cap
 
 
 @pytest.mark.asyncio
-async def test_admin_reset_password_decrypts_envelope(crypto, http_request, captured_service) -> None:
+async def test_admin_reset_password_decrypts_envelope(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
     await users_password.reset_user_password(
         "target-public",
         UserAdminPasswordUpdateRequest(
-            encrypted_new_password=_encrypt(crypto, NEW_PASSWORD),
+            encrypted_new_password=encrypt_password(NEW_PASSWORD),
             encryption=login_crypto.LOGIN_ENCRYPTION_ALGORITHM,
             key_id=crypto.public_key_payload()["key_id"],
         ),
@@ -152,7 +126,9 @@ async def test_admin_reset_password_decrypts_envelope(crypto, http_request, capt
 
 
 @pytest.mark.asyncio
-async def test_admin_reset_password_rejects_plaintext_by_default(crypto, http_request, captured_service) -> None:
+async def test_admin_reset_password_rejects_plaintext_by_default(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
     with pytest.raises(HTTPException) as exc_info:
         await users_password.reset_user_password(
             "target-public",
@@ -166,13 +142,15 @@ async def test_admin_reset_password_rejects_plaintext_by_default(crypto, http_re
 
 
 @pytest.mark.asyncio
-async def test_stale_key_id_is_rejected_instead_of_silently_failing(crypto, http_request, captured_service) -> None:
+async def test_stale_key_id_is_rejected_instead_of_silently_failing(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
     """密钥轮换后前端拿着旧公钥来改密，必须明确报"刷新页面"，不能糊成密码错误。"""
     with pytest.raises(HTTPException) as exc_info:
         await users_password.change_password(
             UserPasswordUpdateRequest(
-                encrypted_old_password=_encrypt(crypto, OLD_PASSWORD),
-                encrypted_new_password=_encrypt(crypto, NEW_PASSWORD),
+                encrypted_old_password=encrypt_password(OLD_PASSWORD),
+                encrypted_new_password=encrypt_password(NEW_PASSWORD),
                 encryption=login_crypto.LOGIN_ENCRYPTION_ALGORITHM,
                 key_id="stale-key-id",
             ),
@@ -183,6 +161,33 @@ async def test_stale_key_id_is_rejected_instead_of_silently_failing(crypto, http
     assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
     assert "密钥已过期" in exc_info.value.detail
     captured_service.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stale_key_message_is_the_cross_language_contract(
+    crypto, http_request, captured_service, *, encrypt_password
+) -> None:
+    """这段文案是跨端契约：前端靠它识别"该丢掉缓存的公钥了"。
+
+    utils/loginEncryption.ts 的 STALE_KEY_MARKER 匹配 "登录密钥已过期"；这里逐字
+    钉住，改文案而不改前端就会红，而不是等到用户在设置页反复撞 400 才发现。
+    另外它不能再说"请刷新登录页面"——改密与建号发生在设置页/用户管理页。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        await users_password.change_password(
+            UserPasswordUpdateRequest(
+                encrypted_old_password=encrypt_password(OLD_PASSWORD),
+                encrypted_new_password=encrypt_password(NEW_PASSWORD),
+                encryption=login_crypto.LOGIN_ENCRYPTION_ALGORITHM,
+                key_id="stale-key-id",
+            ),
+            OPERATOR,
+            http_request=http_request,
+        )
+
+    assert exc_info.value.detail == login_crypto.STALE_LOGIN_KEY_MESSAGE
+    assert login_crypto.STALE_LOGIN_KEY_MESSAGE.startswith("登录密钥已过期")
+    assert "登录页面" not in login_crypto.STALE_LOGIN_KEY_MESSAGE
 
 
 @pytest.mark.asyncio

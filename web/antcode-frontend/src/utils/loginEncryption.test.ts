@@ -1,5 +1,5 @@
 import { constants, generateKeyPairSync, privateDecrypt } from 'node:crypto'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
@@ -14,6 +14,7 @@ import {
   clearLoginPublicKeyCache,
   encryptLoginPassword,
   encryptPasswords,
+  withStaleKeyRecovery,
 } from './loginEncryption'
 
 describe('login password encryption', () => {
@@ -145,5 +146,70 @@ describe('multi-password encryption', () => {
 
   it('refuses to encrypt an empty password instead of sending an empty cipher', async () => {
     await expect(encryptPasswords(['ok', ''])).rejects.toThrow('密码不能为空')
+  })
+})
+
+describe('stale login key recovery', () => {
+  // 与本文件其它用例同样的处理：jsdom 的 SubtleCrypto 不吃这里构造的 ArrayBuffer，
+  // 摘掉 subtle 走 node-forge 路径。本组用例只关心 key_id，不关心密文本身。
+  const originalCrypto = window.crypto
+
+  beforeEach(() => {
+    clearLoginPublicKeyCache()
+    // 前面的 describe 用 mockResolvedValueOnce 排了队，不 reset 会串到这里。
+    mocks.get.mockReset()
+    Object.defineProperty(window, 'crypto', {
+      configurable: true,
+      value: { getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) },
+    })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(window, 'crypto', { configurable: true, value: originalCrypto })
+  })
+
+  const keyResponse = (id: string) => ({
+    data: {
+      data: {
+        algorithm: 'RSA-OAEP-256',
+        key_id: id,
+        public_key: generateKeyPairSync('rsa', { modulusLength: 2048 })
+          .publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      },
+    },
+  })
+
+  const staleKeyError = () => ({
+    response: { data: { success: false, message: '登录密钥已过期，请重试' } },
+  })
+
+  it('refetches the public key after the server reports it stale', async () => {
+    // 轮换前后必须拿到两个不同的 key_id：只断言 get 调用次数会被"缓存本来就没建起来"
+    // 顶绿，拿不到 key_id 变化就证明不了缓存真的被丢弃了。
+    mocks.get.mockResolvedValueOnce(keyResponse('key-old')).mockResolvedValueOnce(keyResponse('key-new'))
+
+    expect((await encryptPasswords(['secret'])).keyId).toBe('key-old')
+    await expect(withStaleKeyRecovery(() => Promise.reject(staleKeyError()))).rejects.toBeDefined()
+
+    expect((await encryptPasswords(['secret'])).keyId).toBe('key-new')
+  })
+
+  it('keeps the cached key when the failure is not a stale-key error', async () => {
+    mocks.get.mockResolvedValueOnce(keyResponse('key-old')).mockResolvedValueOnce(keyResponse('key-new'))
+    const otherError = { response: { data: { success: false, message: '用户名或密码错误' } } }
+
+    expect((await encryptPasswords(['secret'])).keyId).toBe('key-old')
+    await expect(withStaleKeyRecovery(() => Promise.reject(otherError))).rejects.toBeDefined()
+
+    expect((await encryptPasswords(['secret'])).keyId).toBe('key-old')
+  })
+
+  it('does not silently retry the submission it just failed', async () => {
+    mocks.get.mockResolvedValue(keyResponse('key-old'))
+    const submit = vi.fn().mockRejectedValue(staleKeyError())
+
+    await expect(withStaleKeyRecovery(submit)).rejects.toBeDefined()
+
+    expect(submit).toHaveBeenCalledTimes(1)
   })
 })

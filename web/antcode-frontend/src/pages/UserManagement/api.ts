@@ -1,5 +1,5 @@
 import apiClient from '@/services/api'
-import { encryptPasswords } from '@/utils/loginEncryption'
+import { encryptPasswords, withStaleKeyRecovery } from '@/utils/loginEncryption'
 import type { ApiResponse, PaginationResponse, User } from '@/types'
 import type { UserCreateValues, UserEditValues, UserListQuery } from './types'
 
@@ -30,10 +30,17 @@ export const userManagementApi = {
 
   async create(values: UserCreateValues): Promise<User> {
     const role = values.is_admin ? 'admin' : 'user'
-    const response = await apiClient.post<ApiResponse<User>>('/api/v1/users/', {
-      ...values,
+    // 解构掉 password 而不是覆盖它：`...values` 会把明文原样带上线，
+    // 建号的初始口令与登录/改密/重置是同一类机密，走同一把公钥。
+    const { password, ...profile } = values
+    const { encrypted, algorithm, keyId } = await encryptPasswords([password])
+    const response = await withStaleKeyRecovery(() => apiClient.post<ApiResponse<User>>('/api/v1/users/', {
+      ...profile,
       role,
-    })
+      encrypted_password: encrypted[0],
+      encryption: algorithm,
+      key_id: keyId,
+    }))
     return requireSuccess(response.data)
   },
 
@@ -57,14 +64,14 @@ export const userManagementApi = {
 
   async resetPassword(userId: string, password: string): Promise<void> {
     const { encrypted, algorithm, keyId } = await encryptPasswords([password])
-    const response = await apiClient.put<ApiResponse<null>>(
+    const response = await withStaleKeyRecovery(() => apiClient.put<ApiResponse<null>>(
       `/api/v1/users/${userId}/reset-password`,
       {
         encrypted_new_password: encrypted[0],
         encryption: algorithm,
         key_id: keyId,
       }
-    )
+    ))
     requireSuccess(response.data)
   },
 

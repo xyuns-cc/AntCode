@@ -72,12 +72,21 @@ async def _provision_user(
         username=f"e2e-user-{suffix}",
         password=f"E2e!{suffix}Aa1",
     )
+    # 建号的初始口令与登录同一类机密，走同一把 /auth/public-key 公钥；
+    # 服务端默认 LOGIN_PASSWORD_ENCRYPTION_REQUIRED=true，发明文会 400。
+    key_data = extract_data(await request_json(client, "GET", "/auth/public-key")) or {}
     payload = await request_json(
         client,
         "POST",
         "/users/",
         token=admin_token,
-        json={"username": user.username, "password": user.password, "role": "user"},
+        json={
+            "username": user.username,
+            "encrypted_password": encrypt_password(key_data["public_key"], user.password),
+            "encryption": key_data.get("algorithm"),
+            "key_id": key_data.get("key_id"),
+            "role": "user",
+        },
     )
     created = extract_data(payload) or {}
     user = ProvisionedUser(created["id"], user.username, user.password)

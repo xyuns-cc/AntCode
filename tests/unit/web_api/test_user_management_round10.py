@@ -35,6 +35,8 @@ async def test_user_list_forwards_search_before_pagination(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_create_user_maps_weak_password_to_bad_request(monkeypatch) -> None:
+    # 本例验证的是 service 错误到 HTTP 状态码的映射，不是传输加密策略。
+    monkeypatch.setattr(settings, "LOGIN_PASSWORD_ENCRYPTION_REQUIRED", False)
     monkeypatch.setattr(users.user_service, "get_user_by_id", AsyncMock(return_value=SimpleNamespace(id=1)))
     monkeypatch.setattr(users.user_service, "create_user", AsyncMock(side_effect=ValueError("密码强度不足")))
     request = UserCreateRequest(username="alice", password="weakpass", is_admin=False)

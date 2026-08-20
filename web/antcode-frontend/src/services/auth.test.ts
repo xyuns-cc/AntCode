@@ -55,7 +55,10 @@ vi.mock('./api', () => ({
   },
 }))
 
-vi.mock('@/utils/loginEncryption', () => ({
+// 只替换两个加密函数；withStaleKeyRecovery 用真实实现，避免把"正是会坏的那个
+// 函数"mock 成透传后，它吞掉异常也测不出来。
+vi.mock('@/utils/loginEncryption', async () => ({
+  ...(await vi.importActual<typeof import('@/utils/loginEncryption')>('@/utils/loginEncryption')),
   encryptLoginPassword: mocks.encryptLoginPassword,
   encryptPasswords: mocks.encryptPasswords,
 }))

@@ -4,7 +4,12 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), encryptPasswords: vi.fn(),
 }))
 vi.mock('@/services/api', () => ({ default: mocks }))
-vi.mock('@/utils/loginEncryption', () => ({ encryptPasswords: mocks.encryptPasswords }))
+// 只替换 encryptPasswords；withStaleKeyRecovery 用真实实现，避免把"正是会坏的那个
+// 函数"mock 成透传后，它吞掉异常也测不出来。
+vi.mock('@/utils/loginEncryption', async () => ({
+  ...(await vi.importActual<typeof import('@/utils/loginEncryption')>('@/utils/loginEncryption')),
+  encryptPasswords: mocks.encryptPasswords,
+}))
 
 import { userManagementApi } from './api'
 
@@ -61,7 +66,24 @@ describe('userManagementApi', () => {
 
     await userManagementApi.create(values)
 
-    expect(mocks.post).toHaveBeenCalledWith('/api/v1/users/', { ...values, role: 'admin' })
+    expect(mocks.post).toHaveBeenCalledWith('/api/v1/users/', {
+      username: 'alice',
+      is_active: true,
+      is_admin: true,
+      role: 'admin',
+      encrypted_password: 'cipher-new',
+      encryption: 'RSA-OAEP-256',
+      key_id: 'key-1',
+    })
+  })
+
+  it('never puts the initial password on the wire in clear text', async () => {
+    await userManagementApi.create({
+      username: 'alice', password: 'Strong#123', is_active: true, is_admin: false,
+    })
+
+    expect(mocks.encryptPasswords).toHaveBeenCalledWith(['Strong#123'])
+    expect(JSON.stringify(mocks.post.mock.calls[0][1])).not.toContain('Strong#123')
   })
 
   it('sends search to the server before pagination', async () => {

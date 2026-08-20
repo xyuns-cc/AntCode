@@ -70,13 +70,6 @@ class UserService extends BaseService {
   }
 
   /**
-   * 创建用户
-   */
-  async createUser(userData: Partial<User>): Promise<User> {
-    return this.post<User>('/', userData)
-  }
-
-  /**
    * 更新用户
    */
   async updateUser(id: string, userData: Partial<User>): Promise<User> {
@@ -90,9 +83,10 @@ class UserService extends BaseService {
     return this.delete(`/${id}`)
   }
 
-  // 这里曾有 resetPassword / changePassword 两个方法，零调用方：改密走
-  // authService.changePassword，重置走 pages/UserManagement/api.ts。留着就是
-  // 一组同名双实现——两个方法打两个不同端点，且不会随加密改造一起被更新。
+  // 这里曾有 resetPassword / changePassword / createUser 三个方法，零调用方：
+  // 改密走 authService.changePassword，重置与建号走 pages/UserManagement/api.ts。
+  // 留着就是一组同名双实现——打的是同一批端点却不会随加密改造一起被更新，
+  // createUser 更是会把一个不带密文信封的载荷发给已强制密文的建号路由。
 
   /**
    * 批量操作

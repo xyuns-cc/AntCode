@@ -7,6 +7,7 @@ from antcode_core.application.services.workers.worker_dispatcher import (
     BatchDispatchResult,
     DispatchResult,
 )
+from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.domain.models import UserRole
 from antcode_core.domain.schemas.user import UserCreateRequest, UserUpdateRequest
@@ -59,6 +60,8 @@ async def test_user_list_hides_database_error(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_unknown_create_user_conflict_is_sanitized(monkeypatch) -> None:
     admin = SimpleNamespace(id=1, username="root")
+    # 本例验证的是 DB 冲突到 HTTP 状态码的映射，不是传输加密策略。
+    monkeypatch.setattr(settings, "LOGIN_PASSWORD_ENCRYPTION_REQUIRED", False)
     monkeypatch.setattr(users.user_service, "get_user_by_id", AsyncMock(return_value=admin))
     monkeypatch.setattr(users.user_service, "create_user", AsyncMock(side_effect=IntegrityError(_INTERNAL_ERROR)))
     request = UserCreateRequest(username="alice", password="long-password", is_admin=False)
