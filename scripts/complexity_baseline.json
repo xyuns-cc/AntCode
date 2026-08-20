@@ -20,18 +20,6 @@
   },
   "violations": [
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_channels/base.py",
-      "function": "MultiWebhookChannel._send_single_alert",
-      "rule": "PLR0911",
-      "value": 7
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_channels/base.py",
-      "function": "MultiWebhookChannel._send_single_alert",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/alert/alert_channels/feishu.py",
       "function": "FeishuAlertChannel._parse_log_message",
       "rule": "PLR2004",

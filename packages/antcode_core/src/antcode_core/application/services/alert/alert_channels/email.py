@@ -11,6 +11,18 @@ from email.mime.text import MIMEText
 from loguru import logger
 
 from antcode_core.application.services.alert.alert_channels.base import AlertChannel
+from antcode_core.application.services.alert.alert_delivery_status import (
+    ERROR_CHANNEL_LEVEL_FILTERED,
+    ERROR_CHANNEL_NO_TARGET,
+    ERROR_CHANNEL_SMTP,
+    ERROR_CHANNEL_SMTP_AUTH,
+    ERROR_CHANNEL_UNEXPECTED,
+    ERROR_CHANNEL_URL_REJECTED,
+    ChannelSendOutcome,
+    channel_failed,
+    channel_sent,
+    merge_channel_outcomes,
+)
 from antcode_core.application.services.alert.smtp_delivery import (
     SMTPDeliveryConfig,
     deliver_smtp_message,
@@ -144,8 +156,8 @@ class EmailAlertChannel(AlertChannel):
         recipient_name: str,
         subject: str,
         html_body: str,
-    ) -> bool:
-        """发送单封邮件"""
+    ) -> ChannelSendOutcome:
+        """发送单封邮件。失败时把 SMTP 服务端原文放进 detail，只给人看。"""
         try:
             recipient_email, message = self._build_message(
                 recipient_email=recipient_email,
@@ -159,86 +171,74 @@ class EmailAlertChannel(AlertChannel):
                 recipient_email=recipient_email,
                 message=message,
             )
-            logger.debug("邮件告警发送成功: {}", recipient_email)
-            return True
         except ValueError as exc:
             logger.error("拒绝连接 SMTP 目标: {}", exc)
-            return False
+            return channel_failed(ERROR_CHANNEL_URL_REJECTED, detail=str(exc))
         except smtplib.SMTPAuthenticationError as exc:
             logger.error("邮件认证失败: {}", exc)
-            return False
+            return channel_failed(ERROR_CHANNEL_SMTP_AUTH, detail=str(exc))
         except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
             logger.error("邮件发送失败: {}", exc)
-            return False
-        except Exception:
-            logger.exception("邮件发送发生未预期异常")
-            return False
+            return channel_failed(ERROR_CHANNEL_SMTP, detail=str(exc))
+        logger.debug("邮件告警发送成功: {}", recipient_email)
+        return channel_sent()
 
-    async def _send_single_alert_with_retry(self, recipient: dict, subject: str, html_body: str) -> bool:
-        """发送单条告警（带重试）"""
+    async def _send_single_alert_with_retry(self, recipient: dict, subject: str, html_body: str) -> ChannelSendOutcome:
+        """发送单条告警（带重试）。失败时回传最后一次尝试的结构化原因。"""
+        # 与 MultiWebhookChannel 一致：先发一次再补 retries-1 次，避免用占位
+        # outcome 起头而在 retries<=0 时返回一个谁也没产生过的假原因。
         retries = self.max_retries if self.retry_enabled else 1
+        outcome = await self._attempt_send(recipient, subject, html_body)
+        for attempt in range(1, retries):
+            if outcome.ok:
+                return outcome
+            await asyncio.sleep(self.retry_delay * (2 ** (attempt - 1)))
+            outcome = await self._attempt_send(recipient, subject, html_body)
+        return outcome
 
-        for attempt in range(retries):
-            try:
-                if attempt > 0:
-                    await asyncio.sleep(self.retry_delay * (2 ** (attempt - 1)))
+    async def _attempt_send(self, recipient: dict, subject: str, html_body: str) -> ChannelSendOutcome:
+        try:
+            return await self._send_email(
+                recipient_email=recipient.get("email", ""),
+                recipient_name=recipient.get("name", ""),
+                subject=subject,
+                html_body=html_body,
+            )
+        except Exception as exc:
+            logger.error("邮件发送未预期异常: {}", exc)
+            return channel_failed(ERROR_CHANNEL_UNEXPECTED, detail=str(exc))
 
-                success = await self._send_email(
-                    recipient_email=recipient.get("email", ""),
-                    recipient_name=recipient.get("name", ""),
-                    subject=subject,
-                    html_body=html_body,
-                )
-                if success:
-                    return True
+    async def send_alert_for_level(self, message: str, level: str, default_levels: list[str]) -> ChannelSendOutcome:
+        """发送告警（带级别过滤）。优先级：收件人配置的级别 > 默认级别。"""
+        allowed_levels = default_levels or []
 
-            except Exception as e:
-                logger.error(f"邮件发送重试失败 (attempt {attempt + 1}): {e}")
-                if attempt == retries - 1:
-                    return False
+        def should_send(target_levels: list[str]) -> bool:
+            return (level in target_levels) if target_levels else (level in allowed_levels)
 
-        return False
+        return await self._dispatch(message, level, should_send)
 
-    async def send_alert_for_level(self, message: str, level: str, default_levels: list[str]) -> bool:
-        """发送告警（带级别过滤）"""
-        if not self.recipients or not self.smtp_host:
-            return False
-
-        subject, html_body = self._build_email_content(message, level)
-        tasks = []
-
-        for recipient in self.recipients:
-            target_levels = recipient.get("levels", [])
-
-            # 优先级逻辑：收件人配置的级别 > 默认级别
-            should_send = (level in target_levels) if target_levels else (level in (default_levels or []))
-
-            if should_send and recipient.get("email"):
-                tasks.append(self._send_single_alert_with_retry(recipient, subject, html_body))
-
-        if not tasks:
-            return False
-
-        # 并发发送
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # 检查是否至少有一个成功
-        return any(isinstance(r, bool) and r for r in results)
-
-    async def send_alert_force(self, message: str, level: str) -> bool:
+    async def send_alert_force(self, message: str, level: str) -> ChannelSendOutcome:
         """强制发送告警（忽略级别过滤）"""
-        if not self.recipients or not self.smtp_host:
-            return False
+        return await self._dispatch(message, level, lambda _target_levels: True)
+
+    async def _dispatch(self, message: str, level: str, should_send) -> ChannelSendOutcome:
+        if not self.smtp_host:
+            return channel_failed(ERROR_CHANNEL_NO_TARGET, detail="未配置 SMTP 服务器地址")
+        if not self.recipients:
+            return channel_failed(ERROR_CHANNEL_NO_TARGET, detail="未配置任何收件人")
+
+        targets = [
+            recipient
+            for recipient in self.recipients
+            if recipient.get("email") and should_send(recipient.get("levels", []))
+        ]
+        if not targets:
+            return channel_failed(ERROR_CHANNEL_LEVEL_FILTERED, detail=f"没有订阅 {level} 级别的收件人")
 
         subject, html_body = self._build_email_content(message, level)
-        tasks = []
-
-        for recipient in self.recipients:
-            if recipient.get("email"):
-                tasks.append(self._send_single_alert_with_retry(recipient, subject, html_body))
-
-        if not tasks:
-            return False
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return any(isinstance(r, bool) and r for r in results)
+        names = [recipient.get("email", "") for recipient in targets]
+        outcomes = await asyncio.gather(
+            *(self._send_single_alert_with_retry(recipient, subject, html_body) for recipient in targets),
+            return_exceptions=True,
+        )
+        return merge_channel_outcomes(zip(names, outcomes, strict=True))

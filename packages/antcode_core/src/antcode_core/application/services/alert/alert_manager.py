@@ -2,7 +2,6 @@
 
 import asyncio
 import time
-from collections import defaultdict
 from threading import Lock, Thread
 
 from loguru import logger
@@ -16,64 +15,7 @@ from antcode_core.application.services.alert.alert_delivery_status import (
     delivered,
     undelivered,
 )
-from antcode_core.common.hash_utils import calculate_content_hash
-
-
-class RateLimiter:
-    # 超过该键数时清理已全部过期的键，防止长期运行内存无界增长
-    _PRUNE_THRESHOLD = 512
-
-    def __init__(self, window=60, max_count=3):
-        self.window = window
-        self.max_count = max_count
-        self._records = defaultdict(list)
-
-    def _get_message_key(self, message, level, rate_key=None):
-        # rate_key 允许调用方提供不含时间戳/瞬时数值的稳定去重键，
-        # 否则同一告警每次因时间戳不同而哈希不同，限流永远不生效。
-        content = rate_key if rate_key else f"{level}:{message}"
-        return calculate_content_hash(content)
-
-    def _prune_expired(self, current_time):
-        if len(self._records) <= self._PRUNE_THRESHOLD:
-            return
-        expired = [
-            key
-            for key, timestamps in self._records.items()
-            if not timestamps or current_time - timestamps[-1] >= self.window
-        ]
-        for key in expired:
-            del self._records[key]
-
-    def should_allow(self, message, level, rate_key=None):
-        key = self._get_message_key(message, level, rate_key)
-        current_time = time.time()
-
-        self._prune_expired(current_time)
-        self._records[key] = [ts for ts in self._records[key] if current_time - ts < self.window]
-
-        if len(self._records[key]) >= self.max_count:
-            remaining = int(self.window - (current_time - self._records[key][0]))
-            return False, f"限流 ({remaining}s后可用)"
-
-        self._records[key].append(current_time)
-        return True, None
-
-    def clear(self):
-        self._records.clear()
-
-    def get_stats(self):
-        current_time = time.time()
-        active_keys = 0
-        total_records = 0
-
-        for _key, timestamps in self._records.items():
-            valid_timestamps = [ts for ts in timestamps if current_time - ts < self.window]
-            if valid_timestamps:
-                active_keys += 1
-                total_records += len(valid_timestamps)
-
-        return {"active_keys": active_keys, "total_records": total_records}
+from antcode_core.application.services.alert.alert_rate_limiter import RateLimiter
 
 
 class AlertManager:
@@ -197,7 +139,7 @@ class AlertManager:
 
     async def _send_async(self, message, level, force=False, default_levels=None):
         """异步发送告警到所有渠道"""
-        tasks = []
+        named_tasks = []
 
         for channel_name in self._enabled_channels:
             channel = self._channels.get(channel_name)
@@ -209,15 +151,25 @@ class AlertManager:
                     task = channel.send_alert_force(message, level)
                 else:
                     task = channel.send_alert_for_level(message, level, default_levels)
-                tasks.append(task)
+                named_tasks.append((channel_name, task))
             except Exception as e:
                 logger.error(f"创建告警发送任务失败 [{channel_name}]: {e}")
 
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"告警发送异常: {result}")
+        if not named_tasks:
+            return
+
+        results = await asyncio.gather(*(task for _name, task in named_tasks), return_exceptions=True)
+        for (channel_name, _task), result in zip(named_tasks, results, strict=True):
+            self._log_send_outcome(channel_name, result)
+
+    @staticmethod
+    def _log_send_outcome(channel_name, result):
+        """自动告警没有调用方接返回值，原因只能落日志——但必须带结构化码落。"""
+        if isinstance(result, BaseException):
+            logger.error(f"告警发送异常 [{channel_name}]: {result}")
+            return
+        if not result.ok:
+            logger.error(f"告警发送失败 [{channel_name}]: {result.describe()}")
 
     def wait_for_pending_tasks(self, timeout=5):
         """等待所有待完成的任务"""

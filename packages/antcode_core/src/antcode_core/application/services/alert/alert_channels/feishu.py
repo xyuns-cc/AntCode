@@ -217,13 +217,10 @@ class FeishuAlertChannel(MultiWebhookChannel):
         }
 
     def _check_response(self, data):
-        """检查飞书响应"""
-        try:
-            if data.get("code") == 0 or data.get("StatusCode") == 0:
-                return True, ""
-            return False, data.get("msg", str(data))
-        except (KeyError, TypeError, AttributeError):
-            return False, "响应解析失败"
+        """检查飞书响应。msg 是飞书给人看的原文，不参与判定。"""
+        if data.get("code") == 0 or data.get("StatusCode") == 0:
+            return True, ""
+        return False, f"code={data.get('code', data.get('StatusCode'))}: {data.get('msg', data)}"
 
     @property
     def channel_name(self):

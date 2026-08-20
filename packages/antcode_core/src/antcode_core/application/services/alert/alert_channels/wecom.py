@@ -11,13 +11,10 @@ class WeComAlertChannel(MultiWebhookChannel):
         return {"msgtype": "text", "text": {"content": f"[{level}] {message}"}}
 
     def _check_response(self, data):
-        """检查企业微信响应"""
-        try:
-            if data.get("errcode") == 0:
-                return True, ""
-            return False, data.get("errmsg", str(data))
-        except (KeyError, TypeError, AttributeError):
-            return False, "响应解析失败"
+        """检查企业微信响应。errmsg 是企微给人看的原文，不参与判定。"""
+        if data.get("errcode") == 0:
+            return True, ""
+        return False, f"errcode={data.get('errcode')}: {data.get('errmsg', data)}"
 
     @property
     def channel_name(self):

@@ -15,13 +15,10 @@ class DingtalkAlertChannel(MultiWebhookChannel):
         }
 
     def _check_response(self, data):
-        """检查钉钉响应"""
-        try:
-            if data.get("errcode") == 0:
-                return True, ""
-            return False, data.get("errmsg", str(data))
-        except (KeyError, TypeError, AttributeError):
-            return False, "响应解析失败"
+        """检查钉钉响应。errmsg 是钉钉给人看的原文（如 token is not exist）。"""
+        if data.get("errcode") == 0:
+            return True, ""
+        return False, f"errcode={data.get('errcode')}: {data.get('errmsg', data)}"
 
     @property
     def channel_name(self):

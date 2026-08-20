@@ -141,4 +141,4 @@ async def test_email_delivery_does_not_block_event_loop(monkeypatch) -> None:
     assert not send_task.done()
     assert delivery_thread_ids != [threading.get_ident()]
     release_delivery.set()
-    assert await send_task is True
+    assert (await send_task).ok is True

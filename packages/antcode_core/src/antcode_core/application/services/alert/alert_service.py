@@ -16,6 +16,11 @@ from antcode_core.application.services.alert.alert_config_broadcast import (
     publish_alert_config_invalidation,
     start_alert_config_subscriber,
 )
+from antcode_core.application.services.alert.alert_delivery_status import (
+    ERROR_CHANNEL_MISSING,
+    ERROR_CHANNEL_UNEXPECTED,
+    channel_failed,
+)
 from antcode_core.application.services.alert.alert_history import (
     DEFAULT_HISTORY_LIMIT,
     AlertHistory,
@@ -241,19 +246,24 @@ class AlertService:
         return await deliver_test_alert(request, self._send_test_to_channel)
 
     async def _send_test_to_channel(self, channel_name, message):
+        """把渠道的结构化失败原因原样带到 API。
+
+        这里过去写死 "发送失败"：第三方给的真实原因（钉钉的 token is not exist）
+        在渠道的 bool 返回边界上就丢了，运维只能去翻日志。
+        """
         channel_obj = alert_manager._channels.get(channel_name)
         if not channel_obj:
-            return channel_name, False, "渠道不存在"
+            return channel_name, False, channel_failed(ERROR_CHANNEL_MISSING, detail=channel_name).describe()
         try:
-            success = await channel_obj.send_alert_force(message, "INFO")
+            outcome = await channel_obj.send_alert_force(message, "INFO")
         except Exception as exc:
             logger.error(f"测试告警发送异常 [{channel_name}]: {exc}")
-            return channel_name, False, str(exc)
-        if success:
+            return channel_name, False, channel_failed(ERROR_CHANNEL_UNEXPECTED, detail=str(exc)).describe()
+        if outcome.ok:
             logger.info(f"测试告警发送成功: {channel_name}")
             return channel_name, True, None
-        logger.warning(f"测试告警发送失败: {channel_name}")
-        return channel_name, False, "发送失败"
+        logger.warning(f"测试告警发送失败 [{channel_name}]: {outcome.describe()}")
+        return channel_name, False, outcome.describe()
 
     _summarize_test_results = staticmethod(summarize_test_results)
 
