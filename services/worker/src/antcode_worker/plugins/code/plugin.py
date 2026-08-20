@@ -8,13 +8,13 @@ language（Master 随 ``params.kwargs.language`` 下发）与 entry_point 后缀
 - javascript  → 镜像预装的 node
 - typescript  → 镜像预装的 node + workspace devDep 里的 tsx / ts-node
 - java        → java -jar
-- go          → go run（需要 workspace 有 go.mod）
+- go          → 装配期 `go build` 出的产物本身（不是 `go run`，见 go_execution_policy）
 
 依赖装配假设：
 - Python：由 UV/mise 层准备好 venv，context.runtime_spec.python_path 指向解释器
 - Node：workspace 内已 `npm ci`（后续 M4+ 会加自动 npm ci）
 - Java：`.jar` 已含依赖或 workspace 有 lib/*.jar
-- Go：workspace 有 go.mod（go run 会自动下载模块到 GOPATH）
+- Go：外部模块必须随源码提交 vendor，装配期在无网沙箱内编译
 
 Node/Go/Java 的语言二进制由镜像构建期预装并写进 PATH（见
 ``infra/docker/Dockerfile.worker`` 与 ``runtime.language_runtime``），这里只解析
@@ -33,10 +33,14 @@ from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import ExecPlan, RunContext, TaskPayload
 from antcode_worker.plugins.base import PluginBase
 from antcode_worker.runtime.dependency_process import DependencyLimits
-from antcode_worker.runtime.go_execution_policy import build_go_execution_env
+from antcode_worker.runtime.go_execution_policy import (
+    build_go_binary,
+    build_go_execution_env,
+    go_binary_path,
+    install_go_dependencies,
+)
 from antcode_worker.runtime.language_cache import inject_language_cache_env
 from antcode_worker.runtime.language_runtime import (
-    GO_RUNTIME,
     JAVA_RUNTIME,
     NODE_RUNTIME,
     require_language_executable,
@@ -123,9 +127,10 @@ class CodePlugin(PluginBase):
         if language is ExecutionLanguage.GO:
             env = build_go_execution_env(cwd, env)
 
-        # 执行前依赖装配（幂等，复用缓存）
+        # 执行前依赖装配（幂等，复用缓存）；Go 的编译也在这里，_build_argv 依赖它的产物
         await self._prepare_deps(
             language=language,
+            payload=payload,
             cwd=cwd,
             limits=DependencyLimits.from_context(context),
         )
@@ -216,8 +221,14 @@ class CodePlugin(PluginBase):
         return java_exe, ["-jar", payload.entry_point, *payload.args]
 
     def _go_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
-        go_exe = require_language_executable(GO_RUNTIME)
-        return go_exe, ["run", payload.entry_point, *payload.args]
+        """argv[0] 是装配期编译出的产物，不是 ``go``。
+
+        ``go run`` 会把被编译程序的退出码折成自己的 1（真值只在 stderr 的
+        ``exit status N``），直接 exec 产物才能把退出码原样交回给 Worker。
+        副作用是任务沙箱里不再需要 Go 工具链——argv[0] 落在 work_dir 内，
+        ``sandbox_executables`` 因此不会把 mise 的 go 安装根挂进 namespace。
+        """
+        return str(go_binary_path(self._get_project_cwd(payload))), [*payload.args]
 
     # ---------- 依赖装配 ----------
 
@@ -225,6 +236,7 @@ class CodePlugin(PluginBase):
         self,
         *,
         language: ExecutionLanguage,
+        payload: TaskPayload,
         cwd: str,
         limits: DependencyLimits,
     ) -> None:
@@ -232,15 +244,15 @@ class CodePlugin(PluginBase):
 
         - Python：假设 UV/mise 已装好 venv，此处 skip
         - Node：在无网络 bwrap 内从 source bundle 的离线缓存安装
-        - Go：外部模块必须提交 vendor，沙箱内始终 GOPROXY=off
+        - Go：外部模块必须提交 vendor，随后在同一个无网沙箱内编译出可执行产物
         - Java：`.jar` 打包型跳过；Maven 项目暂不自动装（需要 mvn dependency:copy-dependencies）
         """
         if language in _NODE_LANGUAGES:
             await install_node_dependencies(cwd, limits=limits)
+            return
         if language is ExecutionLanguage.GO:
-            from antcode_worker.runtime.go_execution_policy import install_go_dependencies
-
             await install_go_dependencies(cwd, limits=limits)
+            await build_go_binary(cwd, entry_point=payload.entry_point, limits=limits)
         # python / java 无需在此装依赖
 
     # ---------- 通用工具 ----------

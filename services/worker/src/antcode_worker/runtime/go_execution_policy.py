@@ -2,27 +2,33 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
-from antcode_worker.runtime.dependency_process import DependencyLimits
+from antcode_worker.runtime.dependency_process import DependencyLimits, run_dependency_command
+from antcode_worker.runtime.language_runtime import GO_RUNTIME, require_language_executable
 
 _CACHE_ROOT = ".antcode-go-cache"
+# 产物落在缓存根下：这里已经是 go 自己往里写 build/modules 的目录，
+# 不会和用户源码抢名字，也跟着 run 工作区一起被回收。
+_BINARY_PARTS = (_CACHE_ROOT, "bin", "task-binary")
 _EXTERNAL_DIRECTIVE_PATTERN = re.compile(r"^(?:require|replace)\b")
+# 编译子进程只继承显式列出的宿主变量。run_dependency_command 不做 env 过滤，
+# 而任务自带的 env_vars 里可能有凭据，没有任何理由进编译器。
+_BUILD_ENV_KEYS = ("PATH",)
 
 
-def build_go_execution_env(cwd: str, env: dict[str, str]) -> dict[str, str]:
-    """Return a copy whose Go caches stay inside the current run workspace.
+def go_binary_path(cwd: str) -> Path:
+    """Return the executable that :func:`build_go_binary` produces for ``cwd``."""
+    return Path(cwd).joinpath(*_BINARY_PARTS)
 
-    沙箱内 ``go run`` 默认 ``--unshare-net``。外部模块必须随源码提交
-    ``vendor``；这里强制 ``GOPROXY=off``，缺依赖时立即显式失败。
-    """
-    if not (Path(cwd) / "go.mod").is_file():
-        return dict(env)
+
+def _go_state_env(cwd: str) -> dict[str, str]:
+    """Go 缓存与模块解析状态，全部指向当前 run 工作区内。"""
     cache_root = Path(cwd) / _CACHE_ROOT
     vendor_mode = (Path(cwd) / "vendor").is_dir()
     return {
-        **env,
         "GOCACHE": str(cache_root / "build"),
         "GOMODCACHE": str(cache_root / "modules"),
         "GOENV": "off",
@@ -31,6 +37,44 @@ def build_go_execution_env(cwd: str, env: dict[str, str]) -> dict[str, str]:
         "GOPROXY": "off",
         "GOFLAGS": "-mod=vendor" if vendor_mode else "-mod=mod",
     }
+
+
+def build_go_execution_env(cwd: str, env: dict[str, str]) -> dict[str, str]:
+    """Return a copy whose Go caches stay inside the current run workspace.
+
+    沙箱内编译默认 ``--unshare-net``。外部模块必须随源码提交 ``vendor``；
+    这里强制 ``GOPROXY=off``，缺依赖时立即显式失败。
+    """
+    if not (Path(cwd) / "go.mod").is_file():
+        return dict(env)
+    return {**env, **_go_state_env(cwd)}
+
+
+async def build_go_binary(cwd: str, *, entry_point: str, limits: DependencyLimits) -> None:
+    """Compile ``entry_point`` ahead of execution so the run reports its own exit code.
+
+    ``go run`` 不透传被编译程序的退出码：程序 ``os.Exit(9)`` 时 ``go run`` 自己以 1
+    退出，真值只留在 stderr 的 ``exit status 9``。退出码是产品对外的结构化信号
+    （重试、告警、编排都按它分支），在这个交接点被折叠等于把信息丢掉。先编译、
+    再由 Worker 直接 exec 产物，退出码就是内核报回来的那一个。
+
+    编译与 ``npm ci`` 同走 ``run_dependency_command``：源码不可信（``#cgo`` 指令能把
+    参数带进 C 编译器），必须在无网络 bwrap 与同一套资源上限内跑，不能退回宿主直跑。
+    """
+    go_exe = require_language_executable(GO_RUNTIME)
+    binary = go_binary_path(cwd)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    env = {key: os.environ[key] for key in _BUILD_ENV_KEYS if key in os.environ}
+    env["HOME"] = cwd
+    env.update(_go_state_env(cwd))
+    result = await run_dependency_command(
+        [go_exe, "build", "-o", str(binary), entry_point],
+        cwd=cwd,
+        env=env,
+        limits=limits,
+    )
+    if result.exit_code != 0:
+        raise RuntimeError(f"Go 编译失败（go build 退出码 {result.exit_code}）: {result.stderr or result.stdout}")
 
 
 async def install_go_dependencies(cwd: str, *, limits: DependencyLimits) -> None:
@@ -56,4 +100,9 @@ def _has_external_directive(content: str) -> bool:
     return False
 
 
-__all__ = ["build_go_execution_env", "install_go_dependencies"]
+__all__ = [
+    "build_go_binary",
+    "build_go_execution_env",
+    "go_binary_path",
+    "install_go_dependencies",
+]
