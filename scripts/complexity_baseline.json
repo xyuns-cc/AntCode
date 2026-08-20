@@ -1691,7 +1691,7 @@
       "path": "services/worker/src/antcode_worker/config.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 683
+      "value": 646
     },
     {
       "path": "services/worker/src/antcode_worker/config.py",
@@ -1763,7 +1763,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1737
+      "value": 1732
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
@@ -1847,7 +1847,7 @@
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 731
+      "value": 719
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",
@@ -1860,12 +1860,6 @@
       "function": "ProcessExecutor._execute",
       "rule": "POSITIONAL_ARGS",
       "value": 5
-    },
-    {
-      "path": "services/worker/src/antcode_worker/executor/process.py",
-      "function": "ProcessExecutor._get_monitor_interval",
-      "rule": "PLR2004",
-      "value": 3
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",

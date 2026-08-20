@@ -30,10 +30,7 @@ from antcode_worker.domain.models import ExecPlan, ExecResult, RunContext
 from antcode_worker.engine.cancel_tombstones import CancelTombstones
 from antcode_worker.engine.cancellation import cancel_queued_run, cancel_started_run
 from antcode_worker.engine.capacity_update import apply_capacity_limits
-from antcode_worker.engine.config_update import (
-    parse_engine_config_update,
-    resolve_adaptive_update,
-)
+from antcode_worker.engine.config_update import CurrentCapacity, resolve_engine_config_update
 from antcode_worker.engine.execution_admission import execute_with_admission, execution_egress
 from antcode_worker.engine.execution_completion import complete_execution
 from antcode_worker.engine.execution_failure import handle_execution_failure
@@ -160,7 +157,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         *,
         cancel_tombstones: CancelTombstones | None = None,
         auto_resource_limit: bool = False,
-        adaptive_limits_provider: Callable[[], dict[str, int]] | None = None,
+        adaptive_limits_provider: Callable[[int | None], dict[str, int]] | None = None,
         capacity_observer: Callable[[int], None] | None = None,
     ):
         # P2-#31: ``transport`` 与 ``executor`` 是核心依赖，按抽象基类标注；
@@ -1515,10 +1512,8 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
 
     async def apply_config_update(self, config: dict[str, Any]) -> None:
         """应用资源配置更新"""
-        update = resolve_adaptive_update(
-            parse_engine_config_update(config),
-            self._adaptive_limits_provider,
-        )
+        current = CurrentCapacity(self._max_concurrent, self._policies.resource.memory_limit_mb)
+        update = resolve_engine_config_update(config, self._adaptive_limits_provider, current)
         if update.max_concurrent_tasks is not None and update.max_concurrent_tasks != self._max_concurrent:
             await self._resize_workers(update.max_concurrent_tasks)
         if update.task_memory_limit_mb is not None:

@@ -6,6 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from antcode_worker.adaptive_limits import current_memory_budget
+from antcode_worker.resource_budget import validate_capacity_fits_budget
+
 MAX_CONCURRENT_TASKS_MIN = 1
 MAX_CONCURRENT_TASKS_MAX = 20
 TASK_MEMORY_LIMIT_MB_MIN = 256
@@ -29,6 +32,34 @@ class EngineConfigUpdate:
     task_memory_limit_mb: int | None = None
     task_cpu_time_limit_sec: int | None = None
     auto_resource_limit: bool | None = None
+
+
+@dataclass(frozen=True)
+class CurrentCapacity:
+    """引擎当前生效的容量，用来补齐 payload 里没带的那一半。"""
+
+    max_concurrent_tasks: int
+    task_memory_limit_mb: int
+
+
+def resolve_engine_config_update(
+    config: dict[str, Any],
+    provider: Callable[[int | None], dict[str, int]] | None,
+    current: CurrentCapacity,
+) -> EngineConfigUpdate:
+    """校验 → 补齐自适应值 → 确认生效组合放得进内存预算，三步一起做完。
+
+    控制台单改 ``task_memory_limit_mb`` 时并发不在 payload 里，生效并发是引擎
+    当前的值——只校验 payload 会漏掉"单改内存把总量顶爆"这条路径。任何一步失败
+    都在引擎改状态之前抛出，配置不会半生效。
+    """
+    update = resolve_adaptive_update(parse_engine_config_update(config), provider)
+    validate_capacity_fits_budget(
+        max_concurrent_tasks=update.max_concurrent_tasks or current.max_concurrent_tasks,
+        task_memory_limit_mb=update.task_memory_limit_mb or current.task_memory_limit_mb,
+        budget=current_memory_budget(),
+    )
+    return update
 
 
 def parse_engine_config_update(config: dict[str, Any]) -> EngineConfigUpdate:
@@ -67,14 +98,18 @@ def parse_engine_config_update(config: dict[str, Any]) -> EngineConfigUpdate:
 
 def resolve_adaptive_update(
     update: EngineConfigUpdate,
-    provider: Callable[[], dict[str, int]] | None,
+    provider: Callable[[int | None], dict[str, int]] | None,
 ) -> EngineConfigUpdate:
-    """Fill omitted numeric fields when this event explicitly enables auto mode."""
+    """Fill omitted numeric fields when this event explicitly enables auto mode.
+
+    本次事件如果同时钉死了并发，就必须把它交给自适应计算器：内存池要按**生效**
+    并发瓜分，否则会算出"内存按 N 路、实际跑 M 路"的自相矛盾组合。
+    """
     if update.auto_resource_limit is not True or _has_all_resource_values(update):
         return update
     if provider is None:
         raise RuntimeError("Worker 未配置自适应资源计算器")
-    adaptive = parse_engine_config_update(provider())
+    adaptive = parse_engine_config_update(provider(update.max_concurrent_tasks))
     _require_complete_adaptive_values(adaptive)
     return EngineConfigUpdate(
         max_concurrent_tasks=update.max_concurrent_tasks or adaptive.max_concurrent_tasks,
@@ -135,7 +170,9 @@ def _require_complete_adaptive_values(update: EngineConfigUpdate) -> None:
 
 
 __all__ = [
+    "CurrentCapacity",
     "EngineConfigUpdate",
     "parse_engine_config_update",
     "resolve_adaptive_update",
+    "resolve_engine_config_update",
 ]

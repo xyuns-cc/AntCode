@@ -33,6 +33,7 @@ from antcode_worker.executor.base import (
 )
 from antcode_worker.executor.concurrency import ExecutionAdmission
 from antcode_worker.executor.exec_path import authoritative_path
+from antcode_worker.executor.monitor_interval import resource_monitor_interval
 from antcode_worker.executor.output_stream import OutputByteBudget, OutputReadOptions, read_output_stream
 from antcode_worker.executor.process_limits import SandboxLimits, build_preexec_fn, host_max_processes
 from antcode_worker.executor.process_signals import signal_process_group
@@ -661,7 +662,7 @@ class ProcessExecutor(BaseExecutor):
         except (psutil.NoSuchProcess, ProcessLookupError):
             return
 
-        interval = self._get_monitor_interval(exec_plan)
+        interval = resource_monitor_interval(exec_plan.memory_limit_mb)
 
         while process.returncode is None:
             usage = sample_process_tree(root)
@@ -679,19 +680,6 @@ class ProcessExecutor(BaseExecutor):
                 return
 
             await asyncio.sleep(interval)
-
-    def _get_monitor_interval(self, exec_plan: ExecPlan) -> float:
-        """根据任务时长估算监控间隔"""
-        timeout = int(exec_plan.timeout_seconds or 0)
-        if timeout <= 0:
-            return 1.0
-        if timeout <= 60:
-            return 0.5
-        if timeout <= 300:
-            return 1.0
-        if timeout <= 1800:
-            return 2.0
-        return 5.0
 
     def _determine_result(self, exit_code: int, process_info: ProcessInfo) -> tuple[RunStatus, ExitReason, str | None]:
         """把退出码与已采样的资源用量翻译成 (status, exit_reason, error_message)。"""

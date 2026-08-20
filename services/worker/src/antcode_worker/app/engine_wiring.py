@@ -21,7 +21,7 @@ def create_engine(
     tombstone_redis: Any = None,
 ) -> Any:
     """Build the Engine and connect metrics observers."""
-    from antcode_worker.config import calculate_adaptive_limits
+    from antcode_worker.adaptive_limits import calculate_adaptive_limits
     from antcode_worker.engine.engine import Engine
 
     max_concurrent = getattr(config, "max_concurrent_tasks", 5)

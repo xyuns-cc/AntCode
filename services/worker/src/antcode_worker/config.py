@@ -19,6 +19,13 @@ import aiofiles  # type: ignore[import-untyped]
 import yaml  # type: ignore[import-untyped]
 from loguru import logger
 
+from antcode_worker.adaptive_limits import (
+    DEFAULT_RESOURCE_LIMITS,
+    calculate_adaptive_limits,
+    current_memory_budget,
+    fit_task_memory_to_budget,
+)
+
 try:
     import dotenv
 except ImportError:  # pragma: no cover - optional dependency
@@ -495,55 +502,14 @@ def set_worker_config(config: WorkerConfig):
     _worker_config = config
 
 
-def calculate_adaptive_limits() -> dict[str, int]:
-    """
-    根据系统资源自适应计算任务限制
-
-    算法：
-    - max_concurrent_tasks: min(CPU核心数, 可用内存GB / 2, 10)
-    - task_memory_limit_mb: 可用内存 / (并发数 * 1.5)，预留 30% 给系统
-    - task_cpu_time_limit_sec: 基于任务超时时间的 80%
-    """
-    import psutil
-
-    try:
-        cpu_count = psutil.cpu_count() or os.cpu_count() or 4
-        mem = psutil.virtual_memory()
-        total_mem_gb = mem.total / (1024**3)
-    except Exception as exc:
-        logger.warning("获取系统资源失败，使用默认资源限制: {}", exc)
-        return DEFAULT_RESOURCE_LIMITS.copy()
-
-    # 计算最大并发数：取 CPU 核心数、总内存/2GB、硬上限 10 的最小值
-    max_concurrent = min(cpu_count, max(1, int(total_mem_gb / 2)), 10)
-
-    # 计算单任务内存限制：总内存的 70% / 并发数，最小 512MB，最大 4GB
-    usable_mem_mb = int(total_mem_gb * 0.7 * 1024)
-    task_memory = max(512, min(4096, usable_mem_mb // max(1, max_concurrent)))
-
-    # CPU 时间限制：默认 10 分钟，高性能机器可以更长
-    task_cpu_time = min(1800, max(300, cpu_count * 60))
-
-    return {
-        "max_concurrent_tasks": max_concurrent,
-        "task_memory_limit_mb": task_memory,
-        "task_cpu_time_limit_sec": task_cpu_time,
-    }
-
-
-# 安全默认值（当 auto_resource_limit=false 且值为 0 时使用）
-DEFAULT_RESOURCE_LIMITS = {
-    "max_concurrent_tasks": 4,
-    "task_memory_limit_mb": 512,
-    "task_cpu_time_limit_sec": 300,
-}
-
-
 def apply_resource_limits(config: WorkerConfig) -> WorkerConfig:
     """
-    应用资源限制，手动值优先
+    应用资源限制，手动值优先，并校验生效组合放得进内存预算
 
     优先级：手动设置值(>0) > 自动计算(auto=true) > 安全默认值
+
+    自适应路径按**生效并发**瓜分任务池，天然不超卖；最后那道校验兜的是手动值
+    ——手动调大并发或单任务限额就能绕开自适应，那才是会把容器额度打爆的配置。
 
     Args:
         config: Worker配置对象
@@ -551,30 +517,24 @@ def apply_resource_limits(config: WorkerConfig) -> WorkerConfig:
     Returns:
         应用资源限制后的配置对象
     """
-    # 获取自动计算的推荐值（仅当 auto_resource_limit=true 时）
-    adaptive = calculate_adaptive_limits() if config.auto_resource_limit else None
+    # 并发已被显式固定时要透传给自适应，否则内存会按另一个并发数除出来
+    pinned_concurrency = config.max_concurrent_tasks if config.max_concurrent_tasks > 0 else None
+    recommended = (
+        calculate_adaptive_limits(pinned_concurrency) if config.auto_resource_limit else DEFAULT_RESOURCE_LIMITS
+    )
 
-    # 并发数：手动(>0) > 自动 > 默认
     if config.max_concurrent_tasks <= 0:
-        if adaptive:
-            config.max_concurrent_tasks = adaptive["max_concurrent_tasks"]
-        else:
-            config.max_concurrent_tasks = DEFAULT_RESOURCE_LIMITS["max_concurrent_tasks"]
-
-    # 内存限制：手动(>0) > 自动 > 默认
+        config.max_concurrent_tasks = recommended["max_concurrent_tasks"]
     if config.task_memory_limit_mb <= 0:
-        if adaptive:
-            config.task_memory_limit_mb = adaptive["task_memory_limit_mb"]
-        else:
-            config.task_memory_limit_mb = DEFAULT_RESOURCE_LIMITS["task_memory_limit_mb"]
-
-    # CPU时间：手动(>0) > 自动 > 默认
+        config.task_memory_limit_mb = recommended["task_memory_limit_mb"]
     if config.task_cpu_time_limit_sec <= 0:
-        if adaptive:
-            config.task_cpu_time_limit_sec = adaptive["task_cpu_time_limit_sec"]
-        else:
-            config.task_cpu_time_limit_sec = DEFAULT_RESOURCE_LIMITS["task_cpu_time_limit_sec"]
+        config.task_cpu_time_limit_sec = recommended["task_cpu_time_limit_sec"]
 
+    config.task_memory_limit_mb = fit_task_memory_to_budget(
+        max_concurrent_tasks=config.max_concurrent_tasks,
+        task_memory_limit_mb=config.task_memory_limit_mb,
+        auto_resource_limit=config.auto_resource_limit,
+    )
     return config
 
 
@@ -670,12 +630,15 @@ def init_worker_config(name: str = "Worker-001", port: int = 8001, region: str =
     config = apply_resource_limits(config)
 
     auto_mode = "自动" if config.auto_resource_limit else "默认"
+    # 预算来源必须打进这一行：它决定了限额是按容器额度还是按宿主内存算出来的，
+    # 而这两个数在容器里差一个数量级。看不到来源就无法判断限额是否可信。
     logger.info(
-        "资源限制: mode={} concurrent={} memory={}MB cpu_time={}s",
+        "资源限制: mode={} concurrent={} memory={}MB cpu_time={}s 内存预算={}",
         auto_mode,
         config.max_concurrent_tasks,
         config.task_memory_limit_mb,
         config.task_cpu_time_limit_sec,
+        current_memory_budget().describe(),
     )
 
     config.ensure_directories()

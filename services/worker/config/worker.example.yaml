@@ -29,6 +29,13 @@ heartbeat_interval: 30        # 心跳间隔（秒）
 heartbeat_timeout: 60         # 心跳超时（秒）
 
 # 任务配置
+# 自适应（值为 0）一律从**本进程的预算**推导，容器里就是 cgroup 的
+# memory.max / cpu.max，不是宿主 /proc/meminfo 与 nproc（两者在容器里差一个
+# 数量级）。探测不到 cgroup 时会退到宿主值并打 WARNING，启动日志的
+# "内存预算=" 一栏写明来源。
+# 生效的 max_concurrent_tasks × task_memory_limit_mb 必须放得进任务池
+# （预算 × 70%），放不下直接拒绝启动——超卖的表现是任务被容器 cgroup 杀掉，
+# 静默放过只会让运维追不到配置上。
 max_concurrent_tasks: 0       # 最大并发（0=自动计算）
 task_timeout: 3600            # 默认超时（秒）
 task_cpu_time_limit_sec: 0    # CPU 时间限制（0=自动）

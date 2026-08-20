@@ -6,8 +6,16 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+from antcode_worker import adaptive_limits as adaptive_mod
 from antcode_worker.engine.engine import Engine
+from antcode_worker.resource_budget import BudgetSource, MemoryBudget
 from antcode_worker.transport.base import ControlMessage, GenerationLostError
+
+_BYTES_PER_MIB = 1024 * 1024
+# 用例里的限额组合必须与跑测机器的内存无关，否则小内存 CI 上会随机变红。
+_PINNED_BUDGET_BYTES = 64 * 1024 * _BYTES_PER_MIB
+# 任务池 = 65536 × 0.7 = 45875MB，远超下面用到的任何组合；超卖路径见
+# test_engine_capacity_budget_guard.py。
 
 EXPECTED_MEMORY_LIMIT_MB = 512
 EXPECTED_CPU_LIMIT_SECONDS = 60
@@ -18,6 +26,20 @@ ADAPTIVE_CPU_LIMIT_SECONDS = 300
 EXPLICIT_CONCURRENCY = 4
 EXPLICIT_ADAPTIVE_MEMORY_LIMIT_MB = 2048
 EXPLICIT_CPU_LIMIT_SECONDS = 600
+
+
+@pytest.fixture(autouse=True)
+def _pinned_memory_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把内存预算钉死，让配置更新用例只检验配置逻辑而不检验跑测机器规格。"""
+    monkeypatch.setattr(
+        adaptive_mod,
+        "current_memory_budget",
+        lambda: MemoryBudget(
+            total_bytes=_PINNED_BUDGET_BYTES,
+            source=BudgetSource.CGROUP_V2,
+            origin="test",
+        ),
+    )
 
 
 def _engine(*, max_concurrent: int = 2) -> Engine:
@@ -101,7 +123,8 @@ async def test_enabling_auto_mode_applies_all_adaptive_values() -> None:
 
     await engine.apply_config_update({"auto_resource_limit": "true"})
 
-    provider.assert_called_once_with()
+    # 本次事件没钉并发，自适应计算器自己决定并发数
+    provider.assert_called_once_with(None)
     engine._executor.resize_concurrency.assert_awaited_once_with(ADAPTIVE_CONCURRENCY)
     observer.assert_called_once_with(ADAPTIVE_CONCURRENCY)
     assert engine._max_concurrent == ADAPTIVE_CONCURRENCY
