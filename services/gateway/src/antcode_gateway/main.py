@@ -8,6 +8,7 @@ import asyncio
 import os
 import signal
 import sys
+from contextlib import suppress
 
 from antcode_contracts.artifact_pb2_grpc import add_ArtifactServiceServicer_to_server
 from antcode_contracts.control_pb2_grpc import add_ControlServiceServicer_to_server
@@ -30,6 +31,7 @@ from antcode_gateway.rate_limit import RateLimitInterceptor
 from antcode_gateway.security_audit import SecurityAuditor
 from antcode_gateway.server import get_grpc_server
 from antcode_gateway.services import GatewayArtifactService, GatewayControlService, GatewayDataService
+from antcode_gateway.tls_expiry import TlsExpiryMonitor
 
 
 def _build_rate_limiter() -> RateLimitInterceptor | None:
@@ -114,6 +116,33 @@ def _register_services(server, lease_store: LeaseStore, redis_client, *, audit_s
         add_ArtifactServiceServicer_to_server,
     )
     logger.info("ControlService + DataService + ArtifactService 已注册 (quota 带 Redis 备份)")
+
+
+def _start_tls_expiry_monitor(server) -> asyncio.Task | None:
+    """明文端口没有材料可查，其余情况一律开监控。
+
+    放在 ``server.start()`` 成功之后：启动期的坏材料由
+    ``create_reloadable_server_credentials`` fail-closed 拦掉，这里只负责"还没坏
+    但快到期"这段提前量。
+    """
+    if not server.config.tls_enabled:
+        logger.info("TLS 未启用，跳过证书到期监控")
+        return None
+    monitor = TlsExpiryMonitor(server.tls_material_paths(), server.config.tls_expiry_policy)
+    logger.info(
+        "TLS 证书到期监控已启动: interval={}s warning={}d",
+        server.config.tls_expiry_check_interval_seconds,
+        server.config.tls_expiry_warning_days,
+    )
+    return asyncio.create_task(monitor.run())
+
+
+async def _stop_tls_expiry_monitor(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 async def _close_db_with_timeout(timeout: float, message: str) -> None:
@@ -210,11 +239,13 @@ async def main():
         await _close_db_with_timeout(5, "退出前 close_db 失败,忽略")
         sys.exit(1)
     logger.info("Gateway 服务已启动")
+    expiry_monitor = _start_tls_expiry_monitor(server)
     coordinator = _ShutdownCoordinator(server)
     coordinator.install_signal_handlers()
     try:
         await coordinator.wait()
     finally:
+        await _stop_tls_expiry_monitor(expiry_monitor)
         await coordinator.shutdown(None)
 
 

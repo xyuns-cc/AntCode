@@ -15,6 +15,13 @@ from antcode_core.common.log_limits import (
     positive_env_int,
 )
 
+from antcode_gateway.tls_expiry import (
+    DEFAULT_TLS_EXPIRY_CHECK_INTERVAL_SECONDS,
+    DEFAULT_TLS_EXPIRY_WARNING_DAYS,
+    SECONDS_PER_DAY,
+    TlsExpiryPolicy,
+)
+
 # 在读 env 前先加载 .env（GatewayConfig 用 os.getenv 直连 os.environ，无此步骤会
 # 读不到项目根 .env）。dotenv 缺失时静默跳过，不影响 CI/CD 已通过 env 注入的场景。
 try:
@@ -110,6 +117,17 @@ class GatewayConfig:
     tls_key_path: str | None = field(default_factory=lambda: os.getenv("GRPC_TLS_KEY_PATH") or None)
     tls_ca_path: str | None = field(default_factory=lambda: os.getenv("GRPC_TLS_CA_PATH") or None)
 
+    # TLS 材料到期监控（见 tls_expiry）：热更新只解决"换不了"，提前量靠这两个阈值
+    tls_expiry_warning_days: int = field(
+        default_factory=lambda: positive_env_int("GRPC_TLS_EXPIRY_WARNING_DAYS", DEFAULT_TLS_EXPIRY_WARNING_DAYS)
+    )
+    tls_expiry_check_interval_seconds: int = field(
+        default_factory=lambda: positive_env_int(
+            "GRPC_TLS_EXPIRY_CHECK_INTERVAL_SECONDS",
+            DEFAULT_TLS_EXPIRY_CHECK_INTERVAL_SECONDS,
+        )
+    )
+
     # 认证配置
     auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "true").lower() == "true")
     # 显式允许在启用鉴权的情况下用明文端口启动（仅本地/测试）。
@@ -179,6 +197,14 @@ class GatewayConfig:
     def mtls_enabled(self) -> bool:
         """是否启用 mTLS（双向 TLS）"""
         return self.tls_enabled and bool(self.tls_ca_path)
+
+    @property
+    def tls_expiry_policy(self) -> TlsExpiryPolicy:
+        """把"天"换算成秒的唯一一处，避免调用方各写各的 86400。"""
+        return TlsExpiryPolicy(
+            warning_seconds=self.tls_expiry_warning_days * SECONDS_PER_DAY,
+            interval_seconds=self.tls_expiry_check_interval_seconds,
+        )
 
     @property
     def listen_address(self) -> str:

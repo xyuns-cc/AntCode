@@ -29,6 +29,9 @@ from loguru import logger
 TLS_MATERIAL_STAT_FAILED = "TLS_MATERIAL_STAT_FAILED"
 TLS_MATERIAL_READ_FAILED = "TLS_MATERIAL_READ_FAILED"
 TLS_MATERIAL_INVALID_PEM = "TLS_MATERIAL_INVALID_PEM"
+#: 成功换料同样要有码。容器级校验靠数这条日志的条数判断"指纹短路有没有生效"
+#: （材料没变时它一条都不该多），匹配中文描述会在下一次措辞调整时静默失效。
+TLS_MATERIAL_RELOADED = "TLS_MATERIAL_RELOADED"
 
 # PEM 边界标记。运维半写入 / 截断的文件如果直接换给 gRPC，全队 Worker 会在下一次
 # 握手集体失败；换之前先validate，坏材料一律不生效。
@@ -108,7 +111,7 @@ class TlsMaterialLoader:
         except ConfigurationError as exc:
             logger.error("{}: TLS 材料已变更但不可用，继续沿用旧材料: {}", TLS_MATERIAL_READ_FAILED, exc)
             return None
-        logger.warning("TLS 材料已热更新，新连接开始使用新的证书 / CA bundle")
+        logger.warning("{}: TLS 材料已热更新，新连接开始使用新的证书 / CA bundle", TLS_MATERIAL_RELOADED)
         return server_certificate_configuration(material)
 
     def _read_fingerprint(self) -> _Fingerprint:
@@ -160,6 +163,7 @@ def create_reloadable_server_credentials(paths: TlsMaterialPaths) -> grpc.Server
 __all__ = [
     "TLS_MATERIAL_INVALID_PEM",
     "TLS_MATERIAL_READ_FAILED",
+    "TLS_MATERIAL_RELOADED",
     "TLS_MATERIAL_STAT_FAILED",
     "TlsMaterial",
     "TlsMaterialLoader",

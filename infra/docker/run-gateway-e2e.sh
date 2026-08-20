@@ -10,8 +10,8 @@
 # 正式发布前必须在受控发布机（有 Docker 与中间件）上跑通它；make release-gate 不覆盖。
 #
 # 覆盖：生成 mTLS PKI -> 起生产 Gateway 画像 -> 安装 Key 注册 -> 按分配到的
-# worker_id 重签客户端证书 -> mTLS 连 Gateway -> 初始 Lease -> 心跳 -> 控制台
-# online -> 跑 tests/e2e。
+# worker_id 重签客户端证书 -> mTLS 连 Gateway -> TLS 材料热更新（不重启换证 /
+# CA 级吊销）-> 初始 Lease -> 心跳 -> 控制台 online -> 跑 tests/e2e。
 #
 # Worker 是"每主机一个进程"的部署单位（prod.worker.yml 的容器名/数据卷/mTLS 目录
 # 全由 env 参数化），所以多 Worker = 同一份 Worker Compose 起多个 project，各自一张
@@ -48,7 +48,7 @@ log() { printf '=== %s\n' "$*"; }
 #     里的 `import antcode_core / antcode_contracts` 一律 ModuleNotFoundError；
 #   * --extra dev：编排器复用 tests/e2e 的 HTTP helper，helpers.py 经 conftest 依赖 pytest。
 # 每次 `uv run` 都会按给定 flag 重新同步 venv，所以这里必须处处一致——一处漏掉就会把
-# 上一步装好的包卸掉，故障点还落在下一步（真机实测：卡在 [4/6] 与 tests/e2e teardown）。
+# 上一步装好的包卸掉，故障点还落在下一步（真机实测：卡在 [4/7] 与 tests/e2e teardown）。
 # 用数组而不是函数：Git HTTP 源要走 `nohup`，而 nohup 只能 exec 真实命令，
 # 传函数名会直接 "No such file or directory"（真机实测）。
 UV_RUN=(uv run --frozen --all-packages --extra dev)
@@ -144,20 +144,20 @@ resolve_source_ref() {
 
 build_images() {
   if [ "${ANTCODE_GATEWAY_E2E_SKIP_BUILD:-0}" = "1" ]; then
-    log "[2/6] 跳过构建，复用现有 :$TAG 镜像"
+    log "[2/7] 跳过构建，复用现有 :$TAG 镜像"
     return
   fi
   # 走生产 Compose 自己的 build 段，而不是另写一份 docker build：E2E 验的镜像与
   # deploy-production.sh 部署的镜像必须由同一处定义产出，否则两者会悄悄分叉。
   # control 栈里的 worker 在 co-located-worker profile 后面，compose build 不会碰它；
   # worker 镜像由 worker 栈构建，两边指向同一个 Dockerfile 与同一个 tag。
-  log "[2/6] 用生产 Compose 的 build 段就地构建五个应用镜像"
+  log "[2/7] 用生产 Compose 的 build 段就地构建五个应用镜像"
   control_compose build
   worker_compose 0 build
 }
 
 prepare_environment() {
-  log "[1/6] 生成一次性 mTLS PKI、密钥与生产 Compose 环境"
+  log "[1/7] 生成一次性 mTLS PKI、密钥与生产 Compose 环境"
   mkdir -p "$(dirname "$STATE_DIR")"
   chmod 0755 "$(dirname "$STATE_DIR")"
   "${UV_RUN[@]}" python -m scripts.prepare_local_release_e2e \
@@ -175,7 +175,7 @@ prepare_environment() {
 }
 
 start_git_source() {
-  log "[3/6] 起 E2E Git 源（宿主进程；地址取宿主出口 IP，宿主与 Worker 容器都能路由）"
+  log "[3/7] 起 E2E Git 源（宿主进程；地址取宿主出口 IP，宿主与 Worker 容器都能路由）"
   # host.docker.internal 只在容器里靠 extra_hosts 解析，宿主上的 pytest 解析不了；
   # 回环地址反过来只对宿主有效。所以 prepare 脚本按路由表取宿主出口 IP，两侧同址。
   local git_root
@@ -188,14 +188,14 @@ start_git_source() {
 }
 
 start_stack() {
-  log "[4/6] 起生产 Gateway 画像并用安装 Key 注册 $WORKERS 个 Worker（含按 worker_id 重签客户端证书）"
+  log "[4/7] 起生产 Gateway 画像并用安装 Key 注册 $WORKERS 个 Worker（含按 worker_id 重签客户端证书）"
   "${UV_RUN[@]}" python -m scripts.release_e2e_orchestrator \
     --environment "$STATE_DIR/production.env" \
     --state-dir "$STATE_DIR"
 }
 
 verify_transport() {
-  log "[5/6] 校验 HTTPS 与 Gateway mTLS（拒绝无客户端证书、拒绝 TLS<1.2、拒绝证书冒充）"
+  log "[5/7] 校验 HTTPS 与 Gateway mTLS（拒绝无客户端证书、拒绝 TLS<1.2、拒绝证书冒充）"
   # 多 Worker 拓扑下额外用第二个**真实**已注册 Worker 做冒充负向用例；单 Worker 时
   # 只有合成身份可用（脚本内恒验），peer 传空串。
   local peer
@@ -211,12 +211,30 @@ verify_transport() {
     --peer-worker-id "$peer"
 }
 
+verify_tls_hot_reload() {
+  log "[6/7] 校验 TLS 材料热更新（换盘即生效、旧材料被拒、Gateway 不重启）"
+  # 必须对着**真在跑的容器**验：单测里的热更新跑在宿主进程的 grpc.aio.server 上，
+  # 生产画像下 gRPC 到底会不会在每次新握手前回调 fetcher，只有这里能证伪。
+  # 校验自己会把材料写回原值，之后的 tests/e2e 不受影响。
+  local gateway_container
+  gateway_container="$(control_compose ps -q gateway)"
+  [ -n "$gateway_container" ] || { echo "找不到 gateway 容器，无法校验热更新" >&2; exit 1; }
+  "${UV_RUN[@]}" python -m scripts.verify_gateway_tls_hot_reload \
+    --gateway-tls-dir "$STATE_DIR/gateway-tls" \
+    --ca-cert "$STATE_DIR/public-ca.crt" \
+    --ca-key "$STATE_DIR/ca.key" \
+    --client-cert "$STATE_DIR/worker-tls/client.crt" \
+    --client-key "$STATE_DIR/worker-tls/client.key" \
+    --gateway-container "$gateway_container" \
+    --gateway-port "$GATEWAY_PORT"
+}
+
 run_e2e() {
   # 「初始 Lease -> 心跳 -> 控制台 online」不另设脚本重复断言：
   #   * 编排器最后一步 `up -d --wait` 等的是 Worker healthcheck /health/ready，
   #     它同时检查传输层连接与 lifecycle ready，Lease 没签发就不会 healthy；
   #   * 控制台 online + 心跳推进由 tests/e2e/test_worker_lifecycle.py 断言。
-  log "[6/6] 跑 tests/e2e（生产 Gateway 画像）"
+  log "[7/7] 跑 tests/e2e（生产 Gateway 画像）"
   set -a
   # shellcheck disable=SC1091
   . "$STATE_DIR/runner.env"
@@ -235,5 +253,6 @@ build_images
 start_git_source
 start_stack
 verify_transport
+verify_tls_hot_reload
 
 run_e2e

@@ -211,7 +211,7 @@ class GrpcServer:
         self._started = False
         self._health_servicer = None
 
-    def _tls_material_paths(self) -> TlsMaterialPaths:
+    def tls_material_paths(self) -> TlsMaterialPaths:
         cert_path = self.config.tls_cert_path
         key_path = self.config.tls_key_path
         if not cert_path or not key_path:
@@ -232,7 +232,7 @@ class GrpcServer:
             服务器凭证，失败返回 None
         """
         try:
-            credentials = create_reloadable_server_credentials(self._tls_material_paths())
+            credentials = create_reloadable_server_credentials(self.tls_material_paths())
             logger.debug("已创建可热更新的 {} 服务器凭证", "mTLS" if self.config.mtls_enabled else "TLS")
             return credentials
         except FileNotFoundError as e:

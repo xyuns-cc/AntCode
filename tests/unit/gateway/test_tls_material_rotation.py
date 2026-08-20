@@ -16,6 +16,7 @@ from antcode_gateway.config import GatewayConfig
 from antcode_gateway.server import GrpcServer
 from antcode_gateway.tls_material import (
     TLS_MATERIAL_READ_FAILED,
+    TLS_MATERIAL_RELOADED,
     TlsMaterialLoader,
     TlsMaterialPaths,
 )
@@ -25,6 +26,8 @@ from loguru import logger
 from scripts.release_e2e_pki import _create_ca, _create_leaf, _pem_cert, _pem_key
 
 HANDSHAKE_TIMEOUT_SECONDS = 5
+#: 材料不变时的重复回调次数；每多读一轮盘就是每次握手多三次 IO。
+REPEATED_HANDSHAKES = 5
 
 
 class _Authority:
@@ -211,3 +214,55 @@ def test_unchanged_material_is_reported_as_no_change(
     loader.load()
 
     assert loader.certificate_configuration() is None
+
+
+def test_repeated_callbacks_do_not_reread_unchanged_material_from_disk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authorities: _Authorities,
+) -> None:
+    """材料没变时反复回调**一次盘都不该读**。
+
+    上一条只断言"返回 None"，挡不住"每次都读满三个文件、比完内容再返回 None"这种
+    实现——指纹存在的全部理由就是省掉那次读盘，判据必须落在读盘次数上。
+    """
+    paths = _write_material(tmp_path, authorities.current, authorities.current.ca)
+    reads: list[str] = []
+    read_bytes = Path.read_bytes
+
+    def _counting(self: Path) -> bytes:
+        reads.append(self.name)
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _counting)
+    loader = TlsMaterialLoader(paths)
+    loader.load()
+    per_load = len(reads)
+
+    for _ in range(REPEATED_HANDSHAKES):
+        assert loader.certificate_configuration() is None
+    assert len(reads) == per_load
+
+    paths.client_ca.write_bytes(authorities.replacement.ca)
+    assert loader.certificate_configuration() is not None
+    assert len(reads) == per_load * 2
+
+
+def test_successful_reload_reports_a_structured_code(
+    tmp_path: Path,
+    authorities: _Authorities,
+) -> None:
+    """换料成功也要留码：容器级校验靠数这条日志判断指纹短路有没有失效。"""
+    paths = _write_material(tmp_path, authorities.current, authorities.current.ca)
+    loader = TlsMaterialLoader(paths)
+    loader.load()
+
+    records: list[str] = []
+    sink = logger.add(records.append, level="WARNING")
+    try:
+        paths.client_ca.write_bytes(authorities.replacement.ca)
+        assert loader.certificate_configuration() is not None
+    finally:
+        logger.remove(sink)
+
+    assert any(TLS_MATERIAL_RELOADED in record for record in records)
