@@ -9,6 +9,11 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from antcode_core.application.services.projects.source_bundle_errors import (
+    SOURCE_BUNDLE_SYMLINK_REJECTED,
+    SourceBundleRejected,
+)
+
 ENTRYPOINT_CANDIDATES = ("main.py", "spider.py", "crawler.py", "app.py")
 PROJECT_MARKERS = ENTRYPOINT_CANDIDATES + ("pyproject.toml", "requirements.txt")
 MAX_BUNDLE_FILE_COUNT = 10_000
@@ -16,6 +21,8 @@ MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 MAX_BUNDLE_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_BUNDLE_INCLUDE_PATHS = 100
 MAX_LFS_POINTER_BYTES = 1024
+# 报错里只列前几个：node_modules 动辄上千条链接，全列出来会把错误信息本身撑爆。
+MAX_REPORTED_SYMLINKS = 5
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 
 
@@ -196,7 +203,7 @@ def resolve_inside(root: Path, relative_path: str, label: str) -> Path:
 def iter_unique_source_files(repo_root: Path, roots: list[Path]) -> list[Path]:
     files: dict[str, Path] = {}
     for source_root in roots:
-        for path in iter_source_files(source_root):
+        for path in iter_source_files(source_root, repo_root=repo_root):
             relative = path.resolve().relative_to(repo_root).as_posix()
             files[relative] = path
             if len(files) > MAX_BUNDLE_FILE_COUNT:
@@ -204,17 +211,45 @@ def iter_unique_source_files(repo_root: Path, roots: list[Path]) -> list[Path]:
     return [files[name] for name in sorted(files)]
 
 
-def iter_source_files(source_root: Path) -> list[Path]:
+def iter_source_files(source_root: Path, *, repo_root: Path) -> list[Path]:
     files: list[Path] = []
     for current, dirnames, filenames in os.walk(source_root):
         dirnames[:] = sorted(name for name in dirnames if name != ".git")
+        base = Path(current)
+        _reject_symlinks(base, (*dirnames, *filenames), repo_root=repo_root)
         for filename in sorted(filenames):
-            path = Path(current) / filename
-            if not path.is_symlink() and path.is_file():
-                files.append(path)
-                if len(files) > MAX_BUNDLE_FILE_COUNT:
-                    raise ValueError(f"source bundle 文件数超过上限: {len(files)} > {MAX_BUNDLE_FILE_COUNT}")
+            path = base / filename
+            # 走到这里已排除符号链接；git 检出只可能产出普通文件与目录，
+            # 其余类型（若真出现）不进包也不该被当成正常输入。
+            if not path.is_file():
+                continue
+            files.append(path)
+            if len(files) > MAX_BUNDLE_FILE_COUNT:
+                raise ValueError(f"source bundle 文件数超过上限: {len(files)} > {MAX_BUNDLE_FILE_COUNT}")
     return files
+
+
+def _reject_symlinks(base: Path, names: tuple[str, ...], *, repo_root: Path) -> None:
+    """符号链接必须在生产侧显式报错，不能静默丢弃。
+
+    为什么不是"保留但限制在包内"：消费侧 ``ArtifactFetcher._is_unsafe_tar_member``
+    本来就拒收一切非 file/dir 成员，保留链接只会让整包在解压期被拒，
+    还换成一句和符号链接无关的"不安全的压缩路径"。
+
+    为什么这条以前最坑：npm 的 ``node_modules/.bin/*`` 永远是符号链接，于是
+    "把 node_modules 提交进仓库"这条路必然失败，用户看到的却是 Worker 侧
+    "TypeScript 入口需要 workspace 装 tsx" —— 一个字都没提符号链接。
+    """
+    offenders = sorted(name for name in names if (base / name).is_symlink())
+    if not offenders:
+        return
+    prefix = base.resolve().relative_to(repo_root).as_posix()
+    listed = ", ".join(f"{prefix}/{name}".lstrip("./") for name in offenders[:MAX_REPORTED_SYMLINKS])
+    raise SourceBundleRejected(
+        SOURCE_BUNDLE_SYMLINK_REJECTED,
+        f"source bundle 不支持符号链接，请从仓库中移除后重试（共 {len(offenders)} 个，示例: {listed}）。"
+        f"Node 外部依赖不要提交 node_modules/，改为提交 package-lock.json 与 .antcode-deps/npm-cache/",
+    )
 
 
 def add_file(tar: tarfile.TarFile, repo_root: Path, path: Path) -> None:

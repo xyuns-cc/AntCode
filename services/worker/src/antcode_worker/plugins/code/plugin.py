@@ -41,6 +41,10 @@ from antcode_worker.runtime.language_runtime import (
     NODE_RUNTIME,
     require_language_executable,
 )
+from antcode_worker.runtime.node_dependency_errors import (
+    NODE_DEP_TS_RUNNER_MISSING,
+    NodeDependencyInstallError,
+)
 from antcode_worker.runtime.node_dependency_policy import install_node_dependencies
 
 # 顺序即优先级：tsx 是当前主流 runner，ts-node 作为老项目的既有约定保留。
@@ -196,7 +200,16 @@ class CodePlugin(PluginBase):
             if os.path.isfile(local_runner):
                 node_exe = require_language_executable(NODE_RUNTIME)
                 return node_exe, [local_runner, payload.entry_point, *payload.args]
-        raise RuntimeError("TypeScript 入口需要 workspace 装 tsx 或 ts-node（devDependencies）")
+        # 只说"需要装 tsx"会把人引向"把 node_modules 提交进仓库"这条死路：
+        # source bundle 不收符号链接，而 .bin/<runner> 永远是符号链接。
+        raise NodeDependencyInstallError(
+            NODE_DEP_TS_RUNNER_MISSING,
+            f"TypeScript 入口在 {dependency_root or '<workspace>'} 下找不到 "
+            f"node_modules/.bin/{{{','.join(_TYPESCRIPT_RUNNERS)}}}；"
+            "正确做法是把 tsx 或 ts-node 写进 devDependencies，并把 package-lock.json 与 "
+            ".antcode-deps/npm-cache/ 一起提交，由 Worker 在无网络沙箱内 npm ci 装出来。"
+            "直接提交 node_modules/ 不可行：source bundle 不接受符号链接",
+        )
 
     def _java_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
         java_exe = require_language_executable(JAVA_RUNTIME)

@@ -14,6 +14,10 @@ from antcode_contracts.execution_language import ExecutionLanguageError
 from antcode_worker.domain.enums import TaskType
 from antcode_worker.domain.models import RunContext, RuntimeSpec, TaskPayload
 from antcode_worker.plugins.code.plugin import CodePlugin
+from antcode_worker.runtime.node_dependency_errors import (
+    NODE_DEP_TS_RUNNER_MISSING,
+    NodeDependencyInstallError,
+)
 
 _PYTHON_CONTEXT = RunContext(
     "run-1",
@@ -92,6 +96,24 @@ def test_validate_reports_the_language_conflict_instead_of_raising(workspace: Pa
 
     assert len(errors) == 1
     assert "请把两者改到一致" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_missing_ts_runner_error_points_at_the_only_workable_path(workspace: Path, isolated_bin: Path) -> None:
+    """旧报错只说"需要装 tsx"，把人引向"提交 node_modules"这条必死的路。
+
+    source bundle 不收符号链接，而 ``node_modules/.bin/<runner>`` 永远是符号链接，
+    所以报错必须点名真正可行的做法（lockfile + .antcode-deps 离线缓存），
+    并且带结构化码而不是让调用方去匹配中文。
+    """
+    _executable(isolated_bin, "node")
+
+    with pytest.raises(NodeDependencyInstallError) as excinfo:
+        await CodePlugin().build_plan(_PYTHON_CONTEXT, _payload("main.ts", workspace, "typescript"))
+
+    assert excinfo.value.error_code == NODE_DEP_TS_RUNNER_MISSING
+    assert ".antcode-deps/npm-cache" in excinfo.value.detail
+    assert "符号链接" in excinfo.value.detail
 
 
 @pytest.mark.asyncio

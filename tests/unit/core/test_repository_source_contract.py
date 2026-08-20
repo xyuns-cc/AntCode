@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from antcode_core.application.services.projects import source_bundle_errors as bundle_errors
 from antcode_core.application.services.projects import source_bundle_paths as path_module
 from antcode_core.domain.models import (
     GitRepository,
@@ -46,6 +47,45 @@ def test_bundle_keeps_repo_relative_paths_and_explicit_includes(tmp_path):
     names = path_module.list_tar_names(content)
 
     assert names == ["libs/common/helpers.py", "spiders/news/main.py"]
+
+
+def test_bundle_rejects_symlink_instead_of_dropping_it(tmp_path):
+    """符号链接必须在生产侧带码报错，不能静默丢弃后在 Worker 侧炸一句无关的话。
+
+    npm 的 ``node_modules/.bin/*`` 永远是符号链接，旧实现直接跳过它们，于是
+    "把 node_modules 提交进仓库"必然失败，而报错一个字都不提符号链接。
+    """
+    repo = tmp_path / "repo"
+    project = repo / "app"
+    runner_dir = project / "node_modules" / ".bin"
+    runner_dir.mkdir(parents=True)
+    (project / "main.ts").write_text("export const a = 1;\n", encoding="utf-8")
+    (project / "node_modules" / "tsx.js").write_text("// runner\n", encoding="utf-8")
+    (runner_dir / "tsx").symlink_to(Path("..") / "tsx.js")
+
+    with pytest.raises(bundle_errors.SourceBundleRejected) as excinfo:
+        path_module.resolve_bundle_paths(repo, subdir="app", entry_point="main.ts", include_paths=[])
+
+    assert excinfo.value.error_code == bundle_errors.SOURCE_BUNDLE_SYMLINK_REJECTED
+    assert "app/node_modules/.bin/tsx" in excinfo.value.detail
+
+
+def test_bundle_rejects_symlinked_directory(tmp_path):
+    """os.walk 不跟随目录软链，目录形态同样是"静默少一整棵子树"。"""
+    repo = tmp_path / "repo"
+    project = repo / "app"
+    shared = repo / "shared"
+    shared.mkdir(parents=True)
+    project.mkdir(parents=True)
+    (shared / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (project / "main.py").write_text("print(1)\n", encoding="utf-8")
+    (project / "vendor").symlink_to(shared, target_is_directory=True)
+
+    with pytest.raises(bundle_errors.SourceBundleRejected) as excinfo:
+        path_module.resolve_bundle_paths(repo, subdir="app", entry_point="main.py", include_paths=[])
+
+    assert excinfo.value.error_code == bundle_errors.SOURCE_BUNDLE_SYMLINK_REJECTED
+    assert "app/vendor" in excinfo.value.detail
 
 
 def test_bundle_rejects_unmaterialized_git_lfs_pointer(tmp_path):

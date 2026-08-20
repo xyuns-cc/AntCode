@@ -328,7 +328,7 @@ class Settings(BaseSettings):
     def LANG_CACHE_ROOT(self) -> str:
         """多语言依赖 cache 根目录，各语言子目录做隔离。
 
-        - node: 用作 npm/pnpm cache 目录（`npm_config_cache` / `PNPM_STORE_PATH`）
+        - node: 用作 npm cache 目录（`npm_config_cache`）；镜像只装 npm，无 pnpm/yarn
         - go:   用作 `GOPATH` 和 `GOCACHE`
         - java: 用作 Maven local repo（`MAVEN_OPTS=-Dmaven.repo.local=...`）
 
