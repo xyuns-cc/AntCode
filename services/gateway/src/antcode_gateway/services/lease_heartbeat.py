@@ -98,6 +98,9 @@ def _decode_metrics_values(metrics: Any) -> dict[str, Any]:
         "disk_used_bytes": int(_nonnegative(metrics.disk_used_bytes, "disk_used_bytes")),
         "disk_free_bytes": int(_nonnegative(metrics.disk_free_bytes, "disk_free_bytes")),
         "uptime_seconds": int(_nonnegative(metrics.uptime_seconds, "uptime_seconds")),
+        # 生效限额；0 合法（没有限额在生效），只拒负数。
+        "task_memory_limit_mb": int(_nonnegative(metrics.task_memory_limit_mb, "task_memory_limit_mb")),
+        "task_cpu_time_limit_sec": int(_nonnegative(metrics.task_cpu_time_limit_sec, "task_cpu_time_limit_sec")),
     }
 
 
@@ -129,6 +132,8 @@ def decode_lease_heartbeat(request: control_pb2.LeaseRequest, worker_id: str) ->
         disk_used_bytes=values["disk_used_bytes"],
         disk_free_bytes=values["disk_free_bytes"],
         uptime_seconds=values["uptime_seconds"],
+        task_memory_limit_mb=values["task_memory_limit_mb"],
+        task_cpu_time_limit_sec=values["task_cpu_time_limit_sec"],
         spider_stats=spider_stats,
         capabilities=capabilities,
     )

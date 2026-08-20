@@ -54,6 +54,10 @@ def heartbeat_metrics_dict(heartbeat: Any) -> dict[str, Any]:
         "disk_used_bytes": _value(metrics, "disk_used_bytes", 0),
         "disk_free_bytes": _value(metrics, "disk_free_bytes", 0),
         "uptime_seconds": _value(metrics, "uptime_seconds", 0),
+        # 生效限额。缺省 0 = 没有限额在生效，控制面读成"未知"；这里不许拿下发值
+        # 或任何配置值兜底，那正是资源页报假值的成因。
+        "task_memory_limit_mb": _value(metrics, "task_memory_limit_mb", 0),
+        "task_cpu_time_limit_sec": _value(metrics, "task_cpu_time_limit_sec", 0),
         "spider_stats": _spider_stats_dict(_value(metrics, "spider_stats", None)),
     }
 
@@ -109,6 +113,8 @@ def build_metrics_proto(metrics: dict[str, Any]) -> Any:
         "disk_used_bytes": int(metrics.get("disk_used_bytes", 0) or 0),
         "disk_free_bytes": int(metrics.get("disk_free_bytes", 0) or 0),
         "uptime_seconds": int(metrics.get("uptime_seconds", 0) or 0),
+        "task_memory_limit_mb": int(metrics.get("task_memory_limit_mb", 0) or 0),
+        "task_cpu_time_limit_sec": int(metrics.get("task_cpu_time_limit_sec", 0) or 0),
     }
     spider_stats = _spider_stats_proto(metrics.get("spider_stats"))
     if spider_stats is not None:

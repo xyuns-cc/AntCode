@@ -1877,7 +1877,7 @@
       "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 565
+      "value": 520
     },
     {
       "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",

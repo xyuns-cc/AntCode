@@ -69,6 +69,19 @@ message Metrics {
   uint32 cpu_cores = 17;
   uint64 uptime_seconds = 18;
   int32 queued_tasks = 19;
+
+  // Per-task resource limits actually in force on this Worker right now.
+  //
+  // These are execution-plane values, not the control plane's request: the
+  // Worker recomputes them against its own cgroup budget at startup and on
+  // every config_update, so the number the control plane pushed is routinely
+  // not the number in force. Without them on the wire the API can only ever
+  // answer "unknown" for two of the three limits shown on the resource page.
+  //
+  // 0 means "no limit in force" and must stay distinguishable from a real
+  // quota downstream - proto3 cannot tell an unset field from a zero one.
+  int32 task_memory_limit_mb = 20;
+  int32 task_cpu_time_limit_sec = 21;
 }
 
 // Operating system information from Workers

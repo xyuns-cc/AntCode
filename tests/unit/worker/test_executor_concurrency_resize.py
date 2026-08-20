@@ -17,6 +17,9 @@ from antcode_worker.heartbeat.system_metrics import SystemMetricsCollector
 INITIAL_CAPACITY = 2
 EXPANDED_CAPACITY = 4
 UPDATED_HEARTBEAT_CAPACITY = 5
+STARTUP_MEMORY_LIMIT_MB = 512
+STARTUP_CPU_LIMIT_SEC = 60
+RESIZED_MEMORY_LIMIT_MB = 1024
 
 
 async def _occupy(gate: ResizableConcurrencyGate, entered: asyncio.Event, release: asyncio.Event) -> None:
@@ -107,6 +110,66 @@ async def test_reporter_fallback_capacity_tracks_live_update() -> None:
     metrics = await reporter._get_metrics()
 
     assert metrics.max_concurrent_tasks == UPDATED_HEARTBEAT_CAPACITY
+
+
+def _wire(collector: SystemMetricsCollector, reporter: HeartbeatReporter, executor) -> object:
+    config = SimpleNamespace(
+        max_concurrent_tasks=INITIAL_CAPACITY,
+        task_memory_limit_mb=STARTUP_MEMORY_LIMIT_MB,
+        task_cpu_time_limit_sec=STARTUP_CPU_LIMIT_SEC,
+        auto_resource_limit=False,
+    )
+    return create_engine(
+        config,
+        transport=MagicMock(),
+        runtime_manager=MagicMock(),
+        executor=executor,
+        plugin_registry=MagicMock(),
+        log_manager=MagicMock(),
+        project_fetcher=MagicMock(),
+        artifact_manager=MagicMock(),
+        metrics_collector=collector,
+        heartbeat_reporter=reporter,
+    )
+
+
+def _reporter(collector: SystemMetricsCollector) -> HeartbeatReporter:
+    return HeartbeatReporter(
+        transport=object(),
+        worker_id="worker-1",
+        metrics_collector=collector,
+        max_concurrent_tasks=INITIAL_CAPACITY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_reports_engine_effective_task_limits() -> None:
+    """生效单任务限额必须上到心跳里, 否则控制面只能显示"未知"。"""
+    collector = SystemMetricsCollector(max_slots=INITIAL_CAPACITY)
+    reporter = _reporter(collector)
+    _wire(collector, reporter, MagicMock(resize_concurrency=AsyncMock()))
+
+    metrics = await reporter._get_metrics()
+
+    assert metrics.task_memory_limit_mb == STARTUP_MEMORY_LIMIT_MB
+    assert metrics.task_cpu_time_limit_sec == STARTUP_CPU_LIMIT_SEC
+
+
+@pytest.mark.asyncio
+async def test_effective_task_limits_track_runtime_config_update() -> None:
+    """上报的必须是引擎的**活值**, 不是启动时抄下来的一份快照。
+
+    ``apply_config_update`` 只改引擎的 ResourcePolicy, 从不回写 config。谁要是
+    从 config 读这两项, 运行时改过限额之后就会一直报旧数字——那正是这个页面
+    原本的缺陷形态: 报一个和执行面无关的数。
+    """
+    collector = SystemMetricsCollector(max_slots=INITIAL_CAPACITY)
+    reporter = _reporter(collector)
+    engine = _wire(collector, reporter, MagicMock(resize_concurrency=AsyncMock()))
+
+    await engine.apply_config_update({"task_memory_limit_mb": RESIZED_MEMORY_LIMIT_MB})
+
+    assert (await reporter._get_metrics()).task_memory_limit_mb == RESIZED_MEMORY_LIMIT_MB
 
 
 @pytest.mark.asyncio

@@ -89,6 +89,9 @@ def _redis_metrics(data: dict[str, Any]) -> dict[str, Any]:
         "disk_used_bytes": ("diskUsed", int),
         "disk_free_bytes": ("diskFree", int),
         "uptime_seconds": ("uptime", int),
+        # Worker 上报的**生效**单任务限额，与 resource_limits 里的下发值分开存。
+        "task_memory_limit_mb": ("taskMemoryLimitMb", int),
+        "task_cpu_time_limit_sec": ("taskCpuTimeLimitSec", int),
     }
     metrics = {
         target: converter(data[source])

@@ -46,6 +46,9 @@ class Metrics:
     disk_used_bytes: int = 0
     disk_free_bytes: int = 0
     uptime_seconds: int = 0
+    # 生效限额；0 = 没有限额在生效，控制面据此显示"未知"而不是编造数字。
+    task_memory_limit_mb: int = 0
+    task_cpu_time_limit_sec: int = 0
     spider_stats: SpiderStats | None = None
 
 

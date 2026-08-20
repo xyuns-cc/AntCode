@@ -23,8 +23,13 @@ def create_engine(
     """Build the Engine and connect metrics observers."""
     from antcode_worker.adaptive_limits import calculate_adaptive_limits
     from antcode_worker.engine.engine import Engine
+    from antcode_worker.engine.policies import default_policies
 
     max_concurrent = getattr(config, "max_concurrent_tasks", 5)
+    # 策略对象由 wiring 持有：引擎在 __init__ 与 apply_config_update 里**就地**改写
+    # 它，所以这一份引用就是生效限额的实时视图。心跳读它而不是读 config——
+    # config 在运行时 config_update 之后不会被回写，读它就会报出过期的限额。
+    policies = default_policies()
     engine = Engine(
         transport=transport,
         executor=executor,
@@ -34,6 +39,7 @@ def create_engine(
         log_manager_factory=log_manager,
         project_fetcher=project_fetcher,
         artifact_manager=artifact_manager,
+        policies=policies,
         max_concurrent=max_concurrent,
         memory_limit_mb=getattr(config, "task_memory_limit_mb", 0),
         cpu_limit_seconds=getattr(config, "task_cpu_time_limit_sec", 0),
@@ -46,7 +52,7 @@ def create_engine(
             heartbeat_reporter,
         ),
     )
-    _connect_metrics(engine, metrics_collector)
+    _connect_metrics(engine, metrics_collector, policies)
     return engine
 
 
@@ -65,12 +71,19 @@ def _create_cancel_tombstones(config: Any, transport: Any, tombstone_redis: Any)
     )
 
 
-def _connect_metrics(engine: Any, metrics_collector: Any) -> None:
+def _connect_metrics(engine: Any, metrics_collector: Any, policies: Any) -> None:
     metrics_collector.set_state_manager(engine.state_manager)
     metrics_collector.set_scheduler(engine.scheduler)
+    from antcode_worker.heartbeat.metric_models import EffectiveTaskLimits
     from antcode_worker.runtime.uv_manager import uv_manager
 
     metrics_collector.set_env_count_provider(uv_manager.get_env_count)
+    metrics_collector.set_task_limits_provider(
+        lambda: EffectiveTaskLimits(
+            memory_limit_mb=policies.resource.memory_limit_mb,
+            cpu_time_limit_sec=policies.resource.cpu_limit_seconds,
+        )
+    )
     engine.set_spider_stats_recorder(metrics_collector.record_spider_stats_file)
     engine.set_task_completed_recorder(metrics_collector.record_task_executed)
 

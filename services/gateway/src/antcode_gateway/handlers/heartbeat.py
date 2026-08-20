@@ -45,6 +45,9 @@ class HeartbeatData:
     disk_used_bytes: int = 0
     disk_free_bytes: int = 0
     uptime_seconds: int = 0
+    # 生效单任务限额；0 = 没有限额在生效，控制面据此显示"未知"。
+    task_memory_limit_mb: int = 0
+    task_cpu_time_limit_sec: int = 0
     spider_stats: dict[str, Any] | None = None
     version: str = ""
     os_type: str = ""
@@ -143,6 +146,8 @@ class HeartbeatHandler:
                 "disk_used_bytes": str(heartbeat.disk_used_bytes),
                 "disk_free_bytes": str(heartbeat.disk_free_bytes),
                 "uptime_seconds": str(heartbeat.uptime_seconds),
+                "task_memory_limit_mb": str(heartbeat.task_memory_limit_mb),
+                "task_cpu_time_limit_sec": str(heartbeat.task_cpu_time_limit_sec),
                 "version": heartbeat.version,
                 "os_type": heartbeat.os_type,
                 "os_version": heartbeat.os_version,

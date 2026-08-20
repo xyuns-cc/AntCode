@@ -27,6 +27,11 @@ EFFECTIVE_CONCURRENCY = 4
 CONFIGURED_MEMORY_MB = 537
 # 控制面下发过、但执行面按预算收敛掉的并发（API 的合法上限）。
 CONFIGURED_CONCURRENCY = 20
+# 真机 mn-worker-02 心跳上报的生效单任务限额。
+EFFECTIVE_MEMORY_MB = 537
+EFFECTIVE_CPU_SEC = 480
+# 同一台机器上 DB 里躺着的下发值：超过预算，Worker 启动时按预算重算掉了。
+OVERSOLD_MEMORY_MB = 1024
 
 
 def _worker(*, metrics: dict | None, resource_limits: dict | None) -> SimpleNamespace:
@@ -74,8 +79,61 @@ async def test_db_configured_value_never_masquerades_as_effective(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_unreported_limits_are_null_instead_of_web_api_settings(monkeypatch) -> None:
-    """心跳契约没有这两项, API 无从得知生效值——只能如实为 None。"""
+    """控制组：Worker 没报这两项时仍然是 None，不许回落到 settings。
+
+    契约已经能承载它们了（Metrics 20/21 号字段），但"能报"不等于"这台报了"——
+    没报上来的唯一诚实答案还是"不知道"。
+    """
     data = await _get(monkeypatch, metrics={"maxConcurrentTasks": EFFECTIVE_CONCURRENCY}, resource_limits={})
+
+    assert data["limits"]["task_memory_limit_mb"] is None
+    assert data["limits"]["task_cpu_time_limit_sec"] is None
+
+
+@pytest.mark.asyncio
+async def test_effective_memory_and_cpu_limits_come_from_heartbeat(monkeypatch) -> None:
+    """Worker 上报了生效限额, 页面就得显示真值而不是 '—'。"""
+    data = await _get(
+        monkeypatch,
+        metrics={
+            "maxConcurrentTasks": EFFECTIVE_CONCURRENCY,
+            "taskMemoryLimitMb": EFFECTIVE_MEMORY_MB,
+            "taskCpuTimeLimitSec": EFFECTIVE_CPU_SEC,
+        },
+        resource_limits={},
+    )
+
+    assert data["limits"]["task_memory_limit_mb"] == EFFECTIVE_MEMORY_MB
+    assert data["limits"]["task_cpu_time_limit_sec"] == EFFECTIVE_CPU_SEC
+    assert data["limits"]["task_memory_limit_mb"] != settings.TASK_MEMORY_LIMIT_MB
+    assert data["limits"]["task_cpu_time_limit_sec"] != settings.TASK_CPU_TIME_LIMIT_SEC
+
+
+@pytest.mark.asyncio
+async def test_effective_limit_wins_over_diverging_configured_value(monkeypatch) -> None:
+    """真机的分叉形态：DB 下发 1024MB，Worker 按预算收敛到 537MB。
+
+    两个数字必须各就各位——生效侧报 537、已配置侧报 1024。报成一个数就是
+    aa93bfd 之前那个"设了但没生效看不见"的老问题。
+    """
+    data = await _get(
+        monkeypatch,
+        metrics={"taskMemoryLimitMb": EFFECTIVE_MEMORY_MB},
+        resource_limits={"task_memory_limit_mb": OVERSOLD_MEMORY_MB},
+    )
+
+    assert data["limits"]["task_memory_limit_mb"] == EFFECTIVE_MEMORY_MB
+    assert data["configured_limits"]["task_memory_limit_mb"] == OVERSOLD_MEMORY_MB
+
+
+@pytest.mark.asyncio
+async def test_zero_effective_limit_is_unknown_not_a_quota(monkeypatch) -> None:
+    """0 = 没有限额在生效, 不是"限额 0MB"。前端会把 0 当真实配额画出来。"""
+    data = await _get(
+        monkeypatch,
+        metrics={"taskMemoryLimitMb": 0, "taskCpuTimeLimitSec": 0},
+        resource_limits={},
+    )
 
     assert data["limits"]["task_memory_limit_mb"] is None
     assert data["limits"]["task_cpu_time_limit_sec"] is None
@@ -112,13 +170,26 @@ async def test_never_reported_worker_reports_unknown_not_a_number(monkeypatch) -
     }
 
 
+_CONCURRENCY_KEYS = workers_resources._EFFECTIVE_LIMIT_KEYS["max_concurrent_tasks"]
+_MEMORY_KEYS = workers_resources._EFFECTIVE_LIMIT_KEYS["task_memory_limit_mb"]
+
+
 @pytest.mark.parametrize("reported", [True, 0, -1, "4", None])
-def test_effective_concurrency_rejects_non_positive_int(reported: object) -> None:
-    """bool 是 int 的子类; 字符串/0/负数都不是并发数, 一律算"没上报"。"""
-    assert workers_resources._effective_concurrency({"maxConcurrentTasks": reported}) is None
+def test_reported_limit_rejects_non_positive_int(reported: object) -> None:
+    """bool 是 int 的子类; 字符串/0/负数都不是限额, 一律算"没上报"。"""
+    assert workers_resources._reported_limit({"maxConcurrentTasks": reported}, _CONCURRENCY_KEYS) is None
 
 
-def test_effective_concurrency_accepts_legacy_snake_case_alias() -> None:
-    assert workers_resources._effective_concurrency({"max_concurrent_tasks": EFFECTIVE_CONCURRENCY}) == (
+def test_reported_limit_accepts_legacy_snake_case_alias() -> None:
+    assert workers_resources._reported_limit({"max_concurrent_tasks": EFFECTIVE_CONCURRENCY}, _CONCURRENCY_KEYS) == (
         EFFECTIVE_CONCURRENCY
+    )
+
+
+def test_reported_memory_limit_accepts_both_spellings() -> None:
+    assert workers_resources._reported_limit({"taskMemoryLimitMb": EFFECTIVE_MEMORY_MB}, _MEMORY_KEYS) == (
+        EFFECTIVE_MEMORY_MB
+    )
+    assert workers_resources._reported_limit({"task_memory_limit_mb": EFFECTIVE_MEMORY_MB}, _MEMORY_KEYS) == (
+        EFFECTIVE_MEMORY_MB
     )

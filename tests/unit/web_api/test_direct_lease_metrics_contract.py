@@ -39,6 +39,8 @@ def _full_metrics_heartbeat() -> SimpleNamespace:
             disk_used_bytes=256_055_095_296,
             disk_free_bytes=256_055_095_296,
             uptime_seconds=86_400,
+            task_memory_limit_mb=537,
+            task_cpu_time_limit_sec=480,
             spider_stats=None,
         )
     )
@@ -92,8 +94,25 @@ def test_metricsless_heartbeat_payload_also_validates():
         "cpu_cores",
         "uptime_seconds",
         "queued_tasks",
+        "task_memory_limit_mb",
+        "task_cpu_time_limit_sec",
     ],
 )
 def test_proto_resource_metrics_fields_are_representable(proto_field: str):
-    """proto ResourceMetrics 11-19 号字段在 Direct 侧必须都有对应位置。"""
+    """proto Metrics 11-21 号字段在 Direct 侧必须都有对应位置。"""
     assert proto_field in DirectLeaseMetrics.model_fields
+
+
+def test_zero_effective_limit_passes_validation():
+    """0 = 没有限额在生效，是合法上报值。
+
+    给这两项加 ge=1 会让"未设限额"的 Worker 每次续租 422，形态与本文件开头
+    那起事故完全相同。
+    """
+    payload = heartbeat_metrics_dict(_full_metrics_heartbeat())
+    payload["task_memory_limit_mb"] = 0
+    payload["task_cpu_time_limit_sec"] = 0
+
+    model = DirectLeaseMetrics.model_validate(payload)
+
+    assert model.task_memory_limit_mb == 0

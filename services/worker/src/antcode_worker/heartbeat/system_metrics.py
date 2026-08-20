@@ -11,6 +11,7 @@ from loguru import logger
 from antcode_worker.heartbeat.metric_models import (
     CPUMetrics,
     DiskMetrics,
+    EffectiveTaskLimits,
     MemoryMetrics,
     NetworkMetrics,
     SystemMetrics,
@@ -53,6 +54,9 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         self._reconnect_count = 0
         self._started_at = time.monotonic()
         self._env_count_provider: Callable[[], int] | None = None
+        # 生效限额只有引擎知道，且会被 config_update 就地改写。这里存**提供者**
+        # 而不是快照，避免复制出一份会过期的值——过期的限额就是这个页面原本的 bug。
+        self._task_limits_provider: Callable[[], EffectiveTaskLimits] | None = None
 
         # 引擎指标提供者
         self._state_manager: StateManager | None = None
@@ -79,6 +83,10 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
 
     def set_env_count_provider(self, provider: Callable[[], int]) -> None:
         self._env_count_provider = provider
+
+    def set_task_limits_provider(self, provider: Callable[[], EffectiveTaskLimits]) -> None:
+        """接上生效限额的实时来源（引擎的资源策略）。"""
+        self._task_limits_provider = provider
 
     def record_task_executed(self, project_id: str) -> None:
         """Record one real execution and its non-empty project identity."""
@@ -227,6 +235,10 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         metrics = WorkerMetrics()
 
         metrics.max_slots = self._max_slots
+        if self._task_limits_provider is not None:
+            limits = self._task_limits_provider()
+            metrics.task_memory_limit_mb = limits.memory_limit_mb
+            metrics.task_cpu_time_limit_sec = limits.cpu_time_limit_sec
         metrics.total_tasks_executed = self._total_tasks_executed
         metrics.project_count = len(self._executed_project_ids)
         metrics.last_heartbeat_ts = self._last_heartbeat_ts

@@ -122,3 +122,37 @@ async def test_gateway_redis_metrics_reach_postgres_persistence(monkeypatch):
         "spider_stats": {"request_count": 5, "status_codes": {"200": 5}},
     }
     assert persist.await_args.kwargs["record_history"] is True
+
+
+@pytest.mark.asyncio
+async def test_effective_task_limits_survive_the_metrics_allowlist(monkeypatch):
+    """``_redis_metrics`` 是固定白名单：不在表里的键会被静默丢掉。
+
+    这两项要是漏进白名单，整条链路每一步都"成功"，只是数据在最后一米消失，
+    资源页永远显示"未知"——没有任何一处会报错。
+    """
+    service = WorkerHeartbeatService()
+    worker = _worker()
+    heartbeat_module = importlib.import_module("antcode_core.application.services.workers.worker_heartbeat_service")
+    persist = AsyncMock(return_value=worker)
+    monkeypatch.setattr(heartbeat_module, "persist_worker_heartbeat", persist)
+    monkeypatch.setattr(
+        redis_module,
+        "get_redis_client",
+        AsyncMock(
+            return_value=FakeRedis(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "task_memory_limit_mb": "537",
+                    "task_cpu_time_limit_sec": "480",
+                }
+            )
+        ),
+    )
+
+    assert await service._sync_redis_heartbeat_to_db(worker) is True
+
+    assert persist.await_args.args[1].metrics == {
+        "taskMemoryLimitMb": 537,
+        "taskCpuTimeLimitSec": 480,
+    }

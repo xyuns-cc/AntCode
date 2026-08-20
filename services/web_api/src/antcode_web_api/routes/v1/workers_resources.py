@@ -46,8 +46,13 @@ DISK_USED = CapacityMetric("diskUsed", "disk_used_gb", BYTES_PER_GIB)
 DISK_TOTAL = CapacityMetric("diskTotal", "disk_total_gb", BYTES_PER_GIB)
 
 LIMIT_FIELDS = ("max_concurrent_tasks", "task_memory_limit_mb", "task_cpu_time_limit_sec")
-# Worker 心跳上报生效并发时用的驼峰键，以及 worker_metrics 归一化前的下划线别名。
-_EFFECTIVE_CONCURRENCY_KEYS = ("maxConcurrentTasks", "max_concurrent_tasks")
+# 心跳落库后的驼峰键，以及归一化前的下划线别名。三项都由 Worker 上报生效值
+# (contracts/proto/common.proto 的 Metrics: 5 / 20 / 21 号字段)。
+_EFFECTIVE_LIMIT_KEYS: dict[str, tuple[str, ...]] = {
+    "max_concurrent_tasks": ("maxConcurrentTasks", "max_concurrent_tasks"),
+    "task_memory_limit_mb": ("taskMemoryLimitMb", "task_memory_limit_mb"),
+    "task_cpu_time_limit_sec": ("taskCpuTimeLimitSec", "task_cpu_time_limit_sec"),
+}
 
 
 async def _require_admin(current_user: TokenData) -> User:
@@ -79,10 +84,14 @@ def _capacity_value(resources: dict, metric: CapacityMetric) -> float:
     return _to_float(resources.get(metric.legacy_field, 0))
 
 
-def _effective_concurrency(resources: dict) -> int | None:
-    for key in _EFFECTIVE_CONCURRENCY_KEYS:
+def _reported_limit(resources: dict, keys: tuple[str, ...]) -> int | None:
+    """只认心跳上报过的正整数真值。
+
+    0 表示"没有限额在生效"，与"没上报"一样都不是可展示的配额，统一如实为 None。
+    """
+    for key in keys:
         value = resources.get(key)
-        # bool 是 int 的子类，但 True 不是并发数。
+        # bool 是 int 的子类，但 True 不是限额。
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
     return None
@@ -97,13 +106,7 @@ def _effective_limits(resources: dict) -> dict[str, int | None]:
     等于编造一个 API 并不知道的数字，且真机上恒偏大（10 vs 4、600s vs 480s）。
     所以这里只认心跳上报过的真值，其余如实为 None。
     """
-    return {
-        "max_concurrent_tasks": _effective_concurrency(resources),
-        # contracts/proto/common.proto 的 Metrics 只有 max_concurrent_tasks，
-        # 这两项 Worker 从未上报，控制面无从得知生效值。
-        "task_memory_limit_mb": None,
-        "task_cpu_time_limit_sec": None,
-    }
+    return {name: _reported_limit(resources, keys) for name, keys in _EFFECTIVE_LIMIT_KEYS.items()}
 
 
 def _configured_limits(limits: dict) -> dict[str, int | None]:

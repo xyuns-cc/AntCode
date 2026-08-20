@@ -53,6 +53,11 @@ class WorkerMetrics(BaseModel):
     diskTotal: int = Field(default=0, ge=0, description="总磁盘 (bytes)")
     diskUsed: int = Field(default=0, ge=0, description="已用磁盘 (bytes)")
     diskFree: int = Field(default=0, ge=0, description="可用磁盘 (bytes)")
+    # 生效单任务限额；0 = 没有限额在生效，故 ge=0 而不是 ge=1。本模型是
+    # extra="forbid"，缺字段会让 workers.py 的 except 分支把**整个** metrics
+    # 静默换成默认值，而不是只丢这两项。
+    taskMemoryLimitMb: int = Field(default=0, ge=0, description="生效单任务内存限额 (MB)")
+    taskCpuTimeLimitSec: int = Field(default=0, ge=0, description="生效单任务 CPU 时间限额 (秒)")
 
     model_config = ConfigDict(extra="forbid")
 

@@ -62,7 +62,7 @@ class SpiderDomainStats(_message.Message):
     def __init__(self, domain: _Optional[str] = ..., request_count: _Optional[int] = ..., success_rate: _Optional[float] = ..., avg_latency_ms: _Optional[float] = ...) -> None: ...
 
 class Metrics(_message.Message):
-    __slots__ = ("cpu", "memory", "disk", "running_tasks", "max_concurrent_tasks", "task_count", "project_count", "env_count", "spider_stats", "memory_total_bytes", "memory_used_bytes", "memory_available_bytes", "disk_total_bytes", "disk_used_bytes", "disk_free_bytes", "cpu_cores", "uptime_seconds", "queued_tasks")
+    __slots__ = ("cpu", "memory", "disk", "running_tasks", "max_concurrent_tasks", "task_count", "project_count", "env_count", "spider_stats", "memory_total_bytes", "memory_used_bytes", "memory_available_bytes", "disk_total_bytes", "disk_used_bytes", "disk_free_bytes", "cpu_cores", "uptime_seconds", "queued_tasks", "task_memory_limit_mb", "task_cpu_time_limit_sec")
     CPU_FIELD_NUMBER: _ClassVar[int]
     MEMORY_FIELD_NUMBER: _ClassVar[int]
     DISK_FIELD_NUMBER: _ClassVar[int]
@@ -81,6 +81,8 @@ class Metrics(_message.Message):
     CPU_CORES_FIELD_NUMBER: _ClassVar[int]
     UPTIME_SECONDS_FIELD_NUMBER: _ClassVar[int]
     QUEUED_TASKS_FIELD_NUMBER: _ClassVar[int]
+    TASK_MEMORY_LIMIT_MB_FIELD_NUMBER: _ClassVar[int]
+    TASK_CPU_TIME_LIMIT_SEC_FIELD_NUMBER: _ClassVar[int]
     cpu: float
     memory: float
     disk: float
@@ -99,7 +101,9 @@ class Metrics(_message.Message):
     cpu_cores: int
     uptime_seconds: int
     queued_tasks: int
-    def __init__(self, cpu: _Optional[float] = ..., memory: _Optional[float] = ..., disk: _Optional[float] = ..., running_tasks: _Optional[int] = ..., max_concurrent_tasks: _Optional[int] = ..., task_count: _Optional[int] = ..., project_count: _Optional[int] = ..., env_count: _Optional[int] = ..., spider_stats: _Optional[_Union[SpiderStatsSummary, _Mapping]] = ..., memory_total_bytes: _Optional[int] = ..., memory_used_bytes: _Optional[int] = ..., memory_available_bytes: _Optional[int] = ..., disk_total_bytes: _Optional[int] = ..., disk_used_bytes: _Optional[int] = ..., disk_free_bytes: _Optional[int] = ..., cpu_cores: _Optional[int] = ..., uptime_seconds: _Optional[int] = ..., queued_tasks: _Optional[int] = ...) -> None: ...
+    task_memory_limit_mb: int
+    task_cpu_time_limit_sec: int
+    def __init__(self, cpu: _Optional[float] = ..., memory: _Optional[float] = ..., disk: _Optional[float] = ..., running_tasks: _Optional[int] = ..., max_concurrent_tasks: _Optional[int] = ..., task_count: _Optional[int] = ..., project_count: _Optional[int] = ..., env_count: _Optional[int] = ..., spider_stats: _Optional[_Union[SpiderStatsSummary, _Mapping]] = ..., memory_total_bytes: _Optional[int] = ..., memory_used_bytes: _Optional[int] = ..., memory_available_bytes: _Optional[int] = ..., disk_total_bytes: _Optional[int] = ..., disk_used_bytes: _Optional[int] = ..., disk_free_bytes: _Optional[int] = ..., cpu_cores: _Optional[int] = ..., uptime_seconds: _Optional[int] = ..., queued_tasks: _Optional[int] = ..., task_memory_limit_mb: _Optional[int] = ..., task_cpu_time_limit_sec: _Optional[int] = ...) -> None: ...
 
 class OSInfo(_message.Message):
     __slots__ = ("os_type", "os_version", "python_version", "machine_arch")

@@ -20,8 +20,13 @@ import WorkerResourceManagement from './WorkerResourceManagement'
 vi.mock('@/utils/notification', () => ({ default: vi.fn() }))
 const notify = vi.mocked(showNotification)
 
-// 真机 mn-worker-02 的形状：从没被 API 设过限额，心跳只带得动并发。
+// 真机 mn-worker-02 的形状。
 const EFFECTIVE_CONCURRENCY = 4
+// 心跳 Metrics 20/21 号字段上报的生效单任务限额。
+const EFFECTIVE_MEMORY_MB = 537
+const EFFECTIVE_CPU_SEC = 480
+// 同一台机器 DB 里的下发值：超出预算，Worker 启动时按预算重算掉了。
+const OVERSOLD_MEMORY_MB = 1024
 
 const STATS: WorkerResourceInfo['resource_stats'] = {
   cpu_percent: 1,
@@ -164,6 +169,46 @@ describe('WorkerResourceManagement 生效限额展示', () => {
     const [type, message] = notify.mock.calls.at(-1)!
     expect(type).toBe('warning')
     expect(String(message)).toContain('未能下发')
+  })
+
+  it('Worker 上报了生效内存/CPU 限额时显示真值，不再是占位符', async () => {
+    renderWith(
+      resources({
+        limits: {
+          max_concurrent_tasks: EFFECTIVE_CONCURRENCY,
+          task_memory_limit_mb: EFFECTIVE_MEMORY_MB,
+          task_cpu_time_limit_sec: EFFECTIVE_CPU_SEC
+        }
+      })
+    )
+
+    await waitFor(() => expect(screen.getByText('内存限制（生效）')).toBeInTheDocument())
+    expect(screen.getByText('内存限制（生效）').parentElement?.textContent).toContain(String(EFFECTIVE_MEMORY_MB))
+    expect(screen.getByText('CPU 时限（生效）').parentElement?.textContent).toContain(String(EFFECTIVE_CPU_SEC))
+    // 有真值就必须带单位，不能还挂着占位符。
+    expect(screen.getByText('内存限制（生效）').parentElement?.textContent).not.toContain('—')
+  })
+
+  it('内存侧的"设了但没生效"现在才报得出来', async () => {
+    // 生效侧此前恒为 null，isLimitDiverged 对内存永远返回 false —— 这条分叉
+    // 在 Worker 上报生效值之前根本没法被发现。
+    renderWith(
+      resources({
+        limits: {
+          max_concurrent_tasks: EFFECTIVE_CONCURRENCY,
+          task_memory_limit_mb: EFFECTIVE_MEMORY_MB,
+          task_cpu_time_limit_sec: null
+        },
+        configured_limits: {
+          max_concurrent_tasks: EFFECTIVE_CONCURRENCY,
+          task_memory_limit_mb: OVERSOLD_MEMORY_MB,
+          task_cpu_time_limit_sec: null
+        }
+      })
+    )
+
+    await waitFor(() => expect(screen.getByText('配置值未生效')).toBeInTheDocument())
+    expect(screen.getByText(/的下发值与 Worker 上报的生效值不一致/).textContent).toContain('内存限制')
   })
 
   it('生效值与下发值一致时不误报分叉', async () => {

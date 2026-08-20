@@ -68,6 +68,8 @@ def _heartbeat_mapping(heartbeat: Any) -> dict[str, str]:
         "disk_used_bytes": str(metrics.get("disk_used_bytes", 0)),
         "disk_free_bytes": str(metrics.get("disk_free_bytes", 0)),
         "uptime_seconds": str(metrics.get("uptime_seconds", 0)),
+        "task_memory_limit_mb": str(metrics.get("task_memory_limit_mb", 0)),
+        "task_cpu_time_limit_sec": str(metrics.get("task_cpu_time_limit_sec", 0)),
         "timestamp": timestamp.isoformat(),
     }
     if metrics.get("spider_stats") is not None:

@@ -79,6 +79,10 @@ class DirectLeaseMetrics(BaseModel):
     cpu_cores: ProtoCount | None = None
     uptime_seconds: ProtoCount | None = None
     queued_tasks: ProtoCount | None = None
+    # 20-21 号字段：Worker 上报的**生效**单任务限额。0 是合法值（没有限额在生效），
+    # 所以不设 ge=1 —— 把 0 判非法会让整个心跳 422，重演上面那条重启环。
+    task_memory_limit_mb: ProtoCount | None = None
+    task_cpu_time_limit_sec: ProtoCount | None = None
 
 
 class DirectLeaseRequest(BaseModel):

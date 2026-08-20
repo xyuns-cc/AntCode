@@ -18,6 +18,8 @@ EXPECTED_SUCCESS_RATE = 87.5
 EXPECTED_MEMORY_BYTES = 1_048_576
 EXPECTED_QUEUED_TASKS = 6
 EXPECTED_CPU_CORES = 8
+EXPECTED_TASK_MEMORY_LIMIT_MB = 537
+EXPECTED_TASK_CPU_LIMIT_SEC = 480
 
 
 def _heartbeat() -> Heartbeat:
@@ -56,6 +58,8 @@ def _heartbeat() -> Heartbeat:
             memory_used_bytes=EXPECTED_MEMORY_BYTES // 2,
             disk_total_bytes=EXPECTED_MEMORY_BYTES * 10,
             uptime_seconds=30,
+            task_memory_limit_mb=EXPECTED_TASK_MEMORY_LIMIT_MB,
+            task_cpu_time_limit_sec=EXPECTED_TASK_CPU_LIMIT_SEC,
             spider_stats=spider,
         ),
         os_info=OSInfo(),
@@ -76,6 +80,20 @@ def test_metrics_proto_includes_all_worker_and_spider_fields() -> None:
     assert dict(metrics.spider_stats.status_codes) == {200: 7, 500: 1}
     assert metrics.spider_stats.domain_stats[0].domain == "example.com"
     assert metrics.spider_stats.domain_stats[0].success_rate == EXPECTED_SUCCESS_RATE
+    # 生效限额是 Gateway 侧唯一的来源；漏在这一步的话下游每一环都"成功"但值没了。
+    assert metrics.task_memory_limit_mb == EXPECTED_TASK_MEMORY_LIMIT_MB
+    assert metrics.task_cpu_time_limit_sec == EXPECTED_TASK_CPU_LIMIT_SEC
+
+
+def test_metrics_dict_carries_effective_limits_for_both_transports() -> None:
+    """``heartbeat_metrics_dict`` 是 Direct 与 Gateway 共用的编码点。
+
+    它是显式键表：漏了就是两条传输一起静默丢字段，且没有任何一处会报错。
+    """
+    values = heartbeat_metrics_dict(_heartbeat())
+
+    assert values["task_memory_limit_mb"] == EXPECTED_TASK_MEMORY_LIMIT_MB
+    assert values["task_cpu_time_limit_sec"] == EXPECTED_TASK_CPU_LIMIT_SEC
 
 
 def test_heartbeat_encoder_uses_complete_metrics_contract() -> None:

@@ -33,14 +33,13 @@ from antcode_worker.heartbeat.lease_timing import (
     adopt_server_window,
     reconnect_delay_seconds,
 )
+from antcode_worker.heartbeat.metrics_assembly import collect_metrics
 from antcode_worker.heartbeat.renewal_supervision import classify_loop_termination, report_fatal_termination
-from antcode_worker.heartbeat.reporter_models import Heartbeat, Metrics, OSInfo, SpiderStats
+from antcode_worker.heartbeat.reporter_models import Heartbeat, Metrics, OSInfo
+from antcode_worker.heartbeat.reporter_models import SpiderStats as SpiderStats
 from antcode_worker.heartbeat.reporter_protocols import MetricsCollectorProtocol as MetricsCollectorProtocol
 from antcode_worker.heartbeat.reporter_protocols import TransportProtocol as TransportProtocol
 from antcode_worker.transport.generation import raise_if_generation_lost
-
-MIB_IN_BYTES = 1024 * 1024
-GIB_IN_BYTES = 1024 * MIB_IN_BYTES
 
 
 class HeartbeatState(StrEnum):
@@ -440,51 +439,7 @@ class HeartbeatReporter:
 
     async def _get_metrics(self) -> Metrics:
         """获取系统指标"""
-        if not self._metrics_collector:
-            return Metrics(max_concurrent_tasks=self._max_concurrent_tasks)
-        collected = await self._metrics_collector.collect(use_cache=False)
-        worker = collected.worker
-        return Metrics(
-            cpu=self._bounded_percent(collected.cpu.percent),
-            memory=self._bounded_percent(collected.memory.percent),
-            disk=self._bounded_percent(collected.disk.percent),
-            running_tasks=worker.running_slots,
-            max_concurrent_tasks=worker.max_slots or self._max_concurrent_tasks,
-            task_count=worker.total_tasks_executed,
-            project_count=worker.project_count,
-            env_count=worker.env_count,
-            queued_tasks=worker.queue_depth,
-            cpu_cores=collected.cpu.count,
-            memory_total_bytes=int(collected.memory.total_mb * MIB_IN_BYTES),
-            memory_used_bytes=int(collected.memory.used_mb * MIB_IN_BYTES),
-            memory_available_bytes=int(collected.memory.available_mb * MIB_IN_BYTES),
-            disk_total_bytes=int(collected.disk.total_gb * GIB_IN_BYTES),
-            disk_used_bytes=int(collected.disk.used_gb * GIB_IN_BYTES),
-            disk_free_bytes=int(collected.disk.free_gb * GIB_IN_BYTES),
-            uptime_seconds=worker.uptime_seconds,
-            spider_stats=self._get_spider_stats(),
-        )
-
-    def _get_spider_stats(self) -> SpiderStats | None:
-        if not self._metrics_collector:
-            return None
-        stats = self._metrics_collector.get_spider_stats()
-        if not stats:
-            return None
-        return SpiderStats(
-            request_count=stats.get("request_count", 0),
-            response_count=stats.get("response_count", 0),
-            item_scraped_count=stats.get("item_scraped_count", 0),
-            error_count=stats.get("error_count", 0),
-            avg_latency_ms=stats.get("avg_latency_ms", 0.0),
-            requests_per_minute=stats.get("requests_per_minute", 0.0),
-            status_codes=stats.get("status_codes", {}),
-            domain_stats=stats.get("domain_stats", []),
-        )
-
-    @staticmethod
-    def _bounded_percent(value: float) -> float:
-        return round(max(0.0, min(100.0, value)), 1)
+        return await collect_metrics(self._metrics_collector, self._max_concurrent_tasks)
 
     def _get_os_info(self) -> OSInfo:
         """获取操作系统信息"""

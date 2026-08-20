@@ -148,6 +148,8 @@ async def test_lease_grant_is_authoritative_when_legacy_view_fails(monkeypatch) 
             "disk_used_bytes": 0,
             "disk_free_bytes": 0,
             "uptime_seconds": 0,
+            "task_memory_limit_mb": 0,
+            "task_cpu_time_limit_sec": 0,
             "spider_stats": {
                 "request_count": 5,
                 "response_count": 0,

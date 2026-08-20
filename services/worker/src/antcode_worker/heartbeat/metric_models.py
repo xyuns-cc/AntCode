@@ -42,6 +42,19 @@ class NetworkMetrics:
     bytes_recv_rate: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class EffectiveTaskLimits:
+    """单任务限额的**生效**值，由执行面持有。
+
+    与"下发值"必须分开：Worker 按自己的 cgroup 预算在启动与每次 config_update
+    时重算收敛，控制面推送的数字经常不等于真正在跑的数字。0 表示没有限额在生效，
+    上报侧不得把它改写成任何猜测值。
+    """
+
+    memory_limit_mb: int = 0
+    cpu_time_limit_sec: int = 0
+
+
 @dataclass
 class WorkerMetrics:
     running_slots: int = 0
@@ -53,6 +66,8 @@ class WorkerMetrics:
     last_heartbeat_ts: float = 0.0
     reconnect_count: int = 0
     uptime_seconds: int = 0
+    task_memory_limit_mb: int = 0
+    task_cpu_time_limit_sec: int = 0
 
 
 @dataclass
@@ -110,6 +125,7 @@ class SystemMetrics:
 __all__ = [
     "CPUMetrics",
     "DiskMetrics",
+    "EffectiveTaskLimits",
     "MemoryMetrics",
     "NetworkMetrics",
     "SystemMetrics",

@@ -37,13 +37,18 @@ WIRE_CONTRACT_CAPABILITY = "wire_contract"
 LEGACY_WIRE_CONTRACT_VERSION = 1
 
 #: 本次发布的契约版本：hash-tag ready key + 密文 ready 帧 + HMAC v2 + Lease ttl_ms
-#: (v2)，外加运行时控制失败回包的 ``data`` 必须携带结构化 ``error_code`` (v3)。
-#: v3 断裂的形态与上面同类：v2 Worker 失败时回 ``data=null``，控制面按缺码
-#: fail-closed，任何一次运行时管理失败都会退化成一句"回包损坏"，而不是真实原因。
-WORKER_WIRE_CONTRACT_VERSION = 3
+#: (v2)，外加运行时控制失败回包的 ``data`` 必须携带结构化 ``error_code`` (v3)，
+#: 再加心跳 ``Metrics`` 新增生效单任务限额 20/21 号字段 (v4)。
+#:
+#: v4 必须单独占一个版本号，不能并进尚未发布的 v3：断裂方向是**新 Worker → 旧控制面**。
+#: 新 Worker 的 Direct 心跳会带上这两个键，而旧控制面的 ``DirectLeaseMetrics`` 是
+#: ``extra="forbid"`` —— 每一次续租被判 422 → 租约永不续期 → 失租回收 → 容器无限
+#: 重启。并进 v3 就要赌"v3 从未部署到任何地方"，而测试机此刻就跑着 cbe3dd2 构建的
+#: v3 镜像，这个赌注当场就是输的。抬版本号把它变成 Lease 拒发这种一眼可见的失败。
+WORKER_WIRE_CONTRACT_VERSION = 4
 
 #: 控制面接受的最低 Worker 契约版本。
-MIN_SUPPORTED_WORKER_WIRE_CONTRACT = 3
+MIN_SUPPORTED_WORKER_WIRE_CONTRACT = 4
 
 
 class WorkerWireContractError(RuntimeError):
