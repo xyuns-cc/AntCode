@@ -3,9 +3,17 @@ import { taskService } from '@/services/tasks'
 import { dashboardService } from '@/services/dashboard'
 import type { MonitorTask, MonitorTaskCounts, WorkerDisplayData } from '../types'
 
-// 后端 TaskResponse（packages/antcode_core/.../domain/schemas/task.py）没有
-// last_run_duration 字段，Pydantic 也不会输出未声明字段。原先读它只会恒定得到
-// undefined，"运行时长"列因此永远是 '-'，看起来像"数据还没到"而不是"没有这个数据"。
+// 这里只映射后端 TaskResponse（packages/antcode_core/.../domain/schemas/task.py）真有的
+// 字段。该 schema 不提供任何任务级运行数据，历次想读的都恒定落空：
+//
+// - last_run_duration：schema 里没有此字段，Pydantic 也不会输出未声明字段，读它恒得
+//   undefined，"运行时长"列因此永远是 '-'（0706582 已摘）。
+// - cpu / memory：连读都没读过，自 mock 版改真接口起就直接写死 '-'。任务级用量只在 Worker
+//   进程内采样（executor/resource_sampler.py）当超限判据，engine.py::_task_result 组装上报
+//   时并不带出来；task_executions 的同名列也因恒 NULL 被摘（e7b7249）。要"补"等于新造一条
+//   Worker→Master→API 的上报链路，那是做功能，不是填值。
+//
+// 共同的教训：留着永远取不到值的列，只会把"产品没有这个数据"伪装成"数据还没加载到"。
 interface TaskResponseItem {
   id: string
   name: string
@@ -25,8 +33,6 @@ const mapTask = (task: TaskResponseItem, workers: WorkerDisplayData[]): MonitorT
         : task.status === 'success'
           ? 'success'
           : 'pending',
-  cpu: '-',
-  memory: '-',
 })
 
 const EMPTY_COUNTS: MonitorTaskCounts = { success: 0, failed: 0, running: 0, pending: 0 }

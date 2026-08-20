@@ -15,23 +15,19 @@ interface TasksSectionProps {
   diskBarOptions: ChartOptions<'bar'>
 }
 
+// 摘掉任务级 CPU/内存两列后，剩下四列（含 ResponsiveTable 注入的 70px 序号列）实际只占
+// 600px，沿用默认的 800px 阈值会让列被无谓拉伸、窄屏还平白横向滚动。
+const TABLE_MIN_WIDTH = 600
+
 const columns: ColumnsType<MonitorTask> = [
   {
-    title: '任务名称', dataIndex: 'name', key: 'name', width: 150, ellipsis: { showTitle: false },
+    title: '任务名称', dataIndex: 'name', key: 'name', width: 220, ellipsis: { showTitle: false },
     render: (name: string) => <Tooltip title={name} placement="topLeft"><span>{name}</span></Tooltip>,
   },
-  { title: '执行 Worker', dataIndex: 'worker', key: 'worker', width: 100 },
+  { title: '执行 Worker', dataIndex: 'worker', key: 'worker', width: 140 },
   {
-    title: '状态', dataIndex: 'status', key: 'status', width: 80,
+    title: '状态', dataIndex: 'status', key: 'status', width: 100,
     render: (status: string) => <Tag color={getStatusColor(status)}>{getStatusText(status)}</Tag>,
-  },
-  {
-    title: 'CPU', dataIndex: 'cpu', key: 'cpu', width: 60,
-    render: (cpu: number | string) => typeof cpu === 'number' ? `${cpu}%` : cpu,
-  },
-  {
-    title: '内存', dataIndex: 'memory', key: 'memory', width: 60,
-    render: (memory: number | string) => typeof memory === 'number' ? `${memory}%` : memory,
   },
   { title: '操作', key: 'action', width: 70, fixed: 'right', render: () => <Button type="link" size="small">详情</Button> },
 ]
@@ -42,7 +38,7 @@ const TaskTable = ({ tasks }: { tasks: MonitorTask[] }) => (
     title={<span style={{ fontSize: 14 }}><BugOutlined /> 关键任务状态</span>}
     extra={<Button size="small" icon={<SyncOutlined />} style={{ fontSize: 12 }}>筛选</Button>}
   >
-    <ResponsiveTable dataSource={tasks} rowKey="id" columns={columns} pagination={{ pageSize: 5, size: 'small' }} size="small" />
+    <ResponsiveTable dataSource={tasks} rowKey="id" columns={columns} minWidth={TABLE_MIN_WIDTH} pagination={{ pageSize: 5, size: 'small' }} size="small" />
   </Card>
 )
 

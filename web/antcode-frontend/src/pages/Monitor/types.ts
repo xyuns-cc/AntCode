@@ -39,8 +39,6 @@ export interface MonitorTask {
   name: string
   worker: string
   status: 'running' | 'success' | 'failed' | 'pending'
-  cpu: number | string
-  memory: number | string
 }
 
 export interface MonitorTaskCounts {
