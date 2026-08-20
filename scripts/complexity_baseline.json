@@ -1307,13 +1307,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/base.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 565
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/base.py",
-      "function": "login",
-      "rule": "C901",
-      "value": 12
+      "value": 561
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
@@ -1487,7 +1481,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 498
+      "value": 413
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/users.py",
