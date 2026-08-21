@@ -102,9 +102,10 @@ def test_persistence_allowlist_renames_to_camel_case() -> None:
 
 
 def test_readback_schema_accepts_persisted_metrics() -> None:
-    """读回 schema 是 extra="forbid"：缺字段会让**整个** metrics 塌成默认值。
+    """读回 schema 是 extra="forbid"：缺字段会让**整份** metrics 校验失败。
 
-    塌陷是静默的（workers.py 的 except 分支），所以必须显式校验一次。
+    失败现在会冒泡（见 tests/unit/web_api/test_worker_response_readback_contract.py），
+    但"冒泡"意味着资源页直接 500，所以这两项仍要逐个钉住。
     """
     mapping = _heartbeat_mapping(_heartbeat())
     persisted = build_redis_heartbeat_update(mapping, datetime.now()).metrics

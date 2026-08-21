@@ -29,6 +29,12 @@ class WorkerCapabilities(BaseModel):
     # dispatcher.select_best_worker 按 capability 过滤。schema 之前用
     # extra=forbid 会拒绝这个字段导致 direct 注册 400 Bad Request。
     task_types: list[str] = Field(default_factory=list, description="worker 已装载的 plugin/task type 列表")
+    # 下面两项同样出自 Worker 的能力快照（services/worker/.../app/capabilities.py），
+    # 且控制面自己就在用：workers_query 按 playwright.enabled 过滤渲染节点，
+    # wire_contract 决定 Lease 发不发。本模型是 extra="forbid"，漏掉任意一项都不是
+    # "少显示一个字段"，而是整份 capabilities 校验失败。
+    playwright: dict[str, Any] = Field(default_factory=dict, description="playwright 渲染能力")
+    wire_contract: int | None = Field(default=None, description="Worker 声明的线协议契约版本")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -53,11 +59,15 @@ class WorkerMetrics(BaseModel):
     diskTotal: int = Field(default=0, ge=0, description="总磁盘 (bytes)")
     diskUsed: int = Field(default=0, ge=0, description="已用磁盘 (bytes)")
     diskFree: int = Field(default=0, ge=0, description="可用磁盘 (bytes)")
-    # 生效单任务限额；0 = 没有限额在生效，故 ge=0 而不是 ge=1。本模型是
-    # extra="forbid"，缺字段会让 workers.py 的 except 分支把**整个** metrics
-    # 静默换成默认值，而不是只丢这两项。
+    # 生效单任务限额；0 = 没有限额在生效，故 ge=0 而不是 ge=1。
     taskMemoryLimitMb: int = Field(default=0, ge=0, description="生效单任务内存限额 (MB)")
     taskCpuTimeLimitSec: int = Field(default=0, ge=0, description="生效单任务 CPU 时间限额 (秒)")
+    # 心跳把爬虫统计**并进** metrics 落库（worker_heartbeat_persistence 的
+    # build_worker_heartbeat_update / _redis_metrics），spider_stats_service 与
+    # worker_stats_service 也都按 metrics["spider_stats"] 读，这就是持久化契约。
+    # 读回 schema 必须认识它。原样透传 dict 而不套一层子模型：这里是展示面，口径
+    # 归上述两个服务；再加一个 forbid 子模型只是把同一个陷阱下移一层。
+    spider_stats: dict[str, Any] = Field(default_factory=dict, description="心跳携带的爬虫统计摘要")
 
     model_config = ConfigDict(extra="forbid")
 

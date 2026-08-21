@@ -250,20 +250,13 @@ async def _resolve_dispatch_worker(
 
 def _worker_to_response(worker) -> WorkerResponse:
     """将 Worker 模型转换为响应对象"""
-    metrics = WorkerMetrics()
-    if worker.metrics:
-        try:
-            metrics = WorkerMetrics(**worker.metrics)
-        except Exception:
-            metrics = WorkerMetrics()
-
-    # 解析 Worker 能力
-    capabilities = WorkerCapabilities()
-    if worker.capabilities:
-        try:
-            capabilities = WorkerCapabilities(**worker.capabilities)
-        except Exception:
-            capabilities = WorkerCapabilities()
+    # 这两列由 Worker 侧写、由控制面 schema 读回，两端各自发布，键集迟早会错配。
+    # 吞掉 ValidationError 换默认值不是"少显示几个字段"：整份 metrics 会塌成
+    # cpu=0 / maxConcurrentTasks=5，与一台真正空闲的 Worker 逐字节相同，页面、日志、
+    # 告警都分辨不出来。真机上三台 Worker 就这样显示了整整一个版本的 CPU 0%。
+    # 让 ValidationError 原样冒泡，错配当场可见并带上缺的键名。
+    metrics = WorkerMetrics(**worker.metrics) if worker.metrics else WorkerMetrics()
+    capabilities = WorkerCapabilities(**worker.capabilities) if worker.capabilities else WorkerCapabilities()
 
     # 处理时间字段，转换为 ISO 格式字符串
     last_heartbeat = ""
