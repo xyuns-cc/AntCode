@@ -102,7 +102,7 @@ async def probe_memory() -> MemoryMetrics:
     """总额/已用/可用/占比四个数一起取自同一层（容器 cgroup 优先）。
 
     这里没有 ``except``：内存额度不可知时报一组零，与报宿主值一样是在给下游一个
-    没有依据的数——资源页、调度门禁和 Worker 自己的过载保护全都吃这四个值。让
+    没有依据的数——资源页、调度门禁与 /metrics 全都吃这四个值。让
     ``ResourceBudgetError`` 一路冒到心跳上去，是唯一能被看见的失败方式。
     """
     metrics = MemoryMetrics()

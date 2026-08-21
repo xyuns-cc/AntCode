@@ -1,7 +1,7 @@
 """Worker 上报的核数与内存必须是**容器额度**，不是宿主 /proc 视图。
 
-资源页(GET /workers/{id}/resources)、Monitor 详情抽屉、调度器可用性门禁与 Worker
-自己的过载保护读的都是这几个上报值。报宿主数字会让容量规划高估一个数量级——真机
+资源页(GET /workers/{id}/resources)、Monitor 详情抽屉、调度器可用性门禁与 Worker 的
+/metrics 端点读的都是这几个上报值。报宿主数字会让容量规划高估一个数量级——真机
 实测同一台 Worker：宿主 8 核 / 31.34GiB，容器额度 2 核 / 3GiB。
 
 **这些 stub 能证明什么、不能证明什么**：monkeypatch 把 cgroup 路径指到 tmp_path，
