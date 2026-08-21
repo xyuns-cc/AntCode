@@ -161,7 +161,9 @@ class ProcessInfo:
     exec_plan: ExecPlan
     cancelled: bool = False
 
-    # 资源使用
+    # 资源用量：采样写入，只供 _describe_limit_breach / _limit_breach_result 判越线。
+    # proto TaskStatus 没有对应字段，数字只以 ExitReason.CPU_LIMIT/OOM 与错误文案离开
+    # Worker——别再往 ExecResult 上复制一份，那份拷贝没有消费者。
     cpu_time_seconds: float = 0
     memory_peak_mb: float = 0
 
@@ -387,8 +389,6 @@ class ProcessExecutor(BaseExecutor):
             finished_at=datetime.now(),
             stdout_lines=stdout_lines,
             stderr_lines=stderr_lines,
-            cpu_time_seconds=process_info.cpu_time_seconds,
-            memory_peak_mb=process_info.memory_peak_mb,
         )
         self._update_stats(status)
         return result

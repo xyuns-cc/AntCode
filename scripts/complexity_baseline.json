@@ -1499,7 +1499,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 603
+      "value": 596
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -1757,7 +1757,7 @@
       "path": "services/worker/src/antcode_worker/domain/models.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 328
+      "value": 309
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
@@ -2225,19 +2225,13 @@
       "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 560
+      "value": 502
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
       "function": "HeartbeatCodec.encode_heartbeat",
       "rule": "POSITIONAL_ARGS",
       "value": 9
-    },
-    {
-      "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
-      "function": "JsonCodec._dict_to_object",
-      "rule": "PLR0911",
-      "value": 7
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",

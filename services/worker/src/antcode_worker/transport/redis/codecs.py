@@ -17,14 +17,11 @@ from typing import Any, ClassVar, TypeVar, cast
 
 from antcode_worker.domain.enums import (
     ArtifactType,
-    ExitReason,
     LogStream,
-    RunStatus,
     TaskType,
 )
 from antcode_worker.domain.models import (
     ArtifactRef,
-    ExecResult,
     LogEntry,
     RunContext,
     RuntimeSpec,
@@ -249,8 +246,6 @@ class JsonCodec(MessageCodec):
             return cast(T, self._decode_run_context(data))
         elif target_type == TaskPayload:
             return cast(T, self._decode_task_payload(data))
-        elif target_type == ExecResult:
-            return cast(T, self._decode_exec_result(data))
         elif target_type == LogEntry:
             return cast(T, self._decode_log_entry(data))
         elif target_type == ArtifactRef:
@@ -328,42 +323,6 @@ class JsonCodec(MessageCodec):
             source_subdir=data.get("source_subdir", ""),
         )
 
-    def _decode_exec_result(self, data: dict[str, Any]) -> ExecResult:
-        """解码 ExecResult"""
-        status = RunStatus(data.get("status", "pending"))
-        exit_reason = ExitReason(data.get("exit_reason", "normal"))
-
-        # 处理时间字段
-        started_at = None
-        if data.get("started_at"):
-            started_at = datetime.fromisoformat(data["started_at"])
-
-        finished_at = None
-        if data.get("finished_at"):
-            finished_at = datetime.fromisoformat(data["finished_at"])
-
-        # 处理 artifacts
-        artifacts = []
-        for artifact_data in data.get("artifacts", []):
-            artifacts.append(self._decode_artifact_ref(artifact_data))
-
-        return ExecResult(
-            run_id=data.get("run_id", ""),
-            status=status,
-            exit_code=data.get("exit_code"),
-            exit_reason=exit_reason,
-            error_message=data.get("error_message"),
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=data.get("duration_ms", 0),
-            cpu_time_seconds=data.get("cpu_time_seconds", 0),
-            memory_peak_mb=data.get("memory_peak_mb", 0),
-            artifacts=artifacts,
-            stdout_lines=data.get("stdout_lines", 0),
-            stderr_lines=data.get("stderr_lines", 0),
-            data=data.get("data", {}),
-        )
-
     def _decode_log_entry(self, data: dict[str, Any]) -> LogEntry:
         """解码 LogEntry"""
         stream = LogStream(data.get("stream", "stdout"))
@@ -430,22 +389,6 @@ class LogMessageCodec(JsonCodec):
     def decode_log_batch(self, batch: list[dict[str, str]]) -> list[LogEntry]:
         """解码日志批次"""
         return [self.decode_log_entry(data) for data in batch]
-
-
-class ResultMessageCodec(JsonCodec):
-    """
-    结果消息编解码器
-
-    专门用于执行结果消息的编解码。
-    """
-
-    def encode_result(self, result: ExecResult) -> dict[str, str]:
-        """编码执行结果"""
-        return self.encode(result)
-
-    def decode_result(self, data: dict[str, str]) -> ExecResult:
-        """解码执行结果"""
-        return self.decode(data, ExecResult)
 
 
 class HeartbeatCodec(JsonCodec):
@@ -555,6 +498,5 @@ class ControlMessageCodec(JsonCodec):
 # 默认编解码器实例
 default_codec = JsonCodec()
 log_codec = LogMessageCodec()
-result_codec = ResultMessageCodec()
 heartbeat_codec = HeartbeatCodec()
 control_codec = ControlMessageCodec()

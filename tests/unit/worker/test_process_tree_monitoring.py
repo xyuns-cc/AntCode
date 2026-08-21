@@ -14,12 +14,13 @@ import contextlib
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
+from pathlib import Path
 
 import psutil
 import pytest
-from antcode_worker.domain.models import ExecPlan
+from antcode_worker.domain.models import ExecPlan, ExecResult
 from antcode_worker.executor import process as process_mod
 from antcode_worker.executor import process_limits
 from antcode_worker.executor.resource_sampler import ProcessTreeUsage, sample_process_tree
@@ -27,6 +28,10 @@ from antcode_worker.executor.resource_sampler import ProcessTreeUsage, sample_pr
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
 
 _BYTES_PER_MIB = 1024 * 1024
+
+_REDIS_CODECS_PATH = (
+    Path(__file__).resolve().parents[3] / "services/worker/src/antcode_worker/transport/redis/codecs.py"
+)
 
 # 进程树用例：孙进程吃掉的内存必须显著高于解释器自身开销，才能区分"只看根进程"
 _BALLOON_MIB = 128
@@ -159,6 +164,26 @@ def test_limit_breach_uses_whole_tree_usage() -> None:
 
     assert process_mod._describe_limit_breach(tree_usage, plan) is not None
     assert process_mod._describe_limit_breach(root_only_usage, plan) is None
+
+
+def test_sampled_usage_stays_inside_the_worker() -> None:
+    """采样值只在 Worker 内部当超限判据，不得再有一份到不了消费者的下游拷贝。
+
+    ``ExecResult`` 上曾挂着 ``cpu_time_seconds`` / ``memory_peak_mb``，由
+    ``_collect_result`` 从 ``ProcessInfo`` 抄一份；两条上报链路（Direct/Gateway）
+    都走 proto ``TaskStatus``，proto 里没有这两个字段，``engine._task_result``
+    也不会把它们塞进 ``data``，所以那份拷贝写完就没人读。落库侧同型的
+    ``task_executions.cpu_usage / memory_usage`` 已由 20260820 迁移删除。
+    这里把"活的在 ProcessInfo 上、ExecResult 上没有"钉住，避免又长回来。
+    """
+    live = {field.name for field in fields(process_mod.ProcessInfo)}
+    exposed = {field.name for field in fields(ExecResult)}
+
+    assert {"cpu_time_seconds", "memory_peak_mb"} <= live
+    assert not ({"cpu_time_seconds", "memory_peak_mb"} & exposed)
+    # ExecResult 是进程内值对象，没有序列化形态可供任何编解码器消费
+    assert not hasattr(ExecResult, "to_dict")
+    assert "ExecResult" not in _REDIS_CODECS_PATH.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

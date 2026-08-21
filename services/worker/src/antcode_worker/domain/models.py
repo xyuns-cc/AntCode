@@ -186,6 +186,10 @@ class ExecResult:
     """
     执行结果
 
+    进程内值对象：executor 产出，engine._task_result 逐字段翻成 TaskResult 后
+    才出网。本类型自身没有序列化形态——Direct/Gateway 两条上报链路都走 proto
+    (``data_pb2.TaskStatus``)，任何 to_dict/JSON 编解码都不会有消费者。
+
     Requirements: 3.4
     """
 
@@ -202,10 +206,6 @@ class ExecResult:
     finished_at: datetime | None = None
     duration_ms: float = 0
 
-    # 资源使用
-    cpu_time_seconds: float = 0
-    memory_peak_mb: float = 0
-
     # 产物
     artifacts: list["ArtifactRef"] = field(default_factory=list)
 
@@ -215,25 +215,6 @@ class ExecResult:
 
     # 额外数据
     data: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典"""
-        return {
-            "run_id": self.run_id,
-            "status": self.status.value,
-            "exit_code": self.exit_code,
-            "exit_reason": self.exit_reason.value,
-            "error_message": self.error_message,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
-            "duration_ms": self.duration_ms,
-            "cpu_time_seconds": self.cpu_time_seconds,
-            "memory_peak_mb": self.memory_peak_mb,
-            "artifacts": [a.to_dict() for a in self.artifacts],
-            "stdout_lines": self.stdout_lines,
-            "stderr_lines": self.stderr_lines,
-            "data": self.data,
-        }
 
 
 @dataclass

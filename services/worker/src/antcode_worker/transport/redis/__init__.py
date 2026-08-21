@@ -19,13 +19,11 @@ from antcode_worker.transport.redis.codecs import (
     JsonCodec,
     LogMessageCodec,
     MessageCodec,
-    ResultMessageCodec,
     SchemaVersion,
     control_codec,
     default_codec,
     heartbeat_codec,
     log_codec,
-    result_codec,
 )
 from antcode_worker.transport.redis.keys import RedisKeyConfig, RedisKeys, default_keys
 from antcode_worker.transport.redis.reclaim import (
@@ -50,7 +48,6 @@ __all__ = [
     "MessageCodec",
     "JsonCodec",
     "LogMessageCodec",
-    "ResultMessageCodec",
     "HeartbeatCodec",
     "ControlMessageCodec",
     "SchemaVersion",
@@ -58,7 +55,6 @@ __all__ = [
     # Default codec instances
     "default_codec",
     "log_codec",
-    "result_codec",
     "heartbeat_codec",
     "control_codec",
     # Reclaim
