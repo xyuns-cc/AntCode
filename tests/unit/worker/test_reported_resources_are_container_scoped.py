@@ -18,7 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from antcode_worker import resource_budget, resource_usage
+from antcode_worker import cpu_usage, resource_budget, resource_usage
+from antcode_worker.cpu_usage import ContainerCpuSampler
 from antcode_worker.heartbeat import metric_probes
 from antcode_worker.heartbeat.metrics_assembly import MIB_IN_BYTES, collect_metrics
 from antcode_worker.resource_budget import ResourceBudgetError
@@ -108,6 +109,12 @@ def _point_cpu_cgroup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, quota:
         _write(tmp_path / "cpu.max", quota) if quota is not None else absent,
     )
     monkeypatch.setattr(resource_budget, "CGROUP_V1_CPU_QUOTA", absent)
+    # 额度判成 cgroup 后使用率必须从同层读，所以用量文件要一起指过来。
+    monkeypatch.setattr(
+        cpu_usage,
+        "CGROUP_V2_CPU_STAT",
+        _write(tmp_path / "cpu.stat", "usage_usec 0\nnr_periods 0\n"),
+    )
     monkeypatch.setattr(metric_probes.psutil, "cpu_count", lambda: _HOST_CPU_COUNT)
 
 
@@ -119,7 +126,7 @@ async def test_reported_cpu_cores_is_container_quota_not_host_nproc(
     """核数报容器 CPU 配额；报 nproc 就是资源页高估的那个数。"""
     _point_cpu_cgroup(monkeypatch, tmp_path, quota=_CONTAINER_CPU_MAX)
 
-    metrics = await metric_probes.probe_cpu()
+    metrics = await metric_probes.probe_cpu(ContainerCpuSampler())
 
     assert metrics.count == _CONTAINER_CPU_CORES
     assert metrics.count != _HOST_CPU_COUNT, "读到宿主核数说明 cgroup 配额没被采信"
@@ -239,7 +246,7 @@ async def test_unparseable_cpu_quota_is_not_swallowed_by_the_probe(
     _point_cpu_cgroup(monkeypatch, tmp_path, quota="garbage")
 
     with pytest.raises(ResourceBudgetError, match="拒绝按宿主核数估算"):
-        await metric_probes.probe_cpu()
+        await metric_probes.probe_cpu(ContainerCpuSampler())
 
 
 @pytest.mark.asyncio
@@ -269,6 +276,6 @@ async def test_cpu_without_cgroup_quota_reports_host_cores(
     """对照组（非证伪项）：没有 CPU 配额时宿主核数就是正确答案。"""
     _point_cpu_cgroup(monkeypatch, tmp_path, quota=None)
 
-    metrics = await metric_probes.probe_cpu()
+    metrics = await metric_probes.probe_cpu(ContainerCpuSampler())
 
     assert metrics.count == _HOST_CPU_COUNT

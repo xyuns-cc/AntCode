@@ -152,7 +152,7 @@ def create_container(config: Any) -> Container:
     container.register("engine", engine)
 
     # 11. 创建可观测性服务器
-    observability_server = _create_observability_server(config, transport, engine)
+    observability_server = _create_observability_server(transport, engine, metrics_collector)
     container.register("observability_server", observability_server)
 
     container.mark_initialized()
@@ -680,12 +680,12 @@ def _create_artifact_manager(config: Any, transport: Any) -> Any:
     return ArtifactManager(artifact_store=store)
 
 
-def _create_observability_server(config: Any, transport: Any, engine: Any) -> Any:
-    """创建可观测性服务器"""
+def _create_observability_server(transport: Any, engine: Any, metrics_collector: Any) -> Any:
+    """创建可观测性服务器；``metrics_collector`` 就是心跳那一份，/metrics 与资源页必须同源。"""
     from antcode_worker.observability.health import HealthResult, HealthStatus
     from antcode_worker.observability.server import ObservabilityServer
 
-    server = ObservabilityServer()
+    server = ObservabilityServer(metrics_collector)
 
     def transport_check():
         if transport.is_connected:

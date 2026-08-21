@@ -19,7 +19,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from antcode_worker.observability.health import HealthChecker, HealthStatus
-from antcode_worker.observability.metrics import MetricsCollector
+from antcode_worker.observability.metrics import MetricsCollector, SystemMetricsSource
 
 
 class ObservabilityServer:
@@ -37,18 +37,19 @@ class ObservabilityServer:
 
     def __init__(
         self,
+        system_metrics: SystemMetricsSource,
         health_checker: HealthChecker | None = None,
-        metrics_collector: MetricsCollector | None = None,
     ):
         """
         初始化可观测性服务器
 
         Args:
+            system_metrics: 心跳采集器（必填）。/metrics 的三个百分比只能来自它，
+                留一个默认值就等于允许 /metrics 与资源页各报各的
             health_checker: 健康检查器实例
-            metrics_collector: 指标收集器实例
         """
+        self._metrics_collector = MetricsCollector(system_metrics)
         self._health_checker = health_checker or HealthChecker()
-        self._metrics_collector = metrics_collector or MetricsCollector()
         self._runner: Any | None = None
         self._site: Any | None = None
         self._host: str = "0.0.0.0"
@@ -146,7 +147,7 @@ class ObservabilityServer:
         if not HAS_AIOHTTP:
             return None
 
-        prometheus_text = self._metrics_collector.to_prometheus()
+        prometheus_text = await self._metrics_collector.to_prometheus()
         return web.Response(
             text=prometheus_text,
             content_type="text/plain",

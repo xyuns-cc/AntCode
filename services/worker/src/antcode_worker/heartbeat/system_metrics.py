@@ -1,7 +1,7 @@
 """Collect this Worker's own resource metrics and its execution metrics.
 
-单项指标"怎么读出来"在 ``metric_probes``：CPU 核数与内存四件套报的是**容器额度**
-而非宿主 /proc 视图。本模块只负责编排、缓存与 Worker 自身的执行指标。
+单项指标"怎么读出来"在 ``metric_probes``：CPU（核数与使用率）和内存四件套报的都是
+**容器额度**而非宿主 /proc 视图。本模块只负责编排、缓存与 Worker 自身的执行指标。
 """
 
 import asyncio
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from antcode_worker.cpu_usage import ContainerCpuSampler
 from antcode_worker.heartbeat.metric_models import (
     EffectiveTaskLimits,
     SystemMetrics,
@@ -41,8 +42,9 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         self._disk_path = disk_path
         self._max_slots = max_slots
 
-        # 网络速率要跨采样求差，状态由探针自己持有
+        # 网络速率与容器 CPU 使用率都要跨采样求差，状态由探针自己持有
         self._network_probe = NetworkRateProbe()
+        self._cpu_sampler = ContainerCpuSampler()
 
         # Worker 指标
         self._total_tasks_executed = 0
@@ -122,7 +124,7 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         metrics = SystemMetrics(timestamp=now)
 
         # 采集各项指标
-        metrics.cpu = await probe_cpu()
+        metrics.cpu = await probe_cpu(self._cpu_sampler)
         metrics.memory = await probe_memory()
         metrics.disk = await probe_disk(self._disk_path)
         metrics.network = await self._network_probe.probe()

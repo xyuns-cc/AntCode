@@ -77,9 +77,17 @@ class MemoryBudget:
 
 @dataclass(frozen=True)
 class CpuBudget:
-    """本 Worker 进程可用的 CPU 核数（cgroup 配额向下取整，至少 1）。"""
+    """本 Worker 进程可用的 CPU 配额，两种用法一个来源。
+
+    ``cores`` 向下取整、至少 1，用来给并发与运行时定尺寸——半个核开不出半条并发。
+    ``quota_cores`` 保留 ``cpu.max`` 的原始小数，只用作 CPU 使用率的分母：
+    ``--cpus=1.5`` 的容器拿取整后的 1 核当分母，会把 150% 的过载报成 100%，正好把
+    调度门禁需要看见的那一段磨平。两个字段必须由同一次配额解析产出，各算各的就是
+    在制造第二个真源。
+    """
 
     cores: int
+    quota_cores: float
     source: BudgetSource
     origin: str
 
@@ -170,8 +178,14 @@ def resolve_cpu_budget(host_cpu_count: int) -> CpuBudget:
     cores, source, origin = _cgroup_cpu_cores()
     if cores is None or cores >= host_cpu_count:
         host_origin = origin if source is BudgetSource.HOST else f"{origin} 未设限"
-        return CpuBudget(cores=max(1, host_cpu_count), source=BudgetSource.HOST, origin=host_origin)
-    return CpuBudget(cores=max(1, int(cores)), source=source, origin=origin)
+        host_cores = max(1, host_cpu_count)
+        return CpuBudget(
+            cores=host_cores,
+            quota_cores=float(host_cores),
+            source=BudgetSource.HOST,
+            origin=host_origin,
+        )
+    return CpuBudget(cores=max(1, int(cores)), quota_cores=cores, source=source, origin=origin)
 
 
 def validate_capacity_fits_budget(

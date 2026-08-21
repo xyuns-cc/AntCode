@@ -2,11 +2,15 @@
 自身的执行指标，"一个数怎么读出来"是另一件事，而且只有这部分需要区分宿主视图
 与容器额度。
 
-CPU 核数与内存总额报的是**本容器的额度**，不是宿主 /proc 的数字。资源页、
-Monitor 详情抽屉与调度器可用性门禁读的都是这里报上去的值：报宿主数字会让容量
-规划高估一个数量级（真机实测同一台 Worker：宿主 8 核/31.34GiB，容器额度 2 核/3GiB），
-也会让"这台还能不能再接一个任务"用宿主的忙闲程度作答。来源与 fail-closed 语义
-统一在 ``resource_budget`` / ``resource_usage``，本模块只负责把宿主快照喂给它们。
+CPU（核数与使用率）和内存（四件套）报的都是**本容器的额度**，不是宿主 /proc 的
+数字。资源页、Monitor 详情抽屉与调度器可用性门禁读的都是这里报上去的值：报宿主
+数字会让容量规划高估一个数量级（真机实测同一台 Worker：宿主 8 核/31.34GiB，容器
+额度 2 核/3GiB），也会让"这台还能不能再接一个任务"用整机的忙闲程度作答。来源与
+fail-closed 语义统一在 ``resource_budget`` / ``resource_usage`` / ``cpu_usage``，
+本模块只负责把宿主快照喂给它们。
+
+只有负载均值（load average）仍是宿主视图：它是内核对整机运行队列的定义，cgroup
+没有对应物，换算不出来。它不参与任何门禁，只在详情里展示。
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import time
 
 from loguru import logger
 
+from antcode_worker.cpu_usage import ContainerCpuSampler
 from antcode_worker.heartbeat.metric_models import (
     CPUMetrics,
     DiskMetrics,
@@ -41,27 +46,36 @@ _BYTES_PER_MIB = 1024 * 1024
 _BYTES_PER_GIB = 1024 * _BYTES_PER_MIB
 
 
-async def probe_cpu() -> CPUMetrics:
-    """使用率仍是宿主视图，核数必须是容器配额。
+async def probe_cpu(sampler: ContainerCpuSampler) -> CPUMetrics:
+    """核数与使用率都必须是容器配额口径。
 
     ``count`` 走 ``resolve_cpu_budget`` 而不是 ``psutil.cpu_count()``：后者在容器里
     读到的是宿主 nproc（真机 8），与容器 ``cpus=2`` 无关。配额解析失败会抛
     ``ResourceBudgetError``，故意放在 try 之外——把"核数不可知"吞成 0 或悄悄退回
-    宿主值，正是本次要消灭的那类静默失败。
+    宿主值，正是要消灭的那类静默失败。
 
-    ``percent`` 保持宿主口径：它是利用率而非容量，不参与容量规划的乘法，且容器
-    自己的 CPU 用量需要跨采样求差值，与本次修复不是同一件事。
+    ``percent`` 同样按额度所在的那一层重算。它不是"只用来显示"的利用率：
+    ``is_worker_available`` 拿它当硬门禁、``calculate_load_score`` 给它 0.30 权重，
+    是五项判据里最重的一项。宿主口径下，一台打满自己配额并已被内核限流的容器只显示
+    整机的三成忙闲（真机 99.6% vs 36.0%），门禁根本看不见——与内存那个盲区同一形状。
+    psutil 的整机使用率只在没有 cgroup 配额（裸机）时才是正确答案，由
+    ``ContainerCpuSampler`` 按 ``budget.source`` 二选一，调用方无从分叉。
+
+    ``sampler`` 由采集器持有：cgroup 的 CPU 时间是累计值，窗口必须跨两次心跳。
     """
     metrics = CPUMetrics()
     if not HAS_PSUTIL:
         return metrics
 
-    metrics.count = resolve_cpu_budget(psutil.cpu_count() or 1).cores
+    budget = resolve_cpu_budget(psutil.cpu_count() or 1)
+    metrics.count = budget.cores
     try:
         metrics.percent = await asyncio.to_thread(psutil.cpu_percent, interval=None)
         _fill_load_average(metrics)
     except Exception as e:  # noqa: BLE001 - psutil 抖动不该拖垮整份心跳
-        logger.debug(f"采集 CPU 使用率失败: {e}")
+        logger.debug(f"采集宿主 CPU 视图失败: {e}")
+    # cgroup 分支会丢掉上面那个宿主值；采样失败要冒出去，所以不在 try 里。
+    metrics.percent = sampler.sample(budget, metrics.percent).percent
     return metrics
 
 

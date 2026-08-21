@@ -30,7 +30,8 @@ def _server(*, queue_size: int, running: bool = True, connected: bool = True):
         }
     )
     transport = SimpleNamespace(is_connected=connected, is_running=True)
-    server = _create_observability_server(None, transport, engine)
+    # 指标采集器只服务 /metrics，本文件只测健康探针，给一个不会被调用的占位。
+    server = _create_observability_server(transport, engine, SimpleNamespace())
     # 启动完成后 lifecycle 会置就绪；不置的话 readiness 直接短路成 "not ready"，
     # 就测不到下面的各项检查了。
     server.set_ready(True)

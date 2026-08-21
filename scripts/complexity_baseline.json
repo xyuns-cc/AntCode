@@ -2541,18 +2541,6 @@
     },
     {
       "path": "tests/integration/worker/test_observability_checkpoint.py",
-      "function": "TestMetricsCollector.test_counter_increment",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_observability_checkpoint.py",
-      "function": "TestMetricsCollector.test_gauge_set",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/integration/worker/test_observability_checkpoint.py",
       "function": "TestObservabilityServer.test_health_endpoint",
       "rule": "PLR2004",
       "value": 1

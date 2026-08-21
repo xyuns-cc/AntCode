@@ -32,7 +32,8 @@ def _server(*, queue_size: int = 0, engine_running: bool = True, connected: bool
         }
     )
     transport = SimpleNamespace(is_connected=connected, is_running=transport_up)
-    server = _create_observability_server(None, transport, engine)
+    # 指标采集器只服务 /metrics，本文件只测健康探针，给一个不会被调用的占位。
+    server = _create_observability_server(transport, engine, SimpleNamespace())
     server.set_ready(True)
     return server
 

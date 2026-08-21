@@ -6,7 +6,10 @@ Checkpoint 20: 验证健康检查端点和 Prometheus 指标暴露
 Requirements: 12.1, 12.2
 """
 
+from types import SimpleNamespace
+
 import pytest
+from antcode_worker.observability.metrics import MetricsCollector
 
 # 检查 aiohttp 是否可用
 try:
@@ -17,6 +20,23 @@ except ImportError:
     HAS_AIOHTTP = False
 
 pytestmark = pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+
+_COUNTER_VALUE = 5
+_EXTRA_INCREMENT = 3
+_SINGLE_INCREMENTS = 2
+_GAUGE_VALUE = 3.0
+
+
+def _metrics_source():
+    """/metrics 的三个百分比只能来自心跳采集器。本套件只验端点与格式，给一个空快照即可；
+    口径正确性由 tests/unit/worker/test_prometheus_shares_the_heartbeat_metric_source.py 负责。
+    """
+    from antcode_worker.heartbeat.metric_models import SystemMetrics
+
+    async def collect(use_cache: bool = True) -> SystemMetrics:
+        return SystemMetrics()
+
+    return SimpleNamespace(collect=collect)
 
 
 class TestHealthChecker:
@@ -100,50 +120,46 @@ class TestHealthChecker:
 class TestMetricsCollector:
     """测试指标收集器"""
 
-    def test_counter_increment(self):
+    @pytest.mark.asyncio
+    async def test_counter_increment(self):
         """计数器应正确递增"""
-        from antcode_worker.observability.metrics import MetricsCollector
+        collector = MetricsCollector(_metrics_source())
+        for _ in range(_SINGLE_INCREMENTS):
+            collector.inc("tasks_completed")
+        collector.inc("tasks_completed", _EXTRA_INCREMENT)
 
-        collector = MetricsCollector()
-        collector.inc("tasks_completed")
-        collector.inc("tasks_completed")
-        collector.inc("tasks_completed", 3)
+        metrics = await collector.get_all()
+        assert metrics["tasks_completed"] == _SINGLE_INCREMENTS + _EXTRA_INCREMENT
 
-        metrics = collector.get_all()
-        assert metrics["tasks_completed"] == 5
-
-    def test_gauge_set(self):
+    @pytest.mark.asyncio
+    async def test_gauge_set(self):
         """仪表应正确设置"""
-        from antcode_worker.observability.metrics import MetricsCollector
+        collector = MetricsCollector(_metrics_source())
+        collector.set("queue_depth", _GAUGE_VALUE)
 
-        collector = MetricsCollector()
-        collector.set("queue_depth", 10.5)
+        metrics = await collector.get_all()
+        assert metrics["queue_depth"] == _GAUGE_VALUE
 
-        metrics = collector.get_all()
-        assert metrics["queue_depth"] == 10.5
-
-    def test_uptime_tracked(self):
+    @pytest.mark.asyncio
+    async def test_uptime_tracked(self):
         """应跟踪运行时间"""
-        from antcode_worker.observability.metrics import MetricsCollector
-
-        collector = MetricsCollector()
-        metrics = collector.get_all()
+        collector = MetricsCollector(_metrics_source())
+        metrics = await collector.get_all()
 
         assert "uptime_seconds" in metrics
         assert metrics["uptime_seconds"] >= 0
 
-    def test_prometheus_format(self):
+    @pytest.mark.asyncio
+    async def test_prometheus_format(self):
         """应输出 Prometheus 格式"""
-        from antcode_worker.observability.metrics import MetricsCollector
+        collector = MetricsCollector(_metrics_source())
+        collector.inc("tasks_completed", _COUNTER_VALUE)
+        collector.set("queue_depth", _GAUGE_VALUE)
 
-        collector = MetricsCollector()
-        collector.inc("tasks_completed", 5)
-        collector.set("queue_depth", 3.0)
+        prometheus_text = await collector.to_prometheus()
 
-        prometheus_text = collector.to_prometheus()
-
-        assert "antcode_worker_tasks_completed 5" in prometheus_text
-        assert "antcode_worker_queue_depth 3.0" in prometheus_text
+        assert f"antcode_worker_tasks_completed {_COUNTER_VALUE}" in prometheus_text
+        assert f"antcode_worker_queue_depth {_GAUGE_VALUE}" in prometheus_text
         assert "antcode_worker_uptime_seconds" in prometheus_text
 
 
@@ -156,7 +172,7 @@ class TestObservabilityServer:
         """创建服务器实例"""
         from antcode_worker.observability.server import ObservabilityServer
 
-        return ObservabilityServer()
+        return ObservabilityServer(_metrics_source())
 
     @pytest.mark.asyncio
     async def test_server_start_stop(self, server):
@@ -239,8 +255,8 @@ class TestObservabilityServer:
     async def test_metrics_endpoint(self, server):
         """Prometheus 指标端点应返回指标"""
         # 添加一些指标
-        server.metrics_collector.inc("test_counter", 10)
-        server.metrics_collector.set("test_gauge", 5.5)
+        server.metrics_collector.inc("test_counter", _COUNTER_VALUE)
+        server.metrics_collector.set("test_gauge", _GAUGE_VALUE)
 
         await server.start(host="127.0.0.1", port=18086)
 
@@ -251,8 +267,8 @@ class TestObservabilityServer:
                     text = await resp.text()
 
                     # 验证 Prometheus 格式
-                    assert "antcode_worker_test_counter 10" in text
-                    assert "antcode_worker_test_gauge 5.5" in text
+                    assert f"antcode_worker_test_counter {_COUNTER_VALUE}" in text
+                    assert f"antcode_worker_test_gauge {_GAUGE_VALUE}" in text
                     assert "antcode_worker_uptime_seconds" in text
         finally:
             await server.stop()
