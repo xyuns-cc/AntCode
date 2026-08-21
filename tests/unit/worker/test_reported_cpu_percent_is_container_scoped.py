@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,6 +46,7 @@ _IDLE_CONTAINER_PERCENT = 0.4
 
 _WINDOW_SEC = 6.0
 _USEC_PER_SEC = 1_000_000
+_CLOCK_ORIGIN = 1000.0
 
 # --cpus=1.5：取整成 1 核当分母会把 100% 的负载报成 150%
 _FRACTIONAL_CPU_MAX = "150000 100000"
@@ -58,18 +60,6 @@ _SCHEDULER_CPU_GATE = WorkerLoadBalancer.MAX_CPU_THRESHOLD
 def _usec_for(percent: float, cores: float) -> int:
     """在 ``_WINDOW_SEC`` 的窗口里跑出这个占用率需要多少微秒 CPU 时间。"""
     return int(percent / 100.0 * _WINDOW_SEC * cores * _USEC_PER_SEC)
-
-
-class _SteppingClock:
-    """每次读表前进一个固定窗口，让百分比可复算。"""
-
-    def __init__(self) -> None:
-        self._now = 1000.0
-
-    def monotonic(self) -> float:
-        now = self._now
-        self._now += _WINDOW_SEC
-        return now
 
 
 class _CpuStatFile:
@@ -91,7 +81,9 @@ class _CpuStatFile:
 
 @pytest.fixture
 def stepping_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cpu_usage, "time", _SteppingClock())
+    """每次读表前进一个固定窗口，让百分比可复算。"""
+    ticks = count(_CLOCK_ORIGIN, _WINDOW_SEC)
+    monkeypatch.setattr(cpu_usage, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
 
 
 def _point_cpu_cgroup(
@@ -104,11 +96,8 @@ def _point_cpu_cgroup(
 ) -> _CpuStatFile | None:
     """把 v2 的 cpu.max / cpu.stat 指到 tmp_path；返回可推进的用量文件。"""
     absent = tmp_path / "absent-cpu"
-    monkeypatch.setattr(
-        resource_budget,
-        "CGROUP_V2_CPU_MAX",
-        _write(tmp_path / "cpu.max", quota) if quota is not None else absent,
-    )
+    cpu_max = _write(tmp_path / "cpu.max", quota) if quota is not None else absent
+    monkeypatch.setattr(resource_budget, "CGROUP_V2_CPU_MAX", cpu_max)
     monkeypatch.setattr(resource_budget, "CGROUP_V1_CPU_QUOTA", absent)
     monkeypatch.setattr(cpu_usage, "CGROUP_V1_CPUACCT_USAGE", absent)
     if not stat_present:
