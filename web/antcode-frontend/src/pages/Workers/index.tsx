@@ -50,6 +50,7 @@ import PageContainer from '@/components/common/PageContainer'
 import FilterBar from '@/components/common/FilterBar'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import WorkerInstallKeyModals from '@/components/workers/WorkerInstallKeyModals'
+import { renderMetricCell } from '@/components/workers/WorkerMetricCell'
 import WorkerResourceManagement from '@/components/workers/WorkerResourceManagement'
 import WorkerSpiderStats from '@/components/workers/WorkerSpiderStats'
 import { useWorkerStore } from '@/stores/workerStore'
@@ -477,41 +478,35 @@ const Workers: React.FC = () => {
       title: 'CPU',
       key: 'cpu',
       width: 100,
-      render: (_: unknown, record: Worker) => (
-        record.metrics?.cpu !== undefined ? (
-          <Progress
-            percent={Math.round(record.metrics.cpu)}
-            size="small"
-            status={record.metrics.cpu > 80 ? 'exception' : 'normal'}
-          />
-        ) : '-'
-      )
+      render: (_: unknown, record: Worker) => renderMetricCell(record, (metrics) => (
+        <Progress
+          percent={Math.round(metrics.cpu)}
+          size="small"
+          status={metrics.cpu > 80 ? 'exception' : 'normal'}
+        />
+      ))
     },
     {
       title: '内存',
       key: 'memory',
       width: 100,
-      render: (_: unknown, record: Worker) => (
-        record.metrics?.memory !== undefined ? (
-          <Progress
-            percent={Math.round(record.metrics.memory)}
-            size="small"
-            status={record.metrics.memory > 80 ? 'exception' : 'normal'}
-          />
-        ) : '-'
-      )
+      render: (_: unknown, record: Worker) => renderMetricCell(record, (metrics) => (
+        <Progress
+          percent={Math.round(metrics.memory)}
+          size="small"
+          status={metrics.memory > 80 ? 'exception' : 'normal'}
+        />
+      ))
     },
     {
       title: '任务',
       key: 'tasks',
       width: 80,
-      render: (_: unknown, record: Worker) => (
-        record.metrics ? (
-          <Tooltip title={`运行中: ${record.metrics.runningTasks}`} placement="topLeft">
-            <span>{record.metrics.runningTasks}/{record.metrics.taskCount}</span>
-          </Tooltip>
-        ) : '-'
-      )
+      render: (_: unknown, record: Worker) => renderMetricCell(record, (metrics) => (
+        <Tooltip title={`运行中: ${metrics.runningTasks}`} placement="topLeft">
+          <span>{metrics.runningTasks}/{metrics.taskCount}</span>
+        </Tooltip>
+      ))
     },
     {
       title: '最后心跳',
@@ -868,6 +863,11 @@ const Workers: React.FC = () => {
                     <Descriptions.Item label="最后心跳" span={2}>
                       {selectedWorker.lastHeartbeat ? formatDateTime(selectedWorker.lastHeartbeat) : '-'}
                     </Descriptions.Item>
+                    {(selectedWorker.snapshotErrors ?? []).map((snapshotError) => (
+                      <Descriptions.Item key={snapshotError.column} label={`${snapshotError.column} 读取失败`} span={2}>
+                        <Text type="danger">{snapshotError.message}</Text>
+                      </Descriptions.Item>
+                    ))}
                     {selectedWorker.metrics && (
                       <>
                         <Descriptions.Item label="CPU 使用率">

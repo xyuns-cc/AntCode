@@ -2,6 +2,13 @@
  * 分布式 Worker 类型定义
  */
 
+// Worker 自报列读回失败详情（后端 worker_snapshot.py 的 WorkerSnapshotError）
+export interface WorkerSnapshotError {
+  column: string
+  keys: string[]
+  message: string
+}
+
 // Worker 状态
 export type WorkerStatus = 'online' | 'offline' | 'maintenance' | 'connecting'
 
@@ -44,8 +51,10 @@ export interface Worker {
   region?: string
   tags?: string[]
   description?: string
-  metrics?: WorkerMetrics
-  capabilities?: WorkerCapabilities // Worker 能力
+  metrics?: WorkerMetrics | null
+  capabilities?: WorkerCapabilities | null // Worker 能力
+  // 读不回来的自报列；非空时对应列为 null，含列名与键名（见 workerSnapshotError.ts）
+  snapshotErrors?: WorkerSnapshotError[]
   version?: string
   // 操作系统信息
   osType?: string // 操作系统类型: Windows/Linux/Darwin

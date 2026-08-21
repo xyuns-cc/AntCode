@@ -19,13 +19,13 @@ from types import SimpleNamespace
 import pytest
 from antcode_core.application.services.workers.worker_heartbeat_persistence import (
     build_redis_heartbeat_update,
+    build_worker_heartbeat_update,
 )
-from antcode_core.domain.schemas.worker import WorkerCapabilities, WorkerMetrics
+from antcode_core.domain.schemas.worker import WorkerCapabilities, WorkerHeartbeatRequest, WorkerMetrics
 from antcode_web_api.routes.v1.workers import _worker_to_response
 from antcode_worker.app.capabilities import detect_plugin_capabilities
 from antcode_worker.heartbeat.reporter_models import Heartbeat, Metrics, OSInfo, SpiderStats
 from antcode_worker.transport.redis.heartbeat_hash import _heartbeat_mapping
-from pydantic import ValidationError
 
 # 真机 mn-worker-02 的实测值：并发 4（不是 schema 默认的 5）、CPU 26.3%。
 REPORTED_MAX_CONCURRENT = 4
@@ -92,6 +92,32 @@ def test_persisted_metrics_keys_are_all_declared_by_readback_schema() -> None:
     assert set(persisted) <= set(WorkerMetrics.model_fields)
 
 
+def test_http_heartbeat_persisted_metrics_keys_are_all_declared_by_readback_schema() -> None:
+    """另一条落库路径同样要钉。
+
+    ``build_worker_heartbeat_update`` 与 ``_redis_metrics`` 是同一个形状：先过
+    ``extra="forbid"`` 的模型，再往 dict 里补塞 ``spider_stats``。补塞的键绕开了模型，
+    上一条契约测试只覆盖了 Redis 那条投影；下次只在 HTTP 这条加字段照样漏到真机。
+    """
+    request = WorkerHeartbeatRequest(
+        worker_id="mn-worker-02",
+        api_key="k",
+        metrics=WorkerMetrics(maxConcurrentTasks=REPORTED_MAX_CONCURRENT),
+        spider_stats={"request_count": REPORTED_REQUEST_COUNT},
+    )
+
+    update = build_worker_heartbeat_update(
+        heartbeat_at=datetime.now(),
+        status="online",
+        metrics=request.metrics.model_dump(),
+        spider_stats=request.spider_stats,
+        system_info={},
+        capabilities=None,
+    )
+
+    assert set(update.metrics) <= set(WorkerMetrics.model_fields)
+
+
 def test_reported_capability_keys_are_all_declared_by_readback_schema() -> None:
     """Worker 能力快照的生产者是 detect_plugin_capabilities，直接拿它的真实输出比。"""
     produced = detect_plugin_capabilities(SimpleNamespace(capabilities=lambda: ["code", "spider"]))
@@ -123,19 +149,27 @@ def test_response_keeps_real_capabilities_for_current_wire_contract_worker() -> 
     assert response.capabilities.playwright == produced["playwright"]
 
 
-def test_unknown_metrics_key_raises_instead_of_collapsing_to_defaults() -> None:
-    """未声明的键必须抛。退回默认值等于用"一台空闲 Worker"冒充真实读数。"""
+def test_unknown_metrics_key_never_collapses_to_defaults() -> None:
+    """未声明的键绝不能塌成默认值：那等于用"一台空闲 Worker"冒充真实读数。
+
+    置 None + 带键名的 snapshotErrors 是当前契约（爆炸半径见
+    test_worker_list_row_isolation）；这里只钉"不许出现假读数"这条底线。
+    """
     worker = _worker(metrics={"cpu": REPORTED_CPU_PERCENT, "unknownFutureField": 1})
 
-    with pytest.raises(ValidationError, match="unknownFutureField"):
-        _worker_to_response(worker)
+    response = _worker_to_response(worker)
+
+    assert response.metrics is None
+    assert response.snapshotErrors[0].keys == ["unknownFutureField"]
 
 
-def test_unknown_capability_key_raises_instead_of_collapsing_to_defaults() -> None:
+def test_unknown_capability_key_never_collapses_to_defaults() -> None:
     worker = _worker(capabilities={"task_types": ["code"], "unknownFutureCapability": True})
 
-    with pytest.raises(ValidationError, match="unknownFutureCapability"):
-        _worker_to_response(worker)
+    response = _worker_to_response(worker)
+
+    assert response.capabilities is None
+    assert response.snapshotErrors[0].keys == ["unknownFutureCapability"]
 
 
 def test_worker_that_never_reported_spider_stats_still_shows_real_values() -> None:

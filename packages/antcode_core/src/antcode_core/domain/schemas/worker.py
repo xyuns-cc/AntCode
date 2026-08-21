@@ -18,6 +18,7 @@ from antcode_core.domain.schemas.worker_registration import (
     WorkerRegisterByKeyV2Response,
     WorkerRegistrationAckRequest,
 )
+from antcode_core.domain.schemas.worker_snapshot import WorkerSnapshotError
 
 
 class WorkerCapabilities(BaseModel):
@@ -115,8 +116,11 @@ class WorkerResponse(BaseModel):
 
     transportMode: str | None = Field(None, description="连接模式: direct/gateway")
 
-    capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
-    metrics: WorkerMetrics = Field(default_factory=WorkerMetrics)
+    # None 只有一个含义：这一列有数据但读不回来，原因在 snapshotErrors 里。
+    # 不用默认值填，填了就与一台真正空闲的 Worker 无法区分。
+    capabilities: WorkerCapabilities | None = Field(default_factory=WorkerCapabilities)
+    metrics: WorkerMetrics | None = Field(default_factory=WorkerMetrics)
+    snapshotErrors: list[WorkerSnapshotError] = Field(default_factory=list, description="读不回来的自报列")
     lastHeartbeat: str = Field("", description="最后心跳时间")
     createdAt: datetime = Field(..., description="创建时间")
     updatedAt: str = Field("", description="更新时间")
@@ -269,6 +273,7 @@ class WorkerRegisterDirectResponse(BaseModel):
 __all__ = [
     "WorkerCapabilities",
     "WorkerMetrics",
+    "WorkerSnapshotError",
     "WorkerCreateRequest",
     "WorkerUpdateRequest",
     "WorkerResponse",

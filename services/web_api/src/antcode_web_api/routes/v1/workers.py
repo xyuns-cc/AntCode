@@ -73,6 +73,7 @@ from antcode_web_api.routes.v1 import workers_spider as _workers_spider
 
 # P2 拆分: 3 个 stats/history 查询接口移到 workers_stats.py。
 from antcode_web_api.routes.v1 import workers_stats as _workers_stats
+from antcode_web_api.routes.v1.worker_snapshot_readback import read_worker_snapshot
 from antcode_web_api.routes.v1.workers_dispatch import (  # noqa: F401
     WorkerDispatchBatchRequest,
     WorkerDispatchBatchTaskRequest,
@@ -251,12 +252,11 @@ async def _resolve_dispatch_worker(
 def _worker_to_response(worker) -> WorkerResponse:
     """将 Worker 模型转换为响应对象"""
     # 这两列由 Worker 侧写、由控制面 schema 读回，两端各自发布，键集迟早会错配。
-    # 吞掉 ValidationError 换默认值不是"少显示几个字段"：整份 metrics 会塌成
-    # cpu=0 / maxConcurrentTasks=5，与一台真正空闲的 Worker 逐字节相同，页面、日志、
-    # 告警都分辨不出来。真机上三台 Worker 就这样显示了整整一个版本的 CPU 0%。
-    # 让 ValidationError 原样冒泡，错配当场可见并带上缺的键名。
-    metrics = WorkerMetrics(**worker.metrics) if worker.metrics else WorkerMetrics()
-    capabilities = WorkerCapabilities(**worker.capabilities) if worker.capabilities else WorkerCapabilities()
+    # 吞掉 ValidationError 换默认值等于拿"一台空闲 Worker"冒充真实读数；让它冒泡则
+    # 是一台机器的一个新键把整份列表打成 500（真机实测：body 只有"服务器内部错误"，
+    # 看不出哪台哪个键，同批的正常 Worker 也一起没了）。改为逐列读回：坏列置 None
+    # 并挂 snapshotErrors（列名 + 键名 + 原因），好列与其余 Worker 照常返回真值。
+    snapshot = read_worker_snapshot(worker)
 
     # 处理时间字段，转换为 ISO 格式字符串
     last_heartbeat = ""
@@ -290,9 +290,9 @@ def _worker_to_response(worker) -> WorkerResponse:
         machineArch=getattr(worker, "machine_arch", None) or "",
         # 连接模式
         transportMode=getattr(worker, "transport_mode", None),
-        # Worker 能力
-        capabilities=capabilities,
-        metrics=metrics,
+        capabilities=snapshot.capabilities,
+        metrics=snapshot.metrics,
+        snapshotErrors=snapshot.errors,
         lastHeartbeat=last_heartbeat,
         createdAt=worker.created_at,
         updatedAt=updated_at,
