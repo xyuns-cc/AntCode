@@ -1,4 +1,8 @@
-"""Collect host and Worker execution metrics."""
+"""Collect this Worker's own resource metrics and its execution metrics.
+
+单项指标"怎么读出来"在 ``metric_probes``：CPU 核数与内存四件套报的是**容器额度**
+而非宿主 /proc 视图。本模块只负责编排、缓存与 Worker 自身的执行指标。
+"""
 
 import asyncio
 import platform
@@ -9,24 +13,17 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from antcode_worker.heartbeat.metric_models import (
-    CPUMetrics,
-    DiskMetrics,
     EffectiveTaskLimits,
-    MemoryMetrics,
-    NetworkMetrics,
     SystemMetrics,
     WorkerMetrics,
 )
+from antcode_worker.heartbeat.metric_probes import (
+    NetworkRateProbe,
+    probe_cpu,
+    probe_disk,
+    probe_memory,
+)
 from antcode_worker.heartbeat.spider_stats import SpiderStatsCollectorMixin
-
-try:
-    import psutil
-
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
-    logger.warning("psutil 未安装，系统指标采集将受限")
-
 
 if TYPE_CHECKING:
     from antcode_worker.engine.scheduler import Scheduler
@@ -44,8 +41,8 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         self._disk_path = disk_path
         self._max_slots = max_slots
 
-        # 网络速率计算
-        self._last_net_io: tuple[int, int, float] | None = None
+        # 网络速率要跨采样求差，状态由探针自己持有
+        self._network_probe = NetworkRateProbe()
 
         # Worker 指标
         self._total_tasks_executed = 0
@@ -125,108 +122,15 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         metrics = SystemMetrics(timestamp=now)
 
         # 采集各项指标
-        metrics.cpu = await self._collect_cpu()
-        metrics.memory = await self._collect_memory()
-        metrics.disk = await self._collect_disk()
-        metrics.network = await self._collect_network()
+        metrics.cpu = await probe_cpu()
+        metrics.memory = await probe_memory()
+        metrics.disk = await probe_disk(self._disk_path)
+        metrics.network = await self._network_probe.probe()
         metrics.worker = await self._collect_worker()
 
         # 更新缓存
         self._cached_metrics = metrics
         self._last_collect_time = now
-
-        return metrics
-
-    async def _collect_cpu(self) -> CPUMetrics:
-        """采集 CPU 指标"""
-        metrics = CPUMetrics()
-
-        if not HAS_PSUTIL:
-            return metrics
-
-        try:
-            # CPU 使用率（非阻塞）
-            metrics.percent = await asyncio.to_thread(psutil.cpu_percent, interval=None)
-            metrics.count = psutil.cpu_count() or 1
-
-            # 负载（仅 Unix）
-            if hasattr(psutil, "getloadavg"):
-                load = psutil.getloadavg()
-                metrics.load_avg_1m = round(load[0], 2)
-                metrics.load_avg_5m = round(load[1], 2)
-                metrics.load_avg_15m = round(load[2], 2)
-
-        except Exception as e:
-            logger.debug(f"采集 CPU 指标失败: {e}")
-
-        return metrics
-
-    async def _collect_memory(self) -> MemoryMetrics:
-        """采集内存指标"""
-        metrics = MemoryMetrics()
-
-        if not HAS_PSUTIL:
-            return metrics
-
-        try:
-            mem = psutil.virtual_memory()
-            metrics.percent = round(mem.percent, 1)
-            metrics.total_mb = round(mem.total / (1024 * 1024), 1)
-            metrics.available_mb = round(mem.available / (1024 * 1024), 1)
-            metrics.used_mb = round(mem.used / (1024 * 1024), 1)
-
-        except Exception as e:
-            logger.debug(f"采集内存指标失败: {e}")
-
-        return metrics
-
-    async def _collect_disk(self) -> DiskMetrics:
-        """采集磁盘指标"""
-        metrics = DiskMetrics()
-
-        if not HAS_PSUTIL:
-            return metrics
-
-        try:
-            disk = psutil.disk_usage(self._disk_path)
-            metrics.percent = round(disk.percent, 1)
-            metrics.total_gb = round(disk.total / (1024 * 1024 * 1024), 2)
-            metrics.free_gb = round(disk.free / (1024 * 1024 * 1024), 2)
-            metrics.used_gb = round(disk.used / (1024 * 1024 * 1024), 2)
-
-        except Exception as e:
-            logger.debug(f"采集磁盘指标失败: {e}")
-
-        return metrics
-
-    async def _collect_network(self) -> NetworkMetrics:
-        """采集网络指标"""
-        metrics = NetworkMetrics()
-
-        if not HAS_PSUTIL:
-            return metrics
-
-        try:
-            net_io = psutil.net_io_counters()
-            now = time.time()
-
-            metrics.bytes_sent = net_io.bytes_sent
-            metrics.bytes_recv = net_io.bytes_recv
-            metrics.packets_sent = net_io.packets_sent
-            metrics.packets_recv = net_io.packets_recv
-
-            # 计算速率
-            if self._last_net_io:
-                last_sent, last_recv, last_time = self._last_net_io
-                elapsed = now - last_time
-                if elapsed > 0:
-                    metrics.bytes_sent_rate = round((net_io.bytes_sent - last_sent) / elapsed, 1)
-                    metrics.bytes_recv_rate = round((net_io.bytes_recv - last_recv) / elapsed, 1)
-
-            self._last_net_io = (net_io.bytes_sent, net_io.bytes_recv, now)
-
-        except Exception as e:
-            logger.debug(f"采集网络指标失败: {e}")
 
         return metrics
 

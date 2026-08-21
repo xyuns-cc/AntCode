@@ -18,6 +18,14 @@ from antcode_worker.heartbeat.lease_timing import (
     LeaseRenewSource,
     LeaseTtlUnavailableError,
 )
+from antcode_worker.heartbeat.metric_models import (
+    CPUMetrics,
+    DiskMetrics,
+    MemoryMetrics,
+    NetworkMetrics,
+    SystemMetrics,
+    WorkerMetrics,
+)
 from antcode_worker.heartbeat.reporter import (
     Heartbeat,
     HeartbeatReporter,
@@ -31,13 +39,7 @@ from antcode_worker.heartbeat.reporter import (
     init_heartbeat_reporter,
 )
 from antcode_worker.heartbeat.system_metrics import (
-    CPUMetrics,
-    DiskMetrics,
-    MemoryMetrics,
-    NetworkMetrics,
-    SystemMetrics,
     SystemMetricsCollector,
-    WorkerMetrics,
     get_metrics_collector,
     init_metrics_collector,
 )

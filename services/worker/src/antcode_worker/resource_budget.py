@@ -87,11 +87,14 @@ class CpuBudget:
         return f"{self.cores}核(来源: {self.source.value} {self.origin})"
 
 
-def _read_cgroup_value(path: Path) -> str | None:
+def read_cgroup_value(path: Path) -> str | None:
     """读取一个 cgroup 控制文件；文件不存在返回 None，读失败上抛。
 
     "不存在"与"读不出来"必须区分：前者说明这层 cgroup 压根没生效，后者说明
     预算不可知——后者退回宿主值就是本模块要修的那个 bug。
+
+    对 ``resource_usage`` 公开：额度与占用必须用同一套读法与同一套失败语义，
+    各抄一份迟早分叉成"同名双实现"。
     """
     if not path.exists():
         return None
@@ -116,7 +119,7 @@ def _cgroup_memory_limit_bytes() -> tuple[int | None, BudgetSource, str]:
         (CGROUP_V2_MEMORY_MAX, BudgetSource.CGROUP_V2),
         (CGROUP_V1_MEMORY_LIMIT, BudgetSource.CGROUP_V1),
     ):
-        raw = _read_cgroup_value(path)
+        raw = read_cgroup_value(path)
         if raw is None:
             continue
         return _parse_cgroup_bytes(raw, path), source, str(path)
@@ -134,11 +137,11 @@ def resolve_memory_budget(host_total_bytes: int) -> MemoryBudget:
 
 
 def _cgroup_cpu_cores() -> tuple[float | None, BudgetSource, str]:
-    raw_v2 = _read_cgroup_value(CGROUP_V2_CPU_MAX)
+    raw_v2 = read_cgroup_value(CGROUP_V2_CPU_MAX)
     if raw_v2 is not None:
         return _parse_cpu_max(raw_v2), BudgetSource.CGROUP_V2, str(CGROUP_V2_CPU_MAX)
-    quota = _read_cgroup_value(CGROUP_V1_CPU_QUOTA)
-    period = _read_cgroup_value(CGROUP_V1_CPU_PERIOD)
+    quota = read_cgroup_value(CGROUP_V1_CPU_QUOTA)
+    period = read_cgroup_value(CGROUP_V1_CPU_PERIOD)
     if quota is not None and period is not None:
         return _parse_cpu_max(f"{quota} {period}"), BudgetSource.CGROUP_V1, str(CGROUP_V1_CPU_QUOTA)
     return None, BudgetSource.HOST, f"未检测到 cgroup CPU 配额(已探测 {CGROUP_V2_CPU_MAX}, {CGROUP_V1_CPU_QUOTA})"
@@ -202,6 +205,7 @@ __all__ = [
     "CpuBudget",
     "MemoryBudget",
     "ResourceBudgetError",
+    "read_cgroup_value",
     "resolve_cpu_budget",
     "resolve_memory_budget",
     "validate_capacity_fits_budget",

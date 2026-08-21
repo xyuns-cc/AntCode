@@ -170,9 +170,9 @@ def test_spider_stats_accumulator_rejects_weighted_latency_overflow(tmp_path) ->
 
 @pytest.mark.asyncio
 async def test_reporter_uses_live_running_count_and_spider_stats(monkeypatch, tmp_path) -> None:
-    from antcode_worker.heartbeat import system_metrics
+    from antcode_worker.heartbeat import metric_probes
 
-    monkeypatch.setattr(system_metrics, "HAS_PSUTIL", False)
+    monkeypatch.setattr(metric_probes, "HAS_PSUTIL", False)
     collector = SystemMetricsCollector(max_slots=8)
     collector.set_state_manager(_StateManager())
     collector.set_scheduler(SimpleNamespace(size=2))
