@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router'
 import './charts/setup'
 import { AlertsDrawer } from './drawers/AlertsDrawer'
 import { WorkerDetailDrawer } from './drawers/WorkerDetailDrawer'
@@ -11,6 +12,7 @@ import './monitor.css'
 
 const Monitor = () => {
   const monitor = useMonitorController()
+  const navigate = useNavigate()
 
   return (
     <div className="monitor-container">
@@ -32,8 +34,12 @@ const Monitor = () => {
           onShowAllAlerts={() => monitor.setShowAllAlerts(true)}
           onPeriodChange={monitor.setPerformancePeriod}
         />
+        {/* 监控页的任务表只有名称/Worker/状态三列，「详情」不在这里就地重造一份，而是跳到
+            已有的任务详情页（App.tsx 的 tasks/:id）；MonitorTask.id 就是 TaskResponse.id，
+            与 /tasks 列表页的「查看」跳的是同一条路由。 */}
         <TasksSection
           tasks={monitor.tasks}
+          onViewTask={(taskId) => navigate(`/tasks/${taskId}`)}
           taskStatsData={monitor.view.taskStatsData}
           diskUsageData={monitor.view.diskUsageData}
           taskBarOptions={monitor.view.taskBarOptions}

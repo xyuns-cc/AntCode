@@ -75,6 +75,7 @@ describe('Monitor 任务表不展示任务级 CPU/内存', () => {
     const { container } = render(
       <TasksSection
         tasks={[task]}
+        onViewTask={vi.fn()}
         taskStatsData={emptyChart}
         diskUsageData={emptyChart}
         taskBarOptions={emptyOptions}
