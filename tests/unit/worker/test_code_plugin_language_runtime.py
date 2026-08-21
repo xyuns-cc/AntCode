@@ -19,7 +19,8 @@ from antcode_worker.domain.models import RunContext, RuntimeSpec, TaskPayload
 from antcode_worker.plugins.code.plugin import CodePlugin
 from antcode_worker.runtime.language_runtime import LanguageRuntimeMissingError
 
-_RUN_CONTEXT = RunContext("run-1", "task-1", "project-1")
+# memory_limit_mb 用真机 worker-03 的生效限额：CodePlugin 要靠它把预算注进运行时
+_RUN_CONTEXT = RunContext("run-1", "task-1", "project-1", memory_limit_mb=537)
 
 
 @pytest.fixture
@@ -110,7 +111,8 @@ async def test_typescript_runs_the_workspace_runner_through_node(
     plan = await CodePlugin().build_plan(_RUN_CONTEXT, _payload("main.ts", workspace))
 
     assert plan.command == str(node)
-    assert plan.args == [str(workspace / "node_modules" / ".bin" / "tsx"), "main.ts"]
+    runner = str(workspace / "node_modules" / ".bin" / "tsx")
+    assert plan.args == ["--max-old-space-size=268", runner, "main.ts"]
 
 
 @pytest.mark.asyncio

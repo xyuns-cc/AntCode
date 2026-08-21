@@ -8,6 +8,7 @@ from pathlib import Path
 
 from antcode_worker.runtime.dependency_process import DependencyLimits, run_dependency_command
 from antcode_worker.runtime.language_runtime import GO_RUNTIME, require_language_executable
+from antcode_worker.runtime.runtime_budget import RuntimeBudget, go_budget_env
 
 _CACHE_ROOT = ".antcode-go-cache"
 # 产物落在缓存根下：这里已经是 go 自己往里写 build/modules 的目录，
@@ -39,18 +40,28 @@ def _go_state_env(cwd: str) -> dict[str, str]:
     }
 
 
-def build_go_execution_env(cwd: str, env: dict[str, str]) -> dict[str, str]:
+def build_go_execution_env(cwd: str, env: dict[str, str], budget: RuntimeBudget) -> dict[str, str]:
     """Return a copy whose Go caches stay inside the current run workspace.
 
     沙箱内编译默认 ``--unshare-net``。外部模块必须随源码提交 ``vendor``；
     这里强制 ``GOPROXY=off``，缺依赖时立即显式失败。
+
+    GOMAXPROCS 在 go.mod 之外注入：沙箱里读不到 cgroup 的不只是模块化项目，产物一旦
+    开跑，调度器的 P 数同样要按容器配额而不是宿主核数来（见 ``runtime_budget``）。
     """
+    runtime_env = {**env, **go_budget_env(budget)}
     if not (Path(cwd) / "go.mod").is_file():
-        return dict(env)
-    return {**env, **_go_state_env(cwd)}
+        return runtime_env
+    return {**runtime_env, **_go_state_env(cwd)}
 
 
-async def build_go_binary(cwd: str, *, entry_point: str, limits: DependencyLimits) -> None:
+async def build_go_binary(
+    cwd: str,
+    *,
+    entry_point: str,
+    limits: DependencyLimits,
+    budget: RuntimeBudget,
+) -> None:
     """Compile ``entry_point`` ahead of execution so the run reports its own exit code.
 
     ``go run`` 不透传被编译程序的退出码：程序 ``os.Exit(9)`` 时 ``go run`` 自己以 1
@@ -60,6 +71,10 @@ async def build_go_binary(cwd: str, *, entry_point: str, limits: DependencyLimit
 
     编译与 ``npm ci`` 同走 ``run_dependency_command``：源码不可信（``#cgo`` 指令能把
     参数带进 C 编译器），必须在无网络 bwrap 与同一套资源上限内跑，不能退回宿主直跑。
+
+    ``budget`` 决定 GOMAXPROCS，也就是 ``go build -p`` 的并行编译动作数与
+    ``cmd/compile`` 的后端并发：沙箱里 Go 读不到 cgroup，不给就按宿主核数扇出，
+    编译期峰值内存随宿主核数上涨而与本任务的内存限额无关。
     """
     go_exe = require_language_executable(GO_RUNTIME)
     binary = go_binary_path(cwd)
@@ -67,6 +82,7 @@ async def build_go_binary(cwd: str, *, entry_point: str, limits: DependencyLimit
     env = {key: os.environ[key] for key in _BUILD_ENV_KEYS if key in os.environ}
     env["HOME"] = cwd
     env.update(_go_state_env(cwd))
+    env.update(go_budget_env(budget))
     result = await run_dependency_command(
         [go_exe, "build", "-o", str(binary), entry_point],
         cwd=cwd,

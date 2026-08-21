@@ -43,6 +43,7 @@ async def test_bundle_root_reaches_the_child_pythonpath() -> None:
         run_id="run-1",
         task_id="task-1",
         project_id="proj-1",
+        memory_limit_mb=537,
         runtime_spec=RuntimeSpec(python_path=f"{RUNTIME_PATH}/bin/python"),
     )
     plan = await CodePlugin().build_plan(context=context, payload=payload)

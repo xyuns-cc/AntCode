@@ -63,6 +63,7 @@ async def test_node_local_bin_reaches_the_child_path(tmp_path: Path) -> None:
         run_id="run-1",
         task_id="task-1",
         project_id="proj-1",
+        memory_limit_mb=537,
         runtime_spec=RuntimeSpec(python_path=f"{RUNTIME_PATH}/bin/python"),
     )
     plan = await CodePlugin().build_plan(context=context, payload=payload)
@@ -166,7 +167,7 @@ async def test_plugin_never_writes_the_authoritative_env_keys(tmp_path: Path) ->
     (project_cwd / "app.js").write_text("", encoding="utf-8")
 
     plan = await CodePlugin().build_plan(
-        context=RunContext(run_id="r", task_id="t", project_id="p"),
+        context=RunContext(run_id="r", task_id="t", project_id="p", memory_limit_mb=537),
         payload=TaskPayload(
             entry_point="app.js",
             workspace_path=str(bundle_root),

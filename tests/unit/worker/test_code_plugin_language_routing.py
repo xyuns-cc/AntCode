@@ -23,6 +23,7 @@ _PYTHON_CONTEXT = RunContext(
     "run-1",
     "task-1",
     "project-1",
+    memory_limit_mb=537,
     runtime_spec=RuntimeSpec(python_path="/opt/antcode/runtime/bin/python"),
 )
 
@@ -68,7 +69,8 @@ async def test_suffixless_entry_uses_the_dispatched_language(workspace: Path, is
     plan = await CodePlugin().build_plan(_PYTHON_CONTEXT, _payload("app-runner", workspace, "java"))
 
     assert plan.command == str(java)
-    assert plan.args == ["-jar", "app-runner"]
+    # -XX:MaxRAM 必须在 -jar 之前：落到后面就成了被执行程序的 argv（537MiB→字节）
+    assert plan.args == ["-XX:MaxRAM=563085312", "-jar", "app-runner"]
 
 
 @pytest.mark.asyncio
@@ -123,4 +125,4 @@ async def test_agreeing_signals_still_route_normally(workspace: Path, isolated_b
     plan = await CodePlugin().build_plan(_PYTHON_CONTEXT, _payload("main.mjs", workspace, "javascript"))
 
     assert plan.command == str(node)
-    assert plan.args == ["main.mjs"]
+    assert plan.args == ["--max-old-space-size=268", "main.mjs"]

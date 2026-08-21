@@ -9,6 +9,9 @@ from antcode_worker.runtime import go_execution_policy
 from antcode_worker.runtime.dependency_process import DependencyCommandResult
 
 _BINARY_RELPATH = Path(".antcode-go-cache") / "bin" / "task-binary"
+# memory_limit_mb 用真机 worker-03 的生效限额（3GiB×70%÷4）：CodePlugin 要靠它把
+# 预算注进沙箱内读不到 cgroup 的 Go 工具链。
+_RUN_CONTEXT = RunContext("run-1", "task-1", "project-1", memory_limit_mb=537)
 
 
 def _install_go_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -76,7 +79,7 @@ async def test_go_external_dependencies_require_vendor(tmp_path: Path) -> None:
     payload = _go_payload(tmp_path, env_vars={"GOMODCACHE": "/shared/host-cache"})
 
     with pytest.raises(RuntimeError, match="必须提交 vendor"):
-        await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
+        await CodePlugin().build_plan(_RUN_CONTEXT, payload)
 
 
 @pytest.mark.asyncio
@@ -86,7 +89,7 @@ async def test_go_vendor_project_runs_offline(tmp_path: Path, monkeypatch: pytes
     _write_vendored_module(tmp_path)
     payload = _go_payload(tmp_path, env_vars={})
 
-    plan = await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
+    plan = await CodePlugin().build_plan(_RUN_CONTEXT, payload)
 
     assert plan.env["GOMODCACHE"].startswith(str(tmp_path))
     assert plan.env["GOCACHE"].startswith(str(tmp_path))
@@ -105,7 +108,7 @@ async def test_go_work_is_rejected(tmp_path: Path) -> None:
     payload = _go_payload(tmp_path)
 
     with pytest.raises(RuntimeError, match="不支持 go.work"):
-        await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
+        await CodePlugin().build_plan(_RUN_CONTEXT, payload)
 
 
 @pytest.mark.asyncio
@@ -123,7 +126,7 @@ async def test_go_plan_execs_built_binary_instead_of_go_run(
     _write_vendored_module(tmp_path)
     payload = _go_payload(tmp_path, args=["--flag", "value"])
 
-    plan = await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
+    plan = await CodePlugin().build_plan(_RUN_CONTEXT, payload)
 
     assert plan.command == str(tmp_path / _BINARY_RELPATH)
     assert plan.command != str(go_stub)
@@ -142,7 +145,7 @@ async def test_go_build_runs_in_offline_sandbox_without_task_env(
     _write_vendored_module(tmp_path)
     payload = _go_payload(tmp_path, env_vars={"DATABASE_PASSWORD": "s3cret"})
 
-    await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
+    await CodePlugin().build_plan(_RUN_CONTEXT, payload)
 
     assert len(calls) == 1
     command, env = calls[0]
@@ -167,7 +170,7 @@ async def test_go_build_failure_surfaces_compiler_output(
     payload = _go_payload(tmp_path)
 
     with pytest.raises(RuntimeError, match="Go 编译失败.*undefined: nope"):
-        await CodePlugin().build_plan(RunContext("run-1", "task-1", "project-1"), payload)
+        await CodePlugin().build_plan(_RUN_CONTEXT, payload)
 
 
 def test_sandbox_allows_only_explicit_go_execution_state() -> None:

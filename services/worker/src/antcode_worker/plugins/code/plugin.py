@@ -50,6 +50,12 @@ from antcode_worker.runtime.node_dependency_errors import (
     NodeDependencyInstallError,
 )
 from antcode_worker.runtime.node_dependency_policy import install_node_dependencies
+from antcode_worker.runtime.runtime_budget import (
+    RuntimeBudget,
+    java_runtime_argv,
+    node_runtime_argv,
+    resolve_runtime_budget,
+)
 
 # 顺序即优先级：tsx 是当前主流 runner，ts-node 作为老项目的既有约定保留。
 _TYPESCRIPT_RUNNERS = ("tsx", "ts-node")
@@ -98,10 +104,7 @@ class CodePlugin(PluginBase):
         # 拒绝绝对路径（POSIX 前导 '/'、Windows 盘符 'C:' 等）
         if entry.startswith("/") or (len(entry) >= 2 and entry[1] == ":"):
             return f"entry_point 不合法：不允许绝对路径 ({payload.entry_point})"
-        # 拒绝路径穿越
-        if any(part in {"..", ""} for part in entry.split("/") if part != "."):
-            # 允许 "./main.py" 之类；只拒绝 '..' 段与空段
-            pass  # 下面 commonpath 会兜底
+        # 拒绝路径穿越（"./main.py" 之类的单点段合法，只拒 '..'；越界由下面 commonpath 兜底）
         if ".." in entry.split("/"):
             return f"entry_point 不合法：不允许包含 '..' ({payload.entry_point})"
         # commonpath 兜底：解析后必须仍在 workspace / project_cwd 内
@@ -123,9 +126,11 @@ class CodePlugin(PluginBase):
     ) -> ExecPlan:
         language = self._resolve_language(payload)
         cwd = self._get_project_cwd(payload)
+        # 沙箱内的运行时看不见 cgroup、只看得见宿主 /proc，必须由这里把生效限额喂给它们
+        budget = resolve_runtime_budget(context.memory_limit_mb)
         env = self._build_env(payload)
         if language is ExecutionLanguage.GO:
-            env = build_go_execution_env(cwd, env)
+            env = build_go_execution_env(cwd, env, budget)
 
         # 执行前依赖装配（幂等，复用缓存）；Go 的编译也在这里，_build_argv 依赖它的产物
         await self._prepare_deps(
@@ -133,8 +138,9 @@ class CodePlugin(PluginBase):
             payload=payload,
             cwd=cwd,
             limits=DependencyLimits.from_context(context),
+            budget=budget,
         )
-        command, args = self._build_argv(language, context, payload)
+        command, args = self._build_argv(language, context, payload, budget=budget)
 
         return ExecPlan(
             command=command,
@@ -167,13 +173,16 @@ class CodePlugin(PluginBase):
         language: ExecutionLanguage,
         context: RunContext,
         payload: TaskPayload,
+        *,
+        budget: RuntimeBudget,
     ) -> tuple[str, list[str]]:
         if language is ExecutionLanguage.PYTHON:
             return self._python_argv(context, payload)
         if language in _NODE_LANGUAGES:
-            return self._node_argv(payload, is_typescript=language is ExecutionLanguage.TYPESCRIPT)
+            is_typescript = language is ExecutionLanguage.TYPESCRIPT
+            return self._node_argv(payload, budget, is_typescript=is_typescript)
         if language is ExecutionLanguage.JAVA:
-            return self._java_argv(payload)
+            return self._java_argv(payload, budget)
         if language is ExecutionLanguage.GO:
             return self._go_argv(payload)
         raise RuntimeError(f"CodePlugin 没有 {language.value} 的执行方式实现")
@@ -183,12 +192,19 @@ class CodePlugin(PluginBase):
         args = [payload.entry_point, *payload.args]
         return python_exe, args
 
-    def _node_argv(self, payload: TaskPayload, *, is_typescript: bool) -> tuple[str, list[str]]:
+    def _node_argv(
+        self,
+        payload: TaskPayload,
+        budget: RuntimeBudget,
+        *,
+        is_typescript: bool,
+    ) -> tuple[str, list[str]]:
         if is_typescript:
-            return self._typescript_argv(payload)
-        return require_language_executable(NODE_RUNTIME), [payload.entry_point, *payload.args]
+            return self._typescript_argv(payload, budget)
+        node_exe = require_language_executable(NODE_RUNTIME)
+        return node_exe, [*node_runtime_argv(budget), payload.entry_point, *payload.args]
 
-    def _typescript_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
+    def _typescript_argv(self, payload: TaskPayload, budget: RuntimeBudget) -> tuple[str, list[str]]:
         """TS 入口由镜像的 node 去跑 workspace 自带的 TS runner（约定 devDep 装 tsx 或 ts-node）。
 
         argv[0] 必须是 node 而不是 ``node_modules/.bin/<runner>``：沙箱是从 payload
@@ -204,7 +220,8 @@ class CodePlugin(PluginBase):
             local_runner = os.path.join(dependency_root, "node_modules", ".bin", runner)
             if os.path.isfile(local_runner):
                 node_exe = require_language_executable(NODE_RUNTIME)
-                return node_exe, [local_runner, payload.entry_point, *payload.args]
+                # V8 参数必须排在脚本路径之前，落到 runner 之后就成了 runner 的位置参数
+                return node_exe, [*node_runtime_argv(budget), local_runner, payload.entry_point, *payload.args]
         # 只说"需要装 tsx"会把人引向"把 node_modules 提交进仓库"这条死路：
         # source bundle 不收符号链接，而 .bin/<runner> 永远是符号链接。
         raise NodeDependencyInstallError(
@@ -216,9 +233,10 @@ class CodePlugin(PluginBase):
             "直接提交 node_modules/ 不可行：source bundle 不接受符号链接",
         )
 
-    def _java_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
+    def _java_argv(self, payload: TaskPayload, budget: RuntimeBudget) -> tuple[str, list[str]]:
         java_exe = require_language_executable(JAVA_RUNTIME)
-        return java_exe, ["-jar", payload.entry_point, *payload.args]
+        # VM 参数必须排在 -jar 之前，落到 -jar 之后就成了被执行程序的 argv
+        return java_exe, [*java_runtime_argv(budget), "-jar", payload.entry_point, *payload.args]
 
     def _go_argv(self, payload: TaskPayload) -> tuple[str, list[str]]:
         """argv[0] 是装配期编译出的产物，不是 ``go``。
@@ -239,6 +257,7 @@ class CodePlugin(PluginBase):
         payload: TaskPayload,
         cwd: str,
         limits: DependencyLimits,
+        budget: RuntimeBudget,
     ) -> None:
         """执行前装依赖；幂等，包管理器自身会跳过已装。
 
@@ -252,7 +271,7 @@ class CodePlugin(PluginBase):
             return
         if language is ExecutionLanguage.GO:
             await install_go_dependencies(cwd, limits=limits)
-            await build_go_binary(cwd, entry_point=payload.entry_point, limits=limits)
+            await build_go_binary(cwd, entry_point=payload.entry_point, limits=limits, budget=budget)
         # python / java 无需在此装依赖
 
     # ---------- 通用工具 ----------

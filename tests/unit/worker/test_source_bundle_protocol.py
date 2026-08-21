@@ -267,6 +267,7 @@ async def test_code_plugin_runs_from_project_cwd_and_leaves_pythonpath_to_the_ex
         run_id="run-1",
         task_id="task-1",
         project_id="proj-1",
+        memory_limit_mb=537,
         runtime_spec=RuntimeSpec(python_path="/opt/antcode/runtime/bin/python"),
     )
     plan = await plugin.build_plan(context=context, payload=payload)

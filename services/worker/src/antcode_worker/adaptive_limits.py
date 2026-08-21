@@ -41,6 +41,13 @@ def current_memory_budget() -> MemoryBudget:
     return resolve_memory_budget(int(psutil.virtual_memory().total))
 
 
+def current_cpu_budget() -> CpuBudget:
+    """本进程真正能用的 CPU 预算（容器 cgroup 配额优先，裸机才是宿主核数）。"""
+    import psutil
+
+    return resolve_cpu_budget(int(psutil.cpu_count() or os.cpu_count() or 1))
+
+
 def calculate_adaptive_limits(effective_concurrency: int | None = None) -> dict[str, int]:
     """从**本进程的预算**自适应计算任务限制。
 
@@ -55,10 +62,8 @@ def calculate_adaptive_limits(effective_concurrency: int | None = None) -> dict[
     - task_memory_limit_mb: 任务池 / 生效并发（任务池 = 预算 × 70%）
     - task_cpu_time_limit_sec: CPU 配额核数 × 60s，钳在 [300, 1800]
     """
-    import psutil
-
     memory = current_memory_budget()
-    cpu = resolve_cpu_budget(int(psutil.cpu_count() or os.cpu_count() or 1))
+    cpu = current_cpu_budget()
     _warn_on_host_sourced_budget(memory, cpu)
 
     concurrency = effective_concurrency or _adaptive_concurrency(memory, cpu)
@@ -156,6 +161,7 @@ DEFAULT_RESOURCE_LIMITS = {
 __all__ = [
     "DEFAULT_RESOURCE_LIMITS",
     "calculate_adaptive_limits",
+    "current_cpu_budget",
     "current_memory_budget",
     "fit_task_memory_to_budget",
 ]

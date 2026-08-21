@@ -23,7 +23,7 @@ from antcode_worker.plugins.code.plugin import CodePlugin
 
 # 与镜像里 mise 的实际布局一致：<MISE_DATA_DIR>/installs/<language>/<version>/bin
 _NODE_VERSION = "22.23.2"
-_RUN_CONTEXT = RunContext("run-1", "task-1", "project-1")
+_RUN_CONTEXT = RunContext("run-1", "task-1", "project-1", memory_limit_mb=537)
 
 
 @pytest.fixture
