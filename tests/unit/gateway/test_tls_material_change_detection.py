@@ -14,8 +14,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_ONE_SECOND_NS = 1_000_000_000
-
 import pytest
 from antcode_gateway.tls_material import (
     TLS_MATERIAL_READ_FAILED,
@@ -34,6 +32,10 @@ from tests.unit.gateway.tls_material_support import (
 
 #: 材料不变时的重复回调次数；每多读一轮盘就是每次握手多三次 IO。
 REPEATED_HANDSHAKES = 5
+
+#: 显式推进 mtime 的步长。取 1 秒是为了远大于任何文件系统的时间戳粒度
+#: （ext4 实测约 4ms），确保"mtime 确实变了"这个前置条件不依赖运行时序。
+ONE_SECOND_NS = 1_000_000_000
 
 
 @pytest.fixture(scope="module")
@@ -105,7 +107,7 @@ def test_touching_material_without_changing_content_is_not_a_reload(
     # 于是下面那条前置断言会随机失败（实测 12 跑 10 挂）。要造的场景是"内容没动、
     # 只有 mtime 变了"，那就把 mtime 直接设成一个确定不同的值。
     paths.client_ca.write_bytes(unchanged)
-    os.utime(paths.client_ca, ns=(stat.st_atime_ns, stat.st_mtime_ns + _ONE_SECOND_NS))
+    os.utime(paths.client_ca, ns=(stat.st_atime_ns, stat.st_mtime_ns + ONE_SECOND_NS))
 
     assert paths.client_ca.stat().st_mtime_ns != stat.st_mtime_ns
     assert loader.certificate_configuration() is None
