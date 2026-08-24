@@ -10,12 +10,14 @@ from antcode_worker.domain.models import ExecPlan, RuntimeHandle
 from antcode_worker.engine.unbound_runtime import WORKER_PYTHON_RUNTIME_HASH
 from antcode_worker.executor.base import ExecutorConfig
 from antcode_worker.executor.exec_path import authoritative_path
+from antcode_worker.executor.process_limits import effective_memory_limit_mb
 from antcode_worker.executor.python_path import authoritative_python_path
 from antcode_worker.executor.sandbox_cancellation import payload_process_limit
 from antcode_worker.executor.sandbox_mounts import private_home
 from antcode_worker.executor.sandbox_provider import SandboxProvider
 
 _PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
+_TMPFS_SIZE_KEY = "tmpfs_size_mb"
 _HIJACK_ENV_KEYS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV")
 
 
@@ -60,6 +62,8 @@ def _sandbox_context(config: ExecutorConfig, request: SandboxPlanRequest) -> dic
         # 不并进来，Rule 任务会停在 "Rule egress bridge 缺少有效总时长上限"。
         **plan.sandbox_config,
         _PAYLOAD_PROCESS_LIMIT_KEY: payload_process_limit(plan, config),
+        # 内存盘尺寸与 RLIMIT_DATA/RSS 监控共用同一个生效限额，避免两层各解析一遍。
+        _TMPFS_SIZE_KEY: effective_memory_limit_mb(plan.memory_limit_mb, config.default_memory_limit_mb),
         "run_id": plan.run_id,
         # Worker 自身解释器（rule 等内建插件）不作为"任务 runtime 目录"挂载：
         # sandbox_mounts 只接受 runtimes_root 下的托管运行时，而 /app/.venv 走的是

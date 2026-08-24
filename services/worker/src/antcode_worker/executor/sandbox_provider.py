@@ -23,6 +23,7 @@ from antcode_worker.executor.sandbox_mounts import SandboxFilesystemRequest, san
 
 _PRLIMIT_EXECUTABLE = "prlimit"
 _PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
+_TMPFS_SIZE_KEY = "tmpfs_size_mb"
 _PROCESS_HIJACK_ENV = frozenset({"BASH_ENV", "ENV", "PYTHONHOME"})
 _PROCESS_HIJACK_PREFIXES = ("LD_", "DYLD_")
 _SENSITIVE_ENV_PATTERNS = frozenset({"SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE"})
@@ -157,8 +158,27 @@ class BasicSandbox(SandboxProvider):
                 runtime_dir=self._context_path(context, "runtime_path"),
                 runtime_executable=self._context_path(context, "runtime_executable"),
                 bundle_root=self._context_path(context, "workspace_root"),
+                tmpfs_size_mb=self._context_tmpfs_size_mb(context),
             )
         )
+
+    @staticmethod
+    def _context_tmpfs_size_mb(context: dict[str, Any]) -> int:
+        """内存盘尺寸必须由调用方显式给出，缺省即拒绝。
+
+        给一个"未配置就不限"的默认值，等于让任何新调用方悄悄拿到宿主内存一半的
+        tmpfs——本仓已有两个 wrap_command 调用方（任务执行与依赖准备），第三个出现时
+        不该靠人记得加这个键。0 是合法值，含义是"运维显式关掉了内存限额"。
+        """
+        if _TMPFS_SIZE_KEY not in context:
+            raise RuntimeError(
+                f"sandbox context 缺少 {_TMPFS_SIZE_KEY}：内存盘（/tmp、/dev/shm）尺寸必须显式指定，"
+                f"否则内核按宿主内存的一半建 tmpfs，单任务即可超出整个容器的内存额度"
+            )
+        value = context[_TMPFS_SIZE_KEY]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise RuntimeError(f"sandbox context.{_TMPFS_SIZE_KEY} 必须是非负整数 MB，当前 {value!r}")
+        return value
 
     @staticmethod
     def _limit_payload_processes(cmd: list[str], context: dict[str, Any]) -> list[str]:

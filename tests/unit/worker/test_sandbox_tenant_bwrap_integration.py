@@ -32,6 +32,7 @@ def test_real_bwrap_cannot_read_sibling_workspace(tmp_path: Path) -> None:
         "plugin_name": "code",
         "run_id": "current",
         "runtime_executable": sys.executable,
+        "tmpfs_size_mb": 0,
     }
     probe = "from pathlib import Path; import sys; raise SystemExit(97 if Path(sys.argv[1]).exists() else 0)"
 
@@ -57,6 +58,7 @@ def test_real_bwrap_provides_private_shared_memory(tmp_path: Path) -> None:
         "plugin_name": "code",
         "run_id": "current",
         "runtime_executable": sys.executable,
+        "tmpfs_size_mb": 0,
     }
     probe = (
         "import os, stat; mode=stat.S_IMODE(os.stat('/dev/shm').st_mode); raise SystemExit(0 if mode == 0o1777 else 98)"

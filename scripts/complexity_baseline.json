@@ -1841,7 +1841,7 @@
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 719
+      "value": 698
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",

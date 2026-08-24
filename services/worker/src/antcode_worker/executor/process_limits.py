@@ -38,11 +38,21 @@ _BYTES_PER_MIB = 1024 * 1024
 # 因此收的是"真的会写下去的内存"。
 #
 # 语义代价（必须知情）：MAP_SHARED 匿名映射与 tmpfs 页不计入 RLIMIT_DATA，
-# 而 RLIMIT_AS 会计入。这部分改由两层真 RSS 的边界兜底——ProcessExecutor
-# 的进程树 RSS 监控（超限直接杀进程组）与容器级 cgroup mem_limit。
+# 而 RLIMIT_AS 会计入。但这两类页**不由同一层兜底**，写成一句会得到一个不存在的防护：
+#
+# - 被映射进地址空间的页（MAP_SHARED 匿名映射、mmap 出来的 tmpfs 页）计入
+#   ``memory_info().rss``，进程树 RSS 监控看得见，超限直接杀进程组。真机实测
+#   （192.168.1.250 / 限额 1433MB）：MAP_SHARED 写满 2000MB，采到树 RSS 2013MB，
+#   判定成立。
+# - ``write()`` 写进 tmpfs 的页**没有任何进程映射它，因此不进任何进程的 RSS**，
+#   进程树监控对这条路径完全失明。同一画像下 dd 往沙箱 /tmp 写 3000MB（2.09×限额）：
+#   任务树 RSS 全程 ≤6.1MB、exit 0 上报 SUCCESS，而容器 memory.current 冲到 2816MB。
+#   真正约束它的是沙箱 tmpfs 的 ``--size``（见 ``sandbox_mounts``，按本任务的内存
+#   限额定尺寸）与容器级 mem_limit——与 RSS 监控无关。
+#
 # 容器内 /sys/fs/cgroup 是只读挂载且 cgroup.subtree_control 为空，
 # 在现有安全画像（cap_drop ALL / no-new-privileges / 非 root）下无法为每个任务
-# 创建 cgroup，所以"每任务 RSS 硬限额"没有内核级实现，只有上述监控级实现。
+# 创建 cgroup，所以"每任务内存硬限额"没有内核级实现。
 _MEMORY_RLIMIT_NAME = "RLIMIT_DATA"
 
 # B8: Windows 上 ProcessExecutor 根本无法工作，必须显式拒绝而不是假装沙箱生效。
@@ -100,6 +110,20 @@ class SandboxLimits:
             ("RLIMIT_FSIZE", self.file_size_mb * _BYTES_PER_MIB),
         )
         return tuple(RlimitRequest(name, value) for name, value in candidates if value > 0)
+
+
+def effective_memory_limit_mb(plan_limit_mb: int, default_limit_mb: int) -> int:
+    """本次执行真正生效的内存限额：计划值优先，0 表示"本次未指定"，退到执行器默认值。
+
+    进程层（RLIMIT_DATA + 进程树 RSS 监控）与沙箱层（tmpfs ``--size``）必须用**同一个**
+    数。两处各写一遍 ``a or b``，改动其一就会分叉成"rlimit 按 1433MB 收、tmpfs 按另一个
+    数切"——而这种分叉在真机上的表现是"限额看起来生效了却拦不住"，正是本仓反复出现的
+    同名双实现。
+
+    两个值都是 0 表示运维显式关掉了内存限额；此时没有任何任务级数值可以用来给 tmpfs
+    定尺寸，调用方据此**不下 --size**，而不是另编一个数。
+    """
+    return plan_limit_mb or default_limit_mb
 
 
 def require_posix_platform() -> None:

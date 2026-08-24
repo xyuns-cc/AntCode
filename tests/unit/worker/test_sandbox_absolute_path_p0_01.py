@@ -72,7 +72,7 @@ def test_wrap_command_accepts_absolute_sandbox_command(tmp_path):
 
     wrapped = sandbox.wrap_command(
         [sys.executable],
-        {"work_dir": str(work_dir), "plugin_name": "code", "run_id": "test-run"},
+        {"work_dir": str(work_dir), "plugin_name": "code", "run_id": "test-run", "tmpfs_size_mb": 0},
     )
 
     assert wrapped[0] == "/usr/bin/bwrap"

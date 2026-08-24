@@ -70,7 +70,7 @@ async def run_dependency_command(
 ) -> DependencyCommandResult:
     root = Path(cwd).resolve(strict=True)
     _require_workspace_budget(root, limits.workspace_bytes)
-    wrapped = _wrap_offline_command(command, root, run_id=limits.run_id)
+    wrapped = _wrap_offline_command(command, root, run_id=limits.run_id, memory_mb=limits.memory_mb)
     process = await _start_process(wrapped, root=root, env=env, limits=limits)
     capture = asyncio.create_task(_capture_process(process))
     monitor = asyncio.create_task(_monitor_process(process, root, limits))
@@ -92,7 +92,7 @@ async def run_dependency_command(
         await _settle_task(monitor)
 
 
-def _wrap_offline_command(command: list[str], root: Path, *, run_id: str | None) -> list[str]:
+def _wrap_offline_command(command: list[str], root: Path, *, run_id: str | None, memory_mb: int) -> list[str]:
     sandbox_command = _resolve_bwrap_command()
     sandbox = BasicSandbox(
         SandboxConfig(
@@ -109,6 +109,10 @@ def _wrap_offline_command(command: list[str], root: Path, *, run_id: str | None)
         "plugin_name": "dependency_prepare",
         "run_id": run_id,
         "payload_max_processes": DEPENDENCY_MAX_PROCESSES,
+        # 依赖准备也跑在同一套 bwrap 画像里，同样有"tmpfs 页计入容器内存却不进 RSS"
+        # 的盲区（_resource_violation 只看 memory_info().rss）。尺寸取本次准备自己的
+        # 内存上限，与任务执行路径同一条规则。
+        "tmpfs_size_mb": memory_mb,
     }
     return sandbox.wrap_command(command, context)
 

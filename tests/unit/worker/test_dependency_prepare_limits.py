@@ -67,6 +67,7 @@ def test_dependency_command_is_wrapped_in_offline_bwrap(monkeypatch, tmp_path: P
         ["npm", "ci", "--offline"],
         work_dir,
         run_id="run-1",
+        memory_mb=dependency_process.DEPENDENCY_MEMORY_MB,
     )
 
     assert wrapped[0] == "/usr/bin/bwrap"

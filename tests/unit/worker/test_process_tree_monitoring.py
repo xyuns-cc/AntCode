@@ -111,14 +111,18 @@ def test_sample_process_tree_returns_none_for_dead_root() -> None:
 def test_sample_process_tree_skips_members_that_vanish() -> None:
     """成员在遍历中消失属于正常竞态，跳过它并继续统计其余成员。"""
 
-    class _Vanishing:
+    # 替身也要有 pid：采内存盘用量按 /proc/<pid>/root 定位挂载命名空间，-1 读不出即跳过。
+    class _Fake:
+        pid = -1
+
+    class _Vanishing(_Fake):
         def cpu_times(self) -> object:
             raise psutil.NoSuchProcess(pid=-1)
 
         def memory_info(self) -> object:
             raise psutil.NoSuchProcess(pid=-1)
 
-    class _Alive:
+    class _Alive(_Fake):
         def cpu_times(self) -> object:
             return _CpuTimes(user=_FAKE_USER_CPU_SECONDS, system=_FAKE_SYSTEM_CPU_SECONDS)
 
@@ -162,8 +166,8 @@ def test_limit_breach_uses_whole_tree_usage() -> None:
         process_count=1,
     )
 
-    assert process_mod._describe_limit_breach(tree_usage, plan) is not None
-    assert process_mod._describe_limit_breach(root_only_usage, plan) is None
+    assert process_mod.describe_limit_breach(tree_usage, plan) is not None
+    assert process_mod.describe_limit_breach(root_only_usage, plan) is None
 
 
 def test_sampled_usage_stays_inside_the_worker() -> None:

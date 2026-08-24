@@ -35,10 +35,21 @@ from antcode_worker.executor.concurrency import ExecutionAdmission
 from antcode_worker.executor.exec_path import authoritative_path
 from antcode_worker.executor.monitor_interval import resource_monitor_interval
 from antcode_worker.executor.output_stream import OutputByteBudget, OutputReadOptions, read_output_stream
-from antcode_worker.executor.process_limits import SandboxLimits, build_preexec_fn, host_max_processes
+from antcode_worker.executor.process_limits import (
+    SandboxLimits,
+    build_preexec_fn,
+    effective_memory_limit_mb,
+    host_max_processes,
+)
+from antcode_worker.executor.process_result import (
+    ProcessInfo,
+    describe_limit_breach,
+    failure_message,
+    limit_breach_result,
+)
 from antcode_worker.executor.process_signals import signal_process_group
 from antcode_worker.executor.python_path import authoritative_python_path
-from antcode_worker.executor.resource_sampler import ProcessTreeUsage, sample_process_tree
+from antcode_worker.executor.resource_sampler import sample_process_tree
 from antcode_worker.executor.rule_policy import filter_spider_control_env, is_rule_env_allowed
 
 # C1: 子进程 env 白名单——只透传 shell/runtime 必需变量，其余一律不给用户代码，
@@ -137,44 +148,6 @@ async def _stop_resource_monitor(monitor_task: asyncio.Task[None] | None) -> Bas
         return None
     except Exception as exc:
         return exc
-    return None
-
-
-def _describe_limit_breach(usage: ProcessTreeUsage, exec_plan: ExecPlan) -> str | None:
-    """返回进程树超限描述；未超限返回 None。"""
-    cpu_limit = exec_plan.cpu_limit_seconds
-    if cpu_limit > 0 and usage.cpu_time_seconds > cpu_limit:
-        return f"进程树 CPU 时间超限: {usage.cpu_time_seconds:.1f}s > {cpu_limit}s"
-    memory_limit_mb = exec_plan.memory_limit_mb
-    if memory_limit_mb > 0 and usage.memory_rss_mb > memory_limit_mb:
-        return f"进程树内存超限: {usage.memory_rss_mb:.1f}MB > {memory_limit_mb}MB"
-    return None
-
-
-@dataclass
-class ProcessInfo:
-    """进程信息"""
-
-    process: asyncio.subprocess.Process
-    run_id: str
-    started_at: datetime
-    exec_plan: ExecPlan
-    cancelled: bool = False
-
-    # 资源用量：采样写入，只供 _describe_limit_breach / _limit_breach_result 判越线。
-    # proto TaskStatus 没有对应字段，数字只以 ExitReason.CPU_LIMIT/OOM 与错误文案离开
-    # Worker——别再往 ExecResult 上复制一份，那份拷贝没有消费者。
-    cpu_time_seconds: float = 0
-    memory_peak_mb: float = 0
-
-
-def _limit_breach_result(process_info: ProcessInfo) -> tuple[RunStatus, ExitReason, str] | None:
-    """已采样的峰值是否越过 CPU/内存上限；未越过返回 None。"""
-    exec_plan = process_info.exec_plan
-    if exec_plan.cpu_limit_seconds > 0 and process_info.cpu_time_seconds > exec_plan.cpu_limit_seconds:
-        return RunStatus.FAILED, ExitReason.CPU_LIMIT, "CPU 时间超限"
-    if exec_plan.memory_limit_mb > 0 and process_info.memory_peak_mb > exec_plan.memory_limit_mb:
-        return RunStatus.FAILED, ExitReason.OOM, "内存超限"
     return None
 
 
@@ -334,7 +307,7 @@ class ProcessExecutor(BaseExecutor):
         return SandboxLimits(
             enforce_rlimit=bool(enforce),
             cpu_seconds=exec_plan.cpu_limit_seconds or self.config.default_cpu_limit_seconds,
-            memory_mb=exec_plan.memory_limit_mb or self.config.default_memory_limit_mb,
+            memory_mb=effective_memory_limit_mb(exec_plan.memory_limit_mb, self.config.default_memory_limit_mb),
             max_open_files=exec_plan.max_open_files or self.config.default_max_open_files,
             max_processes=host_max_processes(cmd, exec_plan.max_processes or self.config.default_max_processes),
             # T7-P2-4: RLIMIT_FSIZE 单文件上限
@@ -671,9 +644,11 @@ class ProcessExecutor(BaseExecutor):
 
             process_info.cpu_time_seconds = usage.cpu_time_seconds
             process_info.memory_peak_mb = max(process_info.memory_peak_mb, usage.memory_rss_mb)
+            process_info.scratch_peak_mb = max(process_info.scratch_peak_mb, usage.scratch_used_mb)
+            process_info.scratch_exhausted = process_info.scratch_exhausted or usage.scratch_exhausted
 
             # rlimit 是硬兜底，主动监控负责在失控前提前杀掉整个进程组
-            breach = _describe_limit_breach(usage, exec_plan)
+            breach = describe_limit_breach(usage, exec_plan)
             if breach is not None:
                 logger.warning(f"{breach}, run_id={process_info.run_id}, 进程树成员数={usage.process_count}")
                 signal_process_group(process, signal.SIGKILL)
@@ -697,16 +672,20 @@ class ProcessExecutor(BaseExecutor):
             )
 
         # 超限判定必须排在"被信号杀死"之前：内存上限主要由 _monitor_resources
-        # 主动 SIGKILL 进程树来兑现（RLIMIT_DATA 不覆盖 MAP_SHARED 与 tmpfs），
+        # 主动 SIGKILL 进程树来兑现（RLIMIT_DATA 不覆盖 MAP_SHARED 匿名映射），
         # 退出码恒为 -9，先匹配 KILLED 会把"内存超限"抹成笼统的"进程被终止"。
-        breach = _limit_breach_result(process_info)
+        breach = limit_breach_result(process_info)
         if breach is not None:
             return breach
 
         if exit_code in (-signal.SIGTERM, -signal.SIGKILL, -15, -9):
             return RunStatus.KILLED, ExitReason.KILLED, "进程被终止"
 
-        return RunStatus.FAILED, ExitReason.ERROR, f"退出码: {exit_code}"
+        scratch_limit_mb = effective_memory_limit_mb(
+            process_info.exec_plan.memory_limit_mb,
+            self.config.default_memory_limit_mb,
+        )
+        return RunStatus.FAILED, ExitReason.ERROR, failure_message(exit_code, process_info, scratch_limit_mb)
 
     async def _do_cancel(self, run_id: str, task_info: Any) -> None:
         """执行取消操作"""

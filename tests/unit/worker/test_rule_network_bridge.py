@@ -290,7 +290,7 @@ async def test_bwrap_network_namespace_reaches_only_unix_bridge() -> None:
                         RULE_EGRESS_CONNECTION_LIMIT_CONFIG: _MAX_RULE_CONNECTIONS,
                     },
                 )
-                context = await sandbox.prepare(plan, work_dir)
+                context = {**await sandbox.prepare(plan, work_dir), "tmpfs_size_mb": 0}
                 command = sandbox.wrap_command(
                     [sys.executable, "-c", _NAMESPACE_PROBE, str(upstream_port), str(RULE_EGRESS_LOOPBACK_PORT)],
                     context,

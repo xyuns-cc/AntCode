@@ -31,6 +31,9 @@ _PRIVATE_HOME = "/tmp/antcode-home"
 _PRIVATE_SHARED_MEMORY = "/dev/shm"
 _PRIVATE_SHARED_MEMORY_MODE = "1777"
 _FORBIDDEN_RUNTIME_ROOTS = frozenset({Path("/").resolve(), Path("/tmp").resolve()})
+_BYTES_PER_MIB = 1024 * 1024
+# 0 = 调用方没有任何任务级内存限额可用（运维显式关掉了限额），此时不下 --size。
+_TMPFS_UNSIZED = 0
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,8 @@ class SandboxFilesystemRequest:
     # source bundle 解包根目录；include_paths 共享目录是 work_dir 的兄弟节点，
     # 只 bind work_dir 会让它们在沙箱里彻底不存在。
     bundle_root: Path | None = None
+    # 每个内存盘挂载点（/tmp、/dev/shm）的字节上限，单位 MB。见 _private_namespace_args。
+    tmpfs_size_mb: int = _TMPFS_UNSIZED
 
 
 def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...]:
@@ -72,7 +77,7 @@ def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...
     executable = _resolve_executable(request.payload_executable)
     runtime_executable = _optional_executable(request.runtime_executable)
 
-    args = _private_namespace_args()
+    args = _private_namespace_args(request.tmpfs_size_mb)
     mounted: set[tuple[Path, Path]] = set()
     for path in _required_system_roots():
         _append_read_only(args, path, mounted=mounted)
@@ -111,12 +116,33 @@ def _optional_bundle_root(
     return bundle_root
 
 
-def _private_namespace_args() -> list[str]:
+def _private_namespace_args(tmpfs_size_mb: int) -> list[str]:
+    """私有 /dev、/proc 与两个内存盘（/dev/shm、/tmp）。
+
+    两个 tmpfs 必须显式定尺寸。不给 ``--size`` 时内核按**宿主内存的一半**建 tmpfs：
+    真机实测（宿主 32GB）任务里 ``statvfs`` 两处各报 16046MB，而整个 Worker 容器的
+    ``memory.max`` 只有 8192MB——单个任务的一个内存盘就是容器额度的 2 倍。这是典型的
+    "值从宿主算出来"：尺寸的来源与它要约束的对象不在同一个坐标系。
+
+    tmpfs 页计入容器 memory cgroup 却不进任何进程的 RSS（``write()`` 写下去的页没有
+    映射），所以进程树 RSS 监控看不见它们，``--size`` 是这条路径**唯一**的每任务边界。
+
+    尺寸取本任务自己的内存限额（``effective_memory_limit_mb``）——不是新发明的比例，
+    就是同一个已经用来收 RLIMIT_DATA 与 RSS 的数：任务对容器内存的占用，无论走哪条
+    通道，都不该超过它自己那一份。
+
+    重复计账（必须知情）：任务池已被 RSS 100% 分光（``task_memory_limit_mb`` =
+    任务池 / 并发），所以任何非零的 tmpfs 预算按定义都是超配。最坏情况单任务
+    = RSS + /tmp + /dev/shm = 3 倍限额，容器级 mem_limit 是硬顶。取这个代价是因为
+    另一条路（把限额砍到 1/3 给 tmpfs 腾地方）会让每个任务的可用内存三等分，
+    代价远大于收益。改动前后的单任务最坏值：33525MB → 3 × 限额。
+    """
     return [
         "--dev",
         "/dev",
         "--dir",
         _PRIVATE_SHARED_MEMORY,
+        *_tmpfs_size_args(tmpfs_size_mb),
         "--tmpfs",
         _PRIVATE_SHARED_MEMORY,
         "--chmod",
@@ -124,11 +150,19 @@ def _private_namespace_args() -> list[str]:
         _PRIVATE_SHARED_MEMORY,
         "--proc",
         "/proc",
+        *_tmpfs_size_args(tmpfs_size_mb),
         "--tmpfs",
         "/tmp",
         "--dir",
         _PRIVATE_HOME,
     ]
+
+
+def _tmpfs_size_args(tmpfs_size_mb: int) -> tuple[str, ...]:
+    """``--size`` 只作用于紧随其后的那一个 ``--tmpfs``（bwrap 语义），故每个挂载点各下一次。"""
+    if tmpfs_size_mb <= _TMPFS_UNSIZED:
+        return ()
+    return ("--size", str(tmpfs_size_mb * _BYTES_PER_MIB))
 
 
 def _required_system_roots() -> tuple[Path, ...]:

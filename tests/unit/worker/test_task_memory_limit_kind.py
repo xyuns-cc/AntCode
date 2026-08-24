@@ -174,7 +174,7 @@ def test_reserved_address_space_is_admitted_by_data_limit_and_refused_by_address
 def test_memory_breach_is_reported_as_oom_even_when_killed_by_signal() -> None:
     """限额生效的证据不能被 SIGKILL 掩盖成一句笼统的"进程被终止"。
 
-    RLIMIT_DATA 不覆盖 MAP_SHARED 与 tmpfs，那部分由进程树 RSS 监控主动杀进程组
+    RLIMIT_DATA 不覆盖 MAP_SHARED 匿名映射，那部分由进程树 RSS 监控主动杀进程组
     兑现——这条路径的退出码恒为 -SIGKILL。判定顺序错了，用户就看不出任务是撞了
     内存上限还是被别人杀了。
     """

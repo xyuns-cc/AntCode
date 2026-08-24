@@ -1,7 +1,11 @@
 """进程树轮询间隔的定档策略。
 
-``RLIMIT_DATA`` 不覆盖 MAP_SHARED 与 tmpfs 页，这部分只能靠 ``_monitor_resources``
+``RLIMIT_DATA`` 不覆盖 MAP_SHARED 匿名映射，这部分只能靠 ``_monitor_resources``
 的轮询式 RSS 兜底，于是"两次采样之间任务能多吃多少"就是真实的超限窗口：
+
+（``write()`` 写进 tmpfs 的页同样不计入 RLIMIT_DATA，但它也**不进 RSS**，轮询看不见，
+不在本模块的窗口讨论范围内——那条路径由沙箱 tmpfs 的 ``--size`` 硬限，见
+``sandbox_mounts``。）
 
     超限窗口 ≈ 采样间隔 × 弄脏页速率
 
