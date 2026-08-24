@@ -129,9 +129,9 @@ def _report(observation: ExpiryObservation, policy: TlsExpiryPolicy) -> str:
 class TlsExpiryMonitor:
     """周期性读盘判有效期。
 
-    **不复用 ``TlsMaterialLoader``**：``load()`` 会顺手刷新它的 ``(inode, mtime, size)``
-    指纹，监控每小时刷一次，gRPC 的握手回调就会认为"材料没变"，热更新从此永久失效。
-    监控只读自己的，绝不碰热更新链路上的状态。
+    **不复用 ``TlsMaterialLoader``**：``load()`` 会顺手刷新它的内容指纹，监控每小时
+    刷一次，gRPC 的握手回调就会认为"材料没变"，热更新从此永久失效。监控只读自己的，
+    绝不碰热更新链路上的状态。
     """
 
     def __init__(self, paths: TlsMaterialPaths, policy: TlsExpiryPolicy) -> None:

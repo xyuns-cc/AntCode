@@ -184,9 +184,9 @@ def test_unreadable_material_is_reported_as_unknown_not_as_healthy(tmp_path: Pat
 def test_expiry_checks_do_not_consume_the_hot_reload_fingerprint(tmp_path: Path) -> None:
     """到期监控不得吞掉一次待生效的热更新。
 
-    ``TlsMaterialLoader.load()`` 顺手刷新 ``(inode, mtime, size)`` 指纹。监控若复用
-    同一个 loader，它每小时一次的读盘就会把"材料变了"这条信息吃掉，gRPC 的握手回调
-    随后看到的是"没变"，热更新从此永久失效——而且不会有任何报错。
+    ``TlsMaterialLoader.load()`` 顺手刷新内容指纹。监控若复用同一个 loader，它每小时
+    一次的读盘就会把"材料变了"这条信息吃掉，gRPC 的握手回调随后看到的是"没变"，
+    热更新从此永久失效——而且不会有任何报错。
     """
     paths = _material(tmp_path, LONG_LIVED_DAYS, LONG_LIVED_DAYS)
     loader = TlsMaterialLoader(paths)

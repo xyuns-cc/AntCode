@@ -180,11 +180,14 @@ class GatewayConfig:
             #
             # 长连接不老化 ⇒ 证书材料的变化只对**新连接**生效
             # (``tls_material.create_reloadable_server_credentials``)。
-            # 切断在途会话不靠连接老化, 靠控制面的 Worker 生命周期围栏:
-            # ``lease_service.disable_worker`` 装 Redis fence,
-            # ``LeaseStore.is_current`` 在每条数据面消息上校验, 停用即时生效。
-            # 想靠 max_connection_age_ms 做"定期强制重新握手"之前, 先确认
-            # 上面这条路径为什么不够 —— 它比周期性砍长连接便宜得多。
+            #
+            # 这里曾写着"切断在途会话靠 disable_worker 的 Redis fence +
+            # LeaseStore.is_current 逐消息校验, 所以不需要 max_connection_age_ms"。
+            # **该论证在 CA 私钥泄露场景下已被证伪, 不要再据此下结论**:
+            # is_current 判的是 (worker_id, lease_id) 的代际一致性, 持伪造证书者能
+            # 走正常 Lease RPC 自签一个合法 lease; fence 只由人工运维动作触发,
+            # 与 CA 吊销无自动联动。于是 CA 被吊销后, 已建立的长连接可以无限期
+            # 存活并继续调用数据面 —— 这是一条已知残留风险, 不是已解决的问题。
             ("grpc.max_connection_idle_ms", 300_000),
         ]
 

@@ -107,8 +107,9 @@ def channel_becomes_ready(endpoint: tuple[str, int], client: ClientIdentity) -> 
 def replace_material(path: Path, value: bytes) -> None:
     """原子替换一份材料。
 
-    换 inode 而不是就地改写：``(st_ino, st_mtime_ns, st_size)`` 指纹必然变化，也不会
-    让 Gateway 读到半截文件。容器侧绑定的是**目录**，宿主换掉的文件立刻可见。
+    换 inode 而不是就地改写：不会让 Gateway 读到半截文件。变更检测本身按内容哈希
+    判，就地改写也不会漏，这里选原子替换纯粹是为了排除"读到半截"这个干扰变量。
+    容器侧绑定的是**目录**，宿主换掉的文件立刻可见。
     """
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
     temporary.write_bytes(value)
