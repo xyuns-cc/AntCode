@@ -204,7 +204,7 @@ async def test_rule_namespace_exposes_only_read_only_unix_bridge(monkeypatch, tm
 
             # tmpfs_size_mb 生产上由 sandbox_plan._sandbox_context 注入；直接
             # prepare+wrap_command 绕过了它，必须自己给，否则 wrap_command 拒绝。
-            context = {**await sandbox.prepare(plan, str(work_dir)), "tmpfs_size_mb": 0}
+            context = {**await sandbox.prepare(plan, str(work_dir)), "tmpfs_size_mb": 512}
             context["payload_max_processes"] = plan.sandbox_config[RULE_EGRESS_CONNECTION_LIMIT_CONFIG]
             context[RULE_EGRESS_DURATION_CONFIG] = 60
             monkeypatch.setattr(
@@ -244,7 +244,7 @@ async def test_bwrap_recreates_tmp_workdir_before_bind(tmp_path: Path) -> None:
     sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
     plan = ExecPlan(command=sys.executable, run_id="run-1", plugin_name="code")
 
-    context = {**await sandbox.prepare(plan, str(work_dir)), "tmpfs_size_mb": 0}
+    context = {**await sandbox.prepare(plan, str(work_dir)), "tmpfs_size_mb": 512}
     command = sandbox.wrap_command([sys.executable], context)
 
     bind_index = command.index("--bind")
@@ -263,7 +263,7 @@ def test_bwrap_applies_process_limit_inside_namespace(monkeypatch, tmp_path) -> 
     (data_root / "runtimes").mkdir()
     sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
     # tmpfs_size_mb 生产上由 sandbox_plan._sandbox_context 注入，这里直接调 wrap_command 必须自己给
-    context = {"work_dir": str(work_dir), "run_id": "run-1", "allow_network": False, "tmpfs_size_mb": 0}
+    context = {"work_dir": str(work_dir), "run_id": "run-1", "allow_network": False, "tmpfs_size_mb": 512}
     context["payload_max_processes"] = 64
 
     wrapped = sandbox.wrap_command([sys.executable, "main.py"], context)
@@ -289,7 +289,7 @@ def test_bwrap_requires_prlimit_for_process_limit(monkeypatch, tmp_path) -> None
     (data_root / "runtimes").mkdir()
     sandbox = BasicSandbox(SandboxConfig(sandbox_command=["/usr/bin/bwrap"], data_dir=str(data_root)))
     # tmpfs_size_mb 生产上由 sandbox_plan._sandbox_context 注入，这里直接调 wrap_command 必须自己给
-    context = {"work_dir": str(work_dir), "run_id": "run-1", "allow_network": False, "tmpfs_size_mb": 0}
+    context = {"work_dir": str(work_dir), "run_id": "run-1", "allow_network": False, "tmpfs_size_mb": 512}
     context["payload_max_processes"] = 64
 
     with pytest.raises(RuntimeError, match="prlimit"):

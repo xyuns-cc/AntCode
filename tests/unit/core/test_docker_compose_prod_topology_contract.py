@@ -12,6 +12,7 @@ from scripts.release_e2e_environment import NETWORK_LAYOUT
 from tests.unit.core.compose_support import load_compose
 
 PROD_COMPOSE = Path("infra/docker/docker-compose.prod.yml")
+DEV_COMPOSE = Path("infra/docker/docker-compose.dev.yml")
 WORKER_DOCKERFILE = Path("infra/docker/Dockerfile.worker")
 DOCKER_ENV_EXAMPLE = Path("infra/docker/.env.example")
 NGINX_UID = 101
@@ -66,6 +67,32 @@ def test_read_only_nginx_containers_own_their_tmpfs_scratch_space() -> None:
             options = mounts[path].split(":", 1)[1]
             assert f"uid={NGINX_UID}" in options, f"{name}:{path}"
             assert f"gid={NGINX_UID}" in options, f"{name}:{path}"
+
+
+def _tmpfs_options(entry: str) -> str:
+    _mount, _, options = str(entry).partition(":")
+    return options
+
+
+def test_worker_scratch_tmpfs_is_sized_from_the_container_not_the_host() -> None:
+    """Worker 容器的每个 tmpfs 都必须带 ``size=``，且取本容器自己的 ``mem_limit``。
+
+    Docker 建 tmpfs 不带 size 时内核按**宿主内存的一半**定尺寸：真机实测（宿主 32GB）
+    ``/tmp`` 与 ``/home/appuser/.cache`` 在 mem_limit=4g 与 3g 的 Worker 容器里各报
+    16047MB，是容器全部额度的 4~5 倍。这与沙箱层 ``--tmpfs`` 不带 ``--size`` 是同一个
+    洞——尺寸的来源与它要约束的对象不在同一个坐标系。
+
+    断言"等于 mem_limit"而不只是"存在"：写一个与容器额度无关的常数同样能让 size 存在，
+    但那就又造了一个必须靠人记得同步的第二真源。compose 是声明不是计算，容器坐标系里
+    声明期可得的数只有 mem_limit 这一个。
+    """
+    for path in (PROD_COMPOSE, DEV_COMPOSE):
+        worker = load_compose(path)["services"]["worker"]
+        entries = worker["tmpfs"]
+        assert entries, path
+        for entry in entries:
+            options = _tmpfs_options(entry)
+            assert f"size={worker['mem_limit']}" in options, f"{path}: {entry} 未按容器 mem_limit 定尺寸"
 
 
 def _toolchain_install_roots() -> dict[str, PurePosixPath]:

@@ -58,7 +58,7 @@ def test_worker_root_and_sibling_runtime_are_absent_from_mounts(tmp_path: Path) 
             "work_dir": str(work_dir),
             "run_id": "run-current",
             "runtime_path": str(current_runtime),
-            "tmpfs_size_mb": 0,
+            "tmpfs_size_mb": 512,
         },
     )
 

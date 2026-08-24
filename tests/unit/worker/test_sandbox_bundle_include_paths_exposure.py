@@ -72,6 +72,7 @@ class _Layout:
             "runtimes_root": self.runtimes_root,
             "run_id": RUN_ID,
             "bundle_root": self.bundle_root,
+            "tmpfs_size_mb": 512,
         }
         fields.update(overrides)
         return SandboxFilesystemRequest(**fields)  # type: ignore[arg-type]
@@ -171,6 +172,7 @@ def test_extracted_bundle_layout_is_exposed_end_to_end(tmp_path: Path) -> None:
             runtimes_root=runtimes_root,
             run_id=RUN_ID,
             bundle_root=Path(workspace.bundle_root),
+            tmpfs_size_mb=512,
         )
     )
 

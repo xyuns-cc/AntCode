@@ -83,7 +83,7 @@ def test_sandbox_layer_and_child_layer_never_diverge(tmp_path: Path) -> None:
         enforce_rlimit=False,
     )
     executor = SandboxExecutor(
-        config=ExecutorConfig(),
+        config=ExecutorConfig(default_memory_limit_mb=512),
         sandbox_config=SandboxConfig(
             sandbox_command=["/usr/bin/bwrap"],
             data_dir=str(data_root),
@@ -131,7 +131,7 @@ async def test_real_child_imports_shared_package_from_the_bundle_root(tmp_path: 
         workspace_root=str(bundle_root),
         enforce_rlimit=False,
     )
-    executor = ProcessExecutor(ExecutorConfig())
+    executor = ProcessExecutor(ExecutorConfig(default_memory_limit_mb=512))
     await executor.start()
     try:
         result = await asyncio.wait_for(

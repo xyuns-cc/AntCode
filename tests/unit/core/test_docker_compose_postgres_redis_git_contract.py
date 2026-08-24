@@ -154,7 +154,7 @@ def test_worker_uses_unprivileged_read_only_sandbox_container():
     assert "no-new-privileges:true" in worker["security_opt"]
     assert "seccomp=unconfined" not in worker["security_opt"]
     assert "cap_add" not in worker
-    assert "/tmp:exec,uid=1000,gid=1000,mode=1777" in worker["tmpfs"]
+    assert "/tmp:exec,uid=1000,gid=1000,mode=1777,size=4g" in worker["tmpfs"]
 
 
 def test_trusted_proxy_examples_are_explicit_and_fail_closed() -> None:

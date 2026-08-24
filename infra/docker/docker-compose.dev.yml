@@ -313,9 +313,12 @@ services:
       - apparmor=unconfined
       - systempaths=unconfined
     shm_size: 1g
+    # size= 必须显式给，且必须等于上面的 mem_limit：不给 size 时内核按**宿主内存的
+    # 一半**建盘（真机实测宿主 32GB → 16047MB，而这个容器只有 4g），推导与边界见
+    # docker-compose.prod.worker.yml 同名字段的注释。
     tmpfs:
-      - /tmp:exec,uid=1000,gid=1000,mode=1777
-      - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700
+      - /tmp:exec,uid=1000,gid=1000,mode=1777,size=4g
+      - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700,size=4g
     environment:
       - REDIS_ACL_ENABLED=true
       - ANTCODE_WORKER_KEY=${ANTCODE_WORKER_KEY:?generate a one-time Worker install key first}

@@ -72,7 +72,12 @@ def test_wrap_command_accepts_absolute_sandbox_command(tmp_path):
 
     wrapped = sandbox.wrap_command(
         [sys.executable],
-        {"work_dir": str(work_dir), "plugin_name": "code", "run_id": "test-run", "tmpfs_size_mb": 0},
+        {
+            "work_dir": str(work_dir),
+            "plugin_name": "code",
+            "run_id": "test-run",
+            "tmpfs_size_mb": 512,
+        },
     )
 
     assert wrapped[0] == "/usr/bin/bwrap"
@@ -95,7 +100,7 @@ def test_task_env_path_does_not_pollute_final_env(tmp_path, monkeypatch):
     data_root.mkdir()
     runtimes_root.mkdir()
     executor = SandboxExecutor(
-        config=ExecutorConfig(),
+        config=ExecutorConfig(default_memory_limit_mb=512),
         sandbox_config=SandboxConfig(
             sandbox_command=["/usr/bin/bwrap"],
             fs_isolated=True,
@@ -166,7 +171,7 @@ def test_filter_env_still_allows_benign_task_env(tmp_path, monkeypatch):
     data_root.mkdir()
     runtimes_root.mkdir()
     executor = SandboxExecutor(
-        config=ExecutorConfig(),
+        config=ExecutorConfig(default_memory_limit_mb=512),
         sandbox_config=SandboxConfig(
             sandbox_command=["/usr/bin/bwrap"],
             fs_isolated=True,

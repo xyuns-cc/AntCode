@@ -45,7 +45,7 @@ def test_sandbox_filesystem_request_receives_the_bundle_root(monkeypatch: pytest
 
     sandbox.wrap_command(
         ["python", "main.py"],
-        {"work_dir": PROJECT_CWD, "workspace_root": BUNDLE_ROOT, "tmpfs_size_mb": 0},
+        {"work_dir": PROJECT_CWD, "workspace_root": BUNDLE_ROOT, "tmpfs_size_mb": 512},
     )
 
     assert captured == {"bundle_root": Path(BUNDLE_ROOT), "work_dir": Path(PROJECT_CWD)}

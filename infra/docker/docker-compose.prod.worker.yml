@@ -56,9 +56,27 @@ services:
         hard: 65536
     # /tmp 还承载 healthcheck 包装器的连续失败计数与 grace 起点：它必须是 tmpfs，
     # 每次容器启动都是空的，计数与宽限期才会按"本次容器生命周期"重新起算。
+    #
+    # size= 不能省。Docker 建 tmpfs 不带 size 时内核按**宿主内存的一半**定尺寸，
+    # 而不是按本容器的 mem_limit：真机实测（宿主 32GB）这两个挂载在 mem_limit=4g 与
+    # 3g 的 Worker 容器里各报 16047MB——尺寸的来源与它要约束的对象不在同一个坐标系，
+    # 与沙箱层 --tmpfs 不带 --size 是同一个洞（见 executor/sandbox_mounts.py）。
+    # 后果不只是 df 说谎：容器内按"可用临时空间"自我定尺寸的工具会照着 16G 规划。
+    #
+    # 取值取本容器自己的 mem_limit，用的就是上面同一个变量——不是新发明的比例。
+    # 沙箱层那一层取的是"这个任务自己的内存限额"，容器层的对应物就是"这个容器自己的
+    # 内存限额"，同一条规则上移一层。compose 是**声明**不是运行期计算：它拿不到 Worker
+    # 启动后按 cgroup 算出的自适应单任务限额，也不允许引入宿主的数，mem_limit 是这里
+    # 唯一既属于容器坐标系又在声明期可得的数。
+    #
+    # 必须知情的边界：内存 cgroup 本来就是 tmpfs 页的硬顶，所以 size=mem_limit 并不会
+    # 制造一条"先 ENOSPC 后 OOM"的余量——它消灭的是宿主来源的数字，不是加一道新闸。
+    # 想要那条余量就得取 mem_limit 的某个分数，而任何分数都得先被论证（收太紧会打挂
+    # 依赖装配的 uv/mise 缓存与 rule 插件落在 /tmp 的 spool）。真正把"还是宿主的一半"
+    # 挡在启动之前的是 Worker 侧的 container_scratch 校验（fail-closed，见该模块）。
     tmpfs:
-      - /tmp:exec,uid=1000,gid=1000,mode=1777
-      - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700
+      - /tmp:exec,uid=1000,gid=1000,mode=1777,size=${ANTCODE_WORKER_MEMORY:-8g}
+      - /home/appuser/.cache:exec,uid=1000,gid=1000,mode=0700,size=${ANTCODE_WORKER_MEMORY:-8g}
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       WORKER_NAME: ${ANTCODE_WORKER_NAME:?unique Worker name is required}

@@ -36,6 +36,7 @@ def test_mount_view_contains_only_current_runtime_and_workspace(tmp_path: Path) 
             runtimes_root=tmp_path / "runtimes",
             run_id="run-current",
             runtime_dir=current_runtime,
+            tmpfs_size_mb=512,
         )
     )
     read_only = _mount_triplets(args, "--ro-bind")
@@ -67,6 +68,7 @@ def test_broad_runtime_mount_is_rejected(tmp_path: Path, runtime: Path) -> None:
                 runtimes_root=tmp_path / "runtimes",
                 run_id="run-current",
                 runtime_dir=runtime,
+                tmpfs_size_mb=512,
             )
         )
 
@@ -79,6 +81,7 @@ def test_missing_workspace_fails_closed(tmp_path: Path) -> None:
                 payload_executable=sys.executable,
                 data_root=tmp_path,
                 runtimes_root=tmp_path,
+                tmpfs_size_mb=512,
             )
         )
 
@@ -98,6 +101,7 @@ def test_runtime_collection_root_is_rejected(tmp_path: Path) -> None:
                 runtimes_root=runtimes,
                 run_id="run-current",
                 runtime_dir=runtimes,
+                tmpfs_size_mb=512,
             )
         )
 
@@ -118,6 +122,7 @@ def test_runtime_must_be_direct_child_of_configured_runtime_root(tmp_path: Path)
                 runtimes_root=runtimes,
                 run_id="run-current",
                 runtime_dir=foreign_runtime,
+                tmpfs_size_mb=512,
             )
         )
 
@@ -145,6 +150,7 @@ def test_worker_data_workspace_roots_are_rejected(tmp_path: Path, work_dir_build
                 data_root=tmp_path,
                 runtimes_root=runtimes,
                 run_id="run-current",
+                tmpfs_size_mb=512,
             )
         )
 
@@ -162,6 +168,7 @@ def test_workspace_outside_worker_data_is_rejected(tmp_path: Path) -> None:
                 payload_executable=sys.executable,
                 data_root=data_root,
                 runtimes_root=data_root / "runtimes",
+                tmpfs_size_mb=512,
             )
         )
 
@@ -179,6 +186,7 @@ def test_workspace_must_match_current_run_id(tmp_path: Path) -> None:
                 data_root=tmp_path,
                 runtimes_root=tmp_path / "runtimes",
                 run_id="run-current",
+                tmpfs_size_mb=512,
             )
         )
 
@@ -198,6 +206,7 @@ def test_workspace_less_rule_uses_only_its_private_run_directory(tmp_path: Path)
             runtimes_root=data_root / "runtimes",
             plugin_name="rule",
             run_id=run_id,
+            tmpfs_size_mb=512,
         )
     )
 
@@ -222,5 +231,6 @@ def test_workspace_executable_symlink_cannot_escape_current_run(tmp_path: Path) 
                 data_root=tmp_path,
                 runtimes_root=tmp_path / "runtimes",
                 run_id="run-current",
+                tmpfs_size_mb=512,
             )
         )

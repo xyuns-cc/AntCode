@@ -120,8 +120,10 @@ def effective_memory_limit_mb(plan_limit_mb: int, default_limit_mb: int) -> int:
     数切"——而这种分叉在真机上的表现是"限额看起来生效了却拦不住"，正是本仓反复出现的
     同名双实现。
 
-    两个值都是 0 表示运维显式关掉了内存限额；此时没有任何任务级数值可以用来给 tmpfs
-    定尺寸，调用方据此**不下 --size**，而不是另编一个数。
+    两个值都是 0 不是"运维关掉了内存限额"，而是**接线断了**：``init_worker_config``
+    恒把 0 换成自适应或默认限额（下界 256MB），``engine/config_update`` 走同一条区间
+    校验，没有任何合法路径能让运行期读到 0。返回值原样交给下游，由真正要用它的那一层
+    （``sandbox_mounts._tmpfs_size_args``）显式拒绝——在这里再判一遍就是第二个真源。
     """
     return plan_limit_mb or default_limit_mb
 

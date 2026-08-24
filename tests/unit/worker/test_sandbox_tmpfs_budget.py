@@ -88,17 +88,17 @@ def test_both_scratch_mounts_are_sized_from_the_task_memory_limit(tmp_path) -> N
     assert _sized_mounts(args) == {mount: _TASK_MEMORY_LIMIT_MB * _BYTES_PER_MIB for mount in _SCRATCH_MOUNTS}
 
 
-def test_scratch_mounts_stay_unsized_only_when_the_task_has_no_memory_limit(tmp_path) -> None:
-    """限额为 0 = 运维显式关掉了内存上限，此时没有任务级数值可用来定尺寸。
+@pytest.mark.parametrize("size_mb", [0, -1])
+def test_a_missing_task_memory_limit_is_refused_instead_of_falling_back_to_unsized(size_mb: int, tmp_path) -> None:
+    """限额 <=0 不是"运维关掉了内存上限"，是接线断了，必须抛。
 
-    反向臂：不能因为"0 也得给个数"就编一个出来。
+    ``init_worker_config`` 恒把 0 换成自适应或默认限额（下界 256MB），
+    ``engine/config_update`` 走同一条区间校验，所以运行期没有合法路径能送来 0。
+    旧实现在这里"0 就不下 --size"——一个断掉的接线于是安静地退回**宿主内存的一半**，
+    防护不是被关掉，是被换成了这套代码正要消灭的那个值。
     """
-    args = sandbox_filesystem_args(_request(tmp_path, tmpfs_size_mb=0))
-
-    assert _sized_mounts(args) == {}
-    assert "--size" not in args
-    # 但挂载点本身必须还在，否则就成了"把 tmpfs 删了"而不是"不限尺寸"
-    assert all(args[index + 1] in _SCRATCH_MOUNTS for index, tok in enumerate(args) if tok == "--tmpfs")
+    with pytest.raises(RuntimeError, match="不可知"):
+        sandbox_filesystem_args(_request(tmp_path, tmpfs_size_mb=size_mb))
 
 
 def test_wrap_command_refuses_a_context_without_an_explicit_scratch_size(tmp_path) -> None:
@@ -185,7 +185,7 @@ def _process_info(*, exhausted: bool, peak_mb: float = _SCRATCH_PEAK_MB) -> proc
         started_at=datetime.now(),
         exec_plan=ExecPlan(command="/bin/sh", memory_limit_mb=_TASK_MEMORY_LIMIT_MB),
     )
-    info.scratch_exhausted = exhausted
+    info.scratch_exhausted_at_last_sample = exhausted
     info.scratch_peak_mb = peak_mb
     return info
 
@@ -217,17 +217,28 @@ def test_a_normal_failure_is_not_relabelled_as_a_scratch_exhaustion() -> None:
     assert message == "退出码: 1"
 
 
-class _FinishesAfterOneSample:
-    """第一次采样时还活着，之后立刻退出——只跑一轮监控循环。"""
+class _FinishesAfterSamples:
+    """跑满 ``samples`` 轮监控循环后退出。"""
 
-    def __init__(self) -> None:
+    def __init__(self, samples: int = 1) -> None:
         self.pid = os.getpid()
+        self._samples = samples
         self._polls = 0
 
     @property
     def returncode(self) -> int | None:
         self._polls += 1
-        return None if self._polls <= 1 else 0
+        return None if self._polls <= self._samples else 0
+
+
+def _usage(*, exhausted: bool, used_mb: float) -> ProcessTreeUsage:
+    return ProcessTreeUsage(
+        cpu_time_seconds=0.0,
+        memory_rss_bytes=0,
+        process_count=1,
+        scratch_used_bytes=int(used_mb * _BYTES_PER_MIB),
+        scratch_exhausted=exhausted,
+    )
 
 
 @pytest.mark.asyncio
@@ -237,18 +248,34 @@ async def test_monitor_records_what_the_sampler_saw_on_the_scratch_mounts(monkey
     这条补的是"采样器会算 → 监控循环会记"之间的接线：只测采样器和只测归因函数
     都不会发现这段断掉。
     """
-    usage = ProcessTreeUsage(
-        cpu_time_seconds=0.0,
-        memory_rss_bytes=0,
-        process_count=1,
-        scratch_used_bytes=int(_SCRATCH_PEAK_MB * _BYTES_PER_MIB),
-        scratch_exhausted=True,
-    )
+    usage = _usage(exhausted=True, used_mb=_SCRATCH_PEAK_MB)
     monkeypatch.setattr(process_mod, "sample_process_tree", lambda _root: usage)
     info = _process_info(exhausted=False, peak_mb=0)
-    info.process = cast(Any, _FinishesAfterOneSample())
+    info.process = cast(Any, _FinishesAfterSamples())
 
     await process_mod.ProcessExecutor()._monitor_resources(info)
 
-    assert info.scratch_exhausted is True
+    assert info.scratch_exhausted_at_last_sample is True
     assert info.scratch_peak_mb == pytest.approx(_SCRATCH_PEAK_MB)
+
+
+@pytest.mark.asyncio
+async def test_a_scratch_mount_that_was_filled_and_then_freed_is_not_blamed_for_the_exit(monkeypatch) -> None:
+    """写满 → 释放 → 因无关原因退出，归因**不该**再说"写满了内存盘"。
+
+    旧实现把"是否写满"与峰值一样 latch 成 ``已有 or 本次``，于是任何一次瞬时写满都会
+    永久改写这次执行的失败原因——运维照着"内存盘写满"去查内存，而真因在 stderr 里。
+    峰值该 latch（它回答"最多用到多少"），写满不该（它回答"这次退出跟盘满有没有关系"）。
+    """
+    samples = iter([_usage(exhausted=True, used_mb=_SCRATCH_PEAK_MB), _usage(exhausted=False, used_mb=0.0)])
+    monkeypatch.setattr(process_mod, "sample_process_tree", lambda _root: next(samples))
+    info = _process_info(exhausted=False, peak_mb=0)
+    info.process = cast(Any, _FinishesAfterSamples(samples=2))
+
+    await process_mod.ProcessExecutor()._monitor_resources(info)
+
+    assert info.scratch_exhausted_at_last_sample is False, "退出时盘是空的，不能贴写满的归因"
+    # 峰值仍要保留：它是历史量，用来说明"最多用到多少"，与归因无关
+    assert info.scratch_peak_mb == pytest.approx(_SCRATCH_PEAK_MB)
+    _status, _reason, message = process_mod.ProcessExecutor()._determine_result(1, info)
+    assert message == "退出码: 1"

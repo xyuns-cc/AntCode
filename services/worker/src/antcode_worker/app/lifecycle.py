@@ -13,7 +13,9 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_worker.adaptive_limits import current_memory_budget
 from antcode_worker.app.shutdown import shutdown_components
+from antcode_worker.container_scratch import validate_container_scratch_fits_budget
 from antcode_worker.transport.base import WorkerState
 
 MILLISECONDS_PER_SECOND = 1000
@@ -72,6 +74,10 @@ class Lifecycle:
             raise RuntimeError("Worker 缺少 transport")
         if getattr(container, "heartbeat_reporter", None) is None:
             raise RuntimeError("Worker 缺少 heartbeat reporter")
+        # 容器自己的 /tmp 等内存盘可能是内核按**宿主内存的一半**建的（compose 的 tmpfs
+        # 声明漏了 size=）。Worker 改不了自己容器的挂载，所以只能在接活之前拒绝——放行
+        # 等于带着一个与容器额度无关的内存盘跑，正是 container_scratch 要消灭的静默失败。
+        validate_container_scratch_fits_budget(current_memory_budget())
 
     async def _check_optional_runtime(self) -> None:
         """mise 是可选能力；检测失败只禁用多语言任务。"""

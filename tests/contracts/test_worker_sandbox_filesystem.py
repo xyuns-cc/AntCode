@@ -38,7 +38,7 @@ def test_payload_namespace_never_mounts_worker_or_runtime_collection_roots(tmp_p
             "run_id": "run-current",
             "runtime_path": str(runtime),
             "runtime_executable": sys.executable,
-            "tmpfs_size_mb": 0,
+            "tmpfs_size_mb": 512,
         },
     )
     read_only = _mounts(command, "--ro-bind")

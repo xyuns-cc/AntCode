@@ -40,6 +40,7 @@ def test_runtime_interpreter_target_is_mounted_without_runtime_parent(
             run_id="run-current",
             runtime_dir=runtime_dir,
             runtime_executable=runtime_python,
+            tmpfs_size_mb=512,
         )
     )
     read_only = _read_only_mounts(args)
@@ -68,6 +69,7 @@ def test_external_executable_install_root_is_rejected(tmp_path: Path) -> None:
                 data_root=data_root,
                 runtimes_root=data_root / "runtimes",
                 run_id="run-current",
+                tmpfs_size_mb=512,
             )
         )
 
@@ -94,6 +96,7 @@ def test_mise_language_version_root_is_mounted_without_collection(
             data_root=data_root,
             runtimes_root=data_root / "runtimes",
             run_id="run-current",
+            tmpfs_size_mb=512,
         )
     )
     read_only = _read_only_mounts(args)
@@ -124,6 +127,7 @@ def test_mise_unknown_language_collection_is_rejected(
                 data_root=data_root,
                 runtimes_root=data_root / "runtimes",
                 run_id="run-current",
+                tmpfs_size_mb=512,
             )
         )
 
@@ -164,6 +168,7 @@ def test_uv_minor_version_alias_hop_is_mounted_alongside_the_resolved_root(
             run_id="run-current",
             runtime_dir=runtime_dir,
             runtime_executable=runtime_python,
+            tmpfs_size_mb=512,
         )
     )
     destinations = {destination for _source, destination in _read_only_mounts(args)}

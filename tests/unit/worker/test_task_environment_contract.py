@@ -67,7 +67,7 @@ def test_sandbox_executor_keeps_explicit_task_secrets_only(monkeypatch, tmp_path
     runtimes_root.mkdir()
     work_dir.mkdir(parents=True)
     executor = SandboxExecutor(
-        config=ExecutorConfig(),
+        config=ExecutorConfig(default_memory_limit_mb=512),
         sandbox_config=SandboxConfig(
             sandbox_command=["/usr/bin/bwrap"],
             data_dir=str(data_root),
@@ -98,11 +98,12 @@ def test_internal_plugin_receives_worker_source_path(tmp_path: Path):
     runtimes_root.mkdir()
     work_dir.mkdir(parents=True)
     executor = SandboxExecutor(
+        config=ExecutorConfig(default_memory_limit_mb=512),
         sandbox_config=SandboxConfig(
             sandbox_command=["/usr/bin/bwrap"],
             data_dir=str(data_root),
             runtimes_dir=str(runtimes_root),
-        )
+        ),
     )
 
     sandboxed = executor._create_sandboxed_plan(

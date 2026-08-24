@@ -645,7 +645,7 @@ class ProcessExecutor(BaseExecutor):
             process_info.cpu_time_seconds = usage.cpu_time_seconds
             process_info.memory_peak_mb = max(process_info.memory_peak_mb, usage.memory_rss_mb)
             process_info.scratch_peak_mb = max(process_info.scratch_peak_mb, usage.scratch_used_mb)
-            process_info.scratch_exhausted = process_info.scratch_exhausted or usage.scratch_exhausted
+            process_info.scratch_exhausted_at_last_sample = usage.scratch_exhausted  # 不 latch，见 process_result
 
             # rlimit 是硬兜底，主动监控负责在失控前提前杀掉整个进程组
             breach = describe_limit_breach(usage, exec_plan)

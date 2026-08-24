@@ -168,7 +168,10 @@ class BasicSandbox(SandboxProvider):
 
         给一个"未配置就不限"的默认值，等于让任何新调用方悄悄拿到宿主内存一半的
         tmpfs——本仓已有两个 wrap_command 调用方（任务执行与依赖准备），第三个出现时
-        不该靠人记得加这个键。0 是合法值，含义是"运维显式关掉了内存限额"。
+        不该靠人记得加这个键。
+
+        这里只判"是不是一个整数 MB"；"多大才合法"由 ``sandbox_mounts._tmpfs_size_args``
+        单独判（<=0 即接线断了，直接抛）。两处各写一遍区间就是在造第二个真源。
         """
         if _TMPFS_SIZE_KEY not in context:
             raise RuntimeError(
@@ -176,8 +179,8 @@ class BasicSandbox(SandboxProvider):
                 f"否则内核按宿主内存的一半建 tmpfs，单任务即可超出整个容器的内存额度"
             )
         value = context[_TMPFS_SIZE_KEY]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise RuntimeError(f"sandbox context.{_TMPFS_SIZE_KEY} 必须是非负整数 MB，当前 {value!r}")
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise RuntimeError(f"sandbox context.{_TMPFS_SIZE_KEY} 必须是整数 MB，当前 {value!r}")
         return value
 
     @staticmethod

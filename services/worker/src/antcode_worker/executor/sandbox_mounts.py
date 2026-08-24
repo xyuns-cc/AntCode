@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from antcode_worker.executor.sandbox_executables import executable_mount_roots
@@ -32,8 +32,6 @@ _PRIVATE_SHARED_MEMORY = "/dev/shm"
 _PRIVATE_SHARED_MEMORY_MODE = "1777"
 _FORBIDDEN_RUNTIME_ROOTS = frozenset({Path("/").resolve(), Path("/tmp").resolve()})
 _BYTES_PER_MIB = 1024 * 1024
-# 0 = 调用方没有任何任务级内存限额可用（运维显式关掉了限额），此时不下 --size。
-_TMPFS_UNSIZED = 0
 
 
 @dataclass(frozen=True)
@@ -52,7 +50,8 @@ class SandboxFilesystemRequest:
     # 只 bind work_dir 会让它们在沙箱里彻底不存在。
     bundle_root: Path | None = None
     # 每个内存盘挂载点（/tmp、/dev/shm）的字节上限，单位 MB。见 _private_namespace_args。
-    tmpfs_size_mb: int = _TMPFS_UNSIZED
+    # 无默认值：默认值只能是"不下 --size"，而那正是内核按宿主内存的一半建盘的入口。
+    tmpfs_size_mb: int = field(kw_only=True)
 
 
 def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...]:
@@ -133,9 +132,12 @@ def _private_namespace_args(tmpfs_size_mb: int) -> list[str]:
 
     重复计账（必须知情）：任务池已被 RSS 100% 分光（``task_memory_limit_mb`` =
     任务池 / 并发），所以任何非零的 tmpfs 预算按定义都是超配。最坏情况单任务
-    = RSS + /tmp + /dev/shm = 3 倍限额，容器级 mem_limit 是硬顶。取这个代价是因为
-    另一条路（把限额砍到 1/3 给 tmpfs 腾地方）会让每个任务的可用内存三等分，
-    代价远大于收益。改动前后的单任务最坏值：33525MB → 3 × 限额。
+    = RSS + /tmp + /dev/shm = **3.5 倍**限额，容器级 mem_limit 是硬顶。是 3.5 不是 3：
+    RSS 那一份的上界不是 1 倍而是 ~1.5 倍——它由轮询监控兑现，而
+    ``monitor_interval._OVERSHOOT_BUDGET_RATIO`` 显式允许 50% 超支，按 1 倍算就是把那条
+    已写明的超支预算漏掉了。取这个代价是因为另一条路（把限额砍到 1/3 给 tmpfs 腾地方）
+    会让每个任务的可用内存三等分，代价远大于收益。改动前后的单任务最坏值
+    （限额 1433MB、宿主 32GB）：2×16046 + 1.5×1433 = 34242MB → 3.5 × 限额。
     """
     return [
         "--dev",
@@ -159,9 +161,20 @@ def _private_namespace_args(tmpfs_size_mb: int) -> list[str]:
 
 
 def _tmpfs_size_args(tmpfs_size_mb: int) -> tuple[str, ...]:
-    """``--size`` 只作用于紧随其后的那一个 ``--tmpfs``（bwrap 语义），故每个挂载点各下一次。"""
-    if tmpfs_size_mb <= _TMPFS_UNSIZED:
-        return ()
+    """``--size`` 只作用于紧随其后的那一个 ``--tmpfs``（bwrap 语义），故每个挂载点各下一次。
+
+    ``<= 0`` 不是"不限制"而是**接线断了**：``init_worker_config`` 恒把 0 换成自适应或
+    默认限额（下界 256MB），``engine/config_update`` 走同一条区间校验，运行期没有合法
+    路径能送来 0。旧实现"0 就不下 --size"，于是断掉的接线会安静退回**宿主内存的一半**
+    ——防护不是被关掉，是被换成了本模块正要消灭的那个值。
+    """
+    if tmpfs_size_mb <= 0:
+        raise RuntimeError(
+            f"沙箱内存盘尺寸不可知({tmpfs_size_mb})：0/负数不表示不限制，而是任务级内存限额没接上。"
+            "此时不下 --size 会让内核按宿主内存的一半建 /tmp 与 /dev/shm，单个任务的一个内存盘"
+            "就能超出整个容器的额度。请检查资源限额接线"
+            "(config.init_worker_config → ExecutorConfig.default_memory_limit_mb → effective_memory_limit_mb)。"
+        )
     return ("--size", str(tmpfs_size_mb * _BYTES_PER_MIB))
 
 
