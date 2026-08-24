@@ -149,7 +149,7 @@ def test_metrics_compute_and_assert_required_indicators(capsys) -> None:
         OperationSample(10.0, 200, "a"),
         OperationSample(30.0, 200, "b"),
     )
-    report = LoadReport("self-check", stage, 1.0, samples)
+    report = LoadReport("self-check", stage, 1.0, samples, 1)
     summary = report.summary
     assert summary.qps == 2.0
     assert summary.p50_ms == percentile((10.0, 30.0), 0.50)
@@ -256,13 +256,8 @@ async def test_cleanup_rejects_tasks_that_remain_accessible() -> None:
 
 
 def test_created_task_ids_include_error_samples_for_cleanup() -> None:
-    report = LoadReport(
-        "cleanup",
-        Stage(1, 1, 1),
-        1.0,
-        (OperationSample(1.0, 200, {"data": {"id": "task-1"}}, "api_success_false"),),
-    )
-    assert created_task_ids(report) == ["task-1"]
+    samples = (OperationSample(1.0, 200, {"data": {"id": "task-1"}}, "api_success_false"),)
+    assert created_task_ids(LoadReport("cleanup", Stage(1, 1, 1), 1.0, samples, 1)) == ["task-1"]
 
 
 @pytest.mark.asyncio

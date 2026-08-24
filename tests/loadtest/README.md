@@ -67,8 +67,19 @@ not increase the per-user limit.
 - `trigger-dedup` aims every virtual user at one task. `task-dispatch`
   deliberately triggers each task once to avoid the dedup lock, so without this
   scenario the most common production race — the same task triggered
-  concurrently — is never exercised. It requires every accepted trigger to
-  return the same run ID, and only `200` / `409` to be observed.
+  concurrently — is never exercised. It requires exactly one accepted trigger,
+  only `200` / `409` to be observed, and a **measured peak of at least two
+  simultaneously in-flight triggers**. Status codes alone cannot prove a race:
+  the trigger dedup lock is a Redis key with a TTL, so serially released
+  requests collect `409`s too. The scenario therefore releases its triggers all
+  at once instead of at `1/QPS`; VUS is its concurrency, and `QPS * duration`
+  is only the total trigger count.
+- `worker-churn` observes a real externally driven restart. A Worker is only
+  reported offline after `WORKER_HEARTBEAT_TIMEOUT` (60s by default) elapses
+  without a heartbeat, so the stage duration must cover restart plus that
+  timeout plus recovery — roughly 150s or more. A short duration fails the
+  scenario (`did not transition online/offline/online`); it does not pass
+  quietly.
 - Dispatch correctness is asserted, not just throughput: every scenario that
   waits for runs reads a page of run history and fails if a `retry_count=0`
   task produced more than one run. Reading only the latest run cannot see a
@@ -90,6 +101,15 @@ mandatory so a saved command cannot execute on its own.
 ```bash
 pytest tests/loadtest --run-loadtests -m loadtest_scenario -q -s
 ```
+
+Requests are released at `1/QPS`, so the number of in-flight requests is about
+`QPS * per-request latency`, not VUS. Every scenario reports the measured
+`peak_concurrency`; check it before believing a result describes concurrent
+traffic. The achievable QPS is also bounded by the global API rate limit
+(`RATE_LIMIT_CALLS` / `RATE_LIMIT_PERIOD`, 1000 per 60s per client IP by
+default). Write scenarios amplify that budget: setup, measured request,
+post-run verification, and cleanup all count, and cleanup paces itself at one
+request per 100ms.
 
 The common assertion checks request count, achieved QPS, P50/P95/P99 latency,
 status-code distribution, 5xx count, and total error rate. Thresholds are

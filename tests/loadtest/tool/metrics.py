@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Generic, TypeVar
 
 from .config import Stage, Thresholds
 
 T = TypeVar("T")
+InFlightWindow = tuple[float, float]
+OVERLAP_START = 1
+OVERLAP_END = -1
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,7 @@ class LoadReport(Generic[T]):
     stage: Stage
     elapsed_seconds: float
     samples: tuple[OperationSample[T], ...]
+    peak_concurrency: int
 
     @property
     def summary(self) -> LoadSummary:
@@ -62,6 +67,22 @@ def percentile(values: tuple[float, ...], quantile: float) -> float:
     upper = min(lower + 1, len(ordered) - 1)
     fraction = position - lower
     return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def peak_overlap(windows: Sequence[InFlightWindow]) -> int:
+    """同时在飞的请求数峰值。
+
+    一个场景到底有没有制造出并发，只有这个量能证伪；状态码分布证明不了——
+    触发去重锁按 TTL 生效，串行释放的请求照样一路 409。端点相同时先记结束
+    再记开始，首尾相接的两个请求不算重叠。
+    """
+    events = sorted([(start, OVERLAP_START) for start, _ in windows] + [(end, OVERLAP_END) for _, end in windows])
+    peak = 0
+    live = 0
+    for _, delta in events:
+        live += delta
+        peak = max(peak, live)
+    return peak
 
 
 def _status_counts(samples: tuple[OperationSample[object], ...]) -> tuple[tuple[str, int], ...]:
@@ -125,6 +146,7 @@ def emit_report(report: LoadReport[object], extra: dict[str, object] | None = No
         "scenario": report.name,
         "stage": asdict(report.stage),
         "elapsed_seconds": round(report.elapsed_seconds, 6),
+        "peak_concurrency": report.peak_concurrency,
         "summary": asdict(summary),
     }
     if extra:

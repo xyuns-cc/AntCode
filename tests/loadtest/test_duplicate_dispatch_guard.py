@@ -11,7 +11,12 @@ from typing import Any
 
 import pytest
 
+from tests.loadtest.test_task_throughput import _accepted_count, _accepted_run_ids
+from tests.loadtest.tool.config import Stage
+from tests.loadtest.tool.metrics import LoadReport, OperationSample
 from tests.loadtest.tool.scenarios import reject_duplicate_runs, wait_for_successful_runs
+
+ACCEPTED_TWICE = 2
 
 
 class _DuplicateRunApi:
@@ -33,6 +38,25 @@ async def test_duplicate_dispatch_is_rejected_even_when_latest_run_succeeded() -
             1,
             expected_worker_id="worker-1",
         )
+
+
+def test_matching_run_ids_cannot_detect_a_second_accepted_trigger() -> None:
+    """负载任务是 ``schedule_type=date``，``dispatch_run_id`` 对一次性任务返回
+    调度锚点派生的确定值——同一个 task 的每次触发本来就返回同一个 run id。
+    "被接受的触发返回的 run id 全部相同"因此恒成立，验不出第二次被接受的触发。
+    """
+    accepted_twice = LoadReport(
+        "trigger-dedup",
+        Stage(2, 2, 1),
+        1.0,
+        (
+            OperationSample(1.0, 200, {"data": {"run_id": "run-1"}}),
+            OperationSample(1.0, 200, {"data": {"run_id": "run-1"}}),
+        ),
+        ACCEPTED_TWICE,
+    )
+    assert _accepted_run_ids(accepted_twice) == {"run-1"}
+    assert _accepted_count(accepted_twice) == ACCEPTED_TWICE
 
 
 def test_reject_duplicate_runs_accepts_exactly_one_run_per_task() -> None:

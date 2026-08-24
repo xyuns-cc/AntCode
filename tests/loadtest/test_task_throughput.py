@@ -9,7 +9,7 @@ import pytest
 from tests.loadtest.tool.api import AntCodeApi
 from tests.loadtest.tool.config import LoadSettings, Stage
 from tests.loadtest.tool.metrics import LoadReport, assert_report, emit_report
-from tests.loadtest.tool.runner import run_load
+from tests.loadtest.tool.runner import run_burst, run_load
 from tests.loadtest.tool.scenarios import (
     create_tasks,
     created_task_ids,
@@ -23,6 +23,11 @@ HTTP_OK = frozenset({200})
 TRIGGER_ACCEPTED = 200
 # 并发触发同一个 task 时，去重锁的败者返回 409；两者之外的任何码都是缺陷。
 TRIGGER_DEDUP_STATUSES = frozenset({TRIGGER_ACCEPTED, 409})
+# 竞态的定义就是"至少两个请求同时在飞"。低于它，这一场压测什么竞态都没打到，
+# 而 409 照样满屏——去重锁按 TTL 生效，串行释放的后续请求一样被拒。
+MIN_CONCURRENT_TRIGGERS = 2
+# 同时打到的一批触发里，只允许一个被接受。
+MAX_ACCEPTED_TRIGGERS = 1
 
 
 @pytest.mark.asyncio
@@ -122,6 +127,9 @@ async def test_concurrent_trigger_deduplication(load_settings: LoadSettings) -> 
 
     ``task-dispatch`` 刻意一 task 一次触发以绕开去重锁，于是生产里最常见的
     并发形态——同一个任务被同时触发多次——在整套压测里从没被打过。
+
+    这里必须用 ``run_burst``：匀速释放下在飞请求恒为 1，场景会全过而全程零
+    并发，因此峰值并发度本身是一条断言，而不是背景信息。
     """
     _, worker_id = require_write_targets(load_settings)
     async with AntCodeApi(load_settings) as api:
@@ -131,11 +139,13 @@ async def test_concurrent_trigger_deduplication(load_settings: LoadSettings) -> 
             return await api.call("POST", f"/tasks/{task_ids[0]}/trigger", index)
 
         try:
-            report = await run_load("trigger-dedup", load_settings.stage, trigger)
+            report = await run_burst("trigger-dedup", load_settings.stage, trigger)
             observed = {int(code) for code, _ in report.summary.status_codes if code != "network_error"}
             run_ids = _accepted_run_ids(report)
+            assert report.peak_concurrency >= MIN_CONCURRENT_TRIGGERS, report.peak_concurrency
             assert report.summary.server_errors_5xx == 0, report.summary
             assert observed <= TRIGGER_DEDUP_STATUSES, report.summary
+            assert _accepted_count(report) == MAX_ACCEPTED_TRIGGERS, report.summary
             assert len(run_ids) == 1, run_ids
             completion_seconds = await wait_for_successful_runs(
                 api,
@@ -146,6 +156,16 @@ async def test_concurrent_trigger_deduplication(load_settings: LoadSettings) -> 
         finally:
             await api.delete_tasks(task_ids)
     emit_report(report, {"deduplicated_run_id": run_ids.pop(), "completion_seconds": round(completion_seconds, 6)})
+
+
+def _accepted_count(report: LoadReport[Any]) -> int:
+    """被接受的触发条数——去重是否成立的直接判据。
+
+    只比对 run id 不够：负载任务是 ``schedule_type=date``，``dispatch_run_id``
+    对一次性任务返回调度锚点派生的确定值，同一个 task 的每次触发本来就返回
+    同一个 run id，"全部相同"恒成立、验不出任何东西。
+    """
+    return dict(report.summary.status_codes).get(str(TRIGGER_ACCEPTED), 0)
 
 
 def _accepted_run_ids(report: LoadReport[Any]) -> set[str]:

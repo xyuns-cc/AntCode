@@ -2729,7 +2729,7 @@
       "path": "tests/loadtest/test_tool_self_check.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 315
+      "value": 310
     },
     {
       "path": "tests/loadtest/test_tool_self_check.py",
