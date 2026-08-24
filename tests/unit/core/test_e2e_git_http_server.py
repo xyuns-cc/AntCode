@@ -1,9 +1,13 @@
+import json
+import os
 import subprocess
 import threading
 from pathlib import Path
 from urllib.request import urlopen
 
 from tests.e2e.git_http_server import GitHttpConfig, ThreadingHTTPServer, _handler
+
+IDENTITY = "identity-for-this-round"
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -27,7 +31,7 @@ def _bare_repository(root: Path) -> Path:
 def test_smart_git_http_server_supports_shallow_branch_clone(tmp_path) -> None:
     repository = _bare_repository(tmp_path)
     backend = subprocess.check_output(["git", "--exec-path"], text=True).strip()
-    config = GitHttpConfig(root=tmp_path, backend=str(Path(backend) / "git-http-backend"))
+    config = GitHttpConfig(root=tmp_path, backend=str(Path(backend) / "git-http-backend"), identity=IDENTITY)
     server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(config))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -36,7 +40,12 @@ def test_smart_git_http_server_supports_shallow_branch_clone(tmp_path) -> None:
     try:
         with urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as response:
             assert response.status == 200
-            assert response.read() == b"ok\n"
+            # 根路径必须自报身份：只回一个定值等于任何占住该端口的进程都能冒充。
+            assert json.loads(response.read()) == {
+                "identity": IDENTITY,
+                "root": str(tmp_path),
+                "pid": os.getpid(),
+            }
         subprocess.run(
             [
                 "git",

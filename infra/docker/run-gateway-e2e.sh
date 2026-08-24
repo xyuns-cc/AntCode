@@ -34,7 +34,6 @@ WORKERS="${ANTCODE_GATEWAY_E2E_WORKERS:-1}"
 HTTPS_PORT="${ANTCODE_GATEWAY_E2E_HTTPS_PORT:-443}"
 HTTP_REDIRECT_PORT="${ANTCODE_GATEWAY_E2E_HTTP_PORT:-80}"
 GATEWAY_PORT="${ANTCODE_GATEWAY_E2E_GATEWAY_PORT:-15051}"
-GIT_HTTP_PORT=18081
 # WORKER_INSTALL_SOURCE_URL 只进安装脚本模板，E2E 期间没有任何进程去 clone 它，
 # 但 web_api 的 worker_installer 会 fail-closed 校验它必须是 HTTPS Git 地址。
 SOURCE_URL="${ANTCODE_GATEWAY_E2E_SOURCE_URL:-https://github.com/antcode/antcode.git}"
@@ -49,8 +48,6 @@ log() { printf '=== %s\n' "$*"; }
 #   * --extra dev：编排器复用 tests/e2e 的 HTTP helper，helpers.py 经 conftest 依赖 pytest。
 # 每次 `uv run` 都会按给定 flag 重新同步 venv，所以这里必须处处一致——一处漏掉就会把
 # 上一步装好的包卸掉，故障点还落在下一步（真机实测：卡在 [4/7] 与 tests/e2e teardown）。
-# 用数组而不是函数：Git HTTP 源要走 `nohup`，而 nohup 只能 exec 真实命令，
-# 传函数名会直接 "No such file or directory"（真机实测）。
 UV_RUN=(uv run --frozen --all-packages --extra dev)
 
 control_compose() {
@@ -174,17 +171,26 @@ prepare_environment() {
   mv "$STATE_DIR.runner.env" "$STATE_DIR/runner.env"
 }
 
+runner_value() {
+  grep "^$1=" "$STATE_DIR/runner.env" | cut -d= -f2-
+}
+
 start_git_source() {
   log "[3/7] 起 E2E Git 源（宿主进程；地址取宿主出口 IP，宿主与 Worker 容器都能路由）"
   # host.docker.internal 只在容器里靠 extra_hosts 解析，宿主上的 pytest 解析不了；
   # 回环地址反过来只对宿主有效。所以 prepare 脚本按路由表取宿主出口 IP，两侧同址。
-  local git_root
-  git_root="$(grep '^ANTCODE_E2E_GIT_ROOT=' "$STATE_DIR/runner.env" | cut -d= -f2-)"
-  nohup "${UV_RUN[@]}" python -m tests.e2e.git_http_server \
-    --root "$git_root" --host 0.0.0.0 --port "$GIT_HTTP_PORT" \
-    >"$STATE_DIR/git-http.log" 2>&1 &
-  echo "$!" >"$STATE_DIR/git-http.pid"
-  timeout 30 bash -c "until curl -fsS http://127.0.0.1:${GIT_HTTP_PORT}/ >/dev/null; do sleep 1; done"
+  #
+  # 启动与自证都交给 scripts.start_e2e_git_source，这一步才有真实退出码可读：
+  # 原先是 `nohup … &` 加 `curl` 探活，前者的退出码无人读，后者只证明"端口上有人
+  # 应答"。18081 被上一轮遗留的孤儿占着时，新进程 EADDRINUSE 秒死而探活对着孤儿
+  # 成功，整轮 E2E 于是验错对象还报全过（测试机已复现）。
+  # 探活地址直接用 ANTCODE_E2E_GIT_BASE_URL——tests/e2e 连的就是它，端口也只在
+  # scripts/release_e2e_environment.py 定义一份，这里不再另抄一个 18081。
+  "${UV_RUN[@]}" python -m scripts.start_e2e_git_source \
+    --root "$(runner_value ANTCODE_E2E_GIT_ROOT)" \
+    --base-url "$(runner_value ANTCODE_E2E_GIT_BASE_URL)" \
+    --log "$STATE_DIR/git-http.log" \
+    --pid-file "$STATE_DIR/git-http.pid"
 }
 
 start_stack() {

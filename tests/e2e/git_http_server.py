@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
@@ -20,6 +21,9 @@ HTTP_SERVER_PORT = 8000
 class GitHttpConfig:
     root: Path
     backend: str
+    # 本轮启动方生成的随机串。根路径原样回它，探活方才能证明"应答的是我起的那个
+    # 进程"，而不只是"这个端口上有人应答"——两者以前长得一模一样。
+    identity: str
 
 
 def _request_path(raw_path: str) -> str:
@@ -80,11 +84,26 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if _request_path(self.path) == "/":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok\n")
+            self._send_identity()
             return
         self._serve_backend(b"")
+
+    def _send_identity(self) -> None:
+        """根路径自报身份：本轮 identity、真正在服务的仓库根、进程号。
+
+        以前这里回定长的 ``ok\\n``——任何占住同一端口的进程都给得出同样的应答，
+        于是"端口通"被当成"我起来了"，上一轮遗留的孤儿能让整轮 E2E 对着别人的
+        仓库树跑还报全过。回了这三样，探活方才有能证伪的判据，人排查时
+        ``curl 根路径`` 也能直接看出占用者是谁、在服务哪棵树。
+        """
+        payload = json.dumps(
+            {"identity": self.config.identity, "root": str(self.config.root), "pid": os.getpid()}
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -124,11 +143,21 @@ def _handler(config: GitHttpConfig) -> type[GitHttpRequestHandler]:
     return ConfiguredGitHttpRequestHandler
 
 
-def serve(root: Path, host: str, port: int) -> None:
-    backend = shutil.which("git-http-backend") or "/usr/lib/git-core/git-http-backend"
-    if not Path(backend).is_file():
-        raise RuntimeError("git-http-backend is not installed")
-    config = GitHttpConfig(root=root.resolve(), backend=backend)
+def _git_http_backend() -> Path:
+    """问 git 自己要 backend 路径。
+
+    它从不在 PATH 上（各发行版放 libexec，macOS 在 CommandLineTools 里），写死任一
+    绝对路径都会在另一种环境上无声地退化成"服务起不来"。
+    """
+    exec_path = subprocess.run(["git", "--exec-path"], capture_output=True, text=True, check=True).stdout.strip()
+    backend = Path(exec_path) / "git-http-backend"
+    if not backend.is_file():
+        raise RuntimeError(f"git-http-backend is not installed: {backend}")
+    return backend
+
+
+def serve(root: Path, host: str, port: int, *, identity: str) -> None:
+    config = GitHttpConfig(root=root.resolve(), backend=str(_git_http_backend()), identity=identity)
     config.root.mkdir(parents=True, exist_ok=True)
     with ThreadingHTTPServer((host, port), _handler(config)) as server:
         server.serve_forever()
@@ -139,8 +168,11 @@ def main() -> None:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=HTTP_SERVER_PORT)
+    # 必填而不是自动生成：identity 的唯一用处是让**启动方**核对应答方，
+    # 服务端自己编一个等于谁也证明不了。
+    parser.add_argument("--identity", required=True)
     args = parser.parse_args()
-    serve(args.root, args.host, args.port)
+    serve(args.root, args.host, args.port, identity=args.identity)
 
 
 if __name__ == "__main__":
