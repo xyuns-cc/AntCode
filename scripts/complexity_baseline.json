@@ -1073,7 +1073,7 @@
       "path": "services/gateway/src/antcode_gateway/services/control_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 793
+      "value": 790
     },
     {
       "path": "services/gateway/src/antcode_gateway/services/data_service.py",

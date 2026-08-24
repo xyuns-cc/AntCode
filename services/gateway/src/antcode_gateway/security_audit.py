@@ -36,6 +36,8 @@ EVENT_API_KEY_INVALID = "api_key_invalid"
 EVENT_JWT_INVALID = "jwt_invalid"
 EVENT_MTLS_REJECT = "mtls_reject"
 EVENT_REGISTER_REJECTED = "register_rejected"
+# Deregister 携带空 lease_id：被拒的强制撤销尝试(见 control_service.Deregister)。
+EVENT_DEREGISTER_MISSING_GENERATION = "deregister_missing_generation"
 
 
 def extract_trace_id(metadata: dict[str, Any]) -> str | None:
@@ -116,6 +118,7 @@ __all__ = [
     "AUDIT_SECURITY_MAXLEN",
     "AUDIT_SECURITY_STREAM",
     "EVENT_API_KEY_INVALID",
+    "EVENT_DEREGISTER_MISSING_GENERATION",
     "EVENT_JWT_INVALID",
     "EVENT_MTLS_REJECT",
     "EVENT_REGISTER_REJECTED",

@@ -60,6 +60,7 @@ from loguru import logger
 from antcode_gateway.auth import require_authenticated_worker
 from antcode_gateway.handlers import LeaseHandler
 from antcode_gateway.security_audit import SecurityAuditor
+from antcode_gateway.services import deregister_guard
 from antcode_gateway.services.control_ack_settlement import settle_control_ack as _settle_control_ack
 from antcode_gateway.services.control_event_builders import build_control_event
 from antcode_gateway.services.control_stream_ownership import (
@@ -269,6 +270,10 @@ class GatewayControlService(ControlServiceServicer):
         worker_id = await require_authenticated_worker(context, request.worker_id)
         reason = request.reason or "explicit"
         logger.info(f"Worker Deregister: worker_id={worker_id}, reason={reason}")
+        # 空 lease_id 会让 revoke 无条件 DEL 任意 worker 的 lease（见 deregister_guard 模块 docstring）。
+        if not request.lease_id:
+            await deregister_guard.reject_deregister_without_generation(context, self._security_auditor, worker_id)
+            return control_pb2.DeregisterResponse(success=False, error=deregister_guard.DEREGISTER_MISSING_GENERATION)
         if self._lease_store is None:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "lease service unavailable")
             return control_pb2.DeregisterResponse(success=False, error="lease service unavailable")
@@ -285,15 +290,7 @@ class GatewayControlService(ControlServiceServicer):
         if not revoked:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "worker lease is not current")
             return control_pb2.DeregisterResponse(success=False, error="worker lease is not current")
-        # 同时清理过渡期心跳 Hash（运维 dashboard 兼容）。
-        try:
-            redis = await get_redis_client()
-            if redis is not None:
-                from antcode_core.infrastructure.redis import worker_heartbeat_key
-
-                await redis.delete(worker_heartbeat_key(worker_id))
-        except Exception as exc:
-            logger.warning(f"Deregister 清理 heartbeat 失败: {exc}")
+        await deregister_guard.delete_deregister_heartbeat(await get_redis_client(), worker_id)
         return control_pb2.DeregisterResponse(success=True)
 
     # =========================================================================
