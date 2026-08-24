@@ -629,13 +629,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 910
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerLoadBalancer.calculate_load_score",
-      "rule": "PLR2004",
-      "value": 3
+      "value": 832
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
@@ -653,7 +647,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerLoadBalancer.select_best_worker",
       "rule": "PLR0915",
-      "value": 52
+      "value": 51
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",

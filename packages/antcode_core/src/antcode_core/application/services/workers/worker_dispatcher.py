@@ -27,6 +27,8 @@ from antcode_core.application.services.workers.worker_capability_routing import 
     supports_task_types,
 )
 from antcode_core.application.services.workers.worker_dispatch_failure import failed_batch_dispatch
+from antcode_core.application.services.workers.worker_liveness import heartbeat_age_ms
+from antcode_core.application.services.workers.worker_load_score import PERCENT_FULL, calculate_load_score
 from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
 from antcode_core.application.services.workers.worker_registration_gate import filter_registration_ready_workers
 from antcode_core.application.services.workers.worker_selection import select_dispatch_worker
@@ -86,19 +88,19 @@ class BatchDispatchResult:
 class WorkerLoadBalancer:
     """负载均衡器"""
 
-    WEIGHT_CPU = 0.3
-    WEIGHT_MEMORY = 0.3
-    WEIGHT_TASKS = 0.25
-    WEIGHT_LATENCY = 0.15
-
+    # 硬门禁：过了这条线就不再是"排在后面"，而是完全不派活。
+    #
+    # 这两个 90 与下面的 0.8 一样出自 70a26e9 的裸字面量，**没有任何依据留下**——同批
+    # 引入的 WEIGHT_* 权重常量甚至从未被引用过。它们是按宿主口径的年代定的，而 CPU 与
+    # 内存现已换成容器配额口径（f23f192 / 8074a8f），阈值的含义随之从"整机忙闲"变成
+    # "本容器吃掉了自己配额的几成"。真机实测当前不误伤（三台各跑到自己配额约 50% 时全部
+    # available、76.6% 仍不踢、只有真打满的那台被拦），但"实测没出事"不等于"90 是对的
+    # 数"。上线首日应观察这条线附近的判定，有数据再定，不要在这里补一个编出来的理由。
     MAX_CPU_THRESHOLD = 90
     MAX_MEMORY_THRESHOLD = 90
     MAX_TASKS_RATIO = 0.8
 
     def __init__(self):
-        self._worker_latencies = {}
-        self._latency_update_interval = 60
-        self._last_latency_update = {}
         self._resource_cache = {}
         self._resource_cache_time = {}
         self._resource_cache_ttl = 2.0
@@ -173,57 +175,9 @@ class WorkerLoadBalancer:
                 if self._resource_inflight.get(worker.id) is inflight:
                     self._resource_inflight.pop(worker.id, None)
 
-    def calculate_load_score(self, worker, metrics=None):
-        """
-        计算负载评分（越低越优）
-
-        评分因素:
-        - CPU 使用率 (30%)
-        - 内存使用率 (25%)
-        - 任务负载 (20%)
-        - 网络延迟 (15%)
-        - 成功率 (10%)
-        """
-        import math
-
-        if not metrics:
-            return 100
-
-        # CPU 评分
-        cpu_score = metrics.get("cpu", 100)
-
-        # 内存评分
-        memory_score = metrics.get("memory", 100)
-
-        # 任务负载评分
-        running_tasks = metrics.get("runningTasks", 0)
-        queued_tasks = metrics.get("queuedTasks", 0)
-        max_tasks = metrics.get("maxConcurrentTasks", 5)
-        task_load = running_tasks + queued_tasks
-        task_score = (task_load / max_tasks) * 100 if max_tasks > 0 else 100
-        if task_score > 100:
-            task_score = 100
-
-        # 网络延迟评分
-        latency = self._worker_latencies.get(worker.id, 100)
-        latency_score: float
-        if latency <= 10:
-            latency_score = 0
-        elif latency >= 1000:
-            latency_score = 100
-        else:
-            latency_score = min(100, max(0, 25 * math.log10(latency / 10)))
-
-        success_rate = metrics.get("successRate", 100)  # 默认100%成功率
-        # 成功率越高，分数越低
-        success_score = 100 - success_rate
-
-        # 综合评分（调整权重）
-        total_score = (
-            cpu_score * 0.30 + memory_score * 0.25 + task_score * 0.20 + latency_score * 0.15 + success_score * 0.10
-        )
-
-        return round(total_score, 2)
+    async def score_worker(self, worker):
+        """单台节点的负载评分，口径与 select_best_worker 排序时用的完全一致。"""
+        return calculate_load_score(await self._refresh_resources(worker))
 
     def is_worker_available(self, worker, metrics=None):
         """检查节点可用性"""
@@ -247,34 +201,6 @@ class WorkerLoadBalancer:
         if max_tasks <= 0:
             return False
         return not running_tasks >= max_tasks * self.MAX_TASKS_RATIO
-
-    async def update_worker_latency(self, worker):
-        """更新网络延迟"""
-        now = datetime.now()
-        last_update = self._last_latency_update.get(worker.id)
-
-        if last_update and (now - last_update).total_seconds() < self._latency_update_interval:
-            return self._worker_latencies.get(worker.id, 100)
-
-        try:
-            if not worker.last_heartbeat:
-                self._worker_latencies[worker.id] = 999
-                return 999
-
-            last_hb = worker.last_heartbeat
-            if last_hb.tzinfo is not None:
-                last_hb = last_hb.astimezone().replace(tzinfo=None)
-
-            latency = int((now - last_hb).total_seconds() * 1000)
-            if latency < 0:
-                latency = 0
-
-            self._worker_latencies[worker.id] = latency
-            self._last_latency_update[worker.id] = now
-            return latency
-        except Exception:
-            self._worker_latencies[worker.id] = 999
-            return 999
 
     async def select_best_worker(
         self,
@@ -349,10 +275,6 @@ class WorkerLoadBalancer:
             *[self._refresh_resources(worker) for worker in filtered_workers],
             return_exceptions=True,
         )
-        await asyncio.gather(
-            *[self.update_worker_latency(worker) for worker in filtered_workers],
-            return_exceptions=True,
-        )
 
         candidates = []
         for worker, resource_metrics in zip(filtered_workers, resource_results, strict=False):
@@ -376,7 +298,7 @@ class WorkerLoadBalancer:
 
         scored_workers = []
         for worker, metrics in candidates:
-            score = self.calculate_load_score(worker, metrics)
+            score = calculate_load_score(metrics)
             scored_workers.append((worker, score))
             logger.debug(f"负载评分 [{worker.name}] {score}")
 
@@ -404,24 +326,20 @@ class WorkerLoadBalancer:
 
         workers = await query.all()
 
-        rankings = []
+        rankings: list[dict[str, Any]] = []
         resource_results = await asyncio.gather(
             *[self._refresh_resources(worker) for worker in workers],
-            return_exceptions=True,
-        )
-        await asyncio.gather(
-            *[self.update_worker_latency(worker) for worker in workers],
             return_exceptions=True,
         )
 
         for worker, resource_metrics in zip(workers, resource_results, strict=False):
             if isinstance(resource_metrics, Exception) or not resource_metrics:
-                score = 100
+                score = PERCENT_FULL
                 available = False
                 metrics = {}
             else:
                 metrics = self._merge_metrics(worker.metrics, resource_metrics)
-                score = self.calculate_load_score(worker, metrics)
+                score = calculate_load_score(metrics)
                 available = self.is_worker_available(worker, metrics)
 
             rankings.append(
@@ -434,7 +352,11 @@ class WorkerLoadBalancer:
                     "load_score": score,
                     "available": available,
                     "metrics": metrics,
-                    "latency_ms": self._worker_latencies.get(worker.id, -1),
+                    # 曾经叫 latency_ms，但它从来就是 now - last_heartbeat，不是网络往返；
+                    # 这个仓库没有任何 Master→Worker 的探活通道能测出往返（派发单向走 Redis
+                    # Stream，worker_connection_service.test_connection 也只标 heartbeat）。
+                    # 判据删掉之后更不能留一个名字说谎的展示字段。
+                    "heartbeat_age_ms": heartbeat_age_ms(worker.last_heartbeat),
                 }
             )
 

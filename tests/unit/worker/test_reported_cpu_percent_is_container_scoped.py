@@ -1,7 +1,7 @@
 """Worker 上报的 CPU 使用率必须是**本容器配额**的占用，不是宿主整机的忙闲程度。
 
 这个值不是只拿来显示的：``WorkerLoadBalancer.is_worker_available`` 拿它当硬门禁
-(阈值 90)、``calculate_load_score`` 给它 0.30 权重(五项判据里最重的一项)。宿主口径
+(阈值 90)、``calculate_load_score`` 给它三分之一权重(三项判据之一)。宿主口径
 下两个方向都会判错，真机 192.168.1.250 实测(``docker exec`` 直接读 cgroup)：
 
 - 漏判：``antcode-mn-worker2`` 打满自己 2 核配额时容器口径 99.6%、内核已在限流

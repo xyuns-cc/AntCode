@@ -56,7 +56,10 @@ async def get_best_worker(
                 "message": "没有可用的渲染 Worker" if require_render else "没有可用的 Worker",
             }
         )
-    score = worker_load_balancer.calculate_load_score(best_worker)
+    # 这里曾经写 calculate_load_score(best_worker)——把 worker 对象传给了 metrics 形参，
+    # 于是恒走"无指标"分支，接口报的 load_score 永远是满分 100。要报的就是刚才排序用的
+    # 那份指标，走 score_worker 取（select_best_worker 刚填过它的资源缓存）。
+    score = await worker_load_balancer.score_worker(best_worker)
     return success(
         {
             "available": True,

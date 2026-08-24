@@ -55,7 +55,9 @@ export interface WorkerLoadRankingItem {
   status: string
   load_score: number
   available: boolean
-  latency_ms: number
+  // 后端字段曾叫 latency_ms，量的却是 now - last_heartbeat（心跳新鲜度），
+  // 与网络往返无关；后端已改名，这里跟着改，别再按"延迟"去读它。
+  heartbeat_age_ms: number
   metrics: {
     cpu: number
     memory: number

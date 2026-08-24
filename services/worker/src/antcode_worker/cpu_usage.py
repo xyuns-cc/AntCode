@@ -7,7 +7,8 @@
 ``CpuBudget``，由它的 ``source`` 决定占用从哪一层读——**来源不可能分叉**。
 
 这个混用不是显示瑕疵，它是调度判据：``worker_dispatcher.is_worker_available`` 拿
-CPU 百分比当硬门禁（阈值 90），``calculate_load_score`` 给它 0.30 权重（五项里最高）。
+CPU 百分比当硬门禁（阈值 90），``worker_load_score.calculate_load_score`` 又给它三分
+之一的权重（三项判据之一，与内存占用、并发槽位占用同权）。
 真机实测（192.168.1.250）两个方向都会判错：
 
 - 漏判：``antcode-mn-worker2`` 打满自己 2 核配额时容器口径 **99.6%**、内核已经在限流

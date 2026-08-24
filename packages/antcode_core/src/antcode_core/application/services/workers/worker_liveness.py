@@ -52,4 +52,24 @@ def heartbeat_is_fresh(heartbeat: datetime | None, now: datetime, timeout_second
     return bool(heartbeat and (now - heartbeat).total_seconds() <= timeout_seconds)
 
 
-__all__ = ["heartbeat_is_fresh", "is_within_bootstrap_window", "naive_datetime"]
+# 从未上报过心跳时用负数，而不是 0 或某个大数：0 会读成"刚刚才心跳过"，
+# 大数又会读成一个具体的年龄。负数在任何单位下都不是合法年龄，只能读成"没有"。
+HEARTBEAT_AGE_UNKNOWN_MS = -1
+_MS_PER_SECOND = 1000
+
+
+def heartbeat_age_ms(heartbeat: datetime | None) -> int:
+    """距上次心跳过去了多少毫秒。这是**新鲜度**，不是网络往返时延。"""
+    normalized = naive_datetime(heartbeat)
+    if normalized is None:
+        return HEARTBEAT_AGE_UNKNOWN_MS
+    return int((datetime.now() - normalized).total_seconds() * _MS_PER_SECOND)
+
+
+__all__ = [
+    "HEARTBEAT_AGE_UNKNOWN_MS",
+    "heartbeat_age_ms",
+    "heartbeat_is_fresh",
+    "is_within_bootstrap_window",
+    "naive_datetime",
+]

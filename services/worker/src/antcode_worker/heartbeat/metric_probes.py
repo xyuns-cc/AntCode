@@ -55,8 +55,8 @@ async def probe_cpu(sampler: ContainerCpuSampler) -> CPUMetrics:
     宿主值，正是要消灭的那类静默失败。
 
     ``percent`` 同样按额度所在的那一层重算。它不是"只用来显示"的利用率：
-    ``is_worker_available`` 拿它当硬门禁、``calculate_load_score`` 给它 0.30 权重，
-    是五项判据里最重的一项。宿主口径下，一台打满自己配额并已被内核限流的容器只显示
+    ``is_worker_available`` 拿它当硬门禁、``calculate_load_score`` 给它三分之一的
+    权重（三项判据之一）。宿主口径下，一台打满自己配额并已被内核限流的容器只显示
     整机的三成忙闲（真机 99.6% vs 36.0%），门禁根本看不见——与内存那个盲区同一形状。
     psutil 的整机使用率只在没有 cgroup 配额（裸机）时才是正确答案，由
     ``ContainerCpuSampler`` 按 ``budget.source`` 二选一，调用方无从分叉。

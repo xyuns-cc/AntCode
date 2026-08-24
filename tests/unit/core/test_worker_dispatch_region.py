@@ -80,10 +80,8 @@ async def test_acl_candidate_list_is_filtered_by_region(monkeypatch) -> None:
         "runningTasks": 0,
         "queuedTasks": 0,
         "maxConcurrentTasks": 10,
-        "successRate": 100,
     }
     monkeypatch.setattr(balancer, "_refresh_resources", AsyncMock(return_value=metrics))
-    monkeypatch.setattr(balancer, "update_worker_latency", AsyncMock(return_value=1))
     ready_filter = AsyncMock(return_value=[west, east])
     monkeypatch.setattr(
         "antcode_core.application.services.workers.worker_dispatcher.filter_registration_ready_workers",
