@@ -12,6 +12,9 @@ from pathlib import Path
 from antcode_core.application.services.projects.source_bundle_errors import (
     SOURCE_BUNDLE_SYMLINK_REJECTED,
     SourceBundleRejected,
+    reject_file_bytes,
+    reject_file_count,
+    reject_total_bytes,
 )
 
 ENTRYPOINT_CANDIDATES = ("main.py", "spider.py", "crawler.py", "app.py")
@@ -111,16 +114,16 @@ def create_deterministic_tar_gz(repo_dir: Path, paths: list[Path] | None = None)
 
 def validate_bundle_paths(paths: list[Path]) -> None:
     if len(paths) > MAX_BUNDLE_FILE_COUNT:
-        raise ValueError(f"source bundle 文件数超过上限: {len(paths)} > {MAX_BUNDLE_FILE_COUNT}")
+        raise reject_file_count(len(paths), MAX_BUNDLE_FILE_COUNT)
     total = 0
     for path in paths:
         size = path.stat().st_size
         _reject_lfs_pointer(path, size)
         if size > MAX_BUNDLE_FILE_BYTES:
-            raise ValueError(f"source bundle 单文件超过上限: {path.name} {size} > {MAX_BUNDLE_FILE_BYTES}")
+            raise reject_file_bytes(path.name, size, MAX_BUNDLE_FILE_BYTES)
         total += size
         if total > MAX_BUNDLE_TOTAL_BYTES:
-            raise ValueError(f"source bundle 总大小超过上限: {total} > {MAX_BUNDLE_TOTAL_BYTES}")
+            raise reject_total_bytes(total, MAX_BUNDLE_TOTAL_BYTES)
 
 
 def _reject_lfs_pointer(path: Path, size: int) -> None:
@@ -207,7 +210,7 @@ def iter_unique_source_files(repo_root: Path, roots: list[Path]) -> list[Path]:
             relative = path.resolve().relative_to(repo_root).as_posix()
             files[relative] = path
             if len(files) > MAX_BUNDLE_FILE_COUNT:
-                raise ValueError(f"source bundle 文件数超过上限: {len(files)} > {MAX_BUNDLE_FILE_COUNT}")
+                raise reject_file_count(len(files), MAX_BUNDLE_FILE_COUNT)
     return [files[name] for name in sorted(files)]
 
 
@@ -225,7 +228,7 @@ def iter_source_files(source_root: Path, *, repo_root: Path) -> list[Path]:
                 continue
             files.append(path)
             if len(files) > MAX_BUNDLE_FILE_COUNT:
-                raise ValueError(f"source bundle 文件数超过上限: {len(files)} > {MAX_BUNDLE_FILE_COUNT}")
+                raise reject_file_count(len(files), MAX_BUNDLE_FILE_COUNT)
     return files
 
 

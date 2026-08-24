@@ -88,6 +88,65 @@ def test_bundle_rejects_symlinked_directory(tmp_path):
     assert "app/vendor" in excinfo.value.detail
 
 
+def test_bundle_file_count_rejection_carries_structured_code(tmp_path, monkeypatch):
+    """容量线必须带码：中文文案是给人看的，程序判定只能靠 ``error_code``。
+
+    旧实现四条容量线一律裸 ``ValueError``，调用方想区分"文件数超了"还是"压缩包超了"
+    只能去匹配中文串——仓里已经为 ``"NOSCRIPT" in str(exc)`` 付过一次 P0 代价。
+    """
+    repo = tmp_path / "repo"
+    project = repo / "app"
+    project.mkdir(parents=True)
+    for index in range(3):
+        (project / f"f{index}.py").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(path_module, "MAX_BUNDLE_FILE_COUNT", 2)
+
+    with pytest.raises(bundle_errors.SourceBundleRejected) as excinfo:
+        path_module.resolve_bundle_paths(repo, subdir="app", entry_point="f0.py", include_paths=[])
+
+    assert excinfo.value.error_code == bundle_errors.SOURCE_BUNDLE_FILE_COUNT_EXCEEDED
+    # 超了多少必须写在脸上，否则用户不知道要删几个文件。
+    assert "3" in excinfo.value.detail
+    assert bundle_errors.CAPACITY_HINT in excinfo.value.detail
+
+
+def test_bundle_total_bytes_rejection_carries_structured_code(tmp_path, monkeypatch):
+    blob = tmp_path / "blob.bin"
+    blob.write_bytes(b"x" * 4096)
+    monkeypatch.setattr(path_module, "MAX_BUNDLE_TOTAL_BYTES", 1024)
+
+    with pytest.raises(bundle_errors.SourceBundleRejected) as excinfo:
+        path_module.validate_bundle_paths([blob])
+
+    assert excinfo.value.error_code == bundle_errors.SOURCE_BUNDLE_TOTAL_BYTES_EXCEEDED
+    # 裸字节数没人读得动，必须同时给出 MiB。
+    assert "MiB" in excinfo.value.detail
+    assert bundle_errors.CAPACITY_HINT in excinfo.value.detail
+
+
+def test_bundle_single_file_rejection_carries_structured_code(tmp_path, monkeypatch):
+    blob = tmp_path / "huge.bin"
+    blob.write_bytes(b"x" * 4096)
+    monkeypatch.setattr(path_module, "MAX_BUNDLE_FILE_BYTES", 1024)
+
+    with pytest.raises(bundle_errors.SourceBundleRejected) as excinfo:
+        path_module.validate_bundle_paths([blob])
+
+    assert excinfo.value.error_code == bundle_errors.SOURCE_BUNDLE_FILE_BYTES_EXCEEDED
+    assert "huge.bin" in excinfo.value.detail
+
+
+def test_capacity_rejections_stay_value_error_subclasses():
+    """上层派发链路一律按 ``except ValueError`` 兜底，换基类会静默漏接。
+
+    这条不是证伪项：它锁的是"改动没有顺手把兜底打断"，摘掉修复也不会变红。
+    """
+    rejection = bundle_errors.reject_archive_bytes(200, 100)
+
+    assert isinstance(rejection, ValueError)
+    assert str(rejection).startswith(f"{bundle_errors.SOURCE_BUNDLE_ARCHIVE_BYTES_EXCEEDED}: ")
+
+
 def test_bundle_rejects_unmaterialized_git_lfs_pointer(tmp_path):
     pointer = tmp_path / "model.bin"
     pointer.write_text(

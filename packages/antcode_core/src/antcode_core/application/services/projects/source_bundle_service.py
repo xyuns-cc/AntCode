@@ -28,6 +28,7 @@ from antcode_core.application.services.projects.git_transport import (
 )
 from antcode_core.application.services.projects.git_url_security import ResolvedURL
 from antcode_core.application.services.projects.git_url_security import resolve_git_url as _resolve_git_url
+from antcode_core.application.services.projects.source_bundle_errors import reject_archive_bytes
 from antcode_core.application.services.projects.source_bundle_metadata import (
     artifact_metadata as _artifact_metadata,
 )
@@ -152,7 +153,7 @@ def _materialize_bundle(
         _validate_bundle_paths(bundle_paths)
         content = _create_deterministic_tar_gz(repo_dir, bundle_paths)
         if len(content) > MAX_BUNDLE_ARCHIVE_BYTES:
-            raise ValueError(f"source bundle 压缩包超过上限: {len(content)} > {MAX_BUNDLE_ARCHIVE_BYTES}")
+            raise reject_archive_bytes(len(content), MAX_BUNDLE_ARCHIVE_BYTES)
         return content
 
 

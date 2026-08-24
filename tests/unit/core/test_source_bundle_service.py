@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from antcode_core.application.services.projects import source_bundle_errors as bundle_errors
 from antcode_core.application.services.projects import source_bundle_service as module
 from antcode_core.application.services.projects.git_transfer_quota import TransferBudget
 from antcode_core.application.services.projects.git_transport import GitTransportSession
@@ -66,6 +67,34 @@ def test_materialize_bundle_uses_root_data_temp_directory(monkeypatch):
 
     root_data = Path.cwd() / "data"
     assert root_data in seen["repo_dir"].parents
+
+
+def test_materialize_bundle_archive_rejection_carries_structured_code(monkeypatch):
+    """压缩包线是四条容量线里唯一打包之后才判的一条，也是提交 npm 离线缓存时先触到的那条。
+
+    真机实测（1967 个文件 / 200 MiB 的 npm ``_cacache``）：文件数与解压后总大小都没超，
+    tar.gz 后 123.6 MiB 顶穿 100 MiB。这条报错必须能和另外三条区分开。
+    """
+
+    def fake_clone(repo_dir, source_config, revision, **kwargs):
+        del source_config, revision, kwargs
+        (repo_dir / "app").mkdir(parents=True)
+        (repo_dir / "app" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setattr(module, "_clone_repo", fake_clone)
+    monkeypatch.setattr(module, "MAX_BUNDLE_ARCHIVE_BYTES", 8)
+
+    with pytest.raises(bundle_errors.SourceBundleRejected) as excinfo:
+        module._materialize_bundle(
+            {"url": "https://example.com/repo.git", "subdir": "app"},
+            "a" * 40,
+            None,
+            entry_point="main.py",
+            transfer_budget=TransferBudget(1024),
+        )
+
+    assert excinfo.value.error_code == bundle_errors.SOURCE_BUNDLE_ARCHIVE_BYTES_EXCEEDED
+    assert bundle_errors.CAPACITY_HINT in excinfo.value.detail
 
 
 _BRANCH_SHA = "1" * 40
