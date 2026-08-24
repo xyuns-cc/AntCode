@@ -11,7 +11,10 @@ fetcher 凭什么断定"没变、不用换"。判错的两个方向后果完全�
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+_ONE_SECOND_NS = 1_000_000_000
 
 import pytest
 from antcode_gateway.tls_material import (
@@ -97,7 +100,12 @@ def test_touching_material_without_changing_content_is_not_a_reload(
     unchanged = paths.client_ca.read_bytes()
     stat = paths.client_ca.stat()
 
+    # 用 os.utime 显式推进 mtime，不指望 write_bytes 自己推进：ext4 的时间戳粒度实测
+    # 约 4ms，紧跟着 stat() 的写入大概率落在同一个 tick 里、st_mtime_ns 原样不变，
+    # 于是下面那条前置断言会随机失败（实测 12 跑 10 挂）。要造的场景是"内容没动、
+    # 只有 mtime 变了"，那就把 mtime 直接设成一个确定不同的值。
     paths.client_ca.write_bytes(unchanged)
+    os.utime(paths.client_ca, ns=(stat.st_atime_ns, stat.st_mtime_ns + _ONE_SECOND_NS))
 
     assert paths.client_ca.stat().st_mtime_ns != stat.st_mtime_ns
     assert loader.certificate_configuration() is None
