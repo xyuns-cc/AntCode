@@ -1247,7 +1247,7 @@
       "path": "services/web_api/src/antcode_web_api/lifespan.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 430
+      "value": 410
     },
     {
       "path": "services/web_api/src/antcode_web_api/middleware/middleware.py",

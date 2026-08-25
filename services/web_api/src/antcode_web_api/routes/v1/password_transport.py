@@ -6,10 +6,9 @@
 这里既不另起一套开关，也不另起一套状态码。
 
 策略执行在**路由层**，不在 schema 或 service 层，因为它管的是"口令不得明文
-过线"——只对真正过线的请求成立。``lifespan._create_default_admin`` 直接拿本进程
-环境变量里的 ``DEFAULT_ADMIN_PASSWORD`` 构造 ``UserCreateRequest`` 调 service，
-不经过网络也拿不到公钥（启动期还没有 HTTP 客户端），因此刻意不受此策略约束；
-把策略下沉到 schema 会连引导管理员一起打挂。
+过线"——只对真正过线的请求成立。引导默认管理员的 ``scripts/init_db.py::_create_admin``
+拿本进程环境变量里的 ``DEFAULT_ADMIN_PASSWORD`` 直接落 ``User`` 模型，既不过网络也
+拿不到公钥；策略留在路由层，这条路径才不会被"过线"的规矩误伤。
 """
 
 from antcode_core.common.security.login_crypto import (

@@ -61,47 +61,61 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 async def init_services() -> None:
-    """初始化所有应用服务"""
+    """初始化所有应用服务。
+
+    这里**不**引导默认管理员：唯一的创建方是 ``scripts/init_db.py::_create_admin``。
+    两个理由，缺一都会退回到原来的坏形态：
+
+    1. 本函数按 ``SERVER_WORKERS``（默认 2）在每个 uvicorn 子进程各跑一遍。曾经的
+       ``_create_default_admin`` 是 ``get_or_none`` 后 ``create_user`` 的 check-then-act，
+       空库时两个进程同时走到就必然有一个吃 ``users_username_key`` 唯一冲突，异常
+       冒泡出 lifespan → uvicorn 判 "Application startup failed" 杀掉该子进程 →
+       父进程重拉，服务在半容量下待若干秒。init_db 是一次性单进程，没有这个竞态。
+    2. 生产刻意不把 ``DEFAULT_ADMIN_PASSWORD`` 给常驻的 web-api，只在
+       ``bootstrap-admin.sh`` 那次一次性 migration 里以 secret 文件形态注入
+       （见 docker-compose.prod.bootstrap-admin.yml 与 test_docker_compose_prod_contract）。
+       在常驻服务里读这个变量建号会把一次性引导密钥变成长期环境变量。
+
+    web-api 本身永远不建表（``_init_db`` 只 ``Tortoise.init``，不 ``generate_schemas``），
+    所以任何部署形态都必须先跑 init_db，管理员也就一定被创建过。
+    """
     logger.info("=" * 50)
     logger.info(f"初始化 {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info("=" * 50)
 
     # 生产画像必须在数据库连接前暴露安装分发配置错误。
-    logger.info("[1/12] 校验 Worker 安装分发配置")
+    logger.info("[1/11] 校验 Worker 安装分发配置")
     validate_required_worker_install_config(settings)
 
-    logger.info("[2/12] 初始化数据库")
+    logger.info("[2/11] 初始化数据库")
     await _init_db()
 
-    logger.info("[3/12] 初始化运行目录")
+    logger.info("[3/11] 初始化运行目录")
     await _init_runtime_dirs()
 
-    logger.info("[4/12] 创建默认管理员")
-    await _create_default_admin()
-
-    logger.info("[5/12] 初始化系统配置")
+    logger.info("[4/11] 初始化系统配置")
     await _init_system_config()
     await _init_alert_service()
 
-    logger.info("[6/12] 初始化 Worker 认证")
+    logger.info("[5/11] 初始化 Worker 认证")
     await _init_worker_auth()
 
-    logger.info("[7/12] 初始化Redis")
+    logger.info("[6/11] 初始化Redis")
     await _init_redis()
 
-    logger.info("[8/12] 启动内存监控")
+    logger.info("[7/11] 启动内存监控")
     await _setup_memory_monitoring()
 
-    logger.info("[9/12] 初始化指标缓存")
+    logger.info("[8/11] 初始化指标缓存")
     await _init_metrics_cache()
 
-    logger.info("[10/12] 启动日志清理")
+    logger.info("[9/11] 启动日志清理")
     await _init_log_cleanup()
 
-    logger.info("[11/12] 启动分布式日志")
+    logger.info("[10/11] 启动分布式日志")
     await _init_distributed_log()
 
-    logger.info("[12/12] 启动 HTTP 客户端")
+    logger.info("[11/11] 启动 HTTP 客户端")
     await http_client.start()
 
     logger.info("=" * 50)
@@ -183,40 +197,6 @@ async def _init_runtime_dirs() -> None:
         logger.info(f"运行目录已初始化: {settings.data_dir}")
     except Exception as e:
         logger.error(f"运行目录初始化失败: {e}")
-        raise
-
-
-# 管理员用户初始化
-
-
-async def _create_default_admin() -> None:
-    """创建默认管理员用户（如不存在）"""
-    try:
-        from antcode_core.application.services.users.user_service import user_service
-        from antcode_core.domain.schemas.user import UserCreateRequest
-
-        admin_user = await user_service.get_user_by_username(settings.DEFAULT_ADMIN_USERNAME)
-
-        if not admin_user:
-            if not settings.DEFAULT_ADMIN_PASSWORD:
-                logger.warning(
-                    "未配置 DEFAULT_ADMIN_PASSWORD，跳过默认管理员创建。"
-                    "请在 .env 中设置 DEFAULT_ADMIN_USERNAME 和 DEFAULT_ADMIN_PASSWORD"
-                )
-                return
-
-            admin_request = UserCreateRequest(
-                username=settings.DEFAULT_ADMIN_USERNAME,
-                password=settings.DEFAULT_ADMIN_PASSWORD,
-                email="admin@example.com",
-                is_admin=True,
-                role="super_admin",
-            )
-            await user_service.create_user(admin_request)
-            logger.info(f"默认管理员 [{settings.DEFAULT_ADMIN_USERNAME}] 已创建")
-            logger.warning("请尽快修改默认管理员密码")
-    except Exception as e:
-        logger.error(f"创建默认管理员失败: {e}")
         raise
 
 
