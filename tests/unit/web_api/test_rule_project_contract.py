@@ -10,7 +10,8 @@ from antcode_core.domain.schemas.project import (
     ProjectRuleCreateRequest,
     ProjectRuleUpdateRequest,
 )
-from antcode_web_api.routes.v1.project import _build_project_create_request, project_router
+from antcode_web_api.routes.v1.project import project_router
+from antcode_web_api.routes.v1.project_create_request import build_project_create_request
 from pydantic import ValidationError
 
 
@@ -43,7 +44,7 @@ def test_rule_form_preserves_dispatch_constraints() -> None:
         require_render=True,
     )
 
-    request = _build_project_create_request(form)
+    request = build_project_create_request(form)
 
     assert isinstance(request, ProjectRuleCreateRequest)
     assert request.region == "cn-east"
@@ -114,7 +115,7 @@ def test_file_form_preserves_language() -> None:
         subdir="src",
     )
 
-    request = _build_project_create_request(form)
+    request = build_project_create_request(form)
 
     assert isinstance(request, ProjectFileCreateRequest)
     assert request.language == "go"

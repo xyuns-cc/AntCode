@@ -22,7 +22,7 @@ from typing import Annotated, Any
 
 import pytest
 from antcode_core.domain.schemas.project import ProjectCreateFormRequest
-from antcode_web_api.routes.v1 import project as project_route
+from antcode_web_api.routes.v1.project_create_request import build_project_create_request
 from fastapi import FastAPI, Form
 from fastapi.testclient import TestClient
 
@@ -41,7 +41,7 @@ def _build_app() -> FastAPI:
     async def create(  # pyright: ignore[reportUnusedFunction]
         form_data: Annotated[ProjectCreateFormRequest, Form()],
     ) -> dict[str, Any]:
-        request = project_route._build_project_create_request(form_data)
+        request = build_project_create_request(form_data)
         return {
             "parsed_form": {
                 "include_paths": form_data.include_paths,

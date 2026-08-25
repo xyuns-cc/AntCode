@@ -29,16 +29,12 @@ from antcode_core.domain.schemas.common import BaseResponse, PaginationResponse
 from antcode_core.domain.schemas.project import (
     CodeInfo,
     FileInfo,
-    ProjectCodeCreateRequest,
     ProjectCodeUpdateRequest,
     ProjectCreateFormRequest,
-    ProjectCreateRequest,
-    ProjectFileCreateRequest,
     ProjectFileUpdateRequest,
     ProjectListQueryRequest,
     ProjectListResponse,
     ProjectResponse,
-    ProjectRuleCreateRequest,
     ProjectRuleUpdateRequest,
     TaskJsonRequest,
 )
@@ -79,6 +75,7 @@ from antcode_web_api.routes.v1.mutation_audit import AuditedResource, audit_data
 from antcode_web_api.routes.v1.project_cache_scope import (
     project_authorization_cache_scope,
 )
+from antcode_web_api.routes.v1.project_create_request import build_project_create_request
 from antcode_web_api.routes.v1.project_duplicate import duplicate_project_record
 from antcode_web_api.routes.v1.project_export_executions import bound_execution_export_payloads
 from antcode_web_api.routes.v1.project_export_logs import load_export_task_logs
@@ -195,20 +192,6 @@ async def get_project_create_form(
     return form_data
 
 
-def _extract_repo_source_fields(form_data) -> dict:
-    """O6: 从 FormRequest 抽 Git repository 源码字段，供 file/code project
-    的 CreateRequest 使用。前端 ``appendRepositorySourceFields`` 用同一契约。
-    """
-    fields = {
-        "repository_id": form_data.repository_id,
-        "ref": form_data.ref or "main",
-        "subdir": form_data.subdir,
-        "include_paths": form_data.include_paths,
-    }
-    # 剔除 None 让 Pydantic default 生效
-    return {k: v for k, v in fields.items() if v is not None}
-
-
 async def get_project_list_query(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=500),
@@ -257,7 +240,7 @@ async def create_project(
     - 废弃字段不再声明为 Form 参数，避免客户端误以为这些配置仍然生效。
     """
 
-    request = _build_project_create_request(form_data)
+    request = build_project_create_request(form_data)
     project = await project_service.create_project(
         request=request,
         user_id=current_user_id,
@@ -266,91 +249,6 @@ async def create_project(
     await _attach_project_detail_info(response_data, project)
     await _audit_project_creation(http_request, current_user, project)
     return success_response(response_data, message=Messages.CREATED_SUCCESS, code=201)
-
-
-def _build_project_create_request(form_data: ProjectCreateFormRequest) -> ProjectCreateRequest:
-    request_data = {**_base_project_create_data(form_data), **_project_type_create_data(form_data)}
-    schema_by_type = {
-        ProjectType.RULE: ProjectRuleCreateRequest,
-        ProjectType.FILE: ProjectFileCreateRequest,
-        ProjectType.CODE: ProjectCodeCreateRequest,
-    }
-    schema = schema_by_type.get(form_data.type, ProjectCreateRequest)
-    return schema(**request_data)
-
-
-def _base_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
-    return {
-        "name": form_data.name,
-        "description": form_data.description,
-        "type": form_data.type,
-        "tags": form_data.tags,
-        "dependencies": form_data.dependencies,
-        "runtime_scope": form_data.runtime_scope,
-        "python_version": form_data.python_version,
-        "shared_runtime_key": form_data.shared_runtime_key,
-        "env_location": form_data.env_location,
-        "worker_id": form_data.worker_id,
-        "use_existing_env": form_data.use_existing_env,
-        "existing_env_name": form_data.existing_env_name,
-        "env_name": form_data.env_name,
-        "env_description": form_data.env_description,
-        "region": form_data.region,
-    }
-
-
-def _project_type_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
-    if form_data.type == ProjectType.FILE:
-        return {
-            "language": form_data.language,
-            "entry_point": form_data.entry_point,
-            "runtime_config": form_data.runtime_config,
-            "environment_vars": form_data.environment_vars,
-            **_extract_repo_source_fields(form_data),
-        }
-    if form_data.type == ProjectType.RULE:
-        return _rule_project_create_data(form_data)
-    if form_data.type == ProjectType.CODE:
-        return {
-            "language": form_data.language,
-            "entry_point": form_data.code_entry_point,
-            "documentation": form_data.documentation,
-            **_extract_repo_source_fields(form_data),
-        }
-    return {}
-
-
-def _rule_project_create_data(form_data: ProjectCreateFormRequest) -> dict[str, Any]:
-    if not form_data.target_url:
-        raise HTTPException(status_code=400, detail="规则项目必须提供target_url")
-    if not form_data.extraction_rules:
-        raise HTTPException(status_code=400, detail="规则项目必须提供extraction_rules")
-    return {
-        "engine": form_data.engine,
-        "region": form_data.region,
-        "require_render": form_data.require_render,
-        "target_url": form_data.target_url,
-        "url_pattern": form_data.url_pattern,
-        "request_method": form_data.request_method,
-        "callback_type": form_data.callback_type,
-        "extraction_rules": form_data.extraction_rules,
-        "pagination_config": form_data.pagination_config,
-        "max_pages": form_data.max_pages,
-        "start_page": form_data.start_page,
-        "request_delay": form_data.request_delay,
-        "retry_count": form_data.retry_count,
-        "timeout": form_data.timeout,
-        "priority": form_data.priority,
-        "dont_filter": form_data.dont_filter,
-        "data_schema": form_data.data_schema,
-        "headers": form_data.headers,
-        "cookies": form_data.cookies,
-        "proxy_config": form_data.proxy_config,
-        "anti_spider": form_data.anti_spider,
-        "task_config": form_data.task_config,
-        "resume_enabled": getattr(form_data, "resume_enabled", None),
-        "dedup_config": getattr(form_data, "dedup_config", None),
-    }
 
 
 async def _audit_project_creation(http_request: Request, current_user: Any, project: Project) -> None:

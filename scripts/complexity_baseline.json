@@ -1343,7 +1343,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1265
+      "value": 1163
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
