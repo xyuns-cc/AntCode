@@ -21,6 +21,8 @@ from antcode_worker.adaptive_limits import calculate_adaptive_limits
 from antcode_worker.config import WorkerConfig, apply_resource_limits
 from antcode_worker.resource_budget import TASK_POOL_SHARE_OF_BUDGET, ResourceBudgetError
 
+from tests.unit.worker.cgroup_v2_support import simulate_cgroup_v2_host
+
 _BYTES_PER_MIB = 1024 * 1024
 
 # 真机实测环境：Worker 容器 mem_limit=3g / cpus=2，宿主 31.34GiB / 8 核
@@ -58,10 +60,9 @@ def _use_container_budget(
     memory_max.write_text(str(memory_bytes), encoding="utf-8")
     cpu_file = tmp_path / "cpu.max"
     cpu_file.write_text(cpu_max, encoding="utf-8")
+    simulate_cgroup_v2_host(monkeypatch, tmp_path)
     monkeypatch.setattr(resource_budget, "CGROUP_V2_MEMORY_MAX", memory_max)
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_MEMORY_LIMIT", tmp_path / "absent-v1-mem")
     monkeypatch.setattr(resource_budget, "CGROUP_V2_CPU_MAX", cpu_file)
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_CPU_QUOTA", tmp_path / "absent-v1-cpu")
     monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVirtualMemory(_HOST_MEMORY_BYTES))
     monkeypatch.setattr(psutil, "cpu_count", lambda: _HOST_CPU_COUNT)
 
@@ -225,10 +226,12 @@ def test_host_sourced_budget_is_reported_not_swallowed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """探测不到 cgroup 时必须留下 WARNING——静默按宿主值算正是要修的 bug。"""
+    # 裸机形态：连 cgroup 根都没有。挂着 cgroup 却不是 v2 是另一回事（直接抛），
+    # 见 test_resource_budget_source.test_non_v2_cgroup_host_fails_loudly_for_memory。
+    monkeypatch.setattr(resource_budget, "CGROUP_ROOT", tmp_path / "absent-root")
+    monkeypatch.setattr(resource_budget, "CGROUP_V2_CONTROLLERS", tmp_path / "absent-controllers")
     monkeypatch.setattr(resource_budget, "CGROUP_V2_MEMORY_MAX", tmp_path / "absent-v2-mem")
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_MEMORY_LIMIT", tmp_path / "absent-v1-mem")
     monkeypatch.setattr(resource_budget, "CGROUP_V2_CPU_MAX", tmp_path / "absent-v2-cpu")
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_CPU_QUOTA", tmp_path / "absent-v1-cpu")
     monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVirtualMemory(_HOST_MEMORY_BYTES))
     monkeypatch.setattr(psutil, "cpu_count", lambda: _HOST_CPU_COUNT)
     warnings: list[str] = []

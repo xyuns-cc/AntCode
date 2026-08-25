@@ -11,6 +11,8 @@ cgroup 配额相差一个数量级——真机实测：``mem_limit=3g`` 的容�
 算出来**。
 
 读不到 cgroup 时不假装没事：
+- 挂着 cgroup 但不是 v2 → 直接抛错（见 ``_require_cgroup_v2``），本版本只支持
+  cgroup v2 统一层级;
 - cgroup 文件不存在 → 这个进程确实没有 cgroup 内存上限（裸机部署），宿主总量
   就是正确答案；来源记进 ``origin`` 并由调用方打印，不静默;
 - cgroup 文件存在但读不出/解析不了 → 无法判定预算，直接抛错（fail-closed），
@@ -26,15 +28,16 @@ from pathlib import Path
 _BYTES_PER_MIB = 1024 * 1024
 
 # cgroup v2 统一层级；容器内有 cgroup namespace，读到的就是本容器自己的额度。
-CGROUP_V2_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
-CGROUP_V2_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
-# cgroup v1 回退路径（老内核 / 老 dockerd）。
-CGROUP_V1_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-CGROUP_V1_CPU_QUOTA = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-CGROUP_V1_CPU_PERIOD = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+CGROUP_V2_MEMORY_MAX = CGROUP_ROOT / "memory.max"
+CGROUP_V2_CPU_MAX = CGROUP_ROOT / "cpu.max"
+# 判定 cgroup 代际只认这一个文件：它是 v2 独有的，v1 与 hybrid 都没有。
+# 不能拿 memory.max 的缺席来判——缺席既可能是 v1，也可能是压根没挂 cgroup，
+# 而这两者要走的路正好相反（前者必须失败，后者宿主值就是答案）。
+CGROUP_V2_CONTROLLERS = CGROUP_ROOT / "cgroup.controllers"
 
-# cgroup v2 用字面量 "max" 表示不限制；v1 用一个接近 2^63 的哨兵值，
-# 两者统一按"不小于宿主物理量即视为不限制"折叠掉。
+# cgroup v2 用字面量 "max" 表示不限制；另外 mem_limit 允许大于宿主物理内存，
+# 那种设法同样等于没设限，一并按"不小于宿主物理量即视为不限制"折叠掉。
 _CGROUP_UNLIMITED_LITERAL = "max"
 
 # 任务池只拿预算的一部分：Worker 父进程自己要跑 gRPC 长连接、日志缓冲、artifact
@@ -46,7 +49,6 @@ class BudgetSource(StrEnum):
     """预算取自哪一层——必须能在启动日志里被看见。"""
 
     CGROUP_V2 = "cgroup-v2"
-    CGROUP_V1 = "cgroup-v1"
     HOST = "host"
 
 
@@ -113,7 +115,7 @@ def read_cgroup_value(path: Path) -> str | None:
 
 
 def _parse_cgroup_bytes(raw: str, path: Path) -> int | None:
-    """把 memory.max / memory.limit_in_bytes 的内容解析成字节数；不限制返回 None。"""
+    """把 memory.max 的内容解析成字节数；不限制返回 None。"""
     if raw == _CGROUP_UNLIMITED_LITERAL:
         return None
     try:
@@ -122,41 +124,57 @@ def _parse_cgroup_bytes(raw: str, path: Path) -> int | None:
         raise ResourceBudgetError(f"cgroup 内存上限无法解析，拒绝按宿主内存估算: {path} 内容={raw!r}") from exc
 
 
+def _require_cgroup_v2() -> None:
+    """挂着 cgroup 却不是 v2 → 拒绝继续，不允许退回宿主视图。
+
+    这条不是可有可无的告警，而是删掉 v1 读取分支之后唯一的出口：v1/hybrid 宿主上
+    ``memory.max`` / ``cpu.max`` 同样不存在，在下面两个探测函数里与"裸机压根没挂
+    cgroup"长得一模一样，都会落到 ``BudgetSource.HOST``——限额于是按宿主的 31GiB
+    和 8 核算出来，而不是容器的 3GiB / 2 核，正好把本模块存在的那个超卖 bug 原样
+    复活，还附赠一句"未检测到 cgroup 上限"让人以为是裸机。所以两者必须在这里分开。
+
+    本仓没有任何 v1 部署目标（无文档、无 compose 声明、无宿主探测脚本、无 v1 真机
+    记录），曾经的 v1 读取分支从未在任何宿主上执行过。与其留一条没验证过的路径让人
+    以为有防护，不如在这里响亮地失败。
+    """
+    if not CGROUP_ROOT.exists() or CGROUP_V2_CONTROLLERS.exists():
+        return
+    raise ResourceBudgetError(
+        f"检测到 {CGROUP_ROOT} 已挂载但不是 cgroup v2（{CGROUP_V2_CONTROLLERS} 不存在），"
+        "本版本只支持 cgroup v2 统一层级。v1/hybrid 宿主上读不到本容器的额度，"
+        "继续运行会按宿主内存与核数算限额并超卖容器额度。"
+        "请把宿主切到 cgroup v2（内核启动参数 systemd.unified_cgroup_hierarchy=1）后重启。"
+    )
+
+
 def _cgroup_memory_limit_bytes() -> tuple[int | None, BudgetSource, str]:
-    for path, source in (
-        (CGROUP_V2_MEMORY_MAX, BudgetSource.CGROUP_V2),
-        (CGROUP_V1_MEMORY_LIMIT, BudgetSource.CGROUP_V1),
-    ):
-        raw = read_cgroup_value(path)
-        if raw is None:
-            continue
-        return _parse_cgroup_bytes(raw, path), source, str(path)
-    return None, BudgetSource.HOST, f"未检测到 cgroup 内存上限(已探测 {CGROUP_V2_MEMORY_MAX}, {CGROUP_V1_MEMORY_LIMIT})"
+    _require_cgroup_v2()
+    raw = read_cgroup_value(CGROUP_V2_MEMORY_MAX)
+    if raw is None:
+        return None, BudgetSource.HOST, f"未检测到 cgroup 内存上限(已探测 {CGROUP_V2_MEMORY_MAX})"
+    return _parse_cgroup_bytes(raw, CGROUP_V2_MEMORY_MAX), BudgetSource.CGROUP_V2, str(CGROUP_V2_MEMORY_MAX)
 
 
 def resolve_memory_budget(host_total_bytes: int) -> MemoryBudget:
     """优先用 cgroup 上限；没有 cgroup 上限时宿主总量才是正确答案。"""
     limit, source, origin = _cgroup_memory_limit_bytes()
     if limit is None or limit >= host_total_bytes:
-        # limit >= 宿主物理内存 = cgroup 没有真正设限（v1 哨兵值走这条）。
+        # limit >= 宿主物理内存 = cgroup 没有真正设限，宿主总量才是真正的天花板。
         host_origin = origin if source is BudgetSource.HOST else f"{origin} 未设限"
         return MemoryBudget(total_bytes=host_total_bytes, source=BudgetSource.HOST, origin=host_origin)
     return MemoryBudget(total_bytes=limit, source=source, origin=origin)
 
 
 def _cgroup_cpu_cores() -> tuple[float | None, BudgetSource, str]:
-    raw_v2 = read_cgroup_value(CGROUP_V2_CPU_MAX)
-    if raw_v2 is not None:
-        return _parse_cpu_max(raw_v2), BudgetSource.CGROUP_V2, str(CGROUP_V2_CPU_MAX)
-    quota = read_cgroup_value(CGROUP_V1_CPU_QUOTA)
-    period = read_cgroup_value(CGROUP_V1_CPU_PERIOD)
-    if quota is not None and period is not None:
-        return _parse_cpu_max(f"{quota} {period}"), BudgetSource.CGROUP_V1, str(CGROUP_V1_CPU_QUOTA)
-    return None, BudgetSource.HOST, f"未检测到 cgroup CPU 配额(已探测 {CGROUP_V2_CPU_MAX}, {CGROUP_V1_CPU_QUOTA})"
+    _require_cgroup_v2()
+    raw = read_cgroup_value(CGROUP_V2_CPU_MAX)
+    if raw is None:
+        return None, BudgetSource.HOST, f"未检测到 cgroup CPU 配额(已探测 {CGROUP_V2_CPU_MAX})"
+    return _parse_cpu_max(raw), BudgetSource.CGROUP_V2, str(CGROUP_V2_CPU_MAX)
 
 
 def _parse_cpu_max(raw: str) -> float | None:
-    """``"<quota> <period>"``；quota 为 max 或负数表示不限制。"""
+    """``"<quota> <period>"``；quota 为字面量 ``max`` 表示不限制。"""
     fields = raw.split()
     expected_fields = 2
     if len(fields) != expected_fields:
@@ -169,7 +187,11 @@ def _parse_cpu_max(raw: str) -> float | None:
     except ValueError as exc:
         raise ResourceBudgetError(f"cgroup CPU 配额无法解析，拒绝按宿主核数估算: 内容={raw!r}") from exc
     if quota <= 0 or period <= 0:
-        return None
+        # v2 的 cpu.max 只写 "max" 或正整数，非正数只可能是文件坏了。这里原本返回
+        # None（当作不限制、退回宿主核数），那是 v1 拿 -1 表示不限制留下的读法：
+        # 沿用它会让一个坏文件静默变成"按宿主 8 核定并发"，且 quota_cores=0 会在
+        # CPU 使用率的分母上直接除零。
+        raise ResourceBudgetError(f"cgroup CPU 配额不是正数，拒绝按宿主核数估算: 内容={raw!r}")
     return quota / period
 
 

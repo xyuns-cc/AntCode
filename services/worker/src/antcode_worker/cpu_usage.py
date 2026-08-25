@@ -43,15 +43,11 @@ from antcode_worker.resource_budget import (
 _PERCENT_SCALE = 100.0
 _PERCENT_DIGITS = 1
 _USEC_PER_SEC = 1_000_000.0
-_NSEC_PER_SEC = 1_000_000_000.0
 
-# cgroup v2 统一层级。
+# cgroup v2 统一层级；非 v2 宿主在 resource_budget._require_cgroup_v2 就被拦下了。
 CGROUP_V2_CPU_STAT = Path("/sys/fs/cgroup/cpu.stat")
-# cgroup v1 回退路径（老内核 / 老 dockerd），与 resource_budget 的 v1 分支配套。
-# v1 的用量归 cpuacct 控制器，且以纳秒计——与 v2 的微秒不是同一个单位。
-CGROUP_V1_CPUACCT_USAGE = Path("/sys/fs/cgroup/cpuacct/cpuacct.usage")
 
-_V2_USAGE_KEY = "usage_usec"
+_USAGE_KEY = "usage_usec"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,27 +75,15 @@ def _parse_int(raw: str, path: Path) -> int:
         raise ResourceBudgetError(f"cgroup CPU 用量无法解析，拒绝按宿主使用率估算: {path} 内容={raw!r}") from exc
 
 
-def _v2_used_seconds() -> float:
-    raw = _require_cgroup_value(CGROUP_V2_CPU_STAT, BudgetSource.CGROUP_V2)
+def _cgroup_used_seconds(source: BudgetSource) -> float:
+    raw = _require_cgroup_value(CGROUP_V2_CPU_STAT, source)
     for line in raw.splitlines():
         name, _, value = line.partition(" ")
-        if name == _V2_USAGE_KEY:
+        if name == _USAGE_KEY:
             return _parse_int(value, CGROUP_V2_CPU_STAT) / _USEC_PER_SEC
     raise ResourceBudgetError(
-        f"{CGROUP_V2_CPU_STAT} 里没有 {_V2_USAGE_KEY}，算不出本容器的 CPU 用量（拒绝改报宿主使用率）。"
+        f"{CGROUP_V2_CPU_STAT} 里没有 {_USAGE_KEY}，算不出本容器的 CPU 用量（拒绝改报宿主使用率）。"
     )
-
-
-def _v1_used_seconds() -> float:
-    raw = _require_cgroup_value(CGROUP_V1_CPUACCT_USAGE, BudgetSource.CGROUP_V1)
-    return _parse_int(raw, CGROUP_V1_CPUACCT_USAGE) / _NSEC_PER_SEC
-
-
-def _cgroup_used_seconds(source: BudgetSource) -> float:
-    """用量文件必须与额度所在的那一代 cgroup 严格对应。"""
-    if source is BudgetSource.CGROUP_V2:
-        return _v2_used_seconds()
-    return _v1_used_seconds()
 
 
 class ContainerCpuSampler:
@@ -138,7 +122,6 @@ class ContainerCpuSampler:
 
 
 __all__ = [
-    "CGROUP_V1_CPUACCT_USAGE",
     "CGROUP_V2_CPU_STAT",
     "ContainerCpuSampler",
     "CpuUsage",

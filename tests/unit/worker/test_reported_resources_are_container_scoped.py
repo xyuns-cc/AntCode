@@ -25,6 +25,8 @@ from antcode_worker.heartbeat.metrics_assembly import MIB_IN_BYTES, collect_metr
 from antcode_worker.resource_budget import ResourceBudgetError
 from antcode_worker.resource_usage import HostMemory
 
+from tests.unit.worker.cgroup_v2_support import simulate_cgroup_v2_host
+
 # 真机实测值（192.168.1.250 上的 antcode-mn-worker3）
 _CONTAINER_MEMORY_BYTES = 3221225472
 _CONTAINER_MEMORY_MB = 3072.0
@@ -83,12 +85,12 @@ def _point_memory_cgroup(
 ) -> None:
     """把三个 v2 控制文件指到 tmp_path；传 None 表示该文件不存在。"""
     absent = tmp_path / "absent"
+    simulate_cgroup_v2_host(monkeypatch, tmp_path)
     monkeypatch.setattr(
         resource_budget,
         "CGROUP_V2_MEMORY_MAX",
         _write(tmp_path / "memory.max", limit) if limit is not None else absent,
     )
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_MEMORY_LIMIT", absent)
     monkeypatch.setattr(
         resource_usage,
         "CGROUP_V2_MEMORY_CURRENT",
@@ -103,12 +105,12 @@ def _point_memory_cgroup(
 
 def _point_cpu_cgroup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, quota: str | None) -> None:
     absent = tmp_path / "absent-cpu"
+    simulate_cgroup_v2_host(monkeypatch, tmp_path)
     monkeypatch.setattr(
         resource_budget,
         "CGROUP_V2_CPU_MAX",
         _write(tmp_path / "cpu.max", quota) if quota is not None else absent,
     )
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_CPU_QUOTA", absent)
     # 额度判成 cgroup 后使用率必须从同层读，所以用量文件要一起指过来。
     monkeypatch.setattr(
         cpu_usage,

@@ -34,6 +34,8 @@ from antcode_worker.cpu_usage import ContainerCpuSampler
 from antcode_worker.heartbeat import metric_probes
 from antcode_worker.resource_budget import ResourceBudgetError, resolve_cpu_budget
 
+from tests.unit.worker.cgroup_v2_support import simulate_cgroup_v2_host
+
 # 真机实测值（antcode-mn-worker2：cpu.max="200000 100000"，宿主 nproc=8）
 _CONTAINER_CPU_MAX = "200000 100000"
 _CONTAINER_CORES = 2.0
@@ -96,10 +98,9 @@ def _point_cpu_cgroup(
 ) -> _CpuStatFile | None:
     """把 v2 的 cpu.max / cpu.stat 指到 tmp_path；返回可推进的用量文件。"""
     absent = tmp_path / "absent-cpu"
+    simulate_cgroup_v2_host(monkeypatch, tmp_path)
     cpu_max = _write(tmp_path / "cpu.max", quota) if quota is not None else absent
     monkeypatch.setattr(resource_budget, "CGROUP_V2_CPU_MAX", cpu_max)
-    monkeypatch.setattr(resource_budget, "CGROUP_V1_CPU_QUOTA", absent)
-    monkeypatch.setattr(cpu_usage, "CGROUP_V1_CPUACCT_USAGE", absent)
     if not stat_present:
         monkeypatch.setattr(cpu_usage, "CGROUP_V2_CPU_STAT", absent)
         return None

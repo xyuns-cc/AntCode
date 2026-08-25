@@ -37,16 +37,12 @@ _PERCENT_SCALE = 100.0
 _PERCENT_DIGITS = 1
 _MB_DIGITS = 1
 
-# cgroup v2 统一层级。
+# cgroup v2 统一层级；非 v2 宿主在 resource_budget._require_cgroup_v2 就被拦下了。
 CGROUP_V2_MEMORY_CURRENT = Path("/sys/fs/cgroup/memory.current")
 CGROUP_V2_MEMORY_STAT = Path("/sys/fs/cgroup/memory.stat")
-# cgroup v1 回退路径（老内核 / 老 dockerd），与 resource_budget 的 v1 分支配套。
-CGROUP_V1_MEMORY_USAGE = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-CGROUP_V1_MEMORY_STAT = Path("/sys/fs/cgroup/memory/memory.stat")
 
-# 可回收页缓存在两代 cgroup 里的键名不同。
-_V2_RECLAIMABLE_KEY = "inactive_file"
-_V1_RECLAIMABLE_KEY = "total_inactive_file"
+# memory.stat 里那部分内核随时能回收、因此不该算进"已用"的页缓存。
+_RECLAIMABLE_KEY = "inactive_file"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +82,6 @@ class MemoryUsage:
         return round(self.available_bytes / _BYTES_PER_MIB, _MB_DIGITS)
 
 
-def _usage_paths(source: BudgetSource) -> tuple[Path, Path, str]:
-    """占用文件与可回收键必须与额度所在的那一代 cgroup 严格对应。"""
-    if source is BudgetSource.CGROUP_V2:
-        return CGROUP_V2_MEMORY_CURRENT, CGROUP_V2_MEMORY_STAT, _V2_RECLAIMABLE_KEY
-    return CGROUP_V1_MEMORY_USAGE, CGROUP_V1_MEMORY_STAT, _V1_RECLAIMABLE_KEY
-
-
 def _parse_bytes(raw: str, path: Path) -> int:
     try:
         return int(raw.strip())
@@ -110,22 +99,21 @@ def _require_cgroup_value(path: Path, source: BudgetSource) -> str:
     return raw
 
 
-def _reclaimable_bytes(stat_path: Path, key: str, source: BudgetSource) -> int:
-    """memory.stat 里那部分内核随时能回收、因此不该算进"已用"的页缓存。"""
-    raw = _require_cgroup_value(stat_path, source)
+def _reclaimable_bytes(source: BudgetSource) -> int:
+    raw = _require_cgroup_value(CGROUP_V2_MEMORY_STAT, source)
     for line in raw.splitlines():
         name, _, value = line.partition(" ")
-        if name == key:
-            return _parse_bytes(value, stat_path)
+        if name == _RECLAIMABLE_KEY:
+            return _parse_bytes(value, CGROUP_V2_MEMORY_STAT)
     raise ResourceBudgetError(
-        f"{stat_path} 里没有 {key}，无法按 working set 口径算内存占用（拒绝改用会虚高的 memory.current 原值）。"
+        f"{CGROUP_V2_MEMORY_STAT} 里没有 {_RECLAIMABLE_KEY}，"
+        "无法按 working set 口径算内存占用（拒绝改用会虚高的 memory.current 原值）。"
     )
 
 
 def _cgroup_used_bytes(source: BudgetSource) -> int:
-    usage_path, stat_path, reclaimable_key = _usage_paths(source)
-    current = _parse_bytes(_require_cgroup_value(usage_path, source), usage_path)
-    return current - _reclaimable_bytes(stat_path, reclaimable_key, source)
+    raw = _require_cgroup_value(CGROUP_V2_MEMORY_CURRENT, source)
+    return _parse_bytes(raw, CGROUP_V2_MEMORY_CURRENT) - _reclaimable_bytes(source)
 
 
 def resolve_memory_usage(budget: MemoryBudget, host: HostMemory) -> MemoryUsage:
