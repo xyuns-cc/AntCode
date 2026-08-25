@@ -7,7 +7,7 @@ run-gateway-e2e.sh 的 [3/7] 原先是 `nohup … &` 加一句 `curl` 探活，�
 "全过"。ANTCODE_GATEWAY_E2E_KEEP=1 是按设计把 Git 源留活的，孤儿因此是常态而非意外。
 
 所以判据换成三条彼此独立、都能证伪的：
-  * 起之前用一次**不带 SO_REUSEADDR** 的独占绑定证明端口是空的，占着就报出占用者；
+  * 起之前先证明端口上没有别人的服务，且本轮 Git 源自己绑得上，占着就报出占用者；
   * 子进程由本进程 Popen 持有，用 poll() 读它的真实退出码，而不是猜它还活着；
   * 探活比对本轮随机 identity——根路径回的是启动方给的串，冒名者对不上。
 """
@@ -19,6 +19,7 @@ import json
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -35,7 +36,14 @@ IDENTITY_BYTES = 16
 READY_TIMEOUT_SECONDS = 30.0
 PROBE_INTERVAL_SECONDS = 0.5
 PROBE_TIMEOUT_SECONDS = 5.0
+CONNECT_TIMEOUT_SECONDS = 2.0
 LOG_TAIL_LINES = 40
+# struct linger{onoff=1, linger=0}：close() 直接发 RST。占用探测借此确定性地不在被测
+# 端口上留下 TIME_WAIT，而不是依赖"谁先关"这个竞态。
+RESET_ON_CLOSE = struct.pack("ii", 1, 0)
+# `ss -tan` 的列：State Recv-Q Send-Q Local:Port Peer:Port。只认本地地址那一列，
+# 否则把"连往该端口的客户端"也算成占用者。
+SS_LOCAL_ADDRESS_COLUMN = 3
 
 
 def _arguments() -> argparse.Namespace:
@@ -76,32 +84,101 @@ def _responder_identity(base_url: str) -> str:
         return ""
 
 
+def _socket_states(port: int) -> list[str]:
+    """列出这个端口上所有状态的 TCP 套接字。
+
+    用 `ss -tanp` 而不是 `-lntp`：只问 LISTEN 的话，占着端口却没在 listen 的套接字
+    会被归到"无法识别"里；带上状态列，运维还能一眼分清"真有人在服务"和"只剩上一轮
+    的 TIME-WAIT 尾巴"。
+    """
+    listing = shutil.which("ss")
+    if listing is None:
+        return []
+    result = subprocess.run([listing, "-tanp"], capture_output=True, text=True, check=False)
+    columns = (line.split() for line in result.stdout.splitlines()[1:])
+    return [
+        " ".join(fields)
+        for fields in columns
+        if len(fields) > SS_LOCAL_ADDRESS_COLUMN and fields[SS_LOCAL_ADDRESS_COLUMN].endswith(f":{port}")
+    ]
+
+
 def describe_port_occupant(port: int) -> str:
     """尽力而为地说出占用者是谁：非 root 的 `ss` 看不到别人进程的 PID，所以再补
-    一次根路径探活——占用者若是本仓库的 Git 源，它会自报 identity / root / pid。"""
-    details: list[str] = []
-    listing = shutil.which("ss")
-    if listing is not None:
-        result = subprocess.run([listing, "-lntp"], capture_output=True, text=True, check=False)
-        details.extend(line.strip() for line in result.stdout.splitlines() if f":{port}" in line)
+    一次根路径探活——占用者若是本仓库的 Git 源，它会自报 identity / root / pid。
+
+    这次探活自己会在 port 上留下一条 TIME_WAIT（HTTP 请求带 Connection: close，
+    服务端先关）。以前那是条死路：守卫用无 SO_REUSEADDR 的独占绑定，于是"报占用 →
+    运维杀掉占用者 → 立刻重试仍失败"要卡满一个 TIME_WAIT 周期，起点正是这句探活。
+    现在两条判据都不把 TIME_WAIT 当占用，这条残留才不再有害。
+    """
+    details = _socket_states(port)
     answer = _read_root_path(f"http://127.0.0.1:{port}")
     if answer:
         details.append(f"根路径应答={answer}")
-    return "; ".join(details) or "无法识别（ss 无匹配且根路径无应答）"
+    if details:
+        return "; ".join(details)
+    return f"ss 与根路径都没认出占用者；用 `sudo lsof -nP -iTCP:{port}` 查出持有者并结束它"
 
 
-def require_free_port(port: int) -> None:
-    """独占绑一次证明端口是空的，占着就当场失败并报出占用者。
+def _port_has_listener(host: str, port: int) -> bool:
+    """有人 accept 就是有人在这个端口上服务——875e6dd 要挡的正是这一种。
 
-    刻意不设 SO_REUSEADDR：ThreadingHTTPServer 自己会设，而带 SO_REUSEADDR 的通配
-    绑定可以骑在别人已有的 127.0.0.1 绑定之上并"成功"，那样子进程活着、探活却打给
-    另一个进程。这里比子进程自己的绑定更严，才能把这种重叠也挡在启动之前。
+    判据取自内核的 connect 而不是 `ss` 的状态字段：开发机（macOS）上没有 `ss`，把
+    决策建在它上面等于在那里悄悄把守卫关掉；`ss` 只留给给人看的占用者描述。
+    探测地址取自 base_url，即 tests/e2e 真正会去连的那个地址，避免"检查的"和
+    "被测的"分叉。
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(CONNECT_TIMEOUT_SECONDS)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, RESET_ON_CLOSE)
+        try:
+            probe.connect((host, port))
+        except ConnectionRefusedError:
+            return False
+        except OSError as exc:
+            raise RuntimeError(
+                f"判定不了 {host}:{port} 有没有人在服务（connect 既没被接受也没被拒绝：{exc}）；"
+                f"tests/e2e 待会儿连的就是这个地址，先查这台机器到该地址的路由与防火墙"
+            ) from exc
+        return True
+
+
+def _require_bindable(port: int) -> None:
+    """用 Git 源自己的绑定语义试一次：SO_REUSEADDR 也绑不上，说明有活着的套接字占着。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((BIND_HOST, port))
         except OSError as exc:
-            raise RuntimeError(f"端口 {port} 已被占用，拒绝起 E2E Git 源: {describe_port_occupant(port)}") from exc
+            raise RuntimeError(
+                f"端口 {port} 已被占用：Git 源自己的绑定语义（SO_REUSEADDR）也绑不上（{exc.strerror}），"
+                f"拒绝起 E2E Git 源: {describe_port_occupant(port)}"
+            ) from exc
+
+
+def require_free_port(base_url: str) -> None:
+    """证明端口上没有别人的服务、且本轮 Git 源绑得上，占着就当场失败并报出占用者。
+
+    两条判据都直接问内核，缺一不可：
+      * 没人 accept——排掉"别人的进程正占着这个端口在服务"，那才是 875e6dd 的洞；
+      * 用与 ThreadingHTTPServer 完全相同的 SO_REUSEADDR 语义绑得上——"守卫绑得上"
+        才精确等价于"Git 源绑得上"。
+
+    不再用无 SO_REUSEADDR 的独占绑定当判据：Git 源自己 allow_reuse_address=1，那样
+    守卫比它守卫的东西还严。上一轮 E2E（乃至本文件的探活）在端口上留下的 TIME_WAIT
+    会让独占绑定接着拒绝一个完整的 TIME_WAIT 周期——Linux 的 TCP_TIMEWAIT_LEN 写死
+    60s，等不快也调不动——于是"杀掉占用者、立刻重试仍然失败"成了一条没人解释得了的
+    死路。反过来只用 SO_REUSEADDR 也不行：macOS 上带 SO_REUSEADDR 的通配绑定能骑在
+    别人已有的 127.0.0.1 LISTEN 之上并"成功"，守卫会就此漏掉真占用（已实测）。
+    """
+    port = service_port(base_url)
+    host = urlsplit(base_url).hostname or BIND_HOST
+    if _port_has_listener(host, port):
+        raise RuntimeError(
+            f"端口 {port} 已被占用：{host}:{port} 上有进程在应答，拒绝起 E2E Git 源: {describe_port_occupant(port)}"
+        )
+    _require_bindable(port)
 
 
 def spawn(root: Path, port: int, *, identity: str, log: Path) -> subprocess.Popen[bytes]:
@@ -150,7 +227,7 @@ def main() -> None:
     args = _arguments()
     identity = secrets.token_hex(IDENTITY_BYTES)
     port = service_port(args.base_url)
-    require_free_port(port)
+    require_free_port(args.base_url)
     process = spawn(args.root, port, identity=identity, log=args.log)
     try:
         await_own_service(process, base_url=args.base_url, identity=identity, log=args.log)
