@@ -93,11 +93,25 @@ uv run pytest tests/unit/core/
 
 ### 运行集成测试
 
+集成测试会 `SET` Master 代际镜像 `{ns}:fencing:dispatch:master`、改写
+Lease/heartbeat/ready stream，并对实例执行 `ACL SETUSER/DELUSER`。指向活栈会让
+在任 Master 永久无法派发且不自愈，所以目标 Redis 必须先被显式声明为**一次性实例**
+（`tests/integration/conftest.py` 会 fail-closed 校验，缺标记直接终止整轮 run）。
+`ACL` 是实例级配置、`test_redis_acl_live.py` 又把 `antcode` namespace 写死，因此
+换 `REDIS_NAMESPACE` 或换 db 号都不构成隔离，只能换实例。
+
 ```bash
 # 集成测试需要真实 Redis，以及两个职责隔离的 PostgreSQL 测试数据库。
 export ANTCODE_INTEGRATION_REDIS_URL=redis://127.0.0.1:16379/14
+# test_fault_tolerance.py 驱动真实 ResultLoop，走的是生产变量 REDIS_URL，
+# 因此这两个 URL 指向的实例都必须带一次性实例标记。
+export REDIS_URL="$ANTCODE_INTEGRATION_REDIS_URL"
 export TEST_DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_migration_test
 export DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_e2e_test
+
+# 只在确认该 Redis 可被销毁之后执行；严禁写到生产或共享栈的 Redis 上。
+redis-cli -u "$ANTCODE_INTEGRATION_REDIS_URL" \
+  SET antcode:integration-test:disposable-binding ANTCODE_INTEGRATION_TESTS_MAY_DESTROY_THIS_REDIS
 
 uv run pytest tests/integration/ -v
 ```
